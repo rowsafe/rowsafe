@@ -32,18 +32,18 @@ inputs:
   preview-sql:
     description: >-
       Migration SQL files to preview on a copy of the database before the Mark, as glob patterns
-      (e.g. prisma/migrations/**/migration.sql). Needs a rowsafe CLI with `rowsafe preview`; skipped
-      otherwise.
+      (e.g. prisma/migrations/**/migration.sql). A migration that fails on the copy stops the job.
+      Needs a rowsafe CLI with `rowsafe preview`; skipped otherwise.
     required: false
     default: ""
   preview-changed-only:
     description: Preview only the files this push or pull request adds or changes.
     required: false
     default: "true"
-  preview-fail-on:
+  fail-on:
     description: >-
-      Stop before the Mark when the preview verdict is at least this bad: never (default), dangerous
-      or careful.
+      Also stop before the Mark when the preview's verdict is at least this: careful or dangerous.
+      never (default) only warns. A migration that fails on the copy always stops the job.
     required: false
     default: never
   wait-timeout-minutes:
@@ -94,7 +94,7 @@ outputs:
     description: Whether the database could be restored at the time (true, false).
     value: ${{ steps.run.outputs.protected }}
   preview-verdict:
-    description: The migration preview's verdict (safe, careful, dangerous), when one ran.
+    description: The migration preview's verdict (safe, careful, dangerous or failed), when one ran.
     value: ${{ steps.run.outputs.preview-verdict }}
 
 runs:
@@ -134,7 +134,7 @@ runs:
         INPUT_REQUIRE_PROTECTED: ${{ inputs.require-protected }}
         INPUT_PREVIEW_SQL: ${{ inputs.preview-sql }}
         INPUT_PREVIEW_CHANGED_ONLY: ${{ inputs.preview-changed-only }}
-        INPUT_PREVIEW_FAIL_ON: ${{ inputs.preview-fail-on }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
         INPUT_WAIT_TIMEOUT_MINUTES: ${{ inputs.wait-timeout-minutes }}
         INPUT_WORKING_DIRECTORY: ${{ inputs.working-directory }}
         INPUT_API_URL: ${{ inputs.api-url }}

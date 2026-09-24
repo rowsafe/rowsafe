@@ -94,17 +94,18 @@ expect_status() { [ "$status" = "$1" ] || fail "exit status $status, want $1"; }
 expect_out() { [ "$(out "$1")" = "$2" ] || fail "output $1 = '$(out "$1")', want '$2'"; }
 expect_summary() { grep -qF -- "$1" "$case_dir/summary" || fail "summary lacks: $1"; }
 expect_log() { grep -qF -- "$1" "$case_dir/log" || fail "log lacks: $1"; }
-expect_no_log() { if grep -v '^::add-mask::' "$case_dir/log" | grep -qF -- "$1"; then fail "log has: $1"; fi; }
+expect_no_log() { if grep -v '^::add-mask::' "$case_dir/log" | grep -F -- "$1" >/dev/null; then fail "log has: $1"; fi; }
 reported=0
 ok() { # the checks since the previous ok() passed
   if [ "$failures" -eq "$reported" ]; then pass=$((pass + 1)); echo "ok   $1"; else echo "FAIL $1"; fi
   reported=$failures
 }
 marks() { curl -fsS "http://127.0.0.1:$port/_mock/marks"; }
+has_mark() { [[ $'\n'$(marks) =~ $'\n'$1 ]]; } # has_mark REGEX: a line of marks starts with it
 
 short=${sha:0:7}
 json=true
-"$cli" help mark | grep -q -- --json || json=false
+case $("$cli" help mark) in *--json*) ;; *) json=false ;; esac
 
 # 1. The usual deploy: protected, default label, wait until confirmed.
 run happy INPUT_DATABASE=app
@@ -121,6 +122,7 @@ expect_summary "[Rewind to this Mark](https://app.example.test/databases/app/res
 expect_summary "rowsafe rewind copy app --mark before-deploy-$short"
 expect_log "::notice title=Rowsafe::Saved Mark before-deploy-$short on app"
 expect_log "::add-mask::rsk_test"
+has_mark "app/before-deploy-$short archived" || fail "the mock has no archived Mark before-deploy-$short: $(marks)"
 ok "protected database: Mark saved and confirmed, outputs and summary"
 
 # 2. The same commit again (a re-run): the default label gets -2.
@@ -151,7 +153,7 @@ expect_out protected false
 expect_summary "### Rowsafe: unprotected-db is not protected"
 expect_summary "- WAL archiving is failing"
 expect_summary "[Open unprotected-db in the dashboard](https://app.example.test/databases/unprotected-db)"
-if marks | grep -q '^unprotected-db/'; then fail "a Mark was saved on an unprotected database with require-protected"; fi
+if has_mark 'unprotected-db/'; then fail "a Mark was saved on an unprotected database with require-protected"; fi
 ok "not protected + require-protected: stopped, no Mark"
 
 # 6. Not protected, default: warn and still save the Mark.
@@ -201,7 +203,7 @@ ok "database from .rowsafe.json, and a clear question without it"
 # 10. preview-sql: only the new migration; skipped when the CLI can't preview.
 run preview INPUT_DATABASE=app INPUT_LABEL=with-preview "INPUT_PREVIEW_SQL=migrations/**/migration.sql"
 expect_status 0
-if "$cli" help preview | grep -q '^rowsafe preview'; then
+if [[ $("$cli" help preview) == "rowsafe preview "* ]]; then
   expect_log "Previewing 1 migration file(s)"
 else
   expect_log "Migration preview: 1 of 2 matching files are new or changed since ${before:0:7}."
@@ -218,36 +220,70 @@ expect_log "::warning title=Rowsafe::Migration preview skipped: can't tell which
 expect_out mark dispatched
 ok "preview-sql: new files only (skipped when unknown), graceful without rowsafe preview"
 
-# 10b. With a CLI that has `rowsafe preview` (a wrapper standing in for it;
-# FAKE_PREVIEW_VERDICT picks the verdict it reports).
-cat >"$work/bin/rowsafe-with-preview" <<EOF
-#!/usr/bin/env bash
-if [ "\$1 \$2" = "help preview" ]; then
-  echo "rowsafe preview [NAME] FILE [--json]   run migration SQL on a copy and report what it would do"
-  exit 0
-fi
-if [ "\$1" = preview ]; then
-  echo "Restoring a copy of \$2..." >&2
-  grep -q 'ALTER TABLE' "\$3" || exit 1
-  printf '{\n  "database": "%s",\n  "verdict": "%s",\n  "summary": "ALTER TABLE orders rewrites 3.1 GB and blocks writes for about 2 min."\n}\n' "\$2" "\${FAKE_PREVIEW_VERDICT:-safe}"
-  exit 0
-fi
-exec "$cli" "\$@"
-EOF
-chmod +x "$work/bin/rowsafe-with-preview"
-run preview-careful INPUT_DATABASE=app INPUT_LABEL=preview-careful "INPUT_PREVIEW_SQL=migrations/**/migration.sql" \
-  "INPUT_CLI_PATH=$work/bin/rowsafe-with-preview" INPUT_PREVIEW_FAIL_ON=dangerous FAKE_PREVIEW_VERDICT=careful
+# 10b. With a CLI that has `rowsafe preview` (test/fake-preview.sh stands in).
+pv=("INPUT_CLI_PATH=$here/fake-preview.sh" "FAKE_REAL_CLI=$cli" "FAKE_ARGS=$work/preview-args"
+  INPUT_DATABASE=app "INPUT_PREVIEW_SQL=migrations/**/migration.sql")
+
+run preview-careful "${pv[@]}" INPUT_LABEL=preview-careful FAKE_PREVIEW=careful
 expect_status 0
 expect_out preview-verdict careful
 expect_out mark preview-careful
 expect_log "Previewing 1 migration file(s) on a copy of app"
-expect_summary "**Migration preview: careful.** ALTER TABLE orders rewrites 3.1 GB"
-run preview-dangerous INPUT_DATABASE=app INPUT_LABEL=preview-dangerous "INPUT_PREVIEW_SQL=migrations/**/migration.sql" \
-  "INPUT_CLI_PATH=$work/bin/rowsafe-with-preview" INPUT_PREVIEW_FAIL_ON=dangerous FAKE_PREVIEW_VERDICT=dangerous
+expect_log '::warning title=Rowsafe::The migration preview says "careful". CREATE INDEX on orders'
+expect_summary "### Rowsafe migration preview: careful"
+expect_summary "<details><summary>Statements</summary>"
+grep -qx -- "preview app $case_dir/runner/rowsafe-action.* --json --source action --label migrations/002_add_column/migration.sql" <(sed "s|rowsafe-action\.[A-Za-z0-9]*/preview.sql|rowsafe-action.*|" "$work/preview-args") ||
+  fail "preview arguments: $(cat "$work/preview-args")"
+ok "preview careful: warns, the report's markdown in the summary, --source action and the file as label"
+
+run preview-safe "${pv[@]}" INPUT_LABEL=preview-safe FAKE_PREVIEW=safe INPUT_FAIL_ON=careful
+expect_status 0
+expect_out preview-verdict safe
+expect_log "Migration preview: safe. Adds a column without a default"
+expect_no_log "::warning"
+ok "preview safe with fail-on careful: goes on quietly"
+
+run preview-dangerous "${pv[@]}" INPUT_LABEL=preview-dangerous FAKE_PREVIEW=dangerous INPUT_FAIL_ON=dangerous
 expect_status 1
 expect_summary "### Rowsafe: migration looks dangerous"
-if marks | grep -q '/preview-dangerous '; then fail "a Mark was saved after a dangerous preview with preview-fail-on"; fi
-ok "rowsafe preview: verdict in the summary; preview-fail-on stops before the Mark"
+expect_summary "### Rowsafe migration preview: dangerous"
+if has_mark 'app/preview-dangerous '; then fail "a Mark was saved after a dangerous preview with fail-on"; fi
+run preview-careful-stop "${pv[@]}" INPUT_LABEL=preview-careful-stop FAKE_PREVIEW=careful INPUT_FAIL_ON=careful
+expect_status 1
+expect_summary "### Rowsafe: migration looks careful"
+run preview-dangerous-warn "${pv[@]}" INPUT_LABEL=preview-dangerous-warn FAKE_PREVIEW=dangerous
+expect_status 0
+expect_out mark preview-dangerous-warn
+expect_log "set fail-on: dangerous to stop deploys like this one"
+ok "fail-on: stops at or above its verdict before the Mark; warns without it"
+
+run preview-failed "${pv[@]}" INPUT_LABEL=preview-failed FAKE_PREVIEW=failed
+expect_status 1
+expect_out preview-verdict failed
+expect_summary "### Rowsafe: the migration fails"
+expect_summary "so it would fail on production too"
+expect_summary 'column "note" of relation "orders" already exists (line 2)'
+expect_summary "### Rowsafe migration preview: failed"
+if has_mark 'app/preview-failed '; then fail "a Mark was saved after the migration failed on the copy"; fi
+ok "migration fails on the copy: the job stops (without fail-on), with the SQL error"
+
+run preview-error "${pv[@]}" INPUT_LABEL=preview-error FAKE_PREVIEW=error INPUT_FAIL_ON=careful
+expect_status 0
+expect_out mark preview-error
+expect_log "::warning title=Rowsafe::The migration preview couldn't run, so there is no verdict: The preview couldn't run: app has no backup yet"
+expect_summary "**Migration preview:** couldn't run"
+ok "preview couldn't run: a warning, and the Mark is still saved"
+
+run preview-all "${pv[@]}" INPUT_LABEL=preview-all INPUT_PREVIEW_CHANGED_ONLY=false
+expect_status 0
+grep -qF -- "--label 2 migrations: migrations/001_init/migration.sql, migrations/002_add_column/migration.sql" "$work/preview-args" ||
+  fail "preview arguments: $(cat "$work/preview-args")"
+ok "preview-changed-only: false previews every matching file, labelled"
+
+run bad-fail-on INPUT_DATABASE=app INPUT_FAIL_ON=sometimes
+expect_status 1
+expect_summary "fail-on must be never, careful or dangerous"
+ok "invalid fail-on"
 
 # 11. Credentials.
 run no-key INPUT_API_KEY=

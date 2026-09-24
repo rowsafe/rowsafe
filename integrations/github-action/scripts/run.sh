@@ -39,6 +39,20 @@ field() {
   sed -n "s/^  \"$1\": \"\\(.*\\)\",\\{0,1\\}\$/\\1/p" "$2" | head -n 1 | sed 's/\\"/"/g; s/\\\\/\\/g'
 }
 
+# jget KEY FILE prints a top-level field of a JSON object as text (strings
+# unescaped, anything else as JSON), with jq, else python3, else field.
+jget() {
+  if command -v jq >/dev/null 2>&1; then
+    jq -r --arg k "$1" '.[$k] // "" | if type == "string" then . else tojson end' "$2" 2>/dev/null || true
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import json, sys
+v = json.load(open(sys.argv[2])).get(sys.argv[1], "")
+print(v if isinstance(v, str) else json.dumps(v))' "$1" "$2" 2>/dev/null || true
+  else
+    field "$1" "$2"
+  fi
+}
+
 # run_limited SECONDS CMD... runs CMD with a time limit; after it,
 # $TMP/timed-out exists. Output goes wherever the caller redirects it.
 # (The watchdog doesn't hold the caller's stdout or stderr open.)
@@ -97,9 +111,9 @@ TIMEOUT_MIN=${INPUT_WAIT_TIMEOUT_MINUTES:-10}
 printf '%s\n' "$TIMEOUT_MIN" | grep -Eq '^[1-9][0-9]{0,3}$' ||
   stop "invalid input" "wait-timeout-minutes must be a whole number of minutes, such as 10 (got \"$TIMEOUT_MIN\")."
 TIMEOUT_SECS=${ROWSAFE_ACTION_TIMEOUT_SECONDS:-$((TIMEOUT_MIN * 60))} # the override is for tests
-PREVIEW_FAIL_ON=${INPUT_PREVIEW_FAIL_ON:-never}
-case $PREVIEW_FAIL_ON in never | dangerous | careful) ;; *)
-  stop "invalid input" "preview-fail-on must be never, dangerous or careful (got \"$PREVIEW_FAIL_ON\")." ;;
+FAIL_ON=${INPUT_FAIL_ON:-never}
+case $FAIL_ON in never | dangerous | careful) ;; *)
+  stop "invalid input" "fail-on must be never, careful or dangerous (got \"$FAIL_ON\")." ;;
 esac
 
 if [ -n "${INPUT_WORKING_DIRECTORY:-}" ] && [ "$INPUT_WORKING_DIRECTORY" != . ]; then
@@ -139,8 +153,14 @@ fi
 # ---------------------------------------------------------------- database
 
 CLI_VERSION=$(rowsafe version 2>/dev/null || echo unknown)
-supports() { # COMMAND FLAG: does this CLI's help for COMMAND mention FLAG?
-  rowsafe help "$1" 2>/dev/null | grep -q -- "$2"
+# supports COMMAND TEXT: does this CLI's help for COMMAND mention TEXT?
+# (Not `rowsafe help | grep -q`: with pipefail, grep closing the pipe early
+# can make the pipeline fail.)
+supports() {
+  local help
+  help=$(rowsafe help "$1" 2>/dev/null || true)
+  case $help in *"$2"*) return 0 ;; esac
+  return 1
 }
 
 # The CLI finds the database the same way everywhere: the database input,
@@ -205,7 +225,6 @@ fi
 # ---------------------------------------------------------------- migration preview
 
 PREVIEW_MD=()
-PREVIEW_VERDICT=""
 if [ -n "${INPUT_PREVIEW_SQL:-}" ]; then
   say ""
   # Match the patterns (one per line or space-separated, ** allowed).
@@ -250,7 +269,7 @@ if [ -n "${INPUT_PREVIEW_SQL:-}" ]; then
   elif [ ${#files[@]} -eq 0 ]; then
     say "Migration preview: no new migration files match \"$INPUT_PREVIEW_SQL\"; nothing to preview."
     PREVIEW_MD=("**Migration preview:** no new migration files matched \`$INPUT_PREVIEW_SQL\`.")
-  elif ! rowsafe help preview 2>/dev/null | grep -q '^rowsafe preview'; then
+  elif ! supports preview 'rowsafe preview '; then
     notice "Migration preview skipped: rowsafe CLI $CLI_VERSION can't preview migrations yet. Use a newer version (version: latest) to preview them on a copy before deploying."
     PREVIEW_MD=("**Migration preview:** skipped, the rowsafe CLI $CLI_VERSION can't preview migrations yet.")
   else
@@ -261,45 +280,56 @@ if [ -n "${INPUT_PREVIEW_SQL:-}" ]; then
       cat "$f"
       printf '\n'
     done >"$TMP/preview.sql"
+    if [ ${#files[@]} -eq 1 ]; then
+      plabel=${files[0]#./}
+    else
+      plabel="${#files[@]} migrations: $(printf '%s\n' "${files[@]#./}" | paste -sd ',' - | sed 's/,/, /g')"
+    fi
+    plabel=$(printf '%s' "$plabel" | cut -c1-200)
     say "Previewing ${#files[@]} migration file(s) on a copy of $DB (production isn't touched):"
     printf '  %s\n' "${files[@]}"
-    json=false
-    args=(preview "$DB" "$TMP/preview.sql")
-    if supports preview --json; then
-      json=true
-      args+=(--json)
-    fi
     rc=0
-    capture preview run_limited "$TIMEOUT_SECS" rowsafe "${args[@]}" || rc=$?
-    if [ -e "$TMP/timed-out" ]; then
-      warning "The migration preview didn't finish within $TIMEOUT_MIN minutes, so there is no verdict."
-      PREVIEW_MD=("**Migration preview:** didn't finish within $TIMEOUT_MIN minutes.")
-    else
-      [ "$json" = true ] || sed 's/^/  /' "$TMP/preview.out"
-      if [ "$json" = true ]; then
-        PREVIEW_VERDICT=$(field verdict "$TMP/preview.out" | tr '[:upper:]' '[:lower:]')
-        headline=$(field summary "$TMP/preview.out")
-        perr=$(field error "$TMP/preview.out")
-        [ -n "$perr" ] && [ -z "$PREVIEW_VERDICT" ] && PREVIEW_VERDICT=dangerous && headline="The migration failed on the copy: $perr"
-      else
-        PREVIEW_VERDICT=$(grep -Eoiw 'safe|careful|dangerous' "$TMP/preview.out" | head -n 1 | tr '[:upper:]' '[:lower:]' || true)
-        headline=$(head -n 1 "$TMP/preview.out")
-      fi
-      if [ "$rc" -ne 0 ] && [ -z "$PREVIEW_VERDICT" ]; then
-        warning "The migration preview couldn't finish: $(sed 's/^error: //' "$TMP/preview.err" | tail -n 1)"
-        PREVIEW_MD=("**Migration preview:** couldn't finish: $(sed 's/^error: //' "$TMP/preview.err" | tail -n 1)")
-      else
-        say "Migration preview: ${PREVIEW_VERDICT:-done}${headline:+. $headline}"
-        PREVIEW_MD=("**Migration preview: ${PREVIEW_VERDICT:-done}.** ${headline}" ""
-          "<details><summary>Preview details (${#files[@]} file(s))</summary>" "" '```' "$(head -c 60000 "$TMP/preview.out")" '```' "" "</details>")
-      fi
+    capture preview run_limited "$TIMEOUT_SECS" rowsafe preview "$DB" "$TMP/preview.sql" \
+      --json --source action --label "$plabel" || rc=$?
+    VERDICT="" SUMMARY="" PERR="" PMD=""
+    if [ -s "$TMP/preview.out" ]; then
+      VERDICT=$(jget verdict "$TMP/preview.out" | tr '[:upper:]' '[:lower:]')
+      SUMMARY=$(jget summary "$TMP/preview.out")
+      PERR=$(jget error "$TMP/preview.out")
+      PMD=$(jget markdown "$TMP/preview.out")
     fi
-    output preview-verdict "$PREVIEW_VERDICT"
-    if { [ "$PREVIEW_FAIL_ON" = dangerous ] && [ "$PREVIEW_VERDICT" = dangerous ]; } ||
-      { [ "$PREVIEW_FAIL_ON" = careful ] && { [ "$PREVIEW_VERDICT" = dangerous ] || [ "$PREVIEW_VERDICT" = careful ]; }; }; then
-      stop "migration looks $PREVIEW_VERDICT" \
-        "Deploy stopped: the migration preview on a copy of $DB says \"$PREVIEW_VERDICT\" (preview-fail-on: $PREVIEW_FAIL_ON). Nothing was changed in production and no Mark was saved." \
-        "${PREVIEW_MD[@]}"
+    if [ -e "$TMP/timed-out" ]; then
+      warning "The migration preview didn't finish within $TIMEOUT_MIN minutes, so there is no verdict. The deploy goes on."
+      PREVIEW_MD=("**Migration preview:** didn't finish within $TIMEOUT_MIN minutes.")
+    elif [ -n "$PERR" ] || [ -z "$VERDICT" ]; then
+      # It couldn't run (no backup yet, copies not ready...): not a verdict.
+      why=${PERR:-$(sed -n 's/^error: //p' "$TMP/preview.err" | tail -n 1)}
+      why=${why:-the rowsafe CLI exited with status $rc}
+      warning "The migration preview couldn't run, so there is no verdict: $why"
+      PREVIEW_MD=("**Migration preview:** couldn't run: $why")
+    else
+      output preview-verdict "$VERDICT"
+      say "Migration preview: $VERDICT.${SUMMARY:+ $SUMMARY}"
+      if [ -n "$PMD" ]; then
+        PREVIEW_MD=("$PMD")
+      else
+        PREVIEW_MD=("**Migration preview: $VERDICT.** $SUMMARY")
+      fi
+      case $VERDICT in
+        failed)
+          detail=" The report is below."
+          [ -n "$PMD" ] || detail=${SUMMARY:+ $SUMMARY}
+          stop "the migration fails" \
+            "Deploy stopped: the migration failed when Rowsafe ran it on a copy of $DB, so it would fail on production too. Nothing was changed in production and no Mark was saved. Fix the migration and push again.$detail" \
+            "${PREVIEW_MD[@]}" ;;
+        dangerous | careful)
+          if [ "$FAIL_ON" = careful ] || { [ "$FAIL_ON" = dangerous ] && [ "$VERDICT" = dangerous ]; }; then
+            stop "migration looks $VERDICT" \
+              "Deploy stopped: the migration preview on a copy of $DB says \"$VERDICT\" (fail-on: $FAIL_ON). Nothing was changed in production and no Mark was saved." \
+              "${PREVIEW_MD[@]}"
+          fi
+          warning "The migration preview says \"$VERDICT\". ${SUMMARY:+$SUMMARY }The deploy goes on; set fail-on: $VERDICT to stop deploys like this one." ;;
+      esac
     fi
   fi
 fi
@@ -336,9 +366,9 @@ output mark "$LABEL"
 
 STATUS="" RESTORE_FROM="" ERROR=""
 if [ "$JSON" = true ]; then
-  STATUS=$(field status "$TMP/mark.out")
-  RESTORE_FROM=$(field restore_from_backup "$TMP/mark.out")
-  ERROR=$(field error "$TMP/mark.out")
+  STATUS=$(jget status "$TMP/mark.out")
+  RESTORE_FROM=$(jget restore_from_backup "$TMP/mark.out")
+  ERROR=$(jget error "$TMP/mark.out")
 else
   # An older CLI: read the Mark back from the list.
   sed 's/^/  /' "$TMP/mark.out"

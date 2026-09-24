@@ -20,7 +20,7 @@ jobs:
           api-key: ${{ secrets.ROWSAFE_API_KEY }}
           database: app
           preview-sql: sql/V*__*.sql
-          preview-fail-on: dangerous # stop before migrations that would lock big tables
+          fail-on: dangerous # stop before migrations that would lock big tables
 
       - name: flyway migrate
         run: >-

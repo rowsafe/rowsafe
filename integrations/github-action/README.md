@@ -16,9 +16,9 @@ Save a **Mark** of your PostgreSQL right before each deploy. If a migration drop
 Before the next step runs, the action:
 
 1. **Checks that the database can be restored right now**: backups, WAL archiving and the latest restore test are OK. If not, it warns, or stops the deploy with `require-protected: true`.
-2. **Previews the migration on a copy** (optional, `preview-sql`): the new migration files run on a restored copy next to production, never on production, and you get a verdict.
+2. **Previews the migration on a copy** (optional, `preview-sql`): the new migration files run on a restored copy next to production, never on production, and you get a verdict: safe, careful, dangerous, or failed. A migration that fails on the copy stops the job; careful and dangerous warn, or stop it with `fail-on`.
 3. **Saves the Mark** `before-deploy-<commit>` and waits until it is confirmed in your storage, usually in a few seconds.
-4. **Writes a job summary** with the Mark, the backup a rewind starts from and a Rewind link.
+4. **Writes a job summary** with the Mark, the preview report, the backup a rewind starts from and a Rewind link.
 
 ## Set it up
 
@@ -38,13 +38,13 @@ Complete workflows: [Prisma](examples/prisma.yml), [Rails](examples/rails.yml), 
 | `wait` | `true` | Wait until the Mark is confirmed in your storage. `false` only requests it. |
 | `require-protected` | `false` | Stop the deploy when the database can't be restored right now, instead of warning. |
 | `preview-sql` | | Glob patterns of migration SQL files (`**` works) to preview on a copy first. |
+| `fail-on` | `never` | Stop the deploy when the preview's verdict is at least `careful` or `dangerous`, instead of warning. |
 
 ### More options
 
 | Input | Default | What it does |
 |---|---|---|
 | `preview-changed-only` | `true` | Preview only the files this push or pull request adds or changes. Needs `actions/checkout` with `fetch-depth: 0`, or the action fetches the base commit itself. |
-| `preview-fail-on` | `never` | Stop before the Mark when the preview's verdict is `dangerous` (or `careful`). |
 | `wait-timeout-minutes` | `10` | Give up waiting for the Mark or the preview after this long. |
 | `working-directory` | `.` | Where `.rowsafe.json` and `preview-sql` are looked up (monorepos). |
 | `version` | `latest` | The rowsafe CLI version, e.g. `0.4.0`. |
@@ -62,7 +62,7 @@ Complete workflows: [Prisma](examples/prisma.yml), [Rails](examples/rails.yml), 
 | `dashboard-url` | `https://app.rowsafe.sh/databases/app/restore-points`: rewind from here |
 | `database` | `app` |
 | `protected` | `true` or `false` |
-| `preview-verdict` | `safe`, `careful` or `dangerous`, when a preview ran |
+| `preview-verdict` | `safe`, `careful`, `dangerous` or `failed`, when a preview ran |
 
 ## If the deploy goes wrong
 
