@@ -456,7 +456,7 @@ func TestRewindInPlacePreflightRefusals(t *testing.T) {
 		setup func(e *inPlaceEnv)
 		want  string
 	}{
-		"docker":       {func(e *inPlaceEnv) { e.a.cfg.Mode = ModeDockerSidecar }, "Docker"},
+		"docker":       {func(e *inPlaceEnv) { e.a.cfg.Mode = ModeDockerSidecar }, "stop PostgreSQL's container"},
 		"not allowed":  {func(e *inPlaceEnv) { os.WriteFile(e.a.cfg.RestartAllowFile, []byte("5433 x.service\n"), 0o644) }, "isn't allowed to stop PostgreSQL on port 5432"},
 		"old helper":   {func(e *inPlaceEnv) { os.WriteFile(e.a.cfg.RestartHelper, []byte("#!/bin/sh\n"), 0o755) }, "Re-run the install command"},
 		"no helper":    {func(e *inPlaceEnv) { os.RemoveAll(e.a.cfg.RestartDir) }, "not set up"},

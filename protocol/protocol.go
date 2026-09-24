@@ -175,6 +175,8 @@ type HeartbeatRequest struct {
 	RestartActions []string `json:"restart_actions,omitempty"`
 	// Rewinds are the live copies and kept data directories on this host.
 	Rewinds []RewindState `json:"rewinds,omitempty"`
+	// DockerControl: docker-sidecar agents only (see protocol/docker.go).
+	DockerControl *DockerControlReport `json:"docker_control,omitempty"`
 }
 
 // HeartbeatResponse tells the agent which databases to watch.
