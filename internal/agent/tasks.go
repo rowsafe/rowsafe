@@ -103,6 +103,8 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 			return nil, err
 		}
 		return res, err
+	case protocol.TaskSecurityScan, protocol.TaskSecurityFix: // security.go
+		return a.runSecurityTask(ctx, task, tl, db)
 	case protocol.TaskRewindCopy:
 		return runRewind(ctx, task, tl, db, a.rewindCopy)
 	case protocol.TaskRewindDrop:

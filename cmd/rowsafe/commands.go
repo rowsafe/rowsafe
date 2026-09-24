@@ -751,6 +751,10 @@ func taskName(typ string) string {
 		return "PostgreSQL restart"
 	case protocol.TaskMaintenance:
 		return "fix"
+	case protocol.TaskSecurityScan:
+		return "security check"
+	case protocol.TaskSecurityFix:
+		return "security fix"
 	case protocol.TaskRewindCopy, protocol.TaskRewindDrop, protocol.TaskRewindCompare, protocol.TaskRewindRows,
 		protocol.TaskRewindInPlace, protocol.TaskRewindUndo, protocol.TaskRewindCleanup:
 		return rewindTaskName(typ)
