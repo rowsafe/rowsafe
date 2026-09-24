@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -219,6 +220,10 @@ func (a *Agent) editHBA(ctx context.Context, db protocol.DatabaseSpec, res *prot
 	}
 	backup := hbaFile + hbaBackupSuffix + time.Now().UTC().Format("20060102T150405.000000Z")
 	if err := os.WriteFile(backup, old, st.Mode().Perm()); err != nil {
+		if errors.Is(err, syscall.EROFS) {
+			return fmt.Errorf("the agent's service may not write %s yet: run the Rowsafe install command on this server again, "+
+				"which updates the service (nothing else changes)", filepath.Dir(hbaFile))
+		}
 		return fmt.Errorf("backing up %s: %w", hbaFile, err)
 	}
 	res.Backup = backup

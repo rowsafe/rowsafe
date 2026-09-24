@@ -44,12 +44,14 @@ IOWeight=50
 # /etc/rowsafe/pgbackrest, swap its own symlink and versions in /opt/rowsafe,
 # keep state and run drills under /var/lib/rowsafe, write logs to
 # /var/log/rowsafe, read the PostgreSQL data directory (pgBackRest) and
-# connect to PostgreSQL's Unix socket.
+# connect to PostgreSQL's Unix socket. The security check edits pg_hba.conf
+# when a person asks, which Debian and Ubuntu keep in /etc/postgresql (owned
+# by postgres, which PostgreSQL itself can already write).
 NoNewPrivileges=yes
 # /usr, /boot and /etc read-only, with the exceptions below. /var stays
 # writable (drills, logs, pgBackRest reading the data directory).
 ProtectSystem=full
-ReadWritePaths=/etc/rowsafe /opt/rowsafe -/var/lib/rowsafe -/var/log/rowsafe
+ReadWritePaths=/etc/rowsafe /opt/rowsafe -/var/lib/rowsafe -/var/log/rowsafe -/etc/postgresql
 ProtectHome=yes
 # No PrivateTmp: pgBackRest's lock files live in /tmp/pgbackrest and must be
 # shared with the archive-push commands PostgreSQL runs outside this unit.
