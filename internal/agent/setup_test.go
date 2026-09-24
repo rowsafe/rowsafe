@@ -465,6 +465,10 @@ func TestSetupDiscover(t *testing.T) {
 	listenUnix(t, filepath.Join(dir, ".s.PGSQL.5435"))
 	oldDirs, oldLs, oldSum := socketDirs, lsclusters, summarizeCluster
 	defer func() { socketDirs, lsclusters, summarizeCluster = oldDirs, oldLs, oldSum }()
+	// Don't find this machine's own PostgreSQL units (CI runners have them).
+	oldUnits, oldProc := unitFileDirs, procRoot
+	defer func() { unitFileDirs, procRoot = oldUnits, oldProc }()
+	unitFileDirs, procRoot = []string{t.TempDir()}, t.TempDir()
 	socketDirs = []string{dir}
 	lsclusters = func(context.Context) ([]byte, error) {
 		return []byte("18 main 5432 online postgres /var/lib/postgresql/18/main x\n16 old 5440 down postgres /var/lib/postgresql/16/old x\n"), nil
