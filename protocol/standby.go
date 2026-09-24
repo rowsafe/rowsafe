@@ -81,6 +81,10 @@ func StandbyRoleName(standbyID string) string {
 	return "rowsafe_standby_" + id
 }
 
+// FixStandbyRebuild is a health fix (FindingFix.Kind): rebuild the
+// database's standby from the latest backup (it fell behind or broke).
+const FixStandbyRebuild = "standby_rebuild"
+
 // IsStandbyTask reports whether a task type belongs to Standby.
 func IsStandbyTask(taskType string) bool { return strings.HasPrefix(taskType, "standby_") }
 
