@@ -482,6 +482,9 @@ type CreateDatabaseResponse struct {
 // TaskTimeout is how long the agent lets a task run before killing it.
 // The control plane's lease is slightly longer.
 func TaskTimeout(taskType string) time.Duration {
+	if IsFilesTask(taskType) { // files.go
+		return FilesTaskTimeout(taskType)
+	}
 	switch taskType {
 	case TaskInspect:
 		return 2 * time.Minute
