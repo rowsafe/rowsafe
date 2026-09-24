@@ -322,6 +322,22 @@ func TestPoolingReal(t *testing.T) {
 	if st := a.poolerStatus(ctx); st == nil || !st.Managed || !st.Running || st.DatabaseID != "db_1" {
 		t.Fatalf("status %+v", st)
 	}
+	// A PgBouncer Rowsafe doesn't manage (Docker): monitored through
+	// ROWSAFE_POOLER_STATS_URL.
+	ext := &Agent{cfg: Config{StateDir: t.TempDir(), Mode: ModeDockerSidecar, PGUser: u.Username, Pooler: PoolerConfig{
+		StatsURL: fmt.Sprintf("postgres://rowsafe_pgbouncer:%s@127.0.0.1:%d/pgbouncer?sslmode=disable", pw, poolerPort)}},
+		monitored: []protocol.DatabaseSpec{db}}
+	if st := ext.poolerStatus(ctx); st == nil || !st.External || !st.Running || st.Managed || st.Version == "" {
+		t.Fatalf("external status %+v", st)
+	}
+	extRep := collect.New(collect.Options{PGUser: u.Username, Databases: ext.monitoredDatabases, Poolers: ext.poolerSources}).Collect(ctx)
+	if extRep.Databases[0].Metrics[collect.PPoolerUp] != 1 || extRep.Databases[0].Pooler == nil {
+		t.Fatalf("external pooler metrics %v", extRep.Databases[0].Metrics)
+	}
+	bad := &Agent{cfg: Config{Mode: ModeDockerSidecar, Pooler: PoolerConfig{StatsURL: fmt.Sprintf("postgres://rowsafe_pgbouncer:wrong@127.0.0.1:%d/pgbouncer?sslmode=disable", poolerPort)}}}
+	if st := bad.poolerStatus(ctx); st.Running || st.Error == "" || strings.Contains(st.Error, "wrong") {
+		t.Fatalf("a wrong stats password: %+v", st)
+	}
 
 	// Switch to the other cluster (as if it were the promoted standby: the
 	// role and function replicated, with the same password) under load.
