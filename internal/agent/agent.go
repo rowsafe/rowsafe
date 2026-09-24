@@ -62,6 +62,9 @@ type Agent struct {
 	inPlaceMu sync.Mutex
 	// rewindOps runs the steps of a rewind in place (tests replace it).
 	rewindOps inPlaceOps
+
+	// second is the second copy and storage use (secondcopy.go).
+	second secondCopyState
 }
 
 func New(cfg Config, logger *slog.Logger) *Agent {
@@ -75,6 +78,7 @@ func New(cfg Config, logger *slog.Logger) *Agent {
 		a.pusher = newSpoolPusher(cfg.SpoolDir, cfg.SpoolStallAfter, logger, a.spoolCLI)
 		a.pusher.healthFile = healthPath(cfg)
 	}
+	a.initSecondCopy()
 	return a
 }
 
@@ -159,6 +163,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.heartbeatLoop(ctx)
 	go a.fastLane(ctx)
 	go a.rewindHousekeeping(ctx)
+	a.startSecondCopy(ctx)
 	// Built-in monitoring (package collect): metrics every minute, beside
 	// the task loop and never blocking it.
 	go collect.Run(ctx, collect.Options{Log: a.log, PGUser: a.cfg.PGUser,
@@ -292,6 +297,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 			Hostname: hostname, AgentVersion: Version, Platform: release.Platform(),
 			Archivers: a.archiverStats(ctx), Update: a.updater.Report(), Mode: a.cfg.Mode,
 			RestartPorts: a.restartPorts(), RestartActions: a.helperActions(), Rewinds: a.rewindState().states(),
+			Storage: a.storageReports(), SecondCopies: a.secondCopyStatuses(),
 		}
 		resp, err := a.client.heartbeat(ctx, req)
 		if isUnauthorized(err) {

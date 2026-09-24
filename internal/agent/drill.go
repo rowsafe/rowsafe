@@ -177,8 +177,17 @@ var coreBackendTypes = map[string]bool{
 // drill restores the latest backup plus all archived WAL into a scratch
 // directory, starts it on a private socket, and checks every database.
 func (a *Agent) drill(ctx context.Context, db protocol.DatabaseSpec, taskID string, tl *taskLog) (*protocol.DrillResult, error) {
+	return a.drillFrom(ctx, db, taskID, 0, tl)
+}
+
+// drillFrom restores from the given storage (protocol.RepoSecond: the
+// second copy).
+func (a *Agent) drillFrom(ctx context.Context, db protocol.DatabaseSpec, taskID string, repo int, tl *taskLog) (*protocol.DrillResult, error) {
 	start := time.Now()
 	res := &protocol.DrillResult{}
+	if repo == protocol.RepoSecond {
+		res.Repo = repo
+	}
 	finish := func(err error) (*protocol.DrillResult, error) {
 		res.DurationSeconds = time.Since(start).Seconds()
 		if err != nil {
@@ -195,7 +204,13 @@ func (a *Agent) drill(ctx context.Context, db protocol.DatabaseSpec, taskID stri
 	if err := a.writeConfig(db, prod); err != nil {
 		return nil, err
 	}
-	cli := a.cli(db)
+	cli, err := a.repoCLI(db, repo)
+	if err != nil {
+		return finish(err)
+	}
+	if repo == protocol.RepoSecond {
+		tl.Printf("restoring from the second copy (%s)", describeRepo(a.cfg.Repo2))
+	}
 	stanzas, err := cli.Info(ctx)
 	if err != nil {
 		return finish(err)

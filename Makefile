@@ -5,6 +5,7 @@
 #   make lint                  go vet, gofmt, shellcheck, installer consistency
 #   make test-installer        scripts/install.sh in Debian/Ubuntu containers (Docker)
 #   make test-rewind           a real Rewind (copy, rows, in place, undo) on a systemd Debian container (Docker)
+#   make test-secondcopy       a real second backup copy (two storages, one going away) in a Debian container (Docker)
 #   make dist VERSION=1.2.3 RELEASE_PUBLIC_KEY=...    reproducible release binaries in dist/1.2.3/
 #   make release VERSION=1.2.3 RELEASE_PUBLIC_KEY=... (needs ROWSAFE_RELEASE_PRIVATE_KEY)
 #                              dist + Ed25519-signed manifest + rendered install.sh + SHA256SUMS
@@ -27,7 +28,7 @@ AGENT_LDFLAGS := -s -w -buildid= -X $(PKG)/internal/agent.Version=$(VERSION) -X 
 MAIN_LDFLAGS := -s -w -buildid= -X main.version=$(VERSION)
 GOBUILD := CGO_ENABLED=0 GOFLAGS=-mod=readonly $(GO) build -trimpath -buildvcs=false
 
-.PHONY: all build test lint check-installer test-installer test-rewind dist release check-release-env clean
+.PHONY: all build test lint check-installer test-installer test-rewind test-secondcopy dist release check-release-env clean
 
 all: lint test build
 
@@ -43,7 +44,7 @@ lint: check-installer
 	$(GO) vet ./...
 	@test -z "$$(gofmt -l .)" || { echo "gofmt needed:"; gofmt -l .; exit 1; }
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck -S warning -s sh scripts/install.sh scripts/test-install.sh scripts/test-rewind.sh scripts/rowsafe-agent-guard scripts/rowsafe-pg-restart; \
+		shellcheck -S warning -s sh scripts/install.sh scripts/test-install.sh scripts/test-rewind.sh scripts/test-secondcopy.sh scripts/rowsafe-agent-guard scripts/rowsafe-pg-restart; \
 	else echo "shellcheck not installed; skipping"; fi
 
 # install.sh is fetched on its own with curl, so it embeds the guard, the
@@ -69,6 +70,9 @@ test-installer:
 
 test-rewind:
 	sh scripts/test-rewind.sh
+
+test-secondcopy:
+	sh scripts/test-secondcopy.sh
 
 # The agent ships for linux/amd64 and linux/arm64 (the names the release
 # manifest expects); the CLI and the release tool for Linux and macOS.

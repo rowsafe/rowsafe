@@ -67,6 +67,12 @@ type Config struct {
 	// RewindDir holds restored copies, one directory per copy
 	// (ROWSAFE_REWIND_DIR).
 	RewindDir string
+
+	// Second copy (secondcopy.go): Repo2 is the second storage
+	// (ROWSAFE_REPO2_*; optional), and SecondCopyQueueDir is where WAL waits
+	// to be sent to it (ROWSAFE_REPO2_QUEUE_DIR).
+	Repo2              pgbackrest.Repo
+	SecondCopyQueueDir string
 }
 
 // Agent modes (ROWSAFE_MODE).
@@ -118,6 +124,9 @@ func ConfigFromEnv() (Config, error) {
 	c.RestartDir = env("ROWSAFE_RESTART_DIR", filepath.Join(c.StateDir, "restart"))
 	c.RewindDir = env("ROWSAFE_REWIND_DIR", filepath.Join(c.StateDir, "rewind"))
 	var err error
+	if err = secondCopyFromEnv(&c); err != nil {
+		return c, err
+	}
 	if c.Mode != ModeNative && c.Mode != ModeDockerSidecar {
 		return c, fmt.Errorf("ROWSAFE_MODE must be %q or %q", ModeNative, ModeDockerSidecar)
 	}
@@ -157,7 +166,7 @@ func ConfigFromEnv() (Config, error) {
 		!strings.HasPrefix(c.ControlURL, "http://localhost") {
 		return c, fmt.Errorf("ROWSAFE_URL must use https (plain http is only allowed for localhost)")
 	}
-	for _, p := range []string{c.StateDir, c.ConfigDir, c.LogDir, c.DrillDir, c.InstallDir, c.RestartDir, c.RestartAllowFile, c.RestartResultDir, c.RestartHelper, c.RewindDir} {
+	for _, p := range []string{c.StateDir, c.ConfigDir, c.LogDir, c.DrillDir, c.InstallDir, c.RestartDir, c.RestartAllowFile, c.RestartResultDir, c.RestartHelper, c.RewindDir, c.SecondCopyQueueDir} {
 		if !filepath.IsAbs(p) {
 			return c, fmt.Errorf("directory %q must be absolute", p)
 		}

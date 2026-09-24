@@ -89,7 +89,7 @@ func (o *fakeOps) running(dataDir string) bool {
 	return dataDir == o.f.DataDir && (o.live || o.private)
 }
 
-func (o *fakeOps) repo(context.Context, protocol.DatabaseSpec, string) error {
+func (o *fakeOps) repo(context.Context, protocol.DatabaseSpec, string, int) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.call("repo")
