@@ -508,6 +508,8 @@ func TaskTimeout(taskType string) time.Duration {
 		return 10 * time.Minute
 	case TaskRestorePoint, TaskRestart:
 		return 5 * time.Minute
+	case TaskSecurityScan, TaskSecurityFix: // security.go; a firewall change waits for its confirmation
+		return 10 * time.Minute
 	case TaskMaintenance: // a VACUUM or REINDEX of a large table takes a while
 		return 2 * time.Hour
 	case TaskRewindDrop, TaskRewindCleanup: // stopping a copy, deleting a large directory
