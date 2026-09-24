@@ -62,6 +62,11 @@ type Agent struct {
 	inPlaceMu sync.Mutex
 	// rewindOps runs the steps of a rewind in place (tests replace it).
 	rewindOps inPlaceOps
+
+	// Standby (standby*.go): the runtime, and its steps (tests replace them).
+	sbOnce sync.Once
+	sbRT   *standbyRuntime
+	sbOps  standbyOps
 }
 
 func New(cfg Config, logger *slog.Logger) *Agent {
@@ -159,6 +164,8 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.heartbeatLoop(ctx)
 	go a.fastLane(ctx)
 	go a.rewindHousekeeping(ctx)
+	go a.standbyLoop(ctx) // fences, primaries seen from standbys (standby.go)
+	go a.standbyLane(ctx)
 	// Built-in monitoring (package collect): metrics every minute, beside
 	// the task loop and never blocking it.
 	go collect.Run(ctx, collect.Options{Log: a.log, PGUser: a.cfg.PGUser,
@@ -292,6 +299,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 			Hostname: hostname, AgentVersion: Version, Platform: release.Platform(),
 			Archivers: a.archiverStats(ctx), Update: a.updater.Report(), Mode: a.cfg.Mode,
 			RestartPorts: a.restartPorts(), RestartActions: a.helperActions(), Rewinds: a.rewindState().states(),
+			StandbyHeartbeat: a.standbyHeartbeat(ctx),
 		}
 		resp, err := a.client.heartbeat(ctx, req)
 		if isUnauthorized(err) {
@@ -321,6 +329,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 			}
 			a.updater.OnHeartbeat(resp.Update)
 			a.rewindState().setExpiries(resp.RewindExpires, time.Now())
+			a.applyStandbyInstructions(resp.StandbyInstructions)
 		}
 		select {
 		case <-ctx.Done():

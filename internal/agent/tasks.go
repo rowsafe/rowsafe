@@ -47,6 +47,9 @@ func (l *taskLog) String() string {
 }
 
 func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (any, error) {
+	if protocol.IsStandbyTask(task.Type) {
+		return a.runStandbyTask(ctx, task, tl) // standby*.go
+	}
 	if task.Database == nil {
 		return nil, fmt.Errorf("task %s has no database", task.Type)
 	}
@@ -152,7 +155,8 @@ var numCPU = runtime.NumCPU
 // writeConfig renders the pgBackRest config for db. It is rewritten before
 // every operation so retention and credential changes take effect.
 func (a *Agent) writeConfig(db protocol.DatabaseSpec, in protocol.InspectResult) error {
-	if err := a.cfg.Repo.Validate(); err != nil {
+	repo := a.repoFor(db) // the bucket a primary handed over, for a (promoted) standby
+	if err := repo.Validate(); err != nil {
 		return err
 	}
 	for _, dir := range []string{a.cfg.ConfigDir, a.cfg.LogDir} {
@@ -164,7 +168,7 @@ func (a *Agent) writeConfig(db protocol.DatabaseSpec, in protocol.InspectResult)
 	if a.cfg.Sidecar() {
 		logDir = "" // container logs only
 	}
-	conf := pgbackrest.RenderConfig(a.cfg.Repo, pgbackrest.ConfigInput{
+	conf := pgbackrest.RenderConfig(repo, pgbackrest.ConfigInput{
 		Stanza: db.Stanza, DataDir: in.DataDirectory, Port: db.Port, SocketDir: db.SocketDir,
 		User: a.cfg.PGUser, RetentionFull: db.RetentionFull, LogPath: logDir,
 		ProcessMax: pgbackrest.ProcessMax(numCPU()),
