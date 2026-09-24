@@ -444,7 +444,7 @@ func pickSegments(chain []pgbackrest.ArchivedSegment, from, to time.Time) (picke
 	}
 	if first == 0 && chain[0].Time.After(from.Add(10*time.Minute)) {
 		start = chain[0].Time
-		notes = append(notes, fmt.Sprintf("Your storage keeps the change log from %s on (the oldest backup), so the search starts there.",
+		notes = append(notes, fmt.Sprintf("The change log in your storage starts at %s (the oldest backup still kept), so the search starts there.",
 			start.Format("15:04 UTC on Jan 2")))
 	}
 	first = max(first-1, 0)
@@ -668,13 +668,27 @@ func (l *limitedBuffer) Write(p []byte) (int, error) {
 // momentsSummary: "Found 3 changes between 14:00 and 15:00 UTC. The
 // biggest: 1,204 rows deleted from applications at 14:05:37."
 func momentsSummary(r protocol.FindMomentResult) string {
-	span := fmt.Sprintf("between %s and %s", r.From.Format("15:04 UTC Jan 2"), r.To.Format("15:04 UTC Jan 2"))
+	span := spanText(r.From, r.To)
 	if len(r.Moments) == 0 {
 		return "No deletes, updates, TRUNCATEs or DROPs matched " + span + "."
 	}
 	big := slices.MinFunc(r.Moments, momentRank)
 	s := fmt.Sprintf("Found %s %s.", nplural(r.Transactions, "transaction with matching changes", "transactions with matching changes"), span)
 	return s + fmt.Sprintf(" The biggest: %s at %s.", lowerFirst(big.Summary), big.Time.Format("15:04:05 UTC"))
+}
+
+// spanText: "between 14:00 and 15:00 UTC on Sep 24" (seconds when both are
+// in the same minute; both dates when they differ).
+func spanText(from, to time.Time) string {
+	from, to = from.UTC(), to.UTC()
+	layout := "15:04"
+	if from.Truncate(time.Minute).Equal(to.Truncate(time.Minute)) {
+		layout = "15:04:05"
+	}
+	if from.Format("2006-01-02") == to.Format("2006-01-02") {
+		return fmt.Sprintf("between %s and %s UTC on %s", from.Format(layout), to.Format(layout), to.Format("Jan 2"))
+	}
+	return fmt.Sprintf("between %s UTC on %s and %s UTC on %s", from.Format(layout), from.Format("Jan 2"), to.Format(layout), to.Format("Jan 2"))
 }
 
 func lowerFirst(s string) string {
