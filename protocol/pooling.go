@@ -45,7 +45,7 @@ const (
 
 // Where PgBouncer listens (PoolingSettings.Listen).
 const (
-	// PoolerListenLocal: this server only (127.0.0.1 and ::1).
+	// PoolerListenLocal: this server only (127.0.0.1).
 	PoolerListenLocal = "local"
 	// PoolerListenPrivate: this server and its private network addresses
 	// (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7): the default.
@@ -221,3 +221,27 @@ type PoolingRequest struct {
 // FixPooling is the fix kind that queues a pooling task (turn on, raise
 // the pool size, switch mode), params PoolingParams.
 const FixPooling = "pooling"
+
+// PoolHeadroom is how many server connections PgBouncer may use in all:
+// PostgreSQL's max_connections less the reserved ones (superuser_reserved_
+// connections and reserved_connections) and 10 more for Rowsafe, admins and
+// replication.
+func PoolHeadroom(maxConnections, reserved int) int {
+	return max(maxConnections-reserved-10, 4)
+}
+
+// DefaultPoolingSettings are the settings Rowsafe picks for a server with
+// cores CPUs and PostgreSQL's max_connections and reserved connections.
+// Pools are per database and user, so the pool size stays well under what
+// PostgreSQL allows (half the headroom at most); the agent also caps the
+// total (max_db_connections, three quarters of the headroom).
+func DefaultPoolingSettings(cores, maxConnections, reserved int) PoolingSettings {
+	pool := min(max(cores*2, 10), 50)
+	return PoolingSettings{
+		Mode:          PoolModeTransaction,
+		PoolSize:      max(min(pool, PoolHeadroom(maxConnections, reserved)/2), 2),
+		MaxClientConn: 1000,
+		Listen:        PoolerListenPrivate,
+		Port:          DefaultPoolerPort,
+	}
+}

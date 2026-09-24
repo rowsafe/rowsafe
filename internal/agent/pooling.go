@@ -245,29 +245,12 @@ func waitHelperResult(ctx context.Context, path, id string, timeout time.Duratio
 
 // ---- settings ----
 
-// PoolingDefaults are the settings Rowsafe picks for a server with cores
-// CPUs and PostgreSQL's max_connections and reserved connections. Pools
-// are per database and user, so the pool size stays well under what
-// PostgreSQL allows, and max_db_connections caps the total so PgBouncer
-// never takes the connections Rowsafe, admins and replication need.
+// PoolingDefaults are the settings Rowsafe picks (protocol.DefaultPoolingSettings).
 func PoolingDefaults(cores, maxConnections, reserved int) protocol.PoolingSettings {
-	return protocol.PoolingSettings{
-		Mode:          protocol.PoolModeTransaction,
-		PoolSize:      defaultPoolSize(cores, maxConnections, reserved),
-		MaxClientConn: 1000,
-		Listen:        protocol.PoolerListenPrivate,
-		Port:          protocol.DefaultPoolerPort,
-	}
+	return protocol.DefaultPoolingSettings(cores, maxConnections, reserved)
 }
 
-func headroom(maxConnections, reserved int) int {
-	return max(maxConnections-reserved-10, 4)
-}
-
-func defaultPoolSize(cores, maxConnections, reserved int) int {
-	pool := min(max(cores*2, 10), 50)
-	return max(min(pool, headroom(maxConnections, reserved)/2), 2)
-}
+func headroom(maxConnections, reserved int) int { return protocol.PoolHeadroom(maxConnections, reserved) }
 
 // fillSettings completes settings with defaults and checks them.
 func fillSettings(s, def protocol.PoolingSettings, maxConnections, reserved int) (protocol.PoolingSettings, error) {
