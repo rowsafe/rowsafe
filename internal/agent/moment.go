@@ -164,7 +164,9 @@ func (a *Agent) findMoment(ctx context.Context, db protocol.DatabaseSpec, p prot
 	if err := a.writeConfig(db, prod); err != nil {
 		return nil, err
 	}
-	sc.src = repoSource{cli: a.cli(db)}
+	fetchCLI := a.cli(db)
+	fetchCLI.Wrap = niceWrap() // low CPU and IO priority, like backups
+	sc.src = repoSource{cli: fetchCLI}
 
 	conn, err := a.target(db).Connect(ctx, "postgres")
 	if err != nil {
