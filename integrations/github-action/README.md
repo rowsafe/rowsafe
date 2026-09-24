@@ -16,7 +16,7 @@ Save a **Mark** of your PostgreSQL right before each deploy. If a migration drop
 Before the next step runs, the action:
 
 1. **Checks that the database can be restored right now**: backups, WAL archiving and the latest restore test are OK. If not, it warns, or stops the deploy with `require-protected: true`.
-2. **Previews the migration on a copy** (optional, `preview-sql`): the new migration files run on a restored copy next to production, never on production, and you get a verdict: safe, careful, dangerous, or failed. A migration that fails on the copy stops the job; careful and dangerous warn, or stop it with `fail-on`.
+2. **Previews the migration on a copy** (optional, `preview-sql`; needs a rowsafe CLI with `rowsafe preview`, arriving in an upcoming release, until then the action skips it with a notice): the new migration files run on a restored copy next to production, never on production, and you get a verdict: safe, careful, dangerous, or failed. A migration that fails on the copy stops the job; careful and dangerous warn, or stop it with `fail-on`.
 3. **Saves the Mark** `before-deploy-<commit>` and waits until it is confirmed in your storage, usually in a few seconds.
 4. **Writes a job summary** with the Mark, the preview report, the backup a rewind starts from and a Rewind link.
 
