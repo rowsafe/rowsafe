@@ -62,6 +62,10 @@ type Agent struct {
 	inPlaceMu sync.Mutex
 	// rewindOps runs the steps of a rewind in place (tests replace it).
 	rewindOps inPlaceOps
+
+	// copies records Guard's preview and safe copies (copyState()).
+	copies     *copyStore
+	copiesOnce sync.Once
 }
 
 func New(cfg Config, logger *slog.Logger) *Agent {
@@ -153,12 +157,14 @@ func (a *Agent) Run(ctx context.Context) error {
 	// restart stopped them), roll back a rewind in place that was
 	// interrupted, and delete what expired, even with no control plane.
 	a.recoverRewinds(ctx)
+	a.recoverCopies(ctx) // Guard copies: same, see copies_state.go
 	a.reportInterrupted(ctx)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go a.heartbeatLoop(ctx)
 	go a.fastLane(ctx)
 	go a.rewindHousekeeping(ctx)
+	go a.copiesHousekeeping(ctx)
 	// Built-in monitoring (package collect): metrics every minute, beside
 	// the task loop and never blocking it.
 	go collect.Run(ctx, collect.Options{Log: a.log, PGUser: a.cfg.PGUser,
@@ -213,7 +219,7 @@ func (a *Agent) Run(ctx context.Context) error {
 
 // fastLaneTypes are claimed by the fast lane. They are short, and must not
 // wait behind a backup or drill that can take hours.
-var fastLaneTypes = []string{protocol.TaskRestorePoint}
+var fastLaneTypes = []string{protocol.TaskRestorePoint, protocol.TaskCopySchema}
 
 // sideTypes run beside the fast lane, one at a time: health fixes (such as
 // ending a session that blocks others), and the Rewind steps people wait
@@ -292,6 +298,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 			Hostname: hostname, AgentVersion: Version, Platform: release.Platform(),
 			Archivers: a.archiverStats(ctx), Update: a.updater.Report(), Mode: a.cfg.Mode,
 			RestartPorts: a.restartPorts(), RestartActions: a.helperActions(), Rewinds: a.rewindState().states(),
+			Copies: a.copiesReport(),
 		}
 		resp, err := a.client.heartbeat(ctx, req)
 		if isUnauthorized(err) {
@@ -321,6 +328,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 			}
 			a.updater.OnHeartbeat(resp.Update)
 			a.rewindState().setExpiries(resp.RewindExpires, time.Now())
+			a.onCopiesUpdate(ctx, resp.Copies)
 		}
 		select {
 		case <-ctx.Done():
@@ -481,6 +489,8 @@ func (a *Agent) reportInterrupted(ctx context.Context) {
 		cleanup = "the interrupted rewind was rolled back when the agent started again: PostgreSQL runs on the data it had before (see the agent's log)"
 	case protocol.TaskRewindCopy:
 		cleanup = "the half-restored copy has been removed"
+	case protocol.TaskPreviewMigration, protocol.TaskSafeCopy:
+		cleanup = "the unfinished copy has been removed; nothing was changed on production"
 	}
 	req := protocol.CompleteRequest{
 		Status: protocol.StatusFailed,
