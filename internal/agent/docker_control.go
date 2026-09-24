@@ -47,7 +47,8 @@ type dockerControl struct {
 }
 
 // dockerReportTTL is how long a report the control service answered is
-// reused (a missing socket is checked on every heartbeat: it costs a stat).
+// reused (a missing socket, or a data directory not known yet, is checked
+// again on every heartbeat).
 var dockerReportTTL = time.Minute
 
 // dockerHowToAllow is the plain next step when the control service is missing.
@@ -91,7 +92,7 @@ func (a *Agent) dockerRefresh(ctx context.Context) protocol.DockerControlReport 
 	d := &a.docker
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if !d.at.IsZero() && time.Since(d.at) < dockerReportTTL && d.report.Found {
+	if !d.at.IsZero() && time.Since(d.at) < dockerReportTTL && d.report.Found && d.dataDir != "" {
 		return d.report
 	}
 	var r protocol.DockerControlReport
