@@ -979,10 +979,7 @@ func (a *Agent) poolerStatus(ctx context.Context) *protocol.PoolerStatus {
 		if err != nil {
 			out.Error = err.Error()
 		}
-		if !out.Allowed && out.Error == "" {
-			return nil
-		}
-		return out
+		return out // not managed; Allowed says whether it may be
 	}
 	out.Managed, out.DatabaseID, out.Settings, out.Addresses, out.Target, out.Version = true, st.DatabaseID, st.Settings, st.Addresses, st.target(), st.Version
 	password, err := readUserlistPassword(a.cfg.Pooler.Userlist)

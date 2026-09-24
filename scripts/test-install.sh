@@ -30,7 +30,11 @@
 #      start actions for Rewind (listed unit only, malformed actions
 #      refused), the installer
 #      not following symlinks planted in the agent's directories, and
-#      --no-allow-restart / uninstall removing it.
+#      --no-allow-restart / uninstall removing it;
+#   7. PgBouncer on request (--allow-pooler): the allow list and units, the
+#      helper in PgBouncer mode (install, configure from its template,
+#      reload, off, refused values and foreign configurations) with apt-get
+#      and systemctl stood in, and --no-allow-pooler.
 #
 # When Go is available the release key and the 0.2.0 release are made by the
 # real `rowsafe-release keygen/manifest/sign`, so the installer is tested
@@ -986,7 +990,7 @@ EOF
   scenario "discover_out=$shop" "plan_out=$plan" "apply_out=Done: the backup settings are in place." apply_rc=10 \
     "wait_out=$done_" "status_out=$status"
   tty_ok "turn on backups, restart now" \
-    "Allow Rowsafe to restart or stop PostgreSQL when you ask?\tn\nName it in Rowsafe [shop]\tTV Hub\nName it in Rowsafe\t\nTurn on backups for shop now? [Y/n]\t\nRestart PostgreSQL now? [y/N]\ty\n" \
+    "Allow Rowsafe to restart or stop PostgreSQL when you ask?\tn\nAllow Rowsafe to install and manage PgBouncer?\tn\nName it in Rowsafe [shop]\tTV Hub\nName it in Rowsafe\t\nTurn on backups for shop now? [Y/n]\t\nRestart PostgreSQL now? [y/N]\ty\n" \
     env ROWSAFE_TEST_LEAK=1 "$INSTALLER"
   has "Looking for PostgreSQL on this server"
   has "Found PostgreSQL 17 on port 5432 (1.2 GiB; databases: shop)"
@@ -1005,12 +1009,16 @@ EOF
   [ "$(cat "$F/pg_ctlcluster")" = "17 main restart" ] || fail "$name: pg_ctlcluster not run as 17 main restart"
   grep -q "is off" /etc/rowsafe/restart-allowed || fail "$name: the no to restarts from Rowsafe was not kept"
   [ ! -e /usr/local/lib/rowsafe/rowsafe-pg-restart ] || fail "$name: restart helper installed after a no"
+  has "Rowsafe won't install or manage PgBouncer"
+  grep -q "is off" /etc/rowsafe/pooler-allowed || fail "$name: the no to PgBouncer was not kept"
+  [ ! -e /etc/systemd/system/rowsafe-pooler.path ] || fail "$name: PgBouncer helper installed after a no"
 
   # 2. Restart later: the command, and that Rowsafe finishes by itself.
   scenario "discover_out=$shop" "plan_out=$plan" apply_rc=10
   tty_ok "turn on backups, restart later" \
     "Name it in Rowsafe\t\nTurn on backups for shop now?\ty\nRestart PostgreSQL now?\t\n" "$INSTALLER"
   lacks "Allow Rowsafe to restart or stop PostgreSQL"
+  lacks "Allow Rowsafe to install and manage PgBouncer"
   has "Restart PostgreSQL when it suits you:"
   has "sudo systemctl restart postgresql@17-main"
   has "Rowsafe notices the restart by itself and finishes setting up. Nothing else to do."
@@ -1254,6 +1262,7 @@ EOF
   as_pg mkdir -m 0700 "$R"
   pass "the installer doesn't follow symlinks planted in the agent's directories"
 
+  pooler_tests
   expect_ok "--no-allow-restart" "$INSTALLER" --no-allow-restart
   [ ! -e "$H" ] && [ ! -e /etc/systemd/system/rowsafe-pg-restart.service ] && [ ! -e /etc/systemd/system/rowsafe-pg-restart.path ] ||
     fail "--no-allow-restart left the helper"
@@ -1266,6 +1275,183 @@ EOF
   expect_ok "purge" "$INSTALLER" --uninstall --purge
   [ ! -e /etc/rowsafe ] || fail "purge left /etc/rowsafe"
   pass "--no-allow-restart, uninstall and purge remove the restart helper"
+}
+
+# ------------------------------------------------------------ PgBouncer
+
+# pooler_tests: --allow-pooler, and the helper in PgBouncer mode with apt-get
+# and systemctl stood in (called from restart_tests, which set up $H, $F,
+# $W, the systemctl stand-in, request, result_has and as_pg).
+pooler_tests() {
+  echo "  -- PgBouncer on request (--allow-pooler)"
+  PR=/var/lib/rowsafe/pooler
+  scenario "discover_out=$shop"
+  expect_ok "--allow-pooler" "$INSTALLER" --allow-pooler
+  grep -q "Rowsafe may install and manage PgBouncer when you turn pooling on" "$W/out" || fail "--allow-pooler not confirmed"
+  grep -qx "5432" /etc/rowsafe/pooler-allowed || fail "pooler allow list lacks 5432"
+  [ "$(stat -c '%U %a' /etc/rowsafe/pooler-allowed)" = "root 644" ] || fail "pooler allow list ownership/mode"
+  [ "$(stat -c '%U %a' "$PR")" = "postgres 700" ] || fail "pooler request directory ownership/mode"
+  cmp "$H" /src/scripts/rowsafe-pg-restart || fail "helper differs from scripts/rowsafe-pg-restart"
+  cmp /etc/systemd/system/rowsafe-pooler.service /src/deploy/systemd/rowsafe-pooler.service || fail "pooler service differs"
+  cmp /etc/systemd/system/rowsafe-pooler.path /src/deploy/systemd/rowsafe-pooler.path || fail "pooler path unit differs"
+  if [ "${TEST_UNITS:-0}" = 1 ]; then
+    expect_ok "systemd-analyze verify (pooler units)" \
+      systemd-analyze verify /etc/systemd/system/rowsafe-pooler.service /etc/systemd/system/rowsafe-pooler.path
+    [ ! -s "$W/out" ] || {
+      cat "$W/out" >&2
+      fail "systemd-analyze verify printed warnings for the pooler units"
+    }
+    systemd-analyze security --offline=true --no-pager /etc/systemd/system/rowsafe-pooler.service 2>/dev/null |
+      tail -n 1 | sed "s/^/  rowsafe-pooler: /"
+  fi
+  scenario "discover_out=$shop"
+  tty_ok "a re-run keeps PgBouncer allowed" "Name it in Rowsafe\t\nTurn on backups for shop now?\tn\n" "$INSTALLER"
+  lacks "Allow Rowsafe to install and manage PgBouncer"
+  grep -qx "5432" /etc/rowsafe/pooler-allowed || fail "a re-run dropped the pooler allow list"
+
+  # The helper in PgBouncer mode, run as rowsafe-pooler.service would.
+  cat >"$F/apt-get" <<'APT_EOF'
+#!/bin/sh
+echo "$*" >>/tmp/rowsafe-fake/apt.calls
+case "$*" in
+  *install*pgbouncer*) printf '#!/bin/sh\necho "PgBouncer 1.24.1"\n' >/usr/local/bin/pgbouncer && chmod 755 /usr/local/bin/pgbouncer ;;
+  *purge*pgbouncer*) rm -f /usr/local/bin/pgbouncer ;;
+esac
+APT_EOF
+  chmod 755 "$F/apt-get"
+  OP=$W/pooler-run
+  install -d -m 0755 -o root -g root "$OP"
+  PGB=$W/etc-pgbouncer
+  rm -rf "$PGB" "$W/pooler-state" "$W/systemd"
+  : >"$F/systemctl.calls"
+  pooler_helper() {
+    timeout 30 env ROWSAFE_HELPER_MODE=pooler ROWSAFE_RESTART_DIR="$PR" ROWSAFE_SYSTEMCTL="$F/systemctl" ROWSAFE_APT_GET="$F/apt-get" \
+      ROWSAFE_PGBOUNCER_DIR="$PGB" ROWSAFE_SYSTEMD_DIR="$W/systemd" STATE_DIRECTORY="$W/pooler-state" RUNTIME_DIRECTORY="$OP" \
+      "$H" 2>>"$W/helper.log" || fail "the PgBouncer helper failed or hung (exit $?)"
+  }
+  prequest() {
+    rm -f "$OP/result"
+    printf '%s\n' "$1" | as_pg sh -c 'cat >"$1"' sh "$PR/request"
+    pooler_helper
+    [ ! -e "$PR/request" ] && [ ! -L "$PR/request" ] || fail "helper left the request: $1"
+    [ -f "$OP/result" ] || fail "no result for: $1"
+  }
+  presult() { grep -qxF "$1" "$OP/result" || {
+    cat "$OP/result" >&2
+    fail "PgBouncer helper result lacks $1"
+  }; }
+  pw=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  good="dbport=5432 listen=127.0.0.1,10.0.0.5 port=6432 mode=transaction pool_size=20 reserve_pool=5 max_db_conn=60 max_client_conn=1000 prepared=200 target_host=127.0.0.1 target_port=5432 restart=1 auth_dbname=postgres"
+
+  pooler_helper # no request: nothing happens
+  [ ! -e "$OP/result" ] || fail "PgBouncer helper answered without a request"
+  rm -f /usr/local/bin/pgbouncer /tmp/rowsafe-fake/apt.calls
+  prequest "pb_1 pooler-install"
+  presult "ok=1"
+  presult "installed=1"
+  presult "version=1.24.1"
+  grep -q "install -y -q --no-install-recommends pgbouncer" /tmp/rowsafe-fake/apt.calls || fail "apt-get install not run: $(cat /tmp/rowsafe-fake/apt.calls)"
+  prequest "pb_1 pooler-configure $good password=$pw"
+  presult "ok=1"
+  presult "running=1"
+  ini=$PGB/pgbouncer.ini
+  [ "$(head -n 1 "$ini")" = ";; Managed by Rowsafe" ] || fail "config lacks the marker"
+  for line in "* = host=127.0.0.1 port=5432 auth_user=rowsafe_pgbouncer" "listen_addr = 127.0.0.1,10.0.0.5" "listen_port = 6432" \
+    "auth_type = scram-sha-256" "auth_dbname = postgres" "pool_mode = transaction" "default_pool_size = 20" \
+    "max_prepared_statements = 200" "admin_users = rowsafe_pgbouncer" 'auth_query = SELECT uname, phash FROM rowsafe_pgbouncer.user_lookup($1)'; do
+    grep -qxF "$line" "$ini" || fail "config lacks: $line"
+  done
+  grep -qxF "\"rowsafe_pgbouncer\" \"$pw\"" "$PGB/userlist.txt" || fail "userlist lacks the password"
+  [ "$(stat -c '%U %G %a' "$ini")" = "root postgres 640" ] && [ "$(stat -c '%U %G %a' "$PGB/userlist.txt")" = "root postgres 640" ] ||
+    fail "config ownership/mode: $(stat -c '%U %G %a' "$ini" "$PGB/userlist.txt")"
+  [ "$(stat -c '%U %a' "$PGB")" = "root 755" ] || fail "config directory ownership/mode"
+  grep -q "LimitNOFILE=65536" "$W/systemd/pgbouncer.service.d/rowsafe.conf" || fail "no file limit drop-in"
+  grep -qx "restart pgbouncer.service" "$F/systemctl.calls" || fail "PgBouncer not (re)started: $(cat "$F/systemctl.calls")"
+  grep -q "enable --quiet pgbouncer.service" "$F/systemctl.calls" || fail "PgBouncer not enabled"
+  [ -z "$(find "$PR" -user root)" ] || fail "root left files in $PR"
+  # Without a password, the existing userlist stays; restart=0 doesn't restart.
+  : >"$F/systemctl.calls"
+  prequest "pb_2 pooler-configure $(printf '%s' "$good" | sed 's/restart=1/restart=0/; s/target_port=5432/target_port=5433/')"
+  presult "ok=1"
+  grep -qxF "* = host=127.0.0.1 port=5433 auth_user=rowsafe_pgbouncer" "$ini" || fail "retarget not written"
+  grep -qF "$pw" "$PGB/userlist.txt" || fail "userlist lost its password"
+  ! grep -q "^restart" "$F/systemctl.calls" || fail "restart=0 restarted PgBouncer"
+  prequest "pb_3 pooler-reload"
+  presult "ok=1"
+  grep -qx "reload pgbouncer.service" "$F/systemctl.calls" || fail "reload not run"
+  # Refusals: an unlisted port, bad values, anything that isn't a plain value.
+  prequest "pb_4 pooler-configure $(printf '%s' "$good" | sed 's/dbport=5432/dbport=5499/')"
+  presult "ok=0"
+  grep -q "^error=port 5499 is not in /etc/rowsafe/pooler-allowed" "$OP/result" || fail "unlisted pooler port not refused"
+  for bad in "mode=statement" "listen=localhost" "target_host=-evil" "pool_size=0" "port=80" "password=NOTHEX" \
+    "auth_dbname=Bad-Name" "max_client_conn=5" "pool_size=007"; do
+    key=${bad%%=*}
+    prequest "pb_5 pooler-configure $(printf '%s' "$good" | sed "s/$key=[^ ]*//; s/  */ /g") $bad"
+    presult "ok=0"
+  done
+  # shellcheck disable=SC2016 # literal $(reboot) must reach the helper
+  for bad in "pb_6 pooler-configure listen=1.2.3.4;reboot" 'pb_6 pooler-configure target_host=$(reboot)' "pb_6 pooler-evil" \
+    "pb 6 pooler-install" "pb_6 restart 5432" "pb_6 pooler-configure mode=transaction ; x=1"; do
+    prequest "$bad"
+    presult "ok=0"
+  done
+  grep -qxF "* = host=127.0.0.1 port=5433 auth_user=rowsafe_pgbouncer" "$ini" || fail "a refused request changed the config"
+  # Someone else's PgBouncer configuration is never replaced.
+  cp "$ini" "$W/ini.rowsafe"
+  printf '[databases]\nmine = host=10.9.9.9\n' >"$ini"
+  prequest "pb_7 pooler-configure $good password=$pw"
+  presult "ok=0"
+  grep -q "has its own configuration" "$OP/result" || fail "a foreign config was not refused"
+  grep -q "mine = host=10.9.9.9" "$ini" || fail "a foreign config was replaced"
+  cp "$W/ini.rowsafe" "$ini"
+  # A group-writable allow list is refused.
+  chmod 664 /etc/rowsafe/pooler-allowed
+  prequest "pb_8 pooler-reload"
+  presult "error=/etc/rowsafe/pooler-allowed is writable by others than root"
+  chmod 644 /etc/rowsafe/pooler-allowed
+  # PgBouncer requests never reach the restart helper's mode.
+  request "pb_9 pooler-reload"
+  result_has "error=malformed request"
+  # Off: stopped, drop-in removed, and the package Rowsafe installed purged.
+  : >"$F/systemctl.calls"
+  prequest "pb_10 pooler-off remove_package=1"
+  presult "ok=1"
+  presult "removed=1"
+  grep -q "disable --now --quiet pgbouncer.service" "$F/systemctl.calls" || fail "PgBouncer not stopped"
+  grep -q "purge -y -q pgbouncer" /tmp/rowsafe-fake/apt.calls || fail "package not purged"
+  [ ! -e "$ini" ] && [ ! -e "$W/systemd/pgbouncer.service.d/rowsafe.conf" ] || fail "off left files"
+  [ ! -e /usr/local/bin/pgbouncer ] || fail "pgbouncer still installed"
+  # A package that was there before is kept, with its own files put back.
+  printf '#!/bin/sh\necho "PgBouncer 1.18.0"\n' >/usr/local/bin/pgbouncer
+  chmod 755 /usr/local/bin/pgbouncer
+  install -d -o postgres -g postgres "$PGB"
+  rm -f /tmp/rowsafe-fake/apt.calls
+  prequest "pb_11 pooler-install"
+  presult "installed=0"
+  presult "version=1.18.0"
+  [ ! -e /tmp/rowsafe-fake/apt.calls ] || fail "apt-get ran for an installed package"
+  prequest "pb_11 pooler-configure $good password=$pw"
+  presult "ok=1"
+  prequest "pb_12 pooler-off remove_package=1"
+  presult "removed=0"
+  [ -x /usr/local/bin/pgbouncer ] || fail "a package Rowsafe didn't install was removed"
+  rm -f /usr/local/bin/pgbouncer
+  grep -q "pooler-configure: done (request pb_1)" "$W/helper.log" || fail "PgBouncer helper did not log"
+  pass "PgBouncer helper: install, configure from its template, reload, off; allow list, bad values, foreign configs"
+
+  expect_ok "--no-allow-pooler" "$INSTALLER" --no-allow-pooler
+  [ ! -e /etc/systemd/system/rowsafe-pooler.service ] && [ ! -e /etc/systemd/system/rowsafe-pooler.path ] || fail "--no-allow-pooler left the units"
+  [ -e "$H" ] || fail "--no-allow-pooler removed the helper restarts still use"
+  grep -q "is off" /etc/rowsafe/pooler-allowed || fail "--no-allow-pooler kept the allow list"
+  scenario "discover_out=$shop"
+  expect_ok "--allow-pooler again" "$INSTALLER" --allow-pooler
+  expect_ok "--no-allow-restart keeps the helper for PgBouncer" "$INSTALLER" --no-allow-restart
+  [ -e "$H" ] && [ -e /etc/systemd/system/rowsafe-pooler.path ] || fail "--no-allow-restart removed the helper PgBouncer uses"
+  expect_ok "--no-allow-pooler" "$INSTALLER" --no-allow-pooler
+  [ ! -e "$H" ] || fail "the helper stayed with neither restarts nor PgBouncer allowed"
+  scenario "discover_out=$shop"
+  expect_ok "--allow-restart" "$INSTALLER" --allow-restart
+  pass "--allow-pooler / --no-allow-pooler install and remove the PgBouncer helper"
 }
 
 case ${1:-} in

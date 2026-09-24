@@ -240,7 +240,7 @@ func TestPoolerStatus(t *testing.T) {
 	dir := t.TempDir()
 	a := &Agent{cfg: Config{StateDir: dir, Mode: ModeNative, Pooler: PoolerConfig{AllowFile: filepath.Join(dir, "allow"),
 		Userlist: filepath.Join(dir, "userlist.txt"), SocketDir: dir}}}
-	if st := a.poolerStatus(context.Background()); st != nil {
+	if st := a.poolerStatus(context.Background()); st == nil || st.Allowed || st.Managed {
 		t.Fatalf("nothing allowed or set up: %+v", st)
 	}
 	os.WriteFile(a.cfg.Pooler.AllowFile, []byte("5433\n5432\n"), 0o644)
