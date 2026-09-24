@@ -546,7 +546,7 @@ func dbRemove(ctx context.Context, c *client.Client, args []string) error {
 		fmt.Printf("Rowsafe will stop backing up, drilling and monitoring %s on %s. Nothing on the host is changed.\n", d.Name, d.Hostname)
 		if *keep {
 			fmt.Println("PostgreSQL keeps archiving WAL to the repository. To turn that off, follow the Rollback")
-			fmt.Println("section of docs/runbooks/adopt.md.")
+			fmt.Println("section of https://rowsafe.sh/docs/guides/adopt#rollback")
 		}
 		if !confirm("Remove " + d.Name + "?") {
 			return errors.New("cancelled")
@@ -572,7 +572,7 @@ func hostsRemove(ctx context.Context, c *client.Client, args []string) error {
 	}
 	if !*yes {
 		fmt.Printf("This revokes the agent on %s; it stops working until the host is enrolled again.\n", pos[0])
-		fmt.Println("WAL archiving on the host is not affected. Uninstall the agent afterwards (see docs/runbooks/adopt.md).")
+		fmt.Println("WAL archiving on the host is not affected. Uninstall the agent afterwards (https://rowsafe.sh/docs/guides/agent-updates#uninstall).")
 		if !confirm("Remove host " + pos[0] + "?") {
 			return errors.New("cancelled")
 		}
@@ -633,7 +633,7 @@ func waitAndReport(ctx context.Context, c *client.Client, taskID, dbName string)
 	case protocol.TaskCheck:
 		fmt.Printf("\n%s is protected. The first full backup is queued; follow it with `rowsafe tasks %s`.\n", dbName, dbName)
 	case protocol.TaskRestorePoint:
-		fmt.Println("\nTo recover to it, see \"Restore to a named restore point\" in docs/runbooks/restore.md.")
+		fmt.Println("\nTo recover to it, see \"To a restore point\" in https://rowsafe.sh/docs/guides/restore")
 	}
 	return nil
 }

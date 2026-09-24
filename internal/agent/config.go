@@ -39,7 +39,7 @@ type Config struct {
 	Repo                pgbackrest.Repo
 
 	// Mode is ModeNative (pgBackRest and PostgreSQL on this host) or
-	// ModeDockerSidecar (ROWSAFE_MODE; see docs/docker.md).
+	// ModeDockerSidecar (ROWSAFE_MODE; see https://rowsafe.sh/docs/guides/docker).
 	Mode string
 	// SpoolDir is where archive_command hands WAL over in sidecar mode
 	// (ROWSAFE_SPOOL_DIR, a volume shared with the PostgreSQL container).

@@ -58,6 +58,8 @@ const (
 // clusterState keeps what a cluster collector remembers between rounds.
 type clusterState struct {
 	statementsDB string // database where pg_stat_statements was found
+	stmts        stmtState
+	insights     insightsState
 }
 
 // clusterReading is one round of raw readings from a cluster.
@@ -75,6 +77,9 @@ type clusterReading struct {
 	activity        []protocol.ActivityQuery
 	sizes           []protocol.DatabaseSize
 	statements      *protocol.Statements
+	queryStats      *protocol.QueryStats
+	blocking        []protocol.LockSession
+	replication     *protocol.ReplicationStatus
 }
 
 // readCluster runs the monitoring queries against one cluster. withSlow
@@ -191,9 +196,15 @@ func readCluster(ctx context.Context, t Target, st *clusterState, withSlow, quer
 	if err := readActivity(ctx, conn, r, queryText, longRunningThreshold); err != nil {
 		return nil, err
 	}
+	if waiting := g[MLocksWaiting]; waiting > 0 {
+		readBlocking(ctx, conn, r, queryText)
+	} else {
+		g[MBlockedSessions], g[MLongestBlockedSeconds] = 0, 0
+	}
+	readReplication(ctx, conn, r, inRecovery)
 	if withSlow {
 		readSizes(ctx, conn, r)
-		r.statements = readStatements(ctx, t, conn, st)
+		r.statements, r.queryStats = readStatements(ctx, t, conn, st, r.versionNum, time.Now())
 	}
 	return r, nil
 }
@@ -203,21 +214,29 @@ func readSlots(ctx context.Context, conn *pgx.Conn, r *clusterReading) error {
 		SELECT slot_name::text, coalesce(slot_type, ''), active,
 		       CASE WHEN pg_is_in_recovery() OR restart_lsn IS NULL THEN NULL
 		            ELSE pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)::bigint END,
-		       coalesce(wal_status, '')
-		FROM pg_replication_slots ORDER BY slot_name`)
+		       coalesce(wal_status, ''),
+		       CASE WHEN slot_type <> 'logical' OR pg_is_in_recovery() OR confirmed_flush_lsn IS NULL THEN NULL
+		            ELSE greatest(pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn), 0)::bigint END,
+		       coalesce(database::text, '')
+		FROM pg_replication_slots ORDER BY slot_name LIMIT 100`)
 	if err != nil {
 		return fmt.Errorf("reading pg_replication_slots: %w", err)
 	}
 	r.slots, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (protocol.ReplicationSlot, error) {
 		var s protocol.ReplicationSlot
-		err := row.Scan(&s.Name, &s.Type, &s.Active, &s.RetainedBytes, &s.WALStatus)
+		err := row.Scan(&s.Name, &s.Type, &s.Active, &s.RetainedBytes, &s.WALStatus, &s.LagBytes, &s.Database)
 		return s, err
 	})
 	if err != nil {
 		return fmt.Errorf("reading pg_replication_slots: %w", err)
 	}
-	var inactive, inactiveRetained, retained float64
+	var inactive, inactiveRetained, retained, logicalLag float64
+	hasLogical := false
 	for _, s := range r.slots {
+		if s.LagBytes != nil {
+			hasLogical = true
+			logicalLag = max(logicalLag, float64(*s.LagBytes))
+		}
 		var b float64
 		if s.RetainedBytes != nil {
 			b = float64(max(*s.RetainedBytes, 0))
@@ -231,6 +250,9 @@ func readSlots(ctx context.Context, conn *pgx.Conn, r *clusterReading) error {
 	r.gauges[MSlotsInactive] = inactive
 	r.gauges[MSlotInactiveRetain] = inactiveRetained
 	r.gauges[MSlotRetainedMax] = retained
+	if hasLogical {
+		r.gauges[MLogicalSlotLagBytes] = logicalLag
+	}
 	return nil
 }
 
@@ -292,91 +314,6 @@ func readSizes(ctx context.Context, conn *pgx.Conn, r *clusterReading) {
 	if complete && len(names) > 0 {
 		r.gauges[MDatabaseSizeBytes] = total
 	}
-}
-
-// readStatements reads the top of pg_stat_statements. The view lives in
-// whichever database the extension was created in, so look for it in the
-// postgres database first, then in the others (remembering where it was).
-func readStatements(ctx context.Context, t Target, conn *pgx.Conn, st *clusterState) *protocol.Statements {
-	out := &protocol.Statements{Statements: []protocol.StatementStat{}}
-	var names []string
-	if st.statementsDB != "" {
-		names = append(names, st.statementsDB)
-	}
-	names = append(names, "postgres")
-	rows, err := conn.Query(ctx, `
-		SELECT datname::text FROM pg_database
-		WHERE datallowconn AND NOT datistemplate AND datname <> 'postgres' ORDER BY datname LIMIT 20`)
-	if err == nil {
-		if more, err := pgx.CollectRows(rows, pgx.RowTo[string]); err == nil {
-			names = append(names, more...)
-		}
-	}
-	seen := map[string]bool{}
-	for _, name := range names {
-		if seen[name] {
-			continue
-		}
-		seen[name] = true
-		c := conn
-		if name != "postgres" {
-			var err error
-			if c, err = t.connect(ctx, name); err != nil {
-				continue
-			}
-		}
-		stmts, found, err := statementsFrom(ctx, c)
-		if c != conn {
-			c.Close(context.WithoutCancel(ctx))
-		}
-		if !found {
-			continue
-		}
-		st.statementsDB = name
-		if err != nil {
-			out.Reason = "reading pg_stat_statements failed: " + err.Error()
-			return out
-		}
-		out.Available = true
-		out.Statements = stmts
-		return out
-	}
-	st.statementsDB = ""
-	out.Reason = "the pg_stat_statements extension is not installed (CREATE EXTENSION pg_stat_statements, " +
-		"with pg_stat_statements in shared_preload_libraries)"
-	return out
-}
-
-// statementsFrom reads pg_stat_statements if the extension exists in the
-// connected database.
-func statementsFrom(ctx context.Context, conn *pgx.Conn) ([]protocol.StatementStat, bool, error) {
-	var schema string
-	err := conn.QueryRow(ctx, `
-		SELECT n.nspname::text FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
-		WHERE e.extname = 'pg_stat_statements'`).Scan(&schema)
-	if err != nil {
-		return nil, false, nil
-	}
-	rows, err := conn.Query(ctx, fmt.Sprintf(`
-		SELECT coalesce(s.queryid, 0), left(coalesce(s.query, ''), %d), coalesce(d.datname::text, ''),
-		       coalesce(r.rolname::text, ''), s.calls, s.total_exec_time, s.mean_exec_time, s.rows
-		FROM %s.pg_stat_statements s
-		LEFT JOIN pg_database d ON d.oid = s.dbid
-		LEFT JOIN pg_roles r ON r.oid = s.userid
-		ORDER BY s.total_exec_time DESC
-		LIMIT %d`, statementQueryChars, pgx.Identifier{schema}.Sanitize(), topStatements))
-	if err != nil {
-		return nil, true, err
-	}
-	stmts, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (protocol.StatementStat, error) {
-		var s protocol.StatementStat
-		var id int64
-		err := row.Scan(&id, &s.Query, &s.Database, &s.User, &s.Calls, &s.TotalTimeMs, &s.MeanTimeMs, &s.Rows)
-		s.QueryID = strconv.FormatInt(id, 10)
-		s.Query = redact(s.Query)
-		return s, err
-	})
-	return stmts, true, err
 }
 
 // passwordRE matches statements that may carry a password in clear text.

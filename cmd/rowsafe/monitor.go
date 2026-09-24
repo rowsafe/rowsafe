@@ -301,7 +301,7 @@ func channelsAdd(ctx context.Context, c *client.Client, args []string) error {
 	}
 	fmt.Printf("Added %s channel %q (%s); alerts of severity %s and above go there.\n", ch.Type, ch.Name, ch.ID, ch.MinSeverity)
 	if ch.SigningSecret != "" {
-		fmt.Printf("\nSigning secret (shown once; verify the %s header with it, see docs/monitoring.md):\n  %s\n",
+		fmt.Printf("\nSigning secret (shown once; verify the %s header with it, see https://rowsafe.sh/docs/reference/webhooks):\n  %s\n",
 			"X-Rowsafe-Signature", ch.SigningSecret)
 	}
 	fmt.Printf("\nSend a test notification: rowsafe channels test %s\n", ch.ID)

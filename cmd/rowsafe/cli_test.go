@@ -27,6 +27,7 @@ type fakeAPI struct {
 	marks      []string // "db/label" of created restore points
 	logouts    []string // API keys that logged out
 	deviceName string
+	health     map[string]int // database -> health score
 }
 
 func (f *fakeAPI) handler(t *testing.T) http.Handler {
@@ -77,6 +78,27 @@ func (f *fakeAPI) handler(t *testing.T) http.Handler {
 		f.marks = append(f.marks, r.PathValue("ref")+"/"+req.Name)
 		f.mu.Unlock()
 		j(w, 201, protocol.TaskView{ID: "task_1", Type: protocol.TaskRestorePoint, Status: protocol.StatusQueued})
+	}))
+	mux.HandleFunc("GET /v1/databases/{ref}/health", authed(func(w http.ResponseWriter, r *http.Request) {
+		score, ok := f.health[r.PathValue("ref")]
+		if !ok {
+			j(w, 404, protocol.Error{Error: "not found"})
+			return
+		}
+		h := protocol.DatabaseHealth{Database: r.PathValue("ref"), Score: score, Grade: protocol.GradeHealthy, Findings: []protocol.Finding{}}
+		if score < 70 {
+			h.Grade = protocol.GradeAtRisk
+			h.Findings = []protocol.Finding{{ID: "backup_stale", Severity: "critical", Title: "No backup in 2 days",
+				Explanation: "x", Action: "y", Penalty: 25}}
+		}
+		j(w, 200, h)
+	}))
+	mux.HandleFunc("GET /v1/health", authed(func(w http.ResponseWriter, r *http.Request) {
+		o := protocol.HealthOverview{Databases: []protocol.DatabaseHealthSummary{}}
+		for name, score := range f.health {
+			o.Databases = append(o.Databases, protocol.DatabaseHealthSummary{Database: name, Score: score})
+		}
+		j(w, 200, o)
 	}))
 	mux.HandleFunc("POST /v1/auth/device", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "" {
@@ -454,5 +476,28 @@ func TestHelp(t *testing.T) {
 	}
 	if h := helpFor([]string{"frobnicate"}); !strings.Contains(h, "No help") {
 		t.Fatalf("unknown topic:\n%s", h)
+	}
+}
+
+func TestHealthExitCodes(t *testing.T) {
+	f := &fakeAPI{dbs: dbs("app", "old"), health: map[string]int{"app": 95, "old": 40}}
+	_, _ = cliEnv(t, f)
+	ctx := t.Context()
+	var exit exitError
+	if err := dispatch(ctx, []string{"health", "app"}); err != nil {
+		t.Fatalf("healthy database: %v", err)
+	}
+	if err := dispatch(ctx, []string{"health", "old", "--json"}); !errors.As(err, &exit) || exit != 3 {
+		t.Fatalf("database at risk: %v, want exit 3", err)
+	}
+	if err := dispatch(ctx, []string{"health"}); !errors.As(err, &exit) || exit != 3 {
+		t.Fatalf("fleet with a database at risk: %v, want exit 3", err)
+	}
+	f.health = map[string]int{"app": 95}
+	if err := dispatch(ctx, []string{"health"}); err != nil {
+		t.Fatalf("healthy fleet: %v", err)
+	}
+	if h := helpFor([]string{"health"}); !strings.Contains(h, "rowsafe health [NAME]") || !strings.Contains(h, "caps the score at 59") {
+		t.Errorf("help health:\n%s", h)
 	}
 }

@@ -22,6 +22,14 @@ rowsafe status            # is everything protected?
 rowsafe mark before-drop  # a named point you can restore to
 ```
 
+And to see how your databases are doing:
+
+```sh
+rowsafe health            # a 0-100 score per database, with what to fix in plain language
+rowsafe top app           # the queries that take the most time, and which got slower
+rowsafe insights app      # largest tables, unused indexes, wasted space, vacuum
+```
+
 Full guide: [Quickstart](https://rowsafe.sh/docs/quickstart).
 
 ## What's in this repository
@@ -31,7 +39,7 @@ Full guide: [Quickstart](https://rowsafe.sh/docs/quickstart).
 | `cmd/rowsafe-agent`, `internal/agent` | The agent. Makes outbound HTTPS requests only and runs a fixed set of tasks: inspect, adopt, check, backup, drill, restore point. |
 | `cmd/rowsafe`, `client` | The CLI. |
 | `mcp`, `integrations/claude-code` | `rowsafe mcp`, an MCP server for AI assistants, and a Claude Code plugin that creates a restore point before migrations. |
-| `collect` | Database and host metrics the agent reports. |
+| `collect` | What the agent's monitoring reads: database and host metrics, locks, replication, query statistics and table insights. |
 | `protocol` | The API types shared by the agent, the CLI and the Rowsafe service. |
 | `internal/pgbackrest`, `internal/pginspect` | PostgreSQL backup and inspection. |
 | `scripts/install.sh` | The installer served at `https://rowsafe.sh`. |
@@ -44,6 +52,7 @@ Full guide: [Quickstart](https://rowsafe.sh/docs/quickstart).
 - **Isolated restore drills** that can't touch production or its backups.
 - **Signed, verifiable releases** with automatic rollback of a bad update. See [verifying releases](docs/verifying-releases.md).
 - **Your secrets stay on your server,** and backups are encrypted before upload.
+- **Monitoring is read-only and light.** Short statement and lock timeouts on every query; heavier table checks run every 30 minutes, in the background, and back off when slow. `ROWSAFE_COLLECT_QUERY_TEXT=false` keeps query text on your server; `ROWSAFE_MONITORING=false` turns monitoring off.
 
 ## Build from source
 

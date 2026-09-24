@@ -38,6 +38,9 @@ type Agent struct {
 
 	mu      sync.Mutex
 	watched []protocol.DatabaseSpec
+	// monitored is what built-in monitoring covers (HeartbeatResponse.Monitored);
+	// nil until a control plane that sends it answers.
+	monitored []protocol.DatabaseSpec
 
 	// fastMu is held while the fast lane runs a restore point, so a
 	// restart for an update waits for it.
@@ -137,7 +140,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	// Built-in monitoring (package collect): metrics every minute, beside
 	// the task loop and never blocking it.
 	go collect.Run(ctx, collect.Options{Log: a.log, PGUser: a.cfg.PGUser,
-		Databases: func() []protocol.DatabaseSpec { a.mu.Lock(); defer a.mu.Unlock(); return slices.Clone(a.watched) },
+		Databases: a.monitoredDatabases,
 		Send: func(ctx context.Context, r protocol.MonitoringReport) (ack protocol.MonitoringAck, err error) {
 			return ack, a.client.post(ctx, "/v1/agent/monitoring", r, &ack)
 		}})
@@ -250,6 +253,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 		} else if err == nil {
 			a.mu.Lock()
 			a.watched = resp.Databases
+			a.monitored = resp.Monitored
 			a.mu.Unlock()
 			saveWatched(a.cfg, resp.Databases)
 			if a.pusher != nil {
@@ -263,6 +267,18 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 		case <-t.C:
 		}
 	}
+}
+
+// monitoredDatabases is what built-in monitoring covers: every database of
+// the host when the control plane says so (including ones not adopted yet),
+// else the watched ones.
+func (a *Agent) monitoredDatabases() []protocol.DatabaseSpec {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.monitored) > 0 {
+		return slices.Clone(a.monitored)
+	}
+	return slices.Clone(a.watched)
 }
 
 // RevokedBackoff is how long the agent waits between attempts once the

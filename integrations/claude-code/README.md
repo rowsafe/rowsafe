@@ -15,4 +15,4 @@ claude plugin install rowsafe@rowsafe
 
 Set `ROWSAFE_REQUIRE_PROTECTION=1` (or `"require_protection": true` in `.rowsafe.json`) to block destructive commands when the database isn't protected or the restore point can't be confirmed.
 
-Details: [docs/agents.md](../../docs/agents.md).
+Details: [rowsafe.sh/docs/guides/ai-agents](https://rowsafe.sh/docs/guides/ai-agents).

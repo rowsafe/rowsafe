@@ -16,10 +16,20 @@
 #
 # Options (when piping, pass them after `sh -s --`):
 #   rse_...                the enrollment token
+#   --setup-storage        (re)run the guided backup storage setup
+#   --storage PROVIDER     preselect r2, b2, s3, wasabi, spaces or s3-compatible
+#   --no-prompt            never ask questions, even on a terminal
+#   --check-storage        test the configured backup storage; change nothing
 #   --uninstall            stop and remove the agent; keep configuration and state
 #   --uninstall --purge    also delete /etc/rowsafe, /var/lib/rowsafe, /var/log/rowsafe
 #   --download-only DIR    download and verify the agent into DIR; install nothing
 #   -h, --help
+#
+# Guided setup: when the backup storage isn't configured yet and a terminal is
+# attached, the installer asks for it on /dev/tty (the script itself arrives on
+# stdin), tests it by writing, reading and deleting a small file with
+# pgBackRest, and can generate the encryption passphrase. Without a terminal
+# (or with --no-prompt) it never asks and prints exactly what to set instead.
 #
 # Installer settings (environment):
 #   ROWSAFE_VERSION         install exactly this version (default: the channel's latest)
@@ -66,20 +76,34 @@ AGENT_VARS="ROWSAFE_URL ROWSAFE_ENROLL_TOKEN $REQUIRED_REPO_VARS
   ROWSAFE_AUTO_UPDATE ROWSAFE_PG_USER ROWSAFE_PG_BIN_DIR ROWSAFE_PGBACKREST_BIN
   ROWSAFE_DRILL_DIR ROWSAFE_DRILL_PORT ROWSAFE_POLL_INTERVAL ROWSAFE_HEARTBEAT_INTERVAL"
 
+PROMPT=auto        # auto: ask on a terminal when needed; never: --no-prompt
+SETUP_STORAGE=0    # --setup-storage: offer to replace configured storage settings
+STORAGE_PROVIDER='' # --storage: preselected provider for the guided setup
+TTY=0              # 1 once /dev/tty is open on fd 3
+TTY_SAVED=''       # terminal settings to restore (stty -g)
+STORAGE_CLEAR=''   # agent.env keys the guided setup turns back into comments
+STORAGE_GUIDED=0
+
 TMP=
 CHANGED=0          # binary, unit, guard or config changed: a running agent needs a restart
 KEEP_INSTALLED=0   # the installed version is newer than the channel's: leave it
 APT_UPDATED=0
 
-if [ -t 1 ]; then
+# Colours only on a terminal, and never with NO_COLOR (https://no-color.org).
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != dumb ]; then
   BOLD=$(printf '\033[1m') RED=$(printf '\033[31m') YELLOW=$(printf '\033[33m') GREEN=$(printf '\033[32m') RESET=$(printf '\033[0m')
 else
   BOLD='' RED='' YELLOW='' GREEN='' RESET=''
 fi
+# Check marks and the passphrase box need a UTF-8 locale; plain ASCII otherwise.
+case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
+  *UTF-8* | *utf-8* | *UTF8* | *utf8*) CHECK='✓' CROSS='✗' BOX_H='─' BOX_V='│' BOX_TL='┌' BOX_TR='┐' BOX_BL='└' BOX_BR='┘' ;;
+  *) CHECK='ok' CROSS='x' BOX_H='-' BOX_V='|' BOX_TL='+' BOX_TR='+' BOX_BL='+' BOX_BR='+' ;;
+esac
 
 say() { printf '%s\n' "$*"; }
 step() { printf '%s==>%s %s\n' "$BOLD" "$RESET" "$*"; }
-ok() { printf '    %s%s%s\n' "$GREEN" "$*" "$RESET"; }
+ok() { printf '    %s%s%s %s\n' "$GREEN" "$CHECK" "$RESET" "$*"; }
 note() { printf '    %s\n' "$*"; }
 warn() { printf '%swarning:%s %s\n' "$YELLOW" "$RESET" "$*" >&2; }
 die() {
@@ -88,10 +112,13 @@ die() {
 }
 
 cleanup() {
+  # Never leave the terminal with echo off (Ctrl-C at a hidden prompt).
+  if [ "$TTY" = 1 ] && [ -n "$TTY_SAVED" ]; then stty "$TTY_SAVED" <&3 2>/dev/null || true; fi
   if [ -n "$TMP" ]; then rm -rf "$TMP"; fi
 }
 trap cleanup EXIT
-trap 'exit 130' INT TERM
+# After Ctrl-C at a question, end the half-typed line before exiting.
+trap 'if [ "$TTY" = 1 ]; then printf "\n" >&3; fi; exit 130' INT TERM
 
 usage() {
   cat <<'EOF'
@@ -101,6 +128,10 @@ Rowsafe agent installer
 
 Options (when piping, pass them after `sh -s --`):
   rse_...                the one-time enrollment token from `rowsafe hosts enroll-token`
+  --setup-storage        set up (or change) the backup storage, even if it is configured
+  --storage PROVIDER     skip the "where" question: r2, b2, s3, wasabi, spaces, s3-compatible
+  --no-prompt            never ask questions, even on a terminal (for automation)
+  --check-storage        test the backup storage in /etc/rowsafe/agent.env; change nothing
   --uninstall            stop and remove the agent; keep configuration and state
   --uninstall --purge    also delete /etc/rowsafe, /var/lib/rowsafe and /var/log/rowsafe
   --download-only DIR    download and verify the agent into DIR; install nothing
@@ -115,7 +146,25 @@ Environment:
                          (ROWSAFE_ENROLL_TOKEN may instead be the argument rse_...)
                          (ROWSAFE_URL defaults to https://api.rowsafe.sh)
 
-Documentation: https://github.com/rowsafe/rowsafe/blob/main/docs/agent.md
+Backup storage (guided setup):
+  Run from a terminal, the installer walks you through the backup storage the
+  first time: where to keep backups (Cloudflare R2, Backblaze B2, Amazon S3,
+  Wasabi, DigitalOcean Spaces or any S3-compatible store), the bucket and its
+  access key. It then tests the bucket by writing, reading and deleting a
+  small file, and explains what to fix if that fails. Finally it creates (or
+  takes) the passphrase that encrypts your backups: it is shown once, so save
+  it in your password manager. Without it, backups can't be restored.
+
+  Secrets are typed hidden and never printed. Nothing is saved until you have
+  answered everything; settings go to /etc/rowsafe/agent.env (postgres, 0600).
+  Run it again with --setup-storage to change the storage later.
+
+  Without a terminal (cloud-init, CI, configuration management) or with
+  --no-prompt, set ROWSAFE_REPO_S3_ENDPOINT, _BUCKET, _KEY, _KEY_SECRET and
+  ROWSAFE_REPO_CIPHER_PASS in the environment instead, and check them with
+  --check-storage.
+
+Documentation: https://rowsafe.sh/docs/reference/agent-configuration
 EOF
 }
 
@@ -476,7 +525,7 @@ install_unit() {
 
 [Unit]
 Description=Rowsafe agent (PostgreSQL backups, WAL archiving and restore drills)
-Documentation=https://github.com/rowsafe/rowsafe/blob/main/docs/agent.md
+Documentation=https://rowsafe.sh/docs/reference/agent-configuration
 Wants=network-online.target
 # Ordering only: the agent must keep running (and reporting) while
 # PostgreSQL is down, so it does not require it.
@@ -585,7 +634,7 @@ env_template() {
 # Rowsafe agent configuration, read by rowsafe-agent.service (EnvironmentFile=).
 # Owned by postgres with mode 0600 because it holds repository credentials.
 # Values are single-quoted and must not contain single quotes or newlines.
-# Every setting: https://github.com/rowsafe/rowsafe/blob/main/docs/agent.md
+# Every setting: https://rowsafe.sh/docs/reference/agent-configuration
 #
 # Apply changes by re-running the installer (it self-tests the configuration
 # before starting the agent) or with: systemctl restart rowsafe-agent
@@ -667,6 +716,25 @@ set_env_var() {
   mv -f "$ENV_FILE.rowsafe-new" "$ENV_FILE"
 }
 
+# clear_env_var KEY turns an active KEY line back into the template's
+# commented-out default, so the agent uses its default again.
+clear_env_var() {
+  line=''
+  if ! grep -q "^#$1=" "$ENV_FILE"; then
+    line=$(env_template | grep "^#$1=" | head -n 1)
+    [ -n "$line" ] || line="#$1=''"
+  fi
+  RS_KEY=$1 RS_LINE=$line awk '
+    index($0, ENVIRON["RS_KEY"] "=") == 1 {
+      if (ENVIRON["RS_LINE"] != "" && !done) print ENVIRON["RS_LINE"]
+      done = 1
+      next
+    }
+    { print }
+  ' "$ENV_FILE" >"$ENV_FILE.rowsafe-new"
+  mv -f "$ENV_FILE.rowsafe-new" "$ENV_FILE"
+}
+
 # env_value KEY prints KEY's active value from the env file (unquoted).
 env_value() {
   [ -f "$ENV_FILE" ] || return 0
@@ -689,11 +757,18 @@ write_env() {
     set_env_var "$key"
     written="$written $key"
   done
+  for key in $STORAGE_CLEAR; do
+    clear_env_var "$key"
+  done
   chown "$AGENT_USER:$AGENT_USER" "$ENV_FILE"
   chmod 0600 "$ENV_FILE"
   if [ "$(sha256_of "$ENV_FILE")" != "$before" ]; then
     CHANGED=1
-    note "set from the installer's environment:${written}"
+    if [ "$STORAGE_GUIDED" = 1 ]; then
+      ok "saved your backup storage settings (secrets are only in this file)"
+    else
+      note "set from the installer's environment:${written}"
+    fi
   elif [ -z "${ENV_CREATED:-}" ]; then
     note "unchanged"
   fi
@@ -709,6 +784,626 @@ missing_config() {
     out="$out ROWSAFE_ENROLL_TOKEN"
   fi
   printf '%s\n' "${out# }"
+}
+
+# ---------------------------------------------------------------- terminal
+
+# open_tty opens the terminal on fd 3 for the guided setup. The script itself
+# arrives on stdin (curl ... | sh), so answers come from /dev/tty. That device
+# exists even without a controlling terminal, so opening it is the real test,
+# done in a subshell because a failed redirection on `exec` ends the script.
+open_tty() {
+  [ "$PROMPT" != never ] || return 0
+  (: <>/dev/tty) 2>/dev/null || return 0
+  exec 3<>/dev/tty
+  TTY=1
+  TTY_SAVED=$(stty -g <&3 2>/dev/null || true)
+}
+
+tty_say() { printf '%s\n' "$*" >&3; }
+tty_hint() { printf '  %s\n' "$*" >&3; }
+tty_bad() { printf '  %s%s%s %s\n' "$RED" "$CROSS" "$RESET" "$*" >&3; }
+
+tty_echo_on() {
+  if [ -n "$TTY_SAVED" ]; then stty "$TTY_SAVED" <&3 2>/dev/null || true; else stty echo <&3 2>/dev/null || true; fi
+}
+
+# trim VAR strips surrounding white space (and the CR of a pasted line).
+trim() {
+  eval "_t=\$$1"
+  _t=${_t#"${_t%%[![:space:]]*}"}
+  _t=${_t%"${_t##*[![:space:]]}"}
+  eval "$1=\$_t"
+}
+
+tty_read() {
+  IFS= read -r _a <&3 || {
+    printf '\n' >&3
+    die "no answer; nothing was saved"
+  }
+  trim _a
+}
+
+# ask VAR QUESTION [DEFAULT]
+ask() {
+  if [ -n "${3:-}" ]; then printf '%s [%s]: ' "$2" "$3" >&3; else printf '%s: ' "$2" >&3; fi
+  tty_read
+  [ -n "$_a" ] || _a=${3:-}
+  eval "$1=\$_a"
+}
+
+# ask_secret VAR QUESTION reads without echo. Echo goes off before the
+# question appears, so nothing typed ahead is shown either.
+ask_secret() {
+  stty -echo <&3 2>/dev/null || true
+  printf '%s: ' "$2" >&3
+  if ! IFS= read -r _a <&3; then
+    tty_echo_on
+    printf '\n' >&3
+    die "no answer; nothing was saved"
+  fi
+  tty_echo_on
+  printf '\n' >&3
+  trim _a
+  eval "$1=\$_a"
+}
+
+# confirm QUESTION y|n (the default) succeeds on yes.
+confirm() {
+  _p='[y/N]'
+  [ "$2" = y ] && _p='[Y/n]'
+  while :; do
+    printf '%s %s ' "$1" "$_p" >&3
+    tty_read
+    case ${_a:-$2} in
+      [Yy] | [Yy][Ee][Ss]) return 0 ;;
+      [Nn] | [Nn][Oo]) return 1 ;;
+    esac
+    tty_hint "Please answer y or n."
+  done
+}
+
+# choose VAR QUESTION DEFAULT MAX reads a menu number.
+choose() {
+  _c=''
+  while :; do
+    ask _c "$2" "$3"
+    case $_c in
+      '' | *[!0-9]*) ;;
+      *) if [ "$_c" -ge 1 ] && [ "$_c" -le "$4" ]; then
+        eval "$1=\$_c"
+        return 0
+      fi ;;
+    esac
+    tty_hint "Please type a number from 1 to $4."
+  done
+}
+
+# matches VALUE ERE, for values that are not secret.
+matches() { printf '%s\n' "$1" | grep -Eq "$2"; }
+
+# host_of INPUT turns a pasted URL or host into a lower-case host[:port].
+host_of() { printf '%s\n' "$1" | sed -e 's|^[A-Za-z][A-Za-z0-9+.-]*://||' -e 's|[/?#].*$||' | tr '[:upper:]' '[:lower:]'; }
+
+# ---------------------------------------------------------------- storage
+
+PROVIDERS='r2 b2 s3 wasabi spaces s3-compatible'
+
+provider_number() {
+  n=1
+  for p in $PROVIDERS; do
+    [ "$p" = "$1" ] && {
+      echo $n
+      return 0
+    }
+    n=$((n + 1))
+  done
+  return 1
+}
+
+# s_get KEY prints KEY from the installer's environment, else from agent.env.
+s_get() {
+  eval "_v=\${$1:-}"
+  [ -n "$_v" ] || _v=$(env_value "$1")
+  printf '%s' "$_v"
+}
+
+# load_storage reads the repository settings into S_*, the environment
+# taking precedence over agent.env (the same values write_env would save).
+load_storage() {
+  S_ENDPOINT=$(s_get ROWSAFE_REPO_S3_ENDPOINT)
+  S_BUCKET=$(s_get ROWSAFE_REPO_S3_BUCKET)
+  S_KEY=$(s_get ROWSAFE_REPO_S3_KEY)
+  S_SECRET=$(s_get ROWSAFE_REPO_S3_KEY_SECRET)
+  S_CIPHER=$(s_get ROWSAFE_REPO_CIPHER_PASS)
+  S_REGION=$(s_get ROWSAFE_REPO_S3_REGION)
+  S_URI=$(s_get ROWSAFE_REPO_S3_URI_STYLE)
+  S_PORT=$(s_get ROWSAFE_REPO_S3_PORT)
+  S_CA=$(s_get ROWSAFE_REPO_S3_CA_FILE)
+  S_VERIFY=$(s_get ROWSAFE_REPO_S3_VERIFY_TLS)
+  load_storage_path
+}
+
+# load_storage_path sets S_PATH, the repository root the agent's stanzas live
+# under (RenderConfig: repo1-path=<prefix>/<stanza>).
+load_storage_path() {
+  _p=$(s_get ROWSAFE_REPO_PATH_PREFIX)
+  [ -n "$_p" ] || _p=/rowsafe
+  _p=$(printf '%s\n' "$_p" | sed -e 's|^/*||' -e 's|/*$||')
+  S_PATH=/$_p
+}
+
+storage_configured() {
+  for key in $REQUIRED_REPO_VARS; do
+    [ -n "$(env_value "$key")" ] || return 1
+  done
+}
+
+# st_run PGBACKREST ARGS... runs pgBackRest as the agent user against the S_*
+# repository, the way the agent's rendered config would (without the cipher:
+# the test file is not a backup). Settings travel in the environment only,
+# never on a command line or in a file.
+st_run() {
+  _bin=$1
+  shift
+  (
+    export PGBACKREST_REPO1_TYPE=s3
+    export PGBACKREST_REPO1_S3_ENDPOINT="$S_ENDPOINT"
+    export PGBACKREST_REPO1_S3_BUCKET="$S_BUCKET"
+    export PGBACKREST_REPO1_S3_REGION="${S_REGION:-auto}"
+    export PGBACKREST_REPO1_S3_URI_STYLE="${S_URI:-path}"
+    export PGBACKREST_REPO1_S3_KEY="$S_KEY"
+    export PGBACKREST_REPO1_S3_KEY_SECRET="$S_SECRET"
+    export PGBACKREST_REPO1_PATH="$S_PATH"
+    [ -z "$S_PORT" ] || export PGBACKREST_REPO1_STORAGE_PORT="$S_PORT"
+    [ -z "$S_CA" ] || export PGBACKREST_REPO1_STORAGE_CA_FILE="$S_CA"
+    case $S_VERIFY in
+      0 | [Nn] | [Nn][Oo] | [Ff][Aa][Ll][Ss][Ee] | [Oo][Ff][Ff]) export PGBACKREST_REPO1_STORAGE_VERIFY_TLS=n ;;
+    esac
+    export PGBACKREST_LOG_LEVEL_FILE=off PGBACKREST_LOG_LEVEL_CONSOLE=off PGBACKREST_LOG_LEVEL_STDERR=warn
+    export PGBACKREST_IO_TIMEOUT=5
+    cd /
+    exec runuser -u "$AGENT_USER" -- timeout 120 "$_bin" --no-config "$@"
+  )
+}
+
+# storage_test writes, reads back and deletes a small file in the S_*
+# repository with pgBackRest, the client the agent uses for backups.
+storage_test() {
+  pgbr=${ROWSAFE_PGBACKREST_BIN:-/usr/bin/pgbackrest}
+  [ -x "$pgbr" ] || pgbr=$(command -v pgbackrest 2>/dev/null) || die "pgBackRest is not installed; run the installer first"
+  where="bucket '$S_BUCKET' at $S_ENDPOINT${S_PORT:+:$S_PORT}"
+  note "writing, reading and deleting a test file in $where..."
+  probe=rowsafe-storage-test-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+  printf 'Rowsafe storage test from %s\n' "$(uname -n)" >"$TMP/probe"
+  if ! st_run "$pgbr" repo-put "$probe" <"$TMP/probe" >"$TMP/storage.log" 2>&1; then
+    storage_failed "could not write to $where"
+    return 1
+  fi
+  if ! st_run "$pgbr" repo-get "$probe" </dev/null >"$TMP/probe.back" 2>"$TMP/storage.log" ||
+    ! cmp -s "$TMP/probe" "$TMP/probe.back"; then
+    st_run "$pgbr" repo-rm "$probe" </dev/null >/dev/null 2>&1 || true
+    storage_failed "wrote a test file to $where but could not read it back"
+    return 1
+  fi
+  if ! st_run "$pgbr" repo-rm "$probe" </dev/null >"$TMP/storage.log" 2>&1; then
+    storage_failed "could not delete the test file from $where. The key needs delete access too: old backups are deleted when they expire."
+    return 1
+  fi
+  ok "backup storage works: wrote, read back and deleted a test file"
+}
+
+storage_failed() {
+  printf '    %s%s %s%s\n' "$RED" "$CROSS" "$1" "$RESET"
+  storage_explain | while IFS= read -r line; do say "      $line"; done
+}
+
+# storage_explain turns pgBackRest's error in $TMP/storage.log into the
+# likely cause. S3 errors carry a <Code>; connection errors are pgBackRest's.
+storage_explain() {
+  log=$TMP/storage.log
+  if grep -q RequestTimeTooSkewed "$log"; then
+    say "This server's clock is wrong: it says $(date -u '+%Y-%m-%d %H:%M') UTC."
+    say "Storage refuses requests from a clock more than 15 minutes off."
+    say "Turn on time sync (timedatectl set-ntp true), then try again."
+  elif grep -q InvalidAccessKeyId "$log"; then
+    say "The access key ID was not recognised. Copy it again from your provider."
+    case ${S_PROVIDER:-} in
+      r2) say "(R2: use the Access Key ID, 32 characters, not the token value.)" ;;
+      b2) say "(B2: use the application key's keyID, not the account ID.)" ;;
+    esac
+  elif grep -q SignatureDoesNotMatch "$log"; then
+    say "The secret doesn't match the access key ID. Copy the secret again; it is"
+    say "shown only once, so if you no longer have it, create a new key."
+  elif grep -q NoSuchBucket "$log"; then
+    say "There is no bucket named '$S_BUCKET' there. Check the name, and that you"
+    say "created it in this account (and region)."
+  elif grep -Eq 'AuthorizationHeaderMalformed|PermanentRedirect|IncorrectEndpoint|IllegalLocationConstraint|InvalidRegion|failed with 301' "$log"; then
+    say "The bucket is in a different region. Check the region (or endpoint) you chose."
+  elif grep -Eq 'AccessDenied|failed with 403' "$log"; then
+    say "The key is valid but not allowed to use this bucket. Give it read, write"
+    say "and delete access to '$S_BUCKET' (R2: Object Read & Write)."
+  elif grep -q 'unable to get address' "$log"; then
+    say "Can't find $S_ENDPOINT. Check the account ID or region, and that this"
+    say "server can look up internet names (DNS)."
+  elif grep -Eq 'unable to connect|onnection refused|No route to host' "$log"; then
+    say "Can't connect to $S_ENDPOINT on port ${S_PORT:-443}. Check that a firewall"
+    say "allows outgoing HTTPS from this server."
+  elif grep -Eqi 'certificate|tls|ssl' "$log"; then
+    say "The storage's TLS certificate is not trusted. For a private CA, set"
+    say "ROWSAFE_REPO_S3_CA_FILE in the environment and run the installer again."
+  elif grep -Eqi 'timeout|timed out' "$log"; then
+    say "The storage did not answer in time. Check the endpoint and the network."
+  fi
+  # The underlying error, for support: the storage's error code and message
+  # if it sent one, else pgBackRest's error. pgBackRest redacts credentials;
+  # mask them anyway in case a provider echoes one back.
+  RS_A=$S_KEY RS_B=$S_SECRET RS_C=${S_CIPHER:-} awk '
+    function mask(s, v,   i) {
+      if (v == "") return s
+      while ((i = index(s, v)) > 0) s = substr(s, 1, i - 1) "***" substr(s, i + length(v))
+      return s
+    }
+    function tag(s, t,   a, b) {
+      a = index(s, "<" t ">"); b = index(s, "</" t ">")
+      return (a && b > a) ? substr(s, a + length(t) + 2, b - a - length(t) - 2) : ""
+    }
+    err == "" && /ERROR: \[/ {
+      err = $0
+      sub(/^.*ERROR: \[[0-9]+\]: /, "", err)
+    }
+    code == "" && /<Code>/ {
+      code = tag($0, "Code")
+      if (tag($0, "Message") != "") code = code ": " tag($0, "Message")
+    }
+    END {
+      s = code != "" ? "storage said: " code : err != "" ? "pgBackRest: " err : ""
+      s = mask(mask(mask(s, ENVIRON["RS_A"]), ENVIRON["RS_B"]), ENVIRON["RS_C"])
+      if (s != "") print "(" substr(s, 1, 200) ")"
+    }' "$log"
+}
+
+# ---- the guided setup
+
+storage_menu() {
+  tty_say ""
+  tty_say "${BOLD}Where should Rowsafe store your backups?${RESET}"
+  tty_say "  1) Cloudflare R2          recommended: 10 GB free, no egress fees"
+  tty_say "  2) Backblaze B2"
+  tty_say "  3) Amazon S3"
+  tty_say "  4) Wasabi"
+  tty_say "  5) DigitalOcean Spaces"
+  tty_say "  6) Other S3-compatible storage (MinIO, Ceph, Hetzner, OVH, ...)"
+}
+
+ask_r2() {
+  tty_hint "In Cloudflare: R2 > Create bucket, then R2 > Manage API tokens > Create"
+  tty_hint "API token with \"Object Read & Write\" for that bucket. The token page"
+  tty_hint "shows the account ID and the S3 endpoint; paste either."
+  while :; do
+    ask _v "Cloudflare account ID" "$S_ENDPOINT"
+    h=$(host_of "$_v")
+    acct=$(printf '%s\n' "$h" | sed -nE 's/^([0-9a-f]{32})(\.(eu|fedramp))?(\.r2\.cloudflarestorage\.com)?$/\1/p')
+    [ -n "$acct" ] && break
+    tty_bad "An account ID is 32 characters, 0-9 and a-f."
+  done
+  case $h in
+    *.r2.cloudflarestorage.com) S_ENDPOINT=$h ;;
+    *)
+      if confirm "Is the bucket in the EU jurisdiction (created with \"EU\" data location)?" n; then
+        S_ENDPOINT=$acct.eu.r2.cloudflarestorage.com
+      else
+        S_ENDPOINT=$acct.r2.cloudflarestorage.com
+      fi
+      ;;
+  esac
+  S_REGION=auto S_URI=path
+}
+
+ask_b2() {
+  tty_hint "In Backblaze: Buckets lists each bucket's endpoint, e.g."
+  tty_hint "s3.us-west-004.backblazeb2.com. Under Application Keys, add a key with"
+  tty_hint "Read and Write access to the bucket: keyID and applicationKey."
+  while :; do
+    ask _v "Bucket endpoint or region (e.g. us-west-004)" "$S_REGION"
+    r=$(host_of "$_v" | sed -nE 's/^(s3\.)?([a-z]+-[a-z]+-[0-9]{3})(\.backblazeb2\.com)?$/\2/p')
+    [ -n "$r" ] && break
+    tty_bad "That isn't a B2 region; it looks like us-west-004 or eu-central-003."
+  done
+  S_ENDPOINT=s3.$r.backblazeb2.com S_REGION=$r S_URI=path
+}
+
+ask_s3() {
+  tty_hint "Use an IAM access key allowed to list, read, write and delete objects"
+  tty_hint "in the bucket (s3:ListBucket, s3:GetObject, s3:PutObject, s3:DeleteObject)."
+  while :; do
+    ask _v "AWS region of the bucket (e.g. us-east-1, eu-central-1)" "$S_REGION"
+    r=$(host_of "$_v" | sed -nE 's/^(s3[.-])?([a-z]{2}(-gov)?-[a-z]+-[0-9])(\.amazonaws\.com)?$/\2/p')
+    [ -n "$r" ] && break
+    tty_bad "That isn't an AWS region; it looks like us-east-1 or eu-central-1."
+  done
+  S_ENDPOINT=s3.$r.amazonaws.com S_REGION=$r S_URI=host
+}
+
+ask_wasabi() {
+  tty_hint "Use an access key (Access Keys > Create new access key) whose user may"
+  tty_hint "read, write and delete in the bucket."
+  while :; do
+    ask _v "Wasabi region of the bucket (e.g. us-east-1, eu-central-1)" "$S_REGION"
+    h=$(host_of "$_v")
+    [ "$h" = s3.wasabisys.com ] && h=us-east-1
+    r=$(printf '%s\n' "$h" | sed -nE 's/^(s3\.)?([a-z]{2}-[a-z]+-[0-9])(\.wasabisys\.com)?$/\2/p')
+    [ -n "$r" ] && break
+    tty_bad "That isn't a Wasabi region; it looks like us-east-1 or eu-central-2."
+  done
+  S_ENDPOINT=s3.$r.wasabisys.com S_REGION=$r S_URI=path
+}
+
+ask_spaces() {
+  tty_hint "Create a key under Spaces Object Storage > Access Keys with read/write"
+  tty_hint "access to the Space (bucket)."
+  _d=''
+  case $S_ENDPOINT in *.digitaloceanspaces.com) _d=${S_ENDPOINT%%.*} ;; esac
+  while :; do
+    ask _v "Datacenter of the Space (e.g. nyc3, fra1, sgp1)" "$_d"
+    r=$(host_of "$_v" | sed -nE 's/^([a-z0-9-]+\.)?([a-z]{3}[0-9])(\.digitaloceanspaces\.com)?$/\2/p')
+    [ -n "$r" ] && break
+    tty_bad "That isn't a Spaces datacenter; it looks like nyc3 or fra1."
+  done
+  # Spaces signs with us-east-1 whatever the datacenter; the endpoint picks it.
+  S_ENDPOINT=$r.digitaloceanspaces.com S_REGION=us-east-1 S_URI=host
+}
+
+ask_other() {
+  tty_hint "The S3 API endpoint of your storage, e.g. s3.example.com or"
+  tty_hint "minio.example.com:9000. pgBackRest only talks to storage over HTTPS."
+  while :; do
+    ask _v "Endpoint" "$S_ENDPOINT${S_PORT:+:$S_PORT}"
+    case $_v in
+      [Hh][Tt][Tt][Pp]://*)
+        tty_bad "Plain http:// is not supported; the endpoint must serve HTTPS."
+        continue
+        ;;
+    esac
+    h=$(host_of "$_v")
+    p=''
+    case $h in
+      *:*)
+        p=${h##*:}
+        h=${h%:*}
+        ;;
+    esac
+    if matches "$h" '^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$' && { [ -z "$p" ] || matches "$p" '^[1-9][0-9]{0,4}$'; }; then
+      [ "$p" != 443 ] || p=''
+      break
+    fi
+    tty_bad "That doesn't look like a host name (and optional :port)."
+  done
+  S_ENDPOINT=$h S_PORT=$p
+  ask S_REGION "Region (most self-hosted storage accepts us-east-1)" "${S_REGION:-us-east-1}"
+  if confirm "Use path-style URLs? MinIO, Ceph and most self-hosted storage need them." y; then S_URI=path; else S_URI=host; fi
+  # TLS options for a private CA come from the environment or agent.env.
+  S_CA=$(s_get ROWSAFE_REPO_S3_CA_FILE)
+  S_VERIFY=$(s_get ROWSAFE_REPO_S3_VERIFY_TLS)
+}
+
+ask_credentials() {
+  while :; do
+    ask _v "Bucket name" "$S_BUCKET"
+    _v=${_v#s3://}
+    _v=${_v%/}
+    matches "$_v" '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$' && break
+    tty_bad "Bucket names are 3-63 characters: lowercase letters, numbers, dots and hyphens."
+  done
+  S_BUCKET=$_v
+  # Host-style URLs put the bucket in the TLS host name; dots break that.
+  case $S_URI:$S_BUCKET in host:*.*) S_URI=path ;; esac
+
+  _k=''
+  [ -z "$S_KEY" ] || _k=' (Enter keeps the last one)'
+  while :; do
+    ask _v "Access key ID$_k"
+    [ -n "$_v" ] || _v=$S_KEY
+    case $_v in
+      '') ;;
+      *[[:space:]]* | *"'"* | *'"'*) tty_bad "That contains spaces or quotes; paste just the key ID." ;;
+      *) break ;;
+    esac
+  done
+  S_KEY=$_v
+
+  _k=''
+  [ -z "$S_SECRET" ] || _k=', Enter keeps the last one'
+  while :; do
+    ask_secret _v "Secret access key (hidden$_k)"
+    [ -n "$_v" ] || _v=$S_SECRET
+    case $_v in
+      '') ;;
+      *[[:space:]]* | *"'"*) tty_bad "That contains spaces or quotes; paste just the secret." ;;
+      *) break ;;
+    esac
+  done
+  S_SECRET=$_v
+}
+
+show_passphrase() {
+  _h=''
+  _i=0
+  while [ $_i -lt 54 ]; do
+    _h=$_h$BOX_H
+    _i=$((_i + 1))
+  done
+  box() { printf '  %s  %-50s  %s\n' "$BOX_V" "$1" "$BOX_V" >&3; }
+  tty_say ""
+  tty_say "  $BOX_TL$_h$BOX_TR"
+  box "Your backup encryption passphrase:"
+  box ""
+  printf '  %s      %s%s%s        %s\n' "$BOX_V" "$BOLD" "$1" "$RESET" "$BOX_V" >&3
+  box ""
+  box "Save this in your password manager now."
+  box "Without it, your backups can't be restored."
+  box "Rowsafe can't recover it."
+  tty_say "  $BOX_BL$_h$BOX_BR"
+  tty_say ""
+}
+
+# choose_passphrase sets S_CIPHER: kept, generated (shown once) or typed.
+choose_passphrase() {
+  current=$(env_value ROWSAFE_REPO_CIPHER_PASS)
+  if [ -n "$current" ]; then
+    tty_say ""
+    tty_say "This server already has a backup encryption passphrase. Keep it unless"
+    tty_say "you are starting over: backups made with it can only be restored with it."
+    if confirm "Keep the current encryption passphrase?" y; then
+      S_CIPHER=$current
+      ok "kept the current encryption passphrase"
+      return 0
+    fi
+  fi
+  tty_say ""
+  tty_say "${BOLD}Backups are encrypted on this server before they are uploaded.${RESET}"
+  tty_say "  1) Generate a strong passphrase for me (recommended)"
+  tty_say "  2) Use my own passphrase"
+  _n=1 _p1='' _p2=''
+  choose _n "Choose 1-2" 1 2
+  if [ "$_n" = 1 ]; then
+    # 40 letters and digits (~238 bits): no symbols, so a double-click copies it whole.
+    S_CIPHER=$(head -c 1024 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' 2>/dev/null | head -c 40)
+    [ "${#S_CIPHER}" = 40 ] || die "could not generate a passphrase"
+    show_passphrase "$S_CIPHER"
+    last4=${S_CIPHER#"${S_CIPHER%????}"}
+    while :; do
+      ask _v "Saved it? Type its last 4 characters to continue"
+      [ "$_v" = "$last4" ] && break
+      tty_bad "That doesn't match. Save the passphrase in the box above, then type its last 4 characters."
+    done
+    ok "passphrase confirmed"
+    return 0
+  fi
+  while :; do
+    ask_secret _p1 "Your passphrase (at least 20 characters, hidden)"
+    case $_p1 in
+      *"'"*)
+        tty_bad "Single quotes can't be used in the passphrase."
+        continue
+        ;;
+    esac
+    if [ "${#_p1}" -lt 20 ]; then
+      tty_bad "That is ${#_p1} characters; use at least 20."
+      continue
+    fi
+    ask_secret _p2 "Type it again"
+    [ "$_p1" = "$_p2" ] && break
+    tty_bad "The two don't match. Try again."
+  done
+  S_CIPHER=$_p1
+  tty_hint "Keep it in your password manager: without it, backups can't be restored."
+  ok "passphrase set"
+}
+
+# maybe_guided_storage runs the guided setup on a terminal when the storage
+# is not configured yet (or --setup-storage asks for it). Settings in the
+# installer's environment mean automation: then it never asks.
+maybe_guided_storage() {
+  [ "$TTY" = 1 ] || return 0
+  if [ "$SETUP_STORAGE" = 0 ]; then
+    for key in $REQUIRED_REPO_VARS; do
+      eval "v=\${$key:-}"
+      [ -z "$v" ] || return 0
+    done
+    if storage_configured; then
+      ok "backup storage: bucket '$(env_value ROWSAFE_REPO_S3_BUCKET)' at $(env_value ROWSAFE_REPO_S3_ENDPOINT) (change it with --setup-storage)"
+      return 0
+    fi
+  fi
+  guided_storage
+}
+
+guided_storage() {
+  say ""
+  step "Backup storage"
+  if storage_configured; then
+    tty_say "Backups go to bucket '$(env_value ROWSAFE_REPO_S3_BUCKET)' at $(env_value ROWSAFE_REPO_S3_ENDPOINT)."
+    if ! confirm "Replace these storage settings?" n; then
+      ok "kept the current storage settings"
+      return 0
+    fi
+    tty_hint "Existing backups stay where they are; new ones go to the new bucket."
+  else
+    tty_say "Rowsafe keeps your backups in a storage bucket that you own. You need an"
+    tty_say "empty bucket and an access key that can read, write and delete in it."
+  fi
+  S_ENDPOINT='' S_BUCKET='' S_KEY='' S_SECRET='' S_REGION='' S_URI='' S_PORT='' S_CA='' S_VERIFY='' S_CIPHER=''
+  load_storage_path
+  n=1
+  [ -z "$STORAGE_PROVIDER" ] || n=$(provider_number "$STORAGE_PROVIDER")
+  last=''
+  while :; do
+    storage_menu
+    choose n "Choose 1-6" "$n" 6
+    if [ "$n" != "$last" ]; then
+      # Another provider: its endpoint and region defaults don't carry over.
+      S_ENDPOINT='' S_REGION='' S_URI='' S_PORT='' S_CA='' S_VERIFY=''
+    fi
+    last=$n
+    S_PROVIDER=$(printf '%s\n' "$PROVIDERS" | cut -d' ' -f"$n")
+    tty_say ""
+    case $S_PROVIDER in
+      r2) ask_r2 ;;
+      b2) ask_b2 ;;
+      s3) ask_s3 ;;
+      wasabi) ask_wasabi ;;
+      spaces) ask_spaces ;;
+      *) ask_other ;;
+    esac
+    ask_credentials
+    say ""
+    step "Testing the backup storage"
+    storage_test && break
+    say ""
+    confirm "Change the settings and test again?" y && continue
+    if confirm "Save them anyway? The agent will run, but backups fail until the storage works." n; then
+      warn "saved storage settings that failed the test; check them with --check-storage"
+      break
+    fi
+    die "nothing was saved. Run the installer again once the storage is ready."
+  done
+  choose_passphrase
+  STORAGE_GUIDED=1
+
+  ROWSAFE_REPO_S3_ENDPOINT=$S_ENDPOINT ROWSAFE_REPO_S3_BUCKET=$S_BUCKET
+  ROWSAFE_REPO_S3_KEY=$S_KEY ROWSAFE_REPO_S3_KEY_SECRET=$S_SECRET ROWSAFE_REPO_CIPHER_PASS=$S_CIPHER
+  ROWSAFE_REPO_S3_REGION=$S_REGION ROWSAFE_REPO_S3_URI_STYLE=$S_URI
+  export ROWSAFE_REPO_S3_ENDPOINT ROWSAFE_REPO_S3_BUCKET ROWSAFE_REPO_S3_KEY ROWSAFE_REPO_S3_KEY_SECRET \
+    ROWSAFE_REPO_CIPHER_PASS ROWSAFE_REPO_S3_REGION ROWSAFE_REPO_S3_URI_STYLE
+  # Settings from a previous provider must not linger in agent.env.
+  if [ -n "$S_PORT" ]; then
+    ROWSAFE_REPO_S3_PORT=$S_PORT
+    export ROWSAFE_REPO_S3_PORT
+  else
+    unset ROWSAFE_REPO_S3_PORT
+    STORAGE_CLEAR="$STORAGE_CLEAR ROWSAFE_REPO_S3_PORT"
+  fi
+  if [ "$S_PROVIDER" != s3-compatible ]; then
+    unset ROWSAFE_REPO_S3_CA_FILE ROWSAFE_REPO_S3_VERIFY_TLS
+    STORAGE_CLEAR="$STORAGE_CLEAR ROWSAFE_REPO_S3_CA_FILE ROWSAFE_REPO_S3_VERIFY_TLS"
+  fi
+}
+
+# check_storage (--check-storage) tests the configured repository and
+# changes nothing.
+check_storage() {
+  require_root
+  [ -f "$ENV_FILE" ] || die "$ENV_FILE doesn't exist yet; install the agent first"
+  load_storage
+  missing=''
+  for key in $REQUIRED_REPO_VARS; do
+    [ "$key" = ROWSAFE_REPO_CIPHER_PASS ] && continue
+    [ -n "$(s_get "$key")" ] || missing="$missing $key"
+  done
+  [ -z "$missing" ] || die "the backup storage is not configured; missing:$missing"
+  step "Testing the backup storage"
+  storage_test || die "the backup storage test failed; nothing was changed"
 }
 
 # ---------------------------------------------------------------- service
@@ -803,6 +1498,9 @@ install_agent() {
   detect_os
   detect_arch
   check_postgres
+  say "${BOLD}Rowsafe agent installer${RESET}: backups, WAL archiving and restore drills for"
+  say "the PostgreSQL on this server. PostgreSQL itself is never restarted."
+  say ""
   step "Installing the Rowsafe agent on $(uname -n) ($OS_NAME, $ARCH)"
   ensure_base_tools
 
@@ -843,6 +1541,7 @@ install_agent() {
   UNIT_CHANGED=0
   install_unit
   install_logrotate
+  maybe_guided_storage
   write_env
 
   if systemd_running; then
@@ -868,6 +1567,18 @@ install_agent() {
     say ""
     say "Edit the file (as root), then run this installer again: it self-tests the"
     say "configuration and starts the agent."
+    case " $missing " in
+      *" ROWSAFE_REPO_"*)
+        say ""
+        if [ "$PROMPT" = never ]; then
+          say "Easier: run the installer on a terminal without --no-prompt and it walks"
+        else
+          say "Easier: run the installer from a terminal (e.g. over ssh) and it walks"
+        fi
+        say "you through the storage setup and tests it. Check storage settings you"
+        say "set by hand with: sudo sh install.sh --check-storage"
+        ;;
+    esac
     return 0
   fi
 
@@ -894,7 +1605,9 @@ install_agent() {
   probe_postgres
   summary "$SERVICE_STATE"
   say ""
-  say "${BOLD}Next, from your workstation:${RESET}"
+  say "${BOLD}${GREEN}${CHECK} All set.${RESET} ${BOLD}Next: go back to the Rowsafe dashboard.${RESET}"
+  say "    This server ($(uname -n)) shows up there within a minute; choose which"
+  say "    database to protect. Or, from your workstation:"
   say "    rowsafe hosts list"
   say "    rowsafe adopt <name> --host $(uname -n)"
   say ""
@@ -925,7 +1638,7 @@ uninstall_agent() {
   purge=$1
   refs=$(archive_refs)
   if [ "$purge" = 1 ] && [ -n "$refs" ]; then
-    die "PostgreSQL still archives WAL with Rowsafe's pgBackRest config ($refs). Purging $CONFIG_DIR would make every archive_command fail and fill pg_wal until PostgreSQL stops. Disable archiving first (docs/runbooks/adopt.md, 'Rollback'), then purge."
+    die "PostgreSQL still archives WAL with Rowsafe's pgBackRest config ($refs). Purging $CONFIG_DIR would make every archive_command fail and fill pg_wal until PostgreSQL stops. Disable archiving first (https://rowsafe.sh/docs/guides/adopt#rollback), then purge."
   fi
   step "Removing the Rowsafe agent"
   if systemd_running; then
@@ -976,6 +1689,19 @@ main() {
         ;;
       --uninstall) mode=uninstall ;;
       --purge) purge=1 ;;
+      --setup-storage) SETUP_STORAGE=1 ;;
+      --no-prompt) PROMPT=never ;;
+      --check-storage) mode=check-storage ;;
+      --storage)
+        [ $# -ge 2 ] || die "--storage needs a provider: $PROVIDERS"
+        case " $PROVIDERS other minio " in
+          *" $2 "*) ;;
+          *) die "unknown storage provider '$2' (one of: $PROVIDERS)" ;;
+        esac
+        STORAGE_PROVIDER=$2
+        case $2 in other | minio) STORAGE_PROVIDER=s3-compatible ;; esac
+        shift
+        ;;
       --download-only)
         [ $# -ge 2 ] || die "--download-only needs a directory"
         mode=download
@@ -1002,9 +1728,19 @@ main() {
   if [ "$purge" = 1 ] && [ "$mode" != uninstall ]; then
     die "--purge only goes with --uninstall"
   fi
+  if [ "$mode" != install ] && { [ "$SETUP_STORAGE" = 1 ] || [ -n "$STORAGE_PROVIDER" ]; }; then
+    die "--setup-storage and --storage only go with an install"
+  fi
   TMP=$(mktemp -d "${TMPDIR:-/tmp}/rowsafe-install.XXXXXX")
+  if [ "$mode" = install ]; then
+    open_tty
+    if [ "$TTY" = 0 ] && { [ "$SETUP_STORAGE" = 1 ] || [ -n "$STORAGE_PROVIDER" ]; }; then
+      die "the guided storage setup needs a terminal; set ROWSAFE_REPO_* in the environment instead (see --help)"
+    fi
+  fi
   case $mode in
     install) install_agent ;;
+    check-storage) check_storage ;;
     uninstall) uninstall_agent "$purge" ;;
     download) download_only "$dir" ;;
   esac

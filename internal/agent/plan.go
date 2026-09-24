@@ -111,7 +111,7 @@ func PlanAdoptInput(in protocol.InspectResult, pi PlanInput) (Plan, error) {
 		case !sidecar && isSpool:
 			return p, fmt.Errorf("archive_command hands WAL to a Rowsafe docker-sidecar spool (%s), but this agent runs in native "+
 				"mode: nothing would push that WAL to the repository. If PostgreSQL runs in Docker, run the agent as its sidecar "+
-				"(ROWSAFE_MODE=docker-sidecar, see docs/docker.md). If you moved PostgreSQL out of Docker, reset archive_command "+
+				"(ROWSAFE_MODE=docker-sidecar, see https://rowsafe.sh/docs/guides/docker). If you moved PostgreSQL out of Docker, reset archive_command "+
 				"first (ALTER SYSTEM RESET archive_command; SELECT pg_reload_conf();) and plan again", spoolDir)
 		case sidecar && isSpool && spoolDir == pi.SpoolDir:
 			ours = true

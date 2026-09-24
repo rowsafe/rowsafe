@@ -35,10 +35,17 @@ Protect
   rowsafe mark [NAME] [LABEL]        restore point, e.g. before a migration
   rowsafe tasks [NAME]               recent tasks
 
+Monitor
+  rowsafe health [NAME]              health score (0-100) and what to fix
+  rowsafe insights [NAME]            largest tables, unused indexes, bloat, vacuum
+  rowsafe top [NAME]                 queries that take the most time, and which got slower
+  rowsafe report                     the weekly "Your databases this week" email
+
 Recover
   rowsafe marks [NAME]               restore points to recover to
   rowsafe backups [NAME]             backups and the recovery window
-  docs/runbooks/restore.md           the restore procedure (pgBackRest)
+  https://rowsafe.sh/docs/guides/restore
+                                     the restore procedure (pgBackRest)
 
 Admin
   rowsafe whoami | logout | org | audit
@@ -56,6 +63,12 @@ set, or when the organization has one database ("rowsafe help names").
 // helpDetails adds explanations that don't fit the one-line reference.
 var helpDetails = map[string]string{
 	"names": nameRules,
+	"health": `The score starts at 100 and loses points for each problem found: backups,
+restore tests and WAL archiving; whether PostgreSQL answers; disk space and
+when it will run out; connections; vacuum, transaction ID wraparound and
+wasted space; locks, slow-downs and index suggestions; replication. One
+critical problem caps the score at 59, a warning at 89. 90-100 is healthy,
+70-89 needs attention, 50-69 at risk, below 50 critical.`,
 	"mark": `LABEL defaults to manual-<UTC time>. With a single argument, it is the
 database if it names one of your databases, and otherwise the label for the
 inferred database: in a project whose .rowsafe.json names "app",
@@ -110,6 +123,14 @@ func shortCommand(ctx context.Context, c *client.Client, args []string) (bool, e
 		return true, statusCmd(ctx, c, args[1:])
 	case "init":
 		return true, initCmd(ctx, c, args[1:])
+	case "health":
+		return true, healthCmd(ctx, c, args[1:])
+	case "insights":
+		return true, insightsCmd(ctx, c, args[1:])
+	case "top":
+		return true, topCmd(ctx, c, args[1:])
+	case "report":
+		return true, reportCmd(ctx, c, args[1:])
 	}
 	return false, nil
 }

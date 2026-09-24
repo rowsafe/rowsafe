@@ -11,7 +11,14 @@
 #      upgrade, downgrade refusal, failing self-test keeps the old version,
 #      uninstall, and --purge refusing while PostgreSQL still archives WAL;
 #   3. on the first image, `systemd-analyze verify` and an offline security
-#      review of both systemd units.
+#      review of both systemd units;
+#   4. the guided storage setup, driven on a real pseudo-terminal (drive.py)
+#      against a local S3 that checks SigV4 signatures (fakes3.py): R2 with a
+#      generated passphrase that is shown once and must be confirmed, failed
+#      storage tests explained (bucket, key, secret, region, clock, DNS),
+#      re-runs that keep or change settings, a passphrase of one's own,
+#      Ctrl-C at a hidden prompt, --check-storage and --no-prompt. Secrets
+#      must never reach the terminal.
 #
 # When Go is available the release key and the 0.2.0 release are made by the
 # real `rowsafe-release keygen/manifest/sign`, so the installer is tested
@@ -382,6 +389,401 @@ EOF
   expect_ok "purge" "$INSTALLER" --uninstall --purge
   [ ! -e /etc/rowsafe ] && [ ! -e /var/lib/rowsafe ] && [ ! -e /var/log/rowsafe ] && [ ! -e /etc/logrotate.d/rowsafe ] || fail "purge result"
   expect_fail "--purge needs --uninstall" "only goes with --uninstall" "$INSTALLER" --purge
+  guided_storage_tests
+}
+
+# ------------------------------------------------------------ guided setup
+
+# write_terminal_helpers writes drive.py (answers the installer on a real
+# pseudo-terminal) and fakes3.py (a local S3 that checks SigV4 signatures).
+write_terminal_helpers() {
+  cat >"$W/drive.py" <<'EOF'
+import fcntl, os, re, select, signal, sys, termios, time
+
+# drive.py STEPS TRANSCRIPT CMD...: run CMD on a new terminal (so it has a
+# /dev/tty) and answer like a person. STEPS has lines "PATTERN<TAB>ANSWER":
+# wait for PATTERN (after the previous match), then type ANSWER and Enter.
+# ANSWER {ctrl-c} presses Ctrl-C; {capture:RE} types group 1 of RE matched
+# against everything shown so far. The transcript goes to TRANSCRIPT. Exits
+# with CMD's status, 99 if a PATTERN never showed up, 98 if CMD left the
+# terminal with echo off.
+steps = []
+with open(sys.argv[1]) as f:
+    for line in f:
+        line = line.rstrip("\n")
+        if line:
+            pat, _, ans = line.partition("\t")
+            steps.append((pat, ans))
+
+master, slave = os.openpty()
+pid = os.fork()
+if pid == 0:
+    os.close(master)
+    os.setsid()
+    fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+    for fd in (0, 1, 2):
+        os.dup2(slave, fd)
+    if slave > 2:
+        os.close(slave)
+    os.execvp(sys.argv[3], sys.argv[3:])
+
+out = b""
+status = None
+
+
+def pump(timeout):
+    """Read what the terminal shows; False once CMD has exited and all is read."""
+    global out, status
+    r, _, _ = select.select([master], [], [], timeout)
+    if r:
+        out += os.read(master, 65536)
+        return True
+    if status is None:
+        p, st = os.waitpid(pid, os.WNOHANG)
+        if p:
+            status = st
+    return status is None
+
+
+failed = None
+seen = 0
+for pat, ans in steps:
+    deadline = time.time() + 90
+    while pat.encode() not in out[seen:]:
+        if time.time() > deadline or not pump(0.2):
+            break
+    i = out.find(pat.encode(), seen)
+    if i < 0:
+        failed = f"never saw {pat!r}"
+        break
+    seen = i + len(pat)
+    time.sleep(0.1)
+    if ans == "{ctrl-c}":
+        os.write(master, b"\x03")
+        continue
+    m = re.match(r"\{capture:(.*)\}$", ans)
+    if m:
+        found = re.search(m.group(1), out.decode("utf-8", "replace"))
+        ans = found.group(1) if found else "?"
+    os.write(master, ans.encode() + b"\r")
+
+deadline = time.time() + 240
+while failed is None and time.time() < deadline and pump(0.5):
+    pass
+if status is None:
+    if failed is None:
+        failed = "timed out"
+    os.kill(pid, signal.SIGKILL)
+    _, status = os.waitpid(pid, 0)
+while select.select([master], [], [], 0)[0]:
+    data = os.read(master, 65536)
+    if not data:
+        break
+    out += data
+with open(sys.argv[2], "wb") as f:
+    f.write(out)
+if failed:
+    sys.stderr.write(f"drive.py: {failed}\n")
+    sys.exit(99)
+if not termios.tcgetattr(slave)[3] & termios.ECHO:
+    sys.stderr.write("drive.py: the terminal was left with echo off\n")
+    sys.exit(98)
+sys.exit(os.WEXITSTATUS(status) if os.WIFEXITED(status) else 128 + os.WTERMSIG(status))
+EOF
+  cat >"$W/fakes3.py" <<'EOF'
+import datetime, hashlib, hmac, http.server, re, ssl, sys, urllib.parse
+
+# A small S3 endpoint for installer tests: one bucket, one key pair, real
+# SigV4 checking and AWS-style errors. Its region is the one in an
+# s3.<region>.amazonaws.com host name, else "auto" (which, like R2, also
+# takes us-east-1). A file named "skew" in the working directory moves its
+# clock by that many seconds.
+KEYS = {"AKIDTESTROWSAFE": "test/secret+key=="}
+BUCKETS = {"rowsafe-test"}
+objects = {}
+
+
+def sign(key, msg):
+    return hmac.new(key, msg.encode(), hashlib.sha256).digest()
+
+
+class S3(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *args):
+        pass
+
+    def reply(self, status, body=b"", ctype="application/xml", headers=()):
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        for k, v in headers:
+            self.send_header(k, v)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def error(self, status, code, msg="error"):
+        self.reply(status, f"<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Code>{code}</Code><Message>{msg}</Message></Error>".encode())
+
+    def authorized(self, body):
+        auth = self.headers.get("Authorization", "")
+        if not auth.startswith("AWS4-HMAC-SHA256 "):
+            return self.error(403, "AccessDenied")
+        parts = dict(p.strip().split("=", 1) for p in auth[len("AWS4-HMAC-SHA256 "):].split(","))
+        key, date, region, service, _ = parts["Credential"].split("/")
+        if key not in KEYS:
+            return self.error(403, "InvalidAccessKeyId", "The AWS Access Key Id you provided does not exist in our records.")
+        m = re.search(r"s3\.([a-z0-9-]+)\.amazonaws\.com$", self.headers.get("Host", "").split(":")[0])
+        want = m.group(1) if m else "auto"
+        if region != want and not (want == "auto" and region == "us-east-1"):
+            return self.error(400, "AuthorizationHeaderMalformed", f"The authorization header is malformed; the region '{region}' is wrong; expecting '{want}'")
+        amzdate = self.headers.get("x-amz-date", "")
+        try:
+            skew = int(open("skew").read())
+        except OSError:
+            skew = 0
+        now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=skew)
+        sent = datetime.datetime.strptime(amzdate, "%Y%m%dT%H%M%SZ").replace(tzinfo=datetime.timezone.utc)
+        if abs((now - sent).total_seconds()) > 900:
+            return self.error(403, "RequestTimeTooSkewed", "The difference between the request time and the current time is too large.")
+        url = urllib.parse.urlsplit(self.path)
+        query = sorted(urllib.parse.parse_qsl(url.query, keep_blank_values=True))
+        cq = "&".join(urllib.parse.quote(k, safe="-_.~") + "=" + urllib.parse.quote(v, safe="-_.~") for k, v in query)
+        signed = parts["SignedHeaders"].split(";")
+        ch = "".join(f"{h}:{' '.join(self.headers.get(h, '').split())}\n" for h in signed)
+        payload = self.headers.get("x-amz-content-sha256", hashlib.sha256(body).hexdigest())
+        creq = "\n".join([self.command, url.path, cq, ch, ";".join(signed), payload])
+        sts = "\n".join(["AWS4-HMAC-SHA256", amzdate, f"{date}/{region}/{service}/aws4_request", hashlib.sha256(creq.encode()).hexdigest()])
+        k = sign(sign(sign(sign(("AWS4" + KEYS[key]).encode(), date), region), service), "aws4_request")
+        if hmac.new(k, sts.encode(), hashlib.sha256).hexdigest() != parts["Signature"]:
+            return self.error(403, "SignatureDoesNotMatch", "The request signature we calculated does not match the signature you provided.")
+        return True
+
+    def handle_any(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(n) if n else b""
+        if self.authorized(body) is not True:
+            return
+        path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
+        host = self.headers.get("Host", "").split(":")[0]
+        if host.startswith("rowsafe-test."):  # virtual-hosted style
+            bucket, key = "rowsafe-test", path.lstrip("/")
+        else:
+            bucket, _, key = path.lstrip("/").partition("/")
+        if bucket not in BUCKETS:
+            return self.error(404, "NoSuchBucket", "The specified bucket does not exist")
+        store = objects.setdefault(bucket, {})
+        if self.command == "PUT":
+            store[key] = body
+            return self.reply(200)
+        if self.command in ("GET", "HEAD") and key:
+            if key not in store:
+                return self.error(404, "NoSuchKey", "The specified key does not exist.")
+            return self.reply(200, store[key], "application/octet-stream",
+                              [("Last-Modified", "Thu, 24 Sep 2026 00:00:00 GMT"), ("ETag", '"%s"' % hashlib.md5(store[key]).hexdigest())])
+        if self.command == "DELETE":
+            store.pop(key, None)
+            return self.reply(204)
+        if self.command == "POST":  # multi-object delete
+            return self.reply(200, b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><DeleteResult></DeleteResult>")
+        # ListObjectsV2
+        q = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(self.path).query, keep_blank_values=True))
+        prefix, delim = q.get("prefix", ""), q.get("delimiter", "")
+        contents, prefixes = [], set()
+        for k in sorted(store):
+            if not k.startswith(prefix):
+                continue
+            rest = k[len(prefix):]
+            if delim and delim in rest:
+                prefixes.add(prefix + rest.split(delim)[0] + delim)
+            else:
+                contents.append(f"<Contents><Key>{k}</Key><LastModified>2026-09-24T00:00:00.000Z</LastModified><Size>{len(store[k])}</Size></Contents>")
+        cp = "".join(f"<CommonPrefixes><Prefix>{p}</Prefix></CommonPrefixes>" for p in sorted(prefixes))
+        self.reply(200, f"<?xml version=\"1.0\" encoding=\"UTF-8\"?><ListBucketResult><Name>{bucket}</Name><Prefix>{prefix}</Prefix><IsTruncated>false</IsTruncated>{''.join(contents)}{cp}</ListBucketResult>".encode())
+
+    do_GET = do_PUT = do_DELETE = do_HEAD = do_POST = handle_any
+
+
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.load_cert_chain(sys.argv[1], sys.argv[2])
+srv = http.server.ThreadingHTTPServer(("127.0.0.1", int(sys.argv[3])), S3)
+srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+srv.serve_forever()
+EOF
+}
+
+# on_tty NAME STEPS CMD...: run CMD on a terminal, answering from the STEPS
+# lines ("PATTERN<TAB>ANSWER"); the transcript (without CRs) is in $W/out.
+on_tty() {
+  name=$1 steps=$2
+  shift 2
+  printf '%b' "$steps" >"$W/steps"
+  rc=0
+  NO_COLOR=1 LANG=C.UTF-8 python3 "$W/drive.py" "$W/steps" "$W/tty.raw" "$@" || rc=$?
+  tr -d '\r' <"$W/tty.raw" >"$W/out"
+  [ -z "${TEST_SHOW:-}" ] || cat "$W/out"
+}
+
+tty_ok() {
+  on_tty "$@"
+  [ "$rc" = 0 ] || {
+    cat "$W/out" >&2
+    fail "$name (exit $rc)"
+  }
+  pass "$name"
+}
+
+tty_fail() { # NAME CODE STEPS CMD...
+  n=$1 code=$2
+  shift 2
+  on_tty "$n" "$@"
+  [ "$rc" = "$code" ] || {
+    cat "$W/out" >&2
+    fail "$n (exit $rc, wanted $code)"
+  }
+  pass "$n"
+}
+
+has() { grep -qF -- "$1" "$W/out" || {
+  cat "$W/out" >&2
+  fail "$name: output lacks '$1'"
+}; }
+lacks() { ! grep -qF -- "$1" "$W/out" || {
+  cat "$W/out" >&2
+  fail "$name: output shows '$1'"
+}; }
+env_is() { grep -qxF "$1='$2'" /etc/rowsafe/agent.env || {
+  grep "^#*$1=" /etc/rowsafe/agent.env >&2
+  fail "$name: agent.env lacks $1='$2'"
+}; }
+
+guided_storage_tests() {
+  echo "  -- guided storage setup on a terminal"
+  write_terminal_helpers
+  acct=0123456789abcdef0123456789abcdef
+  names="s3.rowsafe.test $acct.eu.r2.cloudflarestorage.com s3.eu-central-1.amazonaws.com rowsafe-test.s3.eu-central-1.amazonaws.com"
+  echo "127.0.0.1 $names" >>/etc/hosts
+  san=$(printf 'DNS:%s,' $names)
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 \
+    -subj /CN=s3.rowsafe.test -addext "subjectAltName=${san%,}" -keyout s3.key -out s3.crt 2>/dev/null
+  # The named providers use the system CA store, as on a real host.
+  cp s3.crt /usr/local/share/ca-certificates/rowsafe-test-s3.crt && update-ca-certificates >/dev/null 2>&1
+  python3 fakes3.py s3.crt s3.key 443 &
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    curl -s -o /dev/null "https://s3.rowsafe.test/" && break
+    sleep 0.5
+  done
+  key=AKIDTESTROWSAFE secret='test/secret+key=='
+
+  expect_fail "--storage needs a terminal" "needs a terminal" "$INSTALLER" --storage r2
+  expect_fail "unknown provider refused" "unknown storage provider" "$INSTALLER" --storage dropbox
+  [ ! -e /etc/rowsafe ] || fail "a refused option wrote /etc/rowsafe"
+
+  # 1. First install, as from `curl ... | sudo sh -s rse_...` on a terminal:
+  # R2 in the EU, a generated passphrase that must be confirmed.
+  tty_ok "fresh install: R2 (EU), generated passphrase" \
+    "Choose 1-6\t1\nCloudflare account ID\t$acct\nEU jurisdiction\ty\nBucket name\trowsafe-test\nAccess key ID\t$key\nSecret access key\t$secret\nChoose 1-2\t1\nto continue\tzzzz\nto continue\t{capture:[│|] {6}[A-Za-z0-9]{36}([A-Za-z0-9]{4}) }\n" \
+    sh -c 'ROWSAFE_RELEASES_URL=https://localhost:8443/agent sh -s rse_secrettoken123 <"$1/install.sh"' piped "$W"
+  has "Where should Rowsafe store your backups?"
+  has "backup storage works: wrote, read back and deleted a test file"
+  has "Save this in your password manager now."
+  has "That doesn't match."
+  has "passphrase confirmed"
+  lacks "Broken pipe"
+  has "Next: go back to the Rowsafe dashboard"
+  has "configuration, pgBackRest and control plane reachable"
+  pass_=$(sed -n 's/^.*[│|]      \([A-Za-z0-9]\{40\}\)        [│|].*$/\1/p' "$W/out")
+  [ "${#pass_}" = 40 ] || fail "generated passphrase not shown in the box"
+  [ "$(grep -oF "$pass_" "$W/out" | wc -l)" = 1 ] || fail "the passphrase was shown more than once"
+  lacks "$secret"
+  lacks rse_secrettoken123
+  ! grep -q "$(printf '\033')" "$W/out" || fail "colours despite NO_COLOR"
+  env_is ROWSAFE_REPO_S3_ENDPOINT "$acct.eu.r2.cloudflarestorage.com"
+  env_is ROWSAFE_REPO_S3_BUCKET rowsafe-test
+  env_is ROWSAFE_REPO_S3_REGION auto
+  env_is ROWSAFE_REPO_S3_URI_STYLE path
+  env_is ROWSAFE_REPO_S3_KEY "$key"
+  env_is ROWSAFE_REPO_S3_KEY_SECRET "$secret"
+  env_is ROWSAFE_REPO_CIPHER_PASS "$pass_"
+  [ "$(stat -c '%U %a' /etc/rowsafe/agent.env)" = "postgres 600" ] || fail "agent.env ownership/mode"
+  pass "settings saved to agent.env, passphrase shown once, secrets never shown"
+
+  # 2. A plain re-run on a terminal asks nothing.
+  before=$(sha256sum /etc/rowsafe/agent.env)
+  tty_ok "re-run on a terminal asks nothing" "" "$INSTALLER"
+  has "change it with --setup-storage"
+  lacks "Where should Rowsafe"
+  [ "$(sha256sum /etc/rowsafe/agent.env)" = "$before" ] || fail "re-run changed agent.env"
+  tty_ok "--setup-storage, keep the current settings" "Replace these storage settings?\tn\n" "$INSTALLER" --setup-storage
+  has "kept the current storage settings"
+  [ "$(sha256sum /etc/rowsafe/agent.env)" = "$before" ] || fail "declining changed agent.env"
+
+  # 3. Switch to self-hosted storage, getting it wrong three times first.
+  # --storage preselects the provider; the passphrase is kept.
+  echo "ROWSAFE_REPO_S3_PORT='9000'" >>/etc/rowsafe/agent.env # stale; must go
+  tty_ok "--setup-storage: failures explained, then fixed" \
+    "Replace these storage settings?\ty\nChoose 1-6\t\nEndpoint\thttps://s3.rowsafe.test/\nRegion (\t\npath-style\t\nBucket name\tno-such-bucket\nAccess key ID\t$key\nSecret access key\t$secret\ntest again?\ty\nChoose 1-6\t\nEndpoint\t\nRegion (\t\npath-style\t\nBucket name\trowsafe-test\nAccess key ID\tAKIDWRONG\nSecret access key\t\ntest again?\ty\nChoose 1-6\t\nEndpoint\t\nRegion (\t\npath-style\t\nBucket name\t\nAccess key ID\t$key\nSecret access key\twrong-secret-value\ntest again?\ty\nChoose 1-6\t\nEndpoint\t\nRegion (\t\npath-style\t\nBucket name\t\nAccess key ID\t\nSecret access key\t$secret\nKeep the current encryption passphrase?\t\n" \
+    "$INSTALLER" --setup-storage --storage s3-compatible
+  has "There is no bucket named 'no-such-bucket' there."
+  has "The access key ID was not recognised."
+  has "The secret doesn't match the access key ID."
+  has "(storage said: NoSuchBucket: The specified bucket does not exist)"
+  has "backup storage works"
+  has "kept the current encryption passphrase"
+  lacks "$secret"
+  lacks wrong-secret-value
+  lacks "$pass_"
+  env_is ROWSAFE_REPO_S3_ENDPOINT s3.rowsafe.test
+  env_is ROWSAFE_REPO_S3_REGION us-east-1
+  env_is ROWSAFE_REPO_S3_URI_STYLE path
+  env_is ROWSAFE_REPO_CIPHER_PASS "$pass_"
+  ! grep -q '^ROWSAFE_REPO_S3_PORT=' /etc/rowsafe/agent.env || fail "stale ROWSAFE_REPO_S3_PORT kept"
+  [ "$(grep -c "^#ROWSAFE_REPO_S3_PORT='443'$" /etc/rowsafe/agent.env)" = 1 ] || fail "ROWSAFE_REPO_S3_PORT not reset to the template once"
+  pass "storage changed, stale settings reset, passphrase kept"
+
+  # 4. Amazon S3 (host-style URLs) with a passphrase of one's own.
+  tty_ok "--setup-storage: Amazon S3, own passphrase" \
+    "Replace these storage settings?\ty\nChoose 1-6\t3\nAWS region\teu-central-1\nBucket name\trowsafe-test\nAccess key ID\t$key\nSecret access key\t$secret\nKeep the current encryption passphrase?\tn\nChoose 1-2\t2\nYour passphrase\tshort\nYour passphrase\tmy-own-passphrase-long-enough\nType it again\tsomething-else-long-enough\nYour passphrase\tmy-own-passphrase-long-enough\nType it again\tmy-own-passphrase-long-enough\n" \
+    "$INSTALLER" --setup-storage
+  has "use at least 20"
+  has "The two don't match."
+  lacks my-own-passphrase-long-enough
+  lacks "$secret"
+  env_is ROWSAFE_REPO_S3_ENDPOINT s3.eu-central-1.amazonaws.com
+  env_is ROWSAFE_REPO_S3_REGION eu-central-1
+  env_is ROWSAFE_REPO_S3_URI_STYLE host
+  env_is ROWSAFE_REPO_CIPHER_PASS my-own-passphrase-long-enough
+
+  # 5. Ctrl-C at the hidden prompt: echo comes back (drive.py checks) and
+  # nothing is saved.
+  before=$(sha256sum /etc/rowsafe/agent.env)
+  tty_fail "Ctrl-C at a hidden prompt restores the terminal" 130 \
+    "Replace these storage settings?\ty\nChoose 1-6\t2\nBucket endpoint or region\ts3.eu-central-003.backblazeb2.com\nBucket name\trowsafe-test\nAccess key ID\t$key\nSecret access key\t{ctrl-c}\n" \
+    "$INSTALLER" --setup-storage
+  [ "$(sha256sum /etc/rowsafe/agent.env)" = "$before" ] || fail "an interrupted setup changed agent.env"
+
+  # 6. --check-storage, and what it says about common mistakes.
+  expect_ok "--check-storage" "$INSTALLER" --check-storage
+  grep -q "backup storage works" "$W/out" || fail "--check-storage: no success message"
+  expect_fail "wrong region explained" "bucket is in a different region" \
+    env ROWSAFE_REPO_S3_REGION=us-west-2 "$INSTALLER" --check-storage
+  echo 3600 >"$W/skew"
+  expect_fail "clock skew explained" "clock is wrong" "$INSTALLER" --check-storage
+  rm "$W/skew"
+  expect_fail "unknown host explained" "Can't find nonexistent.invalid" \
+    env ROWSAFE_REPO_S3_ENDPOINT=nonexistent.invalid "$INSTALLER" --check-storage
+  for s in "$secret" my-own-passphrase-long-enough; do
+    ! grep -qF "$s" "$W/out" || fail "--check-storage printed a secret"
+  done
+
+  # 7. --no-prompt on a terminal behaves exactly like no terminal.
+  expect_ok "purge" "$INSTALLER" --uninstall --purge
+  tty_ok "--no-prompt on a terminal asks nothing" "" "$INSTALLER" --no-prompt rse_secrettoken123
+  has "Before the agent can start"
+  has "without --no-prompt and it walks"
+  lacks "Where should Rowsafe"
+  expect_ok "purge" "$INSTALLER" --uninstall --purge
 }
 
 case ${1:-} in

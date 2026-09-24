@@ -106,8 +106,15 @@ type HeartbeatRequest struct {
 
 // HeartbeatResponse tells the agent which databases to watch.
 type HeartbeatResponse struct {
+	// Databases are the databases past the initial plan: the agent reports
+	// their WAL archiving and runs their tasks.
 	Databases []DatabaseSpec `json:"databases"`
 	Update    *UpdateOffer   `json:"update,omitempty"`
+	// Monitored are the databases built-in monitoring covers: every
+	// database of the host, including ones not adopted yet (monitoring is
+	// read-only). A superset of Databases. Older control planes omit it;
+	// agents then monitor Databases.
+	Monitored []DatabaseSpec `json:"monitored,omitempty"`
 }
 
 // ArchiverStats mirrors pg_stat_archiver for one adopted database.
@@ -568,7 +575,7 @@ type Protection struct {
 // ---- Monitoring (agent -> control plane) ----
 
 // MonitoringReport is what the agent posts to POST /v1/agent/monitoring
-// about once a minute. Metric names are listed in docs/monitoring.md; the
+// about once a minute. Metric names are listed at https://rowsafe.sh/docs/guides/monitoring; the
 // control plane drops names it doesn't know.
 type MonitoringReport struct {
 	CollectedAt time.Time `json:"collected_at"`
@@ -588,6 +595,14 @@ type DatabaseMonitoring struct {
 	ReplicationSlots []ReplicationSlot  `json:"replication_slots,omitempty"`
 	Activity         *Activity          `json:"activity,omitempty"`
 	Statements       *Statements        `json:"statements,omitempty"` // about every 5 minutes
+	// QueryStats is pg_stat_statements activity since the previous reading
+	// (about every 5 minutes; newer agents only).
+	QueryStats *QueryStats `json:"query_stats,omitempty"`
+	// Insights are table and index statistics (about every 30 minutes;
+	// newer agents only).
+	Insights *Insights `json:"insights,omitempty"`
+	// Replication is streaming replication status (newer agents only).
+	Replication *ReplicationStatus `json:"replication,omitempty"`
 }
 
 // MonitoringAck answers a monitoring report.
@@ -609,6 +624,10 @@ type ReplicationSlot struct {
 	// or for a slot that never reserved WAL).
 	RetainedBytes *int64 `json:"retained_bytes,omitempty"`
 	WALStatus     string `json:"wal_status,omitempty"` // reserved | extended | unreserved | lost
+	// LagBytes is how far a logical slot's consumer is behind (WAL written
+	// but not yet confirmed by the consumer). Newer agents only.
+	LagBytes *int64 `json:"lag_bytes,omitempty"`
+	Database string `json:"database,omitempty"` // logical slots: the database it decodes
 }
 
 // Activity lists sessions running a query, or idle in a transaction, for
@@ -619,6 +638,10 @@ type Activity struct {
 	// ROWSAFE_COLLECT_QUERY_TEXT=false; Query is then empty.
 	QueryTextCollected bool            `json:"query_text_collected"`
 	Queries            []ActivityQuery `json:"queries"`
+	// Blocking lists sessions waiting for a lock held by another session,
+	// and the sessions holding those locks (newer agents; absent when no
+	// session is blocked).
+	Blocking []LockSession `json:"blocking,omitempty"`
 }
 
 type ActivityQuery struct {
@@ -685,6 +708,9 @@ type MonitoringSnapshot struct {
 	ReplicationSlots []ReplicationSlot `json:"replication_slots"`
 	Sizes            []DatabaseSize    `json:"sizes"`
 	SizesAt          *time.Time        `json:"sizes_at,omitempty"`
+	// Replication is the newest streaming replication status (absent until
+	// an agent that reports it does).
+	Replication *ReplicationStatus `json:"replication,omitempty"`
 }
 
 // MetricInfo describes one collected metric (GET /v1/monitoring/metrics).

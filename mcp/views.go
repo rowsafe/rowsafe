@@ -295,13 +295,13 @@ func nextStep(t protocol.TaskView, d TaskDetail) string {
 	case protocol.StatusFailed:
 		switch t.Type {
 		case protocol.TaskCheck:
-			return fmt.Sprintf("WAL verification failed. Read the error and log; usually archive_mode is still off (PostgreSQL not restarted) or the repository credentials are wrong. After fixing it: `rowsafe db verify %s` (tool verify_database).", name)
+			return fmt.Sprintf("WAL verification failed. Read the error and log; usually archive_mode is still off (PostgreSQL not restarted) or the repository credentials are wrong. After fixing it: `rowsafe verify %s` (tool verify_database).", name)
 		case protocol.TaskBackup:
-			return fmt.Sprintf("Read the error and log (pgBackRest output). After fixing the cause: `rowsafe backup run %s --type diff` (tool run_backup). See docs/runbooks/alerts.md#rowsafebackupmissing.", name)
+			return fmt.Sprintf("Read the error and log (pgBackRest output). After fixing the cause: `rowsafe backup %s --type diff` (tool run_backup). See https://rowsafe.sh/docs/guides/monitoring.", name)
 		case protocol.TaskDrill:
-			return fmt.Sprintf("Read the error and log. After fixing the cause: `rowsafe drill run %s` (tool run_drill). See docs/runbooks/alerts.md#rowsafedrillfailed.", name)
+			return fmt.Sprintf("Read the error and log. After fixing the cause: `rowsafe drill %s` (tool run_drill). See https://rowsafe.sh/docs/guides/monitoring.", name)
 		case protocol.TaskAdopt:
-			return fmt.Sprintf("Read the error and log, fix the cause on the host, then re-plan: `rowsafe db plan %s` (tool plan_adoption).", name)
+			return fmt.Sprintf("Read the error and log, fix the cause on the host, then re-plan: `rowsafe plan %s` (tool plan_adoption).", name)
 		case protocol.TaskRestorePoint:
 			return "The restore point was not created. Don't run a destructive operation relying on it; check safety_check for the cause."
 		}
@@ -314,9 +314,9 @@ func nextStep(t protocol.TaskView, d TaskDetail) string {
 		}
 		switch {
 		case !d.Adopt.Applied:
-			return fmt.Sprintf("This is a read-only plan; nothing changed. Show it to the user. If they approve, apply it: `rowsafe db apply %s` (tool apply_adoption). Applying never restarts PostgreSQL.", name)
+			return fmt.Sprintf("This is a read-only plan; nothing changed. Show it to the user. If they approve, apply it: `rowsafe apply %s` (tool apply_adoption). Applying never restarts PostgreSQL.", name)
 		case d.Adopt.RestartRequired:
-			return fmt.Sprintf("Settings applied. The user must restart PostgreSQL in a maintenance window (e.g. `sudo systemctl restart postgresql`), then run `rowsafe db verify %s` (tool verify_database). Rowsafe never restarts PostgreSQL itself.", name)
+			return fmt.Sprintf("Settings applied. The user must restart PostgreSQL in a maintenance window (e.g. `sudo systemctl restart postgresql`), then run `rowsafe verify %s` (tool verify_database). Rowsafe never restarts PostgreSQL itself.", name)
 		default:
 			return fmt.Sprintf("Settings applied; a WAL verification (check) was queued automatically. Follow it with list_tasks for %s.", name)
 		}
@@ -326,7 +326,7 @@ func nextStep(t protocol.TaskView, d TaskDetail) string {
 		}
 	case protocol.TaskDrill:
 		if d.Drill != nil && !d.Drill.Passed {
-			return "The drill ran but its checks failed: the backups may not restore correctly. See docs/runbooks/alerts.md#rowsafedrillfailed; take a new full backup and drill again once the cause is understood."
+			return "The drill ran but its checks failed: the backups may not restore correctly. See https://rowsafe.sh/docs/guides/monitoring; take a new full backup and drill again once the cause is understood."
 		}
 	}
 	return ""

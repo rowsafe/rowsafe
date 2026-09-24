@@ -75,6 +75,15 @@ All commands (NAME is optional where shown in brackets; see "rowsafe help names"
   rowsafe alerts [--all | --resolved]        firing alerts (with --all, resolved ones too)
   rowsafe alerts ack ID                      acknowledge a firing alert: no more reminders
   rowsafe alerts rules                       built-in alert rules with this org's settings
+  rowsafe health [NAME] [--json]             health score (0-100) and findings in plain language; without NAME,
+                                             every database. Exit 3 if one scores below 70
+  rowsafe insights [NAME] [--limit 10] [--json]
+                                             largest tables, unused and duplicate indexes, estimated bloat,
+                                             dead rows and vacuum, transaction ID age
+  rowsafe top [NAME] [--since 24h] [--sort total_time|calls|mean_time|rows] [--query ID] [--json]
+                                             statements that took the most time in a range, and which got slower
+  rowsafe report [--preview [--html]] [--on | --off] [--to A,B] [--send-test]
+                                             the weekly "Your databases this week" email: settings, preview, test
   rowsafe db top NAME [--limit 20]           top statements by total time (pg_stat_statements)
   rowsafe db activity NAME                   queries running, or idle in a transaction, for over a minute
   rowsafe channels list
@@ -85,10 +94,10 @@ All commands (NAME is optional where shown in brackets; see "rowsafe help names"
   rowsafe channels test ID                   send a test notification now
 
   rowsafe mcp [--allow-restore-points | --allow-writes]
-                                             MCP server on stdio for AI assistants (docs/mcp.md); read-only
+                                             MCP server on stdio for AI assistants (https://rowsafe.sh/docs/reference/mcp); read-only
                                              unless restore points or all write tools are allowed
   rowsafe guard                              Claude Code PreToolUse hook: before a destructive database
-                                             command, create a restore point (docs/agents.md)
+                                             command, create a restore point (https://rowsafe.sh/docs/guides/ai-agents)
   rowsafe guard --check COMMAND              tell whether COMMAND looks destructive (exit 0 yes, 1 no)
 
 Run commands wait for the task to finish; pass --no-wait to return at once.

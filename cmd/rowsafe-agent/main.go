@@ -30,8 +30,8 @@ Usage:
   rowsafe-agent version
 
 Runs as the postgres OS user. Configuration comes from the environment,
-normally /etc/rowsafe/agent.env; see docs/agent.md. In Docker, see
-docs/docker.md.
+normally /etc/rowsafe/agent.env; see https://rowsafe.sh/docs/reference/agent-configuration. In Docker, see
+https://rowsafe.sh/docs/guides/docker.
 `
 
 func main() {
@@ -71,7 +71,7 @@ func run(ctx context.Context) error {
 	if os.Geteuid() == 0 {
 		if err == nil && cfg.Sidecar() {
 			return fmt.Errorf("refusing to run as root: run the agent container as the postgres user of the PostgreSQL image " +
-				"(user: \"999:999\" for the Debian-based images, \"70:70\" for the Alpine ones; see docs/docker.md)")
+				"(user: \"999:999\" for the Debian-based images, \"70:70\" for the Alpine ones; see https://rowsafe.sh/docs/guides/docker)")
 		}
 		return fmt.Errorf("refusing to run as root: run rowsafe-agent as the postgres user (see deploy/systemd/rowsafe-agent.service)")
 	}

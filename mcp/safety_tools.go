@@ -245,7 +245,7 @@ func (t *tools) createRestorePoint(ctx context.Context, _ *sdk.CallToolRequest, 
 		if out.RestoreFromBackup != "" {
 			set = out.RestoreFromBackup
 		}
-		out.Guidance = fmt.Sprintf("Tell the user: restore point %q on %s is in the backup repository. If the operation goes wrong, stop and tell them they can restore %s to it (docs/runbooks/restore.md, \"Restore to a named restore point\": pgbackrest restore --type=name --target=%s --set=%s). Never attempt the restore yourself.", name, d.Name, d.Name, name, set)
+		out.Guidance = fmt.Sprintf("Tell the user: restore point %q on %s is in the backup repository. If the operation goes wrong, stop and tell them they can restore %s to it (https://rowsafe.sh/docs/guides/restore, \"To a restore point\": pgbackrest restore --type=name --target=%s --set=%s). Never attempt the restore yourself.", name, d.Name, d.Name, name, set)
 		b.line("Restore point %q on %s is ARCHIVED (confirmed in the backup repository)%s.", name, d.Name, lsnSuffix(out.LSN))
 	case out.Status == protocol.RestorePointUnconfirmed:
 		out.Guidance = "The restore point was written, but its WAL was not confirmed in the repository in time, so it may not be restorable yet. WAL archiving may be slow or failing: run safety_check, tell the user, and don't proceed with a destructive operation without their explicit OK."

@@ -35,6 +35,12 @@ type Options struct {
 	// ProcRoot is where /proc is mounted (tests point it elsewhere).
 	ProcRoot string
 	Now      func() time.Time
+	// InsightsInterval is how often table and index insights are collected
+	// (default 30 minutes; slow runs back off up to 4 hours).
+	InsightsInterval time.Duration
+	// InsightsSync collects insights inline instead of in the background
+	// (tests).
+	InsightsSync bool
 }
 
 // Collector gathers one report per round. It is not safe for concurrent use.
@@ -55,6 +61,9 @@ func New(o Options) *Collector {
 	}
 	if o.Now == nil {
 		o.Now = time.Now
+	}
+	if o.InsightsInterval <= 0 {
+		o.InsightsInterval = DefaultInsightsInterval
 	}
 	return &Collector{o: o, deltas: newDeltaTracker(), clusters: map[string]*clusterState{},
 		host: &hostCollector{procRoot: o.ProcRoot}}
@@ -173,8 +182,9 @@ func (c *Collector) Collect(ctx context.Context) protocol.MonitoringReport {
 			c.clusters[db.ID] = st
 		}
 		dm := protocol.DatabaseMonitoring{DatabaseID: db.ID}
+		target := Target{SocketDir: db.SocketDir, Port: db.Port, User: c.o.PGUser}
 		cctx, cancel := context.WithTimeout(ctx, perClusterTimeout)
-		r, err := readCluster(cctx, Target{SocketDir: db.SocketDir, Port: db.Port, User: c.o.PGUser}, st, slow, c.o.QueryText)
+		r, err := readCluster(cctx, target, st, slow, c.o.QueryText)
 		cancel()
 		if err != nil {
 			dm.Error = err.Error()
@@ -192,17 +202,25 @@ func (c *Collector) Collect(ctx context.Context) protocol.MonitoringReport {
 			}
 		}
 		dm.ReplicationSlots = r.slots
-		dm.Activity = &protocol.Activity{CollectedAt: at.UTC(), QueryTextCollected: c.o.QueryText, Queries: r.activity}
+		dm.Activity = &protocol.Activity{CollectedAt: at.UTC(), QueryTextCollected: c.o.QueryText, Queries: r.activity,
+			Blocking: r.blocking}
 		if dm.Activity.Queries == nil {
 			dm.Activity.Queries = []protocol.ActivityQuery{}
 		}
+		dm.Replication = r.replication
 		if slow {
 			dm.Sizes = r.sizes
 			if r.statements != nil {
 				r.statements.CollectedAt = at.UTC()
 				dm.Statements = r.statements
 			}
+			if r.queryStats != nil {
+				r.queryStats.CollectedAt = at.UTC()
+				dm.QueryStats = r.queryStats
+			}
 		}
+		c.startInsights(ctx, st, target, at)
+		dm.Insights = st.insights.take()
 		report.Databases = append(report.Databases, dm)
 	}
 	c.deltas.forget(keep)
@@ -213,4 +231,29 @@ func (c *Collector) Collect(ctx context.Context) protocol.MonitoringReport {
 	}
 	report.Host = c.host.collect(dataDirs)
 	return report
+}
+
+// startInsights begins a cluster's insights run when one is due. It runs
+// in the background (the report carries it once it is done) unless
+// InsightsSync is set.
+func (c *Collector) startInsights(ctx context.Context, st *clusterState, t Target, now time.Time) {
+	every := c.o.InsightsInterval
+	if !st.insights.start(now, every) {
+		return
+	}
+	run := func() {
+		began := time.Now()
+		res, err := CollectInsights(ctx, t)
+		if err != nil {
+			c.o.Log.Debug("collecting table insights failed", "err", err)
+		} else {
+			res.CollectedAt = c.o.Now().UTC()
+		}
+		st.insights.finish(res, time.Since(began), every)
+	}
+	if c.o.InsightsSync {
+		run()
+		return
+	}
+	go run()
 }

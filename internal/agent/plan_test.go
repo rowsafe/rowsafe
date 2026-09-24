@@ -8,11 +8,11 @@ import (
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
-const ourCmd = "/usr/bin/pgbackrest --config=/etc/rowsafe/pgbackrest/tvhub.conf --stanza=tvhub archive-push %p"
+const ourCmd = "/usr/bin/pgbackrest --config=/etc/rowsafe/pgbackrest/app.conf --stanza=app archive-push %p"
 
-// tvhubToday mirrors TvHub production as documented in ~/code/infra:
+// appToday mirrors TvHub production as documented in ~/code/infra:
 // PostgreSQL 18.4 with archive_mode=off.
-func tvhubToday() protocol.InspectResult {
+func appToday() protocol.InspectResult {
 	return protocol.InspectResult{
 		ServerVersion: "18.4", VersionNum: 180004, DataDirectory: "/var/lib/postgresql/18/main",
 		IsSuperuser: true, WalLevel: "replica", ArchiveMode: "off", ArchiveCommand: "(disabled)",
@@ -22,7 +22,7 @@ func tvhubToday() protocol.InspectResult {
 func settings(p Plan) map[string]string { return p.Settings }
 
 func TestPlanAdoptFreshCluster(t *testing.T) {
-	p, err := PlanAdopt(tvhubToday(), "/etc/rowsafe/pgbackrest/tvhub.conf", ourCmd, false)
+	p, err := PlanAdopt(appToday(), "/etc/rowsafe/pgbackrest/app.conf", ourCmd, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,9 +41,9 @@ func TestPlanAdoptFreshCluster(t *testing.T) {
 }
 
 func TestPlanAdoptAlreadyAdoptedIsNoop(t *testing.T) {
-	in := tvhubToday()
+	in := appToday()
 	in.ArchiveMode, in.ArchiveCommand, in.ArchiveTimeoutSeconds = "on", ourCmd, 300
-	p, err := PlanAdopt(in, "/etc/rowsafe/pgbackrest/tvhub.conf", ourCmd, false)
+	p, err := PlanAdopt(in, "/etc/rowsafe/pgbackrest/app.conf", ourCmd, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestPlanAdoptAlreadyAdoptedIsNoop(t *testing.T) {
 }
 
 func TestPlanAdoptPendingRestartStillNeedsRestart(t *testing.T) {
-	in := tvhubToday()
+	in := appToday()
 	in.ArchiveMode, in.ArchiveCommand, in.ArchiveTimeoutSeconds = "on", ourCmd, 300
 	in.PendingRestart = []string{"archive_mode"}
 	p, err := PlanAdopt(in, "x", ourCmd, false)
@@ -66,7 +66,7 @@ func TestPlanAdoptPendingRestartStillNeedsRestart(t *testing.T) {
 }
 
 func TestPlanAdoptMinimalWalLevel(t *testing.T) {
-	in := tvhubToday()
+	in := appToday()
 	in.WalLevel = "minimal"
 	p, err := PlanAdopt(in, "x", ourCmd, false)
 	if err != nil {
@@ -78,7 +78,7 @@ func TestPlanAdoptMinimalWalLevel(t *testing.T) {
 }
 
 func TestPlanAdoptRefusesForeignArchiver(t *testing.T) {
-	in := tvhubToday()
+	in := appToday()
 	in.ArchiveMode, in.ArchiveCommand = "on", "wal-g wal-push %p"
 	if _, err := PlanAdopt(in, "x", ourCmd, false); err == nil || !strings.Contains(err.Error(), "wal-g") {
 		t.Fatalf("expected refusal naming the existing archive_command, got %v", err)
@@ -96,7 +96,7 @@ func TestPlanAdoptRefusesForeignArchiver(t *testing.T) {
 }
 
 func TestPlanAdoptRefusesArchiveLibrary(t *testing.T) {
-	in := tvhubToday()
+	in := appToday()
 	in.ArchiveMode, in.ArchiveCommand, in.ArchiveLibrary = "on", "", "basic_archive"
 	if _, err := PlanAdopt(in, "x", ourCmd, false); err == nil {
 		t.Fatal("expected refusal when archive_library is set")
@@ -118,7 +118,7 @@ func TestPlanAdoptPreconditions(t *testing.T) {
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
-			in := tvhubToday()
+			in := appToday()
 			mutate(&in)
 			if _, err := PlanAdopt(in, "x", ourCmd, true); err == nil {
 				t.Fatal("expected an error")
@@ -128,7 +128,7 @@ func TestPlanAdoptPreconditions(t *testing.T) {
 }
 
 func TestPlanAdoptKeepsShorterArchiveTimeout(t *testing.T) {
-	in := tvhubToday()
+	in := appToday()
 	in.ArchiveTimeoutSeconds = 60
 	p, _ := PlanAdopt(in, "x", ourCmd, false)
 	if _, ok := settings(p)["archive_timeout"]; ok {
@@ -228,10 +228,10 @@ func TestPlanSidecarRefusesNativeCommandEvenWithForce(t *testing.T) {
 }
 
 func TestPlanNativeRefusesSpoolCommandEvenWithForce(t *testing.T) {
-	in := tvhubToday()
+	in := appToday()
 	in.ArchiveMode, in.ArchiveCommand = "on", spoolCmd
 	for _, force := range []bool{false, true} {
-		_, err := PlanAdopt(in, "/etc/rowsafe/pgbackrest/tvhub.conf", ourCmd, force)
+		_, err := PlanAdopt(in, "/etc/rowsafe/pgbackrest/app.conf", ourCmd, force)
 		if err == nil || !strings.Contains(err.Error(), "native") || !strings.Contains(err.Error(), "/rowsafe-spool/app") {
 			t.Errorf("force=%v: expected refusal, got %v", force, err)
 		}

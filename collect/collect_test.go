@@ -2,12 +2,16 @@ package collect
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/rowsafe/rowsafe/protocol"
 )
@@ -360,5 +364,400 @@ func TestNextSlot(t *testing.T) {
 		if got := nextSlot(tc.now, time.Minute, 17*time.Second); !got.Equal(tc.want) {
 			t.Errorf("nextSlot(%v) = %v, want %v", tc.now.Sub(base), got.Sub(base), tc.want.Sub(base))
 		}
+	}
+}
+
+func TestStatementDeltas(t *testing.T) {
+	k := func(id int64, db uint32) stmtKey { return stmtKey{queryID: id, dbid: db, userid: 10} }
+	prev := map[stmtKey]stmtCounters{
+		k(1, 1): {calls: 100, totalMs: 1000, rows: 100},
+		k(1, 2): {calls: 10, totalMs: 10, rows: 10},
+		k(2, 1): {calls: 50, totalMs: 500, rows: 5},
+		k(3, 1): {calls: 7, totalMs: 7, rows: 7},
+	}
+	cur := map[stmtKey]stmtCounters{
+		k(1, 1): {calls: 150, totalMs: 1600, rows: 150}, // +50 calls, +600ms
+		k(1, 2): {calls: 12, totalMs: 40, rows: 12},     // +2 calls, +30ms: summed into query 1
+		k(2, 1): {calls: 4, totalMs: 80, rows: 1},       // went backwards: evicted and re-added, all new
+		k(3, 1): {calls: 7, totalMs: 7, rows: 7},        // idle: left out
+		k(4, 1): {calls: 3, totalMs: 9, rows: 3},        // new entry: all new
+	}
+	got := statementDeltas(prev, cur, false)
+	if len(got) != 3 {
+		t.Fatalf("deltas = %+v", got)
+	}
+	if d := got[0]; d.queryID != 1 || d.calls != 52 || d.totalMs != 630 || d.rows != 52 || d.topDB != 1 {
+		t.Errorf("query 1 = %+v", d)
+	}
+	if d := got[1]; d.queryID != 2 || d.calls != 4 || d.totalMs != 80 {
+		t.Errorf("query 2 = %+v", d)
+	}
+	if d := got[2]; d.queryID != 4 || d.calls != 3 {
+		t.Errorf("query 4 = %+v", d)
+	}
+	// A truncated reading can't tell a new entry from one it didn't read.
+	if got := statementDeltas(prev, cur, true); len(got) != 2 {
+		t.Errorf("truncated deltas = %+v", got)
+	}
+
+	var many []stmtDelta
+	for i := range 80 {
+		many = append(many, stmtDelta{queryID: int64(i), totalMs: float64(1000 - i), calls: int64(i)})
+	}
+	picked := pickStatements(many)
+	if len(picked) != queryStatsByTime+queryStatsByCalls || picked[0].queryID != 0 || picked[queryStatsByTime].queryID != 79 {
+		t.Errorf("picked %d statements, first %d, first by calls %d", len(picked), picked[0].queryID, picked[queryStatsByTime].queryID)
+	}
+}
+
+func TestInsightsSchedule(t *testing.T) {
+	var s insightsState
+	now := time.Now()
+	if s.start(now, DefaultInsightsInterval) {
+		t.Fatal("insights started right after the agent started")
+	}
+	if !s.start(now.Add(insightsFirstDelay), DefaultInsightsInterval) {
+		t.Fatal("insights did not start after the first delay")
+	}
+	if s.start(now.Add(insightsFirstDelay), DefaultInsightsInterval) {
+		t.Fatal("two runs at once")
+	}
+	s.finish(&protocol.Insights{}, time.Minute, DefaultInsightsInterval) // slow: back off
+	if s.interval != 2*DefaultInsightsInterval {
+		t.Errorf("interval after a slow run = %v", s.interval)
+	}
+	if s.take() == nil || s.take() != nil {
+		t.Error("take should return the result exactly once")
+	}
+	s.running = true
+	s.finish(nil, time.Second, DefaultInsightsInterval)
+	if s.interval != DefaultInsightsInterval {
+		t.Errorf("interval after a quick run = %v", s.interval)
+	}
+}
+
+// scratchDB creates a throwaway database on the local PostgreSQL and drops
+// it when the test ends.
+func scratchDB(t *testing.T, tg Target) (string, *pgx.Conn) {
+	t.Helper()
+	admin, err := tg.connect(t.Context(), "postgres")
+	if err != nil {
+		t.Skip(err)
+	}
+	name := fmt.Sprintf("rowsafe_scratch_%d", time.Now().UnixNano())
+	if _, err := admin.Exec(t.Context(), `CREATE DATABASE `+name); err != nil {
+		admin.Close(context.Background())
+		t.Skipf("can't create a scratch database: %v", err)
+	}
+	cfg, _ := pgx.ParseConfig("")
+	cfg.Host, cfg.Port, cfg.User, cfg.Database = tg.SocketDir, uint16(tg.Port), tg.User, name
+	conn, err := pgx.ConnectConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		conn.Close(context.Background())
+		_, _ = admin.Exec(context.Background(), `DROP DATABASE IF EXISTS `+name+` WITH (FORCE)`)
+		admin.Close(context.Background())
+	})
+	return name, conn
+}
+
+func TestInsightsLocalPostgres(t *testing.T) {
+	tg := localTarget(t)
+	name, conn := scratchDB(t, tg)
+	for _, sql := range []string{
+		`CREATE TABLE orders (id bigint PRIMARY KEY, customer int NOT NULL, status text NOT NULL, note text)`,
+		`INSERT INTO orders SELECT g, g % 1000, CASE WHEN g % 3 = 0 THEN 'shipped' ELSE 'open' END, repeat('x', 100)
+		 FROM generate_series(1, 60000) g`,
+		`CREATE INDEX orders_customer ON orders (customer)`,
+		`CREATE INDEX orders_customer_again ON orders (customer)`,          // exact duplicate
+		`CREATE INDEX orders_customer_status ON orders (customer, status)`, // makes orders_customer redundant too
+		`CREATE INDEX orders_status ON orders (status)`,                    // never used
+		`CREATE UNIQUE INDEX orders_note_unique ON orders (id, note)`,      // unique: never suggested
+		`DELETE FROM orders WHERE id % 10 <> 0`,                            // 90% dead: bloat
+		`ANALYZE orders`,
+	} {
+		if _, err := conn.Exec(t.Context(), sql); err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+	}
+	// Sequential scans reading many rows each.
+	for range 60 {
+		if _, err := conn.Exec(t.Context(), `SELECT count(*) FROM orders WHERE note LIKE '%y%'`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Make this session publish its table statistics now (PostgreSQL 15+
+	// flushes them lazily).
+	_, _ = conn.Exec(t.Context(), `SELECT pg_stat_force_next_flush()`)
+	_, _ = conn.Exec(t.Context(), `SELECT 1`)
+	time.Sleep(100 * time.Millisecond)
+
+	ins, err := CollectInsights(t.Context(), tg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	find := func(dbs []protocol.InsightsDatabase) *protocol.InsightsDatabase {
+		for i := range dbs {
+			if dbs[i].Name == name {
+				return &dbs[i]
+			}
+		}
+		return nil
+	}
+	db := find(ins.Databases)
+	if db == nil || db.Skipped != "" || db.Tables != 1 {
+		t.Fatalf("scratch database in insights: %+v (notes %v)", db, ins.Notes)
+	}
+	for _, n := range ins.Notes {
+		if strings.HasPrefix(n, name+":") {
+			t.Errorf("note about the scratch database: %s", n)
+		}
+	}
+	var sawTable bool
+	for _, x := range ins.LargestTables {
+		if x.Database == name && x.Table == "orders" && x.TotalBytes > x.TableBytes && x.IndexBytes > 0 {
+			sawTable = true
+		}
+	}
+	if !sawTable {
+		t.Errorf("orders not among the largest tables: %+v", ins.LargestTables)
+	}
+	unused := map[string]bool{}
+	for _, x := range ins.UnusedIndexes {
+		if x.Database == name {
+			unused[x.Index] = true
+		}
+	}
+	if !unused["orders_status"] || unused["orders_pkey"] || unused["orders_note_unique"] {
+		t.Errorf("unused indexes = %v", unused)
+	}
+	dups := map[string]string{}
+	for _, x := range ins.DuplicateIndexes {
+		if x.Database == name {
+			dups[x.Index] = x.Kind + ":" + x.CoveredBy
+		}
+	}
+	if dups["orders_customer_again"] != "duplicate:orders_customer" || dups["orders_customer"] != "redundant:orders_customer_status" {
+		t.Errorf("duplicate indexes = %v", dups)
+	}
+	if _, ok := dups["orders_note_unique"]; ok {
+		t.Error("a unique index was suggested for removal")
+	}
+	var sawBloat, sawVacuum, sawSeq, sawFreeze bool
+	for _, x := range ins.TableBloat {
+		if x.Database == name && x.Table == "orders" && x.BloatPct > 50 {
+			sawBloat = true
+		}
+	}
+	for _, x := range ins.VacuumStats {
+		if x.Database == name && x.Table == "orders" && x.DeadRows > 50000 && x.DeadPct > 80 {
+			sawVacuum = true
+		}
+	}
+	for _, x := range ins.SeqScanTables {
+		if x.Database == name && x.Table == "orders" && x.SeqScans >= 60 {
+			sawSeq = true
+		}
+	}
+	for _, x := range ins.FreezeAge {
+		if x.XIDAge > 0 && x.FreezeMaxAge > 0 {
+			sawFreeze = true
+		}
+	}
+	if !sawBloat {
+		t.Errorf("no bloat estimate for orders: %+v", ins.TableBloat)
+	}
+	if !sawVacuum {
+		t.Errorf("no dead rows for orders: %+v", ins.VacuumStats)
+	}
+	if !sawSeq {
+		t.Errorf("orders not among sequentially scanned tables: %+v", ins.SeqScanTables)
+	}
+	if !sawFreeze {
+		t.Errorf("no transaction ID ages: %+v", ins.FreezeAge)
+	}
+	t.Logf("insights took %dms over %d databases; index bloat %+v", ins.DurationMs, len(ins.Databases), ins.IndexBloat)
+}
+
+func TestBlockingLocalPostgres(t *testing.T) {
+	tg := localTarget(t)
+	_, holder := scratchDB(t, tg)
+	if _, err := holder.Exec(t.Context(), `CREATE TABLE t (id int PRIMARY KEY); INSERT INTO t VALUES (1)`); err != nil {
+		t.Fatal(err)
+	}
+	cfg := holder.Config().Copy()
+	waiter, err := pgx.ConnectConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer waiter.Close(context.Background())
+	if _, err := holder.Exec(t.Context(), `BEGIN; UPDATE t SET id = 1 WHERE id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Exec(context.Background(), `ROLLBACK`)
+	done := make(chan error, 1)
+	waiterPID := int(waiter.PgConn().PID())
+	go func() {
+		_, err := waiter.Exec(context.Background(), `SET statement_timeout = '10s'; UPDATE t SET id = 1 WHERE id = 1`)
+		done <- err
+	}()
+	mon, err := tg.connect(t.Context(), "postgres")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mon.Close(context.Background())
+	var r *clusterReading
+	for range 50 {
+		time.Sleep(100 * time.Millisecond)
+		r = &clusterReading{gauges: map[string]float64{}, versionNum: 170000}
+		_ = mon.QueryRow(t.Context(), `SELECT current_setting('server_version_num')::int`).Scan(&r.versionNum)
+		readBlocking(t.Context(), mon, r, true)
+		if r.gauges[MBlockedSessions] > 0 {
+			break
+		}
+	}
+	if r.gauges[MBlockedSessions] != 1 || len(r.blocking) != 2 {
+		t.Fatalf("blocking = %+v, gauges %v", r.blocking, r.gauges)
+	}
+	holderPID := int(holder.PgConn().PID())
+	for _, s := range r.blocking {
+		switch s.PID {
+		case waiterPID:
+			if len(s.BlockedBy) != 1 || s.BlockedBy[0] != holderPID || s.LockType == "" || !strings.Contains(s.Query, "UPDATE t") {
+				t.Errorf("waiting session = %+v", s)
+			}
+		case holderPID:
+			if len(s.BlockedBy) != 0 || s.Blocking != 1 || s.State != "idle in transaction" {
+				t.Errorf("blocking session = %+v", s)
+			}
+		default:
+			t.Errorf("unexpected session %+v", s)
+		}
+	}
+	if _, err := holder.Exec(t.Context(), `ROLLBACK`); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("waiting update: %v", err)
+	}
+}
+
+func TestReplicationLocalPostgres(t *testing.T) {
+	tg := localTarget(t)
+	conn, err := tg.connect(t.Context(), "postgres")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(context.Background())
+	r := &clusterReading{gauges: map[string]float64{}}
+	var inRecovery bool
+	if err := conn.QueryRow(t.Context(), `SELECT current_setting('server_version_num')::int, pg_is_in_recovery()`).Scan(&r.versionNum, &inRecovery); err != nil {
+		t.Fatal(err)
+	}
+	readReplication(t.Context(), conn, r, inRecovery)
+	if r.replication == nil || r.replication.Role == "" || r.replication.Replicas == nil {
+		t.Fatalf("replication = %+v", r.replication)
+	}
+	if _, ok := r.gauges[MReplicasConnected]; !ok {
+		t.Errorf("no %s gauge: %v", MReplicasConnected, r.gauges)
+	}
+}
+
+// TestStatementReads runs the pg_stat_statements queries against a stand-in
+// schema with the same shape (the extension needs shared_preload_libraries,
+// which a developer's PostgreSQL may not have).
+func TestStatementReads(t *testing.T) {
+	tg := localTarget(t)
+	_, conn := scratchDB(t, tg)
+	for _, sql := range []string{
+		`CREATE SCHEMA fakepgss`,
+		`CREATE TABLE fakepgss.data (userid oid, dbid oid, toplevel bool, queryid bigint, query text, calls bigint,
+		   total_exec_time float8, mean_exec_time float8, rows bigint)`,
+		`CREATE FUNCTION fakepgss.pg_stat_statements(showtext boolean) RETURNS SETOF fakepgss.data
+		   LANGUAGE sql AS 'SELECT userid, dbid, toplevel, queryid, CASE WHEN showtext THEN query END, calls, total_exec_time, mean_exec_time, rows FROM fakepgss.data'`,
+		`CREATE VIEW fakepgss.pg_stat_statements AS SELECT * FROM fakepgss.pg_stat_statements(true)`,
+		`CREATE VIEW fakepgss.pg_stat_statements_info AS SELECT timestamptz '2026-09-01 00:00:00+00' AS stats_reset`,
+		`INSERT INTO fakepgss.data SELECT r.oid, d.oid, true, 42, 'SELECT * FROM t WHERE id = $1', 100, 50, 0.5, 100
+		   FROM pg_roles r, pg_database d WHERE r.rolname = current_user AND d.datname = current_database()`,
+		`INSERT INTO fakepgss.data SELECT r.oid, d.oid, true, 7, 'ALTER ROLE x PASSWORD ''secret''', 1, 1, 1, 0
+		   FROM pg_roles r, pg_database d WHERE r.rolname = current_user AND d.datname = current_database()`,
+	} {
+		if _, err := conn.Exec(t.Context(), sql); err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+	}
+	var version int
+	if err := conn.QueryRow(t.Context(), `SELECT current_setting('server_version_num')::int`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	stmts, err := statementsFrom(t.Context(), conn, "fakepgss", version)
+	if err != nil || len(stmts) != 2 || stmts[0].QueryID != "42" || stmts[0].Calls != 100 {
+		t.Fatalf("cumulative statements = %+v, %v", stmts, err)
+	}
+	var s stmtState
+	now := time.Now()
+	if qs, err := s.read(t.Context(), conn, "fakepgss", version, now); err != nil || qs != nil {
+		t.Fatalf("first reading = %+v, %v", qs, err)
+	}
+	if _, err := conn.Exec(t.Context(), `UPDATE fakepgss.data SET calls = calls + 10, total_exec_time = total_exec_time + 30`); err != nil {
+		t.Fatal(err)
+	}
+	qs, err := s.read(t.Context(), conn, "fakepgss", version, now.Add(5*time.Minute))
+	if err != nil || qs == nil {
+		t.Fatalf("second reading = %+v, %v", qs, err)
+	}
+	if qs.IntervalSeconds != 300 || qs.TotalCalls != 20 || qs.TotalTimeMs != 60 || len(qs.Statements) != 2 {
+		t.Fatalf("query stats = %+v", qs)
+	}
+	top := qs.Statements[0]
+	if top.QueryID != "42" && top.QueryID != "7" || top.Calls != 10 || top.Database == "" || top.User != tg.User {
+		t.Errorf("top delta = %+v", top)
+	}
+	for _, x := range qs.Statements {
+		if x.QueryID == "42" && x.Query != "SELECT * FROM t WHERE id = $1" {
+			t.Errorf("query text = %q", x.Query)
+		}
+		if x.QueryID == "7" && strings.Contains(x.Query, "secret") {
+			t.Errorf("password not redacted: %q", x.Query)
+		}
+	}
+	// No activity: an empty interval, not an error.
+	qs, err = s.read(t.Context(), conn, "fakepgss", version, now.Add(10*time.Minute))
+	if err != nil || qs == nil || len(qs.Statements) != 0 || qs.TotalCalls != 0 {
+		t.Errorf("idle interval = %+v, %v", qs, err)
+	}
+	// A reset (new stats_reset) starts over.
+	if _, err := conn.Exec(t.Context(), `CREATE OR REPLACE VIEW fakepgss.pg_stat_statements_info AS SELECT now() AS stats_reset`); err != nil {
+		t.Fatal(err)
+	}
+	if qs, err := s.read(t.Context(), conn, "fakepgss", version, now.Add(15*time.Minute)); err != nil || qs != nil {
+		t.Errorf("reading after a reset = %+v, %v", qs, err)
+	}
+}
+
+func TestCollectCarriesInsightsAndReplication(t *testing.T) {
+	tg := localTarget(t)
+	c := New(Options{
+		PGUser: tg.User, InsightsSync: true, InsightsInterval: time.Second,
+		Databases: func() []protocol.DatabaseSpec {
+			return []protocol.DatabaseSpec{{ID: "db_local", SocketDir: tg.SocketDir, Port: tg.Port}}
+		},
+	})
+	r := c.Collect(t.Context())
+	dm := r.Databases[0]
+	if dm.Error != "" || dm.Insights == nil || dm.Insights.CollectedAt.IsZero() || len(dm.Insights.Databases) == 0 {
+		t.Fatalf("first report: error %q insights %+v", dm.Error, dm.Insights)
+	}
+	if dm.Replication == nil || dm.Replication.Role == "" {
+		t.Errorf("replication = %+v", dm.Replication)
+	}
+	if _, ok := dm.Metrics[MBlockedSessions]; !ok {
+		t.Errorf("no %s metric", MBlockedSessions)
+	}
+	// The next run is not due yet: the next report carries no insights.
+	if r := c.Collect(t.Context()); r.Databases[0].Insights != nil {
+		t.Error("insights sent twice")
 	}
 }

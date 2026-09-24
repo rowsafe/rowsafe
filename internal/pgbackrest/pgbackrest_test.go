@@ -14,13 +14,13 @@ var testRepo = Repo{
 
 func TestRenderConfig(t *testing.T) {
 	conf := RenderConfig(testRepo, ConfigInput{
-		Stanza: "tvhub", DataDir: "/var/lib/postgresql/18/main", Port: 5432,
+		Stanza: "app", DataDir: "/var/lib/postgresql/18/main", Port: 5432,
 		SocketDir: "/var/run/postgresql", User: "postgres", RetentionFull: 2, LogPath: "/var/log/rowsafe",
 	})
 	for _, want := range []string{
 		"repo1-type=s3\n", "repo1-s3-endpoint=acct.eu.r2.cloudflarestorage.com\n", "repo1-s3-region=auto\n",
-		"repo1-path=/rowsafe/tvhub\n", "repo1-cipher-type=aes-256-cbc\n", "repo1-retention-full=2\n",
-		"\n[tvhub]\n", "pg1-path=/var/lib/postgresql/18/main\n", "pg1-socket-path=/var/run/postgresql\n",
+		"repo1-path=/rowsafe/app\n", "repo1-cipher-type=aes-256-cbc\n", "repo1-retention-full=2\n",
+		"\n[app]\n", "pg1-path=/var/lib/postgresql/18/main\n", "pg1-socket-path=/var/run/postgresql\n",
 	} {
 		if !strings.Contains(conf, want) {
 			t.Errorf("config missing %q\n%s", want, conf)
@@ -45,11 +45,11 @@ func TestRepoValidate(t *testing.T) {
 }
 
 func TestArchiveCommand(t *testing.T) {
-	cmd, err := ArchiveCommand("/usr/bin/pgbackrest", "/etc/rowsafe/pgbackrest/tvhub.conf", "tvhub")
+	cmd, err := ArchiveCommand("/usr/bin/pgbackrest", "/etc/rowsafe/pgbackrest/app.conf", "app")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cmd != "/usr/bin/pgbackrest --config=/etc/rowsafe/pgbackrest/tvhub.conf --stanza=tvhub archive-push %p" {
+	if cmd != "/usr/bin/pgbackrest --config=/etc/rowsafe/pgbackrest/app.conf --stanza=app archive-push %p" {
 		t.Errorf("got %s", cmd)
 	}
 	if _, err := ArchiveCommand("/usr/bin/pgbackrest", "/etc/x.conf; rm -rf /", "x"); err == nil {
@@ -71,7 +71,7 @@ const infoJSON = `[{"archive":[{"database":{"id":1,"repo-key":1},"id":"18-1","ma
    "info":{"delta":52000000,"repository":{"delta":9800000,"delta-map":2352,"size-map":36952},"size":3870000000},
    "label":"20260920-010002F_20260921-010003D","lsn":{"start":"A/30000028","stop":"A/30000050"},"prior":"20260920-010002F",
    "reference":["20260920-010002F"],"timestamp":{"start":1758416403,"stop":1758416470},"type":"diff"}],
- "cipher":"aes-256-cbc","db":[{"id":1,"repo-key":1,"system-id":7688889327546123916,"version":"18"}],"name":"tvhub",
+ "cipher":"aes-256-cbc","db":[{"id":1,"repo-key":1,"system-id":7688889327546123916,"version":"18"}],"name":"app",
  "repo":[{"cipher":"aes-256-cbc","key":1,"status":{"code":0,"message":"ok"}}],
  "status":{"code":0,"lock":{"backup":{"held":false},"restore":{"held":false}},"message":"ok"}}]`
 
@@ -80,7 +80,7 @@ func TestParseInfoLatest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, ok := Latest(stanzas, "tvhub")
+	b, ok := Latest(stanzas, "app")
 	if !ok || b.Label != "20260920-010002F_20260921-010003D" {
 		t.Fatalf("latest = %+v, %v", b, ok)
 	}
@@ -99,7 +99,7 @@ func TestParseInfoSkipsConsoleNoise(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b, ok := Latest(stanzas, "tvhub"); !ok || b.Type != "diff" {
+	if b, ok := Latest(stanzas, "app"); !ok || b.Type != "diff" {
 		t.Errorf("latest = %+v, %v", b, ok)
 	}
 	if _, err := ParseInfo([]byte("ERROR: [055]: unable to open missing file")); err == nil {
@@ -125,14 +125,14 @@ func TestLatestBackupExplainsMissingBackups(t *testing.T) {
    "info":{"delta":52000000`, `"error":true,
    "info":{"delta":52000000`, 1)
 	stanzas, _ = ParseInfo([]byte(withError))
-	b, err := LatestBackup(stanzas, "tvhub")
+	b, err := LatestBackup(stanzas, "app")
 	if err != nil || b.Label != "20260920-010002F" {
 		t.Errorf("latest = %s, %v; want the full backup", b.Label, err)
 	}
 }
 
 func TestRenderConfigSelfHostedS3(t *testing.T) {
-	in := ConfigInput{Stanza: "tvhub", DataDir: "/d", Port: 5432, SocketDir: "/s", User: "postgres", RetentionFull: 2, LogPath: "/l"}
+	in := ConfigInput{Stanza: "app", DataDir: "/d", Port: 5432, SocketDir: "/s", User: "postgres", RetentionFull: 2, LogPath: "/l"}
 	conf := RenderConfig(testRepo, in)
 	for _, unwanted := range []string{"repo1-storage-port", "repo1-storage-ca-file", "repo1-storage-verify-tls"} {
 		if strings.Contains(conf, unwanted) {
@@ -166,13 +166,13 @@ func (r *recordRunner) Run(_ context.Context, name string, args ...string) ([]by
 
 func TestRestoreNeverTouchesProductionPaths(t *testing.T) {
 	rr := &recordRunner{}
-	c := CLI{Bin: "/usr/bin/pgbackrest", ConfigPath: "/etc/rowsafe/pgbackrest/tvhub.conf", Stanza: "tvhub", Runner: rr,
+	c := CLI{Bin: "/usr/bin/pgbackrest", ConfigPath: "/etc/rowsafe/pgbackrest/app.conf", Stanza: "app", Runner: rr,
 		Wrap: []string{"nice", "-n", "10"}}
 	if _, err := c.Restore(context.Background(), "/var/lib/rowsafe/drills/t/data", "/var/lib/rowsafe/drills/t/tablespaces"); err != nil {
 		t.Fatal(err)
 	}
 	got := strings.Join(rr.calls[0], " ")
-	want := "nice -n 10 /usr/bin/pgbackrest --config=/etc/rowsafe/pgbackrest/tvhub.conf --stanza=tvhub " +
+	want := "nice -n 10 /usr/bin/pgbackrest --config=/etc/rowsafe/pgbackrest/app.conf --stanza=app " +
 		"--pg1-path=/var/lib/rowsafe/drills/t/data --tablespace-map-all=/var/lib/rowsafe/drills/t/tablespaces --archive-mode=off --cmd=/usr/bin/pgbackrest restore"
 	if got != want {
 		t.Errorf("restore command:\n got %s\nwant %s", got, want)

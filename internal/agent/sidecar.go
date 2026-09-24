@@ -27,7 +27,7 @@ const defaultSocketDir = "/var/run/postgresql"
 func uidHint(uid int) string {
 	return fmt.Sprintf("the agent container must run as the postgres user of the PostgreSQL image, uid:gid 999:999 for the "+
 		"Debian-based postgres images and 70:70 for the Alpine ones (set `user: \"%d:%d\"` and use an agent image built with "+
-		"PG_UID/PG_GID to match; see docs/docker.md)", uid, uid)
+		"PG_UID/PG_GID to match; see https://rowsafe.sh/docs/guides/docker)", uid, uid)
 }
 
 // SidecarStartupCheck verifies, before the agent starts working, that the
@@ -55,7 +55,7 @@ func SidecarStartupCheck(cfg Config) error {
 func checkSpoolRoot(root string) error {
 	info, err := os.Stat(root)
 	if err != nil {
-		return fmt.Errorf("the WAL spool %s is missing (%v): mount the spool volume at %s in both the agent and the PostgreSQL container (see docs/docker.md)", root, err, root)
+		return fmt.Errorf("the WAL spool %s is missing (%v): mount the spool volume at %s in both the agent and the PostgreSQL container (see https://rowsafe.sh/docs/guides/docker)", root, err, root)
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("the WAL spool %s is not a directory", root)
@@ -99,7 +99,7 @@ func (a *Agent) sidecarPreflight(ctx context.Context, db protocol.DatabaseSpec, 
 	info, err := os.Stat(dd)
 	if err != nil {
 		return fmt.Errorf("PostgreSQL's data directory %s is not visible in the agent container (%v): mount the PostgreSQL "+
-			"data volume at the same path in both containers (see docs/docker.md)", dd, err)
+			"data volume at the same path in both containers (see https://rowsafe.sh/docs/guides/docker)", dd, err)
 	}
 	if owner, uid := fileUID(info), os.Geteuid(); owner != uid {
 		return fmt.Errorf("PostgreSQL's data directory %s is owned by uid %d, but the agent runs as uid %d: %s", dd, owner, uid, uidHint(owner))

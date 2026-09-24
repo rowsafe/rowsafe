@@ -7,7 +7,7 @@
 
 [Unit]
 Description=Rowsafe agent (PostgreSQL backups, WAL archiving and restore drills)
-Documentation=https://github.com/rowsafe/rowsafe/blob/main/docs/agent.md
+Documentation=https://rowsafe.sh/docs/reference/agent-configuration
 Wants=network-online.target
 # Ordering only: the agent must keep running (and reporting) while
 # PostgreSQL is down, so it does not require it.
