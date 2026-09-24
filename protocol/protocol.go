@@ -175,6 +175,8 @@ type HeartbeatRequest struct {
 	RestartActions []string `json:"restart_actions,omitempty"`
 	// Rewinds are the live copies and kept data directories on this host.
 	Rewinds []RewindState `json:"rewinds,omitempty"`
+	// Storage: Rowsafe Storage or the customer's own bucket (storage.go).
+	Storage *StorageStatus `json:"storage,omitempty"`
 }
 
 // HeartbeatResponse tells the agent which databases to watch.

@@ -21,11 +21,14 @@ import (
 // Credentials come from the agent's environment and are written only to the
 // host-local config file, which Postgres' archive_command also reads.
 type Repo struct {
-	Endpoint   string // e.g. <account>.eu.r2.cloudflarestorage.com
-	Bucket     string
-	Region     string // "auto" for R2
-	Key        string
-	KeySecret  string
+	Endpoint  string // e.g. <account>.eu.r2.cloudflarestorage.com
+	Bucket    string
+	Region    string // "auto" for R2
+	Key       string
+	KeySecret string
+	// Token is the session token of temporary credentials (Rowsafe
+	// Storage); "" for a long-lived key.
+	Token      string
 	CipherPass string // client-side encryption passphrase; keep a copy off-host
 	PathPrefix string // e.g. "/rowsafe"
 	URIStyle   string // "path" or "host"
@@ -57,7 +60,7 @@ func (r Repo) Validate() error {
 	if len(r.CipherPass) < 20 {
 		return errors.New("ROWSAFE_REPO_CIPHER_PASS must be at least 20 characters")
 	}
-	for _, v := range []string{r.Endpoint, r.Bucket, r.Region, r.Key, r.KeySecret, r.CipherPass, r.PathPrefix, r.CAFile} {
+	for _, v := range []string{r.Endpoint, r.Bucket, r.Region, r.Key, r.KeySecret, r.Token, r.CipherPass, r.PathPrefix, r.CAFile} {
 		if strings.ContainsAny(v, "\n\r") {
 			return errors.New("repository settings must not contain newlines")
 		}
@@ -105,10 +108,6 @@ func RenderConfig(repo Repo, in ConfigInput) string {
 	if uriStyle == "" {
 		uriStyle = "path"
 	}
-	prefix := "/" + strings.Trim(repo.PathPrefix, "/")
-	if prefix == "/" {
-		prefix = ""
-	}
 	var b strings.Builder
 	b.WriteString("# Managed by rowsafe-agent. Local edits are overwritten.\n")
 	b.WriteString("[global]\n")
@@ -120,6 +119,9 @@ func RenderConfig(repo Repo, in ConfigInput) string {
 	kv("repo1-s3-uri-style", uriStyle)
 	kv("repo1-s3-key", repo.Key)
 	kv("repo1-s3-key-secret", repo.KeySecret)
+	if repo.Token != "" {
+		kv("repo1-s3-token", repo.Token)
+	}
 	if repo.Port != 0 {
 		kv("repo1-storage-port", repo.Port)
 	}
@@ -129,7 +131,7 @@ func RenderConfig(repo Repo, in ConfigInput) string {
 	if repo.SkipTLSVerify {
 		kv("repo1-storage-verify-tls", "n")
 	}
-	kv("repo1-path", prefix+"/"+in.Stanza)
+	kv("repo1-path", repoPath(repo.PathPrefix, in.Stanza))
 	kv("repo1-cipher-type", "aes-256-cbc")
 	kv("repo1-cipher-pass", repo.CipherPass)
 	kv("repo1-retention-full-type", "count")

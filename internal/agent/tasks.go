@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -152,9 +153,15 @@ var numCPU = runtime.NumCPU
 // writeConfig renders the pgBackRest config for db. It is rewritten before
 // every operation so retention and credential changes take effect.
 func (a *Agent) writeConfig(db protocol.DatabaseSpec, in protocol.InspectResult) error {
-	if err := a.cfg.Repo.Validate(); err != nil {
+	if err := a.cfg.ValidateRepo(); err != nil {
 		return err
 	}
+	repo, err := a.repo()
+	if err != nil {
+		return err
+	}
+	a.confMu.Lock()
+	defer a.confMu.Unlock()
 	for _, dir := range []string{a.cfg.ConfigDir, a.cfg.LogDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
@@ -164,14 +171,22 @@ func (a *Agent) writeConfig(db protocol.DatabaseSpec, in protocol.InspectResult)
 	if a.cfg.Sidecar() {
 		logDir = "" // container logs only
 	}
-	conf := pgbackrest.RenderConfig(a.cfg.Repo, pgbackrest.ConfigInput{
+	conf := pgbackrest.RenderConfig(repo, pgbackrest.ConfigInput{
 		Stanza: db.Stanza, DataDir: in.DataDirectory, Port: db.Port, SocketDir: db.SocketDir,
 		User: a.cfg.PGUser, RetentionFull: db.RetentionFull, LogPath: logDir,
 		ProcessMax: pgbackrest.ProcessMax(numCPU()),
 	})
 	path := a.cfg.configPath(db.Stanza)
-	if old, err := os.ReadFile(path); err == nil && string(old) == conf {
+	old, err := os.ReadFile(path)
+	if err == nil && string(old) == conf {
 		return nil
+	}
+	if err == nil && pgbackrest.Location(string(old)) != pgbackrest.Location(conf) {
+		// Moving to another repository: note where the stanza exists now
+		// (configs from before markers), so it is created in the new one.
+		if _, err := os.Stat(a.cfg.repoMarkerPath(db.Stanza)); errors.Is(err, os.ErrNotExist) {
+			_ = writeFileAtomic(a.cfg.repoMarkerPath(db.Stanza), []byte(pgbackrest.Location(string(old))), 0o600)
+		}
 	}
 	return writeFileAtomic(path, []byte(conf), 0o600)
 }
@@ -208,7 +223,7 @@ func (a *Agent) adopt(ctx context.Context, db protocol.DatabaseSpec, p protocol.
 		tl.Printf("plan only: %d changes, nothing was modified", len(plan.Changes))
 		return res, nil
 	}
-	if err := a.cfg.Repo.Validate(); err != nil {
+	if err := a.cfg.ValidateRepo(); err != nil {
 		return res, err
 	}
 
@@ -228,6 +243,7 @@ func (a *Agent) adopt(ctx context.Context, db protocol.DatabaseSpec, p protocol.
 	if err != nil {
 		return res, err
 	}
+	a.stanzaCreated(db.Stanza)
 	if err := applySettings(ctx, a.target(db), plan.Settings, tl); err != nil {
 		return res, err
 	}
@@ -320,6 +336,9 @@ func (a *Agent) check(ctx context.Context, db protocol.DatabaseSpec, tl *taskLog
 	if err := a.writeConfig(db, in); err != nil {
 		return res, err
 	}
+	if err := a.ensureStanza(ctx, db, tl); err != nil {
+		return res, err
+	}
 	if a.cfg.Sidecar() {
 		// pgbackrest check switches WAL segments and waits until the segment
 		// is in the repository, so here it proves the whole path: PostgreSQL
@@ -348,6 +367,9 @@ func (a *Agent) backup(ctx context.Context, db protocol.DatabaseSpec, typ string
 		return nil, err
 	}
 	if err := a.writeConfig(db, in); err != nil {
+		return nil, err
+	}
+	if err := a.ensureStanza(ctx, db, tl); err != nil {
 		return nil, err
 	}
 	cli := a.cli(db)
