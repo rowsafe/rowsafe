@@ -156,6 +156,8 @@ if ! rowsafe show ${DB_ARG[@]+"${DB_ARG[@]}"} >"$TMP/show.out" 2>"$TMP/show.err"
   case $err in
     *"invalid API key"* | *"invalid credentials"* | *"HTTP 401"*)
       stop "API key rejected" "Rowsafe didn't accept the API key ($err). Check the ROWSAFE_API_KEY secret: it must be a current key of your organization (Settings > API keys)." ;;
+    *"not found"*)
+      stop "database not found" "Rowsafe has no database named \"${INPUT_DATABASE:-}\" in this API key's organization. Use the name shown in the dashboard." ;;
     *"which database"*)
       stop "which database?" "${err%%$'\n'*} Set the database input, e.g. \`database: app\`, or commit a .rowsafe.json (\`rowsafe init app\`)." ;;
     *)

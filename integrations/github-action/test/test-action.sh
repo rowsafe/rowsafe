@@ -259,6 +259,11 @@ expect_summary "### Rowsafe: API key rejected"
 expect_no_log "not-a-key"
 ok "missing and rejected API keys"
 
+run unknown-db INPUT_DATABASE=nope
+expect_status 1
+expect_summary "### Rowsafe: database not found"
+ok "unknown database name"
+
 # 12. Invalid inputs.
 run bad-wait INPUT_DATABASE=app INPUT_WAIT=maybe
 expect_status 1
