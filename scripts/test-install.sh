@@ -1309,7 +1309,14 @@ pooler_tests() {
   lacks "Allow Rowsafe to install and manage PgBouncer"
   grep -qx "5432" /etc/rowsafe/pooler-allowed || fail "a re-run dropped the pooler allow list"
 
-  # The helper in PgBouncer mode, run as rowsafe-pooler.service would.
+  # The helper in PgBouncer mode, run as rowsafe-pooler.service would
+  # (scenario reset the stand-ins).
+  cat >"$F/systemctl" <<'EOF'
+#!/bin/sh
+echo "$*" >>/tmp/rowsafe-fake/systemctl.calls
+exit "$(cat /tmp/rowsafe-fake/systemctl.rc 2>/dev/null || echo 0)"
+EOF
+  chmod 755 "$F/systemctl"
   cat >"$F/apt-get" <<'APT_EOF'
 #!/bin/sh
 echo "$*" >>/tmp/rowsafe-fake/apt.calls
