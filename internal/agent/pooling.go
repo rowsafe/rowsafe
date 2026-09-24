@@ -250,7 +250,9 @@ func PoolingDefaults(cores, maxConnections, reserved int) protocol.PoolingSettin
 	return protocol.DefaultPoolingSettings(cores, maxConnections, reserved)
 }
 
-func headroom(maxConnections, reserved int) int { return protocol.PoolHeadroom(maxConnections, reserved) }
+func headroom(maxConnections, reserved int) int {
+	return protocol.PoolHeadroom(maxConnections, reserved)
+}
 
 // fillSettings completes settings with defaults and checks them.
 func fillSettings(s, def protocol.PoolingSettings, maxConnections, reserved int) (protocol.PoolingSettings, error) {
