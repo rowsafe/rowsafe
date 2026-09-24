@@ -100,6 +100,10 @@ func TestDestructiveDBCommand(t *testing.T) {
 		{"pg_restore -l dump.pgdump", false},
 		{"pg_dump app > app.sql", false},
 		{`bash -c "bin/rails db:migrate"`, true},
+		{`bash -lc "npx prisma migrate deploy"`, true},
+		{`sh -ec 'psql -c "DROP TABLE users"'`, true},
+		{`zsh -ic "npm test"`, false},
+		{`grep -ic "DROP TABLE" schema.sql`, false},
 
 		// Mentions that don't run anything.
 		{`git commit -m "run prisma migrate deploy on release"`, false},

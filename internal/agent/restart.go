@@ -109,26 +109,12 @@ func (a *Agent) restart(ctx context.Context, db protocol.DatabaseSpec, taskID st
 			"or restart PostgreSQL yourself: sudo systemctl restart %s", host, a.cfg.RestartDir, strings.TrimSuffix(unit, ".service"))
 	}
 
-	id := taskID
-	if !restartIDRE.MatchString(id) {
-		b := make([]byte, 8)
-		_, _ = rand.Read(b)
-		id = hex.EncodeToString(b)
-	}
-	request := filepath.Join(a.cfg.RestartDir, "request")
-	resultPath := filepath.Join(a.cfg.RestartResultDir, "result")
 	start := time.Now()
 	tl.Printf("asking the restart helper to restart %s (port %d)", unit, db.Port)
-	if err := writeFileAtomic(request, []byte(fmt.Sprintf("%s %d\n", id, db.Port)), 0o600); err != nil {
-		return nil, err
-	}
-
-	res, err := waitRestartResult(ctx, resultPath, id)
+	res, err := a.askHelper(ctx, helperRestart, db.Port, taskID)
 	if err != nil {
-		_ = os.Remove(request)
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errRestartNoAnswer) {
-			return nil, fmt.Errorf("the restart helper on %s did not answer within %s; check `systemctl status rowsafe-pg-restart.path rowsafe-pg-restart.service`, "+
-				"or restart PostgreSQL yourself: sudo systemctl restart %s", host, restartHelperTimeout, strings.TrimSuffix(unit, ".service"))
+		if errors.Is(err, errRestartNoAnswer) {
+			return nil, fmt.Errorf("%w, or restart PostgreSQL yourself: sudo systemctl restart %s", err, strings.TrimSuffix(unit, ".service"))
 		}
 		return nil, err
 	}
@@ -167,6 +153,75 @@ func (a *Agent) restart(ctx context.Context, db protocol.DatabaseSpec, taskID st
 }
 
 var errRestartNoAnswer = errors.New("no answer from the restart helper")
+
+// Root helper actions.
+const (
+	helperRestart = "restart"
+	helperStop    = "stop"
+	helperStart   = "start"
+)
+
+// askHelper hands one request to the root helper and waits for its answer
+// (key=value lines). Restarts use the "ID PORT" form every helper
+// understands; stop and start need the helper from agent 0.4.0 on
+// ("ID ACTION PORT"), and an older one answers "malformed request".
+func (a *Agent) askHelper(ctx context.Context, action string, port int, id string) (map[string]string, error) {
+	host, _ := os.Hostname()
+	if !restartIDRE.MatchString(id) {
+		b := make([]byte, 8)
+		_, _ = rand.Read(b)
+		id = hex.EncodeToString(b)
+	}
+	line := fmt.Sprintf("%s %s %d\n", id, action, port)
+	if action == helperRestart {
+		line = fmt.Sprintf("%s %d\n", id, port)
+	}
+	request := filepath.Join(a.cfg.RestartDir, "request")
+	if err := writeFileAtomic(request, []byte(line), 0o600); err != nil {
+		return nil, err
+	}
+	res, err := waitRestartResult(ctx, filepath.Join(a.cfg.RestartResultDir, "result"), id)
+	if err != nil {
+		_ = os.Remove(request)
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errRestartNoAnswer) {
+			return nil, fmt.Errorf("%w: the restart helper on %s did not answer within %s; check `systemctl status rowsafe-pg-restart.path rowsafe-pg-restart.service`",
+				errRestartNoAnswer, host, restartHelperTimeout)
+		}
+		return nil, err
+	}
+	if action != helperRestart && res["ok"] != "1" && res["error"] == "malformed request" {
+		return nil, fmt.Errorf("%w: the helper that restarts PostgreSQL on %s is from an older Rowsafe and can't stop it. "+
+			"Re-run the install command on the server to allow Rewind there", errOldHelper, host)
+	}
+	return res, nil
+}
+
+var errOldHelper = errors.New("old restart helper")
+
+// helperActions reads what the installed root helper can do from its
+// "# actions:" line (reported in the heartbeat). A helper without one only
+// restarts.
+func (a *Agent) helperActions() []string {
+	if a.cfg.Sidecar() || a.cfg.RestartHelper == "" || len(a.restartPorts()) == 0 {
+		return nil
+	}
+	data, err := os.ReadFile(a.cfg.RestartHelper)
+	if err != nil {
+		return nil
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if rest, ok := strings.CutPrefix(line, "# actions:"); ok {
+			var out []string
+			for _, f := range strings.Fields(rest) {
+				if f == helperRestart || f == helperStop || f == helperStart {
+					out = append(out, f)
+				}
+			}
+			return out
+		}
+	}
+	return []string{helperRestart}
+}
 
 // waitRestartResult waits for the helper's result for request id.
 func waitRestartResult(ctx context.Context, path, id string) (map[string]string, error) {

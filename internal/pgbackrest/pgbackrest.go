@@ -169,6 +169,21 @@ func ArchiveCommand(bin, configPath, stanza string) (string, error) {
 	return fmt.Sprintf("%s --config=%s --stanza=%s archive-push %%p", bin, configPath, stanza), nil
 }
 
+// ArchiveGetCommand is a restore_command that reads WAL from the
+// repository (for a recovery Rowsafe runs itself, outside pgbackrest
+// restore).
+func ArchiveGetCommand(bin, configPath, stanza string) (string, error) {
+	for _, p := range []string{bin, configPath} {
+		if !safePathRE.MatchString(p) {
+			return "", fmt.Errorf("unsafe path for restore_command: %q", p)
+		}
+	}
+	if !stanzaRE.MatchString(stanza) {
+		return "", fmt.Errorf("unsafe stanza name %q", stanza)
+	}
+	return fmt.Sprintf("%s --config=%s --stanza=%s archive-get %%f \"%%p\"", bin, configPath, stanza), nil
+}
+
 // Runner executes a command and returns combined output. Tests swap it out.
 type Runner interface {
 	Run(ctx context.Context, name string, args ...string) ([]byte, error)
@@ -237,6 +252,67 @@ func (c CLI) Restore(ctx context.Context, dataDir, tablespaceDir string) ([]byte
 		// depend on PATH or on how this process was launched.
 		"--cmd="+c.Bin,
 		"restore")
+}
+
+// RestoreOptions describe a point-in-time restore (RestoreTo).
+type RestoreOptions struct {
+	DataDir string // --pg1-path
+	// TablespaceDir remaps every tablespace under it (--tablespace-map-all);
+	// "" keeps them where the backup says (only for restores that replace
+	// production itself, which has none).
+	TablespaceDir string
+	// ArchiveOff forces archive_mode=off in the restored cluster, so a copy
+	// never pushes WAL into the repository. A restore that replaces
+	// production keeps its archiving (false).
+	ArchiveOff bool
+	// Type is "time" or "name"; Target the time ("2006-01-02
+	// 15:04:05.999999+00") or restore point name.
+	Type, Target string
+	Set          string // --set: the backup to start from ("" lets pgBackRest pick, time targets only)
+	Timeline     string // --target-timeline ("" = PostgreSQL's default)
+}
+
+var (
+	restoreTargetRE   = regexp.MustCompile(`^[A-Za-z0-9 :.+_-]{1,64}$`)
+	backupLabelRE     = regexp.MustCompile(`^[0-9]{8}-[0-9]{6}F(_[0-9]{8}-[0-9]{6}[DI])?$`)
+	targetTimelineRE  = regexp.MustCompile(`^(current|latest|[0-9]{1,10})$`)
+	restoreTargetType = map[string]bool{"time": true, "name": true}
+)
+
+// ValidBackupLabel reports whether s looks like a pgBackRest backup label.
+func ValidBackupLabel(s string) bool { return backupLabelRE.MatchString(s) }
+
+// RestoreTo restores to a point in time or a restore point, then promotes.
+// Every value is checked, so nothing unexpected reaches pgBackRest's
+// command line or the recovery settings it writes.
+func (c CLI) RestoreTo(ctx context.Context, o RestoreOptions) ([]byte, error) {
+	if !restoreTargetType[o.Type] || !restoreTargetRE.MatchString(o.Target) {
+		return nil, fmt.Errorf("invalid restore target %q %q", o.Type, o.Target)
+	}
+	if o.Set != "" && !ValidBackupLabel(o.Set) {
+		return nil, fmt.Errorf("invalid backup set %q", o.Set)
+	}
+	if o.Timeline != "" && !targetTimelineRE.MatchString(o.Timeline) {
+		return nil, fmt.Errorf("invalid target timeline %q", o.Timeline)
+	}
+	if !safePathRE.MatchString(o.DataDir) || (o.TablespaceDir != "" && !safePathRE.MatchString(o.TablespaceDir)) {
+		return nil, fmt.Errorf("unsafe restore path %q", o.DataDir)
+	}
+	args := []string{"--pg1-path=" + o.DataDir}
+	if o.TablespaceDir != "" {
+		args = append(args, "--tablespace-map-all="+o.TablespaceDir)
+	}
+	if o.ArchiveOff {
+		args = append(args, "--archive-mode=off")
+	}
+	args = append(args, "--type="+o.Type, "--target="+o.Target, "--target-action=promote")
+	if o.Set != "" {
+		args = append(args, "--set="+o.Set)
+	}
+	if o.Timeline != "" {
+		args = append(args, "--target-timeline="+o.Timeline)
+	}
+	return c.run(ctx, append(args, "--cmd="+c.Bin, "restore")...)
 }
 
 func (c CLI) Info(ctx context.Context) ([]Stanza, error) {

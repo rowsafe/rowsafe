@@ -60,6 +60,13 @@ type Config struct {
 	// its answer (ROWSAFE_RESTART_RESULT_DIR). Root never writes into a
 	// directory the agent owns.
 	RestartResultDir string
+	// RestartHelper is the installed root helper (ROWSAFE_RESTART_HELPER);
+	// the agent only reads its "# actions:" line.
+	RestartHelper string
+
+	// RewindDir holds restored copies, one directory per copy
+	// (ROWSAFE_REWIND_DIR).
+	RewindDir string
 }
 
 // Agent modes (ROWSAFE_MODE).
@@ -95,6 +102,7 @@ func ConfigFromEnv() (Config, error) {
 		SpoolDir:         env("ROWSAFE_SPOOL_DIR", "/rowsafe-spool"),
 		RestartAllowFile: env("ROWSAFE_RESTART_ALLOW_FILE", "/etc/rowsafe/restart-allowed"),
 		RestartResultDir: env("ROWSAFE_RESTART_RESULT_DIR", "/run/rowsafe-pg-restart"),
+		RestartHelper:    env("ROWSAFE_RESTART_HELPER", "/usr/local/lib/rowsafe/rowsafe-pg-restart"),
 		Repo: pgbackrest.Repo{
 			Endpoint:   env("ROWSAFE_REPO_S3_ENDPOINT", ""),
 			Bucket:     env("ROWSAFE_REPO_S3_BUCKET", ""),
@@ -108,6 +116,7 @@ func ConfigFromEnv() (Config, error) {
 		},
 	}
 	c.RestartDir = env("ROWSAFE_RESTART_DIR", filepath.Join(c.StateDir, "restart"))
+	c.RewindDir = env("ROWSAFE_REWIND_DIR", filepath.Join(c.StateDir, "rewind"))
 	var err error
 	if c.Mode != ModeNative && c.Mode != ModeDockerSidecar {
 		return c, fmt.Errorf("ROWSAFE_MODE must be %q or %q", ModeNative, ModeDockerSidecar)
@@ -148,7 +157,7 @@ func ConfigFromEnv() (Config, error) {
 		!strings.HasPrefix(c.ControlURL, "http://localhost") {
 		return c, fmt.Errorf("ROWSAFE_URL must use https (plain http is only allowed for localhost)")
 	}
-	for _, p := range []string{c.StateDir, c.ConfigDir, c.LogDir, c.DrillDir, c.InstallDir, c.RestartDir, c.RestartAllowFile, c.RestartResultDir} {
+	for _, p := range []string{c.StateDir, c.ConfigDir, c.LogDir, c.DrillDir, c.InstallDir, c.RestartDir, c.RestartAllowFile, c.RestartResultDir, c.RestartHelper, c.RewindDir} {
 		if !filepath.IsAbs(p) {
 			return c, fmt.Errorf("directory %q must be absolute", p)
 		}

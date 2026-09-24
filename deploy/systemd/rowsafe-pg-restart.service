@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-# rowsafe-pg-restart.service: restarts a PostgreSQL cluster that root listed
-# in /etc/rowsafe/restart-allowed, when the Rowsafe agent asks because a
-# person did (see /usr/local/lib/rowsafe/rowsafe-pg-restart). Started by
-# rowsafe-pg-restart.path; installed by https://rowsafe.sh/install only when
-# root allowed it.
+# rowsafe-pg-restart.service: restarts, stops or starts a PostgreSQL cluster
+# that root listed in /etc/rowsafe/restart-allowed, when the Rowsafe agent
+# asks because a person did (see /usr/local/lib/rowsafe/rowsafe-pg-restart).
+# Started by rowsafe-pg-restart.path; installed by https://rowsafe.sh/install
+# only when root allowed it.
 
 [Unit]
-Description=Rowsafe: restart PostgreSQL on request
+Description=Rowsafe: restart or stop PostgreSQL on request
 Documentation=https://rowsafe.sh/docs/reference/agent-configuration
 
 [Service]
@@ -27,7 +27,8 @@ UMask=0022
 
 # Hardening. Root never writes into the agent's directory: the request is
 # read and removed as the agent user (hence CAP_SETUID/CAP_SETGID, to drop
-# to it). Then it asks systemd over its private socket to restart one unit.
+# to it). Then it asks systemd over its private socket to restart, stop or
+# start one unit.
 CapabilityBoundingSet=CAP_SETUID CAP_SETGID
 AmbientCapabilities=
 NoNewPrivileges=yes

@@ -41,15 +41,15 @@ type Options struct {
 
 const maxWaitLimit = 60 * time.Second
 
-const instructions = `Rowsafe is the safety net for PostgreSQL databases: continuous WAL archiving (point-in-time recovery), scheduled backups (Rewind) and a weekly restore test (Proof, task type drill), with health monitoring (Pulse), run by an agent on each database host. It never restarts PostgreSQL on its own (only when a person asks, in the dashboard or with "rowsafe restart"; no MCP tool can) or runs arbitrary SQL, and never sees backup contents.
+const instructions = `Rowsafe is the safety net for PostgreSQL databases: continuous WAL archiving (point-in-time recovery), scheduled backups (Rewind) and a weekly restore test (Proof, task type drill), with health monitoring (Pulse), run by an agent on each database host. It never restarts PostgreSQL on its own (only when a person asks, in the dashboard or with "rowsafe restart"; no MCP tool can) or runs arbitrary SQL, and never sees backup contents. Rewinding (restoring a copy, bringing rows back, rewinding a whole database) is for people only, in the dashboard or with "rowsafe rewind": AI assistants never restore over production, and no MCP tool can.
 
 Before any destructive or risky database operation (migrations, schema changes, DROP/TRUNCATE, DELETE/UPDATE without a narrow WHERE, bulk data changes, restoring a dump):
 1. safety_check on the database. If it is not protected, tell the user why and get their OK before continuing.
 2. create_restore_point with a descriptive name, and tell the user the name. (If the tool is unavailable, ask the user to run: rowsafe mark DB NAME.)
 3. Proceed.
-4. If something breaks, stop. Don't try to repair data and never attempt a restore yourself: tell the user they can restore the database to the named restore point.
+4. If something breaks, stop. Don't try to repair data and never attempt a restore yourself: tell the user they can Rewind in the Rowsafe dashboard (restore a copy at the restore point, compare it and bring the missing rows back, or rewind the whole database), or run "rowsafe rewind". rewind_window shows how far back they can go.
 
-For "is everything OK?" or alerts, start with fleet_health: it lists each problem with the exact next step. For "is the database healthy?", "what is slow?" or "why is the disk filling up?", use database_health, query_trends and database_insights. get_task shows a task's result and log tail. Write tools queue asynchronous tasks and return a task id; poll get_task. apply_adoption changes PostgreSQL settings: only after showing the user the plan and getting explicit approval.`
+For "is everything OK?" or alerts, start with fleet_health: it lists each problem with the exact next step. For "is the database healthy?", "what is slow?" or "why is the disk filling up?", use database_health, query_trends and database_insights. When database_health says Rowsafe can fix a finding (clean up tables, remove an unused index, end a stuck session, ...), tell the user to click Apply fix in the dashboard (Pulse, Health) instead of giving them SQL or commands to run; you can't apply fixes yourself. get_task shows a task's result and log tail. Write tools queue asynchronous tasks and return a task id; poll get_task. apply_adoption changes PostgreSQL settings: only after showing the user the plan and getting explicit approval.`
 
 // NewServer returns an MCP server whose tools act through c.
 func NewServer(c *client.Client, opts Options) *sdk.Server {
@@ -68,6 +68,7 @@ func NewServer(c *client.Client, opts Options) *sdk.Server {
 	t.addReadTools(s)
 	t.addSafetyReadTools(s)
 	t.addMonitoringTools(s)
+	t.addRewindReadTools(s)
 	if opts.AllowWrites {
 		t.addWriteTools(s)
 	}

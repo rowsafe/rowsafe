@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # rowsafe-pg-restart.path: starts rowsafe-pg-restart.service when the Rowsafe
-# agent asks for a PostgreSQL restart (someone clicked Restart in the
-# dashboard or ran `rowsafe restart`). Installed by https://rowsafe.sh/install
-# only when root allowed it; remove it with --no-allow-restart.
+# agent asks to restart or stop PostgreSQL (someone clicked Restart or Rewind
+# in the dashboard, or ran `rowsafe restart`). Installed by
+# https://rowsafe.sh/install only when root allowed it; remove it with
+# --no-allow-restart.
 
 [Unit]
-Description=Rowsafe: watch for PostgreSQL restart requests
+Description=Rowsafe: watch for requests to restart or stop PostgreSQL
 Documentation=https://rowsafe.sh/docs/reference/agent-configuration
 
 [Path]

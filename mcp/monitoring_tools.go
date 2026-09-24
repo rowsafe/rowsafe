@@ -63,7 +63,8 @@ type QueryTrendsOutput struct {
 func (t *tools) addMonitoringTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "database_health",
-		Description: "Health score (0-100) of a database, with findings in plain language, worst first: each has a title, an explanation, what to do and often a command or SQL to start with. " +
+		Description: "Health score (0-100) of a database, with findings in plain language, worst first: each has a title, an explanation and what to do. " +
+			"Many findings list fixes Rowsafe can apply itself (clean up tables, rebuild or remove an index, end a stuck session, remove an inactive replication slot, back up now, ...): the user applies them with Apply fix in the Rowsafe dashboard (Pulse, Health), after a confirmation when they are disruptive. Point the user there instead of giving them SQL to run; no MCP tool applies fixes. " +
 			"Covers backups, restore tests and WAL archiving; whether PostgreSQL answers; disk space and a forecast of when it fills up; connections; vacuum, transaction ID wraparound and estimated bloat; blocked queries, statements that got slower, unused and duplicate indexes, tables that may lack an index; replication lag. " +
 			"Without a database it lists every database's score and top finding. Scores: 90-100 healthy, 70-89 needs attention, 50-69 at risk, below 50 critical.",
 		Annotations: readOnly("Database health score"),
@@ -72,7 +73,7 @@ func (t *tools) addMonitoringTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "database_insights",
 		Description: "Table and index insights of a database, collected every 30 minutes: largest tables and indexes, estimated table and index bloat (estimates from planner statistics), unused indexes (never scanned since statistics were reset; primary keys and unique indexes excluded), duplicate and redundant indexes, large tables read by sequential scans (may be missing an index), dead rows with last vacuum and analyze times, and tables with the oldest transaction IDs. " +
-			"Suggest DROP INDEX CONCURRENTLY or new indexes only as proposals for the user to review; never run them.",
+			"Unused and duplicate indexes and bloat that Rowsafe can deal with appear as fixes in database_health: point the user to Apply fix in the dashboard (Pulse, Health) rather than suggesting DROP INDEX or REINDEX. Suggest new indexes only as proposals for the user to review; never run them.",
 		Annotations: readOnly("Table and index insights"),
 		InputSchema: inputSchema[insightsInput](func(p map[string]*jsonschema.Schema) {
 			p["limit"].Minimum, p["limit"].Maximum, p["limit"].Default = ptr(1.0), ptr(20.0), []byte("10")
@@ -116,6 +117,11 @@ func (t *tools) databaseHealth(ctx context.Context, _ *sdk.CallToolRequest, in h
 			b.line("")
 			b.line("Call database_health with a database for its findings and what to do.")
 		}
+		for i := range o.Databases {
+			if f := o.Databases[i].TopFinding; f != nil {
+				stripFixParams(f)
+			}
+		}
 		return text(b), HealthOutput{Fleet: &o}, nil
 	}
 	h, err := t.c.Health(ctx, in.Database)
@@ -124,6 +130,9 @@ func (t *tools) databaseHealth(ctx context.Context, _ *sdk.CallToolRequest, in h
 	}
 	if h.Findings == nil {
 		h.Findings = []protocol.Finding{}
+	}
+	for i := range h.Findings {
+		stripFixParams(&h.Findings[i])
 	}
 	if h.Checks == nil {
 		h.Checks = []protocol.HealthCheck{}
@@ -134,7 +143,21 @@ func (t *tools) databaseHealth(ctx context.Context, _ *sdk.CallToolRequest, in h
 		b.line("[%s, -%d] %s", strings.ToUpper(f.Severity), f.Penalty, f.Title)
 		b.line("  %s", f.Explanation)
 		b.line("  What to do: %s", f.Action)
-		if f.Command != "" {
+		var fixes, unavailable []string
+		for _, fx := range f.Fixes {
+			if fx.Available {
+				fixes = append(fixes, fx.Label)
+			} else if fx.Reason != "" {
+				unavailable = append(unavailable, fx.Label+" (not now: "+fx.Reason+")")
+			}
+		}
+		switch {
+		case len(fixes) > 0:
+			b.line("  Rowsafe can fix this: %s. The user clicks Apply fix in the dashboard (Pulse, Health); you can't apply it.", strings.Join(fixes, "; "))
+		case len(unavailable) > 0:
+			b.line("  Rowsafe could fix this, but not right now: %s.", strings.Join(unavailable, "; "))
+		}
+		if f.Command != "" && len(fixes) == 0 {
 			b.line("  Command: %s", f.Command)
 		}
 	}
@@ -299,4 +322,13 @@ func (t *tools) queryTrends(ctx context.Context, _ *sdk.CallToolRequest, in quer
 		b.line("    %s", firstLine(strings.Join(strings.Fields(s.Query), " "), 300))
 	}
 	return text(b), out, nil
+}
+
+// stripFixParams drops each fix's params from MCP output: an assistant only
+// needs what a fix does (the user applies it in the dashboard), and the
+// SDK's schema for a json.RawMessage field accepts only null or an array.
+func stripFixParams(f *protocol.Finding) {
+	for i := range f.Fixes {
+		f.Fixes[i].Params = nil
+	}
 }

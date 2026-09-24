@@ -583,7 +583,7 @@ func TestInsightsLocalPostgres(t *testing.T) {
 
 func TestBlockingLocalPostgres(t *testing.T) {
 	tg := localTarget(t)
-	_, holder := scratchDB(t, tg)
+	dbName, holder := scratchDB(t, tg)
 	if _, err := holder.Exec(t.Context(), `CREATE TABLE t (id int PRIMARY KEY); INSERT INTO t VALUES (1)`); err != nil {
 		t.Fatal(err)
 	}
@@ -608,21 +608,33 @@ func TestBlockingLocalPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer mon.Close(context.Background())
+	// Other tests may block sessions on the same server: only this
+	// database's sessions count.
 	var r *clusterReading
+	var mine []protocol.LockSession
 	for range 50 {
 		time.Sleep(100 * time.Millisecond)
 		r = &clusterReading{gauges: map[string]float64{}, versionNum: 170000}
 		_ = mon.QueryRow(t.Context(), `SELECT current_setting('server_version_num')::int`).Scan(&r.versionNum)
 		readBlocking(t.Context(), mon, r, true)
-		if r.gauges[MBlockedSessions] > 0 {
+		mine = mine[:0]
+		for _, s := range r.blocking {
+			if s.Database == dbName {
+				mine = append(mine, s)
+			}
+		}
+		if len(mine) == 2 {
 			break
 		}
 	}
-	if r.gauges[MBlockedSessions] != 1 || len(r.blocking) != 2 {
+	if r.gauges[MBlockedSessions] < 1 || len(mine) != 2 {
 		t.Fatalf("blocking = %+v, gauges %v", r.blocking, r.gauges)
 	}
 	holderPID := int(holder.PgConn().PID())
-	for _, s := range r.blocking {
+	for _, s := range mine {
+		if s.BackendStart == nil || time.Since(*s.BackendStart) > time.Hour {
+			t.Errorf("backend_start of %d = %v", s.PID, s.BackendStart)
+		}
 		switch s.PID {
 		case waiterPID:
 			if len(s.BlockedBy) != 1 || s.BlockedBy[0] != holderPID || s.LockType == "" || !strings.Contains(s.Query, "UPDATE t") {

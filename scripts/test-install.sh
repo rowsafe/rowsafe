@@ -26,7 +26,9 @@
 #      archiver, an already registered database, --protect and --no-setup;
 #   6. restarts on request (--allow-restart): the allow list, the root
 #      helper's checks (unlisted port, garbage, symlinks, FIFOs, once a
-#      minute; root never writes in the agent's directory), the installer
+#      minute; root never writes in the agent's directory), its stop and
+#      start actions for Rewind (listed unit only, malformed actions
+#      refused), the installer
 #      not following symlinks planted in the agent's directories, and
 #      --no-allow-restart / uninstall removing it.
 #
@@ -984,7 +986,7 @@ EOF
   scenario "discover_out=$shop" "plan_out=$plan" "apply_out=Done: the backup settings are in place." apply_rc=10 \
     "wait_out=$done_" "status_out=$status"
   tty_ok "turn on backups, restart now" \
-    "Allow restarting PostgreSQL from the Rowsafe dashboard?\tn\nName it in Rowsafe [shop]\tTV Hub\nName it in Rowsafe\t\nTurn on backups for shop now? [Y/n]\t\nRestart PostgreSQL now? [y/N]\ty\n" \
+    "Allow Rowsafe to restart or stop PostgreSQL when you ask?\tn\nName it in Rowsafe [shop]\tTV Hub\nName it in Rowsafe\t\nTurn on backups for shop now? [Y/n]\t\nRestart PostgreSQL now? [y/N]\ty\n" \
     env ROWSAFE_TEST_LEAK=1 "$INSTALLER"
   has "Looking for PostgreSQL on this server"
   has "Found PostgreSQL 17 on port 5432 (1.2 GiB; databases: shop)"
@@ -996,7 +998,7 @@ EOF
   has "PostgreSQL restarted"
   has "✓ shop is protected. The first full backup is running."
   has "Dashboard: https://app.rowsafe.test/databases/db_fake"
-  has "nobody can restart PostgreSQL from Rowsafe"
+  has "Rowsafe can't restart or stop PostgreSQL"
   called "plan --name shop --port 5432 --socket-dir /var/run/postgresql --id-file"
   called "apply --database db_fake"
   called "wait --database db_fake --timeout 5m"
@@ -1008,7 +1010,7 @@ EOF
   scenario "discover_out=$shop" "plan_out=$plan" apply_rc=10
   tty_ok "turn on backups, restart later" \
     "Name it in Rowsafe\t\nTurn on backups for shop now?\ty\nRestart PostgreSQL now?\t\n" "$INSTALLER"
-  lacks "Allow restarting PostgreSQL"
+  lacks "Allow Rowsafe to restart or stop PostgreSQL"
   has "Restart PostgreSQL when it suits you:"
   has "sudo systemctl restart postgresql@17-main"
   has "Rowsafe notices the restart by itself and finishes setting up. Nothing else to do."
@@ -1075,7 +1077,7 @@ restart_tests() {
   R=/var/lib/rowsafe/restart
   scenario "discover_out=$shop"
   expect_ok "--allow-restart" "$INSTALLER" --allow-restart
-  grep -q "people can restart PostgreSQL from Rowsafe" "$W/out" || fail "--allow-restart not confirmed"
+  grep -q "Rowsafe may restart or stop PostgreSQL when you ask" "$W/out" || fail "--allow-restart not confirmed"
   grep -qx "5432 postgresql@17-main.service" /etc/rowsafe/restart-allowed || fail "allow list lacks 5432"
   [ "$(stat -c '%U %a' /etc/rowsafe/restart-allowed)" = "root 644" ] || fail "allow list ownership/mode"
   [ "$(stat -c '%U %a' "$H")" = "root 755" ] || fail "helper ownership/mode"
@@ -1096,7 +1098,7 @@ restart_tests() {
   # A re-run without the flag keeps it (and asks nothing).
   scenario "discover_out=$shop"
   tty_ok "a re-run keeps restarts allowed" "Name it in Rowsafe\t\nTurn on backups for shop now?\tn\n" "$INSTALLER"
-  lacks "Allow restarting PostgreSQL"
+  lacks "Allow Rowsafe to restart or stop PostgreSQL"
   grep -qx "5432 postgresql@17-main.service" /etc/rowsafe/restart-allowed || fail "a re-run dropped the allow list"
 
   # The helper, run as its service would (root, its own result and state
@@ -1153,6 +1155,40 @@ EOF
   result_has "ok=0"
   result_has "error=malformed request"
 
+  # Rewind: stop and start the listed unit (no once-a-minute limit), in the
+  # "ID ACTION PORT" form; anything else is refused before systemctl runs.
+  : >"$F/systemctl.calls"
+  request "rw_1 stop 5432"
+  result_has "id=rw_1"
+  result_has "action=stop"
+  result_has "ok=1"
+  result_has "unit=postgresql@17-main.service"
+  request "rw_1 start 5432"
+  result_has "action=start"
+  result_has "ok=1"
+  request "rw_2 stop 5432"
+  result_has "ok=1"
+  request "rw_2 start 5432"
+  result_has "ok=1"
+  [ "$(cat "$F/systemctl.calls")" = "$(printf 'stop postgresql@17-main.service\nstart postgresql@17-main.service\nstop postgresql@17-main.service\nstart postgresql@17-main.service')" ] ||
+    fail "helper ran for stop/start: $(cat "$F/systemctl.calls")"
+  request "rw_3 restart 5432"
+  result_has "action=restart"
+  result_has "error=PostgreSQL (postgresql@17-main.service) was restarted less than a minute ago; try again in a minute"
+  request "rw_4 stop 5499"
+  result_has "ok=0"
+  grep -q "^error=port 5499 is not in /etc/rowsafe/restart-allowed" "$O/result" || fail "unlisted port not refused for stop"
+  for bad in "rw_5 kill 5432" "rw_5 STOP 5432" "rw_5 stop" "rw_5 stop 5432 extra" "rw_5  stop 5432" "rw_5 stop 5432;reboot" \
+    "rw_5 stop postgresql@17-main.service" "rw_5 disable 5432" "rw_5 stop 123456" "rw.5 stop 5432"; do
+    request "$bad"
+    result_has "ok=0"
+    result_has "error=malformed request"
+  done
+  [ "$(calls)" = 4 ] || fail "helper ran systemctl for a refused stop/start: $(cat "$F/systemctl.calls")"
+  : >"$F/systemctl.calls"
+  echo "restart postgresql@17-main.service" >"$F/systemctl.calls"
+  root_free "after stop and start"
+
   # A request symlinked to a file only root can read (holding a valid
   # request) is neither read nor followed; its target stays as it was.
   rm -rf "$W/helper-state"
@@ -1190,13 +1226,16 @@ EOF
   request "task_4 5432"
   result_has "ok=0"
   grep -q "^error=systemctl restart postgresql@17-main.service failed" "$O/result" || fail "failed restart not reported"
+  request "rw_6 stop 5432"
+  result_has "ok=0"
+  grep -q "^error=systemctl stop postgresql@17-main.service failed" "$O/result" || fail "failed stop not reported"
   rm -f "$F/systemctl.rc"
   chmod 666 /etc/rowsafe/restart-allowed
   rm -rf "$W/helper-state"
   request "task_5 5432"
   result_has "error=/etc/rowsafe/restart-allowed is writable by others than root"
   chmod 644 /etc/rowsafe/restart-allowed
-  grep -q "rowsafe-pg-restart: restarted postgresql@17-main.service" "$W/helper.log" || fail "helper did not log the restart"
+  grep -q "rowsafe-pg-restart: restart postgresql@17-main.service: done" "$W/helper.log" || fail "helper did not log the restart"
   pass "restart helper: allow list, bad requests, symlinks, FIFO, once a minute, never writes in the agent's directory"
 
   # The installer never acts as root inside the agent's directories: a

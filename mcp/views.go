@@ -147,7 +147,7 @@ type DatabaseSummary struct {
 // TaskView is one task. Log is only filled by get_task.
 type TaskView struct {
 	ID              string     `json:"id"`
-	Type            string     `json:"type" jsonschema:"inspect, adopt, check, backup, drill (the restore test), restore_point or restart"`
+	Type            string     `json:"type" jsonschema:"inspect, adopt, check, backup, drill (the restore test), restore_point, restart, maintenance or a rewind_* task"`
 	Status          string     `json:"status" jsonschema:"queued, running, succeeded, failed, lost or cancelled"`
 	Database        string     `json:"database,omitempty"`
 	DatabaseID      string     `json:"database_id,omitempty"`
@@ -187,6 +187,7 @@ type TaskDetail struct {
 	CheckOK      *bool                        `json:"check_ok,omitempty" jsonschema:"result of a check task: WAL reached the repository"`
 	RestorePoint *protocol.RestorePointResult `json:"restore_point,omitempty"`
 	Restart      *protocol.RestartResult      `json:"restart,omitempty" jsonschema:"result of a restart a person asked for"`
+	Maintenance  *protocol.MaintenanceResult  `json:"maintenance,omitempty" jsonschema:"result of a health fix a person applied (VACUUM, ending a session, removing an unused index...)"`
 	LogTail      string                       `json:"log_tail,omitempty"`
 	LogBytes     int                          `json:"log_bytes,omitempty" jsonschema:"full log size; log_tail holds only its end when smaller"`
 	LogTruncated bool                         `json:"log_truncated,omitempty"`
@@ -277,6 +278,12 @@ func taskDetail(t protocol.TaskView, logTail int) TaskDetail {
 			if json.Unmarshal(t.Result, &r) == nil {
 				d.Restart = &r
 			}
+		case protocol.TaskMaintenance:
+			var r protocol.MaintenanceResult
+			if json.Unmarshal(t.Result, &r) == nil && r.Summary != "" {
+				r.Details = capList(r.Details, 20)
+				d.Maintenance = &r
+			}
 		}
 	}
 	if logTail > 0 && t.Log != "" {
@@ -312,6 +319,11 @@ func nextStep(t protocol.TaskView, d TaskDetail) string {
 			return "The restore point was not created. Don't run a destructive operation relying on it; check safety_check for the cause."
 		case protocol.TaskRestart:
 			return "The PostgreSQL restart failed; the error says why (e.g. restarting from Rowsafe isn't allowed on this server). Tell the user; restarting is theirs to do, and no tool here can."
+		case protocol.TaskMaintenance:
+			return "The health fix didn't run; the error says why in plain words (Rowsafe checks each fix again right before it runs and leaves things alone when they changed). Tell the user; they can apply it again from the dashboard (Pulse, Health, Apply fix) if it still applies. No tool here applies fixes."
+		case protocol.TaskRewindCopy, protocol.TaskRewindDrop, protocol.TaskRewindCompare, protocol.TaskRewindRows,
+			protocol.TaskRewindInPlace, protocol.TaskRewindUndo, protocol.TaskRewindCleanup:
+			return "This Rewind step failed; the error says why in plain words (a failed rewind in place puts the original data back by itself). Tell the user; they can try again from Rewind in the dashboard. No tool here rewinds."
 		}
 		return "Read the error and log."
 	}

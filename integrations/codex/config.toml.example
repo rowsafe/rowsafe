@@ -1,0 +1,26 @@
+# Rowsafe for Codex, without the plugin: add one of these to ~/.codex/config.toml
+# (or to .codex/config.toml in a trusted project; never commit an API key there).
+# The plugin (see README.md) sets up the first one for you.
+
+# A. Local stdio server: uses your `rowsafe login` (or ROWSAFE_API_KEY).
+#    Read-only tools plus create_restore_point. Same as:
+#    codex mcp add rowsafe -- rowsafe mcp --allow-restore-points
+[mcp_servers.rowsafe]
+command = "rowsafe"
+args = ["mcp", "--allow-restore-points"]
+# Codex passes only a few variables (HOME, PATH, USER, ...) to MCP servers.
+# Forward the Rowsafe ones if you use them instead of `rowsafe login`.
+env_vars = ["ROWSAFE_API_KEY", "ROWSAFE_URL"]
+# create_restore_point waits up to 90 s for the Mark to be confirmed.
+tool_timeout_sec = 180
+
+# B. Hosted endpoint, no CLI needed. Every write tool is listed, so give it a
+#    key that can only do what you want (a --read-only key can still run
+#    safety_check but can't set Marks). Same as:
+#    codex mcp add rowsafe --url https://api.rowsafe.sh/mcp --bearer-token-env-var ROWSAFE_API_KEY
+# [mcp_servers.rowsafe]
+# url = "https://api.rowsafe.sh/mcp"
+# bearer_token_env_var = "ROWSAFE_API_KEY"
+# tool_timeout_sec = 180
+# # Only the safety tools; drop this line to get everything the key allows.
+# enabled_tools = ["safety_check", "list_restore_points", "create_restore_point", "list_databases", "get_database", "database_health", "fleet_health"]

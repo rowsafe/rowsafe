@@ -25,8 +25,9 @@
 #   --protect NAME         without questions: turn on backups for this server's
 #                          PostgreSQL as NAME (never restarts it)
 #   --protect-port PORT    with --protect: the cluster on PORT (when there are several)
-#   --allow-restart        let people restart PostgreSQL from Rowsafe (dashboard,
-#                          `rowsafe restart`); only when they confirm
+#   --allow-restart        allow Rowsafe to restart or stop PostgreSQL when you
+#                          ask (Restart and Rewind in the dashboard, `rowsafe
+#                          restart`); only when someone confirms
 #   --no-allow-restart     turn that off again
 #   --check-storage        test the configured backup storage; change nothing
 #   --uninstall            stop and remove the agent; keep configuration and state
@@ -166,8 +167,9 @@ Options (when piping, pass them after `sh -s --`):
                          named NAME in Rowsafe. Never restarts PostgreSQL; prints the
                          command when it needs a restart
   --protect-port PORT    with --protect: the PostgreSQL on PORT (when there are several)
-  --allow-restart        let people restart PostgreSQL from Rowsafe (Restart in the
-                         dashboard, `rowsafe restart`), only when they confirm
+  --allow-restart        allow Rowsafe to restart or stop PostgreSQL when you ask
+                         (Restart and Rewind in the dashboard, `rowsafe restart`),
+                         only when someone confirms
   --no-allow-restart     turn that off (and remove the restart helper)
   --check-storage        test the backup storage in /etc/rowsafe/agent.env; change nothing
   --uninstall            stop and remove the agent; keep configuration and state
@@ -209,8 +211,9 @@ Turning on backups:
   asks "Restart PostgreSQL now?" (default no); if you'd rather restart later,
   Rowsafe notices the restart by itself and finishes. Rowsafe itself never
   restarts PostgreSQL on its own: with --allow-restart (or yes at the
-  question), people can restart it from the dashboard, and only when they
-  confirm. Automation: --protect NAME.
+  question), it restarts or stops PostgreSQL when you ask (Restart, and
+  Rewind the whole database, in the dashboard), and only when someone
+  confirms. Automation: --protect NAME.
 
 Documentation: https://rowsafe.sh/docs/reference/agent-configuration
 EOF
@@ -687,11 +690,13 @@ ROWSAFE_LOGROTATE_EOF
 
 # ---------------------------------------------------------------- restarts
 
-# Rowsafe never restarts PostgreSQL on its own. With root's permission
-# (--allow-restart, or yes at the question), a person can ask for a restart
-# from the dashboard or `rowsafe restart`: the agent (unprivileged) writes a
-# request to $RESTART_DIR, rowsafe-pg-restart.path starts the root helper,
-# and the helper restarts only a unit listed in $RESTART_ALLOW_FILE.
+# Rowsafe never restarts or stops PostgreSQL on its own. With root's
+# permission (--allow-restart, or yes at the question), a person can ask for
+# a restart (dashboard, `rowsafe restart`) or a rewind of the whole database
+# (which stops PostgreSQL, swaps its data directory and starts it): the agent
+# (unprivileged) writes a request to $RESTART_DIR, rowsafe-pg-restart.path
+# starts the root helper, and the helper restarts, stops or starts only a
+# unit listed in $RESTART_ALLOW_FILE.
 
 install_restart_helper() {
   install -d -m 0755 -o root -g root "${RESTART_HELPER%/*}"
@@ -699,8 +704,9 @@ install_restart_helper() {
   if write_file "$RESTART_HELPER" 0755 root:root <<'ROWSAFE_RESTART_HELPER_EOF'; then
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
-# rowsafe-pg-restart: restarts PostgreSQL when a person asked Rowsafe to
-# (Restart in the dashboard, `rowsafe restart`).
+# rowsafe-pg-restart: restarts or stops PostgreSQL when a person asked
+# Rowsafe to (Restart in the dashboard, `rowsafe restart`; Rewind the whole
+# database, which stops PostgreSQL, swaps its data directory and starts it).
 #
 # Installed by https://rowsafe.sh/install as
 # /usr/local/lib/rowsafe/rowsafe-pg-restart, only when root allowed it
@@ -709,13 +715,18 @@ install_restart_helper() {
 # agent writes a request; the agent itself cannot restart anything.
 #
 # The request (/var/lib/rowsafe/restart/request, in a directory the agent
-# user owns) is one line: "ID PORT". It is read and removed with the agent
-# user's privileges, never root's, so nothing planted there (a symlink, a
-# FIFO) can make root read, write or wait on anything. The port must be
-# listed in /etc/rowsafe/restart-allowed ("PORT UNIT" lines, written by
-# root); only that unit is restarted, and at most once a minute. The answer
-# goes to /run/rowsafe-pg-restart/result (root's directory, readable by the
-# agent) as key=value lines: id, ok (1 or 0), unit, error and finished_at.
+# user owns) is one line: "ID ACTION PORT", ACTION being restart, stop or
+# start ("ID PORT", from agents before 0.4.0, means restart). It is read and
+# removed with the agent user's privileges, never root's, so nothing planted
+# there (a symlink, a FIFO) can make root read, write or wait on anything.
+# The port must be listed in /etc/rowsafe/restart-allowed ("PORT UNIT"
+# lines, written by root); only that unit is restarted, stopped or started,
+# and it is restarted at most once a minute. The answer goes to
+# /run/rowsafe-pg-restart/result (root's directory, readable by the agent)
+# as key=value lines: id, action, ok (1 or 0), unit, error and finished_at.
+#
+# The agent reads the next line to know what this helper can do.
+# actions: restart stop start
 
 set -u
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -732,7 +743,7 @@ log() { echo "rowsafe-pg-restart: $*" >&2; }
 # as_agent runs a command with the agent user's privileges.
 as_agent() { setpriv --reuid="$agent_user" --regid="$agent_user" --init-groups -- "$@"; }
 
-id='' unit='' ok=0 err=''
+id='' action='' unit='' ok=0 err=''
 
 # answer writes the result atomically into root's own directory.
 answer() {
@@ -740,7 +751,7 @@ answer() {
     log "cannot write the result in $out_dir"
     exit 0
   }
-  printf 'id=%s\nok=%s\nunit=%s\nerror=%s\nfinished_at=%s\n' "$id" "$ok" "$unit" "$err" "$(date +%s)" >"$tmp"
+  printf 'id=%s\naction=%s\nok=%s\nunit=%s\nerror=%s\nfinished_at=%s\n' "$id" "$action" "$ok" "$unit" "$err" "$(date +%s)" >"$tmp"
   chmod 0644 "$tmp"
   mv -f "$tmp" "$out_dir/result"
 }
@@ -761,40 +772,51 @@ line=$(as_agent sh -c '
   if [ -f "$1" ] && [ ! -L "$1" ]; then timeout 5 head -c 200 -- "$1"; fi
   rm -f -- "$1"' rowsafe-pg-restart "$request" 2>/dev/null | head -n 1)
 
-printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} [0-9]{1,5}$' || refuse "malformed request"
-id=${line% *}
-port=${line#* }
+if printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} [0-9]{1,5}$'; then
+  id=${line% *}
+  action=restart
+  port=${line#* }
+elif printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} (restart|stop|start) [0-9]{1,5}$'; then
+  id=${line%% *}
+  rest=${line#* }
+  action=${rest% *}
+  port=${rest#* }
+else
+  refuse "malformed request"
+fi
 
-[ -f "$allow" ] && [ ! -L "$allow" ] || refuse "restarting PostgreSQL from Rowsafe is not allowed on this server"
+[ -f "$allow" ] && [ ! -L "$allow" ] || refuse "restarting or stopping PostgreSQL from Rowsafe is not allowed on this server"
 [ "$(stat -c '%u' "$allow")" = 0 ] || refuse "$allow is not owned by root"
 case $(stat -c '%A' "$allow") in
   ?????w???? | ????????w?) refuse "$allow is writable by others than root" ;;
 esac
 unit=$(awk -v p="$port" '$1 == p && $2 ~ /^[A-Za-z0-9@._-]+\.service$/ { print $2; exit }' "$allow")
-[ -n "$unit" ] || refuse "port $port is not in $allow: restarting it from Rowsafe is not allowed"
+[ -n "$unit" ] || refuse "port $port is not in $allow: restarting or stopping it from Rowsafe is not allowed"
 
-mkdir -p "$state"
-stamp=$state/last-$unit
-now=$(date +%s)
-last=$(cat "$stamp" 2>/dev/null || echo 0)
-case $last in '' | *[!0-9]*) last=0 ;; esac
-if [ $((now - last)) -lt "$min_interval" ]; then
-  refuse "PostgreSQL ($unit) was restarted less than a minute ago; try again in a minute"
+if [ "$action" = restart ]; then
+  mkdir -p "$state"
+  stamp=$state/last-$unit
+  now=$(date +%s)
+  last=$(cat "$stamp" 2>/dev/null || echo 0)
+  case $last in '' | *[!0-9]*) last=0 ;; esac
+  if [ $((now - last)) -lt "$min_interval" ]; then
+    refuse "PostgreSQL ($unit) was restarted less than a minute ago; try again in a minute"
+  fi
+  echo "$now" >"$stamp"
 fi
-echo "$now" >"$stamp"
 
-log "restarting $unit (request $id)"
-out=$(timeout 120 "$systemctl" restart "$unit" 2>&1 </dev/null)
+log "$action $unit (request $id)"
+out=$(timeout 120 "$systemctl" "$action" "$unit" 2>&1 </dev/null)
 rc=$?
 if [ "$rc" = 0 ]; then
   ok=1
-  log "restarted $unit"
+  log "${action} $unit: done"
 else
   out=$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)
   if [ "$rc" = 124 ]; then
-    err="systemctl restart $unit did not finish within 2 minutes"
+    err="systemctl $action $unit did not finish within 2 minutes"
   else
-    err="systemctl restart $unit failed${out:+: $out}"
+    err="systemctl $action $unit failed${out:+: $out}"
   fi
   log "$err"
 fi
@@ -804,14 +826,14 @@ ROWSAFE_RESTART_HELPER_EOF
   fi
   if write_file "$RESTART_SERVICE_FILE" 0644 root:root <<'ROWSAFE_RESTART_SERVICE_EOF'; then
 # SPDX-License-Identifier: Apache-2.0
-# rowsafe-pg-restart.service: restarts a PostgreSQL cluster that root listed
-# in /etc/rowsafe/restart-allowed, when the Rowsafe agent asks because a
-# person did (see /usr/local/lib/rowsafe/rowsafe-pg-restart). Started by
-# rowsafe-pg-restart.path; installed by https://rowsafe.sh/install only when
-# root allowed it.
+# rowsafe-pg-restart.service: restarts, stops or starts a PostgreSQL cluster
+# that root listed in /etc/rowsafe/restart-allowed, when the Rowsafe agent
+# asks because a person did (see /usr/local/lib/rowsafe/rowsafe-pg-restart).
+# Started by rowsafe-pg-restart.path; installed by https://rowsafe.sh/install
+# only when root allowed it.
 
 [Unit]
-Description=Rowsafe: restart PostgreSQL on request
+Description=Rowsafe: restart or stop PostgreSQL on request
 Documentation=https://rowsafe.sh/docs/reference/agent-configuration
 
 [Service]
@@ -832,7 +854,8 @@ UMask=0022
 
 # Hardening. Root never writes into the agent's directory: the request is
 # read and removed as the agent user (hence CAP_SETUID/CAP_SETGID, to drop
-# to it). Then it asks systemd over its private socket to restart one unit.
+# to it). Then it asks systemd over its private socket to restart, stop or
+# start one unit.
 CapabilityBoundingSet=CAP_SETUID CAP_SETGID
 AmbientCapabilities=
 NoNewPrivileges=yes
@@ -863,12 +886,13 @@ ROWSAFE_RESTART_SERVICE_EOF
   if write_file "$RESTART_PATH_FILE" 0644 root:root <<'ROWSAFE_RESTART_PATH_EOF'; then
 # SPDX-License-Identifier: Apache-2.0
 # rowsafe-pg-restart.path: starts rowsafe-pg-restart.service when the Rowsafe
-# agent asks for a PostgreSQL restart (someone clicked Restart in the
-# dashboard or ran `rowsafe restart`). Installed by https://rowsafe.sh/install
-# only when root allowed it; remove it with --no-allow-restart.
+# agent asks to restart or stop PostgreSQL (someone clicked Restart or Rewind
+# in the dashboard, or ran `rowsafe restart`). Installed by
+# https://rowsafe.sh/install only when root allowed it; remove it with
+# --no-allow-restart.
 
 [Unit]
-Description=Rowsafe: watch for PostgreSQL restart requests
+Description=Rowsafe: watch for requests to restart or stop PostgreSQL
 Documentation=https://rowsafe.sh/docs/reference/agent-configuration
 
 [Path]
@@ -913,25 +937,26 @@ restart_allowed() {
 allow_restarts() {
   _pairs=$(restart_pairs)
   if [ -z "$_pairs" ]; then
-    warn "found no systemd service running PostgreSQL here, so restarting it from Rowsafe stays off"
+    warn "found no systemd service running PostgreSQL here, so restarting or stopping it from Rowsafe stays off"
     return 0
   fi
   {
-    echo "# PostgreSQL clusters people may restart from Rowsafe (Restart in the"
-    echo "# dashboard, \`rowsafe restart\`), only when they confirm. Written by the"
-    echo "# installer (root); run it with --no-allow-restart to turn this off."
+    echo "# PostgreSQL clusters Rowsafe may restart or stop when someone asks"
+    echo "# (Restart and Rewind in the dashboard, \`rowsafe restart\`), only when they"
+    echo "# confirm. Written by the installer (root); run it with --no-allow-restart"
+    echo "# to turn this off."
     echo "# PORT UNIT"
     printf '%s\n' "$_pairs"
   } | write_file "$RESTART_ALLOW_FILE" 0644 root:root || true
   install_restart_helper
-  ok "people can restart PostgreSQL from Rowsafe, only when they confirm (turn off with --no-allow-restart)"
+  ok "Rowsafe may restart or stop PostgreSQL when you ask (Restart, Rewind), only when someone confirms (turn off with --no-allow-restart)"
 }
 
 disallow_restarts() {
   remove_restart_helper
   if [ -d "$CONFIG_DIR" ]; then
     {
-      echo "# Restarting PostgreSQL from Rowsafe is off on this server."
+      echo "# Restarting or stopping PostgreSQL from Rowsafe is off on this server."
       echo "# Run the installer with --allow-restart to turn it on."
     } | write_file "$RESTART_ALLOW_FILE" 0644 root:root || true
   fi
@@ -944,7 +969,7 @@ restart_access() {
     yes) allow_restarts ;;
     no)
       disallow_restarts
-      ok "restarting PostgreSQL from Rowsafe is off"
+      ok "restarting or stopping PostgreSQL from Rowsafe is off"
       ;;
     *)
       if [ -f "$RESTART_ALLOW_FILE" ]; then
@@ -953,11 +978,11 @@ restart_access() {
       fi
       [ "$TTY" = 1 ] && [ -n "$(restart_pairs)" ] || return 0
       say ""
-      if confirm "Allow restarting PostgreSQL from the Rowsafe dashboard? Only when someone clicks Restart and confirms." y; then
+      if confirm "Allow Rowsafe to restart or stop PostgreSQL when you ask? Only when someone clicks Restart or Rewind in the dashboard and confirms." y; then
         allow_restarts
       else
         disallow_restarts
-        note "OK: nobody can restart PostgreSQL from Rowsafe (change it with --allow-restart)"
+        note "OK: Rowsafe can't restart or stop PostgreSQL (change it with --allow-restart)"
       fi
       ;;
   esac

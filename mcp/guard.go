@@ -155,8 +155,15 @@ func looksLikeCommandArg(prev []string) bool {
 		return true
 	}
 	last := prev[len(prev)-1]
-	return last == "-c" || last == "--command" || last == "--" || last == "exec" || last == "run"
+	if last == "-c" || last == "--command" || last == "--" || last == "exec" || last == "run" {
+		return true
+	}
+	// bash -lc "...", sh -ec '...': combined shell flags that include -c.
+	return len(prev) >= 2 && shellFlagsRE.MatchString(last) &&
+		slices.Contains([]string{"bash", "sh", "zsh", "dash", "ash", "ksh"}, base(prev[len(prev)-2]))
 }
+
+var shellFlagsRE = regexp.MustCompile(`^-[A-Za-z]*c[A-Za-z]*$`)
 
 // shellWords splits on unquoted whitespace and removes quotes.
 func shellWords(s string) []string {

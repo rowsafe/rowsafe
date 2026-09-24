@@ -265,7 +265,8 @@ func readActivity(ctx context.Context, conn *pgx.Conn, r *clusterReading, queryT
 		       coalesce(extract(epoch FROM clock_timestamp() - xact_start), 0)::float8,
 		       coalesce(state, ''), coalesce(wait_event_type, ''), coalesce(wait_event, ''),
 		       left(coalesce(application_name, ''), 200), coalesce(datname::text, ''), coalesce(usename::text, ''),
-		       CASE WHEN $1 THEN left(coalesce(query, ''), $2) ELSE '' END
+		       CASE WHEN $1 THEN left(coalesce(query, ''), $2) ELSE '' END,
+		       backend_start
 		FROM pg_stat_activity
 		WHERE backend_type = 'client backend' AND pid <> pg_backend_pid()
 		  AND ((state = 'active' AND query_start < clock_timestamp() - make_interval(secs => $3))
@@ -278,7 +279,7 @@ func readActivity(ctx context.Context, conn *pgx.Conn, r *clusterReading, queryT
 	r.activity, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (protocol.ActivityQuery, error) {
 		var q protocol.ActivityQuery
 		err := row.Scan(&q.PID, &q.DurationSeconds, &q.XactSeconds, &q.State, &q.WaitEventType, &q.WaitEvent,
-			&q.ApplicationName, &q.Database, &q.User, &q.Query)
+			&q.ApplicationName, &q.Database, &q.User, &q.Query, &q.BackendStart)
 		q.Query = redact(q.Query)
 		return q, err
 	})

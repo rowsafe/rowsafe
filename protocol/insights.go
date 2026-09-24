@@ -1,6 +1,9 @@
 package protocol
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Deeper monitoring: query trends, table and index insights, locks,
 // replication, availability, health scores and disk forecasts. Everything
@@ -61,6 +64,8 @@ type LockSession struct {
 	Database        string  `json:"database,omitempty"`
 	User            string  `json:"user,omitempty"`
 	Query           string  `json:"query,omitempty"` // up to 500 characters; empty with ROWSAFE_COLLECT_QUERY_TEXT=false
+	// BackendStart is when the session started (see ActivityQuery).
+	BackendStart *time.Time `json:"backend_start,omitempty"`
 }
 
 // ReplicationStatus describes streaming replication from this server's
@@ -283,6 +288,60 @@ type Finding struct {
 	Action      string `json:"action"`
 	Command     string `json:"command,omitempty"` // CLI command or SQL to start with
 	Penalty     int    `json:"penalty"`           // points taken off the score
+	// Fixes are what Rowsafe can do about it, best first. Clients apply one
+	// by ids only (POST /v1/databases/{ref}/fixes); the server recomputes
+	// health and runs the fix with its own params.
+	Fixes []FindingFix `json:"fixes,omitempty"`
+}
+
+// FindingFix is one thing Rowsafe can do about a finding ("Apply fix").
+type FindingFix struct {
+	// ID is stable within the finding, e.g. "vacuum", "end:4312",
+	// "drop:public.orders_created_idx".
+	ID   string `json:"id"`
+	Kind string `json:"kind"` // Fix* below
+	// Label is the button text, e.g. "Back up now", "Clean up 3 tables".
+	Label string `json:"label"`
+	// Description says what happens, the impact and how long it takes, in
+	// plain words (1-2 sentences).
+	Description string `json:"description"`
+	// Params are built by the server; clients display nothing from them.
+	Params json.RawMessage `json:"params,omitempty"`
+	// Confirm, when set, is a warning to show before running it; the API
+	// then needs confirm = the database name.
+	Confirm     string `json:"confirm,omitempty"`
+	Destructive bool   `json:"destructive,omitempty"`
+	// MarkFirst: Rowsafe saves a Mark (restore point) before running it.
+	MarkFirst bool `json:"mark_first,omitempty"`
+	// Available is false when it can't run now; Reason says why (agent
+	// offline, restarts not allowed, needs PostgreSQL 12+, ...).
+	Available bool   `json:"available"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+// Fix kinds. All but FixMaintenance map to existing task types.
+const (
+	FixBackup      = "backup"      // backup task, params BackupParams
+	FixProof       = "proof"       // drill task
+	FixCheck       = "check"       // check (verify) task
+	FixApply       = "apply"       // adopt task with apply (confirm)
+	FixPlan        = "plan"        // adopt task, plan only
+	FixRestart     = "restart"     // restart task (confirm; only when restarts are allowed)
+	FixMaintenance = "maintenance" // maintenance task, params MaintenanceParams
+)
+
+// ApplyFixRequest is the body of POST /v1/databases/{ref}/fixes.
+type ApplyFixRequest struct {
+	FindingID string `json:"finding_id"`
+	FixID     string `json:"fix_id"`
+	// Confirm is the database name, required when the fix has Confirm.
+	Confirm string `json:"confirm,omitempty"`
+}
+
+// ApplyFixResponse answers POST /v1/databases/{ref}/fixes (202): the queued
+// tasks, a restore_point task first when the fix has MarkFirst.
+type ApplyFixResponse struct {
+	Tasks []TaskView `json:"tasks"`
 }
 
 // HealthCheck is the state of one area.

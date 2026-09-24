@@ -24,7 +24,64 @@ const (
 	// only for clusters root allowed at install time (HeartbeatRequest.
 	// RestartPorts), through a root helper; it never restarts on its own.
 	TaskRestart = "restart"
+	// TaskMaintenance runs one fixed maintenance action (MaintenanceParams)
+	// that the control plane proposed as a health fix: VACUUM, ANALYZE,
+	// REINDEX/DROP INDEX CONCURRENTLY, cancelling a query, ending a session or
+	// dropping an inactive replication slot. The agent validates everything
+	// again before running it.
+	TaskMaintenance = "maintenance"
 )
+
+// Maintenance actions (MaintenanceParams.Action).
+const (
+	// MaintVacuum: VACUUM (ANALYZE[, FREEZE]) each of Tables in DB.
+	MaintVacuum = "vacuum"
+	// MaintAnalyze: ANALYZE each of Tables in DB.
+	MaintAnalyze = "analyze"
+	// MaintReindexIndex: REINDEX INDEX CONCURRENTLY Index in DB (PostgreSQL 12+).
+	MaintReindexIndex = "reindex_index"
+	// MaintDropIndex: DROP INDEX CONCURRENTLY Index in DB; refused when it
+	// backs a constraint, is a primary key/unique/exclusion index, or has
+	// been used since the finding.
+	MaintDropIndex = "drop_index"
+	// MaintCancelQuery: pg_cancel_backend(PID) if BackendStart still matches.
+	MaintCancelQuery = "cancel_query"
+	// MaintTerminateSession: pg_terminate_backend(PID) if BackendStart still
+	// matches and it isn't a Rowsafe, replication or autovacuum backend.
+	MaintTerminateSession = "terminate_session"
+	// MaintDropReplicationSlot: pg_drop_replication_slot(Slot) if inactive.
+	MaintDropReplicationSlot = "drop_replication_slot"
+)
+
+// MaintenanceParams are the params of a maintenance task.
+type MaintenanceParams struct {
+	Action string `json:"action"` // Maint* above
+	// DB is the PostgreSQL database (datname) inside the cluster, for
+	// object actions (tables and indexes).
+	DB string `json:"db,omitempty"`
+	// Tables are "schema.table" names; the agent splits and quotes them.
+	Tables []string `json:"tables,omitempty"`
+	Index  string   `json:"index,omitempty"` // "schema.index"
+	Slot   string   `json:"slot,omitempty"`
+	PID    int      `json:"pid,omitempty"`
+	// BackendStart must still match the session's backend_start (PIDs are
+	// reused).
+	BackendStart *time.Time `json:"backend_start,omitempty"`
+	Freeze       bool       `json:"freeze,omitempty"`
+	// Unused marks a drop_index for an unused index: the agent refuses when
+	// the index has been scanned since (idx_scan > 0).
+	Unused bool `json:"unused,omitempty"`
+}
+
+// MaintenanceResult is the agent's report for a maintenance task.
+type MaintenanceResult struct {
+	Action string `json:"action"`
+	// Summary is plain words: "Cleaned up 3 tables; about 1.2 million dead
+	// rows removed."
+	Summary    string   `json:"summary"`
+	Details    []string `json:"details,omitempty"`
+	DurationMs int64    `json:"duration_ms"`
+}
 
 // Task statuses.
 const (
@@ -111,6 +168,13 @@ type HeartbeatRequest struct {
 	// to restart when someone asks (/etc/rowsafe/restart-allowed, written by
 	// the installer). Empty: restarting from Rowsafe is off on this host.
 	RestartPorts []int `json:"restart_ports,omitempty"`
+	// RestartActions are what the installed root helper can do for the
+	// clusters in RestartPorts: "restart", and "stop" and "start" (needed to
+	// rewind in place) from the helper installed with agent 0.4.0 on. Empty
+	// with RestartPorts set: an older helper that can only restart.
+	RestartActions []string `json:"restart_actions,omitempty"`
+	// Rewinds are the live copies and kept data directories on this host.
+	Rewinds []RewindState `json:"rewinds,omitempty"`
 }
 
 // HeartbeatResponse tells the agent which databases to watch.
@@ -123,6 +187,8 @@ type HeartbeatResponse struct {
 	// database of the host, including ones not adopted yet (monitoring is
 	// read-only). A superset of Databases.
 	Monitored []DatabaseSpec `json:"monitored,omitempty"`
+	// RewindExpires changes when copies and kept data are deleted (Extend).
+	RewindExpires []RewindExpiry `json:"rewind_expires,omitempty"`
 }
 
 // ArchiverStats mirrors pg_stat_archiver for one adopted database.
@@ -423,7 +489,15 @@ func TaskTimeout(taskType string) time.Duration {
 		return 10 * time.Minute
 	case TaskRestorePoint, TaskRestart:
 		return 5 * time.Minute
-	default: // backup, drill: a large first backup or restore takes hours
+	case TaskMaintenance: // a VACUUM or REINDEX of a large table takes a while
+		return 2 * time.Hour
+	case TaskRewindDrop, TaskRewindCleanup: // stopping a copy, deleting a large directory
+		return 30 * time.Minute
+	case TaskRewindCompare, TaskRewindRows:
+		return 2 * time.Hour
+	case TaskRewindUndo: // stop, two renames, start
+		return time.Hour
+	default: // backup, drill, rewind copy and in place: a large restore takes hours
 		return 12 * time.Hour
 	}
 }
@@ -724,6 +798,10 @@ type ActivityQuery struct {
 	Database        string  `json:"database,omitempty"`
 	User            string  `json:"user,omitempty"`
 	Query           string  `json:"query,omitempty"` // up to 500 characters
+	// BackendStart is when the session started; with PID it identifies the
+	// session for a cancel_query or terminate_session fix (PIDs are
+	// reused). Newer agents only.
+	BackendStart *time.Time `json:"backend_start,omitempty"`
 }
 
 // Statements is the top of pg_stat_statements by total execution time,

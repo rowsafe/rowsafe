@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -34,6 +35,9 @@ type fakeAPI struct {
 	tasks      []protocol.TaskView // tasks created through POST /v1/databases/{ref}/tasks
 	reject     map[string]int      // task type -> status POST /v1/databases/{ref}/tasks answers
 	retryAfter string              // Retry-After header on rejections
+	findings   []protocol.Finding  // findings of every database (with health set)
+	fixes      []protocol.ApplyFixRequest
+	fixReject  *protocol.Error // POST /fixes answers 409 with this
 }
 
 func (f *fakeAPI) handler(t *testing.T) http.Handler {
@@ -105,6 +109,19 @@ func (f *fakeAPI) handler(t *testing.T) http.Handler {
 			if tk.ID == r.PathValue("id") {
 				// The agent finishes every task at once.
 				tk.Status = protocol.StatusSucceeded
+				switch tk.Type {
+				case protocol.TaskRestorePoint:
+					tk.Result, _ = json.Marshal(protocol.RestorePointResult{Name: "before-fix-drop-20260924-120000", Archived: true})
+				case protocol.TaskMaintenance:
+					var p protocol.MaintenanceParams
+					_ = json.Unmarshal(tk.Params, &p)
+					if p.Action == protocol.MaintDropIndex {
+						tk.Status, tk.Error = protocol.StatusFailed, "The index public.orders_created_idx is now used by queries, so Rowsafe didn't remove it."
+					} else {
+						tk.Result, _ = json.Marshal(protocol.MaintenanceResult{Action: p.Action,
+							Summary: "Cleaned up 3 tables; about 1.2 million dead rows removed.", Details: []string{"Tables: a, b, c."}})
+					}
+				}
 				if tk.Type == protocol.TaskRestart {
 					tk.Result, _ = json.Marshal(protocol.RestartResult{Restarted: true, Unit: "postgresql@18-main.service",
 						DurationMs: 4200, ArchiveMode: "on"})
@@ -141,12 +158,47 @@ func (f *fakeAPI) handler(t *testing.T) http.Handler {
 			return
 		}
 		h := protocol.DatabaseHealth{Database: r.PathValue("ref"), Score: score, Grade: protocol.GradeHealthy, Findings: []protocol.Finding{}}
-		if score < 70 {
+		if f.findings != nil {
+			h.Findings = f.findings
+		} else if score < 70 {
 			h.Grade = protocol.GradeAtRisk
 			h.Findings = []protocol.Finding{{ID: "backup_stale", Severity: "critical", Title: "No backup in 2 days",
 				Explanation: "x", Action: "y", Penalty: 25}}
 		}
 		j(w, 200, h)
+	}))
+	mux.HandleFunc("POST /v1/databases/{ref}/fixes", authed(func(w http.ResponseWriter, r *http.Request) {
+		var req protocol.ApplyFixRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.fixReject != nil {
+			j(w, http.StatusConflict, f.fixReject)
+			return
+		}
+		f.fixes = append(f.fixes, req)
+		var out protocol.ApplyFixResponse
+		for _, fd := range f.findings {
+			for _, fx := range fd.Fixes {
+				if fd.ID != req.FindingID || fx.ID != req.FixID {
+					continue
+				}
+				if fx.MarkFirst {
+					tk := protocol.TaskView{ID: fmt.Sprintf("task_%d", len(f.tasks)+1), Type: protocol.TaskRestorePoint, Status: protocol.StatusQueued}
+					f.tasks = append(f.tasks, tk)
+					out.Tasks = append(out.Tasks, tk)
+				}
+				tk := protocol.TaskView{ID: fmt.Sprintf("task_%d", len(f.tasks)+1), Type: protocol.TaskMaintenance, Status: protocol.StatusQueued,
+					DatabaseName: r.PathValue("ref"), Params: fx.Params}
+				f.tasks = append(f.tasks, tk)
+				out.Tasks = append(out.Tasks, tk)
+			}
+		}
+		if len(out.Tasks) == 0 {
+			j(w, http.StatusNotFound, protocol.Error{Error: "This fix no longer applies."})
+			return
+		}
+		j(w, http.StatusAccepted, out)
 	}))
 	mux.HandleFunc("GET /v1/health", authed(func(w http.ResponseWriter, r *http.Request) {
 		o := protocol.HealthOverview{Databases: []protocol.DatabaseHealthSummary{}}
@@ -665,5 +717,157 @@ func TestPulseExitCodes(t *testing.T) {
 	}
 	if h := helpFor([]string{"pulse"}); !strings.Contains(h, "rowsafe pulse [NAME]") || !strings.Contains(h, "caps the score at 59") {
 		t.Errorf("help pulse:\n%s", h)
+	}
+}
+
+func fixFindings() []protocol.Finding {
+	vac, _ := json.Marshal(protocol.MaintenanceParams{Action: protocol.MaintVacuum, DB: "shop", Tables: []string{"public.a"}})
+	drop, _ := json.Marshal(protocol.MaintenanceParams{Action: protocol.MaintDropIndex, DB: "shop", Index: "public.orders_created_idx", Unused: true})
+	return []protocol.Finding{
+		{ID: "vacuum_behind", Severity: protocol.SeverityWarning, Title: "Dead rows are piling up in 3 tables", Action: "Clean them up.",
+			Fixes: []protocol.FindingFix{{ID: "vacuum", Kind: protocol.FixMaintenance, Label: "Clean up 3 tables",
+				Description: "Runs VACUUM gently; nothing is locked.", Params: vac, Available: true}}},
+		{ID: "unused_indexes", Severity: protocol.SeverityInfo, Title: "1 index is never used", Action: "Remove it.",
+			Fixes: []protocol.FindingFix{
+				{ID: "drop:public.orders_created_idx", Kind: protocol.FixMaintenance, Label: "Remove public.orders_created_idx",
+					Description: "Frees 1.4 GB.", Params: drop, Confirm: "Queries that need it get slower.", Destructive: true, MarkFirst: true, Available: true},
+				{ID: "drop:public.other_idx", Kind: protocol.FixMaintenance, Label: "Remove public.other_idx", Available: false,
+					Reason: "The agent is offline."},
+			}},
+		{ID: "cache_hit_low", Severity: protocol.SeverityInfo, Title: "Cache hit rate is low", Action: "Consider more memory.",
+			Command: "SHOW shared_buffers"},
+	}
+}
+
+// captureStdout returns what fn printed.
+func captureStdout(t *testing.T, fn func() error) (string, error) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = w
+	done := make(chan string)
+	go func() {
+		var b strings.Builder
+		_, _ = io.Copy(&b, r)
+		done <- b.String()
+	}()
+	ferr := fn()
+	w.Close()
+	os.Stdout = old
+	return <-done, ferr
+}
+
+func TestFix(t *testing.T) {
+	f := &fakeAPI{dbs: dbs("shop", "other"), health: map[string]int{"shop": 80}, findings: fixFindings()}
+	_, _ = cliEnv(t, f)
+	ctx := t.Context()
+	t.Cleanup(func() { stdin, stdinIsTerminal = os.Stdin, func() bool { return false } })
+	stdinIsTerminal = func() bool { return false }
+
+	// The list: numbered available fixes, unavailable ones with their reason.
+	out, err := captureStdout(t, func() error { return dispatch(ctx, []string{"fix", "shop"}) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"shop: Rowsafe can fix 2 of 3 findings", "(vacuum_behind)", " 1) Clean up 3 tables",
+		" 2) Remove public.orders_created_idx  [asks you to confirm, saves a Mark first]", " -) Remove public.other_idx",
+		"Not available now: The agent is offline.", "Apply one: rowsafe fix shop NUMBER"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("list lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "cache_hit_low") || len(f.fixes) != 0 {
+		t.Errorf("listed a finding without fixes, or applied something:\n%s", out)
+	}
+
+	// By number, answering y.
+	stdin = strings.NewReader("y\n")
+	out, err = captureStdout(t, func() error { return dispatch(ctx, []string{"fix", "shop", "1"}) })
+	if err != nil || !strings.Contains(out, "Cleaned up 3 tables; about 1.2 million dead rows removed.") || !strings.Contains(out, "  Tables: a, b, c.") {
+		t.Fatalf("fix 1: %v\n%s", err, out)
+	}
+	if len(f.fixes) != 1 || f.fixes[0] != (protocol.ApplyFixRequest{FindingID: "vacuum_behind", FixID: "vacuum"}) {
+		t.Fatalf("fixes sent %+v", f.fixes)
+	}
+
+	// No answer: nothing applied.
+	stdin = strings.NewReader("")
+	if err := dispatch(ctx, []string{"fix", "shop", "vacuum_behind"}); err == nil || !strings.Contains(err.Error(), "cancelled") {
+		t.Fatalf("no answer: %v", err)
+	}
+	// A fix with Confirm needs the database name typed exactly.
+	stdin = strings.NewReader("y\n")
+	if err := dispatch(ctx, []string{"fix", "shop", "unused_indexes", "drop:public.orders_created_idx"}); err == nil || !strings.Contains(err.Error(), "cancelled") {
+		t.Fatalf("answering y to a destructive fix: %v", err)
+	}
+	if len(f.fixes) != 1 {
+		t.Fatalf("a cancelled fix was sent: %+v", f.fixes)
+	}
+	// Typed; the Mark is saved first; the agent refuses: exit 1 with its reason.
+	stdin = strings.NewReader("shop\n")
+	out, err = captureStdout(t, func() error {
+		return dispatch(ctx, []string{"fix", "shop", "unused_indexes", "drop:public.orders_created_idx"})
+	})
+	var exit exitError
+	if !errors.As(err, &exit) || exit != 1 || !strings.Contains(out, "Warning: Queries that need it get slower.") ||
+		!strings.Contains(out, "Mark saved: before-fix-drop-") || !strings.Contains(out, "The fix didn't work: The index public.orders_created_idx is now used") {
+		t.Fatalf("destructive fix: %v\n%s", err, out)
+	}
+	if last := f.fixes[len(f.fixes)-1]; last.Confirm != "shop" {
+		t.Fatalf("confirm not sent: %+v", last)
+	}
+	// The only available fix of a finding is picked without naming it;
+	// an unavailable one explains why.
+	if err := dispatch(ctx, []string{"fix", "shop", "unused_indexes", "drop:public.other_idx", "--yes"}); err == nil ||
+		!strings.Contains(err.Error(), "The agent is offline") {
+		t.Fatalf("unavailable fix: %v", err)
+	}
+	if err := dispatch(ctx, []string{"fix", "shop", "cache_hit_low"}); err == nil || !strings.Contains(err.Error(), "can't fix") {
+		t.Fatalf("finding without fixes: %v", err)
+	}
+	if err := dispatch(ctx, []string{"fix", "shop", "gone"}); err == nil || !strings.Contains(err.Error(), "no finding") {
+		t.Fatalf("unknown finding: %v", err)
+	}
+	if err := dispatch(ctx, []string{"fix", "shop", "7"}); err == nil || !strings.Contains(err.Error(), "no fix number 7") {
+		t.Fatalf("unknown number: %v", err)
+	}
+	// With the database from .rowsafe.json, FINDING comes first.
+	t.Setenv("ROWSAFE_DATABASE", "shop")
+	stdin = strings.NewReader("")
+	if _, err := captureStdout(t, func() error { return dispatch(ctx, []string{"fix", "vacuum_behind", "--yes"}) }); err != nil {
+		t.Fatal(err)
+	}
+	if last := f.fixes[len(f.fixes)-1]; last.FindingID != "vacuum_behind" || last.Confirm != "" {
+		t.Fatalf("inferred database: %+v", last)
+	}
+	// The server says it no longer applies.
+	f.fixReject = &protocol.Error{Error: "This fix no longer applies; the page refreshed."}
+	if err := dispatch(ctx, []string{"fix", "1", "--yes"}); err == nil || !strings.Contains(err.Error(), "no longer applies") {
+		t.Fatalf("409: %v", err)
+	}
+	f.fixReject = nil
+
+	// Interactive: pick from the list.
+	stdinIsTerminal = func() bool { return true }
+	n := len(f.fixes)
+	stdin = strings.NewReader("1\ny\n")
+	if out, err := captureStdout(t, func() error { return dispatch(ctx, []string{"fix"}) }); err != nil || len(f.fixes) != n+1 {
+		t.Fatalf("interactive pick: %v\n%s", err, out)
+	}
+	stdin = strings.NewReader("\n")
+	if _, err := captureStdout(t, func() error { return dispatch(ctx, []string{"fix"}) }); err != nil || len(f.fixes) != n+1 {
+		t.Fatalf("Enter must leave it: %v", err)
+	}
+
+	// pulse points to the fix instead of a command.
+	out, _ = captureStdout(t, func() error { return dispatch(ctx, []string{"pulse", "shop"}) })
+	if !strings.Contains(out, "Fix: rowsafe fix shop vacuum_behind  (Clean up 3 tables)") || !strings.Contains(out, "Try: SHOW shared_buffers") {
+		t.Errorf("pulse:\n%s", out)
+	}
+	if h := helpFor([]string{"fix"}); !strings.Contains(h, "rowsafe fix [NAME]") || !strings.Contains(h, "Apply fix") {
+		t.Errorf("help fix:\n%s", h)
 	}
 }

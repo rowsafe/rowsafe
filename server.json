@@ -1,0 +1,44 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "sh.rowsafe/rowsafe",
+  "title": "Rowsafe",
+  "description": "PostgreSQL backups and a safety net for AI agents: check recoverability, set restore points.",
+  "version": "0.3.0",
+  "websiteUrl": "https://rowsafe.sh/docs/reference/mcp",
+  "repository": {
+    "url": "https://github.com/rowsafe/rowsafe",
+    "source": "github",
+    "id": "1384358998",
+    "subfolder": "mcp"
+  },
+  "icons": [
+    {
+      "src": "https://rowsafe.sh/icon.svg",
+      "mimeType": "image/svg+xml",
+      "sizes": ["any"]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://api.rowsafe.sh/mcp",
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "A Rowsafe API key (rowsafe api-keys create NAME, or in the dashboard). Use a --read-only key for monitoring only; it can still run safety_check but can't set restore points.",
+          "value": "Bearer {rowsafe_api_key}",
+          "isRequired": true,
+          "isSecret": true,
+          "variables": {
+            "rowsafe_api_key": {
+              "description": "Rowsafe API key",
+              "placeholder": "rsk_...",
+              "isRequired": true,
+              "isSecret": true
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

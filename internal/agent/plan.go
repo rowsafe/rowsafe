@@ -10,8 +10,10 @@ import (
 
 // DesiredArchiveTimeout bounds data loss on quiet databases: Postgres
 // switches to a new WAL segment at least this often, so a segment (and the
-// transactions in it) reaches the repository within about this many seconds.
-const DesiredArchiveTimeout = 300
+// transactions in it) reaches the repository within about this many seconds:
+// backups are at most about a minute behind. (Segments are compressed in the
+// repository, so a mostly empty forced segment costs little.)
+const DesiredArchiveTimeout = 60
 
 // restartWarning is the plan's warning when PostgreSQL needs a restart.
 // Rowsafe never restarts it on its own; once someone does, the control plane

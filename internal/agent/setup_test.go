@@ -265,7 +265,7 @@ var planNeedingRestart = protocol.AdoptResult{
 		{Kind: "command", Description: "pgbackrest stanza-create: initialise the repository for this cluster"},
 		{Kind: "setting", Setting: "archive_mode", From: "off", To: "on", Restart: true},
 		{Kind: "setting", Setting: "archive_command", To: "pgbackrest ... archive-push %p"},
-		{Kind: "setting", Setting: "archive_timeout", From: "0", To: "300"},
+		{Kind: "setting", Setting: "archive_timeout", From: "0", To: "60"},
 	},
 	RestartRequired: true,
 	Warnings:        []string{restartWarning(false, "shop")},
@@ -298,7 +298,7 @@ func TestSetupPlanApplyWait(t *testing.T) {
 		"Prepare your bucket for this database",
 		"Turn on copying of every change to your bucket (archive_mode: off → on, needs a restart)",
 		"Copy the changes with Rowsafe (archive_command)",
-		"at least every 5 minutes",
+		"at least every minute, even when the database is quiet, so backups are at most about a minute behind",
 		"Restart: PostgreSQL needs one quick restart",
 	} {
 		if !strings.Contains(out.String(), want) {

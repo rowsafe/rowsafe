@@ -90,8 +90,47 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 			return nil, err
 		}
 		return res, err
+	case protocol.TaskMaintenance:
+		var p protocol.MaintenanceParams
+		if err := json.Unmarshal(task.Params, &p); err != nil {
+			return nil, fmt.Errorf("invalid maintenance params: %w", err)
+		}
+		res, err := a.maintenance(ctx, db, p, tl)
+		if res == nil {
+			return nil, err
+		}
+		return res, err
+	case protocol.TaskRewindCopy:
+		return runRewind(ctx, task, tl, db, a.rewindCopy)
+	case protocol.TaskRewindDrop:
+		return runRewind(ctx, task, tl, db, a.rewindDrop)
+	case protocol.TaskRewindCompare:
+		return runRewind(ctx, task, tl, db, a.rewindCompare)
+	case protocol.TaskRewindRows:
+		return runRewind(ctx, task, tl, db, a.rewindRows)
+	case protocol.TaskRewindInPlace:
+		return runRewind(ctx, task, tl, db, a.rewindInPlace)
+	case protocol.TaskRewindUndo:
+		return runRewind(ctx, task, tl, db, a.rewindUndo)
+	case protocol.TaskRewindCleanup:
+		return runRewind(ctx, task, tl, db, a.rewindCleanup)
 	}
 	return nil, fmt.Errorf("unsupported task type %q (agent %s)", task.Type, Version)
+}
+
+// runRewind decodes a rewind task's params and runs it, keeping a typed nil
+// result out of the interface.
+func runRewind[P any, R any](ctx context.Context, task *protocol.Task, tl *taskLog, db protocol.DatabaseSpec,
+	run func(context.Context, protocol.DatabaseSpec, P, *taskLog) (*R, error)) (any, error) {
+	var p P
+	if err := json.Unmarshal(task.Params, &p); err != nil {
+		return nil, fmt.Errorf("invalid %s params: %w", task.Type, err)
+	}
+	res, err := run(ctx, db, p, tl)
+	if res == nil {
+		return nil, err
+	}
+	return res, err
 }
 
 func (a *Agent) cli(db protocol.DatabaseSpec) pgbackrest.CLI {

@@ -110,6 +110,14 @@ func printTask(t protocol.TaskView) {
 		if json.Unmarshal(t.Result, &r) == nil && r.BackupLabel != "" {
 			printDrill(r)
 		}
+	case protocol.TaskMaintenance:
+		var r protocol.MaintenanceResult
+		if json.Unmarshal(t.Result, &r) == nil && r.Summary != "" {
+			fmt.Println(r.Summary)
+			for _, d := range r.Details {
+				fmt.Printf("  %s\n", d)
+			}
+		}
 	case protocol.TaskRestart:
 		var r protocol.RestartResult
 		if json.Unmarshal(t.Result, &r) == nil && r.Restarted {

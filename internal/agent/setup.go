@@ -670,11 +670,15 @@ func describeChange(c protocol.Change, arrow string) string {
 		case "archive_library":
 			return fmt.Sprintf("Turn off the other archiver (archive_library: %s%s)", fromTo(c.From, c.To), restart)
 		case "archive_timeout":
-			every := c.To + " seconds"
-			if n, err := strconv.Atoi(c.To); err == nil && n%60 == 0 {
+			every, behind := c.To+" seconds", c.To+" seconds"
+			if n, err := strconv.Atoi(c.To); err == nil && n == 60 {
+				every, behind = "minute", "a minute"
+			} else if err == nil && n%60 == 0 {
 				every = fmt.Sprintf("%d minutes", n/60)
+				behind = every
 			}
-			return fmt.Sprintf("Send changes at least every %s, even when the database is quiet (archive_timeout: %s%s)", every, fromTo(c.From, c.To), restart)
+			return fmt.Sprintf("Send changes at least every %s, even when the database is quiet, so backups are at most about %s behind "+
+				"(archive_timeout: %s%s)", every, behind, fromTo(c.From, c.To), restart)
 		default:
 			return fmt.Sprintf("Change %s: %s%s", c.Setting, fromTo(c.From, c.To), restart)
 		}

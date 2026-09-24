@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rowsafe/rowsafe/collect"
@@ -48,6 +49,19 @@ type Agent struct {
 	// fastMu is held while the fast lane runs a restore point, so a
 	// restart for an update waits for it.
 	fastMu sync.Mutex
+	// maintMu is held while the fast lane's side worker runs a maintenance
+	// task (a health fix), for the same reason; maintBusy says one runs.
+	maintMu   sync.Mutex
+	maintBusy atomic.Bool
+
+	// rewinds records copies and kept data directories (rewindState()).
+	rewinds    *rewindStore
+	rewindOnce sync.Once
+	// inPlaceMu is held while a rewind in place, an undo or the deletion of
+	// kept data runs: one at a time.
+	inPlaceMu sync.Mutex
+	// rewindOps runs the steps of a rewind in place (tests replace it).
+	rewindOps inPlaceOps
 }
 
 func New(cfg Config, logger *slog.Logger) *Agent {
@@ -135,11 +149,16 @@ func (a *Agent) Run(ctx context.Context) error {
 	// scratch clusters and close the task it was running, so the control
 	// plane doesn't wait for a lease to expire before scheduling again.
 	a.cleanupStaleDrills()
+	// Copies and kept data outlive tasks: start copies again (the agent's
+	// restart stopped them), roll back a rewind in place that was
+	// interrupted, and delete what expired, even with no control plane.
+	a.recoverRewinds(ctx)
 	a.reportInterrupted(ctx)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go a.heartbeatLoop(ctx)
 	go a.fastLane(ctx)
+	go a.rewindHousekeeping(ctx)
 	// Built-in monitoring (package collect): metrics every minute, beside
 	// the task loop and never blocking it.
 	go collect.Run(ctx, collect.Options{Log: a.log, PGUser: a.cfg.PGUser,
@@ -154,7 +173,8 @@ func (a *Agent) Run(ctx context.Context) error {
 		// never interrupted by an agent restart.
 		if err := a.updater.Tick(ctx); err != nil {
 			if errors.Is(err, ErrRestartForUpdate) {
-				a.fastMu.Lock() // let a restore point in progress finish
+				a.fastMu.Lock()  // let a restore point in progress finish
+				a.maintMu.Lock() // and a health fix
 			}
 			return err
 		}
@@ -180,7 +200,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			backoff = a.cfg.PollInterval
 		}
 		if task != nil {
-			a.execute(ctx, task)
+			a.execute(ctx, task, !slices.Contains(fastLaneTypes, task.Type))
 			continue // there may be more queued work
 		}
 		select {
@@ -195,7 +215,38 @@ func (a *Agent) Run(ctx context.Context) error {
 // wait behind a backup or drill that can take hours.
 var fastLaneTypes = []string{protocol.TaskRestorePoint}
 
-// fastLane claims and runs restore points alongside the main loop.
+// sideTypes run beside the fast lane, one at a time: health fixes (such as
+// ending a session that blocks others), and the Rewind steps people wait
+// for in the dashboard (compare, bring back rows, delete a copy or the kept
+// data), so they never wait behind a backup or a copy being restored.
+var sideTypes = []string{protocol.TaskMaintenance, protocol.TaskRewindCompare, protocol.TaskRewindRows,
+	protocol.TaskRewindDrop, protocol.TaskRewindCleanup}
+
+// fastLaneClaim is what the fast lane asks for: restore points, and a side
+// task unless one is running already. Side tasks run beside the lane, one
+// at a time, so a long VACUUM never holds up a restore point.
+func (a *Agent) fastLaneClaim() []string {
+	if a.maintBusy.Load() {
+		return fastLaneTypes
+	}
+	return append(slices.Clone(fastLaneTypes), sideTypes...)
+}
+
+// runMaintenance runs a maintenance task beside the fast lane.
+func (a *Agent) runMaintenance(ctx context.Context, task *protocol.Task) {
+	a.maintBusy.Store(true)
+	a.maintMu.Lock()
+	go func() {
+		defer func() {
+			a.maintMu.Unlock()
+			a.maintBusy.Store(false)
+		}()
+		a.execute(ctx, task, false)
+	}()
+}
+
+// fastLane claims and runs restore points (and starts maintenance tasks)
+// alongside the main loop.
 func (a *Agent) fastLane(ctx context.Context) {
 	backoff := a.cfg.PollInterval
 	for {
@@ -208,7 +259,7 @@ func (a *Agent) fastLane(ctx context.Context) {
 			continue
 		}
 		a.fastMu.Lock()
-		task, err := a.client.claimTypes(ctx, fastLaneTypes)
+		task, err := a.client.claimTypes(ctx, a.fastLaneClaim())
 		switch {
 		case ctx.Err() != nil:
 		case isUnauthorized(err):
@@ -218,8 +269,13 @@ func (a *Agent) fastLane(ctx context.Context) {
 			backoff = min(backoff*2, 2*time.Minute)
 		default:
 			backoff = a.cfg.PollInterval
-			if task != nil {
-				a.execute(ctx, task)
+			switch {
+			case task == nil:
+			case slices.Contains(sideTypes, task.Type):
+				a.runMaintenance(ctx, task)
+				backoff = 0
+			default:
+				a.execute(ctx, task, false)
 				backoff = 0 // there may be more
 			}
 		}
@@ -235,7 +291,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 		req := protocol.HeartbeatRequest{
 			Hostname: hostname, AgentVersion: Version, Platform: release.Platform(),
 			Archivers: a.archiverStats(ctx), Update: a.updater.Report(), Mode: a.cfg.Mode,
-			RestartPorts: a.restartPorts(),
+			RestartPorts: a.restartPorts(), RestartActions: a.helperActions(), Rewinds: a.rewindState().states(),
 		}
 		resp, err := a.client.heartbeat(ctx, req)
 		if isUnauthorized(err) {
@@ -264,6 +320,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 				a.ensureConfigs(ctx, resp.Databases)
 			}
 			a.updater.OnHeartbeat(resp.Update)
+			a.rewindState().setExpiries(resp.RewindExpires, time.Now())
 		}
 		select {
 		case <-ctx.Done():
@@ -313,14 +370,13 @@ func (a *Agent) target(db protocol.DatabaseSpec) pginspect.Target {
 }
 
 // execute runs one task and reports the outcome. Reporting is retried so a
-// brief control plane outage doesn't lose a finished backup.
-func (a *Agent) execute(ctx context.Context, task *protocol.Task) {
+// brief control plane outage doesn't lose a finished backup. Only the main
+// lane persists its task for crash recovery (persist); a restore point or
+// health fix interrupted by a crash is closed by its lease.
+func (a *Agent) execute(ctx context.Context, task *protocol.Task, persist bool) {
 	log := a.log.With("task_id", task.ID, "type", task.Type)
 	log.Info("task started")
 	start := time.Now()
-	// Only the main lane persists its task for crash recovery; a restore
-	// point interrupted by a crash is closed by its (short) lease.
-	persist := !slices.Contains(fastLaneTypes, task.Type)
 	if persist {
 		a.saveRunning(runningTask{ID: task.ID, Type: task.Type, StartedAt: start.UTC()})
 	}
@@ -419,10 +475,17 @@ func (a *Agent) reportInterrupted(ctx context.Context) {
 		a.clearRunning()
 		return
 	}
+	cleanup := "any scratch drill cluster has been removed"
+	switch t.Type {
+	case protocol.TaskRewindInPlace, protocol.TaskRewindUndo:
+		cleanup = "the interrupted rewind was rolled back when the agent started again: PostgreSQL runs on the data it had before (see the agent's log)"
+	case protocol.TaskRewindCopy:
+		cleanup = "the half-restored copy has been removed"
+	}
 	req := protocol.CompleteRequest{
 		Status: protocol.StatusFailed,
-		Error: fmt.Sprintf("the agent stopped while this %s task was running (started %s): crash, kill or reboot; "+
-			"any scratch drill cluster has been removed", t.Type, t.StartedAt.Format(time.RFC3339)),
+		Error: fmt.Sprintf("the agent stopped while this %s task was running (started %s): crash, kill or reboot; %s",
+			t.Type, t.StartedAt.Format(time.RFC3339), cleanup),
 	}
 	if t.Report != nil {
 		req = *t.Report

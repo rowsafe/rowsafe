@@ -169,8 +169,9 @@ func guard(ctx context.Context, args []string) error {
 	}
 	return hookReply(fmt.Sprintf("Rowsafe: restore point %s created on %s (LSN %s) before: %s", name, db, lsn, reason),
 		fmt.Sprintf("Rowsafe created restore point %q on database %s (from %s), confirmed in the backup repository, right before this command (%s). "+
-			"If the command goes wrong, stop and tell the user they can restore %s to restore point %q; don't try to repair the data or restore it yourself.",
-			name, db, src, reason, db, name))
+			"If the command goes wrong, stop and tell the user they can Rewind %s to restore point %q in the Rowsafe dashboard (or `rowsafe rewind copy %s --mark %s`, then bring the rows back); "+
+			"don't try to repair the data or restore it yourself.",
+			name, db, src, reason, db, name, db, name))
 }
 
 // hookReply lets the command run and passes a note to the user and to Claude.

@@ -33,7 +33,8 @@ Rewind: continuous backups, restore to any second
   rowsafe backup [NAME]              back up now          rowsafe backups [NAME]   list them
   rowsafe mark [NAME] [LABEL]        a named restore point, e.g. before a migration
   rowsafe marks [NAME]               restore points
-  restore guide                      https://rowsafe.sh/docs/guides/restore
+  rowsafe rewind [NAME]              restore a copy at any second, compare it, bring rows back,
+                                     or rewind the whole database (rowsafe help rewind)
 
 Proof: the weekly restore test
   rowsafe proof [NAME]               run the restore test now
@@ -41,6 +42,7 @@ Proof: the weekly restore test
 
 Pulse: health and monitoring
   rowsafe pulse [NAME]               health score (0-100) and what to fix
+  rowsafe fix [NAME]                 let Rowsafe fix what pulse found (asks first)
   rowsafe insights [NAME]            largest tables, unused indexes, bloat, vacuum
   rowsafe top [NAME]                 queries that take the most time, and which got slower
   rowsafe alerts                     firing alerts (rowsafe channels: where they go)
@@ -66,6 +68,19 @@ set, or when the organization has one database ("rowsafe help names").
 // helpDetails adds explanations that don't fit the one-line reference.
 var helpDetails = map[string]string{
 	"names": nameRules,
+	"rewind": `Deleted rows by mistake? Restore a copy as it was just before (it runs next to
+production on your server, on a private socket, and never touches production),
+compare it with production, and bring the missing rows back:
+  rowsafe rewind copy --at "14:04"
+  rowsafe rewind compare
+  rowsafe rewind rows public.orders public.order_items
+Rows come back by primary key, parents before children, in one transaction;
+triggers don't fire for them, and nothing else in production changes. The
+copy is deleted by itself after 24 hours (rowsafe rewind extend keeps it).
+When the whole database has to go back, rowsafe rewind database stops
+PostgreSQL, restores it to that point and starts it again; the current data
+is kept aside so rowsafe rewind undo can put it back. Your data never leaves
+your server: Rowsafe only sees table names and counts.`,
 	"pulse": `The score starts at 100 and loses points for each problem found: backups,
 restore tests and WAL archiving; whether PostgreSQL answers; disk space and
 when it will run out; connections; vacuum, transaction ID wraparound and
@@ -96,6 +111,16 @@ only on servers where the installer was allowed to (root decides at install
 time). If this server doesn't allow it, the task fails and says how to
 restart by hand. A database waiting for a restart to start its backups
 finishes setting up by itself once PostgreSQL is back.`,
+	"fix": `Without FINDING, lists the findings of "rowsafe pulse" that Rowsafe can fix
+by itself, numbered, and (in a terminal) asks which one to apply. Fixes are
+proposed by Rowsafe and checked again right before they run: cleaning up
+tables (VACUUM), refreshing statistics (ANALYZE), rebuilding a bloated index
+or removing an unused one without blocking writes, cancelling a query or
+ending a session that blocks others, removing an inactive replication slot,
+backups, restore tests and checks. Fixes that end a session or remove
+something ask you to type the database name (--yes skips the questions);
+removing an index saves a Mark first so it can be undone. The same fixes
+are the "Apply fix" buttons in the dashboard (Pulse, Health).`,
 	"proof": `Proof restores the latest backup plus WAL into a scratch copy on the same
 server (its own socket, no network, low priority), checks that every
 database and table is there, and deletes the copy. It runs every week on

@@ -18,6 +18,9 @@ type Target struct {
 	SocketDir string
 	Port      int
 	User      string
+	// AppName is the connection's application_name ("rowsafe-agent" when
+	// empty).
+	AppName string
 }
 
 func (t Target) Connect(ctx context.Context, dbname string) (*pgx.Conn, error) {
@@ -30,6 +33,9 @@ func (t Target) Connect(ctx context.Context, dbname string) (*pgx.Conn, error) {
 	cfg.User = t.User
 	cfg.Database = dbname
 	cfg.RuntimeParams["application_name"] = "rowsafe-agent"
+	if t.AppName != "" {
+		cfg.RuntimeParams["application_name"] = t.AppName
+	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	return pgx.ConnectConfig(ctx, cfg)

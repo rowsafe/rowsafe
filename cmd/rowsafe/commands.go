@@ -729,7 +729,7 @@ func waitAndReport(ctx context.Context, c *client.Client, taskID, dbName string)
 	case protocol.TaskCheck:
 		fmt.Printf("\n%s is protected. The first full backup is queued; follow it with `rowsafe tasks %s`.\n", dbName, dbName)
 	case protocol.TaskRestorePoint:
-		fmt.Println("\nTo recover to it, see \"To a restore point\" in https://rowsafe.sh/docs/guides/restore")
+		fmt.Printf("\nTo go back to it: rowsafe rewind copy %s --mark LABEL (a copy next to production), or Rewind in the dashboard\n", dbName)
 	}
 	return nil
 }
@@ -748,6 +748,11 @@ func taskName(typ string) string {
 		return "WAL check"
 	case protocol.TaskRestart:
 		return "PostgreSQL restart"
+	case protocol.TaskMaintenance:
+		return "fix"
+	case protocol.TaskRewindCopy, protocol.TaskRewindDrop, protocol.TaskRewindCompare, protocol.TaskRewindRows,
+		protocol.TaskRewindInPlace, protocol.TaskRewindUndo, protocol.TaskRewindCleanup:
+		return rewindTaskName(typ)
 	}
 	return typ
 }

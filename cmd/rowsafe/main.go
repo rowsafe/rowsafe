@@ -59,7 +59,26 @@ Rewind: continuous backups, restore to any second
                                              change retention and schedules (5-field cron, UTC; --diff-schedule "" disables diffs)
   rowsafe remove NAME [--keep-archiving] [--yes]
                                              stop managing a database; never changes the server
-  To restore, follow https://rowsafe.sh/docs/guides/restore
+  rowsafe rewind [NAME] [--json]             the recovery window, the copy and data kept aside by a rewind
+  rowsafe rewind copy [NAME] (--at TIME | --mark LABEL) [--hours 24] [--no-wait]
+                                             restore a copy as it was then, next to production (never
+                                             touches it). TIME: "2026-09-24 14:04" or "14:04" (your time
+                                             zone), "10m ago", or RFC 3339
+  rowsafe rewind compare [NAME] [TABLE...] [--db DB] [--json]
+                                             rows missing in production, changed, or added since, by
+                                             primary key (no TABLE: every table)
+  rowsafe rewind rows [NAME] TABLE... [--include-changed] [--db DB] [--yes]
+                                             bring the missing rows back from the copy (a Mark first; asks
+                                             you to type the name). TABLE is schema.table or DB:schema.table
+  rowsafe rewind extend [NAME] [--hours 24]  keep the copy longer
+  rowsafe rewind drop [NAME] [--yes]         delete the copy
+  rowsafe rewind database [NAME] (--at TIME | --mark LABEL) [--yes]
+                                             rewind the whole live database (stops PostgreSQL; the current
+                                             data is kept aside for undo; asks you to type the name). Only on
+                                             servers where the installer allowed restarting PostgreSQL
+  rowsafe rewind undo [NAME] [--yes]         undo the rewind: put the data from before it back
+  rowsafe rewind cleanup [NAME] [--yes]      delete the data kept aside by a rewind (frees disk)
+  Advanced (restore by hand or to another server): https://rowsafe.sh/docs/guides/restore
 
 Proof: the weekly restore test
   rowsafe proof [NAME] [--no-wait]           restore the latest backup to a scratch copy and check it, now
@@ -68,6 +87,9 @@ Proof: the weekly restore test
 Pulse: health, monitoring and alerts
   rowsafe pulse [NAME] [--json]              health score (0-100) and findings in plain language; without NAME,
                                              every database. Exit 3 if one scores below 70
+  rowsafe fix [NAME] [FINDING [FIX] | NUMBER] [--yes]
+                                             what Rowsafe can fix from pulse (clean up tables, end a stuck
+                                             session, remove an unused index...) and do it; asks first
   rowsafe insights [NAME] [--limit 10] [--json]
                                              largest tables, unused and duplicate indexes, estimated bloat,
                                              dead rows and vacuum, transaction ID age
@@ -239,6 +261,8 @@ func dispatch(ctx context.Context, args []string) error {
 		return setCmd(ctx, c, rest)
 	case "remove":
 		return removeCmd(ctx, c, rest)
+	case "rewind":
+		return rewindCmd(ctx, c, rest)
 	// Proof
 	case "proof":
 		return proofCmd(ctx, c, rest)
@@ -247,6 +271,8 @@ func dispatch(ctx context.Context, args []string) error {
 	// Pulse
 	case "pulse":
 		return pulseCmd(ctx, c, rest)
+	case "fix":
+		return fixCmd(ctx, c, rest)
 	case "insights":
 		return insightsCmd(ctx, c, rest)
 	case "top":
