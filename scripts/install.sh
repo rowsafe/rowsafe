@@ -30,6 +30,8 @@
 #                          restart`); only when someone confirms
 #   --no-allow-restart     turn that off again
 #   --check-storage        test the configured backup storage; change nothing
+#   --add-storage          set up a second backup copy in another bucket (guided)
+#   --remove-second-copy   stop sending backups to the second copy
 #   --uninstall            stop and remove the agent; keep configuration and state
 #   --uninstall --purge    also delete /etc/rowsafe, /var/lib/rowsafe, /var/log/rowsafe
 #   --download-only DIR    download and verify the agent into DIR; install nothing
@@ -101,6 +103,12 @@ AGENT_VARS="ROWSAFE_URL ROWSAFE_ENROLL_TOKEN $REQUIRED_REPO_VARS
   ROWSAFE_REPO_S3_PORT ROWSAFE_REPO_S3_CA_FILE ROWSAFE_REPO_S3_VERIFY_TLS
   ROWSAFE_AUTO_UPDATE ROWSAFE_PG_USER ROWSAFE_PG_BIN_DIR ROWSAFE_PGBACKREST_BIN
   ROWSAFE_DRILL_DIR ROWSAFE_DRILL_PORT ROWSAFE_POLL_INTERVAL ROWSAFE_HEARTBEAT_INTERVAL"
+# ---- second copy (--add-storage): the second storage's settings
+REPO2_VARS="ROWSAFE_REPO2_S3_ENDPOINT ROWSAFE_REPO2_S3_BUCKET ROWSAFE_REPO2_S3_KEY ROWSAFE_REPO2_S3_KEY_SECRET ROWSAFE_REPO2_CIPHER_PASS"
+REPO2_OPT_VARS="ROWSAFE_REPO2_S3_REGION ROWSAFE_REPO2_S3_URI_STYLE ROWSAFE_REPO2_PATH_PREFIX ROWSAFE_REPO2_S3_PORT ROWSAFE_REPO2_S3_CA_FILE ROWSAFE_REPO2_S3_VERIFY_TLS"
+AGENT_VARS="$AGENT_VARS $REPO2_VARS $REPO2_OPT_VARS"
+SECOND_COPY=''     # --add-storage (add) / --remove-second-copy (remove)
+# ---- end second copy
 
 PROMPT=auto        # auto: ask on a terminal when needed; never: --no-prompt
 SETUP_STORAGE=0    # --setup-storage: offer to replace configured storage settings
@@ -172,6 +180,9 @@ Options (when piping, pass them after `sh -s --`):
                          only when someone confirms
   --no-allow-restart     turn that off (and remove the restart helper)
   --check-storage        test the backup storage in /etc/rowsafe/agent.env; change nothing
+  --add-storage          add a second backup copy in another bucket, ideally at another
+                         provider (guided, like the first storage), or change it
+  --remove-second-copy   stop sending backups to the second copy (its bucket is kept)
   --uninstall            stop and remove the agent; keep configuration and state
   --uninstall --purge    also delete /etc/rowsafe, /var/lib/rowsafe and /var/log/rowsafe
   --download-only DIR    download and verify the agent into DIR; install nothing
@@ -198,6 +209,14 @@ Backup storage (guided setup):
   Secrets are typed hidden and never printed. Nothing is saved until you have
   answered everything; settings go to /etc/rowsafe/agent.env (postgres, 0600).
   Run it again with --setup-storage to change the storage later.
+
+  A second copy (--add-storage) keeps everything in a second bucket too, with
+  its own key and its own passphrase, so losing one bucket, account or
+  provider never loses your backups. It is set up the same way. PostgreSQL
+  never waits for it: if the second storage is down, backups go on in the
+  first one and Rowsafe alerts you. Without a terminal, set
+  ROWSAFE_REPO2_S3_ENDPOINT, _BUCKET, _KEY, _KEY_SECRET and
+  ROWSAFE_REPO2_CIPHER_PASS (and _S3_REGION) instead.
 
   Without a terminal (cloud-init, CI, configuration management) or with
   --no-prompt, set ROWSAFE_REPO_S3_ENDPOINT, _BUCKET, _KEY, _KEY_SECRET and
@@ -1031,6 +1050,24 @@ env_template() {
 #ROWSAFE_REPO_S3_CA_FILE='/etc/ssl/certs/my-ca.pem'
 #ROWSAFE_REPO_S3_VERIFY_TLS='true'
 EOF
+  repo2_template
+}
+
+# repo2_template is the second copy's part of agent.env.
+repo2_template() {
+  cat <<'EOF'
+
+# Second backup copy (optional; `install.sh --add-storage` sets it up): a
+# second bucket, ideally at another provider, with its own key and its own
+# encryption passphrase (keep it in your password manager too). The same
+# optional settings as above exist with ROWSAFE_REPO2_.
+#ROWSAFE_REPO2_S3_ENDPOINT=''
+#ROWSAFE_REPO2_S3_BUCKET=''
+#ROWSAFE_REPO2_S3_REGION='auto'
+#ROWSAFE_REPO2_S3_KEY=''
+#ROWSAFE_REPO2_S3_KEY_SECRET=''
+#ROWSAFE_REPO2_CIPHER_PASS=''
+EOF
 }
 
 # check_value KEY VALUE rejects values the env file can't hold or the agent
@@ -1051,11 +1088,11 @@ check_value() {
     ROWSAFE_ENROLL_TOKEN)
       case $2 in rse_*) ;; *) die "ROWSAFE_ENROLL_TOKEN does not look like an enrollment token (rse_...)" ;; esac
       ;;
-    ROWSAFE_REPO_S3_ENDPOINT)
-      case $2 in *://*) die "ROWSAFE_REPO_S3_ENDPOINT is a host name without a scheme, e.g. <account-id>.eu.r2.cloudflarestorage.com" ;; esac
+    ROWSAFE_REPO_S3_ENDPOINT | ROWSAFE_REPO2_S3_ENDPOINT)
+      case $2 in *://*) die "$1 is a host name without a scheme, e.g. <account-id>.eu.r2.cloudflarestorage.com" ;; esac
       ;;
-    ROWSAFE_REPO_CIPHER_PASS)
-      [ "${#2}" -ge 20 ] || die "ROWSAFE_REPO_CIPHER_PASS must be at least 20 characters"
+    ROWSAFE_REPO_CIPHER_PASS | ROWSAFE_REPO2_CIPHER_PASS)
+      [ "${#2}" -ge 20 ] || die "$1 must be at least 20 characters"
       ;;
   esac
 }
@@ -1110,6 +1147,7 @@ write_env() {
     ENV_CREATED=1
   fi
   before=$(sha256_of "$ENV_FILE")
+  if [ "$SECOND_COPY" = add ] && ! grep -q 'ROWSAFE_REPO2_' "$ENV_FILE"; then repo2_template >>"$ENV_FILE"; fi
   written=''
   for key in $AGENT_VARS; do
     eval "val=\${$key:-}"
@@ -1125,7 +1163,7 @@ write_env() {
   chmod 0600 "$ENV_FILE"
   if [ "$(sha256_of "$ENV_FILE")" != "$before" ]; then
     CHANGED=1
-    if [ "$STORAGE_GUIDED" = 1 ]; then
+    if [ "$STORAGE_GUIDED" = 1 ] || [ -n "$SECOND_COPY" ]; then
       ok "saved your backup storage settings (secrets are only in this file)"
     else
       note "set from the installer's environment:${written}"
@@ -1556,8 +1594,8 @@ ask_bucket_url() {
     s3-compatible)
       ask S_REGION "Region (most self-hosted storage accepts us-east-1)" us-east-1
       # TLS options for a private CA come from the environment or agent.env.
-      S_CA=$(s_get ROWSAFE_REPO_S3_CA_FILE)
-      S_VERIFY=$(s_get ROWSAFE_REPO_S3_VERIFY_TLS)
+      S_CA=$(s_get "${S_PREFIX:-ROWSAFE_REPO_}S3_CA_FILE")
+      S_VERIFY=$(s_get "${S_PREFIX:-ROWSAFE_REPO_}S3_VERIFY_TLS")
       ;;
   esac
   key_hint
@@ -1683,8 +1721,8 @@ ask_other() {
   ask S_REGION "Region (most self-hosted storage accepts us-east-1)" "${S_REGION:-us-east-1}"
   if confirm "Use path-style URLs? MinIO, Ceph and most self-hosted storage need them." y; then S_URI=path; else S_URI=host; fi
   # TLS options for a private CA come from the environment or agent.env.
-  S_CA=$(s_get ROWSAFE_REPO_S3_CA_FILE)
-  S_VERIFY=$(s_get ROWSAFE_REPO_S3_VERIFY_TLS)
+  S_CA=$(s_get "${S_PREFIX:-ROWSAFE_REPO_}S3_CA_FILE")
+  S_VERIFY=$(s_get "${S_PREFIX:-ROWSAFE_REPO_}S3_VERIFY_TLS")
 }
 
 ask_credentials() {
@@ -1738,7 +1776,7 @@ show_passphrase() {
   box() { printf '  %s  %-50s  %s\n' "$BOX_V" "$1" "$BOX_V" >&3; }
   tty_say ""
   tty_say "  $BOX_TL$_h$BOX_TR"
-  box "Your backup encryption passphrase:"
+  box "Your ${PASS_WHAT:-backup} encryption passphrase:"
   box ""
   printf '  %s      %s%s%s        %s\n' "$BOX_V" "$BOLD" "$1" "$RESET" "$BOX_V" >&3
   box ""
@@ -1751,10 +1789,10 @@ show_passphrase() {
 
 # choose_passphrase sets S_CIPHER: kept, generated (shown once) or typed.
 choose_passphrase() {
-  current=$(env_value ROWSAFE_REPO_CIPHER_PASS)
+  current=$(env_value "${PASS_KEY:-ROWSAFE_REPO_CIPHER_PASS}")
   if [ -n "$current" ]; then
     tty_say ""
-    tty_say "This server already has a backup encryption passphrase. Keep it unless"
+    tty_say "This server already has a ${PASS_WHAT:-backup} encryption passphrase. Keep it unless"
     tty_say "you are starting over: backups made with it can only be restored with it."
     if confirm "Keep the current encryption passphrase?" y; then
       S_CIPHER=$current
@@ -1835,9 +1873,37 @@ guided_storage() {
     tty_say "Rowsafe keeps your backups in a storage bucket that you own. You need an"
     tty_say "empty bucket and an access key that can read, write and delete in it."
   fi
+  load_storage_path
+  storage_questions
+  choose_passphrase
+  STORAGE_GUIDED=1
+
+  ROWSAFE_REPO_S3_ENDPOINT=$S_ENDPOINT ROWSAFE_REPO_S3_BUCKET=$S_BUCKET
+  ROWSAFE_REPO_S3_KEY=$S_KEY ROWSAFE_REPO_S3_KEY_SECRET=$S_SECRET ROWSAFE_REPO_CIPHER_PASS=$S_CIPHER
+  ROWSAFE_REPO_S3_REGION=$S_REGION ROWSAFE_REPO_S3_URI_STYLE=$S_URI
+  export ROWSAFE_REPO_S3_ENDPOINT ROWSAFE_REPO_S3_BUCKET ROWSAFE_REPO_S3_KEY ROWSAFE_REPO_S3_KEY_SECRET \
+    ROWSAFE_REPO_CIPHER_PASS ROWSAFE_REPO_S3_REGION ROWSAFE_REPO_S3_URI_STYLE
+  # Settings from a previous provider must not linger in agent.env.
+  if [ -n "$S_PORT" ]; then
+    ROWSAFE_REPO_S3_PORT=$S_PORT
+    export ROWSAFE_REPO_S3_PORT
+  else
+    unset ROWSAFE_REPO_S3_PORT
+    STORAGE_CLEAR="$STORAGE_CLEAR ROWSAFE_REPO_S3_PORT"
+  fi
+  if [ "$S_PROVIDER" != s3-compatible ]; then
+    unset ROWSAFE_REPO_S3_CA_FILE ROWSAFE_REPO_S3_VERIFY_TLS
+    STORAGE_CLEAR="$STORAGE_CLEAR ROWSAFE_REPO_S3_CA_FILE ROWSAFE_REPO_S3_VERIFY_TLS"
+  fi
+}
+
+# storage_questions asks for a bucket and its key until the test passes (or
+# the person saves failing settings on purpose), into S_*. With S_AVOID set
+# to "<endpoint>/<bucket>", that bucket is refused (the second copy must not
+# go to the first storage's bucket).
+storage_questions() {
   S_ENDPOINT='' S_BUCKET='' S_KEY='' S_SECRET='' S_REGION='' S_URI='' S_PORT='' S_CA='' S_VERIFY='' S_CIPHER=''
   S_URL='' S_MODE=url
-  load_storage_path
   n=1
   if [ -n "$STORAGE_PROVIDER" ]; then
     n=$(provider_number "$STORAGE_PROVIDER")
@@ -1867,6 +1933,11 @@ guided_storage() {
       esac
     fi
     ask_credentials
+    if [ -n "${S_AVOID:-}" ] && [ "$S_ENDPOINT/$S_BUCKET" = "$S_AVOID" ]; then
+      tty_bad "That is the bucket your backups already go to. The second copy needs another bucket, ideally at another provider."
+      S_MODE=url
+      continue
+    fi
     say ""
     step "Testing the backup storage"
     storage_test && break
@@ -1878,26 +1949,6 @@ guided_storage() {
     fi
     die "nothing was saved. Run the installer again once the storage is ready."
   done
-  choose_passphrase
-  STORAGE_GUIDED=1
-
-  ROWSAFE_REPO_S3_ENDPOINT=$S_ENDPOINT ROWSAFE_REPO_S3_BUCKET=$S_BUCKET
-  ROWSAFE_REPO_S3_KEY=$S_KEY ROWSAFE_REPO_S3_KEY_SECRET=$S_SECRET ROWSAFE_REPO_CIPHER_PASS=$S_CIPHER
-  ROWSAFE_REPO_S3_REGION=$S_REGION ROWSAFE_REPO_S3_URI_STYLE=$S_URI
-  export ROWSAFE_REPO_S3_ENDPOINT ROWSAFE_REPO_S3_BUCKET ROWSAFE_REPO_S3_KEY ROWSAFE_REPO_S3_KEY_SECRET \
-    ROWSAFE_REPO_CIPHER_PASS ROWSAFE_REPO_S3_REGION ROWSAFE_REPO_S3_URI_STYLE
-  # Settings from a previous provider must not linger in agent.env.
-  if [ -n "$S_PORT" ]; then
-    ROWSAFE_REPO_S3_PORT=$S_PORT
-    export ROWSAFE_REPO_S3_PORT
-  else
-    unset ROWSAFE_REPO_S3_PORT
-    STORAGE_CLEAR="$STORAGE_CLEAR ROWSAFE_REPO_S3_PORT"
-  fi
-  if [ "$S_PROVIDER" != s3-compatible ]; then
-    unset ROWSAFE_REPO_S3_CA_FILE ROWSAFE_REPO_S3_VERIFY_TLS
-    STORAGE_CLEAR="$STORAGE_CLEAR ROWSAFE_REPO_S3_CA_FILE ROWSAFE_REPO_S3_VERIFY_TLS"
-  fi
 }
 
 # check_storage (--check-storage) tests the configured repository and
@@ -1914,7 +1965,170 @@ check_storage() {
   [ -z "$missing" ] || die "the backup storage is not configured; missing:$missing"
   step "Testing the backup storage"
   storage_test || die "the backup storage test failed; nothing was changed"
+  if second_configured; then
+    load_second
+    step "Testing the second copy's storage"
+    storage_test || die "the second copy's storage test failed; nothing was changed"
+  fi
 }
+
+# ---------------------------------------------------------------- second copy (--add-storage)
+# A second bucket (ideally at another provider) that gets the backups and the
+# change log too. Its settings are ROWSAFE_REPO2_* in agent.env; the agent
+# does the rest (it sets up the second storage and switches archive_command,
+# with a reload, no restart), and the control plane schedules its backups.
+
+second_configured() {
+  for key in $REPO2_VARS; do
+    [ -n "$(env_value "$key")" ] || return 1
+  done
+}
+
+# load_second reads the second copy's settings into S_* (the environment
+# taking precedence over agent.env).
+load_second() {
+  S_ENDPOINT=$(s_get ROWSAFE_REPO2_S3_ENDPOINT)
+  S_BUCKET=$(s_get ROWSAFE_REPO2_S3_BUCKET)
+  S_KEY=$(s_get ROWSAFE_REPO2_S3_KEY)
+  S_SECRET=$(s_get ROWSAFE_REPO2_S3_KEY_SECRET)
+  S_CIPHER=$(s_get ROWSAFE_REPO2_CIPHER_PASS)
+  S_REGION=$(s_get ROWSAFE_REPO2_S3_REGION)
+  S_URI=$(s_get ROWSAFE_REPO2_S3_URI_STYLE)
+  S_PORT=$(s_get ROWSAFE_REPO2_S3_PORT)
+  S_CA=$(s_get ROWSAFE_REPO2_S3_CA_FILE)
+  S_VERIFY=$(s_get ROWSAFE_REPO2_S3_VERIFY_TLS)
+  _p=$(s_get ROWSAFE_REPO2_PATH_PREFIX)
+  [ -n "$_p" ] || _p=/rowsafe
+  _p=$(printf '%s\n' "$_p" | sed -e 's|^/*||' -e 's|/*$||')
+  S_PATH=/$_p
+}
+
+# second_copy runs before write_env: --add-storage asks for (or, without a
+# terminal, tests) the second storage; --remove-second-copy turns it off.
+second_copy() {
+  case $SECOND_COPY in
+    add) ;;
+    remove)
+      if ! second_configured; then
+        ok "no second copy is set up on this server"
+        return 0
+      fi
+      for key in $REPO2_VARS $REPO2_OPT_VARS; do unset "$key"; done
+      STORAGE_CLEAR="$STORAGE_CLEAR $REPO2_VARS $REPO2_OPT_VARS"
+      return 0
+      ;;
+    *) return 0 ;;
+  esac
+  storage_configured || die "set up the first backup storage first: run the installer without --add-storage"
+  first="$(env_value ROWSAFE_REPO_S3_ENDPOINT)/$(env_value ROWSAFE_REPO_S3_BUCKET)"
+  if [ "$TTY" = 0 ]; then
+    # Automation: the settings come from the environment.
+    missing=''
+    for key in $REPO2_VARS; do
+      [ -n "$(s_get "$key")" ] || missing="$missing $key"
+    done
+    [ -z "$missing" ] || die "--add-storage without a terminal needs these in the environment:$missing"
+    load_second
+    [ "$S_ENDPOINT/$S_BUCKET" != "$first" ] || die "the second copy must go to another bucket than the first storage ($S_BUCKET)"
+    step "Testing the second copy's storage"
+    storage_test || die "the second copy's storage test failed; nothing was saved"
+    return 0
+  fi
+  say ""
+  step "Second backup copy"
+  tty_say "A second copy keeps your backups and the change log in a second bucket too,"
+  tty_say "ideally at another provider: if one bucket, account or provider is ever lost,"
+  tty_say "the other still has everything. PostgreSQL never waits for it. Its key and"
+  tty_say "its own encryption passphrase stay on this server, like the first ones."
+  tty_say ""
+  tty_say "Your backups go to bucket '$(env_value ROWSAFE_REPO_S3_BUCKET)' at $(env_value ROWSAFE_REPO_S3_ENDPOINT)."
+  if second_configured; then
+    tty_say "The second copy goes to bucket '$(env_value ROWSAFE_REPO2_S3_BUCKET)' at $(env_value ROWSAFE_REPO2_S3_ENDPOINT)."
+    if ! confirm "Move the second copy to another bucket?" n; then
+      ok "kept the second copy's settings"
+      SECOND_COPY=''
+      return 0
+    fi
+    tty_hint "What is in the old bucket stays there; new backups go to the new one."
+  fi
+  tty_hint "Tip: a bucket at another provider than the first one protects you best."
+  S_AVOID=$first S_PREFIX=ROWSAFE_REPO2_
+  _pp=$(s_get ROWSAFE_REPO2_PATH_PREFIX)
+  [ -n "$_pp" ] || _pp=/rowsafe
+  S_PATH=/$(printf '%s\n' "$_pp" | sed -e 's|^/*||' -e 's|/*$||')
+  storage_questions
+  S_AVOID='' S_PREFIX=''
+  PASS_KEY=ROWSAFE_REPO2_CIPHER_PASS PASS_WHAT="second copy"
+  choose_passphrase
+  tty_hint "This passphrase is not the first storage's: keep both in your password manager."
+  PASS_KEY='' PASS_WHAT=''
+
+  ROWSAFE_REPO2_S3_ENDPOINT=$S_ENDPOINT ROWSAFE_REPO2_S3_BUCKET=$S_BUCKET
+  ROWSAFE_REPO2_S3_KEY=$S_KEY ROWSAFE_REPO2_S3_KEY_SECRET=$S_SECRET ROWSAFE_REPO2_CIPHER_PASS=$S_CIPHER
+  ROWSAFE_REPO2_S3_REGION=$S_REGION ROWSAFE_REPO2_S3_URI_STYLE=$S_URI
+  export ROWSAFE_REPO2_S3_ENDPOINT ROWSAFE_REPO2_S3_BUCKET ROWSAFE_REPO2_S3_KEY ROWSAFE_REPO2_S3_KEY_SECRET \
+    ROWSAFE_REPO2_CIPHER_PASS ROWSAFE_REPO2_S3_REGION ROWSAFE_REPO2_S3_URI_STYLE
+  if [ -n "$S_PORT" ]; then
+    ROWSAFE_REPO2_S3_PORT=$S_PORT
+    export ROWSAFE_REPO2_S3_PORT
+  else
+    unset ROWSAFE_REPO2_S3_PORT
+    STORAGE_CLEAR="$STORAGE_CLEAR ROWSAFE_REPO2_S3_PORT"
+  fi
+  if [ "$S_PROVIDER" != s3-compatible ]; then
+    unset ROWSAFE_REPO2_S3_CA_FILE ROWSAFE_REPO2_S3_VERIFY_TLS
+    STORAGE_CLEAR="$STORAGE_CLEAR ROWSAFE_REPO2_S3_CA_FILE ROWSAFE_REPO2_S3_VERIFY_TLS"
+  fi
+}
+
+# second_copy_done runs once the agent restarted with the new settings: it
+# waits for the agent to set up the second copy for each database with
+# backups on, and says what happens next.
+second_copy_done() {
+  say ""
+  if [ "$SECOND_COPY" = remove ]; then
+    say "${BOLD}${GREEN}${CHECK} The second copy is off.${RESET} New backups and the change log go only to the first storage."
+    say "    What is already in the second bucket stays there: delete it at your provider"
+    say "    once you no longer need it."
+    return 0
+  fi
+  stanzas=''
+  for f in "$CONFIG_DIR"/pgbackrest/*.conf; do
+    case $f in *.copy2.conf | *'*'*) continue ;; esac
+    stanzas="$stanzas $(basename "$f" .conf)"
+  done
+  if [ -z "$stanzas" ]; then
+    say "${BOLD}${GREEN}${CHECK} Second copy saved.${RESET} It starts with the first database you turn backups on for."
+    return 0
+  fi
+  if ! agent_running; then
+    say "${BOLD}Second copy saved.${RESET} The agent isn't running, so it starts once the agent does."
+    return 0
+  fi
+  step "Turning on the second copy"
+  note "the agent sets it up for:$stanzas"
+  i=0
+  while :; do
+    waiting=''
+    for st in $stanzas; do
+      [ -f "$CONFIG_DIR/pgbackrest/$st.copy2.conf" ] && [ -d "$STATE_DIR/copy2-queue/$st" ] || waiting="$waiting $st"
+    done
+    [ -n "$waiting" ] || break
+    i=$((i + 1))
+    if [ "$i" -gt 45 ]; then
+      warn "the agent hasn't set up the second copy for$waiting yet; it keeps trying (see journalctl -u rowsafe-agent)"
+      break
+    fi
+    sleep 2
+  done
+  [ -n "$waiting" ] || ok "the second copy is set up; PostgreSQL's change log now goes to both storages (reloaded, no restart)"
+  say ""
+  say "${BOLD}${GREEN}${CHECK} Second copy on.${RESET} Rowsafe takes a first full backup into it now, then one every week."
+  say "    If the second storage is ever unreachable, PostgreSQL carries on, backups keep"
+  say "    going to the first storage, and Rowsafe alerts you. The dashboard shows both"
+  say "    storages, how far the copy is, and what each costs."
+}
+# ---- end second copy
 
 # ---------------------------------------------------------------- service
 
@@ -2377,6 +2591,7 @@ install_agent() {
   install_unit
   install_logrotate
   maybe_guided_storage
+  second_copy
   write_env
 
   if systemd_running; then
@@ -2443,7 +2658,7 @@ install_agent() {
   fi
   probe_postgres
   summary "$SERVICE_STATE"
-  databases
+  if [ -n "$SECOND_COPY" ]; then second_copy_done; else databases; fi
 }
 
 summary() {
@@ -2543,6 +2758,8 @@ main() {
         shift
         ;;
       --check-storage) mode=check-storage ;;
+      --add-storage) SECOND_COPY=add ;;
+      --remove-second-copy) SECOND_COPY=remove ;;
       --storage)
         [ $# -ge 2 ] || die "--storage needs a provider: $PROVIDERS"
         case " $PROVIDERS other minio " in
@@ -2579,9 +2796,11 @@ main() {
   if [ "$purge" = 1 ] && [ "$mode" != uninstall ]; then
     die "--purge only goes with --uninstall"
   fi
-  if [ "$mode" != install ] && { [ "$SETUP_STORAGE" = 1 ] || [ -n "$STORAGE_PROVIDER" ]; }; then
-    die "--setup-storage and --storage only go with an install"
+  if [ "$mode" != install ] && { [ "$SETUP_STORAGE" = 1 ] || [ -n "$STORAGE_PROVIDER" ] || [ -n "$SECOND_COPY" ]; }; then
+    die "--setup-storage, --storage, --add-storage and --remove-second-copy only go with an install"
   fi
+  # The second copy is its own step: no database questions around it.
+  [ -z "$SECOND_COPY" ] || NO_SETUP=1
   if [ "$mode" != install ] && { [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME" ] || [ -n "$ALLOW_RESTART" ]; }; then
     die "--no-setup, --protect and --allow-restart only go with an install"
   fi

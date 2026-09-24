@@ -19,7 +19,10 @@
 #      re-runs that keep or change settings, a passphrase of one's own,
 #      Ctrl-C at a hidden prompt, --check-storage and --no-prompt. Secrets
 #      must never reach the terminal. Pasted bucket URLs (R2, B2, S3, Wasabi,
-#      Spaces, any https endpoint) fill in the provider, endpoint and bucket;
+#      Spaces, any https endpoint) fill in the provider, endpoint and bucket.
+#      The second copy (--add-storage): the first storage's bucket refused,
+#      its own generated passphrase, kept on a re-run, tested by
+#      --check-storage, without a terminal, and --remove-second-copy;
 #   5. turning on backups after the install, with a stand-in agent whose
 #      `setup` answers come from files: found PostgreSQL, name, plan, "Turn on
 #      backups?", "Restart PostgreSQL now?" (yes, no), a taken name, another
@@ -540,7 +543,7 @@ import datetime, hashlib, hmac, http.server, re, ssl, sys, urllib.parse
 # takes us-east-1). A file named "skew" in the working directory moves its
 # clock by that many seconds.
 KEYS = {"AKIDTESTROWSAFE": "test/secret+key=="}
-BUCKETS = {"rowsafe-test"}
+BUCKETS = {"rowsafe-test", "rowsafe-copy2"}
 objects = {}
 
 
@@ -858,6 +861,7 @@ guided_storage_tests() {
   for s in "$secret" my-own-passphrase-long-enough; do
     ! grep -qF "$s" "$W/out" || fail "--check-storage printed a secret"
   done
+  second_copy_tests
 
   # 7. --no-prompt on a terminal behaves exactly like no terminal.
   expect_ok "purge" "$INSTALLER" --uninstall --purge
@@ -869,6 +873,64 @@ guided_storage_tests() {
   bucket_url_tests
   setup_flow_tests
   restart_tests
+}
+
+# ------------------------------------------------------------ second copy
+
+second_copy_tests() {
+  echo "  -- second copy (--add-storage)"
+  first=$(grep -E '^ROWSAFE_REPO_' /etc/rowsafe/agent.env | sort)
+  expect_fail "--add-storage without a terminal needs its settings" "needs these in the environment" "$INSTALLER" --add-storage
+  # The first storage's bucket is refused; another bucket is tested; the
+  # second copy gets its own generated passphrase.
+  tty_ok "--add-storage: another bucket, own passphrase" \
+    "Bucket URL\thttps://rowsafe-test.s3.eu-central-1.amazonaws.com/\nAccess key ID\t$key\nSecret access key\t$secret\nBucket URL\thttps://s3.rowsafe.test/rowsafe-copy2\nRegion (\t\nAccess key ID\t$key\nSecret access key\t$secret\nChoose 1-2\t1\nto continue\t{capture:[│|] {6}[A-Za-z0-9]{36}([A-Za-z0-9]{4}) }\n" \
+    "$INSTALLER" --add-storage
+  has "A second copy keeps your backups"
+  has "That is the bucket your backups already go to."
+  has "backup storage works"
+  has "Your second copy encryption passphrase:"
+  has "keep both in your password manager"
+  has "Second copy saved."
+  lacks "$secret"
+  lacks "Turn on backups"
+  pass2=$(sed -n 's/^.*[│|]      \([A-Za-z0-9]\{40\}\)        [│|].*$/\1/p' "$W/out")
+  [ "${#pass2}" = 40 ] || fail "second copy passphrase not shown in the box"
+  env_is ROWSAFE_REPO2_S3_ENDPOINT s3.rowsafe.test
+  env_is ROWSAFE_REPO2_S3_BUCKET rowsafe-copy2
+  env_is ROWSAFE_REPO2_S3_REGION us-east-1
+  env_is ROWSAFE_REPO2_S3_URI_STYLE path
+  env_is ROWSAFE_REPO2_S3_KEY "$key"
+  env_is ROWSAFE_REPO2_S3_KEY_SECRET "$secret"
+  env_is ROWSAFE_REPO2_CIPHER_PASS "$pass2"
+  [ "$(grep -E '^ROWSAFE_REPO_' /etc/rowsafe/agent.env | sort)" = "$first" ] || fail "--add-storage changed the first storage's settings"
+  ! grep -q "^ROWSAFE_REPO_CIPHER_PASS='$pass2'" /etc/rowsafe/agent.env || fail "the second copy reused the first passphrase"
+  [ "$(grep -c '^# Second backup copy' /etc/rowsafe/agent.env)" = 1 ] || fail "second copy block not added once"
+  pass "second copy saved beside the first storage, with its own passphrase"
+
+  # A re-run keeps it; --check-storage tests both.
+  before=$(sha256sum /etc/rowsafe/agent.env)
+  tty_ok "--add-storage again, keep it" "Move the second copy to another bucket?\tn\n" "$INSTALLER" --add-storage
+  has "kept the second copy's settings"
+  [ "$(sha256sum /etc/rowsafe/agent.env)" = "$before" ] || fail "keeping the second copy changed agent.env"
+  expect_ok "--check-storage tests both storages" "$INSTALLER" --check-storage
+  grep -q "Testing the second copy's storage" "$W/out" || fail "--check-storage skipped the second copy"
+  [ "$(grep -c "backup storage works" "$W/out")" = 2 ] || fail "--check-storage: not both storages tested"
+
+  # Without a terminal: from the environment, tested before anything is saved.
+  expect_fail "--add-storage --no-prompt: a failing bucket saves nothing" "second copy's storage test failed" \
+    env ROWSAFE_REPO2_S3_BUCKET=no-such-bucket "$INSTALLER" --add-storage --no-prompt
+  [ "$(sha256sum /etc/rowsafe/agent.env)" = "$before" ] || fail "a failing second copy changed agent.env"
+  expect_fail "--add-storage --no-prompt: the first bucket refused" "another bucket than the first storage" \
+    env ROWSAFE_REPO2_S3_ENDPOINT=s3.eu-central-1.amazonaws.com ROWSAFE_REPO2_S3_BUCKET=rowsafe-test "$INSTALLER" --add-storage --no-prompt
+
+  # Off again: the settings become comments, the first storage stays.
+  expect_ok "--remove-second-copy" "$INSTALLER" --remove-second-copy
+  grep -q "The second copy is off" "$W/out" || fail "--remove-second-copy: no message"
+  ! grep -q '^ROWSAFE_REPO2_' /etc/rowsafe/agent.env || fail "--remove-second-copy left settings active"
+  [ "$(grep -E '^ROWSAFE_REPO_' /etc/rowsafe/agent.env | sort)" = "$first" ] || fail "--remove-second-copy changed the first storage"
+  expect_fail "--add-storage only goes with an install" "only go with an install" "$INSTALLER" --add-storage --check-storage
+  pass "second copy: kept, checked, automation, removed"
 }
 
 # ------------------------------------------------------------ bucket URLs
