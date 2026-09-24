@@ -301,6 +301,7 @@ func adoptCmd(ctx context.Context, c *client.Client, args []string) error {
 	socketDir := fs.String("socket-dir", "/var/run/postgresql", "Unix socket directory")
 	retention := fs.Int("retention-full", 2, "full backups to keep (weekly fulls: 2 = about 2 weeks of PITR)")
 	noWait := fs.Bool("no-wait", false, "don't wait for the plan")
+	engine := fs.String("engine", "", "database engine: postgresql (default), or another engine Rowsafe supports")
 	name, err := parse(fs, args, true)
 	if err != nil {
 		return err
@@ -309,7 +310,7 @@ func adoptCmd(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	resp, err := c.CreateDatabase(ctx, protocol.CreateDatabaseRequest{
-		HostID: *host, Name: name, Port: *port, SocketDir: *socketDir, RetentionFull: *retention,
+		HostID: *host, Name: name, Port: *port, SocketDir: *socketDir, RetentionFull: *retention, Engine: *engine,
 	})
 	if err != nil {
 		return err

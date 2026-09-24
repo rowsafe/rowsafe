@@ -162,7 +162,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	// Built-in monitoring (package collect): metrics every minute, beside
 	// the task loop and never blocking it.
 	go collect.Run(ctx, collect.Options{Log: a.log, PGUser: a.cfg.PGUser,
-		Databases: a.monitoredDatabases,
+		Databases: a.monitoredDatabases, Engine: a.monitorEngine,
 		Send: func(ctx context.Context, r protocol.MonitoringReport) (ack protocol.MonitoringAck, err error) {
 			return ack, a.client.post(ctx, "/v1/agent/monitoring", r, &ack)
 		}})
@@ -353,6 +353,12 @@ func (a *Agent) archiverStats(ctx context.Context) []protocol.ArchiverStats {
 	a.mu.Unlock()
 	var out []protocol.ArchiverStats
 	for _, db := range watched {
+		if !isPostgres(db) {
+			if stats, ok := a.engineArchiver(ctx, db); ok {
+				out = append(out, stats)
+			}
+			continue
+		}
 		stats, err := pginspect.Archiver(ctx, a.target(db))
 		stats.DatabaseID = db.ID
 		if err != nil {

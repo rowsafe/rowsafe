@@ -51,6 +51,9 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 		return nil, fmt.Errorf("task %s has no database", task.Type)
 	}
 	db := *task.Database
+	if !isPostgres(db) {
+		return a.runEngineTask(ctx, task, tl)
+	}
 	switch task.Type {
 	case protocol.TaskInspect:
 		return pginspect.Inspect(ctx, a.target(db))
