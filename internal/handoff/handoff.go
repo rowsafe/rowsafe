@@ -23,9 +23,7 @@ import (
 	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -117,28 +115,16 @@ func (k *KeyPair) PublicKey() string {
 	return base64.StdEncoding.EncodeToString(k.priv.PublicKey().Bytes())
 }
 
-// Fingerprint is the first 64 bits of SHA-256 of the public key, as four
-// groups of four hex digits ("7F3A-91C2-0B4E-D8A1"). 64 bits: finding
-// another key with the same fingerprint is out of reach.
+// Fingerprint is the key's fingerprint (protocol.KeyFingerprint).
 func Fingerprint(publicKey string) (string, error) {
-	raw, err := parsePublic(publicKey)
-	if err != nil {
+	if _, err := parsePublic(publicKey); err != nil {
 		return "", err
 	}
-	sum := sha256.Sum256(raw.Bytes())
-	h := strings.ToUpper(hex.EncodeToString(sum[:8]))
-	return h[0:4] + "-" + h[4:8] + "-" + h[8:12] + "-" + h[12:16], nil
+	return protocol.KeyFingerprint(publicKey)
 }
 
-// SameFingerprint compares fingerprints, ignoring case, spaces and dashes.
-func SameFingerprint(a, b string) bool {
-	norm := func(s string) string {
-		s = strings.ToUpper(strings.NewReplacer("-", "", " ", "", ":", "").Replace(s))
-		return s
-	}
-	na, nb := norm(a), norm(b)
-	return len(na) == 16 && subtle.ConstantTimeCompare([]byte(na), []byte(nb)) == 1
-}
+// SameFingerprint compares fingerprints (protocol.SameFingerprint).
+func SameFingerprint(a, b string) bool { return protocol.SameFingerprint(a, b) }
 
 func parsePublic(s string) (*ecdh.PublicKey, error) {
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(s))

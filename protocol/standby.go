@@ -1,6 +1,10 @@
 package protocol
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
 	"strings"
 	"time"
 )
@@ -96,6 +100,30 @@ type SealedBox struct {
 	EphemeralKey string `json:"ephemeral_key"`
 	Nonce        string `json:"nonce"`
 	Ciphertext   string `json:"ciphertext"`
+}
+
+// KeyFingerprint is an agent key's fingerprint: the first 64 bits of
+// SHA-256 of the X25519 public key, as four groups of four hex digits
+// ("7F3A-91C2-0B4E-D8A1"). It is what `rowsafe-agent key` prints on the
+// server and what a person confirms before anything is sealed to it.
+func KeyFingerprint(publicKey string) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(publicKey))
+	if err != nil || len(raw) != 32 {
+		return "", errors.New("invalid agent key")
+	}
+	sum := sha256.Sum256(raw)
+	h := strings.ToUpper(hex.EncodeToString(sum[:8]))
+	return h[0:4] + "-" + h[4:8] + "-" + h[8:12] + "-" + h[12:16], nil
+}
+
+// SameFingerprint compares fingerprints, ignoring case, spaces, colons and
+// dashes.
+func SameFingerprint(a, b string) bool {
+	norm := func(s string) string {
+		return strings.ToUpper(strings.NewReplacer("-", "", " ", "", ":", "").Replace(s))
+	}
+	na, nb := norm(a), norm(b)
+	return len(na) == 16 && na == nb
 }
 
 // HandoffPurposeStandby is SealedBox.Purpose for a standby.
