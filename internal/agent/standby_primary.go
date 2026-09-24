@@ -118,6 +118,9 @@ func (a *Agent) standbyPrepare(ctx context.Context, db protocol.DatabaseSpec, p 
 		return nil, fmt.Errorf("the standby server's key has fingerprint %s, not %s as confirmed: nothing was sent. "+
 			"Compare again with `sudo -u postgres rowsafe-agent key` on that server", fp, p.RecipientFingerprint)
 	}
+	if err := a.peerAllowed(p.RecipientKey, "the standby server"); err != nil {
+		return nil, err
+	}
 	f, err := a.readPrimaryFacts(ctx, db)
 	if err != nil {
 		return nil, fmt.Errorf("reading PostgreSQL's settings: %w", err)
@@ -182,6 +185,9 @@ func (a *Agent) standbyPrepare(ctx context.Context, db protocol.DatabaseSpec, p 
 		return res, err
 	}
 	res.Box = box
+	// On the server's own log too: which key got the bucket settings.
+	a.log.Warn("sealed this database's bucket settings for a standby server", "database", db.Name, "standby_id", p.StandbyID,
+		"recipient_fingerprint", fp, "streaming", res.Streaming)
 	res.Summary = fmt.Sprintf("Sealed the bucket settings for the standby (key %s).", fp)
 	if res.Streaming {
 		res.Summary += fmt.Sprintf(" Streaming is set up: role %s may connect from %s only.", res.ReplicationRole, strings.Join(p.StandbyAddresses, ", "))

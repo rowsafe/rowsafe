@@ -163,6 +163,9 @@ func (a *Agent) standbyCreate(ctx context.Context, db protocol.DatabaseSpec, p p
 		}
 	}
 	db.Port, db.SocketDir = p.Port, p.SocketDir
+	if err := a.peerAllowed(p.Box.SenderKey, "the primary"); err != nil {
+		return nil, err
+	}
 	plain, err := handoff.Open(rt.key, p.Box, protocol.HandoffPurposeStandby, protocol.StandbyHandoffContext(db.ID, p.StandbyID), p.SenderKey)
 	if err != nil {
 		return nil, fmt.Errorf("opening the primary's sealed handoff: %w", err)

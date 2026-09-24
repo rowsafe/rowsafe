@@ -410,7 +410,7 @@ func localAddresses() []string {
 func (a *Agent) standbyHeartbeat(ctx context.Context) protocol.StandbyHeartbeat {
 	rt := a.sb()
 	var hb protocol.StandbyHeartbeat
-	if rt.key != nil && !a.cfg.Sidecar() {
+	if rt.key != nil && !a.cfg.Sidecar() && a.cfg.Standby != StandbyOff {
 		hb.BoxKey = rt.key.PublicKey()
 	}
 	hb.Addresses = localAddresses()
@@ -427,6 +427,9 @@ func (a *Agent) standbyHeartbeat(ctx context.Context) protocol.StandbyHeartbeat 
 
 // applyStandbyInstructions takes the fences from a heartbeat answer.
 func (a *Agent) applyStandbyInstructions(in protocol.StandbyInstructions) {
+	if a.cfg.Standby == StandbyOff {
+		return // this server takes no part in standbys: nothing to hold
+	}
 	a.sb().setFences(in.Fences)
 }
 
@@ -520,6 +523,9 @@ func (a *Agent) runStandbyTask(ctx context.Context, task *protocol.Task, tl *tas
 	if a.cfg.Sidecar() {
 		return nil, errors.New("standby servers need the agent installed on the server itself; PostgreSQL in Docker isn't supported yet")
 	}
+	if a.cfg.Standby == StandbyOff {
+		return nil, errors.New("standby servers are turned off on this server (ROWSAFE_STANDBY=off in /etc/rowsafe/agent.env)")
+	}
 	if task.Database == nil {
 		return nil, fmt.Errorf("task %s has no database", task.Type)
 	}
@@ -541,6 +547,23 @@ func (a *Agent) runStandbyTask(ctx context.Context, task *protocol.Task, tl *tas
 		return runRewind(ctx, task, tl, db, a.standbyUnfence)
 	}
 	return nil, fmt.Errorf("unsupported task type %q (agent %s)", task.Type, Version)
+}
+
+// peerAllowed checks a peer's key against ROWSAFE_STANDBY=pinned.
+func (a *Agent) peerAllowed(publicKey, what string) error {
+	if a.cfg.Standby != StandbyPinned {
+		return nil
+	}
+	fp, err := handoff.Fingerprint(publicKey)
+	if err != nil {
+		return err
+	}
+	for _, p := range a.cfg.StandbyPeers {
+		if handoff.SameFingerprint(p, fp) {
+			return nil
+		}
+	}
+	return fmt.Errorf("this server only pairs with the servers listed in ROWSAFE_STANDBY_PEERS, and %s's key (%s) isn't one of them: nothing was sent or accepted", what, fp)
 }
 
 // KeyFingerprint prints this agent's key fingerprint (rowsafe-agent key),

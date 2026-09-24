@@ -248,3 +248,51 @@ func TestKeptStandbyDir(t *testing.T) {
 		}
 	}
 }
+
+func TestStandbyModes(t *testing.T) {
+	t.Setenv("ROWSAFE_STANDBY", "pinned")
+	if _, err := ConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "ROWSAFE_STANDBY_PEERS") {
+		t.Fatalf("pinned without peers: %v", err)
+	}
+	t.Setenv("ROWSAFE_STANDBY_PEERS", "7F3A-91C2-0B4E-D8A1, 0000-1111-2222-3333")
+	cfg, err := ConfigFromEnv()
+	if err != nil || cfg.Standby != StandbyPinned || len(cfg.StandbyPeers) != 2 {
+		t.Fatalf("pinned: %+v %v", cfg.StandbyPeers, err)
+	}
+	t.Setenv("ROWSAFE_STANDBY", "maybe")
+	if _, err := ConfigFromEnv(); err == nil {
+		t.Fatal("accepted ROWSAFE_STANDBY=maybe")
+	}
+
+	dir := t.TempDir()
+	peer := &Agent{cfg: Config{StateDir: filepath.Join(dir, "peer")}, log: slog.New(slog.DiscardHandler)}
+	os.MkdirAll(peer.cfg.StateDir, 0o700)
+	pub := peer.sb().key.PublicKey()
+	fp, _ := protocol.KeyFingerprint(pub)
+	a := &Agent{cfg: Config{StateDir: dir, Standby: StandbyPinned, StandbyPeers: []string{"0000-1111-2222-3333"}}, log: slog.New(slog.DiscardHandler)}
+	if err := a.peerAllowed(pub, "db-2"); err == nil || !strings.Contains(err.Error(), fp) {
+		t.Fatalf("an unlisted peer was allowed: %v", err)
+	}
+	a.cfg.StandbyPeers = append(a.cfg.StandbyPeers, strings.ToLower(fp))
+	if err := a.peerAllowed(pub, "db-2"); err != nil {
+		t.Fatal(err)
+	}
+	a.cfg.Standby = StandbyOn
+	if err := a.peerAllowed("anything", "db-2"); err != nil {
+		t.Fatal(err)
+	}
+	// Off: no key in heartbeats, no fences held, every task refused.
+	a.cfg.Standby = StandbyOff
+	if hb := a.standbyHeartbeat(t.Context()); hb.BoxKey != "" {
+		t.Fatal("reported a key with ROWSAFE_STANDBY=off")
+	}
+	a.applyStandbyInstructions(protocol.StandbyInstructions{Fences: []protocol.Fence{{ID: "fen_1", DatabaseID: "db_1", Port: 5432}}})
+	if len(a.sb().fences()) != 0 {
+		t.Fatal("held a fence with ROWSAFE_STANDBY=off")
+	}
+	db := protocol.DatabaseSpec{ID: "db_1"}
+	if _, err := a.runStandbyTask(t.Context(), &protocol.Task{Type: protocol.TaskStandbyFence, Database: &db, Params: []byte(`{}`)}, &taskLog{}); err == nil ||
+		!strings.Contains(err.Error(), "ROWSAFE_STANDBY=off") {
+		t.Fatalf("fence with ROWSAFE_STANDBY=off: %v", err)
+	}
+}
