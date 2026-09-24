@@ -1,0 +1,143 @@
+name: Rowsafe Mark
+description: Save a Mark (a named restore point) of your PostgreSQL before every deploy, so a bad migration can be rewound.
+author: Rowsafe
+branding:
+  icon: bookmark
+  color: green
+
+inputs:
+  api-key:
+    description: A read-write Rowsafe API key (rsk_...). Store it as a secret, e.g. secrets.ROWSAFE_API_KEY.
+    required: true
+  database:
+    description: >-
+      The Rowsafe database to mark. Default: "database" in .rowsafe.json, or the organization's only
+      database.
+    required: false
+    default: ""
+  label:
+    description: The Mark's name. Default before-deploy-<short commit SHA>. Letters are lowercased; other characters become dashes.
+    required: false
+    default: ""
+  wait:
+    description: Wait until the Mark is confirmed in your storage (usually a few seconds). false only requests it.
+    required: false
+    default: "true"
+  require-protected:
+    description: >-
+      Fail when the database can't be restored right now (backups, WAL archiving or the restore test
+      aren't OK), instead of only warning.
+    required: false
+    default: "false"
+  preview-sql:
+    description: >-
+      Migration SQL files to preview on a copy of the database before the Mark, as glob patterns
+      (e.g. prisma/migrations/**/migration.sql). Needs a rowsafe CLI with `rowsafe preview`; skipped
+      otherwise.
+    required: false
+    default: ""
+  preview-changed-only:
+    description: Preview only the files this push or pull request adds or changes.
+    required: false
+    default: "true"
+  preview-fail-on:
+    description: >-
+      Stop before the Mark when the preview verdict is at least this bad: never (default), dangerous
+      or careful.
+    required: false
+    default: never
+  wait-timeout-minutes:
+    description: Give up waiting for the Mark (or the preview) after this many minutes.
+    required: false
+    default: "10"
+  working-directory:
+    description: Directory with the project (where .rowsafe.json and preview-sql are looked up).
+    required: false
+    default: "."
+  version:
+    description: The rowsafe CLI version to use, e.g. 0.4.0, or latest.
+    required: false
+    default: latest
+  verify-provenance:
+    description: >-
+      Check the CLI's SLSA build provenance with the GitHub CLI before running it: auto (when gh is
+      available), true (required) or false. The SHA-256 checksum is always checked.
+    required: false
+    default: auto
+  api-url:
+    description: The Rowsafe API. Default https://api.rowsafe.sh.
+    required: false
+    default: ""
+  cli-path:
+    description: Use this rowsafe binary instead of downloading one (not verified by the action).
+    required: false
+    default: ""
+  github-token:
+    description: Token used to look up the CLI's build attestations.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  mark:
+    description: The Mark's name, e.g. before-deploy-3f2a1c9.
+    value: ${{ steps.run.outputs.mark }}
+  restore-from-backup:
+    description: The backup a rewind to this Mark starts from (empty until the Mark is confirmed).
+    value: ${{ steps.run.outputs.restore-from-backup }}
+  dashboard-url:
+    description: The database's Marks in the Rowsafe dashboard, where you rewind to one.
+    value: ${{ steps.run.outputs.dashboard-url }}
+  database:
+    description: The database that was marked.
+    value: ${{ steps.run.outputs.database }}
+  protected:
+    description: Whether the database could be restored at the time (true, false).
+    value: ${{ steps.run.outputs.protected }}
+  preview-verdict:
+    description: The migration preview's verdict (safe, careful, dangerous), when one ran.
+    value: ${{ steps.run.outputs.preview-verdict }}
+
+runs:
+  using: composite
+  steps:
+    - id: resolve
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_CLI_PATH: ${{ inputs.cli-path }}
+      run: '"$GITHUB_ACTION_PATH/scripts/install-cli.sh" resolve'
+
+    - if: steps.resolve.outputs.cache == 'true'
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ${{ steps.resolve.outputs.dir }}
+        key: rowsafe-cli-${{ steps.resolve.outputs.version }}-${{ steps.resolve.outputs.platform }}
+
+    - id: install
+      shell: bash
+      env:
+        INPUT_CLI_PATH: ${{ inputs.cli-path }}
+        INPUT_VERIFY_PROVENANCE: ${{ inputs.verify-provenance }}
+        INPUT_RESOLVED_VERSION: ${{ steps.resolve.outputs.version }}
+        INPUT_RESOLVED_PLATFORM: ${{ steps.resolve.outputs.platform }}
+        INPUT_RESOLVED_DIR: ${{ steps.resolve.outputs.dir }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: '"$GITHUB_ACTION_PATH/scripts/install-cli.sh" install'
+
+    - id: run
+      shell: bash
+      env:
+        INPUT_API_KEY: ${{ inputs.api-key }}
+        INPUT_DATABASE: ${{ inputs.database }}
+        INPUT_LABEL: ${{ inputs.label }}
+        INPUT_WAIT: ${{ inputs.wait }}
+        INPUT_REQUIRE_PROTECTED: ${{ inputs.require-protected }}
+        INPUT_PREVIEW_SQL: ${{ inputs.preview-sql }}
+        INPUT_PREVIEW_CHANGED_ONLY: ${{ inputs.preview-changed-only }}
+        INPUT_PREVIEW_FAIL_ON: ${{ inputs.preview-fail-on }}
+        INPUT_WAIT_TIMEOUT_MINUTES: ${{ inputs.wait-timeout-minutes }}
+        INPUT_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        INPUT_API_URL: ${{ inputs.api-url }}
+        ROWSAFE_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        ROWSAFE_BEFORE_SHA: ${{ github.event.before }}
+      run: '"$GITHUB_ACTION_PATH/scripts/run.sh"'
