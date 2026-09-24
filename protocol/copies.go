@@ -220,6 +220,10 @@ type CopyAccess struct {
 	// agent or, when the requester made it, Rowsafe at all).
 	Role             string `json:"role"`
 	PasswordVerifier string `json:"password_verifier"`
+	// Port is the TCP port the control plane chose (from
+	// CopiesReport.PortMin/PortMax). The agent takes another if it is busy
+	// and says so in the result.
+	Port int `json:"port,omitempty"`
 }
 
 // SafeCopyParams are the params of a safe_copy task.
@@ -293,6 +297,10 @@ type CopiesReport struct {
 	// OwnTLSCert: the host has a certificate configured for copies
 	// (otherwise each copy makes a self-signed one).
 	OwnTLSCert bool `json:"own_tls_cert,omitempty"`
+	// PortMin and PortMax bound the TCP ports safe copies may listen on
+	// (ROWSAFE_COPY_PORTS), so the control plane can give each its port.
+	PortMin int `json:"port_min,omitempty"`
+	PortMax int `json:"port_max,omitempty"`
 }
 
 // CopyState is a preview or safe copy on the host.

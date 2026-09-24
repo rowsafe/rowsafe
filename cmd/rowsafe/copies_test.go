@@ -8,7 +8,7 @@ func TestPreviewExit(t *testing.T) {
 		want            int
 	}{
 		{"safe", "dangerous", 0}, {"careful", "dangerous", 0}, {"dangerous", "dangerous", 3},
-		{"careful", "careful", 3}, {"dangerous", "never", 0}, {"failed", "never", 2}, {"failed", "dangerous", 2},
+		{"careful", "careful", 3}, {"dangerous", "never", 0}, {"failed", "never", 0}, {"failed", "dangerous", 2},
 	} {
 		got := 0
 		if err := previewExit(c.verdict, c.failOn); err != nil {

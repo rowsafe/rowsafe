@@ -348,6 +348,9 @@ func (a *Agent) copyState() *copyStore {
 // copiesReport is what the heartbeat says about copies.
 func (a *Agent) copiesReport() *protocol.CopiesReport {
 	r := &protocol.CopiesReport{OwnTLSCert: a.cfg.Copies.TLSCert != ""}
+	if !a.cfg.Sidecar() {
+		r.PortMin, r.PortMax = a.cfg.Copies.PortMin, a.cfg.Copies.PortMax
+	}
 	for _, c := range a.copyState().all() {
 		r.Copies = append(r.Copies, c.state())
 	}

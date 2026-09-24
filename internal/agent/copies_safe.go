@@ -64,7 +64,7 @@ func (a *Agent) safeCopy(ctx context.Context, db protocol.DatabaseSpec, p protoc
 	if listen[0] == "*" {
 		bind = []string{"0.0.0.0"}
 	}
-	port, err := a.freeCopyPort(bind)
+	port, err := a.freeCopyPort(bind, p.Access.Port)
 	if err != nil {
 		return nil, err
 	}

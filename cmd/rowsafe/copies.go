@@ -23,14 +23,35 @@ import (
 
 // ---- rowsafe preview ----
 
-// Exit codes of rowsafe preview (the GitHub Action relies on them).
+// rowsafe preview is a contract (the GitHub Action relies on it):
+//   - progress goes to stderr, the report to stdout;
+//   - --json prints one object with top-level string fields verdict (safe,
+//     careful, dangerous or failed: the migration fails on the copy),
+//     summary and error ("" when the preview ran), plus details;
+//   - exit 0 whenever the preview ran, whatever the verdict, and 1 when it
+//     couldn't run. --fail-on makes a verdict fail the command: exit 3 at
+//     or above it, 2 when the migration fails.
 const (
-	previewExitFails   = 2 // the migration fails on the copy
-	previewExitVerdict = 3 // the verdict is at or above --fail-on
+	previewExitFails   = 2 // --fail-on set and the migration fails on the copy
+	previewExitVerdict = 3 // --fail-on set and the verdict is at or above it
 )
 
 // stdinReader is where "rowsafe preview -" reads SQL (tests replace it).
 var stdinReader io.Reader = os.Stdin
+
+// previewJSON is what rowsafe preview --json prints.
+type previewJSON struct {
+	Verdict  string `json:"verdict"`
+	Summary  string `json:"summary"`
+	Error    string `json:"error"`
+	ID       string `json:"id,omitempty"`
+	Database string `json:"database,omitempty"`
+	Label    string `json:"label,omitempty"`
+	Status   string `json:"status,omitempty"`
+	// Markdown is the report for a pull request comment.
+	Markdown string                  `json:"markdown,omitempty"`
+	Result   *protocol.PreviewResult `json:"result,omitempty"`
+}
 
 func previewCmd(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("preview", flag.ContinueOnError)
@@ -38,7 +59,7 @@ func previewCmd(ctx context.Context, c *client.Client, args []string) error {
 	label := fs.String("label", "", "a name for the preview (default: the file name)")
 	format := fs.String("format", "text", "output: text, json or markdown")
 	asJSON := fs.Bool("json", false, "same as --format json")
-	failOn := fs.String("fail-on", protocol.PreviewDangerous, "exit 3 when the verdict is at least this: careful, dangerous or never")
+	failOn := fs.String("fail-on", "never", "fail (exit 3) when the verdict is at least this: careful or dangerous; never (default) always exits 0 once the preview ran")
 	fresh := fs.Int("fresh", 0, "reuse a kept preview copy whose data is at most this many minutes old (default 60; -1: always restore a new one)")
 	noWait := fs.Bool("no-wait", false, "return once the preview is queued")
 	source := fs.String("source", "cli", "")
@@ -64,42 +85,81 @@ func previewCmd(ctx context.Context, c *client.Client, args []string) error {
 	default:
 		return errors.New("usage: rowsafe preview [NAME] FILE.sql (or - to read the SQL from stdin)")
 	}
-	if name, err = resolveDatabase(ctx, c, name); err != nil {
-		return err
+	if file != "-" && *label == "" {
+		*label = filepath.Base(file)
+	}
+	p, err := runPreview(ctx, c, name, file, protocol.CreatePreviewRequest{DB: *db, Label: *label, Source: *source, FreshMinutes: *fresh}, *noWait)
+	if err == nil && p.Result == nil && !*noWait {
+		err = errors.New(orText(p.Error, "the preview ended as "+p.Status))
+	}
+	switch *format {
+	case "json":
+		out := previewJSON{ID: p.ID, Database: p.Database, Label: p.Label, Status: p.Status, Result: p.Result}
+		if err != nil {
+			out.Error = "The preview couldn't run: " + apiErr(err).Error()
+		}
+		if r := p.Result; r != nil {
+			out.Verdict, out.Summary, out.Markdown = r.Verdict, r.Summary, preview.Markdown(r, p.Label)
+		}
+		if perr := printJSON(out); perr != nil {
+			return perr
+		}
+		if err != nil {
+			return exitError(1)
+		}
+	case "markdown":
+		if err != nil {
+			fmt.Printf("### Rowsafe migration preview\n\nThe preview couldn't run: %s\n", apiErr(err))
+			return exitError(1)
+		}
+		if p.Result != nil {
+			fmt.Print(preview.Markdown(p.Result, p.Label))
+		}
+	default:
+		if err != nil {
+			return fmt.Errorf("the preview couldn't run: %w", apiErr(err))
+		}
+		if p.Result == nil { // --no-wait
+			fmt.Printf("Queued preview %s. Follow it with: rowsafe previews %s\n", p.ID, p.ID)
+			return nil
+		}
+		fmt.Print(preview.Text(p.Result))
+	}
+	if p.Result == nil {
+		return nil
+	}
+	return previewExit(p.Result.Verdict, *failOn)
+}
+
+// runPreview reads the SQL, queues the preview and (unless noWait) waits
+// for it, telling stderr what happens.
+func runPreview(ctx context.Context, c *client.Client, name, file string, req protocol.CreatePreviewRequest, noWait bool) (protocol.Preview, error) {
+	name, err := resolveDatabase(ctx, c, name)
+	if err != nil {
+		return protocol.Preview{}, err
 	}
 	var sql []byte
 	if file == "-" {
 		sql, err = io.ReadAll(io.LimitReader(stdinReader, 1<<20+1))
 	} else {
 		sql, err = os.ReadFile(file)
-		if *label == "" {
-			*label = filepath.Base(file)
-		}
 	}
-	if err != nil {
-		return err
+	switch {
+	case err != nil:
+		return protocol.Preview{}, err
+	case len(sql) > 960<<10:
+		return protocol.Preview{}, errors.New("the SQL is over 960 kB; preview one migration at a time")
+	case strings.TrimSpace(string(sql)) == "":
+		return protocol.Preview{}, errors.New("the SQL is empty")
 	}
-	if len(sql) > 1<<20 {
-		return errors.New("the SQL is over 1 MB; preview migrations one file at a time")
+	req.SQL = string(sql)
+	p, err := c.CreatePreview(ctx, name, req)
+	if err != nil || noWait {
+		return p, err
 	}
-	if strings.TrimSpace(string(sql)) == "" {
-		return errors.New("the SQL is empty")
-	}
-	p, err := c.CreatePreview(ctx, name, protocol.CreatePreviewRequest{SQL: string(sql), DB: *db, Label: *label, Source: *source, FreshMinutes: *fresh})
-	if err != nil {
-		return apiErr(err)
-	}
-	if *noWait {
-		if *format == "json" {
-			return printJSON(p)
-		}
-		fmt.Printf("Queued preview %s of %s. Follow it with: rowsafe previews %s %s\n", p.ID, orText(*label, "the SQL"), name, p.ID)
-		return nil
-	}
-	quiet := *format != "text"
 	step := ""
-	fmt.Fprintf(os.Stderr, "Previewing %s on a fresh copy of %s (production is never touched)...\n", orText(*label, "the SQL"), name)
-	p, err = c.WaitPreview(ctx, p.ID, func(v protocol.Preview) {
+	fmt.Fprintf(os.Stderr, "Previewing %s on a fresh copy of %s (production is never touched)...\n", orText(req.Label, "the SQL"), name)
+	return c.WaitPreview(ctx, p.ID, func(v protocol.Preview) {
 		s := v.Status + "/" + v.Step
 		if s == step {
 			return
@@ -114,42 +174,19 @@ func previewCmd(ctx context.Context, c *client.Client, args []string) error {
 			fmt.Fprintln(os.Stderr, "  running the migration on the copy")
 		}
 	})
-	if err != nil {
-		return err
-	}
-	if p.Result == nil {
-		msg := orText(p.Error, "the preview ended as "+p.Status)
-		if quiet {
-			if *format == "json" {
-				_ = printJSON(p)
-			} else {
-				fmt.Printf("### Rowsafe migration preview\n\nThe preview couldn't run: %s\n", msg)
-			}
-		} else {
-			fmt.Printf("The preview couldn't run: %s\n", msg)
-		}
-		return exitError(1)
-	}
-	switch *format {
-	case "json":
-		if err := printJSON(p); err != nil {
-			return err
-		}
-	case "markdown":
-		fmt.Print(preview.Markdown(p.Result, p.Label))
-	default:
-		fmt.Print(preview.Text(p.Result))
-	}
-	return previewExit(p.Result.Verdict, *failOn)
 }
 
-// previewExit maps a verdict to the exit code.
+// previewExit maps a verdict to the exit code: 0 unless --fail-on says
+// otherwise.
 func previewExit(verdict, failOn string) error {
+	if failOn == "never" {
+		return nil
+	}
 	rank := map[string]int{protocol.PreviewSafe: 0, protocol.PreviewCareful: 1, protocol.PreviewDangerous: 2}
 	switch {
 	case verdict == protocol.PreviewFailed:
 		return exitError(previewExitFails)
-	case failOn != "never" && rank[verdict] >= rank[failOn]:
+	case rank[verdict] >= rank[failOn]:
 		return exitError(previewExitVerdict)
 	}
 	return nil

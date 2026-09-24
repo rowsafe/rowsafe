@@ -432,10 +432,17 @@ func copyDatabases(ctx context.Context, conn *pgx.Conn) ([]string, error) {
 // ---- TCP access for safe copies ----
 
 // freeCopyPort picks a TCP port in the configured range that no copy uses
-// and nothing listens on.
-func (a *Agent) freeCopyPort(listen []string) (int, error) {
+// and nothing listens on: want (the control plane's choice) when it is.
+func (a *Agent) freeCopyPort(listen []string, want int) (int, error) {
 	used := a.copyState().usedPorts()
+	ports := []int{}
+	if want >= a.cfg.Copies.PortMin && want <= a.cfg.Copies.PortMax {
+		ports = append(ports, want)
+	}
 	for p := a.cfg.Copies.PortMin; p <= a.cfg.Copies.PortMax; p++ {
+		ports = append(ports, p)
+	}
+	for _, p := range ports {
 		if used[p] {
 			continue
 		}

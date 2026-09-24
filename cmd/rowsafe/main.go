@@ -116,11 +116,12 @@ Guard: the safety net for AI agents
                                              command, create a restore point (https://rowsafe.sh/docs/guides/ai-agents)
   rowsafe guard --check COMMAND              tell whether COMMAND looks destructive (exit 0 yes, 1 no)
   (rowsafe status NAME, above, exits 3 when a database is not protected: use it to gate risky changes)
-  rowsafe preview [NAME] FILE [--db DB] [--format text|json|markdown] [--fail-on dangerous|careful|never] [--no-wait]
+  rowsafe preview [NAME] FILE [--db DB] [--json | --format text|json|markdown] [--fail-on careful|dangerous]
                                              run a migration (FILE, or - for stdin) on a fresh copy of the database
-                                             and report locks, rewrites, rows and time with a verdict: Safe, Careful
-                                             or Dangerous. Never touches production. Exit 0 below --fail-on (default
-                                             dangerous), 3 at or above it, 2 if the migration fails on the copy
+                                             and report locks, rewrites, rows and time with a verdict: safe, careful,
+                                             dangerous, or failed (it fails on the copy). Never touches production.
+                                             Exit 0 once the preview ran, 1 if it couldn't; with --fail-on, 3 at or
+                                             above that verdict and 2 if the migration fails
   rowsafe previews [NAME] [ID] [--json]      recent previews, or one in full
   rowsafe copies [NAME] [--json]             safe copies: masked copies developers and AI agents can connect to
   rowsafe copies create [NAME] [--allow IP] [--listen private|public|IP|*] [--hours 24] [--db DB] [--json]
