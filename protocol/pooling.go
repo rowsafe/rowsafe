@@ -211,8 +211,9 @@ type PoolingView struct {
 }
 
 // PoolingRequest is the body of PUT /v1/databases/{ref}/pooling (turn on or
-// change settings) and DELETE (turn off; Settings ignored). Confirm is the
-// database's name.
+// change settings; omitted settings keep their current value, or Rowsafe's
+// default when pooling is off) and POST /v1/databases/{ref}/pooling/off
+// (turn off; Settings ignored). Confirm is the database's name.
 type PoolingRequest struct {
 	Settings PoolingSettings `json:"settings,omitzero"`
 	Confirm  string          `json:"confirm"`
