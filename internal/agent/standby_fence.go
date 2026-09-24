@@ -70,6 +70,14 @@ func (a *Agent) standbyFence(ctx context.Context, db protocol.DatabaseSpec, p pr
 	if running || ops.running(c.DataDir) {
 		how, err := a.stopCluster(ctx, ops, db.Port, c.DataDir, c.Major, p.FenceID+"-stop", tl)
 		if err != nil {
+			// Still the primary: undo the fence rather than leave a primary
+			// that stops at its next restart. The control plane doesn't
+			// promote.
+			if st, serr := ops.status(ctx, db); serr == nil && !st.InRecovery {
+				_ = os.Remove(filepath.Join(c.DataDir, "standby.signal"))
+				_ = rt.releaseFence(p.FenceID)
+				tl.Printf("PostgreSQL is still running as the primary: removed standby.signal and dropped the fence")
+			}
 			return nil, fmt.Errorf("stopping PostgreSQL: %w", err)
 		}
 		res.Method = how
