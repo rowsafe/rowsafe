@@ -175,6 +175,8 @@ type HeartbeatRequest struct {
 	RestartActions []string `json:"restart_actions,omitempty"`
 	// Rewinds are the live copies and kept data directories on this host.
 	Rewinds []RewindState `json:"rewinds,omitempty"`
+	// Copies are Guard's preview and safe copies (protocol/copies.go).
+	Copies *CopiesReport `json:"copies,omitempty"`
 }
 
 // HeartbeatResponse tells the agent which databases to watch.
@@ -189,6 +191,8 @@ type HeartbeatResponse struct {
 	Monitored []DatabaseSpec `json:"monitored,omitempty"`
 	// RewindExpires changes when copies and kept data are deleted (Extend).
 	RewindExpires []RewindExpiry `json:"rewind_expires,omitempty"`
+	// Copies extends or deletes Guard copies (protocol/copies.go).
+	Copies *CopiesUpdate `json:"copies,omitempty"`
 }
 
 // ArchiverStats mirrors pg_stat_archiver for one adopted database.
@@ -488,6 +492,8 @@ func TaskTimeout(taskType string) time.Duration {
 	case TaskAdopt, TaskCheck:
 		return 10 * time.Minute
 	case TaskRestorePoint, TaskRestart:
+		return 5 * time.Minute
+	case TaskCopySchema: // catalog queries only
 		return 5 * time.Minute
 	case TaskMaintenance: // a VACUUM or REINDEX of a large table takes a while
 		return 2 * time.Hour
