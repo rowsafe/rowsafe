@@ -129,6 +129,7 @@ host() {
     echo "=== $image"
     docker run --rm \
       -e TEST_PUB="$TEST_PUB" -e TEST_PRIV="$TEST_PRIV" -e TEST_UNITS="$first" -e TEST_SHOW="${TEST_SHOW:-}" \
+      --cap-add NET_ADMIN \
       -v "$root/scripts:/src/scripts:ro" -v "$root/deploy:/src/deploy:ro" -v "$work/go:/go-release:ro" \
       "$image" sh /src/scripts/test-install.sh --in-container
     first=0
@@ -869,6 +870,7 @@ guided_storage_tests() {
   bucket_url_tests
   setup_flow_tests
   restart_tests
+  firewall_tests
 }
 
 # ------------------------------------------------------------ bucket URLs
@@ -1266,6 +1268,143 @@ EOF
   expect_ok "purge" "$INSTALLER" --uninstall --purge
   [ ! -e /etc/rowsafe ] || fail "purge left /etc/rowsafe"
   pass "--no-allow-restart, uninstall and purge remove the restart helper"
+}
+
+# ------------------------------------------------------------ firewall
+
+# firewall_tests: --allow-firewall, and the firewall helper with the real
+# nft (the container has its own network namespace and CAP_NET_ADMIN).
+firewall_tests() {
+  echo "  -- the firewall on request (--allow-firewall)"
+  apt-get install -y -qq --no-install-recommends nftables >/dev/null
+  H=/usr/local/lib/rowsafe/rowsafe-firewall
+  D=/var/lib/rowsafe/firewall
+  scenario "discover_out=$shop"
+  expect_ok "--allow-firewall" "$INSTALLER" --allow-firewall
+  grep -q "Rowsafe may limit who can reach PostgreSQL's port when you ask" "$W/out" || fail "--allow-firewall not confirmed"
+  grep -qx "5432" /etc/rowsafe/firewall-allowed || fail "firewall allow list lacks 5432"
+  [ "$(stat -c '%U %a' /etc/rowsafe/firewall-allowed)" = "root 644" ] || fail "firewall allow list ownership/mode"
+  [ "$(stat -c '%U %a' "$H")" = "root 755" ] || fail "firewall helper ownership/mode"
+  [ "$(stat -c '%U %a' "$D")" = "postgres 700" ] || fail "firewall request directory ownership/mode"
+  cmp "$H" /src/scripts/rowsafe-firewall || fail "helper differs from scripts/rowsafe-firewall"
+  for u in rowsafe-firewall.service rowsafe-firewall.path rowsafe-firewall-restore.service; do
+    cmp "/etc/systemd/system/$u" "/src/deploy/systemd/$u" || fail "$u differs"
+  done
+  if [ "${TEST_UNITS:-0}" = 1 ]; then
+    expect_ok "systemd-analyze verify (firewall units)" systemd-analyze verify /etc/systemd/system/rowsafe-firewall.service \
+      /etc/systemd/system/rowsafe-firewall.path /etc/systemd/system/rowsafe-firewall-restore.service
+    [ ! -s "$W/out" ] || {
+      cat "$W/out" >&2
+      fail "systemd-analyze verify printed warnings for the firewall units"
+    }
+    systemd-analyze security --offline=true --no-pager /etc/systemd/system/rowsafe-firewall.service 2>/dev/null |
+      tail -n 1 | sed "s/^/  rowsafe-firewall: /"
+  fi
+  scenario "discover_out=$shop"
+  tty_ok "a re-run keeps the firewall allowed" "Name it in Rowsafe\t\nTurn on backups for shop now?\tn\n" "$INSTALLER"
+  lacks "Allow Rowsafe to limit who can reach"
+  grep -qx "5432" /etc/rowsafe/firewall-allowed || fail "a re-run dropped the firewall allow list"
+
+  FO=$W/fw-run
+  install -d -m 0755 -o root -g root "$FO"
+  as_pg() { runuser -u postgres -- "$@"; }
+  fw() {
+    timeout 90 env STATE_DIRECTORY="$W/fw-state" RUNTIME_DIRECTORY="$FO" ROWSAFE_FIREWALL_CONFIRM_WAIT="${WAIT:-3}" "$H" "$@" 2>>"$W/fw.log" ||
+      fail "the firewall helper failed or hung (exit $?)"
+  }
+  # fw_request LINE ADDRESSES CONFIRM: as the agent does (CONFIRM=1 writes
+  # the confirmation once the helper answers phase=pending).
+  fw_request() {
+    rm -f "$FO/result"
+    [ -z "$2" ] || printf '%b' "$2" | as_pg sh -c 'cat >"$1"' sh "$D/addresses"
+    if [ "${3:-0}" = 1 ]; then
+      (
+        for _ in $(seq 1 100); do
+          if grep -qx phase=pending "$FO/result" 2>/dev/null; then
+            printf '%s\n' "${1%% *}" | as_pg sh -c 'cat >"$1.tmp" && mv "$1.tmp" "$1"' sh "$D/confirm"
+            break
+          fi
+          sleep 0.1
+        done
+      ) &
+    fi
+    printf '%s\n' "$1" | as_pg sh -c 'cat >"$1"' sh "$D/request"
+    fw
+    wait
+    [ ! -e "$D/request" ] || fail "helper left the request: $1"
+    [ -f "$FO/result" ] || fail "no result for: $1"
+  }
+  fw_has() { grep -qxF "$1" "$FO/result" || {
+    cat "$FO/result" >&2
+    fail "firewall helper result lacks $1"
+  }; }
+  rules() { nft list table inet rowsafe 2>/dev/null; }
+
+  fw # no request: nothing happens
+  [ ! -e "$FO/result" ] || fail "firewall helper answered without a request"
+  fw_request "fw_1 apply 5432" '10.0.0.0/16\n2001:db8::/32\n' 1
+  fw_has "id=fw_1"
+  fw_has "phase=done"
+  fw_has "ok=1"
+  rules | grep -q "tcp dport 5432 ip saddr 10.0.0.0/16 accept" || fail "no IPv4 allow rule: $(rules)"
+  rules | grep -q "tcp dport 5432 ip6 saddr 2001:db8::/32 accept" || fail "no IPv6 allow rule: $(rules)"
+  rules | grep -q "tcp dport 5432 drop" || fail "no drop rule: $(rules)"
+  ! rules | grep -q "dport 22" || fail "the firewall helper touched SSH"
+  grep -qx "addresses=10.0.0.0/16,2001:db8::/32" "$FO/port-5432" || fail "port state not published"
+  [ "$(stat -c '%U %a' "$FO/port-5432")" = "root 644" ] || fail "port state ownership/mode"
+
+  # Without the agent's confirmation the previous rule comes back.
+  WAIT=1 fw_request "fw_2 apply 5432" '192.168.7.0/24\n' 0
+  fw_has "ok=0"
+  grep -q "^error=the agent did not confirm" "$FO/result" || fail "unconfirmed change not explained"
+  rules | grep -q "10.0.0.0/16" && ! rules | grep -q "192.168.7.0/24" || fail "unconfirmed change not rolled back: $(rules)"
+  grep -qx "addresses=10.0.0.0/16,2001:db8::/32" "$FO/port-5432" || fail "rolled back state not published"
+
+  for bad in "0.0.0.0/0" "10.0.0.0/4" "::/0" "1.2.3.4;flush" "300.1.1.1" "example.com" '1.2.3.4 } accept; chain x {'; do
+    fw_request "fw_3 apply 5432" "$bad\n" 1
+    fw_has "ok=0"
+    grep -q "^error=not an address or range" "$FO/result" || fail "bad address $bad not refused"
+  done
+  fw_request "fw_4 apply 5499" '10.1.0.0/16\n' 1
+  grep -q "^error=port 5499 is not in /etc/rowsafe/firewall-allowed" "$FO/result" || fail "unlisted port not refused"
+  for bad in "fw_5 flush 5432" "fw_5 apply" "fw_5 apply 5432 x" "fw.5 apply 5432" 'x; nft flush ruleset 5432'; do
+    fw_request "$bad" "" 0
+    fw_has "error=malformed request"
+  done
+  rules | grep -q "10.0.0.0/16" || fail "refused requests changed the rules"
+  # A symlinked request is neither read nor followed.
+  printf 'fw_9 remove 5432\n' >"$W/fw-sentinel"
+  chmod 600 "$W/fw-sentinel"
+  as_pg ln -s "$W/fw-sentinel" "$D/request"
+  rm -f "$FO/result"
+  fw
+  [ ! -L "$D/request" ] || fail "firewall helper left a symlinked request"
+  fw_has "error=malformed request"
+  [ "$(cat "$W/fw-sentinel")" = "fw_9 remove 5432" ] || fail "a symlinked request changed its target"
+  [ -z "$(find "$D" -user root)" ] || fail "root left files in $D"
+
+  # At boot the kept rules come back.
+  nft delete table inet rowsafe
+  fw --restore
+  rules | grep -q "10.0.0.0/16" || fail "--restore did not load the rules"
+  fw_request "fw_6 remove 5432" "" 0
+  fw_has "ok=1"
+  ! rules | grep -q . || fail "remove left the table: $(rules)"
+  [ ! -e "$FO/port-5432" ] || fail "remove left the port state"
+  pass "firewall helper: nft rules, confirmation and rollback, bad addresses, allow list, symlinks, --restore, remove"
+
+  fw_request "fw_7 apply 5432" '10.2.0.0/16\n' 1
+  expect_ok "--no-allow-firewall" "$INSTALLER" --no-allow-firewall
+  [ ! -e "$H" ] && [ ! -e /etc/systemd/system/rowsafe-firewall.path ] || fail "--no-allow-firewall left the helper"
+  ! rules | grep -q . || fail "--no-allow-firewall left Rowsafe's rules"
+  ! grep -q '^[0-9]' /etc/rowsafe/firewall-allowed || fail "--no-allow-firewall kept the allow list"
+  scenario "discover_out=$shop"
+  expect_ok "--allow-firewall again" "$INSTALLER" --allow-firewall
+  pkill -u postgres -f 'rowsafe-agent run' || true
+  expect_ok "uninstall removes the firewall helper" "$INSTALLER" --uninstall
+  [ ! -e "$H" ] && [ ! -e /etc/systemd/system/rowsafe-firewall-restore.service ] || fail "uninstall left the firewall helper"
+  expect_ok "purge" "$INSTALLER" --uninstall --purge
+  pass "--no-allow-firewall, uninstall and purge remove the firewall helper and its rules"
 }
 
 case ${1:-} in

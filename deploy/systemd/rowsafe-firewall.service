@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-firewall.service: lets only chosen addresses reach a PostgreSQL
+# port root listed in /etc/rowsafe/firewall-allowed, when the Rowsafe agent
+# asks because a person did (see /usr/local/lib/rowsafe/rowsafe-firewall).
+# Started by rowsafe-firewall.path; installed by https://rowsafe.sh/install
+# only when root allowed it.
+
+[Unit]
+Description=Rowsafe: limit who can reach PostgreSQL's port, on request
+Documentation=https://rowsafe.sh/docs/guides/security
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/rowsafe/rowsafe-firewall
+TimeoutStartSec=120
+# The agent user, whose privileges read and remove the request.
+Environment=ROWSAFE_AGENT_USER=postgres
+# The answer: root's own directory, which the agent can read.
+RuntimeDirectory=rowsafe-firewall
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+# The rules, out of the agent's reach.
+StateDirectory=rowsafe-firewall
+StateDirectoryMode=0700
+UMask=0022
+
+# Hardening. It needs the host's network namespace and CAP_NET_ADMIN to
+# change nftables (over netlink), and CAP_SETUID/CAP_SETGID to read the
+# request as the agent user. No IP traffic at all.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SETUID CAP_SETGID
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=-/var/lib/rowsafe/firewall
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service

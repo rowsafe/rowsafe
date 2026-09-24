@@ -29,6 +29,10 @@
 #                          ask (Restart and Rewind in the dashboard, `rowsafe
 #                          restart`); only when someone confirms
 #   --no-allow-restart     turn that off again
+#   --allow-firewall       allow Rowsafe to limit who can reach PostgreSQL's port
+#                          with the firewall when you ask (Security in the
+#                          dashboard); never touches SSH or other ports
+#   --no-allow-firewall    turn that off again (and remove Rowsafe's rule)
 #   --check-storage        test the configured backup storage; change nothing
 #   --uninstall            stop and remove the agent; keep configuration and state
 #   --uninstall --purge    also delete /etc/rowsafe, /var/lib/rowsafe, /var/log/rowsafe
@@ -90,6 +94,13 @@ RESTART_SERVICE_FILE=/etc/systemd/system/rowsafe-pg-restart.service
 RESTART_PATH_FILE=/etc/systemd/system/rowsafe-pg-restart.path
 RESTART_ALLOW_FILE=$CONFIG_DIR/restart-allowed
 RESTART_DIR=$STATE_DIR/restart
+# The firewall on request (--allow-firewall): a root helper of its own.
+FIREWALL_HELPER=$LIB_DIR/rowsafe-firewall
+FIREWALL_SERVICE_FILE=/etc/systemd/system/rowsafe-firewall.service
+FIREWALL_PATH_FILE=/etc/systemd/system/rowsafe-firewall.path
+FIREWALL_RESTORE_FILE=/etc/systemd/system/rowsafe-firewall-restore.service
+FIREWALL_ALLOW_FILE=$CONFIG_DIR/firewall-allowed
+FIREWALL_DIR=$STATE_DIR/firewall
 AGENT_USER=postgres
 DEFAULT_RELEASES_URL=https://releases.rowsafe.sh/agent
 MAX_ARTIFACT_SIZE=536870912 # 512 MiB, the same limit the agent enforces
@@ -113,6 +124,7 @@ NO_SETUP=0         # --no-setup
 PROTECT_NAME=''    # --protect NAME
 PROTECT_PORT=''    # --protect-port PORT
 ALLOW_RESTART=''   # --allow-restart (yes) / --no-allow-restart (no); '' = ask once, on a terminal
+ALLOW_FIREWALL=''  # --allow-firewall (yes) / --no-allow-firewall (no); '' = ask once, on a terminal
 SETUP_STOP=0       # the plan limit was reached: don't offer more databases
 
 TMP=
@@ -171,6 +183,10 @@ Options (when piping, pass them after `sh -s --`):
                          (Restart and Rewind in the dashboard, `rowsafe restart`),
                          only when someone confirms
   --no-allow-restart     turn that off (and remove the restart helper)
+  --allow-firewall       allow Rowsafe to limit who can reach PostgreSQL's port with
+                         the firewall (nftables) when you ask, under Security in the
+                         dashboard; never touches SSH or other ports
+  --no-allow-firewall    turn that off (and remove Rowsafe's rule and helper)
   --check-storage        test the backup storage in /etc/rowsafe/agent.env; change nothing
   --uninstall            stop and remove the agent; keep configuration and state
   --uninstall --purge    also delete /etc/rowsafe, /var/lib/rowsafe and /var/log/rowsafe
@@ -983,6 +999,483 @@ restart_access() {
       else
         disallow_restarts
         note "OK: Rowsafe can't restart or stop PostgreSQL (change it with --allow-restart)"
+      fi
+      ;;
+  esac
+}
+
+# ---------------------------------------------------------------- firewall
+
+# With root's permission (--allow-firewall, or yes at the question), a
+# person can have Rowsafe let only chosen addresses reach PostgreSQL's port
+# (Security in the dashboard): the agent (unprivileged) writes a request to
+# $FIREWALL_DIR, rowsafe-firewall.path starts the root helper, and the
+# helper changes only its own nftables table, only for a port listed in
+# $FIREWALL_ALLOW_FILE. It runs in a unit of its own: the restart helper's
+# sandbox has no network access and stays that way.
+
+install_firewall_helper() {
+  install -d -m 0755 -o root -g root "${FIREWALL_HELPER%/*}"
+  _changed=0
+  if write_file "$FIREWALL_HELPER" 0755 root:root <<'ROWSAFE_FIREWALL_HELPER_EOF'; then
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-firewall: lets only chosen addresses reach PostgreSQL's port, when
+# a person asked Rowsafe to (Security in the dashboard) and root allowed it
+# for that port.
+#
+# Installed by https://rowsafe.sh/install as
+# /usr/local/lib/rowsafe/rowsafe-firewall, only when root allowed it
+# (--allow-firewall, or yes at the installer's question). It runs as root in
+# rowsafe-firewall.service, which rowsafe-firewall.path starts when the
+# agent writes a request; the agent itself cannot change the firewall. It
+# runs in a unit of its own, not in rowsafe-pg-restart's, because it needs
+# the host's network namespace and CAP_NET_ADMIN, which the restart helper
+# never gets.
+#
+# The request (/var/lib/rowsafe/firewall/request, in a directory the agent
+# user owns) is one line: "ID ACTION PORT", ACTION being apply or remove.
+# For apply, /var/lib/rowsafe/firewall/addresses holds the allowed IPv4 and
+# IPv6 addresses or ranges, one per line (at most 32). Both are read and
+# removed with the agent user's privileges, never root's. The port must be
+# listed in /etc/rowsafe/firewall-allowed ("PORT" lines, written by root).
+#
+# Rules live in one nftables table of Rowsafe's own, "inet rowsafe", which
+# matches only the allowed PostgreSQL ports: connections to such a port
+# from anywhere but the allowed addresses and the server itself are
+# dropped; SSH and every other port are never touched. The whole table is
+# replaced in one nft transaction, checked with nft -c first.
+#
+# After applying a rule the helper answers phase=pending and waits up to 60
+# seconds for the agent to confirm (/var/lib/rowsafe/firewall/confirm holding
+# the request ID), which the agent does only once it still reaches Rowsafe
+# and PostgreSQL. Without it, the previous rules are put back.
+#
+# Answers go to /run/rowsafe-firewall (root's directory, readable by the
+# agent): "result" (id, action, phase, ok, error, finished_at) and, per
+# port, "port-PORT" (addresses, applied_at). The rules are kept in
+# /var/lib/rowsafe-firewall and loaded again at boot by
+# rowsafe-firewall-restore.service ("rowsafe-firewall --restore").
+
+set -u
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+dir=${ROWSAFE_FIREWALL_DIR:-/var/lib/rowsafe/firewall}
+out_dir=${RUNTIME_DIRECTORY:-/run/rowsafe-firewall}
+allow=${ROWSAFE_FIREWALL_ALLOW:-/etc/rowsafe/firewall-allowed}
+state=${STATE_DIRECTORY:-/var/lib/rowsafe-firewall}
+agent_user=${ROWSAFE_AGENT_USER:-postgres}
+nft=${ROWSAFE_NFT:-nft}
+confirm_wait=${ROWSAFE_FIREWALL_CONFIRM_WAIT:-60}
+
+log() { echo "rowsafe-firewall: $*" >&2; }
+
+# as_agent runs a command with the agent user's privileges.
+as_agent() { setpriv --reuid="$agent_user" --regid="$agent_user" --init-groups -- "$@"; }
+
+id='' action='' port='' phase='done' ok=0 err=''
+
+# answer writes the result atomically into root's own directory.
+answer() {
+  tmp=$(mktemp "$out_dir/.result.XXXXXX") || {
+    log "cannot write the result in $out_dir"
+    exit 0
+  }
+  printf 'id=%s\naction=%s\nphase=%s\nok=%s\nerror=%s\nfinished_at=%s\n' "$id" "$action" "$phase" "$ok" "$err" "$(date +%s)" >"$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$out_dir/result"
+}
+
+refuse() {
+  err=$1
+  phase='done' ok=0
+  log "refused: $1"
+  answer
+  exit 0
+}
+
+# read_agent_file PATH MAXBYTES: prints a regular file read (and removed)
+# as the agent user; a symlink, FIFO or anything else prints nothing.
+read_agent_file() {
+  # shellcheck disable=SC2016 # $1 and $2 expand in the inner shell
+  as_agent sh -c '
+    if [ -f "$1" ] && [ ! -L "$1" ]; then
+      timeout 5 head -c "$2" -- "$1"
+      rm -f -- "$1"
+    elif [ -e "$1" ] || [ -L "$1" ]; then
+      rm -f -- "$1"
+    fi' rowsafe-firewall "$1" "$2" 2>/dev/null
+}
+
+# valid_cidr: an IPv4 or IPv6 address or range, nothing else.
+valid_cidr() {
+  printf '%s\n' "$1" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$' && {
+    printf '%s\n' "$1" | awk -F'[./]' '{ for (i = 1; i <= 4; i++) if ($i > 255) exit 1; if (NF == 5 && ($5 < 8 || $5 > 32)) exit 1 }'
+    return
+  }
+  printf '%s\n' "$1" | grep -Eq '^[0-9A-Fa-f:]{2,39}(/[0-9]{1,3})?$' || return 1
+  case $1 in *:*) ;; *) return 1 ;; esac
+  case $1 in */*) [ "${1#*/}" -ge 16 ] && [ "${1#*/}" -le 128 ] || return 1 ;; esac
+}
+
+allowed_port() {
+  [ -f "$allow" ] && [ ! -L "$allow" ] || return 1
+  [ "$(stat -c '%u' "$allow")" = 0 ] || return 1
+  case $(stat -c '%A' "$allow") in ?????w???? | ????????w?) return 1 ;; esac
+  awk -v p="$1" '$1 == p { f = 1 } END { exit !f }' "$allow"
+}
+
+# render prints the whole table from the per-port address lists in $state.
+render() {
+  echo "table inet rowsafe {}"
+  echo "delete table inet rowsafe"
+  echo "table inet rowsafe {"
+  echo "  chain input {"
+  echo "    type filter hook input priority filter - 5; policy accept;"
+  echo "    iifname \"lo\" accept"
+  for f in "$state"/port-*; do
+    [ -f "$f" ] || continue
+    p=${f##*/port-}
+    v4=$(grep -v ':' "$f" | paste -sd, -)
+    v6=$(grep ':' "$f" | paste -sd, -)
+    [ -z "$v4" ] || echo "    tcp dport $p ip saddr { $v4 } accept"
+    [ -z "$v6" ] || echo "    tcp dport $p ip6 saddr { $v6 } accept"
+    echo "    tcp dport $p drop"
+  done
+  echo "  }"
+  echo "}"
+}
+
+# load applies the rules in $state (or removes the table when none are left).
+load() {
+  if ls "$state"/port-* >/dev/null 2>&1; then
+    render >"$state/rules.nft.new" || return 1
+    "$nft" -c -f "$state/rules.nft.new" 2>"$state/nft.err" || return 1
+    "$nft" -f "$state/rules.nft.new" 2>"$state/nft.err" || return 1
+    mv -f "$state/rules.nft.new" "$state/rules.nft"
+  else
+    rm -f "$state/rules.nft"
+    if "$nft" list table inet rowsafe >/dev/null 2>&1; then
+      "$nft" delete table inet rowsafe 2>"$state/nft.err" || return 1
+    fi
+  fi
+}
+
+# publish writes the public view of each port's rule for the agent.
+publish() {
+  rm -f "$out_dir"/port-*
+  for f in "$state"/port-*; do
+    [ -f "$f" ] || continue
+    p=${f##*/port-}
+    tmp=$(mktemp "$out_dir/.port.XXXXXX") || return 0
+    printf 'addresses=%s\napplied_at=%s\n' "$(paste -sd, - <"$f")" "$(stat -c '%Y' "$f")" >"$tmp"
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$out_dir/port-$p"
+  done
+}
+
+mkdir -p "$state"
+chmod 0700 "$state"
+
+if [ "${1:-}" = --restore ]; then
+  if load; then
+    publish
+    log "rules loaded"
+  else
+    log "loading the rules failed: $(cat "$state/nft.err" 2>/dev/null)"
+    exit 1
+  fi
+  exit 0
+fi
+
+request=$dir/request
+as_agent test -e "$request" -o -L "$request" 2>/dev/null || exit 0
+line=$(read_agent_file "$request" 200 | head -n 1)
+if printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} (apply|remove) [0-9]{1,5}$'; then
+  id=${line%% *}
+  rest=${line#* }
+  action=${rest% *}
+  port=${rest#* }
+else
+  refuse "malformed request"
+fi
+command -v "$nft" >/dev/null 2>&1 || refuse "nftables (the nft command) is not installed on this server"
+allowed_port "$port" || refuse "port $port is not in $allow: changing the firewall for it from Rowsafe is not allowed"
+
+# Keep the current rules to go back to.
+rm -rf "$state/previous"
+mkdir -p "$state/previous"
+for f in "$state"/port-*; do [ -f "$f" ] && cp -p "$f" "$state/previous/"; done
+
+if [ "$action" = apply ]; then
+  addrs=$(read_agent_file "$dir/addresses" 4096 | head -n 33)
+  n=0
+  : >"$state/new-$port"
+  for a in $addrs; do
+    valid_cidr "$a" || {
+      rm -f "$state/new-$port"
+      refuse "not an address or range: $(printf '%s' "$a" | cut -c1-60)"
+    }
+    n=$((n + 1))
+    printf '%s\n' "$a" >>"$state/new-$port"
+  done
+  [ "$n" -ge 1 ] && [ "$n" -le 32 ] || { rm -f "$state/new-$port"; refuse "between 1 and 32 addresses are needed, got $n"; }
+  mv -f "$state/new-$port" "$state/port-$port"
+else
+  rm -f "$state/port-$port"
+fi
+
+rollback() {
+  rm -f "$state"/port-*
+  for f in "$state"/previous/port-*; do [ -f "$f" ] && cp -p "$f" "$state/"; done
+  load || log "putting the previous rules back failed: $(cat "$state/nft.err" 2>/dev/null)"
+  publish
+}
+
+if ! load; then
+  e=$(tr '\n' ' ' <"$state/nft.err" 2>/dev/null | cut -c1-300)
+  rollback
+  refuse "nft refused the rules: $e"
+fi
+log "$action port $port (request $id)"
+
+if [ "$action" = apply ]; then
+  # Wait for the agent to confirm it still reaches Rowsafe and PostgreSQL.
+  phase=pending ok=1
+  answer
+  confirmed=0
+  i=0
+  while [ "$i" -lt "$((confirm_wait * 2))" ]; do
+    if [ "$(read_agent_file "$dir/confirm" 100 | head -n 1)" = "$id" ]; then
+      confirmed=1
+      break
+    fi
+    sleep 0.5
+    i=$((i + 1))
+  done
+  phase='done'
+  if [ "$confirmed" != 1 ]; then
+    rollback
+    ok=0 err="the agent did not confirm within ${confirm_wait}s that it still reaches Rowsafe and PostgreSQL, so the previous rules were put back"
+    log "$err"
+    answer
+    exit 0
+  fi
+fi
+publish
+ok=1
+log "$action port $port: done"
+answer
+ROWSAFE_FIREWALL_HELPER_EOF
+    _changed=1
+  fi
+  if write_file "$FIREWALL_SERVICE_FILE" 0644 root:root <<'ROWSAFE_FIREWALL_SERVICE_EOF'; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-firewall.service: lets only chosen addresses reach a PostgreSQL
+# port root listed in /etc/rowsafe/firewall-allowed, when the Rowsafe agent
+# asks because a person did (see /usr/local/lib/rowsafe/rowsafe-firewall).
+# Started by rowsafe-firewall.path; installed by https://rowsafe.sh/install
+# only when root allowed it.
+
+[Unit]
+Description=Rowsafe: limit who can reach PostgreSQL's port, on request
+Documentation=https://rowsafe.sh/docs/guides/security
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/rowsafe/rowsafe-firewall
+TimeoutStartSec=120
+# The agent user, whose privileges read and remove the request.
+Environment=ROWSAFE_AGENT_USER=postgres
+# The answer: root's own directory, which the agent can read.
+RuntimeDirectory=rowsafe-firewall
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+# The rules, out of the agent's reach.
+StateDirectory=rowsafe-firewall
+StateDirectoryMode=0700
+UMask=0022
+
+# Hardening. It needs the host's network namespace and CAP_NET_ADMIN to
+# change nftables (over netlink), and CAP_SETUID/CAP_SETGID to read the
+# request as the agent user. No IP traffic at all.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SETUID CAP_SETGID
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=-/var/lib/rowsafe/firewall
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+ROWSAFE_FIREWALL_SERVICE_EOF
+    _changed=1
+  fi
+  if write_file "$FIREWALL_PATH_FILE" 0644 root:root <<'ROWSAFE_FIREWALL_PATH_EOF'; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-firewall.path: starts rowsafe-firewall.service when the Rowsafe
+# agent asks to change who can reach PostgreSQL's port (someone chose the
+# allowed addresses under Security in the dashboard). Installed by
+# https://rowsafe.sh/install only when root allowed it; remove it with
+# --no-allow-firewall.
+
+[Unit]
+Description=Rowsafe: watch for requests to limit who can reach PostgreSQL
+Documentation=https://rowsafe.sh/docs/guides/security
+
+[Path]
+PathExists=/var/lib/rowsafe/firewall/request
+Unit=rowsafe-firewall.service
+
+[Install]
+WantedBy=multi-user.target
+ROWSAFE_FIREWALL_PATH_EOF
+    _changed=1
+  fi
+  if write_file "$FIREWALL_RESTORE_FILE" 0644 root:root <<'ROWSAFE_FIREWALL_RESTORE_EOF'; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-firewall-restore.service: loads the rules Rowsafe's firewall
+# helper keeps (/var/lib/rowsafe-firewall) at boot, after the system's own
+# firewall. Installed by https://rowsafe.sh/install only when root allowed
+# it; remove it with --no-allow-firewall.
+
+[Unit]
+Description=Rowsafe: load the PostgreSQL port rules at boot
+Documentation=https://rowsafe.sh/docs/guides/security
+After=nftables.service ufw.service firewalld.service network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/rowsafe/rowsafe-firewall --restore
+RuntimeDirectory=rowsafe-firewall
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+StateDirectory=rowsafe-firewall
+StateDirectoryMode=0700
+UMask=0022
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target
+ROWSAFE_FIREWALL_RESTORE_EOF
+    _changed=1
+  fi
+  as_agent mkdir -p -m 0700 "$FIREWALL_DIR"
+  if systemd_running; then
+    [ "$_changed" = 0 ] || systemctl daemon-reload
+    systemctl enable --now --quiet rowsafe-firewall.path
+    systemctl enable --quiet rowsafe-firewall-restore.service
+  else
+    warn "systemd is not running here; the firewall helper was installed but cannot be enabled"
+  fi
+}
+
+remove_firewall_helper() {
+  [ -e "$FIREWALL_PATH_FILE" ] || [ -e "$FIREWALL_SERVICE_FILE" ] || [ -e "$FIREWALL_HELPER" ] || return 0
+  if systemd_running; then
+    systemctl disable --now --quiet rowsafe-firewall.path 2>/dev/null || true
+    systemctl disable --quiet rowsafe-firewall-restore.service 2>/dev/null || true
+  fi
+  # Rowsafe's rule goes with the helper: nothing it set up stays behind.
+  if command -v nft >/dev/null 2>&1 && nft list table inet rowsafe >/dev/null 2>&1; then
+    nft delete table inet rowsafe || warn "could not remove Rowsafe's firewall rules (nft delete table inet rowsafe)"
+  fi
+  rm -rf /var/lib/rowsafe-firewall /run/rowsafe-firewall
+  rm -f "$FIREWALL_PATH_FILE" "$FIREWALL_SERVICE_FILE" "$FIREWALL_RESTORE_FILE" "$FIREWALL_HELPER"
+  rmdir "${FIREWALL_HELPER%/*}" 2>/dev/null || true
+  if systemd_running; then systemctl daemon-reload; fi
+}
+
+# firewall_ports prints the ports of the discovered clusters.
+firewall_ports() {
+  [ -s "$TMP/clusters" ] || return 0
+  awk -F '\t' '$1 ~ /^[0-9]+$/ { print $1 }' "$TMP/clusters"
+}
+
+allow_firewall() {
+  if ! command -v nft >/dev/null 2>&1; then
+    warn "nftables isn't installed here (no nft command), so limiting who can reach PostgreSQL stays off. Install it (e.g. apt install nftables) and run the installer again with --allow-firewall"
+    return 0
+  fi
+  _ports=$(firewall_ports)
+  if [ -z "$_ports" ]; then
+    warn "found no PostgreSQL here, so the firewall stays off for Rowsafe"
+    return 0
+  fi
+  {
+    echo "# PostgreSQL ports whose firewall rule Rowsafe may set when someone asks"
+    echo "# (Security in the dashboard): only the chosen addresses may reach the"
+    echo "# port. SSH and other ports are never touched. Written by the installer"
+    echo "# (root); run it with --no-allow-firewall to turn this off."
+    echo "# PORT"
+    printf '%s\n' "$_ports"
+  } | write_file "$FIREWALL_ALLOW_FILE" 0644 root:root || true
+  install_firewall_helper
+  ok "Rowsafe may limit who can reach PostgreSQL's port when you ask (Security), never SSH or other ports (turn off with --no-allow-firewall)"
+}
+
+disallow_firewall() {
+  remove_firewall_helper
+  if [ -d "$CONFIG_DIR" ]; then
+    {
+      echo "# Limiting who can reach PostgreSQL with the firewall is off for Rowsafe."
+      echo "# Run the installer with --allow-firewall to turn it on."
+    } | write_file "$FIREWALL_ALLOW_FILE" 0644 root:root || true
+  fi
+}
+
+# firewall_access applies --allow-firewall / --no-allow-firewall, or asks
+# once on a terminal (default no). A re-run keeps the earlier answer.
+firewall_access() {
+  case $ALLOW_FIREWALL in
+    yes) allow_firewall ;;
+    no)
+      disallow_firewall
+      ok "limiting who can reach PostgreSQL with the firewall is off for Rowsafe"
+      ;;
+    *)
+      if [ -f "$FIREWALL_ALLOW_FILE" ]; then
+        if grep -q '^[0-9]' "$FIREWALL_ALLOW_FILE"; then allow_firewall; fi
+        return 0
+      fi
+      [ "$TTY" = 1 ] && [ -n "$(firewall_ports)" ] && command -v nft >/dev/null 2>&1 || return 0
+      say ""
+      if confirm "Allow Rowsafe to limit who can reach PostgreSQL's port with the firewall? Only when someone picks the allowed addresses in the dashboard and confirms; SSH and other ports are never touched." n; then
+        allow_firewall
+      else
+        disallow_firewall
+        note "OK: Rowsafe won't change the firewall (change it with --allow-firewall)"
       fi
       ;;
   esac
@@ -2299,15 +2792,18 @@ next_steps() {
 # databases runs once the agent is up: restart access, then backups.
 databases() {
   [ "$ALLOW_RESTART" != no ] || disallow_restarts
+  [ "$ALLOW_FIREWALL" != no ] || disallow_firewall
   if [ ! -f "$STATE_DIR/agent.json" ] || ! agent_running; then
     [ -z "$PROTECT_NAME" ] || die "the agent is not running, so backups can't be turned on yet; see 'journalctl -u rowsafe-agent'"
     [ "$ALLOW_RESTART" != yes ] || warn "the agent is not running; run the installer again with --allow-restart once it is"
+    [ "$ALLOW_FIREWALL" != yes ] || warn "the agent is not running; run the installer again with --allow-firewall once it is"
     next_steps not-running
     return 0
   fi
   interactive=0
   if [ "$TTY" = 1 ] && [ "$NO_SETUP" = 0 ]; then interactive=1; fi
-  if [ "$interactive" = 1 ] || [ -n "$PROTECT_NAME" ] || [ "$ALLOW_RESTART" = yes ] || grep -qs '^[0-9]' "$RESTART_ALLOW_FILE"; then
+  if [ "$interactive" = 1 ] || [ -n "$PROTECT_NAME" ] || [ "$ALLOW_RESTART" = yes ] || grep -qs '^[0-9]' "$RESTART_ALLOW_FILE" ||
+    [ "$ALLOW_FIREWALL" = yes ] || grep -qs '^[0-9]' "$FIREWALL_ALLOW_FILE"; then
     say ""
     step "Looking for PostgreSQL on this server"
     if ! discover; then
@@ -2316,6 +2812,7 @@ databases() {
       return 0
     fi
     restart_access
+    firewall_access
   fi
   if [ -n "$PROTECT_NAME" ]; then
     protect_unattended
@@ -2478,6 +2975,7 @@ uninstall_agent() {
   fi
   rm -f "$UNIT_FILE"
   remove_restart_helper
+  remove_firewall_helper
   rm -f "$GUARD_FILE"
   rmdir "$LIB_DIR" 2>/dev/null || true
   if systemd_running; then systemctl daemon-reload; fi
@@ -2529,6 +3027,8 @@ main() {
       --no-setup) NO_SETUP=1 ;;
       --allow-restart) ALLOW_RESTART=yes ;;
       --no-allow-restart) ALLOW_RESTART=no ;;
+      --allow-firewall) ALLOW_FIREWALL=yes ;;
+      --no-allow-firewall) ALLOW_FIREWALL=no ;;
       --protect)
         [ $# -ge 2 ] || die "--protect needs the database's name in Rowsafe"
         printf '%s\n' "$2" | grep -Eq '^[a-z][a-z0-9-]{1,39}$' ||
@@ -2582,8 +3082,8 @@ main() {
   if [ "$mode" != install ] && { [ "$SETUP_STORAGE" = 1 ] || [ -n "$STORAGE_PROVIDER" ]; }; then
     die "--setup-storage and --storage only go with an install"
   fi
-  if [ "$mode" != install ] && { [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME" ] || [ -n "$ALLOW_RESTART" ]; }; then
-    die "--no-setup, --protect and --allow-restart only go with an install"
+  if [ "$mode" != install ] && { [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME" ] || [ -n "$ALLOW_RESTART" ] || [ -n "$ALLOW_FIREWALL" ]; }; then
+    die "--no-setup, --protect, --allow-restart and --allow-firewall only go with an install"
   fi
   [ -z "$PROTECT_PORT" ] || [ -n "$PROTECT_NAME" ] || die "--protect-port only goes with --protect"
   [ "$NO_SETUP" = 0 ] || [ -z "$PROTECT_NAME" ] || die "--no-setup and --protect contradict each other"

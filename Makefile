@@ -43,7 +43,7 @@ lint: check-installer
 	$(GO) vet ./...
 	@test -z "$$(gofmt -l .)" || { echo "gofmt needed:"; gofmt -l .; exit 1; }
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck -S warning -s sh scripts/install.sh scripts/test-install.sh scripts/test-rewind.sh scripts/rowsafe-agent-guard scripts/rowsafe-pg-restart; \
+		shellcheck -S warning -s sh scripts/install.sh scripts/test-install.sh scripts/test-rewind.sh scripts/rowsafe-agent-guard scripts/rowsafe-pg-restart scripts/rowsafe-firewall; \
 	else echo "shellcheck not installed; skipping"; fi
 
 # install.sh is fetched on its own with curl, so it embeds the guard, the
@@ -62,6 +62,14 @@ check-installer:
 		diff -u deploy/systemd/rowsafe-pg-restart.service - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pg-restart.service"; exit 1; }
 	@sed -n "/<<'ROWSAFE_RESTART_PATH_EOF'; then\$$/,/^ROWSAFE_RESTART_PATH_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
 		diff -u deploy/systemd/rowsafe-pg-restart.path - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pg-restart.path"; exit 1; }
+	@sed -n "/<<'ROWSAFE_FIREWALL_HELPER_EOF'; then\$$/,/^ROWSAFE_FIREWALL_HELPER_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
+		diff -u scripts/rowsafe-firewall - || { echo "scripts/install.sh: embedded firewall helper differs from scripts/rowsafe-firewall"; exit 1; }
+	@sed -n "/<<'ROWSAFE_FIREWALL_SERVICE_EOF'; then\$$/,/^ROWSAFE_FIREWALL_SERVICE_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
+		diff -u deploy/systemd/rowsafe-firewall.service - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-firewall.service"; exit 1; }
+	@sed -n "/<<'ROWSAFE_FIREWALL_PATH_EOF'; then\$$/,/^ROWSAFE_FIREWALL_PATH_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
+		diff -u deploy/systemd/rowsafe-firewall.path - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-firewall.path"; exit 1; }
+	@sed -n "/<<'ROWSAFE_FIREWALL_RESTORE_EOF'; then\$$/,/^ROWSAFE_FIREWALL_RESTORE_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
+		diff -u deploy/systemd/rowsafe-firewall-restore.service - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-firewall-restore.service"; exit 1; }
 	@sh -n scripts/install.sh
 
 test-installer:

@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-firewall.path: starts rowsafe-firewall.service when the Rowsafe
+# agent asks to change who can reach PostgreSQL's port (someone chose the
+# allowed addresses under Security in the dashboard). Installed by
+# https://rowsafe.sh/install only when root allowed it; remove it with
+# --no-allow-firewall.
+
+[Unit]
+Description=Rowsafe: watch for requests to limit who can reach PostgreSQL
+Documentation=https://rowsafe.sh/docs/guides/security
+
+[Path]
+PathExists=/var/lib/rowsafe/firewall/request
+Unit=rowsafe-firewall.service
+
+[Install]
+WantedBy=multi-user.target
