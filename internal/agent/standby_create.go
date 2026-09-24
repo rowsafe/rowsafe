@@ -216,8 +216,6 @@ func (a *Agent) standbyCreate(ctx context.Context, db protocol.DatabaseSpec, p p
 			return nil, fmt.Errorf("the cluster on port %d runs PostgreSQL %d and the primary %d: a standby needs the same major version", p.Port, f.Major, p.Major)
 		case f.Tablespaces > 0:
 			return nil, fmt.Errorf("the cluster on port %d has tablespaces; use an empty cluster", p.Port)
-		case p.SystemID != "" && u.SystemID == p.SystemID:
-			return nil, errors.New("this cluster already is a copy of the primary; remove it and use an empty cluster")
 		}
 		for k, v := range u.Settings {
 			settings[k] = max(settings[k], v)
