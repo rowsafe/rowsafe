@@ -78,6 +78,17 @@ Rewind: continuous backups, restore to any second
                                              servers where the installer allowed restarting PostgreSQL
   rowsafe rewind undo [NAME] [--yes]         undo the rewind: put the data from before it back
   rowsafe rewind cleanup [NAME] [--yes]      delete the data kept aside by a rewind (frees disk)
+  rowsafe files [NAME] [--json]              the folders backed up with the database (uploads, media)
+  rowsafe files add [NAME] PATH [--exclude cache,*.tmp]
+                                             back up a folder of the database server with the database
+  rowsafe files remove [NAME] PATH [--yes]   stop backing up a folder
+  rowsafe files backup [NAME] [--no-wait]    snapshot the folders now
+  rowsafe files restore [NAME] (--at TIME | --mark LABEL) [--folder PATH] [--path REL]...
+                        [--column DB:schema.table.column] [--whole-folder] [--overwrite] [--preview] [--yes]
+                                             bring files back as they were: by default only the missing
+                                             ones; --column restores the files a column refers to
+  rowsafe files undo [NAME] [--yes]          undo a --whole-folder restore
+  rowsafe files proof [NAME]                 restore a few files and compare them with the live ones, now
   Advanced (restore by hand or to another server): https://rowsafe.sh/docs/guides/restore
 
 Proof: the weekly restore test
@@ -263,6 +274,8 @@ func dispatch(ctx context.Context, args []string) error {
 		return removeCmd(ctx, c, rest)
 	case "rewind":
 		return rewindCmd(ctx, c, rest)
+	case "files":
+		return filesCmd(ctx, c, rest) // files.go
 	// Proof
 	case "proof":
 		return proofCmd(ctx, c, rest)
