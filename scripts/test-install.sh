@@ -24,6 +24,11 @@
 #      `setup` answers come from files: found PostgreSQL, name, plan, "Turn on
 #      backups?", "Restart PostgreSQL now?" (yes, no), a taken name, another
 #      archiver, an already registered database, --protect and --no-setup;
+#   5b. Rowsafe Storage: the "where should backups go?" choice when the
+#      control plane offers it (fakes3.py answers /v1/storage/offer), the
+#      passphrase, --storage rowsafe without a terminal (passphrase generated
+#      and never printed), the agent's storage test, moving to one's own
+#      bucket and back, and --check-storage;
 #   6. restarts on request (--allow-restart): the allow list, the root
 #      helper's checks (unlisted port, garbage, symlinks, FIFOs, once a
 #      minute; root never writes in the agent's directory), its stop and
@@ -65,6 +70,20 @@ case \${1:-} in
   inspect)
     printf '{\n  "server_version": "17.6 (Debian 17.6-1)",\n  "data_directory": "/var/lib/postgresql/17/main",\n  "archive_mode": "off"\n}\n' ;;
   run) while :; do sleep 1; done ;;
+  storage)
+    # Rowsafe Storage test: must run as postgres with agent.env loaded.
+    f=/tmp/rowsafe-fake
+    echo "storage \$*" >>"\$f/calls" 2>/dev/null || true
+    if [ "\$(id -un)" != postgres ] || [ "\${ROWSAFE_STORAGE:-}" != rowsafe ]; then
+      echo "storage test must run as postgres with ROWSAFE_STORAGE=rowsafe from agent.env" >&2
+      exit 1
+    fi
+    if [ -s "\$f/storage.rc" ] && [ "\$(cat "\$f/storage.rc")" != 0 ]; then
+      echo "error: no Rowsafe Storage credentials: control plane returned 503: storage unavailable" >&2
+      exit 1
+    fi
+    echo "writing, reading and deleting a test file in Rowsafe Storage..."
+    echo "Rowsafe Storage works: wrote, read back and deleted a test file" ;;
   setup)
     # Answers from /tmp/rowsafe-fake: CMD.out is printed, CMD.rc holds exit
     # codes (one per line, used in turn; the last one sticks).
@@ -604,6 +623,13 @@ class S3(http.server.BaseHTTPRequestHandler):
     def handle_any(self):
         n = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(n) if n else b""
+        if self.path == "/v1/storage/offer":  # the control plane's Rowsafe Storage offer
+            self.close_connection = True  # curl -f hangs up after an error
+            try:
+                open("offer").close()
+            except OSError:
+                return self.reply(404, b'{"error":"not found"}', "application/json", [("Connection", "close")])
+            return self.reply(200, b'{"available":true,"free_bytes":10000000000}', "application/json", [("Connection", "close")])
         if self.authorized(body) is not True:
             return
         path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
@@ -703,7 +729,8 @@ guided_storage_tests() {
   echo "  -- guided storage setup on a terminal"
   write_terminal_helpers
   acct=0123456789abcdef0123456789abcdef
-  names="s3.rowsafe.test $acct.eu.r2.cloudflarestorage.com s3.eu-central-1.amazonaws.com rowsafe-test.s3.eu-central-1.amazonaws.com"
+  # api.rowsafe.sh too: the storage offer is asked locally, never online.
+  names="s3.rowsafe.test $acct.eu.r2.cloudflarestorage.com s3.eu-central-1.amazonaws.com rowsafe-test.s3.eu-central-1.amazonaws.com api.rowsafe.sh api.rowsafe.test"
   echo "127.0.0.1 $names" >>/etc/hosts
   san=$(printf 'DNS:%s,' $names)
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 \
@@ -867,8 +894,119 @@ guided_storage_tests() {
   lacks "Where should Rowsafe"
   expect_ok "purge" "$INSTALLER" --uninstall --purge
   bucket_url_tests
+  rowsafe_storage_tests
   setup_flow_tests
   restart_tests
+}
+
+# ------------------------------------------------------------ Rowsafe Storage
+
+rowsafe_storage_tests() {
+  echo "  -- Rowsafe Storage"
+  api=https://api.rowsafe.test
+  touch "$W/offer"
+
+  # 1. Fresh install on a terminal: Rowsafe Storage is the default answer;
+  # the passphrase is generated, shown once and confirmed.
+  tty_ok "fresh install: Rowsafe Storage" \
+    "Choose 1-2\t\nChoose 1-2\t1\nto continue\t{capture:[│|] {6}[A-Za-z0-9]{36}([A-Za-z0-9]{4}) }\n" \
+    sh -c 'ROWSAFE_URL=$2 ROWSAFE_RELEASES_URL=https://localhost:8443/agent sh -s rse_secrettoken123 <"$1/install.sh"' piped "$W" "$api"
+  has "Where should backups go?"
+  has "1) Rowsafe Storage     nothing to set up (10 GB free)"
+  has "Rowsafe can't read them"
+  has "backups go to Rowsafe Storage, encrypted with your passphrase"
+  has "storage      Rowsafe Storage"
+  lacks "Bucket URL"
+  lacks "Access key ID"
+  lacks rse_secrettoken123
+  rpass=$(sed -n 's/^.*[│|]      \([A-Za-z0-9]\{40\}\)        [│|].*$/\1/p' "$W/out")
+  [ "${#rpass}" = 40 ] || fail "$name: passphrase not shown"
+  env_is ROWSAFE_STORAGE rowsafe
+  env_is ROWSAFE_REPO_CIPHER_PASS "$rpass"
+  ! grep -q '^ROWSAFE_REPO_S3_' /etc/rowsafe/agent.env || fail "$name: bucket settings written for Rowsafe Storage"
+
+  # 2. Re-run: nothing asked. With the agent enrolled and running, the
+  # installer runs its storage test.
+  tty_ok "re-run on Rowsafe Storage asks nothing" "" "$INSTALLER" --no-setup
+  has "backup storage: Rowsafe Storage (change it with --setup-storage)"
+  lacks "Where should backups go?"
+  echo '{"host_id":"host_1","agent_token":"rsa_x"}' >/var/lib/rowsafe/agent.json
+  chown postgres:postgres /var/lib/rowsafe/agent.json
+  runuser -u postgres -- /opt/rowsafe/rowsafe-agent run >/dev/null 2>&1 &
+  agent_pid=$!
+  sleep 1
+  scenario
+  expect_ok "agent running: Rowsafe Storage tested" "$INSTALLER" --no-setup
+  grep -q "Rowsafe Storage works: wrote, read back and deleted a test file" "$W/out" || fail "$name: no storage test"
+  called "storage test --wait 60s"
+  scenario storage_rc=1
+  expect_ok "a failing storage test warns, the install goes on" "$INSTALLER" --no-setup
+  grep -q "Rowsafe Storage didn't work yet" "$W/out" || fail "$name: no warning"
+  expect_fail "--check-storage on Rowsafe Storage fails" "Rowsafe Storage test failed" "$INSTALLER" --check-storage
+  scenario
+  expect_ok "--check-storage on Rowsafe Storage" "$INSTALLER" --check-storage
+  grep -q "Rowsafe Storage works" "$W/out" || fail "$name: no success"
+  kill "$agent_pid" 2>/dev/null || true
+  wait "$agent_pid" 2>/dev/null || true
+  rm -f /var/lib/rowsafe/agent.json
+
+  # 3. Move to one's own bucket: the passphrase is kept, ROWSAFE_STORAGE
+  # goes back to its commented-out default.
+  tty_ok "--setup-storage: keep Rowsafe Storage" "Move them to your own bucket?\t\n" "$INSTALLER" --setup-storage --no-setup
+  has "kept Rowsafe Storage"
+  env_is ROWSAFE_STORAGE rowsafe
+  tty_ok "--setup-storage: move to your own bucket" \
+    "Move them to your own bucket?\ty\nBucket URL\thttps://s3.rowsafe.test/rowsafe-test\nRegion (\t\nAccess key ID\t$key\nSecret access key\t$secret\nKeep the current encryption passphrase?\t\n" \
+    "$INSTALLER" --setup-storage --no-setup
+  has "Rowsafe takes a new full backup in your bucket right away"
+  has "backup storage works"
+  lacks "Where should backups go?"
+  env_is ROWSAFE_REPO_S3_ENDPOINT s3.rowsafe.test
+  env_is ROWSAFE_REPO_CIPHER_PASS "$rpass"
+  ! grep -q '^ROWSAFE_STORAGE=' /etc/rowsafe/agent.env || fail "$name: ROWSAFE_STORAGE kept"
+  grep -q "^#ROWSAFE_STORAGE='own'$" /etc/rowsafe/agent.env || fail "$name: ROWSAFE_STORAGE not back to the template"
+
+  # 4. And back, choosing Rowsafe Storage at the "where" question.
+  tty_ok "--setup-storage: own bucket to Rowsafe Storage" \
+    "Replace these storage settings?\ty\nChoose 1-2\t1\nKeep the current encryption passphrase?\t\n" \
+    env ROWSAFE_URL=$api "$INSTALLER" --setup-storage --no-setup
+  has "Where should backups go?"
+  env_is ROWSAFE_STORAGE rowsafe
+  env_is ROWSAFE_REPO_CIPHER_PASS "$rpass"
+  ! grep -q '^ROWSAFE_REPO_S3_ENDPOINT=' /etc/rowsafe/agent.env || fail "$name: the old bucket was kept active"
+  lacks "$secret"
+  lacks "$rpass"
+
+  # 5. Not offered (a self-hosted control plane): the question is skipped.
+  rm -f "$W/offer"
+  expect_ok "purge" "$INSTALLER" --uninstall --purge
+  tty_fail "not offered: straight to the bucket" 130 "Bucket URL\t{ctrl-c}\n" \
+    env ROWSAFE_URL=$api "$INSTALLER" rse_secrettoken123
+  lacks "Where should backups go?"
+  touch "$W/offer"
+
+  # 6. Without a terminal: --storage rowsafe generates the passphrase, keeps
+  # it only in agent.env and says how to see it.
+  expect_ok "purge" "$INSTALLER" --uninstall --purge
+  expect_ok "--storage rowsafe without a terminal" "$INSTALLER" --storage rowsafe rse_secrettoken123
+  grep -q "a backup encryption passphrase was generated and saved as ROWSAFE_REPO_CIPHER_PASS" "$W/out" || fail "$name: no passphrase note"
+  env_is ROWSAFE_STORAGE rowsafe
+  gen=$(sed -n "s/^ROWSAFE_REPO_CIPHER_PASS='\([A-Za-z0-9]\{40\}\)'\$/\1/p" /etc/rowsafe/agent.env)
+  [ "${#gen}" = 40 ] || fail "$name: no generated passphrase in agent.env"
+  ! grep -qF "$gen" "$W/out" || fail "$name: the generated passphrase was printed"
+  grep -q "storage      Rowsafe Storage" "$W/out" || fail "$name: summary"
+  expect_ok "--storage rowsafe again keeps the passphrase" "$INSTALLER" --storage rowsafe
+  env_is ROWSAFE_REPO_CIPHER_PASS "$gen"
+  ! grep -q "was generated" "$W/out" || fail "$name: generated a second passphrase"
+  expect_ok "purge" "$INSTALLER" --uninstall --purge
+  expect_ok "--storage rowsafe with a passphrase from the environment" \
+    env ROWSAFE_REPO_CIPHER_PASS=my-own-passphrase-long-enough "$INSTALLER" --storage rowsafe rse_secrettoken123
+  env_is ROWSAFE_REPO_CIPHER_PASS my-own-passphrase-long-enough
+  ! grep -q "was generated" "$W/out" || fail "$name: generated a passphrase despite the environment"
+  ! grep -qF my-own-passphrase-long-enough "$W/out" || fail "$name: printed the passphrase"
+  expect_ok "purge" "$INSTALLER" --uninstall --purge
+  rm -f "$W/offer"
+  pass "Rowsafe Storage: choice, passphrase, storage test, moving both ways, no terminal"
 }
 
 # ------------------------------------------------------------ bucket URLs

@@ -19,7 +19,9 @@
 # Options (when piping, pass them after `sh -s --`):
 #   rse_...                the enrollment token
 #   --setup-storage        (re)run the guided backup storage setup
-#   --storage PROVIDER     preselect r2, b2, s3, wasabi, spaces or s3-compatible
+#   --storage PROVIDER     preselect rowsafe (Rowsafe Storage: no bucket needed,
+#                          works without a terminal), r2, b2, s3, wasabi, spaces
+#                          or s3-compatible
 #   --no-prompt            never ask questions, even on a terminal
 #   --no-setup             don't look for PostgreSQL or turn on backups
 #   --protect NAME         without questions: turn on backups for this server's
@@ -96,7 +98,7 @@ MAX_ARTIFACT_SIZE=536870912 # 512 MiB, the same limit the agent enforces
 
 REQUIRED_REPO_VARS="ROWSAFE_REPO_S3_ENDPOINT ROWSAFE_REPO_S3_BUCKET ROWSAFE_REPO_S3_KEY ROWSAFE_REPO_S3_KEY_SECRET ROWSAFE_REPO_CIPHER_PASS"
 # Agent settings copied from the installer's environment into agent.env.
-AGENT_VARS="ROWSAFE_URL ROWSAFE_ENROLL_TOKEN $REQUIRED_REPO_VARS
+AGENT_VARS="ROWSAFE_URL ROWSAFE_ENROLL_TOKEN $REQUIRED_REPO_VARS ROWSAFE_STORAGE
   ROWSAFE_REPO_S3_REGION ROWSAFE_REPO_S3_URI_STYLE ROWSAFE_REPO_PATH_PREFIX
   ROWSAFE_REPO_S3_PORT ROWSAFE_REPO_S3_CA_FILE ROWSAFE_REPO_S3_VERIFY_TLS
   ROWSAFE_AUTO_UPDATE ROWSAFE_PG_USER ROWSAFE_PG_BIN_DIR ROWSAFE_PGBACKREST_BIN
@@ -160,7 +162,9 @@ Rowsafe agent installer
 Options (when piping, pass them after `sh -s --`):
   rse_...                the one-time enrollment token from `rowsafe hosts enroll-token`
   --setup-storage        set up (or change) the backup storage, even if it is configured
-  --storage PROVIDER     skip the "where" question: r2, b2, s3, wasabi, spaces, s3-compatible
+  --storage PROVIDER     skip the "where" question: rowsafe (Rowsafe Storage, no bucket
+                         needed; also without a terminal), r2, b2, s3, wasabi, spaces,
+                         s3-compatible
   --no-prompt            never ask questions, even on a terminal (for automation)
   --no-setup             don't look for PostgreSQL or turn on backups
   --protect NAME         without questions: turn on backups for this server's PostgreSQL,
@@ -187,8 +191,10 @@ Environment:
                          (ROWSAFE_URL defaults to https://api.rowsafe.sh)
 
 Backup storage (guided setup):
-  Run from a terminal, the installer walks you through the backup storage the
-  first time: paste your bucket's URL (or pick Cloudflare R2, Backblaze B2,
+  Run from a terminal, the installer first asks where backups go: Rowsafe
+  Storage (nothing to set up; the free plan includes 10 GB) or your own
+  bucket. Either way they are encrypted on this server with a passphrase only
+  you have, so Rowsafe can't read them. For your own bucket: paste its URL (or pick Cloudflare R2, Backblaze B2,
   Amazon S3, Wasabi, DigitalOcean Spaces or any S3-compatible store), then its
   access key. It then tests the bucket by writing, reading and deleting a
   small file, and explains what to fix if that fails. Finally it creates (or
@@ -200,9 +206,10 @@ Backup storage (guided setup):
   Run it again with --setup-storage to change the storage later.
 
   Without a terminal (cloud-init, CI, configuration management) or with
-  --no-prompt, set ROWSAFE_REPO_S3_ENDPOINT, _BUCKET, _KEY, _KEY_SECRET and
-  ROWSAFE_REPO_CIPHER_PASS in the environment instead, and check them with
-  --check-storage.
+  --no-prompt, pass --storage rowsafe (the passphrase comes from
+  ROWSAFE_REPO_CIPHER_PASS, or is generated and kept in agent.env), or set
+  ROWSAFE_REPO_S3_ENDPOINT, _BUCKET, _KEY, _KEY_SECRET and
+  ROWSAFE_REPO_CIPHER_PASS in the environment, and check with --check-storage.
 
 Turning on backups:
   Once the agent runs, the installer looks for PostgreSQL on this server,
@@ -1006,6 +1013,12 @@ env_template() {
 #ROWSAFE_URL='https://api.rowsafe.sh'
 #ROWSAFE_ENROLL_TOKEN=''
 
+# Where backups go: 'rowsafe' for Rowsafe Storage (nothing to set up: the
+# location and short-lived credentials come from Rowsafe, and the
+# ROWSAFE_REPO_S3_* settings below are not used), or 'own' for your bucket.
+# Backups are encrypted on this server with the passphrase either way.
+#ROWSAFE_STORAGE='own'
+
 # Backup repository: a private S3-compatible bucket (Cloudflare R2) and an API
 # token scoped to that bucket with Object Read & Write. The endpoint is a host
 # name without https://, e.g. <account-id>.eu.r2.cloudflarestorage.com
@@ -1138,7 +1151,7 @@ write_env() {
 # missing_config prints the settings the agent still needs.
 missing_config() {
   out=''
-  for key in $REQUIRED_REPO_VARS; do
+  for key in $(required_repo_vars); do
     [ -n "$(env_value "$key")" ] || out="$out $key"
   done
   if [ ! -f "$STATE_DIR/agent.json" ] && [ -z "$(env_value ROWSAFE_ENROLL_TOKEN)" ]; then
@@ -1295,7 +1308,7 @@ load_storage_path() {
 }
 
 storage_configured() {
-  for key in $REQUIRED_REPO_VARS; do
+  for key in $(required_repo_vars); do
     [ -n "$(env_value "$key")" ] || return 1
   done
 }
@@ -1563,6 +1576,121 @@ ask_bucket_url() {
   key_hint
 }
 
+# ---- Rowsafe Storage (no bucket needed)
+#
+# Backups go to a bucket Rowsafe operates, in this organization's own
+# prefix. The agent gets short-lived credentials for it from Rowsafe; the
+# passphrase stays here, so Rowsafe only ever stores ciphertext.
+
+ROWSAFE_REPO_S3_VARS="ROWSAFE_REPO_S3_ENDPOINT ROWSAFE_REPO_S3_BUCKET ROWSAFE_REPO_S3_KEY ROWSAFE_REPO_S3_KEY_SECRET ROWSAFE_REPO_S3_REGION ROWSAFE_REPO_S3_URI_STYLE ROWSAFE_REPO_S3_PORT"
+OFFER_FREE=''
+GENERATED_PASS=0
+
+# on_rowsafe_storage: backups go (or, set in the environment, will go) to
+# Rowsafe Storage.
+on_rowsafe_storage() { [ "$(s_get ROWSAFE_STORAGE)" = rowsafe ]; }
+
+# required_repo_vars prints the settings the storage needs.
+required_repo_vars() {
+  if on_rowsafe_storage; then echo ROWSAFE_REPO_CIPHER_PASS; else echo "$REQUIRED_REPO_VARS"; fi
+}
+
+storage_desc() {
+  if on_rowsafe_storage; then
+    echo "Rowsafe Storage"
+  else
+    echo "bucket '$(env_value ROWSAFE_REPO_S3_BUCKET)' at $(env_value ROWSAFE_REPO_S3_ENDPOINT)"
+  fi
+}
+
+# storage_offer succeeds when the control plane offers Rowsafe Storage, and
+# sets OFFER_FREE to what the free plan includes (e.g. "10 GB").
+storage_offer() {
+  _url=$(s_get ROWSAFE_URL)
+  [ -n "$_url" ] || _url=https://api.rowsafe.sh
+  _o=$(curl -fsS --max-time 5 "${_url%/}/v1/storage/offer" 2>/dev/null) || return 1
+  case $_o in *'"available":true'*) ;; *) return 1 ;; esac
+  _b=$(printf '%s\n' "$_o" | sed -n 's/.*"free_bytes":\([0-9][0-9]*\).*/\1/p')
+  OFFER_FREE=''
+  [ -z "$_b" ] || OFFER_FREE="$((_b / 1000000000)) GB free"
+  return 0
+}
+
+# rowsafe_storage_ask: "where should backups go?", into S_WHERE.
+rowsafe_storage_ask() {
+  tty_say ""
+  tty_say "${BOLD}Where should backups go?${RESET}"
+  tty_say "  1) Rowsafe Storage     nothing to set up${OFFER_FREE:+ ($OFFER_FREE)}"
+  tty_say "  2) Your own bucket     Cloudflare R2, Amazon S3, Backblaze B2, ..."
+  tty_hint "Either way, backups are encrypted on this server first: Rowsafe can't read them."
+  _w=1
+  choose _w "Choose 1-2" 1 2
+  S_WHERE=rowsafe
+  [ "$_w" = 1 ] || S_WHERE=own
+}
+
+# rowsafe_storage_env saves Rowsafe Storage with the passphrase S_CIPHER,
+# and turns the bucket settings back into comments.
+rowsafe_storage_env() {
+  ROWSAFE_STORAGE=rowsafe ROWSAFE_REPO_CIPHER_PASS=$S_CIPHER
+  export ROWSAFE_STORAGE ROWSAFE_REPO_CIPHER_PASS
+  for key in $ROWSAFE_REPO_S3_VARS; do
+    unset "$key"
+    STORAGE_CLEAR="$STORAGE_CLEAR $key"
+  done
+  STORAGE_GUIDED=1
+}
+
+rowsafe_storage_guided() {
+  tty_say ""
+  tty_say "Backups go to Rowsafe Storage. Nothing to set up: Rowsafe gives this server"
+  tty_say "short-lived access to your organization's space and renews it by itself."
+  choose_passphrase
+  rowsafe_storage_env
+  ok "backups go to Rowsafe Storage, encrypted with your passphrase"
+}
+
+# rowsafe_storage_unattended (--storage rowsafe, no terminal): the
+# passphrase from the environment or agent.env, else a new one kept in
+# agent.env (rowsafe_storage_passphrase_note says where).
+rowsafe_storage_unattended() {
+  if storage_configured && on_rowsafe_storage; then
+    ok "backup storage: Rowsafe Storage"
+    return 0
+  fi
+  S_CIPHER=$(s_get ROWSAFE_REPO_CIPHER_PASS)
+  if [ -z "$S_CIPHER" ]; then
+    S_CIPHER=$(gen_passphrase)
+    [ "${#S_CIPHER}" = 40 ] || die "could not generate a passphrase"
+    GENERATED_PASS=1
+  fi
+  rowsafe_storage_env
+}
+
+rowsafe_storage_passphrase_note() {
+  [ "$GENERATED_PASS" = 1 ] || return 0
+  say ""
+  warn "a backup encryption passphrase was generated and saved as ROWSAFE_REPO_CIPHER_PASS in $ENV_FILE."
+  say "    Copy it into your password manager now: without it, backups can't be restored,"
+  say "    and Rowsafe can't recover it. Show it with: sudo grep CIPHER_PASS $ENV_FILE"
+}
+
+# rowsafe_storage_test runs the agent's storage test once it is enrolled.
+rowsafe_storage_test() {
+  say ""
+  step "Testing Rowsafe Storage"
+  if agent_show storage test --wait 60s; then
+    return 0
+  fi
+  warn "Rowsafe Storage didn't work yet (see above). The agent keeps trying; test again with --check-storage"
+}
+
+# gen_passphrase prints 40 letters and digits (~238 bits): no symbols, so a
+# double-click copies it whole.
+gen_passphrase() {
+  head -c 1024 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' 2>/dev/null | head -c 40
+}
+
 # ---- the guided setup
 
 storage_menu() {
@@ -1769,8 +1897,7 @@ choose_passphrase() {
   _n=1 _p1='' _p2=''
   choose _n "Choose 1-2" 1 2
   if [ "$_n" = 1 ]; then
-    # 40 letters and digits (~238 bits): no symbols, so a double-click copies it whole.
-    S_CIPHER=$(head -c 1024 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' 2>/dev/null | head -c 40)
+    S_CIPHER=$(gen_passphrase)
     [ "${#S_CIPHER}" = 40 ] || die "could not generate a passphrase"
     show_passphrase "$S_CIPHER"
     last4=${S_CIPHER#"${S_CIPHER%????}"}
@@ -1807,6 +1934,12 @@ choose_passphrase() {
 # is not configured yet (or --setup-storage asks for it). Settings in the
 # installer's environment mean automation: then it never asks.
 maybe_guided_storage() {
+  # --storage rowsafe needs no questions without a terminal, or with the
+  # passphrase in the environment (automation).
+  if [ "$STORAGE_PROVIDER" = rowsafe ] && { [ "$TTY" = 0 ] || [ -n "${ROWSAFE_REPO_CIPHER_PASS:-}" ]; }; then
+    rowsafe_storage_unattended
+    return 0
+  fi
   [ "$TTY" = 1 ] || return 0
   if [ "$SETUP_STORAGE" = 0 ]; then
     for key in $REQUIRED_REPO_VARS; do
@@ -1814,7 +1947,7 @@ maybe_guided_storage() {
       [ -z "$v" ] || return 0
     done
     if storage_configured; then
-      ok "backup storage: bucket '$(env_value ROWSAFE_REPO_S3_BUCKET)' at $(env_value ROWSAFE_REPO_S3_ENDPOINT) (change it with --setup-storage)"
+      ok "backup storage: $(storage_desc) (change it with --setup-storage)"
       return 0
     fi
   fi
@@ -1824,16 +1957,41 @@ maybe_guided_storage() {
 guided_storage() {
   say ""
   step "Backup storage"
-  if storage_configured; then
+  # Rowsafe Storage (rowsafe_storage_* below): offered when the control
+  # plane has it, or asked for with --storage rowsafe.
+  S_WHERE=own
+  _offered=0
+  if [ "$STORAGE_PROVIDER" = rowsafe ]; then
+    S_WHERE=rowsafe
+  elif [ -z "$STORAGE_PROVIDER" ] && ! on_rowsafe_storage && storage_offer; then
+    _offered=1
+  fi
+  if storage_configured && on_rowsafe_storage; then
+    tty_say "Backups go to Rowsafe Storage."
+    if [ "$S_WHERE" = rowsafe ] || ! confirm "Move them to your own bucket?" n; then
+      ok "kept Rowsafe Storage"
+      return 0
+    fi
+    tty_hint "Rowsafe takes a new full backup in your bucket right away, and restores"
+    tty_hint "start from it. The backups in Rowsafe Storage are deleted after 30 days."
+  elif storage_configured; then
     tty_say "Backups go to bucket '$(env_value ROWSAFE_REPO_S3_BUCKET)' at $(env_value ROWSAFE_REPO_S3_ENDPOINT)."
     if ! confirm "Replace these storage settings?" n; then
       ok "kept the current storage settings"
       return 0
     fi
-    tty_hint "Existing backups stay where they are; new ones go to the new bucket."
+    tty_hint "Existing backups stay where they are; new ones go to the new storage."
+    [ "$_offered" = 0 ] || rowsafe_storage_ask
   else
-    tty_say "Rowsafe keeps your backups in a storage bucket that you own. You need an"
-    tty_say "empty bucket and an access key that can read, write and delete in it."
+    [ "$_offered" = 0 ] || rowsafe_storage_ask
+    if [ "$S_WHERE" = own ]; then
+      tty_say "Rowsafe keeps your backups in a storage bucket that you own. You need an"
+      tty_say "empty bucket and an access key that can read, write and delete in it."
+    fi
+  fi
+  if [ "$S_WHERE" = rowsafe ]; then
+    rowsafe_storage_guided
+    return 0
   fi
   S_ENDPOINT='' S_BUCKET='' S_KEY='' S_SECRET='' S_REGION='' S_URI='' S_PORT='' S_CA='' S_VERIFY='' S_CIPHER=''
   S_URL='' S_MODE=url
@@ -1887,6 +2045,8 @@ guided_storage() {
   export ROWSAFE_REPO_S3_ENDPOINT ROWSAFE_REPO_S3_BUCKET ROWSAFE_REPO_S3_KEY ROWSAFE_REPO_S3_KEY_SECRET \
     ROWSAFE_REPO_CIPHER_PASS ROWSAFE_REPO_S3_REGION ROWSAFE_REPO_S3_URI_STYLE
   # Settings from a previous provider must not linger in agent.env.
+  unset ROWSAFE_STORAGE
+  STORAGE_CLEAR="$STORAGE_CLEAR ROWSAFE_STORAGE"
   if [ -n "$S_PORT" ]; then
     ROWSAFE_REPO_S3_PORT=$S_PORT
     export ROWSAFE_REPO_S3_PORT
@@ -1905,6 +2065,12 @@ guided_storage() {
 check_storage() {
   require_root
   [ -f "$ENV_FILE" ] || die "$ENV_FILE doesn't exist yet; install the agent first"
+  if on_rowsafe_storage; then
+    [ -f "$STATE_DIR/agent.json" ] || die "the agent has not connected to Rowsafe yet, so Rowsafe Storage can't be tested"
+    step "Testing Rowsafe Storage"
+    agent_show storage test --wait 30s || die "the Rowsafe Storage test failed; nothing was changed"
+    return 0
+  fi
   load_storage
   missing=''
   for key in $REQUIRED_REPO_VARS; do
@@ -2305,6 +2471,7 @@ databases() {
     next_steps not-running
     return 0
   fi
+  if on_rowsafe_storage; then rowsafe_storage_test; fi
   interactive=0
   if [ "$TTY" = 1 ] && [ "$NO_SETUP" = 0 ]; then interactive=1; fi
   if [ "$interactive" = 1 ] || [ -n "$PROTECT_NAME" ] || [ "$ALLOW_RESTART" = yes ] || grep -qs '^[0-9]' "$RESTART_ALLOW_FILE"; then
@@ -2443,6 +2610,7 @@ install_agent() {
   fi
   probe_postgres
   summary "$SERVICE_STATE"
+  rowsafe_storage_passphrase_note
   databases
 }
 
@@ -2452,6 +2620,7 @@ summary() {
   say "    binary       $INSTALL_DIR/versions/$REL_VERSION/rowsafe-agent"
   say "    config       $ENV_FILE (postgres, 0600)"
   say "    pgBackRest   ${PGBR_VERSION:-unknown}"
+  ! storage_configured || say "    storage      $(storage_desc)"
   [ -z "${PG_SUMMARY:-}" ] || say "    PostgreSQL   $PG_SUMMARY"
   id=$(host_id)
   [ -z "$id" ] || say "    host         enrolled as $id"
@@ -2544,10 +2713,10 @@ main() {
         ;;
       --check-storage) mode=check-storage ;;
       --storage)
-        [ $# -ge 2 ] || die "--storage needs a provider: $PROVIDERS"
-        case " $PROVIDERS other minio " in
+        [ $# -ge 2 ] || die "--storage needs a provider: rowsafe $PROVIDERS"
+        case " rowsafe $PROVIDERS other minio " in
           *" $2 "*) ;;
-          *) die "unknown storage provider '$2' (one of: $PROVIDERS)" ;;
+          *) die "unknown storage provider '$2' (one of: rowsafe $PROVIDERS)" ;;
         esac
         STORAGE_PROVIDER=$2
         case $2 in other | minio) STORAGE_PROVIDER=s3-compatible ;; esac
@@ -2592,7 +2761,7 @@ main() {
   chmod 0711 "$TMP"
   if [ "$mode" = install ]; then
     open_tty
-    if [ "$TTY" = 0 ] && { [ "$SETUP_STORAGE" = 1 ] || [ -n "$STORAGE_PROVIDER" ]; }; then
+    if [ "$TTY" = 0 ] && [ "$STORAGE_PROVIDER" != rowsafe ] && { [ "$SETUP_STORAGE" = 1 ] || [ -n "$STORAGE_PROVIDER" ]; }; then
       die "the guided storage setup needs a terminal; set ROWSAFE_REPO_* in the environment instead (see --help)"
     fi
   fi
