@@ -1,0 +1,238 @@
+# Builds, signs, attests and publishes an agent/CLI release when a
+# vMAJOR.MINOR.PATCH tag is pushed. See docs/verifying-releases.md.
+#
+# Every release carries three independent proofs:
+#   1. manifest.json.sig   Ed25519 signature the agent checks before it runs an
+#                          update (key compiled into the agent; offline).
+#   2. SLSA provenance     Sigstore-signed, keyless attestation that GitHub
+#                          Actions built each file from this repository at this
+#                          tag, recorded in the public Rekor transparency log.
+#   3. SBOM                SPDX list of every dependency, also attested.
+# The build is reproducible; a second job rebuilds on a fresh runner and
+# requires byte-identical binaries.
+#
+# It never offers the release to agents: `rowsafed release add` on the control
+# plane stays a deliberate, manual step.
+#
+# "release" environment (Settings > Environments, with required reviewers):
+#   secret   ROWSAFE_RELEASE_PRIVATE_KEY          base64 Ed25519 private key
+#   secret   R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY  token scoped to the releases bucket
+#   variable ROWSAFE_RELEASE_PUBLIC_KEY           the matching public key
+#   variable R2_ENDPOINT                          https://<account-id>.r2.cloudflarestorage.com
+#   variable R2_RELEASES_BUCKET                   bucket served at https://releases.rowsafe.sh
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: write       # GitHub release
+      id-token: write       # Sigstore keyless signing
+      attestations: write   # build provenance and SBOM attestations
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+      R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+      BUCKET: ${{ vars.R2_RELEASES_BUCKET }}
+      RELEASE_PUBLIC_KEY: ${{ vars.ROWSAFE_RELEASE_PUBLIC_KEY }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Version from tag
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          if ! printf '%s\n' "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::tag $GITHUB_REF_NAME is not vMAJOR.MINOR.PATCH"; exit 1
+          fi
+          echo "VERSION=$v" >>"$GITHUB_ENV"
+
+      - name: Refuse to overwrite a published release
+        run: |
+          if aws s3api head-object --endpoint-url "$R2_ENDPOINT" --bucket "$BUCKET" \
+              --key "agent/$VERSION/manifest.json" >/dev/null 2>&1; then
+            echo "::error::release $VERSION is already published; releases are immutable, tag a new version"; exit 1
+          fi
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build and sign (Ed25519 manifest)
+        env:
+          ROWSAFE_RELEASE_PRIVATE_KEY: ${{ secrets.ROWSAFE_RELEASE_PRIVATE_KEY }}
+        run: make release VERSION="$VERSION" RELEASE_PUBLIC_KEY="$RELEASE_PUBLIC_KEY"
+
+      - name: SBOM (SPDX)
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          path: .
+          format: spdx-json
+          output-file: dist/${{ env.VERSION }}/rowsafe-${{ env.VERSION }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Attest build provenance (SLSA, Sigstore)
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: |
+            dist/${{ env.VERSION }}/rowsafe-agent-linux-*
+            dist/${{ env.VERSION }}/rowsafe-linux-*
+            dist/${{ env.VERSION }}/rowsafe-darwin-*
+            dist/${{ env.VERSION }}/rowsafe-release-*
+            dist/${{ env.VERSION }}/install.sh
+            dist/${{ env.VERSION }}/manifest.json
+            dist/${{ env.VERSION }}/SHA256SUMS
+
+      - name: Attest SBOM
+        uses: actions/attest-sbom@bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b # v2.4.0
+        with:
+          subject-path: |
+            dist/${{ env.VERSION }}/rowsafe-agent-linux-*
+            dist/${{ env.VERSION }}/rowsafe-linux-*
+            dist/${{ env.VERSION }}/rowsafe-darwin-*
+          sbom-path: dist/${{ env.VERSION }}/rowsafe-${{ env.VERSION }}.spdx.json
+
+      - name: Upload to R2
+        run: |
+          aws s3 cp "dist/$VERSION/" "s3://$BUCKET/agent/$VERSION/" --recursive \
+            --endpoint-url "$R2_ENDPOINT" --only-show-errors
+
+      - name: Verify the published release with its own installer
+        run: ROWSAFE_VERSION="$VERSION" sh "dist/$VERSION/install.sh" --download-only "$RUNNER_TEMP/verify"
+
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/"$VERSION"/* \
+            --verify-tag --title "Rowsafe $VERSION" --generate-notes \
+            --notes "Verify this release: https://github.com/${GITHUB_REPOSITORY}/blob/main/docs/verifying-releases.md"
+
+      - name: Next steps
+        run: |
+          {
+            echo "## Release $VERSION published"
+            echo
+            echo "Signed, attested and uploaded to https://releases.rowsafe.sh/agent/$VERSION/. Agents are **not** offered it yet."
+            echo
+            echo '```sh'
+            echo "curl -fsSLO https://releases.rowsafe.sh/agent/$VERSION/manifest.json"
+            echo "curl -fsSLO https://releases.rowsafe.sh/agent/$VERSION/manifest.json.sig"
+            echo "rowsafed release add --manifest manifest.json --signature manifest.json.sig --channel stable --rollout 10"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+  # Rebuild from the tag on a fresh runner and require byte-identical binaries.
+  reproducible:
+    needs: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Rebuild and compare with the published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_PUBLIC_KEY: ${{ vars.ROWSAFE_RELEASE_PUBLIC_KEY }}
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          make dist VERSION="$v" RELEASE_PUBLIC_KEY="$RELEASE_PUBLIC_KEY"
+          mkdir published && gh release download "$GITHUB_REF_NAME" -D published -p 'rowsafe-*' -R "$GITHUB_REPOSITORY"
+          fail=0
+          for f in dist/"$v"/rowsafe-*; do
+            b=$(basename "$f")
+            if cmp -s "$f" "published/$b"; then echo "identical  $b"; else echo "DIFFERENT  $b"; fail=1; fi
+          done
+          exit $fail
+
+  # Docker sidecar images, signed with cosign (keyless) and attested.
+  image:
+    needs: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ["14", "15", "16", "17", "18"]
+        flavor:
+          - { suffix: "", uid: "999", gid: "999" }       # postgres:NN (Debian)
+          - { suffix: "-alpine", uid: "70", gid: "70" }  # postgres:NN-alpine
+    env:
+      IMAGE: ghcr.io/rowsafe/agent
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Version from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >>"$GITHUB_ENV"
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+      - id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: deploy/docker/agent.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            VERSION=${{ env.VERSION }}
+            PG_MAJOR=${{ matrix.pg }}
+            PG_UID=${{ matrix.flavor.uid }}
+            PG_GID=${{ matrix.flavor.gid }}
+          tags: ${{ env.IMAGE }}:${{ env.VERSION }}-pg${{ matrix.pg }}${{ matrix.flavor.suffix }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.licenses=Apache-2.0
+          provenance: mode=max
+          sbom: true
+          push: true
+      - name: Sign the image (cosign, keyless)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$IMAGE@$DIGEST"
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true

@@ -1,0 +1,10 @@
+{
+  "name": "rowsafe",
+  "version": "0.1.0",
+  "description": "PostgreSQL safety net for AI agents: Rowsafe MCP tools, a safety workflow skill, and a hook that creates a restore point before migrations and destructive SQL.",
+  "author": { "name": "Rowsafe" },
+  "homepage": "https://rowsafe.sh",
+  "repository": "https://github.com/rowsafe/rowsafe",
+  "license": "Apache-2.0",
+  "keywords": ["postgresql", "backup", "point-in-time-recovery", "migrations", "safety"]
+}

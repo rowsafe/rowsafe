@@ -1,0 +1,68 @@
+# Points a channel (what `curl https://rowsafe.sh/install | sh` installs) at
+# an already published release, and publishes that release's rendered
+# installer as https://releases.rowsafe.sh/install.sh. Run it once a release
+# has rolled out to 100% of agents. See docs/releases.md.
+
+name: promote
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Published version to promote (MAJOR.MINOR.PATCH)
+        required: true
+      channel:
+        description: Channel for new installs
+        required: true
+        default: stable
+
+permissions:
+  contents: read
+
+concurrency:
+  group: promote
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+      R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+      BUCKET: ${{ vars.R2_RELEASES_BUCKET }}
+      VERSION: ${{ inputs.version }}
+      CHANNEL: ${{ inputs.channel }}
+    steps:
+      - name: Check inputs
+        run: |
+          printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::bad version"; exit 1; }
+          printf '%s\n' "$CHANNEL" | grep -Eq '^[a-z0-9][a-z0-9-]{0,31}$' || { echo "::error::bad channel"; exit 1; }
+
+      - name: Verify the release with its own installer
+        run: |
+          curl -fsSL --proto '=https' -o "$RUNNER_TEMP/install.sh" "https://releases.rowsafe.sh/agent/$VERSION/install.sh"
+          ROWSAFE_VERSION="$VERSION" sh "$RUNNER_TEMP/install.sh" --download-only "$RUNNER_TEMP/verify"
+
+      - name: Point the channel at it
+        run: |
+          for f in manifest.json manifest.json.sig; do
+            aws s3 cp "s3://$BUCKET/agent/$VERSION/$f" "s3://$BUCKET/agent/$CHANNEL/$f" \
+              --endpoint-url "$R2_ENDPOINT" --cache-control "public, max-age=300" --only-show-errors
+          done
+          if [ "$CHANNEL" = stable ]; then
+            aws s3 cp "s3://$BUCKET/agent/$VERSION/install.sh" "s3://$BUCKET/install.sh" \
+              --endpoint-url "$R2_ENDPOINT" --content-type "text/x-shellscript; charset=utf-8" \
+              --cache-control "public, max-age=300" --only-show-errors
+          fi
+
+      - name: Check what new installs get
+        run: |
+          curl -fsSL --proto '=https' -o "$RUNNER_TEMP/channel.sh" https://releases.rowsafe.sh/install.sh
+          ROWSAFE_CHANNEL="$CHANNEL" sh "$RUNNER_TEMP/channel.sh" --download-only "$RUNNER_TEMP/channel" | tee "$RUNNER_TEMP/out"
+          grep -q "rowsafe-agent $VERSION" "$RUNNER_TEMP/out" || echo "::warning::the CDN may still serve the previous manifest for a few minutes"

@@ -1,0 +1,458 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/rowsafe/rowsafe/client"
+	"github.com/rowsafe/rowsafe/protocol"
+)
+
+// fakeAPI is just enough of the control plane for the CLI's own logic.
+type fakeAPI struct {
+	mu         sync.Mutex
+	dbs        []protocol.Database
+	hosts      []protocol.Host
+	protected  map[string]bool
+	polls      []string // device-token responses to hand out, in order
+	marks      []string // "db/label" of created restore points
+	logouts    []string // API keys that logged out
+	deviceName string
+}
+
+func (f *fakeAPI) handler(t *testing.T) http.Handler {
+	mux := http.NewServeMux()
+	j := func(w http.ResponseWriter, status int, v any) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(v)
+	}
+	authed := func(h http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer rsk_") {
+				j(w, 401, protocol.Error{Error: "invalid credentials"})
+				return
+			}
+			h(w, r)
+		}
+	}
+	mux.HandleFunc("GET /v1/databases", authed(func(w http.ResponseWriter, r *http.Request) { j(w, 200, f.dbs) }))
+	mux.HandleFunc("GET /v1/hosts", authed(func(w http.ResponseWriter, r *http.Request) { j(w, 200, f.hosts) }))
+	mux.HandleFunc("GET /v1/databases/{ref}", authed(func(w http.ResponseWriter, r *http.Request) {
+		for _, d := range f.dbs {
+			if d.Name == r.PathValue("ref") {
+				j(w, 200, d)
+				return
+			}
+		}
+		j(w, 404, protocol.Error{Error: "not found"})
+	}))
+	for _, p := range []string{"backups", "drills", "tasks"} {
+		mux.HandleFunc("GET /v1/databases/{ref}/"+p, authed(func(w http.ResponseWriter, r *http.Request) { j(w, 200, []any{}) }))
+	}
+	mux.HandleFunc("GET /v1/org", authed(func(w http.ResponseWriter, r *http.Request) {
+		j(w, 200, protocol.Org{ID: "org_1", Name: "Acme", Plan: "pro", Limits: protocol.PlanLimits{MaxHosts: 5, MaxDatabases: 25}})
+	}))
+	mux.HandleFunc("GET /v1/databases/{ref}/protection", authed(func(w http.ResponseWriter, r *http.Request) {
+		ok := f.protected[r.PathValue("ref")]
+		p := protocol.Protection{Protected: ok, Reasons: []string{}, OpenFailedTasks: []protocol.TaskView{}}
+		if !ok {
+			p.Reasons = []string{"no restore drill has run yet"}
+		}
+		j(w, 200, p)
+	}))
+	mux.HandleFunc("POST /v1/databases/{ref}/restore-points", authed(func(w http.ResponseWriter, r *http.Request) {
+		var req protocol.CreateRestorePointRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		f.mu.Lock()
+		f.marks = append(f.marks, r.PathValue("ref")+"/"+req.Name)
+		f.mu.Unlock()
+		j(w, 201, protocol.TaskView{ID: "task_1", Type: protocol.TaskRestorePoint, Status: protocol.StatusQueued})
+	}))
+	mux.HandleFunc("POST /v1/auth/device", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			t.Error("the device flow start must not send credentials")
+		}
+		var req protocol.DeviceAuthRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		f.deviceName = req.ClientName
+		j(w, 200, protocol.DeviceAuthResponse{DeviceCode: "rsd_x", UserCode: "BCDF-GHJK", VerificationURI: "https://app.test/cli",
+			VerificationURIComplete: "https://app.test/cli?code=BCDF-GHJK", ExpiresIn: 600, Interval: 3})
+	})
+	mux.HandleFunc("POST /v1/auth/device/token", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		next := f.polls[0]
+		f.polls = f.polls[1:]
+		f.mu.Unlock()
+		if next == "ok" {
+			j(w, 200, protocol.DeviceTokenResponse{APIKey: "rsk_new", KeyID: "key_new", Org: protocol.OrgBrief{ID: "org_1", Name: "Acme"}})
+			return
+		}
+		j(w, 400, protocol.Error{Error: next})
+	})
+	mux.HandleFunc("GET /v1/whoami", authed(func(w http.ResponseWriter, r *http.Request) {
+		j(w, 200, protocol.WhoAmI{Org: protocol.Org{ID: "org_1", Name: "Acme", Plan: "pro"},
+			APIKey: &protocol.APIKey{ID: "key_x", Name: "ci"}})
+	}))
+	mux.HandleFunc("POST /v1/auth/logout", authed(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.logouts = append(f.logouts, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+		f.mu.Unlock()
+		w.WriteHeader(204)
+	}))
+	return mux
+}
+
+// cliEnv isolates config, project files and environment for one test.
+func cliEnv(t *testing.T, f *fakeAPI) (*httptest.Server, *client.Client) {
+	t.Helper()
+	ts := httptest.NewServer(f.handler(t))
+	t.Cleanup(ts.Close)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("ROWSAFE_URL", ts.URL)
+	t.Setenv("ROWSAFE_API_KEY", "rsk_test")
+	t.Setenv("ROWSAFE_DATABASE", "")
+	for _, v := range []string{"SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"} {
+		t.Setenv(v, "")
+	}
+	t.Chdir(t.TempDir())
+	return ts, client.New(ts.URL, "rsk_test")
+}
+
+func dbs(names ...string) []protocol.Database {
+	var out []protocol.Database
+	for _, n := range names {
+		out = append(out, protocol.Database{ID: "db_" + n, Name: n, Status: protocol.DBActive})
+	}
+	return out
+}
+
+func TestResolveDatabase(t *testing.T) {
+	f := &fakeAPI{dbs: dbs("app", "billing")}
+	_, c := cliEnv(t, f)
+	ctx := t.Context()
+
+	if got, err := resolveDatabase(ctx, c, "explicit"); err != nil || got != "explicit" {
+		t.Fatalf("explicit: %q, %v", got, err)
+	}
+	_, err := resolveDatabase(ctx, c, "")
+	if err == nil || !strings.Contains(err.Error(), "2 databases: app, billing") || !strings.Contains(err.Error(), "rowsafe init") {
+		t.Fatalf("ambiguous: %v", err)
+	}
+
+	// .rowsafe.json in a parent directory.
+	root, _ := os.Getwd()
+	if _, err := writeProjectConfig(root, "billing"); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(root, "src", "deep")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(sub)
+	if got, err := resolveDatabase(ctx, c, ""); err != nil || got != "billing" {
+		t.Fatalf(".rowsafe.json: %q, %v", got, err)
+	}
+	// ROWSAFE_DATABASE wins over the file.
+	t.Setenv("ROWSAFE_DATABASE", "app")
+	if got, err := resolveDatabase(ctx, c, ""); err != nil || got != "app" {
+		t.Fatalf("ROWSAFE_DATABASE: %q, %v", got, err)
+	}
+	t.Setenv("ROWSAFE_DATABASE", "")
+	t.Chdir(t.TempDir())
+
+	f.dbs = dbs("only")
+	if got, err := resolveDatabase(ctx, c, ""); err != nil || got != "only" {
+		t.Fatalf("single database: %q, %v", got, err)
+	}
+	f.dbs = nil
+	if _, err := resolveDatabase(ctx, c, ""); err == nil || !strings.Contains(err.Error(), "rowsafe adopt") {
+		t.Fatalf("no databases: %v", err)
+	}
+}
+
+func TestMarkArgs(t *testing.T) {
+	f := &fakeAPI{dbs: dbs("app", "billing")}
+	_, c := cliEnv(t, f)
+	ctx := t.Context()
+	root, _ := os.Getwd()
+	if _, err := writeProjectConfig(root, "app"); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		args          []string
+		db, label     string
+		wantErrSubstr string
+	}{
+		{nil, "app", "", ""}, // project database, default label
+		{[]string{"before-drop"}, "app", "before-drop", ""}, // not a database: a label
+		{[]string{"billing"}, "billing", "", ""},            // a database: default label
+		{[]string{"billing", "pre-migration"}, "billing", "pre-migration", ""},
+		{[]string{"a", "b", "c"}, "", "", "expected"},
+	}
+	for _, tc := range cases {
+		db, label, err := markArgs(ctx, c, tc.args)
+		if tc.wantErrSubstr != "" {
+			if err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr) {
+				t.Errorf("markArgs(%q): err %v", tc.args, err)
+			}
+			continue
+		}
+		if err != nil || db != tc.db || label != tc.label {
+			t.Errorf("markArgs(%q) = %q, %q, %v; want %q, %q", tc.args, db, label, err, tc.db, tc.label)
+		}
+	}
+
+	// Through the command: the default label is manual-<UTC time>.
+	if err := dispatch(ctx, []string{"mark", "--no-wait"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch(ctx, []string{"mark", "before-drop", "--no-wait"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.marks) != 2 || !strings.HasPrefix(f.marks[0], "app/manual-"+time.Now().UTC().Format("20060102")) || f.marks[1] != "app/before-drop" {
+		t.Fatalf("marks = %q", f.marks)
+	}
+}
+
+func TestResolveHost(t *testing.T) {
+	f := &fakeAPI{}
+	_, c := cliEnv(t, f)
+	ctx := t.Context()
+	if _, err := resolveHost(ctx, c, ""); err == nil || !strings.Contains(err.Error(), "enroll-token") {
+		t.Fatalf("no hosts: %v", err)
+	}
+	f.hosts = []protocol.Host{{ID: "host_1", Hostname: "db1"}}
+	if h, err := resolveHost(ctx, c, ""); err != nil || h != "db1" {
+		t.Fatalf("one host: %q, %v", h, err)
+	}
+	f.hosts = append(f.hosts, protocol.Host{ID: "host_2", Hostname: "db2"})
+	_, err := resolveHost(ctx, c, "")
+	if err == nil || !strings.Contains(err.Error(), "--host db1") || !strings.Contains(err.Error(), "--host db2") {
+		t.Fatalf("two hosts: %v", err)
+	}
+	if h, _ := resolveHost(ctx, c, "db2"); h != "db2" {
+		t.Fatalf("explicit host: %q", h)
+	}
+}
+
+func TestExpandAlias(t *testing.T) {
+	cases := map[string]string{
+		"ls":                     "db list",
+		"show app":               "db show app",
+		"adopt app --host db1":   "db adopt app --host db1",
+		"plan":                   "db plan",
+		"apply app --yes":        "db apply app --yes",
+		"verify":                 "db verify",
+		"backup":                 "backup run",
+		"backup app --type diff": "backup run app --type diff",
+		"backup --type diff":     "backup run --type diff",
+		"backup run app":         "backup run app",
+		"backup list app":        "backup list app",
+		"backups app":            "backup list app",
+		"drill":                  "drill run",
+		"drill app":              "drill run app",
+		"drills":                 "drill list",
+		"marks app":              "restore-point list app",
+		"db list":                "db list",
+		"hosts list":             "hosts list",
+	}
+	for in, want := range cases {
+		if got := strings.Join(expandAlias(strings.Fields(in)), " "); got != want {
+			t.Errorf("expandAlias(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestStatusExitCodes(t *testing.T) {
+	f := &fakeAPI{dbs: dbs("app"), hosts: []protocol.Host{}, protected: map[string]bool{"app": true}}
+	_, _ = cliEnv(t, f)
+	ctx := t.Context()
+	var exit exitError
+	if err := dispatch(ctx, []string{"status", "app"}); err != nil {
+		t.Fatalf("protected: %v", err)
+	}
+	if err := dispatch(ctx, []string{"db", "protection", "app", "--json"}); err != nil {
+		t.Fatalf("long form, protected: %v", err)
+	}
+	f.protected["app"] = false
+	if err := dispatch(ctx, []string{"status", "app"}); !errors.As(err, &exit) || exit != 3 {
+		t.Fatalf("unprotected: %v, want exit 3", err)
+	}
+	// Fleet health: an active database with no backups or drills is a problem.
+	if err := dispatch(ctx, []string{"status"}); !errors.As(err, &exit) || exit != 3 {
+		t.Fatalf("fleet with problems: %v, want exit 3", err)
+	}
+	f.dbs = nil
+	if err := dispatch(ctx, []string{"status", "--json"}); err != nil {
+		t.Fatalf("empty fleet: %v", err)
+	}
+	if err := dispatch(ctx, []string{"status", "a", "b"}); err == nil || errors.As(err, &exit) {
+		t.Fatalf("two names: %v", err)
+	}
+}
+
+func TestInitWritesProjectConfig(t *testing.T) {
+	f := &fakeAPI{dbs: dbs("app", "billing")}
+	_, _ = cliEnv(t, f)
+	ctx := t.Context()
+	if err := os.WriteFile(".rowsafe.json", []byte(`{"require_protection": true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch(ctx, []string{"init"}); err == nil || !strings.Contains(err.Error(), "rowsafe init NAME") {
+		t.Fatalf("init with two databases and no NAME: %v", err)
+	}
+	if err := dispatch(ctx, []string{"init", "nope"}); err == nil {
+		t.Fatal("init with an unknown database succeeded")
+	}
+	if err := dispatch(ctx, []string{"init", "billing"}); err != nil {
+		t.Fatal(err)
+	}
+	var pc map[string]any
+	data, _ := os.ReadFile(".rowsafe.json")
+	if err := json.Unmarshal(data, &pc); err != nil || pc["database"] != "billing" || pc["require_protection"] != true {
+		t.Fatalf(".rowsafe.json = %s (%v)", data, err)
+	}
+	if pc2, _ := findProjectConfig(""); pc2.Database != "billing" || !pc2.RequireProtection {
+		t.Fatalf("the guard hook's loader reads %+v", pc2)
+	}
+}
+
+func TestBrowserLogin(t *testing.T) {
+	f := &fakeAPI{polls: []string{protocol.DeviceAuthorizationPending, protocol.DeviceSlowDown, protocol.DeviceAuthorizationPending, "ok"}}
+	ts, _ := cliEnv(t, f)
+	t.Setenv("ROWSAFE_API_KEY", "")
+	t.Setenv("ROWSAFE_URL", "")
+	var slept []time.Duration
+	var opened []string
+	oldSleep, oldOpen := sleepCtx, openBrowser
+	sleepCtx = func(ctx context.Context, d time.Duration) error { slept = append(slept, d); return nil }
+	openBrowser = func(u string) error { opened = append(opened, u); return nil }
+	t.Cleanup(func() { sleepCtx, openBrowser = oldSleep, oldOpen })
+	ctx := t.Context()
+
+	if err := dispatch(ctx, []string{"whoami"}); err == nil || !strings.Contains(err.Error(), "rowsafe login") {
+		t.Fatalf("whoami before login: %v", err)
+	}
+	if err := dispatch(ctx, []string{"login", "--url", ts.URL, "--name", "laptop"}); err != nil {
+		t.Fatal(err)
+	}
+	want := []time.Duration{3 * time.Second, 3 * time.Second, 8 * time.Second, 8 * time.Second}
+	if len(slept) != len(want) || slept[0] != want[0] || slept[2] != want[2] || slept[3] != want[3] {
+		t.Fatalf("poll intervals = %v, want %v (slow_down adds 5s)", slept, want)
+	}
+	if f.deviceName != "laptop" {
+		t.Fatalf("client name = %q", f.deviceName)
+	}
+	if canOpenBrowser() && (len(opened) != 1 || opened[0] != "https://app.test/cli?code=BCDF-GHJK") {
+		t.Fatalf("opened %v", opened)
+	}
+	saved, p, err := readSavedConfig()
+	if err != nil || saved.URL != ts.URL || saved.APIKey != "rsk_new" || saved.KeyID != "key_new" || saved.Org == nil || saved.Org.Name != "Acme" {
+		t.Fatalf("saved config %+v, %v", saved, err)
+	}
+	if st, _ := os.Stat(p); st.Mode().Perm() != 0o600 {
+		t.Fatalf("config mode %v", st.Mode().Perm())
+	}
+	// The saved URL is used from now on, without --url or ROWSAFE_URL.
+	if err := dispatch(ctx, []string{"whoami"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch(ctx, []string{"logout"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.logouts) != 1 || f.logouts[0] != "rsk_new" {
+		t.Fatalf("logout revoked %q", f.logouts)
+	}
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Fatal("logout left the config behind")
+	}
+
+	// Over SSH the browser is never opened.
+	t.Setenv("SSH_CONNECTION", "10.0.0.1 22 10.0.0.2 22")
+	opened = nil
+	f.polls = []string{protocol.DeviceAccessDenied}
+	if err := dispatch(ctx, []string{"login", "--url", ts.URL}); err == nil || !strings.Contains(err.Error(), "declined") {
+		t.Fatalf("denied login: %v", err)
+	}
+	if len(opened) != 0 {
+		t.Fatal("opened a browser over SSH")
+	}
+	f.polls = []string{protocol.DeviceExpiredToken}
+	if err := dispatch(ctx, []string{"login", "--url", ts.URL}); err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("expired login: %v", err)
+	}
+}
+
+func TestKeyLogin(t *testing.T) {
+	f := &fakeAPI{}
+	ts, _ := cliEnv(t, f)
+	t.Setenv("ROWSAFE_API_KEY", "")
+	ctx := t.Context()
+	if err := dispatch(ctx, []string{"login", "--key", "nope"}); err == nil {
+		t.Fatal("a malformed key was accepted")
+	}
+	if err := dispatch(ctx, []string{"login", "--key", "rsk_pasted"}); err != nil {
+		t.Fatal(err)
+	}
+	saved, _, _ := readSavedConfig()
+	if saved.URL != ts.URL || saved.APIKey != "rsk_pasted" || saved.KeyID != "" || saved.Org.ID != "org_1" {
+		t.Fatalf("saved %+v", saved)
+	}
+	// A pasted key is never revoked by logout.
+	if err := dispatch(ctx, []string{"logout"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.logouts) != 0 {
+		t.Fatalf("logout revoked a pasted key: %q", f.logouts)
+	}
+}
+
+func TestLoginURLDefault(t *testing.T) {
+	t.Setenv("ROWSAFE_URL", "")
+	if got := loginURL("", config{}); got != "https://api.rowsafe.sh" {
+		t.Fatalf("default = %q", got)
+	}
+	if got := loginURL("", config{URL: "https://saved.example/"}); got != "https://saved.example" {
+		t.Fatalf("saved = %q", got)
+	}
+	t.Setenv("ROWSAFE_URL", "https://env.example")
+	if got := loginURL("", config{URL: "https://saved.example"}); got != "https://env.example" {
+		t.Fatalf("env = %q", got)
+	}
+	if got := loginURL("https://flag.example", config{}); got != "https://flag.example" {
+		t.Fatalf("flag = %q", got)
+	}
+}
+
+func TestHelp(t *testing.T) {
+	if h := helpFor(nil); !strings.Contains(h, "Getting started") || !strings.Contains(h, "Recover") || !strings.Contains(h, "Admin") {
+		t.Fatalf("short help:\n%s", h)
+	}
+	if h := helpFor([]string{"mark"}); !strings.Contains(h, "rowsafe mark [NAME] [LABEL]") || !strings.Contains(h, "before-drop") {
+		t.Fatalf("help mark:\n%s", h)
+	}
+	if h := helpFor([]string{"backups"}); !strings.Contains(h, "short for rowsafe backup list") {
+		t.Fatalf("help backups:\n%s", h)
+	}
+	if h := helpFor([]string{"adopt"}); !strings.Contains(h, "--host may be omitted") {
+		t.Fatalf("help adopt:\n%s", h)
+	}
+	if h := helpFor([]string{"all"}); !strings.Contains(h, "rowsafe hosts enroll-token") || !strings.Contains(h, "ROWSAFE_DATABASE") {
+		t.Fatalf("help all is incomplete")
+	}
+	if h := helpFor([]string{"frobnicate"}); !strings.Contains(h, "No help") {
+		t.Fatalf("unknown topic:\n%s", h)
+	}
+}

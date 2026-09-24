@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+# pgBackRest file logs (log-level-file=detail) written by the Rowsafe agent and
+# by PostgreSQL's archive_command. Installed as /etc/logrotate.d/rowsafe by
+# https://rowsafe.sh/install. pgBackRest reopens its log on every command, so
+# plain create-style rotation is safe.
+/var/log/rowsafe/*.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    su postgres postgres
+    create 0640 postgres postgres
+}

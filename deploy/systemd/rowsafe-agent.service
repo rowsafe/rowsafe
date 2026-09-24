@@ -1,0 +1,81 @@
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-agent: the Rowsafe database host agent.
+#
+# Installed by https://rowsafe.sh/install as
+# /etc/systemd/system/rowsafe-agent.service, which the installer overwrites.
+# Put local changes in a drop-in: systemctl edit rowsafe-agent
+
+[Unit]
+Description=Rowsafe agent (PostgreSQL backups, WAL archiving and restore drills)
+Documentation=https://github.com/rowsafe/rowsafe/blob/main/docs/agent.md
+Wants=network-online.target
+# Ordering only: the agent must keep running (and reporting) while
+# PostgreSQL is down, so it does not require it.
+After=network-online.target postgresql.service
+# Never give up restarting: backups and monitoring must recover on their own.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=postgres
+Group=postgres
+EnvironmentFile=/etc/rowsafe/agent.env
+# Rolls the symlink back to the previous version when a self-update keeps
+# crashing before it confirms itself. It always exits 0.
+ExecStartPre=/opt/rowsafe/bin/rowsafe-agent-guard
+# A symlink into /opt/rowsafe/versions/ that self-update swaps atomically.
+ExecStart=/opt/rowsafe/rowsafe-agent run
+# The agent exits 0 to switch versions after an update, so restart on success too.
+Restart=always
+RestartSec=5
+# Stop pgBackRest and a drill's scratch PostgreSQL together with the agent
+# (they run in this unit's cgroup), and give a drill time to clean up.
+KillMode=control-group
+TimeoutStopSec=120
+UMask=0077
+# Production comes first. If the host runs out of memory, the kernel kills
+# the agent, pgBackRest or a drill's scratch PostgreSQL (all in this unit)
+# before production PostgreSQL. Under contention they also get less CPU and IO.
+OOMScoreAdjust=500
+CPUWeight=50
+IOWeight=50
+
+# Hardening. The agent needs to: write pgBackRest configs to
+# /etc/rowsafe/pgbackrest, swap its own symlink and versions in /opt/rowsafe,
+# keep state and run drills under /var/lib/rowsafe, write logs to
+# /var/log/rowsafe, read the PostgreSQL data directory (pgBackRest) and
+# connect to PostgreSQL's Unix socket.
+NoNewPrivileges=yes
+# /usr, /boot and /etc read-only, with the exceptions below. /var stays
+# writable (drills, logs, pgBackRest reading the data directory).
+ProtectSystem=full
+ReadWritePaths=/etc/rowsafe /opt/rowsafe -/var/lib/rowsafe -/var/log/rowsafe
+ProtectHome=yes
+# No PrivateTmp: pgBackRest's lock files live in /tmp/pgbackrest and must be
+# shared with the archive-push commands PostgreSQL runs outside this unit.
+PrivateTmp=no
+# A private /dev with only pseudo devices; /dev/shm (needed by a drill's
+# PostgreSQL) is still shared.
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+# Unix sockets for PostgreSQL, IP for the control plane and the S3
+# repository, netlink for glibc's address lookups.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Deliberately unset: SystemCallFilter and MemoryDenyWriteExecute. A drill
+# starts a full PostgreSQL with production's shared_preload_libraries (and
+# JIT); a filter that breaks an extension would look like a failed restore.
+
+[Install]
+WantedBy=multi-user.target

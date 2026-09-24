@@ -1,0 +1,891 @@
+// Package protocol defines the JSON contract between the Rowsafe control
+// plane (rowsafed), the agent (rowsafe-agent) and the CLI (rowsafe).
+package protocol
+
+import (
+	"encoding/json"
+	"time"
+)
+
+// Task types. The agent only ever executes these fixed operations; it never
+// runs arbitrary commands sent by the control plane.
+const (
+	TaskInspect = "inspect" // read-only: report version, settings, sizes
+	TaskAdopt   = "adopt"   // plan (default) or apply WAL archiving to the repo
+	TaskCheck   = "check"   // pgbackrest check: proves WAL reaches the repo
+	TaskBackup  = "backup"  // pgbackrest backup (full, diff or incr)
+	TaskDrill   = "drill"   // restore latest backup to a scratch dir and verify
+	// TaskRestorePoint creates a named restore point and waits until the WAL
+	// holding it is archived. It may run alongside another task on the same
+	// database (it is only a few SQL statements).
+	TaskRestorePoint = "restore_point"
+)
+
+// Task statuses.
+const (
+	StatusQueued    = "queued"
+	StatusRunning   = "running"
+	StatusSucceeded = "succeeded"
+	StatusFailed    = "failed"
+	StatusLost      = "lost" // lease expired while running (agent died or hung)
+	// StatusCancelled: removed from the queue before it ran (its database or
+	// host was removed from Rowsafe).
+	StatusCancelled = "cancelled"
+)
+
+// Database statuses.
+const (
+	DBPendingAdopt    = "pending_adopt"    // registered, adopt plan not applied yet
+	DBAwaitingRestart = "awaiting_restart" // settings applied, Postgres restart needed
+	DBVerifying       = "verifying"        // check task queued/running
+	DBActive          = "active"           // WAL archiving proven, schedules running
+)
+
+// Backup types accepted by pgBackRest.
+const (
+	BackupFull = "full"
+	BackupDiff = "diff"
+	BackupIncr = "incr"
+)
+
+// DatabaseSpec is everything the agent needs to act on one Postgres cluster.
+// It carries no secrets: repository credentials live only on the host.
+type DatabaseSpec struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Stanza        string `json:"stanza"`
+	Port          int    `json:"port"`
+	SocketDir     string `json:"socket_dir"`
+	RetentionFull int    `json:"retention_full"`
+}
+
+// Task is a unit of work handed to an agent.
+type Task struct {
+	ID        string          `json:"id"`
+	Type      string          `json:"type"`
+	Database  *DatabaseSpec   `json:"database,omitempty"`
+	Params    json.RawMessage `json:"params,omitempty"`
+	CreatedAt time.Time       `json:"created_at"`
+}
+
+type AdoptParams struct {
+	Apply bool `json:"apply"`
+	// Force replaces an existing, foreign archive_command (e.g. WAL-G).
+	Force bool `json:"force,omitempty"`
+}
+
+type BackupParams struct {
+	Type string `json:"type"`
+}
+
+// ---- Agent <-> control plane ----
+
+type EnrollRequest struct {
+	Token        string `json:"token"`
+	Hostname     string `json:"hostname"`
+	AgentVersion string `json:"agent_version"`
+}
+
+type EnrollResponse struct {
+	HostID     string `json:"host_id"`
+	AgentToken string `json:"agent_token"`
+}
+
+type HeartbeatRequest struct {
+	Hostname     string          `json:"hostname"`
+	AgentVersion string          `json:"agent_version"`
+	Archivers    []ArchiverStats `json:"archivers,omitempty"`
+	Update       *UpdateReport   `json:"update,omitempty"`
+	// Platform is the agent's release artifact key, e.g. "linux/amd64"
+	// (release.Platform()). Older agents omit it.
+	Platform string `json:"platform,omitempty"`
+	// Mode is the agent's mode: "native" or "docker-sidecar". Older agents
+	// omit it (native).
+	Mode string `json:"mode,omitempty"`
+}
+
+// HeartbeatResponse tells the agent which databases to watch.
+type HeartbeatResponse struct {
+	Databases []DatabaseSpec `json:"databases"`
+	Update    *UpdateOffer   `json:"update,omitempty"`
+}
+
+// ArchiverStats mirrors pg_stat_archiver for one adopted database.
+type ArchiverStats struct {
+	DatabaseID       string     `json:"database_id"`
+	ArchivedCount    int64      `json:"archived_count"`
+	FailedCount      int64      `json:"failed_count"`
+	LastArchivedTime *time.Time `json:"last_archived_time,omitempty"`
+	LastFailedTime   *time.Time `json:"last_failed_time,omitempty"`
+	Error            string     `json:"error,omitempty"`
+
+	// Docker sidecar agents (Mode "docker-sidecar") archive through a spool:
+	// PostgreSQL's archive_command copies WAL into it and the agent pushes it
+	// to the repository. For them the fields above describe the repository
+	// (last successful push; failures include push failures and a stalled
+	// spool) and PostgreSQL's own pg_stat_archiver view is in Spooled*.
+	Mode            string     `json:"mode,omitempty"`
+	SpooledCount    int64      `json:"spooled_count,omitempty"`
+	LastSpooledTime *time.Time `json:"last_spooled_time,omitempty"`
+	SpoolFiles      int        `json:"spool_files,omitempty"`       // WAL files waiting to be pushed
+	SpoolBytes      int64      `json:"spool_bytes,omitempty"`       // their total size
+	SpoolOldestTime *time.Time `json:"spool_oldest_time,omitempty"` // when the oldest waiting file was spooled
+	SpoolStalled    bool       `json:"spool_stalled,omitempty"`     // the oldest file has waited too long
+	LastPushedWAL   string     `json:"last_pushed_wal,omitempty"`
+	PushFailedCount int64      `json:"push_failed_count,omitempty"` // since the agent started
+	LastPushError   string     `json:"last_push_error,omitempty"`
+}
+
+type ClaimResponse struct {
+	Task *Task `json:"task"`
+}
+
+type CompleteRequest struct {
+	Status string          `json:"status"` // succeeded | failed
+	Error  string          `json:"error,omitempty"`
+	Log    string          `json:"log,omitempty"`
+	Result json.RawMessage `json:"result,omitempty"`
+}
+
+// ---- Task results ----
+
+type InspectResult struct {
+	ServerVersion          string   `json:"server_version"`
+	VersionNum             int      `json:"version_num"`
+	DataDirectory          string   `json:"data_directory"`
+	ConfigFile             string   `json:"config_file"`
+	Port                   int      `json:"port"`
+	IsSuperuser            bool     `json:"is_superuser"`
+	InRecovery             bool     `json:"in_recovery"`
+	WalLevel               string   `json:"wal_level"`
+	ArchiveMode            string   `json:"archive_mode"`
+	ArchiveCommand         string   `json:"archive_command"`
+	ArchiveLibrary         string   `json:"archive_library,omitempty"`
+	ArchiveTimeoutSeconds  int      `json:"archive_timeout_seconds"`
+	SharedPreloadLibraries string   `json:"shared_preload_libraries"`
+	PendingRestart         []string `json:"pending_restart,omitempty"`
+	Databases              []DBInfo `json:"databases"`
+	TotalSizeBytes         int64    `json:"total_size_bytes"`
+}
+
+// Major returns the Postgres major version (e.g. 18 for 180004).
+func (r InspectResult) Major() int { return r.VersionNum / 10000 }
+
+type DBInfo struct {
+	Name      string `json:"name"`
+	SizeBytes int64  `json:"size_bytes"`
+	Tables    int    `json:"tables"`
+}
+
+// Change is one step of an adopt plan.
+type Change struct {
+	Kind        string `json:"kind"` // file | command | setting
+	Description string `json:"description"`
+	Setting     string `json:"setting,omitempty"`
+	From        string `json:"from,omitempty"`
+	To          string `json:"to,omitempty"`
+	Restart     bool   `json:"restart,omitempty"`
+}
+
+type AdoptResult struct {
+	Inspect         InspectResult `json:"inspect"`
+	Plan            []Change      `json:"plan"`
+	Applied         bool          `json:"applied"`
+	RestartRequired bool          `json:"restart_required"`
+	Warnings        []string      `json:"warnings,omitempty"`
+}
+
+type CheckResult struct {
+	OK      bool          `json:"ok"`
+	Inspect InspectResult `json:"inspect"`
+}
+
+type BackupResult struct {
+	Label         string    `json:"label"`
+	Type          string    `json:"type"`
+	StartedAt     time.Time `json:"started_at"`
+	StoppedAt     time.Time `json:"stopped_at"`
+	SizeBytes     int64     `json:"size_bytes"`
+	RepoSizeBytes int64     `json:"repo_size_bytes"`
+	WALStart      string    `json:"wal_start,omitempty"`
+	WALStop       string    `json:"wal_stop,omitempty"`
+}
+
+type DrillResult struct {
+	Passed          bool            `json:"passed"`
+	BackupLabel     string          `json:"backup_label"`
+	RecoveredTo     *time.Time      `json:"recovered_to,omitempty"`
+	DurationSeconds float64         `json:"duration_seconds"`
+	RestoredBytes   int64           `json:"restored_bytes"`
+	Databases       []DrillDatabase `json:"databases"`
+	Failures        []string        `json:"failures,omitempty"`
+	Warnings        []string        `json:"warnings,omitempty"`
+}
+
+type DrillDatabase struct {
+	Name           string `json:"name"`
+	Present        bool   `json:"present"`
+	SourceTables   int    `json:"source_tables"`
+	RestoredTables int    `json:"restored_tables"`
+}
+
+// ---- User API ----
+
+type CreateEnrollmentTokenRequest struct {
+	TTLSeconds int `json:"ttl_seconds,omitempty"`
+}
+
+type EnrollmentToken struct {
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+type Host struct {
+	ID            string        `json:"id"`
+	Hostname      string        `json:"hostname"`
+	AgentVersion  string        `json:"agent_version"`
+	Platform      string        `json:"platform,omitempty"` // "" until the agent reports it
+	UpdateChannel string        `json:"update_channel"`
+	PinnedVersion string        `json:"pinned_version,omitempty"`
+	LastUpdate    *UpdateReport `json:"last_update,omitempty"`
+	LastSeenAt    *time.Time    `json:"last_seen_at,omitempty"`
+	CreatedAt     time.Time     `json:"created_at"`
+}
+
+// UpdateHostRequest changes a host's update policy. Pin "" clears the pin.
+type UpdateHostRequest struct {
+	UpdateChannel *string `json:"update_channel,omitempty"`
+	PinnedVersion *string `json:"pinned_version,omitempty"`
+}
+
+type CreateDatabaseRequest struct {
+	HostID        string `json:"host_id"` // host ID or hostname
+	Name          string `json:"name"`
+	Port          int    `json:"port,omitempty"`
+	SocketDir     string `json:"socket_dir,omitempty"`
+	RetentionFull int    `json:"retention_full,omitempty"`
+}
+
+type Database struct {
+	ID            string         `json:"id"`
+	HostID        string         `json:"host_id"`
+	Hostname      string         `json:"hostname"`
+	Name          string         `json:"name"`
+	Stanza        string         `json:"stanza"`
+	Port          int            `json:"port"`
+	SocketDir     string         `json:"socket_dir"`
+	Status        string         `json:"status"`
+	RetentionFull int            `json:"retention_full"`
+	ScheduleFull  string         `json:"schedule_full"`
+	ScheduleDiff  string         `json:"schedule_diff"`
+	ScheduleDrill string         `json:"schedule_drill"`
+	Inspect       *InspectResult `json:"inspect,omitempty"`
+	Archiver      *ArchiverStats `json:"archiver,omitempty"`
+	CreatedAt     time.Time      `json:"created_at"`
+}
+
+type CreateTaskRequest struct {
+	Type   string          `json:"type"`
+	Params json.RawMessage `json:"params,omitempty"`
+}
+
+type TaskView struct {
+	ID         string `json:"id"`
+	Type       string `json:"type"`
+	DatabaseID string `json:"database_id,omitempty"`
+	// DatabaseName is the database's name (also for removed databases).
+	DatabaseName string          `json:"database_name,omitempty"`
+	HostID       string          `json:"host_id"`
+	Status       string          `json:"status"`
+	Scheduled    bool            `json:"scheduled"`
+	Params       json.RawMessage `json:"params,omitempty"`
+	Error        string          `json:"error,omitempty"`
+	Log          string          `json:"log,omitempty"`
+	Result       json.RawMessage `json:"result,omitempty"`
+	CreatedAt    time.Time       `json:"created_at"`
+	StartedAt    *time.Time      `json:"started_at,omitempty"`
+	FinishedAt   *time.Time      `json:"finished_at,omitempty"`
+}
+
+type Backup struct {
+	ID            string    `json:"id"`
+	DatabaseID    string    `json:"database_id"`
+	TaskID        string    `json:"task_id"`
+	Label         string    `json:"label"`
+	Type          string    `json:"type"`
+	StartedAt     time.Time `json:"started_at"`
+	StoppedAt     time.Time `json:"stopped_at"`
+	SizeBytes     int64     `json:"size_bytes"`
+	RepoSizeBytes int64     `json:"repo_size_bytes"`
+}
+
+type Drill struct {
+	ID         string      `json:"id"`
+	DatabaseID string      `json:"database_id"`
+	TaskID     string      `json:"task_id"`
+	Passed     bool        `json:"passed"`
+	Result     DrillResult `json:"result"`
+	CreatedAt  time.Time   `json:"created_at"`
+}
+
+type Error struct {
+	Error string `json:"error"`
+}
+
+type CreateDatabaseResponse struct {
+	Database Database `json:"database"`
+	Task     TaskView `json:"task"` // the initial adopt plan (read-only)
+}
+
+// TaskTimeout is how long the agent lets a task run before killing it.
+// The control plane's lease is slightly longer.
+func TaskTimeout(taskType string) time.Duration {
+	switch taskType {
+	case TaskInspect:
+		return 2 * time.Minute
+	case TaskAdopt, TaskCheck:
+		return 10 * time.Minute
+	case TaskRestorePoint:
+		return 5 * time.Minute
+	default: // backup, drill: a large first backup or restore takes hours
+		return 12 * time.Hour
+	}
+}
+
+// ---- Agent self-update ----
+
+// Update states reported by the agent.
+const (
+	UpdateStaged     = "staged"      // new version downloaded, verified and self-tested
+	UpdateSwitched   = "switched"    // symlink swapped, restarting into new version
+	UpdateConfirmed  = "confirmed"   // new version passed probation
+	UpdateRolledBack = "rolled_back" // new version failed probation; previous restored
+	UpdateFailed     = "failed"      // rejected before switching (bad signature, self-test...)
+)
+
+// UpdateOffer is sent in the heartbeat response when the control plane wants
+// this host on a different version. Manifest and Signature are passed through
+// verbatim: the agent verifies the signature with a key built into it, so the
+// control plane cannot forge releases.
+type UpdateOffer struct {
+	Version   string `json:"version"`
+	Manifest  string `json:"manifest"`  // exact signed JSON bytes
+	Signature string `json:"signature"` // base64 Ed25519 signature over Manifest
+}
+
+// UpdateReport tells the control plane how the last update attempt went.
+type UpdateReport struct {
+	State       string `json:"state"`
+	FromVersion string `json:"from_version,omitempty"`
+	ToVersion   string `json:"to_version"`
+	Error       string `json:"error,omitempty"`
+	// Retryable marks transient failures (e.g. a download timeout) that say
+	// nothing about the release itself and must not halt its rollout.
+	Retryable bool      `json:"retryable,omitempty"`
+	At        time.Time `json:"at"`
+}
+
+// ReleaseManifest is the signed description of one agent release.
+type ReleaseManifest struct {
+	Version    string              `json:"version"`
+	ReleasedAt time.Time           `json:"released_at"`
+	Artifacts  map[string]Artifact `json:"artifacts"` // key: "linux/amd64"
+}
+
+type Artifact struct {
+	URL    string `json:"url"`
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size"`
+}
+
+// ---- Organizations, plans and API keys ----
+
+// Plans. Their limits live in the control plane (store.PlanLimits).
+const (
+	PlanFree     = "free"
+	PlanPro      = "pro"
+	PlanBusiness = "business"
+)
+
+// OrgHeader selects the organization a service-token request acts for.
+const OrgHeader = "X-Rowsafe-Org"
+
+type PlanLimits struct {
+	MaxHosts     int `json:"max_hosts"`
+	MaxDatabases int `json:"max_databases"`
+}
+
+type OrgUsage struct {
+	Hosts     int `json:"hosts"`
+	Databases int `json:"databases"`
+}
+
+type Org struct {
+	ID                  string     `json:"id"`
+	Name                string     `json:"name"`
+	ExternalID          string     `json:"external_id"` // Better Auth organization ID; "" for orgs made with rowsafed bootstrap
+	Plan                string     `json:"plan"`
+	Limits              PlanLimits `json:"limits"`
+	Usage               OrgUsage   `json:"usage"`
+	PolarCustomerID     string     `json:"polar_customer_id,omitempty"`
+	PolarSubscriptionID string     `json:"polar_subscription_id,omitempty"`
+	PlanPeriodEnd       *time.Time `json:"plan_period_end,omitempty"`
+	CreatedAt           time.Time  `json:"created_at"`
+}
+
+type CreateOrgRequest struct {
+	Name       string `json:"name"`
+	ExternalID string `json:"external_id"`
+}
+
+// UpdatePlanRequest sets an org's plan. Omitted optional fields keep their
+// current value and "" clears an ID. Moving to the free plan clears the
+// subscription ID and period end unless they are given.
+type UpdatePlanRequest struct {
+	Plan                string     `json:"plan"`
+	PolarCustomerID     *string    `json:"polar_customer_id,omitempty"`
+	PolarSubscriptionID *string    `json:"polar_subscription_id,omitempty"`
+	PlanPeriodEnd       *time.Time `json:"plan_period_end,omitempty"`
+}
+
+type APIKey struct {
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	CreatedAt  time.Time  `json:"created_at"`
+	LastUsedAt *time.Time `json:"last_used_at"`
+	// ReadOnly keys may only make GET requests.
+	ReadOnly bool `json:"read_only"`
+}
+
+type CreateAPIKeyRequest struct {
+	Name     string `json:"name"`
+	ReadOnly bool   `json:"read_only,omitempty"`
+}
+
+// CreatedAPIKey carries the plaintext key, which is shown only once.
+type CreatedAPIKey struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Key       string    `json:"key"`
+	CreatedAt time.Time `json:"created_at"`
+	ReadOnly  bool      `json:"read_only"`
+}
+
+// UpdateDatabaseRequest changes a database's retention and schedules.
+// Omitted fields are unchanged. Schedules are 5-field cron expressions in
+// UTC; schedule_diff "" disables differential backups.
+type UpdateDatabaseRequest struct {
+	RetentionFull *int    `json:"retention_full,omitempty"`
+	ScheduleFull  *string `json:"schedule_full,omitempty"`
+	ScheduleDiff  *string `json:"schedule_diff,omitempty"`
+	ScheduleDrill *string `json:"schedule_drill,omitempty"`
+}
+
+// AuditEvent records a change made through the API.
+type AuditEvent struct {
+	ID     string          `json:"id"`
+	At     time.Time       `json:"at"`
+	Actor  string          `json:"actor"`  // "key:<id> (<name>)", "dashboard[:<user>]" or "rowsafed"
+	Action string          `json:"action"` // e.g. "database.update"
+	Target string          `json:"target,omitempty"`
+	Detail json.RawMessage `json:"detail,omitempty"`
+}
+
+// ActorHeader names the person acting through the service token (e.g. the
+// dashboard user's email) for the audit log. It is ignored with API keys.
+const ActorHeader = "X-Rowsafe-Actor"
+
+// ---- Restore points and protection ----
+
+// ClaimRequest optionally limits a claim to some task types (the agent's
+// fast lane claims only restore points so they never wait behind a backup).
+type ClaimRequest struct {
+	Types []string `json:"types,omitempty"`
+}
+
+type RestorePointParams struct {
+	Name string `json:"name"`
+}
+
+type CreateRestorePointRequest struct {
+	Name string `json:"name"`
+}
+
+// RestorePointResult is the agent's report for a restore_point task.
+type RestorePointResult struct {
+	Name       string     `json:"name"`
+	LSN        string     `json:"lsn"`
+	WALFile    string     `json:"wal_file"`
+	Archived   bool       `json:"archived"`
+	CreatedAt  time.Time  `json:"created_at"`
+	ArchivedAt *time.Time `json:"archived_at,omitempty"`
+}
+
+// Restore point states.
+const (
+	RestorePointPending     = "pending"     // task queued or running
+	RestorePointArchived    = "archived"    // WAL with the restore point is in the repository
+	RestorePointUnconfirmed = "unconfirmed" // created, but archiving wasn't confirmed in time
+)
+
+type RestorePoint struct {
+	ID          string     `json:"id"`
+	DatabaseID  string     `json:"database_id"`
+	Name        string     `json:"name"`
+	Status      string     `json:"status"`
+	TaskID      string     `json:"task_id"`
+	LSN         string     `json:"lsn,omitempty"`
+	WALFile     string     `json:"wal_file,omitempty"`
+	CreatedBy   string     `json:"created_by"`
+	RequestedAt time.Time  `json:"requested_at"`
+	CreatedAt   *time.Time `json:"created_at,omitempty"`  // when PostgreSQL wrote it
+	ArchivedAt  *time.Time `json:"archived_at,omitempty"` // when its WAL was confirmed archived
+	// RestoreFromBackup is the newest backup that finished before the
+	// restore point: pass it to pgbackrest restore as --set, because with
+	// --type=name pgBackRest can't pick the backup itself.
+	RestoreFromBackup string `json:"restore_from_backup,omitempty"`
+}
+
+// Protection is a conservative "is this database recoverable right now"
+// check. Protected is true only if every condition holds; Reasons lists
+// each one that doesn't.
+type Protection struct {
+	Protected           bool       `json:"protected"`
+	Reasons             []string   `json:"reasons"`
+	Status              string     `json:"status"`
+	CheckedAt           time.Time  `json:"checked_at"`
+	LastBackupAt        *time.Time `json:"last_backup_at,omitempty"`
+	LastFullAt          *time.Time `json:"last_full_at,omitempty"`
+	WALLastArchivedAt   *time.Time `json:"wal_last_archived_at,omitempty"`
+	ArchiverUp          bool       `json:"archiver_up"`
+	ArchiveFailing      bool       `json:"archive_failing"`
+	RecoveryWindowStart *time.Time `json:"recovery_window_start,omitempty"`
+	LastDrillPassedAt   *time.Time `json:"last_drill_passed_at,omitempty"`
+	LastDrillPassed     *bool      `json:"last_drill_passed,omitempty"`
+	OpenFailedTasks     []TaskView `json:"open_failed_tasks"`
+}
+
+// ---- Monitoring (agent -> control plane) ----
+
+// MonitoringReport is what the agent posts to POST /v1/agent/monitoring
+// about once a minute. Metric names are listed in docs/monitoring.md; the
+// control plane drops names it doesn't know.
+type MonitoringReport struct {
+	CollectedAt time.Time `json:"collected_at"`
+	// Host metrics (CPU, load, memory, swap, disk). Empty on platforms
+	// where the agent can't read them.
+	Host      map[string]float64   `json:"host,omitempty"`
+	Databases []DatabaseMonitoring `json:"databases,omitempty"`
+}
+
+// DatabaseMonitoring is one database cluster's part of a report.
+type DatabaseMonitoring struct {
+	DatabaseID string `json:"database_id"`
+	// Error is set when the agent could not query PostgreSQL.
+	Error            string             `json:"error,omitempty"`
+	Metrics          map[string]float64 `json:"metrics,omitempty"`
+	Sizes            []DatabaseSize     `json:"sizes,omitempty"` // about every 5 minutes
+	ReplicationSlots []ReplicationSlot  `json:"replication_slots,omitempty"`
+	Activity         *Activity          `json:"activity,omitempty"`
+	Statements       *Statements        `json:"statements,omitempty"` // about every 5 minutes
+}
+
+// MonitoringAck answers a monitoring report.
+type MonitoringAck struct {
+	// IntervalSeconds is how often the control plane wants reports.
+	IntervalSeconds int `json:"interval_seconds"`
+}
+
+type DatabaseSize struct {
+	Name      string `json:"name"`
+	SizeBytes int64  `json:"size_bytes"`
+}
+
+type ReplicationSlot struct {
+	Name   string `json:"name"`
+	Type   string `json:"type"` // physical | logical
+	Active bool   `json:"active"`
+	// RetainedBytes is how much WAL the slot holds back (nil on a standby
+	// or for a slot that never reserved WAL).
+	RetainedBytes *int64 `json:"retained_bytes,omitempty"`
+	WALStatus     string `json:"wal_status,omitempty"` // reserved | extended | unreserved | lost
+}
+
+// Activity lists sessions running a query, or idle in a transaction, for
+// over a minute.
+type Activity struct {
+	CollectedAt time.Time `json:"collected_at,omitzero"` // absent until the agent reports
+	// QueryTextCollected is false when the agent runs with
+	// ROWSAFE_COLLECT_QUERY_TEXT=false; Query is then empty.
+	QueryTextCollected bool            `json:"query_text_collected"`
+	Queries            []ActivityQuery `json:"queries"`
+}
+
+type ActivityQuery struct {
+	PID             int     `json:"pid"`
+	DurationSeconds float64 `json:"duration_seconds"` // since the query (or, idle in transaction, the last one) started
+	XactSeconds     float64 `json:"xact_seconds"`     // since the transaction started (0 outside one)
+	State           string  `json:"state"`
+	WaitEventType   string  `json:"wait_event_type,omitempty"`
+	WaitEvent       string  `json:"wait_event,omitempty"`
+	ApplicationName string  `json:"application_name,omitempty"`
+	Database        string  `json:"database,omitempty"`
+	User            string  `json:"user,omitempty"`
+	Query           string  `json:"query,omitempty"` // up to 500 characters
+}
+
+// Statements is the top of pg_stat_statements by total execution time,
+// cumulative since its last reset. Query text is normalized by PostgreSQL
+// (constants become $1, $2...).
+type Statements struct {
+	CollectedAt time.Time       `json:"collected_at,omitzero"` // absent until the agent reports
+	Available   bool            `json:"available"`
+	Reason      string          `json:"reason,omitempty"` // why not available
+	Statements  []StatementStat `json:"statements"`
+}
+
+type StatementStat struct {
+	QueryID     string  `json:"query_id"` // a 64-bit integer, as a string
+	Query       string  `json:"query"`    // up to 2000 characters
+	Database    string  `json:"database,omitempty"`
+	User        string  `json:"user,omitempty"`
+	Calls       int64   `json:"calls"`
+	TotalTimeMs float64 `json:"total_time_ms"`
+	MeanTimeMs  float64 `json:"mean_time_ms"`
+	Rows        int64   `json:"rows"`
+}
+
+// ---- Monitoring and alerting (user API) ----
+
+// MetricsResponse answers GET /v1/databases/{ref}/metrics and
+// GET /v1/hosts/{ref}/metrics.
+type MetricsResponse struct {
+	From       time.Time      `json:"from"`
+	To         time.Time      `json:"to"`
+	Step       int            `json:"step"`       // seconds between points
+	Resolution string         `json:"resolution"` // stored resolution used: 1m, 5m or 1h
+	Series     []MetricSeries `json:"series"`
+}
+
+type MetricSeries struct {
+	Metric string `json:"metric"`
+	Unit   string `json:"unit"`
+	// Points are [unix_seconds, value] pairs, oldest first. A bucket
+	// without samples has no point.
+	Points [][2]float64 `json:"points"`
+}
+
+// MonitoringSnapshot answers GET /v1/databases/{ref}/monitoring: the
+// newest details the agent reported besides the metric series.
+type MonitoringSnapshot struct {
+	ReportedAt *time.Time `json:"reported_at,omitempty"` // nil until the agent reports
+	// Error is set when the agent could not query PostgreSQL in its newest
+	// report.
+	Error            string            `json:"error,omitempty"`
+	ReplicationSlots []ReplicationSlot `json:"replication_slots"`
+	Sizes            []DatabaseSize    `json:"sizes"`
+	SizesAt          *time.Time        `json:"sizes_at,omitempty"`
+}
+
+// MetricInfo describes one collected metric (GET /v1/monitoring/metrics).
+type MetricInfo struct {
+	Name        string `json:"name"`
+	Scope       string `json:"scope"` // database | host
+	Unit        string `json:"unit"`
+	Description string `json:"description"`
+}
+
+// Alert severities, from most to least urgent.
+const (
+	SeverityCritical = "critical"
+	SeverityWarning  = "warning"
+	SeverityInfo     = "info"
+)
+
+// Alert states shown by the API. (An alert whose condition has not yet
+// held for the rule's for_seconds is pending and not listed.)
+const (
+	AlertFiring   = "firing"
+	AlertResolved = "resolved"
+)
+
+type Alert struct {
+	ID          string         `json:"id"`
+	Rule        string         `json:"rule"`
+	Severity    string         `json:"severity"`
+	State       string         `json:"state"`
+	Database    *AlertDatabase `json:"database,omitempty"`
+	Host        *AlertHost     `json:"host,omitempty"`
+	Summary     string         `json:"summary"`
+	Description string         `json:"description"`
+	NextStep    string         `json:"next_step,omitempty"` // what to do, usually a CLI command
+	Value       *float64       `json:"value,omitempty"`
+	Threshold   *float64       `json:"threshold,omitempty"`
+	Unit        string         `json:"unit,omitempty"` // unit of value and threshold
+	URL         string         `json:"url,omitempty"`  // dashboard page, when ROWSAFE_APP_URL is set
+	StartedAt   time.Time      `json:"started_at"`
+	ResolvedAt  *time.Time     `json:"resolved_at,omitempty"`
+	// AcknowledgedAt stops repeat notifications of a firing alert.
+	AcknowledgedAt *time.Time `json:"acknowledged_at,omitempty"`
+	AcknowledgedBy string     `json:"acknowledged_by,omitempty"`
+}
+
+type AlertDatabase struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type AlertHost struct {
+	ID       string `json:"id"`
+	Hostname string `json:"hostname"`
+}
+
+// AlertRule is a built-in rule with the org's overrides applied.
+type AlertRule struct {
+	Rule        string   `json:"rule"`
+	Title       string   `json:"title"`
+	Scope       string   `json:"scope"` // database | host
+	Description string   `json:"description"`
+	Enabled     bool     `json:"enabled"`
+	Threshold   *float64 `json:"threshold,omitempty"` // absent for rules without one
+	Unit        string   `json:"unit,omitempty"`      // unit of threshold
+	ForSeconds  int      `json:"for_seconds"`
+	Severity    string   `json:"severity"`
+	// Customized is true when the org overrides any default.
+	Customized bool             `json:"customized"`
+	Defaults   AlertRuleDefault `json:"defaults"`
+}
+
+type AlertRuleDefault struct {
+	Threshold  *float64 `json:"threshold,omitempty"`
+	ForSeconds int      `json:"for_seconds"`
+	Severity   string   `json:"severity"`
+}
+
+// UpdateAlertRuleRequest replaces an org's override of a rule: an omitted
+// field goes back to the default (enabled: true).
+type UpdateAlertRuleRequest struct {
+	Enabled    *bool    `json:"enabled,omitempty"`
+	Threshold  *float64 `json:"threshold,omitempty"`
+	ForSeconds *int     `json:"for_seconds,omitempty"`
+	Severity   *string  `json:"severity,omitempty"`
+}
+
+// Notification channel types.
+const (
+	ChannelEmail   = "email"
+	ChannelSlack   = "slack"
+	ChannelDiscord = "discord"
+	ChannelWebhook = "webhook"
+)
+
+type NotificationChannel struct {
+	ID          string        `json:"id"`
+	Type        string        `json:"type"`
+	Name        string        `json:"name"`
+	Config      ChannelConfig `json:"config"` // url is masked in responses
+	MinSeverity string        `json:"min_severity"`
+	CreatedAt   time.Time     `json:"created_at"`
+	LastSentAt  *time.Time    `json:"last_sent_at,omitempty"`
+	LastError   string        `json:"last_error,omitempty"`
+	LastErrorAt *time.Time    `json:"last_error_at,omitempty"`
+	// SigningSecret is returned once, when a webhook channel is created.
+	SigningSecret string `json:"signing_secret,omitempty"`
+}
+
+type ChannelConfig struct {
+	Addresses []string `json:"addresses,omitempty"` // email
+	URL       string   `json:"url,omitempty"`       // slack, discord, webhook (https only)
+}
+
+type CreateNotificationChannelRequest struct {
+	Type        string        `json:"type"`
+	Name        string        `json:"name"`
+	Config      ChannelConfig `json:"config"`
+	MinSeverity string        `json:"min_severity,omitempty"` // default warning
+}
+
+type ChannelTestResult struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+// ---- CLI login (OAuth 2.0 device authorization, RFC 8628 style) ----
+
+// DefaultAPIURL is the hosted control plane. The CLI and the agent use it
+// unless ROWSAFE_URL (or a saved login) says otherwise.
+const DefaultAPIURL = "https://api.rowsafe.sh"
+
+// Device-flow errors returned by POST /v1/auth/device/token (HTTP 400).
+const (
+	DeviceAuthorizationPending = "authorization_pending" // keep polling
+	DeviceSlowDown             = "slow_down"             // polled too fast: add 5s to the interval
+	DeviceExpiredToken         = "expired_token"         // expired, unknown or already used: start over
+	DeviceAccessDenied         = "access_denied"         // the user declined
+)
+
+type DeviceAuthRequest struct {
+	ClientName string `json:"client_name"` // e.g. "rowsafe CLI on laptop"
+}
+
+type DeviceAuthResponse struct {
+	DeviceCode              string `json:"device_code"`
+	UserCode                string `json:"user_code"` // "XXXX-XXXX"
+	VerificationURI         string `json:"verification_uri"`
+	VerificationURIComplete string `json:"verification_uri_complete"`
+	ExpiresIn               int    `json:"expires_in"` // seconds
+	Interval                int    `json:"interval"`   // seconds between polls
+}
+
+type DeviceTokenRequest struct {
+	DeviceCode string `json:"device_code"`
+}
+
+// DeviceTokenResponse carries a new API key, shown only this once.
+type DeviceTokenResponse struct {
+	APIKey string   `json:"api_key"`
+	KeyID  string   `json:"key_id"`
+	Org    OrgBrief `json:"org"`
+}
+
+type OrgBrief struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// Device authorization states, as the approval page sees them.
+const (
+	DeviceStatusPending  = "pending"
+	DeviceStatusApproved = "approved"
+	DeviceStatusDenied   = "denied"
+	DeviceStatusExpired  = "expired"
+	DeviceStatusConsumed = "consumed" // approved and the CLI has its key
+)
+
+// DeviceAuthorization is what the approval page shows before the user
+// approves (service token only).
+type DeviceAuthorization struct {
+	UserCode   string    `json:"user_code"`
+	ClientName string    `json:"client_name"`
+	ClientIP   string    `json:"client_ip,omitempty"` // where the CLI asked from
+	Status     string    `json:"status"`
+	CreatedAt  time.Time `json:"created_at"`
+	ExpiresAt  time.Time `json:"expires_at"`
+}
+
+type ApproveDeviceRequest struct {
+	OrgID string `json:"org_id"`
+}
+
+// DenyDeviceRequest's OrgID is optional; with it the denial is audit-logged
+// in that org.
+type DenyDeviceRequest struct {
+	OrgID string `json:"org_id,omitempty"`
+}
+
+// WhoAmI describes the credentials making the request.
+type WhoAmI struct {
+	Org    Org     `json:"org"`
+	APIKey *APIKey `json:"api_key,omitempty"` // nil for the service token
+	Actor  string  `json:"actor"`
+}

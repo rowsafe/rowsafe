@@ -1,0 +1,46 @@
+#!/bin/sh
+# rowsafe-agent-guard: systemd ExecStartPre for rowsafe-agent.
+#
+# After a self-update the agent writes an update/pending directory and
+# restarts into the new version. If that version keeps dying before it
+# confirms itself, this script (which does not depend on the agent binary)
+# switches the symlink back to the previous version.
+#
+# It always exits 0 so it can never be the reason the agent fails to start.
+
+install_dir=${ROWSAFE_INSTALL_DIR:-/opt/rowsafe}
+state_dir=${ROWSAFE_STATE_DIR:-/var/lib/rowsafe}/update
+max_boots=${ROWSAFE_UPDATE_MAX_BOOTS:-3}
+pending=$state_dir/pending
+
+[ -d "$pending" ] || exit 0
+
+boots=$(cat "$pending/boots" 2>/dev/null || echo 0)
+case $boots in ''|*[!0-9]*) boots=0 ;; esac
+boots=$((boots + 1))
+echo "$boots" > "$pending/boots" 2>/dev/null
+
+[ "$boots" -le "$max_boots" ] && exit 0
+
+previous=$(cat "$pending/previous" 2>/dev/null)
+target=$(cat "$pending/target" 2>/dev/null)
+case $previous in
+  versions/*/rowsafe-agent) ;;
+  *) echo "rowsafe-agent-guard: invalid previous version path '$previous'; not rolling back" >&2; exit 0 ;;
+esac
+if [ ! -x "$install_dir/$previous" ]; then
+  echo "rowsafe-agent-guard: $install_dir/$previous is missing; cannot roll back" >&2
+  exit 0
+fi
+
+# Atomic swap: build the new link beside the old one, then rename over it.
+# shellcheck disable=SC2015 # the { } block runs if either step fails, as intended
+ln -sfn "$previous" "$install_dir/rowsafe-agent.guard" &&
+  mv -f "$install_dir/rowsafe-agent.guard" "$install_dir/rowsafe-agent" || {
+  echo "rowsafe-agent-guard: rollback symlink swap failed" >&2
+  exit 0
+}
+printf '%s %s\n' "$target" "$boots" > "$state_dir/guard-rollback"
+rm -rf "$pending"
+echo "rowsafe-agent-guard: version $target failed to start $boots times; rolled back to $previous" >&2
+exit 0

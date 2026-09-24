@@ -1,0 +1,84 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# PostgreSQL 17 (the official, unmodified postgres:17 image) with the Rowsafe
+# agent as a sidecar: WAL archiving to your S3-compatible bucket, scheduled
+# backups, restore drills and named restore points. See docs/docker.md.
+#
+#   1. Put the agent's settings in rowsafe-agent.env next to this file
+#      (chmod 600; see below), with a one-time token from
+#      `rowsafe hosts enroll-token`.
+#   2. ROWSAFE_AGENT_VERSION=<release> docker compose up -d
+#   3. rowsafe db adopt app --host db-1   (then `rowsafe db apply app`,
+#      `docker compose restart postgres` in a maintenance window, and
+#      `rowsafe db verify app`)
+#
+# Adding Rowsafe to an existing compose file takes only the lines marked
+# "Rowsafe": two volume mounts on your postgres service, the rowsafe-agent
+# service, and three volumes. Recreating the postgres container to add the
+# mounts is a few seconds of downtime; do it in a maintenance window.
+#
+# PostgreSQL 18 and later images keep their data in a version-specific
+# directory (PGDATA=/var/lib/postgresql/18/docker) and want the volume at
+# /var/lib/postgresql. For them, mount the data volume at /var/lib/postgresql
+# in BOTH services and use the matching agent tag (-pg18). The agent finds
+# the data directory by asking PostgreSQL; it only has to be mounted at the
+# same path in both containers.
+#
+# For postgres:NN-alpine, use the agent's -alpine tag and user "70:70".
+
+name: myapp
+
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data           # PostgreSQL 18+: pgdata:/var/lib/postgresql
+      - pgsocket:/var/run/postgresql              # Rowsafe: the agent connects over this socket
+      - rowsafe-spool:/rowsafe-spool              # Rowsafe: archive_command hands WAL over here
+    # Your application reaches PostgreSQL as before (network/ports unchanged).
+
+  # Rowsafe
+  rowsafe-agent:
+    # One tag per PostgreSQL major: <version>-pg<major>[-alpine]. Pin a
+    # release; upgrade by changing it (the agent never updates itself here).
+    image: ghcr.io/rowsafe/agent:${ROWSAFE_AGENT_VERSION:?set ROWSAFE_AGENT_VERSION to a Rowsafe release}-pg17
+    # The name Rowsafe shows for this host: `rowsafe db adopt app --host db-1`.
+    hostname: db-1
+    # The postgres user of the postgres image: 999:999 (Debian images),
+    # 70:70 (-alpine images). The agent checks this at startup.
+    user: "999:999"
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    env_file: rowsafe-agent.env
+    # Restore drills start a scratch PostgreSQL inside this container.
+    shm_size: 256m
+    volumes:
+      # The same data volume at the same path as in the postgres service.
+      # Read-only: the agent reads it for backups and never writes to it.
+      - pgdata:/var/lib/postgresql/data:ro        # PostgreSQL 18+: pgdata:/var/lib/postgresql:ro
+      - pgsocket:/var/run/postgresql
+      - rowsafe-spool:/rowsafe-spool
+      # Identity, generated pgBackRest config and restore drill scratch
+      # space (needs free space of about 1.3 x your database + 1 GiB).
+      - rowsafe-state:/var/lib/rowsafe
+
+volumes:
+  pgdata:
+  pgsocket:        # Rowsafe
+  rowsafe-spool:   # Rowsafe: WAL waiting to be pushed; must be on durable disk (not tmpfs)
+  rowsafe-state:   # Rowsafe
+
+# rowsafe-agent.env (chmod 600, never commit it):
+#
+#   ROWSAFE_URL=https://api.rowsafe.sh
+#   ROWSAFE_ENROLL_TOKEN=rse_...           # first start only; delete it afterwards
+#   ROWSAFE_REPO_S3_ENDPOINT=<account-id>.eu.r2.cloudflarestorage.com
+#   ROWSAFE_REPO_S3_BUCKET=app-rowsafe
+#   ROWSAFE_REPO_S3_KEY=...
+#   ROWSAFE_REPO_S3_KEY_SECRET=...
+#   ROWSAFE_REPO_CIPHER_PASS=...           # store it in your secret manager FIRST
+#   # ROWSAFE_PG_USER=app                  # if POSTGRES_USER is not postgres

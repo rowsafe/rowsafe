@@ -1,0 +1,42 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    name: vet, test, build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: Install shellcheck
+        run: sudo apt-get update -q && sudo apt-get install -yq shellcheck
+      - run: make lint
+      - run: make test
+      - run: make build
+  reproducible:
+    name: reproducible build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build twice in different directories and compare
+        run: |
+          make dist VERSION=0.0.0 RELEASE_PUBLIC_KEY=ci-check >/dev/null
+          (cd dist/0.0.0 && sha256sum -- * | sort) > "$RUNNER_TEMP/a"
+          cp -R . "$RUNNER_TEMP/copy" && cd "$RUNNER_TEMP/copy" && rm -rf dist && go clean -cache
+          make dist VERSION=0.0.0 RELEASE_PUBLIC_KEY=ci-check >/dev/null
+          (cd dist/0.0.0 && sha256sum -- * | sort) > "$RUNNER_TEMP/b"
+          diff -u "$RUNNER_TEMP/a" "$RUNNER_TEMP/b" && echo "binaries are byte-identical"
