@@ -662,6 +662,15 @@ func (a *Agent) upgradeRehearsal(ctx context.Context, db protocol.DatabaseSpec, 
 	if out, err := a.runner.Run(ctx, filepath.Join(newBin, "initdb"), initdbArgs(newDir, ip, to)...); err != nil {
 		return finish(fmt.Errorf("creating the PostgreSQL %d cluster failed: %w: %s", to, err, tail(out, 1000)))
 	}
+	// Like pg_upgradecluster, give the new cluster production's preload
+	// libraries (an extension's objects may need them), but no background
+	// workers and no listener.
+	if err := appendFile(filepath.Join(newDir, "postgresql.conf"), "\n# Rowsafe upgrade rehearsal\n"+renderSettings([]drillSetting{
+		{"shared_preload_libraries", prod.SharedPreloadLibraries}, {"listen_addresses", ""}, {"max_worker_processes", "0"},
+		{"max_logical_replication_workers", "0"}, {"archive_mode", "off"}, {"cron.launch_active_jobs", "off"},
+		{"timescaledb.max_background_workers", "0"}})); err != nil {
+		return finish(err)
+	}
 	jobs := strconv.Itoa(min(max(numCPU(), 1), 8))
 	upArgs := []string{"-C", dir, filepath.Join(newBin, "pg_upgrade"), "-b", oldBin, "-B", newBin, "-d", dataDir, "-D", newDir,
 		"-p", strconv.Itoa(port), "-P", strconv.Itoa(port), "-U", ip.Super, "--socketdir", socketDir, "-j", jobs, "--" + method}
@@ -695,7 +704,7 @@ func (a *Agent) upgradeRehearsal(ctx context.Context, db protocol.DatabaseSpec, 
 	if err := a.writeScratchConf(dataDir, nspec); err != nil {
 		return finish(err)
 	}
-	nconn, err := a.startScratch(ctx, tl, nspec, scratch, newCtl, dir, 10*time.Minute)
+	nconn, nspec, err := a.startScratchFallback(ctx, tl, nspec, scratch, newCtl, dir, 10*time.Minute, prod.SharedPreloadLibraries)
 	if err != nil {
 		return finish(fmt.Errorf("the upgraded copy didn't start: %w", err))
 	}

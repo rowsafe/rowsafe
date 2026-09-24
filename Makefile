@@ -5,6 +5,7 @@
 #   make lint                  go vet, gofmt, shellcheck, installer consistency
 #   make test-installer        scripts/install.sh in Debian/Ubuntu containers (Docker)
 #   make test-rewind           a real Rewind (copy, rows, in place, undo) on a systemd Debian container (Docker)
+#   make test-upgrade          real PostgreSQL updates and upgrades (16 -> 18, undo) on a systemd Debian container (Docker)
 #   make dist VERSION=1.2.3 RELEASE_PUBLIC_KEY=...    reproducible release binaries in dist/1.2.3/
 #   make release VERSION=1.2.3 RELEASE_PUBLIC_KEY=... (needs ROWSAFE_RELEASE_PRIVATE_KEY)
 #                              dist + Ed25519-signed manifest + rendered install.sh + SHA256SUMS
@@ -27,7 +28,7 @@ AGENT_LDFLAGS := -s -w -buildid= -X $(PKG)/internal/agent.Version=$(VERSION) -X 
 MAIN_LDFLAGS := -s -w -buildid= -X main.version=$(VERSION)
 GOBUILD := CGO_ENABLED=0 GOFLAGS=-mod=readonly $(GO) build -trimpath -buildvcs=false
 
-.PHONY: all build test lint check-installer test-installer test-rewind dist release check-release-env clean
+.PHONY: all build test lint check-installer test-installer test-rewind test-upgrade dist release check-release-env clean
 
 all: lint test build
 
@@ -43,7 +44,7 @@ lint: check-installer
 	$(GO) vet ./...
 	@test -z "$$(gofmt -l .)" || { echo "gofmt needed:"; gofmt -l .; exit 1; }
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck -S warning -s sh scripts/install.sh scripts/test-install.sh scripts/test-rewind.sh scripts/rowsafe-agent-guard scripts/rowsafe-pg-restart; \
+		shellcheck -S warning -s sh scripts/install.sh scripts/test-install.sh scripts/test-rewind.sh scripts/test-upgrade.sh scripts/rowsafe-agent-guard scripts/rowsafe-pg-restart; \
 	else echo "shellcheck not installed; skipping"; fi
 
 # install.sh is fetched on its own with curl, so it embeds the guard, the
@@ -62,6 +63,10 @@ check-installer:
 		diff -u deploy/systemd/rowsafe-pg-restart.service - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pg-restart.service"; exit 1; }
 	@sed -n "/<<'ROWSAFE_RESTART_PATH_EOF'; then\$$/,/^ROWSAFE_RESTART_PATH_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
 		diff -u deploy/systemd/rowsafe-pg-restart.path - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pg-restart.path"; exit 1; }
+	@sed -n "/<<'ROWSAFE_UPDATE_SERVICE_EOF'; then\$$/,/^ROWSAFE_UPDATE_SERVICE_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
+		diff -u deploy/systemd/rowsafe-pg-update.service - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pg-update.service"; exit 1; }
+	@sed -n "/<<'ROWSAFE_UPDATE_PATH_EOF'; then\$$/,/^ROWSAFE_UPDATE_PATH_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
+		diff -u deploy/systemd/rowsafe-pg-update.path - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pg-update.path"; exit 1; }
 	@sh -n scripts/install.sh
 
 test-installer:
@@ -69,6 +74,9 @@ test-installer:
 
 test-rewind:
 	sh scripts/test-rewind.sh
+
+test-upgrade:
+	sh scripts/test-upgrade.sh
 
 # The agent ships for linux/amd64 and linux/arm64 (the names the release
 # manifest expects); the CLI and the release tool for Linux and macOS.
