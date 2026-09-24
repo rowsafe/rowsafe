@@ -67,6 +67,11 @@ type Config struct {
 	// RewindDir holds restored copies, one directory per copy
 	// (ROWSAFE_REWIND_DIR).
 	RewindDir string
+
+	// UpdateAllowFile lists what root allowed Rowsafe to install or do
+	// (postgresql, security, reboot; ROWSAFE_UPDATE_ALLOW_FILE). Written by
+	// the installer; the agent only reads it (updates.go).
+	UpdateAllowFile string
 }
 
 // Agent modes (ROWSAFE_MODE).
@@ -103,6 +108,7 @@ func ConfigFromEnv() (Config, error) {
 		RestartAllowFile: env("ROWSAFE_RESTART_ALLOW_FILE", "/etc/rowsafe/restart-allowed"),
 		RestartResultDir: env("ROWSAFE_RESTART_RESULT_DIR", "/run/rowsafe-pg-restart"),
 		RestartHelper:    env("ROWSAFE_RESTART_HELPER", "/usr/local/lib/rowsafe/rowsafe-pg-restart"),
+		UpdateAllowFile:  env("ROWSAFE_UPDATE_ALLOW_FILE", "/etc/rowsafe/updates-allowed"),
 		Repo: pgbackrest.Repo{
 			Endpoint:   env("ROWSAFE_REPO_S3_ENDPOINT", ""),
 			Bucket:     env("ROWSAFE_REPO_S3_BUCKET", ""),
@@ -157,7 +163,7 @@ func ConfigFromEnv() (Config, error) {
 		!strings.HasPrefix(c.ControlURL, "http://localhost") {
 		return c, fmt.Errorf("ROWSAFE_URL must use https (plain http is only allowed for localhost)")
 	}
-	for _, p := range []string{c.StateDir, c.ConfigDir, c.LogDir, c.DrillDir, c.InstallDir, c.RestartDir, c.RestartAllowFile, c.RestartResultDir, c.RestartHelper, c.RewindDir} {
+	for _, p := range []string{c.StateDir, c.ConfigDir, c.LogDir, c.DrillDir, c.InstallDir, c.RestartDir, c.RestartAllowFile, c.RestartResultDir, c.RestartHelper, c.RewindDir, c.UpdateAllowFile} {
 		if !filepath.IsAbs(p) {
 			return c, fmt.Errorf("directory %q must be absolute", p)
 		}

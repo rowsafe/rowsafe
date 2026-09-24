@@ -62,10 +62,24 @@ type Agent struct {
 	inPlaceMu sync.Mutex
 	// rewindOps runs the steps of a rewind in place (tests replace it).
 	rewindOps inPlaceOps
+
+	// PostgreSQL updates and upgrades (software.go, updates.go, upgrade.go):
+	// the newest software report, a nudge to refresh it, the upgrade
+	// records, and seams for tests.
+	swMu             sync.Mutex
+	sw               *protocol.SoftwareReport
+	swKick           chan struct{}
+	upgrades         *upgradeStore
+	upgradeOnce      sync.Once
+	updateHelperFn   updateHelperFunc
+	pingDB           func(context.Context, protocol.DatabaseSpec) error
+	checkArchivingFn func(context.Context, protocol.DatabaseSpec) error
+	finishBackupsFn  func(context.Context, protocol.DatabaseSpec) error
+	skipAnalyze      bool
 }
 
 func New(cfg Config, logger *slog.Logger) *Agent {
-	a := &Agent{cfg: cfg, log: logger, runner: pgbackrest.ExecRunner{}, pgArchiveMode: pginspect.ArchiveMode}
+	a := &Agent{cfg: cfg, log: logger, runner: pgbackrest.ExecRunner{}, pgArchiveMode: pginspect.ArchiveMode, swKick: make(chan struct{}, 1)}
 	u, reason := NewUpdater(cfg, logger)
 	if u == nil {
 		logger.Warn("agent self-update is off", "reason", reason)
@@ -159,6 +173,8 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.heartbeatLoop(ctx)
 	go a.fastLane(ctx)
 	go a.rewindHousekeeping(ctx)
+	go a.softwareLoop(ctx)
+	go a.upgradeHousekeeping(ctx)
 	// Built-in monitoring (package collect): metrics every minute, beside
 	// the task loop and never blocking it.
 	go collect.Run(ctx, collect.Options{Log: a.log, PGUser: a.cfg.PGUser,
@@ -292,6 +308,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 			Hostname: hostname, AgentVersion: Version, Platform: release.Platform(),
 			Archivers: a.archiverStats(ctx), Update: a.updater.Report(), Mode: a.cfg.Mode,
 			RestartPorts: a.restartPorts(), RestartActions: a.helperActions(), Rewinds: a.rewindState().states(),
+			Software: a.softwareForHeartbeat(),
 		}
 		resp, err := a.client.heartbeat(ctx, req)
 		if isUnauthorized(err) {
@@ -481,6 +498,10 @@ func (a *Agent) reportInterrupted(ctx context.Context) {
 		cleanup = "the interrupted rewind was rolled back when the agent started again: PostgreSQL runs on the data it had before (see the agent's log)"
 	case protocol.TaskRewindCopy:
 		cleanup = "the half-restored copy has been removed"
+	case protocol.TaskUpgrade, protocol.TaskUpgradeUndo:
+		cleanup = "the root helper finishes (or rolls back) on its own and the agent follows it through; the database's Upgrade page shows where it stands"
+	case protocol.TaskUpgradeRehearsal:
+		cleanup = "the rehearsal's scratch copy has been removed; production was not touched"
 	}
 	req := protocol.CompleteRequest{
 		Status: protocol.StatusFailed,
@@ -489,6 +510,10 @@ func (a *Agent) reportInterrupted(ctx context.Context) {
 	}
 	if t.Report != nil {
 		req = *t.Report
+	} else if t.Type == protocol.TaskReboot {
+		if r, ok := a.afterReboot(ctx, t.ID); ok {
+			req = r
+		}
 	}
 	log := a.log.With("task_id", t.ID, "type", t.Type)
 	log.Warn("reporting task interrupted by an agent restart", "status", req.Status)

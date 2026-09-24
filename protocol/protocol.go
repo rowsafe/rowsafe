@@ -175,6 +175,9 @@ type HeartbeatRequest struct {
 	RestartActions []string `json:"restart_actions,omitempty"`
 	// Rewinds are the live copies and kept data directories on this host.
 	Rewinds []RewindState `json:"rewinds,omitempty"`
+	// Software is PostgreSQL's versions, pending updates and upgrades on
+	// this host (upgrade.go); sent about every hour.
+	Software *SoftwareReport `json:"software,omitempty"`
 }
 
 // HeartbeatResponse tells the agent which databases to watch.
@@ -497,6 +500,10 @@ func TaskTimeout(taskType string) time.Duration {
 		return 2 * time.Hour
 	case TaskRewindUndo: // stop, two renames, start
 		return time.Hour
+	case TaskUpgradeCheck, TaskUpgradeCleanup, TaskPGUpdate, TaskReboot:
+		return 30 * time.Minute
+	case TaskSecurityUpdates:
+		return 2 * time.Hour
 	default: // backup, drill, rewind copy and in place: a large restore takes hours
 		return 12 * time.Hour
 	}
