@@ -28,6 +28,9 @@ Usage:
   rowsafe-agent setup discover|plan|apply|wait|status ...
                                             turn on backups for this server's PostgreSQL
                                             (used by the installer; see setup --help)
+  rowsafe-agent files discover|access|add ...
+                                            the folders that go with a database
+                                            (used by the installer; see files --help)
   rowsafe-agent selftest                    check this binary can run here (used before self-update)
   rowsafe-agent health                      container health check (docker-sidecar mode)
   rowsafe-agent version
@@ -53,6 +56,8 @@ func main() {
 		err = inspect(ctx, os.Args[2:])
 	case "setup":
 		os.Exit(setup(ctx, os.Args[2:]))
+	case "files":
+		os.Exit(filesCmd(ctx, os.Args[2:])) // files.go
 	case "selftest":
 		os.Exit(selftest(ctx))
 	case "health":

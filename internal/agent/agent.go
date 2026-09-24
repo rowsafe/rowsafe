@@ -62,6 +62,10 @@ type Agent struct {
 	inPlaceMu sync.Mutex
 	// rewindOps runs the steps of a rewind in place (tests replace it).
 	rewindOps inPlaceOps
+
+	// files backs up the folders that go with databases (files.go).
+	files     *filesRuntime
+	filesOnce sync.Once
 }
 
 func New(cfg Config, logger *slog.Logger) *Agent {
@@ -159,6 +163,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.heartbeatLoop(ctx)
 	go a.fastLane(ctx)
 	go a.rewindHousekeeping(ctx)
+	go a.filesLoop(ctx) // files.go: folder snapshots and the files lane
 	// Built-in monitoring (package collect): metrics every minute, beside
 	// the task loop and never blocking it.
 	go collect.Run(ctx, collect.Options{Log: a.log, PGUser: a.cfg.PGUser,
