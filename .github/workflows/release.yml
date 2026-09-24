@@ -70,6 +70,7 @@ jobs:
           echo "VERSION=$v" >>"$GITHUB_ENV"
 
       - name: Refuse to overwrite a published release
+        if: env.R2_ENDPOINT != ''
         run: |
           if aws s3api head-object --endpoint-url "$R2_ENDPOINT" --bucket "$BUCKET" \
               --key "agent/$VERSION/manifest.json" >/dev/null 2>&1; then
@@ -114,14 +115,6 @@ jobs:
             dist/${{ env.VERSION }}/rowsafe-darwin-*
           sbom-path: dist/${{ env.VERSION }}/rowsafe-${{ env.VERSION }}.spdx.json
 
-      - name: Upload to R2
-        run: |
-          aws s3 cp "dist/$VERSION/" "s3://$BUCKET/agent/$VERSION/" --recursive \
-            --endpoint-url "$R2_ENDPOINT" --only-show-errors
-
-      - name: Verify the published release with its own installer
-        run: ROWSAFE_VERSION="$VERSION" sh "dist/$VERSION/install.sh" --download-only "$RUNNER_TEMP/verify"
-
       - name: GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -129,6 +122,19 @@ jobs:
           gh release create "$GITHUB_REF_NAME" dist/"$VERSION"/* \
             --verify-tag --title "Rowsafe $VERSION" --generate-notes \
             --notes "Verify this release: https://github.com/${GITHUB_REPOSITORY}/blob/main/docs/verifying-releases.md"
+
+      # R2 credentials are optional: without them the signed, attested files
+      # are published on the GitHub release only, and copied to
+      # releases.rowsafe.sh by a maintainer.
+      - name: Upload to R2
+        if: env.R2_ENDPOINT != ''
+        run: |
+          aws s3 cp "dist/$VERSION/" "s3://$BUCKET/agent/$VERSION/" --recursive \
+            --endpoint-url "$R2_ENDPOINT" --only-show-errors
+
+      - name: Verify the published release with its own installer
+        if: env.R2_ENDPOINT != ''
+        run: ROWSAFE_VERSION="$VERSION" sh "dist/$VERSION/install.sh" --download-only "$RUNNER_TEMP/verify"
 
       - name: Next steps
         run: |

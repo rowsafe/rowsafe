@@ -24,6 +24,11 @@ COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY cmd ./cmd
 COPY internal ./internal
+COPY protocol ./protocol
+COPY release ./release
+COPY collect ./collect
+COPY client ./client
+COPY mcp ./mcp
 ARG VERSION=dev
 ARG TARGETOS=linux
 ARG TARGETARCH

@@ -40,3 +40,12 @@ jobs:
           make dist VERSION=0.0.0 RELEASE_PUBLIC_KEY=ci-check >/dev/null
           (cd dist/0.0.0 && sha256sum -- * | sort) > "$RUNNER_TEMP/b"
           diff -u "$RUNNER_TEMP/a" "$RUNNER_TEMP/b" && echo "binaries are byte-identical"
+  image:
+    name: agent image builds
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Build the Docker agent image (PostgreSQL 17, amd64)
+        run: docker build -f deploy/docker/agent.Dockerfile --build-arg PG_MAJOR=17 --build-arg VERSION=0.0.0 -t rowsafe-agent-ci .
