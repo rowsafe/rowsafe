@@ -952,7 +952,7 @@ func (a *Agent) upgrade(ctx context.Context, db protocol.DatabaseSpec, p protoco
 	a.refreshSoftware()
 	res.DurationMs = time.Since(start).Milliseconds()
 	res.Summary = fmt.Sprintf("Upgraded PostgreSQL %s to %s in %s; it didn't accept connections for %s.", f.Version, res.ToVersion,
-		humanDuration(time.Duration(res.DurationMs)*time.Millisecond), humanDuration(time.Duration(res.DowntimeMs)*time.Millisecond))
+		humanDuration(time.Duration(res.DurationMs)*time.Millisecond), downtimeText(res.DowntimeMs))
 	if p.Mode == protocol.UpgradeSafe {
 		res.Summary += fmt.Sprintf(" PostgreSQL %d is kept, stopped, until %s: Undo switches back to it in seconds.", f.Major, until.Format("2006-01-02"))
 	} else {
@@ -1109,7 +1109,7 @@ func (a *Agent) afterUndo(ctx context.Context, r upgradeRecord, res *protocol.Up
 	res.KeptUntil = &until
 	res.DurationMs = time.Since(start).Milliseconds()
 	res.Summary = fmt.Sprintf("Back on PostgreSQL %s after %s (it didn't accept connections for %s).", res.Version,
-		humanDuration(time.Duration(res.DurationMs)*time.Millisecond), humanDuration(time.Duration(res.DowntimeMs)*time.Millisecond))
+		humanDuration(time.Duration(res.DurationMs)*time.Millisecond), downtimeText(res.DowntimeMs))
 	if res.RestoredTo != nil {
 		res.Summary += fmt.Sprintf(" It was restored from the backup to %s: what was written after that is not in it.", res.RestoredTo.UTC().Format("15:04:05 UTC on 2006-01-02"))
 	} else {

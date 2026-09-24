@@ -290,7 +290,7 @@ func (a *Agent) pgUpdate(ctx context.Context, db protocol.DatabaseSpec, p protoc
 		res.Summary = fmt.Sprintf("PostgreSQL %s is already the newest %s release available to this server.", before, majorOf(before))
 	case res.Restarted:
 		res.Summary = fmt.Sprintf("Updated PostgreSQL from %s to %s in %s; it didn't accept connections for %s.", before, res.ToVersion,
-			humanDuration(time.Duration(res.DurationMs)*time.Millisecond), humanDuration(time.Duration(res.DowntimeMs)*time.Millisecond))
+			humanDuration(time.Duration(res.DurationMs)*time.Millisecond), downtimeText(res.DowntimeMs))
 	default:
 		res.Summary = fmt.Sprintf("Installed PostgreSQL %s; it runs %s until its next restart.", minorOf(res.PackageVersion), res.ToVersion)
 	}
@@ -304,6 +304,14 @@ func (a *Agent) pgUpdate(ctx context.Context, db protocol.DatabaseSpec, p protoc
 func majorOf(version string) string {
 	major, _, _ := strings.Cut(version, ".")
 	return major
+}
+
+// downtimeText: "less than a second" or humanDuration.
+func downtimeText(ms int64) string {
+	if ms < 1000 {
+		return "less than a second"
+	}
+	return humanDuration(time.Duration(ms) * time.Millisecond)
 }
 
 // humanDuration: "12 s", "2 min 5 s", "1 h 3 min".
