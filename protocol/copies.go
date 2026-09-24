@@ -349,7 +349,11 @@ type Preview struct {
 	// Status is the task's: queued, running, succeeded, failed, lost or
 	// cancelled. A migration that failed on the copy is "succeeded" with
 	// Verdict failed: the preview itself worked.
-	Status  string `json:"status"`
+	Status string `json:"status"`
+	// Step is what a running preview does now: PreviewStepRestoring (a
+	// fresh copy is being restored) or PreviewStepRunning (the migration
+	// runs on it).
+	Step    string `json:"step,omitempty"`
 	Verdict string `json:"verdict,omitempty"`
 	Summary string `json:"summary,omitempty"`
 	// Label names the SQL (e.g. a migration file name).
@@ -365,6 +369,12 @@ type Preview struct {
 	Error      string         `json:"error,omitempty"` // why the preview couldn't run
 	Result     *PreviewResult `json:"result,omitempty"`
 }
+
+// Preview steps (Preview.Step).
+const (
+	PreviewStepRestoring = "restoring"
+	PreviewStepRunning   = "running"
+)
 
 // CreatePreviewRequest previews SQL on a copy.
 type CreatePreviewRequest struct {

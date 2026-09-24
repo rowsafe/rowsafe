@@ -116,6 +116,23 @@ Guard: the safety net for AI agents
                                              command, create a restore point (https://rowsafe.sh/docs/guides/ai-agents)
   rowsafe guard --check COMMAND              tell whether COMMAND looks destructive (exit 0 yes, 1 no)
   (rowsafe status NAME, above, exits 3 when a database is not protected: use it to gate risky changes)
+  rowsafe preview [NAME] FILE [--db DB] [--format text|json|markdown] [--fail-on dangerous|careful|never] [--no-wait]
+                                             run a migration (FILE, or - for stdin) on a fresh copy of the database
+                                             and report locks, rewrites, rows and time with a verdict: Safe, Careful
+                                             or Dangerous. Never touches production. Exit 0 below --fail-on (default
+                                             dangerous), 3 at or above it, 2 if the migration fails on the copy
+  rowsafe previews [NAME] [ID] [--json]      recent previews, or one in full
+  rowsafe copies [NAME] [--json]             safe copies: masked copies developers and AI agents can connect to
+  rowsafe copies create [NAME] [--allow IP] [--listen private|public|IP|*] [--hours 24] [--db DB] [--json]
+                                             make one: restore, mask, open it on the server for the allowed
+                                             addresses (default: this computer's). Prints the connection string once
+  rowsafe copies extend [NAME] ID [--hours 24]
+                                             keep a safe copy longer
+  rowsafe copies delete [NAME] ID [--yes]    delete a safe copy
+  rowsafe masking [NAME] [--all] [--json]    which columns safe copies mask, and how
+  rowsafe masking set [NAME] [DB:]TABLE.COLUMN STRATEGY
+                                             change one column's masking (keep to leave it real)
+  rowsafe masking refresh [NAME]             read the tables again (names and types only)
 
 Admin
   rowsafe tasks [NAME] [--status S] [--type T] [--limit N]
@@ -290,6 +307,14 @@ func dispatch(ctx context.Context, args []string) error {
 	// Guard
 	case "mcp":
 		return mcpServe(ctx, c, rest)
+	case "preview": // copies.go
+		return previewCmd(ctx, c, rest)
+	case "previews":
+		return previewsCmd(ctx, c, rest)
+	case "copies":
+		return copiesCmd(ctx, c, rest)
+	case "masking":
+		return maskingCmd(ctx, c, rest)
 	// Admin
 	case "tasks":
 		return tasksList(ctx, c, rest)
