@@ -28,6 +28,8 @@ Usage:
   rowsafe-agent setup discover|plan|apply|wait|status ...
                                             turn on backups for this server's PostgreSQL
                                             (used by the installer; see setup --help)
+  rowsafe-agent key                         this server's key fingerprint: compare it with the one the Rowsafe
+                                            dashboard shows before setting up a standby here
   rowsafe-agent selftest                    check this binary can run here (used before self-update)
   rowsafe-agent health                      container health check (docker-sidecar mode)
   rowsafe-agent version
@@ -53,6 +55,8 @@ func main() {
 		err = inspect(ctx, os.Args[2:])
 	case "setup":
 		os.Exit(setup(ctx, os.Args[2:]))
+	case "key":
+		err = keyCmd()
 	case "selftest":
 		os.Exit(selftest(ctx))
 	case "health":
@@ -168,4 +172,20 @@ func inspect(ctx context.Context, args []string) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(res)
+}
+
+// keyCmd prints the agent's key fingerprint (creating the key if needed):
+// what a person compares with the dashboard before a primary seals its
+// bucket settings to this server.
+func keyCmd() error {
+	cfg, err := agent.ConfigFromEnv()
+	if err != nil {
+		return err
+	}
+	fp, pub, err := agent.KeyFingerprint(cfg)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Fingerprint: %s\nPublic key:  %s\n", fp, pub)
+	return nil
 }

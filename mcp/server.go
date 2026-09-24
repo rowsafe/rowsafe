@@ -41,7 +41,7 @@ type Options struct {
 
 const maxWaitLimit = 60 * time.Second
 
-const instructions = `Rowsafe is the safety net for PostgreSQL databases: continuous WAL archiving (point-in-time recovery), scheduled backups (Rewind) and a weekly restore test (Proof, task type drill), with health monitoring (Pulse), run by an agent on each database host. It never restarts PostgreSQL on its own (only when a person asks, in the dashboard or with "rowsafe restart"; no MCP tool can) or runs arbitrary SQL, and never sees backup contents. Rewinding (restoring a copy, bringing rows back, rewinding a whole database) is for people only, in the dashboard or with "rowsafe rewind": AI assistants never restore over production, and no MCP tool can.
+const instructions = `Rowsafe is the safety net for PostgreSQL databases: continuous WAL archiving (point-in-time recovery), scheduled backups (Rewind) and a weekly restore test (Proof, task type drill), with health monitoring (Pulse), run by an agent on each database host. It never restarts PostgreSQL on its own (only when a person asks, in the dashboard or with "rowsafe restart"; no MCP tool can) or runs arbitrary SQL, and never sees backup contents. Rewinding (restoring a copy, bringing rows back, rewinding a whole database) is for people only, in the dashboard or with "rowsafe rewind": AI assistants never restore over production, and no MCP tool can. The same goes for standby servers: creating, promoting (failing over to), rebuilding or removing a standby, and automatic failover, are for people only (the dashboard or "rowsafe standby"); standby_status only reads.
 
 Before any destructive or risky database operation (migrations, schema changes, DROP/TRUNCATE, DELETE/UPDATE without a narrow WHERE, bulk data changes, restoring a dump):
 1. safety_check on the database. If it is not protected, tell the user why and get their OK before continuing.
@@ -69,6 +69,7 @@ func NewServer(c *client.Client, opts Options) *sdk.Server {
 	t.addSafetyReadTools(s)
 	t.addMonitoringTools(s)
 	t.addRewindReadTools(s)
+	t.addStandbyReadTools(s)
 	if opts.AllowWrites {
 		t.addWriteTools(s)
 	}

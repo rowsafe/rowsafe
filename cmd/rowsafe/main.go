@@ -80,6 +80,22 @@ Rewind: continuous backups, restore to any second
   rowsafe rewind cleanup [NAME] [--yes]      delete the data kept aside by a rewind (frees disk)
   Advanced (restore by hand or to another server): https://rowsafe.sh/docs/guides/restore
 
+Standby: a second server that stays in sync, is readable, and takes over
+  rowsafe standby [NAME] [--json]            the standby, how far behind it is, fenced old primaries, automatic
+                                             failover, connection strings that follow the primary
+  rowsafe standby add [NAME] --host SERVER [--port 5432] [--fingerprint F] [--no-stream] [--no-wait]
+                                             restore the latest backup on an empty cluster of SERVER and follow
+                                             the primary (streaming when it can reach it, else the bucket)
+  rowsafe standby promote [NAME] [--primary-down] [--force] [--yes]
+                                             make the standby the primary: the old one is stopped for good first
+                                             (asks you to type the name)
+  rowsafe standby rebuild [NAME] [--host SERVER] [--yes]
+                                             turn the fenced old primary into the new standby
+  rowsafe standby unfence [NAME] [--yes]     start the fenced primary again when the standby wasn't promoted
+  rowsafe standby failover [NAME] --on|--off [--after 3m] [--max-data-loss 1m] [--yes]
+                                             automatic failover (off by default)
+  rowsafe standby remove [NAME] [--yes]      remove the standby; its cluster gets its own data back
+
 Proof: the weekly restore test
   rowsafe proof [NAME] [--no-wait]           restore the latest backup to a scratch copy and check it, now
   rowsafe proofs [NAME]                      restore test results
@@ -263,6 +279,8 @@ func dispatch(ctx context.Context, args []string) error {
 		return removeCmd(ctx, c, rest)
 	case "rewind":
 		return rewindCmd(ctx, c, rest)
+	case "standby":
+		return standbyCmd(ctx, c, rest)
 	// Proof
 	case "proof":
 		return proofCmd(ctx, c, rest)
