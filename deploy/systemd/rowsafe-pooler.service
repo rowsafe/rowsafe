@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-pooler.service: installs, configures, reloads or turns off
+# PgBouncer in front of a PostgreSQL cluster that root listed in
+# /etc/rowsafe/pooler-allowed, when the Rowsafe agent asks because a person
+# turned pooling on, changed it or turned it off (see "PgBouncer" in
+# /usr/local/lib/rowsafe/rowsafe-pg-restart). Started by rowsafe-pooler.path;
+# installed by https://rowsafe.sh/install only when root allowed it.
+
+[Unit]
+Description=Rowsafe: manage PgBouncer on request
+Documentation=https://rowsafe.sh/docs/guides/connection-pooling
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/rowsafe/rowsafe-pg-restart
+TimeoutStartSec=1500
+Environment=ROWSAFE_HELPER_MODE=pooler
+# The agent user, whose privileges read and remove the request, and the
+# directory it writes requests to.
+Environment=ROWSAFE_AGENT_USER=postgres
+Environment=ROWSAFE_RESTART_DIR=/var/lib/rowsafe/pooler
+# The answer: root's own directory, which the agent can read.
+RuntimeDirectory=rowsafe-pooler
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+# PgBouncer's original configuration and whether Rowsafe installed the
+# package, out of the agent's reach.
+StateDirectory=rowsafe-pooler
+StateDirectoryMode=0700
+UMask=0022
+
+# Hardening. Installing the pgbouncer package needs the network and write
+# access to the system (apt, dpkg), so this unit is less confined than
+# rowsafe-pg-restart.service; the helper still only installs or removes
+# that one package and writes PgBouncer's files from its own template.
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_FSETID CAP_KILL
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service

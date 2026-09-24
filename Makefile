@@ -62,6 +62,10 @@ check-installer:
 		diff -u deploy/systemd/rowsafe-pg-restart.service - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pg-restart.service"; exit 1; }
 	@sed -n "/<<'ROWSAFE_RESTART_PATH_EOF'; then\$$/,/^ROWSAFE_RESTART_PATH_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
 		diff -u deploy/systemd/rowsafe-pg-restart.path - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pg-restart.path"; exit 1; }
+	@sed -n "/<<'ROWSAFE_POOLER_SERVICE_EOF'; then\$$/,/^ROWSAFE_POOLER_SERVICE_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
+		diff -u deploy/systemd/rowsafe-pooler.service - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pooler.service"; exit 1; }
+	@sed -n "/<<'ROWSAFE_POOLER_PATH_EOF'; then\$$/,/^ROWSAFE_POOLER_PATH_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
+		diff -u deploy/systemd/rowsafe-pooler.path - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pooler.path"; exit 1; }
 	@sh -n scripts/install.sh
 
 test-installer:
