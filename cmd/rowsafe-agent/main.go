@@ -25,6 +25,9 @@ Usage:
   rowsafe-agent run                         enroll if needed, then execute tasks
   rowsafe-agent inspect [--port 5432] [--socket-dir /var/run/postgresql]
                                             print what the agent sees (read-only)
+  rowsafe-agent setup discover|plan|apply|wait|status ...
+                                            turn on backups for this server's PostgreSQL
+                                            (used by the installer; see setup --help)
   rowsafe-agent selftest                    check this binary can run here (used before self-update)
   rowsafe-agent health                      container health check (docker-sidecar mode)
   rowsafe-agent version
@@ -48,6 +51,8 @@ func main() {
 		err = run(ctx)
 	case "inspect":
 		err = inspect(ctx, os.Args[2:])
+	case "setup":
+		os.Exit(setup(ctx, os.Args[2:]))
 	case "selftest":
 		os.Exit(selftest(ctx))
 	case "health":

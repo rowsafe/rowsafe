@@ -80,6 +80,19 @@ type ConfigInput struct {
 	User          string
 	RetentionFull int
 	LogPath       string // "" turns pgBackRest's log files off
+	// ProcessMax is how many processes pgBackRest uses to compress and
+	// upload (see ProcessMax); less than 1 means 1.
+	ProcessMax int
+}
+
+// ProcessMax is pgBackRest's process-max for a host with cpus CPUs: 1 on
+// small hosts (up to 4 CPUs), 2 otherwise, so a backup never takes more than
+// a slice of the CPU PostgreSQL needs.
+func ProcessMax(cpus int) int {
+	if cpus <= 4 {
+		return 1
+	}
+	return 2
 }
 
 // RenderConfig produces a pgBackRest config file for one stanza.
@@ -125,7 +138,7 @@ func RenderConfig(repo Repo, in ConfigInput) string {
 	kv("repo1-block", "y")
 	kv("compress-type", "zst")
 	kv("start-fast", "y")
-	kv("process-max", 2)
+	kv("process-max", max(in.ProcessMax, 1))
 	kv("archive-timeout", 120)
 	kv("log-level-console", "info")
 	if in.LogPath == "" {

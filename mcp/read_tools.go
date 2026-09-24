@@ -3,7 +3,6 @@ package mcp
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
 
@@ -113,14 +112,14 @@ func (t *tools) addReadTools(s *sdk.Server) {
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "list_databases",
-		Description: "List every PostgreSQL cluster Rowsafe protects or is adopting, with a health summary for each: status, PostgreSQL version and size, the last backup and last full backup (with age), the last restore drill and whether it passed, WAL archiving (last archived segment, lag, failure counts, whether archiving is failing), and one-line problems. " +
+		Description: "List every PostgreSQL cluster Rowsafe protects or is adopting, with a health summary for each: status, PostgreSQL version and size, the last backup and last full backup (with age), the last restore test (Proof, drill) and whether it passed, WAL archiving (last archived segment, lag, failure counts, whether archiving is failing), and one-line problems. " +
 			"For the next action on each problem, use fleet_health; for one database in depth, get_database.",
 		Annotations: readOnly("List databases"),
 	}, t.listDatabases)
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "get_database",
-		Description: "Show one database in depth: status, host, socket and port, retention and cron schedules (UTC), PostgreSQL settings relevant to archiving (wal_level, archive_mode, pending restart), WAL archiving stats, recent backups, recent drills, recent tasks, and its problems with next actions.",
+		Description: "Show one database in depth: status, host, socket and port, retention and cron schedules (UTC), PostgreSQL settings relevant to archiving (wal_level, archive_mode, pending restart), WAL archiving stats, recent backups, recent restore tests (drills), recent tasks, and its problems with next actions.",
 		Annotations: readOnly("Show database"),
 	}, t.getDatabase)
 
@@ -135,8 +134,8 @@ func (t *tools) addReadTools(s *sdk.Server) {
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "list_drills",
-		Description: "List a database's restore drills, newest first. A drill restores the latest backup plus all archived WAL into a scratch cluster on the host and compares databases and table counts with production. Shows pass/fail, the backup used, the point in time recovered to, duration, and any failures or warnings.",
-		Annotations: readOnly("List drills"),
+		Description: "List a database's restore tests (Proof; task type drill), newest first. A restore test restores the latest backup plus all archived WAL into a scratch cluster on the host and compares databases and table counts with production. Shows pass/fail, the backup used, the point in time recovered to, duration, and any failures or warnings.",
+		Annotations: readOnly("List restore tests"),
 		InputSchema: inputSchema[listInput](func(p map[string]*jsonschema.Schema) {
 			p["limit"].Minimum, p["limit"].Maximum, p["limit"].Default = ptr(1.0), ptr(50.0), []byte("10")
 		}),
@@ -144,7 +143,7 @@ func (t *tools) addReadTools(s *sdk.Server) {
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "list_tasks",
-		Description: "List tasks (inspect, adopt, check, backup, drill, restore_point), newest first, for the whole organization or one database, optionally filtered by status and type. Shows who queued them (scheduler or a person), status, timing and the first line of any error. Use get_task for a task's result and log.",
+		Description: "List tasks (inspect, adopt, check, backup, drill (the restore test), restore_point, restart), newest first, for the whole organization or one database, optionally filtered by status and type. Shows who queued them (scheduler or a person), status, timing and the first line of any error. Use get_task for a task's result and log.",
 		Annotations: readOnly("List tasks"),
 		InputSchema: inputSchema[listTasksInput](func(p map[string]*jsonschema.Schema) {
 			p["status"].Enum = []any{protocol.StatusQueued, protocol.StatusRunning, protocol.StatusSucceeded, protocol.StatusFailed, protocol.StatusLost, protocol.StatusCancelled}
@@ -155,8 +154,8 @@ func (t *tools) addReadTools(s *sdk.Server) {
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "get_task",
-		Description: "Show one task: status, timing, error, its typed result (an adopt plan or what was applied, a backup, a drill report, or a WAL check), the end of its log, and what to do next. " +
-			"Poll this after a write tool returns a task that is still queued or running (every 10-30 seconds; backups and drills of large databases take hours).",
+		Description: "Show one task: status, timing, error, its typed result (an adopt plan or what was applied, a backup, a restore test report, a restart, or a WAL check), the end of its log, and what to do next. " +
+			"Poll this after a write tool returns a task that is still queued or running (every 10-30 seconds; backups and restore tests of large databases take hours).",
 		Annotations: readOnly("Show task"),
 		InputSchema: inputSchema[getTaskInput](func(p map[string]*jsonschema.Schema) {
 			p["log_tail_bytes"].Minimum, p["log_tail_bytes"].Maximum = ptr(0.0), ptr(float64(maxLogTail))
@@ -166,7 +165,7 @@ func (t *tools) addReadTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "fleet_health",
 		Description: "Check the whole fleet in one call and list every problem, worst first, each with the exact next action, the rowsafe CLI command, and the MCP tool that does it when there is one. " +
-			"Covers: offline agents, stale or missing backups (none in 26h, no full in 8 days), failing WAL archiving, PostgreSQL unreachable by the agent, failed or overdue restore drills, databases not yet adopted or awaiting a PostgreSQL restart, failed WAL verification, recently failed or lost tasks, tasks never picked up, rolled-back or failed agent updates, and plan limits. " +
+			"Covers: offline agents, stale or missing backups (none in 26h, no full in 8 days), failing WAL archiving, PostgreSQL unreachable by the agent, failed or overdue restore tests, databases not yet adopted or awaiting a PostgreSQL restart, failed WAL verification, recently failed or lost tasks, tasks never picked up, rolled-back or failed agent updates, and plan limits. " +
 			"Start here for any \"is everything OK?\", \"why did I get an alert?\" or \"what needs attention?\" question.",
 		Annotations: readOnly("Fleet health"),
 	}, t.fleetHealth)
@@ -236,7 +235,7 @@ func (t *tools) listDatabases(ctx context.Context, _ *sdk.CallToolRequest, _ noI
 	out := DatabasesOutput{Databases: []DatabaseSummary{}}
 	var b textBuilder
 	if len(dbs) == 0 {
-		b.line("No databases registered. Register one with plan_adoption (or `rowsafe db adopt NAME --host HOST`).")
+		b.line("No databases registered. The installer from `rowsafe hosts enroll-token` sets one up on its server; or register one with plan_adoption (`rowsafe adopt NAME --host HOST`).")
 	}
 	for _, s := range t.gather(ctx, dbs) {
 		sum := summarize(s, byID[s.db.HostID], now)
@@ -300,7 +299,7 @@ func summaryLine(s DatabaseSummary, now time.Time) string {
 		if !s.LastDrill.Passed {
 			res = "FAILED"
 		}
-		parts = append(parts, fmt.Sprintf("last drill %s %s", res, ago(&s.LastDrill.At, now)))
+		parts = append(parts, fmt.Sprintf("last restore test %s %s", res, ago(&s.LastDrill.At, now)))
 	}
 	if w := s.WAL; w != nil {
 		wal := "WAL last archived " + ago(w.LastArchivedAt, now)
@@ -367,7 +366,7 @@ func (t *tools) getDatabase(ctx context.Context, _ *sdk.CallToolRequest, in data
 
 	var b textBuilder
 	b.line("%s (%s) on %s: %s, health %s", d.Name, d.ID, d.Hostname, d.Status, strings.ToUpper(out.Health))
-	b.line("Socket %s port %d. Retention: %d full backups. Schedules (UTC): full %q, diff %q, drill %q.",
+	b.line("Socket %s port %d. Retention: %d full backups. Schedules (UTC): full %q, diff %q, restore test (drill) %q.",
 		d.SocketDir, d.Port, d.RetentionFull, d.ScheduleFull, d.ScheduleDiff, d.ScheduleDrill)
 	if pv := out.Postgres; pv != nil {
 		b.line("PostgreSQL %s, %s, data directory %s; wal_level=%s archive_mode=%s archive_timeout=%ds",
@@ -428,7 +427,7 @@ func (t *tools) listDrills(ctx context.Context, _ *sdk.CallToolRequest, in listI
 	out := DrillsOutput{Database: in.Database, Drills: []DrillView{}}
 	var b textBuilder
 	if len(drills) == 0 {
-		b.line("No restore drills of %s yet.", in.Database)
+		b.line("No restore tests of %s yet.", in.Database)
 	}
 	for _, d := range drills {
 		v := drillView(d, now)
@@ -453,21 +452,6 @@ func (t *tools) listDrills(ctx context.Context, _ *sdk.CallToolRequest, in listI
 func (t *tools) listTasks(ctx context.Context, _ *sdk.CallToolRequest, in listTasksInput) (*sdk.CallToolResult, TasksOutput, error) {
 	limit := clamp(in.Limit, 20, 100)
 	tasks, err := t.c.AllTasks(ctx, client.TaskQuery{Database: in.Database, Status: in.Status, Type: in.Type, Limit: limit})
-	if err != nil && in.Database != "" && (isStatus(err, http.StatusNotFound) || isStatus(err, http.StatusMethodNotAllowed)) {
-		// An older control plane without GET /v1/tasks: filter one database's tasks here.
-		if _, dbErr := t.c.Database(ctx, in.Database); dbErr != nil {
-			return nil, TasksOutput{}, apiError(dbErr)
-		}
-		var all []protocol.TaskView
-		if all, err = t.c.Tasks(ctx, in.Database, 500); err == nil {
-			tasks = tasks[:0]
-			for _, tk := range all {
-				if (in.Status == "" || tk.Status == in.Status) && (in.Type == "" || tk.Type == in.Type) && len(tasks) < limit {
-					tasks = append(tasks, tk)
-				}
-			}
-		}
-	}
 	if err != nil {
 		return nil, TasksOutput{}, apiError(err)
 	}
@@ -573,7 +557,7 @@ func (t *tools) fleetHealth(ctx context.Context, _ *sdk.CallToolRequest, _ noInp
 	out.Healthy = out.Critical == 0 && out.Warnings == 0
 	out.Summary = fmt.Sprintf("%d hosts, %d databases (%d active): %d critical, %d warning(s)", out.Hosts, out.Databases, out.Active, out.Critical, out.Warnings)
 	if out.Healthy {
-		out.Summary += ". All good: every active database has recent backups, WAL archiving works and drills pass."
+		out.Summary += ". All good: every active database has recent backups, WAL archiving works and restore tests pass."
 		if out.Databases == 0 {
 			out.Summary = fmt.Sprintf("%d hosts, no databases registered yet.", out.Hosts)
 		}
@@ -657,12 +641,15 @@ func taskText(d TaskDetail) textBuilder {
 			b.line("PostgreSQL restart required.")
 		}
 	}
+	if r := d.Restart; r != nil && r.Restarted {
+		b.line("Restarted %s in %.1fs; archive_mode is %s", cmpOr(r.Unit, "PostgreSQL"), float64(r.DurationMs)/1000, cmpOr(r.ArchiveMode, "unknown"))
+	}
 	if r := d.Backup; r != nil {
 		b.line("Backup %s (%s): %s database, %s stored, took %s", r.Label, r.Type, humanBytes(r.SizeBytes), humanBytes(r.RepoSizeBytes),
 			r.StoppedAt.Sub(r.StartedAt).Round(time.Second))
 	}
 	if r := d.Drill; r != nil {
-		b.line("Drill %s: restored backup %s (%s) in %s", passFail(r.Passed), r.BackupLabel, humanBytes(r.RestoredBytes),
+		b.line("Restore test (Proof) %s: restored backup %s (%s) in %s", passFail(r.Passed), r.BackupLabel, humanBytes(r.RestoredBytes),
 			(time.Duration(r.DurationSeconds) * time.Second).String())
 		if r.RecoveredTo != nil {
 			b.line("Recovered to the last transaction at %s", r.RecoveredTo.UTC().Format(time.RFC3339))

@@ -163,7 +163,15 @@ func Databases(ctx context.Context, t Target, conn *pgx.Conn) ([]protocol.DBInfo
 	return dbs, nil
 }
 
-// Archiver reads pg_stat_archiver.
+// archiverSQL reads pg_stat_archiver and archive_mode in one round trip.
+// archive_mode is what the running server uses (a changed setting waiting
+// for a restart still reads "off"), so it flips to "on" only once
+// PostgreSQL has restarted with the adopt settings.
+const archiverSQL = `
+	SELECT archived_count, failed_count, last_archived_time, last_failed_time, current_setting('archive_mode')
+	FROM pg_stat_archiver`
+
+// Archiver reads pg_stat_archiver and the current archive_mode.
 func Archiver(ctx context.Context, t Target) (protocol.ArchiverStats, error) {
 	var a protocol.ArchiverStats
 	conn, err := t.Connect(ctx, "postgres")
@@ -171,8 +179,65 @@ func Archiver(ctx context.Context, t Target) (protocol.ArchiverStats, error) {
 		return a, err
 	}
 	defer conn.Close(ctx)
-	err = conn.QueryRow(ctx, `
-		SELECT archived_count, failed_count, last_archived_time, last_failed_time FROM pg_stat_archiver`,
-	).Scan(&a.ArchivedCount, &a.FailedCount, &a.LastArchivedTime, &a.LastFailedTime)
+	err = conn.QueryRow(ctx, archiverSQL).Scan(&a.ArchivedCount, &a.FailedCount, &a.LastArchivedTime, &a.LastFailedTime, &a.ArchiveMode)
 	return a, err
+}
+
+// ArchiveMode reads the running server's archive_mode. It doubles as the
+// "is PostgreSQL answering again" probe after a restart.
+func ArchiveMode(ctx context.Context, t Target) (string, error) {
+	conn, err := t.Connect(ctx, "postgres")
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close(ctx)
+	var mode string
+	err = conn.QueryRow(ctx, `SELECT current_setting('archive_mode')`).Scan(&mode)
+	return mode, err
+}
+
+// Summary is what setup discovery shows about a cluster.
+type Summary struct {
+	ServerVersion  string
+	VersionNum     int
+	DataDirectory  string
+	InRecovery     bool
+	Databases      []protocol.DatabaseSize // connectable, non-template databases
+	TotalSizeBytes int64
+}
+
+// Major returns the PostgreSQL major version (e.g. 18).
+func (s Summary) Major() int { return s.VersionNum / 10000 }
+
+// Summarize reads version, data directory, recovery state and database
+// sizes with a single connection (unlike Inspect, it doesn't visit every
+// database).
+func Summarize(ctx context.Context, t Target) (Summary, error) {
+	var s Summary
+	conn, err := t.Connect(ctx, "postgres")
+	if err != nil {
+		return s, err
+	}
+	defer conn.Close(ctx)
+	if err := conn.QueryRow(ctx, `
+		SELECT current_setting('server_version'), current_setting('server_version_num')::int,
+		       current_setting('data_directory'), pg_is_in_recovery()`,
+	).Scan(&s.ServerVersion, &s.VersionNum, &s.DataDirectory, &s.InRecovery); err != nil {
+		return s, err
+	}
+	rows, err := conn.Query(ctx, `
+		SELECT datname, pg_database_size(oid) FROM pg_database
+		WHERE datallowconn AND NOT datistemplate ORDER BY datname`)
+	if err != nil {
+		return s, err
+	}
+	s.Databases, err = pgx.CollectRows(rows, func(r pgx.CollectableRow) (protocol.DatabaseSize, error) {
+		var d protocol.DatabaseSize
+		err := r.Scan(&d.Name, &d.SizeBytes)
+		return d, err
+	})
+	for _, d := range s.Databases {
+		s.TotalSizeBytes += d.SizeBytes
+	}
+	return s, err
 }

@@ -10,8 +10,7 @@ import (
 )
 
 // Monitoring covers every database of the host the control plane lists as
-// monitored (including ones not adopted yet); with an older control plane
-// that doesn't send the list, it covers the watched databases.
+// monitored, including ones not adopted yet.
 func TestMonitoredDatabases(t *testing.T) {
 	for _, tc := range []struct {
 		name, body string
@@ -19,7 +18,6 @@ func TestMonitoredDatabases(t *testing.T) {
 	}{
 		{"new control plane", `{"databases":[{"id":"db_active"}],"monitored":[{"id":"db_active"},{"id":"db_pending"}]}`,
 			[]string{"db_active", "db_pending"}},
-		{"old control plane", `{"databases":[{"id":"db_active"}]}`, []string{"db_active"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

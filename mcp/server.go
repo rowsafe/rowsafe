@@ -41,11 +41,11 @@ type Options struct {
 
 const maxWaitLimit = 60 * time.Second
 
-const instructions = `Rowsafe is the safety net for PostgreSQL databases: continuous WAL archiving (point-in-time recovery), scheduled backups and weekly restore drills, run by an agent on each database host. It never restarts PostgreSQL or runs arbitrary SQL, and never sees backup contents.
+const instructions = `Rowsafe is the safety net for PostgreSQL databases: continuous WAL archiving (point-in-time recovery), scheduled backups (Rewind) and a weekly restore test (Proof, task type drill), with health monitoring (Pulse), run by an agent on each database host. It never restarts PostgreSQL on its own (only when a person asks, in the dashboard or with "rowsafe restart"; no MCP tool can) or runs arbitrary SQL, and never sees backup contents.
 
 Before any destructive or risky database operation (migrations, schema changes, DROP/TRUNCATE, DELETE/UPDATE without a narrow WHERE, bulk data changes, restoring a dump):
 1. safety_check on the database. If it is not protected, tell the user why and get their OK before continuing.
-2. create_restore_point with a descriptive name, and tell the user the name. (Without write tools, ask the user to run: rowsafe restore-point create DB NAME.)
+2. create_restore_point with a descriptive name, and tell the user the name. (If the tool is unavailable, ask the user to run: rowsafe mark DB NAME.)
 3. Proceed.
 4. If something breaks, stop. Don't try to repair data and never attempt a restore yourself: tell the user they can restore the database to the named restore point.
 

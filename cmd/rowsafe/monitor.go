@@ -13,42 +13,17 @@ import (
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
-// monitorCommand runs the monitoring and alerting commands; handled is
-// false for any other command.
-func monitorCommand(ctx context.Context, c *client.Client, args []string) (handled bool, err error) {
-	sub := ""
-	if len(args) > 1 {
-		sub = args[1]
-	}
-	rest := []string{}
-	if len(args) > 2 {
-		rest = args[2:]
-	}
-	switch {
-	case args[0] == "alerts" && sub == "ack":
-		return true, alertsAck(ctx, c, rest)
-	case args[0] == "alerts" && sub == "rules":
-		return true, alertRulesList(ctx, c, rest)
-	case args[0] == "alerts":
-		return true, alertsList(ctx, c, args[1:])
-	case args[0] == "db" && sub == "top":
-		return true, dbTop(ctx, c, rest)
-	case args[0] == "db" && sub == "activity":
-		return true, dbActivity(ctx, c, rest)
-	case args[0] == "channels":
-		switch sub {
-		case "", "list":
-			return true, channelsList(ctx, c, rest)
-		case "add":
-			return true, channelsAdd(ctx, c, rest)
-		case "remove":
-			return true, channelsRemove(ctx, c, rest)
-		case "test":
-			return true, channelsTest(ctx, c, rest)
+// alertsCmd is rowsafe alerts [ack ID | rules].
+func alertsCmd(ctx context.Context, c *client.Client, args []string) error {
+	if len(args) > 0 {
+		switch args[0] {
+		case "ack":
+			return alertsAck(ctx, c, args[1:])
+		case "rules":
+			return alertRulesList(ctx, c, args[1:])
 		}
-		return true, fmt.Errorf("unknown command %q; try rowsafe channels list|add|remove|test", "channels "+sub)
 	}
-	return false, nil
+	return alertsList(ctx, c, args)
 }
 
 func alertTarget(a protocol.Alert) string {
@@ -153,38 +128,6 @@ func alertRulesList(ctx context.Context, c *client.Client, args []string) error 
 	return nil
 }
 
-func dbTop(ctx context.Context, c *client.Client, args []string) error {
-	fs := flag.NewFlagSet("db top", flag.ContinueOnError)
-	limit := fs.Int("limit", 20, "number of statements (at most 20)")
-	width := fs.Int("width", 100, "characters of query text to show")
-	name, err := parse(fs, args, true)
-	if err != nil {
-		return err
-	}
-	st, err := c.TopQueries(ctx, name, *limit)
-	if err != nil {
-		return err
-	}
-	if !st.Available {
-		reason := st.Reason
-		if reason == "" {
-			reason = "pg_stat_statements is not available"
-		}
-		fmt.Printf("No query statistics for %s: %s\n", name, reason)
-		return nil
-	}
-	fmt.Printf("Top statements of %s by total execution time (pg_stat_statements, since its last reset; collected %s)\n\n",
-		name, ago(&st.CollectedAt))
-	t := newTable("#", "TOTAL", "CALLS", "MEAN", "ROWS", "DATABASE", "QUERY")
-	for i, s := range st.Statements {
-		query := strings.Join(strings.Fields(s.Query), " ")
-		t.row(strconv.Itoa(i+1), msText(s.TotalTimeMs), strconv.FormatInt(s.Calls, 10), msText(s.MeanTimeMs),
-			strconv.FormatInt(s.Rows, 10), orDash(s.Database), firstLine(query, max(*width, 20)))
-	}
-	t.flush()
-	return nil
-}
-
 func msText(ms float64) string {
 	d := time.Duration(ms * float64(time.Millisecond))
 	switch {
@@ -198,10 +141,10 @@ func msText(ms float64) string {
 	return d.Round(time.Minute).String()
 }
 
-func dbActivity(ctx context.Context, c *client.Client, args []string) error {
-	fs := flag.NewFlagSet("db activity", flag.ContinueOnError)
+func activityCmd(ctx context.Context, c *client.Client, args []string) error {
+	fs := flag.NewFlagSet("activity", flag.ContinueOnError)
 	width := fs.Int("width", 100, "characters of query text to show")
-	name, err := parse(fs, args, true)
+	name, err := dbArg(ctx, c, fs, args)
 	if err != nil {
 		return err
 	}

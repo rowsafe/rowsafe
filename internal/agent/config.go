@@ -47,6 +47,19 @@ type Config struct {
 	// SpoolStallAfter is how old the oldest spooled WAL file may get before
 	// it is reported as an archiving failure (ROWSAFE_SPOOL_STALL_AFTER).
 	SpoolStallAfter time.Duration
+
+	// RestartAllowFile lists the clusters root allowed Rowsafe to restart
+	// ("PORT UNIT" lines; ROWSAFE_RESTART_ALLOW_FILE). The installer writes
+	// it; the agent only reads it.
+	RestartAllowFile string
+	// RestartDir is where a restart task asks the root helper
+	// (rowsafe-pg-restart) for a restart (ROWSAFE_RESTART_DIR, default
+	// <state dir>/restart).
+	RestartDir string
+	// RestartResultDir is the helper's own directory, where the agent reads
+	// its answer (ROWSAFE_RESTART_RESULT_DIR). Root never writes into a
+	// directory the agent owns.
+	RestartResultDir string
 }
 
 // Agent modes (ROWSAFE_MODE).
@@ -67,19 +80,21 @@ func env(name, def string) string {
 
 func ConfigFromEnv() (Config, error) {
 	c := Config{
-		ControlURL:    strings.TrimRight(env("ROWSAFE_URL", protocol.DefaultAPIURL), "/"),
-		EnrollToken:   env("ROWSAFE_ENROLL_TOKEN", ""),
-		StateDir:      env("ROWSAFE_STATE_DIR", "/var/lib/rowsafe"),
-		ConfigDir:     env("ROWSAFE_CONFIG_DIR", "/etc/rowsafe/pgbackrest"),
-		LogDir:        env("ROWSAFE_LOG_DIR", "/var/log/rowsafe"),
-		DrillDir:      env("ROWSAFE_DRILL_DIR", "/var/lib/rowsafe/drills"),
-		DrillPreload:  env("ROWSAFE_DRILL_PRELOAD", DrillPreloadAuto),
-		PGUser:        env("ROWSAFE_PG_USER", "postgres"),
-		PGBinDir:      env("ROWSAFE_PG_BIN_DIR", "/usr/lib/postgresql/%d/bin"),
-		PgBackRestBin: env("ROWSAFE_PGBACKREST_BIN", "/usr/bin/pgbackrest"),
-		InstallDir:    env("ROWSAFE_INSTALL_DIR", "/opt/rowsafe"),
-		Mode:          env("ROWSAFE_MODE", ModeNative),
-		SpoolDir:      env("ROWSAFE_SPOOL_DIR", "/rowsafe-spool"),
+		ControlURL:       strings.TrimRight(env("ROWSAFE_URL", protocol.DefaultAPIURL), "/"),
+		EnrollToken:      env("ROWSAFE_ENROLL_TOKEN", ""),
+		StateDir:         env("ROWSAFE_STATE_DIR", "/var/lib/rowsafe"),
+		ConfigDir:        env("ROWSAFE_CONFIG_DIR", "/etc/rowsafe/pgbackrest"),
+		LogDir:           env("ROWSAFE_LOG_DIR", "/var/log/rowsafe"),
+		DrillDir:         env("ROWSAFE_DRILL_DIR", "/var/lib/rowsafe/drills"),
+		DrillPreload:     env("ROWSAFE_DRILL_PRELOAD", DrillPreloadAuto),
+		PGUser:           env("ROWSAFE_PG_USER", "postgres"),
+		PGBinDir:         env("ROWSAFE_PG_BIN_DIR", "/usr/lib/postgresql/%d/bin"),
+		PgBackRestBin:    env("ROWSAFE_PGBACKREST_BIN", "/usr/bin/pgbackrest"),
+		InstallDir:       env("ROWSAFE_INSTALL_DIR", "/opt/rowsafe"),
+		Mode:             env("ROWSAFE_MODE", ModeNative),
+		SpoolDir:         env("ROWSAFE_SPOOL_DIR", "/rowsafe-spool"),
+		RestartAllowFile: env("ROWSAFE_RESTART_ALLOW_FILE", "/etc/rowsafe/restart-allowed"),
+		RestartResultDir: env("ROWSAFE_RESTART_RESULT_DIR", "/run/rowsafe-pg-restart"),
 		Repo: pgbackrest.Repo{
 			Endpoint:   env("ROWSAFE_REPO_S3_ENDPOINT", ""),
 			Bucket:     env("ROWSAFE_REPO_S3_BUCKET", ""),
@@ -92,6 +107,7 @@ func ConfigFromEnv() (Config, error) {
 			CAFile:     env("ROWSAFE_REPO_S3_CA_FILE", ""),
 		},
 	}
+	c.RestartDir = env("ROWSAFE_RESTART_DIR", filepath.Join(c.StateDir, "restart"))
 	var err error
 	if c.Mode != ModeNative && c.Mode != ModeDockerSidecar {
 		return c, fmt.Errorf("ROWSAFE_MODE must be %q or %q", ModeNative, ModeDockerSidecar)
@@ -132,7 +148,7 @@ func ConfigFromEnv() (Config, error) {
 		!strings.HasPrefix(c.ControlURL, "http://localhost") {
 		return c, fmt.Errorf("ROWSAFE_URL must use https (plain http is only allowed for localhost)")
 	}
-	for _, p := range []string{c.StateDir, c.ConfigDir, c.LogDir, c.DrillDir, c.InstallDir} {
+	for _, p := range []string{c.StateDir, c.ConfigDir, c.LogDir, c.DrillDir, c.InstallDir, c.RestartDir, c.RestartAllowFile, c.RestartResultDir} {
 		if !filepath.IsAbs(p) {
 			return c, fmt.Errorf("directory %q must be absolute", p)
 		}

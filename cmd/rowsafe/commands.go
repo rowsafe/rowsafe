@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -41,7 +42,10 @@ func parse(fs *flag.FlagSet, args []string, wantName bool) (string, error) {
 	return positional[0], nil
 }
 
-func hostsList(ctx context.Context, c *client.Client) error {
+func hostsList(ctx context.Context, c *client.Client, args []string) error {
+	if _, err := parse(flag.NewFlagSet("hosts list", flag.ContinueOnError), args, false); err != nil {
+		return err
+	}
 	hosts, err := c.Hosts(ctx)
 	if err != nil {
 		return err
@@ -122,7 +126,10 @@ func hostsChannel(ctx context.Context, c *client.Client, args []string) error {
 	return nil
 }
 
-func orgShow(ctx context.Context, c *client.Client) error {
+func orgShow(ctx context.Context, c *client.Client, args []string) error {
+	if _, err := parse(flag.NewFlagSet("org", flag.ContinueOnError), args, false); err != nil {
+		return err
+	}
 	o, err := c.Org(ctx)
 	if err != nil {
 		return err
@@ -138,7 +145,10 @@ func orgShow(ctx context.Context, c *client.Client) error {
 	return nil
 }
 
-func apiKeysList(ctx context.Context, c *client.Client) error {
+func apiKeysList(ctx context.Context, c *client.Client, args []string) error {
+	if _, err := parse(flag.NewFlagSet("api-keys list", flag.ContinueOnError), args, false); err != nil {
+		return err
+	}
 	keys, err := c.APIKeys(ctx)
 	if err != nil {
 		return err
@@ -193,7 +203,9 @@ func hostsEnrollToken(ctx context.Context, c *client.Client, cfg config, args []
 		return err
 	}
 	fmt.Printf("Enrollment token (single use, expires %s):\n  %s\n\n", tok.ExpiresAt.Local().Format(time.RFC1123), tok.Token)
-	fmt.Printf("On the database host:\n  %s\n", installCommand(cfg.URL, tok.Token))
+	fmt.Printf("On the database server:\n  %s\n\n", installCommand(cfg.URL, tok.Token))
+	fmt.Println("It installs the agent, sets up storage, finds PostgreSQL and shows the plan, then asks before turning")
+	fmt.Println("on backups (and before restarting PostgreSQL, if that is needed). Nothing else to run here.")
 	return nil
 }
 
@@ -208,7 +220,10 @@ func installCommand(url, token string) string {
 	return "curl -fsSL https://rowsafe.sh | sudo " + env + "sh -s " + token
 }
 
-func dbList(ctx context.Context, c *client.Client) error {
+func listCmd(ctx context.Context, c *client.Client, args []string) error {
+	if _, err := parse(flag.NewFlagSet("ls", flag.ContinueOnError), args, false); err != nil {
+		return err
+	}
 	dbs, err := c.Databases(ctx)
 	if err != nil {
 		return err
@@ -229,7 +244,7 @@ func dbList(ctx context.Context, c *client.Client) error {
 	return nil
 }
 
-func dbShow(ctx context.Context, c *client.Client, args []string) error {
+func showCmd(ctx context.Context, c *client.Client, args []string) error {
 	name, err := dbArg(ctx, c, flag.NewFlagSet("show", flag.ContinueOnError), args)
 	if err != nil {
 		return err
@@ -243,7 +258,7 @@ func dbShow(ctx context.Context, c *client.Client, args []string) error {
 	fmt.Printf("Status:     %s\n", statusText(d.Status))
 	fmt.Printf("Socket:     %s port %d\n", d.SocketDir, d.Port)
 	fmt.Printf("Retention:  %d full backups\n", d.RetentionFull)
-	fmt.Printf("Schedules:  full %q, diff %q, drill %q (UTC)\n", d.ScheduleFull, d.ScheduleDiff, d.ScheduleDrill)
+	fmt.Printf("Schedules:  full %q, diff %q, restore test %q (UTC)\n", d.ScheduleFull, d.ScheduleDiff, d.ScheduleDrill)
 	if in := d.Inspect; in != nil {
 		fmt.Printf("Postgres:   %s, %s, data directory %s\n", in.ServerVersion, humanBytes(in.TotalSizeBytes), in.DataDirectory)
 		fmt.Printf("Archiving:  archive_mode=%s archive_timeout=%ds\n", in.ArchiveMode, in.ArchiveTimeoutSeconds)
@@ -261,6 +276,11 @@ func dbShow(ctx context.Context, c *client.Client, args []string) error {
 			fmt.Printf("            the agent can't read archiver stats right now: %s\n", firstLine(a.Error, 100))
 		}
 	}
+	if d.CanRestart {
+		fmt.Println("Restart:    allowed from Rowsafe (rowsafe restart)")
+	} else {
+		fmt.Println("Restart:    not allowed from Rowsafe on this server (allowed at install time)")
+	}
 	backups, err := c.Backups(ctx, name, 1)
 	if err == nil && len(backups) > 0 {
 		b := backups[0]
@@ -269,12 +289,12 @@ func dbShow(ctx context.Context, c *client.Client, args []string) error {
 	drills, err := c.Drills(ctx, name, 1)
 	if err == nil && len(drills) > 0 {
 		dr := drills[0]
-		fmt.Printf("Drill:      %s, %s ago\n", passFail(dr.Passed), time.Since(dr.CreatedAt).Round(time.Minute))
+		fmt.Printf("Proof:      restore test %s, %s ago\n", passFail(dr.Passed), time.Since(dr.CreatedAt).Round(time.Minute))
 	}
 	return nil
 }
 
-func dbAdopt(ctx context.Context, c *client.Client, args []string) error {
+func adoptCmd(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("adopt", flag.ContinueOnError)
 	host := fs.String("host", "", "host ID or hostname (see `rowsafe hosts list`); optional with a single host")
 	port := fs.Int("port", 5432, "Postgres port")
@@ -296,13 +316,13 @@ func dbAdopt(ctx context.Context, c *client.Client, args []string) error {
 	}
 	fmt.Printf("Registered %s (%s). Planning...\n\n", resp.Database.Name, resp.Database.ID)
 	if *noWait {
-		fmt.Printf("Task %s queued. Check it with `rowsafe task show %s`.\n", resp.Task.ID, resp.Task.ID)
+		fmt.Printf("Task %s queued. Check it with `rowsafe task %s`.\n", resp.Task.ID, resp.Task.ID)
 		return nil
 	}
 	return waitAndReport(ctx, c, resp.Task.ID, name)
 }
 
-func dbPlan(ctx context.Context, c *client.Client, args []string) error {
+func planCmd(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("plan", flag.ContinueOnError)
 	name, err := dbArg(ctx, c, fs, args)
 	if err != nil {
@@ -315,7 +335,7 @@ func dbPlan(ctx context.Context, c *client.Client, args []string) error {
 	return waitAndReport(ctx, c, t.ID, name)
 }
 
-func dbApply(ctx context.Context, c *client.Client, args []string) error {
+func applyCmd(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
 	force := fs.Bool("force", false, "replace an existing archive_command or archive_library")
 	yes := fs.Bool("yes", false, "don't ask for confirmation")
@@ -341,21 +361,91 @@ func dbApply(ctx context.Context, c *client.Client, args []string) error {
 	return waitAndReport(ctx, c, t.ID, name)
 }
 
-func dbVerify(ctx context.Context, c *client.Client, args []string) error {
+func verifyCmd(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
 	name, err := dbArg(ctx, c, fs, args)
 	if err != nil {
 		return err
 	}
 	t, err := c.CreateTask(ctx, name, protocol.TaskCheck, nil)
+	var ae *client.APIError
+	if errors.As(err, &ae) && ae.Status == http.StatusConflict {
+		// Usually Rowsafe's own check after a restart: wait for that one.
+		open, lerr := c.AllTasks(ctx, client.TaskQuery{Database: name, Type: protocol.TaskCheck, Limit: 10})
+		if lerr == nil {
+			for _, o := range open {
+				if o.Status == protocol.StatusQueued || o.Status == protocol.StatusRunning {
+					fmt.Fprintf(os.Stderr, "Rowsafe is already checking %s (task %s); waiting for it.\n", name, o.ID)
+					return waitAndReport(ctx, c, o.ID, name)
+				}
+			}
+		}
+	}
 	if err != nil {
 		return err
 	}
 	return waitAndReport(ctx, c, t.ID, name)
 }
 
-func backupRun(ctx context.Context, c *client.Client, args []string) error {
-	fs := flag.NewFlagSet("backup run", flag.ContinueOnError)
+// restartCmd is rowsafe restart: restart a database's PostgreSQL when a
+// person asks. The agent does it only on servers where root allowed it at
+// install time; Rowsafe never restarts PostgreSQL on its own.
+func restartCmd(ctx context.Context, c *client.Client, args []string) error {
+	fs := flag.NewFlagSet("restart", flag.ContinueOnError)
+	yes := fs.Bool("yes", false, "don't ask for confirmation")
+	name, err := dbArg(ctx, c, fs, args)
+	if err != nil {
+		return err
+	}
+	d, err := c.Database(ctx, name)
+	if err != nil {
+		return err
+	}
+	if !d.CanRestart {
+		return errors.New(restartNotAllowed(d))
+	}
+	fmt.Printf("Database %s on %s (%s)\n", d.Name, d.Hostname, statusText(d.Status))
+	fmt.Println("PostgreSQL restarts: it takes a few seconds; open connections are dropped and apps reconnect.")
+	if !*yes && !confirm("Restart PostgreSQL on "+d.Hostname+" now?") {
+		return errors.New("cancelled; nothing was restarted")
+	}
+	t, err := c.CreateTask(ctx, d.Name, protocol.TaskRestart, map[string]string{"confirm": d.Name})
+	var ae *client.APIError
+	if errors.As(err, &ae) {
+		switch ae.Status {
+		case http.StatusForbidden:
+			return errors.New(restartNotAllowed(d))
+		case http.StatusConflict:
+			return fmt.Errorf("not restarted: the agent on %s is offline, or a restart is already running (%s)", d.Hostname, ae.Msg)
+		case http.StatusTooManyRequests:
+			wait := "a moment"
+			if ae.RetryAfter > 0 {
+				wait = fmt.Sprintf("%d seconds", int(ae.RetryAfter.Seconds()))
+			}
+			return fmt.Errorf("not restarted: PostgreSQL on %s was restarted in the last 2 minutes; try again in %s", d.Hostname, wait)
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if err := waitAndReport(ctx, c, t.ID, d.Name); err != nil {
+		return err
+	}
+	if d.Status == protocol.DBAwaitingRestart {
+		fmt.Printf("\nRowsafe now checks the backups by itself and starts them; follow it with `rowsafe status %s`.\n", d.Name)
+	}
+	return nil
+}
+
+// restartNotAllowed explains why Rowsafe can't restart d's PostgreSQL.
+func restartNotAllowed(d protocol.Database) string {
+	return fmt.Sprintf("not restarted: %s doesn't allow restarts from Rowsafe (only root can allow it, at install time).\n"+
+		"Either restart PostgreSQL yourself, on %s:\n  sudo systemctl restart postgresql\n"+
+		"or allow it: re-run the install command on %s and say yes to restarts (--allow-restart).", d.Hostname, d.Hostname, d.Hostname)
+}
+
+func backupCmd(ctx context.Context, c *client.Client, args []string) error {
+	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
 	typ := fs.String("type", "full", "full, diff or incr")
 	noWait := fs.Bool("no-wait", false, "return once queued")
 	name, err := dbArg(ctx, c, fs, args)
@@ -373,8 +463,8 @@ func backupRun(ctx context.Context, c *client.Client, args []string) error {
 	return waitAndReport(ctx, c, t.ID, name)
 }
 
-func backupList(ctx context.Context, c *client.Client, args []string) error {
-	name, err := dbArg(ctx, c, flag.NewFlagSet("backup list", flag.ContinueOnError), args)
+func backupsCmd(ctx context.Context, c *client.Client, args []string) error {
+	name, err := dbArg(ctx, c, flag.NewFlagSet("backups", flag.ContinueOnError), args)
 	if err != nil {
 		return err
 	}
@@ -391,8 +481,8 @@ func backupList(ctx context.Context, c *client.Client, args []string) error {
 	return nil
 }
 
-func drillRun(ctx context.Context, c *client.Client, args []string) error {
-	fs := flag.NewFlagSet("drill run", flag.ContinueOnError)
+func proofCmd(ctx context.Context, c *client.Client, args []string) error {
+	fs := flag.NewFlagSet("proof", flag.ContinueOnError)
 	noWait := fs.Bool("no-wait", false, "return once queued")
 	name, err := dbArg(ctx, c, fs, args)
 	if err != nil {
@@ -403,20 +493,24 @@ func drillRun(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if *noWait {
-		fmt.Println("Queued", t.ID)
+		fmt.Printf("Queued the restore test of %s (task %s). See the result with `rowsafe proofs %s`.\n", name, t.ID, name)
 		return nil
 	}
 	return waitAndReport(ctx, c, t.ID, name)
 }
 
-func drillList(ctx context.Context, c *client.Client, args []string) error {
-	name, err := dbArg(ctx, c, flag.NewFlagSet("drill list", flag.ContinueOnError), args)
+func proofsCmd(ctx context.Context, c *client.Client, args []string) error {
+	name, err := dbArg(ctx, c, flag.NewFlagSet("proofs", flag.ContinueOnError), args)
 	if err != nil {
 		return err
 	}
 	drills, err := c.Drills(ctx, name, 20)
 	if err != nil {
 		return err
+	}
+	if len(drills) == 0 {
+		fmt.Printf("No restore tests of %s yet. Run one now: rowsafe proof %s\n", name, name)
+		return nil
 	}
 	t := newTable("WHEN", "RESULT", "BACKUP", "RECOVERED TO", "DURATION", "DATABASES")
 	for _, d := range drills {
@@ -434,7 +528,7 @@ func drillList(ctx context.Context, c *client.Client, args []string) error {
 func tasksList(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("tasks", flag.ContinueOnError)
 	status := fs.String("status", "", "only tasks in this status (queued, running, succeeded, failed, lost, cancelled)")
-	typ := fs.String("type", "", "only tasks of this type (inspect, adopt, check, backup, drill)")
+	typ := fs.String("type", "", "only tasks of this type (inspect, adopt, check, backup, drill (the restore test), restore_point, restart)")
 	limit := fs.Int("limit", 30, "how many tasks to show")
 	var positional []string
 	for len(args) > 0 {
@@ -491,12 +585,12 @@ func auditList(ctx context.Context, c *client.Client, args []string) error {
 	return nil
 }
 
-func dbSet(ctx context.Context, c *client.Client, args []string) error {
-	fs := flag.NewFlagSet("db set", flag.ContinueOnError)
+func setCmd(ctx context.Context, c *client.Client, args []string) error {
+	fs := flag.NewFlagSet("set", flag.ContinueOnError)
 	retention := fs.Int("retention-full", 0, "full backups to keep (1-52)")
 	full := fs.String("full-schedule", "", "cron for full backups, UTC (e.g. \"0 1 * * 0\")")
 	diff := fs.String("diff-schedule", "", "cron for differential backups, UTC; \"\" disables them")
-	drill := fs.String("drill-schedule", "", "cron for restore drills, UTC")
+	proof := fs.String("proof-schedule", "", "cron for the restore test, UTC")
 	name, err := dbArg(ctx, c, fs, args)
 	if err != nil {
 		return err
@@ -510,12 +604,12 @@ func dbSet(ctx context.Context, c *client.Client, args []string) error {
 			req.ScheduleFull = full
 		case "diff-schedule":
 			req.ScheduleDiff = diff
-		case "drill-schedule":
-			req.ScheduleDrill = drill
+		case "proof-schedule":
+			req.ScheduleDrill = proof
 		}
 	})
 	if req == (protocol.UpdateDatabaseRequest{}) {
-		return errors.New("nothing to change: pass --retention-full, --full-schedule, --diff-schedule or --drill-schedule")
+		return errors.New("nothing to change: pass --retention-full, --full-schedule, --diff-schedule or --proof-schedule")
 	}
 	d, err := c.UpdateDatabase(ctx, name, req)
 	if err != nil {
@@ -525,13 +619,13 @@ func dbSet(ctx context.Context, c *client.Client, args []string) error {
 	if diffText == "" {
 		diffText = "off"
 	}
-	fmt.Printf("%s: keep %d full backups; full %q, diff %q, drill %q (UTC)\n",
+	fmt.Printf("%s: keep %d full backups; full %q, diff %q, restore test %q (UTC)\n",
 		d.Name, d.RetentionFull, d.ScheduleFull, diffText, d.ScheduleDrill)
 	return nil
 }
 
-func dbRemove(ctx context.Context, c *client.Client, args []string) error {
-	fs := flag.NewFlagSet("db remove", flag.ContinueOnError)
+func removeCmd(ctx context.Context, c *client.Client, args []string) error {
+	fs := flag.NewFlagSet("remove", flag.ContinueOnError)
 	keep := fs.Bool("keep-archiving", false, "remove an adopted database; its host keeps archiving WAL to the repository")
 	yes := fs.Bool("yes", false, "don't ask for confirmation")
 	name, err := parse(fs, args, true)
@@ -543,7 +637,7 @@ func dbRemove(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if !*yes {
-		fmt.Printf("Rowsafe will stop backing up, drilling and monitoring %s on %s. Nothing on the host is changed.\n", d.Name, d.Hostname)
+		fmt.Printf("Rowsafe will stop backing up, testing restores and monitoring %s on %s. Nothing on the server is changed.\n", d.Name, d.Hostname)
 		if *keep {
 			fmt.Println("PostgreSQL keeps archiving WAL to the repository. To turn that off, follow the Rollback")
 			fmt.Println("section of https://rowsafe.sh/docs/guides/adopt#rollback")
@@ -585,12 +679,12 @@ func hostsRemove(ctx context.Context, c *client.Client, args []string) error {
 }
 
 func taskShow(ctx context.Context, c *client.Client, args []string) error {
-	fs := flag.NewFlagSet("task show", flag.ContinueOnError)
-	id, err := parse(fs, args, true)
+	fs := flag.NewFlagSet("task", flag.ContinueOnError)
+	pos, err := parseN(fs, args, "ID")
 	if err != nil {
 		return err
 	}
-	t, err := c.Task(ctx, id)
+	t, err := c.Task(ctx, pos[0])
 	if err != nil {
 		return err
 	}
@@ -604,7 +698,7 @@ func waitAndReport(ctx context.Context, c *client.Client, taskID, dbName string)
 		if t.Status != last {
 			last = t.Status
 			if t.Status == protocol.StatusQueued {
-				fmt.Fprintf(os.Stderr, "Waiting for the agent to pick up %s task %s...\n", t.Type, t.ID)
+				fmt.Fprintf(os.Stderr, "Waiting for the agent to pick up the %s (task %s)...\n", taskName(t.Type), t.ID)
 			} else if t.Status == protocol.StatusRunning {
 				fmt.Fprintf(os.Stderr, "Running...\n")
 			}
@@ -625,7 +719,9 @@ func waitAndReport(ctx context.Context, c *client.Client, taskID, dbName string)
 			case !res.Applied:
 				fmt.Printf("\nNext: rowsafe apply %s\n", dbName)
 			case res.RestartRequired:
-				fmt.Printf("\nNext: restart PostgreSQL in a maintenance window (e.g. `sudo systemctl restart postgresql`), then run `rowsafe verify %s`.\n", dbName)
+				fmt.Printf("\nNext: PostgreSQL needs a quick restart for backups to start. Restart it when it suits you:\n"+
+					"  `rowsafe restart %s`, Restart PostgreSQL in the dashboard, or on the server: sudo systemctl restart postgresql\n"+
+					"Rowsafe notices the restart by itself and finishes; `rowsafe verify %s` checks right away.\n", dbName, dbName)
 			default:
 				fmt.Printf("\nVerification queued automatically. Follow it with `rowsafe tasks %s`.\n", dbName)
 			}
@@ -638,24 +734,32 @@ func waitAndReport(ctx context.Context, c *client.Client, taskID, dbName string)
 	return nil
 }
 
+// stdin is where confirm reads the answer; tests replace it.
+var stdin io.Reader = os.Stdin
+
+// taskName is a task type in words.
+func taskName(typ string) string {
+	switch typ {
+	case protocol.TaskDrill:
+		return "restore test"
+	case protocol.TaskRestorePoint:
+		return "restore point"
+	case protocol.TaskCheck:
+		return "WAL check"
+	case protocol.TaskRestart:
+		return "PostgreSQL restart"
+	}
+	return typ
+}
+
 func confirm(prompt string) bool {
 	fmt.Printf("%s [y/N] ", prompt)
-	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	line, _ := bufio.NewReader(stdin).ReadString('\n')
 	return strings.EqualFold(strings.TrimSpace(line), "y") || strings.EqualFold(strings.TrimSpace(line), "yes")
 }
 
-func restorePointCreate(ctx context.Context, c *client.Client, args []string) error {
-	fs := flag.NewFlagSet("restore-point create", flag.ContinueOnError)
-	noWait := fs.Bool("no-wait", false, "return once queued")
-	pos, err := parseN(fs, args, "DATABASE", "POINT")
-	if err != nil {
-		return err
-	}
-	return createRestorePoint(ctx, c, pos[0], pos[1], *noWait)
-}
-
-func restorePointList(ctx context.Context, c *client.Client, args []string) error {
-	name, err := dbArg(ctx, c, flag.NewFlagSet("restore-point list", flag.ContinueOnError), args)
+func marksCmd(ctx context.Context, c *client.Client, args []string) error {
+	name, err := dbArg(ctx, c, flag.NewFlagSet("marks", flag.ContinueOnError), args)
 	if err != nil {
 		return err
 	}
@@ -673,18 +777,4 @@ func restorePointList(ctx context.Context, c *client.Client, args []string) erro
 	}
 	t.flush()
 	return nil
-}
-
-// dbProtection exits 0 if the database is protected and 3 if not, so
-// scripts and AI-agent hooks can gate risky changes on it.
-// dbProtection exits 0 if the database is protected and 3 if not, so
-// scripts and AI-agent hooks can gate risky changes on it.
-func dbProtection(ctx context.Context, c *client.Client, args []string) error {
-	fs := flag.NewFlagSet("db protection", flag.ContinueOnError)
-	asJSON := fs.Bool("json", false, "print the full check as JSON")
-	name, err := dbArg(ctx, c, fs, args)
-	if err != nil {
-		return err
-	}
-	return protectionStatus(ctx, c, name, *asJSON)
 }

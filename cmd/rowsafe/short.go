@@ -16,43 +16,46 @@ import (
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
-const shortHelp = `rowsafe - backups, point-in-time recovery and restore drills for your Postgres
+const shortHelp = `rowsafe - backups you can restore to any second, tested every week
 
 Getting started
   rowsafe login                      log in with your browser
-  rowsafe hosts enroll-token         install command for a database host
-  rowsafe adopt NAME                 register a Postgres on that host (read-only plan)
-  rowsafe apply NAME                 apply the plan (never restarts Postgres)
-  rowsafe verify NAME                prove WAL reaches the repository; backups start
+  rowsafe hosts enroll-token         the install command for a database server; the installer
+                                     sets up backups there and asks before changing anything
+  rowsafe restart [NAME]             restart PostgreSQL when setup needs it (asks first)
   rowsafe init NAME                  make NAME this project's database (.rowsafe.json)
+  rowsafe adopt | plan | apply | verify NAME
+                                     set up by hand from your workstation instead
 
-Protect
-  rowsafe status [NAME]              is it recoverable right now? (exit 0 yes, 3 no)
+Rewind: continuous backups, restore to any second
   rowsafe ls                         databases
   rowsafe show [NAME]                one database in detail
   rowsafe backup [NAME]              back up now          rowsafe backups [NAME]   list them
-  rowsafe drill [NAME]               restore drill now    rowsafe drills [NAME]    list them
-  rowsafe mark [NAME] [LABEL]        restore point, e.g. before a migration
-  rowsafe tasks [NAME]               recent tasks
+  rowsafe mark [NAME] [LABEL]        a named restore point, e.g. before a migration
+  rowsafe marks [NAME]               restore points
+  restore guide                      https://rowsafe.sh/docs/guides/restore
 
-Monitor
-  rowsafe health [NAME]              health score (0-100) and what to fix
+Proof: the weekly restore test
+  rowsafe proof [NAME]               run the restore test now
+  rowsafe proofs [NAME]              results
+
+Pulse: health and monitoring
+  rowsafe pulse [NAME]               health score (0-100) and what to fix
   rowsafe insights [NAME]            largest tables, unused indexes, bloat, vacuum
   rowsafe top [NAME]                 queries that take the most time, and which got slower
-  rowsafe report                     the weekly "Your databases this week" email
+  rowsafe alerts                     firing alerts (rowsafe channels: where they go)
+  rowsafe report                     "Your weekly Pulse", the weekly email
 
-Recover
-  rowsafe marks [NAME]               restore points to recover to
-  rowsafe backups [NAME]             backups and the recovery window
-  https://rowsafe.sh/docs/guides/restore
-                                     the restore procedure (pgBackRest)
+Guard: the safety net for AI agents
+  rowsafe status [NAME]              is it recoverable right now? (exit 0 yes, 3 no)
+  rowsafe mcp                        MCP server for AI assistants
+  rowsafe guard                      Claude Code hook: a restore point before destructive commands
 
 Admin
-  rowsafe whoami | logout | org | audit
-  rowsafe hosts list|enroll-token|pin|unpin|channel|remove
-  rowsafe api-keys list|create|revoke
-  rowsafe db set|remove NAME         retention, schedules; stop managing a database
-  rowsafe alerts | channels | mcp | guard
+  rowsafe tasks [NAME] | task ID     recent tasks; one task with its log
+  rowsafe set | remove | activity NAME
+                                     retention and schedules; stop managing; long-running queries
+  rowsafe hosts | api-keys | org | audit | whoami | logout
 
 NAME can be left out in a project with .rowsafe.json, with ROWSAFE_DATABASE
 set, or when the organization has one database ("rowsafe help names").
@@ -63,7 +66,7 @@ set, or when the organization has one database ("rowsafe help names").
 // helpDetails adds explanations that don't fit the one-line reference.
 var helpDetails = map[string]string{
 	"names": nameRules,
-	"health": `The score starts at 100 and loses points for each problem found: backups,
+	"pulse": `The score starts at 100 and loses points for each problem found: backups,
 restore tests and WAL archiving; whether PostgreSQL answers; disk space and
 when it will run out; connections; vacuum, transaction ID wraparound and
 wasted space; locks, slow-downs and index suggestions; replication. One
@@ -76,8 +79,8 @@ inferred database: in a project whose .rowsafe.json names "app",
 "rowsafe mark app" marks app with the default label.`,
 	"status": `With NAME: a conservative check that the database is recoverable right now
 (active, WAL archiving reporting and not failing, a backup in the last 26
-hours, the latest drill passed within 8 days). Without NAME: every problem
-across hosts and databases, each with the command to run next.
+hours, the latest restore test (Proof) passed within 8 days). Without NAME:
+every problem across hosts and databases, each with the command to run next.
 Exit status: 0 protected (or all healthy), 3 not, 1 on errors.`,
 	"login": `Opens a browser page where you confirm the code shown in the terminal; the
 new API key is saved to your config directory (mode 0600). Over SSH, or with
@@ -87,52 +90,16 @@ saved login, else https://api.rowsafe.sh.`,
 	"init": `Writes {"database": NAME} to .rowsafe.json in the current directory (keeping
 other settings in an existing file). Commands run in this directory or below
 then use NAME when it is left out; so does the Claude Code guard hook.`,
-}
-
-// aliases maps short commands to their long forms.
-var aliases = map[string][]string{
-	"ls":      {"db", "list"},
-	"show":    {"db", "show"},
-	"adopt":   {"db", "adopt"},
-	"plan":    {"db", "plan"},
-	"apply":   {"db", "apply"},
-	"verify":  {"db", "verify"},
-	"backups": {"backup", "list"},
-	"drills":  {"drill", "list"},
-	"marks":   {"restore-point", "list"},
-}
-
-// expandAlias rewrites short forms to the long commands. "backup" and
-// "drill" alone mean "run" unless followed by run or list.
-func expandAlias(args []string) []string {
-	if long, ok := aliases[args[0]]; ok {
-		return append(append([]string{}, long...), args[1:]...)
-	}
-	if (args[0] == "backup" || args[0] == "drill") && (len(args) == 1 || (args[1] != "run" && args[1] != "list")) {
-		return append([]string{args[0], "run"}, args[1:]...)
-	}
-	return args
-}
-
-// shortCommand runs the commands that exist only in short form.
-func shortCommand(ctx context.Context, c *client.Client, args []string) (bool, error) {
-	switch args[0] {
-	case "mark":
-		return true, markCmd(ctx, c, args[1:])
-	case "status":
-		return true, statusCmd(ctx, c, args[1:])
-	case "init":
-		return true, initCmd(ctx, c, args[1:])
-	case "health":
-		return true, healthCmd(ctx, c, args[1:])
-	case "insights":
-		return true, insightsCmd(ctx, c, args[1:])
-	case "top":
-		return true, topCmd(ctx, c, args[1:])
-	case "report":
-		return true, reportCmd(ctx, c, args[1:])
-	}
-	return false, nil
+	"restart": `Rowsafe never restarts PostgreSQL on its own. It restarts it only when you ask
+(this command, Restart PostgreSQL in the dashboard, or the installer), and
+only on servers where the installer was allowed to (root decides at install
+time). If this server doesn't allow it, the task fails and says how to
+restart by hand. A database waiting for a restart to start its backups
+finishes setting up by itself once PostgreSQL is back.`,
+	"proof": `Proof restores the latest backup plus WAL into a scratch copy on the same
+server (its own socket, no network, low priority), checks that every
+database and table is there, and deletes the copy. It runs every week on
+its own (rowsafe set --proof-schedule changes when); this runs it now.`,
 }
 
 func markCmd(ctx context.Context, c *client.Client, args []string) error {
@@ -267,14 +234,7 @@ func helpFor(args []string) string {
 	if topic == "all" {
 		return usage + "\n" + nameRules + "\n"
 	}
-	var lines []string
-	if long, ok := aliases[args[0]]; ok {
-		lines = append(lines, fmt.Sprintf("rowsafe %s is short for rowsafe %s.", args[0], strings.Join(long, " ")))
-	}
-	lines = append(lines, referenceLines(topic)...)
-	if long, ok := aliases[args[0]]; ok && len(args) == 1 {
-		lines = append(lines, referenceLines(strings.Join(long, " "))...)
-	}
+	lines := referenceLines(topic)
 	if d, ok := helpDetails[topic]; ok {
 		lines = append(lines, "", d)
 	}
@@ -303,7 +263,7 @@ func referenceLines(topic string) []string {
 	return out
 }
 
-// createRestorePoint is rowsafe mark and restore-point create.
+// createRestorePoint is rowsafe mark.
 func createRestorePoint(ctx context.Context, c *client.Client, db, label string, noWait bool) error {
 	t, err := c.CreateRestorePoint(ctx, db, label)
 	if err != nil {
@@ -316,7 +276,7 @@ func createRestorePoint(ctx context.Context, c *client.Client, db, label string,
 	return waitAndReport(ctx, c, t.ID, db)
 }
 
-// protectionStatus is rowsafe status NAME and db protection.
+// protectionStatus is rowsafe status NAME.
 func protectionStatus(ctx context.Context, c *client.Client, name string, asJSON bool) error {
 	p, err := c.Protection(ctx, name)
 	if err != nil {
@@ -343,13 +303,13 @@ func printProtection(name string, p protocol.Protection) {
 			fmt.Printf("  - %s\n", r)
 		}
 	}
-	fmt.Printf("\nLast backup:        %s\n", ago(p.LastBackupAt))
-	fmt.Printf("Last WAL archived:  %s\n", ago(p.WALLastArchivedAt))
+	fmt.Printf("\nLast backup:          %s\n", ago(p.LastBackupAt))
+	fmt.Printf("Last WAL archived:    %s\n", ago(p.WALLastArchivedAt))
 	if p.RecoveryWindowStart != nil {
-		fmt.Printf("Recoverable from:   %s\n", p.RecoveryWindowStart.Local().Format(time.RFC1123))
+		fmt.Printf("Recoverable from:     %s\n", p.RecoveryWindowStart.Local().Format(time.RFC1123))
 	}
-	fmt.Printf("Last passing drill: %s\n", ago(p.LastDrillPassedAt))
+	fmt.Printf("Restore test passed:  %s\n", ago(p.LastDrillPassedAt))
 	for _, t := range p.OpenFailedTasks {
-		fmt.Printf("Failing:            %s %s (%s): %s\n", t.Type, t.Status, t.ID, firstLine(t.Error, 80))
+		fmt.Printf("Failing:              %s %s (%s): %s\n", t.Type, t.Status, t.ID, firstLine(t.Error, 80))
 	}
 }

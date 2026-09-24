@@ -8,9 +8,9 @@
 #      (chmod 600; see below), with a one-time token from
 #      `rowsafe hosts enroll-token`.
 #   2. ROWSAFE_AGENT_VERSION=<release> docker compose up -d
-#   3. rowsafe db adopt app --host db-1   (then `rowsafe db apply app`,
-#      `docker compose restart postgres` in a maintenance window, and
-#      `rowsafe db verify app`)
+#   3. rowsafe adopt app --host db-1   (then `rowsafe apply app` and
+#      `docker compose restart postgres` when it suits you; Rowsafe
+#      notices the restart and finishes by itself)
 #
 # Adding Rowsafe to an existing compose file takes only the lines marked
 # "Rowsafe": two volume mounts on your postgres service, the rowsafe-agent
@@ -45,7 +45,7 @@ services:
     # One tag per PostgreSQL major: <version>-pg<major>[-alpine]. Pin a
     # release; upgrade by changing it (the agent never updates itself here).
     image: ghcr.io/rowsafe/agent:${ROWSAFE_AGENT_VERSION:?set ROWSAFE_AGENT_VERSION to a Rowsafe release}-pg17
-    # The name Rowsafe shows for this host: `rowsafe db adopt app --host db-1`.
+    # The name Rowsafe shows for this host: `rowsafe adopt app --host db-1`.
     hostname: db-1
     # The postgres user of the postgres image: 999:999 (Debian images),
     # 70:70 (-alpine images). The agent checks this at startup.

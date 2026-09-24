@@ -578,8 +578,8 @@ func compareDatabases(source, restored []protocol.DBInfo) (out []protocol.DrillD
 	return out, failures, warnings
 }
 
-// niceWrap lowers the drill's CPU and IO priority so it competes as little
-// as possible with production on the same host.
+// niceWrap lowers a drill's or backup's CPU and IO priority so it competes
+// as little as possible with production on the same host.
 func niceWrap() []string {
 	if p, err := exec.LookPath("ionice"); err == nil {
 		return []string{p, "-c2", "-n7", "nice", "-n", "10"}

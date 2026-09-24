@@ -289,11 +289,11 @@ func TestSpoolStallCountsAsArchiveFailure(t *testing.T) {
 func TestSidecarArchiverStats(t *testing.T) {
 	t0 := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	at := func(m int) *time.Time { x := t0.Add(time.Duration(m) * time.Minute); return &x }
-	pg := protocol.ArchiverStats{DatabaseID: "db1", ArchivedCount: 40, FailedCount: 1, LastArchivedTime: at(10), LastFailedTime: at(1)}
+	pg := protocol.ArchiverStats{DatabaseID: "db1", ArchivedCount: 40, FailedCount: 1, LastArchivedTime: at(10), LastFailedTime: at(1), ArchiveMode: "on"}
 
 	// Healthy: empty spool, pushes up to date.
 	got := sidecarArchiverStats(pg, SpoolStatus{PushedCount: 5, LastPushed: "000000010000000000000009", LastPushedAt: t0.Add(10*time.Minute + time.Second)})
-	if got.Mode != ModeDockerSidecar || got.SpooledCount != 40 || *got.LastSpooledTime != *at(10) {
+	if got.Mode != ModeDockerSidecar || got.SpooledCount != 40 || *got.LastSpooledTime != *at(10) || got.ArchiveMode != "on" {
 		t.Errorf("PostgreSQL's view must be kept in the spool fields: %+v", got)
 	}
 	if got.ArchivedCount != 5 || !got.LastArchivedTime.Equal(t0.Add(10*time.Minute+time.Second)) || got.FailedCount != 1 || !got.LastFailedTime.Equal(*at(1)) {

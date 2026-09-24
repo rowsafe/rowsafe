@@ -22,7 +22,7 @@ Group=postgres
 EnvironmentFile=/etc/rowsafe/agent.env
 # Rolls the symlink back to the previous version when a self-update keeps
 # crashing before it confirms itself. It always exits 0.
-ExecStartPre=/opt/rowsafe/bin/rowsafe-agent-guard
+ExecStartPre=/usr/local/lib/rowsafe/rowsafe-agent-guard
 # A symlink into /opt/rowsafe/versions/ that self-update swaps atomically.
 ExecStart=/opt/rowsafe/rowsafe-agent run
 # The agent exits 0 to switch versions after an update, so restart on success too.

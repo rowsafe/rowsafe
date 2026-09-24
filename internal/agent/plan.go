@@ -13,6 +13,24 @@ import (
 // transactions in it) reaches the repository within about this many seconds.
 const DesiredArchiveTimeout = 300
 
+// restartWarning is the plan's warning when PostgreSQL needs a restart.
+// Rowsafe never restarts it on its own; once someone does, the control plane
+// notices (the agent reports archive_mode) and verifies by itself.
+func restartWarning(sidecar bool, name string) string {
+	if name == "" {
+		name = "NAME"
+	}
+	how := "restart it when it suits you (Restart PostgreSQL in the dashboard, `rowsafe restart " + name + "`, or on the server)"
+	if sidecar {
+		how = "restart its container when it suits you (e.g. `docker compose restart postgres`)"
+	}
+	return RestartWarningPrefix + " Rowsafe never restarts it on its own: " + how +
+		". Rowsafe notices the restart by itself and finishes; `rowsafe verify " + name + "` checks right away."
+}
+
+// RestartWarningPrefix starts the plan's restart warning.
+const RestartWarningPrefix = "PostgreSQL needs a quick restart for backups to start."
+
 // Plan is the outcome of comparing a cluster with what Rowsafe needs.
 type Plan struct {
 	Changes  []protocol.Change
@@ -28,6 +46,7 @@ type PlanInput struct {
 	ArchiveCommand string // the archive_command Rowsafe wants
 	SpoolDir       string // sidecar mode: this stanza's spool directory
 	Force          bool   // replace a foreign archiver
+	Name           string // the database's name in Rowsafe, for hints
 }
 
 // PlanAdopt plans native-mode adoption; see PlanAdoptInput.
@@ -140,12 +159,8 @@ func PlanAdoptInput(in protocol.InspectResult, pi PlanInput) (Plan, error) {
 			p.Restart = true
 		}
 	}
-	if p.Restart && sidecar {
-		p.Warnings = append(p.Warnings,
-			"PostgreSQL must be restarted for WAL archiving to start. Rowsafe never restarts your database; restart its container in a maintenance window (e.g. `docker compose restart postgres`), then run `rowsafe db verify`.")
-	} else if p.Restart {
-		p.Warnings = append(p.Warnings,
-			"PostgreSQL must be restarted for WAL archiving to start. Rowsafe never restarts your database; restart it in a maintenance window, then run `rowsafe db verify`.")
+	if p.Restart {
+		p.Warnings = append(p.Warnings, restartWarning(sidecar, pi.Name))
 	}
 	return p, nil
 }

@@ -38,9 +38,12 @@ type Agent struct {
 
 	mu      sync.Mutex
 	watched []protocol.DatabaseSpec
-	// monitored is what built-in monitoring covers (HeartbeatResponse.Monitored);
-	// nil until a control plane that sends it answers.
+	// monitored is what built-in monitoring covers (HeartbeatResponse.Monitored).
 	monitored []protocol.DatabaseSpec
+
+	// pgArchiveMode reads archive_mode; a restart task uses it to wait
+	// until PostgreSQL answers again (tests replace it).
+	pgArchiveMode func(context.Context, pginspect.Target) (string, error)
 
 	// fastMu is held while the fast lane runs a restore point, so a
 	// restart for an update waits for it.
@@ -48,7 +51,7 @@ type Agent struct {
 }
 
 func New(cfg Config, logger *slog.Logger) *Agent {
-	a := &Agent{cfg: cfg, log: logger, runner: pgbackrest.ExecRunner{}}
+	a := &Agent{cfg: cfg, log: logger, runner: pgbackrest.ExecRunner{}, pgArchiveMode: pginspect.ArchiveMode}
 	u, reason := NewUpdater(cfg, logger)
 	if u == nil {
 		logger.Warn("agent self-update is off", "reason", reason)
@@ -232,6 +235,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 		req := protocol.HeartbeatRequest{
 			Hostname: hostname, AgentVersion: Version, Platform: release.Platform(),
 			Archivers: a.archiverStats(ctx), Update: a.updater.Report(), Mode: a.cfg.Mode,
+			RestartPorts: a.restartPorts(),
 		}
 		resp, err := a.client.heartbeat(ctx, req)
 		if isUnauthorized(err) {
@@ -270,15 +274,11 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 }
 
 // monitoredDatabases is what built-in monitoring covers: every database of
-// the host when the control plane says so (including ones not adopted yet),
-// else the watched ones.
+// the host, including ones not adopted yet.
 func (a *Agent) monitoredDatabases() []protocol.DatabaseSpec {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if len(a.monitored) > 0 {
-		return slices.Clone(a.monitored)
-	}
-	return slices.Clone(a.watched)
+	return slices.Clone(a.monitored)
 }
 
 // RevokedBackoff is how long the agent waits between attempts once the

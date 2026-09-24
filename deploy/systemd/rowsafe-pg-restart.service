@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-pg-restart.service: restarts a PostgreSQL cluster that root listed
+# in /etc/rowsafe/restart-allowed, when the Rowsafe agent asks because a
+# person did (see /usr/local/lib/rowsafe/rowsafe-pg-restart). Started by
+# rowsafe-pg-restart.path; installed by https://rowsafe.sh/install only when
+# root allowed it.
+
+[Unit]
+Description=Rowsafe: restart PostgreSQL on request
+Documentation=https://rowsafe.sh/docs/reference/agent-configuration
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/rowsafe/rowsafe-pg-restart
+TimeoutStartSec=180
+# The agent user, whose privileges read and remove the request.
+Environment=ROWSAFE_AGENT_USER=postgres
+# The answer: root's own directory, which the agent can read.
+RuntimeDirectory=rowsafe-pg-restart
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+# When each unit was last restarted (at most once a minute), out of the
+# agent's reach.
+StateDirectory=rowsafe-pg-restart
+StateDirectoryMode=0700
+UMask=0022
+
+# Hardening. Root never writes into the agent's directory: the request is
+# read and removed as the agent user (hence CAP_SETUID/CAP_SETGID, to drop
+# to it). Then it asks systemd over its private socket to restart one unit.
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=-/var/lib/rowsafe/restart
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service

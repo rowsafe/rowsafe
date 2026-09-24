@@ -172,7 +172,7 @@ func (p *spoolPusher) pushStanza(ctx context.Context, stanza string) int {
 	cli, ok := p.cli(stanza)
 	if !ok {
 		p.fail(stanza, names[0], fmt.Errorf("no pgBackRest configuration for stanza %s yet: the agent writes it on adopt and "+
-			"before every task (run `rowsafe db verify %s`)", stanza, stanza))
+			"before every task (run `rowsafe verify %s`)", stanza, stanza))
 		return 0
 	}
 	pushed := 0

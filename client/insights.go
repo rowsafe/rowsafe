@@ -84,7 +84,7 @@ func (c *Client) QueryDetail(ctx context.Context, ref, queryID string, q QueryTr
 	return out, c.do(ctx, http.MethodGet, path, nil, &out)
 }
 
-// OrgSettings returns the organization's settings (the weekly report).
+// OrgSettings returns the organization's settings (the weekly Pulse email).
 func (c *Client) OrgSettings(ctx context.Context) (out protocol.OrgSettings, err error) {
 	return out, c.do(ctx, http.MethodGet, "/v1/org/settings", nil, &out)
 }
@@ -94,12 +94,12 @@ func (c *Client) UpdateOrgSettings(ctx context.Context, req protocol.UpdateOrgSe
 	return out, c.do(ctx, http.MethodPut, "/v1/org/settings", req, &out)
 }
 
-// WeeklyReport renders the weekly report as it would be sent now.
+// WeeklyReport renders the weekly Pulse email as it would be sent now.
 func (c *Client) WeeklyReport(ctx context.Context) (out protocol.WeeklyReportPreview, err error) {
 	return out, c.do(ctx, http.MethodGet, "/v1/org/weekly-report", nil, &out)
 }
 
-// SendTestWeeklyReport emails the weekly report to its recipients now.
+// SendTestWeeklyReport emails the weekly Pulse to its recipients now.
 func (c *Client) SendTestWeeklyReport(ctx context.Context) (out protocol.ChannelTestResult, err error) {
 	return out, c.do(ctx, http.MethodPost, "/v1/org/weekly-report/test", nil, &out)
 }

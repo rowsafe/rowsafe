@@ -86,7 +86,7 @@ func (t *tools) addSafetyReadTools(s *sdk.Server) {
 		Name: "safety_check",
 		Description: "Check whether a database can be recovered right now, before you change it. " +
 			"Call this BEFORE any destructive or risky database operation: running migrations (prisma migrate, rails db:migrate, alembic, django migrate, knex, goose, ...), DROP or TRUNCATE, DELETE or UPDATE without a narrow WHERE, bulk data changes, schema changes, or restoring a dump over a database. " +
-			"protected=true means: active, WAL archiving works, a backup finished in the last 26h and the latest restore drill passed. " +
+			"protected=true means: active, WAL archiving works, a backup finished in the last 26h and the latest restore test (Proof) passed. " +
 			"If it is not protected, tell the user the reasons and ask whether to proceed anyway before doing anything destructive. If it is protected, create a restore point next (create_restore_point).",
 		Annotations: readOnly("Safety check before destructive changes"),
 	}, t.safetyCheck)
@@ -144,7 +144,7 @@ func (t *tools) safetyCheck(ctx context.Context, _ *sdk.CallToolRequest, in data
 		if p.RecoveryWindowStart != nil {
 			window = " from " + p.RecoveryWindowStart.UTC().Format(time.RFC3339)
 		}
-		b.line("PROTECTED: %s can be restored to any point%s up to about now (WAL last archived %s, last backup %s, last drill passed %s).",
+		b.line("PROTECTED: %s can be restored to any point%s up to about now (WAL last archived %s, last backup %s, last restore test passed %s).",
 			d.Name, window, ago(p.WALLastArchivedAt, now), ago(p.LastBackupAt, now), ago(p.LastDrillPassedAt, now))
 	} else {
 		out.Guidance = "NOT protected. Before any destructive operation, tell the user these reasons and ask whether to proceed anyway; don't proceed on your own. fleet_health gives the fix for each reason."
@@ -241,7 +241,7 @@ func (t *tools) createRestorePoint(ctx context.Context, _ *sdk.CallToolRequest, 
 	var b textBuilder
 	switch {
 	case out.Confirmed:
-		set := "the restore_from_backup label from `rowsafe restore-point list " + shellArg(d.Name) + "`"
+		set := "the restore_from_backup label from `rowsafe marks " + shellArg(d.Name) + "`"
 		if out.RestoreFromBackup != "" {
 			set = out.RestoreFromBackup
 		}

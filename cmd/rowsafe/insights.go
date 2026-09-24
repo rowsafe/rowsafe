@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,7 +15,7 @@ import (
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
-// Health scores, table insights, query trends and the weekly report.
+// Health scores, table insights, query trends and the weekly Pulse email.
 
 func printJSON(v any) error {
 	out, err := json.MarshalIndent(v, "", "  ")
@@ -32,11 +33,11 @@ var gradeText = map[string]string{
 	protocol.GradeCritical:       "critical",
 }
 
-// healthCmd is rowsafe health [NAME]: one database's score and findings,
+// pulseCmd is rowsafe pulse [NAME]: one database's health score and findings,
 // or every database's score. Exit status 3 when a database is at risk or
 // critical (score below 70).
-func healthCmd(ctx context.Context, c *client.Client, args []string) error {
-	fs := flag.NewFlagSet("health", flag.ContinueOnError)
+func pulseCmd(ctx context.Context, c *client.Client, args []string) error {
+	fs := flag.NewFlagSet("pulse", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "print the full result as JSON")
 	pos, err := positionals(fs, args)
 	if err != nil {
@@ -46,7 +47,7 @@ func healthCmd(ctx context.Context, c *client.Client, args []string) error {
 		return errors.New("expected at most one database name")
 	}
 	if len(pos) == 0 {
-		return fleetHealthCmd(ctx, c, *asJSON)
+		return fleetPulse(ctx, c, *asJSON)
 	}
 	h, err := c.Health(ctx, pos[0])
 	if err != nil {
@@ -108,7 +109,7 @@ func printHealth(h protocol.DatabaseHealth) {
 	}
 }
 
-func fleetHealthCmd(ctx context.Context, c *client.Client, asJSON bool) error {
+func fleetPulse(ctx context.Context, c *client.Client, asJSON bool) error {
 	o, err := c.FleetHealth(ctx)
 	if err != nil {
 		return err
@@ -129,7 +130,7 @@ func fleetHealthCmd(ctx context.Context, c *client.Client, asJSON bool) error {
 			t.row(d.Database, d.Host, strconv.Itoa(d.Score), gradeText[d.Grade], top)
 		}
 		t.flush()
-		fmt.Println("\nDetails and what to do: rowsafe health NAME")
+		fmt.Println("\nDetails and what to do: rowsafe pulse NAME")
 	}
 	for _, d := range o.Databases {
 		if d.Score < 70 {
@@ -294,13 +295,7 @@ func topCmd(ctx context.Context, c *client.Client, args []string) error {
 		return printJSON(q)
 	}
 	if !q.TrendAvailable {
-		fmt.Printf("No per-interval query statistics for %s yet (they need pg_stat_statements and an up-to-date agent; the first numbers arrive 10 minutes after it starts).\n", name)
-		if q.Available && len(q.Statements.Statements) > 0 {
-			fmt.Println("Cumulative statistics since pg_stat_statements was last reset: rowsafe db top " + name)
-		} else if q.Reason != "" {
-			fmt.Println(q.Reason)
-		}
-		return nil
+		return printCumulativeTop(name, q.Statements, *width)
 	}
 	fmt.Printf("Top statements of %s in the last %s by %s: %d calls, %s of execution time in total\n\n",
 		name, *since, strings.ReplaceAll(*sort, "_", " "), q.Totals.Calls, msText(q.Totals.TotalTimeMs))
@@ -329,6 +324,26 @@ func topCmd(ctx context.Context, c *client.Client, args []string) error {
 		fmt.Printf(" %d statement(s) got more than twice as slow.", regressions)
 	}
 	fmt.Printf("\nOne statement's history: rowsafe top %s --query QUERY_ID\n", name)
+	return nil
+}
+
+// printCumulativeTop shows pg_stat_statements' totals since its last reset,
+// for when the per-interval numbers are not there yet.
+func printCumulativeTop(name string, st protocol.Statements, width int) error {
+	if !st.Available || len(st.Statements) == 0 {
+		fmt.Printf("No query statistics for %s yet: %s\n", name, cmp.Or(st.Reason,
+			"they need pg_stat_statements; the first numbers arrive 10 minutes after the agent starts"))
+		return nil
+	}
+	fmt.Printf("Top statements of %s by total time since pg_stat_statements was last reset (collected %s).\n", name, ago(&st.CollectedAt))
+	fmt.Printf("Numbers per time range, and which queries got slower, arrive within 10 minutes.\n\n")
+	t := newTable("QUERY ID", "TOTAL", "CALLS", "MEAN", "ROWS", "DATABASE", "QUERY")
+	for _, s := range st.Statements {
+		query := strings.Join(strings.Fields(s.Query), " ")
+		t.row(s.QueryID, msText(s.TotalTimeMs), strconv.FormatInt(s.Calls, 10), msText(s.MeanTimeMs),
+			strconv.FormatInt(s.Rows, 10), orDash(s.Database), firstLine(orDash(query), max(width, 20)))
+	}
+	t.flush()
 	return nil
 }
 
@@ -362,16 +377,16 @@ func topQuery(ctx context.Context, c *client.Client, name, id string, since time
 	return nil
 }
 
-// reportCmd is rowsafe report: the weekly report's settings, a preview,
+// reportCmd is rowsafe report: the weekly Pulse email's settings, a preview,
 // or a test send.
 func reportCmd(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("report", flag.ContinueOnError)
-	preview := fs.Bool("preview", false, "print the report as it would be sent now")
+	preview := fs.Bool("preview", false, "print this week's Pulse email as it would be sent now")
 	html := fs.Bool("html", false, "with --preview: print the HTML version")
-	on := fs.Bool("on", false, "send the weekly report every Monday")
-	off := fs.Bool("off", false, "stop the weekly report")
+	on := fs.Bool("on", false, "send \"Your weekly Pulse\" every Monday")
+	off := fs.Bool("off", false, "stop the weekly Pulse email")
 	to := fs.String("to", "", "comma-separated recipients (\"\" with --to= goes back to the email alert channels)")
-	sendTest := fs.Bool("send-test", false, "email the report to its recipients now")
+	sendTest := fs.Bool("send-test", false, "email this week's Pulse to its recipients now")
 	if _, err := parse(fs, args, false); err != nil {
 		return err
 	}
@@ -417,10 +432,10 @@ func reportCmd(ctx context.Context, c *client.Client, args []string) error {
 			return err
 		}
 		if !res.OK {
-			fmt.Println("Sending the report failed:", res.Error)
+			fmt.Println("Sending the weekly Pulse failed:", res.Error)
 			return exitError(1)
 		}
-		fmt.Println("Test report sent.")
+		fmt.Println("Test email sent: \"Your weekly Pulse\".")
 		return nil
 	}
 	st, err := c.OrgSettings(ctx)
@@ -431,7 +446,7 @@ func reportCmd(ctx context.Context, c *client.Client, args []string) error {
 	if st.WeeklyReport {
 		state = "on (every Monday morning, UTC)"
 	}
-	fmt.Printf("Weekly report: %s\n", state)
+	fmt.Printf("Your weekly Pulse (email): %s\n", state)
 	switch {
 	case len(st.WeeklyReportRecipients) > 0:
 		fmt.Printf("Recipients: %s\n", strings.Join(st.WeeklyReportRecipients, ", "))

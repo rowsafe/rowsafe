@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -83,6 +84,12 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 			return nil, err // keep a typed nil out of the interface
 		}
 		return res, err
+	case protocol.TaskRestart:
+		res, err := a.restart(ctx, db, task.ID, tl)
+		if res == nil {
+			return nil, err
+		}
+		return res, err
 	}
 	return nil, fmt.Errorf("unsupported task type %q (agent %s)", task.Type, Version)
 }
@@ -90,6 +97,18 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 func (a *Agent) cli(db protocol.DatabaseSpec) pgbackrest.CLI {
 	return pgbackrest.CLI{Bin: a.cfg.PgBackRestBin, ConfigPath: a.cfg.configPath(db.Stanza), Stanza: db.Stanza, Runner: a.runner}
 }
+
+// backupCLI runs backups at low CPU and IO priority, like restore tests, so
+// production PostgreSQL on the same host comes first. (archive-push, which
+// PostgreSQL runs itself, is not affected.)
+func (a *Agent) backupCLI(db protocol.DatabaseSpec) pgbackrest.CLI {
+	cli := a.cli(db)
+	cli.Wrap = niceWrap()
+	return cli
+}
+
+// numCPU is the host's CPU count (a variable for tests).
+var numCPU = runtime.NumCPU
 
 // writeConfig renders the pgBackRest config for db. It is rewritten before
 // every operation so retention and credential changes take effect.
@@ -109,6 +128,7 @@ func (a *Agent) writeConfig(db protocol.DatabaseSpec, in protocol.InspectResult)
 	conf := pgbackrest.RenderConfig(a.cfg.Repo, pgbackrest.ConfigInput{
 		Stanza: db.Stanza, DataDir: in.DataDirectory, Port: db.Port, SocketDir: db.SocketDir,
 		User: a.cfg.PGUser, RetentionFull: db.RetentionFull, LogPath: logDir,
+		ProcessMax: pgbackrest.ProcessMax(numCPU()),
 	})
 	path := a.cfg.configPath(db.Stanza)
 	if old, err := os.ReadFile(path); err == nil && string(old) == conf {
@@ -125,7 +145,7 @@ func (a *Agent) adopt(ctx context.Context, db protocol.DatabaseSpec, p protocol.
 	tl.Printf("found PostgreSQL %s, data directory %s, %d databases, %s",
 		in.ServerVersion, in.DataDirectory, len(in.Databases), humanBytes(in.TotalSizeBytes))
 
-	pi := PlanInput{Mode: a.cfg.Mode, ConfigPath: a.cfg.configPath(db.Stanza), Force: p.Force}
+	pi := PlanInput{Mode: a.cfg.Mode, ConfigPath: a.cfg.configPath(db.Stanza), Force: p.Force, Name: db.Name}
 	if a.cfg.Sidecar() {
 		if pi.SpoolDir, err = pgbackrest.SpoolDir(a.cfg.SpoolDir, db.Stanza); err != nil {
 			return nil, err
@@ -255,7 +275,7 @@ func (a *Agent) check(ctx context.Context, db protocol.DatabaseSpec, tl *taskLog
 			return res, err
 		}
 		if _, ok := pgbackrest.ParseSpoolArchiveCommand(in.ArchiveCommand); !ok {
-			return res, fmt.Errorf("archive_command is %q, not Rowsafe's spool command: run `rowsafe db plan` and apply it", in.ArchiveCommand)
+			return res, fmt.Errorf("archive_command is %q, not Rowsafe's spool command: run `rowsafe plan` and apply it", in.ArchiveCommand)
 		}
 	}
 	if err := a.writeConfig(db, in); err != nil {
@@ -293,7 +313,7 @@ func (a *Agent) backup(ctx context.Context, db protocol.DatabaseSpec, typ string
 	}
 	cli := a.cli(db)
 	tl.Printf("starting %s backup of %s", typ, humanBytes(in.TotalSizeBytes))
-	out, err := cli.Backup(ctx, typ)
+	out, err := a.backupCLI(db).Backup(ctx, typ)
 	tl.Output("pgbackrest backup", out)
 	if err != nil {
 		return nil, err

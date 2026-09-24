@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -27,7 +30,10 @@ type fakeAPI struct {
 	marks      []string // "db/label" of created restore points
 	logouts    []string // API keys that logged out
 	deviceName string
-	health     map[string]int // database -> health score
+	health     map[string]int      // database -> health score
+	tasks      []protocol.TaskView // tasks created through POST /v1/databases/{ref}/tasks
+	reject     map[string]int      // task type -> status POST /v1/databases/{ref}/tasks answers
+	retryAfter string              // Retry-After header on rejections
 }
 
 func (f *fakeAPI) handler(t *testing.T) http.Handler {
@@ -60,6 +66,55 @@ func (f *fakeAPI) handler(t *testing.T) http.Handler {
 	for _, p := range []string{"backups", "drills", "tasks"} {
 		mux.HandleFunc("GET /v1/databases/{ref}/"+p, authed(func(w http.ResponseWriter, r *http.Request) { j(w, 200, []any{}) }))
 	}
+	mux.HandleFunc("GET /v1/tasks", authed(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		out := []protocol.TaskView{}
+		for _, tk := range f.tasks {
+			if typ := r.URL.Query().Get("type"); typ == "" || typ == tk.Type {
+				out = append(out, tk)
+			}
+		}
+		j(w, 200, out)
+	}))
+	mux.HandleFunc("POST /v1/databases/{ref}/tasks", authed(func(w http.ResponseWriter, r *http.Request) {
+		var req protocol.CreateTaskRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if !slices.ContainsFunc(f.dbs, func(d protocol.Database) bool { return d.Name == r.PathValue("ref") }) {
+			j(w, 404, protocol.Error{Error: "not found"})
+			return
+		}
+		if status := f.reject[req.Type]; status != 0 {
+			if f.retryAfter != "" {
+				w.Header().Set("Retry-After", f.retryAfter)
+			}
+			j(w, status, protocol.Error{Error: "rejected"})
+			return
+		}
+		tk := protocol.TaskView{ID: fmt.Sprintf("task_%d", len(f.tasks)+1), Type: req.Type, Status: protocol.StatusQueued,
+			DatabaseName: r.PathValue("ref"), Params: req.Params}
+		f.tasks = append(f.tasks, tk)
+		j(w, 201, tk)
+	}))
+	mux.HandleFunc("GET /v1/tasks/{id}", authed(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		for _, tk := range f.tasks {
+			if tk.ID == r.PathValue("id") {
+				// The agent finishes every task at once.
+				tk.Status = protocol.StatusSucceeded
+				if tk.Type == protocol.TaskRestart {
+					tk.Result, _ = json.Marshal(protocol.RestartResult{Restarted: true, Unit: "postgresql@18-main.service",
+						DurationMs: 4200, ArchiveMode: "on"})
+				}
+				j(w, 200, tk)
+				return
+			}
+		}
+		j(w, 404, protocol.Error{Error: "not found"})
+	}))
 	mux.HandleFunc("GET /v1/org", authed(func(w http.ResponseWriter, r *http.Request) {
 		j(w, 200, protocol.Org{ID: "org_1", Name: "Acme", Plan: "pro", Limits: protocol.PlanLimits{MaxHosts: 5, MaxDatabases: 25}})
 	}))
@@ -269,31 +324,138 @@ func TestResolveHost(t *testing.T) {
 	}
 }
 
-func TestExpandAlias(t *testing.T) {
-	cases := map[string]string{
-		"ls":                     "db list",
-		"show app":               "db show app",
-		"adopt app --host db1":   "db adopt app --host db1",
-		"plan":                   "db plan",
-		"apply app --yes":        "db apply app --yes",
-		"verify":                 "db verify",
-		"backup":                 "backup run",
-		"backup app --type diff": "backup run app --type diff",
-		"backup --type diff":     "backup run --type diff",
-		"backup run app":         "backup run app",
-		"backup list app":        "backup list app",
-		"backups app":            "backup list app",
-		"drill":                  "drill run",
-		"drill app":              "drill run app",
-		"drills":                 "drill list",
-		"marks app":              "restore-point list app",
-		"db list":                "db list",
-		"hosts list":             "hosts list",
-	}
-	for in, want := range cases {
-		if got := strings.Join(expandAlias(strings.Fields(in)), " "); got != want {
-			t.Errorf("expandAlias(%q) = %q, want %q", in, got, want)
+// TestEveryCommand checks that each command in the reference has help and
+// is dispatched, and that the short help names only real commands.
+func TestEveryCommand(t *testing.T) {
+	f := &fakeAPI{dbs: dbs("app"), hosts: []protocol.Host{}}
+	_, _ = cliEnv(t, f)
+	ctx := t.Context()
+	sub := regexp.MustCompile(`^[a-z][a-z-]*$`)
+	seen := map[string]bool{}
+	for _, line := range strings.Split(usage, "\n") {
+		if !strings.HasPrefix(line, "  rowsafe ") {
+			continue
 		}
+		fields := strings.Fields(line)
+		cmd := fields[1:2]
+		if len(fields) > 2 && sub.MatchString(fields[2]) {
+			cmd = fields[1:3]
+		}
+		key := strings.Join(cmd, " ")
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if h := helpFor(cmd[:1]); strings.Contains(h, "No help") {
+			t.Errorf("rowsafe help %s: %s", cmd[0], h)
+		}
+		// An unknown flag stops every command before it does anything.
+		if err := dispatch(ctx, append(cmd, "--no-such-flag")); err != nil && strings.Contains(err.Error(), "unknown command") {
+			t.Errorf("rowsafe %s is in the reference but not dispatched: %v", key, err)
+		}
+	}
+	if len(seen) < 45 {
+		t.Fatalf("parsed only %d commands from the reference: %v", len(seen), seen)
+	}
+	for _, m := range regexp.MustCompile(`rowsafe ([a-z][a-z-]*)`).FindAllStringSubmatch(shortHelp, -1) {
+		if m[1] != "help" && strings.Contains(helpFor(m[1:2]), "No help") {
+			t.Errorf("the short help mentions rowsafe %s, which has no reference entry", m[1])
+		}
+	}
+	for _, old := range []string{"drill", "drills", "health", "db list", "backup run", "restore-point create", "task show"} {
+		// "run", "show" and "create" are taken for names now: there are no such databases or tasks.
+		if err := dispatch(ctx, strings.Fields(old)); err == nil {
+			t.Errorf("rowsafe %s still works", old)
+		}
+	}
+	if err := dispatch(ctx, []string{"hosts"}); err == nil || !strings.Contains(err.Error(), "rowsafe hosts enroll-token") {
+		t.Errorf("rowsafe hosts without a command: %v", err)
+	}
+}
+
+func TestRestart(t *testing.T) {
+	f := &fakeAPI{dbs: dbs("app")}
+	f.dbs[0].Status = protocol.DBAwaitingRestart
+	f.dbs[0].Hostname = "db1"
+	_, _ = cliEnv(t, f)
+	ctx := t.Context()
+	t.Cleanup(func() { stdin = os.Stdin })
+
+	// Not allowed on this server: refused before asking, with the manual command.
+	stdin = strings.NewReader("y\n")
+	if err := dispatch(ctx, []string{"restart", "app"}); err == nil || !strings.Contains(err.Error(), "sudo systemctl restart postgresql") ||
+		!strings.Contains(err.Error(), "--allow-restart") {
+		t.Fatalf("CanRestart=false: %v", err)
+	}
+	f.dbs[0].CanRestart = true
+
+	stdin = strings.NewReader("n\n")
+	if err := dispatch(ctx, []string{"restart", "app"}); err == nil || !strings.Contains(err.Error(), "cancelled") {
+		t.Fatalf("answering n: %v", err)
+	}
+	stdin = strings.NewReader("")
+	if err := dispatch(ctx, []string{"restart"}); err == nil || !strings.Contains(err.Error(), "cancelled") {
+		t.Fatalf("no answer: %v", err)
+	}
+	if len(f.tasks) != 0 {
+		t.Fatalf("a cancelled restart created tasks: %+v", f.tasks)
+	}
+
+	stdin = strings.NewReader("") // --yes must not read an answer
+	if err := dispatch(ctx, []string{"restart", "--yes"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.tasks) != 1 || f.tasks[0].Type != protocol.TaskRestart || f.tasks[0].DatabaseName != "app" ||
+		string(f.tasks[0].Params) != `{"confirm":"app"}` {
+		t.Fatalf("tasks = %+v, want one restart task for app confirming its name", f.tasks)
+	}
+
+	f.reject = map[string]int{protocol.TaskRestart: http.StatusForbidden}
+	if err := dispatch(ctx, []string{"restart", "--yes"}); err == nil || !strings.Contains(err.Error(), "doesn't allow restarts") {
+		t.Fatalf("403: %v", err)
+	}
+	f.reject[protocol.TaskRestart], f.retryAfter = http.StatusTooManyRequests, "73"
+	if err := dispatch(ctx, []string{"restart", "--yes"}); err == nil || !strings.Contains(err.Error(), "try again in 73 seconds") {
+		t.Fatalf("429: %v", err)
+	}
+	f.reject[protocol.TaskRestart] = http.StatusConflict
+	if err := dispatch(ctx, []string{"restart", "--yes"}); err == nil || !strings.Contains(err.Error(), "offline") {
+		t.Fatalf("409: %v", err)
+	}
+	if h := helpFor([]string{"restart"}); !strings.Contains(h, "rowsafe restart [NAME] [--yes]") || !strings.Contains(h, "never restarts PostgreSQL on its own") {
+		t.Errorf("help restart:\n%s", h)
+	}
+}
+
+// Right after a restart Rowsafe checks by itself: verify waits for that check.
+func TestVerifyWaitsForOpenCheck(t *testing.T) {
+	f := &fakeAPI{dbs: dbs("app"), reject: map[string]int{protocol.TaskCheck: http.StatusConflict},
+		tasks: []protocol.TaskView{{ID: "task_open", Type: protocol.TaskCheck, Status: protocol.StatusRunning, DatabaseName: "app"}}}
+	_, _ = cliEnv(t, f)
+	if err := dispatch(t.Context(), []string{"verify", "app"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.tasks) != 1 {
+		t.Fatalf("tasks = %+v", f.tasks)
+	}
+	f.tasks[0].Status = protocol.StatusSucceeded // nothing open: the 409 stands
+	if err := dispatch(t.Context(), []string{"verify", "app"}); err == nil {
+		t.Fatal("verify succeeded without a check")
+	}
+}
+
+func TestProof(t *testing.T) {
+	f := &fakeAPI{dbs: dbs("app")}
+	_, _ = cliEnv(t, f)
+	ctx := t.Context()
+	if err := dispatch(ctx, []string{"proof", "--no-wait"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch(ctx, []string{"proofs", "app"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.tasks) != 1 || f.tasks[0].Type != protocol.TaskDrill {
+		t.Fatalf("tasks = %+v, want one drill task", f.tasks)
 	}
 }
 
@@ -305,8 +467,8 @@ func TestStatusExitCodes(t *testing.T) {
 	if err := dispatch(ctx, []string{"status", "app"}); err != nil {
 		t.Fatalf("protected: %v", err)
 	}
-	if err := dispatch(ctx, []string{"db", "protection", "app", "--json"}); err != nil {
-		t.Fatalf("long form, protected: %v", err)
+	if err := dispatch(ctx, []string{"status", "app", "--json"}); err != nil {
+		t.Fatalf("protected, JSON: %v", err)
 	}
 	f.protected["app"] = false
 	if err := dispatch(ctx, []string{"status", "app"}); !errors.As(err, &exit) || exit != 3 {
@@ -459,14 +621,18 @@ func TestLoginURLDefault(t *testing.T) {
 }
 
 func TestHelp(t *testing.T) {
-	if h := helpFor(nil); !strings.Contains(h, "Getting started") || !strings.Contains(h, "Recover") || !strings.Contains(h, "Admin") {
+	if h := helpFor(nil); !strings.Contains(h, "Getting started") || !strings.Contains(h, "Rewind") || !strings.Contains(h, "Proof") ||
+		!strings.Contains(h, "Pulse") || !strings.Contains(h, "Guard") || !strings.Contains(h, "Admin") {
 		t.Fatalf("short help:\n%s", h)
 	}
 	if h := helpFor([]string{"mark"}); !strings.Contains(h, "rowsafe mark [NAME] [LABEL]") || !strings.Contains(h, "before-drop") {
 		t.Fatalf("help mark:\n%s", h)
 	}
-	if h := helpFor([]string{"backups"}); !strings.Contains(h, "short for rowsafe backup list") {
+	if h := helpFor([]string{"backups"}); !strings.Contains(h, "rowsafe backups [NAME]") || strings.Contains(h, "rowsafe backup [NAME]") {
 		t.Fatalf("help backups:\n%s", h)
+	}
+	if h := helpFor([]string{"proof"}); !strings.Contains(h, "rowsafe proof [NAME] [--no-wait]") || !strings.Contains(h, "--proof-schedule") {
+		t.Fatalf("help proof:\n%s", h)
 	}
 	if h := helpFor([]string{"adopt"}); !strings.Contains(h, "--host may be omitted") {
 		t.Fatalf("help adopt:\n%s", h)
@@ -479,25 +645,25 @@ func TestHelp(t *testing.T) {
 	}
 }
 
-func TestHealthExitCodes(t *testing.T) {
+func TestPulseExitCodes(t *testing.T) {
 	f := &fakeAPI{dbs: dbs("app", "old"), health: map[string]int{"app": 95, "old": 40}}
 	_, _ = cliEnv(t, f)
 	ctx := t.Context()
 	var exit exitError
-	if err := dispatch(ctx, []string{"health", "app"}); err != nil {
+	if err := dispatch(ctx, []string{"pulse", "app"}); err != nil {
 		t.Fatalf("healthy database: %v", err)
 	}
-	if err := dispatch(ctx, []string{"health", "old", "--json"}); !errors.As(err, &exit) || exit != 3 {
+	if err := dispatch(ctx, []string{"pulse", "old", "--json"}); !errors.As(err, &exit) || exit != 3 {
 		t.Fatalf("database at risk: %v, want exit 3", err)
 	}
-	if err := dispatch(ctx, []string{"health"}); !errors.As(err, &exit) || exit != 3 {
+	if err := dispatch(ctx, []string{"pulse"}); !errors.As(err, &exit) || exit != 3 {
 		t.Fatalf("fleet with a database at risk: %v, want exit 3", err)
 	}
 	f.health = map[string]int{"app": 95}
-	if err := dispatch(ctx, []string{"health"}); err != nil {
+	if err := dispatch(ctx, []string{"pulse"}); err != nil {
 		t.Fatalf("healthy fleet: %v", err)
 	}
-	if h := helpFor([]string{"health"}); !strings.Contains(h, "rowsafe health [NAME]") || !strings.Contains(h, "caps the score at 59") {
-		t.Errorf("help health:\n%s", h)
+	if h := helpFor([]string{"pulse"}); !strings.Contains(h, "rowsafe pulse [NAME]") || !strings.Contains(h, "caps the score at 59") {
+		t.Errorf("help pulse:\n%s", h)
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -109,6 +110,12 @@ func printTask(t protocol.TaskView) {
 		if json.Unmarshal(t.Result, &r) == nil && r.BackupLabel != "" {
 			printDrill(r)
 		}
+	case protocol.TaskRestart:
+		var r protocol.RestartResult
+		if json.Unmarshal(t.Result, &r) == nil && r.Restarted {
+			fmt.Printf("Restarted %s in %.1fs; archive_mode is %s\n", cmp.Or(r.Unit, "PostgreSQL"),
+				float64(r.DurationMs)/1000, cmp.Or(r.ArchiveMode, "unknown"))
+		}
 	}
 	if t.Error != "" {
 		fmt.Printf("\nError: %s\n", t.Error)
@@ -155,7 +162,7 @@ func printAdopt(r protocol.AdoptResult) {
 }
 
 func printDrill(r protocol.DrillResult) {
-	fmt.Printf("Drill %s: restored backup %s (%s) in %s\n", passFail(r.Passed), r.BackupLabel,
+	fmt.Printf("Proof %s: restored backup %s (%s) in %s\n", passFail(r.Passed), r.BackupLabel,
 		humanBytes(r.RestoredBytes), (time.Duration(r.DurationSeconds) * time.Second).String())
 	if r.RecoveredTo != nil {
 		fmt.Printf("Recovered to the last transaction at %s\n", r.RecoveredTo.Local().Format(time.RFC1123))

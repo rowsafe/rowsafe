@@ -11,14 +11,23 @@
 # self-hosted control plane: sudo ROWSAFE_URL=https://... sh -s rse_...
 #
 # Installs or upgrades rowsafe-agent on a Debian 12/13 or Ubuntu 22.04/24.04
-# host (amd64 or arm64) that runs PostgreSQL. Running it again is safe: it only
-# changes what differs, and it never restarts PostgreSQL.
+# host (amd64 or arm64) that runs PostgreSQL, sets up the backup storage,
+# finds PostgreSQL on the server and turns on its backups. Running it again is
+# safe: it only changes what differs. It restarts PostgreSQL only when the
+# person at the terminal says yes.
 #
 # Options (when piping, pass them after `sh -s --`):
 #   rse_...                the enrollment token
 #   --setup-storage        (re)run the guided backup storage setup
 #   --storage PROVIDER     preselect r2, b2, s3, wasabi, spaces or s3-compatible
 #   --no-prompt            never ask questions, even on a terminal
+#   --no-setup             don't look for PostgreSQL or turn on backups
+#   --protect NAME         without questions: turn on backups for this server's
+#                          PostgreSQL as NAME (never restarts it)
+#   --protect-port PORT    with --protect: the cluster on PORT (when there are several)
+#   --allow-restart        let people restart PostgreSQL from Rowsafe (dashboard,
+#                          `rowsafe restart`); only when they confirm
+#   --no-allow-restart     turn that off again
 #   --check-storage        test the configured backup storage; change nothing
 #   --uninstall            stop and remove the agent; keep configuration and state
 #   --uninstall --purge    also delete /etc/rowsafe, /var/lib/rowsafe, /var/log/rowsafe
@@ -30,6 +39,12 @@
 # stdin), tests it by writing, reading and deleting a small file with
 # pgBackRest, and can generate the encryption passphrase. Without a terminal
 # (or with --no-prompt) it never asks and prints exactly what to set instead.
+#
+# Database setup: then, on a terminal, it finds PostgreSQL on this server
+# (`rowsafe-agent setup`, run as postgres), shows what would change, asks
+# "Turn on backups now?" and, if PostgreSQL needs a restart for that, asks
+# "Restart PostgreSQL now?" (default no). Rowsafe notices a restart done later
+# and finishes by itself.
 #
 # Installer settings (environment):
 #   ROWSAFE_VERSION         install exactly this version (default: the channel's latest)
@@ -62,8 +77,18 @@ LOG_DIR=/var/log/rowsafe
 ENV_FILE=$CONFIG_DIR/agent.env
 UNIT_FILE=/etc/systemd/system/rowsafe-agent.service
 LOGROTATE_FILE=/etc/logrotate.d/rowsafe
-GUARD_FILE=$INSTALL_DIR/bin/rowsafe-agent-guard
+# Root's files live in root's directories: /opt/rowsafe belongs to the agent
+# user (self-update swaps versions there), so root never writes inside it.
+LIB_DIR=/usr/local/lib/rowsafe
+GUARD_FILE=$LIB_DIR/rowsafe-agent-guard
+OLD_GUARD_DIR=$INSTALL_DIR/bin # where installers before 0.3 put the guard
 SERVICE=rowsafe-agent.service
+# Restarts on request (--allow-restart): a root helper started by a path unit.
+RESTART_HELPER=$LIB_DIR/rowsafe-pg-restart
+RESTART_SERVICE_FILE=/etc/systemd/system/rowsafe-pg-restart.service
+RESTART_PATH_FILE=/etc/systemd/system/rowsafe-pg-restart.path
+RESTART_ALLOW_FILE=$CONFIG_DIR/restart-allowed
+RESTART_DIR=$STATE_DIR/restart
 AGENT_USER=postgres
 DEFAULT_RELEASES_URL=https://releases.rowsafe.sh/agent
 MAX_ARTIFACT_SIZE=536870912 # 512 MiB, the same limit the agent enforces
@@ -83,6 +108,11 @@ TTY=0              # 1 once /dev/tty is open on fd 3
 TTY_SAVED=''       # terminal settings to restore (stty -g)
 STORAGE_CLEAR=''   # agent.env keys the guided setup turns back into comments
 STORAGE_GUIDED=0
+NO_SETUP=0         # --no-setup
+PROTECT_NAME=''    # --protect NAME
+PROTECT_PORT=''    # --protect-port PORT
+ALLOW_RESTART=''   # --allow-restart (yes) / --no-allow-restart (no); '' = ask once, on a terminal
+SETUP_STOP=0       # the plan limit was reached: don't offer more databases
 
 TMP=
 CHANGED=0          # binary, unit, guard or config changed: a running agent needs a restart
@@ -131,6 +161,14 @@ Options (when piping, pass them after `sh -s --`):
   --setup-storage        set up (or change) the backup storage, even if it is configured
   --storage PROVIDER     skip the "where" question: r2, b2, s3, wasabi, spaces, s3-compatible
   --no-prompt            never ask questions, even on a terminal (for automation)
+  --no-setup             don't look for PostgreSQL or turn on backups
+  --protect NAME         without questions: turn on backups for this server's PostgreSQL,
+                         named NAME in Rowsafe. Never restarts PostgreSQL; prints the
+                         command when it needs a restart
+  --protect-port PORT    with --protect: the PostgreSQL on PORT (when there are several)
+  --allow-restart        let people restart PostgreSQL from Rowsafe (Restart in the
+                         dashboard, `rowsafe restart`), only when they confirm
+  --no-allow-restart     turn that off (and remove the restart helper)
   --check-storage        test the backup storage in /etc/rowsafe/agent.env; change nothing
   --uninstall            stop and remove the agent; keep configuration and state
   --uninstall --purge    also delete /etc/rowsafe, /var/lib/rowsafe and /var/log/rowsafe
@@ -148,8 +186,8 @@ Environment:
 
 Backup storage (guided setup):
   Run from a terminal, the installer walks you through the backup storage the
-  first time: where to keep backups (Cloudflare R2, Backblaze B2, Amazon S3,
-  Wasabi, DigitalOcean Spaces or any S3-compatible store), the bucket and its
+  first time: paste your bucket's URL (or pick Cloudflare R2, Backblaze B2,
+  Amazon S3, Wasabi, DigitalOcean Spaces or any S3-compatible store), then its
   access key. It then tests the bucket by writing, reading and deleting a
   small file, and explains what to fix if that fails. Finally it creates (or
   takes) the passphrase that encrypts your backups: it is shown once, so save
@@ -163,6 +201,16 @@ Backup storage (guided setup):
   --no-prompt, set ROWSAFE_REPO_S3_ENDPOINT, _BUCKET, _KEY, _KEY_SECRET and
   ROWSAFE_REPO_CIPHER_PASS in the environment instead, and check them with
   --check-storage.
+
+Turning on backups:
+  Once the agent runs, the installer looks for PostgreSQL on this server,
+  asks for its name in Rowsafe, shows what would change and asks before
+  changing anything. If PostgreSQL needs a restart for backups to start, it
+  asks "Restart PostgreSQL now?" (default no); if you'd rather restart later,
+  Rowsafe notices the restart by itself and finishes. Rowsafe itself never
+  restarts PostgreSQL on its own: with --allow-restart (or yes at the
+  question), people can restart it from the dashboard, and only when they
+  confirm. Automation: --protect NAME.
 
 Documentation: https://rowsafe.sh/docs/reference/agent-configuration
 EOF
@@ -223,6 +271,12 @@ apt_install() {
     die "installing $* failed"
   fi
 }
+
+# as_agent CMD... runs CMD as the agent user. Everything under /opt/rowsafe
+# and /var/lib/rowsafe (the agent's own directories) is changed this way:
+# root acting there could be tricked by a planted symlink into changing any
+# file on the system.
+as_agent() { (cd / && runuser -u "$AGENT_USER" -- "$@" </dev/null); }
 
 # write_file PATH MODE OWNER:GROUP < content. Returns 0 if the file changed.
 write_file() {
@@ -434,9 +488,10 @@ ensure_pgbackrest() {
 install_binary() {
   vdir=$INSTALL_DIR/versions/$REL_VERSION
   STAGED=$vdir/rowsafe-agent
-  install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" "$vdir"
-  install -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" "$TMP/rowsafe-agent" "$vdir/.rowsafe-agent.install"
-  mv -f "$vdir/.rowsafe-agent.install" "$STAGED"
+  { as_agent install -d -m 0755 "$vdir" &&
+    as_agent install -m 0755 "$TMP/rowsafe-agent" "$vdir/.rowsafe-agent.install" &&
+    as_agent mv -f "$vdir/.rowsafe-agent.install" "$STAGED"; } ||
+    die "could not put rowsafe-agent $REL_VERSION into $vdir as $AGENT_USER (see above)"
   CHANGED=1
 }
 
@@ -445,20 +500,23 @@ install_binary() {
 switch_version() {
   target=versions/$REL_VERSION/rowsafe-agent
   [ "$(readlink "$INSTALL_DIR/rowsafe-agent" 2>/dev/null || true)" = "$target" ] && return 0
-  ln -sfn "$target" "$INSTALL_DIR/rowsafe-agent.install"
-  chown -h "$AGENT_USER:$AGENT_USER" "$INSTALL_DIR/rowsafe-agent.install"
-  mv -Tf "$INSTALL_DIR/rowsafe-agent.install" "$INSTALL_DIR/rowsafe-agent"
+  as_agent ln -sfn "$target" "$INSTALL_DIR/rowsafe-agent.install"
+  as_agent mv -Tf "$INSTALL_DIR/rowsafe-agent.install" "$INSTALL_DIR/rowsafe-agent"
   # A manual install supersedes any self-update that was in flight.
-  rm -rf "$STATE_DIR/update/pending"
+  as_agent rm -rf "$STATE_DIR/update/pending"
   CHANGED=1
   ok "$INSTALL_DIR/rowsafe-agent -> $target"
 }
 
 make_dirs() {
-  install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" "$INSTALL_DIR" "$INSTALL_DIR/versions"
-  install -d -m 0755 -o root -g root "$INSTALL_DIR/bin"
+  # These parents belong to root, so creating them as root is safe.
+  install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" "$INSTALL_DIR"
+  install -d -m 0755 -o root -g root "$LIB_DIR"
   install -d -m 0750 -o root -g "$AGENT_USER" "$CONFIG_DIR"
   install -d -m 0700 -o "$AGENT_USER" -g "$AGENT_USER" "$CONFIG_DIR/pgbackrest" "$STATE_DIR" "$LOG_DIR"
+  # Inside the agent's directories: as the agent.
+  as_agent mkdir -p -m 0755 "$INSTALL_DIR/versions"
+  as_agent mkdir -p -m 0700 "$RESTART_DIR"
 }
 
 install_guard() {
@@ -540,7 +598,7 @@ Group=postgres
 EnvironmentFile=/etc/rowsafe/agent.env
 # Rolls the symlink back to the previous version when a self-update keeps
 # crashing before it confirms itself. It always exits 0.
-ExecStartPre=/opt/rowsafe/bin/rowsafe-agent-guard
+ExecStartPre=/usr/local/lib/rowsafe/rowsafe-agent-guard
 # A symlink into /opt/rowsafe/versions/ that self-update swaps atomically.
 ExecStart=/opt/rowsafe/rowsafe-agent run
 # The agent exits 0 to switch versions after an update, so restart on success too.
@@ -625,6 +683,284 @@ install_logrotate() {
     create 0640 postgres postgres
 }
 ROWSAFE_LOGROTATE_EOF
+}
+
+# ---------------------------------------------------------------- restarts
+
+# Rowsafe never restarts PostgreSQL on its own. With root's permission
+# (--allow-restart, or yes at the question), a person can ask for a restart
+# from the dashboard or `rowsafe restart`: the agent (unprivileged) writes a
+# request to $RESTART_DIR, rowsafe-pg-restart.path starts the root helper,
+# and the helper restarts only a unit listed in $RESTART_ALLOW_FILE.
+
+install_restart_helper() {
+  install -d -m 0755 -o root -g root "${RESTART_HELPER%/*}"
+  _changed=0
+  if write_file "$RESTART_HELPER" 0755 root:root <<'ROWSAFE_RESTART_HELPER_EOF'; then
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-pg-restart: restarts PostgreSQL when a person asked Rowsafe to
+# (Restart in the dashboard, `rowsafe restart`).
+#
+# Installed by https://rowsafe.sh/install as
+# /usr/local/lib/rowsafe/rowsafe-pg-restart, only when root allowed it
+# (--allow-restart, or yes at the installer's question). It runs as root in
+# rowsafe-pg-restart.service, which rowsafe-pg-restart.path starts when the
+# agent writes a request; the agent itself cannot restart anything.
+#
+# The request (/var/lib/rowsafe/restart/request, in a directory the agent
+# user owns) is one line: "ID PORT". It is read and removed with the agent
+# user's privileges, never root's, so nothing planted there (a symlink, a
+# FIFO) can make root read, write or wait on anything. The port must be
+# listed in /etc/rowsafe/restart-allowed ("PORT UNIT" lines, written by
+# root); only that unit is restarted, and at most once a minute. The answer
+# goes to /run/rowsafe-pg-restart/result (root's directory, readable by the
+# agent) as key=value lines: id, ok (1 or 0), unit, error and finished_at.
+
+set -u
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+dir=${ROWSAFE_RESTART_DIR:-/var/lib/rowsafe/restart}
+out_dir=${RUNTIME_DIRECTORY:-/run/rowsafe-pg-restart}
+allow=${ROWSAFE_RESTART_ALLOW:-/etc/rowsafe/restart-allowed}
+state=${STATE_DIRECTORY:-/var/lib/rowsafe-pg-restart}
+agent_user=${ROWSAFE_AGENT_USER:-postgres}
+systemctl=${ROWSAFE_SYSTEMCTL:-systemctl}
+min_interval=60
+
+log() { echo "rowsafe-pg-restart: $*" >&2; }
+
+# as_agent runs a command with the agent user's privileges.
+as_agent() { setpriv --reuid="$agent_user" --regid="$agent_user" --init-groups -- "$@"; }
+
+id='' unit='' ok=0 err=''
+
+# answer writes the result atomically into root's own directory.
+answer() {
+  tmp=$(mktemp "$out_dir/.result.XXXXXX") || {
+    log "cannot write the result in $out_dir"
+    exit 0
+  }
+  printf 'id=%s\nok=%s\nunit=%s\nerror=%s\nfinished_at=%s\n' "$id" "$ok" "$unit" "$err" "$(date +%s)" >"$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$out_dir/result"
+}
+
+refuse() {
+  err=$1
+  log "refused: $1"
+  answer
+  exit 0
+}
+
+request=$dir/request
+as_agent test -e "$request" -o -L "$request" 2>/dev/null || exit 0
+# Only a regular file is read, for at most 5 seconds; whatever it was, it is
+# removed so the path unit doesn't fire again.
+# shellcheck disable=SC2016 # $1 expands in the inner shell
+line=$(as_agent sh -c '
+  if [ -f "$1" ] && [ ! -L "$1" ]; then timeout 5 head -c 200 -- "$1"; fi
+  rm -f -- "$1"' rowsafe-pg-restart "$request" 2>/dev/null | head -n 1)
+
+printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} [0-9]{1,5}$' || refuse "malformed request"
+id=${line% *}
+port=${line#* }
+
+[ -f "$allow" ] && [ ! -L "$allow" ] || refuse "restarting PostgreSQL from Rowsafe is not allowed on this server"
+[ "$(stat -c '%u' "$allow")" = 0 ] || refuse "$allow is not owned by root"
+case $(stat -c '%A' "$allow") in
+  ?????w???? | ????????w?) refuse "$allow is writable by others than root" ;;
+esac
+unit=$(awk -v p="$port" '$1 == p && $2 ~ /^[A-Za-z0-9@._-]+\.service$/ { print $2; exit }' "$allow")
+[ -n "$unit" ] || refuse "port $port is not in $allow: restarting it from Rowsafe is not allowed"
+
+mkdir -p "$state"
+stamp=$state/last-$unit
+now=$(date +%s)
+last=$(cat "$stamp" 2>/dev/null || echo 0)
+case $last in '' | *[!0-9]*) last=0 ;; esac
+if [ $((now - last)) -lt "$min_interval" ]; then
+  refuse "PostgreSQL ($unit) was restarted less than a minute ago; try again in a minute"
+fi
+echo "$now" >"$stamp"
+
+log "restarting $unit (request $id)"
+out=$(timeout 120 "$systemctl" restart "$unit" 2>&1 </dev/null)
+rc=$?
+if [ "$rc" = 0 ]; then
+  ok=1
+  log "restarted $unit"
+else
+  out=$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)
+  if [ "$rc" = 124 ]; then
+    err="systemctl restart $unit did not finish within 2 minutes"
+  else
+    err="systemctl restart $unit failed${out:+: $out}"
+  fi
+  log "$err"
+fi
+answer
+ROWSAFE_RESTART_HELPER_EOF
+    _changed=1
+  fi
+  if write_file "$RESTART_SERVICE_FILE" 0644 root:root <<'ROWSAFE_RESTART_SERVICE_EOF'; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-pg-restart.service: restarts a PostgreSQL cluster that root listed
+# in /etc/rowsafe/restart-allowed, when the Rowsafe agent asks because a
+# person did (see /usr/local/lib/rowsafe/rowsafe-pg-restart). Started by
+# rowsafe-pg-restart.path; installed by https://rowsafe.sh/install only when
+# root allowed it.
+
+[Unit]
+Description=Rowsafe: restart PostgreSQL on request
+Documentation=https://rowsafe.sh/docs/reference/agent-configuration
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/rowsafe/rowsafe-pg-restart
+TimeoutStartSec=180
+# The agent user, whose privileges read and remove the request.
+Environment=ROWSAFE_AGENT_USER=postgres
+# The answer: root's own directory, which the agent can read.
+RuntimeDirectory=rowsafe-pg-restart
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+# When each unit was last restarted (at most once a minute), out of the
+# agent's reach.
+StateDirectory=rowsafe-pg-restart
+StateDirectoryMode=0700
+UMask=0022
+
+# Hardening. Root never writes into the agent's directory: the request is
+# read and removed as the agent user (hence CAP_SETUID/CAP_SETGID, to drop
+# to it). Then it asks systemd over its private socket to restart one unit.
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=-/var/lib/rowsafe/restart
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+ROWSAFE_RESTART_SERVICE_EOF
+    _changed=1
+  fi
+  if write_file "$RESTART_PATH_FILE" 0644 root:root <<'ROWSAFE_RESTART_PATH_EOF'; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-pg-restart.path: starts rowsafe-pg-restart.service when the Rowsafe
+# agent asks for a PostgreSQL restart (someone clicked Restart in the
+# dashboard or ran `rowsafe restart`). Installed by https://rowsafe.sh/install
+# only when root allowed it; remove it with --no-allow-restart.
+
+[Unit]
+Description=Rowsafe: watch for PostgreSQL restart requests
+Documentation=https://rowsafe.sh/docs/reference/agent-configuration
+
+[Path]
+PathExists=/var/lib/rowsafe/restart/request
+Unit=rowsafe-pg-restart.service
+
+[Install]
+WantedBy=multi-user.target
+ROWSAFE_RESTART_PATH_EOF
+    _changed=1
+  fi
+  if systemd_running; then
+    [ "$_changed" = 0 ] || systemctl daemon-reload
+    systemctl enable --now --quiet rowsafe-pg-restart.path
+  else
+    warn "systemd is not running here; the restart helper was installed but cannot be enabled"
+  fi
+}
+
+remove_restart_helper() {
+  [ -e "$RESTART_PATH_FILE" ] || [ -e "$RESTART_SERVICE_FILE" ] || [ -e "$RESTART_HELPER" ] || return 0
+  if systemd_running; then
+    systemctl disable --now --quiet rowsafe-pg-restart.path 2>/dev/null || true
+  fi
+  rm -f "$RESTART_PATH_FILE" "$RESTART_SERVICE_FILE" "$RESTART_HELPER"
+  rmdir "${RESTART_HELPER%/*}" 2>/dev/null || true
+  if systemd_running; then systemctl daemon-reload; fi
+}
+
+# restart_pairs prints "PORT UNIT" for the discovered clusters with a
+# systemd unit (the ones a restart helper can restart).
+restart_pairs() {
+  [ -s "$TMP/clusters" ] || return 0
+  awk -F '\t' '$12 != "-" && $12 ~ /^[A-Za-z0-9@._-]+\.service$/ { print $1, $12 }' "$TMP/clusters"
+}
+
+# restart_allowed PORT: is PORT in the allow list?
+restart_allowed() {
+  [ -f "$RESTART_ALLOW_FILE" ] && awk -v p="$1" '$1 == p { f = 1 } END { exit !f }' "$RESTART_ALLOW_FILE"
+}
+
+allow_restarts() {
+  _pairs=$(restart_pairs)
+  if [ -z "$_pairs" ]; then
+    warn "found no systemd service running PostgreSQL here, so restarting it from Rowsafe stays off"
+    return 0
+  fi
+  {
+    echo "# PostgreSQL clusters people may restart from Rowsafe (Restart in the"
+    echo "# dashboard, \`rowsafe restart\`), only when they confirm. Written by the"
+    echo "# installer (root); run it with --no-allow-restart to turn this off."
+    echo "# PORT UNIT"
+    printf '%s\n' "$_pairs"
+  } | write_file "$RESTART_ALLOW_FILE" 0644 root:root || true
+  install_restart_helper
+  ok "people can restart PostgreSQL from Rowsafe, only when they confirm (turn off with --no-allow-restart)"
+}
+
+disallow_restarts() {
+  remove_restart_helper
+  if [ -d "$CONFIG_DIR" ]; then
+    {
+      echo "# Restarting PostgreSQL from Rowsafe is off on this server."
+      echo "# Run the installer with --allow-restart to turn it on."
+    } | write_file "$RESTART_ALLOW_FILE" 0644 root:root || true
+  fi
+}
+
+# restart_access applies --allow-restart / --no-allow-restart, or asks once
+# on a terminal. A re-run keeps the earlier answer (and refreshes the list).
+restart_access() {
+  case $ALLOW_RESTART in
+    yes) allow_restarts ;;
+    no)
+      disallow_restarts
+      ok "restarting PostgreSQL from Rowsafe is off"
+      ;;
+    *)
+      if [ -f "$RESTART_ALLOW_FILE" ]; then
+        if grep -q '^[0-9]' "$RESTART_ALLOW_FILE"; then allow_restarts; fi
+        return 0
+      fi
+      [ "$TTY" = 1 ] && [ -n "$(restart_pairs)" ] || return 0
+      say ""
+      if confirm "Allow restarting PostgreSQL from the Rowsafe dashboard? Only when someone clicks Restart and confirms." y; then
+        allow_restarts
+      else
+        disallow_restarts
+        note "OK: nobody can restart PostgreSQL from Rowsafe (change it with --allow-restart)"
+      fi
+      ;;
+  esac
 }
 
 # ---------------------------------------------------------------- agent.env
@@ -1063,6 +1399,145 @@ storage_explain() {
     }' "$log"
 }
 
+BUCKET_RE='^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'
+
+# parse_bucket_url URL fills S_PROVIDER, S_ENDPOINT, S_PORT, S_BUCKET,
+# S_REGION and S_URI from a pasted bucket URL: Cloudflare R2's "S3 API" URL
+# (https://<account>[.eu|.fedramp].r2.cloudflarestorage.com/<bucket>),
+# Backblaze B2, Amazon S3, Wasabi and DigitalOcean Spaces in path or
+# virtual-host form, s3://<bucket> (AWS), or any other https endpoint
+# (host[:port]/<bucket>). S_BUCKET stays empty when the URL has none, and
+# S_REGION when it must be asked (s3://, other storage). Returns 1 when it
+# can't tell, 2 for a provider's dashboard link rather than the bucket's.
+parse_bucket_url() {
+  S_PROVIDER='' S_ENDPOINT='' S_PORT='' S_BUCKET='' S_REGION='' S_URI=''
+  _u=$1
+  case $_u in
+    [Ss]3://*)
+      _b=$(printf '%s\n' "${_u#*://}" | sed 's|[/?#].*$||')
+      matches "$_b" "$BUCKET_RE" || return 1
+      S_PROVIDER=s3 S_BUCKET=$_b S_URI=host
+      return 0
+      ;;
+    [Hh][Tt][Tt][Pp][Ss]://*) ;;
+    *://*) return 1 ;;
+  esac
+  _h=$(host_of "$_u")
+  # The first path segment: the bucket in path-style URLs.
+  _seg=$(printf '%s\n' "$_u" | sed -e 's|^[A-Za-z][A-Za-z0-9+.-]*://||' -e 's|^[^/?#]*||' -e 's|^/*||' -e 's|[/?#].*$||')
+  case $_h in
+    dash.cloudflare.com | *.backblaze.com | backblaze.com | console.aws.amazon.com | *.console.aws.amazon.com | \
+      console.wasabisys.com | cloud.digitalocean.com)
+      return 2
+      ;;
+  esac
+  _hb=''
+  if _m=$(printf '%s\n' "$_h" | sed -nE 's/^[0-9a-f]{32}(\.(eu|fedramp))?\.r2\.cloudflarestorage\.com$/x/p') && [ -n "$_m" ]; then
+    S_PROVIDER=r2 S_ENDPOINT=$_h S_REGION=auto S_URI=path
+  elif _m=$(printf '%s\n' "$_h" | sed -nE 's/^(([a-z0-9][a-z0-9.-]*)\.)?s3\.([a-z]+-[a-z]+-[0-9]{3})\.backblazeb2\.com$/\2|\3/p') && [ -n "$_m" ]; then
+    _hb=${_m%%|*} S_REGION=${_m#*|}
+    S_PROVIDER=b2 S_ENDPOINT=s3.$S_REGION.backblazeb2.com S_URI=path
+  elif _m=$(printf '%s\n' "$_h" | sed -nE 's/^(([a-z0-9][a-z0-9.-]*)\.)?s3[.-]([a-z]{2}(-gov)?-[a-z]+-[0-9])\.amazonaws\.com$/\2|\3/p') && [ -n "$_m" ]; then
+    _hb=${_m%%|*} S_REGION=${_m#*|}
+    S_PROVIDER=s3 S_ENDPOINT=s3.$S_REGION.amazonaws.com S_URI=host
+  elif _m=$(printf '%s\n' "$_h" | sed -nE 's/^(([a-z0-9][a-z0-9.-]*)\.)?s3\.amazonaws\.com$/\2|/p') && [ -n "$_m" ]; then
+    _hb=${_m%%|*} S_REGION=us-east-1
+    S_PROVIDER=s3 S_ENDPOINT=s3.us-east-1.amazonaws.com S_URI=host
+  elif _m=$(printf '%s\n' "$_h" | sed -nE 's/^(([a-z0-9][a-z0-9.-]*)\.)?s3\.(([a-z]{2}-[a-z]+-[0-9])\.)?wasabisys\.com$/\2|\4/p') && [ -n "$_m" ]; then
+    _hb=${_m%%|*} S_REGION=${_m#*|}
+    [ -n "$S_REGION" ] || S_REGION=us-east-1
+    S_PROVIDER=wasabi S_ENDPOINT=s3.$S_REGION.wasabisys.com S_URI=path
+  elif _m=$(printf '%s\n' "$_h" | sed -nE 's/^(([a-z0-9][a-z0-9-]*)\.)?([a-z]{3}[0-9])(\.cdn)?\.digitaloceanspaces\.com$/\2|\3/p') && [ -n "$_m" ]; then
+    _hb=${_m%%|*}
+    # Spaces signs with us-east-1 whatever the datacenter; the endpoint picks it.
+    S_PROVIDER=spaces S_ENDPOINT=${_m#*|}.digitaloceanspaces.com S_REGION=us-east-1 S_URI=host
+  else
+    _p=''
+    case $_h in
+      *:*)
+        _p=${_h##*:}
+        _h=${_h%:*}
+        ;;
+    esac
+    matches "$_h" '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$' || return 1
+    [ -z "$_p" ] || matches "$_p" '^[1-9][0-9]{0,4}$' || return 1
+    [ "$_p" != 443 ] || _p=''
+    S_PROVIDER=s3-compatible S_ENDPOINT=$_h S_PORT=$_p S_URI=path
+  fi
+  S_BUCKET=${_hb:-$_seg}
+  matches "$S_BUCKET" "$BUCKET_RE" || S_BUCKET=''
+  # Host-style URLs put the bucket in the TLS host name; dots break that.
+  case $S_URI:$S_BUCKET in host:*.*) S_URI=path ;; esac
+  return 0
+}
+
+provider_name() {
+  case $1 in
+    r2) echo "Cloudflare R2" ;;
+    b2) echo "Backblaze B2" ;;
+    s3) echo "Amazon S3" ;;
+    wasabi) echo "Wasabi" ;;
+    spaces) echo "DigitalOcean Spaces" ;;
+    *) echo "S3-compatible storage" ;;
+  esac
+}
+
+# key_hint says where the provider makes the access key.
+key_hint() {
+  case $S_PROVIDER in
+    r2) tty_hint "Access key: R2 > Manage API tokens > Create API token, \"Object Read & Write\" for this bucket." ;;
+    b2) tty_hint "Access key: Application Keys > Add a New Application Key with Read and Write access to the bucket." ;;
+    s3) tty_hint "Access key: an IAM key allowed to list, read, write and delete objects in the bucket." ;;
+    wasabi) tty_hint "Access key: Access Keys > Create new access key, for a user who may read, write and delete in the bucket." ;;
+    spaces) tty_hint "Access key: Spaces Object Storage > Access Keys, with read/write access to the Space." ;;
+    *) tty_hint "Access key: one that can list, read, write and delete in the bucket." ;;
+  esac
+}
+
+# ask_bucket_url is the first storage question: a pasted bucket URL fills in
+# everything it can. Enter, or a URL it can't read, switches to the menu.
+ask_bucket_url() {
+  tty_say ""
+  tty_say "${BOLD}Paste your bucket's URL${RESET}, or press Enter to pick your provider instead."
+  tty_hint "Cloudflare R2: the \"S3 API\" URL on the bucket's Settings page, like"
+  tty_hint "https://<account-id>.r2.cloudflarestorage.com/<bucket>. Others: the bucket's endpoint URL."
+  while :; do
+    ask _v "Bucket URL" "$S_URL"
+    if [ -z "$_v" ]; then
+      S_MODE=menu
+      return 0
+    fi
+    case $_v in
+      [Hh][Tt][Tt][Pp]://*)
+        tty_bad "Plain http:// is not supported; the storage must serve HTTPS."
+        continue
+        ;;
+    esac
+    _rc=0
+    parse_bucket_url "$_v" || _rc=$?
+    case $_rc in
+      0) break ;;
+      2) tty_bad "That's a link to your provider's dashboard, not to the bucket. Pick your provider:" ;;
+      *) tty_bad "Rowsafe can't tell which storage that is. Pick your provider:" ;;
+    esac
+    S_MODE=menu
+    return 0
+  done
+  S_URL=$_v
+  tty_hint "$(provider_name "$S_PROVIDER"), endpoint $S_ENDPOINT${S_PORT:+:$S_PORT}${S_BUCKET:+, bucket $S_BUCKET}"
+  [ -z "$S_BUCKET" ] || S_BUCKET_KNOWN=1
+  case $S_PROVIDER in
+    s3) [ -n "$S_REGION" ] || ask_s3 ;;
+    s3-compatible)
+      ask S_REGION "Region (most self-hosted storage accepts us-east-1)" us-east-1
+      # TLS options for a private CA come from the environment or agent.env.
+      S_CA=$(s_get ROWSAFE_REPO_S3_CA_FILE)
+      S_VERIFY=$(s_get ROWSAFE_REPO_S3_VERIFY_TLS)
+      ;;
+  esac
+  key_hint
+}
+
 # ---- the guided setup
 
 storage_menu() {
@@ -1188,14 +1663,16 @@ ask_other() {
 }
 
 ask_credentials() {
-  while :; do
+  while [ "$S_BUCKET_KNOWN" = 0 ]; do
     ask _v "Bucket name" "$S_BUCKET"
     _v=${_v#s3://}
     _v=${_v%/}
-    matches "$_v" '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$' && break
+    if matches "$_v" "$BUCKET_RE"; then
+      S_BUCKET=$_v
+      break
+    fi
     tty_bad "Bucket names are 3-63 characters: lowercase letters, numbers, dots and hyphens."
   done
-  S_BUCKET=$_v
   # Host-style URLs put the bucket in the TLS host name; dots break that.
   case $S_URI:$S_BUCKET in host:*.*) S_URI=path ;; esac
 
@@ -1334,28 +1811,36 @@ guided_storage() {
     tty_say "empty bucket and an access key that can read, write and delete in it."
   fi
   S_ENDPOINT='' S_BUCKET='' S_KEY='' S_SECRET='' S_REGION='' S_URI='' S_PORT='' S_CA='' S_VERIFY='' S_CIPHER=''
+  S_URL='' S_MODE=url
   load_storage_path
   n=1
-  [ -z "$STORAGE_PROVIDER" ] || n=$(provider_number "$STORAGE_PROVIDER")
+  if [ -n "$STORAGE_PROVIDER" ]; then
+    n=$(provider_number "$STORAGE_PROVIDER")
+    S_MODE=menu
+  fi
   last=''
   while :; do
-    storage_menu
-    choose n "Choose 1-6" "$n" 6
-    if [ "$n" != "$last" ]; then
-      # Another provider: its endpoint and region defaults don't carry over.
-      S_ENDPOINT='' S_REGION='' S_URI='' S_PORT='' S_CA='' S_VERIFY=''
+    S_BUCKET_KNOWN=0
+    [ "$S_MODE" = menu ] || ask_bucket_url
+    if [ "$S_MODE" = menu ]; then
+      storage_menu
+      choose n "Choose 1-6" "$n" 6
+      if [ "$n" != "$last" ]; then
+        # Another provider: its endpoint and region defaults don't carry over.
+        S_ENDPOINT='' S_REGION='' S_URI='' S_PORT='' S_CA='' S_VERIFY=''
+      fi
+      last=$n
+      S_PROVIDER=$(printf '%s\n' "$PROVIDERS" | cut -d' ' -f"$n")
+      tty_say ""
+      case $S_PROVIDER in
+        r2) ask_r2 ;;
+        b2) ask_b2 ;;
+        s3) ask_s3 ;;
+        wasabi) ask_wasabi ;;
+        spaces) ask_spaces ;;
+        *) ask_other ;;
+      esac
     fi
-    last=$n
-    S_PROVIDER=$(printf '%s\n' "$PROVIDERS" | cut -d' ' -f"$n")
-    tty_say ""
-    case $S_PROVIDER in
-      r2) ask_r2 ;;
-      b2) ask_b2 ;;
-      s3) ask_s3 ;;
-      wasabi) ask_wasabi ;;
-      spaces) ask_spaces ;;
-      *) ask_other ;;
-    esac
     ask_credentials
     say ""
     step "Testing the backup storage"
@@ -1491,6 +1976,331 @@ host_id() {
   sed -n 's/.*"host_id": *"\([^"]*\)".*/\1/p' "$STATE_DIR/agent.json" 2>/dev/null | head -n 1
 }
 
+# ---------------------------------------------------------------- databases
+
+# agent_run ARGS... runs the installed agent as the agent user with only
+# agent.env in its environment, like the service. Never on the installer's
+# stdin: that is the script itself when piped from curl.
+agent_run() {
+  # shellcheck disable=SC2016 # $1 expands in the inner shell
+  runuser -u "$AGENT_USER" -- env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/var/lib/postgresql \
+    LANG="${LANG:-C}" LC_ALL="${LC_ALL:-}" \
+    sh -c 'set -a; . "$1"; set +a; shift; exec "$@"' rowsafe-setup "$ENV_FILE" "$INSTALL_DIR/rowsafe-agent" "$@" </dev/null
+}
+
+# agent_show ARGS... runs agent_run with its output indented like note, and
+# returns its exit status.
+agent_show() {
+  {
+    _src=0
+    agent_run "$@" 2>&1 || _src=$?
+    echo "$_src" >"$TMP/agent.rc"
+  } | sed 's/^/    /'
+  return "$(cat "$TMP/agent.rc")"
+}
+
+agent_running() {
+  if systemd_running; then
+    systemctl is-active --quiet "$SERVICE"
+  else
+    have pgrep && pgrep -u "$AGENT_USER" -f 'rowsafe-agent run' >/dev/null 2>&1
+  fi
+}
+
+# discover lists the local PostgreSQL clusters in $TMP/clusters (the
+# tab-separated lines of `rowsafe-agent setup discover`).
+discover() {
+  : >"$TMP/clusters"
+  if ! agent_run setup discover >"$TMP/clusters" 2>"$TMP/discover.err"; then
+    sed 's/^/    /' "$TMP/discover.err" >&2
+    warn "could not look for PostgreSQL on this server"
+    : >"$TMP/clusters"
+    return 1
+  fi
+  sed 's/^/    /' "$TMP/discover.err"
+  return 0
+}
+
+# The cluster being set up (one line of $TMP/clusters).
+C_PORT='' C_SOCK='' C_MAJOR='' C_CLUSTER='' C_NAME='' C_REG='' C_STATUS='' C_DBS='' C_SIZE='' C_UNIT='' C_ID=''
+
+# read_cluster LINE splits a discover line (no field is empty: "-" stands
+# for nothing, so tabs never collapse).
+read_cluster() {
+  _f() { printf '%s\n' "$1" | cut -f"$2"; }
+  C_PORT=$(_f "$1" 1) C_SOCK=$(_f "$1" 2) C_MAJOR=$(_f "$1" 3) C_CLUSTER=$(_f "$1" 4)
+  C_NAME=$(_f "$1" 7) C_REG=$(_f "$1" 8) C_STATUS=$(_f "$1" 9) C_DBS=$(_f "$1" 10)
+  C_SIZE=$(_f "$1" 11) C_UNIT=$(_f "$1" 12) C_ID=$(_f "$1" 13)
+  [ "$C_ID" != - ] || C_ID=''
+}
+
+cluster_desc() {
+  _d=$C_DBS
+  [ "$_d" != - ] || _d=none
+  printf 'PostgreSQL %s on port %s (%s; databases: %s)' "$C_MAJOR" "$C_PORT" "$C_SIZE" "$(printf '%s' "$_d" | sed 's/,/, /g')"
+}
+
+# restart_cmd is how a person restarts this cluster.
+restart_cmd() {
+  if [ "$C_UNIT" != - ]; then
+    echo "sudo systemctl restart ${C_UNIT%.service}"
+  elif [ "$C_CLUSTER" != - ]; then
+    echo "sudo pg_ctlcluster $C_MAJOR $C_CLUSTER restart"
+  else
+    echo "sudo systemctl restart postgresql"
+  fi
+}
+
+restart_later() {
+  say ""
+  say "    OK. Restart PostgreSQL when it suits you:"
+  say "        $(restart_cmd)"
+  if restart_allowed "$C_PORT"; then
+    say "    (or with Restart PostgreSQL in the Rowsafe dashboard)."
+  fi
+  say "    Rowsafe notices the restart by itself and finishes setting up. Nothing else to do."
+}
+
+# restart_postgres restarts the cluster, because the person said yes.
+restart_postgres() {
+  step "Restarting PostgreSQL $C_MAJOR"
+  _rc=0
+  if systemd_running && [ "$C_UNIT" != - ]; then
+    timeout 180 systemctl restart "$C_UNIT" >"$TMP/restart.log" 2>&1 </dev/null || _rc=$?
+  elif [ "$C_CLUSTER" != - ] && have pg_ctlcluster; then
+    timeout 180 pg_ctlcluster "$C_MAJOR" "$C_CLUSTER" restart >"$TMP/restart.log" 2>&1 </dev/null || _rc=$?
+  else
+    warn "the installer doesn't know how PostgreSQL is run on this server, so it can't restart it"
+    return 1
+  fi
+  if [ "$_rc" != 0 ]; then
+    tail -n 5 "$TMP/restart.log" | sed 's/^/    /' >&2
+    warn "restarting PostgreSQL failed"
+    return 1
+  fi
+  ok "PostgreSQL restarted"
+}
+
+offer_restart() {
+  say ""
+  tty_say "PostgreSQL needs a quick restart for backups to start. It takes a few"
+  tty_say "seconds; open connections are dropped and apps reconnect."
+  if confirm "Restart PostgreSQL now?" n; then
+    if restart_postgres; then
+      finish_setup
+      return 0
+    fi
+  fi
+  restart_later
+}
+
+# finish_setup [TIMEOUT] waits until the database is protected and its first
+# full backup runs, then shows where to see it.
+finish_setup() {
+  _rc=0
+  agent_show setup wait --database "$C_ID" --timeout "${1:-5m}" || _rc=$?
+  [ "$_rc" = 0 ] || [ "$_rc" = 2 ] || warn "could not follow the setup (see above); Rowsafe finishes it on its own"
+  if agent_run setup status --database "$C_ID" >"$TMP/status" 2>/dev/null; then
+    _url=$(cut -f5 "$TMP/status")
+    [ -z "$_url" ] || [ "$_url" = - ] || note "Dashboard: $_url"
+  fi
+}
+
+# ask_name asks for the database's name in Rowsafe, into C_NAME.
+ask_name() {
+  while :; do
+    ask _v "Name it in Rowsafe" "$C_NAME"
+    if matches "$_v" '^[a-z][a-z0-9-]{1,39}$'; then
+      C_NAME=$_v
+      return 0
+    fi
+    tty_bad "Use 2-40 lowercase letters, digits and dashes, starting with a letter."
+  done
+}
+
+# plan_cluster registers the cluster and shows the plan; its exit status is
+# `setup plan`'s. C_ID is set once registered.
+plan_cluster() {
+  install -d -m 0700 -o "$AGENT_USER" -g "$AGENT_USER" "$TMP/setup"
+  rm -f "$TMP/setup/id"
+  _rc=0
+  agent_show setup plan --name "$C_NAME" --port "$C_PORT" --socket-dir "$C_SOCK" --id-file "$TMP/setup/id" || _rc=$?
+  C_ID=$(cat "$TMP/setup/id" 2>/dev/null || true)
+  return "$_rc"
+}
+
+# protect_cluster (interactive): plan, "Turn on backups?", apply, restart.
+protect_cluster() {
+  step "Preparing a plan"
+  while :; do
+    _prc=0
+    plan_cluster || _prc=$?
+    [ "$_prc" = 7 ] || break
+    ask_name
+  done
+  _force=''
+  case $_prc in
+    0)
+      say ""
+      if ! confirm "Nothing changes until you say yes. Turn on backups for $C_NAME now?" y; then
+        note "OK, nothing was changed. Turn them on later in the Rowsafe dashboard, or run this installer again."
+        return 0
+      fi
+      ;;
+    3)
+      say ""
+      if ! confirm "Replace it with Rowsafe?" n; then
+        note "OK, nothing was changed."
+        return 0
+      fi
+      _force=1
+      ;;
+    4)
+      SETUP_STOP=1
+      return 0
+      ;;
+    5) return 0 ;;
+    10)
+      offer_restart
+      return 0
+      ;;
+    *)
+      warn "could not prepare a plan for $C_NAME (see above); you can finish in the Rowsafe dashboard"
+      return 0
+      ;;
+  esac
+  step "Turning on backups for $C_NAME"
+  _arc=0
+  agent_show setup apply --database "$C_ID" ${_force:+--force} || _arc=$?
+  case $_arc in
+    0) finish_setup ;;
+    10) offer_restart ;;
+    *) warn "turning on backups for $C_NAME failed (see above); nothing restarted" ;;
+  esac
+}
+
+# setup_databases (interactive) goes through every cluster found.
+setup_databases() {
+  if [ ! -s "$TMP/clusters" ]; then
+    note "No running PostgreSQL found that the agent can reach. Once it runs, run this installer again."
+    return 0
+  fi
+  _count=$(wc -l <"$TMP/clusters" | tr -d ' ')
+  while IFS= read -r _line <&4; do
+    [ "$SETUP_STOP" = 0 ] || break
+    read_cluster "$_line"
+    say ""
+    case $C_REG:$C_STATUS in
+      yes:active)
+        ok "$(cluster_desc) is protected as $C_NAME"
+        continue
+        ;;
+      yes:verifying)
+        ok "$(cluster_desc): backups are on as $C_NAME; Rowsafe is checking them"
+        continue
+        ;;
+      yes:awaiting_restart)
+        note "Found $(cluster_desc): backups for $C_NAME wait for a PostgreSQL restart."
+        offer_restart
+        continue
+        ;;
+      yes:*)
+        note "Found $(cluster_desc): added to Rowsafe as $C_NAME, backups not on yet."
+        ;;
+      *)
+        note "Found $(cluster_desc)"
+        if [ "$_count" -gt 1 ] && ! confirm "Set up backups for it?" y; then
+          continue
+        fi
+        ask_name
+        ;;
+    esac
+    protect_cluster
+  done 4<"$TMP/clusters"
+}
+
+# protect_unattended is --protect NAME: no questions, never a restart.
+protect_unattended() {
+  step "Turning on backups for $PROTECT_NAME"
+  if [ -n "$PROTECT_PORT" ]; then
+    _line=$(awk -F '\t' -v p="$PROTECT_PORT" '$1 == p' "$TMP/clusters")
+    [ -n "$_line" ] || die "found no PostgreSQL on port $PROTECT_PORT that the agent can reach"
+  else
+    case $(wc -l <"$TMP/clusters" | tr -d ' ') in
+      0) die "found no running PostgreSQL that the agent can reach" ;;
+      1) _line=$(cat "$TMP/clusters") ;;
+      *) die "found several PostgreSQL clusters (ports $(cut -f1 "$TMP/clusters" | tr '\n' ' ')); pick one with --protect-port" ;;
+    esac
+  fi
+  read_cluster "$_line"
+  C_NAME=$PROTECT_NAME
+  note "$(cluster_desc)"
+  _prc=0
+  plan_cluster || _prc=$?
+  case $_prc in
+    0) ;;
+    5) return 0 ;;
+    10)
+      restart_later
+      return 0
+      ;;
+    3) die "another backup tool is set up for this PostgreSQL; run the installer on a terminal to replace it" ;;
+    7) die "the name $PROTECT_NAME is taken in your Rowsafe organization; pick another with --protect" ;;
+    *) die "could not turn on backups for $PROTECT_NAME (see above)" ;;
+  esac
+  _arc=0
+  agent_show setup apply --database "$C_ID" || _arc=$?
+  case $_arc in
+    0) finish_setup 3m ;;
+    10) restart_later ;;
+    *) die "turning on backups for $PROTECT_NAME failed (see above)" ;;
+  esac
+}
+
+# next_steps says how to turn on backups when the installer didn't.
+next_steps() {
+  say ""
+  say "${BOLD}${GREEN}${CHECK} All set.${RESET} ${BOLD}Next: turn on backups for this server's PostgreSQL.${RESET}"
+  if [ "${1:-}" = not-running ]; then
+    say "    Once the agent runs, run this installer again from a terminal: it finds"
+    say "    PostgreSQL and asks before changing anything. Or use the Rowsafe dashboard."
+  else
+    say "    Run this installer again from a terminal: it finds PostgreSQL and asks"
+    say "    before changing anything (or, without questions: --protect NAME)."
+    say "    Or use the Rowsafe dashboard, where $(uname -n) shows up within a minute."
+  fi
+}
+
+# databases runs once the agent is up: restart access, then backups.
+databases() {
+  [ "$ALLOW_RESTART" != no ] || disallow_restarts
+  if [ ! -f "$STATE_DIR/agent.json" ] || ! agent_running; then
+    [ -z "$PROTECT_NAME" ] || die "the agent is not running, so backups can't be turned on yet; see 'journalctl -u rowsafe-agent'"
+    [ "$ALLOW_RESTART" != yes ] || warn "the agent is not running; run the installer again with --allow-restart once it is"
+    next_steps not-running
+    return 0
+  fi
+  interactive=0
+  if [ "$TTY" = 1 ] && [ "$NO_SETUP" = 0 ]; then interactive=1; fi
+  if [ "$interactive" = 1 ] || [ -n "$PROTECT_NAME" ] || [ "$ALLOW_RESTART" = yes ] || grep -qs '^[0-9]' "$RESTART_ALLOW_FILE"; then
+    say ""
+    step "Looking for PostgreSQL on this server"
+    if ! discover; then
+      [ -z "$PROTECT_NAME" ] || die "could not look for PostgreSQL (see above)"
+      next_steps
+      return 0
+    fi
+    restart_access
+  fi
+  if [ -n "$PROTECT_NAME" ]; then
+    protect_unattended
+  elif [ "$interactive" = 1 ]; then
+    setup_databases
+  else
+    next_steps
+  fi
+}
+
 # ---------------------------------------------------------------- modes
 
 install_agent() {
@@ -1498,8 +2308,8 @@ install_agent() {
   detect_os
   detect_arch
   check_postgres
-  say "${BOLD}Rowsafe agent installer${RESET}: backups, WAL archiving and restore drills for"
-  say "the PostgreSQL on this server. PostgreSQL itself is never restarted."
+  say "${BOLD}Rowsafe agent installer${RESET}: backups, restore to any second and weekly"
+  say "restore tests for the PostgreSQL on this server. Nothing changes without your yes."
   say ""
   step "Installing the Rowsafe agent on $(uname -n) ($OS_NAME, $ARCH)"
   ensure_base_tools
@@ -1550,10 +2360,14 @@ install_agent() {
   else
     warn "systemd is not running here; the service was installed but cannot be enabled or started"
   fi
+  # The unit now runs the guard from $LIB_DIR. (/opt is root's, so removing
+  # this one path as root follows no symlink the agent could plant.)
+  rm -rf "$OLD_GUARD_DIR"
 
   # 3. Unconfigured: stop here and say exactly what to fill in.
   missing=$(missing_config)
   if [ -n "$missing" ]; then
+    [ -z "$PROTECT_NAME" ] || warn "--protect needs the agent running; set the settings below, then run the installer again"
     switch_version
     if systemd_running; then summary "installed and enabled, not started"; else summary "installed, not started"; fi
     say ""
@@ -1592,7 +2406,7 @@ install_agent() {
       die "fix the problems above in $ENV_FILE, then run the installer again. The agent is installed but not started."
     fi
     # Don't leave a version that failed its self-test lying around.
-    if [ "$need_binary" = 1 ] && [ "$installed" != "$REL_VERSION" ]; then rm -rf "${STAGED%/rowsafe-agent}"; fi
+    if [ "$need_binary" = 1 ] && [ "$installed" != "$REL_VERSION" ]; then as_agent rm -rf "${STAGED%/rowsafe-agent}"; fi
     die "keeping rowsafe-agent $installed. Fix the problems above in $ENV_FILE, then run the installer again."
   fi
   ok "configuration, pgBackRest and control plane reachable"
@@ -1604,14 +2418,7 @@ install_agent() {
   fi
   probe_postgres
   summary "$SERVICE_STATE"
-  say ""
-  say "${BOLD}${GREEN}${CHECK} All set.${RESET} ${BOLD}Next: go back to the Rowsafe dashboard.${RESET}"
-  say "    This server ($(uname -n)) shows up there within a minute; choose which"
-  say "    database to protect. Or, from your workstation:"
-  say "    rowsafe hosts list"
-  say "    rowsafe adopt <name> --host $(uname -n)"
-  say ""
-  say "Adopting only prints a read-only plan; nothing changes until you run \`rowsafe apply <name>\`."
+  databases
 }
 
 summary() {
@@ -1645,6 +2452,9 @@ uninstall_agent() {
     systemctl disable --now --quiet "$SERVICE" 2>/dev/null || true
   fi
   rm -f "$UNIT_FILE"
+  remove_restart_helper
+  rm -f "$GUARD_FILE"
+  rmdir "$LIB_DIR" 2>/dev/null || true
   if systemd_running; then systemctl daemon-reload; fi
   rm -rf "$INSTALL_DIR"
   ok "service and $INSTALL_DIR removed"
@@ -1691,6 +2501,22 @@ main() {
       --purge) purge=1 ;;
       --setup-storage) SETUP_STORAGE=1 ;;
       --no-prompt) PROMPT=never ;;
+      --no-setup) NO_SETUP=1 ;;
+      --allow-restart) ALLOW_RESTART=yes ;;
+      --no-allow-restart) ALLOW_RESTART=no ;;
+      --protect)
+        [ $# -ge 2 ] || die "--protect needs the database's name in Rowsafe"
+        printf '%s\n' "$2" | grep -Eq '^[a-z][a-z0-9-]{1,39}$' ||
+          die "--protect: names use 2-40 lowercase letters, digits and dashes, starting with a letter"
+        PROTECT_NAME=$2
+        shift
+        ;;
+      --protect-port)
+        [ $# -ge 2 ] || die "--protect-port needs a port"
+        printf '%s\n' "$2" | grep -Eq '^[1-9][0-9]{0,4}$' || die "--protect-port needs a port number"
+        PROTECT_PORT=$2
+        shift
+        ;;
       --check-storage) mode=check-storage ;;
       --storage)
         [ $# -ge 2 ] || die "--storage needs a provider: $PROVIDERS"
@@ -1731,7 +2557,14 @@ main() {
   if [ "$mode" != install ] && { [ "$SETUP_STORAGE" = 1 ] || [ -n "$STORAGE_PROVIDER" ]; }; then
     die "--setup-storage and --storage only go with an install"
   fi
+  if [ "$mode" != install ] && { [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME" ] || [ -n "$ALLOW_RESTART" ]; }; then
+    die "--no-setup, --protect and --allow-restart only go with an install"
+  fi
+  [ -z "$PROTECT_PORT" ] || [ -n "$PROTECT_NAME" ] || die "--protect-port only goes with --protect"
+  [ "$NO_SETUP" = 0 ] || [ -z "$PROTECT_NAME" ] || die "--no-setup and --protect contradict each other"
   TMP=$(mktemp -d "${TMPDIR:-/tmp}/rowsafe-install.XXXXXX")
+  # The agent user writes one file into $TMP/setup (0700, its own).
+  chmod 0711 "$TMP"
   if [ "$mode" = install ]; then
     open_tty
     if [ "$TTY" = 0 ] && { [ "$SETUP_STORAGE" = 1 ] || [ -n "$STORAGE_PROVIDER" ]; }; then

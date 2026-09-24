@@ -147,7 +147,7 @@ type DatabaseSummary struct {
 // TaskView is one task. Log is only filled by get_task.
 type TaskView struct {
 	ID              string     `json:"id"`
-	Type            string     `json:"type" jsonschema:"inspect, adopt, check, backup, drill or restore_point"`
+	Type            string     `json:"type" jsonschema:"inspect, adopt, check, backup, drill (the restore test), restore_point or restart"`
 	Status          string     `json:"status" jsonschema:"queued, running, succeeded, failed, lost or cancelled"`
 	Database        string     `json:"database,omitempty"`
 	DatabaseID      string     `json:"database_id,omitempty"`
@@ -186,6 +186,7 @@ type TaskDetail struct {
 	Drill        *protocol.DrillResult        `json:"drill,omitempty"`
 	CheckOK      *bool                        `json:"check_ok,omitempty" jsonschema:"result of a check task: WAL reached the repository"`
 	RestorePoint *protocol.RestorePointResult `json:"restore_point,omitempty"`
+	Restart      *protocol.RestartResult      `json:"restart,omitempty" jsonschema:"result of a restart a person asked for"`
 	LogTail      string                       `json:"log_tail,omitempty"`
 	LogBytes     int                          `json:"log_bytes,omitempty" jsonschema:"full log size; log_tail holds only its end when smaller"`
 	LogTruncated bool                         `json:"log_truncated,omitempty"`
@@ -271,6 +272,11 @@ func taskDetail(t protocol.TaskView, logTail int) TaskDetail {
 			if json.Unmarshal(t.Result, &r) == nil && r.Name != "" {
 				d.RestorePoint = &r
 			}
+		case protocol.TaskRestart:
+			var r protocol.RestartResult
+			if json.Unmarshal(t.Result, &r) == nil {
+				d.Restart = &r
+			}
 		}
 	}
 	if logTail > 0 && t.Log != "" {
@@ -289,7 +295,7 @@ func nextStep(t protocol.TaskView, d TaskDetail) string {
 	case protocol.StatusCancelled:
 		return "The task was removed from the queue before it ran."
 	case protocol.StatusQueued, protocol.StatusRunning:
-		return fmt.Sprintf("The task is %s. Poll get_task with task_id %q until it finishes (backups and drills of large databases can take hours).", t.Status, t.ID)
+		return fmt.Sprintf("The task is %s. Poll get_task with task_id %q until it finishes (backups and restore tests of large databases can take hours).", t.Status, t.ID)
 	case protocol.StatusLost:
 		return fmt.Sprintf("The agent stopped reporting on this task (it died, restarted or the host rebooted). Check the agent on the host (`systemctl status rowsafe-agent`, `journalctl -u rowsafe-agent`), then run the %s again.", t.Type)
 	case protocol.StatusFailed:
@@ -299,11 +305,13 @@ func nextStep(t protocol.TaskView, d TaskDetail) string {
 		case protocol.TaskBackup:
 			return fmt.Sprintf("Read the error and log (pgBackRest output). After fixing the cause: `rowsafe backup %s --type diff` (tool run_backup). See https://rowsafe.sh/docs/guides/monitoring.", name)
 		case protocol.TaskDrill:
-			return fmt.Sprintf("Read the error and log. After fixing the cause: `rowsafe drill %s` (tool run_drill). See https://rowsafe.sh/docs/guides/monitoring.", name)
+			return fmt.Sprintf("Read the error and log. After fixing the cause: `rowsafe proof %s` (tool run_drill). See https://rowsafe.sh/docs/guides/monitoring.", name)
 		case protocol.TaskAdopt:
 			return fmt.Sprintf("Read the error and log, fix the cause on the host, then re-plan: `rowsafe plan %s` (tool plan_adoption).", name)
 		case protocol.TaskRestorePoint:
 			return "The restore point was not created. Don't run a destructive operation relying on it; check safety_check for the cause."
+		case protocol.TaskRestart:
+			return "The PostgreSQL restart failed; the error says why (e.g. restarting from Rowsafe isn't allowed on this server). Tell the user; restarting is theirs to do, and no tool here can."
 		}
 		return "Read the error and log."
 	}
@@ -316,7 +324,7 @@ func nextStep(t protocol.TaskView, d TaskDetail) string {
 		case !d.Adopt.Applied:
 			return fmt.Sprintf("This is a read-only plan; nothing changed. Show it to the user. If they approve, apply it: `rowsafe apply %s` (tool apply_adoption). Applying never restarts PostgreSQL.", name)
 		case d.Adopt.RestartRequired:
-			return fmt.Sprintf("Settings applied. The user must restart PostgreSQL in a maintenance window (e.g. `sudo systemctl restart postgresql`), then run `rowsafe verify %s` (tool verify_database). Rowsafe never restarts PostgreSQL itself.", name)
+			return fmt.Sprintf("Settings applied. PostgreSQL needs a restart for backups to start; the user restarts it when it suits them (Restart PostgreSQL in the dashboard, `rowsafe restart %s`, or on the server: sudo systemctl restart postgresql, or in Docker: docker compose restart postgres). Rowsafe never restarts it on its own, and AI assistants can't. Rowsafe notices the restart and verifies by itself; `rowsafe verify %s` (tool verify_database) checks right away.", name, name)
 		default:
 			return fmt.Sprintf("Settings applied; a WAL verification (check) was queued automatically. Follow it with list_tasks for %s.", name)
 		}
@@ -326,7 +334,7 @@ func nextStep(t protocol.TaskView, d TaskDetail) string {
 		}
 	case protocol.TaskDrill:
 		if d.Drill != nil && !d.Drill.Passed {
-			return "The drill ran but its checks failed: the backups may not restore correctly. See https://rowsafe.sh/docs/guides/monitoring; take a new full backup and drill again once the cause is understood."
+			return "The restore test (Proof) ran but its checks failed: the backups may not restore correctly. See https://rowsafe.sh/docs/guides/monitoring; take a new full backup and test again once the cause is understood."
 		}
 	}
 	return ""

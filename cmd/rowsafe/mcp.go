@@ -28,7 +28,7 @@ import (
 func mcpServe(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	allowWrites := fs.Bool("allow-writes", false, "also offer tools that queue tasks (plan, apply, backup, drill, verify, restore points) and change schedules")
+	allowWrites := fs.Bool("allow-writes", false, "also offer tools that queue tasks (plan, apply, backup, restore test, verify, restore points) and change schedules")
 	allowRP := fs.Bool("allow-restore-points", false, "also offer create_restore_point, but no other write tool")
 	if _, err := parse(fs, args, false); err != nil {
 		return err

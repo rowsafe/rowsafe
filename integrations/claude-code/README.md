@@ -1,4 +1,4 @@
-# Rowsafe plugin for Claude Code
+# Rowsafe Guard for Claude Code
 
 The PostgreSQL safety net for AI agents: before a migration or destructive SQL, check that the database can be recovered and create a named Rowsafe restore point.
 

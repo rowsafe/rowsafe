@@ -42,12 +42,12 @@ lint: check-installer
 	$(GO) vet ./...
 	@test -z "$$(gofmt -l .)" || { echo "gofmt needed:"; gofmt -l .; exit 1; }
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck -S warning -s sh scripts/install.sh scripts/test-install.sh scripts/rowsafe-agent-guard; \
+		shellcheck -S warning -s sh scripts/install.sh scripts/test-install.sh scripts/rowsafe-agent-guard scripts/rowsafe-pg-restart; \
 	else echo "shellcheck not installed; skipping"; fi
 
 # install.sh is fetched on its own with curl, so it embeds the guard, the
-# systemd unit and the logrotate config; they must stay identical to the files
-# in the repository.
+# systemd units, the restart helper and the logrotate config; they must stay
+# identical to the files in the repository.
 check-installer:
 	@sed -n "/<<'ROWSAFE_GUARD_EOF'; then\$$/,/^ROWSAFE_GUARD_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
 		diff -u scripts/rowsafe-agent-guard - || { echo "scripts/install.sh: embedded guard differs from scripts/rowsafe-agent-guard"; exit 1; }
@@ -55,6 +55,12 @@ check-installer:
 		diff -u deploy/systemd/rowsafe-agent.service - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-agent.service"; exit 1; }
 	@sed -n "/<<'ROWSAFE_LOGROTATE_EOF' || true\$$/,/^ROWSAFE_LOGROTATE_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
 		diff -u deploy/logrotate/rowsafe - || { echo "scripts/install.sh: embedded logrotate config differs from deploy/logrotate/rowsafe"; exit 1; }
+	@sed -n "/<<'ROWSAFE_RESTART_HELPER_EOF'; then\$$/,/^ROWSAFE_RESTART_HELPER_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
+		diff -u scripts/rowsafe-pg-restart - || { echo "scripts/install.sh: embedded restart helper differs from scripts/rowsafe-pg-restart"; exit 1; }
+	@sed -n "/<<'ROWSAFE_RESTART_SERVICE_EOF'; then\$$/,/^ROWSAFE_RESTART_SERVICE_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
+		diff -u deploy/systemd/rowsafe-pg-restart.service - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pg-restart.service"; exit 1; }
+	@sed -n "/<<'ROWSAFE_RESTART_PATH_EOF'; then\$$/,/^ROWSAFE_RESTART_PATH_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
+		diff -u deploy/systemd/rowsafe-pg-restart.path - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pg-restart.path"; exit 1; }
 	@sh -n scripts/install.sh
 
 test-installer:

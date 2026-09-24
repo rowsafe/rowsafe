@@ -110,12 +110,12 @@ func assessDatabase(s dbState, host *protocol.Host, now time.Time) []Problem {
 		out = append(out, p)
 	}
 	if s.err != nil {
-		add(Problem{Severity: sevWarning, Kind: "history_unavailable", Summary: "could not read backup, drill or task history",
+		add(Problem{Severity: sevWarning, Kind: "history_unavailable", Summary: "could not read backup, restore test or task history",
 			Detail: apiError(s.err).Error(), NextAction: "Retry; if it persists, check the control plane."})
 	}
 	if host != nil && !online(*host, now) {
 		// The host problem says what to do; here only note the consequence.
-		add(Problem{Severity: sevInfo, Kind: "host_offline", Summary: "its agent is offline: no backups, drills or WAL monitoring until it is back",
+		add(Problem{Severity: sevInfo, Kind: "host_offline", Summary: "its agent is offline: no backups, restore tests or WAL monitoring until it is back",
 			NextAction: "Fix the agent on " + d.Hostname + " (see the host_offline problem for that host)."})
 	}
 
@@ -130,7 +130,7 @@ func assessDatabase(s dbState, host *protocol.Host, now time.Time) []Problem {
 				p.Kind, p.Summary = "adopt_failed", "the latest adopt task "+lt.Status
 				p.Detail = firstLine(lt.Error, 300)
 				p.NextAction = "Read the task log with get_task, fix the cause on the host, then re-plan."
-				p.Command, p.Tool = "rowsafe task show "+lt.ID, "get_task"
+				p.Command, p.Tool = "rowsafe task "+lt.ID, "get_task"
 			}
 		}
 		add(p)
@@ -140,10 +140,11 @@ func assessDatabase(s dbState, host *protocol.Host, now time.Time) []Problem {
 			detail = "Pending restart for: " + strings.Join(d.Inspect.PendingRestart, ", ") + ". " + detail
 		}
 		add(Problem{Severity: sevWarning, Kind: "awaiting_restart", Summary: "settings applied; waiting for a PostgreSQL restart, nothing is protected yet",
-			Detail:     detail,
-			NextAction: "The user restarts PostgreSQL in a maintenance window (Rowsafe never does), then verifies WAL archiving.",
-			Command:    "sudo systemctl restart postgresql   # on " + d.Hostname + ", then: rowsafe verify " + q,
-			Tool:       "verify_database", Runbook: runbookURL})
+			Detail: detail,
+			NextAction: "The user restarts PostgreSQL when it suits them: Restart PostgreSQL in the dashboard, `rowsafe restart " + q + "`, or on the server. " +
+				"Rowsafe never restarts it on its own, and AI assistants can't. Rowsafe notices the restart and verifies by itself; verify_database checks right away.",
+			Command: restartCommand(d),
+			Runbook: runbookURL})
 	case protocol.DBVerifying:
 		lt := latestTask(s.tasks, protocol.TaskCheck)
 		switch {
@@ -154,11 +155,11 @@ func assessDatabase(s dbState, host *protocol.Host, now time.Time) []Problem {
 			add(Problem{Severity: sevCritical, Kind: "verification_failed", Summary: "WAL verification " + lt.Status + ": no backups are scheduled",
 				Detail:     firstLine(lt.Error, 300),
 				NextAction: "Read the check task's log (get_task). Usually archive_mode is still off (PostgreSQL not restarted) or the repository credentials are wrong. Fix it, then verify again.",
-				Command:    "rowsafe task show " + lt.ID + " && rowsafe verify " + q, Tool: "verify_database", TaskID: lt.ID,
+				Command:    "rowsafe task " + lt.ID + " && rowsafe verify " + q, Tool: "verify_database", TaskID: lt.ID,
 				Runbook: runbookURL})
 		default:
 			add(Problem{Severity: sevInfo, Kind: "verifying", Summary: "WAL verification is " + lt.Status,
-				NextAction: "Wait for the check task to finish.", Command: "rowsafe task show " + lt.ID, Tool: "get_task", TaskID: lt.ID})
+				NextAction: "Wait for the check task to finish.", Command: "rowsafe task " + lt.ID, Tool: "get_task", TaskID: lt.ID})
 		}
 	case protocol.DBActive:
 		out = append(out, assessBackups(s, now)...)
@@ -208,25 +209,33 @@ func assessDatabase(s dbState, host *protocol.Host, now time.Time) []Problem {
 		}
 		retry := map[string]string{
 			protocol.TaskBackup: "rowsafe backup " + q + " --type diff",
-			protocol.TaskDrill:  "rowsafe drill " + q,
+			protocol.TaskDrill:  "rowsafe proof " + q,
 			protocol.TaskCheck:  "rowsafe verify " + q,
 			protocol.TaskAdopt:  "rowsafe plan " + q,
 		}[t.Type]
 		add(Problem{Severity: sevWarning, Kind: "task_" + t.Status, Summary: fmt.Sprintf("%s task %s %s", t.Type, t.Status, ago(t.FinishedAt, now)),
 			Detail:     firstLine(t.Error, 300),
 			NextAction: "Read the task's error and log with get_task. One transient failure needs no action if the next scheduled run succeeds; otherwise fix the cause and retry.",
-			Command:    strings.TrimSuffix("rowsafe task show "+t.ID+" && "+retry, " && "), Tool: "get_task", TaskID: t.ID,
+			Command:    strings.TrimSuffix("rowsafe task "+t.ID+" && "+retry, " && "), Tool: "get_task", TaskID: t.ID,
 			Runbook: runbookURL})
 	}
 	for _, t := range s.tasks {
 		if t.Status == protocol.StatusQueued && now.Sub(t.CreatedAt) > queuedTooLong && (host == nil || online(*host, now)) {
 			add(Problem{Severity: sevWarning, Kind: "task_not_claimed", Summary: fmt.Sprintf("%s task queued since %s and not picked up", t.Type, ago(&t.CreatedAt, now)),
-				NextAction: "The agent runs one task at a time: it may be busy with a long backup or drill, or stuck. Check list_tasks for a running task, and the agent on the host (`journalctl -u rowsafe-agent`).",
+				NextAction: "The agent runs one task at a time: it may be busy with a long backup or restore test, or stuck. Check list_tasks for a running task, and the agent on the host (`journalctl -u rowsafe-agent`).",
 				Command:    "rowsafe tasks " + q, Tool: "list_tasks", TaskID: t.ID})
 			break
 		}
 	}
 	return out
+}
+
+// restartCommand is how the user restarts d's PostgreSQL.
+func restartCommand(d protocol.Database) string {
+	if d.CanRestart {
+		return "rowsafe restart " + shellArg(d.Name) + "   # or on " + d.Hostname + ": sudo systemctl restart postgresql"
+	}
+	return "sudo systemctl restart postgresql   # on " + d.Hostname + " (in Docker: docker compose restart postgres; restarting from Rowsafe isn't allowed there)"
 }
 
 func assessBackups(s dbState, now time.Time) []Problem {
@@ -289,10 +298,10 @@ func assessDrills(s dbState, now time.Time) []Problem {
 		dr := s.drills[0]
 		p := base
 		p.Severity, p.Kind = sevCritical, "drill_failed"
-		p.Summary = "the latest restore drill FAILED " + ago(&dr.CreatedAt, now)
+		p.Summary = "the latest restore test (Proof) FAILED " + ago(&dr.CreatedAt, now)
 		p.Detail = strings.Join(capList(dr.Result.Failures, 3), "; ")
-		p.NextAction = "Until a drill passes there is no proof the backups restore. Read the drill task's log (get_task). Disk-space failures: free space and re-run. Restore errors or missing databases are serious: take a new full backup and drill again."
-		p.Command, p.Tool, p.TaskID = "rowsafe task show "+dr.TaskID+" && rowsafe drill "+q, "run_drill", dr.TaskID
+		p.NextAction = "Until a restore test passes there is no proof the backups restore. Read the drill task's log (get_task). Disk-space failures: free space and re-run. Restore errors or missing databases are serious: take a new full backup and test again."
+		p.Command, p.Tool, p.TaskID = "rowsafe task "+dr.TaskID+" && rowsafe proof "+q, "run_drill", dr.TaskID
 		p.Runbook = runbookURL
 		return []Problem{p}
 	}
@@ -306,15 +315,15 @@ func assessDrills(s dbState, now time.Time) []Problem {
 	switch {
 	case lastPass != nil && now.Sub(lastPass.CreatedAt) > drillStaleAfter:
 		p := base
-		p.Severity, p.Kind, p.Summary = sevWarning, "drill_overdue", "last passing restore drill was "+ago(&lastPass.CreatedAt, now)
-		p.NextAction = "Check the drill tasks (list_tasks type=drill) for failures, then run a drill."
-		p.Command, p.Tool, p.Runbook = "rowsafe drill "+q, "run_drill", runbookURL
+		p.Severity, p.Kind, p.Summary = sevWarning, "drill_overdue", "last passing restore test (Proof) was "+ago(&lastPass.CreatedAt, now)
+		p.NextAction = "Check the drill tasks (list_tasks type=drill) for failures, then run a restore test."
+		p.Command, p.Tool, p.Runbook = "rowsafe proof "+q, "run_drill", runbookURL
 		return []Problem{p}
 	case lastPass == nil && now.Sub(d.CreatedAt) > drillStaleAfter:
 		p := base
-		p.Severity, p.Kind, p.Summary = sevWarning, "drill_missing", "no restore drill has ever passed"
-		p.NextAction = "Run a restore drill to prove the backups restore."
-		p.Command, p.Tool, p.Runbook = "rowsafe drill "+q, "run_drill", runbookURL
+		p.Severity, p.Kind, p.Summary = sevWarning, "drill_missing", "no restore test (Proof) has ever passed"
+		p.NextAction = "Run a restore test to prove the backups restore."
+		p.Command, p.Tool, p.Runbook = "rowsafe proof "+q, "run_drill", runbookURL
 		return []Problem{p}
 	}
 	return nil
@@ -332,7 +341,7 @@ func assessHost(h protocol.Host, dbNames []string, now time.Time) []Problem {
 			p.Summary = "the agent's last heartbeat was " + ago(h.LastSeenAt, now)
 		}
 		if len(dbNames) > 0 {
-			p.Detail = "Affected databases (no backups, drills or WAL monitoring; PostgreSQL still archives WAL): " + strings.Join(dbNames, ", ")
+			p.Detail = "Affected databases (no backups, restore tests or WAL monitoring; PostgreSQL still archives WAL): " + strings.Join(dbNames, ", ")
 		} else {
 			p.Severity = sevWarning
 		}

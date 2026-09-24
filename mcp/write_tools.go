@@ -92,7 +92,7 @@ func (t *tools) addWriteTools(s *sdk.Server) {
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "apply_adoption",
-		Description: "Apply a database's adopt plan on its host: write the pgBackRest config, create the stanza, and set the archiving settings with ALTER SYSTEM + pg_reload_conf(). This changes production PostgreSQL settings. It never restarts PostgreSQL: when archive_mode or wal_level changes, the user must restart it later and then run verify_database. " +
+		Description: "Apply a database's adopt plan on its host: write the pgBackRest config, create the stanza, and set the archiving settings with ALTER SYSTEM + pg_reload_conf(). This changes production PostgreSQL settings. It never restarts PostgreSQL: when archive_mode or wal_level changes, PostgreSQL needs a restart later, which the user does (Restart PostgreSQL in the dashboard, `rowsafe restart`, or on the server); Rowsafe then verifies by itself. " +
 			"REQUIRED before calling: show the user the latest plan (plan_adoption or get_task on the plan task), explain what changes and whether a restart will be needed, and get their explicit approval for this database. Then pass confirm set to the database's exact name. Never call it on your own initiative. " +
 			"Leave force false unless the user explicitly asked to replace an existing archiver (e.g. WAL-G); force overwrites another tool's archive_command.",
 		Annotations: writes("Apply adoption (changes PostgreSQL settings)", true, false),
@@ -112,15 +112,15 @@ func (t *tools) addWriteTools(s *sdk.Server) {
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "run_drill",
-		Description: "Queue a restore drill of an active database: the agent restores the latest backup plus archived WAL into a scratch cluster on the same host (private socket, no TCP, low CPU and IO priority), compares databases and table counts with production, and deletes it. " +
-			"It needs free disk of about 1.3x the database size + 1 GiB on the host and can take hours. Fails with 409 if a drill is already queued or running.",
-		Annotations: writes("Run a restore drill", false, false),
+		Description: "Queue a restore test (Proof; task type drill) of an active database: the agent restores the latest backup plus archived WAL into a scratch cluster on the same host (private socket, no TCP, low CPU and IO priority), compares databases and table counts with production, and deletes it. " +
+			"It needs free disk of about 1.3x the database size + 1 GiB on the host and can take hours. Fails with 409 if one is already queued or running.",
+		Annotations: writes("Run a restore test (Proof)", false, false),
 		InputSchema: withWait[taskInput](nil),
 	}, t.runDrill)
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "verify_database",
-		Description: "Queue a WAL check (pgbackrest check): force a WAL switch and prove the segment reaches the bucket. Use it after the user restarted PostgreSQL for a database awaiting_restart, after fixing failing WAL archiving (it also rewrites the pgBackRest config archive_command reads), or to re-check a verifying database. " +
+		Description: "Queue a WAL check (pgbackrest check): force a WAL switch and prove the segment reaches the bucket. Rowsafe runs it by itself once a database awaiting_restart has been restarted; use it to check right away, after fixing failing WAL archiving (it also rewrites the pgBackRest config archive_command reads), or to re-check a verifying database. " +
 			"The first successful check makes the database active, starts its schedules and queues its first full backup.",
 		Annotations: writes("Verify WAL archiving", false, false),
 		InputSchema: withWait[taskInput](nil),
@@ -128,7 +128,7 @@ func (t *tools) addWriteTools(s *sdk.Server) {
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "update_schedule",
-		Description: "Change a database's backup and drill schedules (5-field cron expressions, evaluated in UTC) and/or how many full backups are kept. Omitted fields stay as they are; get_database shows the current values. " +
+		Description: "Change a database's backup and restore test (drill) schedules (5-field cron expressions, evaluated in UTC) and/or how many full backups are kept. Omitted fields stay as they are; get_database shows the current values. " +
 			"Lowering retention_full permanently deletes older backups at the next backup, shortening the point-in-time recovery window: confirm that with the user first. A changed schedule counts from now, so it never fires a missed run as a backlog.",
 		Annotations: writes("Update schedules and retention", true, true),
 		InputSchema: inputSchema[scheduleInput](func(p map[string]*jsonschema.Schema) {
@@ -184,9 +184,6 @@ func (t *tools) applyAdoption(ctx context.Context, _ *sdk.CallToolRequest, in ap
 	}
 	// Refuse without a plan the user could have reviewed.
 	plans, err := t.c.AllTasks(ctx, client.TaskQuery{Database: d.ID, Type: protocol.TaskAdopt, Limit: 20})
-	if err != nil && (isStatus(err, http.StatusNotFound) || isStatus(err, http.StatusMethodNotAllowed)) {
-		plans, err = t.c.Tasks(ctx, d.ID, 100) // older control plane
-	}
 	if err != nil {
 		return nil, WriteResult{}, apiError(err)
 	}
@@ -232,7 +229,7 @@ func (t *tools) runDrill(ctx context.Context, _ *sdk.CallToolRequest, in taskInp
 	if err != nil {
 		return nil, WriteResult{}, apiError(err)
 	}
-	return t.finish(ctx, task, in.Database, in.WaitSeconds, "Queued a restore drill of "+in.Database+".", false)
+	return t.finish(ctx, task, in.Database, in.WaitSeconds, "Queued a restore test (Proof) of "+in.Database+".", false)
 }
 
 func (t *tools) verifyDatabase(ctx context.Context, _ *sdk.CallToolRequest, in taskInput) (*sdk.CallToolResult, WriteResult, error) {
@@ -259,7 +256,7 @@ func (t *tools) updateSchedule(ctx context.Context, _ *sdk.CallToolRequest, in s
 	}
 	out := ScheduleResult{Database: d.Name, RetentionFull: d.RetentionFull, ScheduleFull: d.ScheduleFull, ScheduleDiff: d.ScheduleDiff, ScheduleDrill: d.ScheduleDrill}
 	var b textBuilder
-	b.line("Updated %s. Schedules (UTC): full %q, diff %q, drill %q. Retention: %d full backups.", d.Name, d.ScheduleFull, d.ScheduleDiff, d.ScheduleDrill, d.RetentionFull)
+	b.line("Updated %s. Schedules (UTC): full %q, diff %q, restore test (drill) %q. Retention: %d full backups.", d.Name, d.ScheduleFull, d.ScheduleDiff, d.ScheduleDrill, d.RetentionFull)
 	if before.RetentionFull != d.RetentionFull {
 		b.line("Retention changed from %d to %d full backups; it takes effect at the next backup.", before.RetentionFull, d.RetentionFull)
 	}

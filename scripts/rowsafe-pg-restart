@@ -1,0 +1,102 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-pg-restart: restarts PostgreSQL when a person asked Rowsafe to
+# (Restart in the dashboard, `rowsafe restart`).
+#
+# Installed by https://rowsafe.sh/install as
+# /usr/local/lib/rowsafe/rowsafe-pg-restart, only when root allowed it
+# (--allow-restart, or yes at the installer's question). It runs as root in
+# rowsafe-pg-restart.service, which rowsafe-pg-restart.path starts when the
+# agent writes a request; the agent itself cannot restart anything.
+#
+# The request (/var/lib/rowsafe/restart/request, in a directory the agent
+# user owns) is one line: "ID PORT". It is read and removed with the agent
+# user's privileges, never root's, so nothing planted there (a symlink, a
+# FIFO) can make root read, write or wait on anything. The port must be
+# listed in /etc/rowsafe/restart-allowed ("PORT UNIT" lines, written by
+# root); only that unit is restarted, and at most once a minute. The answer
+# goes to /run/rowsafe-pg-restart/result (root's directory, readable by the
+# agent) as key=value lines: id, ok (1 or 0), unit, error and finished_at.
+
+set -u
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+dir=${ROWSAFE_RESTART_DIR:-/var/lib/rowsafe/restart}
+out_dir=${RUNTIME_DIRECTORY:-/run/rowsafe-pg-restart}
+allow=${ROWSAFE_RESTART_ALLOW:-/etc/rowsafe/restart-allowed}
+state=${STATE_DIRECTORY:-/var/lib/rowsafe-pg-restart}
+agent_user=${ROWSAFE_AGENT_USER:-postgres}
+systemctl=${ROWSAFE_SYSTEMCTL:-systemctl}
+min_interval=60
+
+log() { echo "rowsafe-pg-restart: $*" >&2; }
+
+# as_agent runs a command with the agent user's privileges.
+as_agent() { setpriv --reuid="$agent_user" --regid="$agent_user" --init-groups -- "$@"; }
+
+id='' unit='' ok=0 err=''
+
+# answer writes the result atomically into root's own directory.
+answer() {
+  tmp=$(mktemp "$out_dir/.result.XXXXXX") || {
+    log "cannot write the result in $out_dir"
+    exit 0
+  }
+  printf 'id=%s\nok=%s\nunit=%s\nerror=%s\nfinished_at=%s\n' "$id" "$ok" "$unit" "$err" "$(date +%s)" >"$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$out_dir/result"
+}
+
+refuse() {
+  err=$1
+  log "refused: $1"
+  answer
+  exit 0
+}
+
+request=$dir/request
+as_agent test -e "$request" -o -L "$request" 2>/dev/null || exit 0
+# Only a regular file is read, for at most 5 seconds; whatever it was, it is
+# removed so the path unit doesn't fire again.
+# shellcheck disable=SC2016 # $1 expands in the inner shell
+line=$(as_agent sh -c '
+  if [ -f "$1" ] && [ ! -L "$1" ]; then timeout 5 head -c 200 -- "$1"; fi
+  rm -f -- "$1"' rowsafe-pg-restart "$request" 2>/dev/null | head -n 1)
+
+printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} [0-9]{1,5}$' || refuse "malformed request"
+id=${line% *}
+port=${line#* }
+
+[ -f "$allow" ] && [ ! -L "$allow" ] || refuse "restarting PostgreSQL from Rowsafe is not allowed on this server"
+[ "$(stat -c '%u' "$allow")" = 0 ] || refuse "$allow is not owned by root"
+case $(stat -c '%A' "$allow") in
+  ?????w???? | ????????w?) refuse "$allow is writable by others than root" ;;
+esac
+unit=$(awk -v p="$port" '$1 == p && $2 ~ /^[A-Za-z0-9@._-]+\.service$/ { print $2; exit }' "$allow")
+[ -n "$unit" ] || refuse "port $port is not in $allow: restarting it from Rowsafe is not allowed"
+
+mkdir -p "$state"
+stamp=$state/last-$unit
+now=$(date +%s)
+last=$(cat "$stamp" 2>/dev/null || echo 0)
+case $last in '' | *[!0-9]*) last=0 ;; esac
+if [ $((now - last)) -lt "$min_interval" ]; then
+  refuse "PostgreSQL ($unit) was restarted less than a minute ago; try again in a minute"
+fi
+echo "$now" >"$stamp"
+
+log "restarting $unit (request $id)"
+out=$(timeout 120 "$systemctl" restart "$unit" 2>&1 </dev/null)
+rc=$?
+if [ "$rc" = 0 ]; then
+  ok=1
+  log "restarted $unit"
+else
+  out=$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)
+  if [ "$rc" = 124 ]; then
+    err="systemctl restart $unit did not finish within 2 minutes"
+  else
+    err="systemctl restart $unit failed${out:+: $out}"
+  fi
+  log "$err"
+fi
+answer

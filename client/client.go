@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,6 +40,9 @@ func NewService(baseURL, serviceToken, orgID string) *Client {
 type APIError struct {
 	Status int
 	Msg    string
+	// RetryAfter is the response's Retry-After, when it gave one in seconds
+	// (e.g. 429 for a restart too soon after the last one).
+	RetryAfter time.Duration
 }
 
 func (e *APIError) Error() string { return e.Msg }
@@ -79,7 +83,11 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		if json.Unmarshal(data, &e) != nil || e.Error == "" {
 			e.Error = fmt.Sprintf("HTTP %d: %s", resp.StatusCode, bytes.TrimSpace(data))
 		}
-		return &APIError{Status: resp.StatusCode, Msg: e.Error}
+		ae := &APIError{Status: resp.StatusCode, Msg: e.Error}
+		if secs, err := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After"))); err == nil && secs > 0 {
+			ae.RetryAfter = time.Duration(secs) * time.Second
+		}
+		return ae
 	}
 	if out != nil {
 		return json.Unmarshal(data, out)
@@ -303,11 +311,6 @@ func (c *Client) DatabaseMetrics(ctx context.Context, ref string, q MetricsQuery
 
 func (c *Client) HostMetrics(ctx context.Context, ref string, q MetricsQuery) (out protocol.MetricsResponse, err error) {
 	return out, c.do(ctx, http.MethodGet, "/v1/hosts/"+esc(ref)+"/metrics"+q.encode(), nil, &out)
-}
-
-// TopQueries returns the newest pg_stat_statements snapshot.
-func (c *Client) TopQueries(ctx context.Context, ref string, limit int) (out protocol.Statements, err error) {
-	return out, c.do(ctx, http.MethodGet, fmt.Sprintf("/v1/databases/%s/queries?limit=%d", esc(ref), limit), nil, &out)
 }
 
 // Activity returns the newest snapshot of long-running sessions.

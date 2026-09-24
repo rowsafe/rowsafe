@@ -32,7 +32,7 @@ var ReleasePublicKey = ""
 //
 //	/opt/rowsafe/rowsafe-agent -> versions/0.2.0/rowsafe-agent   (the symlink systemd runs)
 //	/opt/rowsafe/versions/<version>/rowsafe-agent
-//	/opt/rowsafe/bin/rowsafe-agent-guard                           (ExecStartPre crash-loop guard)
+//	/usr/local/lib/rowsafe/rowsafe-agent-guard                     (ExecStartPre crash-loop guard, root's)
 //	/var/lib/rowsafe/update/pending/{previous,target,from,boots,switched_at}
 //	/var/lib/rowsafe/update/report.json                           (last outcome, resent on heartbeats)
 //	/var/lib/rowsafe/update/failed/<version>.json                 (don't retry too soon)

@@ -178,3 +178,18 @@ func TestRestoreNeverTouchesProductionPaths(t *testing.T) {
 		t.Errorf("restore command:\n got %s\nwant %s", got, want)
 	}
 }
+
+// process-max follows the host's size: 1 on up to 4 CPUs, 2 above.
+func TestRenderConfigProcessMax(t *testing.T) {
+	for cpus, want := range map[int]int{1: 1, 2: 1, 4: 1, 5: 2, 8: 2, 64: 2} {
+		if got := ProcessMax(cpus); got != want {
+			t.Errorf("ProcessMax(%d) = %d, want %d", cpus, got, want)
+		}
+	}
+	for in, want := range map[int]string{0: "process-max=1\n", 1: "process-max=1\n", 2: "process-max=2\n"} {
+		conf := RenderConfig(testRepo, ConfigInput{Stanza: "app", ProcessMax: in})
+		if !strings.Contains(conf, want) || !strings.Contains(conf, "compress-type=zst\n") {
+			t.Errorf("ProcessMax %d: config lacks %q or zst\n%s", in, want, conf)
+		}
+	}
+}

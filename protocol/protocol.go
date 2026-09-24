@@ -19,6 +19,11 @@ const (
 	// holding it is archived. It may run alongside another task on the same
 	// database (it is only a few SQL statements).
 	TaskRestorePoint = "restore_point"
+	// TaskRestart restarts the database's PostgreSQL. Only a person asks for
+	// it (Restart in the dashboard, `rowsafe restart`), and the agent runs it
+	// only for clusters root allowed at install time (HeartbeatRequest.
+	// RestartPorts), through a root helper; it never restarts on its own.
+	TaskRestart = "restart"
 )
 
 // Task statuses.
@@ -102,6 +107,10 @@ type HeartbeatRequest struct {
 	// Mode is the agent's mode: "native" or "docker-sidecar". Older agents
 	// omit it (native).
 	Mode string `json:"mode,omitempty"`
+	// RestartPorts are the ports of the local clusters root allowed Rowsafe
+	// to restart when someone asks (/etc/rowsafe/restart-allowed, written by
+	// the installer). Empty: restarting from Rowsafe is off on this host.
+	RestartPorts []int `json:"restart_ports,omitempty"`
 }
 
 // HeartbeatResponse tells the agent which databases to watch.
@@ -112,8 +121,7 @@ type HeartbeatResponse struct {
 	Update    *UpdateOffer   `json:"update,omitempty"`
 	// Monitored are the databases built-in monitoring covers: every
 	// database of the host, including ones not adopted yet (monitoring is
-	// read-only). A superset of Databases. Older control planes omit it;
-	// agents then monitor Databases.
+	// read-only). A superset of Databases.
 	Monitored []DatabaseSpec `json:"monitored,omitempty"`
 }
 
@@ -125,6 +133,11 @@ type ArchiverStats struct {
 	LastArchivedTime *time.Time `json:"last_archived_time,omitempty"`
 	LastFailedTime   *time.Time `json:"last_failed_time,omitempty"`
 	Error            string     `json:"error,omitempty"`
+	// ArchiveMode is PostgreSQL's current archive_mode ("off", "on",
+	// "always") as the agent sees it now; empty when unknown. The control
+	// plane uses it to notice the restart of a database waiting for one, and
+	// verifies it itself.
+	ArchiveMode string `json:"archive_mode,omitempty"`
 
 	// Docker sidecar agents (Mode "docker-sidecar") archive through a spool:
 	// PostgreSQL's archive_command copies WAL into it and the agent pushes it
@@ -202,6 +215,16 @@ type AdoptResult struct {
 	Warnings        []string      `json:"warnings,omitempty"`
 }
 
+// RestartResult is the agent's report for a restart task.
+type RestartResult struct {
+	Restarted  bool   `json:"restarted"`
+	Unit       string `json:"unit"`        // the systemd unit restarted, e.g. postgresql@18-main.service
+	DurationMs int64  `json:"duration_ms"` // from the request until PostgreSQL answered again
+	// ArchiveMode is archive_mode once PostgreSQL is back ("on" once the
+	// adopt settings are in effect).
+	ArchiveMode string `json:"archive_mode"`
+}
+
 type CheckResult struct {
 	OK      bool          `json:"ok"`
 	Inspect InspectResult `json:"inspect"`
@@ -234,6 +257,49 @@ type DrillDatabase struct {
 	Present        bool   `json:"present"`
 	SourceTables   int    `json:"source_tables"`
 	RestoredTables int    `json:"restored_tables"`
+}
+
+// ---- Agent-initiated setup ----
+//
+// The installer, run by root on the database host, registers the host's
+// PostgreSQL and turns on backups with the agent's credentials
+// (rowsafe-agent setup ...). Endpoints, scoped to the calling host:
+//
+//	POST /v1/agent/setup/databases             SetupRegisterRequest -> 201 (new) or 200 (existing) SetupDatabase
+//	GET  /v1/agent/setup/databases             {"databases": [SetupDatabase...]}
+//	GET  /v1/agent/setup/databases/{id}        SetupDatabase
+//	POST /v1/agent/setup/databases/{id}/apply  SetupApplyRequest -> 202 SetupDatabase
+
+type SetupRegisterRequest struct {
+	Name      string `json:"name"` // database name in Rowsafe: lowercase letters, digits, dashes
+	Port      int    `json:"port"`
+	SocketDir string `json:"socket_dir,omitempty"`
+}
+
+type SetupDatabase struct {
+	ID        string       `json:"id"`
+	Name      string       `json:"name"`
+	Port      int          `json:"port"`
+	SocketDir string       `json:"socket_dir,omitempty"`
+	Status    string       `json:"status"`         // pending_adopt, awaiting_restart, verifying, active, ...
+	Plan      *AdoptResult `json:"plan,omitempty"` // the latest adopt result (plan, or applied result)
+	// PlanTaskID is the latest adopt task; PlanTaskStatus its status
+	// (queued, running, succeeded, failed) and PlanError its error when it
+	// failed.
+	PlanTaskID     string     `json:"plan_task_id,omitempty"`
+	PlanTaskStatus string     `json:"plan_task_status,omitempty"`
+	PlanError      string     `json:"plan_error,omitempty"`
+	LastBackupAt   *time.Time `json:"last_backup_at,omitempty"`
+	BackupRunning  bool       `json:"backup_running,omitempty"`
+	DashboardURL   string     `json:"dashboard_url,omitempty"`
+}
+
+type SetupDatabaseList struct {
+	Databases []SetupDatabase `json:"databases"`
+}
+
+type SetupApplyRequest struct {
+	Force bool `json:"force,omitempty"` // replace a foreign archive_command
 }
 
 // ---- User API ----
@@ -288,7 +354,10 @@ type Database struct {
 	ScheduleDrill string         `json:"schedule_drill"`
 	Inspect       *InspectResult `json:"inspect,omitempty"`
 	Archiver      *ArchiverStats `json:"archiver,omitempty"`
-	CreatedAt     time.Time      `json:"created_at"`
+	// CanRestart: root allowed Rowsafe to restart this database's
+	// PostgreSQL (its port is in the host's restart allow list).
+	CanRestart bool      `json:"can_restart"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 type CreateTaskRequest struct {
@@ -352,7 +421,7 @@ func TaskTimeout(taskType string) time.Duration {
 		return 2 * time.Minute
 	case TaskAdopt, TaskCheck:
 		return 10 * time.Minute
-	case TaskRestorePoint:
+	case TaskRestorePoint, TaskRestart:
 		return 5 * time.Minute
 	default: // backup, drill: a large first backup or restore takes hours
 		return 12 * time.Hour

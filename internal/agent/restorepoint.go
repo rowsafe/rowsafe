@@ -67,7 +67,7 @@ func (a *Agent) restorePoint(ctx context.Context, db protocol.DatabaseSpec, p pr
 	}
 	if err != nil {
 		return res, fmt.Errorf("restore point %q was created at %s but is not yet confirmed in the repository "+
-			"(WAL segment %s): %v. WAL archiving may be failing; check `rowsafe db show`", p.Name, res.LSN, res.WALFile, err)
+			"(WAL segment %s): %v. WAL archiving may be failing; check `rowsafe show`", p.Name, res.LSN, res.WALFile, err)
 	}
 	res.Archived, res.ArchivedAt = true, &archivedAt
 	tl.Printf("WAL segment %s is archived; the restore point is usable for recovery", res.WALFile)
