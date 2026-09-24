@@ -322,6 +322,8 @@ type AddressSuggestion struct {
 	Kind       string     `json:"kind"`
 	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
 	Users      []string   `json:"users,omitempty"`
+	// Superuser: a superuser session came from it.
+	Superuser bool `json:"superuser,omitempty"`
 	// Recommended: pre-select it.
 	Recommended bool `json:"recommended,omitempty"`
 }
