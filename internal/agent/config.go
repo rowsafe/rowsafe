@@ -67,6 +67,9 @@ type Config struct {
 	// RewindDir holds restored copies, one directory per copy
 	// (ROWSAFE_REWIND_DIR).
 	RewindDir string
+
+	// Pooler is PgBouncer (connection pooling; pooling.go).
+	Pooler PoolerConfig
 }
 
 // Agent modes (ROWSAFE_MODE).
@@ -118,6 +121,9 @@ func ConfigFromEnv() (Config, error) {
 	c.RestartDir = env("ROWSAFE_RESTART_DIR", filepath.Join(c.StateDir, "restart"))
 	c.RewindDir = env("ROWSAFE_REWIND_DIR", filepath.Join(c.StateDir, "rewind"))
 	var err error
+	if err := poolerConfigFromEnv(&c); err != nil {
+		return c, err
+	}
 	if c.Mode != ModeNative && c.Mode != ModeDockerSidecar {
 		return c, fmt.Errorf("ROWSAFE_MODE must be %q or %q", ModeNative, ModeDockerSidecar)
 	}

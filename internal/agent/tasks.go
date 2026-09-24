@@ -47,6 +47,18 @@ func (l *taskLog) String() string {
 }
 
 func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (any, error) {
+	if task.Database != nil {
+		switch task.Type { // connection pooling (pooling.go)
+		case protocol.TaskPooling:
+			return runRewind(ctx, task, tl, *task.Database, func(ctx context.Context, db protocol.DatabaseSpec, p protocol.PoolingParams, tl *taskLog) (*protocol.PoolingResult, error) {
+				return a.pooling(ctx, db, p, task.ID, tl)
+			})
+		case protocol.TaskPoolerRetarget:
+			return runRewind(ctx, task, tl, *task.Database, func(ctx context.Context, db protocol.DatabaseSpec, p protocol.PoolerRetargetParams, tl *taskLog) (*protocol.PoolerRetargetResult, error) {
+				return a.poolerRetarget(ctx, db, p, task.ID, tl)
+			})
+		}
+	}
 	if task.Database == nil {
 		return nil, fmt.Errorf("task %s has no database", task.Type)
 	}
