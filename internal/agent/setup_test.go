@@ -21,7 +21,7 @@ import (
 
 func TestSanitizeAndSuggestName(t *testing.T) {
 	for in, want := range map[string]string{
-		"shop":                        "shop",
+		"shop":                         "shop",
 		"TV_Hub prod":                  "tv-hub-prod",
 		"42app":                        "db-42app",
 		"--a--b--":                     "a-b",
