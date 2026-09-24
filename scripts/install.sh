@@ -1437,6 +1437,7 @@ allow_restarts() {
 
 disallow_restarts() {
   remove_restart_helper
+  rm -f "$UPDATES_ALLOW_FILE" # updates need the helper too
   if [ -d "$CONFIG_DIR" ]; then
     {
       echo "# Restarting or stopping PostgreSQL from Rowsafe is off on this server."

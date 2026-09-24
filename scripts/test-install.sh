@@ -1322,7 +1322,9 @@ case $cmd in
   pg_lsclusters) cat "$S/clusters" 2>/dev/null ;;
   dpkg-query)
     case $* in
-      *'${Version}'*) cat "$S/version-${4#postgresql-}" 2>/dev/null ;;
+      *'${Version}'*)
+        for a; do pkg=$a; done
+        cat "$S/version-${pkg#postgresql-}" 2>/dev/null ;;
       *postgresql-17-\**) echo "ii  postgresql-17-cron" ;;
       *postgresql-18-\**) [ ! -e "$S/installed-18" ] || echo "ii  postgresql-18-cron" ;;
       *postgresql-18*) [ ! -e "$S/installed-18" ] || echo "ii  postgresql-18" ;;
