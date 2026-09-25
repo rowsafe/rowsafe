@@ -72,6 +72,10 @@ type Config struct {
 	// (postgresql, security, reboot; ROWSAFE_UPDATE_ALLOW_FILE). Written by
 	// the installer; the agent only reads it (updates.go).
 	UpdateAllowFile string
+	// DockerControlSocket is where the opt-in container control service
+	// listens (docker-sidecar mode; ROWSAFE_DOCKER_CONTROL_SOCKET). Absent:
+	// Rowsafe can't stop or start PostgreSQL's container.
+	DockerControlSocket string
 }
 
 // Agent modes (ROWSAFE_MODE).
@@ -123,6 +127,7 @@ func ConfigFromEnv() (Config, error) {
 	}
 	c.RestartDir = env("ROWSAFE_RESTART_DIR", filepath.Join(c.StateDir, "restart"))
 	c.RewindDir = env("ROWSAFE_REWIND_DIR", filepath.Join(c.StateDir, "rewind"))
+	c.DockerControlSocket = env("ROWSAFE_DOCKER_CONTROL_SOCKET", "/run/rowsafe-control/control.sock")
 	var err error
 	if c.Mode != ModeNative && c.Mode != ModeDockerSidecar {
 		return c, fmt.Errorf("ROWSAFE_MODE must be %q or %q", ModeNative, ModeDockerSidecar)

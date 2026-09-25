@@ -269,6 +269,9 @@ func CheckHealth(cfg Config, now time.Time) ([]byte, error) {
 // replaced), so the pusher is not stuck until the next task.
 func (a *Agent) ensureConfigs(ctx context.Context, dbs []protocol.DatabaseSpec) {
 	for _, db := range dbs {
+		if !isPostgres(db) {
+			continue
+		}
 		if _, err := os.Stat(a.cfg.configPath(db.Stanza)); err == nil {
 			continue
 		}
