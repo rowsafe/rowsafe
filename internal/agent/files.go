@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rowsafe/rowsafe/protocol"
@@ -59,6 +60,8 @@ type filesRuntime struct {
 	// syncEvery is how often the report is posted (the control plane says).
 	syncEvery time.Duration
 	nextSync  time.Time
+	// syncSoon asks the scheduler to report at its next tick.
+	syncSoon atomic.Bool
 }
 
 // filesState is persisted in <state dir>/files.json.
@@ -342,11 +345,13 @@ func (a *Agent) filesLoop(ctx context.Context) {
 // filesScheduler runs until ctx is cancelled.
 func (a *Agent) filesScheduler(ctx context.Context) {
 	rt := a.filesRuntime()
-	t := time.NewTicker(15 * time.Second)
+	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
 	for {
 		now := rt.now()
-		if !now.Before(rt.nextSync) {
+		// A folder's state changed (a snapshot, a problem): tell the
+		// control plane now rather than at the next report.
+		if !now.Before(rt.nextSync) || rt.syncSoon.Swap(false) {
 			a.filesSync(ctx)
 		}
 		select {
@@ -384,7 +389,7 @@ func (a *Agent) filesSync(ctx context.Context) {
 	case err == nil:
 		rt.setConfigs(sync.Databases, sync.KeptExpires)
 		every := time.Minute
-		if sync.IntervalSeconds >= 15 {
+		if sync.IntervalSeconds >= 5 {
 			every = time.Duration(sync.IntervalSeconds) * time.Second
 		}
 		rt.syncEvery = every
@@ -516,6 +521,7 @@ func (a *Agent) snapshotFolder(ctx context.Context, c protocol.FilesConfig, fo p
 			}
 		}
 	})
+	rt.syncSoon.Store(true)
 	return snap, err
 }
 
