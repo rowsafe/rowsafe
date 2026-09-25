@@ -516,6 +516,8 @@ func TaskTimeout(taskType string) time.Duration {
 		return 2 * time.Hour
 	case TaskRewindUndo: // stop, two renames, start
 		return time.Hour
+	case TaskMigrate: // a switchover waits for the sync to catch up (migrate.go)
+		return time.Hour
 	default: // backup, drill, rewind copy and in place: a large restore takes hours
 		return 12 * time.Hour
 	}
