@@ -32,7 +32,7 @@ type monitorState struct {
 	// (uptime has a one-second granularity): with a connection ID it names
 	// a session for a fix.
 	serverStart time.Time
-	binlogSize int64
+	binlogSize  int64
 }
 
 var (
