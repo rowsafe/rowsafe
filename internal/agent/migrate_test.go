@@ -42,7 +42,7 @@ func TestParseConninfo(t *testing.T) {
 		}
 	}
 	for _, bad := range []string{"", "not a connection string", "postgres://u:p@/db", "host=/var/run/postgresql user=x",
-		"postgres://u:p@h/db?passfile=/etc/shadow", "postgres://u:p@h/db?sslkey=/etc/shadow", "postgres://:p@h:99999/db",
+		"postgres://u:p@h/db?passfile=/etc/shadow", "postgres://u:p@h/db?sslkey=/etc/shadow", "postgres://u:p@h/db?sslrootcert=/etc/rowsafe/agent.env", "postgres://u:p@h/db?sslcrl=/x", "postgres://:p@h:99999/db",
 		"postgres://h/db", "host=h user='unterminated"} {
 		if _, err := parseConninfo(bad); err == nil {
 			t.Errorf("parseConninfo(%q) accepted", bad)

@@ -27,7 +27,7 @@ type conninfo map[string]string
 // could make libpq read files or run commands).
 var libpqKeywords = map[string]bool{
 	"host": true, "hostaddr": true, "port": true, "dbname": true, "user": true, "password": true,
-	"sslmode": true, "sslrootcert": true, "sslcert": false, "sslkey": false, "sslcrl": true,
+	"sslmode": true, "sslrootcert": true, "sslcert": false, "sslkey": false, "sslcrl": false,
 	"sslsni": true, "sslnegotiation": true, "ssl_min_protocol_version": true, "ssl_max_protocol_version": true,
 	"channel_binding": true, "connect_timeout": true, "application_name": true, "options": true,
 	"target_session_attrs": true, "keepalives": true, "keepalives_idle": true,
@@ -54,6 +54,11 @@ func parseConninfo(s string) (conninfo, error) {
 		if !libpqKeywords[k] {
 			return nil, fmt.Errorf("the connection string has an option Rowsafe doesn't accept: %q", k)
 		}
+	}
+	// Files on this server are never named by a pasted string: only the
+	// system's trusted roots.
+	if v, ok := ci["sslrootcert"]; ok && v != "system" {
+		return nil, errors.New("sslrootcert may only be \"system\" (the server's trusted certificates)")
 	}
 	if ci["host"] == "" && ci["hostaddr"] == "" {
 		return nil, errors.New("the connection string has no host")
