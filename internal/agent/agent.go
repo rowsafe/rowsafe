@@ -70,6 +70,8 @@ type Agent struct {
 	syncTried sync.Map // stanza -> time of the last repo move attempt
 	syncBusy  atomic.Bool
 	stanzaMu  sync.Mutex // ensureStanza
+	// docker talks to the opt-in container control service (docker_control.go).
+	docker dockerControl
 }
 
 func New(cfg Config, logger *slog.Logger) *Agent {
@@ -172,10 +174,11 @@ func (a *Agent) Run(ctx context.Context) error {
 	if a.cfg.RowsafeStorage() {
 		go a.storageLoop(ctx)
 	}
+	go a.relNamesLoop(ctx) // Find the moment: names of tables emptied or dropped later
 	// Built-in monitoring (package collect): metrics every minute, beside
 	// the task loop and never blocking it.
 	go collect.Run(ctx, collect.Options{Log: a.log, PGUser: a.cfg.PGUser,
-		Databases: a.monitoredDatabases,
+		Databases: a.monitoredDatabases, Engine: a.monitorEngine,
 		Send: func(ctx context.Context, r protocol.MonitoringReport) (ack protocol.MonitoringAck, err error) {
 			return ack, a.client.post(ctx, "/v1/agent/monitoring", r, &ack)
 		}})
@@ -233,7 +236,8 @@ var fastLaneTypes = []string{protocol.TaskRestorePoint}
 // for in the dashboard (compare, bring back rows, delete a copy or the kept
 // data), so they never wait behind a backup or a copy being restored.
 var sideTypes = []string{protocol.TaskMaintenance, protocol.TaskRewindCompare, protocol.TaskRewindRows,
-	protocol.TaskRewindDrop, protocol.TaskRewindCleanup}
+	protocol.TaskRewindDrop, protocol.TaskRewindCleanup,
+	protocol.TaskFindMoment} // read-only; people wait for it in the dashboard
 
 // fastLaneClaim is what the fast lane asks for: restore points, and a side
 // task unless one is running already. Side tasks run beside the lane, one
@@ -305,7 +309,8 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 			Hostname: hostname, AgentVersion: Version, Platform: release.Platform(),
 			Archivers: a.archiverStats(ctx), Update: a.updater.Report(), Mode: a.cfg.Mode,
 			RestartPorts: a.restartPorts(), RestartActions: a.helperActions(), Rewinds: a.rewindState().states(),
-			Storage: a.storageStatus(),
+			Storage:       a.storageStatus(),
+			DockerControl: a.dockerControlReport(ctx),
 		}
 		resp, err := a.client.heartbeat(ctx, req)
 		if isUnauthorized(err) {
@@ -373,6 +378,12 @@ func (a *Agent) archiverStats(ctx context.Context) []protocol.ArchiverStats {
 	a.mu.Unlock()
 	var out []protocol.ArchiverStats
 	for _, db := range watched {
+		if !isPostgres(db) {
+			if stats, ok := a.engineArchiver(ctx, db); ok {
+				out = append(out, stats)
+			}
+			continue
+		}
 		stats, err := pginspect.Archiver(ctx, a.target(db))
 		stats.DatabaseID = db.ID
 		if err != nil {
