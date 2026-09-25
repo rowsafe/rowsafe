@@ -156,6 +156,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.reportInterrupted(ctx)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	a.startEngines(ctx) // engines' background work (e.g. MongoDB's oplog copying)
 	go a.heartbeatLoop(ctx)
 	go a.fastLane(ctx)
 	go a.rewindHousekeeping(ctx)
@@ -291,7 +292,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 		req := protocol.HeartbeatRequest{
 			Hostname: hostname, AgentVersion: Version, Platform: release.Platform(),
 			Archivers: a.archiverStats(ctx), Update: a.updater.Report(), Mode: a.cfg.Mode,
-			RestartPorts: a.restartPorts(), RestartActions: a.helperActions(), Rewinds: a.rewindState().states(),
+			RestartPorts: a.restartPorts(), RestartActions: a.helperActions(), Rewinds: append(a.rewindState().states(), a.engineRewindStates()...),
 		}
 		resp, err := a.client.heartbeat(ctx, req)
 		if isUnauthorized(err) {
@@ -321,6 +322,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 			}
 			a.updater.OnHeartbeat(resp.Update)
 			a.rewindState().setExpiries(resp.RewindExpires, time.Now())
+			a.engineRewindExpiries(resp.RewindExpires)
 		}
 		select {
 		case <-ctx.Done():

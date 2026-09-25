@@ -238,3 +238,63 @@ func (a *Agent) engineArchiver(ctx context.Context, db protocol.DatabaseSpec) (s
 	stats.DatabaseID = db.ID
 	return stats, true
 }
+
+// ---- Optional engine hooks for background work and Rewind copies (MongoDB)
+
+// EngineStarter is optionally implemented by an engine with work that runs
+// beside tasks (continuous archiving, copies that outlive their task,
+// housekeeping): Start is called once, when the agent starts, and must
+// return quickly; ctx is cancelled when the agent stops.
+type EngineStarter interface {
+	Start(ctx context.Context, env EngineEnv)
+}
+
+// EngineRewinder is optionally implemented by an engine that keeps Rewind
+// copies: they are reported with PostgreSQL's in every heartbeat, and
+// expiry changes from the control plane (Extend) are passed on.
+type EngineRewinder interface {
+	RewindStates(env EngineEnv) []protocol.RewindState
+	SetRewindExpiries(env EngineEnv, exps []protocol.RewindExpiry)
+}
+
+// startEngines starts the registered engines' background work.
+func (a *Agent) startEngines(ctx context.Context) {
+	for _, e := range registeredEngines() {
+		if s, ok := e.(EngineStarter); ok {
+			s.Start(ctx, a.engineEnv(e.Name()))
+		}
+	}
+}
+
+// engineRewindStates are the engines' copies, for the heartbeat.
+func (a *Agent) engineRewindStates() []protocol.RewindState {
+	var out []protocol.RewindState
+	for _, e := range registeredEngines() {
+		if r, ok := e.(EngineRewinder); ok {
+			out = append(out, r.RewindStates(a.engineEnv(e.Name()))...)
+		}
+	}
+	return out
+}
+
+// engineRewindExpiries passes the control plane's expiry changes on.
+func (a *Agent) engineRewindExpiries(exps []protocol.RewindExpiry) {
+	if len(exps) == 0 {
+		return
+	}
+	for _, e := range registeredEngines() {
+		if r, ok := e.(EngineRewinder); ok {
+			r.SetRewindExpiries(a.engineEnv(e.Name()), exps)
+		}
+	}
+}
+
+// EngineEnvFor is the environment an engine gets, for commands outside the
+// agent's run loop (installer helpers).
+func EngineEnvFor(cfg Config, name string, notes io.Writer) EngineEnv {
+	env := engineEnv(cfg, nil, nil, name)
+	if notes != nil {
+		env.Notes = notes
+	}
+	return env
+}
