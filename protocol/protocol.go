@@ -179,6 +179,8 @@ type HeartbeatRequest struct {
 	RestartActions []string `json:"restart_actions,omitempty"`
 	// Rewinds are the live copies and kept data directories on this host.
 	Rewinds []RewindState `json:"rewinds,omitempty"`
+	// DockerControl: docker-sidecar agents only (see protocol/docker.go).
+	DockerControl *DockerControlReport `json:"docker_control,omitempty"`
 }
 
 // HeartbeatResponse tells the agent which databases to watch.
@@ -515,6 +517,8 @@ func TaskTimeout(taskType string) time.Duration {
 	case TaskRewindCompare, TaskRewindRows:
 		return 2 * time.Hour
 	case TaskRewindUndo: // stop, two renames, start
+		return time.Hour
+	case TaskFindMoment: // reads the WAL of the range from the repository
 		return time.Hour
 	default: // backup, drill, rewind copy and in place: a large restore takes hours
 		return 12 * time.Hour

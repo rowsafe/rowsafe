@@ -1,0 +1,29 @@
+# Laravel: save a Mark, then migrate and deploy.
+# Secrets: ROWSAFE_API_KEY (a read-write Rowsafe API key), DB_URL.
+name: deploy
+on:
+  push:
+    branches: [main]
+concurrency: deploy-production
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+      - run: composer install --no-dev --prefer-dist --no-interaction
+
+      - name: Save a Mark before the migration
+        uses: rowsafe/action@v1
+        with:
+          api-key: ${{ secrets.ROWSAFE_API_KEY }}
+          database: app
+
+      - run: php artisan migrate --force
+        env:
+          DB_CONNECTION: pgsql
+          DB_URL: ${{ secrets.DB_URL }}
+      # ... then deploy (Forge, Envoyer, Deployer, ...)
