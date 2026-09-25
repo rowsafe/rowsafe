@@ -308,7 +308,10 @@ func (c *momentCollector) ddl(cm *walCommit) []protocol.Moment {
 		// It must have replaced a file the table had (CREATE TABLE also
 		// locks the new table, then creates its TOAST table and indexes).
 		if r, ok := c.cat.byOID[o]; ok && r.isTable() {
-			if old := c.oldFileOf(cm, o); old != (walRel{}) {
+			// ...and had before the transaction: a table created and then
+			// rewritten in one transaction (CREATE EXTENSION runs every
+			// upgrade script in one) had no rows to lose.
+			if old := c.oldFileOf(cm, o); old != (walRel{}) && !slices.Contains(cm.created, old) {
 				truncate(o, old)
 			}
 		}

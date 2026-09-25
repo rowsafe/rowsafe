@@ -335,6 +335,15 @@ func (s *walScanner) Line(line string) {
 	if r.lsn > s.LastLSN {
 		s.LastLSN = r.lsn
 	}
+	// A TRUNCATE gives a relation its new file right after locking it; any
+	// other record of the transaction in between (catalog rows for a new
+	// relation, as an ALTER TABLE or VACUUM FULL rewrite writes) breaks
+	// the pair.
+	if r.rmgr != "Standby" && r.rmgr != "Storage" && r.xid != 0 {
+		if t := s.pending[r.xid]; t != nil {
+			t.lastLock = nil
+		}
+	}
 	switch r.rmgr {
 	case "Heap":
 		if r.xid == 0 {

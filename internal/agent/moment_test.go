@@ -433,6 +433,17 @@ func TestFindMomentRealWAL(t *testing.T) {
 	partition := txid("shop", `DELETE FROM audit WHERE id <= 10`)
 	truncate := txid("shop", `TRUNCATE logs`)
 	drop := txid("shop", `DROP TABLE legacy`)
+	// Rewriting an empty table (ALTER TABLE ... TYPE) isn't emptying it.
+	exec1("shop", `CREATE TABLE empty_rewrite (id int, v int)`, `ANALYZE empty_rewrite`)
+	if _, err := a.snapshotRelNames(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	exec1("shop", `ALTER TABLE empty_rewrite ALTER COLUMN v TYPE bigint`)
+	// Nor is creating a table and rewriting it in one transaction (as
+	// CREATE EXTENSION does, running every upgrade script).
+	exec1("shop", `BEGIN`, `CREATE TABLE ext_job (id serial PRIMARY KEY, name text, v int)`,
+		`ALTER TABLE ext_job ALTER COLUMN v TYPE bigint`, `ALTER TABLE ext_job ADD COLUMN at timestamptz DEFAULT clock_timestamp()`,
+		`ALTER TABLE ext_job SET UNLOGGED`, `ALTER TABLE ext_job SET LOGGED`, `COMMIT`)
 	// A rebuild after the mistake gives applications a new file; the delete
 	// above is on the old one and must still be named.
 	exec1("shop", `VACUUM FULL applications`)
@@ -528,8 +539,8 @@ func TestFindMomentRealWAL(t *testing.T) {
 		switch {
 		case m.XID == sub && m.Kind == protocol.MomentDelete && m.Rows == 1:
 			subFound = true
-		case m.Kind == protocol.MomentTruncate && m.Table == "public.applications":
-			t.Fatalf("VACUUM FULL reported as a TRUNCATE: %+v", m)
+		case m.Kind == protocol.MomentTruncate && (m.Table == "public.applications" || m.Table == "public.empty_rewrite" || m.Table == "public.ext_job"):
+			t.Fatalf("a rewrite reported as a TRUNCATE: %+v", m)
 		case m.Table == "" && m.Kind != protocol.MomentDrop:
 			t.Fatalf("unnamed table: %+v", m)
 		case m.Kind == protocol.MomentDelete && m.Rows == 100 && m.Table == "public.applications":
