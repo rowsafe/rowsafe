@@ -153,6 +153,10 @@ func (a *Agent) restoreGuardCopy(ctx context.Context, db protocol.DatabaseSpec, 
 	if err != nil {
 		return nil, err
 	}
+	// Scratch sessions default to read-only; this one prepares the copy.
+	if _, err = conn.Exec(ctx, "SET default_transaction_read_only = off"); err != nil {
+		return nil, err
+	}
 	var recoveredTo *time.Time
 	if err = conn.QueryRow(ctx, `SELECT pg_last_xact_replay_timestamp()`).Scan(&recoveredTo); err != nil {
 		return nil, err
