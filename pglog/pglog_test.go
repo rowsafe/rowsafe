@@ -285,3 +285,11 @@ func TestStderrPrefixChange(t *testing.T) {
 		t.Fatalf("after the change: %+v", es[len(es)-1])
 	}
 }
+
+// The plain-text log appends the error position to the message.
+func TestRedactMessageWithPosition(t *testing.T) {
+	got, _ := RedactMessage(`invalid input syntax for type integer: "ann@example.com" at character 8`, "22P02")
+	if got != `invalid input syntax for type integer: "…" at character 8` {
+		t.Errorf("got %q", got)
+	}
+}
