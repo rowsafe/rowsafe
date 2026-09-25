@@ -86,6 +86,7 @@ func fixCmd(ctx context.Context, c *client.Client, args []string) error {
 	if err != nil {
 		return err
 	}
+	withRecommendations(ctx, c, &h) // advisor (recommendations.go)
 	choices := fixChoices(h)
 
 	var pick *fixChoice
