@@ -361,7 +361,7 @@ type RewindInPlaceRequest struct {
 	Time    *time.Time `json:"time,omitempty"`
 	Mark    string     `json:"mark,omitempty"`
 	XID     uint32     `json:"xid,omitempty"` // as in CreateRewindCopyRequest
-	Confirm string     `json:"confirm"` // the database's name
+	Confirm string     `json:"confirm"`       // the database's name
 }
 
 type RewindConfirmRequest struct {
