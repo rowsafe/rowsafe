@@ -53,11 +53,13 @@ for target in $targets; do
     agent_image=rowsafe-agent:mysql$version
     server_args="--server-id=1"
     envpw=MYSQL_ROOT_PASSWORD
+    sockdir=/var/run/mysqld
   else
     docker build -q -f deploy/docker/agent-mariadb.Dockerfile --build-arg MARIADB_VERSION="$version" -t "rowsafe-agent:mariadb$version" . >/dev/null
     agent_image=rowsafe-agent:mariadb$version
     server_args="--log-bin=mysql-bin --binlog-format=ROW --server-id=1"
     envpw=MARIADB_ROOT_PASSWORD
+    sockdir=/run/mysqld # /var/run is not /run in the Ubuntu 22.04 based images (10.6, 10.11)
   fi
   name=$proj-$image
   data=$name-data
@@ -68,16 +70,16 @@ for target in $targets; do
   chmod 0644 "$work/rootpw"
   # shellcheck disable=SC2086
   docker run -d --label "$proj" --network "$net" --name "$name" -e "$envpw=root-secret-$$" \
-    -v "$data:/var/lib/mysql" -v "$sock:/var/run/mysqld" "$image:$version" $server_args >/dev/null
+    -v "$data:/var/lib/mysql" -v "$sock:$sockdir" "$image:$version" $server_args >/dev/null
   for _ in $(seq 1 90); do
     docker logs "$name" 2>&1 | grep -q "port: 3306" && break
     sleep 2
   done
   sleep 3
   if ! docker run --rm --label "$proj" --network "$net" \
-    -v "$data:/var/lib/mysql:ro" -v "$sock:/var/run/mysqld" \
+    -v "$data:/var/lib/mysql:ro" -v "$sock:$sockdir" \
     -v "$work/mysql.test:/it/mysql.test:ro" -v "$work/rootpw:/it/rootpw:ro" -v "$work/certs/public.crt:/it/ca.crt:ro" \
-    -e ROWSAFE_MYSQL_IT="$image" -e ROWSAFE_MYSQL_IT_SOCKET=/var/run/mysqld/mysqld.sock \
+    -e ROWSAFE_MYSQL_IT="$image" -e ROWSAFE_MYSQL_IT_SOCKET=$sockdir/mysqld.sock \
     -e ROWSAFE_MYSQL_ADMIN_PASSWORD_FILE=/it/rootpw \
     -e ROWSAFE_REPO_S3_ENDPOINT=minio -e ROWSAFE_REPO_S3_PORT=9000 -e ROWSAFE_REPO_S3_BUCKET=backups \
     -e ROWSAFE_REPO_S3_KEY=rowsafe -e ROWSAFE_REPO_S3_KEY_SECRET=rowsafe-secret-key \

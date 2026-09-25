@@ -52,7 +52,7 @@ RUN set -eux; \
     # package of the image's exact version, checked with MySQL's key (which
     # the image carries).
     ver="$(rpm -q --qf '%{VERSION}-%{RELEASE}' mysql-community-server-minimal)"; arch="$(uname -m)"; \
-    mm="$(echo "${MYSQL_VERSION}" | cut -d. -f1,2)"; case "$mm" in 8.0) mrepo=mysql80-community ;; *) mrepo="mysql-${mm}-community" ;; esac; \
+    mm="$(echo "${MYSQL_VERSION}" | cut -d. -f1,2)"; mrepo="mysql-${mm}-community"; \
     curl -fsSL -o /tmp/client.rpm "https://repo.mysql.com/yum/${mrepo}/el/9/${arch}/mysql-community-client-${ver}.${arch}.rpm"; \
     rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-mysql*; rpm -K /tmp/client.rpm | grep -q 'digests signatures OK'; \
     (cd / && rpm2cpio /tmp/client.rpm | cpio -idm ./usr/bin/mysqlbinlog); rm -f /tmp/client.rpm; \
