@@ -235,6 +235,9 @@ type restoreOutcome struct {
 	RecoveredTo *time.Time // the last change replayed (nil: none after the backup)
 	Replayed    int        // oplog entries replayed after the backup
 	Failed      int64      // documents mongorestore couldn't restore
+	// GapAfter is set when the copied changes stop at a gap (the oplog was
+	// overwritten before they were copied): the newest restorable moment.
+	GapAfter *time.Time
 }
 
 // restoreInto restores the backup and changes needed for target into a
@@ -279,6 +282,10 @@ func restoreInto(ctx context.Context, env agent.EngineEnv, r *repo, target resto
 	}
 	out.Backup = *b
 	chain, reach, gap := chainFrom(chunks, b.StartTS)
+	if gap {
+		t := reach.Time()
+		out.GapAfter = &t
+	}
 	if target.Latest {
 		until = reach
 		if !until.After(b.EndTS) {

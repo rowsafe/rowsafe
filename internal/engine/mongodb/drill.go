@@ -76,6 +76,10 @@ func (e *Engine) drill(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 		t := out.Backup.StoppedAt
 		res.RecoveredTo = &t
 	}
+	if out.GapAfter != nil {
+		res.Warnings = append(res.Warnings, fmt.Sprintf("changes after %s are missing from your bucket (MongoDB's oplog was overwritten before "+
+			"they were copied): the next full backup starts a new unbroken chain", out.GapAfter.Format(time.RFC3339)))
+	}
 	if out.Failed > 0 {
 		res.Failures = append(res.Failures, fmt.Sprintf("%d documents couldn't be restored", out.Failed))
 	}
