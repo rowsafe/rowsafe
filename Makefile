@@ -36,6 +36,7 @@ build:
 	$(GOBUILD) -ldflags '$(MAIN_LDFLAGS)' -o bin/rowsafe ./cmd/rowsafe
 	$(GOBUILD) -ldflags '$(AGENT_LDFLAGS)' -o bin/rowsafe-agent ./cmd/rowsafe-agent
 	$(GOBUILD) -ldflags '$(MAIN_LDFLAGS)' -o bin/rowsafe-release ./cmd/rowsafe-release
+	$(GOBUILD) -ldflags '$(MAIN_LDFLAGS)' -o bin/rowsafe-docker-control ./cmd/rowsafe-docker-control
 
 test:
 	$(GO) test ./...
