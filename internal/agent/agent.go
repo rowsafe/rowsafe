@@ -17,6 +17,7 @@ import (
 	"github.com/rowsafe/rowsafe/collect"
 	"github.com/rowsafe/rowsafe/internal/pgbackrest"
 	"github.com/rowsafe/rowsafe/internal/pginspect"
+	"github.com/rowsafe/rowsafe/pglog"
 	"github.com/rowsafe/rowsafe/protocol"
 	"github.com/rowsafe/rowsafe/release"
 )
@@ -165,6 +166,11 @@ func (a *Agent) Run(ctx context.Context) error {
 		Databases: a.monitoredDatabases, Engine: a.monitorEngine,
 		Send: func(ctx context.Context, r protocol.MonitoringReport) (ack protocol.MonitoringAck, err error) {
 			return ack, a.client.post(ctx, "/v1/agent/monitoring", r, &ack)
+		}})
+	// PostgreSQL's log (package pglog): redacted here, sent every few seconds.
+	go pglog.Run(ctx, pglog.Options{Log: a.log, PGUser: a.cfg.PGUser, StateDir: a.cfg.StateDir, Sidecar: a.cfg.Sidecar(),
+		Databases: a.monitoredDatabases, Send: func(ctx context.Context, b protocol.LogBatch) (ack protocol.LogAck, err error) {
+			return ack, a.client.post(ctx, "/v1/agent/logs", b, &ack)
 		}})
 
 	backoff := a.cfg.PollInterval

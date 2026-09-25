@@ -285,6 +285,8 @@ func (a *Agent) maintenance(ctx context.Context, db protocol.DatabaseSpec, p pro
 		err = m.signalBackend(ctx)
 	case protocol.MaintDropReplicationSlot:
 		err = m.dropSlot(ctx)
+	case protocol.MaintLogSettings: // logsettings.go
+		err = m.logSettings(ctx)
 	}
 	m.res.DurationMs = time.Since(start).Milliseconds()
 	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
