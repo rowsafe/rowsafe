@@ -58,3 +58,34 @@ func (c *Client) ForgetFence(ctx context.Context, ref string, req protocol.Forge
 func (c *Client) SetFailover(ctx context.Context, ref string, req protocol.FailoverSettings) (out protocol.StandbyInfo, err error) {
 	return out, c.do(ctx, http.MethodPut, standbyPath(ref)+"/failover", req, &out)
 }
+
+// Move moves the database to another server (a standby, then a planned
+// switchover).
+func (c *Client) Move(ctx context.Context, ref string, req protocol.MoveRequest) (out protocol.StandbyInfo, err error) {
+	return out, c.do(ctx, http.MethodPost, "/v1/databases/"+esc(ref)+"/move", req, &out)
+}
+
+// MoveSchedule sets or clears when the switchover starts.
+func (c *Client) MoveSchedule(ctx context.Context, ref string, req protocol.MoveScheduleRequest) (out protocol.StandbyInfo, err error) {
+	return out, c.do(ctx, http.MethodPost, "/v1/databases/"+esc(ref)+"/move/schedule", req, &out)
+}
+
+// MoveSwitch starts the switchover now.
+func (c *Client) MoveSwitch(ctx context.Context, ref, confirm string) (out protocol.StandbyInfo, err error) {
+	return out, c.do(ctx, http.MethodPost, "/v1/databases/"+esc(ref)+"/move/switch", protocol.StandbyConfirmRequest{Confirm: confirm}, &out)
+}
+
+// MoveCancel stops a move before the switchover.
+func (c *Client) MoveCancel(ctx context.Context, ref, confirm string) (out protocol.StandbyInfo, err error) {
+	return out, c.do(ctx, http.MethodPost, "/v1/databases/"+esc(ref)+"/move/cancel", protocol.StandbyConfirmRequest{Confirm: confirm}, &out)
+}
+
+// MoveBack moves the database back to the server the last move left.
+func (c *Client) MoveBack(ctx context.Context, ref string, req protocol.MoveBackRequest) (out protocol.StandbyInfo, err error) {
+	return out, c.do(ctx, http.MethodPost, "/v1/databases/"+esc(ref)+"/move/switch-back", req, &out)
+}
+
+// MoveFinish lets the old server go.
+func (c *Client) MoveFinish(ctx context.Context, ref, confirm string) (out protocol.StandbyInfo, err error) {
+	return out, c.do(ctx, http.MethodPost, "/v1/databases/"+esc(ref)+"/move/finish", protocol.MoveFinishRequest{Confirm: confirm}, &out)
+}

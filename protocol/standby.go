@@ -499,6 +499,18 @@ type StandbyReleaseResult struct {
 //	POST /v1/databases/{ref}/standby/unfence      UnfenceRequest -> StandbyInfo
 //	PUT  /v1/databases/{ref}/standby/failover     FailoverSettings -> StandbyInfo
 //
+// Moving a database to another server is a standby followed by a planned
+// switchover (never a failover): the old server is stopped briefly and
+// cleanly, the new one replays everything and is promoted, poolers follow,
+// and the old server stays fenced as a way back for KeepDays.
+//
+//	POST /v1/databases/{ref}/move                 MoveRequest -> StandbyInfo
+//	POST /v1/databases/{ref}/move/schedule        MoveScheduleRequest -> StandbyInfo
+//	POST /v1/databases/{ref}/move/switch          StandbyConfirmRequest -> StandbyInfo (switch now)
+//	POST /v1/databases/{ref}/move/cancel          StandbyConfirmRequest -> StandbyInfo (before switching)
+//	POST /v1/databases/{ref}/move/switch-back     MoveBackRequest -> StandbyInfo
+//	POST /v1/databases/{ref}/move/finish          ForgetFenceRequest-like: MoveFinishRequest -> StandbyInfo
+//
 // Every write is for people only (owners and admins, read-write API keys);
 // AI assistants on /mcp can read StandbyInfo but can't change anything.
 
@@ -529,6 +541,9 @@ type StandbyInfo struct {
 	Events     []StandbyEvent  `json:"events"`
 	Tasks      []TaskView      `json:"tasks,omitempty"` // recent standby tasks, newest first
 	Connect    []ConnectString `json:"connect,omitempty"`
+	// Move is the database's move to another server, if one is open or
+	// finished recently (MoveView).
+	Move *MoveView `json:"move,omitempty"`
 }
 
 // StandbyServer is a server in a standby pair.
@@ -692,6 +707,77 @@ type StandbyConfirmRequest struct {
 // promotion that fenced it didn't happen. Confirm is the database's name.
 type UnfenceRequest struct {
 	FenceID string `json:"fence_id"`
+	Confirm string `json:"confirm"`
+}
+
+// Move statuses (MoveView.Status).
+const (
+	MoveSyncing   = "syncing"   // the new server is being set up or catching up
+	MoveSwitching = "switching" // planned switchover in progress
+	MoveMoved     = "moved"     // done: the old server is fenced, kept as a way back
+	MoveFinished  = "finished"  // the old server was let go (or its time to switch back ran out)
+	MoveCancelled = "cancelled" // stopped before switching; the database never moved
+	MoveFailed    = "failed"    // setting up the new server failed; the database never moved
+)
+
+// MoveView is a move of the database to another server.
+type MoveView struct {
+	ID     string        `json:"id"`
+	Status string        `json:"status"` // Move*
+	From   StandbyServer `json:"from"`
+	To     StandbyServer `json:"to"`
+	// SwitchAt is when the switchover starts by itself (nil: when a person
+	// says so). The new server must be in sync by then; otherwise it waits.
+	SwitchAt   *time.Time `json:"switch_at,omitempty"`
+	SwitchedAt *time.Time `json:"switched_at,omitempty"`
+	// KeepUntil is how long the old server is kept (stopped, fenced) as a
+	// way back: Switch back is offered until then.
+	KeepDays  int        `json:"keep_days"`
+	KeepUntil *time.Time `json:"keep_until,omitempty"`
+	// Back: this move goes back to the server a previous move left.
+	Back      bool   `json:"back,omitempty"`
+	CanSwitch bool   `json:"can_switch"`
+	Hint      string `json:"hint,omitempty"` // why not, or what it waits for
+	// CanSwitchBack and CanFinish are offered once moved.
+	CanSwitchBack bool      `json:"can_switch_back"`
+	CanFinish     bool      `json:"can_finish"`
+	Error         string    `json:"error,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	CreatedBy     string    `json:"created_by,omitempty"`
+	// Connect is how apps reach the database once moved (the new server
+	// alone; and poolers were pointed at it).
+	Connect []ConnectString `json:"connect,omitempty"`
+}
+
+// MoveRequest moves the database to HostID's empty cluster on Port.
+type MoveRequest struct {
+	HostID      string `json:"host_id"`
+	Port        int    `json:"port,omitempty"`
+	Fingerprint string `json:"fingerprint"` // the new server's key fingerprint, as compared
+	// SwitchAt starts the switchover by itself at that time (nil: wait for
+	// Switch now).
+	SwitchAt *time.Time `json:"switch_at,omitempty"`
+	// KeepDays keeps the old server as a way back (default 7, 1 to 30).
+	KeepDays int   `json:"keep_days,omitempty"`
+	Stream   *bool `json:"stream,omitempty"`
+}
+
+// MoveScheduleRequest sets (or, nil, clears) when the switchover starts.
+type MoveScheduleRequest struct {
+	SwitchAt *time.Time `json:"switch_at,omitempty"`
+}
+
+// MoveBackRequest moves the database back to the server the last move
+// left: that server is turned into the standby (reusing its data), and the
+// switchover happens as soon as it is in sync.
+type MoveBackRequest struct {
+	Confirm     string `json:"confirm"`     // the database's name
+	Fingerprint string `json:"fingerprint"` // the old server's key fingerprint
+}
+
+// MoveFinishRequest lets the old server go (Remove old server): Rowsafe
+// stops keeping it stopped. Confirm is its hostname.
+type MoveFinishRequest struct {
 	Confirm string `json:"confirm"`
 }
 
