@@ -337,6 +337,11 @@ func standbyPromoteCmd(ctx context.Context, c *client.Client, args []string) err
 		if i.Primary.HostID == v.Server.HostID {
 			return true, nil
 		}
+		if i.Standby != nil && i.Standby.Status == protocol.StandbyPromoting && i.Standby.CanPromote {
+			// Rowsafe was stopping the primary when its agent stopped answering.
+			return true, fmt.Errorf("%s stopped answering while Rowsafe was stopping it. If it is down, run "+
+				"`rowsafe standby promote %s --primary-down`", i.Primary.Hostname, name)
+		}
 		if i.Standby != nil && i.Standby.Status != protocol.StandbyPromoting {
 			if err := failedStandbyTask(i); err != nil {
 				return true, err
