@@ -69,6 +69,7 @@ func NewServer(c *client.Client, opts Options) *sdk.Server {
 	t.addSafetyReadTools(s)
 	t.addMonitoringTools(s)
 	t.addRewindReadTools(s)
+	t.addDBAdminReadTools(s) // Databases & users: read-only (dbadmin_tools.go)
 	if opts.AllowWrites {
 		t.addWriteTools(s)
 	}

@@ -53,6 +53,12 @@ Guard: the safety net for AI agents
   rowsafe mcp                        MCP server for AI assistants
   rowsafe guard                      Claude Code hook: a restore point before destructive commands
 
+Databases & users
+  rowsafe db                         databases, users and extensions inside the server
+  rowsafe db create DB               a new database with its own user (password shown once)
+  rowsafe db user add | password | remove
+                                     users and passwords (rowsafe help db)
+
 Admin
   rowsafe tasks [NAME] | task ID     recent tasks; one task with its log
   rowsafe set | remove | activity NAME
