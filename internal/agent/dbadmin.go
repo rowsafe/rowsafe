@@ -593,6 +593,13 @@ func (d *dba) createDatabase(ctx context.Context, conn *pgx.Conn) error {
 		return fmt.Errorf("%w. Rowsafe removed the half-made database again, so nothing was left behind", err)
 	}
 
+	// Close the current WAL segment so the new database reaches the backups
+	// now rather than at the next archive_timeout (best effort).
+	if _, err := conn.Exec(ctx, `SELECT pg_switch_wal()`); err != nil {
+		d.tl.Printf("switching WAL (the new database reaches the backups with the next segment instead): %v", err)
+	} else {
+		d.tl.Printf("switched WAL so the new database reaches the backups right away")
+	}
 	if p.CreateOwner {
 		d.res.Summary = fmt.Sprintf("Created the database %s, owned by the new user %s. It is backed up with the rest of the server from now on.", p.Database, owner)
 		d.secret = &protocol.DBConnection{User: owner, Database: p.Database}
