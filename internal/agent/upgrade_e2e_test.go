@@ -201,6 +201,33 @@ func TestRealUpgrade(t *testing.T) {
 	}
 	step("check after the undo", func(tl *taskLog) error { _, err := a.check(ctx, db, tl); return err })
 	markBackup := backup("full backup after the undo")
+	// The agent's user owns /etc/postgresql: it can repoint where the kept
+	// PostgreSQL 18's data lives. The root helper must refuse to remove
+	// anything but the data directory it recorded.
+	decoy := "/var/lib/postgresql/decoy"
+	if err := os.MkdirAll(decoy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(decoy+"/PG_VERSION", []byte(strconv.Itoa(to)+"\n"), 0o600)
+	os.WriteFile(decoy+"/canary", []byte("keep me"), 0o600)
+	conftool := func(args ...string) {
+		t.Helper()
+		if out, err := a.runner.Run(ctx, "pg_conftool", append([]string{strconv.Itoa(to), "main"}, args...)...); err != nil {
+			t.Fatalf("pg_conftool %v: %v %s", args, err, out)
+		}
+	}
+	conftool("set", "data_directory", decoy)
+	rtl := &taskLog{}
+	_, err = a.upgradeCleanup(ctx, db, protocol.UpgradeCleanupParams{UpgradeID: "up_safe"}, rtl)
+	t.Logf("---- remove the kept version after repointing its data directory (must be refused)\n%s", rtl.String())
+	if err == nil || !strings.Contains(err.Error(), "not /var/lib/postgresql/"+strconv.Itoa(to)+"/main as recorded") {
+		t.Fatalf("a repointed data directory wasn't refused: %v", err)
+	}
+	if data, err := os.ReadFile(decoy + "/canary"); err != nil || string(data) != "keep me" {
+		t.Fatalf("the decoy was touched: %v", err)
+	}
+	conftool("set", "data_directory", "/var/lib/postgresql/"+strconv.Itoa(to)+"/main")
+	os.RemoveAll(decoy)
 	step("remove the kept version", func(tl *taskLog) error {
 		res, err := a.upgradeCleanup(ctx, db, protocol.UpgradeCleanupParams{UpgradeID: "up_safe"}, tl)
 		if err == nil {

@@ -1384,7 +1384,10 @@ esac
 exit 0
 FAKE_EOF
   chmod 755 "$F/systemctl"
-  for m in 17 18; do install -d -o postgres -g postgres /etc/postgresql/$m/main; done
+  for m in 17 18; do
+    install -d -o postgres -g postgres /etc/postgresql/$m/main /var/lib/postgresql/$m/main
+    echo "$m" | runuser -u postgres -- sh -c 'cat >"$1"' sh /var/lib/postgresql/$m/main/PG_VERSION
+  done
   echo "17 main 5432 online postgres /var/lib/postgresql/17/main /var/log/postgresql/postgresql-17-main.log" >"$S/clusters"
   echo 17.5-1 >"$S/version-17"
   : >"$S/calls"
@@ -1458,7 +1461,8 @@ FAKE_EOF
   u_has "ok=1"
   u_has "packages=postgresql-18 postgresql-client-18 postgresql-18-cron"
   u_has "dropped= 18/main"
-  u_called "pg_dropcluster --stop 18 main"
+  u_called "pg_dropcluster 18 main"
+  grep -qx "stop postgresql@18-main.service" "$F/systemctl.calls" || fail "the package's cluster wasn't stopped by root first"
   urequest "u7 pg-install-major 5432 16"
   grep -q "^error=PostgreSQL 16 is not newer" "$O/update-result" || fail "older major not refused"
 
@@ -1487,6 +1491,48 @@ FAKE_EOF
   grep -q '^17 main 5432 online' "$S/clusters" || fail "17 not running on 5432: $(cat "$S/clusters")"
   urequest "u11 pg-upgrade-undo 5432 start"
   u_has "error=that upgrade was already undone"
+  grep -qx "old_data=/var/lib/postgresql/17/main" "$W/helper-state/upgrade-5432" &&
+    grep -qx "new_data=/var/lib/postgresql/18/main" "$W/helper-state/upgrade-5432" || fail "data directories not recorded"
+  # The agent user owns /etc/postgresql: it can repoint where PostgreSQL 18's
+  # data lives, or make its configuration directory a link. Root must not
+  # remove anything but the recorded data directory.
+  cp "$S/clusters" "$S/clusters.good"
+  install -d -o postgres -g postgres /var/lib/postgresql/decoy
+  echo 18 >/var/lib/postgresql/decoy/PG_VERSION
+  chown postgres /var/lib/postgresql/decoy/PG_VERSION
+  for dir in /etc /var/lib/postgresql/decoy /home; do
+    sed "s|^18 main 5433 down postgres [^ ]*|18 main 5433 down postgres $dir|" "$S/clusters.good" >"$S/clusters"
+    urequest "u12a pg-upgrade-cleanup 5432"
+    u_has "ok=0"
+    grep -q "^error=Rowsafe didn't remove PostgreSQL 18/main: PostgreSQL 18/main's data directory is now $dir, not /var/lib/postgresql/18/main as recorded" "$O/update-result" ||
+      fail "a repointed data directory ($dir) wasn't refused: $(cat "$O/update-result")"
+    ! grep -q pg_dropcluster "$S/calls" || fail "pg_dropcluster ran for a repointed data directory ($dir)"
+  done
+  cp "$S/clusters.good" "$S/clusters"
+  # The recorded path, but now a link to somewhere else.
+  mv /var/lib/postgresql/18/main /var/lib/postgresql/18/main.real
+  ln -s /var/lib/postgresql/decoy /var/lib/postgresql/18/main
+  urequest "u12b pg-upgrade-cleanup 5432"
+  grep -q "^error=.*the data directory /var/lib/postgresql/18/main is missing or its path goes through a symbolic link" "$O/update-result" ||
+    fail "a linked data directory wasn't refused: $(cat "$O/update-result")"
+  rm /var/lib/postgresql/18/main
+  mv /var/lib/postgresql/18/main.real /var/lib/postgresql/18/main
+  # A linked configuration directory, and a log link pointing at a system file.
+  mv /etc/postgresql/18/main /etc/postgresql/18/main.real
+  ln -s /etc/postgresql/18/main.real /etc/postgresql/18/main
+  urequest "u12c pg-upgrade-cleanup 5432"
+  grep -q "^error=.*the configuration directory /etc/postgresql/18/main is missing or its path goes through a symbolic link" "$O/update-result" ||
+    fail "a linked configuration directory wasn't refused: $(cat "$O/update-result")"
+  rm /etc/postgresql/18/main
+  mv /etc/postgresql/18/main.real /etc/postgresql/18/main
+  runuser -u postgres -- ln -s /etc/shadow /etc/postgresql/18/main/log
+  urequest "u12d pg-upgrade-cleanup 5432"
+  grep -q "^error=.*/etc/postgresql/18/main/log points outside /var/log/postgresql" "$O/update-result" ||
+    fail "a log link to /etc/shadow wasn't refused: $(cat "$O/update-result")"
+  rm /etc/postgresql/18/main/log
+  [ -s /etc/shadow ] && [ -f /var/lib/postgresql/decoy/PG_VERSION ] || fail "something outside the cluster was removed"
+  ! grep -q pg_dropcluster "$S/calls" || fail "pg_dropcluster ran despite a refusal"
+  pass "cluster removal refuses repointed or linked data and configuration directories"
   urequest "u12 pg-upgrade-cleanup 5432"
   u_has "ok=1"
   u_has "dropped=18/main"
@@ -1526,6 +1572,7 @@ FAKE_EOF
   # Reboot: answered first, then asked of systemd.
   urequest "u17 reboot"
   u_has "ok=1"
+  u_has "status=rebooting"
   grep -qx -- "--no-block reboot" "$F/systemctl.calls" || fail "no reboot asked: $(cat "$F/systemctl.calls")"
   sed -i '/^reboot /d' "$U"
   urequest "u18 reboot"

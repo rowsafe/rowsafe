@@ -44,7 +44,11 @@
 # Package names are fixed here: a minor update installs only PORT's major
 # (never another one), a new major only postgresql-MAJOR, its client and the
 # counterparts of the extension packages PORT's major has installed. What an
-# upgrade keeps for undo is recorded in root's state directory.
+# upgrade keeps for undo is recorded in root's state directory, with the data
+# directories it checked. A cluster is only removed while its data directory
+# is still the recorded one (a real directory of the agent user, of that
+# major, not a system directory), and pg_dropcluster then runs as the agent
+# user, never as root (see drop_cluster).
 #
 # The agent reads the next lines to know what this helper can do.
 # actions: restart stop start
@@ -250,6 +254,91 @@ set_start() {
   as_agent sh -c 'f=/etc/postgresql/$1/$2/start.conf; [ ! -L "$f" ] && printf "%s\n" "$3" >"$f"' sh "$1" "$2" "$3"
 }
 
+# Removing a cluster. postgresql-common reads where a cluster's data lives
+# (data_directory, or a "pgdata" link) and its log file (a "log" link) from
+# /etc/postgresql/MAJOR/NAME, which the agent user owns: as root,
+# pg_dropcluster would remove whatever those point at. So Rowsafe checks the
+# data directory against the one root recorded when it created or upgraded
+# the cluster, and runs pg_dropcluster with the agent user's privileges:
+# whatever the configuration says, it can then only remove what that user
+# could remove anyway. Root only stops the unit and tells systemd and apt.
+
+# check_conf_dir MAJOR NAME: the configuration directory is a real
+# directory (no symbolic link on its path) and has no log link pointing
+# outside /var/log/postgresql. Sets why and returns 1 otherwise.
+check_conf_dir() {
+  cd_=/etc/postgresql/$1/$2
+  if [ ! -d "$cd_" ] || [ "$(realpath -e -- "$cd_" 2>/dev/null)" != "$cd_" ]; then
+    why="the configuration directory $cd_ is missing or its path goes through a symbolic link"
+    return 1
+  fi
+  if [ -L "$cd_/log" ]; then
+    case $(readlink -- "$cd_/log") in
+      /var/log/postgresql/*) ;;
+      *)
+        why="$cd_/log points outside /var/log/postgresql"
+        return 1
+        ;;
+    esac
+  fi
+  return 0
+}
+
+# check_data_dir DIR MAJOR: DIR is a PostgreSQL MAJOR data directory the
+# agent user owns, an absolute path with no symbolic link on it, and no
+# system directory. Sets why and returns 1 otherwise.
+check_data_dir() {
+  case $1 in
+    /*) ;;
+    *)
+      why="the data directory \"$1\" is not an absolute path"
+      return 1
+      ;;
+  esac
+  if [ "$(realpath -e -- "$1" 2>/dev/null)" != "$1" ]; then
+    why="the data directory $1 is missing or its path goes through a symbolic link"
+    return 1
+  fi
+  case $1 in
+    / | /etc | /etc/* | /usr | /usr/* | /var | /var/lib | /var/log | /home | /root | /root/* | /boot | /boot/* | \
+      /bin | /bin/* | /sbin | /sbin/* | /lib | /lib/* | /lib64 | /lib64/* | /proc | /proc/* | /sys | /sys/* | /dev | /dev/* | /run | /tmp | /opt | /srv | /mnt | /media)
+      why="the data directory $1 is a system directory"
+      return 1
+      ;;
+  esac
+  if [ "$(stat -c %U -- "$1")" != "$agent_user" ]; then
+    why="the data directory $1 isn't owned by $agent_user"
+    return 1
+  fi
+  if [ "$(as_agent timeout 5 head -c 16 -- "$1/PG_VERSION" 2>/dev/null | tr -d '\n')" != "$2" ]; then
+    why="$1 is not a PostgreSQL $2 data directory"
+    return 1
+  fi
+  return 0
+}
+
+# drop_cluster MAJOR NAME WANT removes a cluster whose data directory must
+# still be WANT (recorded by root). Sets why and returns 1 when it refuses
+# or fails.
+drop_cluster() {
+  why=''
+  check_conf_dir "$1" "$2" || return 1
+  d_=$(cluster_field "$1" "$2" 6)
+  if [ "$d_" != "$3" ]; then
+    why="PostgreSQL $1/$2's data directory is now ${d_:-unknown}, not $3 as recorded"
+    return 1
+  fi
+  check_data_dir "$d_" "$1" || return 1
+  timeout 180 "$systemctl" stop "postgresql@$1-$2.service" >>"$work_log" 2>&1 </dev/null
+  if ! as_agent pg_dropcluster "$1" "$2" >>"$work_log" 2>&1 </dev/null; then
+    why="pg_dropcluster failed: $(tail_log)"
+    return 1
+  fi
+  "$systemctl" daemon-reload >>"$work_log" 2>&1
+  [ ! -x /usr/share/postgresql-common/pg_updateaptconfig ] || /usr/share/postgresql-common/pg_updateaptconfig >>"$work_log" 2>&1
+  return 0
+}
+
 free_port() { lsclusters | awk 'BEGIN { p = 5433 } $3 >= p { p = $3 + 1 } END { print p }'; }
 
 # An upgrade's record (root's state directory): key=value lines.
@@ -322,11 +411,18 @@ act_pg_install_major() {
   apt_timeout=3600 apt_run install -y --no-install-recommends $pkgs || refuse "installing PostgreSQL $major failed: $(tail_log)"
   # postgresql-common creates (and starts) an empty "main" cluster for a
   # newly installed major; the upgrade needs that name free.
-  dropped=''
+  dropped='' left=''
   for n in $(lsclusters | awk -v m="$major" '$1 == m { print $2 }'); do
     case $before in *" $n "*) continue ;; esac
-    if pg_dropcluster --stop "$major" "$n" >>"$work_log" 2>&1; then dropped="$dropped $major/$n"; fi
+    # Its data directory as the package just created it.
+    if drop_cluster "$major" "$n" "$(cluster_field "$major" "$n" 6)"; then
+      dropped="$dropped $major/$n"
+    else
+      left="$left $major/$n ($why)"
+      log "left the new cluster $major/$n in place: $why"
+    fi
   done
+  add left "$left"
   add packages "$pkgs"
   add missing "$missing"
   add dropped "$dropped"
@@ -346,6 +442,10 @@ act_pg_upgrade() {
     *) refuse "PostgreSQL on port $port is not running" ;;
   esac
   [ -z "$(cluster_field "$major" "$c_name" 1)" ] || refuse "a PostgreSQL $major cluster named $c_name already exists"
+  # Where the old version's data lives, checked and recorded now: it is
+  # what a later cleanup may remove, and nothing else.
+  check_conf_dir "$c_major" "$c_name" || refuse "Rowsafe won't upgrade this cluster: $why"
+  check_data_dir "$c_datadir" "$c_major" || refuse "Rowsafe won't upgrade this cluster: $why"
   flag=''
   case $method in link) flag=--link ;; clone) flag=--clone ;; esac
   jobs=$(nproc 2>/dev/null || echo 1)
@@ -372,8 +472,11 @@ act_pg_upgrade() {
     refuse "pg_upgrade failed, and PostgreSQL $c_major could not be started again: $why"
   fi
   old_port=$(cluster_field "$c_major" "$c_name" 3)
+  new_data=$(cluster_field "$major" "$c_name" 6)
+  check_data_dir "$new_data" "$major" || new_data=''
   record_put "$rec" "id=$id" "port=$port" "from=$c_major" "to=$major" "name=$c_name" "method=$method" \
-    "aside_port=$old_port" "status=upgraded" "created=$(date +%s)" || refuse "could not record the upgrade"
+    "aside_port=$old_port" "status=upgraded" "created=$(date +%s)" "old_data=$c_datadir" "new_data=$new_data" ||
+    refuse "could not record the upgrade"
   set_allowed_unit "$port" "$new_unit" || refuse "could not update $allow"
   unit=$new_unit
   "$systemctl" daemon-reload >>"$work_log" 2>&1
@@ -393,10 +496,16 @@ act_pg_upgrade() {
     unit=$old_unit
     "$systemctl" daemon-reload >>"$work_log" 2>&1
     if timeout 180 "$systemctl" start "$old_unit" >>"$work_log" 2>&1 </dev/null; then
-      pg_dropcluster --stop "$major" "$c_name" >>"$work_log" 2>&1
-      rm -f "$rec"
+      startwhy=$why
+      if [ -n "$new_data" ] && drop_cluster "$major" "$c_name" "$new_data"; then
+        rm -f "$rec"
+      else
+        # Kept, stopped: the record lets a person remove it later.
+        record_put "$rec" "status=undone" "aside_port=$old_port"
+        add kept "$major/$c_name"
+      fi
       add rolled_back 1
-      refuse "PostgreSQL $major did not start ($why); Rowsafe put PostgreSQL $c_major back and started it"
+      refuse "PostgreSQL $major did not start ($startwhy); Rowsafe put PostgreSQL $c_major back and started it"
     fi
     refuse "PostgreSQL $major did not start ($why), and starting PostgreSQL $c_major again failed too: $(tail_log)"
   fi
@@ -404,7 +513,7 @@ act_pg_upgrade() {
   add to "$major"
   add aside_port "$old_port"
   add old_data_dir "$c_datadir"
-  add new_data_dir "$(cluster_field "$major" "$c_name" 6)"
+  add new_data_dir "$new_data"
   ok=1
   log "upgraded $c_major/$c_name to $major; $c_major kept on port $old_port, stopped"
 }
@@ -469,11 +578,13 @@ act_pg_upgrade_cleanup() {
     down) ;;
     *) refuse "PostgreSQL $kept/$r_name is running ($status); Rowsafe won't remove it" ;;
   esac
+  if [ "$r_status" = upgraded ]; then want=$(record_get "$rec" old_data); else want=$(record_get "$rec" new_data); fi
+  [ -n "$want" ] || refuse "the upgrade record doesn't say where PostgreSQL $kept/$r_name's data lives, so Rowsafe won't remove it: remove it yourself with pg_dropcluster"
   data=$(cluster_field "$kept" "$r_name" 6)
-  size=$(du -sb "$data" 2>/dev/null | cut -f1)
+  size=$(as_agent du -sb -- "$data" 2>/dev/null | cut -f1)
   : >"$work_log"
   log "removing $kept/$r_name, kept by an upgrade (request $id)"
-  pg_dropcluster "$kept" "$r_name" >>"$work_log" 2>&1 || refuse "removing PostgreSQL $kept/$r_name failed: $(tail_log)"
+  drop_cluster "$kept" "$r_name" "$want" || refuse "Rowsafe didn't remove PostgreSQL $kept/$r_name: $why"
   rm -f "$rec"
   add freed "${size:-0}"
   add dropped "$kept/$r_name"
@@ -497,6 +608,7 @@ act_pg_upgrade_cleanup() {
 
 act_security_updates() {
   update_allowed security "installing security updates from Rowsafe is not allowed on this server (run the installer again with --allow-security-updates)"
+  cooldown security-updates 300
   : >"$work_log"
   apt_refresh
   # Upgrades of installed packages from a security origin. PostgreSQL's
@@ -521,10 +633,23 @@ act_security_updates() {
   ok=1
 }
 
+# cooldown ACTION SECONDS: at most one ACTION per SECONDS (root's own stamp).
+cooldown() {
+  stamp=$state/last-$1
+  now=$(date +%s)
+  last=$(cat "$stamp" 2>/dev/null || echo 0)
+  case $last in '' | *[!0-9]*) last=0 ;; esac
+  [ $((now - last)) -ge "$2" ] || refuse "$1 ran less than $(($2 / 60)) minutes ago; try again later"
+  echo "$now" >"$stamp"
+}
+
 act_reboot() {
   update_allowed reboot "rebooting the server from Rowsafe is not allowed here (run the installer again with --allow-reboot)"
+  cooldown reboot 600
   log "rebooting the server (request $id)"
+  # The answer comes before the reboot: it says the reboot was asked for.
   ok=1
+  add status rebooting
   add requested_at "$(date +%s)"
   answer
   sleep 3
