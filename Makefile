@@ -4,6 +4,7 @@
 #   make test                  unit tests
 #   make lint                  go vet, gofmt, shellcheck, installer consistency
 #   make test-installer        scripts/install.sh in Debian/Ubuntu containers (Docker)
+#   make test-mongodb          the MongoDB engine on real mongo 7.0/8.0 containers (Docker)
 #   make test-rewind           a real Rewind (copy, rows, in place, undo) on a systemd Debian container (Docker)
 #   make dist VERSION=1.2.3 RELEASE_PUBLIC_KEY=...    reproducible release binaries in dist/1.2.3/
 #   make release VERSION=1.2.3 RELEASE_PUBLIC_KEY=... (needs ROWSAFE_RELEASE_PRIVATE_KEY)
@@ -27,7 +28,7 @@ AGENT_LDFLAGS := -s -w -buildid= -X $(PKG)/internal/agent.Version=$(VERSION) -X 
 MAIN_LDFLAGS := -s -w -buildid= -X main.version=$(VERSION)
 GOBUILD := CGO_ENABLED=0 GOFLAGS=-mod=readonly $(GO) build -trimpath -buildvcs=false
 
-.PHONY: all build test lint check-installer test-installer test-rewind dist release check-release-env clean
+.PHONY: all build test lint check-installer test-installer test-mongodb test-rewind dist release check-release-env clean
 
 all: lint test build
 
@@ -66,6 +67,9 @@ check-installer:
 
 test-installer:
 	sh scripts/test-install.sh
+
+test-mongodb:
+	bash scripts/test-mongodb.sh
 
 test-rewind:
 	sh scripts/test-rewind.sh
