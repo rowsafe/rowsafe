@@ -49,7 +49,8 @@ func (a *Agent) makeSourceReadOnly(ctx context.Context, st *migState, ci conninf
 	sessions := func() ([]int32, error) {
 		rows, err := conn.Query(ctx, `
 			SELECT pid FROM pg_stat_activity
-			WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_type = 'client backend'`)
+			WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_type = 'client backend'
+			  AND application_name <> 'rowsafe-move-in'`)
 		if err != nil {
 			return nil, err
 		}
@@ -473,6 +474,21 @@ func (a *Agent) handOver(ctx context.Context, st *migState, p protocol.MigratePa
 		return err
 	}
 	defer conn.Close(ctx)
+	if reassign && p.AppUser == "" {
+		// A name Rowsafe picked never takes over an existing login (another
+		// move's, or one of yours): app, app_2, app_3...
+		base := st.AppUser
+		for n := 2; ; n++ {
+			var taken bool
+			if err := conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)`, st.AppUser).Scan(&taken); err != nil {
+				return err
+			}
+			if !taken || n > 99 {
+				break
+			}
+			st.AppUser = fmt.Sprintf("%s_%d", base[:min(len(base), 59)], n)
+		}
+	}
 	user := pgx.Identifier{st.AppUser}.Sanitize()
 	var exists, super bool
 	_ = conn.QueryRow(ctx, `SELECT true, rolsuper FROM pg_roles WHERE rolname = $1`, st.AppUser).Scan(&exists, &super)

@@ -81,7 +81,7 @@ Rewind: continuous backups, restore to any second
 
 Move in: bring a database from DigitalOcean, RDS, Supabase, Neon... onto your server
   rowsafe migrate [NAME] [--json]            migrations (into NAME, or all)
-  rowsafe migrate start [NAME] [--into DB] [--method live|dump] [--source-env VAR] [--id ID] [--yes]
+  rowsafe migrate start [NAME] [--into DB] [--method live|dump] [--source-env VAR] [--id ID] [--host ADDR] [--user NAME] [--yes]
                                              check the source and start copying into the server of NAME. The
                                              connection string is typed (not shown), piped, or read from $VAR,
                                              and sealed here to the server's key: Rowsafe never sees it

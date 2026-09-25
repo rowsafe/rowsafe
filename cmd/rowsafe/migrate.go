@@ -146,6 +146,8 @@ func migrateStartCmd(ctx context.Context, c *client.Client, args []string) error
 	sourceEnv := fs.String("source-env", "", "read the source connection string from this environment variable")
 	yes := fs.Bool("yes", false, "start without asking")
 	again := fs.String("id", "", "check an existing migration again (after fixing what its check found)")
+	host := fs.String("host", "", "one-time copy: the server address to put in the new connection string")
+	user := fs.String("user", "", "one-time copy: the login name apps use on the new server")
 	name, err := dbArg(ctx, c, fs, args)
 	if err != nil {
 		return err
@@ -215,7 +217,7 @@ func migrateStartCmd(ctx context.Context, c *client.Client, args []string) error
 		if key, err = e2e.GenerateKey(); err != nil {
 			return err
 		}
-		req.ReadOnly, req.BrowserKey = true, e2e.PublicKeyString(key.PublicKey())
+		req.ReadOnly, req.BrowserKey, req.Host, req.AppUser = true, e2e.PublicKeyString(key.PublicKey()), *host, *user
 	} else {
 		fmt.Println("\nLive sync copies everything while your apps keep running, then follows every change until you switch over.")
 	}
