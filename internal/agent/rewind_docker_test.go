@@ -115,6 +115,11 @@ func TestDockerRewindUndoCleanup(t *testing.T) {
 	if exists(stagingDir(e.dataDir, "rw_1")) {
 		t.Error("the staging directory is left")
 	}
+	// pgBackRest's restore_command names the data directory, not the staging one.
+	if auto, _ := os.ReadFile(filepath.Join(e.dataDir, "postgresql.auto.conf")); !strings.Contains(string(auto), "--pg1-path="+e.dataDir+" archive-get") ||
+		strings.Contains(string(auto), "restore-rw_1") {
+		t.Errorf("postgresql.auto.conf:\n%s", auto)
+	}
 	// Production's own configuration files in the data directory are kept.
 	if hba, _ := os.ReadFile(filepath.Join(e.dataDir, "pg_hba.conf")); string(hba) != "# production hba\n" {
 		t.Errorf("pg_hba.conf %q", hba)

@@ -204,6 +204,22 @@ func moveData(contents bool, dataDir, src, dst string) error {
 	return nil
 }
 
+// retargetRestore points the recovery settings pgBackRest wrote for a
+// restore into staging (restore_command carries --pg1-path=<staging>) at
+// the data directory the restored files were moved to.
+func retargetRestore(dataDir, staging string) error {
+	path := filepath.Join(dataDir, "postgresql.auto.conf")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	fixed := strings.ReplaceAll(string(data), "--pg1-path="+staging, "--pg1-path="+dataDir)
+	if fixed == string(data) {
+		return nil
+	}
+	return writeFileAtomic(path, []byte(fixed), 0o600)
+}
+
 // freshDir creates dir empty (0700), removing a leftover of an earlier
 // attempt; dir must be a Rowsafe staging directory.
 func freshDir(dir string) error {

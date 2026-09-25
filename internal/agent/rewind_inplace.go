@@ -385,6 +385,9 @@ func (a *Agent) rewindInPlace(ctx context.Context, db protocol.DatabaseSpec, p p
 		if err := moveData(true, f.DataDir, restoreDir, f.DataDir); err != nil {
 			return fail("moving the restored data into place", err)
 		}
+		if err := retargetRestore(f.DataDir, restoreDir); err != nil {
+			return fail("moving the restored data into place", err)
+		}
 	}
 
 	// 5. Configuration that lives in the data directory.
