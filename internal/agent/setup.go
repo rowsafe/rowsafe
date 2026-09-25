@@ -31,6 +31,9 @@ type Setup struct {
 	Out    io.Writer // plan and progress, for the person at the terminal
 	Notes  io.Writer // side remarks (skipped clusters)
 	Poll   time.Duration
+	// Engine is the engine Plan registers (protocol.Engine*; "" is
+	// PostgreSQL).
+	Engine string
 }
 
 // Exit codes of the setup commands (documented in rowsafe-agent's usage).
@@ -161,8 +164,10 @@ func suggestName(userDBs []string, hostname string) string {
 
 // ---- discovery
 
-// Cluster is a local PostgreSQL cluster the agent can reach.
+// Cluster is a local database server the agent can reach: a PostgreSQL
+// cluster, or another engine's server (Engine).
 type Cluster struct {
+	Engine     string // protocol.Engine*: postgresql for PostgreSQL
 	Port       int
 	SocketDir  string
 	Major      int
@@ -290,15 +295,20 @@ func (s *Setup) Discover(ctx context.Context) ([]Cluster, error) {
 			fmt.Fprintf(s.Notes, "PostgreSQL %d on port %d is a replica (standby); skipped. Set up backups on its primary server instead.\n", sum.Major(), port)
 			continue
 		}
-		c := Cluster{Port: port, SocketDir: sockets[port], Major: sum.Major(), Version: sum.ServerVersion,
+		c := Cluster{Engine: protocol.EnginePostgreSQL, Port: port, SocketDir: sockets[port], Major: sum.Major(), Version: sum.ServerVersion,
 			DataDir: sum.DataDirectory, SizeBytes: sum.TotalSizeBytes, Databases: userDatabases(sum.Databases)}
 		if ls, ok := byPort[port]; ok && ls.Major == c.Major {
 			c.Name = ls.Name
 		}
 		c.Unit = SystemdUnit(c.DataDir, c.Major, c.Name)
-		for i := range registered {
-			if registered[i].Port == port {
-				c.Registered = &registered[i]
+		out = append(out, c)
+	}
+	out = append(out, s.discoverEngines(ctx)...)
+	for i := range out {
+		c := &out[i]
+		for j := range registered {
+			if registered[j].Port == c.Port && protocol.NormalizeEngine(registered[j].Engine) == c.Engine {
+				c.Registered = &registered[j]
 			}
 		}
 		if c.Registered != nil {
@@ -306,7 +316,6 @@ func (s *Setup) Discover(ctx context.Context) ([]Cluster, error) {
 		} else {
 			c.Suggested = suggestName(c.Databases, hostname)
 		}
-		out = append(out, c)
 	}
 	// Two new clusters suggesting the same name: tell them apart by port.
 	count := map[string]int{}
@@ -321,9 +330,32 @@ func (s *Setup) Discover(ctx context.Context) ([]Cluster, error) {
 	return out, nil
 }
 
+// discoverEngines asks the registered engines (MySQL, ...) for their
+// servers on this host.
+func (s *Setup) discoverEngines(ctx context.Context) []Cluster {
+	var out []Cluster
+	for _, e := range registeredEngines() {
+		env := engineEnv(s.cfg, nil, nil, e.Name())
+		if s.Notes != nil {
+			env.Notes = s.Notes
+		}
+		found, err := e.Discover(ctx, env)
+		if err != nil {
+			fmt.Fprintf(env.Notes, "Looking for %s failed (%s); skipped.\n", protocol.EngineDisplayName(e.Name()), firstLineOf(err.Error()))
+			continue
+		}
+		for _, d := range found {
+			out = append(out, Cluster{Engine: e.Name(), Port: d.Port, SocketDir: d.SocketDir, Major: d.Major,
+				Version: d.Version, Name: d.Name, DataDir: d.DataDir, SizeBytes: d.SizeBytes,
+				Databases: d.Databases, Unit: d.Unit})
+		}
+	}
+	return out
+}
+
 // WriteClusters prints one tab-separated line per cluster:
 //
-//	port socket_dir major cluster data_dir size_bytes name registered status databases size unit database_id
+//	port socket_dir major cluster data_dir size_bytes name registered status databases size unit database_id engine
 //
 // Empty values are "-"; registered is yes or no; databases are
 // comma-separated; size is human-readable (it contains a space).
@@ -339,9 +371,10 @@ func WriteClusters(w io.Writer, cs []Cluster) {
 		if c.Registered != nil {
 			reg, status, id = "yes", c.Registered.Status, c.Registered.ID
 		}
-		fmt.Fprintf(w, "%d\t%s\t%d\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			c.Port, c.SocketDir, c.Major, dash(c.Name), dash(c.DataDir), c.SizeBytes, c.Suggested, reg, dash(status),
-			dash(strings.Join(c.Databases, ",")), humanBytes(c.SizeBytes), dash(c.Unit), dash(id))
+		fmt.Fprintf(w, "%d\t%s\t%d\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			c.Port, dash(c.SocketDir), c.Major, dash(c.Name), dash(c.DataDir), c.SizeBytes, c.Suggested, reg, dash(status),
+			dash(strings.Join(c.Databases, ",")), humanBytes(c.SizeBytes), dash(c.Unit), dash(id),
+			protocol.NormalizeEngine(c.Engine))
 	}
 }
 
@@ -359,7 +392,7 @@ func (s *Setup) Plan(ctx context.Context, name string, port int, socketDir, idFi
 	if !ValidName(name) {
 		return fmt.Errorf("%q can't be a name in Rowsafe: %s", name, NameRule)
 	}
-	d, err := s.client.setupRegister(ctx, protocol.SetupRegisterRequest{Name: name, Port: port, SocketDir: socketDir})
+	d, err := s.client.setupRegister(ctx, protocol.SetupRegisterRequest{Name: name, Port: port, SocketDir: socketDir, Engine: s.Engine})
 	switch httpStatus(err) {
 	case 0:
 	case http.StatusConflict:

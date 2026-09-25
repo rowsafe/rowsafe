@@ -52,8 +52,10 @@ Rewind: continuous backups, restore to any second
   rowsafe backup [NAME] [--type full|diff|incr] [--no-wait]
                                              take a backup now
   rowsafe backups [NAME]                     backups
-  rowsafe mark [NAME] [LABEL] [--no-wait]    a named restore point (a Mark), e.g. before a migration.
-                                             LABEL defaults to manual-<UTC time>
+  rowsafe mark [NAME] [LABEL] [--no-wait] [--json]
+                                             a named restore point (a Mark), e.g. before a migration.
+                                             LABEL defaults to manual-<UTC time>. --json prints the Mark
+                                             (status, restore_from_backup) for scripts and CI
   rowsafe marks [NAME]                       restore points
   rowsafe set [NAME] [--retention-full N] [--full-schedule CRON] [--diff-schedule CRON] [--proof-schedule CRON]
                                              change retention and schedules (5-field cron, UTC; --diff-schedule "" disables diffs)

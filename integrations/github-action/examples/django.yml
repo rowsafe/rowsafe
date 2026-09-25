@@ -1,0 +1,36 @@
+# Django: save a Mark, then migrate and deploy.
+# Secrets: ROWSAFE_API_KEY (a read-write Rowsafe API key), DATABASE_URL.
+name: deploy
+on:
+  push:
+    branches: [main]
+concurrency: deploy-production
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - name: Save a Mark before the migration
+        id: rowsafe
+        uses: rowsafe/action@v1
+        with:
+          api-key: ${{ secrets.ROWSAFE_API_KEY }}
+          database: app
+
+      - run: python manage.py migrate --noinput
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      - name: If the migration failed
+        if: failure() && steps.rowsafe.outputs.mark != ''
+        env:
+          MARK: ${{ steps.rowsafe.outputs.mark }}
+          URL: ${{ steps.rowsafe.outputs.dashboard-url }}
+        run: echo "::error::The deploy failed after Mark $MARK. To go back, rewind to it in Rowsafe - $URL"
+      # ... then deploy the application as usual

@@ -279,7 +279,11 @@ func showCmd(ctx context.Context, c *client.Client, args []string) error {
 	if d.CanRestart {
 		fmt.Println("Restart:    allowed from Rowsafe (rowsafe restart)")
 	} else {
-		fmt.Println("Restart:    not allowed from Rowsafe on this server (allowed at install time)")
+		if d.Archiver != nil && d.Archiver.Mode == "docker-sidecar" {
+			fmt.Println("Restart:    not allowed from Rowsafe (Docker: add the container control service)")
+		} else {
+			fmt.Println("Restart:    not allowed from Rowsafe on this server (allowed at install time)")
+		}
 	}
 	backups, err := c.Backups(ctx, name, 1)
 	if err == nil && len(backups) > 0 {
@@ -301,6 +305,7 @@ func adoptCmd(ctx context.Context, c *client.Client, args []string) error {
 	socketDir := fs.String("socket-dir", "/var/run/postgresql", "Unix socket directory")
 	retention := fs.Int("retention-full", 2, "full backups to keep (weekly fulls: 2 = about 2 weeks of PITR)")
 	noWait := fs.Bool("no-wait", false, "don't wait for the plan")
+	engine := fs.String("engine", "", "database engine: postgresql (default), or another engine Rowsafe supports")
 	name, err := parse(fs, args, true)
 	if err != nil {
 		return err
@@ -309,7 +314,7 @@ func adoptCmd(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	resp, err := c.CreateDatabase(ctx, protocol.CreateDatabaseRequest{
-		HostID: *host, Name: name, Port: *port, SocketDir: *socketDir, RetentionFull: *retention,
+		HostID: *host, Name: name, Port: *port, SocketDir: *socketDir, RetentionFull: *retention, Engine: *engine,
 	})
 	if err != nil {
 		return err
@@ -439,6 +444,12 @@ func restartCmd(ctx context.Context, c *client.Client, args []string) error {
 
 // restartNotAllowed explains why Rowsafe can't restart d's PostgreSQL.
 func restartNotAllowed(d protocol.Database) string {
+	if d.Archiver != nil && d.Archiver.Mode == "docker-sidecar" {
+		return fmt.Sprintf("not restarted: Rowsafe can't restart PostgreSQL's container on %s yet.\n"+
+			"Either restart it yourself: docker compose restart postgres (your PostgreSQL service's name)\n"+
+			"or allow it: add the container control service to your compose file; the database's Settings in the dashboard show the lines "+
+			"(https://rowsafe.sh/docs/guides/docker#let-rowsafe-restart-the-container).", d.Hostname)
+	}
 	return fmt.Sprintf("not restarted: %s doesn't allow restarts from Rowsafe (only root can allow it, at install time).\n"+
 		"Either restart PostgreSQL yourself, on %s:\n  sudo systemctl restart postgresql\n"+
 		"or allow it: re-run the install command on %s and say yes to restarts (--allow-restart).", d.Hostname, d.Hostname, d.Hostname)
