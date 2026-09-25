@@ -91,6 +91,13 @@ RESTART_PATH_FILE=/etc/systemd/system/rowsafe-pg-restart.path
 RESTART_ALLOW_FILE=$CONFIG_DIR/restart-allowed
 RESTART_DIR=$STATE_DIR/restart
 AGENT_USER=postgres
+# >>> mysql: a server with MySQL or MariaDB and no PostgreSQL runs the agent
+# as the mysql user (detect_host_engine), like postgres on a PostgreSQL one.
+HOST_ENGINE=postgresql
+AGENT_HOME=/var/lib/postgresql
+PERCONA_KEY_FPR=4D1BB29D63D98E422B2113B19334A25F8507EFA5
+MYSQL_CONF_LINK=/etc/mysql/conf.d/zz-rowsafe.cnf
+# <<< mysql
 DEFAULT_RELEASES_URL=https://releases.rowsafe.sh/agent
 MAX_ARTIFACT_SIZE=536870912 # 512 MiB, the same limit the agent enforces
 
@@ -100,7 +107,8 @@ AGENT_VARS="ROWSAFE_URL ROWSAFE_ENROLL_TOKEN $REQUIRED_REPO_VARS
   ROWSAFE_REPO_S3_REGION ROWSAFE_REPO_S3_URI_STYLE ROWSAFE_REPO_PATH_PREFIX
   ROWSAFE_REPO_S3_PORT ROWSAFE_REPO_S3_CA_FILE ROWSAFE_REPO_S3_VERIFY_TLS
   ROWSAFE_AUTO_UPDATE ROWSAFE_PG_USER ROWSAFE_PG_BIN_DIR ROWSAFE_PGBACKREST_BIN
-  ROWSAFE_DRILL_DIR ROWSAFE_DRILL_PORT ROWSAFE_POLL_INTERVAL ROWSAFE_HEARTBEAT_INTERVAL"
+  ROWSAFE_DRILL_DIR ROWSAFE_DRILL_PORT ROWSAFE_POLL_INTERVAL ROWSAFE_HEARTBEAT_INTERVAL
+  ROWSAFE_MYSQL_BIN_DIR ROWSAFE_MYSQL_SCRATCH_MEMORY"
 
 PROMPT=auto        # auto: ask on a terminal when needed; never: --no-prompt
 SETUP_STORAGE=0    # --setup-storage: offer to replace configured storage settings
@@ -327,8 +335,143 @@ detect_os() {
   esac
 }
 
+# >>> mysql
+# detect_host_engine: without a postgres user but with MySQL or MariaDB,
+# Rowsafe protects MySQL/MariaDB and the agent runs as the mysql user, which
+# can read the data directory (backups) and start private servers on it
+# (restore tests, Rewind copies).
+detect_host_engine() {
+  id -u postgres >/dev/null 2>&1 && return 0
+  id -u mysql >/dev/null 2>&1 || return 0
+  for _b in /usr/sbin/mariadbd /usr/sbin/mysqld; do
+    [ -x "$_b" ] || continue
+    if "$_b" --version 2>/dev/null | grep -qi mariadb; then HOST_ENGINE=mariadb; else HOST_ENGINE=mysql; fi
+    MYSQLD_BIN=$_b
+    AGENT_USER=mysql
+    AGENT_HOME=$STATE_DIR
+    return 0
+  done
+}
+
+engine_label() {
+  case ${1:-$HOST_ENGINE} in mysql) echo MySQL ;; mariadb) echo MariaDB ;; *) echo PostgreSQL ;; esac
+}
+
+# ensure_mysql_tools installs the physical backup tool: mariadb-backup from
+# the same apt source as the server, or Percona XtraBackup (8.0 or 8.4, the
+# server's) from Percona's repository, whose signing key is checked against
+# its pinned fingerprint. pgBackRest is installed too: the installer's
+# storage test uses it.
+ensure_mysql_tools() {
+  _ver=$("$MYSQLD_BIN" --version 2>/dev/null | sed -n 's/.*Ver \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p')
+  if [ "$HOST_ENGINE" = mariadb ]; then
+    if ! have mariadb-backup && ! have mariabackup; then
+      step "Installing mariadb-backup (MariaDB's backup tool)"
+      apt_install mariadb-backup
+    fi
+    TOOLS_SUMMARY="mariadb-backup $(mariadb-backup --version 2>&1 | sed -n 's/.*MariaDB server \([0-9.]*\).*/\1/p')"
+  else
+    case $_ver in
+      8.0.*) _pkg=percona-xtrabackup-80 _repo=pxb-80 ;;
+      8.4.*) _pkg=percona-xtrabackup-84 _repo=pxb-84-lts ;;
+      *) die "MySQL ${_ver:-(unknown version)}: Rowsafe supports MySQL 8.0 and 8.4" ;;
+    esac
+    if ! dpkg -s "$_pkg" >/dev/null 2>&1; then
+      step "Installing Percona XtraBackup ($_pkg) from Percona's repository"
+      have gpg || apt_install gnupg
+      _codename=$(. /etc/os-release && printf '%s' "${VERSION_CODENAME:-}")
+      fetch https://repo.percona.com/yum/PERCONA-PACKAGING-KEY "$TMP/percona.asc"
+      _fpr=$(gpg --show-keys --with-colons "$TMP/percona.asc" 2>/dev/null | awk -F: '$1 == "fpr" { print $10; exit }')
+      [ "$_fpr" = "$PERCONA_KEY_FPR" ] || die "Percona's signing key has an unexpected fingerprint ($_fpr); not installing XtraBackup"
+      gpg --dearmor <"$TMP/percona.asc" >"$TMP/percona.gpg"
+      install -m 0644 -o root -g root "$TMP/percona.gpg" /usr/share/keyrings/rowsafe-percona.gpg
+      echo "deb [signed-by=/usr/share/keyrings/rowsafe-percona.gpg] https://repo.percona.com/$_repo/apt $_codename main" |
+        write_file /etc/apt/sources.list.d/rowsafe-percona-xtrabackup.list 0644 root:root || true
+      APT_UPDATED=0
+      apt_install "$_pkg"
+    fi
+    TOOLS_SUMMARY=$(xtrabackup --version 2>&1 | sed -n 's/^xtrabackup version \([^ ]*\).*/XtraBackup \1/p')
+    have mysqlbinlog || warn "mysqlbinlog is missing (MySQL's server or client package has it): restores need it"
+  fi
+  ok "${TOOLS_SUMMARY:-backup tool installed}"
+  have pgbackrest || apt_install pgbackrest
+}
+
+# mysql_setup gives the agent (the mysql user) what it needs: a unit
+# drop-in that runs it as mysql, an option file Rowsafe writes the binary
+# log settings to (included from /etc/mysql/conf.d, empty until you turn on
+# backups), and, on Ubuntu's AppArmor profile for mysqld, access to Rowsafe's
+# folders (restore tests and copies run mysqld on data under $STATE_DIR).
+mysql_setup() {
+  _dropin=/etc/systemd/system/$SERVICE.d
+  if [ "$AGENT_USER" = postgres ]; then
+    [ ! -f "$_dropin/10-mysql.conf" ] || { rm -f "$_dropin/10-mysql.conf"; UNIT_CHANGED=1; CHANGED=1; }
+    return 0
+  fi
+  install -d -m 0755 "$_dropin"
+  if printf '# Written by the Rowsafe installer: this server runs MySQL or MariaDB.\n[Unit]\nAfter=mysql.service mariadb.service\n[Service]\nUser=mysql\nGroup=mysql\n' |
+    write_file "$_dropin/10-mysql.conf" 0644 root:root; then
+    UNIT_CHANGED=1 CHANGED=1
+  fi
+  install -d -m 0750 -o mysql -g mysql "$CONFIG_DIR/mysql"
+  if [ ! -f "$CONFIG_DIR/mysql/server.cnf" ]; then
+    as_agent sh -c 'umask 027; printf "# Written by Rowsafe (https://rowsafe.sh): binary log settings for backups.\n[mysqld]\n" >"$1"' \
+      rowsafe "$CONFIG_DIR/mysql/server.cnf"
+  fi
+  if [ -d /etc/mysql/conf.d ] && [ ! -e "$MYSQL_CONF_LINK" ]; then
+    ln -s "$CONFIG_DIR/mysql/server.cnf" "$MYSQL_CONF_LINK"
+    ok "$MYSQL_CONF_LINK -> $CONFIG_DIR/mysql/server.cnf (settings Rowsafe needs, added only when you turn on backups)"
+  fi
+  if [ -f /etc/apparmor.d/usr.sbin.mysqld ] && ! grep -qs 'Rowsafe' /etc/apparmor.d/local/usr.sbin.mysqld; then
+    install -d -m 0755 /etc/apparmor.d/local
+    {
+      echo "# Rowsafe: restore tests and Rewind copies run mysqld on data under $STATE_DIR;"
+      echo "# the server reads Rowsafe's binary log settings from $CONFIG_DIR/mysql."
+      echo "$STATE_DIR/ r,"
+      echo "$STATE_DIR/** rwk,"
+      echo "$CONFIG_DIR/mysql/ r,"
+      echo "$CONFIG_DIR/mysql/* r,"
+    } >>/etc/apparmor.d/local/usr.sbin.mysqld
+    if have apparmor_parser && [ -d /sys/kernel/security/apparmor ]; then
+      apparmor_parser -r /etc/apparmor.d/usr.sbin.mysqld 2>/dev/null || warn "could not reload mysqld's AppArmor profile"
+    fi
+  fi
+}
+
+# mysql_account creates Rowsafe's own MySQL/MariaDB account (as root, via
+# the server's socket; or with the administrator password on a terminal).
+mysql_account() {
+  [ "$C_ENGINE" = mysql ] || [ "$C_ENGINE" = mariadb ] || return 0
+  [ ! -f "$STATE_DIR/engines/$C_ENGINE/account-$C_PORT.cnf" ] || return 0
+  _sock=$C_SOCK
+  [ "$_sock" != - ] || _sock=''
+  if "$INSTALL_DIR/rowsafe-agent" setup mysql-account --engine "$C_ENGINE" --port "$C_PORT" ${_sock:+--socket "$_sock"} \
+    --owner "$AGENT_USER" --state-dir "$STATE_DIR" >"$TMP/account.log" 2>&1 </dev/null; then
+    note "$(cat "$TMP/account.log")"
+    return 0
+  fi
+  if [ "$TTY" != 1 ]; then
+    sed 's/^/    /' "$TMP/account.log" >&2
+    warn "could not log in to $(engine_label "$C_ENGINE") as root through its socket; run the installer on a terminal to give the root password once"
+    return 1
+  fi
+  note "Rowsafe needs its own $(engine_label "$C_ENGINE") account; root can't log in without a password here."
+  ask_secret _pw "$(engine_label "$C_ENGINE") root password (used once to create the account, not kept)"
+  ( umask 077; printf '%s' "$_pw" >"$TMP/adminpw" )
+  _pw=''
+  _rc=0
+  "$INSTALL_DIR/rowsafe-agent" setup mysql-account --engine "$C_ENGINE" --port "$C_PORT" ${_sock:+--socket "$_sock"} \
+    --owner "$AGENT_USER" --state-dir "$STATE_DIR" --admin-password-file "$TMP/adminpw" >"$TMP/account.log" 2>&1 </dev/null || _rc=$?
+  rm -f "$TMP/adminpw"
+  if [ "$_rc" = 0 ]; then note "$(cat "$TMP/account.log")"; return 0; fi
+  sed 's/^/    /' "$TMP/account.log" >&2
+  return 1
+}
+# <<< mysql
+
 # check_postgres finds the postgres OS user and the installed server majors.
 check_postgres() {
+  [ "$HOST_ENGINE" = postgresql ] || return 0 # mysql
   id -u "$AGENT_USER" >/dev/null 2>&1 ||
     die "no '$AGENT_USER' user on this host. Rowsafe adopts an existing PostgreSQL; install PostgreSQL first."
   PG_MAJORS=''
@@ -926,7 +1069,7 @@ remove_restart_helper() {
 # systemd unit (the ones a restart helper can restart).
 restart_pairs() {
   [ -s "$TMP/clusters" ] || return 0
-  awk -F '\t' '$12 != "-" && $12 ~ /^[A-Za-z0-9@._-]+\.service$/ { print $1, $12 }' "$TMP/clusters"
+  awk -F '\t' '($14 == "" || $14 == "postgresql") && $12 != "-" && $12 ~ /^[A-Za-z0-9@._-]+\.service$/ { print $1, $12 }' "$TMP/clusters"
 }
 
 # restart_allowed PORT: is PORT in the allow list?
@@ -2008,7 +2151,7 @@ host_id() {
 # stdin: that is the script itself when piped from curl.
 agent_run() {
   # shellcheck disable=SC2016 # $1 expands in the inner shell
-  runuser -u "$AGENT_USER" -- env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/var/lib/postgresql \
+  runuser -u "$AGENT_USER" -- env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME="$AGENT_HOME" \
     LANG="${LANG:-C}" LC_ALL="${LC_ALL:-}" \
     sh -c 'set -a; . "$1"; set +a; shift; exec "$@"' rowsafe-setup "$ENV_FILE" "$INSTALL_DIR/rowsafe-agent" "$@" </dev/null
 }
@@ -2047,7 +2190,7 @@ discover() {
 }
 
 # The cluster being set up (one line of $TMP/clusters).
-C_PORT='' C_SOCK='' C_MAJOR='' C_CLUSTER='' C_NAME='' C_REG='' C_STATUS='' C_DBS='' C_SIZE='' C_UNIT='' C_ID=''
+C_PORT='' C_SOCK='' C_MAJOR='' C_CLUSTER='' C_NAME='' C_REG='' C_STATUS='' C_DBS='' C_SIZE='' C_UNIT='' C_ID='' C_ENGINE=postgresql
 
 # read_cluster LINE splits a discover line (no field is empty: "-" stands
 # for nothing, so tabs never collapse).
@@ -2055,14 +2198,15 @@ read_cluster() {
   _f() { printf '%s\n' "$1" | cut -f"$2"; }
   C_PORT=$(_f "$1" 1) C_SOCK=$(_f "$1" 2) C_MAJOR=$(_f "$1" 3) C_CLUSTER=$(_f "$1" 4)
   C_NAME=$(_f "$1" 7) C_REG=$(_f "$1" 8) C_STATUS=$(_f "$1" 9) C_DBS=$(_f "$1" 10)
-  C_SIZE=$(_f "$1" 11) C_UNIT=$(_f "$1" 12) C_ID=$(_f "$1" 13)
+  C_SIZE=$(_f "$1" 11) C_UNIT=$(_f "$1" 12) C_ID=$(_f "$1" 13) C_ENGINE=$(_f "$1" 14)
   [ "$C_ID" != - ] || C_ID=''
+  [ -n "$C_ENGINE" ] && [ "$C_ENGINE" != - ] || C_ENGINE=postgresql
 }
 
 cluster_desc() {
   _d=$C_DBS
   [ "$_d" != - ] || _d=none
-  printf 'PostgreSQL %s on port %s (%s; databases: %s)' "$C_MAJOR" "$C_PORT" "$C_SIZE" "$(printf '%s' "$_d" | sed 's/,/, /g')"
+  printf '%s %s on port %s (%s; databases: %s)' "$(engine_label "$C_ENGINE")" "$C_MAJOR" "$C_PORT" "$C_SIZE" "$(printf '%s' "$_d" | sed 's/,/, /g')"
 }
 
 # restart_cmd is how a person restarts this cluster.
@@ -2078,17 +2222,17 @@ restart_cmd() {
 
 restart_later() {
   say ""
-  say "    OK. Restart PostgreSQL when it suits you:"
+  say "    OK. Restart $(engine_label "$C_ENGINE") when it suits you:"
   say "        $(restart_cmd)"
   if restart_allowed "$C_PORT"; then
-    say "    (or with Restart PostgreSQL in the Rowsafe dashboard)."
+    say "    (or with Restart in the Rowsafe dashboard)."
   fi
   say "    Rowsafe notices the restart by itself and finishes setting up. Nothing else to do."
 }
 
 # restart_postgres restarts the cluster, because the person said yes.
 restart_postgres() {
-  step "Restarting PostgreSQL $C_MAJOR"
+  step "Restarting $(engine_label "$C_ENGINE") $C_MAJOR"
   _rc=0
   if systemd_running && [ "$C_UNIT" != - ]; then
     timeout 180 systemctl restart "$C_UNIT" >"$TMP/restart.log" 2>&1 </dev/null || _rc=$?
@@ -2103,14 +2247,14 @@ restart_postgres() {
     warn "restarting PostgreSQL failed"
     return 1
   fi
-  ok "PostgreSQL restarted"
+  ok "$(engine_label "$C_ENGINE") restarted"
 }
 
 offer_restart() {
   say ""
-  tty_say "PostgreSQL needs a quick restart for backups to start. It takes a few"
+  tty_say "$(engine_label "$C_ENGINE") needs a quick restart for backups to start. It takes a few"
   tty_say "seconds; open connections are dropped and apps reconnect."
-  if confirm "Restart PostgreSQL now?" n; then
+  if confirm "Restart $(engine_label "$C_ENGINE") now?" n; then
     if restart_postgres; then
       finish_setup
       return 0
@@ -2149,7 +2293,8 @@ plan_cluster() {
   install -d -m 0700 -o "$AGENT_USER" -g "$AGENT_USER" "$TMP/setup"
   rm -f "$TMP/setup/id"
   _rc=0
-  agent_show setup plan --name "$C_NAME" --port "$C_PORT" --socket-dir "$C_SOCK" --id-file "$TMP/setup/id" || _rc=$?
+  mysql_account || return 1 # mysql
+  agent_show setup plan --name "$C_NAME" --port "$C_PORT" --socket-dir "$C_SOCK" --engine "$C_ENGINE" --id-file "$TMP/setup/id" || _rc=$?
   C_ID=$(cat "$TMP/setup/id" 2>/dev/null || true)
   return "$_rc"
 }
@@ -2215,6 +2360,10 @@ setup_databases() {
     [ "$SETUP_STOP" = 0 ] || break
     read_cluster "$_line"
     say ""
+    if [ "$C_ENGINE" != postgresql ] && [ "$AGENT_USER" != mysql ]; then # mysql
+      note "Found $(cluster_desc): Rowsafe protects $(engine_label "$C_ENGINE") on servers without PostgreSQL for now; skipped."
+      continue
+    fi
     case $C_REG:$C_STATUS in
       yes:active)
         ok "$(cluster_desc) is protected as $C_NAME"
@@ -2225,7 +2374,7 @@ setup_databases() {
         continue
         ;;
       yes:awaiting_restart)
-        note "Found $(cluster_desc): backups for $C_NAME wait for a PostgreSQL restart."
+        note "Found $(cluster_desc): backups for $C_NAME wait for a restart."
         offer_restart
         continue
         ;;
@@ -2309,7 +2458,7 @@ databases() {
   if [ "$TTY" = 1 ] && [ "$NO_SETUP" = 0 ]; then interactive=1; fi
   if [ "$interactive" = 1 ] || [ -n "$PROTECT_NAME" ] || [ "$ALLOW_RESTART" = yes ] || grep -qs '^[0-9]' "$RESTART_ALLOW_FILE"; then
     say ""
-    step "Looking for PostgreSQL on this server"
+    step "Looking for $(engine_label) on this server"
     if ! discover; then
       [ -z "$PROTECT_NAME" ] || die "could not look for PostgreSQL (see above)"
       next_steps
@@ -2332,9 +2481,10 @@ install_agent() {
   require_root
   detect_os
   detect_arch
+  detect_host_engine # mysql
   check_postgres
   say "${BOLD}Rowsafe agent installer${RESET}: backups, restore to any second and weekly"
-  say "restore tests for the PostgreSQL on this server. Nothing changes without your yes."
+  say "restore tests for the $(engine_label) on this server. Nothing changes without your yes."
   say ""
   step "Installing the Rowsafe agent on $(uname -n) ($OS_NAME, $ARCH)"
   ensure_base_tools
@@ -2368,13 +2518,14 @@ install_agent() {
   [ "$need_binary" = 0 ] || download_binary
 
   # 2. Dependencies and layout.
-  ensure_pgbackrest
+  if [ "$HOST_ENGINE" = postgresql ]; then ensure_pgbackrest; else ensure_mysql_tools; fi # mysql
   step "Installing into $INSTALL_DIR"
   make_dirs
   [ "$need_binary" = 0 ] || install_binary
   install_guard
   UNIT_CHANGED=0
   install_unit
+  mysql_setup # mysql
   install_logrotate
   maybe_guided_storage
   write_env
@@ -2441,7 +2592,7 @@ install_agent() {
   if systemd_running; then
     start_agent
   fi
-  probe_postgres
+  [ "$HOST_ENGINE" != postgresql ] || probe_postgres
   summary "$SERVICE_STATE"
   databases
 }
@@ -2451,7 +2602,7 @@ summary() {
   say "${BOLD}Rowsafe agent $REL_VERSION: $1${RESET}"
   say "    binary       $INSTALL_DIR/versions/$REL_VERSION/rowsafe-agent"
   say "    config       $ENV_FILE (postgres, 0600)"
-  say "    pgBackRest   ${PGBR_VERSION:-unknown}"
+  if [ -n "${TOOLS_SUMMARY:-}" ]; then say "    backups      $TOOLS_SUMMARY"; else say "    pgBackRest   ${PGBR_VERSION:-unknown}"; fi
   [ -z "${PG_SUMMARY:-}" ] || say "    PostgreSQL   $PG_SUMMARY"
   id=$(host_id)
   [ -z "$id" ] || say "    host         enrolled as $id"
@@ -2483,7 +2634,12 @@ uninstall_agent() {
   if systemd_running; then systemctl daemon-reload; fi
   rm -rf "$INSTALL_DIR"
   ok "service and $INSTALL_DIR removed"
+  rm -f "/etc/systemd/system/$SERVICE.d/10-mysql.conf" # mysql
   if [ "$purge" = 1 ]; then
+    if [ -L "$MYSQL_CONF_LINK" ]; then # mysql: keep the server's binary log settings
+      cp "$CONFIG_DIR/mysql/server.cnf" "$MYSQL_CONF_LINK.rowsafe-new" 2>/dev/null &&
+        mv -f "$MYSQL_CONF_LINK.rowsafe-new" "$MYSQL_CONF_LINK" || rm -f "$MYSQL_CONF_LINK"
+    fi
     rm -rf "$CONFIG_DIR" "$STATE_DIR" "$LOG_DIR" "$LOGROTATE_FILE"
     ok "$CONFIG_DIR, $STATE_DIR, $LOG_DIR and $LOGROTATE_FILE deleted"
   else
