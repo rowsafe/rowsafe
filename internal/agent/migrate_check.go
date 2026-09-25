@@ -265,15 +265,25 @@ func (a *Agent) migrateCheck(ctx context.Context, db protocol.DatabaseSpec, p pr
 	if st.Phase != protocol.MigratePhaseReady && st.Phase != protocol.MigratePhaseChecked && st.Phase != protocol.MigratePhaseFailed {
 		return nil, fmt.Errorf("this migration is %s: the source can't be changed now", st.Phase)
 	}
-	ci, err := a.openSource(p.MigrationID, p.Source)
-	if err != nil {
-		return nil, err
+	var ci conninfo
+	if p.Source == nil {
+		// A check again (after a fix): the source this server already has.
+		if ci, err = a.sourceConninfo(p.MigrationID); err != nil {
+			return nil, err
+		}
+	} else {
+		if ci, err = a.openSource(p.MigrationID, p.Source); err != nil {
+			return nil, err
+		}
+		tl.Printf("opened the source connection string on this server (%s, database %s, user %s)", ci.firstHost(), ci["dbname"], ci["user"])
 	}
-	tl.Printf("opened the source connection string on this server (%s, database %s, user %s)", ci.firstHost(), ci["dbname"], ci["user"])
 	res := &protocol.MigrateCheckResult{}
 	res.Source = protocol.MigrateSource{Host: ci.firstHost(), Port: ci.firstPort(), Database: ci["dbname"], User: ci["user"],
 		Provider: protocol.DetectMigrateProvider(ci.firstHost(), nil).ID}
 	targetDB := p.TargetDB
+	if targetDB == "" && p.Source == nil {
+		targetDB = st.TargetDB
+	}
 	if targetDB == "" {
 		targetDB = strings.ToLower(ci["dbname"])
 		if !validTargetDB(targetDB) {

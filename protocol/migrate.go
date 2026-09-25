@@ -105,8 +105,9 @@ type MigrateParams struct {
 	MigrationID string `json:"migration_id"` // [a-z0-9_]{1,40}
 	Action      string `json:"action,omitempty"`
 	// Source is the source connection string (URL or key=value) sealed to
-	// the key MigrateKey made, with MigrateSourceAAD. Check only; the
-	// control plane removes it from the task once the task finished.
+	// the key MigrateKey made, with MigrateSourceAAD. Check only (none:
+	// check again with the source the server has); the control plane
+	// removes it from the task once the task finished.
 	Source *e2e.Box `json:"source,omitempty"`
 	// TargetDB is the database to create (or fill, if empty) in the target
 	// cluster; "" means the source database's name.
