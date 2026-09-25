@@ -520,6 +520,8 @@ func TaskTimeout(taskType string) time.Duration {
 		return time.Hour
 	case TaskFindMoment: // reads the WAL of the range from the repository
 		return time.Hour
+	case TaskMigrate: // a switchover waits for the sync to catch up (migrate.go)
+		return time.Hour
 	default: // backup, drill, rewind copy and in place: a large restore takes hours
 		return 12 * time.Hour
 	}

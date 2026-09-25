@@ -83,6 +83,24 @@ Rewind: continuous backups, restore to any second
                                              servers where the installer allowed restarting PostgreSQL
   rowsafe rewind undo [NAME] [--yes]         undo the rewind: put the data from before it back
   rowsafe rewind cleanup [NAME] [--yes]      delete the data kept aside by a rewind (frees disk)
+
+Move in: bring a database from DigitalOcean, RDS, Supabase, Neon... onto your server
+  rowsafe migrate [NAME] [--json]            migrations (into NAME, or all)
+  rowsafe migrate start [NAME] [--into DB] [--method live|dump] [--source-env VAR] [--id ID] [--host ADDR] [--user NAME] [--yes]
+                                             check the source and start copying into the server of NAME. The
+                                             connection string is typed (not shown), piped, or read from $VAR,
+                                             and sealed here to the server's key: Rowsafe never sees it
+  rowsafe migrate status ID [--json]         progress: tables copied, how far behind, the check's findings
+  rowsafe migrate fix ID [--yes]             mark source tables without a primary key REPLICA IDENTITY FULL
+  rowsafe migrate switch ID [--writes-stopped] [--user NAME] [--host ADDR] [--yes]
+                                             switch over: the old database goes read-only (unless you stopped
+                                             writes yourself), the last changes arrive, then the new
+                                             connection string is shown once
+  rowsafe migrate password ID                a new password for the apps' login, shown once
+  rowsafe migrate writable ID                make the old database writable again (rollback)
+  rowsafe migrate cancel ID [--drop-copy] [--yes]
+                                             stop and remove the sync from the old database
+  rowsafe migrate finish ID [--yes]          forget the old database's connection string
   Advanced (restore by hand or to another server): https://rowsafe.sh/docs/guides/restore
 
 Proof: the weekly restore test
@@ -268,6 +286,8 @@ func dispatch(ctx context.Context, args []string) error {
 		return removeCmd(ctx, c, rest)
 	case "rewind":
 		return rewindCmd(ctx, c, rest)
+	case "migrate": // move in from a managed database (migrate.go)
+		return migrateCmd(ctx, c, rest)
 	// Proof
 	case "proof":
 		return proofCmd(ctx, c, rest)
