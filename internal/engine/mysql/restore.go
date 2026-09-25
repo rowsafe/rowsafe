@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/rowsafe/rowsafe/internal/agent"
+	"github.com/rowsafe/rowsafe/protocol"
 )
 
 // Restoring (restore tests and Rewind copies): download the backup chain
@@ -633,4 +634,72 @@ func safeDir(root, id string) (string, error) {
 		return "", fmt.Errorf("invalid directory name %q", id)
 	}
 	return dir, nil
+}
+
+// RestoreOptions restore a database from the bucket into a folder, without
+// Rowsafe's service: for a new server after the old one is lost.
+type RestoreOptions struct {
+	Engine   string // protocol.EngineMySQL or protocol.EngineMariaDB
+	Database string // its name in Rowsafe (the bucket folder)
+	Dir      string // an empty or missing folder; the data ends up in Dir/data
+	At       *time.Time
+	Mark     string
+	Env      agent.EngineEnv
+	Log      agent.TaskLogger
+}
+
+// RestoreTo downloads the newest backup before the target, prepares it,
+// replays the binary logs up to the target on a private server, stops it
+// and leaves a data directory the server can start on (Dir/data). It
+// returns the time of the last transaction it contains.
+func RestoreTo(ctx context.Context, o RestoreOptions) (*time.Time, error) {
+	f := flavor(o.Engine)
+	if f != flavorMySQL && f != flavorMariaDB {
+		return nil, fmt.Errorf("unknown engine %q (mysql or mariadb)", o.Engine)
+	}
+	if entries, err := os.ReadDir(o.Dir); err == nil && len(entries) > 0 {
+		return nil, fmt.Errorf("%s is not empty", o.Dir)
+	}
+	if err := os.MkdirAll(o.Dir, 0o700); err != nil {
+		return nil, err
+	}
+	s := &server{flavor: f, env: o.Env, db: protocol.DatabaseSpec{Name: o.Database, Stanza: o.Database, Engine: o.Engine}, cfg: loadConfig(o.Env)}
+	st, err := openStore(o.Env.Repo, o.Engine, o.Database, s.cfg.PartSizeMB)
+	if err != nil {
+		return nil, err
+	}
+	var t restoreTarget
+	switch {
+	case o.Mark != "":
+		m, err := s.loadMark(ctx, st, o.Mark)
+		if err != nil {
+			return nil, err
+		}
+		t.Mark = &m
+	case o.At != nil:
+		at := o.At.UTC().Truncate(time.Second)
+		t.Time = &at
+	}
+	r, err := s.restoreData(ctx, st, o.Dir, t, o.Log)
+	if err != nil {
+		return nil, err
+	}
+	sc, err := s.startScratch(ctx, o.Dir, r.Backup, drillStartTimeout)
+	if err != nil {
+		return nil, err
+	}
+	err = s.replay(ctx, sc, r, t, o.Log)
+	sc.stop(context.WithoutCancel(ctx))
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range []string{"socket", "tmp", "binlogs"} {
+		_ = os.RemoveAll(filepath.Join(o.Dir, d))
+	}
+	at := recoveredTo(r, t)
+	if at == nil {
+		stopped := r.Backup.StoppedAt
+		at = &stopped
+	}
+	return at, nil
 }

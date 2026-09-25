@@ -240,6 +240,27 @@ func TestIntegration(t *testing.T) {
 	cdb.Close()
 	must(protocol.TaskRewindDrop, protocol.RewindDropParams{CopyID: "c3"})
 
+	// Disaster recovery without the service: restore-mysql into a folder.
+	rdir := filepath.Join(state, "restored")
+	got2, err := RestoreTo(ctx, RestoreOptions{Engine: engine, Database: "shop", Dir: rdir, At: &before, Env: env, Log: &testLog{t: t}})
+	if err != nil || got2.After(before) {
+		t.Fatalf("RestoreTo: %v %v", got2, err)
+	}
+	s2 := e.server(env, spec)
+	sc, err := s2.startScratch(ctx, rdir, manifest{Version: "8.4.0", LowerCase: 0}, time.Minute*5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rdb, err := sc.connect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := count(rdb, "SELECT COUNT(*) FROM shop.orders"); n != 1500 {
+		t.Fatalf("restored folder has %d orders, want 1500", n)
+	}
+	rdb.Close()
+	sc.stop(ctx)
+
 	// Pulse.
 	dm, err := e.Monitor(ctx, env, spec)
 	if err != nil || dm.Metrics["connections_total"] == 0 || dm.Metrics["disk_free_pct"] == 0 {
