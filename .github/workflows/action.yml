@@ -1,0 +1,154 @@
+# Tests the Rowsafe GitHub Action (integrations/github-action) against a mock
+# Rowsafe API: its scripts in every situation they handle (Linux and macOS),
+# the action itself through `uses:`, and installing a real CLI release with
+# checksum and provenance verification.
+name: action
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - integrations/github-action/**
+      - cmd/rowsafe/**
+      - client/**
+      - protocol/**
+      - .github/workflows/action.yml
+  pull_request:
+    paths:
+      - integrations/github-action/**
+      - cmd/rowsafe/**
+      - client/**
+      - protocol/**
+      - .github/workflows/action.yml
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: actionlint, shellcheck
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: actionlint
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color
+      - name: shellcheck
+        run: shellcheck -s bash integrations/github-action/scripts/*.sh integrations/github-action/test/*.sh integrations/github-action/export.sh
+
+  scripts:
+    name: scripts (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: Every situation, with the CLI from this commit
+        run: integrations/github-action/test/test-action.sh
+      - name: With the oldest supported CLI release, installed and verified like the action does
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ROWSAFE_TEST_RELEASE: "0.3.0"
+        run: |
+          integrations/github-action/test/test-action.sh
+
+  action:
+    name: uses ./integrations/github-action
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      attestations: read
+    env:
+      MOCK: http://127.0.0.1:8787
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: Build the CLI and start the mock API
+        run: |
+          go build -o "$RUNNER_TEMP/rowsafe" ./cmd/rowsafe
+          go build -o "$RUNNER_TEMP/mockapi" ./integrations/github-action/test/mockapi
+          "$RUNNER_TEMP/mockapi" -addr 127.0.0.1:8787 -databases app,unprotected-db >"$RUNNER_TEMP/mock.log" 2>&1 &
+          for _ in $(seq 50); do curl -fsS "$MOCK/_mock/marks" >/dev/null && exit 0; sleep 0.2; done
+          exit 1
+
+      - name: Mark before deploy
+        id: mark
+        uses: ./integrations/github-action
+        with:
+          api-key: rsk_ci_test
+          api-url: ${{ env.MOCK }}
+          database: app
+          cli-path: ${{ runner.temp }}/rowsafe
+      - name: Check the outputs
+        env:
+          MARK: ${{ steps.mark.outputs.mark }}
+          RESTORE_FROM: ${{ steps.mark.outputs.restore-from-backup }}
+          DATABASE: ${{ steps.mark.outputs.database }}
+          PROTECTED: ${{ steps.mark.outputs.protected }}
+        run: |
+          set -x
+          [ "$MARK" = "before-deploy-${GITHUB_SHA::7}" ]
+          [ "$RESTORE_FROM" = 20260924-020000F ]
+          [ "$DATABASE" = app ]
+          [ "$PROTECTED" = true ]
+          curl -fsS "$MOCK/_mock/marks" | grep -qx "app/$MARK archived"
+
+      - name: Not protected, with require-protected
+        id: unprotected
+        continue-on-error: true
+        uses: ./integrations/github-action
+        with:
+          api-key: rsk_ci_test
+          api-url: ${{ env.MOCK }}
+          database: unprotected-db
+          require-protected: true
+          cli-path: ${{ runner.temp }}/rowsafe
+      - name: Check that it stopped before the Mark
+        env:
+          OUTCOME: ${{ steps.unprotected.outcome }}
+        run: |
+          set -x
+          [ "$OUTCOME" = failure ]
+          ! curl -fsS "$MOCK/_mock/marks" | grep -q '^unprotected-db/'
+
+      - name: Install the CLI from a release (checksum, provenance, cache)
+        id: release
+        uses: ./integrations/github-action
+        with:
+          api-key: rsk_ci_test
+          api-url: ${{ env.MOCK }}
+          database: app
+          label: from-release-${{ github.run_attempt }}
+          version: "0.3.0"
+          verify-provenance: "true"
+      - name: Check the released CLI's Mark
+        env:
+          MARK: ${{ steps.release.outputs.mark }}
+          RESTORE_FROM: ${{ steps.release.outputs.restore-from-backup }}
+        run: |
+          set -x
+          [ "$MARK" = "from-release-$GITHUB_RUN_ATTEMPT" ]
+          [ "$RESTORE_FROM" = 20260924-020000F ]
+          [ "$(rowsafe version)" = 0.3.0 ]
+
+      - name: Mock API log
+        if: always()
+        run: cat "$RUNNER_TEMP/mock.log"
