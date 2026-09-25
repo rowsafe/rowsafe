@@ -57,6 +57,8 @@ func main() {
 		os.Exit(selftest(ctx))
 	case "health":
 		os.Exit(health())
+	case "sql-shapes": // internal: the index advisor's parser process
+		os.Exit(sqlShapes())
 	case "version":
 		fmt.Println(agent.Version)
 	case "-h", "--help", "help":
