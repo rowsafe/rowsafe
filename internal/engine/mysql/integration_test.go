@@ -245,6 +245,9 @@ func TestIntegration(t *testing.T) {
 	if err != nil || dm.Metrics["connections_total"] == 0 || dm.Metrics["disk_free_pct"] == 0 {
 		t.Fatalf("monitor: %v %+v", err, dm)
 	}
+	if dm.Insights == nil || len(dm.Insights.LargestTables) == 0 || dm.Activity == nil || dm.Statements == nil {
+		t.Fatalf("monitor details: insights %+v activity %+v statements %+v", dm.Insights, dm.Activity, dm.Statements)
+	}
 	time.Sleep(6 * time.Second)
 	dm, _ = e.Monitor(ctx, env, spec)
 	t.Logf("metrics: %v", dm.Metrics)

@@ -27,6 +27,7 @@ type monitorState struct {
 	counters   map[string]float64
 	sizesAt    time.Time
 	statsAt    time.Time
+	insightsAt time.Time
 	binlogSize int64
 }
 
@@ -172,6 +173,12 @@ func (s *server) monitor(ctx context.Context) (*protocol.DatabaseMonitoring, err
 	if now.Sub(st.statsAt) >= 5*time.Minute {
 		dm.Statements = s.statements(ctx, db)
 		st.statsAt = now
+	}
+	if now.Sub(st.insightsAt) >= 30*time.Minute {
+		if ins := insights(ctx, db); ins != nil {
+			dm.Insights = ins
+			st.insightsAt = now
+		}
 	}
 	return dm, nil
 }
@@ -457,3 +464,60 @@ func truncate(s string, n int) string {
 }
 
 func isRuneStart(b byte) bool { return b&0xC0 != 0x80 }
+
+// insights: the largest tables and the free space inside InnoDB tables
+// (data_free: space a rebuild, OPTIMIZE TABLE, gives back to the disk).
+func insights(ctx context.Context, db *sql.DB) *protocol.Insights {
+	start := time.Now()
+	ins := &protocol.Insights{CollectedAt: start.UTC(), LargestTables: []protocol.TableSize{}, LargestIndexes: []protocol.IndexSize{},
+		TableBloat: []protocol.TableBloat{}, IndexBloat: []protocol.IndexBloat{}, UnusedIndexes: []protocol.UnusedIndex{},
+		DuplicateIndexes: []protocol.DuplicateIndex{}, SeqScanTables: []protocol.SeqScanTable{}, VacuumStats: []protocol.TableVacuum{},
+		FreezeAge: []protocol.TableFreeze{}}
+	rows, err := db.QueryContext(ctx, `
+		SELECT table_schema, table_name, COALESCE(data_length, 0), COALESCE(index_length, 0), COALESCE(data_free, 0),
+		       COALESCE(table_rows, 0), COALESCE(engine, '')
+		FROM information_schema.tables
+		WHERE table_type = 'BASE TABLE' AND table_schema NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')
+		ORDER BY data_length + index_length DESC LIMIT 500`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	dbs := map[string]int{}
+	for rows.Next() {
+		var schema, table, engine string
+		var data, index, free, n int64
+		if rows.Scan(&schema, &table, &data, &index, &free, &n, &engine) != nil {
+			continue
+		}
+		dbs[schema]++
+		if len(ins.LargestTables) < 20 {
+			ins.LargestTables = append(ins.LargestTables, protocol.TableSize{Database: schema, Schema: schema, Table: table,
+				TotalBytes: data + index, TableBytes: data, IndexBytes: index, RowsEstimate: n})
+		}
+		// A shared tablespace reports its own free space for every table in
+		// it; only file-per-table InnoDB tables count (free < 4 GiB + size).
+		if strings.EqualFold(engine, "InnoDB") && free >= 64<<20 && data+index > 0 && free <= 4*(data+index) {
+			total := data + index + free
+			ins.TableBloat = append(ins.TableBloat, protocol.TableBloat{Database: schema, Schema: schema, Table: table,
+				TableBytes: total, BloatBytes: free, BloatPct: 100 * float64(free) / float64(total)})
+		}
+	}
+	for name, n := range dbs {
+		ins.Databases = append(ins.Databases, protocol.InsightsDatabase{Name: name, Tables: n})
+	}
+	sortBloat(ins.TableBloat)
+	if len(ins.TableBloat) > 20 {
+		ins.TableBloat = ins.TableBloat[:20]
+	}
+	ins.DurationMs = time.Since(start).Milliseconds()
+	return ins
+}
+
+func sortBloat(b []protocol.TableBloat) {
+	for i := 1; i < len(b); i++ {
+		for j := i; j > 0 && b[j].BloatBytes > b[j-1].BloatBytes; j-- {
+			b[j], b[j-1] = b[j-1], b[j]
+		}
+	}
+}
