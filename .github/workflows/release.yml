@@ -1,4 +1,5 @@
-# Builds, signs, attests and publishes an agent/CLI release when a
+# Builds, signs, attests and publishes an agent/CLI release (and the Docker
+# images: ghcr.io/rowsafe/agent, ghcr.io/rowsafe/docker-control) when a
 # vMAJOR.MINOR.PATCH tag is pushed. See docs/verifying-releases.md.
 #
 # Every release carries three independent proofs:
@@ -225,6 +226,61 @@ jobs:
             PG_UID=${{ matrix.flavor.uid }}
             PG_GID=${{ matrix.flavor.gid }}
           tags: ${{ env.IMAGE }}:${{ env.VERSION }}-pg${{ matrix.pg }}${{ matrix.flavor.suffix }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.licenses=Apache-2.0
+          provenance: mode=max
+          sbom: true
+          push: true
+      - name: Sign the image (cosign, keyless)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$IMAGE@$DIGEST"
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  # rowsafe-docker-control: the opt-in service that restarts one PostgreSQL
+  # container for the Docker sidecar (it holds the Docker socket, so it is
+  # signed and attested like the agent images).
+  control-image:
+    needs: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      IMAGE: ghcr.io/rowsafe/docker-control
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Version from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >>"$GITHUB_ENV"
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+      - id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: deploy/docker/docker-control.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            VERSION=${{ env.VERSION }}
+          tags: ${{ env.IMAGE }}:${{ env.VERSION }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ env.VERSION }}

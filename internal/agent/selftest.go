@@ -53,6 +53,9 @@ func WatchedTargets(cfg Config) []pginspect.Target {
 	}
 	var out []pginspect.Target
 	for _, d := range dbs {
+		if !isPostgres(d) {
+			continue // other engines: the self-test checks PostgreSQL only
+		}
 		out = append(out, pginspect.Target{SocketDir: d.SocketDir, Port: d.Port, User: cfg.PGUser})
 	}
 	return out

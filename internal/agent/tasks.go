@@ -51,6 +51,9 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 		return nil, fmt.Errorf("task %s has no database", task.Type)
 	}
 	db := *task.Database
+	if !isPostgres(db) {
+		return a.runEngineTask(ctx, task, tl)
+	}
 	switch task.Type {
 	case protocol.TaskInspect:
 		return pginspect.Inspect(ctx, a.target(db))
@@ -168,6 +171,7 @@ func (a *Agent) writeConfig(db protocol.DatabaseSpec, in protocol.InspectResult)
 		Stanza: db.Stanza, DataDir: in.DataDirectory, Port: db.Port, SocketDir: db.SocketDir,
 		User: a.cfg.PGUser, RetentionFull: db.RetentionFull, LogPath: logDir,
 		ProcessMax: pgbackrest.ProcessMax(numCPU()),
+		Exclude:    a.backupExclude(), // rewind_contents.go
 	})
 	path := a.cfg.configPath(db.Stanza)
 	if old, err := os.ReadFile(path); err == nil && string(old) == conf {
