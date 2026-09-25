@@ -194,9 +194,8 @@ func parseToolVersion(f flavor, out string) string {
 }
 
 // toolMatches checks the backup tool can back up the server: XtraBackup's
-// major.minor must match MySQL's (8.0 for 8.0, 8.4 for 8.4), and 8.0's
-// patch level must not be older than the server's; mariadb-backup must be
-// the server's own version (same major.minor).
+// major.minor must match MySQL's (8.0 for 8.0, 8.4 for 8.4); mariadb-backup
+// must be the server's own version (same major.minor).
 func toolMatches(f flavor, tool, serverVersion string) error {
 	if tool == "" {
 		return nil
@@ -214,9 +213,10 @@ func toolMatches(f flavor, tool, serverVersion string) error {
 		return fmt.Errorf("Percona XtraBackup %s can't back up MySQL %s: install percona-xtrabackup-%s", tv, sv,
 			strings.ReplaceAll(majorMinor(sv), ".", ""))
 	}
-	if !f.mariadb() && majorMinor(sv) == "8.0" && tnum < snum {
-		return fmt.Errorf("Percona XtraBackup %s is older than MySQL %s: update percona-xtrabackup-80", tv, sv)
-	}
+	// Percona keeps XtraBackup 8.0 at 8.0.35-N while it follows newer MySQL
+	// 8.0 releases, so an older-looking patch level is fine: the backup
+	// itself refuses a server it can't read.
+	_, _ = tnum, snum
 	return nil
 }
 
