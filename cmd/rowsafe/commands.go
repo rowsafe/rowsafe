@@ -319,6 +319,9 @@ func adoptCmd(ctx context.Context, c *client.Client, args []string) error {
 		}
 		if !set["socket-dir"] {
 			*socketDir = "/var/run/mysqld/mysqld.sock"
+			if e == protocol.EngineMariaDB {
+				*socketDir = "/run/mysqld/mysqld.sock" // the mariadb images' own path
+			}
 		}
 	}
 	if *host, err = resolveHost(ctx, c, *host); err != nil {
