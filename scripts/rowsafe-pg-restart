@@ -21,8 +21,18 @@
 # /run/rowsafe-pg-restart/result (root's directory, readable by the agent)
 # as key=value lines: id, action, ok (1 or 0), unit, error and finished_at.
 #
+# Files (only when root allowed it: --allow-files, which writes
+# /etc/rowsafe/files-allowed, the folders Rowsafe may read and restore
+# into, with everything under them): "ID files-read PATH" gives the agent
+# user read access to PATH (POSIX ACLs, never ownership or modes);
+# "ID files-put MODE STAGE PATH" puts files the agent restored into
+# /var/lib/rowsafe/files-staging/STAGE/tree back into PATH as PATH's owner
+# (read as the agent user, written as the owner; root only passes the bytes
+# along). MODE: missing (never overwrite), replace, or mirror (also delete
+# the files listed in STAGE/delete).
+#
 # The agent reads the next line to know what this helper can do.
-# actions: restart stop start
+# actions: restart stop start files-read files-put
 
 set -u
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -30,6 +40,8 @@ dir=${ROWSAFE_RESTART_DIR:-/var/lib/rowsafe/restart}
 out_dir=${RUNTIME_DIRECTORY:-/run/rowsafe-pg-restart}
 allow=${ROWSAFE_RESTART_ALLOW:-/etc/rowsafe/restart-allowed}
 state=${STATE_DIRECTORY:-/var/lib/rowsafe-pg-restart}
+files_allow=${ROWSAFE_FILES_ALLOW:-/etc/rowsafe/files-allowed}
+files_staging=${ROWSAFE_FILES_STAGING:-/var/lib/rowsafe/files-staging}
 agent_user=${ROWSAFE_AGENT_USER:-postgres}
 systemctl=${ROWSAFE_SYSTEMCTL:-systemctl}
 min_interval=60
@@ -39,7 +51,7 @@ log() { echo "rowsafe-pg-restart: $*" >&2; }
 # as_agent runs a command with the agent user's privileges.
 as_agent() { setpriv --reuid="$agent_user" --regid="$agent_user" --init-groups -- "$@"; }
 
-id='' action='' unit='' ok=0 err=''
+id='' action='' unit='' ok=0 err='' fpath='' fmode='' fstage=''
 
 # answer writes the result atomically into root's own directory.
 answer() {
@@ -65,7 +77,7 @@ as_agent test -e "$request" -o -L "$request" 2>/dev/null || exit 0
 # removed so the path unit doesn't fire again.
 # shellcheck disable=SC2016 # $1 expands in the inner shell
 line=$(as_agent sh -c '
-  if [ -f "$1" ] && [ ! -L "$1" ]; then timeout 5 head -c 200 -- "$1"; fi
+  if [ -f "$1" ] && [ ! -L "$1" ]; then timeout 5 head -c 600 -- "$1"; fi
   rm -f -- "$1"' rowsafe-pg-restart "$request" 2>/dev/null | head -n 1)
 
 if printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} [0-9]{1,5}$'; then
@@ -77,9 +89,116 @@ elif printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} (restart|stop|start)
   rest=${line#* }
   action=${rest% *}
   port=${rest#* }
+elif printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} files-read /[A-Za-z0-9._@+,=/-]{1,400}$'; then
+  id=${line%% *}
+  action=files-read
+  fpath=${line#* files-read }
+elif printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} files-put (missing|replace|mirror) [A-Za-z0-9_-]{1,64} /[A-Za-z0-9._@+,=/-]{1,400}$'; then
+  id=${line%% *}
+  action=files-put
+  rest=${line#* files-put }
+  fmode=${rest%% *}
+  rest=${rest#* }
+  fstage=${rest%% *}
+  fpath=${rest#* }
 else
   refuse "malformed request"
 fi
+
+# ---- files (--allow-files) ----
+
+# files_check_path refuses unless $fpath is a plain, existing folder (no
+# symbolic link on the way) under a folder root allowed, and not a system
+# or database folder.
+files_check_path() {
+  [ -f "$files_allow" ] && [ ! -L "$files_allow" ] || refuse "reading or restoring folders from Rowsafe is not allowed on this server"
+  [ "$(stat -c '%u' "$files_allow")" = 0 ] || refuse "$files_allow is not owned by root"
+  case $(stat -c '%A' "$files_allow") in
+    ?????w???? | ????????w?) refuse "$files_allow is writable by others than root" ;;
+  esac
+  case $fpath in
+    */../* | */.. | */./* | */. | *//* | */) refuse "$fpath is not a plain path" ;;
+  esac
+  case $fpath/ in
+    /etc/* | /root/* | /boot/* | /proc/* | /sys/* | /dev/* | /run/* | /usr/* | /bin/* | /sbin/* | /lib/* | /lib64/* | \
+      /var/lib/postgresql/* | /var/lib/rowsafe/* | /var/lib/rowsafe-pg-restart/* | /opt/rowsafe/* | \
+      /var/lib/docker/containers/* | */.ssh/* | */.gnupg/*)
+      refuse "$fpath is a system or database folder: Rowsafe never touches it" ;;
+  esac
+  real=$(realpath -e -- "$fpath" 2>/dev/null) || refuse "$fpath doesn't exist"
+  [ "$real" = "$fpath" ] || refuse "$fpath goes through a symbolic link (to $real)"
+  [ -d "$fpath" ] || refuse "$fpath is not a folder"
+  allowed=0
+  while IFS= read -r root; do
+    case $root in '' | '#'* | / | [!/]*) continue ;; esac
+    case $fpath in "$root" | "$root"/*) allowed=1 ;; esac
+  done <"$files_allow"
+  [ "$allowed" = 1 ] || refuse "$fpath is not under a folder listed in $files_allow"
+}
+
+# files_read gives the agent user read access to the folder and what is in
+# it, now and later (default ACLs), and passage through its parents.
+files_read() {
+  files_check_path
+  out=$(setfacl -R -P -m "u:$agent_user:rX" -- "$fpath" 2>&1) || refuse "setfacl failed on $fpath: $(printf '%s' "$out" | head -n 3 | tr '\n' ' ')"
+  find -P "$fpath" -type d -exec setfacl -m "d:u:$agent_user:rX" -- {} + 2>/dev/null ||
+    refuse "setting the default ACL on the folders in $fpath failed"
+  p=${fpath%/*}
+  while [ -n "$p" ]; do
+    as_agent test -x "$p" 2>/dev/null || setfacl -m "u:$agent_user:x" -- "$p" || refuse "can't let Rowsafe through $p"
+    p=${p%/*}
+  done
+  ok=1
+  log "files-read $fpath (request $id): done"
+}
+
+# files_put copies the staged files into the folder as its owner: the agent
+# user reads them (tar), the owner writes them (tar), root only passes the
+# bytes along and never opens either side.
+files_put() {
+  files_check_path
+  src=$files_staging/$fstage
+  as_agent test -d "$src/tree" -a ! -L "$src/tree" -a ! -L "$src" 2>/dev/null || refuse "nothing is staged for restore $fstage"
+  owner=$(stat -c '%u' "$fpath")
+  group=$(stat -c '%g' "$fpath")
+  [ "$owner" != 0 ] || refuse "$fpath belongs to root: Rowsafe won't write there as root"
+  if [ "$fmode" = mirror ] && as_agent test -f "$src/delete" -a ! -L "$src/delete"; then
+    # shellcheck disable=SC2016 # $1 expands in the inner shell
+    as_agent cat -- "$src/delete" | setpriv --reuid="$owner" --regid="$group" --clear-groups -- sh -c '
+      cd -- "$1" || exit 1
+      while IFS= read -r f; do
+        case $f in "" | /* | ../* | */../* | */.. | ..) continue ;; esac
+        if [ -L "$f" ] || { [ -e "$f" ] && [ ! -d "$f" ]; }; then rm -f -- "$f"; fi
+      done' rowsafe-files-put "$fpath" || refuse "removing the files added since from $fpath failed"
+  fi
+  # Existing folders keep their owner and mode; missing never replaces a file.
+  keep=--no-overwrite-dir
+  [ "$fmode" != missing ] || keep=--skip-old-files
+  flag=$(mktemp "$out_dir/.put.XXXXXX")
+  out=$({ as_agent tar -C "$src/tree" -cf - . || echo read >"$flag"; } |
+    setpriv --reuid="$owner" --regid="$group" --clear-groups -- tar -C "$fpath" -xpf - --no-same-owner $keep 2>&1)
+  rc=$?
+  if [ -s "$flag" ] || [ "$rc" != 0 ]; then
+    rm -f "$flag"
+    refuse "putting the files into $fpath failed: $(printf '%s' "$out" | head -n 3 | tr '\n' ' ')"
+  fi
+  rm -f "$flag"
+  ok=1
+  log "files-put $fmode $fstage into $fpath as uid $owner (request $id): done"
+}
+
+case $action in
+  files-read)
+    files_read
+    answer
+    exit 0
+    ;;
+  files-put)
+    files_put
+    answer
+    exit 0
+    ;;
+esac
 
 [ -f "$allow" ] && [ ! -L "$allow" ] || refuse "restarting or stopping PostgreSQL from Rowsafe is not allowed on this server"
 [ "$(stat -c '%u' "$allow")" = 0 ] || refuse "$allow is not owned by root"

@@ -21,6 +21,9 @@ const filesUsage = `rowsafe-agent files - the folders that go with a database (u
   rowsafe-agent files access PATH
       Print whether the agent's user can read PATH: yes, no or missing.
 
+  rowsafe-agent files list --database ID
+      The database's protected folders, one path a line (as the agent user).
+
   rowsafe-agent files add --database ID --path PATH [--exclude cache,tmp]
       Protect PATH for the database (as the agent user, with agent.env
       loaded). Prints "folder_id path".
@@ -52,20 +55,20 @@ func filesCmd(ctx context.Context, args []string) int {
 		}
 		fmt.Println(agent.FolderAccess(ctx, p))
 		return 0
-	case "add":
-		fs := flag.NewFlagSet("files add", flag.ContinueOnError)
+	case "add", "list":
+		fs := flag.NewFlagSet("files "+args[0], flag.ContinueOnError)
 		id := fs.String("database", "", "database ID")
 		path := fs.String("path", "", "folder to protect")
 		exclude := fs.String("exclude", "", "comma-separated exclude patterns")
 		if err := fs.Parse(args[1:]); err != nil {
 			return 2
 		}
-		if *id == "" || *path == "" {
+		if *id == "" || (*path == "" && args[0] == "add") {
 			fmt.Fprintln(os.Stderr, "--database and --path are required")
 			return 2
 		}
 		if os.Geteuid() == 0 {
-			fmt.Fprintln(os.Stderr, "run files add as the postgres user, with /etc/rowsafe/agent.env loaded (the installer does this)")
+			fmt.Fprintln(os.Stderr, "run files "+args[0]+" as the postgres user, with /etc/rowsafe/agent.env loaded (the installer does this)")
 			return 1
 		}
 		cfg, err := agent.ConfigFromEnv()
@@ -74,7 +77,9 @@ func filesCmd(ctx context.Context, args []string) int {
 			return 1
 		}
 		s, err := agent.NewSetup(cfg, os.Stdout, os.Stderr)
-		if err == nil {
+		if err == nil && args[0] == "list" {
+			err = s.ListFolders(ctx, *id)
+		} else if err == nil {
 			err = s.AddFolder(ctx, *id, *path, agent.ParseExcludes(*exclude))
 		}
 		if err != nil {

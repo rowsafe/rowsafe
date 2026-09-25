@@ -12,6 +12,7 @@ import (
 // The installer protects folders the person chose (--files PATH, or yes at
 // its question) through the agent's credentials:
 //
+//	GET  /v1/agent/setup/databases/{id}/files/folders   {"folders": [FilesFolderView...]}
 //	POST /v1/agent/setup/databases/{id}/files/folders   AddFilesFolderRequest -> FilesFolderView
 
 // AddFolder protects a folder for a database.
@@ -27,6 +28,20 @@ func (s *Setup) AddFolder(ctx context.Context, id, path string, excludes []strin
 		return &ExitError{Code: 1, Err: fmt.Errorf("protecting %s: %s", p, serverMessage(err))}
 	}
 	fmt.Fprintf(s.Out, "%s\t%s\n", out.ID, out.Path)
+	return nil
+}
+
+// ListFolders prints the database's protected folders, one path a line.
+func (s *Setup) ListFolders(ctx context.Context, id string) error {
+	var out struct {
+		Folders []protocol.FilesFolderView `json:"folders"`
+	}
+	if err := s.client.get(ctx, "/v1/agent/setup/databases/"+url.PathEscape(id)+"/files/folders", &out); err != nil {
+		return &ExitError{Code: 1, Err: fmt.Errorf("listing protected folders: %s", serverMessage(err))}
+	}
+	for _, f := range out.Folders {
+		fmt.Fprintln(s.Out, f.Path)
+	}
 	return nil
 }
 
