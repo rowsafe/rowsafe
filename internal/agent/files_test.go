@@ -195,7 +195,8 @@ func TestSetConfigs(t *testing.T) {
 	rt.st.Kept = []filesKeptRecord{{FilesKept: protocol.FilesKept{RestoreID: "r1"}}}
 	rt.setConfigs([]protocol.FilesConfig{
 		{DatabaseID: "db1", Stanza: "app", IntervalMinutes: 1, RetentionDays: 2, Folders: []protocol.FilesFolder{
-			{ID: "f1", Path: "/srv/app/storage"}, {ID: "f2", Path: "relative"}, {ID: "bad id", Path: "/x"}, {ID: "f3", Path: "/srv/../etc"}}},
+			{ID: "f1", Path: "/srv/app/storage"}, {ID: "f2", Path: "relative"}, {ID: "bad id", Path: "/srv/x"}, {ID: "f3", Path: "/srv/../etc"},
+			{ID: "f4", Path: "/etc/rowsafe"}, {ID: "f5", Path: "/var/lib/rowsafe/state"}}},
 		{DatabaseID: "db2", Stanza: "../evil"},
 	}, []protocol.FilesKeptExpiry{{RestoreID: "r1", Expires: now.Add(90 * 24 * time.Hour)}})
 	cs := rt.configs()

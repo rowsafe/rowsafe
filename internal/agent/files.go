@@ -259,7 +259,9 @@ func (f *filesRuntime) setConfigs(cs []protocol.FilesConfig, exps []protocol.Fil
 			}
 			var folders []protocol.FilesFolder
 			for _, fo := range c.Folders {
-				if rewindIDRE.MatchString(fo.ID) && filepath.IsAbs(fo.Path) && filepath.Clean(fo.Path) == fo.Path {
+				// The same rules as for the installer: never a system,
+				// database or Rowsafe folder, whatever the control plane says.
+				if p, err := CleanFolderPath(fo.Path); err == nil && p == fo.Path && rewindIDRE.MatchString(fo.ID) {
 					folders = append(folders, fo)
 				}
 			}
@@ -536,6 +538,12 @@ func (a *Agent) snapshotLocked(ctx context.Context, c protocol.FilesConfig, fo p
 	tags = append(tags, extra...)
 	start := a.filesRuntime().now()
 	sum, err := r.backup(ctx, fo.Path, fo.Excludes, tags)
+	if resticCode(err) == resticExitNoRepo { // deleted from the bucket: create it again next time
+		rt := a.filesRuntime()
+		rt.mu.Lock()
+		delete(rt.ready, c.Stanza)
+		rt.mu.Unlock()
+	}
 	if sum.SnapshotID == "" {
 		if err == nil {
 			err = errors.New("restic backup reported no snapshot")
