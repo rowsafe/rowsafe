@@ -48,8 +48,6 @@ func TestRealPooling(t *testing.T) {
 		sql(s, "postgres", `CREATE ROLE app LOGIN PASSWORD 'app-secret'`)
 		sql(s, "postgres", `CREATE DATABASE shop OWNER app`)
 	}
-	sql(db, "postgres", `ALTER DATABASE shop SET application_name = 'primary'`)
-	sql(other, "postgres", `ALTER DATABASE shop SET application_name = 'standby'`)
 	// The other cluster stands in for a promoted standby: same role secrets.
 	copySecret := func(role string) {
 		conn, _ := a.target(db).Connect(ctx, "postgres")
@@ -96,11 +94,13 @@ func TestRealPooling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("through PgBouncer: %v", err)
 	}
-	var name string
-	app.QueryRow(ctx, `SELECT current_setting('application_name')`).Scan(&name)
+	// PgBouncer replays the client's application_name, so the server's own
+	// port tells the clusters apart.
+	var port int
+	app.QueryRow(ctx, `SELECT inet_server_port()`).Scan(&port)
 	app.Close(ctx)
-	if name != "primary" {
-		t.Fatalf("connected to %q", name)
+	if port != 5432 {
+		t.Fatalf("connected to port %d", port)
 	}
 	c := collect.New(collect.Options{PGUser: "postgres", Databases: func() []protocol.DatabaseSpec { return []protocol.DatabaseSpec{db} },
 		Poolers: a.poolerSources})
@@ -152,10 +152,10 @@ func TestRealPooling(t *testing.T) {
 		t.Fatalf("retarget %+v %v, %d failed queries", rr, err, failed.Load())
 	}
 	app, _ = appConnect(ctx, 6432, "shop")
-	app.QueryRow(ctx, `SELECT current_setting('application_name')`).Scan(&name)
+	app.QueryRow(ctx, `SELECT inet_server_port()`).Scan(&port)
 	app.Close(ctx)
-	if name != "standby" {
-		t.Fatalf("after the switch: %q", name)
+	if port != 5433 {
+		t.Fatalf("after the switch: port %d", port)
 	}
 
 	// Change settings: a reload, not a restart.

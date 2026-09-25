@@ -239,13 +239,6 @@ func TestPoolingReal(t *testing.T) {
 		}
 		conn.Close(ctx)
 	}
-	// Tell the two clusters apart.
-	for i, c := range []tempCluster{primary, other} {
-		conn, _ := pginspectConnect(ctx, c, u.Username)
-		conn.Exec(ctx, fmt.Sprintf(`ALTER DATABASE shop SET application_name = 'cluster-%d'`, i))
-		conn.Close(ctx)
-	}
-
 	state := filepath.Join(base, "state")
 	h := &fakePgbHelper{t: t, dir: filepath.Join(state, "pooler"), resultDir: filepath.Join(base, "run"), confDir: filepath.Join(base, "etc"),
 		sockDir: base, stop: make(chan struct{}), allowedPort: primary.port}
@@ -298,9 +291,11 @@ func TestPoolingReal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("app through PgBouncer: %v", err)
 	}
-	var name string
-	if err := app.QueryRow(ctx, `SELECT current_setting('application_name')`).Scan(&name); err != nil || name != "cluster-0" {
-		t.Fatalf("app on %q %v", name, err)
+	// PgBouncer replays the client's application_name: the server's port
+	// tells the clusters apart.
+	var port int
+	if err := app.QueryRow(ctx, `SELECT inet_server_port()`).Scan(&port); err != nil || port != primary.port {
+		t.Fatalf("app on port %d %v", port, err)
 	}
 	app.Close(ctx)
 	if _, err := appConnectWrong(ctx, poolerPort); err == nil {
@@ -394,10 +389,10 @@ func TestPoolingReal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app.QueryRow(ctx, `SELECT current_setting('application_name')`).Scan(&name)
+	app.QueryRow(ctx, `SELECT inet_server_port()`).Scan(&port)
 	app.Close(ctx)
-	if name != "cluster-1" {
-		t.Fatalf("after the switch, connections go to %q", name)
+	if port != other.port {
+		t.Fatalf("after the switch, connections go to port %d", port)
 	}
 
 	// Change settings: session mode, bigger pool (a reload, no restart).
