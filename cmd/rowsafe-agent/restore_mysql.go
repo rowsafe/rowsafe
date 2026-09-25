@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/rowsafe/rowsafe/internal/agent"
-	"github.com/rowsafe/rowsafe/internal/pgbackrest"
 	mysqlengine "github.com/rowsafe/rowsafe/internal/engine/mysql"
+	"github.com/rowsafe/rowsafe/internal/pgbackrest"
 )
 
 const restoreMySQLUsage = `rowsafe-agent restore-mysql - restore a MySQL or MariaDB database from your bucket
