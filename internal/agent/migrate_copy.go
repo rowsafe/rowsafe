@@ -45,6 +45,16 @@ func (a *Agent) migrateCopy(ctx context.Context, db protocol.DatabaseSpec, p pro
 	start := time.Now()
 	res := &protocol.MigrateCopyResult{Method: p.Method}
 	fail := func(err error) (*protocol.MigrateCopyResult, error) {
+		if st.SourceReadOnly && st.Phase != protocol.MigratePhaseSwitched {
+			// A one-time copy that failed never leaves the old database
+			// read-only: the apps go on using it.
+			if werr := sourceWritable(ctx, ci, tl); werr == nil {
+				st.SourceReadOnly = false
+				tl.Printf("the old database accepts writes again")
+			} else {
+				err = fmt.Errorf("%w (and the old database is still read-only: %v)", err, werr)
+			}
+		}
 		st.Phase = protocol.MigratePhaseFailed
 		_ = a.saveMigState(st)
 		a.mig().update(st.ID, func(s *protocol.MigrationStatus) { s.Phase = protocol.MigratePhaseFailed; s.Error = err.Error() })
