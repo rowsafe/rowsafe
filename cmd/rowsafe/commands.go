@@ -309,6 +309,21 @@ func adoptCmd(ctx context.Context, c *client.Client, args []string) error {
 	if *host, err = resolveHost(ctx, c, *host); err != nil {
 		return err
 	}
+	if protocol.NormalizeEngine(*engine) == protocol.EngineMongoDB {
+		// MongoDB: TCP on 127.0.0.1, port 27017 and daily full backups by
+		// default (the control plane fills in what isn't given).
+		set := map[string]bool{}
+		fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+		if !set["socket-dir"] {
+			*socketDir = ""
+		}
+		if !set["port"] {
+			*port = 0
+		}
+		if !set["retention-full"] {
+			*retention = 0
+		}
+	}
 	resp, err := c.CreateDatabase(ctx, protocol.CreateDatabaseRequest{
 		HostID: *host, Name: name, Port: *port, SocketDir: *socketDir, RetentionFull: *retention, Engine: *engine,
 	})
