@@ -622,13 +622,6 @@ func publicDatabases(ctx context.Context, q querier) ([]string, error) {
 	return pgx.CollectRows(rows, pgx.RowTo[string])
 }
 
-func cmpOr(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
-}
-
 // ---- create a user ----
 
 func (d *dba) createUser(ctx context.Context, conn *pgx.Conn) error {
