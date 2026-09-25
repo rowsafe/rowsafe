@@ -67,6 +67,8 @@ type Agent struct {
 	sbOnce sync.Once
 	sbRT   *standbyRuntime
 	sbOps  standbyOps
+	// sbLaneMu is held while the standby lane runs a task.
+	sbLaneMu sync.Mutex
 }
 
 func New(cfg Config, logger *slog.Logger) *Agent {
@@ -180,8 +182,9 @@ func (a *Agent) Run(ctx context.Context) error {
 		// never interrupted by an agent restart.
 		if err := a.updater.Tick(ctx); err != nil {
 			if errors.Is(err, ErrRestartForUpdate) {
-				a.fastMu.Lock()  // let a restore point in progress finish
-				a.maintMu.Lock() // and a health fix
+				a.fastMu.Lock()   // let a restore point in progress finish
+				a.maintMu.Lock()  // and a health fix
+				a.sbLaneMu.Lock() // and a fence or promotion (standby.go)
 			}
 			return err
 		}

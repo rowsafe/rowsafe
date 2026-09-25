@@ -501,9 +501,11 @@ func (a *Agent) standbyLane(ctx context.Context) {
 		if a.updater.InProbation() {
 			continue
 		}
+		a.sbLaneMu.Lock()
 		task, err := a.client.claimTypes(ctx, standbyUrgentTypes)
 		switch {
 		case ctx.Err() != nil:
+			a.sbLaneMu.Unlock()
 			return
 		case isUnauthorized(err):
 			backoff = RevokedBackoff
@@ -515,6 +517,7 @@ func (a *Agent) standbyLane(ctx context.Context) {
 			a.execute(ctx, task, false)
 			backoff = 0
 		}
+		a.sbLaneMu.Unlock()
 	}
 }
 
