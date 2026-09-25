@@ -62,6 +62,9 @@ Rewind: continuous backups, restore to any second
   rowsafe remove NAME [--keep-archiving] [--yes]
                                              stop managing a database; never changes the server
   rowsafe rewind [NAME] [--json]             the recovery window, the copy and data kept aside by a rewind
+  rowsafe rewind find [NAME] [--table T] [--since 24h | --from TIME [--to TIME]] [--kind delete,update,truncate,drop]
+                                             when were rows deleted or changed, or a table emptied or dropped?
+                                             Lists the biggest changes with exact times, to rewind to just before
   rowsafe rewind copy [NAME] (--at TIME | --mark LABEL) [--hours 24] [--no-wait]
                                              restore a copy as it was then, next to production (never
                                              touches it). TIME: "2026-09-24 14:04" or "14:04" (your time

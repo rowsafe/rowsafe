@@ -15,7 +15,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -481,18 +480,4 @@ func (a *Agent) primaryState(ctx context.Context, db protocol.DatabaseSpec) (pro
 		rows.Close()
 	}
 	return st, facts, true
-}
-
-// parseLSN parses "16/B374D848".
-func parseLSN(s string) (uint64, bool) {
-	hi, lo, ok := strings.Cut(strings.TrimSpace(s), "/")
-	if !ok {
-		return 0, false
-	}
-	h, err1 := strconv.ParseUint(hi, 16, 32)
-	l, err2 := strconv.ParseUint(lo, 16, 32)
-	if err1 != nil || err2 != nil {
-		return 0, false
-	}
-	return h<<32 | l, true
 }

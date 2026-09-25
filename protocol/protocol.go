@@ -525,6 +525,8 @@ func TaskTimeout(taskType string) time.Duration {
 		return time.Hour
 	case TaskStandbyPrepare, TaskStandbyRelease, TaskStandbyFence, TaskStandbyPromote, TaskStandbyRemove, TaskStandbyUnfence:
 		return 15 * time.Minute
+	case TaskFindMoment: // reads the WAL of the range from the repository
+		return time.Hour
 	default: // backup, drill, rewind copy and in place: a large restore takes hours
 		return 12 * time.Hour
 	}
