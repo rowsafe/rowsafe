@@ -62,7 +62,12 @@ func (a *Agent) securityLoop(ctx context.Context) {
 		}
 		batch := protocol.SecurityReportBatch{}
 		for _, db := range dbs {
-			batch.Reports = append(batch.Reports, a.securityReport(ctx, db))
+			if isPostgres(db) { // the security check reads PostgreSQL's own settings
+				batch.Reports = append(batch.Reports, a.securityReport(ctx, db))
+			}
+		}
+		if len(batch.Reports) == 0 {
+			continue
 		}
 		var ack protocol.SecurityAck
 		sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
