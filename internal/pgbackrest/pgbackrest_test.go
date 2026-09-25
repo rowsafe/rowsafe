@@ -238,3 +238,16 @@ func TestRenderConfigProcessMax(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderConfigExclude(t *testing.T) {
+	if conf := RenderConfig(testRepo, ConfigInput{Stanza: "app"}); strings.Contains(conf, "exclude") {
+		t.Errorf("exclude without any:\n%s", conf)
+	}
+	conf := RenderConfig(testRepo, ConfigInput{Stanza: "app", DataDir: "/var/lib/postgresql/data", Exclude: []string{".rowsafe-rewind"}})
+	// A backup-only section, before the stanza's (pgBackRest ignores it for
+	// every other command, archive-push included).
+	i, j := strings.Index(conf, "\n[global:backup]\nexclude=.rowsafe-rewind\n"), strings.Index(conf, "\n[app]\n")
+	if i < 0 || j < i {
+		t.Errorf("config:\n%s", conf)
+	}
+}

@@ -33,7 +33,7 @@ type scratchPG struct {
 	bin               string
 }
 
-func pgBinDir(t *testing.T) string {
+func secPGBinDir(t *testing.T) string {
 	if d := os.Getenv("ROWSAFE_TEST_PG_BIN"); d != "" {
 		return d
 	}
@@ -55,7 +55,7 @@ func freePort(t *testing.T) int {
 
 func startScratchPG(t *testing.T) *scratchPG {
 	t.Helper()
-	bin := pgBinDir(t)
+	bin := secPGBinDir(t)
 	if _, err := os.Stat(filepath.Join(bin, "initdb")); err != nil {
 		t.Skip("initdb not found in " + bin)
 	}
