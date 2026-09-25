@@ -135,7 +135,15 @@ var EngineCapabilities = map[string]EngineFeatures{
 	},
 	EngineMySQL:   {},
 	EngineMariaDB: {},
-	EngineMongoDB: {},
+	// MongoDB (internal/engine/mongodb): mongodump + oplog copying, Proof,
+	// Rewind copies and bringing documents back, Marks, Pulse and stopping
+	// a long operation. No restart, rewind in place, standby, pooling,
+	// files or updates yet.
+	EngineMongoDB: {
+		Backups: true, PointInTime: true, Proof: true,
+		RewindCopy: true, RewindRows: true, Marks: true,
+		Monitoring: true, Fixes: true,
+	},
 }
 
 // Features is the engine's EngineCapabilities entry ("" is PostgreSQL); an

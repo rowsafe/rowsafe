@@ -38,6 +38,7 @@ type dbMonitor struct {
 	prevAt    time.Time
 	lastSizes time.Time
 	dbPath    string
+	opStarts  map[int]time.Time // opid -> start, as first seen
 }
 
 func (e *Engine) monitorFor(id string) *dbMonitor {
@@ -162,7 +163,10 @@ func (e *Engine) sample(ctx context.Context, m *dbMonitor, dm *protocol.Database
 		}
 	}
 
-	act, longest := longOps(ctx, c, queryTextOn())
+	if m.opStarts == nil {
+		m.opStarts = map[int]time.Time{}
+	}
+	act, longest := longOps(ctx, c, queryTextOn(), m.opStarts)
 	metrics[collect.MLongestQuerySeconds] = longest
 	dm.Activity = act
 
@@ -222,7 +226,7 @@ func replicationLag(ctx context.Context, c *mongo.Client) (float64, int) {
 
 // longOps lists client operations running for over a minute (Activity) and
 // the longest running one's seconds.
-func longOps(ctx context.Context, c *mongo.Client, withText bool) (*protocol.Activity, float64) {
+func longOps(ctx context.Context, c *mongo.Client, withText bool, starts map[int]time.Time) (*protocol.Activity, float64) {
 	act := &protocol.Activity{CollectedAt: time.Now().UTC(), QueryTextCollected: withText, Queries: []protocol.ActivityQuery{}}
 	var res struct {
 		Inprog []bson.M `bson:"inprog"`
@@ -231,6 +235,7 @@ func longOps(ctx context.Context, c *mongo.Client, withText bool) (*protocol.Act
 	if err != nil {
 		return act, 0
 	}
+	seen := map[int]bool{}
 	longest := 0.0
 	for _, op := range res.Inprog {
 		if !clientOp(op) {
@@ -262,9 +267,22 @@ func longOps(ctx context.Context, c *mongo.Client, withText bool) (*protocol.Act
 				}
 			}
 		}
+		// The start is kept from the first sighting, so it (and the fix id
+		// built from it) stays the same while the operation runs.
 		start := time.Now().Add(-time.Duration(secs * float64(time.Second))).UTC().Truncate(time.Second)
+		if first, ok := starts[q.PID]; ok && start.Sub(first).Abs() < 10*time.Second {
+			start = first
+		} else if starts != nil {
+			starts[q.PID] = start
+		}
+		seen[q.PID] = true
 		q.BackendStart = &start
 		act.Queries = append(act.Queries, q)
+	}
+	for pid := range starts {
+		if !seen[pid] {
+			delete(starts, pid)
+		}
 	}
 	return act, longest
 }

@@ -286,7 +286,7 @@ func TestMongoDBEndToEnd(t *testing.T) {
 	}()
 	var victim *protocol.ActivityQuery
 	for range 60 {
-		act, _ := longOps(ctx, c, true)
+		act, _ := longOps(ctx, c, true, nil)
 		for _, q := range act.Queries {
 			if strings.Contains(q.Query, "sleep") {
 				victim = &q
