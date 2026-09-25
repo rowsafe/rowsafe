@@ -36,6 +36,10 @@ Rewind: continuous backups, restore to any second
   rowsafe rewind [NAME]              restore a copy at any second, compare it, bring rows back,
                                      or rewind the whole database (rowsafe help rewind)
 
+Move in: leave your managed database, keep the safety net
+  rowsafe migrate start [NAME]       move a database in from DigitalOcean, RDS, Supabase, Neon...
+                                     with near-zero downtime (rowsafe help migrate)
+
 Proof: the weekly restore test
   rowsafe proof [NAME]               run the restore test now
   rowsafe proofs [NAME]              results
