@@ -206,6 +206,7 @@ type AskAction struct {
 	Href        string `json:"href,omitempty"`
 	Destructive bool   `json:"destructive,omitempty"`
 	Confirm     string `json:"confirm,omitempty"`
+	MarkFirst   bool   `json:"mark_first,omitempty"`
 }
 
 // AskDone ends a successful answer.
