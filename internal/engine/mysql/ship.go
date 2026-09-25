@@ -599,11 +599,12 @@ func (s *server) currentPosition(ctx context.Context, db *sql.DB) (position, err
 		return position{}, err
 	}
 	p.GTIDSet = gtid.String
+	rows.Close() // one connection: free it before the next query
 	if s.flavor.mariadb() {
 		var g sql.NullString
 		if err := db.QueryRowContext(ctx, "SELECT @@gtid_binlog_pos").Scan(&g); err == nil {
 			p.GTIDSet = g.String
 		}
 	}
-	return p, rows.Err()
+	return p, nil
 }
