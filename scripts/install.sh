@@ -29,6 +29,10 @@
 #                          ask (Restart and Rewind in the dashboard, `rowsafe
 #                          restart`); only when someone confirms
 #   --no-allow-restart     turn that off again
+#   --allow-create-cluster allow Rowsafe to create a new PostgreSQL cluster (on a
+#                          free port in 5440-5499) when you fork a database to
+#                          this server; only when someone confirms
+#   --no-allow-create-cluster  turn that off again
 #   --check-storage        test the configured backup storage; change nothing
 #   --uninstall            stop and remove the agent; keep configuration and state
 #   --uninstall --purge    also delete /etc/rowsafe, /var/lib/rowsafe, /var/log/rowsafe
@@ -90,6 +94,13 @@ RESTART_SERVICE_FILE=/etc/systemd/system/rowsafe-pg-restart.service
 RESTART_PATH_FILE=/etc/systemd/system/rowsafe-pg-restart.path
 RESTART_ALLOW_FILE=$CONFIG_DIR/restart-allowed
 RESTART_DIR=$STATE_DIR/restart
+# Forks (--allow-create-cluster): new clusters created by their own unit,
+# started by the restart helper.
+CREATE_HELPER=$LIB_DIR/rowsafe-pg-create-cluster
+CREATE_UNIT_FILE=/etc/systemd/system/rowsafe-pg-create-cluster@.service
+CREATE_ALLOW_FILE=$CONFIG_DIR/create-cluster-allowed
+CREATED_CLUSTERS_FILE=$CONFIG_DIR/created-clusters
+CREATE_PORTS=5440-5499
 AGENT_USER=postgres
 DEFAULT_RELEASES_URL=https://releases.rowsafe.sh/agent
 MAX_ARTIFACT_SIZE=536870912 # 512 MiB, the same limit the agent enforces
@@ -113,6 +124,7 @@ NO_SETUP=0         # --no-setup
 PROTECT_NAME=''    # --protect NAME
 PROTECT_PORT=''    # --protect-port PORT
 ALLOW_RESTART=''   # --allow-restart (yes) / --no-allow-restart (no); '' = ask once, on a terminal
+ALLOW_CREATE_CLUSTER='' # --allow-create-cluster (yes) / --no-allow-create-cluster (no); '' = ask once
 SETUP_STOP=0       # the plan limit was reached: don't offer more databases
 
 TMP=
@@ -171,6 +183,10 @@ Options (when piping, pass them after `sh -s --`):
                          (Restart and Rewind in the dashboard, `rowsafe restart`),
                          only when someone confirms
   --no-allow-restart     turn that off (and remove the restart helper)
+  --allow-create-cluster allow Rowsafe to create a new PostgreSQL cluster (a free port
+                         in 5440-5499) when you fork a database to this server,
+                         only when someone confirms (Debian and Ubuntu)
+  --no-allow-create-cluster  turn that off
   --check-storage        test the backup storage in /etc/rowsafe/agent.env; change nothing
   --uninstall            stop and remove the agent; keep configuration and state
   --uninstall --purge    also delete /etc/rowsafe, /var/lib/rowsafe and /var/log/rowsafe
@@ -727,14 +743,25 @@ install_restart_helper() {
 # /run/rowsafe-pg-restart/result (root's directory, readable by the agent)
 # as key=value lines: id, action, ok (1 or 0), unit, error and finished_at.
 #
+# Forks: "ID create-cluster PORT MAJOR NAME" asks for a new, empty
+# PostgreSQL cluster (a person forked a database to a new port). Only when
+# root allowed it (/etc/rowsafe/create-cluster-allowed, "ports MIN-MAX",
+# written by the installer with --allow-create-cluster): the helper checks
+# the request and starts rowsafe-pg-create-cluster@MAJOR-PORT-NAME.service,
+# a separate sandboxed unit that runs pg_createcluster and lists the new
+# cluster in /etc/rowsafe/created-clusters ("PORT UNIT"), which this helper
+# then stops and starts like the clusters in restart-allowed.
+#
 # The agent reads the next line to know what this helper can do.
-# actions: restart stop start
+# actions: restart stop start create-cluster
 
 set -u
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 dir=${ROWSAFE_RESTART_DIR:-/var/lib/rowsafe/restart}
 out_dir=${RUNTIME_DIRECTORY:-/run/rowsafe-pg-restart}
 allow=${ROWSAFE_RESTART_ALLOW:-/etc/rowsafe/restart-allowed}
+create_allow=${ROWSAFE_CREATE_CLUSTER_ALLOW:-/etc/rowsafe/create-cluster-allowed}
+created=${ROWSAFE_CREATED_CLUSTERS:-/etc/rowsafe/created-clusters}
 state=${STATE_DIRECTORY:-/var/lib/rowsafe-pg-restart}
 agent_user=${ROWSAFE_AGENT_USER:-postgres}
 systemctl=${ROWSAFE_SYSTEMCTL:-systemctl}
@@ -765,6 +792,48 @@ refuse() {
   exit 0
 }
 
+# root_only FILE: FILE is a regular file only root can change.
+root_only() {
+  [ "$(stat -c '%u' "$1")" = 0 ] || refuse "$1 is not owned by root"
+  case $(stat -c '%A' "$1") in
+    ?????w???? | ????????w?) refuse "$1 is writable by others than root" ;;
+  esac
+}
+
+# create_cluster PORT MAJOR NAME: a new cluster for a fork, through its own
+# sandboxed unit, when root allowed it and PORT is in the allowed range.
+create_cluster() {
+  c_port=$1 c_major=$2 c_name=$3
+  [ -f "$create_allow" ] && [ ! -L "$create_allow" ] || refuse "creating PostgreSQL clusters from Rowsafe is not allowed on this server"
+  root_only "$create_allow"
+  range=$(awk '$1 == "ports" && $2 ~ /^[0-9]+-[0-9]+$/ { print $2; exit }' "$create_allow")
+  [ -n "$range" ] || refuse "$create_allow names no ports"
+  [ "$c_port" -ge "${range%-*}" ] && [ "$c_port" -le "${range#*-}" ] ||
+    refuse "port $c_port is not in the ports Rowsafe may create clusters on ($range)"
+  unit=rowsafe-pg-create-cluster@$c_major-$c_port-$c_name.service
+  log "create-cluster PostgreSQL $c_major $c_name on port $c_port (request $id)"
+  rm -f "$out_dir/create-cluster.err"
+  out=$(timeout 120 "$systemctl" start "$unit" 2>&1 </dev/null)
+  rc=$?
+  if [ "$rc" = 0 ]; then
+    ok=1
+    unit=postgresql@$c_major-$c_name.service
+    log "create-cluster $unit: done"
+  else
+    why=$(head -c 300 "$out_dir/create-cluster.err" 2>/dev/null | head -n 1 | tr -cd '[:print:]')
+    if [ -n "$why" ]; then
+      err=$why
+    elif [ "$rc" = 124 ]; then
+      err="creating the cluster did not finish within 2 minutes"
+    else
+      err="systemctl start $unit failed: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
+    fi
+    log "$err"
+  fi
+  answer
+  exit 0
+}
+
 request=$dir/request
 as_agent test -e "$request" -o -L "$request" 2>/dev/null || exit 0
 # Only a regular file is read, for at most 5 seconds; whatever it was, it is
@@ -783,16 +852,27 @@ elif printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} (restart|stop|start)
   rest=${line#* }
   action=${rest% *}
   port=${rest#* }
+elif printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} create-cluster [1-9][0-9]{3,4} [1-9][0-9] [a-z][a-z0-9_]{0,39}$'; then
+  id=${line%% *}
+  action=create-cluster
+  # shellcheck disable=SC2086 # split the checked request into its fields
+  set -- $line
+  create_cluster "$3" "$4" "$5"
 else
   refuse "malformed request"
 fi
 
-[ -f "$allow" ] && [ ! -L "$allow" ] || refuse "restarting or stopping PostgreSQL from Rowsafe is not allowed on this server"
-[ "$(stat -c '%u' "$allow")" = 0 ] || refuse "$allow is not owned by root"
-case $(stat -c '%A' "$allow") in
-  ?????w???? | ????????w?) refuse "$allow is writable by others than root" ;;
-esac
-unit=$(awk -v p="$port" '$1 == p && $2 ~ /^[A-Za-z0-9@._-]+\.service$/ { print $2; exit }' "$allow")
+# The unit comes from restart-allowed or, for clusters created for forks,
+# created-clusters; both must be files only root can change.
+listed() { [ -f "$1" ] && [ ! -L "$1" ]; }
+listed "$allow" || listed "$created" || refuse "restarting or stopping PostgreSQL from Rowsafe is not allowed on this server"
+unit=''
+for list in "$allow" "$created"; do
+  listed "$list" || continue
+  root_only "$list"
+  unit=$(awk -v p="$port" '$1 == p && $2 ~ /^[A-Za-z0-9@._-]+\.service$/ { print $2; exit }' "$list")
+  [ -z "$unit" ] || break
+done
 [ -n "$unit" ] || refuse "port $port is not in $allow: restarting or stopping it from Rowsafe is not allowed"
 
 if [ "$action" = restart ]; then
@@ -955,7 +1035,7 @@ allow_restarts() {
 }
 
 disallow_restarts() {
-  remove_restart_helper
+  create_clusters_allowed || remove_restart_helper # forks still use the helper
   if [ -d "$CONFIG_DIR" ]; then
     {
       echo "# Restarting or stopping PostgreSQL from Rowsafe is off on this server."
@@ -985,6 +1065,215 @@ restart_access() {
       else
         disallow_restarts
         note "OK: Rowsafe can't restart or stop PostgreSQL (change it with --allow-restart)"
+      fi
+      ;;
+  esac
+}
+
+# ---------------------------------------------------------------- forks
+
+# With root's permission (--allow-create-cluster, or yes at the question),
+# forking a database to this server can create a new PostgreSQL cluster for
+# it: the agent asks the restart helper, which starts
+# rowsafe-pg-create-cluster@MAJOR-PORT-NAME.service (root, its own sandbox)
+# to run pg_createcluster on a port in $CREATE_PORTS. The new cluster is
+# listed in $CREATED_CLUSTERS_FILE, so the helper may stop and start it.
+
+create_clusters_allowed() { grep -qs '^ports ' "$CREATE_ALLOW_FILE"; }
+
+install_create_cluster() {
+  install -d -m 0755 -o root -g root "${CREATE_HELPER%/*}"
+  _changed=0
+  if write_file "$CREATE_HELPER" 0755 root:root <<'ROWSAFE_CREATE_CLUSTER_EOF'; then
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-pg-create-cluster: creates a new, empty PostgreSQL cluster when a
+# person forks a database in Rowsafe to a new port on this server.
+#
+# Installed by https://rowsafe.sh/install as
+# /usr/local/lib/rowsafe/rowsafe-pg-create-cluster, only when root allowed
+# it (--allow-create-cluster, or yes at the installer's question). It runs as
+# root in rowsafe-pg-create-cluster@MAJOR-PORT-NAME.service, which only the
+# root helper (rowsafe-pg-restart) starts, after checking the agent's
+# request; the agent itself cannot create anything.
+#
+# It checks everything again: the port must be in the range root allowed
+# (/etc/rowsafe/create-cluster-allowed, "ports MIN-MAX") and unused, the
+# PostgreSQL major version installed and the name free. Then it runs
+# pg_createcluster (Debian and Ubuntu, postgresql-common) without starting
+# the cluster, and adds "PORT postgresql@MAJOR-NAME.service" to
+# /etc/rowsafe/created-clusters, so the root helper may stop and start it.
+# A failure's reason goes to /run/rowsafe-pg-restart/create-cluster.err,
+# which the helper hands to the agent.
+
+set -u
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+allow=${ROWSAFE_CREATE_CLUSTER_ALLOW:-/etc/rowsafe/create-cluster-allowed}
+created=${ROWSAFE_CREATED_CLUSTERS:-/etc/rowsafe/created-clusters}
+err_file=${ROWSAFE_CREATE_CLUSTER_ERR:-/run/rowsafe-pg-restart/create-cluster.err}
+pg_root=${ROWSAFE_PG_ROOT:-/usr/lib/postgresql}
+conf_root=${ROWSAFE_PG_CONF_ROOT:-/etc/postgresql}
+pg_createcluster=${ROWSAFE_PG_CREATECLUSTER:-pg_createcluster}
+
+fail() {
+  printf '%s\n' "$1" >"$err_file" 2>/dev/null || true
+  echo "rowsafe-pg-create-cluster: $1" >&2
+  exit 1
+}
+
+rm -f "$err_file"
+instance=${1:-}
+printf '%s\n' "$instance" | grep -Eq '^[1-9][0-9]-[1-9][0-9]{3,4}-[a-z][a-z0-9_]{0,39}$' || fail "malformed cluster request"
+major=${instance%%-*}
+rest=${instance#*-}
+port=${rest%%-*}
+name=${rest#*-}
+
+[ -f "$allow" ] && [ ! -L "$allow" ] && [ "$(stat -c '%u' "$allow")" = 0 ] ||
+  fail "creating PostgreSQL clusters from Rowsafe is not allowed on this server"
+case $(stat -c '%A' "$allow") in
+  ?????w???? | ????????w?) fail "$allow is writable by others than root" ;;
+esac
+range=$(awk '$1 == "ports" && $2 ~ /^[0-9]+-[0-9]+$/ { print $2; exit }' "$allow")
+[ -n "$range" ] && [ "$port" -ge "${range%-*}" ] && [ "$port" -le "${range#*-}" ] ||
+  fail "port $port is not in the ports Rowsafe may create clusters on (${range:-none})"
+[ -x "$pg_root/$major/bin/postgres" ] || fail "PostgreSQL $major is not installed on this server"
+command -v "$pg_createcluster" >/dev/null 2>&1 ||
+  fail "pg_createcluster is missing: Rowsafe creates clusters on Debian and Ubuntu (package postgresql-common)"
+[ ! -e "$conf_root/$major/$name" ] || fail "a PostgreSQL $major cluster named $name already exists"
+if grep -Eqs "^[[:space:]]*port[[:space:]]*=[[:space:]]*'?$port'?([[:space:]]|#|\$)" "$conf_root"/*/*/postgresql.conf; then
+  fail "port $port is already used by another PostgreSQL cluster"
+fi
+if [ -f "$created" ] && awk -v p="$port" '$1 == p { f = 1 } END { exit !f }' "$created"; then
+  fail "port $port is already used by a cluster Rowsafe created"
+fi
+
+out=$("$pg_createcluster" --port "$port" --start-conf auto "$major" "$name" 2>&1 </dev/null) ||
+  fail "pg_createcluster failed: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
+printf '%s postgresql@%s-%s.service\n' "$port" "$major" "$name" >>"$created" ||
+  fail "the cluster was created, but $created couldn't be updated"
+echo "rowsafe-pg-create-cluster: created PostgreSQL $major cluster $name on port $port" >&2
+ROWSAFE_CREATE_CLUSTER_EOF
+    _changed=1
+  fi
+  if write_file "$CREATE_UNIT_FILE" 0644 root:root <<'ROWSAFE_CREATE_UNIT_EOF'; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-pg-create-cluster@MAJOR-PORT-NAME.service: creates a new, empty
+# PostgreSQL cluster for a fork (pg_createcluster), when a person forked a
+# database in Rowsafe to a new port on this server. Started only by the root
+# helper (rowsafe-pg-restart.service) after it checked the agent's request;
+# installed by https://rowsafe.sh/install only when root allowed it
+# (--allow-create-cluster).
+
+[Unit]
+Description=Rowsafe: create PostgreSQL cluster %i for a fork
+Documentation=https://rowsafe.sh/docs/guides/fork
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/rowsafe/rowsafe-pg-create-cluster %i
+TimeoutStartSec=110
+UMask=0022
+
+# Hardening. pg_createcluster writes the cluster's configuration, data and
+# log directories, runs initdb as postgres (hence CAP_SETUID/CAP_SETGID) and
+# hands the new files to postgres (CAP_CHOWN, CAP_FOWNER). The new cluster
+# is added to /etc/rowsafe/created-clusters; the reason of a failure goes to
+# the root helper's directory.
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/etc/postgresql /var/lib/postgresql -/var/log/postgresql /etc/rowsafe/created-clusters -/run/rowsafe-pg-restart
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+ROWSAFE_CREATE_UNIT_EOF
+    _changed=1
+  fi
+  if [ ! -f "$CREATED_CLUSTERS_FILE" ]; then
+    {
+      echo "# PostgreSQL clusters Rowsafe created for forks (PORT UNIT). The restart"
+      echo "# helper may stop and start them like those in restart-allowed."
+    } | write_file "$CREATED_CLUSTERS_FILE" 0644 root:root || true
+  fi
+  if systemd_running && [ "$_changed" = 1 ]; then systemctl daemon-reload; fi
+}
+
+remove_create_cluster() {
+  [ -e "$CREATE_HELPER" ] || [ -e "$CREATE_UNIT_FILE" ] || return 0
+  rm -f "$CREATE_HELPER" "$CREATE_UNIT_FILE"
+  if systemd_running; then systemctl daemon-reload; fi
+}
+
+allow_create_clusters() {
+  if ! command -v pg_createcluster >/dev/null 2>&1; then
+    warn "pg_createcluster isn't installed here (Debian and Ubuntu's postgresql-common), so creating clusters for forks stays off"
+    return 0
+  fi
+  {
+    echo "# Rowsafe may create a new PostgreSQL cluster on one of these ports when"
+    echo "# someone forks a database to this server and confirms. Written by the"
+    echo "# installer (root); run it with --no-allow-create-cluster to turn this off."
+    echo "ports $CREATE_PORTS"
+  } | write_file "$CREATE_ALLOW_FILE" 0644 root:root || true
+  install_create_cluster
+  install_restart_helper
+  as_agent mkdir -p -m 0700 "$RESTART_DIR"
+  ok "Rowsafe may create a new PostgreSQL cluster (ports $CREATE_PORTS) when you fork a database here (turn off with --no-allow-create-cluster)"
+}
+
+disallow_create_clusters() {
+  remove_create_cluster
+  if [ -f "$CREATE_ALLOW_FILE" ]; then
+    {
+      echo "# Creating PostgreSQL clusters for forks is off on this server."
+      echo "# Run the installer with --allow-create-cluster to turn it on."
+    } | write_file "$CREATE_ALLOW_FILE" 0644 root:root || true
+  fi
+  # The helper stays while restarts are allowed; clusters created earlier
+  # stay listed in $CREATED_CLUSTERS_FILE.
+  grep -qs '^[0-9]' "$RESTART_ALLOW_FILE" || grep -qs '^[0-9]' "$CREATED_CLUSTERS_FILE" || remove_restart_helper
+}
+
+# create_cluster_access applies --allow-create-cluster /
+# --no-allow-create-cluster, or asks once on a terminal. A re-run keeps the
+# earlier answer.
+create_cluster_access() {
+  case $ALLOW_CREATE_CLUSTER in
+    yes) allow_create_clusters ;;
+    no)
+      disallow_create_clusters
+      ok "creating PostgreSQL clusters for forks is off"
+      ;;
+    *)
+      if [ -f "$CREATE_ALLOW_FILE" ]; then
+        if create_clusters_allowed; then allow_create_clusters; fi
+        return 0
+      fi
+      [ "$TTY" = 1 ] && command -v pg_createcluster >/dev/null 2>&1 || return 0
+      say ""
+      if confirm "Allow Rowsafe to create a new PostgreSQL cluster here when you fork a database to this server? Only when someone confirms a fork; ports $CREATE_PORTS." y; then
+        allow_create_clusters
+      else
+        disallow_create_clusters
+        note "OK: forks to this server go into an empty cluster you create (change it with --allow-create-cluster)"
       fi
       ;;
   esac
@@ -2301,6 +2590,7 @@ next_steps() {
 # databases runs once the agent is up: restart access, then backups.
 databases() {
   [ "$ALLOW_RESTART" != no ] || disallow_restarts
+  [ -z "$ALLOW_CREATE_CLUSTER" ] || create_cluster_access # forks
   if [ ! -f "$STATE_DIR/agent.json" ] || ! agent_running; then
     [ -z "$PROTECT_NAME" ] || die "the agent is not running, so backups can't be turned on yet; see 'journalctl -u rowsafe-agent'"
     [ "$ALLOW_RESTART" != yes ] || warn "the agent is not running; run the installer again with --allow-restart once it is"
@@ -2318,6 +2608,7 @@ databases() {
       return 0
     fi
     restart_access
+    [ -n "$ALLOW_CREATE_CLUSTER" ] || create_cluster_access # forks
   fi
   if [ -n "$PROTECT_NAME" ]; then
     protect_unattended
@@ -2480,6 +2771,7 @@ uninstall_agent() {
   fi
   rm -f "$UNIT_FILE"
   remove_restart_helper
+  remove_create_cluster
   rm -f "$GUARD_FILE"
   rmdir "$LIB_DIR" 2>/dev/null || true
   if systemd_running; then systemctl daemon-reload; fi
@@ -2531,6 +2823,8 @@ main() {
       --no-setup) NO_SETUP=1 ;;
       --allow-restart) ALLOW_RESTART=yes ;;
       --no-allow-restart) ALLOW_RESTART=no ;;
+      --allow-create-cluster) ALLOW_CREATE_CLUSTER=yes ;;
+      --no-allow-create-cluster) ALLOW_CREATE_CLUSTER=no ;;
       --protect)
         [ $# -ge 2 ] || die "--protect needs the database's name in Rowsafe"
         printf '%s\n' "$2" | grep -Eq '^[a-z][a-z0-9-]{1,39}$' ||
@@ -2584,8 +2878,8 @@ main() {
   if [ "$mode" != install ] && { [ "$SETUP_STORAGE" = 1 ] || [ -n "$STORAGE_PROVIDER" ]; }; then
     die "--setup-storage and --storage only go with an install"
   fi
-  if [ "$mode" != install ] && { [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME" ] || [ -n "$ALLOW_RESTART" ]; }; then
-    die "--no-setup, --protect and --allow-restart only go with an install"
+  if [ "$mode" != install ] && { [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME" ] || [ -n "$ALLOW_RESTART" ] || [ -n "$ALLOW_CREATE_CLUSTER" ]; }; then
+    die "--no-setup, --protect, --allow-restart and --allow-create-cluster only go with an install"
   fi
   [ -z "$PROTECT_PORT" ] || [ -n "$PROTECT_NAME" ] || die "--protect-port only goes with --protect"
   [ "$NO_SETUP" = 0 ] || [ -z "$PROTECT_NAME" ] || die "--no-setup and --protect contradict each other"

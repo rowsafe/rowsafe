@@ -869,6 +869,7 @@ guided_storage_tests() {
   bucket_url_tests
   setup_flow_tests
   restart_tests
+  create_cluster_tests
 }
 
 # ------------------------------------------------------------ bucket URLs
@@ -1266,6 +1267,130 @@ EOF
   expect_ok "purge" "$INSTALLER" --uninstall --purge
   [ ! -e /etc/rowsafe ] || fail "purge left /etc/rowsafe"
   pass "--no-allow-restart, uninstall and purge remove the restart helper"
+}
+
+# ------------------------------------------------------------ forks: new clusters
+
+create_cluster_tests() {
+  echo "  -- creating clusters for forks (--allow-create-cluster)"
+  H=/usr/local/lib/rowsafe/rowsafe-pg-restart
+  C=/usr/local/lib/rowsafe/rowsafe-pg-create-cluster
+  R=/var/lib/rowsafe/restart
+  # pg_createcluster stood in: it writes the cluster's configuration like
+  # postgresql-common does.
+  cat >/usr/local/bin/pg_createcluster <<'EOF'
+#!/bin/sh
+echo "$*" >>/tmp/rowsafe-fake/pg_createcluster.calls
+[ "$1" = --port ] || exit 2
+port=$2 major=$5 name=$6
+mkdir -p "/etc/postgresql/$major/$name"
+printf "data_directory = '/var/lib/postgresql/%s/%s'\nport = %s\n" "$major" "$name" "$port" >"/etc/postgresql/$major/$name/postgresql.conf"
+EOF
+  chmod 755 /usr/local/bin/pg_createcluster
+  scenario "discover_out=$shop"
+  expect_ok "--allow-create-cluster" configured "$INSTALLER" rse_secrettoken123 --allow-create-cluster
+  grep -q "Rowsafe may create a new PostgreSQL cluster (ports 5440-5499)" "$W/out" || fail "--allow-create-cluster not confirmed"
+  grep -qx "ports 5440-5499" /etc/rowsafe/create-cluster-allowed || fail "allow file lacks the ports"
+  [ "$(stat -c '%U %a' /etc/rowsafe/create-cluster-allowed)" = "root 644" ] || fail "create allow file ownership/mode"
+  [ "$(stat -c '%U %a' /etc/rowsafe/created-clusters)" = "root 644" ] || fail "created-clusters ownership/mode"
+  cmp "$C" /src/scripts/rowsafe-pg-create-cluster || fail "cluster creator differs from scripts/rowsafe-pg-create-cluster"
+  cmp /etc/systemd/system/rowsafe-pg-create-cluster@.service /src/deploy/systemd/rowsafe-pg-create-cluster@.service || fail "create unit differs"
+  cmp "$H" /src/scripts/rowsafe-pg-restart || fail "helper not installed for cluster creation"
+  [ "$(stat -c '%U %a' "$R")" = "postgres 700" ] || fail "request directory ownership/mode"
+  if [ "${TEST_UNITS:-0}" = 1 ]; then
+    expect_ok "systemd-analyze verify (create unit)" systemd-analyze verify /etc/systemd/system/rowsafe-pg-create-cluster@.service
+  fi
+
+  # The helper, with systemctl standing in for systemd: starting the create
+  # unit runs the creator as the unit would.
+  O=$W/helper-run
+  rm -rf "$O" "$W/helper-state"
+  install -d -m 0755 -o root -g root "$O"
+  install -d "$W/pgroot/17/bin"
+  printf '#!/bin/sh\n' >"$W/pgroot/17/bin/postgres"
+  chmod 755 "$W/pgroot/17/bin/postgres"
+  cat >"$F/systemctl" <<EOF
+#!/bin/sh
+echo "\$*" >>/tmp/rowsafe-fake/systemctl.calls
+case "\$1 \$2" in
+  "start rowsafe-pg-create-cluster@"*)
+    i=\${2#rowsafe-pg-create-cluster@}
+    exec env ROWSAFE_CREATE_CLUSTER_ERR=$O/create-cluster.err ROWSAFE_PG_ROOT=$W/pgroot $C "\${i%.service}" ;;
+esac
+exit 0
+EOF
+  chmod 755 "$F/systemctl"
+  helper() {
+    timeout 30 env ROWSAFE_SYSTEMCTL="$F/systemctl" STATE_DIRECTORY="$W/helper-state" RUNTIME_DIRECTORY="$O" "$H" 2>>"$W/helper.log" ||
+      fail "the helper failed or hung (exit $?)"
+  }
+  as_pg() { runuser -u postgres -- "$@"; }
+  request() {
+    rm -f "$O/result"
+    printf '%s\n' "$1" | as_pg sh -c 'cat >"$1"' sh "$R/request"
+    helper
+    [ -f "$O/result" ] || fail "no result for: $1"
+  }
+  result_has() { grep -qxF "$1" "$O/result" || {
+    cat "$O/result" >&2
+    fail "helper result lacks $1"
+  }; }
+  grep -q '^# actions: restart stop start create-cluster$' "$H" || fail "the helper doesn't say it creates clusters"
+
+  request "fork_1-create create-cluster 5440 17 shop_staging"
+  result_has "action=create-cluster"
+  result_has "ok=1"
+  result_has "unit=postgresql@17-shop_staging.service"
+  grep -q -- "--port 5440 --start-conf auto 17 shop_staging" "$F/pg_createcluster.calls" || fail "pg_createcluster not asked"
+  grep -qx "5440 postgresql@17-shop_staging.service" /etc/rowsafe/created-clusters || fail "the new cluster isn't listed"
+  # The helper may now stop and start it, like a cluster in restart-allowed.
+  request "fork_1-stop stop 5440"
+  result_has "ok=1"
+  result_has "unit=postgresql@17-shop_staging.service"
+  request "fork_1-start start 5440"
+  result_has "ok=1"
+  # Refused: outside the range, taken, not installed, bad requests.
+  request "fork_2 create-cluster 5439 17 other"
+  result_has "ok=0"
+  result_has "error=port 5439 is not in the ports Rowsafe may create clusters on (5440-5499)"
+  request "fork_3 create-cluster 5441 17 shop_staging"
+  result_has "error=a PostgreSQL 17 cluster named shop_staging already exists"
+  request "fork_4 create-cluster 5440 17 other"
+  result_has "error=port 5440 is already used by another PostgreSQL cluster"
+  request "fork_5 create-cluster 5442 16 other"
+  result_has "error=PostgreSQL 16 is not installed on this server"
+  for bad in "fork_6 create-cluster 5443 17 Bad" "fork_6 create-cluster 5443 17 a-b" "fork_6 create-cluster 5443 17 x;reboot" \
+    "fork_6 create-cluster 5443 17" "fork_6 create-cluster 543 17 x" "fork_6 create-cluster 5443 7 x" "fork_6 create-cluster 5443 17 ../x"; do
+    request "$bad"
+    result_has "ok=0"
+    result_has "error=malformed request"
+  done
+  [ "$(grep -c . "$F/pg_createcluster.calls")" = 1 ] || fail "pg_createcluster ran for a refused request: $(cat "$F/pg_createcluster.calls")"
+  # The creator checks on its own too (root could start the unit by hand).
+  rm -f "$O/create-cluster.err"
+  if env ROWSAFE_CREATE_CLUSTER_ERR="$O/create-cluster.err" ROWSAFE_PG_ROOT="$W/pgroot" "$C" "17-6000-x" 2>/dev/null; then
+    fail "the creator made a cluster outside the allowed ports"
+  fi
+  grep -q "port 6000 is not in the ports" "$O/create-cluster.err" || fail "the creator didn't explain the refused port"
+  chmod 666 /etc/rowsafe/create-cluster-allowed
+  request "fork_7 create-cluster 5445 17 other"
+  result_has "error=/etc/rowsafe/create-cluster-allowed is writable by others than root"
+  chmod 644 /etc/rowsafe/create-cluster-allowed
+  pass "creating clusters for forks: allow file, the creator's checks, bad requests, stop/start of created clusters"
+
+  expect_ok "--no-allow-create-cluster" "$INSTALLER" --no-allow-create-cluster
+  [ ! -e "$C" ] && [ ! -e /etc/systemd/system/rowsafe-pg-create-cluster@.service ] || fail "--no-allow-create-cluster left the creator"
+  ! grep -q '^ports' /etc/rowsafe/create-cluster-allowed || fail "--no-allow-create-cluster kept the ports"
+  grep -qx "5440 postgresql@17-shop_staging.service" /etc/rowsafe/created-clusters || fail "created clusters were forgotten"
+  request "fork_8 create-cluster 5446 17 other"
+  result_has "error=creating PostgreSQL clusters from Rowsafe is not allowed on this server"
+  request "fork_8-stop stop 5440"
+  result_has "ok=1"
+  pkill -u postgres -f 'rowsafe-agent run' || true
+  expect_ok "uninstall" "$INSTALLER" --uninstall --purge
+  [ ! -e "$H" ] && [ ! -e "$C" ] || fail "uninstall left the helpers"
+  rm -rf /usr/local/bin/pg_createcluster /etc/postgresql/17/shop_staging "$W/pgroot"
+  pass "--no-allow-create-cluster keeps created clusters manageable; uninstall removes everything"
 }
 
 case ${1:-} in

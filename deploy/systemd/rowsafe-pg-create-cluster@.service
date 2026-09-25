@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-pg-create-cluster@MAJOR-PORT-NAME.service: creates a new, empty
+# PostgreSQL cluster for a fork (pg_createcluster), when a person forked a
+# database in Rowsafe to a new port on this server. Started only by the root
+# helper (rowsafe-pg-restart.service) after it checked the agent's request;
+# installed by https://rowsafe.sh/install only when root allowed it
+# (--allow-create-cluster).
+
+[Unit]
+Description=Rowsafe: create PostgreSQL cluster %i for a fork
+Documentation=https://rowsafe.sh/docs/guides/fork
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/rowsafe/rowsafe-pg-create-cluster %i
+TimeoutStartSec=110
+UMask=0022
+
+# Hardening. pg_createcluster writes the cluster's configuration, data and
+# log directories, runs initdb as postgres (hence CAP_SETUID/CAP_SETGID) and
+# hands the new files to postgres (CAP_CHOWN, CAP_FOWNER). The new cluster
+# is added to /etc/rowsafe/created-clusters; the reason of a failure goes to
+# the root helper's directory.
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/etc/postgresql /var/lib/postgresql -/var/log/postgresql /etc/rowsafe/created-clusters -/run/rowsafe-pg-restart
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service

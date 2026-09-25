@@ -1,0 +1,68 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-pg-create-cluster: creates a new, empty PostgreSQL cluster when a
+# person forks a database in Rowsafe to a new port on this server.
+#
+# Installed by https://rowsafe.sh/install as
+# /usr/local/lib/rowsafe/rowsafe-pg-create-cluster, only when root allowed
+# it (--allow-create-cluster, or yes at the installer's question). It runs as
+# root in rowsafe-pg-create-cluster@MAJOR-PORT-NAME.service, which only the
+# root helper (rowsafe-pg-restart) starts, after checking the agent's
+# request; the agent itself cannot create anything.
+#
+# It checks everything again: the port must be in the range root allowed
+# (/etc/rowsafe/create-cluster-allowed, "ports MIN-MAX") and unused, the
+# PostgreSQL major version installed and the name free. Then it runs
+# pg_createcluster (Debian and Ubuntu, postgresql-common) without starting
+# the cluster, and adds "PORT postgresql@MAJOR-NAME.service" to
+# /etc/rowsafe/created-clusters, so the root helper may stop and start it.
+# A failure's reason goes to /run/rowsafe-pg-restart/create-cluster.err,
+# which the helper hands to the agent.
+
+set -u
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+allow=${ROWSAFE_CREATE_CLUSTER_ALLOW:-/etc/rowsafe/create-cluster-allowed}
+created=${ROWSAFE_CREATED_CLUSTERS:-/etc/rowsafe/created-clusters}
+err_file=${ROWSAFE_CREATE_CLUSTER_ERR:-/run/rowsafe-pg-restart/create-cluster.err}
+pg_root=${ROWSAFE_PG_ROOT:-/usr/lib/postgresql}
+conf_root=${ROWSAFE_PG_CONF_ROOT:-/etc/postgresql}
+pg_createcluster=${ROWSAFE_PG_CREATECLUSTER:-pg_createcluster}
+
+fail() {
+  printf '%s\n' "$1" >"$err_file" 2>/dev/null || true
+  echo "rowsafe-pg-create-cluster: $1" >&2
+  exit 1
+}
+
+rm -f "$err_file"
+instance=${1:-}
+printf '%s\n' "$instance" | grep -Eq '^[1-9][0-9]-[1-9][0-9]{3,4}-[a-z][a-z0-9_]{0,39}$' || fail "malformed cluster request"
+major=${instance%%-*}
+rest=${instance#*-}
+port=${rest%%-*}
+name=${rest#*-}
+
+[ -f "$allow" ] && [ ! -L "$allow" ] && [ "$(stat -c '%u' "$allow")" = 0 ] ||
+  fail "creating PostgreSQL clusters from Rowsafe is not allowed on this server"
+case $(stat -c '%A' "$allow") in
+  ?????w???? | ????????w?) fail "$allow is writable by others than root" ;;
+esac
+range=$(awk '$1 == "ports" && $2 ~ /^[0-9]+-[0-9]+$/ { print $2; exit }' "$allow")
+[ -n "$range" ] && [ "$port" -ge "${range%-*}" ] && [ "$port" -le "${range#*-}" ] ||
+  fail "port $port is not in the ports Rowsafe may create clusters on (${range:-none})"
+[ -x "$pg_root/$major/bin/postgres" ] || fail "PostgreSQL $major is not installed on this server"
+command -v "$pg_createcluster" >/dev/null 2>&1 ||
+  fail "pg_createcluster is missing: Rowsafe creates clusters on Debian and Ubuntu (package postgresql-common)"
+[ ! -e "$conf_root/$major/$name" ] || fail "a PostgreSQL $major cluster named $name already exists"
+if grep -Eqs "^[[:space:]]*port[[:space:]]*=[[:space:]]*'?$port'?([[:space:]]|#|\$)" "$conf_root"/*/*/postgresql.conf; then
+  fail "port $port is already used by another PostgreSQL cluster"
+fi
+if [ -f "$created" ] && awk -v p="$port" '$1 == p { f = 1 } END { exit !f }' "$created"; then
+  fail "port $port is already used by a cluster Rowsafe created"
+fi
+
+out=$("$pg_createcluster" --port "$port" --start-conf auto "$major" "$name" 2>&1 </dev/null) ||
+  fail "pg_createcluster failed: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
+printf '%s postgresql@%s-%s.service\n' "$port" "$major" "$name" >>"$created" ||
+  fail "the cluster was created, but $created couldn't be updated"
+echo "rowsafe-pg-create-cluster: created PostgreSQL $major cluster $name on port $port" >&2
