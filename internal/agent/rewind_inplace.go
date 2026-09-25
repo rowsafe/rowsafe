@@ -376,7 +376,7 @@ func (a *Agent) rewindInPlace(ctx context.Context, db protocol.DatabaseSpec, p p
 		}
 	}
 	tl.Printf("restoring %s (backup %s) into %s", describeTarget(p.Target), cmp.Or(set, "picked by pgBackRest"), restoreDir)
-	out, err := ops.restore(ctx, db, pgbackrest.RestoreOptions{DataDir: restoreDir, Type: typ, Target: target, Set: set, Timeline: p.Target.Timeline})
+	out, err := ops.restore(ctx, db, pgbackrest.RestoreOptions{DataDir: restoreDir, Type: typ, Target: target, Exclusive: typ == "xid", Set: set, Timeline: p.Target.Timeline})
 	tl.Output("pgbackrest restore", out)
 	if err != nil {
 		return fail("restoring the backup", err)
@@ -414,7 +414,7 @@ func (a *Agent) rewindInPlace(ctx context.Context, db protocol.DatabaseSpec, p p
 	_ = os.Remove(pr.LogFile)
 	_ = os.RemoveAll(socketDir)
 	if err != nil {
-		if typ == "time" {
+		if typ != "name" {
 			err = fmt.Errorf("%w (if the time is after the last change that reached the backups, pick an earlier one)", err)
 		}
 		return fail("replaying changes", err)
