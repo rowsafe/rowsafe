@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/rowsafe/rowsafe/internal/agent"
-	_ "github.com/rowsafe/rowsafe/internal/engine/mysql" // MySQL and MariaDB
+	_ "github.com/rowsafe/rowsafe/internal/engine/mysql" // registers MySQL and MariaDB
 	"github.com/rowsafe/rowsafe/internal/pginspect"
 	"github.com/rowsafe/rowsafe/release"
 )
