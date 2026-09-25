@@ -274,7 +274,9 @@ func (a *Agent) storageLoop(ctx context.Context) {
 		c, _ := a.storage.get()
 		wait := time.Until(storageRefreshDue(c, time.Now()))
 		if failures > 0 {
-			wait = min(wait, storageRetry(failures))
+			// After a failure the credentials are due already: back off
+			// instead of asking again at once.
+			wait = storageRetry(failures)
 		}
 		// Wake at least hourly: a laptop-style suspend or clock jump must
 		// not make the agent miss the renewal.

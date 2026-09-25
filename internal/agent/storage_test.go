@@ -308,3 +308,33 @@ func TestStorageStatusOwnBucket(t *testing.T) {
 		t.Errorf("%+v", st)
 	}
 }
+
+// A control plane that refuses renewals is asked again after a back-off,
+// never in a tight loop (the e2e once saw 100,000 requests in minutes).
+func TestStorageLoopBacksOff(t *testing.T) {
+	var calls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":"slow down"}`))
+	}))
+	defer ts.Close()
+	old := storageRetry
+	storageRetry = func(int) time.Duration { return 100 * time.Millisecond }
+	defer func() { storageRetry = old }()
+
+	a, _ := storageTestAgent(t, protocol.StorageRowsafe)
+	a.client = newControlClient(ts.URL, "rsa_test")
+	due := testCreds("K1", 7*24*time.Hour)
+	due.RefreshAt = time.Now().Add(-time.Minute)
+	a.storage.set(due)
+	ctx, cancel := context.WithTimeout(context.Background(), 550*time.Millisecond)
+	defer cancel()
+	a.storageLoop(ctx)
+	if n := calls.Load(); n < 2 || n > 7 {
+		t.Fatalf("%d renewal attempts in 550ms with a 100ms back-off", n)
+	}
+	if c, errMsg := a.storage.get(); c.AccessKeyID != "K1" || !strings.Contains(errMsg, "slow down") {
+		t.Errorf("credentials %v, error %q", c, errMsg)
+	}
+}
