@@ -1,0 +1,32 @@
+# Prisma: save a Mark, preview the new migrations on a copy, then deploy.
+# Secrets: ROWSAFE_API_KEY (a read-write Rowsafe API key), DATABASE_URL.
+name: deploy
+on:
+  push:
+    branches: [main]
+concurrency: deploy-production
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # lets the preview find the migrations this push adds
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      - name: Save a Mark before the migration
+        uses: rowsafe/action@v1
+        with:
+          api-key: ${{ secrets.ROWSAFE_API_KEY }}
+          database: app
+          preview-sql: prisma/migrations/*/migration.sql
+
+      - run: npx prisma migrate deploy
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      # ... then deploy the application as usual
