@@ -77,7 +77,7 @@ type shipper struct {
 	pending   map[string]time.Time  // bucket folder -> since when bytes wait
 	caughtUp  *time.Time            // everything written before this is shipped
 	lastErr   string
-	connErr   bool // lastErr: the server couldn't be queried
+	connErr   bool   // lastErr: the server couldn't be queried
 	logOn     bool   // the server's log_bin, as last seen
 	lastFile  string // current file, as last seen
 	lastWAL   string // last shipped piece, for the report
