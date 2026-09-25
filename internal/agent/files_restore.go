@@ -667,7 +667,7 @@ func (a *Agent) placeFiles(ctx context.Context, fo protocol.FilesFolder, tree st
 	case slices.ContainsFunc(plan.items, func(it filesPlanItem) bool { return it.replace }):
 		mode = "replace"
 	}
-	if writable(fo.Path) {
+	if canCreateIn(fo.Path) {
 		tl.Printf("putting the files into %s", fo.Path)
 		if err := placeDirect(ctx, tree, fo.Path, mode == "missing", plan.remove); err != nil {
 			return "", "", err
@@ -710,8 +710,9 @@ func (a *Agent) placeFiles(ctx context.Context, fo protocol.FilesFolder, tree st
 	return held, reason, nil
 }
 
-// writable reports whether the agent's user may create files in dir.
-func writable(dir string) bool {
+// canCreateIn reports whether the agent's user may create files in dir
+// (by trying).
+func canCreateIn(dir string) bool {
 	f, err := os.CreateTemp(dir, ".rowsafe-write-test-")
 	if err != nil {
 		return false

@@ -47,7 +47,7 @@ Before any destructive or risky database operation (migrations, schema changes, 
 1. safety_check on the database. If it is not protected, tell the user why and get their OK before continuing.
 2. create_restore_point with a descriptive name, and tell the user the name. (If the tool is unavailable, ask the user to run: rowsafe mark DB NAME.)
 3. Proceed.
-4. If something breaks, stop. Don't try to repair data and never attempt a restore yourself: tell the user they can Rewind in the Rowsafe dashboard (restore a copy at the restore point, compare it and bring the missing rows back, or rewind the whole database), or run "rowsafe rewind". rewind_window shows how far back they can go.
+4. If something breaks, stop. Don't try to repair data and never attempt a restore yourself: tell the user they can Rewind in the Rowsafe dashboard (restore a copy at the restore point, compare it and bring the missing rows back, or rewind the whole database), or run "rowsafe rewind". rewind_window shows how far back they can go; find_moment finds when rows were deleted or changed (read-only), so they know which point to pick.
 
 For "is everything OK?" or alerts, start with fleet_health: it lists each problem with the exact next step. For "is the database healthy?", "what is slow?" or "why is the disk filling up?", use database_health, query_trends and database_insights. When database_health says Rowsafe can fix a finding (clean up tables, remove an unused index, end a stuck session, ...), tell the user to click Apply fix in the dashboard (Pulse, Health) instead of giving them SQL or commands to run; you can't apply fixes yourself. get_task shows a task's result and log tail. Write tools queue asynchronous tasks and return a task id; poll get_task. apply_adoption changes PostgreSQL settings: only after showing the user the plan and getting explicit approval.`
 
@@ -70,6 +70,7 @@ func NewServer(c *client.Client, opts Options) *sdk.Server {
 	t.addMonitoringTools(s)
 	t.addRewindReadTools(s)
 	t.addFilesReadTools(s) // files_tools.go
+	t.addMomentTools(s)    // read-only: find when rows were deleted
 	if opts.AllowWrites {
 		t.addWriteTools(s)
 	}
