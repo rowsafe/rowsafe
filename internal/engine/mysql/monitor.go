@@ -28,6 +28,10 @@ type monitorState struct {
 	sizesAt    time.Time
 	statsAt    time.Time
 	insightsAt time.Time
+	// serverStart is the server's start time, kept stable across samples
+	// (uptime has a one-second granularity): with a connection ID it names
+	// a session for a fix.
+	serverStart time.Time
 	binlogSize int64
 }
 
@@ -143,6 +147,11 @@ func (s *server) monitor(ctx context.Context) (*protocol.DatabaseMonitoring, err
 	}
 
 	serverStart := now.Add(-time.Duration(status["Uptime"]) * time.Second).UTC().Truncate(time.Second)
+	if d := serverStart.Sub(st.serverStart); d < 0 && d > -5*time.Second || d >= 0 && d < 5*time.Second {
+		serverStart = st.serverStart
+	} else {
+		st.serverStart = serverStart
+	}
 	act, err := s.activity(ctx, db, serverStart, m)
 	if err == nil {
 		dm.Activity = act
