@@ -256,6 +256,8 @@ type InspectResult struct {
 	PendingRestart         []string `json:"pending_restart,omitempty"`
 	Databases              []DBInfo `json:"databases"`
 	TotalSizeBytes         int64    `json:"total_size_bytes"`
+	// MySQL is set for MySQL and MariaDB servers (mysql.go).
+	MySQL *MySQLInspect `json:"mysql,omitempty"`
 }
 
 // Major returns the Postgres major version (e.g. 18 for 180004).
