@@ -28,23 +28,12 @@ import (
 // for every step: key, check, fix, live sync with writes during the copy,
 // switchover, credentials, rollback, finish, a one-time copy and a cancel.
 //
-// It needs initdb: set ROWSAFE_TEST_PG_BIN to a PostgreSQL bin directory
-// (default: `pg_config --bindir`); skipped without one.
+// It needs initdb: set ROWSAFE_TEST_PG_BIN_DIR to a PostgreSQL bin
+// directory (default: `pg_config --bindir`); skipped without one.
 
 type testCluster struct {
 	bin, data, sock string
 	port            int
-}
-
-func pgBinDir(t *testing.T) string {
-	if d := os.Getenv("ROWSAFE_TEST_PG_BIN"); d != "" {
-		return d
-	}
-	out, err := exec.Command("pg_config", "--bindir").Output()
-	if err != nil {
-		t.Skip("no PostgreSQL binaries (set ROWSAFE_TEST_PG_BIN)")
-	}
-	return strings.TrimSpace(string(out))
 }
 
 func freePort(t *testing.T) int {

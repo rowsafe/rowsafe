@@ -189,7 +189,7 @@ func TestFastLaneClaimsMaintenanceOneAtATime(t *testing.T) {
 	a := &Agent{}
 	if got := a.fastLaneClaim(); !slices.Equal(got, []string{protocol.TaskRestorePoint, protocol.TaskMaintenance,
 		protocol.TaskRewindCompare, protocol.TaskRewindRows, protocol.TaskRewindDrop, protocol.TaskRewindCleanup,
-		protocol.TaskMigrate}) {
+		protocol.TaskFindMoment, protocol.TaskMigrate}) {
 		t.Fatalf("idle claim %v", got)
 	}
 	a.maintBusy.Store(true)
