@@ -919,9 +919,11 @@ func (a *Agent) poolerRetarget(ctx context.Context, db protocol.DatabaseSpec, p 
 			_ = pgbouncer.Command(ctx, admin, "RESUME")
 			return res, fmt.Errorf("reloading PgBouncer: %w", err)
 		}
-		if !res.Paused {
-			// Close what still goes to the old server.
-			_ = pgbouncer.Command(ctx, admin, "RECONNECT")
+		// Server connections to the old target stay open after a RELOAD:
+		// close them (paused, they are all idle), so every query from now
+		// on goes to the new one.
+		if err := pgbouncer.Command(ctx, admin, "RECONNECT"); err != nil {
+			tl.Printf("RECONNECT failed (%v): connections to %s close as PgBouncer recycles them", err, res.From)
 		}
 		if err := pgbouncer.Command(ctx, admin, "RESUME"); err != nil && res.Paused {
 			return res, fmt.Errorf("resuming PgBouncer: %w", err)
