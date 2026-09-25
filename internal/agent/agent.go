@@ -69,6 +69,12 @@ type Agent struct {
 	sbOps  standbyOps
 	// sbLaneMu is held while the standby lane runs a task.
 	sbLaneMu sync.Mutex
+
+	// Fork (fork*.go): the runtime, and the steps a fork restore runs
+	// (tests replace them).
+	fkOnce sync.Once
+	fkRT   *forkRuntime
+	fkOps  forkOps
 }
 
 func New(cfg Config, logger *slog.Logger) *Agent {
@@ -168,6 +174,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.rewindHousekeeping(ctx)
 	go a.standbyLoop(ctx) // fences, primaries seen from standbys (standby.go)
 	go a.standbyLane(ctx)
+	go a.forkLoop(ctx) // fork.go: rolls back an interrupted fork restore, deletes expired kept data
 	// Built-in monitoring (package collect): metrics every minute, beside
 	// the task loop and never blocking it.
 	go collect.Run(ctx, collect.Options{Log: a.log, PGUser: a.cfg.PGUser,
@@ -303,6 +310,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 			Archivers: a.archiverStats(ctx), Update: a.updater.Report(), Mode: a.cfg.Mode,
 			RestartPorts: a.restartPorts(), RestartActions: a.helperActions(), Rewinds: a.rewindState().states(),
 			StandbyHeartbeat: a.standbyHeartbeat(ctx),
+			ForkHeartbeat:    a.forkHeartbeat(), // fork.go
 		}
 		resp, err := a.client.heartbeat(ctx, req)
 		if isUnauthorized(err) {
