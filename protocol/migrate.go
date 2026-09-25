@@ -353,9 +353,10 @@ type CreateMigrationRequest struct {
 	Database string `json:"database"`
 }
 
-// CheckMigrationRequest hands over the sealed source.
+// CheckMigrationRequest hands over the sealed source. Without one, a
+// checked migration is checked again with the source the server has.
 type CheckMigrationRequest struct {
-	Source   e2e.Box `json:"source"`
+	Source   e2e.Box `json:"source,omitzero"`
 	TargetDB string  `json:"target_db,omitempty"`
 }
 
