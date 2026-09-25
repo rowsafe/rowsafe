@@ -161,6 +161,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.heartbeatLoop(ctx)
 	go a.fastLane(ctx)
 	go a.rewindHousekeeping(ctx)
+	go a.relNamesLoop(ctx) // Find the moment: names of tables emptied or dropped later
 	// Built-in monitoring (package collect): metrics every minute, beside
 	// the task loop and never blocking it.
 	go collect.Run(ctx, collect.Options{Log: a.log, PGUser: a.cfg.PGUser,
@@ -222,7 +223,8 @@ var fastLaneTypes = []string{protocol.TaskRestorePoint}
 // for in the dashboard (compare, bring back rows, delete a copy or the kept
 // data), so they never wait behind a backup or a copy being restored.
 var sideTypes = []string{protocol.TaskMaintenance, protocol.TaskRewindCompare, protocol.TaskRewindRows,
-	protocol.TaskRewindDrop, protocol.TaskRewindCleanup}
+	protocol.TaskRewindDrop, protocol.TaskRewindCleanup,
+	protocol.TaskFindMoment} // read-only; people wait for it in the dashboard
 
 // fastLaneClaim is what the fast lane asks for: restore points, and a side
 // task unless one is running already. Side tasks run beside the lane, one
