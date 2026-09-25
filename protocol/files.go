@@ -575,3 +575,10 @@ type FilesNearestFolder struct {
 	// GapSeconds is how long before Time the snapshot was taken.
 	GapSeconds int64 `json:"gap_seconds,omitempty"`
 }
+
+// Health fixes for files (FindingFix.Kind; see protocol/insights.go).
+const (
+	FixFilesBackup = "files_backup" // files_backup task: back up files now
+	FixFilesAccess = "files_access" // files_access task, params FilesAccessParams
+	FixFilesProof  = "files_proof"  // files_check task
+)
