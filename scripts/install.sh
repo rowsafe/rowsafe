@@ -29,6 +29,13 @@
 #                          ask (Restart and Rewind in the dashboard, `rowsafe
 #                          restart`); only when someone confirms
 #   --no-allow-restart     turn that off again
+#   --allow-updates        allow Rowsafe to install PostgreSQL updates and upgrade
+#                          PostgreSQL when you click Update or Upgrade (needs
+#                          --allow-restart); --no-allow-updates turns it off
+#   --allow-security-updates  allow Rowsafe to install the server's security
+#                          updates when you click Install; --no-allow-security-updates
+#   --allow-reboot         allow Rowsafe to reboot the server when you click
+#                          Reboot; --no-allow-reboot
 #   --check-storage        test the configured backup storage; change nothing
 #   --add-storage          set up a second backup copy in another bucket (guided)
 #   --remove-second-copy   stop sending backups to the second copy
@@ -92,6 +99,11 @@ RESTART_SERVICE_FILE=/etc/systemd/system/rowsafe-pg-restart.service
 RESTART_PATH_FILE=/etc/systemd/system/rowsafe-pg-restart.path
 RESTART_ALLOW_FILE=$CONFIG_DIR/restart-allowed
 RESTART_DIR=$STATE_DIR/restart
+# Updates on request (--allow-updates, --allow-security-updates,
+# --allow-reboot): the same helper, run by its own service and path unit.
+UPDATE_SERVICE_FILE=/etc/systemd/system/rowsafe-pg-update.service
+UPDATE_PATH_FILE=/etc/systemd/system/rowsafe-pg-update.path
+UPDATES_ALLOW_FILE=$CONFIG_DIR/updates-allowed
 AGENT_USER=postgres
 DEFAULT_RELEASES_URL=https://releases.rowsafe.sh/agent
 MAX_ARTIFACT_SIZE=536870912 # 512 MiB, the same limit the agent enforces
@@ -121,6 +133,9 @@ NO_SETUP=0         # --no-setup
 PROTECT_NAME=''    # --protect NAME
 PROTECT_PORT=''    # --protect-port PORT
 ALLOW_RESTART=''   # --allow-restart (yes) / --no-allow-restart (no); '' = ask once, on a terminal
+ALLOW_UPDATES=''   # --allow-updates / --no-allow-updates (PostgreSQL updates and upgrades)
+ALLOW_SECURITY=''  # --allow-security-updates / --no-allow-security-updates
+ALLOW_REBOOT=''    # --allow-reboot / --no-allow-reboot
 SETUP_STOP=0       # the plan limit was reached: don't offer more databases
 
 TMP=
@@ -179,6 +194,13 @@ Options (when piping, pass them after `sh -s --`):
                          (Restart and Rewind in the dashboard, `rowsafe restart`),
                          only when someone confirms
   --no-allow-restart     turn that off (and remove the restart helper)
+  --allow-updates        allow Rowsafe to install PostgreSQL updates and upgrade PostgreSQL
+                         when you click Update or Upgrade and confirm (needs --allow-restart)
+  --no-allow-updates     turn that off
+  --allow-security-updates  allow Rowsafe to install the server's security updates when
+                         you click Install and confirm (--no-allow-security-updates: off)
+  --allow-reboot         allow Rowsafe to reboot the server when you click Reboot and
+                         confirm (--no-allow-reboot: off)
   --check-storage        test the backup storage in /etc/rowsafe/agent.env; change nothing
   --add-storage          add a second backup copy in another bucket, ideally at another
                          provider (guided, like the first storage), or change it
@@ -725,7 +747,10 @@ install_restart_helper() {
 # SPDX-License-Identifier: Apache-2.0
 # rowsafe-pg-restart: restarts or stops PostgreSQL when a person asked
 # Rowsafe to (Restart in the dashboard, `rowsafe restart`; Rewind the whole
-# database, which stops PostgreSQL, swaps its data directory and starts it).
+# database, which stops PostgreSQL, swaps its data directory and starts it),
+# and installs PostgreSQL updates, upgrades PostgreSQL, installs security
+# updates or reboots the server when a person clicked that and root allowed
+# it (update mode, below).
 #
 # Installed by https://rowsafe.sh/install as
 # /usr/local/lib/rowsafe/rowsafe-pg-restart, only when root allowed it
@@ -744,17 +769,46 @@ install_restart_helper() {
 # /run/rowsafe-pg-restart/result (root's directory, readable by the agent)
 # as key=value lines: id, action, ok (1 or 0), unit, error and finished_at.
 #
-# The agent reads the next line to know what this helper can do.
+# Update mode (ROWSAFE_HELPER_MODE=update, set by rowsafe-pg-update.service,
+# which rowsafe-pg-update.path starts): the request is
+# /var/lib/rowsafe/restart/update-request, read the same way, and the answer
+# /run/rowsafe-pg-restart/update-result. Only these requests exist:
+#
+#   ID pg-minor-update PORT                  newest minor release of PORT's major
+#   ID pg-install-major PORT MAJOR           install MAJOR (and PORT's extensions for it)
+#   ID pg-upgrade PORT MAJOR METHOD          pg_upgradecluster to MAJOR (copy, clone or link)
+#   ID pg-upgrade-undo PORT start|nostart    back to the version kept by that upgrade
+#   ID pg-upgrade-cleanup PORT               remove the version kept aside by an upgrade or undo
+#   ID security-updates                      install pending security updates
+#   ID reboot                                reboot the server
+#
+# Each needs its word in /etc/rowsafe/updates-allowed (root's, written by
+# the installer): "postgresql" for the pg-* requests, which also only act on
+# a port in /etc/rowsafe/restart-allowed whose unit is Debian's
+# postgresql@MAJOR-NAME.service; "security" and "reboot" for the others.
+# Package names are fixed here: a minor update installs only PORT's major
+# (never another one), a new major only postgresql-MAJOR, its client and the
+# counterparts of the extension packages PORT's major has installed. What an
+# upgrade keeps for undo is recorded in root's state directory, with the data
+# directories it checked. A cluster is only removed while its data directory
+# is still the recorded one (a real directory of the agent user, of that
+# major, not a system directory), and pg_dropcluster then runs as the agent
+# user, never as root (see drop_cluster).
+#
+# The agent reads the next lines to know what this helper can do.
 # actions: restart stop start
+# update-actions: pg-minor-update pg-install-major pg-upgrade pg-upgrade-undo pg-upgrade-cleanup security-updates reboot
 
 set -u
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+PATH=${ROWSAFE_HELPER_PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}
 dir=${ROWSAFE_RESTART_DIR:-/var/lib/rowsafe/restart}
 out_dir=${RUNTIME_DIRECTORY:-/run/rowsafe-pg-restart}
 allow=${ROWSAFE_RESTART_ALLOW:-/etc/rowsafe/restart-allowed}
+updates_allow=${ROWSAFE_UPDATES_ALLOW:-/etc/rowsafe/updates-allowed}
 state=${STATE_DIRECTORY:-/var/lib/rowsafe-pg-restart}
 agent_user=${ROWSAFE_AGENT_USER:-postgres}
 systemctl=${ROWSAFE_SYSTEMCTL:-systemctl}
+mode=${ROWSAFE_HELPER_MODE:-restart}
 min_interval=60
 
 log() { echo "rowsafe-pg-restart: $*" >&2; }
@@ -762,7 +816,13 @@ log() { echo "rowsafe-pg-restart: $*" >&2; }
 # as_agent runs a command with the agent user's privileges.
 as_agent() { setpriv --reuid="$agent_user" --regid="$agent_user" --init-groups -- "$@"; }
 
-id='' action='' unit='' ok=0 err=''
+id='' action='' unit='' ok=0 err='' extra='' result_name=result
+
+# add KEY VALUE adds a line to the answer (one line, at most 1000 bytes).
+add() {
+  extra="$extra$1=$(printf '%s' "$2" | tr '\n\r' '  ' | cut -c1-1000)
+"
+}
 
 # answer writes the result atomically into root's own directory.
 answer() {
@@ -770,9 +830,9 @@ answer() {
     log "cannot write the result in $out_dir"
     exit 0
   }
-  printf 'id=%s\naction=%s\nok=%s\nunit=%s\nerror=%s\nfinished_at=%s\n' "$id" "$action" "$ok" "$unit" "$err" "$(date +%s)" >"$tmp"
+  printf 'id=%s\naction=%s\nok=%s\nunit=%s\nerror=%s\n%sfinished_at=%s\n' "$id" "$action" "$ok" "$unit" "$err" "$extra" "$(date +%s)" >"$tmp"
   chmod 0644 "$tmp"
-  mv -f "$tmp" "$out_dir/result"
+  mv -f "$tmp" "$out_dir/$result_name"
 }
 
 refuse() {
@@ -782,64 +842,611 @@ refuse() {
   exit 0
 }
 
-request=$dir/request
-as_agent test -e "$request" -o -L "$request" 2>/dev/null || exit 0
-# Only a regular file is read, for at most 5 seconds; whatever it was, it is
-# removed so the path unit doesn't fire again.
-# shellcheck disable=SC2016 # $1 expands in the inner shell
-line=$(as_agent sh -c '
-  if [ -f "$1" ] && [ ! -L "$1" ]; then timeout 5 head -c 200 -- "$1"; fi
-  rm -f -- "$1"' rowsafe-pg-restart "$request" 2>/dev/null | head -n 1)
+# have_request FILE: something (anything) is at FILE.
+have_request() { as_agent test -e "$1" -o -L "$1" 2>/dev/null; }
 
-if printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} [0-9]{1,5}$'; then
-  id=${line% *}
-  action=restart
-  port=${line#* }
-elif printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} (restart|stop|start) [0-9]{1,5}$'; then
-  id=${line%% *}
-  rest=${line#* }
-  action=${rest% *}
-  port=${rest#* }
-else
-  refuse "malformed request"
-fi
+# read_request FILE prints the request's first line (at most 200 bytes, read
+# for at most 5 seconds, as the agent user, only from a regular file) and
+# removes it, whatever it was, so the path unit doesn't fire again.
+read_request() {
+  # shellcheck disable=SC2016 # $1 expands in the inner shell
+  as_agent sh -c '
+    if [ -f "$1" ] && [ ! -L "$1" ]; then timeout 5 head -c 200 -- "$1"; fi
+    rm -f -- "$1"' rowsafe-pg-restart "$1" 2>/dev/null | head -n 1
+}
 
-[ -f "$allow" ] && [ ! -L "$allow" ] || refuse "restarting or stopping PostgreSQL from Rowsafe is not allowed on this server"
-[ "$(stat -c '%u' "$allow")" = 0 ] || refuse "$allow is not owned by root"
-case $(stat -c '%A' "$allow") in
-  ?????w???? | ????????w?) refuse "$allow is writable by others than root" ;;
-esac
-unit=$(awk -v p="$port" '$1 == p && $2 ~ /^[A-Za-z0-9@._-]+\.service$/ { print $2; exit }' "$allow")
-[ -n "$unit" ] || refuse "port $port is not in $allow: restarting or stopping it from Rowsafe is not allowed"
+# check_root_file FILE MISSING: FILE must be a regular file root owns and
+# only root can write; MISSING is the refusal when it isn't there.
+check_root_file() {
+  [ -f "$1" ] && [ ! -L "$1" ] || refuse "$2"
+  [ "$(stat -c '%u' "$1")" = 0 ] || refuse "$1 is not owned by root"
+  case $(stat -c '%A' "$1") in
+    ?????w???? | ????????w?) refuse "$1 is writable by others than root" ;;
+  esac
+}
 
-if [ "$action" = restart ]; then
-  mkdir -p "$state"
-  stamp=$state/last-$unit
+# allowed_unit PORT prints the unit the restart allow list names for PORT.
+allowed_unit() {
+  awk -v p="$1" '$1 == p && $2 ~ /^[A-Za-z0-9@._-]+\.service$/ { print $2; exit }' "$allow"
+}
+
+# ---------------------------------------------------------------- restart mode
+
+restart_main() {
+  have_request "$dir/request" || exit 0
+  line=$(read_request "$dir/request")
+  if printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} [0-9]{1,5}$'; then
+    id=${line% *}
+    action=restart
+    port=${line#* }
+  elif printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} (restart|stop|start) [0-9]{1,5}$'; then
+    id=${line%% *}
+    rest=${line#* }
+    action=${rest% *}
+    port=${rest#* }
+  else
+    refuse "malformed request"
+  fi
+
+  check_root_file "$allow" "restarting or stopping PostgreSQL from Rowsafe is not allowed on this server"
+  unit=$(allowed_unit "$port")
+  [ -n "$unit" ] || refuse "port $port is not in $allow: restarting or stopping it from Rowsafe is not allowed"
+
+  if [ "$action" = restart ]; then
+    mkdir -p "$state"
+    stamp=$state/last-$unit
+    now=$(date +%s)
+    last=$(cat "$stamp" 2>/dev/null || echo 0)
+    case $last in '' | *[!0-9]*) last=0 ;; esac
+    if [ $((now - last)) -lt "$min_interval" ]; then
+      refuse "PostgreSQL ($unit) was restarted less than a minute ago; try again in a minute"
+    fi
+    echo "$now" >"$stamp"
+  fi
+
+  log "$action $unit (request $id)"
+  out=$(timeout 120 "$systemctl" "$action" "$unit" 2>&1 </dev/null)
+  rc=$?
+  if [ "$rc" = 0 ]; then
+    ok=1
+    log "${action} $unit: done"
+  else
+    out=$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)
+    if [ "$rc" = 124 ]; then
+      err="systemctl $action $unit did not finish within 2 minutes"
+    else
+      err="systemctl $action $unit failed${out:+: $out}"
+    fi
+    log "$err"
+  fi
+  answer
+}
+
+# ---------------------------------------------------------------- update mode
+
+work_log=$state/update.log
+
+# tail_log is the end of the current action's log, for errors.
+tail_log() { tail -n 12 "$work_log" 2>/dev/null | tr '\n' ' ' | cut -c1-700; }
+
+# update_allowed WORD REFUSAL: root allowed WORD in the updates allow list.
+update_allowed() {
+  check_root_file "$updates_allow" "$2"
+  awk -v k="$1" '$1 == k { f = 1 } END { exit !f }' "$updates_allow" || refuse "$2"
+}
+
+lsclusters() { pg_lsclusters -h 2>/dev/null; }
+
+# cluster_for_port PORT sets c_major, c_name, c_status, c_datadir and unit
+# for the Debian cluster on PORT, which must be in the restart allow list
+# as its postgresql@MAJOR-NAME.service.
+cluster_for_port() {
+  check_root_file "$allow" "Rowsafe may not restart PostgreSQL on this server, which updating it needs (run the installer again with --allow-restart)"
+  unit=$(allowed_unit "$1")
+  [ -n "$unit" ] || refuse "port $1 is not in $allow: Rowsafe may not restart it, which updating it needs"
+  c_line=$(lsclusters | awk -v p="$1" '$3 == p { print; exit }')
+  [ -n "$c_line" ] || refuse "no PostgreSQL cluster managed by postgresql-common (pg_lsclusters) uses port $1"
+  # shellcheck disable=SC2086 # split the pg_lsclusters line into its fields
+  set -- $c_line
+  c_major=$1 c_name=$2 c_status=$4 c_owner=$5 c_datadir=$6
+  printf '%s\n' "$c_major" | grep -Eq '^[1-9][0-9]$' || refuse "unsupported PostgreSQL version $c_major"
+  printf '%s\n' "$c_name" | grep -Eq '^[A-Za-z0-9_.-]{1,63}$' || refuse "unexpected cluster name $c_name"
+  [ "$c_owner" = "$agent_user" ] || refuse "the cluster on port $port belongs to $c_owner, not $agent_user"
+  [ "$unit" = "postgresql@$c_major-$c_name.service" ] ||
+    refuse "PostgreSQL on port $port runs as $unit, not as postgresql@$c_major-$c_name.service: Rowsafe updates only clusters managed by Debian's postgresql-common"
+}
+
+# cluster_field MAJOR NAME FIELD prints a pg_lsclusters field (3 port,
+# 4 status, 6 data directory).
+cluster_field() { lsclusters | awk -v m="$1" -v n="$2" -v f="$3" '$1 == m && $2 == n { print $f; exit }'; }
+
+pkg_version() { dpkg-query -W -f='${Version}' "$1" 2>/dev/null; }
+
+# installed_pkgs PATTERN prints the installed packages matching PATTERN.
+installed_pkgs() {
+  dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' "$1" 2>/dev/null | awk '$1 == "ii" { print $2 }' |
+    grep -Ev -- '-(dbgsym|dbg|doc)$'
+}
+
+candidate() { apt-cache policy "$1" 2>/dev/null | awk '$1 == "Candidate:" { print $2; exit }'; }
+
+# apt_run ARGS... runs apt-get non-interactively, keeping configuration
+# files as they are and never restarting services by itself (needrestart).
+apt_run() {
+  timeout "${apt_timeout:-1800}" env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1 \
+    APT_LISTCHANGES_FRONTEND=none UCF_FORCE_CONFFOLD=1 \
+    apt-get -q -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
+    "$@" >>"$work_log" 2>&1 </dev/null
+}
+
+apt_refresh() { apt_run update || log "apt-get update failed; using the package lists as they are"; }
+
+# active_since UNIT: when UNIT last became active (monotonic microseconds).
+active_since() { "$systemctl" show -p ActiveEnterTimestampMonotonic --value "$1" 2>/dev/null; }
+
+# set_allowed_unit PORT UNIT points PORT's restart allow list entry at UNIT.
+set_allowed_unit() {
+  tmp=$(mktemp "$allow.XXXXXX") || return 1
+  awk -v p="$1" -v u="$2" '$1 == p { print p, u; next } { print }' "$allow" >"$tmp" &&
+    chmod 0644 "$tmp" && mv -f "$tmp" "$allow"
+}
+
+# A cluster's settings live in the agent user's /etc/postgresql/MAJOR/NAME:
+# change them as that user, never as root.
+set_port() { as_agent pg_conftool "$1" "$2" set port "$3" >>"$work_log" 2>&1; }
+set_start() {
+  # shellcheck disable=SC2016 # $1, $2 and $3 expand in the inner shell
+  as_agent sh -c 'f=/etc/postgresql/$1/$2/start.conf; [ ! -L "$f" ] && printf "%s\n" "$3" >"$f"' sh "$1" "$2" "$3"
+}
+
+# Removing a cluster. postgresql-common reads where a cluster's data lives
+# (data_directory, or a "pgdata" link) and its log file (a "log" link) from
+# /etc/postgresql/MAJOR/NAME, which the agent user owns: as root,
+# pg_dropcluster would remove whatever those point at. So Rowsafe checks the
+# data directory against the one root recorded when it created or upgraded
+# the cluster, and runs pg_dropcluster with the agent user's privileges:
+# whatever the configuration says, it can then only remove what that user
+# could remove anyway. Root only stops the unit and tells systemd and apt.
+
+# check_conf_dir MAJOR NAME: the configuration directory is a real
+# directory (no symbolic link on its path) and has no log link pointing
+# outside /var/log/postgresql. Sets why and returns 1 otherwise.
+check_conf_dir() {
+  cd_=/etc/postgresql/$1/$2
+  if [ ! -d "$cd_" ] || [ "$(realpath -e -- "$cd_" 2>/dev/null)" != "$cd_" ]; then
+    why="the configuration directory $cd_ is missing or its path goes through a symbolic link"
+    return 1
+  fi
+  if [ -L "$cd_/log" ]; then
+    case $(readlink -- "$cd_/log") in
+      /var/log/postgresql/*) ;;
+      *)
+        why="$cd_/log points outside /var/log/postgresql"
+        return 1
+        ;;
+    esac
+  fi
+  return 0
+}
+
+# check_data_dir DIR MAJOR: DIR is a PostgreSQL MAJOR data directory the
+# agent user owns, an absolute path with no symbolic link on it, and no
+# system directory. Sets why and returns 1 otherwise.
+check_data_dir() {
+  case $1 in
+    /*) ;;
+    *)
+      why="the data directory \"$1\" is not an absolute path"
+      return 1
+      ;;
+  esac
+  if [ "$(realpath -e -- "$1" 2>/dev/null)" != "$1" ]; then
+    why="the data directory $1 is missing or its path goes through a symbolic link"
+    return 1
+  fi
+  case $1 in
+    / | /etc | /etc/* | /usr | /usr/* | /var | /var/lib | /var/log | /home | /root | /root/* | /boot | /boot/* | \
+      /bin | /bin/* | /sbin | /sbin/* | /lib | /lib/* | /lib64 | /lib64/* | /proc | /proc/* | /sys | /sys/* | /dev | /dev/* | /run | /tmp | /opt | /srv | /mnt | /media)
+      why="the data directory $1 is a system directory"
+      return 1
+      ;;
+  esac
+  if [ "$(stat -c %U -- "$1")" != "$agent_user" ]; then
+    why="the data directory $1 isn't owned by $agent_user"
+    return 1
+  fi
+  if [ "$(as_agent timeout 5 head -c 16 -- "$1/PG_VERSION" 2>/dev/null | tr -d '\n')" != "$2" ]; then
+    why="$1 is not a PostgreSQL $2 data directory"
+    return 1
+  fi
+  return 0
+}
+
+# drop_cluster MAJOR NAME WANT removes a cluster whose data directory must
+# still be WANT (recorded by root). Sets why and returns 1 when it refuses
+# or fails.
+drop_cluster() {
+  why=''
+  check_conf_dir "$1" "$2" || return 1
+  d_=$(cluster_field "$1" "$2" 6)
+  if [ "$d_" != "$3" ]; then
+    why="PostgreSQL $1/$2's data directory is now ${d_:-unknown}, not $3 as recorded"
+    return 1
+  fi
+  check_data_dir "$d_" "$1" || return 1
+  timeout 180 "$systemctl" stop "postgresql@$1-$2.service" >>"$work_log" 2>&1 </dev/null
+  if ! as_agent pg_dropcluster "$1" "$2" >>"$work_log" 2>&1 </dev/null; then
+    why="pg_dropcluster failed: $(tail_log)"
+    return 1
+  fi
+  "$systemctl" daemon-reload >>"$work_log" 2>&1
+  [ ! -x /usr/share/postgresql-common/pg_updateaptconfig ] || /usr/share/postgresql-common/pg_updateaptconfig >>"$work_log" 2>&1
+  return 0
+}
+
+free_port() { lsclusters | awk 'BEGIN { p = 5433 } $3 >= p { p = $3 + 1 } END { print p }'; }
+
+# An upgrade's record (root's state directory): key=value lines.
+record_file() { printf '%s/upgrade-%s\n' "$state" "$1"; }
+record_get() { awk -F= -v k="$2" '$1 == k { print substr($0, length(k) + 2); exit }' "$1"; }
+# record_put FILE KEY=VALUE... sets keys (later values win).
+record_put() {
+  f=$1
+  shift
+  tmp=$(mktemp "$state/.upgrade.XXXXXX") || return 1
+  { [ ! -f "$f" ] || cat "$f"; printf '%s\n' "$@"; } |
+    awk -F= '{ v[$1] = $0; if (!($1 in seen)) { seen[$1] = 1; order[++n] = $1 } } END { for (i = 1; i <= n; i++) print v[order[i]] }' >"$tmp" &&
+    mv -f "$tmp" "$f"
+}
+
+act_pg_minor_update() {
+  update_allowed postgresql "installing PostgreSQL updates from Rowsafe is not allowed on this server (run the installer again with --allow-updates)"
+  cluster_for_port "$port"
+  m=$c_major
+  before=$(pkg_version "postgresql-$m")
+  [ -n "$before" ] || refuse "PostgreSQL $m is not installed from packages here (postgresql-$m)"
+  pkgs="postgresql-$m postgresql-client-$m libpq5 $(installed_pkgs "postgresql-$m-*" | tr '\n' ' ')"
+  : >"$work_log"
+  t0=$(active_since "$unit")
+  apt_refresh
+  log "updating $pkgs (request $id)"
+  # shellcheck disable=SC2086 # package names, built above
+  apt_run install -y --only-upgrade $pkgs || refuse "installing the update failed: $(tail_log)"
+  after=$(pkg_version "postgresql-$m")
+  add from_package "$before"
+  add package "$after"
+  add packages "$pkgs"
+  add other_clusters "$(lsclusters | awk -v m="$m" -v p="$port" '$1 == m && $3 != p { printf "%s/%s (port %s) ", $1, $2, $3 }')"
+  restarted=0
+  case $c_status in
+    online*)
+      if [ "$after" != "$before" ]; then
+        if [ "$(active_since "$unit")" = "$t0" ]; then
+          # The packages didn't restart it: start the new binaries now.
+          out=$(timeout 180 "$systemctl" restart "$unit" 2>&1 </dev/null) ||
+            refuse "the update is installed, but restarting $unit failed: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
+        fi
+        restarted=1
+      fi
+      ;;
+  esac
+  add restarted "$restarted"
+  ok=1
+  log "PostgreSQL $m: $before -> $after (restarted: $restarted)"
+}
+
+act_pg_install_major() {
+  update_allowed postgresql "installing PostgreSQL from Rowsafe is not allowed on this server (run the installer again with --allow-updates)"
+  cluster_for_port "$port"
+  [ "$major" -gt "$c_major" ] || refuse "PostgreSQL $major is not newer than PostgreSQL $c_major on port $port"
+  : >"$work_log"
+  apt_refresh
+  c=$(candidate "postgresql-$major")
+  [ -n "$c" ] && [ "$c" != "(none)" ] || refuse "PostgreSQL $major is not available from this server's package sources"
+  before=$(lsclusters | awk -v m="$major" '$1 == m { printf " %s ", $2 }')
+  pkgs="postgresql-$major postgresql-client-$major"
+  missing=''
+  for p in $(installed_pkgs "postgresql-$c_major-*"); do
+    n=postgresql-$major-${p#postgresql-"$c_major"-}
+    c=$(candidate "$n")
+    if [ -n "$c" ] && [ "$c" != "(none)" ]; then pkgs="$pkgs $n"; else missing="$missing $n"; fi
+  done
+  log "installing $pkgs (request $id)"
+  # shellcheck disable=SC2086 # package names, built above
+  apt_timeout=3600 apt_run install -y --no-install-recommends $pkgs || refuse "installing PostgreSQL $major failed: $(tail_log)"
+  # postgresql-common creates (and starts) an empty "main" cluster for a
+  # newly installed major; the upgrade needs that name free.
+  dropped='' left=''
+  for n in $(lsclusters | awk -v m="$major" '$1 == m { print $2 }'); do
+    case $before in *" $n "*) continue ;; esac
+    # Its data directory as the package just created it.
+    if drop_cluster "$major" "$n" "$(cluster_field "$major" "$n" 6)"; then
+      dropped="$dropped $major/$n"
+    else
+      left="$left $major/$n ($why)"
+      log "left the new cluster $major/$n in place: $why"
+    fi
+  done
+  add left "$left"
+  add packages "$pkgs"
+  add missing "$missing"
+  add dropped "$dropped"
+  ok=1
+}
+
+act_pg_upgrade() {
+  update_allowed postgresql "upgrading PostgreSQL from Rowsafe is not allowed on this server (run the installer again with --allow-updates)"
+  cluster_for_port "$port"
+  [ "$major" -gt "$c_major" ] || refuse "PostgreSQL $major is not newer than PostgreSQL $c_major on port $port"
+  rec=$(record_file "$port")
+  [ ! -e "$rec" ] || refuse "the version kept by an earlier upgrade on port $port is still there: remove it first"
+  [ -x "/usr/lib/postgresql/$major/bin/pg_upgrade" ] || refuse "PostgreSQL $major is not installed: rehearse the upgrade first (it installs it)"
+  case $c_status in
+    *recovery*) refuse "PostgreSQL on port $port is a replica: upgrade the primary" ;;
+    online*) ;;
+    *) refuse "PostgreSQL on port $port is not running" ;;
+  esac
+  [ -z "$(cluster_field "$major" "$c_name" 1)" ] || refuse "a PostgreSQL $major cluster named $c_name already exists"
+  # Where the old version's data lives, checked and recorded now: it is
+  # what a later cleanup may remove, and nothing else.
+  check_conf_dir "$c_major" "$c_name" || refuse "Rowsafe won't upgrade this cluster: $why"
+  check_data_dir "$c_datadir" "$c_major" || refuse "Rowsafe won't upgrade this cluster: $why"
+  flag=''
+  case $method in link) flag=--link ;; clone) flag=--clone ;; esac
+  jobs=$(nproc 2>/dev/null || echo 1)
+  [ "$jobs" -le 8 ] 2>/dev/null || jobs=8
+  : >"$work_log"
+  old_unit=$unit
+  new_unit=postgresql@$major-$c_name.service
+  log "upgrading $c_major/$c_name to $major ($method, request $id)"
+  # shellcheck disable=SC2086 # $flag is empty or one option
+  if ! timeout 12h pg_upgradecluster -v "$major" -m upgrade $flag -j "$jobs" --no-start "$c_major" "$c_name" >>"$work_log" 2>&1 </dev/null; then
+    why=$(tail_log)
+    # pg_upgradecluster removes the new cluster and starts the old one
+    # again when pg_upgrade fails; make sure the old one runs.
+    case $(cluster_field "$c_major" "$c_name" 4) in
+      online*) ;;
+      *) timeout 180 "$systemctl" start "$old_unit" >>"$work_log" 2>&1 </dev/null ;;
+    esac
+    case $(cluster_field "$c_major" "$c_name" 4) in
+      online*)
+        add rolled_back 1
+        refuse "pg_upgrade failed, and PostgreSQL $c_major runs as before: $why"
+        ;;
+    esac
+    refuse "pg_upgrade failed, and PostgreSQL $c_major could not be started again: $why"
+  fi
+  old_port=$(cluster_field "$c_major" "$c_name" 3)
+  new_data=$(cluster_field "$major" "$c_name" 6)
+  check_data_dir "$new_data" "$major" || new_data=''
+  record_put "$rec" "id=$id" "port=$port" "from=$c_major" "to=$major" "name=$c_name" "method=$method" \
+    "aside_port=$old_port" "status=upgraded" "created=$(date +%s)" "old_data=$c_datadir" "new_data=$new_data" ||
+    refuse "could not record the upgrade"
+  set_allowed_unit "$port" "$new_unit" || refuse "could not update $allow"
+  unit=$new_unit
+  "$systemctl" daemon-reload >>"$work_log" 2>&1
+  if ! timeout 600 "$systemctl" start "$new_unit" >>"$work_log" 2>&1 </dev/null; then
+    why=$(tail_log)
+    if [ "$method" = link ]; then
+      add kept "$c_major/$c_name"
+      refuse "PostgreSQL $major did not start: $why. In Fast mode the old version can't simply be started again: Undo restores it from the backup taken just before"
+    fi
+    # Safe mode: the old data is untouched. Put it back and start it.
+    "$systemctl" stop "$new_unit" >>"$work_log" 2>&1
+    set_port "$major" "$c_name" "$old_port"
+    set_start "$major" "$c_name" manual
+    set_port "$c_major" "$c_name" "$port"
+    set_start "$c_major" "$c_name" auto
+    set_allowed_unit "$port" "$old_unit"
+    unit=$old_unit
+    "$systemctl" daemon-reload >>"$work_log" 2>&1
+    if timeout 180 "$systemctl" start "$old_unit" >>"$work_log" 2>&1 </dev/null; then
+      startwhy=$why
+      if [ -n "$new_data" ] && drop_cluster "$major" "$c_name" "$new_data"; then
+        rm -f "$rec"
+      else
+        # Kept, stopped: the record lets a person remove it later.
+        record_put "$rec" "status=undone" "aside_port=$old_port"
+        add kept "$major/$c_name"
+      fi
+      add rolled_back 1
+      refuse "PostgreSQL $major did not start ($startwhy); Rowsafe put PostgreSQL $c_major back and started it"
+    fi
+    refuse "PostgreSQL $major did not start ($why), and starting PostgreSQL $c_major again failed too: $(tail_log)"
+  fi
+  add from "$c_major"
+  add to "$major"
+  add aside_port "$old_port"
+  add old_data_dir "$c_datadir"
+  add new_data_dir "$new_data"
+  ok=1
+  log "upgraded $c_major/$c_name to $major; $c_major kept on port $old_port, stopped"
+}
+
+# read_record PORT sets rec, r_from, r_to, r_name, r_status and r_aside
+# from PORT's upgrade record, checking every value.
+read_record() {
+  rec=$(record_file "$1")
+  [ -f "$rec" ] || refuse "there is no upgrade on port $1 that Rowsafe keeps a version for"
+  r_from=$(record_get "$rec" from) r_to=$(record_get "$rec" to) r_name=$(record_get "$rec" name)
+  r_status=$(record_get "$rec" status) r_aside=$(record_get "$rec" aside_port)
+  printf '%s %s %s %s %s\n' "$r_from" "$r_to" "$r_aside" "$r_name" "$r_status" |
+    grep -Eq '^[1-9][0-9] [1-9][0-9] [0-9]{1,5} [A-Za-z0-9_.-]{1,63} (upgraded|undone)$' ||
+    refuse "the upgrade record for port $1 is damaged"
+}
+
+act_pg_upgrade_undo() {
+  update_allowed postgresql "upgrading PostgreSQL from Rowsafe is not allowed on this server (run the installer again with --allow-updates)"
+  check_root_file "$allow" "Rowsafe may not restart PostgreSQL on this server"
+  read_record "$port"
+  [ "$r_status" = upgraded ] || refuse "that upgrade was already undone"
+  new_unit=postgresql@$r_to-$r_name.service
+  old_unit=postgresql@$r_from-$r_name.service
+  [ "$(allowed_unit "$port")" = "$new_unit" ] || refuse "port $port is not PostgreSQL $r_to's in $allow"
+  [ "$(cluster_field "$r_to" "$r_name" 3)" = "$port" ] || refuse "PostgreSQL $r_to/$r_name is not on port $port"
+  unit=$new_unit
+  : >"$work_log"
+  log "undoing the upgrade of $r_from/$r_name to $r_to (request $id)"
+  timeout 180 "$systemctl" stop "$new_unit" >>"$work_log" 2>&1 </dev/null || refuse "stopping PostgreSQL $r_to failed: $(tail_log)"
+  aside=$r_aside
+  other=$(lsclusters | awk -v q="$aside" -v m="$r_from" -v n="$r_name" '$3 == q && !($1 == m && $2 == n) { print; exit }')
+  [ -z "$other" ] || aside=$(free_port)
+  { set_port "$r_to" "$r_name" "$aside" && set_start "$r_to" "$r_name" manual &&
+    set_port "$r_from" "$r_name" "$port" && set_start "$r_from" "$r_name" auto &&
+    set_allowed_unit "$port" "$old_unit"; } || refuse "switching the clusters' ports failed: $(tail_log)"
+  unit=$old_unit
+  "$systemctl" daemon-reload >>"$work_log" 2>&1
+  record_put "$rec" "status=undone" "aside_port=$aside"
+  add kept "$r_to/$r_name"
+  add aside_port "$aside"
+  add data_dir "$(cluster_field "$r_from" "$r_name" 6)"
+  if [ "$start" = start ]; then
+    timeout 300 "$systemctl" start "$old_unit" >>"$work_log" 2>&1 </dev/null ||
+      refuse "PostgreSQL $r_from did not start: $(tail_log)"
+  fi
+  ok=1
+}
+
+act_pg_upgrade_cleanup() {
+  update_allowed postgresql "upgrading PostgreSQL from Rowsafe is not allowed on this server (run the installer again with --allow-updates)"
+  read_record "$port"
+  if [ "$r_status" = upgraded ]; then kept=$r_from; else kept=$r_to; fi
+  [ "$(cluster_field "$kept" "$r_name" 3)" != "$port" ] || refuse "PostgreSQL $kept/$r_name is the one on port $port"
+  status=$(cluster_field "$kept" "$r_name" 4)
+  case $status in
+    '')
+      rm -f "$rec"
+      add freed 0
+      ok=1
+      return 0
+      ;;
+    down) ;;
+    *) refuse "PostgreSQL $kept/$r_name is running ($status); Rowsafe won't remove it" ;;
+  esac
+  if [ "$r_status" = upgraded ]; then want=$(record_get "$rec" old_data); else want=$(record_get "$rec" new_data); fi
+  [ -n "$want" ] || refuse "the upgrade record doesn't say where PostgreSQL $kept/$r_name's data lives, so Rowsafe won't remove it: remove it yourself with pg_dropcluster"
+  data=$(cluster_field "$kept" "$r_name" 6)
+  size=$(as_agent du -sb -- "$data" 2>/dev/null | cut -f1)
+  : >"$work_log"
+  log "removing $kept/$r_name, kept by an upgrade (request $id)"
+  drop_cluster "$kept" "$r_name" "$want" || refuse "Rowsafe didn't remove PostgreSQL $kept/$r_name: $why"
+  rm -f "$rec"
+  add freed "${size:-0}"
+  add dropped "$kept/$r_name"
+  # Its programs too, when no cluster of that major is left and nothing
+  # else would be removed with them.
+  if [ -z "$(lsclusters | awk -v m="$kept" '$1 == m')" ]; then
+    pkgs=$(printf '%s\n%s\n' "$(installed_pkgs "postgresql-$kept")" "$(installed_pkgs "postgresql-$kept-*")" | grep . | tr '\n' ' ')
+    if [ -n "$pkgs" ]; then
+      # shellcheck disable=SC2086 # package names from dpkg
+      removes=$(apt-get -s remove $pkgs 2>/dev/null | awk '/^Remv / { print $2 }' | sort)
+      # shellcheck disable=SC2086
+      if [ "$removes" = "$(printf '%s\n' $pkgs | sort)" ] && apt_run remove -y $pkgs; then
+        add packages_removed "$pkgs"
+      else
+        add packages_kept "$pkgs"
+      fi
+    fi
+  fi
+  ok=1
+}
+
+act_security_updates() {
+  update_allowed security "installing security updates from Rowsafe is not allowed on this server (run the installer again with --allow-security-updates)"
+  cooldown security-updates 300
+  : >"$work_log"
+  apt_refresh
+  # Upgrades of installed packages from a security origin. PostgreSQL's
+  # server packages are left for Update PostgreSQL, which saves a Mark,
+  # restarts in a controlled way and checks archiving.
+  list=$(apt-get -s -o Debug::NoLocking=1 dist-upgrade 2>/dev/null |
+    awk '/^Inst [^ ]+ \[/ && /-security|Debian-Security/ { print $2 }' | sort -u)
+  held=$(printf '%s\n' "$list" | grep -E '^postgresql-[0-9]+(-.+)?$' | tr '\n' ' ')
+  pkgs=$(printf '%s\n' "$list" | grep -Ev '^postgresql-[0-9]+(-.+)?$' | grep . | tr '\n' ' ')
+  n=0
+  if [ -n "$pkgs" ]; then
+    log "installing security updates: $pkgs (request $id)"
+    # shellcheck disable=SC2086 # package names from apt
+    apt_timeout=5400 apt_run install -y --only-upgrade $pkgs || refuse "installing the security updates failed: $(tail_log)"
+    # shellcheck disable=SC2086
+    n=$(printf '%s\n' $pkgs | wc -l | tr -d ' ')
+  fi
+  add installed "$n"
+  add packages "$pkgs"
+  add held_back "$held"
+  if [ -e /run/reboot-required ]; then add reboot_required 1; else add reboot_required 0; fi
+  ok=1
+}
+
+# cooldown ACTION SECONDS: at most one ACTION per SECONDS (root's own stamp).
+cooldown() {
+  stamp=$state/last-$1
   now=$(date +%s)
   last=$(cat "$stamp" 2>/dev/null || echo 0)
   case $last in '' | *[!0-9]*) last=0 ;; esac
-  if [ $((now - last)) -lt "$min_interval" ]; then
-    refuse "PostgreSQL ($unit) was restarted less than a minute ago; try again in a minute"
-  fi
+  [ $((now - last)) -ge "$2" ] || refuse "$1 ran less than $(($2 / 60)) minutes ago; try again later"
   echo "$now" >"$stamp"
-fi
+}
 
-log "$action $unit (request $id)"
-out=$(timeout 120 "$systemctl" "$action" "$unit" 2>&1 </dev/null)
-rc=$?
-if [ "$rc" = 0 ]; then
+act_reboot() {
+  update_allowed reboot "rebooting the server from Rowsafe is not allowed here (run the installer again with --allow-reboot)"
+  cooldown reboot 600
+  log "rebooting the server (request $id)"
+  # The answer comes before the reboot: it says the reboot was asked for.
   ok=1
-  log "${action} $unit: done"
-else
-  out=$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)
-  if [ "$rc" = 124 ]; then
-    err="systemctl $action $unit did not finish within 2 minutes"
+  add status rebooting
+  add requested_at "$(date +%s)"
+  answer
+  sleep 3
+  "$systemctl" --no-block reboot
+  exit 0
+}
+
+update_main() {
+  result_name=update-result
+  have_request "$dir/update-request" || exit 0
+  mkdir -p "$state"
+  line=$(read_request "$dir/update-request")
+  port='' major='' method='' start=''
+  # Every request's exact shape; anything else is refused before it is split.
+  rid='[A-Za-z0-9_-]{1,64}'
+  if printf '%s\n' "$line" | grep -Eq "^$rid (pg-minor-update|pg-upgrade-cleanup) [0-9]{1,5}\$"; then
+    # shellcheck disable=SC2086 # validated just above
+    set -- $line
+    id=$1 action=$2 port=$3
+  elif printf '%s\n' "$line" | grep -Eq "^$rid pg-upgrade-undo [0-9]{1,5} (start|nostart)\$"; then
+    # shellcheck disable=SC2086
+    set -- $line
+    id=$1 action=$2 port=$3 start=$4
+  elif printf '%s\n' "$line" | grep -Eq "^$rid pg-install-major [0-9]{1,5} [1-9][0-9]\$"; then
+    # shellcheck disable=SC2086
+    set -- $line
+    id=$1 action=$2 port=$3 major=$4
+  elif printf '%s\n' "$line" | grep -Eq "^$rid pg-upgrade [0-9]{1,5} [1-9][0-9] (copy|clone|link)\$"; then
+    # shellcheck disable=SC2086
+    set -- $line
+    id=$1 action=$2 port=$3 major=$4 method=$5
+  elif printf '%s\n' "$line" | grep -Eq "^$rid (security-updates|reboot)\$"; then
+    id=${line%% *} action=${line#* }
   else
-    err="systemctl $action $unit failed${out:+: $out}"
+    refuse "malformed request"
   fi
-  log "$err"
-fi
-answer
+  case $action in
+    pg-minor-update) act_pg_minor_update ;;
+    pg-install-major) act_pg_install_major ;;
+    pg-upgrade) act_pg_upgrade ;;
+    pg-upgrade-undo) act_pg_upgrade_undo ;;
+    pg-upgrade-cleanup) act_pg_upgrade_cleanup ;;
+    security-updates) act_security_updates ;;
+    reboot) act_reboot ;;
+  esac
+  answer
+}
+
+case $mode in
+  update) update_main ;;
+  *) restart_main ;;
+esac
 ROWSAFE_RESTART_HELPER_EOF
     _changed=1
   fi
@@ -932,6 +1539,7 @@ ROWSAFE_RESTART_PATH_EOF
 }
 
 remove_restart_helper() {
+  remove_update_units # they run the same helper
   [ -e "$RESTART_PATH_FILE" ] || [ -e "$RESTART_SERVICE_FILE" ] || [ -e "$RESTART_HELPER" ] || return 0
   if systemd_running; then
     systemctl disable --now --quiet rowsafe-pg-restart.path 2>/dev/null || true
@@ -973,6 +1581,7 @@ allow_restarts() {
 
 disallow_restarts() {
   remove_restart_helper
+  rm -f "$UPDATES_ALLOW_FILE" # updates need the helper too
   if [ -d "$CONFIG_DIR" ]; then
     {
       echo "# Restarting or stopping PostgreSQL from Rowsafe is off on this server."
@@ -1005,6 +1614,166 @@ restart_access() {
       fi
       ;;
   esac
+}
+
+# ---------------------------------------------------------------- updates
+
+# Rowsafe never installs anything on its own. With root's permission, per
+# capability, a person can click Update PostgreSQL (minor updates and major
+# upgrades), Install security updates or Reboot in the dashboard and
+# confirm: the agent writes a request to $RESTART_DIR/update-request,
+# rowsafe-pg-update.path starts the same root helper in update mode, and the
+# helper does only what $UPDATES_ALLOW_FILE lists. It needs the restart
+# helper (PostgreSQL updates restart the cluster).
+
+install_update_units() {
+  _changed=0
+  if write_file "$UPDATE_SERVICE_FILE" 0644 root:root <<'ROWSAFE_UPDATE_SERVICE_EOF'; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-pg-update.service: installs PostgreSQL updates, upgrades
+# PostgreSQL, installs security updates or reboots the server when the
+# Rowsafe agent asks because a person clicked that, and only what root
+# allowed in /etc/rowsafe/updates-allowed (see
+# /usr/local/lib/rowsafe/rowsafe-pg-restart, update mode). Started by
+# rowsafe-pg-update.path; installed by https://rowsafe.sh/install only when
+# root allowed one of them (--allow-updates, --allow-security-updates,
+# --allow-reboot).
+
+[Unit]
+Description=Rowsafe: install PostgreSQL updates or upgrade PostgreSQL on request
+Documentation=https://rowsafe.sh/docs/guides/updates
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/rowsafe/rowsafe-pg-restart
+Environment=ROWSAFE_HELPER_MODE=update
+# The agent user, whose privileges read and remove the request and change a
+# cluster's own settings.
+Environment=ROWSAFE_AGENT_USER=postgres
+# A major upgrade of a large database in Safe mode copies all its data.
+TimeoutStartSec=13h
+# The answer: root's own directory, which the agent can read (shared with
+# rowsafe-pg-restart.service).
+RuntimeDirectory=rowsafe-pg-restart
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+# What an upgrade keeps for undo, and the last action's log, out of the
+# agent's reach.
+StateDirectory=rowsafe-pg-restart
+StateDirectoryMode=0700
+UMask=0022
+
+# Unlike rowsafe-pg-restart.service this one can't be sandboxed much: apt,
+# the packages' own scripts and pg_upgradecluster write under /usr, /etc and
+# /var, download packages and start PostgreSQL. What it can do is limited by
+# the script instead: only the requests it knows, each checked against
+# root's allow lists, with package names it builds itself.
+ProtectHome=read-only
+PrivateTmp=no
+LockPersonality=yes
+RestrictRealtime=yes
+ROWSAFE_UPDATE_SERVICE_EOF
+    _changed=1
+  fi
+  if write_file "$UPDATE_PATH_FILE" 0644 root:root <<'ROWSAFE_UPDATE_PATH_EOF'; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-pg-update.path: starts rowsafe-pg-update.service when the Rowsafe
+# agent asks to update or upgrade PostgreSQL, install security updates or
+# reboot (someone clicked that in the dashboard and confirmed). Installed by
+# https://rowsafe.sh/install only when root allowed it; removed when every
+# one of those is turned off (--no-allow-updates, --no-allow-security-updates,
+# --no-allow-reboot).
+
+[Unit]
+Description=Rowsafe: watch for requests to update PostgreSQL or the server
+Documentation=https://rowsafe.sh/docs/guides/updates
+
+[Path]
+PathExists=/var/lib/rowsafe/restart/update-request
+Unit=rowsafe-pg-update.service
+
+[Install]
+WantedBy=multi-user.target
+ROWSAFE_UPDATE_PATH_EOF
+    _changed=1
+  fi
+  if systemd_running; then
+    [ "$_changed" = 0 ] || systemctl daemon-reload
+    systemctl enable --now --quiet rowsafe-pg-update.path
+  else
+    warn "systemd is not running here; the update helper was installed but cannot be enabled"
+  fi
+}
+
+remove_update_units() {
+  [ -e "$UPDATE_PATH_FILE" ] || [ -e "$UPDATE_SERVICE_FILE" ] || return 0
+  if systemd_running; then
+    systemctl disable --now --quiet rowsafe-pg-update.path 2>/dev/null || true
+  fi
+  rm -f "$UPDATE_PATH_FILE" "$UPDATE_SERVICE_FILE"
+  if systemd_running; then systemctl daemon-reload; fi
+}
+
+# update_allowed WORD: is WORD in the updates allow list?
+update_allowed() {
+  [ -f "$UPDATES_ALLOW_FILE" ] && awk -v w="$1" '$1 == w { f = 1 } END { exit !f }' "$UPDATES_ALLOW_FILE"
+}
+
+# decide_update FLAG WORD QUESTION DEFAULT prints yes or no: the flag, else
+# the earlier answer (a re-run keeps it), else the answer to QUESTION on a
+# terminal, else no.
+decide_update() {
+  case $1 in
+    yes | no)
+      echo "$1"
+      return 0
+      ;;
+  esac
+  if [ -f "$UPDATES_ALLOW_FILE" ]; then
+    if update_allowed "$2"; then echo yes; else echo no; fi
+    return 0
+  fi
+  if [ "$TTY" = 1 ] && confirm "$3" "$4"; then echo yes; else echo no; fi
+}
+
+# update_access applies --allow-updates, --allow-security-updates and
+# --allow-reboot (and their --no- forms), or asks once on a terminal.
+update_access() {
+  if [ ! -x "$RESTART_HELPER" ] || ! grep -qs '^[0-9]' "$RESTART_ALLOW_FILE"; then
+    case "$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT" in
+      *yes*) warn "installing updates or rebooting from Rowsafe needs --allow-restart too (the same helper does it); left off" ;;
+    esac
+    remove_update_units
+    [ ! -f "$UPDATES_ALLOW_FILE" ] || rm -f "$UPDATES_ALLOW_FILE"
+    return 0
+  fi
+  [ -f "$UPDATES_ALLOW_FILE" ] || [ "$TTY" = 1 ] || [ -n "$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT" ] || return 0
+  [ -f "$UPDATES_ALLOW_FILE" ] || [ "$TTY" = 0 ] || say ""
+  _pg=$(decide_update "$ALLOW_UPDATES" postgresql "Allow Rowsafe to install PostgreSQL updates when you click Update? Minor updates and major upgrades, only when someone confirms; a Mark is saved first." y)
+  _sec=$(decide_update "$ALLOW_SECURITY" security "Allow Rowsafe to install this server's security updates when you click Install? Only when someone confirms." n)
+  _reboot=no
+  if [ "$_sec" = yes ] || [ "$ALLOW_REBOOT" = yes ]; then
+    _reboot=$(decide_update "$ALLOW_REBOOT" reboot "Allow Rowsafe to reboot this server when you click Reboot? Only when someone confirms; a Mark is saved first." n)
+  fi
+  {
+    echo "# What Rowsafe may install or do on this server when someone clicks it in"
+    echo "# the dashboard and confirms. Written by the installer (root); change it by"
+    echo "# running the installer with --allow-updates / --no-allow-updates,"
+    echo "# --allow-security-updates / --no-allow-security-updates and --allow-reboot /"
+    echo "# --no-allow-reboot."
+    [ "$_pg" != yes ] || echo "postgresql   # PostgreSQL minor updates and major upgrades (clusters in restart-allowed)"
+    [ "$_sec" != yes ] || echo "security     # security updates (PostgreSQL's own packages excepted)"
+    [ "$_reboot" != yes ] || echo "reboot       # rebooting the server"
+  } | write_file "$UPDATES_ALLOW_FILE" 0644 root:root || true
+  if [ "$_pg$_sec$_reboot" = nonono ]; then
+    remove_update_units
+    note "OK: Rowsafe can't install updates or reboot here (change it with --allow-updates, --allow-security-updates, --allow-reboot)"
+    return 0
+  fi
+  install_update_units
+  [ "$_pg" != yes ] || ok "Rowsafe may install PostgreSQL updates and upgrade PostgreSQL when you click Update or Upgrade and confirm (turn off with --no-allow-updates)"
+  [ "$_sec" != yes ] || ok "Rowsafe may install security updates when you click Install and confirm (turn off with --no-allow-security-updates)"
+  [ "$_reboot" != yes ] || ok "Rowsafe may reboot this server when you click Reboot and confirm (turn off with --no-allow-reboot)"
 }
 
 # ---------------------------------------------------------------- agent.env
@@ -2521,7 +3290,8 @@ databases() {
   fi
   interactive=0
   if [ "$TTY" = 1 ] && [ "$NO_SETUP" = 0 ]; then interactive=1; fi
-  if [ "$interactive" = 1 ] || [ -n "$PROTECT_NAME" ] || [ "$ALLOW_RESTART" = yes ] || grep -qs '^[0-9]' "$RESTART_ALLOW_FILE"; then
+  if [ "$interactive" = 1 ] || [ -n "$PROTECT_NAME" ] || [ "$ALLOW_RESTART" = yes ] || grep -qs '^[0-9]' "$RESTART_ALLOW_FILE" ||
+    [ -n "$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT" ]; then
     say ""
     step "Looking for PostgreSQL on this server"
     if ! discover; then
@@ -2530,6 +3300,7 @@ databases() {
       return 0
     fi
     restart_access
+    update_access
   fi
   if [ -n "$PROTECT_NAME" ]; then
     protect_unattended
@@ -2744,6 +3515,12 @@ main() {
       --no-setup) NO_SETUP=1 ;;
       --allow-restart) ALLOW_RESTART=yes ;;
       --no-allow-restart) ALLOW_RESTART=no ;;
+      --allow-updates) ALLOW_UPDATES=yes ;;
+      --no-allow-updates) ALLOW_UPDATES=no ;;
+      --allow-security-updates) ALLOW_SECURITY=yes ;;
+      --no-allow-security-updates) ALLOW_SECURITY=no ;;
+      --allow-reboot) ALLOW_REBOOT=yes ;;
+      --no-allow-reboot) ALLOW_REBOOT=no ;;
       --protect)
         [ $# -ge 2 ] || die "--protect needs the database's name in Rowsafe"
         printf '%s\n' "$2" | grep -Eq '^[a-z][a-z0-9-]{1,39}$' ||
@@ -2801,8 +3578,8 @@ main() {
   fi
   # The second copy is its own step: no database questions around it.
   [ -z "$SECOND_COPY" ] || NO_SETUP=1
-  if [ "$mode" != install ] && { [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME" ] || [ -n "$ALLOW_RESTART" ]; }; then
-    die "--no-setup, --protect and --allow-restart only go with an install"
+  if [ "$mode" != install ] && { [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME" ] || [ -n "$ALLOW_RESTART$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT" ]; }; then
+    die "--no-setup, --protect and the --allow- options only go with an install"
   fi
   [ -z "$PROTECT_PORT" ] || [ -n "$PROTECT_NAME" ] || die "--protect-port only goes with --protect"
   [ "$NO_SETUP" = 0 ] || [ -z "$PROTECT_NAME" ] || die "--no-setup and --protect contradict each other"

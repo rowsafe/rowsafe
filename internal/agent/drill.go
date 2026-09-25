@@ -598,6 +598,7 @@ func (a *Agent) cleanupStaleDrills() {
 				pgCtl = a.cfg.pgBin(major, "pg_ctl")
 			}
 		}
+		a.stopRehearsalLeftover(dir) // an upgrade rehearsal's second cluster
 		if err := a.removeDrill(dir, pgCtl); err != nil {
 			a.log.Error("removing leftover drill failed", "dir", dir, "err", err)
 		} else {
