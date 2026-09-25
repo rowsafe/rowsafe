@@ -49,7 +49,7 @@ Before any destructive or risky database operation (migrations, schema changes, 
 3. Proceed.
 4. If something breaks, stop. Don't try to repair data and never attempt a restore yourself: tell the user they can Rewind in the Rowsafe dashboard (restore a copy at the restore point, compare it and bring the missing rows back, or rewind the whole database), or run "rowsafe rewind". rewind_window shows how far back they can go.
 
-For "is everything OK?" or alerts, start with fleet_health: it lists each problem with the exact next step. For "is the database healthy?", "what is slow?" or "why is the disk filling up?", use database_health, query_trends and database_insights. When database_health says Rowsafe can fix a finding (clean up tables, remove an unused index, end a stuck session, ...), tell the user to click Apply fix in the dashboard (Pulse, Health) instead of giving them SQL or commands to run; you can't apply fixes yourself. get_task shows a task's result and log tail. Write tools queue asynchronous tasks and return a task id; poll get_task. apply_adoption changes PostgreSQL settings: only after showing the user the plan and getting explicit approval.`
+For "is everything OK?" or alerts, start with fleet_health: it lists each problem with the exact next step. For "is the database healthy?", "what is slow?" or "why is the disk filling up?", use database_health, query_trends and database_insights; index_recommendations lists indexes Rowsafe tested on a copy of the database (suggest them, never create indexes yourself). When database_health says Rowsafe can fix a finding (clean up tables, remove an unused index, end a stuck session, ...), tell the user to click Apply fix in the dashboard (Pulse, Health) instead of giving them SQL or commands to run; you can't apply fixes yourself. get_task shows a task's result and log tail. Write tools queue asynchronous tasks and return a task id; poll get_task. apply_adoption changes PostgreSQL settings: only after showing the user the plan and getting explicit approval.`
 
 // NewServer returns an MCP server whose tools act through c.
 func NewServer(c *client.Client, opts Options) *sdk.Server {
@@ -68,6 +68,7 @@ func NewServer(c *client.Client, opts Options) *sdk.Server {
 	t.addReadTools(s)
 	t.addSafetyReadTools(s)
 	t.addMonitoringTools(s)
+	t.addIndexAdvisorTools(s)
 	t.addRewindReadTools(s)
 	if opts.AllowWrites {
 		t.addWriteTools(s)

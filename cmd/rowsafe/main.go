@@ -93,6 +93,13 @@ Pulse: health, monitoring and alerts
   rowsafe insights [NAME] [--limit 10] [--json]
                                              largest tables, unused and duplicate indexes, estimated bloat,
                                              dead rows and vacuum, transaction ID age
+  rowsafe recommendations [NAME] [--all] [--json]
+                                             indexes that make your slowest queries faster, each tested on a
+                                             copy of the database; create one with rowsafe fix
+  rowsafe recommendations find [NAME] [--no-wait]
+                                             look for index recommendations now (runs every night by itself)
+  rowsafe recommendations schedule [NAME] auto|off|CRON
+                                             when to look (auto: every night at the quietest hour)
   rowsafe top [NAME] [--since 24h] [--sort total_time|calls|mean_time|rows] [--query ID] [--json]
                                              statements that took the most time in a range, and which got slower
   rowsafe activity [NAME]                    queries running, or idle in a transaction, for over a minute
@@ -275,6 +282,8 @@ func dispatch(ctx context.Context, args []string) error {
 		return fixCmd(ctx, c, rest)
 	case "insights":
 		return insightsCmd(ctx, c, rest)
+	case "recommendations":
+		return recommendationsCmd(ctx, c, rest)
 	case "top":
 		return topCmd(ctx, c, rest)
 	case "activity":
