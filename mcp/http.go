@@ -44,7 +44,7 @@ func NewHTTPHandler(api http.Handler, opts HTTPOptions) http.Handler {
 		if c == nil {
 			return nil
 		}
-		return NewServer(c, Options{AllowWrites: true, Version: opts.Version, MaxWait: opts.MaxWait, SchemaCache: cache})
+		return NewServer(c, Options{AllowWrites: true, Remote: true, Version: opts.Version, MaxWait: opts.MaxWait, SchemaCache: cache})
 	}, &sdk.StreamableHTTPOptions{
 		// Each request stands alone and is authenticated on its own; no
 		// session outlives it. Plain JSON responses pass any proxy.

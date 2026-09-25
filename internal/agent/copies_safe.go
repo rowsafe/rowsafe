@@ -36,7 +36,7 @@ func (a *Agent) safeCopy(ctx context.Context, db protocol.DatabaseSpec, p protoc
 	if !copyRoleRE.MatchString(role) || strings.HasPrefix(role, "pg_") || role == copyOwnerRole || role == previewRole || role == a.cfg.PGUser {
 		return nil, fmt.Errorf("invalid role name %q", role)
 	}
-	if !protocol.ValidPasswordVerifier(p.Access.PasswordVerifier) {
+	if p.Access.PasswordVerifier != "" && !protocol.ValidPasswordVerifier(p.Access.PasswordVerifier) {
 		return nil, errors.New("the password verifier is not a SCRAM-SHA-256 verifier")
 	}
 	if p.Masking.Mode != protocol.MaskingRules && p.Masking.Mode != protocol.MaskingNone {
@@ -119,9 +119,16 @@ func (a *Agent) safeCopy(ctx context.Context, db protocol.DatabaseSpec, p protoc
 	if exists {
 		return fail(fmt.Errorf("a role named %s already exists in this database; choose another name", role))
 	}
-	// The verifier's shape was checked above: base64 and $ : only.
+	// The verifier's shape was checked above: base64 and $ : only. Without
+	// one the role has no password, so nobody can log in until a person
+	// sets it (setCopyPassword).
+	password := ""
+	if p.Access.PasswordVerifier != "" {
+		password = " PASSWORD '" + p.Access.PasswordVerifier + "'"
+		rec.PasswordVersion = 1
+	}
 	if _, err := super.Exec(ctx, "CREATE ROLE "+pgx.Identifier{role}.Sanitize()+
-		" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 30 PASSWORD '"+p.Access.PasswordVerifier+"'"); err != nil {
+		" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 30"+password); err != nil {
 		return fail(fmt.Errorf("creating the copy's login role: %w", err))
 	}
 	for _, q := range []string{"ALTER ROLE %s SET default_transaction_read_only = off", "ALTER ROLE %s SET statement_timeout = 0"} {
@@ -184,7 +191,9 @@ func (a *Agent) safeCopy(ctx context.Context, db protocol.DatabaseSpec, p protoc
 		return fail(err)
 	}
 	rec.SizeBytes = dirSize(dataDir)
-	if err := st.update(rec.ID, func(r *copyRecord) { r.Status, r.SizeBytes, r.Prepared = protocol.CopyReady, rec.SizeBytes, true }); err != nil {
+	if err := st.update(rec.ID, func(r *copyRecord) {
+		r.Status, r.SizeBytes, r.Prepared, r.PasswordVersion = protocol.CopyReady, rec.SizeBytes, true, rec.PasswordVersion
+	}); err != nil {
 		return fail(err)
 	}
 	ok = true

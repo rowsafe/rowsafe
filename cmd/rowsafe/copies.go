@@ -258,9 +258,10 @@ func previewsCmd(ctx context.Context, c *client.Client, args []string) error {
 // ---- rowsafe copies ----
 
 var copiesSubs = map[string]subcommand{
-	"create": copiesCreateCmd,
-	"delete": copiesDeleteCmd,
-	"extend": copiesExtendCmd,
+	"create":   copiesCreateCmd,
+	"delete":   copiesDeleteCmd,
+	"extend":   copiesExtendCmd,
+	"password": copiesPasswordCmd,
 }
 
 func copiesCmd(ctx context.Context, c *client.Client, args []string) error {
@@ -443,6 +444,27 @@ func copiesDeleteCmd(ctx context.Context, c *client.Client, args []string) error
 		return apiErr(err)
 	}
 	fmt.Printf("Deleting safe copy %s; it is gone within a minute.\n", id)
+	return nil
+}
+
+// rowsafe copies password [NAME] ID: a new password, made here; only its
+// verifier is sent.
+func copiesPasswordCmd(ctx context.Context, c *client.Client, args []string) error {
+	fs := flag.NewFlagSet("copies password", flag.ContinueOnError)
+	name, id, err := copyArgs(ctx, c, fs, args)
+	if err != nil {
+		return err
+	}
+	password, verifier, err := client.NewCopyPassword()
+	if err != nil {
+		return err
+	}
+	cp, err := c.SetSafeCopyPassword(ctx, name, id, verifier)
+	if err != nil {
+		return apiErr(err)
+	}
+	fmt.Printf("New password for safe copy %s, in use within a few seconds. The connection string (shown only now):\n\n  %s\n",
+		id, client.ConnectionString(cp, password))
 	return nil
 }
 

@@ -84,8 +84,10 @@ type SafeCopyView struct {
 
 type CreateSafeCopyOutput struct {
 	SafeCopyView
-	Password string `json:"password" jsonschema:"shown once: keep it with the connection string"`
-	Guidance string `json:"guidance"`
+	Password string `json:"password,omitempty" jsonschema:"shown once: keep it with the connection string (only from a local rowsafe mcp; the remote endpoint never makes passwords)"`
+	// PasswordURL is where a person sets the password in their browser.
+	PasswordURL string `json:"password_url,omitempty" jsonschema:"the dashboard page where the user sets the copy's password"`
+	Guidance    string `json:"guidance"`
 }
 
 type SafeCopiesOutput struct {
@@ -116,7 +118,9 @@ func (t *tools) addCopiesTools(s *sdk.Server) {
 		Name: "create_safe_copy",
 		Description: "Make a safe copy: a masked copy of the database (emails, names, phones, addresses, secrets... replaced with realistic fakes on the database server, before it opens) " +
 			"that you can connect to with a connection string, to test queries and migrations against real-shaped data. It runs on the database server, not production; " +
-			"it is deleted by itself after 24 hours. Returns the connection string and password once; it works when list_safe_copies says ready (restoring takes minutes for large databases).",
+			"it is deleted by itself after 24 hours. It works when list_safe_copies says ready (restoring takes minutes for large databases). " +
+			"With a local rowsafe mcp it returns the connection string with a password made on this machine, once; Rowsafe never sees it. " +
+			"On the remote endpoint the copy starts without a password and the user sets one in the dashboard (password_url).",
 		Annotations: writes("Create a safe copy", false, false),
 		InputSchema: inputSchema[safeCopyInput](func(p map[string]*jsonschema.Schema) {
 			p["hours"].Minimum, p["hours"].Maximum = ptr(0.0), ptr(168.0)
@@ -222,25 +226,41 @@ func (t *tools) createSafeCopy(ctx context.Context, _ *sdk.CallToolRequest, in s
 	if err != nil {
 		return nil, CreateSafeCopyOutput{}, apiError(err)
 	}
-	// The password is made here, where the tool runs; Rowsafe's API only
-	// gets its SCRAM verifier.
-	password, verifier, err := client.NewCopyPassword()
-	if err != nil {
-		return nil, CreateSafeCopyOutput{}, err
+	req := protocol.CreateSafeCopyRequest{Hours: in.Hours, AllowFrom: in.AllowFrom, Listen: in.Listen, DB: in.DB, Masking: protocol.MaskingRules}
+	// Locally (rowsafe mcp) the password is made here, on the user's
+	// machine, and Rowsafe only gets its SCRAM verifier. On the remote
+	// endpoint this code runs inside Rowsafe, which must never make or see
+	// a password: the copy starts without one and a person sets it in the
+	// dashboard, in their browser.
+	password := ""
+	if !t.opts.Remote {
+		var verifier string
+		var err error
+		if password, verifier, err = client.NewCopyPassword(); err != nil {
+			return nil, CreateSafeCopyOutput{}, err
+		}
+		req.PasswordVerifier = verifier
 	}
-	resp, err := t.c.CreateSafeCopy(ctx, d.ID, protocol.CreateSafeCopyRequest{Hours: in.Hours, AllowFrom: in.AllowFrom, Listen: in.Listen,
-		DB: in.DB, Masking: protocol.MaskingRules, PasswordVerifier: verifier})
+	resp, err := t.c.CreateSafeCopy(ctx, d.ID, req)
 	if err != nil {
 		return nil, CreateSafeCopyOutput{}, apiError(err)
 	}
-	out := CreateSafeCopyOutput{SafeCopyView: safeCopyView(resp.Copy), Password: password}
-	out.ConnectionString = client.ConnectionString(resp.Copy, password)
-	out.Guidance = fmt.Sprintf("The copy is being restored and masked; it accepts connections once list_safe_copies shows %s as ready. "+
-		"Keep the connection string: the password isn't shown again. Use the copy for tests, never production's connection string. It is deleted at %s; delete_safe_copy removes it sooner.",
-		resp.Copy.ID, resp.Copy.Expires.UTC().Format(time.RFC3339))
+	out := CreateSafeCopyOutput{SafeCopyView: safeCopyView(resp.Copy), Password: password, PasswordURL: resp.Copy.PasswordURL}
+	expires := resp.Copy.Expires.UTC().Format(time.RFC3339)
 	var b textBuilder
 	b.line("Safe copy %s of %s: %s, masked, allowed from %s.", resp.Copy.ID, d.Name, resp.Copy.Status, strings.Join(resp.Copy.AllowFrom, ", "))
-	b.line("Connection string (shown once): %s", out.ConnectionString)
+	if password != "" {
+		out.ConnectionString = client.ConnectionString(resp.Copy, password)
+		out.Guidance = fmt.Sprintf("The copy is being restored and masked; it accepts connections once list_safe_copies shows %s as ready. "+
+			"Keep the connection string: the password isn't shown again. Use the copy for tests, never production's connection string. It is deleted at %s; delete_safe_copy removes it sooner.",
+			resp.Copy.ID, expires)
+		b.line("Connection string (shown once): %s", out.ConnectionString)
+	} else {
+		out.Guidance = fmt.Sprintf("The copy has no password yet: Rowsafe never makes or sees one. Ask the user to open %s, click Set password "+
+			"(it is made in their browser) and give you the connection string it shows. Until then, the connection string without a password is %s. "+
+			"The copy is ready when list_safe_copies shows %s as ready; it is deleted at %s. Use it for tests, never production's connection string.",
+			resp.Copy.PasswordURL, orDash(resp.Copy.ConnectionString), resp.Copy.ID, expires)
+	}
 	b.line("Next: %s", out.Guidance)
 	return text(b), out, nil
 }

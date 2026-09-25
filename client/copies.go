@@ -78,6 +78,13 @@ func (c *Client) ExtendSafeCopy(ctx context.Context, ref, id string, hours int) 
 		protocol.ExtendSafeCopyRequest{Hours: hours}, &out)
 }
 
+// SetSafeCopyPassword sets (or resets) a safe copy's password from its
+// SCRAM verifier (NewCopyPassword): the password itself is never sent.
+func (c *Client) SetSafeCopyPassword(ctx context.Context, ref, id, verifier string) (out protocol.SafeCopy, err error) {
+	return out, c.do(ctx, http.MethodPost, "/v1/databases/"+esc(ref)+"/safe-copies/"+esc(id)+"/password",
+		protocol.SetCopyPasswordRequest{PasswordVerifier: verifier}, &out)
+}
+
 // Masking is the database's masking rules with its columns.
 func (c *Client) Masking(ctx context.Context, ref string) (out protocol.MaskingInfo, err error) {
 	return out, c.do(ctx, http.MethodGet, "/v1/databases/"+esc(ref)+"/masking", nil, &out)

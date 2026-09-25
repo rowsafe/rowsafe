@@ -135,6 +135,7 @@ Guard: the safety net for AI agents
   rowsafe copies extend [NAME] ID [--hours 24]
                                              keep a safe copy longer
   rowsafe copies delete [NAME] ID [--yes]    delete a safe copy
+  rowsafe copies password [NAME] ID          a new password for a safe copy (made here; Rowsafe never sees it)
   rowsafe masking [NAME] [--all] [--json]    which columns safe copies mask, and how
   rowsafe masking set [NAME] [DB:]TABLE.COLUMN STRATEGY
                                              change one column's masking (keep to leave it real)

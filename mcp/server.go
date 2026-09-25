@@ -35,6 +35,10 @@ type Options struct {
 	// the task tools (at most 60s) and create_restore_point's confirmation
 	// (at most 120s). Default 120s; keep it below any HTTP write timeout.
 	MaxWait time.Duration
+	// Remote: the server runs inside Rowsafe (the /mcp endpoint), so it must
+	// never make a safe copy's password: copies start without one, and a
+	// person sets it in the dashboard.
+	Remote bool
 	// SchemaCache avoids re-deriving schemas when a server is built per request.
 	SchemaCache *sdk.SchemaCache
 }

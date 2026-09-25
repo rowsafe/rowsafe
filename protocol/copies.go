@@ -216,10 +216,11 @@ type CopyAccess struct {
 	// least one.
 	AllowFrom []string `json:"allow_from"`
 	// Role is the login role created on the copy; PasswordVerifier its
-	// SCRAM-SHA-256 verifier (the password itself never reaches Rowsafe's
-	// agent or, when the requester made it, Rowsafe at all).
+	// SCRAM-SHA-256 verifier, made where the requester is (browser, CLI):
+	// the password never reaches Rowsafe. Empty: the role has no password
+	// until one is set (SetCopyPassword), so nobody can log in yet.
 	Role             string `json:"role"`
-	PasswordVerifier string `json:"password_verifier"`
+	PasswordVerifier string `json:"password_verifier,omitempty"`
 	// Port is the TCP port the control plane chose (from
 	// CopiesReport.PortMin/PortMax). The agent takes another if it is busy
 	// and says so in the result.
@@ -315,6 +316,9 @@ type CopyState struct {
 	RecoveredTo *time.Time `json:"recovered_to,omitempty"`
 	Listen      string     `json:"listen,omitempty"`
 	Port        int        `json:"port,omitempty"`
+	// PasswordVersion is the last password the agent set on a safe copy's
+	// role (1: the one it was made with; 0: none yet).
+	PasswordVersion int `json:"password_version,omitempty"`
 }
 
 // HostAddress is one IP address of the server.
@@ -334,6 +338,17 @@ type CopiesUpdate struct {
 	// Drop lists copies to delete now (Delete in the dashboard). Unknown
 	// IDs are ignored.
 	Drop []string `json:"drop,omitempty"`
+	// Passwords sets a safe copy's password (Set password in the
+	// dashboard): a SCRAM verifier made in the person's browser. The agent
+	// applies a version once, and reports it in CopyState.PasswordVersion.
+	Passwords []CopyPassword `json:"passwords,omitempty"`
+}
+
+// CopyPassword is a new password for a safe copy's role.
+type CopyPassword struct {
+	ID       string `json:"id"`
+	Version  int    `json:"version"`
+	Verifier string `json:"verifier"`
 }
 
 // ---- User API ----
@@ -345,6 +360,7 @@ type CopiesUpdate struct {
 //	POST   /v1/databases/{ref}/safe-copies                 CreateSafeCopyRequest -> CreateSafeCopyResponse
 //	DELETE /v1/databases/{ref}/safe-copies/{id}            -> SafeCopy
 //	POST   /v1/databases/{ref}/safe-copies/{id}/extend     ExtendSafeCopyRequest -> SafeCopy
+//	POST   /v1/databases/{ref}/safe-copies/{id}/password   SetCopyPasswordRequest -> SafeCopy
 //	GET    /v1/databases/{ref}/masking                     -> MaskingInfo
 //	PUT    /v1/databases/{ref}/masking                     PutMaskingRequest -> MaskingInfo
 //	POST   /v1/databases/{ref}/masking/refresh             -> MaskingInfo (queues copy_schema)
@@ -410,14 +426,21 @@ type SafeCopy struct {
 	DB        string   `json:"db,omitempty"`
 	Role      string   `json:"role"`
 	AllowFrom []string `json:"allow_from"`
-	// ConnectionString has no password: it was shown once, when the copy
-	// was created.
-	ConnectionString string         `json:"connection_string,omitempty"`
-	SizeBytes        int64          `json:"size_bytes,omitempty"`
-	RecoveredTo      *time.Time     `json:"recovered_to,omitempty"`
-	TLSCert          string         `json:"tls_cert,omitempty"`
-	Masking          *MaskingReport `json:"masking,omitempty"`
-	TaskID           string         `json:"task_id"`
+	// ConnectionString has no password: Rowsafe never has it (it is made
+	// where the person is, and only its verifier is sent).
+	ConnectionString string `json:"connection_string,omitempty"`
+	// HasPassword: the role has a password (set when the copy was made or
+	// later); PasswordPending: a new one is on its way to the server.
+	HasPassword     bool `json:"has_password"`
+	PasswordPending bool `json:"password_pending,omitempty"`
+	// PasswordURL is the dashboard page where a person sets (or resets) the
+	// password, in their browser.
+	PasswordURL string         `json:"password_url,omitempty"`
+	SizeBytes   int64          `json:"size_bytes,omitempty"`
+	RecoveredTo *time.Time     `json:"recovered_to,omitempty"`
+	TLSCert     string         `json:"tls_cert,omitempty"`
+	Masking     *MaskingReport `json:"masking,omitempty"`
+	TaskID      string         `json:"task_id"`
 	// Task is the safe_copy task while it runs or when it failed.
 	Task  *TaskView `json:"task,omitempty"`
 	Error string    `json:"error,omitempty"`
@@ -457,21 +480,24 @@ type CreateSafeCopyRequest struct {
 	Masking          string `json:"masking,omitempty"`
 	NoMaskingConfirm string `json:"no_masking_confirm,omitempty"`
 	// PasswordVerifier is a SCRAM-SHA-256 verifier of a password the
-	// requester made, so the password never reaches Rowsafe. Without it
-	// Rowsafe makes a password and returns it once.
+	// requester made (client.NewCopyPassword; the dashboard and CLI do it),
+	// so the password never reaches Rowsafe. Required, except from the
+	// remote MCP endpoint, whose copies start without a password: a person
+	// sets it in the dashboard (SafeCopy.PasswordURL).
 	PasswordVerifier string `json:"password_verifier,omitempty"`
 	// Role is the login role's name (default rowsafe_copy_<id>).
 	Role string `json:"role,omitempty"`
 }
 
-// CreateSafeCopyResponse is the new copy. Password and ConnectionString
-// (with the password) are only set when Rowsafe made the password, and are
-// never shown again.
+// CreateSafeCopyResponse is the new copy.
 type CreateSafeCopyResponse struct {
-	Copy             SafeCopy `json:"copy"`
-	Task             TaskView `json:"task"`
-	Password         string   `json:"password,omitempty"`
-	ConnectionString string   `json:"connection_string,omitempty"`
+	Copy SafeCopy `json:"copy"`
+	Task TaskView `json:"task"`
+}
+
+// SetCopyPasswordRequest sets (or resets) a safe copy's password.
+type SetCopyPasswordRequest struct {
+	PasswordVerifier string `json:"password_verifier"`
 }
 
 // ExtendSafeCopyRequest keeps a safe copy Hours longer (from now).

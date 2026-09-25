@@ -68,6 +68,8 @@ type Agent struct {
 	// copies records Guard's preview and safe copies (copyState()).
 	copies     *copyStore
 	copiesOnce sync.Once
+	// copyPasswordMu serializes setting safe copies' passwords.
+	copyPasswordMu sync.Mutex
 }
 
 func New(cfg Config, logger *slog.Logger) *Agent {

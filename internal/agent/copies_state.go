@@ -16,6 +16,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
@@ -106,13 +108,16 @@ type copyRecord struct {
 	// found in use after a crash may be half-migrated and is removed).
 	LastUsed time.Time `json:"last_used,omitzero"`
 	InUse    bool      `json:"in_use,omitempty"`
+	// PasswordVersion is the last password set on a safe copy's role (1:
+	// the one it was made with; 0: none).
+	PasswordVersion int `json:"password_version,omitempty"`
 }
 
 func (r *copyRecord) state() protocol.CopyState {
 	s := protocol.CopyState{ID: r.ID, DatabaseID: r.DatabaseID, Kind: r.Kind, Status: r.Status, SizeBytes: r.SizeBytes,
 		CreatedAt: r.CreatedAt, RecoveredTo: r.RecoveredTo, Listen: r.Listen}
 	if r.Kind == protocol.CopyKindSafe {
-		s.Port = r.Port
+		s.Port, s.PasswordVersion = r.Port, r.PasswordVersion
 	}
 	if !r.Expires.IsZero() {
 		e := r.Expires
@@ -376,6 +381,45 @@ func (a *Agent) onCopiesUpdate(ctx context.Context, u *protocol.CopiesUpdate) {
 		}
 		go a.dropCopy(context.WithoutCancel(ctx), id, "deleted from Rowsafe")
 	}
+	for _, p := range u.Passwords {
+		if r, ok := st.get(p.ID); ok && r.Kind == protocol.CopyKindSafe && r.Status == protocol.CopyReady && p.Version > r.PasswordVersion {
+			go a.setCopyPassword(context.WithoutCancel(ctx), p)
+		}
+	}
+}
+
+// setCopyPassword sets a new password on a ready safe copy's role: a SCRAM
+// verifier made in the person's browser (the password never reaches Rowsafe
+// or the agent). Versions apply once, in order; the heartbeat reports the
+// version so the control plane stops sending it.
+func (a *Agent) setCopyPassword(ctx context.Context, p protocol.CopyPassword) {
+	if !copyIDRE.MatchString(p.ID) || !protocol.ValidPasswordVerifier(p.Verifier) {
+		a.log.Warn("ignoring an invalid password for a copy", "copy_id", p.ID)
+		return
+	}
+	a.copyPasswordMu.Lock()
+	defer a.copyPasswordMu.Unlock()
+	st := a.copyState()
+	r, ok := st.get(p.ID)
+	if !ok || r.Status != protocol.CopyReady || p.Version <= r.PasswordVersion || !copyRoleRE.MatchString(r.Role) {
+		return
+	}
+	conn, err := copyConnect(ctx, a.guardTarget(r.Port, r.socketDir(), ""), "postgres")
+	if err != nil {
+		a.log.Error("setting a copy's password: the copy is not answering", "copy_id", p.ID, "err", err)
+		return
+	}
+	defer closeConn(ctx, conn)
+	// The verifier's shape was checked: base64 and $ : only.
+	if _, err := conn.Exec(ctx, "ALTER ROLE "+pgx.Identifier{r.Role}.Sanitize()+" PASSWORD '"+p.Verifier+"'"); err != nil {
+		a.log.Error("setting a copy's password failed", "copy_id", p.ID, "err", err)
+		return
+	}
+	if err := st.update(p.ID, func(r *copyRecord) { r.PasswordVersion = max(r.PasswordVersion, p.Version) }); err != nil {
+		a.log.Error("recording a copy's password", "copy_id", p.ID, "err", err)
+		return
+	}
+	a.log.Info("set a new password on a safe copy", "copy_id", p.ID, "version", p.Version)
 }
 
 // dropCopy deletes a copy now: a running task on it is cancelled first.

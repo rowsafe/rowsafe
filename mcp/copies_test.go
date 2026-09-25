@@ -37,7 +37,8 @@ func TestCopiesTools(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/databases/db_app/safe-copies":
 			_ = json.NewDecoder(r.Body).Decode(&created)
 			_ = json.NewEncoder(w).Encode(protocol.CreateSafeCopyResponse{Copy: protocol.SafeCopy{ID: "sc_1", Status: protocol.CopyRestoring, Masked: true,
-				Host: "10.0.0.5", Port: 55440, DB: "app", Role: "rowsafe_copy_sc_1", AllowFrom: []string{"203.0.113.7"}, Expires: exp}})
+				Host: "10.0.0.5", Port: 55440, DB: "app", Role: "rowsafe_copy_sc_1", AllowFrom: []string{"203.0.113.7"}, Expires: exp,
+				PasswordURL: "https://app.rowsafe.sh/databases/app/guard/copies?copy=sc_1"}})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"error":"not found"}`))
@@ -99,5 +100,32 @@ func TestCopiesTools(t *testing.T) {
 	}
 	if strings.Contains(created.PasswordVerifier, out.Password) {
 		t.Error("the password reached the API")
+	}
+
+	// On the remote endpoint the tool runs inside Rowsafe: it never makes a
+	// password, and sends the user to the dashboard to set one.
+	remote := NewServer(client.New(api.URL, "rsk_test"), Options{MaxWait: 5 * time.Second, Remote: true})
+	rst, rct := sdk.NewInMemoryTransports()
+	rss, err := remote.Connect(ctx, rst, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rss.Close()
+	rcs, err := sdk.NewClient(&sdk.Implementation{Name: "test"}, nil).Connect(ctx, rct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rcs.Close()
+	created = protocol.CreateSafeCopyRequest{}
+	res, err = rcs.CallTool(ctx, &sdk.CallToolParams{Name: "create_safe_copy", Arguments: map[string]any{"database": "app", "allow_from": []any{"203.0.113.7"}}})
+	if err != nil || res.IsError {
+		t.Fatalf("remote create_safe_copy: %v %+v", err, res)
+	}
+	var rout CreateSafeCopyOutput
+	raw, _ = json.Marshal(res.StructuredContent)
+	_ = json.Unmarshal(raw, &rout)
+	if created.PasswordVerifier != "" || rout.Password != "" || strings.Contains(rout.ConnectionString, ":") && strings.Contains(rout.ConnectionString, "@") && strings.Count(rout.ConnectionString, ":") > 2 ||
+		!strings.Contains(rout.Guidance, "?copy=sc_1") || rout.PasswordURL == "" {
+		t.Errorf("remote made a password or no dashboard link: request %+v output %+v", created, rout)
 	}
 }
