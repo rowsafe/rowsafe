@@ -178,6 +178,9 @@ type HeartbeatRequest struct {
 	// StandbyHeartbeat: the agent's key, addresses, standbys and fences
 	// (protocol/standby.go).
 	StandbyHeartbeat
+	// ForkHeartbeat: what this server offers forks, and their progress
+	// (protocol/fork.go).
+	ForkHeartbeat
 }
 
 // HeartbeatResponse tells the agent which databases to watch.
@@ -503,6 +506,8 @@ func TaskTimeout(taskType string) time.Duration {
 	case TaskRewindUndo: // stop, two renames, start
 		return time.Hour
 	case TaskStandbyPrepare, TaskStandbyRelease, TaskStandbyFence, TaskStandbyPromote, TaskStandbyRemove, TaskStandbyUnfence:
+		return 15 * time.Minute
+	case TaskForkPrepare: // fork_restore: a large restore takes hours (default)
 		return 15 * time.Minute
 	default: // backup, drill, rewind copy and in place: a large restore takes hours
 		return 12 * time.Hour
