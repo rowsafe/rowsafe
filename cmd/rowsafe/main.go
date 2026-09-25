@@ -107,6 +107,17 @@ Pulse: health, monitoring and alerts
   rowsafe channels test ID                   send a test notification now
   rowsafe report [--preview [--html]] [--on | --off] [--to A,B] [--send-test]
                                              "Your weekly Pulse", the weekly email: settings, preview, test
+  rowsafe settings [NAME] [SETTING] [--all] [--json]
+                                             PostgreSQL's settings that matter: value, default, where it is
+                                             set, and whether a change needs a restart
+  rowsafe settings set [NAME] SETTING=VALUE... [--yes] [--no-wait]
+                                             change settings (ALTER SYSTEM + reload, a Mark first; VALUE
+                                             default resets one). Rowsafe's archiving settings never change
+  rowsafe settings undo [NAME] [CHANGE_ID] [--yes]
+                                             undo the latest change made through Rowsafe (or CHANGE_ID)
+  rowsafe tune [NAME] [--workload web|analytics|mixed] [--disk ssd|hdd] [--all] [--yes] [--json]
+                                             settings that suit this server (memory, CPUs, disk) and apply
+                                             them; asks first. Nothing restarts: see rowsafe restart
 
 Guard: the safety net for AI agents
   rowsafe mcp [--allow-restore-points | --allow-writes]
@@ -281,6 +292,10 @@ func dispatch(ctx context.Context, args []string) error {
 		return activityCmd(ctx, c, rest)
 	case "report":
 		return reportCmd(ctx, c, rest)
+	case "settings": // settings.go
+		return settingsCmd(ctx, c, rest)
+	case "tune":
+		return tuneCmd(ctx, c, rest)
 	case "alerts":
 		return alertsCmd(ctx, c, rest)
 	case "channels":

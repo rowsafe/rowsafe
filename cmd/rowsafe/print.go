@@ -118,6 +118,11 @@ func printTask(t protocol.TaskView) {
 				fmt.Printf("  %s\n", d)
 			}
 		}
+	case protocol.TaskSettings:
+		var r protocol.SettingsResult
+		if json.Unmarshal(t.Result, &r) == nil && r.Summary != "" {
+			fmt.Println(r.Summary)
+		}
 	case protocol.TaskRestart:
 		var r protocol.RestartResult
 		if json.Unmarshal(t.Result, &r) == nil && r.Restarted {
