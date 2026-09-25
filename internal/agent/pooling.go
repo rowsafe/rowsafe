@@ -465,6 +465,9 @@ func tcpConnect(ctx context.Context, host string, port int, password, db string)
 	cfg.ConnectTimeout = 5 * time.Second
 	cfg.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol // also through PgBouncer in transaction mode
 	cfg.RuntimeParams["application_name"] = "rowsafe-agent"
+	// The simple protocol needs UTF8, whatever the database's encoding
+	// (SQL_ASCII clusters default to it).
+	cfg.RuntimeParams["client_encoding"] = "UTF8"
 	return pgx.ConnectConfig(ctx, cfg)
 }
 
