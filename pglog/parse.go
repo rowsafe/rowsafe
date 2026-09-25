@@ -377,7 +377,15 @@ func (a *Assembler) Add(s string, now time.Time) {
 	e.Severity, e.Message = l.severity, l.text
 	a.cur = &e
 	a.curPart = &a.cur.Message
+	// A reload changed the prefix: the lines after this one use it.
+	if m := prefixChangedRE.FindStringSubmatch(l.text); m != nil {
+		a.p = NewStderrParser(m[1], a.p.loc)
+	}
 }
+
+// prefixChangedRE is PostgreSQL's message when a reload changes
+// log_line_prefix.
+var prefixChangedRE = regexp.MustCompile(`^parameter "log_line_prefix" changed to "(.*)"$`)
 
 // part returns the field a part severity fills (nil for LOCATION).
 func (e *Entry) part(sev string) *string {

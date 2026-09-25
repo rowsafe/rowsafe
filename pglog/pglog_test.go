@@ -274,3 +274,14 @@ func TestFingerprint(t *testing.T) {
 		t.Error("failed logins are split by user")
 	}
 }
+
+// A reload that changes log_line_prefix: the lines after it use the new one.
+func TestStderrPrefixChange(t *testing.T) {
+	log := `2025-06-02 10:00:00.000 UTC [10] LOG:  received SIGHUP, reloading configuration files
+2025-06-02 10:00:00.001 UTC [10] LOG:  parameter "log_line_prefix" changed to "%m [%p] %q%u@%d app=%a client=%h code=%e "
+2025-06-02 10:00:01.000 UTC [11] app@shop app=web client=10.0.0.9 code=23505 ERROR:  duplicate key value violates unique constraint "k"`
+	es := parseAll(t, debianPrefix, nil, log)
+	if len(es) != 3 || es[2].Client != "10.0.0.9" || es[2].SQLState != "23505" || es[2].User != "app" {
+		t.Fatalf("after the change: %+v", es[len(es)-1])
+	}
+}
