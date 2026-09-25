@@ -425,7 +425,9 @@ func sortAndCapAdvisor(ins *protocol.Insights) {
 	if len(a.IntegerKeys) > maxIntegerKeys {
 		a.IntegerKeys = a.IntegerKeys[:maxIntegerKeys]
 	}
-	capSort(&a.SequencesBehind, func(x, y protocol.SequenceBehind) int { return cmp.Compare(x.Database+x.Sequence, y.Database+y.Sequence) })
+	capSort(&a.SequencesBehind, func(x, y protocol.SequenceBehind) int {
+		return cmp.Compare(x.Database+x.Sequence, y.Database+y.Sequence)
+	})
 	capSort(&a.InvalidIndexes, func(x, y protocol.InvalidIndex) int { return cmp.Compare(y.Bytes, x.Bytes) })
 	capSort(&a.DuplicateConstraints, func(x, y protocol.DuplicateConstraint) int {
 		return cmp.Compare(x.Database+"."+x.Schema+"."+x.Table, y.Database+"."+y.Schema+"."+y.Table)
