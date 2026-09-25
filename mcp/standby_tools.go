@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -30,6 +31,7 @@ type StandbyStatusView struct {
 	Note              string     `json:"note,omitempty"`
 	Fenced            []string   `json:"fenced,omitempty" jsonschema:"old primaries kept stopped after a promotion"`
 	AutoFailover      bool       `json:"automatic_failover"`
+	Move              string     `json:"move,omitempty" jsonschema:"a move to another server in progress or just done, in plain words"`
 	ConnectionStrings []string   `json:"connection_strings,omitempty" jsonschema:"connection strings that follow the primary"`
 	Guidance          string     `json:"guidance"`
 }
@@ -62,6 +64,12 @@ func (t *tools) standbyStatus(ctx context.Context, _ *sdk.CallToolRequest, in da
 	for _, f := range info.Fences {
 		if !f.Released {
 			out.Fenced = append(out.Fenced, serverName(f.Server.Hostname, f.Server.Port))
+		}
+	}
+	if m := info.Move; m != nil {
+		out.Move = fmt.Sprintf("move from %s to %s: %s", m.From.Hostname, m.To.Hostname, m.Status)
+		if m.Hint != "" {
+			out.Move += " (" + m.Hint + ")"
 		}
 	}
 	for _, c := range info.Connect {

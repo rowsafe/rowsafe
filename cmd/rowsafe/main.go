@@ -95,6 +95,13 @@ Standby: a second server that stays in sync, is readable, and takes over
   rowsafe standby failover [NAME] --on|--off [--after 3m] [--max-data-loss 1m] [--yes]
                                              automatic failover (off by default)
   rowsafe standby remove [NAME] [--yes]      remove the standby; its cluster gets its own data back
+  rowsafe move [NAME] --to SERVER [--port N] [--at TIME] [--keep-days 7] [--fingerprint F]
+                                             move the database to another server: a standby there, then a
+                                             planned switchover (nothing lost); the old server is kept stopped
+                                             as a way back. Without --to: the move in progress
+  rowsafe move switch|schedule|cancel|back|finish [NAME]
+                                             switch over now, (re)schedule it (--at TIME, --clear), cancel,
+                                             switch back to the old server, remove the old server
 
 Proof: the weekly restore test
   rowsafe proof [NAME] [--no-wait]           restore the latest backup to a scratch copy and check it, now
@@ -281,6 +288,8 @@ func dispatch(ctx context.Context, args []string) error {
 		return rewindCmd(ctx, c, rest)
 	case "standby":
 		return standbyCmd(ctx, c, rest)
+	case "move":
+		return moveCmd(ctx, c, rest)
 	// Proof
 	case "proof":
 		return proofCmd(ctx, c, rest)
