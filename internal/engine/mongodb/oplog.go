@@ -109,7 +109,8 @@ func (e *Engine) shipperFor(env agent.EngineEnv, db protocol.DatabaseSpec) (*shi
 	defer e.mu.Unlock()
 	if s := e.shippers[db.ID]; s != nil {
 		s.mu.Lock()
-		s.db, s.lastSeen = db, time.Now()
+		// The newest environment: storage keys can change (rotation).
+		s.db, s.env, s.lastSeen = db, env, time.Now()
 		s.mu.Unlock()
 		return s, nil
 	}
@@ -166,7 +167,10 @@ func (s *shipper) run(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			s.env.Log.Warn("copying MongoDB's oplog failed", "database_id", s.db.ID, "err", err)
+			s.mu.Lock()
+			log, id := s.env.Log, s.db.ID
+			s.mu.Unlock()
+			log.Warn("copying MongoDB's oplog failed", "database_id", id, "err", err)
 			backoff = min(max(2*backoff, 5*time.Second), wait)
 			wait = backoff
 		} else {
@@ -230,19 +234,19 @@ func (s *shipper) snapshot() (shipState, error) {
 func (s *shipper) save(st shipState) error {
 	s.mu.Lock()
 	s.st = st
-	db := s.db
+	db, env := s.db, s.env
 	s.mu.Unlock()
-	return saveJSONFile(statePath(s.env, db.Stanza, "oplog.json"), st)
+	return saveJSONFile(statePath(env, db.Stanza, "oplog.json"), st)
 }
 
 func (s *shipper) conn(ctx context.Context) (*mongo.Client, error) {
 	s.mu.Lock()
-	c, db := s.client, s.db
+	c, db, env := s.client, s.db, s.env
 	s.mu.Unlock()
 	if c != nil {
 		return c, nil
 	}
-	c, err := connectDB(ctx, s.env, db)
+	c, err := connectDB(ctx, env, db)
 	if err != nil {
 		return nil, err
 	}
@@ -265,7 +269,7 @@ func (s *shipper) dropConn() {
 // round copies what is new; it keeps going while chunks are full.
 func (s *shipper) round(ctx context.Context) (err error) {
 	s.mu.Lock()
-	st, db := s.st, s.db
+	st, db, env := s.st, s.db, s.env
 	s.mu.Unlock()
 	defer func() {
 		if err != nil && ctx.Err() == nil {
@@ -280,7 +284,7 @@ func (s *shipper) round(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	r, err := openRepo(s.env, db)
+	r, err := openRepo(env, db)
 	if err != nil {
 		return err
 	}
