@@ -71,7 +71,8 @@ func ValidWorkload(w string) bool {
 //
 // A setting already close to its recommendation is left alone: within 5%
 // when it is at PostgreSQL's default, and between 75% and 175% of it when
-// someone chose it on purpose (a deliberate 40% shared_buffers is fine).
+// someone chose it on purpose (a deliberate 40% shared_buffers is fine;
+// for work_mem up to 400%).
 // Nothing is recommended for memory when the server's memory is unknown,
 // and nothing for the disk when it isn't known to be an SSD (virtual disks
 // often claim to spin; people can say it is an SSD).
@@ -86,6 +87,7 @@ const (
 	defaultToleranceLow = 0.95
 	chosenToleranceLow  = 0.75
 	chosenToleranceHigh = 1.75
+	chosenWorkMemHigh   = 4.0
 )
 
 // Recommend lists the changes that suit the server, in catalog order.
@@ -140,7 +142,9 @@ func Recommend(in Input) []protocol.Recommendation {
 		}
 		wm = max(minWorkMem, wm/MB*MB)
 		why := fmt.Sprintf("What's left after the data cache, shared among %d connections and %d workers with room for a few sorts each, so fewer queries spill to disk.", maxConn, workers)
-		r.memory("work_mem", wm, why)
+		// A work_mem someone raised is only lowered when far above the
+		// formula (4x): more memory per sort is often a deliberate choice.
+		r.memoryWithin("work_mem", wm, chosenWorkMemHigh, why)
 
 		if s, ok := r.get("wal_buffers"); ok && strings.TrimSpace(s.BootVal) == "-1" && s.Source != "default" && s.Source != "override" {
 			if b, ok := Bytes(r.wanted(s), s.Unit); ok && b >= 0 && b < min(16*MB, sb*3/100) {
@@ -255,6 +259,11 @@ func (r *recommender) optional(s protocol.PGSetting, value, display, why string)
 
 // memory recommends a size, unless the current one is close enough.
 func (r *recommender) memory(name string, target int64, why string) {
+	r.memoryWithin(name, target, chosenToleranceHigh, why)
+}
+
+// memoryWithin is memory with its own upper bound for a chosen value.
+func (r *recommender) memoryWithin(name string, target int64, high float64, why string) {
 	s, ok := r.get(name)
 	if !ok || LockedReason(name) != "" {
 		return
@@ -268,7 +277,7 @@ func (r *recommender) memory(name string, target int64, why string) {
 		if ratio >= defaultToleranceLow && ratio <= 1/defaultToleranceLow {
 			return
 		}
-	} else if ratio >= chosenToleranceLow && ratio <= chosenToleranceHigh {
+	} else if ratio >= chosenToleranceLow && ratio <= high {
 		return
 	}
 	r.add(s, PGBytes(target), HumanBytes(target), why)

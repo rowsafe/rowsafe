@@ -170,8 +170,12 @@ func TestRecommendLeavesChosenAndPendingValues(t *testing.T) {
 	lib := s["shared_preload_libraries"]
 	lib.PendingRestart, lib.PendingValue = true, "pg_stat_statements"
 	s["shared_preload_libraries"] = lib
+	wm := s["work_mem"]
+	wm.Setting, wm.Source = "32768", "configuration file" // 32 MB: raised on purpose, under 4x the formula's 9 MB
+	s["work_mem"] = wm
 	got := recs(Input{Host: protocol.SettingsHost{MemoryBytes: 16 * GB, CPUs: 2}, Settings: s, PgStatStatements: "available"})
 	wantValues(t, got, map[string]string{
+		"work_mem":                 "",
 		"shared_buffers":           "",
 		"effective_cache_size":     "12GB",
 		"maintenance_work_mem":     "",
