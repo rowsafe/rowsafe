@@ -27,6 +27,10 @@ type Options struct {
 	PGUser string
 	// Databases returns the clusters to watch (the agent's current list).
 	Databases func() []protocol.DatabaseSpec
+	// Engine collects a sample of a database whose engine isn't PostgreSQL
+	// (the agent's registered engines). Without it, or when it returns nil,
+	// such a database is left out of the report.
+	Engine func(context.Context, protocol.DatabaseSpec) (*protocol.DatabaseMonitoring, error)
 	// Send delivers a report to the control plane.
 	Send func(context.Context, protocol.MonitoringReport) (protocol.MonitoringAck, error)
 	// QueryText includes query text in activity snapshots
@@ -175,6 +179,12 @@ func (c *Collector) Collect(ctx context.Context) protocol.MonitoringReport {
 	keep := map[string]bool{}
 	var dataDirs []string
 	for _, db := range dbs {
+		if protocol.NormalizeEngine(db.Engine) != protocol.EnginePostgreSQL {
+			if dm := c.otherEngine(ctx, db); dm != nil {
+				report.Databases = append(report.Databases, *dm)
+			}
+			continue
+		}
 		keep[db.ID] = true
 		st := c.clusters[db.ID]
 		if st == nil {
@@ -231,6 +241,27 @@ func (c *Collector) Collect(ctx context.Context) protocol.MonitoringReport {
 	}
 	report.Host = c.host.collect(dataDirs)
 	return report
+}
+
+// otherEngine collects a non-PostgreSQL database's sample through
+// Options.Engine (nil: left out of the report).
+func (c *Collector) otherEngine(ctx context.Context, db protocol.DatabaseSpec) *protocol.DatabaseMonitoring {
+	if c.o.Engine == nil {
+		return nil
+	}
+	cctx, cancel := context.WithTimeout(ctx, perClusterTimeout)
+	defer cancel()
+	dm, err := c.o.Engine(cctx, db)
+	if err != nil {
+		if dm == nil {
+			dm = &protocol.DatabaseMonitoring{}
+		}
+		dm.Error = err.Error()
+	}
+	if dm != nil {
+		dm.DatabaseID = db.ID
+	}
+	return dm
 }
 
 // startInsights begins a cluster's insights run when one is due. It runs

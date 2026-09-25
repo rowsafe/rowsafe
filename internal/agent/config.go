@@ -91,6 +91,10 @@ type Config struct {
 	// restored into this directory, its PostgreSQL container's PGDATA
 	// (ROWSAFE_FORK_TARGET_DIR).
 	ForkTargetDir string
+	// DockerControlSocket is where the opt-in container control service
+	// listens (docker-sidecar mode; ROWSAFE_DOCKER_CONTROL_SOCKET). Absent:
+	// Rowsafe can't stop or start PostgreSQL's container.
+	DockerControlSocket string
 }
 
 // ROWSAFE_STANDBY values.
@@ -157,6 +161,7 @@ func ConfigFromEnv() (Config, error) {
 			c.StandbyPeers = append(c.StandbyPeers, fp)
 		}
 	}
+	c.DockerControlSocket = env("ROWSAFE_DOCKER_CONTROL_SOCKET", "/run/rowsafe-control/control.sock")
 	var err error
 	if c.Standby != StandbyOn && c.Standby != StandbyPinned && c.Standby != StandbyOff {
 		return c, fmt.Errorf("ROWSAFE_STANDBY must be %q, %q or %q", StandbyOn, StandbyPinned, StandbyOff)

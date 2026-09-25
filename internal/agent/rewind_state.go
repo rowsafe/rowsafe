@@ -86,6 +86,9 @@ type rewindRecord struct {
 	KeepDays int    `json:"keep_days,omitempty"`
 	// ConfigFile is PostgreSQL's config_file, for private recoveries.
 	ConfigFile string `json:"config_file,omitempty"`
+	// Contents: the data directory's entries are moved, not the directory
+	// (Docker; rewind_contents.go).
+	Contents bool `json:"contents,omitempty"`
 }
 
 func (r *rewindRecord) state() protocol.RewindState {

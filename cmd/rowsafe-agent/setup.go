@@ -22,13 +22,14 @@ the agent must have connected to Rowsafe first.
       /var/run/postgresql and /tmp) the agent can connect to. One
       tab-separated line each ("-" when empty):
         port socket_dir major cluster data_dir size_bytes name registered
-        status databases size unit database_id
+        status databases size unit database_id engine
       name is the suggested name (the Rowsafe name when registered);
       registered is yes or no; status is the Rowsafe status; databases are
-      comma-separated; size is human-readable; unit is the systemd unit.
+      comma-separated; size is human-readable; unit is the systemd unit;
+      engine is postgresql, or another engine this agent supports.
       Replicas and clusters it can't reach are skipped with a note on stderr.
 
-  rowsafe-agent setup plan --name NAME --port PORT [--socket-dir DIR] [--id-file FILE] [--timeout 3m]
+  rowsafe-agent setup plan --name NAME --port PORT [--socket-dir DIR] [--engine ENGINE] [--id-file FILE] [--timeout 3m]
       Add the cluster to Rowsafe (again: same database), wait for the
       read-only plan and print it. Nothing changes on this server.
       Exit 0 plan ready; 3 another backup tool is set up (apply --force
@@ -79,6 +80,7 @@ func runSetup(ctx context.Context, cmd string, args []string) error {
 		name      = fs.String("name", "", "database name in Rowsafe")
 		port      = fs.Int("port", 0, "PostgreSQL port")
 		socketDir = fs.String("socket-dir", "", "Unix socket directory")
+		engine    = fs.String("engine", "", "database engine (from discover; default postgresql)")
 		idFile    = fs.String("id-file", "", "write the database ID to this file")
 		id        = fs.String("database", "", "database ID (from plan --id-file)")
 		force     = fs.Bool("force", false, "replace another backup tool's archive_command")
@@ -109,6 +111,7 @@ func runSetup(ctx context.Context, cmd string, args []string) error {
 	if err != nil {
 		return err
 	}
+	s.Engine = *engine
 	needID := func() error {
 		if *id == "" {
 			return errors.New("--database ID is required")

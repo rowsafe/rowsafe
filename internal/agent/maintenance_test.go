@@ -188,9 +188,9 @@ func TestPlainWords(t *testing.T) {
 func TestFastLaneClaimsMaintenanceOneAtATime(t *testing.T) {
 	a := &Agent{}
 	// Other features append their side tasks (fork_prepare, fork.go).
-	if got := a.fastLaneClaim(); len(got) < 6 || !slices.Equal(got[:6], []string{protocol.TaskRestorePoint, protocol.TaskMaintenance,
-		protocol.TaskRewindCompare, protocol.TaskRewindRows, protocol.TaskRewindDrop, protocol.TaskRewindCleanup}) ||
-		!slices.Contains(got, protocol.TaskForkPrepare) {
+	if got := a.fastLaneClaim(); len(got) < 7 || !slices.Equal(got[:7], []string{protocol.TaskRestorePoint, protocol.TaskMaintenance,
+		protocol.TaskRewindCompare, protocol.TaskRewindRows, protocol.TaskRewindDrop, protocol.TaskRewindCleanup,
+		protocol.TaskFindMoment}) || !slices.Contains(got, protocol.TaskForkPrepare) {
 		t.Fatalf("idle claim %v", got)
 	}
 	a.maintBusy.Store(true)

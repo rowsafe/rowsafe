@@ -73,7 +73,10 @@ func ReadRestartAllowed(path string) (map[int]string, error) {
 
 // restartPorts are the ports reported in the heartbeat.
 func (a *Agent) restartPorts() []int {
-	if a.cfg.Sidecar() || a.cfg.RestartAllowFile == "" {
+	if a.cfg.Sidecar() {
+		return a.dockerRestartPorts() // docker_control.go
+	}
+	if a.cfg.RestartAllowFile == "" {
 		return nil
 	}
 	allowed, err := a.allowedClusters() // restart-allowed and the clusters created for forks (fork_helper.go)
@@ -92,8 +95,7 @@ func (a *Agent) restartPorts() []int {
 func (a *Agent) restart(ctx context.Context, db protocol.DatabaseSpec, taskID string, tl *taskLog) (*protocol.RestartResult, error) {
 	host, _ := os.Hostname()
 	if a.cfg.Sidecar() {
-		return nil, fmt.Errorf("Rowsafe can't restart PostgreSQL running in Docker. Restart its container yourself " +
-			"(e.g. `docker compose restart postgres`); Rowsafe notices the restart by itself")
+		return a.dockerRestart(ctx, db, taskID, tl) // docker_control.go
 	}
 	allowed, err := a.allowedClusters() // fork_helper.go
 	if err != nil {
@@ -202,7 +204,10 @@ var errOldHelper = errors.New("old restart helper")
 // "# actions:" line (reported in the heartbeat). A helper without one only
 // restarts.
 func (a *Agent) helperActions() []string {
-	if a.cfg.Sidecar() || a.cfg.RestartHelper == "" || len(a.restartPorts()) == 0 {
+	if a.cfg.Sidecar() {
+		return a.dockerActions() // docker_control.go
+	}
+	if a.cfg.RestartHelper == "" || len(a.restartPorts()) == 0 {
 		return nil
 	}
 	data, err := os.ReadFile(a.cfg.RestartHelper)
