@@ -88,7 +88,9 @@ func (a *Agent) safeCopy(ctx context.Context, db protocol.DatabaseSpec, p protoc
 	super := rc.conn
 	ok := false
 	defer func() {
-		closeConn(context.Background(), super)
+		if super != nil {
+			closeConn(context.Background(), super)
+		}
 		if ok {
 			return
 		}
