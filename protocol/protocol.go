@@ -1080,4 +1080,6 @@ type WhoAmI struct {
 	Org    Org     `json:"org"`
 	APIKey *APIKey `json:"api_key,omitempty"` // nil for the service token
 	Actor  string  `json:"actor"`
+	// OAuth is set for an AI app's OAuth access token (only on /mcp).
+	OAuth *OAuthConnection `json:"oauth,omitempty"`
 }
