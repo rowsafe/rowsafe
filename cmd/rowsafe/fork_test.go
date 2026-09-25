@@ -92,7 +92,7 @@ func TestForkCommands(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 	if !strings.Contains(out, "now (Rowsafe saves a Mark first)") || !strings.Contains(out, "✓ Restore: 1.2 GiB") ||
-		!strings.Contains(out, "shop-staging is ready on db-2:5433") || !strings.Contains(out, "Masked 3 columns in 2 tables (1204 rows)") {
+		!strings.Contains(out, "shop-staging is ready on db-2:5433") || !strings.Contains(out, "Masked 3 columns in 2 tables (1,204 rows)") {
 		t.Fatal(out)
 	}
 	// Another server needs the fingerprint (typed, or --fingerprint off a terminal).

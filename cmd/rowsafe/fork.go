@@ -235,7 +235,7 @@ func forkDone(v protocol.ForkView) string {
 	}
 	s += fmt.Sprintf(", with its own backups. Open it with: rowsafe status %s", v.Name)
 	if v.Masking != nil {
-		s += fmt.Sprintf("\nMasked %d columns in %d tables (%d rows).", v.Masking.Columns, v.Masking.Tables, v.Masking.Rows)
+		s += fmt.Sprintf("\nMasked %d columns in %d tables (%s rows).", v.Masking.Columns, v.Masking.Tables, groupDigits(v.Masking.Rows))
 	}
 	for _, w := range v.Warnings {
 		s += "\nNote: " + w
@@ -289,4 +289,20 @@ func forkPoint(f protocol.ForkView) string {
 		return "from the Mark " + f.Mark
 	}
 	return "as of " + describeTime(f.CreatedAt)
+}
+
+// groupDigits prints 1204 as "1,204".
+func groupDigits(n int64) string {
+	s := fmt.Sprint(n)
+	if n < 0 {
+		return s
+	}
+	var b strings.Builder
+	for i, c := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteRune(c)
+	}
+	return b.String()
 }
