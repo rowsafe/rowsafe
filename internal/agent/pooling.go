@@ -542,6 +542,9 @@ func (a *Agent) pooling(ctx context.Context, db protocol.DatabaseSpec, p protoco
 	if a.cfg.Sidecar() {
 		return nil, errors.New("Rowsafe doesn't install PgBouncer next to PostgreSQL in Docker: run the official PgBouncer image as another service in your compose file, and set ROWSAFE_POOLER_STATS_URL for Rowsafe to monitor it (see https://rowsafe.sh/docs/guides/connection-pooling)")
 	}
+	if !protocol.EngineHas(db.Engine, protocol.FeaturePooling) {
+		return nil, fmt.Errorf("connection pooling isn't available for %s yet", protocol.EngineDisplayName(db.Engine))
+	}
 	poolerMu.Lock()
 	defer poolerMu.Unlock()
 	start := time.Now()
@@ -849,6 +852,9 @@ func (a *Agent) poolerRetarget(ctx context.Context, db protocol.DatabaseSpec, p 
 	}
 	if p.Port < 1 || p.Port > 65535 {
 		return nil, fmt.Errorf("invalid port %d", p.Port)
+	}
+	if !protocol.EngineHas(db.Engine, protocol.FeaturePooling) {
+		return nil, fmt.Errorf("connection pooling isn't available for %s yet", protocol.EngineDisplayName(db.Engine))
 	}
 	poolerMu.Lock()
 	defer poolerMu.Unlock()

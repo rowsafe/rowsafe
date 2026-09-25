@@ -234,6 +234,12 @@ func TestPoolingRefusals(t *testing.T) {
 	if _, err := a.pooling(context.Background(), db, protocol.PoolingParams{Action: "sideways"}, "t", &taskLog{}); err == nil {
 		t.Error("unknown action accepted")
 	}
+	mysql := db
+	mysql.Engine = protocol.EngineMySQL
+	if _, err := a.pooling(context.Background(), mysql, protocol.PoolingParams{Action: protocol.PoolingOn}, "t", &taskLog{}); err == nil ||
+		!strings.Contains(err.Error(), "isn't available") {
+		t.Errorf("MySQL: %v", err)
+	}
 }
 
 func TestPoolerStatus(t *testing.T) {
