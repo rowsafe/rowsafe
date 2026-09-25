@@ -68,6 +68,10 @@ type Config struct {
 	// (ROWSAFE_REWIND_DIR).
 	RewindDir string
 
+	// DockerControlSocket is where the opt-in container control service
+	// listens (docker-sidecar mode; ROWSAFE_DOCKER_CONTROL_SOCKET). Absent:
+	// Rowsafe can't stop or start PostgreSQL's container.
+	DockerControlSocket string
 	// Copies configures Guard's preview and safe copies (copies_state.go).
 	Copies CopiesConfig
 }
@@ -120,6 +124,7 @@ func ConfigFromEnv() (Config, error) {
 	}
 	c.RestartDir = env("ROWSAFE_RESTART_DIR", filepath.Join(c.StateDir, "restart"))
 	c.RewindDir = env("ROWSAFE_REWIND_DIR", filepath.Join(c.StateDir, "rewind"))
+	c.DockerControlSocket = env("ROWSAFE_DOCKER_CONTROL_SOCKET", "/run/rowsafe-control/control.sock")
 	var err error
 	if c.Copies, err = copiesConfigFromEnv(c.StateDir); err != nil {
 		return c, err

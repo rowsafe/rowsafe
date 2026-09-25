@@ -313,8 +313,8 @@ func dropForce(major int) string {
 	return ""
 }
 
-// relInfo is a relation of the database before the migration.
-type relInfo struct {
+// previewRel is a relation of the database before the migration.
+type previewRel struct {
 	name     string
 	kind     byte
 	table    uint32 // an index's table
@@ -334,7 +334,7 @@ LEFT JOIN pg_catalog.pg_index i ON i.indexrelid = c.oid
 WHERE c.relkind IN ('r', 'p', 'm', 'i') AND n.nspname NOT IN ('pg_catalog', 'information_schema')
   AND n.nspname !~ '^pg_toast' AND n.nspname !~ '^pg_temp'`
 
-func snapshotRelations(ctx context.Context, conn *pgx.Conn, sizes bool) (map[uint32]relInfo, error) {
+func snapshotRelations(ctx context.Context, conn *pgx.Conn, sizes bool) (map[uint32]previewRel, error) {
 	q := relSnapshotSQL
 	if sizes {
 		q = `SELECT s.*, CASE WHEN s.relkind IN ('r', 'm') THEN pg_catalog.pg_table_size(s.oid) WHEN s.relkind = 'i' THEN pg_catalog.pg_relation_size(s.oid) ELSE 0 END,
@@ -346,7 +346,7 @@ func snapshotRelations(ctx context.Context, conn *pgx.Conn, sizes bool) (map[uin
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[uint32]relInfo{}
+	out := map[uint32]previewRel{}
 	for rows.Next() {
 		var oid, filenode, table uint32
 		var kind, name string
@@ -358,7 +358,7 @@ func snapshotRelations(ctx context.Context, conn *pgx.Conn, sizes bool) (map[uin
 		if err := rows.Scan(dest...); err != nil {
 			return nil, err
 		}
-		out[oid] = relInfo{name: name, kind: kind[0], table: table, filenode: filenode, size: size, rows: n}
+		out[oid] = previewRel{name: name, kind: kind[0], table: table, filenode: filenode, size: size, rows: n}
 	}
 	return out, rows.Err()
 }

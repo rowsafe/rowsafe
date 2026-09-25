@@ -330,19 +330,6 @@ func printSafeCopy(cp protocol.SafeCopy) {
 	}
 }
 
-// csvList collects repeated or comma-separated flag values.
-type csvList []string
-
-func (s *csvList) String() string { return strings.Join(*s, ",") }
-func (s *csvList) Set(v string) error {
-	for _, p := range strings.Split(v, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			*s = append(*s, p)
-		}
-	}
-	return nil
-}
-
 func copiesCreateCmd(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("copies create", flag.ContinueOnError)
 	var allow csvList

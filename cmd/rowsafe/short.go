@@ -132,6 +132,7 @@ its own (rowsafe set --proof-schedule changes when); this runs it now.`,
 func markCmd(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("mark", flag.ContinueOnError)
 	noWait := fs.Bool("no-wait", false, "return once queued")
+	asJSON := fs.Bool("json", false, "print the Mark as JSON (progress goes to stderr)")
 	pos, err := positionals(fs, args)
 	if err != nil {
 		return err
@@ -142,6 +143,9 @@ func markCmd(ctx context.Context, c *client.Client, args []string) error {
 	}
 	if label == "" {
 		label = "manual-" + time.Now().UTC().Format("20060102-150405")
+	}
+	if *asJSON {
+		return createRestorePointJSON(ctx, c, db, label, *noWait)
 	}
 	return createRestorePoint(ctx, c, db, label, *noWait)
 }
