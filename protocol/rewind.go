@@ -57,6 +57,12 @@ type RewindTarget struct {
 	// for a Mark (pgBackRest can't pick the backup for --type=name) and
 	// optional for a Time.
 	BackupSet string `json:"backup_set,omitempty"`
+	// XID (Find the moment) stops recovery just before this transaction
+	// commits: everything up to it, not including it (pgbackrest
+	// --type=xid --target=XID --target-exclusive). Time is then the
+	// transaction's commit time, used to pick BackupSet and to show the
+	// point; Time and XID come together, without Mark.
+	XID uint32 `json:"xid,omitempty"`
 	// Timeline is pgbackrest --target-timeline: "" (PostgreSQL's default,
 	// latest), "current" (the backup's timeline) or a timeline number. Only
 	// needed to reach a point before an earlier in-place rewind happened.
