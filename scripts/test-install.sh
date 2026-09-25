@@ -65,12 +65,17 @@ case \${1:-} in
   inspect)
     printf '{\n  "server_version": "17.6 (Debian 17.6-1)",\n  "data_directory": "/var/lib/postgresql/17/main",\n  "archive_mode": "off"\n}\n' ;;
   run) while :; do sleep 1; done ;;
-  setup)
+  setup|mongodb)
     # Answers from /tmp/rowsafe-fake: CMD.out is printed, CMD.rc holds exit
-    # codes (one per line, used in turn; the last one sticks).
+    # codes (one per line, used in turn; the last one sticks). MongoDB
+    # helpers are mongodb-CMD; a password on stdin goes to CMD.stdin.
     f=/tmp/rowsafe-fake
+    pre=''
+    [ "\$1" != mongodb ] || pre=mongodb-
     shift
-    echo "\$*" >>"\$f/calls"
+    echo "\$pre\$*" >>"\$f/calls"
+    case " \$* " in *" --admin-user "*) cat >"\$f/\$pre\$1.stdin" ;; esac
+    set -- "\$pre\$@"
     if [ "\$(id -un)" != postgres ] || [ -z "\${ROWSAFE_REPO_CIPHER_PASS:-}" ] || [ -n "\${ROWSAFE_TEST_LEAK:-}" ]; then
       echo "setup must run as postgres with only agent.env" >&2
       exit 1
@@ -1067,6 +1072,59 @@ EOF
   expect_fail "--protect-port needs --protect" "only goes with --protect" "$INSTALLER" --protect-port 5433
   expect_fail "--protect checks the name" "lowercase letters" "$INSTALLER" --protect Bad_Name
   pass "turning on backups: prompts, restarts, --protect, --no-setup"
+  mongodb_flow_tests
+}
+
+# mongodb_flow_tests: a MongoDB server found by discover (engine column):
+# its replica set and Rowsafe's own MongoDB user come before the plan.
+mongodb_flow_tests() {
+  echo "  -- MongoDB"
+  mongo='27017\t-\t8\t-\t/var/lib/mongodb\t52428800\tshop\tno\t-\tshop\t50.0 MiB\tmongod.service\t-\tmongodb'
+  rs='port=27017\nversion=8.0.4\nreplset=rs0\ninitiated=yes\nprimary=yes\nauth=on\nlogin=ok\nconfig=/etc/mongod.conf\ndbpath=/var/lib/mongodb\nkeyfile=-\nunit=mongod.service'
+  standalone='port=27017\nversion=8.0.4\nreplset=-\ninitiated=no\nprimary=yes\nauth=off\nlogin=not-needed\nconfig=/etc/mongod.conf\ndbpath=/var/lib/mongodb\nkeyfile=-\nunit=mongod.service'
+  noLogin='port=27017\nversion=8.0.4\nreplset=rs0\ninitiated=yes\nprimary=yes\nauth=on\nlogin=missing\nconfig=/etc/mongod.conf\ndbpath=/var/lib/mongodb\nkeyfile=-\nunit=mongod.service'
+  mplan='MongoDB 8.0.4 on port 27017: 50.0 MiB, 1 database (shop).\n\nWhat Rowsafe will change:\n  - Prepare your bucket for this database\n\nNo downtime: MongoDB does not need a restart.'
+
+  # 1. A replica set with Rowsafe's login: straight to the plan, with the engine.
+  scenario "discover_out=$mongo" "mongodb-status_out=$rs" "plan_out=$mplan" "wait_out=$done_" "status_out=$status"
+  tty_ok "MongoDB replica set: plan, turn on" "Name it in Rowsafe\t\nTurn on backups for shop now?\t\n" "$INSTALLER"
+  has "Found MongoDB 8 on port 27017 (50.0 MiB; databases: shop)"
+  has "No downtime: MongoDB does not need a restart."
+  called "mongodb-status --port 27017"
+  called "plan --name shop --port 27017 --id-file"
+  called "--engine mongodb"
+  not_called "socket-dir -"
+  not_called "mongodb-login"
+  called "apply --database db_fake"
+
+  # 2. A standalone server: explained, and a no changes nothing.
+  scenario "discover_out=$mongo" "mongodb-status_out=$standalone"
+  tty_ok "MongoDB standalone: declined" "Name it in Rowsafe\t\nTurn on the replica set and restart MongoDB now? [y/N]\t\n" "$INSTALLER"
+  has "runs as a standalone server"
+  has "OK, nothing was changed."
+  not_called "plan"
+  not_called "mongodb-initiate"
+
+  # 3. Access control on and no login yet: an administrator signs in once;
+  #    the password goes to the agent on stdin and is never printed.
+  scenario "discover_out=$mongo" "mongodb-status_out=$noLogin" "mongodb-login_rc=11\n0" \
+    "mongodb-login_out=Created MongoDB user rowsafe for Rowsafe" "plan_out=$mplan"
+  tty_ok "MongoDB login with an administrator" \
+    "Name it in Rowsafe\t\nMongoDB administrator user [admin]\troot\nPassword for root\tAdm1n-S3cret\nTurn on backups for shop now?\tn\n" "$INSTALLER"
+  called "mongodb-login --port 27017 --admin-user root"
+  [ "$(cat "$F/mongodb-login.stdin")" = Adm1n-S3cret ] || fail "$name: the administrator's password didn't reach the agent on stdin"
+  lacks "Adm1n-S3cret"
+  ! grep -rq "Adm1n-S3cret" /etc/rowsafe /var/lib/rowsafe 2>/dev/null || fail "$name: the administrator's password was saved"
+  called "plan --name shop --port 27017"
+
+  # 4. --protect never restarts a standalone MongoDB without --mongodb-replica-set.
+  scenario "discover_out=$mongo" "mongodb-status_out=$standalone"
+  expect_fail "--protect with a standalone MongoDB" "isn't ready for backups" "$INSTALLER" --protect shop
+  not_called "plan"
+  scenario "discover_out=$mongo" "mongodb-status_out=$standalone"
+  expect_fail "--no-mongodb-replica-set" "isn't ready for backups" "$INSTALLER" --protect shop --no-mongodb-replica-set
+  grep -q "Skipped (--no-mongodb-replica-set)" "$W/out" || fail "--no-mongodb-replica-set: not explained"
+  pass "MongoDB: engine in the plan, standalone explained, administrator login once, --protect never restarts"
 }
 
 # ------------------------------------------------------------ restarts

@@ -84,7 +84,9 @@ func (l Login) uri(port int) string {
 	}
 	host := l.Host
 	if host == "" {
-		host = "127.0.0.1"
+		// ROWSAFE_MONGODB_HOST: the database container's name for a Docker
+		// sidecar; the server itself (127.0.0.1) everywhere else.
+		host = cmpOr(strings.TrimSpace(os.Getenv("ROWSAFE_MONGODB_HOST")), "127.0.0.1")
 	}
 	u := url.URL{Scheme: "mongodb", Host: net.JoinHostPort(host, strconv.Itoa(port)), Path: "/"}
 	q := url.Values{"directConnection": {"true"}}
