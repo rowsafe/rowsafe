@@ -228,6 +228,12 @@ func (a *Agent) adopt(ctx context.Context, db protocol.DatabaseSpec, p protocol.
 	if err := a.writeConfig(db, in); err != nil {
 		return res, err
 	}
+	if !a.cfg.Sidecar() && a.cfg.SecondCopy() {
+		// archive_command queues WAL for the second copy here.
+		if dir, err := a.cfg.secondCopyQueue(db.Stanza); err == nil {
+			_ = os.MkdirAll(dir, 0o700)
+		}
+	}
 	if a.cfg.Sidecar() {
 		// archive_command writes here as soon as it is in effect.
 		tl.Printf("creating WAL spool directory %s", pi.SpoolDir)
