@@ -69,6 +69,7 @@ type Agent struct {
 	confMu    sync.Mutex
 	syncTried sync.Map // stanza -> time of the last repo move attempt
 	syncBusy  atomic.Bool
+	stanzaMu  sync.Mutex // ensureStanza
 }
 
 func New(cfg Config, logger *slog.Logger) *Agent {

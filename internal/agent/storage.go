@@ -375,6 +375,9 @@ func (a *Agent) stanzaCreated(stanza string) {
 
 // ensureStanza creates the stanza in a repository the host just moved to.
 func (a *Agent) ensureStanza(ctx context.Context, db protocol.DatabaseSpec, tl *taskLog) error {
+	// One at a time: the heartbeat's move and a backup may both get here.
+	a.stanzaMu.Lock()
+	defer a.stanzaMu.Unlock()
 	if !a.stanzaPending(db.Stanza) {
 		return nil
 	}
