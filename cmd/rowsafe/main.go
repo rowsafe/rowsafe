@@ -103,6 +103,21 @@ Move in: bring a database from DigitalOcean, RDS, Supabase, Neon... onto your se
   rowsafe migrate finish ID [--yes]          forget the old database's connection string
   Advanced (restore by hand or to another server): https://rowsafe.sh/docs/guides/restore
 
+Updates and upgrades: PostgreSQL kept current, with a Mark first
+  rowsafe update [NAME] [--yes] [--no-wait]  install the newest minor release (e.g. 16.9 -> 16.10) and restart
+                                             PostgreSQL; asks you to type the name. Only on servers where the
+                                             installer allowed updates (--allow-updates)
+  rowsafe update [NAME] --auto on|off [--timezone ZONE]
+                                             install minor releases by itself, Sundays at 03:00 (your time zone)
+  rowsafe upgrade [NAME] [--json]            versions, newer majors, the latest rehearsal, an upgrade to undo
+  rowsafe upgrade [NAME] [--to 18] [--rehearse-only] [--mode safe|fast] [--yes]
+                                             check, rehearse on a restored copy (production isn't touched),
+                                             then upgrade. Safe keeps the old version for an instant undo;
+                                             fast hard-links the data (undo restores from the backup)
+  rowsafe upgrade undo [NAME] [--yes]        go back to the version the upgrade kept (7 days)
+  rowsafe upgrade cleanup [NAME] [--yes]     remove the kept version (frees disk; no undo afterwards)
+  (Security updates and reboots: rowsafe fix, on servers where the installer allowed them)
+
 Proof: the weekly restore test
   rowsafe proof [NAME] [--no-wait]           restore the latest backup to a scratch copy and check it, now
   rowsafe proofs [NAME]                      restore test results
@@ -288,6 +303,11 @@ func dispatch(ctx context.Context, args []string) error {
 		return rewindCmd(ctx, c, rest)
 	case "migrate": // move in from a managed database (migrate.go)
 		return migrateCmd(ctx, c, rest)
+	// Updates and upgrades (upgrade.go)
+	case "update":
+		return updateCmd(ctx, c, rest)
+	case "upgrade":
+		return upgradeCmd(ctx, c, rest)
 	// Proof
 	case "proof":
 		return proofCmd(ctx, c, rest)

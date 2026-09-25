@@ -179,6 +179,9 @@ type HeartbeatRequest struct {
 	RestartActions []string `json:"restart_actions,omitempty"`
 	// Rewinds are the live copies and kept data directories on this host.
 	Rewinds []RewindState `json:"rewinds,omitempty"`
+	// Software is PostgreSQL's versions, pending updates and upgrades on
+	// this host (upgrade.go); sent about every hour.
+	Software *SoftwareReport `json:"software,omitempty"`
 	// DockerControl: docker-sidecar agents only (see protocol/docker.go).
 	DockerControl *DockerControlReport `json:"docker_control,omitempty"`
 }
@@ -518,6 +521,10 @@ func TaskTimeout(taskType string) time.Duration {
 		return 2 * time.Hour
 	case TaskRewindUndo: // stop, two renames, start
 		return time.Hour
+	case TaskUpgradeCheck, TaskUpgradeCleanup, TaskPGUpdate, TaskReboot:
+		return 30 * time.Minute
+	case TaskSecurityUpdates:
+		return 2 * time.Hour
 	case TaskFindMoment: // reads the WAL of the range from the repository
 		return time.Hour
 	case TaskMigrate: // a switchover waits for the sync to catch up (migrate.go)
