@@ -53,3 +53,10 @@ type MySQLInspect struct {
 // which rebuilds a fragmented InnoDB table to give its free space back.
 // It copies the table: the agent refuses when the disk can't hold it.
 const MaintOptimize = "optimize"
+
+// mysqlFeatures are what MySQL and MariaDB support (EngineCapabilities).
+var mysqlFeatures = EngineFeatures{
+	Backups: true, PointInTime: true, Proof: true,
+	RewindCopy: true, RewindRows: true, Marks: true,
+	Monitoring: true, Fixes: true,
+}
