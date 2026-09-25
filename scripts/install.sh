@@ -1241,7 +1241,7 @@ allow_create_clusters() {
 
 disallow_create_clusters() {
   remove_create_cluster
-  if [ -f "$CREATE_ALLOW_FILE" ]; then
+  if [ -d "$CONFIG_DIR" ]; then
     {
       echo "# Creating PostgreSQL clusters for forks is off on this server."
       echo "# Run the installer with --allow-create-cluster to turn it on."

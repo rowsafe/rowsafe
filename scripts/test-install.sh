@@ -987,7 +987,7 @@ EOF
   scenario "discover_out=$shop" "plan_out=$plan" "apply_out=Done: the backup settings are in place." apply_rc=10 \
     "wait_out=$done_" "status_out=$status"
   tty_ok "turn on backups, restart now" \
-    "Allow Rowsafe to restart or stop PostgreSQL when you ask?\tn\nName it in Rowsafe [shop]\tTV Hub\nName it in Rowsafe\t\nTurn on backups for shop now? [Y/n]\t\nRestart PostgreSQL now? [y/N]\ty\n" \
+    "Allow Rowsafe to restart or stop PostgreSQL when you ask?\tn\nAllow Rowsafe to create a new PostgreSQL cluster here\tn\nName it in Rowsafe [shop]\tTV Hub\nName it in Rowsafe\t\nTurn on backups for shop now? [Y/n]\t\nRestart PostgreSQL now? [y/N]\ty\n" \
     env ROWSAFE_TEST_LEAK=1 "$INSTALLER"
   has "Looking for PostgreSQL on this server"
   has "Found PostgreSQL 17 on port 5432 (1.2 GiB; databases: shop)"
