@@ -100,6 +100,8 @@ func validateMaintenance(p protocol.MaintenanceParams) error {
 		if !slotNameRE.MatchString(p.Slot) {
 			return fmt.Errorf("invalid replication slot name %q", p.Slot)
 		}
+	case protocol.MaintCreateIndex, protocol.MaintDropInvalidIndex, protocol.MaintSyncSequence, protocol.MaintSetTableStorageParams: // advisor
+		return validateAdvisorMaintenance(p)
 	}
 	return nil
 }
@@ -285,6 +287,8 @@ func (a *Agent) maintenance(ctx context.Context, db protocol.DatabaseSpec, p pro
 		err = m.signalBackend(ctx)
 	case protocol.MaintDropReplicationSlot:
 		err = m.dropSlot(ctx)
+	case protocol.MaintCreateIndex, protocol.MaintDropInvalidIndex, protocol.MaintSyncSequence, protocol.MaintSetTableStorageParams: // advisor
+		err = m.advisorAction(ctx)
 	}
 	m.res.DurationMs = time.Since(start).Milliseconds()
 	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
