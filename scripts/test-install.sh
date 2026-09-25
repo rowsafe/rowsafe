@@ -1279,9 +1279,19 @@ firewall_tests() {
   apt-get install -y -qq --no-install-recommends nftables >/dev/null
   H=/usr/local/lib/rowsafe/rowsafe-firewall
   D=/var/lib/rowsafe/firewall
+  # The restart tests purged everything: install again, with a running agent.
+  scenario
+  expect_ok "install again for the firewall tests" configured "$INSTALLER" rse_secrettoken123
+  echo '{"host_id":"host_1","agent_token":"rsa_x"}' >/var/lib/rowsafe/agent.json
+  chown postgres:postgres /var/lib/rowsafe/agent.json
+  runuser -u postgres -- /opt/rowsafe/rowsafe-agent run >/dev/null 2>&1 &
+  sleep 1
   scenario "discover_out=$shop"
   expect_ok "--allow-firewall" "$INSTALLER" --allow-firewall
-  grep -q "Rowsafe may limit who can reach PostgreSQL's port when you ask" "$W/out" || fail "--allow-firewall not confirmed"
+  grep -q "Rowsafe may limit who can reach PostgreSQL's port when you ask" "$W/out" || {
+    cat "$W/out" >&2
+    fail "--allow-firewall not confirmed"
+  }
   grep -qx "5432" /etc/rowsafe/firewall-allowed || fail "firewall allow list lacks 5432"
   [ "$(stat -c '%U %a' /etc/rowsafe/firewall-allowed)" = "root 644" ] || fail "firewall allow list ownership/mode"
   [ "$(stat -c '%U %a' "$H")" = "root 755" ] || fail "firewall helper ownership/mode"
