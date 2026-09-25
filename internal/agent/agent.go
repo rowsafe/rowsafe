@@ -220,7 +220,8 @@ var fastLaneTypes = []string{protocol.TaskRestorePoint}
 // for in the dashboard (compare, bring back rows, delete a copy or the kept
 // data), so they never wait behind a backup or a copy being restored.
 var sideTypes = []string{protocol.TaskMaintenance, protocol.TaskRewindCompare, protocol.TaskRewindRows,
-	protocol.TaskRewindDrop, protocol.TaskRewindCleanup}
+	protocol.TaskRewindDrop, protocol.TaskRewindCleanup,
+	protocol.TaskSettings}
 
 // fastLaneClaim is what the fast lane asks for: restore points, and a side
 // task unless one is running already. Side tasks run beside the lane, one
