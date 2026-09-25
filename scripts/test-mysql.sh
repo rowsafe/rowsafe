@@ -36,7 +36,7 @@ chmod 0644 "$work/certs/private.key" "$work/certs/public.crt"
 docker run -d --label "$proj" --network "$net" --network-alias minio --name "$proj-minio" \
   -e MINIO_ROOT_USER=rowsafe -e MINIO_ROOT_PASSWORD=rowsafe-secret-key \
   -v "$work/certs:/root/.minio/certs:ro" minio/minio:latest server /data >/dev/null
-for i in $(seq 1 30); do
+for _ in $(seq 1 30); do
   docker run --rm --label "$proj" --network "$net" --entrypoint sh minio/mc:latest -c \
     'mc --insecure alias set m https://minio:9000 rowsafe rowsafe-secret-key >/dev/null && mc --insecure mb -p m/backups >/dev/null' \
     >/dev/null 2>&1 && break
@@ -69,7 +69,7 @@ for target in $targets; do
   # shellcheck disable=SC2086
   docker run -d --label "$proj" --network "$net" --name "$name" -e "$envpw=root-secret-$$" \
     -v "$data:/var/lib/mysql" -v "$sock:/var/run/mysqld" "$image:$version" $server_args >/dev/null
-  for i in $(seq 1 90); do
+  for _ in $(seq 1 90); do
     docker logs "$name" 2>&1 | grep -q "port: 3306" && break
     sleep 2
   done
