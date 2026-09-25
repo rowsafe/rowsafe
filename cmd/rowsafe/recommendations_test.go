@@ -36,7 +36,10 @@ func TestRecommendationsCommand(t *testing.T) {
 	var dismissBody protocol.DismissRecommendationRequest
 	inner := f.handler(t)
 	mux := http.NewServeMux()
-	j := func(w http.ResponseWriter, v any) { w.Header().Set("Content-Type", "application/json"); _ = json.NewEncoder(w).Encode(v) }
+	j := func(w http.ResponseWriter, v any) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(v)
+	}
 	mux.HandleFunc("GET /v1/recommendations", func(w http.ResponseWriter, r *http.Request) {
 		top := testRecommendations()[0]
 		j(w, protocol.RecommendationsOverview{Databases: []protocol.DatabaseRecommendations{{Database: "shop", Host: "db1", Count: 3, Critical: 1, Top: &top}}})
