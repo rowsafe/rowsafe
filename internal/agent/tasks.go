@@ -117,14 +117,19 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 		return runRewind(ctx, task, tl, db, a.rewindUndo)
 	case protocol.TaskRewindCleanup:
 		return runRewind(ctx, task, tl, db, a.rewindCleanup)
+	case protocol.TaskPGUpdate, protocol.TaskSecurityUpdates, protocol.TaskReboot, protocol.TaskUpgradeCheck,
+		protocol.TaskUpgradeRehearsal, protocol.TaskUpgrade, protocol.TaskUpgradeUndo, protocol.TaskUpgradeCleanup:
+		return a.runUpgradeTask(ctx, task, tl, db) // upgrade_tasks.go
 	case protocol.TaskFindMoment:
 		return runRewind(ctx, task, tl, db, a.findMoment)
+	case protocol.TaskMigrate, protocol.TaskMigrateCopy: // move in (migrate.go)
+		return a.runMigrate(ctx, task, db, tl)
 	case protocol.TaskPreviewMigration: // Guard (copies_*.go)
 		return runRewind(ctx, task, tl, db, a.previewMigration)
 	case protocol.TaskSafeCopy:
 		return runRewind(ctx, task, tl, db, a.safeCopy)
 	case protocol.TaskCopySchema:
-		return runRewind(ctx, task, tl, db, a.copySchema)
+		return runRewind(ctx, task, tl, db, a.readCopySchema)
 	}
 	return nil, fmt.Errorf("unsupported task type %q (agent %s)", task.Type, Version)
 }

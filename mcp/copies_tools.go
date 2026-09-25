@@ -100,6 +100,23 @@ type SafeCopiesOutput struct {
 
 func (t *tools) addCopiesTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
+		Name:        "get_preview",
+		Description: "The result of a migration preview (preview_migration), by ID.",
+		Annotations: readOnly("Migration preview"),
+	}, t.getPreview)
+	sdk.AddTool(s, &sdk.Tool{
+		Name:        "list_safe_copies",
+		Description: "A database's safe copies (masked copies to test against): status, where to connect, and when each is deleted. Passwords are only shown when a copy is made.",
+		Annotations: readOnly("Safe copies"),
+	}, t.listSafeCopies)
+	// The rest make requests an app connected with Sign in with Rowsafe
+	// (OAuth: read, and Marks when allowed) may not make: don't offer them
+	// there. Locally, and with an API key, they are always offered: they
+	// never touch production.
+	if t.opts.Remote && !t.opts.AllowWrites {
+		return
+	}
+	sdk.AddTool(s, &sdk.Tool{
 		Name: "preview_migration",
 		Description: "Run a migration's SQL on a fresh copy of the database, restored from its backups on its own server, and report what it would do to production: " +
 			"each statement's time, locks (and what they block), tables rewritten, indexes built, rows changed, with a verdict (safe, careful, dangerous, or failed) and concrete suggestions. " +
@@ -109,11 +126,6 @@ func (t *tools) addCopiesTools(s *sdk.Server) {
 			p["wait_seconds"].Minimum, p["wait_seconds"].Maximum = ptr(0.0), ptr(t.opts.MaxWait.Seconds())
 		}),
 	}, t.previewMigration)
-	sdk.AddTool(s, &sdk.Tool{
-		Name:        "get_preview",
-		Description: "The result of a migration preview (preview_migration), by ID.",
-		Annotations: readOnly("Migration preview"),
-	}, t.getPreview)
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "create_safe_copy",
 		Description: "Make a safe copy: a masked copy of the database (emails, names, phones, addresses, secrets... replaced with realistic fakes on the database server, before it opens) " +
@@ -126,11 +138,6 @@ func (t *tools) addCopiesTools(s *sdk.Server) {
 			p["hours"].Minimum, p["hours"].Maximum = ptr(0.0), ptr(168.0)
 		}),
 	}, t.createSafeCopy)
-	sdk.AddTool(s, &sdk.Tool{
-		Name:        "list_safe_copies",
-		Description: "A database's safe copies (masked copies to test against): status, where to connect, and when each is deleted. Passwords are only shown when a copy is made.",
-		Annotations: readOnly("Safe copies"),
-	}, t.listSafeCopies)
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "delete_safe_copy",
 		Description: "Delete a safe copy you no longer need (frees disk on the database server). Never affects production.",

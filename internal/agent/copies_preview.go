@@ -799,13 +799,11 @@ func redactMessage(msg, sql string) string {
 	})
 }
 
-func quoteLiteral(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
-
 // ---- copy_schema ----
 
-// copySchema lists production's tables and columns, for reviewing masking
+// readCopySchema lists production's tables and columns, for reviewing masking
 // rules: catalog queries only, no row is read.
-func (a *Agent) copySchema(ctx context.Context, db protocol.DatabaseSpec, _ protocol.CopySchemaParams, tl *taskLog) (*protocol.CopySchemaResult, error) {
+func (a *Agent) readCopySchema(ctx context.Context, db protocol.DatabaseSpec, _ protocol.CopySchemaParams, tl *taskLog) (*protocol.CopySchemaResult, error) {
 	t := a.target(db)
 	conn, err := t.Connect(ctx, "postgres")
 	if err != nil {

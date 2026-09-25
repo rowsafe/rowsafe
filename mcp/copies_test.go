@@ -104,7 +104,7 @@ func TestCopiesTools(t *testing.T) {
 
 	// On the remote endpoint the tool runs inside Rowsafe: it never makes a
 	// password, and sends the user to the dashboard to set one.
-	remote := NewServer(client.New(api.URL, "rsk_test"), Options{MaxWait: 5 * time.Second, Remote: true})
+	remote := NewServer(client.New(api.URL, "rsk_test"), Options{MaxWait: 5 * time.Second, Remote: true, AllowWrites: true})
 	rst, rct := sdk.NewInMemoryTransports()
 	rss, err := remote.Connect(ctx, rst, nil)
 	if err != nil {
@@ -127,5 +127,30 @@ func TestCopiesTools(t *testing.T) {
 	if created.PasswordVerifier != "" || rout.Password != "" || strings.Contains(rout.ConnectionString, ":") && strings.Contains(rout.ConnectionString, "@") && strings.Count(rout.ConnectionString, ":") > 2 ||
 		!strings.Contains(rout.Guidance, "?copy=sc_1") || rout.PasswordURL == "" {
 		t.Errorf("remote made a password or no dashboard link: request %+v output %+v", created, rout)
+	}
+
+	// An app signed in with OAuth (read, maybe Marks) isn't offered the tools
+	// that post: the API would refuse them.
+	oauth := NewServer(client.New(api.URL, "rso_test"), Options{MaxWait: 5 * time.Second, Remote: true, AllowRestorePoints: true})
+	ost, oct := sdk.NewInMemoryTransports()
+	oss, err := oauth.Connect(ctx, ost, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer oss.Close()
+	ocs, err := sdk.NewClient(&sdk.Implementation{Name: "test"}, nil).Connect(ctx, oct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ocs.Close()
+	otools, err := ocs.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range otools.Tools {
+		switch tool.Name {
+		case "preview_migration", "create_safe_copy", "delete_safe_copy":
+			t.Errorf("OAuth connection offered %s", tool.Name)
+		}
 	}
 }

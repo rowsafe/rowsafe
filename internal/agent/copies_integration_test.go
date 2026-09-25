@@ -23,7 +23,7 @@ import (
 // stands in for a restored copy: the preview and masking code only needs a
 // cluster it may change.
 
-func testCluster(t *testing.T) (pginspect.Target, *pgx.Conn) {
+func copiesCluster(t *testing.T) (pginspect.Target, *pgx.Conn) {
 	t.Helper()
 	url := os.Getenv("ROWSAFE_TEST_DATABASE_URL")
 	if url == "" {
@@ -53,7 +53,7 @@ func testCluster(t *testing.T) (pginspect.Target, *pgx.Conn) {
 
 // scratchDB creates a database dropped at the end of the test, and makes
 // sure the Guard roles are dropped too.
-func scratchDB(t *testing.T, conn *pgx.Conn, roles ...string) string {
+func copiesScratchDB(t *testing.T, conn *pgx.Conn, roles ...string) string {
 	t.Helper()
 	ctx := context.Background()
 	name := fmt.Sprintf("rowsafe_copies_test_%d", time.Now().UnixNano()%1_000_000_000)
@@ -74,7 +74,7 @@ func scratchDB(t *testing.T, conn *pgx.Conn, roles ...string) string {
 	return name
 }
 
-func execAll(t *testing.T, tgt pginspect.Target, db, sql string) {
+func copiesExec(t *testing.T, tgt pginspect.Target, db, sql string) {
 	t.Helper()
 	c, err := copyConnect(context.Background(), tgt, db)
 	if err != nil {
@@ -86,7 +86,7 @@ func execAll(t *testing.T, tgt pginspect.Target, db, sql string) {
 	}
 }
 
-func testAgent(t *testing.T, pgUser string) *Agent {
+func copiesAgent(t *testing.T, pgUser string) *Agent {
 	return &Agent{cfg: Config{StateDir: t.TempDir(), PGUser: pgUser}, log: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))}
 }
 
@@ -112,16 +112,16 @@ func runTestPreview(t *testing.T, a *Agent, super pginspect.Target, db, sql stri
 }
 
 func TestPreviewOnCopy(t *testing.T) {
-	tgt, conn := testCluster(t)
+	tgt, conn := copiesCluster(t)
 	ctx := context.Background()
-	db := scratchDB(t, conn)
-	execAll(t, tgt, db, `
+	db := copiesScratchDB(t, conn)
+	copiesExec(t, tgt, db, `
 		CREATE TABLE users (id bigserial PRIMARY KEY, email text UNIQUE NOT NULL, phone text);
 		CREATE TABLE orders (id bigserial PRIMARY KEY, user_id bigint REFERENCES users, total numeric NOT NULL, note text);
 		INSERT INTO users (email, phone) SELECT 'user' || g || '@corp.example', '+1 555 01' || lpad(g::text, 4, '0') FROM generate_series(1, 2000) g;
 		INSERT INTO orders (user_id, total) SELECT 1 + g % 2000, g * 1.5 FROM generate_series(1, 200000) g;
 		ANALYZE;`)
-	a := testAgent(t, tgt.User)
+	a := copiesAgent(t, tgt.User)
 	if _, err := conn.Exec(ctx, "CREATE ROLE "+previewRole+" LOGIN"); err != nil {
 		t.Fatal(err)
 	}
@@ -242,10 +242,10 @@ COMMIT;`)
 }
 
 func TestMaskCopy(t *testing.T) {
-	tgt, conn := testCluster(t)
+	tgt, conn := copiesCluster(t)
 	ctx := context.Background()
-	db := scratchDB(t, conn)
-	execAll(t, tgt, db, `
+	db := copiesScratchDB(t, conn)
+	copiesExec(t, tgt, db, `
 		CREATE TABLE users (id bigserial PRIMARY KEY, email text UNIQUE NOT NULL, first_name text, phone text NOT NULL,
 			password_digest text, signup_ip inet, notes text, plan text, birth_date date,
 			email_lower text GENERATED ALWAYS AS (lower(email)) STORED);
@@ -260,7 +260,7 @@ func TestMaskCopy(t *testing.T) {
 		INSERT INTO orders (customer_email, total) SELECT 'user' || (1 + g % 3000) || '@corp.example', g FROM generate_series(1, 9000) g;
 		CREATE MATERIALIZED VIEW user_emails AS SELECT email FROM users;
 		ANALYZE;`)
-	a := testAgent(t, tgt.User)
+	a := copiesAgent(t, tgt.User)
 	plan := protocol.MaskingPlan{Mode: protocol.MaskingRules, Rules: []protocol.MaskingRule{
 		{DB: db, Table: "public.users", Column: "phone", Strategy: masking.Null},      // NOT NULL: skipped
 		{DB: db, Table: "public.users", Column: "plan", Strategy: masking.Keep},       // kept

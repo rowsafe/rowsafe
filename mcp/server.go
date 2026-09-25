@@ -95,9 +95,10 @@ type tools struct {
 func ptr[T any](v T) *T { return &v }
 
 // readOnly annotates a tool that never changes anything. The tools' world is
-// the user's own Rowsafe organization, not the open internet.
+// the user's own Rowsafe organization, not the open internet. All three
+// hints are explicit (directories such as ChatGPT's review them).
 func readOnly(title string) *sdk.ToolAnnotations {
-	return &sdk.ToolAnnotations{Title: title, ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: ptr(false)}
+	return &sdk.ToolAnnotations{Title: title, ReadOnlyHint: true, DestructiveHint: ptr(false), IdempotentHint: true, OpenWorldHint: ptr(false)}
 }
 
 func writes(title string, destructive, idempotent bool) *sdk.ToolAnnotations {
@@ -133,7 +134,7 @@ func apiError(err error) error {
 		case http.StatusPaymentRequired:
 			return fmt.Errorf("plan limit reached (402): %s. The user can upgrade the organization's plan in the Rowsafe dashboard; get_org shows limits and usage", ae.Msg)
 		case http.StatusForbidden:
-			return fmt.Errorf("forbidden (403): %s. If this API key is read-only it cannot queue tasks or change settings: ask the user to run the equivalent `rowsafe` command themselves or to connect with a key that has write access", ae.Msg)
+			return fmt.Errorf("forbidden (403): %s. A read-only API key, or an app connected with \"Sign in with Rowsafe\", cannot queue tasks or change settings: ask the user to do it in the Rowsafe dashboard or with the equivalent `rowsafe` command", ae.Msg)
 		case http.StatusNotFound:
 			return fmt.Errorf("not found (404): %s. Names and IDs are per organization; list_databases, list_hosts and list_tasks show valid ones", ae.Msg)
 		case http.StatusConflict:

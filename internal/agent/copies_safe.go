@@ -42,7 +42,7 @@ func (a *Agent) safeCopy(ctx context.Context, db protocol.DatabaseSpec, p protoc
 	if p.Masking.Mode != protocol.MaskingRules && p.Masking.Mode != protocol.MaskingNone {
 		return nil, fmt.Errorf("unknown masking mode %q", p.Masking.Mode)
 	}
-	listen, err := resolveListen(p.Access.Listen, hostAddresses())
+	listen, err := resolveListen(p.Access.Listen, copyAddresses())
 	if err != nil {
 		return nil, err
 	}

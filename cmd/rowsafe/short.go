@@ -36,6 +36,14 @@ Rewind: continuous backups, restore to any second
   rowsafe rewind [NAME]              restore a copy at any second, compare it, bring rows back,
                                      or rewind the whole database (rowsafe help rewind)
 
+Move in: leave your managed database, keep the safety net
+  rowsafe migrate start [NAME]       move a database in from DigitalOcean, RDS, Supabase, Neon...
+                                     with near-zero downtime (rowsafe help migrate)
+
+Updates and upgrades
+  rowsafe update [NAME]              install PostgreSQL's newest minor release (asks first)
+  rowsafe upgrade [NAME] --to 18     check, rehearse on a copy, then upgrade (rowsafe help upgrade)
+
 Proof: the weekly restore test
   rowsafe proof [NAME]               run the restore test now
   rowsafe proofs [NAME]              results

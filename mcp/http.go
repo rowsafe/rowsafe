@@ -3,9 +3,11 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"time"
 
@@ -25,14 +27,23 @@ type HTTPOptions struct {
 	// MaxWait caps wait_seconds. Keep it below the HTTP server's write timeout.
 	MaxWait time.Duration
 	Logger  *slog.Logger
+	// ResourceMetadataURL turns on "Sign in with Rowsafe": OAuth access
+	// tokens (rso_...) are accepted besides API keys, and a request without
+	// valid credentials gets a 401 whose WWW-Authenticate challenge points
+	// clients at this OAuth protected resource metadata document (RFC 9728),
+	// from which they discover the authorization server.
+	ResourceMetadataURL string
 }
 
 type clientKey struct{}
 
 // NewHTTPHandler serves MCP over Streamable HTTP. Every request must carry an
-// org API key (Authorization: Bearer rsk_...); the tools act as that key
-// through the user API served by api. Write tools are always listed: the API
-// refuses them with 403 for a read-only key.
+// org API key (Authorization: Bearer rsk_...) or, with ResourceMetadataURL
+// set, an OAuth access token (rso_...); the tools act as that credential
+// through the user API served by api. For an API key the write tools are
+// always listed: the API refuses them with 403 for a read-only key. For an
+// OAuth token the tools follow its scopes: read-only tools, plus
+// create_restore_point with rowsafe:marks. The API enforces the same scopes.
 func NewHTTPHandler(api http.Handler, opts HTTPOptions) http.Handler {
 	if opts.MaxWait <= 0 {
 		opts.MaxWait = 45 * time.Second
@@ -40,11 +51,12 @@ func NewHTTPHandler(api http.Handler, opts HTTPOptions) http.Handler {
 	cache := sdk.NewSchemaCache()
 	inProcess := &http.Client{Transport: handlerTransport{api}, Timeout: 30 * time.Second}
 	mcpHandler := sdk.NewStreamableHTTPHandler(func(r *http.Request) *sdk.Server {
-		c, _ := r.Context().Value(clientKey{}).(*client.Client)
-		if c == nil {
+		a, _ := r.Context().Value(clientKey{}).(*access)
+		if a == nil {
 			return nil
 		}
-		return NewServer(c, Options{AllowWrites: true, Remote: true, Version: opts.Version, MaxWait: opts.MaxWait, SchemaCache: cache})
+		return NewServer(a.c, Options{AllowWrites: a.writes, AllowRestorePoints: a.marks, Remote: true, Version: opts.Version,
+			MaxWait: opts.MaxWait, SchemaCache: cache})
 	}, &sdk.StreamableHTTPOptions{
 		// Each request stands alone and is authenticated on its own; no
 		// session outlives it. Plain JSON responses pass any proxy.
@@ -58,25 +70,55 @@ func NewHTTPHandler(api http.Handler, opts HTTPOptions) http.Handler {
 		Logger:                     opts.Logger,
 	})
 
+	oauth := opts.ResourceMetadataURL != ""
+	challenge := func(w http.ResponseWriter, invalidToken bool, msg string) {
+		unauthorized(w, opts.ResourceMetadataURL, invalidToken, msg)
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		key = strings.TrimSpace(key)
-		if !strings.HasPrefix(key, "rsk_") {
-			unauthorized(w, "missing or invalid API key: send Authorization: Bearer rsk_...")
+		isKey := strings.HasPrefix(key, "rsk_")
+		isToken := oauth && strings.HasPrefix(key, protocol.OAuthAccessTokenPrefix)
+		if !isKey && !isToken {
+			if oauth {
+				challenge(w, key != "", "sign in with Rowsafe, or send Authorization: Bearer rsk_...")
+			} else {
+				challenge(w, false, "missing or invalid API key: send Authorization: Bearer rsk_...")
+			}
 			return
 		}
 		var c *client.Client
-		if opts.APIURL != "" {
+		switch {
+		case opts.APIURL != "":
 			c = client.New(strings.TrimRight(opts.APIURL, "/"), key)
-		} else {
+		default:
 			c = client.New("http://rowsafed.internal", key)
 			c.HTTP = inProcess
 		}
-		// Authenticate up front so a bad key fails the MCP handshake with 401
-		// instead of every tool call.
-		if _, err := c.Org(r.Context()); err != nil {
+		// Authenticate up front so bad credentials fail the MCP handshake
+		// with 401 instead of every tool call.
+		a := &access{c: c}
+		var err error
+		if isKey {
+			a.writes = true
+			_, err = c.Org(r.Context())
+		} else {
+			var who protocol.WhoAmI
+			if who, err = c.WhoAmI(r.Context()); err == nil {
+				if who.OAuth == nil {
+					err = &client.APIError{Status: http.StatusUnauthorized, Msg: "not an OAuth access token"}
+				} else {
+					a.marks = slices.Contains(who.OAuth.Scopes, protocol.ScopeMarks)
+				}
+			}
+		}
+		if err != nil {
 			if isStatus(err, http.StatusUnauthorized) {
-				unauthorized(w, "invalid API key")
+				if isKey {
+					challenge(w, true, "invalid API key")
+				} else {
+					challenge(w, true, "the access token is invalid, expired or revoked: sign in with Rowsafe again")
+				}
 				return
 			}
 			if opts.Logger != nil {
@@ -85,12 +127,30 @@ func NewHTTPHandler(api http.Handler, opts HTTPOptions) http.Handler {
 			writeJSONError(w, http.StatusBadGateway, "could not authenticate the request")
 			return
 		}
-		mcpHandler.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), clientKey{}, c)))
+		mcpHandler.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), clientKey{}, a)))
 	})
 }
 
-func unauthorized(w http.ResponseWriter, msg string) {
-	w.Header().Set("WWW-Authenticate", `Bearer realm="rowsafe"`)
+// access is what one request's credentials may use.
+type access struct {
+	c      *client.Client
+	writes bool // API key: every write tool (the API checks read-only keys)
+	marks  bool // OAuth token with rowsafe:marks
+}
+
+// unauthorized answers 401 with a Bearer challenge. With OAuth on it names
+// the protected resource metadata and the scopes to ask for (MCP
+// authorization, RFC 9728 section 5.1, RFC 6750 section 3).
+func unauthorized(w http.ResponseWriter, resourceMetadata string, invalidToken bool, msg string) {
+	params := []string{`realm="rowsafe"`}
+	if resourceMetadata != "" {
+		params = append([]string{fmt.Sprintf("resource_metadata=%q", resourceMetadata),
+			fmt.Sprintf("scope=%q", strings.Join(protocol.OAuthScopes, " "))}, params...)
+	}
+	if invalidToken {
+		params = append(params, `error="invalid_token"`)
+	}
+	w.Header().Set("WWW-Authenticate", "Bearer "+strings.Join(params, ", "))
 	writeJSONError(w, http.StatusUnauthorized, msg)
 }
 

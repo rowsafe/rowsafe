@@ -360,7 +360,7 @@ func (a *Agent) copiesReport() *protocol.CopiesReport {
 		r.Copies = append(r.Copies, c.state())
 	}
 	if !a.cfg.Sidecar() {
-		r.Addresses = hostAddresses()
+		r.Addresses = copyAddresses()
 	}
 	return r
 }
@@ -587,9 +587,9 @@ func (a *Agent) recoverCopies(ctx context.Context) {
 	}
 }
 
-// hostAddresses are the server's own unicast addresses (no loopback or
+// copyAddresses are the server's own unicast addresses (no loopback or
 // link-local), private ones first.
-func hostAddresses() []protocol.HostAddress {
+func copyAddresses() []protocol.HostAddress {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil
