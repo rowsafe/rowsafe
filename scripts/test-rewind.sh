@@ -12,7 +12,9 @@
 #   bring the deleted rows back; a rewind in place to before the backup
 #   (fails, rolled back automatically); a rewind in place to the point (the
 #   later rows are gone, a new timeline archives to the repository); undo
-#   (they are back); cleanup; drop the copy.
+#   (they are back); cleanup; drop the copy. Then Find the moment
+#   (rewind_moment_e2e_test.go): deletes, updates, a TRUNCATE and a DROP,
+#   found in the repository's WAL with their transaction IDs.
 #
 # Usage: sh scripts/test-rewind.sh [debian:trixie]   (needs Docker, ~3 min; the image
 # needs pgBackRest 2.46 or newer, as Rowsafe installs)
@@ -47,7 +49,7 @@ in_container() {
     ROWSAFE_REPO_S3_BUCKET=rowsafe ROWSAFE_REPO_S3_KEY=rowsafe-test ROWSAFE_REPO_S3_KEY_SECRET="$S3_SECRET" \
     ROWSAFE_REPO_CIPHER_PASS="$CIPHER_PASS" ROWSAFE_REPO_S3_CA_FILE=$W/certs/ca.crt \
     ROWSAFE_RESTORE_POINT_TIMEOUT=2m \
-    "$W/rewind-e2e.test" -test.run '^TestRealRewind$' -test.v -test.timeout 25m || status=$?
+    "$W/rewind-e2e.test" -test.run '^TestReal(Rewind|FindMoment)$' -test.v -test.timeout 25m || status=$?
   if [ "$status" != 0 ]; then
     echo "---- journal (helper and PostgreSQL)" >&2
     journalctl -u rowsafe-pg-restart.service -u "$unit" --no-pager -n 80 >&2 || true

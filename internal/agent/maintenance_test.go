@@ -189,7 +189,8 @@ func TestFastLaneClaimsMaintenanceOneAtATime(t *testing.T) {
 	a := &Agent{}
 	a.poolerBusy.Store(true) // pooling tasks: TestFastLaneClaimsPooling
 	if got := a.fastLaneClaim(); !slices.Equal(got, []string{protocol.TaskRestorePoint, protocol.TaskMaintenance,
-		protocol.TaskRewindCompare, protocol.TaskRewindRows, protocol.TaskRewindDrop, protocol.TaskRewindCleanup}) {
+		protocol.TaskRewindCompare, protocol.TaskRewindRows, protocol.TaskRewindDrop, protocol.TaskRewindCleanup,
+		protocol.TaskFindMoment}) {
 		t.Fatalf("idle claim %v", got)
 	}
 	a.maintBusy.Store(true)
