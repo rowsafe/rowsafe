@@ -115,6 +115,9 @@ type ConfigInput struct {
 	// copy's configuration has its own, so its commands never wait for the
 	// first storage's (they share the stanza name).
 	LockPath string
+	// Exclude are paths relative to the data directory that backups leave
+	// out (e.g. data a Docker rewind keeps aside inside it).
+	Exclude []string
 }
 
 // ProcessMax is pgBackRest's process-max for a host with cpus CPUs: 1 on
@@ -190,6 +193,12 @@ func RenderConfig(repo Repo, in ConfigInput) string {
 	} else {
 		kv("log-level-file", "detail")
 		kv("log-path", in.LogPath)
+	}
+	if len(in.Exclude) > 0 {
+		b.WriteString("\n[global:backup]\n")
+		for _, x := range in.Exclude {
+			kv("exclude", x)
+		}
 	}
 	fmt.Fprintf(&b, "\n[%s]\n", in.Stanza)
 	kv("pg1-path", in.DataDir)

@@ -31,6 +31,7 @@ var rewindSubs = map[string]subcommand{
 	"database": rewindDatabaseCmd,
 	"undo":     rewindUndoCmd,
 	"cleanup":  rewindCleanupCmd,
+	"find":     rewindFindCmd, // Find the moment (moment.go)
 }
 
 func rewindCmd(ctx context.Context, c *client.Client, args []string) error {

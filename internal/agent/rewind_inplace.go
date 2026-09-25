@@ -122,7 +122,8 @@ func stampNow() string { return time.Now().UTC().Format("20060102T150405Z") }
 func validKeptDir(dataDir, kept string) error {
 	dataDir, kept = filepath.Clean(dataDir), filepath.Clean(kept)
 	m := keptDirRE.FindStringSubmatch(filepath.Base(kept))
-	if m == nil || m[1] != filepath.Base(dataDir) || filepath.Dir(kept) != filepath.Dir(dataDir) || kept == dataDir {
+	inPlace := filepath.Dir(kept) == filepath.Dir(dataDir) || filepath.Dir(kept) == filepath.Join(dataDir, asideDirName) // Docker: rewind_contents.go
+	if m == nil || m[1] != filepath.Base(dataDir) || !inPlace || kept == dataDir {
 		return fmt.Errorf("refusing to touch %s: it is not a directory Rowsafe kept aside for %s", kept, dataDir)
 	}
 	info, err := os.Lstat(kept)
@@ -197,7 +198,7 @@ func keepUntil(days int, now time.Time) time.Time {
 // set up and able to stop.
 func (a *Agent) inPlaceAllowed(db protocol.DatabaseSpec) (string, error) {
 	if a.cfg.Sidecar() {
-		return "", errors.New("Rowsafe can't rewind PostgreSQL running in Docker in place. Restore a copy and bring back the rows you need instead")
+		return a.dockerInPlaceAllowed() // docker_control.go
 	}
 	allowed, err := ReadRestartAllowed(a.cfg.RestartAllowFile)
 	if err != nil {
@@ -257,11 +258,15 @@ func (a *Agent) rewindInPlace(ctx context.Context, db protocol.DatabaseSpec, p p
 	case f.Major == 0 || f.DataDir == "":
 		return nil, errors.New("couldn't read the PostgreSQL version or data directory")
 	}
-	info, err := checkDataDir(f.DataDir)
+	contents := a.contentsLayout() // Docker: move the entries inside the volume (rewind_contents.go)
+	info, err := checkDataDirFor(contents, f.DataDir)
 	if err != nil {
 		return nil, err
 	}
 	parent := filepath.Dir(f.DataDir)
+	if contents {
+		parent = f.DataDir
+	}
 	need := f.SizeBytes + f.SizeBytes/10
 	if free, err := ops.freeBytes(parent); err != nil {
 		return nil, err
@@ -282,14 +287,14 @@ func (a *Agent) rewindInPlace(ctx context.Context, db protocol.DatabaseSpec, p p
 		warnings = append(warnings, fmt.Sprintf("%s streamed from this server; after the rewind they no longer match it and have to be set up again",
 			countNoun(f.Replicas, "replica", "replicas")))
 	}
-	kept := f.DataDir + ".before-rewind-" + stampNow()
+	kept := keptPath(contents, f.DataDir, "before")
 	if exists(kept) {
 		return nil, fmt.Errorf("%s already exists; try again in a second", kept)
 	}
 	res := &protocol.RewindInPlaceResult{RewindID: p.RewindID, OldDataDir: kept, Warnings: warnings}
 	rec := rewindRecord{ID: p.RewindID, Kind: protocol.RewindKindKeptData, DatabaseID: db.ID, Status: protocol.RewindInProgress,
 		CreatedAt: time.Now().UTC(), Target: p.Target, Database: db, DataDir: f.DataDir, KeptDir: kept, Major: f.Major,
-		Phase: phasePreflight, KeepDays: p.KeepDays, ConfigFile: f.ConfigFile}
+		Phase: phasePreflight, KeepDays: p.KeepDays, ConfigFile: f.ConfigFile, Contents: contents}
 	if err := st.put(rec); err != nil {
 		return nil, err
 	}
@@ -325,7 +330,7 @@ func (a *Agent) rewindInPlace(ctx context.Context, db protocol.DatabaseSpec, p p
 	}
 
 	// 2. Stop.
-	tl.Printf("stopping PostgreSQL (%s) through the root helper", unit)
+	tl.Printf("stopping PostgreSQL (%s) through %s", unit, a.stopper())
 	if err := ops.helper(ctx, helperStop, db.Port, p.RewindID+"-stop"); err != nil {
 		if errors.Is(err, errOldHelper) && ops.running(f.DataDir) {
 			_ = st.remove(p.RewindID)
@@ -340,7 +345,7 @@ func (a *Agent) rewindInPlace(ctx context.Context, db protocol.DatabaseSpec, p p
 	tl.Printf("PostgreSQL is stopped")
 
 	// 3. Keep the data directory aside.
-	if err := os.Rename(f.DataDir, kept); err != nil {
+	if err := moveData(contents, f.DataDir, f.DataDir, kept); err != nil {
 		if errors.Is(err, syscall.EXDEV) {
 			err = fmt.Errorf("the filesystem can't rename the data directory in place (%w); a container's overlay filesystem does this, "+
 				"so rewinding in place needs the data directory on a volume (restore a copy instead)", err)
@@ -352,20 +357,37 @@ func (a *Agent) rewindInPlace(ctx context.Context, db protocol.DatabaseSpec, p p
 
 	// 4. Restore into a fresh data directory.
 	phase(phaseRestored) // from here the data directory is ours to remove
-	if err := os.Mkdir(f.DataDir, info.Mode().Perm()); err != nil {
-		return fail("creating the new data directory", err)
+	restoreDir := f.DataDir
+	if contents {
+		// Docker: restore next to the data, then move it in (rewind_contents.go).
+		restoreDir = stagingDir(f.DataDir, p.RewindID)
+		if err := freshDir(restoreDir); err != nil {
+			return fail("creating the new data directory", err)
+		}
+	} else {
+		if err := os.Mkdir(f.DataDir, info.Mode().Perm()); err != nil {
+			return fail("creating the new data directory", err)
+		}
+		if err := os.Chmod(f.DataDir, info.Mode().Perm()); err != nil {
+			return fail("creating the new data directory", err)
+		}
+		if st, ok := info.Sys().(*syscall.Stat_t); ok {
+			_ = os.Lchown(f.DataDir, -1, int(st.Gid))
+		}
 	}
-	if err := os.Chmod(f.DataDir, info.Mode().Perm()); err != nil {
-		return fail("creating the new data directory", err)
-	}
-	if st, ok := info.Sys().(*syscall.Stat_t); ok {
-		_ = os.Lchown(f.DataDir, -1, int(st.Gid))
-	}
-	tl.Printf("restoring %s (backup %s) into %s", describeTarget(p.Target), cmp.Or(set, "picked by pgBackRest"), f.DataDir)
-	out, err := ops.restore(ctx, db, pgbackrest.RestoreOptions{DataDir: f.DataDir, Type: typ, Target: target, Set: set, Timeline: p.Target.Timeline, Repo: p.Target.Repo})
+	tl.Printf("restoring %s (backup %s) into %s", describeTarget(p.Target), cmp.Or(set, "picked by pgBackRest"), restoreDir)
+	out, err := ops.restore(ctx, db, pgbackrest.RestoreOptions{DataDir: restoreDir, Type: typ, Target: target, Set: set, Timeline: p.Target.Timeline, Repo: p.Target.Repo})
 	tl.Output("pgbackrest restore", out)
 	if err != nil {
 		return fail("restoring the backup", err)
+	}
+	if contents {
+		if err := moveData(true, f.DataDir, restoreDir, f.DataDir); err != nil {
+			return fail("moving the restored data into place", err)
+		}
+		if err := retargetRestore(f.DataDir, restoreDir); err != nil {
+			return fail("moving the restored data into place", err)
+		}
 	}
 
 	// 5. Configuration that lives in the data directory.
@@ -401,7 +423,7 @@ func (a *Agent) rewindInPlace(ctx context.Context, db protocol.DatabaseSpec, p p
 
 	// 7. Start.
 	phase(phaseStarted)
-	tl.Printf("starting PostgreSQL (%s) through the root helper", unit)
+	tl.Printf("starting PostgreSQL (%s) through %s", unit, a.stopper())
 	if err := ops.helper(ctx, helperStart, db.Port, p.RewindID+"-start"); err != nil {
 		if !strings.Contains(err.Error(), "did not finish") || !ops.running(f.DataDir) {
 			return fail("starting PostgreSQL", err)
@@ -483,14 +505,16 @@ func (a *Agent) rollbackRewind(ctx context.Context, r rewindRecord, tl *taskLog)
 		if err := a.ensureStopped(ctx, ops, r, tl); err != nil {
 			return fmt.Errorf("stopping PostgreSQL: %w", err)
 		}
-		if exists(r.DataDir) {
-			failed := r.DataDir + ".failed-rewind-" + stampNow()
-			if err := os.Rename(r.DataDir, failed); err != nil {
+		// Docker: before phaseRestored the data directory holds what wasn't
+		// moved aside yet: the original, which the kept part joins again.
+		if dataPresent(r.Contents, r.DataDir) && !(r.Contents && phaseBefore(r.Phase, phaseRestored)) {
+			failed := keptPath(r.Contents, r.DataDir, "failed")
+			if err := moveData(r.Contents, r.DataDir, r.DataDir, failed); err != nil {
 				return fmt.Errorf("moving the partial restore aside: %w", err)
 			}
 			_ = st.update(r.ID, func(x *rewindRecord) { x.FailedDir = failed })
 		}
-		if err := os.Rename(r.KeptDir, r.DataDir); err != nil {
+		if err := moveData(r.Contents, r.DataDir, r.KeptDir, r.DataDir); err != nil {
 			return fmt.Errorf("moving %s back: %w", r.KeptDir, err)
 		}
 		tl.Printf("moved the original data back to %s", r.DataDir)
@@ -509,7 +533,7 @@ func (a *Agent) rollbackRewind(ctx context.Context, r rewindRecord, tl *taskLog)
 	// already): production's data is in place. Start it if it isn't
 	// running; never stop it.
 	if !ops.running(r.DataDir) {
-		if !exists(r.DataDir) {
+		if !dataPresent(r.Contents, r.DataDir) {
 			return fmt.Errorf("neither %s nor %s exists", r.DataDir, r.KeptDir)
 		}
 		if err := ops.helper(ctx, helperStart, r.Database.Port, r.ID+"-rbstart"); err != nil && !strings.Contains(err.Error(), "did not finish") {
@@ -522,11 +546,15 @@ func (a *Agent) rollbackRewind(ctx context.Context, r rewindRecord, tl *taskLog)
 	tl.Printf("PostgreSQL is running on the original data")
 	if x, ok := st.get(r.ID); ok && x.FailedDir != "" {
 		failed := x.FailedDir
-		if strings.HasPrefix(filepath.Base(failed), filepath.Base(r.DataDir)+".failed-rewind-") && filepath.Dir(failed) == filepath.Dir(r.DataDir) {
+		if isAsidePath(r.DataDir, failed, "failed") {
 			if err := os.RemoveAll(failed); err != nil {
 				tl.Printf("removing the partial restore %s: %v", failed, err)
 			}
 		}
+	}
+	if r.Contents {
+		_ = os.RemoveAll(stagingDir(r.DataDir, r.ID))
+		removeEmptyAsideRoot(r.DataDir)
 	}
 	return st.remove(r.ID)
 }
@@ -706,7 +734,7 @@ func (a *Agent) rewindUndo(ctx context.Context, db protocol.DatabaseSpec, p prot
 	if err := validKeptDir(r.DataDir, r.KeptDir); err != nil {
 		return nil, err
 	}
-	if _, err := checkDataDir(r.DataDir); err != nil {
+	if _, err := checkDataDirFor(r.Contents, r.DataDir); err != nil {
 		return nil, err
 	}
 	f, err := ops.facts(ctx, db)
@@ -716,7 +744,7 @@ func (a *Agent) rewindUndo(ctx context.Context, db protocol.DatabaseSpec, p prot
 	if filepath.Clean(f.DataDir) != r.DataDir {
 		return nil, fmt.Errorf("PostgreSQL now runs from %s, not %s", f.DataDir, r.DataDir)
 	}
-	aside := r.DataDir + ".after-rewind-" + stampNow()
+	aside := keptPath(r.Contents, r.DataDir, "after")
 	if exists(aside) {
 		return nil, fmt.Errorf("%s already exists; try again in a second", aside)
 	}
@@ -744,7 +772,7 @@ func (a *Agent) rewindUndo(ctx context.Context, db protocol.DatabaseSpec, p prot
 	}
 	phase := func(ph string) { _ = st.update(r.ID, func(x *rewindRecord) { x.Phase = ph }) }
 
-	tl.Printf("stopping PostgreSQL (%s) through the root helper", unit)
+	tl.Printf("stopping PostgreSQL (%s) through %s", unit, a.stopper())
 	if err := ops.helper(ctx, helperStop, db.Port, r.ID+"-ustop"); err != nil {
 		return fail("stopping PostgreSQL", err)
 	}
@@ -752,12 +780,12 @@ func (a *Agent) rewindUndo(ctx context.Context, db protocol.DatabaseSpec, p prot
 		return fail("stopping PostgreSQL", err)
 	}
 	phase(phaseStopped)
-	if err := os.Rename(r.DataDir, aside); err != nil {
+	if err := moveData(r.Contents, r.DataDir, r.DataDir, aside); err != nil {
 		return fail("setting the rewound data aside", err)
 	}
 	phase(phaseMoved)
 	tl.Printf("kept the rewound data aside in %s", aside)
-	if err := os.Rename(r.KeptDir, r.DataDir); err != nil {
+	if err := moveData(r.Contents, r.DataDir, r.KeptDir, r.DataDir); err != nil {
 		return fail("moving the data from before the rewind back", err)
 	}
 	phase(phaseRestored)
@@ -806,16 +834,20 @@ func (a *Agent) rollbackUndo(ctx context.Context, r, before rewindRecord, tl *ta
 		if err := a.ensureStopped(ctx, ops, r, tl); err != nil {
 			return fmt.Errorf("stopping PostgreSQL: %w", err)
 		}
-		if exists(r.DataDir) {
-			if exists(r.KeptDir) {
+		switch {
+		case r.Contents && phaseBefore(r.Phase, phaseMoved):
+			// Docker: the rewound data was being set aside entry by entry;
+			// what is still in place joins the rest below.
+		case dataPresent(r.Contents, r.DataDir):
+			if exists(r.KeptDir) && !r.Contents {
 				return fmt.Errorf("%s, %s and %s all exist; Rowsafe won't guess which is which", r.DataDir, r.KeptDir, r.AsideDir)
 			}
-			// The data from before the rewind was already moved in.
-			if err := os.Rename(r.DataDir, r.KeptDir); err != nil {
+			// The data from before the rewind was (partly, in Docker) moved in.
+			if err := moveData(r.Contents, r.DataDir, r.DataDir, r.KeptDir); err != nil {
 				return err
 			}
 		}
-		if err := os.Rename(r.AsideDir, r.DataDir); err != nil {
+		if err := moveData(r.Contents, r.DataDir, r.AsideDir, r.DataDir); err != nil {
 			return err
 		}
 		tl.Printf("moved the rewound data back to %s", r.DataDir)
@@ -873,6 +905,9 @@ func (a *Agent) removeKept(r rewindRecord) (int64, error) {
 	}
 	if err := os.RemoveAll(r.KeptDir); err != nil {
 		return 0, err
+	}
+	if r.Contents {
+		removeEmptyAsideRoot(r.DataDir)
 	}
 	return r.SizeBytes, a.rewindState().remove(r.ID)
 }
@@ -939,6 +974,9 @@ func (o realInPlaceOps) facts(ctx context.Context, db protocol.DatabaseSpec) (in
 }
 
 func (o realInPlaceOps) helper(ctx context.Context, action string, port int, id string) error {
+	if o.a.cfg.Sidecar() {
+		return o.a.dockerHelper(ctx, action, id) // docker_control.go
+	}
 	res, err := o.a.askHelper(ctx, action, port, id)
 	if err != nil {
 		return err
@@ -949,7 +987,12 @@ func (o realInPlaceOps) helper(ctx context.Context, action string, port int, id 
 	return nil
 }
 
-func (o realInPlaceOps) running(dataDir string) bool { return postmasterAlive(dataDir) }
+func (o realInPlaceOps) running(dataDir string) bool {
+	if o.a.cfg.Sidecar() {
+		return o.a.dockerRunning(dataDir) // docker_control.go
+	}
+	return postmasterAlive(dataDir)
+}
 
 // postmasterAlive reports whether dataDir/postmaster.pid names a live
 // process. Unlike postmasterFor it doesn't need the process's command line
@@ -1069,6 +1112,12 @@ func pgbackrestSafePath(p string) bool { return safeOptPathRE.MatchString(p) }
 var safeOptPathRE = regexp.MustCompile(`^/[A-Za-z0-9/_.@+-]+$`)
 
 func (o realInPlaceOps) stopLocal(dataDir string, major int) error {
+	if o.a.cfg.Sidecar() && !localPostmaster(dataDir) {
+		if exists(filepath.Join(dataDir, "postmaster.pid")) {
+			return errNotLocalPostmaster
+		}
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 11*time.Minute)
 	defer cancel()
 	out, err := o.a.runner.Run(ctx, o.a.cfg.pgBin(major, "pg_ctl"), "-D", dataDir, "-m", "fast", "-w", "-t", "600", "stop")

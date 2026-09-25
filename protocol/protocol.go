@@ -110,8 +110,9 @@ const (
 	BackupIncr = "incr"
 )
 
-// DatabaseSpec is everything the agent needs to act on one Postgres cluster.
-// It carries no secrets: repository credentials live only on the host.
+// DatabaseSpec is everything the agent needs to act on one database server
+// (a PostgreSQL cluster, unless Engine says otherwise). It carries no
+// secrets: repository credentials live only on the host.
 type DatabaseSpec struct {
 	ID            string `json:"id"`
 	Name          string `json:"name"`
@@ -122,6 +123,9 @@ type DatabaseSpec struct {
 	// SecondCopyRetentionFull is how many full backups the second copy keeps
 	// (0: DefaultSecondCopyRetentionFull). See secondcopy.go.
 	SecondCopyRetentionFull int `json:"second_copy_retention_full,omitempty"`
+	// Engine is the database engine (Engine* in engine.go); "" from older
+	// control planes means PostgreSQL (NormalizeEngine).
+	Engine string `json:"engine,omitempty"`
 }
 
 // Task is a unit of work handed to an agent.
@@ -183,6 +187,8 @@ type HeartbeatRequest struct {
 	// (secondcopy.go).
 	Storage      []RepoStorage      `json:"storage,omitempty"`
 	SecondCopies []SecondCopyStatus `json:"second_copies,omitempty"`
+	// DockerControl: docker-sidecar agents only (see protocol/docker.go).
+	DockerControl *DockerControlReport `json:"docker_control,omitempty"`
 }
 
 // HeartbeatResponse tells the agent which databases to watch.
@@ -350,6 +356,8 @@ type SetupRegisterRequest struct {
 	Name      string `json:"name"` // database name in Rowsafe: lowercase letters, digits, dashes
 	Port      int    `json:"port"`
 	SocketDir string `json:"socket_dir,omitempty"`
+	// Engine is the database engine; "" is PostgreSQL.
+	Engine string `json:"engine,omitempty"`
 }
 
 type SetupDatabase struct {
@@ -368,6 +376,9 @@ type SetupDatabase struct {
 	LastBackupAt   *time.Time `json:"last_backup_at,omitempty"`
 	BackupRunning  bool       `json:"backup_running,omitempty"`
 	DashboardURL   string     `json:"dashboard_url,omitempty"`
+	// Engine is the database engine; "" (older control planes) is
+	// PostgreSQL.
+	Engine string `json:"engine,omitempty"`
 }
 
 type SetupDatabaseList struct {
@@ -413,6 +424,9 @@ type CreateDatabaseRequest struct {
 	Port          int    `json:"port,omitempty"`
 	SocketDir     string `json:"socket_dir,omitempty"`
 	RetentionFull int    `json:"retention_full,omitempty"`
+	// Engine is the database engine; "" is PostgreSQL. The control plane
+	// refuses engines whose EngineCapabilities have no Backups yet.
+	Engine string `json:"engine,omitempty"`
 }
 
 type Database struct {
@@ -434,6 +448,13 @@ type Database struct {
 	// PostgreSQL (its port is in the host's restart allow list).
 	CanRestart bool      `json:"can_restart"`
 	CreatedAt  time.Time `json:"created_at"`
+	// Engine is the database engine (Engine* in engine.go). Current control
+	// planes always set it; "" from older ones means PostgreSQL.
+	Engine string `json:"engine,omitempty"`
+	// EngineVersion is the database server's version as the agent reported
+	// it ("18.1", "8.4.3", "7.0.12"); for PostgreSQL it mirrors
+	// Inspect.ServerVersion. "" until known.
+	EngineVersion string `json:"engine_version,omitempty"`
 }
 
 type CreateTaskRequest struct {
@@ -506,6 +527,8 @@ func TaskTimeout(taskType string) time.Duration {
 	case TaskRewindCompare, TaskRewindRows:
 		return 2 * time.Hour
 	case TaskRewindUndo: // stop, two renames, start
+		return time.Hour
+	case TaskFindMoment: // reads the WAL of the range from the repository
 		return time.Hour
 	default: // backup, drill, rewind copy and in place: a large restore takes hours
 		return 12 * time.Hour

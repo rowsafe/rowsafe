@@ -365,6 +365,7 @@ func (a *Agent) writeSecondCopyConfig(db protocol.DatabaseSpec, in protocol.Insp
 		Stanza: db.Stanza, DataDir: in.DataDirectory, Port: db.Port, SocketDir: db.SocketDir,
 		User: a.cfg.PGUser, RetentionFull: retention, LogPath: logDir,
 		ProcessMax: pgbackrest.ProcessMax(numCPU()), LockPath: secondCopyLockPath,
+		Exclude: a.backupExclude(), // like the first storage's (rewind_contents.go)
 	})
 	path := a.cfg.secondCopyConfigPath(db.Stanza)
 	if old, err := os.ReadFile(path); err == nil && string(old) == conf {
