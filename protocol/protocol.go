@@ -506,7 +506,7 @@ func TaskTimeout(taskType string) time.Duration {
 		return 2 * time.Minute
 	case TaskAdopt, TaskCheck:
 		return 10 * time.Minute
-	case TaskRestorePoint, TaskRestart:
+	case TaskRestorePoint, TaskRestart, TaskSettings:
 		return 5 * time.Minute
 	case TaskMaintenance: // a VACUUM or REINDEX of a large table takes a while
 		return 2 * time.Hour
@@ -765,6 +765,9 @@ type DatabaseMonitoring struct {
 	Insights *Insights `json:"insights,omitempty"`
 	// Replication is streaming replication status (newer agents only).
 	Replication *ReplicationStatus `json:"replication,omitempty"`
+	// Settings are the PostgreSQL settings that matter (settings.go; about
+	// every 5 minutes, newer agents only).
+	Settings *SettingsSnapshot `json:"settings,omitempty"`
 }
 
 // MonitoringAck answers a monitoring report.
