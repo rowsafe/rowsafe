@@ -55,6 +55,17 @@ type shipState struct {
 	LastFailedAt  *time.Time `json:"last_failed_at,omitempty"`
 }
 
+// serverError: the server couldn't be queried (reported as the archiver's
+// Error, which the control plane reads as "database unreachable").
+type serverError struct{ err error }
+
+func (e *serverError) Error() string { return e.err.Error() }
+func (e *serverError) Unwrap() error { return e.err }
+
+// errLogBinOff: nothing to ship until the server restarts with the binary
+// log on (ArchiveMode "off"); not a failure.
+var errLogBinOff = errors.New("the binary log is off")
+
 // shipper ships one database's binary logs.
 type shipper struct {
 	mu        sync.Mutex
@@ -66,6 +77,7 @@ type shipper struct {
 	pending   map[string]time.Time  // bucket folder -> since when bytes wait
 	caughtUp  *time.Time            // everything written before this is shipped
 	lastErr   string
+	connErr   bool // lastErr: the server couldn't be queried
 	logOn     bool   // the server's log_bin, as last seen
 	lastFile  string // current file, as last seen
 	lastWAL   string // last shipped piece, for the report
@@ -203,14 +215,22 @@ func (sh *shipper) poll(ctx context.Context) {
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 	sh.polled = true
+	var ce *serverError
+	sh.connErr = errors.As(err, &ce)
+	if errors.Is(err, errLogBinOff) {
+		sh.lastErr = ""
+		return
+	}
 	if err != nil {
 		if sh.lastErr == "" || sh.lastErr != err.Error() {
 			sh.srv.env.Log.Warn("binary log shipping failed", "database_id", sh.srv.db.ID, "err", err)
 		}
 		sh.lastErr = err.Error()
 		now := time.Now().UTC()
-		sh.state.FailedCount++
-		sh.state.LastFailedAt = &now
+		if !sh.connErr {
+			sh.state.FailedCount++
+			sh.state.LastFailedAt = &now
+		}
 		sh.saveState()
 		if sh.db != nil {
 			sh.db.Close()
@@ -241,20 +261,20 @@ func (sh *shipper) pollOnce(ctx context.Context) error {
 	if sh.db == nil {
 		db, err := s.open(ctx)
 		if err != nil {
-			return err
+			return &serverError{err}
 		}
 		sh.db = db
 	}
 	var logBin int
 	var basename sql.NullString
 	if err := sh.db.QueryRowContext(ctx, "SELECT @@log_bin, @@log_bin_basename").Scan(&logBin, &basename); err != nil {
-		return err
+		return &serverError{err}
 	}
 	sh.mu.Lock()
 	sh.logOn = logBin == 1
 	sh.mu.Unlock()
 	if logBin != 1 {
-		return errors.New("the binary log is off: restart the server so Rowsafe's settings take effect")
+		return errLogBinOff
 	}
 	files, err := showBinaryLogs(ctx, sh.db)
 	if err != nil {
@@ -421,6 +441,9 @@ func (sh *shipper) noteGap(msg string) {
 	defer sh.mu.Unlock()
 	if sh.state.Gap == "" {
 		sh.state.Gap = msg + "; restores to points before the next full backup may not be possible. Rowsafe takes a full backup to fix this."
+		now := time.Now().UTC()
+		sh.state.FailedCount++
+		sh.state.LastFailedAt = &now
 		sh.srv.env.Log.Warn("binary log gap", "database_id", sh.srv.db.ID, "gap", msg)
 	}
 }
@@ -491,7 +514,11 @@ func (sh *shipper) stats() *protocol.ArchiverStats {
 	st := &protocol.ArchiverStats{
 		ArchivedCount: sh.state.ArchivedCount, FailedCount: sh.state.FailedCount,
 		LastArchivedTime: sh.caughtUp, LastFailedTime: sh.state.LastFailedAt,
-		Error: cmp.Or(sh.lastErr, sh.state.Gap), LastPushedWAL: sh.lastWAL,
+		LastPushedWAL: sh.lastWAL, PushFailedCount: sh.state.FailedCount,
+		LastPushError: cmp.Or(sh.lastErr, sh.state.Gap),
+	}
+	if sh.connErr {
+		st.Error, st.LastPushError = sh.lastErr, ""
 	}
 	if sh.logOn {
 		st.ArchiveMode = "on"
