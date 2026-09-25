@@ -117,6 +117,8 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 		return runRewind(ctx, task, tl, db, a.rewindUndo)
 	case protocol.TaskRewindCleanup:
 		return runRewind(ctx, task, tl, db, a.rewindCleanup)
+	case protocol.TaskIndexAdvisor:
+		return a.runIndexAdvisor(ctx, task, db, tl)
 	}
 	return nil, fmt.Errorf("unsupported task type %q (agent %s)", task.Type, Version)
 }
