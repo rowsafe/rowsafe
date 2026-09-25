@@ -1396,30 +1396,38 @@ files_tests() {
   called "files add --database db_fake --path /srv/app/media (postgres)"
   has "Rowsafe may put restored files back into the folders you protect"
   grep -qx /srv/app/media /etc/rowsafe/files-allowed && grep -qx /srv /etc/rowsafe/files-allowed || fail "files-allowed lacks a root"
+  ! grep -qx /home /etc/rowsafe/files-allowed || fail "files-allowed lets Rowsafe into /home by default"
   [ "$(stat -c '%U %a' /etc/rowsafe/files-allowed)" = "root 644" ] || fail "files-allowed ownership/mode"
-  grep -qx "ReadWritePaths=-/srv" "$D" && grep -qx "ProtectHome=no" "$D" && grep -q "CAP_FOWNER" "$D" || fail "helper drop-in"
+  grep -qx "ReadWritePaths=-/srv" "$D" && ! grep -q "ProtectHome" "$D" && ! grep -q "/home" "$D" && grep -q "CAP_FOWNER" "$D" || fail "helper drop-in"
   [ -x "$H" ] || fail "--allow-files didn't install the root helper"
   grep -q '^# actions: .*files-read files-put' "$H" || fail "helper lacks the files actions"
   if [ "${TEST_UNITS:-0}" = 1 ] && command -v systemd-analyze >/dev/null; then
     expect_ok "systemd-analyze verify (helper with the files drop-in)" systemd-analyze verify /etc/systemd/system/rowsafe-pg-restart.service
   fi
 
-  # The helper's files actions, run as its service would.
+  # The helper's files actions, run as its service would. Files requests
+  # have their own request and result files.
   O=$W/files-helper-run
   install -d -m 0755 -o root -g root "$O"
   as_pg() { runuser -u postgres -- "$@"; }
+  cat >"$W/fake-systemctl" <<'EOF'
+#!/bin/sh
+echo "$*" >>/tmp/rowsafe-files-systemctl.calls
+EOF
+  chmod 755 "$W/fake-systemctl"
   helper() {
-    timeout 60 env STATE_DIRECTORY="$W/files-helper-state" RUNTIME_DIRECTORY="$O" "$H" 2>>"$W/files-helper.log" ||
+    timeout 60 env ROWSAFE_SYSTEMCTL="$W/fake-systemctl" STATE_DIRECTORY="$W/files-helper-state" RUNTIME_DIRECTORY="$O" "$H" 2>>"$W/files-helper.log" ||
       fail "the helper failed or hung (exit $?)"
   }
   request() {
-    rm -f "$O/result"
-    printf '%s\n' "$1" | as_pg sh -c 'cat >"$1"' sh "$R/request"
+    rm -f "$O/files-result"
+    printf '%s\n' "$1" | as_pg sh -c 'cat >"$1"' sh "$R/files-request"
     helper
-    [ -f "$O/result" ] || fail "no result for: $1"
+    [ ! -e "$R/files-request" ] || fail "helper left the files request: $1"
+    [ -f "$O/files-result" ] || fail "no result for: $1"
   }
-  result_has() { grep -qxF "$1" "$O/result" || {
-    cat "$O/result" >&2
+  result_has() { grep -qxF "$1" "$O/files-result" || {
+    cat "$O/files-result" >&2
     fail "helper result lacks $1"
   }; }
   request "f_1 files-read /srv/other"
@@ -1431,21 +1439,24 @@ files_tests() {
     "/mnt|not under a folder listed" "/srv/nope|doesn't exist" "/var/lib/rowsafe/files-staging|a system or database folder"; do
     request "f_2 files-read ${bad%%|*}"
     result_has "ok=0"
-    grep -q "^error=.*${bad#*|}" "$O/result" || fail "files-read ${bad%%|*}: $(cat "$O/result")"
+    grep -q "^error=.*${bad#*|}" "$O/files-result" || fail "files-read ${bad%%|*}: $(cat "$O/files-result")"
   done
   for bad in "f_3 files-read relative/path" "f_3 files-read /srv/a b" "f_3 files-put all r1 /srv/app/media" \
-    "f_3 files-put missing ../x /srv/app/media" "f_3 files-put missing r1" "f_3 files-read /srv;reboot"; do
+    "f_3 files-put missing ../x /srv/app/media" "f_3 files-put missing r1" "f_3 files-read /srv;reboot" "f_3 restart 5432"; do
     request "$bad"
     result_has "error=malformed request"
   done
 
   # files-put: staged by the agent user, written as the folder's owner.
   S=/var/lib/rowsafe/files-staging/r1
-  as_pg mkdir -p "$S/tree/sub"
-  printf 'restored\n' | as_pg sh -c 'cat >"$1"' sh "$S/tree/sub/new.txt"
-  printf 'from the snapshot\n' | as_pg sh -c 'cat >"$1"' sh "$S/tree/kept.txt"
-  as_pg ln -s /etc/shadow "$S/tree/sneaky"
-  as_pg chmod 0700 "$S/tree"
+  stage() { # fresh staged tree
+    as_pg rm -rf "$S"
+    as_pg mkdir -p "$S/tree/sub"
+    printf 'restored\n' | as_pg sh -c 'cat >"$1"' sh "$S/tree/sub/new.txt"
+    printf 'from the snapshot\n' | as_pg sh -c 'cat >"$1"' sh "$S/tree/kept.txt"
+    as_pg chmod 0700 "$S/tree"
+  }
+  stage
   echo "current" >/srv/app/media/kept.txt
   echo "added since" >/srv/app/media/extra.txt
   chown www-data:www-data /srv/app/media/kept.txt /srv/app/media/extra.txt
@@ -1455,18 +1466,60 @@ files_tests() {
   [ "$(cat /srv/app/media/sub/new.txt)" = restored ] || fail "files-put missing: new file not there"
   [ "$(stat -c '%U' /srv/app/media/sub/new.txt)" = www-data ] || fail "files-put didn't write as the folder's owner"
   [ "$(cat /srv/app/media/kept.txt)" = current ] || fail "files-put missing overwrote a file"
-  [ -L /srv/app/media/sneaky ] && [ "$(stat -c '%U' /srv/app/media/sneaky)" = www-data ] ||
-    fail "a staged symlink was not kept as a symlink owned by the folder's owner"
   [ "$(stat -c '%a' /srv/app/media)" = 751 ] || fail "files-put changed the folder's mode"
   request "f_5 files-put replace r1 /srv/app/media"
   result_has "ok=1"
   [ "$(cat /srv/app/media/kept.txt)" = "from the snapshot" ] || fail "files-put replace"
-  printf 'extra.txt\n../../../etc/passwd\n/etc/passwd\nsub\n' | as_pg sh -c 'cat >"$1"' sh "$S/delete"
+
+  # A compromised agent controls the staged tree: anything but plain files
+  # and folders is refused before anything is written.
   cp /etc/passwd "$W/passwd.before"
+  stage
+  as_pg sh -c "printf '#!/bin/sh\n' >$S/tree/suid.sh && chmod 4755 $S/tree/suid.sh"
+  request "f_10 files-put missing r1 /srv/app/media"
+  result_has "ok=0"
+  grep -q '^error=.*set-user-ID' "$O/files-result" || fail "a setuid file was not refused: $(cat "$O/files-result")"
+  [ ! -e /srv/app/media/suid.sh ] || fail "a staged setuid file was written"
+  stage
+  as_pg sh -c "chmod 2755 $S/tree/sub && printf x >$S/tree/sub/g.txt"
+  request "f_11 files-put missing r1 /srv/app/media"
+  grep -q '^error=.*set-user-ID or set-group-ID' "$O/files-result" || fail "a setgid folder was not refused: $(cat "$O/files-result")"
+  stage
+  as_pg ln -s /etc/passwd "$S/tree/passwd"
+  request "f_12 files-put replace r1 /srv/app/media"
+  grep -q '^error=.*symbolic link' "$O/files-result" || fail "a staged symlink was not refused: $(cat "$O/files-result")"
+  [ ! -e /srv/app/media/passwd ] && [ ! -L /srv/app/media/passwd ] || fail "a staged symlink was written"
+  stage
+  as_pg ln "$S/tree/kept.txt" "$S/tree/hard.txt"
+  request "f_13 files-put missing r1 /srv/app/media"
+  grep -q '^error=.*hard link' "$O/files-result" || fail "a staged hard link was not refused: $(cat "$O/files-result")"
+  stage
+  as_pg mkfifo "$S/tree/fifo"
+  request "f_14 files-put missing r1 /srv/app/media"
+  grep -q '^error=.*device, FIFO or socket' "$O/files-result" || fail "a staged FIFO was not refused: $(cat "$O/files-result")"
+  cmp -s /etc/passwd "$W/passwd.before" || fail "a refused files-put touched /etc/passwd"
+
+  # Never through a symbolic link in the folder: a staged linkdir/evil.txt
+  # doesn't land where the folder's own link points.
+  install -d -o www-data -g www-data /srv/outside
+  ln -sfn /srv/outside /srv/app/media/linkdir
+  chown -h www-data:www-data /srv/app/media/linkdir
+  stage
+  as_pg sh -c "mkdir $S/tree/linkdir && printf evil >$S/tree/linkdir/evil.txt"
+  request "f_15 files-put replace r1 /srv/app/media"
+  grep -q '^error=.*linkdir is a symbolic link' "$O/files-result" || fail "writing through a symlinked folder was not refused: $(cat "$O/files-result")"
+  [ ! -e /srv/outside/evil.txt ] || fail "files-put wrote through a symlinked folder"
+
+  # mirror deletes only files whose folder is really inside the folder.
+  echo "keep" >/srv/outside/x.txt
+  chown www-data:www-data /srv/outside/x.txt
+  stage
+  printf 'extra.txt\n../../../etc/passwd\n/etc/passwd\nsub\nlinkdir/x.txt\n./linkdir/x.txt\n' | as_pg sh -c 'cat >"$1"' sh "$S/delete"
   request "f_6 files-put mirror r1 /srv/app/media"
   result_has "ok=1"
   [ ! -e /srv/app/media/extra.txt ] || fail "files-put mirror left a file added since"
   [ -d /srv/app/media/sub ] || fail "files-put mirror removed a folder"
+  [ "$(cat /srv/outside/x.txt)" = keep ] || fail "files-put mirror deleted through a symlinked folder"
   cmp -s /etc/passwd "$W/passwd.before" || fail "files-put mirror touched /etc/passwd"
   request "f_7 files-put missing nothing /srv/app/media"
   result_has "error=nothing is staged for restore nothing"
@@ -1474,11 +1527,26 @@ files_tests() {
   request "f_8 files-put missing r1 /srv/rootowned"
   result_has "error=/srv/rootowned belongs to root: Rowsafe won't write there as root"
   [ -z "$(find "$R" /var/lib/rowsafe/files-staging -user root)" ] || fail "root left files in the agent's directories"
+  [ -z "$(find "$W/files-helper-state" -maxdepth 1 -name 'put.*')" ] || fail "the helper left its private copy behind"
   chmod 666 /etc/rowsafe/files-allowed
   request "f_9 files-read /srv/other"
   result_has "error=/etc/rowsafe/files-allowed is writable by others than root"
   chmod 644 /etc/rowsafe/files-allowed
-  pass "root helper files-read and files-put: allow list, system folders, symlinks, owner writes, never root"
+
+  # A restart and a files request at the same time: both are answered, each
+  # in its own result file.
+  printf '5432 postgresql@17-main.service\n' >/etc/rowsafe/restart-allowed
+  chmod 644 /etc/rowsafe/restart-allowed
+  rm -f "$O/result" "$O/files-result" "$W/files-helper-state"/last-*
+  printf 'rs_1 5432\n' | as_pg sh -c 'cat >"$1"' sh "$R/request"
+  printf 'fr_1 files-read /srv/other\n' | as_pg sh -c 'cat >"$1"' sh "$R/files-request"
+  helper
+  helper
+  grep -qx 'id=rs_1' "$O/result" && grep -qx 'ok=1' "$O/result" || fail "the restart request was lost: $(cat "$O/result" 2>&1)"
+  grep -qx 'id=fr_1' "$O/files-result" && grep -qx 'ok=1' "$O/files-result" || fail "the files request was lost: $(cat "$O/files-result" 2>&1)"
+  [ ! -e "$R/request" ] && [ ! -e "$R/files-request" ] || fail "a request was left"
+  printf '# off\n' >/etc/rowsafe/restart-allowed
+  pass "root helper files-read and files-put: allow list, system folders, no setuid/links/devices, never through symlinks, own request file, never root"
 
   # --no-allow-files removes the helper (restarts aren't allowed either).
   scenario "discover_out=$shop_reg"

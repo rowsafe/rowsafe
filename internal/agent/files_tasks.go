@@ -360,11 +360,13 @@ func (a *Agent) askFilesHelper(ctx context.Context, action, args, id string) (ma
 		_, _ = rand.Read(b)
 		id = hex.EncodeToString(b)
 	}
-	request := filepath.Join(a.cfg.RestartDir, "request")
+	// Its own request and result files: a restart asked for at the same
+	// time (Rewind) never overwrites it.
+	request := filepath.Join(a.cfg.RestartDir, "files-request")
 	if err := writeFileAtomic(request, []byte(id+" "+action+" "+args+"\n"), 0o600); err != nil {
 		return nil, err
 	}
-	res, err := waitRestartResult(ctx, filepath.Join(a.cfg.RestartResultDir, "result"), id)
+	res, err := waitRestartResult(ctx, filepath.Join(a.cfg.RestartResultDir, "files-result"), id)
 	if err != nil {
 		_ = os.Remove(request)
 		if errors.Is(err, errRestartNoAnswer) {

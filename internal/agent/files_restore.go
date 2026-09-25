@@ -13,6 +13,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -675,6 +676,14 @@ func (a *Agent) placeFiles(ctx context.Context, fo protocol.FilesFolder, tree st
 	}
 	rt := a.filesRuntime()
 	if slices.Contains(a.filesHelperActions(), helperFilesPut) && underRoots(fo.Path, rt.allowedRoots()) {
+		// The helper only puts back plain files and folders.
+		links, err := plainTree(tree)
+		if err != nil {
+			return "", "", err
+		}
+		if links > 0 {
+			tl.Printf("left out %d symbolic links: the root helper only puts back plain files and folders", links)
+		}
 		tl.Printf("asking the root helper to put the files into %s as its owner", fo.Path)
 		res, err := a.askFilesHelper(ctx, helperFilesPut, mode+" "+restoreID+" "+fo.Path, restoreID)
 		if err != nil {
@@ -940,4 +949,67 @@ func (a *Agent) filesCleanup(ctx context.Context, db protocol.DatabaseSpec, p pr
 	out.Summary = fmt.Sprintf("Deleted the copy of %s kept for Undo; the space is freed in the bucket at the next weekly clean-up.", k.Path)
 	tl.Printf("%s", out.Summary)
 	return out, nil
+}
+
+// plainTree makes a staged tree acceptable to the root helper, which puts
+// back only plain files and folders: symbolic links and special files are
+// left out (counted), set-user-ID and set-group-ID bits cleared, and hard
+// links broken into separate copies.
+func plainTree(tree string) (links int, err error) {
+	err = filepath.WalkDir(tree, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || p == tree {
+			return err
+		}
+		info, err := os.Lstat(p)
+		if err != nil {
+			return err
+		}
+		switch {
+		case info.IsDir():
+			if info.Mode()&(fs.ModeSetuid|fs.ModeSetgid) != 0 {
+				return os.Chmod(p, info.Mode().Perm())
+			}
+			return nil
+		case !info.Mode().IsRegular():
+			if info.Mode()&fs.ModeSymlink != 0 {
+				links++
+			}
+			return os.Remove(p)
+		}
+		if info.Mode()&(fs.ModeSetuid|fs.ModeSetgid) != 0 {
+			if err := os.Chmod(p, info.Mode().Perm()); err != nil {
+				return err
+			}
+		}
+		if st, ok := info.Sys().(*syscall.Stat_t); ok && st.Nlink > 1 {
+			return breakHardLink(p, info)
+		}
+		return nil
+	})
+	return links, err
+}
+
+// breakHardLink replaces p with a copy of itself.
+func breakHardLink(p string, info fs.FileInfo) error {
+	tmp := p + ".rowsafe-copy"
+	in, err := os.Open(p)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	_ = os.Chtimes(tmp, info.ModTime(), info.ModTime())
+	return os.Rename(tmp, p)
 }

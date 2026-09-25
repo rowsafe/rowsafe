@@ -280,3 +280,31 @@ func TestHumanCount(t *testing.T) {
 		}
 	}
 }
+
+func TestPlainTree(t *testing.T) {
+	tree := t.TempDir()
+	os.MkdirAll(filepath.Join(tree, "sub"), 0o755)
+	os.WriteFile(filepath.Join(tree, "sub/a.txt"), []byte("a"), 0o644)
+	os.WriteFile(filepath.Join(tree, "suid"), []byte("x"), 0o755)
+	os.Chmod(filepath.Join(tree, "suid"), 0o755|os.ModeSetuid|os.ModeSetgid)
+	os.Link(filepath.Join(tree, "sub/a.txt"), filepath.Join(tree, "hard.txt"))
+	os.Symlink("/etc/passwd", filepath.Join(tree, "link"))
+	links, err := plainTree(tree)
+	if err != nil || links != 1 {
+		t.Fatalf("links %d, err %v", links, err)
+	}
+	if _, err := os.Lstat(filepath.Join(tree, "link")); !os.IsNotExist(err) {
+		t.Error("a symlink was left")
+	}
+	if st, _ := os.Stat(filepath.Join(tree, "suid")); st.Mode()&(os.ModeSetuid|os.ModeSetgid) != 0 {
+		t.Errorf("setuid left: %v", st.Mode())
+	}
+	a, _ := os.Stat(filepath.Join(tree, "sub/a.txt"))
+	h, _ := os.Stat(filepath.Join(tree, "hard.txt"))
+	if os.SameFile(a, h) {
+		t.Error("the hard link was not broken")
+	}
+	if b, _ := os.ReadFile(filepath.Join(tree, "hard.txt")); string(b) != "a" {
+		t.Error("the copy lost its content")
+	}
+}

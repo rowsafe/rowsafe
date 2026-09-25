@@ -23,13 +23,19 @@
 #
 # Files (only when root allowed it: --allow-files, which writes
 # /etc/rowsafe/files-allowed, the folders Rowsafe may read and restore
-# into, with everything under them): "ID files-read PATH" gives the agent
-# user read access to PATH (POSIX ACLs, never ownership or modes);
-# "ID files-put MODE STAGE PATH" puts files the agent restored into
-# /var/lib/rowsafe/files-staging/STAGE/tree back into PATH as PATH's owner
-# (read as the agent user, written as the owner; root only passes the bytes
-# along). MODE: missing (never overwrite), replace, or mirror (also delete
-# the files listed in STAGE/delete).
+# into, with everything under them) come in their own request file,
+# /var/lib/rowsafe/restart/files-request, answered in
+# /run/rowsafe-pg-restart/files-result, so they never overwrite a restart
+# request or its answer. "ID files-read PATH" gives the agent user read
+# access to PATH (POSIX ACLs, never ownership or modes); "ID files-put MODE
+# STAGE PATH" puts files the agent restored into
+# /var/lib/rowsafe/files-staging/STAGE/tree back into PATH as PATH's owner.
+# MODE: missing (never overwrite), replace, or mirror (also delete the files
+# listed in STAGE/delete). The agent is not trusted with that: root copies
+# the staged files (read as the agent user) and puts them back only if they
+# are plain files and folders (no links, devices or FIFOs, no set-user-ID or
+# set-group-ID bits, no path leaving PATH), never through a symbolic link in
+# PATH, and deletes only files whose folder is really inside PATH.
 #
 # The agent reads the next line to know what this helper can do.
 # actions: restart stop start files-read files-put
@@ -51,7 +57,7 @@ log() { echo "rowsafe-pg-restart: $*" >&2; }
 # as_agent runs a command with the agent user's privileges.
 as_agent() { setpriv --reuid="$agent_user" --regid="$agent_user" --init-groups -- "$@"; }
 
-id='' action='' unit='' ok=0 err='' fpath='' fmode='' fstage=''
+id='' action='' unit='' ok=0 err='' fpath='' fmode='' fstage='' result=result
 
 # answer writes the result atomically into root's own directory.
 answer() {
@@ -61,7 +67,7 @@ answer() {
   }
   printf 'id=%s\naction=%s\nok=%s\nunit=%s\nerror=%s\nfinished_at=%s\n' "$id" "$action" "$ok" "$unit" "$err" "$(date +%s)" >"$tmp"
   chmod 0644 "$tmp"
-  mv -f "$tmp" "$out_dir/result"
+  mv -f "$tmp" "$out_dir/$result"
 }
 
 refuse() {
@@ -71,8 +77,12 @@ refuse() {
   exit 0
 }
 
+# A restart request first, then a files request (each fires the path unit).
 request=$dir/request
-as_agent test -e "$request" -o -L "$request" 2>/dev/null || exit 0
+if ! as_agent test -e "$request" -o -L "$request" 2>/dev/null; then
+  request=$dir/files-request result=files-result
+  as_agent test -e "$request" -o -L "$request" 2>/dev/null || exit 0
+fi
 # Only a regular file is read, for at most 5 seconds; whatever it was, it is
 # removed so the path unit doesn't fire again.
 # shellcheck disable=SC2016 # $1 expands in the inner shell
@@ -104,6 +114,10 @@ elif printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} files-put (missing|r
 else
   refuse "malformed request"
 fi
+# Each request file carries its own kind of action.
+case $result:$action in
+  result:files-* | files-result:restart | files-result:stop | files-result:start) refuse "malformed request" ;;
+esac
 
 # ---- files (--allow-files) ----
 
@@ -152,9 +166,10 @@ files_read() {
   log "files-read $fpath (request $id): done"
 }
 
-# files_put copies the staged files into the folder as its owner: the agent
-# user reads them (tar), the owner writes them (tar), root only passes the
-# bytes along and never opens either side.
+# files_put puts the staged files into the folder as its owner. The agent
+# (whose files these are) is not trusted: root takes its own copy (read as
+# the agent user), checks it, and the owner extracts that copy. Root never
+# opens anything in the agent's directories or in PATH itself.
 files_put() {
   files_check_path
   src=$files_staging/$fstage
@@ -162,27 +177,55 @@ files_put() {
   owner=$(stat -c '%u' "$fpath")
   group=$(stat -c '%g' "$fpath")
   [ "$owner" != 0 ] || refuse "$fpath belongs to root: Rowsafe won't write there as root"
+  as_owner() { setpriv --reuid="$owner" --regid="$group" --clear-groups -- "$@"; }
+  mkdir -p "$state" && chmod 0700 "$state"
+  work=$(mktemp -d "$state/put.XXXXXX") || refuse "no room for a private copy of the staged files"
+  trap 'rm -rf "$work"' EXIT
+  as_agent tar -C "$src/tree" -cf - . >"$work/files.tar" 2>/dev/null || refuse "reading the staged files failed"
+  LC_ALL=C tar -tvf "$work/files.tar" >"$work/list" 2>/dev/null &&
+    LC_ALL=C tar -tf "$work/files.tar" >"$work/names" 2>/dev/null || refuse "the staged files are unreadable"
+  bad=$(awk '{
+    t = substr($1, 1, 1)
+    if (t == "l") { print "a symbolic link"; exit }
+    if (t == "h") { print "a hard link"; exit }
+    if (t != "-" && t != "d") { print "a device, FIFO or socket"; exit }
+    if (substr($1, 4, 1) ~ /[sS]/ || substr($1, 7, 1) ~ /[sS]/) { print "a set-user-ID or set-group-ID file"; exit }
+  }' "$work/list")
+  [ -z "$bad" ] || refuse "the staged files include $bad: Rowsafe only puts back plain files and folders"
+  if grep -Eq '^/|(^|/)\.\.(/|$)' "$work/names"; then refuse "a staged path leaves the folder"; fi
+  # Never write through a symbolic link in the folder: every folder the
+  # files go into must be a real one (or not exist yet).
+  # shellcheck disable=SC2016 # $1 expands in the inner shell
+  link=$(grep '/$' "$work/names" | as_owner sh -c '
+    cd -- "$1" || exit 1
+    while IFS= read -r d; do
+      d=${d%/}
+      case $d in "" | .) continue ;; esac
+      if [ -L "$d" ]; then printf "%s\n" "$d"; exit 0; fi
+    done' rowsafe-files-put "$fpath")
+  [ -z "$link" ] || refuse "$fpath/${link#./} is a symbolic link: Rowsafe won't write through it"
   if [ "$fmode" = mirror ] && as_agent test -f "$src/delete" -a ! -L "$src/delete"; then
+    # Only files whose folder resolves to PATH or inside it, without a
+    # symbolic link on the way, are removed.
     # shellcheck disable=SC2016 # $1 expands in the inner shell
-    as_agent cat -- "$src/delete" | setpriv --reuid="$owner" --regid="$group" --clear-groups -- sh -c '
+    as_agent cat -- "$src/delete" | as_owner sh -c '
       cd -- "$1" || exit 1
       while IFS= read -r f; do
-        case $f in "" | /* | ../* | */../* | */.. | ..) continue ;; esac
+        case $f in "" | /* | ../* | */../* | */.. | .. | ./* | */./* | .) continue ;; esac
+        d=$(dirname -- "$f")
+        r=$(realpath -e -- "$d" 2>/dev/null) || continue
+        if [ "$d" = . ]; then [ "$r" = "$1" ] || continue; else [ "$r" = "$1/$d" ] || continue; fi
         if [ -L "$f" ] || { [ -e "$f" ] && [ ! -d "$f" ]; }; then rm -f -- "$f"; fi
       done' rowsafe-files-put "$fpath" || refuse "removing the files added since from $fpath failed"
   fi
-  # Existing folders keep their owner and mode; missing never replaces a file.
+  # Existing folders keep their owner and mode; missing never replaces a
+  # file; modes are the owner's umask applied to the snapshot's.
   keep=--no-overwrite-dir
   [ "$fmode" != missing ] || keep=--skip-old-files
-  flag=$(mktemp "$out_dir/.put.XXXXXX")
-  out=$({ as_agent tar -C "$src/tree" -cf - . || echo read >"$flag"; } |
-    setpriv --reuid="$owner" --regid="$group" --clear-groups -- tar -C "$fpath" -xpf - --no-same-owner $keep 2>&1)
-  rc=$?
-  if [ -s "$flag" ] || [ "$rc" != 0 ]; then
-    rm -f "$flag"
+  # shellcheck disable=SC2016 # $1 and $2 expand in the inner shell
+  out=$(as_owner sh -c 'umask 022; exec tar -C "$1" -xf - --no-same-owner --no-same-permissions "$2"' \
+    rowsafe-files-put "$fpath" "$keep" <"$work/files.tar" 2>&1) ||
     refuse "putting the files into $fpath failed: $(printf '%s' "$out" | head -n 3 | tr '\n' ' ')"
-  fi
-  rm -f "$flag"
   ok=1
   log "files-put $fmode $fstage into $fpath as uid $owner (request $id): done"
 }
