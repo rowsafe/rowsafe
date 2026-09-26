@@ -119,6 +119,8 @@ type poolerState struct {
 	Prepared     int                      `json:"prepared,omitempty"`
 	// MaxDBConn caps PgBouncer's server connections (max_db_connections).
 	MaxDBConn int `json:"max_db_conn"`
+	// DBNames are the databases with an entry of their own (poolerDBList).
+	DBNames string `json:"db_names,omitempty"`
 	// Databases where the lookup function was created (AuthDB "").
 	FunctionDBs []string  `json:"function_dbs,omitempty"`
 	UpdatedAt   time.Time `json:"updated_at"`
@@ -489,22 +491,49 @@ func tcpConnect(ctx context.Context, host string, port int, password, db string)
 // checkTarget checks that PgBouncer can log in to host:port as
 // rowsafe_pgbouncer and look a password up there; it reports whether that
 // server is a standby.
-func checkTarget(ctx context.Context, host string, port int, password, authDB string) (inRecovery bool, err error) {
+func checkTarget(ctx context.Context, host string, port int, password, authDB string) (inRecovery bool, dbs []string, err error) {
 	db := authDB
 	if db == "" {
 		db = "postgres"
 	}
 	conn, err := tcpConnect(ctx, host, port, password, db)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	defer conn.Close(context.WithoutCancel(ctx))
 	var who string
 	if err := conn.QueryRow(ctx, `SELECT coalesce(uname, '') FROM rowsafe_pgbouncer.user_lookup(current_user)`).Scan(&who); err != nil {
-		return false, fmt.Errorf("PgBouncer's lookup function doesn't work there: %w", err)
+		return false, nil, fmt.Errorf("PgBouncer's lookup function doesn't work there: %w", err)
 	}
-	err = conn.QueryRow(ctx, `SELECT pg_is_in_recovery()`).Scan(&inRecovery)
-	return inRecovery, err
+	if err = conn.QueryRow(ctx, `SELECT pg_is_in_recovery()`).Scan(&inRecovery); err != nil {
+		return false, nil, err
+	}
+	rows, err := conn.Query(ctx, `SELECT datname FROM pg_catalog.pg_database WHERE datallowconn AND NOT datistemplate ORDER BY 1`)
+	if err != nil {
+		return inRecovery, nil, err
+	}
+	dbs, err = pgx.CollectRows(rows, pgx.RowTo[string])
+	return inRecovery, dbs, err
+}
+
+var poolerDBNameRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,63}$`)
+
+// poolerDBList is the helper's dbs parameter: the databases PgBouncer gets
+// an entry of its own for. A RELOAD moves explicit entries to a new target,
+// while PgBouncer before 1.25 keeps pools made from the "*" fallback on the
+// old one. Names the helper can't take, and any past 300 characters, use
+// the fallback.
+func poolerDBList(dbs []string) string {
+	var out []string
+	n := 0
+	for _, d := range dbs {
+		if d == "pgbouncer" || !poolerDBNameRE.MatchString(d) || n+len(d)+1 > 300 {
+			continue
+		}
+		out = append(out, d)
+		n += len(d) + 1
+	}
+	return strings.Join(out, ",")
 }
 
 // hbaHint explains a refused password login from PgBouncer.
@@ -677,9 +706,11 @@ func (a *Agent) poolingOn(ctx context.Context, db protocol.DatabaseSpec, want pr
 		}
 	}
 	tl.Printf("checking that PgBouncer can log in to PostgreSQL at %s", next.target())
-	if _, err := checkTarget(ctx, next.TargetHost, next.TargetPort, password, next.AuthDB); err != nil {
+	_, targetDBs, err := checkTarget(ctx, next.TargetHost, next.TargetPort, password, next.AuthDB)
+	if err != nil {
 		return res, errors.New(hbaHint(err, next.TargetHost, next.TargetPort))
 	}
+	next.DBNames = poolerDBList(targetDBs)
 
 	next.MaxDBConn = max(headroom(facts.maxConnections, facts.reserved)*3/4, settings.PoolSize)
 	restart := fresh || st.Settings.Port != settings.Port || !slices.Equal(st.Addresses, addrs)
@@ -749,6 +780,9 @@ func (a *Agent) configureArgs(st poolerState, restart bool) [][2]string {
 	}
 	if st.AuthDB != "" {
 		kv = append(kv, [2]string{"auth_dbname", st.AuthDB})
+	}
+	if st.DBNames != "" {
+		kv = append(kv, [2]string{"dbs", st.DBNames})
 	}
 	return kv
 }
@@ -903,8 +937,9 @@ func (a *Agent) poolerRetarget(ctx context.Context, db protocol.DatabaseSpec, p 
 	tl.Printf("checking that PgBouncer can log in to %s", res.To)
 	deadline := time.Now().Add(poolerTargetWait)
 	for {
-		standby, err := checkTarget(ctx, p.Host, p.Port, password, st.AuthDB)
+		standby, targetDBs, err := checkTarget(ctx, p.Host, p.Port, password, st.AuthDB)
 		if err == nil && !standby {
+			next.DBNames = poolerDBList(targetDBs)
 			break
 		}
 		if err == nil {

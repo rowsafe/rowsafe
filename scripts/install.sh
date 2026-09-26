@@ -982,6 +982,12 @@ pooler_configure() {
   [ -z "$_authdb" ] || printf '%s\n' "$_authdb" | grep -Eq '^[a-z_][a-z0-9_]{0,62}$' || pooler_refuse "invalid auth_dbname"
   _password=$(pooler_kv password)
   [ -z "$_password" ] || printf '%s\n' "$_password" | grep -Eq '^[0-9a-f]{32,128}$' || pooler_refuse "invalid password"
+  # Databases with an entry of their own (a RELOAD moves them to a new
+  # target; older PgBouncers keep pools made from "*" on the old one).
+  _dbs=$(pooler_kv dbs)
+  for _d in $(printf '%s' "$_dbs" | tr ',' ' '); do
+    printf '%s\n' "$_d" | grep -Eq '^[A-Za-z0-9_-]{1,63}$' && [ "$_d" != pgbouncer ] || pooler_refuse "invalid database name in dbs"
+  done
 
   pooler_secure_dir
   # Keep PgBouncer's own files, to put back when pooling is turned off.
@@ -1006,6 +1012,9 @@ pooler_configure() {
     echo ";; or changes it in Rowsafe: changes made here are replaced. Turning"
     echo ";; pooling off in Rowsafe puts PgBouncer's own configuration back."
     echo "[databases]"
+    for _d in $(printf '%s' "$_dbs" | tr ',' ' '); do
+      echo "$_d = host=$_thost port=$_tport auth_user=rowsafe_pgbouncer"
+    done
     echo "* = host=$_thost port=$_tport auth_user=rowsafe_pgbouncer"
     echo ""
     echo "[pgbouncer]"
@@ -1596,10 +1605,11 @@ allow_pooler() {
 refresh_pooler() {
   _have=$(pooler_allowed_ports)
   _ports=$_have
-  for _p in $(pooler_ports); do
-    printf '%s\n' "$_have" | grep -qx "$_p" && continue
-    if [ "$TTY" = 1 ] && confirm "Also allow PgBouncer for the PostgreSQL on port $_p?" n; then
-      _ports=$(printf '%s\n%s\n' "$_ports" "$_p" | awk 'NF' | sort -un)
+  for _newport in $(pooler_ports); do
+    printf '%s\n' "$_have" | grep -qx "$_newport" && continue
+    # (confirm uses $_p itself.)
+    if [ "$TTY" = 1 ] && confirm "Also allow PgBouncer for the PostgreSQL on port $_newport?" n; then
+      _ports=$(printf '%s\n%s\n' "$_ports" "$_newport" | awk 'NF' | sort -un)
     fi
   done
   _public=$ALLOW_POOLER_PUBLIC

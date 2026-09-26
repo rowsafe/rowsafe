@@ -1371,7 +1371,7 @@ APT_EOF
     fail "PgBouncer helper result lacks $1"
   }; }
   pw=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-  good="dbport=5432 listen=127.0.0.1,10.0.0.5 port=6432 mode=transaction pool_size=20 reserve_pool=5 max_db_conn=60 max_client_conn=1000 prepared=200 target_host=127.0.0.1 target_port=5432 restart=1 auth_dbname=postgres"
+  good="dbport=5432 listen=127.0.0.1,10.0.0.5 port=6432 mode=transaction pool_size=20 reserve_pool=5 max_db_conn=60 max_client_conn=1000 prepared=200 target_host=127.0.0.1 target_port=5432 restart=1 auth_dbname=postgres dbs=shop,app-2"
 
   pooler_helper # no request: nothing happens
   [ ! -e "$OP/result" ] || fail "PgBouncer helper answered without a request"
@@ -1395,7 +1395,8 @@ APT_EOF
   presult "running=1"
   ini=$PGB/pgbouncer.ini
   [ "$(head -n 1 "$ini")" = ";; Managed by Rowsafe" ] || fail "config lacks the marker"
-  for line in "* = host=127.0.0.1 port=5432 auth_user=rowsafe_pgbouncer" "listen_addr = 127.0.0.1,10.0.0.5" "listen_port = 6432" \
+  for line in "* = host=127.0.0.1 port=5432 auth_user=rowsafe_pgbouncer" "shop = host=127.0.0.1 port=5432 auth_user=rowsafe_pgbouncer" \
+    "app-2 = host=127.0.0.1 port=5432 auth_user=rowsafe_pgbouncer" "listen_addr = 127.0.0.1,10.0.0.5" "listen_port = 6432" \
     "auth_type = scram-sha-256" "auth_dbname = postgres" "pool_mode = transaction" "default_pool_size = 20" \
     "max_prepared_statements = 200" "admin_users = rowsafe_pgbouncer" 'auth_query = SELECT uname, phash FROM rowsafe_pgbouncer.user_lookup($1)'; do
     grep -qxF "$line" "$ini" || fail "config lacks: $line"
@@ -1442,7 +1443,7 @@ APT_EOF
   presult "ok=0"
   grep -q "^error=port 5499 is not in /etc/rowsafe/pooler-allowed" "$OP/result" || fail "unlisted pooler port not refused"
   for bad in "mode=statement" "listen=localhost" "target_host=-evil" "pool_size=0" "port=80" "password=NOTHEX" \
-    "auth_dbname=Bad-Name" "max_client_conn=5" "pool_size=007"; do
+    "auth_dbname=Bad-Name" "max_client_conn=5" "pool_size=007" "dbs=pgbouncer" "dbs=a.b"; do
     key=${bad%%=*}
     prequest "pb_5 pooler-configure $(printf '%s' "$good" | sed "s/$key=[^ ]*//; s/  */ /g") $bad"
     presult "ok=0"

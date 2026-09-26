@@ -138,7 +138,13 @@ func (h *fakePgbHelper) handle(action string, kv map[string]string) error {
 			os.WriteFile(userlist, []byte(";; Managed by Rowsafe\n\"rowsafe_pgbouncer\" \""+pw+"\"\n"), 0o640)
 		}
 		var b strings.Builder
-		fmt.Fprintf(&b, ";; Managed by Rowsafe\n[databases]\n* = host=%s port=%s auth_user=rowsafe_pgbouncer\n\n[pgbouncer]\n", kv["target_host"], kv["target_port"])
+		b.WriteString(";; Managed by Rowsafe\n[databases]\n")
+		for _, d := range strings.Split(kv["dbs"], ",") {
+			if d != "" {
+				fmt.Fprintf(&b, "%s = host=%s port=%s auth_user=rowsafe_pgbouncer\n", d, kv["target_host"], kv["target_port"])
+			}
+		}
+		fmt.Fprintf(&b, "* = host=%s port=%s auth_user=rowsafe_pgbouncer\n\n[pgbouncer]\n", kv["target_host"], kv["target_port"])
 		fmt.Fprintf(&b, "listen_addr = %s\nlisten_port = %s\nunix_socket_dir = %s\n", kv["listen"], kv["port"], h.sockDir)
 		fmt.Fprintf(&b, "auth_type = scram-sha-256\nauth_file = %s\nauth_user = rowsafe_pgbouncer\n", userlist)
 		b.WriteString("auth_query = SELECT uname, phash FROM rowsafe_pgbouncer.user_lookup($1)\nadmin_users = rowsafe_pgbouncer\n")
