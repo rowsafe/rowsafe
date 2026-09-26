@@ -2490,7 +2490,9 @@ create_cluster_access() {
         if create_clusters_allowed; then allow_create_clusters; fi
         return 0
       fi
-      [ "$TTY" = 1 ] && command -v pg_createcluster >/dev/null 2>&1 || return 0
+      # Asked only where restarts are allowed: the created cluster is
+      # stopped and started by the same helper.
+      [ "$TTY" = 1 ] && command -v pg_createcluster >/dev/null 2>&1 && grep -qs '^[0-9]' "$RESTART_ALLOW_FILE" || return 0
       say ""
       if confirm "Allow Rowsafe to create a new PostgreSQL cluster here when you fork a database to this server? Only when someone confirms a fork; ports $CREATE_PORTS." y; then
         allow_create_clusters

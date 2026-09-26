@@ -1207,7 +1207,7 @@ EOF
   scenario "discover_out=$shop" "plan_out=$plan" "apply_out=Done: the backup settings are in place." apply_rc=10 \
     "wait_out=$done_" "status_out=$status"
   tty_ok "turn on backups, restart now" \
-    "Allow Rowsafe to restart or stop PostgreSQL when you ask?\tn\nAllow Rowsafe to create a new PostgreSQL cluster here\tn\nAllow Rowsafe to install and manage PgBouncer?\tn\nName it in Rowsafe [shop]\tTV Hub\nName it in Rowsafe\t\nTurn on backups for shop now? [Y/n]\t\nRestart PostgreSQL now? [y/N]\ty\n" \
+    "Allow Rowsafe to restart or stop PostgreSQL when you ask?\tn\nAllow Rowsafe to install and manage PgBouncer?\tn\nName it in Rowsafe [shop]\tTV Hub\nName it in Rowsafe\t\nTurn on backups for shop now? [Y/n]\t\nRestart PostgreSQL now? [y/N]\ty\n" \
     env ROWSAFE_TEST_LEAK=1 "$INSTALLER"
   has "Looking for PostgreSQL on this server"
   has "Found PostgreSQL 17 on port 5432 (1.2 GiB; databases: shop)"
@@ -1323,7 +1323,7 @@ restart_tests() {
   # A re-run without the flag keeps it (and asks nothing).
   scenario "discover_out=$shop"
   tty_ok "a re-run keeps restarts allowed (and asks about updates once)" \
-    "Allow Rowsafe to install PostgreSQL updates when you click Update?\tn\nAllow Rowsafe to install this server's security updates\tn\nName it in Rowsafe\t\nTurn on backups for shop now?\tn\n" "$INSTALLER"
+    "Allow Rowsafe to create a new PostgreSQL cluster here\tn\nAllow Rowsafe to install PostgreSQL updates when you click Update?\tn\nAllow Rowsafe to install this server's security updates\tn\nName it in Rowsafe\t\nTurn on backups for shop now?\tn\n" "$INSTALLER"
   lacks "Allow Rowsafe to restart or stop PostgreSQL"
   lacks "Allow Rowsafe to reboot"
   [ -f /etc/rowsafe/updates-allowed ] && ! grep -q '^[a-z]' /etc/rowsafe/updates-allowed || fail "no to updates not kept"
