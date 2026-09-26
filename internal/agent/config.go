@@ -78,6 +78,16 @@ type Config struct {
 	// to be sent to it (ROWSAFE_REPO2_QUEUE_DIR).
 	Repo2              pgbackrest.Repo
 	SecondCopyQueueDir string
+
+	// Standby is whether this server takes part in standby servers
+	// (ROWSAFE_STANDBY): StandbyOn (default) seals and opens handoffs for the
+	// peers a person confirms in the dashboard; StandbyPinned only for the
+	// key fingerprints in StandbyPeers (ROWSAFE_STANDBY_PEERS, comma
+	// separated), so even a compromised control plane can't pair a server of
+	// its own; StandbyOff refuses every standby task (and fencing never uses
+	// pg_ctl here).
+	Standby      string
+	StandbyPeers []string
 	// DockerControlSocket is where the opt-in container control service
 	// listens (docker-sidecar mode; ROWSAFE_DOCKER_CONTROL_SOCKET). Absent:
 	// Rowsafe can't stop or start PostgreSQL's container.
@@ -85,6 +95,13 @@ type Config struct {
 	// Copies configures Guard's preview and safe copies (copies_state.go).
 	Copies CopiesConfig
 }
+
+// ROWSAFE_STANDBY values.
+const (
+	StandbyOn     = "on"
+	StandbyPinned = "pinned"
+	StandbyOff    = "off"
+)
 
 // Agent modes (ROWSAFE_MODE).
 const (
@@ -135,6 +152,12 @@ func ConfigFromEnv() (Config, error) {
 	}
 	c.RestartDir = env("ROWSAFE_RESTART_DIR", filepath.Join(c.StateDir, "restart"))
 	c.RewindDir = env("ROWSAFE_REWIND_DIR", filepath.Join(c.StateDir, "rewind"))
+	c.Standby = strings.ToLower(env("ROWSAFE_STANDBY", StandbyOn))
+	for _, fp := range strings.Split(env("ROWSAFE_STANDBY_PEERS", ""), ",") {
+		if fp = strings.TrimSpace(fp); fp != "" {
+			c.StandbyPeers = append(c.StandbyPeers, fp)
+		}
+	}
 	c.DockerControlSocket = env("ROWSAFE_DOCKER_CONTROL_SOCKET", "/run/rowsafe-control/control.sock")
 	var err error
 	if c.Copies, err = copiesConfigFromEnv(c.StateDir); err != nil {
@@ -142,6 +165,12 @@ func ConfigFromEnv() (Config, error) {
 	}
 	if err = secondCopyFromEnv(&c); err != nil {
 		return c, err
+	}
+	if c.Standby != StandbyOn && c.Standby != StandbyPinned && c.Standby != StandbyOff {
+		return c, fmt.Errorf("ROWSAFE_STANDBY must be %q, %q or %q", StandbyOn, StandbyPinned, StandbyOff)
+	}
+	if c.Standby == StandbyPinned && len(c.StandbyPeers) == 0 {
+		return c, fmt.Errorf("ROWSAFE_STANDBY=pinned needs ROWSAFE_STANDBY_PEERS: the key fingerprints of the servers this one may pair with")
 	}
 	if c.Mode != ModeNative && c.Mode != ModeDockerSidecar {
 		return c, fmt.Errorf("ROWSAFE_MODE must be %q or %q", ModeNative, ModeDockerSidecar)

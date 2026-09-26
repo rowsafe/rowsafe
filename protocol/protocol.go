@@ -202,6 +202,9 @@ type HeartbeatRequest struct {
 	DockerControl *DockerControlReport `json:"docker_control,omitempty"`
 	// Copies are Guard's preview and safe copies (protocol/copies.go).
 	Copies *CopiesReport `json:"copies,omitempty"`
+	// StandbyHeartbeat: the agent's key, addresses, standbys and fences
+	// (protocol/standby.go).
+	StandbyHeartbeat
 }
 
 // HeartbeatResponse tells the agent which databases to watch.
@@ -218,6 +221,8 @@ type HeartbeatResponse struct {
 	RewindExpires []RewindExpiry `json:"rewind_expires,omitempty"`
 	// Copies extends or deletes Guard copies (protocol/copies.go).
 	Copies *CopiesUpdate `json:"copies,omitempty"`
+	// StandbyInstructions: fences to hold (protocol/standby.go).
+	StandbyInstructions
 }
 
 // ArchiverStats mirrors pg_stat_archiver for one adopted database.
@@ -551,6 +556,8 @@ func TaskTimeout(taskType string) time.Duration {
 		return 30 * time.Minute
 	case TaskSecurityUpdates:
 		return 2 * time.Hour
+	case TaskStandbyPrepare, TaskStandbyRelease, TaskStandbyFence, TaskStandbyPromote, TaskStandbyRemove, TaskStandbyUnfence:
+		return 15 * time.Minute
 	case TaskFindMoment: // reads the WAL of the range from the repository
 		return time.Hour
 	case TaskMigrate: // a switchover waits for the sync to catch up (migrate.go)

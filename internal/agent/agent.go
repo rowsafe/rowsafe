@@ -79,6 +79,12 @@ type Agent struct {
 	checkArchivingFn func(context.Context, protocol.DatabaseSpec) error
 	finishBackupsFn  func(context.Context, protocol.DatabaseSpec) error
 	skipAnalyze      bool
+	// Standby (standby*.go): the runtime, and its steps (tests replace them).
+	sbOnce sync.Once
+	sbRT   *standbyRuntime
+	sbOps  standbyOps
+	// sbLaneMu is held while the standby lane runs a task.
+	sbLaneMu sync.Mutex
 	// docker talks to the opt-in container control service (docker_control.go).
 	docker dockerControl
 
@@ -186,8 +192,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.heartbeatLoop(ctx)
 	go a.fastLane(ctx)
 	go a.rewindHousekeeping(ctx)
+	go a.standbyLoop(ctx) // fences, primaries seen from standbys (standby.go)
+	go a.standbyLane(ctx)
 	a.startSecondCopy(ctx)
-	go a.relNamesLoop(ctx)    // Find the moment: names of tables emptied or dropped later
 	go a.relNamesLoop(ctx)    // Find the moment: names of tables emptied or dropped later
 	go a.migrateReporter(ctx) // move-in progress (migrate_status.go)
 	go a.softwareLoop(ctx)
@@ -212,8 +219,9 @@ func (a *Agent) Run(ctx context.Context) error {
 		// never interrupted by an agent restart.
 		if err := a.updater.Tick(ctx); err != nil {
 			if errors.Is(err, ErrRestartForUpdate) {
-				a.fastMu.Lock()  // let a restore point in progress finish
-				a.maintMu.Lock() // and a health fix
+				a.fastMu.Lock()   // let a restore point in progress finish
+				a.maintMu.Lock()  // and a health fix
+				a.sbLaneMu.Lock() // and a fence or promotion (standby.go)
 			}
 			return err
 		}
@@ -337,9 +345,10 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 			RestartPorts: a.restartPorts(), RestartActions: a.helperActions(),
 			Rewinds: append(a.rewindState().states(), a.engineRewindStates()...),
 			Storage: a.storageReports(), SecondCopies: a.secondCopyStatuses(),
-			Software:      a.softwareForHeartbeat(),
-			DockerControl: a.dockerControlReport(ctx),
-			Copies:        a.copiesReport(),
+			Software:         a.softwareForHeartbeat(),
+			DockerControl:    a.dockerControlReport(ctx),
+			Copies:           a.copiesReport(),
+			StandbyHeartbeat: a.standbyHeartbeat(ctx),
 		}
 		resp, err := a.client.heartbeat(ctx, req)
 		if isUnauthorized(err) {
@@ -371,6 +380,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 			a.rewindState().setExpiries(resp.RewindExpires, time.Now())
 			a.setEngineRewindExpiries(resp.RewindExpires)
 			a.onCopiesUpdate(ctx, resp.Copies)
+			a.applyStandbyInstructions(resp.StandbyInstructions)
 		}
 		select {
 		case <-ctx.Done():

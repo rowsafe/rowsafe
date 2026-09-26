@@ -373,6 +373,17 @@ func (c CLI) RestoreTo(ctx context.Context, o RestoreOptions) ([]byte, error) {
 	return c.run(ctx, append(args, "--cmd="+c.Bin, "restore")...)
 }
 
+// RestoreStandby restores the latest backup into dataDir as a standby
+// (standby.signal, restore_command from the repository) that follows the
+// newest timeline. Archiving settings are kept, so a promoted standby
+// archives to the same repository.
+func (c CLI) RestoreStandby(ctx context.Context, dataDir string) ([]byte, error) {
+	if !safePathRE.MatchString(dataDir) {
+		return nil, fmt.Errorf("unsafe restore path %q", dataDir)
+	}
+	return c.run(ctx, "--pg1-path="+dataDir, "--type=standby", "--target-timeline=latest", "--cmd="+c.Bin, "restore")
+}
+
 func (c CLI) Info(ctx context.Context) ([]Stanza, error) {
 	out, err := c.Runner.Run(ctx, c.Bin, "--config="+c.ConfigPath, "--stanza="+c.Stanza, "--output=json", "info")
 	if err != nil {
