@@ -179,13 +179,15 @@ func (a *Agent) repo() (pgbackrest.Repo, error) {
 }
 
 // storageRefreshDue says when to ask for credentials next: now without
-// any, at the control plane's RefreshAt, and never later than an hour
-// before they expire.
+// any, else at the control plane's RefreshAt, and never later than an
+// hour before they expire (or, for short-lived ones, a quarter of their
+// remaining life).
 func storageRefreshDue(c *protocol.StorageCredentials, now time.Time) time.Time {
 	if c == nil {
 		return now
 	}
-	due := c.ExpiresAt.Add(-time.Hour)
+	margin := min(time.Hour, max(c.ExpiresAt.Sub(now), 0)/4)
+	due := c.ExpiresAt.Add(-margin)
 	if !c.RefreshAt.IsZero() && c.RefreshAt.Before(due) {
 		due = c.RefreshAt
 	}

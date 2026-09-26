@@ -126,6 +126,17 @@ func TestStorageRefreshDue(t *testing.T) {
 	if got := storageRefreshDue(c, now); !got.Equal(c.ExpiresAt.Add(-time.Hour)) {
 		t.Error("no RefreshAt: an hour before expiry")
 	}
+	// Short-lived credentials (15 minutes, as in the e2e): renewed at
+	// RefreshAt, never considered due right away.
+	short := testCreds("S", 15*time.Minute)
+	short.RefreshAt = now.Add(20 * time.Second)
+	if got := storageRefreshDue(short, now); !got.Equal(short.RefreshAt) {
+		t.Errorf("short-lived: due %v, want RefreshAt", got.Sub(now))
+	}
+	short.RefreshAt = time.Time{}
+	if got := storageRefreshDue(short, now); !got.After(now) {
+		t.Error("short-lived credentials without RefreshAt must not be due at once")
+	}
 	c.RefreshAt = c.ExpiresAt.Add(time.Hour)
 	if got := storageRefreshDue(c, now); !got.Equal(c.ExpiresAt.Add(-time.Hour)) {
 		t.Error("never later than an hour before expiry")

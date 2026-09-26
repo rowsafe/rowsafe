@@ -137,7 +137,7 @@ func storageCredentialsForTest(ctx context.Context, cfg Config, wait time.Durati
 	deadline := time.Now().Add(wait)
 	for {
 		c, err := LoadStorageCredentials(cfg)
-		if err == nil && c != nil && time.Until(c.ExpiresAt) > time.Hour {
+		if err == nil && c != nil && time.Until(c.ExpiresAt) > 5*time.Minute {
 			return c, nil
 		}
 		st, serr := loadState(cfg)
