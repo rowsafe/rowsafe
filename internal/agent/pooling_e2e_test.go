@@ -97,11 +97,10 @@ func TestRealPooling(t *testing.T) {
 	// PgBouncer replays the client's application_name, so the server's own
 	// port tells the clusters apart.
 	var port int
-	app.QueryRow(ctx, `SELECT inet_server_port()`).Scan(&port)
-	app.Close(ctx)
-	if port != 5432 {
-		t.Fatalf("connected to port %d", port)
+	if err := app.QueryRow(ctx, `SELECT inet_server_port()`).Scan(&port); err != nil || port != 5432 {
+		t.Fatalf("connected to port %d: %v", port, err)
 	}
+	app.Close(ctx)
 	c := collect.New(collect.Options{PGUser: "postgres", Databases: func() []protocol.DatabaseSpec { return []protocol.DatabaseSpec{db} },
 		Poolers: a.poolerSources})
 	c.Collect(ctx)
@@ -152,11 +151,11 @@ func TestRealPooling(t *testing.T) {
 		t.Fatalf("retarget %+v %v, %d failed queries", rr, err, failed.Load())
 	}
 	app, _ = appConnect(ctx, 6432, "shop")
-	app.QueryRow(ctx, `SELECT inet_server_port()`).Scan(&port)
-	app.Close(ctx)
-	if port != 5433 {
-		t.Fatalf("after the switch: port %d", port)
+	port = 0
+	if err := app.QueryRow(ctx, `SELECT inet_server_port()`).Scan(&port); err != nil || port != 5433 {
+		t.Fatalf("after the switch: port %d: %v", port, err)
 	}
+	app.Close(ctx)
 
 	// Change settings: a reload, not a restart.
 	pid := func() string {

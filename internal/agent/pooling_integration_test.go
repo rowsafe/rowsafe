@@ -204,6 +204,7 @@ func appConnect(ctx context.Context, port int, db string) (*pgx.Conn, error) {
 		return nil, err
 	}
 	cfg.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	cfg.RuntimeParams["client_encoding"] = "UTF8" // SQL_ASCII clusters
 	return pgx.ConnectConfig(ctx, cfg)
 }
 
