@@ -992,22 +992,6 @@ func (a *Agent) filesBackupTask(ctx context.Context, db protocol.DatabaseSpec, p
 	return res, nil
 }
 
-// humanCount prints 1204 as "1,204".
-func humanCount(n int64) string {
-	s := fmt.Sprint(n)
-	if n < 0 {
-		return "-" + humanCount(-n)
-	}
-	var b strings.Builder
-	for i, c := range s {
-		if i > 0 && (len(s)-i)%3 == 0 {
-			b.WriteByte(',')
-		}
-		b.WriteRune(c)
-	}
-	return b.String()
-}
-
 func filesCount(n int, one, many string) string {
 	if n == 1 {
 		return "1 " + one

@@ -424,7 +424,7 @@ func (s *Setup) Plan(ctx context.Context, name string, port int, socketDir, idFi
 	if d.Plan == nil {
 		return errors.New("the plan finished without a result; see the task in the dashboard")
 	}
-	PrintPlan(s.Out, *d.Plan)
+	PrintPlanFor(s.Out, d.Engine, *d.Plan)
 	return nil
 }
 
@@ -438,7 +438,7 @@ func (s *Setup) alreadySetUp(d protocol.SetupDatabase) error {
 		fmt.Fprintf(s.Out, "Backups are on for %s; Rowsafe is checking that changes reach your storage.\n", d.Name)
 		return &ExitError{Code: SetupAlreadyDone}
 	case protocol.DBAwaitingRestart:
-		fmt.Fprintf(s.Out, "Backups are set up for %s; PostgreSQL needs a restart to start them.\n", d.Name)
+		fmt.Fprintf(s.Out, "Backups are set up for %s; %s needs a restart to start them.\n", d.Name, protocol.EngineDisplayName(d.Engine))
 		return &ExitError{Code: SetupRestartNeeded}
 	}
 	return nil
@@ -549,7 +549,7 @@ func (s *Setup) Wait(ctx context.Context, id string, timeout time.Duration) erro
 			case protocol.DBPendingAdopt:
 				say("pending", "Waiting for the backup settings to be applied...")
 			case protocol.DBAwaitingRestart:
-				say("restart", "Waiting for PostgreSQL to restart...")
+				say("restart", "Waiting for "+protocol.EngineDisplayName(d.Engine)+" to restart...")
 			case protocol.DBVerifying:
 				say("verifying", "Checking that changes reach your storage...")
 			case protocol.DBActive:
@@ -617,12 +617,20 @@ func utf8Locale() bool {
 // expert: what gets written, which settings change, whether a restart is
 // needed and how big the database is. Setting names are kept in brackets
 // for those who want them.
-func PrintPlan(w io.Writer, r protocol.AdoptResult) {
+func PrintPlan(w io.Writer, r protocol.AdoptResult) { PrintPlanFor(w, "", r) }
+
+// PrintPlanFor is PrintPlan for a database of engine ("" is PostgreSQL).
+func PrintPlanFor(w io.Writer, engine string, r protocol.AdoptResult) {
+	server := protocol.EngineDisplayName(engine)
 	arrow := "->"
 	if utf8Locale() {
 		arrow = "→"
 	}
 	in := r.Inspect
+	if in.MySQL != nil {
+		printEnginePlan(w, r, arrow)
+		return
+	}
 	if in.ServerVersion != "" {
 		var names []string
 		for _, d := range in.Databases {
@@ -638,7 +646,7 @@ func PrintPlan(w io.Writer, r protocol.AdoptResult) {
 		default:
 			what = fmt.Sprintf("%d databases (%s)", len(names), strings.Join(names, ", "))
 		}
-		fmt.Fprintf(w, "PostgreSQL %s on port %d: %s, %s.\n\n", strings.Fields(in.ServerVersion + " ")[0], in.Port, humanBytes(in.TotalSizeBytes), what)
+		fmt.Fprintf(w, "%s %s on port %d: %s, %s.\n\n", server, strings.Fields(in.ServerVersion + " ")[0], in.Port, humanBytes(in.TotalSizeBytes), what)
 	}
 	if r.Applied {
 		fmt.Fprintln(w, "What Rowsafe changed:")
@@ -656,10 +664,10 @@ func PrintPlan(w io.Writer, r protocol.AdoptResult) {
 	}
 	fmt.Fprintln(w)
 	if r.RestartRequired {
-		fmt.Fprintln(w, "Restart: PostgreSQL needs one quick restart (a few seconds) before backups start.")
+		fmt.Fprintf(w, "Restart: %s needs one quick restart (a few seconds) before backups start.\n", server)
 		fmt.Fprintln(w, "         It only restarts if you say so.")
 	} else {
-		fmt.Fprintln(w, "No downtime: PostgreSQL does not need a restart.")
+		fmt.Fprintf(w, "No downtime: %s does not need a restart.\n", server)
 	}
 }
 
@@ -702,6 +710,9 @@ func describeChange(c protocol.Change, arrow string) string {
 			return "Copy the changes with Rowsafe instead of the current command (archive_command" + restart + ")"
 		case "archive_library":
 			return fmt.Sprintf("Turn off the other archiver (archive_library: %s%s)", fromTo(c.From, c.To), restart)
+		case "replication.replSetName": // MongoDB
+			return fmt.Sprintf("Make MongoDB a single-member replica set, so it keeps the change log needed to restore to any second "+
+				"(replication.replSetName: %s%s)", fromTo(c.From, c.To), restart)
 		case "archive_timeout":
 			every, behind := c.To+" seconds", c.To+" seconds"
 			if n, err := strconv.Atoi(c.To); err == nil && n == 60 {

@@ -187,16 +187,19 @@ func TestPlainWords(t *testing.T) {
 
 func TestFastLaneClaimsMaintenanceOneAtATime(t *testing.T) {
 	a := &Agent{}
-	if got := a.fastLaneClaim(); !slices.Equal(got, []string{protocol.TaskRestorePoint, protocol.TaskMaintenance,
+	a.poolerBusy.Store(true) // pooling tasks: TestFastLaneClaimsPooling
+	// fork_prepare (fork.go) is appended at init; the rest in order.
+	if got := slices.DeleteFunc(a.fastLaneClaim(), func(t string) bool { return t == protocol.TaskForkPrepare }); !slices.Equal(got, []string{protocol.TaskRestorePoint, protocol.TaskCopySchema, protocol.TaskMaintenance,
 		protocol.TaskRewindCompare, protocol.TaskRewindRows, protocol.TaskRewindDrop, protocol.TaskRewindCleanup,
-		protocol.TaskFindMoment}) {
+		protocol.TaskFindMoment, protocol.TaskDBAdmin, protocol.TaskMigrate, protocol.TaskSettings,
+		protocol.TaskSecurityScan, protocol.TaskSecurityFix}) || !slices.Contains(a.fastLaneClaim(), protocol.TaskForkPrepare) {
 		t.Fatalf("idle claim %v", got)
 	}
 	a.maintBusy.Store(true)
-	if got := a.fastLaneClaim(); !slices.Equal(got, []string{protocol.TaskRestorePoint}) {
+	if got := a.fastLaneClaim(); !slices.Equal(got, []string{protocol.TaskRestorePoint, protocol.TaskCopySchema}) {
 		t.Fatalf("busy claim %v", got)
 	}
-	if len(fastLaneTypes) != 1 {
+	if len(fastLaneTypes) != 2 {
 		t.Fatal("fastLaneClaim modified fastLaneTypes")
 	}
 }

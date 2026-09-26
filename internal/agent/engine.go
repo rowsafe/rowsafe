@@ -48,6 +48,38 @@ type EngineArchiver interface {
 	Archiver(ctx context.Context, env EngineEnv, db protocol.DatabaseSpec) (*protocol.ArchiverStats, error)
 }
 
+// EngineRewinds is optionally implemented by an engine with Rewind copies:
+// the agent reports them with every heartbeat next to PostgreSQL's (the
+// control plane treats a copy it no longer hears about as gone) and hands
+// it the expiries the control plane asks for (Extend).
+type EngineRewinds interface {
+	RewindStates(env EngineEnv) []protocol.RewindState
+	SetRewindExpiries(env EngineEnv, exp []protocol.RewindExpiry)
+}
+
+// engineRewindStates are the registered engines' copies (heartbeat).
+func (a *Agent) engineRewindStates() []protocol.RewindState {
+	var out []protocol.RewindState
+	for _, e := range registeredEngines() {
+		if r, ok := e.(EngineRewinds); ok {
+			out = append(out, r.RewindStates(a.engineEnv(e.Name()))...)
+		}
+	}
+	return out
+}
+
+// setEngineRewindExpiries passes the heartbeat's expiries to the engines.
+func (a *Agent) setEngineRewindExpiries(exp []protocol.RewindExpiry) {
+	if len(exp) == 0 {
+		return
+	}
+	for _, e := range registeredEngines() {
+		if r, ok := e.(EngineRewinds); ok {
+			r.SetRewindExpiries(a.engineEnv(e.Name()), exp)
+		}
+	}
+}
+
 // TaskLogger is the log attached to a task (what people see in the
 // dashboard under the task).
 type TaskLogger interface {
@@ -237,4 +269,33 @@ func (a *Agent) engineArchiver(ctx context.Context, db protocol.DatabaseSpec) (s
 	}
 	stats.DatabaseID = db.ID
 	return stats, true
+}
+
+// ---- Optional engine hooks for background work and Rewind copies (MongoDB)
+
+// EngineStarter is optionally implemented by an engine with work that runs
+// beside tasks (continuous archiving, copies that outlive their task,
+// housekeeping): Start is called once, when the agent starts, and must
+// return quickly; ctx is cancelled when the agent stops.
+type EngineStarter interface {
+	Start(ctx context.Context, env EngineEnv)
+}
+
+// startEngines starts the registered engines' background work.
+func (a *Agent) startEngines(ctx context.Context) {
+	for _, e := range registeredEngines() {
+		if s, ok := e.(EngineStarter); ok {
+			s.Start(ctx, a.engineEnv(e.Name()))
+		}
+	}
+}
+
+// EngineEnvFor is the environment an engine gets, for commands outside the
+// agent's run loop (installer helpers).
+func EngineEnvFor(cfg Config, name string, notes io.Writer) EngineEnv {
+	env := engineEnv(cfg, nil, nil, name)
+	if notes != nil {
+		env.Notes = notes
+	}
+	return env
 }

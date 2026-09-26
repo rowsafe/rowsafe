@@ -79,7 +79,7 @@ func (a *Agent) restartPorts() []int {
 	if a.cfg.RestartAllowFile == "" {
 		return nil
 	}
-	allowed, err := ReadRestartAllowed(a.cfg.RestartAllowFile)
+	allowed, err := a.allowedClusters() // restart-allowed and the clusters created for forks (fork_helper.go)
 	if err != nil {
 		a.log.Warn("reading the restart allow list", "path", a.cfg.RestartAllowFile, "err", err)
 		return nil
@@ -97,7 +97,7 @@ func (a *Agent) restart(ctx context.Context, db protocol.DatabaseSpec, taskID st
 	if a.cfg.Sidecar() {
 		return a.dockerRestart(ctx, db, taskID, tl) // docker_control.go
 	}
-	allowed, err := ReadRestartAllowed(a.cfg.RestartAllowFile)
+	allowed, err := a.allowedClusters() // fork_helper.go
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", a.cfg.RestartAllowFile, err)
 	}
@@ -218,7 +218,7 @@ func (a *Agent) helperActions() []string {
 		if rest, ok := strings.CutPrefix(line, "# actions:"); ok {
 			var out []string
 			for _, f := range strings.Fields(rest) {
-				if f == helperRestart || f == helperStop || f == helperStart {
+				if f == helperRestart || f == helperStop || f == helperStart || f == helperCreateCluster {
 					out = append(out, f)
 				}
 			}

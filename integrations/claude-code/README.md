@@ -2,8 +2,8 @@
 
 The PostgreSQL safety net for AI agents: before a migration or destructive SQL, check that the database can be recovered and create a named Rowsafe restore point.
 
-- **MCP server** `rowsafe mcp --allow-restore-points`: `safety_check`, `create_restore_point`, `list_restore_points`, and read-only fleet tools.
-- **Skill** `rowsafe-safety`: the workflow (check, restore point, proceed; if something breaks, stop and tell the user).
+- **MCP server** `rowsafe mcp --allow-restore-points`: `safety_check`, `create_restore_point`, `list_restore_points`, `preview_migration` (runs a migration on a fresh copy, never production) and `create_safe_copy` (a masked copy to test against), and read-only fleet tools.
+- **Skill** `rowsafe-safety`: the workflow (check, restore point, preview migrations, proceed; if something breaks, stop and tell the user).
 - **Hook** `rowsafe guard` on Bash: creates a restore point right before commands like `prisma migrate deploy`, `rails db:migrate`, `alembic upgrade` or `psql -c "DROP TABLE ..."`.
 
 Requirements: the `rowsafe` CLI on `PATH`, logged in (`rowsafe login`), and the project's database named in `ROWSAFE_DATABASE` or `.rowsafe.json` (`{"database": "app"}`).

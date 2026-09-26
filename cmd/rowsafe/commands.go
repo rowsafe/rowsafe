@@ -305,13 +305,42 @@ func adoptCmd(ctx context.Context, c *client.Client, args []string) error {
 	socketDir := fs.String("socket-dir", "/var/run/postgresql", "Unix socket directory")
 	retention := fs.Int("retention-full", 2, "full backups to keep (weekly fulls: 2 = about 2 weeks of PITR)")
 	noWait := fs.Bool("no-wait", false, "don't wait for the plan")
-	engine := fs.String("engine", "", "database engine: postgresql (default), or another engine Rowsafe supports")
+	engine := fs.String("engine", "", "database engine: postgresql (default), mysql or mariadb")
 	name, err := parse(fs, args, true)
 	if err != nil {
 		return err
 	}
+	if e := protocol.NormalizeEngine(*engine); e == protocol.EngineMySQL || e == protocol.EngineMariaDB {
+		// MySQL and MariaDB defaults: port 3306, the Debian/Docker socket.
+		set := map[string]bool{}
+		fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+		if !set["port"] {
+			*port = 3306
+		}
+		if !set["socket-dir"] {
+			*socketDir = "/var/run/mysqld/mysqld.sock"
+			if e == protocol.EngineMariaDB {
+				*socketDir = "/run/mysqld/mysqld.sock" // the mariadb images' own path
+			}
+		}
+	}
 	if *host, err = resolveHost(ctx, c, *host); err != nil {
 		return err
+	}
+	if protocol.NormalizeEngine(*engine) == protocol.EngineMongoDB {
+		// MongoDB: TCP on 127.0.0.1, port 27017 and daily full backups by
+		// default (the control plane fills in what isn't given).
+		set := map[string]bool{}
+		fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+		if !set["socket-dir"] {
+			*socketDir = ""
+		}
+		if !set["port"] {
+			*port = 0
+		}
+		if !set["retention-full"] {
+			*retention = 0
+		}
 	}
 	resp, err := c.CreateDatabase(ctx, protocol.CreateDatabaseRequest{
 		HostID: *host, Name: name, Port: *port, SocketDir: *socketDir, RetentionFull: *retention, Engine: *engine,
@@ -761,6 +790,14 @@ func taskName(typ string) string {
 		return "PostgreSQL restart"
 	case protocol.TaskMaintenance:
 		return "fix"
+	case protocol.TaskIndexAdvisor:
+		return "index check"
+	case protocol.TaskSettings:
+		return "settings change"
+	case protocol.TaskSecurityScan:
+		return "security check"
+	case protocol.TaskSecurityFix:
+		return "security fix"
 	case protocol.TaskRewindCopy, protocol.TaskRewindDrop, protocol.TaskRewindCompare, protocol.TaskRewindRows,
 		protocol.TaskRewindInPlace, protocol.TaskRewindUndo, protocol.TaskRewindCleanup:
 		return rewindTaskName(typ)
