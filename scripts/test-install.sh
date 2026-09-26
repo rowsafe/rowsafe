@@ -1254,7 +1254,7 @@ EOF
   scenario "discover_out=$shop\n5433\t/var/run/postgresql\t16\tbilling\t/var/lib/postgresql/16/billing\t8192\tbilling\tyes\tawaiting_restart\tbilling\t8.0 KiB\t-\tdb_2"
   tty_ok "several clusters, one waiting for a restart" \
     "Set up backups for it?\tn\nRestart PostgreSQL now?\tn\n" "$INSTALLER"
-  has "backups for billing wait for a PostgreSQL restart"
+  has "backups for billing wait for a restart"
   has "sudo pg_ctlcluster 16 billing restart"
   not_called "plan"
 
