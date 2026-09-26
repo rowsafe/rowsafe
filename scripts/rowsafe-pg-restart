@@ -90,7 +90,7 @@ create_cluster() {
   [ -f "$create_allow" ] && [ ! -L "$create_allow" ] || refuse "creating PostgreSQL clusters from Rowsafe is not allowed on this server"
   root_only "$create_allow"
   range=$(awk '$1 == "ports" && $2 ~ /^[0-9]+-[0-9]+$/ { print $2; exit }' "$create_allow")
-  [ -n "$range" ] || refuse "$create_allow names no ports"
+  [ -n "$range" ] || refuse "creating PostgreSQL clusters from Rowsafe is not allowed on this server"
   [ "$c_port" -ge "${range%-*}" ] && [ "$c_port" -le "${range#*-}" ] ||
     refuse "port $c_port is not in the ports Rowsafe may create clusters on ($range)"
   [ -f "$created" ] && [ ! -L "$created" ] || refuse "$created is missing: run the installer again with --allow-create-cluster"
