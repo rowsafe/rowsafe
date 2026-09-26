@@ -76,7 +76,7 @@ func TestEmailUnique(t *testing.T) {
 // split so secret scanners don't flag it.
 func TestFormat(t *testing.T) {
 	m := New(testKey)
-	for _, in := range []string{"+1 (415) 555-0199", "AB-123456-C", "sk_"+"live_"+"4eC39HqLyjWDarjtT1zdp7dc", "SW1A 1AA", "078-05-1120"} {
+	for _, in := range []string{"+1 (415) 555-0199", "AB-123456-C", "sk_" + "live_" + "4eC39HqLyjWDarjtT1zdp7dc", "SW1A 1AA", "078-05-1120"} {
 		out, ok := m.Value(Format, in, Options{})
 		if !ok || len(out) != len(in) || out == in {
 			t.Fatalf("%q -> %q", in, out)
