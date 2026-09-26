@@ -83,7 +83,40 @@ Rewind: continuous backups, restore to any second
                                              servers where the installer allowed restarting PostgreSQL
   rowsafe rewind undo [NAME] [--yes]         undo the rewind: put the data from before it back
   rowsafe rewind cleanup [NAME] [--yes]      delete the data kept aside by a rewind (frees disk)
+
+Move in: bring a database from DigitalOcean, RDS, Supabase, Neon... onto your server
+  rowsafe migrate [NAME] [--json]            migrations (into NAME, or all)
+  rowsafe migrate start [NAME] [--into DB] [--method live|dump] [--source-env VAR] [--id ID] [--host ADDR] [--user NAME] [--yes]
+                                             check the source and start copying into the server of NAME. The
+                                             connection string is typed (not shown), piped, or read from $VAR,
+                                             and sealed here to the server's key: Rowsafe never sees it
+  rowsafe migrate status ID [--json]         progress: tables copied, how far behind, the check's findings
+  rowsafe migrate fix ID [--yes]             mark source tables without a primary key REPLICA IDENTITY FULL
+  rowsafe migrate switch ID [--writes-stopped] [--user NAME] [--host ADDR] [--yes]
+                                             switch over: the old database goes read-only (unless you stopped
+                                             writes yourself), the last changes arrive, then the new
+                                             connection string is shown once
+  rowsafe migrate password ID                a new password for the apps' login, shown once
+  rowsafe migrate writable ID                make the old database writable again (rollback)
+  rowsafe migrate cancel ID [--drop-copy] [--yes]
+                                             stop and remove the sync from the old database
+  rowsafe migrate finish ID [--yes]          forget the old database's connection string
   Advanced (restore by hand or to another server): https://rowsafe.sh/docs/guides/restore
+
+Updates and upgrades: PostgreSQL kept current, with a Mark first
+  rowsafe update [NAME] [--yes] [--no-wait]  install the newest minor release (e.g. 16.9 -> 16.10) and restart
+                                             PostgreSQL; asks you to type the name. Only on servers where the
+                                             installer allowed updates (--allow-updates)
+  rowsafe update [NAME] --auto on|off [--timezone ZONE]
+                                             install minor releases by itself, Sundays at 03:00 (your time zone)
+  rowsafe upgrade [NAME] [--json]            versions, newer majors, the latest rehearsal, an upgrade to undo
+  rowsafe upgrade [NAME] [--to 18] [--rehearse-only] [--mode safe|fast] [--yes]
+                                             check, rehearse on a restored copy (production isn't touched),
+                                             then upgrade. Safe keeps the old version for an instant undo;
+                                             fast hard-links the data (undo restores from the backup)
+  rowsafe upgrade undo [NAME] [--yes]        go back to the version the upgrade kept (7 days)
+  rowsafe upgrade cleanup [NAME] [--yes]     remove the kept version (frees disk; no undo afterwards)
+  (Security updates and reboots: rowsafe fix, on servers where the installer allowed them)
 
 Proof: the weekly restore test
   rowsafe proof [NAME] [--no-wait]           restore the latest backup to a scratch copy and check it, now
@@ -121,6 +154,25 @@ Guard: the safety net for AI agents
                                              command, create a restore point (https://rowsafe.sh/docs/guides/ai-agents)
   rowsafe guard --check COMMAND              tell whether COMMAND looks destructive (exit 0 yes, 1 no)
   (rowsafe status NAME, above, exits 3 when a database is not protected: use it to gate risky changes)
+  rowsafe preview [NAME] FILE [--db DB] [--json | --format text|json|markdown] [--fail-on careful|dangerous]
+                                             run a migration (FILE, or - for stdin) on a fresh copy of the database
+                                             and report locks, rewrites, rows and time with a verdict: safe, careful,
+                                             dangerous, or failed (it fails on the copy). Never touches production.
+                                             Exit 0 once the preview ran, 1 if it couldn't; with --fail-on, 3 at or
+                                             above that verdict and 2 if the migration fails
+  rowsafe previews [NAME] [ID] [--json]      recent previews, or one in full
+  rowsafe copies [NAME] [--json]             safe copies: masked copies developers and AI agents can connect to
+  rowsafe copies create [NAME] [--allow IP] [--listen private|public|IP|*] [--hours 24] [--db DB] [--json]
+                                             make one: restore, mask, open it on the server for the allowed
+                                             addresses (default: this computer's). Prints the connection string once
+  rowsafe copies extend [NAME] ID [--hours 24]
+                                             keep a safe copy longer
+  rowsafe copies delete [NAME] ID [--yes]    delete a safe copy
+  rowsafe copies password [NAME] ID          a new password for a safe copy (made here; Rowsafe never sees it)
+  rowsafe masking [NAME] [--all] [--json]    which columns safe copies mask, and how
+  rowsafe masking set [NAME] [DB:]TABLE.COLUMN STRATEGY
+                                             change one column's masking (keep to leave it real)
+  rowsafe masking refresh [NAME]             read the tables again (names and types only)
 
 Admin
   rowsafe tasks [NAME] [--status S] [--type T] [--limit N]
@@ -268,6 +320,13 @@ func dispatch(ctx context.Context, args []string) error {
 		return removeCmd(ctx, c, rest)
 	case "rewind":
 		return rewindCmd(ctx, c, rest)
+	case "migrate": // move in from a managed database (migrate.go)
+		return migrateCmd(ctx, c, rest)
+	// Updates and upgrades (upgrade.go)
+	case "update":
+		return updateCmd(ctx, c, rest)
+	case "upgrade":
+		return upgradeCmd(ctx, c, rest)
 	// Proof
 	case "proof":
 		return proofCmd(ctx, c, rest)
@@ -295,6 +354,14 @@ func dispatch(ctx context.Context, args []string) error {
 	// Guard
 	case "mcp":
 		return mcpServe(ctx, c, rest)
+	case "preview": // copies.go
+		return previewCmd(ctx, c, rest)
+	case "previews":
+		return previewsCmd(ctx, c, rest)
+	case "copies":
+		return copiesCmd(ctx, c, rest)
+	case "masking":
+		return maskingCmd(ctx, c, rest)
 	// Admin
 	case "tasks":
 		return tasksList(ctx, c, rest)
