@@ -1772,7 +1772,7 @@ mysql_host_tests() {
   command -v pgbackrest >/dev/null || fail "pgbackrest (storage test) not installed"
   pass "MySQL server: agent as mysql, XtraBackup from Percona (key checked), option file and AppArmor"
   expect_ok "MySQL server: re-run is idempotent" configured "$INSTALLER" --no-setup
-  [ "$(grep -c Rowsafe /etc/apparmor.d/local/usr.sbin.mysqld)" = 1 ] || fail "AppArmor override added twice"
+  [ "$(grep -c "^# Rowsafe:" /etc/apparmor.d/local/usr.sbin.mysqld)" = 1 ] || fail "AppArmor override added twice"
   echo "log_bin = binlog" >>/etc/rowsafe/mysql/server.cnf
   expect_ok "MySQL server: purge" "$INSTALLER" --uninstall --purge
   [ -f /etc/mysql/conf.d/zz-rowsafe.cnf ] && [ ! -L /etc/mysql/conf.d/zz-rowsafe.cnf ] &&
