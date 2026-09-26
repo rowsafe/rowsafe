@@ -114,6 +114,9 @@ func selftest(ctx context.Context) int {
 	check("config", err)
 	if err == nil {
 		check("repository settings", cfg.Repo.Validate())
+		if cfg.SecondCopy() {
+			check("second copy settings", cfg.Repo2.ValidateAs("ROWSAFE_REPO2_"))
+		}
 		check("pgbackrest", exec.CommandContext(ctx, cfg.PgBackRestBin, "version").Run())
 		check("control plane", agent.CheckControlPlane(ctx, cfg))
 		for _, t := range agent.WatchedTargets(cfg) {

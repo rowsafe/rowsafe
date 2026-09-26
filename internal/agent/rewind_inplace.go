@@ -74,7 +74,7 @@ type inPlaceOps interface {
 	// running reports whether a postmaster serves dataDir.
 	running(dataDir string) bool
 	// repo checks the repository answers and holds the backup set.
-	repo(ctx context.Context, db protocol.DatabaseSpec, set string) error
+	repo(ctx context.Context, db protocol.DatabaseSpec, set string, which int) error
 	restore(ctx context.Context, db protocol.DatabaseSpec, o pgbackrest.RestoreOptions) ([]byte, error)
 	// recover starts the restored cluster privately, waits until it has
 	// promoted, stops it and returns the last replayed commit time.
@@ -274,7 +274,7 @@ func (a *Agent) rewindInPlace(ctx context.Context, db protocol.DatabaseSpec, p p
 		return nil, fmt.Errorf("not enough free disk: rewinding keeps the current data aside for Undo, so it needs about %s free in %s (the database's size plus 10%%), and %s is free",
 			humanBytes(need), parent, humanBytes(free))
 	}
-	if err := ops.repo(ctx, db, set); err != nil {
+	if err := ops.repo(ctx, db, set, p.Target.Repo); err != nil {
 		return nil, err
 	}
 	// One rewind in place runs at a time (inPlaceMu), so a fixed name.
@@ -376,7 +376,7 @@ func (a *Agent) rewindInPlace(ctx context.Context, db protocol.DatabaseSpec, p p
 		}
 	}
 	tl.Printf("restoring %s (backup %s) into %s", describeTarget(p.Target), cmp.Or(set, "picked by pgBackRest"), restoreDir)
-	out, err := ops.restore(ctx, db, pgbackrest.RestoreOptions{DataDir: restoreDir, Type: typ, Target: target, Set: set, Timeline: p.Target.Timeline})
+	out, err := ops.restore(ctx, db, pgbackrest.RestoreOptions{DataDir: restoreDir, Type: typ, Target: target, Set: set, Timeline: p.Target.Timeline, Repo: p.Target.Repo})
 	tl.Output("pgbackrest restore", out)
 	if err != nil {
 		return fail("restoring the backup", err)
@@ -1013,7 +1013,7 @@ func postmasterAlive(dataDir string) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
-func (o realInPlaceOps) repo(ctx context.Context, db protocol.DatabaseSpec, set string) error {
+func (o realInPlaceOps) repo(ctx context.Context, db protocol.DatabaseSpec, set string, which int) error {
 	in, err := pginspect.Inspect(ctx, o.a.target(db))
 	if err != nil {
 		return err
@@ -1021,7 +1021,11 @@ func (o realInPlaceOps) repo(ctx context.Context, db protocol.DatabaseSpec, set 
 	if err := o.a.writeConfig(db, in); err != nil {
 		return err
 	}
-	stanzas, err := o.a.cli(db).Info(ctx)
+	cli, err := o.a.repoCLI(db, which)
+	if err != nil {
+		return err
+	}
+	stanzas, err := cli.Info(ctx)
 	if err != nil {
 		return fmt.Errorf("Rowsafe can't reach the backup repository from this server: %w", err)
 	}
@@ -1029,7 +1033,11 @@ func (o realInPlaceOps) repo(ctx context.Context, db protocol.DatabaseSpec, set 
 }
 
 func (o realInPlaceOps) restore(ctx context.Context, db protocol.DatabaseSpec, opts pgbackrest.RestoreOptions) ([]byte, error) {
-	return o.a.cli(db).RestoreTo(ctx, opts)
+	cli, err := o.a.repoCLI(db, opts.Repo)
+	if err != nil {
+		return nil, err
+	}
+	return cli.RestoreTo(ctx, opts)
 }
 
 func (o realInPlaceOps) recover(ctx context.Context, r privateRecovery) (*time.Time, error) {

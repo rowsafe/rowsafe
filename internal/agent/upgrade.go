@@ -1139,7 +1139,7 @@ func (a *Agent) undoFast(ctx context.Context, r upgradeRecord, t protocol.Rewind
 		return nil, errors.New("the upgrade record doesn't say where PostgreSQL's old data lived")
 	}
 	ops := a.ops()
-	if err := ops.repo(ctx, db, set); err != nil {
+	if err := ops.repo(ctx, db, set, 0); err != nil {
 		return nil, err
 	}
 	helperID := taskID + "-undo"

@@ -120,6 +120,9 @@ type DatabaseSpec struct {
 	Port          int    `json:"port"`
 	SocketDir     string `json:"socket_dir"`
 	RetentionFull int    `json:"retention_full"`
+	// SecondCopyRetentionFull is how many full backups the second copy keeps
+	// (0: DefaultSecondCopyRetentionFull). See secondcopy.go.
+	SecondCopyRetentionFull int `json:"second_copy_retention_full,omitempty"`
 	// Engine is the database engine (Engine* in engine.go); "" from older
 	// control planes means PostgreSQL (NormalizeEngine).
 	Engine string `json:"engine,omitempty"`
@@ -142,6 +145,7 @@ type AdoptParams struct {
 
 type BackupParams struct {
 	Type string `json:"type"`
+	Repo int    `json:"repo,omitempty"` // RepoSecond: back up to the second copy (secondcopy.go)
 }
 
 // ---- Agent <-> control plane ----
@@ -179,6 +183,10 @@ type HeartbeatRequest struct {
 	RestartActions []string `json:"restart_actions,omitempty"`
 	// Rewinds are the live copies and kept data directories on this host.
 	Rewinds []RewindState `json:"rewinds,omitempty"`
+	// Storage and SecondCopies: backup storage use and the second copy
+	// (secondcopy.go).
+	Storage      []RepoStorage      `json:"storage,omitempty"`
+	SecondCopies []SecondCopyStatus `json:"second_copies,omitempty"`
 	// Software is PostgreSQL's versions, pending updates and upgrades on
 	// this host (upgrade.go); sent about every hour.
 	Software *SoftwareReport `json:"software,omitempty"`
@@ -318,6 +326,7 @@ type BackupResult struct {
 	RepoSizeBytes int64     `json:"repo_size_bytes"`
 	WALStart      string    `json:"wal_start,omitempty"`
 	WALStop       string    `json:"wal_stop,omitempty"`
+	Repo          int       `json:"repo,omitempty"` // RepoSecond for a backup to the second copy
 }
 
 type DrillResult struct {
@@ -329,6 +338,7 @@ type DrillResult struct {
 	Databases       []DrillDatabase `json:"databases"`
 	Failures        []string        `json:"failures,omitempty"`
 	Warnings        []string        `json:"warnings,omitempty"`
+	Repo            int             `json:"repo,omitempty"` // RepoSecond: restored from the second copy
 }
 
 type DrillDatabase struct {

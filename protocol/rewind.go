@@ -67,6 +67,9 @@ type RewindTarget struct {
 	// latest), "current" (the backup's timeline) or a timeline number. Only
 	// needed to reach a point before an earlier in-place rewind happened.
 	Timeline string `json:"timeline,omitempty"`
+	// Repo is the storage to restore from: 0 or RepoPrimary for the first,
+	// RepoSecond for the second copy (secondcopy.go).
+	Repo int `json:"repo,omitempty"`
 }
 
 // RewindCopyParams are the params of a rewind_copy task.

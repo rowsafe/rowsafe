@@ -63,6 +63,8 @@ type Agent struct {
 	// rewindOps runs the steps of a rewind in place (tests replace it).
 	rewindOps inPlaceOps
 
+	// second is the second copy and storage use (secondcopy.go).
+	second secondCopyState
 	// PostgreSQL updates and upgrades (software.go, updates.go, upgrade.go):
 	// the newest software report, a nudge to refresh it, the upgrade
 	// records, and seams for tests.
@@ -97,6 +99,7 @@ func New(cfg Config, logger *slog.Logger) *Agent {
 		a.pusher = newSpoolPusher(cfg.SpoolDir, cfg.SpoolStallAfter, logger, a.spoolCLI)
 		a.pusher.healthFile = healthPath(cfg)
 	}
+	a.initSecondCopy()
 	return a
 }
 
@@ -182,6 +185,8 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.heartbeatLoop(ctx)
 	go a.fastLane(ctx)
 	go a.rewindHousekeeping(ctx)
+	a.startSecondCopy(ctx)
+	go a.relNamesLoop(ctx)    // Find the moment: names of tables emptied or dropped later
 	go a.relNamesLoop(ctx)    // Find the moment: names of tables emptied or dropped later
 	go a.migrateReporter(ctx) // move-in progress (migrate_status.go)
 	go a.softwareLoop(ctx)
@@ -322,6 +327,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 			Hostname: hostname, AgentVersion: Version, Platform: release.Platform(),
 			Archivers: a.archiverStats(ctx), Update: a.updater.Report(), Mode: a.cfg.Mode,
 			RestartPorts: a.restartPorts(), RestartActions: a.helperActions(), Rewinds: a.rewindState().states(),
+			Storage: a.storageReports(), SecondCopies: a.secondCopyStatuses(),
 			Software:      a.softwareForHeartbeat(),
 			DockerControl: a.dockerControlReport(ctx),
 			Copies:        a.copiesReport(),

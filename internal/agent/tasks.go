@@ -74,9 +74,19 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 				return nil, err
 			}
 		}
+		defer a.measureSoon()
+		if p.Repo == protocol.RepoSecond {
+			return a.secondCopyBackup(ctx, db, p.Type, tl)
+		}
 		return a.backup(ctx, db, p.Type, tl)
 	case protocol.TaskDrill:
-		return a.drill(ctx, db, task.ID, tl)
+		var p protocol.DrillParams
+		if len(task.Params) > 0 {
+			if err := json.Unmarshal(task.Params, &p); err != nil {
+				return nil, err
+			}
+		}
+		return a.drillFrom(ctx, db, task.ID, p.Repo, tl)
 	case protocol.TaskRestorePoint:
 		var p protocol.RestorePointParams
 		if err := json.Unmarshal(task.Params, &p); err != nil {
@@ -180,6 +190,7 @@ func (a *Agent) writeConfig(db protocol.DatabaseSpec, in protocol.InspectResult)
 	if a.cfg.Sidecar() {
 		logDir = "" // container logs only
 	}
+	a.writeSecondCopyConfig(db, in, logDir)
 	conf := pgbackrest.RenderConfig(a.cfg.Repo, pgbackrest.ConfigInput{
 		Stanza: db.Stanza, DataDir: in.DataDirectory, Port: db.Port, SocketDir: db.SocketDir,
 		User: a.cfg.PGUser, RetentionFull: db.RetentionFull, LogPath: logDir,
@@ -211,7 +222,8 @@ func (a *Agent) adopt(ctx context.Context, db protocol.DatabaseSpec, p protocol.
 			err = a.sidecarPreflight(ctx, db, in, tl)
 		}
 	} else {
-		pi.ArchiveCommand, err = pgbackrest.ArchiveCommand(a.cfg.PgBackRestBin, a.cfg.configPath(db.Stanza), db.Stanza)
+		pi.ArchiveCommand, err = a.nativeArchiveCommand(db)
+		pi.Own = a.ownArchiveCommand(db)
 	}
 	if err != nil {
 		return &protocol.AdoptResult{Inspect: in}, err
@@ -232,6 +244,12 @@ func (a *Agent) adopt(ctx context.Context, db protocol.DatabaseSpec, p protocol.
 	tl.Printf("writing %s", a.cfg.configPath(db.Stanza))
 	if err := a.writeConfig(db, in); err != nil {
 		return res, err
+	}
+	if !a.cfg.Sidecar() && a.cfg.SecondCopy() {
+		// archive_command queues WAL for the second copy here.
+		if dir, err := a.cfg.secondCopyQueue(db.Stanza); err == nil {
+			_ = os.MkdirAll(dir, 0o700)
+		}
 	}
 	if a.cfg.Sidecar() {
 		// archive_command writes here as soon as it is in effect.
