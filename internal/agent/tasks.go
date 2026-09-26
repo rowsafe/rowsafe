@@ -51,6 +51,9 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 	if protocol.IsStandbyTask(task.Type) {
 		return a.runStandbyTask(ctx, task, tl) // standby*.go
 	}
+	if protocol.IsForkTask(task.Type) {
+		return a.runForkTask(ctx, task, tl) // fork*.go
+	}
 	if task.Database != nil {
 		switch task.Type { // connection pooling (pooling.go)
 		case protocol.TaskPooling:

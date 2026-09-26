@@ -56,7 +56,7 @@ lint: check-installer
 		done; \
 	done
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck -S warning -s sh scripts/install.sh scripts/test-install.sh scripts/test-rewind.sh scripts/test-pooling.sh scripts/test-secondcopy.sh scripts/test-mysql.sh scripts/test-upgrade.sh scripts/rowsafe-agent-guard scripts/rowsafe-pg-restart scripts/rowsafe-firewall; \
+		shellcheck -S warning -s sh scripts/install.sh scripts/test-install.sh scripts/test-rewind.sh scripts/test-pooling.sh scripts/test-secondcopy.sh scripts/test-mysql.sh scripts/test-upgrade.sh scripts/rowsafe-agent-guard scripts/rowsafe-pg-restart scripts/rowsafe-firewall scripts/rowsafe-pg-create-cluster; \
 		shellcheck -S warning -s bash integrations/github-action/scripts/*.sh integrations/github-action/test/*.sh integrations/github-action/export.sh; \
 	else echo "shellcheck not installed; skipping"; fi
 
@@ -76,6 +76,10 @@ check-installer:
 		diff -u deploy/systemd/rowsafe-pg-restart.service - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pg-restart.service"; exit 1; }
 	@sed -n "/<<'ROWSAFE_RESTART_PATH_EOF'; then\$$/,/^ROWSAFE_RESTART_PATH_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
 		diff -u deploy/systemd/rowsafe-pg-restart.path - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pg-restart.path"; exit 1; }
+	@sed -n "/<<'ROWSAFE_CREATE_CLUSTER_EOF'; then\$$/,/^ROWSAFE_CREATE_CLUSTER_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
+		diff -u scripts/rowsafe-pg-create-cluster - || { echo "scripts/install.sh: embedded cluster creator differs from scripts/rowsafe-pg-create-cluster"; exit 1; }
+	@sed -n "/<<'ROWSAFE_CREATE_UNIT_EOF'; then\$$/,/^ROWSAFE_CREATE_UNIT_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
+		diff -u deploy/systemd/rowsafe-pg-create-cluster@.service - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pg-create-cluster@.service"; exit 1; }
 	@sed -n "/<<'ROWSAFE_POOLER_SERVICE_EOF'; then\$$/,/^ROWSAFE_POOLER_SERVICE_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
 		diff -u deploy/systemd/rowsafe-pooler.service - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pooler.service"; exit 1; }
 	@sed -n "/<<'ROWSAFE_POOLER_PATH_EOF'; then\$$/,/^ROWSAFE_POOLER_PATH_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \

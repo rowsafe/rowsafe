@@ -94,6 +94,12 @@ type Agent struct {
 	sbOps  standbyOps
 	// sbLaneMu is held while the standby lane runs a task.
 	sbLaneMu sync.Mutex
+
+	// Fork (fork*.go): the runtime, and the steps a fork restore runs
+	// (tests replace them).
+	fkOnce sync.Once
+	fkRT   *forkRuntime
+	fkOps  forkOps
 	// docker talks to the opt-in container control service (docker_control.go).
 	docker dockerControl
 
@@ -209,6 +215,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 	go a.standbyLoop(ctx) // fences, primaries seen from standbys (standby.go)
 	go a.standbyLane(ctx)
+	go a.forkLoop(ctx) // fork.go: rolls back an interrupted fork restore, deletes expired kept data
 	a.startSecondCopy(ctx)
 	go a.relNamesLoop(ctx)    // Find the moment: names of tables emptied or dropped later
 	go a.migrateReporter(ctx) // move-in progress (migrate_status.go)
@@ -388,6 +395,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 			DockerControl:    a.dockerControlReport(ctx),
 			Copies:           a.copiesReport(),
 			StandbyHeartbeat: a.standbyHeartbeat(ctx),
+			ForkHeartbeat:    a.forkHeartbeat(),   // fork.go
 			ManagedStorage:   a.storageStatus(),   // Rowsafe Storage or own bucket (storage.go)
 			Pooler:           a.poolerStatus(ctx), // pooling.go
 		}

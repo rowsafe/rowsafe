@@ -266,7 +266,7 @@ func waitStandby(ctx context.Context, ops standbyOps, db protocol.DatabaseSpec, 
 // helperCanStopStart checks the root helper may stop and start db's
 // cluster on this server.
 func (a *Agent) helperCanStopStart(port int) error {
-	allowed, err := ReadRestartAllowed(a.cfg.RestartAllowFile)
+	allowed, err := a.allowedClusters() // fork_helper.go: with the clusters created for forks
 	if err != nil {
 		return fmt.Errorf("reading %s: %w", a.cfg.RestartAllowFile, err)
 	}

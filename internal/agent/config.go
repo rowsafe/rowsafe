@@ -95,6 +95,20 @@ type Config struct {
 	// pg_ctl here).
 	Standby      string
 	StandbyPeers []string
+
+	// ---- Fork (fork*.go) ----
+	// CreateClusterAllowFile says root allowed Rowsafe to create PostgreSQL
+	// clusters for forks, and on which ports ("ports MIN-MAX";
+	// ROWSAFE_CREATE_CLUSTER_ALLOW_FILE). The installer writes it.
+	CreateClusterAllowFile string
+	// CreatedClustersFile lists the clusters root created for forks ("PORT
+	// UNIT" lines, like RestartAllowFile; ROWSAFE_CREATED_CLUSTERS_FILE):
+	// the root helper may stop and start them too.
+	CreatedClustersFile string
+	// ForkTargetDir makes a Docker sidecar a fork target: the fork is
+	// restored into this directory, its PostgreSQL container's PGDATA
+	// (ROWSAFE_FORK_TARGET_DIR).
+	ForkTargetDir string
 	// DockerControlSocket is where the opt-in container control service
 	// listens (docker-sidecar mode; ROWSAFE_DOCKER_CONTROL_SOCKET). Absent:
 	// Rowsafe can't stop or start PostgreSQL's container.
@@ -159,6 +173,9 @@ func ConfigFromEnv() (Config, error) {
 		},
 	}
 	c.RestartDir = env("ROWSAFE_RESTART_DIR", filepath.Join(c.StateDir, "restart"))
+	c.CreateClusterAllowFile = env("ROWSAFE_CREATE_CLUSTER_ALLOW_FILE", "/etc/rowsafe/create-cluster-allowed") // fork
+	c.CreatedClustersFile = env("ROWSAFE_CREATED_CLUSTERS_FILE", "/etc/rowsafe/created-clusters")              // fork
+	c.ForkTargetDir = env("ROWSAFE_FORK_TARGET_DIR", "")                                                       // fork
 	c.RewindDir = env("ROWSAFE_REWIND_DIR", filepath.Join(c.StateDir, "rewind"))
 	c.Standby = strings.ToLower(env("ROWSAFE_STANDBY", StandbyOn))
 	for _, fp := range strings.Split(env("ROWSAFE_STANDBY_PEERS", ""), ",") {
@@ -226,10 +243,14 @@ func ConfigFromEnv() (Config, error) {
 		!strings.HasPrefix(c.ControlURL, "http://localhost") {
 		return c, fmt.Errorf("ROWSAFE_URL must use https (plain http is only allowed for localhost)")
 	}
-	for _, p := range []string{c.StateDir, c.ConfigDir, c.LogDir, c.DrillDir, c.InstallDir, c.RestartDir, c.RestartAllowFile, c.RestartResultDir, c.RestartHelper, c.RewindDir, c.UpdateAllowFile, c.SecondCopyQueueDir} {
+	for _, p := range []string{c.StateDir, c.ConfigDir, c.LogDir, c.DrillDir, c.InstallDir, c.RestartDir, c.RestartAllowFile, c.RestartResultDir, c.RestartHelper, c.RewindDir, c.UpdateAllowFile, c.SecondCopyQueueDir,
+		c.CreateClusterAllowFile, c.CreatedClustersFile} {
 		if !filepath.IsAbs(p) {
 			return c, fmt.Errorf("directory %q must be absolute", p)
 		}
+	}
+	if c.ForkTargetDir != "" && (!c.Sidecar() || !filepath.IsAbs(c.ForkTargetDir)) {
+		return c, fmt.Errorf("ROWSAFE_FORK_TARGET_DIR must be an absolute path, and only goes with ROWSAFE_MODE=%s", ModeDockerSidecar)
 	}
 	if c.Sidecar() {
 		if _, err := pgbackrest.SpoolDir(c.SpoolDir, "x"); err != nil {

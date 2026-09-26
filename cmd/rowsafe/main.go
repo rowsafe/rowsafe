@@ -141,6 +141,13 @@ Standby: a second server that stays in sync, is readable, and takes over
                                              switch over now, (re)schedule it (--at TIME, --clear), cancel,
                                              switch back to the old server, remove the old server
 
+Fork: a new, independent database from any moment, on another server or a new port
+  rowsafe fork [SOURCE] --to SERVER [--name NAME] [--at TIME | --mark MARK] [--mask]
+               [--port PORT | --into-port PORT] [--fingerprint F] [--no-wait] [--json]
+                                             restore SOURCE as it was (default: now) as a new database with its own
+                                             backups; --mask replaces personal data before anyone can connect
+  rowsafe forks [SOURCE] [--json]            the forks made from SOURCE, and what it was forked from
+
 Proof: the weekly restore test
   rowsafe proof [NAME] [--no-wait]           restore the latest backup to a scratch copy and check it, now
   rowsafe proofs [NAME]                      restore test results
@@ -396,6 +403,10 @@ func dispatch(ctx context.Context, args []string) error {
 		return updateCmd(ctx, c, rest)
 	case "upgrade":
 		return upgradeCmd(ctx, c, rest)
+	case "fork": // fork.go
+		return forkCmd(ctx, c, rest)
+	case "forks":
+		return forksCmd(ctx, c, rest)
 	case "standby":
 		return standbyCmd(ctx, c, rest)
 	case "move":
