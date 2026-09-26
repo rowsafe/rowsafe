@@ -1019,21 +1019,27 @@ install_helper_script() {
 # /run/rowsafe-pg-restart/result (root's directory, readable by the agent)
 # as key=value lines: id, action, ok (1 or 0), unit, error and finished_at.
 #
-# Files (only when root allowed it: --allow-files, which writes
-# /etc/rowsafe/files-allowed, the folders Rowsafe may read and restore
-# into, with everything under them) come in their own request file,
-# /var/lib/rowsafe/restart/files-request, answered in
-# /run/rowsafe-pg-restart/files-result, so they never overwrite a restart
-# request or its answer. "ID files-read PATH" gives the agent user read
-# access to PATH (POSIX ACLs, never ownership or modes); "ID files-put MODE
-# STAGE PATH" puts files the agent restored into
+# Files mode (ROWSAFE_HELPER_MODE=files, set by rowsafe-files-helper.service,
+# which rowsafe-files-helper.path starts; only when root allowed it with
+# --allow-files): the request is /var/lib/rowsafe/restart/files-request and
+# the answer /run/rowsafe-pg-restart/files-result. "ID files-read PATH"
+# gives the agent user read access to PATH (POSIX ACLs, never ownership or
+# modes); "ID files-put MODE STAGE PATH" puts files the agent restored into
 # /var/lib/rowsafe/files-staging/STAGE/tree back into PATH as PATH's owner.
 # MODE: missing (never overwrite), replace, or mirror (also delete the files
-# listed in STAGE/delete). The agent is not trusted with that: root copies
-# the staged files (read as the agent user) and puts them back only if they
-# are plain files and folders (no links, devices or FIFOs, no set-user-ID or
-# set-group-ID bits, no path leaving PATH), never through a symbolic link in
-# PATH, and deletes only files whose folder is really inside PATH.
+# listed in STAGE/delete). PATH must be listed exactly in
+# /etc/rowsafe/files-allowed ("PATH UID": the folders the person protected
+# with the installer, and their owner then) and still be owned by that uid;
+# never a system, database or home folder, nor one the agent user owns or
+# can write (nor any folder on the way or inside). The agent is not trusted
+# with the rest either: root copies the staged files (read as the agent
+# user, at most 20 GB by default) and puts them back only if they are plain
+# files and folders (no links, devices or FIFOs, no set-user-ID or
+# set-group-ID bits, no path leaving PATH or into .ssh, .gnupg or
+# .config/systemd), never through a symbolic link in PATH, as the owner
+# with the owner's own group; it deletes only files whose folder is really
+# inside PATH. At most one files-put every 2 minutes and one files-read
+# every 10 minutes.
 #
 # Update mode (ROWSAFE_HELPER_MODE=update, set by rowsafe-pg-update.service,
 # which rowsafe-pg-update.path starts): the request is
@@ -1094,6 +1100,10 @@ journalctl=${ROWSAFE_JOURNALCTL:-journalctl}
 state=${STATE_DIRECTORY:-/var/lib/rowsafe-pg-restart}
 files_allow=${ROWSAFE_FILES_ALLOW:-/etc/rowsafe/files-allowed}
 files_staging=${ROWSAFE_FILES_STAGING:-/var/lib/rowsafe/files-staging}
+# At most this many bytes of files are put back at once (root can change it
+# in the files unit: Environment=ROWSAFE_FILES_MAX_BYTES=...).
+files_max=${ROWSAFE_FILES_MAX_BYTES:-21474836480}
+case $files_max in '' | *[!0-9]*) files_max=21474836480 ;; esac
 agent_user=${ROWSAFE_AGENT_USER:-postgres}
 systemctl=${ROWSAFE_SYSTEMCTL:-systemctl}
 mode=${ROWSAFE_HELPER_MODE:-restart}
@@ -1602,11 +1612,61 @@ create_cluster() {
   exit 0
 }
 
-# ---------------------------------------------------------------- files (restart mode, --allow-files)
+# ---------------------------------------------------------------- files (files mode, --allow-files)
+
+# files_folder_uid prints the owner uid root recorded for exactly $fpath in
+# the files allow list ("PATH UID" lines), or nothing.
+files_folder_uid() {
+  awk -v p="$fpath" '$1 == p && $2 ~ /^[0-9]+$/ && NF == 2 { print $2; exit }' "$files_allow"
+}
+
+# files_agent_can_write DIR: DIR is owned by the agent user or writable by
+# it (as the agent sees it, or by mode bits for others and its groups).
+files_agent_can_write() {
+  [ "$(stat -c '%u' -- "$1")" = "$agent_uid" ] && return 0
+  as_agent test -w "$1" 2>/dev/null && return 0
+  _m=$(stat -c '%a %g' -- "$1")
+  _perm=${_m% *} _gid=${_m#* }
+  [ $((0$_perm & 02)) = 0 ] || return 0
+  if [ $((0$_perm & 020)) != 0 ]; then
+    for _g in $agent_groups; do [ "$_g" != "$_gid" ] || return 0; done
+  fi
+  return 1
+}
+
+# files_check_home refuses a folder that is, contains or sits inside a home
+# directory (getent passwd). Exceptions: the folder IS the home of a service
+# account (uid 1-999, no login shell), or sits inside such an account's
+# home (/var/www for www-data). Homes that are / or don't exist are skipped.
+files_check_home() {
+  getent passwd >"$work_pw" 2>/dev/null || refuse "can't read the list of users"
+  while IFS=: read -r _u _x _uid _gid _gecos _home _shell; do
+    case $_home in '' | / | [!/]*) continue ;; esac
+    _home=${_home%/}
+    [ -d "$_home" ] || continue
+    _service=0
+    case $_uid in '' | *[!0-9]*) _uid=0 ;; esac
+    if [ "$_uid" -ge 1 ] && [ "$_uid" -le 999 ]; then
+      case $_shell in */nologin | */false | '') _service=1 ;; esac
+    fi
+    case $_home in
+      "$fpath")
+        [ "$_service" = 1 ] || refuse "$fpath is the home folder of $_u: Rowsafe never writes there"
+        ;;
+      "$fpath"/*) refuse "$fpath contains the home folder of $_u ($_home): Rowsafe never writes there" ;;
+    esac
+    case $fpath in
+      "$_home"/*)
+        [ "$_service" = 1 ] || refuse "$fpath is inside the home folder of $_u ($_home): Rowsafe never writes there"
+        ;;
+    esac
+  done <"$work_pw"
+}
 
 # files_check_path refuses unless $fpath is a plain, existing folder (no
-# symbolic link on the way) under a folder root allowed, and not a system
-# or database folder.
+# symbolic link on the way) that root listed exactly in the files allow
+# list, still owned by the uid recorded there, not a system, database or
+# home folder, with no folder on the way the agent user owns or can write.
 files_check_path() {
   check_root_file "$files_allow" "reading or restoring folders from Rowsafe is not allowed on this server"
   case $fpath in
@@ -1614,53 +1674,122 @@ files_check_path() {
   esac
   case $fpath/ in
     /etc/* | /root/* | /boot/* | /proc/* | /sys/* | /dev/* | /run/* | /usr/* | /bin/* | /sbin/* | /lib/* | /lib64/* | \
-      /var/lib/postgresql/* | /var/lib/rowsafe/* | /var/lib/rowsafe-pg-restart/* | /opt/rowsafe/* | \
-      /var/lib/docker/containers/* | */.ssh/* | */.gnupg/*)
+      /var/lib/postgresql/* | /var/lib/rowsafe/* | /var/lib/rowsafe-pg-restart/* | /var/lib/rowsafe-files-helper/* | \
+      /opt/rowsafe/* | /var/lib/docker/containers/* | */.ssh/* | */.gnupg/* | */.config/systemd/*)
       refuse "$fpath is a system or database folder: Rowsafe never touches it" ;;
   esac
+  want_uid=$(files_folder_uid)
+  [ -n "$want_uid" ] || refuse "$fpath is not a folder root allowed in $files_allow (run the installer again with --files $fpath)"
   real=$(realpath -e -- "$fpath" 2>/dev/null) || refuse "$fpath doesn't exist"
   [ "$real" = "$fpath" ] || refuse "$fpath goes through a symbolic link (to $real)"
   [ -d "$fpath" ] || refuse "$fpath is not a folder"
-  allowed=0
-  while IFS= read -r root; do
-    case $root in '' | '#'* | / | [!/]*) continue ;; esac
-    case $fpath in "$root" | "$root"/*) allowed=1 ;; esac
-  done <"$files_allow"
-  [ "$allowed" = 1 ] || refuse "$fpath is not under a folder listed in $files_allow"
+  [ "$(stat -c '%u' -- "$fpath")" = "$want_uid" ] ||
+    refuse "$fpath belongs to uid $(stat -c '%u' -- "$fpath") now, not uid $want_uid as when root allowed it: run the installer again with --files $fpath"
+  agent_uid=$(id -u "$agent_user" 2>/dev/null) || refuse "no user $agent_user"
+  agent_groups=$(id -G "$agent_user" 2>/dev/null)
+  files_check_home
+  _p=$fpath
+  while [ -n "$_p" ]; do
+    if files_agent_can_write "$_p"; then refuse "Rowsafe's own user can change $_p: Rowsafe won't use root there"; fi
+    _p=${_p%/*}
+  done
+  if files_agent_can_write /; then refuse "Rowsafe's own user can change /"; fi
+  # No folder inside is the agent's or writable by it either.
+  _found=$(find -P "$fpath" -xdev -type d \( -user "$agent_uid" -o -perm -0002 \) -print -quit 2>/dev/null)
+  [ -z "$_found" ] || refuse "Rowsafe's own user can change $_found: Rowsafe won't use root there"
+  for _g in $agent_groups; do
+    _found=$(find -P "$fpath" -xdev -type d -group "$_g" -perm -0020 -print -quit 2>/dev/null)
+    [ -z "$_found" ] || refuse "Rowsafe's own user can change $_found (group): Rowsafe won't use root there"
+  done
+  _found=$(as_agent find -P "$fpath" -xdev -type d -writable -print -quit 2>/dev/null)
+  [ -z "$_found" ] || refuse "Rowsafe's own user can change $_found: Rowsafe won't use root there"
+}
+
+# acl_grant_read DIR USER WORKDIR lets USER read DIR and everything in it,
+# now and later (default ACLs). Masks that were already there are put back
+# as they were, so no other named entry gains rights; a new mask covers only
+# the owning group and USER.
+acl_grant_read() {
+  getfacl -R -P -s -p -- "$1" >"$3/acl.before" 2>/dev/null || return 1
+  setfacl -R -P -m "u:$2:rX" -- "$1" || return 1
+  find -P "$1" -xdev -type d -exec setfacl -m "d:u:$2:rX" -- {} + || return 1
+  [ -s "$3/acl.before" ] || return 0
+  getfacl -R -P -s -p -- "$1" >"$3/acl.after" 2>/dev/null || return 1
+  awk '
+    FNR == 1 { pass++ }
+    /^# file: / { f = substr($0, 9); if (pass == 1) had[f] = 1; else keep = (f in had) }
+    pass == 1 { if ($0 ~ /^mask::/) m[f] = $0; else if ($0 ~ /^default:mask::/) dm[f] = $0; next }
+    !keep || /^# (owner|group|flags):/ { next }
+    /^mask::/ && (f in m) { print m[f]; next }
+    /^default:mask::/ && (f in dm) { print dm[f]; next }
+    { print }
+  ' "$3/acl.before" "$3/acl.after" >"$3/acl.restore"
+  [ ! -s "$3/acl.restore" ] || setfacl --restore="$3/acl.restore"
+}
+
+# acl_grant_x DIR USER lets USER through DIR, keeping DIR's mask if it has
+# one.
+acl_grant_x() {
+  if getfacl -p -s -- "$1" 2>/dev/null | grep -q '^mask::'; then
+    setfacl -n -m "u:$2:x" -- "$1"
+  else
+    setfacl -m "u:$2:x" -- "$1"
+  fi
 }
 
 # files_read gives the agent user read access to the folder and what is in
-# it, now and later (default ACLs), and passage through its parents.
+# it, now and later (default ACLs), and passage through its parents, never
+# widening an ACL mask that was there.
 files_read() {
   files_check_path
-  out=$(setfacl -R -P -m "u:$agent_user:rX" -- "$fpath" 2>&1) || refuse "setfacl failed on $fpath: $(printf '%s' "$out" | head -n 3 | tr '\n' ' ')"
-  find -P "$fpath" -type d -exec setfacl -m "d:u:$agent_user:rX" -- {} + 2>/dev/null ||
-    refuse "setting the default ACL on the folders in $fpath failed"
+  cooldown files-read 600
+  work=$(mktemp -d "$state/read.XXXXXX") || refuse "no room in $state"
+  trap 'rm -rf "$work"' EXIT
+  trap 'exit 143' TERM INT HUP
+  out=$(acl_grant_read "$fpath" "$agent_user" "$work" 2>&1) || refuse "setting the ACLs on $fpath failed: $(printf '%s' "$out" | head -n 3 | tr '\n' ' ')"
   p=${fpath%/*}
   while [ -n "$p" ]; do
-    as_agent test -x "$p" 2>/dev/null || setfacl -m "u:$agent_user:x" -- "$p" || refuse "can't let Rowsafe through $p"
+    as_agent test -x "$p" 2>/dev/null || acl_grant_x "$p" "$agent_user" || refuse "can't let Rowsafe through $p"
     p=${p%/*}
   done
   ok=1
   log "files-read $fpath (request $id): done"
 }
 
+# files_bad_names FILE prints the first path in FILE (one per line) that
+# leaves the folder or goes into .ssh, .gnupg or .config/systemd.
+files_bad_names() {
+  grep -E '^/|(^|/)\.\.(/|$)|(^|/)\.ssh(/|$)|(^|/)\.gnupg(/|$)|(^|/)\.config/systemd(/|$)' "$1" | head -n 1
+}
+
 # files_put puts the staged files into the folder as its owner. The agent
 # (whose files these are) is not trusted: root takes its own copy (read as
-# the agent user), checks it, and the owner extracts that copy. Root never
-# opens anything in the agent's directories or in PATH itself.
+# the agent user, at most files_max bytes), checks it, and the owner (with
+# the owner's own primary group) extracts that copy. Root never opens
+# anything in the agent's directories or in PATH itself.
 files_put() {
   files_check_path
   src=$files_staging/$fstage
   as_agent test -d "$src/tree" -a ! -L "$src/tree" -a ! -L "$src" 2>/dev/null || refuse "nothing is staged for restore $fstage"
-  owner=$(stat -c '%u' "$fpath")
-  group=$(stat -c '%g' "$fpath")
+  owner=$want_uid
   [ "$owner" != 0 ] || refuse "$fpath belongs to root: Rowsafe won't write there as root"
+  [ "$owner" != "$agent_uid" ] || refuse "$fpath belongs to Rowsafe's own user, which puts files back by itself"
+  group=$(getent passwd "$owner" | cut -d: -f4)
+  case $group in '' | *[!0-9]*) refuse "uid $owner, which owns $fpath, has no entry in the user list" ;; esac
   as_owner() { setpriv --reuid="$owner" --regid="$group" --clear-groups -- "$@"; }
-  mkdir -p "$state" && chmod 0700 "$state"
+  # The staged size, as the agent sees it, before copying anything.
+  size=$(as_agent du -s -B1 --apparent-size -- "$src/tree" 2>/dev/null | cut -f1)
+  case $size in '' | *[!0-9]*) refuse "can't measure the staged files" ;; esac
+  [ "$size" -le "$files_max" ] || refuse "the staged files are $size bytes, more than the $files_max bytes Rowsafe may put back at once"
+  cooldown files-put 120
   work=$(mktemp -d "$state/put.XXXXXX") || refuse "no room for a private copy of the staged files"
   trap 'rm -rf "$work"' EXIT
-  as_agent tar -C "$src/tree" -cf - . >"$work/files.tar" 2>/dev/null || refuse "reading the staged files failed"
+  trap 'exit 143' TERM INT HUP
+  # tar adds headers: the copy may exceed the files by 1/16 at most.
+  cap=$((files_max + files_max / 16 + 1048576))
+  { as_agent tar -C "$src/tree" -cSf - . 2>/dev/null; echo $? >"$work/rc"; } | head -c $((cap + 1)) >"$work/files.tar"
+  [ "$(stat -c '%s' "$work/files.tar")" -le "$cap" ] || refuse "the staged files are more than the $files_max bytes Rowsafe may put back at once"
+  [ "$(cat "$work/rc")" = 0 ] || refuse "reading the staged files failed"
   if ! LC_ALL=C tar -tvf "$work/files.tar" >"$work/list" 2>/dev/null ||
     ! LC_ALL=C tar -tf "$work/files.tar" >"$work/names" 2>/dev/null; then
     refuse "the staged files are unreadable"
@@ -1673,23 +1802,33 @@ files_put() {
     if (substr($1, 4, 1) ~ /[sS]/ || substr($1, 7, 1) ~ /[sS]/) { print "a set-user-ID or set-group-ID file"; exit }
   }' "$work/list")
   [ -z "$bad" ] || refuse "the staged files include $bad: Rowsafe only puts back plain files and folders"
-  if grep -Eq '^/|(^|/)\.\.(/|$)' "$work/names"; then refuse "a staged path leaves the folder"; fi
-  # Never write through a symbolic link in the folder: every folder the
-  # files go into must be a real one (or not exist yet).
+  bad=$(files_bad_names "$work/names")
+  [ -z "$bad" ] || refuse "a staged path leaves the folder or goes where Rowsafe never writes ($bad)"
+  # Never write through a symbolic link in the folder: every folder on the
+  # way to every file must be a real one (or not exist yet).
+  awk '{
+    sub(/\/$/, ""); sub(/^\.\//, "")
+    if ($0 == "" || $0 == ".") next
+    n = split($0, c, "/"); p = ""
+    for (i = 1; i < n; i++) { p = (p == "" ? c[i] : p "/" c[i]); if (!(p in s)) { s[p] = 1; print p } }
+    if (!($0 in s)) { s[$0] = 1; print $0 }
+  }' "$work/names" >"$work/parents"
   # shellcheck disable=SC2016 # $1 expands in the inner shell
-  link=$(grep '/$' "$work/names" | as_owner sh -c '
-    cd -- "$1" || exit 1
+  link=$(as_owner sh -c '
+    cd -- "$1" || { echo "?"; exit 0; }
     while IFS= read -r d; do
-      d=${d%/}
-      case $d in "" | .) continue ;; esac
       if [ -L "$d" ]; then printf "%s\n" "$d"; exit 0; fi
-    done' rowsafe-files-put "$fpath")
-  [ -z "$link" ] || refuse "$fpath/${link#./} is a symbolic link: Rowsafe won't write through it"
+    done' rowsafe-files-put "$fpath" <"$work/parents") || link="?"
+  [ "$link" != "?" ] || refuse "can't check $fpath as its owner"
+  [ -z "$link" ] || refuse "$fpath/$link is a symbolic link: Rowsafe won't write through it"
   if [ "$fmode" = mirror ] && as_agent test -f "$src/delete" -a ! -L "$src/delete"; then
+    as_agent head -c 67108864 -- "$src/delete" >"$work/delete" 2>/dev/null || refuse "reading the list of files to remove failed"
+    bad=$(files_bad_names "$work/delete")
+    [ -z "$bad" ] || refuse "a path to remove leaves the folder or goes where Rowsafe never writes ($bad)"
     # Only files whose folder resolves to PATH or inside it, without a
     # symbolic link on the way, are removed.
     # shellcheck disable=SC2016 # $1 expands in the inner shell
-    as_agent cat -- "$src/delete" | as_owner sh -c '
+    as_owner sh -c '
       cd -- "$1" || exit 1
       while IFS= read -r f; do
         case $f in "" | /* | ../* | */../* | */.. | .. | ./* | */./* | .) continue ;; esac
@@ -1697,7 +1836,7 @@ files_put() {
         r=$(realpath -e -- "$d" 2>/dev/null) || continue
         if [ "$d" = . ]; then [ "$r" = "$1" ] || continue; else [ "$r" = "$1/$d" ] || continue; fi
         if [ -L "$f" ] || { [ -e "$f" ] && [ ! -d "$f" ]; }; then rm -f -- "$f"; fi
-      done' rowsafe-files-put "$fpath" || refuse "removing the files added since from $fpath failed"
+      done' rowsafe-files-put "$fpath" <"$work/delete" || refuse "removing the files added since from $fpath failed"
   fi
   # Existing folders keep their owner and mode; missing never replaces a
   # file; modes are the owner's umask applied to the snapshot's.
@@ -1708,14 +1847,19 @@ files_put() {
     rowsafe-files-put "$fpath" "$keep" <"$work/files.tar" 2>&1) ||
     refuse "putting the files into $fpath failed: $(printf '%s' "$out" | head -n 3 | tr '\n' ' ')"
   ok=1
-  log "files-put $fmode $fstage into $fpath as uid $owner (request $id): done"
+  log "files-put $fmode $fstage into $fpath as uid $owner gid $group (request $id): done"
 }
 
-# files_main answers a files request (restart mode, when no restart request
-# is waiting). It has its own request and result files, so a files request
-# never overwrites a restart request or its answer.
+# files_main answers a files request (rowsafe-files-helper.service, which
+# rowsafe-files-helper.path starts). It has its own request and result
+# files, and its own unit, so the rights it needs never widen the restart
+# helper's.
 files_main() {
   result_name=files-result
+  state=${STATE_DIRECTORY:-/var/lib/rowsafe-files-helper}
+  mkdir -p "$state" && chmod 0700 "$state"
+  rm -rf "$state"/put.* "$state"/read.* # left by a run that was killed
+  work_pw=$state/passwd
   have_request "$dir/files-request" || exit 0
   line=$(read_request "$dir/files-request" 600)
   if printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} files-read /[A-Za-z0-9._@+,=/-]{1,400}$'; then
@@ -1744,8 +1888,7 @@ files_main() {
 # ---------------------------------------------------------------- restart mode
 
 restart_main() {
-  # A restart request first, then a files request (each fires the path unit).
-  have_request "$dir/request" || files_main
+  have_request "$dir/request" || exit 0
   line=$(read_request "$dir/request")
   if printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} [0-9]{1,5}$'; then
     id=${line% *}
@@ -2329,6 +2472,7 @@ update_main() {
 
 case $mode in
   update) update_main ;;
+  files) files_main ;;
   *) restart_main ;;
 esac
 ROWSAFE_RESTART_HELPER_EOF
@@ -2412,9 +2556,6 @@ Documentation=https://rowsafe.sh/docs/reference/agent-configuration
 
 [Path]
 PathExists=/var/lib/rowsafe/restart/request
-# Files requests (--allow-files) have their own file, so they never
-# overwrite a restart request.
-PathExists=/var/lib/rowsafe/restart/files-request
 Unit=rowsafe-pg-restart.service
 
 [Install]
@@ -2432,13 +2573,12 @@ ROWSAFE_RESTART_PATH_EOF
 
 remove_restart_helper() {
   remove_update_units # they run the same helper
-  files_allowed && return 0 # files use the helper too (files section)
   [ -e "$RESTART_PATH_FILE" ] || [ -e "$RESTART_SERVICE_FILE" ] || [ -e "$RESTART_HELPER" ] || return 0
   if systemd_running; then
     systemctl disable --now --quiet rowsafe-pg-restart.path 2>/dev/null || true
   fi
   rm -f "$RESTART_PATH_FILE" "$RESTART_SERVICE_FILE"
-  [ -e "$POOLER_PATH_FILE" ] || rm -f "$RESTART_HELPER" # PgBouncer still uses it
+  [ -e "$POOLER_PATH_FILE" ] || [ -e "$FILES_PATH_FILE" ] || rm -f "$RESTART_HELPER" # PgBouncer or files still use it
   rmdir "${RESTART_HELPER%/*}" 2>/dev/null || true
   if systemd_running; then systemctl daemon-reload; fi
 }
@@ -3751,10 +3891,11 @@ pooler_access() {
 #
 #   --files PATH       protect PATH with the database (repeat for several);
 #                      root gives the agent user read access (ACL) if needed
-#   --allow-files      let Rowsafe put restored files back as the folder's
-#                      owner, and read folders added later in the dashboard,
-#                      under the roots in /etc/rowsafe/files-allowed (via the
-#                      root helper); --no-allow-files turns it off
+#   --allow-files      let Rowsafe put restored files back into exactly the
+#                      folders protected with --files (as the folder's owner),
+#                      listed with their owner in /etc/rowsafe/files-allowed,
+#                      through rowsafe-files-helper.service; --no-allow-files
+#                      turns it off
 #   --no-files         don't ask about folders
 #
 # restic is a pinned release from its GitHub releases, verified against the
@@ -3766,10 +3907,11 @@ RESTIC_SHA256_AMD64=f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151
 RESTIC_SHA256_ARM64=a5f64aaab53d51e311fa3829124c5b703f2d14cf187d8640b6be3b2b49376465
 RESTIC_BIN=$LIB_DIR/restic
 FILES_ALLOW_FILE=$CONFIG_DIR/files-allowed
-FILES_DROPIN_DIR=/etc/systemd/system/rowsafe-pg-restart.service.d
-FILES_DROPIN=$FILES_DROPIN_DIR/rowsafe-files.conf
-# Where folders added later in the dashboard may be (root's allow list).
-FILES_DEFAULT_ROOTS="/srv /var/www /opt /data /app /var/lib/docker/volumes"
+FILES_SERVICE_FILE=/etc/systemd/system/rowsafe-files-helper.service
+FILES_PATH_FILE=/etc/systemd/system/rowsafe-files-helper.path
+FILES_DROPIN_DIR=/etc/systemd/system/rowsafe-files-helper.service.d
+FILES_DROPIN=$FILES_DROPIN_DIR/folders.conf
+OLD_FILES_DROPIN=/etc/systemd/system/rowsafe-pg-restart.service.d/rowsafe-files.conf
 FILES_PATHS=''     # --files PATH (newline-separated)
 ALLOW_FILES=''     # --allow-files (yes) / --no-allow-files (no); '' = ask once, on a terminal
 NO_FILES=0         # --no-files
@@ -3832,18 +3974,53 @@ restic_from_distro() {
 
 files_allowed() { grep -qs '^/' "$FILES_ALLOW_FILE"; }
 
+# files_allowed_list prints the allowed folders' "PATH UID" lines.
+files_allowed_list() { awk 'NF == 2 && $1 ~ /^\// && $2 ~ /^[0-9]+$/' "$FILES_ALLOW_FILE" 2>/dev/null || true; }
+
+# acl_grant_read DIR USER WORKDIR lets USER read DIR and everything in it,
+# now and later (default ACLs). Masks that were already there are put back
+# as they were, so no other named entry gains rights; a new mask covers only
+# the owning group and USER.
+acl_grant_read() {
+  getfacl -R -P -s -p -- "$1" >"$3/acl.before" 2>/dev/null || return 1
+  setfacl -R -P -m "u:$2:rX" -- "$1" || return 1
+  find -P "$1" -xdev -type d -exec setfacl -m "d:u:$2:rX" -- {} + || return 1
+  [ -s "$3/acl.before" ] || return 0
+  getfacl -R -P -s -p -- "$1" >"$3/acl.after" 2>/dev/null || return 1
+  awk '
+    FNR == 1 { pass++ }
+    /^# file: / { f = substr($0, 9); if (pass == 1) had[f] = 1; else keep = (f in had) }
+    pass == 1 { if ($0 ~ /^mask::/) m[f] = $0; else if ($0 ~ /^default:mask::/) dm[f] = $0; next }
+    !keep || /^# (owner|group|flags):/ { next }
+    /^mask::/ && (f in m) { print m[f]; next }
+    /^default:mask::/ && (f in dm) { print dm[f]; next }
+    { print }
+  ' "$3/acl.before" "$3/acl.after" >"$3/acl.restore"
+  [ ! -s "$3/acl.restore" ] || setfacl --restore="$3/acl.restore"
+}
+
+# acl_grant_x DIR USER lets USER through DIR, keeping DIR's mask if it has
+# one.
+acl_grant_x() {
+  if getfacl -p -s -- "$1" 2>/dev/null | grep -q '^mask::'; then
+    setfacl -n -m "u:$2:x" -- "$1"
+  else
+    setfacl -m "u:$2:x" -- "$1"
+  fi
+}
+
 # files_grant_read gives the agent user read access to a folder the person
 # chose to protect (POSIX ACLs; ownership and modes stay as they are).
 files_grant_read() {
   have setfacl || apt_install acl
-  if ! setfacl -R -P -m "u:$AGENT_USER:rX" -- "$1" ||
-    ! find -P "$1" -type d -exec setfacl -m "d:u:$AGENT_USER:rX" -- {} +; then
+  mkdir -p "$TMP/acl"
+  if ! acl_grant_read "$1" "$AGENT_USER" "$TMP/acl"; then
     warn "could not give the agent read access to $1 (see above); it is not protected"
     return 1
   fi
   _p=${1%/*}
   while [ -n "$_p" ]; do
-    as_agent test -x "$_p" 2>/dev/null || setfacl -m "u:$AGENT_USER:x" -- "$_p" || true
+    as_agent test -x "$_p" 2>/dev/null || acl_grant_x "$_p" "$AGENT_USER" || true
     _p=${_p%/*}
   done
   ok "gave the Rowsafe agent read access to $1 (read-only, with an ACL; nothing else changed)"
@@ -3895,6 +4072,12 @@ files_protect() {
       ;;
     no) files_grant_read "$1" || return 0 ;;
   esac
+  if grep -qxF -- "$1" "$TMP/files-have"; then
+    FILES_PROTECTED="$FILES_PROTECTED$1
+"
+    ok "$1 is already backed up with $FILES_DB_NAME"
+    return 0
+  fi
   if ! agent_run files add --database "$FILES_DB_ID" --path "$1" >"$TMP/files.out" 2>"$TMP/files.err"; then
     warn "$(sed 's/^error: //' "$TMP/files.err")"
     return 0
@@ -3938,9 +4121,7 @@ files_setup() {
       note "Files), or run this installer again with --files /path/to/uploads."
     fi
   fi
-  printf '%s' "$FILES_PATHS" | while IFS= read -r _path; do
-    [ -z "$_path" ] || grep -qxF -- "$_path" "$TMP/files-have" || printf '%s\n' "$_path"
-  done >"$TMP/files-todo"
+  printf '%s' "$FILES_PATHS" | awk 'NF && !seen[$0]++' >"$TMP/files-todo"
   while IFS= read -r _path <&4; do
     files_protect "$_path"
   done 4<"$TMP/files-todo"
@@ -3950,9 +4131,14 @@ files_setup() {
   files_access
 }
 
-# files_access applies --allow-files / --no-allow-files, or asks once on a
-# terminal once a folder is protected. A re-run keeps the earlier answer.
+# files_access applies --allow-files / --no-allow-files, or asks on a
+# terminal once a folder is protected. The question names exactly the
+# folders it allows. A re-run keeps the earlier answer: after a yes, the
+# folders protected with --files join the list (asked on a terminal).
 files_access() {
+  _new=$(printf '%s' "$FILES_PROTECTED" | while IFS= read -r _p; do
+    [ -z "$_p" ] || files_allowed_list | awk -v p="$_p" '$1 == p { f = 1 } END { exit f }' && printf '%s\n' "$_p"
+  done | awk 'NF' | paste -sd' ' -)
   case $ALLOW_FILES in
     yes) allow_files ;;
     no)
@@ -3961,12 +4147,19 @@ files_access() {
       ;;
     *)
       if [ -f "$FILES_ALLOW_FILE" ]; then
-        if files_allowed; then allow_files; fi
+        files_allowed || return 0
+        if [ -n "$_new" ] && [ "$TTY" = 1 ]; then
+          say ""
+          if ! confirm "Also allow Rowsafe to put restored files back into $_new, as the folder's owner? Only when someone asks and confirms." y; then
+            FILES_PROTECTED=''
+          fi
+        fi
+        allow_files
         return 0
       fi
-      [ "$TTY" = 1 ] && [ -n "$FILES_PROTECTED" ] || return 0
+      [ "$TTY" = 1 ] && [ -n "$_new" ] || return 0
       say ""
-      if confirm "Allow Rowsafe to put restored files back into these folders (as their owner), and to read folders you add later in the dashboard? Only when someone asks and confirms." y; then
+      if confirm "Allow Rowsafe to put restored files back into $_new, as the folder's owner? Only these folders (add others later with --files), only when someone asks and confirms." y; then
         allow_files
       else
         disallow_files
@@ -3976,48 +4169,159 @@ files_access() {
   esac
 }
 
+# allow_files lists the protected folders in $FILES_ALLOW_FILE ("PATH UID",
+# the owner now) and installs rowsafe-files-helper, whose sandbox may write
+# only there. Folders allowed before keep their line; the ones protected by
+# this run are (re)recorded with their owner now.
 allow_files() {
-  _roots=$( {
-    printf '%s' "$FILES_PROTECTED"
-    grep -s '^/' "$FILES_ALLOW_FILE" || true
-    printf '%s\n' $FILES_DEFAULT_ROOTS
-  } | awk 'NF && !seen[$0]++')
   {
-    echo "# Folders Rowsafe may read (to back them up) and put restored files back"
-    echo "# into, with everything under them, when someone asks and confirms. The"
-    echo "# root helper never touches system or database folders, whatever this says."
-    echo "# Written by the installer (root); run it with --no-allow-files to turn"
-    echo "# this off."
-    printf '%s\n' "$_roots"
+    printf '%s' "$FILES_PROTECTED" | while IFS= read -r _p; do
+      [ -n "$_p" ] && [ -d "$_p" ] && [ ! -L "$_p" ] && printf '%s %s\n' "$_p" "$(stat -c '%u' -- "$_p")"
+    done
+    files_allowed_list
+  } | awk '!seen[$1]++' >"$TMP/files-allow"
+  if [ ! -s "$TMP/files-allow" ]; then
+    disallow_files
+    note "No folder to put restored files back into yet: protect one with --files PATH (and --allow-files)"
+    return 0
+  fi
+  {
+    echo "# The folders Rowsafe may read and put restored files back into, with the"
+    echo "# uid that owned each when root allowed it (\"PATH UID\"). Only these exact"
+    echo "# folders and the files inside them, only while that uid still owns them,"
+    echo "# only when someone asks and confirms, never as root; never system,"
+    echo "# database or home folders. Written by the installer (root): add a folder"
+    echo "# with --files PATH, turn it all off with --no-allow-files."
+    cat "$TMP/files-allow"
   } | write_file "$FILES_ALLOW_FILE" 0644 root:root || true
   install -d -m 0755 -o root -g root "$FILES_DROPIN_DIR"
-  _home=''
-  printf '%s\n' "$_roots" | grep -q '^/home\(/\|$\)' && _home=no
   {
-    echo "# Written by the Rowsafe installer because root allowed Rowsafe to read the"
-    echo "# folders in $FILES_ALLOW_FILE and put restored files back there as their"
-    echo "# owner (--allow-files). Removed with --no-allow-files."
+    echo "# Written by the Rowsafe installer (--allow-files): the helper may write"
+    echo "# only into the folders listed in $FILES_ALLOW_FILE."
     echo "[Service]"
-    printf '%s\n' "$_roots" | sed 's/^/ReadWritePaths=-/'
-    [ -z "$_home" ] || echo "ProtectHome=no"
-    echo "CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_FOWNER CAP_DAC_READ_SEARCH"
+    awk '{ print "ReadWritePaths=-" $1 }' "$TMP/files-allow"
+    if grep -q '^/home[/ ]' "$TMP/files-allow"; then echo "ProtectHome=no"; fi
   } | write_file "$FILES_DROPIN" 0644 root:root || true
+  rm -f "$OLD_FILES_DROPIN"
+  rmdir "${OLD_FILES_DROPIN%/*}" 2>/dev/null || true
   have setfacl || apt_install acl
-  install_restart_helper
-  if systemd_running; then systemctl daemon-reload; fi
-  ok "Rowsafe may put restored files back into the folders you protect, as their owner, when someone asks (turn off with --no-allow-files)"
+  install_files_units
+  ok "Rowsafe may put restored files back into $(cut -d' ' -f1 "$TMP/files-allow" | paste -sd' ' -), as the folder's owner, when someone asks (turn off with --no-allow-files)"
 }
 
 disallow_files() {
-  rm -f "$FILES_DROPIN"
-  rmdir "$FILES_DROPIN_DIR" 2>/dev/null || true
+  remove_files_units
   if [ -d "$CONFIG_DIR" ]; then
     {
       echo "# Reading and restoring folders through Rowsafe's root helper is off."
-      echo "# Run the installer with --allow-files to turn it on."
+      echo "# Run the installer with --files PATH --allow-files to turn it on."
     } | write_file "$FILES_ALLOW_FILE" 0644 root:root || true
   fi
-  grep -qs '^[0-9]' "$RESTART_ALLOW_FILE" || grep -qs '^[0-9]' "$CREATED_CLUSTERS_FILE" || remove_restart_helper
+}
+
+install_files_units() {
+  install_helper_script
+  write_file "$FILES_SERVICE_FILE" 0644 root:root <<'ROWSAFE_FILES_SERVICE_EOF' || true
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-files-helper.service: gives the Rowsafe agent read access to a
+# folder root allowed in /etc/rowsafe/files-allowed, or puts restored files
+# back into it as the folder's owner, when the agent asks because a person
+# did (see /usr/local/lib/rowsafe/rowsafe-pg-restart, files mode). Started
+# by rowsafe-files-helper.path; installed by https://rowsafe.sh/install only
+# when root allowed it (--allow-files). Its own unit, so the rights files
+# need never widen rowsafe-pg-restart.service.
+
+[Unit]
+Description=Rowsafe: read or restore a protected folder on request
+Documentation=https://rowsafe.sh/docs/guides/files
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/rowsafe/rowsafe-pg-restart
+Environment=ROWSAFE_HELPER_MODE=files
+TimeoutStartSec=3600
+# The agent user, whose privileges read and remove the request and read the
+# staged files.
+Environment=ROWSAFE_AGENT_USER=postgres
+# The answer: root's own directory, which the agent can read (shared with
+# rowsafe-pg-restart.service).
+RuntimeDirectory=rowsafe-pg-restart
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+# Root's private copy of the staged files and the cooldowns, out of the
+# agent's reach.
+StateDirectory=rowsafe-files-helper
+StateDirectoryMode=0700
+UMask=0022
+
+# Hardening. CAP_SETUID/CAP_SETGID drop to the agent user (to read its
+# files) and to the folder's owner (to write); CAP_FOWNER sets ACLs on files
+# root doesn't own; CAP_DAC_READ_SEARCH lets root check the folder. Only the
+# protected folders are writable (rowsafe-files-helper.service.d, written by
+# the installer), and no set-user-ID file can be created.
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_FOWNER CAP_DAC_READ_SEARCH
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=-/var/lib/rowsafe/restart
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+ROWSAFE_FILES_SERVICE_EOF
+  write_file "$FILES_PATH_FILE" 0644 root:root <<'ROWSAFE_FILES_PATH_EOF' || true
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-files-helper.path: starts rowsafe-files-helper.service when the
+# Rowsafe agent asks for read access to a protected folder or to put
+# restored files back (someone asked in the dashboard and confirmed).
+# Installed by https://rowsafe.sh/install only when root allowed it; remove
+# it with --no-allow-files.
+
+[Unit]
+Description=Rowsafe: watch for requests to read or restore a protected folder
+Documentation=https://rowsafe.sh/docs/guides/files
+
+[Path]
+PathExists=/var/lib/rowsafe/restart/files-request
+Unit=rowsafe-files-helper.service
+
+[Install]
+WantedBy=multi-user.target
+ROWSAFE_FILES_PATH_EOF
+  if systemd_running; then
+    systemctl daemon-reload
+    systemctl enable --now --quiet rowsafe-files-helper.path
+  else
+    warn "systemd is not running here; the files helper was installed but cannot be enabled"
+  fi
+}
+
+remove_files_units() {
+  rm -f "$OLD_FILES_DROPIN"
+  rmdir "${OLD_FILES_DROPIN%/*}" 2>/dev/null || true
+  if [ -e "$FILES_PATH_FILE" ] || [ -e "$FILES_SERVICE_FILE" ] || [ -d "$FILES_DROPIN_DIR" ]; then
+    if systemd_running; then
+      systemctl disable --now --quiet rowsafe-files-helper.path 2>/dev/null || true
+    fi
+    rm -f "$FILES_PATH_FILE" "$FILES_SERVICE_FILE" "$FILES_DROPIN"
+    rmdir "$FILES_DROPIN_DIR" 2>/dev/null || true
+  fi
+  [ -e "$RESTART_PATH_FILE" ] || [ -e "$POOLER_PATH_FILE" ] || [ -e "$UPDATE_PATH_FILE" ] || rm -f "$RESTART_HELPER"
   if systemd_running; then systemctl daemon-reload; fi
 }
 
@@ -6120,8 +6424,8 @@ uninstall_agent() {
     systemctl disable --now --quiet "$SERVICE" 2>/dev/null || true
   fi
   rm -f "$UNIT_FILE"
-  rm -f "$FILES_ALLOW_FILE" "$FILES_DROPIN" "$RESTIC_BIN" # files section
-  rmdir "$FILES_DROPIN_DIR" 2>/dev/null || true
+  remove_files_units # files section
+  rm -f "$FILES_ALLOW_FILE" "$RESTIC_BIN"
   remove_pooler_units
   remove_restart_helper
   remove_create_cluster

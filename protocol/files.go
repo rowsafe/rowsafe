@@ -127,8 +127,9 @@ type FilesReport struct {
 	// "files-read" (grant read access) and "files-put" (put restored files
 	// back as the folder's owner). Empty: root didn't allow it.
 	HelperActions []string `json:"helper_actions,omitempty"`
-	// AllowedRoots are the folders root allowed Rowsafe to read and restore
-	// into, with everything under them (/etc/rowsafe/files-allowed).
+	// AllowedRoots are the exact folders root allowed Rowsafe to read and
+	// restore into (/etc/rowsafe/files-allowed): folders inside them, or
+	// anywhere else, need the installer again (--files PATH).
 	AllowedRoots []string             `json:"allowed_roots,omitempty"`
 	Databases    []FilesDatabaseState `json:"databases,omitempty"`
 }
@@ -500,8 +501,9 @@ type FilesHost struct {
 	Engine   string `json:"engine,omitempty"` // restic version; "" not installed
 	Online   bool   `json:"online"`
 	// CanGrantAccess: root allowed Rowsafe to give itself read access to
-	// folders under AllowedRoots; CanPutBack: to put restored files back as
-	// the folder's owner. Reason says why not, in plain words.
+	// the folders in AllowedRoots (exactly those); CanPutBack: to put
+	// restored files back into them as the folder's owner. Reason says why
+	// not, in plain words.
 	CanGrantAccess bool     `json:"can_grant_access"`
 	CanPutBack     bool     `json:"can_put_back"`
 	AllowedRoots   []string `json:"allowed_roots,omitempty"`

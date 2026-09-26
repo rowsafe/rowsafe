@@ -675,7 +675,7 @@ func (a *Agent) placeFiles(ctx context.Context, fo protocol.FilesFolder, tree st
 		return "", "", nil
 	}
 	rt := a.filesRuntime()
-	if slices.Contains(a.filesHelperActions(), helperFilesPut) && underRoots(fo.Path, rt.allowedRoots()) {
+	if slices.Contains(a.filesHelperActions(), helperFilesPut) && slices.Contains(rt.allowedRoots(), fo.Path) {
 		// The helper only puts back plain files and folders.
 		links, err := plainTree(tree)
 		if err != nil {
@@ -720,16 +720,6 @@ func canCreateIn(dir string) bool {
 	f.Close()
 	os.Remove(f.Name())
 	return true
-}
-
-// underRoots reports whether p is one of roots or inside one.
-func underRoots(p string, roots []string) bool {
-	for _, r := range roots {
-		if p == r || strings.HasPrefix(p, strings.TrimSuffix(r, "/")+"/") {
-			return true
-		}
-	}
-	return false
 }
 
 // placeDirect copies the staged tree into dst as the agent's user. With

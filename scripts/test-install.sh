@@ -53,9 +53,11 @@
 #      and systemctl stood in, and --no-allow-pooler.
 #   9. files (--files, --allow-files): restic installed from a pinned,
 #      SHA-256-verified release (a tampered one refused), read access
-#      granted with ACLs, the "Back it up with ...?" question, the root
-#      helper's files-read and files-put (allow list, system folders,
-#      symlinks, .. paths, written as the folder's owner, never as root) and
+#      granted with ACLs, the "Back it up with ...?" question, the files
+#      helper in its own unit: files-read and files-put only for the exact
+#      folders and owners root listed (no default roots, no home, system or
+#      .ssh paths, nothing the agent can write), size cap, cooldowns,
+#      symlinks, .. paths, written as the folder's owner, never as root, and
 #      --no-allow-files / uninstall removing it.
 #
 # When Go is available the release key and the 0.2.0 release are made by the
@@ -1605,7 +1607,9 @@ files_tests() {
   H=/usr/local/lib/rowsafe/rowsafe-pg-restart
   R=/var/lib/rowsafe/restart
   RB=/usr/local/lib/rowsafe/restic
-  D=/etc/systemd/system/rowsafe-pg-restart.service.d/rowsafe-files.conf
+  D=/etc/systemd/system/rowsafe-files-helper.service.d/folders.conf
+  FU=/etc/systemd/system/rowsafe-files-helper.service
+  FP=/etc/systemd/system/rowsafe-files-helper.path
   rv=$(sed -n 's/^RESTIC_VERSION=//p' /src/scripts/install.sh)
   secret_key=AKIAEXAMPLEKEY42 secret=s3cr3t/with+base64= cipher='cipher-pass-that-is-long-enough/+=='
   configured() {
@@ -1673,32 +1677,40 @@ files_tests() {
   expect_ok "no terminal, no --files: nothing about files" "$INSTALLER"
   not_called "files add"
 
-  # On a terminal: the found folder is offered, then "put files back?".
+  # On a terminal: the found folder is offered, then "put files back?",
+  # which names exactly the folders it allows.
   scenario "discover_out=$shop_reg"
   printf '/srv/app/storage\n' >"$F/files-list.out"
   printf '/srv/app/storage\t2469606195\t1204\tno\t2.3 GiB\tLaravel storage (uploaded files)\n/srv/app/media\t10240\t3\tno\t10.0 KiB\tuploaded media\n' >"$F/files-discover.out"
   chmod 666 "$F"/*
   name="found folder"
   tty_ok "offer the found folder, allow putting files back" \
-    "Allow Rowsafe to install and manage PgBouncer?\tn\nso a restore brings back both? [Y/n]\t\nAllow Rowsafe to put restored files back\ty\n" \
+    "Allow Rowsafe to install and manage PgBouncer?\tn\nso a restore brings back both? [Y/n]\t\nAllow Rowsafe to put restored files back into /srv/app/media, as the folder's owner?\ty\n" \
     "$INSTALLER"
   has "Rowsafe found /srv/app/media (10.0 KiB, 3 files: uploaded media)"
   lacks "Rowsafe found /srv/app/storage"
   called "files add --database db_fake --path /srv/app/media (postgres)"
-  has "Rowsafe may put restored files back into the folders you protect"
-  grep -qx /srv/app/media /etc/rowsafe/files-allowed && grep -qx /srv /etc/rowsafe/files-allowed || fail "files-allowed lacks a root"
-  ! grep -qx /home /etc/rowsafe/files-allowed || fail "files-allowed lets Rowsafe into /home by default"
+  has "Rowsafe may put restored files back into /srv/app/media, as the folder's owner"
+  WWW=$(id -u www-data)
+  [ "$(grep -v '^#' /etc/rowsafe/files-allowed)" = "/srv/app/media $WWW" ] ||
+    fail "files-allowed must list exactly the protected folder and its owner: $(cat /etc/rowsafe/files-allowed)"
   [ "$(stat -c '%U %a' /etc/rowsafe/files-allowed)" = "root 644" ] || fail "files-allowed ownership/mode"
-  grep -qx "ReadWritePaths=-/srv" "$D" && ! grep -q "ProtectHome" "$D" && ! grep -q "/home" "$D" && grep -q "CAP_FOWNER" "$D" || fail "helper drop-in"
+  [ "$(grep -c '^ReadWritePaths=' "$D")" = 1 ] && grep -qx "ReadWritePaths=-/srv/app/media" "$D" && ! grep -q "ProtectHome" "$D" ||
+    fail "files unit drop-in: $(cat "$D")"
   [ -x "$H" ] || fail "--allow-files didn't install the root helper"
   grep -q '^# actions: .*files-read files-put' "$H" || fail "helper lacks the files actions"
+  # Files mode has its own unit and path unit; the restart helper's stay as
+  # they are (nothing is added to them).
+  grep -qx 'Environment=ROWSAFE_HELPER_MODE=files' "$FU" && grep -q 'CAP_FOWNER' "$FU" && grep -qx 'RestrictSUIDSGID=yes' "$FU" || fail "files unit"
+  grep -qx 'PathExists=/var/lib/rowsafe/restart/files-request' "$FP" || fail "files path unit"
+  [ ! -e /etc/systemd/system/rowsafe-pg-restart.service.d ] || fail "the restart unit got a drop-in"
   if [ "${TEST_UNITS:-0}" = 1 ] && command -v systemd-analyze >/dev/null; then
-    expect_ok "systemd-analyze verify (helper with the files drop-in)" systemd-analyze verify /etc/systemd/system/rowsafe-pg-restart.service
+    expect_ok "systemd-analyze verify (files unit with its drop-in)" systemd-analyze verify "$FU" "$FP"
   fi
 
-  # The helper's files actions, run as its service would. Files requests
-  # have their own request and result files.
+  # The helper's files mode, run as its service would.
   O=$W/files-helper-run
+  ST=$W/files-helper-state
   install -d -m 0755 -o root -g root "$O"
   as_pg() { runuser -u postgres -- "$@"; }
   cat >"$W/fake-systemctl" <<'EOF'
@@ -1706,39 +1718,73 @@ files_tests() {
 echo "$*" >>/tmp/rowsafe-files-systemctl.calls
 EOF
   chmod 755 "$W/fake-systemctl"
-  helper() {
-    timeout 60 env ROWSAFE_SYSTEMCTL="$W/fake-systemctl" STATE_DIRECTORY="$W/files-helper-state" RUNTIME_DIRECTORY="$O" "$H" 2>>"$W/files-helper.log" ||
+  helper() { # MODE [ENV...]
+    _mode=$1
+    shift
+    timeout 60 env ROWSAFE_HELPER_MODE="$_mode" ROWSAFE_SYSTEMCTL="$W/fake-systemctl" STATE_DIRECTORY="$ST" RUNTIME_DIRECTORY="$O" "$@" "$H" 2>>"$W/files-helper.log" ||
       fail "the helper failed or hung (exit $?)"
   }
-  request() {
+  request() { # LINE: cooldowns cleared unless KEEP_COOLDOWN=1
     rm -f "$O/files-result"
+    [ "${KEEP_COOLDOWN:-0}" = 1 ] || rm -f "$ST"/last-*
     printf '%s\n' "$1" | as_pg sh -c 'cat >"$1"' sh "$R/files-request"
-    helper
-    [ ! -e "$R/files-request" ] || fail "helper left the files request: $1"
-    [ -f "$O/files-result" ] || fail "no result for: $1"
+    helper files
+    [ ! -e "$R/files-request" ] || fail "helper left the files request"
+    [ -f "$O/files-result" ] || fail "no result"
   }
   result_has() { grep -qxF "$1" "$O/files-result" || {
     cat "$O/files-result" >&2
     fail "helper result lacks $1"
   }; }
+  refused() { # LINE TEXT
+    request "$1"
+    result_has "ok=0"
+    grep -q "^error=.*$2" "$O/files-result" || fail "$1: expected '$2', got: $(cat "$O/files-result")"
+  }
+  allow() { # the allow list, as root writes it
+    printf '%s\n' "$@" >/etc/rowsafe/files-allowed
+    chmod 644 /etc/rowsafe/files-allowed
+  }
+  getent passwd appsvc >/dev/null || useradd --system --home-dir /srv/appsvc --create-home --shell /usr/sbin/nologin appsvc
+  getent passwd alice >/dev/null || useradd --uid 1500 --home-dir /srv/alice --create-home --shell /bin/bash alice
+  install -d -o alice -g alice /srv/alice/uploads
+  ln -sfn /etc /srv/link
+  mkdir -p /srv/rootowned
+  allow "/srv/app/media $WWW" "/srv/other $WWW" "/srv/link $WWW" "/srv/nope $WWW" "/srv/rootowned 0" \
+    "/srv/alice 1500" "/srv/alice/uploads 1500" "/srv 0" "/srv/appsvc $(id -u appsvc)" "/srv/app/storage $WWW 1"
+
   request "f_1 files-read /srv/other"
   result_has "ok=1"
   getfacl -p /srv/other 2>/dev/null | grep -qx 'user:postgres:r-x' || fail "files-read gave no access"
   [ "$(stat -c '%U' /srv/other)" = "www-data" ] || fail "files-read changed ownership"
-  ln -sfn /etc /srv/link
+  # files-read keeps a folder's ACL mask: another named entry isn't widened.
+  install -d -o www-data -g www-data -m 0750 /srv/other/masked
+  setfacl -m u:appsvc:rwx,m::r-x /srv/other/masked
+  request "f_1m files-read /srv/other"
+  result_has "ok=1"
+  getfacl -p /srv/other/masked 2>/dev/null | grep -qx 'mask::r-x' || fail "files-read widened the ACL mask: $(getfacl -p /srv/other/masked)"
+  # A service account whose home is exactly the folder is fine.
+  request "f_1s files-read /srv/appsvc"
+  result_has "ok=1"
   for bad in "/etc/ssh|a system or database folder" "/srv/../etc|not a plain path" "/srv/link|goes through a symbolic link" \
-    "/mnt|not under a folder listed" "/srv/nope|doesn't exist" "/var/lib/rowsafe/files-staging|a system or database folder"; do
-    request "f_2 files-read ${bad%%|*}"
-    result_has "ok=0"
-    grep -q "^error=.*${bad#*|}" "$O/files-result" || fail "files-read ${bad%%|*}: $(cat "$O/files-result")"
+    "/srv/nope|doesn't exist" "/var/lib/rowsafe/files-staging|a system or database folder" \
+    "/srv/app/media/sub|is not a folder root allowed" "/var/www|is not a folder root allowed" "/opt|is not a folder root allowed" \
+    "/srv/app/storage|is not a folder root allowed" "/srv/alice|is the home folder of alice" \
+    "/srv/alice/uploads|is inside the home folder of alice" "/srv|contains the home folder of"; do
+    refused "f_2 files-read ${bad%%|*}" "${bad#*|}"
   done
+  # The owner recorded at install must still own the folder.
+  chown 1234 /srv/other
+  refused "f_2u files-read /srv/other" "belongs to uid 1234 now, not uid $WWW"
+  chown www-data /srv/other
   for bad in "f_3 files-read relative/path" "f_3 files-read /srv/a b" "f_3 files-put all r1 /srv/app/media" \
     "f_3 files-put missing ../x /srv/app/media" "f_3 files-put missing r1" "f_3 files-read /srv;reboot" "f_3 restart 5432"; do
     request "$bad"
     result_has "error=malformed request"
   done
 
-  # files-put: staged by the agent user, written as the folder's owner.
+  # files-put: staged by the agent user, written as the folder's owner with
+  # the owner's own group (not the folder's).
   S=/var/lib/rowsafe/files-staging/r1
   stage() { # fresh staged tree
     as_pg rm -rf "$S"
@@ -1751,61 +1797,93 @@ EOF
   echo "current" >/srv/app/media/kept.txt
   echo "added since" >/srv/app/media/extra.txt
   chown www-data:www-data /srv/app/media/kept.txt /srv/app/media/extra.txt
+  chgrp staff /srv/app/media
   chmod 0751 /srv/app/media
+  install -d -m 0700 "$ST"
+  mkdir -p "$ST/put.stale"
   request "f_4 files-put missing r1 /srv/app/media"
   result_has "ok=1"
+  [ ! -e "$ST/put.stale" ] || fail "a stale private copy was left"
   [ "$(cat /srv/app/media/sub/new.txt)" = restored ] || fail "files-put missing: new file not there"
-  [ "$(stat -c '%U' /srv/app/media/sub/new.txt)" = www-data ] || fail "files-put didn't write as the folder's owner"
+  [ "$(stat -c '%U %G' /srv/app/media/sub/new.txt)" = "www-data www-data" ] || fail "files-put didn't write as the owner with the owner's group: $(stat -c '%U %G' /srv/app/media/sub/new.txt)"
   [ "$(cat /srv/app/media/kept.txt)" = current ] || fail "files-put missing overwrote a file"
   [ "$(stat -c '%a' /srv/app/media)" = 751 ] || fail "files-put changed the folder's mode"
+  # At most one files-put every 2 minutes.
+  KEEP_COOLDOWN=1 request "f_5c files-put replace r1 /srv/app/media"
+  result_has "error=files-put ran less than 2 minutes ago; try again later"
   request "f_5 files-put replace r1 /srv/app/media"
   result_has "ok=1"
   [ "$(cat /srv/app/media/kept.txt)" = "from the snapshot" ] || fail "files-put replace"
+  # And one files-read every 10 minutes.
+  request "f_5r files-read /srv/other"
+  KEEP_COOLDOWN=1 request "f_5s files-read /srv/other"
+  result_has "error=files-read ran less than 10 minutes ago; try again later"
 
   # A compromised agent controls the staged tree: anything but plain files
-  # and folders is refused before anything is written.
+  # and folders, or anything bound for .ssh, .gnupg or .config/systemd, is
+  # refused before anything is written.
   cp /etc/passwd "$W/passwd.before"
   stage
   as_pg sh -c "printf '#!/bin/sh\n' >$S/tree/suid.sh && chmod 4755 $S/tree/suid.sh"
-  request "f_10 files-put missing r1 /srv/app/media"
-  result_has "ok=0"
-  grep -q '^error=.*set-user-ID' "$O/files-result" || fail "a setuid file was not refused: $(cat "$O/files-result")"
+  refused "f_10 files-put missing r1 /srv/app/media" "set-user-ID"
   [ ! -e /srv/app/media/suid.sh ] || fail "a staged setuid file was written"
   stage
   as_pg sh -c "chmod 2755 $S/tree/sub && printf x >$S/tree/sub/g.txt"
-  request "f_11 files-put missing r1 /srv/app/media"
-  grep -q '^error=.*set-user-ID or set-group-ID' "$O/files-result" || fail "a setgid folder was not refused: $(cat "$O/files-result")"
+  refused "f_11 files-put missing r1 /srv/app/media" "set-user-ID or set-group-ID"
   stage
   as_pg ln -s /etc/passwd "$S/tree/passwd"
-  request "f_12 files-put replace r1 /srv/app/media"
-  grep -q '^error=.*symbolic link' "$O/files-result" || fail "a staged symlink was not refused: $(cat "$O/files-result")"
+  refused "f_12 files-put replace r1 /srv/app/media" "symbolic link"
   [ ! -e /srv/app/media/passwd ] && [ ! -L /srv/app/media/passwd ] || fail "a staged symlink was written"
   stage
   as_pg ln "$S/tree/kept.txt" "$S/tree/hard.txt"
-  request "f_13 files-put missing r1 /srv/app/media"
-  grep -q '^error=.*hard link' "$O/files-result" || fail "a staged hard link was not refused: $(cat "$O/files-result")"
+  refused "f_13 files-put missing r1 /srv/app/media" "hard link"
   stage
   as_pg mkfifo "$S/tree/fifo"
-  request "f_14 files-put missing r1 /srv/app/media"
-  grep -q '^error=.*device, FIFO or socket' "$O/files-result" || fail "a staged FIFO was not refused: $(cat "$O/files-result")"
+  refused "f_14 files-put missing r1 /srv/app/media" "device, FIFO or socket"
+  for p in .ssh/authorized_keys sub/.gnupg/pubring.kbx .config/systemd/user/evil.service; do
+    stage
+    as_pg sh -c 'mkdir -p "$(dirname "$1")" && echo x >"$1"' sh "$S/tree/$p"
+    refused "f_16 files-put missing r1 /srv/app/media" "goes where Rowsafe never writes"
+    [ ! -e "/srv/app/media/$p" ] || fail "files-put wrote $p"
+  done
   cmp -s /etc/passwd "$W/passwd.before" || fail "a refused files-put touched /etc/passwd"
+  # The size cap (20 GB by default; root can lower it in the files unit).
+  stage
+  rm -f "$ST"/last-* "$O/files-result"
+  printf 'f_17b files-put missing r1 /srv/app/media\n' | as_pg sh -c 'cat >"$1"' sh "$R/files-request"
+  helper files ROWSAFE_FILES_MAX_BYTES=10
+  grep -q '^error=the staged files are .* more than the 10 bytes' "$O/files-result" || fail "size cap: $(cat "$O/files-result")"
+  # A folder inside that Rowsafe's own user owns or can write: refused.
+  install -d -o postgres /srv/app/media/pgdir
+  refused "f_18 files-put missing r1 /srv/app/media" "Rowsafe's own user can change /srv/app/media/pgdir"
+  rmdir /srv/app/media/pgdir
+  install -d -o www-data -m 0777 /srv/app/media/open
+  refused "f_18 files-read /srv/app/media" "Rowsafe's own user can change /srv/app/media/open"
+  rmdir /srv/app/media/open
 
-  # Never through a symbolic link in the folder: a staged linkdir/evil.txt
-  # doesn't land where the folder's own link points.
+  # Never through a symbolic link in the folder, whether the staged path is
+  # a folder or only a file's parent.
   install -d -o www-data -g www-data /srv/outside
   ln -sfn /srv/outside /srv/app/media/linkdir
   chown -h www-data:www-data /srv/app/media/linkdir
   stage
   as_pg sh -c "mkdir $S/tree/linkdir && printf evil >$S/tree/linkdir/evil.txt"
-  request "f_15 files-put replace r1 /srv/app/media"
-  grep -q '^error=.*linkdir is a symbolic link' "$O/files-result" || fail "writing through a symlinked folder was not refused: $(cat "$O/files-result")"
+  refused "f_15 files-put replace r1 /srv/app/media" "linkdir is a symbolic link"
   [ ! -e /srv/outside/evil.txt ] || fail "files-put wrote through a symlinked folder"
 
-  # mirror deletes only files whose folder is really inside the folder.
+  # mirror deletes only files whose folder is really inside the folder, and
+  # a delete list naming .ssh is refused as a whole.
   echo "keep" >/srv/outside/x.txt
   chown www-data:www-data /srv/outside/x.txt
   stage
-  printf 'extra.txt\n../../../etc/passwd\n/etc/passwd\nsub\nlinkdir/x.txt\n./linkdir/x.txt\n' | as_pg sh -c 'cat >"$1"' sh "$S/delete"
+  printf 'extra.txt\n.ssh/authorized_keys\n' | as_pg sh -c 'cat >"$1"' sh "$S/delete"
+  refused "f_6s files-put mirror r1 /srv/app/media" "goes where Rowsafe never writes"
+  [ -e /srv/app/media/extra.txt ] || fail "a refused mirror removed a file"
+  for p in ../../../etc/passwd /etc/passwd; do
+    printf 'extra.txt\n%s\n' "$p" | as_pg sh -c 'cat >"$1"' sh "$S/delete"
+    refused "f_6p files-put mirror r1 /srv/app/media" "a path to remove leaves the folder"
+  done
+  printf 'extra.txt\nsub\nlinkdir/x.txt\n./linkdir/x.txt\n' | as_pg sh -c 'cat >"$1"' sh "$S/delete"
   request "f_6 files-put mirror r1 /srv/app/media"
   result_has "ok=1"
   [ ! -e /srv/app/media/extra.txt ] || fail "files-put mirror left a file added since"
@@ -1814,45 +1892,50 @@ EOF
   cmp -s /etc/passwd "$W/passwd.before" || fail "files-put mirror touched /etc/passwd"
   request "f_7 files-put missing nothing /srv/app/media"
   result_has "error=nothing is staged for restore nothing"
-  mkdir -p /srv/rootowned
-  request "f_8 files-put missing r1 /srv/rootowned"
-  result_has "error=/srv/rootowned belongs to root: Rowsafe won't write there as root"
+  refused "f_8 files-put missing r1 /srv/rootowned" "belongs to root: Rowsafe won't write there as root"
   [ -z "$(find "$R" /var/lib/rowsafe/files-staging -user root)" ] || fail "root left files in the agent's directories"
-  [ -z "$(find "$W/files-helper-state" -maxdepth 1 -name 'put.*')" ] || fail "the helper left its private copy behind"
+  [ -z "$(find "$ST" -maxdepth 1 -name 'put.*')" ] || fail "the helper left its private copy behind"
   chmod 666 /etc/rowsafe/files-allowed
-  request "f_9 files-read /srv/other"
-  result_has "error=/etc/rowsafe/files-allowed is writable by others than root"
+  refused "f_9 files-read /srv/other" "/etc/rowsafe/files-allowed is writable by others than root"
   chmod 644 /etc/rowsafe/files-allowed
 
-  # A restart and a files request at the same time: both are answered, each
-  # in its own result file.
-  printf '5432 postgresql@17-main.service\n' >/etc/rowsafe/restart-allowed
-  chmod 644 /etc/rowsafe/restart-allowed
-  rm -f "$O/result" "$O/files-result" "$W/files-helper-state"/last-*
-  printf 'rs_1 5432\n' | as_pg sh -c 'cat >"$1"' sh "$R/request"
+  # The restart helper never answers a files request: that is the files
+  # unit's job alone (and its rights stay out of the restart unit).
+  rm -f "$O/files-result"
   printf 'fr_1 files-read /srv/other\n' | as_pg sh -c 'cat >"$1"' sh "$R/files-request"
-  helper
-  helper
-  grep -qx 'id=rs_1' "$O/result" && grep -qx 'ok=1' "$O/result" || fail "the restart request was lost: $(cat "$O/result" 2>&1)"
-  grep -qx 'id=fr_1' "$O/files-result" && grep -qx 'ok=1' "$O/files-result" || fail "the files request was lost: $(cat "$O/files-result" 2>&1)"
-  [ ! -e "$R/request" ] && [ ! -e "$R/files-request" ] || fail "a request was left"
-  printf '# off\n' >/etc/rowsafe/restart-allowed
-  pass "root helper files-read and files-put: allow list, system folders, no setuid/links/devices, never through symlinks, own request file, never root"
+  helper restart
+  [ -e "$R/files-request" ] && [ ! -e "$O/files-result" ] || fail "restart mode answered a files request"
+  as_pg rm -f "$R/files-request"
+  pass "files helper: exact folders and owners, no home/system/.ssh, size cap, cooldowns, own unit, never through symlinks, never root"
 
-  # --no-allow-files removes the helper (restarts aren't allowed either).
+  # The installer: --no-allow-files removes the files units; --allow-files
+  # with no folder named allows nothing; --files PATH --allow-files allows
+  # exactly that folder; a re-run with --files adds one to an earlier yes.
   scenario "discover_out=$shop_reg"
+  printf 'no\n' >"$F/files-access.out"
+  chmod 666 "$F"/*
   expect_ok "--no-allow-files" "$INSTALLER" --no-allow-files
-  [ ! -e "$D" ] && [ ! -e "$H" ] || fail "--no-allow-files left the helper or its drop-in"
+  [ ! -e "$D" ] && [ ! -e "$FU" ] && [ ! -e "$FP" ] && [ ! -e "$H" ] || fail "--no-allow-files left the files helper"
   ! grep -q '^/' /etc/rowsafe/files-allowed || fail "--no-allow-files kept the allow list"
-  expect_ok "--allow-files and --allow-restart" "$INSTALLER" --allow-files --allow-restart
+  expect_ok "--allow-files without a folder" "$INSTALLER" --allow-files
+  grep -q "No folder to put restored files back into yet" "$W/out" || fail "--allow-files alone should allow nothing"
+  [ ! -e "$FU" ] || fail "--allow-files alone installed the files helper"
+  expect_ok "--files PATH --allow-files" "$INSTALLER" --files /srv/app/media --allow-files --allow-restart
+  [ "$(grep -v '^#' /etc/rowsafe/files-allowed)" = "/srv/app/media $WWW" ] || fail "allow list: $(cat /etc/rowsafe/files-allowed)"
+  ! grep -q CAP_FOWNER /etc/systemd/system/rowsafe-pg-restart.service || fail "the restart unit got the files rights"
+  expect_ok "a re-run adds a folder named with --files" "$INSTALLER" --files /srv/other
+  [ "$(grep -v '^#' /etc/rowsafe/files-allowed | sort | paste -sd, -)" = "/srv/app/media $WWW,/srv/other $WWW" ] || fail "allow list after a re-run: $(cat /etc/rowsafe/files-allowed)"
+  grep -qx "ReadWritePaths=-/srv/other" "$D" || fail "drop-in after a re-run"
   expect_ok "--no-allow-files keeps the helper for restarts" "$INSTALLER" --no-allow-files
-  [ -x "$H" ] && [ ! -e "$D" ] || fail "--no-allow-files removed the helper restarts still need"
-  expect_ok "--allow-files again" "$INSTALLER" --allow-files
+  [ -x "$H" ] && [ ! -e "$D" ] && [ ! -e "$FU" ] || fail "--no-allow-files removed the helper restarts still need"
+  expect_ok "--files PATH --allow-files again" "$INSTALLER" --files /srv/app/media --allow-files
   expect_fail "--files only with an install" "only go with an install" "$INSTALLER" --uninstall --files /srv/app/media
   pkill -u postgres -f 'rowsafe-agent run' || true
   expect_ok "uninstall removes files access and restic" "$INSTALLER" --uninstall
-  [ ! -e "$RB" ] && [ ! -e "$D" ] && [ ! -e /etc/rowsafe/files-allowed ] && [ ! -e "$H" ] || fail "uninstall left files pieces"
+  [ ! -e "$RB" ] && [ ! -e "$D" ] && [ ! -e "$FU" ] && [ ! -e "$FP" ] && [ ! -e /etc/rowsafe/files-allowed ] && [ ! -e "$H" ] || fail "uninstall left files pieces"
   expect_ok "purge" "$INSTALLER" --uninstall --purge
+  userdel -r alice 2>/dev/null || true
+  userdel -r appsvc 2>/dev/null || true
   pass "files: restic, --files, the question, --allow-files, --no-allow-files, uninstall"
 }
 

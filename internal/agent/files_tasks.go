@@ -302,8 +302,10 @@ const (
 	helperFilesPut  = "files-put"  // put staged files into a folder as its owner
 )
 
-// allowedRoots reads /etc/rowsafe/files-allowed: the folders root allowed
-// Rowsafe to read and restore into (with everything under them).
+// allowedRoots reads /etc/rowsafe/files-allowed ("PATH UID" lines): the
+// exact folders root allowed Rowsafe to read and restore into, each with
+// the uid that owned it then (the helper checks it; the agent only needs the
+// paths). Lines without a uid (an earlier format) don't count.
 func (f *filesRuntime) allowedRoots() []string {
 	file, err := os.Open(f.allowFile)
 	if err != nil {
@@ -313,11 +315,11 @@ func (f *filesRuntime) allowedRoots() []string {
 	var out []string
 	sc := bufio.NewScanner(file)
 	for sc.Scan() {
-		l := strings.TrimSpace(sc.Text())
-		if l == "" || strings.HasPrefix(l, "#") || !filepath.IsAbs(l) || filepath.Clean(l) != l || l == "/" {
+		fs := strings.Fields(sc.Text())
+		if len(fs) != 2 || !filepath.IsAbs(fs[0]) || filepath.Clean(fs[0]) != fs[0] || fs[0] == "/" || !allDigits(fs[1]) {
 			continue
 		}
-		out = append(out, l)
+		out = append(out, fs[0])
 	}
 	return out
 }
@@ -370,7 +372,7 @@ func (a *Agent) askFilesHelper(ctx context.Context, action, args, id string) (ma
 	if err != nil {
 		_ = os.Remove(request)
 		if errors.Is(err, errRestartNoAnswer) {
-			return nil, fmt.Errorf("the Rowsafe root helper on %s did not answer; check `systemctl status rowsafe-pg-restart.path`", host)
+			return nil, fmt.Errorf("the Rowsafe root helper on %s did not answer; check `systemctl status rowsafe-files-helper.path`", host)
 		}
 		return nil, err
 	}
@@ -397,8 +399,8 @@ func (a *Agent) filesAccess(ctx context.Context, db protocol.DatabaseSpec, p pro
 	if !helperPathRE.MatchString(path) || strings.Contains(path, "/../") || strings.Contains(path, "/./") {
 		return out, fmt.Errorf("Rowsafe can only ask for access to plain paths, not %q", path)
 	}
-	if !slices.Contains(a.filesHelperActions(), helperFilesRead) || !underRoots(path, rt.allowedRoots()) {
-		return out, fmt.Errorf("root didn't allow Rowsafe to give itself access to %s. Re-run the install command with --allow-files (or --files %s) on the server", path, path)
+	if !slices.Contains(a.filesHelperActions(), helperFilesRead) || !slices.Contains(rt.allowedRoots(), path) {
+		return out, fmt.Errorf("root didn't allow Rowsafe to read %s. Run the install command on the server again with --files %s: it gives Rowsafe read-only access to that folder", path, path)
 	}
 	tl.Printf("asking the root helper for read access to %s", path)
 	res, err := a.askFilesHelper(ctx, helperFilesRead, path, "")
@@ -633,4 +635,17 @@ func CleanFolderPath(p string) (string, error) {
 		return "", fmt.Errorf("%s holds keys; Rowsafe won't back it up", p)
 	}
 	return p, nil
+}
+
+// allDigits reports whether s is a non-empty run of ASCII digits.
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
