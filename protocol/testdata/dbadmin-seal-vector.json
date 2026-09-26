@@ -1,0 +1,20 @@
+{
+  "recipient_d": "UZgI706_uJei4CS_yfrNTLGZFmoQqasaQX7dMvYJ1xI",
+  "recipient_public": "BGx78J80kQvUHVwZ0KzVzuGNsxqBSZ1vlHa3qEbV6ZU7STLm5B4E_HD28akYNnj2aXYRhcygDrFCa85pGNl-U84",
+  "aad": "task_01J9ZSEALVECTOR",
+  "plaintext": "{\"user\":\"shop\",\"database\":\"shop\",\"host\":\"10.0.0.5\",\"port\":5432,\"sslmode\":\"require\",\"password\":\"Vq3xT8mKp2LzR7wN4bYc9HdF6sJ1gE5a\",\"url\":\"postgresql://shop:Vq3xT8mKp2LzR7wN4bYc9HdF6sJ1gE5a@10.0.0.5:5432/shop?sslmode=require\"}",
+  "sealed_by_go": {
+    "v": 1,
+    "alg": "ECDH-P256+HKDF-SHA256+A256GCM",
+    "epk": "BFxBRoownRBr8C4pEw_cDGogGmD8RLCsKktgc_RWIrV6DV-cp31IAEzhCXvwdgcuqdVYhHplQVzs-_NNWfWl3OM",
+    "nonce": "R_DLAo4laaGfyknz",
+    "ct": "tIi5pm9-P4qbDAqgj5WFEsPpL3pkhg5k5caJg0ImDNCO0LLo3d9BhVcyRr1wi0WNgSW9z1PTfsHDJY4Fr0AZTG199CsVH7HtRebchq0HEfGa9EoENyR9nNEgoP5dJefNqfC93oSjgANLmuH4a7pslx_PcnsejBDGpB8_AOX96LOAZMtzGH773xdVNDl_eeh9vsyikFJPRoZHUxsgnPQcvaLOl9J0VO57sT7hmKd0wjwtd5OJaJw7lvmq5kcrQX-hMA4lv3V-RR4gBTneqtP5tDAsoOAh33v5mbclkwM1NhSb1Ai8SowlCxFEcLaldrc"
+  },
+  "sealed_by_webcrypto": {
+    "v": 1,
+    "alg": "ECDH-P256+HKDF-SHA256+A256GCM",
+    "epk": "BKfqQ8fEaGSOEUxsFPBuXXHuGI0JJGssGIxJDi0OqJ3ZrdAtdlIActuTvpbKOyary5zKHSZQ_jPSjRr-EjvOR1k",
+    "nonce": "cbhyp7y0VIOxXvdz",
+    "ct": "N9SRHWQvJKwReIiK5qXvGID7xUt_POSZ9-5ezQioK_nA5lC13Uu4msiSeWq8pkRFMjRd5STz5wHruHKnqdojqBpJ5z1GcLl1WF-bsmyBQgr0-2G0blZR9Cmhx208FyYKSCeXzXmmQUF05bGZPXEkUN3-75KLwViKq1trZSc1_oCkWRxst8iLYIdg0qb3sjvhM4xk-mJ_1mp7UKXO8pn-fkPBlTzhAPETmteYSX2vcP0mu9eWETBSZq4SqUgG3T8wQmuI1Quxz4drTzTPWehKTMXNfhr9Wy0HOVm6DYsK3sJEv8RerT8d51fL2fw0IhM"
+  }
+}

@@ -53,6 +53,8 @@ Pulse: health and monitoring
   rowsafe fix [NAME]                 let Rowsafe fix what pulse found (asks first)
   rowsafe insights [NAME]            largest tables, unused indexes, bloat, vacuum
   rowsafe top [NAME]                 queries that take the most time, and which got slower
+  rowsafe settings [NAME]            PostgreSQL's settings; rowsafe tune [NAME]: what suits the server
+  rowsafe recommendations [NAME]     what would make it better, why and what it costs
   rowsafe alerts                     firing alerts (rowsafe channels: where they go)
   rowsafe report                     "Your weekly Pulse", the weekly email
 
@@ -62,6 +64,12 @@ Guard: the safety net for AI agents
   rowsafe guard                      Claude Code hook: a restore point before destructive commands
   rowsafe preview [NAME] FILE        run a migration on a fresh copy first: locks, rewrites, a verdict
   rowsafe copies [NAME]              masked copies developers and AI agents can connect to
+
+Databases & users
+  rowsafe db                         databases, users and extensions inside the server
+  rowsafe db create DB               a new database with its own user (password shown once)
+  rowsafe db user add | password | remove
+                                     users and passwords (rowsafe help db)
 
 Admin
   rowsafe tasks [NAME] | task ID     recent tasks; one task with its log

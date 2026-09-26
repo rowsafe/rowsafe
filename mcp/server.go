@@ -45,7 +45,7 @@ type Options struct {
 
 const maxWaitLimit = 60 * time.Second
 
-const instructions = `Rowsafe is the safety net for PostgreSQL databases: continuous WAL archiving (point-in-time recovery), scheduled backups (Rewind) and a weekly restore test (Proof, task type drill), with health monitoring (Pulse), run by an agent on each database host. It never restarts PostgreSQL on its own (only when a person asks, in the dashboard or with "rowsafe restart"; no MCP tool can) or runs arbitrary SQL on production, and never sees backup contents. To test against real-shaped data, create_safe_copy makes a masked copy you can connect to (never production). Rewinding (restoring a copy, bringing rows back, rewinding a whole database) is for people only, in the dashboard or with "rowsafe rewind": AI assistants never restore over production, and no MCP tool can.
+const instructions = `Rowsafe is the safety net for PostgreSQL databases: continuous WAL archiving (point-in-time recovery), scheduled backups (Rewind) and a weekly restore test (Proof, task type drill), with health monitoring (Pulse), run by an agent on each database host. It never restarts PostgreSQL on its own (only when a person asks, in the dashboard or with "rowsafe restart"; no MCP tool can) or runs arbitrary SQL on production, and never sees backup contents. To test against real-shaped data, create_safe_copy makes a masked copy you can connect to (never production). Rewinding (restoring a copy, bringing rows back, rewinding a whole database) is for people only, in the dashboard or with "rowsafe rewind": AI assistants never restore over production, and no MCP tool can. The same goes for standby servers: creating, promoting (failing over to), rebuilding or removing a standby, and automatic failover, are for people only (the dashboard or "rowsafe standby"); standby_status only reads.
 
 Before any destructive or risky database operation (migrations, schema changes, DROP/TRUNCATE, DELETE/UPDATE without a narrow WHERE, bulk data changes, restoring a dump):
 1. safety_check on the database. If it is not protected, tell the user why and get their OK before continuing. For a migration, preview_migration runs it on a fresh copy of the database first (never production) and returns a verdict (safe, careful, dangerous or failed) with suggestions: follow them before running it for real.
@@ -53,7 +53,7 @@ Before any destructive or risky database operation (migrations, schema changes, 
 3. Proceed.
 4. If something breaks, stop. Don't try to repair data and never attempt a restore yourself: tell the user they can Rewind in the Rowsafe dashboard (restore a copy at the restore point, compare it and bring the missing rows back, or rewind the whole database), or run "rowsafe rewind". rewind_window shows how far back they can go; find_moment finds when rows were deleted or changed (read-only), so they know which point to pick.
 
-For "is everything OK?" or alerts, start with fleet_health: it lists each problem with the exact next step. For "is the database healthy?", "what is slow?" or "why is the disk filling up?", use database_health, query_trends and database_insights. When database_health says Rowsafe can fix a finding (clean up tables, remove an unused index, end a stuck session, ...), tell the user to click Apply fix in the dashboard (Pulse, Health) instead of giving them SQL or commands to run; you can't apply fixes yourself. get_task shows a task's result and log tail. Write tools queue asynchronous tasks and return a task id; poll get_task. apply_adoption changes PostgreSQL settings: only after showing the user the plan and getting explicit approval.`
+For "is everything OK?" or alerts, start with fleet_health: it lists each problem with the exact next step. For "is the database healthy?", "what is slow?" or "why is the disk filling up?", use database_health, query_trends and database_insights. When database_health says Rowsafe can fix a finding (clean up tables, remove an unused index, end a stuck session, ...), tell the user to click Apply fix in the dashboard (Pulse, Health) instead of giving them SQL or commands to run; you can't apply fixes yourself. get_task shows a task's result and log tail. Write tools queue asynchronous tasks and return a task id; poll get_task. Applying an adopt plan changes PostgreSQL settings, so no tool does it: the user clicks Turn on backups in the dashboard (or runs rowsafe apply NAME).`
 
 // NewServer returns an MCP server whose tools act through c.
 func NewServer(c *client.Client, opts Options) *sdk.Server {
@@ -73,8 +73,14 @@ func NewServer(c *client.Client, opts Options) *sdk.Server {
 	t.addSafetyReadTools(s)
 	t.addMonitoringTools(s)
 	t.addRewindReadTools(s)
-	t.addMomentTools(s) // read-only: find when rows were deleted
-	t.addCopiesTools(s) // Guard copies: never touch production (copies_tools.go)
+	t.addStorageTools(s)
+	t.addMomentTools(s)      // read-only: find when rows were deleted
+	t.addCopiesTools(s)      // Guard copies: never touch production (copies_tools.go)
+	t.addSettingsTools(s)    // settings_tools.go
+	t.addLogTools(s)         // logs_tools.go
+	t.addAdvisorTools(s)     // advisor (advisor_tools.go)
+	t.addDBAdminReadTools(s) // Databases & users: read-only (dbadmin_tools.go)
+	t.addStandbyReadTools(s)
 	if opts.AllowWrites {
 		t.addWriteTools(s)
 	}

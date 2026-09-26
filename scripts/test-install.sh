@@ -19,11 +19,19 @@
 #      re-runs that keep or change settings, a passphrase of one's own,
 #      Ctrl-C at a hidden prompt, --check-storage and --no-prompt. Secrets
 #      must never reach the terminal. Pasted bucket URLs (R2, B2, S3, Wasabi,
-#      Spaces, any https endpoint) fill in the provider, endpoint and bucket;
+#      Spaces, any https endpoint) fill in the provider, endpoint and bucket.
+#      The second copy (--add-storage): the first storage's bucket refused,
+#      its own generated passphrase, kept on a re-run, tested by
+#      --check-storage, without a terminal, and --remove-second-copy;
 #   5. turning on backups after the install, with a stand-in agent whose
 #      `setup` answers come from files: found PostgreSQL, name, plan, "Turn on
 #      backups?", "Restart PostgreSQL now?" (yes, no), a taken name, another
 #      archiver, an already registered database, --protect and --no-setup;
+#   5b. Rowsafe Storage: the "where should backups go?" choice when the
+#      control plane offers it (fakes3.py answers /v1/storage/offer), the
+#      passphrase, --storage rowsafe without a terminal (passphrase generated
+#      and never printed), the agent's storage test, moving to one's own
+#      bucket and back, and --check-storage;
 #   6. restarts on request (--allow-restart): the allow list, the root
 #      helper's checks (unlisted port, garbage, symlinks, FIFOs, once a
 #      minute; root never writes in the agent's directory), its stop and
@@ -65,14 +73,29 @@ case \${1:-} in
       exit 1
     fi
     # The installer must run the self-test as postgres with agent.env loaded.
-    if [ "\$(id -un)" != postgres ] || [ -z "\${ROWSAFE_REPO_CIPHER_PASS:-}" ]; then
+    # (as mysql on a MySQL server)
+    if { [ "\$(id -un)" != postgres ] && [ "\$(id -un)" != mysql ]; } || [ -z "\${ROWSAFE_REPO_CIPHER_PASS:-}" ]; then
       echo '{"version":"$1","ok":false,"errors":["config: not run as postgres with agent.env"]}'
       exit 1
     fi
     echo '{"version":"$1","platform":"linux/x","ok":true,"checks":["config","repository settings","pgbackrest","control plane"]}' ;;
   inspect)
     printf '{\n  "server_version": "17.6 (Debian 17.6-1)",\n  "data_directory": "/var/lib/postgresql/17/main",\n  "archive_mode": "off"\n}\n' ;;
-  run) while :; do sleep 1; done ;;
+  run) i=0; while [ \$i -lt 1800 ]; do sleep 1; i=\$((i + 1)); done ;; # at most 30 minutes, even if nothing kills it
+  storage)
+    # Rowsafe Storage test: must run as postgres with agent.env loaded.
+    f=/tmp/rowsafe-fake
+    echo "storage \$*" >>"\$f/calls" 2>/dev/null || true
+    if [ "\$(id -un)" != postgres ] || [ "\${ROWSAFE_STORAGE:-}" != rowsafe ]; then
+      echo "storage test must run as postgres with ROWSAFE_STORAGE=rowsafe from agent.env" >&2
+      exit 1
+    fi
+    if [ -s "\$f/storage.rc" ] && [ "\$(cat "\$f/storage.rc")" != 0 ]; then
+      echo "error: no Rowsafe Storage credentials: control plane returned 503: storage unavailable" >&2
+      exit 1
+    fi
+    echo "writing, reading and deleting a test file in Rowsafe Storage..."
+    echo "Rowsafe Storage works: wrote, read back and deleted a test file" ;;
   setup|mongodb)
     # Answers from /tmp/rowsafe-fake: CMD.out is printed, CMD.rc holds exit
     # codes (one per line, used in turn; the last one sticks). MongoDB
@@ -142,6 +165,7 @@ host() {
     echo "=== $image"
     docker run --rm \
       -e TEST_PUB="$TEST_PUB" -e TEST_PRIV="$TEST_PRIV" -e TEST_UNITS="$first" -e TEST_SHOW="${TEST_SHOW:-}" \
+      --cap-add NET_ADMIN \
       -v "$root/scripts:/src/scripts:ro" -v "$root/deploy:/src/deploy:ro" -v "$work/go:/go-release:ro" \
       "$image" sh /src/scripts/test-install.sh --in-container
     first=0
@@ -553,7 +577,7 @@ import datetime, hashlib, hmac, http.server, re, ssl, sys, urllib.parse
 # takes us-east-1). A file named "skew" in the working directory moves its
 # clock by that many seconds.
 KEYS = {"AKIDTESTROWSAFE": "test/secret+key=="}
-BUCKETS = {"rowsafe-test"}
+BUCKETS = {"rowsafe-test", "rowsafe-copy2"}
 objects = {}
 
 
@@ -617,6 +641,13 @@ class S3(http.server.BaseHTTPRequestHandler):
     def handle_any(self):
         n = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(n) if n else b""
+        if self.path == "/v1/storage/offer":  # the control plane's Rowsafe Storage offer
+            self.close_connection = True  # curl -f hangs up after an error
+            try:
+                open("offer").close()
+            except OSError:
+                return self.reply(404, b'{"error":"not found"}', "application/json", [("Connection", "close")])
+            return self.reply(200, b'{"available":true,"free_bytes":10000000000}', "application/json", [("Connection", "close")])
         if self.authorized(body) is not True:
             return
         path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
@@ -716,7 +747,8 @@ guided_storage_tests() {
   echo "  -- guided storage setup on a terminal"
   write_terminal_helpers
   acct=0123456789abcdef0123456789abcdef
-  names="s3.rowsafe.test $acct.eu.r2.cloudflarestorage.com s3.eu-central-1.amazonaws.com rowsafe-test.s3.eu-central-1.amazonaws.com"
+  # api.rowsafe.sh too: the storage offer is asked locally, never online.
+  names="s3.rowsafe.test $acct.eu.r2.cloudflarestorage.com s3.eu-central-1.amazonaws.com rowsafe-test.s3.eu-central-1.amazonaws.com api.rowsafe.sh api.rowsafe.test"
   echo "127.0.0.1 $names" >>/etc/hosts
   san=$(printf 'DNS:%s,' $names)
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 \
@@ -871,6 +903,7 @@ guided_storage_tests() {
   for s in "$secret" my-own-passphrase-long-enough; do
     ! grep -qF "$s" "$W/out" || fail "--check-storage printed a secret"
   done
+  second_copy_tests
 
   # 7. --no-prompt on a terminal behaves exactly like no terminal.
   expect_ok "purge" "$INSTALLER" --uninstall --purge
@@ -880,8 +913,179 @@ guided_storage_tests() {
   lacks "Where should Rowsafe"
   expect_ok "purge" "$INSTALLER" --uninstall --purge
   bucket_url_tests
+  rowsafe_storage_tests
   setup_flow_tests
   restart_tests
+  firewall_tests
+  [ "${TEST_UNITS:-0}" != 1 ] || mysql_host_tests
+}
+
+# ------------------------------------------------------------ second copy
+
+second_copy_tests() {
+  echo "  -- second copy (--add-storage)"
+  first=$(grep -E '^ROWSAFE_REPO_' /etc/rowsafe/agent.env | sort)
+  expect_fail "--add-storage without a terminal needs its settings" "needs these in the environment" "$INSTALLER" --add-storage
+  # The first storage's bucket is refused; another bucket is tested; the
+  # second copy gets its own generated passphrase.
+  tty_ok "--add-storage: another bucket, own passphrase" \
+    "Bucket URL\thttps://rowsafe-test.s3.eu-central-1.amazonaws.com/\nAccess key ID\t$key\nSecret access key\t$secret\nBucket URL\thttps://s3.rowsafe.test/rowsafe-copy2\nRegion (\t\nAccess key ID\t$key\nSecret access key\t$secret\nChoose 1-2\t1\nto continue\t{capture:[│|] {6}[A-Za-z0-9]{36}([A-Za-z0-9]{4}) }\n" \
+    "$INSTALLER" --add-storage
+  has "A second copy keeps your backups"
+  has "That is the bucket your backups already go to."
+  has "backup storage works"
+  has "Your second copy encryption passphrase:"
+  has "keep both in your password manager"
+  has "Second copy saved."
+  lacks "$secret"
+  lacks "Turn on backups"
+  pass2=$(sed -n 's/^.*[│|]      \([A-Za-z0-9]\{40\}\)        [│|].*$/\1/p' "$W/out")
+  [ "${#pass2}" = 40 ] || fail "second copy passphrase not shown in the box"
+  env_is ROWSAFE_REPO2_S3_ENDPOINT s3.rowsafe.test
+  env_is ROWSAFE_REPO2_S3_BUCKET rowsafe-copy2
+  env_is ROWSAFE_REPO2_S3_REGION us-east-1
+  env_is ROWSAFE_REPO2_S3_URI_STYLE path
+  env_is ROWSAFE_REPO2_S3_KEY "$key"
+  env_is ROWSAFE_REPO2_S3_KEY_SECRET "$secret"
+  env_is ROWSAFE_REPO2_CIPHER_PASS "$pass2"
+  [ "$(grep -E '^ROWSAFE_REPO_' /etc/rowsafe/agent.env | sort)" = "$first" ] || fail "--add-storage changed the first storage's settings"
+  ! grep -q "^ROWSAFE_REPO_CIPHER_PASS='$pass2'" /etc/rowsafe/agent.env || fail "the second copy reused the first passphrase"
+  [ "$(grep -c '^# Second backup copy' /etc/rowsafe/agent.env)" = 1 ] || fail "second copy block not added once"
+  pass "second copy saved beside the first storage, with its own passphrase"
+
+  # A re-run keeps it; --check-storage tests both.
+  before=$(sha256sum /etc/rowsafe/agent.env)
+  tty_ok "--add-storage again, keep it" "Move the second copy to another bucket?\tn\n" "$INSTALLER" --add-storage
+  has "kept the second copy's settings"
+  [ "$(sha256sum /etc/rowsafe/agent.env)" = "$before" ] || fail "keeping the second copy changed agent.env"
+  expect_ok "--check-storage tests both storages" "$INSTALLER" --check-storage
+  grep -q "Testing the second copy's storage" "$W/out" || fail "--check-storage skipped the second copy"
+  [ "$(grep -c "backup storage works" "$W/out")" = 2 ] || fail "--check-storage: not both storages tested"
+
+  # Without a terminal: from the environment, tested before anything is saved.
+  expect_fail "--add-storage --no-prompt: a failing bucket saves nothing" "second copy's storage test failed" \
+    env ROWSAFE_REPO2_S3_BUCKET=no-such-bucket "$INSTALLER" --add-storage --no-prompt
+  [ "$(sha256sum /etc/rowsafe/agent.env)" = "$before" ] || fail "a failing second copy changed agent.env"
+  expect_fail "--add-storage --no-prompt: the first bucket refused" "another bucket than the first storage" \
+    env ROWSAFE_REPO2_S3_ENDPOINT=s3.eu-central-1.amazonaws.com ROWSAFE_REPO2_S3_BUCKET=rowsafe-test "$INSTALLER" --add-storage --no-prompt
+
+  # Off again: the settings become comments, the first storage stays.
+  expect_ok "--remove-second-copy" "$INSTALLER" --remove-second-copy
+  grep -q "The second copy is off" "$W/out" || fail "--remove-second-copy: no message"
+  ! grep -q '^ROWSAFE_REPO2_' /etc/rowsafe/agent.env || fail "--remove-second-copy left settings active"
+  [ "$(grep -E '^ROWSAFE_REPO_' /etc/rowsafe/agent.env | sort)" = "$first" ] || fail "--remove-second-copy changed the first storage"
+  expect_fail "--add-storage only goes with an install" "only go with an install" "$INSTALLER" --add-storage --check-storage
+  pass "second copy: kept, checked, automation, removed"
+}
+
+# ------------------------------------------------------------ Rowsafe Storage
+
+rowsafe_storage_tests() {
+  echo "  -- Rowsafe Storage"
+  api=https://api.rowsafe.test
+  touch "$W/offer"
+
+  # 1. Fresh install on a terminal: Rowsafe Storage is the default answer;
+  # the passphrase is generated, shown once and confirmed.
+  tty_ok "fresh install: Rowsafe Storage" \
+    "Choose 1-2\t\nChoose 1-2\t1\nto continue\t{capture:[│|] {6}[A-Za-z0-9]{36}([A-Za-z0-9]{4}) }\n" \
+    sh -c 'ROWSAFE_URL=$2 ROWSAFE_RELEASES_URL=https://localhost:8443/agent sh -s rse_secrettoken123 <"$1/install.sh"' piped "$W" "$api"
+  has "Where should backups go?"
+  has "1) Rowsafe Storage     nothing to set up (10 GB free)"
+  has "Rowsafe can't read them"
+  has "backups go to Rowsafe Storage, encrypted with your passphrase"
+  has "storage      Rowsafe Storage"
+  lacks "Bucket URL"
+  lacks "Access key ID"
+  lacks rse_secrettoken123
+  rpass=$(sed -n 's/^.*[│|]      \([A-Za-z0-9]\{40\}\)        [│|].*$/\1/p' "$W/out")
+  [ "${#rpass}" = 40 ] || fail "$name: passphrase not shown"
+  env_is ROWSAFE_STORAGE rowsafe
+  env_is ROWSAFE_REPO_CIPHER_PASS "$rpass"
+  ! grep -q '^ROWSAFE_REPO_S3_' /etc/rowsafe/agent.env || fail "$name: bucket settings written for Rowsafe Storage"
+
+  # 2. Re-run: nothing asked. With the agent enrolled and running, the
+  # installer runs its storage test.
+  tty_ok "re-run on Rowsafe Storage asks nothing" "" "$INSTALLER" --no-setup
+  has "backup storage: Rowsafe Storage (change it with --setup-storage)"
+  lacks "Where should backups go?"
+  echo '{"host_id":"host_1","agent_token":"rsa_x"}' >/var/lib/rowsafe/agent.json
+  chown postgres:postgres /var/lib/rowsafe/agent.json
+  runuser -u postgres -- /opt/rowsafe/rowsafe-agent run >/dev/null 2>&1 &
+  agent_pid=$!
+  sleep 1
+  scenario
+  expect_ok "agent running: Rowsafe Storage tested" "$INSTALLER" --no-setup
+  grep -q "Rowsafe Storage works: wrote, read back and deleted a test file" "$W/out" || fail "$name: no storage test"
+  called "storage test --wait 60s"
+  scenario storage_rc=1
+  expect_ok "a failing storage test warns, the install goes on" "$INSTALLER" --no-setup
+  grep -q "Rowsafe Storage didn't work yet" "$W/out" || fail "$name: no warning"
+  expect_fail "--check-storage on Rowsafe Storage fails" "Rowsafe Storage test failed" "$INSTALLER" --check-storage
+  scenario
+  expect_ok "--check-storage on Rowsafe Storage" "$INSTALLER" --check-storage
+  grep -q "Rowsafe Storage works" "$W/out" || fail "$name: no success"
+  kill "$agent_pid" 2>/dev/null || true
+  wait "$agent_pid" 2>/dev/null || true
+  rm -f /var/lib/rowsafe/agent.json
+
+  # 3. Move to one's own bucket: the passphrase is kept, ROWSAFE_STORAGE
+  # goes back to its commented-out default.
+  tty_ok "--setup-storage: keep Rowsafe Storage" "Move them to your own bucket?\t\n" "$INSTALLER" --setup-storage --no-setup
+  has "kept Rowsafe Storage"
+  env_is ROWSAFE_STORAGE rowsafe
+  tty_ok "--setup-storage: move to your own bucket" \
+    "Move them to your own bucket?\ty\nBucket URL\thttps://s3.rowsafe.test/rowsafe-test\nRegion (\t\nAccess key ID\t$key\nSecret access key\t$secret\nKeep the current encryption passphrase?\t\n" \
+    "$INSTALLER" --setup-storage --no-setup
+  has "Rowsafe takes a new full backup in your bucket right away"
+  has "backup storage works"
+  lacks "Where should backups go?"
+  env_is ROWSAFE_REPO_S3_ENDPOINT s3.rowsafe.test
+  env_is ROWSAFE_REPO_CIPHER_PASS "$rpass"
+  ! grep -q '^ROWSAFE_STORAGE=' /etc/rowsafe/agent.env || fail "$name: ROWSAFE_STORAGE kept"
+  grep -q "^#ROWSAFE_STORAGE='own'$" /etc/rowsafe/agent.env || fail "$name: ROWSAFE_STORAGE not back to the template"
+
+  # 4. And back, choosing Rowsafe Storage at the "where" question.
+  tty_ok "--setup-storage: own bucket to Rowsafe Storage" \
+    "Replace these storage settings?\ty\nChoose 1-2\t1\nKeep the current encryption passphrase?\t\n" \
+    env ROWSAFE_URL=$api "$INSTALLER" --setup-storage --no-setup
+  has "Where should backups go?"
+  env_is ROWSAFE_STORAGE rowsafe
+  env_is ROWSAFE_REPO_CIPHER_PASS "$rpass"
+  ! grep -q '^ROWSAFE_REPO_S3_ENDPOINT=' /etc/rowsafe/agent.env || fail "$name: the old bucket was kept active"
+  lacks "$secret"
+  lacks "$rpass"
+
+  # 5. Not offered (a self-hosted control plane): the question is skipped.
+  rm -f "$W/offer"
+  expect_ok "purge" "$INSTALLER" --uninstall --purge
+  tty_fail "not offered: straight to the bucket" 130 "Bucket URL\t{ctrl-c}\n" \
+    env ROWSAFE_URL=$api "$INSTALLER" rse_secrettoken123
+  lacks "Where should backups go?"
+  touch "$W/offer"
+
+  # 6. Without a terminal: --storage rowsafe generates the passphrase, keeps
+  # it only in agent.env and says how to see it.
+  expect_ok "purge" "$INSTALLER" --uninstall --purge
+  expect_ok "--storage rowsafe without a terminal" "$INSTALLER" --storage rowsafe rse_secrettoken123
+  grep -q "a backup encryption passphrase was generated and saved as ROWSAFE_REPO_CIPHER_PASS" "$W/out" || fail "$name: no passphrase note"
+  env_is ROWSAFE_STORAGE rowsafe
+  gen=$(sed -n "s/^ROWSAFE_REPO_CIPHER_PASS='\([A-Za-z0-9]\{40\}\)'\$/\1/p" /etc/rowsafe/agent.env)
+  [ "${#gen}" = 40 ] || fail "$name: no generated passphrase in agent.env"
+  ! grep -qF "$gen" "$W/out" || fail "$name: the generated passphrase was printed"
+  grep -q "storage      Rowsafe Storage" "$W/out" || fail "$name: summary"
+  expect_ok "--storage rowsafe again keeps the passphrase" "$INSTALLER" --storage rowsafe
+  env_is ROWSAFE_REPO_CIPHER_PASS "$gen"
+  ! grep -q "was generated" "$W/out" || fail "$name: generated a second passphrase"
+  expect_ok "purge" "$INSTALLER" --uninstall --purge
+  expect_ok "--storage rowsafe with a passphrase from the environment" \
+    env ROWSAFE_REPO_CIPHER_PASS=my-own-passphrase-long-enough "$INSTALLER" --storage rowsafe rse_secrettoken123
+  env_is ROWSAFE_REPO_CIPHER_PASS my-own-passphrase-long-enough
+  ! grep -q "was generated" "$W/out" || fail "$name: generated a passphrase despite the environment"
+  ! grep -qF my-own-passphrase-long-enough "$W/out" || fail "$name: printed the passphrase"
+  expect_ok "purge" "$INSTALLER" --uninstall --purge
+  rm -f "$W/offer"
+  pass "Rowsafe Storage: choice, passphrase, storage test, moving both ways, no terminal"
 }
 
 # ------------------------------------------------------------ bucket URLs
@@ -1012,7 +1216,7 @@ EOF
   has "✓ shop is protected. The first full backup is running."
   has "Dashboard: https://app.rowsafe.test/databases/db_fake"
   has "Rowsafe can't restart or stop PostgreSQL"
-  called "plan --name shop --port 5432 --socket-dir /var/run/postgresql --id-file"
+  called "plan --name shop --port 5432 --socket-dir /var/run/postgresql --engine postgresql --id-file"
   called "apply --database db_fake"
   called "wait --database db_fake --timeout 5m"
   [ "$(cat "$F/pg_ctlcluster")" = "17 main restart" ] || fail "$name: pg_ctlcluster not run as 17 main restart"
@@ -1055,7 +1259,7 @@ EOF
   scenario "discover_out=$shop\n5433\t/var/run/postgresql\t16\tbilling\t/var/lib/postgresql/16/billing\t8192\tbilling\tyes\tawaiting_restart\tbilling\t8.0 KiB\t-\tdb_2"
   tty_ok "several clusters, one waiting for a restart" \
     "Set up backups for it?\tn\nRestart PostgreSQL now?\tn\n" "$INSTALLER"
-  has "backups for billing wait for a PostgreSQL restart"
+  has "backups for billing wait for a restart"
   has "sudo pg_ctlcluster 16 billing restart"
   not_called "plan"
 
@@ -1339,6 +1543,52 @@ EOF
   expect_ok "purge" "$INSTALLER" --uninstall --purge
   [ ! -e /etc/rowsafe ] || fail "purge left /etc/rowsafe"
   pass "--no-allow-restart, uninstall and purge remove the restart helper"
+}
+
+# ------------------------------------------------------------ MySQL servers
+
+# mysql_host_tests: a server with MySQL and no PostgreSQL. The agent runs as
+# mysql (a unit drop-in), Percona XtraBackup comes from Percona's repository
+# after its key's fingerprint is checked, Rowsafe's option file is included
+# from /etc/mysql/conf.d, AppArmor's mysqld profile lets mysqld use Rowsafe's
+# folders, and a purge keeps the server's binary log settings.
+mysql_host_tests() {
+  echo "  -- a MySQL server (no PostgreSQL)"
+  pkill -u postgres -f 'rowsafe-agent run' 2>/dev/null || true
+  userdel -r postgres 2>/dev/null || userdel postgres
+  rm -rf /usr/lib/postgresql /var/lib/postgresql
+  useradd --system --home-dir /nonexistent --no-create-home --shell /bin/false mysql
+  printf '#!/bin/sh\necho "/usr/sbin/mysqld  Ver 8.4.3 for Linux on x86_64 (MySQL Community Server - GPL)"\n' >/usr/sbin/mysqld
+  chmod 755 /usr/sbin/mysqld
+  mkdir -p /etc/mysql/conf.d /etc/apparmor.d
+  echo '#include <local/usr.sbin.mysqld>' >/etc/apparmor.d/usr.sbin.mysqld
+  # Percona's key comes over the internet; the releases from the local server.
+  cat /etc/ssl/certs/ca-certificates.crt "$W/tls.crt" >"$W/both.crt"
+  export CURL_CA_BUNDLE=$W/both.crt
+  expect_ok "MySQL server: configured install" configured env ROWSAFE_ENROLL_TOKEN=rse_secrettoken123 "$INSTALLER" --no-setup
+  [ -z "${TEST_SHOW:-}" ] || cat "$W/out"
+  grep -q "restore tests for the MySQL on this server" "$W/out" || fail "installer doesn't speak of MySQL"
+  dpkg -s percona-xtrabackup-84 >/dev/null 2>&1 || fail "percona-xtrabackup-84 not installed"
+  [ -s /usr/share/keyrings/rowsafe-percona.gpg ] || fail "Percona keyring missing"
+  grep -q 'signed-by=/usr/share/keyrings/rowsafe-percona.gpg\] https://repo.percona.com/pxb-84-lts/apt' \
+    /etc/apt/sources.list.d/rowsafe-percona-xtrabackup.list || fail "Percona source not pinned to its key"
+  grep -qx 'User=mysql' /etc/systemd/system/rowsafe-agent.service.d/10-mysql.conf || fail "no drop-in running the agent as mysql"
+  cmp /etc/systemd/system/rowsafe-agent.service /src/deploy/systemd/rowsafe-agent.service || fail "the unit itself changed"
+  [ "$(stat -c '%U %a' /etc/rowsafe/agent.env)" = "mysql 600" ] || fail "agent.env ownership/mode on a MySQL server"
+  [ "$(stat -c '%U %G %a' /etc/rowsafe)" = "root mysql 750" ] || fail "/etc/rowsafe ownership/mode on a MySQL server"
+  [ "$(stat -c '%U %a' /etc/rowsafe/mysql/server.cnf)" = "mysql 640" ] || fail "Rowsafe's option file ownership/mode"
+  [ "$(readlink /etc/mysql/conf.d/zz-rowsafe.cnf)" = /etc/rowsafe/mysql/server.cnf ] || fail "option file not included from conf.d"
+  grep -q '^/var/lib/rowsafe/\*\* rwk,$' /etc/apparmor.d/local/usr.sbin.mysqld || fail "AppArmor override missing"
+  command -v pgbackrest >/dev/null || fail "pgbackrest (storage test) not installed"
+  pass "MySQL server: agent as mysql, XtraBackup from Percona (key checked), option file and AppArmor"
+  expect_ok "MySQL server: re-run is idempotent" configured "$INSTALLER" --no-setup
+  [ "$(grep -c Rowsafe /etc/apparmor.d/local/usr.sbin.mysqld)" = 1 ] || fail "AppArmor override added twice"
+  echo "log_bin = binlog" >>/etc/rowsafe/mysql/server.cnf
+  expect_ok "MySQL server: purge" "$INSTALLER" --uninstall --purge
+  [ -f /etc/mysql/conf.d/zz-rowsafe.cnf ] && [ ! -L /etc/mysql/conf.d/zz-rowsafe.cnf ] &&
+    grep -q '^log_bin = binlog$' /etc/mysql/conf.d/zz-rowsafe.cnf || fail "purge dropped the server's binary log settings"
+  [ ! -e /etc/systemd/system/rowsafe-agent.service.d/10-mysql.conf ] || fail "uninstall left the drop-in"
+  pass "MySQL server: purge keeps the server's binary log settings as a plain file"
 }
 
 # ------------------------------------------------------------ updates
@@ -1646,6 +1896,219 @@ FAKE_EOF
   scenario "discover_out=$shop"
   expect_ok "--allow-updates again" "$INSTALLER" --allow-updates
   pass "--no-allow-updates and friends turn updates off and keep restarts"
+}
+
+# ------------------------------------------------------------ firewall
+
+# firewall_tests: --allow-firewall, and the firewall helper with the real
+# nft (the container has its own network namespace and CAP_NET_ADMIN).
+firewall_tests() {
+  echo "  -- the firewall on request (--allow-firewall)"
+  apt-get install -y -qq --no-install-recommends nftables >/dev/null
+  H=/usr/local/lib/rowsafe/rowsafe-firewall
+  D=/var/lib/rowsafe/firewall
+  # The ports come from root's own look (pg_lsclusters here), never from the
+  # agent's discover output: port 22 in either is never allowed.
+  cat >/usr/local/bin/pg_lsclusters <<'PGEOF'
+#!/bin/sh
+printf '17 main 5432 online postgres /var/lib/postgresql/17/main /var/log/postgresql/postgresql-17-main.log\n'
+printf '17 odd 22 online postgres /var/lib/postgresql/17/odd /var/log/postgresql/postgresql-17-odd.log\n'
+PGEOF
+  chmod 755 /usr/local/bin/pg_lsclusters
+  # The restart tests purged everything: install again, with a running agent.
+  scenario
+  expect_ok "install again for the firewall tests" configured "$INSTALLER" rse_secrettoken123
+  echo '{"host_id":"host_1","agent_token":"rsa_x"}' >/var/lib/rowsafe/agent.json
+  chown postgres:postgres /var/lib/rowsafe/agent.json
+  runuser -u postgres -- /opt/rowsafe/rowsafe-agent run >/dev/null 2>&1 &
+  sleep 1
+  scenario "discover_out=$shop\n22\t/var/run/postgresql\t17\todd\t/var/lib/postgresql/17/odd\t8192\todd\tno\t-\todd\t8.0 KiB\tssh.service\t-"
+  expect_ok "--allow-firewall" "$INSTALLER" --allow-firewall
+  grep -q "Rowsafe may limit who can reach PostgreSQL's port (5432) when you ask" "$W/out" || {
+    cat "$W/out" >&2
+    fail "--allow-firewall not confirmed"
+  }
+  grep -qx "5432" /etc/rowsafe/firewall-allowed || fail "firewall allow list lacks 5432"
+  ! grep -qx "22" /etc/rowsafe/firewall-allowed || fail "port 22 made it into the firewall allow list"
+  ! grep -q "ssh.service" /etc/rowsafe/restart-allowed 2>/dev/null || fail "an agent-reported unit made it into the restart allow list"
+  [ "$(stat -c '%U %a' /etc/rowsafe/firewall-allowed)" = "root 644" ] || fail "firewall allow list ownership/mode"
+  [ "$(stat -c '%U %a' "$H")" = "root 755" ] || fail "firewall helper ownership/mode"
+  [ "$(stat -c '%U %a' "$D")" = "postgres 700" ] || fail "firewall request directory ownership/mode"
+  cmp "$H" /src/scripts/rowsafe-firewall || fail "helper differs from scripts/rowsafe-firewall"
+  for u in rowsafe-firewall.service rowsafe-firewall.path rowsafe-firewall-restore.service; do
+    cmp "/etc/systemd/system/$u" "/src/deploy/systemd/$u" || fail "$u differs"
+  done
+  ! grep -q "ReadWritePaths" /etc/systemd/system/rowsafe-firewall.service || fail "the firewall unit may write somewhere"
+  if [ "${TEST_UNITS:-0}" = 1 ]; then
+    expect_ok "systemd-analyze verify (firewall units)" systemd-analyze verify /etc/systemd/system/rowsafe-firewall.service \
+      /etc/systemd/system/rowsafe-firewall.path /etc/systemd/system/rowsafe-firewall-restore.service
+    [ ! -s "$W/out" ] || {
+      cat "$W/out" >&2
+      fail "systemd-analyze verify printed warnings for the firewall units"
+    }
+    systemd-analyze security --offline=true --no-pager /etc/systemd/system/rowsafe-firewall.service 2>/dev/null |
+      tail -n 1 | sed "s/^/  rowsafe-firewall: /"
+  fi
+  # A re-run keeps the list as it is and asks nothing (restarts answered
+  # already, so only the database questions come).
+  scenario "discover_out=$shop"
+  expect_ok "restarts off for the firewall tests" "$INSTALLER" --no-allow-restart
+  scenario "discover_out=$shop"
+  tty_ok "a re-run keeps the firewall allowed" "Name it in Rowsafe\t\nTurn on backups for shop now?\tn\n" "$INSTALLER"
+  lacks "Allow Rowsafe to limit who can reach"
+  grep -qx "5432" /etc/rowsafe/firewall-allowed || fail "a re-run dropped the firewall allow list"
+
+  FO=$W/fw-run
+  install -d -m 0755 -o root -g root "$FO"
+  as_pg() { runuser -u postgres -- "$@"; }
+  # ss and sshd stand in: PostgreSQL (postgres) listens on 5432 and 5433,
+  # root on 5499, sshd on 22 and 2222.
+  pg_uid=$(id -u postgres)
+  {
+    echo '#!/bin/sh'
+    echo 'case "$*" in'
+    echo "*p*) printf 'LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:((\"sshd\",pid=1,fd=3))\\n' ;;"
+    echo "*) printf 'LISTEN 0 244 0.0.0.0:5432 0.0.0.0:* uid:$pg_uid ino:1 sk:1\\nLISTEN 0 244 0.0.0.0:5433 0.0.0.0:* uid:$pg_uid ino:2 sk:2\\nLISTEN 0 128 0.0.0.0:5499 0.0.0.0:* uid:0 ino:3 sk:3\\n' ;;"
+    echo 'esac'
+  } >"$F/ss"
+  printf '#!/bin/sh\nprintf "port 22\\nport 2222\\n"\n' >"$F/sshd"
+  chmod 755 "$F/ss" "$F/sshd"
+  fw() {
+    timeout 90 env STATE_DIRECTORY="$W/fw-state" RUNTIME_DIRECTORY="$FO" ROWSAFE_FIREWALL_CONFIRM_WAIT="${WAIT:-3}" \
+      ROWSAFE_SS="$F/ss" ROWSAFE_SSHD="$F/sshd" "$H" "$@" 2>>"$W/fw.log" ||
+      fail "the firewall helper failed or hung (exit $?)"
+  }
+  # fw_request LINE ADDRESSES CONFIRM: as the agent does (CONFIRM=1 writes
+  # the confirmation once the helper answers phase=pending). The agent
+  # removes its own files afterwards: the helper never does.
+  fw_request() {
+    rm -f "$FO/result"
+    [ -z "$2" ] || printf '%b' "$2" | as_pg sh -c 'cat >"$1"' sh "$D/addresses"
+    confirmer=''
+    if [ "${3:-0}" = 1 ]; then
+      # At most 10 seconds (100 x 0.1s).
+      (
+        for _ in $(seq 1 100); do
+          if grep -qx phase=pending "$FO/result" 2>/dev/null; then
+            printf '%s\n' "${1%% *}" | as_pg sh -c 'cat >"$1.tmp" && mv "$1.tmp" "$1"' sh "$D/confirm"
+            break
+          fi
+          sleep 0.1
+        done
+      ) &
+      confirmer=$!
+    fi
+    printf '%s\n' "$1" | as_pg sh -c 'cat >"$1"' sh "$D/request"
+    fw
+    # Only the confirmer: a bare wait would also wait for the fake agent,
+    # which runs until pkill.
+    [ -z "$confirmer" ] || wait "$confirmer"
+    [ -e "$D/request" ] || fail "helper removed the agent's request: $1"
+    [ -f "$FO/result" ] || fail "no result for: $1"
+    as_pg rm -f "$D/request" "$D/addresses" "$D/confirm"
+  }
+  fw_has() { grep -qxF "$1" "$FO/result" || {
+    cat "$FO/result" >&2
+    fail "firewall helper result lacks $1"
+  }; }
+  rules() { nft list table inet rowsafe 2>/dev/null; }
+
+  fw # no request: nothing happens
+  [ ! -e "$FO/result" ] || fail "firewall helper answered without a request"
+  fw_request "fw_1 apply 5432" '10.0.0.0/16\n2001:db8::/32\n' 1
+  fw_has "id=fw_1"
+  fw_has "phase=done"
+  fw_has "ok=1"
+  rules | grep -q "tcp dport 5432 ip saddr 10.0.0.0/16 accept" || fail "no IPv4 allow rule: $(rules)"
+  rules | grep -q "tcp dport 5432 ip6 saddr 2001:db8::/32 accept" || fail "no IPv6 allow rule: $(rules)"
+  rules | grep -q "tcp dport 5432 drop" || fail "no drop rule: $(rules)"
+  ! rules | grep -q "dport 22" || fail "the firewall helper touched SSH"
+  grep -qx "addresses=10.0.0.0/16,2001:db8::/32" "$FO/port-5432" && grep -qx "loaded=1" "$FO/port-5432" || fail "port state not published"
+  [ "$(stat -c '%U %a' "$FO/port-5432")" = "root 644" ] || fail "port state ownership/mode"
+  [ -f "$W/fw-state/port-5432" ] && [ ! -e "$W/fw-state/pending-5432" ] || fail "a confirmed rule was not kept as port-5432"
+  # A request is handled once.
+  printf 'fw_1 apply 5432\n' | as_pg sh -c 'cat >"$1"' sh "$D/request"
+  rm -f "$FO/result"
+  fw
+  [ ! -e "$FO/result" ] || fail "the same request was handled twice"
+  as_pg rm -f "$D/request"
+
+  # Without the agent's confirmation the previous rule comes back.
+  WAIT=1 fw_request "fw_2 apply 5432" '192.168.7.0/24\n' 0
+  fw_has "ok=0"
+  grep -q "^error=the agent did not confirm" "$FO/result" || fail "unconfirmed change not explained"
+  rules | grep -q "10.0.0.0/16" && ! rules | grep -q "192.168.7.0/24" || fail "unconfirmed change not rolled back: $(rules)"
+  grep -qx "addresses=10.0.0.0/16,2001:db8::/32" "$FO/port-5432" || fail "rolled back state not published"
+  [ ! -e "$W/fw-state/pending-5432" ] || fail "an unconfirmed rule was kept"
+
+  n=0
+  for bad in "0.0.0.0/0" "10.0.0.0/4" "::/0" "1.2.3.4;flush" "300.1.1.1" "example.com" '1.2.3.4 } accept; chain x {'; do
+    n=$((n + 1))
+    fw_request "fw_3_$n apply 5432" "$bad\n" 1
+    fw_has "ok=0"
+    grep -q "^error=not an address or range" "$FO/result" || fail "bad address $bad not refused"
+  done
+  fw_request "fw_4 apply 5499" '10.1.0.0/16\n' 1
+  grep -q "^error=port 5499 is not in /etc/rowsafe/firewall-allowed" "$FO/result" || fail "unlisted port not refused"
+  # Whatever the allow list says: never SSH, never below 1024, and only a
+  # port PostgreSQL (the postgres user) listens on.
+  printf '5432\n2222\n22\n5433\n5499\n' >/etc/rowsafe/firewall-allowed
+  fw_request "fw_ssh apply 2222" '10.1.0.0/16\n' 1
+  grep -q "^error=port 2222 is SSH's" "$FO/result" || fail "an sshd port was not refused"
+  fw_request "fw_low apply 22" '10.1.0.0/16\n' 1
+  grep -q "^error=port 22 can't be managed by Rowsafe" "$FO/result" || fail "a port below 1024 was not refused"
+  fw_request "fw_nopg apply 5499" '10.1.0.0/16\n' 1
+  grep -q "^error=no PostgreSQL of the postgres user listens on port 5499" "$FO/result" || fail "a port without PostgreSQL was not refused"
+  printf '5432\n' >/etc/rowsafe/firewall-allowed
+  for bad in "fw_5 flush 5432" "fw_5 apply" "fw_5 apply 5432 x" "fw.5 apply 5432" 'x; nft flush ruleset 5432' "fw_5 apply 05432" "fw_5 apply 99999999"; do
+    fw_request "$bad" "" 0
+    fw_has "error=malformed request"
+  done
+  rules | grep -q "10.0.0.0/16" || fail "refused requests changed the rules"
+  # A symlinked request is neither read nor followed.
+  printf 'fw_9 remove 5432\n' >"$W/fw-sentinel"
+  chmod 600 "$W/fw-sentinel"
+  as_pg ln -s "$W/fw-sentinel" "$D/request"
+  rm -f "$FO/result"
+  fw
+  [ ! -e "$FO/result" ] || fail "a symlinked request was read"
+  [ "$(cat "$W/fw-sentinel")" = "fw_9 remove 5432" ] || fail "a symlinked request changed its target"
+  as_pg rm -f "$D/request"
+  [ -z "$(find "$D" -user root)" ] || fail "root left files in $D"
+
+  # Status: whether nftables still holds the rules.
+  fw_request "fw_s1 status 5432" "" 0
+  fw_has "ok=1"
+  grep -qx "loaded=1" "$FO/port-5432" || fail "status: rules not reported loaded"
+  nft delete table inet rowsafe
+  fw_request "fw_s2 status 5432" "" 0
+  grep -qx "loaded=0" "$FO/port-5432" || fail "status: a flushed table reported loaded"
+
+  # At boot the kept rules come back; an unconfirmed one doesn't.
+  printf '10.77.0.0/16\n' >"$W/fw-state/pending-5432"
+  fw --restore
+  rules | grep -q "10.0.0.0/16" || fail "--restore did not load the rules"
+  ! rules | grep -q "10.77.0.0/16" || fail "--restore loaded an unconfirmed rule"
+  [ ! -e "$W/fw-state/pending-5432" ] || fail "--restore kept an unconfirmed rule"
+  fw_request "fw_6 remove 5432" "" 0
+  fw_has "ok=1"
+  ! rules | grep -q . || fail "remove left the table: $(rules)"
+  [ ! -e "$FO/port-5432" ] || fail "remove left the port state"
+  pass "firewall helper: nft rules, confirmation and rollback, pending rules, bad addresses and ports, SSH, allow list, symlinks, status, --restore, remove"
+
+  fw_request "fw_7 apply 5432" '10.2.0.0/16\n' 1
+  expect_ok "--no-allow-firewall" "$INSTALLER" --no-allow-firewall
+  [ ! -e "$H" ] && [ ! -e /etc/systemd/system/rowsafe-firewall.path ] || fail "--no-allow-firewall left the helper"
+  ! rules | grep -q . || fail "--no-allow-firewall left Rowsafe's rules"
+  ! grep -q '^[0-9]' /etc/rowsafe/firewall-allowed || fail "--no-allow-firewall kept the allow list"
+  scenario "discover_out=$shop"
+  expect_ok "--allow-firewall again" "$INSTALLER" --allow-firewall
+  pkill -u postgres -f 'rowsafe-agent run' || true
+  expect_ok "uninstall removes the firewall helper" "$INSTALLER" --uninstall
+  [ ! -e "$H" ] && [ ! -e /etc/systemd/system/rowsafe-firewall-restore.service ] || fail "uninstall left the firewall helper"
+  expect_ok "purge" "$INSTALLER" --uninstall --purge
+  rm -f /usr/local/bin/pg_lsclusters
+  pass "--no-allow-firewall, uninstall and purge remove the firewall helper and its rules"
 }
 
 case ${1:-} in

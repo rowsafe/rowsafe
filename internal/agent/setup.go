@@ -438,7 +438,7 @@ func (s *Setup) alreadySetUp(d protocol.SetupDatabase) error {
 		fmt.Fprintf(s.Out, "Backups are on for %s; Rowsafe is checking that changes reach your storage.\n", d.Name)
 		return &ExitError{Code: SetupAlreadyDone}
 	case protocol.DBAwaitingRestart:
-		fmt.Fprintf(s.Out, "Backups are set up for %s; PostgreSQL needs a restart to start them.\n", d.Name)
+		fmt.Fprintf(s.Out, "Backups are set up for %s; %s needs a restart to start them.\n", d.Name, protocol.EngineDisplayName(d.Engine))
 		return &ExitError{Code: SetupRestartNeeded}
 	}
 	return nil
@@ -549,7 +549,7 @@ func (s *Setup) Wait(ctx context.Context, id string, timeout time.Duration) erro
 			case protocol.DBPendingAdopt:
 				say("pending", "Waiting for the backup settings to be applied...")
 			case protocol.DBAwaitingRestart:
-				say("restart", "Waiting for PostgreSQL to restart...")
+				say("restart", "Waiting for "+protocol.EngineDisplayName(d.Engine)+" to restart...")
 			case protocol.DBVerifying:
 				say("verifying", "Checking that changes reach your storage...")
 			case protocol.DBActive:
@@ -627,6 +627,10 @@ func PrintPlanFor(w io.Writer, engine string, r protocol.AdoptResult) {
 		arrow = "→"
 	}
 	in := r.Inspect
+	if in.MySQL != nil {
+		printEnginePlan(w, r, arrow)
+		return
+	}
 	if in.ServerVersion != "" {
 		var names []string
 		for _, d := range in.Databases {

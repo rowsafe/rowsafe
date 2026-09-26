@@ -2,11 +2,7 @@ package agent
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/pbkdf2"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -611,25 +607,11 @@ func randomPassword() (string, error) {
 // scramVerifier computes PostgreSQL's SCRAM-SHA-256 verifier for password
 // (RFC 7677), so the password itself is never sent to the server.
 func scramVerifier(password string) (string, error) {
-	const iterations = 4096
 	salt := make([]byte, 16)
 	if _, err := rand.Read(salt); err != nil {
 		return "", err
 	}
-	salted, err := pbkdf2.Key(sha256.New, password, salt, iterations, 32)
-	if err != nil {
-		return "", err
-	}
-	mac := func(key []byte, msg string) []byte {
-		h := hmac.New(sha256.New, key)
-		h.Write([]byte(msg))
-		return h.Sum(nil)
-	}
-	clientKey := mac(salted, "Client Key")
-	stored := sha256.Sum256(clientKey)
-	serverKey := mac(salted, "Server Key")
-	enc := base64.StdEncoding.EncodeToString
-	return fmt.Sprintf("SCRAM-SHA-256$%d:%s$%s:%s", iterations, enc(salt), enc(stored[:]), enc(serverKey)), nil
+	return scramVerifierWithSalt(password, salt) // dbadmin.go
 }
 
 // migrateCredentials gives the app login a new password.

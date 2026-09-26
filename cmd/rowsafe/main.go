@@ -118,6 +118,29 @@ Updates and upgrades: PostgreSQL kept current, with a Mark first
   rowsafe upgrade cleanup [NAME] [--yes]     remove the kept version (frees disk; no undo afterwards)
   (Security updates and reboots: rowsafe fix, on servers where the installer allowed them)
 
+Standby: a second server that stays in sync, is readable, and takes over
+  rowsafe standby [NAME] [--json]            the standby, how far behind it is, fenced old primaries, automatic
+                                             failover, connection strings that follow the primary
+  rowsafe standby add [NAME] --host SERVER [--port 5432] [--fingerprint F] [--no-stream] [--no-wait]
+                                             restore the latest backup on an empty cluster of SERVER and follow
+                                             the primary (streaming when it can reach it, else the bucket)
+  rowsafe standby promote [NAME] [--primary-down] [--force] [--yes]
+                                             make the standby the primary: the old one is stopped for good first
+                                             (asks you to type the name)
+  rowsafe standby rebuild [NAME] [--host SERVER] [--yes]
+                                             turn the fenced old primary into the new standby
+  rowsafe standby unfence [NAME] [--yes]     start the fenced primary again when the standby wasn't promoted
+  rowsafe standby failover [NAME] --on|--off [--after 3m] [--max-data-loss 1m] [--yes]
+                                             automatic failover (off by default)
+  rowsafe standby remove [NAME] [--yes]      remove the standby; its cluster gets its own data back
+  rowsafe move [NAME] --to SERVER [--port N] [--at TIME] [--keep-days 7] [--fingerprint F]
+                                             move the database to another server: a standby there, then a
+                                             planned switchover (nothing lost); the old server is kept stopped
+                                             as a way back. Without --to: the move in progress
+  rowsafe move switch|schedule|cancel|back|finish [NAME]
+                                             switch over now, (re)schedule it (--at TIME, --clear), cancel,
+                                             switch back to the old server, remove the old server
+
 Proof: the weekly restore test
   rowsafe proof [NAME] [--no-wait]           restore the latest backup to a scratch copy and check it, now
   rowsafe proofs [NAME]                      restore test results
@@ -133,6 +156,18 @@ Pulse: health, monitoring and alerts
                                              dead rows and vacuum, transaction ID age
   rowsafe top [NAME] [--since 24h] [--sort total_time|calls|mean_time|rows] [--query ID] [--json]
                                              statements that took the most time in a range, and which got slower
+  rowsafe recommendations [NAME] [--group schema|queries|capacity|indexes] [--dismissed] [--json]
+                                             what would make it better (missing indexes, ids running out,
+                                             N+1 queries, memory...), why and what it costs; without NAME,
+                                             each database's top one. Apply the ones Rowsafe can do with rowsafe fix
+  rowsafe recommendations [NAME] --dismiss ID [--reason not_relevant|intended|later|wrong] [--note TEXT]
+  rowsafe recommendations [NAME] --restore ID
+                                             set a recommendation aside, or bring it back
+  rowsafe recommendations find [NAME] [--no-wait]
+                                             test index ideas on a copy of the database now (runs every night
+                                             by itself); proven ones appear under Indexes
+  rowsafe recommendations schedule [NAME] auto|off|CRON
+                                             when to test index ideas (auto: every night at the quietest hour)
   rowsafe activity [NAME]                    queries running, or idle in a transaction, for over a minute
   rowsafe alerts [--all | --resolved]        firing alerts (with --all, resolved ones too)
   rowsafe alerts ack ID                      acknowledge a firing alert: no more reminders
@@ -145,6 +180,17 @@ Pulse: health, monitoring and alerts
   rowsafe channels test ID                   send a test notification now
   rowsafe report [--preview [--html]] [--on | --off] [--to A,B] [--send-test]
                                              "Your weekly Pulse", the weekly email: settings, preview, test
+  rowsafe settings [NAME] [SETTING] [--all] [--json]
+                                             PostgreSQL's settings that matter: value, default, where it is
+                                             set, and whether a change needs a restart
+  rowsafe settings set [NAME] SETTING=VALUE... [--yes] [--no-wait]
+                                             change settings (ALTER SYSTEM + reload, a Mark first; VALUE
+                                             default resets one). Rowsafe's archiving settings never change
+  rowsafe settings undo [NAME] [CHANGE_ID] [--yes]
+                                             undo the latest change made through Rowsafe (or CHANGE_ID)
+  rowsafe tune [NAME] [--workload web|analytics|mixed] [--disk ssd|hdd] [--all] [--yes] [--json]
+                                             settings that suit this server (memory, CPUs, disk) and apply
+                                             them; asks first. Nothing restarts: see rowsafe restart
 
 Guard: the safety net for AI agents
   rowsafe mcp [--allow-restore-points | --allow-writes]
@@ -173,6 +219,23 @@ Guard: the safety net for AI agents
   rowsafe masking set [NAME] [DB:]TABLE.COLUMN STRATEGY
                                              change one column's masking (keep to leave it real)
   rowsafe masking refresh [NAME]             read the tables again (names and types only)
+
+Databases & users: the databases, users and extensions inside a server (--on NAME: which server)
+  rowsafe db [ls] [--on NAME] [--json]       databases, users and extensions on the server
+  rowsafe db create DB [--owner USER | --new-owner USER] [--extension EXT]... [--template template0] [--locale L]
+                                             create a database. Without --owner a new user owns it: its
+                                             password is made on the server and shown here once
+  rowsafe db drop DB [--yes]                 remove a database and everything in it (a Mark first; asks you
+                                             to type its name)
+  rowsafe db users [--json]                  users, what they can connect to and how their password is stored
+  rowsafe db user add USER --db DB[,DB] [--access read_only|read_write|owner]
+                                             a new user; its password is shown once
+  rowsafe db user password USER              a new password for USER, shown once
+  rowsafe db user remove USER [--reassign-to USER] [--yes]
+                                             remove a user; what it owns goes to --reassign-to
+  rowsafe db ext on|off DB EXTENSION [--allow-untrusted]
+                                             turn an extension on or off in one database
+  Passwords are encrypted on the server for this terminal only; Rowsafe never sees them.
 
 Admin
   rowsafe tasks [NAME] [--status S] [--type T] [--limit N]
@@ -327,6 +390,10 @@ func dispatch(ctx context.Context, args []string) error {
 		return updateCmd(ctx, c, rest)
 	case "upgrade":
 		return upgradeCmd(ctx, c, rest)
+	case "standby":
+		return standbyCmd(ctx, c, rest)
+	case "move":
+		return moveCmd(ctx, c, rest)
 	// Proof
 	case "proof":
 		return proofCmd(ctx, c, rest)
@@ -341,10 +408,16 @@ func dispatch(ctx context.Context, args []string) error {
 		return insightsCmd(ctx, c, rest)
 	case "top":
 		return topCmd(ctx, c, rest)
+	case "recommendations": // advisor (recommendations.go)
+		return recommendationsCmd(ctx, c, rest)
 	case "activity":
 		return activityCmd(ctx, c, rest)
 	case "report":
 		return reportCmd(ctx, c, rest)
+	case "settings": // settings.go
+		return settingsCmd(ctx, c, rest)
+	case "tune":
+		return tuneCmd(ctx, c, rest)
 	case "alerts":
 		return alertsCmd(ctx, c, rest)
 	case "channels":
@@ -362,6 +435,9 @@ func dispatch(ctx context.Context, args []string) error {
 		return copiesCmd(ctx, c, rest)
 	case "masking":
 		return maskingCmd(ctx, c, rest)
+	// Databases & users
+	case "db":
+		return dbCmd(ctx, c, rest)
 	// Admin
 	case "tasks":
 		return tasksList(ctx, c, rest)

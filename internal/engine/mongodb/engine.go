@@ -37,7 +37,7 @@ var (
 	_ agent.Engine         = (*Engine)(nil)
 	_ agent.EngineArchiver = (*Engine)(nil)
 	_ agent.EngineStarter  = (*Engine)(nil)
-	_ agent.EngineRewinder = (*Engine)(nil)
+	_ agent.EngineRewinds  = (*Engine)(nil)
 )
 
 // Name is protocol.EngineMongoDB.

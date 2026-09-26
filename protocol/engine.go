@@ -65,6 +65,7 @@ const (
 	FeaturePooling       = "pooling"         // connection pooling
 	FeatureFiles         = "files"           // backups of the folders that go with a database
 	FeatureUpdates       = "updates"         // package updates and version upgrades
+	// FeatureDBAdmin ("dbadmin") is in dbadmin.go.
 )
 
 // EngineFeatures says which Rowsafe features work for an engine. The
@@ -84,6 +85,9 @@ type EngineFeatures struct {
 	Pooling       bool `json:"pooling"`
 	Files         bool `json:"files"`
 	Updates       bool `json:"updates"`
+	// DBAdmin: Databases & users (create databases, users and extensions
+	// inside the server; dbadmin.go).
+	DBAdmin bool `json:"dbadmin"`
 }
 
 // Has reports whether a feature (Feature* above) is supported; unknown
@@ -118,6 +122,8 @@ func (f EngineFeatures) Has(feature string) bool {
 		return f.Files
 	case FeatureUpdates:
 		return f.Updates
+	case FeatureDBAdmin:
+		return f.DBAdmin
 	}
 	return false
 }
@@ -132,9 +138,12 @@ var EngineCapabilities = map[string]EngineFeatures{
 		RewindCopy: true, RewindRows: true, RewindInPlace: true,
 		Marks: true, Monitoring: true, Fixes: true, Restart: true,
 		Standby: true, Pooling: true, Files: true, Updates: true,
+		DBAdmin: true,
 	},
-	EngineMySQL:   {},
-	EngineMariaDB: {},
+	// MySQL and MariaDB (internal/engine/mysql): no restart, rewind in
+	// place, standby, pooling, files or updates yet.
+	EngineMySQL:   mysqlFeatures,
+	EngineMariaDB: mysqlFeatures,
 	// MongoDB (internal/engine/mongodb): mongodump + oplog copying, Proof,
 	// Rewind copies and bringing documents back, Marks, Pulse and stopping
 	// a long operation. No restart, rewind in place, standby, pooling,
