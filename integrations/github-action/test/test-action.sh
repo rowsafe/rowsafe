@@ -18,11 +18,13 @@ repo=$(cd "$action/../.." && pwd)
 work=$(mktemp -d "${TMPDIR:-/tmp}/rowsafe-action-test.XXXXXX")
 mock_pid=""
 cleanup() {
+  rc=$? # the test's own result; stopping the mock must not change it
   if [ -n "$mock_pid" ]; then
-    kill "$mock_pid" 2>/dev/null
-    wait "$mock_pid" 2>/dev/null
+    kill "$mock_pid" 2>/dev/null || true
+    wait "$mock_pid" 2>/dev/null || true
   fi
   if [ -n "${ROWSAFE_TEST_KEEP:-}" ]; then echo "kept $work"; else rm -rf "$work"; fi
+  exit "$rc"
 }
 trap cleanup EXIT
 
