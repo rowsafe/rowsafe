@@ -629,19 +629,29 @@ const (
 	minHelpedRatio = 1.25 // cost at most 80% of before
 	minBestRatio   = 2    // at least one statement at least twice as fast
 	// A statement already fast before the index (an existing index serves
-	// it) isn't helped, however the ratio looks: below this plan cost, or
-	// this measured time, there is little left to save.
+	// it) isn't helped, however the ratio looks: when it was timed on the
+	// copy, under minMsBefore; when only PostgreSQL's estimate is known
+	// (statements that change data aren't run), under minCostBefore, about
+	// what reading a few dozen pages through an index costs.
 	minCostBefore = 500
 	minMsBefore   = 1.0
 )
+
+// slowBefore reports whether a statement had something left to gain:
+// measured time when both times are known, the plan cost otherwise.
+func slowBefore(g protocol.IndexGain) bool {
+	if g.MsBefore > 0 && g.MsAfter > 0 {
+		return g.MsBefore >= minMsBefore
+	}
+	return g.CostBefore >= minCostBefore
+}
 
 // helped are the gains of statements whose plan used the index and got
 // meaningfully cheaper, busiest first.
 func (r *Result) helped() []protocol.IndexGain {
 	var out []protocol.IndexGain
 	for _, g := range r.Gains {
-		slow := g.CostBefore >= minCostBefore || g.MsBefore >= minMsBefore
-		if r.Used[g.QueryID] && g.Speedup >= minHelpedRatio && slow {
+		if r.Used[g.QueryID] && g.Speedup >= minHelpedRatio && slowBefore(g) {
 			out = append(out, g)
 		}
 	}

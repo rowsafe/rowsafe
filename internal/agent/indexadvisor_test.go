@@ -110,8 +110,18 @@ func TestIndexAdvisorAgainstPostgres(t *testing.T) {
 	defer admin.Close(context.Background())
 	copyDB := e.db + "_copy"
 	e.conn.Close(context.Background())
-	if _, err := admin.Exec(t.Context(), `CREATE DATABASE `+copyDB+` TEMPLATE `+e.db); err != nil {
-		t.Fatal(err)
+	// Other sessions (monitoring collectors, other tests on the shared
+	// server) may be connected to the source: end them and try again.
+	var cerr error
+	for try := 0; try < 10; try++ {
+		_, _ = admin.Exec(t.Context(), `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`, e.db)
+		if _, cerr = admin.Exec(t.Context(), `CREATE DATABASE `+copyDB+` TEMPLATE `+e.db); cerr == nil {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if cerr != nil {
+		t.Fatal(cerr)
 	}
 	t.Cleanup(func() { // admin is closed by then: connect again to drop the copy
 		c, err := e.tg.Connect(context.Background(), "postgres")
