@@ -326,8 +326,8 @@ type RestoreOptions struct {
 	// Exclusive stops just before the target (--target-exclusive): for an
 	// xid, everything up to that transaction, not including it.
 	Exclusive bool
-	Set          string // --set: the backup to start from ("" lets pgBackRest pick, time targets only)
-	Timeline     string // --target-timeline ("" = PostgreSQL's default)
+	Set       string // --set: the backup to start from ("" lets pgBackRest pick, time targets only)
+	Timeline  string // --target-timeline ("" = PostgreSQL's default)
 	// Repo is the storage to restore from (protocol.RepoSecond: the second
 	// copy). It picks the configuration file; RestoreTo itself ignores it.
 	Repo int
