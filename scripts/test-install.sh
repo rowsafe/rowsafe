@@ -966,6 +966,10 @@ setup_flow_tests() {
 echo "$*" >>/tmp/rowsafe-fake/pg_ctlcluster
 EOF
   chmod 755 /usr/local/bin/pg_ctlcluster
+  # What root sees of the clusters (the PgBouncer allow list comes from it,
+  # never from the agent's own discovery).
+  printf '#!/bin/sh\ncat /tmp/rowsafe-fake-clusters 2>/dev/null || printf "17 main 5432 online postgres /var/lib/postgresql/17/main -\\n17 other 5433 online postgres /var/lib/postgresql/17/other -\\n"\n' >/usr/local/bin/pg_lsclusters
+  chmod 755 /usr/local/bin/pg_lsclusters
   scenario
   expect_ok "configured install, agent not running" configured "$INSTALLER" rse_secrettoken123
   grep -q "Once the agent runs, run this installer again" "$W/out" || fail "no next step without a running agent"
@@ -1285,10 +1289,15 @@ EOF
 pooler_tests() {
   echo "  -- PgBouncer on request (--allow-pooler)"
   PR=/var/lib/rowsafe/pooler
-  scenario "discover_out=$shop"
+  # The agent's discovery (agent-owned code) also claims 5499: ignored.
+  scenario "discover_out=$shop\n5499\t/var/run/postgresql\t17\tevil\t/var/lib/postgresql/17/evil\t8192\tevil\tno\t-\tevil\t8.0 KiB\t-\t-"
   expect_ok "--allow-pooler" "$INSTALLER" --allow-pooler
   grep -q "Rowsafe may install and manage PgBouncer when you turn pooling on" "$W/out" || fail "--allow-pooler not confirmed"
-  grep -qx "5432" /etc/rowsafe/pooler-allowed || fail "pooler allow list lacks 5432"
+  grep -qx "5432" /etc/rowsafe/pooler-allowed && grep -qx "5433" /etc/rowsafe/pooler-allowed || fail "pooler allow list lacks root's clusters"
+  ! grep -q "5499" /etc/rowsafe/pooler-allowed || fail "a port only the agent's discovery reported was allowed"
+  ! grep -qx public /etc/rowsafe/pooler-allowed || fail "public allowed without --allow-pooler-public"
+  [ -e /etc/systemd/system/rowsafe-pooler-apt@.service ] && [ -d /etc/systemd/system/pgbouncer.service.d ] || fail "apt unit or drop-in directory missing"
+  cmp "/etc/systemd/system/rowsafe-pooler-apt@.service" "/src/deploy/systemd/rowsafe-pooler-apt@.service" || fail "pooler apt unit differs"
   [ "$(stat -c '%U %a' /etc/rowsafe/pooler-allowed)" = "root 644" ] || fail "pooler allow list ownership/mode"
   [ "$(stat -c '%U %a' "$PR")" = "postgres 700" ] || fail "pooler request directory ownership/mode"
   cmp "$H" /src/scripts/rowsafe-pg-restart || fail "helper differs from scripts/rowsafe-pg-restart"
@@ -1308,13 +1317,27 @@ pooler_tests() {
   tty_ok "a re-run keeps PgBouncer allowed" "Name it in Rowsafe\t\nTurn on backups for shop now?\tn\n" "$INSTALLER"
   lacks "Allow Rowsafe to install and manage PgBouncer"
   grep -qx "5432" /etc/rowsafe/pooler-allowed || fail "a re-run dropped the pooler allow list"
+  # A cluster found since is added only when someone says yes on a terminal.
+  printf '17 main 5432 online postgres - -\n17 other 5433 online postgres - -\n17 new 5434 online postgres - -\n' >/tmp/rowsafe-fake-clusters
+  scenario "discover_out=$shop"
+  expect_ok "a re-run without a terminal" "$INSTALLER"
+  ! grep -qx "5434" /etc/rowsafe/pooler-allowed || fail "a re-run added a cluster without asking"
+  scenario "discover_out=$shop"
+  tty_ok "a re-run asks about a new cluster" "Also allow PgBouncer for the PostgreSQL on port 5434?\ty\nName it in Rowsafe\t\nTurn on backups for shop now?\tn\n" "$INSTALLER"
+  grep -qx "5434" /etc/rowsafe/pooler-allowed || fail "a yes didn't add the new cluster"
+  rm -f /tmp/rowsafe-fake-clusters
 
   # The helper in PgBouncer mode, run as rowsafe-pooler.service would
-  # (scenario reset the stand-ins).
-  cat >"$F/systemctl" <<'EOF'
+  # (scenario reset the stand-ins). Starting rowsafe-pooler-apt@ACTION runs
+  # the helper in its package mode, as that unit would.
+  cat >"$F/systemctl" <<EOF
 #!/bin/sh
-echo "$*" >>/tmp/rowsafe-fake/systemctl.calls
-exit "$(cat /tmp/rowsafe-fake/systemctl.rc 2>/dev/null || echo 0)"
+echo "\$*" >>/tmp/rowsafe-fake/systemctl.calls
+case "\$1 \$2" in
+  "start rowsafe-pooler-apt@install.service") exec env ROWSAFE_HELPER_MODE=pooler-apt ROWSAFE_APT_ACTION=install "$H" ;;
+  "start rowsafe-pooler-apt@purge.service") exec env ROWSAFE_HELPER_MODE=pooler-apt ROWSAFE_APT_ACTION=purge "$H" ;;
+esac
+exit "\$(cat /tmp/rowsafe-fake/systemctl.rc 2>/dev/null || echo 0)"
 EOF
   chmod 755 "$F/systemctl"
   cat >"$F/apt-get" <<'APT_EOF'
@@ -1358,6 +1381,15 @@ APT_EOF
   presult "installed=1"
   presult "version=1.24.1"
   grep -q "install -y -q --no-install-recommends pgbouncer" /tmp/rowsafe-fake/apt.calls || fail "apt-get install not run: $(cat /tmp/rowsafe-fake/apt.calls)"
+  grep -qx "start rowsafe-pooler-apt@install.service" "$F/systemctl.calls" || fail "the package wasn't installed in its own unit"
+  # At most one install or removal every 10 minutes.
+  mv /usr/local/bin/pgbouncer "$W/pgbouncer.keep"
+  rm -f /tmp/rowsafe-fake/apt.calls
+  prequest "pb_c pooler-install"
+  presult "ok=0"
+  grep -q "^error=PgBouncer was installed or removed less than 10 minutes ago" "$OP/result" || fail "no cooldown between installs"
+  [ ! -e /tmp/rowsafe-fake/apt.calls ] || fail "apt-get ran during the cooldown"
+  mv "$W/pgbouncer.keep" /usr/local/bin/pgbouncer
   prequest "pb_1 pooler-configure $good password=$pw"
   presult "ok=1"
   presult "running=1"
@@ -1386,6 +1418,25 @@ APT_EOF
   prequest "pb_3 pooler-reload"
   presult "ok=1"
   grep -qx "reload pgbouncer.service" "$F/systemctl.calls" || fail "reload not run"
+  # PgBouncer only reaches allowed ports on 127.0.0.1.
+  for bad in "target_host=10.9.9.9" "target_host=db.example.com" "target_port=5499"; do
+    key=${bad%%=*}
+    prequest "pb_t pooler-configure $(printf '%s' "$good" | sed "s/$key=[^ ]*//; s/  */ /g") $bad"
+    presult "ok=0"
+  done
+  grep -q "^error=port 5499 is not in /etc/rowsafe/pooler-allowed: PgBouncer can't send connections there" "$OP/result" || fail "a foreign target port not refused"
+  # Every address only with root's --allow-pooler-public.
+  prequest "pb_p pooler-configure $(printf '%s' "$good" | sed 's/listen=[^ ]*/listen=*/')"
+  presult "ok=0"
+  grep -q "^error=listening on every address isn't allowed" "$OP/result" || fail "listen=* not refused"
+  cp /etc/rowsafe/pooler-allowed "$W/allow.keep"
+  echo public >>/etc/rowsafe/pooler-allowed
+  prequest "pb_p pooler-configure $(printf '%s' "$good" | sed 's/listen=[^ ]*/listen=*/')"
+  presult "ok=1"
+  grep -qxF "listen_addr = *" "$ini" || fail "listen=* not written with the opt-in"
+  cp "$W/allow.keep" /etc/rowsafe/pooler-allowed
+  prequest "pb_2 pooler-configure $(printf '%s' "$good" | sed 's/restart=1/restart=0/; s/target_port=5432/target_port=5433/')"
+  presult "ok=1"
   # Refusals: an unlisted port, bad values, anything that isn't a plain value.
   prequest "pb_4 pooler-configure $(printf '%s' "$good" | sed 's/dbport=5432/dbport=5499/')"
   presult "ok=0"
@@ -1419,7 +1470,9 @@ APT_EOF
   # PgBouncer requests never reach the restart helper's mode.
   request "pb_9 pooler-reload"
   result_has "error=malformed request"
-  # Off: stopped, drop-in removed, and the package Rowsafe installed purged.
+  # Off: stopped, drop-in removed, and the package Rowsafe installed purged
+  # (10 minutes after it was installed).
+  rm -f "$W/pooler-state/last-apt"
   : >"$F/systemctl.calls"
   prequest "pb_10 pooler-off remove_package=1"
   presult "ok=1"

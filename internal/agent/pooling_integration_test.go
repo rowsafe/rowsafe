@@ -253,7 +253,7 @@ func TestPoolingReal(t *testing.T) {
 		h.mu.Unlock()
 	})
 	allow := filepath.Join(base, "pooler-allowed")
-	os.WriteFile(allow, []byte(fmt.Sprintf("%d\n", primary.port)), 0o644)
+	os.WriteFile(allow, []byte(fmt.Sprintf("%d\n%d\n", primary.port, other.port)), 0o644)
 	a := &Agent{cfg: Config{StateDir: state, Mode: ModeNative, PGUser: u.Username, Pooler: PoolerConfig{
 		AllowFile: allow, Dir: h.dir, ResultDir: h.resultDir, SocketDir: base, Userlist: filepath.Join(h.confDir, "userlist.txt")}}}
 	db := protocol.DatabaseSpec{ID: "db_1", Name: "shop", Port: primary.port, SocketDir: primary.sock}

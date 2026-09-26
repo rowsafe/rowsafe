@@ -176,6 +176,21 @@ func ReadPoolerAllowed(path string) (map[int]bool, error) {
 	return out, sc.Err()
 }
 
+// poolerPublicAllowed: root let PgBouncer listen on every address
+// (--allow-pooler-public writes "public" in the allow list).
+func poolerPublicAllowed(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == "public" {
+			return true
+		}
+	}
+	return false
+}
+
 // ---- the root helper ----
 
 var poolerValueRE = regexp.MustCompile(`^[A-Za-z0-9.:,*_-]{0,300}$`)
@@ -573,6 +588,9 @@ func (a *Agent) poolingOn(ctx context.Context, db protocol.DatabaseSpec, want pr
 	if !allowed[db.Port] {
 		return nil, fmt.Errorf("installing and managing PgBouncer from Rowsafe isn't allowed for port %d on %s: run the Rowsafe installer there again with --allow-pooler", db.Port, host)
 	}
+	if want.Listen == protocol.PoolerListenPublic && !poolerPublicAllowed(a.cfg.Pooler.AllowFile) {
+		return nil, fmt.Errorf("PgBouncer may not listen on public addresses on %s: root allows that with the installer's --allow-pooler-public. Choose this server only, or this server and its private network", host)
+	}
 	st, err := a.loadPoolerState()
 	if err != nil {
 		return nil, err
@@ -852,6 +870,13 @@ func (a *Agent) poolerRetarget(ctx context.Context, db protocol.DatabaseSpec, p 
 	}
 	if p.Port < 1 || p.Port > 65535 {
 		return nil, fmt.Errorf("invalid port %d", p.Port)
+	}
+	if ip := net.ParseIP(p.Host); p.Host != "localhost" && (ip == nil || !ip.Equal(net.IPv4(127, 0, 0, 1))) {
+		return nil, fmt.Errorf("PgBouncer managed by Rowsafe only sends connections to PostgreSQL on its own server (127.0.0.1), not to %s: point your apps at the new primary directly, or run PgBouncer there", p.Host)
+	}
+	p.Host = "127.0.0.1"
+	if allowed, err := ReadPoolerAllowed(a.cfg.Pooler.AllowFile); err != nil || !allowed[p.Port] {
+		return nil, fmt.Errorf("port %d isn't in %s: root didn't allow PgBouncer to send connections there", p.Port, a.cfg.Pooler.AllowFile)
 	}
 	if !protocol.EngineHas(db.Engine, protocol.FeaturePooling) {
 		return nil, fmt.Errorf("connection pooling isn't available for %s yet", protocol.EngineDisplayName(db.Engine))

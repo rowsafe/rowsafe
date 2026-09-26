@@ -94,6 +94,8 @@ RESTART_DIR=$STATE_DIR/restart
 # path unit.
 POOLER_SERVICE_FILE=/etc/systemd/system/rowsafe-pooler.service
 POOLER_PATH_FILE=/etc/systemd/system/rowsafe-pooler.path
+POOLER_APT_FILE=/etc/systemd/system/rowsafe-pooler-apt@.service
+POOLER_DROPIN_DIR=/etc/systemd/system/pgbouncer.service.d
 POOLER_ALLOW_FILE=$CONFIG_DIR/pooler-allowed
 POOLER_DIR=$STATE_DIR/pooler
 AGENT_USER=postgres
@@ -120,6 +122,7 @@ PROTECT_NAME=''    # --protect NAME
 PROTECT_PORT=''    # --protect-port PORT
 ALLOW_RESTART=''   # --allow-restart (yes) / --no-allow-restart (no); '' = ask once, on a terminal
 ALLOW_POOLER=''    # --allow-pooler (yes) / --no-allow-pooler (no); '' = ask once, on a terminal
+ALLOW_POOLER_PUBLIC=0 # --allow-pooler-public: PgBouncer may also listen on every address
 SETUP_STOP=0       # the plan limit was reached: don't offer more databases
 
 TMP=
@@ -181,6 +184,8 @@ Options (when piping, pass them after `sh -s --`):
   --allow-pooler         allow Rowsafe to install and manage PgBouncer (connection
                          pooling) when you turn pooling on in the dashboard
   --no-allow-pooler      turn that off
+  --allow-pooler-public  with --allow-pooler: also let PgBouncer listen on public
+                         addresses when someone chooses that (put a firewall in front)
   --check-storage        test the backup storage in /etc/rowsafe/agent.env; change nothing
   --uninstall            stop and remove the agent; keep configuration and state
   --uninstall --purge    also delete /etc/rowsafe, /var/lib/rowsafe and /var/log/rowsafe
@@ -783,15 +788,22 @@ refuse() {
 # In rowsafe-pooler.service (ROWSAFE_HELPER_MODE=pooler) the helper manages
 # PgBouncer instead, when someone turned pooling on, changed it or turned it
 # off in Rowsafe, and only where root allowed it (--allow-pooler):
-# /etc/rowsafe/pooler-allowed lists the PostgreSQL ports PgBouncer may pool.
-# The request (/var/lib/rowsafe/pooler/request, read as the agent user like
-# a restart request) is one line "ID ACTION KEY=VALUE...", ACTION being
-# pooler-install, pooler-configure, pooler-reload or pooler-off. Every value
-# is checked against a strict pattern, and the helper writes PgBouncer's
-# configuration itself from its own template; the only package it ever
-# installs or removes is pgbouncer. The answer goes to
-# /run/rowsafe-pooler/result: id, action, ok, error, version, installed,
-# removed, running and finished_at.
+# /etc/rowsafe/pooler-allowed lists the PostgreSQL ports PgBouncer may pool
+# (found by root with pg_lsclusters, never by the agent), and "public" when
+# root also allowed PgBouncer to listen on every address
+# (--allow-pooler-public). The request (/var/lib/rowsafe/pooler/request,
+# read as the agent user like a restart request) is one line
+# "ID ACTION KEY=VALUE...", ACTION being pooler-install, pooler-configure,
+# pooler-reload or pooler-off. Every value is checked against a strict
+# pattern, and the helper writes PgBouncer's configuration itself from its
+# own template: PgBouncer only ever sends connections to an allowed port on
+# 127.0.0.1. That unit has no network and a read-only system; installing or
+# removing the pgbouncer package (the only package the helper touches) runs
+# in rowsafe-pooler-apt@install.service or @purge.service
+# (ROWSAFE_HELPER_MODE=pooler-apt), which takes no input from the agent, at
+# most once every 10 minutes. The answer goes to /run/rowsafe-pooler/result:
+# id, action, ok, error, version, installed, removed, running and
+# finished_at.
 #
 # pooler-actions: install configure reload off
 
@@ -800,6 +812,8 @@ pgb_dir=${ROWSAFE_PGBOUNCER_DIR:-/etc/pgbouncer}
 apt_get=${ROWSAFE_APT_GET:-apt-get}
 pgb_unit=pgbouncer.service
 pgb_marker=';; Managed by Rowsafe'
+apt_unit=rowsafe-pooler-apt
+apt_cooldown=600
 p_args='' p_version='' p_installed=0 p_removed=0 p_running=0
 
 pooler_answer() {
@@ -873,15 +887,45 @@ pooler_put() {
 
 pooler_active() { "$systemctl" is-active --quiet "$pgb_unit" 2>/dev/null; }
 
+# pooler_apt ACTION: install or purge the pgbouncer package in its own unit
+# (network and a writable system), at most once every 10 minutes.
+pooler_apt() {
+  _now=$(date +%s)
+  _last=$(cat "$state/last-apt" 2>/dev/null || echo 0)
+  case $_last in '' | *[!0-9]*) _last=0 ;; esac
+  if [ $((_now - _last)) -lt "$apt_cooldown" ]; then
+    pooler_refuse "PgBouncer was installed or removed less than 10 minutes ago; try again in $(((apt_cooldown - _now + _last + 59) / 60)) minutes"
+  fi
+  echo "$_now" >"$state/last-apt"
+  log "$1 pgbouncer (request $id)"
+  _out=$(timeout 1000 "$systemctl" start "$apt_unit@$1.service" 2>&1 </dev/null) ||
+    pooler_refuse "$1 of the pgbouncer package failed: $(tail -n 3 "$state/apt.log" 2>/dev/null | tr '\n' ' ' | cut -c1-300)$(printf '%s' "$_out" | tr '\n' ' ' | cut -c1-100)"
+}
+
+# pooler_apt_main runs in rowsafe-pooler-apt@ACTION.service: root started it,
+# with nothing from the agent but the unit's instance name.
+pooler_apt_main() {
+  state=${STATE_DIRECTORY:-/var/lib/rowsafe-pooler}
+  export DEBIAN_FRONTEND=noninteractive
+  case ${ROWSAFE_APT_ACTION:-} in
+    install)
+      if ! timeout 600 "$apt_get" install -y -q --no-install-recommends pgbouncer </dev/null >"$state/apt.log" 2>&1; then
+        timeout 300 "$apt_get" update -q </dev/null >>"$state/apt.log" 2>&1 || true
+        timeout 600 "$apt_get" install -y -q --no-install-recommends pgbouncer </dev/null >>"$state/apt.log" 2>&1 || exit 1
+      fi
+      ;;
+    purge) timeout 600 "$apt_get" purge -y -q pgbouncer </dev/null >"$state/apt.log" 2>&1 || exit 1 ;;
+    *)
+      log "unknown package action"
+      exit 1
+      ;;
+  esac
+  exit 0
+}
+
 pooler_install() {
   if ! pooler_installed; then
-    log "installing pgbouncer (request $id)"
-    export DEBIAN_FRONTEND=noninteractive
-    if ! timeout 600 "$apt_get" install -y -q --no-install-recommends pgbouncer </dev/null >"$state/apt.log" 2>&1; then
-      timeout 300 "$apt_get" update -q </dev/null >>"$state/apt.log" 2>&1 || true
-      timeout 600 "$apt_get" install -y -q --no-install-recommends pgbouncer </dev/null >>"$state/apt.log" 2>&1 ||
-        pooler_refuse "installing the pgbouncer package failed: $(tail -n 3 "$state/apt.log" | tr '\n' ' ' | cut -c1-300)"
-    fi
+    pooler_apt install
     pooler_installed || pooler_refuse "the pgbouncer package was installed but pgbouncer is not on the PATH"
     : >"$state/installed-by-rowsafe"
     p_installed=1
@@ -895,11 +939,14 @@ pooler_install() {
   ok=1
 }
 
+# pooler_allowed_port PORT: root listed PORT in the allow list.
+pooler_allowed_port() { awk -v p="$1" '$1 == p { f = 1 } END { exit !f }' "$pooler_allow"; }
+
 pooler_configure() {
   pooler_installed || pooler_refuse "PgBouncer is not installed"
   pooler_ours || pooler_refuse "PgBouncer on this server has its own configuration ($pgb_dir/pgbouncer.ini); Rowsafe doesn't replace it"
   pooler_num dbport 1 65535 && _dbport=$n
-  awk -v p="$_dbport" '$1 == p { f = 1 } END { exit !f }' "$pooler_allow" ||
+  pooler_allowed_port "$_dbport" ||
     pooler_refuse "port $_dbport is not in $pooler_allow: pooling it from Rowsafe is not allowed"
   pooler_num port 1024 65535 6432 && _port=$n
   pooler_num pool_size 1 1000 && _pool=$n
@@ -908,15 +955,23 @@ pooler_configure() {
   pooler_num max_client_conn 10 100000 && _maxcl=$n
   pooler_num prepared 0 5000 0 && _prepared=$n
   pooler_num restart 0 1 0 && _restart=$n
-  pooler_num target_port 1 65535 && _tport=$n
+  pooler_num target_port 1 65535 "$_dbport" && _tport=$n
+  # PgBouncer only reaches PostgreSQL on this server, on a port root allowed.
+  pooler_allowed_port "$_tport" ||
+    pooler_refuse "port $_tport is not in $pooler_allow: PgBouncer can't send connections there"
   _mode=$(pooler_kv mode)
   case $_mode in transaction | session) ;; *) pooler_refuse "mode must be transaction or session" ;; esac
   _thost=$(pooler_kv target_host)
-  pooler_ip "$_thost" || printf '%s\n' "$_thost" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$' ||
-    pooler_refuse "invalid target_host"
+  case ${_thost:-127.0.0.1} in
+    127.0.0.1) _thost=127.0.0.1 ;;
+    *) pooler_refuse "PgBouncer only sends connections to PostgreSQL on this server (127.0.0.1)" ;;
+  esac
   _listen=$(pooler_kv listen)
-  [ -n "$_listen" ] || pooler_refuse "listen is required"
-  if [ "$_listen" != '*' ]; then
+  [ -n "$_listen" ] || _listen=127.0.0.1
+  if [ "$_listen" = '*' ]; then
+    grep -qx 'public' "$pooler_allow" ||
+      pooler_refuse "listening on every address isn't allowed on this server (the installer's --allow-pooler-public)"
+  else
     _n=0
     for _a in $(printf '%s' "$_listen" | tr ',' ' '); do
       _n=$((_n + 1))
@@ -1018,9 +1073,7 @@ pooler_off() {
   "$systemctl" disable --now --quiet "$pgb_unit" >/dev/null 2>&1 || true
   pooler_secure_dir
   if [ "$_remove" = 1 ] && [ -e "$state/installed-by-rowsafe" ]; then
-    export DEBIAN_FRONTEND=noninteractive
-    timeout 600 "$apt_get" purge -y -q pgbouncer </dev/null >"$state/apt.log" 2>&1 ||
-      pooler_refuse "removing the pgbouncer package failed: $(tail -n 3 "$state/apt.log" | tr '\n' ' ' | cut -c1-300)"
+    pooler_apt purge
     p_removed=1
     rm -f "$pgb_dir/pgbouncer.ini" "$pgb_dir/userlist.txt"
     rmdir "$pgb_dir" 2>/dev/null || true
@@ -1080,10 +1133,13 @@ pooler_main() {
   pooler_answer
 }
 
-if [ "${ROWSAFE_HELPER_MODE:-}" = pooler ]; then
-  pooler_main
-  exit 0
-fi
+case ${ROWSAFE_HELPER_MODE:-} in
+  pooler)
+    pooler_main
+    exit 0
+    ;;
+  pooler-apt) pooler_apt_main ;;
+esac
 # ------------------------------------------------------------ end PgBouncer
 
 request=$dir/request
@@ -1332,12 +1388,13 @@ install_pooler_units() {
   _changed=$HELPER_CHANGED
   if write_file "$POOLER_SERVICE_FILE" 0644 root:root <<'ROWSAFE_POOLER_SERVICE_EOF'; then
 # SPDX-License-Identifier: Apache-2.0
-# rowsafe-pooler.service: installs, configures, reloads or turns off
-# PgBouncer in front of a PostgreSQL cluster that root listed in
-# /etc/rowsafe/pooler-allowed, when the Rowsafe agent asks because a person
-# turned pooling on, changed it or turned it off (see "PgBouncer" in
-# /usr/local/lib/rowsafe/rowsafe-pg-restart). Started by rowsafe-pooler.path;
-# installed by https://rowsafe.sh/install only when root allowed it.
+# rowsafe-pooler.service: configures, reloads or turns off PgBouncer in front
+# of a PostgreSQL cluster that root listed in /etc/rowsafe/pooler-allowed,
+# when the Rowsafe agent asks because a person turned pooling on, changed it
+# or turned it off (see "PgBouncer" in /usr/local/lib/rowsafe/rowsafe-pg-restart).
+# Started by rowsafe-pooler.path; installed by https://rowsafe.sh/install
+# only when root allowed it. Installing or removing the pgbouncer package
+# runs in rowsafe-pooler-apt@.service, which this unit starts.
 
 [Unit]
 Description=Rowsafe: manage PgBouncer on request
@@ -1356,23 +1413,29 @@ Environment=ROWSAFE_RESTART_DIR=/var/lib/rowsafe/pooler
 RuntimeDirectory=rowsafe-pooler
 RuntimeDirectoryMode=0755
 RuntimeDirectoryPreserve=yes
-# PgBouncer's original configuration and whether Rowsafe installed the
-# package, out of the agent's reach.
+# PgBouncer's original configuration, whether Rowsafe installed the package
+# and when it last installed or removed it, out of the agent's reach.
 StateDirectory=rowsafe-pooler
 StateDirectoryMode=0700
 UMask=0022
 
-# Hardening. Installing the pgbouncer package needs the network and write
-# access to the system (apt, dpkg), so this unit is less confined than
-# rowsafe-pg-restart.service; the helper still only installs or removes
-# that one package and writes PgBouncer's files from its own template.
-CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_FSETID CAP_KILL
+# Hardening. The system is read-only except PgBouncer's configuration and
+# its systemd drop-in directory; no network. The request is read and removed
+# as the agent user (CAP_SETUID/CAP_SETGID); root then writes PgBouncer's
+# files (CAP_CHOWN, CAP_FOWNER, CAP_DAC_OVERRIDE for the package's
+# postgres-owned files) and asks systemd, over its private socket, to start
+# or reload pgbouncer.service or rowsafe-pooler-apt@.service.
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
 AmbientCapabilities=
 NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=-/etc/pgbouncer -/etc/systemd/system/pgbouncer.service.d -/var/lib/rowsafe/pooler
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
@@ -1383,6 +1446,7 @@ RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
+MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 ROWSAFE_POOLER_SERVICE_EOF
@@ -1409,6 +1473,54 @@ WantedBy=multi-user.target
 ROWSAFE_POOLER_PATH_EOF
     _changed=1
   fi
+  if write_file "$POOLER_APT_FILE" 0644 root:root <<'ROWSAFE_POOLER_APT_EOF'; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-pooler-apt@install.service / @purge.service: installs or removes
+# the pgbouncer package, and nothing else. Started only by
+# rowsafe-pooler.service (root), at most once every 10 minutes; it takes no
+# input from the agent but its instance name. Installed by
+# https://rowsafe.sh/install only when root allowed PgBouncer.
+
+[Unit]
+Description=Rowsafe: %i the pgbouncer package
+Documentation=https://rowsafe.sh/docs/guides/connection-pooling
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/rowsafe/rowsafe-pg-restart
+TimeoutStartSec=900
+Environment=ROWSAFE_HELPER_MODE=pooler-apt
+Environment=ROWSAFE_APT_ACTION=%i
+StateDirectory=rowsafe-pooler
+StateDirectoryMode=0700
+UMask=0022
+
+# apt and dpkg need the network and write access to the system, so this unit
+# is less confined; it only ever runs "apt-get install pgbouncer" or
+# "apt-get purge pgbouncer".
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+ROWSAFE_POOLER_APT_EOF
+    _changed=1
+  fi
+  # The helper's unit may only write PgBouncer's drop-in directory, so it
+  # must exist.
+  install -d -m 0755 -o root -g root "$POOLER_DROPIN_DIR"
   if systemd_running; then
     [ "$_changed" = 0 ] || systemctl daemon-reload
     systemctl enable --now --quiet rowsafe-pooler.path
@@ -1418,38 +1530,86 @@ ROWSAFE_POOLER_PATH_EOF
 }
 
 remove_pooler_units() {
-  [ -e "$POOLER_PATH_FILE" ] || [ -e "$POOLER_SERVICE_FILE" ] || return 0
+  [ -e "$POOLER_PATH_FILE" ] || [ -e "$POOLER_SERVICE_FILE" ] || [ -e "$POOLER_APT_FILE" ] || return 0
   if systemd_running; then
     systemctl disable --now --quiet rowsafe-pooler.path 2>/dev/null || true
   fi
-  rm -f "$POOLER_PATH_FILE" "$POOLER_SERVICE_FILE"
+  rm -f "$POOLER_PATH_FILE" "$POOLER_SERVICE_FILE" "$POOLER_APT_FILE"
+  rmdir "$POOLER_DROPIN_DIR" 2>/dev/null || true
   [ -e "$RESTART_PATH_FILE" ] || rm -f "$RESTART_HELPER" # restarts still use it
   rmdir "${RESTART_HELPER%/*}" 2>/dev/null || true
   if systemd_running; then systemctl daemon-reload; fi
 }
 
-# pooler_ports prints the ports of the discovered clusters.
+# pooler_ports prints the ports of this server's PostgreSQL clusters, found
+# by root: pg_lsclusters (Debian and Ubuntu), else the TCP ports that
+# processes of the agent user listen on. Never the agent's own discovery:
+# the agent user owns the agent's binary.
 pooler_ports() {
-  [ -s "$TMP/clusters" ] || return 0
-  awk -F '\t' '$1 ~ /^[0-9]+$/ { print $1 }' "$TMP/clusters"
-}
-
-allow_pooler() {
-  _ports=$(pooler_ports)
-  if [ -z "$_ports" ]; then
-    warn "found no PostgreSQL here, so managing PgBouncer from Rowsafe stays off"
+  if have pg_lsclusters; then
+    pg_lsclusters -h 2>/dev/null | awk '$3 ~ /^[0-9]+$/ && $3 > 0 && $3 < 65536 { print $3 }' | sort -un
     return 0
   fi
+  _uid=$(id -u "$AGENT_USER" 2>/dev/null) || return 0
+  have ss || return 0
+  ss -Hltne 2>/dev/null | awk -v u="uid:$_uid" '{ for (i = 1; i <= NF; i++) if ($i == u) { n = split($4, a, ":"); print a[n] } }' |
+    awk '$1 ~ /^[0-9]+$/' | sort -un
+}
+
+# pooler_allowed_ports prints the ports already in the allow list.
+pooler_allowed_ports() {
+  [ -f "$POOLER_ALLOW_FILE" ] && awk '$1 ~ /^[0-9]+$/ { print $1 }' "$POOLER_ALLOW_FILE"
+}
+
+# write_pooler_allow PORTS PUBLIC writes the allow list.
+write_pooler_allow() {
   {
     echo "# PostgreSQL clusters Rowsafe may put PgBouncer (connection pooling) in"
     echo "# front of, when someone turns pooling on in Rowsafe and confirms."
     echo "# Written by the installer (root); run it with --no-allow-pooler to turn"
-    echo "# this off."
+    echo "# this off. \"public\": PgBouncer may listen on every address"
+    echo "# (--allow-pooler-public)."
     echo "# PORT"
-    printf '%s\n' "$_ports"
+    printf '%s\n' "$1"
+    if [ "$2" = 1 ]; then echo public; fi
   } | write_file "$POOLER_ALLOW_FILE" 0644 root:root || true
+}
+
+# allow_pooler: --allow-pooler, or yes at the question: every cluster root
+# finds, plus the ones allowed before.
+allow_pooler() {
+  _ports=$(printf '%s\n%s\n' "$(pooler_allowed_ports)" "$(pooler_ports)" | awk 'NF' | sort -un)
+  if [ -z "$_ports" ]; then
+    warn "found no PostgreSQL here, so managing PgBouncer from Rowsafe stays off"
+    return 0
+  fi
+  _public=$ALLOW_POOLER_PUBLIC
+  if grep -qsx public "$POOLER_ALLOW_FILE"; then _public=1; fi
+  write_pooler_allow "$_ports" "$_public"
   install_pooler_units
   ok "Rowsafe may install and manage PgBouncer when you turn pooling on, only when someone confirms (turn off with --no-allow-pooler)"
+  if [ "$_public" = 1 ]; then note "PgBouncer may listen on public addresses when someone chooses that: put a firewall in front of it."; fi
+}
+
+# refresh_pooler: a re-run keeps the allow list as it is and adds a cluster
+# found since only when someone says yes on a terminal.
+refresh_pooler() {
+  _have=$(pooler_allowed_ports)
+  _ports=$_have
+  for _p in $(pooler_ports); do
+    printf '%s\n' "$_have" | grep -qx "$_p" && continue
+    if [ "$TTY" = 1 ] && confirm "Also allow PgBouncer for the PostgreSQL on port $_p?" n; then
+      _ports=$(printf '%s\n%s\n' "$_ports" "$_p" | awk 'NF' | sort -un)
+    fi
+  done
+  _public=$ALLOW_POOLER_PUBLIC
+  if grep -qsx public "$POOLER_ALLOW_FILE"; then _public=1; fi
+  _was_public=0
+  if grep -qsx public "$POOLER_ALLOW_FILE"; then _was_public=1; fi
+  if [ "$_ports" != "$_have" ] || [ "$_public" != "$_was_public" ]; then
+    write_pooler_allow "$_ports" "$_public"
+  fi
+  install_pooler_units
 }
 
 disallow_pooler() {
@@ -1476,7 +1636,7 @@ pooler_access() {
       ;;
     *)
       if [ -f "$POOLER_ALLOW_FILE" ]; then
-        if grep -q '^[0-9]' "$POOLER_ALLOW_FILE"; then allow_pooler; fi
+        if grep -q '^[0-9]' "$POOLER_ALLOW_FILE"; then refresh_pooler; fi
         return 0
       fi
       [ "$TTY" = 1 ] && [ -n "$(pooler_ports)" ] || return 0
@@ -3039,6 +3199,7 @@ main() {
       --no-allow-restart) ALLOW_RESTART=no ;;
       --allow-pooler) ALLOW_POOLER=yes ;;
       --no-allow-pooler) ALLOW_POOLER=no ;;
+      --allow-pooler-public) ALLOW_POOLER_PUBLIC=1 ;;
       --protect)
         [ $# -ge 2 ] || die "--protect needs the database's name in Rowsafe"
         printf '%s\n' "$2" | grep -Eq '^[a-z][a-z0-9-]{1,39}$' ||

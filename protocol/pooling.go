@@ -45,13 +45,14 @@ const (
 
 // Where PgBouncer listens (PoolingSettings.Listen).
 const (
-	// PoolerListenLocal: this server only (127.0.0.1).
+	// PoolerListenLocal: this server only (127.0.0.1): the default.
 	PoolerListenLocal = "local"
 	// PoolerListenPrivate: this server and its private network addresses
-	// (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7): the default.
+	// (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7).
 	PoolerListenPrivate = "private"
 	// PoolerListenPublic: every address, including public ones. Only when a
-	// person chooses it explicitly.
+	// person chooses it, on a server where root also allowed it at install
+	// (--allow-pooler-public).
 	PoolerListenPublic = "public"
 )
 
@@ -65,7 +66,7 @@ type PoolingSettings struct {
 	Mode          string `json:"mode,omitempty"`            // PoolMode*; default transaction
 	PoolSize      int    `json:"pool_size,omitempty"`       // default_pool_size: server connections per database and user
 	MaxClientConn int    `json:"max_client_conn,omitempty"` // client connections PgBouncer accepts
-	Listen        string `json:"listen,omitempty"`          // PoolerListen*; default private
+	Listen        string `json:"listen,omitempty"`          // PoolerListen*; default local
 	Port          int    `json:"port,omitempty"`            // default 6432
 }
 
@@ -105,10 +106,12 @@ type PoolingResult struct {
 }
 
 // PoolerRetargetParams are the params of a pooler_retarget task: the
-// PostgreSQL server PgBouncer should send connections to from now on.
-// The standby feature queues it when a primary changes.
+// PostgreSQL PgBouncer should send connections to from now on. The standby
+// feature queues it when a primary changes. The root helper only points
+// PgBouncer at 127.0.0.1, on a port root allowed (/etc/rowsafe/
+// pooler-allowed): another cluster on the same server, never another host.
 type PoolerRetargetParams struct {
-	Host string `json:"host"` // IP address or DNS name
+	Host string `json:"host"` // 127.0.0.1
 	Port int    `json:"port"`
 }
 
@@ -242,7 +245,7 @@ func DefaultPoolingSettings(cores, maxConnections, reserved int) PoolingSettings
 		Mode:          PoolModeTransaction,
 		PoolSize:      max(min(pool, PoolHeadroom(maxConnections, reserved)/2), 2),
 		MaxClientConn: 1000,
-		Listen:        PoolerListenPrivate,
+		Listen:        PoolerListenLocal,
 		Port:          DefaultPoolerPort,
 	}
 }

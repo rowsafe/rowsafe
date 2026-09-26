@@ -75,7 +75,7 @@ func pbkdf2ForTest(password string, salt []byte, iter int) []byte {
 
 func TestPoolingDefaultsAndSettings(t *testing.T) {
 	d := PoolingDefaults(4, 100, 3)
-	if d.Mode != protocol.PoolModeTransaction || d.PoolSize != 10 || d.Listen != protocol.PoolerListenPrivate || d.Port != 6432 {
+	if d.Mode != protocol.PoolModeTransaction || d.PoolSize != 10 || d.Listen != protocol.PoolerListenLocal || d.Port != 6432 {
 		t.Fatalf("defaults %+v", d)
 	}
 	if got := PoolingDefaults(64, 500, 3).PoolSize; got != 50 {
@@ -222,11 +222,23 @@ func TestPoolingRefusals(t *testing.T) {
 		!strings.Contains(err.Error(), "already pools billing") {
 		t.Fatalf("other database: %v", err)
 	}
-	if _, err := a.poolerRetarget(context.Background(), db, protocol.PoolerRetargetParams{Host: "10.0.0.6", Port: 5432}, "t", &taskLog{}); err == nil ||
+	if _, err := a.poolerRetarget(context.Background(), db, protocol.PoolerRetargetParams{Host: "127.0.0.1", Port: 5432}, "t", &taskLog{}); err == nil ||
 		!strings.Contains(err.Error(), "pooling isn't on") {
 		t.Fatalf("retarget without pooling: %v", err)
 	}
-	for _, p := range []protocol.PoolerRetargetParams{{Host: "bad host", Port: 5432}, {Host: "10.0.0.6", Port: 0}, {Host: "-x", Port: 5432}} {
+	if _, err := a.poolerRetarget(context.Background(), db, protocol.PoolerRetargetParams{Host: "10.0.0.6", Port: 5432}, "t", &taskLog{}); err == nil ||
+		!strings.Contains(err.Error(), "its own server") {
+		t.Fatalf("retarget to another host: %v", err)
+	}
+	os.Remove(a.poolerStatePath())
+	if _, err := a.pooling(context.Background(), db, protocol.PoolingParams{Action: protocol.PoolingOn,
+		Settings: protocol.PoolingSettings{Listen: protocol.PoolerListenPublic}}, "t", &taskLog{}); err == nil ||
+		!strings.Contains(err.Error(), "--allow-pooler-public") {
+		t.Fatalf("public without root's opt-in: %v", err)
+	}
+	a.savePoolerState(&poolerState{DatabaseID: "db_2", DatabaseName: "billing"})
+	for _, p := range []protocol.PoolerRetargetParams{{Host: "bad host", Port: 5432}, {Host: "127.0.0.1", Port: 0}, {Host: "-x", Port: 5432},
+		{Host: "10.0.0.6", Port: 5432}, {Host: "127.0.0.1", Port: 5499}} {
 		if _, err := a.poolerRetarget(context.Background(), db, p, "t", &taskLog{}); err == nil {
 			t.Errorf("%+v accepted", p)
 		}

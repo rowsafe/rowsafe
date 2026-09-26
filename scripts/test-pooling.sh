@@ -22,8 +22,10 @@ in_container() {
   export DEBIAN_FRONTEND=noninteractive
   install -d -m 0755 /usr/local/lib/rowsafe /etc/rowsafe
   install -m 0755 /src/scripts/rowsafe-pg-restart /usr/local/lib/rowsafe/rowsafe-pg-restart
-  install -m 0644 /src/deploy/systemd/rowsafe-pooler.service /src/deploy/systemd/rowsafe-pooler.path /etc/systemd/system/
-  printf '# test\n5432\n' >/etc/rowsafe/pooler-allowed
+  install -m 0644 /src/deploy/systemd/rowsafe-pooler.service /src/deploy/systemd/rowsafe-pooler.path \
+    /src/deploy/systemd/rowsafe-pooler-apt@.service /etc/systemd/system/
+  install -d -m 0755 /etc/systemd/system/pgbouncer.service.d
+  printf '# test\n5432\n5433\n' >/etc/rowsafe/pooler-allowed
   chmod 0644 /etc/rowsafe/pooler-allowed
   install -d -m 0700 -o postgres -g postgres /var/lib/rowsafe /var/lib/rowsafe/pooler
   major=$(ls /usr/lib/postgresql)
