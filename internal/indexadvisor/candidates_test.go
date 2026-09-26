@@ -351,3 +351,19 @@ func TestAlreadyFastNotHelped(t *testing.T) {
 		t.Errorf("recs %v, rejected %v", recs, rejected)
 	}
 }
+
+func TestSlowBefore(t *testing.T) {
+	for _, tc := range []struct {
+		g    protocol.IndexGain
+		want bool
+	}{
+		{protocol.IndexGain{CostBefore: 48000, CostAfter: 110, MsBefore: 42, MsAfter: 0.9}, true},
+		{protocol.IndexGain{CostBefore: 900, CostAfter: 10, MsBefore: 0.3, MsAfter: 0.05}, false}, // measured: already fast
+		{protocol.IndexGain{CostBefore: 55000, CostAfter: 1460}, true},                            // an UPDATE: estimate only
+		{protocol.IndexGain{CostBefore: 86, CostAfter: 32}, false},
+	} {
+		if got := slowBefore(tc.g); got != tc.want {
+			t.Errorf("slowBefore(%+v) = %v, want %v", tc.g, got, tc.want)
+		}
+	}
+}
