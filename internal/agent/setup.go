@@ -31,6 +31,9 @@ type Setup struct {
 	Out    io.Writer // plan and progress, for the person at the terminal
 	Notes  io.Writer // side remarks (skipped clusters)
 	Poll   time.Duration
+	// Engine is the engine Plan registers (protocol.Engine*; "" is
+	// PostgreSQL).
+	Engine string
 }
 
 // Exit codes of the setup commands (documented in rowsafe-agent's usage).
@@ -161,8 +164,10 @@ func suggestName(userDBs []string, hostname string) string {
 
 // ---- discovery
 
-// Cluster is a local PostgreSQL cluster the agent can reach.
+// Cluster is a local database server the agent can reach: a PostgreSQL
+// cluster, or another engine's server (Engine).
 type Cluster struct {
+	Engine     string // protocol.Engine*: postgresql for PostgreSQL
 	Port       int
 	SocketDir  string
 	Major      int
@@ -290,15 +295,20 @@ func (s *Setup) Discover(ctx context.Context) ([]Cluster, error) {
 			fmt.Fprintf(s.Notes, "PostgreSQL %d on port %d is a replica (standby); skipped. Set up backups on its primary server instead.\n", sum.Major(), port)
 			continue
 		}
-		c := Cluster{Port: port, SocketDir: sockets[port], Major: sum.Major(), Version: sum.ServerVersion,
+		c := Cluster{Engine: protocol.EnginePostgreSQL, Port: port, SocketDir: sockets[port], Major: sum.Major(), Version: sum.ServerVersion,
 			DataDir: sum.DataDirectory, SizeBytes: sum.TotalSizeBytes, Databases: userDatabases(sum.Databases)}
 		if ls, ok := byPort[port]; ok && ls.Major == c.Major {
 			c.Name = ls.Name
 		}
 		c.Unit = SystemdUnit(c.DataDir, c.Major, c.Name)
-		for i := range registered {
-			if registered[i].Port == port {
-				c.Registered = &registered[i]
+		out = append(out, c)
+	}
+	out = append(out, s.discoverEngines(ctx)...)
+	for i := range out {
+		c := &out[i]
+		for j := range registered {
+			if registered[j].Port == c.Port && protocol.NormalizeEngine(registered[j].Engine) == c.Engine {
+				c.Registered = &registered[j]
 			}
 		}
 		if c.Registered != nil {
@@ -306,7 +316,6 @@ func (s *Setup) Discover(ctx context.Context) ([]Cluster, error) {
 		} else {
 			c.Suggested = suggestName(c.Databases, hostname)
 		}
-		out = append(out, c)
 	}
 	// Two new clusters suggesting the same name: tell them apart by port.
 	count := map[string]int{}
@@ -321,9 +330,32 @@ func (s *Setup) Discover(ctx context.Context) ([]Cluster, error) {
 	return out, nil
 }
 
+// discoverEngines asks the registered engines (MySQL, ...) for their
+// servers on this host.
+func (s *Setup) discoverEngines(ctx context.Context) []Cluster {
+	var out []Cluster
+	for _, e := range registeredEngines() {
+		env := engineEnv(s.cfg, nil, nil, e.Name())
+		if s.Notes != nil {
+			env.Notes = s.Notes
+		}
+		found, err := e.Discover(ctx, env)
+		if err != nil {
+			fmt.Fprintf(env.Notes, "Looking for %s failed (%s); skipped.\n", protocol.EngineDisplayName(e.Name()), firstLineOf(err.Error()))
+			continue
+		}
+		for _, d := range found {
+			out = append(out, Cluster{Engine: e.Name(), Port: d.Port, SocketDir: d.SocketDir, Major: d.Major,
+				Version: d.Version, Name: d.Name, DataDir: d.DataDir, SizeBytes: d.SizeBytes,
+				Databases: d.Databases, Unit: d.Unit})
+		}
+	}
+	return out
+}
+
 // WriteClusters prints one tab-separated line per cluster:
 //
-//	port socket_dir major cluster data_dir size_bytes name registered status databases size unit database_id
+//	port socket_dir major cluster data_dir size_bytes name registered status databases size unit database_id engine
 //
 // Empty values are "-"; registered is yes or no; databases are
 // comma-separated; size is human-readable (it contains a space).
@@ -339,9 +371,10 @@ func WriteClusters(w io.Writer, cs []Cluster) {
 		if c.Registered != nil {
 			reg, status, id = "yes", c.Registered.Status, c.Registered.ID
 		}
-		fmt.Fprintf(w, "%d\t%s\t%d\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			c.Port, c.SocketDir, c.Major, dash(c.Name), dash(c.DataDir), c.SizeBytes, c.Suggested, reg, dash(status),
-			dash(strings.Join(c.Databases, ",")), humanBytes(c.SizeBytes), dash(c.Unit), dash(id))
+		fmt.Fprintf(w, "%d\t%s\t%d\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			c.Port, dash(c.SocketDir), c.Major, dash(c.Name), dash(c.DataDir), c.SizeBytes, c.Suggested, reg, dash(status),
+			dash(strings.Join(c.Databases, ",")), humanBytes(c.SizeBytes), dash(c.Unit), dash(id),
+			protocol.NormalizeEngine(c.Engine))
 	}
 }
 
@@ -359,7 +392,7 @@ func (s *Setup) Plan(ctx context.Context, name string, port int, socketDir, idFi
 	if !ValidName(name) {
 		return fmt.Errorf("%q can't be a name in Rowsafe: %s", name, NameRule)
 	}
-	d, err := s.client.setupRegister(ctx, protocol.SetupRegisterRequest{Name: name, Port: port, SocketDir: socketDir})
+	d, err := s.client.setupRegister(ctx, protocol.SetupRegisterRequest{Name: name, Port: port, SocketDir: socketDir, Engine: s.Engine})
 	switch httpStatus(err) {
 	case 0:
 	case http.StatusConflict:
@@ -391,7 +424,7 @@ func (s *Setup) Plan(ctx context.Context, name string, port int, socketDir, idFi
 	if d.Plan == nil {
 		return errors.New("the plan finished without a result; see the task in the dashboard")
 	}
-	PrintPlan(s.Out, *d.Plan)
+	PrintPlanFor(s.Out, d.Engine, *d.Plan)
 	return nil
 }
 
@@ -405,7 +438,7 @@ func (s *Setup) alreadySetUp(d protocol.SetupDatabase) error {
 		fmt.Fprintf(s.Out, "Backups are on for %s; Rowsafe is checking that changes reach your storage.\n", d.Name)
 		return &ExitError{Code: SetupAlreadyDone}
 	case protocol.DBAwaitingRestart:
-		fmt.Fprintf(s.Out, "Backups are set up for %s; PostgreSQL needs a restart to start them.\n", d.Name)
+		fmt.Fprintf(s.Out, "Backups are set up for %s; %s needs a restart to start them.\n", d.Name, protocol.EngineDisplayName(d.Engine))
 		return &ExitError{Code: SetupRestartNeeded}
 	}
 	return nil
@@ -516,7 +549,7 @@ func (s *Setup) Wait(ctx context.Context, id string, timeout time.Duration) erro
 			case protocol.DBPendingAdopt:
 				say("pending", "Waiting for the backup settings to be applied...")
 			case protocol.DBAwaitingRestart:
-				say("restart", "Waiting for PostgreSQL to restart...")
+				say("restart", "Waiting for "+protocol.EngineDisplayName(d.Engine)+" to restart...")
 			case protocol.DBVerifying:
 				say("verifying", "Checking that changes reach your storage...")
 			case protocol.DBActive:
@@ -584,12 +617,20 @@ func utf8Locale() bool {
 // expert: what gets written, which settings change, whether a restart is
 // needed and how big the database is. Setting names are kept in brackets
 // for those who want them.
-func PrintPlan(w io.Writer, r protocol.AdoptResult) {
+func PrintPlan(w io.Writer, r protocol.AdoptResult) { PrintPlanFor(w, "", r) }
+
+// PrintPlanFor is PrintPlan for a database of engine ("" is PostgreSQL).
+func PrintPlanFor(w io.Writer, engine string, r protocol.AdoptResult) {
+	server := protocol.EngineDisplayName(engine)
 	arrow := "->"
 	if utf8Locale() {
 		arrow = "→"
 	}
 	in := r.Inspect
+	if in.MySQL != nil {
+		printEnginePlan(w, r, arrow)
+		return
+	}
 	if in.ServerVersion != "" {
 		var names []string
 		for _, d := range in.Databases {
@@ -605,7 +646,7 @@ func PrintPlan(w io.Writer, r protocol.AdoptResult) {
 		default:
 			what = fmt.Sprintf("%d databases (%s)", len(names), strings.Join(names, ", "))
 		}
-		fmt.Fprintf(w, "PostgreSQL %s on port %d: %s, %s.\n\n", strings.Fields(in.ServerVersion + " ")[0], in.Port, humanBytes(in.TotalSizeBytes), what)
+		fmt.Fprintf(w, "%s %s on port %d: %s, %s.\n\n", server, strings.Fields(in.ServerVersion + " ")[0], in.Port, humanBytes(in.TotalSizeBytes), what)
 	}
 	if r.Applied {
 		fmt.Fprintln(w, "What Rowsafe changed:")
@@ -623,10 +664,10 @@ func PrintPlan(w io.Writer, r protocol.AdoptResult) {
 	}
 	fmt.Fprintln(w)
 	if r.RestartRequired {
-		fmt.Fprintln(w, "Restart: PostgreSQL needs one quick restart (a few seconds) before backups start.")
+		fmt.Fprintf(w, "Restart: %s needs one quick restart (a few seconds) before backups start.\n", server)
 		fmt.Fprintln(w, "         It only restarts if you say so.")
 	} else {
-		fmt.Fprintln(w, "No downtime: PostgreSQL does not need a restart.")
+		fmt.Fprintf(w, "No downtime: %s does not need a restart.\n", server)
 	}
 }
 
@@ -669,12 +710,19 @@ func describeChange(c protocol.Change, arrow string) string {
 			return "Copy the changes with Rowsafe instead of the current command (archive_command" + restart + ")"
 		case "archive_library":
 			return fmt.Sprintf("Turn off the other archiver (archive_library: %s%s)", fromTo(c.From, c.To), restart)
+		case "replication.replSetName": // MongoDB
+			return fmt.Sprintf("Make MongoDB a single-member replica set, so it keeps the change log needed to restore to any second "+
+				"(replication.replSetName: %s%s)", fromTo(c.From, c.To), restart)
 		case "archive_timeout":
-			every := c.To + " seconds"
-			if n, err := strconv.Atoi(c.To); err == nil && n%60 == 0 {
+			every, behind := c.To+" seconds", c.To+" seconds"
+			if n, err := strconv.Atoi(c.To); err == nil && n == 60 {
+				every, behind = "minute", "a minute"
+			} else if err == nil && n%60 == 0 {
 				every = fmt.Sprintf("%d minutes", n/60)
+				behind = every
 			}
-			return fmt.Sprintf("Send changes at least every %s, even when the database is quiet (archive_timeout: %s%s)", every, fromTo(c.From, c.To), restart)
+			return fmt.Sprintf("Send changes at least every %s, even when the database is quiet, so backups are at most about %s behind "+
+				"(archive_timeout: %s%s)", every, behind, fromTo(c.From, c.To), restart)
 		default:
 			return fmt.Sprintf("Change %s: %s%s", c.Setting, fromTo(c.From, c.To), restart)
 		}

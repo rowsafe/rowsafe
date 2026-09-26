@@ -45,7 +45,8 @@ func readBlocking(ctx context.Context, conn *pgx.Conn, r *clusterReading, queryT
 		       coalesce(extract(epoch FROM clock_timestamp() - a.xact_start), 0)::float8,
 		       coalesce(a.wait_event_type, ''), coalesce(a.wait_event, ''),
 		       left(coalesce(a.application_name, ''), 200), coalesce(a.datname::text, ''), coalesce(a.usename::text, ''),
-		       CASE WHEN $1 THEN left(coalesce(a.query, ''), $2) ELSE '' END
+		       CASE WHEN $1 THEN left(coalesce(a.query, ''), $2) ELSE '' END,
+		       a.backend_start
 		FROM involved i
 		JOIN pg_stat_activity a ON a.pid = i.pid
 		LEFT JOIN waiting w ON w.pid = a.pid
@@ -61,7 +62,7 @@ func readBlocking(ctx context.Context, conn *pgx.Conn, r *clusterReading, queryT
 		var blockers []int32
 		err := row.Scan(&s.PID, &blockers, &s.Blocking, &s.WaitSeconds, &s.LockType, &s.LockMode, &s.Relation,
 			&s.State, &s.DurationSeconds, &s.XactSeconds, &s.WaitEventType, &s.WaitEvent,
-			&s.ApplicationName, &s.Database, &s.User, &s.Query)
+			&s.ApplicationName, &s.Database, &s.User, &s.Query, &s.BackendStart)
 		s.BlockedBy = make([]int, 0, len(blockers))
 		for _, b := range blockers {
 			s.BlockedBy = append(s.BlockedBy, int(b))

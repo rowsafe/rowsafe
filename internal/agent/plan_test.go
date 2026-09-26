@@ -26,7 +26,7 @@ func TestPlanAdoptFreshCluster(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]string{"archive_mode": "on", "archive_command": ourCmd, "archive_timeout": "300"}
+	want := map[string]string{"archive_mode": "on", "archive_command": ourCmd, "archive_timeout": "60"}
 	for k, v := range want {
 		if settings(p)[k] != v {
 			t.Errorf("setting %s = %q, want %q", k, settings(p)[k], v)
@@ -42,7 +42,7 @@ func TestPlanAdoptFreshCluster(t *testing.T) {
 
 func TestPlanAdoptAlreadyAdoptedIsNoop(t *testing.T) {
 	in := appToday()
-	in.ArchiveMode, in.ArchiveCommand, in.ArchiveTimeoutSeconds = "on", ourCmd, 300
+	in.ArchiveMode, in.ArchiveCommand, in.ArchiveTimeoutSeconds = "on", ourCmd, 60
 	p, err := PlanAdopt(in, "/etc/rowsafe/pgbackrest/app.conf", ourCmd, false)
 	if err != nil {
 		t.Fatal(err)
@@ -54,7 +54,7 @@ func TestPlanAdoptAlreadyAdoptedIsNoop(t *testing.T) {
 
 func TestPlanAdoptPendingRestartStillNeedsRestart(t *testing.T) {
 	in := appToday()
-	in.ArchiveMode, in.ArchiveCommand, in.ArchiveTimeoutSeconds = "on", ourCmd, 300
+	in.ArchiveMode, in.ArchiveCommand, in.ArchiveTimeoutSeconds = "on", ourCmd, 60
 	in.PendingRestart = []string{"archive_mode"}
 	p, err := PlanAdopt(in, "x", ourCmd, false)
 	if err != nil {
@@ -127,9 +127,21 @@ func TestPlanAdoptPreconditions(t *testing.T) {
 	}
 }
 
+func TestPlanAdoptLowersArchiveTimeoutToAMinute(t *testing.T) {
+	in := appToday()
+	in.ArchiveMode, in.ArchiveCommand, in.ArchiveTimeoutSeconds = "on", ourCmd, 300
+	p, err := PlanAdopt(in, "x", ourCmd, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := settings(p)["archive_timeout"]; got != "60" || p.Restart {
+		t.Errorf("archive_timeout 300 -> %q (restart %v); want 60 with a reload only", got, p.Restart)
+	}
+}
+
 func TestPlanAdoptKeepsShorterArchiveTimeout(t *testing.T) {
 	in := appToday()
-	in.ArchiveTimeoutSeconds = 60
+	in.ArchiveTimeoutSeconds = 30
 	p, _ := PlanAdopt(in, "x", ourCmd, false)
 	if _, ok := settings(p)["archive_timeout"]; ok {
 		t.Error("a stricter archive_timeout should be left alone")
@@ -165,7 +177,7 @@ func TestPlanSidecarFreshContainer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]string{"archive_mode": "on", "archive_command": spoolCmd, "archive_timeout": "300"}
+	want := map[string]string{"archive_mode": "on", "archive_command": spoolCmd, "archive_timeout": "60"}
 	for k, v := range want {
 		if p.Settings[k] != v {
 			t.Errorf("setting %s = %q, want %q", k, p.Settings[k], v)
@@ -185,7 +197,7 @@ func TestPlanSidecarFreshContainer(t *testing.T) {
 
 func TestPlanSidecarIdempotent(t *testing.T) {
 	in := dockerToday()
-	in.ArchiveMode, in.ArchiveCommand, in.ArchiveTimeoutSeconds = "on", spoolCmd, 300
+	in.ArchiveMode, in.ArchiveCommand, in.ArchiveTimeoutSeconds = "on", spoolCmd, 60
 	p, err := PlanAdoptInput(in, sidecarInput(false))
 	if err != nil {
 		t.Fatal(err)
@@ -203,7 +215,7 @@ func TestPlanSidecarIdempotent(t *testing.T) {
 
 func TestPlanSidecarUpdatesItsOwnOlderCommand(t *testing.T) {
 	in := dockerToday()
-	in.ArchiveMode, in.ArchiveTimeoutSeconds = "on", 300
+	in.ArchiveMode, in.ArchiveTimeoutSeconds = "on", 60
 	in.ArchiveCommand = `f=/rowsafe-spool/app/%f; test ! -f "$f" && cp %p "$f" # rowsafe spool (older agent)`
 	p, err := PlanAdoptInput(in, sidecarInput(false))
 	if err != nil {

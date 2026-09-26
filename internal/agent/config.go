@@ -37,6 +37,11 @@ type Config struct {
 	// holding the restore point to be archived (ROWSAFE_RESTORE_POINT_TIMEOUT).
 	RestorePointTimeout time.Duration
 	Repo                pgbackrest.Repo
+	// Storage is where backups go (ROWSAFE_STORAGE): protocol.StorageOwn,
+	// the bucket in ROWSAFE_REPO_S3_*, or protocol.StorageRowsafe, Rowsafe
+	// Storage, whose location and short-lived credentials come from the
+	// control plane (storage.go). Encryption stays on this host either way.
+	Storage string
 
 	// Mode is ModeNative (pgBackRest and PostgreSQL on this host) or
 	// ModeDockerSidecar (ROWSAFE_MODE; see https://rowsafe.sh/docs/guides/docker).
@@ -60,7 +65,64 @@ type Config struct {
 	// its answer (ROWSAFE_RESTART_RESULT_DIR). Root never writes into a
 	// directory the agent owns.
 	RestartResultDir string
+	// RestartHelper is the installed root helper (ROWSAFE_RESTART_HELPER);
+	// the agent only reads its "# actions:" line.
+	RestartHelper string
+
+	// RewindDir holds restored copies, one directory per copy
+	// (ROWSAFE_REWIND_DIR).
+	RewindDir string
+
+	// Pooler is PgBouncer (connection pooling; pooling.go).
+	Pooler PoolerConfig
+	// UpdateAllowFile lists what root allowed Rowsafe to install or do
+	// (postgresql, security, reboot; ROWSAFE_UPDATE_ALLOW_FILE). Written by
+	// the installer; the agent only reads it (updates.go).
+	UpdateAllowFile string
+
+	// Second copy (secondcopy.go): Repo2 is the second storage
+	// (ROWSAFE_REPO2_*; optional), and SecondCopyQueueDir is where WAL waits
+	// to be sent to it (ROWSAFE_REPO2_QUEUE_DIR).
+	Repo2              pgbackrest.Repo
+	SecondCopyQueueDir string
+
+	// Standby is whether this server takes part in standby servers
+	// (ROWSAFE_STANDBY): StandbyOn (default) seals and opens handoffs for the
+	// peers a person confirms in the dashboard; StandbyPinned only for the
+	// key fingerprints in StandbyPeers (ROWSAFE_STANDBY_PEERS, comma
+	// separated), so even a compromised control plane can't pair a server of
+	// its own; StandbyOff refuses every standby task (and fencing never uses
+	// pg_ctl here).
+	Standby      string
+	StandbyPeers []string
+
+	// ---- Fork (fork*.go) ----
+	// CreateClusterAllowFile says root allowed Rowsafe to create PostgreSQL
+	// clusters for forks, and on which ports ("ports MIN-MAX";
+	// ROWSAFE_CREATE_CLUSTER_ALLOW_FILE). The installer writes it.
+	CreateClusterAllowFile string
+	// CreatedClustersFile lists the clusters root created for forks ("PORT
+	// UNIT" lines, like RestartAllowFile; ROWSAFE_CREATED_CLUSTERS_FILE):
+	// the root helper may stop and start them too.
+	CreatedClustersFile string
+	// ForkTargetDir makes a Docker sidecar a fork target: the fork is
+	// restored into this directory, its PostgreSQL container's PGDATA
+	// (ROWSAFE_FORK_TARGET_DIR).
+	ForkTargetDir string
+	// DockerControlSocket is where the opt-in container control service
+	// listens (docker-sidecar mode; ROWSAFE_DOCKER_CONTROL_SOCKET). Absent:
+	// Rowsafe can't stop or start PostgreSQL's container.
+	DockerControlSocket string
+	// Copies configures Guard's preview and safe copies (copies_state.go).
+	Copies CopiesConfig
 }
+
+// ROWSAFE_STANDBY values.
+const (
+	StandbyOn     = "on"
+	StandbyPinned = "pinned"
+	StandbyOff    = "off"
+)
 
 // Agent modes (ROWSAFE_MODE).
 const (
@@ -95,6 +157,9 @@ func ConfigFromEnv() (Config, error) {
 		SpoolDir:         env("ROWSAFE_SPOOL_DIR", "/rowsafe-spool"),
 		RestartAllowFile: env("ROWSAFE_RESTART_ALLOW_FILE", "/etc/rowsafe/restart-allowed"),
 		RestartResultDir: env("ROWSAFE_RESTART_RESULT_DIR", "/run/rowsafe-pg-restart"),
+		RestartHelper:    env("ROWSAFE_RESTART_HELPER", "/usr/local/lib/rowsafe/rowsafe-pg-restart"),
+		Storage:          env("ROWSAFE_STORAGE", protocol.StorageOwn),
+		UpdateAllowFile:  env("ROWSAFE_UPDATE_ALLOW_FILE", "/etc/rowsafe/updates-allowed"),
 		Repo: pgbackrest.Repo{
 			Endpoint:   env("ROWSAFE_REPO_S3_ENDPOINT", ""),
 			Bucket:     env("ROWSAFE_REPO_S3_BUCKET", ""),
@@ -108,7 +173,37 @@ func ConfigFromEnv() (Config, error) {
 		},
 	}
 	c.RestartDir = env("ROWSAFE_RESTART_DIR", filepath.Join(c.StateDir, "restart"))
+	c.CreateClusterAllowFile = env("ROWSAFE_CREATE_CLUSTER_ALLOW_FILE", "/etc/rowsafe/create-cluster-allowed") // fork
+	c.CreatedClustersFile = env("ROWSAFE_CREATED_CLUSTERS_FILE", "/etc/rowsafe/created-clusters")              // fork
+	c.ForkTargetDir = env("ROWSAFE_FORK_TARGET_DIR", "")                                                       // fork
+	c.RewindDir = env("ROWSAFE_REWIND_DIR", filepath.Join(c.StateDir, "rewind"))
+	c.Standby = strings.ToLower(env("ROWSAFE_STANDBY", StandbyOn))
+	for _, fp := range strings.Split(env("ROWSAFE_STANDBY_PEERS", ""), ",") {
+		if fp = strings.TrimSpace(fp); fp != "" {
+			c.StandbyPeers = append(c.StandbyPeers, fp)
+		}
+	}
+	c.DockerControlSocket = env("ROWSAFE_DOCKER_CONTROL_SOCKET", "/run/rowsafe-control/control.sock")
 	var err error
+	if err := poolerConfigFromEnv(&c); err != nil {
+		return c, err
+	}
+	if c.Storage != protocol.StorageOwn && c.Storage != protocol.StorageRowsafe {
+		return c, fmt.Errorf("ROWSAFE_STORAGE must be %q (Rowsafe Storage) or %q (your bucket, ROWSAFE_REPO_S3_*)",
+			protocol.StorageRowsafe, protocol.StorageOwn)
+	}
+	if c.Copies, err = copiesConfigFromEnv(c.StateDir); err != nil {
+		return c, err
+	}
+	if err = secondCopyFromEnv(&c); err != nil {
+		return c, err
+	}
+	if c.Standby != StandbyOn && c.Standby != StandbyPinned && c.Standby != StandbyOff {
+		return c, fmt.Errorf("ROWSAFE_STANDBY must be %q, %q or %q", StandbyOn, StandbyPinned, StandbyOff)
+	}
+	if c.Standby == StandbyPinned && len(c.StandbyPeers) == 0 {
+		return c, fmt.Errorf("ROWSAFE_STANDBY=pinned needs ROWSAFE_STANDBY_PEERS: the key fingerprints of the servers this one may pair with")
+	}
 	if c.Mode != ModeNative && c.Mode != ModeDockerSidecar {
 		return c, fmt.Errorf("ROWSAFE_MODE must be %q or %q", ModeNative, ModeDockerSidecar)
 	}
@@ -148,10 +243,14 @@ func ConfigFromEnv() (Config, error) {
 		!strings.HasPrefix(c.ControlURL, "http://localhost") {
 		return c, fmt.Errorf("ROWSAFE_URL must use https (plain http is only allowed for localhost)")
 	}
-	for _, p := range []string{c.StateDir, c.ConfigDir, c.LogDir, c.DrillDir, c.InstallDir, c.RestartDir, c.RestartAllowFile, c.RestartResultDir} {
+	for _, p := range []string{c.StateDir, c.ConfigDir, c.LogDir, c.DrillDir, c.InstallDir, c.RestartDir, c.RestartAllowFile, c.RestartResultDir, c.RestartHelper, c.RewindDir, c.UpdateAllowFile, c.SecondCopyQueueDir,
+		c.CreateClusterAllowFile, c.CreatedClustersFile} {
 		if !filepath.IsAbs(p) {
 			return c, fmt.Errorf("directory %q must be absolute", p)
 		}
+	}
+	if c.ForkTargetDir != "" && (!c.Sidecar() || !filepath.IsAbs(c.ForkTargetDir)) {
+		return c, fmt.Errorf("ROWSAFE_FORK_TARGET_DIR must be an absolute path, and only goes with ROWSAFE_MODE=%s", ModeDockerSidecar)
 	}
 	if c.Sidecar() {
 		if _, err := pgbackrest.SpoolDir(c.SpoolDir, "x"); err != nil {

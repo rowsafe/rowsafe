@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,7 +10,6 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/rowsafe/rowsafe/client"
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
@@ -24,13 +22,6 @@ type planInput struct {
 	SocketDir     string `json:"socket_dir,omitempty" jsonschema:"only to register: PostgreSQL Unix socket directory (default /var/run/postgresql)"`
 	RetentionFull int    `json:"retention_full,omitempty" jsonschema:"only to register: full backups to keep (default 2, about two weeks of point-in-time recovery with weekly fulls)"`
 	WaitSeconds   int    `json:"wait_seconds,omitempty" jsonschema:"seconds to wait for the plan (usually ready in seconds when the agent is online); 0 returns at once"`
-}
-
-type applyInput struct {
-	Database    string `json:"database" jsonschema:"database name or ID"`
-	Confirm     string `json:"confirm" jsonschema:"the database's exact name, typed only after the user explicitly approved applying the plan"`
-	Force       bool   `json:"force,omitempty" jsonschema:"replace an existing, foreign archive_command or archive_library (e.g. WAL-G). Only when the user explicitly asked for it"`
-	WaitSeconds int    `json:"wait_seconds,omitempty" jsonschema:"seconds to wait for the task to finish before returning (0 returns at once); if it is still running, poll get_task"`
 }
 
 type backupInput struct {
@@ -82,22 +73,13 @@ func (t *tools) addWriteTools(s *sdk.Server) {
 		Name: "plan_adoption",
 		Description: "Produce a read-only adopt plan for a PostgreSQL cluster: what Rowsafe would change to enable WAL archiving (pgBackRest config, stanza, archive_mode/archive_command/archive_timeout, wal_level if minimal) and whether a PostgreSQL restart will be needed. Nothing on the host changes. " +
 			"If the database is not registered yet, pass host (from list_hosts) to register it first; registering counts against the plan's database limit (402 when full). For a registered database it re-plans (e.g. after the user changed settings). " +
-			"Returns the plan task; show the plan to the user. Applying it is a separate step (apply_adoption) that needs their explicit approval.",
+			"Returns the plan task; show the plan to the user. Applying it changes PostgreSQL settings, so only a person does it: the Turn on backups button in the dashboard, or rowsafe apply NAME.",
 		Annotations: writes("Plan adoption (read-only on the host)", false, false),
 		InputSchema: withWait[planInput](func(p map[string]*jsonschema.Schema) {
 			p["port"].Minimum, p["port"].Maximum = ptr(1.0), ptr(65535.0)
 			p["retention_full"].Minimum, p["retention_full"].Maximum = ptr(1.0), ptr(52.0)
 		}),
 	}, t.planAdoption)
-
-	sdk.AddTool(s, &sdk.Tool{
-		Name: "apply_adoption",
-		Description: "Apply a database's adopt plan on its host: write the pgBackRest config, create the stanza, and set the archiving settings with ALTER SYSTEM + pg_reload_conf(). This changes production PostgreSQL settings. It never restarts PostgreSQL: when archive_mode or wal_level changes, PostgreSQL needs a restart later, which the user does (Restart PostgreSQL in the dashboard, `rowsafe restart`, or on the server); Rowsafe then verifies by itself. " +
-			"REQUIRED before calling: show the user the latest plan (plan_adoption or get_task on the plan task), explain what changes and whether a restart will be needed, and get their explicit approval for this database. Then pass confirm set to the database's exact name. Never call it on your own initiative. " +
-			"Leave force false unless the user explicitly asked to replace an existing archiver (e.g. WAL-G); force overwrites another tool's archive_command.",
-		Annotations: writes("Apply adoption (changes PostgreSQL settings)", true, false),
-		InputSchema: withWait[applyInput](nil),
-	}, t.applyAdoption)
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "run_backup",
@@ -172,48 +154,6 @@ func (t *tools) planAdoption(ctx context.Context, _ *sdk.CallToolRequest, in pla
 	default:
 		return nil, WriteResult{}, apiError(err)
 	}
-}
-
-func (t *tools) applyAdoption(ctx context.Context, _ *sdk.CallToolRequest, in applyInput) (*sdk.CallToolResult, WriteResult, error) {
-	d, err := t.c.Database(ctx, in.Database)
-	if err != nil {
-		return nil, WriteResult{}, apiError(err)
-	}
-	if in.Confirm != d.Name {
-		return nil, WriteResult{}, fmt.Errorf("not applied: confirm must be exactly %q. Show the user the adopt plan first and apply only after they explicitly approve it", d.Name)
-	}
-	// Refuse without a plan the user could have reviewed.
-	plans, err := t.c.AllTasks(ctx, client.TaskQuery{Database: d.ID, Type: protocol.TaskAdopt, Limit: 20})
-	if err != nil {
-		return nil, WriteResult{}, apiError(err)
-	}
-	var plan *protocol.TaskView
-	for i := range plans {
-		p := plans[i]
-		if p.Type != protocol.TaskAdopt {
-			continue
-		}
-		if !finished(p.Status) {
-			return nil, WriteResult{}, fmt.Errorf("not applied: adopt task %s for %s is still %s. Wait for it (get_task) and show the user the plan first", p.ID, d.Name, p.Status)
-		}
-		var params protocol.AdoptParams
-		if p.Status == protocol.StatusSucceeded && json.Unmarshal(p.Params, &params) == nil && !params.Apply {
-			plan = &p
-			break
-		}
-	}
-	if plan == nil {
-		return nil, WriteResult{}, fmt.Errorf("not applied: %s has no successful adopt plan. Run plan_adoption, show the plan to the user and get their approval first", d.Name)
-	}
-	task, err := t.c.CreateTask(ctx, d.ID, protocol.TaskAdopt, protocol.AdoptParams{Apply: true, Force: in.Force})
-	if err != nil {
-		return nil, WriteResult{}, apiError(err)
-	}
-	lead := fmt.Sprintf("Applying the adopt plan to %s on %s (ALTER SYSTEM + reload; PostgreSQL is not restarted). Last reviewed plan: task %s.", d.Name, d.Hostname, plan.ID)
-	if in.Force {
-		lead += " force=true: an existing archive_command/archive_library will be replaced."
-	}
-	return t.finish(ctx, task, d.Name, in.WaitSeconds, lead, false)
 }
 
 func (t *tools) runBackup(ctx context.Context, _ *sdk.CallToolRequest, in backupInput) (*sdk.CallToolResult, WriteResult, error) {

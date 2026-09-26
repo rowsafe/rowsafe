@@ -161,6 +161,7 @@ type fakeSetupAPI struct {
 	forced         bool
 	registerStatus int
 	registerMsg    string
+	registers      []protocol.SetupRegisterRequest
 }
 
 func newFakeSetupAPI() *fakeSetupAPI {
@@ -183,6 +184,7 @@ func (f *fakeSetupAPI) server(t *testing.T) *httptest.Server {
 		}
 		var req protocol.SetupRegisterRequest
 		json.NewDecoder(r.Body).Decode(&req)
+		f.registers = append(f.registers, req)
 		for _, d := range f.dbs {
 			if d.Port == req.Port {
 				if d.Status == protocol.DBPendingAdopt {
@@ -265,7 +267,7 @@ var planNeedingRestart = protocol.AdoptResult{
 		{Kind: "command", Description: "pgbackrest stanza-create: initialise the repository for this cluster"},
 		{Kind: "setting", Setting: "archive_mode", From: "off", To: "on", Restart: true},
 		{Kind: "setting", Setting: "archive_command", To: "pgbackrest ... archive-push %p"},
-		{Kind: "setting", Setting: "archive_timeout", From: "0", To: "300"},
+		{Kind: "setting", Setting: "archive_timeout", From: "0", To: "60"},
 	},
 	RestartRequired: true,
 	Warnings:        []string{restartWarning(false, "shop")},
@@ -298,7 +300,7 @@ func TestSetupPlanApplyWait(t *testing.T) {
 		"Prepare your bucket for this database",
 		"Turn on copying of every change to your bucket (archive_mode: off → on, needs a restart)",
 		"Copy the changes with Rowsafe (archive_command)",
-		"at least every 5 minutes",
+		"at least every minute, even when the database is quiet, so backups are at most about a minute behind",
 		"Restart: PostgreSQL needs one quick restart",
 	} {
 		if !strings.Contains(out.String(), want) {
@@ -494,8 +496,8 @@ func TestSetupDiscover(t *testing.T) {
 	}
 	var out bytes.Buffer
 	WriteClusters(&out, cs)
-	want := "5432\t" + dir + "\t18\tmain\t/var/lib/postgresql/18/main\t1288490189\ttv-hub\tno\t-\tTV hub\t1.2 GiB\t-\t-\n" +
-		"5435\t" + dir + "\t17\t-\t/srv/b\t0\tbilling\tyes\tawaiting_restart\ta,b\t0 B\t-\tdb_1\n"
+	want := "5432\t" + dir + "\t18\tmain\t/var/lib/postgresql/18/main\t1288490189\ttv-hub\tno\t-\tTV hub\t1.2 GiB\t-\t-\tpostgresql\n" +
+		"5435\t" + dir + "\t17\t-\t/srv/b\t0\tbilling\tyes\tawaiting_restart\ta,b\t0 B\t-\tdb_1\tpostgresql\n"
 	if out.String() != want {
 		t.Errorf("discover:\n%s\nwant:\n%s", out.String(), want)
 	}

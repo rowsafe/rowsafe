@@ -1,0 +1,12 @@
+{
+  "name": "rowsafe",
+  "interface": { "displayName": "Rowsafe" },
+  "plugins": [
+    {
+      "name": "rowsafe",
+      "source": { "source": "local", "path": "./integrations/codex" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Developer Tools"
+    }
+  ]
+}

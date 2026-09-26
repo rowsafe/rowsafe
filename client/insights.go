@@ -103,3 +103,13 @@ func (c *Client) WeeklyReport(ctx context.Context) (out protocol.WeeklyReportPre
 func (c *Client) SendTestWeeklyReport(ctx context.Context) (out protocol.ChannelTestResult, err error) {
 	return out, c.do(ctx, http.MethodPost, "/v1/org/weekly-report/test", nil, &out)
 }
+
+// ApplyFix applies one of a health finding's fixes (FindingFix) by its ids.
+// confirm is the database name, required when the fix has Confirm. The
+// control plane recomputes health and queues the fix with its own
+// parameters; it answers with the queued tasks, a restore point first when
+// the fix saves a Mark before it runs.
+func (c *Client) ApplyFix(ctx context.Context, ref, findingID, fixID, confirm string) (out protocol.ApplyFixResponse, err error) {
+	return out, c.do(ctx, http.MethodPost, "/v1/databases/"+esc(ref)+"/fixes",
+		protocol.ApplyFixRequest{FindingID: findingID, FixID: fixID, Confirm: confirm}, &out)
+}

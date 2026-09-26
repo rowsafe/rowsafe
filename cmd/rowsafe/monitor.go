@@ -176,7 +176,8 @@ func activityCmd(ctx context.Context, c *client.Client, args []string) error {
 			orDash(q.ApplicationName), orDash(q.Database), orDash(q.User), firstLine(orDash(query), max(*width, 20)))
 	}
 	t.flush()
-	fmt.Println("\nCancel a query with SELECT pg_cancel_backend(PID); end a session with SELECT pg_terminate_backend(PID).")
+	fmt.Printf("\nSessions that block others or stay idle in a transaction too long show up in `rowsafe fix %s`,\n"+
+		"which cancels the query or ends the session for you (after checking it is still the same session).\n", name)
 	return nil
 }
 

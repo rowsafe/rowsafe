@@ -279,7 +279,11 @@ func showCmd(ctx context.Context, c *client.Client, args []string) error {
 	if d.CanRestart {
 		fmt.Println("Restart:    allowed from Rowsafe (rowsafe restart)")
 	} else {
-		fmt.Println("Restart:    not allowed from Rowsafe on this server (allowed at install time)")
+		if d.Archiver != nil && d.Archiver.Mode == "docker-sidecar" {
+			fmt.Println("Restart:    not allowed from Rowsafe (Docker: add the container control service)")
+		} else {
+			fmt.Println("Restart:    not allowed from Rowsafe on this server (allowed at install time)")
+		}
 	}
 	backups, err := c.Backups(ctx, name, 1)
 	if err == nil && len(backups) > 0 {
@@ -301,15 +305,45 @@ func adoptCmd(ctx context.Context, c *client.Client, args []string) error {
 	socketDir := fs.String("socket-dir", "/var/run/postgresql", "Unix socket directory")
 	retention := fs.Int("retention-full", 2, "full backups to keep (weekly fulls: 2 = about 2 weeks of PITR)")
 	noWait := fs.Bool("no-wait", false, "don't wait for the plan")
+	engine := fs.String("engine", "", "database engine: postgresql (default), mysql or mariadb")
 	name, err := parse(fs, args, true)
 	if err != nil {
 		return err
 	}
+	if e := protocol.NormalizeEngine(*engine); e == protocol.EngineMySQL || e == protocol.EngineMariaDB {
+		// MySQL and MariaDB defaults: port 3306, the Debian/Docker socket.
+		set := map[string]bool{}
+		fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+		if !set["port"] {
+			*port = 3306
+		}
+		if !set["socket-dir"] {
+			*socketDir = "/var/run/mysqld/mysqld.sock"
+			if e == protocol.EngineMariaDB {
+				*socketDir = "/run/mysqld/mysqld.sock" // the mariadb images' own path
+			}
+		}
+	}
 	if *host, err = resolveHost(ctx, c, *host); err != nil {
 		return err
 	}
+	if protocol.NormalizeEngine(*engine) == protocol.EngineMongoDB {
+		// MongoDB: TCP on 127.0.0.1, port 27017 and daily full backups by
+		// default (the control plane fills in what isn't given).
+		set := map[string]bool{}
+		fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+		if !set["socket-dir"] {
+			*socketDir = ""
+		}
+		if !set["port"] {
+			*port = 0
+		}
+		if !set["retention-full"] {
+			*retention = 0
+		}
+	}
 	resp, err := c.CreateDatabase(ctx, protocol.CreateDatabaseRequest{
-		HostID: *host, Name: name, Port: *port, SocketDir: *socketDir, RetentionFull: *retention,
+		HostID: *host, Name: name, Port: *port, SocketDir: *socketDir, RetentionFull: *retention, Engine: *engine,
 	})
 	if err != nil {
 		return err
@@ -439,6 +473,12 @@ func restartCmd(ctx context.Context, c *client.Client, args []string) error {
 
 // restartNotAllowed explains why Rowsafe can't restart d's PostgreSQL.
 func restartNotAllowed(d protocol.Database) string {
+	if d.Archiver != nil && d.Archiver.Mode == "docker-sidecar" {
+		return fmt.Sprintf("not restarted: Rowsafe can't restart PostgreSQL's container on %s yet.\n"+
+			"Either restart it yourself: docker compose restart postgres (your PostgreSQL service's name)\n"+
+			"or allow it: add the container control service to your compose file; the database's Settings in the dashboard show the lines "+
+			"(https://rowsafe.sh/docs/guides/docker#let-rowsafe-restart-the-container).", d.Hostname)
+	}
 	return fmt.Sprintf("not restarted: %s doesn't allow restarts from Rowsafe (only root can allow it, at install time).\n"+
 		"Either restart PostgreSQL yourself, on %s:\n  sudo systemctl restart postgresql\n"+
 		"or allow it: re-run the install command on %s and say yes to restarts (--allow-restart).", d.Hostname, d.Hostname, d.Hostname)
@@ -729,7 +769,7 @@ func waitAndReport(ctx context.Context, c *client.Client, taskID, dbName string)
 	case protocol.TaskCheck:
 		fmt.Printf("\n%s is protected. The first full backup is queued; follow it with `rowsafe tasks %s`.\n", dbName, dbName)
 	case protocol.TaskRestorePoint:
-		fmt.Println("\nTo recover to it, see \"To a restore point\" in https://rowsafe.sh/docs/guides/restore")
+		fmt.Printf("\nTo go back to it: rowsafe rewind copy %s --mark LABEL (a copy next to production), or Rewind in the dashboard\n", dbName)
 	}
 	return nil
 }
@@ -748,6 +788,19 @@ func taskName(typ string) string {
 		return "WAL check"
 	case protocol.TaskRestart:
 		return "PostgreSQL restart"
+	case protocol.TaskMaintenance:
+		return "fix"
+	case protocol.TaskIndexAdvisor:
+		return "index check"
+	case protocol.TaskSettings:
+		return "settings change"
+	case protocol.TaskSecurityScan:
+		return "security check"
+	case protocol.TaskSecurityFix:
+		return "security fix"
+	case protocol.TaskRewindCopy, protocol.TaskRewindDrop, protocol.TaskRewindCompare, protocol.TaskRewindRows,
+		protocol.TaskRewindInPlace, protocol.TaskRewindUndo, protocol.TaskRewindCleanup:
+		return rewindTaskName(typ)
 	}
 	return typ
 }

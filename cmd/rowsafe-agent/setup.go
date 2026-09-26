@@ -6,9 +6,12 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/user"
+	"strconv"
 	"time"
 
 	"github.com/rowsafe/rowsafe/internal/agent"
+	mysqlengine "github.com/rowsafe/rowsafe/internal/engine/mysql"
 )
 
 const setupUsage = `rowsafe-agent setup - turn on backups for this server's PostgreSQL
@@ -22,13 +25,14 @@ the agent must have connected to Rowsafe first.
       /var/run/postgresql and /tmp) the agent can connect to. One
       tab-separated line each ("-" when empty):
         port socket_dir major cluster data_dir size_bytes name registered
-        status databases size unit database_id
+        status databases size unit database_id engine
       name is the suggested name (the Rowsafe name when registered);
       registered is yes or no; status is the Rowsafe status; databases are
-      comma-separated; size is human-readable; unit is the systemd unit.
+      comma-separated; size is human-readable; unit is the systemd unit;
+      engine is postgresql, or another engine this agent supports.
       Replicas and clusters it can't reach are skipped with a note on stderr.
 
-  rowsafe-agent setup plan --name NAME --port PORT [--socket-dir DIR] [--id-file FILE] [--timeout 3m]
+  rowsafe-agent setup plan --name NAME --port PORT [--socket-dir DIR] [--engine ENGINE] [--id-file FILE] [--timeout 3m]
       Add the cluster to Rowsafe (again: same database), wait for the
       read-only plan and print it. Nothing changes on this server.
       Exit 0 plan ready; 3 another backup tool is set up (apply --force
@@ -46,6 +50,14 @@ the agent must have connected to Rowsafe first.
 
   rowsafe-agent setup status --database ID
       One tab-separated line: id name status backup(none|running|done) dashboard_url
+
+  rowsafe-agent setup mysql-account --engine mysql|mariadb --port PORT [--socket FILE]
+                                    [--admin-user root] [--admin-password-file FILE] [--owner USER]
+      As root: create (or reset) Rowsafe's own MySQL/MariaDB account
+      rowsafe@localhost with a random password, kept in the agent's state
+      directory (0600, owned by --owner, the agent user). It logs in as the
+      administrator through the socket (auth_socket / unix_socket), or with
+      the password in --admin-password-file, which is used once and not kept.
 
 Other errors exit 1.
 `
@@ -79,11 +91,15 @@ func runSetup(ctx context.Context, cmd string, args []string) error {
 		name      = fs.String("name", "", "database name in Rowsafe")
 		port      = fs.Int("port", 0, "PostgreSQL port")
 		socketDir = fs.String("socket-dir", "", "Unix socket directory")
+		engine    = fs.String("engine", "", "database engine (from discover; default postgresql)")
 		idFile    = fs.String("id-file", "", "write the database ID to this file")
 		id        = fs.String("database", "", "database ID (from plan --id-file)")
 		force     = fs.Bool("force", false, "replace another backup tool's archive_command")
 		timeout   = fs.Duration("timeout", 0, "how long to wait")
 	)
+	if cmd == "mysql-account" {
+		return mysqlAccount(ctx, args)
+	}
 	switch cmd {
 	case "discover", "plan", "apply", "wait", "status":
 	default:
@@ -96,7 +112,7 @@ func runSetup(ctx context.Context, cmd string, args []string) error {
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
 	if os.Geteuid() == 0 {
-		return errors.New("run setup as the postgres user, with /etc/rowsafe/agent.env loaded (the installer does this)")
+		return errors.New("run setup as the agent user, with /etc/rowsafe/agent.env loaded (the installer does this)")
 	}
 	cfg, err := agent.ConfigFromEnv()
 	if err != nil {
@@ -109,6 +125,7 @@ func runSetup(ctx context.Context, cmd string, args []string) error {
 	if err != nil {
 		return err
 	}
+	s.Engine = *engine
 	needID := func() error {
 		if *id == "" {
 			return errors.New("--database ID is required")
@@ -150,4 +167,49 @@ func runSetup(ctx context.Context, cmd string, args []string) error {
 		}
 		return s.Status(ctx, *id)
 	}
+}
+
+// mysqlAccount creates Rowsafe's MySQL/MariaDB account (as root).
+func mysqlAccount(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("setup mysql-account", flag.ContinueOnError)
+	var (
+		engine    = fs.String("engine", "", "mysql or mariadb")
+		port      = fs.Int("port", 3306, "the server's port")
+		socket    = fs.String("socket", "", "the server's Unix socket file")
+		adminUser = fs.String("admin-user", "root", "administrator account")
+		adminPW   = fs.String("admin-password-file", "", "file holding the administrator's password (default: socket login)")
+		owner     = fs.String("owner", "", "OS user that owns the account file (the agent user)")
+		stateDir  = fs.String("state-dir", "", "the agent's state directory (default ROWSAFE_STATE_DIR or /var/lib/rowsafe)")
+	)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *engine == "" {
+		return errors.New("--engine is required")
+	}
+	dir := *stateDir
+	if dir == "" {
+		dir = os.Getenv("ROWSAFE_STATE_DIR")
+	}
+	if dir == "" {
+		dir = "/var/lib/rowsafe"
+	}
+	uid, gid := -1, -1
+	if *owner != "" {
+		u, err := user.Lookup(*owner)
+		if err != nil {
+			return err
+		}
+		uid, _ = strconv.Atoi(u.Uid)
+		gid, _ = strconv.Atoi(u.Gid)
+	}
+	msg, err := mysqlengine.CreateAccount(ctx, mysqlengine.AccountOptions{
+		Engine: *engine, Port: *port, Socket: *socket, StateDir: dir,
+		AdminUser: *adminUser, AdminPasswordFile: *adminPW, UID: uid, GID: gid,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Println(msg)
+	return nil
 }

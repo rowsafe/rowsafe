@@ -1,0 +1,41 @@
+{
+  "name": "rowsafe",
+  "version": "0.1.0",
+  "description": "PostgreSQL safety net for AI agents: Rowsafe MCP tools, a safety workflow skill, and a hook that sets a restore point before migrations and destructive SQL.",
+  "author": {
+    "name": "Rowsafe",
+    "url": "https://rowsafe.sh"
+  },
+  "homepage": "https://rowsafe.sh/docs/guides/ai-agents",
+  "repository": "https://github.com/rowsafe/rowsafe",
+  "license": "Apache-2.0",
+  "keywords": [
+    "postgresql",
+    "backup",
+    "point-in-time-recovery",
+    "migrations",
+    "safety"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Rowsafe",
+    "shortDescription": "Restore point before every migration",
+    "longDescription": "Before a migration or destructive SQL, Codex checks that your PostgreSQL database can be recovered and sets a named Rowsafe restore point (a Mark). If something breaks, you rewind to it from the Rowsafe dashboard. Codex never restores or restarts anything itself.",
+    "developerName": "Rowsafe",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://rowsafe.sh",
+    "privacyPolicyURL": "https://rowsafe.sh/legal/privacy",
+    "termsOfServiceURL": "https://rowsafe.sh/legal/terms",
+    "defaultPrompt": [
+      "Is the app database safe to migrate right now?",
+      "Set a restore point, then run the pending migrations.",
+      "Which restore points does the app database have?"
+    ]
+  }
+}

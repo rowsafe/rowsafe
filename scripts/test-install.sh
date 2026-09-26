@@ -19,16 +19,46 @@
 #      re-runs that keep or change settings, a passphrase of one's own,
 #      Ctrl-C at a hidden prompt, --check-storage and --no-prompt. Secrets
 #      must never reach the terminal. Pasted bucket URLs (R2, B2, S3, Wasabi,
-#      Spaces, any https endpoint) fill in the provider, endpoint and bucket;
+#      Spaces, any https endpoint) fill in the provider, endpoint and bucket.
+#      The second copy (--add-storage): the first storage's bucket refused,
+#      its own generated passphrase, kept on a re-run, tested by
+#      --check-storage, without a terminal, and --remove-second-copy;
 #   5. turning on backups after the install, with a stand-in agent whose
 #      `setup` answers come from files: found PostgreSQL, name, plan, "Turn on
 #      backups?", "Restart PostgreSQL now?" (yes, no), a taken name, another
 #      archiver, an already registered database, --protect and --no-setup;
+#   5b. Rowsafe Storage: the "where should backups go?" choice when the
+#      control plane offers it (fakes3.py answers /v1/storage/offer), the
+#      passphrase, --storage rowsafe without a terminal (passphrase generated
+#      and never printed), the agent's storage test, moving to one's own
+#      bucket and back, and --check-storage;
 #   6. restarts on request (--allow-restart): the allow list, the root
 #      helper's checks (unlisted port, garbage, symlinks, FIFOs, once a
-#      minute; root never writes in the agent's directory), the installer
+#      minute; root never writes in the agent's directory), its stop and
+#      start actions for Rewind (listed unit only, malformed actions
+#      refused), the installer
 #      not following symlinks planted in the agent's directories, and
-#      --no-allow-restart / uninstall removing it.
+#      --no-allow-restart / uninstall removing it;
+#   7. updates on request (--allow-updates, --allow-security-updates,
+#      --allow-reboot): the allow list and units, and the helper's update
+#      mode with apt, dpkg and Debian's cluster tools stood in: exact
+#      request shapes, what isn't allowed, a minor update (only that major's
+#      packages, restarted), installing a major (the package's own cluster
+#      dropped), an upgrade (allow list moved, record kept), its undo and
+#      cleanup, a failed upgrade rolled back, security updates (PostgreSQL
+#      held back) and a reboot.
+#   8. PgBouncer on request (--allow-pooler): the allow list and units, the
+#      helper in PgBouncer mode (install, configure from its template,
+#      reload, off, refused values and foreign configurations) with apt-get
+#      and systemctl stood in, and --no-allow-pooler.
+#   9. files (--files, --allow-files): restic installed from a pinned,
+#      SHA-256-verified release (a tampered one refused), read access
+#      granted with ACLs, the "Back it up with ...?" question, the files
+#      helper in its own unit: files-read and files-put only for the exact
+#      folders and owners root listed (no default roots, no home, system or
+#      .ssh paths, nothing the agent can write), size cap, cooldowns,
+#      symlinks, .. paths, written as the folder's owner, never as root, and
+#      --no-allow-files / uninstall removing it.
 #
 # When Go is available the release key and the 0.2.0 release are made by the
 # real `rowsafe-release keygen/manifest/sign`, so the installer is tested
@@ -55,20 +85,40 @@ case \${1:-} in
       exit 1
     fi
     # The installer must run the self-test as postgres with agent.env loaded.
-    if [ "\$(id -un)" != postgres ] || [ -z "\${ROWSAFE_REPO_CIPHER_PASS:-}" ]; then
+    # (as mysql on a MySQL server)
+    if { [ "\$(id -un)" != postgres ] && [ "\$(id -un)" != mysql ]; } || [ -z "\${ROWSAFE_REPO_CIPHER_PASS:-}" ]; then
       echo '{"version":"$1","ok":false,"errors":["config: not run as postgres with agent.env"]}'
       exit 1
     fi
     echo '{"version":"$1","platform":"linux/x","ok":true,"checks":["config","repository settings","pgbackrest","control plane"]}' ;;
   inspect)
     printf '{\n  "server_version": "17.6 (Debian 17.6-1)",\n  "data_directory": "/var/lib/postgresql/17/main",\n  "archive_mode": "off"\n}\n' ;;
-  run) while :; do sleep 1; done ;;
-  setup)
-    # Answers from /tmp/rowsafe-fake: CMD.out is printed, CMD.rc holds exit
-    # codes (one per line, used in turn; the last one sticks).
+  run) i=0; while [ \$i -lt 1800 ]; do sleep 1; i=\$((i + 1)); done ;; # at most 30 minutes, even if nothing kills it
+  storage)
+    # Rowsafe Storage test: must run as postgres with agent.env loaded.
     f=/tmp/rowsafe-fake
+    echo "storage \$*" >>"\$f/calls" 2>/dev/null || true
+    if [ "\$(id -un)" != postgres ] || [ "\${ROWSAFE_STORAGE:-}" != rowsafe ]; then
+      echo "storage test must run as postgres with ROWSAFE_STORAGE=rowsafe from agent.env" >&2
+      exit 1
+    fi
+    if [ -s "\$f/storage.rc" ] && [ "\$(cat "\$f/storage.rc")" != 0 ]; then
+      echo "error: no Rowsafe Storage credentials: control plane returned 503: storage unavailable" >&2
+      exit 1
+    fi
+    echo "writing, reading and deleting a test file in Rowsafe Storage..."
+    echo "Rowsafe Storage works: wrote, read back and deleted a test file" ;;
+  setup|mongodb)
+    # Answers from /tmp/rowsafe-fake: CMD.out is printed, CMD.rc holds exit
+    # codes (one per line, used in turn; the last one sticks). MongoDB
+    # helpers are mongodb-CMD; a password on stdin goes to CMD.stdin.
+    f=/tmp/rowsafe-fake
+    pre=''
+    [ "\$1" != mongodb ] || pre=mongodb-
     shift
-    echo "\$*" >>"\$f/calls"
+    echo "\$pre\$*" >>"\$f/calls"
+    case " \$* " in *" --admin-user "*) cat >"\$f/\$pre\$1.stdin" ;; esac
+    set -- "\$pre\$@"
     if [ "\$(id -un)" != postgres ] || [ -z "\${ROWSAFE_REPO_CIPHER_PASS:-}" ] || [ -n "\${ROWSAFE_TEST_LEAK:-}" ]; then
       echo "setup must run as postgres with only agent.env" >&2
       exit 1
@@ -86,6 +136,20 @@ case \${1:-} in
       [ "\$(wc -l <"\$f/\$cmd.rc")" -le 1 ] || sed -i 1d "\$f/\$cmd.rc"
     fi
     exit "\$rc" ;;
+  files)
+    # (files) answers from /tmp/rowsafe-fake: files-discover.out, files-access.out, files-list.out
+    f=/tmp/rowsafe-fake
+    shift
+    echo "files \$* (\$(id -un))" >>"\$f/calls"
+    case \${1:-} in
+      discover) [ ! -f "\$f/files-discover.out" ] || cat "\$f/files-discover.out" ;;
+      access) if [ -f "\$f/files-access.out" ]; then cat "\$f/files-access.out"; else echo yes; fi ;;
+      list) [ ! -f "\$f/files-list.out" ] || cat "\$f/files-list.out" ;;
+      add)
+        [ "\$(id -un)" = postgres ] && [ -n "\${ROWSAFE_REPO_CIPHER_PASS:-}" ] || exit 1
+        echo "fld_1 \$5" ;;
+      *) exit 2 ;;
+    esac ;;
   *) exit 2 ;;
 esac
 EOF
@@ -122,11 +186,28 @@ host() {
     echo "test-install: rowsafe-release unavailable; signing everything with openssl" >&2
   fi
 
+  # (files) The pinned restic releases, verified against the installer's
+  # SHA-256, served to the containers by their local release server.
+  rv=$(sed -n 's/^RESTIC_VERSION=//p' "$root/scripts/install.sh")
+  mkdir -p "$work/go/restic/v$rv"
+  for arch in amd64 arm64; do
+    sum=$(sed -n "s/^RESTIC_SHA256_$(echo "$arch" | tr a-z A-Z)=//p" "$root/scripts/install.sh")
+    f=$work/go/restic/v$rv/restic_${rv}_linux_$arch.bz2
+    if curl -fsSL --retry 3 -o "$f" "https://github.com/restic/restic/releases/download/v$rv/restic_${rv}_linux_$arch.bz2" &&
+      [ "$( (sha256sum "$f" 2>/dev/null || shasum -a 256 "$f") | cut -d' ' -f1)" = "$sum" ]; then
+      :
+    else
+      rm -f "$f"
+      echo "test-install: could not fetch restic $rv for $arch; its tests are skipped" >&2
+    fi
+  done
+
   first=1
   for image in $images; do
     echo "=== $image"
     docker run --rm \
       -e TEST_PUB="$TEST_PUB" -e TEST_PRIV="$TEST_PRIV" -e TEST_UNITS="$first" -e TEST_SHOW="${TEST_SHOW:-}" \
+      --cap-add NET_ADMIN \
       -v "$root/scripts:/src/scripts:ro" -v "$root/deploy:/src/deploy:ro" -v "$work/go:/go-release:ro" \
       "$image" sh /src/scripts/test-install.sh --in-container
     first=0
@@ -230,7 +311,7 @@ in_container() {
   sed "s|@RELEASE_PUBLIC_KEY@|$pub|" /src/scripts/install.sh >install.sh
   # An executable wrapper (not a function) so `env VAR=... $INSTALLER` works.
   INSTALLER=$W/installer
-  printf '#!/bin/sh\nexec env ROWSAFE_RELEASES_URL=https://localhost:8443/agent sh %s/install.sh "$@"\n' "$W" >"$INSTALLER"
+  printf '#!/bin/sh\nexec env ROWSAFE_RELEASES_URL=https://localhost:8443/agent ROWSAFE_RESTIC_URL=https://localhost:8443/restic sh %s/install.sh "$@"\n' "$W" >"$INSTALLER"
   chmod 755 "$INSTALLER"
   cp /src/scripts/install.sh placeholder-install.sh
 
@@ -257,6 +338,8 @@ EOF
   done
 
   # ---- releases
+  mkdir -p srv/restic
+  [ ! -d /go-release/restic ] || cp -r /go-release/restic/. srv/restic/ # (files) the pinned restic
   if [ -d /go-release/0.2.0 ]; then
     cp -r /go-release/0.2.0 srv/agent/0.2.0 # signed by rowsafe-release
   else
@@ -378,7 +461,7 @@ EOF
 
   # Exactly as piped from curl: sh -s rse_...
   expect_ok "re-run is idempotent (piped, token as argument)" \
-    sh -c 'ROWSAFE_RELEASES_URL=https://localhost:8443/agent sh -s rse_secrettoken123 <"$1/install.sh"' piped "$W"
+    sh -c 'ROWSAFE_RELEASES_URL=https://localhost:8443/agent ROWSAFE_RESTIC_URL=https://localhost:8443/restic sh -s rse_secrettoken123 <"$1/install.sh"' piped "$W"
   grep -q "already on disk" "$W/out" || fail "binary downloaded again"
   grep -q "unchanged" "$W/out" || fail "env file changed on a plain re-run"
   expect_fail "bad cipher pass refused" "at least 20 characters" env ROWSAFE_REPO_CIPHER_PASS=short "$INSTALLER"
@@ -538,7 +621,7 @@ import datetime, hashlib, hmac, http.server, re, ssl, sys, urllib.parse
 # takes us-east-1). A file named "skew" in the working directory moves its
 # clock by that many seconds.
 KEYS = {"AKIDTESTROWSAFE": "test/secret+key=="}
-BUCKETS = {"rowsafe-test"}
+BUCKETS = {"rowsafe-test", "rowsafe-copy2"}
 objects = {}
 
 
@@ -602,6 +685,13 @@ class S3(http.server.BaseHTTPRequestHandler):
     def handle_any(self):
         n = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(n) if n else b""
+        if self.path == "/v1/storage/offer":  # the control plane's Rowsafe Storage offer
+            self.close_connection = True  # curl -f hangs up after an error
+            try:
+                open("offer").close()
+            except OSError:
+                return self.reply(404, b'{"error":"not found"}', "application/json", [("Connection", "close")])
+            return self.reply(200, b'{"available":true,"free_bytes":10000000000}', "application/json", [("Connection", "close")])
         if self.authorized(body) is not True:
             return
         path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
@@ -701,7 +791,8 @@ guided_storage_tests() {
   echo "  -- guided storage setup on a terminal"
   write_terminal_helpers
   acct=0123456789abcdef0123456789abcdef
-  names="s3.rowsafe.test $acct.eu.r2.cloudflarestorage.com s3.eu-central-1.amazonaws.com rowsafe-test.s3.eu-central-1.amazonaws.com"
+  # api.rowsafe.sh too: the storage offer is asked locally, never online.
+  names="s3.rowsafe.test $acct.eu.r2.cloudflarestorage.com s3.eu-central-1.amazonaws.com rowsafe-test.s3.eu-central-1.amazonaws.com api.rowsafe.sh api.rowsafe.test"
   echo "127.0.0.1 $names" >>/etc/hosts
   san=$(printf 'DNS:%s,' $names)
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 \
@@ -723,7 +814,7 @@ guided_storage_tests() {
   # R2 in the EU, a generated passphrase that must be confirmed.
   tty_ok "fresh install: R2 (EU), generated passphrase" \
     "Bucket URL\t\nChoose 1-6\t1\nCloudflare account ID\t$acct\nEU jurisdiction\ty\nBucket name\trowsafe-test\nAccess key ID\t$key\nSecret access key\t$secret\nChoose 1-2\t1\nto continue\tzzzz\nto continue\t{capture:[│|] {6}[A-Za-z0-9]{36}([A-Za-z0-9]{4}) }\n" \
-    sh -c 'ROWSAFE_RELEASES_URL=https://localhost:8443/agent sh -s rse_secrettoken123 <"$1/install.sh"' piped "$W"
+    sh -c 'ROWSAFE_RELEASES_URL=https://localhost:8443/agent ROWSAFE_RESTIC_URL=https://localhost:8443/restic sh -s rse_secrettoken123 <"$1/install.sh"' piped "$W"
   has "Where should Rowsafe store your backups?"
   has "backup storage works: wrote, read back and deleted a test file"
   has "Save this in your password manager now."
@@ -856,6 +947,7 @@ guided_storage_tests() {
   for s in "$secret" my-own-passphrase-long-enough; do
     ! grep -qF "$s" "$W/out" || fail "--check-storage printed a secret"
   done
+  second_copy_tests
 
   # 7. --no-prompt on a terminal behaves exactly like no terminal.
   expect_ok "purge" "$INSTALLER" --uninstall --purge
@@ -865,8 +957,181 @@ guided_storage_tests() {
   lacks "Where should Rowsafe"
   expect_ok "purge" "$INSTALLER" --uninstall --purge
   bucket_url_tests
+  rowsafe_storage_tests
   setup_flow_tests
   restart_tests
+  files_tests
+  create_cluster_tests
+  firewall_tests
+  [ "${TEST_UNITS:-0}" != 1 ] || mysql_host_tests
+}
+
+# ------------------------------------------------------------ second copy
+
+second_copy_tests() {
+  echo "  -- second copy (--add-storage)"
+  first=$(grep -E '^ROWSAFE_REPO_' /etc/rowsafe/agent.env | sort)
+  expect_fail "--add-storage without a terminal needs its settings" "needs these in the environment" "$INSTALLER" --add-storage
+  # The first storage's bucket is refused; another bucket is tested; the
+  # second copy gets its own generated passphrase.
+  tty_ok "--add-storage: another bucket, own passphrase" \
+    "Bucket URL\thttps://rowsafe-test.s3.eu-central-1.amazonaws.com/\nAccess key ID\t$key\nSecret access key\t$secret\nBucket URL\thttps://s3.rowsafe.test/rowsafe-copy2\nRegion (\t\nAccess key ID\t$key\nSecret access key\t$secret\nChoose 1-2\t1\nto continue\t{capture:[│|] {6}[A-Za-z0-9]{36}([A-Za-z0-9]{4}) }\n" \
+    "$INSTALLER" --add-storage
+  has "A second copy keeps your backups"
+  has "That is the bucket your backups already go to."
+  has "backup storage works"
+  has "Your second copy encryption passphrase:"
+  has "keep both in your password manager"
+  has "Second copy saved."
+  lacks "$secret"
+  lacks "Turn on backups"
+  pass2=$(sed -n 's/^.*[│|]      \([A-Za-z0-9]\{40\}\)        [│|].*$/\1/p' "$W/out")
+  [ "${#pass2}" = 40 ] || fail "second copy passphrase not shown in the box"
+  env_is ROWSAFE_REPO2_S3_ENDPOINT s3.rowsafe.test
+  env_is ROWSAFE_REPO2_S3_BUCKET rowsafe-copy2
+  env_is ROWSAFE_REPO2_S3_REGION us-east-1
+  env_is ROWSAFE_REPO2_S3_URI_STYLE path
+  env_is ROWSAFE_REPO2_S3_KEY "$key"
+  env_is ROWSAFE_REPO2_S3_KEY_SECRET "$secret"
+  env_is ROWSAFE_REPO2_CIPHER_PASS "$pass2"
+  [ "$(grep -E '^ROWSAFE_REPO_' /etc/rowsafe/agent.env | sort)" = "$first" ] || fail "--add-storage changed the first storage's settings"
+  ! grep -q "^ROWSAFE_REPO_CIPHER_PASS='$pass2'" /etc/rowsafe/agent.env || fail "the second copy reused the first passphrase"
+  [ "$(grep -c '^# Second backup copy' /etc/rowsafe/agent.env)" = 1 ] || fail "second copy block not added once"
+  pass "second copy saved beside the first storage, with its own passphrase"
+
+  # A re-run keeps it; --check-storage tests both.
+  before=$(sha256sum /etc/rowsafe/agent.env)
+  tty_ok "--add-storage again, keep it" "Move the second copy to another bucket?\tn\n" "$INSTALLER" --add-storage
+  has "kept the second copy's settings"
+  [ "$(sha256sum /etc/rowsafe/agent.env)" = "$before" ] || fail "keeping the second copy changed agent.env"
+  expect_ok "--check-storage tests both storages" "$INSTALLER" --check-storage
+  grep -q "Testing the second copy's storage" "$W/out" || fail "--check-storage skipped the second copy"
+  [ "$(grep -c "backup storage works" "$W/out")" = 2 ] || fail "--check-storage: not both storages tested"
+
+  # Without a terminal: from the environment, tested before anything is saved.
+  expect_fail "--add-storage --no-prompt: a failing bucket saves nothing" "second copy's storage test failed" \
+    env ROWSAFE_REPO2_S3_BUCKET=no-such-bucket "$INSTALLER" --add-storage --no-prompt
+  [ "$(sha256sum /etc/rowsafe/agent.env)" = "$before" ] || fail "a failing second copy changed agent.env"
+  expect_fail "--add-storage --no-prompt: the first bucket refused" "another bucket than the first storage" \
+    env ROWSAFE_REPO2_S3_ENDPOINT=s3.eu-central-1.amazonaws.com ROWSAFE_REPO2_S3_BUCKET=rowsafe-test "$INSTALLER" --add-storage --no-prompt
+
+  # Off again: the settings become comments, the first storage stays.
+  expect_ok "--remove-second-copy" "$INSTALLER" --remove-second-copy
+  grep -q "The second copy is off" "$W/out" || fail "--remove-second-copy: no message"
+  ! grep -q '^ROWSAFE_REPO2_' /etc/rowsafe/agent.env || fail "--remove-second-copy left settings active"
+  [ "$(grep -E '^ROWSAFE_REPO_' /etc/rowsafe/agent.env | sort)" = "$first" ] || fail "--remove-second-copy changed the first storage"
+  expect_fail "--add-storage only goes with an install" "only go with an install" "$INSTALLER" --add-storage --check-storage
+  pass "second copy: kept, checked, automation, removed"
+}
+
+# ------------------------------------------------------------ Rowsafe Storage
+
+rowsafe_storage_tests() {
+  echo "  -- Rowsafe Storage"
+  api=https://api.rowsafe.test
+  touch "$W/offer"
+
+  # 1. Fresh install on a terminal: Rowsafe Storage is the default answer;
+  # the passphrase is generated, shown once and confirmed.
+  tty_ok "fresh install: Rowsafe Storage" \
+    "Choose 1-2\t\nChoose 1-2\t1\nto continue\t{capture:[│|] {6}[A-Za-z0-9]{36}([A-Za-z0-9]{4}) }\n" \
+    sh -c 'ROWSAFE_URL=$2 ROWSAFE_RELEASES_URL=https://localhost:8443/agent ROWSAFE_RESTIC_URL=https://localhost:8443/restic sh -s rse_secrettoken123 <"$1/install.sh"' piped "$W" "$api"
+  has "Where should backups go?"
+  has "1) Rowsafe Storage     nothing to set up (10 GB free)"
+  has "Rowsafe can't read them"
+  has "backups go to Rowsafe Storage, encrypted with your passphrase"
+  has "storage      Rowsafe Storage"
+  lacks "Bucket URL"
+  lacks "Access key ID"
+  lacks rse_secrettoken123
+  rpass=$(sed -n 's/^.*[│|]      \([A-Za-z0-9]\{40\}\)        [│|].*$/\1/p' "$W/out")
+  [ "${#rpass}" = 40 ] || fail "$name: passphrase not shown"
+  env_is ROWSAFE_STORAGE rowsafe
+  env_is ROWSAFE_REPO_CIPHER_PASS "$rpass"
+  ! grep -q '^ROWSAFE_REPO_S3_' /etc/rowsafe/agent.env || fail "$name: bucket settings written for Rowsafe Storage"
+
+  # 2. Re-run: nothing asked. With the agent enrolled and running, the
+  # installer runs its storage test.
+  tty_ok "re-run on Rowsafe Storage asks nothing" "" "$INSTALLER" --no-setup
+  has "backup storage: Rowsafe Storage (change it with --setup-storage)"
+  lacks "Where should backups go?"
+  echo '{"host_id":"host_1","agent_token":"rsa_x"}' >/var/lib/rowsafe/agent.json
+  chown postgres:postgres /var/lib/rowsafe/agent.json
+  runuser -u postgres -- /opt/rowsafe/rowsafe-agent run >/dev/null 2>&1 &
+  agent_pid=$!
+  sleep 1
+  scenario
+  expect_ok "agent running: Rowsafe Storage tested" "$INSTALLER" --no-setup
+  grep -q "Rowsafe Storage works: wrote, read back and deleted a test file" "$W/out" || fail "$name: no storage test"
+  called "storage test --wait 60s"
+  scenario storage_rc=1
+  expect_ok "a failing storage test warns, the install goes on" "$INSTALLER" --no-setup
+  grep -q "Rowsafe Storage didn't work yet" "$W/out" || fail "$name: no warning"
+  expect_fail "--check-storage on Rowsafe Storage fails" "Rowsafe Storage test failed" "$INSTALLER" --check-storage
+  scenario
+  expect_ok "--check-storage on Rowsafe Storage" "$INSTALLER" --check-storage
+  grep -q "Rowsafe Storage works" "$W/out" || fail "$name: no success"
+  kill "$agent_pid" 2>/dev/null || true
+  wait "$agent_pid" 2>/dev/null || true
+  rm -f /var/lib/rowsafe/agent.json
+
+  # 3. Move to one's own bucket: the passphrase is kept, ROWSAFE_STORAGE
+  # goes back to its commented-out default.
+  tty_ok "--setup-storage: keep Rowsafe Storage" "Move them to your own bucket?\t\n" "$INSTALLER" --setup-storage --no-setup
+  has "kept Rowsafe Storage"
+  env_is ROWSAFE_STORAGE rowsafe
+  tty_ok "--setup-storage: move to your own bucket" \
+    "Move them to your own bucket?\ty\nBucket URL\thttps://s3.rowsafe.test/rowsafe-test\nRegion (\t\nAccess key ID\t$key\nSecret access key\t$secret\nKeep the current encryption passphrase?\t\n" \
+    "$INSTALLER" --setup-storage --no-setup
+  has "Rowsafe takes a new full backup in your bucket right away"
+  has "backup storage works"
+  lacks "Where should backups go?"
+  env_is ROWSAFE_REPO_S3_ENDPOINT s3.rowsafe.test
+  env_is ROWSAFE_REPO_CIPHER_PASS "$rpass"
+  ! grep -q '^ROWSAFE_STORAGE=' /etc/rowsafe/agent.env || fail "$name: ROWSAFE_STORAGE kept"
+  grep -q "^#ROWSAFE_STORAGE='own'$" /etc/rowsafe/agent.env || fail "$name: ROWSAFE_STORAGE not back to the template"
+
+  # 4. And back, choosing Rowsafe Storage at the "where" question.
+  tty_ok "--setup-storage: own bucket to Rowsafe Storage" \
+    "Replace these storage settings?\ty\nChoose 1-2\t1\nKeep the current encryption passphrase?\t\n" \
+    env ROWSAFE_URL=$api "$INSTALLER" --setup-storage --no-setup
+  has "Where should backups go?"
+  env_is ROWSAFE_STORAGE rowsafe
+  env_is ROWSAFE_REPO_CIPHER_PASS "$rpass"
+  ! grep -q '^ROWSAFE_REPO_S3_ENDPOINT=' /etc/rowsafe/agent.env || fail "$name: the old bucket was kept active"
+  lacks "$secret"
+  lacks "$rpass"
+
+  # 5. Not offered (a self-hosted control plane): the question is skipped.
+  rm -f "$W/offer"
+  expect_ok "purge" "$INSTALLER" --uninstall --purge
+  tty_fail "not offered: straight to the bucket" 130 "Bucket URL\t{ctrl-c}\n" \
+    env ROWSAFE_URL=$api "$INSTALLER" rse_secrettoken123
+  lacks "Where should backups go?"
+  touch "$W/offer"
+
+  # 6. Without a terminal: --storage rowsafe generates the passphrase, keeps
+  # it only in agent.env and says how to see it.
+  expect_ok "purge" "$INSTALLER" --uninstall --purge
+  expect_ok "--storage rowsafe without a terminal" "$INSTALLER" --storage rowsafe rse_secrettoken123
+  grep -q "a backup encryption passphrase was generated and saved as ROWSAFE_REPO_CIPHER_PASS" "$W/out" || fail "$name: no passphrase note"
+  env_is ROWSAFE_STORAGE rowsafe
+  gen=$(sed -n "s/^ROWSAFE_REPO_CIPHER_PASS='\([A-Za-z0-9]\{40\}\)'\$/\1/p" /etc/rowsafe/agent.env)
+  [ "${#gen}" = 40 ] || fail "$name: no generated passphrase in agent.env"
+  ! grep -qF "$gen" "$W/out" || fail "$name: the generated passphrase was printed"
+  grep -q "storage      Rowsafe Storage" "$W/out" || fail "$name: summary"
+  expect_ok "--storage rowsafe again keeps the passphrase" "$INSTALLER" --storage rowsafe
+  env_is ROWSAFE_REPO_CIPHER_PASS "$gen"
+  ! grep -q "was generated" "$W/out" || fail "$name: generated a second passphrase"
+  expect_ok "purge" "$INSTALLER" --uninstall --purge
+  expect_ok "--storage rowsafe with a passphrase from the environment" \
+    env ROWSAFE_REPO_CIPHER_PASS=my-own-passphrase-long-enough "$INSTALLER" --storage rowsafe rse_secrettoken123
+  env_is ROWSAFE_REPO_CIPHER_PASS my-own-passphrase-long-enough
+  ! grep -q "was generated" "$W/out" || fail "$name: generated a passphrase despite the environment"
+  ! grep -qF my-own-passphrase-long-enough "$W/out" || fail "$name: printed the passphrase"
+  expect_ok "purge" "$INSTALLER" --uninstall --purge
+  rm -f "$W/offer"
+  pass "Rowsafe Storage: choice, passphrase, storage test, moving both ways, no terminal"
 }
 
 # ------------------------------------------------------------ bucket URLs
@@ -960,6 +1225,10 @@ setup_flow_tests() {
 echo "$*" >>/tmp/rowsafe-fake/pg_ctlcluster
 EOF
   chmod 755 /usr/local/bin/pg_ctlcluster
+  # What root sees of the clusters (the PgBouncer allow list comes from it,
+  # never from the agent's own discovery).
+  printf '#!/bin/sh\ncat /tmp/rowsafe-fake-clusters 2>/dev/null || printf "17 main 5432 online postgres /var/lib/postgresql/17/main -\\n17 other 5433 online postgres /var/lib/postgresql/17/other -\\n"\n' >/usr/local/bin/pg_lsclusters
+  chmod 755 /usr/local/bin/pg_lsclusters
   scenario
   expect_ok "configured install, agent not running" configured "$INSTALLER" rse_secrettoken123
   grep -q "Once the agent runs, run this installer again" "$W/out" || fail "no next step without a running agent"
@@ -984,7 +1253,7 @@ EOF
   scenario "discover_out=$shop" "plan_out=$plan" "apply_out=Done: the backup settings are in place." apply_rc=10 \
     "wait_out=$done_" "status_out=$status"
   tty_ok "turn on backups, restart now" \
-    "Allow restarting PostgreSQL from the Rowsafe dashboard?\tn\nName it in Rowsafe [shop]\tTV Hub\nName it in Rowsafe\t\nTurn on backups for shop now? [Y/n]\t\nRestart PostgreSQL now? [y/N]\ty\n" \
+    "Allow Rowsafe to restart or stop PostgreSQL when you ask?\tn\nAllow Rowsafe to install and manage PgBouncer?\tn\nName it in Rowsafe [shop]\tTV Hub\nName it in Rowsafe\t\nTurn on backups for shop now? [Y/n]\t\nRestart PostgreSQL now? [y/N]\ty\n" \
     env ROWSAFE_TEST_LEAK=1 "$INSTALLER"
   has "Looking for PostgreSQL on this server"
   has "Found PostgreSQL 17 on port 5432 (1.2 GiB; databases: shop)"
@@ -996,19 +1265,23 @@ EOF
   has "PostgreSQL restarted"
   has "✓ shop is protected. The first full backup is running."
   has "Dashboard: https://app.rowsafe.test/databases/db_fake"
-  has "nobody can restart PostgreSQL from Rowsafe"
+  has "Rowsafe can't restart or stop PostgreSQL"
   called "plan --name shop --port 5432 --socket-dir /var/run/postgresql --id-file"
   called "apply --database db_fake"
   called "wait --database db_fake --timeout 5m"
   [ "$(cat "$F/pg_ctlcluster")" = "17 main restart" ] || fail "$name: pg_ctlcluster not run as 17 main restart"
   grep -q "is off" /etc/rowsafe/restart-allowed || fail "$name: the no to restarts from Rowsafe was not kept"
   [ ! -e /usr/local/lib/rowsafe/rowsafe-pg-restart ] || fail "$name: restart helper installed after a no"
+  has "Rowsafe won't install or manage PgBouncer"
+  grep -q "is off" /etc/rowsafe/pooler-allowed || fail "$name: the no to PgBouncer was not kept"
+  [ ! -e /etc/systemd/system/rowsafe-pooler.path ] || fail "$name: PgBouncer helper installed after a no"
 
   # 2. Restart later: the command, and that Rowsafe finishes by itself.
   scenario "discover_out=$shop" "plan_out=$plan" apply_rc=10
   tty_ok "turn on backups, restart later" \
     "Name it in Rowsafe\t\nTurn on backups for shop now?\ty\nRestart PostgreSQL now?\t\n" "$INSTALLER"
-  lacks "Allow restarting PostgreSQL"
+  lacks "Allow Rowsafe to restart or stop PostgreSQL"
+  lacks "Allow Rowsafe to install and manage PgBouncer"
   has "Restart PostgreSQL when it suits you:"
   has "sudo systemctl restart postgresql@17-main"
   has "Rowsafe notices the restart by itself and finishes setting up. Nothing else to do."
@@ -1040,7 +1313,7 @@ EOF
   scenario "discover_out=$shop\n5433\t/var/run/postgresql\t16\tbilling\t/var/lib/postgresql/16/billing\t8192\tbilling\tyes\tawaiting_restart\tbilling\t8.0 KiB\t-\tdb_2"
   tty_ok "several clusters, one waiting for a restart" \
     "Set up backups for it?\tn\nRestart PostgreSQL now?\tn\n" "$INSTALLER"
-  has "backups for billing wait for a PostgreSQL restart"
+  has "backups for billing wait for a restart"
   has "sudo pg_ctlcluster 16 billing restart"
   not_called "plan"
 
@@ -1065,6 +1338,59 @@ EOF
   expect_fail "--protect-port needs --protect" "only goes with --protect" "$INSTALLER" --protect-port 5433
   expect_fail "--protect checks the name" "lowercase letters" "$INSTALLER" --protect Bad_Name
   pass "turning on backups: prompts, restarts, --protect, --no-setup"
+  mongodb_flow_tests
+}
+
+# mongodb_flow_tests: a MongoDB server found by discover (engine column):
+# its replica set and Rowsafe's own MongoDB user come before the plan.
+mongodb_flow_tests() {
+  echo "  -- MongoDB"
+  mongo='27017\t-\t8\t-\t/var/lib/mongodb\t52428800\tshop\tno\t-\tshop\t50.0 MiB\tmongod.service\t-\tmongodb'
+  rs='port=27017\nversion=8.0.4\nreplset=rs0\ninitiated=yes\nprimary=yes\nauth=on\nlogin=ok\nconfig=/etc/mongod.conf\ndbpath=/var/lib/mongodb\nkeyfile=-\nunit=mongod.service'
+  standalone='port=27017\nversion=8.0.4\nreplset=-\ninitiated=no\nprimary=yes\nauth=off\nlogin=not-needed\nconfig=/etc/mongod.conf\ndbpath=/var/lib/mongodb\nkeyfile=-\nunit=mongod.service'
+  noLogin='port=27017\nversion=8.0.4\nreplset=rs0\ninitiated=yes\nprimary=yes\nauth=on\nlogin=missing\nconfig=/etc/mongod.conf\ndbpath=/var/lib/mongodb\nkeyfile=-\nunit=mongod.service'
+  mplan='MongoDB 8.0.4 on port 27017: 50.0 MiB, 1 database (shop).\n\nWhat Rowsafe will change:\n  - Prepare your bucket for this database\n\nNo downtime: MongoDB does not need a restart.'
+
+  # 1. A replica set with Rowsafe's login: straight to the plan, with the engine.
+  scenario "discover_out=$mongo" "mongodb-status_out=$rs" "plan_out=$mplan" "wait_out=$done_" "status_out=$status"
+  tty_ok "MongoDB replica set: plan, turn on" "Name it in Rowsafe\t\nTurn on backups for shop now?\t\n" "$INSTALLER"
+  has "Found MongoDB 8 on port 27017 (50.0 MiB; databases: shop)"
+  has "No downtime: MongoDB does not need a restart."
+  called "mongodb-status --port 27017"
+  called "plan --name shop --port 27017 --id-file"
+  called "--engine mongodb"
+  not_called "socket-dir -"
+  not_called "mongodb-login"
+  called "apply --database db_fake"
+
+  # 2. A standalone server: explained, and a no changes nothing.
+  scenario "discover_out=$mongo" "mongodb-status_out=$standalone"
+  tty_ok "MongoDB standalone: declined" "Name it in Rowsafe\t\nTurn on the replica set and restart MongoDB now? [y/N]\t\n" "$INSTALLER"
+  has "runs as a standalone server"
+  has "OK, nothing was changed."
+  not_called "plan"
+  not_called "mongodb-initiate"
+
+  # 3. Access control on and no login yet: an administrator signs in once;
+  #    the password goes to the agent on stdin and is never printed.
+  scenario "discover_out=$mongo" "mongodb-status_out=$noLogin" "mongodb-login_rc=11\n0" \
+    "mongodb-login_out=Created MongoDB user rowsafe for Rowsafe" "plan_out=$mplan"
+  tty_ok "MongoDB login with an administrator" \
+    "Name it in Rowsafe\t\nMongoDB administrator user [admin]\troot\nPassword for root\tAdm1n-S3cret\nTurn on backups for shop now?\tn\n" "$INSTALLER"
+  called "mongodb-login --port 27017 --admin-user root"
+  [ "$(cat "$F/mongodb-login.stdin")" = Adm1n-S3cret ] || fail "$name: the administrator's password didn't reach the agent on stdin"
+  lacks "Adm1n-S3cret"
+  ! grep -rq "Adm1n-S3cret" /etc/rowsafe /var/lib/rowsafe 2>/dev/null || fail "$name: the administrator's password was saved"
+  called "plan --name shop --port 27017"
+
+  # 4. --protect never restarts a standalone MongoDB without --mongodb-replica-set.
+  scenario "discover_out=$mongo" "mongodb-status_out=$standalone"
+  expect_fail "--protect with a standalone MongoDB" "isn't ready for backups" "$INSTALLER" --protect shop
+  not_called "plan"
+  scenario "discover_out=$mongo" "mongodb-status_out=$standalone"
+  expect_fail "--no-mongodb-replica-set" "isn't ready for backups" "$INSTALLER" --protect shop --no-mongodb-replica-set
+  grep -q "Skipped (--no-mongodb-replica-set)" "$W/out" || fail "--no-mongodb-replica-set: not explained"
+  pass "MongoDB: engine in the plan, standalone explained, administrator login once, --protect never restarts"
 }
 
 # ------------------------------------------------------------ restarts
@@ -1075,7 +1401,7 @@ restart_tests() {
   R=/var/lib/rowsafe/restart
   scenario "discover_out=$shop"
   expect_ok "--allow-restart" "$INSTALLER" --allow-restart
-  grep -q "people can restart PostgreSQL from Rowsafe" "$W/out" || fail "--allow-restart not confirmed"
+  grep -q "Rowsafe may restart or stop PostgreSQL when you ask" "$W/out" || fail "--allow-restart not confirmed"
   grep -qx "5432 postgresql@17-main.service" /etc/rowsafe/restart-allowed || fail "allow list lacks 5432"
   [ "$(stat -c '%U %a' /etc/rowsafe/restart-allowed)" = "root 644" ] || fail "allow list ownership/mode"
   [ "$(stat -c '%U %a' "$H")" = "root 755" ] || fail "helper ownership/mode"
@@ -1095,8 +1421,12 @@ restart_tests() {
   fi
   # A re-run without the flag keeps it (and asks nothing).
   scenario "discover_out=$shop"
-  tty_ok "a re-run keeps restarts allowed" "Name it in Rowsafe\t\nTurn on backups for shop now?\tn\n" "$INSTALLER"
-  lacks "Allow restarting PostgreSQL"
+  tty_ok "a re-run keeps restarts allowed (and asks about updates once)" \
+    "Allow Rowsafe to create a new PostgreSQL cluster here\tn\nAllow Rowsafe to install PostgreSQL updates when you click Update?\tn\nAllow Rowsafe to install this server's security updates\tn\nName it in Rowsafe\t\nTurn on backups for shop now?\tn\n" "$INSTALLER"
+  lacks "Allow Rowsafe to restart or stop PostgreSQL"
+  lacks "Allow Rowsafe to reboot"
+  [ -f /etc/rowsafe/updates-allowed ] && ! grep -q '^[a-z]' /etc/rowsafe/updates-allowed || fail "no to updates not kept"
+  [ ! -e /etc/systemd/system/rowsafe-pg-update.path ] || fail "update units installed after a no"
   grep -qx "5432 postgresql@17-main.service" /etc/rowsafe/restart-allowed || fail "a re-run dropped the allow list"
 
   # The helper, run as its service would (root, its own result and state
@@ -1153,6 +1483,40 @@ EOF
   result_has "ok=0"
   result_has "error=malformed request"
 
+  # Rewind: stop and start the listed unit (no once-a-minute limit), in the
+  # "ID ACTION PORT" form; anything else is refused before systemctl runs.
+  : >"$F/systemctl.calls"
+  request "rw_1 stop 5432"
+  result_has "id=rw_1"
+  result_has "action=stop"
+  result_has "ok=1"
+  result_has "unit=postgresql@17-main.service"
+  request "rw_1 start 5432"
+  result_has "action=start"
+  result_has "ok=1"
+  request "rw_2 stop 5432"
+  result_has "ok=1"
+  request "rw_2 start 5432"
+  result_has "ok=1"
+  [ "$(cat "$F/systemctl.calls")" = "$(printf 'stop postgresql@17-main.service\nstart postgresql@17-main.service\nstop postgresql@17-main.service\nstart postgresql@17-main.service')" ] ||
+    fail "helper ran for stop/start: $(cat "$F/systemctl.calls")"
+  request "rw_3 restart 5432"
+  result_has "action=restart"
+  result_has "error=PostgreSQL (postgresql@17-main.service) was restarted less than a minute ago; try again in a minute"
+  request "rw_4 stop 5499"
+  result_has "ok=0"
+  grep -q "^error=port 5499 is not in /etc/rowsafe/restart-allowed" "$O/result" || fail "unlisted port not refused for stop"
+  for bad in "rw_5 kill 5432" "rw_5 STOP 5432" "rw_5 stop" "rw_5 stop 5432 extra" "rw_5  stop 5432" "rw_5 stop 5432;reboot" \
+    "rw_5 stop postgresql@17-main.service" "rw_5 disable 5432" "rw_5 stop 123456" "rw.5 stop 5432"; do
+    request "$bad"
+    result_has "ok=0"
+    result_has "error=malformed request"
+  done
+  [ "$(calls)" = 4 ] || fail "helper ran systemctl for a refused stop/start: $(cat "$F/systemctl.calls")"
+  : >"$F/systemctl.calls"
+  echo "restart postgresql@17-main.service" >"$F/systemctl.calls"
+  root_free "after stop and start"
+
   # A request symlinked to a file only root can read (holding a valid
   # request) is neither read nor followed; its target stays as it was.
   rm -rf "$W/helper-state"
@@ -1190,13 +1554,16 @@ EOF
   request "task_4 5432"
   result_has "ok=0"
   grep -q "^error=systemctl restart postgresql@17-main.service failed" "$O/result" || fail "failed restart not reported"
+  request "rw_6 stop 5432"
+  result_has "ok=0"
+  grep -q "^error=systemctl stop postgresql@17-main.service failed" "$O/result" || fail "failed stop not reported"
   rm -f "$F/systemctl.rc"
   chmod 666 /etc/rowsafe/restart-allowed
   rm -rf "$W/helper-state"
   request "task_5 5432"
   result_has "error=/etc/rowsafe/restart-allowed is writable by others than root"
   chmod 644 /etc/rowsafe/restart-allowed
-  grep -q "rowsafe-pg-restart: restarted postgresql@17-main.service" "$W/helper.log" || fail "helper did not log the restart"
+  grep -q "rowsafe-pg-restart: restart postgresql@17-main.service: done" "$W/helper.log" || fail "helper did not log the restart"
   pass "restart helper: allow list, bad requests, symlinks, FIFO, once a minute, never writes in the agent's directory"
 
   # The installer never acts as root inside the agent's directories: a
@@ -1215,7 +1582,11 @@ EOF
   as_pg mkdir -m 0700 "$R"
   pass "the installer doesn't follow symlinks planted in the agent's directories"
 
+  pooler_tests
+  update_tests
+
   expect_ok "--no-allow-restart" "$INSTALLER" --no-allow-restart
+  [ ! -e /etc/systemd/system/rowsafe-pg-update.path ] && [ ! -e /etc/rowsafe/updates-allowed ] || fail "--no-allow-restart left updates allowed"
   [ ! -e "$H" ] && [ ! -e /etc/systemd/system/rowsafe-pg-restart.service ] && [ ! -e /etc/systemd/system/rowsafe-pg-restart.path ] ||
     fail "--no-allow-restart left the helper"
   ! grep -q '^[0-9]' /etc/rowsafe/restart-allowed || fail "--no-allow-restart kept the allow list"
@@ -1227,6 +1598,1286 @@ EOF
   expect_ok "purge" "$INSTALLER" --uninstall --purge
   [ ! -e /etc/rowsafe ] || fail "purge left /etc/rowsafe"
   pass "--no-allow-restart, uninstall and purge remove the restart helper"
+}
+
+# ------------------------------------------------------------ files
+
+files_tests() {
+  echo "  -- files (--files, --allow-files)"
+  H=/usr/local/lib/rowsafe/rowsafe-pg-restart
+  R=/var/lib/rowsafe/restart
+  RB=/usr/local/lib/rowsafe/restic
+  D=/etc/systemd/system/rowsafe-files-helper.service.d/folders.conf
+  FU=/etc/systemd/system/rowsafe-files-helper.service
+  FP=/etc/systemd/system/rowsafe-files-helper.path
+  rv=$(sed -n 's/^RESTIC_VERSION=//p' /src/scripts/install.sh)
+  secret_key=AKIAEXAMPLEKEY42 secret=s3cr3t/with+base64= cipher='cipher-pass-that-is-long-enough/+=='
+  configured() {
+    env ROWSAFE_REPO_S3_ENDPOINT=acct.eu.r2.cloudflarestorage.com ROWSAFE_REPO_S3_BUCKET=app-rowsafe \
+      ROWSAFE_REPO_S3_KEY="$secret_key" ROWSAFE_REPO_S3_KEY_SECRET="$secret" ROWSAFE_REPO_CIPHER_PASS="$cipher" "$@"
+  }
+  shop_reg='5432\t/var/run/postgresql\t17\tmain\t/var/lib/postgresql/17/main\t1288490189\tshop\tyes\tactive\tshop\t1.2 GiB\tpostgresql@17-main.service\tdb_fake'
+  command -v bzip2 >/dev/null || apt-get install -y -qq --no-install-recommends bzip2 >/dev/null
+
+  # restic: a tampered download is refused and nothing is installed.
+  mkdir -p "srv/restic-bad/v$rv"
+  echo "not restic" | bzip2 >"srv/restic-bad/v$rv/restic_${rv}_linux_$arch.bz2"
+  scenario
+  expect_ok "a tampered restic is refused" configured env ROWSAFE_RELEASES_URL=https://localhost:8443/agent \
+    ROWSAFE_RESTIC_URL=https://localhost:8443/restic-bad sh "$W/install.sh" rse_secrettoken123
+  grep -q "does not match the SHA-256 of the official $rv release" "$W/out" || fail "tampered restic not reported"
+  [ ! -e "$RB" ] || fail "a tampered restic was installed"
+  if [ -f "srv/restic/v$rv/restic_${rv}_linux_$arch.bz2" ]; then
+    expect_ok "restic installed from the pinned release" configured "$INSTALLER" rse_secrettoken123
+    grep -q "restic $rv installed (official release, SHA-256 verified)" "$W/out" || fail "restic install not reported"
+    [ "$(stat -c '%U %a' "$RB")" = "root 755" ] || fail "restic ownership/mode"
+    "$RB" version | grep -q "^restic $rv " || fail "restic doesn't run"
+    expect_ok "restic kept on a re-run" configured "$INSTALLER"
+    grep -q "restic $rv (backs up the folders" "$W/out" || fail "restic reinstalled on a re-run"
+  else
+    echo "  skip restic from the release (not fetched on the host)"
+    expect_ok "configured install" configured "$INSTALLER" rse_secrettoken123
+  fi
+
+  # The agent is enrolled and running; shop is registered.
+  echo '{"host_id":"host_1","agent_token":"rsa_x"}' >/var/lib/rowsafe/agent.json
+  chown postgres:postgres /var/lib/rowsafe/agent.json
+  pkill -u postgres -f 'rowsafe-agent run' || true
+  runuser -u postgres -- /opt/rowsafe/rowsafe-agent run >/dev/null 2>&1 &
+  sleep 1
+  getent passwd www-data >/dev/null || useradd --system www-data
+  mkdir -p /srv/app/storage/cvs /srv/app/media /srv/other
+  echo cv >/srv/app/storage/cvs/a.pdf
+  chown -R www-data:www-data /srv/app /srv/other
+  chmod 0750 /srv/app /srv/app/storage /srv/app/storage/cvs
+  chmod 0700 /srv/other
+
+  # --files PATH the agent can't read: root gives it read access (ACLs).
+  scenario "discover_out=$shop_reg"
+  printf 'no\n' >"$F/files-access.out"
+  chmod 666 "$F"/*
+  name="--files"
+  expect_ok "--files grants read access and protects the folder" "$INSTALLER" --files /srv/app/storage --no-allow-restart
+  [ -z "${TEST_SHOW:-}" ] || cat "$W/out"
+  called "files add --database db_fake --path /srv/app/storage (postgres)"
+  grep -q "gave the Rowsafe agent read access to /srv/app/storage" "$W/out" || fail "read access not reported"
+  grep -q "/srv/app/storage is backed up with shop" "$W/out" || fail "protection not reported"
+  grep -q "same passphrase restores them" "$W/out" || fail "no word on the files key"
+  getfacl -p /srv/app/storage/cvs 2>/dev/null | grep -qx 'user:postgres:r-x' || fail "no ACL on the folder"
+  getfacl -p /srv/app/storage/cvs 2>/dev/null | grep -qx 'default:user:postgres:r-x' || fail "no default ACL"
+  getfacl -p /srv/app/storage/cvs/a.pdf 2>/dev/null | grep -qx 'user:postgres:r--' || fail "no ACL on a file"
+  runuser -u postgres -- cat /srv/app/storage/cvs/a.pdf >/dev/null || fail "the agent user can't read the file"
+  [ "$(stat -c '%U' /srv/app/storage/cvs/a.pdf)" = "www-data" ] || fail "ownership changed"
+  [ ! -e /etc/rowsafe/files-allowed ] || fail "--files alone allowed the root helper"
+  [ ! -e "$H" ] || fail "--files alone installed the root helper"
+
+  # Without a terminal and without --files, nothing about files is done.
+  scenario "discover_out=$shop_reg"
+  name="no terminal"
+  expect_ok "no terminal, no --files: nothing about files" "$INSTALLER"
+  not_called "files add"
+
+  # On a terminal: the found folder is offered, then "put files back?",
+  # which names exactly the folders it allows.
+  scenario "discover_out=$shop_reg"
+  printf '/srv/app/storage\n' >"$F/files-list.out"
+  printf '/srv/app/storage\t2469606195\t1204\tno\t2.3 GiB\tLaravel storage (uploaded files)\n/srv/app/media\t10240\t3\tno\t10.0 KiB\tuploaded media\n' >"$F/files-discover.out"
+  chmod 666 "$F"/*
+  name="found folder"
+  tty_ok "offer the found folder, allow putting files back" \
+    "Allow Rowsafe to install and manage PgBouncer?\tn\nso a restore brings back both? [Y/n]\t\nAllow Rowsafe to put restored files back into /srv/app/media, as the folder's owner?\ty\n" \
+    "$INSTALLER"
+  has "Rowsafe found /srv/app/media (10.0 KiB, 3 files: uploaded media)"
+  lacks "Rowsafe found /srv/app/storage"
+  called "files add --database db_fake --path /srv/app/media (postgres)"
+  has "Rowsafe may put restored files back into /srv/app/media, as the folder's owner"
+  WWW=$(id -u www-data)
+  [ "$(grep -v '^#' /etc/rowsafe/files-allowed)" = "/srv/app/media $WWW" ] ||
+    fail "files-allowed must list exactly the protected folder and its owner: $(cat /etc/rowsafe/files-allowed)"
+  [ "$(stat -c '%U %a' /etc/rowsafe/files-allowed)" = "root 644" ] || fail "files-allowed ownership/mode"
+  [ "$(grep -c '^ReadWritePaths=' "$D")" = 1 ] && grep -qx "ReadWritePaths=-/srv/app/media" "$D" && ! grep -q "ProtectHome" "$D" ||
+    fail "files unit drop-in: $(cat "$D")"
+  [ -x "$H" ] || fail "--allow-files didn't install the root helper"
+  grep -q '^# actions: .*files-read files-put' "$H" || fail "helper lacks the files actions"
+  # Files mode has its own unit and path unit; the restart helper's stay as
+  # they are (nothing is added to them).
+  grep -qx 'Environment=ROWSAFE_HELPER_MODE=files' "$FU" && grep -q 'CAP_FOWNER' "$FU" && grep -qx 'RestrictSUIDSGID=yes' "$FU" || fail "files unit"
+  grep -qx 'PathExists=/var/lib/rowsafe/restart/files-request' "$FP" || fail "files path unit"
+  [ ! -e /etc/systemd/system/rowsafe-pg-restart.service.d ] || fail "the restart unit got a drop-in"
+  if [ "${TEST_UNITS:-0}" = 1 ] && command -v systemd-analyze >/dev/null; then
+    expect_ok "systemd-analyze verify (files unit with its drop-in)" systemd-analyze verify "$FU" "$FP"
+  fi
+
+  # The helper's files mode, run as its service would.
+  O=$W/files-helper-run
+  ST=$W/files-helper-state
+  install -d -m 0755 -o root -g root "$O"
+  as_pg() { runuser -u postgres -- "$@"; }
+  cat >"$W/fake-systemctl" <<'EOF'
+#!/bin/sh
+echo "$*" >>/tmp/rowsafe-files-systemctl.calls
+EOF
+  chmod 755 "$W/fake-systemctl"
+  helper() { # MODE [ENV...]
+    _mode=$1
+    shift
+    timeout 60 env ROWSAFE_HELPER_MODE="$_mode" ROWSAFE_SYSTEMCTL="$W/fake-systemctl" STATE_DIRECTORY="$ST" RUNTIME_DIRECTORY="$O" "$@" "$H" 2>>"$W/files-helper.log" ||
+      fail "the helper failed or hung (exit $?)"
+  }
+  request() { # LINE: cooldowns cleared unless KEEP_COOLDOWN=1
+    rm -f "$O/files-result"
+    [ "${KEEP_COOLDOWN:-0}" = 1 ] || rm -f "$ST"/last-*
+    printf '%s\n' "$1" | as_pg sh -c 'cat >"$1"' sh "$R/files-request"
+    helper files
+    [ ! -e "$R/files-request" ] || fail "helper left the files request"
+    [ -f "$O/files-result" ] || fail "no result"
+  }
+  result_has() { grep -qxF "$1" "$O/files-result" || {
+    cat "$O/files-result" >&2
+    fail "helper result lacks $1"
+  }; }
+  refused() { # LINE TEXT
+    request "$1"
+    result_has "ok=0"
+    grep -q "^error=.*$2" "$O/files-result" || fail "$1: expected '$2', got: $(cat "$O/files-result")"
+  }
+  allow() { # the allow list, as root writes it
+    printf '%s\n' "$@" >/etc/rowsafe/files-allowed
+    chmod 644 /etc/rowsafe/files-allowed
+  }
+  getent passwd appsvc >/dev/null || useradd --system --home-dir /srv/appsvc --create-home --shell /usr/sbin/nologin appsvc
+  getent passwd alice >/dev/null || useradd --uid 1500 --home-dir /srv/alice --create-home --shell /bin/bash alice
+  install -d -o alice -g alice /srv/alice/uploads
+  ln -sfn /etc /srv/link
+  mkdir -p /srv/rootowned
+  allow "/srv/app/media $WWW" "/srv/other $WWW" "/srv/link $WWW" "/srv/nope $WWW" "/srv/rootowned 0" \
+    "/srv/alice 1500" "/srv/alice/uploads 1500" "/srv 0" "/srv/appsvc $(id -u appsvc)" "/srv/app/storage $WWW 1"
+
+  request "f_1 files-read /srv/other"
+  result_has "ok=1"
+  getfacl -p /srv/other 2>/dev/null | grep -qx 'user:postgres:r-x' || fail "files-read gave no access"
+  [ "$(stat -c '%U' /srv/other)" = "www-data" ] || fail "files-read changed ownership"
+  # files-read keeps a folder's ACL mask: another named entry isn't widened.
+  install -d -o www-data -g www-data -m 0750 /srv/other/masked
+  setfacl -m u:appsvc:rwx,m::r-x /srv/other/masked
+  request "f_1m files-read /srv/other"
+  result_has "ok=1"
+  getfacl -p /srv/other/masked 2>/dev/null | grep -qx 'mask::r-x' || fail "files-read widened the ACL mask: $(getfacl -p /srv/other/masked)"
+  # A service account whose home is exactly the folder is fine.
+  request "f_1s files-read /srv/appsvc"
+  result_has "ok=1"
+  for bad in "/etc/ssh|a system or database folder" "/srv/../etc|not a plain path" "/srv/link|goes through a symbolic link" \
+    "/srv/nope|doesn't exist" "/var/lib/rowsafe/files-staging|a system or database folder" \
+    "/srv/app/media/sub|is not a folder root allowed" "/var/www|is not a folder root allowed" "/opt|is not a folder root allowed" \
+    "/srv/app/storage|is not a folder root allowed" "/srv/alice|is the home folder of alice" \
+    "/srv/alice/uploads|is inside the home folder of alice" "/srv|contains the home folder of"; do
+    refused "f_2 files-read ${bad%%|*}" "${bad#*|}"
+  done
+  # The owner recorded at install must still own the folder.
+  chown 1234 /srv/other
+  refused "f_2u files-read /srv/other" "belongs to uid 1234 now, not uid $WWW"
+  chown www-data /srv/other
+  for bad in "f_3 files-read relative/path" "f_3 files-read /srv/a b" "f_3 files-put all r1 /srv/app/media" \
+    "f_3 files-put missing ../x /srv/app/media" "f_3 files-put missing r1" "f_3 files-read /srv;reboot" "f_3 restart 5432"; do
+    request "$bad"
+    result_has "error=malformed request"
+  done
+
+  # files-put: staged by the agent user, written as the folder's owner with
+  # the owner's own group (not the folder's).
+  S=/var/lib/rowsafe/files-staging/r1
+  stage() { # fresh staged tree
+    as_pg rm -rf "$S"
+    as_pg mkdir -p "$S/tree/sub"
+    printf 'restored\n' | as_pg sh -c 'cat >"$1"' sh "$S/tree/sub/new.txt"
+    printf 'from the snapshot\n' | as_pg sh -c 'cat >"$1"' sh "$S/tree/kept.txt"
+    as_pg chmod 0700 "$S/tree"
+  }
+  stage
+  echo "current" >/srv/app/media/kept.txt
+  echo "added since" >/srv/app/media/extra.txt
+  chown www-data:www-data /srv/app/media/kept.txt /srv/app/media/extra.txt
+  chgrp staff /srv/app/media
+  chmod 0751 /srv/app/media
+  install -d -m 0700 "$ST"
+  mkdir -p "$ST/put.stale"
+  request "f_4 files-put missing r1 /srv/app/media"
+  result_has "ok=1"
+  [ ! -e "$ST/put.stale" ] || fail "a stale private copy was left"
+  [ "$(cat /srv/app/media/sub/new.txt)" = restored ] || fail "files-put missing: new file not there"
+  [ "$(stat -c '%U %G' /srv/app/media/sub/new.txt)" = "www-data www-data" ] || fail "files-put didn't write as the owner with the owner's group: $(stat -c '%U %G' /srv/app/media/sub/new.txt)"
+  [ "$(cat /srv/app/media/kept.txt)" = current ] || fail "files-put missing overwrote a file"
+  [ "$(stat -c '%a' /srv/app/media)" = 751 ] || fail "files-put changed the folder's mode"
+  # At most one files-put every 2 minutes.
+  KEEP_COOLDOWN=1 request "f_5c files-put replace r1 /srv/app/media"
+  result_has "error=files-put ran less than 2 minutes ago; try again later"
+  request "f_5 files-put replace r1 /srv/app/media"
+  result_has "ok=1"
+  [ "$(cat /srv/app/media/kept.txt)" = "from the snapshot" ] || fail "files-put replace"
+  # And one files-read every 10 minutes.
+  request "f_5r files-read /srv/other"
+  KEEP_COOLDOWN=1 request "f_5s files-read /srv/other"
+  result_has "error=files-read ran less than 10 minutes ago; try again later"
+
+  # A compromised agent controls the staged tree: anything but plain files
+  # and folders, or anything bound for .ssh, .gnupg or .config/systemd, is
+  # refused before anything is written.
+  cp /etc/passwd "$W/passwd.before"
+  stage
+  as_pg sh -c "printf '#!/bin/sh\n' >$S/tree/suid.sh && chmod 4755 $S/tree/suid.sh"
+  refused "f_10 files-put missing r1 /srv/app/media" "set-user-ID"
+  [ ! -e /srv/app/media/suid.sh ] || fail "a staged setuid file was written"
+  stage
+  as_pg sh -c "chmod 2755 $S/tree/sub && printf x >$S/tree/sub/g.txt"
+  refused "f_11 files-put missing r1 /srv/app/media" "set-user-ID or set-group-ID"
+  stage
+  as_pg ln -s /etc/passwd "$S/tree/passwd"
+  refused "f_12 files-put replace r1 /srv/app/media" "symbolic link"
+  [ ! -e /srv/app/media/passwd ] && [ ! -L /srv/app/media/passwd ] || fail "a staged symlink was written"
+  stage
+  as_pg ln "$S/tree/kept.txt" "$S/tree/hard.txt"
+  refused "f_13 files-put missing r1 /srv/app/media" "hard link"
+  stage
+  as_pg mkfifo "$S/tree/fifo"
+  refused "f_14 files-put missing r1 /srv/app/media" "device, FIFO or socket"
+  for p in .ssh/authorized_keys sub/.gnupg/pubring.kbx .config/systemd/user/evil.service; do
+    stage
+    as_pg sh -c 'mkdir -p "$(dirname "$1")" && echo x >"$1"' sh "$S/tree/$p"
+    refused "f_16 files-put missing r1 /srv/app/media" "goes where Rowsafe never writes"
+    [ ! -e "/srv/app/media/$p" ] || fail "files-put wrote $p"
+  done
+  cmp -s /etc/passwd "$W/passwd.before" || fail "a refused files-put touched /etc/passwd"
+  # The size cap (20 GB by default; root can lower it in the files unit).
+  stage
+  rm -f "$ST"/last-* "$O/files-result"
+  printf 'f_17b files-put missing r1 /srv/app/media\n' | as_pg sh -c 'cat >"$1"' sh "$R/files-request"
+  helper files ROWSAFE_FILES_MAX_BYTES=10
+  grep -q '^error=the staged files are .* more than the 10 bytes' "$O/files-result" || fail "size cap: $(cat "$O/files-result")"
+  # A folder inside that Rowsafe's own user owns or can write: refused.
+  install -d -o postgres /srv/app/media/pgdir
+  refused "f_18 files-put missing r1 /srv/app/media" "Rowsafe's own user can change /srv/app/media/pgdir"
+  rmdir /srv/app/media/pgdir
+  install -d -o www-data -m 0777 /srv/app/media/open
+  refused "f_18 files-read /srv/app/media" "Rowsafe's own user can change /srv/app/media/open"
+  rmdir /srv/app/media/open
+
+  # Never through a symbolic link in the folder, whether the staged path is
+  # a folder or only a file's parent.
+  install -d -o www-data -g www-data /srv/outside
+  ln -sfn /srv/outside /srv/app/media/linkdir
+  chown -h www-data:www-data /srv/app/media/linkdir
+  stage
+  as_pg sh -c "mkdir $S/tree/linkdir && printf evil >$S/tree/linkdir/evil.txt"
+  refused "f_15 files-put replace r1 /srv/app/media" "linkdir is a symbolic link"
+  [ ! -e /srv/outside/evil.txt ] || fail "files-put wrote through a symlinked folder"
+
+  # mirror deletes only files whose folder is really inside the folder, and
+  # a delete list naming .ssh is refused as a whole.
+  echo "keep" >/srv/outside/x.txt
+  chown www-data:www-data /srv/outside/x.txt
+  stage
+  printf 'extra.txt\n.ssh/authorized_keys\n' | as_pg sh -c 'cat >"$1"' sh "$S/delete"
+  refused "f_6s files-put mirror r1 /srv/app/media" "goes where Rowsafe never writes"
+  [ -e /srv/app/media/extra.txt ] || fail "a refused mirror removed a file"
+  for p in ../../../etc/passwd /etc/passwd; do
+    printf 'extra.txt\n%s\n' "$p" | as_pg sh -c 'cat >"$1"' sh "$S/delete"
+    refused "f_6p files-put mirror r1 /srv/app/media" "a path to remove leaves the folder"
+  done
+  printf 'extra.txt\nsub\nlinkdir/x.txt\n./linkdir/x.txt\n' | as_pg sh -c 'cat >"$1"' sh "$S/delete"
+  request "f_6 files-put mirror r1 /srv/app/media"
+  result_has "ok=1"
+  [ ! -e /srv/app/media/extra.txt ] || fail "files-put mirror left a file added since"
+  [ -d /srv/app/media/sub ] || fail "files-put mirror removed a folder"
+  [ "$(cat /srv/outside/x.txt)" = keep ] || fail "files-put mirror deleted through a symlinked folder"
+  cmp -s /etc/passwd "$W/passwd.before" || fail "files-put mirror touched /etc/passwd"
+  request "f_7 files-put missing nothing /srv/app/media"
+  result_has "error=nothing is staged for restore nothing"
+  refused "f_8 files-put missing r1 /srv/rootowned" "belongs to root: Rowsafe won't write there as root"
+  [ -z "$(find "$R" /var/lib/rowsafe/files-staging -user root)" ] || fail "root left files in the agent's directories"
+  [ -z "$(find "$ST" -maxdepth 1 -name 'put.*')" ] || fail "the helper left its private copy behind"
+  chmod 666 /etc/rowsafe/files-allowed
+  refused "f_9 files-read /srv/other" "/etc/rowsafe/files-allowed is writable by others than root"
+  chmod 644 /etc/rowsafe/files-allowed
+
+  # The restart helper never answers a files request: that is the files
+  # unit's job alone (and its rights stay out of the restart unit).
+  rm -f "$O/files-result"
+  printf 'fr_1 files-read /srv/other\n' | as_pg sh -c 'cat >"$1"' sh "$R/files-request"
+  helper restart
+  [ -e "$R/files-request" ] && [ ! -e "$O/files-result" ] || fail "restart mode answered a files request"
+  as_pg rm -f "$R/files-request"
+  pass "files helper: exact folders and owners, no home/system/.ssh, size cap, cooldowns, own unit, never through symlinks, never root"
+
+  # The installer: --no-allow-files removes the files units; --allow-files
+  # with no folder named allows nothing; --files PATH --allow-files allows
+  # exactly that folder; a re-run with --files adds one to an earlier yes.
+  scenario "discover_out=$shop_reg"
+  printf 'no\n' >"$F/files-access.out"
+  chmod 666 "$F"/*
+  expect_ok "--no-allow-files" "$INSTALLER" --no-allow-files
+  [ ! -e "$D" ] && [ ! -e "$FU" ] && [ ! -e "$FP" ] && [ ! -e "$H" ] || fail "--no-allow-files left the files helper"
+  ! grep -q '^/' /etc/rowsafe/files-allowed || fail "--no-allow-files kept the allow list"
+  expect_ok "--allow-files without a folder" "$INSTALLER" --allow-files
+  grep -q "No folder to put restored files back into yet" "$W/out" || fail "--allow-files alone should allow nothing"
+  [ ! -e "$FU" ] || fail "--allow-files alone installed the files helper"
+  expect_ok "--files PATH --allow-files" "$INSTALLER" --files /srv/app/media --allow-files --allow-restart
+  [ "$(grep -v '^#' /etc/rowsafe/files-allowed)" = "/srv/app/media $WWW" ] || fail "allow list: $(cat /etc/rowsafe/files-allowed)"
+  ! grep -q CAP_FOWNER /etc/systemd/system/rowsafe-pg-restart.service || fail "the restart unit got the files rights"
+  expect_ok "a re-run adds a folder named with --files" "$INSTALLER" --files /srv/other
+  [ "$(grep -v '^#' /etc/rowsafe/files-allowed | sort | paste -sd, -)" = "/srv/app/media $WWW,/srv/other $WWW" ] || fail "allow list after a re-run: $(cat /etc/rowsafe/files-allowed)"
+  grep -qx "ReadWritePaths=-/srv/other" "$D" || fail "drop-in after a re-run"
+  expect_ok "--no-allow-files keeps the helper for restarts" "$INSTALLER" --no-allow-files
+  [ -x "$H" ] && [ ! -e "$D" ] && [ ! -e "$FU" ] || fail "--no-allow-files removed the helper restarts still need"
+  expect_ok "--files PATH --allow-files again" "$INSTALLER" --files /srv/app/media --allow-files
+  expect_fail "--files only with an install" "only go with an install" "$INSTALLER" --uninstall --files /srv/app/media
+  pkill -u postgres -f 'rowsafe-agent run' || true
+  expect_ok "uninstall removes files access and restic" "$INSTALLER" --uninstall
+  [ ! -e "$RB" ] && [ ! -e "$D" ] && [ ! -e "$FU" ] && [ ! -e "$FP" ] && [ ! -e /etc/rowsafe/files-allowed ] && [ ! -e "$H" ] || fail "uninstall left files pieces"
+  expect_ok "purge" "$INSTALLER" --uninstall --purge
+  userdel -r alice 2>/dev/null || true
+  userdel -r appsvc 2>/dev/null || true
+  pass "files: restic, --files, the question, --allow-files, --no-allow-files, uninstall"
+}
+
+# ------------------------------------------------------------ PgBouncer
+
+# pooler_tests: --allow-pooler, and the helper in PgBouncer mode with apt-get
+# and systemctl stood in (called from restart_tests, which set up $H, $F,
+# $W, the systemctl stand-in, request, result_has and as_pg).
+pooler_tests() {
+  echo "  -- PgBouncer on request (--allow-pooler)"
+  PR=/var/lib/rowsafe/pooler
+  # The agent's discovery (agent-owned code) also claims 5499: ignored.
+  scenario "discover_out=$shop\n5499\t/var/run/postgresql\t17\tevil\t/var/lib/postgresql/17/evil\t8192\tevil\tno\t-\tevil\t8.0 KiB\t-\t-"
+  expect_ok "--allow-pooler" "$INSTALLER" --allow-pooler
+  grep -q "Rowsafe may install and manage PgBouncer when you turn pooling on" "$W/out" || fail "--allow-pooler not confirmed"
+  grep -qx "5432" /etc/rowsafe/pooler-allowed && grep -qx "5433" /etc/rowsafe/pooler-allowed || fail "pooler allow list lacks root's clusters"
+  ! grep -q "5499" /etc/rowsafe/pooler-allowed || fail "a port only the agent's discovery reported was allowed"
+  ! grep -qx public /etc/rowsafe/pooler-allowed || fail "public allowed without --allow-pooler-public"
+  [ -e /etc/systemd/system/rowsafe-pooler-apt@.service ] && [ -d /etc/systemd/system/pgbouncer.service.d ] || fail "apt unit or drop-in directory missing"
+  cmp "/etc/systemd/system/rowsafe-pooler-apt@.service" "/src/deploy/systemd/rowsafe-pooler-apt@.service" || fail "pooler apt unit differs"
+  [ "$(stat -c '%U %a' /etc/rowsafe/pooler-allowed)" = "root 644" ] || fail "pooler allow list ownership/mode"
+  [ "$(stat -c '%U %a' "$PR")" = "postgres 700" ] || fail "pooler request directory ownership/mode"
+  cmp "$H" /src/scripts/rowsafe-pg-restart || fail "helper differs from scripts/rowsafe-pg-restart"
+  cmp /etc/systemd/system/rowsafe-pooler.service /src/deploy/systemd/rowsafe-pooler.service || fail "pooler service differs"
+  cmp /etc/systemd/system/rowsafe-pooler.path /src/deploy/systemd/rowsafe-pooler.path || fail "pooler path unit differs"
+  if [ "${TEST_UNITS:-0}" = 1 ]; then
+    expect_ok "systemd-analyze verify (pooler units)" \
+      systemd-analyze verify /etc/systemd/system/rowsafe-pooler.service /etc/systemd/system/rowsafe-pooler.path
+    [ ! -s "$W/out" ] || {
+      cat "$W/out" >&2
+      fail "systemd-analyze verify printed warnings for the pooler units"
+    }
+    systemd-analyze security --offline=true --no-pager /etc/systemd/system/rowsafe-pooler.service 2>/dev/null |
+      tail -n 1 | sed "s/^/  rowsafe-pooler: /"
+  fi
+  scenario "discover_out=$shop"
+  tty_ok "a re-run keeps PgBouncer allowed" "Name it in Rowsafe\t\nTurn on backups for shop now?\tn\n" "$INSTALLER"
+  lacks "Allow Rowsafe to install and manage PgBouncer"
+  grep -qx "5432" /etc/rowsafe/pooler-allowed || fail "a re-run dropped the pooler allow list"
+  # A cluster found since is added only when someone says yes on a terminal.
+  printf '17 main 5432 online postgres - -\n17 other 5433 online postgres - -\n17 new 5434 online postgres - -\n' >/tmp/rowsafe-fake-clusters
+  scenario "discover_out=$shop"
+  expect_ok "a re-run without a terminal" "$INSTALLER"
+  ! grep -qx "5434" /etc/rowsafe/pooler-allowed || fail "a re-run added a cluster without asking"
+  scenario "discover_out=$shop"
+  tty_ok "a re-run asks about a new cluster" "Also allow PgBouncer for the PostgreSQL on port 5434?\ty\nName it in Rowsafe\t\nTurn on backups for shop now?\tn\n" "$INSTALLER"
+  grep -qx "5434" /etc/rowsafe/pooler-allowed || fail "a yes didn't add the new cluster"
+  rm -f /tmp/rowsafe-fake-clusters
+
+  # The helper in PgBouncer mode, run as rowsafe-pooler.service would
+  # (scenario reset the stand-ins). Starting rowsafe-pooler-apt@ACTION runs
+  # the helper in its package mode, as that unit would.
+  cat >"$F/systemctl" <<EOF
+#!/bin/sh
+echo "\$*" >>/tmp/rowsafe-fake/systemctl.calls
+case "\$1 \$2" in
+  "start rowsafe-pooler-apt@install.service") exec env ROWSAFE_HELPER_MODE=pooler-apt ROWSAFE_APT_ACTION=install "$H" ;;
+  "start rowsafe-pooler-apt@purge.service") exec env ROWSAFE_HELPER_MODE=pooler-apt ROWSAFE_APT_ACTION=purge "$H" ;;
+esac
+exit "\$(cat /tmp/rowsafe-fake/systemctl.rc 2>/dev/null || echo 0)"
+EOF
+  chmod 755 "$F/systemctl"
+  cat >"$F/apt-get" <<'APT_EOF'
+#!/bin/sh
+echo "$*" >>/tmp/rowsafe-fake/apt.calls
+case "$*" in
+  *install*pgbouncer*) printf '#!/bin/sh\necho "PgBouncer 1.24.1"\n' >/usr/local/bin/pgbouncer && chmod 755 /usr/local/bin/pgbouncer ;;
+  *purge*pgbouncer*) rm -f /usr/local/bin/pgbouncer ;;
+esac
+APT_EOF
+  chmod 755 "$F/apt-get"
+  OP=$W/pooler-run
+  install -d -m 0755 -o root -g root "$OP"
+  PGB=$W/etc-pgbouncer
+  rm -rf "$PGB" "$W/pooler-state" "$W/systemd"
+  : >"$F/systemctl.calls"
+  pooler_helper() {
+    timeout 30 env ROWSAFE_HELPER_MODE=pooler ROWSAFE_RESTART_DIR="$PR" ROWSAFE_SYSTEMCTL="$F/systemctl" ROWSAFE_APT_GET="$F/apt-get" \
+      ROWSAFE_PGBOUNCER_DIR="$PGB" ROWSAFE_SYSTEMD_DIR="$W/systemd" STATE_DIRECTORY="$W/pooler-state" RUNTIME_DIRECTORY="$OP" \
+      "$H" 2>>"$W/helper.log" || fail "the PgBouncer helper failed or hung (exit $?)"
+  }
+  prequest() {
+    rm -f "$OP/result"
+    printf '%s\n' "$1" | as_pg sh -c 'cat >"$1"' sh "$PR/request"
+    pooler_helper
+    [ ! -e "$PR/request" ] && [ ! -L "$PR/request" ] || fail "helper left the request: $1"
+    [ -f "$OP/result" ] || fail "no result for: $1"
+  }
+  presult() { grep -qxF "$1" "$OP/result" || {
+    cat "$OP/result" >&2
+    fail "PgBouncer helper result lacks $1"
+  }; }
+  pw=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  good="dbport=5432 listen=127.0.0.1,10.0.0.5 port=6432 mode=transaction pool_size=20 reserve_pool=5 max_db_conn=60 max_client_conn=1000 prepared=200 target_host=127.0.0.1 target_port=5432 restart=1 auth_dbname=postgres dbs=shop,app-2"
+
+  pooler_helper # no request: nothing happens
+  [ ! -e "$OP/result" ] || fail "PgBouncer helper answered without a request"
+  rm -f /usr/local/bin/pgbouncer /tmp/rowsafe-fake/apt.calls
+  prequest "pb_1 pooler-install"
+  presult "ok=1"
+  presult "installed=1"
+  presult "version=1.24.1"
+  grep -q "install -y -q --no-install-recommends pgbouncer" /tmp/rowsafe-fake/apt.calls || fail "apt-get install not run: $(cat /tmp/rowsafe-fake/apt.calls)"
+  grep -qx "start rowsafe-pooler-apt@install.service" "$F/systemctl.calls" || fail "the package wasn't installed in its own unit"
+  # At most one install every 10 minutes (removing right after is fine).
+  mv /usr/local/bin/pgbouncer "$W/pgbouncer.keep"
+  rm -f /tmp/rowsafe-fake/apt.calls
+  prequest "pb_c pooler-install"
+  presult "ok=0"
+  grep -q "^error=PgBouncer was installed less than 10 minutes ago" "$OP/result" || fail "no cooldown between installs"
+  [ ! -e /tmp/rowsafe-fake/apt.calls ] || fail "apt-get ran during the cooldown"
+  mv "$W/pgbouncer.keep" /usr/local/bin/pgbouncer
+  prequest "pb_1 pooler-configure $good password=$pw"
+  presult "ok=1"
+  presult "running=1"
+  ini=$PGB/pgbouncer.ini
+  [ "$(head -n 1 "$ini")" = ";; Managed by Rowsafe" ] || fail "config lacks the marker"
+  for line in "* = host=127.0.0.1 port=5432 auth_user=rowsafe_pgbouncer" "shop = host=127.0.0.1 port=5432 auth_user=rowsafe_pgbouncer" \
+    "app-2 = host=127.0.0.1 port=5432 auth_user=rowsafe_pgbouncer" "listen_addr = 127.0.0.1,10.0.0.5" "listen_port = 6432" \
+    "auth_type = scram-sha-256" "auth_dbname = postgres" "pool_mode = transaction" "default_pool_size = 20" \
+    "max_prepared_statements = 200" "admin_users = rowsafe_pgbouncer" 'auth_query = SELECT uname, phash FROM rowsafe_pgbouncer.user_lookup($1)'; do
+    grep -qxF "$line" "$ini" || fail "config lacks: $line"
+  done
+  grep -qxF "\"rowsafe_pgbouncer\" \"$pw\"" "$PGB/userlist.txt" || fail "userlist lacks the password"
+  [ "$(stat -c '%U %G %a' "$ini")" = "root postgres 640" ] && [ "$(stat -c '%U %G %a' "$PGB/userlist.txt")" = "root postgres 640" ] ||
+    fail "config ownership/mode: $(stat -c '%U %G %a' "$ini" "$PGB/userlist.txt")"
+  [ "$(stat -c '%U %a' "$PGB")" = "root 755" ] || fail "config directory ownership/mode"
+  grep -q "LimitNOFILE=65536" "$W/systemd/pgbouncer.service.d/rowsafe.conf" || fail "no file limit drop-in"
+  grep -qx "restart pgbouncer.service" "$F/systemctl.calls" || fail "PgBouncer not (re)started: $(cat "$F/systemctl.calls")"
+  grep -q "enable --quiet pgbouncer.service" "$F/systemctl.calls" || fail "PgBouncer not enabled"
+  [ -z "$(find "$PR" -user root)" ] || fail "root left files in $PR"
+  # Without a password, the existing userlist stays; restart=0 doesn't restart.
+  : >"$F/systemctl.calls"
+  prequest "pb_2 pooler-configure $(printf '%s' "$good" | sed 's/restart=1/restart=0/; s/target_port=5432/target_port=5433/')"
+  presult "ok=1"
+  grep -qxF "* = host=127.0.0.1 port=5433 auth_user=rowsafe_pgbouncer" "$ini" || fail "retarget not written"
+  grep -qF "$pw" "$PGB/userlist.txt" || fail "userlist lost its password"
+  ! grep -q "^restart" "$F/systemctl.calls" || fail "restart=0 restarted PgBouncer"
+  prequest "pb_3 pooler-reload"
+  presult "ok=1"
+  grep -qx "reload pgbouncer.service" "$F/systemctl.calls" || fail "reload not run"
+  # PgBouncer only reaches allowed ports on 127.0.0.1.
+  for bad in "target_host=10.9.9.9" "target_host=db.example.com" "target_port=5499"; do
+    key=${bad%%=*}
+    prequest "pb_t pooler-configure $(printf '%s' "$good" | sed "s/$key=[^ ]*//; s/  */ /g") $bad"
+    presult "ok=0"
+  done
+  grep -q "^error=port 5499 is not in /etc/rowsafe/pooler-allowed: PgBouncer can't send connections there" "$OP/result" || fail "a foreign target port not refused"
+  # Every address only with root's --allow-pooler-public.
+  prequest "pb_p pooler-configure $(printf '%s' "$good" | sed 's/listen=[^ ]*/listen=*/')"
+  presult "ok=0"
+  grep -q "^error=listening on every address isn't allowed" "$OP/result" || fail "listen=* not refused"
+  cp /etc/rowsafe/pooler-allowed "$W/allow.keep"
+  echo public >>/etc/rowsafe/pooler-allowed
+  prequest "pb_p pooler-configure $(printf '%s' "$good" | sed 's/listen=[^ ]*/listen=*/')"
+  presult "ok=1"
+  grep -qxF "listen_addr = *" "$ini" || fail "listen=* not written with the opt-in"
+  cp "$W/allow.keep" /etc/rowsafe/pooler-allowed
+  prequest "pb_2 pooler-configure $(printf '%s' "$good" | sed 's/restart=1/restart=0/; s/target_port=5432/target_port=5433/')"
+  presult "ok=1"
+  # Refusals: an unlisted port, bad values, anything that isn't a plain value.
+  prequest "pb_4 pooler-configure $(printf '%s' "$good" | sed 's/dbport=5432/dbport=5499/')"
+  presult "ok=0"
+  grep -q "^error=port 5499 is not in /etc/rowsafe/pooler-allowed" "$OP/result" || fail "unlisted pooler port not refused"
+  for bad in "mode=statement" "listen=localhost" "target_host=-evil" "pool_size=0" "port=80" "password=NOTHEX" \
+    "auth_dbname=Bad-Name" "max_client_conn=5" "pool_size=007" "dbs=pgbouncer" "dbs=a.b"; do
+    key=${bad%%=*}
+    prequest "pb_5 pooler-configure $(printf '%s' "$good" | sed "s/$key=[^ ]*//; s/  */ /g") $bad"
+    presult "ok=0"
+  done
+  # shellcheck disable=SC2016 # literal $(reboot) must reach the helper
+  for bad in "pb_6 pooler-configure listen=1.2.3.4;reboot" 'pb_6 pooler-configure target_host=$(reboot)' "pb_6 pooler-evil" \
+    "pb 6 pooler-install" "pb_6 restart 5432" "pb_6 pooler-configure mode=transaction ; x=1"; do
+    prequest "$bad"
+    presult "ok=0"
+  done
+  grep -qxF "* = host=127.0.0.1 port=5433 auth_user=rowsafe_pgbouncer" "$ini" || fail "a refused request changed the config"
+  # Someone else's PgBouncer configuration is never replaced.
+  cp "$ini" "$W/ini.rowsafe"
+  printf '[databases]\nmine = host=10.9.9.9\n' >"$ini"
+  prequest "pb_7 pooler-configure $good password=$pw"
+  presult "ok=0"
+  grep -q "has its own configuration" "$OP/result" || fail "a foreign config was not refused"
+  grep -q "mine = host=10.9.9.9" "$ini" || fail "a foreign config was replaced"
+  cp "$W/ini.rowsafe" "$ini"
+  # A group-writable allow list is refused.
+  chmod 664 /etc/rowsafe/pooler-allowed
+  prequest "pb_8 pooler-reload"
+  presult "error=/etc/rowsafe/pooler-allowed is writable by others than root"
+  chmod 644 /etc/rowsafe/pooler-allowed
+  # PgBouncer requests never reach the restart helper's mode.
+  request "pb_9 pooler-reload"
+  result_has "error=malformed request"
+  # Off right after the install: stopped, drop-in removed, and the package
+  # Rowsafe installed purged (the cooldown is per action).
+  : >"$F/systemctl.calls"
+  prequest "pb_10 pooler-off remove_package=1"
+  presult "ok=1"
+  presult "removed=1"
+  grep -qx "stop pgbouncer.service" "$F/systemctl.calls" && grep -q "disable --quiet pgbouncer.service" "$F/systemctl.calls" ||
+    fail "PgBouncer not stopped and disabled"
+  grep -q "purge -y -q pgbouncer" /tmp/rowsafe-fake/apt.calls || fail "package not purged"
+  [ ! -e "$ini" ] && [ ! -e "$W/systemd/pgbouncer.service.d/rowsafe.conf" ] || fail "off left files"
+  [ ! -e /usr/local/bin/pgbouncer ] || fail "pgbouncer still installed"
+  # A package that was there before is kept, with its own files put back.
+  printf '#!/bin/sh\necho "PgBouncer 1.18.0"\n' >/usr/local/bin/pgbouncer
+  chmod 755 /usr/local/bin/pgbouncer
+  install -d -o postgres -g postgres "$PGB"
+  rm -f /tmp/rowsafe-fake/apt.calls
+  prequest "pb_11 pooler-install"
+  presult "installed=0"
+  presult "version=1.18.0"
+  [ ! -e /tmp/rowsafe-fake/apt.calls ] || fail "apt-get ran for an installed package"
+  prequest "pb_11 pooler-configure $good password=$pw"
+  presult "ok=1"
+  prequest "pb_12 pooler-off remove_package=1"
+  presult "removed=0"
+  [ -x /usr/local/bin/pgbouncer ] || fail "a package Rowsafe didn't install was removed"
+  rm -f /usr/local/bin/pgbouncer
+  grep -q "pooler-configure: done (request pb_1)" "$W/helper.log" || fail "PgBouncer helper did not log"
+  pass "PgBouncer helper: install, configure from its template, reload, off; allow list, bad values, foreign configs"
+
+  expect_ok "--no-allow-pooler" "$INSTALLER" --no-allow-pooler
+  [ ! -e /etc/systemd/system/rowsafe-pooler.service ] && [ ! -e /etc/systemd/system/rowsafe-pooler.path ] || fail "--no-allow-pooler left the units"
+  [ -e "$H" ] || fail "--no-allow-pooler removed the helper restarts still use"
+  grep -q "is off" /etc/rowsafe/pooler-allowed || fail "--no-allow-pooler kept the allow list"
+  scenario "discover_out=$shop"
+  expect_ok "--allow-pooler again" "$INSTALLER" --allow-pooler
+  expect_ok "--no-allow-restart keeps the helper for PgBouncer" "$INSTALLER" --no-allow-restart
+  [ -e "$H" ] && [ -e /etc/systemd/system/rowsafe-pooler.path ] || fail "--no-allow-restart removed the helper PgBouncer uses"
+  expect_ok "--no-allow-pooler" "$INSTALLER" --no-allow-pooler
+  [ ! -e "$H" ] || fail "the helper stayed with neither restarts nor PgBouncer allowed"
+  scenario "discover_out=$shop"
+  expect_ok "--allow-restart" "$INSTALLER" --allow-restart
+  pass "--allow-pooler / --no-allow-pooler install and remove the PgBouncer helper"
+}
+
+# ------------------------------------------------------------ MySQL servers
+
+# mysql_host_tests: a server with MySQL and no PostgreSQL. The agent runs as
+# mysql (a unit drop-in), Percona XtraBackup comes from Percona's repository
+# after its key's fingerprint is checked, Rowsafe's option file is included
+# from /etc/mysql/conf.d, AppArmor's mysqld profile lets mysqld use Rowsafe's
+# folders, and a purge keeps the server's binary log settings.
+mysql_host_tests() {
+  echo "  -- a MySQL server (no PostgreSQL)"
+  pkill -u postgres -f 'rowsafe-agent run' 2>/dev/null || true
+  userdel -r postgres 2>/dev/null || userdel postgres
+  rm -rf /usr/lib/postgresql /var/lib/postgresql
+  useradd --system --home-dir /nonexistent --no-create-home --shell /bin/false mysql
+  printf '#!/bin/sh\necho "/usr/sbin/mysqld  Ver 8.4.3 for Linux on x86_64 (MySQL Community Server - GPL)"\n' >/usr/sbin/mysqld
+  chmod 755 /usr/sbin/mysqld
+  mkdir -p /etc/mysql/conf.d /etc/apparmor.d
+  echo '#include <local/usr.sbin.mysqld>' >/etc/apparmor.d/usr.sbin.mysqld
+  # Percona's key comes over the internet; the releases from the local server.
+  cat /etc/ssl/certs/ca-certificates.crt "$W/tls.crt" >"$W/both.crt"
+  export CURL_CA_BUNDLE=$W/both.crt
+  expect_ok "MySQL server: configured install" configured env ROWSAFE_ENROLL_TOKEN=rse_secrettoken123 "$INSTALLER" --no-setup
+  [ -z "${TEST_SHOW:-}" ] || cat "$W/out"
+  grep -q "restore tests for the MySQL on this server" "$W/out" || fail "installer doesn't speak of MySQL"
+  dpkg -s percona-xtrabackup-84 >/dev/null 2>&1 || fail "percona-xtrabackup-84 not installed"
+  [ -s /usr/share/keyrings/rowsafe-percona.gpg ] || fail "Percona keyring missing"
+  grep -q 'signed-by=/usr/share/keyrings/rowsafe-percona.gpg\] https://repo.percona.com/pxb-84-lts/apt' \
+    /etc/apt/sources.list.d/rowsafe-percona-xtrabackup.list || fail "Percona source not pinned to its key"
+  grep -qx 'User=mysql' /etc/systemd/system/rowsafe-agent.service.d/10-mysql.conf || fail "no drop-in running the agent as mysql"
+  cmp /etc/systemd/system/rowsafe-agent.service /src/deploy/systemd/rowsafe-agent.service || fail "the unit itself changed"
+  [ "$(stat -c '%U %a' /etc/rowsafe/agent.env)" = "mysql 600" ] || fail "agent.env ownership/mode on a MySQL server"
+  [ "$(stat -c '%U %G %a' /etc/rowsafe)" = "root mysql 750" ] || fail "/etc/rowsafe ownership/mode on a MySQL server"
+  [ "$(stat -c '%U %a' /etc/rowsafe/mysql/server.cnf)" = "mysql 640" ] || fail "Rowsafe's option file ownership/mode"
+  [ "$(readlink /etc/mysql/conf.d/zz-rowsafe.cnf)" = /etc/rowsafe/mysql/server.cnf ] || fail "option file not included from conf.d"
+  grep -q '^/var/lib/rowsafe/\*\* rwk,$' /etc/apparmor.d/local/usr.sbin.mysqld || fail "AppArmor override missing"
+  command -v pgbackrest >/dev/null || fail "pgbackrest (storage test) not installed"
+  pass "MySQL server: agent as mysql, XtraBackup from Percona (key checked), option file and AppArmor"
+  expect_ok "MySQL server: re-run is idempotent" configured "$INSTALLER" --no-setup
+  [ "$(grep -c "^# Rowsafe:" /etc/apparmor.d/local/usr.sbin.mysqld)" = 1 ] || fail "AppArmor override added twice"
+  echo "log_bin = binlog" >>/etc/rowsafe/mysql/server.cnf
+  expect_ok "MySQL server: purge" "$INSTALLER" --uninstall --purge
+  [ -f /etc/mysql/conf.d/zz-rowsafe.cnf ] && [ ! -L /etc/mysql/conf.d/zz-rowsafe.cnf ] &&
+    grep -q '^log_bin = binlog$' /etc/mysql/conf.d/zz-rowsafe.cnf || fail "purge dropped the server's binary log settings"
+  [ ! -e /etc/systemd/system/rowsafe-agent.service.d/10-mysql.conf ] || fail "uninstall left the drop-in"
+  pass "MySQL server: purge keeps the server's binary log settings as a plain file"
+}
+
+# ------------------------------------------------------------ updates
+
+update_tests() {
+  echo "  -- updates on request (--allow-updates, --allow-security-updates, --allow-reboot)"
+  U=/etc/rowsafe/updates-allowed
+  scenario "discover_out=$shop"
+  expect_ok "--allow-updates" "$INSTALLER" --allow-updates
+  grep -q "Rowsafe may install PostgreSQL updates and upgrade PostgreSQL" "$W/out" || fail "--allow-updates not confirmed"
+  grep -q '^postgresql ' "$U" && ! grep -q '^security' "$U" && ! grep -q '^reboot' "$U" || fail "updates allow list: $(cat "$U")"
+  [ "$(stat -c '%U %a' "$U")" = "root 644" ] || fail "updates allow list ownership/mode"
+  cmp /etc/systemd/system/rowsafe-pg-update.service /src/deploy/systemd/rowsafe-pg-update.service || fail "update service differs"
+  cmp /etc/systemd/system/rowsafe-pg-update.path /src/deploy/systemd/rowsafe-pg-update.path || fail "update path unit differs"
+  if [ "${TEST_UNITS:-0}" = 1 ]; then
+    expect_ok "systemd-analyze verify (update units)" \
+      systemd-analyze verify /etc/systemd/system/rowsafe-pg-update.service /etc/systemd/system/rowsafe-pg-update.path
+  fi
+  scenario "discover_out=$shop"
+  tty_ok "a re-run keeps the update answers" "Name it in Rowsafe\t\nTurn on backups for shop now?\tn\n" "$INSTALLER"
+  lacks "install PostgreSQL updates when you click"
+  scenario "discover_out=$shop"
+  expect_ok "--allow-security-updates --allow-reboot" "$INSTALLER" --allow-security-updates --allow-reboot
+  grep -q '^postgresql ' "$U" && grep -q '^security ' "$U" && grep -q '^reboot ' "$U" || fail "updates allow list: $(cat "$U")"
+
+  # The helper in update mode, with apt, dpkg, the cluster tools and
+  # systemctl stood in. The stand-ins keep their state in $S.
+  S=$F/cluster
+  B=$F/bin
+  rm -rf "$S" "$B"
+  mkdir -p "$S" "$B"
+  chmod 777 "$S"
+  cat >"$B/fake" <<'FAKE_EOF'
+#!/bin/sh
+S=/tmp/rowsafe-fake/cluster
+cmd=${0##*/}
+echo "$cmd $*" >>"$S/calls"
+case $cmd in
+  pg_lsclusters) cat "$S/clusters" 2>/dev/null ;;
+  dpkg-query)
+    case $* in
+      *'${Version}'*)
+        for a; do pkg=$a; done
+        cat "$S/version-${pkg#postgresql-}" 2>/dev/null ;;
+      *postgresql-17-\**) echo "ii  postgresql-17-cron" ;;
+      *postgresql-18-\**) [ ! -e "$S/installed-18" ] || echo "ii  postgresql-18-cron" ;;
+      *postgresql-18*) [ ! -e "$S/installed-18" ] || echo "ii  postgresql-18" ;;
+    esac ;;
+  apt-cache) printf '%s:\n  Installed: (none)\n  Candidate: 1.0-1\n' "$2" ;;
+  apt-get)
+    case " $* " in
+      *' -s '*dist-upgrade*)
+        echo "Inst libssl3t64 [3.5.1-1] (3.5.1-1+deb13u1 Debian-Security:13/stable-security [arm64])"
+        echo "Inst postgresql-17 [17.5-1] (17.6-1 Debian-Security:13/stable-security [arm64])"
+        echo "Inst tzdata [2025a-1] (2025b-1 Debian:13/stable [all])" ;;
+      ' -s remove '*) shift 2; for p in "$@"; do echo "Remv $p [1.0-1]"; done ;;
+      *' remove '*) rm -f "$S/installed-18" ;;
+      *' install '*--only-upgrade*postgresql-17*) echo 17.6-1 >"$S/version-17" ;;
+      *' install '*postgresql-18*)
+        touch "$S/installed-18"
+        mkdir -p /usr/lib/postgresql/18/bin && touch /usr/lib/postgresql/18/bin/pg_upgrade && chmod 755 /usr/lib/postgresql/18/bin/pg_upgrade
+        echo "18 main 5433 online postgres /var/lib/postgresql/18/main /var/log/postgresql/postgresql-18-main.log" >>"$S/clusters" ;;
+    esac ;;
+  pg_dropcluster)
+    [ "$1" = --stop ] && shift
+    grep -v "^$1 $2 " "$S/clusters" >"$S/c.tmp"
+    cat "$S/c.tmp" >"$S/clusters" ;;
+  pg_upgradecluster)
+    [ ! -e "$S/upgrade.fail" ] || { echo "pg_upgrade failed: Your installation contains ..."; exit 1; }
+    printf '17 main 5433 down postgres /var/lib/postgresql/17/main log\n18 main 5432 down postgres /var/lib/postgresql/18/main log\n' >"$S/clusters" ;;
+  pg_conftool)
+    [ "$(id -un)" = postgres ] || { echo "pg_conftool must run as the cluster owner" >&2; exit 1; }
+    sed "s/^$1 $2 [0-9]* /$1 $2 $5 /" "$S/clusters" >"$S/c.tmp"
+    cat "$S/c.tmp" >"$S/clusters" ;;
+  du) printf '1048576\t%s\n' "$2" ;;
+esac
+exit 0
+FAKE_EOF
+  chmod 755 "$B/fake"
+  for c in pg_lsclusters dpkg-query apt-cache apt-get pg_dropcluster pg_upgradecluster pg_conftool du; do ln -s fake "$B/$c"; done
+  cat >"$F/systemctl" <<'FAKE_EOF'
+#!/bin/sh
+S=/tmp/rowsafe-fake/cluster
+echo "$*" >>/tmp/rowsafe-fake/systemctl.calls
+case $1 in
+  show) echo 1000 ;;
+  start | stop)
+    case $2 in
+      postgresql@*)
+        m=${2#postgresql@}
+        m=${m%%-*}
+        from=down to=online
+        [ "$1" = start ] || { from=online to=down; }
+        [ "$1" = stop ] || [ ! -e "$S/start-$m.fail" ] || exit 1
+        sed "s/^$m main \([0-9]*\) $from /$m main \1 $to /" "$S/clusters" >"$S/c.tmp"
+        cat "$S/c.tmp" >"$S/clusters"
+        ;;
+    esac
+    ;;
+esac
+exit 0
+FAKE_EOF
+  chmod 755 "$F/systemctl"
+  for m in 17 18; do
+    install -d -o postgres -g postgres /etc/postgresql/$m/main /var/lib/postgresql/$m/main
+    echo "$m" | runuser -u postgres -- sh -c 'cat >"$1"' sh /var/lib/postgresql/$m/main/PG_VERSION
+  done
+  echo "17 main 5432 online postgres /var/lib/postgresql/17/main /var/log/postgresql/postgresql-17-main.log" >"$S/clusters"
+  echo 17.5-1 >"$S/version-17"
+  : >"$S/calls"
+  : >"$S/c.tmp"
+  chmod 666 "$S"/*
+  rm -rf "$W/helper-state"
+  uhelper() {
+    timeout 30 env ROWSAFE_HELPER_MODE=update ROWSAFE_HELPER_PATH="$B:/usr/sbin:/usr/bin:/sbin:/bin" ROWSAFE_SYSTEMCTL="$F/systemctl" \
+      STATE_DIRECTORY="$W/helper-state" RUNTIME_DIRECTORY="$O" "$H" 2>>"$W/helper.log" || fail "the update helper failed or hung (exit $?)"
+  }
+  urequest() {
+    rm -f "$O/update-result"
+    : >"$S/calls"
+    : >"$F/systemctl.calls"
+    printf '%s\n' "$1" | as_pg sh -c 'cat >"$1"' sh "$R/update-request"
+    uhelper
+    [ ! -e "$R/update-request" ] || fail "helper left the update request: $1"
+    [ -f "$O/update-result" ] || fail "no update result for: $1"
+  }
+  u_has() { grep -qxF -- "$1" "$O/update-result" || {
+    cat "$O/update-result" >&2
+    fail "update result lacks $1"
+  }; }
+  u_called() { grep -qF -- "$1" "$S/calls" || {
+    cat "$S/calls" >&2
+    fail "the helper didn't run: $1"
+  }; }
+
+  uhelper # no request: nothing happens
+  [ ! -e "$O/update-result" ] || fail "update helper answered without a request"
+  for bad in "u1 pg-minor-update" "u1 pg-minor-update 5432 extra" "u1 apt-get install evil" "u1 pg-upgrade 5432 18 dump" \
+    "u1 pg-install-major 5432 9" "u1 pg-install-major 5432 18;reboot" "u1 reboot now" "u1 pg-upgrade-undo 5432" "u.1 reboot" \
+    "u1 security-updates 5432" "u1 pg-upgrade 5432 18 copy --force"; do
+    urequest "$bad"
+    u_has "ok=0"
+    u_has "error=malformed request"
+    [ ! -s "$S/calls" ] && [ ! -s "$F/systemctl.calls" ] || fail "the helper ran something for a malformed request: $bad"
+  done
+  # A restart request isn't read in update mode.
+  printf 'r1 restart 5432\n' | as_pg sh -c 'cat >"$1"' sh "$R/request"
+  rm -f "$O/update-result"
+  uhelper
+  [ -e "$R/request" ] && [ ! -e "$O/update-result" ] || fail "update mode read the restart request"
+  as_pg rm -f "$R/request"
+
+  # A minor update: only that major's packages, then a restart.
+  urequest "u2 pg-minor-update 5432"
+  u_has "ok=1"
+  u_has "package=17.6-1"
+  u_has "from_package=17.5-1"
+  u_has "restarted=1"
+  u_called "--only-upgrade postgresql-17 postgresql-client-17 libpq5 postgresql-17-cron"
+  grep -qx "restart postgresql@17-main.service" "$F/systemctl.calls" || fail "minor update: no restart: $(cat "$F/systemctl.calls")"
+  ! grep -q 'postgresql-18' "$S/calls" || fail "a minor update touched another major"
+  urequest "u3 pg-minor-update 5499"
+  u_has "ok=0"
+  grep -q "^error=port 5499 is not in /etc/rowsafe/restart-allowed" "$O/update-result" || fail "unlisted port not refused"
+  sed -i '/^postgresql /d' "$U"
+  urequest "u4 pg-minor-update 5432"
+  u_has "error=installing PostgreSQL updates from Rowsafe is not allowed on this server (run the installer again with --allow-updates)"
+  [ ! -s "$S/calls" ] || fail "the helper ran something that isn't allowed"
+  echo "postgresql" >>"$U"
+  chmod 666 "$U"
+  urequest "u5 pg-minor-update 5432"
+  u_has "error=$U is writable by others than root"
+  chmod 644 "$U"
+
+  # A new major: its packages and the extension's; the package's own
+  # cluster dropped.
+  urequest "u6 pg-install-major 5432 18"
+  u_has "ok=1"
+  u_has "packages=postgresql-18 postgresql-client-18 postgresql-18-cron"
+  u_has "dropped= 18/main"
+  u_called "pg_dropcluster 18 main"
+  grep -qx "stop postgresql@18-main.service" "$F/systemctl.calls" || fail "the package's cluster wasn't stopped by root first"
+  urequest "u7 pg-install-major 5432 16"
+  grep -q "^error=PostgreSQL 16 is not newer" "$O/update-result" || fail "older major not refused"
+
+  # The upgrade: pg_upgradecluster, the allow list moved to the new unit,
+  # the new version started, a record kept for undo.
+  urequest "u8 pg-upgrade 5432 18 copy"
+  u_has "ok=1"
+  u_has "aside_port=5433"
+  u_has "unit=postgresql@18-main.service"
+  u_called "pg_upgradecluster -v 18 -m upgrade -j"
+  u_called "--no-start 17 main"
+  grep -qx "5432 postgresql@18-main.service" /etc/rowsafe/restart-allowed || fail "allow list not moved to 18"
+  [ "$(stat -c '%U %a' /etc/rowsafe/restart-allowed)" = "root 644" ] || fail "allow list ownership/mode after the upgrade"
+  grep -qx "start postgresql@18-main.service" "$F/systemctl.calls" || fail "18 not started"
+  grep -qx "status=upgraded" "$W/helper-state/upgrade-5432" || fail "no upgrade record"
+  urequest "u9 pg-upgrade 5432 19 link"
+  grep -q "^ok=0" "$O/update-result" || fail "a second upgrade wasn't refused"
+  urequest "u10 pg-upgrade-undo 5432 start"
+  u_has "ok=1"
+  u_has "unit=postgresql@17-main.service"
+  u_called "pg_conftool 18 main set port 5433"
+  u_called "pg_conftool 17 main set port 5432"
+  [ "$(cat /etc/postgresql/18/main/start.conf)" = manual ] && [ "$(cat /etc/postgresql/17/main/start.conf)" = auto ] || fail "start.conf not switched"
+  [ "$(stat -c %U /etc/postgresql/17/main/start.conf)" = postgres ] || fail "root wrote the cluster's start.conf"
+  grep -qx "5432 postgresql@17-main.service" /etc/rowsafe/restart-allowed || fail "allow list not moved back to 17"
+  grep -q '^17 main 5432 online' "$S/clusters" || fail "17 not running on 5432: $(cat "$S/clusters")"
+  urequest "u11 pg-upgrade-undo 5432 start"
+  u_has "error=that upgrade was already undone"
+  grep -qx "old_data=/var/lib/postgresql/17/main" "$W/helper-state/upgrade-5432" &&
+    grep -qx "new_data=/var/lib/postgresql/18/main" "$W/helper-state/upgrade-5432" || fail "data directories not recorded"
+  # The agent user owns /etc/postgresql: it can repoint where PostgreSQL 18's
+  # data lives, or make its configuration directory a link. Root must not
+  # remove anything but the recorded data directory.
+  cp "$S/clusters" "$S/clusters.good"
+  install -d -o postgres -g postgres /var/lib/postgresql/decoy
+  echo 18 >/var/lib/postgresql/decoy/PG_VERSION
+  chown postgres /var/lib/postgresql/decoy/PG_VERSION
+  for dir in /etc /var/lib/postgresql/decoy /home; do
+    sed "s|^18 main 5433 down postgres [^ ]*|18 main 5433 down postgres $dir|" "$S/clusters.good" >"$S/clusters"
+    urequest "u12a pg-upgrade-cleanup 5432"
+    u_has "ok=0"
+    grep -q "^error=Rowsafe didn't remove PostgreSQL 18/main: PostgreSQL 18/main's data directory is now $dir, not /var/lib/postgresql/18/main as recorded" "$O/update-result" ||
+      fail "a repointed data directory ($dir) wasn't refused: $(cat "$O/update-result")"
+    ! grep -q pg_dropcluster "$S/calls" || fail "pg_dropcluster ran for a repointed data directory ($dir)"
+  done
+  cp "$S/clusters.good" "$S/clusters"
+  # The recorded path, but now a link to somewhere else.
+  mv /var/lib/postgresql/18/main /var/lib/postgresql/18/main.real
+  ln -s /var/lib/postgresql/decoy /var/lib/postgresql/18/main
+  urequest "u12b pg-upgrade-cleanup 5432"
+  grep -q "^error=.*the data directory /var/lib/postgresql/18/main is missing or its path goes through a symbolic link" "$O/update-result" ||
+    fail "a linked data directory wasn't refused: $(cat "$O/update-result")"
+  rm /var/lib/postgresql/18/main
+  mv /var/lib/postgresql/18/main.real /var/lib/postgresql/18/main
+  # A linked configuration directory, and a log link pointing at a system file.
+  mv /etc/postgresql/18/main /etc/postgresql/18/main.real
+  ln -s /etc/postgresql/18/main.real /etc/postgresql/18/main
+  urequest "u12c pg-upgrade-cleanup 5432"
+  grep -q "^error=.*the configuration directory /etc/postgresql/18/main is missing or its path goes through a symbolic link" "$O/update-result" ||
+    fail "a linked configuration directory wasn't refused: $(cat "$O/update-result")"
+  rm /etc/postgresql/18/main
+  mv /etc/postgresql/18/main.real /etc/postgresql/18/main
+  runuser -u postgres -- ln -s /etc/shadow /etc/postgresql/18/main/log
+  urequest "u12d pg-upgrade-cleanup 5432"
+  grep -q "^error=.*/etc/postgresql/18/main/log points outside /var/log/postgresql" "$O/update-result" ||
+    fail "a log link to /etc/shadow wasn't refused: $(cat "$O/update-result")"
+  rm /etc/postgresql/18/main/log
+  [ -s /etc/shadow ] && [ -f /var/lib/postgresql/decoy/PG_VERSION ] || fail "something outside the cluster was removed"
+  ! grep -q pg_dropcluster "$S/calls" || fail "pg_dropcluster ran despite a refusal"
+  pass "cluster removal refuses repointed or linked data and configuration directories"
+  urequest "u12 pg-upgrade-cleanup 5432"
+  u_has "ok=1"
+  u_has "dropped=18/main"
+  u_called "pg_dropcluster 18 main"
+  grep -q "^packages_removed=postgresql-18 postgresql-18-cron" "$O/update-result" || fail "18's packages not removed: $(cat "$O/update-result")"
+  [ ! -e "$W/helper-state/upgrade-5432" ] || fail "upgrade record kept after cleanup"
+
+  # A failed upgrade: pg_upgradecluster starts the old version again.
+  urequest "u13 pg-install-major 5432 18"
+  u_has "ok=1"
+  touch "$S/upgrade.fail"
+  urequest "u14 pg-upgrade 5432 18 copy"
+  u_has "ok=0"
+  u_has "rolled_back=1"
+  grep -q "^error=pg_upgrade failed, and PostgreSQL 17 runs as before" "$O/update-result" || fail "failed upgrade not explained"
+  grep -qx "5432 postgresql@17-main.service" /etc/rowsafe/restart-allowed || fail "a failed upgrade moved the allow list"
+  rm -f "$S/upgrade.fail"
+  # The new version doesn't start (Safe mode): the old one is put back.
+  touch "$S/start-18.fail"
+  urequest "u15 pg-upgrade 5432 18 copy"
+  u_has "ok=0"
+  u_has "rolled_back=1"
+  grep -q "Rowsafe put PostgreSQL 17 back and started it" "$O/update-result" || fail "failed start not rolled back: $(cat "$O/update-result")"
+  grep -qx "5432 postgresql@17-main.service" /etc/rowsafe/restart-allowed || fail "allow list not put back"
+  grep -q '^17 main 5432 online' "$S/clusters" || fail "17 not back on 5432: $(cat "$S/clusters")"
+  [ ! -e "$W/helper-state/upgrade-5432" ] || fail "record kept after a rollback"
+  rm -f "$S/start-18.fail"
+
+  # Security updates: from security origins only, PostgreSQL held back.
+  urequest "u16 security-updates"
+  u_has "ok=1"
+  u_has "installed=1"
+  u_has "packages=libssl3t64 "
+  u_has "held_back=postgresql-17 "
+  u_called "--only-upgrade libssl3t64"
+  ! grep -q 'install.*tzdata' "$S/calls" || fail "a non-security update was installed"
+  # Reboot: answered first, then asked of systemd.
+  urequest "u17 reboot"
+  u_has "ok=1"
+  u_has "status=rebooting"
+  grep -qx -- "--no-block reboot" "$F/systemctl.calls" || fail "no reboot asked: $(cat "$F/systemctl.calls")"
+  sed -i '/^reboot /d' "$U"
+  urequest "u18 reboot"
+  u_has "error=rebooting the server from Rowsafe is not allowed here (run the installer again with --allow-reboot)"
+  [ ! -s "$F/systemctl.calls" ] || fail "rebooted without permission"
+  root_free "after update requests"
+  pass "update helper: request shapes, allow lists, minor update, new major, upgrade, undo, cleanup, rollback, security updates, reboot"
+
+  scenario "discover_out=$shop"
+  expect_ok "--no-allow-updates --no-allow-security-updates --no-allow-reboot" "$INSTALLER" --no-allow-updates --no-allow-security-updates --no-allow-reboot
+  [ ! -e /etc/systemd/system/rowsafe-pg-update.path ] && ! grep -q '^[a-z]' "$U" || fail "updates still allowed"
+  [ -e "$H" ] || fail "turning updates off removed the restart helper"
+  scenario "discover_out=$shop"
+  expect_ok "--allow-updates again" "$INSTALLER" --allow-updates
+  pass "--no-allow-updates and friends turn updates off and keep restarts"
+}
+
+# ------------------------------------------------------------ firewall
+
+# firewall_tests: --allow-firewall, and the firewall helper with the real
+# nft (the container has its own network namespace and CAP_NET_ADMIN).
+firewall_tests() {
+  echo "  -- the firewall on request (--allow-firewall)"
+  apt-get install -y -qq --no-install-recommends nftables >/dev/null
+  H=/usr/local/lib/rowsafe/rowsafe-firewall
+  D=/var/lib/rowsafe/firewall
+  # The ports come from root's own look (pg_lsclusters here), never from the
+  # agent's discover output: port 22 in either is never allowed.
+  cat >/usr/local/bin/pg_lsclusters <<'PGEOF'
+#!/bin/sh
+printf '17 main 5432 online postgres /var/lib/postgresql/17/main /var/log/postgresql/postgresql-17-main.log\n'
+printf '17 odd 22 online postgres /var/lib/postgresql/17/odd /var/log/postgresql/postgresql-17-odd.log\n'
+PGEOF
+  chmod 755 /usr/local/bin/pg_lsclusters
+  # The restart tests purged everything: install again, with a running agent.
+  scenario
+  expect_ok "install again for the firewall tests" configured "$INSTALLER" rse_secrettoken123
+  echo '{"host_id":"host_1","agent_token":"rsa_x"}' >/var/lib/rowsafe/agent.json
+  chown postgres:postgres /var/lib/rowsafe/agent.json
+  runuser -u postgres -- /opt/rowsafe/rowsafe-agent run >/dev/null 2>&1 &
+  sleep 1
+  scenario "discover_out=$shop\n22\t/var/run/postgresql\t17\todd\t/var/lib/postgresql/17/odd\t8192\todd\tno\t-\todd\t8.0 KiB\tssh.service\t-"
+  expect_ok "--allow-firewall" "$INSTALLER" --allow-firewall
+  grep -q "Rowsafe may limit who can reach PostgreSQL's port (5432) when you ask" "$W/out" || {
+    cat "$W/out" >&2
+    fail "--allow-firewall not confirmed"
+  }
+  grep -qx "5432" /etc/rowsafe/firewall-allowed || fail "firewall allow list lacks 5432"
+  ! grep -qx "22" /etc/rowsafe/firewall-allowed || fail "port 22 made it into the firewall allow list"
+  ! grep -q "ssh.service" /etc/rowsafe/restart-allowed 2>/dev/null || fail "an agent-reported unit made it into the restart allow list"
+  [ "$(stat -c '%U %a' /etc/rowsafe/firewall-allowed)" = "root 644" ] || fail "firewall allow list ownership/mode"
+  [ "$(stat -c '%U %a' "$H")" = "root 755" ] || fail "firewall helper ownership/mode"
+  [ "$(stat -c '%U %a' "$D")" = "postgres 700" ] || fail "firewall request directory ownership/mode"
+  cmp "$H" /src/scripts/rowsafe-firewall || fail "helper differs from scripts/rowsafe-firewall"
+  for u in rowsafe-firewall.service rowsafe-firewall.path rowsafe-firewall-restore.service; do
+    cmp "/etc/systemd/system/$u" "/src/deploy/systemd/$u" || fail "$u differs"
+  done
+  ! grep -q "ReadWritePaths" /etc/systemd/system/rowsafe-firewall.service || fail "the firewall unit may write somewhere"
+  if [ "${TEST_UNITS:-0}" = 1 ]; then
+    expect_ok "systemd-analyze verify (firewall units)" systemd-analyze verify /etc/systemd/system/rowsafe-firewall.service \
+      /etc/systemd/system/rowsafe-firewall.path /etc/systemd/system/rowsafe-firewall-restore.service
+    [ ! -s "$W/out" ] || {
+      cat "$W/out" >&2
+      fail "systemd-analyze verify printed warnings for the firewall units"
+    }
+    systemd-analyze security --offline=true --no-pager /etc/systemd/system/rowsafe-firewall.service 2>/dev/null |
+      tail -n 1 | sed "s/^/  rowsafe-firewall: /"
+  fi
+  # A re-run keeps the list as it is and asks nothing (restarts answered
+  # already, so only the database questions come).
+  scenario "discover_out=$shop"
+  expect_ok "restarts and PgBouncer off for the firewall tests" "$INSTALLER" --no-allow-restart --no-allow-pooler
+  scenario "discover_out=$shop"
+  tty_ok "a re-run keeps the firewall allowed" "Name it in Rowsafe\t\nTurn on backups for shop now?\tn\n" "$INSTALLER"
+  lacks "Allow Rowsafe to limit who can reach"
+  grep -qx "5432" /etc/rowsafe/firewall-allowed || fail "a re-run dropped the firewall allow list"
+
+  FO=$W/fw-run
+  install -d -m 0755 -o root -g root "$FO"
+  as_pg() { runuser -u postgres -- "$@"; }
+  # ss and sshd stand in: PostgreSQL (postgres) listens on 5432 and 5433,
+  # root on 5499, sshd on 22 and 2222.
+  pg_uid=$(id -u postgres)
+  {
+    echo '#!/bin/sh'
+    echo 'case "$*" in'
+    echo "*p*) printf 'LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:((\"sshd\",pid=1,fd=3))\\n' ;;"
+    echo "*) printf 'LISTEN 0 244 0.0.0.0:5432 0.0.0.0:* uid:$pg_uid ino:1 sk:1\\nLISTEN 0 244 0.0.0.0:5433 0.0.0.0:* uid:$pg_uid ino:2 sk:2\\nLISTEN 0 128 0.0.0.0:5499 0.0.0.0:* uid:0 ino:3 sk:3\\n' ;;"
+    echo 'esac'
+  } >"$F/ss"
+  printf '#!/bin/sh\nprintf "port 22\\nport 2222\\n"\n' >"$F/sshd"
+  chmod 755 "$F/ss" "$F/sshd"
+  fw() {
+    timeout 90 env STATE_DIRECTORY="$W/fw-state" RUNTIME_DIRECTORY="$FO" ROWSAFE_FIREWALL_CONFIRM_WAIT="${WAIT:-3}" \
+      ROWSAFE_SS="$F/ss" ROWSAFE_SSHD="$F/sshd" "$H" "$@" 2>>"$W/fw.log" ||
+      fail "the firewall helper failed or hung (exit $?)"
+  }
+  # fw_request LINE ADDRESSES CONFIRM: as the agent does (CONFIRM=1 writes
+  # the confirmation once the helper answers phase=pending). The agent
+  # removes its own files afterwards: the helper never does.
+  fw_request() {
+    rm -f "$FO/result"
+    [ -z "$2" ] || printf '%b' "$2" | as_pg sh -c 'cat >"$1"' sh "$D/addresses"
+    confirmer=''
+    if [ "${3:-0}" = 1 ]; then
+      # At most 10 seconds (100 x 0.1s).
+      (
+        for _ in $(seq 1 100); do
+          if grep -qx phase=pending "$FO/result" 2>/dev/null; then
+            printf '%s\n' "${1%% *}" | as_pg sh -c 'cat >"$1.tmp" && mv "$1.tmp" "$1"' sh "$D/confirm"
+            break
+          fi
+          sleep 0.1
+        done
+      ) &
+      confirmer=$!
+    fi
+    printf '%s\n' "$1" | as_pg sh -c 'cat >"$1"' sh "$D/request"
+    fw
+    # Only the confirmer: a bare wait would also wait for the fake agent,
+    # which runs until pkill.
+    [ -z "$confirmer" ] || wait "$confirmer"
+    [ -e "$D/request" ] || fail "helper removed the agent's request: $1"
+    [ -f "$FO/result" ] || fail "no result for: $1"
+    as_pg rm -f "$D/request" "$D/addresses" "$D/confirm"
+  }
+  fw_has() { grep -qxF "$1" "$FO/result" || {
+    cat "$FO/result" >&2
+    fail "firewall helper result lacks $1"
+  }; }
+  rules() { nft list table inet rowsafe 2>/dev/null; }
+
+  fw # no request: nothing happens
+  [ ! -e "$FO/result" ] || fail "firewall helper answered without a request"
+  fw_request "fw_1 apply 5432" '10.0.0.0/16\n2001:db8::/32\n' 1
+  fw_has "id=fw_1"
+  fw_has "phase=done"
+  fw_has "ok=1"
+  rules | grep -q "tcp dport 5432 ip saddr 10.0.0.0/16 accept" || fail "no IPv4 allow rule: $(rules)"
+  rules | grep -q "tcp dport 5432 ip6 saddr 2001:db8::/32 accept" || fail "no IPv6 allow rule: $(rules)"
+  rules | grep -q "tcp dport 5432 drop" || fail "no drop rule: $(rules)"
+  ! rules | grep -q "dport 22" || fail "the firewall helper touched SSH"
+  grep -qx "addresses=10.0.0.0/16,2001:db8::/32" "$FO/port-5432" && grep -qx "loaded=1" "$FO/port-5432" || fail "port state not published"
+  [ "$(stat -c '%U %a' "$FO/port-5432")" = "root 644" ] || fail "port state ownership/mode"
+  [ -f "$W/fw-state/port-5432" ] && [ ! -e "$W/fw-state/pending-5432" ] || fail "a confirmed rule was not kept as port-5432"
+  # A request is handled once.
+  printf 'fw_1 apply 5432\n' | as_pg sh -c 'cat >"$1"' sh "$D/request"
+  rm -f "$FO/result"
+  fw
+  [ ! -e "$FO/result" ] || fail "the same request was handled twice"
+  as_pg rm -f "$D/request"
+
+  # Without the agent's confirmation the previous rule comes back.
+  WAIT=1 fw_request "fw_2 apply 5432" '192.168.7.0/24\n' 0
+  fw_has "ok=0"
+  grep -q "^error=the agent did not confirm" "$FO/result" || fail "unconfirmed change not explained"
+  rules | grep -q "10.0.0.0/16" && ! rules | grep -q "192.168.7.0/24" || fail "unconfirmed change not rolled back: $(rules)"
+  grep -qx "addresses=10.0.0.0/16,2001:db8::/32" "$FO/port-5432" || fail "rolled back state not published"
+  [ ! -e "$W/fw-state/pending-5432" ] || fail "an unconfirmed rule was kept"
+
+  n=0
+  for bad in "0.0.0.0/0" "10.0.0.0/4" "::/0" "1.2.3.4;flush" "300.1.1.1" "example.com" '1.2.3.4 } accept; chain x {'; do
+    n=$((n + 1))
+    fw_request "fw_3_$n apply 5432" "$bad\n" 1
+    fw_has "ok=0"
+    grep -q "^error=not an address or range" "$FO/result" || fail "bad address $bad not refused"
+  done
+  fw_request "fw_4 apply 5499" '10.1.0.0/16\n' 1
+  grep -q "^error=port 5499 is not in /etc/rowsafe/firewall-allowed" "$FO/result" || fail "unlisted port not refused"
+  # Whatever the allow list says: never SSH, never below 1024, and only a
+  # port PostgreSQL (the postgres user) listens on.
+  printf '5432\n2222\n22\n5433\n5499\n' >/etc/rowsafe/firewall-allowed
+  fw_request "fw_ssh apply 2222" '10.1.0.0/16\n' 1
+  grep -q "^error=port 2222 is SSH's" "$FO/result" || fail "an sshd port was not refused"
+  fw_request "fw_low apply 22" '10.1.0.0/16\n' 1
+  grep -q "^error=port 22 can't be managed by Rowsafe" "$FO/result" || fail "a port below 1024 was not refused"
+  fw_request "fw_nopg apply 5499" '10.1.0.0/16\n' 1
+  grep -q "^error=no PostgreSQL of the postgres user listens on port 5499" "$FO/result" || fail "a port without PostgreSQL was not refused"
+  printf '5432\n' >/etc/rowsafe/firewall-allowed
+  for bad in "fw_5 flush 5432" "fw_5 apply" "fw_5 apply 5432 x" "fw.5 apply 5432" 'x; nft flush ruleset 5432' "fw_5 apply 05432" "fw_5 apply 99999999"; do
+    fw_request "$bad" "" 0
+    fw_has "error=malformed request"
+  done
+  rules | grep -q "10.0.0.0/16" || fail "refused requests changed the rules"
+  # A symlinked request is neither read nor followed.
+  printf 'fw_9 remove 5432\n' >"$W/fw-sentinel"
+  chmod 600 "$W/fw-sentinel"
+  as_pg ln -s "$W/fw-sentinel" "$D/request"
+  rm -f "$FO/result"
+  fw
+  [ ! -e "$FO/result" ] || fail "a symlinked request was read"
+  [ "$(cat "$W/fw-sentinel")" = "fw_9 remove 5432" ] || fail "a symlinked request changed its target"
+  as_pg rm -f "$D/request"
+  [ -z "$(find "$D" -user root)" ] || fail "root left files in $D"
+
+  # Status: whether nftables still holds the rules.
+  fw_request "fw_s1 status 5432" "" 0
+  fw_has "ok=1"
+  grep -qx "loaded=1" "$FO/port-5432" || fail "status: rules not reported loaded"
+  nft delete table inet rowsafe
+  fw_request "fw_s2 status 5432" "" 0
+  grep -qx "loaded=0" "$FO/port-5432" || fail "status: a flushed table reported loaded"
+
+  # At boot the kept rules come back; an unconfirmed one doesn't.
+  printf '10.77.0.0/16\n' >"$W/fw-state/pending-5432"
+  fw --restore
+  rules | grep -q "10.0.0.0/16" || fail "--restore did not load the rules"
+  ! rules | grep -q "10.77.0.0/16" || fail "--restore loaded an unconfirmed rule"
+  [ ! -e "$W/fw-state/pending-5432" ] || fail "--restore kept an unconfirmed rule"
+  fw_request "fw_6 remove 5432" "" 0
+  fw_has "ok=1"
+  ! rules | grep -q . || fail "remove left the table: $(rules)"
+  [ ! -e "$FO/port-5432" ] || fail "remove left the port state"
+  pass "firewall helper: nft rules, confirmation and rollback, pending rules, bad addresses and ports, SSH, allow list, symlinks, status, --restore, remove"
+
+  fw_request "fw_7 apply 5432" '10.2.0.0/16\n' 1
+  expect_ok "--no-allow-firewall" "$INSTALLER" --no-allow-firewall
+  [ ! -e "$H" ] && [ ! -e /etc/systemd/system/rowsafe-firewall.path ] || fail "--no-allow-firewall left the helper"
+  ! rules | grep -q . || fail "--no-allow-firewall left Rowsafe's rules"
+  ! grep -q '^[0-9]' /etc/rowsafe/firewall-allowed || fail "--no-allow-firewall kept the allow list"
+  scenario "discover_out=$shop"
+  expect_ok "--allow-firewall again" "$INSTALLER" --allow-firewall
+  pkill -u postgres -f 'rowsafe-agent run' || true
+  expect_ok "uninstall removes the firewall helper" "$INSTALLER" --uninstall
+  [ ! -e "$H" ] && [ ! -e /etc/systemd/system/rowsafe-firewall-restore.service ] || fail "uninstall left the firewall helper"
+  expect_ok "purge" "$INSTALLER" --uninstall --purge
+  rm -f /usr/local/bin/pg_lsclusters
+  pass "--no-allow-firewall, uninstall and purge remove the firewall helper and its rules"
+}
+
+# ------------------------------------------------------------ forks: new clusters
+
+create_cluster_tests() {
+  echo "  -- creating clusters for forks (--allow-create-cluster)"
+  H=/usr/local/lib/rowsafe/rowsafe-pg-restart
+  C=/usr/local/lib/rowsafe/rowsafe-pg-create-cluster
+  R=/var/lib/rowsafe/restart
+  # pg_createcluster stood in: it writes the cluster's configuration like
+  # postgresql-common does.
+  cat >/usr/local/bin/pg_createcluster <<'EOF'
+#!/bin/sh
+echo "$*" >>/tmp/rowsafe-fake/pg_createcluster.calls
+[ "$1" = --port ] || exit 2
+port=$2 major=$5 name=$6
+mkdir -p "/etc/postgresql/$major/$name"
+printf "data_directory = '/var/lib/postgresql/%s/%s'\nport = %s\n" "$major" "$name" "$port" >"/etc/postgresql/$major/$name/postgresql.conf"
+EOF
+  chmod 755 /usr/local/bin/pg_createcluster
+  scenario "discover_out=$shop"
+  expect_ok "--allow-create-cluster" configured "$INSTALLER" rse_secrettoken123 --allow-create-cluster
+  grep -q "Rowsafe may create a new PostgreSQL cluster (ports 5440-5499)" "$W/out" || fail "--allow-create-cluster not confirmed"
+  grep -qx "ports 5440-5499" /etc/rowsafe/create-cluster-allowed || fail "allow file lacks the ports"
+  [ "$(stat -c '%U %a' /etc/rowsafe/create-cluster-allowed)" = "root 644" ] || fail "create allow file ownership/mode"
+  [ "$(stat -c '%U %a' /etc/rowsafe/created-clusters)" = "root 644" ] || fail "created-clusters ownership/mode"
+  cmp "$C" /src/scripts/rowsafe-pg-create-cluster || fail "cluster creator differs from scripts/rowsafe-pg-create-cluster"
+  cmp /etc/systemd/system/rowsafe-pg-create-cluster@.service /src/deploy/systemd/rowsafe-pg-create-cluster@.service || fail "create unit differs"
+  cmp "$H" /src/scripts/rowsafe-pg-restart || fail "helper not installed for cluster creation"
+  [ "$(stat -c '%U %a' "$R")" = "postgres 700" ] || fail "request directory ownership/mode"
+  if [ "${TEST_UNITS:-0}" = 1 ]; then
+    expect_ok "systemd-analyze verify (create unit)" systemd-analyze verify /etc/systemd/system/rowsafe-pg-create-cluster@.service
+  fi
+
+  # The helper, with systemctl standing in for systemd: starting the create
+  # unit runs the creator as the unit would.
+  O=$W/helper-run
+  rm -rf "$O" "$W/helper-state"
+  install -d -m 0755 -o root -g root "$O"
+  install -d "$W/pgroot/17/bin"
+  printf '#!/bin/sh\n' >"$W/pgroot/17/bin/postgres"
+  chmod 755 "$W/pgroot/17/bin/postgres"
+  cat >"$F/systemctl" <<EOF
+#!/bin/sh
+echo "\$*" >>/tmp/rowsafe-fake/systemctl.calls
+case "\$1 \$2" in
+  "start rowsafe-pg-create-cluster@"*)
+    i=\${2#rowsafe-pg-create-cluster@}
+    # The unit's output goes to its journal (stood in by a file).
+    env ROWSAFE_PG_ROOT=$W/pgroot $C "\${i%.service}" 2>>/tmp/rowsafe-fake/journal
+    exit \$? ;;
+esac
+exit 0
+EOF
+  chmod 755 "$F/systemctl"
+  printf '#!/bin/sh\ncat /tmp/rowsafe-fake/journal 2>/dev/null\n' >"$F/journalctl"
+  chmod 755 "$F/journalctl"
+  helper() {
+    timeout 30 env ROWSAFE_SYSTEMCTL="$F/systemctl" ROWSAFE_JOURNALCTL="$F/journalctl" STATE_DIRECTORY="$W/helper-state" \
+      RUNTIME_DIRECTORY="$O" "$H" 2>>"$W/helper.log" || fail "the helper failed or hung (exit $?)"
+  }
+  as_pg() { runuser -u postgres -- "$@"; }
+  request() {
+    rm -f "$O/result" "$F/journal"
+    printf '%s\n' "$1" | as_pg sh -c 'cat >"$1"' sh "$R/request"
+    helper
+    [ -f "$O/result" ] || fail "no result for: $1"
+  }
+  result_has() { grep -qxF "$1" "$O/result" || {
+    cat "$O/result" >&2
+    fail "helper result lacks $1"
+  }; }
+  grep -q '^# actions: restart stop start create-cluster\( \|$\)' "$H" || fail "the helper doesn't say it creates clusters"
+
+  request "fork_1-create create-cluster 5440 17 shop_staging"
+  result_has "action=create-cluster"
+  result_has "ok=1"
+  result_has "unit=postgresql@17-shop_staging.service"
+  grep -q -- "--port 5440 --start-conf auto 17 shop_staging" "$F/pg_createcluster.calls" || fail "pg_createcluster not asked"
+  grep -qx "5440 postgresql@17-shop_staging.service" /etc/rowsafe/created-clusters || fail "the new cluster isn't listed"
+  # The helper may now stop and start it, like a cluster in restart-allowed.
+  request "fork_1-stop stop 5440"
+  result_has "ok=1"
+  result_has "unit=postgresql@17-shop_staging.service"
+  request "fork_1-start start 5440"
+  result_has "ok=1"
+  # Refused: outside the range, taken, not installed, bad requests.
+  request "fork_2 create-cluster 5439 17 other"
+  result_has "ok=0"
+  result_has "error=port 5439 is not in the ports Rowsafe may create clusters on (5440-5499)"
+  request "fork_3 create-cluster 5441 17 shop_staging"
+  result_has "error=a PostgreSQL 17 cluster named shop_staging already exists"
+  request "fork_4 create-cluster 5440 17 other"
+  result_has "error=port 5440 is already used by a cluster Rowsafe manages"
+  request "fork_5 create-cluster 5442 16 other"
+  result_has "error=PostgreSQL 16 is not installed on this server"
+  for bad in "fork_6 create-cluster 5443 17 Bad" "fork_6 create-cluster 5443 17 a-b" "fork_6 create-cluster 5443 17 x;reboot" \
+    "fork_6 create-cluster 5443 17" "fork_6 create-cluster 543 17 x" "fork_6 create-cluster 5443 7 x" "fork_6 create-cluster 5443 17 ../x"; do
+    request "$bad"
+    result_has "ok=0"
+    result_has "error=malformed request"
+  done
+  [ "$(grep -c . "$F/pg_createcluster.calls")" = 1 ] || fail "pg_createcluster ran for a refused request: $(cat "$F/pg_createcluster.calls")"
+  # The creator checks on its own too (root could start the unit by hand).
+  if env ROWSAFE_PG_ROOT="$W/pgroot" "$C" "17-6000-x" 2>"$W/creator.err"; then
+    fail "the creator made a cluster outside the allowed ports"
+  fi
+  grep -q "port 6000 is not in the ports" "$W/creator.err" || fail "the creator didn't explain the refused port"
+  # The creator writes nothing of Rowsafe's: only the helper lists clusters.
+  grep -qx "ReadWritePaths=/etc/postgresql /var/lib/postgresql -/var/log/postgresql" /etc/systemd/system/rowsafe-pg-create-cluster@.service ||
+    fail "the create unit may write outside PostgreSQL's directories"
+  # A cluster whose configuration doesn't name the requested port isn't listed.
+  cat >/usr/local/bin/pg_createcluster <<'EOF'
+#!/bin/sh
+mkdir -p "/etc/postgresql/$5/$6"
+printf "port = 5999\n" >"/etc/postgresql/$5/$6/postgresql.conf"
+EOF
+  request "fork_9 create-cluster 5447 17 sneaky"
+  result_has "ok=0"
+  grep -q "^error=the new cluster's configuration .* doesn't name port 5447" "$O/result" || fail "a cluster on another port was accepted"
+  ! grep -q "^5447 \|sneaky" /etc/rowsafe/created-clusters || fail "a cluster on another port was listed"
+  rm -rf /etc/postgresql/17/sneaky
+  chmod 666 /etc/rowsafe/create-cluster-allowed
+  request "fork_7 create-cluster 5445 17 other"
+  result_has "error=/etc/rowsafe/create-cluster-allowed is writable by others than root"
+  chmod 644 /etc/rowsafe/create-cluster-allowed
+  pass "creating clusters for forks: allow file, the creator's checks, bad requests, stop/start of created clusters"
+
+  expect_ok "--no-allow-create-cluster" "$INSTALLER" --no-allow-create-cluster
+  [ ! -e "$C" ] && [ ! -e /etc/systemd/system/rowsafe-pg-create-cluster@.service ] || fail "--no-allow-create-cluster left the creator"
+  ! grep -q '^ports' /etc/rowsafe/create-cluster-allowed || fail "--no-allow-create-cluster kept the ports"
+  grep -qx "5440 postgresql@17-shop_staging.service" /etc/rowsafe/created-clusters || fail "created clusters were forgotten"
+  request "fork_8 create-cluster 5446 17 other"
+  result_has "error=creating PostgreSQL clusters from Rowsafe is not allowed on this server"
+  request "fork_8-stop stop 5440"
+  result_has "ok=1"
+  pkill -u postgres -f 'rowsafe-agent run' || true
+  expect_ok "uninstall" "$INSTALLER" --uninstall --purge
+  [ ! -e "$H" ] && [ ! -e "$C" ] || fail "uninstall left the helpers"
+  rm -rf /usr/local/bin/pg_createcluster /etc/postgresql/17/shop_staging "$W/pgroot"
+  pass "--no-allow-create-cluster keeps created clusters manageable; uninstall removes everything"
 }
 
 case ${1:-} in

@@ -29,6 +29,11 @@ COPY release ./release
 COPY collect ./collect
 COPY client ./client
 COPY mcp ./mcp
+COPY masking ./masking
+COPY pglog ./pglog
+COPY preview ./preview
+COPY tune ./tune
+COPY pgprobe ./pgprobe
 ARG VERSION=dev
 ARG TARGETOS=linux
 ARG TARGETARCH
@@ -44,6 +49,13 @@ ARG PG_MAJOR=17
 # images, 70 in the Alpine ones. The agent checks this at startup.
 ARG PG_UID=999
 ARG PG_GID=999
+# restic backs up the folders that go with a database (Files): the pinned
+# official release, checked against the SHA-256 in its signed SHA256SUMS
+# (the same pins as scripts/install.sh).
+ARG RESTIC_VERSION=0.19.1
+ARG RESTIC_SHA256_AMD64=f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c
+ARG RESTIC_SHA256_ARM64=a5f64aaab53d51e311fa3829124c5b703f2d14cf187d8640b6be3b2b49376465
+ARG TARGETARCH
 ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8
 
 # The postgres user first, so the packages below reuse it; no default
@@ -62,7 +74,15 @@ RUN set -eux; \
     echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${DEBIAN_SUITE}-pgdg main" \
       > /etc/apt/sources.list.d/pgdg.list; \
     apt-get update; \
-    apt-get install -y --no-install-recommends "postgresql-${PG_MAJOR}" pgbackrest; \
+    apt-get install -y --no-install-recommends "postgresql-${PG_MAJOR}" pgbackrest bzip2; \
+    case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+      amd64) restic_sum="${RESTIC_SHA256_AMD64}"; restic_arch=amd64 ;; \
+      arm64) restic_sum="${RESTIC_SHA256_ARM64}"; restic_arch=arm64 ;; \
+      *) echo "no pinned restic for ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/restic.bz2 "https://github.com/restic/restic/releases/download/v${RESTIC_VERSION}/restic_${RESTIC_VERSION}_linux_${restic_arch}.bz2"; \
+    echo "${restic_sum}  /tmp/restic.bz2" | sha256sum -c -; \
+    bunzip2 -c /tmp/restic.bz2 >/usr/local/bin/restic; rm -f /tmp/restic.bz2; chmod 0755 /usr/local/bin/restic; \
     localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8; \
     apt-get purge -y --auto-remove curl; \
     # JIT is never used here (drills only count tables). Up to PostgreSQL 17 \
@@ -75,14 +95,17 @@ RUN set -eux; \
     if [ -n "$jit" ]; then dpkg --purge --force-depends $jit; fi; \
     rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/*; \
     test "$(id -u postgres):$(id -g postgres)" = "${PG_UID}:${PG_GID}"; \
-    pgbackrest version; "/usr/lib/postgresql/${PG_MAJOR}/bin/postgres" --version
+    pgbackrest version; "/usr/lib/postgresql/${PG_MAJOR}/bin/postgres" --version; restic version
 
 # /var/lib/rowsafe: identity, generated pgBackRest configs, drills (a volume).
 # /rowsafe-spool: WAL handed over by archive_command (a volume shared with
 # PostgreSQL; a new, empty volume takes this directory's owner, so
 # PostgreSQL can write to it). /var/run/postgresql: PostgreSQL's socket (a
 # shared volume).
+# /rowsafe-files: mount the volumes whose files go with the database here
+# (read-only is enough to back them up; see compose.example.yml).
 RUN install -d -o postgres -g postgres -m 0700 /var/lib/rowsafe /var/log/rowsafe /rowsafe-spool \
+ && install -d -m 0755 /rowsafe-files \
  && install -d -o postgres -g postgres -m 2775 /var/run/postgresql \
  && install -d -o postgres -g postgres -m 0700 /tmp/pgbackrest
 
@@ -101,6 +124,8 @@ ENV ROWSAFE_MODE=docker-sidecar \
     ROWSAFE_PG_BIN_DIR=/usr/lib/postgresql/%d/bin \
     ROWSAFE_PGBACKREST_BIN=/usr/bin/pgbackrest \
     ROWSAFE_AUTO_UPDATE=false \
+    ROWSAFE_RESTIC_BIN=/usr/local/bin/restic \
+    ROWSAFE_FILES_MOUNT_DIR=/rowsafe-files \
     PG_MAJOR=${PG_MAJOR}
 
 USER ${PG_UID}:${PG_GID}

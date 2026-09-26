@@ -11,11 +11,13 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rowsafe/rowsafe/collect"
 	"github.com/rowsafe/rowsafe/internal/pgbackrest"
 	"github.com/rowsafe/rowsafe/internal/pginspect"
+	"github.com/rowsafe/rowsafe/pglog"
 	"github.com/rowsafe/rowsafe/protocol"
 	"github.com/rowsafe/rowsafe/release"
 )
@@ -48,10 +50,71 @@ type Agent struct {
 	// fastMu is held while the fast lane runs a restore point, so a
 	// restart for an update waits for it.
 	fastMu sync.Mutex
+	// maintMu is held while the fast lane's side worker runs a maintenance
+	// task (a health fix), for the same reason; maintBusy says one runs.
+	maintMu   sync.Mutex
+	maintBusy atomic.Bool
+	// poolerBusy says a pooling task runs beside the fast lane (pooling.go).
+	poolerBusy atomic.Bool
+
+	// rewinds records copies and kept data directories (rewindState()).
+	rewinds    *rewindStore
+	rewindOnce sync.Once
+	// inPlaceMu is held while a rewind in place, an undo or the deletion of
+	// kept data runs: one at a time.
+	inPlaceMu sync.Mutex
+	// rewindOps runs the steps of a rewind in place (tests replace it).
+	rewindOps inPlaceOps
+
+	// files backs up the folders that go with databases (files.go).
+	files     *filesRuntime
+	filesOnce sync.Once
+	// Rowsafe Storage credentials (storage.go); confMu serializes writes
+	// of pgBackRest configs (tasks, credential rotation, repo moves).
+	storage   managedStorage
+	confMu    sync.Mutex
+	syncTried sync.Map // stanza -> time of the last repo move attempt
+	syncBusy  atomic.Bool
+	stanzaMu  sync.Mutex // ensureStanza
+	// second is the second copy and storage use (secondcopy.go).
+	second secondCopyState
+	// PostgreSQL updates and upgrades (software.go, updates.go, upgrade.go):
+	// the newest software report, a nudge to refresh it, the upgrade
+	// records, and seams for tests.
+	swMu             sync.Mutex
+	sw               *protocol.SoftwareReport
+	swKick           chan struct{}
+	upgrades         *upgradeStore
+	upgradeOnce      sync.Once
+	updateHelperFn   updateHelperFunc
+	pingDB           func(context.Context, protocol.DatabaseSpec) error
+	checkArchivingFn func(context.Context, protocol.DatabaseSpec) error
+	finishBackupsFn  func(context.Context, protocol.DatabaseSpec) error
+	skipAnalyze      bool
+	// Standby (standby*.go): the runtime, and its steps (tests replace them).
+	sbOnce sync.Once
+	sbRT   *standbyRuntime
+	sbOps  standbyOps
+	// sbLaneMu is held while the standby lane runs a task.
+	sbLaneMu sync.Mutex
+
+	// Fork (fork*.go): the runtime, and the steps a fork restore runs
+	// (tests replace them).
+	fkOnce sync.Once
+	fkRT   *forkRuntime
+	fkOps  forkOps
+	// docker talks to the opt-in container control service (docker_control.go).
+	docker dockerControl
+
+	// copies records Guard's preview and safe copies (copyState()).
+	copies     *copyStore
+	copiesOnce sync.Once
+	// copyPasswordMu serializes setting safe copies' passwords.
+	copyPasswordMu sync.Mutex
 }
 
 func New(cfg Config, logger *slog.Logger) *Agent {
-	a := &Agent{cfg: cfg, log: logger, runner: pgbackrest.ExecRunner{}, pgArchiveMode: pginspect.ArchiveMode}
+	a := &Agent{cfg: cfg, log: logger, runner: pgbackrest.ExecRunner{}, pgArchiveMode: pginspect.ArchiveMode, swKick: make(chan struct{}, 1)}
 	u, reason := NewUpdater(cfg, logger)
 	if u == nil {
 		logger.Warn("agent self-update is off", "reason", reason)
@@ -61,6 +124,7 @@ func New(cfg Config, logger *slog.Logger) *Agent {
 		a.pusher = newSpoolPusher(cfg.SpoolDir, cfg.SpoolStallAfter, logger, a.spoolCLI)
 		a.pusher.healthFile = healthPath(cfg)
 	}
+	a.initSecondCopy()
 	return a
 }
 
@@ -131,21 +195,49 @@ func (a *Agent) Run(ctx context.Context) error {
 	if err := a.ensureEnrolled(ctx); err != nil {
 		return err
 	}
+	// Rowsafe Storage: credentials before any work that needs the repository.
+	a.startStorage(ctx)
 	// Recover from a previous process that died mid-task: remove its
 	// scratch clusters and close the task it was running, so the control
 	// plane doesn't wait for a lease to expire before scheduling again.
 	a.cleanupStaleDrills()
+	// Copies and kept data outlive tasks: start copies again (the agent's
+	// restart stopped them), roll back a rewind in place that was
+	// interrupted, and delete what expired, even with no control plane.
+	a.recoverRewinds(ctx)
+	a.recoverCopies(ctx) // Guard copies: same, see copies_state.go
 	a.reportInterrupted(ctx)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	a.startEngines(ctx) // engines' background work (e.g. MongoDB's oplog copying)
 	go a.heartbeatLoop(ctx)
 	go a.fastLane(ctx)
+	go a.rewindHousekeeping(ctx)
+	go a.filesLoop(ctx) // files.go: folder snapshots and the files lane
+	if a.cfg.RowsafeStorage() {
+		go a.managedStorageLoop(ctx) // Rowsafe Storage credentials (storage.go)
+	}
+	go a.standbyLoop(ctx) // fences, primaries seen from standbys (standby.go)
+	go a.standbyLane(ctx)
+	go a.forkLoop(ctx) // fork.go: rolls back an interrupted fork restore, deletes expired kept data
+	a.startSecondCopy(ctx)
+	go a.relNamesLoop(ctx)    // Find the moment: names of tables emptied or dropped later
+	go a.migrateReporter(ctx) // move-in progress (migrate_status.go)
+	go a.softwareLoop(ctx)
+	go a.upgradeHousekeeping(ctx)
+	go a.copiesHousekeeping(ctx)
+	go a.securityLoop(ctx) // security.go
 	// Built-in monitoring (package collect): metrics every minute, beside
 	// the task loop and never blocking it.
 	go collect.Run(ctx, collect.Options{Log: a.log, PGUser: a.cfg.PGUser,
-		Databases: a.monitoredDatabases,
+		Databases: a.monitoredDatabases, Engine: a.monitorEngine, Poolers: a.poolerSources,
 		Send: func(ctx context.Context, r protocol.MonitoringReport) (ack protocol.MonitoringAck, err error) {
 			return ack, a.client.post(ctx, "/v1/agent/monitoring", r, &ack)
+		}})
+	// PostgreSQL's log (package pglog): redacted here, sent every few seconds.
+	go pglog.Run(ctx, pglog.Options{Log: a.log, PGUser: a.cfg.PGUser, StateDir: a.cfg.StateDir, Sidecar: a.cfg.Sidecar(),
+		Databases: a.monitoredDatabases, Send: func(ctx context.Context, b protocol.LogBatch) (ack protocol.LogAck, err error) {
+			return ack, a.client.post(ctx, "/v1/agent/logs", b, &ack)
 		}})
 
 	backoff := a.cfg.PollInterval
@@ -154,7 +246,10 @@ func (a *Agent) Run(ctx context.Context) error {
 		// never interrupted by an agent restart.
 		if err := a.updater.Tick(ctx); err != nil {
 			if errors.Is(err, ErrRestartForUpdate) {
-				a.fastMu.Lock() // let a restore point in progress finish
+				a.fastMu.Lock()   // let a restore point in progress finish
+				a.maintMu.Lock()  // and a health fix
+				a.sbLaneMu.Lock() // and a fence or promotion (standby.go)
+				poolerMu.Lock()   // and a pooling task (pooling.go)
 			}
 			return err
 		}
@@ -180,7 +275,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			backoff = a.cfg.PollInterval
 		}
 		if task != nil {
-			a.execute(ctx, task)
+			a.execute(ctx, task, !slices.Contains(fastLaneTypes, task.Type))
 			continue // there may be more queued work
 		}
 		select {
@@ -193,9 +288,63 @@ func (a *Agent) Run(ctx context.Context) error {
 
 // fastLaneTypes are claimed by the fast lane. They are short, and must not
 // wait behind a backup or drill that can take hours.
-var fastLaneTypes = []string{protocol.TaskRestorePoint}
+var fastLaneTypes = []string{protocol.TaskRestorePoint, protocol.TaskCopySchema}
 
-// fastLane claims and runs restore points alongside the main loop.
+// sideTypes run beside the fast lane, one at a time: health fixes (such as
+// ending a session that blocks others), and the Rewind steps people wait
+// for in the dashboard (compare, bring back rows, delete a copy or the kept
+// data), so they never wait behind a backup or a copy being restored.
+var sideTypes = []string{protocol.TaskMaintenance, protocol.TaskRewindCompare, protocol.TaskRewindRows,
+	protocol.TaskRewindDrop, protocol.TaskRewindCleanup,
+	protocol.TaskFindMoment, // read-only; people wait for it in the dashboard
+	protocol.TaskDBAdmin,    // Databases & users: people wait for it in the dashboard
+	protocol.TaskMigrate,    // move in: key, check, switchover... (migrate.go)
+	protocol.TaskSettings,
+	protocol.TaskSecurityScan, protocol.TaskSecurityFix} // security.go
+
+// fastLaneClaim is what the fast lane asks for: restore points, and a side
+// task unless one is running already. Side tasks run beside the lane, one
+// at a time, so a long VACUUM never holds up a restore point.
+func (a *Agent) fastLaneClaim() []string {
+	types := slices.Clone(fastLaneTypes)
+	if !a.maintBusy.Load() {
+		types = append(types, sideTypes...)
+	}
+	if !a.poolerBusy.Load() {
+		types = append(types, poolerTypes...)
+	}
+	return types
+}
+
+// poolerTypes run beside the fast lane, one at a time, and never behind a
+// backup or a health fix: pointing PgBouncer at a new primary after a
+// failover can't wait.
+var poolerTypes = []string{protocol.TaskPoolerRetarget, protocol.TaskPooling}
+
+// runPooler runs a pooling task beside the fast lane.
+func (a *Agent) runPooler(ctx context.Context, task *protocol.Task) {
+	a.poolerBusy.Store(true)
+	go func() {
+		defer a.poolerBusy.Store(false)
+		a.execute(ctx, task, false)
+	}()
+}
+
+// runMaintenance runs a maintenance task beside the fast lane.
+func (a *Agent) runMaintenance(ctx context.Context, task *protocol.Task) {
+	a.maintBusy.Store(true)
+	a.maintMu.Lock()
+	go func() {
+		defer func() {
+			a.maintMu.Unlock()
+			a.maintBusy.Store(false)
+		}()
+		a.execute(ctx, task, false)
+	}()
+}
+
+// fastLane claims and runs restore points (and starts maintenance tasks)
+// alongside the main loop.
 func (a *Agent) fastLane(ctx context.Context) {
 	backoff := a.cfg.PollInterval
 	for {
@@ -208,7 +357,7 @@ func (a *Agent) fastLane(ctx context.Context) {
 			continue
 		}
 		a.fastMu.Lock()
-		task, err := a.client.claimTypes(ctx, fastLaneTypes)
+		task, err := a.client.claimTypes(ctx, a.fastLaneClaim())
 		switch {
 		case ctx.Err() != nil:
 		case isUnauthorized(err):
@@ -218,8 +367,16 @@ func (a *Agent) fastLane(ctx context.Context) {
 			backoff = min(backoff*2, 2*time.Minute)
 		default:
 			backoff = a.cfg.PollInterval
-			if task != nil {
-				a.execute(ctx, task)
+			switch {
+			case task == nil:
+			case slices.Contains(sideTypes, task.Type):
+				a.runMaintenance(ctx, task)
+				backoff = 0
+			case slices.Contains(poolerTypes, task.Type):
+				a.runPooler(ctx, task)
+				backoff = 0
+			default:
+				a.execute(ctx, task, false)
 				backoff = 0 // there may be more
 			}
 		}
@@ -235,8 +392,18 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 		req := protocol.HeartbeatRequest{
 			Hostname: hostname, AgentVersion: Version, Platform: release.Platform(),
 			Archivers: a.archiverStats(ctx), Update: a.updater.Report(), Mode: a.cfg.Mode,
-			RestartPorts: a.restartPorts(),
+			RestartPorts: a.restartPorts(), RestartActions: a.helperActions(),
+			Rewinds: append(a.rewindState().states(), a.engineRewindStates()...),
+			Storage: a.storageReports(), SecondCopies: a.secondCopyStatuses(),
+			Software:         a.softwareForHeartbeat(),
+			DockerControl:    a.dockerControlReport(ctx),
+			Copies:           a.copiesReport(),
+			StandbyHeartbeat: a.standbyHeartbeat(ctx),
+			ForkHeartbeat:    a.forkHeartbeat(),   // fork.go
+			ManagedStorage:   a.storageStatus(),   // Rowsafe Storage or own bucket (storage.go)
+			Pooler:           a.poolerStatus(ctx), // pooling.go
 		}
+		req.PoolerDatabases = a.poolerDatabases() // for Standby's pooler_retarget (pooling.go)
 		resp, err := a.client.heartbeat(ctx, req)
 		if isUnauthorized(err) {
 			stop := "sudo systemctl disable --now rowsafe-agent"
@@ -263,7 +430,17 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 			if a.pusher != nil {
 				a.ensureConfigs(ctx, resp.Databases)
 			}
+			if a.syncBusy.CompareAndSwap(false, true) { // storage changed: move to the new repository
+				go func(dbs []protocol.DatabaseSpec) {
+					defer a.syncBusy.Store(false)
+					a.syncRepos(ctx, dbs)
+				}(resp.Databases)
+			}
 			a.updater.OnHeartbeat(resp.Update)
+			a.rewindState().setExpiries(resp.RewindExpires, time.Now())
+			a.setEngineRewindExpiries(resp.RewindExpires)
+			a.onCopiesUpdate(ctx, resp.Copies)
+			a.applyStandbyInstructions(resp.StandbyInstructions)
 		}
 		select {
 		case <-ctx.Done():
@@ -296,6 +473,12 @@ func (a *Agent) archiverStats(ctx context.Context) []protocol.ArchiverStats {
 	a.mu.Unlock()
 	var out []protocol.ArchiverStats
 	for _, db := range watched {
+		if !isPostgres(db) {
+			if stats, ok := a.engineArchiver(ctx, db); ok {
+				out = append(out, stats)
+			}
+			continue
+		}
 		stats, err := pginspect.Archiver(ctx, a.target(db))
 		stats.DatabaseID = db.ID
 		if err != nil {
@@ -313,14 +496,13 @@ func (a *Agent) target(db protocol.DatabaseSpec) pginspect.Target {
 }
 
 // execute runs one task and reports the outcome. Reporting is retried so a
-// brief control plane outage doesn't lose a finished backup.
-func (a *Agent) execute(ctx context.Context, task *protocol.Task) {
+// brief control plane outage doesn't lose a finished backup. Only the main
+// lane persists its task for crash recovery (persist); a restore point or
+// health fix interrupted by a crash is closed by its lease.
+func (a *Agent) execute(ctx context.Context, task *protocol.Task, persist bool) {
 	log := a.log.With("task_id", task.ID, "type", task.Type)
 	log.Info("task started")
 	start := time.Now()
-	// Only the main lane persists its task for crash recovery; a restore
-	// point interrupted by a crash is closed by its (short) lease.
-	persist := !slices.Contains(fastLaneTypes, task.Type)
 	if persist {
 		a.saveRunning(runningTask{ID: task.ID, Type: task.Type, StartedAt: start.UTC()})
 	}
@@ -330,13 +512,21 @@ func (a *Agent) execute(ctx context.Context, task *protocol.Task) {
 	tl := &taskLog{}
 	result, err := a.runTask(tctx, task, tl)
 
-	req := protocol.CompleteRequest{Status: protocol.StatusSucceeded, Log: tl.String()}
+	secrets := a.secretValues() // taskerror.go
+	req := protocol.CompleteRequest{Status: protocol.StatusSucceeded, Log: protocol.Redact(tl.String(), secrets...)}
 	if result != nil {
 		req.Result, _ = json.Marshal(result)
 	}
 	if err != nil {
 		req.Status = protocol.StatusFailed
-		req.Error = err.Error()
+		req.Error = protocol.Redact(err.Error(), secrets...)
+		if te := a.taskErrorOf(err); te != nil {
+			req.ErrorInfo = te
+			if te.Detail != "" && !containsLine(req.Log, te.Detail) {
+				req.Log += te.Tool + " output (last lines):\n" + te.Detail + "\n"
+			}
+			log = log.With("error_code", te.Code)
+		}
 		if ctx.Err() != nil {
 			req.Error = "the agent was stopped while this task was running: " + req.Error
 		}
@@ -366,6 +556,11 @@ func (a *Agent) report(ctx context.Context, log *slog.Logger, taskID string, req
 			return true
 		}
 		var he *httpError
+		if errors.As(err, &he) && he.Status == 400 && req.ErrorInfo != nil {
+			// A control plane from before error_info: send the outcome without it.
+			req.ErrorInfo = nil
+			continue
+		}
 		if errors.As(err, &he) && he.Status < 500 {
 			// The task is no longer ours (already closed or reaped).
 			log.Error("control plane rejected task report", "err", err)
@@ -419,13 +614,30 @@ func (a *Agent) reportInterrupted(ctx context.Context) {
 		a.clearRunning()
 		return
 	}
+	cleanup := "any scratch drill cluster has been removed"
+	switch t.Type {
+	case protocol.TaskRewindInPlace, protocol.TaskRewindUndo:
+		cleanup = "the interrupted rewind was rolled back when the agent started again: PostgreSQL runs on the data it had before (see the agent's log)"
+	case protocol.TaskRewindCopy:
+		cleanup = "the half-restored copy has been removed"
+	case protocol.TaskPreviewMigration, protocol.TaskSafeCopy:
+		cleanup = "the unfinished copy has been removed; nothing was changed on production"
+	case protocol.TaskUpgrade, protocol.TaskUpgradeUndo:
+		cleanup = "the root helper finishes (or rolls back) on its own and the agent follows it through; the database's Upgrade page shows where it stands"
+	case protocol.TaskUpgradeRehearsal:
+		cleanup = "the rehearsal's scratch copy has been removed; production was not touched"
+	}
 	req := protocol.CompleteRequest{
 		Status: protocol.StatusFailed,
-		Error: fmt.Sprintf("the agent stopped while this %s task was running (started %s): crash, kill or reboot; "+
-			"any scratch drill cluster has been removed", t.Type, t.StartedAt.Format(time.RFC3339)),
+		Error: fmt.Sprintf("the agent stopped while this %s task was running (started %s): crash, kill or reboot; %s",
+			t.Type, t.StartedAt.Format(time.RFC3339), cleanup),
 	}
 	if t.Report != nil {
 		req = *t.Report
+	} else if t.Type == protocol.TaskReboot {
+		if r, ok := a.afterReboot(ctx, t.ID); ok {
+			req = r
+		}
 	}
 	log := a.log.With("task_id", t.ID, "type", t.Type)
 	log.Warn("reporting task interrupted by an agent restart", "status", req.Status)

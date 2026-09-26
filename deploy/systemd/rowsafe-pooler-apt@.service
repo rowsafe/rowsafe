@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-pooler-apt@install.service / @purge.service: installs or removes
+# the pgbouncer package, and nothing else. Started only by
+# rowsafe-pooler.service (root), at most once every 10 minutes; it takes no
+# input from the agent but its instance name. Installed by
+# https://rowsafe.sh/install only when root allowed PgBouncer.
+
+[Unit]
+Description=Rowsafe: %i the pgbouncer package
+Documentation=https://rowsafe.sh/docs/guides/connection-pooling
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/rowsafe/rowsafe-pg-restart
+TimeoutStartSec=900
+Environment=ROWSAFE_HELPER_MODE=pooler-apt
+Environment=ROWSAFE_APT_ACTION=%i
+StateDirectory=rowsafe-pooler
+StateDirectoryMode=0700
+UMask=0022
+
+# apt and dpkg need the network and write access to the system, so this unit
+# is less confined; it only ever runs "apt-get install pgbouncer" or
+# "apt-get purge pgbouncer".
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service

@@ -179,6 +179,63 @@ func TestRestoreNeverTouchesProductionPaths(t *testing.T) {
 	}
 }
 
+func TestRestoreTo(t *testing.T) {
+	rr := &recordRunner{}
+	c := CLI{Bin: "/usr/bin/pgbackrest", ConfigPath: "/etc/rowsafe/pgbackrest/app.conf", Stanza: "app", Runner: rr}
+	_, err := c.RestoreTo(context.Background(), RestoreOptions{DataDir: "/var/lib/rowsafe/rewind/c1/data",
+		TablespaceDir: "/var/lib/rowsafe/rewind/c1/tablespaces", ArchiveOff: true, Type: "time",
+		Target: "2026-09-24 14:04:00+00", Set: "20260920-010002F_20260921-010003D"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "/usr/bin/pgbackrest --config=/etc/rowsafe/pgbackrest/app.conf --stanza=app --pg1-path=/var/lib/rowsafe/rewind/c1/data " +
+		"--tablespace-map-all=/var/lib/rowsafe/rewind/c1/tablespaces --archive-mode=off --type=time --target=2026-09-24 14:04:00+00 " +
+		"--target-action=promote --set=20260920-010002F_20260921-010003D --cmd=/usr/bin/pgbackrest restore"
+	if got := strings.Join(rr.calls[0], " "); got != want {
+		t.Errorf("restore command:\n got %s\nwant %s", got, want)
+	}
+	// In place: production's archiving is kept, no tablespace remap.
+	_, err = c.RestoreTo(context.Background(), RestoreOptions{DataDir: "/var/lib/postgresql/18/main", Type: "name",
+		Target: "before-migration", Set: "20260920-010002F", Timeline: "current"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = "/usr/bin/pgbackrest --config=/etc/rowsafe/pgbackrest/app.conf --stanza=app --pg1-path=/var/lib/postgresql/18/main " +
+		"--type=name --target=before-migration --target-action=promote --set=20260920-010002F --target-timeline=current --cmd=/usr/bin/pgbackrest restore"
+	if got := strings.Join(rr.calls[1], " "); got != want {
+		t.Errorf("restore command:\n got %s\nwant %s", got, want)
+	}
+	// Just before a transaction (Find the moment).
+	_, err = c.RestoreTo(context.Background(), RestoreOptions{DataDir: "/d", Type: "xid", Target: "4242", Exclusive: true, Set: "20260920-010002F"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = "/usr/bin/pgbackrest --config=/etc/rowsafe/pgbackrest/app.conf --stanza=app --pg1-path=/d " +
+		"--type=xid --target=4242 --target-action=promote --target-exclusive --set=20260920-010002F --cmd=/usr/bin/pgbackrest restore"
+	if got := strings.Join(rr.calls[2], " "); got != want {
+		t.Errorf("restore command:\n got %s\nwant %s", got, want)
+	}
+	for _, bad := range []RestoreOptions{
+		{DataDir: "/d", Type: "lsn", Target: "0/1"},
+		{DataDir: "/d", Type: "xid", Target: "12 34"},
+		{DataDir: "/d", Type: "xid", Target: "0"},
+		{DataDir: "/d", Type: "name", Target: "x' ; rm -rf /"},
+		{DataDir: "/d", Type: "name", Target: "x\nrestore_command = 'evil'"},
+		{DataDir: "/d", Type: "name", Target: ""},
+		{DataDir: "/d", Type: "name", Target: "m", Set: "--delta"},
+		{DataDir: "/d", Type: "name", Target: "m", Timeline: "2; x"},
+		{DataDir: "relative", Type: "name", Target: "m"},
+		{DataDir: "/d e", Type: "name", Target: "m"},
+	} {
+		if _, err := c.RestoreTo(context.Background(), bad); err == nil {
+			t.Errorf("accepted %+v", bad)
+		}
+	}
+	if len(rr.calls) != 3 {
+		t.Errorf("pgbackrest ran for refused options: %v", rr.calls[3:])
+	}
+}
+
 // process-max follows the host's size: 1 on up to 4 CPUs, 2 above.
 func TestRenderConfigProcessMax(t *testing.T) {
 	for cpus, want := range map[int]int{1: 1, 2: 1, 4: 1, 5: 2, 8: 2, 64: 2} {
@@ -191,5 +248,18 @@ func TestRenderConfigProcessMax(t *testing.T) {
 		if !strings.Contains(conf, want) || !strings.Contains(conf, "compress-type=zst\n") {
 			t.Errorf("ProcessMax %d: config lacks %q or zst\n%s", in, want, conf)
 		}
+	}
+}
+
+func TestRenderConfigExclude(t *testing.T) {
+	if conf := RenderConfig(testRepo, ConfigInput{Stanza: "app"}); strings.Contains(conf, "exclude") {
+		t.Errorf("exclude without any:\n%s", conf)
+	}
+	conf := RenderConfig(testRepo, ConfigInput{Stanza: "app", DataDir: "/var/lib/postgresql/data", Exclude: []string{".rowsafe-rewind"}})
+	// A backup-only section, before the stanza's (pgBackRest ignores it for
+	// every other command, archive-push included).
+	i, j := strings.Index(conf, "\n[global:backup]\nexclude=.rowsafe-rewind\n"), strings.Index(conf, "\n[app]\n")
+	if i < 0 || j < i {
+		t.Errorf("config:\n%s", conf)
 	}
 }

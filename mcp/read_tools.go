@@ -143,11 +143,14 @@ func (t *tools) addReadTools(s *sdk.Server) {
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "list_tasks",
-		Description: "List tasks (inspect, adopt, check, backup, drill (the restore test), restore_point, restart), newest first, for the whole organization or one database, optionally filtered by status and type. Shows who queued them (scheduler or a person), status, timing and the first line of any error. Use get_task for a task's result and log.",
+		Description: "List tasks (inspect, adopt, check, backup, drill (the restore test), restore_point, restart, maintenance (a health fix a person applied), security_scan and security_fix (a security check, and a security change a person made), and the rewind_* tasks a person started from Rewind), newest first, for the whole organization or one database, optionally filtered by status and type. Shows who queued them (scheduler or a person), status, timing and the first line of any error. Use get_task for a task's result and log.",
 		Annotations: readOnly("List tasks"),
 		InputSchema: inputSchema[listTasksInput](func(p map[string]*jsonschema.Schema) {
 			p["status"].Enum = []any{protocol.StatusQueued, protocol.StatusRunning, protocol.StatusSucceeded, protocol.StatusFailed, protocol.StatusLost, protocol.StatusCancelled}
-			p["type"].Enum = []any{protocol.TaskInspect, protocol.TaskAdopt, protocol.TaskCheck, protocol.TaskBackup, protocol.TaskDrill, protocol.TaskRestorePoint}
+			p["type"].Enum = []any{protocol.TaskInspect, protocol.TaskAdopt, protocol.TaskCheck, protocol.TaskBackup, protocol.TaskDrill, protocol.TaskRestorePoint,
+				protocol.TaskRestart, protocol.TaskMaintenance, protocol.TaskRewindCopy, protocol.TaskRewindDrop, protocol.TaskRewindCompare,
+				protocol.TaskRewindRows, protocol.TaskRewindInPlace, protocol.TaskRewindUndo, protocol.TaskRewindCleanup,
+				protocol.TaskSecurityScan, protocol.TaskSecurityFix}
 			p["limit"].Minimum, p["limit"].Maximum, p["limit"].Default = ptr(1.0), ptr(100.0), []byte("20")
 		}),
 	}, t.listTasks)

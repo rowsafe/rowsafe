@@ -3,6 +3,7 @@ package collect
 import (
 	"context"
 	"log/slog"
+	"maps"
 	"math/rand/v2"
 	"os"
 	"strings"
@@ -27,6 +28,10 @@ type Options struct {
 	PGUser string
 	// Databases returns the clusters to watch (the agent's current list).
 	Databases func() []protocol.DatabaseSpec
+	// Engine collects a sample of a database whose engine isn't PostgreSQL
+	// (the agent's registered engines). Without it, or when it returns nil,
+	// such a database is left out of the report.
+	Engine func(context.Context, protocol.DatabaseSpec) (*protocol.DatabaseMonitoring, error)
 	// Send delivers a report to the control plane.
 	Send func(context.Context, protocol.MonitoringReport) (protocol.MonitoringAck, error)
 	// QueryText includes query text in activity snapshots
@@ -41,6 +46,9 @@ type Options struct {
 	// InsightsSync collects insights inline instead of in the background
 	// (tests).
 	InsightsSync bool
+	// Poolers returns the PgBouncer admin consoles to read, per database
+	// (pooler.go); nil when none.
+	Poolers func() []PoolerSource
 }
 
 // Collector gathers one report per round. It is not safe for concurrent use.
@@ -50,6 +58,8 @@ type Collector struct {
 	clusters map[string]*clusterState
 	host     *hostCollector
 	lastSlow time.Time
+	// poolerPrev is the previous PgBouncer reading per database (pooler.go).
+	poolerPrev map[string]*poolerTotals
 }
 
 func New(o Options) *Collector {
@@ -66,7 +76,7 @@ func New(o Options) *Collector {
 		o.InsightsInterval = DefaultInsightsInterval
 	}
 	return &Collector{o: o, deltas: newDeltaTracker(), clusters: map[string]*clusterState{},
-		host: &hostCollector{procRoot: o.ProcRoot}}
+		host: &hostCollector{procRoot: o.ProcRoot}, poolerPrev: map[string]*poolerTotals{}}
 }
 
 // Settings read from the agent's environment.
@@ -174,7 +184,17 @@ func (c *Collector) Collect(ctx context.Context) protocol.MonitoringReport {
 	report := protocol.MonitoringReport{CollectedAt: now.UTC()}
 	keep := map[string]bool{}
 	var dataDirs []string
+	var poolers []PoolerSource
+	if c.o.Poolers != nil {
+		poolers = c.o.Poolers()
+	}
 	for _, db := range dbs {
+		if protocol.NormalizeEngine(db.Engine) != protocol.EnginePostgreSQL {
+			if dm := c.otherEngine(ctx, db); dm != nil {
+				report.Databases = append(report.Databases, *dm)
+			}
+			continue
+		}
 		keep[db.ID] = true
 		st := c.clusters[db.ID]
 		if st == nil {
@@ -186,13 +206,17 @@ func (c *Collector) Collect(ctx context.Context) protocol.MonitoringReport {
 		cctx, cancel := context.WithTimeout(ctx, perClusterTimeout)
 		r, err := readCluster(cctx, target, st, slow, c.o.QueryText)
 		cancel()
+		poolerMetrics, poolerStats := c.pooler(ctx, poolers, db.ID)
 		if err != nil {
 			dm.Error = err.Error()
+			dm.Metrics, dm.Pooler = poolerMetrics, poolerStats
 			report.Databases = append(report.Databases, dm)
 			continue
 		}
 		at := c.o.Now()
 		dm.Metrics = derive(r, db.ID, at, c.deltas)
+		maps.Copy(dm.Metrics, poolerMetrics)
+		dm.Pooler = poolerStats
 		if r.dataDir != "" {
 			dataDirs = append(dataDirs, r.dataDir)
 			if d, err := diskUsage(r.dataDir); err == nil {
@@ -218,6 +242,7 @@ func (c *Collector) Collect(ctx context.Context) protocol.MonitoringReport {
 				r.queryStats.CollectedAt = at.UTC()
 				dm.QueryStats = r.queryStats
 			}
+			dm.Settings = c.settings(ctx, target, at) // settings.go
 		}
 		c.startInsights(ctx, st, target, at)
 		dm.Insights = st.insights.take()
@@ -231,6 +256,27 @@ func (c *Collector) Collect(ctx context.Context) protocol.MonitoringReport {
 	}
 	report.Host = c.host.collect(dataDirs)
 	return report
+}
+
+// otherEngine collects a non-PostgreSQL database's sample through
+// Options.Engine (nil: left out of the report).
+func (c *Collector) otherEngine(ctx context.Context, db protocol.DatabaseSpec) *protocol.DatabaseMonitoring {
+	if c.o.Engine == nil {
+		return nil
+	}
+	cctx, cancel := context.WithTimeout(ctx, perClusterTimeout)
+	defer cancel()
+	dm, err := c.o.Engine(cctx, db)
+	if err != nil {
+		if dm == nil {
+			dm = &protocol.DatabaseMonitoring{}
+		}
+		dm.Error = err.Error()
+	}
+	if dm != nil {
+		dm.DatabaseID = db.ID
+	}
+	return dm
 }
 
 // startInsights begins a cluster's insights run when one is due. It runs

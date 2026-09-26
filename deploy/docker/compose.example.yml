@@ -65,12 +65,51 @@ services:
       # Identity, generated pgBackRest config and restore drill scratch
       # space (needs free space of about 1.3 x your database + 1 GiB).
       - rowsafe-state:/var/lib/rowsafe
+      # Files (optional): your app's uploads volume, so a restore brings back
+      # the database and its files together. Read-only is enough to back it
+      # up; then protect /rowsafe-files/uploads in the dashboard (Rewind,
+      # Files). Restored files wait in the agent's state volume unless the
+      # volume is mounted read-write and the agent's user may write there.
+      # - uploads:/rowsafe-files/uploads:ro
+      # Optional, see "Let Rowsafe restart the container" below:
+      # - rowsafe-control:/run/rowsafe-control
+
+  # Rowsafe (optional): let Rowsafe restart the container, and rewind the
+  # whole database with one click. Without it, restart the postgres
+  # container yourself when Rowsafe asks; everything else works the same.
+  #
+  # rowsafe-docker-control holds the Docker socket, which is root-equivalent
+  # on this host, so the agent never gets it. It stops, starts and restarts
+  # exactly one container, the "postgres" service of this compose project,
+  # when the agent asks over the rowsafe-control volume, and refuses
+  # everything else (any other container, any other Docker call). Every
+  # request is in its log (docker compose logs rowsafe-docker-control).
+  # To turn it on, uncomment this service, the rowsafe-control volume
+  # below and the rowsafe-control mount of rowsafe-agent. For "Rewind the
+  # whole database", also remove ":ro" from the agent's pgdata mount.
+  # See https://rowsafe.sh/docs/guides/docker#let-rowsafe-restart-the-container
+  #
+  # rowsafe-docker-control:
+  #   image: ghcr.io/rowsafe/docker-control:${ROWSAFE_AGENT_VERSION:?set ROWSAFE_AGENT_VERSION}
+  #   restart: unless-stopped
+  #   depends_on:
+  #     - postgres
+  #   environment:
+  #     ROWSAFE_CONTROL_SERVICE: postgres   # the name of your PostgreSQL service above
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock
+  #     - rowsafe-control:/run/rowsafe-control
+  #   network_mode: none
+  #   read_only: true
+  #   cap_drop: [ALL]
+  #   security_opt: ["no-new-privileges:true"]
 
 volumes:
   pgdata:
   pgsocket:        # Rowsafe
   rowsafe-spool:   # Rowsafe: WAL waiting to be pushed; must be on durable disk (not tmpfs)
   rowsafe-state:   # Rowsafe
+  # rowsafe-control: # Rowsafe (optional): the agent asks rowsafe-docker-control here
 
 # rowsafe-agent.env (chmod 600, never commit it):
 #

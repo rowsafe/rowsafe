@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -30,15 +31,21 @@ const drillSpaceFactor = 1.3
 // drillDir returns the scratch directory for one drill and refuses anything
 // that could point at real data.
 func (a *Agent) drillDir(taskID string, prodDataDir string) (string, error) {
-	root := filepath.Clean(a.cfg.DrillDir)
-	dir := filepath.Join(root, taskID)
-	if !strings.HasPrefix(dir, root+string(filepath.Separator)) || strings.ContainsAny(taskID, `/\.`) {
-		return "", fmt.Errorf("invalid drill directory for task %q", taskID)
+	return scratchDir(a.cfg.DrillDir, taskID, prodDataDir, "drill")
+}
+
+// scratchDir returns root/id for a scratch cluster (a drill or a copy) and
+// refuses anything that could point at real data.
+func scratchDir(root, id, prodDataDir, what string) (string, error) {
+	root = filepath.Clean(root)
+	dir := filepath.Join(root, id)
+	if id == "" || !strings.HasPrefix(dir, root+string(filepath.Separator)) || strings.ContainsAny(id, `/\.`) {
+		return "", fmt.Errorf("invalid %s directory for %q", what, id)
 	}
 	prod := filepath.Clean(prodDataDir)
 	if dir == prod || strings.HasPrefix(prod, dir+string(filepath.Separator)) ||
 		strings.HasPrefix(dir, prod+string(filepath.Separator)) {
-		return "", fmt.Errorf("drill directory %s overlaps the production data directory %s", dir, prod)
+		return "", fmt.Errorf("%s directory %s overlaps the production data directory %s", what, dir, prod)
 	}
 	return dir, nil
 }
@@ -48,6 +55,9 @@ type drillSetting struct{ name, value string }
 
 // scratchSpec describes how the scratch cluster is started.
 type scratchSpec struct {
+	// Name is what the cluster is for: "drill" (default) or "copy"; it
+	// becomes cluster_name rowsafe-<name>.
+	Name      string
 	Port      int
 	SocketDir string
 	Major     int    // PostgreSQL major version, for version-specific settings
@@ -94,7 +104,7 @@ func drillSettings(spec scratchSpec) []drillSetting {
 		{"recovery_end_command", ""},
 		{"archive_cleanup_command", ""},
 		{"external_pid_file", ""},
-		{"cluster_name", "rowsafe-drill"},
+		{"cluster_name", "rowsafe-" + cmp.Or(spec.Name, "drill")},
 		{"logging_collector", "off"},
 		{"log_destination", "stderr"},
 		{"autovacuum", "off"},
@@ -133,7 +143,7 @@ func drillConf(spec scratchSpec) string {
 
 // drillAutoConfOverride is appended to the restored postgresql.auto.conf.
 func drillAutoConfOverride(spec scratchSpec) string {
-	return "\n# Rowsafe restore drill overrides (last setting wins).\n" +
+	return "\n# Rowsafe " + cmp.Or(spec.Name, "drill") + " isolation settings (last setting wins).\n" +
 		renderSettings(drillSettings(spec))
 }
 
@@ -167,8 +177,17 @@ var coreBackendTypes = map[string]bool{
 // drill restores the latest backup plus all archived WAL into a scratch
 // directory, starts it on a private socket, and checks every database.
 func (a *Agent) drill(ctx context.Context, db protocol.DatabaseSpec, taskID string, tl *taskLog) (*protocol.DrillResult, error) {
+	return a.drillFrom(ctx, db, taskID, 0, tl)
+}
+
+// drillFrom restores from the given storage (protocol.RepoSecond: the
+// second copy).
+func (a *Agent) drillFrom(ctx context.Context, db protocol.DatabaseSpec, taskID string, repo int, tl *taskLog) (*protocol.DrillResult, error) {
 	start := time.Now()
 	res := &protocol.DrillResult{}
+	if repo == protocol.RepoSecond {
+		res.Repo = repo
+	}
 	finish := func(err error) (*protocol.DrillResult, error) {
 		res.DurationSeconds = time.Since(start).Seconds()
 		if err != nil {
@@ -185,7 +204,13 @@ func (a *Agent) drill(ctx context.Context, db protocol.DatabaseSpec, taskID stri
 	if err := a.writeConfig(db, prod); err != nil {
 		return nil, err
 	}
-	cli := a.cli(db)
+	cli, err := a.repoCLI(db, repo)
+	if err != nil {
+		return finish(err)
+	}
+	if repo == protocol.RepoSecond {
+		tl.Printf("restoring from the second copy (%s)", describeRepo(a.cfg.Repo2))
+	}
 	stanzas, err := cli.Info(ctx)
 	if err != nil {
 		return finish(err)
@@ -259,22 +284,8 @@ func (a *Agent) drill(ctx context.Context, db protocol.DatabaseSpec, taskID stri
 	if a.cfg.DrillPreload == DrillPreloadProduction {
 		spec.Preload = prod.SharedPreloadLibraries
 	}
-	hba, ident := drillAuth(currentUser(), a.cfg.PGUser)
-	files := map[string]string{
-		"postgresql.conf": drillConf(spec),
-		"pg_hba.conf":     hba,
-		"pg_ident.conf":   ident,
-	}
-	for name, content := range files {
-		path := filepath.Join(dataDir, name)
-		if _, err := os.Stat(path); err == nil {
-			if err := os.Rename(path, path+".rowsafe-orig"); err != nil {
-				return finish(err)
-			}
-		}
-		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-			return finish(err)
-		}
+	if err := a.writeScratchConf(dataDir, spec); err != nil {
+		return finish(err)
 	}
 
 	timeout := 4 * time.Hour
@@ -282,22 +293,10 @@ func (a *Agent) drill(ctx context.Context, db protocol.DatabaseSpec, taskID stri
 		timeout = max(time.Until(dl)-5*time.Minute, time.Minute)
 	}
 	scratch := pginspect.Target{SocketDir: socketDir, Port: a.cfg.DrillPort, User: a.cfg.PGUser}
-	conn, err := a.startScratch(ctx, tl, spec, scratch, pgCtl, dir, timeout)
-	if err != nil && spec.Preload == "" && prod.SharedPreloadLibraries != "" && ctx.Err() == nil {
-		// Production's libraries are left out by default so none of their
-		// code (and no background worker) runs on restored data. A cluster
-		// whose WAL needs one (e.g. a custom WAL resource manager) cannot
-		// recover without it: retry with them loaded, still with no
-		// background workers, and say so in the result.
-		tl.Printf("scratch cluster did not start without production's shared_preload_libraries (%v); retrying with %q loaded",
-			err, prod.SharedPreloadLibraries)
-		if serr := a.stopScratch(dataDir, pgCtl); serr != nil {
-			return finish(serr)
-		}
-		spec.Preload = prod.SharedPreloadLibraries
+	conn, spec, err := a.startScratchFallback(ctx, tl, spec, scratch, pgCtl, dir, timeout, prod.SharedPreloadLibraries)
+	if spec.Preload != "" && a.cfg.DrillPreload != DrillPreloadProduction {
 		res.Warnings = append(res.Warnings, fmt.Sprintf(
 			"the restored cluster only started with production's shared_preload_libraries (%s) loaded", spec.Preload))
-		conn, err = a.startScratch(ctx, tl, spec, scratch, pgCtl, dir, timeout)
 	}
 	if err != nil {
 		return finish(err)
@@ -309,20 +308,8 @@ func (a *Agent) drill(ctx context.Context, db protocol.DatabaseSpec, taskID stri
 	}
 	res.RecoveredTo = recoveredTo
 
-	// Prove the isolation held: no extension background worker is running.
-	var types []string
-	rows, err := conn.Query(ctx, `SELECT DISTINCT coalesce(backend_type, '') FROM pg_stat_activity ORDER BY 1`)
-	if err == nil {
-		types, err = pgx.CollectRows(rows, pgx.RowTo[string])
-	}
-	if err != nil {
+	if err := checkScratchIsolation(ctx, conn, tl); err != nil {
 		return finish(err)
-	}
-	tl.Printf("scratch cluster processes: %s", strings.Join(types, ", "))
-	for _, t := range types {
-		if !coreBackendTypes[t] {
-			return finish(fmt.Errorf("unexpected background process %q in the scratch cluster: drill isolation failed", t))
-		}
 	}
 	if recoveredTo != nil {
 		tl.Printf("recovered to last transaction at %s", recoveredTo.UTC().Format(time.RFC3339Nano))
@@ -344,6 +331,89 @@ func (a *Agent) drill(ctx context.Context, db protocol.DatabaseSpec, taskID stri
 	}
 	tl.Printf("drill passed in %s", time.Since(start).Round(time.Second))
 	return finish(nil)
+}
+
+// writeScratchConf writes the scratch cluster's own postgresql.conf,
+// pg_hba.conf and pg_ident.conf into the restored data directory, keeping
+// restored ones as *.rowsafe-orig. Debian keeps production's in /etc, so
+// the restored directory usually has none; the isolation settings are also
+// pinned at the end of postgresql.auto.conf (see drillSettings).
+func (a *Agent) writeScratchConf(dataDir string, spec scratchSpec) error {
+	hba, ident := drillAuth(currentUser(), a.cfg.PGUser)
+	conf := drillConf(spec)
+	if spec.Name == "copy" {
+		conf = "# Rowsafe Rewind copy. Deleted when it expires or is deleted from the dashboard.\n" +
+			renderSettings(drillSettings(spec))
+	}
+	files := map[string]string{
+		"postgresql.conf": conf,
+		"pg_hba.conf":     hba,
+		"pg_ident.conf":   ident,
+	}
+	for name, content := range files {
+		path := filepath.Join(dataDir, name)
+		if _, err := os.Lstat(path); err == nil {
+			if err := os.Rename(path, path+".rowsafe-orig"); err != nil {
+				return err
+			}
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// startScratchFallback starts the scratch cluster; if it doesn't start
+// without production's shared_preload_libraries, it tries again with them
+// (still with no background workers). It returns the spec that started.
+func (a *Agent) startScratchFallback(ctx context.Context, tl *taskLog, spec scratchSpec, t pginspect.Target,
+	pgCtl, dir string, timeout time.Duration, prodPreload string) (*pgx.Conn, scratchSpec, error) {
+	conn, err := a.startScratch(ctx, tl, spec, t, pgCtl, dir, timeout)
+	if err != nil && spec.Preload == "" && prodPreload != "" && ctx.Err() == nil {
+		// Production's libraries are left out by default so none of their
+		// code (and no background worker) runs on restored data. A cluster
+		// whose WAL needs one (e.g. a custom WAL resource manager) cannot
+		// recover without it: retry with them loaded, still with no
+		// background workers, and say so in the result.
+		tl.Printf("scratch cluster did not start without production's shared_preload_libraries (%v); retrying with %q loaded",
+			err, prodPreload)
+		if serr := a.stopScratch(filepath.Join(dir, "data"), pgCtl); serr != nil {
+			return nil, spec, serr
+		}
+		spec.Preload = prodPreload
+		conn, err = a.startScratch(ctx, tl, spec, t, pgCtl, dir, timeout)
+	}
+	return conn, spec, err
+}
+
+// checkScratchIsolation proves the isolation held on a started scratch
+// cluster: no extension background worker, no archiving, no TCP listener.
+func checkScratchIsolation(ctx context.Context, conn *pgx.Conn, tl *taskLog) error {
+	var types []string
+	rows, err := conn.Query(ctx, `SELECT DISTINCT coalesce(backend_type, '') FROM pg_stat_activity ORDER BY 1`)
+	if err == nil {
+		types, err = pgx.CollectRows(rows, pgx.RowTo[string])
+	}
+	if err != nil {
+		return err
+	}
+	tl.Printf("scratch cluster processes: %s", strings.Join(types, ", "))
+	for _, t := range types {
+		if !coreBackendTypes[t] {
+			return fmt.Errorf("unexpected background process %q in the scratch cluster: isolation failed", t)
+		}
+	}
+	var archiveMode, listen, archiveCommand string
+	if err := conn.QueryRow(ctx, `SELECT current_setting('archive_mode'), current_setting('listen_addresses'),
+		current_setting('archive_command')`).Scan(&archiveMode, &listen, &archiveCommand); err != nil {
+		return err
+	}
+	if archiveMode != "off" || listen != "" || (archiveCommand != "" && archiveCommand != "(disabled)") {
+		return fmt.Errorf("the scratch cluster is not isolated (archive_mode=%q, listen_addresses=%q, archive_command=%q)",
+			archiveMode, listen, archiveCommand)
+	}
+	return nil
 }
 
 // startScratch pins spec at the end of postgresql.auto.conf, starts the
@@ -528,6 +598,7 @@ func (a *Agent) cleanupStaleDrills() {
 				pgCtl = a.cfg.pgBin(major, "pg_ctl")
 			}
 		}
+		a.stopRehearsalLeftover(dir) // an upgrade rehearsal's second cluster
 		if err := a.removeDrill(dir, pgCtl); err != nil {
 			a.log.Error("removing leftover drill failed", "dir", dir, "err", err)
 		} else {

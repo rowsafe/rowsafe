@@ -583,7 +583,7 @@ func TestInsightsLocalPostgres(t *testing.T) {
 
 func TestBlockingLocalPostgres(t *testing.T) {
 	tg := localTarget(t)
-	_, holder := scratchDB(t, tg)
+	dbName, holder := scratchDB(t, tg)
 	if _, err := holder.Exec(t.Context(), `CREATE TABLE t (id int PRIMARY KEY); INSERT INTO t VALUES (1)`); err != nil {
 		t.Fatal(err)
 	}
@@ -608,21 +608,33 @@ func TestBlockingLocalPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer mon.Close(context.Background())
+	// Other tests may block sessions on the same server: only this
+	// database's sessions count.
 	var r *clusterReading
+	var mine []protocol.LockSession
 	for range 50 {
 		time.Sleep(100 * time.Millisecond)
 		r = &clusterReading{gauges: map[string]float64{}, versionNum: 170000}
 		_ = mon.QueryRow(t.Context(), `SELECT current_setting('server_version_num')::int`).Scan(&r.versionNum)
 		readBlocking(t.Context(), mon, r, true)
-		if r.gauges[MBlockedSessions] > 0 {
+		mine = mine[:0]
+		for _, s := range r.blocking {
+			if s.Database == dbName {
+				mine = append(mine, s)
+			}
+		}
+		if len(mine) == 2 {
 			break
 		}
 	}
-	if r.gauges[MBlockedSessions] != 1 || len(r.blocking) != 2 {
+	if r.gauges[MBlockedSessions] < 1 || len(mine) != 2 {
 		t.Fatalf("blocking = %+v, gauges %v", r.blocking, r.gauges)
 	}
 	holderPID := int(holder.PgConn().PID())
-	for _, s := range r.blocking {
+	for _, s := range mine {
+		if s.BackendStart == nil || time.Since(*s.BackendStart) > time.Hour {
+			t.Errorf("backend_start of %d = %v", s.PID, s.BackendStart)
+		}
 		switch s.PID {
 		case waiterPID:
 			if len(s.BlockedBy) != 1 || s.BlockedBy[0] != holderPID || s.LockType == "" || !strings.Contains(s.Query, "UPDATE t") {
@@ -674,9 +686,11 @@ func TestStatementReads(t *testing.T) {
 	for _, sql := range []string{
 		`CREATE SCHEMA fakepgss`,
 		`CREATE TABLE fakepgss.data (userid oid, dbid oid, toplevel bool, queryid bigint, query text, calls bigint,
-		   total_exec_time float8, mean_exec_time float8, rows bigint)`,
+		   total_exec_time float8, mean_exec_time float8, rows bigint,
+		   shared_blks_hit bigint DEFAULT 0, shared_blks_read bigint DEFAULT 0, temp_blks_written bigint DEFAULT 0)`,
 		`CREATE FUNCTION fakepgss.pg_stat_statements(showtext boolean) RETURNS SETOF fakepgss.data
-		   LANGUAGE sql AS 'SELECT userid, dbid, toplevel, queryid, CASE WHEN showtext THEN query END, calls, total_exec_time, mean_exec_time, rows FROM fakepgss.data'`,
+		   LANGUAGE sql AS 'SELECT userid, dbid, toplevel, queryid, CASE WHEN showtext THEN query END, calls, total_exec_time, mean_exec_time, rows,
+		     shared_blks_hit, shared_blks_read, temp_blks_written FROM fakepgss.data'`,
 		`CREATE VIEW fakepgss.pg_stat_statements AS SELECT * FROM fakepgss.pg_stat_statements(true)`,
 		`CREATE VIEW fakepgss.pg_stat_statements_info AS SELECT timestamptz '2026-09-01 00:00:00+00' AS stats_reset`,
 		`INSERT INTO fakepgss.data SELECT r.oid, d.oid, true, 42, 'SELECT * FROM t WHERE id = $1', 100, 50, 0.5, 100
@@ -701,7 +715,8 @@ func TestStatementReads(t *testing.T) {
 	if qs, err := s.read(t.Context(), conn, "fakepgss", version, now); err != nil || qs != nil {
 		t.Fatalf("first reading = %+v, %v", qs, err)
 	}
-	if _, err := conn.Exec(t.Context(), `UPDATE fakepgss.data SET calls = calls + 10, total_exec_time = total_exec_time + 30`); err != nil {
+	if _, err := conn.Exec(t.Context(), `UPDATE fakepgss.data SET calls = calls + 10, total_exec_time = total_exec_time + 30,
+		shared_blks_hit = shared_blks_hit + 500, shared_blks_read = shared_blks_read + 20, temp_blks_written = temp_blks_written + 3`); err != nil {
 		t.Fatal(err)
 	}
 	qs, err := s.read(t.Context(), conn, "fakepgss", version, now.Add(5*time.Minute))
@@ -718,6 +733,9 @@ func TestStatementReads(t *testing.T) {
 	for _, x := range qs.Statements {
 		if x.QueryID == "42" && x.Query != "SELECT * FROM t WHERE id = $1" {
 			t.Errorf("query text = %q", x.Query)
+		}
+		if x.SharedBlksHit != 500 || x.SharedBlksRead != 20 || x.TempBlksWritten != 3 {
+			t.Errorf("blocks of %s = %d hit, %d read, %d temp", x.QueryID, x.SharedBlksHit, x.SharedBlksRead, x.TempBlksWritten)
 		}
 		if x.QueryID == "7" && strings.Contains(x.Query, "secret") {
 			t.Errorf("password not redacted: %q", x.Query)

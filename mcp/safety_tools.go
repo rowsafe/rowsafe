@@ -103,7 +103,7 @@ func (t *tools) addSafetyWriteTools(s *sdk.Server) {
 		Name: "create_restore_point",
 		Description: "Create a named restore point on a database and wait until it is confirmed in the backup repository. Call it right BEFORE a destructive or risky operation (after safety_check), so the database can be rewound to the moment just before it. " +
 			"It is cheap and safe: it only writes a marker into the WAL (pg_create_restore_point) and forces a WAL switch; nothing else changes. Needs an active database. " +
-			"Tell the user the restore point's name. If the operation then goes wrong, stop, don't try to repair data or restore it yourself, and tell the user they can restore the database to that restore point.",
+			"Tell the user the restore point's name. If the operation then goes wrong, stop, don't try to repair data or restore it yourself, and tell the user they can Rewind to that restore point in the Rowsafe dashboard.",
 		Annotations: writes("Create a restore point", false, false),
 		InputSchema: inputSchema[restorePointInput](func(p map[string]*jsonschema.Schema) {
 			p["name"].Pattern = restorePointNamePattern
@@ -241,11 +241,7 @@ func (t *tools) createRestorePoint(ctx context.Context, _ *sdk.CallToolRequest, 
 	var b textBuilder
 	switch {
 	case out.Confirmed:
-		set := "the restore_from_backup label from `rowsafe marks " + shellArg(d.Name) + "`"
-		if out.RestoreFromBackup != "" {
-			set = out.RestoreFromBackup
-		}
-		out.Guidance = fmt.Sprintf("Tell the user: restore point %q on %s is in the backup repository. If the operation goes wrong, stop and tell them they can restore %s to it (https://rowsafe.sh/docs/guides/restore, \"To a restore point\": pgbackrest restore --type=name --target=%s --set=%s). Never attempt the restore yourself.", name, d.Name, d.Name, name, set)
+		out.Guidance = fmt.Sprintf("Tell the user: restore point %q on %s is in the backup repository. If the operation goes wrong, stop and tell them they can Rewind to it in the Rowsafe dashboard (restore a copy at the Mark %s, then bring the missing rows back, or rewind the whole database), or with `rowsafe rewind copy %s --mark %s`. Never attempt the restore yourself.", name, d.Name, name, shellArg(d.Name), name)
 		b.line("Restore point %q on %s is ARCHIVED (confirmed in the backup repository)%s.", name, d.Name, lsnSuffix(out.LSN))
 	case out.Status == protocol.RestorePointUnconfirmed:
 		out.Guidance = "The restore point was written, but its WAL was not confirmed in the repository in time, so it may not be restorable yet. WAL archiving may be slow or failing: run safety_check, tell the user, and don't proceed with a destructive operation without their explicit OK."

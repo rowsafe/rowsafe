@@ -95,7 +95,9 @@ func printHealth(h protocol.DatabaseHealth) {
 		fmt.Printf("\n%s %s  (%s, -%d)\n", mark, f.Title, f.Severity, f.Penalty)
 		fmt.Printf("   %s\n", f.Explanation)
 		fmt.Printf("   What to do: %s\n", f.Action)
-		if f.Command != "" {
+		if fx := firstAvailableFix(f); fx != nil {
+			fmt.Printf("   Fix: rowsafe fix %s %s  (%s)\n", h.Database, f.ID, fx.Label)
+		} else if f.Command != "" {
 			fmt.Printf("   Try: %s\n", f.Command)
 		}
 	}
@@ -192,7 +194,7 @@ func insightsCmd(ctx context.Context, c *client.Client, args []string) error {
 		}
 		t.flush()
 	}
-	if section("Unused indexes", "Never used since statistics were reset; they slow down writes. Check replicas too before dropping.", len(ins.UnusedIndexes)) {
+	if section("Unused indexes", "Never used since statistics were reset; they slow down writes (use on replicas is not counted).", len(ins.UnusedIndexes)) {
 		t := newTable("  INDEX", "TABLE", "SIZE", "UNUSED SINCE")
 		for _, x := range cut(ins.UnusedIndexes, n) {
 			since := "statistics began"
@@ -243,6 +245,9 @@ func insightsCmd(ctx context.Context, c *client.Client, args []string) error {
 			t.row("  "+qual(x.Database, x.Schema, x.Table), strconv.FormatInt(x.XIDAge, 10), fmt.Sprintf("%.1f%%", x.WraparoundPct))
 		}
 		t.flush()
+	}
+	if len(ins.UnusedIndexes)+len(ins.DuplicateIndexes)+len(ins.IndexBloat) > 0 {
+		fmt.Printf("\nRowsafe can rebuild or remove these indexes for you, safely: rowsafe fix %s\n", name)
 	}
 	if len(ins.Notes) > 0 {
 		fmt.Println("\nNotes")

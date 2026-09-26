@@ -16,12 +16,15 @@ curl -fsSL https://rowsafe.sh | sudo sh -s rse_…       # on the database serve
 
 The installer does the rest on the server: it installs the agent, sets up storage, finds PostgreSQL, shows you the plan and asks before turning on backups (and before restarting PostgreSQL, if that is needed). To set up from your workstation instead: `rowsafe adopt app`, then `rowsafe apply app`.
 
-**Rewind**: continuous backups, restore to any second.
+**Rewind**: continuous backups, restore to any second. Deleted rows by mistake? Restore a copy as it was just before, next to production, and bring the rows back.
 
 ```sh
-rowsafe status            # is everything protected?
-rowsafe mark before-drop  # a named point (a Mark) you can restore to
-rowsafe backups app       # backups and the recovery window
+rowsafe status                       # is everything protected?
+rowsafe mark before-drop             # a named point (a Mark) you can go back to
+rowsafe rewind copy app --at "14:04" # a copy as it was at 14:04, on your server; production isn't touched
+rowsafe rewind compare app           # which rows are missing or changed in production
+rowsafe rewind rows app public.orders  # bring the missing rows back (asks first)
+rowsafe rewind database app --at "14:04"  # worst case: the whole database goes back (asks first; undo keeps working)
 ```
 
 **Proof**: every week Rowsafe restores your latest backup into a scratch copy and checks it.
@@ -35,11 +38,13 @@ rowsafe proofs app        # past results
 
 ```sh
 rowsafe pulse             # a 0-100 score per database, with what to fix in plain language
+rowsafe fix app           # let Rowsafe fix what pulse found (clean up tables, end a stuck session...)
 rowsafe top app           # the queries that take the most time, and which got slower
 rowsafe insights app      # largest tables, unused indexes, wasted space, vacuum
+rowsafe tune app          # PostgreSQL settings that suit this server; asks, then applies (undo: rowsafe settings undo)
 ```
 
-**Guard**: the safety net for AI agents. `rowsafe mcp` and the Claude Code plugin create a restore point before migrations and destructive SQL.
+**Guard**: the safety net for AI agents and deploys. `rowsafe mcp` and the Claude Code plugin create a restore point before migrations and destructive SQL; the GitHub Action saves one before every deploy.
 
 Full guide: [Quickstart](https://rowsafe.sh/docs/quickstart).
 
@@ -47,10 +52,12 @@ Full guide: [Quickstart](https://rowsafe.sh/docs/quickstart).
 
 | Path | What it is |
 |---|---|
-| `cmd/rowsafe-agent`, `internal/agent` | The agent. Makes outbound HTTPS requests only and runs a fixed set of tasks: inspect, adopt, check, backup, restore test, restore point, and a PostgreSQL restart when you ask for one. |
+| `cmd/rowsafe-agent`, `internal/agent` | The agent. Makes outbound HTTPS requests only and runs a fixed set of tasks: inspect, adopt, check, backup, restore test, restore point, a PostgreSQL restart when you ask for one, Rewind (a copy next to production, compare, bring rows back, rewind in place and undo) when you ask, health fixes you apply (VACUUM, ANALYZE, rebuilding or removing an index, cancelling a query, ending a session, removing an inactive replication slot), and PostgreSQL settings changes you choose (ALTER SYSTEM + reload, checked again on the server; never its own archiving settings). |
 | `cmd/rowsafe`, `client` | The CLI. |
 | `mcp`, `integrations/claude-code` | Guard: `rowsafe mcp`, an MCP server for AI assistants, and a Claude Code plugin that creates a restore point before migrations. |
-| `collect` | What the agent's monitoring reads: database and host metrics, locks, replication, query statistics and table insights. |
+| `integrations/github-action` | Guard in CI: a GitHub Action that saves a Mark (restore point) before every deploy, published as `rowsafe/action`. |
+| `collect` | What the agent's monitoring reads: database and host metrics, locks, replication, query statistics, table insights and PostgreSQL settings. |
+| `tune` | The settings that matter, explained; recommendations for a server's memory, CPUs and disk; and the values Rowsafe refuses. |
 | `protocol` | The API types shared by the agent, the CLI and the Rowsafe service. |
 | `internal/pgbackrest`, `internal/pginspect` | PostgreSQL backup and inspection. |
 | `scripts/install.sh` | The installer served at `https://rowsafe.sh`. |
@@ -60,7 +67,9 @@ Full guide: [Quickstart](https://rowsafe.sh/docs/quickstart).
 
 - **Never restarts your database on its own.** When a change needs a restart, you choose when: the installer asks, or you click Restart in the dashboard or run `rowsafe restart`. AI agents can't restart it.
 - **Plan before apply.** You see every change before anything happens.
-- **Isolated restore tests** that can't touch production or its backups.
+- **Fixes you choose, checked twice.** Health fixes run only when a person applies one, from a fixed list (no arbitrary SQL). The agent looks every object up again and re-checks the conditions right before it acts: it never removes an index that backs a constraint or has been used since, never ends Rowsafe's own, replication or autovacuum sessions, and only ends the exact session that was found (same process and start time). DDL waits at most 5 seconds for locks, indexes are rebuilt and removed `CONCURRENTLY`, and VACUUM runs gently (`vacuum_cost_delay`). AI agents can't apply fixes.
+- **Isolated restore tests and copies** that can't touch production or its backups: a private socket, no network listener, no archiving into your bucket.
+- **Rewind only when you ask, and undoable.** Bringing rows back runs in one transaction by primary key (parents first, triggers off, a Mark saved first). Rewinding the whole database keeps the current data aside for undo, and any failure puts the original back and starts it again. Your data stays on your server: Rowsafe only sees table names and counts. AI agents can't restore anything.
 - **Signed, verifiable releases** with automatic rollback of a bad update. See [verifying releases](docs/verifying-releases.md).
 - **Your secrets stay on your server,** and backups are encrypted before upload.
 - **Backups go easy on your server.** Backups and restore tests run at low CPU and disk priority (`nice`, `ionice`), so PostgreSQL comes first. pgBackRest uses one process on servers with up to 4 CPUs and two on bigger ones (`process-max`), and compresses with zstd. Copying each change to your bucket (`archive-push`, run by PostgreSQL) is left at normal priority so it never falls behind.
