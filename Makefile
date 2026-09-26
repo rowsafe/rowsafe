@@ -86,6 +86,10 @@ check-installer:
 		diff -u deploy/systemd/rowsafe-pooler.path - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pooler.path"; exit 1; }
 	@sed -n "/<<'ROWSAFE_POOLER_APT_EOF'; then\$$/,/^ROWSAFE_POOLER_APT_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
 		diff -u deploy/systemd/rowsafe-pooler-apt@.service - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pooler-apt@.service"; exit 1; }
+	@sed -n "/<<'ROWSAFE_FILES_SERVICE_EOF' || true\$$/,/^ROWSAFE_FILES_SERVICE_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
+		diff -u deploy/systemd/rowsafe-files-helper.service - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-files-helper.service"; exit 1; }
+	@sed -n "/<<'ROWSAFE_FILES_PATH_EOF' || true\$$/,/^ROWSAFE_FILES_PATH_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
+		diff -u deploy/systemd/rowsafe-files-helper.path - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-files-helper.path"; exit 1; }
 	@sed -n "/<<'ROWSAFE_UPDATE_SERVICE_EOF'; then\$$/,/^ROWSAFE_UPDATE_SERVICE_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
 		diff -u deploy/systemd/rowsafe-pg-update.service - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pg-update.service"; exit 1; }
 	@sed -n "/<<'ROWSAFE_UPDATE_PATH_EOF'; then\$$/,/^ROWSAFE_UPDATE_PATH_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \

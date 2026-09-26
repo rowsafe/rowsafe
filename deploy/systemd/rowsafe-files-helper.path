@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-files-helper.path: starts rowsafe-files-helper.service when the
+# Rowsafe agent asks for read access to a protected folder or to put
+# restored files back (someone asked in the dashboard and confirmed).
+# Installed by https://rowsafe.sh/install only when root allowed it; remove
+# it with --no-allow-files.
+
+[Unit]
+Description=Rowsafe: watch for requests to read or restore a protected folder
+Documentation=https://rowsafe.sh/docs/guides/files
+
+[Path]
+PathExists=/var/lib/rowsafe/restart/files-request
+Unit=rowsafe-files-helper.service
+
+[Install]
+WantedBy=multi-user.target

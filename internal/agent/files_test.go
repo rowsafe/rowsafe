@@ -219,14 +219,11 @@ func TestSetConfigs(t *testing.T) {
 func TestAllowedRootsAndHelperActions(t *testing.T) {
 	dir := t.TempDir()
 	allow := filepath.Join(dir, "files-allowed")
-	os.WriteFile(allow, []byte("# roots\n/srv\n\nrelative\n/\n/var/www/\n/data\n"), 0o644)
+	os.WriteFile(allow, []byte("# folders\n/srv/app/storage 33\n/srv\n\nrelative 1\n/ 0\n/var/www/ 33\n/data 1000\n/opt/x 1 2\n/opt/y uid\n"), 0o644)
 	rt := newFilesRuntime(Config{StateDir: dir})
 	rt.allowFile = allow
-	if got := rt.allowedRoots(); !slices.Equal(got, []string{"/srv", "/data"}) {
-		t.Errorf("roots %v", got)
-	}
-	if !underRoots("/srv/app/storage", []string{"/srv"}) || underRoots("/srvx/a", []string{"/srv"}) || !underRoots("/data", []string{"/data"}) {
-		t.Error("underRoots")
+	if got := rt.allowedRoots(); !slices.Equal(got, []string{"/srv/app/storage", "/data"}) {
+		t.Errorf("folders %v", got)
 	}
 	helper := filepath.Join(dir, "helper")
 	os.WriteFile(helper, []byte("#!/bin/sh\n# actions: restart stop start files-read files-put\n"), 0o755)

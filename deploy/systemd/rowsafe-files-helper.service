@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-files-helper.service: gives the Rowsafe agent read access to a
+# folder root allowed in /etc/rowsafe/files-allowed, or puts restored files
+# back into it as the folder's owner, when the agent asks because a person
+# did (see /usr/local/lib/rowsafe/rowsafe-pg-restart, files mode). Started
+# by rowsafe-files-helper.path; installed by https://rowsafe.sh/install only
+# when root allowed it (--allow-files). Its own unit, so the rights files
+# need never widen rowsafe-pg-restart.service.
+
+[Unit]
+Description=Rowsafe: read or restore a protected folder on request
+Documentation=https://rowsafe.sh/docs/guides/files
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/rowsafe/rowsafe-pg-restart
+Environment=ROWSAFE_HELPER_MODE=files
+TimeoutStartSec=3600
+# The agent user, whose privileges read and remove the request and read the
+# staged files.
+Environment=ROWSAFE_AGENT_USER=postgres
+# The answer: root's own directory, which the agent can read (shared with
+# rowsafe-pg-restart.service).
+RuntimeDirectory=rowsafe-pg-restart
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+# Root's private copy of the staged files and the cooldowns, out of the
+# agent's reach.
+StateDirectory=rowsafe-files-helper
+StateDirectoryMode=0700
+UMask=0022
+
+# Hardening. CAP_SETUID/CAP_SETGID drop to the agent user (to read its
+# files) and to the folder's owner (to write); CAP_FOWNER sets ACLs on files
+# root doesn't own; CAP_DAC_READ_SEARCH lets root check the folder. Only the
+# protected folders are writable (rowsafe-files-helper.service.d, written by
+# the installer), and no set-user-ID file can be created.
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_FOWNER CAP_DAC_READ_SEARCH
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=-/var/lib/rowsafe/restart
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service

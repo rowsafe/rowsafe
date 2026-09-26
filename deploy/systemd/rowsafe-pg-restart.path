@@ -11,9 +11,6 @@ Documentation=https://rowsafe.sh/docs/reference/agent-configuration
 
 [Path]
 PathExists=/var/lib/rowsafe/restart/request
-# Files requests (--allow-files) have their own file, so they never
-# overwrite a restart request.
-PathExists=/var/lib/rowsafe/restart/files-request
 Unit=rowsafe-pg-restart.service
 
 [Install]
