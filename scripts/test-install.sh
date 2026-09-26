@@ -81,7 +81,7 @@ case \${1:-} in
     echo '{"version":"$1","platform":"linux/x","ok":true,"checks":["config","repository settings","pgbackrest","control plane"]}' ;;
   inspect)
     printf '{\n  "server_version": "17.6 (Debian 17.6-1)",\n  "data_directory": "/var/lib/postgresql/17/main",\n  "archive_mode": "off"\n}\n' ;;
-  run) while :; do sleep 1; done ;;
+  run) i=0; while [ \$i -lt 1800 ]; do sleep 1; i=\$((i + 1)); done ;; # at most 30 minutes, even if nothing kills it
   storage)
     # Rowsafe Storage test: must run as postgres with agent.env loaded.
     f=/tmp/rowsafe-fake
@@ -1926,7 +1926,9 @@ PGEOF
   fw_request() {
     rm -f "$FO/result"
     [ -z "$2" ] || printf '%b' "$2" | as_pg sh -c 'cat >"$1"' sh "$D/addresses"
+    confirmer=''
     if [ "${3:-0}" = 1 ]; then
+      # At most 10 seconds (100 x 0.1s).
       (
         for _ in $(seq 1 100); do
           if grep -qx phase=pending "$FO/result" 2>/dev/null; then
@@ -1936,10 +1938,13 @@ PGEOF
           sleep 0.1
         done
       ) &
+      confirmer=$!
     fi
     printf '%s\n' "$1" | as_pg sh -c 'cat >"$1"' sh "$D/request"
     fw
-    wait
+    # Only the confirmer: a bare wait would also wait for the fake agent,
+    # which runs until pkill.
+    [ -z "$confirmer" ] || wait "$confirmer"
     [ -e "$D/request" ] || fail "helper removed the agent's request: $1"
     [ -f "$FO/result" ] || fail "no result for: $1"
     as_pg rm -f "$D/request" "$D/addresses" "$D/confirm"
