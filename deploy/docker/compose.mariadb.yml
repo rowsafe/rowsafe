@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# MariaDB 11.4 (the official, unmodified mariadb:11.4 image) with the Rowsafe
+# agent as a sidecar: physical backups with mariadb-backup and the binary
+# log shipped to your S3-compatible bucket, encrypted in the agent
+# container, restores to any second, weekly restore tests (Proof) and Marks.
+# See https://rowsafe.sh/docs/guides/mysql.
+#
+#   1. Put the root password in mariadb_root_password.txt (chmod 600) and
+#      the agent's settings in rowsafe-agent.env (chmod 600; see
+#      compose.mysql.yml), with a one-time token from
+#      `rowsafe hosts enroll-token`.
+#   2. ROWSAFE_AGENT_VERSION=<release> docker compose up -d
+#   3. rowsafe adopt cms --host db-1 --engine mariadb, then approve the plan.
+#
+# MariaDB keeps no binary log by default: the three options on the mariadb
+# service's command turn it on (in an existing setup, adding them means
+# recreating the container: a few seconds of downtime).
+
+name: mycms
+
+services:
+  mariadb:
+    image: mariadb:11.4
+    restart: unless-stopped
+    # Rowsafe: the binary log, row-based, for restores to any second.
+    command: --log-bin=mysql-bin --binlog-format=ROW --server-id=1
+    environment:
+      MARIADB_ROOT_PASSWORD_FILE: /run/secrets/mariadb_root_password
+    secrets: [mariadb_root_password]
+    volumes:
+      - mariadbdata:/var/lib/mysql
+      - mariadbsocket:/run/mysqld                  # Rowsafe: the agent connects over this socket
+
+  # Rowsafe
+  rowsafe-agent:
+    # One tag per MariaDB version: <version>-mariadb11.4, -mariadb10.11,
+    # -mariadb10.6 (built FROM the same mariadb image).
+    image: ghcr.io/rowsafe/agent:${ROWSAFE_AGENT_VERSION:?set ROWSAFE_AGENT_VERSION to a Rowsafe release}-mariadb11.4
+    hostname: db-1
+    user: "999:999"                                # the mariadb image's mysql user
+    restart: unless-stopped
+    depends_on: [mariadb]
+    env_file: rowsafe-agent.env
+    environment:
+      ROWSAFE_MYSQL_ADMIN_PASSWORD_FILE: /run/secrets/mariadb_root_password
+    secrets: [mariadb_root_password]
+    volumes:
+      - mariadbdata:/var/lib/mysql:ro
+      - mariadbsocket:/run/mysqld
+      - rowsafe-state:/var/lib/rowsafe
+
+secrets:
+  mariadb_root_password:
+    file: ./mariadb_root_password.txt
+
+volumes:
+  mariadbdata:
+  mariadbsocket:   # Rowsafe
+  rowsafe-state:   # Rowsafe

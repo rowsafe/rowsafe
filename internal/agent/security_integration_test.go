@@ -44,7 +44,7 @@ func secPGBinDir(t *testing.T) string {
 	return strings.TrimSpace(string(out))
 }
 
-func freePort(t *testing.T) int {
+func secFreePort(t *testing.T) int {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -73,7 +73,7 @@ func startScratchPG(t *testing.T) *scratchPG {
 		}
 		os.RemoveAll(sock)
 	})
-	pg := &scratchPG{dir: filepath.Join(sock, "data"), sockDir: sock, port: freePort(t), user: u.Username, bin: bin}
+	pg := &scratchPG{dir: filepath.Join(sock, "data"), sockDir: sock, port: secFreePort(t), user: u.Username, bin: bin}
 	run := func(name string, args ...string) {
 		t.Helper()
 		cmd := exec.Command(filepath.Join(bin, name), args...)
@@ -131,7 +131,7 @@ func (pg *scratchPG) agent(t *testing.T) (*Agent, protocol.DatabaseSpec) {
 }
 
 // scramVerifier is what the dashboard computes in the browser (RFC 5802/7677).
-func scramVerifier(password string, salt []byte, iter int) string {
+func testSCRAMVerifier(password string, salt []byte, iter int) string {
 	salted, _ := pbkdf2.Key(sha256.New, password, salt, iter, 32)
 	mac := func(key []byte, msg string) []byte {
 		h := hmac.New(sha256.New, key)
@@ -183,7 +183,7 @@ func TestSecurityIntegration(t *testing.T) {
 	if !r.Reachable || r.TLS || r.State != protocol.OutsideNoPassword || !r.PlainLogins {
 		t.Errorf("probe with trust: %+v", r)
 	}
-	closed := pgprobe.Probe(ctx, fmt.Sprintf("127.0.0.1:%d", freePort(t)), pgprobe.Options{})
+	closed := pgprobe.Probe(ctx, fmt.Sprintf("127.0.0.1:%d", secFreePort(t)), pgprobe.Options{})
 	if closed.Reachable || closed.State != protocol.OutsideClosed {
 		t.Errorf("probe of a closed port: %+v", closed)
 	}
@@ -273,7 +273,7 @@ func TestSecurityIntegration(t *testing.T) {
 	}
 
 	// ---- a new password from its SCRAM verifier ----
-	verifier := scramVerifier("n3w-Passw0rd-from-the-browser", []byte("0123456789abcdef"), 4096)
+	verifier := testSCRAMVerifier("n3w-Passw0rd-from-the-browser", []byte("0123456789abcdef"), 4096)
 	tl = &taskLog{}
 	if _, err := a.securityFix(ctx, db, protocol.SecurityFixParams{Action: protocol.SecSetPassword, Role: "app", Verifier: verifier}, tl); err != nil {
 		t.Fatalf("set password: %v\n%s", err, tl)

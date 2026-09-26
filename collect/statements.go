@@ -34,6 +34,20 @@ type stmtCounters struct {
 	calls   int64
 	totalMs float64
 	rows    int64
+	blocks  stmtBlocks // advisor
+}
+
+// stmtBlocks are buffer and temp file counters (advisor: rows read per row
+// returned, temp file use).
+type stmtBlocks struct{ hit, read, temp int64 }
+
+func (b stmtBlocks) add(o stmtBlocks) stmtBlocks {
+	return stmtBlocks{b.hit + o.hit, b.read + o.read, b.temp + o.temp}
+}
+
+// minus is b - o, never negative.
+func (b stmtBlocks) minus(o stmtBlocks) stmtBlocks {
+	return stmtBlocks{max(b.hit-o.hit, 0), max(b.read-o.read, 0), max(b.temp-o.temp, 0)}
 }
 
 type stmtText struct {
@@ -175,7 +189,8 @@ func (s *stmtState) read(ctx context.Context, conn *pgx.Conn, schema string, ver
 		}
 	}
 	rows, err := conn.Query(ctx, fmt.Sprintf(`
-		SELECT coalesce(queryid, 0), dbid, userid, calls, %s, rows FROM %s %s LIMIT %d`,
+		SELECT coalesce(queryid, 0), dbid, userid, calls, %s, rows,
+		       shared_blks_hit, shared_blks_read, temp_blks_written FROM %s %s LIMIT %d`,
 		total, fn, toplevel, maxStmtRows+1))
 	if err != nil {
 		return nil, err
@@ -185,7 +200,8 @@ func (s *stmtState) read(ctx context.Context, conn *pgx.Conn, schema string, ver
 	for rows.Next() {
 		var k stmtKey
 		var c stmtCounters
-		if err := rows.Scan(&k.queryID, &k.dbid, &k.userid, &c.calls, &c.totalMs, &c.rows); err != nil {
+		if err := rows.Scan(&k.queryID, &k.dbid, &k.userid, &c.calls, &c.totalMs, &c.rows,
+			&c.blocks.hit, &c.blocks.read, &c.blocks.temp); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -194,7 +210,7 @@ func (s *stmtState) read(ctx context.Context, conn *pgx.Conn, schema string, ver
 			break
 		}
 		p := cur[k] // the same key twice: toplevel false on PostgreSQL < 14 can't happen; sum anyway
-		cur[k] = stmtCounters{calls: p.calls + c.calls, totalMs: p.totalMs + c.totalMs, rows: p.rows + c.rows}
+		cur[k] = stmtCounters{calls: p.calls + c.calls, totalMs: p.totalMs + c.totalMs, rows: p.rows + c.rows, blocks: p.blocks.add(c.blocks)}
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -233,6 +249,7 @@ func (s *stmtState) read(ctx context.Context, conn *pgx.Conn, schema string, ver
 			QueryID: strconv.FormatInt(d.queryID, 10), Query: s.texts[d.queryID].text,
 			Database: names.db[d.topDB], User: names.role[d.topUser],
 			Calls: d.calls, TotalTimeMs: d.totalMs, Rows: d.rows,
+			SharedBlksHit: d.blocks.hit, SharedBlksRead: d.blocks.read, TempBlksWritten: d.blocks.temp,
 		})
 	}
 	return qs, nil
@@ -245,6 +262,7 @@ type stmtDelta struct {
 	calls          int64
 	totalMs        float64
 	rows           int64
+	blocks         stmtBlocks // advisor
 	topDB, topUser uint32
 	topMs          float64
 }
@@ -265,7 +283,7 @@ func statementDeltas(prev, cur map[stmtKey]stmtCounters, truncated bool) []stmtD
 		case !had || c.calls < p.calls || c.totalMs < p.totalMs:
 			d = c
 		default:
-			d = stmtCounters{calls: c.calls - p.calls, totalMs: c.totalMs - p.totalMs, rows: max(c.rows-p.rows, 0)}
+			d = stmtCounters{calls: c.calls - p.calls, totalMs: c.totalMs - p.totalMs, rows: max(c.rows-p.rows, 0), blocks: c.blocks.minus(p.blocks)}
 		}
 		if d.calls <= 0 {
 			continue
@@ -278,6 +296,7 @@ func statementDeltas(prev, cur map[stmtKey]stmtCounters, truncated bool) []stmtD
 		x.calls += d.calls
 		x.totalMs += d.totalMs
 		x.rows += d.rows
+		x.blocks = x.blocks.add(d.blocks)
 		if d.totalMs >= x.topMs {
 			x.topMs, x.topDB, x.topUser = d.totalMs, k.dbid, k.userid
 		}

@@ -686,9 +686,11 @@ func TestStatementReads(t *testing.T) {
 	for _, sql := range []string{
 		`CREATE SCHEMA fakepgss`,
 		`CREATE TABLE fakepgss.data (userid oid, dbid oid, toplevel bool, queryid bigint, query text, calls bigint,
-		   total_exec_time float8, mean_exec_time float8, rows bigint)`,
+		   total_exec_time float8, mean_exec_time float8, rows bigint,
+		   shared_blks_hit bigint DEFAULT 0, shared_blks_read bigint DEFAULT 0, temp_blks_written bigint DEFAULT 0)`,
 		`CREATE FUNCTION fakepgss.pg_stat_statements(showtext boolean) RETURNS SETOF fakepgss.data
-		   LANGUAGE sql AS 'SELECT userid, dbid, toplevel, queryid, CASE WHEN showtext THEN query END, calls, total_exec_time, mean_exec_time, rows FROM fakepgss.data'`,
+		   LANGUAGE sql AS 'SELECT userid, dbid, toplevel, queryid, CASE WHEN showtext THEN query END, calls, total_exec_time, mean_exec_time, rows,
+		     shared_blks_hit, shared_blks_read, temp_blks_written FROM fakepgss.data'`,
 		`CREATE VIEW fakepgss.pg_stat_statements AS SELECT * FROM fakepgss.pg_stat_statements(true)`,
 		`CREATE VIEW fakepgss.pg_stat_statements_info AS SELECT timestamptz '2026-09-01 00:00:00+00' AS stats_reset`,
 		`INSERT INTO fakepgss.data SELECT r.oid, d.oid, true, 42, 'SELECT * FROM t WHERE id = $1', 100, 50, 0.5, 100
@@ -713,7 +715,8 @@ func TestStatementReads(t *testing.T) {
 	if qs, err := s.read(t.Context(), conn, "fakepgss", version, now); err != nil || qs != nil {
 		t.Fatalf("first reading = %+v, %v", qs, err)
 	}
-	if _, err := conn.Exec(t.Context(), `UPDATE fakepgss.data SET calls = calls + 10, total_exec_time = total_exec_time + 30`); err != nil {
+	if _, err := conn.Exec(t.Context(), `UPDATE fakepgss.data SET calls = calls + 10, total_exec_time = total_exec_time + 30,
+		shared_blks_hit = shared_blks_hit + 500, shared_blks_read = shared_blks_read + 20, temp_blks_written = temp_blks_written + 3`); err != nil {
 		t.Fatal(err)
 	}
 	qs, err := s.read(t.Context(), conn, "fakepgss", version, now.Add(5*time.Minute))
@@ -730,6 +733,9 @@ func TestStatementReads(t *testing.T) {
 	for _, x := range qs.Statements {
 		if x.QueryID == "42" && x.Query != "SELECT * FROM t WHERE id = $1" {
 			t.Errorf("query text = %q", x.Query)
+		}
+		if x.SharedBlksHit != 500 || x.SharedBlksRead != 20 || x.TempBlksWritten != 3 {
+			t.Errorf("blocks of %s = %d hit, %d read, %d temp", x.QueryID, x.SharedBlksHit, x.SharedBlksRead, x.TempBlksWritten)
 		}
 		if x.QueryID == "7" && strings.Contains(x.Query, "secret") {
 			t.Errorf("password not redacted: %q", x.Query)

@@ -213,7 +213,7 @@ func readRoles(ctx context.Context, conn *pgx.Conn, super bool, rep *protocol.Se
 	// (pg_authid); the hash itself is never read.
 	q := `SELECT rolname, rolsuper, rolcanlogin,
 		CASE WHEN rolpassword IS NULL THEN 'none' WHEN rolpassword LIKE 'md5%' THEN 'md5'
-		     WHEN rolpassword LIKE 'SCRAM-SHA-256$%' THEN 'scram' ELSE 'other' END, rolvaliduntil
+		     WHEN rolpassword LIKE 'SCRAM-SHA-256$%' THEN 'scram-sha-256' ELSE 'other' END, rolvaliduntil
 		FROM pg_authid WHERE (rolcanlogin OR rolsuper) AND rolname NOT LIKE 'pg\_%' ORDER BY rolname LIMIT $1`
 	if !super {
 		q = `SELECT rolname, rolsuper, rolcanlogin, '', rolvaliduntil FROM pg_roles

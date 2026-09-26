@@ -118,7 +118,7 @@ func (a *Agent) restrictAccess(ctx context.Context, db protocol.DatabaseSpec, p 
 		var parts []string
 		if e.replaced > 0 {
 			parts = append(parts, fmt.Sprintf("%s open to every address now %s only %s",
-				countNoun(e.replaced, "rule", "rules"), map[bool]string{true: "lets", false: "let"}[e.replaced == 1], addrList(allowed)))
+				countNoun(e.replaced, "rule", "rules"), map[bool]string{true: "lets", false: "let"}[e.replaced == 1], prefixList(allowed)))
 		}
 		if e.toTLS > 0 {
 			parts = append(parts, fmt.Sprintf("%s now %s TLS", countNoun(e.toTLS, "rule", "rules"), map[bool]string{true: "requires", false: "require"}[e.toTLS == 1]))
@@ -129,7 +129,7 @@ func (a *Agent) restrictAccess(ctx context.Context, db protocol.DatabaseSpec, p 
 
 var errNoChange = errors.New("no change needed")
 
-func addrList(ps []netip.Prefix) string {
+func prefixList(ps []netip.Prefix) string {
 	var s []string
 	for _, p := range ps[:min(len(ps), 4)] {
 		s = append(s, p.String())

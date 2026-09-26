@@ -170,8 +170,19 @@ func guard(ctx context.Context, args []string) error {
 	return hookReply(fmt.Sprintf("Rowsafe: restore point %s created on %s (LSN %s) before: %s", name, db, lsn, reason),
 		fmt.Sprintf("Rowsafe created restore point %q on database %s (from %s), confirmed in the backup repository, right before this command (%s). "+
 			"If the command goes wrong, stop and tell the user they can Rewind %s to restore point %q in the Rowsafe dashboard (or `rowsafe rewind copy %s --mark %s`, then bring the rows back); "+
-			"don't try to repair the data or restore it yourself.",
+			"don't try to repair the data or restore it yourself."+previewHint(reason),
 			name, db, src, reason, db, name, db, name))
+}
+
+// previewHint nudges an assistant running a migration to preview the next
+// one on a copy first (Guard's preview_migration tool).
+func previewHint(reason string) string {
+	r := strings.ToLower(reason)
+	if !strings.Contains(r, "migrat") && !strings.Contains(r, "upgrade") && !strings.Contains(r, "db push") && !strings.Contains(r, "schema") {
+		return ""
+	}
+	return " Before running a migration, preview it: call the preview_migration tool with its SQL (or run `rowsafe preview FILE.sql`); " +
+		"it runs on a fresh copy of the database and reports locks, table rewrites and a verdict, without touching production."
 }
 
 // hookReply lets the command run and passes a note to the user and to Claude.

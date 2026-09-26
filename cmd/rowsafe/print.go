@@ -97,7 +97,11 @@ func printTask(t protocol.TaskView) {
 			if !r.Archived {
 				state = "NOT yet confirmed in the repository"
 			}
-			fmt.Printf("Restore point %q at LSN %s (WAL %s), %s\n", r.Name, r.LSN, r.WALFile, state)
+			if strings.Contains(r.LSN, ":") { // MySQL / MariaDB: a binary log position
+				fmt.Printf("Mark %q at binary log position %s, %s\n", r.Name, r.LSN, state)
+			} else {
+				fmt.Printf("Restore point %q at LSN %s (WAL %s), %s\n", r.Name, r.LSN, r.WALFile, state)
+			}
 		}
 	case protocol.TaskBackup:
 		var r protocol.BackupResult
@@ -117,6 +121,11 @@ func printTask(t protocol.TaskView) {
 			for _, d := range r.Details {
 				fmt.Printf("  %s\n", d)
 			}
+		}
+	case protocol.TaskSettings:
+		var r protocol.SettingsResult
+		if json.Unmarshal(t.Result, &r) == nil && r.Summary != "" {
+			fmt.Println(r.Summary)
 		}
 	case protocol.TaskSecurityFix: // protocol/security.go
 		var r protocol.SecurityFixResult
@@ -141,8 +150,12 @@ func printTask(t protocol.TaskView) {
 func printAdopt(r protocol.AdoptResult) {
 	in := r.Inspect
 	if in.ServerVersion != "" {
-		fmt.Printf("PostgreSQL %s, %s across %d databases, data directory %s\n\n",
-			in.ServerVersion, humanBytes(in.TotalSizeBytes), len(in.Databases), in.DataDirectory)
+		engine := "PostgreSQL"
+		if in.MySQL != nil {
+			engine = protocol.EngineDisplayName(in.MySQL.Engine)
+		}
+		fmt.Printf("%s %s, %s across %d databases, data directory %s\n\n",
+			engine, in.ServerVersion, humanBytes(in.TotalSizeBytes), len(in.Databases), in.DataDirectory)
 	}
 	if len(r.Plan) > 0 {
 		if r.Applied {

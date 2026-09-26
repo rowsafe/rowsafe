@@ -186,20 +186,16 @@ type HBARule struct {
 	Error     string   `json:"error,omitempty"`
 }
 
-// Password kinds of a role (RoleInfo.Password).
-const (
-	PasswordNone  = "none"
-	PasswordMD5   = "md5"
-	PasswordSCRAM = "scram"
-	PasswordOther = "other" // stored in plain text by a very old version
-)
+// Password kinds of a role (RoleInfo.Password): PasswordNone, PasswordMD5
+// and PasswordSCRAM (dbadmin.go), or PasswordOther.
+const PasswordOther = "other" // stored in plain text by a very old version
 
 // RoleInfo is one role: the kind of its password, never the password.
 type RoleInfo struct {
 	Name       string     `json:"name"`
 	Superuser  bool       `json:"superuser,omitempty"`
 	CanLogin   bool       `json:"can_login"`
-	Password   string     `json:"password"` // Password*
+	Password   string     `json:"password"` // none, md5, scram-sha-256 or other
 	ValidUntil *time.Time `json:"valid_until,omitempty"`
 }
 

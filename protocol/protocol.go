@@ -71,6 +71,16 @@ type MaintenanceParams struct {
 	// Unused marks a drop_index for an unused index: the agent refuses when
 	// the index has been scanned since (idx_scan > 0).
 	Unused bool `json:"unused,omitempty"`
+	// CreateIndex is the index of a create_index (protocol/indexadvisor.go).
+	CreateIndex *CreateIndexParams `json:"create_index,omitempty"`
+	// ---- advisor (protocol/advisor.go) ----
+	// Columns of a create_index on Tables[0] (column names, unquoted).
+	Columns []string `json:"columns,omitempty"`
+	// Sequence is "schema.sequence" for sync_sequence.
+	Sequence string `json:"sequence,omitempty"`
+	// Settings are the storage parameters of set_table_storage_params.
+	Settings map[string]string `json:"settings,omitempty"`
+	// ---- end advisor ----
 }
 
 // MaintenanceResult is the agent's report for a maintenance task.
@@ -120,6 +130,9 @@ type DatabaseSpec struct {
 	Port          int    `json:"port"`
 	SocketDir     string `json:"socket_dir"`
 	RetentionFull int    `json:"retention_full"`
+	// SecondCopyRetentionFull is how many full backups the second copy keeps
+	// (0: DefaultSecondCopyRetentionFull). See secondcopy.go.
+	SecondCopyRetentionFull int `json:"second_copy_retention_full,omitempty"`
 	// Engine is the database engine (Engine* in engine.go); "" from older
 	// control planes means PostgreSQL (NormalizeEngine).
 	Engine string `json:"engine,omitempty"`
@@ -142,6 +155,7 @@ type AdoptParams struct {
 
 type BackupParams struct {
 	Type string `json:"type"`
+	Repo int    `json:"repo,omitempty"` // RepoSecond: back up to the second copy (secondcopy.go)
 }
 
 // ---- Agent <-> control plane ----
@@ -179,8 +193,23 @@ type HeartbeatRequest struct {
 	RestartActions []string `json:"restart_actions,omitempty"`
 	// Rewinds are the live copies and kept data directories on this host.
 	Rewinds []RewindState `json:"rewinds,omitempty"`
+	// ManagedStorage: Rowsafe Storage or the customer's own bucket
+	// (storage.go). Not Storage, which is storage use per repository.
+	ManagedStorage *StorageStatus `json:"managed_storage,omitempty"`
+	// Storage and SecondCopies: backup storage use and the second copy
+	// (secondcopy.go).
+	Storage      []RepoStorage      `json:"storage,omitempty"`
+	SecondCopies []SecondCopyStatus `json:"second_copies,omitempty"`
+	// Software is PostgreSQL's versions, pending updates and upgrades on
+	// this host (upgrade.go); sent about every hour.
+	Software *SoftwareReport `json:"software,omitempty"`
 	// DockerControl: docker-sidecar agents only (see protocol/docker.go).
 	DockerControl *DockerControlReport `json:"docker_control,omitempty"`
+	// Copies are Guard's preview and safe copies (protocol/copies.go).
+	Copies *CopiesReport `json:"copies,omitempty"`
+	// StandbyHeartbeat: the agent's key, addresses, standbys and fences
+	// (protocol/standby.go).
+	StandbyHeartbeat
 }
 
 // HeartbeatResponse tells the agent which databases to watch.
@@ -195,6 +224,10 @@ type HeartbeatResponse struct {
 	Monitored []DatabaseSpec `json:"monitored,omitempty"`
 	// RewindExpires changes when copies and kept data are deleted (Extend).
 	RewindExpires []RewindExpiry `json:"rewind_expires,omitempty"`
+	// Copies extends or deletes Guard copies (protocol/copies.go).
+	Copies *CopiesUpdate `json:"copies,omitempty"`
+	// StandbyInstructions: fences to hold (protocol/standby.go).
+	StandbyInstructions
 }
 
 // ArchiverStats mirrors pg_stat_archiver for one adopted database.
@@ -258,6 +291,8 @@ type InspectResult struct {
 	PendingRestart         []string `json:"pending_restart,omitempty"`
 	Databases              []DBInfo `json:"databases"`
 	TotalSizeBytes         int64    `json:"total_size_bytes"`
+	// MySQL is set for MySQL and MariaDB servers (mysql.go).
+	MySQL *MySQLInspect `json:"mysql,omitempty"`
 }
 
 // Major returns the Postgres major version (e.g. 18 for 180004).
@@ -311,6 +346,7 @@ type BackupResult struct {
 	RepoSizeBytes int64     `json:"repo_size_bytes"`
 	WALStart      string    `json:"wal_start,omitempty"`
 	WALStop       string    `json:"wal_stop,omitempty"`
+	Repo          int       `json:"repo,omitempty"` // RepoSecond for a backup to the second copy
 }
 
 type DrillResult struct {
@@ -322,6 +358,7 @@ type DrillResult struct {
 	Databases       []DrillDatabase `json:"databases"`
 	Failures        []string        `json:"failures,omitempty"`
 	Warnings        []string        `json:"warnings,omitempty"`
+	Repo            int             `json:"repo,omitempty"` // RepoSecond: restored from the second copy
 }
 
 type DrillDatabase struct {
@@ -508,7 +545,9 @@ func TaskTimeout(taskType string) time.Duration {
 		return 2 * time.Minute
 	case TaskAdopt, TaskCheck:
 		return 10 * time.Minute
-	case TaskRestorePoint, TaskRestart:
+	case TaskRestorePoint, TaskRestart, TaskSettings:
+		return 5 * time.Minute
+	case TaskCopySchema: // catalog queries only
 		return 5 * time.Minute
 	case TaskSecurityScan, TaskSecurityFix: // security.go; a firewall change waits for its confirmation
 		return 10 * time.Minute
@@ -520,8 +559,18 @@ func TaskTimeout(taskType string) time.Duration {
 		return 2 * time.Hour
 	case TaskRewindUndo: // stop, two renames, start
 		return time.Hour
+	case TaskUpgradeCheck, TaskUpgradeCleanup, TaskPGUpdate, TaskReboot:
+		return 30 * time.Minute
+	case TaskSecurityUpdates:
+		return 2 * time.Hour
+	case TaskStandbyPrepare, TaskStandbyRelease, TaskStandbyFence, TaskStandbyPromote, TaskStandbyRemove, TaskStandbyUnfence:
+		return 15 * time.Minute
 	case TaskFindMoment: // reads the WAL of the range from the repository
 		return time.Hour
+	case TaskMigrate: // a switchover waits for the sync to catch up (migrate.go)
+		return time.Hour
+	case TaskDBAdmin: // Databases & users (dbadmin.go); removing a large database deletes its files
+		return 30 * time.Minute
 	default: // backup, drill, rewind copy and in place: a large restore takes hours
 		return 12 * time.Hour
 	}
@@ -588,6 +637,9 @@ const OrgHeader = "X-Rowsafe-Org"
 type PlanLimits struct {
 	MaxHosts     int `json:"max_hosts"`
 	MaxDatabases int `json:"max_databases"`
+	// MaxRewindRows is the most rows one Rewind "bring back rows" run may
+	// write (RewindRowsParams.MaxRows).
+	MaxRewindRows int64 `json:"max_rewind_rows"`
 }
 
 type OrgUsage struct {
@@ -771,6 +823,9 @@ type DatabaseMonitoring struct {
 	Insights *Insights `json:"insights,omitempty"`
 	// Replication is streaming replication status (newer agents only).
 	Replication *ReplicationStatus `json:"replication,omitempty"`
+	// Settings are the PostgreSQL settings that matter (settings.go; about
+	// every 5 minutes, newer agents only).
+	Settings *SettingsSnapshot `json:"settings,omitempty"`
 }
 
 // MonitoringAck answers a monitoring report.
@@ -1086,4 +1141,6 @@ type WhoAmI struct {
 	Org    Org     `json:"org"`
 	APIKey *APIKey `json:"api_key,omitempty"` // nil for the service token
 	Actor  string  `json:"actor"`
+	// OAuth is set for an AI app's OAuth access token (only on /mcp).
+	OAuth *OAuthConnection `json:"oauth,omitempty"`
 }
