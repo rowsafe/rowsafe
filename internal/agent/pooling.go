@@ -520,7 +520,7 @@ var poolerDBNameRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,63}$`)
 
 // poolerDBList is the helper's dbs parameter: the databases PgBouncer gets
 // an entry of its own for. A RELOAD moves explicit entries to a new target,
-// while PgBouncer before 1.25 keeps pools made from the "*" fallback on the
+// while some PgBouncer versions (1.24, for one) keep pools made from the "*" fallback on the
 // old one. Names the helper can't take, and any past 300 characters, use
 // the fallback.
 func poolerDBList(dbs []string) string {
