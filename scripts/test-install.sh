@@ -2142,7 +2142,7 @@ PGEOF
   # A re-run keeps the list as it is and asks nothing (restarts answered
   # already, so only the database questions come).
   scenario "discover_out=$shop"
-  expect_ok "restarts off for the firewall tests" "$INSTALLER" --no-allow-restart
+  expect_ok "restarts and PgBouncer off for the firewall tests" "$INSTALLER" --no-allow-restart --no-allow-pooler
   scenario "discover_out=$shop"
   tty_ok "a re-run keeps the firewall allowed" "Name it in Rowsafe\t\nTurn on backups for shop now?\tn\n" "$INSTALLER"
   lacks "Allow Rowsafe to limit who can reach"
