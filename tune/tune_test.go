@@ -45,15 +45,15 @@ func pgDefaults() map[string]protocol.PGSetting {
 	return SettingsMap(rows)
 }
 
-func recs(in Input) map[string]protocol.Recommendation {
-	out := map[string]protocol.Recommendation{}
+func recs(in Input) map[string]protocol.SettingRecommendation {
+	out := map[string]protocol.SettingRecommendation{}
 	for _, r := range Recommend(in) {
 		out[r.Name] = r
 	}
 	return out
 }
 
-func wantValues(t *testing.T, got map[string]protocol.Recommendation, want map[string]string) {
+func wantValues(t *testing.T, got map[string]protocol.SettingRecommendation, want map[string]string) {
 	t.Helper()
 	for name, v := range want {
 		r, ok := got[name]

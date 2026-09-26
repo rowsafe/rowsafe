@@ -54,6 +54,7 @@ Pulse: health and monitoring
   rowsafe insights [NAME]            largest tables, unused indexes, bloat, vacuum
   rowsafe top [NAME]                 queries that take the most time, and which got slower
   rowsafe settings [NAME]            PostgreSQL's settings; rowsafe tune [NAME]: what suits the server
+  rowsafe recommendations [NAME]     what would make it better, why and what it costs
   rowsafe alerts                     firing alerts (rowsafe channels: where they go)
   rowsafe report                     "Your weekly Pulse", the weekly email
 

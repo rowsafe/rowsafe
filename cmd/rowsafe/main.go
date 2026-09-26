@@ -133,6 +133,13 @@ Pulse: health, monitoring and alerts
                                              dead rows and vacuum, transaction ID age
   rowsafe top [NAME] [--since 24h] [--sort total_time|calls|mean_time|rows] [--query ID] [--json]
                                              statements that took the most time in a range, and which got slower
+  rowsafe recommendations [NAME] [--group schema|queries|capacity|indexes] [--dismissed] [--json]
+                                             what would make it better (missing indexes, ids running out,
+                                             N+1 queries, memory...), why and what it costs; without NAME,
+                                             each database's top one. Apply the ones Rowsafe can do with rowsafe fix
+  rowsafe recommendations [NAME] --dismiss ID [--reason not_relevant|intended|later|wrong] [--note TEXT]
+  rowsafe recommendations [NAME] --restore ID
+                                             set a recommendation aside, or bring it back
   rowsafe activity [NAME]                    queries running, or idle in a transaction, for over a minute
   rowsafe alerts [--all | --resolved]        firing alerts (with --all, resolved ones too)
   rowsafe alerts ack ID                      acknowledge a firing alert: no more reminders
@@ -352,6 +359,8 @@ func dispatch(ctx context.Context, args []string) error {
 		return insightsCmd(ctx, c, rest)
 	case "top":
 		return topCmd(ctx, c, rest)
+	case "recommendations": // advisor (recommendations.go)
+		return recommendationsCmd(ctx, c, rest)
 	case "activity":
 		return activityCmd(ctx, c, rest)
 	case "report":

@@ -174,9 +174,9 @@ type SettingsOverview struct {
 	Settings []SettingView `json:"settings"`
 	Other    []SettingView `json:"other"`
 	// Recommendations are what "Tune for this server" would change.
-	Recommendations []Recommendation `json:"recommendations"`
-	PendingRestart  []string         `json:"pending_restart"`
-	ConfigErrors    []string         `json:"config_errors,omitempty"`
+	Recommendations []SettingRecommendation `json:"recommendations"`
+	PendingRestart  []string                `json:"pending_restart"`
+	ConfigErrors    []string                `json:"config_errors,omitempty"`
 	// Changes are the latest changes made through Rowsafe, newest first.
 	Changes []SettingsChange `json:"changes"`
 	// CanRestart: Restart PostgreSQL may be offered (restarts allowed, agent
@@ -229,8 +229,8 @@ type SettingView struct {
 	LockedReason   string `json:"locked_reason,omitempty"`
 }
 
-// Recommendation is one change "Tune for this server" proposes.
-type Recommendation struct {
+// SettingRecommendation is one change "Tune for this server" proposes.
+type SettingRecommendation struct {
 	Name    string `json:"name"`
 	Title   string `json:"title,omitempty"`
 	Current string `json:"current"` // for people

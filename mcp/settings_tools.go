@@ -52,7 +52,7 @@ func (t *tools) databaseSettings(ctx context.Context, _ *sdk.CallToolRequest, in
 		ov.Other = []protocol.SettingView{}
 	}
 	if ov.Recommendations == nil {
-		ov.Recommendations = []protocol.Recommendation{}
+		ov.Recommendations = []protocol.SettingRecommendation{}
 	}
 	if ov.PendingRestart == nil {
 		ov.PendingRestart = []string{}

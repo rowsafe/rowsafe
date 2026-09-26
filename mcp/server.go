@@ -78,6 +78,7 @@ func NewServer(c *client.Client, opts Options) *sdk.Server {
 	t.addCopiesTools(s)   // Guard copies: never touch production (copies_tools.go)
 	t.addSettingsTools(s) // settings_tools.go
 	t.addLogTools(s)      // logs_tools.go
+	t.addAdvisorTools(s)  // advisor (advisor_tools.go)
 	if opts.AllowWrites {
 		t.addWriteTools(s)
 	}

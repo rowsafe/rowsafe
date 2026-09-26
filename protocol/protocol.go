@@ -71,6 +71,14 @@ type MaintenanceParams struct {
 	// Unused marks a drop_index for an unused index: the agent refuses when
 	// the index has been scanned since (idx_scan > 0).
 	Unused bool `json:"unused,omitempty"`
+	// ---- advisor (protocol/advisor.go) ----
+	// Columns of a create_index on Tables[0] (column names, unquoted).
+	Columns []string `json:"columns,omitempty"`
+	// Sequence is "schema.sequence" for sync_sequence.
+	Sequence string `json:"sequence,omitempty"`
+	// Settings are the storage parameters of set_table_storage_params.
+	Settings map[string]string `json:"settings,omitempty"`
+	// ---- end advisor ----
 }
 
 // MaintenanceResult is the agent's report for a maintenance task.

@@ -91,7 +91,7 @@ const (
 )
 
 // Recommend lists the changes that suit the server, in catalog order.
-func Recommend(in Input) []protocol.Recommendation {
+func Recommend(in Input) []protocol.SettingRecommendation {
 	r := recommender{in: in}
 	w := in.Workload
 	if !ValidWorkload(w) {
@@ -212,7 +212,7 @@ func Recommend(in Input) []protocol.Recommendation {
 
 type recommender struct {
 	in  Input
-	out []protocol.Recommendation
+	out []protocol.SettingRecommendation
 }
 
 func (r *recommender) get(name string) (protocol.PGSetting, bool) {
@@ -248,7 +248,7 @@ func (r *recommender) intOf(name string, def int) int {
 
 func (r *recommender) add(s protocol.PGSetting, value, display, why string) {
 	e, _ := Lookup(s.Name)
-	r.out = append(r.out, protocol.Recommendation{Name: s.Name, Title: e.Title, Current: Display(s.Name, r.wanted(s), s.Unit, s.VarType),
+	r.out = append(r.out, protocol.SettingRecommendation{Name: s.Name, Title: e.Title, Current: Display(s.Name, r.wanted(s), s.Unit, s.VarType),
 		Value: value, Display: display, Why: why, Restart: s.Context == "postmaster"})
 }
 
@@ -312,8 +312,8 @@ func (r *recommender) number(name string, target, tol float64, why string, _ boo
 }
 
 // sorted orders the recommendations like the catalog.
-func (r *recommender) sorted() []protocol.Recommendation {
-	out := make([]protocol.Recommendation, 0, len(r.out))
+func (r *recommender) sorted() []protocol.SettingRecommendation {
+	out := make([]protocol.SettingRecommendation, 0, len(r.out))
 	for _, e := range Catalog {
 		for _, rec := range r.out {
 			if rec.Name == e.Name {

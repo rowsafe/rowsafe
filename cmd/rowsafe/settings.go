@@ -171,7 +171,7 @@ func printSettings(db string, ov protocol.SettingsOverview, all bool) {
 	printChanges(db, ov.Changes, 5)
 }
 
-func countRequired(recs []protocol.Recommendation) int {
+func countRequired(recs []protocol.SettingRecommendation) int {
 	n := 0
 	for _, r := range recs {
 		if !r.Optional {
@@ -336,7 +336,7 @@ func tuneCmd(ctx context.Context, c *client.Client, args []string) error {
 		return nil
 	}
 	fmt.Printf("Tune %s for this server (%s; workload: %s)\n", db, hostLine(ov.Host), ov.Workload)
-	var picked []protocol.Recommendation
+	var picked []protocol.SettingRecommendation
 	for _, r := range ov.Recommendations {
 		if !r.Optional || *all {
 			picked = append(picked, r)

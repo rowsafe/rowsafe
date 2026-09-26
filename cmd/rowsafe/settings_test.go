@@ -105,7 +105,7 @@ func settingsOverview() protocol.SettingsOverview {
 				Apply: "reload", Locked: true, LockedReason: "Rowsafe sets this."},
 		},
 		Other: []protocol.SettingView{{Name: "log_line_prefix", Category: protocol.SettingsCatOther, Value: "%m", Source: "postgresql.conf", Apply: "reload"}},
-		Recommendations: []protocol.Recommendation{
+		Recommendations: []protocol.SettingRecommendation{
 			{Name: "shared_buffers", Current: "128 MB", Value: "4GB", Display: "4 GB", Why: "A quarter of memory.", Restart: true},
 			{Name: "work_mem", Current: "4 MB", Value: "18MB", Display: "18 MB", Why: "Fewer spills."},
 			{Name: "idle_in_transaction_session_timeout", Current: "off", Value: "10min", Display: "10 min", Why: "Ends forgotten transactions.", Optional: true},
