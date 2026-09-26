@@ -70,7 +70,12 @@ func validateCreateIndex(c *protocol.CreateIndexParams) error {
 	return nil
 }
 
-func (m *maint) createIndex(ctx context.Context) error {
+// createIndexSpec is create_index with a full definition (CreateIndex):
+// the index advisor's proven indexes, with INCLUDE columns, directions, a
+// partial condition, the rs_ name and a free-disk check. create_index with
+// Tables and Columns (the advisor's foreign-key indexes) is createIndex in
+// advisor_maint.go.
+func (m *maint) createIndexSpec(ctx context.Context) error {
 	spec := m.p.CreateIndex
 	conn, err := m.connect(ctx, m.p.DB, map[string]string{
 		"statement_timeout": "0",
@@ -261,7 +266,7 @@ func (m *maint) createIndex(ctx context.Context) error {
 		m.tl.Printf("%s (table %s)", stmt, humanBytes(tableBytes))
 		_, err := conn.Exec(ctx, stmt)
 		if err != nil {
-			m.dropInvalidIndex(ctx, conn, tableOID, spec.Schema, spec.Name, display)
+			m.removeFailedBuild(ctx, conn, tableOID, spec.Schema, spec.Name, display)
 		}
 		return err
 	})
@@ -279,7 +284,7 @@ func (m *maint) createIndex(ctx context.Context) error {
 		return err
 	}
 	if !valid {
-		m.dropInvalidIndex(ctx, conn, tableOID, spec.Schema, spec.Name, display)
+		m.removeFailedBuild(ctx, conn, tableOID, spec.Schema, spec.Name, display)
 		return fmt.Errorf("PostgreSQL finished building %s but marked it unusable, so Rowsafe removed it; nothing changed", display)
 	}
 	m.res.Summary = fmt.Sprintf("Created the index %s on %s (%s) in %s. PostgreSQL uses it for queries right away.",
@@ -288,10 +293,10 @@ func (m *maint) createIndex(ctx context.Context) error {
 	return nil
 }
 
-// dropInvalidIndex removes the invalid index a failed CREATE INDEX
+// removeFailedBuild removes the invalid index a failed CREATE INDEX
 // CONCURRENTLY leaves behind: only an invalid index of this table with
 // exactly this name.
-func (m *maint) dropInvalidIndex(ctx context.Context, conn *pgx.Conn, tableOID uint32, schema, name, display string) {
+func (m *maint) removeFailedBuild(ctx context.Context, conn *pgx.Conn, tableOID uint32, schema, name, display string) {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 	defer cancel()
 	var invalid bool

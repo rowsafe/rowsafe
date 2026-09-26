@@ -37,14 +37,42 @@ type Repo struct {
 	// verifies; only ever set it for throwaway test repositories.
 	SkipTLSVerify bool
 	CAFile        string // PEM bundle trusted instead of the system store
+
+	// Type is "" or "s3" for S3-compatible storage, or "posix" for a
+	// directory on this host (Path; tests and mounted storage). Only S3 is
+	// configurable through the environment.
+	Type string
+	Path string // posix: the repository directory
 }
 
-func (r Repo) Validate() error {
+// Posix reports whether the repository is a local directory.
+func (r Repo) Posix() bool { return r.Type == "posix" }
+
+// Configured reports whether any setting of the repository is set (a
+// second copy is optional; see ValidateAs).
+func (r Repo) Configured() bool {
+	return r.Posix() || strings.TrimSpace(r.Endpoint+r.Bucket+r.Key+r.KeySecret+r.CipherPass) != ""
+}
+
+func (r Repo) Validate() error { return r.ValidateAs("ROWSAFE_REPO_") }
+
+// ValidateAs checks the settings, naming them with prefix
+// ("ROWSAFE_REPO_", "ROWSAFE_REPO2_") in errors.
+func (r Repo) ValidateAs(prefix string) error {
+	if r.Posix() {
+		if !safePathRE.MatchString(r.Path) {
+			return fmt.Errorf("%sPATH must be an absolute path", prefix)
+		}
+		if r.CipherPass != "" && len(r.CipherPass) < 20 {
+			return fmt.Errorf("%sCIPHER_PASS must be at least 20 characters", prefix)
+		}
+		return nil
+	}
 	var missing []string
 	for name, v := range map[string]string{
-		"ROWSAFE_REPO_S3_ENDPOINT": r.Endpoint, "ROWSAFE_REPO_S3_BUCKET": r.Bucket,
-		"ROWSAFE_REPO_S3_KEY": r.Key, "ROWSAFE_REPO_S3_KEY_SECRET": r.KeySecret,
-		"ROWSAFE_REPO_CIPHER_PASS": r.CipherPass,
+		prefix + "S3_ENDPOINT": r.Endpoint, prefix + "S3_BUCKET": r.Bucket,
+		prefix + "S3_KEY": r.Key, prefix + "S3_KEY_SECRET": r.KeySecret,
+		prefix + "CIPHER_PASS": r.CipherPass,
 	} {
 		if strings.TrimSpace(v) == "" {
 			missing = append(missing, name)
@@ -55,7 +83,7 @@ func (r Repo) Validate() error {
 		return fmt.Errorf("repository not configured, missing: %s", strings.Join(missing, ", "))
 	}
 	if len(r.CipherPass) < 20 {
-		return errors.New("ROWSAFE_REPO_CIPHER_PASS must be at least 20 characters")
+		return fmt.Errorf("%sCIPHER_PASS must be at least 20 characters", prefix)
 	}
 	for _, v := range []string{r.Endpoint, r.Bucket, r.Region, r.Key, r.KeySecret, r.CipherPass, r.PathPrefix, r.CAFile} {
 		if strings.ContainsAny(v, "\n\r") {
@@ -63,10 +91,10 @@ func (r Repo) Validate() error {
 		}
 	}
 	if r.Port < 0 || r.Port > 65535 {
-		return fmt.Errorf("ROWSAFE_REPO_S3_PORT %d is out of range", r.Port)
+		return fmt.Errorf("%sS3_PORT %d is out of range", prefix, r.Port)
 	}
 	if r.CAFile != "" && !strings.HasPrefix(r.CAFile, "/") {
-		return errors.New("ROWSAFE_REPO_S3_CA_FILE must be an absolute path")
+		return fmt.Errorf("%sS3_CA_FILE must be an absolute path", prefix)
 	}
 	return nil
 }
@@ -83,6 +111,10 @@ type ConfigInput struct {
 	// ProcessMax is how many processes pgBackRest uses to compress and
 	// upload (see ProcessMax); less than 1 means 1.
 	ProcessMax int
+	// LockPath is pgBackRest's lock-path ("" = its default). The second
+	// copy's configuration has its own, so its commands never wait for the
+	// first storage's (they share the stanza name).
+	LockPath string
 	// Exclude are paths relative to the data directory that backups leave
 	// out (e.g. data a Docker rewind keeps aside inside it).
 	Exclude []string
@@ -116,25 +148,32 @@ func RenderConfig(repo Repo, in ConfigInput) string {
 	b.WriteString("# Managed by rowsafe-agent. Local edits are overwritten.\n")
 	b.WriteString("[global]\n")
 	kv := func(k string, v any) { fmt.Fprintf(&b, "%s=%v\n", k, v) }
-	kv("repo1-type", "s3")
-	kv("repo1-s3-endpoint", repo.Endpoint)
-	kv("repo1-s3-bucket", repo.Bucket)
-	kv("repo1-s3-region", region)
-	kv("repo1-s3-uri-style", uriStyle)
-	kv("repo1-s3-key", repo.Key)
-	kv("repo1-s3-key-secret", repo.KeySecret)
-	if repo.Port != 0 {
-		kv("repo1-storage-port", repo.Port)
-	}
-	if repo.CAFile != "" {
-		kv("repo1-storage-ca-file", repo.CAFile)
-	}
-	if repo.SkipTLSVerify {
-		kv("repo1-storage-verify-tls", "n")
+	if repo.Posix() {
+		kv("repo1-type", "posix")
+		prefix = strings.TrimRight(repo.Path, "/")
+	} else {
+		kv("repo1-type", "s3")
+		kv("repo1-s3-endpoint", repo.Endpoint)
+		kv("repo1-s3-bucket", repo.Bucket)
+		kv("repo1-s3-region", region)
+		kv("repo1-s3-uri-style", uriStyle)
+		kv("repo1-s3-key", repo.Key)
+		kv("repo1-s3-key-secret", repo.KeySecret)
+		if repo.Port != 0 {
+			kv("repo1-storage-port", repo.Port)
+		}
+		if repo.CAFile != "" {
+			kv("repo1-storage-ca-file", repo.CAFile)
+		}
+		if repo.SkipTLSVerify {
+			kv("repo1-storage-verify-tls", "n")
+		}
 	}
 	kv("repo1-path", prefix+"/"+in.Stanza)
-	kv("repo1-cipher-type", "aes-256-cbc")
-	kv("repo1-cipher-pass", repo.CipherPass)
+	if repo.CipherPass != "" || !repo.Posix() {
+		kv("repo1-cipher-type", "aes-256-cbc")
+		kv("repo1-cipher-pass", repo.CipherPass)
+	}
 	kv("repo1-retention-full-type", "count")
 	kv("repo1-retention-full", in.RetentionFull)
 	kv("repo1-bundle", "y")
@@ -143,6 +182,9 @@ func RenderConfig(repo Repo, in ConfigInput) string {
 	kv("start-fast", "y")
 	kv("process-max", max(in.ProcessMax, 1))
 	kv("archive-timeout", 120)
+	if in.LockPath != "" {
+		kv("lock-path", in.LockPath)
+	}
 	kv("log-level-console", "info")
 	if in.LogPath == "" {
 		// Containers: no log files (nothing rotates them); the agent keeps
@@ -243,6 +285,10 @@ func (c CLI) run(ctx context.Context, args ...string) ([]byte, error) {
 func (c CLI) StanzaCreate(ctx context.Context) ([]byte, error) { return c.run(ctx, "stanza-create") }
 func (c CLI) Check(ctx context.Context) ([]byte, error)        { return c.run(ctx, "check") }
 
+// StanzaUpgrade moves the stanza to the PostgreSQL version now running
+// (after a major upgrade, or the undo of one).
+func (c CLI) StanzaUpgrade(ctx context.Context) ([]byte, error) { return c.run(ctx, "stanza-upgrade") }
+
 func (c CLI) Backup(ctx context.Context, typ string) ([]byte, error) {
 	return c.run(ctx, "--type="+typ, "backup")
 }
@@ -279,6 +325,9 @@ type RestoreOptions struct {
 	Type, Target string
 	Set          string // --set: the backup to start from ("" lets pgBackRest pick, time targets only)
 	Timeline     string // --target-timeline ("" = PostgreSQL's default)
+	// Repo is the storage to restore from (protocol.RepoSecond: the second
+	// copy). It picks the configuration file; RestoreTo itself ignores it.
+	Repo int
 }
 
 var (

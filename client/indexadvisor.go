@@ -25,8 +25,3 @@ func (c *Client) RunIndexAdvisor(ctx context.Context, ref string) (out protocol.
 func (c *Client) SetIndexAdvisorSchedule(ctx context.Context, ref, schedule string) (out protocol.IndexAdvisorView, err error) {
 	return out, c.do(ctx, http.MethodPut, indexRecsPath(ref)+"/settings", protocol.IndexAdvisorSettingsRequest{Schedule: schedule}, &out)
 }
-
-// DismissIndexRecommendation hides a recommendation ("not now").
-func (c *Client) DismissIndexRecommendation(ctx context.Context, ref, id, reason string) (out protocol.IndexRecommendationView, err error) {
-	return out, c.do(ctx, http.MethodPost, indexRecsPath(ref)+"/"+esc(id)+"/dismiss", protocol.DismissIndexRecommendationRequest{Reason: reason}, &out)
-}

@@ -41,7 +41,6 @@ var maintenanceTimeouts = map[string]time.Duration{
 	protocol.MaintCancelQuery:         30 * time.Second,
 	protocol.MaintTerminateSession:    30 * time.Second,
 	protocol.MaintDropReplicationSlot: 30 * time.Second,
-	protocol.MaintCreateIndex:         110 * time.Minute, // within the task's 2 hours
 }
 
 // ddlLockTimeout keeps DDL from queueing behind long transactions (and
@@ -101,11 +100,8 @@ func validateMaintenance(p protocol.MaintenanceParams) error {
 		if !slotNameRE.MatchString(p.Slot) {
 			return fmt.Errorf("invalid replication slot name %q", p.Slot)
 		}
-	case protocol.MaintCreateIndex:
-		if err := validDatName(p.DB); err != nil {
-			return err
-		}
-		return validateCreateIndex(p.CreateIndex)
+	case protocol.MaintCreateIndex, protocol.MaintDropInvalidIndex, protocol.MaintSyncSequence, protocol.MaintSetTableStorageParams: // advisor
+		return validateAdvisorMaintenance(p)
 	}
 	return nil
 }
@@ -291,8 +287,10 @@ func (a *Agent) maintenance(ctx context.Context, db protocol.DatabaseSpec, p pro
 		err = m.signalBackend(ctx)
 	case protocol.MaintDropReplicationSlot:
 		err = m.dropSlot(ctx)
-	case protocol.MaintCreateIndex:
-		err = m.createIndex(ctx)
+	case protocol.MaintLogSettings: // logsettings.go
+		err = m.logSettings(ctx)
+	case protocol.MaintCreateIndex, protocol.MaintDropInvalidIndex, protocol.MaintSyncSequence, protocol.MaintSetTableStorageParams: // advisor
+		err = m.advisorAction(ctx)
 	}
 	m.res.DurationMs = time.Since(start).Milliseconds()
 	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {

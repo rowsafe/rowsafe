@@ -5,154 +5,210 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/rowsafe/rowsafe/client"
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
-// rowsafe recommendations: indexes the index advisor proved on a copy of the
-// database. Creating one is a fix: `rowsafe fix NAME index_recommendation`.
+// rowsafe recommendations [NAME]: what would make a database better
+// (schema, queries, capacity, indexes), with why and what it costs; the
+// ones Rowsafe can do are applied with rowsafe fix.
 
 func recommendationsCmd(ctx context.Context, c *client.Client, args []string) error {
-	if len(args) > 0 {
-		switch args[0] {
-		case "find":
-			return recommendationsFind(ctx, c, args[1:])
-		case "schedule":
-			return recommendationsSchedule(ctx, c, args[1:])
-		}
+	if ok, err := indexAdvisorSubcommand(ctx, c, args); ok { // indexadvisor.go
+		return err
 	}
 	fs := flag.NewFlagSet("recommendations", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "print the full result as JSON")
-	all := fs.Bool("all", false, "also list created, dismissed and no longer needed ones")
-	name, err := dbArg(ctx, c, fs, args)
-	if err != nil {
-		return err
-	}
-	v, err := c.IndexRecommendations(ctx, name)
-	if err != nil {
-		return err
-	}
-	if *asJSON {
-		return printJSON(v)
-	}
-	printIndexAdvisor(name, v, *all)
-	return nil
-}
-
-func printIndexAdvisor(name string, v protocol.IndexAdvisorView, all bool) {
-	if !v.Available {
-		fmt.Printf("No index recommendations for %s: %s\n", name, v.Reason)
-		return
-	}
-	var open, other []protocol.IndexRecommendationView
-	for _, r := range v.Recommendations {
-		if r.Status == protocol.IndexRecOpen {
-			open = append(open, r)
-		} else {
-			other = append(other, r)
-		}
-	}
-	switch {
-	case len(open) == 0 && v.LastRun == nil:
-		fmt.Printf("Rowsafe hasn't looked for index recommendations for %s yet.\n", name)
-	case len(open) == 0:
-		fmt.Printf("No index recommendations for %s: no new index would make its busiest queries much faster.\n", name)
-	default:
-		fmt.Printf("Index recommendations for %s, each tested on a copy of the database:\n", name)
-	}
-	for i, r := range open {
-		fmt.Printf("\n%d. %s\n", i+1, r.Title)
-		fmt.Printf("   %s\n", r.Explanation)
-		fmt.Printf("   Index: %s\n", r.Definition)
-		for _, s := range r.Statements[:min(len(r.Statements), 3)] {
-			fmt.Printf("   - %s faster: %s\n", protocol.TimesFaster(s.Speedup), firstLine(s.Query, 100))
-		}
-		if r.Creating != nil {
-			fmt.Printf("   Being created now (task %s).\n", r.Creating.ID)
-		} else if r.FixID != "" {
-			fmt.Printf("   Create it: rowsafe fix %s %s %s\n", name, r.FindingID, r.FixID)
-		}
-	}
-	if all {
-		for _, r := range other {
-			fmt.Printf("\n- [%s] %s\n", r.Status, r.Title)
-			if r.Outcome != nil {
-				fmt.Printf("  %s\n", r.Outcome.Summary)
-			} else if r.Usage != nil {
-				fmt.Printf("  Used %d times so far (%s).\n", r.Usage.Scans, humanBytes(r.Usage.SizeBytes))
-			}
-		}
-	} else if len(other) > 0 {
-		fmt.Printf("\n%d more (created, dismissed or no longer needed): rowsafe recommendations %s --all\n", len(other), name)
-	}
-	fmt.Println()
-	if v.LastRun != nil {
-		when := ago(v.LastRun.FinishedAt)
-		if v.LastRun.Summary != "" {
-			fmt.Printf("Last check %s: %s\n", when, v.LastRun.Summary)
-		} else if v.LastRun.Error != "" {
-			fmt.Printf("Last check %s failed: %s\n", when, v.LastRun.Error)
-		}
-	}
-	if v.Running != nil {
-		fmt.Printf("A check is %s now (task %s).\n", v.Running.Status, v.Running.ID)
-	} else if v.NextRunAt != nil {
-		fmt.Printf("Next check: %s UTC (schedule %s). Check now: rowsafe recommendations find %s\n",
-			v.NextRunAt.UTC().Format("2006-01-02 15:04"), v.Schedule, name)
-	}
-}
-
-func recommendationsFind(ctx context.Context, c *client.Client, args []string) error {
-	fs := flag.NewFlagSet("recommendations find", flag.ContinueOnError)
-	noWait := fs.Bool("no-wait", false, "return once queued")
-	name, err := dbArg(ctx, c, fs, args)
-	if err != nil {
-		return err
-	}
-	t, err := c.RunIndexAdvisor(ctx, name)
-	if err != nil {
-		return err
-	}
-	if *noWait {
-		fmt.Printf("Looking for index recommendations for %s (task %s). See them with `rowsafe recommendations %s`.\n", name, t.ID, name)
-		return nil
-	}
-	if err := waitAndReport(ctx, c, t.ID, name); err != nil {
-		return err
-	}
-	v, err := c.IndexRecommendations(ctx, name)
-	if err != nil {
-		return err
-	}
-	fmt.Println()
-	printIndexAdvisor(name, v, false)
-	return nil
-}
-
-func recommendationsSchedule(ctx context.Context, c *client.Client, args []string) error {
-	fs := flag.NewFlagSet("recommendations schedule", flag.ContinueOnError)
+	group := fs.String("group", "", "only this group: schema, queries, capacity or indexes")
+	dismiss := fs.String("dismiss", "", "set the recommendation with this ID aside")
+	reason := fs.String("reason", protocol.DismissNotRelevant, "why, with --dismiss: not_relevant, intended, later or wrong")
+	note := fs.String("note", "", "a note, with --dismiss")
+	restore := fs.String("restore", "", "bring back the dismissed recommendation with this ID")
+	showDismissed := fs.Bool("dismissed", false, "also list the dismissed recommendations")
 	pos, err := positionals(fs, args)
 	if err != nil {
 		return err
 	}
-	var name, sched string
-	switch len(pos) {
-	case 1:
-		sched = pos[0]
-		if name, err = dbArg(ctx, c, fs, nil); err != nil {
+	if len(pos) > 1 {
+		return errors.New("expected at most one database name")
+	}
+	if *group != "" && !isRecGroup(*group) {
+		return fmt.Errorf("--group must be schema, queries, capacity or indexes")
+	}
+	if len(pos) == 0 && *dismiss == "" && *restore == "" {
+		return fleetRecommendations(ctx, c, *asJSON)
+	}
+	name := ""
+	if len(pos) == 1 {
+		name = pos[0]
+	}
+	if name, err = resolveDatabase(ctx, c, name); err != nil {
+		return err
+	}
+	switch {
+	case *dismiss != "":
+		d, err := c.DismissRecommendation(ctx, name, *dismiss, protocol.DismissRecommendationRequest{Reason: *reason, Note: *note})
+		if err != nil {
 			return err
 		}
-	case 2:
-		name, sched = pos[0], pos[1]
-	default:
-		return errors.New(`usage: rowsafe recommendations schedule [NAME] auto|off|"CRON"`)
+		fmt.Printf("Dismissed %s (%s). Bring it back with: rowsafe recommendations %s --restore %s\n",
+			*dismiss, orText(protocol.DismissReasons[d.Reason], d.Reason), name, *dismiss)
+		return nil
+	case *restore != "":
+		if err := c.RestoreRecommendation(ctx, name, *restore); err != nil {
+			return err
+		}
+		fmt.Printf("Brought back %s.\n", *restore)
+		return nil
 	}
-	v, err := c.SetIndexAdvisorSchedule(ctx, name, strings.TrimSpace(sched))
+	r, err := c.DatabaseRecommendations(ctx, name)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Index recommendations for %s: schedule %s.\n", name, v.Schedule)
+	if *group != "" {
+		r.Recommendations = filterGroup(r.Recommendations, *group)
+		r.Dismissed = filterGroup(r.Dismissed, *group)
+	}
+	if *asJSON {
+		return printJSON(r)
+	}
+	printRecommendations(r, *showDismissed)
+	if *group == "" || *group == protocol.RecGroupIndexes {
+		printIndexCheck(ctx, c, name) // indexadvisor.go
+	}
 	return nil
+}
+
+func isRecGroup(g string) bool {
+	for _, x := range protocol.RecommendationGroups {
+		if x == g {
+			return true
+		}
+	}
+	return false
+}
+
+func filterGroup(rs []protocol.Recommendation, g string) []protocol.Recommendation {
+	out := []protocol.Recommendation{}
+	for _, r := range rs {
+		if r.Group == g {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func fleetRecommendations(ctx context.Context, c *client.Client, asJSON bool) error {
+	o, err := c.Recommendations(ctx)
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		return printJSON(o)
+	}
+	if len(o.Databases) == 0 {
+		fmt.Println("No databases yet. Register one with: rowsafe adopt NAME")
+		return nil
+	}
+	t := newTable("DATABASE", "HOST", "OPEN", "TOP RECOMMENDATION")
+	for _, d := range o.Databases {
+		top := "-"
+		if d.Top != nil {
+			top = firstLine(d.Top.Title, 80)
+		}
+		t.row(d.Database, d.Host, strconv.Itoa(d.Count), top)
+	}
+	t.flush()
+	fmt.Println("\nDetails, why and what it costs: rowsafe recommendations NAME")
+	return nil
+}
+
+var groupTitle = map[string]string{
+	protocol.RecGroupSchema:   "Schema",
+	protocol.RecGroupQueries:  "Queries",
+	protocol.RecGroupCapacity: "Capacity",
+	protocol.RecGroupIndexes:  "Indexes",
+}
+
+func printRecommendations(r protocol.RecommendationsResponse, showDismissed bool) {
+	switch {
+	case !r.Available:
+		fmt.Printf("No recommendations for %s yet: %s\n", r.Database, r.Reason)
+	case len(r.Recommendations) == 0:
+		fmt.Printf("Nothing to recommend for %s right now.\n", r.Database)
+	default:
+		fmt.Printf("%s: %d recommendations, most important first.\n", r.Database, len(r.Recommendations))
+	}
+	for _, g := range protocol.RecommendationGroups {
+		var in []protocol.Recommendation
+		for _, x := range r.Recommendations {
+			if x.Group == g {
+				in = append(in, x)
+			}
+		}
+		if len(in) == 0 {
+			continue
+		}
+		fmt.Printf("\n%s\n", strings.ToUpper(groupTitle[g]))
+		for _, x := range in {
+			printRecommendation(r.Database, x)
+		}
+	}
+	for _, n := range r.Notes {
+		fmt.Printf("\nNote: %s\n", n)
+	}
+	if len(r.Dismissed) > 0 {
+		if !showDismissed {
+			fmt.Printf("\n%d dismissed (show them with --dismissed).\n", len(r.Dismissed))
+			return
+		}
+		fmt.Printf("\nDISMISSED\n")
+		for _, x := range r.Dismissed {
+			why := x.Dismissed.Reason
+			if l, ok := protocol.DismissReasons[why]; ok {
+				why = l
+			}
+			fmt.Printf("\n- %s\n   %s, by %s. Bring back: rowsafe recommendations %s --restore %s\n", x.Title, why, x.Dismissed.By, r.Database, x.ID)
+		}
+	}
+}
+
+func printRecommendation(db string, x protocol.Recommendation) {
+	mark := map[string]string{protocol.SeverityCritical: "!!", protocol.SeverityWarning: "! ", protocol.SeverityInfo: "- "}[x.Severity]
+	fmt.Printf("\n%s %s\n", mark, x.Title)
+	fmt.Printf("   Why: %s\n", x.Explanation)
+	fmt.Printf("   What to do: %s\n", x.Action)
+	if x.Cost != "" {
+		fmt.Printf("   What it costs: %s\n", x.Cost)
+	}
+	for _, f := range x.Facts {
+		fmt.Printf("   · %s\n", f)
+	}
+	for i, s := range x.Steps {
+		fmt.Printf("   %d. %s\n", i+1, s)
+	}
+	if fx := firstAvailableFix(x.Finding); fx != nil {
+		fmt.Printf("   Fix: rowsafe fix %s %s  (%s)\n", db, x.ID, fx.Label)
+	} else if x.Command != "" && len(x.Steps) == 0 {
+		fmt.Printf("   Do it yourself: %s\n", x.Command)
+	}
+	fmt.Printf("   Not relevant? rowsafe recommendations %s --dismiss %s\n", db, x.ID)
+}
+
+// withRecommendations adds the recommendations Rowsafe can fix to h's
+// findings, so rowsafe fix offers them too (older control planes have
+// none: nothing is added).
+func withRecommendations(ctx context.Context, c *client.Client, h *protocol.DatabaseHealth) {
+	r, err := c.DatabaseRecommendations(ctx, h.Database)
+	if err != nil {
+		return
+	}
+	for _, x := range r.Recommendations {
+		if x.Source == "advisor" && len(x.Fixes) > 0 {
+			h.Findings = append(h.Findings, x.Finding)
+		}
+	}
 }

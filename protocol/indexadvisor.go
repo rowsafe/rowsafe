@@ -26,9 +26,9 @@ import (
 // when done.
 const TaskIndexAdvisor = "index_advisor"
 
-// MaintCreateIndex: CREATE INDEX CONCURRENTLY of CreateIndex in DB, never on
-// a replica; a failed build's invalid index is removed.
-const MaintCreateIndex = "create_index"
+// The index advisor's indexes are created with MaintCreateIndex
+// (advisor.go) carrying MaintenanceParams.CreateIndex: the full definition
+// instead of Tables and Columns.
 
 // IndexNamePrefix starts the name of every index Rowsafe creates.
 const IndexNamePrefix = "rs_"
@@ -316,10 +316,9 @@ type CreateIndexParams struct {
 
 // Recommendation statuses.
 const (
-	IndexRecOpen      = "open"      // proven on a copy, not created
-	IndexRecCreated   = "created"   // Rowsafe created it
-	IndexRecDismissed = "dismissed" // someone said "not now"
-	IndexRecGone      = "gone"      // no longer needed (queries changed, or an index now covers it)
+	IndexRecOpen    = "open"    // proven on a copy, not created
+	IndexRecCreated = "created" // Rowsafe created it
+	IndexRecGone    = "gone"    // no longer needed (queries changed, or an index now covers it)
 )
 
 // IndexAdvisorView is GET /v1/databases/{ref}/index-recommendations.
@@ -377,10 +376,9 @@ type IndexRecommendationView struct {
 	FindingID string `json:"finding_id,omitempty"`
 	FixID     string `json:"fix_id,omitempty"`
 	// Creating: a create_index task for it is queued or running.
-	Creating        *TaskView  `json:"creating,omitempty"`
-	CreatedAt       *time.Time `json:"created_at,omitempty"`
-	CreatedTask     string     `json:"created_task_id,omitempty"`
-	DismissedReason string     `json:"dismissed_reason,omitempty"`
+	Creating    *TaskView  `json:"creating,omitempty"`
+	CreatedAt   *time.Time `json:"created_at,omitempty"`
+	CreatedTask string     `json:"created_task_id,omitempty"`
 	// Usage is the created index's use (from the nightly run).
 	Usage *IndexUsageView `json:"usage,omitempty"`
 	// Outcome is the report a week after creation.
@@ -426,11 +424,6 @@ type IndexOutcomeStatement struct {
 // IndexAdvisorSettingsRequest is PUT /v1/databases/{ref}/index-recommendations/settings.
 type IndexAdvisorSettingsRequest struct {
 	Schedule string `json:"schedule"` // auto | off | 5-field cron (UTC)
-}
-
-// DismissIndexRecommendationRequest is POST .../index-recommendations/{id}/dismiss.
-type DismissIndexRecommendationRequest struct {
-	Reason string `json:"reason,omitempty"`
 }
 
 // TimesFaster formats a speedup: "40×", "2.5×".
