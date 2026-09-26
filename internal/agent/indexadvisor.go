@@ -184,6 +184,7 @@ func (a *Agent) indexAdvisor(ctx context.Context, db protocol.DatabaseSpec, task
 		db    string
 		stmts []advisorStatement
 		cands []*indexadvisor.Candidate
+		prod  *catalog // production's tables and indexes
 	}
 	var work []dbWork
 	known := map[string]bool{}
@@ -191,7 +192,7 @@ func (a *Agent) indexAdvisor(ctx context.Context, db protocol.DatabaseSpec, task
 		known[k] = true
 	}
 	for _, name := range dbs {
-		cands, err := advisorCandidates(ctx, prod, name, byDB[name], tl)
+		cands, prodCat, err := advisorCandidates(ctx, prod, name, byDB[name], tl)
 		if err != nil {
 			res.Notes = append(res.Notes, fmt.Sprintf("Database %s: %v", name, sentence(err)))
 			tl.Printf("database %s: %v", name, err)
@@ -207,7 +208,7 @@ func (a *Agent) indexAdvisor(ctx context.Context, db protocol.DatabaseSpec, task
 			fresh = append(fresh, c)
 		}
 		if len(fresh) > 0 {
-			work = append(work, dbWork{db: name, stmts: byDB[name], cands: fresh})
+			work = append(work, dbWork{db: name, stmts: byDB[name], cands: fresh, prod: prodCat})
 		}
 	}
 	total := 0
@@ -233,7 +234,7 @@ func (a *Agent) indexAdvisor(ctx context.Context, db protocol.DatabaseSpec, task
 				res.Notes = append(res.Notes, fmt.Sprintf("Database %s: the copy didn't open it (%v).", w.db, err))
 				continue
 			}
-			rs, err := testCandidates(ctx, conn, in.VersionNum, w.stmts, cands, tl)
+			rs, err := testCandidates(ctx, conn, in.VersionNum, w.stmts, cands, w.prod, tl)
 			closeConn(ctx, conn)
 			results = append(results, rs...)
 			if err != nil {
@@ -246,6 +247,22 @@ func (a *Agent) indexAdvisor(ctx context.Context, db protocol.DatabaseSpec, task
 		return finish(err)
 	}
 	res.Tested = len(results)
+	// Production's indexes now (not the copy's, which may be older): an idea
+	// an existing valid index already covers is not recommended.
+	current := map[string]*catalog{}
+	for _, w := range work {
+		if c, err := productionIndexes(ctx, prod, w.db, w.stmts); err == nil {
+			current[w.db] = c
+		} else {
+			tl.Printf("database %s: reading production's indexes again: %v", w.db, err)
+		}
+	}
+	for _, r := range results {
+		c := r.Candidate
+		if cat := current[c.Spec.DB]; cat != nil && r.Err == "" && indexadvisor.CoveredBy(cat.table(c.Spec.Schema, c.Spec.Table), c) {
+			r.Err = "An index on production already does this."
+		}
+	}
 	recs, rejected := indexadvisor.Choose(results)
 	for _, r := range recs {
 		res.Recommendations = append(res.Recommendations, r.Recommendation())
@@ -453,7 +470,35 @@ func setTimeouts(ctx context.Context, conn *pgx.Conn, stmt string) error {
 
 // advisorCandidates reads the catalogs of dbname for the tables the
 // statements use and builds the index ideas.
-func advisorCandidates(ctx context.Context, t pginspect.Target, dbname string, stmts []advisorStatement, tl *taskLog) ([]*indexadvisor.Candidate, error) {
+func advisorCandidates(ctx context.Context, t pginspect.Target, dbname string, stmts []advisorStatement, tl *taskLog) ([]*indexadvisor.Candidate, *catalog, error) {
+	conn, err := t.Connect(ctx, dbname)
+	if err != nil {
+		return nil, nil, fmt.Errorf("connecting: %w", err)
+	}
+	defer closeConn(ctx, conn)
+	if err := setTimeouts(ctx, conn, advisorStmtTimeout); err != nil {
+		return nil, nil, err
+	}
+	var rels []indexadvisor.Relation
+	for _, s := range stmts {
+		rels = append(rels, s.Shape.Relations...)
+	}
+	cat, err := loadCatalog(ctx, conn, rels)
+	if err != nil {
+		return nil, nil, err
+	}
+	plain := make([]indexadvisor.Statement, len(stmts))
+	for i, s := range stmts {
+		plain[i] = s.Statement
+	}
+	cands := indexadvisor.Generate(dbname, plain, cat.lookup)
+	tl.Printf("database %s: %d tables, %d index ideas", dbname, len(cat.tables), len(cands))
+	return cands, cat, nil
+}
+
+// productionIndexes reads production's indexes of the tables the results
+// are about, right before recommending.
+func productionIndexes(ctx context.Context, t pginspect.Target, dbname string, stmts []advisorStatement) (*catalog, error) {
 	conn, err := t.Connect(ctx, dbname)
 	if err != nil {
 		return nil, fmt.Errorf("connecting: %w", err)
@@ -466,17 +511,38 @@ func advisorCandidates(ctx context.Context, t pginspect.Target, dbname string, s
 	for _, s := range stmts {
 		rels = append(rels, s.Shape.Relations...)
 	}
-	cat, err := loadCatalog(ctx, conn, rels)
-	if err != nil {
-		return nil, err
+	return loadCatalog(ctx, conn, rels)
+}
+
+// prodTable is production's table of a candidate.
+func (c *catalog) table(schema, name string) *indexadvisor.Table {
+	for _, t := range c.tables {
+		if t.Schema == schema && t.Name == name {
+			return t
+		}
 	}
-	plain := make([]indexadvisor.Statement, len(stmts))
-	for i, s := range stmts {
-		plain[i] = s.Statement
+	return nil
+}
+
+// syncProductionIndexes builds on the copy the indexes production has and
+// the copy doesn't (created after the backup it came from), for the tables
+// being tested, so ideas are measured against production's real indexes.
+func syncProductionIndexes(ctx context.Context, conn *pgx.Conn, prod, copyCat *catalog, cands []*indexadvisor.Candidate, tl *taskLog) {
+	done := map[string]bool{}
+	for _, c := range cands {
+		k := c.Spec.Schema + "." + c.Spec.Table
+		if done[k] {
+			continue
+		}
+		done[k] = true
+		for _, ix := range indexadvisor.MissingOnCopy(prod.table(c.Spec.Schema, c.Spec.Table), copyCat.table(c.Spec.Schema, c.Spec.Table)) {
+			if _, err := rawQuery(ctx, conn, ix.Def); err != nil {
+				tl.Printf("production's index %s (created after the backup) couldn't be built on the copy: %v", ix.Name, plainPGError(err))
+				continue
+			}
+			tl.Printf("built production's index %s on the copy (it was created after the backup)", ix.Name)
+		}
 	}
-	cands := indexadvisor.Generate(dbname, plain, cat.lookup)
-	tl.Printf("database %s: %d tables, %d index ideas", dbname, len(cat.tables), len(cands))
-	return cands, nil
 }
 
 // catalog is the tables of one database the statements use.
@@ -584,7 +650,8 @@ func loadCatalog(ctx context.Context, conn *pgx.Conn, rels []indexadvisor.Relati
 		SELECT x.indrelid, i.relname::text, am.amname::text, x.indisvalid AND x.indisready, x.indisunique, x.indnkeyatts::int,
 		       coalesce(pg_get_expr(x.indpred, x.indrelid), ''), k.ord::int, coalesce(a.attname::text, ''),
 		       coalesce((k.opt & 1) = 1, false),
-		       coalesce(oc.opcdefault, false) AND (coalesce(k.coll, 0) = 0 OR k.coll = a.attcollation)
+		       coalesce(oc.opcdefault, false) AND (coalesce(k.coll, 0) = 0 OR k.coll = a.attcollation),
+		       pg_get_indexdef(x.indexrelid)
 		FROM pg_index x
 		JOIN pg_class i ON i.oid = x.indexrelid
 		JOIN pg_am am ON am.oid = i.relam
@@ -607,16 +674,16 @@ func loadCatalog(ctx context.Context, conn *pgx.Conn, rels []indexadvisor.Relati
 	}
 	for rows.Next() {
 		var rel uint32
-		var name, method, pred, col string
+		var name, method, pred, col, def string
 		var valid, unique, desc, plainKey bool
 		var nkey, ord int
-		if err := rows.Scan(&rel, &name, &method, &valid, &unique, &nkey, &pred, &ord, &col, &desc, &plainKey); err != nil {
+		if err := rows.Scan(&rel, &name, &method, &valid, &unique, &nkey, &pred, &ord, &col, &desc, &plainKey, &def); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		if cur == nil || curRel != rel || cur.Name != name {
 			flush()
-			cur = &indexadvisor.Index{Name: name, Method: method, Valid: valid, Unique: unique, Predicate: pred}
+			cur = &indexadvisor.Index{Name: name, Method: method, Valid: valid, Unique: unique, Predicate: pred, Def: def}
 			curRel = rel
 		}
 		if ord <= nkey {
@@ -950,7 +1017,7 @@ func measurable(s indexadvisor.Shape) bool {
 // every statement that uses an idea's table without it, then for each idea
 // CREATE INDEX, EXPLAIN those statements again, and DROP INDEX.
 func testCandidates(ctx context.Context, conn *pgx.Conn, version int, stmts []advisorStatement,
-	cands []*indexadvisor.Candidate, tl *taskLog) ([]*indexadvisor.Result, error) {
+	cands []*indexadvisor.Candidate, prod *catalog, tl *taskLog) ([]*indexadvisor.Result, error) {
 	if _, err := conn.Exec(ctx, `SELECT set_config('statement_timeout', $1, false), set_config('lock_timeout', '10s', false),
 		set_config('maintenance_work_mem', '128MB', false), set_config('default_transaction_read_only', 'off', false)`, advisorExplainTime); err != nil {
 		return nil, err
@@ -967,6 +1034,9 @@ func testCandidates(ctx context.Context, conn *pgx.Conn, version int, stmts []ad
 	cat, err := loadCatalog(ctx, conn, rels)
 	if err != nil {
 		return nil, err
+	}
+	if prod != nil {
+		syncProductionIndexes(ctx, conn, prod, cat, cands, tl)
 	}
 	uses := map[string][]int{} // "schema.table" -> statement indexes
 	usage := map[int][]*indexadvisor.Usage{}

@@ -309,3 +309,45 @@ func TestIndexNames(t *testing.T) {
 		t.Errorf("definition %s", def)
 	}
 }
+
+// An index created on production after the backup the copy came from:
+// ideas it covers are dropped, and the copy gets it before testing.
+func TestProductionIndexesCount(t *testing.T) {
+	prod, cp := orders(), orders()
+	created := Index{Name: "rs_orders_customer_id_idx", Method: "btree", Valid: true,
+		Keys: []IndexKey{{Col: "customer_id", Plain: true}}, Def: "CREATE INDEX rs_orders_customer_id_idx ON public.orders USING btree (customer_id)"}
+	prod.Indexes = append(prod.Indexes, created,
+		Index{Name: "orders_half_built", Method: "btree", Keys: []IndexKey{{Col: "total", Plain: true}}, Def: "CREATE INDEX orders_half_built ON public.orders USING btree (total)"})
+	missing := MissingOnCopy(prod, cp)
+	if len(missing) != 1 || missing[0].Name != created.Name {
+		t.Fatalf("missing on the copy: %+v", missing)
+	}
+	if MissingOnCopy(prod, prod) != nil || MissingOnCopy(nil, cp) != nil {
+		t.Error("nothing is missing when the copy has them")
+	}
+	same := &Candidate{Spec: protocol.IndexSpec{Columns: []string{"customer_id"}}, EqCount: 1}
+	longer := &Candidate{Spec: protocol.IndexSpec{Columns: []string{"customer_id", "created_at"}}, EqCount: 1}
+	partial := &Candidate{Spec: protocol.IndexSpec{Columns: []string{"customer_id"}, WhereNull: []string{"sent_at"}}, EqCount: 1}
+	if !CoveredBy(prod, same) || !CoveredBy(prod, partial) {
+		t.Error("the index created on production covers (customer_id), with or without a partial condition")
+	}
+	if CoveredBy(cp, same) || CoveredBy(nil, same) {
+		t.Error("the copy's older catalog doesn't have it")
+	}
+	if CoveredBy(prod, longer) {
+		t.Error("(customer_id, created_at) isn't covered: it is tested on the copy with the new index in place")
+	}
+}
+
+// A query an existing index already serves isn't "helped" by a longer one,
+// even when the cost ratio looks big.
+func TestAlreadyFastNotHelped(t *testing.T) {
+	c := &Candidate{Spec: protocol.IndexSpec{DB: "shop", Schema: "public", Table: "orders", Columns: []string{"customer_id", "created_at"}}, Table: orders()}
+	g := protocol.IndexGain{QueryID: "q", CostBefore: 86, CostAfter: 32, TotalTimeMs: 1000}
+	g.Speedup = GainSpeedup(g)
+	r := &Result{Candidate: c, SizeBytes: 30 << 20, Used: map[string]bool{"q": true}, Gains: []protocol.IndexGain{g}}
+	recs, rejected := Choose([]*Result{r})
+	if len(recs) != 0 || !strings.Contains(rejected[c.Key()], "only a little") {
+		t.Errorf("recs %v, rejected %v", recs, rejected)
+	}
+}
