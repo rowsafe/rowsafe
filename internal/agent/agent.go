@@ -255,7 +255,8 @@ var fastLaneTypes = []string{protocol.TaskRestorePoint, protocol.TaskCopySchema}
 var sideTypes = []string{protocol.TaskMaintenance, protocol.TaskRewindCompare, protocol.TaskRewindRows,
 	protocol.TaskRewindDrop, protocol.TaskRewindCleanup,
 	protocol.TaskFindMoment, // read-only; people wait for it in the dashboard
-	protocol.TaskMigrate}    // move in: key, check, switchover... (migrate.go)
+	protocol.TaskMigrate,    // move in: key, check, switchover... (migrate.go)
+	protocol.TaskSettings}
 
 // fastLaneClaim is what the fast lane asks for: restore points, and a side
 // task unless one is running already. Side tasks run beside the lane, one
