@@ -193,6 +193,9 @@ type HeartbeatRequest struct {
 	RestartActions []string `json:"restart_actions,omitempty"`
 	// Rewinds are the live copies and kept data directories on this host.
 	Rewinds []RewindState `json:"rewinds,omitempty"`
+	// ManagedStorage: Rowsafe Storage or the customer's own bucket
+	// (storage.go). Not Storage, which is storage use per repository.
+	ManagedStorage *StorageStatus `json:"managed_storage,omitempty"`
 	// Storage and SecondCopies: backup storage use and the second copy
 	// (secondcopy.go).
 	Storage      []RepoStorage      `json:"storage,omitempty"`

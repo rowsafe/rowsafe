@@ -37,6 +37,11 @@ type Config struct {
 	// holding the restore point to be archived (ROWSAFE_RESTORE_POINT_TIMEOUT).
 	RestorePointTimeout time.Duration
 	Repo                pgbackrest.Repo
+	// Storage is where backups go (ROWSAFE_STORAGE): protocol.StorageOwn,
+	// the bucket in ROWSAFE_REPO_S3_*, or protocol.StorageRowsafe, Rowsafe
+	// Storage, whose location and short-lived credentials come from the
+	// control plane (storage.go). Encryption stays on this host either way.
+	Storage string
 
 	// Mode is ModeNative (pgBackRest and PostgreSQL on this host) or
 	// ModeDockerSidecar (ROWSAFE_MODE; see https://rowsafe.sh/docs/guides/docker).
@@ -137,6 +142,7 @@ func ConfigFromEnv() (Config, error) {
 		RestartAllowFile: env("ROWSAFE_RESTART_ALLOW_FILE", "/etc/rowsafe/restart-allowed"),
 		RestartResultDir: env("ROWSAFE_RESTART_RESULT_DIR", "/run/rowsafe-pg-restart"),
 		RestartHelper:    env("ROWSAFE_RESTART_HELPER", "/usr/local/lib/rowsafe/rowsafe-pg-restart"),
+		Storage:          env("ROWSAFE_STORAGE", protocol.StorageOwn),
 		UpdateAllowFile:  env("ROWSAFE_UPDATE_ALLOW_FILE", "/etc/rowsafe/updates-allowed"),
 		Repo: pgbackrest.Repo{
 			Endpoint:   env("ROWSAFE_REPO_S3_ENDPOINT", ""),
@@ -160,6 +166,10 @@ func ConfigFromEnv() (Config, error) {
 	}
 	c.DockerControlSocket = env("ROWSAFE_DOCKER_CONTROL_SOCKET", "/run/rowsafe-control/control.sock")
 	var err error
+	if c.Storage != protocol.StorageOwn && c.Storage != protocol.StorageRowsafe {
+		return c, fmt.Errorf("ROWSAFE_STORAGE must be %q (Rowsafe Storage) or %q (your bucket, ROWSAFE_REPO_S3_*)",
+			protocol.StorageRowsafe, protocol.StorageOwn)
+	}
 	if c.Copies, err = copiesConfigFromEnv(c.StateDir); err != nil {
 		return c, err
 	}

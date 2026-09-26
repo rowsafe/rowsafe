@@ -367,6 +367,9 @@ func (a *Agent) saveHandedRepo(dbID string, s protocol.StandbyRepo) error {
 
 // handedRepo is what a primary hands over: its own repository for db.
 func (a *Agent) handedRepo(db protocol.DatabaseSpec) (protocol.StandbyRepo, error) {
+	if _, err := os.Stat(a.repoPath(db.ID)); err != nil && a.cfg.RowsafeStorage() {
+		return protocol.StandbyRepo{}, errStandbyRowsafeStorage
+	}
 	r := a.repoFor(db)
 	if err := r.Validate(); err != nil {
 		return protocol.StandbyRepo{}, err

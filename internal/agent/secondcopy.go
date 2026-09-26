@@ -795,6 +795,9 @@ func (a *Agent) measureAll(ctx context.Context, force bool) {
 // nothing to measure yet (no config written).
 func (a *Agent) measure(ctx context.Context, db protocol.DatabaseSpec, repo int) (protocol.RepoStorage, bool) {
 	repoCfg := a.cfg.Repo
+	if r, err := a.repo(); err == nil { // Rowsafe Storage: where it is now
+		repoCfg = r
+	}
 	if repo == protocol.RepoSecond {
 		repoCfg = a.cfg.Repo2
 	}

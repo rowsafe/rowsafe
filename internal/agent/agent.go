@@ -64,6 +64,13 @@ type Agent struct {
 	// rewindOps runs the steps of a rewind in place (tests replace it).
 	rewindOps inPlaceOps
 
+	// Rowsafe Storage credentials (storage.go); confMu serializes writes
+	// of pgBackRest configs (tasks, credential rotation, repo moves).
+	storage   managedStorage
+	confMu    sync.Mutex
+	syncTried sync.Map // stanza -> time of the last repo move attempt
+	syncBusy  atomic.Bool
+	stanzaMu  sync.Mutex // ensureStanza
 	// second is the second copy and storage use (secondcopy.go).
 	second secondCopyState
 	// PostgreSQL updates and upgrades (software.go, updates.go, upgrade.go):
@@ -177,6 +184,8 @@ func (a *Agent) Run(ctx context.Context) error {
 	if err := a.ensureEnrolled(ctx); err != nil {
 		return err
 	}
+	// Rowsafe Storage: credentials before any work that needs the repository.
+	a.startStorage(ctx)
 	// Recover from a previous process that died mid-task: remove its
 	// scratch clusters and close the task it was running, so the control
 	// plane doesn't wait for a lease to expire before scheduling again.
@@ -192,6 +201,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.heartbeatLoop(ctx)
 	go a.fastLane(ctx)
 	go a.rewindHousekeeping(ctx)
+	if a.cfg.RowsafeStorage() {
+		go a.managedStorageLoop(ctx) // Rowsafe Storage credentials (storage.go)
+	}
 	go a.standbyLoop(ctx) // fences, primaries seen from standbys (standby.go)
 	go a.standbyLane(ctx)
 	a.startSecondCopy(ctx)
@@ -349,6 +361,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 			DockerControl:    a.dockerControlReport(ctx),
 			Copies:           a.copiesReport(),
 			StandbyHeartbeat: a.standbyHeartbeat(ctx),
+			ManagedStorage:   a.storageStatus(), // Rowsafe Storage or own bucket (storage.go)
 		}
 		resp, err := a.client.heartbeat(ctx, req)
 		if isUnauthorized(err) {
@@ -375,6 +388,12 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 			saveWatched(a.cfg, resp.Databases)
 			if a.pusher != nil {
 				a.ensureConfigs(ctx, resp.Databases)
+			}
+			if a.syncBusy.CompareAndSwap(false, true) { // storage changed: move to the new repository
+				go func(dbs []protocol.DatabaseSpec) {
+					defer a.syncBusy.Store(false)
+					a.syncRepos(ctx, dbs)
+				}(resp.Databases)
 			}
 			a.updater.OnHeartbeat(resp.Update)
 			a.rewindState().setExpiries(resp.RewindExpires, time.Now())
