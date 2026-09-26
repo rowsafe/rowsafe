@@ -122,7 +122,9 @@ check_root_file() {
 
 # allowed_unit PORT prints the unit the restart allow list names for PORT.
 allowed_unit() {
-  awk -v p="$1" '$1 == p && $2 ~ /^[A-Za-z0-9@._-]+\.service$/ { print $2; exit }' "$allow"
+  # Only Debian's cluster units (postgresql@MAJOR-NAME.service), whatever the
+  # file says; ports compare as strings.
+  awk -v p="$1" '$1 "" == p "" && $2 ~ /^postgresql@[0-9]+-[A-Za-z0-9_.-]+\.service$/ { print $2; exit }' "$allow"
 }
 
 # ---------------------------------------------------------------- restart mode

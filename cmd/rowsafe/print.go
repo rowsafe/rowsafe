@@ -127,6 +127,11 @@ func printTask(t protocol.TaskView) {
 		if json.Unmarshal(t.Result, &r) == nil && r.Summary != "" {
 			fmt.Println(r.Summary)
 		}
+	case protocol.TaskSecurityFix: // protocol/security.go
+		var r protocol.SecurityFixResult
+		if json.Unmarshal(t.Result, &r) == nil && r.Summary != "" {
+			fmt.Println(r.Summary)
+		}
 	case protocol.TaskRestart:
 		var r protocol.RestartResult
 		if json.Unmarshal(t.Result, &r) == nil && r.Restarted {

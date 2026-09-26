@@ -321,6 +321,8 @@ func nextStep(t protocol.TaskView, d TaskDetail) string {
 			return "The PostgreSQL restart failed; the error says why (e.g. restarting from Rowsafe isn't allowed on this server). Tell the user; restarting is theirs to do, and no tool here can."
 		case protocol.TaskMaintenance:
 			return "The health fix didn't run; the error says why in plain words (Rowsafe checks each fix again right before it runs and leaves things alone when they changed). Tell the user; they can apply it again from the dashboard (Pulse, Health, Apply fix) if it still applies. No tool here applies fixes."
+		case protocol.TaskSecurityFix:
+			return "The security change didn't go through; the error says why (Rowsafe checks every change with PostgreSQL first and puts the previous settings back when something is off). Tell the user; they can try again from Pulse, Security in the dashboard. No tool here changes security settings."
 		case protocol.TaskRewindCopy, protocol.TaskRewindDrop, protocol.TaskRewindCompare, protocol.TaskRewindRows,
 			protocol.TaskRewindInPlace, protocol.TaskRewindUndo, protocol.TaskRewindCleanup:
 			return "This Rewind step failed; the error says why in plain words (a failed rewind in place puts the original data back by itself). Tell the user; they can try again from Rewind in the dashboard. No tool here rewinds."

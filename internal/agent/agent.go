@@ -212,6 +212,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.softwareLoop(ctx)
 	go a.upgradeHousekeeping(ctx)
 	go a.copiesHousekeeping(ctx)
+	go a.securityLoop(ctx) // security.go
 	// Built-in monitoring (package collect): metrics every minute, beside
 	// the task loop and never blocking it.
 	go collect.Run(ctx, collect.Options{Log: a.log, PGUser: a.cfg.PGUser,
@@ -283,7 +284,8 @@ var sideTypes = []string{protocol.TaskMaintenance, protocol.TaskRewindCompare, p
 	protocol.TaskFindMoment, // read-only; people wait for it in the dashboard
 	protocol.TaskDBAdmin,    // Databases & users: people wait for it in the dashboard
 	protocol.TaskMigrate,    // move in: key, check, switchover... (migrate.go)
-	protocol.TaskSettings}
+	protocol.TaskSettings,
+	protocol.TaskSecurityScan, protocol.TaskSecurityFix} // security.go
 
 // fastLaneClaim is what the fast lane asks for: restore points, and a side
 // task unless one is running already. Side tasks run beside the lane, one
