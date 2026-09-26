@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-pooler.path: starts rowsafe-pooler.service when the Rowsafe agent
+# asks to install, configure or turn off PgBouncer (someone turned pooling on,
+# changed it or turned it off in Rowsafe). Installed by
+# https://rowsafe.sh/install only when root allowed it; remove it with
+# --no-allow-pooler.
+
+[Unit]
+Description=Rowsafe: watch for requests to manage PgBouncer
+Documentation=https://rowsafe.sh/docs/guides/connection-pooling
+
+[Path]
+PathExists=/var/lib/rowsafe/pooler/request
+Unit=rowsafe-pooler.service
+
+[Install]
+WantedBy=multi-user.target

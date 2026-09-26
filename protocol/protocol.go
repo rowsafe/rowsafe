@@ -196,6 +196,9 @@ type HeartbeatRequest struct {
 	RestartActions []string `json:"restart_actions,omitempty"`
 	// Rewinds are the live copies and kept data directories on this host.
 	Rewinds []RewindState `json:"rewinds,omitempty"`
+	// Pooler is PgBouncer on this host (pooling.go); Pooler.Managed says a
+	// Rowsafe-managed pooler runs here.
+	Pooler *PoolerStatus `json:"pooler,omitempty"`
 	// ManagedStorage: Rowsafe Storage or the customer's own bucket
 	// (storage.go). Not Storage, which is storage use per repository.
 	ManagedStorage *StorageStatus `json:"managed_storage,omitempty"`
@@ -571,6 +574,10 @@ func TaskTimeout(taskType string) time.Duration {
 		return 2 * time.Hour
 	case TaskRewindUndo: // stop, two renames, start
 		return time.Hour
+	case TaskPooling: // installing the pgbouncer package
+		return 15 * time.Minute
+	case TaskPoolerRetarget:
+		return 3 * time.Minute
 	case TaskUpgradeCheck, TaskUpgradeCleanup, TaskPGUpdate, TaskReboot:
 		return 30 * time.Minute
 	case TaskSecurityUpdates:
@@ -835,6 +842,9 @@ type DatabaseMonitoring struct {
 	Insights *Insights `json:"insights,omitempty"`
 	// Replication is streaming replication status (newer agents only).
 	Replication *ReplicationStatus `json:"replication,omitempty"`
+	// Pooler is PgBouncer's view of this database, when it has one
+	// (pooling.go; newer agents only).
+	Pooler *PoolerStats `json:"pooler,omitempty"`
 	// Settings are the PostgreSQL settings that matter (settings.go; about
 	// every 5 minutes, newer agents only).
 	Settings *SettingsSnapshot `json:"settings,omitempty"`

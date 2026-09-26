@@ -5,6 +5,7 @@
 #   make lint                  go vet, gofmt, shellcheck, installer consistency
 #   make test-installer        scripts/install.sh in Debian/Ubuntu containers (Docker)
 #   make test-rewind           a real Rewind (copy, rows, in place, undo) on a systemd Debian container (Docker)
+#   make test-pooling          real PgBouncer through the root helper on a systemd Debian container (Docker)
 #   make test-secondcopy       a real second backup copy (two storages, one going away) in a Debian container (Docker)
 #   make test-mysql            the MySQL/MariaDB engine against real MySQL 8.4 and MariaDB 11.4 (Docker)
 #   make test-upgrade          real PostgreSQL updates and upgrades (16 -> 18, undo) on a systemd Debian container (Docker)
@@ -31,7 +32,7 @@ AGENT_LDFLAGS := -s -w -buildid= -X $(PKG)/internal/agent.Version=$(VERSION) -X 
 MAIN_LDFLAGS := -s -w -buildid= -X main.version=$(VERSION)
 GOBUILD := CGO_ENABLED=0 GOFLAGS=-mod=readonly $(GO) build -trimpath -buildvcs=false
 
-.PHONY: all build test lint check-installer test-installer test-rewind test-secondcopy test-mysql test-upgrade test-action dist release check-release-env clean
+.PHONY: all build test lint check-installer test-installer test-rewind test-secondcopy test-mysql test-upgrade test-pooling test-action dist release check-release-env clean
 
 all: lint test build
 
@@ -54,7 +55,7 @@ lint: check-installer
 		done; \
 	done
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck -S warning -s sh scripts/install.sh scripts/test-install.sh scripts/test-rewind.sh scripts/test-secondcopy.sh scripts/test-mysql.sh scripts/test-upgrade.sh scripts/rowsafe-agent-guard scripts/rowsafe-pg-restart scripts/rowsafe-firewall; \
+		shellcheck -S warning -s sh scripts/install.sh scripts/test-install.sh scripts/test-rewind.sh scripts/test-pooling.sh scripts/test-secondcopy.sh scripts/test-mysql.sh scripts/test-upgrade.sh scripts/rowsafe-agent-guard scripts/rowsafe-pg-restart scripts/rowsafe-firewall; \
 		shellcheck -S warning -s bash integrations/github-action/scripts/*.sh integrations/github-action/test/*.sh integrations/github-action/export.sh; \
 	else echo "shellcheck not installed; skipping"; fi
 
@@ -74,6 +75,12 @@ check-installer:
 		diff -u deploy/systemd/rowsafe-pg-restart.service - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pg-restart.service"; exit 1; }
 	@sed -n "/<<'ROWSAFE_RESTART_PATH_EOF'; then\$$/,/^ROWSAFE_RESTART_PATH_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
 		diff -u deploy/systemd/rowsafe-pg-restart.path - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pg-restart.path"; exit 1; }
+	@sed -n "/<<'ROWSAFE_POOLER_SERVICE_EOF'; then\$$/,/^ROWSAFE_POOLER_SERVICE_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
+		diff -u deploy/systemd/rowsafe-pooler.service - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pooler.service"; exit 1; }
+	@sed -n "/<<'ROWSAFE_POOLER_PATH_EOF'; then\$$/,/^ROWSAFE_POOLER_PATH_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
+		diff -u deploy/systemd/rowsafe-pooler.path - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pooler.path"; exit 1; }
+	@sed -n "/<<'ROWSAFE_POOLER_APT_EOF'; then\$$/,/^ROWSAFE_POOLER_APT_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
+		diff -u deploy/systemd/rowsafe-pooler-apt@.service - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pooler-apt@.service"; exit 1; }
 	@sed -n "/<<'ROWSAFE_UPDATE_SERVICE_EOF'; then\$$/,/^ROWSAFE_UPDATE_SERVICE_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
 		diff -u deploy/systemd/rowsafe-pg-update.service - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pg-update.service"; exit 1; }
 	@sed -n "/<<'ROWSAFE_UPDATE_PATH_EOF'; then\$$/,/^ROWSAFE_UPDATE_PATH_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
@@ -94,6 +101,8 @@ test-installer:
 test-rewind:
 	sh scripts/test-rewind.sh
 
+test-pooling:
+	sh scripts/test-pooling.sh
 test-secondcopy:
 	sh scripts/test-secondcopy.sh
 

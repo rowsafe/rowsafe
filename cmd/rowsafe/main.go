@@ -180,6 +180,12 @@ Pulse: health, monitoring and alerts
   rowsafe channels test ID                   send a test notification now
   rowsafe report [--preview [--html]] [--on | --off] [--to A,B] [--send-test]
                                              "Your weekly Pulse", the weekly email: settings, preview, test
+  rowsafe pooling status [NAME] [--json]     connection pooling (PgBouncer): state, connection strings, pools
+  rowsafe pooling on [NAME] [--mode transaction|session] [--pool-size N] [--max-client-conn N]
+        [--listen local|private|public] [--port 6432] [--yes]
+                                             turn pooling on (or change it); Rowsafe installs PgBouncer on the
+                                             server. Only on servers where the installer allowed it
+  rowsafe pooling off [NAME] [--yes]         stop PgBouncer and remove what Rowsafe installed; asks first
   rowsafe settings [NAME] [SETTING] [--all] [--json]
                                              PostgreSQL's settings that matter: value, default, where it is
                                              set, and whether a change needs a restart
@@ -414,6 +420,8 @@ func dispatch(ctx context.Context, args []string) error {
 		return activityCmd(ctx, c, rest)
 	case "report":
 		return reportCmd(ctx, c, rest)
+	case "pooling":
+		return poolingCmd(ctx, c, rest)
 	case "settings": // settings.go
 		return settingsCmd(ctx, c, rest)
 	case "tune":

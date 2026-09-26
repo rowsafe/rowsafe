@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-pooler.service: configures, reloads or turns off PgBouncer in front
+# of a PostgreSQL cluster that root listed in /etc/rowsafe/pooler-allowed,
+# when the Rowsafe agent asks because a person turned pooling on, changed it
+# or turned it off (see "PgBouncer" in /usr/local/lib/rowsafe/rowsafe-pg-restart).
+# Started by rowsafe-pooler.path; installed by https://rowsafe.sh/install
+# only when root allowed it. Installing or removing the pgbouncer package
+# runs in rowsafe-pooler-apt@.service, which this unit starts.
+
+[Unit]
+Description=Rowsafe: manage PgBouncer on request
+Documentation=https://rowsafe.sh/docs/guides/connection-pooling
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/rowsafe/rowsafe-pg-restart
+TimeoutStartSec=1500
+Environment=ROWSAFE_HELPER_MODE=pooler
+# The agent user, whose privileges read and remove the request, and the
+# directory it writes requests to.
+Environment=ROWSAFE_AGENT_USER=postgres
+Environment=ROWSAFE_RESTART_DIR=/var/lib/rowsafe/pooler
+# The answer: root's own directory, which the agent can read.
+RuntimeDirectory=rowsafe-pooler
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+# PgBouncer's original configuration, whether Rowsafe installed the package
+# and when it last installed or removed it, out of the agent's reach.
+StateDirectory=rowsafe-pooler
+StateDirectoryMode=0700
+UMask=0022
+
+# Hardening. The system is read-only except PgBouncer's configuration and
+# its systemd drop-in directory; no network. The request is read and removed
+# as the agent user (CAP_SETUID/CAP_SETGID); root then writes PgBouncer's
+# files (CAP_CHOWN, CAP_FOWNER, CAP_DAC_OVERRIDE for the package's
+# postgres-owned files) and asks systemd, over its private socket, to start
+# or reload pgbouncer.service or rowsafe-pooler-apt@.service.
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=-/etc/pgbouncer -/etc/systemd/system/pgbouncer.service.d -/var/lib/rowsafe/pooler
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service

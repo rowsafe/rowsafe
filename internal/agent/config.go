@@ -73,6 +73,8 @@ type Config struct {
 	// (ROWSAFE_REWIND_DIR).
 	RewindDir string
 
+	// Pooler is PgBouncer (connection pooling; pooling.go).
+	Pooler PoolerConfig
 	// UpdateAllowFile lists what root allowed Rowsafe to install or do
 	// (postgresql, security, reboot; ROWSAFE_UPDATE_ALLOW_FILE). Written by
 	// the installer; the agent only reads it (updates.go).
@@ -166,6 +168,9 @@ func ConfigFromEnv() (Config, error) {
 	}
 	c.DockerControlSocket = env("ROWSAFE_DOCKER_CONTROL_SOCKET", "/run/rowsafe-control/control.sock")
 	var err error
+	if err := poolerConfigFromEnv(&c); err != nil {
+		return c, err
+	}
 	if c.Storage != protocol.StorageOwn && c.Storage != protocol.StorageRowsafe {
 		return c, fmt.Errorf("ROWSAFE_STORAGE must be %q (Rowsafe Storage) or %q (your bucket, ROWSAFE_REPO_S3_*)",
 			protocol.StorageRowsafe, protocol.StorageOwn)

@@ -54,6 +54,8 @@ type Agent struct {
 	// task (a health fix), for the same reason; maintBusy says one runs.
 	maintMu   sync.Mutex
 	maintBusy atomic.Bool
+	// poolerBusy says a pooling task runs beside the fast lane (pooling.go).
+	poolerBusy atomic.Bool
 
 	// rewinds records copies and kept data directories (rewindState()).
 	rewinds    *rewindStore
@@ -216,7 +218,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	// Built-in monitoring (package collect): metrics every minute, beside
 	// the task loop and never blocking it.
 	go collect.Run(ctx, collect.Options{Log: a.log, PGUser: a.cfg.PGUser,
-		Databases: a.monitoredDatabases, Engine: a.monitorEngine,
+		Databases: a.monitoredDatabases, Engine: a.monitorEngine, Poolers: a.poolerSources,
 		Send: func(ctx context.Context, r protocol.MonitoringReport) (ack protocol.MonitoringAck, err error) {
 			return ack, a.client.post(ctx, "/v1/agent/monitoring", r, &ack)
 		}})
@@ -235,6 +237,7 @@ func (a *Agent) Run(ctx context.Context) error {
 				a.fastMu.Lock()   // let a restore point in progress finish
 				a.maintMu.Lock()  // and a health fix
 				a.sbLaneMu.Lock() // and a fence or promotion (standby.go)
+				poolerMu.Lock()   // and a pooling task (pooling.go)
 			}
 			return err
 		}
@@ -291,10 +294,28 @@ var sideTypes = []string{protocol.TaskMaintenance, protocol.TaskRewindCompare, p
 // task unless one is running already. Side tasks run beside the lane, one
 // at a time, so a long VACUUM never holds up a restore point.
 func (a *Agent) fastLaneClaim() []string {
-	if a.maintBusy.Load() {
-		return fastLaneTypes
+	types := slices.Clone(fastLaneTypes)
+	if !a.maintBusy.Load() {
+		types = append(types, sideTypes...)
 	}
-	return append(slices.Clone(fastLaneTypes), sideTypes...)
+	if !a.poolerBusy.Load() {
+		types = append(types, poolerTypes...)
+	}
+	return types
+}
+
+// poolerTypes run beside the fast lane, one at a time, and never behind a
+// backup or a health fix: pointing PgBouncer at a new primary after a
+// failover can't wait.
+var poolerTypes = []string{protocol.TaskPoolerRetarget, protocol.TaskPooling}
+
+// runPooler runs a pooling task beside the fast lane.
+func (a *Agent) runPooler(ctx context.Context, task *protocol.Task) {
+	a.poolerBusy.Store(true)
+	go func() {
+		defer a.poolerBusy.Store(false)
+		a.execute(ctx, task, false)
+	}()
 }
 
 // runMaintenance runs a maintenance task beside the fast lane.
@@ -339,6 +360,9 @@ func (a *Agent) fastLane(ctx context.Context) {
 			case slices.Contains(sideTypes, task.Type):
 				a.runMaintenance(ctx, task)
 				backoff = 0
+			case slices.Contains(poolerTypes, task.Type):
+				a.runPooler(ctx, task)
+				backoff = 0
 			default:
 				a.execute(ctx, task, false)
 				backoff = 0 // there may be more
@@ -363,8 +387,10 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 			DockerControl:    a.dockerControlReport(ctx),
 			Copies:           a.copiesReport(),
 			StandbyHeartbeat: a.standbyHeartbeat(ctx),
-			ManagedStorage:   a.storageStatus(), // Rowsafe Storage or own bucket (storage.go)
+			ManagedStorage:   a.storageStatus(),   // Rowsafe Storage or own bucket (storage.go)
+			Pooler:           a.poolerStatus(ctx), // pooling.go
 		}
+		req.PoolerDatabases = a.poolerDatabases() // for Standby's pooler_retarget (pooling.go)
 		resp, err := a.client.heartbeat(ctx, req)
 		if isUnauthorized(err) {
 			stop := "sudo systemctl disable --now rowsafe-agent"

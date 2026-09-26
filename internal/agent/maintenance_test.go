@@ -187,6 +187,7 @@ func TestPlainWords(t *testing.T) {
 
 func TestFastLaneClaimsMaintenanceOneAtATime(t *testing.T) {
 	a := &Agent{}
+	a.poolerBusy.Store(true) // pooling tasks: TestFastLaneClaimsPooling
 	if got := a.fastLaneClaim(); !slices.Equal(got, []string{protocol.TaskRestorePoint, protocol.TaskCopySchema, protocol.TaskMaintenance,
 		protocol.TaskRewindCompare, protocol.TaskRewindRows, protocol.TaskRewindDrop, protocol.TaskRewindCleanup,
 		protocol.TaskFindMoment, protocol.TaskDBAdmin, protocol.TaskMigrate, protocol.TaskSettings,

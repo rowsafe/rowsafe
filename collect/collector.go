@@ -3,6 +3,7 @@ package collect
 import (
 	"context"
 	"log/slog"
+	"maps"
 	"math/rand/v2"
 	"os"
 	"strings"
@@ -45,6 +46,9 @@ type Options struct {
 	// InsightsSync collects insights inline instead of in the background
 	// (tests).
 	InsightsSync bool
+	// Poolers returns the PgBouncer admin consoles to read, per database
+	// (pooler.go); nil when none.
+	Poolers func() []PoolerSource
 }
 
 // Collector gathers one report per round. It is not safe for concurrent use.
@@ -54,6 +58,8 @@ type Collector struct {
 	clusters map[string]*clusterState
 	host     *hostCollector
 	lastSlow time.Time
+	// poolerPrev is the previous PgBouncer reading per database (pooler.go).
+	poolerPrev map[string]*poolerTotals
 }
 
 func New(o Options) *Collector {
@@ -70,7 +76,7 @@ func New(o Options) *Collector {
 		o.InsightsInterval = DefaultInsightsInterval
 	}
 	return &Collector{o: o, deltas: newDeltaTracker(), clusters: map[string]*clusterState{},
-		host: &hostCollector{procRoot: o.ProcRoot}}
+		host: &hostCollector{procRoot: o.ProcRoot}, poolerPrev: map[string]*poolerTotals{}}
 }
 
 // Settings read from the agent's environment.
@@ -178,6 +184,10 @@ func (c *Collector) Collect(ctx context.Context) protocol.MonitoringReport {
 	report := protocol.MonitoringReport{CollectedAt: now.UTC()}
 	keep := map[string]bool{}
 	var dataDirs []string
+	var poolers []PoolerSource
+	if c.o.Poolers != nil {
+		poolers = c.o.Poolers()
+	}
 	for _, db := range dbs {
 		if protocol.NormalizeEngine(db.Engine) != protocol.EnginePostgreSQL {
 			if dm := c.otherEngine(ctx, db); dm != nil {
@@ -196,13 +206,17 @@ func (c *Collector) Collect(ctx context.Context) protocol.MonitoringReport {
 		cctx, cancel := context.WithTimeout(ctx, perClusterTimeout)
 		r, err := readCluster(cctx, target, st, slow, c.o.QueryText)
 		cancel()
+		poolerMetrics, poolerStats := c.pooler(ctx, poolers, db.ID)
 		if err != nil {
 			dm.Error = err.Error()
+			dm.Metrics, dm.Pooler = poolerMetrics, poolerStats
 			report.Databases = append(report.Databases, dm)
 			continue
 		}
 		at := c.o.Now()
 		dm.Metrics = derive(r, db.ID, at, c.deltas)
+		maps.Copy(dm.Metrics, poolerMetrics)
+		dm.Pooler = poolerStats
 		if r.dataDir != "" {
 			dataDirs = append(dataDirs, r.dataDir)
 			if d, err := diskUsage(r.dataDir); err == nil {

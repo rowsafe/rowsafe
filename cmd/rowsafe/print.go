@@ -138,6 +138,8 @@ func printTask(t protocol.TaskView) {
 			fmt.Printf("Restarted %s in %.1fs; archive_mode is %s\n", cmp.Or(r.Unit, "PostgreSQL"),
 				float64(r.DurationMs)/1000, cmp.Or(r.ArchiveMode, "unknown"))
 		}
+	case protocol.TaskPooling, protocol.TaskPoolerRetarget:
+		poolingResult(t)
 	}
 	if t.Error != "" {
 		fmt.Printf("\nError: %s\n", t.Error)
