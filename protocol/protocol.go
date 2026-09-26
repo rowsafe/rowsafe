@@ -630,6 +630,9 @@ const OrgHeader = "X-Rowsafe-Org"
 type PlanLimits struct {
 	MaxHosts     int `json:"max_hosts"`
 	MaxDatabases int `json:"max_databases"`
+	// MaxRewindRows is the most rows one Rewind "bring back rows" run may
+	// write (RewindRowsParams.MaxRows).
+	MaxRewindRows int64 `json:"max_rewind_rows"`
 }
 
 type OrgUsage struct {

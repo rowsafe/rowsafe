@@ -205,8 +205,20 @@ func TestRestoreTo(t *testing.T) {
 	if got := strings.Join(rr.calls[1], " "); got != want {
 		t.Errorf("restore command:\n got %s\nwant %s", got, want)
 	}
+	// Just before a transaction (Find the moment).
+	_, err = c.RestoreTo(context.Background(), RestoreOptions{DataDir: "/d", Type: "xid", Target: "4242", Exclusive: true, Set: "20260920-010002F"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = "/usr/bin/pgbackrest --config=/etc/rowsafe/pgbackrest/app.conf --stanza=app --pg1-path=/d " +
+		"--type=xid --target=4242 --target-action=promote --target-exclusive --set=20260920-010002F --cmd=/usr/bin/pgbackrest restore"
+	if got := strings.Join(rr.calls[2], " "); got != want {
+		t.Errorf("restore command:\n got %s\nwant %s", got, want)
+	}
 	for _, bad := range []RestoreOptions{
-		{DataDir: "/d", Type: "xid", Target: "1"},
+		{DataDir: "/d", Type: "lsn", Target: "0/1"},
+		{DataDir: "/d", Type: "xid", Target: "12 34"},
+		{DataDir: "/d", Type: "xid", Target: "0"},
 		{DataDir: "/d", Type: "name", Target: "x' ; rm -rf /"},
 		{DataDir: "/d", Type: "name", Target: "x\nrestore_command = 'evil'"},
 		{DataDir: "/d", Type: "name", Target: ""},
@@ -219,8 +231,8 @@ func TestRestoreTo(t *testing.T) {
 			t.Errorf("accepted %+v", bad)
 		}
 	}
-	if len(rr.calls) != 2 {
-		t.Errorf("pgbackrest ran for refused options: %v", rr.calls[2:])
+	if len(rr.calls) != 3 {
+		t.Errorf("pgbackrest ran for refused options: %v", rr.calls[3:])
 	}
 }
 

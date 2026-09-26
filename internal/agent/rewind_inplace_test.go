@@ -749,9 +749,14 @@ func TestRewindRestoreArgs(t *testing.T) {
 	if err != nil || typ != "name" || target != "before-migration" || set != "20260920-010002F_20260921-010003D" {
 		t.Errorf("mark: %s %s %s %v", typ, target, set, err)
 	}
+	typ, target, set, err = rewindRestoreArgs(protocol.RewindTarget{Time: &past, XID: 4242, BackupSet: "20260920-010002F"})
+	if err != nil || typ != "xid" || target != "4242" || set != "20260920-010002F" {
+		t.Errorf("xid: %s %s %s %v", typ, target, set, err)
+	}
 	future := time.Now().Add(time.Hour)
 	for _, bad := range []protocol.RewindTarget{
 		{}, {Time: &past, Mark: "m"}, {Time: &future}, {Mark: "m"}, {Mark: "Bad Name", BackupSet: "20260920-010002F"},
+		{XID: 7}, {XID: 7, Mark: "m", BackupSet: "20260920-010002F"}, {XID: 7, Time: &future},
 	} {
 		if _, _, _, err := rewindRestoreArgs(bad); err == nil {
 			t.Errorf("accepted %+v", bad)

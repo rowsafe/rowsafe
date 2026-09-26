@@ -320,9 +320,12 @@ type RestoreOptions struct {
 	// never pushes WAL into the repository. A restore that replaces
 	// production keeps its archiving (false).
 	ArchiveOff bool
-	// Type is "time" or "name"; Target the time ("2006-01-02
-	// 15:04:05.999999+00") or restore point name.
+	// Type is "time", "name" or "xid"; Target the time ("2006-01-02
+	// 15:04:05.999999+00"), restore point name or transaction ID.
 	Type, Target string
+	// Exclusive stops just before the target (--target-exclusive): for an
+	// xid, everything up to that transaction, not including it.
+	Exclusive bool
 	Set          string // --set: the backup to start from ("" lets pgBackRest pick, time targets only)
 	Timeline     string // --target-timeline ("" = PostgreSQL's default)
 	// Repo is the storage to restore from (protocol.RepoSecond: the second
@@ -334,7 +337,8 @@ var (
 	restoreTargetRE   = regexp.MustCompile(`^[A-Za-z0-9 :.+_-]{1,64}$`)
 	backupLabelRE     = regexp.MustCompile(`^[0-9]{8}-[0-9]{6}F(_[0-9]{8}-[0-9]{6}[DI])?$`)
 	targetTimelineRE  = regexp.MustCompile(`^(current|latest|[0-9]{1,10})$`)
-	restoreTargetType = map[string]bool{"time": true, "name": true}
+	restoreTargetType = map[string]bool{"time": true, "name": true, "xid": true}
+	xidTargetRE       = regexp.MustCompile(`^[1-9][0-9]{0,9}$`)
 )
 
 // ValidBackupLabel reports whether s looks like a pgBackRest backup label.
@@ -344,7 +348,7 @@ func ValidBackupLabel(s string) bool { return backupLabelRE.MatchString(s) }
 // Every value is checked, so nothing unexpected reaches pgBackRest's
 // command line or the recovery settings it writes.
 func (c CLI) RestoreTo(ctx context.Context, o RestoreOptions) ([]byte, error) {
-	if !restoreTargetType[o.Type] || !restoreTargetRE.MatchString(o.Target) {
+	if !restoreTargetType[o.Type] || !restoreTargetRE.MatchString(o.Target) || (o.Type == "xid" && !xidTargetRE.MatchString(o.Target)) {
 		return nil, fmt.Errorf("invalid restore target %q %q", o.Type, o.Target)
 	}
 	if o.Set != "" && !ValidBackupLabel(o.Set) {
@@ -364,6 +368,9 @@ func (c CLI) RestoreTo(ctx context.Context, o RestoreOptions) ([]byte, error) {
 		args = append(args, "--archive-mode=off")
 	}
 	args = append(args, "--type="+o.Type, "--target="+o.Target, "--target-action=promote")
+	if o.Exclusive {
+		args = append(args, "--target-exclusive")
+	}
 	if o.Set != "" {
 		args = append(args, "--set="+o.Set)
 	}
