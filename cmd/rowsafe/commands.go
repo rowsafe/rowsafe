@@ -305,10 +305,24 @@ func adoptCmd(ctx context.Context, c *client.Client, args []string) error {
 	socketDir := fs.String("socket-dir", "/var/run/postgresql", "Unix socket directory")
 	retention := fs.Int("retention-full", 2, "full backups to keep (weekly fulls: 2 = about 2 weeks of PITR)")
 	noWait := fs.Bool("no-wait", false, "don't wait for the plan")
-	engine := fs.String("engine", "", "database engine: postgresql (default), or another engine Rowsafe supports")
+	engine := fs.String("engine", "", "database engine: postgresql (default), mysql or mariadb")
 	name, err := parse(fs, args, true)
 	if err != nil {
 		return err
+	}
+	if e := protocol.NormalizeEngine(*engine); e == protocol.EngineMySQL || e == protocol.EngineMariaDB {
+		// MySQL and MariaDB defaults: port 3306, the Debian/Docker socket.
+		set := map[string]bool{}
+		fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+		if !set["port"] {
+			*port = 3306
+		}
+		if !set["socket-dir"] {
+			*socketDir = "/var/run/mysqld/mysqld.sock"
+			if e == protocol.EngineMariaDB {
+				*socketDir = "/run/mysqld/mysqld.sock" // the mariadb images' own path
+			}
+		}
 	}
 	if *host, err = resolveHost(ctx, c, *host); err != nil {
 		return err

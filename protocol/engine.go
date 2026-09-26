@@ -133,8 +133,10 @@ var EngineCapabilities = map[string]EngineFeatures{
 		Marks: true, Monitoring: true, Fixes: true, Restart: true,
 		Standby: true, Pooling: true, Files: true, Updates: true,
 	},
-	EngineMySQL:   {},
-	EngineMariaDB: {},
+	// MySQL and MariaDB (internal/engine/mysql): no restart, rewind in
+	// place, standby, pooling, files or updates yet.
+	EngineMySQL:   mysqlFeatures,
+	EngineMariaDB: mysqlFeatures,
 	EngineMongoDB: {},
 }
 

@@ -68,7 +68,8 @@ case \${1:-} in
       exit 1
     fi
     # The installer must run the self-test as postgres with agent.env loaded.
-    if [ "\$(id -un)" != postgres ] || [ -z "\${ROWSAFE_REPO_CIPHER_PASS:-}" ]; then
+    # (as mysql on a MySQL server)
+    if { [ "\$(id -un)" != postgres ] && [ "\$(id -un)" != mysql ]; } || [ -z "\${ROWSAFE_REPO_CIPHER_PASS:-}" ]; then
       echo '{"version":"$1","ok":false,"errors":["config: not run as postgres with agent.env"]}'
       exit 1
     fi
@@ -881,6 +882,7 @@ guided_storage_tests() {
   bucket_url_tests
   setup_flow_tests
   restart_tests
+  [ "${TEST_UNITS:-0}" != 1 ] || mysql_host_tests
 }
 
 # ------------------------------------------------------------ second copy
@@ -1343,6 +1345,52 @@ EOF
   expect_ok "purge" "$INSTALLER" --uninstall --purge
   [ ! -e /etc/rowsafe ] || fail "purge left /etc/rowsafe"
   pass "--no-allow-restart, uninstall and purge remove the restart helper"
+}
+
+# ------------------------------------------------------------ MySQL servers
+
+# mysql_host_tests: a server with MySQL and no PostgreSQL. The agent runs as
+# mysql (a unit drop-in), Percona XtraBackup comes from Percona's repository
+# after its key's fingerprint is checked, Rowsafe's option file is included
+# from /etc/mysql/conf.d, AppArmor's mysqld profile lets mysqld use Rowsafe's
+# folders, and a purge keeps the server's binary log settings.
+mysql_host_tests() {
+  echo "  -- a MySQL server (no PostgreSQL)"
+  pkill -u postgres -f 'rowsafe-agent run' 2>/dev/null || true
+  userdel -r postgres 2>/dev/null || userdel postgres
+  rm -rf /usr/lib/postgresql /var/lib/postgresql
+  useradd --system --home-dir /nonexistent --no-create-home --shell /bin/false mysql
+  printf '#!/bin/sh\necho "/usr/sbin/mysqld  Ver 8.4.3 for Linux on x86_64 (MySQL Community Server - GPL)"\n' >/usr/sbin/mysqld
+  chmod 755 /usr/sbin/mysqld
+  mkdir -p /etc/mysql/conf.d /etc/apparmor.d
+  echo '#include <local/usr.sbin.mysqld>' >/etc/apparmor.d/usr.sbin.mysqld
+  # Percona's key comes over the internet; the releases from the local server.
+  cat /etc/ssl/certs/ca-certificates.crt "$W/tls.crt" >"$W/both.crt"
+  export CURL_CA_BUNDLE=$W/both.crt
+  expect_ok "MySQL server: configured install" configured env ROWSAFE_ENROLL_TOKEN=rse_secrettoken123 "$INSTALLER" --no-setup
+  [ -z "${TEST_SHOW:-}" ] || cat "$W/out"
+  grep -q "restore tests for the MySQL on this server" "$W/out" || fail "installer doesn't speak of MySQL"
+  dpkg -s percona-xtrabackup-84 >/dev/null 2>&1 || fail "percona-xtrabackup-84 not installed"
+  [ -s /usr/share/keyrings/rowsafe-percona.gpg ] || fail "Percona keyring missing"
+  grep -q 'signed-by=/usr/share/keyrings/rowsafe-percona.gpg\] https://repo.percona.com/pxb-84-lts/apt' \
+    /etc/apt/sources.list.d/rowsafe-percona-xtrabackup.list || fail "Percona source not pinned to its key"
+  grep -qx 'User=mysql' /etc/systemd/system/rowsafe-agent.service.d/10-mysql.conf || fail "no drop-in running the agent as mysql"
+  cmp /etc/systemd/system/rowsafe-agent.service /src/deploy/systemd/rowsafe-agent.service || fail "the unit itself changed"
+  [ "$(stat -c '%U %a' /etc/rowsafe/agent.env)" = "mysql 600" ] || fail "agent.env ownership/mode on a MySQL server"
+  [ "$(stat -c '%U %G %a' /etc/rowsafe)" = "root mysql 750" ] || fail "/etc/rowsafe ownership/mode on a MySQL server"
+  [ "$(stat -c '%U %a' /etc/rowsafe/mysql/server.cnf)" = "mysql 640" ] || fail "Rowsafe's option file ownership/mode"
+  [ "$(readlink /etc/mysql/conf.d/zz-rowsafe.cnf)" = /etc/rowsafe/mysql/server.cnf ] || fail "option file not included from conf.d"
+  grep -q '^/var/lib/rowsafe/\*\* rwk,$' /etc/apparmor.d/local/usr.sbin.mysqld || fail "AppArmor override missing"
+  command -v pgbackrest >/dev/null || fail "pgbackrest (storage test) not installed"
+  pass "MySQL server: agent as mysql, XtraBackup from Percona (key checked), option file and AppArmor"
+  expect_ok "MySQL server: re-run is idempotent" configured "$INSTALLER" --no-setup
+  [ "$(grep -c Rowsafe /etc/apparmor.d/local/usr.sbin.mysqld)" = 1 ] || fail "AppArmor override added twice"
+  echo "log_bin = binlog" >>/etc/rowsafe/mysql/server.cnf
+  expect_ok "MySQL server: purge" "$INSTALLER" --uninstall --purge
+  [ -f /etc/mysql/conf.d/zz-rowsafe.cnf ] && [ ! -L /etc/mysql/conf.d/zz-rowsafe.cnf ] &&
+    grep -q '^log_bin = binlog$' /etc/mysql/conf.d/zz-rowsafe.cnf || fail "purge dropped the server's binary log settings"
+  [ ! -e /etc/systemd/system/rowsafe-agent.service.d/10-mysql.conf ] || fail "uninstall left the drop-in"
+  pass "MySQL server: purge keeps the server's binary log settings as a plain file"
 }
 
 # ------------------------------------------------------------ updates

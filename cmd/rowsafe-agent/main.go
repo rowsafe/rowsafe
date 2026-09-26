@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/rowsafe/rowsafe/internal/agent"
+	_ "github.com/rowsafe/rowsafe/internal/engine/mysql" // registers MySQL and MariaDB
 	"github.com/rowsafe/rowsafe/internal/pginspect"
 	"github.com/rowsafe/rowsafe/release"
 )
@@ -28,6 +29,8 @@ Usage:
   rowsafe-agent setup discover|plan|apply|wait|status ...
                                             turn on backups for this server's PostgreSQL
                                             (used by the installer; see setup --help)
+  rowsafe-agent restore-mysql --engine mysql|mariadb --database NAME --dir DIR [--at TIME | --mark NAME]
+                                            restore a MySQL/MariaDB database from your bucket into DIR
   rowsafe-agent selftest                    check this binary can run here (used before self-update)
   rowsafe-agent health                      container health check (docker-sidecar mode)
   rowsafe-agent version
@@ -53,6 +56,8 @@ func main() {
 		err = inspect(ctx, os.Args[2:])
 	case "setup":
 		os.Exit(setup(ctx, os.Args[2:]))
+	case "restore-mysql":
+		err = restoreMySQL(ctx, os.Args[2:])
 	case "selftest":
 		os.Exit(selftest(ctx))
 	case "health":

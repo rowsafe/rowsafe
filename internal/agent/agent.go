@@ -333,7 +333,8 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 		req := protocol.HeartbeatRequest{
 			Hostname: hostname, AgentVersion: Version, Platform: release.Platform(),
 			Archivers: a.archiverStats(ctx), Update: a.updater.Report(), Mode: a.cfg.Mode,
-			RestartPorts: a.restartPorts(), RestartActions: a.helperActions(), Rewinds: a.rewindState().states(),
+			RestartPorts: a.restartPorts(), RestartActions: a.helperActions(),
+			Rewinds: append(a.rewindState().states(), a.engineRewindStates()...),
 			Storage: a.storageReports(), SecondCopies: a.secondCopyStatuses(),
 			Software:      a.softwareForHeartbeat(),
 			DockerControl: a.dockerControlReport(ctx),
@@ -367,6 +368,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 			}
 			a.updater.OnHeartbeat(resp.Update)
 			a.rewindState().setExpiries(resp.RewindExpires, time.Now())
+			a.setEngineRewindExpiries(resp.RewindExpires)
 			a.onCopiesUpdate(ctx, resp.Copies)
 		}
 		select {

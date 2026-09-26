@@ -48,6 +48,38 @@ type EngineArchiver interface {
 	Archiver(ctx context.Context, env EngineEnv, db protocol.DatabaseSpec) (*protocol.ArchiverStats, error)
 }
 
+// EngineRewinds is optionally implemented by an engine with Rewind copies:
+// the agent reports them with every heartbeat next to PostgreSQL's (the
+// control plane treats a copy it no longer hears about as gone) and hands
+// it the expiries the control plane asks for (Extend).
+type EngineRewinds interface {
+	RewindStates(env EngineEnv) []protocol.RewindState
+	SetRewindExpiries(env EngineEnv, exp []protocol.RewindExpiry)
+}
+
+// engineRewindStates are the registered engines' copies (heartbeat).
+func (a *Agent) engineRewindStates() []protocol.RewindState {
+	var out []protocol.RewindState
+	for _, e := range registeredEngines() {
+		if r, ok := e.(EngineRewinds); ok {
+			out = append(out, r.RewindStates(a.engineEnv(e.Name()))...)
+		}
+	}
+	return out
+}
+
+// setEngineRewindExpiries passes the heartbeat's expiries to the engines.
+func (a *Agent) setEngineRewindExpiries(exp []protocol.RewindExpiry) {
+	if len(exp) == 0 {
+		return
+	}
+	for _, e := range registeredEngines() {
+		if r, ok := e.(EngineRewinds); ok {
+			r.SetRewindExpiries(a.engineEnv(e.Name()), exp)
+		}
+	}
+}
+
 // TaskLogger is the log attached to a task (what people see in the
 // dashboard under the task).
 type TaskLogger interface {
