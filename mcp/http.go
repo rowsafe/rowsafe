@@ -55,7 +55,7 @@ func NewHTTPHandler(api http.Handler, opts HTTPOptions) http.Handler {
 		if a == nil {
 			return nil
 		}
-		return NewServer(a.c, Options{AllowWrites: a.writes, AllowRestorePoints: a.marks, Version: opts.Version,
+		return NewServer(a.c, Options{AllowWrites: a.writes, AllowRestorePoints: a.marks, Remote: true, Version: opts.Version,
 			MaxWait: opts.MaxWait, SchemaCache: cache})
 	}, &sdk.StreamableHTTPOptions{
 		// Each request stands alone and is authenticated on its own; no

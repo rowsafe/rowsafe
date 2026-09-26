@@ -35,16 +35,20 @@ type Options struct {
 	// the task tools (at most 60s) and create_restore_point's confirmation
 	// (at most 120s). Default 120s; keep it below any HTTP write timeout.
 	MaxWait time.Duration
+	// Remote: the server runs inside Rowsafe (the /mcp endpoint), so it must
+	// never make a safe copy's password: copies start without one, and a
+	// person sets it in the dashboard.
+	Remote bool
 	// SchemaCache avoids re-deriving schemas when a server is built per request.
 	SchemaCache *sdk.SchemaCache
 }
 
 const maxWaitLimit = 60 * time.Second
 
-const instructions = `Rowsafe is the safety net for PostgreSQL databases: continuous WAL archiving (point-in-time recovery), scheduled backups (Rewind) and a weekly restore test (Proof, task type drill), with health monitoring (Pulse), run by an agent on each database host. It never restarts PostgreSQL on its own (only when a person asks, in the dashboard or with "rowsafe restart"; no MCP tool can) or runs arbitrary SQL, and never sees backup contents. Rewinding (restoring a copy, bringing rows back, rewinding a whole database) is for people only, in the dashboard or with "rowsafe rewind": AI assistants never restore over production, and no MCP tool can.
+const instructions = `Rowsafe is the safety net for PostgreSQL databases: continuous WAL archiving (point-in-time recovery), scheduled backups (Rewind) and a weekly restore test (Proof, task type drill), with health monitoring (Pulse), run by an agent on each database host. It never restarts PostgreSQL on its own (only when a person asks, in the dashboard or with "rowsafe restart"; no MCP tool can) or runs arbitrary SQL on production, and never sees backup contents. To test against real-shaped data, create_safe_copy makes a masked copy you can connect to (never production). Rewinding (restoring a copy, bringing rows back, rewinding a whole database) is for people only, in the dashboard or with "rowsafe rewind": AI assistants never restore over production, and no MCP tool can.
 
 Before any destructive or risky database operation (migrations, schema changes, DROP/TRUNCATE, DELETE/UPDATE without a narrow WHERE, bulk data changes, restoring a dump):
-1. safety_check on the database. If it is not protected, tell the user why and get their OK before continuing.
+1. safety_check on the database. If it is not protected, tell the user why and get their OK before continuing. For a migration, preview_migration runs it on a fresh copy of the database first (never production) and returns a verdict (safe, careful, dangerous or failed) with suggestions: follow them before running it for real.
 2. create_restore_point with a descriptive name, and tell the user the name. (If the tool is unavailable, ask the user to run: rowsafe mark DB NAME.)
 3. Proceed.
 4. If something breaks, stop. Don't try to repair data and never attempt a restore yourself: tell the user they can Rewind in the Rowsafe dashboard (restore a copy at the restore point, compare it and bring the missing rows back, or rewind the whole database), or run "rowsafe rewind". rewind_window shows how far back they can go; find_moment finds when rows were deleted or changed (read-only), so they know which point to pick.
@@ -70,6 +74,7 @@ func NewServer(c *client.Client, opts Options) *sdk.Server {
 	t.addMonitoringTools(s)
 	t.addRewindReadTools(s)
 	t.addMomentTools(s) // read-only: find when rows were deleted
+	t.addCopiesTools(s) // Guard copies: never touch production (copies_tools.go)
 	if opts.AllowWrites {
 		t.addWriteTools(s)
 	}

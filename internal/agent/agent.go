@@ -78,6 +78,12 @@ type Agent struct {
 	skipAnalyze      bool
 	// docker talks to the opt-in container control service (docker_control.go).
 	docker dockerControl
+
+	// copies records Guard's preview and safe copies (copyState()).
+	copies     *copyStore
+	copiesOnce sync.Once
+	// copyPasswordMu serializes setting safe copies' passwords.
+	copyPasswordMu sync.Mutex
 }
 
 func New(cfg Config, logger *slog.Logger) *Agent {
@@ -169,6 +175,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	// restart stopped them), roll back a rewind in place that was
 	// interrupted, and delete what expired, even with no control plane.
 	a.recoverRewinds(ctx)
+	a.recoverCopies(ctx) // Guard copies: same, see copies_state.go
 	a.reportInterrupted(ctx)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -179,6 +186,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.migrateReporter(ctx) // move-in progress (migrate_status.go)
 	go a.softwareLoop(ctx)
 	go a.upgradeHousekeeping(ctx)
+	go a.copiesHousekeeping(ctx)
 	// Built-in monitoring (package collect): metrics every minute, beside
 	// the task loop and never blocking it.
 	go collect.Run(ctx, collect.Options{Log: a.log, PGUser: a.cfg.PGUser,
@@ -233,7 +241,7 @@ func (a *Agent) Run(ctx context.Context) error {
 
 // fastLaneTypes are claimed by the fast lane. They are short, and must not
 // wait behind a backup or drill that can take hours.
-var fastLaneTypes = []string{protocol.TaskRestorePoint}
+var fastLaneTypes = []string{protocol.TaskRestorePoint, protocol.TaskCopySchema}
 
 // sideTypes run beside the fast lane, one at a time: health fixes (such as
 // ending a session that blocks others), and the Rewind steps people wait
@@ -316,6 +324,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 			RestartPorts: a.restartPorts(), RestartActions: a.helperActions(), Rewinds: a.rewindState().states(),
 			Software:      a.softwareForHeartbeat(),
 			DockerControl: a.dockerControlReport(ctx),
+			Copies:        a.copiesReport(),
 		}
 		resp, err := a.client.heartbeat(ctx, req)
 		if isUnauthorized(err) {
@@ -345,6 +354,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 			}
 			a.updater.OnHeartbeat(resp.Update)
 			a.rewindState().setExpiries(resp.RewindExpires, time.Now())
+			a.onCopiesUpdate(ctx, resp.Copies)
 		}
 		select {
 		case <-ctx.Done():
@@ -511,6 +521,8 @@ func (a *Agent) reportInterrupted(ctx context.Context) {
 		cleanup = "the interrupted rewind was rolled back when the agent started again: PostgreSQL runs on the data it had before (see the agent's log)"
 	case protocol.TaskRewindCopy:
 		cleanup = "the half-restored copy has been removed"
+	case protocol.TaskPreviewMigration, protocol.TaskSafeCopy:
+		cleanup = "the unfinished copy has been removed; nothing was changed on production"
 	case protocol.TaskUpgrade, protocol.TaskUpgradeUndo:
 		cleanup = "the root helper finishes (or rolls back) on its own and the agent follows it through; the database's Upgrade page shows where it stands"
 	case protocol.TaskUpgradeRehearsal:

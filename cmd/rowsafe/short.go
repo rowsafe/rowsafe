@@ -60,6 +60,8 @@ Guard: the safety net for AI agents
   rowsafe status [NAME]              is it recoverable right now? (exit 0 yes, 3 no)
   rowsafe mcp                        MCP server for AI assistants
   rowsafe guard                      Claude Code hook: a restore point before destructive commands
+  rowsafe preview [NAME] FILE        run a migration on a fresh copy first: locks, rewrites, a verdict
+  rowsafe copies [NAME]              masked copies developers and AI agents can connect to
 
 Admin
   rowsafe tasks [NAME] | task ID     recent tasks; one task with its log
