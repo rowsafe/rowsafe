@@ -481,15 +481,6 @@ case ${ROWSAFE_HELPER_MODE:-} in
 esac
 # ------------------------------------------------------------ end PgBouncer
 
-request=$dir/request
-as_agent test -e "$request" -o -L "$request" 2>/dev/null || exit 0
-# Only a regular file is read, for at most 5 seconds; whatever it was, it is
-# removed so the path unit doesn't fire again.
-# shellcheck disable=SC2016 # $1 expands in the inner shell
-line=$(as_agent sh -c '
-  if [ -f "$1" ] && [ ! -L "$1" ]; then timeout 5 head -c 200 -- "$1"; fi
-  rm -f -- "$1"' rowsafe-pg-restart "$request" 2>/dev/null | head -n 1)
-
 # read_request FILE prints the request's first line (at most 200 bytes, read
 # for at most 5 seconds, as the agent user, only from a regular file) and
 # removes it, whatever it was, so the path unit doesn't fire again.
