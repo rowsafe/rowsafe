@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# MongoDB (the official, unmodified mongo:8.0 image) with the Rowsafe agent
+# as a sidecar on the same compose network: backups and every change copied to your bucket (encrypted
+# in the agent container, with your passphrase), restore to any second,
+# weekly Proof, Rewind copies and Pulse. See docs/docker.md.
+#
+#   1. Put the agent's settings in rowsafe-agent.env next to this file
+#      (chmod 600), with a one-time token from `rowsafe hosts enroll-token`.
+#   2. ROWSAFE_AGENT_VERSION=<release> docker compose up -d
+#   3. Once, start the replica set and create Rowsafe's MongoDB user:
+#        docker compose exec rowsafe-agent rowsafe-agent mongodb initiate --port 27017
+#        docker compose exec rowsafe-agent rowsafe-agent mongodb login --port 27017
+#      (with access control on, add --admin-user NAME and type its password;
+#      it is used once and never saved)
+#   4. rowsafe adopt shop --host db-1 --engine mongodb --port 27017, then
+#      `rowsafe apply shop` (or Turn on backups in the dashboard).
+#
+# Restoring to any second needs a replica set: one member is enough, and it
+# changes nothing for your apps (they can keep connecting as before).
+
+name: myapp
+
+services:
+  mongo:
+    image: mongo:8.0
+    # A fixed name: the replica set records its member as mongo:27017.
+    hostname: mongo
+    restart: unless-stopped
+    # Rowsafe: a replica set of one (--replSet). With MONGO_INITDB_ROOT_*
+    # (access control on), MongoDB also needs a keyFile: see docs/docker.md.
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    volumes:
+      - mongodata:/data/db
+
+  # Rowsafe
+  rowsafe-agent:
+    image: ghcr.io/rowsafe/agent:${ROWSAFE_AGENT_VERSION:?set ROWSAFE_AGENT_VERSION to a Rowsafe release}-mongo8
+    # The name Rowsafe shows for this host: `rowsafe adopt shop --host db-1`.
+    hostname: db-1
+    restart: unless-stopped
+    environment:
+      ROWSAFE_MONGODB_HOST: mongo                 # the mongo service, on the compose network
+    depends_on:
+      - mongo
+    env_file: rowsafe-agent.env
+    volumes:
+      - rowsafe-state:/var/lib/rowsafe
+
+volumes:
+  mongodata:
+  rowsafe-state:

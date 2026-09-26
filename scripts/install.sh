@@ -169,6 +169,7 @@ ALLOW_UPDATES=''   # --allow-updates / --no-allow-updates (PostgreSQL updates an
 ALLOW_SECURITY=''  # --allow-security-updates / --no-allow-security-updates
 ALLOW_REBOOT=''    # --allow-reboot / --no-allow-reboot
 SETUP_STOP=0       # the plan limit was reached: don't offer more databases
+MONGODB_REPLSET='' # --mongodb-replica-set (yes) / --no-mongodb-replica-set (no); '' = ask on a terminal
 
 TMP=
 CHANGED=0          # binary, unit, guard or config changed: a running agent needs a restart
@@ -244,6 +245,10 @@ Options (when piping, pass them after `sh -s --`):
                          you click Install and confirm (--no-allow-security-updates: off)
   --allow-reboot         allow Rowsafe to reboot the server when you click Reboot and
                          confirm (--no-allow-reboot: off)
+  --mongodb-replica-set  MongoDB: turn a standalone server into a single-member replica
+                         set without asking (one MongoDB restart); restoring to any
+                         second needs it
+  --no-mongodb-replica-set  never do that
   --check-storage        test the backup storage in /etc/rowsafe/agent.env; change nothing
   --add-storage          add a second backup copy in another bucket, ideally at another
                          provider (guided, like the first storage), or change it
@@ -258,6 +263,9 @@ Environment:
   ROWSAFE_CHANNEL        channel to install from (default: stable)
   ROWSAFE_RELEASES_URL   release location (default: https://releases.rowsafe.sh/agent)
   ROWSAFE_ALLOW_DOWNGRADE=1  allow ROWSAFE_VERSION older than the installed version
+  ROWSAFE_MONGODB_ADMIN_USER, ROWSAFE_MONGODB_ADMIN_PASSWORD  without a terminal: a MongoDB
+                         administrator to create Rowsafe's own MongoDB user (used once,
+                         never saved)
   ROWSAFE_URL, ROWSAFE_ENROLL_TOKEN, ROWSAFE_REPO_*  written to /etc/rowsafe/agent.env
                          (ROWSAFE_ENROLL_TOKEN may instead be the argument rse_...)
                          (ROWSAFE_URL defaults to https://api.rowsafe.sh)
@@ -431,9 +439,38 @@ detect_host_engine() {
     return 0
   done
 }
+# <<< mysql
+
+# >>> mongodb: without PostgreSQL and MySQL/MariaDB but with MongoDB, the
+# agent runs as its own system user, rowsafe.
+detect_mongodb_host() {
+  [ "$HOST_ENGINE" = postgresql ] || return 0
+  id -u postgres >/dev/null 2>&1 && return 0
+  mongodb_present || return 0
+  HOST_ENGINE=mongodb
+  use_rowsafe_user
+  AGENT_HOME=$STATE_DIR
+}
+
+# mongodb_setup: on a MongoDB server without PostgreSQL, a unit drop-in runs
+# the agent as rowsafe (like mysql_setup does for MySQL).
+mongodb_setup() {
+  _dropin=/etc/systemd/system/$SERVICE.d
+  if [ "$HOST_ENGINE" != mongodb ]; then
+    [ ! -f "$_dropin/10-mongodb.conf" ] || { rm -f "$_dropin/10-mongodb.conf"; UNIT_CHANGED=1; CHANGED=1; }
+    return 0
+  fi
+  install -d -m 0755 "$_dropin"
+  if printf '# Written by the Rowsafe installer: this server runs MongoDB.\n[Unit]\nAfter=mongod.service\n[Service]\nUser=rowsafe\nGroup=rowsafe\n' |
+    write_file "$_dropin/10-mongodb.conf" 0644 root:root; then
+    UNIT_CHANGED=1 CHANGED=1
+  fi
+}
+# <<< mongodb
+# >>> mysql
 
 engine_label() {
-  case ${1:-$HOST_ENGINE} in mysql) echo MySQL ;; mariadb) echo MariaDB ;; *) echo PostgreSQL ;; esac
+  case ${1:-$HOST_ENGINE} in mysql) echo MySQL ;; mariadb) echo MariaDB ;; mongodb) echo MongoDB ;; *) echo PostgreSQL ;; esac
 }
 
 # ensure_mysql_tools installs the physical backup tool: mariadb-backup from
@@ -552,7 +589,7 @@ mysql_account() {
 check_postgres() {
   [ "$HOST_ENGINE" = postgresql ] || return 0 # mysql
   id -u "$AGENT_USER" >/dev/null 2>&1 ||
-    die "no '$AGENT_USER' user on this host. Rowsafe adopts an existing PostgreSQL; install PostgreSQL first."
+    die "no '$AGENT_USER' user on this host. Rowsafe adopts an existing PostgreSQL or MongoDB; install one first."
   PG_MAJORS=''
   for bin in /usr/lib/postgresql/*/bin/postgres; do
     [ -x "$bin" ] || continue
@@ -560,7 +597,7 @@ check_postgres() {
     PG_MAJORS="$PG_MAJORS ${major%%/*}"
   done
   PG_MAJORS=${PG_MAJORS# }
-  if [ -z "$PG_MAJORS" ] && [ -z "${ROWSAFE_PG_BIN_DIR:-}" ]; then
+  if [ -z "$PG_MAJORS" ] && [ -z "${ROWSAFE_PG_BIN_DIR:-}" ] && ! mongodb_present; then
     die "no PostgreSQL server found under /usr/lib/postgresql. Restore drills need the server binaries (pg_ctl); set ROWSAFE_PG_BIN_DIR if they live elsewhere."
   fi
 }
@@ -4735,13 +4772,19 @@ plan_cluster() {
   rm -f "$TMP/setup/id"
   _rc=0
   mysql_account || return 1 # mysql
-  agent_show setup plan --name "$C_NAME" --port "$C_PORT" --socket-dir "$C_SOCK" --engine "$C_ENGINE" --id-file "$TMP/setup/id" || _rc=$?
+  _sock=''
+  [ "$C_SOCK" = - ] || _sock=$C_SOCK
+  agent_show setup plan --name "$C_NAME" --port "$C_PORT" ${_sock:+--socket-dir "$_sock"} --id-file "$TMP/setup/id" --engine "$C_ENGINE" || _rc=$?
   C_ID=$(cat "$TMP/setup/id" 2>/dev/null || true)
   return "$_rc"
 }
 
 # protect_cluster (interactive): plan, "Turn on backups?", apply, restart.
 protect_cluster() {
+  if [ "$C_ENGINE" = mongodb ] && ! mongodb_prepare; then
+    note "Backups for $C_NAME are not on yet. Run this installer again when you're ready."
+    return 0
+  fi
   step "Preparing a plan"
   while :; do
     _prc=0
@@ -4801,7 +4844,7 @@ setup_databases() {
     [ "$SETUP_STOP" = 0 ] || break
     read_cluster "$_line"
     say ""
-    if [ "$C_ENGINE" != postgresql ] && [ "$AGENT_USER" != mysql ]; then # mysql
+    if { [ "$C_ENGINE" = mysql ] || [ "$C_ENGINE" = mariadb ]; } && [ "$AGENT_USER" != mysql ]; then # mysql
       note "Found $(cluster_desc): Rowsafe protects $(engine_label "$C_ENGINE") on servers without PostgreSQL for now; skipped."
       continue
     fi
@@ -4850,6 +4893,9 @@ protect_unattended() {
   read_cluster "$_line"
   C_NAME=$PROTECT_NAME
   note "$(cluster_desc)"
+  if [ "$C_ENGINE" = mongodb ]; then
+    mongodb_prepare 1 || die "MongoDB on port $C_PORT isn't ready for backups (see above)"
+  fi
   _prc=0
   plan_cluster || _prc=$?
   case $_prc in
@@ -4926,6 +4972,225 @@ databases() {
   fi
 }
 
+# ---------------------------------------------------------------- MongoDB
+#
+# MongoDB servers are found by `rowsafe-agent setup discover` like
+# PostgreSQL clusters (engine column "mongodb"). Before their plan, the
+# installer makes sure of three things, asking first:
+#   - the MongoDB Database Tools (mongodump, mongorestore) are installed,
+#     from MongoDB's own apt repository, whose signing key is checked
+#     against the fingerprint below;
+#   - the server is a replica set (a single member is enough): restoring to
+#     any second needs its oplog. A standalone server is converted with
+#     replication.replSetName (and a keyFile when access control is on) in
+#     its config file and one restart, then replSetInitiate;
+#   - Rowsafe has its own MongoDB user ("rowsafe", random password saved for
+#     the agent only). Where access control is on, an administrator signs in
+#     once for that; the password is never stored.
+
+# MongoDB 8.0 release signing key (pgp.mongodb.com/server-8.0.asc).
+MONGODB_KEY_URL=https://pgp.mongodb.com/server-8.0.asc
+MONGODB_KEY_FPR=4B0752C1BCA238C0B4EE14DC41DE058A4E7DCA05
+MONGODB_KEYRING=/usr/share/keyrings/mongodb-server-8.0.asc
+MONGODB_LIST=/etc/apt/sources.list.d/mongodb-org-8.0.list
+MONGODB_KEYFILE=/etc/mongodb-rowsafe.key
+
+mongodb_present() {
+  have mongod || [ -x /usr/bin/mongod ] || { have pgrep && pgrep -x mongod >/dev/null 2>&1; }
+}
+
+# use_rowsafe_user: a server without PostgreSQL runs the agent as its own
+# system user, rowsafe.
+use_rowsafe_user() {
+  AGENT_USER=rowsafe
+  if ! id -u rowsafe >/dev/null 2>&1; then
+    step "Creating the system user rowsafe for the agent"
+    useradd --system --user-group --home-dir "$STATE_DIR" --no-create-home --shell /usr/sbin/nologin rowsafe ||
+      die "could not create the rowsafe user"
+  fi
+}
+
+# ensure_mongodb_tools installs mongodump and mongorestore when MongoDB runs
+# here without them.
+ensure_mongodb_tools() {
+  mongodb_present || return 0
+  if have mongodump && have mongorestore; then
+    ok "MongoDB Database Tools at $(command -v mongodump)"
+    return 0
+  fi
+  step "Installing the MongoDB Database Tools (mongodump, mongorestore) from MongoDB's repository"
+  if ! grep -Eqs 'repo\.mongodb\.org' /etc/apt/sources.list /etc/apt/sources.list.d/*; then
+    have gpg || apt_install gnupg
+    fetch "$MONGODB_KEY_URL" "$TMP/mongodb.asc" || die "could not download MongoDB's signing key from $MONGODB_KEY_URL"
+    fpr=$(gpg --show-keys --with-colons "$TMP/mongodb.asc" 2>/dev/null | awk -F: '$1 == "fpr" { print $10; exit }')
+    [ "$fpr" = "$MONGODB_KEY_FPR" ] ||
+      die "MongoDB's signing key has an unexpected fingerprint (${fpr:-none}); not adding its repository"
+    install -m 0644 -o root -g root "$TMP/mongodb.asc" "$MONGODB_KEYRING"
+    # shellcheck disable=SC1091
+    codename=$(. /etc/os-release && printf '%s' "${VERSION_CODENAME:-}")
+    case $OS_ID in
+      ubuntu) line="deb [ arch=amd64,arm64 signed-by=$MONGODB_KEYRING ] https://repo.mongodb.org/apt/ubuntu $codename/mongodb-org/8.0 multiverse" ;;
+      # MongoDB publishes bookworm packages; the tools run on newer Debian too.
+      *) line="deb [ signed-by=$MONGODB_KEYRING ] https://repo.mongodb.org/apt/debian bookworm/mongodb-org/8.0 main" ;;
+    esac
+    printf '%s\n' "$line" | write_file "$MONGODB_LIST" 0644 root:root || true
+    APT_UPDATED=0
+  fi
+  apt_install mongodb-database-tools
+  ok "MongoDB Database Tools installed"
+}
+
+# agent_in ARGS...: agent_run with the caller's stdin (a password, one line).
+agent_in() {
+  # shellcheck disable=SC2016 # $1 expands in the inner shell
+  runuser -u "$AGENT_USER" -- env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME="$STATE_DIR" \
+    LANG="${LANG:-C}" LC_ALL="${LC_ALL:-}" \
+    sh -c 'set -a; . "$1"; set +a; shift; exec "$@"' rowsafe-setup "$ENV_FILE" "$INSTALL_DIR/rowsafe-agent" "$@"
+}
+
+# mongodb_status reads `rowsafe-agent mongodb status` into M_* variables.
+M_REPLSET='' M_AUTH='' M_LOGIN='' M_CONFIG='' M_DBPATH='' M_UNIT=''
+mongodb_status() {
+  agent_run mongodb status --port "$C_PORT" >"$TMP/mstatus" 2>"$TMP/mstatus.err" || return 1
+  _m() { sed -n "s/^$1=//p" "$TMP/mstatus" | head -n 1; }
+  M_REPLSET=$(_m replset) M_AUTH=$(_m auth) M_LOGIN=$(_m login) M_CONFIG=$(_m config)
+  M_DBPATH=$(_m dbpath) M_UNIT=$(_m unit)
+  [ "$M_UNIT" != - ] || M_UNIT=''
+  [ -n "$M_UNIT" ] || { systemd_running && systemctl is-active --quiet mongod.service && M_UNIT=mongod.service; } || true
+}
+
+# mongodb_admin asks for (or takes from the environment) an administrator's
+# login, into M_ADMIN and M_ADMIN_PW. Never stored.
+M_ADMIN='' M_ADMIN_PW=''
+mongodb_admin() {
+  [ -z "$M_ADMIN" ] || return 0
+  if [ -n "${ROWSAFE_MONGODB_ADMIN_USER:-}" ]; then
+    M_ADMIN=$ROWSAFE_MONGODB_ADMIN_USER M_ADMIN_PW=${ROWSAFE_MONGODB_ADMIN_PASSWORD:-}
+    return 0
+  fi
+  [ "$TTY" = 1 ] || return 1
+  tty_say ""
+  tty_say "MongoDB has access control on. To create Rowsafe's own user, an administrator"
+  tty_say "signs in once (a user with the root or userAdminAnyDatabase role). The password"
+  tty_say "is used for this only and never saved."
+  ask M_ADMIN "MongoDB administrator user" admin
+  ask_secret M_ADMIN_PW "Password for $M_ADMIN"
+}
+
+# mongodb_as_admin CMD...: run an agent mongodb command, as an administrator
+# when needed. Its exit status is the command's.
+mongodb_as_admin() {
+  if [ -n "$M_ADMIN" ]; then
+    printf '%s\n' "$M_ADMIN_PW" | agent_in mongodb "$@" --port "$C_PORT" --admin-user "$M_ADMIN"
+  else
+    agent_run mongodb "$@" --port "$C_PORT"
+  fi
+}
+
+# mongodb_login creates Rowsafe's MongoDB user.
+mongodb_login() {
+  [ "$M_LOGIN" = ok ] && return 0
+  _rc=0
+  mongodb_as_admin login >"$TMP/mlogin" 2>&1 || _rc=$?
+  while [ "$_rc" = 11 ] || [ "$_rc" = 12 ]; do
+    [ "$_rc" = 12 ] && { tty_bad "MongoDB refused that login."; M_ADMIN=''; }
+    [ "$_rc" = 11 ] && [ -n "$M_ADMIN" ] && { tty_bad "That user can't create users."; M_ADMIN=''; }
+    mongodb_admin || { warn "MongoDB has access control on: set ROWSAFE_MONGODB_ADMIN_USER and ROWSAFE_MONGODB_ADMIN_PASSWORD (used once, never saved), or run the installer on a terminal"; return 1; }
+    [ -n "${ROWSAFE_MONGODB_ADMIN_USER:-}" ] && [ "$_rc" = 12 ] && return 1
+    _rc=0
+    mongodb_as_admin login >"$TMP/mlogin" 2>&1 || _rc=$?
+  done
+  sed 's/^/    /' "$TMP/mlogin"
+  [ "$_rc" = 0 ]
+}
+
+# mongodb_set_yaml FILE SECTION KEY VALUE sets section.key in a mongod
+# config file (two-space indent, as MongoDB's packages write it).
+mongodb_set_yaml() {
+  if grep -Eq "^$2:[[:space:]]*$" "$1"; then
+    awk -v s="$2" -v k="$3" -v v="$4" '
+      { print }
+      $0 ~ "^" s ":[[:space:]]*$" { print "  " k ": " v }' "$1" >"$TMP/mconf" && cat "$TMP/mconf" >"$1"
+  else
+    printf '\n%s:\n  %s: %s\n' "$2" "$3" "$4" >>"$1"
+  fi
+}
+
+# mongodb_replset converts a standalone server into a single-member
+# replica set: config file, keyFile when access control is on, restart,
+# replSetInitiate.
+mongodb_replset() {
+  if [ -z "$M_CONFIG" ] || [ "$M_CONFIG" = - ] || [ ! -f "$M_CONFIG" ] || [ -z "$M_UNIT" ]; then
+    warn "MongoDB on port $C_PORT isn't started from a config file by a systemd unit the installer knows, so it can't turn on the replica set for you"
+    note "Do it yourself: add 'replication: {replSetName: rs0}' to its configuration, restart it,"
+    note "run rs.initiate() in mongosh, then run this installer again."
+    return 1
+  fi
+  if grep -Eq '^[[:space:]]+replSetName:' "$M_CONFIG"; then
+    note "$M_CONFIG already names a replica set; restarting MongoDB would start it"
+  else
+    cp -p "$M_CONFIG" "$M_CONFIG.rowsafe-backup"
+    mongodb_set_yaml "$M_CONFIG" replication replSetName rs0
+    if [ "$M_AUTH" = on ] && ! grep -Eq '^[[:space:]]+keyFile:' "$M_CONFIG"; then
+      owner=$(stat -c %U "${M_DBPATH:-/var/lib/mongodb}" 2>/dev/null || echo mongodb)
+      openssl rand -base64 756 >"$TMP/keyfile"
+      install -m 0400 -o "$owner" -g "$owner" "$TMP/keyfile" "$MONGODB_KEYFILE"
+      mongodb_set_yaml "$M_CONFIG" security keyFile "$MONGODB_KEYFILE"
+      ok "created $MONGODB_KEYFILE (replica set members use it to trust each other)"
+    fi
+    ok "$M_CONFIG: replication.replSetName rs0 (the previous file is $M_CONFIG.rowsafe-backup)"
+  fi
+  step "Restarting MongoDB ($M_UNIT)"
+  if ! timeout 180 systemctl restart "$M_UNIT" >"$TMP/mrestart" 2>&1 </dev/null; then
+    tail -n 5 "$TMP/mrestart" | sed 's/^/    /' >&2
+    warn "MongoDB didn't start with the replica set; putting the previous configuration back"
+    [ ! -f "$M_CONFIG.rowsafe-backup" ] || cp -p "$M_CONFIG.rowsafe-backup" "$M_CONFIG"
+    timeout 180 systemctl restart "$M_UNIT" </dev/null || true
+    return 1
+  fi
+  _i=0
+  until mongodb_status || [ $_i -ge 60 ]; do sleep 1; _i=$((_i + 1)); done
+  _rc=0
+  mongodb_as_admin initiate >"$TMP/minit" 2>&1 || _rc=$?
+  if [ "$_rc" = 11 ] || [ "$_rc" = 12 ]; then
+    mongodb_admin && { _rc=0; mongodb_as_admin initiate >"$TMP/minit" 2>&1 || _rc=$?; }
+  fi
+  sed 's/^/    /' "$TMP/minit"
+  [ "$_rc" = 0 ] || { warn "starting the replica set failed (see above)"; return 1; }
+  ok "MongoDB on port $C_PORT is now a single-member replica set"
+}
+
+# mongodb_prepare gets a MongoDB server ready for its plan. Interactive
+# unless unattended=1 (then it never restarts without --mongodb-replica-set).
+mongodb_prepare() {
+  _unattended=${1:-0}
+  M_ADMIN='' M_ADMIN_PW=''
+  if ! mongodb_status; then
+    sed 's/^/    /' "$TMP/mstatus.err" >&2
+    warn "could not look at MongoDB on port $C_PORT"
+    return 1
+  fi
+  if [ "$M_REPLSET" = - ] || [ -z "$M_REPLSET" ]; then
+    say ""
+    note "MongoDB on port $C_PORT runs as a standalone server. Restoring to any second needs"
+    note "its change log (the oplog), which only a replica set keeps. A replica set of one"
+    note "member changes nothing for your apps; it takes one MongoDB restart (a few seconds)."
+    case $MONGODB_REPLSET in
+      yes) ;;
+      no) note "Skipped (--no-mongodb-replica-set)."; return 1 ;;
+      *)
+        if [ "$_unattended" = 1 ] || [ "$TTY" = 0 ]; then
+          note "Run the installer on a terminal, or add --mongodb-replica-set, to turn it on."
+          return 1
+        fi
+        confirm "Turn on the replica set and restart MongoDB now?" n || { note "OK, nothing was changed."; return 1; }
+        ;;
+    esac
+    mongodb_replset || return 1
+  fi
+  mongodb_login || return 1
+}
+
 # ---------------------------------------------------------------- modes
 
 install_agent() {
@@ -4933,6 +5198,7 @@ install_agent() {
   detect_os
   detect_arch
   detect_host_engine # mysql
+  detect_mongodb_host # mongodb
   check_postgres
   say "${BOLD}Rowsafe agent installer${RESET}: backups, restore to any second and weekly"
   say "restore tests for the $(engine_label) on this server. Nothing changes without your yes."
@@ -4969,7 +5235,8 @@ install_agent() {
   [ "$need_binary" = 0 ] || download_binary
 
   # 2. Dependencies and layout.
-  if [ "$HOST_ENGINE" = postgresql ]; then ensure_pgbackrest; else ensure_mysql_tools; fi # mysql
+  if [ "$HOST_ENGINE" = postgresql ] || [ "$HOST_ENGINE" = mongodb ]; then ensure_pgbackrest; else ensure_mysql_tools; fi # mysql
+  ensure_mongodb_tools # mongodb (only where MongoDB runs)
   step "Installing into $INSTALL_DIR"
   make_dirs
   [ "$need_binary" = 0 ] || install_binary
@@ -4977,6 +5244,7 @@ install_agent() {
   UNIT_CHANGED=0
   install_unit
   mysql_setup # mysql
+  mongodb_setup # mongodb
   install_logrotate
   maybe_guided_storage
   second_copy
@@ -5140,6 +5408,8 @@ main() {
       --no-prompt) PROMPT=never ;;
       --no-setup) NO_SETUP=1 ;;
       --allow-restart) ALLOW_RESTART=yes ;;
+      --mongodb-replica-set) MONGODB_REPLSET=yes ;;
+      --no-mongodb-replica-set) MONGODB_REPLSET=no ;;
       --no-allow-restart) ALLOW_RESTART=no ;;
       --allow-firewall) ALLOW_FIREWALL=yes ;;
       --no-allow-firewall) ALLOW_FIREWALL=no ;;

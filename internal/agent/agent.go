@@ -200,6 +200,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.reportInterrupted(ctx)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	a.startEngines(ctx) // engines' background work (e.g. MongoDB's oplog copying)
 	go a.heartbeatLoop(ctx)
 	go a.fastLane(ctx)
 	go a.rewindHousekeeping(ctx)

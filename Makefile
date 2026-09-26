@@ -4,6 +4,7 @@
 #   make test                  unit tests
 #   make lint                  go vet, gofmt, shellcheck, installer consistency
 #   make test-installer        scripts/install.sh in Debian/Ubuntu containers (Docker)
+#   make test-mongodb          the MongoDB engine on real mongo 7.0/8.0 containers (Docker)
 #   make test-rewind           a real Rewind (copy, rows, in place, undo) on a systemd Debian container (Docker)
 #   make test-pooling          real PgBouncer through the root helper on a systemd Debian container (Docker)
 #   make test-secondcopy       a real second backup copy (two storages, one going away) in a Debian container (Docker)
@@ -32,7 +33,7 @@ AGENT_LDFLAGS := -s -w -buildid= -X $(PKG)/internal/agent.Version=$(VERSION) -X 
 MAIN_LDFLAGS := -s -w -buildid= -X main.version=$(VERSION)
 GOBUILD := CGO_ENABLED=0 GOFLAGS=-mod=readonly $(GO) build -trimpath -buildvcs=false
 
-.PHONY: all build test lint check-installer test-installer test-rewind test-secondcopy test-mysql test-upgrade test-pooling test-action dist release check-release-env clean
+.PHONY: all build test lint check-installer test-installer test-mongodb test-rewind test-secondcopy test-mysql test-upgrade test-pooling test-action dist release check-release-env clean
 
 all: lint test build
 
@@ -97,6 +98,9 @@ check-installer:
 
 test-installer:
 	sh scripts/test-install.sh
+
+test-mongodb:
+	bash scripts/test-mongodb.sh
 
 test-rewind:
 	sh scripts/test-rewind.sh
