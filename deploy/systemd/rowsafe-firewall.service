@@ -26,12 +26,12 @@ UMask=0022
 
 # Hardening. It needs the host's network namespace and CAP_NET_ADMIN to
 # change nftables (over netlink), and CAP_SETUID/CAP_SETGID to read the
-# request as the agent user. No IP traffic at all.
+# request as the agent user. No IP traffic at all, and nothing it can write
+# in the agent's directory.
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_SETUID CAP_SETGID
 AmbientCapabilities=
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=-/var/lib/rowsafe/firewall
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes

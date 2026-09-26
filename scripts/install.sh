@@ -1035,7 +1035,9 @@ check_root_file() {
 
 # allowed_unit PORT prints the unit the restart allow list names for PORT.
 allowed_unit() {
-  awk -v p="$1" '$1 == p && $2 ~ /^[A-Za-z0-9@._-]+\.service$/ { print $2; exit }' "$allow"
+  # Only Debian's cluster units (postgresql@MAJOR-NAME.service), whatever the
+  # file says; ports compare as strings.
+  awk -v p="$1" '$1 "" == p "" && $2 ~ /^postgresql@[0-9]+-[A-Za-z0-9_.-]+\.service$/ { print $2; exit }' "$allow"
 }
 
 # ---------------------------------------------------------------- restart mode
@@ -1721,7 +1723,7 @@ remove_restart_helper() {
 # systemd unit (the ones a restart helper can restart).
 restart_pairs() {
   [ -s "$TMP/clusters" ] || return 0
-  awk -F '\t' '($14 == "" || $14 == "postgresql") && $12 != "-" && $12 ~ /^[A-Za-z0-9@._-]+\.service$/ { print $1, $12 }' "$TMP/clusters"
+  awk -F '\t' '($14 == "" || $14 == "postgresql") && $1 ~ /^[1-9][0-9]*$/ && $12 ~ /^postgresql@[0-9]+-[A-Za-z0-9_.-]+\.service$/ { print $1, $12 }' "$TMP/clusters"
 }
 
 # restart_allowed PORT: is PORT in the allow list?
@@ -1973,31 +1975,40 @@ install_firewall_helper() {
 # the host's network namespace and CAP_NET_ADMIN, which the restart helper
 # never gets.
 #
-# The request (/var/lib/rowsafe/firewall/request, in a directory the agent
-# user owns) is one line: "ID ACTION PORT", ACTION being apply or remove.
-# For apply, /var/lib/rowsafe/firewall/addresses holds the allowed IPv4 and
-# IPv6 addresses or ranges, one per line (at most 32). Both are read and
-# removed with the agent user's privileges, never root's. The port must be
-# listed in /etc/rowsafe/firewall-allowed ("PORT" lines, written by root).
+# The agent is not trusted. Its request (/var/lib/rowsafe/firewall/request,
+# in a directory the agent user owns) is one line, "ID ACTION PORT", ACTION
+# being apply, remove or status. For apply,
+# /var/lib/rowsafe/firewall/addresses holds the allowed IPv4 and IPv6
+# addresses or ranges, one per line (at most 32). They are only read, with
+# the agent user's privileges: root never writes or removes anything in the
+# agent's directory (the agent removes its request itself). A request ID is
+# handled once. Whatever /etc/rowsafe/firewall-allowed (root's) lists, a
+# port is refused unless it is at least 1024, no sshd listens on it, and a
+# socket of the postgres user listens on it.
 #
 # Rules live in one nftables table of Rowsafe's own, "inet rowsafe", which
 # matches only the allowed PostgreSQL ports: connections to such a port
 # from anywhere but the allowed addresses and the server itself are
 # dropped; SSH and every other port are never touched. The whole table is
-# replaced in one nft transaction, checked with nft -c first.
+# replaced in one nft transaction, checked with nft -c first. Ports that
+# Docker publishes are not covered (their traffic is forwarded, not
+# delivered to this server), and the postgres-socket check refuses them.
 #
-# After applying a rule the helper answers phase=pending and waits up to 60
-# seconds for the agent to confirm (/var/lib/rowsafe/firewall/confirm holding
-# the request ID), which the agent does only once it still reaches Rowsafe
-# and PostgreSQL. Without it, the previous rules are put back.
+# A new rule is kept as pending-PORT: the helper answers phase=pending and
+# waits up to 60 seconds for the agent to confirm
+# (/var/lib/rowsafe/firewall/confirm holding the request ID), which the
+# agent does only once it still reaches Rowsafe and PostgreSQL. Confirmed,
+# it becomes port-PORT; otherwise the previous rules are put back.
 #
 # Answers go to /run/rowsafe-firewall (root's directory, readable by the
 # agent): "result" (id, action, phase, ok, error, finished_at) and, per
-# port, "port-PORT" (addresses, applied_at). The rules are kept in
-# /var/lib/rowsafe-firewall and loaded again at boot by
-# rowsafe-firewall-restore.service ("rowsafe-firewall --restore").
+# port, "port-PORT" (addresses, applied_at, loaded: whether nftables really
+# holds the rules). The rules are kept in /var/lib/rowsafe-firewall and
+# loaded again at boot by rowsafe-firewall-restore.service
+# ("rowsafe-firewall --restore", which drops unconfirmed rules).
 
 set -u
+set -f
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 dir=${ROWSAFE_FIREWALL_DIR:-/var/lib/rowsafe/firewall}
 out_dir=${RUNTIME_DIRECTORY:-/run/rowsafe-firewall}
@@ -2005,6 +2016,8 @@ allow=${ROWSAFE_FIREWALL_ALLOW:-/etc/rowsafe/firewall-allowed}
 state=${STATE_DIRECTORY:-/var/lib/rowsafe-firewall}
 agent_user=${ROWSAFE_AGENT_USER:-postgres}
 nft=${ROWSAFE_NFT:-nft}
+ss=${ROWSAFE_SS:-ss}
+sshd=${ROWSAFE_SSHD:-sshd}
 confirm_wait=${ROWSAFE_FIREWALL_CONFIRM_WAIT:-60}
 
 log() { echo "rowsafe-firewall: $*" >&2; }
@@ -2033,17 +2046,16 @@ refuse() {
   exit 0
 }
 
-# read_agent_file PATH MAXBYTES: prints a regular file read (and removed)
-# as the agent user; a symlink, FIFO or anything else prints nothing.
+# read_agent_file PATH MAXBYTES: prints a regular file, read as the agent
+# user; a symlink, FIFO or anything else prints nothing. Nothing is removed.
 read_agent_file() {
   # shellcheck disable=SC2016 # $1 and $2 expand in the inner shell
-  as_agent sh -c '
-    if [ -f "$1" ] && [ ! -L "$1" ]; then
-      timeout 5 head -c "$2" -- "$1"
-      rm -f -- "$1"
-    elif [ -e "$1" ] || [ -L "$1" ]; then
-      rm -f -- "$1"
-    fi' rowsafe-firewall "$1" "$2" 2>/dev/null
+  as_agent sh -c 'if [ -f "$1" ] && [ ! -L "$1" ]; then timeout 5 head -c "$2" -- "$1"; fi' rowsafe-firewall "$1" "$2" 2>/dev/null
+}
+
+# valid_port: 1024 to 65535, digits only, no leading zero.
+valid_port() {
+  printf '%s\n' "$1" | grep -Eq '^[1-9][0-9]{0,4}$' && [ "$1" -ge 1024 ] && [ "$1" -le 65535 ]
 }
 
 # valid_cidr: an IPv4 or IPv6 address or range, nothing else.
@@ -2057,14 +2069,36 @@ valid_cidr() {
   case $1 in */*) [ "${1#*/}" -ge 16 ] && [ "${1#*/}" -le 128 ] || return 1 ;; esac
 }
 
-allowed_port() {
+# listed_port PORT: in root's allow list (ports compare as strings).
+listed_port() {
   [ -f "$allow" ] && [ ! -L "$allow" ] || return 1
   [ "$(stat -c '%u' "$allow")" = 0 ] || return 1
   case $(stat -c '%A' "$allow") in ?????w???? | ????????w?) return 1 ;; esac
-  awk -v p="$1" '$1 == p { f = 1 } END { exit !f }' "$allow"
+  awk -v p="$1" '$1 "" == p "" { f = 1 } END { exit !f }' "$allow"
 }
 
-# render prints the whole table from the per-port address lists in $state.
+# listen_ports [UID]: the TCP ports with a listening socket (of UID).
+listen_ports() {
+  "$ss" -ltnHe 2>/dev/null | awk -v u="${1:-}" '
+    u == "" || index($0, " uid:" u " ") { n = split($4, a, ":"); print a[n] }' | sort -u
+}
+
+# ssh_port PORT: sshd listens on PORT, or is set to.
+ssh_port() {
+  {
+    "$sshd" -T 2>/dev/null | awk '$1 == "port" { print $2 }'
+    "$ss" -ltnHp 2>/dev/null | awk '/"sshd"/ { n = split($4, a, ":"); print a[n] }'
+  } | awk -v p="$1" '$1 "" == p "" { f = 1 } END { exit !f }'
+}
+
+# rule_files prints the rule files in $state: port-P, and pending-P which
+# replaces port-P while it waits for its confirmation.
+rule_files() {
+  find "$state" -maxdepth 1 -type f \( -name 'port-*' -o -name 'pending-*' \) 2>/dev/null |
+    awk -F/ '{ f = $NF; p = f; sub(/^(port|pending)-/, "", p); if (f ~ /^pending-/ || !(p in r)) r[p] = $0 } END { for (p in r) print r[p] }' | sort
+}
+
+# render prints the whole table.
 render() {
   echo "table inet rowsafe {}"
   echo "delete table inet rowsafe"
@@ -2072,9 +2106,10 @@ render() {
   echo "  chain input {"
   echo "    type filter hook input priority filter - 5; policy accept;"
   echo "    iifname \"lo\" accept"
-  for f in "$state"/port-*; do
-    [ -f "$f" ] || continue
-    p=${f##*/port-}
+  for f in $(rule_files); do
+    p=${f##*/}
+    p=${p#*-}
+    valid_port "$p" || continue
     v4=$(grep -v ':' "$f" | paste -sd, -)
     v6=$(grep ':' "$f" | paste -sd, -)
     [ -z "$v4" ] || echo "    tcp dport $p ip saddr { $v4 } accept"
@@ -2085,29 +2120,37 @@ render() {
   echo "}"
 }
 
-# load applies the rules in $state (or removes the table when none are left).
+loaded() { "$nft" list table inet rowsafe >/dev/null 2>&1; }
+
+# load applies the rules in $state (or removes the table when none are
+# left), and checks nftables holds them.
 load() {
-  if ls "$state"/port-* >/dev/null 2>&1; then
+  if [ -n "$(rule_files)" ]; then
     render >"$state/rules.nft.new" || return 1
     "$nft" -c -f "$state/rules.nft.new" 2>"$state/nft.err" || return 1
     "$nft" -f "$state/rules.nft.new" 2>"$state/nft.err" || return 1
     mv -f "$state/rules.nft.new" "$state/rules.nft"
+    loaded || {
+      echo "nftables does not hold Rowsafe's table after loading it" >"$state/nft.err"
+      return 1
+    }
   else
     rm -f "$state/rules.nft"
-    if "$nft" list table inet rowsafe >/dev/null 2>&1; then
+    if loaded; then
       "$nft" delete table inet rowsafe 2>"$state/nft.err" || return 1
     fi
   fi
 }
 
-# publish writes the public view of each port's rule for the agent.
+# publish writes the public view of each confirmed rule for the agent.
 publish() {
-  rm -f "$out_dir"/port-*
-  for f in "$state"/port-*; do
-    [ -f "$f" ] || continue
+  find "$out_dir" -maxdepth 1 -type f -name 'port-*' -exec rm -f {} + 2>/dev/null
+  l=0
+  if loaded; then l=1; fi
+  find "$state" -maxdepth 1 -type f -name 'port-*' 2>/dev/null | while read -r f; do
     p=${f##*/port-}
     tmp=$(mktemp "$out_dir/.port.XXXXXX") || return 0
-    printf 'addresses=%s\napplied_at=%s\n' "$(paste -sd, - <"$f")" "$(stat -c '%Y' "$f")" >"$tmp"
+    printf 'addresses=%s\napplied_at=%s\nloaded=%s\n' "$(paste -sd, - <"$f")" "$(stat -c '%Y' "$f")" "$l" >"$tmp"
     chmod 0644 "$tmp"
     mv -f "$tmp" "$out_dir/port-$p"
   done
@@ -2117,6 +2160,8 @@ mkdir -p "$state"
 chmod 0700 "$state"
 
 if [ "${1:-}" = --restore ]; then
+  # Unconfirmed rules never come back.
+  find "$state" -maxdepth 1 -type f -name 'pending-*' -exec rm -f {} + 2>/dev/null
   if load; then
     publish
     log "rules loaded"
@@ -2127,10 +2172,9 @@ if [ "${1:-}" = --restore ]; then
   exit 0
 fi
 
-request=$dir/request
-as_agent test -e "$request" -o -L "$request" 2>/dev/null || exit 0
-line=$(read_agent_file "$request" 200 | head -n 1)
-if printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} (apply|remove) [0-9]{1,5}$'; then
+line=$(read_agent_file "$dir/request" 200 | head -n 1)
+[ -n "$line" ] || exit 0
+if printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} (apply|remove|status) [1-9][0-9]{0,4}$'; then
   id=${line%% *}
   rest=${line#* }
   action=${rest% *}
@@ -2138,15 +2182,41 @@ if printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} (apply|remove) [0-9]{1
 else
   refuse "malformed request"
 fi
+# Each request is handled once (the agent removes it once it has the answer).
+[ "$(cat "$state/last-request" 2>/dev/null)" != "$id" ] || exit 0
+printf '%s\n' "$id" >"$state/last-request"
+
+if [ "$action" = status ]; then
+  publish
+  ok=1
+  answer
+  exit 0
+fi
+
 command -v "$nft" >/dev/null 2>&1 || refuse "nftables (the nft command) is not installed on this server"
-allowed_port "$port" || refuse "port $port is not in $allow: changing the firewall for it from Rowsafe is not allowed"
+valid_port "$port" || refuse "port $port can't be managed by Rowsafe: only ports 1024 to 65535"
+listed_port "$port" || refuse "port $port is not in $allow: changing the firewall for it from Rowsafe is not allowed"
+if ssh_port "$port"; then refuse "port $port is SSH's: Rowsafe never touches it"; fi
 
 # Keep the current rules to go back to.
 rm -rf "$state/previous"
 mkdir -p "$state/previous"
-for f in "$state"/port-*; do [ -f "$f" ] && cp -p "$f" "$state/previous/"; done
+for f in $(rule_files); do cp -p "$f" "$state/previous/"; done
+
+rollback() {
+  find "$state" -maxdepth 1 -type f \( -name 'port-*' -o -name 'pending-*' \) -exec rm -f {} + 2>/dev/null
+  find "$state/previous" -maxdepth 1 -type f -exec cp -p {} "$state/" \; 2>/dev/null
+  if ! load; then
+    publish
+    return 1
+  fi
+  publish
+}
 
 if [ "$action" = apply ]; then
+  uid=$(id -u "$agent_user" 2>/dev/null) || refuse "no $agent_user user"
+  listen_ports "$uid" | grep -qx "$port" ||
+    refuse "no PostgreSQL of the $agent_user user listens on port $port here (a port Docker publishes bypasses this firewall: limit it in the compose file instead)"
   addrs=$(read_agent_file "$dir/addresses" 4096 | head -n 33)
   n=0
   : >"$state/new-$port"
@@ -2158,23 +2228,21 @@ if [ "$action" = apply ]; then
     n=$((n + 1))
     printf '%s\n' "$a" >>"$state/new-$port"
   done
-  [ "$n" -ge 1 ] && [ "$n" -le 32 ] || { rm -f "$state/new-$port"; refuse "between 1 and 32 addresses are needed, got $n"; }
-  mv -f "$state/new-$port" "$state/port-$port"
+  [ "$n" -ge 1 ] && [ "$n" -le 32 ] || {
+    rm -f "$state/new-$port"
+    refuse "between 1 and 32 addresses are needed, got $n"
+  }
+  mv -f "$state/new-$port" "$state/pending-$port"
 else
-  rm -f "$state/port-$port"
+  rm -f "$state/port-$port" "$state/pending-$port"
 fi
-
-rollback() {
-  rm -f "$state"/port-*
-  for f in "$state"/previous/port-*; do [ -f "$f" ] && cp -p "$f" "$state/"; done
-  load || log "putting the previous rules back failed: $(cat "$state/nft.err" 2>/dev/null)"
-  publish
-}
 
 if ! load; then
   e=$(tr '\n' ' ' <"$state/nft.err" 2>/dev/null | cut -c1-300)
-  rollback
-  refuse "nft refused the rules: $e"
+  if rollback; then
+    refuse "nft refused the rules: $e"
+  fi
+  refuse "nft refused the rules ($e), and putting the previous rules back failed too: check with 'nft list table inet rowsafe'"
 fi
 log "$action port $port (request $id)"
 
@@ -2194,12 +2262,16 @@ if [ "$action" = apply ]; then
   done
   phase='done'
   if [ "$confirmed" != 1 ]; then
-    rollback
-    ok=0 err="the agent did not confirm within ${confirm_wait}s that it still reaches Rowsafe and PostgreSQL, so the previous rules were put back"
+    if rollback; then
+      ok=0 err="the agent did not confirm within ${confirm_wait}s that it still reaches Rowsafe and PostgreSQL, so the previous rules were put back"
+    else
+      ok=0 err="the agent did not confirm within ${confirm_wait}s, and putting the previous rules back failed: check with 'nft list table inet rowsafe'"
+    fi
     log "$err"
     answer
     exit 0
   fi
+  mv -f "$state/pending-$port" "$state/port-$port"
 fi
 publish
 ok=1
@@ -2237,12 +2309,12 @@ UMask=0022
 
 # Hardening. It needs the host's network namespace and CAP_NET_ADMIN to
 # change nftables (over netlink), and CAP_SETUID/CAP_SETGID to read the
-# request as the agent user. No IP traffic at all.
+# request as the agent user. No IP traffic at all, and nothing it can write
+# in the agent's directory.
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_SETUID CAP_SETGID
 AmbientCapabilities=
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=-/var/lib/rowsafe/firewall
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
@@ -2277,7 +2349,8 @@ Description=Rowsafe: watch for requests to limit who can reach PostgreSQL
 Documentation=https://rowsafe.sh/docs/guides/security
 
 [Path]
-PathExists=/var/lib/rowsafe/firewall/request
+# The helper never removes the request (the agent does): start on a change.
+PathChanged=/var/lib/rowsafe/firewall/request
 Unit=rowsafe-firewall.service
 
 [Install]
@@ -2357,10 +2430,44 @@ remove_firewall_helper() {
   if systemd_running; then systemctl daemon-reload; fi
 }
 
-# firewall_ports prints the ports of the discovered clusters.
+# ssh_port_here PORT: sshd listens on PORT here, or is set to.
+ssh_port_here() {
+  {
+    sshd -T 2>/dev/null | awk '$1 == "port" { print $2 }'
+    ss -ltnHp 2>/dev/null | awk '/"sshd"/ { n = split($4, a, ":"); print a[n] }'
+  } | awk -v p="$1" '$1 "" == p "" { f = 1 } END { exit !f }'
+}
+
+# firewall_ports prints the TCP ports PostgreSQL listens on, found by root
+# itself (pg_lsclusters, and the agent user's listening sockets), never
+# taken from the agent: 1024 to 65535, never one sshd uses.
 firewall_ports() {
-  [ -s "$TMP/clusters" ] || return 0
-  awk -F '\t' '$1 ~ /^[0-9]+$/ { print $1 }' "$TMP/clusters"
+  {
+    if command -v pg_lsclusters >/dev/null 2>&1; then pg_lsclusters -h 2>/dev/null | awk '{ print $3 }'; fi
+    if _uid=$(id -u "$AGENT_USER" 2>/dev/null) && command -v ss >/dev/null 2>&1; then
+      ss -ltnHe 2>/dev/null | awk -v u="$_uid" 'index($0, " uid:" u " ") { n = split($4, a, ":"); print a[n] }'
+    fi
+  } | grep -Ex '[1-9][0-9]{3,4}' | awk '$1 >= 1024 && $1 <= 65535' | sort -un | while read -r _p; do
+    ssh_port_here "$_p" || echo "$_p"
+  done
+}
+
+# firewall_listed prints the ports already in the allow list.
+firewall_listed() {
+  [ -f "$FIREWALL_ALLOW_FILE" ] || return 0
+  grep -Ex '[1-9][0-9]{3,4}' "$FIREWALL_ALLOW_FILE" || true
+}
+
+# write_firewall_allow PORTS...: the allow list, written by root.
+write_firewall_allow() {
+  {
+    echo "# PostgreSQL ports whose firewall rule Rowsafe may set when someone asks"
+    echo "# (Security in the dashboard): only the chosen addresses may reach the"
+    echo "# port. SSH and other ports are never touched. Written by the installer"
+    echo "# (root); run it with --no-allow-firewall to turn this off."
+    echo "# PORT"
+    printf '%s\n' "$@" | sort -un
+  } | write_file "$FIREWALL_ALLOW_FILE" 0644 root:root || true
 }
 
 allow_firewall() {
@@ -2369,20 +2476,15 @@ allow_firewall() {
     return 0
   fi
   _ports=$(firewall_ports)
-  if [ -z "$_ports" ]; then
-    warn "found no PostgreSQL here, so the firewall stays off for Rowsafe"
+  _listed=$(firewall_listed)
+  if [ -z "$_ports$_listed" ]; then
+    warn "found no PostgreSQL listening here, so the firewall stays off for Rowsafe"
     return 0
   fi
-  {
-    echo "# PostgreSQL ports whose firewall rule Rowsafe may set when someone asks"
-    echo "# (Security in the dashboard): only the chosen addresses may reach the"
-    echo "# port. SSH and other ports are never touched. Written by the installer"
-    echo "# (root); run it with --no-allow-firewall to turn this off."
-    echo "# PORT"
-    printf '%s\n' "$_ports"
-  } | write_file "$FIREWALL_ALLOW_FILE" 0644 root:root || true
+  # shellcheck disable=SC2086 # one port per word
+  write_firewall_allow $_listed $_ports
   install_firewall_helper
-  ok "Rowsafe may limit who can reach PostgreSQL's port when you ask (Security), never SSH or other ports (turn off with --no-allow-firewall)"
+  ok "Rowsafe may limit who can reach PostgreSQL's port ($(firewall_listed | paste -sd, - | sed 's/,/, /g')) when you ask (Security), never SSH or other ports (turn off with --no-allow-firewall)"
 }
 
 disallow_firewall() {
@@ -2396,7 +2498,8 @@ disallow_firewall() {
 }
 
 # firewall_access applies --allow-firewall / --no-allow-firewall, or asks
-# once on a terminal (default no). A re-run keeps the earlier answer.
+# once on a terminal (default no). A re-run keeps the allow list as it is,
+# and adds a port it doesn't list only after a fresh yes.
 firewall_access() {
   case $ALLOW_FIREWALL in
     yes) allow_firewall ;;
@@ -2405,13 +2508,23 @@ firewall_access() {
       ok "limiting who can reach PostgreSQL with the firewall is off for Rowsafe"
       ;;
     *)
-      if [ -f "$FIREWALL_ALLOW_FILE" ]; then
-        if grep -q '^[0-9]' "$FIREWALL_ALLOW_FILE"; then allow_firewall; fi
+      if [ -n "$(firewall_listed)" ]; then
+        install_firewall_helper
+        _new=$(firewall_ports | grep -vxF "$(firewall_listed)" || true)
+        [ -n "$_new" ] && [ "$TTY" = 1 ] || return 0
+        say ""
+        if confirm "PostgreSQL also listens on port $(printf '%s' "$_new" | paste -sd, - | sed 's/,/, /g'). Allow Rowsafe's firewall rule for it too?" n; then
+          # shellcheck disable=SC2046 # one port per word
+          write_firewall_allow $(firewall_listed) $_new
+        fi
         return 0
       fi
-      [ "$TTY" = 1 ] && [ -n "$(firewall_ports)" ] && command -v nft >/dev/null 2>&1 || return 0
+      [ -f "$FIREWALL_ALLOW_FILE" ] && return 0 # a no, kept
+      [ "$TTY" = 1 ] && command -v nft >/dev/null 2>&1 || return 0
+      _ports=$(firewall_ports)
+      [ -n "$_ports" ] || return 0
       say ""
-      if confirm "Allow Rowsafe to limit who can reach PostgreSQL's port with the firewall? Only when someone picks the allowed addresses in the dashboard and confirms; SSH and other ports are never touched." n; then
+      if confirm "Allow Rowsafe to limit who can reach PostgreSQL's port ($(printf '%s' "$_ports" | paste -sd, - | sed 's/,/, /g')) with the firewall? Only when someone picks the allowed addresses in the dashboard and confirms; SSH and other ports are never touched." n; then
         allow_firewall
       else
         disallow_firewall

@@ -10,7 +10,8 @@ Description=Rowsafe: watch for requests to limit who can reach PostgreSQL
 Documentation=https://rowsafe.sh/docs/guides/security
 
 [Path]
-PathExists=/var/lib/rowsafe/firewall/request
+# The helper never removes the request (the agent does): start on a change.
+PathChanged=/var/lib/rowsafe/firewall/request
 Unit=rowsafe-firewall.service
 
 [Install]

@@ -1211,7 +1211,7 @@ EOF
   has "✓ shop is protected. The first full backup is running."
   has "Dashboard: https://app.rowsafe.test/databases/db_fake"
   has "Rowsafe can't restart or stop PostgreSQL"
-  called "plan --name shop --port 5432 --socket-dir /var/run/postgresql --id-file"
+  called "plan --name shop --port 5432 --socket-dir /var/run/postgresql --engine postgresql --id-file"
   called "apply --database db_fake"
   called "wait --database db_fake --timeout 5m"
   [ "$(cat "$F/pg_ctlcluster")" = "17 main restart" ] || fail "$name: pg_ctlcluster not run as 17 main restart"
@@ -1849,6 +1849,14 @@ firewall_tests() {
   apt-get install -y -qq --no-install-recommends nftables >/dev/null
   H=/usr/local/lib/rowsafe/rowsafe-firewall
   D=/var/lib/rowsafe/firewall
+  # The ports come from root's own look (pg_lsclusters here), never from the
+  # agent's discover output: port 22 in either is never allowed.
+  cat >/usr/local/bin/pg_lsclusters <<'PGEOF'
+#!/bin/sh
+printf '17 main 5432 online postgres /var/lib/postgresql/17/main /var/log/postgresql/postgresql-17-main.log\n'
+printf '17 odd 22 online postgres /var/lib/postgresql/17/odd /var/log/postgresql/postgresql-17-odd.log\n'
+PGEOF
+  chmod 755 /usr/local/bin/pg_lsclusters
   # The restart tests purged everything: install again, with a running agent.
   scenario
   expect_ok "install again for the firewall tests" configured "$INSTALLER" rse_secrettoken123
@@ -1856,13 +1864,15 @@ firewall_tests() {
   chown postgres:postgres /var/lib/rowsafe/agent.json
   runuser -u postgres -- /opt/rowsafe/rowsafe-agent run >/dev/null 2>&1 &
   sleep 1
-  scenario "discover_out=$shop"
+  scenario "discover_out=$shop\n22\t/var/run/postgresql\t17\todd\t/var/lib/postgresql/17/odd\t8192\todd\tno\t-\todd\t8.0 KiB\tssh.service\t-"
   expect_ok "--allow-firewall" "$INSTALLER" --allow-firewall
-  grep -q "Rowsafe may limit who can reach PostgreSQL's port when you ask" "$W/out" || {
+  grep -q "Rowsafe may limit who can reach PostgreSQL's port (5432) when you ask" "$W/out" || {
     cat "$W/out" >&2
     fail "--allow-firewall not confirmed"
   }
   grep -qx "5432" /etc/rowsafe/firewall-allowed || fail "firewall allow list lacks 5432"
+  ! grep -qx "22" /etc/rowsafe/firewall-allowed || fail "port 22 made it into the firewall allow list"
+  ! grep -q "ssh.service" /etc/rowsafe/restart-allowed 2>/dev/null || fail "an agent-reported unit made it into the restart allow list"
   [ "$(stat -c '%U %a' /etc/rowsafe/firewall-allowed)" = "root 644" ] || fail "firewall allow list ownership/mode"
   [ "$(stat -c '%U %a' "$H")" = "root 755" ] || fail "firewall helper ownership/mode"
   [ "$(stat -c '%U %a' "$D")" = "postgres 700" ] || fail "firewall request directory ownership/mode"
@@ -1870,6 +1880,7 @@ firewall_tests() {
   for u in rowsafe-firewall.service rowsafe-firewall.path rowsafe-firewall-restore.service; do
     cmp "/etc/systemd/system/$u" "/src/deploy/systemd/$u" || fail "$u differs"
   done
+  ! grep -q "ReadWritePaths" /etc/systemd/system/rowsafe-firewall.service || fail "the firewall unit may write somewhere"
   if [ "${TEST_UNITS:-0}" = 1 ]; then
     expect_ok "systemd-analyze verify (firewall units)" systemd-analyze verify /etc/systemd/system/rowsafe-firewall.service \
       /etc/systemd/system/rowsafe-firewall.path /etc/systemd/system/rowsafe-firewall-restore.service
@@ -1880,6 +1891,7 @@ firewall_tests() {
     systemd-analyze security --offline=true --no-pager /etc/systemd/system/rowsafe-firewall.service 2>/dev/null |
       tail -n 1 | sed "s/^/  rowsafe-firewall: /"
   fi
+  # A re-run keeps the list as it is and asks nothing.
   scenario "discover_out=$shop"
   tty_ok "a re-run keeps the firewall allowed" "Name it in Rowsafe\t\nTurn on backups for shop now?\tn\n" "$INSTALLER"
   lacks "Allow Rowsafe to limit who can reach"
@@ -1888,12 +1900,26 @@ firewall_tests() {
   FO=$W/fw-run
   install -d -m 0755 -o root -g root "$FO"
   as_pg() { runuser -u postgres -- "$@"; }
+  # ss and sshd stand in: PostgreSQL (postgres) listens on 5432 and 5433,
+  # root on 5499, sshd on 22 and 2222.
+  pg_uid=$(id -u postgres)
+  {
+    echo '#!/bin/sh'
+    echo 'case "$*" in'
+    echo "*p*) printf 'LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:((\"sshd\",pid=1,fd=3))\\n' ;;"
+    echo "*) printf 'LISTEN 0 244 0.0.0.0:5432 0.0.0.0:* uid:$pg_uid ino:1 sk:1\\nLISTEN 0 244 0.0.0.0:5433 0.0.0.0:* uid:$pg_uid ino:2 sk:2\\nLISTEN 0 128 0.0.0.0:5499 0.0.0.0:* uid:0 ino:3 sk:3\\n' ;;"
+    echo 'esac'
+  } >"$F/ss"
+  printf '#!/bin/sh\nprintf "port 22\\nport 2222\\n"\n' >"$F/sshd"
+  chmod 755 "$F/ss" "$F/sshd"
   fw() {
-    timeout 90 env STATE_DIRECTORY="$W/fw-state" RUNTIME_DIRECTORY="$FO" ROWSAFE_FIREWALL_CONFIRM_WAIT="${WAIT:-3}" "$H" "$@" 2>>"$W/fw.log" ||
+    timeout 90 env STATE_DIRECTORY="$W/fw-state" RUNTIME_DIRECTORY="$FO" ROWSAFE_FIREWALL_CONFIRM_WAIT="${WAIT:-3}" \
+      ROWSAFE_SS="$F/ss" ROWSAFE_SSHD="$F/sshd" "$H" "$@" 2>>"$W/fw.log" ||
       fail "the firewall helper failed or hung (exit $?)"
   }
   # fw_request LINE ADDRESSES CONFIRM: as the agent does (CONFIRM=1 writes
-  # the confirmation once the helper answers phase=pending).
+  # the confirmation once the helper answers phase=pending). The agent
+  # removes its own files afterwards: the helper never does.
   fw_request() {
     rm -f "$FO/result"
     [ -z "$2" ] || printf '%b' "$2" | as_pg sh -c 'cat >"$1"' sh "$D/addresses"
@@ -1911,8 +1937,9 @@ firewall_tests() {
     printf '%s\n' "$1" | as_pg sh -c 'cat >"$1"' sh "$D/request"
     fw
     wait
-    [ ! -e "$D/request" ] || fail "helper left the request: $1"
+    [ -e "$D/request" ] || fail "helper removed the agent's request: $1"
     [ -f "$FO/result" ] || fail "no result for: $1"
+    as_pg rm -f "$D/request" "$D/addresses" "$D/confirm"
   }
   fw_has() { grep -qxF "$1" "$FO/result" || {
     cat "$FO/result" >&2
@@ -1930,8 +1957,15 @@ firewall_tests() {
   rules | grep -q "tcp dport 5432 ip6 saddr 2001:db8::/32 accept" || fail "no IPv6 allow rule: $(rules)"
   rules | grep -q "tcp dport 5432 drop" || fail "no drop rule: $(rules)"
   ! rules | grep -q "dport 22" || fail "the firewall helper touched SSH"
-  grep -qx "addresses=10.0.0.0/16,2001:db8::/32" "$FO/port-5432" || fail "port state not published"
+  grep -qx "addresses=10.0.0.0/16,2001:db8::/32" "$FO/port-5432" && grep -qx "loaded=1" "$FO/port-5432" || fail "port state not published"
   [ "$(stat -c '%U %a' "$FO/port-5432")" = "root 644" ] || fail "port state ownership/mode"
+  [ -f "$W/fw-state/port-5432" ] && [ ! -e "$W/fw-state/pending-5432" ] || fail "a confirmed rule was not kept as port-5432"
+  # A request is handled once.
+  printf 'fw_1 apply 5432\n' | as_pg sh -c 'cat >"$1"' sh "$D/request"
+  rm -f "$FO/result"
+  fw
+  [ ! -e "$FO/result" ] || fail "the same request was handled twice"
+  as_pg rm -f "$D/request"
 
   # Without the agent's confirmation the previous rule comes back.
   WAIT=1 fw_request "fw_2 apply 5432" '192.168.7.0/24\n' 0
@@ -1939,15 +1973,28 @@ firewall_tests() {
   grep -q "^error=the agent did not confirm" "$FO/result" || fail "unconfirmed change not explained"
   rules | grep -q "10.0.0.0/16" && ! rules | grep -q "192.168.7.0/24" || fail "unconfirmed change not rolled back: $(rules)"
   grep -qx "addresses=10.0.0.0/16,2001:db8::/32" "$FO/port-5432" || fail "rolled back state not published"
+  [ ! -e "$W/fw-state/pending-5432" ] || fail "an unconfirmed rule was kept"
 
+  n=0
   for bad in "0.0.0.0/0" "10.0.0.0/4" "::/0" "1.2.3.4;flush" "300.1.1.1" "example.com" '1.2.3.4 } accept; chain x {'; do
-    fw_request "fw_3 apply 5432" "$bad\n" 1
+    n=$((n + 1))
+    fw_request "fw_3_$n apply 5432" "$bad\n" 1
     fw_has "ok=0"
     grep -q "^error=not an address or range" "$FO/result" || fail "bad address $bad not refused"
   done
   fw_request "fw_4 apply 5499" '10.1.0.0/16\n' 1
   grep -q "^error=port 5499 is not in /etc/rowsafe/firewall-allowed" "$FO/result" || fail "unlisted port not refused"
-  for bad in "fw_5 flush 5432" "fw_5 apply" "fw_5 apply 5432 x" "fw.5 apply 5432" 'x; nft flush ruleset 5432'; do
+  # Whatever the allow list says: never SSH, never below 1024, and only a
+  # port PostgreSQL (the postgres user) listens on.
+  printf '5432\n2222\n22\n5433\n5499\n' >/etc/rowsafe/firewall-allowed
+  fw_request "fw_ssh apply 2222" '10.1.0.0/16\n' 1
+  grep -q "^error=port 2222 is SSH's" "$FO/result" || fail "an sshd port was not refused"
+  fw_request "fw_low apply 22" '10.1.0.0/16\n' 1
+  grep -q "^error=port 22 can't be managed by Rowsafe" "$FO/result" || fail "a port below 1024 was not refused"
+  fw_request "fw_nopg apply 5499" '10.1.0.0/16\n' 1
+  grep -q "^error=no PostgreSQL of the postgres user listens on port 5499" "$FO/result" || fail "a port without PostgreSQL was not refused"
+  printf '5432\n' >/etc/rowsafe/firewall-allowed
+  for bad in "fw_5 flush 5432" "fw_5 apply" "fw_5 apply 5432 x" "fw.5 apply 5432" 'x; nft flush ruleset 5432' "fw_5 apply 05432" "fw_5 apply 99999999"; do
     fw_request "$bad" "" 0
     fw_has "error=malformed request"
   done
@@ -1958,20 +2005,30 @@ firewall_tests() {
   as_pg ln -s "$W/fw-sentinel" "$D/request"
   rm -f "$FO/result"
   fw
-  [ ! -L "$D/request" ] || fail "firewall helper left a symlinked request"
-  fw_has "error=malformed request"
+  [ ! -e "$FO/result" ] || fail "a symlinked request was read"
   [ "$(cat "$W/fw-sentinel")" = "fw_9 remove 5432" ] || fail "a symlinked request changed its target"
+  as_pg rm -f "$D/request"
   [ -z "$(find "$D" -user root)" ] || fail "root left files in $D"
 
-  # At boot the kept rules come back.
+  # Status: whether nftables still holds the rules.
+  fw_request "fw_s1 status 5432" "" 0
+  fw_has "ok=1"
+  grep -qx "loaded=1" "$FO/port-5432" || fail "status: rules not reported loaded"
   nft delete table inet rowsafe
+  fw_request "fw_s2 status 5432" "" 0
+  grep -qx "loaded=0" "$FO/port-5432" || fail "status: a flushed table reported loaded"
+
+  # At boot the kept rules come back; an unconfirmed one doesn't.
+  printf '10.77.0.0/16\n' >"$W/fw-state/pending-5432"
   fw --restore
   rules | grep -q "10.0.0.0/16" || fail "--restore did not load the rules"
+  ! rules | grep -q "10.77.0.0/16" || fail "--restore loaded an unconfirmed rule"
+  [ ! -e "$W/fw-state/pending-5432" ] || fail "--restore kept an unconfirmed rule"
   fw_request "fw_6 remove 5432" "" 0
   fw_has "ok=1"
   ! rules | grep -q . || fail "remove left the table: $(rules)"
   [ ! -e "$FO/port-5432" ] || fail "remove left the port state"
-  pass "firewall helper: nft rules, confirmation and rollback, bad addresses, allow list, symlinks, --restore, remove"
+  pass "firewall helper: nft rules, confirmation and rollback, pending rules, bad addresses and ports, SSH, allow list, symlinks, status, --restore, remove"
 
   fw_request "fw_7 apply 5432" '10.2.0.0/16\n' 1
   expect_ok "--no-allow-firewall" "$INSTALLER" --no-allow-firewall
@@ -1984,6 +2041,7 @@ firewall_tests() {
   expect_ok "uninstall removes the firewall helper" "$INSTALLER" --uninstall
   [ ! -e "$H" ] && [ ! -e /etc/systemd/system/rowsafe-firewall-restore.service ] || fail "uninstall left the firewall helper"
   expect_ok "purge" "$INSTALLER" --uninstall --purge
+  rm -f /usr/local/bin/pg_lsclusters
   pass "--no-allow-firewall, uninstall and purge remove the firewall helper and its rules"
 }
 

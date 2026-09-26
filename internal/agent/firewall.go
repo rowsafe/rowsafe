@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rowsafe/rowsafe/protocol"
@@ -27,7 +28,12 @@ import (
 //	<state dir>/firewall/request          written by the agent: "ID ACTION PORT"
 //	<state dir>/firewall/confirm          written by the agent: "ID"
 //	/run/rowsafe-firewall/result          written by the helper: key=value lines
-//	/run/rowsafe-firewall/port-PORT       the rule in place: addresses, applied_at
+//	/run/rowsafe-firewall/port-PORT       the rule in place: addresses, applied_at, loaded
+//
+// The helper never writes or removes anything in the agent's directory: the
+// agent removes its request once it has the answer. The helper also checks
+// on its own that the port is at least 1024, isn't SSH's, and that
+// PostgreSQL (the postgres user) listens on it.
 //
 // The helper changes one nftables table of its own (inet rowsafe) that only
 // matches the PostgreSQL port: SSH and every other port are never touched.
@@ -40,7 +46,15 @@ import (
 const (
 	fwApply  = "apply"
 	fwRemove = "remove"
+	fwStatus = "status"
 )
+
+// firewallMu keeps one request to the helper at a time (a fix, or the
+// scan's status check).
+var firewallMu sync.Mutex
+
+// firewallStatusWait bounds the scan's wait for a status answer.
+var firewallStatusWait = 10 * time.Second
 
 // Firewall paths (variables for tests; the environment can move them).
 var (
@@ -108,7 +122,16 @@ func (a *Agent) firewallState(port int) protocol.FirewallState {
 	if err != nil {
 		return st
 	}
+	// The helper checks nftables really holds the rule (someone may have
+	// flushed the firewall since).
+	if fresh, ok := a.firewallRefresh(port); ok {
+		data = fresh
+	}
 	kv := parseKeyValues(string(data))
+	if kv["loaded"] == "0" {
+		st.Reason = "Rowsafe's firewall rule for this port is no longer loaded (was the firewall reloaded?): apply it again."
+		return st
+	}
 	if addrs := strings.TrimSpace(kv["addresses"]); addrs != "" {
 		st.Active = true
 		st.Addresses = strings.Split(addrs, ",")
@@ -137,10 +160,11 @@ func (a *Agent) firewall(ctx context.Context, db protocol.DatabaseSpec, p protoc
 			addrs = append(addrs, a.String())
 		}
 	}
-	b := make([]byte, 8)
-	_, _ = rand.Read(b)
-	id := hex.EncodeToString(b)
+	firewallMu.Lock()
+	defer firewallMu.Unlock()
+	id := newFirewallID()
 	dir := a.firewallDir()
+	defer a.firewallDone()
 	if action == fwApply {
 		if err := writeFileAtomic(filepath.Join(dir, "addresses"), []byte(strings.Join(addrs, "\n")+"\n"), 0o600); err != nil {
 			return err
@@ -214,4 +238,43 @@ func waitHelper(ctx context.Context, path string, match func(map[string]string) 
 		case <-time.After(restartPoll):
 		}
 	}
+}
+
+func newFirewallID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// firewallDone removes the agent's request files: the helper never does.
+func (a *Agent) firewallDone() {
+	for _, f := range []string{"request", "addresses", "confirm"} {
+		_ = os.Remove(filepath.Join(a.firewallDir(), f))
+	}
+}
+
+// firewallRefresh asks the helper to check its rules are still loaded and
+// returns the fresh port-PORT file (ok false when the helper didn't answer).
+func (a *Agent) firewallRefresh(port int) ([]byte, bool) {
+	if !firewallMu.TryLock() {
+		return nil, false // a change is on its way
+	}
+	defer firewallMu.Unlock()
+	defer a.firewallDone()
+	id := newFirewallID()
+	if err := writeFileAtomic(filepath.Join(a.firewallDir(), "request"), fmt.Appendf(nil, "%s %s %d\n", id, fwStatus, port), 0o600); err != nil {
+		return nil, false
+	}
+	deadline := time.Now().Add(firewallStatusWait)
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(filepath.Join(firewallResultDir, "result")); err == nil && parseKeyValues(string(data))["id"] == id {
+			fresh, err := os.ReadFile(filepath.Join(firewallResultDir, "port-"+strconv.Itoa(port)))
+			if err != nil {
+				return []byte("loaded=0\n"), true
+			}
+			return fresh, true
+		}
+		time.Sleep(restartPoll)
+	}
+	return nil, false
 }
