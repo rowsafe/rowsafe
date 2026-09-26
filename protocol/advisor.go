@@ -231,7 +231,9 @@ type MemoryFacts struct {
 
 const (
 	// MaintCreateIndex: CREATE INDEX CONCURRENTLY on Tables[0] (Columns),
-	// refused when a valid index already starts with those columns.
+	// refused when a valid index already starts with those columns; or, with
+	// CreateIndex, the index advisor's full definition (INCLUDE, DESC, a
+	// partial condition). A failed build leaves no invalid index behind.
 	MaintCreateIndex = "create_index"
 	// MaintDropInvalidIndex: DROP INDEX CONCURRENTLY Index, only while it is
 	// still invalid and not being built.

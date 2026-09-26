@@ -163,6 +163,11 @@ Pulse: health, monitoring and alerts
   rowsafe recommendations [NAME] --dismiss ID [--reason not_relevant|intended|later|wrong] [--note TEXT]
   rowsafe recommendations [NAME] --restore ID
                                              set a recommendation aside, or bring it back
+  rowsafe recommendations find [NAME] [--no-wait]
+                                             test index ideas on a copy of the database now (runs every night
+                                             by itself); proven ones appear under Indexes
+  rowsafe recommendations schedule [NAME] auto|off|CRON
+                                             when to test index ideas (auto: every night at the quietest hour)
   rowsafe activity [NAME]                    queries running, or idle in a transaction, for over a minute
   rowsafe alerts [--all | --resolved]        firing alerts (with --all, resolved ones too)
   rowsafe alerts ack ID                      acknowledge a firing alert: no more reminders

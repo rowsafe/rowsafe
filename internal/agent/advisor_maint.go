@@ -50,6 +50,9 @@ func validateAdvisorMaintenance(p protocol.MaintenanceParams) error {
 	}
 	switch p.Action {
 	case protocol.MaintCreateIndex, protocol.MaintSetTableStorageParams:
+		if p.Action == protocol.MaintCreateIndex && p.CreateIndex != nil {
+			return validateCreateIndex(p.CreateIndex) // a proven index (maintenance_createindex.go)
+		}
 		if len(p.Tables) != 1 || len(nameCandidates(p.Tables[0])) == 0 {
 			return fmt.Errorf("exactly one valid table name is needed")
 		}
@@ -88,6 +91,9 @@ func validateAdvisorMaintenance(p protocol.MaintenanceParams) error {
 func (m *maint) advisorAction(ctx context.Context) error {
 	switch m.p.Action {
 	case protocol.MaintCreateIndex:
+		if m.p.CreateIndex != nil {
+			return m.createIndexSpec(ctx)
+		}
 		return m.createIndex(ctx)
 	case protocol.MaintDropInvalidIndex:
 		return m.dropInvalidIndex(ctx)

@@ -17,6 +17,9 @@ import (
 // ones Rowsafe can do are applied with rowsafe fix.
 
 func recommendationsCmd(ctx context.Context, c *client.Client, args []string) error {
+	if ok, err := indexAdvisorSubcommand(ctx, c, args); ok { // indexadvisor.go
+		return err
+	}
 	fs := flag.NewFlagSet("recommendations", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "print the full result as JSON")
 	group := fs.String("group", "", "only this group: schema, queries, capacity or indexes")
@@ -73,6 +76,9 @@ func recommendationsCmd(ctx context.Context, c *client.Client, args []string) er
 		return printJSON(r)
 	}
 	printRecommendations(r, *showDismissed)
+	if *group == "" || *group == protocol.RecGroupIndexes {
+		printIndexCheck(ctx, c, name) // indexadvisor.go
+	}
 	return nil
 }
 

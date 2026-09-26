@@ -132,6 +132,8 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 		return runRewind(ctx, task, tl, db, a.rewindUndo)
 	case protocol.TaskRewindCleanup:
 		return runRewind(ctx, task, tl, db, a.rewindCleanup)
+	case protocol.TaskIndexAdvisor:
+		return a.runIndexAdvisor(ctx, task, db, tl)
 	case protocol.TaskPGUpdate, protocol.TaskSecurityUpdates, protocol.TaskReboot, protocol.TaskUpgradeCheck,
 		protocol.TaskUpgradeRehearsal, protocol.TaskUpgrade, protocol.TaskUpgradeUndo, protocol.TaskUpgradeCleanup:
 		return a.runUpgradeTask(ctx, task, tl, db) // upgrade_tasks.go
