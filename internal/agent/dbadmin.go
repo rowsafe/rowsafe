@@ -266,12 +266,12 @@ func newPassword() (string, error) {
 // scramIterations is PostgreSQL's default scram_iterations.
 const scramIterations = 4096
 
-// scramVerifier computes the SCRAM-SHA-256 verifier PostgreSQL stores for
+// scramVerifierWithSalt computes the SCRAM-SHA-256 verifier PostgreSQL stores for
 // password (RFC 5802/7677, as libpq's PQencryptPasswordConn). PostgreSQL
 // accepts it in CREATE/ALTER ROLE ... PASSWORD and stores it as is, so the
 // password itself never reaches the server. Generated passwords are ASCII
 // letters and digits, which SASLprep leaves unchanged.
-func scramVerifier(password string, salt []byte) (string, error) {
+func scramVerifierWithSalt(password string, salt []byte) (string, error) {
 	salted, err := pbkdf2.Key(sha256.New, password, salt, scramIterations, sha256.Size)
 	if err != nil {
 		return "", err
@@ -296,7 +296,7 @@ func newCredential() (password, verifier string, err error) {
 	if _, err := rand.Read(salt); err != nil {
 		return "", "", err
 	}
-	verifier, err = scramVerifier(password, salt)
+	verifier, err = scramVerifierWithSalt(password, salt)
 	return password, verifier, err
 }
 

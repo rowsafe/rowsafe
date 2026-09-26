@@ -42,7 +42,7 @@ func TestNewPassword(t *testing.T) {
 // recomputes PostgreSQL's own stored verifiers.
 func TestSCRAMVerifier(t *testing.T) {
 	salt, _ := base64.StdEncoding.DecodeString("W22ZaJ0SNY7soEsUEjb6gQ==")
-	got, err := scramVerifier("pencil", salt)
+	got, err := scramVerifierWithSalt("pencil", salt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func (e *dbaEnv) secret(res *protocol.DBAdminResult) protocol.DBSecret {
 	if n, _ := strconv.Atoi(iter); n != scramIterations {
 		e.t.Fatalf("stored verifier %q", stored)
 	}
-	if again, _ := scramVerifier(s.Password, salt); again != stored {
+	if again, _ := scramVerifierWithSalt(s.Password, salt); again != stored {
 		e.t.Fatalf("the sealed password doesn't match what PostgreSQL stores for %s", s.User)
 	}
 	return s

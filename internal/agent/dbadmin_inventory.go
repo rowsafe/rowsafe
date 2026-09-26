@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"net"
+	"net/netip"
 	"os"
 	"slices"
 	"strings"
@@ -186,11 +187,8 @@ func interfaceNets() []*net.IPNet {
 	return out
 }
 
-// cgnat is 100.64.0.0/10 (carrier-grade NAT, also Tailscale): private.
-var cgnat = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
-
 func addressKind(ip net.IP) string {
-	if ip.IsPrivate() || cgnat.Contains(ip) {
+	if a, ok := netip.AddrFromSlice(ip); ok && privateAddr(a.Unmap()) { // copies_state.go
 		return protocol.AddressPrivate
 	}
 	return protocol.AddressPublic
