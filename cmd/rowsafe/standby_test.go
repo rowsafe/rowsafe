@@ -51,11 +51,13 @@ func (f *standbyAPI) handler() http.Handler {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		b, _ := json.Marshal(body)
-		f.reqs = append(f.reqs, r.Method+" "+strings.TrimPrefix(r.URL.Path, "/v1/databases/shop/standby")+" "+string(b))
+		path := strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/v1/databases/shop/standby"), "/v1/databases/shop")
+		f.reqs = append(f.reqs, r.Method+" "+path+" "+string(b))
 	}
 	for _, pattern := range []string{"POST /v1/databases/{ref}/standby", "POST /v1/databases/{ref}/standby/promote",
 		"POST /v1/databases/{ref}/standby/rebuild", "POST /v1/databases/{ref}/standby/remove", "PUT /v1/databases/{ref}/standby/failover",
-		"POST /v1/databases/{ref}/standby/unfence"} {
+		"POST /v1/databases/{ref}/standby/unfence", "POST /v1/databases/{ref}/move", "POST /v1/databases/{ref}/move/switch",
+		"POST /v1/databases/{ref}/move/finish"} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			f.mu.Lock()
 			defer f.mu.Unlock()
@@ -141,5 +143,55 @@ func TestStandbyCommands(t *testing.T) {
 	if err != nil || !strings.Contains(out, "db-2 is the primary now") ||
 		last() != `POST /promote {"confirm":"shop","primary_down":"db-1 is down"}` {
 		t.Fatalf("promote: %v %s\n%s", err, last(), out)
+	}
+}
+
+func TestMoveCommands(t *testing.T) {
+	seen := time.Now()
+	switchedAt := seen.Add(-time.Hour)
+	keep := switchedAt.Add(48 * time.Hour)
+	f := &standbyAPI{info: protocol.StandbyInfo{Database: "shop",
+		Primary: protocol.StandbyServer{HostID: "host_1", Hostname: "db-1", Port: 5432, Online: true, LastSeen: &seen},
+		Move: &protocol.MoveView{ID: "mov_1", Status: protocol.MoveSyncing, CanSwitch: true,
+			From: protocol.StandbyServer{Hostname: "db-1", Port: 5432, Online: true, Fingerprint: "1111-2222-3333-4444"},
+			To:   protocol.StandbyServer{Hostname: "db-2", Port: 5432, Online: true}}}}
+	ts := httptest.NewServer(f.handler())
+	t.Cleanup(ts.Close)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("ROWSAFE_URL", ts.URL)
+	t.Setenv("ROWSAFE_API_KEY", "rsk_test")
+	t.Setenv("ROWSAFE_DATABASE", "")
+	t.Chdir(t.TempDir())
+	stdinIsTerminal = func() bool { return false }
+	ctx := t.Context()
+	last := func() string { return f.reqs[len(f.reqs)-1] }
+
+	if _, err := captureStdout(t, func() error {
+		return dispatch(ctx, []string{"move", "shop", "--to", "db-2", "--fingerprint", "7F3A-91C2-0B4E-D8A1", "--at", "2099-01-02T03:04:00Z", "--keep-days", "3", "--no-wait"})
+	}); err != nil || last() != `POST /move {"fingerprint":"7F3A-91C2-0B4E-D8A1","host_id":"host_2","keep_days":3,"port":5432,"switch_at":"2099-01-02T03:04:00Z"}` {
+		t.Fatalf("move: %v %s", err, last())
+	}
+	if err := dispatch(ctx, []string{"move", "shop", "--to", "db-2", "--at", "2001-01-01T00:00:00Z"}); err == nil || !strings.Contains(err.Error(), "past") {
+		t.Fatalf("a time in the past: %v", err)
+	}
+	stdin = strings.NewReader("nope\n")
+	t.Cleanup(func() { stdin = os.Stdin })
+	if _, err := captureStdout(t, func() error { return dispatch(ctx, []string{"move", "switch", "shop"}) }); err == nil {
+		t.Fatal("switched without the name")
+	}
+	f.mu.Lock()
+	f.info.Move.Status, f.info.Move.CanSwitch, f.info.Move.CanFinish = protocol.MoveMoved, false, true
+	f.info.Move.SwitchedAt, f.info.Move.KeepUntil = &switchedAt, &keep
+	f.mu.Unlock()
+	out, err := captureStdout(t, func() error { return dispatch(ctx, []string{"move", "shop"}) })
+	if err != nil || !strings.Contains(out, "rowsafe move finish shop") || !strings.Contains(out, "stays stopped until") {
+		t.Fatalf("move status: %v\n%s", err, out)
+	}
+	stdin = strings.NewReader("db-1\n")
+	if _, err := captureStdout(t, func() error { return dispatch(ctx, []string{"move", "finish", "shop"}) }); err != nil ||
+		last() != `POST /move/finish {"confirm":"db-1"}` {
+		t.Fatalf("finish: %v %s", err, last())
 	}
 }

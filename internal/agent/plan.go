@@ -49,6 +49,10 @@ type PlanInput struct {
 	SpoolDir       string // sidecar mode: this stanza's spool directory
 	Force          bool   // replace a foreign archiver
 	Name           string // the database's name in Rowsafe, for hints
+	// Own recognizes Rowsafe's own native archive_command for this
+	// database in another form (with or without the second copy), which
+	// is replaced without force.
+	Own func(cmd string) bool
 }
 
 // PlanAdopt plans native-mode adoption; see PlanAdoptInput.
@@ -142,6 +146,8 @@ func PlanAdoptInput(in protocol.InspectResult, pi PlanInput) (Plan, error) {
 				return p, fmt.Errorf("archive_command already hands WAL to a Rowsafe spool at %s, not %s: another Rowsafe database "+
 					"(or an agent with a different ROWSAFE_SPOOL_DIR) receives this cluster's WAL; re-run with force to replace it", spoolDir, pi.SpoolDir)
 			}
+		case !sidecar && pi.Own != nil && pi.Own(current):
+			ours = true
 		case current != "" && !force:
 			return p, fmt.Errorf("archive_command is already set to %q: another archiver may be running; re-run with force to replace it", current)
 		}

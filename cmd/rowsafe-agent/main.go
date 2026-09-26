@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/rowsafe/rowsafe/internal/agent"
+	_ "github.com/rowsafe/rowsafe/internal/engine/mysql" // registers MySQL and MariaDB
 	"github.com/rowsafe/rowsafe/internal/pginspect"
 	"github.com/rowsafe/rowsafe/release"
 )
@@ -28,9 +29,13 @@ Usage:
   rowsafe-agent setup discover|plan|apply|wait|status ...
                                             turn on backups for this server's PostgreSQL
                                             (used by the installer; see setup --help)
+  rowsafe-agent restore-mysql --engine mysql|mariadb --database NAME --dir DIR [--at TIME | --mark NAME]
+                                            restore a MySQL/MariaDB database from your bucket into DIR
   rowsafe-agent key                         this server's key fingerprint: compare it with the one the Rowsafe
                                             dashboard shows before setting up a standby here
   rowsafe-agent selftest                    check this binary can run here (used before self-update)
+  rowsafe-agent storage test [--wait 60s]   write, read back and delete a test file in the backup
+                                            storage (Rowsafe Storage or your bucket)
   rowsafe-agent health                      container health check (docker-sidecar mode)
   rowsafe-agent version
 
@@ -55,12 +60,18 @@ func main() {
 		err = inspect(ctx, os.Args[2:])
 	case "setup":
 		os.Exit(setup(ctx, os.Args[2:]))
+	case "restore-mysql":
+		err = restoreMySQL(ctx, os.Args[2:])
 	case "key":
 		err = keyCmd()
 	case "selftest":
 		os.Exit(selftest(ctx))
+	case "storage":
+		err = storage(ctx, os.Args[2:])
 	case "health":
 		os.Exit(health())
+	case "sql-shapes": // internal: the index advisor's parser process
+		os.Exit(sqlShapes())
 	case "version":
 		fmt.Println(agent.Version)
 	case "-h", "--help", "help":
@@ -87,7 +98,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := cfg.Repo.Validate(); err != nil {
+	if err := cfg.ValidateRepo(); err != nil {
 		return err
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -117,7 +128,10 @@ func selftest(ctx context.Context) int {
 	cfg, err := agent.ConfigFromEnv()
 	check("config", err)
 	if err == nil {
-		check("repository settings", cfg.Repo.Validate())
+		check("repository settings", cfg.ValidateRepo())
+		if cfg.SecondCopy() {
+			check("second copy settings", cfg.Repo2.ValidateAs("ROWSAFE_REPO2_"))
+		}
 		check("pgbackrest", exec.CommandContext(ctx, cfg.PgBackRestBin, "version").Run())
 		check("control plane", agent.CheckControlPlane(ctx, cfg))
 		for _, t := range agent.WatchedTargets(cfg) {
@@ -188,4 +202,21 @@ func keyCmd() error {
 	}
 	fmt.Printf("Fingerprint: %s\nPublic key:  %s\n", fp, pub)
 	return nil
+}
+
+// storage runs `rowsafe-agent storage test`.
+func storage(ctx context.Context, args []string) error {
+	if len(args) == 0 || args[0] != "test" {
+		return errors.New("usage: rowsafe-agent storage test [--wait 60s]")
+	}
+	fs := flag.NewFlagSet("storage test", flag.ContinueOnError)
+	wait := fs.Duration("wait", 0, "Rowsafe Storage: how long to wait for the agent to enroll and get credentials")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	cfg, err := agent.ConfigFromEnv()
+	if err != nil {
+		return err
+	}
+	return agent.StorageTest(ctx, cfg, os.Stdout, *wait)
 }

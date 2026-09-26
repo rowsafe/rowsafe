@@ -83,7 +83,40 @@ Rewind: continuous backups, restore to any second
                                              servers where the installer allowed restarting PostgreSQL
   rowsafe rewind undo [NAME] [--yes]         undo the rewind: put the data from before it back
   rowsafe rewind cleanup [NAME] [--yes]      delete the data kept aside by a rewind (frees disk)
+
+Move in: bring a database from DigitalOcean, RDS, Supabase, Neon... onto your server
+  rowsafe migrate [NAME] [--json]            migrations (into NAME, or all)
+  rowsafe migrate start [NAME] [--into DB] [--method live|dump] [--source-env VAR] [--id ID] [--host ADDR] [--user NAME] [--yes]
+                                             check the source and start copying into the server of NAME. The
+                                             connection string is typed (not shown), piped, or read from $VAR,
+                                             and sealed here to the server's key: Rowsafe never sees it
+  rowsafe migrate status ID [--json]         progress: tables copied, how far behind, the check's findings
+  rowsafe migrate fix ID [--yes]             mark source tables without a primary key REPLICA IDENTITY FULL
+  rowsafe migrate switch ID [--writes-stopped] [--user NAME] [--host ADDR] [--yes]
+                                             switch over: the old database goes read-only (unless you stopped
+                                             writes yourself), the last changes arrive, then the new
+                                             connection string is shown once
+  rowsafe migrate password ID                a new password for the apps' login, shown once
+  rowsafe migrate writable ID                make the old database writable again (rollback)
+  rowsafe migrate cancel ID [--drop-copy] [--yes]
+                                             stop and remove the sync from the old database
+  rowsafe migrate finish ID [--yes]          forget the old database's connection string
   Advanced (restore by hand or to another server): https://rowsafe.sh/docs/guides/restore
+
+Updates and upgrades: PostgreSQL kept current, with a Mark first
+  rowsafe update [NAME] [--yes] [--no-wait]  install the newest minor release (e.g. 16.9 -> 16.10) and restart
+                                             PostgreSQL; asks you to type the name. Only on servers where the
+                                             installer allowed updates (--allow-updates)
+  rowsafe update [NAME] --auto on|off [--timezone ZONE]
+                                             install minor releases by itself, Sundays at 03:00 (your time zone)
+  rowsafe upgrade [NAME] [--json]            versions, newer majors, the latest rehearsal, an upgrade to undo
+  rowsafe upgrade [NAME] [--to 18] [--rehearse-only] [--mode safe|fast] [--yes]
+                                             check, rehearse on a restored copy (production isn't touched),
+                                             then upgrade. Safe keeps the old version for an instant undo;
+                                             fast hard-links the data (undo restores from the backup)
+  rowsafe upgrade undo [NAME] [--yes]        go back to the version the upgrade kept (7 days)
+  rowsafe upgrade cleanup [NAME] [--yes]     remove the kept version (frees disk; no undo afterwards)
+  (Security updates and reboots: rowsafe fix, on servers where the installer allowed them)
 
 Standby: a second server that stays in sync, is readable, and takes over
   rowsafe standby [NAME] [--json]            the standby, how far behind it is, fenced old primaries, automatic
@@ -100,6 +133,13 @@ Standby: a second server that stays in sync, is readable, and takes over
   rowsafe standby failover [NAME] --on|--off [--after 3m] [--max-data-loss 1m] [--yes]
                                              automatic failover (off by default)
   rowsafe standby remove [NAME] [--yes]      remove the standby; its cluster gets its own data back
+  rowsafe move [NAME] --to SERVER [--port N] [--at TIME] [--keep-days 7] [--fingerprint F]
+                                             move the database to another server: a standby there, then a
+                                             planned switchover (nothing lost); the old server is kept stopped
+                                             as a way back. Without --to: the move in progress
+  rowsafe move switch|schedule|cancel|back|finish [NAME]
+                                             switch over now, (re)schedule it (--at TIME, --clear), cancel,
+                                             switch back to the old server, remove the old server
 
 Fork: a new, independent database from any moment, on another server or a new port
   rowsafe fork [SOURCE] --to SERVER [--name NAME] [--at TIME | --mark MARK] [--mask]
@@ -123,6 +163,18 @@ Pulse: health, monitoring and alerts
                                              dead rows and vacuum, transaction ID age
   rowsafe top [NAME] [--since 24h] [--sort total_time|calls|mean_time|rows] [--query ID] [--json]
                                              statements that took the most time in a range, and which got slower
+  rowsafe recommendations [NAME] [--group schema|queries|capacity|indexes] [--dismissed] [--json]
+                                             what would make it better (missing indexes, ids running out,
+                                             N+1 queries, memory...), why and what it costs; without NAME,
+                                             each database's top one. Apply the ones Rowsafe can do with rowsafe fix
+  rowsafe recommendations [NAME] --dismiss ID [--reason not_relevant|intended|later|wrong] [--note TEXT]
+  rowsafe recommendations [NAME] --restore ID
+                                             set a recommendation aside, or bring it back
+  rowsafe recommendations find [NAME] [--no-wait]
+                                             test index ideas on a copy of the database now (runs every night
+                                             by itself); proven ones appear under Indexes
+  rowsafe recommendations schedule [NAME] auto|off|CRON
+                                             when to test index ideas (auto: every night at the quietest hour)
   rowsafe activity [NAME]                    queries running, or idle in a transaction, for over a minute
   rowsafe alerts [--all | --resolved]        firing alerts (with --all, resolved ones too)
   rowsafe alerts ack ID                      acknowledge a firing alert: no more reminders
@@ -135,6 +187,23 @@ Pulse: health, monitoring and alerts
   rowsafe channels test ID                   send a test notification now
   rowsafe report [--preview [--html]] [--on | --off] [--to A,B] [--send-test]
                                              "Your weekly Pulse", the weekly email: settings, preview, test
+  rowsafe pooling status [NAME] [--json]     connection pooling (PgBouncer): state, connection strings, pools
+  rowsafe pooling on [NAME] [--mode transaction|session] [--pool-size N] [--max-client-conn N]
+        [--listen local|private|public] [--port 6432] [--yes]
+                                             turn pooling on (or change it); Rowsafe installs PgBouncer on the
+                                             server. Only on servers where the installer allowed it
+  rowsafe pooling off [NAME] [--yes]         stop PgBouncer and remove what Rowsafe installed; asks first
+  rowsafe settings [NAME] [SETTING] [--all] [--json]
+                                             PostgreSQL's settings that matter: value, default, where it is
+                                             set, and whether a change needs a restart
+  rowsafe settings set [NAME] SETTING=VALUE... [--yes] [--no-wait]
+                                             change settings (ALTER SYSTEM + reload, a Mark first; VALUE
+                                             default resets one). Rowsafe's archiving settings never change
+  rowsafe settings undo [NAME] [CHANGE_ID] [--yes]
+                                             undo the latest change made through Rowsafe (or CHANGE_ID)
+  rowsafe tune [NAME] [--workload web|analytics|mixed] [--disk ssd|hdd] [--all] [--yes] [--json]
+                                             settings that suit this server (memory, CPUs, disk) and apply
+                                             them; asks first. Nothing restarts: see rowsafe restart
 
 Guard: the safety net for AI agents
   rowsafe mcp [--allow-restore-points | --allow-writes]
@@ -144,6 +213,42 @@ Guard: the safety net for AI agents
                                              command, create a restore point (https://rowsafe.sh/docs/guides/ai-agents)
   rowsafe guard --check COMMAND              tell whether COMMAND looks destructive (exit 0 yes, 1 no)
   (rowsafe status NAME, above, exits 3 when a database is not protected: use it to gate risky changes)
+  rowsafe preview [NAME] FILE [--db DB] [--json | --format text|json|markdown] [--fail-on careful|dangerous]
+                                             run a migration (FILE, or - for stdin) on a fresh copy of the database
+                                             and report locks, rewrites, rows and time with a verdict: safe, careful,
+                                             dangerous, or failed (it fails on the copy). Never touches production.
+                                             Exit 0 once the preview ran, 1 if it couldn't; with --fail-on, 3 at or
+                                             above that verdict and 2 if the migration fails
+  rowsafe previews [NAME] [ID] [--json]      recent previews, or one in full
+  rowsafe copies [NAME] [--json]             safe copies: masked copies developers and AI agents can connect to
+  rowsafe copies create [NAME] [--allow IP] [--listen private|public|IP|*] [--hours 24] [--db DB] [--json]
+                                             make one: restore, mask, open it on the server for the allowed
+                                             addresses (default: this computer's). Prints the connection string once
+  rowsafe copies extend [NAME] ID [--hours 24]
+                                             keep a safe copy longer
+  rowsafe copies delete [NAME] ID [--yes]    delete a safe copy
+  rowsafe copies password [NAME] ID          a new password for a safe copy (made here; Rowsafe never sees it)
+  rowsafe masking [NAME] [--all] [--json]    which columns safe copies mask, and how
+  rowsafe masking set [NAME] [DB:]TABLE.COLUMN STRATEGY
+                                             change one column's masking (keep to leave it real)
+  rowsafe masking refresh [NAME]             read the tables again (names and types only)
+
+Databases & users: the databases, users and extensions inside a server (--on NAME: which server)
+  rowsafe db [ls] [--on NAME] [--json]       databases, users and extensions on the server
+  rowsafe db create DB [--owner USER | --new-owner USER] [--extension EXT]... [--template template0] [--locale L]
+                                             create a database. Without --owner a new user owns it: its
+                                             password is made on the server and shown here once
+  rowsafe db drop DB [--yes]                 remove a database and everything in it (a Mark first; asks you
+                                             to type its name)
+  rowsafe db users [--json]                  users, what they can connect to and how their password is stored
+  rowsafe db user add USER --db DB[,DB] [--access read_only|read_write|owner]
+                                             a new user; its password is shown once
+  rowsafe db user password USER              a new password for USER, shown once
+  rowsafe db user remove USER [--reassign-to USER] [--yes]
+                                             remove a user; what it owns goes to --reassign-to
+  rowsafe db ext on|off DB EXTENSION [--allow-untrusted]
+                                             turn an extension on or off in one database
+  Passwords are encrypted on the server for this terminal only; Rowsafe never sees them.
 
 Admin
   rowsafe tasks [NAME] [--status S] [--type T] [--limit N]
@@ -291,12 +396,21 @@ func dispatch(ctx context.Context, args []string) error {
 		return removeCmd(ctx, c, rest)
 	case "rewind":
 		return rewindCmd(ctx, c, rest)
-	case "standby":
-		return standbyCmd(ctx, c, rest)
+	case "migrate": // move in from a managed database (migrate.go)
+		return migrateCmd(ctx, c, rest)
+	// Updates and upgrades (upgrade.go)
+	case "update":
+		return updateCmd(ctx, c, rest)
+	case "upgrade":
+		return upgradeCmd(ctx, c, rest)
 	case "fork": // fork.go
 		return forkCmd(ctx, c, rest)
 	case "forks":
 		return forksCmd(ctx, c, rest)
+	case "standby":
+		return standbyCmd(ctx, c, rest)
+	case "move":
+		return moveCmd(ctx, c, rest)
 	// Proof
 	case "proof":
 		return proofCmd(ctx, c, rest)
@@ -311,10 +425,18 @@ func dispatch(ctx context.Context, args []string) error {
 		return insightsCmd(ctx, c, rest)
 	case "top":
 		return topCmd(ctx, c, rest)
+	case "recommendations": // advisor (recommendations.go)
+		return recommendationsCmd(ctx, c, rest)
 	case "activity":
 		return activityCmd(ctx, c, rest)
 	case "report":
 		return reportCmd(ctx, c, rest)
+	case "pooling":
+		return poolingCmd(ctx, c, rest)
+	case "settings": // settings.go
+		return settingsCmd(ctx, c, rest)
+	case "tune":
+		return tuneCmd(ctx, c, rest)
 	case "alerts":
 		return alertsCmd(ctx, c, rest)
 	case "channels":
@@ -324,6 +446,17 @@ func dispatch(ctx context.Context, args []string) error {
 	// Guard
 	case "mcp":
 		return mcpServe(ctx, c, rest)
+	case "preview": // copies.go
+		return previewCmd(ctx, c, rest)
+	case "previews":
+		return previewsCmd(ctx, c, rest)
+	case "copies":
+		return copiesCmd(ctx, c, rest)
+	case "masking":
+		return maskingCmd(ctx, c, rest)
+	// Databases & users
+	case "db":
+		return dbCmd(ctx, c, rest)
 	// Admin
 	case "tasks":
 		return tasksList(ctx, c, rest)

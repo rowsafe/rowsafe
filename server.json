@@ -25,15 +25,15 @@
       "headers": [
         {
           "name": "Authorization",
-          "description": "A Rowsafe API key (rowsafe api-keys create NAME, or in the dashboard). Use a --read-only key for monitoring only; it can still run safety_check but can't set restore points.",
+          "description": "Optional. Without it, your AI app signs in with Rowsafe (OAuth 2.1): you approve it in the Rowsafe dashboard and it can read your databases' health, backups and recommendations, and save Marks if you allow. For clients without OAuth, send a Rowsafe API key instead.",
           "value": "Bearer {rowsafe_api_key}",
-          "isRequired": true,
+          "isRequired": false,
           "isSecret": true,
           "variables": {
             "rowsafe_api_key": {
               "description": "Rowsafe API key",
               "placeholder": "rsk_...",
-              "isRequired": true,
+              "isRequired": false,
               "isSecret": true
             }
           }

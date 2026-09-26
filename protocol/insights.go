@@ -38,6 +38,11 @@ type QueryDelta struct {
 	Calls       int64   `json:"calls"`
 	TotalTimeMs float64 `json:"total_time_ms"`
 	Rows        int64   `json:"rows"`
+	// ---- advisor: buffer and temp file use in the interval ----
+	SharedBlksHit   int64 `json:"shared_blks_hit,omitempty"`
+	SharedBlksRead  int64 `json:"shared_blks_read,omitempty"`
+	TempBlksWritten int64 `json:"temp_blks_written,omitempty"`
+	// ---- end advisor ----
 }
 
 // LockSession is one session in a blocking chain: waiting for a lock, or
@@ -130,6 +135,8 @@ type Insights struct {
 	SeqScanTables    []SeqScanTable   `json:"seq_scan_tables"`
 	VacuumStats      []TableVacuum    `json:"vacuum_stats"`
 	FreezeAge        []TableFreeze    `json:"freeze_age"`
+	// Advisor are the extra catalog facts for recommendations (advisor.go).
+	Advisor *AdvisorFacts `json:"advisor,omitempty"`
 }
 
 // InsightsDatabase is one database looked at.

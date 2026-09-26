@@ -34,6 +34,13 @@ const copyMarker = ".rowsafe-rewind-copy"
 // --target and --set, refusing anything malformed.
 func rewindRestoreArgs(t protocol.RewindTarget) (typ, target, set string, err error) {
 	switch {
+	case t.XID != 0 && (t.Mark != "" || t.Time == nil):
+		return "", "", "", errors.New("a transaction to stop before comes with its commit time, and without a Mark")
+	case t.XID != 0:
+		if t.Time.IsZero() || t.Time.After(time.Now().Add(time.Minute)) {
+			return "", "", "", fmt.Errorf("the time %s is in the future", t.Time.UTC().Format(time.RFC3339))
+		}
+		typ, target = "xid", strconv.FormatUint(uint64(t.XID), 10)
 	case t.Time != nil && t.Mark != "":
 		return "", "", "", errors.New("give a time or a Mark, not both")
 	case t.Time != nil:
@@ -62,6 +69,9 @@ func rewindRestoreArgs(t protocol.RewindTarget) (typ, target, set string, err er
 func describeTarget(t protocol.RewindTarget) string {
 	if t.Mark != "" {
 		return "the Mark " + t.Mark
+	}
+	if t.XID != 0 && t.Time != nil {
+		return fmt.Sprintf("just before transaction %d (committed at %s)", t.XID, t.Time.UTC().Format("15:04:05 UTC on 2006-01-02"))
 	}
 	if t.Time != nil {
 		return t.Time.UTC().Format("15:04:05 UTC on 2006-01-02")
@@ -138,7 +148,10 @@ func (a *Agent) rewindCopy(ctx context.Context, db protocol.DatabaseSpec, p prot
 	if err := a.writeConfig(db, prod); err != nil {
 		return nil, err
 	}
-	cli := a.cli(db)
+	cli, err := a.repoCLI(db, p.Target.Repo)
+	if err != nil {
+		return nil, err
+	}
 	stanzas, err := cli.Info(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("Rowsafe can't reach the backup repository from this server: %w", err)
@@ -216,7 +229,7 @@ func (a *Agent) rewindCopy(ctx context.Context, db protocol.DatabaseSpec, p prot
 	cli.Wrap = niceWrap()
 	tl.Printf("restoring %s into a copy at %s (backup %s)", describeTarget(p.Target), dataDir, cmp.Or(set, "picked by pgBackRest"))
 	out, err := cli.RestoreTo(ctx, pgbackrest.RestoreOptions{DataDir: dataDir, TablespaceDir: filepath.Join(dir, "tablespaces"),
-		ArchiveOff: true, Type: typ, Target: target, Set: set, Timeline: p.Target.Timeline})
+		ArchiveOff: true, Type: typ, Target: target, Exclusive: typ == "xid", Set: set, Timeline: p.Target.Timeline})
 	tl.Output("pgbackrest restore", out)
 	if err != nil {
 		return fail(err)
@@ -235,7 +248,7 @@ func (a *Agent) rewindCopy(ctx context.Context, db protocol.DatabaseSpec, p prot
 	t := pginspect.Target{SocketDir: socketDir, Port: port, User: a.cfg.PGUser, AppName: rewindAppName}
 	conn, spec, err := a.startScratchFallback(ctx, tl, spec, t, pgCtl, dir, timeout, prod.SharedPreloadLibraries)
 	if err != nil {
-		if strings.Contains(err.Error(), "stopped during recovery") && typ == "time" {
+		if strings.Contains(err.Error(), "stopped during recovery") && typ != "name" {
 			err = fmt.Errorf("%w (if the time is after the last change that reached the backups, pick an earlier one)", err)
 		}
 		return fail(err)

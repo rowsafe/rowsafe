@@ -337,7 +337,7 @@ func (a *Agent) maskFork(ctx context.Context, t pginspect.Target, m protocol.For
 	used := map[string]bool{}
 	tables := map[string]bool{}
 	for _, dbname := range dbs {
-		if err := a.maskDatabase(ctx, t, dbname, key, m, rules, used, tables, &report, tl); err != nil {
+		if err := a.maskForkDatabase(ctx, t, dbname, key, m, rules, used, tables, &report, tl); err != nil {
 			return report, fmt.Errorf("database %s: %w", dbname, err)
 		}
 	}
@@ -352,7 +352,7 @@ func (a *Agent) maskFork(ctx context.Context, t pginspect.Target, m protocol.For
 	return report, nil
 }
 
-func (a *Agent) maskDatabase(ctx context.Context, t pginspect.Target, dbname, key string, m protocol.ForkMasking, rules map[string]string,
+func (a *Agent) maskForkDatabase(ctx context.Context, t pginspect.Target, dbname, key string, m protocol.ForkMasking, rules map[string]string,
 	used, tables map[string]bool, report *protocol.ForkMaskReport, tl *taskLog) error {
 	conn, err := t.Connect(ctx, dbname)
 	if err != nil {

@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -97,15 +96,6 @@ func (o *testStandbyOps) archivePush(ctx context.Context, db protocol.DatabaseSp
 		return nil, err
 	}
 	return []byte("pushed (test)"), nil
-}
-
-func freePort(t *testing.T) int {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
 }
 
 func newTestCluster(t *testing.T, root, name string, primaryConf string) *pgCluster {

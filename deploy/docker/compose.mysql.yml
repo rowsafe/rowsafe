@@ -1,0 +1,74 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# MySQL 8.4 (the official, unmodified mysql:8.4 image) with the Rowsafe agent
+# as a sidecar: physical backups with Percona XtraBackup and the binary log
+# shipped to your S3-compatible bucket, encrypted in the agent container,
+# restores to any second, weekly restore tests (Proof) and Marks. See
+# https://rowsafe.sh/docs/guides/mysql.
+#
+#   1. Put the root password in mysql_root_password.txt (chmod 600) and the
+#      agent's settings in rowsafe-agent.env (chmod 600; see below), with a
+#      one-time token from `rowsafe hosts enroll-token`.
+#   2. ROWSAFE_AGENT_VERSION=<release> docker compose up -d
+#   3. rowsafe adopt shop --host db-1 --engine mysql, then approve the plan
+#      (dashboard or `rowsafe apply shop`). MySQL 8.4 keeps a binary log by
+#      default, so nothing needs a restart.
+#
+# Adding Rowsafe to an existing compose file takes only the lines marked
+# "Rowsafe": a socket volume on your mysql service, the rowsafe-agent
+# service, and two volumes. The agent logs in as root once, to create its
+# own account (rowsafe@localhost, random password kept in its state volume).
+
+name: myshop
+
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/mysql_root_password
+    secrets: [mysql_root_password]
+    volumes:
+      - mysqldata:/var/lib/mysql
+      - mysqlsocket:/var/run/mysqld                # Rowsafe: the agent connects over this socket
+
+  # Rowsafe
+  rowsafe-agent:
+    # One tag per MySQL version: <version>-mysql8.4 or -mysql8.0 (built FROM
+    # the same mysql image, so restore tests run the very same server).
+    image: ghcr.io/rowsafe/agent:${ROWSAFE_AGENT_VERSION:?set ROWSAFE_AGENT_VERSION to a Rowsafe release}-mysql8.4
+    hostname: db-1
+    user: "999:999"                                # the mysql image's mysql user
+    restart: unless-stopped
+    depends_on: [mysql]
+    env_file: rowsafe-agent.env
+    environment:
+      ROWSAFE_MYSQL_ADMIN_PASSWORD_FILE: /run/secrets/mysql_root_password
+    secrets: [mysql_root_password]
+    volumes:
+      # The same data volume at the same path as in the mysql service,
+      # read-only: backups read the data files and the binary log.
+      - mysqldata:/var/lib/mysql:ro
+      - mysqlsocket:/var/run/mysqld
+      # Identity, Rowsafe's MySQL account and restore test scratch space
+      # (needs free space of about 1.3 x your data + 1 GiB).
+      - rowsafe-state:/var/lib/rowsafe
+
+secrets:
+  mysql_root_password:
+    file: ./mysql_root_password.txt
+
+volumes:
+  mysqldata:
+  mysqlsocket:     # Rowsafe
+  rowsafe-state:   # Rowsafe
+
+# rowsafe-agent.env (chmod 600, never commit it):
+#
+#   ROWSAFE_URL=https://api.rowsafe.sh
+#   ROWSAFE_ENROLL_TOKEN=rse_...           # first start only; delete it afterwards
+#   ROWSAFE_REPO_S3_ENDPOINT=<account-id>.eu.r2.cloudflarestorage.com
+#   ROWSAFE_REPO_S3_BUCKET=shop-rowsafe
+#   ROWSAFE_REPO_S3_KEY=...
+#   ROWSAFE_REPO_S3_KEY_SECRET=...
+#   ROWSAFE_REPO_CIPHER_PASS=...           # store it in your secret manager FIRST

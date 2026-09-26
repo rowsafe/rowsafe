@@ -249,13 +249,6 @@ func dropRoleOn(ctx context.Context, conn *pgx.Conn, user string) error {
 }
 
 // scramVerifier is PostgreSQL's SCRAM-SHA-256 verifier for password.
-func scramVerifier(password string) (string, error) {
-	salt := make([]byte, 16)
-	if _, err := rand.Read(salt); err != nil {
-		return "", err
-	}
-	return scramVerifierSalt(password, salt, 4096)
-}
 
 func scramVerifierSalt(password string, salt []byte, iter int) (string, error) {
 	salted, err := pbkdf2.Key(sha256.New, password, salt, iter, 32)
@@ -481,5 +474,3 @@ func (a *Agent) primaryState(ctx context.Context, db protocol.DatabaseSpec) (pro
 	}
 	return st, facts, true
 }
-
-// parseLSN is in moment_wal.go (Find the moment has the same one).

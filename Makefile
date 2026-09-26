@@ -5,6 +5,10 @@
 #   make lint                  go vet, gofmt, shellcheck, installer consistency
 #   make test-installer        scripts/install.sh in Debian/Ubuntu containers (Docker)
 #   make test-rewind           a real Rewind (copy, rows, in place, undo) on a systemd Debian container (Docker)
+#   make test-pooling          real PgBouncer through the root helper on a systemd Debian container (Docker)
+#   make test-secondcopy       a real second backup copy (two storages, one going away) in a Debian container (Docker)
+#   make test-mysql            the MySQL/MariaDB engine against real MySQL 8.4 and MariaDB 11.4 (Docker)
+#   make test-upgrade          real PostgreSQL updates and upgrades (16 -> 18, undo) on a systemd Debian container (Docker)
 #   make test-action           the GitHub Action (integrations/github-action) against a mock API
 #   make dist VERSION=1.2.3 RELEASE_PUBLIC_KEY=...    reproducible release binaries in dist/1.2.3/
 #   make release VERSION=1.2.3 RELEASE_PUBLIC_KEY=... (needs ROWSAFE_RELEASE_PRIVATE_KEY)
@@ -28,7 +32,7 @@ AGENT_LDFLAGS := -s -w -buildid= -X $(PKG)/internal/agent.Version=$(VERSION) -X 
 MAIN_LDFLAGS := -s -w -buildid= -X main.version=$(VERSION)
 GOBUILD := CGO_ENABLED=0 GOFLAGS=-mod=readonly $(GO) build -trimpath -buildvcs=false
 
-.PHONY: all build test lint check-installer test-installer test-rewind test-action dist release check-release-env clean
+.PHONY: all build test lint check-installer test-installer test-rewind test-secondcopy test-mysql test-upgrade test-pooling test-action dist release check-release-env clean
 
 all: lint test build
 
@@ -44,8 +48,14 @@ test:
 lint: check-installer
 	$(GO) vet ./...
 	@test -z "$$(gofmt -l .)" || { echo "gofmt needed:"; gofmt -l .; exit 1; }
+	@# The agent images copy only listed folders: each one the agent needs must be listed.
+	@for d in $$($(GO) list -deps ./cmd/rowsafe-agent | sed -n 's#^github.com/rowsafe/rowsafe/\([^/]*\).*#\1#p' | sort -u); do \
+		for f in deploy/docker/agent.Dockerfile deploy/docker/agent-mysql.Dockerfile deploy/docker/agent-mariadb.Dockerfile; do \
+			grep -q "^COPY $$d " $$f || { echo "$$f: add COPY $$d ./$$d (the agent imports it)"; exit 1; }; \
+		done; \
+	done
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck -S warning -s sh scripts/install.sh scripts/test-install.sh scripts/test-rewind.sh scripts/rowsafe-agent-guard scripts/rowsafe-pg-restart scripts/rowsafe-pg-create-cluster; \
+		shellcheck -S warning -s sh scripts/install.sh scripts/test-install.sh scripts/test-rewind.sh scripts/test-pooling.sh scripts/test-secondcopy.sh scripts/test-mysql.sh scripts/test-upgrade.sh scripts/rowsafe-agent-guard scripts/rowsafe-pg-restart scripts/rowsafe-firewall scripts/rowsafe-pg-create-cluster; \
 		shellcheck -S warning -s bash integrations/github-action/scripts/*.sh integrations/github-action/test/*.sh integrations/github-action/export.sh; \
 	else echo "shellcheck not installed; skipping"; fi
 
@@ -69,6 +79,24 @@ check-installer:
 		diff -u scripts/rowsafe-pg-create-cluster - || { echo "scripts/install.sh: embedded cluster creator differs from scripts/rowsafe-pg-create-cluster"; exit 1; }
 	@sed -n "/<<'ROWSAFE_CREATE_UNIT_EOF'; then\$$/,/^ROWSAFE_CREATE_UNIT_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
 		diff -u deploy/systemd/rowsafe-pg-create-cluster@.service - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pg-create-cluster@.service"; exit 1; }
+	@sed -n "/<<'ROWSAFE_POOLER_SERVICE_EOF'; then\$$/,/^ROWSAFE_POOLER_SERVICE_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
+		diff -u deploy/systemd/rowsafe-pooler.service - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pooler.service"; exit 1; }
+	@sed -n "/<<'ROWSAFE_POOLER_PATH_EOF'; then\$$/,/^ROWSAFE_POOLER_PATH_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
+		diff -u deploy/systemd/rowsafe-pooler.path - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pooler.path"; exit 1; }
+	@sed -n "/<<'ROWSAFE_POOLER_APT_EOF'; then\$$/,/^ROWSAFE_POOLER_APT_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
+		diff -u deploy/systemd/rowsafe-pooler-apt@.service - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pooler-apt@.service"; exit 1; }
+	@sed -n "/<<'ROWSAFE_UPDATE_SERVICE_EOF'; then\$$/,/^ROWSAFE_UPDATE_SERVICE_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
+		diff -u deploy/systemd/rowsafe-pg-update.service - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pg-update.service"; exit 1; }
+	@sed -n "/<<'ROWSAFE_UPDATE_PATH_EOF'; then\$$/,/^ROWSAFE_UPDATE_PATH_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
+		diff -u deploy/systemd/rowsafe-pg-update.path - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pg-update.path"; exit 1; }
+	@sed -n "/<<'ROWSAFE_FIREWALL_HELPER_EOF'; then\$$/,/^ROWSAFE_FIREWALL_HELPER_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
+		diff -u scripts/rowsafe-firewall - || { echo "scripts/install.sh: embedded firewall helper differs from scripts/rowsafe-firewall"; exit 1; }
+	@sed -n "/<<'ROWSAFE_FIREWALL_SERVICE_EOF'; then\$$/,/^ROWSAFE_FIREWALL_SERVICE_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
+		diff -u deploy/systemd/rowsafe-firewall.service - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-firewall.service"; exit 1; }
+	@sed -n "/<<'ROWSAFE_FIREWALL_PATH_EOF'; then\$$/,/^ROWSAFE_FIREWALL_PATH_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
+		diff -u deploy/systemd/rowsafe-firewall.path - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-firewall.path"; exit 1; }
+	@sed -n "/<<'ROWSAFE_FIREWALL_RESTORE_EOF'; then\$$/,/^ROWSAFE_FIREWALL_RESTORE_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
+		diff -u deploy/systemd/rowsafe-firewall-restore.service - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-firewall-restore.service"; exit 1; }
 	@sh -n scripts/install.sh
 
 test-installer:
@@ -76,6 +104,19 @@ test-installer:
 
 test-rewind:
 	sh scripts/test-rewind.sh
+
+test-pooling:
+	sh scripts/test-pooling.sh
+test-secondcopy:
+	sh scripts/test-secondcopy.sh
+
+# MySQL 8.4 and MariaDB 11.4 in Docker: backups, binary log shipping, Proof,
+# Rewind copies and rows, Marks, Pulse and fixes against real servers.
+test-mysql:
+	sh scripts/test-mysql.sh
+
+test-upgrade:
+	sh scripts/test-upgrade.sh
 
 test-action:
 	integrations/github-action/test/test-action.sh

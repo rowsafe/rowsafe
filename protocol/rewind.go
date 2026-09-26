@@ -67,6 +67,9 @@ type RewindTarget struct {
 	// latest), "current" (the backup's timeline) or a timeline number. Only
 	// needed to reach a point before an earlier in-place rewind happened.
 	Timeline string `json:"timeline,omitempty"`
+	// Repo is the storage to restore from: 0 or RepoPrimary for the first,
+	// RepoSecond for the second copy (secondcopy.go).
+	Repo int `json:"repo,omitempty"`
 }
 
 // RewindCopyParams are the params of a rewind_copy task.
@@ -332,10 +335,13 @@ type RewindKept struct {
 	CreatedAt   time.Time    `json:"created_at"`
 }
 
-// CreateRewindCopyRequest restores a copy: Time or Mark.
+// CreateRewindCopyRequest restores a copy: Time or Mark. With XID (Find
+// the moment), the copy stops just before that transaction and Time is its
+// commit time.
 type CreateRewindCopyRequest struct {
 	Time  *time.Time `json:"time,omitempty"`
 	Mark  string     `json:"mark,omitempty"`
+	XID   uint32     `json:"xid,omitempty"`
 	Hours int        `json:"hours,omitempty"` // how long to keep it (default 24, at most 168)
 }
 
@@ -357,7 +363,8 @@ type RewindRowsRequest struct {
 type RewindInPlaceRequest struct {
 	Time    *time.Time `json:"time,omitempty"`
 	Mark    string     `json:"mark,omitempty"`
-	Confirm string     `json:"confirm"` // the database's name
+	XID     uint32     `json:"xid,omitempty"` // as in CreateRewindCopyRequest
+	Confirm string     `json:"confirm"`       // the database's name
 }
 
 type RewindConfirmRequest struct {

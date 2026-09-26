@@ -59,6 +59,15 @@ type spoolPusher struct {
 	// container's HEALTHCHECK.
 	healthFile string
 
+	// prepare, if set, runs before a stanza's files are pushed (the second
+	// copy creates its stanza there); an error counts as a failed push.
+	prepare func(ctx context.Context, stanza string) error
+	// afterPush, if set, runs for each pushed file before it leaves the
+	// spool (sidecar mode hands it on to the second copy's queue there).
+	afterPush func(stanza, path, name string)
+	// what names the pusher in logs.
+	what string
+
 	mu       sync.Mutex
 	stanzas  map[string]*spoolState
 	lastPass time.Time
@@ -75,6 +84,7 @@ type spoolState struct {
 	lastFailedAt  time.Time
 	lastError     string
 	failuresInRow int
+	failingSince  time.Time
 	nextAttempt   time.Time
 }
 
@@ -89,6 +99,7 @@ type SpoolStatus struct {
 	LastPushedAt time.Time
 	FailedCount  int64 // push failures and stalled reports since the agent started
 	LastFailedAt time.Time
+	FailingSince time.Time // first failure of the current run of failures (zero while pushing works)
 	LastError    string
 	Stalled      bool
 	ScanError    string
@@ -97,7 +108,7 @@ type SpoolStatus struct {
 func newSpoolPusher(root string, stallAfter time.Duration, log *slog.Logger, cli func(string) (pgbackrest.CLI, bool)) *spoolPusher {
 	return &spoolPusher{
 		root: root, stallAfter: stallAfter, poll: time.Second, log: log, cli: cli, now: time.Now,
-		stanzas: map[string]*spoolState{}, wake: make(chan struct{}, 1),
+		stanzas: map[string]*spoolState{}, wake: make(chan struct{}, 1), what: "spooled WAL to the repository",
 	}
 }
 
@@ -112,7 +123,7 @@ func (p *spoolPusher) state(stanza string) *spoolState {
 
 // Run pushes spooled WAL until ctx is cancelled.
 func (p *spoolPusher) Run(ctx context.Context) {
-	p.log.Info("WAL spool pusher started", "spool", p.root)
+	p.log.Info("WAL pusher started", "pushes", p.what, "from", p.root)
 	var healthAt time.Time
 	for {
 		p.pass(ctx)
@@ -175,6 +186,14 @@ func (p *spoolPusher) pushStanza(ctx context.Context, stanza string) int {
 			"before every task (run `rowsafe verify %s`)", stanza, stanza))
 		return 0
 	}
+	if p.prepare != nil {
+		if err := p.prepare(ctx, stanza); err != nil {
+			if ctx.Err() == nil {
+				p.fail(stanza, "", err)
+			}
+			return 0
+		}
+	}
 	pushed := 0
 	for _, name := range names {
 		if ctx.Err() != nil {
@@ -191,6 +210,9 @@ func (p *spoolPusher) pushStanza(ctx context.Context, stanza string) int {
 			p.fail(stanza, name, fmt.Errorf("%w: %s", err, errorLine(out)))
 			return pushed
 		}
+		if p.afterPush != nil {
+			p.afterPush(stanza, path, name)
+		}
 		// Only now, with the file in the repository, may it leave the spool.
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			p.fail(stanza, name, fmt.Errorf("pushed, but removing it from the spool failed: %w", err))
@@ -202,9 +224,9 @@ func (p *spoolPusher) pushStanza(ctx context.Context, stanza string) int {
 		st.pushedCount++
 		st.lastPushed, st.lastPushedAt = name, p.now()
 		if st.failuresInRow > 0 {
-			p.log.Info("WAL spool pusher recovered", "stanza", stanza, "file", name, "after_failures", st.failuresInRow)
+			p.log.Info("WAL pusher recovered", "pushes", p.what, "stanza", stanza, "file", name, "after_failures", st.failuresInRow)
 		}
-		st.failuresInRow, st.nextAttempt = 0, time.Time{}
+		st.failuresInRow, st.nextAttempt, st.failingSince = 0, time.Time{}, time.Time{}
 		p.mu.Unlock()
 	}
 	return pushed
@@ -251,11 +273,14 @@ func (p *spoolPusher) fail(stanza, file string, err error) {
 		st.lastError = file + ": " + st.lastError
 	}
 	st.failuresInRow++
+	if st.failuresInRow == 1 {
+		st.failingSince = p.now()
+	}
 	// Back off 1s, 2s, 4s ... up to a minute, like PostgreSQL's own retries.
 	delay := min(time.Second<<min(st.failuresInRow-1, 6), time.Minute)
 	st.nextAttempt = p.now().Add(delay)
 	if st.failuresInRow == 1 || st.failuresInRow%30 == 0 {
-		p.log.Error("pushing spooled WAL to the repository failed", "stanza", stanza, "file", file,
+		p.log.Error("pushing "+p.what+" failed", "stanza", stanza, "file", file,
 			"err", err, "failures_in_a_row", st.failuresInRow, "retry_in", delay.String())
 	}
 }
@@ -269,6 +294,7 @@ func (p *spoolPusher) Status(stanza string) SpoolStatus {
 	st := p.state(stanza)
 	s.PushedCount, s.LastPushed, s.LastPushedAt = st.pushedCount, st.lastPushed, st.lastPushedAt
 	s.FailedCount, s.LastFailedAt, s.LastError = st.failedCount, st.lastFailedAt, st.lastError
+	s.FailingSince = st.failingSince
 	return s
 }
 

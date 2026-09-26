@@ -86,6 +86,7 @@ func fixCmd(ctx context.Context, c *client.Client, args []string) error {
 	if err != nil {
 		return err
 	}
+	withRecommendations(ctx, c, &h) // advisor (recommendations.go)
 	choices := fixChoices(h)
 
 	var pick *fixChoice
@@ -329,7 +330,7 @@ func applyFix(ctx context.Context, c *client.Client, h protocol.DatabaseHealth, 
 // waitFixTask waits for one task of a fix and says how it went.
 func waitFixTask(ctx context.Context, c *client.Client, t protocol.TaskView, db string) error {
 	switch t.Type {
-	case protocol.TaskMaintenance, protocol.TaskRestorePoint:
+	case protocol.TaskMaintenance, protocol.TaskRestorePoint, protocol.TaskSecurityFix:
 	default:
 		// Backups, restore tests, checks, setup and restarts report as
 		// their own commands do.
