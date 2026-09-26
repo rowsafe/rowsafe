@@ -25,6 +25,10 @@ COPY release ./release
 COPY collect ./collect
 COPY client ./client
 COPY mcp ./mcp
+COPY masking ./masking
+COPY pglog ./pglog
+COPY preview ./preview
+COPY tune ./tune
 ARG VERSION=dev
 ARG TARGETOS=linux
 ARG TARGETARCH

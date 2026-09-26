@@ -47,6 +47,12 @@ test:
 lint: check-installer
 	$(GO) vet ./...
 	@test -z "$$(gofmt -l .)" || { echo "gofmt needed:"; gofmt -l .; exit 1; }
+	@# The agent images copy only listed folders: each one the agent needs must be listed.
+	@for d in $$($(GO) list -deps ./cmd/rowsafe-agent | sed -n 's#^github.com/rowsafe/rowsafe/\([^/]*\).*#\1#p' | sort -u); do \
+		for f in deploy/docker/agent.Dockerfile deploy/docker/agent-mysql.Dockerfile deploy/docker/agent-mariadb.Dockerfile; do \
+			grep -q "^COPY $$d " $$f || { echo "$$f: add COPY $$d ./$$d (the agent imports it)"; exit 1; }; \
+		done; \
+	done
 	@if command -v shellcheck >/dev/null 2>&1; then \
 		shellcheck -S warning -s sh scripts/install.sh scripts/test-install.sh scripts/test-rewind.sh scripts/test-secondcopy.sh scripts/test-mysql.sh scripts/test-upgrade.sh scripts/rowsafe-agent-guard scripts/rowsafe-pg-restart; \
 		shellcheck -S warning -s bash integrations/github-action/scripts/*.sh integrations/github-action/test/*.sh integrations/github-action/export.sh; \
