@@ -748,9 +748,12 @@ install_restart_helper() {
 # root allowed it (/etc/rowsafe/create-cluster-allowed, "ports MIN-MAX",
 # written by the installer with --allow-create-cluster): the helper checks
 # the request and starts rowsafe-pg-create-cluster@MAJOR-PORT-NAME.service,
-# a separate sandboxed unit that runs pg_createcluster and lists the new
-# cluster in /etc/rowsafe/created-clusters ("PORT UNIT"), which this helper
-# then stops and starts like the clusters in restart-allowed.
+# a separate sandboxed unit that runs pg_createcluster and can't write
+# anything of Rowsafe's. Once it succeeded and the new cluster's
+# configuration names the requested port, this helper lists the cluster in
+# /etc/rowsafe/created-clusters ("PORT UNIT") and then stops and starts it
+# like the clusters in restart-allowed. A failure's reason comes from that
+# unit's journal, never from a file another process could write.
 #
 # The agent reads the next line to know what this helper can do.
 # actions: restart stop start create-cluster
@@ -762,6 +765,8 @@ out_dir=${RUNTIME_DIRECTORY:-/run/rowsafe-pg-restart}
 allow=${ROWSAFE_RESTART_ALLOW:-/etc/rowsafe/restart-allowed}
 create_allow=${ROWSAFE_CREATE_CLUSTER_ALLOW:-/etc/rowsafe/create-cluster-allowed}
 created=${ROWSAFE_CREATED_CLUSTERS:-/etc/rowsafe/created-clusters}
+pg_conf_root=${ROWSAFE_PG_CONF_ROOT:-/etc/postgresql}
+journalctl=${ROWSAFE_JOURNALCTL:-journalctl}
 state=${STATE_DIRECTORY:-/var/lib/rowsafe-pg-restart}
 agent_user=${ROWSAFE_AGENT_USER:-postgres}
 systemctl=${ROWSAFE_SYSTEMCTL:-systemctl}
@@ -810,17 +815,38 @@ create_cluster() {
   [ -n "$range" ] || refuse "$create_allow names no ports"
   [ "$c_port" -ge "${range%-*}" ] && [ "$c_port" -le "${range#*-}" ] ||
     refuse "port $c_port is not in the ports Rowsafe may create clusters on ($range)"
+  [ -f "$created" ] && [ ! -L "$created" ] || refuse "$created is missing: run the installer again with --allow-create-cluster"
+  root_only "$created"
+  for list in "$allow" "$created"; do
+    if [ -f "$list" ] && awk -v p="$c_port" '$1 == p { f = 1 } END { exit !f }' "$list"; then
+      refuse "port $c_port is already used by a cluster Rowsafe manages"
+    fi
+  done
+  [ ! -e "$pg_conf_root/$c_major/$c_name" ] && [ ! -L "$pg_conf_root/$c_major/$c_name" ] ||
+    refuse "a PostgreSQL $c_major cluster named $c_name already exists"
   unit=rowsafe-pg-create-cluster@$c_major-$c_port-$c_name.service
   log "create-cluster PostgreSQL $c_major $c_name on port $c_port (request $id)"
-  rm -f "$out_dir/create-cluster.err"
+  since=$(date +%s)
   out=$(timeout 120 "$systemctl" start "$unit" 2>&1 </dev/null)
   rc=$?
+  conf=$pg_conf_root/$c_major/$c_name/postgresql.conf
   if [ "$rc" = 0 ]; then
-    ok=1
-    unit=postgresql@$c_major-$c_name.service
-    log "create-cluster $unit: done"
+    # Only a cluster that is there, on the requested port, is listed.
+    if [ -f "$conf" ] && [ ! -L "$conf" ] &&
+      grep -Eq "^[[:space:]]*port[[:space:]]*=[[:space:]]*'?$c_port'?([[:space:]]|#|\$)" "$conf"; then
+      if printf '%s postgresql@%s-%s.service\n' "$c_port" "$c_major" "$c_name" >>"$created"; then
+        ok=1
+        unit=postgresql@$c_major-$c_name.service
+        log "create-cluster $unit: done"
+      else
+        err="the cluster was created, but $created couldn't be updated"
+      fi
+    else
+      err="the new cluster's configuration ($conf) doesn't name port $c_port"
+    fi
   else
-    why=$(head -c 300 "$out_dir/create-cluster.err" 2>/dev/null | head -n 1 | tr -cd '[:print:]')
+    why=$("$journalctl" -u "$unit" --since "@$since" -o cat -n 20 --no-pager 2>/dev/null |
+      sed -n 's/^rowsafe-pg-create-cluster: //p' | tail -n 1 | tr -cd '[:print:]' | cut -c1-300)
     if [ -n "$why" ]; then
       err=$why
     elif [ "$rc" = 124 ]; then
@@ -828,8 +854,8 @@ create_cluster() {
     else
       err="systemctl start $unit failed: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
     fi
-    log "$err"
   fi
+  [ -z "$err" ] || log "$err"
   answer
   exit 0
 }
@@ -942,7 +968,7 @@ CapabilityBoundingSet=CAP_SETUID CAP_SETGID
 AmbientCapabilities=
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=-/var/lib/rowsafe/restart
+ReadWritePaths=-/var/lib/rowsafe/restart -/etc/rowsafe/created-clusters
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
@@ -1101,27 +1127,24 @@ install_create_cluster() {
 # (/etc/rowsafe/create-cluster-allowed, "ports MIN-MAX") and unused, the
 # PostgreSQL major version installed and the name free. Then it runs
 # pg_createcluster (Debian and Ubuntu, postgresql-common) without starting
-# the cluster, and adds "PORT postgresql@MAJOR-NAME.service" to
-# /etc/rowsafe/created-clusters, so the root helper may stop and start it.
-# A failure's reason goes to /run/rowsafe-pg-restart/create-cluster.err,
-# which the helper hands to the agent.
+# the cluster. It writes nothing of Rowsafe's: the root helper checks the new
+# cluster and lists it in /etc/rowsafe/created-clusters itself, and reads a
+# failure's reason (the last "rowsafe-pg-create-cluster:" line) from this
+# unit's journal.
 
 set -u
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 allow=${ROWSAFE_CREATE_CLUSTER_ALLOW:-/etc/rowsafe/create-cluster-allowed}
 created=${ROWSAFE_CREATED_CLUSTERS:-/etc/rowsafe/created-clusters}
-err_file=${ROWSAFE_CREATE_CLUSTER_ERR:-/run/rowsafe-pg-restart/create-cluster.err}
 pg_root=${ROWSAFE_PG_ROOT:-/usr/lib/postgresql}
 conf_root=${ROWSAFE_PG_CONF_ROOT:-/etc/postgresql}
 pg_createcluster=${ROWSAFE_PG_CREATECLUSTER:-pg_createcluster}
 
 fail() {
-  printf '%s\n' "$1" >"$err_file" 2>/dev/null || true
   echo "rowsafe-pg-create-cluster: $1" >&2
   exit 1
 }
 
-rm -f "$err_file"
 instance=${1:-}
 printf '%s\n' "$instance" | grep -Eq '^[1-9][0-9]-[1-9][0-9]{3,4}-[a-z][a-z0-9_]{0,39}$' || fail "malformed cluster request"
 major=${instance%%-*}
@@ -1150,8 +1173,6 @@ fi
 
 out=$("$pg_createcluster" --port "$port" --start-conf auto "$major" "$name" 2>&1 </dev/null) ||
   fail "pg_createcluster failed: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
-printf '%s postgresql@%s-%s.service\n' "$port" "$major" "$name" >>"$created" ||
-  fail "the cluster was created, but $created couldn't be updated"
 echo "rowsafe-pg-create-cluster: created PostgreSQL $major cluster $name on port $port" >&2
 ROWSAFE_CREATE_CLUSTER_EOF
     _changed=1
@@ -1177,14 +1198,15 @@ UMask=0022
 
 # Hardening. pg_createcluster writes the cluster's configuration, data and
 # log directories, runs initdb as postgres (hence CAP_SETUID/CAP_SETGID) and
-# hands the new files to postgres (CAP_CHOWN, CAP_FOWNER). The new cluster
-# is added to /etc/rowsafe/created-clusters; the reason of a failure goes to
-# the root helper's directory.
+# hands the new files to postgres (CAP_CHOWN, CAP_FOWNER). It can't write
+# anything else: the root helper checks the new cluster and lists it in
+# /etc/rowsafe/created-clusters itself, and reads a failure's reason from
+# this unit's journal.
 CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID
 AmbientCapabilities=
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/etc/postgresql /var/lib/postgresql -/var/log/postgresql /etc/rowsafe/created-clusters -/run/rowsafe-pg-restart
+ReadWritePaths=/etc/postgresql /var/lib/postgresql -/var/log/postgresql
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes

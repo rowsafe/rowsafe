@@ -14,27 +14,24 @@
 # (/etc/rowsafe/create-cluster-allowed, "ports MIN-MAX") and unused, the
 # PostgreSQL major version installed and the name free. Then it runs
 # pg_createcluster (Debian and Ubuntu, postgresql-common) without starting
-# the cluster, and adds "PORT postgresql@MAJOR-NAME.service" to
-# /etc/rowsafe/created-clusters, so the root helper may stop and start it.
-# A failure's reason goes to /run/rowsafe-pg-restart/create-cluster.err,
-# which the helper hands to the agent.
+# the cluster. It writes nothing of Rowsafe's: the root helper checks the new
+# cluster and lists it in /etc/rowsafe/created-clusters itself, and reads a
+# failure's reason (the last "rowsafe-pg-create-cluster:" line) from this
+# unit's journal.
 
 set -u
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 allow=${ROWSAFE_CREATE_CLUSTER_ALLOW:-/etc/rowsafe/create-cluster-allowed}
 created=${ROWSAFE_CREATED_CLUSTERS:-/etc/rowsafe/created-clusters}
-err_file=${ROWSAFE_CREATE_CLUSTER_ERR:-/run/rowsafe-pg-restart/create-cluster.err}
 pg_root=${ROWSAFE_PG_ROOT:-/usr/lib/postgresql}
 conf_root=${ROWSAFE_PG_CONF_ROOT:-/etc/postgresql}
 pg_createcluster=${ROWSAFE_PG_CREATECLUSTER:-pg_createcluster}
 
 fail() {
-  printf '%s\n' "$1" >"$err_file" 2>/dev/null || true
   echo "rowsafe-pg-create-cluster: $1" >&2
   exit 1
 }
 
-rm -f "$err_file"
 instance=${1:-}
 printf '%s\n' "$instance" | grep -Eq '^[1-9][0-9]-[1-9][0-9]{3,4}-[a-z][a-z0-9_]{0,39}$' || fail "malformed cluster request"
 major=${instance%%-*}
@@ -63,6 +60,4 @@ fi
 
 out=$("$pg_createcluster" --port "$port" --start-conf auto "$major" "$name" 2>&1 </dev/null) ||
   fail "pg_createcluster failed: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
-printf '%s postgresql@%s-%s.service\n' "$port" "$major" "$name" >>"$created" ||
-  fail "the cluster was created, but $created couldn't be updated"
 echo "rowsafe-pg-create-cluster: created PostgreSQL $major cluster $name on port $port" >&2

@@ -26,9 +26,12 @@
 # root allowed it (/etc/rowsafe/create-cluster-allowed, "ports MIN-MAX",
 # written by the installer with --allow-create-cluster): the helper checks
 # the request and starts rowsafe-pg-create-cluster@MAJOR-PORT-NAME.service,
-# a separate sandboxed unit that runs pg_createcluster and lists the new
-# cluster in /etc/rowsafe/created-clusters ("PORT UNIT"), which this helper
-# then stops and starts like the clusters in restart-allowed.
+# a separate sandboxed unit that runs pg_createcluster and can't write
+# anything of Rowsafe's. Once it succeeded and the new cluster's
+# configuration names the requested port, this helper lists the cluster in
+# /etc/rowsafe/created-clusters ("PORT UNIT") and then stops and starts it
+# like the clusters in restart-allowed. A failure's reason comes from that
+# unit's journal, never from a file another process could write.
 #
 # The agent reads the next line to know what this helper can do.
 # actions: restart stop start create-cluster
@@ -40,6 +43,8 @@ out_dir=${RUNTIME_DIRECTORY:-/run/rowsafe-pg-restart}
 allow=${ROWSAFE_RESTART_ALLOW:-/etc/rowsafe/restart-allowed}
 create_allow=${ROWSAFE_CREATE_CLUSTER_ALLOW:-/etc/rowsafe/create-cluster-allowed}
 created=${ROWSAFE_CREATED_CLUSTERS:-/etc/rowsafe/created-clusters}
+pg_conf_root=${ROWSAFE_PG_CONF_ROOT:-/etc/postgresql}
+journalctl=${ROWSAFE_JOURNALCTL:-journalctl}
 state=${STATE_DIRECTORY:-/var/lib/rowsafe-pg-restart}
 agent_user=${ROWSAFE_AGENT_USER:-postgres}
 systemctl=${ROWSAFE_SYSTEMCTL:-systemctl}
@@ -88,17 +93,38 @@ create_cluster() {
   [ -n "$range" ] || refuse "$create_allow names no ports"
   [ "$c_port" -ge "${range%-*}" ] && [ "$c_port" -le "${range#*-}" ] ||
     refuse "port $c_port is not in the ports Rowsafe may create clusters on ($range)"
+  [ -f "$created" ] && [ ! -L "$created" ] || refuse "$created is missing: run the installer again with --allow-create-cluster"
+  root_only "$created"
+  for list in "$allow" "$created"; do
+    if [ -f "$list" ] && awk -v p="$c_port" '$1 == p { f = 1 } END { exit !f }' "$list"; then
+      refuse "port $c_port is already used by a cluster Rowsafe manages"
+    fi
+  done
+  [ ! -e "$pg_conf_root/$c_major/$c_name" ] && [ ! -L "$pg_conf_root/$c_major/$c_name" ] ||
+    refuse "a PostgreSQL $c_major cluster named $c_name already exists"
   unit=rowsafe-pg-create-cluster@$c_major-$c_port-$c_name.service
   log "create-cluster PostgreSQL $c_major $c_name on port $c_port (request $id)"
-  rm -f "$out_dir/create-cluster.err"
+  since=$(date +%s)
   out=$(timeout 120 "$systemctl" start "$unit" 2>&1 </dev/null)
   rc=$?
+  conf=$pg_conf_root/$c_major/$c_name/postgresql.conf
   if [ "$rc" = 0 ]; then
-    ok=1
-    unit=postgresql@$c_major-$c_name.service
-    log "create-cluster $unit: done"
+    # Only a cluster that is there, on the requested port, is listed.
+    if [ -f "$conf" ] && [ ! -L "$conf" ] &&
+      grep -Eq "^[[:space:]]*port[[:space:]]*=[[:space:]]*'?$c_port'?([[:space:]]|#|\$)" "$conf"; then
+      if printf '%s postgresql@%s-%s.service\n' "$c_port" "$c_major" "$c_name" >>"$created"; then
+        ok=1
+        unit=postgresql@$c_major-$c_name.service
+        log "create-cluster $unit: done"
+      else
+        err="the cluster was created, but $created couldn't be updated"
+      fi
+    else
+      err="the new cluster's configuration ($conf) doesn't name port $c_port"
+    fi
   else
-    why=$(head -c 300 "$out_dir/create-cluster.err" 2>/dev/null | head -n 1 | tr -cd '[:print:]')
+    why=$("$journalctl" -u "$unit" --since "@$since" -o cat -n 20 --no-pager 2>/dev/null |
+      sed -n 's/^rowsafe-pg-create-cluster: //p' | tail -n 1 | tr -cd '[:print:]' | cut -c1-300)
     if [ -n "$why" ]; then
       err=$why
     elif [ "$rc" = 124 ]; then
@@ -106,8 +132,8 @@ create_cluster() {
     else
       err="systemctl start $unit failed: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
     fi
-    log "$err"
   fi
+  [ -z "$err" ] || log "$err"
   answer
   exit 0
 }

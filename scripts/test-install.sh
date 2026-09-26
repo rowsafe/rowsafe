@@ -1315,18 +1315,22 @@ echo "\$*" >>/tmp/rowsafe-fake/systemctl.calls
 case "\$1 \$2" in
   "start rowsafe-pg-create-cluster@"*)
     i=\${2#rowsafe-pg-create-cluster@}
-    exec env ROWSAFE_CREATE_CLUSTER_ERR=$O/create-cluster.err ROWSAFE_PG_ROOT=$W/pgroot $C "\${i%.service}" ;;
+    # The unit's output goes to its journal (stood in by a file).
+    env ROWSAFE_PG_ROOT=$W/pgroot $C "\${i%.service}" 2>>/tmp/rowsafe-fake/journal
+    exit \$? ;;
 esac
 exit 0
 EOF
   chmod 755 "$F/systemctl"
+  printf '#!/bin/sh\ncat /tmp/rowsafe-fake/journal 2>/dev/null\n' >"$F/journalctl"
+  chmod 755 "$F/journalctl"
   helper() {
-    timeout 30 env ROWSAFE_SYSTEMCTL="$F/systemctl" STATE_DIRECTORY="$W/helper-state" RUNTIME_DIRECTORY="$O" "$H" 2>>"$W/helper.log" ||
-      fail "the helper failed or hung (exit $?)"
+    timeout 30 env ROWSAFE_SYSTEMCTL="$F/systemctl" ROWSAFE_JOURNALCTL="$F/journalctl" STATE_DIRECTORY="$W/helper-state" \
+      RUNTIME_DIRECTORY="$O" "$H" 2>>"$W/helper.log" || fail "the helper failed or hung (exit $?)"
   }
   as_pg() { runuser -u postgres -- "$@"; }
   request() {
-    rm -f "$O/result"
+    rm -f "$O/result" "$F/journal"
     printf '%s\n' "$1" | as_pg sh -c 'cat >"$1"' sh "$R/request"
     helper
     [ -f "$O/result" ] || fail "no result for: $1"
@@ -1356,7 +1360,7 @@ EOF
   request "fork_3 create-cluster 5441 17 shop_staging"
   result_has "error=a PostgreSQL 17 cluster named shop_staging already exists"
   request "fork_4 create-cluster 5440 17 other"
-  result_has "error=port 5440 is already used by another PostgreSQL cluster"
+  result_has "error=port 5440 is already used by a cluster Rowsafe manages"
   request "fork_5 create-cluster 5442 16 other"
   result_has "error=PostgreSQL 16 is not installed on this server"
   for bad in "fork_6 create-cluster 5443 17 Bad" "fork_6 create-cluster 5443 17 a-b" "fork_6 create-cluster 5443 17 x;reboot" \
@@ -1367,11 +1371,24 @@ EOF
   done
   [ "$(grep -c . "$F/pg_createcluster.calls")" = 1 ] || fail "pg_createcluster ran for a refused request: $(cat "$F/pg_createcluster.calls")"
   # The creator checks on its own too (root could start the unit by hand).
-  rm -f "$O/create-cluster.err"
-  if env ROWSAFE_CREATE_CLUSTER_ERR="$O/create-cluster.err" ROWSAFE_PG_ROOT="$W/pgroot" "$C" "17-6000-x" 2>/dev/null; then
+  if env ROWSAFE_PG_ROOT="$W/pgroot" "$C" "17-6000-x" 2>"$W/creator.err"; then
     fail "the creator made a cluster outside the allowed ports"
   fi
-  grep -q "port 6000 is not in the ports" "$O/create-cluster.err" || fail "the creator didn't explain the refused port"
+  grep -q "port 6000 is not in the ports" "$W/creator.err" || fail "the creator didn't explain the refused port"
+  # The creator writes nothing of Rowsafe's: only the helper lists clusters.
+  grep -qx "ReadWritePaths=/etc/postgresql /var/lib/postgresql -/var/log/postgresql" /etc/systemd/system/rowsafe-pg-create-cluster@.service ||
+    fail "the create unit may write outside PostgreSQL's directories"
+  # A cluster whose configuration doesn't name the requested port isn't listed.
+  cat >/usr/local/bin/pg_createcluster <<'EOF'
+#!/bin/sh
+mkdir -p "/etc/postgresql/$5/$6"
+printf "port = 5999\n" >"/etc/postgresql/$5/$6/postgresql.conf"
+EOF
+  request "fork_9 create-cluster 5447 17 sneaky"
+  result_has "ok=0"
+  grep -q "^error=the new cluster's configuration .* doesn't name port 5447" "$O/result" || fail "a cluster on another port was accepted"
+  ! grep -q "^5447 \|sneaky" /etc/rowsafe/created-clusters || fail "a cluster on another port was listed"
+  rm -rf /etc/postgresql/17/sneaky
   chmod 666 /etc/rowsafe/create-cluster-allowed
   request "fork_7 create-cluster 5445 17 other"
   result_has "error=/etc/rowsafe/create-cluster-allowed is writable by others than root"

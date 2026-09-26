@@ -18,14 +18,15 @@ UMask=0022
 
 # Hardening. pg_createcluster writes the cluster's configuration, data and
 # log directories, runs initdb as postgres (hence CAP_SETUID/CAP_SETGID) and
-# hands the new files to postgres (CAP_CHOWN, CAP_FOWNER). The new cluster
-# is added to /etc/rowsafe/created-clusters; the reason of a failure goes to
-# the root helper's directory.
+# hands the new files to postgres (CAP_CHOWN, CAP_FOWNER). It can't write
+# anything else: the root helper checks the new cluster and lists it in
+# /etc/rowsafe/created-clusters itself, and reads a failure's reason from
+# this unit's journal.
 CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID
 AmbientCapabilities=
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/etc/postgresql /var/lib/postgresql -/var/log/postgresql /etc/rowsafe/created-clusters -/run/rowsafe-pg-restart
+ReadWritePaths=/etc/postgresql /var/lib/postgresql -/var/log/postgresql
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
