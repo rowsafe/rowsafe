@@ -242,6 +242,7 @@ func (c *Collector) Collect(ctx context.Context) protocol.MonitoringReport {
 				r.queryStats.CollectedAt = at.UTC()
 				dm.QueryStats = r.queryStats
 			}
+			dm.Settings = c.settings(ctx, target, at) // settings.go
 		}
 		c.startInsights(ctx, st, target, at)
 		dm.Insights = st.insights.take()

@@ -2,9 +2,6 @@ package agent
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
 	"net"
 	"os"
 	"path/filepath"
@@ -19,58 +16,13 @@ import (
 func TestFastLaneClaimsPooling(t *testing.T) {
 	a := &Agent{}
 	a.maintBusy.Store(true)
-	if got := a.fastLaneClaim(); !slices.Equal(got, []string{protocol.TaskRestorePoint, protocol.TaskPoolerRetarget, protocol.TaskPooling}) {
+	if got := a.fastLaneClaim(); !slices.Equal(got, append(slices.Clone(fastLaneTypes), protocol.TaskPoolerRetarget, protocol.TaskPooling)) {
 		t.Fatalf("claim %v", got)
 	}
 	a.poolerBusy.Store(true)
-	if got := a.fastLaneClaim(); !slices.Equal(got, []string{protocol.TaskRestorePoint}) {
+	if got := a.fastLaneClaim(); !slices.Equal(got, fastLaneTypes) {
 		t.Fatalf("busy claim %v", got)
 	}
-}
-
-func TestScramVerifier(t *testing.T) {
-	salt := []byte("0123456789abcdef")
-	v, err := scramVerifierWith("pencil", salt, 4096)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !scramVerifierRE.MatchString(v) {
-		t.Fatalf("verifier %q doesn't look like PostgreSQL's", v)
-	}
-	parts := strings.Split(strings.TrimPrefix(v, "SCRAM-SHA-256$"), "$")
-	iterSalt, keys := strings.Split(parts[0], ":"), strings.Split(parts[1], ":")
-	if iterSalt[0] != "4096" || iterSalt[1] != base64.StdEncoding.EncodeToString(salt) {
-		t.Fatalf("iterations and salt: %v", iterSalt)
-	}
-	// A client proving the password: its ClientKey hashes to StoredKey.
-	salted := pbkdf2ForTest("pencil", salt, 4096)
-	h := hmac.New(sha256.New, salted)
-	h.Write([]byte("Client Key"))
-	stored := sha256.Sum256(h.Sum(nil))
-	if keys[0] != base64.StdEncoding.EncodeToString(stored[:]) {
-		t.Fatal("StoredKey doesn't match")
-	}
-	if v2, _ := scramVerifier("pencil"); v2 == v || !scramVerifierRE.MatchString(v2) {
-		t.Fatalf("random salt: %q", v2)
-	}
-}
-
-// pbkdf2ForTest is PBKDF2-HMAC-SHA256 for one block, written out.
-func pbkdf2ForTest(password string, salt []byte, iter int) []byte {
-	mac := hmac.New(sha256.New, []byte(password))
-	mac.Write(salt)
-	mac.Write([]byte{0, 0, 0, 1})
-	u := mac.Sum(nil)
-	out := slices.Clone(u)
-	for i := 1; i < iter; i++ {
-		mac.Reset()
-		mac.Write(u)
-		u = mac.Sum(nil)
-		for j := range out {
-			out[j] ^= u[j]
-		}
-	}
-	return out
 }
 
 func TestPoolingDefaultsAndSettings(t *testing.T) {

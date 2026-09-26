@@ -38,7 +38,7 @@ type tempCluster struct {
 	port      int
 }
 
-func freePort(t *testing.T) int {
+func poolFreePort(t *testing.T) int {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -47,9 +47,9 @@ func freePort(t *testing.T) int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
-func startCluster(t *testing.T, base, name string) tempCluster {
+func poolStartCluster(t *testing.T, base, name string) tempCluster {
 	t.Helper()
-	c := tempCluster{dir: filepath.Join(base, name), sock: base, port: freePort(t)}
+	c := tempCluster{dir: filepath.Join(base, name), sock: base, port: poolFreePort(t)}
 	u, _ := user.Current()
 	out, err := exec.Command("initdb", "-D", c.dir, "-U", u.Username, "--auth-local=trust", "--auth-host=scram-sha-256", "-E", "UTF8", "--no-locale").CombinedOutput()
 	if err != nil {
@@ -229,8 +229,8 @@ func TestPoolingReal(t *testing.T) {
 			os.RemoveAll(base)
 		}
 	})
-	primary := startCluster(t, base, "a")
-	other := startCluster(t, base, "b")
+	primary := poolStartCluster(t, base, "a")
+	other := poolStartCluster(t, base, "b")
 	u, _ := user.Current()
 
 	for _, c := range []tempCluster{primary, other} {
@@ -264,7 +264,7 @@ func TestPoolingReal(t *testing.T) {
 	a := &Agent{cfg: Config{StateDir: state, Mode: ModeNative, PGUser: u.Username, Pooler: PoolerConfig{
 		AllowFile: allow, Dir: h.dir, ResultDir: h.resultDir, SocketDir: base, Userlist: filepath.Join(h.confDir, "userlist.txt")}}}
 	db := protocol.DatabaseSpec{ID: "db_1", Name: "shop", Port: primary.port, SocketDir: primary.sock}
-	poolerPort := freePort(t)
+	poolerPort := poolFreePort(t)
 
 	// Turn pooling on.
 	tl := &taskLog{}

@@ -41,6 +41,7 @@ rowsafe pulse             # a 0-100 score per database, with what to fix in plai
 rowsafe fix app           # let Rowsafe fix what pulse found (clean up tables, end a stuck session...)
 rowsafe top app           # the queries that take the most time, and which got slower
 rowsafe insights app      # largest tables, unused indexes, wasted space, vacuum
+rowsafe tune app          # PostgreSQL settings that suit this server; asks, then applies (undo: rowsafe settings undo)
 ```
 
 **Guard**: the safety net for AI agents and deploys. `rowsafe mcp` and the Claude Code plugin create a restore point before migrations and destructive SQL; the GitHub Action saves one before every deploy.
@@ -51,11 +52,12 @@ Full guide: [Quickstart](https://rowsafe.sh/docs/quickstart).
 
 | Path | What it is |
 |---|---|
-| `cmd/rowsafe-agent`, `internal/agent` | The agent. Makes outbound HTTPS requests only and runs a fixed set of tasks: inspect, adopt, check, backup, restore test, restore point, a PostgreSQL restart when you ask for one, Rewind (a copy next to production, compare, bring rows back, rewind in place and undo) when you ask, and health fixes you apply (VACUUM, ANALYZE, rebuilding or removing an index, cancelling a query, ending a session, removing an inactive replication slot). |
+| `cmd/rowsafe-agent`, `internal/agent` | The agent. Makes outbound HTTPS requests only and runs a fixed set of tasks: inspect, adopt, check, backup, restore test, restore point, a PostgreSQL restart when you ask for one, Rewind (a copy next to production, compare, bring rows back, rewind in place and undo) when you ask, health fixes you apply (VACUUM, ANALYZE, rebuilding or removing an index, cancelling a query, ending a session, removing an inactive replication slot), and PostgreSQL settings changes you choose (ALTER SYSTEM + reload, checked again on the server; never its own archiving settings). |
 | `cmd/rowsafe`, `client` | The CLI. |
 | `mcp`, `integrations/claude-code` | Guard: `rowsafe mcp`, an MCP server for AI assistants, and a Claude Code plugin that creates a restore point before migrations. |
 | `integrations/github-action` | Guard in CI: a GitHub Action that saves a Mark (restore point) before every deploy, published as `rowsafe/action`. |
-| `collect` | What the agent's monitoring reads: database and host metrics, locks, replication, query statistics and table insights. |
+| `collect` | What the agent's monitoring reads: database and host metrics, locks, replication, query statistics, table insights and PostgreSQL settings. |
+| `tune` | The settings that matter, explained; recommendations for a server's memory, CPUs and disk; and the values Rowsafe refuses. |
 | `protocol` | The API types shared by the agent, the CLI and the Rowsafe service. |
 | `internal/pgbackrest`, `internal/pginspect` | PostgreSQL backup and inspection. |
 | `scripts/install.sh` | The installer served at `https://rowsafe.sh`. |

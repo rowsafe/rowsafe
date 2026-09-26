@@ -188,16 +188,17 @@ func TestPlainWords(t *testing.T) {
 func TestFastLaneClaimsMaintenanceOneAtATime(t *testing.T) {
 	a := &Agent{}
 	a.poolerBusy.Store(true) // pooling tasks: TestFastLaneClaimsPooling
-	if got := a.fastLaneClaim(); !slices.Equal(got, []string{protocol.TaskRestorePoint, protocol.TaskMaintenance,
+	if got := a.fastLaneClaim(); !slices.Equal(got, []string{protocol.TaskRestorePoint, protocol.TaskCopySchema, protocol.TaskMaintenance,
 		protocol.TaskRewindCompare, protocol.TaskRewindRows, protocol.TaskRewindDrop, protocol.TaskRewindCleanup,
-		protocol.TaskFindMoment}) {
+		protocol.TaskFindMoment, protocol.TaskDBAdmin, protocol.TaskMigrate, protocol.TaskSettings,
+		protocol.TaskSecurityScan, protocol.TaskSecurityFix}) {
 		t.Fatalf("idle claim %v", got)
 	}
 	a.maintBusy.Store(true)
-	if got := a.fastLaneClaim(); !slices.Equal(got, []string{protocol.TaskRestorePoint}) {
+	if got := a.fastLaneClaim(); !slices.Equal(got, []string{protocol.TaskRestorePoint, protocol.TaskCopySchema}) {
 		t.Fatalf("busy claim %v", got)
 	}
-	if len(fastLaneTypes) != 1 {
+	if len(fastLaneTypes) != 2 {
 		t.Fatal("fastLaneClaim modified fastLaneTypes")
 	}
 }

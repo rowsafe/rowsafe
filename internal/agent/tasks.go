@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -47,6 +48,9 @@ func (l *taskLog) String() string {
 }
 
 func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (any, error) {
+	if protocol.IsStandbyTask(task.Type) {
+		return a.runStandbyTask(ctx, task, tl) // standby*.go
+	}
 	if task.Database != nil {
 		switch task.Type { // connection pooling (pooling.go)
 		case protocol.TaskPooling:
@@ -86,9 +90,19 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 				return nil, err
 			}
 		}
+		defer a.measureSoon()
+		if p.Repo == protocol.RepoSecond {
+			return a.secondCopyBackup(ctx, db, p.Type, tl)
+		}
 		return a.backup(ctx, db, p.Type, tl)
 	case protocol.TaskDrill:
-		return a.drill(ctx, db, task.ID, tl)
+		var p protocol.DrillParams
+		if len(task.Params) > 0 {
+			if err := json.Unmarshal(task.Params, &p); err != nil {
+				return nil, err
+			}
+		}
+		return a.drillFrom(ctx, db, task.ID, p.Repo, tl)
 	case protocol.TaskRestorePoint:
 		var p protocol.RestorePointParams
 		if err := json.Unmarshal(task.Params, &p); err != nil {
@@ -115,6 +129,10 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 			return nil, err
 		}
 		return res, err
+	case protocol.TaskSettings: // settings.go
+		return runRewind(ctx, task, tl, db, a.changeSettings)
+	case protocol.TaskSecurityScan, protocol.TaskSecurityFix: // security.go
+		return a.runSecurityTask(ctx, task, tl, db)
 	case protocol.TaskRewindCopy:
 		return runRewind(ctx, task, tl, db, a.rewindCopy)
 	case protocol.TaskRewindDrop:
@@ -129,8 +147,23 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 		return runRewind(ctx, task, tl, db, a.rewindUndo)
 	case protocol.TaskRewindCleanup:
 		return runRewind(ctx, task, tl, db, a.rewindCleanup)
+	case protocol.TaskIndexAdvisor:
+		return a.runIndexAdvisor(ctx, task, db, tl)
+	case protocol.TaskPGUpdate, protocol.TaskSecurityUpdates, protocol.TaskReboot, protocol.TaskUpgradeCheck,
+		protocol.TaskUpgradeRehearsal, protocol.TaskUpgrade, protocol.TaskUpgradeUndo, protocol.TaskUpgradeCleanup:
+		return a.runUpgradeTask(ctx, task, tl, db) // upgrade_tasks.go
 	case protocol.TaskFindMoment:
 		return runRewind(ctx, task, tl, db, a.findMoment)
+	case protocol.TaskMigrate, protocol.TaskMigrateCopy: // move in (migrate.go)
+		return a.runMigrate(ctx, task, db, tl)
+	case protocol.TaskPreviewMigration: // Guard (copies_*.go)
+		return runRewind(ctx, task, tl, db, a.previewMigration)
+	case protocol.TaskSafeCopy:
+		return runRewind(ctx, task, tl, db, a.safeCopy)
+	case protocol.TaskCopySchema:
+		return runRewind(ctx, task, tl, db, a.readCopySchema)
+	case protocol.TaskDBAdmin: // Databases & users (dbadmin.go)
+		return a.runDBAdmin(ctx, task, tl, db)
 	}
 	return nil, fmt.Errorf("unsupported task type %q (agent %s)", task.Type, Version)
 }
@@ -169,9 +202,12 @@ var numCPU = runtime.NumCPU
 // writeConfig renders the pgBackRest config for db. It is rewritten before
 // every operation so retention and credential changes take effect.
 func (a *Agent) writeConfig(db protocol.DatabaseSpec, in protocol.InspectResult) error {
-	if err := a.cfg.Repo.Validate(); err != nil {
+	repo, err := a.dbRepo(db) // Rowsafe Storage, this agent's bucket, or one a primary handed over (standby)
+	if err != nil {
 		return err
 	}
+	a.confMu.Lock()
+	defer a.confMu.Unlock()
 	for _, dir := range []string{a.cfg.ConfigDir, a.cfg.LogDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
@@ -181,15 +217,24 @@ func (a *Agent) writeConfig(db protocol.DatabaseSpec, in protocol.InspectResult)
 	if a.cfg.Sidecar() {
 		logDir = "" // container logs only
 	}
-	conf := pgbackrest.RenderConfig(a.cfg.Repo, pgbackrest.ConfigInput{
+	a.writeSecondCopyConfig(db, in, logDir)
+	conf := pgbackrest.RenderConfig(repo, pgbackrest.ConfigInput{
 		Stanza: db.Stanza, DataDir: in.DataDirectory, Port: db.Port, SocketDir: db.SocketDir,
 		User: a.cfg.PGUser, RetentionFull: db.RetentionFull, LogPath: logDir,
 		ProcessMax: pgbackrest.ProcessMax(numCPU()),
 		Exclude:    a.backupExclude(), // rewind_contents.go
 	})
 	path := a.cfg.configPath(db.Stanza)
-	if old, err := os.ReadFile(path); err == nil && string(old) == conf {
+	old, err := os.ReadFile(path)
+	if err == nil && string(old) == conf {
 		return nil
+	}
+	if err == nil && pgbackrest.Location(string(old)) != pgbackrest.Location(conf) {
+		// Moving to another repository: note where the stanza exists now
+		// (configs from before markers), so it is created in the new one.
+		if _, err := os.Stat(a.cfg.repoMarkerPath(db.Stanza)); errors.Is(err, os.ErrNotExist) {
+			_ = writeFileAtomic(a.cfg.repoMarkerPath(db.Stanza), []byte(pgbackrest.Location(string(old))), 0o600)
+		}
 	}
 	return writeFileAtomic(path, []byte(conf), 0o600)
 }
@@ -212,7 +257,8 @@ func (a *Agent) adopt(ctx context.Context, db protocol.DatabaseSpec, p protocol.
 			err = a.sidecarPreflight(ctx, db, in, tl)
 		}
 	} else {
-		pi.ArchiveCommand, err = pgbackrest.ArchiveCommand(a.cfg.PgBackRestBin, a.cfg.configPath(db.Stanza), db.Stanza)
+		pi.ArchiveCommand, err = a.nativeArchiveCommand(db)
+		pi.Own = a.ownArchiveCommand(db)
 	}
 	if err != nil {
 		return &protocol.AdoptResult{Inspect: in}, err
@@ -226,13 +272,24 @@ func (a *Agent) adopt(ctx context.Context, db protocol.DatabaseSpec, p protocol.
 		tl.Printf("plan only: %d changes, nothing was modified", len(plan.Changes))
 		return res, nil
 	}
-	if err := a.cfg.Repo.Validate(); err != nil {
+	if err := a.cfg.ValidateRepo(); err != nil {
 		return res, err
 	}
 
+	folder, err := a.prepareFolder(db, p.ExistingBackups, tl) // taskerror.go
+	if err != nil {
+		return res, err
+	}
+	res.RepoFolder = folder
 	tl.Printf("writing %s", a.cfg.configPath(db.Stanza))
 	if err := a.writeConfig(db, in); err != nil {
 		return res, err
+	}
+	if !a.cfg.Sidecar() && a.cfg.SecondCopy() {
+		// archive_command queues WAL for the second copy here.
+		if dir, err := a.cfg.secondCopyQueue(db.Stanza); err == nil {
+			_ = os.MkdirAll(dir, 0o700)
+		}
 	}
 	if a.cfg.Sidecar() {
 		// archive_command writes here as soon as it is in effect.
@@ -241,11 +298,10 @@ func (a *Agent) adopt(ctx context.Context, db protocol.DatabaseSpec, p protocol.
 			return res, err
 		}
 	}
-	out, err := a.cli(db).StanzaCreate(ctx)
-	tl.Output("stanza-create", out)
-	if err != nil {
+	if err := a.createStanza(ctx, db, in, p.ExistingBackups, tl); err != nil { // taskerror.go
 		return res, err
 	}
+	a.stanzaCreated(db.Stanza)
 	if err := applySettings(ctx, a.target(db), plan.Settings, tl); err != nil {
 		return res, err
 	}
@@ -338,6 +394,9 @@ func (a *Agent) check(ctx context.Context, db protocol.DatabaseSpec, tl *taskLog
 	if err := a.writeConfig(db, in); err != nil {
 		return res, err
 	}
+	if err := a.ensureStanza(ctx, db, tl); err != nil {
+		return res, err
+	}
 	if a.cfg.Sidecar() {
 		// pgbackrest check switches WAL segments and waits until the segment
 		// is in the repository, so here it proves the whole path: PostgreSQL
@@ -366,6 +425,9 @@ func (a *Agent) backup(ctx context.Context, db protocol.DatabaseSpec, typ string
 		return nil, err
 	}
 	if err := a.writeConfig(db, in); err != nil {
+		return nil, err
+	}
+	if err := a.ensureStanza(ctx, db, tl); err != nil {
 		return nil, err
 	}
 	cli := a.cli(db)

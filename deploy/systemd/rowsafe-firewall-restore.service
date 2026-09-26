@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-firewall-restore.service: loads the rules Rowsafe's firewall
+# helper keeps (/var/lib/rowsafe-firewall) at boot, after the system's own
+# firewall. Installed by https://rowsafe.sh/install only when root allowed
+# it; remove it with --no-allow-firewall.
+
+[Unit]
+Description=Rowsafe: load the PostgreSQL port rules at boot
+Documentation=https://rowsafe.sh/docs/guides/security
+After=nftables.service ufw.service firewalld.service network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/rowsafe/rowsafe-firewall --restore
+RuntimeDirectory=rowsafe-firewall
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+StateDirectory=rowsafe-firewall
+StateDirectoryMode=0700
+UMask=0022
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

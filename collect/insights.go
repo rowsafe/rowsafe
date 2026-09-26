@@ -135,11 +135,14 @@ func CollectInsights(ctx context.Context, t Target) (*protocol.Insights, error) 
 			names, err = pgx.CollectRows(rows, pgx.RowTo[string])
 		}
 	}
+	ins := &protocol.Insights{Databases: []protocol.InsightsDatabase{}}
+	if err == nil {
+		advisorCluster(ctx, conn, ins) // advisor (advisor.go)
+	}
 	conn.Close(context.WithoutCancel(ctx))
 	if err != nil {
 		return nil, fmt.Errorf("listing databases: %w", err)
 	}
-	ins := &protocol.Insights{Databases: []protocol.InsightsDatabase{}}
 	emptyListsOf(ins)
 	if inRecovery {
 		ins.Notes = append(ins.Notes, "This server is a replica: index usage, sequential scans and dead rows are tracked on the primary, so those lists are left out.")
@@ -158,6 +161,7 @@ func CollectInsights(ctx context.Context, t Target) (*protocol.Insights, error) 
 		ins.Databases = append(ins.Databases, examineDatabase(ctx, t, name, inRecovery, ins))
 	}
 	sortAndCap(ins)
+	sortAndCapAdvisor(ins) // advisor (advisor.go)
 	ins.DurationMs = time.Since(start).Milliseconds()
 	return ins, nil
 }
@@ -226,6 +230,10 @@ func examineDatabase(ctx context.Context, t Target, name string, inRecovery bool
 		run("unused indexes", func() error { return q.unusedIndexes(ctx, ins, info.StatsReset) })
 		run("sequential scans", func() error { return q.seqScans(ctx, ins) })
 		run("vacuum statistics", func() error { return q.vacuumStats(ctx, ins) })
+	}
+	// advisor (advisor.go)
+	for _, c := range q.advisorChecks(ins, inRecovery, info.StatsReset) {
+		run(c.what, func() error { return c.fn(ctx) })
 	}
 	return info
 }

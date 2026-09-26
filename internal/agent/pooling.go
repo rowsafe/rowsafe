@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -311,8 +312,6 @@ func fillSettings(s, def protocol.PoolingSettings, maxConnections, reserved int)
 // interfaceAddrs is the host's addresses (a variable for tests).
 var interfaceAddrs = net.InterfaceAddrs
 
-var cgnat = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
-
 // listenAddresses turns a listen choice into PgBouncer's listen_addr.
 func listenAddresses(listen string) ([]string, error) {
 	switch listen {
@@ -331,7 +330,7 @@ func listenAddresses(listen string) ([]string, error) {
 		if !ok || ipn.IP.IsLoopback() || ipn.IP.IsLinkLocalUnicast() {
 			continue
 		}
-		if ipn.IP.IsPrivate() || cgnat.Contains(ipn.IP) {
+		if addr, ok := netip.AddrFromSlice(ipn.IP); ok && privateAddr(addr.Unmap()) {
 			if s := ipn.IP.String(); !slices.Contains(out, s) && len(out) < 16 {
 				out = append(out, s)
 			}
@@ -342,16 +341,16 @@ func listenAddresses(listen string) ([]string, error) {
 
 // ---- PostgreSQL side ----
 
-// clusterFacts is what turning pooling on needs to know about PostgreSQL.
-type clusterFacts struct {
+// poolerClusterFacts is what turning pooling on needs to know about PostgreSQL.
+type poolerClusterFacts struct {
 	maxConnections, reserved int
 	inRecovery               bool
 	md5Roles                 []string
 	databases                []string // connectable, template1 included
 }
 
-func readClusterFacts(ctx context.Context, conn *pgx.Conn) (clusterFacts, error) {
-	var f clusterFacts
+func readClusterFacts(ctx context.Context, conn *pgx.Conn) (poolerClusterFacts, error) {
+	var f poolerClusterFacts
 	err := conn.QueryRow(ctx, `
 		SELECT current_setting('max_connections')::int,
 		       current_setting('superuser_reserved_connections')::int + coalesce(nullif(current_setting('reserved_connections', true), ''), '0')::int,
@@ -398,7 +397,7 @@ $f$`,
 	`GRANT EXECUTE ON FUNCTION rowsafe_pgbouncer.user_lookup(text) TO rowsafe_pgbouncer`,
 }
 
-var scramVerifierRE = regexp.MustCompile(`^SCRAM-SHA-256\$[0-9]+:[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$`)
+var poolerVerifierRE = regexp.MustCompile(`^SCRAM-SHA-256\$[0-9]+:[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$`)
 
 // ensureLookupRole creates or updates rowsafe_pgbouncer (with verifier as
 // its password when set) and the lookup function in dbs.
@@ -417,7 +416,7 @@ func ensureLookupRole(ctx context.Context, connect func(context.Context, string)
 	}
 	alter := `ALTER ROLE rowsafe_pgbouncer WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 20`
 	if verifier != "" {
-		if !scramVerifierRE.MatchString(verifier) {
+		if !poolerVerifierRE.MatchString(verifier) {
 			return errors.New("invalid SCRAM verifier")
 		}
 		alter += ` PASSWORD '` + verifier + `'`
@@ -550,7 +549,9 @@ func hbaHint(err error, host string, port int) string {
 
 // ---- passwords ----
 
-func randomPassword() string {
+// poolerPassword is a random password for rowsafe_pgbouncer: hex, which the
+// helper's strict pattern takes.
+func poolerPassword() string {
 	b := make([]byte, 32)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
@@ -692,7 +693,7 @@ func (a *Agent) poolingOn(ctx context.Context, db protocol.DatabaseSpec, want pr
 		password, err = readUserlistPassword(a.cfg.Pooler.Userlist)
 	}
 	if fresh || err != nil {
-		password = randomPassword()
+		password = poolerPassword()
 		if verifier, err = scramVerifier(password); err != nil {
 			return res, err
 		}
@@ -1076,6 +1077,15 @@ func (a *Agent) poolerStatus(ctx context.Context) *protocol.PoolerStatus {
 
 func redactErr(err error, url string) string {
 	return strings.ReplaceAll(err.Error(), url, pgbouncer.Redact(url))
+}
+
+// poolerDatabases are the Rowsafe databases the managed PgBouncer serves
+// (StandbyHeartbeat.PoolerDatabases).
+func (a *Agent) poolerDatabases() []string {
+	if st, err := a.loadPoolerState(); err == nil && st != nil && st.DatabaseID != "" {
+		return []string{st.DatabaseID}
+	}
+	return nil
 }
 
 // poolerSources are the PgBouncer admin consoles monitoring reads.
