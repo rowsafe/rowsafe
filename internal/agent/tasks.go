@@ -262,6 +262,11 @@ func (a *Agent) adopt(ctx context.Context, db protocol.DatabaseSpec, p protocol.
 		return res, err
 	}
 
+	folder, err := a.prepareFolder(db, p.ExistingBackups, tl) // taskerror.go
+	if err != nil {
+		return res, err
+	}
+	res.RepoFolder = folder
 	tl.Printf("writing %s", a.cfg.configPath(db.Stanza))
 	if err := a.writeConfig(db, in); err != nil {
 		return res, err
@@ -279,9 +284,7 @@ func (a *Agent) adopt(ctx context.Context, db protocol.DatabaseSpec, p protocol.
 			return res, err
 		}
 	}
-	out, err := a.cli(db).StanzaCreate(ctx)
-	tl.Output("stanza-create", out)
-	if err != nil {
+	if err := a.createStanza(ctx, db, in, p.ExistingBackups, tl); err != nil { // taskerror.go
 		return res, err
 	}
 	a.stanzaCreated(db.Stanza)

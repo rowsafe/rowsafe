@@ -348,7 +348,8 @@ func (a *Agent) repoFor(db protocol.DatabaseSpec) pgbackrest.Repo {
 // saveHandedRepo stores the primary's repository for db (0600).
 func (a *Agent) saveHandedRepo(dbID string, s protocol.StandbyRepo) error {
 	r := pgbackrest.Repo{Endpoint: s.Endpoint, Bucket: s.Bucket, Region: s.Region, Key: s.Key, KeySecret: s.KeySecret,
-		CipherPass: s.CipherPass, PathPrefix: s.PathPrefix, URIStyle: s.URIStyle, Port: s.Port, SkipTLSVerify: s.SkipTLSVerify}
+		CipherPass: s.CipherPass, PathPrefix: s.PathPrefix, URIStyle: s.URIStyle, Port: s.Port, SkipTLSVerify: s.SkipTLSVerify,
+		Folder: validFolder(s.Folder)}
 	if s.CAPEM != "" {
 		if err := writeFileAtomic(a.caPath(dbID), []byte(s.CAPEM), 0o600); err != nil {
 			return err
@@ -374,8 +375,12 @@ func (a *Agent) handedRepo(db protocol.DatabaseSpec) (protocol.StandbyRepo, erro
 	if err := r.Validate(); err != nil {
 		return protocol.StandbyRepo{}, err
 	}
+	if r.Folder == "" {
+		r.Folder = a.repoFolder(db.Stanza) // taskerror.go
+	}
 	out := protocol.StandbyRepo{Endpoint: r.Endpoint, Bucket: r.Bucket, Region: r.Region, Key: r.Key, KeySecret: r.KeySecret,
-		CipherPass: r.CipherPass, PathPrefix: r.PathPrefix, URIStyle: r.URIStyle, Port: r.Port, SkipTLSVerify: r.SkipTLSVerify}
+		CipherPass: r.CipherPass, PathPrefix: r.PathPrefix, URIStyle: r.URIStyle, Port: r.Port, SkipTLSVerify: r.SkipTLSVerify,
+		Folder: r.Folder}
 	if r.CAFile != "" {
 		pem, err := os.ReadFile(r.CAFile)
 		if err != nil {

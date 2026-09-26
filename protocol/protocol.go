@@ -151,6 +151,9 @@ type AdoptParams struct {
 	Apply bool `json:"apply"`
 	// Force replaces an existing, foreign archive_command (e.g. WAL-G).
 	Force bool `json:"force,omitempty"`
+	// ExistingBackups (ExistingBackups* in taskerror.go) says what to do
+	// when the backup folder already has something in it; "" stops there.
+	ExistingBackups string `json:"existing_backups,omitempty"`
 }
 
 type BackupParams struct {
@@ -270,6 +273,8 @@ type CompleteRequest struct {
 	Error  string          `json:"error,omitempty"`
 	Log    string          `json:"log,omitempty"`
 	Result json.RawMessage `json:"result,omitempty"`
+	// ErrorInfo explains a failure caused by a tool (taskerror.go).
+	ErrorInfo *TaskError `json:"error_info,omitempty"`
 }
 
 // ---- Task results ----
@@ -320,6 +325,9 @@ type AdoptResult struct {
 	Applied         bool          `json:"applied"`
 	RestartRequired bool          `json:"restart_required"`
 	Warnings        []string      `json:"warnings,omitempty"`
+	// RepoFolder is the backup folder when it isn't the default one (the
+	// setup started fresh in a new folder: ExistingBackupsNewFolder).
+	RepoFolder string `json:"repo_folder,omitempty"`
 }
 
 // RestartResult is the agent's report for a restart task.
@@ -505,6 +513,10 @@ type TaskView struct {
 	CreatedAt    time.Time       `json:"created_at"`
 	StartedAt    *time.Time      `json:"started_at,omitempty"`
 	FinishedAt   *time.Time      `json:"finished_at,omitempty"`
+	// ErrorInfo and Problem explain a failed task (taskerror.go): what the
+	// agent reported, and the control plane's plain words and fixes.
+	ErrorInfo *TaskError   `json:"error_info,omitempty"`
+	Problem   *TaskProblem `json:"problem,omitempty"`
 }
 
 type Backup struct {

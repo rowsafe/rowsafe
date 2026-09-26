@@ -400,7 +400,7 @@ func (a *Agent) ensureStanza(ctx context.Context, db protocol.DatabaseSpec, tl *
 		tl.Output("stanza-create", out)
 	}
 	if err != nil {
-		return fmt.Errorf("creating the stanza in the new storage: %w: %s", err, lastLine(out))
+		return fmt.Errorf("creating the stanza in the new storage: %w", err)
 	}
 	a.stanzaCreated(db.Stanza)
 	a.log.Info("created the stanza in the new storage", "stanza", db.Stanza)
@@ -469,7 +469,9 @@ func (a *Agent) dbRepo(db protocol.DatabaseSpec) (pgbackrest.Repo, error) {
 	if err := a.cfg.ValidateRepo(); err != nil {
 		return pgbackrest.Repo{}, err
 	}
-	return a.repo()
+	r, err := a.repo()
+	r.Folder = a.repoFolder(db.Stanza) // a fresh start in a new folder (taskerror.go)
+	return r, err
 }
 
 // errStandbyRowsafeStorage: a primary on Rowsafe Storage can't hand its
