@@ -29,7 +29,16 @@
 #                          ask (Restart and Rewind in the dashboard, `rowsafe
 #                          restart`); only when someone confirms
 #   --no-allow-restart     turn that off again
+#   --allow-updates        allow Rowsafe to install PostgreSQL updates and upgrade
+#                          PostgreSQL when you click Update or Upgrade (needs
+#                          --allow-restart); --no-allow-updates turns it off
+#   --allow-security-updates  allow Rowsafe to install the server's security
+#                          updates when you click Install; --no-allow-security-updates
+#   --allow-reboot         allow Rowsafe to reboot the server when you click
+#                          Reboot; --no-allow-reboot
 #   --check-storage        test the configured backup storage; change nothing
+#   --add-storage          set up a second backup copy in another bucket (guided)
+#   --remove-second-copy   stop sending backups to the second copy
 #   --uninstall            stop and remove the agent; keep configuration and state
 #   --uninstall --purge    also delete /etc/rowsafe, /var/lib/rowsafe, /var/log/rowsafe
 #   --download-only DIR    download and verify the agent into DIR; install nothing
@@ -90,7 +99,19 @@ RESTART_SERVICE_FILE=/etc/systemd/system/rowsafe-pg-restart.service
 RESTART_PATH_FILE=/etc/systemd/system/rowsafe-pg-restart.path
 RESTART_ALLOW_FILE=$CONFIG_DIR/restart-allowed
 RESTART_DIR=$STATE_DIR/restart
+# Updates on request (--allow-updates, --allow-security-updates,
+# --allow-reboot): the same helper, run by its own service and path unit.
+UPDATE_SERVICE_FILE=/etc/systemd/system/rowsafe-pg-update.service
+UPDATE_PATH_FILE=/etc/systemd/system/rowsafe-pg-update.path
+UPDATES_ALLOW_FILE=$CONFIG_DIR/updates-allowed
 AGENT_USER=postgres
+# >>> mysql: a server with MySQL or MariaDB and no PostgreSQL runs the agent
+# as the mysql user (detect_host_engine), like postgres on a PostgreSQL one.
+HOST_ENGINE=postgresql
+AGENT_HOME=/var/lib/postgresql
+PERCONA_KEY_FPR=4D1BB29D63D98E422B2113B19334A25F8507EFA5
+MYSQL_CONF_LINK=/etc/mysql/conf.d/zz-rowsafe.cnf
+# <<< mysql
 DEFAULT_RELEASES_URL=https://releases.rowsafe.sh/agent
 MAX_ARTIFACT_SIZE=536870912 # 512 MiB, the same limit the agent enforces
 
@@ -100,7 +121,14 @@ AGENT_VARS="ROWSAFE_URL ROWSAFE_ENROLL_TOKEN $REQUIRED_REPO_VARS
   ROWSAFE_REPO_S3_REGION ROWSAFE_REPO_S3_URI_STYLE ROWSAFE_REPO_PATH_PREFIX
   ROWSAFE_REPO_S3_PORT ROWSAFE_REPO_S3_CA_FILE ROWSAFE_REPO_S3_VERIFY_TLS
   ROWSAFE_AUTO_UPDATE ROWSAFE_PG_USER ROWSAFE_PG_BIN_DIR ROWSAFE_PGBACKREST_BIN
-  ROWSAFE_DRILL_DIR ROWSAFE_DRILL_PORT ROWSAFE_POLL_INTERVAL ROWSAFE_HEARTBEAT_INTERVAL"
+  ROWSAFE_DRILL_DIR ROWSAFE_DRILL_PORT ROWSAFE_POLL_INTERVAL ROWSAFE_HEARTBEAT_INTERVAL
+  ROWSAFE_MYSQL_BIN_DIR ROWSAFE_MYSQL_SCRATCH_MEMORY"
+# ---- second copy (--add-storage): the second storage's settings
+REPO2_VARS="ROWSAFE_REPO2_S3_ENDPOINT ROWSAFE_REPO2_S3_BUCKET ROWSAFE_REPO2_S3_KEY ROWSAFE_REPO2_S3_KEY_SECRET ROWSAFE_REPO2_CIPHER_PASS"
+REPO2_OPT_VARS="ROWSAFE_REPO2_S3_REGION ROWSAFE_REPO2_S3_URI_STYLE ROWSAFE_REPO2_PATH_PREFIX ROWSAFE_REPO2_S3_PORT ROWSAFE_REPO2_S3_CA_FILE ROWSAFE_REPO2_S3_VERIFY_TLS"
+AGENT_VARS="$AGENT_VARS $REPO2_VARS $REPO2_OPT_VARS"
+SECOND_COPY=''     # --add-storage (add) / --remove-second-copy (remove)
+# ---- end second copy
 
 PROMPT=auto        # auto: ask on a terminal when needed; never: --no-prompt
 SETUP_STORAGE=0    # --setup-storage: offer to replace configured storage settings
@@ -113,6 +141,9 @@ NO_SETUP=0         # --no-setup
 PROTECT_NAME=''    # --protect NAME
 PROTECT_PORT=''    # --protect-port PORT
 ALLOW_RESTART=''   # --allow-restart (yes) / --no-allow-restart (no); '' = ask once, on a terminal
+ALLOW_UPDATES=''   # --allow-updates / --no-allow-updates (PostgreSQL updates and upgrades)
+ALLOW_SECURITY=''  # --allow-security-updates / --no-allow-security-updates
+ALLOW_REBOOT=''    # --allow-reboot / --no-allow-reboot
 SETUP_STOP=0       # the plan limit was reached: don't offer more databases
 
 TMP=
@@ -171,7 +202,17 @@ Options (when piping, pass them after `sh -s --`):
                          (Restart and Rewind in the dashboard, `rowsafe restart`),
                          only when someone confirms
   --no-allow-restart     turn that off (and remove the restart helper)
+  --allow-updates        allow Rowsafe to install PostgreSQL updates and upgrade PostgreSQL
+                         when you click Update or Upgrade and confirm (needs --allow-restart)
+  --no-allow-updates     turn that off
+  --allow-security-updates  allow Rowsafe to install the server's security updates when
+                         you click Install and confirm (--no-allow-security-updates: off)
+  --allow-reboot         allow Rowsafe to reboot the server when you click Reboot and
+                         confirm (--no-allow-reboot: off)
   --check-storage        test the backup storage in /etc/rowsafe/agent.env; change nothing
+  --add-storage          add a second backup copy in another bucket, ideally at another
+                         provider (guided, like the first storage), or change it
+  --remove-second-copy   stop sending backups to the second copy (its bucket is kept)
   --uninstall            stop and remove the agent; keep configuration and state
   --uninstall --purge    also delete /etc/rowsafe, /var/lib/rowsafe and /var/log/rowsafe
   --download-only DIR    download and verify the agent into DIR; install nothing
@@ -198,6 +239,14 @@ Backup storage (guided setup):
   Secrets are typed hidden and never printed. Nothing is saved until you have
   answered everything; settings go to /etc/rowsafe/agent.env (postgres, 0600).
   Run it again with --setup-storage to change the storage later.
+
+  A second copy (--add-storage) keeps everything in a second bucket too, with
+  its own key and its own passphrase, so losing one bucket, account or
+  provider never loses your backups. It is set up the same way. PostgreSQL
+  never waits for it: if the second storage is down, backups go on in the
+  first one and Rowsafe alerts you. Without a terminal, set
+  ROWSAFE_REPO2_S3_ENDPOINT, _BUCKET, _KEY, _KEY_SECRET and
+  ROWSAFE_REPO2_CIPHER_PASS (and _S3_REGION) instead.
 
   Without a terminal (cloud-init, CI, configuration management) or with
   --no-prompt, set ROWSAFE_REPO_S3_ENDPOINT, _BUCKET, _KEY, _KEY_SECRET and
@@ -327,8 +376,143 @@ detect_os() {
   esac
 }
 
+# >>> mysql
+# detect_host_engine: without a postgres user but with MySQL or MariaDB,
+# Rowsafe protects MySQL/MariaDB and the agent runs as the mysql user, which
+# can read the data directory (backups) and start private servers on it
+# (restore tests, Rewind copies).
+detect_host_engine() {
+  id -u postgres >/dev/null 2>&1 && return 0
+  id -u mysql >/dev/null 2>&1 || return 0
+  for _b in /usr/sbin/mariadbd /usr/sbin/mysqld; do
+    [ -x "$_b" ] || continue
+    if "$_b" --version 2>/dev/null | grep -qi mariadb; then HOST_ENGINE=mariadb; else HOST_ENGINE=mysql; fi
+    MYSQLD_BIN=$_b
+    AGENT_USER=mysql
+    AGENT_HOME=$STATE_DIR
+    return 0
+  done
+}
+
+engine_label() {
+  case ${1:-$HOST_ENGINE} in mysql) echo MySQL ;; mariadb) echo MariaDB ;; *) echo PostgreSQL ;; esac
+}
+
+# ensure_mysql_tools installs the physical backup tool: mariadb-backup from
+# the same apt source as the server, or Percona XtraBackup (8.0 or 8.4, the
+# server's) from Percona's repository, whose signing key is checked against
+# its pinned fingerprint. pgBackRest is installed too: the installer's
+# storage test uses it.
+ensure_mysql_tools() {
+  _ver=$("$MYSQLD_BIN" --version 2>/dev/null | sed -n 's/.*Ver \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p')
+  if [ "$HOST_ENGINE" = mariadb ]; then
+    if ! have mariadb-backup && ! have mariabackup; then
+      step "Installing mariadb-backup (MariaDB's backup tool)"
+      apt_install mariadb-backup
+    fi
+    TOOLS_SUMMARY="mariadb-backup $(mariadb-backup --version 2>&1 | sed -n 's/.*MariaDB server \([0-9.]*\).*/\1/p')"
+  else
+    case $_ver in
+      8.0.*) _pkg=percona-xtrabackup-80 _repo=pxb-80 ;;
+      8.4.*) _pkg=percona-xtrabackup-84 _repo=pxb-84-lts ;;
+      *) die "MySQL ${_ver:-(unknown version)}: Rowsafe supports MySQL 8.0 and 8.4" ;;
+    esac
+    if ! dpkg -s "$_pkg" >/dev/null 2>&1; then
+      step "Installing Percona XtraBackup ($_pkg) from Percona's repository"
+      have gpg || apt_install gnupg
+      _codename=$(. /etc/os-release && printf '%s' "${VERSION_CODENAME:-}")
+      fetch https://repo.percona.com/yum/PERCONA-PACKAGING-KEY "$TMP/percona.asc"
+      _fpr=$(gpg --show-keys --with-colons "$TMP/percona.asc" 2>/dev/null | awk -F: '$1 == "fpr" { print $10; exit }')
+      [ "$_fpr" = "$PERCONA_KEY_FPR" ] || die "Percona's signing key has an unexpected fingerprint ($_fpr); not installing XtraBackup"
+      gpg --dearmor <"$TMP/percona.asc" >"$TMP/percona.gpg"
+      install -m 0644 -o root -g root "$TMP/percona.gpg" /usr/share/keyrings/rowsafe-percona.gpg
+      echo "deb [signed-by=/usr/share/keyrings/rowsafe-percona.gpg] https://repo.percona.com/$_repo/apt $_codename main" |
+        write_file /etc/apt/sources.list.d/rowsafe-percona-xtrabackup.list 0644 root:root || true
+      APT_UPDATED=0
+      apt_install "$_pkg"
+    fi
+    TOOLS_SUMMARY=$(xtrabackup --version 2>&1 | sed -n 's/^xtrabackup version \([^ ]*\).*/XtraBackup \1/p')
+    have mysqlbinlog || warn "mysqlbinlog is missing (MySQL's server or client package has it): restores need it"
+  fi
+  ok "${TOOLS_SUMMARY:-backup tool installed}"
+  have pgbackrest || apt_install pgbackrest
+}
+
+# mysql_setup gives the agent (the mysql user) what it needs: a unit
+# drop-in that runs it as mysql, an option file Rowsafe writes the binary
+# log settings to (included from /etc/mysql/conf.d, empty until you turn on
+# backups), and, on Ubuntu's AppArmor profile for mysqld, access to Rowsafe's
+# folders (restore tests and copies run mysqld on data under $STATE_DIR).
+mysql_setup() {
+  _dropin=/etc/systemd/system/$SERVICE.d
+  if [ "$AGENT_USER" = postgres ]; then
+    [ ! -f "$_dropin/10-mysql.conf" ] || { rm -f "$_dropin/10-mysql.conf"; UNIT_CHANGED=1; CHANGED=1; }
+    return 0
+  fi
+  install -d -m 0755 "$_dropin"
+  if printf '# Written by the Rowsafe installer: this server runs MySQL or MariaDB.\n[Unit]\nAfter=mysql.service mariadb.service\n[Service]\nUser=mysql\nGroup=mysql\n' |
+    write_file "$_dropin/10-mysql.conf" 0644 root:root; then
+    UNIT_CHANGED=1 CHANGED=1
+  fi
+  install -d -m 0750 -o mysql -g mysql "$CONFIG_DIR/mysql"
+  if [ ! -f "$CONFIG_DIR/mysql/server.cnf" ]; then
+    as_agent sh -c 'umask 027; printf "# Written by Rowsafe (https://rowsafe.sh): binary log settings for backups.\n[mysqld]\n" >"$1"' \
+      rowsafe "$CONFIG_DIR/mysql/server.cnf"
+  fi
+  if [ -d /etc/mysql/conf.d ] && [ ! -e "$MYSQL_CONF_LINK" ]; then
+    ln -s "$CONFIG_DIR/mysql/server.cnf" "$MYSQL_CONF_LINK"
+    ok "$MYSQL_CONF_LINK -> $CONFIG_DIR/mysql/server.cnf (settings Rowsafe needs, added only when you turn on backups)"
+  fi
+  if [ -f /etc/apparmor.d/usr.sbin.mysqld ] && ! grep -qs 'Rowsafe' /etc/apparmor.d/local/usr.sbin.mysqld; then
+    install -d -m 0755 /etc/apparmor.d/local
+    {
+      echo "# Rowsafe: restore tests and Rewind copies run mysqld on data under $STATE_DIR;"
+      echo "# the server reads Rowsafe's binary log settings from $CONFIG_DIR/mysql."
+      echo "$STATE_DIR/ r,"
+      echo "$STATE_DIR/** rwk,"
+      echo "$CONFIG_DIR/mysql/ r,"
+      echo "$CONFIG_DIR/mysql/* r,"
+    } >>/etc/apparmor.d/local/usr.sbin.mysqld
+    if have apparmor_parser && [ -d /sys/kernel/security/apparmor ]; then
+      apparmor_parser -r /etc/apparmor.d/usr.sbin.mysqld 2>/dev/null || warn "could not reload mysqld's AppArmor profile"
+    fi
+  fi
+}
+
+# mysql_account creates Rowsafe's own MySQL/MariaDB account (as root, via
+# the server's socket; or with the administrator password on a terminal).
+mysql_account() {
+  [ "$C_ENGINE" = mysql ] || [ "$C_ENGINE" = mariadb ] || return 0
+  [ ! -f "$STATE_DIR/engines/$C_ENGINE/account-$C_PORT.cnf" ] || return 0
+  _sock=$C_SOCK
+  [ "$_sock" != - ] || _sock=''
+  if "$INSTALL_DIR/rowsafe-agent" setup mysql-account --engine "$C_ENGINE" --port "$C_PORT" ${_sock:+--socket "$_sock"} \
+    --owner "$AGENT_USER" --state-dir "$STATE_DIR" >"$TMP/account.log" 2>&1 </dev/null; then
+    note "$(cat "$TMP/account.log")"
+    return 0
+  fi
+  if [ "$TTY" != 1 ]; then
+    sed 's/^/    /' "$TMP/account.log" >&2
+    warn "could not log in to $(engine_label "$C_ENGINE") as root through its socket; run the installer on a terminal to give the root password once"
+    return 1
+  fi
+  note "Rowsafe needs its own $(engine_label "$C_ENGINE") account; root can't log in without a password here."
+  ask_secret _pw "$(engine_label "$C_ENGINE") root password (used once to create the account, not kept)"
+  ( umask 077; printf '%s' "$_pw" >"$TMP/adminpw" )
+  _pw=''
+  _rc=0
+  "$INSTALL_DIR/rowsafe-agent" setup mysql-account --engine "$C_ENGINE" --port "$C_PORT" ${_sock:+--socket "$_sock"} \
+    --owner "$AGENT_USER" --state-dir "$STATE_DIR" --admin-password-file "$TMP/adminpw" >"$TMP/account.log" 2>&1 </dev/null || _rc=$?
+  rm -f "$TMP/adminpw"
+  if [ "$_rc" = 0 ]; then note "$(cat "$TMP/account.log")"; return 0; fi
+  sed 's/^/    /' "$TMP/account.log" >&2
+  return 1
+}
+# <<< mysql
+
 # check_postgres finds the postgres OS user and the installed server majors.
 check_postgres() {
+  [ "$HOST_ENGINE" = postgresql ] || return 0 # mysql
   id -u "$AGENT_USER" >/dev/null 2>&1 ||
     die "no '$AGENT_USER' user on this host. Rowsafe adopts an existing PostgreSQL; install PostgreSQL first."
   PG_MAJORS=''
@@ -706,7 +890,10 @@ install_restart_helper() {
 # SPDX-License-Identifier: Apache-2.0
 # rowsafe-pg-restart: restarts or stops PostgreSQL when a person asked
 # Rowsafe to (Restart in the dashboard, `rowsafe restart`; Rewind the whole
-# database, which stops PostgreSQL, swaps its data directory and starts it).
+# database, which stops PostgreSQL, swaps its data directory and starts it),
+# and installs PostgreSQL updates, upgrades PostgreSQL, installs security
+# updates or reboots the server when a person clicked that and root allowed
+# it (update mode, below).
 #
 # Installed by https://rowsafe.sh/install as
 # /usr/local/lib/rowsafe/rowsafe-pg-restart, only when root allowed it
@@ -725,17 +912,46 @@ install_restart_helper() {
 # /run/rowsafe-pg-restart/result (root's directory, readable by the agent)
 # as key=value lines: id, action, ok (1 or 0), unit, error and finished_at.
 #
-# The agent reads the next line to know what this helper can do.
+# Update mode (ROWSAFE_HELPER_MODE=update, set by rowsafe-pg-update.service,
+# which rowsafe-pg-update.path starts): the request is
+# /var/lib/rowsafe/restart/update-request, read the same way, and the answer
+# /run/rowsafe-pg-restart/update-result. Only these requests exist:
+#
+#   ID pg-minor-update PORT                  newest minor release of PORT's major
+#   ID pg-install-major PORT MAJOR           install MAJOR (and PORT's extensions for it)
+#   ID pg-upgrade PORT MAJOR METHOD          pg_upgradecluster to MAJOR (copy, clone or link)
+#   ID pg-upgrade-undo PORT start|nostart    back to the version kept by that upgrade
+#   ID pg-upgrade-cleanup PORT               remove the version kept aside by an upgrade or undo
+#   ID security-updates                      install pending security updates
+#   ID reboot                                reboot the server
+#
+# Each needs its word in /etc/rowsafe/updates-allowed (root's, written by
+# the installer): "postgresql" for the pg-* requests, which also only act on
+# a port in /etc/rowsafe/restart-allowed whose unit is Debian's
+# postgresql@MAJOR-NAME.service; "security" and "reboot" for the others.
+# Package names are fixed here: a minor update installs only PORT's major
+# (never another one), a new major only postgresql-MAJOR, its client and the
+# counterparts of the extension packages PORT's major has installed. What an
+# upgrade keeps for undo is recorded in root's state directory, with the data
+# directories it checked. A cluster is only removed while its data directory
+# is still the recorded one (a real directory of the agent user, of that
+# major, not a system directory), and pg_dropcluster then runs as the agent
+# user, never as root (see drop_cluster).
+#
+# The agent reads the next lines to know what this helper can do.
 # actions: restart stop start
+# update-actions: pg-minor-update pg-install-major pg-upgrade pg-upgrade-undo pg-upgrade-cleanup security-updates reboot
 
 set -u
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+PATH=${ROWSAFE_HELPER_PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}
 dir=${ROWSAFE_RESTART_DIR:-/var/lib/rowsafe/restart}
 out_dir=${RUNTIME_DIRECTORY:-/run/rowsafe-pg-restart}
 allow=${ROWSAFE_RESTART_ALLOW:-/etc/rowsafe/restart-allowed}
+updates_allow=${ROWSAFE_UPDATES_ALLOW:-/etc/rowsafe/updates-allowed}
 state=${STATE_DIRECTORY:-/var/lib/rowsafe-pg-restart}
 agent_user=${ROWSAFE_AGENT_USER:-postgres}
 systemctl=${ROWSAFE_SYSTEMCTL:-systemctl}
+mode=${ROWSAFE_HELPER_MODE:-restart}
 min_interval=60
 
 log() { echo "rowsafe-pg-restart: $*" >&2; }
@@ -743,7 +959,13 @@ log() { echo "rowsafe-pg-restart: $*" >&2; }
 # as_agent runs a command with the agent user's privileges.
 as_agent() { setpriv --reuid="$agent_user" --regid="$agent_user" --init-groups -- "$@"; }
 
-id='' action='' unit='' ok=0 err=''
+id='' action='' unit='' ok=0 err='' extra='' result_name=result
+
+# add KEY VALUE adds a line to the answer (one line, at most 1000 bytes).
+add() {
+  extra="$extra$1=$(printf '%s' "$2" | tr '\n\r' '  ' | cut -c1-1000)
+"
+}
 
 # answer writes the result atomically into root's own directory.
 answer() {
@@ -751,9 +973,9 @@ answer() {
     log "cannot write the result in $out_dir"
     exit 0
   }
-  printf 'id=%s\naction=%s\nok=%s\nunit=%s\nerror=%s\nfinished_at=%s\n' "$id" "$action" "$ok" "$unit" "$err" "$(date +%s)" >"$tmp"
+  printf 'id=%s\naction=%s\nok=%s\nunit=%s\nerror=%s\n%sfinished_at=%s\n' "$id" "$action" "$ok" "$unit" "$err" "$extra" "$(date +%s)" >"$tmp"
   chmod 0644 "$tmp"
-  mv -f "$tmp" "$out_dir/result"
+  mv -f "$tmp" "$out_dir/$result_name"
 }
 
 refuse() {
@@ -763,64 +985,611 @@ refuse() {
   exit 0
 }
 
-request=$dir/request
-as_agent test -e "$request" -o -L "$request" 2>/dev/null || exit 0
-# Only a regular file is read, for at most 5 seconds; whatever it was, it is
-# removed so the path unit doesn't fire again.
-# shellcheck disable=SC2016 # $1 expands in the inner shell
-line=$(as_agent sh -c '
-  if [ -f "$1" ] && [ ! -L "$1" ]; then timeout 5 head -c 200 -- "$1"; fi
-  rm -f -- "$1"' rowsafe-pg-restart "$request" 2>/dev/null | head -n 1)
+# have_request FILE: something (anything) is at FILE.
+have_request() { as_agent test -e "$1" -o -L "$1" 2>/dev/null; }
 
-if printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} [0-9]{1,5}$'; then
-  id=${line% *}
-  action=restart
-  port=${line#* }
-elif printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} (restart|stop|start) [0-9]{1,5}$'; then
-  id=${line%% *}
-  rest=${line#* }
-  action=${rest% *}
-  port=${rest#* }
-else
-  refuse "malformed request"
-fi
+# read_request FILE prints the request's first line (at most 200 bytes, read
+# for at most 5 seconds, as the agent user, only from a regular file) and
+# removes it, whatever it was, so the path unit doesn't fire again.
+read_request() {
+  # shellcheck disable=SC2016 # $1 expands in the inner shell
+  as_agent sh -c '
+    if [ -f "$1" ] && [ ! -L "$1" ]; then timeout 5 head -c 200 -- "$1"; fi
+    rm -f -- "$1"' rowsafe-pg-restart "$1" 2>/dev/null | head -n 1
+}
 
-[ -f "$allow" ] && [ ! -L "$allow" ] || refuse "restarting or stopping PostgreSQL from Rowsafe is not allowed on this server"
-[ "$(stat -c '%u' "$allow")" = 0 ] || refuse "$allow is not owned by root"
-case $(stat -c '%A' "$allow") in
-  ?????w???? | ????????w?) refuse "$allow is writable by others than root" ;;
-esac
-unit=$(awk -v p="$port" '$1 == p && $2 ~ /^[A-Za-z0-9@._-]+\.service$/ { print $2; exit }' "$allow")
-[ -n "$unit" ] || refuse "port $port is not in $allow: restarting or stopping it from Rowsafe is not allowed"
+# check_root_file FILE MISSING: FILE must be a regular file root owns and
+# only root can write; MISSING is the refusal when it isn't there.
+check_root_file() {
+  [ -f "$1" ] && [ ! -L "$1" ] || refuse "$2"
+  [ "$(stat -c '%u' "$1")" = 0 ] || refuse "$1 is not owned by root"
+  case $(stat -c '%A' "$1") in
+    ?????w???? | ????????w?) refuse "$1 is writable by others than root" ;;
+  esac
+}
 
-if [ "$action" = restart ]; then
-  mkdir -p "$state"
-  stamp=$state/last-$unit
+# allowed_unit PORT prints the unit the restart allow list names for PORT.
+allowed_unit() {
+  awk -v p="$1" '$1 == p && $2 ~ /^[A-Za-z0-9@._-]+\.service$/ { print $2; exit }' "$allow"
+}
+
+# ---------------------------------------------------------------- restart mode
+
+restart_main() {
+  have_request "$dir/request" || exit 0
+  line=$(read_request "$dir/request")
+  if printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} [0-9]{1,5}$'; then
+    id=${line% *}
+    action=restart
+    port=${line#* }
+  elif printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} (restart|stop|start) [0-9]{1,5}$'; then
+    id=${line%% *}
+    rest=${line#* }
+    action=${rest% *}
+    port=${rest#* }
+  else
+    refuse "malformed request"
+  fi
+
+  check_root_file "$allow" "restarting or stopping PostgreSQL from Rowsafe is not allowed on this server"
+  unit=$(allowed_unit "$port")
+  [ -n "$unit" ] || refuse "port $port is not in $allow: restarting or stopping it from Rowsafe is not allowed"
+
+  if [ "$action" = restart ]; then
+    mkdir -p "$state"
+    stamp=$state/last-$unit
+    now=$(date +%s)
+    last=$(cat "$stamp" 2>/dev/null || echo 0)
+    case $last in '' | *[!0-9]*) last=0 ;; esac
+    if [ $((now - last)) -lt "$min_interval" ]; then
+      refuse "PostgreSQL ($unit) was restarted less than a minute ago; try again in a minute"
+    fi
+    echo "$now" >"$stamp"
+  fi
+
+  log "$action $unit (request $id)"
+  out=$(timeout 120 "$systemctl" "$action" "$unit" 2>&1 </dev/null)
+  rc=$?
+  if [ "$rc" = 0 ]; then
+    ok=1
+    log "${action} $unit: done"
+  else
+    out=$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)
+    if [ "$rc" = 124 ]; then
+      err="systemctl $action $unit did not finish within 2 minutes"
+    else
+      err="systemctl $action $unit failed${out:+: $out}"
+    fi
+    log "$err"
+  fi
+  answer
+}
+
+# ---------------------------------------------------------------- update mode
+
+work_log=$state/update.log
+
+# tail_log is the end of the current action's log, for errors.
+tail_log() { tail -n 12 "$work_log" 2>/dev/null | tr '\n' ' ' | cut -c1-700; }
+
+# update_allowed WORD REFUSAL: root allowed WORD in the updates allow list.
+update_allowed() {
+  check_root_file "$updates_allow" "$2"
+  awk -v k="$1" '$1 == k { f = 1 } END { exit !f }' "$updates_allow" || refuse "$2"
+}
+
+lsclusters() { pg_lsclusters -h 2>/dev/null; }
+
+# cluster_for_port PORT sets c_major, c_name, c_status, c_datadir and unit
+# for the Debian cluster on PORT, which must be in the restart allow list
+# as its postgresql@MAJOR-NAME.service.
+cluster_for_port() {
+  check_root_file "$allow" "Rowsafe may not restart PostgreSQL on this server, which updating it needs (run the installer again with --allow-restart)"
+  unit=$(allowed_unit "$1")
+  [ -n "$unit" ] || refuse "port $1 is not in $allow: Rowsafe may not restart it, which updating it needs"
+  c_line=$(lsclusters | awk -v p="$1" '$3 == p { print; exit }')
+  [ -n "$c_line" ] || refuse "no PostgreSQL cluster managed by postgresql-common (pg_lsclusters) uses port $1"
+  # shellcheck disable=SC2086 # split the pg_lsclusters line into its fields
+  set -- $c_line
+  c_major=$1 c_name=$2 c_status=$4 c_owner=$5 c_datadir=$6
+  printf '%s\n' "$c_major" | grep -Eq '^[1-9][0-9]$' || refuse "unsupported PostgreSQL version $c_major"
+  printf '%s\n' "$c_name" | grep -Eq '^[A-Za-z0-9_.-]{1,63}$' || refuse "unexpected cluster name $c_name"
+  [ "$c_owner" = "$agent_user" ] || refuse "the cluster on port $port belongs to $c_owner, not $agent_user"
+  [ "$unit" = "postgresql@$c_major-$c_name.service" ] ||
+    refuse "PostgreSQL on port $port runs as $unit, not as postgresql@$c_major-$c_name.service: Rowsafe updates only clusters managed by Debian's postgresql-common"
+}
+
+# cluster_field MAJOR NAME FIELD prints a pg_lsclusters field (3 port,
+# 4 status, 6 data directory).
+cluster_field() { lsclusters | awk -v m="$1" -v n="$2" -v f="$3" '$1 == m && $2 == n { print $f; exit }'; }
+
+pkg_version() { dpkg-query -W -f='${Version}' "$1" 2>/dev/null; }
+
+# installed_pkgs PATTERN prints the installed packages matching PATTERN.
+installed_pkgs() {
+  dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' "$1" 2>/dev/null | awk '$1 == "ii" { print $2 }' |
+    grep -Ev -- '-(dbgsym|dbg|doc)$'
+}
+
+candidate() { apt-cache policy "$1" 2>/dev/null | awk '$1 == "Candidate:" { print $2; exit }'; }
+
+# apt_run ARGS... runs apt-get non-interactively, keeping configuration
+# files as they are and never restarting services by itself (needrestart).
+apt_run() {
+  timeout "${apt_timeout:-1800}" env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1 \
+    APT_LISTCHANGES_FRONTEND=none UCF_FORCE_CONFFOLD=1 \
+    apt-get -q -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
+    "$@" >>"$work_log" 2>&1 </dev/null
+}
+
+apt_refresh() { apt_run update || log "apt-get update failed; using the package lists as they are"; }
+
+# active_since UNIT: when UNIT last became active (monotonic microseconds).
+active_since() { "$systemctl" show -p ActiveEnterTimestampMonotonic --value "$1" 2>/dev/null; }
+
+# set_allowed_unit PORT UNIT points PORT's restart allow list entry at UNIT.
+set_allowed_unit() {
+  tmp=$(mktemp "$allow.XXXXXX") || return 1
+  awk -v p="$1" -v u="$2" '$1 == p { print p, u; next } { print }' "$allow" >"$tmp" &&
+    chmod 0644 "$tmp" && mv -f "$tmp" "$allow"
+}
+
+# A cluster's settings live in the agent user's /etc/postgresql/MAJOR/NAME:
+# change them as that user, never as root.
+set_port() { as_agent pg_conftool "$1" "$2" set port "$3" >>"$work_log" 2>&1; }
+set_start() {
+  # shellcheck disable=SC2016 # $1, $2 and $3 expand in the inner shell
+  as_agent sh -c 'f=/etc/postgresql/$1/$2/start.conf; [ ! -L "$f" ] && printf "%s\n" "$3" >"$f"' sh "$1" "$2" "$3"
+}
+
+# Removing a cluster. postgresql-common reads where a cluster's data lives
+# (data_directory, or a "pgdata" link) and its log file (a "log" link) from
+# /etc/postgresql/MAJOR/NAME, which the agent user owns: as root,
+# pg_dropcluster would remove whatever those point at. So Rowsafe checks the
+# data directory against the one root recorded when it created or upgraded
+# the cluster, and runs pg_dropcluster with the agent user's privileges:
+# whatever the configuration says, it can then only remove what that user
+# could remove anyway. Root only stops the unit and tells systemd and apt.
+
+# check_conf_dir MAJOR NAME: the configuration directory is a real
+# directory (no symbolic link on its path) and has no log link pointing
+# outside /var/log/postgresql. Sets why and returns 1 otherwise.
+check_conf_dir() {
+  cd_=/etc/postgresql/$1/$2
+  if [ ! -d "$cd_" ] || [ "$(realpath -e -- "$cd_" 2>/dev/null)" != "$cd_" ]; then
+    why="the configuration directory $cd_ is missing or its path goes through a symbolic link"
+    return 1
+  fi
+  if [ -L "$cd_/log" ]; then
+    case $(readlink -- "$cd_/log") in
+      /var/log/postgresql/*) ;;
+      *)
+        why="$cd_/log points outside /var/log/postgresql"
+        return 1
+        ;;
+    esac
+  fi
+  return 0
+}
+
+# check_data_dir DIR MAJOR: DIR is a PostgreSQL MAJOR data directory the
+# agent user owns, an absolute path with no symbolic link on it, and no
+# system directory. Sets why and returns 1 otherwise.
+check_data_dir() {
+  case $1 in
+    /*) ;;
+    *)
+      why="the data directory \"$1\" is not an absolute path"
+      return 1
+      ;;
+  esac
+  if [ "$(realpath -e -- "$1" 2>/dev/null)" != "$1" ]; then
+    why="the data directory $1 is missing or its path goes through a symbolic link"
+    return 1
+  fi
+  case $1 in
+    / | /etc | /etc/* | /usr | /usr/* | /var | /var/lib | /var/log | /home | /root | /root/* | /boot | /boot/* | \
+      /bin | /bin/* | /sbin | /sbin/* | /lib | /lib/* | /lib64 | /lib64/* | /proc | /proc/* | /sys | /sys/* | /dev | /dev/* | /run | /tmp | /opt | /srv | /mnt | /media)
+      why="the data directory $1 is a system directory"
+      return 1
+      ;;
+  esac
+  if [ "$(stat -c %U -- "$1")" != "$agent_user" ]; then
+    why="the data directory $1 isn't owned by $agent_user"
+    return 1
+  fi
+  if [ "$(as_agent timeout 5 head -c 16 -- "$1/PG_VERSION" 2>/dev/null | tr -d '\n')" != "$2" ]; then
+    why="$1 is not a PostgreSQL $2 data directory"
+    return 1
+  fi
+  return 0
+}
+
+# drop_cluster MAJOR NAME WANT removes a cluster whose data directory must
+# still be WANT (recorded by root). Sets why and returns 1 when it refuses
+# or fails.
+drop_cluster() {
+  why=''
+  check_conf_dir "$1" "$2" || return 1
+  d_=$(cluster_field "$1" "$2" 6)
+  if [ "$d_" != "$3" ]; then
+    why="PostgreSQL $1/$2's data directory is now ${d_:-unknown}, not $3 as recorded"
+    return 1
+  fi
+  check_data_dir "$d_" "$1" || return 1
+  timeout 180 "$systemctl" stop "postgresql@$1-$2.service" >>"$work_log" 2>&1 </dev/null
+  if ! as_agent pg_dropcluster "$1" "$2" >>"$work_log" 2>&1 </dev/null; then
+    why="pg_dropcluster failed: $(tail_log)"
+    return 1
+  fi
+  "$systemctl" daemon-reload >>"$work_log" 2>&1
+  [ ! -x /usr/share/postgresql-common/pg_updateaptconfig ] || /usr/share/postgresql-common/pg_updateaptconfig >>"$work_log" 2>&1
+  return 0
+}
+
+free_port() { lsclusters | awk 'BEGIN { p = 5433 } $3 >= p { p = $3 + 1 } END { print p }'; }
+
+# An upgrade's record (root's state directory): key=value lines.
+record_file() { printf '%s/upgrade-%s\n' "$state" "$1"; }
+record_get() { awk -F= -v k="$2" '$1 == k { print substr($0, length(k) + 2); exit }' "$1"; }
+# record_put FILE KEY=VALUE... sets keys (later values win).
+record_put() {
+  f=$1
+  shift
+  tmp=$(mktemp "$state/.upgrade.XXXXXX") || return 1
+  { [ ! -f "$f" ] || cat "$f"; printf '%s\n' "$@"; } |
+    awk -F= '{ v[$1] = $0; if (!($1 in seen)) { seen[$1] = 1; order[++n] = $1 } } END { for (i = 1; i <= n; i++) print v[order[i]] }' >"$tmp" &&
+    mv -f "$tmp" "$f"
+}
+
+act_pg_minor_update() {
+  update_allowed postgresql "installing PostgreSQL updates from Rowsafe is not allowed on this server (run the installer again with --allow-updates)"
+  cluster_for_port "$port"
+  m=$c_major
+  before=$(pkg_version "postgresql-$m")
+  [ -n "$before" ] || refuse "PostgreSQL $m is not installed from packages here (postgresql-$m)"
+  pkgs="postgresql-$m postgresql-client-$m libpq5 $(installed_pkgs "postgresql-$m-*" | tr '\n' ' ')"
+  : >"$work_log"
+  t0=$(active_since "$unit")
+  apt_refresh
+  log "updating $pkgs (request $id)"
+  # shellcheck disable=SC2086 # package names, built above
+  apt_run install -y --only-upgrade $pkgs || refuse "installing the update failed: $(tail_log)"
+  after=$(pkg_version "postgresql-$m")
+  add from_package "$before"
+  add package "$after"
+  add packages "$pkgs"
+  add other_clusters "$(lsclusters | awk -v m="$m" -v p="$port" '$1 == m && $3 != p { printf "%s/%s (port %s) ", $1, $2, $3 }')"
+  restarted=0
+  case $c_status in
+    online*)
+      if [ "$after" != "$before" ]; then
+        if [ "$(active_since "$unit")" = "$t0" ]; then
+          # The packages didn't restart it: start the new binaries now.
+          out=$(timeout 180 "$systemctl" restart "$unit" 2>&1 </dev/null) ||
+            refuse "the update is installed, but restarting $unit failed: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
+        fi
+        restarted=1
+      fi
+      ;;
+  esac
+  add restarted "$restarted"
+  ok=1
+  log "PostgreSQL $m: $before -> $after (restarted: $restarted)"
+}
+
+act_pg_install_major() {
+  update_allowed postgresql "installing PostgreSQL from Rowsafe is not allowed on this server (run the installer again with --allow-updates)"
+  cluster_for_port "$port"
+  [ "$major" -gt "$c_major" ] || refuse "PostgreSQL $major is not newer than PostgreSQL $c_major on port $port"
+  : >"$work_log"
+  apt_refresh
+  c=$(candidate "postgresql-$major")
+  [ -n "$c" ] && [ "$c" != "(none)" ] || refuse "PostgreSQL $major is not available from this server's package sources"
+  before=$(lsclusters | awk -v m="$major" '$1 == m { printf " %s ", $2 }')
+  pkgs="postgresql-$major postgresql-client-$major"
+  missing=''
+  for p in $(installed_pkgs "postgresql-$c_major-*"); do
+    n=postgresql-$major-${p#postgresql-"$c_major"-}
+    c=$(candidate "$n")
+    if [ -n "$c" ] && [ "$c" != "(none)" ]; then pkgs="$pkgs $n"; else missing="$missing $n"; fi
+  done
+  log "installing $pkgs (request $id)"
+  # shellcheck disable=SC2086 # package names, built above
+  apt_timeout=3600 apt_run install -y --no-install-recommends $pkgs || refuse "installing PostgreSQL $major failed: $(tail_log)"
+  # postgresql-common creates (and starts) an empty "main" cluster for a
+  # newly installed major; the upgrade needs that name free.
+  dropped='' left=''
+  for n in $(lsclusters | awk -v m="$major" '$1 == m { print $2 }'); do
+    case $before in *" $n "*) continue ;; esac
+    # Its data directory as the package just created it.
+    if drop_cluster "$major" "$n" "$(cluster_field "$major" "$n" 6)"; then
+      dropped="$dropped $major/$n"
+    else
+      left="$left $major/$n ($why)"
+      log "left the new cluster $major/$n in place: $why"
+    fi
+  done
+  add left "$left"
+  add packages "$pkgs"
+  add missing "$missing"
+  add dropped "$dropped"
+  ok=1
+}
+
+act_pg_upgrade() {
+  update_allowed postgresql "upgrading PostgreSQL from Rowsafe is not allowed on this server (run the installer again with --allow-updates)"
+  cluster_for_port "$port"
+  [ "$major" -gt "$c_major" ] || refuse "PostgreSQL $major is not newer than PostgreSQL $c_major on port $port"
+  rec=$(record_file "$port")
+  [ ! -e "$rec" ] || refuse "the version kept by an earlier upgrade on port $port is still there: remove it first"
+  [ -x "/usr/lib/postgresql/$major/bin/pg_upgrade" ] || refuse "PostgreSQL $major is not installed: rehearse the upgrade first (it installs it)"
+  case $c_status in
+    *recovery*) refuse "PostgreSQL on port $port is a replica: upgrade the primary" ;;
+    online*) ;;
+    *) refuse "PostgreSQL on port $port is not running" ;;
+  esac
+  [ -z "$(cluster_field "$major" "$c_name" 1)" ] || refuse "a PostgreSQL $major cluster named $c_name already exists"
+  # Where the old version's data lives, checked and recorded now: it is
+  # what a later cleanup may remove, and nothing else.
+  check_conf_dir "$c_major" "$c_name" || refuse "Rowsafe won't upgrade this cluster: $why"
+  check_data_dir "$c_datadir" "$c_major" || refuse "Rowsafe won't upgrade this cluster: $why"
+  flag=''
+  case $method in link) flag=--link ;; clone) flag=--clone ;; esac
+  jobs=$(nproc 2>/dev/null || echo 1)
+  [ "$jobs" -le 8 ] 2>/dev/null || jobs=8
+  : >"$work_log"
+  old_unit=$unit
+  new_unit=postgresql@$major-$c_name.service
+  log "upgrading $c_major/$c_name to $major ($method, request $id)"
+  # shellcheck disable=SC2086 # $flag is empty or one option
+  if ! timeout 12h pg_upgradecluster -v "$major" -m upgrade $flag -j "$jobs" --no-start "$c_major" "$c_name" >>"$work_log" 2>&1 </dev/null; then
+    why=$(tail_log)
+    # pg_upgradecluster removes the new cluster and starts the old one
+    # again when pg_upgrade fails; make sure the old one runs.
+    case $(cluster_field "$c_major" "$c_name" 4) in
+      online*) ;;
+      *) timeout 180 "$systemctl" start "$old_unit" >>"$work_log" 2>&1 </dev/null ;;
+    esac
+    case $(cluster_field "$c_major" "$c_name" 4) in
+      online*)
+        add rolled_back 1
+        refuse "pg_upgrade failed, and PostgreSQL $c_major runs as before: $why"
+        ;;
+    esac
+    refuse "pg_upgrade failed, and PostgreSQL $c_major could not be started again: $why"
+  fi
+  old_port=$(cluster_field "$c_major" "$c_name" 3)
+  new_data=$(cluster_field "$major" "$c_name" 6)
+  check_data_dir "$new_data" "$major" || new_data=''
+  record_put "$rec" "id=$id" "port=$port" "from=$c_major" "to=$major" "name=$c_name" "method=$method" \
+    "aside_port=$old_port" "status=upgraded" "created=$(date +%s)" "old_data=$c_datadir" "new_data=$new_data" ||
+    refuse "could not record the upgrade"
+  set_allowed_unit "$port" "$new_unit" || refuse "could not update $allow"
+  unit=$new_unit
+  "$systemctl" daemon-reload >>"$work_log" 2>&1
+  if ! timeout 600 "$systemctl" start "$new_unit" >>"$work_log" 2>&1 </dev/null; then
+    why=$(tail_log)
+    if [ "$method" = link ]; then
+      add kept "$c_major/$c_name"
+      refuse "PostgreSQL $major did not start: $why. In Fast mode the old version can't simply be started again: Undo restores it from the backup taken just before"
+    fi
+    # Safe mode: the old data is untouched. Put it back and start it.
+    "$systemctl" stop "$new_unit" >>"$work_log" 2>&1
+    set_port "$major" "$c_name" "$old_port"
+    set_start "$major" "$c_name" manual
+    set_port "$c_major" "$c_name" "$port"
+    set_start "$c_major" "$c_name" auto
+    set_allowed_unit "$port" "$old_unit"
+    unit=$old_unit
+    "$systemctl" daemon-reload >>"$work_log" 2>&1
+    if timeout 180 "$systemctl" start "$old_unit" >>"$work_log" 2>&1 </dev/null; then
+      startwhy=$why
+      if [ -n "$new_data" ] && drop_cluster "$major" "$c_name" "$new_data"; then
+        rm -f "$rec"
+      else
+        # Kept, stopped: the record lets a person remove it later.
+        record_put "$rec" "status=undone" "aside_port=$old_port"
+        add kept "$major/$c_name"
+      fi
+      add rolled_back 1
+      refuse "PostgreSQL $major did not start ($startwhy); Rowsafe put PostgreSQL $c_major back and started it"
+    fi
+    refuse "PostgreSQL $major did not start ($why), and starting PostgreSQL $c_major again failed too: $(tail_log)"
+  fi
+  add from "$c_major"
+  add to "$major"
+  add aside_port "$old_port"
+  add old_data_dir "$c_datadir"
+  add new_data_dir "$new_data"
+  ok=1
+  log "upgraded $c_major/$c_name to $major; $c_major kept on port $old_port, stopped"
+}
+
+# read_record PORT sets rec, r_from, r_to, r_name, r_status and r_aside
+# from PORT's upgrade record, checking every value.
+read_record() {
+  rec=$(record_file "$1")
+  [ -f "$rec" ] || refuse "there is no upgrade on port $1 that Rowsafe keeps a version for"
+  r_from=$(record_get "$rec" from) r_to=$(record_get "$rec" to) r_name=$(record_get "$rec" name)
+  r_status=$(record_get "$rec" status) r_aside=$(record_get "$rec" aside_port)
+  printf '%s %s %s %s %s\n' "$r_from" "$r_to" "$r_aside" "$r_name" "$r_status" |
+    grep -Eq '^[1-9][0-9] [1-9][0-9] [0-9]{1,5} [A-Za-z0-9_.-]{1,63} (upgraded|undone)$' ||
+    refuse "the upgrade record for port $1 is damaged"
+}
+
+act_pg_upgrade_undo() {
+  update_allowed postgresql "upgrading PostgreSQL from Rowsafe is not allowed on this server (run the installer again with --allow-updates)"
+  check_root_file "$allow" "Rowsafe may not restart PostgreSQL on this server"
+  read_record "$port"
+  [ "$r_status" = upgraded ] || refuse "that upgrade was already undone"
+  new_unit=postgresql@$r_to-$r_name.service
+  old_unit=postgresql@$r_from-$r_name.service
+  [ "$(allowed_unit "$port")" = "$new_unit" ] || refuse "port $port is not PostgreSQL $r_to's in $allow"
+  [ "$(cluster_field "$r_to" "$r_name" 3)" = "$port" ] || refuse "PostgreSQL $r_to/$r_name is not on port $port"
+  unit=$new_unit
+  : >"$work_log"
+  log "undoing the upgrade of $r_from/$r_name to $r_to (request $id)"
+  timeout 180 "$systemctl" stop "$new_unit" >>"$work_log" 2>&1 </dev/null || refuse "stopping PostgreSQL $r_to failed: $(tail_log)"
+  aside=$r_aside
+  other=$(lsclusters | awk -v q="$aside" -v m="$r_from" -v n="$r_name" '$3 == q && !($1 == m && $2 == n) { print; exit }')
+  [ -z "$other" ] || aside=$(free_port)
+  { set_port "$r_to" "$r_name" "$aside" && set_start "$r_to" "$r_name" manual &&
+    set_port "$r_from" "$r_name" "$port" && set_start "$r_from" "$r_name" auto &&
+    set_allowed_unit "$port" "$old_unit"; } || refuse "switching the clusters' ports failed: $(tail_log)"
+  unit=$old_unit
+  "$systemctl" daemon-reload >>"$work_log" 2>&1
+  record_put "$rec" "status=undone" "aside_port=$aside"
+  add kept "$r_to/$r_name"
+  add aside_port "$aside"
+  add data_dir "$(cluster_field "$r_from" "$r_name" 6)"
+  if [ "$start" = start ]; then
+    timeout 300 "$systemctl" start "$old_unit" >>"$work_log" 2>&1 </dev/null ||
+      refuse "PostgreSQL $r_from did not start: $(tail_log)"
+  fi
+  ok=1
+}
+
+act_pg_upgrade_cleanup() {
+  update_allowed postgresql "upgrading PostgreSQL from Rowsafe is not allowed on this server (run the installer again with --allow-updates)"
+  read_record "$port"
+  if [ "$r_status" = upgraded ]; then kept=$r_from; else kept=$r_to; fi
+  [ "$(cluster_field "$kept" "$r_name" 3)" != "$port" ] || refuse "PostgreSQL $kept/$r_name is the one on port $port"
+  status=$(cluster_field "$kept" "$r_name" 4)
+  case $status in
+    '')
+      rm -f "$rec"
+      add freed 0
+      ok=1
+      return 0
+      ;;
+    down) ;;
+    *) refuse "PostgreSQL $kept/$r_name is running ($status); Rowsafe won't remove it" ;;
+  esac
+  if [ "$r_status" = upgraded ]; then want=$(record_get "$rec" old_data); else want=$(record_get "$rec" new_data); fi
+  [ -n "$want" ] || refuse "the upgrade record doesn't say where PostgreSQL $kept/$r_name's data lives, so Rowsafe won't remove it: remove it yourself with pg_dropcluster"
+  data=$(cluster_field "$kept" "$r_name" 6)
+  size=$(as_agent du -sb -- "$data" 2>/dev/null | cut -f1)
+  : >"$work_log"
+  log "removing $kept/$r_name, kept by an upgrade (request $id)"
+  drop_cluster "$kept" "$r_name" "$want" || refuse "Rowsafe didn't remove PostgreSQL $kept/$r_name: $why"
+  rm -f "$rec"
+  add freed "${size:-0}"
+  add dropped "$kept/$r_name"
+  # Its programs too, when no cluster of that major is left and nothing
+  # else would be removed with them.
+  if [ -z "$(lsclusters | awk -v m="$kept" '$1 == m')" ]; then
+    pkgs=$(printf '%s\n%s\n' "$(installed_pkgs "postgresql-$kept")" "$(installed_pkgs "postgresql-$kept-*")" | grep . | tr '\n' ' ')
+    if [ -n "$pkgs" ]; then
+      # shellcheck disable=SC2086 # package names from dpkg
+      removes=$(apt-get -s remove $pkgs 2>/dev/null | awk '/^Remv / { print $2 }' | sort)
+      # shellcheck disable=SC2086
+      if [ "$removes" = "$(printf '%s\n' $pkgs | sort)" ] && apt_run remove -y $pkgs; then
+        add packages_removed "$pkgs"
+      else
+        add packages_kept "$pkgs"
+      fi
+    fi
+  fi
+  ok=1
+}
+
+act_security_updates() {
+  update_allowed security "installing security updates from Rowsafe is not allowed on this server (run the installer again with --allow-security-updates)"
+  cooldown security-updates 300
+  : >"$work_log"
+  apt_refresh
+  # Upgrades of installed packages from a security origin. PostgreSQL's
+  # server packages are left for Update PostgreSQL, which saves a Mark,
+  # restarts in a controlled way and checks archiving.
+  list=$(apt-get -s -o Debug::NoLocking=1 dist-upgrade 2>/dev/null |
+    awk '/^Inst [^ ]+ \[/ && /-security|Debian-Security/ { print $2 }' | sort -u)
+  held=$(printf '%s\n' "$list" | grep -E '^postgresql-[0-9]+(-.+)?$' | tr '\n' ' ')
+  pkgs=$(printf '%s\n' "$list" | grep -Ev '^postgresql-[0-9]+(-.+)?$' | grep . | tr '\n' ' ')
+  n=0
+  if [ -n "$pkgs" ]; then
+    log "installing security updates: $pkgs (request $id)"
+    # shellcheck disable=SC2086 # package names from apt
+    apt_timeout=5400 apt_run install -y --only-upgrade $pkgs || refuse "installing the security updates failed: $(tail_log)"
+    # shellcheck disable=SC2086
+    n=$(printf '%s\n' $pkgs | wc -l | tr -d ' ')
+  fi
+  add installed "$n"
+  add packages "$pkgs"
+  add held_back "$held"
+  if [ -e /run/reboot-required ]; then add reboot_required 1; else add reboot_required 0; fi
+  ok=1
+}
+
+# cooldown ACTION SECONDS: at most one ACTION per SECONDS (root's own stamp).
+cooldown() {
+  stamp=$state/last-$1
   now=$(date +%s)
   last=$(cat "$stamp" 2>/dev/null || echo 0)
   case $last in '' | *[!0-9]*) last=0 ;; esac
-  if [ $((now - last)) -lt "$min_interval" ]; then
-    refuse "PostgreSQL ($unit) was restarted less than a minute ago; try again in a minute"
-  fi
+  [ $((now - last)) -ge "$2" ] || refuse "$1 ran less than $(($2 / 60)) minutes ago; try again later"
   echo "$now" >"$stamp"
-fi
+}
 
-log "$action $unit (request $id)"
-out=$(timeout 120 "$systemctl" "$action" "$unit" 2>&1 </dev/null)
-rc=$?
-if [ "$rc" = 0 ]; then
+act_reboot() {
+  update_allowed reboot "rebooting the server from Rowsafe is not allowed here (run the installer again with --allow-reboot)"
+  cooldown reboot 600
+  log "rebooting the server (request $id)"
+  # The answer comes before the reboot: it says the reboot was asked for.
   ok=1
-  log "${action} $unit: done"
-else
-  out=$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)
-  if [ "$rc" = 124 ]; then
-    err="systemctl $action $unit did not finish within 2 minutes"
+  add status rebooting
+  add requested_at "$(date +%s)"
+  answer
+  sleep 3
+  "$systemctl" --no-block reboot
+  exit 0
+}
+
+update_main() {
+  result_name=update-result
+  have_request "$dir/update-request" || exit 0
+  mkdir -p "$state"
+  line=$(read_request "$dir/update-request")
+  port='' major='' method='' start=''
+  # Every request's exact shape; anything else is refused before it is split.
+  rid='[A-Za-z0-9_-]{1,64}'
+  if printf '%s\n' "$line" | grep -Eq "^$rid (pg-minor-update|pg-upgrade-cleanup) [0-9]{1,5}\$"; then
+    # shellcheck disable=SC2086 # validated just above
+    set -- $line
+    id=$1 action=$2 port=$3
+  elif printf '%s\n' "$line" | grep -Eq "^$rid pg-upgrade-undo [0-9]{1,5} (start|nostart)\$"; then
+    # shellcheck disable=SC2086
+    set -- $line
+    id=$1 action=$2 port=$3 start=$4
+  elif printf '%s\n' "$line" | grep -Eq "^$rid pg-install-major [0-9]{1,5} [1-9][0-9]\$"; then
+    # shellcheck disable=SC2086
+    set -- $line
+    id=$1 action=$2 port=$3 major=$4
+  elif printf '%s\n' "$line" | grep -Eq "^$rid pg-upgrade [0-9]{1,5} [1-9][0-9] (copy|clone|link)\$"; then
+    # shellcheck disable=SC2086
+    set -- $line
+    id=$1 action=$2 port=$3 major=$4 method=$5
+  elif printf '%s\n' "$line" | grep -Eq "^$rid (security-updates|reboot)\$"; then
+    id=${line%% *} action=${line#* }
   else
-    err="systemctl $action $unit failed${out:+: $out}"
+    refuse "malformed request"
   fi
-  log "$err"
-fi
-answer
+  case $action in
+    pg-minor-update) act_pg_minor_update ;;
+    pg-install-major) act_pg_install_major ;;
+    pg-upgrade) act_pg_upgrade ;;
+    pg-upgrade-undo) act_pg_upgrade_undo ;;
+    pg-upgrade-cleanup) act_pg_upgrade_cleanup ;;
+    security-updates) act_security_updates ;;
+    reboot) act_reboot ;;
+  esac
+  answer
+}
+
+case $mode in
+  update) update_main ;;
+  *) restart_main ;;
+esac
 ROWSAFE_RESTART_HELPER_EOF
     _changed=1
   fi
@@ -913,6 +1682,7 @@ ROWSAFE_RESTART_PATH_EOF
 }
 
 remove_restart_helper() {
+  remove_update_units # they run the same helper
   [ -e "$RESTART_PATH_FILE" ] || [ -e "$RESTART_SERVICE_FILE" ] || [ -e "$RESTART_HELPER" ] || return 0
   if systemd_running; then
     systemctl disable --now --quiet rowsafe-pg-restart.path 2>/dev/null || true
@@ -926,7 +1696,7 @@ remove_restart_helper() {
 # systemd unit (the ones a restart helper can restart).
 restart_pairs() {
   [ -s "$TMP/clusters" ] || return 0
-  awk -F '\t' '$12 != "-" && $12 ~ /^[A-Za-z0-9@._-]+\.service$/ { print $1, $12 }' "$TMP/clusters"
+  awk -F '\t' '($14 == "" || $14 == "postgresql") && $12 != "-" && $12 ~ /^[A-Za-z0-9@._-]+\.service$/ { print $1, $12 }' "$TMP/clusters"
 }
 
 # restart_allowed PORT: is PORT in the allow list?
@@ -954,6 +1724,7 @@ allow_restarts() {
 
 disallow_restarts() {
   remove_restart_helper
+  rm -f "$UPDATES_ALLOW_FILE" # updates need the helper too
   if [ -d "$CONFIG_DIR" ]; then
     {
       echo "# Restarting or stopping PostgreSQL from Rowsafe is off on this server."
@@ -986,6 +1757,166 @@ restart_access() {
       fi
       ;;
   esac
+}
+
+# ---------------------------------------------------------------- updates
+
+# Rowsafe never installs anything on its own. With root's permission, per
+# capability, a person can click Update PostgreSQL (minor updates and major
+# upgrades), Install security updates or Reboot in the dashboard and
+# confirm: the agent writes a request to $RESTART_DIR/update-request,
+# rowsafe-pg-update.path starts the same root helper in update mode, and the
+# helper does only what $UPDATES_ALLOW_FILE lists. It needs the restart
+# helper (PostgreSQL updates restart the cluster).
+
+install_update_units() {
+  _changed=0
+  if write_file "$UPDATE_SERVICE_FILE" 0644 root:root <<'ROWSAFE_UPDATE_SERVICE_EOF'; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-pg-update.service: installs PostgreSQL updates, upgrades
+# PostgreSQL, installs security updates or reboots the server when the
+# Rowsafe agent asks because a person clicked that, and only what root
+# allowed in /etc/rowsafe/updates-allowed (see
+# /usr/local/lib/rowsafe/rowsafe-pg-restart, update mode). Started by
+# rowsafe-pg-update.path; installed by https://rowsafe.sh/install only when
+# root allowed one of them (--allow-updates, --allow-security-updates,
+# --allow-reboot).
+
+[Unit]
+Description=Rowsafe: install PostgreSQL updates or upgrade PostgreSQL on request
+Documentation=https://rowsafe.sh/docs/guides/updates
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/rowsafe/rowsafe-pg-restart
+Environment=ROWSAFE_HELPER_MODE=update
+# The agent user, whose privileges read and remove the request and change a
+# cluster's own settings.
+Environment=ROWSAFE_AGENT_USER=postgres
+# A major upgrade of a large database in Safe mode copies all its data.
+TimeoutStartSec=13h
+# The answer: root's own directory, which the agent can read (shared with
+# rowsafe-pg-restart.service).
+RuntimeDirectory=rowsafe-pg-restart
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+# What an upgrade keeps for undo, and the last action's log, out of the
+# agent's reach.
+StateDirectory=rowsafe-pg-restart
+StateDirectoryMode=0700
+UMask=0022
+
+# Unlike rowsafe-pg-restart.service this one can't be sandboxed much: apt,
+# the packages' own scripts and pg_upgradecluster write under /usr, /etc and
+# /var, download packages and start PostgreSQL. What it can do is limited by
+# the script instead: only the requests it knows, each checked against
+# root's allow lists, with package names it builds itself.
+ProtectHome=read-only
+PrivateTmp=no
+LockPersonality=yes
+RestrictRealtime=yes
+ROWSAFE_UPDATE_SERVICE_EOF
+    _changed=1
+  fi
+  if write_file "$UPDATE_PATH_FILE" 0644 root:root <<'ROWSAFE_UPDATE_PATH_EOF'; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-pg-update.path: starts rowsafe-pg-update.service when the Rowsafe
+# agent asks to update or upgrade PostgreSQL, install security updates or
+# reboot (someone clicked that in the dashboard and confirmed). Installed by
+# https://rowsafe.sh/install only when root allowed it; removed when every
+# one of those is turned off (--no-allow-updates, --no-allow-security-updates,
+# --no-allow-reboot).
+
+[Unit]
+Description=Rowsafe: watch for requests to update PostgreSQL or the server
+Documentation=https://rowsafe.sh/docs/guides/updates
+
+[Path]
+PathExists=/var/lib/rowsafe/restart/update-request
+Unit=rowsafe-pg-update.service
+
+[Install]
+WantedBy=multi-user.target
+ROWSAFE_UPDATE_PATH_EOF
+    _changed=1
+  fi
+  if systemd_running; then
+    [ "$_changed" = 0 ] || systemctl daemon-reload
+    systemctl enable --now --quiet rowsafe-pg-update.path
+  else
+    warn "systemd is not running here; the update helper was installed but cannot be enabled"
+  fi
+}
+
+remove_update_units() {
+  [ -e "$UPDATE_PATH_FILE" ] || [ -e "$UPDATE_SERVICE_FILE" ] || return 0
+  if systemd_running; then
+    systemctl disable --now --quiet rowsafe-pg-update.path 2>/dev/null || true
+  fi
+  rm -f "$UPDATE_PATH_FILE" "$UPDATE_SERVICE_FILE"
+  if systemd_running; then systemctl daemon-reload; fi
+}
+
+# update_allowed WORD: is WORD in the updates allow list?
+update_allowed() {
+  [ -f "$UPDATES_ALLOW_FILE" ] && awk -v w="$1" '$1 == w { f = 1 } END { exit !f }' "$UPDATES_ALLOW_FILE"
+}
+
+# decide_update FLAG WORD QUESTION DEFAULT prints yes or no: the flag, else
+# the earlier answer (a re-run keeps it), else the answer to QUESTION on a
+# terminal, else no.
+decide_update() {
+  case $1 in
+    yes | no)
+      echo "$1"
+      return 0
+      ;;
+  esac
+  if [ -f "$UPDATES_ALLOW_FILE" ]; then
+    if update_allowed "$2"; then echo yes; else echo no; fi
+    return 0
+  fi
+  if [ "$TTY" = 1 ] && confirm "$3" "$4"; then echo yes; else echo no; fi
+}
+
+# update_access applies --allow-updates, --allow-security-updates and
+# --allow-reboot (and their --no- forms), or asks once on a terminal.
+update_access() {
+  if [ ! -x "$RESTART_HELPER" ] || ! grep -qs '^[0-9]' "$RESTART_ALLOW_FILE"; then
+    case "$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT" in
+      *yes*) warn "installing updates or rebooting from Rowsafe needs --allow-restart too (the same helper does it); left off" ;;
+    esac
+    remove_update_units
+    [ ! -f "$UPDATES_ALLOW_FILE" ] || rm -f "$UPDATES_ALLOW_FILE"
+    return 0
+  fi
+  [ -f "$UPDATES_ALLOW_FILE" ] || [ "$TTY" = 1 ] || [ -n "$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT" ] || return 0
+  [ -f "$UPDATES_ALLOW_FILE" ] || [ "$TTY" = 0 ] || say ""
+  _pg=$(decide_update "$ALLOW_UPDATES" postgresql "Allow Rowsafe to install PostgreSQL updates when you click Update? Minor updates and major upgrades, only when someone confirms; a Mark is saved first." y)
+  _sec=$(decide_update "$ALLOW_SECURITY" security "Allow Rowsafe to install this server's security updates when you click Install? Only when someone confirms." n)
+  _reboot=no
+  if [ "$_sec" = yes ] || [ "$ALLOW_REBOOT" = yes ]; then
+    _reboot=$(decide_update "$ALLOW_REBOOT" reboot "Allow Rowsafe to reboot this server when you click Reboot? Only when someone confirms; a Mark is saved first." n)
+  fi
+  {
+    echo "# What Rowsafe may install or do on this server when someone clicks it in"
+    echo "# the dashboard and confirms. Written by the installer (root); change it by"
+    echo "# running the installer with --allow-updates / --no-allow-updates,"
+    echo "# --allow-security-updates / --no-allow-security-updates and --allow-reboot /"
+    echo "# --no-allow-reboot."
+    [ "$_pg" != yes ] || echo "postgresql   # PostgreSQL minor updates and major upgrades (clusters in restart-allowed)"
+    [ "$_sec" != yes ] || echo "security     # security updates (PostgreSQL's own packages excepted)"
+    [ "$_reboot" != yes ] || echo "reboot       # rebooting the server"
+  } | write_file "$UPDATES_ALLOW_FILE" 0644 root:root || true
+  if [ "$_pg$_sec$_reboot" = nonono ]; then
+    remove_update_units
+    note "OK: Rowsafe can't install updates or reboot here (change it with --allow-updates, --allow-security-updates, --allow-reboot)"
+    return 0
+  fi
+  install_update_units
+  [ "$_pg" != yes ] || ok "Rowsafe may install PostgreSQL updates and upgrade PostgreSQL when you click Update or Upgrade and confirm (turn off with --no-allow-updates)"
+  [ "$_sec" != yes ] || ok "Rowsafe may install security updates when you click Install and confirm (turn off with --no-allow-security-updates)"
+  [ "$_reboot" != yes ] || ok "Rowsafe may reboot this server when you click Reboot and confirm (turn off with --no-allow-reboot)"
 }
 
 # ---------------------------------------------------------------- agent.env
@@ -1031,6 +1962,24 @@ env_template() {
 #ROWSAFE_REPO_S3_CA_FILE='/etc/ssl/certs/my-ca.pem'
 #ROWSAFE_REPO_S3_VERIFY_TLS='true'
 EOF
+  repo2_template
+}
+
+# repo2_template is the second copy's part of agent.env.
+repo2_template() {
+  cat <<'EOF'
+
+# Second backup copy (optional; `install.sh --add-storage` sets it up): a
+# second bucket, ideally at another provider, with its own key and its own
+# encryption passphrase (keep it in your password manager too). The same
+# optional settings as above exist with ROWSAFE_REPO2_.
+#ROWSAFE_REPO2_S3_ENDPOINT=''
+#ROWSAFE_REPO2_S3_BUCKET=''
+#ROWSAFE_REPO2_S3_REGION='auto'
+#ROWSAFE_REPO2_S3_KEY=''
+#ROWSAFE_REPO2_S3_KEY_SECRET=''
+#ROWSAFE_REPO2_CIPHER_PASS=''
+EOF
 }
 
 # check_value KEY VALUE rejects values the env file can't hold or the agent
@@ -1051,11 +2000,11 @@ check_value() {
     ROWSAFE_ENROLL_TOKEN)
       case $2 in rse_*) ;; *) die "ROWSAFE_ENROLL_TOKEN does not look like an enrollment token (rse_...)" ;; esac
       ;;
-    ROWSAFE_REPO_S3_ENDPOINT)
-      case $2 in *://*) die "ROWSAFE_REPO_S3_ENDPOINT is a host name without a scheme, e.g. <account-id>.eu.r2.cloudflarestorage.com" ;; esac
+    ROWSAFE_REPO_S3_ENDPOINT | ROWSAFE_REPO2_S3_ENDPOINT)
+      case $2 in *://*) die "$1 is a host name without a scheme, e.g. <account-id>.eu.r2.cloudflarestorage.com" ;; esac
       ;;
-    ROWSAFE_REPO_CIPHER_PASS)
-      [ "${#2}" -ge 20 ] || die "ROWSAFE_REPO_CIPHER_PASS must be at least 20 characters"
+    ROWSAFE_REPO_CIPHER_PASS | ROWSAFE_REPO2_CIPHER_PASS)
+      [ "${#2}" -ge 20 ] || die "$1 must be at least 20 characters"
       ;;
   esac
 }
@@ -1110,6 +2059,7 @@ write_env() {
     ENV_CREATED=1
   fi
   before=$(sha256_of "$ENV_FILE")
+  if [ "$SECOND_COPY" = add ] && ! grep -q 'ROWSAFE_REPO2_' "$ENV_FILE"; then repo2_template >>"$ENV_FILE"; fi
   written=''
   for key in $AGENT_VARS; do
     eval "val=\${$key:-}"
@@ -1125,7 +2075,7 @@ write_env() {
   chmod 0600 "$ENV_FILE"
   if [ "$(sha256_of "$ENV_FILE")" != "$before" ]; then
     CHANGED=1
-    if [ "$STORAGE_GUIDED" = 1 ]; then
+    if [ "$STORAGE_GUIDED" = 1 ] || [ -n "$SECOND_COPY" ]; then
       ok "saved your backup storage settings (secrets are only in this file)"
     else
       note "set from the installer's environment:${written}"
@@ -1556,8 +2506,8 @@ ask_bucket_url() {
     s3-compatible)
       ask S_REGION "Region (most self-hosted storage accepts us-east-1)" us-east-1
       # TLS options for a private CA come from the environment or agent.env.
-      S_CA=$(s_get ROWSAFE_REPO_S3_CA_FILE)
-      S_VERIFY=$(s_get ROWSAFE_REPO_S3_VERIFY_TLS)
+      S_CA=$(s_get "${S_PREFIX:-ROWSAFE_REPO_}S3_CA_FILE")
+      S_VERIFY=$(s_get "${S_PREFIX:-ROWSAFE_REPO_}S3_VERIFY_TLS")
       ;;
   esac
   key_hint
@@ -1683,8 +2633,8 @@ ask_other() {
   ask S_REGION "Region (most self-hosted storage accepts us-east-1)" "${S_REGION:-us-east-1}"
   if confirm "Use path-style URLs? MinIO, Ceph and most self-hosted storage need them." y; then S_URI=path; else S_URI=host; fi
   # TLS options for a private CA come from the environment or agent.env.
-  S_CA=$(s_get ROWSAFE_REPO_S3_CA_FILE)
-  S_VERIFY=$(s_get ROWSAFE_REPO_S3_VERIFY_TLS)
+  S_CA=$(s_get "${S_PREFIX:-ROWSAFE_REPO_}S3_CA_FILE")
+  S_VERIFY=$(s_get "${S_PREFIX:-ROWSAFE_REPO_}S3_VERIFY_TLS")
 }
 
 ask_credentials() {
@@ -1738,7 +2688,7 @@ show_passphrase() {
   box() { printf '  %s  %-50s  %s\n' "$BOX_V" "$1" "$BOX_V" >&3; }
   tty_say ""
   tty_say "  $BOX_TL$_h$BOX_TR"
-  box "Your backup encryption passphrase:"
+  box "Your ${PASS_WHAT:-backup} encryption passphrase:"
   box ""
   printf '  %s      %s%s%s        %s\n' "$BOX_V" "$BOLD" "$1" "$RESET" "$BOX_V" >&3
   box ""
@@ -1751,10 +2701,10 @@ show_passphrase() {
 
 # choose_passphrase sets S_CIPHER: kept, generated (shown once) or typed.
 choose_passphrase() {
-  current=$(env_value ROWSAFE_REPO_CIPHER_PASS)
+  current=$(env_value "${PASS_KEY:-ROWSAFE_REPO_CIPHER_PASS}")
   if [ -n "$current" ]; then
     tty_say ""
-    tty_say "This server already has a backup encryption passphrase. Keep it unless"
+    tty_say "This server already has a ${PASS_WHAT:-backup} encryption passphrase. Keep it unless"
     tty_say "you are starting over: backups made with it can only be restored with it."
     if confirm "Keep the current encryption passphrase?" y; then
       S_CIPHER=$current
@@ -1835,9 +2785,37 @@ guided_storage() {
     tty_say "Rowsafe keeps your backups in a storage bucket that you own. You need an"
     tty_say "empty bucket and an access key that can read, write and delete in it."
   fi
+  load_storage_path
+  storage_questions
+  choose_passphrase
+  STORAGE_GUIDED=1
+
+  ROWSAFE_REPO_S3_ENDPOINT=$S_ENDPOINT ROWSAFE_REPO_S3_BUCKET=$S_BUCKET
+  ROWSAFE_REPO_S3_KEY=$S_KEY ROWSAFE_REPO_S3_KEY_SECRET=$S_SECRET ROWSAFE_REPO_CIPHER_PASS=$S_CIPHER
+  ROWSAFE_REPO_S3_REGION=$S_REGION ROWSAFE_REPO_S3_URI_STYLE=$S_URI
+  export ROWSAFE_REPO_S3_ENDPOINT ROWSAFE_REPO_S3_BUCKET ROWSAFE_REPO_S3_KEY ROWSAFE_REPO_S3_KEY_SECRET \
+    ROWSAFE_REPO_CIPHER_PASS ROWSAFE_REPO_S3_REGION ROWSAFE_REPO_S3_URI_STYLE
+  # Settings from a previous provider must not linger in agent.env.
+  if [ -n "$S_PORT" ]; then
+    ROWSAFE_REPO_S3_PORT=$S_PORT
+    export ROWSAFE_REPO_S3_PORT
+  else
+    unset ROWSAFE_REPO_S3_PORT
+    STORAGE_CLEAR="$STORAGE_CLEAR ROWSAFE_REPO_S3_PORT"
+  fi
+  if [ "$S_PROVIDER" != s3-compatible ]; then
+    unset ROWSAFE_REPO_S3_CA_FILE ROWSAFE_REPO_S3_VERIFY_TLS
+    STORAGE_CLEAR="$STORAGE_CLEAR ROWSAFE_REPO_S3_CA_FILE ROWSAFE_REPO_S3_VERIFY_TLS"
+  fi
+}
+
+# storage_questions asks for a bucket and its key until the test passes (or
+# the person saves failing settings on purpose), into S_*. With S_AVOID set
+# to "<endpoint>/<bucket>", that bucket is refused (the second copy must not
+# go to the first storage's bucket).
+storage_questions() {
   S_ENDPOINT='' S_BUCKET='' S_KEY='' S_SECRET='' S_REGION='' S_URI='' S_PORT='' S_CA='' S_VERIFY='' S_CIPHER=''
   S_URL='' S_MODE=url
-  load_storage_path
   n=1
   if [ -n "$STORAGE_PROVIDER" ]; then
     n=$(provider_number "$STORAGE_PROVIDER")
@@ -1867,6 +2845,11 @@ guided_storage() {
       esac
     fi
     ask_credentials
+    if [ -n "${S_AVOID:-}" ] && [ "$S_ENDPOINT/$S_BUCKET" = "$S_AVOID" ]; then
+      tty_bad "That is the bucket your backups already go to. The second copy needs another bucket, ideally at another provider."
+      S_MODE=url
+      continue
+    fi
     say ""
     step "Testing the backup storage"
     storage_test && break
@@ -1878,26 +2861,6 @@ guided_storage() {
     fi
     die "nothing was saved. Run the installer again once the storage is ready."
   done
-  choose_passphrase
-  STORAGE_GUIDED=1
-
-  ROWSAFE_REPO_S3_ENDPOINT=$S_ENDPOINT ROWSAFE_REPO_S3_BUCKET=$S_BUCKET
-  ROWSAFE_REPO_S3_KEY=$S_KEY ROWSAFE_REPO_S3_KEY_SECRET=$S_SECRET ROWSAFE_REPO_CIPHER_PASS=$S_CIPHER
-  ROWSAFE_REPO_S3_REGION=$S_REGION ROWSAFE_REPO_S3_URI_STYLE=$S_URI
-  export ROWSAFE_REPO_S3_ENDPOINT ROWSAFE_REPO_S3_BUCKET ROWSAFE_REPO_S3_KEY ROWSAFE_REPO_S3_KEY_SECRET \
-    ROWSAFE_REPO_CIPHER_PASS ROWSAFE_REPO_S3_REGION ROWSAFE_REPO_S3_URI_STYLE
-  # Settings from a previous provider must not linger in agent.env.
-  if [ -n "$S_PORT" ]; then
-    ROWSAFE_REPO_S3_PORT=$S_PORT
-    export ROWSAFE_REPO_S3_PORT
-  else
-    unset ROWSAFE_REPO_S3_PORT
-    STORAGE_CLEAR="$STORAGE_CLEAR ROWSAFE_REPO_S3_PORT"
-  fi
-  if [ "$S_PROVIDER" != s3-compatible ]; then
-    unset ROWSAFE_REPO_S3_CA_FILE ROWSAFE_REPO_S3_VERIFY_TLS
-    STORAGE_CLEAR="$STORAGE_CLEAR ROWSAFE_REPO_S3_CA_FILE ROWSAFE_REPO_S3_VERIFY_TLS"
-  fi
 }
 
 # check_storage (--check-storage) tests the configured repository and
@@ -1914,7 +2877,170 @@ check_storage() {
   [ -z "$missing" ] || die "the backup storage is not configured; missing:$missing"
   step "Testing the backup storage"
   storage_test || die "the backup storage test failed; nothing was changed"
+  if second_configured; then
+    load_second
+    step "Testing the second copy's storage"
+    storage_test || die "the second copy's storage test failed; nothing was changed"
+  fi
 }
+
+# ---------------------------------------------------------------- second copy (--add-storage)
+# A second bucket (ideally at another provider) that gets the backups and the
+# change log too. Its settings are ROWSAFE_REPO2_* in agent.env; the agent
+# does the rest (it sets up the second storage and switches archive_command,
+# with a reload, no restart), and the control plane schedules its backups.
+
+second_configured() {
+  for key in $REPO2_VARS; do
+    [ -n "$(env_value "$key")" ] || return 1
+  done
+}
+
+# load_second reads the second copy's settings into S_* (the environment
+# taking precedence over agent.env).
+load_second() {
+  S_ENDPOINT=$(s_get ROWSAFE_REPO2_S3_ENDPOINT)
+  S_BUCKET=$(s_get ROWSAFE_REPO2_S3_BUCKET)
+  S_KEY=$(s_get ROWSAFE_REPO2_S3_KEY)
+  S_SECRET=$(s_get ROWSAFE_REPO2_S3_KEY_SECRET)
+  S_CIPHER=$(s_get ROWSAFE_REPO2_CIPHER_PASS)
+  S_REGION=$(s_get ROWSAFE_REPO2_S3_REGION)
+  S_URI=$(s_get ROWSAFE_REPO2_S3_URI_STYLE)
+  S_PORT=$(s_get ROWSAFE_REPO2_S3_PORT)
+  S_CA=$(s_get ROWSAFE_REPO2_S3_CA_FILE)
+  S_VERIFY=$(s_get ROWSAFE_REPO2_S3_VERIFY_TLS)
+  _p=$(s_get ROWSAFE_REPO2_PATH_PREFIX)
+  [ -n "$_p" ] || _p=/rowsafe
+  _p=$(printf '%s\n' "$_p" | sed -e 's|^/*||' -e 's|/*$||')
+  S_PATH=/$_p
+}
+
+# second_copy runs before write_env: --add-storage asks for (or, without a
+# terminal, tests) the second storage; --remove-second-copy turns it off.
+second_copy() {
+  case $SECOND_COPY in
+    add) ;;
+    remove)
+      if ! second_configured; then
+        ok "no second copy is set up on this server"
+        return 0
+      fi
+      for key in $REPO2_VARS $REPO2_OPT_VARS; do unset "$key"; done
+      STORAGE_CLEAR="$STORAGE_CLEAR $REPO2_VARS $REPO2_OPT_VARS"
+      return 0
+      ;;
+    *) return 0 ;;
+  esac
+  storage_configured || die "set up the first backup storage first: run the installer without --add-storage"
+  first="$(env_value ROWSAFE_REPO_S3_ENDPOINT)/$(env_value ROWSAFE_REPO_S3_BUCKET)"
+  if [ "$TTY" = 0 ]; then
+    # Automation: the settings come from the environment.
+    missing=''
+    for key in $REPO2_VARS; do
+      [ -n "$(s_get "$key")" ] || missing="$missing $key"
+    done
+    [ -z "$missing" ] || die "--add-storage without a terminal needs these in the environment:$missing"
+    load_second
+    [ "$S_ENDPOINT/$S_BUCKET" != "$first" ] || die "the second copy must go to another bucket than the first storage ($S_BUCKET)"
+    step "Testing the second copy's storage"
+    storage_test || die "the second copy's storage test failed; nothing was saved"
+    return 0
+  fi
+  say ""
+  step "Second backup copy"
+  tty_say "A second copy keeps your backups and the change log in a second bucket too,"
+  tty_say "ideally at another provider: if one bucket, account or provider is ever lost,"
+  tty_say "the other still has everything. PostgreSQL never waits for it. Its key and"
+  tty_say "its own encryption passphrase stay on this server, like the first ones."
+  tty_say ""
+  tty_say "Your backups go to bucket '$(env_value ROWSAFE_REPO_S3_BUCKET)' at $(env_value ROWSAFE_REPO_S3_ENDPOINT)."
+  if second_configured; then
+    tty_say "The second copy goes to bucket '$(env_value ROWSAFE_REPO2_S3_BUCKET)' at $(env_value ROWSAFE_REPO2_S3_ENDPOINT)."
+    if ! confirm "Move the second copy to another bucket?" n; then
+      ok "kept the second copy's settings"
+      SECOND_COPY=''
+      return 0
+    fi
+    tty_hint "What is in the old bucket stays there; new backups go to the new one."
+  fi
+  tty_hint "Tip: a bucket at another provider than the first one protects you best."
+  S_AVOID=$first S_PREFIX=ROWSAFE_REPO2_
+  _pp=$(s_get ROWSAFE_REPO2_PATH_PREFIX)
+  [ -n "$_pp" ] || _pp=/rowsafe
+  S_PATH=/$(printf '%s\n' "$_pp" | sed -e 's|^/*||' -e 's|/*$||')
+  storage_questions
+  S_AVOID='' S_PREFIX=''
+  PASS_KEY=ROWSAFE_REPO2_CIPHER_PASS PASS_WHAT="second copy"
+  choose_passphrase
+  tty_hint "This passphrase is not the first storage's: keep both in your password manager."
+  PASS_KEY='' PASS_WHAT=''
+
+  ROWSAFE_REPO2_S3_ENDPOINT=$S_ENDPOINT ROWSAFE_REPO2_S3_BUCKET=$S_BUCKET
+  ROWSAFE_REPO2_S3_KEY=$S_KEY ROWSAFE_REPO2_S3_KEY_SECRET=$S_SECRET ROWSAFE_REPO2_CIPHER_PASS=$S_CIPHER
+  ROWSAFE_REPO2_S3_REGION=$S_REGION ROWSAFE_REPO2_S3_URI_STYLE=$S_URI
+  export ROWSAFE_REPO2_S3_ENDPOINT ROWSAFE_REPO2_S3_BUCKET ROWSAFE_REPO2_S3_KEY ROWSAFE_REPO2_S3_KEY_SECRET \
+    ROWSAFE_REPO2_CIPHER_PASS ROWSAFE_REPO2_S3_REGION ROWSAFE_REPO2_S3_URI_STYLE
+  if [ -n "$S_PORT" ]; then
+    ROWSAFE_REPO2_S3_PORT=$S_PORT
+    export ROWSAFE_REPO2_S3_PORT
+  else
+    unset ROWSAFE_REPO2_S3_PORT
+    STORAGE_CLEAR="$STORAGE_CLEAR ROWSAFE_REPO2_S3_PORT"
+  fi
+  if [ "$S_PROVIDER" != s3-compatible ]; then
+    unset ROWSAFE_REPO2_S3_CA_FILE ROWSAFE_REPO2_S3_VERIFY_TLS
+    STORAGE_CLEAR="$STORAGE_CLEAR ROWSAFE_REPO2_S3_CA_FILE ROWSAFE_REPO2_S3_VERIFY_TLS"
+  fi
+}
+
+# second_copy_done runs once the agent restarted with the new settings: it
+# waits for the agent to set up the second copy for each database with
+# backups on, and says what happens next.
+second_copy_done() {
+  say ""
+  if [ "$SECOND_COPY" = remove ]; then
+    say "${BOLD}${GREEN}${CHECK} The second copy is off.${RESET} New backups and the change log go only to the first storage."
+    say "    What is already in the second bucket stays there: delete it at your provider"
+    say "    once you no longer need it."
+    return 0
+  fi
+  stanzas=''
+  for f in "$CONFIG_DIR"/pgbackrest/*.conf; do
+    case $f in *.copy2.conf | *'*'*) continue ;; esac
+    stanzas="$stanzas $(basename "$f" .conf)"
+  done
+  if [ -z "$stanzas" ]; then
+    say "${BOLD}${GREEN}${CHECK} Second copy saved.${RESET} It starts with the first database you turn backups on for."
+    return 0
+  fi
+  if ! agent_running; then
+    say "${BOLD}Second copy saved.${RESET} The agent isn't running, so it starts once the agent does."
+    return 0
+  fi
+  step "Turning on the second copy"
+  note "the agent sets it up for:$stanzas"
+  i=0
+  while :; do
+    waiting=''
+    for st in $stanzas; do
+      [ -f "$CONFIG_DIR/pgbackrest/$st.copy2.conf" ] && [ -d "$STATE_DIR/copy2-queue/$st" ] || waiting="$waiting $st"
+    done
+    [ -n "$waiting" ] || break
+    i=$((i + 1))
+    if [ "$i" -gt 45 ]; then
+      warn "the agent hasn't set up the second copy for$waiting yet; it keeps trying (see journalctl -u rowsafe-agent)"
+      break
+    fi
+    sleep 2
+  done
+  [ -n "$waiting" ] || ok "the second copy is set up; PostgreSQL's change log now goes to both storages (reloaded, no restart)"
+  say ""
+  say "${BOLD}${GREEN}${CHECK} Second copy on.${RESET} Rowsafe takes a first full backup into it now, then one every week."
+  say "    If the second storage is ever unreachable, PostgreSQL carries on, backups keep"
+  say "    going to the first storage, and Rowsafe alerts you. The dashboard shows both"
+  say "    storages, how far the copy is, and what each costs."
+}
+# ---- end second copy
 
 # ---------------------------------------------------------------- service
 
@@ -2008,7 +3134,7 @@ host_id() {
 # stdin: that is the script itself when piped from curl.
 agent_run() {
   # shellcheck disable=SC2016 # $1 expands in the inner shell
-  runuser -u "$AGENT_USER" -- env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/var/lib/postgresql \
+  runuser -u "$AGENT_USER" -- env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME="$AGENT_HOME" \
     LANG="${LANG:-C}" LC_ALL="${LC_ALL:-}" \
     sh -c 'set -a; . "$1"; set +a; shift; exec "$@"' rowsafe-setup "$ENV_FILE" "$INSTALL_DIR/rowsafe-agent" "$@" </dev/null
 }
@@ -2047,7 +3173,7 @@ discover() {
 }
 
 # The cluster being set up (one line of $TMP/clusters).
-C_PORT='' C_SOCK='' C_MAJOR='' C_CLUSTER='' C_NAME='' C_REG='' C_STATUS='' C_DBS='' C_SIZE='' C_UNIT='' C_ID=''
+C_PORT='' C_SOCK='' C_MAJOR='' C_CLUSTER='' C_NAME='' C_REG='' C_STATUS='' C_DBS='' C_SIZE='' C_UNIT='' C_ID='' C_ENGINE=postgresql
 
 # read_cluster LINE splits a discover line (no field is empty: "-" stands
 # for nothing, so tabs never collapse).
@@ -2055,14 +3181,15 @@ read_cluster() {
   _f() { printf '%s\n' "$1" | cut -f"$2"; }
   C_PORT=$(_f "$1" 1) C_SOCK=$(_f "$1" 2) C_MAJOR=$(_f "$1" 3) C_CLUSTER=$(_f "$1" 4)
   C_NAME=$(_f "$1" 7) C_REG=$(_f "$1" 8) C_STATUS=$(_f "$1" 9) C_DBS=$(_f "$1" 10)
-  C_SIZE=$(_f "$1" 11) C_UNIT=$(_f "$1" 12) C_ID=$(_f "$1" 13)
+  C_SIZE=$(_f "$1" 11) C_UNIT=$(_f "$1" 12) C_ID=$(_f "$1" 13) C_ENGINE=$(_f "$1" 14)
   [ "$C_ID" != - ] || C_ID=''
+  [ -n "$C_ENGINE" ] && [ "$C_ENGINE" != - ] || C_ENGINE=postgresql
 }
 
 cluster_desc() {
   _d=$C_DBS
   [ "$_d" != - ] || _d=none
-  printf 'PostgreSQL %s on port %s (%s; databases: %s)' "$C_MAJOR" "$C_PORT" "$C_SIZE" "$(printf '%s' "$_d" | sed 's/,/, /g')"
+  printf '%s %s on port %s (%s; databases: %s)' "$(engine_label "$C_ENGINE")" "$C_MAJOR" "$C_PORT" "$C_SIZE" "$(printf '%s' "$_d" | sed 's/,/, /g')"
 }
 
 # restart_cmd is how a person restarts this cluster.
@@ -2078,17 +3205,17 @@ restart_cmd() {
 
 restart_later() {
   say ""
-  say "    OK. Restart PostgreSQL when it suits you:"
+  say "    OK. Restart $(engine_label "$C_ENGINE") when it suits you:"
   say "        $(restart_cmd)"
   if restart_allowed "$C_PORT"; then
-    say "    (or with Restart PostgreSQL in the Rowsafe dashboard)."
+    say "    (or with Restart in the Rowsafe dashboard)."
   fi
   say "    Rowsafe notices the restart by itself and finishes setting up. Nothing else to do."
 }
 
 # restart_postgres restarts the cluster, because the person said yes.
 restart_postgres() {
-  step "Restarting PostgreSQL $C_MAJOR"
+  step "Restarting $(engine_label "$C_ENGINE") $C_MAJOR"
   _rc=0
   if systemd_running && [ "$C_UNIT" != - ]; then
     timeout 180 systemctl restart "$C_UNIT" >"$TMP/restart.log" 2>&1 </dev/null || _rc=$?
@@ -2103,14 +3230,14 @@ restart_postgres() {
     warn "restarting PostgreSQL failed"
     return 1
   fi
-  ok "PostgreSQL restarted"
+  ok "$(engine_label "$C_ENGINE") restarted"
 }
 
 offer_restart() {
   say ""
-  tty_say "PostgreSQL needs a quick restart for backups to start. It takes a few"
+  tty_say "$(engine_label "$C_ENGINE") needs a quick restart for backups to start. It takes a few"
   tty_say "seconds; open connections are dropped and apps reconnect."
-  if confirm "Restart PostgreSQL now?" n; then
+  if confirm "Restart $(engine_label "$C_ENGINE") now?" n; then
     if restart_postgres; then
       finish_setup
       return 0
@@ -2149,7 +3276,8 @@ plan_cluster() {
   install -d -m 0700 -o "$AGENT_USER" -g "$AGENT_USER" "$TMP/setup"
   rm -f "$TMP/setup/id"
   _rc=0
-  agent_show setup plan --name "$C_NAME" --port "$C_PORT" --socket-dir "$C_SOCK" --id-file "$TMP/setup/id" || _rc=$?
+  mysql_account || return 1 # mysql
+  agent_show setup plan --name "$C_NAME" --port "$C_PORT" --socket-dir "$C_SOCK" --engine "$C_ENGINE" --id-file "$TMP/setup/id" || _rc=$?
   C_ID=$(cat "$TMP/setup/id" 2>/dev/null || true)
   return "$_rc"
 }
@@ -2215,6 +3343,10 @@ setup_databases() {
     [ "$SETUP_STOP" = 0 ] || break
     read_cluster "$_line"
     say ""
+    if [ "$C_ENGINE" != postgresql ] && [ "$AGENT_USER" != mysql ]; then # mysql
+      note "Found $(cluster_desc): Rowsafe protects $(engine_label "$C_ENGINE") on servers without PostgreSQL for now; skipped."
+      continue
+    fi
     case $C_REG:$C_STATUS in
       yes:active)
         ok "$(cluster_desc) is protected as $C_NAME"
@@ -2225,7 +3357,7 @@ setup_databases() {
         continue
         ;;
       yes:awaiting_restart)
-        note "Found $(cluster_desc): backups for $C_NAME wait for a PostgreSQL restart."
+        note "Found $(cluster_desc): backups for $C_NAME wait for a restart."
         offer_restart
         continue
         ;;
@@ -2307,15 +3439,17 @@ databases() {
   fi
   interactive=0
   if [ "$TTY" = 1 ] && [ "$NO_SETUP" = 0 ]; then interactive=1; fi
-  if [ "$interactive" = 1 ] || [ -n "$PROTECT_NAME" ] || [ "$ALLOW_RESTART" = yes ] || grep -qs '^[0-9]' "$RESTART_ALLOW_FILE"; then
+  if [ "$interactive" = 1 ] || [ -n "$PROTECT_NAME" ] || [ "$ALLOW_RESTART" = yes ] || grep -qs '^[0-9]' "$RESTART_ALLOW_FILE" ||
+    [ -n "$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT" ]; then
     say ""
-    step "Looking for PostgreSQL on this server"
+    step "Looking for $(engine_label) on this server"
     if ! discover; then
       [ -z "$PROTECT_NAME" ] || die "could not look for PostgreSQL (see above)"
       next_steps
       return 0
     fi
     restart_access
+    update_access
   fi
   if [ -n "$PROTECT_NAME" ]; then
     protect_unattended
@@ -2332,9 +3466,10 @@ install_agent() {
   require_root
   detect_os
   detect_arch
+  detect_host_engine # mysql
   check_postgres
   say "${BOLD}Rowsafe agent installer${RESET}: backups, restore to any second and weekly"
-  say "restore tests for the PostgreSQL on this server. Nothing changes without your yes."
+  say "restore tests for the $(engine_label) on this server. Nothing changes without your yes."
   say ""
   step "Installing the Rowsafe agent on $(uname -n) ($OS_NAME, $ARCH)"
   ensure_base_tools
@@ -2368,15 +3503,17 @@ install_agent() {
   [ "$need_binary" = 0 ] || download_binary
 
   # 2. Dependencies and layout.
-  ensure_pgbackrest
+  if [ "$HOST_ENGINE" = postgresql ]; then ensure_pgbackrest; else ensure_mysql_tools; fi # mysql
   step "Installing into $INSTALL_DIR"
   make_dirs
   [ "$need_binary" = 0 ] || install_binary
   install_guard
   UNIT_CHANGED=0
   install_unit
+  mysql_setup # mysql
   install_logrotate
   maybe_guided_storage
+  second_copy
   write_env
 
   if systemd_running; then
@@ -2441,9 +3578,9 @@ install_agent() {
   if systemd_running; then
     start_agent
   fi
-  probe_postgres
+  [ "$HOST_ENGINE" != postgresql ] || probe_postgres
   summary "$SERVICE_STATE"
-  databases
+  if [ -n "$SECOND_COPY" ]; then second_copy_done; else databases; fi
 }
 
 summary() {
@@ -2451,7 +3588,7 @@ summary() {
   say "${BOLD}Rowsafe agent $REL_VERSION: $1${RESET}"
   say "    binary       $INSTALL_DIR/versions/$REL_VERSION/rowsafe-agent"
   say "    config       $ENV_FILE (postgres, 0600)"
-  say "    pgBackRest   ${PGBR_VERSION:-unknown}"
+  if [ -n "${TOOLS_SUMMARY:-}" ]; then say "    backups      $TOOLS_SUMMARY"; else say "    pgBackRest   ${PGBR_VERSION:-unknown}"; fi
   [ -z "${PG_SUMMARY:-}" ] || say "    PostgreSQL   $PG_SUMMARY"
   id=$(host_id)
   [ -z "$id" ] || say "    host         enrolled as $id"
@@ -2483,7 +3620,12 @@ uninstall_agent() {
   if systemd_running; then systemctl daemon-reload; fi
   rm -rf "$INSTALL_DIR"
   ok "service and $INSTALL_DIR removed"
+  rm -f "/etc/systemd/system/$SERVICE.d/10-mysql.conf" # mysql
   if [ "$purge" = 1 ]; then
+    if [ -L "$MYSQL_CONF_LINK" ]; then # mysql: keep the server's binary log settings
+      cp "$CONFIG_DIR/mysql/server.cnf" "$MYSQL_CONF_LINK.rowsafe-new" 2>/dev/null &&
+        mv -f "$MYSQL_CONF_LINK.rowsafe-new" "$MYSQL_CONF_LINK" || rm -f "$MYSQL_CONF_LINK"
+    fi
     rm -rf "$CONFIG_DIR" "$STATE_DIR" "$LOG_DIR" "$LOGROTATE_FILE"
     ok "$CONFIG_DIR, $STATE_DIR, $LOG_DIR and $LOGROTATE_FILE deleted"
   else
@@ -2529,6 +3671,12 @@ main() {
       --no-setup) NO_SETUP=1 ;;
       --allow-restart) ALLOW_RESTART=yes ;;
       --no-allow-restart) ALLOW_RESTART=no ;;
+      --allow-updates) ALLOW_UPDATES=yes ;;
+      --no-allow-updates) ALLOW_UPDATES=no ;;
+      --allow-security-updates) ALLOW_SECURITY=yes ;;
+      --no-allow-security-updates) ALLOW_SECURITY=no ;;
+      --allow-reboot) ALLOW_REBOOT=yes ;;
+      --no-allow-reboot) ALLOW_REBOOT=no ;;
       --protect)
         [ $# -ge 2 ] || die "--protect needs the database's name in Rowsafe"
         printf '%s\n' "$2" | grep -Eq '^[a-z][a-z0-9-]{1,39}$' ||
@@ -2543,6 +3691,8 @@ main() {
         shift
         ;;
       --check-storage) mode=check-storage ;;
+      --add-storage) SECOND_COPY=add ;;
+      --remove-second-copy) SECOND_COPY=remove ;;
       --storage)
         [ $# -ge 2 ] || die "--storage needs a provider: $PROVIDERS"
         case " $PROVIDERS other minio " in
@@ -2579,11 +3729,13 @@ main() {
   if [ "$purge" = 1 ] && [ "$mode" != uninstall ]; then
     die "--purge only goes with --uninstall"
   fi
-  if [ "$mode" != install ] && { [ "$SETUP_STORAGE" = 1 ] || [ -n "$STORAGE_PROVIDER" ]; }; then
-    die "--setup-storage and --storage only go with an install"
+  if [ "$mode" != install ] && { [ "$SETUP_STORAGE" = 1 ] || [ -n "$STORAGE_PROVIDER" ] || [ -n "$SECOND_COPY" ]; }; then
+    die "--setup-storage, --storage, --add-storage and --remove-second-copy only go with an install"
   fi
-  if [ "$mode" != install ] && { [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME" ] || [ -n "$ALLOW_RESTART" ]; }; then
-    die "--no-setup, --protect and --allow-restart only go with an install"
+  # The second copy is its own step: no database questions around it.
+  [ -z "$SECOND_COPY" ] || NO_SETUP=1
+  if [ "$mode" != install ] && { [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME" ] || [ -n "$ALLOW_RESTART$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT" ]; }; then
+    die "--no-setup, --protect and the --allow- options only go with an install"
   fi
   [ -z "$PROTECT_PORT" ] || [ -n "$PROTECT_NAME" ] || die "--protect-port only goes with --protect"
   [ "$NO_SETUP" = 0 ] || [ -z "$PROTECT_NAME" ] || die "--no-setup and --protect contradict each other"

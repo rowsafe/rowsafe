@@ -148,7 +148,10 @@ func (a *Agent) rewindCopy(ctx context.Context, db protocol.DatabaseSpec, p prot
 	if err := a.writeConfig(db, prod); err != nil {
 		return nil, err
 	}
-	cli := a.cli(db)
+	cli, err := a.repoCLI(db, p.Target.Repo)
+	if err != nil {
+		return nil, err
+	}
 	stanzas, err := cli.Info(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("Rowsafe can't reach the backup repository from this server: %w", err)

@@ -36,6 +36,14 @@ Rewind: continuous backups, restore to any second
   rowsafe rewind [NAME]              restore a copy at any second, compare it, bring rows back,
                                      or rewind the whole database (rowsafe help rewind)
 
+Move in: leave your managed database, keep the safety net
+  rowsafe migrate start [NAME]       move a database in from DigitalOcean, RDS, Supabase, Neon...
+                                     with near-zero downtime (rowsafe help migrate)
+
+Updates and upgrades
+  rowsafe update [NAME]              install PostgreSQL's newest minor release (asks first)
+  rowsafe upgrade [NAME] --to 18     check, rehearse on a copy, then upgrade (rowsafe help upgrade)
+
 Proof: the weekly restore test
   rowsafe proof [NAME]               run the restore test now
   rowsafe proofs [NAME]              results
@@ -45,6 +53,8 @@ Pulse: health and monitoring
   rowsafe fix [NAME]                 let Rowsafe fix what pulse found (asks first)
   rowsafe insights [NAME]            largest tables, unused indexes, bloat, vacuum
   rowsafe top [NAME]                 queries that take the most time, and which got slower
+  rowsafe settings [NAME]            PostgreSQL's settings; rowsafe tune [NAME]: what suits the server
+  rowsafe recommendations [NAME]     what would make it better, why and what it costs
   rowsafe alerts                     firing alerts (rowsafe channels: where they go)
   rowsafe report                     "Your weekly Pulse", the weekly email
 
@@ -52,6 +62,8 @@ Guard: the safety net for AI agents
   rowsafe status [NAME]              is it recoverable right now? (exit 0 yes, 3 no)
   rowsafe mcp                        MCP server for AI assistants
   rowsafe guard                      Claude Code hook: a restore point before destructive commands
+  rowsafe preview [NAME] FILE        run a migration on a fresh copy first: locks, rewrites, a verdict
+  rowsafe copies [NAME]              masked copies developers and AI agents can connect to
 
 Admin
   rowsafe tasks [NAME] | task ID     recent tasks; one task with its log

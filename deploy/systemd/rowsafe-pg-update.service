@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-pg-update.service: installs PostgreSQL updates, upgrades
+# PostgreSQL, installs security updates or reboots the server when the
+# Rowsafe agent asks because a person clicked that, and only what root
+# allowed in /etc/rowsafe/updates-allowed (see
+# /usr/local/lib/rowsafe/rowsafe-pg-restart, update mode). Started by
+# rowsafe-pg-update.path; installed by https://rowsafe.sh/install only when
+# root allowed one of them (--allow-updates, --allow-security-updates,
+# --allow-reboot).
+
+[Unit]
+Description=Rowsafe: install PostgreSQL updates or upgrade PostgreSQL on request
+Documentation=https://rowsafe.sh/docs/guides/updates
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/rowsafe/rowsafe-pg-restart
+Environment=ROWSAFE_HELPER_MODE=update
+# The agent user, whose privileges read and remove the request and change a
+# cluster's own settings.
+Environment=ROWSAFE_AGENT_USER=postgres
+# A major upgrade of a large database in Safe mode copies all its data.
+TimeoutStartSec=13h
+# The answer: root's own directory, which the agent can read (shared with
+# rowsafe-pg-restart.service).
+RuntimeDirectory=rowsafe-pg-restart
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+# What an upgrade keeps for undo, and the last action's log, out of the
+# agent's reach.
+StateDirectory=rowsafe-pg-restart
+StateDirectoryMode=0700
+UMask=0022
+
+# Unlike rowsafe-pg-restart.service this one can't be sandboxed much: apt,
+# the packages' own scripts and pg_upgradecluster write under /usr, /etc and
+# /var, download packages and start PostgreSQL. What it can do is limited by
+# the script instead: only the requests it knows, each checked against
+# root's allow lists, with package names it builds itself.
+ProtectHome=read-only
+PrivateTmp=no
+LockPersonality=yes
+RestrictRealtime=yes
