@@ -479,12 +479,22 @@ func (sh *shipper) shippedUpTo(p position) bool {
 	return sh.state.Files[id.dir()] >= p.Pos
 }
 
+// reported: a poll has finished, so stats() has the time changes were
+// last saved.
+func (sh *shipper) reported() bool {
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	return sh.caughtUp != nil
+}
+
 // waitShipped uploads now and waits until pos is in the bucket.
 func (sh *shipper) waitShipped(ctx context.Context, p position, timeout time.Duration) (time.Time, error) {
 	deadline := time.Now().Add(timeout)
 	for {
 		sh.kick(true)
-		if sh.shippedUpTo(p) {
+		// Shipped, and the poll that shipped it has finished, so the next
+		// heartbeat already reports when changes were last saved.
+		if sh.shippedUpTo(p) && sh.reported() {
 			return time.Now().UTC(), nil
 		}
 		if time.Now().After(deadline) {
