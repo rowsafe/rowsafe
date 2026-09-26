@@ -243,6 +243,10 @@ func (c CLI) run(ctx context.Context, args ...string) ([]byte, error) {
 func (c CLI) StanzaCreate(ctx context.Context) ([]byte, error) { return c.run(ctx, "stanza-create") }
 func (c CLI) Check(ctx context.Context) ([]byte, error)        { return c.run(ctx, "check") }
 
+// StanzaUpgrade moves the stanza to the PostgreSQL version now running
+// (after a major upgrade, or the undo of one).
+func (c CLI) StanzaUpgrade(ctx context.Context) ([]byte, error) { return c.run(ctx, "stanza-upgrade") }
+
 func (c CLI) Backup(ctx context.Context, typ string) ([]byte, error) {
 	return c.run(ctx, "--type="+typ, "backup")
 }
