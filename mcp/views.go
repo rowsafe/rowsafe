@@ -334,7 +334,7 @@ func nextStep(t protocol.TaskView, d TaskDetail) string {
 		}
 		switch {
 		case !d.Adopt.Applied:
-			return fmt.Sprintf("This is a read-only plan; nothing changed. Show it to the user. If they approve, apply it: `rowsafe apply %s` (tool apply_adoption). Applying never restarts PostgreSQL.", name)
+			return fmt.Sprintf("This is a read-only plan; nothing changed. Show it to the user. If they approve, they apply it: the Turn on backups button in the dashboard, or `rowsafe apply %s` (AI assistants can't). Applying never restarts PostgreSQL.", name)
 		case d.Adopt.RestartRequired:
 			return fmt.Sprintf("Settings applied. PostgreSQL needs a restart for backups to start; the user restarts it when it suits them (Restart PostgreSQL in the dashboard, `rowsafe restart %s`, or on the server: sudo systemctl restart postgresql, or in Docker: docker compose restart postgres). Rowsafe never restarts it on its own, and AI assistants can't. Rowsafe notices the restart and verifies by itself; `rowsafe verify %s` (tool verify_database) checks right away.", name, name)
 		default:
