@@ -66,6 +66,9 @@ type Agent struct {
 	// rewindOps runs the steps of a rewind in place (tests replace it).
 	rewindOps inPlaceOps
 
+	// files backs up the folders that go with databases (files.go).
+	files     *filesRuntime
+	filesOnce sync.Once
 	// Rowsafe Storage credentials (storage.go); confMu serializes writes
 	// of pgBackRest configs (tasks, credential rotation, repo moves).
 	storage   managedStorage
@@ -210,6 +213,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.heartbeatLoop(ctx)
 	go a.fastLane(ctx)
 	go a.rewindHousekeeping(ctx)
+	go a.filesLoop(ctx) // files.go: folder snapshots and the files lane
 	if a.cfg.RowsafeStorage() {
 		go a.managedStorageLoop(ctx) // Rowsafe Storage credentials (storage.go)
 	}

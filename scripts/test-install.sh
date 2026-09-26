@@ -51,6 +51,12 @@
 #      helper in PgBouncer mode (install, configure from its template,
 #      reload, off, refused values and foreign configurations) with apt-get
 #      and systemctl stood in, and --no-allow-pooler.
+#   9. files (--files, --allow-files): restic installed from a pinned,
+#      SHA-256-verified release (a tampered one refused), read access
+#      granted with ACLs, the "Back it up with ...?" question, the root
+#      helper's files-read and files-put (allow list, system folders,
+#      symlinks, .. paths, written as the folder's owner, never as root) and
+#      --no-allow-files / uninstall removing it.
 #
 # When Go is available the release key and the 0.2.0 release are made by the
 # real `rowsafe-release keygen/manifest/sign`, so the installer is tested
@@ -128,6 +134,20 @@ case \${1:-} in
       [ "\$(wc -l <"\$f/\$cmd.rc")" -le 1 ] || sed -i 1d "\$f/\$cmd.rc"
     fi
     exit "\$rc" ;;
+  files)
+    # (files) answers from /tmp/rowsafe-fake: files-discover.out, files-access.out, files-list.out
+    f=/tmp/rowsafe-fake
+    shift
+    echo "files \$* (\$(id -un))" >>"\$f/calls"
+    case \${1:-} in
+      discover) [ ! -f "\$f/files-discover.out" ] || cat "\$f/files-discover.out" ;;
+      access) if [ -f "\$f/files-access.out" ]; then cat "\$f/files-access.out"; else echo yes; fi ;;
+      list) [ ! -f "\$f/files-list.out" ] || cat "\$f/files-list.out" ;;
+      add)
+        [ "\$(id -un)" = postgres ] && [ -n "\${ROWSAFE_REPO_CIPHER_PASS:-}" ] || exit 1
+        echo "fld_1 \$5" ;;
+      *) exit 2 ;;
+    esac ;;
   *) exit 2 ;;
 esac
 EOF
@@ -163,6 +183,22 @@ host() {
   else
     echo "test-install: rowsafe-release unavailable; signing everything with openssl" >&2
   fi
+
+  # (files) The pinned restic releases, verified against the installer's
+  # SHA-256, served to the containers by their local release server.
+  rv=$(sed -n 's/^RESTIC_VERSION=//p' "$root/scripts/install.sh")
+  mkdir -p "$work/go/restic/v$rv"
+  for arch in amd64 arm64; do
+    sum=$(sed -n "s/^RESTIC_SHA256_$(echo "$arch" | tr a-z A-Z)=//p" "$root/scripts/install.sh")
+    f=$work/go/restic/v$rv/restic_${rv}_linux_$arch.bz2
+    if curl -fsSL --retry 3 -o "$f" "https://github.com/restic/restic/releases/download/v$rv/restic_${rv}_linux_$arch.bz2" &&
+      [ "$( (sha256sum "$f" 2>/dev/null || shasum -a 256 "$f") | cut -d' ' -f1)" = "$sum" ]; then
+      :
+    else
+      rm -f "$f"
+      echo "test-install: could not fetch restic $rv for $arch; its tests are skipped" >&2
+    fi
+  done
 
   first=1
   for image in $images; do
@@ -273,7 +309,7 @@ in_container() {
   sed "s|@RELEASE_PUBLIC_KEY@|$pub|" /src/scripts/install.sh >install.sh
   # An executable wrapper (not a function) so `env VAR=... $INSTALLER` works.
   INSTALLER=$W/installer
-  printf '#!/bin/sh\nexec env ROWSAFE_RELEASES_URL=https://localhost:8443/agent sh %s/install.sh "$@"\n' "$W" >"$INSTALLER"
+  printf '#!/bin/sh\nexec env ROWSAFE_RELEASES_URL=https://localhost:8443/agent ROWSAFE_RESTIC_URL=https://localhost:8443/restic sh %s/install.sh "$@"\n' "$W" >"$INSTALLER"
   chmod 755 "$INSTALLER"
   cp /src/scripts/install.sh placeholder-install.sh
 
@@ -300,6 +336,8 @@ EOF
   done
 
   # ---- releases
+  mkdir -p srv/restic
+  [ ! -d /go-release/restic ] || cp -r /go-release/restic/. srv/restic/ # (files) the pinned restic
   if [ -d /go-release/0.2.0 ]; then
     cp -r /go-release/0.2.0 srv/agent/0.2.0 # signed by rowsafe-release
   else
@@ -421,7 +459,7 @@ EOF
 
   # Exactly as piped from curl: sh -s rse_...
   expect_ok "re-run is idempotent (piped, token as argument)" \
-    sh -c 'ROWSAFE_RELEASES_URL=https://localhost:8443/agent sh -s rse_secrettoken123 <"$1/install.sh"' piped "$W"
+    sh -c 'ROWSAFE_RELEASES_URL=https://localhost:8443/agent ROWSAFE_RESTIC_URL=https://localhost:8443/restic sh -s rse_secrettoken123 <"$1/install.sh"' piped "$W"
   grep -q "already on disk" "$W/out" || fail "binary downloaded again"
   grep -q "unchanged" "$W/out" || fail "env file changed on a plain re-run"
   expect_fail "bad cipher pass refused" "at least 20 characters" env ROWSAFE_REPO_CIPHER_PASS=short "$INSTALLER"
@@ -774,7 +812,7 @@ guided_storage_tests() {
   # R2 in the EU, a generated passphrase that must be confirmed.
   tty_ok "fresh install: R2 (EU), generated passphrase" \
     "Bucket URL\t\nChoose 1-6\t1\nCloudflare account ID\t$acct\nEU jurisdiction\ty\nBucket name\trowsafe-test\nAccess key ID\t$key\nSecret access key\t$secret\nChoose 1-2\t1\nto continue\tzzzz\nto continue\t{capture:[│|] {6}[A-Za-z0-9]{36}([A-Za-z0-9]{4}) }\n" \
-    sh -c 'ROWSAFE_RELEASES_URL=https://localhost:8443/agent sh -s rse_secrettoken123 <"$1/install.sh"' piped "$W"
+    sh -c 'ROWSAFE_RELEASES_URL=https://localhost:8443/agent ROWSAFE_RESTIC_URL=https://localhost:8443/restic sh -s rse_secrettoken123 <"$1/install.sh"' piped "$W"
   has "Where should Rowsafe store your backups?"
   has "backup storage works: wrote, read back and deleted a test file"
   has "Save this in your password manager now."
@@ -920,6 +958,7 @@ guided_storage_tests() {
   rowsafe_storage_tests
   setup_flow_tests
   restart_tests
+  files_tests
   create_cluster_tests
   firewall_tests
   [ "${TEST_UNITS:-0}" != 1 ] || mysql_host_tests
@@ -994,7 +1033,7 @@ rowsafe_storage_tests() {
   # the passphrase is generated, shown once and confirmed.
   tty_ok "fresh install: Rowsafe Storage" \
     "Choose 1-2\t\nChoose 1-2\t1\nto continue\t{capture:[│|] {6}[A-Za-z0-9]{36}([A-Za-z0-9]{4}) }\n" \
-    sh -c 'ROWSAFE_URL=$2 ROWSAFE_RELEASES_URL=https://localhost:8443/agent sh -s rse_secrettoken123 <"$1/install.sh"' piped "$W" "$api"
+    sh -c 'ROWSAFE_URL=$2 ROWSAFE_RELEASES_URL=https://localhost:8443/agent ROWSAFE_RESTIC_URL=https://localhost:8443/restic sh -s rse_secrettoken123 <"$1/install.sh"' piped "$W" "$api"
   has "Where should backups go?"
   has "1) Rowsafe Storage     nothing to set up (10 GB free)"
   has "Rowsafe can't read them"
@@ -1225,7 +1264,7 @@ EOF
   has "✓ shop is protected. The first full backup is running."
   has "Dashboard: https://app.rowsafe.test/databases/db_fake"
   has "Rowsafe can't restart or stop PostgreSQL"
-  called "plan --name shop --port 5432 --socket-dir /var/run/postgresql --engine postgresql --id-file"
+  called "plan --name shop --port 5432 --socket-dir /var/run/postgresql --id-file"
   called "apply --database db_fake"
   called "wait --database db_fake --timeout 5m"
   [ "$(cat "$F/pg_ctlcluster")" = "17 main restart" ] || fail "$name: pg_ctlcluster not run as 17 main restart"
@@ -1557,6 +1596,264 @@ EOF
   expect_ok "purge" "$INSTALLER" --uninstall --purge
   [ ! -e /etc/rowsafe ] || fail "purge left /etc/rowsafe"
   pass "--no-allow-restart, uninstall and purge remove the restart helper"
+}
+
+# ------------------------------------------------------------ files
+
+files_tests() {
+  echo "  -- files (--files, --allow-files)"
+  H=/usr/local/lib/rowsafe/rowsafe-pg-restart
+  R=/var/lib/rowsafe/restart
+  RB=/usr/local/lib/rowsafe/restic
+  D=/etc/systemd/system/rowsafe-pg-restart.service.d/rowsafe-files.conf
+  rv=$(sed -n 's/^RESTIC_VERSION=//p' /src/scripts/install.sh)
+  secret_key=AKIAEXAMPLEKEY42 secret=s3cr3t/with+base64= cipher='cipher-pass-that-is-long-enough/+=='
+  configured() {
+    env ROWSAFE_REPO_S3_ENDPOINT=acct.eu.r2.cloudflarestorage.com ROWSAFE_REPO_S3_BUCKET=app-rowsafe \
+      ROWSAFE_REPO_S3_KEY="$secret_key" ROWSAFE_REPO_S3_KEY_SECRET="$secret" ROWSAFE_REPO_CIPHER_PASS="$cipher" "$@"
+  }
+  shop_reg='5432\t/var/run/postgresql\t17\tmain\t/var/lib/postgresql/17/main\t1288490189\tshop\tyes\tactive\tshop\t1.2 GiB\tpostgresql@17-main.service\tdb_fake'
+  command -v bzip2 >/dev/null || apt-get install -y -qq --no-install-recommends bzip2 >/dev/null
+
+  # restic: a tampered download is refused and nothing is installed.
+  mkdir -p "srv/restic-bad/v$rv"
+  echo "not restic" | bzip2 >"srv/restic-bad/v$rv/restic_${rv}_linux_$arch.bz2"
+  scenario
+  expect_ok "a tampered restic is refused" configured env ROWSAFE_RELEASES_URL=https://localhost:8443/agent \
+    ROWSAFE_RESTIC_URL=https://localhost:8443/restic-bad sh "$W/install.sh" rse_secrettoken123
+  grep -q "does not match the SHA-256 of the official $rv release" "$W/out" || fail "tampered restic not reported"
+  [ ! -e "$RB" ] || fail "a tampered restic was installed"
+  if [ -f "srv/restic/v$rv/restic_${rv}_linux_$arch.bz2" ]; then
+    expect_ok "restic installed from the pinned release" configured "$INSTALLER" rse_secrettoken123
+    grep -q "restic $rv installed (official release, SHA-256 verified)" "$W/out" || fail "restic install not reported"
+    [ "$(stat -c '%U %a' "$RB")" = "root 755" ] || fail "restic ownership/mode"
+    "$RB" version | grep -q "^restic $rv " || fail "restic doesn't run"
+    expect_ok "restic kept on a re-run" configured "$INSTALLER"
+    grep -q "restic $rv (backs up the folders" "$W/out" || fail "restic reinstalled on a re-run"
+  else
+    echo "  skip restic from the release (not fetched on the host)"
+    expect_ok "configured install" configured "$INSTALLER" rse_secrettoken123
+  fi
+
+  # The agent is enrolled and running; shop is registered.
+  echo '{"host_id":"host_1","agent_token":"rsa_x"}' >/var/lib/rowsafe/agent.json
+  chown postgres:postgres /var/lib/rowsafe/agent.json
+  pkill -u postgres -f 'rowsafe-agent run' || true
+  runuser -u postgres -- /opt/rowsafe/rowsafe-agent run >/dev/null 2>&1 &
+  sleep 1
+  getent passwd www-data >/dev/null || useradd --system www-data
+  mkdir -p /srv/app/storage/cvs /srv/app/media /srv/other
+  echo cv >/srv/app/storage/cvs/a.pdf
+  chown -R www-data:www-data /srv/app /srv/other
+  chmod 0750 /srv/app /srv/app/storage /srv/app/storage/cvs
+  chmod 0700 /srv/other
+
+  # --files PATH the agent can't read: root gives it read access (ACLs).
+  scenario "discover_out=$shop_reg"
+  printf 'no\n' >"$F/files-access.out"
+  chmod 666 "$F"/*
+  name="--files"
+  expect_ok "--files grants read access and protects the folder" "$INSTALLER" --files /srv/app/storage --no-allow-restart
+  [ -z "${TEST_SHOW:-}" ] || cat "$W/out"
+  called "files add --database db_fake --path /srv/app/storage (postgres)"
+  grep -q "gave the Rowsafe agent read access to /srv/app/storage" "$W/out" || fail "read access not reported"
+  grep -q "/srv/app/storage is backed up with shop" "$W/out" || fail "protection not reported"
+  grep -q "same passphrase restores them" "$W/out" || fail "no word on the files key"
+  getfacl -p /srv/app/storage/cvs 2>/dev/null | grep -qx 'user:postgres:r-x' || fail "no ACL on the folder"
+  getfacl -p /srv/app/storage/cvs 2>/dev/null | grep -qx 'default:user:postgres:r-x' || fail "no default ACL"
+  getfacl -p /srv/app/storage/cvs/a.pdf 2>/dev/null | grep -qx 'user:postgres:r--' || fail "no ACL on a file"
+  runuser -u postgres -- cat /srv/app/storage/cvs/a.pdf >/dev/null || fail "the agent user can't read the file"
+  [ "$(stat -c '%U' /srv/app/storage/cvs/a.pdf)" = "www-data" ] || fail "ownership changed"
+  [ ! -e /etc/rowsafe/files-allowed ] || fail "--files alone allowed the root helper"
+  [ ! -e "$H" ] || fail "--files alone installed the root helper"
+
+  # Without a terminal and without --files, nothing about files is done.
+  scenario "discover_out=$shop_reg"
+  name="no terminal"
+  expect_ok "no terminal, no --files: nothing about files" "$INSTALLER"
+  not_called "files add"
+
+  # On a terminal: the found folder is offered, then "put files back?".
+  scenario "discover_out=$shop_reg"
+  printf '/srv/app/storage\n' >"$F/files-list.out"
+  printf '/srv/app/storage\t2469606195\t1204\tno\t2.3 GiB\tLaravel storage (uploaded files)\n/srv/app/media\t10240\t3\tno\t10.0 KiB\tuploaded media\n' >"$F/files-discover.out"
+  chmod 666 "$F"/*
+  name="found folder"
+  tty_ok "offer the found folder, allow putting files back" \
+    "Allow Rowsafe to install and manage PgBouncer?\tn\nso a restore brings back both? [Y/n]\t\nAllow Rowsafe to put restored files back\ty\n" \
+    "$INSTALLER"
+  has "Rowsafe found /srv/app/media (10.0 KiB, 3 files: uploaded media)"
+  lacks "Rowsafe found /srv/app/storage"
+  called "files add --database db_fake --path /srv/app/media (postgres)"
+  has "Rowsafe may put restored files back into the folders you protect"
+  grep -qx /srv/app/media /etc/rowsafe/files-allowed && grep -qx /srv /etc/rowsafe/files-allowed || fail "files-allowed lacks a root"
+  ! grep -qx /home /etc/rowsafe/files-allowed || fail "files-allowed lets Rowsafe into /home by default"
+  [ "$(stat -c '%U %a' /etc/rowsafe/files-allowed)" = "root 644" ] || fail "files-allowed ownership/mode"
+  grep -qx "ReadWritePaths=-/srv" "$D" && ! grep -q "ProtectHome" "$D" && ! grep -q "/home" "$D" && grep -q "CAP_FOWNER" "$D" || fail "helper drop-in"
+  [ -x "$H" ] || fail "--allow-files didn't install the root helper"
+  grep -q '^# actions: .*files-read files-put' "$H" || fail "helper lacks the files actions"
+  if [ "${TEST_UNITS:-0}" = 1 ] && command -v systemd-analyze >/dev/null; then
+    expect_ok "systemd-analyze verify (helper with the files drop-in)" systemd-analyze verify /etc/systemd/system/rowsafe-pg-restart.service
+  fi
+
+  # The helper's files actions, run as its service would. Files requests
+  # have their own request and result files.
+  O=$W/files-helper-run
+  install -d -m 0755 -o root -g root "$O"
+  as_pg() { runuser -u postgres -- "$@"; }
+  cat >"$W/fake-systemctl" <<'EOF'
+#!/bin/sh
+echo "$*" >>/tmp/rowsafe-files-systemctl.calls
+EOF
+  chmod 755 "$W/fake-systemctl"
+  helper() {
+    timeout 60 env ROWSAFE_SYSTEMCTL="$W/fake-systemctl" STATE_DIRECTORY="$W/files-helper-state" RUNTIME_DIRECTORY="$O" "$H" 2>>"$W/files-helper.log" ||
+      fail "the helper failed or hung (exit $?)"
+  }
+  request() {
+    rm -f "$O/files-result"
+    printf '%s\n' "$1" | as_pg sh -c 'cat >"$1"' sh "$R/files-request"
+    helper
+    [ ! -e "$R/files-request" ] || fail "helper left the files request: $1"
+    [ -f "$O/files-result" ] || fail "no result for: $1"
+  }
+  result_has() { grep -qxF "$1" "$O/files-result" || {
+    cat "$O/files-result" >&2
+    fail "helper result lacks $1"
+  }; }
+  request "f_1 files-read /srv/other"
+  result_has "ok=1"
+  getfacl -p /srv/other 2>/dev/null | grep -qx 'user:postgres:r-x' || fail "files-read gave no access"
+  [ "$(stat -c '%U' /srv/other)" = "www-data" ] || fail "files-read changed ownership"
+  ln -sfn /etc /srv/link
+  for bad in "/etc/ssh|a system or database folder" "/srv/../etc|not a plain path" "/srv/link|goes through a symbolic link" \
+    "/mnt|not under a folder listed" "/srv/nope|doesn't exist" "/var/lib/rowsafe/files-staging|a system or database folder"; do
+    request "f_2 files-read ${bad%%|*}"
+    result_has "ok=0"
+    grep -q "^error=.*${bad#*|}" "$O/files-result" || fail "files-read ${bad%%|*}: $(cat "$O/files-result")"
+  done
+  for bad in "f_3 files-read relative/path" "f_3 files-read /srv/a b" "f_3 files-put all r1 /srv/app/media" \
+    "f_3 files-put missing ../x /srv/app/media" "f_3 files-put missing r1" "f_3 files-read /srv;reboot" "f_3 restart 5432"; do
+    request "$bad"
+    result_has "error=malformed request"
+  done
+
+  # files-put: staged by the agent user, written as the folder's owner.
+  S=/var/lib/rowsafe/files-staging/r1
+  stage() { # fresh staged tree
+    as_pg rm -rf "$S"
+    as_pg mkdir -p "$S/tree/sub"
+    printf 'restored\n' | as_pg sh -c 'cat >"$1"' sh "$S/tree/sub/new.txt"
+    printf 'from the snapshot\n' | as_pg sh -c 'cat >"$1"' sh "$S/tree/kept.txt"
+    as_pg chmod 0700 "$S/tree"
+  }
+  stage
+  echo "current" >/srv/app/media/kept.txt
+  echo "added since" >/srv/app/media/extra.txt
+  chown www-data:www-data /srv/app/media/kept.txt /srv/app/media/extra.txt
+  chmod 0751 /srv/app/media
+  request "f_4 files-put missing r1 /srv/app/media"
+  result_has "ok=1"
+  [ "$(cat /srv/app/media/sub/new.txt)" = restored ] || fail "files-put missing: new file not there"
+  [ "$(stat -c '%U' /srv/app/media/sub/new.txt)" = www-data ] || fail "files-put didn't write as the folder's owner"
+  [ "$(cat /srv/app/media/kept.txt)" = current ] || fail "files-put missing overwrote a file"
+  [ "$(stat -c '%a' /srv/app/media)" = 751 ] || fail "files-put changed the folder's mode"
+  request "f_5 files-put replace r1 /srv/app/media"
+  result_has "ok=1"
+  [ "$(cat /srv/app/media/kept.txt)" = "from the snapshot" ] || fail "files-put replace"
+
+  # A compromised agent controls the staged tree: anything but plain files
+  # and folders is refused before anything is written.
+  cp /etc/passwd "$W/passwd.before"
+  stage
+  as_pg sh -c "printf '#!/bin/sh\n' >$S/tree/suid.sh && chmod 4755 $S/tree/suid.sh"
+  request "f_10 files-put missing r1 /srv/app/media"
+  result_has "ok=0"
+  grep -q '^error=.*set-user-ID' "$O/files-result" || fail "a setuid file was not refused: $(cat "$O/files-result")"
+  [ ! -e /srv/app/media/suid.sh ] || fail "a staged setuid file was written"
+  stage
+  as_pg sh -c "chmod 2755 $S/tree/sub && printf x >$S/tree/sub/g.txt"
+  request "f_11 files-put missing r1 /srv/app/media"
+  grep -q '^error=.*set-user-ID or set-group-ID' "$O/files-result" || fail "a setgid folder was not refused: $(cat "$O/files-result")"
+  stage
+  as_pg ln -s /etc/passwd "$S/tree/passwd"
+  request "f_12 files-put replace r1 /srv/app/media"
+  grep -q '^error=.*symbolic link' "$O/files-result" || fail "a staged symlink was not refused: $(cat "$O/files-result")"
+  [ ! -e /srv/app/media/passwd ] && [ ! -L /srv/app/media/passwd ] || fail "a staged symlink was written"
+  stage
+  as_pg ln "$S/tree/kept.txt" "$S/tree/hard.txt"
+  request "f_13 files-put missing r1 /srv/app/media"
+  grep -q '^error=.*hard link' "$O/files-result" || fail "a staged hard link was not refused: $(cat "$O/files-result")"
+  stage
+  as_pg mkfifo "$S/tree/fifo"
+  request "f_14 files-put missing r1 /srv/app/media"
+  grep -q '^error=.*device, FIFO or socket' "$O/files-result" || fail "a staged FIFO was not refused: $(cat "$O/files-result")"
+  cmp -s /etc/passwd "$W/passwd.before" || fail "a refused files-put touched /etc/passwd"
+
+  # Never through a symbolic link in the folder: a staged linkdir/evil.txt
+  # doesn't land where the folder's own link points.
+  install -d -o www-data -g www-data /srv/outside
+  ln -sfn /srv/outside /srv/app/media/linkdir
+  chown -h www-data:www-data /srv/app/media/linkdir
+  stage
+  as_pg sh -c "mkdir $S/tree/linkdir && printf evil >$S/tree/linkdir/evil.txt"
+  request "f_15 files-put replace r1 /srv/app/media"
+  grep -q '^error=.*linkdir is a symbolic link' "$O/files-result" || fail "writing through a symlinked folder was not refused: $(cat "$O/files-result")"
+  [ ! -e /srv/outside/evil.txt ] || fail "files-put wrote through a symlinked folder"
+
+  # mirror deletes only files whose folder is really inside the folder.
+  echo "keep" >/srv/outside/x.txt
+  chown www-data:www-data /srv/outside/x.txt
+  stage
+  printf 'extra.txt\n../../../etc/passwd\n/etc/passwd\nsub\nlinkdir/x.txt\n./linkdir/x.txt\n' | as_pg sh -c 'cat >"$1"' sh "$S/delete"
+  request "f_6 files-put mirror r1 /srv/app/media"
+  result_has "ok=1"
+  [ ! -e /srv/app/media/extra.txt ] || fail "files-put mirror left a file added since"
+  [ -d /srv/app/media/sub ] || fail "files-put mirror removed a folder"
+  [ "$(cat /srv/outside/x.txt)" = keep ] || fail "files-put mirror deleted through a symlinked folder"
+  cmp -s /etc/passwd "$W/passwd.before" || fail "files-put mirror touched /etc/passwd"
+  request "f_7 files-put missing nothing /srv/app/media"
+  result_has "error=nothing is staged for restore nothing"
+  mkdir -p /srv/rootowned
+  request "f_8 files-put missing r1 /srv/rootowned"
+  result_has "error=/srv/rootowned belongs to root: Rowsafe won't write there as root"
+  [ -z "$(find "$R" /var/lib/rowsafe/files-staging -user root)" ] || fail "root left files in the agent's directories"
+  [ -z "$(find "$W/files-helper-state" -maxdepth 1 -name 'put.*')" ] || fail "the helper left its private copy behind"
+  chmod 666 /etc/rowsafe/files-allowed
+  request "f_9 files-read /srv/other"
+  result_has "error=/etc/rowsafe/files-allowed is writable by others than root"
+  chmod 644 /etc/rowsafe/files-allowed
+
+  # A restart and a files request at the same time: both are answered, each
+  # in its own result file.
+  printf '5432 postgresql@17-main.service\n' >/etc/rowsafe/restart-allowed
+  chmod 644 /etc/rowsafe/restart-allowed
+  rm -f "$O/result" "$O/files-result" "$W/files-helper-state"/last-*
+  printf 'rs_1 5432\n' | as_pg sh -c 'cat >"$1"' sh "$R/request"
+  printf 'fr_1 files-read /srv/other\n' | as_pg sh -c 'cat >"$1"' sh "$R/files-request"
+  helper
+  helper
+  grep -qx 'id=rs_1' "$O/result" && grep -qx 'ok=1' "$O/result" || fail "the restart request was lost: $(cat "$O/result" 2>&1)"
+  grep -qx 'id=fr_1' "$O/files-result" && grep -qx 'ok=1' "$O/files-result" || fail "the files request was lost: $(cat "$O/files-result" 2>&1)"
+  [ ! -e "$R/request" ] && [ ! -e "$R/files-request" ] || fail "a request was left"
+  printf '# off\n' >/etc/rowsafe/restart-allowed
+  pass "root helper files-read and files-put: allow list, system folders, no setuid/links/devices, never through symlinks, own request file, never root"
+
+  # --no-allow-files removes the helper (restarts aren't allowed either).
+  scenario "discover_out=$shop_reg"
+  expect_ok "--no-allow-files" "$INSTALLER" --no-allow-files
+  [ ! -e "$D" ] && [ ! -e "$H" ] || fail "--no-allow-files left the helper or its drop-in"
+  ! grep -q '^/' /etc/rowsafe/files-allowed || fail "--no-allow-files kept the allow list"
+  expect_ok "--allow-files and --allow-restart" "$INSTALLER" --allow-files --allow-restart
+  expect_ok "--no-allow-files keeps the helper for restarts" "$INSTALLER" --no-allow-files
+  [ -x "$H" ] && [ ! -e "$D" ] || fail "--no-allow-files removed the helper restarts still need"
+  expect_ok "--allow-files again" "$INSTALLER" --allow-files
+  expect_fail "--files only with an install" "only go with an install" "$INSTALLER" --uninstall --files /srv/app/media
+  pkill -u postgres -f 'rowsafe-agent run' || true
+  expect_ok "uninstall removes files access and restic" "$INSTALLER" --uninstall
+  [ ! -e "$RB" ] && [ ! -e "$D" ] && [ ! -e /etc/rowsafe/files-allowed ] && [ ! -e "$H" ] || fail "uninstall left files pieces"
+  expect_ok "purge" "$INSTALLER" --uninstall --purge
+  pass "files: restic, --files, the question, --allow-files, --no-allow-files, uninstall"
 }
 
 # ------------------------------------------------------------ PgBouncer
@@ -2429,7 +2726,7 @@ EOF
     cat "$O/result" >&2
     fail "helper result lacks $1"
   }; }
-  grep -q '^# actions: restart stop start create-cluster$' "$H" || fail "the helper doesn't say it creates clusters"
+  grep -q '^# actions: restart stop start create-cluster\( \|$\)' "$H" || fail "the helper doesn't say it creates clusters"
 
   request "fork_1-create create-cluster 5440 17 shop_staging"
   result_has "action=create-cluster"

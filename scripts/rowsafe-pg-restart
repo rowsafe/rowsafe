@@ -24,6 +24,22 @@
 # /run/rowsafe-pg-restart/result (root's directory, readable by the agent)
 # as key=value lines: id, action, ok (1 or 0), unit, error and finished_at.
 #
+# Files (only when root allowed it: --allow-files, which writes
+# /etc/rowsafe/files-allowed, the folders Rowsafe may read and restore
+# into, with everything under them) come in their own request file,
+# /var/lib/rowsafe/restart/files-request, answered in
+# /run/rowsafe-pg-restart/files-result, so they never overwrite a restart
+# request or its answer. "ID files-read PATH" gives the agent user read
+# access to PATH (POSIX ACLs, never ownership or modes); "ID files-put MODE
+# STAGE PATH" puts files the agent restored into
+# /var/lib/rowsafe/files-staging/STAGE/tree back into PATH as PATH's owner.
+# MODE: missing (never overwrite), replace, or mirror (also delete the files
+# listed in STAGE/delete). The agent is not trusted with that: root copies
+# the staged files (read as the agent user) and puts them back only if they
+# are plain files and folders (no links, devices or FIFOs, no set-user-ID or
+# set-group-ID bits, no path leaving PATH), never through a symbolic link in
+# PATH, and deletes only files whose folder is really inside PATH.
+#
 # Update mode (ROWSAFE_HELPER_MODE=update, set by rowsafe-pg-update.service,
 # which rowsafe-pg-update.path starts): the request is
 # /var/lib/rowsafe/restart/update-request, read the same way, and the answer
@@ -64,7 +80,7 @@
 # from a file another process could write.
 #
 # The agent reads the next lines to know what this helper can do.
-# actions: restart stop start create-cluster
+# actions: restart stop start create-cluster files-read files-put
 # update-actions: pg-minor-update pg-install-major pg-upgrade pg-upgrade-undo pg-upgrade-cleanup security-updates reboot
 #
 # The same helper manages PgBouncer when root allowed that (--allow-pooler):
@@ -81,6 +97,8 @@ created=${ROWSAFE_CREATED_CLUSTERS:-/etc/rowsafe/created-clusters}
 pg_conf_root=${ROWSAFE_PG_CONF_ROOT:-/etc/postgresql}
 journalctl=${ROWSAFE_JOURNALCTL:-journalctl}
 state=${STATE_DIRECTORY:-/var/lib/rowsafe-pg-restart}
+files_allow=${ROWSAFE_FILES_ALLOW:-/etc/rowsafe/files-allowed}
+files_staging=${ROWSAFE_FILES_STAGING:-/var/lib/rowsafe/files-staging}
 agent_user=${ROWSAFE_AGENT_USER:-postgres}
 systemctl=${ROWSAFE_SYSTEMCTL:-systemctl}
 mode=${ROWSAFE_HELPER_MODE:-restart}
@@ -91,7 +109,7 @@ log() { echo "rowsafe-pg-restart: $*" >&2; }
 # as_agent runs a command with the agent user's privileges.
 as_agent() { setpriv --reuid="$agent_user" --regid="$agent_user" --init-groups -- "$@"; }
 
-id='' action='' unit='' ok=0 err='' extra='' result_name=result
+id='' action='' unit='' ok=0 err='' extra='' result_name=result fpath='' fmode='' fstage=''
 
 # add KEY VALUE adds a line to the answer (one line, at most 1000 bytes).
 add() {
@@ -500,14 +518,15 @@ case ${ROWSAFE_HELPER_MODE:-} in
 esac
 # ------------------------------------------------------------ end PgBouncer
 
-# read_request FILE prints the request's first line (at most 200 bytes, read
-# for at most 5 seconds, as the agent user, only from a regular file) and
-# removes it, whatever it was, so the path unit doesn't fire again.
+# read_request FILE [MAX] prints the request's first line (at most MAX
+# bytes, 200 by default, read for at most 5 seconds, as the agent user, only
+# from a regular file) and removes it, whatever it was, so the path unit
+# doesn't fire again.
 read_request() {
-  # shellcheck disable=SC2016 # $1 expands in the inner shell
+  # shellcheck disable=SC2016 # $1 and $2 expand in the inner shell
   as_agent sh -c '
-    if [ -f "$1" ] && [ ! -L "$1" ]; then timeout 5 head -c 200 -- "$1"; fi
-    rm -f -- "$1"' rowsafe-pg-restart "$1" 2>/dev/null | head -n 1
+    if [ -f "$1" ] && [ ! -L "$1" ]; then timeout 5 head -c "$2" -- "$1"; fi
+    rm -f -- "$1"' rowsafe-pg-restart "$1" "${2:-200}" 2>/dev/null | head -n 1
 }
 
 # check_root_file FILE MISSING: FILE must be a regular file root owns and
@@ -588,10 +607,150 @@ create_cluster() {
   exit 0
 }
 
+# ---------------------------------------------------------------- files (restart mode, --allow-files)
+
+# files_check_path refuses unless $fpath is a plain, existing folder (no
+# symbolic link on the way) under a folder root allowed, and not a system
+# or database folder.
+files_check_path() {
+  check_root_file "$files_allow" "reading or restoring folders from Rowsafe is not allowed on this server"
+  case $fpath in
+    */../* | */.. | */./* | */. | *//* | */) refuse "$fpath is not a plain path" ;;
+  esac
+  case $fpath/ in
+    /etc/* | /root/* | /boot/* | /proc/* | /sys/* | /dev/* | /run/* | /usr/* | /bin/* | /sbin/* | /lib/* | /lib64/* | \
+      /var/lib/postgresql/* | /var/lib/rowsafe/* | /var/lib/rowsafe-pg-restart/* | /opt/rowsafe/* | \
+      /var/lib/docker/containers/* | */.ssh/* | */.gnupg/*)
+      refuse "$fpath is a system or database folder: Rowsafe never touches it" ;;
+  esac
+  real=$(realpath -e -- "$fpath" 2>/dev/null) || refuse "$fpath doesn't exist"
+  [ "$real" = "$fpath" ] || refuse "$fpath goes through a symbolic link (to $real)"
+  [ -d "$fpath" ] || refuse "$fpath is not a folder"
+  allowed=0
+  while IFS= read -r root; do
+    case $root in '' | '#'* | / | [!/]*) continue ;; esac
+    case $fpath in "$root" | "$root"/*) allowed=1 ;; esac
+  done <"$files_allow"
+  [ "$allowed" = 1 ] || refuse "$fpath is not under a folder listed in $files_allow"
+}
+
+# files_read gives the agent user read access to the folder and what is in
+# it, now and later (default ACLs), and passage through its parents.
+files_read() {
+  files_check_path
+  out=$(setfacl -R -P -m "u:$agent_user:rX" -- "$fpath" 2>&1) || refuse "setfacl failed on $fpath: $(printf '%s' "$out" | head -n 3 | tr '\n' ' ')"
+  find -P "$fpath" -type d -exec setfacl -m "d:u:$agent_user:rX" -- {} + 2>/dev/null ||
+    refuse "setting the default ACL on the folders in $fpath failed"
+  p=${fpath%/*}
+  while [ -n "$p" ]; do
+    as_agent test -x "$p" 2>/dev/null || setfacl -m "u:$agent_user:x" -- "$p" || refuse "can't let Rowsafe through $p"
+    p=${p%/*}
+  done
+  ok=1
+  log "files-read $fpath (request $id): done"
+}
+
+# files_put puts the staged files into the folder as its owner. The agent
+# (whose files these are) is not trusted: root takes its own copy (read as
+# the agent user), checks it, and the owner extracts that copy. Root never
+# opens anything in the agent's directories or in PATH itself.
+files_put() {
+  files_check_path
+  src=$files_staging/$fstage
+  as_agent test -d "$src/tree" -a ! -L "$src/tree" -a ! -L "$src" 2>/dev/null || refuse "nothing is staged for restore $fstage"
+  owner=$(stat -c '%u' "$fpath")
+  group=$(stat -c '%g' "$fpath")
+  [ "$owner" != 0 ] || refuse "$fpath belongs to root: Rowsafe won't write there as root"
+  as_owner() { setpriv --reuid="$owner" --regid="$group" --clear-groups -- "$@"; }
+  mkdir -p "$state" && chmod 0700 "$state"
+  work=$(mktemp -d "$state/put.XXXXXX") || refuse "no room for a private copy of the staged files"
+  trap 'rm -rf "$work"' EXIT
+  as_agent tar -C "$src/tree" -cf - . >"$work/files.tar" 2>/dev/null || refuse "reading the staged files failed"
+  if ! LC_ALL=C tar -tvf "$work/files.tar" >"$work/list" 2>/dev/null ||
+    ! LC_ALL=C tar -tf "$work/files.tar" >"$work/names" 2>/dev/null; then
+    refuse "the staged files are unreadable"
+  fi
+  bad=$(awk '{
+    t = substr($1, 1, 1)
+    if (t == "l") { print "a symbolic link"; exit }
+    if (t == "h") { print "a hard link"; exit }
+    if (t != "-" && t != "d") { print "a device, FIFO or socket"; exit }
+    if (substr($1, 4, 1) ~ /[sS]/ || substr($1, 7, 1) ~ /[sS]/) { print "a set-user-ID or set-group-ID file"; exit }
+  }' "$work/list")
+  [ -z "$bad" ] || refuse "the staged files include $bad: Rowsafe only puts back plain files and folders"
+  if grep -Eq '^/|(^|/)\.\.(/|$)' "$work/names"; then refuse "a staged path leaves the folder"; fi
+  # Never write through a symbolic link in the folder: every folder the
+  # files go into must be a real one (or not exist yet).
+  # shellcheck disable=SC2016 # $1 expands in the inner shell
+  link=$(grep '/$' "$work/names" | as_owner sh -c '
+    cd -- "$1" || exit 1
+    while IFS= read -r d; do
+      d=${d%/}
+      case $d in "" | .) continue ;; esac
+      if [ -L "$d" ]; then printf "%s\n" "$d"; exit 0; fi
+    done' rowsafe-files-put "$fpath")
+  [ -z "$link" ] || refuse "$fpath/${link#./} is a symbolic link: Rowsafe won't write through it"
+  if [ "$fmode" = mirror ] && as_agent test -f "$src/delete" -a ! -L "$src/delete"; then
+    # Only files whose folder resolves to PATH or inside it, without a
+    # symbolic link on the way, are removed.
+    # shellcheck disable=SC2016 # $1 expands in the inner shell
+    as_agent cat -- "$src/delete" | as_owner sh -c '
+      cd -- "$1" || exit 1
+      while IFS= read -r f; do
+        case $f in "" | /* | ../* | */../* | */.. | .. | ./* | */./* | .) continue ;; esac
+        d=$(dirname -- "$f")
+        r=$(realpath -e -- "$d" 2>/dev/null) || continue
+        if [ "$d" = . ]; then [ "$r" = "$1" ] || continue; else [ "$r" = "$1/$d" ] || continue; fi
+        if [ -L "$f" ] || { [ -e "$f" ] && [ ! -d "$f" ]; }; then rm -f -- "$f"; fi
+      done' rowsafe-files-put "$fpath" || refuse "removing the files added since from $fpath failed"
+  fi
+  # Existing folders keep their owner and mode; missing never replaces a
+  # file; modes are the owner's umask applied to the snapshot's.
+  keep=--no-overwrite-dir
+  [ "$fmode" != missing ] || keep=--skip-old-files
+  # shellcheck disable=SC2016 # $1 and $2 expand in the inner shell
+  out=$(as_owner sh -c 'umask 022; exec tar -C "$1" -xf - --no-same-owner --no-same-permissions "$2"' \
+    rowsafe-files-put "$fpath" "$keep" <"$work/files.tar" 2>&1) ||
+    refuse "putting the files into $fpath failed: $(printf '%s' "$out" | head -n 3 | tr '\n' ' ')"
+  ok=1
+  log "files-put $fmode $fstage into $fpath as uid $owner (request $id): done"
+}
+
+# files_main answers a files request (restart mode, when no restart request
+# is waiting). It has its own request and result files, so a files request
+# never overwrites a restart request or its answer.
+files_main() {
+  result_name=files-result
+  have_request "$dir/files-request" || exit 0
+  line=$(read_request "$dir/files-request" 600)
+  if printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} files-read /[A-Za-z0-9._@+,=/-]{1,400}$'; then
+    id=${line%% *}
+    action=files-read
+    fpath=${line#* files-read }
+  elif printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} files-put (missing|replace|mirror) [A-Za-z0-9_-]{1,64} /[A-Za-z0-9._@+,=/-]{1,400}$'; then
+    id=${line%% *}
+    action=files-put
+    rest=${line#* files-put }
+    fmode=${rest%% *}
+    rest=${rest#* }
+    fstage=${rest%% *}
+    fpath=${rest#* }
+  else
+    refuse "malformed request"
+  fi
+  case $action in
+    files-read) files_read ;;
+    files-put) files_put ;;
+  esac
+  answer
+  exit 0
+}
+
 # ---------------------------------------------------------------- restart mode
 
 restart_main() {
-  have_request "$dir/request" || exit 0
+  # A restart request first, then a files request (each fires the path unit).
+  have_request "$dir/request" || files_main
   line=$(read_request "$dir/request")
   if printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} [0-9]{1,5}$'; then
     id=${line% *}

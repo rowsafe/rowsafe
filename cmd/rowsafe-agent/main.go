@@ -29,6 +29,9 @@ Usage:
   rowsafe-agent setup discover|plan|apply|wait|status ...
                                             turn on backups for this server's PostgreSQL
                                             (used by the installer; see setup --help)
+  rowsafe-agent files discover|access|list|add ...
+                                            the folders that go with a database
+                                            (used by the installer; see files --help)
   rowsafe-agent mongodb status|login|initiate|save-uri ...
                                             MongoDB helpers for the installer (see mongodb --help)
   rowsafe-agent unseal < FILE > PLAIN       decrypt a file Rowsafe wrote to your bucket (MongoDB)
@@ -63,6 +66,8 @@ func main() {
 		err = inspect(ctx, os.Args[2:])
 	case "setup":
 		os.Exit(setup(ctx, os.Args[2:]))
+	case "files":
+		os.Exit(filesCmd(ctx, os.Args[2:])) // files.go
 	case "mongodb": // MongoDB installer helpers (mongodb.go)
 		os.Exit(mongodbCmd(ctx, os.Args[2:]))
 	case "unseal":

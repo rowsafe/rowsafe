@@ -112,6 +112,9 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 			return nil, err
 		}
 		res, err := a.restorePoint(ctx, db, p, tl)
+		if err == nil {
+			a.filesMark(db.ID, p.Name) // files.go: the Mark covers the files too
+		}
 		if res == nil {
 			return nil, err // keep a typed nil out of the interface
 		}
@@ -150,6 +153,9 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 		return runRewind(ctx, task, tl, db, a.rewindUndo)
 	case protocol.TaskRewindCleanup:
 		return runRewind(ctx, task, tl, db, a.rewindCleanup)
+	case protocol.TaskFilesBackup, protocol.TaskFilesRestore, protocol.TaskFilesUndo, protocol.TaskFilesCleanup,
+		protocol.TaskFilesBrowse, protocol.TaskFilesDiscover, protocol.TaskFilesAccess, protocol.TaskFilesCheck:
+		return a.runFilesTask(ctx, task, db, tl) // files.go
 	case protocol.TaskIndexAdvisor:
 		return a.runIndexAdvisor(ctx, task, db, tl)
 	case protocol.TaskPGUpdate, protocol.TaskSecurityUpdates, protocol.TaskReboot, protocol.TaskUpgradeCheck,

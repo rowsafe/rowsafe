@@ -73,6 +73,7 @@ func NewServer(c *client.Client, opts Options) *sdk.Server {
 	t.addSafetyReadTools(s)
 	t.addMonitoringTools(s)
 	t.addRewindReadTools(s)
+	t.addFilesReadTools(s) // files_tools.go
 	t.addStorageTools(s)
 	t.addMomentTools(s)      // read-only: find when rows were deleted
 	t.addCopiesTools(s)      // Guard copies: never touch production (copies_tools.go)

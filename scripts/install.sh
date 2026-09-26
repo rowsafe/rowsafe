@@ -31,6 +31,10 @@
 #                          ask (Restart and Rewind in the dashboard, `rowsafe
 #                          restart`); only when someone confirms
 #   --no-allow-restart     turn that off again
+#   --files PATH           back up the folder PATH (uploads) with the database
+#   --allow-files          allow Rowsafe to put restored files back (as the
+#                          folder's owner); --no-allow-files turns it off
+#   --no-files             don't ask about folders with uploads
 #   --allow-create-cluster allow Rowsafe to create a new PostgreSQL cluster (on a
 #                          free port in 5440-5499) when you fork a database to
 #                          this server; only when someone confirms
@@ -241,6 +245,13 @@ Options (when piping, pass them after `sh -s --`):
                          (Restart and Rewind in the dashboard, `rowsafe restart`),
                          only when someone confirms
   --no-allow-restart     turn that off (and remove the restart helper)
+  --files PATH           back up the folder PATH (uploads, media) with the database,
+                         so a restore brings back both; repeat for several
+  --allow-files          allow Rowsafe to put restored files back into protected
+                         folders (as their owner) and to read folders you add in
+                         the dashboard, only when someone asks; --no-allow-files
+                         turns it off
+  --no-files             don't ask about folders with uploads
   --allow-create-cluster allow Rowsafe to create a new PostgreSQL cluster (a free port
                          in 5440-5499) when you fork a database to this server,
                          only when someone confirms (Debian and Ubuntu)
@@ -1008,6 +1019,22 @@ install_helper_script() {
 # /run/rowsafe-pg-restart/result (root's directory, readable by the agent)
 # as key=value lines: id, action, ok (1 or 0), unit, error and finished_at.
 #
+# Files (only when root allowed it: --allow-files, which writes
+# /etc/rowsafe/files-allowed, the folders Rowsafe may read and restore
+# into, with everything under them) come in their own request file,
+# /var/lib/rowsafe/restart/files-request, answered in
+# /run/rowsafe-pg-restart/files-result, so they never overwrite a restart
+# request or its answer. "ID files-read PATH" gives the agent user read
+# access to PATH (POSIX ACLs, never ownership or modes); "ID files-put MODE
+# STAGE PATH" puts files the agent restored into
+# /var/lib/rowsafe/files-staging/STAGE/tree back into PATH as PATH's owner.
+# MODE: missing (never overwrite), replace, or mirror (also delete the files
+# listed in STAGE/delete). The agent is not trusted with that: root copies
+# the staged files (read as the agent user) and puts them back only if they
+# are plain files and folders (no links, devices or FIFOs, no set-user-ID or
+# set-group-ID bits, no path leaving PATH), never through a symbolic link in
+# PATH, and deletes only files whose folder is really inside PATH.
+#
 # Update mode (ROWSAFE_HELPER_MODE=update, set by rowsafe-pg-update.service,
 # which rowsafe-pg-update.path starts): the request is
 # /var/lib/rowsafe/restart/update-request, read the same way, and the answer
@@ -1048,7 +1075,7 @@ install_helper_script() {
 # from a file another process could write.
 #
 # The agent reads the next lines to know what this helper can do.
-# actions: restart stop start create-cluster
+# actions: restart stop start create-cluster files-read files-put
 # update-actions: pg-minor-update pg-install-major pg-upgrade pg-upgrade-undo pg-upgrade-cleanup security-updates reboot
 #
 # The same helper manages PgBouncer when root allowed that (--allow-pooler):
@@ -1065,6 +1092,8 @@ created=${ROWSAFE_CREATED_CLUSTERS:-/etc/rowsafe/created-clusters}
 pg_conf_root=${ROWSAFE_PG_CONF_ROOT:-/etc/postgresql}
 journalctl=${ROWSAFE_JOURNALCTL:-journalctl}
 state=${STATE_DIRECTORY:-/var/lib/rowsafe-pg-restart}
+files_allow=${ROWSAFE_FILES_ALLOW:-/etc/rowsafe/files-allowed}
+files_staging=${ROWSAFE_FILES_STAGING:-/var/lib/rowsafe/files-staging}
 agent_user=${ROWSAFE_AGENT_USER:-postgres}
 systemctl=${ROWSAFE_SYSTEMCTL:-systemctl}
 mode=${ROWSAFE_HELPER_MODE:-restart}
@@ -1075,7 +1104,7 @@ log() { echo "rowsafe-pg-restart: $*" >&2; }
 # as_agent runs a command with the agent user's privileges.
 as_agent() { setpriv --reuid="$agent_user" --regid="$agent_user" --init-groups -- "$@"; }
 
-id='' action='' unit='' ok=0 err='' extra='' result_name=result
+id='' action='' unit='' ok=0 err='' extra='' result_name=result fpath='' fmode='' fstage=''
 
 # add KEY VALUE adds a line to the answer (one line, at most 1000 bytes).
 add() {
@@ -1484,14 +1513,15 @@ case ${ROWSAFE_HELPER_MODE:-} in
 esac
 # ------------------------------------------------------------ end PgBouncer
 
-# read_request FILE prints the request's first line (at most 200 bytes, read
-# for at most 5 seconds, as the agent user, only from a regular file) and
-# removes it, whatever it was, so the path unit doesn't fire again.
+# read_request FILE [MAX] prints the request's first line (at most MAX
+# bytes, 200 by default, read for at most 5 seconds, as the agent user, only
+# from a regular file) and removes it, whatever it was, so the path unit
+# doesn't fire again.
 read_request() {
-  # shellcheck disable=SC2016 # $1 expands in the inner shell
+  # shellcheck disable=SC2016 # $1 and $2 expand in the inner shell
   as_agent sh -c '
-    if [ -f "$1" ] && [ ! -L "$1" ]; then timeout 5 head -c 200 -- "$1"; fi
-    rm -f -- "$1"' rowsafe-pg-restart "$1" 2>/dev/null | head -n 1
+    if [ -f "$1" ] && [ ! -L "$1" ]; then timeout 5 head -c "$2" -- "$1"; fi
+    rm -f -- "$1"' rowsafe-pg-restart "$1" "${2:-200}" 2>/dev/null | head -n 1
 }
 
 # check_root_file FILE MISSING: FILE must be a regular file root owns and
@@ -1572,10 +1602,150 @@ create_cluster() {
   exit 0
 }
 
+# ---------------------------------------------------------------- files (restart mode, --allow-files)
+
+# files_check_path refuses unless $fpath is a plain, existing folder (no
+# symbolic link on the way) under a folder root allowed, and not a system
+# or database folder.
+files_check_path() {
+  check_root_file "$files_allow" "reading or restoring folders from Rowsafe is not allowed on this server"
+  case $fpath in
+    */../* | */.. | */./* | */. | *//* | */) refuse "$fpath is not a plain path" ;;
+  esac
+  case $fpath/ in
+    /etc/* | /root/* | /boot/* | /proc/* | /sys/* | /dev/* | /run/* | /usr/* | /bin/* | /sbin/* | /lib/* | /lib64/* | \
+      /var/lib/postgresql/* | /var/lib/rowsafe/* | /var/lib/rowsafe-pg-restart/* | /opt/rowsafe/* | \
+      /var/lib/docker/containers/* | */.ssh/* | */.gnupg/*)
+      refuse "$fpath is a system or database folder: Rowsafe never touches it" ;;
+  esac
+  real=$(realpath -e -- "$fpath" 2>/dev/null) || refuse "$fpath doesn't exist"
+  [ "$real" = "$fpath" ] || refuse "$fpath goes through a symbolic link (to $real)"
+  [ -d "$fpath" ] || refuse "$fpath is not a folder"
+  allowed=0
+  while IFS= read -r root; do
+    case $root in '' | '#'* | / | [!/]*) continue ;; esac
+    case $fpath in "$root" | "$root"/*) allowed=1 ;; esac
+  done <"$files_allow"
+  [ "$allowed" = 1 ] || refuse "$fpath is not under a folder listed in $files_allow"
+}
+
+# files_read gives the agent user read access to the folder and what is in
+# it, now and later (default ACLs), and passage through its parents.
+files_read() {
+  files_check_path
+  out=$(setfacl -R -P -m "u:$agent_user:rX" -- "$fpath" 2>&1) || refuse "setfacl failed on $fpath: $(printf '%s' "$out" | head -n 3 | tr '\n' ' ')"
+  find -P "$fpath" -type d -exec setfacl -m "d:u:$agent_user:rX" -- {} + 2>/dev/null ||
+    refuse "setting the default ACL on the folders in $fpath failed"
+  p=${fpath%/*}
+  while [ -n "$p" ]; do
+    as_agent test -x "$p" 2>/dev/null || setfacl -m "u:$agent_user:x" -- "$p" || refuse "can't let Rowsafe through $p"
+    p=${p%/*}
+  done
+  ok=1
+  log "files-read $fpath (request $id): done"
+}
+
+# files_put puts the staged files into the folder as its owner. The agent
+# (whose files these are) is not trusted: root takes its own copy (read as
+# the agent user), checks it, and the owner extracts that copy. Root never
+# opens anything in the agent's directories or in PATH itself.
+files_put() {
+  files_check_path
+  src=$files_staging/$fstage
+  as_agent test -d "$src/tree" -a ! -L "$src/tree" -a ! -L "$src" 2>/dev/null || refuse "nothing is staged for restore $fstage"
+  owner=$(stat -c '%u' "$fpath")
+  group=$(stat -c '%g' "$fpath")
+  [ "$owner" != 0 ] || refuse "$fpath belongs to root: Rowsafe won't write there as root"
+  as_owner() { setpriv --reuid="$owner" --regid="$group" --clear-groups -- "$@"; }
+  mkdir -p "$state" && chmod 0700 "$state"
+  work=$(mktemp -d "$state/put.XXXXXX") || refuse "no room for a private copy of the staged files"
+  trap 'rm -rf "$work"' EXIT
+  as_agent tar -C "$src/tree" -cf - . >"$work/files.tar" 2>/dev/null || refuse "reading the staged files failed"
+  if ! LC_ALL=C tar -tvf "$work/files.tar" >"$work/list" 2>/dev/null ||
+    ! LC_ALL=C tar -tf "$work/files.tar" >"$work/names" 2>/dev/null; then
+    refuse "the staged files are unreadable"
+  fi
+  bad=$(awk '{
+    t = substr($1, 1, 1)
+    if (t == "l") { print "a symbolic link"; exit }
+    if (t == "h") { print "a hard link"; exit }
+    if (t != "-" && t != "d") { print "a device, FIFO or socket"; exit }
+    if (substr($1, 4, 1) ~ /[sS]/ || substr($1, 7, 1) ~ /[sS]/) { print "a set-user-ID or set-group-ID file"; exit }
+  }' "$work/list")
+  [ -z "$bad" ] || refuse "the staged files include $bad: Rowsafe only puts back plain files and folders"
+  if grep -Eq '^/|(^|/)\.\.(/|$)' "$work/names"; then refuse "a staged path leaves the folder"; fi
+  # Never write through a symbolic link in the folder: every folder the
+  # files go into must be a real one (or not exist yet).
+  # shellcheck disable=SC2016 # $1 expands in the inner shell
+  link=$(grep '/$' "$work/names" | as_owner sh -c '
+    cd -- "$1" || exit 1
+    while IFS= read -r d; do
+      d=${d%/}
+      case $d in "" | .) continue ;; esac
+      if [ -L "$d" ]; then printf "%s\n" "$d"; exit 0; fi
+    done' rowsafe-files-put "$fpath")
+  [ -z "$link" ] || refuse "$fpath/${link#./} is a symbolic link: Rowsafe won't write through it"
+  if [ "$fmode" = mirror ] && as_agent test -f "$src/delete" -a ! -L "$src/delete"; then
+    # Only files whose folder resolves to PATH or inside it, without a
+    # symbolic link on the way, are removed.
+    # shellcheck disable=SC2016 # $1 expands in the inner shell
+    as_agent cat -- "$src/delete" | as_owner sh -c '
+      cd -- "$1" || exit 1
+      while IFS= read -r f; do
+        case $f in "" | /* | ../* | */../* | */.. | .. | ./* | */./* | .) continue ;; esac
+        d=$(dirname -- "$f")
+        r=$(realpath -e -- "$d" 2>/dev/null) || continue
+        if [ "$d" = . ]; then [ "$r" = "$1" ] || continue; else [ "$r" = "$1/$d" ] || continue; fi
+        if [ -L "$f" ] || { [ -e "$f" ] && [ ! -d "$f" ]; }; then rm -f -- "$f"; fi
+      done' rowsafe-files-put "$fpath" || refuse "removing the files added since from $fpath failed"
+  fi
+  # Existing folders keep their owner and mode; missing never replaces a
+  # file; modes are the owner's umask applied to the snapshot's.
+  keep=--no-overwrite-dir
+  [ "$fmode" != missing ] || keep=--skip-old-files
+  # shellcheck disable=SC2016 # $1 and $2 expand in the inner shell
+  out=$(as_owner sh -c 'umask 022; exec tar -C "$1" -xf - --no-same-owner --no-same-permissions "$2"' \
+    rowsafe-files-put "$fpath" "$keep" <"$work/files.tar" 2>&1) ||
+    refuse "putting the files into $fpath failed: $(printf '%s' "$out" | head -n 3 | tr '\n' ' ')"
+  ok=1
+  log "files-put $fmode $fstage into $fpath as uid $owner (request $id): done"
+}
+
+# files_main answers a files request (restart mode, when no restart request
+# is waiting). It has its own request and result files, so a files request
+# never overwrites a restart request or its answer.
+files_main() {
+  result_name=files-result
+  have_request "$dir/files-request" || exit 0
+  line=$(read_request "$dir/files-request" 600)
+  if printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} files-read /[A-Za-z0-9._@+,=/-]{1,400}$'; then
+    id=${line%% *}
+    action=files-read
+    fpath=${line#* files-read }
+  elif printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} files-put (missing|replace|mirror) [A-Za-z0-9_-]{1,64} /[A-Za-z0-9._@+,=/-]{1,400}$'; then
+    id=${line%% *}
+    action=files-put
+    rest=${line#* files-put }
+    fmode=${rest%% *}
+    rest=${rest#* }
+    fstage=${rest%% *}
+    fpath=${rest#* }
+  else
+    refuse "malformed request"
+  fi
+  case $action in
+    files-read) files_read ;;
+    files-put) files_put ;;
+  esac
+  answer
+  exit 0
+}
+
 # ---------------------------------------------------------------- restart mode
 
 restart_main() {
-  have_request "$dir/request" || exit 0
+  # A restart request first, then a files request (each fires the path unit).
+  have_request "$dir/request" || files_main
   line=$(read_request "$dir/request")
   if printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} [0-9]{1,5}$'; then
     id=${line% *}
@@ -2242,6 +2412,9 @@ Documentation=https://rowsafe.sh/docs/reference/agent-configuration
 
 [Path]
 PathExists=/var/lib/rowsafe/restart/request
+# Files requests (--allow-files) have their own file, so they never
+# overwrite a restart request.
+PathExists=/var/lib/rowsafe/restart/files-request
 Unit=rowsafe-pg-restart.service
 
 [Install]
@@ -2259,6 +2432,7 @@ ROWSAFE_RESTART_PATH_EOF
 
 remove_restart_helper() {
   remove_update_units # they run the same helper
+  files_allowed && return 0 # files use the helper too (files section)
   [ -e "$RESTART_PATH_FILE" ] || [ -e "$RESTART_SERVICE_FILE" ] || [ -e "$RESTART_HELPER" ] || return 0
   if systemd_running; then
     systemctl disable --now --quiet rowsafe-pg-restart.path 2>/dev/null || true
@@ -3568,6 +3742,283 @@ pooler_access() {
       fi
       ;;
   esac
+}
+
+# ---------------------------------------------------------------- files
+# (feat/files) The folders that go with a database (uploads, media): the
+# agent backs them up with restic into the database's bucket, encrypted with
+# a key derived from the backup passphrase (no second secret to keep).
+#
+#   --files PATH       protect PATH with the database (repeat for several);
+#                      root gives the agent user read access (ACL) if needed
+#   --allow-files      let Rowsafe put restored files back as the folder's
+#                      owner, and read folders added later in the dashboard,
+#                      under the roots in /etc/rowsafe/files-allowed (via the
+#                      root helper); --no-allow-files turns it off
+#   --no-files         don't ask about folders
+#
+# restic is a pinned release from its GitHub releases, verified against the
+# SHA-256 published in the release's SHA256SUMS (signed by restic's release
+# key, CF8F18F2844575973F79D4E191A6868BD3F7A907, checked when it was pinned).
+
+RESTIC_VERSION=0.19.1
+RESTIC_SHA256_AMD64=f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c
+RESTIC_SHA256_ARM64=a5f64aaab53d51e311fa3829124c5b703f2d14cf187d8640b6be3b2b49376465
+RESTIC_BIN=$LIB_DIR/restic
+FILES_ALLOW_FILE=$CONFIG_DIR/files-allowed
+FILES_DROPIN_DIR=/etc/systemd/system/rowsafe-pg-restart.service.d
+FILES_DROPIN=$FILES_DROPIN_DIR/rowsafe-files.conf
+# Where folders added later in the dashboard may be (root's allow list).
+FILES_DEFAULT_ROOTS="/srv /var/www /opt /data /app /var/lib/docker/volumes"
+FILES_PATHS=''     # --files PATH (newline-separated)
+ALLOW_FILES=''     # --allow-files (yes) / --no-allow-files (no); '' = ask once, on a terminal
+NO_FILES=0         # --no-files
+FILES_PROTECTED='' # folders protected by this run (newline-separated)
+FILES_DB_ID='' FILES_DB_NAME=''
+
+restic_ok() {
+  [ -x "$RESTIC_BIN" ] && "$RESTIC_BIN" version 2>/dev/null | grep -q "^restic $RESTIC_VERSION "
+}
+
+# ensure_restic installs the pinned restic into $LIB_DIR (root's). A failed
+# or mismatching download leaves files backups off; database backups are
+# not affected.
+ensure_restic() {
+  if restic_ok; then
+    ok "restic $RESTIC_VERSION (backs up the folders that go with your databases)"
+    return 0
+  fi
+  case $ARCH in
+    amd64) _sum=$RESTIC_SHA256_AMD64 ;;
+    arm64) _sum=$RESTIC_SHA256_ARM64 ;;
+  esac
+  have bunzip2 || apt_install bzip2
+  _url=${ROWSAFE_RESTIC_URL:-https://github.com/restic/restic/releases/download}/v$RESTIC_VERSION/restic_${RESTIC_VERSION}_linux_$ARCH.bz2
+  rm -f "$TMP/restic.bz2" "$TMP/restic"
+  if ! fetch "$_url" "$TMP/restic.bz2"; then
+    restic_from_distro "could not download restic from $_url"
+    return 0
+  fi
+  _got=$(sha256sum "$TMP/restic.bz2" | cut -d' ' -f1)
+  if [ "$_got" != "$_sum" ]; then
+    rm -f "$TMP/restic.bz2"
+    warn "the restic download from $_url does not match the SHA-256 of the official $RESTIC_VERSION release ($_got instead of $_sum): not installed. Backups of files stay off; database backups are not affected."
+    return 0
+  fi
+  if ! bunzip2 -c "$TMP/restic.bz2" >"$TMP/restic" || ! chmod 0755 "$TMP/restic" || ! "$TMP/restic" version >/dev/null 2>&1; then
+    warn "the verified restic $RESTIC_VERSION does not run here; files backups stay off"
+    return 0
+  fi
+  install -d -m 0755 -o root -g root "$LIB_DIR"
+  install -m 0755 -o root -g root "$TMP/restic" "$RESTIC_BIN.new"
+  mv -f "$RESTIC_BIN.new" "$RESTIC_BIN"
+  ok "restic $RESTIC_VERSION installed (official release, SHA-256 verified) for backing up the folders that go with your databases"
+}
+
+# restic_from_distro falls back to the distribution's package when it is
+# recent enough (0.17 or newer); the agent finds it on PATH.
+restic_from_distro() {
+  _v=$(apt-cache policy restic 2>/dev/null | awk '/Candidate:/ { print $2 }' | sed 's/^[0-9]*://; s/[-+~].*//')
+  case $_v in
+    0.1[7-9]* | 0.[2-9][0-9]* | [1-9]*)
+      if apt_install restic 2>/dev/null; then
+        ok "restic $_v from $OS_NAME's packages ($1)"
+        return 0
+      fi
+      ;;
+  esac
+  warn "$1, and $OS_NAME has no recent enough restic package: backups of files stay off until the installer runs again with GitHub reachable. Database backups are not affected."
+}
+
+files_allowed() { grep -qs '^/' "$FILES_ALLOW_FILE"; }
+
+# files_grant_read gives the agent user read access to a folder the person
+# chose to protect (POSIX ACLs; ownership and modes stay as they are).
+files_grant_read() {
+  have setfacl || apt_install acl
+  if ! setfacl -R -P -m "u:$AGENT_USER:rX" -- "$1" ||
+    ! find -P "$1" -type d -exec setfacl -m "d:u:$AGENT_USER:rX" -- {} +; then
+    warn "could not give the agent read access to $1 (see above); it is not protected"
+    return 1
+  fi
+  _p=${1%/*}
+  while [ -n "$_p" ]; do
+    as_agent test -x "$_p" 2>/dev/null || setfacl -m "u:$AGENT_USER:x" -- "$_p" || true
+    _p=${_p%/*}
+  done
+  ok "gave the Rowsafe agent read access to $1 (read-only, with an ACL; nothing else changed)"
+}
+
+# files_pick_database sets FILES_DB_ID and FILES_DB_NAME: the database the
+# folders go with.
+files_pick_database() {
+  agent_run setup discover >"$TMP/files-dbs" 2>/dev/null || return 1
+  awk -F '\t' '$8 == "yes" && $13 != "-" { print $13 "\t" $7 }' "$TMP/files-dbs" >"$TMP/files-db"
+  if [ -n "$PROTECT_NAME" ]; then
+    awk -F '\t' -v n="$PROTECT_NAME" '$2 == n' "$TMP/files-db" >"$TMP/files-db1"
+    mv "$TMP/files-db1" "$TMP/files-db"
+  fi
+  case $(wc -l <"$TMP/files-db" | tr -d ' ') in
+    0) return 1 ;;
+    1) _line=$(cat "$TMP/files-db") ;;
+    *)
+      [ "$TTY" = 1 ] || return 1
+      say ""
+      tty_say "Which database do these files go with?"
+      _i=0
+      while IFS="$(printf '\t')" read -r _id _name; do
+        _i=$((_i + 1))
+        tty_say "  $_i) $_name"
+      done <"$TMP/files-db"
+      while :; do
+        ask _n "Number" 1
+        if matches "$_n" '^[0-9]+$' && [ "$_n" -ge 1 ] && [ "$_n" -le "$_i" ]; then break; fi
+        tty_bad "Type a number from 1 to $_i."
+      done
+      _line=$(sed -n "${_n}p" "$TMP/files-db")
+      ;;
+  esac
+  FILES_DB_ID=$(printf '%s\n' "$_line" | cut -f1)
+  FILES_DB_NAME=$(printf '%s\n' "$_line" | cut -f2)
+}
+
+# files_protect PATH protects one folder.
+files_protect() {
+  _acc=$(agent_run files access "$1" 2>"$TMP/files.err") || {
+    warn "$(cat "$TMP/files.err"): skipped"
+    return 0
+  }
+  case $_acc in
+    missing)
+      warn "$1 doesn't exist on this server; skipped"
+      return 0
+      ;;
+    no) files_grant_read "$1" || return 0 ;;
+  esac
+  if ! agent_run files add --database "$FILES_DB_ID" --path "$1" >"$TMP/files.out" 2>"$TMP/files.err"; then
+    warn "$(sed 's/^error: //' "$TMP/files.err")"
+    return 0
+  fi
+  FILES_PROTECTED="$FILES_PROTECTED$1
+"
+  ok "$1 is backed up with $FILES_DB_NAME: every 15 minutes and at every Mark, into the same bucket"
+}
+
+# files_setup runs after the database setup: --files, or (on a terminal)
+# "Does this app store uploads on this server?".
+files_setup() {
+  _ask=0
+  if [ "$TTY" = 1 ] && [ "$NO_FILES" = 0 ] && [ "$NO_SETUP" = 0 ] && [ -z "$FILES_PATHS" ]; then _ask=1; fi
+  if [ -z "$FILES_PATHS" ] && [ "$_ask" = 0 ]; then
+    [ -z "$ALLOW_FILES" ] || files_access
+    return 0
+  fi
+  if ! files_pick_database; then
+    [ -z "$FILES_PATHS" ] || warn "--files: no database on this server is set up with Rowsafe yet (or several: add --protect NAME), so folders can't be protected yet"
+    return 0
+  fi
+  agent_run files list --database "$FILES_DB_ID" >"$TMP/files-have" 2>/dev/null || : >"$TMP/files-have"
+  if [ "$_ask" = 1 ]; then
+    "$INSTALL_DIR/rowsafe-agent" files discover 2>/dev/null >"$TMP/files-found" || : >"$TMP/files-found"
+    _asked=0
+    while IFS="$(printf '\t')" read -r _path _bytes _count _readable _size _why <&4; do
+      grep -qxF -- "$_path" "$TMP/files-have" && continue
+      [ "$_asked" -lt 3 ] || break
+      _asked=$((_asked + 1))
+      say ""
+      if confirm "Does this app store uploads on this server? Rowsafe found $_path ($_size, $_count files: $_why). Back it up with $FILES_DB_NAME, so a restore brings back both?" y; then
+        FILES_PATHS="$FILES_PATHS$_path
+"
+      fi
+    done 4<"$TMP/files-found"
+    if [ "$_asked" = 0 ] && [ ! -s "$TMP/files-have" ]; then
+      say ""
+      note "Does your app store uploads (CVs, photos) on this server? Back that folder up with"
+      note "$FILES_DB_NAME, so a restore brings back both: add it in the dashboard (Rewind, then"
+      note "Files), or run this installer again with --files /path/to/uploads."
+    fi
+  fi
+  printf '%s' "$FILES_PATHS" | while IFS= read -r _path; do
+    [ -z "$_path" ] || grep -qxF -- "$_path" "$TMP/files-have" || printf '%s\n' "$_path"
+  done >"$TMP/files-todo"
+  while IFS= read -r _path <&4; do
+    files_protect "$_path"
+  done 4<"$TMP/files-todo"
+  if [ -n "$FILES_PROTECTED" ]; then
+    note "Files are encrypted on this server with a key derived from your backup passphrase: the same passphrase restores them."
+  fi
+  files_access
+}
+
+# files_access applies --allow-files / --no-allow-files, or asks once on a
+# terminal once a folder is protected. A re-run keeps the earlier answer.
+files_access() {
+  case $ALLOW_FILES in
+    yes) allow_files ;;
+    no)
+      disallow_files
+      ok "putting restored files back from Rowsafe is off (restores wait next to the folder)"
+      ;;
+    *)
+      if [ -f "$FILES_ALLOW_FILE" ]; then
+        if files_allowed; then allow_files; fi
+        return 0
+      fi
+      [ "$TTY" = 1 ] && [ -n "$FILES_PROTECTED" ] || return 0
+      say ""
+      if confirm "Allow Rowsafe to put restored files back into these folders (as their owner), and to read folders you add later in the dashboard? Only when someone asks and confirms." y; then
+        allow_files
+      else
+        disallow_files
+        note "OK: restored files will wait next to the folder for you (change it with --allow-files)"
+      fi
+      ;;
+  esac
+}
+
+allow_files() {
+  _roots=$( {
+    printf '%s' "$FILES_PROTECTED"
+    grep -s '^/' "$FILES_ALLOW_FILE" || true
+    printf '%s\n' $FILES_DEFAULT_ROOTS
+  } | awk 'NF && !seen[$0]++')
+  {
+    echo "# Folders Rowsafe may read (to back them up) and put restored files back"
+    echo "# into, with everything under them, when someone asks and confirms. The"
+    echo "# root helper never touches system or database folders, whatever this says."
+    echo "# Written by the installer (root); run it with --no-allow-files to turn"
+    echo "# this off."
+    printf '%s\n' "$_roots"
+  } | write_file "$FILES_ALLOW_FILE" 0644 root:root || true
+  install -d -m 0755 -o root -g root "$FILES_DROPIN_DIR"
+  _home=''
+  printf '%s\n' "$_roots" | grep -q '^/home\(/\|$\)' && _home=no
+  {
+    echo "# Written by the Rowsafe installer because root allowed Rowsafe to read the"
+    echo "# folders in $FILES_ALLOW_FILE and put restored files back there as their"
+    echo "# owner (--allow-files). Removed with --no-allow-files."
+    echo "[Service]"
+    printf '%s\n' "$_roots" | sed 's/^/ReadWritePaths=-/'
+    [ -z "$_home" ] || echo "ProtectHome=no"
+    echo "CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_FOWNER CAP_DAC_READ_SEARCH"
+  } | write_file "$FILES_DROPIN" 0644 root:root || true
+  have setfacl || apt_install acl
+  install_restart_helper
+  if systemd_running; then systemctl daemon-reload; fi
+  ok "Rowsafe may put restored files back into the folders you protect, as their owner, when someone asks (turn off with --no-allow-files)"
+}
+
+disallow_files() {
+  rm -f "$FILES_DROPIN"
+  rmdir "$FILES_DROPIN_DIR" 2>/dev/null || true
+  if [ -d "$CONFIG_DIR" ]; then
+    {
+      echo "# Reading and restoring folders through Rowsafe's root helper is off."
+      echo "# Run the installer with --allow-files to turn it on."
+    } | write_file "$FILES_ALLOW_FILE" 0644 root:root || true
+  fi
+  grep -qs '^[0-9]' "$RESTART_ALLOW_FILE" || grep -qs '^[0-9]' "$CREATED_CLUSTERS_FILE" || remove_restart_helper
+  if systemd_running; then systemctl daemon-reload; fi
 }
 
 # ---------------------------------------------------------------- agent.env
@@ -5287,6 +5738,7 @@ databases() {
   else
     next_steps
   fi
+  files_setup # files section
 }
 
 # ---------------------------------------------------------------- MongoDB
@@ -5554,6 +6006,7 @@ install_agent() {
   # 2. Dependencies and layout.
   if [ "$HOST_ENGINE" = postgresql ] || [ "$HOST_ENGINE" = mongodb ]; then ensure_pgbackrest; else ensure_mysql_tools; fi # mysql
   ensure_mongodb_tools # mongodb (only where MongoDB runs)
+  ensure_restic # files section
   step "Installing into $INSTALL_DIR"
   make_dirs
   [ "$need_binary" = 0 ] || install_binary
@@ -5667,6 +6120,8 @@ uninstall_agent() {
     systemctl disable --now --quiet "$SERVICE" 2>/dev/null || true
   fi
   rm -f "$UNIT_FILE"
+  rm -f "$FILES_ALLOW_FILE" "$FILES_DROPIN" "$RESTIC_BIN" # files section
+  rmdir "$FILES_DROPIN_DIR" 2>/dev/null || true
   remove_pooler_units
   remove_restart_helper
   remove_create_cluster
@@ -5729,6 +6184,16 @@ main() {
       --mongodb-replica-set) MONGODB_REPLSET=yes ;;
       --no-mongodb-replica-set) MONGODB_REPLSET=no ;;
       --no-allow-restart) ALLOW_RESTART=no ;;
+      --files) # files section
+        [ $# -ge 2 ] || die "--files needs a folder's path"
+        printf '%s\n' "$2" | grep -Eq '^/[A-Za-z0-9._@+,=/-]+$' || die "--files: give an absolute path (letters, digits and ._@+,=- only)"
+        FILES_PATHS="$FILES_PATHS${2%/}
+"
+        shift
+        ;;
+      --allow-files) ALLOW_FILES=yes ;;
+      --no-allow-files) ALLOW_FILES=no ;;
+      --no-files) NO_FILES=1 ;;
       --allow-create-cluster) ALLOW_CREATE_CLUSTER=yes ;;
       --no-allow-create-cluster) ALLOW_CREATE_CLUSTER=no ;;
       --allow-firewall) ALLOW_FIREWALL=yes ;;
@@ -5801,6 +6266,9 @@ main() {
   [ -z "$SECOND_COPY" ] || NO_SETUP=1
   if [ "$mode" != install ] && { [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME" ] || [ -n "$ALLOW_RESTART$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT$ALLOW_FIREWALL$ALLOW_POOLER$ALLOW_CREATE_CLUSTER" ]; }; then
     die "--no-setup, --protect and the --allow- options only go with an install"
+  fi
+  if [ "$mode" != install ] && { [ -n "$FILES_PATHS" ] || [ -n "$ALLOW_FILES" ] || [ "$NO_FILES" = 1 ]; }; then
+    die "--files, --allow-files and --no-files only go with an install"
   fi
   [ -z "$PROTECT_PORT" ] || [ -n "$PROTECT_NAME" ] || die "--protect-port only goes with --protect"
   [ "$NO_SETUP" = 0 ] || [ -z "$PROTECT_NAME" ] || die "--no-setup and --protect contradict each other"
