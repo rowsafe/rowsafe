@@ -1660,12 +1660,12 @@ APT_EOF
   presult "version=1.24.1"
   grep -q "install -y -q --no-install-recommends pgbouncer" /tmp/rowsafe-fake/apt.calls || fail "apt-get install not run: $(cat /tmp/rowsafe-fake/apt.calls)"
   grep -qx "start rowsafe-pooler-apt@install.service" "$F/systemctl.calls" || fail "the package wasn't installed in its own unit"
-  # At most one install or removal every 10 minutes.
+  # At most one install every 10 minutes (removing right after is fine).
   mv /usr/local/bin/pgbouncer "$W/pgbouncer.keep"
   rm -f /tmp/rowsafe-fake/apt.calls
   prequest "pb_c pooler-install"
   presult "ok=0"
-  grep -q "^error=PgBouncer was installed or removed less than 10 minutes ago" "$OP/result" || fail "no cooldown between installs"
+  grep -q "^error=PgBouncer was installed less than 10 minutes ago" "$OP/result" || fail "no cooldown between installs"
   [ ! -e /tmp/rowsafe-fake/apt.calls ] || fail "apt-get ran during the cooldown"
   mv "$W/pgbouncer.keep" /usr/local/bin/pgbouncer
   prequest "pb_1 pooler-configure $good password=$pw"
@@ -1749,9 +1749,8 @@ APT_EOF
   # PgBouncer requests never reach the restart helper's mode.
   request "pb_9 pooler-reload"
   result_has "error=malformed request"
-  # Off: stopped, drop-in removed, and the package Rowsafe installed purged
-  # (10 minutes after it was installed).
-  rm -f "$W/pooler-state/last-apt"
+  # Off right after the install: stopped, drop-in removed, and the package
+  # Rowsafe installed purged (the cooldown is per action).
   : >"$F/systemctl.calls"
   prequest "pb_10 pooler-off remove_package=1"
   presult "ok=1"
