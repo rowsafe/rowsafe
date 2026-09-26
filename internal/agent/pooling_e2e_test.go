@@ -14,8 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/rowsafe/rowsafe/collect"
 	"github.com/rowsafe/rowsafe/protocol"
 )
@@ -172,16 +170,18 @@ func TestRealPooling(t *testing.T) {
 		t.Fatalf("changing the mode restarted PgBouncer (%s -> %s)", before, after)
 	}
 	// Session mode: a session keeps its settings across transactions.
-	conn, err := pgx.Connect(ctx, "postgres://app:app-secret@127.0.0.1:6432/shop?sslmode=disable&default_query_exec_mode=simple_protocol")
+	conn, err := appConnect(ctx, 6432, "shop")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var tz string
-	conn.Exec(ctx, `SET TimeZone = 'Asia/Tokyo'`)
-	conn.QueryRow(ctx, `SELECT current_setting('TimeZone')`).Scan(&tz)
+	if _, err := conn.Exec(ctx, `SET TimeZone = 'Asia/Tokyo'`); err != nil {
+		t.Fatal(err)
+	}
+	err = conn.QueryRow(ctx, `SELECT current_setting('TimeZone')`).Scan(&tz)
 	conn.Close(ctx)
-	if tz != "Asia/Tokyo" {
-		t.Fatalf("session mode lost a SET: %q", tz)
+	if err != nil || tz != "Asia/Tokyo" {
+		t.Fatalf("session mode lost a SET: %q %v", tz, err)
 	}
 
 	// Off: PgBouncer removed, role and function gone from the cluster it was on.
