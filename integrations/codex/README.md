@@ -65,12 +65,21 @@ For the hook without the plugin, put [`hooks/hooks.json`](hooks/hooks.json) in `
 
 ### Hosted endpoint, no CLI
 
+Sign in with Rowsafe (you approve Codex in the dashboard and choose whether it may save Marks; it gets read-only tools plus, if you allow it, `create_restore_point`):
+
+```sh
+codex mcp add rowsafe --url https://api.rowsafe.sh/mcp
+codex mcp login rowsafe
+```
+
+Or with an API key, for CI:
+
 ```sh
 export ROWSAFE_API_KEY=rsk_...
 codex mcp add rowsafe --url https://api.rowsafe.sh/mcp --bearer-token-env-var ROWSAFE_API_KEY
 ```
 
-The hosted endpoint lists every tool, write tools included; what a tool can do depends on the key. Give Codex its own key (`rowsafe api-keys create codex`), or a `--read-only` key if it should only check. You can also narrow the tools with `enabled_tools` (see `config.toml.example`). The guard hook needs the CLI.
+With an API key, the hosted endpoint lists every tool, write tools included; what a tool can do depends on the key. Give Codex its own key (`rowsafe api-keys create codex`), or a `--read-only` key if it should only check. You can also narrow the tools with `enabled_tools` (see `config.toml.example`). The guard hook needs the CLI.
 
 ### AGENTS.md snippet
 

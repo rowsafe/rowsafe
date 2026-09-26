@@ -179,8 +179,13 @@ type HeartbeatRequest struct {
 	RestartActions []string `json:"restart_actions,omitempty"`
 	// Rewinds are the live copies and kept data directories on this host.
 	Rewinds []RewindState `json:"rewinds,omitempty"`
+	// Software is PostgreSQL's versions, pending updates and upgrades on
+	// this host (upgrade.go); sent about every hour.
+	Software *SoftwareReport `json:"software,omitempty"`
 	// DockerControl: docker-sidecar agents only (see protocol/docker.go).
 	DockerControl *DockerControlReport `json:"docker_control,omitempty"`
+	// Copies are Guard's preview and safe copies (protocol/copies.go).
+	Copies *CopiesReport `json:"copies,omitempty"`
 }
 
 // HeartbeatResponse tells the agent which databases to watch.
@@ -195,6 +200,8 @@ type HeartbeatResponse struct {
 	Monitored []DatabaseSpec `json:"monitored,omitempty"`
 	// RewindExpires changes when copies and kept data are deleted (Extend).
 	RewindExpires []RewindExpiry `json:"rewind_expires,omitempty"`
+	// Copies extends or deletes Guard copies (protocol/copies.go).
+	Copies *CopiesUpdate `json:"copies,omitempty"`
 }
 
 // ArchiverStats mirrors pg_stat_archiver for one adopted database.
@@ -510,6 +517,8 @@ func TaskTimeout(taskType string) time.Duration {
 		return 10 * time.Minute
 	case TaskRestorePoint, TaskRestart:
 		return 5 * time.Minute
+	case TaskCopySchema: // catalog queries only
+		return 5 * time.Minute
 	case TaskMaintenance: // a VACUUM or REINDEX of a large table takes a while
 		return 2 * time.Hour
 	case TaskRewindDrop, TaskRewindCleanup: // stopping a copy, deleting a large directory
@@ -518,7 +527,13 @@ func TaskTimeout(taskType string) time.Duration {
 		return 2 * time.Hour
 	case TaskRewindUndo: // stop, two renames, start
 		return time.Hour
+	case TaskUpgradeCheck, TaskUpgradeCleanup, TaskPGUpdate, TaskReboot:
+		return 30 * time.Minute
+	case TaskSecurityUpdates:
+		return 2 * time.Hour
 	case TaskFindMoment: // reads the WAL of the range from the repository
+		return time.Hour
+	case TaskMigrate: // a switchover waits for the sync to catch up (migrate.go)
 		return time.Hour
 	default: // backup, drill, rewind copy and in place: a large restore takes hours
 		return 12 * time.Hour
@@ -1084,4 +1099,6 @@ type WhoAmI struct {
 	Org    Org     `json:"org"`
 	APIKey *APIKey `json:"api_key,omitempty"` // nil for the service token
 	Actor  string  `json:"actor"`
+	// OAuth is set for an AI app's OAuth access token (only on /mcp).
+	OAuth *OAuthConnection `json:"oauth,omitempty"`
 }
