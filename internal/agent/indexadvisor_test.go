@@ -263,6 +263,13 @@ func TestIndexAdvisorAgainstPostgres(t *testing.T) {
 	if slices.Contains(res3.Generated, rec.Key) {
 		t.Errorf("still suggested after creating it: %v", res3.Generated)
 	}
+	// The copy predates the new index (like one restored from an older
+	// backup): no idea led by customer_id may be recommended against it.
+	for _, r := range res3.Recommendations {
+		if r.Spec.Columns[0] == "customer_id" {
+			t.Errorf("recommended %s although production has %s: %+v", r.Spec.Definition(), rec.Spec.Name, r.Statements)
+		}
+	}
 	if len(res3.Usage) != 2 {
 		t.Fatalf("usage: %+v", res3.Usage)
 	}

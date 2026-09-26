@@ -61,6 +61,8 @@ type Index struct {
 	Keys      []IndexKey
 	Include   []string
 	Predicate string // pg_get_expr of indpred, "" for a full index
+	// Def is its CREATE INDEX statement (pg_get_indexdef).
+	Def string
 }
 
 // IndexKey is one key column of an index; Col is "" for an expression.
@@ -475,6 +477,43 @@ func forUsage(db string, st Statement, u *Usage) []*Candidate {
 	return out
 }
 
+// CoveredBy reports whether one of t's indexes already does what c would
+// (Covers, or a unique index on some of its equality columns). t is read
+// from production's catalog right before recommending: an index created
+// since the backup the copy came from must count.
+func CoveredBy(t *Table, c *Candidate) bool {
+	if t == nil {
+		return false
+	}
+	for _, ix := range t.Indexes {
+		if Covers(ix, c) || uniqueWithin(ix, c) {
+			return true
+		}
+	}
+	return false
+}
+
+// MissingOnCopy are production's valid indexes of a table that the copy
+// doesn't have (created after the backup it was restored from). They are
+// built on the copy before testing, so ideas are measured against the
+// indexes production really has.
+func MissingOnCopy(prod, copy *Table) []Index {
+	if prod == nil || copy == nil {
+		return nil
+	}
+	have := map[string]bool{}
+	for _, ix := range copy.Indexes {
+		have[ix.Name] = true
+	}
+	var out []Index
+	for _, ix := range prod.Indexes {
+		if ix.Valid && ix.Def != "" && !have[ix.Name] {
+			out = append(out, ix)
+		}
+	}
+	return out
+}
+
 // coveredByExisting reports whether an existing index already does what c
 // would (see Covers).
 func coveredByExisting(c *Candidate) bool {
@@ -589,6 +628,11 @@ type Result struct {
 const (
 	minHelpedRatio = 1.25 // cost at most 80% of before
 	minBestRatio   = 2    // at least one statement at least twice as fast
+	// A statement already fast before the index (an existing index serves
+	// it) isn't helped, however the ratio looks: below this plan cost, or
+	// this measured time, there is little left to save.
+	minCostBefore = 500
+	minMsBefore   = 1.0
 )
 
 // helped are the gains of statements whose plan used the index and got
@@ -596,7 +640,8 @@ const (
 func (r *Result) helped() []protocol.IndexGain {
 	var out []protocol.IndexGain
 	for _, g := range r.Gains {
-		if r.Used[g.QueryID] && g.Speedup >= minHelpedRatio {
+		slow := g.CostBefore >= minCostBefore || g.MsBefore >= minMsBefore
+		if r.Used[g.QueryID] && g.Speedup >= minHelpedRatio && slow {
 			out = append(out, g)
 		}
 	}
