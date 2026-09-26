@@ -1248,15 +1248,17 @@ pooler_stop() {
 }
 
 # pooler_apt ACTION: install or purge the pgbouncer package in its own unit
-# (network and a writable system), at most once every 10 minutes.
+# (network and a writable system): each of install and purge at most once
+# every 10 minutes, so removing it right after installing it still works.
 pooler_apt() {
   _now=$(date +%s)
-  _last=$(cat "$state/last-apt" 2>/dev/null || echo 0)
+  _last=$(cat "$state/last-apt-$1" 2>/dev/null || echo 0)
   case $_last in '' | *[!0-9]*) _last=0 ;; esac
   if [ $((_now - _last)) -lt "$apt_cooldown" ]; then
-    pooler_refuse "PgBouncer was installed or removed less than 10 minutes ago; try again in $(((apt_cooldown - _now + _last + 59) / 60)) minutes"
+    case $1 in install) _what=installed ;; *) _what=removed ;; esac
+    pooler_refuse "PgBouncer was $_what less than 10 minutes ago; try again in $(((apt_cooldown - _now + _last + 59) / 60)) minutes"
   fi
-  echo "$_now" >"$state/last-apt"
+  echo "$_now" >"$state/last-apt-$1"
   log "$1 pgbouncer (request $id)"
   _out=$(timeout 1000 "$systemctl" start "$apt_unit@$1.service" 2>&1 </dev/null) ||
     pooler_refuse "$1 of the pgbouncer package failed: $(tail -n 3 "$state/apt.log" 2>/dev/null | tr '\n' ' ' | cut -c1-300)$(printf '%s' "$_out" | tr '\n' ' ' | cut -c1-100)"
