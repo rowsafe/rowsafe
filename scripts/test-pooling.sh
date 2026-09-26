@@ -25,6 +25,10 @@ in_container() {
   install -m 0644 /src/deploy/systemd/rowsafe-pooler.service /src/deploy/systemd/rowsafe-pooler.path \
     /src/deploy/systemd/rowsafe-pooler-apt@.service /etc/systemd/system/
   install -d -m 0755 /etc/systemd/system/pgbouncer.service.d
+  # The test installs and removes PgBouncer within a minute: no 10-minute
+  # wait between the two (root's setting, in the unit's environment).
+  install -d -m 0755 /etc/systemd/system/rowsafe-pooler.service.d
+  printf '[Service]\nEnvironment=ROWSAFE_POOLER_APT_COOLDOWN=0\n' >/etc/systemd/system/rowsafe-pooler.service.d/test.conf
   printf '# test\n5432\n5433\n' >/etc/rowsafe/pooler-allowed
   chmod 0644 /etc/rowsafe/pooler-allowed
   install -d -m 0700 -o postgres -g postgres /var/lib/rowsafe /var/lib/rowsafe/pooler

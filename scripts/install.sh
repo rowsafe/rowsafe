@@ -813,7 +813,10 @@ apt_get=${ROWSAFE_APT_GET:-apt-get}
 pgb_unit=pgbouncer.service
 pgb_marker=';; Managed by Rowsafe'
 apt_unit=rowsafe-pooler-apt
-apt_cooldown=600
+# Seconds between two package installs or removals (the unit's environment,
+# root's to change; tests shorten it).
+apt_cooldown=${ROWSAFE_POOLER_APT_COOLDOWN:-600}
+case $apt_cooldown in '' | *[!0-9]*) apt_cooldown=600 ;; esac
 p_args='' p_version='' p_installed=0 p_removed=0 p_running=0
 
 pooler_answer() {
