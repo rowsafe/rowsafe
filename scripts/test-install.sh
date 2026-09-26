@@ -1478,7 +1478,8 @@ APT_EOF
   prequest "pb_10 pooler-off remove_package=1"
   presult "ok=1"
   presult "removed=1"
-  grep -q "disable --now --quiet pgbouncer.service" "$F/systemctl.calls" || fail "PgBouncer not stopped"
+  grep -qx "stop pgbouncer.service" "$F/systemctl.calls" && grep -q "disable --quiet pgbouncer.service" "$F/systemctl.calls" ||
+    fail "PgBouncer not stopped and disabled"
   grep -q "purge -y -q pgbouncer" /tmp/rowsafe-fake/apt.calls || fail "package not purged"
   [ ! -e "$ini" ] && [ ! -e "$W/systemd/pgbouncer.service.d/rowsafe.conf" ] || fail "off left files"
   [ ! -e /usr/local/bin/pgbouncer ] || fail "pgbouncer still installed"

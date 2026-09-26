@@ -168,6 +168,15 @@ pooler_put() {
 
 pooler_active() { "$systemctl" is-active --quiet "$pgb_unit" 2>/dev/null; }
 
+# pooler_stop stops PgBouncer and disables it at boot (two calls: a failed
+# disable must not leave it running).
+pooler_stop() {
+  _out=$(timeout 60 "$systemctl" stop "$pgb_unit" 2>&1 </dev/null) ||
+    pooler_refuse "stopping PgBouncer failed: $(printf '%s' "$_out" | tr '\n' ' ' | cut -c1-300)"
+  _out=$(timeout 60 "$systemctl" disable --quiet "$pgb_unit" 2>&1 </dev/null) ||
+    log "could not disable $pgb_unit: $(printf '%s' "$_out" | tr '\n' ' ' | cut -c1-300)"
+}
+
 # pooler_apt ACTION: install or purge the pgbouncer package in its own unit
 # (network and a writable system), at most once every 10 minutes.
 pooler_apt() {
@@ -213,7 +222,7 @@ pooler_install() {
     # The package starts PgBouncer with its default configuration, which
     # serves nothing; Rowsafe's starts once configured.
     if [ ! -e "$state/was-enabled" ]; then echo 0 >"$state/was-enabled"; fi
-    "$systemctl" disable --now --quiet "$pgb_unit" >/dev/null 2>&1 || true
+    pooler_stop
   fi
   pooler_ours || pooler_refuse "PgBouncer on this server has its own configuration ($pgb_dir/pgbouncer.ini); Rowsafe doesn't replace it"
   pooler_version
@@ -360,7 +369,7 @@ pooler_off() {
     return 0
   fi
   log "turning PgBouncer off (request $id)"
-  "$systemctl" disable --now --quiet "$pgb_unit" >/dev/null 2>&1 || true
+  pooler_stop
   pooler_secure_dir
   if [ "$_remove" = 1 ] && [ -e "$state/installed-by-rowsafe" ]; then
     pooler_apt purge
