@@ -269,8 +269,8 @@ var storageRetry = func(failures int) time.Duration {
 	return min(time.Duration(failures)*time.Minute, 15*time.Minute)
 }
 
-// storageLoop renews the Rowsafe Storage credentials when they are due.
-func (a *Agent) storageLoop(ctx context.Context) {
+// managedStorageLoop renews the Rowsafe Storage credentials when they are due.
+func (a *Agent) managedStorageLoop(ctx context.Context) {
 	failures := 0
 	for {
 		c, _ := a.storage.get()
@@ -335,6 +335,13 @@ func (a *Agent) storageStatus() *protocol.StorageStatus {
 }
 
 // ---- moving to another repository ----
+//
+// Rowsafe Storage is always repo1. The second copy (repo2, secondcopy.go)
+// is always the customer's own bucket (ROWSAFE_REPO2_*), so its config never
+// carries a session token. A later "move to your own bucket" could add the
+// bucket as repo2, wait for a full backup there, then promote it to repo1,
+// so no point in time is lost; today the move takes a new full backup in
+// the new repository instead (below).
 //
 // When the host's storage changes (Rowsafe Storage to its own bucket or
 // back, or another bucket), the next writeConfig points pgBackRest at the
@@ -448,3 +455,25 @@ func (a *Agent) syncRepos(ctx context.Context, dbs []protocol.DatabaseSpec) {
 		a.syncTried.Delete(db.Stanza)
 	}
 }
+
+// dbRepo is the repository db's config points at: the one a primary handed
+// over (a standby, standby.go), else this agent's own: Rowsafe Storage or
+// its bucket.
+func (a *Agent) dbRepo(db protocol.DatabaseSpec) (pgbackrest.Repo, error) {
+	if db.ID != "" {
+		if _, err := os.Stat(a.repoPath(db.ID)); err == nil {
+			r := a.repoFor(db)
+			return r, r.Validate()
+		}
+	}
+	if err := a.cfg.ValidateRepo(); err != nil {
+		return pgbackrest.Repo{}, err
+	}
+	return a.repo()
+}
+
+// errStandbyRowsafeStorage: a primary on Rowsafe Storage can't hand its
+// repository to a standby. Its credentials are short-lived and renewed by
+// its own agent, so a copy would stop working within days.
+var errStandbyRowsafeStorage = errors.New("a standby isn't available yet for a server that keeps its backups in Rowsafe Storage: " +
+	"move this server to your own bucket first (install.sh --setup-storage)")

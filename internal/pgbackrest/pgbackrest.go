@@ -40,14 +40,42 @@ type Repo struct {
 	// verifies; only ever set it for throwaway test repositories.
 	SkipTLSVerify bool
 	CAFile        string // PEM bundle trusted instead of the system store
+
+	// Type is "" or "s3" for S3-compatible storage, or "posix" for a
+	// directory on this host (Path; tests and mounted storage). Only S3 is
+	// configurable through the environment.
+	Type string
+	Path string // posix: the repository directory
 }
 
-func (r Repo) Validate() error {
+// Posix reports whether the repository is a local directory.
+func (r Repo) Posix() bool { return r.Type == "posix" }
+
+// Configured reports whether any setting of the repository is set (a
+// second copy is optional; see ValidateAs).
+func (r Repo) Configured() bool {
+	return r.Posix() || strings.TrimSpace(r.Endpoint+r.Bucket+r.Key+r.KeySecret+r.CipherPass) != ""
+}
+
+func (r Repo) Validate() error { return r.ValidateAs("ROWSAFE_REPO_") }
+
+// ValidateAs checks the settings, naming them with prefix
+// ("ROWSAFE_REPO_", "ROWSAFE_REPO2_") in errors.
+func (r Repo) ValidateAs(prefix string) error {
+	if r.Posix() {
+		if !safePathRE.MatchString(r.Path) {
+			return fmt.Errorf("%sPATH must be an absolute path", prefix)
+		}
+		if r.CipherPass != "" && len(r.CipherPass) < 20 {
+			return fmt.Errorf("%sCIPHER_PASS must be at least 20 characters", prefix)
+		}
+		return nil
+	}
 	var missing []string
 	for name, v := range map[string]string{
-		"ROWSAFE_REPO_S3_ENDPOINT": r.Endpoint, "ROWSAFE_REPO_S3_BUCKET": r.Bucket,
-		"ROWSAFE_REPO_S3_KEY": r.Key, "ROWSAFE_REPO_S3_KEY_SECRET": r.KeySecret,
-		"ROWSAFE_REPO_CIPHER_PASS": r.CipherPass,
+		prefix + "S3_ENDPOINT": r.Endpoint, prefix + "S3_BUCKET": r.Bucket,
+		prefix + "S3_KEY": r.Key, prefix + "S3_KEY_SECRET": r.KeySecret,
+		prefix + "CIPHER_PASS": r.CipherPass,
 	} {
 		if strings.TrimSpace(v) == "" {
 			missing = append(missing, name)
@@ -58,7 +86,7 @@ func (r Repo) Validate() error {
 		return fmt.Errorf("repository not configured, missing: %s", strings.Join(missing, ", "))
 	}
 	if len(r.CipherPass) < 20 {
-		return errors.New("ROWSAFE_REPO_CIPHER_PASS must be at least 20 characters")
+		return fmt.Errorf("%sCIPHER_PASS must be at least 20 characters", prefix)
 	}
 	for _, v := range []string{r.Endpoint, r.Bucket, r.Region, r.Key, r.KeySecret, r.Token, r.CipherPass, r.PathPrefix, r.CAFile} {
 		if strings.ContainsAny(v, "\n\r") {
@@ -66,10 +94,10 @@ func (r Repo) Validate() error {
 		}
 	}
 	if r.Port < 0 || r.Port > 65535 {
-		return fmt.Errorf("ROWSAFE_REPO_S3_PORT %d is out of range", r.Port)
+		return fmt.Errorf("%sS3_PORT %d is out of range", prefix, r.Port)
 	}
 	if r.CAFile != "" && !strings.HasPrefix(r.CAFile, "/") {
-		return errors.New("ROWSAFE_REPO_S3_CA_FILE must be an absolute path")
+		return fmt.Errorf("%sS3_CA_FILE must be an absolute path", prefix)
 	}
 	return nil
 }
@@ -86,6 +114,10 @@ type ConfigInput struct {
 	// ProcessMax is how many processes pgBackRest uses to compress and
 	// upload (see ProcessMax); less than 1 means 1.
 	ProcessMax int
+	// LockPath is pgBackRest's lock-path ("" = its default). The second
+	// copy's configuration has its own, so its commands never wait for the
+	// first storage's (they share the stanza name).
+	LockPath string
 	// Exclude are paths relative to the data directory that backups leave
 	// out (e.g. data a Docker rewind keeps aside inside it).
 	Exclude []string
@@ -115,28 +147,36 @@ func RenderConfig(repo Repo, in ConfigInput) string {
 	b.WriteString("# Managed by rowsafe-agent. Local edits are overwritten.\n")
 	b.WriteString("[global]\n")
 	kv := func(k string, v any) { fmt.Fprintf(&b, "%s=%v\n", k, v) }
-	kv("repo1-type", "s3")
-	kv("repo1-s3-endpoint", repo.Endpoint)
-	kv("repo1-s3-bucket", repo.Bucket)
-	kv("repo1-s3-region", region)
-	kv("repo1-s3-uri-style", uriStyle)
-	kv("repo1-s3-key", repo.Key)
-	kv("repo1-s3-key-secret", repo.KeySecret)
-	if repo.Token != "" {
-		kv("repo1-s3-token", repo.Token)
+	path := repoPath(repo.PathPrefix, in.Stanza)
+	if repo.Posix() {
+		kv("repo1-type", "posix")
+		path = strings.TrimRight(repo.Path, "/") + "/" + in.Stanza
+	} else {
+		kv("repo1-type", "s3")
+		kv("repo1-s3-endpoint", repo.Endpoint)
+		kv("repo1-s3-bucket", repo.Bucket)
+		kv("repo1-s3-region", region)
+		kv("repo1-s3-uri-style", uriStyle)
+		kv("repo1-s3-key", repo.Key)
+		kv("repo1-s3-key-secret", repo.KeySecret)
+		if repo.Token != "" {
+			kv("repo1-s3-token", repo.Token)
+		}
+		if repo.Port != 0 {
+			kv("repo1-storage-port", repo.Port)
+		}
+		if repo.CAFile != "" {
+			kv("repo1-storage-ca-file", repo.CAFile)
+		}
+		if repo.SkipTLSVerify {
+			kv("repo1-storage-verify-tls", "n")
+		}
 	}
-	if repo.Port != 0 {
-		kv("repo1-storage-port", repo.Port)
+	kv("repo1-path", path)
+	if repo.CipherPass != "" || !repo.Posix() {
+		kv("repo1-cipher-type", "aes-256-cbc")
+		kv("repo1-cipher-pass", repo.CipherPass)
 	}
-	if repo.CAFile != "" {
-		kv("repo1-storage-ca-file", repo.CAFile)
-	}
-	if repo.SkipTLSVerify {
-		kv("repo1-storage-verify-tls", "n")
-	}
-	kv("repo1-path", repoPath(repo.PathPrefix, in.Stanza))
-	kv("repo1-cipher-type", "aes-256-cbc")
-	kv("repo1-cipher-pass", repo.CipherPass)
 	kv("repo1-retention-full-type", "count")
 	kv("repo1-retention-full", in.RetentionFull)
 	kv("repo1-bundle", "y")
@@ -145,6 +185,9 @@ func RenderConfig(repo Repo, in ConfigInput) string {
 	kv("start-fast", "y")
 	kv("process-max", max(in.ProcessMax, 1))
 	kv("archive-timeout", 120)
+	if in.LockPath != "" {
+		kv("lock-path", in.LockPath)
+	}
 	kv("log-level-console", "info")
 	if in.LogPath == "" {
 		// Containers: no log files (nothing rotates them); the agent keeps
@@ -245,6 +288,10 @@ func (c CLI) run(ctx context.Context, args ...string) ([]byte, error) {
 func (c CLI) StanzaCreate(ctx context.Context) ([]byte, error) { return c.run(ctx, "stanza-create") }
 func (c CLI) Check(ctx context.Context) ([]byte, error)        { return c.run(ctx, "check") }
 
+// StanzaUpgrade moves the stanza to the PostgreSQL version now running
+// (after a major upgrade, or the undo of one).
+func (c CLI) StanzaUpgrade(ctx context.Context) ([]byte, error) { return c.run(ctx, "stanza-upgrade") }
+
 func (c CLI) Backup(ctx context.Context, typ string) ([]byte, error) {
 	return c.run(ctx, "--type="+typ, "backup")
 }
@@ -276,18 +323,25 @@ type RestoreOptions struct {
 	// never pushes WAL into the repository. A restore that replaces
 	// production keeps its archiving (false).
 	ArchiveOff bool
-	// Type is "time" or "name"; Target the time ("2006-01-02
-	// 15:04:05.999999+00") or restore point name.
+	// Type is "time", "name" or "xid"; Target the time ("2006-01-02
+	// 15:04:05.999999+00"), restore point name or transaction ID.
 	Type, Target string
-	Set          string // --set: the backup to start from ("" lets pgBackRest pick, time targets only)
-	Timeline     string // --target-timeline ("" = PostgreSQL's default)
+	// Exclusive stops just before the target (--target-exclusive): for an
+	// xid, everything up to that transaction, not including it.
+	Exclusive bool
+	Set       string // --set: the backup to start from ("" lets pgBackRest pick, time targets only)
+	Timeline  string // --target-timeline ("" = PostgreSQL's default)
+	// Repo is the storage to restore from (protocol.RepoSecond: the second
+	// copy). It picks the configuration file; RestoreTo itself ignores it.
+	Repo int
 }
 
 var (
 	restoreTargetRE   = regexp.MustCompile(`^[A-Za-z0-9 :.+_-]{1,64}$`)
 	backupLabelRE     = regexp.MustCompile(`^[0-9]{8}-[0-9]{6}F(_[0-9]{8}-[0-9]{6}[DI])?$`)
 	targetTimelineRE  = regexp.MustCompile(`^(current|latest|[0-9]{1,10})$`)
-	restoreTargetType = map[string]bool{"time": true, "name": true}
+	restoreTargetType = map[string]bool{"time": true, "name": true, "xid": true}
+	xidTargetRE       = regexp.MustCompile(`^[1-9][0-9]{0,9}$`)
 )
 
 // ValidBackupLabel reports whether s looks like a pgBackRest backup label.
@@ -297,7 +351,7 @@ func ValidBackupLabel(s string) bool { return backupLabelRE.MatchString(s) }
 // Every value is checked, so nothing unexpected reaches pgBackRest's
 // command line or the recovery settings it writes.
 func (c CLI) RestoreTo(ctx context.Context, o RestoreOptions) ([]byte, error) {
-	if !restoreTargetType[o.Type] || !restoreTargetRE.MatchString(o.Target) {
+	if !restoreTargetType[o.Type] || !restoreTargetRE.MatchString(o.Target) || (o.Type == "xid" && !xidTargetRE.MatchString(o.Target)) {
 		return nil, fmt.Errorf("invalid restore target %q %q", o.Type, o.Target)
 	}
 	if o.Set != "" && !ValidBackupLabel(o.Set) {
@@ -317,6 +371,9 @@ func (c CLI) RestoreTo(ctx context.Context, o RestoreOptions) ([]byte, error) {
 		args = append(args, "--archive-mode=off")
 	}
 	args = append(args, "--type="+o.Type, "--target="+o.Target, "--target-action=promote")
+	if o.Exclusive {
+		args = append(args, "--target-exclusive")
+	}
 	if o.Set != "" {
 		args = append(args, "--set="+o.Set)
 	}
@@ -324,6 +381,17 @@ func (c CLI) RestoreTo(ctx context.Context, o RestoreOptions) ([]byte, error) {
 		args = append(args, "--target-timeline="+o.Timeline)
 	}
 	return c.run(ctx, append(args, "--cmd="+c.Bin, "restore")...)
+}
+
+// RestoreStandby restores the latest backup into dataDir as a standby
+// (standby.signal, restore_command from the repository) that follows the
+// newest timeline. Archiving settings are kept, so a promoted standby
+// archives to the same repository.
+func (c CLI) RestoreStandby(ctx context.Context, dataDir string) ([]byte, error) {
+	if !safePathRE.MatchString(dataDir) {
+		return nil, fmt.Errorf("unsafe restore path %q", dataDir)
+	}
+	return c.run(ctx, "--pg1-path="+dataDir, "--type=standby", "--target-timeline=latest", "--cmd="+c.Bin, "restore")
 }
 
 func (c CLI) Info(ctx context.Context) ([]Stanza, error) {

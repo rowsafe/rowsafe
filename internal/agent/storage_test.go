@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -341,11 +342,25 @@ func TestStorageLoopBacksOff(t *testing.T) {
 	a.storage.set(due)
 	ctx, cancel := context.WithTimeout(context.Background(), 550*time.Millisecond)
 	defer cancel()
-	a.storageLoop(ctx)
+	a.managedStorageLoop(ctx)
 	if n := calls.Load(); n < 2 || n > 7 {
 		t.Fatalf("%d renewal attempts in 550ms with a 100ms back-off", n)
 	}
 	if c, errMsg := a.storage.get(); c.AccessKeyID != "K1" || !strings.Contains(errMsg, "slow down") {
 		t.Errorf("credentials %v, error %q", c, errMsg)
+	}
+}
+
+// A primary on Rowsafe Storage refuses to hand its repository to a
+// standby: the credentials are short-lived and renewed by its own agent.
+func TestStandbyRefusedOnRowsafeStorage(t *testing.T) {
+	a, _ := storageTestAgent(t, protocol.StorageRowsafe)
+	a.storage.set(testCreds("K1", 7*24*time.Hour))
+	if _, err := a.handedRepo(testDB); !errors.Is(err, errStandbyRowsafeStorage) {
+		t.Fatalf("handedRepo on Rowsafe Storage: %v", err)
+	}
+	r, err := a.dbRepo(testDB)
+	if err != nil || r.Bucket != "rowsafe-storage-eu" || r.Token != "T-K1" {
+		t.Errorf("dbRepo on Rowsafe Storage: %+v %v", r, err)
 	}
 }

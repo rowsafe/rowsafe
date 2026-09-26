@@ -48,6 +48,9 @@ func (l *taskLog) String() string {
 }
 
 func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (any, error) {
+	if protocol.IsStandbyTask(task.Type) {
+		return a.runStandbyTask(ctx, task, tl) // standby*.go
+	}
 	if task.Database == nil {
 		return nil, fmt.Errorf("task %s has no database", task.Type)
 	}
@@ -75,9 +78,19 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 				return nil, err
 			}
 		}
+		defer a.measureSoon()
+		if p.Repo == protocol.RepoSecond {
+			return a.secondCopyBackup(ctx, db, p.Type, tl)
+		}
 		return a.backup(ctx, db, p.Type, tl)
 	case protocol.TaskDrill:
-		return a.drill(ctx, db, task.ID, tl)
+		var p protocol.DrillParams
+		if len(task.Params) > 0 {
+			if err := json.Unmarshal(task.Params, &p); err != nil {
+				return nil, err
+			}
+		}
+		return a.drillFrom(ctx, db, task.ID, p.Repo, tl)
 	case protocol.TaskRestorePoint:
 		var p protocol.RestorePointParams
 		if err := json.Unmarshal(task.Params, &p); err != nil {
@@ -104,6 +117,8 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 			return nil, err
 		}
 		return res, err
+	case protocol.TaskSettings: // settings.go
+		return runRewind(ctx, task, tl, db, a.changeSettings)
 	case protocol.TaskRewindCopy:
 		return runRewind(ctx, task, tl, db, a.rewindCopy)
 	case protocol.TaskRewindDrop:
@@ -118,8 +133,23 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 		return runRewind(ctx, task, tl, db, a.rewindUndo)
 	case protocol.TaskRewindCleanup:
 		return runRewind(ctx, task, tl, db, a.rewindCleanup)
+	case protocol.TaskIndexAdvisor:
+		return a.runIndexAdvisor(ctx, task, db, tl)
+	case protocol.TaskPGUpdate, protocol.TaskSecurityUpdates, protocol.TaskReboot, protocol.TaskUpgradeCheck,
+		protocol.TaskUpgradeRehearsal, protocol.TaskUpgrade, protocol.TaskUpgradeUndo, protocol.TaskUpgradeCleanup:
+		return a.runUpgradeTask(ctx, task, tl, db) // upgrade_tasks.go
 	case protocol.TaskFindMoment:
 		return runRewind(ctx, task, tl, db, a.findMoment)
+	case protocol.TaskMigrate, protocol.TaskMigrateCopy: // move in (migrate.go)
+		return a.runMigrate(ctx, task, db, tl)
+	case protocol.TaskPreviewMigration: // Guard (copies_*.go)
+		return runRewind(ctx, task, tl, db, a.previewMigration)
+	case protocol.TaskSafeCopy:
+		return runRewind(ctx, task, tl, db, a.safeCopy)
+	case protocol.TaskCopySchema:
+		return runRewind(ctx, task, tl, db, a.readCopySchema)
+	case protocol.TaskDBAdmin: // Databases & users (dbadmin.go)
+		return a.runDBAdmin(ctx, task, tl, db)
 	}
 	return nil, fmt.Errorf("unsupported task type %q (agent %s)", task.Type, Version)
 }
@@ -158,10 +188,7 @@ var numCPU = runtime.NumCPU
 // writeConfig renders the pgBackRest config for db. It is rewritten before
 // every operation so retention and credential changes take effect.
 func (a *Agent) writeConfig(db protocol.DatabaseSpec, in protocol.InspectResult) error {
-	if err := a.cfg.ValidateRepo(); err != nil {
-		return err
-	}
-	repo, err := a.repo()
+	repo, err := a.dbRepo(db) // Rowsafe Storage, this agent's bucket, or one a primary handed over (standby)
 	if err != nil {
 		return err
 	}
@@ -176,6 +203,7 @@ func (a *Agent) writeConfig(db protocol.DatabaseSpec, in protocol.InspectResult)
 	if a.cfg.Sidecar() {
 		logDir = "" // container logs only
 	}
+	a.writeSecondCopyConfig(db, in, logDir)
 	conf := pgbackrest.RenderConfig(repo, pgbackrest.ConfigInput{
 		Stanza: db.Stanza, DataDir: in.DataDirectory, Port: db.Port, SocketDir: db.SocketDir,
 		User: a.cfg.PGUser, RetentionFull: db.RetentionFull, LogPath: logDir,
@@ -215,7 +243,8 @@ func (a *Agent) adopt(ctx context.Context, db protocol.DatabaseSpec, p protocol.
 			err = a.sidecarPreflight(ctx, db, in, tl)
 		}
 	} else {
-		pi.ArchiveCommand, err = pgbackrest.ArchiveCommand(a.cfg.PgBackRestBin, a.cfg.configPath(db.Stanza), db.Stanza)
+		pi.ArchiveCommand, err = a.nativeArchiveCommand(db)
+		pi.Own = a.ownArchiveCommand(db)
 	}
 	if err != nil {
 		return &protocol.AdoptResult{Inspect: in}, err
@@ -236,6 +265,12 @@ func (a *Agent) adopt(ctx context.Context, db protocol.DatabaseSpec, p protocol.
 	tl.Printf("writing %s", a.cfg.configPath(db.Stanza))
 	if err := a.writeConfig(db, in); err != nil {
 		return res, err
+	}
+	if !a.cfg.Sidecar() && a.cfg.SecondCopy() {
+		// archive_command queues WAL for the second copy here.
+		if dir, err := a.cfg.secondCopyQueue(db.Stanza); err == nil {
+			_ = os.MkdirAll(dir, 0o700)
+		}
 	}
 	if a.cfg.Sidecar() {
 		// archive_command writes here as soon as it is in effect.

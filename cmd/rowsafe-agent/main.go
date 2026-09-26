@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/rowsafe/rowsafe/internal/agent"
+	_ "github.com/rowsafe/rowsafe/internal/engine/mysql" // registers MySQL and MariaDB
 	"github.com/rowsafe/rowsafe/internal/pginspect"
 	"github.com/rowsafe/rowsafe/release"
 )
@@ -28,6 +29,10 @@ Usage:
   rowsafe-agent setup discover|plan|apply|wait|status ...
                                             turn on backups for this server's PostgreSQL
                                             (used by the installer; see setup --help)
+  rowsafe-agent restore-mysql --engine mysql|mariadb --database NAME --dir DIR [--at TIME | --mark NAME]
+                                            restore a MySQL/MariaDB database from your bucket into DIR
+  rowsafe-agent key                         this server's key fingerprint: compare it with the one the Rowsafe
+                                            dashboard shows before setting up a standby here
   rowsafe-agent selftest                    check this binary can run here (used before self-update)
   rowsafe-agent storage test [--wait 60s]   write, read back and delete a test file in the backup
                                             storage (Rowsafe Storage or your bucket)
@@ -55,12 +60,18 @@ func main() {
 		err = inspect(ctx, os.Args[2:])
 	case "setup":
 		os.Exit(setup(ctx, os.Args[2:]))
+	case "restore-mysql":
+		err = restoreMySQL(ctx, os.Args[2:])
+	case "key":
+		err = keyCmd()
 	case "selftest":
 		os.Exit(selftest(ctx))
 	case "storage":
 		err = storage(ctx, os.Args[2:])
 	case "health":
 		os.Exit(health())
+	case "sql-shapes": // internal: the index advisor's parser process
+		os.Exit(sqlShapes())
 	case "version":
 		fmt.Println(agent.Version)
 	case "-h", "--help", "help":
@@ -118,6 +129,9 @@ func selftest(ctx context.Context) int {
 	check("config", err)
 	if err == nil {
 		check("repository settings", cfg.ValidateRepo())
+		if cfg.SecondCopy() {
+			check("second copy settings", cfg.Repo2.ValidateAs("ROWSAFE_REPO2_"))
+		}
 		check("pgbackrest", exec.CommandContext(ctx, cfg.PgBackRestBin, "version").Run())
 		check("control plane", agent.CheckControlPlane(ctx, cfg))
 		for _, t := range agent.WatchedTargets(cfg) {
@@ -172,6 +186,22 @@ func inspect(ctx context.Context, args []string) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(res)
+}
+
+// keyCmd prints the agent's key fingerprint (creating the key if needed):
+// what a person compares with the dashboard before a primary seals its
+// bucket settings to this server.
+func keyCmd() error {
+	cfg, err := agent.ConfigFromEnv()
+	if err != nil {
+		return err
+	}
+	fp, pub, err := agent.KeyFingerprint(cfg)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Fingerprint: %s\nPublic key:  %s\n", fp, pub)
+	return nil
 }
 
 // storage runs `rowsafe-agent storage test`.
