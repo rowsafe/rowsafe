@@ -113,8 +113,16 @@ func TestIndexAdvisorAgainstPostgres(t *testing.T) {
 	if _, err := admin.Exec(t.Context(), `CREATE DATABASE `+copyDB+` TEMPLATE `+e.db); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		_, _ = admin.Exec(context.Background(), `DROP DATABASE IF EXISTS `+copyDB+` WITH (FORCE)`)
+	t.Cleanup(func() { // admin is closed by then: connect again to drop the copy
+		c, err := e.tg.Connect(context.Background(), "postgres")
+		if err != nil {
+			t.Logf("dropping %s: %v", copyDB, err)
+			return
+		}
+		defer c.Close(context.Background())
+		if _, err := c.Exec(context.Background(), `DROP DATABASE IF EXISTS `+copyDB+` WITH (FORCE)`); err != nil {
+			t.Logf("dropping %s: %v", copyDB, err)
+		}
 	})
 	if e.conn, err = e.tg.Connect(t.Context(), e.db); err != nil {
 		t.Fatal(err)
