@@ -94,7 +94,7 @@ func (r Repo) Location(stanza string) string {
 	if r.Port != 0 {
 		port = fmt.Sprint(r.Port)
 	}
-	return r.Endpoint + ":" + port + "/" + r.Bucket + repoPath(r.PathPrefix, stanza)
+	return r.Endpoint + ":" + port + "/" + r.Bucket + repoPath(r.PathPrefix, r.folder(stanza))
 }
 
 // repoPath is repo1-path: the path prefix, then the stanza.

@@ -471,13 +471,21 @@ func (a *Agent) execute(ctx context.Context, task *protocol.Task, persist bool) 
 	tl := &taskLog{}
 	result, err := a.runTask(tctx, task, tl)
 
-	req := protocol.CompleteRequest{Status: protocol.StatusSucceeded, Log: tl.String()}
+	secrets := a.secretValues() // taskerror.go
+	req := protocol.CompleteRequest{Status: protocol.StatusSucceeded, Log: protocol.Redact(tl.String(), secrets...)}
 	if result != nil {
 		req.Result, _ = json.Marshal(result)
 	}
 	if err != nil {
 		req.Status = protocol.StatusFailed
-		req.Error = err.Error()
+		req.Error = protocol.Redact(err.Error(), secrets...)
+		if te := a.taskErrorOf(err); te != nil {
+			req.ErrorInfo = te
+			if te.Detail != "" && !containsLine(req.Log, te.Detail) {
+				req.Log += te.Tool + " output (last lines):\n" + te.Detail + "\n"
+			}
+			log = log.With("error_code", te.Code)
+		}
 		if ctx.Err() != nil {
 			req.Error = "the agent was stopped while this task was running: " + req.Error
 		}
@@ -507,6 +515,11 @@ func (a *Agent) report(ctx context.Context, log *slog.Logger, taskID string, req
 			return true
 		}
 		var he *httpError
+		if errors.As(err, &he) && he.Status == 400 && req.ErrorInfo != nil {
+			// A control plane from before error_info: send the outcome without it.
+			req.ErrorInfo = nil
+			continue
+		}
 		if errors.As(err, &he) && he.Status < 500 {
 			// The task is no longer ours (already closed or reaped).
 			log.Error("control plane rejected task report", "err", err)

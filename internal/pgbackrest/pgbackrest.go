@@ -46,6 +46,19 @@ type Repo struct {
 	// configurable through the environment.
 	Type string
 	Path string // posix: the repository directory
+
+	// Folder is the last part of repo1-path, where this database's backups
+	// are: "" means the stanza's name. A setup that found the usual folder
+	// taken starts fresh in another one (protocol.ExistingBackupsNewFolder).
+	Folder string
+}
+
+// folder is the repository folder for stanza.
+func (r Repo) folder(stanza string) string {
+	if r.Folder != "" {
+		return r.Folder
+	}
+	return stanza
 }
 
 // Posix reports whether the repository is a local directory.
@@ -147,10 +160,10 @@ func RenderConfig(repo Repo, in ConfigInput) string {
 	b.WriteString("# Managed by rowsafe-agent. Local edits are overwritten.\n")
 	b.WriteString("[global]\n")
 	kv := func(k string, v any) { fmt.Fprintf(&b, "%s=%v\n", k, v) }
-	path := repoPath(repo.PathPrefix, in.Stanza)
+	path := repoPath(repo.PathPrefix, repo.folder(in.Stanza))
 	if repo.Posix() {
 		kv("repo1-type", "posix")
-		path = strings.TrimRight(repo.Path, "/") + "/" + in.Stanza
+		path = strings.TrimRight(repo.Path, "/") + "/" + repo.folder(in.Stanza)
 	} else {
 		kv("repo1-type", "s3")
 		kv("repo1-s3-endpoint", repo.Endpoint)
@@ -245,6 +258,19 @@ type Runner interface {
 
 type ExecRunner struct{}
 
+// CommandError is a command that failed, with what it printed: errors from
+// ExecRunner carry it, so the agent can explain the failure
+// (protocol.ClassifyToolFailure). Its message is the underlying error's.
+type CommandError struct {
+	Tool     string // protocol.ToolName
+	ExitCode int    // -1: it didn't run or was killed
+	Output   []byte
+	Err      error
+}
+
+func (e *CommandError) Error() string { return e.Err.Error() }
+func (e *CommandError) Unwrap() error { return e.Err }
+
 func (ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.WaitDelay = 10 * time.Second
@@ -258,6 +284,14 @@ func (ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte,
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	err := cmd.Run()
+	if err != nil {
+		code := -1
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			code = ee.ExitCode()
+		}
+		err = &CommandError{Tool: protocol.ToolName(name, args...), ExitCode: code, Output: out.Bytes(), Err: err}
+	}
 	return out.Bytes(), err
 }
 
@@ -280,9 +314,22 @@ func (c CLI) run(ctx context.Context, args ...string) ([]byte, error) {
 	}
 	out, err := c.Runner.Run(ctx, name, full...)
 	if err != nil {
+		// Name pgBackRest's own error ("HTTP request failed with 403
+		// (Forbidden)"), not just its exit status.
+		if msg := ErrorMessage(out); msg != "" {
+			return out, fmt.Errorf("pgbackrest %s: %w: %s", strings.Join(args, " "), err, msg)
+		}
 		return out, fmt.Errorf("pgbackrest %s: %w", strings.Join(args, " "), err)
 	}
 	return out, nil
+}
+
+// ErrorMessage is the first line of pgBackRest's error in its output, with
+// secrets removed ("" if there is none).
+func ErrorMessage(out []byte) string {
+	te := protocol.ClassifyToolFailure("pgbackrest", 0, string(out))
+	msg, _, _ := strings.Cut(te.Message, "\n")
+	return strings.TrimSuffix(strings.TrimSpace(msg), ":")
 }
 
 func (c CLI) StanzaCreate(ctx context.Context) ([]byte, error) { return c.run(ctx, "stanza-create") }
@@ -397,7 +444,7 @@ func (c CLI) RestoreStandby(ctx context.Context, dataDir string) ([]byte, error)
 func (c CLI) Info(ctx context.Context) ([]Stanza, error) {
 	out, err := c.Runner.Run(ctx, c.Bin, "--config="+c.ConfigPath, "--stanza="+c.Stanza, "--output=json", "info")
 	if err != nil {
-		return nil, fmt.Errorf("pgbackrest info: %w: %s", err, bytes.TrimSpace(out))
+		return nil, fmt.Errorf("pgbackrest info: %w: %s", err, protocol.Redact(string(bytes.TrimSpace(out))))
 	}
 	return ParseInfo(out)
 }
@@ -411,6 +458,16 @@ type Stanza struct {
 		Message string `json:"message"`
 	} `json:"status"`
 	Backup []BackupInfo `json:"backup"`
+	// DB is the stanza's database history: the system and PostgreSQL
+	// version its backups are of (the highest ID is the current one).
+	DB []StanzaDB `json:"db"`
+}
+
+// StanzaDB is one entry of a stanza's database history.
+type StanzaDB struct {
+	ID       int    `json:"id"`
+	SystemID uint64 `json:"system-id"`
+	Version  string `json:"version"`
 }
 
 type BackupInfo struct {

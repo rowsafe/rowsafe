@@ -172,6 +172,9 @@ type StandbyRepo struct {
 	// CAPEM is the CA bundle the primary trusts instead of the system store
 	// (its ROWSAFE_REPO_S3_CA_FILE), if any.
 	CAPEM string `json:"ca_pem,omitempty"`
+	// Folder is the primary's backup folder when it isn't the stanza's
+	// name (a setup that started fresh in a new folder).
+	Folder string `json:"folder,omitempty"`
 }
 
 // ---- Heartbeat additions (embedded in HeartbeatRequest/Response) ----
