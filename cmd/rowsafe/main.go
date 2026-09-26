@@ -192,6 +192,23 @@ Guard: the safety net for AI agents
                                              change one column's masking (keep to leave it real)
   rowsafe masking refresh [NAME]             read the tables again (names and types only)
 
+Databases & users: the databases, users and extensions inside a server (--on NAME: which server)
+  rowsafe db [ls] [--on NAME] [--json]       databases, users and extensions on the server
+  rowsafe db create DB [--owner USER | --new-owner USER] [--extension EXT]... [--template template0] [--locale L]
+                                             create a database. Without --owner a new user owns it: its
+                                             password is made on the server and shown here once
+  rowsafe db drop DB [--yes]                 remove a database and everything in it (a Mark first; asks you
+                                             to type its name)
+  rowsafe db users [--json]                  users, what they can connect to and how their password is stored
+  rowsafe db user add USER --db DB[,DB] [--access read_only|read_write|owner]
+                                             a new user; its password is shown once
+  rowsafe db user password USER              a new password for USER, shown once
+  rowsafe db user remove USER [--reassign-to USER] [--yes]
+                                             remove a user; what it owns goes to --reassign-to
+  rowsafe db ext on|off DB EXTENSION [--allow-untrusted]
+                                             turn an extension on or off in one database
+  Passwords are encrypted on the server for this terminal only; Rowsafe never sees them.
+
 Admin
   rowsafe tasks [NAME] [--status S] [--type T] [--limit N]
                                              recent tasks for a database, or for all of them
@@ -386,6 +403,9 @@ func dispatch(ctx context.Context, args []string) error {
 		return copiesCmd(ctx, c, rest)
 	case "masking":
 		return maskingCmd(ctx, c, rest)
+	// Databases & users
+	case "db":
+		return dbCmd(ctx, c, rest)
 	// Admin
 	case "tasks":
 		return tasksList(ctx, c, rest)

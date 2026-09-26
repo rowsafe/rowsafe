@@ -142,6 +142,8 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 		return runRewind(ctx, task, tl, db, a.safeCopy)
 	case protocol.TaskCopySchema:
 		return runRewind(ctx, task, tl, db, a.readCopySchema)
+	case protocol.TaskDBAdmin: // Databases & users (dbadmin.go)
+		return a.runDBAdmin(ctx, task, tl, db)
 	}
 	return nil, fmt.Errorf("unsupported task type %q (agent %s)", task.Type, Version)
 }

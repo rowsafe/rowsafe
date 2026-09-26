@@ -261,6 +261,7 @@ var fastLaneTypes = []string{protocol.TaskRestorePoint, protocol.TaskCopySchema}
 var sideTypes = []string{protocol.TaskMaintenance, protocol.TaskRewindCompare, protocol.TaskRewindRows,
 	protocol.TaskRewindDrop, protocol.TaskRewindCleanup,
 	protocol.TaskFindMoment, // read-only; people wait for it in the dashboard
+	protocol.TaskDBAdmin,    // Databases & users: people wait for it in the dashboard
 	protocol.TaskMigrate,    // move in: key, check, switchover... (migrate.go)
 	protocol.TaskSettings}
 
