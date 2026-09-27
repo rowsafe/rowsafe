@@ -3,6 +3,12 @@
 #
 # Rowsafe agent installer, served at https://rowsafe.sh (and /install)
 #
+#   curl -fsSL https://rowsafe.sh | sudo sh
+#
+# prints a link that opens the approval page with its code; approving the
+# server there enrolls it. For automation (no terminal), pass a one-time
+# enrollment token instead:
+#
 #   curl -fsSL https://rowsafe.sh | sudo sh -s rse_...
 #
 # The argument is the one-time enrollment token from `rowsafe hosts
@@ -227,7 +233,10 @@ usage() {
   cat <<'EOF'
 Rowsafe agent installer
 
+  curl -fsSL https://rowsafe.sh | sudo sh
+      prints a link; approve the server in your browser and the install goes on
   curl -fsSL https://rowsafe.sh | sudo sh -s rse_...
+      for automation (no terminal): a one-time enrollment token instead
 
 Options (when piping, pass them after `sh -s --`):
   rse_...                the one-time enrollment token from `rowsafe hosts enroll-token`
@@ -4509,6 +4518,109 @@ missing_config() {
   printf '%s\n' "${out# }"
 }
 
+# ---------------------------------------------------------------- connect in the browser
+
+# json_str KEY FILE prints the first string value of "KEY" in a one-line JSON
+# document (the control plane's answers); json_num the same for a number.
+json_str() { sed -n 's/.*"'"$1"'":"\([^"]*\)".*/\1/p' "$2" 2>/dev/null | head -n 1; }
+json_num() { sed -n 's/.*"'"$1"'":\([0-9][0-9]*\).*/\1/p' "$2" 2>/dev/null | head -n 1; }
+
+# api_post URL JSON OUT posts JSON to the control plane, keeps the answer in
+# OUT (readable by root only: it may hold a token) and its HTTP status in
+# API_STATUS (000 when the request itself failed).
+api_post() {
+  API_STATUS=$(
+    umask 077
+    curl -sS --proto-redir '=https' --connect-timeout 15 --max-time 30 \
+      -H 'Content-Type: application/json' --data "$2" -o "$3" -w '%{http_code}' "$1" </dev/null 2>/dev/null
+  ) || API_STATUS=000
+  [ "$API_STATUS" != 000 ]
+}
+
+# connect_in_browser runs when this server isn't enrolled yet, has no
+# enrollment token, and someone is at the terminal. It asks the control
+# plane for a code, prints a link that opens the approval page with the code
+# filled in, and waits while someone who can add servers approves it in the
+# dashboard. Approving returns a single-use enrollment token for this server
+# only (never an API key); from there the install goes on as with rse_...
+# Nothing on the host has changed yet when this runs.
+connect_in_browser() {
+  [ ! -f "$STATE_DIR/agent.json" ] || return 0
+  [ -z "$(s_get ROWSAFE_ENROLL_TOKEN)" ] || return 0
+  [ "$TTY" = 1 ] || return 0
+  _api=$(s_get ROWSAFE_URL)
+  [ -n "$_api" ] || _api=https://api.rowsafe.sh
+  _api=${_api%/}
+  _name=$(uname -n | tr -cd 'A-Za-z0-9._-' | cut -c1-100)
+  [ -n "$_name" ] || _name=server
+  _os=$(printf '%s' "$OS_NAME" | tr -d '"\\' | tr -cd '[:print:]' | cut -c1-100)
+
+  step "Connecting this server to your Rowsafe account"
+  if ! api_post "$_api/v1/auth/device" "{\"client_name\":\"$_name\",\"purpose\":\"host\",\"os\":\"$_os\"}" "$TMP/device.json" ||
+    [ "$API_STATUS" != 200 ]; then
+    # Unreachable, or an older control plane: fall back to a token.
+    _why=$(json_str error "$TMP/device.json")
+    if [ -z "$_why" ]; then
+      if [ "$API_STATUS" = 000 ]; then _why="could not reach $_api"; else _why="HTTP $API_STATUS"; fi
+    fi
+    rm -f "$TMP/device.json"
+    warn "could not start the approval in the browser ($_why)"
+    return 0
+  fi
+  _device=$(json_str device_code "$TMP/device.json")
+  _code=$(json_str user_code "$TMP/device.json")
+  _link=$(json_str verification_uri_complete "$TMP/device.json")
+  _interval=$(json_num interval "$TMP/device.json")
+  _expires=$(json_num expires_in "$TMP/device.json")
+  rm -f "$TMP/device.json"
+  if [ -z "$_device" ] || [ -z "$_code" ]; then
+    warn "the control plane's answer had no code; continuing without it"
+    return 0
+  fi
+  case $_link in https://* | http://localhost* | http://127.0.0.1*) ;; *) die "the control plane sent an unexpected approval link" ;; esac
+  [ -n "$_interval" ] || _interval=3
+  [ -n "$_expires" ] || _expires=600
+
+  say ""
+  say "    Open this link and approve the server:"
+  say ""
+  say "      ${BOLD}$_link${RESET}"
+  say ""
+  say "    The page shows the code ${BOLD}$_code${RESET}: it should match. Waiting for your approval..."
+  _waited=0
+  while [ "$_waited" -lt "$_expires" ]; do
+    sleep "$_interval"
+    _waited=$((_waited + _interval))
+    api_post "$_api/v1/auth/device/token" "{\"device_code\":\"$_device\"}" "$TMP/device-token.json" || continue # a network blip: keep waiting
+    case $API_STATUS in
+      200)
+        _tok=$(json_str enroll_token "$TMP/device-token.json")
+        _org=$(json_str name "$TMP/device-token.json" | tr -cd '[:print:]')
+        rm -f "$TMP/device-token.json"
+        case $_tok in rse_*) ;; *) die "the approval did not return an enrollment token; run the installer again" ;; esac
+        # Never echo the token, not even in errors.
+        ROWSAFE_ENROLL_TOKEN=$_tok
+        export ROWSAFE_ENROLL_TOKEN
+        ok "approved${_org:+: this server joins $_org}"
+        return 0
+        ;;
+      400)
+        case $(json_str error "$TMP/device-token.json") in
+          authorization_pending) ;;
+          slow_down) _interval=$((_interval + 5)) ;;
+          access_denied) die "the connection was declined in the browser; nothing was changed on this server" ;;
+          expired_token) die "the code expired before it was approved; run the installer again for a new one" ;;
+          *) die "the control plane refused the approval: $(json_str error "$TMP/device-token.json")" ;;
+        esac
+        ;;
+      429 | 5??) ;; # busy or restarting: keep waiting
+      *) die "the control plane answered HTTP $API_STATUS while waiting for the approval" ;;
+    esac
+  done
+  rm -f "$TMP/device-token.json"
+  die "the code expired before it was approved; run the installer again for a new one"
+}
+
 # ---------------------------------------------------------------- terminal
 
 # open_tty opens the terminal on fd 3 for the guided setup. The script itself
@@ -6307,6 +6419,9 @@ install_agent() {
   fi
   [ "$need_binary" = 0 ] || download_binary
 
+  # No enrollment token: have someone approve this server in the browser.
+  connect_in_browser
+
   # 2. Dependencies and layout.
   if [ "$HOST_ENGINE" = postgresql ] || [ "$HOST_ENGINE" = mongodb ]; then ensure_pgbackrest; else ensure_mysql_tools; fi # mysql
   ensure_mongodb_tools # mongodb (only where MongoDB runs)
@@ -6344,7 +6459,8 @@ install_agent() {
     say "${BOLD}Before the agent can start, set these in $ENV_FILE:${RESET}"
     for key in $missing; do say "    $key"; done
     say ""
-    say "  - ROWSAFE_ENROLL_TOKEN comes from \`rowsafe hosts enroll-token\`."
+    say "  - ROWSAFE_ENROLL_TOKEN comes from \`rowsafe hosts enroll-token\`, or run this"
+    say "    installer from a terminal and approve the server in your browser instead."
     say "  - ROWSAFE_REPO_* are your private bucket and a token scoped to it."
     say "  - Generate ROWSAFE_REPO_CIPHER_PASS with \`openssl rand -base64 48\` and store it"
     say "    in your secret manager FIRST: without it no backup can ever be restored."
