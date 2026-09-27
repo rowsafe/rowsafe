@@ -1107,8 +1107,22 @@ const (
 	DeviceAccessDenied         = "access_denied"         // the user declined
 )
 
+// What a device authorization is for. A CLI login ends with an API key for
+// the organization; a server connection (the installer, run without an
+// enrollment token) ends with a single-use enrollment token for that one
+// server, never an API key.
+const (
+	DevicePurposeCLI  = "cli"
+	DevicePurposeHost = "host"
+)
+
 type DeviceAuthRequest struct {
-	ClientName string `json:"client_name"` // e.g. "rowsafe CLI on laptop"
+	ClientName string `json:"client_name"` // e.g. "rowsafe CLI on laptop", or a server's hostname
+	// Purpose is DevicePurposeCLI (the default when empty) or DevicePurposeHost.
+	Purpose string `json:"purpose,omitempty"`
+	// OS describes a server asking to connect, e.g. "Ubuntu 24.04 LTS", for
+	// the approval page (DevicePurposeHost only).
+	OS string `json:"os,omitempty"`
 }
 
 type DeviceAuthResponse struct {
@@ -1124,11 +1138,13 @@ type DeviceTokenRequest struct {
 	DeviceCode string `json:"device_code"`
 }
 
-// DeviceTokenResponse carries a new API key, shown only this once.
+// DeviceTokenResponse carries a new API key (a CLI login) or a single-use
+// enrollment token (a server connection), shown only this once.
 type DeviceTokenResponse struct {
-	APIKey string   `json:"api_key"`
-	KeyID  string   `json:"key_id"`
-	Org    OrgBrief `json:"org"`
+	APIKey      string   `json:"api_key,omitempty"`
+	KeyID       string   `json:"key_id,omitempty"`
+	EnrollToken string   `json:"enroll_token,omitempty"`
+	Org         OrgBrief `json:"org"`
 }
 
 type OrgBrief struct {
@@ -1142,15 +1158,17 @@ const (
 	DeviceStatusApproved = "approved"
 	DeviceStatusDenied   = "denied"
 	DeviceStatusExpired  = "expired"
-	DeviceStatusConsumed = "consumed" // approved and the CLI has its key
+	DeviceStatusConsumed = "consumed" // approved and the CLI (or server) has its credential
 )
 
 // DeviceAuthorization is what the approval page shows before the user
 // approves (service token only).
 type DeviceAuthorization struct {
 	UserCode   string    `json:"user_code"`
+	Purpose    string    `json:"purpose"` // DevicePurposeCLI or DevicePurposeHost
 	ClientName string    `json:"client_name"`
-	ClientIP   string    `json:"client_ip,omitempty"` // where the CLI asked from
+	ClientIP   string    `json:"client_ip,omitempty"` // where the request came from
+	OS         string    `json:"os,omitempty"`        // a server's operating system
 	Status     string    `json:"status"`
 	CreatedAt  time.Time `json:"created_at"`
 	ExpiresAt  time.Time `json:"expires_at"`
