@@ -6768,6 +6768,7 @@ databases() {
     PERM_QUIET=0
   fi
   perm_summary # permissions section
+  offer_passkey
   if [ -n "$PROTECT_NAME" ]; then
     protect_unattended
   elif [ "$interactive" = 1 ]; then
@@ -6796,6 +6797,32 @@ PERMISSIONS_HELPER=$LIB_DIR/rowsafe-permissions
 PERMISSIONS_SERVICE_FILE=/etc/systemd/system/rowsafe-permissions.service
 PERMISSIONS_PATH_FILE=/etc/systemd/system/rowsafe-permissions.path
 PERMISSIONS_DIR=$STATE_DIR/permissions
+
+# offer_passkey: on a terminal, offer once to pair a passkey, so what
+# Rowsafe may do here changes with one click in the dashboard, signed by the
+# person (root compares a code here first). A "no" is remembered; pairing
+# stays one command away (sudo rowsafe-allow --add-owner).
+offer_passkey() {
+  [ "$TTY" = 1 ] && [ "$PROMPT" != never ] || return 0
+  [ "$HOST_ENGINE" = postgresql ] && perm_has_postgres || return 0
+  [ -x "$PERMISSIONS_HELPER" ] && [ ! -L "$PERMISSIONS_HELPER" ] && [ "$(stat -c %u "$PERMISSIONS_HELPER" 2>/dev/null)" = 0 ] || return 0
+  ! grep -qs '"credential_id"' "$CONFIG_DIR/owners" || return 0
+  [ ! -e "$CONFIG_DIR/passkey-declined" ] || return 0
+  say ""
+  step "Change these from your dashboard"
+  note "Pair your passkey (Face ID, Touch ID or a security key) with this server:"
+  note "then you can allow or stop any of the above with one click in Rowsafe,"
+  note "signed by you. Rowsafe itself can't change them."
+  if confirm "Pair a passkey now?" y; then
+    "$PERMISSIONS_HELPER" pair </dev/tty >&3 2>&3 || note "Not paired. Pair any time with: sudo rowsafe-allow --add-owner"
+  else
+    write_file "$CONFIG_DIR/passkey-declined" 0644 root:root <<'EOF_DECLINED' || true
+# Pairing a passkey was declined at install; it isn't offered again.
+# Pair one any time with: sudo rowsafe-allow --add-owner
+EOF_DECLINED
+    note "Pair one any time with: sudo rowsafe-allow --add-owner"
+  fi
+}
 
 install_permissions_helper() {
   # Root runs only root's files: a copy of rowsafe-agent checked against the
