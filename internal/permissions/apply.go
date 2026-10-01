@@ -142,10 +142,36 @@ func (h *Helper) apply(ctx context.Context, req Request) protocol.PermissionsRes
 	tail := LastLines(out, 15, 2000)
 	if err != nil {
 		h.logf("request %s: the installer failed: %v; %s", req.ID, err, strings.ReplaceAll(tail, "\n", " | "))
-		return protocol.PermissionsResult{Refused: "the installer couldn't apply the change (" + err.Error() + ")", Output: tail}
+		return protocol.PermissionsResult{Refused: installerRefusal(err, out), Output: tail}
 	}
 	h.logf("request %s: applied", req.ID)
 	return protocol.PermissionsResult{Applied: true, Output: tail}
+}
+
+// installerRefusal says why the installer's --permissions mode didn't apply
+// a change: exit 2 is a refusal with nothing changed, exit 1 a change that
+// failed; either way its last "error: ..." line says why in plain words.
+func installerRefusal(err error, out []byte) string {
+	why := ""
+	for _, line := range strings.Split(string(out), "\n") {
+		if r, ok := strings.CutPrefix(strings.TrimSpace(line), "error: "); ok {
+			why = r
+		}
+	}
+	code := -1
+	var ec interface{ ExitCode() int }
+	if errors.As(err, &ec) {
+		code = ec.ExitCode()
+	}
+	switch {
+	case code == 2 && why != "":
+		return why
+	case code == 1 && why != "":
+		return "the change didn't complete: " + why
+	case why != "":
+		return why
+	}
+	return "the installer couldn't apply the change (" + err.Error() + ")"
 }
 
 // hostID reads this server's Rowsafe host ID from the agent's identity file
