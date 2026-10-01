@@ -153,7 +153,6 @@ UPDATES_ALLOW_FILE=$CONFIG_DIR/updates-allowed
 # runs the installer's --permissions mode from root's verified copy of it.
 ALLOW_COMMAND=/usr/local/sbin/rowsafe-allow
 INSTALLER_COPY=$LIB_DIR/install.sh
-ROOT_AGENT=$LIB_DIR/rowsafe-agent
 AGENT_USER=postgres
 # >>> mysql: a server with MySQL or MariaDB and no PostgreSQL runs the agent
 # as the mysql user (detect_host_engine), like postgres on a PostgreSQL one.
@@ -4391,15 +4390,16 @@ remove_files_units() {
 #   install.sh --permissions [--allow-X ...] [--no-allow-X ...] [--no-prompt]
 #
 # changes only the allow lists and their root helpers and units, exactly as
-# an install does. It downloads nothing (except the installer copy when it is
-# missing), never touches the agent, its settings, the storage or the
-# databases, and asks nothing. A permission that needs another one that
+# an install does. It downloads nothing (rowsafe-permissions.service, which
+# runs it for one-click changes, has no network), never touches the agent,
+# its settings, the storage or the databases, and asks nothing. A permission that needs another one that
 # stays off is refused (create-cluster, updates and security-updates need
 # restart, reboot needs security-updates, pooler-public needs pooler);
 # turning one off turns off what needs it. Exit status: 0 done (or nothing to
 # change), 2 refused (nothing was changed: unknown option, a missing need,
 # not possible on this server, Rowsafe not installed), 1 failed while
-# changing. The last lines are always what Rowsafe may do now.
+# changing. The output ends with what Rowsafe may do now, then (exit 1 or
+# 2) the reason in one "error: ..." line.
 
 PERMISSIONS="restart create-cluster updates security-updates reboot pooler pooler-public firewall"
 PERM_QUIET=0 # 1: the summary says it all (the questions on a terminal, --permissions)
@@ -4408,8 +4408,11 @@ PERM_INTRO=0 # 1 once the questions' heading is shown
 perm_ok() { [ "$PERM_QUIET" = 1 ] || ok "$@"; }
 perm_note() { [ "$PERM_QUIET" = 1 ] || note "$@"; }
 
-# perm_refuse MESSAGE: nothing was changed (exit status 2).
+# perm_refuse MESSAGE: nothing was changed (exit status 2). In
+# --permissions, what Rowsafe may do comes first, the reason last.
+PERM_READY=0
 perm_refuse() {
+  if [ "$PERM_READY" = 1 ]; then perm_summary; fi
   printf '%serror:%s %s\n' "$RED" "$RESET" "$*" >&2
   exit 2
 }
@@ -4617,14 +4620,14 @@ install_allow_command() {
 # Changes run the installer's permissions-only mode (--permissions) from the
 # copy the installer keeps in /usr/local/lib/rowsafe, checked against the
 # signed release when it was put there. Passkeys (--add-owner) run root's
-# copy of the agent there too, never the binary in /opt/rowsafe, which the
-# agent's user owns.
+# copy of the agent there too (rowsafe-permissions), never the binary in
+# /opt/rowsafe, which the agent's user owns.
 
 set -u
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 installer=/usr/local/lib/rowsafe/install.sh
-agent=/usr/local/lib/rowsafe/rowsafe-agent
+helper=/usr/local/lib/rowsafe/rowsafe-permissions
 owners=/etc/rowsafe/owners
 update='curl -fsSL https://rowsafe.sh | sudo sh'
 names='restart create-cluster updates security-updates reboot pooler pooler-public firewall'
@@ -4690,14 +4693,14 @@ need_installer() {
   installer_ok || fail "Rowsafe on this server is too old for this (or isn't installed). Update it first: $update"
 }
 
-# passkeys: root's agent copy can pair passkeys.
+# passkeys: root's copy of the agent is there and can pair passkeys.
 passkeys() {
-  root_file "$agent" && "$agent" permissions --help >/dev/null 2>&1
+  root_file "$helper" && "$helper" --help >/dev/null 2>&1
 }
 
 owner_cmd() {
   passkeys || fail "Rowsafe on this server is too old for passkeys. Update it first: $update"
-  exec "$agent" permissions "$@"
+  exec "$helper" "$@"
 }
 
 # installed_version: the agent's version, so a change never updates Rowsafe
@@ -4858,39 +4861,6 @@ install_installer_copy() {
   ok "installer $REL_VERSION kept at $INSTALLER_COPY for \`sudo rowsafe-allow\` (checked against the signed manifest)"
 }
 
-# install_root_agent keeps a copy of the verified agent binary in root's
-# $LIB_DIR: `sudo rowsafe-allow --add-owner` (passkeys) runs it as root, and
-# root never runs the binary under /opt/rowsafe, which the agent user owns.
-install_root_agent() {
-  [ "$KEEP_INSTALLED" = 0 ] || return 0
-  if [ "$need_binary" = 1 ]; then
-    cp "$TMP/rowsafe-agent" "$TMP/root-agent"
-  else
-    as_agent cat -- "$STAGED" >"$TMP/root-agent" 2>/dev/null || return 0
-  fi
-  if [ "$(sha256_of "$TMP/root-agent")" != "$REL_SHA" ]; then
-    warn "$STAGED doesn't match the signed manifest; root keeps no copy of it"
-    return 0
-  fi
-  if [ -f "$ROOT_AGENT" ] && cmp -s "$TMP/root-agent" "$ROOT_AGENT"; then return 0; fi
-  install -m 0755 -o root -g root "$TMP/root-agent" "$ROOT_AGENT.rowsafe-new"
-  mv -f "$ROOT_AGENT.rowsafe-new" "$ROOT_AGENT"
-}
-
-# permissions_installer_copy: --permissions on a server whose copy is
-# missing (installed before rowsafe-allow) fetches the installer of the
-# installed release, checked like an install checks it.
-permissions_installer_copy() {
-  [ ! -f "$INSTALLER_COPY" ] || return 0
-  REL_VERSION=$(installed_version)
-  [ -n "$REL_VERSION" ] || return 0
-  if ! (ROWSAFE_VERSION=$REL_VERSION && export ROWSAFE_VERSION && detect_arch && check_openssl && resolve_release >/dev/null) 2>"$TMP/resolve.err"; then
-    warn "could not fetch the signed manifest of release $REL_VERSION, so \`sudo rowsafe-allow\` needs the installer once more: $(tail -n 1 "$TMP/resolve.err" | sed 's/^[^:]*: //')"
-    return 0
-  fi
-  install_installer_copy
-}
-
 # permissions_main is --permissions.
 permissions_main() {
   require_root
@@ -4905,6 +4875,7 @@ permissions_main() {
     mysql) HOST_ENGINE=mysql ;;
     *) HOST_ENGINE=mongodb ;;
   esac
+  PERM_READY=1
   # One change at a time (the dashboard's and the terminal's).
   if have flock && (: >>/run/rowsafe-permissions.lock) 2>/dev/null; then
     exec 9>>/run/rowsafe-permissions.lock
@@ -4954,7 +4925,6 @@ permissions_main() {
     ok "putting restored files back from Rowsafe is off (restores wait next to the folder)"
   fi
   install_allow_command
-  permissions_installer_copy
 
   say ""
   for _p in $PERMISSIONS; do
@@ -4975,11 +4945,11 @@ permissions_main() {
   for _p in $PERMISSIONS; do
     if [ "$(perm_flag "$_p")" = yes ] && [ "$(perm_state "$_p")" != yes ]; then _failed="$_failed $_p"; fi
   done
+  perm_summary
   if [ -n "$_failed" ]; then
     printf '%serror:%s could not allow%s (see above)\n' "$RED" "$RESET" "$_failed" >&2
+    exit 1
   fi
-  perm_summary
-  [ -z "$_failed" ] || exit 1
 }
 
 # ---------------------------------------------------------------- agent.env
@@ -6808,6 +6778,143 @@ databases() {
   files_setup # files section
 }
 
+# --- permissions helper (permit-host) ---
+#
+# One-click permission changes. Root pairs a passkey at the terminal
+# (`sudo rowsafe-allow --add-owner`); afterwards a person can change what
+# Rowsafe may do here from the dashboard, each change signed in the browser
+# with that passkey. The agent (unprivileged) writes the signed change to
+# $PERMISSIONS_DIR; rowsafe-permissions.path starts
+# rowsafe-permissions.service (root), which runs root's own copy of the
+# agent binary ($PERMISSIONS_HELPER apply): it reads the request as the
+# agent user, checks the signature against the passkeys root paired
+# ($CONFIG_DIR/owners) and this server's Rowsafe ID, and only then runs
+# root's copy of this installer in its permissions-only mode. Installed on
+# every server: with no paired passkey it refuses every request, so it
+# grants nothing by itself.
+PERMISSIONS_HELPER=$LIB_DIR/rowsafe-permissions
+PERMISSIONS_SERVICE_FILE=/etc/systemd/system/rowsafe-permissions.service
+PERMISSIONS_PATH_FILE=/etc/systemd/system/rowsafe-permissions.path
+PERMISSIONS_DIR=$STATE_DIR/permissions
+
+install_permissions_helper() {
+  # Root runs only root's files: a copy of rowsafe-agent checked against the
+  # signed manifest, never the one in $INSTALL_DIR (the agent user's).
+  _src=''
+  if [ -f "$TMP/rowsafe-agent" ]; then
+    _src=$TMP/rowsafe-agent # downloaded and checked just now
+  elif [ "$KEEP_INSTALLED" = 0 ] && as_agent cat "$STAGED" >"$TMP/rowsafe-permissions" 2>/dev/null; then
+    _src=$TMP/rowsafe-permissions # read as the agent user, checked below
+  fi
+  if [ -n "$_src" ] && [ "$(sha256_of "$_src")" = "$REL_SHA" ]; then
+    if [ ! -f "$PERMISSIONS_HELPER" ] || ! cmp -s "$_src" "$PERMISSIONS_HELPER"; then
+      install -m 0755 -o root -g root "$_src" "$PERMISSIONS_HELPER.rowsafe-new"
+      mv -f "$PERMISSIONS_HELPER.rowsafe-new" "$PERMISSIONS_HELPER"
+    fi
+  elif [ ! -f "$PERMISSIONS_HELPER" ]; then
+    warn "one-click permission changes are not set up: no checked copy of rowsafe-agent $REL_VERSION (run the installer again)"
+    return 0
+  fi
+  as_agent mkdir -p -m 0700 "$PERMISSIONS_DIR"
+  _changed=0
+  if sed "s/@AGENT_USER@/$AGENT_USER/" <<'ROWSAFE_PERMISSIONS_SERVICE_EOF' | write_file "$PERMISSIONS_SERVICE_FILE" 0644 root:root; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-permissions.service: applies a permission change a person made in
+# the Rowsafe dashboard, signed with a passkey root paired with this server
+# (sudo rowsafe-allow --add-owner). Started by rowsafe-permissions.path when
+# the agent hands over a request; installed by https://rowsafe.sh/install.
+#
+# /usr/local/lib/rowsafe/rowsafe-permissions (root's copy of rowsafe-agent)
+# reads the request as the agent user, verifies the WebAuthn signature
+# against /etc/rowsafe/owners and this server's Rowsafe ID, refuses a
+# request used before or expired, and only then runs root's copy of the
+# installer (/usr/local/lib/rowsafe/install.sh --permissions --no-prompt
+# --allow-X/--no-allow-X). With no paired passkey it refuses everything.
+
+[Unit]
+Description=Rowsafe: apply a permission change signed with an owner's passkey
+Documentation=https://rowsafe.sh/docs/guides/permissions
+# No start limit: a burst of requests (each refused in milliseconds unless
+# signed) must not leave rowsafe-permissions.path stopped until a reboot.
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/rowsafe/rowsafe-permissions apply
+# The agent user, whose privileges read and remove the request.
+Environment=ROWSAFE_AGENT_USER=@AGENT_USER@
+TimeoutStartSec=15min
+# The answer: root's own directory, which the agent can read.
+RuntimeDirectory=rowsafe-permissions
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+# The requests already applied (each applies once), out of the agent's reach.
+StateDirectory=rowsafe-permissions
+StateDirectoryMode=0700
+UMask=0022
+
+# The installer it runs writes root's allow lists (/etc/rowsafe), helper
+# units (/etc/systemd/system) and helper scripts (/usr/local/lib/rowsafe),
+# and enables them, so the file system can't be read-only and capabilities
+# stay. What it can't do: reach the network beyond this server (the
+# permissions-only mode downloads nothing), gain privileges, make
+# set-user-ID files, or touch kernel settings and modules.
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+ProtectHome=read-only
+PrivateTmp=yes
+IPAddressDeny=any
+IPAddressAllow=localhost
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+ROWSAFE_PERMISSIONS_SERVICE_EOF
+    _changed=1
+  fi
+  if write_file "$PERMISSIONS_PATH_FILE" 0644 root:root <<'ROWSAFE_PERMISSIONS_PATH_EOF'; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-permissions.path: starts rowsafe-permissions.service when the
+# Rowsafe agent hands over a permission change signed with a passkey root
+# paired with this server. Installed by https://rowsafe.sh/install.
+
+[Unit]
+Description=Rowsafe: watch for permission changes signed with an owner's passkey
+Documentation=https://rowsafe.sh/docs/guides/permissions
+
+[Path]
+PathExists=/var/lib/rowsafe/permissions/request
+Unit=rowsafe-permissions.service
+
+[Install]
+WantedBy=multi-user.target
+ROWSAFE_PERMISSIONS_PATH_EOF
+    _changed=1
+  fi
+  if systemd_running; then
+    [ "$_changed" = 0 ] || systemctl daemon-reload
+    systemctl enable --now --quiet rowsafe-permissions.path
+  else
+    warn "systemd is not running here; the permissions helper was installed but cannot be enabled"
+  fi
+}
+
+remove_permissions_helper() {
+  [ -e "$PERMISSIONS_PATH_FILE" ] || [ -e "$PERMISSIONS_SERVICE_FILE" ] || [ -e "$PERMISSIONS_HELPER" ] || return 0
+  if systemd_running; then
+    systemctl disable --now --quiet rowsafe-permissions.path 2>/dev/null || true
+  fi
+  rm -rf /var/lib/rowsafe-permissions /run/rowsafe-permissions
+  rm -f "$PERMISSIONS_PATH_FILE" "$PERMISSIONS_SERVICE_FILE" "$PERMISSIONS_HELPER"
+  if systemd_running; then systemctl daemon-reload; fi
+}
+# --- end permissions helper ---
+
 # ---------------------------------------------------------------- MongoDB
 #
 # MongoDB servers are found by `rowsafe-agent setup discover` like
@@ -7080,10 +7187,10 @@ install_agent() {
   step "Installing into $INSTALL_DIR"
   make_dirs
   [ "$need_binary" = 0 ] || install_binary
-  install_root_agent       # permissions section
   install_installer_copy   # permissions section
   install_allow_command    # permissions section
   install_guard
+  install_permissions_helper # permit-host: one-click permission changes
   UNIT_CHANGED=0
   install_unit
   mysql_setup # mysql
@@ -7200,7 +7307,8 @@ uninstall_agent() {
   remove_restart_helper
   remove_create_cluster
   remove_firewall_helper
-  rm -f "$GUARD_FILE" "$INSTALLER_COPY" "$ROOT_AGENT" "$ALLOW_COMMAND" # permissions section
+  remove_permissions_helper # permit-host
+  rm -f "$GUARD_FILE" "$INSTALLER_COPY" "$ALLOW_COMMAND" # permissions section
   rmdir "$LIB_DIR" 2>/dev/null || true
   if systemd_running; then systemctl daemon-reload; fi
   rm -rf "$INSTALL_DIR"
@@ -7350,8 +7458,9 @@ main() {
   if [ "$mode" != install ] && [ "$mode" != permissions ] && { [ -n "$FILES_PATHS" ] || [ -n "$ALLOW_FILES" ] || [ "$NO_FILES" = 1 ]; }; then
     die "--files, --allow-files and --no-files only go with an install"
   fi
-  # A permission that needs another one turned off: off too (permissions section).
-  if [ "$mode" = install ] || [ "$mode" = permissions ]; then perm_cascade "$mode"; fi
+  # A permission that needs another one turned off: off too (permissions
+  # section; --permissions does it once it knows the server).
+  if [ "$mode" = install ]; then perm_cascade install; fi
   [ -z "$PROTECT_PORT" ] || [ -n "$PROTECT_NAME" ] || die "--protect-port only goes with --protect"
   [ "$NO_SETUP" = 0 ] || [ -z "$PROTECT_NAME" ] || die "--no-setup and --protect contradict each other"
   TMP=$(mktemp -d "${TMPDIR:-/tmp}/rowsafe-install.XXXXXX")

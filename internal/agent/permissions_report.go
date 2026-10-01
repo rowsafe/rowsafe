@@ -2,8 +2,6 @@ package agent
 
 import (
 	"bufio"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,8 +11,8 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
+	"github.com/rowsafe/rowsafe/internal/permissions"
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
@@ -52,18 +50,25 @@ func DefaultPermissionPaths() PermissionPaths {
 	}
 }
 
-func (a *Agent) permissionPaths() PermissionPaths {
+// permissionPathsFor is where an agent with cfg reads them.
+func permissionPathsFor(cfg Config) PermissionPaths {
 	p := DefaultPermissionPaths()
-	p.RestartAllowFile = a.cfg.RestartAllowFile
-	if a.cfg.CreateClusterAllowFile != "" {
-		p.CreateClusterAllowFile = a.cfg.CreateClusterAllowFile
+	p.RestartAllowFile = cfg.RestartAllowFile
+	if cfg.CreateClusterAllowFile != "" {
+		p.CreateClusterAllowFile = cfg.CreateClusterAllowFile
 	}
-	p.UpdatesAllowFile = a.cfg.UpdateAllowFile
-	if a.cfg.Pooler.AllowFile != "" {
-		p.PoolerAllowFile = a.cfg.Pooler.AllowFile
+	p.UpdatesAllowFile = cfg.UpdateAllowFile
+	if cfg.Pooler.AllowFile != "" {
+		p.PoolerAllowFile = cfg.Pooler.AllowFile
 	}
 	p.FirewallAllowFile = firewallAllowFile
 	return p
+}
+
+// A one-click change's result carries what root allows after it
+// (permissions.go).
+func init() {
+	permissionsAfter = func(cfg Config) *protocol.PermissionsReport { return ReadPermissions(permissionPathsFor(cfg)) }
 }
 
 // permHave reports whether a system command is installed (variable for
@@ -202,53 +207,24 @@ func rootOwnedExecutable(path string) bool {
 	return ok && sys.Uid == 0
 }
 
-// permissionOwnerFile is one entry of /etc/rowsafe/owners, written by root
-// (`sudo rowsafe-allow --add-owner`). Only its public fields are read here.
-type permissionOwnerFile struct {
-	CredentialID string    `json:"credential_id"`
-	Name         string    `json:"name"`
-	Fingerprint  string    `json:"fingerprint"`
-	AddedAt      time.Time `json:"added_at"`
-}
-
-// readPermissionOwners reads the paired passkeys; a missing or unreadable
-// file means none.
+// readPermissionOwners reads the paired passkeys' public fields (the file
+// is root's, written by `sudo rowsafe-allow --add-owner`); a missing or
+// unreadable file means none.
 func readPermissionOwners(path string) []protocol.PermissionOwner {
 	if path == "" {
 		return nil
 	}
-	data, err := readSmallFile(path, 1<<20)
+	owners, err := permissions.ReadOwners(path, false)
 	if err != nil {
-		return nil
-	}
-	var entries []permissionOwnerFile
-	if err := json.Unmarshal(data, &entries); err != nil {
 		return nil
 	}
 	var out []protocol.PermissionOwner
-	for _, e := range entries {
-		if e.CredentialID == "" {
-			continue
+	for _, o := range owners {
+		if o.CredentialID != "" {
+			out = append(out, o.Report())
 		}
-		out = append(out, protocol.PermissionOwner{CredentialID: e.CredentialID, Name: e.Name, Fingerprint: e.Fingerprint, AddedAt: e.AddedAt})
 	}
 	return out
-}
-
-func readSmallFile(path string, limit int64) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > limit {
-		return nil, errors.New("too large")
-	}
-	return data, nil
 }
 
 // permissionsState remembers the allow files as the last heartbeat saw
@@ -266,7 +242,7 @@ func (a *Agent) permissionsHeartbeat() protocol.PermissionsHeartbeat {
 	if a.cfg.Sidecar() {
 		return protocol.PermissionsHeartbeat{}
 	}
-	p := a.permissionPaths()
+	p := permissionPathsFor(a.cfg)
 	stamp := allowFilesStamp(p)
 	a.perms.mu.Lock()
 	changed := a.perms.stamp != "" && a.perms.stamp != stamp

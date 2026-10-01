@@ -15,14 +15,14 @@
 # Changes run the installer's permissions-only mode (--permissions) from the
 # copy the installer keeps in /usr/local/lib/rowsafe, checked against the
 # signed release when it was put there. Passkeys (--add-owner) run root's
-# copy of the agent there too, never the binary in /opt/rowsafe, which the
-# agent's user owns.
+# copy of the agent there too (rowsafe-permissions), never the binary in
+# /opt/rowsafe, which the agent's user owns.
 
 set -u
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 installer=/usr/local/lib/rowsafe/install.sh
-agent=/usr/local/lib/rowsafe/rowsafe-agent
+helper=/usr/local/lib/rowsafe/rowsafe-permissions
 owners=/etc/rowsafe/owners
 update='curl -fsSL https://rowsafe.sh | sudo sh'
 names='restart create-cluster updates security-updates reboot pooler pooler-public firewall'
@@ -88,14 +88,14 @@ need_installer() {
   installer_ok || fail "Rowsafe on this server is too old for this (or isn't installed). Update it first: $update"
 }
 
-# passkeys: root's agent copy can pair passkeys.
+# passkeys: root's copy of the agent is there and can pair passkeys.
 passkeys() {
-  root_file "$agent" && "$agent" permissions --help >/dev/null 2>&1
+  root_file "$helper" && "$helper" --help >/dev/null 2>&1
 }
 
 owner_cmd() {
   passkeys || fail "Rowsafe on this server is too old for passkeys. Update it first: $update"
-  exec "$agent" permissions "$@"
+  exec "$helper" "$@"
 }
 
 # installed_version: the agent's version, so a change never updates Rowsafe

@@ -441,6 +441,12 @@ EOF
   done
   [ "$(stat -c '%U %G %a' /etc/rowsafe)" = "root postgres 750" ] || fail "/etc/rowsafe ownership/mode"
   cmp /usr/local/lib/rowsafe/rowsafe-agent-guard /src/scripts/rowsafe-agent-guard || fail "guard differs from scripts/rowsafe-agent-guard"
+  # permit-host: one-click permission changes run root's own copy of the agent.
+  [ "$(stat -c '%U %a' /usr/local/lib/rowsafe/rowsafe-permissions)" = "root 755" ] || fail "permissions helper ownership/mode"
+  cmp /usr/local/lib/rowsafe/rowsafe-permissions /opt/rowsafe/versions/0.2.0/rowsafe-agent || fail "permissions helper is not the release's agent"
+  grep -qx "Environment=ROWSAFE_AGENT_USER=postgres" /etc/systemd/system/rowsafe-permissions.service || fail "permissions unit's agent user"
+  grep -qx "PathExists=/var/lib/rowsafe/permissions/request" /etc/systemd/system/rowsafe-permissions.path || fail "permissions path unit"
+  [ "$(stat -c '%U %a' /var/lib/rowsafe/permissions)" = "postgres 700" ] || fail "permissions request directory"
   cmp /etc/systemd/system/rowsafe-agent.service /src/deploy/systemd/rowsafe-agent.service || fail "unit differs from deploy/systemd/rowsafe-agent.service"
   cmp /etc/logrotate.d/rowsafe /src/deploy/logrotate/rowsafe || fail "logrotate config differs from deploy/logrotate/rowsafe"
   [ "$(stat -c '%U %a' /etc/logrotate.d/rowsafe)" = "root 644" ] || fail "logrotate config ownership/mode"
@@ -450,15 +456,14 @@ EOF
   logrotate --debug /etc/logrotate.d/rowsafe >"$W/lr" 2>&1 || { cat "$W/lr" >&2; fail "logrotate rejects the config"; }
   ! grep -qi "error" "$W/lr" || { cat "$W/lr" >&2; fail "logrotate reported an error"; }
   pass "layout, permissions, guard, unit and logrotate"
-  # (permissions) The installer and the agent, root's copies for sudo
-  # rowsafe-allow, checked against the signed manifest; rowsafe-allow itself.
-  for f in /usr/local/lib/rowsafe/install.sh /usr/local/lib/rowsafe/rowsafe-agent /usr/local/sbin/rowsafe-allow; do
+  # (permissions) Root's copy of the installer for sudo rowsafe-allow,
+  # checked against the signed manifest; rowsafe-allow itself.
+  for f in /usr/local/lib/rowsafe/install.sh /usr/local/sbin/rowsafe-allow; do
     [ "$(stat -c '%U %G %a' "$f")" = "root root 755" ] || fail "$f ownership/mode: $(stat -c '%U %G %a' "$f")"
   done
   cmp /usr/local/lib/rowsafe/install.sh "$W/install.sh" || fail "the installer copy isn't the release's installer"
-  cmp /usr/local/lib/rowsafe/rowsafe-agent "srv/agent/0.2.0/rowsafe-agent-linux-$arch" || fail "root's agent copy isn't the release's agent"
   cmp /usr/local/sbin/rowsafe-allow /src/scripts/rowsafe-allow || fail "rowsafe-allow differs from scripts/rowsafe-allow"
-  pass "installer copy, root's agent copy and rowsafe-allow in place"
+  pass "installer copy and rowsafe-allow in place"
 
   secret_key=AKIAEXAMPLEKEY42 secret=s3cr3t/with+base64= cipher='cipher-pass-that-is-long-enough/+=='
   configured() {
@@ -511,6 +516,7 @@ EOF
 
   expect_ok "upgrade to 0.12.0" env ROWSAFE_VERSION=0.12.0 "$INSTALLER"
   [ "$(readlink /opt/rowsafe/rowsafe-agent)" = versions/0.12.0/rowsafe-agent ] || fail "not switched to 0.12.0"
+  cmp /usr/local/lib/rowsafe/rowsafe-permissions /opt/rowsafe/versions/0.12.0/rowsafe-agent || fail "permissions helper not upgraded" # permit-host
   runuser -u postgres -- mkdir -p /var/lib/rowsafe/update/pending
   install -d -m 0755 -o root -g root /opt/rowsafe/bin && touch /opt/rowsafe/bin/rowsafe-agent-guard # an older install's guard
   expect_ok "channel older than installed keeps it" "$INSTALLER"
@@ -537,6 +543,15 @@ EOF
     }
     systemd-analyze security --offline=true --no-pager /etc/systemd/system/rowsafe-agent.service 2>/dev/null |
       tail -n 1 | sed "s/^/  rowsafe-agent: /"
+    # permit-host
+    expect_ok "systemd-analyze verify (permissions units)" \
+      systemd-analyze verify /etc/systemd/system/rowsafe-permissions.service /etc/systemd/system/rowsafe-permissions.path
+    [ ! -s "$W/out" ] || {
+      cat "$W/out" >&2
+      fail "systemd-analyze verify printed warnings for the permissions units"
+    }
+    systemd-analyze security --offline=true --no-pager /etc/systemd/system/rowsafe-permissions.service 2>/dev/null |
+      tail -n 1 | sed "s/^/  rowsafe-permissions: /"
   fi
 
   echo "x" >/var/lib/postgresql/17/main/postgresql.auto.conf
@@ -1770,11 +1785,9 @@ permissions_tests() {
   }
   pass "--permissions changes only the allow lists, helpers and units"
 
-  # Without the installer's copy of itself (a server installed before
-  # rowsafe-allow), --permissions fetches it for the installed version.
-  rm "$P"
-  expect_ok "--permissions puts the installer copy back" env ROWSAFE_RELEASES_URL=https://localhost:8443/agent sh "$W/install.sh" --permissions --allow-reboot --allow-security-updates
-  cmp "$P" "$W/install.sh" || fail "the installer copy isn't the release's"
+  # The installer run from elsewhere works the same, without the network.
+  expect_ok "--permissions from another copy of the installer" env ROWSAFE_RELEASES_URL=https://127.0.0.1:9/agent sh "$W/install.sh" --permissions --allow-reboot --allow-security-updates
+  grep -q '^reboot ' "$U" || fail "reboot not allowed: $(cat "$U")"
 
   # Not installed: refused, plainly.
   mv /etc/rowsafe/agent.env /etc/rowsafe/agent.env.away
@@ -1802,19 +1815,24 @@ permissions_tests() {
   expect_fail "rowsafe-allow: reboot needs security updates" "Allow them together: sudo rowsafe-allow security-updates reboot" "$A" reboot
   expect_fail "rowsafe-allow files needs a folder" "name the folder" "$A" files
 
-  # Passkeys: only through root's copy of the agent, when it can.
+  # Passkeys: only through root's copy of the agent (rowsafe-permissions),
+  # when it can pair them.
+  RP=/usr/local/lib/rowsafe/rowsafe-permissions
   expect_fail "passkeys need a newer agent" "too old for passkeys" "$A" --add-owner
-  cp /usr/local/lib/rowsafe/rowsafe-agent "$W/root-agent.saved"
-  cat >/usr/local/lib/rowsafe/rowsafe-agent <<'EOF'
+  cp "$RP" "$W/root-agent.saved"
+  cat >"$RP" <<'EOF'
 #!/bin/sh
-[ "$1" = permissions ] || exit 2
-[ "$2" != --help ] || exit 0
-echo "agent permissions $* as $(id -un)"
+[ "$1" != --help ] || exit 0
+echo "rowsafe-permissions $* as $(id -un)"
 EOF
   expect_ok "rowsafe-allow --add-owner runs root's agent copy" "$A" --add-owner
-  grep -q "agent permissions permissions pair as root" "$W/out" || fail "--add-owner: $(cat "$W/out")"
+  grep -q "rowsafe-permissions pair as root" "$W/out" || fail "--add-owner: $(cat "$W/out")"
+  expect_ok "rowsafe-allow --owners" "$A" --owners
+  grep -q "rowsafe-permissions owners as root" "$W/out" || fail "--owners: $(cat "$W/out")"
   expect_ok "rowsafe-allow --remove-owner" "$A" --remove-owner 3F2A-91C3-0B7E-55D4
-  grep -q "agent permissions permissions remove-owner 3F2A-91C3-0B7E-55D4 as root" "$W/out" || fail "--remove-owner: $(cat "$W/out")"
+  grep -q "rowsafe-permissions remove-owner 3F2A-91C3-0B7E-55D4 as root" "$W/out" || fail "--remove-owner: $(cat "$W/out")"
+  expect_ok "rowsafe-allow --help offers passkeys" "$A" --help
+  grep -q -- "--add-owner" "$W/out" || fail "no passkeys in --help"
   expect_fail "rowsafe-allow --remove-owner needs a fingerprint" "which passkey" "$A" --remove-owner
   cat >/etc/rowsafe/owners <<'EOF'
 [
@@ -1835,10 +1853,10 @@ EOF
   ! grep -q "ana@example.com" "$W/out" || fail "listed passkeys from a file others can write"
   rm /etc/rowsafe/owners
   # Root never runs an agent binary that isn't root's.
-  chown postgres /usr/local/lib/rowsafe/rowsafe-agent
+  chown postgres "$RP"
   expect_fail "an agent copy root doesn't own is never run" "too old for passkeys" "$A" --owners
-  cp "$W/root-agent.saved" /usr/local/lib/rowsafe/rowsafe-agent
-  chown root:root /usr/local/lib/rowsafe/rowsafe-agent
+  cp "$W/root-agent.saved" "$RP"
+  chown root:root "$RP"
 
   # Without a trusted installer copy, nothing runs.
   chown postgres "$P"
