@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -284,8 +285,8 @@ func TestRequestCantNameAContainer(t *testing.T) {
 }
 
 func TestPeerUIDs(t *testing.T) {
-	uid := 0
-	e := newEnv(t, Config{peer: func(net.Conn) (Peer, error) { return Peer{UID: uid, PID: 7}, nil }})
+	var uid atomic.Int64
+	e := newEnv(t, Config{peer: func(net.Conn) (Peer, error) { return Peer{UID: int(uid.Load()), PID: 7}, nil }})
 	ln, err := Listen(e.sock)
 	if err != nil {
 		t.Fatal(err)
@@ -294,14 +295,14 @@ func TestPeerUIDs(t *testing.T) {
 	defer cancel()
 	go e.s.Serve(ctx, ln)
 	for _, u := range []int{0, 1000, 33} {
-		uid = u
+		uid.Store(int64(u))
 		r, err := Call(ctx, e.sock, Request{ID: "x", Action: ActionRestart})
 		if err != nil || r.OK || !strings.Contains(r.Error, "may not use") {
 			t.Fatalf("uid %d: %+v %v", u, r, err)
 		}
 	}
 	for _, u := range []int{999, 70} {
-		uid = u
+		uid.Store(int64(u))
 		if r, err := Call(ctx, e.sock, Request{ID: "x", Action: ActionInspect}); err != nil || !r.OK {
 			t.Fatalf("uid %d refused: %+v %v", u, r, err)
 		}

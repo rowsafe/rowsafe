@@ -144,10 +144,14 @@ func Call(ctx context.Context, socket string, req Request) (Response, error) {
 	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
 	defer stop()
 	data, _ := json.Marshal(req)
-	if _, err := conn.Write(append(data, '\n')); err != nil {
-		return Response{}, fmt.Errorf("%w (%v)", ErrUnavailable, err)
-	}
+	// The service may answer and close before reading (it refuses a user
+	// that isn't allowed up front), so a failed write can still have an
+	// answer waiting: read it before calling the service unreachable.
+	_, werr := conn.Write(append(data, '\n'))
 	line, err := bufio.NewReader(io.LimitReader(conn, 64<<10)).ReadBytes('\n')
+	if werr != nil && len(line) == 0 {
+		return Response{}, fmt.Errorf("%w (%v)", ErrUnavailable, werr)
+	}
 	if err != nil && len(line) == 0 {
 		if ctx.Err() != nil {
 			return Response{}, ctx.Err()
