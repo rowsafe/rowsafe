@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "rowsafe guard",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.sh\"",
             "timeout": 120
           }
         ]
