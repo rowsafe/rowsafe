@@ -5,6 +5,8 @@
   "author": { "name": "Rowsafe" },
   "homepage": "https://rowsafe.sh",
   "privacyPolicyUrl": "https://rowsafe.sh/legal/privacy",
+  "termsOfServiceUrl": "https://rowsafe.sh/legal/terms",
+  "supportUrl": "https://rowsafe.sh/contact",
   "repository": "https://github.com/rowsafe/rowsafe",
   "license": "Apache-2.0",
   "keywords": ["postgresql", "backup", "point-in-time-recovery", "migrations", "safety"]
