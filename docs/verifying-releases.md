@@ -40,6 +40,13 @@ curl -fsSLO https://releases.rowsafe.sh/agent/1.2.3/manifest.json.sig
 rowsafe-release verify --public-key <RELEASE_PUBLIC_KEY> manifest.json manifest.json.sig
 ```
 
+The manifest lists the agent builds (`linux/amd64`, `linux/arm64`) and, from the
+release that added `sudo rowsafe-allow` on, the rendered installer (`install.sh`)
+with its SHA-256 and size. The installer keeps a copy of itself on each server
+(`/usr/local/lib/rowsafe/install.sh`, which `rowsafe-allow` runs as root) only
+after checking it against this signed entry; when it was piped from `curl`, it
+downloads that copy from the release and checks it the same way.
+
 ## 4. Docker images
 
 Images are signed with cosign (keyless) and carry provenance and an SBOM:

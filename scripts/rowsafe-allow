@@ -59,7 +59,7 @@ EOF
     cat <<'EOF'
 
 One-click changes from the dashboard, signed with a passkey you pair here:
-  sudo rowsafe-allow --add-owner           pair a passkey (opens a link to approve)
+  sudo rowsafe-allow --add-owner           pair a passkey (prints a link to open in your browser)
   sudo rowsafe-allow --owners              list the paired passkeys
   sudo rowsafe-allow --remove-owner FINGERPRINT   unpair one
 EOF
@@ -116,7 +116,7 @@ list_owners() {
     return 0
   fi
   echo "Passkeys that can change these with one click in the dashboard:"
-  tr -d '\r\n' <"$owners" | sed 's/}[[:space:]]*,[[:space:]]*{/}\n{/g' | while IFS= read -r _o; do
+  { tr -d '\r\n' <"$owners" && echo; } | sed 's/}[[:space:]]*,[[:space:]]*{/}\n{/g' | while IFS= read -r _o; do
     _fp=$(printf '%s\n' "$_o" | sed -n 's/.*"fingerprint"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
     _name=$(printf '%s\n' "$_o" | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
     _at=$(printf '%s\n' "$_o" | sed -n 's/.*"added_at"[[:space:]]*:[[:space:]]*"\([0-9-]\{10\}\).*/\1/p')

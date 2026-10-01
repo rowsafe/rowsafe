@@ -1809,7 +1809,7 @@ permissions_tests() {
   expect_ok "rowsafe-allow pooler, --remove reboot in one go" "$A" pooler --remove reboot
   grep -qx 5432 /etc/rowsafe/pooler-allowed && ! grep -q '^reboot' "$U" || fail "rowsafe-allow pooler --remove reboot"
   expect_fail "rowsafe-allow refuses unknown names" "there is no permission called 'everything'" "$A" everything
-  expect_fail "rowsafe-allow --remove needs a name" "--remove needs a name" "$A" --remove
+  expect_fail "rowsafe-allow --remove needs a name" "needs a name, e.g. sudo rowsafe-allow --remove reboot" "$A" --remove
   expect_ok "rowsafe-allow --remove security-updates" "$A" --remove security-updates
   ! grep -q '^security' "$U" || fail "rowsafe-allow --remove security-updates kept them"
   expect_fail "rowsafe-allow: reboot needs security updates" "Allow them together: sudo rowsafe-allow security-updates reboot" "$A" reboot
