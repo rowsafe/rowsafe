@@ -3,7 +3,7 @@
   "name": "sh.rowsafe/rowsafe",
   "title": "Rowsafe",
   "description": "PostgreSQL backups and a safety net for AI agents: check recoverability, set restore points.",
-  "version": "0.3.0",
+  "version": "0.4.2",
   "websiteUrl": "https://rowsafe.sh/docs/reference/mcp",
   "repository": {
     "url": "https://github.com/rowsafe/rowsafe",
