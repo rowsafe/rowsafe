@@ -1,0 +1,10 @@
+{
+  "name": "rowsafe",
+  "version": "0.4.2",
+  "description": "PostgreSQL backups and a safety net for AI agents: check recoverability and health, save restore points before risky changes.",
+  "mcpServers": {
+    "rowsafe": {
+      "httpUrl": "https://api.rowsafe.sh/mcp"
+    }
+  }
+}
