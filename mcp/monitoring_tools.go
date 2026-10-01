@@ -17,16 +17,16 @@ import (
 // trends. All read-only.
 
 type healthInput struct {
-	Database string `json:"database,omitempty" jsonschema:"database name or ID; omit for every database's score"`
+	Database string `json:"database,omitempty" jsonschema:"database name or ID; when omitted, every database's score"`
 }
 
 type insightsInput struct {
-	Database string `json:"database" jsonschema:"database name (as shown by list_databases) or ID"`
+	Database string `json:"database" jsonschema:"database name or ID"`
 	Limit    int    `json:"limit,omitempty" jsonschema:"entries per list in the text summary"`
 }
 
 type queryTrendsInput struct {
-	Database   string `json:"database" jsonschema:"database name (as shown by list_databases) or ID"`
+	Database   string `json:"database" jsonschema:"database name or ID"`
 	SinceHours int    `json:"since_hours,omitempty" jsonschema:"time range ending now, in hours (default 24, at most 336: statement history is kept 14 days)"`
 	Sort       string `json:"sort,omitempty" jsonschema:"order: total_time (where the database spends its time; default), calls, mean_time (slowest per call) or rows"`
 	Limit      int    `json:"limit,omitempty" jsonschema:"number of statements"`
@@ -64,7 +64,7 @@ func (t *tools) addMonitoringTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "database_health",
 		Description: "Health score (0-100) of a database, with findings in plain language, worst first: each has a title, an explanation and what to do. " +
-			"Many findings list fixes Rowsafe can apply itself (clean up tables, rebuild or remove an index, end a stuck session, remove an inactive replication slot, back up now, ...): the user applies them with Apply fix in the Rowsafe dashboard (Pulse, Health), after a confirmation when they are disruptive. Point the user there instead of giving them SQL to run; no MCP tool applies fixes. " +
+			"Many findings list fixes Rowsafe can apply itself (clean up tables, rebuild or remove an index, end a stuck session, remove an inactive replication slot, back up now, ...); a person applies them with Apply fix in the Rowsafe dashboard (Pulse, Health), after a confirmation when they are disruptive. Read-only: this tool applies nothing. " +
 			"Covers backups, restore tests and WAL archiving; whether PostgreSQL answers; disk space and a forecast of when it fills up; connections; vacuum, transaction ID wraparound and estimated bloat; blocked queries, statements that got slower, unused and duplicate indexes, tables that may lack an index; replication lag. " +
 			"Without a database it lists every database's score and top finding. Scores: 90-100 healthy, 70-89 needs attention, 50-69 at risk, below 50 critical.",
 		Annotations: readOnly("Database health score"),
@@ -73,7 +73,7 @@ func (t *tools) addMonitoringTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "database_insights",
 		Description: "Table and index insights of a database, collected every 30 minutes: largest tables and indexes, estimated table and index bloat (estimates from planner statistics), unused indexes (never scanned since statistics were reset; primary keys and unique indexes excluded), duplicate and redundant indexes, large tables read by sequential scans (may be missing an index), dead rows with last vacuum and analyze times, and tables with the oldest transaction IDs. " +
-			"Unused and duplicate indexes and bloat that Rowsafe can deal with appear as fixes in database_health: point the user to Apply fix in the dashboard (Pulse, Health) rather than suggesting DROP INDEX or REINDEX. Suggest new indexes only as proposals for the user to review; never run them.",
+			"Read-only. Unused and duplicate indexes and bloat that Rowsafe can deal with also appear as Pulse findings with an Apply fix button in the dashboard (Pulse, Health).",
 		Annotations: readOnly("Table and index insights"),
 		InputSchema: inputSchema[insightsInput](func(p map[string]*jsonschema.Schema) {
 			p["limit"].Minimum, p["limit"].Maximum, p["limit"].Default = ptr(1.0), ptr(20.0), []byte("10")
@@ -83,7 +83,7 @@ func (t *tools) addMonitoringTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "query_trends",
 		Description: "The statements (from pg_stat_statements) that took the most time in a time range, with calls, total and mean time, rows, their share of all statement time, and a comparison with the range before: regression is true when the mean time more than doubled. " +
-			"With query_id, one statement's time series. Use it for \"what is slow?\", \"what changed?\" or \"why is the database busy?\".",
+			"With query_id, one statement's time series. Read-only.",
 		Annotations: readOnly("Query trends"),
 		InputSchema: inputSchema[queryTrendsInput](func(p map[string]*jsonschema.Schema) {
 			p["since_hours"].Minimum, p["since_hours"].Maximum, p["since_hours"].Default = ptr(1.0), ptr(336.0), []byte("24")

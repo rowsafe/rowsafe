@@ -23,8 +23,8 @@ const (
 )
 
 type restorePointInput struct {
-	Database    string `json:"database" jsonschema:"the Rowsafe database (PostgreSQL cluster) the operation will change, as named by list_databases"`
-	Name        string `json:"name,omitempty" jsonschema:"restore point name: 1-63 lowercase letters, digits, - and _. Describe the operation, e.g. before-drop-orders or pre-migrate-20260924. Default: agent-<UTC timestamp>"`
+	Database    string `json:"database" jsonschema:"the Rowsafe database (PostgreSQL cluster) name"`
+	Name        string `json:"name,omitempty" jsonschema:"restore point name: 1-63 lowercase letters, digits, - and _. Usually names the operation, e.g. before-drop-orders or pre-migrate-20260924. Default: agent-<UTC timestamp>"`
 	WaitSeconds *int   `json:"wait_seconds,omitempty" jsonschema:"how long to wait for the restore point to be confirmed in the backup repository (default 90)"`
 }
 
@@ -84,10 +84,9 @@ func restorePointView(db string, p protocol.RestorePoint) RestorePointView {
 func (t *tools) addSafetyReadTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "safety_check",
-		Description: "Check whether a database can be recovered right now, before you change it. " +
-			"Call this BEFORE any destructive or risky database operation: running migrations (prisma migrate, rails db:migrate, alembic, django migrate, knex, goose, ...), DROP or TRUNCATE, DELETE or UPDATE without a narrow WHERE, bulk data changes, schema changes, or restoring a dump over a database. " +
-			"protected=true means: active, WAL archiving works, a backup finished in the last 26h and the latest restore test (Proof) passed. " +
-			"If it is not protected, tell the user the reasons and ask whether to proceed anyway before doing anything destructive. If it is protected, create a restore point next (create_restore_point).",
+		Description: "Reports whether a database can be recovered right now, for example before a migration, a schema change, DROP or TRUNCATE, a bulk DELETE or UPDATE, or restoring a dump over it. " +
+			"protected=true means: active, WAL archiving works, a backup finished in the last 26h and the latest restore test (Proof) passed; otherwise reasons lists each condition that does not hold. " +
+			"Also returns the last backup and full backup, the last archived WAL, the start of the recovery window, the last restore test, and open failed tasks. Read-only.",
 		Annotations: readOnly("Safety check before destructive changes"),
 	}, t.safetyCheck)
 
@@ -101,9 +100,9 @@ func (t *tools) addSafetyReadTools(s *sdk.Server) {
 func (t *tools) addSafetyWriteTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "create_restore_point",
-		Description: "Create a named restore point on a database and wait until it is confirmed in the backup repository. Call it right BEFORE a destructive or risky operation (after safety_check), so the database can be rewound to the moment just before it. " +
-			"It is cheap and safe: it only writes a marker into the WAL (pg_create_restore_point) and forces a WAL switch; nothing else changes. Needs an active database. " +
-			"Tell the user the restore point's name. If the operation then goes wrong, stop, don't try to repair data or restore it yourself, and tell the user they can Rewind to that restore point in the Rowsafe dashboard.",
+		Description: "Creates a named restore point (a Mark) on a database and waits until it is confirmed in the backup repository, so the database can be rewound to that exact moment. " +
+			"It only writes a marker into the WAL (pg_create_restore_point) and forces a WAL switch; nothing else changes. Needs an active database. " +
+			"Returns the restore point's name, status and whether it was confirmed.",
 		Annotations: writes("Create a restore point", false, false),
 		InputSchema: inputSchema[restorePointInput](func(p map[string]*jsonschema.Schema) {
 			p["name"].Pattern = restorePointNamePattern

@@ -17,7 +17,7 @@ import (
 // Read-only.
 
 type logsInput struct {
-	Database string `json:"database" jsonschema:"database name (as shown by list_databases) or ID"`
+	Database string `json:"database" jsonschema:"database name or ID"`
 	Kind     string `json:"kind,omitempty" jsonschema:"errors, locks, maintenance, or one kind: error, slow_query, lock_wait, deadlock, auth_failure, too_many_connections, checkpoint, autovacuum, temp_file, connection, statement, server, other"`
 	Search   string `json:"search,omitempty" jsonschema:"case-insensitive text in the message, detail, statement, user or client address"`
 	Grouped  bool   `json:"grouped,omitempty" jsonschema:"repeated messages of the last 24 hours with their counts, instead of lines"`
@@ -37,8 +37,8 @@ type LogsOutput struct {
 func (t *tools) addLogTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "get_logs",
-		Description: "Read a database's PostgreSQL log: errors, slow queries (over log_min_duration_statement), lock waits, deadlocks, failed logins, checkpoints and autovacuum, newest first, or grouped by message with counts. " +
-			"Statements are normalized ($1, $2 for values) and quoted values in messages hidden on the database server, unless the database sends full query text. Use it to explain an error spike, find the statement behind an error, or see who is failing to log in.",
+		Description: "Reads a database's PostgreSQL log: errors, slow queries (over log_min_duration_statement), lock waits, deadlocks, failed logins, checkpoints and autovacuum, newest first, or grouped by message with counts. " +
+			"Statements are normalized ($1, $2 for values) and quoted values in messages hidden on the database server, unless the database sends full query text. Shows error spikes, the statement behind an error, and who is failing to log in. Read-only.",
 		Annotations: readOnly("Read logs"),
 		InputSchema: inputSchema[logsInput](func(p map[string]*jsonschema.Schema) {
 			p["limit"].Minimum, p["limit"].Maximum = ptr(1.0), ptr(200.0)

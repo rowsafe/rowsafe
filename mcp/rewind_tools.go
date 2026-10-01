@@ -53,10 +53,9 @@ type RewindKeptView struct {
 func (t *tools) addRewindReadTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "rewind_window",
-		Description: "Show how far back a database can be rewound: the recovery window (earliest and latest restorable second), the newest Marks (restore points), " +
-			"a restored copy if one exists, and data kept aside by a rewind of the whole database. Read-only. " +
-			"Use it to tell the user what they can go back to when something went wrong. Rewinding is theirs to do (Rewind in the dashboard, or `rowsafe rewind`): " +
-			"no tool restores a copy, brings rows back or rewinds a database.",
+		Description: "Shows how far back a database can be rewound: the recovery window (earliest and latest restorable second), the newest Marks (restore points), " +
+			"a restored copy if one exists, and data kept aside by a rewind of the whole database. Read-only: it restores nothing. " +
+			"Restoring a copy, bringing rows back and rewinding a database are done by a person (Rewind in the dashboard, or `rowsafe rewind`).",
 		Annotations: readOnly("Rewind window"),
 	}, t.rewindWindow)
 }

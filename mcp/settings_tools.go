@@ -17,7 +17,7 @@ import (
 // dashboard (Tuning) or with rowsafe tune / rowsafe settings set.
 
 type settingsInput struct {
-	Database string `json:"database" jsonschema:"database name (as shown by list_databases) or ID"`
+	Database string `json:"database" jsonschema:"database name or ID"`
 	Workload string `json:"workload,omitempty" jsonschema:"what the database serves, for the recommendations: web, analytics or mixed (default: the one saved for the database)"`
 }
 
@@ -32,7 +32,7 @@ func (t *tools) addSettingsTools(s *sdk.Server) {
 		Name: "database_settings",
 		Description: "PostgreSQL's settings that matter for a database (memory, connections, change log and checkpoints, autovacuum, planner, parallel queries, timeouts, logging, query statistics), each with a plain explanation, its value and default, where it is set (default, postgresql.conf, postgresql.auto.conf) and whether changing it needs a restart; " +
 			"the server's memory, CPUs and disk type; settings waiting for a restart; Rowsafe's recommendations for the server (PGTune-style: shared_buffers about 25% of memory, work_mem from memory and connections, SSD costs, ...) with the reason for each; and the latest changes made through Rowsafe. " +
-			"Read-only. Rowsafe's archiving settings (archive_mode, archive_command, archive_timeout) are managed by Rowsafe and must not be changed. To change settings, point the user to Tuning in the Rowsafe dashboard or `rowsafe tune NAME`: a person applies them there (Rowsafe saves a Mark first and can undo a change). Never tell the user to edit postgresql.conf or run ALTER SYSTEM for a change Rowsafe recommends.",
+			"Read-only. The archiving settings (archive_mode, archive_command, archive_timeout) are managed by Rowsafe. Settings are changed by a person with Tuning in the Rowsafe dashboard or `rowsafe tune NAME` (Rowsafe saves a Mark first and can undo a change).",
 		Annotations: readOnly("PostgreSQL settings"),
 		InputSchema: inputSchema[settingsInput](func(p map[string]*jsonschema.Schema) {
 			p["workload"].Enum = []any{protocol.WorkloadWeb, protocol.WorkloadAnalytics, protocol.WorkloadMixed}

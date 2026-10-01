@@ -18,23 +18,23 @@ import (
 type noInput struct{}
 
 type databaseInput struct {
-	Database string `json:"database" jsonschema:"database name (as shown by list_databases) or ID"`
+	Database string `json:"database" jsonschema:"database name or ID"`
 }
 
 type listInput struct {
-	Database string `json:"database" jsonschema:"database name (as shown by list_databases) or ID"`
+	Database string `json:"database" jsonschema:"database name or ID"`
 	Limit    int    `json:"limit,omitempty" jsonschema:"how many to return, newest first"`
 }
 
 type listTasksInput struct {
-	Database string `json:"database,omitempty" jsonschema:"only this database (name or ID); omit for the whole organization"`
+	Database string `json:"database,omitempty" jsonschema:"only this database (name or ID); when omitted, the whole organization"`
 	Status   string `json:"status,omitempty" jsonschema:"only tasks in this status"`
 	Type     string `json:"type,omitempty" jsonschema:"only tasks of this type"`
 	Limit    int    `json:"limit,omitempty" jsonschema:"how many to return, newest first"`
 }
 
 type getTaskInput struct {
-	TaskID       string `json:"task_id" jsonschema:"task ID (task_...), from list_tasks or a write tool"`
+	TaskID       string `json:"task_id" jsonschema:"task ID (task_...)"`
 	LogTailBytes int    `json:"log_tail_bytes,omitempty" jsonschema:"how much of the end of the task log to include; 0 for the default"`
 }
 
@@ -100,32 +100,31 @@ type PostgresView struct {
 func (t *tools) addReadTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "get_org",
-		Description: "Show the Rowsafe organization this connection acts for: its plan, plan limits (max hosts and databases) and current usage. Use it before registering a database to check there is room on the plan, or to explain a 402 plan-limit error.",
+		Description: "Shows the Rowsafe organization this connection acts for: its plan, plan limits (max hosts and databases) and current usage. Read-only.",
 		Annotations: readOnly("Organization and plan"),
 	}, t.getOrg)
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "list_hosts",
-		Description: "List the database hosts enrolled in the organization with their agent: online (heartbeat within 5 minutes) or not, agent version, platform, update channel, version pin, and the outcome of the agent's last self-update. Hostnames and IDs from here are what plan_adoption's host input expects.",
+		Description: "Lists the database hosts enrolled in the organization with their agent: online (heartbeat within 5 minutes) or not, agent version, platform, update channel, version pin, and the outcome of the agent's last self-update. Read-only.",
 		Annotations: readOnly("List hosts"),
 	}, t.listHosts)
 
 	sdk.AddTool(s, &sdk.Tool{
-		Name: "list_databases",
-		Description: "List every PostgreSQL cluster Rowsafe protects or is adopting, with a health summary for each: status, PostgreSQL version and size, the last backup and last full backup (with age), the last restore test (Proof, drill) and whether it passed, WAL archiving (last archived segment, lag, failure counts, whether archiving is failing), and one-line problems. " +
-			"For the next action on each problem, use fleet_health; for one database in depth, get_database.",
+		Name:        "list_databases",
+		Description: "Lists every PostgreSQL cluster Rowsafe protects or is adopting, with a health summary for each: status, PostgreSQL version and size, the last backup and last full backup (with age), the last restore test (Proof, drill) and whether it passed, WAL archiving (last archived segment, lag, failure counts, whether archiving is failing), and one-line problems. Read-only.",
 		Annotations: readOnly("List databases"),
 	}, t.listDatabases)
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "get_database",
-		Description: "Show one database in depth: status, host, socket and port, retention and cron schedules (UTC), PostgreSQL settings relevant to archiving (wal_level, archive_mode, pending restart), WAL archiving stats, recent backups, recent restore tests (drills), recent tasks, and its problems with next actions.",
+		Description: "Shows one database in depth: status, host, socket and port, retention and cron schedules (UTC), PostgreSQL settings relevant to archiving (wal_level, archive_mode, pending restart), WAL archiving stats, recent backups, recent restore tests (drills), recent tasks, and its problems with next actions. Read-only.",
 		Annotations: readOnly("Show database"),
 	}, t.getDatabase)
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "list_backups",
-		Description: "List a database's finished backups, newest first: label, type (full, diff or incr), start and finish time, age, database size and bytes stored in the bucket. Only backups still in the repository's history are listed; retention expires older ones.",
+		Description: "Lists a database's finished backups, newest first: label, type (full, diff or incr), start and finish time, age, database size and bytes stored in the bucket. Only backups still in the repository's history are listed; retention expires older ones.",
 		Annotations: readOnly("List backups"),
 		InputSchema: inputSchema[listInput](func(p map[string]*jsonschema.Schema) {
 			p["limit"].Minimum, p["limit"].Maximum, p["limit"].Default = ptr(1.0), ptr(100.0), []byte("20")
@@ -134,7 +133,7 @@ func (t *tools) addReadTools(s *sdk.Server) {
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "list_drills",
-		Description: "List a database's restore tests (Proof; task type drill), newest first. A restore test restores the latest backup plus all archived WAL into a scratch cluster on the host and compares databases and table counts with production. Shows pass/fail, the backup used, the point in time recovered to, duration, and any failures or warnings.",
+		Description: "Lists a database's restore tests (Proof; task type drill), newest first. A restore test restores the latest backup plus all archived WAL into a scratch cluster on the host and compares databases and table counts with production. Shows pass/fail, the backup used, the point in time recovered to, duration, and any failures or warnings.",
 		Annotations: readOnly("List restore tests"),
 		InputSchema: inputSchema[listInput](func(p map[string]*jsonschema.Schema) {
 			p["limit"].Minimum, p["limit"].Maximum, p["limit"].Default = ptr(1.0), ptr(50.0), []byte("10")
@@ -143,7 +142,7 @@ func (t *tools) addReadTools(s *sdk.Server) {
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "list_tasks",
-		Description: "List tasks (inspect, adopt, check, backup, drill (the restore test), restore_point, restart, maintenance (a health fix a person applied), security_scan and security_fix (a security check, and a security change a person made), and the rewind_* tasks a person started from Rewind), newest first, for the whole organization or one database, optionally filtered by status and type. Shows who queued them (scheduler or a person), status, timing and the first line of any error. Use get_task for a task's result and log.",
+		Description: "Lists tasks (inspect, adopt, check, backup, drill (the restore test), restore_point, restart, maintenance (a health fix a person applied), security_scan and security_fix (a security check, and a security change a person made), and the rewind_* tasks a person started from Rewind), newest first, for the whole organization or one database, optionally filtered by status and type. Shows who queued them (scheduler or a person), status, timing and the first line of any error. Read-only.",
 		Annotations: readOnly("List tasks"),
 		InputSchema: inputSchema[listTasksInput](func(p map[string]*jsonschema.Schema) {
 			p["status"].Enum = []any{protocol.StatusQueued, protocol.StatusRunning, protocol.StatusSucceeded, protocol.StatusFailed, protocol.StatusLost, protocol.StatusCancelled}
@@ -157,8 +156,8 @@ func (t *tools) addReadTools(s *sdk.Server) {
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "get_task",
-		Description: "Show one task: status, timing, error, its typed result (an adopt plan or what was applied, a backup, a restore test report, a restart, or a WAL check), the end of its log, and what to do next. " +
-			"Poll this after a write tool returns a task that is still queued or running (every 10-30 seconds; backups and restore tests of large databases take hours).",
+		Description: "Shows one task: status, timing, error, its typed result (an adopt plan or what was applied, a backup, a restore test report, a restart, or a WAL check), the end of its log, and the suggested next step. " +
+			"done is false while the task is queued or running; backups and restore tests of large databases can run for hours. Read-only.",
 		Annotations: readOnly("Show task"),
 		InputSchema: inputSchema[getTaskInput](func(p map[string]*jsonschema.Schema) {
 			p["log_tail_bytes"].Minimum, p["log_tail_bytes"].Maximum = ptr(0.0), ptr(float64(maxLogTail))
@@ -167,9 +166,8 @@ func (t *tools) addReadTools(s *sdk.Server) {
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "fleet_health",
-		Description: "Check the whole fleet in one call and list every problem, worst first, each with the exact next action, the rowsafe CLI command, and the MCP tool that does it when there is one. " +
-			"Covers: offline agents, stale or missing backups (none in 26h, no full in 8 days), failing WAL archiving, PostgreSQL unreachable by the agent, failed or overdue restore tests, databases not yet adopted or awaiting a PostgreSQL restart, failed WAL verification, recently failed or lost tasks, tasks never picked up, rolled-back or failed agent updates, and plan limits. " +
-			"Start here for any \"is everything OK?\", \"why did I get an alert?\" or \"what needs attention?\" question.",
+		Description: "Checks the whole fleet at once and lists every problem, worst first, each with the exact next action, the rowsafe CLI command, and the MCP tool that does it when there is one. " +
+			"Covers: offline agents, stale or missing backups (none in 26h, no full in 8 days), failing WAL archiving, PostgreSQL unreachable by the agent, failed or overdue restore tests, databases not yet adopted or awaiting a PostgreSQL restart, failed WAL verification, recently failed or lost tasks, tasks never picked up, rolled-back or failed agent updates, and plan limits. Read-only.",
 		Annotations: readOnly("Fleet health"),
 	}, t.fleetHealth)
 }

@@ -39,9 +39,9 @@ type StandbyStatusView struct {
 func (t *tools) addStandbyReadTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "standby_status",
-		Description: "Show a database's standby server (a second server that stays in sync, is readable for reports, and can take over): " +
+		Description: "Shows a database's standby server (a second server that stays in sync, is readable for reports, and can take over): " +
 			"whether it is in sync, streaming or following through the bucket, how far behind, fenced old primaries, whether automatic failover is on, " +
-			"and connection strings that follow the primary. Read-only: no tool creates, promotes or removes a standby.",
+			"and connection strings that follow the primary. Read-only: it changes nothing on either server.",
 		Annotations: readOnly("Standby status"),
 	}, t.standbyStatus)
 }

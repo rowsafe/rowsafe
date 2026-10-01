@@ -42,7 +42,7 @@ const storageGuidance = "A second copy keeps the backups in a second bucket at a
 func (t *tools) addStorageTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "backup_storage",
-		Description: "Show how much space a database's backups take in each storage bucket, the estimated monthly cost, how it grew in 30 days, " +
+		Description: "Shows how much space a database's backups take in each storage bucket, the estimated monthly cost, how it grew in 30 days, " +
 			"and whether a second copy (a second bucket at another provider) exists and is up to date. Read-only.",
 		Annotations: readOnly("Backup storage and costs"),
 	}, t.backupStorage)

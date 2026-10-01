@@ -18,7 +18,7 @@ import (
 // it; rewinding to the moment stays with people.
 
 type findMomentInput struct {
-	Database string   `json:"database" jsonschema:"the database's name or ID (list_databases)"`
+	Database string   `json:"database" jsonschema:"the database's name or ID"`
 	Tables   []string `json:"tables,omitempty" jsonschema:"only these tables: schema.table or just table (e.g. applications)"`
 	DB       string   `json:"db,omitempty" jsonschema:"only this PostgreSQL database inside the server (datname), when it has several"`
 	// SinceHours is how far back from To to search.
@@ -28,8 +28,8 @@ type findMomentInput struct {
 	Kinds      []string   `json:"kinds,omitempty" jsonschema:"only these kinds of change: delete, update, truncate, drop (default all)"`
 	MinRows    int64      `json:"min_rows,omitempty" jsonschema:"leave out transactions that deleted or changed fewer rows"`
 	// TaskID fetches an earlier search instead of starting one.
-	TaskID      string `json:"task_id,omitempty" jsonschema:"the task_id of an earlier find_moment still running: returns its result instead of starting a new search"`
-	WaitSeconds *int   `json:"wait_seconds,omitempty" jsonschema:"how long to wait for the result (default 55); searches of long ranges can take minutes, then call again with task_id"`
+	TaskID      string `json:"task_id,omitempty" jsonschema:"the task_id of an earlier search: returns that search's result instead of starting a new one"`
+	WaitSeconds *int   `json:"wait_seconds,omitempty" jsonschema:"how long to wait for the result (default 55); searches of long ranges can take minutes, and the result then has status running and a task_id"`
 }
 
 // MomentView is one transaction's change to one table.
@@ -48,7 +48,7 @@ type MomentView struct {
 type FindMomentView struct {
 	Database     string       `json:"database"`
 	TaskID       string       `json:"task_id"`
-	Status       string       `json:"status" jsonschema:"queued or running (call again with task_id), succeeded or failed"`
+	Status       string       `json:"status" jsonschema:"queued or running (not finished; task_id identifies the search), succeeded or failed"`
 	Error        string       `json:"error,omitempty"`
 	From         *time.Time   `json:"from,omitempty"`
 	To           *time.Time   `json:"to,omitempty"`
@@ -65,10 +65,10 @@ const momentGuidance = "Tell the user what happened and when. PostgreSQL's chang
 func (t *tools) addMomentTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "find_moment",
-		Description: "Find when rows were deleted or changed, or a table emptied (TRUNCATE) or dropped: the Rowsafe agent reads the database's change log (WAL) in the user's own storage, on their server, " +
-			"and lists the biggest changes per transaction with the exact commit time, transaction ID, table and row count. Read-only: it never changes the database and never reads row contents. " +
-			"Use it when the user says data went missing or was overwritten (\"when were rows deleted from applications?\") so they know exactly which point to rewind to. " +
-			"Default range: the last 24 hours. It can take a minute or more; if the status is still queued or running, call again with task_id.",
+		Description: "Finds when rows were deleted or changed, or a table emptied (TRUNCATE) or dropped: the Rowsafe agent reads the database's change log (WAL) in the user's own storage, on their server, " +
+			"and lists the biggest changes per transaction with the exact commit time, transaction ID, table, row count and the point in time just before it (the moment to rewind to). " +
+			"Read-only: it never changes the database and never reads row contents. " +
+			"Default range: the last 24 hours. A search can take a minute or more; while its status is queued or running, the result has a task_id, and passing that task_id returns the search's result instead of starting a new one.",
 		Annotations: readOnly("Find the moment"),
 		InputSchema: inputSchema[findMomentInput](func(p map[string]*jsonschema.Schema) {
 			p["since_hours"].Minimum, p["since_hours"].Maximum = ptr(0.0), ptr(protocol.MaxMomentRange.Hours())
