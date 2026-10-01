@@ -427,6 +427,12 @@ EOF
   done
   [ "$(stat -c '%U %G %a' /etc/rowsafe)" = "root postgres 750" ] || fail "/etc/rowsafe ownership/mode"
   cmp /usr/local/lib/rowsafe/rowsafe-agent-guard /src/scripts/rowsafe-agent-guard || fail "guard differs from scripts/rowsafe-agent-guard"
+  # permit-host: one-click permission changes run root's own copy of the agent.
+  [ "$(stat -c '%U %a' /usr/local/lib/rowsafe/rowsafe-permissions)" = "root 755" ] || fail "permissions helper ownership/mode"
+  cmp /usr/local/lib/rowsafe/rowsafe-permissions /opt/rowsafe/versions/0.2.0/rowsafe-agent || fail "permissions helper is not the release's agent"
+  grep -qx "Environment=ROWSAFE_AGENT_USER=postgres" /etc/systemd/system/rowsafe-permissions.service || fail "permissions unit's agent user"
+  grep -qx "PathExists=/var/lib/rowsafe/permissions/request" /etc/systemd/system/rowsafe-permissions.path || fail "permissions path unit"
+  [ "$(stat -c '%U %a' /var/lib/rowsafe/permissions)" = "postgres 700" ] || fail "permissions request directory"
   cmp /etc/systemd/system/rowsafe-agent.service /src/deploy/systemd/rowsafe-agent.service || fail "unit differs from deploy/systemd/rowsafe-agent.service"
   cmp /etc/logrotate.d/rowsafe /src/deploy/logrotate/rowsafe || fail "logrotate config differs from deploy/logrotate/rowsafe"
   [ "$(stat -c '%U %a' /etc/logrotate.d/rowsafe)" = "root 644" ] || fail "logrotate config ownership/mode"
@@ -470,6 +476,7 @@ EOF
 
   expect_ok "upgrade to 0.12.0" env ROWSAFE_VERSION=0.12.0 "$INSTALLER"
   [ "$(readlink /opt/rowsafe/rowsafe-agent)" = versions/0.12.0/rowsafe-agent ] || fail "not switched to 0.12.0"
+  cmp /usr/local/lib/rowsafe/rowsafe-permissions /opt/rowsafe/versions/0.12.0/rowsafe-agent || fail "permissions helper not upgraded" # permit-host
   runuser -u postgres -- mkdir -p /var/lib/rowsafe/update/pending
   install -d -m 0755 -o root -g root /opt/rowsafe/bin && touch /opt/rowsafe/bin/rowsafe-agent-guard # an older install's guard
   expect_ok "channel older than installed keeps it" "$INSTALLER"
@@ -496,6 +503,15 @@ EOF
     }
     systemd-analyze security --offline=true --no-pager /etc/systemd/system/rowsafe-agent.service 2>/dev/null |
       tail -n 1 | sed "s/^/  rowsafe-agent: /"
+    # permit-host
+    expect_ok "systemd-analyze verify (permissions units)" \
+      systemd-analyze verify /etc/systemd/system/rowsafe-permissions.service /etc/systemd/system/rowsafe-permissions.path
+    [ ! -s "$W/out" ] || {
+      cat "$W/out" >&2
+      fail "systemd-analyze verify printed warnings for the permissions units"
+    }
+    systemd-analyze security --offline=true --no-pager /etc/systemd/system/rowsafe-permissions.service 2>/dev/null |
+      tail -n 1 | sed "s/^/  rowsafe-permissions: /"
   fi
 
   echo "x" >/var/lib/postgresql/17/main/postgresql.auto.conf
