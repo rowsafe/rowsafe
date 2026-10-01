@@ -1,6 +1,7 @@
 # Builds, signs, attests and publishes an agent/CLI release (and the Docker
-# images: ghcr.io/rowsafe/agent, ghcr.io/rowsafe/docker-control) when a
-# vMAJOR.MINOR.PATCH tag is pushed. See docs/verifying-releases.md.
+# images: ghcr.io/rowsafe/agent:<version>-pg<major>[-alpine] and the floating
+# pg<major>[-alpine], ghcr.io/rowsafe/docker-control:<version> and latest)
+# when a vMAJOR.MINOR.PATCH tag is pushed. See docs/verifying-releases.md.
 #
 # Every release carries three independent proofs:
 #   1. manifest.json.sig   Ed25519 signature the agent checks before it runs an
@@ -204,8 +205,29 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0 # the tags, to tell whether this is the newest release
       - name: Version from tag
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >>"$GITHUB_ENV"
+      # Every release pushes the exact tag (<version>-pg<major>[-alpine], for
+      # people who pin a version) and moves the floating tag
+      # (pg<major>[-alpine]: `docker compose pull && docker compose up -d`
+      # updates). Only the newest release moves the floating tags, so
+      # re-running an older tag's workflow never takes them backwards. Tags
+      # are strict vMAJOR.MINOR.PATCH (the release job refuses anything
+      # else), so there are no prereleases to keep off them.
+      - name: Image tags
+        env:
+          TAG: ${{ env.IMAGE }}:${{ env.VERSION }}-pg${{ matrix.pg }}${{ matrix.flavor.suffix }}
+          FLOATING: ${{ env.IMAGE }}:pg${{ matrix.pg }}${{ matrix.flavor.suffix }}
+        run: |
+          newest=$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+          tags="$TAG"
+          if [ "$newest" = "$GITHUB_REF_NAME" ]; then
+            tags="$tags,$FLOATING"
+          else
+            echo "::notice::$GITHUB_REF_NAME is not the newest release ($newest): $FLOATING stays where it is"
+          fi
+          echo "TAGS=$tags" >>"$GITHUB_ENV"
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -225,7 +247,7 @@ jobs:
             PG_MAJOR=${{ matrix.pg }}
             PG_UID=${{ matrix.flavor.uid }}
             PG_GID=${{ matrix.flavor.gid }}
-          tags: ${{ env.IMAGE }}:${{ env.VERSION }}-pg${{ matrix.pg }}${{ matrix.flavor.suffix }}
+          tags: ${{ env.TAGS }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ env.VERSION }}
@@ -262,8 +284,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Version from tag
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >>"$GITHUB_ENV"
+      # <version>, and "latest" from the newest release only (as the agent's
+      # floating tags above).
+      - name: Image tags
+        run: |
+          newest=$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+          tags="$IMAGE:$VERSION"
+          if [ "$newest" = "$GITHUB_REF_NAME" ]; then tags="$tags,$IMAGE:latest"; fi
+          echo "TAGS=$tags" >>"$GITHUB_ENV"
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -280,7 +311,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           build-args: |
             VERSION=${{ env.VERSION }}
-          tags: ${{ env.IMAGE }}:${{ env.VERSION }}
+          tags: ${{ env.TAGS }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ env.VERSION }}

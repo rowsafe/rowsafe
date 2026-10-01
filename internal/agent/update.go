@@ -82,7 +82,8 @@ type probation struct {
 // on this install; the agent then keeps running without it.
 func NewUpdater(cfg Config, logger *slog.Logger) (*Updater, string) {
 	if cfg.Sidecar() {
-		return nil, "running from a container image (ROWSAFE_MODE=docker-sidecar); images are immutable, so upgrade by changing the image tag (https://rowsafe.sh/docs/guides/docker)"
+		return nil, "running from a container image (ROWSAFE_MODE=docker-sidecar), which the agent can't replace itself: update the image tag " +
+			"(`docker compose pull rowsafe-agent && docker compose up -d rowsafe-agent`; https://rowsafe.sh/docs/guides/docker#upgrade)"
 	}
 	if !cfg.AutoUpdate {
 		return nil, "disabled by ROWSAFE_AUTO_UPDATE=false"

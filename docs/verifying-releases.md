@@ -59,6 +59,9 @@ cosign verify ghcr.io/rowsafe/agent:1.2.3-pg17 \
 gh attestation verify oci://ghcr.io/rowsafe/agent:1.2.3-pg17 --repo rowsafe/rowsafe
 ```
 
+The floating tags (`pg17`, `pg17-alpine`, `docker-control:latest`) point to
+the same signed images as the newest release's exact tags.
+
 ## 5. Rebuild it yourself
 
 Release builds are reproducible: CGO is off, paths are trimmed, there is no VCS stamp or build ID, and the Go toolchain is pinned in `go.mod`.

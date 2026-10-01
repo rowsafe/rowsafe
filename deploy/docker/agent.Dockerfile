@@ -5,8 +5,9 @@
 # which stay unmodified. One image per PostgreSQL major version and image
 # flavour: it carries pgBackRest and that major's server binaries (for
 # restore drills) from apt.postgresql.org, and runs as the postgres image's
-# postgres uid/gid. Published as ghcr.io/rowsafe/agent:<version>-pg<major>
-# and ...-pg<major>-alpine.
+# postgres uid/gid. Published as ghcr.io/rowsafe/agent:pg<major> and
+# ...:pg<major>-alpine (floating: the newest release), and
+# ...:<version>-pg<major>[-alpine] (exact: pins a release).
 #
 #   docker build -f deploy/docker/agent.Dockerfile --build-arg PG_MAJOR=17 -t rowsafe-agent:pg17 .
 #   # for postgres:NN-alpine (postgres is uid/gid 70 there):
