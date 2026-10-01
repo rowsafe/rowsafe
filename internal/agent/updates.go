@@ -94,11 +94,12 @@ func helperOK(res map[string]string) error {
 	return errors.New(cmp.Or(res["error"], "the update helper failed without saying why"))
 }
 
-// allowQuestion is the installer's question for each allow word.
-var allowQuestion = map[string]string{
-	protocol.UpdateAllowPostgres: `"Allow Rowsafe to install PostgreSQL updates when you click Update?" (--allow-updates)`,
-	protocol.UpdateAllowSecurity: `"Allow Rowsafe to install security updates when you click Install?" (--allow-security-updates)`,
-	protocol.UpdateAllowReboot:   `"Allow Rowsafe to reboot this server when you click Reboot?" (--allow-reboot)`,
+// allowPermission is the permission (sudo rowsafe-allow NAME) for each
+// allow word.
+var allowPermission = map[string]string{
+	protocol.UpdateAllowPostgres: protocol.PermUpdates,
+	protocol.UpdateAllowSecurity: protocol.PermSecurityUpdates,
+	protocol.UpdateAllowReboot:   protocol.PermReboot,
 }
 
 // updatesAllowed checks that root allowed word on this host and that the
@@ -109,7 +110,7 @@ func (a *Agent) updatesAllowed(word, action string) error {
 	}
 	host, _ := os.Hostname()
 	if !slices.Contains(a.updateAllowed(), word) {
-		return fmt.Errorf("that isn't allowed on %s. Re-run the install command there and answer yes to %s", host, allowQuestion[word])
+		return fmt.Errorf("that isn't allowed on %s: root allows it there with %s", host, AllowHint(allowPermission[word]))
 	}
 	if !slices.Contains(a.updateHelperActions(), action) {
 		return fmt.Errorf("the helper that installs updates on %s is missing or from an older Rowsafe: re-run the install command there", host)
@@ -132,8 +133,7 @@ func (a *Agent) pgAllowed(db protocol.DatabaseSpec, action string) (string, erro
 	}
 	unit, ok := allowed[db.Port]
 	if !ok {
-		return "", fmt.Errorf("Rowsafe isn't allowed to restart PostgreSQL on port %d, which updating it needs. Re-run the install command "+
-			"and answer yes to \"Allow Rowsafe to restart or stop PostgreSQL when you ask?\" (--allow-restart)", db.Port)
+		return "", fmt.Errorf("Rowsafe isn't allowed to restart PostgreSQL on port %d, which updating it needs: root allows it with %s", db.Port, AllowHint(protocol.PermRestart))
 	}
 	return unit, nil
 }

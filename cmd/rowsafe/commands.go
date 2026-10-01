@@ -481,7 +481,7 @@ func restartNotAllowed(d protocol.Database) string {
 	}
 	return fmt.Sprintf("not restarted: %s doesn't allow restarts from Rowsafe (only root can allow it, at install time).\n"+
 		"Either restart PostgreSQL yourself, on %s:\n  sudo systemctl restart postgresql\n"+
-		"or allow it: re-run the install command on %s and say yes to restarts (--allow-restart).", d.Hostname, d.Hostname, d.Hostname)
+		"or allow it: run sudo rowsafe-allow restart on %s (an older Rowsafe: re-run the install command there with --allow-restart).", d.Hostname, d.Hostname, d.Hostname)
 }
 
 func backupCmd(ctx context.Context, c *client.Client, args []string) error {

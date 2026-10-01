@@ -104,11 +104,11 @@ func (a *Agent) restart(ctx context.Context, db protocol.DatabaseSpec, taskID st
 	unit, ok := allowed[db.Port]
 	if !ok {
 		return nil, fmt.Errorf("restarting PostgreSQL from Rowsafe is not turned on for port %d on %s. Restart it yourself on the server: %s "+
-			"(to allow restarts from Rowsafe, run the installer again with --allow-restart)", db.Port, host, a.restartHint(ctx, db))
+			"(to allow restarts from Rowsafe, root runs %s there)", db.Port, host, a.restartHint(ctx, db), AllowHint(protocol.PermRestart))
 	}
 	if st, err := os.Stat(a.cfg.RestartDir); err != nil || !st.IsDir() {
-		return nil, fmt.Errorf("the restart helper is not set up on %s (%s is missing): run the installer again with --allow-restart, "+
-			"or restart PostgreSQL yourself: sudo systemctl restart %s", host, a.cfg.RestartDir, strings.TrimSuffix(unit, ".service"))
+		return nil, fmt.Errorf("the restart helper is not set up on %s (%s is missing): root allows it there with %s, "+
+			"or restart PostgreSQL yourself: sudo systemctl restart %s", host, a.cfg.RestartDir, AllowHint(protocol.PermRestart), strings.TrimSuffix(unit, ".service"))
 	}
 
 	start := time.Now()

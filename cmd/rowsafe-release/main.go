@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -29,8 +30,9 @@ Usage:
   rowsafe-release keygen
       print a new Ed25519 key pair; store the private key in your secret store
   rowsafe-release manifest --version V --base-url URL --dist DIR
-      describe DIR/rowsafe-agent-linux-{amd64,arm64} as a release manifest on stdout;
-      artifacts are expected at URL/V/rowsafe-agent-linux-ARCH
+      describe DIR/rowsafe-agent-linux-{amd64,arm64} and the rendered DIR/install.sh
+      (when there) as a release manifest on stdout; artifacts are expected at
+      URL/V/rowsafe-agent-linux-ARCH and URL/V/install.sh
   rowsafe-release sign [--key-env ROWSAFE_RELEASE_PRIVATE_KEY] MANIFEST
       write MANIFEST.sig; the private key is read from the named environment variable
   rowsafe-release verify --public-key B64 MANIFEST SIG
@@ -45,6 +47,10 @@ var archs = []string{"amd64", "arm64"}
 
 // maxArtifactSize matches what agents accept (see release.Verify).
 const maxArtifactSize = 512 << 20
+
+// installerName is the rendered installer in a release's dist directory,
+// listed under protocol.ReleaseInstallerKey.
+const installerName = "install.sh"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -155,6 +161,26 @@ func buildManifest(version, baseURL, dist string, releasedAt time.Time) (protoco
 	}
 	if len(m.Artifacts) == 0 {
 		return m, fmt.Errorf("no agent binaries in %s (want rowsafe-agent-linux-amd64 and/or -arm64)", dist)
+	}
+	// The installer, so the copy it leaves on each server
+	// (/usr/local/lib/rowsafe/install.sh) is checked against this signed
+	// manifest. Only a rendered one: the placeholder key makes it refuse to run.
+	path := filepath.Join(dist, installerName)
+	a, err := describeArtifact(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+	case err != nil:
+		return m, err
+	default:
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return m, err
+		}
+		if !bytes.Contains(data, []byte("\nRELEASE_PUBLIC_KEY='")) || bytes.Contains(data, []byte("@RELEASE_PUBLIC_KEY@")) {
+			return m, fmt.Errorf("%s is not a rendered installer (its release key is missing)", path)
+		}
+		a.URL = fmt.Sprintf("%s/%s/%s", base, v, installerName)
+		m.Artifacts[protocol.ReleaseInstallerKey] = a
 	}
 	return m, nil
 }

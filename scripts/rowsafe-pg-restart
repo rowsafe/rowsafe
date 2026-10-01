@@ -347,7 +347,7 @@ pooler_configure() {
   [ -n "$_listen" ] || _listen=127.0.0.1
   if [ "$_listen" = '*' ]; then
     grep -qx 'public' "$pooler_allow" ||
-      pooler_refuse "listening on every address isn't allowed on this server (the installer's --allow-pooler-public)"
+      pooler_refuse "listening on every address isn't allowed on this server (allow it on the server with: sudo rowsafe-allow pooler-public)"
   else
     _n=0
     for _a in $(printf '%s' "$_listen" | tr ',' ' '); do
@@ -573,7 +573,7 @@ create_cluster() {
   [ -n "$range" ] || refuse "creating PostgreSQL clusters from Rowsafe is not allowed on this server"
   [ "$c_port" -ge "${range%-*}" ] && [ "$c_port" -le "${range#*-}" ] ||
     refuse "port $c_port is not in the ports Rowsafe may create clusters on ($range)"
-  check_root_file "$created" "$created is missing: run the installer again with --allow-create-cluster"
+  check_root_file "$created" "$created is missing: allow it on the server with: sudo rowsafe-allow create-cluster"
   for list in "$allow" "$created"; do
     if [ -f "$list" ] && awk -v p="$c_port" '$1 "" == p "" { f = 1 } END { exit !f }' "$list"; then
       refuse "port $c_port is already used by a cluster Rowsafe manages"
@@ -973,7 +973,7 @@ lsclusters() { pg_lsclusters -h 2>/dev/null; }
 # for the Debian cluster on PORT, which must be in the restart allow list
 # as its postgresql@MAJOR-NAME.service.
 cluster_for_port() {
-  check_root_file "$allow" "Rowsafe may not restart PostgreSQL on this server, which updating it needs (run the installer again with --allow-restart)"
+  check_root_file "$allow" "Rowsafe may not restart PostgreSQL on this server, which updating it needs (allow it on the server with: sudo rowsafe-allow restart)"
   unit=$(allowed_unit "$1")
   [ -n "$unit" ] || refuse "port $1 is not in $allow: Rowsafe may not restart it, which updating it needs"
   c_line=$(lsclusters | awk -v p="$1" '$3 == p { print; exit }')
@@ -1132,7 +1132,7 @@ record_put() {
 }
 
 act_pg_minor_update() {
-  update_allowed postgresql "installing PostgreSQL updates from Rowsafe is not allowed on this server (run the installer again with --allow-updates)"
+  update_allowed postgresql "installing PostgreSQL updates from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
   cluster_for_port "$port"
   m=$c_major
   before=$(pkg_version "postgresql-$m")
@@ -1168,7 +1168,7 @@ act_pg_minor_update() {
 }
 
 act_pg_install_major() {
-  update_allowed postgresql "installing PostgreSQL from Rowsafe is not allowed on this server (run the installer again with --allow-updates)"
+  update_allowed postgresql "installing PostgreSQL from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
   cluster_for_port "$port"
   [ "$major" -gt "$c_major" ] || refuse "PostgreSQL $major is not newer than PostgreSQL $c_major on port $port"
   : >"$work_log"
@@ -1207,7 +1207,7 @@ act_pg_install_major() {
 }
 
 act_pg_upgrade() {
-  update_allowed postgresql "upgrading PostgreSQL from Rowsafe is not allowed on this server (run the installer again with --allow-updates)"
+  update_allowed postgresql "upgrading PostgreSQL from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
   cluster_for_port "$port"
   [ "$major" -gt "$c_major" ] || refuse "PostgreSQL $major is not newer than PostgreSQL $c_major on port $port"
   rec=$(record_file "$port")
@@ -1308,7 +1308,7 @@ read_record() {
 }
 
 act_pg_upgrade_undo() {
-  update_allowed postgresql "upgrading PostgreSQL from Rowsafe is not allowed on this server (run the installer again with --allow-updates)"
+  update_allowed postgresql "upgrading PostgreSQL from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
   check_root_file "$allow" "Rowsafe may not restart PostgreSQL on this server"
   read_record "$port"
   [ "$r_status" = upgraded ] || refuse "that upgrade was already undone"
@@ -1340,7 +1340,7 @@ act_pg_upgrade_undo() {
 }
 
 act_pg_upgrade_cleanup() {
-  update_allowed postgresql "upgrading PostgreSQL from Rowsafe is not allowed on this server (run the installer again with --allow-updates)"
+  update_allowed postgresql "upgrading PostgreSQL from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
   read_record "$port"
   if [ "$r_status" = upgraded ]; then kept=$r_from; else kept=$r_to; fi
   [ "$(cluster_field "$kept" "$r_name" 3)" != "$port" ] || refuse "PostgreSQL $kept/$r_name is the one on port $port"
@@ -1384,7 +1384,7 @@ act_pg_upgrade_cleanup() {
 }
 
 act_security_updates() {
-  update_allowed security "installing security updates from Rowsafe is not allowed on this server (run the installer again with --allow-security-updates)"
+  update_allowed security "installing security updates from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow security-updates)"
   cooldown security-updates 300
   : >"$work_log"
   apt_refresh
@@ -1421,7 +1421,7 @@ cooldown() {
 }
 
 act_reboot() {
-  update_allowed reboot "rebooting the server from Rowsafe is not allowed here (run the installer again with --allow-reboot)"
+  update_allowed reboot "rebooting the server from Rowsafe is not allowed here (allow it on the server with: sudo rowsafe-allow reboot)"
   cooldown reboot 600
   log "rebooting the server (request $id)"
   # The answer comes before the reboot: it says the reboot was asked for.

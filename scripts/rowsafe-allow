@@ -1,0 +1,204 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-allow: change what Rowsafe may do on this server.
+#
+# Installed by https://rowsafe.sh/install as /usr/local/sbin/rowsafe-allow
+# (root, 0755). Rowsafe only restarts PostgreSQL, installs updates, reboots,
+# manages PgBouncer or the firewall when someone clicks that in the
+# dashboard and confirms, and only what root allowed on the server. This is
+# how root changes that after the install:
+#
+#   sudo rowsafe-allow                      what Rowsafe may do here
+#   sudo rowsafe-allow restart reboot       allow these
+#   sudo rowsafe-allow --remove reboot      stop allowing these
+#
+# Changes run the installer's permissions-only mode (--permissions) from the
+# copy the installer keeps in /usr/local/lib/rowsafe, checked against the
+# signed release when it was put there. Passkeys (--add-owner) run root's
+# copy of the agent there too, never the binary in /opt/rowsafe, which the
+# agent's user owns.
+
+set -u
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+installer=/usr/local/lib/rowsafe/install.sh
+agent=/usr/local/lib/rowsafe/rowsafe-agent
+owners=/etc/rowsafe/owners
+update='curl -fsSL https://rowsafe.sh | sudo sh'
+names='restart create-cluster updates security-updates reboot pooler pooler-public firewall'
+
+usage() {
+  cat <<'EOF'
+rowsafe-allow: change what Rowsafe may do on this server.
+
+Rowsafe only does these when someone clicks them in your dashboard and
+confirms. Root decides here which ones it may do at all.
+
+  sudo rowsafe-allow                       show what Rowsafe may do here
+  sudo rowsafe-allow NAME...               allow these, e.g.
+                                             sudo rowsafe-allow restart security-updates
+  sudo rowsafe-allow --remove NAME...      stop allowing these, e.g.
+                                             sudo rowsafe-allow --remove reboot
+  sudo rowsafe-allow --files PATH          back up a folder (uploads) with its database
+                                           and let Rowsafe put restored files back there
+  sudo rowsafe-allow --remove files        stop putting restored files back
+
+Names:
+  restart            restart or stop PostgreSQL (Restart, Rewind in place)
+  create-cluster     create a PostgreSQL cluster here for a fork (needs restart)
+  updates            install PostgreSQL updates and upgrades (needs restart)
+  security-updates   install this server's security updates (needs restart)
+  reboot             reboot this server after an update (needs security-updates)
+  pooler             install and manage PgBouncer (connection pooling)
+  pooler-public      let PgBouncer listen on public addresses (needs pooler)
+  firewall           limit who can reach PostgreSQL's port (never SSH or other ports)
+
+Turning one off also turns off what needs it.
+EOF
+  if passkeys; then
+    cat <<'EOF'
+
+One-click changes from the dashboard, signed with a passkey you pair here:
+  sudo rowsafe-allow --add-owner           pair a passkey (opens a link to approve)
+  sudo rowsafe-allow --owners              list the paired passkeys
+  sudo rowsafe-allow --remove-owner FINGERPRINT   unpair one
+EOF
+  fi
+}
+
+fail() {
+  printf 'rowsafe-allow: %s\n' "$1" >&2
+  exit "${2:-1}"
+}
+
+# root_file PATH: a regular file that root owns and only root can change.
+root_file() {
+  [ -f "$1" ] && [ ! -L "$1" ] && [ "$(stat -c '%u' "$1")" = 0 ] || return 1
+  case $(stat -c '%A' "$1") in
+    ?????w???? | ????????w?) return 1 ;;
+  esac
+}
+
+# installer_ok: root's installer copy is there and has --permissions.
+installer_ok() {
+  root_file "$installer" && grep -q -- '--permissions)' "$installer"
+}
+
+need_installer() {
+  installer_ok || fail "Rowsafe on this server is too old for this (or isn't installed). Update it first: $update"
+}
+
+# passkeys: root's agent copy can pair passkeys.
+passkeys() {
+  root_file "$agent" && "$agent" permissions --help >/dev/null 2>&1
+}
+
+owner_cmd() {
+  passkeys || fail "Rowsafe on this server is too old for passkeys. Update it first: $update"
+  exec "$agent" permissions "$@"
+}
+
+# installed_version: the agent's version, so a change never updates Rowsafe
+# on the side.
+installed_version() {
+  _l=$(readlink /opt/rowsafe/rowsafe-agent 2>/dev/null) || return 0
+  case $_l in
+    versions/*/rowsafe-agent) _l=${_l#versions/} && printf '%s\n' "${_l%/rowsafe-agent}" ;;
+  esac
+}
+
+# list_owners prints the paired passkeys (/etc/rowsafe/owners, root's).
+list_owners() {
+  passkeys || return 0
+  echo ""
+  if ! root_file "$owners" || ! grep -q '"credential_id"' "$owners"; then
+    echo "One-click changes from the dashboard: pair a passkey with sudo rowsafe-allow --add-owner"
+    return 0
+  fi
+  echo "Passkeys that can change these with one click in the dashboard:"
+  tr -d '\r\n' <"$owners" | sed 's/}[[:space:]]*,[[:space:]]*{/}\n{/g' | while IFS= read -r _o; do
+    _fp=$(printf '%s\n' "$_o" | sed -n 's/.*"fingerprint"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    _name=$(printf '%s\n' "$_o" | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    _at=$(printf '%s\n' "$_o" | sed -n 's/.*"added_at"[[:space:]]*:[[:space:]]*"\([0-9-]\{10\}\).*/\1/p')
+    [ -n "$_fp" ] || continue
+    printf '    %s  %s%s\n' "$_fp" "${_name:-(no name)}" "${_at:+, added $_at}"
+  done
+  echo "    Unpair one: sudo rowsafe-allow --remove-owner FINGERPRINT"
+}
+
+case ${1:-} in
+  -h | --help | help)
+    usage
+    exit 0
+    ;;
+esac
+
+if [ "$(id -u)" != 0 ]; then
+  fail "only root can see or change what Rowsafe may do on this server. Run it with sudo: sudo rowsafe-allow${*:+ $*}"
+fi
+
+case ${1:-} in
+  '')
+    need_installer
+    "$installer" --permissions || exit $?
+    list_owners
+    exit 0
+    ;;
+  --add-owner)
+    shift
+    owner_cmd pair "$@"
+    ;;
+  --owners)
+    [ $# = 1 ] || fail "--owners takes nothing else" 2
+    owner_cmd owners
+    ;;
+  --remove-owner)
+    [ $# = 2 ] || fail "which passkey? sudo rowsafe-allow --remove-owner FINGERPRINT (sudo rowsafe-allow --owners lists them)" 2
+    owner_cmd remove-owner "$2"
+    ;;
+  --files)
+    need_installer
+    set -- "$@" --end
+    _args=''
+    while [ "$1" != --end ]; do
+      [ "$1" = --files ] && [ "$2" != --end ] || fail "use: sudo rowsafe-allow --files /path/to/folder [--files /another/folder]" 2
+      case $2 in
+        /*) ;;
+        *) fail "--files needs the folder's full path, e.g. /var/www/uploads" 2 ;;
+      esac
+      _args="$_args --files $2"
+      shift 2
+    done
+    # The installer's files flow, on the installed version, without the
+    # database questions. (Paths have no spaces: the installer refuses them.)
+    # shellcheck disable=SC2086 # one word per argument
+    exec env ROWSAFE_VERSION="$(installed_version)" "$installer" --no-setup $_args --allow-files
+    ;;
+esac
+
+_flags='' _off=0 _any=0
+for _a in "$@"; do
+  case $_a in
+    --remove)
+      _off=1
+      continue
+      ;;
+    files)
+      [ "$_off" = 1 ] || fail "name the folder: sudo rowsafe-allow --files /var/www/uploads" 2
+      _flags="$_flags --no-allow-files"
+      ;;
+    -*) fail "unknown option $_a (see sudo rowsafe-allow --help)" 2 ;;
+    *)
+      case " $names " in
+        *" $_a "*) ;;
+        *) fail "there is no permission called '$_a'. The names: $(echo "$names" | sed 's/ /, /g')" 2 ;;
+      esac
+      if [ "$_off" = 1 ]; then _flags="$_flags --no-allow-$_a"; else _flags="$_flags --allow-$_a"; fi
+      ;;
+  esac
+  _any=1
+done
+[ "$_any" = 1 ] || fail "--remove needs a name, e.g. sudo rowsafe-allow --remove reboot" 2
+need_installer
+# shellcheck disable=SC2086 # one word per flag
+exec "$installer" --permissions --no-prompt $_flags

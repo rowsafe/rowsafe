@@ -115,7 +115,7 @@ func (a *Agent) firewallState(port int) protocol.FirewallState {
 	}
 	st := protocol.FirewallState{Allowed: true}
 	if _, err := os.Stat(a.firewallDir()); err != nil {
-		st.Allowed, st.Reason = false, "The firewall helper is not set up on this server: run the installer again with --allow-firewall."
+		st.Allowed, st.Reason = false, "The firewall helper is not set up on this server: root allows it with "+AllowHint(protocol.PermFirewall)+"."
 		return st
 	}
 	data, err := os.ReadFile(filepath.Join(firewallResultDir, "port-"+strconv.Itoa(port)))
@@ -146,7 +146,7 @@ func (a *Agent) firewallState(port int) protocol.FirewallState {
 func (a *Agent) firewall(ctx context.Context, db protocol.DatabaseSpec, p protocol.SecurityFixParams, res *protocol.SecurityFixResult, tl *taskLog) error {
 	st := a.firewallState(db.Port)
 	if !st.Allowed {
-		return errors.New(st.Reason + " To allow it, run the Rowsafe installer on this server again with --allow-firewall.")
+		return errors.New(st.Reason + " To allow it, root runs " + AllowHint(protocol.PermFirewall) + " on this server.")
 	}
 	action := fwRemove
 	var addrs []string

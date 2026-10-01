@@ -55,7 +55,10 @@
 #   --allow-security-updates  allow Rowsafe to install the server's security
 #                          updates when you click Install; --no-allow-security-updates
 #   --allow-reboot         allow Rowsafe to reboot the server when you click
-#                          Reboot; --no-allow-reboot
+#                          Reboot (needs --allow-security-updates); --no-allow-reboot
+#   --permissions          on a server where Rowsafe is installed, change only
+#                          what it may do (--allow-X, --no-allow-X), nothing
+#                          else; what `sudo rowsafe-allow NAME` runs
 #   --check-storage        test the configured backup storage; change nothing
 #   --add-storage          set up a second backup copy in another bucket (guided)
 #   --remove-second-copy   stop sending backups to the second copy
@@ -146,6 +149,11 @@ FIREWALL_DIR=$STATE_DIR/firewall
 UPDATE_SERVICE_FILE=/etc/systemd/system/rowsafe-pg-update.service
 UPDATE_PATH_FILE=/etc/systemd/system/rowsafe-pg-update.path
 UPDATES_ALLOW_FILE=$CONFIG_DIR/updates-allowed
+# Changing all that later (permissions section): `sudo rowsafe-allow`, which
+# runs the installer's --permissions mode from root's verified copy of it.
+ALLOW_COMMAND=/usr/local/sbin/rowsafe-allow
+INSTALLER_COPY=$LIB_DIR/install.sh
+ROOT_AGENT=$LIB_DIR/rowsafe-agent
 AGENT_USER=postgres
 # >>> mysql: a server with MySQL or MariaDB and no PostgreSQL runs the agent
 # as the mysql user (detect_host_engine), like postgres on a PostgreSQL one.
@@ -185,7 +193,7 @@ PROTECT_PORT=''    # --protect-port PORT
 ALLOW_RESTART=''   # --allow-restart (yes) / --no-allow-restart (no); '' = ask once, on a terminal
 ALLOW_CREATE_CLUSTER='' # --allow-create-cluster (yes) / --no-allow-create-cluster (no); '' = ask once
 ALLOW_POOLER=''    # --allow-pooler (yes) / --no-allow-pooler (no); '' = ask once, on a terminal
-ALLOW_POOLER_PUBLIC=0 # --allow-pooler-public: PgBouncer may also listen on every address
+ALLOW_POOLER_PUBLIC='' # --allow-pooler-public (yes) / --no-allow-pooler-public (no): PgBouncer on every address
 ALLOW_FIREWALL=''  # --allow-firewall (yes) / --no-allow-firewall (no); '' = ask once, on a terminal
 ALLOW_UPDATES=''   # --allow-updates / --no-allow-updates (PostgreSQL updates and upgrades)
 ALLOW_SECURITY=''  # --allow-security-updates / --no-allow-security-updates
@@ -280,7 +288,12 @@ Options (when piping, pass them after `sh -s --`):
   --allow-security-updates  allow Rowsafe to install the server's security updates when
                          you click Install and confirm (--no-allow-security-updates: off)
   --allow-reboot         allow Rowsafe to reboot the server when you click Reboot and
-                         confirm (--no-allow-reboot: off)
+                         confirm (needs --allow-security-updates; --no-allow-reboot: off)
+  --no-allow-pooler-public  PgBouncer listens on this server's own addresses only
+  --permissions          change only what Rowsafe may do on this server, where it is
+                         installed: --allow-X and --no-allow-X, nothing else (no
+                         download, the agent and backups untouched). Prints what
+                         Rowsafe may do. `sudo rowsafe-allow NAME` runs this
   --mongodb-replica-set  MongoDB: turn a standalone server into a single-member replica
                          set without asking (one MongoDB restart); restoring to any
                          second needs it
@@ -345,6 +358,18 @@ Turning on backups:
   question), it restarts or stops PostgreSQL when you ask (Restart, and
   Rewind the whole database, in the dashboard), and only when someone
   confirms. Automation: --protect NAME.
+
+What Rowsafe may do on this server:
+  Rowsafe only restarts PostgreSQL, installs updates, reboots, manages
+  PgBouncer or the firewall when someone clicks that in the dashboard and
+  confirms, and only what root allowed here. On a terminal the installer asks
+  once (a re-run keeps the answers) and then shows what is allowed. Change it
+  any time with `sudo rowsafe-allow` (list), `sudo rowsafe-allow NAME` (allow)
+  and `sudo rowsafe-allow --remove NAME`. Names: restart, create-cluster,
+  updates, security-updates, reboot, pooler, pooler-public, firewall. Some
+  need another: create-cluster, updates and security-updates need restart,
+  reboot needs security-updates, pooler-public needs pooler. Turning one off
+  turns off what needs it.
 
 Documentation: https://rowsafe.sh/docs/reference/agent-configuration
 EOF
@@ -1351,7 +1376,7 @@ pooler_configure() {
   [ -n "$_listen" ] || _listen=127.0.0.1
   if [ "$_listen" = '*' ]; then
     grep -qx 'public' "$pooler_allow" ||
-      pooler_refuse "listening on every address isn't allowed on this server (the installer's --allow-pooler-public)"
+      pooler_refuse "listening on every address isn't allowed on this server (allow it on the server with: sudo rowsafe-allow pooler-public)"
   else
     _n=0
     for _a in $(printf '%s' "$_listen" | tr ',' ' '); do
@@ -1577,7 +1602,7 @@ create_cluster() {
   [ -n "$range" ] || refuse "creating PostgreSQL clusters from Rowsafe is not allowed on this server"
   [ "$c_port" -ge "${range%-*}" ] && [ "$c_port" -le "${range#*-}" ] ||
     refuse "port $c_port is not in the ports Rowsafe may create clusters on ($range)"
-  check_root_file "$created" "$created is missing: run the installer again with --allow-create-cluster"
+  check_root_file "$created" "$created is missing: allow it on the server with: sudo rowsafe-allow create-cluster"
   for list in "$allow" "$created"; do
     if [ -f "$list" ] && awk -v p="$c_port" '$1 "" == p "" { f = 1 } END { exit !f }' "$list"; then
       refuse "port $c_port is already used by a cluster Rowsafe manages"
@@ -1977,7 +2002,7 @@ lsclusters() { pg_lsclusters -h 2>/dev/null; }
 # for the Debian cluster on PORT, which must be in the restart allow list
 # as its postgresql@MAJOR-NAME.service.
 cluster_for_port() {
-  check_root_file "$allow" "Rowsafe may not restart PostgreSQL on this server, which updating it needs (run the installer again with --allow-restart)"
+  check_root_file "$allow" "Rowsafe may not restart PostgreSQL on this server, which updating it needs (allow it on the server with: sudo rowsafe-allow restart)"
   unit=$(allowed_unit "$1")
   [ -n "$unit" ] || refuse "port $1 is not in $allow: Rowsafe may not restart it, which updating it needs"
   c_line=$(lsclusters | awk -v p="$1" '$3 == p { print; exit }')
@@ -2136,7 +2161,7 @@ record_put() {
 }
 
 act_pg_minor_update() {
-  update_allowed postgresql "installing PostgreSQL updates from Rowsafe is not allowed on this server (run the installer again with --allow-updates)"
+  update_allowed postgresql "installing PostgreSQL updates from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
   cluster_for_port "$port"
   m=$c_major
   before=$(pkg_version "postgresql-$m")
@@ -2172,7 +2197,7 @@ act_pg_minor_update() {
 }
 
 act_pg_install_major() {
-  update_allowed postgresql "installing PostgreSQL from Rowsafe is not allowed on this server (run the installer again with --allow-updates)"
+  update_allowed postgresql "installing PostgreSQL from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
   cluster_for_port "$port"
   [ "$major" -gt "$c_major" ] || refuse "PostgreSQL $major is not newer than PostgreSQL $c_major on port $port"
   : >"$work_log"
@@ -2211,7 +2236,7 @@ act_pg_install_major() {
 }
 
 act_pg_upgrade() {
-  update_allowed postgresql "upgrading PostgreSQL from Rowsafe is not allowed on this server (run the installer again with --allow-updates)"
+  update_allowed postgresql "upgrading PostgreSQL from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
   cluster_for_port "$port"
   [ "$major" -gt "$c_major" ] || refuse "PostgreSQL $major is not newer than PostgreSQL $c_major on port $port"
   rec=$(record_file "$port")
@@ -2312,7 +2337,7 @@ read_record() {
 }
 
 act_pg_upgrade_undo() {
-  update_allowed postgresql "upgrading PostgreSQL from Rowsafe is not allowed on this server (run the installer again with --allow-updates)"
+  update_allowed postgresql "upgrading PostgreSQL from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
   check_root_file "$allow" "Rowsafe may not restart PostgreSQL on this server"
   read_record "$port"
   [ "$r_status" = upgraded ] || refuse "that upgrade was already undone"
@@ -2344,7 +2369,7 @@ act_pg_upgrade_undo() {
 }
 
 act_pg_upgrade_cleanup() {
-  update_allowed postgresql "upgrading PostgreSQL from Rowsafe is not allowed on this server (run the installer again with --allow-updates)"
+  update_allowed postgresql "upgrading PostgreSQL from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
   read_record "$port"
   if [ "$r_status" = upgraded ]; then kept=$r_from; else kept=$r_to; fi
   [ "$(cluster_field "$kept" "$r_name" 3)" != "$port" ] || refuse "PostgreSQL $kept/$r_name is the one on port $port"
@@ -2388,7 +2413,7 @@ act_pg_upgrade_cleanup() {
 }
 
 act_security_updates() {
-  update_allowed security "installing security updates from Rowsafe is not allowed on this server (run the installer again with --allow-security-updates)"
+  update_allowed security "installing security updates from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow security-updates)"
   cooldown security-updates 300
   : >"$work_log"
   apt_refresh
@@ -2425,7 +2450,7 @@ cooldown() {
 }
 
 act_reboot() {
-  update_allowed reboot "rebooting the server from Rowsafe is not allowed here (run the installer again with --allow-reboot)"
+  update_allowed reboot "rebooting the server from Rowsafe is not allowed here (allow it on the server with: sudo rowsafe-allow reboot)"
   cooldown reboot 600
   log "rebooting the server (request $id)"
   # The answer comes before the reboot: it says the reboot was asked for.
@@ -2595,8 +2620,21 @@ remove_restart_helper() {
 # restart_pairs prints "PORT UNIT" for the discovered clusters with a
 # systemd unit (the ones a restart helper can restart).
 restart_pairs() {
+  if [ ! -f "$TMP/clusters" ]; then
+    root_restart_pairs
+    return 0
+  fi
   [ -s "$TMP/clusters" ] || return 0
   awk -F '\t' '($14 == "" || $14 == "postgresql") && $1 ~ /^[1-9][0-9]*$/ && $12 ~ /^postgresql@[0-9]+-[A-Za-z0-9_.-]+\.service$/ { print $1, $12 }' "$TMP/clusters"
+}
+
+# root_restart_pairs prints "PORT UNIT" for the clusters root finds itself
+# (pg_lsclusters, Debian's postgresql@MAJOR-NAME units), where the agent's
+# discovery didn't run (--permissions; root never needs the agent for it).
+root_restart_pairs() {
+  have pg_lsclusters || return 0
+  pg_lsclusters -h 2>/dev/null |
+    awk '$1 ~ /^[0-9]+$/ && $2 ~ /^[A-Za-z0-9_.-]+$/ && $3 ~ /^[1-9][0-9]*$/ { print $3, "postgresql@" $1 "-" $2 ".service" }'
 }
 
 # restart_allowed PORT: is PORT in the allow list?
@@ -2613,13 +2651,13 @@ allow_restarts() {
   {
     echo "# PostgreSQL clusters Rowsafe may restart or stop when someone asks"
     echo "# (Restart and Rewind in the dashboard, \`rowsafe restart\`), only when they"
-    echo "# confirm. Written by the installer (root); run it with --no-allow-restart"
-    echo "# to turn this off."
+    echo "# confirm. Written by the installer (root); turn this off with:"
+    echo "# sudo rowsafe-allow --remove restart"
     echo "# PORT UNIT"
     printf '%s\n' "$_pairs"
   } | write_file "$RESTART_ALLOW_FILE" 0644 root:root || true
   install_restart_helper
-  ok "Rowsafe may restart or stop PostgreSQL when you ask (Restart, Rewind), only when someone confirms (turn off with --no-allow-restart)"
+  perm_ok "Rowsafe may restart or stop PostgreSQL when you ask (Restart, Rewind), only when someone confirms"
 }
 
 disallow_restarts() {
@@ -2628,7 +2666,7 @@ disallow_restarts() {
   if [ -d "$CONFIG_DIR" ]; then
     {
       echo "# Restarting or stopping PostgreSQL from Rowsafe is off on this server."
-      echo "# Run the installer with --allow-restart to turn it on."
+      echo "# Turn it on with: sudo rowsafe-allow restart"
     } | write_file "$RESTART_ALLOW_FILE" 0644 root:root || true
   fi
 }
@@ -2640,7 +2678,7 @@ restart_access() {
     yes) allow_restarts ;;
     no)
       disallow_restarts
-      ok "restarting or stopping PostgreSQL from Rowsafe is off"
+      perm_ok "restarting or stopping PostgreSQL from Rowsafe is off"
       ;;
     *)
       if [ -f "$RESTART_ALLOW_FILE" ]; then
@@ -2648,12 +2686,11 @@ restart_access() {
         return 0
       fi
       [ "$TTY" = 1 ] && [ -n "$(restart_pairs)" ] || return 0
-      say ""
-      if confirm "Allow Rowsafe to restart or stop PostgreSQL when you ask? Only when someone clicks Restart or Rewind in the dashboard and confirms." y; then
+      if perm_ask "Restart or stop PostgreSQL, when someone clicks Restart or Rewind?" y; then
         allow_restarts
       else
         disallow_restarts
-        note "OK: Rowsafe can't restart or stop PostgreSQL (change it with --allow-restart)"
+        perm_note "OK: Rowsafe can't restart or stop PostgreSQL"
       fi
       ;;
   esac
@@ -2815,13 +2852,13 @@ allow_create_clusters() {
   {
     echo "# Rowsafe may create a new PostgreSQL cluster on one of these ports when"
     echo "# someone forks a database to this server and confirms. Written by the"
-    echo "# installer (root); run it with --no-allow-create-cluster to turn this off."
+    echo "# installer (root); turn this off with: sudo rowsafe-allow --remove create-cluster"
     echo "ports $CREATE_PORTS"
   } | write_file "$CREATE_ALLOW_FILE" 0644 root:root || true
   install_create_cluster
   install_restart_helper
   as_agent mkdir -p -m 0700 "$RESTART_DIR"
-  ok "Rowsafe may create a new PostgreSQL cluster (ports $CREATE_PORTS) when you fork a database here (turn off with --no-allow-create-cluster)"
+  perm_ok "Rowsafe may create a new PostgreSQL cluster (ports $CREATE_PORTS) when you fork a database here"
 }
 
 disallow_create_clusters() {
@@ -2829,7 +2866,7 @@ disallow_create_clusters() {
   if [ -d "$CONFIG_DIR" ]; then
     {
       echo "# Creating PostgreSQL clusters for forks is off on this server."
-      echo "# Run the installer with --allow-create-cluster to turn it on."
+      echo "# Turn it on with: sudo rowsafe-allow create-cluster"
     } | write_file "$CREATE_ALLOW_FILE" 0644 root:root || true
   fi
   # The helper stays while restarts are allowed; clusters created earlier
@@ -2845,7 +2882,7 @@ create_cluster_access() {
     yes) allow_create_clusters ;;
     no)
       disallow_create_clusters
-      ok "creating PostgreSQL clusters for forks is off"
+      perm_ok "creating PostgreSQL clusters for forks is off"
       ;;
     *)
       if [ -f "$CREATE_ALLOW_FILE" ]; then
@@ -2855,12 +2892,11 @@ create_cluster_access() {
       # Asked only where restarts are allowed: the created cluster is
       # stopped and started by the same helper.
       [ "$TTY" = 1 ] && command -v pg_createcluster >/dev/null 2>&1 && grep -qs '^[0-9]' "$RESTART_ALLOW_FILE" || return 0
-      say ""
-      if confirm "Allow Rowsafe to create a new PostgreSQL cluster here when you fork a database to this server? Only when someone confirms a fork; ports $CREATE_PORTS." y; then
+      if perm_ask "Create a new PostgreSQL cluster here (ports $CREATE_PORTS), when someone forks a database to this server?" y; then
         allow_create_clusters
       else
         disallow_create_clusters
-        note "OK: forks to this server go into an empty cluster you create (change it with --allow-create-cluster)"
+        perm_note "OK: forks to this server go into an empty cluster you create"
       fi
       ;;
   esac
@@ -2991,39 +3027,43 @@ decide_update() {
 update_access() {
   if [ ! -x "$RESTART_HELPER" ] || ! grep -qs '^[0-9]' "$RESTART_ALLOW_FILE"; then
     case "$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT" in
-      *yes*) warn "installing updates or rebooting from Rowsafe needs --allow-restart too (the same helper does it); left off" ;;
+      *yes*) warn "installing updates or rebooting from Rowsafe needs restarts allowed too (--allow-restart: the same helper does it); left off" ;;
     esac
     remove_update_units
     [ ! -f "$UPDATES_ALLOW_FILE" ] || rm -f "$UPDATES_ALLOW_FILE"
     return 0
   fi
   [ -f "$UPDATES_ALLOW_FILE" ] || [ "$TTY" = 1 ] || [ -n "$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT" ] || return 0
-  [ -f "$UPDATES_ALLOW_FILE" ] || [ "$TTY" = 0 ] || say ""
-  _pg=$(decide_update "$ALLOW_UPDATES" postgresql "Allow Rowsafe to install PostgreSQL updates when you click Update? Minor updates and major upgrades, only when someone confirms; a Mark is saved first." y)
-  _sec=$(decide_update "$ALLOW_SECURITY" security "Allow Rowsafe to install this server's security updates when you click Install? Only when someone confirms." n)
+  # (The questions run in subshells: the heading comes first, here.)
+  if [ ! -f "$UPDATES_ALLOW_FILE" ] && [ "$TTY" = 1 ] && { [ -z "$ALLOW_UPDATES" ] || [ -z "$ALLOW_SECURITY" ]; }; then
+    perm_intro
+  fi
+  _pg=$(decide_update "$ALLOW_UPDATES" postgresql "Install PostgreSQL updates and upgrades, when someone clicks Update? A Mark is saved first." y)
+  _sec=$(decide_update "$ALLOW_SECURITY" security "Install this server's security updates, when someone clicks Install?" n)
   _reboot=no
-  if [ "$_sec" = yes ] || [ "$ALLOW_REBOOT" = yes ]; then
-    _reboot=$(decide_update "$ALLOW_REBOOT" reboot "Allow Rowsafe to reboot this server when you click Reboot? Only when someone confirms; a Mark is saved first." n)
+  if [ "$_sec" = yes ]; then
+    _reboot=$(decide_update "$ALLOW_REBOOT" reboot "Reboot this server, when someone clicks Reboot? A Mark is saved first." n)
+  elif [ "$ALLOW_REBOOT" = yes ]; then
+    warn "rebooting from Rowsafe goes with security updates (--allow-security-updates); left off"
   fi
   {
     echo "# What Rowsafe may install or do on this server when someone clicks it in"
-    echo "# the dashboard and confirms. Written by the installer (root); change it by"
-    echo "# running the installer with --allow-updates / --no-allow-updates,"
-    echo "# --allow-security-updates / --no-allow-security-updates and --allow-reboot /"
-    echo "# --no-allow-reboot."
+    echo "# the dashboard and confirms. Written by the installer (root); change it"
+    echo "# with sudo rowsafe-allow updates (security-updates, reboot), and"
+    echo "# sudo rowsafe-allow --remove updates (...)."
     [ "$_pg" != yes ] || echo "postgresql   # PostgreSQL minor updates and major upgrades (clusters in restart-allowed)"
     [ "$_sec" != yes ] || echo "security     # security updates (PostgreSQL's own packages excepted)"
     [ "$_reboot" != yes ] || echo "reboot       # rebooting the server"
   } | write_file "$UPDATES_ALLOW_FILE" 0644 root:root || true
   if [ "$_pg$_sec$_reboot" = nonono ]; then
     remove_update_units
-    note "OK: Rowsafe can't install updates or reboot here (change it with --allow-updates, --allow-security-updates, --allow-reboot)"
+    perm_note "OK: Rowsafe can't install updates or reboot here"
     return 0
   fi
   install_update_units
-  [ "$_pg" != yes ] || ok "Rowsafe may install PostgreSQL updates and upgrade PostgreSQL when you click Update or Upgrade and confirm (turn off with --no-allow-updates)"
-  [ "$_sec" != yes ] || ok "Rowsafe may install security updates when you click Install and confirm (turn off with --no-allow-security-updates)"
-  [ "$_reboot" != yes ] || ok "Rowsafe may reboot this server when you click Reboot and confirm (turn off with --no-allow-reboot)"
+  [ "$_pg" != yes ] || perm_ok "Rowsafe may install PostgreSQL updates and upgrade PostgreSQL when you click Update or Upgrade and confirm"
+  [ "$_sec" != yes ] || perm_ok "Rowsafe may install security updates when you click Install and confirm"
+  [ "$_reboot" != yes ] || perm_ok "Rowsafe may reboot this server when you click Reboot and confirm"
 }
 
 # ---------------------------------------------------------------- firewall
@@ -3544,7 +3584,7 @@ write_firewall_allow() {
     echo "# PostgreSQL ports whose firewall rule Rowsafe may set when someone asks"
     echo "# (Security in the dashboard): only the chosen addresses may reach the"
     echo "# port. SSH and other ports are never touched. Written by the installer"
-    echo "# (root); run it with --no-allow-firewall to turn this off."
+    echo "# (root); turn this off with: sudo rowsafe-allow --remove firewall"
     echo "# PORT"
     printf '%s\n' "$@" | sort -un
   } | write_file "$FIREWALL_ALLOW_FILE" 0644 root:root || true
@@ -3552,7 +3592,7 @@ write_firewall_allow() {
 
 allow_firewall() {
   if ! command -v nft >/dev/null 2>&1; then
-    warn "nftables isn't installed here (no nft command), so limiting who can reach PostgreSQL stays off. Install it (e.g. apt install nftables) and run the installer again with --allow-firewall"
+    warn "nftables isn't installed here (no nft command), so limiting who can reach PostgreSQL stays off. Install it (e.g. apt install nftables), then: sudo rowsafe-allow firewall"
     return 0
   fi
   _ports=$(firewall_ports)
@@ -3564,7 +3604,7 @@ allow_firewall() {
   # shellcheck disable=SC2086 # one port per word
   write_firewall_allow $_listed $_ports
   install_firewall_helper
-  ok "Rowsafe may limit who can reach PostgreSQL's port ($(firewall_listed | paste -sd, - | sed 's/,/, /g')) when you ask (Security), never SSH or other ports (turn off with --no-allow-firewall)"
+  perm_ok "Rowsafe may limit who can reach PostgreSQL's port ($(firewall_listed | paste -sd, - | sed 's/,/, /g')) when you ask (Security), never SSH or other ports"
 }
 
 disallow_firewall() {
@@ -3572,7 +3612,7 @@ disallow_firewall() {
   if [ -d "$CONFIG_DIR" ]; then
     {
       echo "# Limiting who can reach PostgreSQL with the firewall is off for Rowsafe."
-      echo "# Run the installer with --allow-firewall to turn it on."
+      echo "# Turn it on with: sudo rowsafe-allow firewall"
     } | write_file "$FIREWALL_ALLOW_FILE" 0644 root:root || true
   fi
 }
@@ -3585,15 +3625,14 @@ firewall_access() {
     yes) allow_firewall ;;
     no)
       disallow_firewall
-      ok "limiting who can reach PostgreSQL with the firewall is off for Rowsafe"
+      perm_ok "limiting who can reach PostgreSQL with the firewall is off for Rowsafe"
       ;;
     *)
       if [ -n "$(firewall_listed)" ]; then
         install_firewall_helper
         _new=$(firewall_ports | grep -vxF "$(firewall_listed)" || true)
         [ -n "$_new" ] && [ "$TTY" = 1 ] || return 0
-        say ""
-        if confirm "PostgreSQL also listens on port $(printf '%s' "$_new" | paste -sd, - | sed 's/,/, /g'). Allow Rowsafe's firewall rule for it too?" n; then
+        if perm_ask "PostgreSQL also listens on port $(printf '%s' "$_new" | paste -sd, - | sed 's/,/, /g'). Allow Rowsafe's firewall rule for it too?" n; then
           # shellcheck disable=SC2046 # one port per word
           write_firewall_allow $(firewall_listed) $_new
         fi
@@ -3603,12 +3642,11 @@ firewall_access() {
       [ "$TTY" = 1 ] && command -v nft >/dev/null 2>&1 || return 0
       _ports=$(firewall_ports)
       [ -n "$_ports" ] || return 0
-      say ""
-      if confirm "Allow Rowsafe to limit who can reach PostgreSQL's port ($(printf '%s' "$_ports" | paste -sd, - | sed 's/,/, /g')) with the firewall? Only when someone picks the allowed addresses in the dashboard and confirms; SSH and other ports are never touched." n; then
+      if perm_ask "Limit who can reach PostgreSQL (port $(printf '%s' "$_ports" | paste -sd, - | sed 's/,/, /g')) with the firewall, when someone picks the addresses? SSH and other ports are never touched." n; then
         allow_firewall
       else
         disallow_firewall
-        note "OK: Rowsafe won't change the firewall (change it with --allow-firewall)"
+        perm_note "OK: Rowsafe won't change the firewall"
       fi
       ;;
   esac
@@ -3807,9 +3845,9 @@ write_pooler_allow() {
   {
     echo "# PostgreSQL clusters Rowsafe may put PgBouncer (connection pooling) in"
     echo "# front of, when someone turns pooling on in Rowsafe and confirms."
-    echo "# Written by the installer (root); run it with --no-allow-pooler to turn"
-    echo "# this off. \"public\": PgBouncer may listen on every address"
-    echo "# (--allow-pooler-public)."
+    echo "# Written by the installer (root); turn this off with:"
+    echo "# sudo rowsafe-allow --remove pooler. \"public\": PgBouncer may listen"
+    echo "# on every address (sudo rowsafe-allow pooler-public)."
     echo "# PORT"
     printf '%s\n' "$1"
     if [ "$2" = 1 ]; then echo public; fi
@@ -3824,12 +3862,22 @@ allow_pooler() {
     warn "found no PostgreSQL here, so managing PgBouncer from Rowsafe stays off"
     return 0
   fi
-  _public=$ALLOW_POOLER_PUBLIC
-  if grep -qsx public "$POOLER_ALLOW_FILE"; then _public=1; fi
+  _public=$(pooler_public_wanted)
   write_pooler_allow "$_ports" "$_public"
   install_pooler_units
-  ok "Rowsafe may install and manage PgBouncer when you turn pooling on, only when someone confirms (turn off with --no-allow-pooler)"
-  if [ "$_public" = 1 ]; then note "PgBouncer may listen on public addresses when someone chooses that: put a firewall in front of it."; fi
+  perm_ok "Rowsafe may install and manage PgBouncer when you turn pooling on, only when someone confirms"
+  if [ "$_public" = 1 ]; then perm_note "PgBouncer may listen on public addresses when someone chooses that: put a firewall in front of it."; fi
+}
+
+# pooler_public_wanted prints 1 when PgBouncer may listen on every address:
+# --allow-pooler-public, else what the allow list says
+# (--no-allow-pooler-public: 0).
+pooler_public_wanted() {
+  case $ALLOW_POOLER_PUBLIC in
+    yes) echo 1 ;;
+    no) echo 0 ;;
+    *) if grep -qsx public "$POOLER_ALLOW_FILE"; then echo 1; else echo 0; fi ;;
+  esac
 }
 
 # refresh_pooler: a re-run keeps the allow list as it is and adds a cluster
@@ -3840,12 +3888,11 @@ refresh_pooler() {
   for _newport in $(pooler_ports); do
     printf '%s\n' "$_have" | grep -qx "$_newport" && continue
     # (confirm uses $_p itself.)
-    if [ "$TTY" = 1 ] && confirm "Also allow PgBouncer for the PostgreSQL on port $_newport?" n; then
+    if [ "$TTY" = 1 ] && perm_ask "Also allow PgBouncer for the PostgreSQL on port $_newport?" n; then
       _ports=$(printf '%s\n%s\n' "$_ports" "$_newport" | awk 'NF' | sort -un)
     fi
   done
-  _public=$ALLOW_POOLER_PUBLIC
-  if grep -qsx public "$POOLER_ALLOW_FILE"; then _public=1; fi
+  _public=$(pooler_public_wanted)
   _was_public=0
   if grep -qsx public "$POOLER_ALLOW_FILE"; then _was_public=1; fi
   if [ "$_ports" != "$_have" ] || [ "$_public" != "$_was_public" ]; then
@@ -3859,11 +3906,11 @@ disallow_pooler() {
   if [ -d "$CONFIG_DIR" ]; then
     {
       echo "# Managing PgBouncer from Rowsafe is off on this server."
-      echo "# Run the installer with --allow-pooler to turn it on."
+      echo "# Turn it on with: sudo rowsafe-allow pooler"
     } | write_file "$POOLER_ALLOW_FILE" 0644 root:root || true
   fi
   if [ -f /etc/pgbouncer/pgbouncer.ini ] && [ "$(head -n 1 /etc/pgbouncer/pgbouncer.ini)" = ';; Managed by Rowsafe' ]; then
-    note "PgBouncer set up by Rowsafe keeps running for your apps; Rowsafe can no longer change it or turn it off."
+    perm_note "PgBouncer set up by Rowsafe keeps running for your apps; Rowsafe can no longer change it or turn it off."
   fi
 }
 
@@ -3874,7 +3921,7 @@ pooler_access() {
     yes) allow_pooler ;;
     no)
       disallow_pooler
-      ok "managing PgBouncer from Rowsafe is off"
+      perm_ok "managing PgBouncer from Rowsafe is off"
       ;;
     *)
       if [ -f "$POOLER_ALLOW_FILE" ]; then
@@ -3882,12 +3929,11 @@ pooler_access() {
         return 0
       fi
       [ "$TTY" = 1 ] && [ -n "$(pooler_ports)" ] || return 0
-      say ""
-      if confirm "Allow Rowsafe to install and manage PgBouncer? Nothing is installed now: only when someone turns connection pooling on in the dashboard and confirms." y; then
+      if perm_ask "Install and manage PgBouncer (connection pooling) when someone turns pooling on? Nothing is installed now." y; then
         allow_pooler
       else
         disallow_pooler
-        note "OK: Rowsafe won't install or manage PgBouncer (change it with --allow-pooler)"
+        perm_note "OK: Rowsafe won't install or manage PgBouncer"
       fi
       ;;
   esac
@@ -4172,7 +4218,7 @@ files_access() {
         allow_files
       else
         disallow_files
-        note "OK: restored files will wait next to the folder for you (change it with --allow-files)"
+        note "OK: restored files will wait next to the folder for you (change it with: sudo rowsafe-allow --files PATH)"
       fi
       ;;
   esac
@@ -4215,7 +4261,7 @@ allow_files() {
   rmdir "${OLD_FILES_DROPIN%/*}" 2>/dev/null || true
   have setfacl || apt_install acl
   install_files_units
-  ok "Rowsafe may put restored files back into $(cut -d' ' -f1 "$TMP/files-allow" | paste -sd' ' -), as the folder's owner, when someone asks (turn off with --no-allow-files)"
+  ok "Rowsafe may put restored files back into $(cut -d' ' -f1 "$TMP/files-allow" | paste -sd' ' -), as the folder's owner, when someone asks (turn off: sudo rowsafe-allow --remove files)"
 }
 
 disallow_files() {
@@ -4223,7 +4269,7 @@ disallow_files() {
   if [ -d "$CONFIG_DIR" ]; then
     {
       echo "# Reading and restoring folders through Rowsafe's root helper is off."
-      echo "# Run the installer with --files PATH --allow-files to turn it on."
+      echo "# Turn it on with: sudo rowsafe-allow --files PATH"
     } | write_file "$FILES_ALLOW_FILE" 0644 root:root || true
   fi
 }
@@ -4332,6 +4378,608 @@ remove_files_units() {
   fi
   [ -e "$RESTART_PATH_FILE" ] || [ -e "$POOLER_PATH_FILE" ] || [ -e "$UPDATE_PATH_FILE" ] || rm -f "$RESTART_HELPER"
   if systemd_running; then systemctl daemon-reload; fi
+}
+
+# ---------------------------------------------------------------- permissions (rowsafe-allow)
+# What Rowsafe may do on this server when someone clicks it in the dashboard
+# and confirms (protocol/permissions.go): asked once on a terminal, set with
+# --allow-X / --no-allow-X, shown at the end, and changed later with
+# `sudo rowsafe-allow NAME`, which runs this installer's permissions-only
+# mode (--permissions) from root's copy of it in $LIB_DIR, checked against
+# the signed release manifest.
+#
+#   install.sh --permissions [--allow-X ...] [--no-allow-X ...] [--no-prompt]
+#
+# changes only the allow lists and their root helpers and units, exactly as
+# an install does. It downloads nothing (except the installer copy when it is
+# missing), never touches the agent, its settings, the storage or the
+# databases, and asks nothing. A permission that needs another one that
+# stays off is refused (create-cluster, updates and security-updates need
+# restart, reboot needs security-updates, pooler-public needs pooler);
+# turning one off turns off what needs it. Exit status: 0 done (or nothing to
+# change), 2 refused (nothing was changed: unknown option, a missing need,
+# not possible on this server, Rowsafe not installed), 1 failed while
+# changing. The last lines are always what Rowsafe may do now.
+
+PERMISSIONS="restart create-cluster updates security-updates reboot pooler pooler-public firewall"
+PERM_QUIET=0 # 1: the summary says it all (the questions on a terminal, --permissions)
+PERM_INTRO=0 # 1 once the questions' heading is shown
+
+perm_ok() { [ "$PERM_QUIET" = 1 ] || ok "$@"; }
+perm_note() { [ "$PERM_QUIET" = 1 ] || note "$@"; }
+
+# perm_refuse MESSAGE: nothing was changed (exit status 2).
+perm_refuse() {
+  printf '%serror:%s %s\n' "$RED" "$RESET" "$*" >&2
+  exit 2
+}
+
+# perm_intro is the heading before the first question.
+perm_intro() {
+  [ "$PERM_INTRO" = 0 ] || return 0
+  PERM_INTRO=1
+  say ""
+  step "What may Rowsafe do on this server?"
+  note "Rowsafe only does these when someone clicks them in your dashboard and"
+  note "confirms. You can change them any time with \`sudo rowsafe-allow\`."
+}
+
+# perm_ask QUESTION y|n: a permission question, under the heading.
+perm_ask() {
+  perm_intro
+  confirm "$1" "$2"
+}
+
+# perm_var NAME prints the variable holding NAME's flag (yes, no or empty).
+perm_var() {
+  case $1 in
+    restart) echo ALLOW_RESTART ;;
+    create-cluster) echo ALLOW_CREATE_CLUSTER ;;
+    updates) echo ALLOW_UPDATES ;;
+    security-updates) echo ALLOW_SECURITY ;;
+    reboot) echo ALLOW_REBOOT ;;
+    pooler) echo ALLOW_POOLER ;;
+    pooler-public) echo ALLOW_POOLER_PUBLIC ;;
+    firewall) echo ALLOW_FIREWALL ;;
+    *) return 1 ;;
+  esac
+}
+perm_flag() { eval "printf '%s' \"\$$(perm_var "$1")\""; }
+perm_set() { eval "$(perm_var "$1")=\$2"; }
+
+# perm_need NAME prints the permission NAME only works with.
+perm_need() {
+  case $1 in
+    create-cluster | updates | security-updates) echo restart ;;
+    reboot) echo security-updates ;;
+    pooler-public) echo pooler ;;
+  esac
+}
+
+perm_desc() {
+  case $1 in
+    restart) echo "restart or stop PostgreSQL (Restart, Rewind)" ;;
+    create-cluster) echo "create a PostgreSQL cluster for a fork" ;;
+    updates) echo "install PostgreSQL updates and upgrades" ;;
+    security-updates) echo "install this server's security updates" ;;
+    reboot) echo "reboot this server (after an update)" ;;
+    pooler) echo "install and manage PgBouncer (pooling)" ;;
+    pooler-public) echo "let PgBouncer listen on public addresses" ;;
+    firewall) echo "limit who can reach PostgreSQL (firewall)" ;;
+  esac
+}
+
+# perm_state NAME prints yes or no, as root answered, or nothing (never
+# asked). The agent reads the same files (internal/agent/permissions.go).
+perm_state() {
+  case $1 in
+    restart) _sf=$RESTART_ALLOW_FILE ;;
+    create-cluster) _sf=$CREATE_ALLOW_FILE ;;
+    pooler | pooler-public) _sf=$POOLER_ALLOW_FILE ;;
+    firewall) _sf=$FIREWALL_ALLOW_FILE ;;
+    *) _sf=$UPDATES_ALLOW_FILE ;;
+  esac
+  [ -f "$_sf" ] || return 0
+  case $1 in
+    restart | pooler | firewall) _sy=$(grep -c '^[1-9]' "$_sf" || true) ;;
+    create-cluster) _sy=$(grep -c '^ports ' "$_sf" || true) ;;
+    pooler-public) _sy=$(grep -qs '^[1-9]' "$_sf" && grep -cx public "$_sf" || true) ;;
+    updates) _sy=$(grep -c '^postgresql\([[:space:]#]\|$\)' "$_sf" || true) ;;
+    security-updates) _sy=$(grep -c '^security\([[:space:]#]\|$\)' "$_sf" || true) ;;
+    reboot) _sy=$(grep -c '^reboot\([[:space:]#]\|$\)' "$_sf" || true) ;;
+  esac
+  if [ "${_sy:-0}" -gt 0 ]; then echo yes; else echo no; fi
+}
+
+perm_has_postgres() {
+  for _pb in /usr/lib/postgresql/*/bin/postgres; do
+    [ -x "$_pb" ] && return 0
+  done
+  return 1
+}
+
+# perm_why NAME prints why this server can't have NAME (nothing when it
+# can). The agent reports the same reasons.
+perm_why() {
+  if [ "$HOST_ENGINE" != postgresql ] || ! perm_has_postgres; then
+    echo "Rowsafe does this for PostgreSQL, and there is no PostgreSQL on this server"
+    return 0
+  fi
+  _w=''
+  case $1 in
+    restart) [ -n "$(restart_pairs)" ] || _w="found no PostgreSQL service (systemd) on this server" ;;
+    create-cluster) have pg_createcluster || _w="pg_createcluster isn't installed (Debian and Ubuntu's postgresql-common)" ;;
+    updates | security-updates | reboot) have apt-get || _w="Rowsafe installs updates with apt (Debian and Ubuntu)" ;;
+    pooler | pooler-public) [ -n "$(pooler_ports)$(pooler_allowed_ports)" ] || _w="found no PostgreSQL cluster here" ;;
+    firewall)
+      if ! have nft; then
+        _w="nftables isn't installed (apt install nftables)"
+      elif [ -z "$(firewall_ports)$(firewall_listed)" ]; then
+        _w="found no PostgreSQL listening here"
+      fi
+      ;;
+  esac
+  _n=$(perm_need "$1")
+  if [ -z "$_w" ] && [ -n "$_n" ] && [ -n "$(perm_why "$_n")" ]; then
+    _w="it needs $_n, which this server can't have"
+  fi
+  [ -z "$_w" ] || echo "$_w"
+}
+
+# perm_on NAME: NAME is allowed, or being allowed now.
+perm_on() {
+  [ "$(perm_flag "$1")" = yes ] || { [ "$(perm_flag "$1")" != no ] && [ "$(perm_state "$1")" = yes ]; }
+}
+
+# perm_chain NAME prints NAME after the permissions it needs that are off.
+perm_chain() {
+  _c=$1
+  _n=$(perm_need "$1")
+  while [ -n "$_n" ] && ! perm_on "$_n"; do
+    _c="$_n $_c"
+    _n=$(perm_need "$_n")
+  done
+  echo "$_c"
+}
+
+# perm_cascade: --no-allow-X turns off what needs X (in --permissions, only
+# what is on: the rest stays as it is); --allow-Y with --no-allow-(what Y
+# needs) contradicts itself. PERM_ALSO_OFF lists what was turned off this way.
+PERM_ALSO_OFF=''
+perm_cascade() {
+  for _p in $PERMISSIONS; do
+    _n=$(perm_need "$_p")
+    [ -n "$_n" ] && [ "$(perm_flag "$_n")" = no ] || continue
+    case $(perm_flag "$_p") in
+      yes) perm_refuse "$_p needs $_n, so it can't be allowed while $_n is turned off" ;;
+      no) ;;
+      *)
+        [ "${1:-}" != permissions ] || [ "$(perm_state "$_p")" = yes ] || continue
+        perm_set "$_p" no
+        [ "$(perm_state "$_p")" != yes ] || PERM_ALSO_OFF="$PERM_ALSO_OFF $_p"
+        ;;
+    esac
+  done
+}
+
+# perm_summary prints what Rowsafe may do here now, and how to change it.
+perm_summary() {
+  say ""
+  if [ "$HOST_ENGINE" != postgresql ] || ! perm_has_postgres; then
+    step "What Rowsafe may do on $(uname -n)"
+    note "Nothing to allow: these permissions are for PostgreSQL (restart it, install"
+    note "its updates, PgBouncer, the firewall), and there is no PostgreSQL here."
+    return 0
+  fi
+  step "What Rowsafe may do on $(uname -n), only when someone clicks it and confirms"
+  _first_on='' _first_off='' _rows_off='' _rows_na=''
+  for _p in $PERMISSIONS; do
+    if [ "$_p" = pooler-public ] && [ "$(perm_state pooler)" != yes ]; then continue; fi
+    if [ "$(perm_state "$_p")" = yes ]; then
+      printf '    %-12s %-17s %s\n' allowed "$_p" "$(perm_desc "$_p")"
+      _first_on=${_first_on:-$_p}
+      continue
+    fi
+    _why=$(perm_why "$_p")
+    if [ -n "$_why" ]; then
+      _rows_na="$_rows_na$(printf '    %-12s %-17s %s' unavailable "$_p" "$_why")
+"
+    else
+      _rows_off="$_rows_off$(printf '    %-12s %-17s %s' 'not allowed' "$_p" "$(perm_desc "$_p")")
+"
+      _first_off=${_first_off:-$_p}
+    fi
+  done
+  printf '%s%s' "$_rows_off" "$_rows_na"
+  [ -z "$_first_off" ] || note "Allow one:          sudo rowsafe-allow $(perm_chain "$_first_off")"
+  [ -z "$_first_on" ] || note "Stop allowing one:  sudo rowsafe-allow --remove $_first_on"
+  return 0
+}
+
+# install_allow_command installs `rowsafe-allow` (root's, 0755).
+install_allow_command() {
+  install -d -m 0755 -o root -g root "${ALLOW_COMMAND%/*}"
+  write_file "$ALLOW_COMMAND" 0755 root:root <<'ROWSAFE_ALLOW_EOF' || true
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-allow: change what Rowsafe may do on this server.
+#
+# Installed by https://rowsafe.sh/install as /usr/local/sbin/rowsafe-allow
+# (root, 0755). Rowsafe only restarts PostgreSQL, installs updates, reboots,
+# manages PgBouncer or the firewall when someone clicks that in the
+# dashboard and confirms, and only what root allowed on the server. This is
+# how root changes that after the install:
+#
+#   sudo rowsafe-allow                      what Rowsafe may do here
+#   sudo rowsafe-allow restart reboot       allow these
+#   sudo rowsafe-allow --remove reboot      stop allowing these
+#
+# Changes run the installer's permissions-only mode (--permissions) from the
+# copy the installer keeps in /usr/local/lib/rowsafe, checked against the
+# signed release when it was put there. Passkeys (--add-owner) run root's
+# copy of the agent there too, never the binary in /opt/rowsafe, which the
+# agent's user owns.
+
+set -u
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+installer=/usr/local/lib/rowsafe/install.sh
+agent=/usr/local/lib/rowsafe/rowsafe-agent
+owners=/etc/rowsafe/owners
+update='curl -fsSL https://rowsafe.sh | sudo sh'
+names='restart create-cluster updates security-updates reboot pooler pooler-public firewall'
+
+usage() {
+  cat <<'EOF'
+rowsafe-allow: change what Rowsafe may do on this server.
+
+Rowsafe only does these when someone clicks them in your dashboard and
+confirms. Root decides here which ones it may do at all.
+
+  sudo rowsafe-allow                       show what Rowsafe may do here
+  sudo rowsafe-allow NAME...               allow these, e.g.
+                                             sudo rowsafe-allow restart security-updates
+  sudo rowsafe-allow --remove NAME...      stop allowing these, e.g.
+                                             sudo rowsafe-allow --remove reboot
+  sudo rowsafe-allow --files PATH          back up a folder (uploads) with its database
+                                           and let Rowsafe put restored files back there
+  sudo rowsafe-allow --remove files        stop putting restored files back
+
+Names:
+  restart            restart or stop PostgreSQL (Restart, Rewind in place)
+  create-cluster     create a PostgreSQL cluster here for a fork (needs restart)
+  updates            install PostgreSQL updates and upgrades (needs restart)
+  security-updates   install this server's security updates (needs restart)
+  reboot             reboot this server after an update (needs security-updates)
+  pooler             install and manage PgBouncer (connection pooling)
+  pooler-public      let PgBouncer listen on public addresses (needs pooler)
+  firewall           limit who can reach PostgreSQL's port (never SSH or other ports)
+
+Turning one off also turns off what needs it.
+EOF
+  if passkeys; then
+    cat <<'EOF'
+
+One-click changes from the dashboard, signed with a passkey you pair here:
+  sudo rowsafe-allow --add-owner           pair a passkey (opens a link to approve)
+  sudo rowsafe-allow --owners              list the paired passkeys
+  sudo rowsafe-allow --remove-owner FINGERPRINT   unpair one
+EOF
+  fi
+}
+
+fail() {
+  printf 'rowsafe-allow: %s\n' "$1" >&2
+  exit "${2:-1}"
+}
+
+# root_file PATH: a regular file that root owns and only root can change.
+root_file() {
+  [ -f "$1" ] && [ ! -L "$1" ] && [ "$(stat -c '%u' "$1")" = 0 ] || return 1
+  case $(stat -c '%A' "$1") in
+    ?????w???? | ????????w?) return 1 ;;
+  esac
+}
+
+# installer_ok: root's installer copy is there and has --permissions.
+installer_ok() {
+  root_file "$installer" && grep -q -- '--permissions)' "$installer"
+}
+
+need_installer() {
+  installer_ok || fail "Rowsafe on this server is too old for this (or isn't installed). Update it first: $update"
+}
+
+# passkeys: root's agent copy can pair passkeys.
+passkeys() {
+  root_file "$agent" && "$agent" permissions --help >/dev/null 2>&1
+}
+
+owner_cmd() {
+  passkeys || fail "Rowsafe on this server is too old for passkeys. Update it first: $update"
+  exec "$agent" permissions "$@"
+}
+
+# installed_version: the agent's version, so a change never updates Rowsafe
+# on the side.
+installed_version() {
+  _l=$(readlink /opt/rowsafe/rowsafe-agent 2>/dev/null) || return 0
+  case $_l in
+    versions/*/rowsafe-agent) _l=${_l#versions/} && printf '%s\n' "${_l%/rowsafe-agent}" ;;
+  esac
+}
+
+# list_owners prints the paired passkeys (/etc/rowsafe/owners, root's).
+list_owners() {
+  passkeys || return 0
+  echo ""
+  if ! root_file "$owners" || ! grep -q '"credential_id"' "$owners"; then
+    echo "One-click changes from the dashboard: pair a passkey with sudo rowsafe-allow --add-owner"
+    return 0
+  fi
+  echo "Passkeys that can change these with one click in the dashboard:"
+  tr -d '\r\n' <"$owners" | sed 's/}[[:space:]]*,[[:space:]]*{/}\n{/g' | while IFS= read -r _o; do
+    _fp=$(printf '%s\n' "$_o" | sed -n 's/.*"fingerprint"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    _name=$(printf '%s\n' "$_o" | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    _at=$(printf '%s\n' "$_o" | sed -n 's/.*"added_at"[[:space:]]*:[[:space:]]*"\([0-9-]\{10\}\).*/\1/p')
+    [ -n "$_fp" ] || continue
+    printf '    %s  %s%s\n' "$_fp" "${_name:-(no name)}" "${_at:+, added $_at}"
+  done
+  echo "    Unpair one: sudo rowsafe-allow --remove-owner FINGERPRINT"
+}
+
+case ${1:-} in
+  -h | --help | help)
+    usage
+    exit 0
+    ;;
+esac
+
+if [ "$(id -u)" != 0 ]; then
+  fail "only root can see or change what Rowsafe may do on this server. Run it with sudo: sudo rowsafe-allow${*:+ $*}"
+fi
+
+case ${1:-} in
+  '')
+    need_installer
+    "$installer" --permissions || exit $?
+    list_owners
+    exit 0
+    ;;
+  --add-owner)
+    shift
+    owner_cmd pair "$@"
+    ;;
+  --owners)
+    [ $# = 1 ] || fail "--owners takes nothing else" 2
+    owner_cmd owners
+    ;;
+  --remove-owner)
+    [ $# = 2 ] || fail "which passkey? sudo rowsafe-allow --remove-owner FINGERPRINT (sudo rowsafe-allow --owners lists them)" 2
+    owner_cmd remove-owner "$2"
+    ;;
+  --files)
+    need_installer
+    set -- "$@" --end
+    _args=''
+    while [ "$1" != --end ]; do
+      [ "$1" = --files ] && [ "$2" != --end ] || fail "use: sudo rowsafe-allow --files /path/to/folder [--files /another/folder]" 2
+      case $2 in
+        /*) ;;
+        *) fail "--files needs the folder's full path, e.g. /var/www/uploads" 2 ;;
+      esac
+      _args="$_args --files $2"
+      shift 2
+    done
+    # The installer's files flow, on the installed version, without the
+    # database questions. (Paths have no spaces: the installer refuses them.)
+    # shellcheck disable=SC2086 # one word per argument
+    exec env ROWSAFE_VERSION="$(installed_version)" "$installer" --no-setup $_args --allow-files
+    ;;
+esac
+
+_flags='' _off=0 _any=0
+for _a in "$@"; do
+  case $_a in
+    --remove)
+      _off=1
+      continue
+      ;;
+    files)
+      [ "$_off" = 1 ] || fail "name the folder: sudo rowsafe-allow --files /var/www/uploads" 2
+      _flags="$_flags --no-allow-files"
+      ;;
+    -*) fail "unknown option $_a (see sudo rowsafe-allow --help)" 2 ;;
+    *)
+      case " $names " in
+        *" $_a "*) ;;
+        *) fail "there is no permission called '$_a'. The names: $(echo "$names" | sed 's/ /, /g')" 2 ;;
+      esac
+      if [ "$_off" = 1 ]; then _flags="$_flags --no-allow-$_a"; else _flags="$_flags --allow-$_a"; fi
+      ;;
+  esac
+  _any=1
+done
+[ "$_any" = 1 ] || fail "--remove needs a name, e.g. sudo rowsafe-allow --remove reboot" 2
+need_installer
+# shellcheck disable=SC2086 # one word per flag
+exec "$installer" --permissions --no-prompt $_flags
+ROWSAFE_ALLOW_EOF
+}
+
+# installer_entry MANIFEST reads the installer's entry of the verified
+# manifest into INST_URL, INST_SHA and INST_SIZE; it fails for releases from
+# before the manifest listed the installer.
+installer_entry() {
+  _e=$(tr -d ' \t\r\n' <"$1" | sed -n 's|.*"install\.sh":{\([^}]*\)}.*|\1|p')
+  [ -n "$_e" ] || return 1
+  INST_URL=$(printf '%s\n' "$_e" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')
+  INST_SHA=$(printf '%s\n' "$_e" | sed -n 's/.*"sha256":"\([^"]*\)".*/\1/p')
+  INST_SIZE=$(printf '%s\n' "$_e" | sed -n 's/.*"size":\([0-9]*\).*/\1/p')
+  printf '%s\n' "$INST_URL" | grep -Eq '^https://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._~/%+-]*/install\.sh$' &&
+    printf '%s\n' "$INST_SHA" | grep -Eq '^[0-9a-f]{64}$' &&
+    printf '%s\n' "$INST_SIZE" | grep -Eq '^[1-9][0-9]{0,6}$' && [ "$INST_SIZE" -le 4194304 ] || {
+    warn "the signed manifest's entry for the installer is malformed; not keeping a copy of it"
+    return 1
+  }
+}
+
+# install_installer_copy leaves the installer of the release in
+# $TMP/manifest.json (verified) at $INSTALLER_COPY, root's, for
+# `sudo rowsafe-allow`: this very script when it is that installer, else a
+# download. Its SHA-256 and size must match the signed manifest; an
+# unverified copy is never installed.
+install_installer_copy() {
+  # A newer version than the channel's stays installed: so does its installer.
+  [ "$KEEP_INSTALLED" = 0 ] || [ ! -f "$INSTALLER_COPY" ] || return 0
+  installer_entry "$TMP/manifest.json" || {
+    [ -f "$INSTALLER_COPY" ] || note "release $REL_VERSION predates \`sudo rowsafe-allow\`; it works once Rowsafe is updated"
+    return 0
+  }
+  if [ -f "$INSTALLER_COPY" ] && [ "$(sha256_of "$INSTALLER_COPY")" = "$INST_SHA" ]; then
+    return 0
+  fi
+  rm -f "$TMP/install.sh"
+  # Run from a file (sh install.sh, or the copy itself): that file, when it
+  # is the signed one. Piped from curl: the release's own copy.
+  if ! { [ -f "$0" ] && cat -- "$0" >"$TMP/install.sh" 2>/dev/null && [ "$(sha256_of "$TMP/install.sh")" = "$INST_SHA" ]; }; then
+    rm -f "$TMP/install.sh"
+    fetch "$INST_URL" "$TMP/install.sh" || {
+      warn "could not download $INST_URL, so \`sudo rowsafe-allow\` can't change anything yet; run the installer again later"
+      return 0
+    }
+  fi
+  if [ "$(size_of "$TMP/install.sh")" != "$INST_SIZE" ] || [ "$(sha256_of "$TMP/install.sh")" != "$INST_SHA" ]; then
+    warn "the installer downloaded from $INST_URL doesn't match the signed manifest; not keeping it"
+    return 0
+  fi
+  install -m 0755 -o root -g root "$TMP/install.sh" "$INSTALLER_COPY.rowsafe-new"
+  mv -f "$INSTALLER_COPY.rowsafe-new" "$INSTALLER_COPY"
+  ok "installer $REL_VERSION kept at $INSTALLER_COPY for \`sudo rowsafe-allow\` (checked against the signed manifest)"
+}
+
+# install_root_agent keeps a copy of the verified agent binary in root's
+# $LIB_DIR: `sudo rowsafe-allow --add-owner` (passkeys) runs it as root, and
+# root never runs the binary under /opt/rowsafe, which the agent user owns.
+install_root_agent() {
+  [ "$KEEP_INSTALLED" = 0 ] || return 0
+  if [ "$need_binary" = 1 ]; then
+    cp "$TMP/rowsafe-agent" "$TMP/root-agent"
+  else
+    as_agent cat -- "$STAGED" >"$TMP/root-agent" 2>/dev/null || return 0
+  fi
+  if [ "$(sha256_of "$TMP/root-agent")" != "$REL_SHA" ]; then
+    warn "$STAGED doesn't match the signed manifest; root keeps no copy of it"
+    return 0
+  fi
+  if [ -f "$ROOT_AGENT" ] && cmp -s "$TMP/root-agent" "$ROOT_AGENT"; then return 0; fi
+  install -m 0755 -o root -g root "$TMP/root-agent" "$ROOT_AGENT.rowsafe-new"
+  mv -f "$ROOT_AGENT.rowsafe-new" "$ROOT_AGENT"
+}
+
+# permissions_installer_copy: --permissions on a server whose copy is
+# missing (installed before rowsafe-allow) fetches the installer of the
+# installed release, checked like an install checks it.
+permissions_installer_copy() {
+  [ ! -f "$INSTALLER_COPY" ] || return 0
+  REL_VERSION=$(installed_version)
+  [ -n "$REL_VERSION" ] || return 0
+  if ! (ROWSAFE_VERSION=$REL_VERSION && export ROWSAFE_VERSION && detect_arch && check_openssl && resolve_release >/dev/null) 2>"$TMP/resolve.err"; then
+    warn "could not fetch the signed manifest of release $REL_VERSION, so \`sudo rowsafe-allow\` needs the installer once more: $(tail -n 1 "$TMP/resolve.err" | sed 's/^[^:]*: //')"
+    return 0
+  fi
+  install_installer_copy
+}
+
+# permissions_main is --permissions.
+permissions_main() {
+  require_root
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  export PATH
+  [ -f "$ENV_FILE" ] && [ -e "$INSTALL_DIR/rowsafe-agent" ] ||
+    perm_refuse "Rowsafe isn't installed on this server. Install it first: curl -fsSL https://rowsafe.sh | sudo sh"
+  # The agent's user and engine, as the install set them up.
+  AGENT_USER=$(stat -c '%U' "$ENV_FILE")
+  case $AGENT_USER in
+    postgres) HOST_ENGINE=postgresql AGENT_HOME=/var/lib/postgresql ;;
+    mysql) HOST_ENGINE=mysql ;;
+    *) HOST_ENGINE=mongodb ;;
+  esac
+  # One change at a time (the dashboard's and the terminal's).
+  if have flock && (: >>/run/rowsafe-permissions.lock) 2>/dev/null; then
+    exec 9>>/run/rowsafe-permissions.lock
+    flock -w 120 9 || die "another change to what Rowsafe may do is running; try again in a minute"
+  fi
+  PERM_QUIET=1
+  _want=''
+  for _p in $PERMISSIONS; do [ -z "$(perm_flag "$_p")" ] || _want=1; done
+  if [ -z "$_want" ] && [ "$ALLOW_FILES" != no ]; then
+    perm_summary
+    return 0
+  fi
+  perm_cascade permissions
+  # Check everything first: refused means nothing changed.
+  for _p in $PERMISSIONS; do
+    [ "$(perm_flag "$_p")" = yes ] || continue
+    _n=$(perm_need "$_p")
+    if [ -n "$_n" ] && ! perm_on "$_n"; then
+      perm_refuse "$_p only works with $_n allowed too. Allow them together: sudo rowsafe-allow $(perm_chain "$_p")"
+    fi
+    [ "$(perm_state "$_p")" != yes ] || continue
+    _why=$(perm_why "$_p")
+    [ -z "$_why" ] || perm_refuse "Rowsafe can't $(perm_desc "$_p" | sed 's/ (.*//') on this server: $_why"
+  done
+  _before=''
+  for _p in $PERMISSIONS; do _before="$_before $_p=$(perm_state "$_p")"; done
+
+  if [ -d "$STATE_DIR" ]; then as_agent mkdir -p -m 0700 "$RESTART_DIR" "$POOLER_DIR" 2>/dev/null || true; fi
+  [ "$ALLOW_RESTART" != yes ] || allow_restarts
+  case $ALLOW_CREATE_CLUSTER in
+    yes) allow_create_clusters ;;
+    no) disallow_create_clusters ;;
+  esac
+  [ -z "$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT" ] || update_access
+  case $ALLOW_POOLER in
+    yes) allow_pooler ;;
+    no) disallow_pooler ;;
+    *) if [ -n "$ALLOW_POOLER_PUBLIC" ] && [ "$(perm_state pooler)" = yes ]; then refresh_pooler; fi ;;
+  esac
+  case $ALLOW_FIREWALL in
+    yes) allow_firewall ;;
+    no) disallow_firewall ;;
+  esac
+  [ "$ALLOW_RESTART" != no ] || disallow_restarts
+  if [ "$ALLOW_FILES" = no ]; then
+    disallow_files
+    ok "putting restored files back from Rowsafe is off (restores wait next to the folder)"
+  fi
+  install_allow_command
+  permissions_installer_copy
+
+  say ""
+  for _p in $PERMISSIONS; do
+    _was=$(printf '%s\n' "$_before" | tr ' ' '\n' | sed -n "s/^$_p=//p")
+    _now=$(perm_state "$_p")
+    [ "$_was" != "$_now" ] || [ "$(perm_flag "$_p")" = yes ] || continue
+    case $_now in
+      yes) ok "$_p: allowed" ;;
+      *)
+        case " $PERM_ALSO_OFF " in
+          *" $_p "*) ok "$_p: not allowed any more (it needs $(perm_need "$_p"))" ;;
+          *) ok "$_p: not allowed" ;;
+        esac
+        ;;
+    esac
+  done
+  _failed=''
+  for _p in $PERMISSIONS; do
+    if [ "$(perm_flag "$_p")" = yes ] && [ "$(perm_state "$_p")" != yes ]; then _failed="$_failed $_p"; fi
+  done
+  if [ -n "$_failed" ]; then
+    printf '%serror:%s could not allow%s (see above)\n' "$RED" "$RESET" "$_failed" >&2
+  fi
+  perm_summary
+  [ -z "$_failed" ] || exit 1
 }
 
 # ---------------------------------------------------------------- agent.env
@@ -6141,17 +6789,20 @@ databases() {
       next_steps
       return 0
     fi
+    PERM_QUIET=$TTY # on a terminal, the summary below says it all
     restart_access
     [ -n "$ALLOW_CREATE_CLUSTER" ] || create_cluster_access # forks
     update_access
-    firewall_access
     pooler_access
+    firewall_access
+    PERM_QUIET=0
   fi
+  perm_summary # permissions section
   if [ -n "$PROTECT_NAME" ]; then
     protect_unattended
   elif [ "$interactive" = 1 ]; then
     setup_databases
-  else
+  elif [ "$NO_SETUP" = 0 ] || [ -z "$FILES_PATHS" ]; then
     next_steps
   fi
   files_setup # files section
@@ -6429,6 +7080,9 @@ install_agent() {
   step "Installing into $INSTALL_DIR"
   make_dirs
   [ "$need_binary" = 0 ] || install_binary
+  install_root_agent       # permissions section
+  install_installer_copy   # permissions section
+  install_allow_command    # permissions section
   install_guard
   UNIT_CHANGED=0
   install_unit
@@ -6546,7 +7200,7 @@ uninstall_agent() {
   remove_restart_helper
   remove_create_cluster
   remove_firewall_helper
-  rm -f "$GUARD_FILE"
+  rm -f "$GUARD_FILE" "$INSTALLER_COPY" "$ROOT_AGENT" "$ALLOW_COMMAND" # permissions section
   rmdir "$LIB_DIR" 2>/dev/null || true
   if systemd_running; then systemctl daemon-reload; fi
   rm -rf "$INSTALL_DIR"
@@ -6620,7 +7274,9 @@ main() {
       --no-allow-firewall) ALLOW_FIREWALL=no ;;
       --allow-pooler) ALLOW_POOLER=yes ;;
       --no-allow-pooler) ALLOW_POOLER=no ;;
-      --allow-pooler-public) ALLOW_POOLER_PUBLIC=1 ;;
+      --allow-pooler-public) ALLOW_POOLER_PUBLIC=yes ;;
+      --no-allow-pooler-public) ALLOW_POOLER_PUBLIC=no ;;
+      --permissions) mode=permissions ;;
       --allow-updates) ALLOW_UPDATES=yes ;;
       --no-allow-updates) ALLOW_UPDATES=no ;;
       --allow-security-updates) ALLOW_SECURITY=yes ;;
@@ -6684,12 +7340,18 @@ main() {
   fi
   # The second copy is its own step: no database questions around it.
   [ -z "$SECOND_COPY" ] || NO_SETUP=1
-  if [ "$mode" != install ] && { [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME" ] || [ -n "$ALLOW_RESTART$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT$ALLOW_FIREWALL$ALLOW_POOLER$ALLOW_CREATE_CLUSTER" ]; }; then
+  if [ "$mode" = permissions ]; then
+    if [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME$PROTECT_PORT$FILES_PATHS$MONGODB_REPLSET" ] || [ "$ALLOW_FILES" = yes ] || [ "$NO_FILES" = 1 ] || [ "$purge" = 1 ]; then
+      perm_refuse "--permissions only changes what Rowsafe may do here: --allow-NAME, --no-allow-NAME and --no-allow-files (see --help)"
+    fi
+  elif [ "$mode" != install ] && { [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME" ] || [ -n "$ALLOW_RESTART$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT$ALLOW_FIREWALL$ALLOW_POOLER$ALLOW_POOLER_PUBLIC$ALLOW_CREATE_CLUSTER" ]; }; then
     die "--no-setup, --protect and the --allow- options only go with an install"
   fi
-  if [ "$mode" != install ] && { [ -n "$FILES_PATHS" ] || [ -n "$ALLOW_FILES" ] || [ "$NO_FILES" = 1 ]; }; then
+  if [ "$mode" != install ] && [ "$mode" != permissions ] && { [ -n "$FILES_PATHS" ] || [ -n "$ALLOW_FILES" ] || [ "$NO_FILES" = 1 ]; }; then
     die "--files, --allow-files and --no-files only go with an install"
   fi
+  # A permission that needs another one turned off: off too (permissions section).
+  if [ "$mode" = install ] || [ "$mode" = permissions ]; then perm_cascade "$mode"; fi
   [ -z "$PROTECT_PORT" ] || [ -n "$PROTECT_NAME" ] || die "--protect-port only goes with --protect"
   [ "$NO_SETUP" = 0 ] || [ -z "$PROTECT_NAME" ] || die "--no-setup and --protect contradict each other"
   TMP=$(mktemp -d "${TMPDIR:-/tmp}/rowsafe-install.XXXXXX")
@@ -6706,6 +7368,7 @@ main() {
     check-storage) check_storage ;;
     uninstall) uninstall_agent "$purge" ;;
     download) download_only "$dir" ;;
+    permissions) permissions_main ;;
   esac
 }
 

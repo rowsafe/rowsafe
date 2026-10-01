@@ -132,3 +132,67 @@ func TestManifestRejects(t *testing.T) {
 		t.Fatal("wrote a signature for a rejected manifest")
 	}
 }
+
+func TestManifestInstaller(t *testing.T) {
+	dist := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dist, "rowsafe-agent-linux-amd64"), []byte("amd64 binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+
+	// Without install.sh (as before): only the agent builds.
+	m, err := buildManifest("1.2.3", "https://releases.rowsafe.sh/agent", dist, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := release.Installer(m); ok || len(m.Artifacts) != 1 {
+		t.Fatalf("manifest without install.sh = %+v", m.Artifacts)
+	}
+
+	// An unrendered installer is refused: it would refuse to run anywhere.
+	inst := filepath.Join(dist, "install.sh")
+	if err := os.WriteFile(inst, []byte("#!/bin/sh\nRELEASE_PUBLIC_KEY='@RELEASE_PUBLIC_KEY@'\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := buildManifest("1.2.3", "https://releases.rowsafe.sh/agent", dist, at); err == nil || !strings.Contains(err.Error(), "not a rendered installer") {
+		t.Fatalf("unrendered installer: %v", err)
+	}
+
+	script := []byte("#!/bin/sh\nRELEASE_PUBLIC_KEY='AAAA'\nmain \"$@\"\n")
+	if err := os.WriteFile(inst, script, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err = buildManifest("1.2.3", "https://releases.rowsafe.sh/agent/", dist, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, ok := release.Installer(m)
+	sum := sha256.Sum256(script)
+	if !ok || a.URL != "https://releases.rowsafe.sh/agent/1.2.3/install.sh" || a.SHA256 != hex.EncodeToString(sum[:]) || a.Size != int64(len(script)) {
+		t.Fatalf("installer = %+v (%v)", a, ok)
+	}
+	if _, ok := m.Artifacts["linux/amd64"]; !ok {
+		t.Fatal("the agent build went missing")
+	}
+
+	// Signed, it verifies; and an agent that predates the installer entry
+	// (strict JSON, any artifact key) accepts it too, because the entry is
+	// just another artifact.
+	pubB64, privB64, _ := release.GenerateKey()
+	pub, _ := release.ParsePublicKey(pubB64)
+	priv, _ := release.ParsePrivateKey(privB64)
+	raw, _ := json.MarshalIndent(m, "", "  ")
+	if _, err := release.Verify(pub, raw, release.Sign(priv, raw)); err != nil {
+		t.Fatal(err)
+	}
+	var old struct {
+		Version    string                       `json:"version"`
+		ReleasedAt time.Time                    `json:"released_at"`
+		Artifacts  map[string]protocol.Artifact `json:"artifacts"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&old); err != nil {
+		t.Fatalf("an older agent would reject the manifest: %v", err)
+	}
+}

@@ -111,6 +111,8 @@ type Agent struct {
 	copiesOnce sync.Once
 	// copyPasswordMu serializes setting safe copies' passwords.
 	copyPasswordMu sync.Mutex
+
+	perms permissionsState // what root allowed (permissions.go)
 }
 
 func New(cfg Config, logger *slog.Logger) *Agent {
@@ -393,7 +395,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 			Hostname: hostname, AgentVersion: Version, Platform: release.Platform(),
 			Archivers: a.archiverStats(ctx), Update: a.updater.Report(), Mode: a.cfg.Mode,
 			RestartPorts: a.restartPorts(), RestartActions: a.helperActions(),
-			Rewinds: append(a.rewindState().states(), a.engineRewindStates()...),
+			PermissionsHeartbeat: a.permissionsHeartbeat(), Rewinds: append(a.rewindState().states(), a.engineRewindStates()...), // permissions.go, before Software (a changed allow list refreshes it)
 			Storage: a.storageReports(), SecondCopies: a.secondCopyStatuses(),
 			Software:         a.softwareForHeartbeat(),
 			DockerControl:    a.dockerControlReport(ctx),
