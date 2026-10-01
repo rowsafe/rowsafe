@@ -51,6 +51,12 @@
 #      helper in PgBouncer mode (install, configure from its template,
 #      reload, off, refused values and foreign configurations) with apt-get
 #      and systemctl stood in, and --no-allow-pooler.
+#  10. permissions (sudo rowsafe-allow, --permissions): the installer copy
+#      checked against the signed manifest (from the file, downloaded when
+#      piped, a tampered one refused), root's copy of the agent, the
+#      permissions-only mode (nothing else changes, needs refused or turned
+#      off with what needs them, exit codes, the summary) and rowsafe-allow
+#      (list, on, off, refusals, passkey commands only on root's agent copy).
 #   9. files (--files, --allow-files): restic installed from a pinned,
 #      SHA-256-verified release (a tampered one refused), read access
 #      granted with ACLs, the "Back it up with ...?" question, the files
@@ -178,6 +184,8 @@ host() {
     for arch in amd64 arm64; do
       fake_agent 0.2.0 >"$d/rowsafe-agent-linux-$arch"
     done
+    # The rendered installer, as `make release` puts it in the manifest.
+    sed "s|@RELEASE_PUBLIC_KEY@|$TEST_PUB|" "$root/scripts/install.sh" >"$d/install.sh"
     "$work/rowsafe-release" manifest --version 0.2.0 --base-url https://localhost:8443/agent --dist "$d" >"$d/manifest.json"
     ROWSAFE_RELEASE_PRIVATE_KEY=$TEST_PRIV "$work/rowsafe-release" sign "$d/manifest.json" 2>/dev/null
     "$work/rowsafe-release" verify --public-key "$TEST_PUB" "$d/manifest.json" "$d/manifest.json.sig" >/dev/null
@@ -248,7 +256,8 @@ expect_fail() {
   pass "$name"
 }
 
-# publish VERSION [DIR-VERSION] [fail]: agent binaries + manifest (unsigned).
+# publish VERSION [DIR-VERSION] [fail]: agent binaries, the rendered
+# installer + manifest (unsigned).
 publish() {
   v=$1 dir=${2:-$1}
   d=$W/srv/agent/$dir
@@ -256,6 +265,7 @@ publish() {
   for a in amd64 arm64; do
     fake_agent "$v" "${3:-}" >"$d/rowsafe-agent-linux-$a"
   done
+  cp "$W/install.sh" "$d/install.sh"
   write_manifest "$d" "$v" "https://localhost:8443/agent/$dir"
 }
 
@@ -271,6 +281,10 @@ write_manifest() {
         "$sep" "$a" "$base" "$a" "$(sha256sum "$f" | cut -d' ' -f1)" "$(wc -c <"$f" | tr -d ' ')"
       sep=','
     done
+    if [ -f "$d/install.sh" ]; then
+      printf ',\n    "install.sh": {\n      "url": "%s/install.sh",\n      "sha256": "%s",\n      "size": %s\n    }' \
+        "$base" "$(sha256sum "$d/install.sh" | cut -d' ' -f1)" "$(wc -c <"$d/install.sh" | tr -d ' ')"
+    fi
     printf '\n  }\n}\n'
   } >"$d/manifest.json"
 }
@@ -427,6 +441,12 @@ EOF
   done
   [ "$(stat -c '%U %G %a' /etc/rowsafe)" = "root postgres 750" ] || fail "/etc/rowsafe ownership/mode"
   cmp /usr/local/lib/rowsafe/rowsafe-agent-guard /src/scripts/rowsafe-agent-guard || fail "guard differs from scripts/rowsafe-agent-guard"
+  # permit-host: one-click permission changes run root's own copy of the agent.
+  [ "$(stat -c '%U %a' /usr/local/lib/rowsafe/rowsafe-permissions)" = "root 755" ] || fail "permissions helper ownership/mode"
+  cmp /usr/local/lib/rowsafe/rowsafe-permissions /opt/rowsafe/versions/0.2.0/rowsafe-agent || fail "permissions helper is not the release's agent"
+  grep -qx "Environment=ROWSAFE_AGENT_USER=postgres" /etc/systemd/system/rowsafe-permissions.service || fail "permissions unit's agent user"
+  grep -qx "PathExists=/var/lib/rowsafe/permissions/request" /etc/systemd/system/rowsafe-permissions.path || fail "permissions path unit"
+  [ "$(stat -c '%U %a' /var/lib/rowsafe/permissions)" = "postgres 700" ] || fail "permissions request directory"
   cmp /etc/systemd/system/rowsafe-agent.service /src/deploy/systemd/rowsafe-agent.service || fail "unit differs from deploy/systemd/rowsafe-agent.service"
   cmp /etc/logrotate.d/rowsafe /src/deploy/logrotate/rowsafe || fail "logrotate config differs from deploy/logrotate/rowsafe"
   [ "$(stat -c '%U %a' /etc/logrotate.d/rowsafe)" = "root 644" ] || fail "logrotate config ownership/mode"
@@ -436,6 +456,14 @@ EOF
   logrotate --debug /etc/logrotate.d/rowsafe >"$W/lr" 2>&1 || { cat "$W/lr" >&2; fail "logrotate rejects the config"; }
   ! grep -qi "error" "$W/lr" || { cat "$W/lr" >&2; fail "logrotate reported an error"; }
   pass "layout, permissions, guard, unit and logrotate"
+  # (permissions) Root's copy of the installer for sudo rowsafe-allow,
+  # checked against the signed manifest; rowsafe-allow itself.
+  for f in /usr/local/lib/rowsafe/install.sh /usr/local/sbin/rowsafe-allow; do
+    [ "$(stat -c '%U %G %a' "$f")" = "root root 755" ] || fail "$f ownership/mode: $(stat -c '%U %G %a' "$f")"
+  done
+  cmp /usr/local/lib/rowsafe/install.sh "$W/install.sh" || fail "the installer copy isn't the release's installer"
+  cmp /usr/local/sbin/rowsafe-allow /src/scripts/rowsafe-allow || fail "rowsafe-allow differs from scripts/rowsafe-allow"
+  pass "installer copy and rowsafe-allow in place"
 
   secret_key=AKIAEXAMPLEKEY42 secret=s3cr3t/with+base64= cipher='cipher-pass-that-is-long-enough/+=='
   configured() {
@@ -464,12 +492,31 @@ EOF
     sh -c 'ROWSAFE_RELEASES_URL=https://localhost:8443/agent ROWSAFE_RESTIC_URL=https://localhost:8443/restic sh -s rse_secrettoken123 <"$1/install.sh"' piped "$W"
   grep -q "already on disk" "$W/out" || fail "binary downloaded again"
   grep -q "unchanged" "$W/out" || fail "env file changed on a plain re-run"
+  # (permissions) Piped, the script can't copy itself: it downloads the
+  # release's installer and checks it against the signed manifest.
+  rm /usr/local/lib/rowsafe/install.sh
+  expect_ok "piped: the installer copy is downloaded and checked" \
+    sh -c 'ROWSAFE_RELEASES_URL=https://localhost:8443/agent ROWSAFE_RESTIC_URL=https://localhost:8443/restic sh -s rse_secrettoken123 <"$1/install.sh"' piped "$W"
+  cmp /usr/local/lib/rowsafe/install.sh "$W/install.sh" || fail "the downloaded installer copy differs"
+  grep -q "kept at /usr/local/lib/rowsafe/install.sh" "$W/out" || fail "no word about the installer copy"
+  # A release whose installer doesn't match its signed manifest: no copy.
+  cp srv/agent/0.2.0/install.sh "$W/install.sh.good"
+  echo '# tampered' >>srv/agent/0.2.0/install.sh
+  rm /usr/local/lib/rowsafe/install.sh
+  expect_ok "piped: a tampered installer is not kept" \
+    sh -c 'ROWSAFE_RELEASES_URL=https://localhost:8443/agent ROWSAFE_RESTIC_URL=https://localhost:8443/restic sh -s <"$1/install.sh"' piped "$W"
+  grep -q "doesn't match the signed manifest; not keeping it" "$W/out" || fail "a tampered installer copy went unnoticed"
+  [ ! -e /usr/local/lib/rowsafe/install.sh ] || fail "a tampered installer was kept"
+  cp "$W/install.sh.good" srv/agent/0.2.0/install.sh
+  expect_ok "from the file, the installer keeps itself" "$INSTALLER"
+  cmp /usr/local/lib/rowsafe/install.sh "$W/install.sh" || fail "the installer didn't keep itself"
   expect_fail "bad cipher pass refused" "at least 20 characters" env ROWSAFE_REPO_CIPHER_PASS=short "$INSTALLER"
   expect_fail "endpoint with scheme refused" "without a scheme" env ROWSAFE_REPO_S3_ENDPOINT=https://x.r2.cloudflarestorage.com "$INSTALLER"
   expect_fail "quote in value refused" "single quotes" env ROWSAFE_REPO_S3_BUCKET="it's" "$INSTALLER"
 
   expect_ok "upgrade to 0.12.0" env ROWSAFE_VERSION=0.12.0 "$INSTALLER"
   [ "$(readlink /opt/rowsafe/rowsafe-agent)" = versions/0.12.0/rowsafe-agent ] || fail "not switched to 0.12.0"
+  cmp /usr/local/lib/rowsafe/rowsafe-permissions /opt/rowsafe/versions/0.12.0/rowsafe-agent || fail "permissions helper not upgraded" # permit-host
   runuser -u postgres -- mkdir -p /var/lib/rowsafe/update/pending
   install -d -m 0755 -o root -g root /opt/rowsafe/bin && touch /opt/rowsafe/bin/rowsafe-agent-guard # an older install's guard
   expect_ok "channel older than installed keeps it" "$INSTALLER"
@@ -496,6 +543,15 @@ EOF
     }
     systemd-analyze security --offline=true --no-pager /etc/systemd/system/rowsafe-agent.service 2>/dev/null |
       tail -n 1 | sed "s/^/  rowsafe-agent: /"
+    # permit-host
+    expect_ok "systemd-analyze verify (permissions units)" \
+      systemd-analyze verify /etc/systemd/system/rowsafe-permissions.service /etc/systemd/system/rowsafe-permissions.path
+    [ ! -s "$W/out" ] || {
+      cat "$W/out" >&2
+      fail "systemd-analyze verify printed warnings for the permissions units"
+    }
+    systemd-analyze security --offline=true --no-pager /etc/systemd/system/rowsafe-permissions.service 2>/dev/null |
+      tail -n 1 | sed "s/^/  rowsafe-permissions: /"
   fi
 
   echo "x" >/var/lib/postgresql/17/main/postgresql.auto.conf
@@ -505,7 +561,7 @@ EOF
   [ -f /etc/rowsafe/agent.env ] && [ -x /opt/rowsafe/rowsafe-agent ] || fail "refused purge removed files"
   expect_ok "uninstall keeps config" "$INSTALLER" --uninstall
   [ ! -e /opt/rowsafe ] && [ -f /etc/rowsafe/agent.env ] && [ ! -e /etc/systemd/system/rowsafe-agent.service ] && [ -f /etc/logrotate.d/rowsafe ] &&
-    [ ! -e /usr/local/lib/rowsafe ] || fail "uninstall result"
+    [ ! -e /usr/local/lib/rowsafe ] && [ ! -e /usr/local/sbin/rowsafe-allow ] || fail "uninstall result"
   grep -q "keeps running" "$W/out" || fail "no note that archiving keeps running"
   rm /var/lib/postgresql/17/main/postgresql.auto.conf
   expect_ok "purge" "$INSTALLER" --uninstall --purge
@@ -1247,13 +1303,17 @@ EOF
   scenario
   expect_ok "without a terminal: next steps, nothing asked" "$INSTALLER"
   grep -q "Run this installer again from a terminal" "$W/out" || fail "no next step without a terminal"
+  # (permissions) Nothing asked, but what Rowsafe may do is shown.
+  grep -q "What Rowsafe may do on" "$W/out" && grep -q "not allowed  restart" "$W/out" &&
+    grep -q "Allow one:          sudo rowsafe-allow restart" "$W/out" || fail "no permissions summary without a terminal"
+  ! grep -q "What may Rowsafe do on this server?" "$W/out" || fail "the questions' heading without a terminal"
   [ ! -e "$F/calls" ] || fail "setup ran without a terminal or --protect"
 
   # 1. Found, named (a bad name first), plan, yes, restart needed, restart now.
   scenario "discover_out=$shop" "plan_out=$plan" "apply_out=Done: the backup settings are in place." apply_rc=10 \
     "wait_out=$done_" "status_out=$status"
   tty_ok "turn on backups, restart now" \
-    "Allow Rowsafe to restart or stop PostgreSQL when you ask?\tn\nAllow Rowsafe to install and manage PgBouncer?\tn\nName it in Rowsafe [shop]\tTV Hub\nName it in Rowsafe\t\nTurn on backups for shop now? [Y/n]\t\nRestart PostgreSQL now? [y/N]\ty\n" \
+    "Restart or stop PostgreSQL, when someone clicks Restart or Rewind?\tn\nInstall and manage PgBouncer (connection pooling)\tn\nName it in Rowsafe [shop]\tTV Hub\nName it in Rowsafe\t\nTurn on backups for shop now? [Y/n]\t\nRestart PostgreSQL now? [y/N]\ty\n" \
     env ROWSAFE_TEST_LEAK=1 "$INSTALLER"
   has "Looking for PostgreSQL on this server"
   has "Found PostgreSQL 17 on port 5432 (1.2 GiB; databases: shop)"
@@ -1265,14 +1325,18 @@ EOF
   has "PostgreSQL restarted"
   has "✓ shop is protected. The first full backup is running."
   has "Dashboard: https://app.rowsafe.test/databases/db_fake"
-  has "Rowsafe can't restart or stop PostgreSQL"
+  has "What may Rowsafe do on this server?"
+  has "Rowsafe only does these when someone clicks them in your dashboard and"
+  has "not allowed  restart           restart or stop PostgreSQL"
+  lacks "Rowsafe can't restart or stop PostgreSQL" # the summary says it, once
   called "plan --name shop --port 5432 --socket-dir /var/run/postgresql --id-file"
   called "apply --database db_fake"
   called "wait --database db_fake --timeout 5m"
   [ "$(cat "$F/pg_ctlcluster")" = "17 main restart" ] || fail "$name: pg_ctlcluster not run as 17 main restart"
   grep -q "is off" /etc/rowsafe/restart-allowed || fail "$name: the no to restarts from Rowsafe was not kept"
   [ ! -e /usr/local/lib/rowsafe/rowsafe-pg-restart ] || fail "$name: restart helper installed after a no"
-  has "Rowsafe won't install or manage PgBouncer"
+  has "not allowed  pooler            install and manage PgBouncer"
+  has "Allow one:          sudo rowsafe-allow restart"
   grep -q "is off" /etc/rowsafe/pooler-allowed || fail "$name: the no to PgBouncer was not kept"
   [ ! -e /etc/systemd/system/rowsafe-pooler.path ] || fail "$name: PgBouncer helper installed after a no"
 
@@ -1280,8 +1344,10 @@ EOF
   scenario "discover_out=$shop" "plan_out=$plan" apply_rc=10
   tty_ok "turn on backups, restart later" \
     "Name it in Rowsafe\t\nTurn on backups for shop now?\ty\nRestart PostgreSQL now?\t\n" "$INSTALLER"
-  lacks "Allow Rowsafe to restart or stop PostgreSQL"
-  lacks "Allow Rowsafe to install and manage PgBouncer"
+  lacks "Restart or stop PostgreSQL, when"
+  lacks "Install and manage PgBouncer (connection"
+  lacks "What may Rowsafe do on this server?" # nothing asked: no heading, just the summary
+  has "What Rowsafe may do on"
   has "Restart PostgreSQL when it suits you:"
   has "sudo systemctl restart postgresql@17-main"
   has "Rowsafe notices the restart by itself and finishes setting up. Nothing else to do."
@@ -1422,9 +1488,11 @@ restart_tests() {
   # A re-run without the flag keeps it (and asks nothing).
   scenario "discover_out=$shop"
   tty_ok "a re-run keeps restarts allowed (and asks about updates once)" \
-    "Allow Rowsafe to create a new PostgreSQL cluster here\tn\nAllow Rowsafe to install PostgreSQL updates when you click Update?\tn\nAllow Rowsafe to install this server's security updates\tn\nName it in Rowsafe\t\nTurn on backups for shop now?\tn\n" "$INSTALLER"
-  lacks "Allow Rowsafe to restart or stop PostgreSQL"
-  lacks "Allow Rowsafe to reboot"
+    "Create a new PostgreSQL cluster here\tn\nInstall PostgreSQL updates and upgrades\tn\nInstall this server's security updates\tn\nName it in Rowsafe\t\nTurn on backups for shop now?\tn\n" "$INSTALLER"
+  lacks "Restart or stop PostgreSQL, when"
+  lacks "Reboot this server, when"
+  has "allowed      restart           restart or stop PostgreSQL"
+  has "not allowed  security-updates  install this server's security updates"
   [ -f /etc/rowsafe/updates-allowed ] && ! grep -q '^[a-z]' /etc/rowsafe/updates-allowed || fail "no to updates not kept"
   [ ! -e /etc/systemd/system/rowsafe-pg-update.path ] || fail "update units installed after a no"
   grep -qx "5432 postgresql@17-main.service" /etc/rowsafe/restart-allowed || fail "a re-run dropped the allow list"
@@ -1584,6 +1652,7 @@ EOF
 
   pooler_tests
   update_tests
+  permissions_tests
 
   expect_ok "--no-allow-restart" "$INSTALLER" --no-allow-restart
   [ ! -e /etc/systemd/system/rowsafe-pg-update.path ] && [ ! -e /etc/rowsafe/updates-allowed ] || fail "--no-allow-restart left updates allowed"
@@ -1598,6 +1667,203 @@ EOF
   expect_ok "purge" "$INSTALLER" --uninstall --purge
   [ ! -e /etc/rowsafe ] || fail "purge left /etc/rowsafe"
   pass "--no-allow-restart, uninstall and purge remove the restart helper"
+}
+
+# ------------------------------------------------------------ permissions
+
+# permissions_tests: install.sh --permissions and sudo rowsafe-allow, on the
+# server restart_tests set up (restarts allowed, the agent running).
+permissions_tests() {
+  echo "  -- permissions (--permissions, sudo rowsafe-allow)"
+  P=/usr/local/lib/rowsafe/install.sh
+  A=/usr/local/sbin/rowsafe-allow
+  U=/etc/rowsafe/updates-allowed
+  # perm NAME ARGS...: the installer copy's permissions mode, as root
+  # automation runs it (no terminal, the releases unreachable: it must not
+  # need them).
+  perm() { ROWSAFE_RELEASES_URL=https://127.0.0.1:9/agent "$P" --permissions "$@"; }
+  perm_rc() { # NAME CODE PATTERN ARGS...
+    n=$1 code=$2 pattern=$3
+    shift 3
+    rc=0
+    perm "$@" >"$W/out" 2>&1 || rc=$?
+    [ "$rc" = "$code" ] && grep -qF -- "$pattern" "$W/out" || {
+      cat "$W/out" >&2
+      fail "$n (exit $rc, wanted $code with '$pattern')"
+    }
+    pass "$n"
+  }
+  # What --permissions must never touch.
+  snapshot() {
+    {
+      readlink /opt/rowsafe/rowsafe-agent
+      sha256sum /etc/rowsafe/agent.env /etc/systemd/system/rowsafe-agent.service /opt/rowsafe/rowsafe-agent "$P"
+      find /opt/rowsafe /var/lib/rowsafe/agent.json -maxdepth 2 | sort
+    } 2>/dev/null
+  }
+  allow_files() { sha256sum /etc/rowsafe/*-allowed 2>/dev/null; }
+  last_lines_summary() {
+    tail -n 12 "$W/out" | grep -q "What Rowsafe may do on" || {
+      cat "$W/out" >&2
+      fail "$n: the summary isn't at the end"
+    }
+  }
+
+  scenario "discover_out=$shop"
+  expect_ok "a known start: restarts on, updates off" "$INSTALLER" --allow-restart --no-allow-updates --no-allow-security-updates --no-allow-pooler
+  snapshot >"$W/snap.before"
+
+  # Without a change: the summary, and nothing written.
+  allow_files >"$W/allow.before"
+  n="--permissions alone lists"
+  perm_rc "$n" 0 "What Rowsafe may do on" 
+  has "allowed      restart           restart or stop PostgreSQL (Restart, Rewind)"
+  has "not allowed  updates           install PostgreSQL updates and upgrades"
+  has "unavailable  firewall          nftables isn't installed"
+  has "not allowed  create-cluster    create a PostgreSQL cluster for a fork"
+  has "Allow one:          sudo rowsafe-allow create-cluster"
+  has "Stop allowing one:  sudo rowsafe-allow --remove restart"
+  allow_files | cmp -s - "$W/allow.before" || fail "--permissions without a change changed an allow list"
+
+  # A need that stays off is refused; nothing changes.
+  perm_rc "reboot without security updates refused" 2 \
+    "reboot only works with security-updates allowed too. Allow them together: sudo rowsafe-allow security-updates reboot" --no-prompt --allow-reboot
+  allow_files | cmp -s - "$W/allow.before" || fail "a refused change changed an allow list"
+  perm_rc "on and off at once refused" 2 "security-updates needs restart, so it can't be allowed while restart is turned off" \
+    --allow-security-updates --no-allow-restart
+  perm_rc "not possible here refused" 2 "Rowsafe can't limit who can reach PostgreSQL on this server: nftables isn't installed" --allow-firewall
+  perm_rc "install options refused" 2 "--permissions only changes what Rowsafe may do" --protect shop
+  [ ! -e /etc/systemd/system/rowsafe-pg-update.path ] || fail "a refused change installed the update units"
+  allow_files | cmp -s - "$W/allow.before" || fail "a refused change changed an allow list"
+
+  # On, with what they need.
+  n="security updates and reboot on"
+  perm_rc "$n" 0 "reboot: allowed" --no-prompt --allow-security-updates --allow-reboot
+  has "security-updates: allowed"
+  last_lines_summary
+  grep -q '^security ' "$U" && grep -q '^reboot ' "$U" && ! grep -q '^postgresql' "$U" || fail "$n: $(cat "$U")"
+  cmp /etc/systemd/system/rowsafe-pg-update.path /src/deploy/systemd/rowsafe-pg-update.path || fail "$n: no update path unit"
+  [ "$(stat -c '%U %a' "$U")" = "root 644" ] || fail "$n: allow list ownership/mode"
+
+  # Off: what needs it goes too.
+  n="security updates off takes reboot along"
+  perm_rc "$n" 0 "reboot: not allowed any more (it needs security-updates)" --no-allow-security-updates
+  ! grep -q '^security' "$U" && ! grep -q '^reboot' "$U" || fail "$n: $(cat "$U")"
+  [ ! -e /etc/systemd/system/rowsafe-pg-update.path ] || fail "$n: update units left"
+
+  perm --allow-updates >"$W/out" 2>&1 || fail "updates on: $(cat "$W/out")"
+  n="restart off takes updates along"
+  perm_rc "$n" 0 "updates: not allowed any more (it needs restart)" --no-allow-restart
+  has "restart: not allowed"
+  ! grep -q '^[0-9]' /etc/rowsafe/restart-allowed || fail "$n: restart list kept"
+  [ ! -e /usr/local/lib/rowsafe/rowsafe-pg-restart ] && [ ! -e /etc/systemd/system/rowsafe-pg-restart.path ] || fail "$n: restart helper left"
+  [ ! -e "$U" ] && [ ! -e /etc/systemd/system/rowsafe-pg-update.path ] || fail "$n: updates left"
+  perm_rc "updates need restart" 2 "Allow them together: sudo rowsafe-allow restart updates" --allow-updates
+
+  # Root's own look at the clusters (pg_lsclusters), not the agent's.
+  n="restart and updates on together"
+  perm_rc "$n" 0 "updates: allowed" --allow-restart --allow-updates
+  grep -qx "5432 postgresql@17-main.service" /etc/rowsafe/restart-allowed &&
+    grep -qx "5433 postgresql@17-other.service" /etc/rowsafe/restart-allowed || fail "$n: $(cat /etc/rowsafe/restart-allowed)"
+  cmp /usr/local/lib/rowsafe/rowsafe-pg-restart /src/scripts/rowsafe-pg-restart || fail "$n: no restart helper"
+  grep -q '^postgresql ' "$U" || fail "$n: $(cat "$U")"
+
+  # PgBouncer, and its public addresses.
+  n="pooler with public addresses"
+  perm_rc "$n" 0 "pooler-public: allowed" --allow-pooler --allow-pooler-public
+  grep -qx 5432 /etc/rowsafe/pooler-allowed && grep -qx public /etc/rowsafe/pooler-allowed || fail "$n: $(cat /etc/rowsafe/pooler-allowed)"
+  [ -e /etc/systemd/system/rowsafe-pooler.path ] || fail "$n: no pooler units"
+  perm_rc "public addresses off, pooler stays" 0 "pooler-public: not allowed" --no-allow-pooler-public
+  grep -qx 5432 /etc/rowsafe/pooler-allowed && ! grep -qx public /etc/rowsafe/pooler-allowed || fail "public kept: $(cat /etc/rowsafe/pooler-allowed)"
+  perm_rc "public addresses need the pooler" 2 "pooler-public needs pooler" --allow-pooler-public --no-allow-pooler
+  perm_rc "pooler off" 0 "pooler: not allowed" --no-allow-pooler
+  [ ! -e /etc/systemd/system/rowsafe-pooler.path ] || fail "pooler units left"
+
+  snapshot | cmp -s - "$W/snap.before" || {
+    snapshot | diff "$W/snap.before" - >&2
+    fail "--permissions changed the agent, its settings or its state"
+  }
+  pass "--permissions changes only the allow lists, helpers and units"
+
+  # The installer run from elsewhere works the same, without the network.
+  expect_ok "--permissions from another copy of the installer" env ROWSAFE_RELEASES_URL=https://127.0.0.1:9/agent sh "$W/install.sh" --permissions --allow-reboot --allow-security-updates
+  grep -q '^reboot ' "$U" || fail "reboot not allowed: $(cat "$U")"
+
+  # Not installed: refused, plainly.
+  mv /etc/rowsafe/agent.env /etc/rowsafe/agent.env.away
+  perm_rc "not installed" 2 "Rowsafe isn't installed on this server" --allow-restart
+  mv /etc/rowsafe/agent.env.away /etc/rowsafe/agent.env
+
+  # ---- rowsafe-allow
+  expect_fail "rowsafe-allow needs root" "only root can see or change what Rowsafe may do" runuser -u tester -- "$A"
+  expect_ok "rowsafe-allow --help without root" runuser -u tester -- "$A" --help
+  grep -q "sudo rowsafe-allow --remove NAME" "$W/out" || fail "rowsafe-allow --help"
+  ! grep -q -- "--add-owner" "$W/out" || fail "passkeys offered by an agent that can't pair them"
+  expect_ok "rowsafe-allow lists" "$A"
+  grep -q "allowed      reboot" "$W/out" && grep -q "What Rowsafe may do on" "$W/out" || fail "rowsafe-allow list: $(cat "$W/out")"
+  ! grep -q "passkey" "$W/out" || fail "passkeys mentioned by an agent that can't pair them"
+  expect_ok "rowsafe-allow --remove reboot" "$A" --remove reboot
+  grep -q "reboot: not allowed" "$W/out" && ! grep -q '^reboot' "$U" || fail "rowsafe-allow --remove reboot: $(cat "$W/out")"
+  expect_ok "rowsafe-allow reboot" "$A" reboot
+  grep -q '^reboot ' "$U" || fail "rowsafe-allow reboot didn't allow it"
+  expect_ok "rowsafe-allow pooler, --remove reboot in one go" "$A" pooler --remove reboot
+  grep -qx 5432 /etc/rowsafe/pooler-allowed && ! grep -q '^reboot' "$U" || fail "rowsafe-allow pooler --remove reboot"
+  expect_fail "rowsafe-allow refuses unknown names" "there is no permission called 'everything'" "$A" everything
+  expect_fail "rowsafe-allow --remove needs a name" "needs a name, e.g. sudo rowsafe-allow --remove reboot" "$A" --remove
+  expect_ok "rowsafe-allow --remove security-updates" "$A" --remove security-updates
+  ! grep -q '^security' "$U" || fail "rowsafe-allow --remove security-updates kept them"
+  expect_fail "rowsafe-allow: reboot needs security updates" "Allow them together: sudo rowsafe-allow security-updates reboot" "$A" reboot
+  expect_fail "rowsafe-allow files needs a folder" "name the folder" "$A" files
+
+  # Passkeys: only through root's copy of the agent (rowsafe-permissions),
+  # when it can pair them.
+  RP=/usr/local/lib/rowsafe/rowsafe-permissions
+  expect_fail "passkeys need a newer agent" "too old for passkeys" "$A" --add-owner
+  cp "$RP" "$W/root-agent.saved"
+  cat >"$RP" <<'EOF'
+#!/bin/sh
+[ "$1" != --help ] || exit 0
+echo "rowsafe-permissions $* as $(id -un)"
+EOF
+  expect_ok "rowsafe-allow --add-owner runs root's agent copy" "$A" --add-owner
+  grep -q "rowsafe-permissions pair as root" "$W/out" || fail "--add-owner: $(cat "$W/out")"
+  expect_ok "rowsafe-allow --owners" "$A" --owners
+  grep -q "rowsafe-permissions owners as root" "$W/out" || fail "--owners: $(cat "$W/out")"
+  expect_ok "rowsafe-allow --remove-owner" "$A" --remove-owner 3F2A-91C3-0B7E-55D4
+  grep -q "rowsafe-permissions remove-owner 3F2A-91C3-0B7E-55D4 as root" "$W/out" || fail "--remove-owner: $(cat "$W/out")"
+  expect_ok "rowsafe-allow --help offers passkeys" "$A" --help
+  grep -q -- "--add-owner" "$W/out" || fail "no passkeys in --help"
+  expect_fail "rowsafe-allow --remove-owner needs a fingerprint" "which passkey" "$A" --remove-owner
+  cat >/etc/rowsafe/owners <<'EOF'
+[
+  {"credential_id": "Y3JlZC0x", "public_key": "pQECAyYgASFYIA", "alg": -7, "name": "ana@example.com",
+   "fingerprint": "3F2A-91C3-0B7E-55D4", "rp_id": "app.rowsafe.sh", "origin": "https://app.rowsafe.sh",
+   "added_at": "2026-10-01T10:00:00Z"},
+  {"credential_id": "Y3JlZC0y", "public_key": "pQECAyYgASFYIB", "alg": -7, "name": "bo@example.com",
+   "fingerprint": "0000-1111-2222-3333", "rp_id": "app.rowsafe.sh", "origin": "https://app.rowsafe.sh",
+   "added_at": "2026-10-02T09:00:00Z"}
+]
+EOF
+  chmod 644 /etc/rowsafe/owners
+  expect_ok "rowsafe-allow lists the passkeys" "$A"
+  grep -q "3F2A-91C3-0B7E-55D4  ana@example.com, added 2026-10-01" "$W/out" &&
+    grep -q "0000-1111-2222-3333  bo@example.com, added 2026-10-02" "$W/out" || fail "passkeys not listed: $(cat "$W/out")"
+  chmod 666 /etc/rowsafe/owners
+  expect_ok "an owners file others can write isn't listed" "$A"
+  ! grep -q "ana@example.com" "$W/out" || fail "listed passkeys from a file others can write"
+  rm /etc/rowsafe/owners
+  # Root never runs an agent binary that isn't root's.
+  chown postgres "$RP"
+  expect_fail "an agent copy root doesn't own is never run" "too old for passkeys" "$A" --owners
+  cp "$W/root-agent.saved" "$RP"
+  chown root:root "$RP"
+
+  # Without a trusted installer copy, nothing runs.
+  chown postgres "$P"
+  expect_fail "an installer copy root doesn't own is never run" "Update it first" "$A" restart
+  chown root:root "$P"
+  pass "rowsafe-allow: list, on, off, refusals, passkey commands"
+  expect_ok "back to the start" "$A" --remove pooler updates
 }
 
 # ------------------------------------------------------------ files
@@ -1685,7 +1951,7 @@ files_tests() {
   chmod 666 "$F"/*
   name="found folder"
   tty_ok "offer the found folder, allow putting files back" \
-    "Allow Rowsafe to install and manage PgBouncer?\tn\nso a restore brings back both? [Y/n]\t\nAllow Rowsafe to put restored files back into /srv/app/media, as the folder's owner?\ty\n" \
+    "Install and manage PgBouncer (connection pooling)\tn\nso a restore brings back both? [Y/n]\t\nAllow Rowsafe to put restored files back into /srv/app/media, as the folder's owner?\ty\n" \
     "$INSTALLER"
   has "Rowsafe found /srv/app/media (10.0 KiB, 3 files: uploaded media)"
   lacks "Rowsafe found /srv/app/storage"
@@ -1973,7 +2239,7 @@ pooler_tests() {
   fi
   scenario "discover_out=$shop"
   tty_ok "a re-run keeps PgBouncer allowed" "Name it in Rowsafe\t\nTurn on backups for shop now?\tn\n" "$INSTALLER"
-  lacks "Allow Rowsafe to install and manage PgBouncer"
+  lacks "Install and manage PgBouncer (connection"
   grep -qx "5432" /etc/rowsafe/pooler-allowed || fail "a re-run dropped the pooler allow list"
   # A cluster found since is added only when someone says yes on a terminal.
   printf '17 main 5432 online postgres - -\n17 other 5433 online postgres - -\n17 new 5434 online postgres - -\n' >/tmp/rowsafe-fake-clusters
@@ -2383,7 +2649,7 @@ FAKE_EOF
   grep -q "^error=port 5499 is not in /etc/rowsafe/restart-allowed" "$O/update-result" || fail "unlisted port not refused"
   sed -i '/^postgresql /d' "$U"
   urequest "u4 pg-minor-update 5432"
-  u_has "error=installing PostgreSQL updates from Rowsafe is not allowed on this server (run the installer again with --allow-updates)"
+  u_has "error=installing PostgreSQL updates from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
   [ ! -s "$S/calls" ] || fail "the helper ran something that isn't allowed"
   echo "postgresql" >>"$U"
   chmod 666 "$U"
@@ -2512,7 +2778,7 @@ FAKE_EOF
   grep -qx -- "--no-block reboot" "$F/systemctl.calls" || fail "no reboot asked: $(cat "$F/systemctl.calls")"
   sed -i '/^reboot /d' "$U"
   urequest "u18 reboot"
-  u_has "error=rebooting the server from Rowsafe is not allowed here (run the installer again with --allow-reboot)"
+  u_has "error=rebooting the server from Rowsafe is not allowed here (allow it on the server with: sudo rowsafe-allow reboot)"
   [ ! -s "$F/systemctl.calls" ] || fail "rebooted without permission"
   root_free "after update requests"
   pass "update helper: request shapes, allow lists, minor update, new major, upgrade, undo, cleanup, rollback, security updates, reboot"
@@ -2583,7 +2849,7 @@ PGEOF
   expect_ok "restarts and PgBouncer off for the firewall tests" "$INSTALLER" --no-allow-restart --no-allow-pooler
   scenario "discover_out=$shop"
   tty_ok "a re-run keeps the firewall allowed" "Name it in Rowsafe\t\nTurn on backups for shop now?\tn\n" "$INSTALLER"
-  lacks "Allow Rowsafe to limit who can reach"
+  lacks "Limit who can reach PostgreSQL"
   grep -qx "5432" /etc/rowsafe/firewall-allowed || fail "a re-run dropped the firewall allow list"
 
   FO=$W/fw-run

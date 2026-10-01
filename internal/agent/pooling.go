@@ -203,7 +203,7 @@ var poolerValueRE = regexp.MustCompile(`^[A-Za-z0-9.:,*_-]{0,300}$`)
 func (a *Agent) askPooler(ctx context.Context, action string, kv [][2]string, id string, timeout time.Duration) (map[string]string, error) {
 	host, _ := os.Hostname()
 	if st, err := os.Stat(a.cfg.Pooler.Dir); err != nil || !st.IsDir() {
-		return nil, fmt.Errorf("the PgBouncer helper is not set up on %s (%s is missing): run the Rowsafe installer there again with --allow-pooler", host, a.cfg.Pooler.Dir)
+		return nil, fmt.Errorf("the PgBouncer helper is not set up on %s (%s is missing): root allows it there with %s", host, a.cfg.Pooler.Dir, AllowHint(protocol.PermPooler))
 	}
 	if !restartIDRE.MatchString(id) {
 		b := make([]byte, 8)
@@ -616,10 +616,10 @@ func (a *Agent) poolingOn(ctx context.Context, db protocol.DatabaseSpec, want pr
 		return nil, err
 	}
 	if !allowed[db.Port] {
-		return nil, fmt.Errorf("installing and managing PgBouncer from Rowsafe isn't allowed for port %d on %s: run the Rowsafe installer there again with --allow-pooler", db.Port, host)
+		return nil, fmt.Errorf("installing and managing PgBouncer from Rowsafe isn't allowed for port %d on %s: root allows it there with %s", db.Port, host, AllowHint(protocol.PermPooler))
 	}
 	if want.Listen == protocol.PoolerListenPublic && !poolerPublicAllowed(a.cfg.Pooler.AllowFile) {
-		return nil, fmt.Errorf("PgBouncer may not listen on public addresses on %s: root allows that with the installer's --allow-pooler-public. Choose this server only, or this server and its private network", host)
+		return nil, fmt.Errorf("PgBouncer may not listen on public addresses on %s: root allows that there with %s. Choose this server only, or this server and its private network", host, AllowHint(protocol.PermPoolerPublic))
 	}
 	st, err := a.loadPoolerState()
 	if err != nil {

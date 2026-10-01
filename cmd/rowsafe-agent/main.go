@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -39,6 +40,9 @@ Usage:
                                             restore a MySQL/MariaDB database from your bucket into DIR
   rowsafe-agent key                         this server's key fingerprint: compare it with the one the Rowsafe
                                             dashboard shows before setting up a standby here
+  rowsafe-agent permissions pair|owners|remove-owner FP|apply
+                                            (root) passkeys that may change this server's permissions
+                                            from the dashboard (see permissions --help)
   rowsafe-agent selftest                    check this binary can run here (used before self-update)
   rowsafe-agent storage test [--wait 60s]   write, read back and delete a test file in the backup
                                             storage (Rowsafe Storage or your bucket)
@@ -58,6 +62,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if filepath.Base(os.Args[0]) == "rowsafe-permissions" { // root's copy (permissions.go)
+		os.Exit(permissionsCmd(ctx, os.Args[1:]))
+	}
 	var err error
 	switch os.Args[1] {
 	case "run":
@@ -76,6 +83,8 @@ func main() {
 		err = restoreMySQL(ctx, os.Args[2:])
 	case "key":
 		err = keyCmd()
+	case "permissions": // permissions.go
+		os.Exit(permissionsCmd(ctx, os.Args[2:]))
 	case "selftest":
 		os.Exit(selftest(ctx))
 	case "storage":

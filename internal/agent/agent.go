@@ -111,6 +111,8 @@ type Agent struct {
 	copiesOnce sync.Once
 	// copyPasswordMu serializes setting safe copies' passwords.
 	copyPasswordMu sync.Mutex
+
+	perms permissionsState // what root allowed (permissions.go)
 }
 
 func New(cfg Config, logger *slog.Logger) *Agent {
@@ -300,7 +302,8 @@ var sideTypes = []string{protocol.TaskMaintenance, protocol.TaskRewindCompare, p
 	protocol.TaskDBAdmin,    // Databases & users: people wait for it in the dashboard
 	protocol.TaskMigrate,    // move in: key, check, switchover... (migrate.go)
 	protocol.TaskSettings,
-	protocol.TaskSecurityScan, protocol.TaskSecurityFix} // security.go
+	protocol.TaskSecurityScan, protocol.TaskSecurityFix, // security.go
+	protocol.TaskPermissions} // permissions.go: people wait for it in the dashboard
 
 // fastLaneClaim is what the fast lane asks for: restore points, and a side
 // task unless one is running already. Side tasks run beside the lane, one
@@ -393,7 +396,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 			Hostname: hostname, AgentVersion: Version, Platform: release.Platform(),
 			Archivers: a.archiverStats(ctx), Update: a.updater.Report(), Mode: a.cfg.Mode,
 			RestartPorts: a.restartPorts(), RestartActions: a.helperActions(),
-			Rewinds: append(a.rewindState().states(), a.engineRewindStates()...),
+			PermissionsHeartbeat: a.permissionsHeartbeat(), Rewinds: append(a.rewindState().states(), a.engineRewindStates()...), // permissions.go, before Software (a changed allow list refreshes it)
 			Storage: a.storageReports(), SecondCopies: a.secondCopyStatuses(),
 			Software:         a.softwareForHeartbeat(),
 			DockerControl:    a.dockerControlReport(ctx),

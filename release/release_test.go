@@ -88,3 +88,42 @@ func TestVersions(t *testing.T) {
 		}
 	}
 }
+
+func TestVerifyInstallerEntry(t *testing.T) {
+	pubB64, privB64, _ := GenerateKey()
+	pub, _ := ParsePublicKey(pubB64)
+	priv, _ := ParsePrivateKey(privB64)
+	agent := protocol.Artifact{URL: "https://releases.rowsafe.sh/agent/1.0.0/rowsafe-agent-linux-amd64", SHA256: strings.Repeat("a", 64), Size: 12 << 20}
+	sign := func(arts map[string]protocol.Artifact) (protocol.ReleaseManifest, error) {
+		m, _ := json.Marshal(protocol.ReleaseManifest{Version: "1.0.0", Artifacts: arts})
+		return Verify(pub, m, Sign(priv, m))
+	}
+
+	// Older manifests, without the installer, still verify.
+	m, err := sign(map[string]protocol.Artifact{"linux/amd64": agent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := Installer(m); ok {
+		t.Fatal("an installer in a manifest without one")
+	}
+
+	inst := protocol.Artifact{URL: "https://releases.rowsafe.sh/agent/1.0.0/install.sh", SHA256: strings.Repeat("b", 64), Size: 300 << 10}
+	m, err = sign(map[string]protocol.Artifact{"linux/amd64": agent, protocol.ReleaseInstallerKey: inst})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := Installer(m); !ok || got != inst {
+		t.Fatalf("installer = %+v %v", got, ok)
+	}
+
+	for name, a := range map[string]protocol.Artifact{
+		"not install.sh": {URL: "https://releases.rowsafe.sh/agent/1.0.0/rowsafe-agent-linux-amd64", SHA256: strings.Repeat("b", 64), Size: 1},
+		"too big":        {URL: "https://releases.rowsafe.sh/agent/1.0.0/install.sh", SHA256: strings.Repeat("b", 64), Size: 5 << 20},
+		"http":           {URL: "http://releases.rowsafe.sh/agent/1.0.0/install.sh", SHA256: strings.Repeat("b", 64), Size: 1},
+	} {
+		if _, err := sign(map[string]protocol.Artifact{"linux/amd64": agent, protocol.ReleaseInstallerKey: a}); err == nil {
+			t.Errorf("%s: installer entry accepted", name)
+		}
+	}
+}

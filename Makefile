@@ -7,13 +7,14 @@
 #   make test-mongodb          the MongoDB engine on real mongo 7.0/8.0 containers (Docker)
 #   make test-rewind           a real Rewind (copy, rows, in place, undo) on a systemd Debian container (Docker)
 #   make test-pooling          real PgBouncer through the root helper on a systemd Debian container (Docker)
+#   make test-permissions      passkey-signed permission changes through root's helper on a systemd Debian container (Docker)
 #   make test-secondcopy       a real second backup copy (two storages, one going away) in a Debian container (Docker)
 #   make test-mysql            the MySQL/MariaDB engine against real MySQL 8.4 and MariaDB 11.4 (Docker)
 #   make test-upgrade          real PostgreSQL updates and upgrades (16 -> 18, undo) on a systemd Debian container (Docker)
 #   make test-action           the GitHub Action (integrations/github-action) against a mock API
 #   make dist VERSION=1.2.3 RELEASE_PUBLIC_KEY=...    reproducible release binaries in dist/1.2.3/
 #   make release VERSION=1.2.3 RELEASE_PUBLIC_KEY=... (needs ROWSAFE_RELEASE_PRIVATE_KEY)
-#                              dist + Ed25519-signed manifest + rendered install.sh + SHA256SUMS
+#                              dist + rendered install.sh + Ed25519-signed manifest (covering both) + SHA256SUMS
 #
 # Release builds are reproducible: CGO off, -trimpath, no VCS stamping, no
 # build ID, the Go toolchain pinned in go.mod. Rebuilding a tag with the same
@@ -33,7 +34,7 @@ AGENT_LDFLAGS := -s -w -buildid= -X $(PKG)/internal/agent.Version=$(VERSION) -X 
 MAIN_LDFLAGS := -s -w -buildid= -X main.version=$(VERSION)
 GOBUILD := CGO_ENABLED=0 GOFLAGS=-mod=readonly $(GO) build -trimpath -buildvcs=false
 
-.PHONY: all build test lint check-installer test-installer test-mongodb test-rewind test-secondcopy test-mysql test-upgrade test-pooling test-action dist release check-release-env clean
+.PHONY: all build test lint check-installer test-installer test-mongodb test-rewind test-secondcopy test-mysql test-upgrade test-pooling test-permissions test-action dist release check-release-env clean
 
 all: lint test build
 
@@ -56,7 +57,7 @@ lint: check-installer
 		done; \
 	done
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck -S warning -s sh scripts/install.sh scripts/test-install.sh scripts/test-rewind.sh scripts/test-pooling.sh scripts/test-secondcopy.sh scripts/test-mysql.sh scripts/test-upgrade.sh scripts/rowsafe-agent-guard scripts/rowsafe-pg-restart scripts/rowsafe-firewall scripts/rowsafe-pg-create-cluster; \
+		shellcheck -S warning -s sh scripts/install.sh scripts/test-install.sh scripts/test-rewind.sh scripts/test-pooling.sh scripts/test-secondcopy.sh scripts/test-mysql.sh scripts/test-upgrade.sh scripts/test-permissions.sh scripts/rowsafe-agent-guard scripts/rowsafe-pg-restart scripts/rowsafe-firewall scripts/rowsafe-pg-create-cluster scripts/rowsafe-allow; \
 		shellcheck -S warning -s bash integrations/github-action/scripts/*.sh integrations/github-action/test/*.sh integrations/github-action/export.sh; \
 	else echo "shellcheck not installed; skipping"; fi
 
@@ -102,6 +103,8 @@ check-installer:
 		diff -u deploy/systemd/rowsafe-firewall.path - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-firewall.path"; exit 1; }
 	@sed -n "/<<'ROWSAFE_FIREWALL_RESTORE_EOF'; then\$$/,/^ROWSAFE_FIREWALL_RESTORE_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
 		diff -u deploy/systemd/rowsafe-firewall-restore.service - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-firewall-restore.service"; exit 1; }
+	@sed -n "/<<'ROWSAFE_ALLOW_EOF' || true\$$/,/^ROWSAFE_ALLOW_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
+		diff -u scripts/rowsafe-allow - || { echo "scripts/install.sh: embedded rowsafe-allow differs from scripts/rowsafe-allow"; exit 1; }
 	@sh -n scripts/install.sh
 
 test-installer:
@@ -115,6 +118,8 @@ test-rewind:
 
 test-pooling:
 	sh scripts/test-pooling.sh
+test-permissions:
+	sh scripts/test-permissions.sh
 test-secondcopy:
 	sh scripts/test-secondcopy.sh
 
@@ -157,11 +162,14 @@ check-release-env:
 release: check-release-env
 	$(MAKE) dist VERSION=$(VERSION) RELEASE_PUBLIC_KEY=$(RELEASE_PUBLIC_KEY)
 	$(GOBUILD) -ldflags '$(MAIN_LDFLAGS)' -o bin/rowsafe-release ./cmd/rowsafe-release
+	@# The rendered installer goes in first: the signed manifest lists its
+	@# SHA-256, so the copy each server keeps (/usr/local/lib/rowsafe/install.sh,
+	@# run by `sudo rowsafe-allow`) is checked like the agent itself.
+	sed 's|@RELEASE_PUBLIC_KEY@|$(RELEASE_PUBLIC_KEY)|' scripts/install.sh > $(DIST)/install.sh
+	@grep -q '@RELEASE_PUBLIC_KEY@' $(DIST)/install.sh && { echo "install.sh was not rendered" >&2; exit 1; } || true
 	bin/rowsafe-release manifest --version $(VERSION) --base-url $(RELEASE_BASE_URL) --dist $(DIST) > $(DIST)/manifest.json
 	bin/rowsafe-release sign --key-env ROWSAFE_RELEASE_PRIVATE_KEY $(DIST)/manifest.json
 	bin/rowsafe-release verify --public-key '$(RELEASE_PUBLIC_KEY)' $(DIST)/manifest.json $(DIST)/manifest.json.sig
-	sed 's|@RELEASE_PUBLIC_KEY@|$(RELEASE_PUBLIC_KEY)|' scripts/install.sh > $(DIST)/install.sh
-	@grep -q '@RELEASE_PUBLIC_KEY@' $(DIST)/install.sh && { echo "install.sh was not rendered" >&2; exit 1; } || true
 	cd $(DIST) && if command -v sha256sum >/dev/null 2>&1; then sha256sum -- * > SHA256SUMS; else shasum -a 256 -- * > SHA256SUMS; fi
 
 clean:

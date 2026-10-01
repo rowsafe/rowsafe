@@ -123,8 +123,22 @@ func Verify(pub ed25519.PublicKey, manifest []byte, signatureB64 string) (protoc
 		if a.Size <= 0 || a.Size > 512<<20 {
 			return m, fmt.Errorf("artifact %s: implausible size %d", platform, a.Size)
 		}
+		if platform == protocol.ReleaseInstallerKey && (!strings.HasSuffix(u.Path, "/install.sh") || a.Size > maxInstallerSize) {
+			return m, errors.New("the installer's entry must name an install.sh of at most 4 MiB")
+		}
 	}
 	return m, nil
+}
+
+// maxInstallerSize bounds the installer listed in a manifest (it is a
+// shell script of a few hundred KiB).
+const maxInstallerSize = 4 << 20
+
+// Installer returns the release's installer entry. Releases from before the
+// installer was signed have none.
+func Installer(m protocol.ReleaseManifest) (protocol.Artifact, bool) {
+	a, ok := m.Artifacts[protocol.ReleaseInstallerKey]
+	return a, ok
 }
 
 // SHA256Hex is a helper for building manifests.
