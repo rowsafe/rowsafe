@@ -426,6 +426,7 @@ func (a *Agent) standbyHeartbeat(ctx context.Context) protocol.StandbyHeartbeat 
 		hb.Standbys = append(hb.Standbys, a.standbyState(ctx, r))
 	}
 	hb.Primaries = a.primaryStates(ctx)
+	a.engineStandbyHeartbeat(ctx, &hb) // engine_standby.go
 	for _, f := range rt.fences() {
 		hb.Fences = append(hb.Fences, protocol.FenceState{ID: f.ID, DatabaseID: f.DatabaseID, Port: f.Port, Running: f.Running,
 			StoppedAt: f.StoppedAt, Other: f.Other, Error: f.LastError, At: time.Now().UTC()})
@@ -448,6 +449,10 @@ func (a *Agent) standbyLoop(ctx context.Context) {
 	a.recoverStandbys(ctx)
 	for {
 		for _, f := range rt.fences() {
+			if f.Engine != "" && f.Engine != protocol.EnginePostgreSQL {
+				a.holdEngineFence(ctx, f)
+				continue
+			}
 			a.holdFence(ctx, f)
 		}
 		for _, r := range rt.standbys() {
@@ -532,7 +537,7 @@ func (a *Agent) standbyLane(ctx context.Context) {
 // runStandbyTask runs a standby task.
 func (a *Agent) runStandbyTask(ctx context.Context, task *protocol.Task, tl *taskLog) (any, error) {
 	if a.cfg.Sidecar() {
-		return nil, errors.New("standby servers need the agent installed on the server itself; PostgreSQL in Docker isn't supported yet")
+		return nil, errors.New("standby servers need the agent installed on the server itself; databases in Docker aren't supported yet")
 	}
 	if a.cfg.Standby == StandbyOff {
 		return nil, errors.New("standby servers are turned off on this server (ROWSAFE_STANDBY=off in /etc/rowsafe/agent.env)")
@@ -541,6 +546,9 @@ func (a *Agent) runStandbyTask(ctx context.Context, task *protocol.Task, tl *tas
 		return nil, fmt.Errorf("task %s has no database", task.Type)
 	}
 	db := *task.Database
+	if !isPostgres(db) {
+		return a.runEngineStandby(ctx, task, tl, db) // engine_standby.go
+	}
 	switch task.Type {
 	case protocol.TaskStandbyPrepare:
 		return runRewind(ctx, task, tl, db, a.standbyPrepare)

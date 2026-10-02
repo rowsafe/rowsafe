@@ -416,6 +416,9 @@ func (a *Agent) primaryStates(ctx context.Context) []protocol.PrimaryState {
 	a.mu.Unlock()
 	var out []protocol.PrimaryState
 	for _, db := range watched {
+		if !isPostgres(db) {
+			continue // engine_standby.go
+		}
 		st, facts, ok := a.primaryState(ctx, db)
 		if !ok {
 			continue

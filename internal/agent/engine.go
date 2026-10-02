@@ -231,7 +231,7 @@ func (a *Agent) runEngineTask(ctx context.Context, task *protocol.Task, tl *task
 		return nil, fmt.Errorf("This agent can't run %s tasks for %s yet; update the agent (this is %s).",
 			task.Type, protocol.EngineDisplayName(name), Version)
 	}
-	return e.Run(ctx, a.engineEnv(name), task, tl)
+	return e.Run(ctx, a.engineEnvFor(*task.Database), task, tl)
 }
 
 // monitorEngine collects a monitoring sample of a non-PostgreSQL database
@@ -243,7 +243,7 @@ func (a *Agent) monitorEngine(ctx context.Context, db protocol.DatabaseSpec) (*p
 	if e == nil {
 		return nil, nil
 	}
-	dm, err := e.Monitor(ctx, a.engineEnv(name), db)
+	dm, err := e.Monitor(ctx, a.engineEnvFor(db), db)
 	if dm != nil && dm.DatabaseID == "" {
 		dm.DatabaseID = db.ID
 	}
@@ -258,7 +258,7 @@ func (a *Agent) engineArchiver(ctx context.Context, db protocol.DatabaseSpec) (s
 	if ar == nil {
 		return stats, false
 	}
-	st, err := ar.Archiver(ctx, a.engineEnv(name), db)
+	st, err := ar.Archiver(ctx, a.engineEnvFor(db), db)
 	switch {
 	case err != nil:
 		stats.Error = err.Error()
