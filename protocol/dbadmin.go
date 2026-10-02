@@ -3,6 +3,7 @@ package protocol
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -170,12 +171,17 @@ type DBAdminResult struct {
 
 // DBConnection is how to connect as a user: everything but the password.
 type DBConnection struct {
+	// Engine is the server's engine ("" is PostgreSQL): it picks the
+	// connection string's scheme.
+	Engine   string `json:"engine,omitempty"`
 	User     string `json:"user"`
 	Database string `json:"database"`
 	Host     string `json:"host"`
 	Port     int    `json:"port"`
 	// SSLMode is "require" when the server has TLS on, else "prefer".
 	SSLMode string `json:"sslmode"`
+	// AuthSource is the database the user is defined in (MongoDB).
+	AuthSource string `json:"auth_source,omitempty"`
 }
 
 // DBSecret is what a SealedSecret holds: a new password and the connection
@@ -183,19 +189,30 @@ type DBConnection struct {
 type DBSecret struct {
 	DBConnection
 	Password string `json:"password"`
-	// URL is postgresql://user:password@host:port/database?sslmode=...
+	// URL is the connection string: postgresql://user:password@host:port/database?sslmode=...
+	// (mysql://, mongodb://, clickhouse:// for the other engines).
 	URL string `json:"url"`
 }
 
-// ConnectionURL is the postgresql:// URL for c with password. Names that
-// pass ValidNewName, and generated passwords, need no escaping; others are
-// escaped anyway.
+// ConnectionURL is the connection string for c with password:
+// postgresql:// (PostgreSQL), mysql:// (MySQL, MariaDB), mongodb:// or
+// clickhouse://. Names that pass ValidNewName, and generated passwords,
+// need no escaping; others are escaped anyway.
 func ConnectionURL(c DBConnection, password string) string {
 	host := c.Host
 	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") { // IPv6
 		host = "[" + host + "]"
 	}
-	u := "postgresql://" + urlEscape(c.User)
+	scheme := "postgresql"
+	switch NormalizeEngine(c.Engine) {
+	case EngineMySQL, EngineMariaDB:
+		scheme = "mysql"
+	case EngineMongoDB:
+		scheme = "mongodb"
+	case EngineClickHouse:
+		scheme = "clickhouse"
+	}
+	u := scheme + "://" + urlEscape(c.User)
 	if password != "" {
 		u += ":" + urlEscape(password)
 	}
@@ -204,8 +221,30 @@ func ConnectionURL(c DBConnection, password string) string {
 		u += fmt.Sprintf(":%d", c.Port)
 	}
 	u += "/" + urlEscape(c.Database)
-	if c.SSLMode != "" {
-		u += "?sslmode=" + c.SSLMode
+	var q []string
+	switch scheme {
+	case "postgresql":
+		if c.SSLMode != "" {
+			q = append(q, "sslmode="+c.SSLMode)
+		}
+	case "mysql":
+		if c.SSLMode == "require" {
+			q = append(q, "ssl-mode=REQUIRED")
+		}
+	case "mongodb":
+		if c.AuthSource != "" {
+			q = append(q, "authSource="+urlEscape(c.AuthSource))
+		}
+		if c.SSLMode == "require" {
+			q = append(q, "tls=true")
+		}
+	case "clickhouse":
+		if c.SSLMode == "require" {
+			q = append(q, "secure=true")
+		}
+	}
+	if len(q) > 0 {
+		u += "?" + strings.Join(q, "&")
 	}
 	return u
 }
@@ -227,9 +266,11 @@ func urlEscape(s string) string {
 // DBInventory is what is inside a database server: its databases, users and
 // extensions. Names, sizes and settings only: never data or password hashes.
 type DBInventory struct {
-	CollectedAt   time.Time `json:"collected_at"`
-	ServerVersion string    `json:"server_version"`
-	Port          int       `json:"port"`
+	CollectedAt time.Time `json:"collected_at"`
+	// Engine is the server's engine ("" is PostgreSQL).
+	Engine        string `json:"engine,omitempty"`
+	ServerVersion string `json:"server_version"`
+	Port          int    `json:"port"`
 	// SSL: the server has TLS on (connection strings use sslmode=require).
 	SSL bool `json:"ssl"`
 	// DefaultLocale is the collation new databases get by default.
@@ -243,10 +284,17 @@ type DBInventory struct {
 	// (listen_addresses is localhost).
 	LocalOnly bool `json:"local_only,omitempty"`
 	// AgentUser is the user Rowsafe's agent connects as (never removed).
-	AgentUser  string        `json:"agent_user,omitempty"`
-	Databases  []DBDatabase  `json:"databases"`
-	Users      []DBUser      `json:"users"`
-	Extensions []DBExtension `json:"extensions"` // available on the server
+	AgentUser string `json:"agent_user,omitempty"`
+	// ManageBlocked, when set, says in plain words why Rowsafe can only
+	// list here and not create or remove anything yet (its own account
+	// lacks the rights, or the server keeps its users in configuration
+	// files). ManageCommand is what root runs on the server to allow it
+	// (shown under "Do it yourself").
+	ManageBlocked string        `json:"manage_blocked,omitempty"`
+	ManageCommand string        `json:"manage_command,omitempty"`
+	Databases     []DBDatabase  `json:"databases"`
+	Users         []DBUser      `json:"users"`
+	Extensions    []DBExtension `json:"extensions"` // available on the server
 	// Truncated: the server has more databases or users than listed.
 	Truncated bool `json:"truncated,omitempty"`
 }
@@ -297,6 +345,16 @@ const (
 	PasswordSCRAM = "scram-sha-256"
 	PasswordMD5   = "md5"
 	PasswordNone  = "none"
+	// PasswordSet: a password is set, stored in a way that is fine today
+	// (MySQL's caching_sha2_password, MongoDB's SCRAM, ClickHouse's
+	// sha256_password...).
+	PasswordSet = "set"
+	// PasswordWeak: a password is set but stored the old, weak way (MySQL's
+	// mysql_native_password, ClickHouse's plaintext_password).
+	PasswordWeak = "weak"
+	// PasswordSocket: no password; only the matching system user on this
+	// server can sign in (MySQL's auth_socket, MariaDB's unix_socket).
+	PasswordSocket = "socket"
 )
 
 // DBUser is one user (role) of the server.
@@ -434,9 +492,17 @@ func ValidExtensionName(name string) error {
 // and the extensions enabled with a new database.
 const maxDBAdminList = 50
 
-// ValidateDBAdmin checks params before anything runs: the control plane and
-// the agent both call it. It does not check that names exist.
-func ValidateDBAdmin(p DBAdminParams) error {
+// ValidateDBAdmin checks params for a PostgreSQL server (ValidateDBAdminFor).
+func ValidateDBAdmin(p DBAdminParams) error { return ValidateDBAdminFor(EnginePostgreSQL, p) }
+
+// ValidateDBAdminFor checks params before anything runs, for a server of
+// engine: the control plane and the agent both call it. It does not check
+// that names exist.
+func ValidateDBAdminFor(engine string, p DBAdminParams) error {
+	engine = NormalizeEngine(engine)
+	if err := validateDBAdminEngine(engine, p); err != nil {
+		return err
+	}
 	if p.Host != "" && !hostRE.MatchString(p.Host) {
 		return fmt.Errorf("invalid host %q", p.Host)
 	}
@@ -527,8 +593,8 @@ func ValidateDBAdmin(p DBAdminParams) error {
 		if err := ValidExistingName("database", p.Database); err != nil {
 			return err
 		}
-		if SystemDatabase(p.Database) {
-			return fmt.Errorf("the database %s is one of PostgreSQL's own; Rowsafe doesn't remove it", p.Database)
+		if SystemDatabaseFor(engine, p.Database) {
+			return fmt.Errorf("the database %s is one of %s's own; Rowsafe doesn't remove it", p.Database, EngineDisplayName(engine))
 		}
 		if p.Confirm != p.Database {
 			return fmt.Errorf("removing a database deletes everything in it: confirm with its name, %q", p.Database)
@@ -548,8 +614,92 @@ func ValidateDBAdmin(p DBAdminParams) error {
 }
 
 // SystemDatabase reports whether name is one of PostgreSQL's own databases.
-func SystemDatabase(name string) bool {
-	return name == "postgres" || name == "template0" || name == "template1"
+func SystemDatabase(name string) bool { return SystemDatabaseFor(EnginePostgreSQL, name) }
+
+// systemDatabases are each engine's own databases (never created, dropped
+// or handed to a user from Rowsafe).
+var systemDatabases = map[string][]string{
+	EnginePostgreSQL: {"postgres", "template0", "template1"},
+	EngineMySQL:      {"mysql", "sys", "information_schema", "performance_schema"},
+	EngineMariaDB:    {"mysql", "sys", "information_schema", "performance_schema"},
+	EngineMongoDB:    {"admin", "local", "config"},
+	EngineClickHouse: {"system", "information_schema", "INFORMATION_SCHEMA", "default"},
+}
+
+// SystemDatabaseFor reports whether name is one of engine's own databases.
+func SystemDatabaseFor(engine, name string) bool {
+	for _, n := range systemDatabases[NormalizeEngine(engine)] {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// systemUsers are user names each engine keeps for itself.
+var systemUsers = map[string][]string{
+	EngineMySQL:      {"root", "mysql.sys", "mysql.session", "mysql.infoschema", "mariadb.sys", "debian-sys-maint"},
+	EngineMariaDB:    {"root", "mysql.sys", "mysql.session", "mysql.infoschema", "mariadb.sys", "debian-sys-maint"},
+	EngineMongoDB:    {"root", "admin", "__system"},
+	EngineClickHouse: {"default"},
+}
+
+// validateDBAdminEngine checks what differs between engines: extensions,
+// templates and locales are PostgreSQL's; each engine has its own
+// databases and users, and MySQL caps user names at 32 characters.
+func validateDBAdminEngine(engine string, p DBAdminParams) error {
+	if _, ok := EngineCapabilities[engine]; !ok {
+		return fmt.Errorf("unknown engine %q", engine)
+	}
+	name := EngineDisplayName(engine)
+	if engine != EnginePostgreSQL {
+		switch p.Action {
+		case DBAdminEnableExtension, DBAdminDisableExtension:
+			return fmt.Errorf("extensions are a PostgreSQL feature; %s has none", name)
+		case DBAdminCreateDatabase:
+			if len(p.Extensions) > 0 || p.Locale != "" || (p.Template != "" && p.Template != DBTemplateDefault) {
+				return fmt.Errorf("templates, locales and extensions are PostgreSQL features; %s has none", name)
+			}
+		}
+	}
+	isNew := func(kind, n string) error {
+		if n == "" {
+			return nil
+		}
+		if SystemDatabaseFor(engine, n) || slices.Contains(systemUsers[engine], n) {
+			return fmt.Errorf("%q is one of %s's own names; pick another %s name", n, name, kind)
+		}
+		if kind == "user" && (engine == EngineMySQL || engine == EngineMariaDB) && len(n) > 32 {
+			return fmt.Errorf("%q is too long: %s user names have at most 32 characters", n, name)
+		}
+		return nil
+	}
+	switch p.Action {
+	case DBAdminCreateDatabase:
+		if err := isNew("database", p.Database); err != nil {
+			return err
+		}
+		if p.CreateOwner {
+			return isNew("user", cmpOr(p.Owner, p.Database))
+		}
+	case DBAdminCreateUser:
+		if err := isNew("user", p.User); err != nil {
+			return err
+		}
+		for _, d := range p.Databases {
+			if engine != EnginePostgreSQL && SystemDatabaseFor(engine, d) {
+				return fmt.Errorf("%s is one of %s's own databases; Rowsafe doesn't give users access to it", d, name)
+			}
+		}
+	}
+	return nil
+}
+
+func cmpOr(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
 
 var (
