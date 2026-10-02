@@ -3117,7 +3117,7 @@ install_firewall_helper() {
   if write_file "$FIREWALL_HELPER" 0755 root:root <<'ROWSAFE_FIREWALL_HELPER_EOF'; then
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
-# rowsafe-firewall: lets only chosen addresses reach PostgreSQL's port, when
+# rowsafe-firewall: lets only chosen addresses reach a database's port, when
 # a person asked Rowsafe to (Security in the dashboard) and root allowed it
 # for that port.
 #
@@ -3142,7 +3142,7 @@ install_firewall_helper() {
 # socket of the postgres user listens on it.
 #
 # Rules live in one nftables table of Rowsafe's own, "inet rowsafe", which
-# matches only the allowed PostgreSQL ports: connections to such a port
+# matches only the allowed database ports: connections to such a port
 # from anywhere but the allowed addresses and the server itself are
 # dropped; SSH and every other port are never touched. The whole table is
 # replaced in one nft transaction, checked with nft -c first. Ports that
@@ -3170,6 +3170,9 @@ out_dir=${RUNTIME_DIRECTORY:-/run/rowsafe-firewall}
 allow=${ROWSAFE_FIREWALL_ALLOW:-/etc/rowsafe/firewall-allowed}
 state=${STATE_DIRECTORY:-/var/lib/rowsafe-firewall}
 agent_user=${ROWSAFE_AGENT_USER:-postgres}
+# The users database servers run as (PostgreSQL's is the agent's own): a
+# port is only accepted while one of them listens on it.
+db_users=${ROWSAFE_DB_USERS:-"$agent_user postgres mysql mongodb mongod clickhouse"}
 nft=${ROWSAFE_NFT:-nft}
 ss=${ROWSAFE_SS:-ss}
 sshd=${ROWSAFE_SSHD:-sshd}
@@ -3369,9 +3372,13 @@ rollback() {
 }
 
 if [ "$action" = apply ]; then
-  uid=$(id -u "$agent_user" 2>/dev/null) || refuse "no $agent_user user"
-  listen_ports "$uid" | grep -qx "$port" ||
-    refuse "no PostgreSQL of the $agent_user user listens on port $port here (a port Docker publishes bypasses this firewall: limit it in the compose file instead)"
+  db_listens=0
+  for u in $db_users; do
+    uid=$(id -u "$u" 2>/dev/null) || continue
+    if listen_ports "$uid" | grep -qx "$port"; then db_listens=1; fi
+  done
+  [ "$db_listens" = 1 ] ||
+    refuse "no database server (PostgreSQL, MySQL, MariaDB, MongoDB or ClickHouse) listens on port $port here (a port Docker publishes bypasses this firewall: limit it in the compose file instead)"
   addrs=$(read_agent_file "$dir/addresses" 4096 | head -n 33)
   n=0
   : >"$state/new-$port"
@@ -3593,14 +3600,18 @@ ssh_port_here() {
   } | awk -v p="$1" '$1 "" == p "" { f = 1 } END { exit !f }'
 }
 
-# firewall_ports prints the TCP ports PostgreSQL listens on, found by root
-# itself (pg_lsclusters, and the agent user's listening sockets), never
-# taken from the agent: 1024 to 65535, never one sshd uses.
+# firewall_ports prints the TCP ports database servers listen on, found by
+# root itself (pg_lsclusters, and the listening sockets of the agent user and
+# of the users MySQL, MariaDB, MongoDB and ClickHouse run as), never taken
+# from the agent: 1024 to 65535, never one sshd uses.
 firewall_ports() {
   {
     if command -v pg_lsclusters >/dev/null 2>&1; then pg_lsclusters -h 2>/dev/null | awk '{ print $3 }'; fi
-    if _uid=$(id -u "$AGENT_USER" 2>/dev/null) && command -v ss >/dev/null 2>&1; then
-      ss -ltnHe 2>/dev/null | awk -v u="$_uid" 'index($0, " uid:" u " ") { n = split($4, a, ":"); print a[n] }'
+    if command -v ss >/dev/null 2>&1; then
+      for _u in "$AGENT_USER" postgres mysql mongodb mongod clickhouse; do
+        _uid=$(id -u "$_u" 2>/dev/null) || continue
+        ss -ltnHe 2>/dev/null | awk -v u="$_uid" 'index($0, " uid:" u " ") { n = split($4, a, ":"); print a[n] }'
+      done
     fi
   } | grep -Ex '[1-9][0-9]{3,4}' | awk '$1 >= 1024 && $1 <= 65535' | sort -un | while read -r _p; do
     ssh_port_here "$_p" || echo "$_p"
@@ -3616,7 +3627,7 @@ firewall_listed() {
 # write_firewall_allow PORTS...: the allow list, written by root.
 write_firewall_allow() {
   {
-    echo "# PostgreSQL ports whose firewall rule Rowsafe may set when someone asks"
+    echo "# Database ports whose firewall rule Rowsafe may set when someone asks"
     echo "# (Security in the dashboard): only the chosen addresses may reach the"
     echo "# port. SSH and other ports are never touched. Written by the installer"
     echo "# (root); turn this off with: sudo rowsafe-allow --remove firewall"
@@ -3627,19 +3638,19 @@ write_firewall_allow() {
 
 allow_firewall() {
   if ! command -v nft >/dev/null 2>&1; then
-    warn "nftables isn't installed here (no nft command), so limiting who can reach PostgreSQL stays off. Install it (e.g. apt install nftables), then: sudo rowsafe-allow firewall"
+    warn "nftables isn't installed here (no nft command), so limiting who can reach $(engine_label) stays off. Install it (e.g. apt install nftables), then: sudo rowsafe-allow firewall"
     return 0
   fi
   _ports=$(firewall_ports)
   _listed=$(firewall_listed)
   if [ -z "$_ports$_listed" ]; then
-    warn "found no PostgreSQL listening here, so the firewall stays off for Rowsafe"
+    warn "found no database server listening here, so the firewall stays off for Rowsafe"
     return 0
   fi
   # shellcheck disable=SC2086 # one port per word
   write_firewall_allow $_listed $_ports
   install_firewall_helper
-  perm_ok "Rowsafe may limit who can reach PostgreSQL's port ($(firewall_listed | paste -sd, - | sed 's/,/, /g')) when you ask (Security), never SSH or other ports"
+  perm_ok "Rowsafe may limit who can reach $(engine_label)'s port ($(firewall_listed | paste -sd, - | sed 's/,/, /g')) when you ask (Security), never SSH or other ports"
 }
 
 disallow_firewall() {
@@ -3660,14 +3671,14 @@ firewall_access() {
     yes) allow_firewall ;;
     no)
       disallow_firewall
-      perm_ok "limiting who can reach PostgreSQL with the firewall is off for Rowsafe"
+      perm_ok "limiting who can reach $(engine_label) with the firewall is off for Rowsafe"
       ;;
     *)
       if [ -n "$(firewall_listed)" ]; then
         install_firewall_helper
         _new=$(firewall_ports | grep -vxF "$(firewall_listed)" || true)
         [ -n "$_new" ] && [ "$TTY" = 1 ] || return 0
-        if perm_ask "PostgreSQL also listens on port $(printf '%s' "$_new" | paste -sd, - | sed 's/,/, /g'). Allow Rowsafe's firewall rule for it too?" n; then
+        if perm_ask "$(engine_label) also listens on port $(printf '%s' "$_new" | paste -sd, - | sed 's/,/, /g'). Allow Rowsafe's firewall rule for it too?" n; then
           # shellcheck disable=SC2046 # one port per word
           write_firewall_allow $(firewall_listed) $_new
         fi
@@ -3677,7 +3688,7 @@ firewall_access() {
       [ "$TTY" = 1 ] && command -v nft >/dev/null 2>&1 || return 0
       _ports=$(firewall_ports)
       [ -n "$_ports" ] || return 0
-      if perm_ask "Limit who can reach PostgreSQL (port $(printf '%s' "$_ports" | paste -sd, - | sed 's/,/, /g')) with the firewall, when someone picks the addresses? SSH and other ports are never touched." n; then
+      if perm_ask "Limit who can reach $(engine_label) (port $(printf '%s' "$_ports" | paste -sd, - | sed 's/,/, /g')) with the firewall, when someone picks the addresses? SSH and other ports are never touched." n; then
         allow_firewall
       else
         disallow_firewall
@@ -4541,8 +4552,13 @@ perm_has_postgres() {
 # can). The agent reports the same reasons.
 perm_why() {
   if [ "$HOST_ENGINE" != postgresql ] || ! perm_has_postgres; then
-    echo "Rowsafe does this for PostgreSQL, and there is no PostgreSQL on this server"
-    return 0
+    case $1 in
+      firewall) ;; # every engine's port
+      *)
+        echo "Rowsafe does this for PostgreSQL, and there is no PostgreSQL on this server"
+        return 0
+        ;;
+    esac
   fi
   _w=''
   case $1 in
@@ -4554,7 +4570,7 @@ perm_why() {
       if ! have nft; then
         _w="nftables isn't installed (apt install nftables)"
       elif [ -z "$(firewall_ports)$(firewall_listed)" ]; then
-        _w="found no PostgreSQL listening here"
+        _w="found no database server listening here"
       fi
       ;;
   esac
@@ -4604,10 +4620,12 @@ perm_cascade() {
 # perm_summary prints what Rowsafe may do here now, and how to change it.
 perm_summary() {
   say ""
-  if [ "$HOST_ENGINE" != postgresql ] || ! perm_has_postgres; then
+  _any=''
+  for _p in $PERMISSIONS; do [ -n "$(perm_why "$_p")" ] || _any=1; done
+  if [ -z "$_any" ] && { [ "$HOST_ENGINE" != postgresql ] || ! perm_has_postgres; }; then
     step "What Rowsafe may do on $(uname -n)"
-    note "Nothing to allow: these permissions are for PostgreSQL (restart it, install"
-    note "its updates, PgBouncer, the firewall), and there is no PostgreSQL here."
+    note "Nothing to allow here: most of these permissions are for PostgreSQL (restart"
+    note "it, install its updates, PgBouncer), and the firewall needs nftables."
     return 0
   fi
   step "What Rowsafe may do on $(uname -n), only when someone clicks it and confirms"

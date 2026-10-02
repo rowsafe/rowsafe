@@ -3073,7 +3073,7 @@ PGEOF
   fw_request "fw_low apply 22" '10.1.0.0/16\n' 1
   grep -q "^error=port 22 can't be managed by Rowsafe" "$FO/result" || fail "a port below 1024 was not refused"
   fw_request "fw_nopg apply 5499" '10.1.0.0/16\n' 1
-  grep -q "^error=no PostgreSQL of the postgres user listens on port 5499" "$FO/result" || fail "a port without PostgreSQL was not refused"
+  grep -q "^error=no database server (PostgreSQL, MySQL, MariaDB, MongoDB or ClickHouse) listens on port 5499" "$FO/result" || fail "a port without PostgreSQL was not refused"
   printf '5432\n' >/etc/rowsafe/firewall-allowed
   for bad in "fw_5 flush 5432" "fw_5 apply" "fw_5 apply 5432 x" "fw.5 apply 5432" 'x; nft flush ruleset 5432' "fw_5 apply 05432" "fw_5 apply 99999999"; do
     fw_request "$bad" "" 0

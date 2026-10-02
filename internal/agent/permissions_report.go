@@ -136,6 +136,10 @@ func ReadPermissions(p PermissionPaths) *protocol.PermissionsReport {
 	return r
 }
 
+// anyEnginePermission are the permissions a server without PostgreSQL may
+// have too (MySQL, MariaDB, MongoDB or ClickHouse).
+var anyEnginePermission = map[string]bool{protocol.PermFirewall: true}
+
 // permissionsUnavailable says which permissions this server can't have,
 // and why. One that is allowed is never listed.
 func permissionsUnavailable(p PermissionPaths, allowed []string) map[string]string {
@@ -144,7 +148,7 @@ func permissionsUnavailable(p PermissionPaths, allowed []string) map[string]stri
 	for _, name := range protocol.Permissions {
 		var why string
 		switch {
-		case len(pg) == 0:
+		case len(pg) == 0 && !anyEnginePermission[name]:
 			why = permReasonPostgresOnly
 		case name == protocol.PermCreateCluster && !permHave("pg_createcluster"):
 			why = permReasonNoCluster

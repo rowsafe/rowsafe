@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
-# rowsafe-firewall: lets only chosen addresses reach PostgreSQL's port, when
+# rowsafe-firewall: lets only chosen addresses reach a database's port, when
 # a person asked Rowsafe to (Security in the dashboard) and root allowed it
 # for that port.
 #
@@ -25,7 +25,7 @@
 # socket of the postgres user listens on it.
 #
 # Rules live in one nftables table of Rowsafe's own, "inet rowsafe", which
-# matches only the allowed PostgreSQL ports: connections to such a port
+# matches only the allowed database ports: connections to such a port
 # from anywhere but the allowed addresses and the server itself are
 # dropped; SSH and every other port are never touched. The whole table is
 # replaced in one nft transaction, checked with nft -c first. Ports that
@@ -53,6 +53,9 @@ out_dir=${RUNTIME_DIRECTORY:-/run/rowsafe-firewall}
 allow=${ROWSAFE_FIREWALL_ALLOW:-/etc/rowsafe/firewall-allowed}
 state=${STATE_DIRECTORY:-/var/lib/rowsafe-firewall}
 agent_user=${ROWSAFE_AGENT_USER:-postgres}
+# The users database servers run as (PostgreSQL's is the agent's own): a
+# port is only accepted while one of them listens on it.
+db_users=${ROWSAFE_DB_USERS:-"$agent_user postgres mysql mongodb mongod clickhouse"}
 nft=${ROWSAFE_NFT:-nft}
 ss=${ROWSAFE_SS:-ss}
 sshd=${ROWSAFE_SSHD:-sshd}
@@ -252,9 +255,13 @@ rollback() {
 }
 
 if [ "$action" = apply ]; then
-  uid=$(id -u "$agent_user" 2>/dev/null) || refuse "no $agent_user user"
-  listen_ports "$uid" | grep -qx "$port" ||
-    refuse "no PostgreSQL of the $agent_user user listens on port $port here (a port Docker publishes bypasses this firewall: limit it in the compose file instead)"
+  db_listens=0
+  for u in $db_users; do
+    uid=$(id -u "$u" 2>/dev/null) || continue
+    if listen_ports "$uid" | grep -qx "$port"; then db_listens=1; fi
+  done
+  [ "$db_listens" = 1 ] ||
+    refuse "no database server (PostgreSQL, MySQL, MariaDB, MongoDB or ClickHouse) listens on port $port here (a port Docker publishes bypasses this firewall: limit it in the compose file instead)"
   addrs=$(read_agent_file "$dir/addresses" 4096 | head -n 33)
   n=0
   : >"$state/new-$port"
