@@ -38,6 +38,7 @@ type dbMonitor struct {
 	prev       map[string]float64
 	prevAt     time.Time
 	lastSizes  time.Time
+	settingsAt time.Time
 	queryStart map[string]time.Time // query_id -> start, as first seen
 }
 
@@ -75,6 +76,10 @@ func (e *Engine) Monitor(ctx context.Context, env agent.EngineEnv, db protocol.D
 	}
 	if err := m.sample(ctx, dm); err != nil {
 		dm.Error = "can't read ClickHouse's status: " + shortError(plainLoginError(err))
+	} else if time.Since(m.settingsAt) >= 5*time.Minute { // Tuning (settings.go)
+		if snap, err := settingsSnapshot(ctx, env, m.client); err == nil {
+			dm.Settings, m.settingsAt = snap, time.Now()
+		}
 	}
 	return dm, nil
 }

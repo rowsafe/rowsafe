@@ -190,6 +190,9 @@ func Allowed(path string) (map[string]string, error) {
 type Applier struct {
 	StateDir string
 	Now      func() time.Time
+	// AgentUID is the agent user's: root never writes in a directory it
+	// owns (-1: unknown, only root-owned directories then).
+	AgentUID int
 }
 
 // state is what Rowsafe set, and what the file held before (MongoDB).
@@ -268,9 +271,9 @@ func (a *Applier) prune() {
 	}
 }
 
-// safeDir checks a directory root writes in: a real directory owned by
-// root, not writable by others.
-func safeDir(dir string) error {
+// safeDir checks a directory root writes in: a real directory, not the
+// agent's, writable by nobody but its owner and group.
+func (a *Applier) safeDir(dir string) error {
 	fi, err := os.Lstat(dir)
 	if err != nil {
 		return err
@@ -278,8 +281,9 @@ func safeDir(dir string) error {
 	if !fi.IsDir() || fi.Mode()&fs.ModeSymlink != 0 {
 		return fmt.Errorf("%s is not a directory", dir)
 	}
-	if st, ok := fi.Sys().(*syscall.Stat_t); ok && st.Uid != 0 && os.Getuid() == 0 {
-		return fmt.Errorf("%s isn't owned by root", dir)
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && os.Getuid() == 0 &&
+		(a.AgentUID >= 0 && int(st.Uid) == a.AgentUID || a.AgentUID < 0 && st.Uid != 0) {
+		return fmt.Errorf("%s belongs to the agent's user; Rowsafe's helper doesn't write there", dir)
 	}
 	if fi.Mode().Perm()&0o002 != 0 {
 		return fmt.Errorf("%s is writable by everyone", dir)
@@ -358,7 +362,7 @@ func (a *Applier) applyClickHouse(r Request, dir string, st *state, backup strin
 	}
 	var written []string
 	for _, f := range files {
-		if err := safeDir(filepath.Dir(f.path)); err != nil {
+		if err := a.safeDir(filepath.Dir(f.path)); err != nil {
 			return written, err
 		}
 		if err := copyIfExists(f.path, filepath.Join(backup, filepath.Base(filepath.Dir(f.path)))); err != nil {
@@ -408,7 +412,7 @@ func clickhouseXML(values map[string]string, profile bool) []byte {
 // ---- MongoDB ----
 
 func (a *Applier) applyMongo(r Request, file string, st *state, backup string) ([]string, error) {
-	if err := safeDir(filepath.Dir(file)); err != nil {
+	if err := a.safeDir(filepath.Dir(file)); err != nil {
 		return nil, err
 	}
 	fi, err := os.Lstat(file)

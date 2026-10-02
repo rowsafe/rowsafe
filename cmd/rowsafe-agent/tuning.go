@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/rowsafe/rowsafe/internal/permissions"
@@ -59,7 +61,12 @@ func tuningApply() error {
 	if !ok {
 		return answer(tuneroot.Result{ID: req.ID, Error: fmt.Sprintf("changing %s's settings isn't allowed on this server (root allows it with: sudo rowsafe-allow tuning)", req.Engine)})
 	}
-	a := &tuneroot.Applier{StateDir: getenv("STATE_DIRECTORY", tuneroot.DefaultStateDir), Now: time.Now}
+	a := &tuneroot.Applier{StateDir: getenv("STATE_DIRECTORY", tuneroot.DefaultStateDir), Now: time.Now, AgentUID: -1}
+	if u, err := user.Lookup(getenv("ROWSAFE_AGENT_USER", "postgres")); err == nil {
+		if id, err := strconv.Atoi(u.Uid); err == nil {
+			a.AgentUID = id
+		}
+	}
 	res := a.Apply(req, where)
 	fmt.Fprintf(os.Stderr, "rowsafe-tuning: %s %s ok=%v %s\n", req.ID, req.Engine, res.OK, res.Error)
 	return answer(res)

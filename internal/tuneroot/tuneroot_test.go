@@ -25,7 +25,7 @@ func TestMongo(t *testing.T) {
 	if err := os.WriteFile(file, []byte(mongodConf), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	a := &Applier{StateDir: filepath.Join(dir, "state"), Now: time.Now}
+	a := &Applier{StateDir: filepath.Join(dir, "state"), Now: time.Now, AgentUID: -1}
 	res := a.Apply(Request{ID: "r1", Engine: "mongodb", Settings: map[string]string{"wiredtiger_cache_size": "4294967296", "slow_op_threshold_ms": "200"}}, file)
 	if !res.OK {
 		t.Fatal(res.Error)
@@ -59,7 +59,7 @@ func TestClickHouse(t *testing.T) {
 	for _, d := range []string{"config.d", "users.d"} {
 		_ = os.MkdirAll(filepath.Join(dir, d), 0o755)
 	}
-	a := &Applier{StateDir: filepath.Join(dir, "state"), Now: time.Now}
+	a := &Applier{StateDir: filepath.Join(dir, "state"), Now: time.Now, AgentUID: -1}
 	res := a.Apply(Request{ID: "c1", Engine: "clickhouse", Settings: map[string]string{"max_memory_usage": "8589934592", "max_concurrent_queries": "200"}}, dir)
 	if !res.OK || len(res.Files) != 2 {
 		t.Fatalf("%+v", res)
