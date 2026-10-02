@@ -66,6 +66,35 @@ DOCKERFILE
 }
 
 rc=0
+if [ "${CLICKHOUSE_CLONE:-}" = 1 ]; then
+	# Clones: a second, empty server in the same container (its own ports,
+	# data and Keeper ports).
+	v=${VERSIONS%% *}
+	img=rowsafe-test/clickhouse:$v
+	image "$v"
+	name=rowsafe-test-clickhouse-clone-$$
+	containers="$containers $name"
+	echo "==> ClickHouse $v, clone into a second server"
+	to "$LIMIT" docker run --rm --name "$name" -e CLICKHOUSE_SKIP_USER_SETUP=1 --entrypoint bash "$img" -euc '
+		/entrypoint.sh >/tmp/server.log 2>&1 &
+		install -d -o clickhouse -g clickhouse /tmp/ch2
+		su clickhouse -s /bin/sh -c "clickhouse-server --config-file=/etc/clickhouse-server/config.xml -- \
+			--http_port=8125 --tcp_port=9005 --mysql_port=9006 --postgresql_port=9007 --interserver_http_port=9019 \
+			--path=/tmp/ch2/ --tmp_path=/tmp/ch2/tmp/ --user_files_path=/tmp/ch2/user_files/ --format_schema_path=/tmp/ch2/format_schemas/ \
+			--access_control_path=/tmp/ch2/access/ --logger.log=/tmp/ch2/server.log --logger.errorlog=/tmp/ch2/error.log \
+			--keeper_server.tcp_port=9182 --keeper_server.raft_configuration.server.port=9235 \
+			--keeper_server.log_storage_path=/tmp/ch2/coordination/log --keeper_server.snapshot_storage_path=/tmp/ch2/coordination/snapshots \
+			--zookeeper.node.port=9182 >/tmp/ch2.out 2>&1 &"
+		for p in 8123 8125; do
+			for _ in $(seq 1 120); do wget -qO- "http://127.0.0.1:$p/ping" >/dev/null 2>&1 && break; sleep 1; done
+		done
+		cd /tmp
+		su rowsafe -c "env ROWSAFE_TEST_CLICKHOUSE_PORT=8123 ROWSAFE_TEST_CLICKHOUSE_CLONE_PORT=8125 \
+			/usr/local/bin/clickhouse.test -test.v -test.count=1 -test.run \"TestClickHouseClone|TestClickHouseMoveIn\" -test.timeout 20m" 2>&1 | tail -n 80
+		exit ${PIPESTATUS[0]}
+	' || rc=1
+	exit $rc
+fi
 mode=xml
 for v in $VERSIONS; do
 	img=rowsafe-test/clickhouse:$v

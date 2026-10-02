@@ -69,6 +69,8 @@ var clickhouseFeatures = EngineFeatures{
 	Logs:            true, // the error log (internal/engine/clickhouse/logs.go)
 	DBAdmin:         true, Security: true, Files: true, SecondCopy: true,
 	MigrationPreview: true, SafeCopies: true,
+	Fork:   true, // clones restored from a backup into an empty server (fork.go in internal/engine/clickhouse)
+	MoveIn: true, // one-time copy from ClickHouse Cloud or any ClickHouse (migrate.go in internal/engine/clickhouse)
 }
 
 // ClickHouseStatus is ClickHouse's own health detail

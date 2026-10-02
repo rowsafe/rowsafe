@@ -147,6 +147,13 @@ func restoreStatement(b backupDoc, skip map[string]string, from, base, id string
 
 // restoreInto restores backup b into the scratch server c.
 func restoreInto(ctx context.Context, env agent.EngineEnv, r *repo, b backupDoc, c *client, tl agent.TaskLogger) (map[string]string, error) {
+	return restoreTo(ctx, env, r, b, c, true, tl)
+}
+
+// restoreTo restores backup b into server c; scratch: c is a private copy,
+// where merges and view refreshes are stopped afterwards (never on a real
+// server, a clone's).
+func restoreTo(ctx context.Context, env agent.EngineEnv, r *repo, b backupDoc, c *client, scratch bool, tl agent.TaskLogger) (map[string]string, error) {
 	skip := leftOut(b.Tables)
 	prefixes := []string{backupDir(b.Label)}
 	if b.Base != "" {
@@ -188,8 +195,10 @@ func restoreInto(ctx context.Context, env agent.EngineEnv, r *repo, b backupDoc,
 	}
 	// Nothing changes in a copy by itself: no merges (TTL deletes included),
 	// no view refreshes (none should be there).
-	_ = c.exec(ctx, "SYSTEM STOP MERGES", nil)
-	_ = c.exec(ctx, "SYSTEM STOP VIEWS", nil)
+	if scratch {
+		_ = c.exec(ctx, "SYSTEM STOP MERGES", nil)
+		_ = c.exec(ctx, "SYSTEM STOP VIEWS", nil)
+	}
 	return skip, nil
 }
 

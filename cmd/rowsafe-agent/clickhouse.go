@@ -78,6 +78,7 @@ func clickhouseCmd(ctx context.Context, args []string) int {
 	port := fs.Int("port", 8123, "ClickHouse HTTP port")
 	adminUser := fs.String("admin-user", "", "administrator user (password on stdin)")
 	usersXML := fs.Bool("users-xml", false, "print a users.d file instead of creating the user with SQL")
+	clones := fs.Bool("clones", false, "also let Rowsafe create and drop databases and tables, so this (empty) server can receive clones")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
@@ -109,7 +110,7 @@ func clickhouseCmd(ctx context.Context, args []string) int {
 	case "login":
 		if *usersXML {
 			var xml string
-			if xml, err = clickhouse.UsersXML(env, *port); err == nil {
+			if xml, err = clickhouse.UsersXMLWith(env, *port, *clones); err == nil {
 				fmt.Print(xml)
 			}
 			break
@@ -118,7 +119,7 @@ func clickhouseCmd(ctx context.Context, args []string) int {
 		if *adminUser != "" {
 			pw = readSecret()
 		}
-		if err = clickhouse.CreateLogin(ctx, env, *port, *adminUser, pw); err == nil {
+		if err = clickhouse.CreateLoginWith(ctx, env, *port, *adminUser, pw, *clones); err == nil {
 			fmt.Printf("Created ClickHouse user %q for Rowsafe; its password is saved for the agent only.\n", clickhouse.LoginUser)
 		}
 	case "save-login":

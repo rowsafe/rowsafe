@@ -22,7 +22,7 @@ DOCKERFILE
 	for auth in off on; do
 		echo "==> MongoDB $v, access control $auth"
 		if ! docker run --rm -v "$HERE":/src:ro -v "$MODCACHE":/go/pkg/mod -v rowsafe-test-gocache:/root/.cache/go-build \
-			-e GOMODCACHE=/go/pkg/mod -e AUTH=$auth -w /src "$img" bash -euc '
+			-e GOMODCACHE=/go/pkg/mod -e AUTH=$auth -e CLONE="${MONGO_CLONE:-}" -w /src "$img" bash -euc '
 			mkdir -p /data/rs /tmp/work
 			args="--dbpath /data/rs --replSet rs0 --port 27017 --bind_ip 127.0.0.1 --fork --logpath /tmp/mongod.log"
 			if [ "$AUTH" = on ]; then
@@ -38,7 +38,20 @@ DOCKERFILE
 				until mongosh --quiet --eval "db.hello().isWritablePrimary" | grep -q true; do sleep 1; done
 			fi
 			cp -r /src /tmp/work/src && cd /tmp/work/src
-			ROWSAFE_TEST_MONGODB_PORT=27017 go test -count=1 -tags mongodb_integration -run TestMongoDB -v ./internal/engine/mongodb/ 2>&1 | tail -n 80
+			run=TestMongoDBEndToEnd
+			if [ "$CLONE" = 1 ]; then
+				# A second, empty server to clone into.
+				mkdir -p /data/c
+				if [ "$AUTH" = on ]; then
+					mongod --dbpath /data/c --port 27018 --bind_ip 127.0.0.1 --fork --logpath /tmp/m2.log --auth >/dev/null
+					mongosh --quiet --port 27018 admin --eval "db.createUser({user: \"admin\", pwd: \"adminpw\", roles: [\"root\"]})" >/dev/null
+				else
+					mongod --dbpath /data/c --port 27018 --bind_ip 127.0.0.1 --fork --logpath /tmp/m2.log >/dev/null
+				fi
+				export ROWSAFE_TEST_MONGODB_CLONE_PORT=27018
+				run="TestMongoDBClone|TestMongoDBMoveIn"
+			fi
+			ROWSAFE_TEST_MONGODB_PORT=27017 go test -count=1 -tags mongodb_integration -run "$run" -v ./internal/engine/mongodb/ 2>&1 | tail -n 80
 			exit ${PIPESTATUS[0]}
 		'; then
 			rc=1

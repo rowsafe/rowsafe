@@ -62,6 +62,12 @@ type AccountOptions struct {
 	// Owner owns the account file (the agent's OS user); -1 keeps the
 	// current user.
 	UID, GID int
+	// Standby also gives the account administrator rights (ALL PRIVILEGES
+	// WITH GRANT OPTION), which standby servers need: creating the
+	// replication login on a primary, loading the copy and its logins into
+	// an empty server, making a server read-only (fencing) and promoting a
+	// replica. Root answers this question at install.
+	Standby bool
 }
 
 // CreateAccount creates (or resets) Rowsafe's MySQL account with the
@@ -130,14 +136,21 @@ func CreateAccount(ctx context.Context, o AccountOptions) (string, error) {
 	}
 	version := strings.TrimSpace(string(out))
 	stmts := accountSQL(f, version, password)
+	if o.Standby {
+		stmts = append(stmts, standbyGrant)
+	}
 	if out, err := run(strings.Join(stmts, ";\n") + ";\n"); err != nil {
 		return "", fmt.Errorf("creating the %s account failed: %s", rowsafeUser, firstLine(string(out)))
 	}
 	if err := saveAccount(stateDir, o.Port, account{User: rowsafeUser, Password: password}, o.UID, o.GID); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("Created the %s account %s@localhost for Rowsafe on %s (its password is kept in %s).",
-		f.display(), rowsafeUser, version, accountPath(stateDir, o.Port)), nil
+	extra := ""
+	if o.Standby {
+		extra = " It may also set up standby servers (replication) with this server."
+	}
+	return fmt.Sprintf("Created the %s account %s@localhost for Rowsafe on %s (its password is kept in %s).%s",
+		f.display(), rowsafeUser, version, accountPath(stateDir, o.Port), extra), nil
 }
 
 // createAccountAsAdmin creates Rowsafe's account through the driver with
@@ -197,6 +210,10 @@ func accountSQL(f flavor, version, password string) []string {
 		"ALTER USER " + user + " IDENTIFIED BY " + pw,
 	}, grants...)
 }
+
+// standbyGrant gives Rowsafe's account what standby servers need (see
+// AccountOptions.Standby).
+const standbyGrant = "GRANT ALL PRIVILEGES ON *.* TO 'rowsafe'@'localhost' WITH GRANT OPTION"
 
 // saveAccount writes the account file (0600) and gives it to uid:gid.
 func saveAccount(stateDir string, port int, a account, uid, gid int) error {

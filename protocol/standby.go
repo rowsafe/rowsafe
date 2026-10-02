@@ -201,6 +201,24 @@ type StandbyHeartbeat struct {
 	// When a database's primary changes, the control plane queues a
 	// "pooler_retarget" task on every server listing it.
 	PoolerDatabases []string `json:"pooler_databases,omitempty"`
+	// Targets are the servers of other engines (MySQL, MariaDB, MongoDB)
+	// on this host that could hold a standby, and why not when they can't.
+	// PostgreSQL clusters are offered through the root helper's ports.
+	Targets []StandbyTarget `json:"standby_targets,omitempty"`
+}
+
+// StandbyTarget is a database server of another engine than PostgreSQL on
+// a host that could become a standby: empty, and Rowsafe's account there
+// may set it up (the installer asked root).
+type StandbyTarget struct {
+	Engine  string `json:"engine"`
+	Port    int    `json:"port"`
+	Version string `json:"version,omitempty"`
+	// Socket is the server's Unix socket ("" when it has none).
+	Socket string `json:"socket,omitempty"`
+	// Usable: it can be picked; Reason says why not, in plain words.
+	Usable bool   `json:"usable"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // StandbyInstructions are what the control plane tells an agent about
@@ -290,6 +308,9 @@ type Fence struct {
 	// with another one is something else and is left alone.
 	SystemID string    `json:"system_id,omitempty"`
 	Since    time.Time `json:"since"`
+	// Engine is the database's engine ("" is PostgreSQL). Other engines
+	// are fenced their own way (MySQL and MariaDB: kept read-only).
+	Engine string `json:"engine,omitempty"`
 }
 
 // FenceState is how a fence holds on its server.
