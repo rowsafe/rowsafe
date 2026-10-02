@@ -66,7 +66,7 @@ func TestEngineSoftware(t *testing.T) {
 	}
 	c := cs[0]
 	if c.Engine != "mongodb" || c.Series != "7.0" || c.Installed != "7.0.40" || c.Candidate != "7.0.43" || c.Running != "7.0.40" ||
-		strings.Join(c.NextSeries, ",") != "8.0" || c.Unit != "mongod.service" {
+		strings.Join(c.NextSeries, ",") != "8.0" || c.Unit != "mongod.service" || c.Major != 700 || len(c.Majors) != 1 || c.Majors[0] != 800 {
 		t.Errorf("%+v", c)
 	}
 	if seriesOf("1:10.11.9+maria~deb12") != "10.11" || upstreamVersion("25.8.15.35") != "25.8.15.35" || seriesOf("8.0.39-0ubuntu0.24.04.2") != "8.0" {

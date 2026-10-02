@@ -123,6 +123,11 @@ func (a *Agent) engineSoftware(ctx context.Context) []protocol.ClusterSoftware {
 				}
 				return 1
 			})
+			// The series as numbers, where PostgreSQL's majors go (8.4 -> 804).
+			cs.Major = protocol.SeriesNumber(cs.Series)
+			for _, n := range cs.NextSeries {
+				cs.Majors = append(cs.Majors, protocol.SeriesNumber(n))
+			}
 		}
 		out = append(out, cs)
 	}

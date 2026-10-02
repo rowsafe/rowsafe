@@ -1,6 +1,10 @@
 package protocol
 
-import "time"
+import (
+	"strconv"
+	"strings"
+	"time"
+)
 
 // ---- PostgreSQL updates and upgrades, server security updates ----
 //
@@ -67,6 +71,31 @@ const (
 	// without PostgreSQL).
 	UpdateAllowDatabase = "database"
 )
+
+// SeriesNumber encodes a release series ("8.4", "25.8", "10.11") as a
+// number (804, 2508, 1011), so other engines' series travel where
+// PostgreSQL's majors do (UpgradeInfo.Majors, ToMajor...). 0 when s isn't
+// one.
+func SeriesNumber(s string) int {
+	a, b, ok := strings.Cut(s, ".")
+	if !ok {
+		return 0
+	}
+	x, err1 := strconv.Atoi(a)
+	y, err2 := strconv.Atoi(b)
+	if err1 != nil || err2 != nil || x < 1 || x > 999 || y < 0 || y > 99 {
+		return 0
+	}
+	return x*100 + y
+}
+
+// SeriesString is SeriesNumber's inverse: 804 -> "8.4".
+func SeriesString(n int) string {
+	if n < 100 {
+		return ""
+	}
+	return strconv.Itoa(n/100) + "." + strconv.Itoa(n%100)
+}
 
 // UpdateWord is the updates allow list's word for engine's own updates.
 func UpdateWord(engine string) string {
