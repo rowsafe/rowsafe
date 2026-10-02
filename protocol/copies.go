@@ -413,16 +413,16 @@ type CreatePreviewRequest struct {
 
 // SafeCopy is a safe copy as the API shows it.
 type SafeCopy struct {
-	ID         string    `json:"id"`
-	DatabaseID string    `json:"database_id"`
+	ID         string `json:"id"`
+	DatabaseID string `json:"database_id"`
 	// Engine is the database's engine ("" from older control planes:
 	// PostgreSQL); it shapes the connection string and the password form.
-	Engine string `json:"engine,omitempty"`
-	Status     string    `json:"status"`
-	Masked     bool      `json:"masked"`
-	CreatedBy  string    `json:"created_by,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
-	Expires    time.Time `json:"expires"`
+	Engine    string    `json:"engine,omitempty"`
+	Status    string    `json:"status"`
+	Masked    bool      `json:"masked"`
+	CreatedBy string    `json:"created_by,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	Expires   time.Time `json:"expires"`
 	// Host and Port are where clients connect; DB the database in the
 	// connection string; Role the login role.
 	Host      string   `json:"host"`
