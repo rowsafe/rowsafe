@@ -113,7 +113,28 @@ func isWordByte(c byte) bool {
 	return c == '_' || c == '$' || c == '@' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c >= 0x80
 }
 
-func isIdent(t string) bool { return strings.HasPrefix(t, "`") }
+// isIdent: a `quoted` name (digests quote every name), or a bare word that
+// isn't an SQL keyword (statements as written, from the slow query log).
+func isIdent(t string) bool {
+	if strings.HasPrefix(t, "`") {
+		return true
+	}
+	if t == "" || t == "?" || !isWordByte(t[0]) || t[0] >= '0' && t[0] <= '9' {
+		return false
+	}
+	return !sqlKeywords[strings.ToUpper(t)]
+}
+
+var sqlKeywords = map[string]bool{}
+
+func init() {
+	for _, k := range strings.Fields(`SELECT FROM WHERE AND OR XOR NOT IN IS NULL BETWEEN LIKE ORDER BY GROUP HAVING LIMIT OFFSET
+		ASC DESC UPDATE SET DELETE INSERT INTO VALUES AS JOIN INNER LEFT RIGHT OUTER CROSS ON USING UNION ALL DISTINCT
+		FOR LOCK SHARE MODE IGNORE LOW_PRIORITY QUICK TRUE FALSE EXISTS CASE WHEN THEN ELSE END INTERVAL REPLACE WITH
+		STRAIGHT_JOIN SQL_CALC_FOUND_ROWS SQL_NO_CACHE HIGH_PRIORITY FORCE USE INDEX KEY PARTITION WINDOW OVER`) {
+		sqlKeywords[k] = true
+	}
+}
 
 func identName(t string) string { return strings.TrimPrefix(t, "`") }
 

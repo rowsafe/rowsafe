@@ -23,6 +23,10 @@ func TestParseShape(t *testing.T) {
 		{"SELECT * FROM `a` WHERE `x` = 'abc' AND `y` IS NULL", "shop", true, "shop.a", []string{"x", "y"}},
 		{"SELECT * FROM `a` WHERE `id` IN ( SELECT `a_id` FROM `b` )", "shop", false, "", nil},
 		{"SELECT * FROM `a`", "", false, "", nil},
+		// As written (MariaDB's slow query log), with values.
+		{"SELECT id, total FROM orders o WHERE o.customer_id = 42 AND status = 'paid' ORDER BY created_at DESC LIMIT 10", "shop", true, "shop.orders", []string{"customer_id", "status", "created_at"}},
+		{"select * from shop.carts where session_id = 'abc'", "", true, "shop.carts", []string{"session_id"}},
+		{"SELECT * FROM orders WHERE lower(email) = 'x'", "shop", false, "", nil},
 	}
 	for _, c := range cases {
 		s, ok := parseShape(c.q, c.schema)

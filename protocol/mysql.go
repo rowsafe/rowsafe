@@ -60,16 +60,12 @@ var mysqlFeatures = EngineFeatures{
 	RewindCopy: true, RewindRows: true, Marks: true,
 	Monitoring: true, Fixes: true, Restart: true, RewindInPlace: true,
 	Recommendations: true, // statement digests, catalog (internal/engine/mysql/advisor.go)
-	IndexAdvice:     true, // MySQL 8.0+ (internal/engine/mysql/indexadvisor.go)
+	IndexAdvice:     true, // samples from performance_schema or the slow query log (internal/engine/mysql/indexadvisor.go)
 	Logs:            true, // error and slow query logs (internal/engine/mysql/logs.go)
 	FindMoment:      true, // the binary logs in the bucket (internal/engine/mysql/moment.go)
 	DBAdmin:         true, Security: true, Files: true, Settings: true, SecondCopy: true,
 }
 
-// mariadbFeatures are MySQL's without index advice: MariaDB keeps no sample
-// of a statement's values to test an index with on a copy.
-var mariadbFeatures = func() EngineFeatures {
-	f := mysqlFeatures
-	f.IndexAdvice = false
-	return f
-}()
+// mariadbFeatures are MySQL's: index advice takes its samples from the
+// slow query log there (performance_schema keeps none of MariaDB's values).
+var mariadbFeatures = mysqlFeatures
