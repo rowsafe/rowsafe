@@ -53,9 +53,9 @@ var reportedSettings = []string{
 
 // Source is where a cluster's log is read.
 type Source struct {
-	Status   protocol.LogSource
-	Format   string // protocol.LogFormat*, or an engine's (engines.go)
-	Path     string // file, or systemd unit for journald
+	Status protocol.LogSource
+	Format string // protocol.LogFormat*, or an engine's (engines.go)
+	Path   string // file, or systemd unit for journald
 	// SlowPath is MySQL's slow query log, read next to its error log.
 	SlowPath string
 	Prefix   string // log_line_prefix
