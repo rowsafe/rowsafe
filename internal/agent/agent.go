@@ -67,6 +67,8 @@ type Agent struct {
 	inPlaceMu sync.Mutex
 	// rewindOps runs the steps of a rewind in place (tests replace it).
 	rewindOps inPlaceOps
+	// engineControl replaces the engines' ServerControl (tests).
+	engineControl ServerControl
 
 	// files backs up the folders that go with databases (files.go).
 	files     *filesRuntime

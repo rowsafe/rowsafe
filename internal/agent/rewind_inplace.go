@@ -204,18 +204,18 @@ func (a *Agent) inPlaceAllowed(db protocol.DatabaseSpec) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("reading %s: %w", a.cfg.RestartAllowFile, err)
 	}
+	name := protocol.EngineDisplayName(db.Engine)
 	unit, ok := allowed[db.Port]
 	if !ok {
-		return "", fmt.Errorf("Rowsafe isn't allowed to stop PostgreSQL on port %d on this server, which a rewind in place needs. "+
-			"Re-run the install command there and answer yes to \"Allow Rowsafe to restart or stop PostgreSQL when you ask?\" "+
-			"(or restore a copy and bring back rows instead)", db.Port)
+		return "", fmt.Errorf("Rowsafe isn't allowed to stop %s on port %d on this server, which a rewind in place needs. "+
+			"Allow it there (root runs %s), or restore a copy and bring back rows instead", name, db.Port, AllowHint(protocol.PermRestart))
 	}
 	if st, err := os.Stat(a.cfg.RestartDir); err != nil || !st.IsDir() {
-		return "", fmt.Errorf("the helper that stops PostgreSQL is not set up on this server (%s is missing): re-run the install command there", a.cfg.RestartDir)
+		return "", fmt.Errorf("the helper that stops %s is not set up on this server (%s is missing): re-run the install command there", name, a.cfg.RestartDir)
 	}
 	if acts := a.helperActions(); len(acts) > 0 && !slices.Contains(acts, helperStop) {
-		return "", errors.New("the helper that restarts PostgreSQL on this server is from an older Rowsafe and can't stop it. " +
-			"Re-run the install command on the server to allow Rewind there")
+		return "", fmt.Errorf("the helper that restarts %s on this server is from an older Rowsafe and can't stop it. "+
+			"Re-run the install command on the server to allow Rewind there", name)
 	}
 	return unit, nil
 }

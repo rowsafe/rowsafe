@@ -140,6 +140,9 @@ type EngineEnv struct {
 	// Notes takes side remarks for the person at the terminal during setup
 	// discover (servers skipped and why); io.Discard elsewhere.
 	Notes io.Writer
+	// Control stops and starts the database server through the root helper
+	// (engine_inplace.go); nil outside the agent's run loop.
+	Control ServerControl
 }
 
 // RunLow runs a command at low CPU and IO priority (LowPriority).
@@ -232,7 +235,14 @@ func engineEnv(cfg Config, runner CommandRunner, log *slog.Logger, name string) 
 	}
 }
 
-func (a *Agent) engineEnv(name string) EngineEnv { return engineEnv(a.cfg, a.runner, a.log, name) }
+func (a *Agent) engineEnv(name string) EngineEnv {
+	env := engineEnv(a.cfg, a.runner, a.log, name)
+	env.Control = agentControl{a}
+	if a.engineControl != nil {
+		env.Control = a.engineControl // tests
+	}
+	return env
+}
 
 // unsupportedEngine is the error for a database whose engine this agent
 // doesn't have.
