@@ -2696,7 +2696,7 @@ restart_pairs() {
   fi
   [ -s "$TMP/clusters" ] || return 0
   awk -F '\t' -v re="$DB_UNIT_RE" '$1 ~ /^[1-9][0-9]*$/ && $12 ~ re &&
-    (($14 == "" || $14 == "postgresql") == ($12 ~ /^postgresql@/)) { print $1, $12 }' "$TMP/clusters"
+    (($14 == "" || $14 == "-" || $14 == "postgresql") == ($12 ~ /^postgresql@/)) { print $1, $12 }' "$TMP/clusters"
 }
 
 # root_restart_pairs prints "PORT UNIT" for the clusters root finds itself
