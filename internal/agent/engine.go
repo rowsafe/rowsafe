@@ -231,6 +231,9 @@ func (a *Agent) runEngineTask(ctx context.Context, task *protocol.Task, tl *task
 		return nil, fmt.Errorf("This agent can't run %s tasks for %s yet; update the agent (this is %s).",
 			task.Type, protocol.EngineDisplayName(name), Version)
 	}
+	if (task.Type == protocol.TaskBackup || task.Type == protocol.TaskDrill) && taskRepo(task) == protocol.RepoSecond {
+		return a.runEngineCopy2(ctx, e, task, tl) // secondcopy_engines.go
+	}
 	return e.Run(ctx, a.engineEnv(name), task, tl)
 }
 

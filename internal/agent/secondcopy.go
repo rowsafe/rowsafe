@@ -205,6 +205,9 @@ func (a *Agent) secondCopyPass(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		if !isPostgres(db) {
+			continue // the other engines' second copy: secondcopy_engines.go
+		}
 		if a.cfg.SecondCopy() && a.cfg.SecondCopyError() == "" {
 			a.ensureSecondCopy(ctx, db)
 		}
@@ -217,6 +220,9 @@ func (a *Agent) secondCopyPass(ctx context.Context) {
 	a.second.mu.Unlock()
 	if sync && !a.cfg.Sidecar() {
 		for _, db := range dbs {
+			if !isPostgres(db) {
+				continue
+			}
 			if err := a.syncArchiveCommand(ctx, db); err != nil && ctx.Err() == nil {
 				a.log.Warn("checking archive_command for the second copy failed", "database", db.Name, "err", err)
 			}
@@ -690,6 +696,12 @@ func (a *Agent) secondCopyStatuses() []protocol.SecondCopyStatus {
 			out = append(out, st)
 			continue
 		}
+		if !isPostgres(db) {
+			if s, ok := a.engineSecondCopyStatus(db, st); ok {
+				out = append(out, s)
+			}
+			continue
+		}
 		st.Ready = a.secondCopyReady(db.Stanza)
 		if a.second.pusher != nil {
 			s := a.second.pusher.Status(db.Stanza)
@@ -763,6 +775,9 @@ func (a *Agent) storageLoop(ctx context.Context) {
 
 func (a *Agent) measureAll(ctx context.Context, force bool) {
 	for _, db := range a.watchedDatabases() {
+		if !isPostgres(db) {
+			continue // pgBackRest's measurement
+		}
 		for _, repo := range []int{protocol.RepoPrimary, protocol.RepoSecond} {
 			if ctx.Err() != nil {
 				return
