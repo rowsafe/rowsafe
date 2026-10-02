@@ -168,6 +168,8 @@ type backedTable struct {
 	RowsBefore *int64   `json:"rows_before,omitempty"`
 	RowsAfter  *int64   `json:"rows_after,omitempty"`
 	Dependents []string `json:"dependents,omitempty"`
+	// Refreshable: a materialized view that refreshes on a schedule.
+	Refreshable bool `json:"refreshable,omitempty"`
 }
 
 func (t backedTable) key() string { return t.DB + "." + t.Name }

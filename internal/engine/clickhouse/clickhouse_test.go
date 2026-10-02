@@ -87,16 +87,33 @@ func TestStatements(t *testing.T) {
 		{DB: "shop", Name: "queue_mv", Engine: "MaterializedView", Dependents: []string{"shop.feed"}},
 		{DB: "shop", Name: "feed", Engine: "View"},
 		{DB: "logs", Name: "raw", Engine: "MergeTree"},
+		{DB: "logs", Name: "hourly", Engine: "MaterializedView", Refreshable: true},
+		{DB: "logs", Name: "lookup", Engine: "Dictionary"},
 	}}
 	skip := leftOut(b.Tables)
-	if len(skip) != 3 || skip["shop.queue_mv"] == "" || skip["shop.feed"] == "" || skip["shop.orders"] != "" {
+	if len(skip) != 5 || skip["shop.queue_mv"] == "" || skip["shop.feed"] == "" || skip["shop.orders"] != "" ||
+		!strings.Contains(skip["logs.hourly"], "refreshes on a schedule") || skip["logs.lookup"] == "" {
 		t.Fatal(skip)
 	}
 	got = restoreStatement(b, skip, "S3('u')", "", "r1")
-	want = "RESTORE DATABASE `shop` EXCEPT TABLES `shop`.`queue`, `shop`.`queue_mv`, `shop`.`feed`, DATABASE `logs` FROM S3('u') " +
+	want = "RESTORE DATABASE `shop` EXCEPT TABLES `shop`.`queue`, `shop`.`queue_mv`, `shop`.`feed`, DATABASE `logs` EXCEPT TABLES " +
+		"`logs`.`hourly`, `logs`.`lookup` FROM S3('u') " +
 		"SETTINGS id = 'r1', allow_s3_native_copy = 0, allow_different_database_def = 1, storage_policy = 'default'"
 	if got != want {
 		t.Fatalf("\n%s\n%s", got, want)
+	}
+}
+
+func TestRefreshableRE(t *testing.T) {
+	for q, want := range map[string]bool{
+		"CREATE MATERIALIZED VIEW d.mv REFRESH EVERY 1 HOUR TO d.t (`n` UInt64) AS SELECT count() AS n FROM d.s": true,
+		"CREATE MATERIALIZED VIEW d.mv REFRESH AFTER 30 SECOND APPEND TO d.t AS SELECT 1":                        true,
+		"CREATE MATERIALIZED VIEW d.mv TO d.t (`n` UInt64) AS SELECT count() AS n FROM d.s":                      false,
+		"": false,
+	} {
+		if refreshableRE.MatchString(q) != want {
+			t.Errorf("%q: want %v", q, want)
+		}
 	}
 }
 

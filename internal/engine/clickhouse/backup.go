@@ -384,7 +384,7 @@ func (e *Engine) takeBackup(ctx context.Context, env agent.EngineEnv, db protoco
 	}
 	for _, t := range in.Tables {
 		doc.Tables = append(doc.Tables, backedTable{DB: t.DB, Name: t.Name, Engine: t.Engine, RowsBefore: t.Rows, RowsAfter: after[t.key()],
-			Dependents: t.Dependents})
+			Dependents: t.Dependents, Refreshable: t.Refreshable})
 	}
 	doc.StoredBytes = r.storedBytes(ctx, label)
 	if err := r.putJSON(ctx, backupKey(label, backupDocName), doc); err != nil {

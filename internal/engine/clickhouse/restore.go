@@ -15,9 +15,11 @@ import (
 
 // Restores (Proof and Rewind copies) go into a scratch server: RESTORE from
 // the bucket through a read-only gateway on 127.0.0.1. Tables that read or
-// write another system (Kafka, S3 queues, MySQL...) and the views fed by
-// them are left out, so a copy never consumes, moves or changes anything
-// outside it.
+// write another system (Kafka, S3 queues, MySQL, dictionaries...), the
+// materialized views that refresh on a schedule (their query can call url(),
+// s3(), remote()... and ClickHouse starts them as soon as they're created,
+// SYSTEM STOP VIEWS or not) and the views fed by them are left out, so a copy
+// never consumes, moves or changes anything outside it.
 
 // restoreTarget is the backup a restore uses: BackupSet when the control
 // plane picked it, else a Mark's, the newest that finished at or before
@@ -106,8 +108,11 @@ func leftOut(tables []backedTable) map[string]string {
 		}
 	}
 	for _, t := range tables {
-		if engineFamily(t.Engine) == "external" {
+		switch {
+		case engineFamily(t.Engine) == "external":
 			mark(t.key(), "a "+t.Engine+" table: it reaches another system")
+		case t.Refreshable:
+			mark(t.key(), "a materialized view that refreshes on a schedule: its query can reach another system")
 		}
 	}
 	return out
@@ -181,8 +186,10 @@ func restoreInto(ctx context.Context, env agent.EngineEnv, r *repo, b backupDoc,
 	if _, err := runAsync(ctx, c, stmt, id, "restore", tl, progress, closeGW); err != nil {
 		return skip, fmt.Errorf("restoring %s: %w", b.Label, err)
 	}
-	// Nothing changes in a copy by itself: no merges (TTL deletes included).
+	// Nothing changes in a copy by itself: no merges (TTL deletes included),
+	// no view refreshes (none should be there).
 	_ = c.exec(ctx, "SYSTEM STOP MERGES", nil)
+	_ = c.exec(ctx, "SYSTEM STOP VIEWS", nil)
 	return skip, nil
 }
 

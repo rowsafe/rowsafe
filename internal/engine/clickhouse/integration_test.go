@@ -208,6 +208,15 @@ func TestClickHouseEndToEnd(t *testing.T) {
 	} else {
 		t.Log("no Kafka engine here: not testing tables that reach another system")
 	}
+	// A view that refreshes on a schedule and a dictionary reading another
+	// system: both stay out of copies.
+	refreshable := admin.exec(ctx, "CREATE MATERIALIZED VIEW shop.hourly REFRESH EVERY 1 HOUR ENGINE = MergeTree ORDER BY n "+
+		"AS SELECT count() AS n FROM shop.orders", nil, "allow_experimental_refreshable_materialized_view", "1") == nil
+	if !refreshable {
+		t.Log("no refreshable materialized views here")
+	}
+	must(t, admin, "CREATE DICTIONARY shop.lookup (id UInt64, v String) PRIMARY KEY id "+
+		"SOURCE(HTTP(URL 'http://127.0.0.1:1/lookup' FORMAT 'TSV')) LAYOUT(FLAT()) LIFETIME(300)")
 	replicated := os.Getenv("ROWSAFE_TEST_CLICKHOUSE_REPLICATED") == "1"
 	if replicated {
 		must(t, admin, "CREATE TABLE shop.rep (id UInt64, v String) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/shop/rep', '{replica}') ORDER BY id")
@@ -311,6 +320,14 @@ func TestClickHouseEndToEnd(t *testing.T) {
 	if kafka {
 		if n := count(t, cc, "SELECT count() FROM system.tables WHERE database = 'shop' AND name IN ('queue', 'queue_mv')"); n != 0 {
 			t.Fatalf("the copy has the Kafka table or its view (%d)", n)
+		}
+	}
+	if n := count(t, cc, "SELECT count() FROM system.tables WHERE database = 'shop' AND name IN ('hourly', 'lookup')"); n != 0 {
+		t.Fatalf("the copy has the refreshable view or the dictionary (%d)", n)
+	}
+	if refreshable {
+		if n := count(t, cc, "SELECT count() FROM system.view_refreshes"); n != 0 {
+			t.Fatalf("the copy has %d views that refresh", n)
 		}
 	}
 	if replicated {

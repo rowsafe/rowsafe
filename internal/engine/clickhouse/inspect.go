@@ -3,6 +3,7 @@ package clickhouse
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -49,6 +50,9 @@ type tableInfo struct {
 	Bytes      int64    `json:"bytes,omitempty"`
 	SortingKey string   `json:"-"`
 	Dependents []string `json:"dependents,omitempty"` // views reading from it, "db.name"
+	// Refreshable: a materialized view that runs its query on a schedule
+	// (REFRESH EVERY/AFTER).
+	Refreshable bool `json:"refreshable,omitempty"`
 }
 
 func (t tableInfo) key() string { return t.DB + "." + t.Name }
@@ -174,9 +178,10 @@ func listTables(ctx context.Context, c *client) ([]tableInfo, error) {
 		SortingKey string   `json:"sorting_key"`
 		DepDBs     []string `json:"dependencies_database"`
 		DepTables  []string `json:"dependencies_table"`
+		Create     string   `json:"create_query"`
 	}
 	rows, err := query[row](ctx, c, `SELECT database, name, engine, engine_full, total_rows, total_bytes, sorting_key,
-		dependencies_database, dependencies_table
+		dependencies_database, dependencies_table, if(engine = 'MaterializedView', create_table_query, '') AS create_query
 		FROM system.tables
 		WHERE database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA') AND NOT is_temporary
 		ORDER BY database, name`, nil)
@@ -185,7 +190,8 @@ func listTables(ctx context.Context, c *client) ([]tableInfo, error) {
 	}
 	out := make([]tableInfo, 0, len(rows))
 	for _, r := range rows {
-		t := tableInfo{DB: r.DB, Name: r.Name, Engine: r.Engine, EngineFull: r.EngineFull, Rows: r.Rows, SortingKey: r.SortingKey}
+		t := tableInfo{DB: r.DB, Name: r.Name, Engine: r.Engine, EngineFull: r.EngineFull, Rows: r.Rows, SortingKey: r.SortingKey,
+			Refreshable: refreshableRE.MatchString(r.Create)}
 		if r.Bytes != nil {
 			t.Bytes = *r.Bytes
 		}
@@ -196,6 +202,10 @@ func listTables(ctx context.Context, c *client) ([]tableInfo, error) {
 	}
 	return out, nil
 }
+
+// refreshableRE finds REFRESH EVERY/AFTER in a materialized view's CREATE
+// (anywhere: a false match only leaves a view out of copies).
+var refreshableRE = regexp.MustCompile(`(?i)\bREFRESH\s+(EVERY|AFTER)\b`)
 
 // globalGrants are the privileges the current user has ON *.* (with its
 // roles').
