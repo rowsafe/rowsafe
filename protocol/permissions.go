@@ -38,12 +38,13 @@ const (
 	PermUpdates         = "updates"          // PostgreSQL minor updates and major upgrades
 	PermSecurityUpdates = "security-updates" // the system's security updates
 	PermReboot          = "reboot"           // reboot after a security update that needs it
+	PermTuning          = "tuning"           // write MongoDB's or ClickHouse's settings into Rowsafe's own file
 )
 
 // Permissions lists every permission in the order to show them.
 var Permissions = []string{
 	PermRestart, PermCreateCluster, PermPooler, PermPoolerPublic,
-	PermFirewall, PermUpdates, PermSecurityUpdates, PermReboot,
+	PermFirewall, PermUpdates, PermSecurityUpdates, PermReboot, PermTuning,
 }
 
 // PermissionNeeds: a permission that only works with another one on (the

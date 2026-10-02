@@ -210,4 +210,21 @@ var tuneExtra = func(t *testing.T, ctx context.Context, e *Engine, env agent.Eng
 		t.Fatal(err)
 	}
 	t.Log(res.(*protocol.SettingsResult).Summary)
+
+	// ProxySQL's users: those that may log in from this server, with their hashes.
+	db, err = s.open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	users, warn, err := s.poolUsers(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("pool users %d %v", len(users), warn)
+	for _, u := range users {
+		if u.Name == rowsafeUser || u.Name == "root" || u.Hash == "" {
+			t.Errorf("pool user %+v", u)
+		}
+	}
 }

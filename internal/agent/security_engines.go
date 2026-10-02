@@ -45,6 +45,7 @@ func (a *Agent) scanEngineSecurity(ctx context.Context, db protocol.DatabaseSpec
 	rep, err := c.SecurityReport(ctx, a.engineEnv(name), db)
 	rep.Engine = name
 	rep.Docker = a.cfg.Sidecar()
+	rep.Firewall = a.firewallState(db.Port)
 	if rep.Port == 0 {
 		rep.Port = db.Port
 	}
@@ -78,7 +79,15 @@ func (a *Agent) runEngineSecurityTask(ctx context.Context, task *protocol.Task, 
 		return nil, unsupportedEngine(db.Engine)
 	}
 	name := protocol.NormalizeEngine(db.Engine)
-	res, err := c.SecurityFix(ctx, a.engineEnv(name), db, p, tl)
+	var res *protocol.SecurityFixResult
+	var err error
+	switch p.Action {
+	case protocol.SecFirewall, protocol.SecFirewallOff: // the root helper, as for PostgreSQL (firewall.go)
+		res = &protocol.SecurityFixResult{Action: p.Action}
+		err = a.firewall(ctx, db, p, res, tl)
+	default:
+		res, err = c.SecurityFix(ctx, a.engineEnv(name), db, p, tl)
+	}
 	if res == nil {
 		res = &protocol.SecurityFixResult{Action: p.Action}
 	}

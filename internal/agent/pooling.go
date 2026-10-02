@@ -587,8 +587,8 @@ func (a *Agent) pooling(ctx context.Context, db protocol.DatabaseSpec, p protoco
 	if a.cfg.Sidecar() {
 		return nil, errors.New("Rowsafe doesn't install PgBouncer next to PostgreSQL in Docker: run the official PgBouncer image as another service in your compose file, and set ROWSAFE_POOLER_STATS_URL for Rowsafe to monitor it (see https://rowsafe.sh/docs/guides/connection-pooling)")
 	}
-	if !protocol.EngineHas(db.Engine, protocol.FeaturePooling) {
-		return nil, fmt.Errorf("connection pooling isn't available for %s yet", protocol.EngineDisplayName(db.Engine))
+	if !isPostgres(db) { // MySQL and MariaDB pool with ProxySQL, in their engine
+		return nil, fmt.Errorf("PgBouncer pooling isn't available for %s; its engine runs its own pooler", protocol.EngineDisplayName(db.Engine))
 	}
 	poolerMu.Lock()
 	defer poolerMu.Unlock()
@@ -913,8 +913,8 @@ func (a *Agent) poolerRetarget(ctx context.Context, db protocol.DatabaseSpec, p 
 	if allowed, err := ReadPoolerAllowed(a.cfg.Pooler.AllowFile); err != nil || !allowed[p.Port] {
 		return nil, fmt.Errorf("port %d isn't in %s: root didn't allow PgBouncer to send connections there", p.Port, a.cfg.Pooler.AllowFile)
 	}
-	if !protocol.EngineHas(db.Engine, protocol.FeaturePooling) {
-		return nil, fmt.Errorf("connection pooling isn't available for %s yet", protocol.EngineDisplayName(db.Engine))
+	if !isPostgres(db) { // MySQL and MariaDB pool with ProxySQL, in their engine
+		return nil, fmt.Errorf("PgBouncer pooling isn't available for %s; its engine runs its own pooler", protocol.EngineDisplayName(db.Engine))
 	}
 	poolerMu.Lock()
 	defer poolerMu.Unlock()
@@ -1050,6 +1050,10 @@ func (a *Agent) poolerStatus(ctx context.Context) *protocol.PoolerStatus {
 	if err != nil || st == nil {
 		if err != nil {
 			out.Error = err.Error()
+		}
+		if es := a.enginePoolerStatus(ctx); es != nil { // ProxySQL (pooling_engines.go)
+			es.Allowed, es.AllowedPorts = out.Allowed, out.AllowedPorts
+			return es
 		}
 		return out // not managed; Allowed says whether it may be
 	}

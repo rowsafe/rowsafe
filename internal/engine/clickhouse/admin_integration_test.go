@@ -13,7 +13,9 @@ import (
 	"time"
 
 	"github.com/rowsafe/rowsafe/internal/agent"
+	"github.com/rowsafe/rowsafe/internal/tuneroot"
 	"github.com/rowsafe/rowsafe/protocol"
+	"github.com/rowsafe/rowsafe/tune"
 )
 
 // TestClickHouseAdmin runs Databases & users, the security check and
@@ -99,4 +101,43 @@ var chAdminExtra = func(t *testing.T, ctx context.Context, e *Engine, db protoco
 	chTuneExtra(t, ctx, e, env, db)
 }
 
-var chTuneExtra = func(t *testing.T, ctx context.Context, e *Engine, env agent.EngineEnv, db protocol.DatabaseSpec) {}
+var chTuneExtra = func(t *testing.T, ctx context.Context, e *Engine, env agent.EngineEnv, db protocol.DatabaseSpec) {
+	c, err := connectDB(ctx, env, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := settingsSnapshot(ctx, env, c)
+	if err != nil || len(snap.Settings) != len(chUnits) {
+		t.Fatalf("snapshot %v %+v", err, snap)
+	}
+	t.Logf("blocked: %s", snap.ChangeBlocked)
+	dir := os.Getenv("ROWSAFE_TEST_CLICKHOUSE_CONFIG_DIR") // root writes here (the test runs as root in the container)
+	if dir == "" {
+		return
+	}
+	value := func(name string) string {
+		s, _ := settingsSnapshot(ctx, env, c)
+		return tune.SettingsMap(s.Settings)[name].Setting
+	}
+	a := &tuneroot.Applier{StateDir: t.TempDir(), Now: time.Now, AgentUID: 65534}
+	res := a.Apply(tuneroot.Request{ID: "t1", Engine: "clickhouse", Settings: map[string]string{"max_concurrent_queries": "250", "max_memory_usage": "2147483648"}}, dir)
+	if !res.OK {
+		t.Fatal(res.Error)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) && (value("max_concurrent_queries") != "250" || value("max_memory_usage") != "2147483648") {
+		time.Sleep(time.Second)
+	}
+	if value("max_concurrent_queries") != "250" || value("max_memory_usage") != "2147483648" {
+		t.Fatalf("ClickHouse didn't pick up the files: %s %s", value("max_concurrent_queries"), value("max_memory_usage"))
+	}
+	res = a.Apply(tuneroot.Request{ID: "t2", Engine: "clickhouse", Settings: map[string]string{"max_concurrent_queries": "", "max_memory_usage": ""}}, dir)
+	if !res.OK {
+		t.Fatal(res.Error)
+	}
+	deadline = time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) && value("max_memory_usage") == "2147483648" {
+		time.Sleep(time.Second)
+	}
+	t.Logf("after undo: %s %s", value("max_concurrent_queries"), value("max_memory_usage"))
+}

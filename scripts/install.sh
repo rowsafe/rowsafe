@@ -49,6 +49,9 @@
 #                          with the firewall when you ask (Security in the
 #                          dashboard); never touches SSH or other ports
 #   --no-allow-firewall    turn that off again (and remove Rowsafe's rule)
+#   --allow-tuning         allow Rowsafe to change MongoDB's or ClickHouse's settings
+#                          when you ask (Tuning), only in its own settings file
+#   --no-allow-tuning      turn that off again
 #   --allow-updates        allow Rowsafe to install PostgreSQL updates and upgrade
 #                          PostgreSQL when you click Update or Upgrade (needs
 #                          --allow-restart); --no-allow-updates turns it off
@@ -140,6 +143,13 @@ POOLER_APT_FILE=/etc/systemd/system/rowsafe-pooler-apt@.service
 POOLER_DROPIN_DIR=/etc/systemd/system/pgbouncer.service.d
 POOLER_ALLOW_FILE=$CONFIG_DIR/pooler-allowed
 POOLER_DIR=$STATE_DIR/pooler
+# Tuning for MongoDB and ClickHouse (--allow-tuning): root's copy of the
+# agent writes the settings into Rowsafe's own files, nothing else.
+TUNING_ALLOW_FILE=$CONFIG_DIR/tuning-allowed
+TUNING_SERVICE_FILE=/etc/systemd/system/rowsafe-tuning.service
+TUNING_PATH_FILE=/etc/systemd/system/rowsafe-tuning.path
+TUNING_DIR=$STATE_DIR/tuning
+
 # The firewall on request (--allow-firewall): a root helper of its own.
 FIREWALL_HELPER=$LIB_DIR/rowsafe-firewall
 FIREWALL_SERVICE_FILE=/etc/systemd/system/rowsafe-firewall.service
@@ -198,6 +208,7 @@ ALLOW_CREATE_CLUSTER='' # --allow-create-cluster (yes) / --no-allow-create-clust
 ALLOW_POOLER=''    # --allow-pooler (yes) / --no-allow-pooler (no); '' = ask once, on a terminal
 ALLOW_POOLER_PUBLIC='' # --allow-pooler-public (yes) / --no-allow-pooler-public (no): PgBouncer on every address
 ALLOW_FIREWALL=''  # --allow-firewall (yes) / --no-allow-firewall (no); '' = ask once, on a terminal
+ALLOW_TUNING=''    # --allow-tuning (yes) / --no-allow-tuning (no): MongoDB and ClickHouse settings files
 ALLOW_UPDATES=''   # --allow-updates / --no-allow-updates (PostgreSQL updates and upgrades)
 ALLOW_SECURITY=''  # --allow-security-updates / --no-allow-security-updates
 ALLOW_REBOOT=''    # --allow-reboot / --no-allow-reboot
@@ -288,6 +299,9 @@ Options (when piping, pass them after `sh -s --`):
                          the firewall (nftables) when you ask, under Security in the
                          dashboard; never touches SSH or other ports
   --no-allow-firewall    turn that off (and remove Rowsafe's rule and helper)
+  --allow-tuning         allow Rowsafe to change MongoDB's or ClickHouse's settings when
+                         you ask under Tuning, only in its own settings file
+  --no-allow-tuning      turn that off
   --allow-updates        allow Rowsafe to install PostgreSQL updates and upgrade PostgreSQL
                          when you click Update or Upgrade and confirm (needs --allow-restart)
   --no-allow-updates     turn that off
@@ -392,7 +406,7 @@ What Rowsafe may do on this server:
   once (a re-run keeps the answers) and then shows what is allowed. Change it
   any time with `sudo rowsafe-allow` (list), `sudo rowsafe-allow NAME` (allow)
   and `sudo rowsafe-allow --remove NAME`. Names: restart, create-cluster,
-  updates, security-updates, reboot, pooler, pooler-public, firewall. Some
+  updates, security-updates, reboot, pooler, pooler-public, firewall, tuning. Some
   need another: create-cluster, updates and security-updates need restart,
   reboot needs security-updates, pooler-public needs pooler. Turning one off
   turns off what needs it.
@@ -3184,6 +3198,184 @@ update_access() {
   [ "$_reboot" != yes ] || perm_ok "Rowsafe may reboot this server when you click Reboot and confirm"
 }
 
+# ------------------------------------------------------------------ tuning
+
+# With root's permission (--allow-tuning, or yes at the question), a person
+# can change MongoDB's or ClickHouse's settings from Tuning in the
+# dashboard. The agent (unprivileged) writes a request to $TUNING_DIR;
+# rowsafe-tuning.path starts rowsafe-tuning.service, which runs root's copy
+# of the agent ($PERMISSIONS_HELPER tuning-apply). It accepts only a fixed
+# list of settings with plain numbers or fixed words, and writes only
+# ClickHouse's config.d/rowsafe-tuning.xml and users.d/rowsafe-tuning.xml,
+# or those settings' keys in the MongoDB configuration file listed in
+# $TUNING_ALLOW_FILE (a copy kept first; MongoDB reads it when it starts).
+
+# mongodb_config_file prints mongod's configuration file (from its systemd
+# unit, else /etc/mongod.conf), nothing when there is none.
+mongodb_config_file() {
+  _mc=''
+  if have systemctl; then
+    _mc=$(systemctl show -p ExecStart --value mongod 2>/dev/null | tr ' ;' '\n\n' | awk 'p { print; exit } /^(--config|-f)$/ { p = 1 } /^--config=/ { sub(/^--config=/, ""); print; exit }')
+  fi
+  [ -n "$_mc" ] || _mc=/etc/mongod.conf
+  case $_mc in /*) ;; *) return 0 ;; esac
+  [ -f "$_mc" ] && [ ! -L "$_mc" ] && printf '%s\n' "$_mc"
+}
+
+# tuning_target prints the allow file's line for this server.
+tuning_target() {
+  case $HOST_ENGINE in
+    mongodb) _t=$(mongodb_config_file) && [ -n "$_t" ] && echo "mongodb $_t" ;;
+    clickhouse) [ -f /etc/clickhouse-server/config.xml ] && echo "clickhouse /etc/clickhouse-server" ;;
+  esac
+}
+
+install_tuning_helper() {
+  [ -x "$PERMISSIONS_HELPER" ] || install_permissions_helper
+  [ -x "$PERMISSIONS_HELPER" ] || { warn "Tuning needs root's copy of the agent ($PERMISSIONS_HELPER); run the installer again"; return 1; }
+  as_agent mkdir -p -m 0700 "$TUNING_DIR"
+  _where=$(awk 'NF == 2 && $1 !~ /^#/ { print $2; exit }' "$TUNING_ALLOW_FILE" 2>/dev/null)
+  [ -n "$_where" ] || return 1
+  _rw=$_where
+  case $HOST_ENGINE in
+    clickhouse)
+      install -d -m 0755 -o root -g root "$_where/config.d" "$_where/users.d"
+      _rw="$_where/config.d $_where/users.d"
+      ;;
+    *) _rw=${_where%/*} ;;
+  esac
+  _changed=0
+  if sed -e "s/@AGENT_USER@/$AGENT_USER/" -e "s|@READ_WRITE@|$_rw|" <<'ROWSAFE_TUNING_SERVICE_EOF' | write_file "$TUNING_SERVICE_FILE" 0644 root:root; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-tuning.service: writes the MongoDB or ClickHouse settings a person
+# changed in Rowsafe (Tuning) into Rowsafe's own files, only where root
+# allowed it (/etc/rowsafe/tuning-allowed, sudo rowsafe-allow tuning).
+# Started by rowsafe-tuning.path; installed by https://rowsafe.sh/install.
+
+[Unit]
+Description=Rowsafe: write the database settings a person changed (Tuning)
+Documentation=https://rowsafe.sh/docs/guides/tuning
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/rowsafe/rowsafe-permissions tuning-apply
+Environment=ROWSAFE_AGENT_USER=@AGENT_USER@
+TimeoutStartSec=2min
+RuntimeDirectory=rowsafe-tuning
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+StateDirectory=rowsafe-tuning
+StateDirectoryMode=0700
+UMask=0022
+# It writes only the settings files root listed, and its own state.
+ProtectSystem=strict
+ReadWritePaths=@READ_WRITE@
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+ROWSAFE_TUNING_SERVICE_EOF
+    _changed=1
+  fi
+  if write_file "$TUNING_PATH_FILE" 0644 root:root <<'ROWSAFE_TUNING_PATH_EOF'; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-tuning.path: starts rowsafe-tuning.service when the Rowsafe agent
+# hands over a settings change (Tuning). Installed by
+# https://rowsafe.sh/install only when root allowed it (--allow-tuning).
+
+[Unit]
+Description=Rowsafe: watch for database settings changes (Tuning)
+
+[Path]
+PathExists=/var/lib/rowsafe/tuning/request
+Unit=rowsafe-tuning.service
+
+[Install]
+WantedBy=multi-user.target
+ROWSAFE_TUNING_PATH_EOF
+    _changed=1
+  fi
+  if systemd_running; then
+    [ "$_changed" = 0 ] || systemctl daemon-reload
+    systemctl enable --now --quiet rowsafe-tuning.path
+  fi
+}
+
+remove_tuning_helper() {
+  [ -e "$TUNING_PATH_FILE" ] || [ -e "$TUNING_SERVICE_FILE" ] || return 0
+  if systemd_running; then systemctl disable --now --quiet rowsafe-tuning.path 2>/dev/null || true; fi
+  rm -f "$TUNING_PATH_FILE" "$TUNING_SERVICE_FILE"
+  rm -rf /run/rowsafe-tuning
+  if systemd_running; then systemctl daemon-reload; fi
+}
+
+allow_tuning() {
+  _why=$(perm_why tuning)
+  if [ -n "$_why" ]; then
+    warn "Tuning stays off for Rowsafe: $_why"
+    return 0
+  fi
+  {
+    echo "# The settings files Rowsafe may write when someone changes settings under"
+    echo "# Tuning (only its own: ClickHouse's config.d and users.d rowsafe-tuning.xml,"
+    echo "# or a few keys of MongoDB's configuration file). Written by the installer"
+    echo "# (root); turn this off with: sudo rowsafe-allow --remove tuning"
+    echo "# ENGINE PATH"
+    tuning_target
+  } | write_file "$TUNING_ALLOW_FILE" 0644 root:root || true
+  install_tuning_helper || return 0
+  perm_ok "Rowsafe may change $(engine_label)'s settings when you ask (Tuning), only in its own files"
+}
+
+disallow_tuning() {
+  remove_tuning_helper
+  if [ -d "$CONFIG_DIR" ]; then
+    {
+      echo "# Changing database settings from Rowsafe (Tuning) is off."
+      echo "# Turn it on with: sudo rowsafe-allow tuning"
+    } | write_file "$TUNING_ALLOW_FILE" 0644 root:root || true
+  fi
+}
+
+# tuning_access applies --allow-tuning / --no-allow-tuning, or asks once on
+# a terminal (default no) where it applies (MongoDB, ClickHouse).
+tuning_access() {
+  case $ALLOW_TUNING in
+    yes) allow_tuning ;;
+    no)
+      disallow_tuning
+      perm_ok "changing $(engine_label)'s settings from Rowsafe is off"
+      ;;
+    *)
+      [ -z "$(perm_why tuning)" ] || return 0
+      if [ "$(perm_state tuning)" = yes ]; then
+        install_tuning_helper || true
+        return 0
+      fi
+      [ -f "$TUNING_ALLOW_FILE" ] && return 0 # a no, kept
+      [ "$TTY" = 1 ] || return 0
+      if perm_ask "Let Rowsafe change $(engine_label)'s settings when someone picks them under Tuning? It writes only its own settings file." n; then
+        allow_tuning
+      else
+        disallow_tuning
+        perm_note "OK: Rowsafe won't change $(engine_label)'s settings"
+      fi
+      ;;
+  esac
+}
+
 # ---------------------------------------------------------------- firewall
 
 # With root's permission (--allow-firewall, or yes at the question), a
@@ -3200,7 +3392,7 @@ install_firewall_helper() {
   if write_file "$FIREWALL_HELPER" 0755 root:root <<'ROWSAFE_FIREWALL_HELPER_EOF'; then
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
-# rowsafe-firewall: lets only chosen addresses reach PostgreSQL's port, when
+# rowsafe-firewall: lets only chosen addresses reach a database's port, when
 # a person asked Rowsafe to (Security in the dashboard) and root allowed it
 # for that port.
 #
@@ -3225,7 +3417,7 @@ install_firewall_helper() {
 # socket of the postgres user listens on it.
 #
 # Rules live in one nftables table of Rowsafe's own, "inet rowsafe", which
-# matches only the allowed PostgreSQL ports: connections to such a port
+# matches only the allowed database ports: connections to such a port
 # from anywhere but the allowed addresses and the server itself are
 # dropped; SSH and every other port are never touched. The whole table is
 # replaced in one nft transaction, checked with nft -c first. Ports that
@@ -3253,6 +3445,9 @@ out_dir=${RUNTIME_DIRECTORY:-/run/rowsafe-firewall}
 allow=${ROWSAFE_FIREWALL_ALLOW:-/etc/rowsafe/firewall-allowed}
 state=${STATE_DIRECTORY:-/var/lib/rowsafe-firewall}
 agent_user=${ROWSAFE_AGENT_USER:-postgres}
+# The users database servers run as (PostgreSQL's is the agent's own): a
+# port is only accepted while one of them listens on it.
+db_users=${ROWSAFE_DB_USERS:-"$agent_user postgres mysql mongodb mongod clickhouse"}
 nft=${ROWSAFE_NFT:-nft}
 ss=${ROWSAFE_SS:-ss}
 sshd=${ROWSAFE_SSHD:-sshd}
@@ -3452,9 +3647,13 @@ rollback() {
 }
 
 if [ "$action" = apply ]; then
-  uid=$(id -u "$agent_user" 2>/dev/null) || refuse "no $agent_user user"
-  listen_ports "$uid" | grep -qx "$port" ||
-    refuse "no PostgreSQL of the $agent_user user listens on port $port here (a port Docker publishes bypasses this firewall: limit it in the compose file instead)"
+  db_listens=0
+  for u in $db_users; do
+    uid=$(id -u "$u" 2>/dev/null) || continue
+    if listen_ports "$uid" | grep -qx "$port"; then db_listens=1; fi
+  done
+  [ "$db_listens" = 1 ] ||
+    refuse "no database server (PostgreSQL, MySQL, MariaDB, MongoDB or ClickHouse) listens on port $port here (a port Docker publishes bypasses this firewall: limit it in the compose file instead)"
   addrs=$(read_agent_file "$dir/addresses" 4096 | head -n 33)
   n=0
   : >"$state/new-$port"
@@ -3676,14 +3875,18 @@ ssh_port_here() {
   } | awk -v p="$1" '$1 "" == p "" { f = 1 } END { exit !f }'
 }
 
-# firewall_ports prints the TCP ports PostgreSQL listens on, found by root
-# itself (pg_lsclusters, and the agent user's listening sockets), never
-# taken from the agent: 1024 to 65535, never one sshd uses.
+# firewall_ports prints the TCP ports database servers listen on, found by
+# root itself (pg_lsclusters, and the listening sockets of the agent user and
+# of the users MySQL, MariaDB, MongoDB and ClickHouse run as), never taken
+# from the agent: 1024 to 65535, never one sshd uses.
 firewall_ports() {
   {
     if command -v pg_lsclusters >/dev/null 2>&1; then pg_lsclusters -h 2>/dev/null | awk '{ print $3 }'; fi
-    if _uid=$(id -u "$AGENT_USER" 2>/dev/null) && command -v ss >/dev/null 2>&1; then
-      ss -ltnHe 2>/dev/null | awk -v u="$_uid" 'index($0, " uid:" u " ") { n = split($4, a, ":"); print a[n] }'
+    if command -v ss >/dev/null 2>&1; then
+      for _u in "$AGENT_USER" postgres mysql mongodb mongod clickhouse; do
+        _uid=$(id -u "$_u" 2>/dev/null) || continue
+        ss -ltnHe 2>/dev/null | awk -v u="$_uid" 'index($0, " uid:" u " ") { n = split($4, a, ":"); print a[n] }'
+      done
     fi
   } | grep -Ex '[1-9][0-9]{3,4}' | awk '$1 >= 1024 && $1 <= 65535' | sort -un | while read -r _p; do
     ssh_port_here "$_p" || echo "$_p"
@@ -3699,7 +3902,7 @@ firewall_listed() {
 # write_firewall_allow PORTS...: the allow list, written by root.
 write_firewall_allow() {
   {
-    echo "# PostgreSQL ports whose firewall rule Rowsafe may set when someone asks"
+    echo "# Database ports whose firewall rule Rowsafe may set when someone asks"
     echo "# (Security in the dashboard): only the chosen addresses may reach the"
     echo "# port. SSH and other ports are never touched. Written by the installer"
     echo "# (root); turn this off with: sudo rowsafe-allow --remove firewall"
@@ -3710,19 +3913,19 @@ write_firewall_allow() {
 
 allow_firewall() {
   if ! command -v nft >/dev/null 2>&1; then
-    warn "nftables isn't installed here (no nft command), so limiting who can reach PostgreSQL stays off. Install it (e.g. apt install nftables), then: sudo rowsafe-allow firewall"
+    warn "nftables isn't installed here (no nft command), so limiting who can reach $(engine_label) stays off. Install it (e.g. apt install nftables), then: sudo rowsafe-allow firewall"
     return 0
   fi
   _ports=$(firewall_ports)
   _listed=$(firewall_listed)
   if [ -z "$_ports$_listed" ]; then
-    warn "found no PostgreSQL listening here, so the firewall stays off for Rowsafe"
+    warn "found no database server listening here, so the firewall stays off for Rowsafe"
     return 0
   fi
   # shellcheck disable=SC2086 # one port per word
   write_firewall_allow $_listed $_ports
   install_firewall_helper
-  perm_ok "Rowsafe may limit who can reach PostgreSQL's port ($(firewall_listed | paste -sd, - | sed 's/,/, /g')) when you ask (Security), never SSH or other ports"
+  perm_ok "Rowsafe may limit who can reach $(engine_label)'s port ($(firewall_listed | paste -sd, - | sed 's/,/, /g')) when you ask (Security), never SSH or other ports"
 }
 
 disallow_firewall() {
@@ -3743,14 +3946,14 @@ firewall_access() {
     yes) allow_firewall ;;
     no)
       disallow_firewall
-      perm_ok "limiting who can reach PostgreSQL with the firewall is off for Rowsafe"
+      perm_ok "limiting who can reach $(engine_label) with the firewall is off for Rowsafe"
       ;;
     *)
       if [ -n "$(firewall_listed)" ]; then
         install_firewall_helper
         _new=$(firewall_ports | grep -vxF "$(firewall_listed)" || true)
         [ -n "$_new" ] && [ "$TTY" = 1 ] || return 0
-        if perm_ask "PostgreSQL also listens on port $(printf '%s' "$_new" | paste -sd, - | sed 's/,/, /g'). Allow Rowsafe's firewall rule for it too?" n; then
+        if perm_ask "$(engine_label) also listens on port $(printf '%s' "$_new" | paste -sd, - | sed 's/,/, /g'). Allow Rowsafe's firewall rule for it too?" n; then
           # shellcheck disable=SC2046 # one port per word
           write_firewall_allow $(firewall_listed) $_new
         fi
@@ -3760,7 +3963,7 @@ firewall_access() {
       [ "$TTY" = 1 ] && command -v nft >/dev/null 2>&1 || return 0
       _ports=$(firewall_ports)
       [ -n "$_ports" ] || return 0
-      if perm_ask "Limit who can reach PostgreSQL (port $(printf '%s' "$_ports" | paste -sd, - | sed 's/,/, /g')) with the firewall, when someone picks the addresses? SSH and other ports are never touched." n; then
+      if perm_ask "Limit who can reach $(engine_label) (port $(printf '%s' "$_ports" | paste -sd, - | sed 's/,/, /g')) with the firewall, when someone picks the addresses? SSH and other ports are never touched." n; then
         allow_firewall
       else
         disallow_firewall
@@ -3938,11 +4141,115 @@ remove_pooler_units() {
   if systemd_running; then systemctl daemon-reload; fi
 }
 
+# pooler_name: PgBouncer in front of PostgreSQL, ProxySQL in front of MySQL
+# and MariaDB.
+pooler_name() {
+  case $HOST_ENGINE in mysql | mariadb) echo ProxySQL ;; *) echo PgBouncer ;; esac
+}
+
+# install_pooler_units_for_engine installs the engine's pooling helper.
+install_pooler_units_for_engine() {
+  case $HOST_ENGINE in
+    mysql | mariadb) install_proxysql_units ;;
+    *) install_pooler_units ;;
+  esac
+}
+
+# ProxySQL (MySQL, MariaDB): root's copy of the agent ($PERMISSIONS_HELPER
+# proxysql-apply) installs and configures it when the agent asks
+# ($POOLER_DIR/proxysql-request), only for ports in $POOLER_ALLOW_FILE.
+PROXYSQL_SERVICE_FILE=/etc/systemd/system/rowsafe-proxysql.service
+PROXYSQL_PATH_FILE=/etc/systemd/system/rowsafe-proxysql.path
+
+install_proxysql_units() {
+  [ -x "$PERMISSIONS_HELPER" ] || install_permissions_helper
+  [ -x "$PERMISSIONS_HELPER" ] || { warn "pooling needs root's copy of the agent ($PERMISSIONS_HELPER); run the installer again"; return 0; }
+  as_agent mkdir -p -m 0700 "$POOLER_DIR"
+  _changed=0
+  if sed "s/@AGENT_USER@/$AGENT_USER/" <<'ROWSAFE_PROXYSQL_SERVICE_EOF' | write_file "$PROXYSQL_SERVICE_FILE" 0644 root:root; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-proxysql.service: installs, configures, points or turns off
+# ProxySQL (connection pooling for MySQL and MariaDB) when someone turned
+# pooling on or off in Rowsafe, only for the ports root allowed
+# (/etc/rowsafe/pooler-allowed, sudo rowsafe-allow pooler). Started by
+# rowsafe-proxysql.path; installed by https://rowsafe.sh/install.
+
+[Unit]
+Description=Rowsafe: manage ProxySQL (connection pooling), on request
+Documentation=https://rowsafe.sh/docs/guides/connection-pooling
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/rowsafe/rowsafe-permissions proxysql-apply
+Environment=ROWSAFE_AGENT_USER=@AGENT_USER@
+TimeoutStartSec=15min
+RuntimeDirectory=rowsafe-proxysql
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+StateDirectory=rowsafe-proxysql
+StateDirectoryMode=0700
+UMask=0022
+# It installs a package (apt) and starts a service: no file system
+# sandbox, but no new privileges and no kernel changes.
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+ROWSAFE_PROXYSQL_SERVICE_EOF
+    _changed=1
+  fi
+  if write_file "$PROXYSQL_PATH_FILE" 0644 root:root <<'ROWSAFE_PROXYSQL_PATH_EOF'; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-proxysql.path: starts rowsafe-proxysql.service when the Rowsafe
+# agent asks for a pooling change. Installed by https://rowsafe.sh/install
+# only when root allowed pooling (--allow-pooler).
+
+[Unit]
+Description=Rowsafe: watch for connection pooling requests (ProxySQL)
+
+[Path]
+PathExists=/var/lib/rowsafe/pooler/proxysql-request
+Unit=rowsafe-proxysql.service
+
+[Install]
+WantedBy=multi-user.target
+ROWSAFE_PROXYSQL_PATH_EOF
+    _changed=1
+  fi
+  if systemd_running; then
+    [ "$_changed" = 0 ] || systemctl daemon-reload
+    systemctl enable --now --quiet rowsafe-proxysql.path
+  fi
+}
+
+remove_proxysql_units() {
+  [ -e "$PROXYSQL_PATH_FILE" ] || [ -e "$PROXYSQL_SERVICE_FILE" ] || return 0
+  if systemd_running; then systemctl disable --now --quiet rowsafe-proxysql.path 2>/dev/null || true; fi
+  rm -f "$PROXYSQL_PATH_FILE" "$PROXYSQL_SERVICE_FILE"
+  if systemd_running; then systemctl daemon-reload; fi
+}
+
 # pooler_ports prints the ports of this server's PostgreSQL clusters, found
 # by root: pg_lsclusters (Debian and Ubuntu), else the TCP ports that
 # processes of the agent user listen on. Never the agent's own discovery:
 # the agent user owns the agent's binary.
 pooler_ports() {
+  case $HOST_ENGINE in
+    mysql | mariadb) # ProxySQL: the ports mysqld or mariadbd (the mysql user) listen on
+      _uid=$(id -u mysql 2>/dev/null) || return 0
+      have ss || return 0
+      ss -Hltne 2>/dev/null | awk -v u="uid:$_uid" '{ for (i = 1; i <= NF; i++) if ($i == u) { n = split($4, a, ":"); print a[n] } }' |
+        awk '$1 ~ /^[0-9]+$/ && $1 != 33060' | sort -un
+      return 0
+      ;;
+  esac
   if have pg_lsclusters; then
     pg_lsclusters -h 2>/dev/null | awk '$3 ~ /^[0-9]+$/ && $3 > 0 && $3 < 65536 { print $3 }' | sort -un
     return 0
@@ -3961,10 +4268,10 @@ pooler_allowed_ports() {
 # write_pooler_allow PORTS PUBLIC writes the allow list.
 write_pooler_allow() {
   {
-    echo "# PostgreSQL clusters Rowsafe may put PgBouncer (connection pooling) in"
+    echo "# Database ports Rowsafe may put $(pooler_name) (connection pooling) in"
     echo "# front of, when someone turns pooling on in Rowsafe and confirms."
     echo "# Written by the installer (root); turn this off with:"
-    echo "# sudo rowsafe-allow --remove pooler. \"public\": PgBouncer may listen"
+    echo "# sudo rowsafe-allow --remove pooler. \"public\": the pooler may listen"
     echo "# on every address (sudo rowsafe-allow pooler-public)."
     echo "# PORT"
     printf '%s\n' "$1"
@@ -3977,14 +4284,14 @@ write_pooler_allow() {
 allow_pooler() {
   _ports=$(printf '%s\n%s\n' "$(pooler_allowed_ports)" "$(pooler_ports)" | awk 'NF' | sort -un)
   if [ -z "$_ports" ]; then
-    warn "found no PostgreSQL here, so managing PgBouncer from Rowsafe stays off"
+    warn "found no database server here, so managing $(pooler_name) from Rowsafe stays off"
     return 0
   fi
   _public=$(pooler_public_wanted)
   write_pooler_allow "$_ports" "$_public"
-  install_pooler_units
-  perm_ok "Rowsafe may install and manage PgBouncer when you turn pooling on, only when someone confirms"
-  if [ "$_public" = 1 ]; then perm_note "PgBouncer may listen on public addresses when someone chooses that: put a firewall in front of it."; fi
+  install_pooler_units_for_engine
+  perm_ok "Rowsafe may install and manage $(pooler_name) when you turn pooling on, only when someone confirms"
+  if [ "$_public" = 1 ]; then perm_note "$(pooler_name) may listen on public addresses when someone chooses that: put a firewall in front of it."; fi
 }
 
 # pooler_public_wanted prints 1 when PgBouncer may listen on every address:
@@ -4006,7 +4313,7 @@ refresh_pooler() {
   for _newport in $(pooler_ports); do
     printf '%s\n' "$_have" | grep -qx "$_newport" && continue
     # (confirm uses $_p itself.)
-    if [ "$TTY" = 1 ] && perm_ask "Also allow PgBouncer for the PostgreSQL on port $_newport?" n; then
+    if [ "$TTY" = 1 ] && perm_ask "Also allow $(pooler_name) for the $(engine_label) on port $_newport?" n; then
       _ports=$(printf '%s\n%s\n' "$_ports" "$_newport" | awk 'NF' | sort -un)
     fi
   done
@@ -4016,14 +4323,15 @@ refresh_pooler() {
   if [ "$_ports" != "$_have" ] || [ "$_public" != "$_was_public" ]; then
     write_pooler_allow "$_ports" "$_public"
   fi
-  install_pooler_units
+  install_pooler_units_for_engine
 }
 
 disallow_pooler() {
   remove_pooler_units
+  remove_proxysql_units
   if [ -d "$CONFIG_DIR" ]; then
     {
-      echo "# Managing PgBouncer from Rowsafe is off on this server."
+      echo "# Managing the connection pooler from Rowsafe is off on this server."
       echo "# Turn it on with: sudo rowsafe-allow pooler"
     } | write_file "$POOLER_ALLOW_FILE" 0644 root:root || true
   fi
@@ -4039,7 +4347,7 @@ pooler_access() {
     yes) allow_pooler ;;
     no)
       disallow_pooler
-      perm_ok "managing PgBouncer from Rowsafe is off"
+      perm_ok "managing $(pooler_name) from Rowsafe is off"
       ;;
     *)
       if [ -f "$POOLER_ALLOW_FILE" ]; then
@@ -4047,11 +4355,11 @@ pooler_access() {
         return 0
       fi
       [ "$TTY" = 1 ] && [ -n "$(pooler_ports)" ] || return 0
-      if perm_ask "Install and manage PgBouncer (connection pooling), when someone turns pooling on? Nothing is installed now." y; then
+      if perm_ask "Install and manage $(pooler_name) (connection pooling), when someone turns pooling on? Nothing is installed now." y; then
         allow_pooler
       else
         disallow_pooler
-        perm_note "OK: Rowsafe won't install or manage PgBouncer"
+        perm_note "OK: Rowsafe won't install or manage $(pooler_name)"
       fi
       ;;
   esac
@@ -4520,7 +4828,7 @@ remove_files_units() {
 # changing. The output ends with what Rowsafe may do now, then (exit 1 or
 # 2) the reason in one "error: ..." line.
 
-PERMISSIONS="restart create-cluster updates security-updates reboot pooler pooler-public firewall"
+PERMISSIONS="restart create-cluster updates security-updates reboot pooler pooler-public firewall tuning"
 PERM_QUIET=0 # 1: the summary says it all (the questions on a terminal, --permissions)
 PERM_INTRO=0 # 1 once the questions' heading is shown
 
@@ -4563,6 +4871,7 @@ perm_var() {
     pooler) echo ALLOW_POOLER ;;
     pooler-public) echo ALLOW_POOLER_PUBLIC ;;
     firewall) echo ALLOW_FIREWALL ;;
+    tuning) echo ALLOW_TUNING ;;
     *) return 1 ;;
   esac
 }
@@ -4587,7 +4896,8 @@ perm_desc() {
     reboot) echo "reboot this server (after an update)" ;;
     pooler) echo "install and manage PgBouncer (pooling)" ;;
     pooler-public) echo "let PgBouncer listen on public addresses" ;;
-    firewall) echo "limit who can reach PostgreSQL (firewall)" ;;
+    firewall) echo "limit who can reach the database (firewall)" ;;
+    tuning) echo "change MongoDB's or ClickHouse's settings (Tuning)" ;;
   esac
 }
 
@@ -4599,11 +4909,13 @@ perm_state() {
     create-cluster) _sf=$CREATE_ALLOW_FILE ;;
     pooler | pooler-public) _sf=$POOLER_ALLOW_FILE ;;
     firewall) _sf=$FIREWALL_ALLOW_FILE ;;
+    tuning) _sf=$TUNING_ALLOW_FILE ;;
     *) _sf=$UPDATES_ALLOW_FILE ;;
   esac
   [ -f "$_sf" ] || return 0
   case $1 in
     restart | pooler | firewall) _sy=$(grep -c '^[1-9]' "$_sf" || true) ;;
+    tuning) _sy=$(grep -Ec '^(mongodb|clickhouse) /' "$_sf" || true) ;;
     create-cluster) _sy=$(grep -c '^ports ' "$_sf" || true) ;;
     pooler-public) _sy=$(grep -qs '^[1-9]' "$_sf" && grep -cx public "$_sf" || true) ;;
     updates) _sy=$(grep -c '^postgresql\([[:space:]#]\|$\)' "$_sf" || true) ;;
@@ -4624,26 +4936,48 @@ perm_has_postgres() {
 # can). The agent reports the same reasons.
 perm_why() {
   if [ "$HOST_ENGINE" != postgresql ] || ! perm_has_postgres; then
-    # Another engine (or none yet): restarts and the server's own updates
-    # work for every engine; the rest is PostgreSQL's.
+    # Another engine (or none yet): restarts, the server's own updates, the
+    # firewall and tuning work for every engine, pooling for MySQL and
+    # MariaDB (ProxySQL); the rest is PostgreSQL's.
     case $1 in
-      restart) [ -n "$(restart_pairs)" ] || echo "found no $(engine_label) service (systemd) on this server" ;;
-      security-updates | reboot) have apt-get || echo "Rowsafe installs updates with apt (Debian and Ubuntu)" ;;
-      *) echo "Rowsafe does this for PostgreSQL, and there is no PostgreSQL on this server" ;;
+      restart)
+        [ -n "$(restart_pairs)" ] || echo "found no $(engine_label) service (systemd) on this server"
+        return 0
+        ;;
+      security-updates | reboot)
+        have apt-get || echo "Rowsafe installs updates with apt (Debian and Ubuntu)"
+        return 0
+        ;;
+      firewall | tuning) ;; # every engine's port; MongoDB's and ClickHouse's settings
+      pooler | pooler-public) case $HOST_ENGINE in mysql | mariadb) ;; *)
+        echo "Rowsafe pools PostgreSQL (PgBouncer) and MySQL or MariaDB (ProxySQL), and neither is on this server"
+        return 0
+        ;;
+      esac ;;
+      *)
+        echo "Rowsafe does this for PostgreSQL, and there is no PostgreSQL on this server"
+        return 0
+        ;;
     esac
-    return 0
   fi
   _w=''
   case $1 in
     restart) [ -n "$(restart_pairs)" ] || _w="found no PostgreSQL service (systemd) on this server" ;;
     create-cluster) have pg_createcluster || _w="pg_createcluster isn't installed (Debian and Ubuntu's postgresql-common)" ;;
     updates | security-updates | reboot) have apt-get || _w="Rowsafe installs updates with apt (Debian and Ubuntu)" ;;
-    pooler | pooler-public) [ -n "$(pooler_ports)$(pooler_allowed_ports)" ] || _w="found no PostgreSQL cluster here" ;;
+    pooler | pooler-public) [ -n "$(pooler_ports)$(pooler_allowed_ports)" ] || _w="found no $(engine_label) here" ;;
+    tuning)
+      case $HOST_ENGINE in
+        mongodb) [ -n "$(mongodb_config_file)" ] || _w="found no MongoDB configuration file (/etc/mongod.conf)" ;;
+        clickhouse) [ -f /etc/clickhouse-server/config.xml ] || _w="found no ClickHouse configuration (/etc/clickhouse-server)" ;;
+        *) _w="Rowsafe changes $(engine_label)'s settings without it" ;;
+      esac
+      ;;
     firewall)
       if ! have nft; then
         _w="nftables isn't installed (apt install nftables)"
       elif [ -z "$(firewall_ports)$(firewall_listed)" ]; then
-        _w="found no PostgreSQL listening here"
+        _w="found no database server listening here"
       fi
       ;;
   esac
@@ -4693,6 +5027,14 @@ perm_cascade() {
 # perm_summary prints what Rowsafe may do here now, and how to change it.
 perm_summary() {
   say ""
+  _any=''
+  for _p in $PERMISSIONS; do [ -n "$(perm_why "$_p")" ] || _any=1; done
+  if [ -z "$_any" ] && { [ "$HOST_ENGINE" != postgresql ] || ! perm_has_postgres; }; then
+    step "What Rowsafe may do on $(uname -n)"
+    note "Nothing to allow here: none of these permissions apply to this server"
+    note "(no database service under systemd, no apt, no nftables)."
+    return 0
+  fi
   step "What Rowsafe may do on $(uname -n), only when someone clicks it and confirms"
   _first_on='' _first_off='' _rows_off='' _rows_na=''
   for _p in $PERMISSIONS; do
@@ -4749,7 +5091,7 @@ installer=/usr/local/lib/rowsafe/install.sh
 helper=/usr/local/lib/rowsafe/rowsafe-permissions
 owners=/etc/rowsafe/owners
 update='curl -fsSL https://rowsafe.sh | sudo sh'
-names='restart create-cluster updates security-updates reboot pooler pooler-public firewall'
+names='restart create-cluster updates security-updates reboot pooler pooler-public firewall tuning'
 
 usage() {
   cat <<'EOF'
@@ -4775,7 +5117,8 @@ Names:
   reboot             reboot this server after an update (needs security-updates)
   pooler             install and manage PgBouncer (connection pooling)
   pooler-public      let PgBouncer listen on public addresses (needs pooler)
-  firewall           limit who can reach PostgreSQL's port (never SSH or other ports)
+  firewall           limit who can reach the database's port (never SSH or other ports)
+  tuning             change MongoDB's or ClickHouse's settings, in Rowsafe's own file
 
 Turning one off also turns off what needs it.
 EOF
@@ -5040,6 +5383,10 @@ permissions_main() {
   case $ALLOW_FIREWALL in
     yes) allow_firewall ;;
     no) disallow_firewall ;;
+  esac
+  case $ALLOW_TUNING in
+    yes) allow_tuning ;;
+    no) disallow_tuning ;;
   esac
   [ "$ALLOW_RESTART" != no ] || disallow_restarts
   if [ "$ALLOW_FILES" = no ]; then
@@ -6890,6 +7237,7 @@ databases() {
   [ "$ALLOW_RESTART" != no ] || disallow_restarts
   [ -z "$ALLOW_CREATE_CLUSTER" ] || create_cluster_access # forks
   [ "$ALLOW_FIREWALL" != no ] || disallow_firewall
+  [ "$ALLOW_TUNING" != no ] || disallow_tuning
   [ "$ALLOW_POOLER" != no ] || disallow_pooler
   if [ ! -f "$STATE_DIR/agent.json" ] || ! agent_running; then
     [ -z "$PROTECT_NAME" ] || die "the agent is not running, so backups can't be turned on yet; see 'journalctl -u rowsafe-agent'"
@@ -6904,6 +7252,7 @@ databases() {
   if [ "$TTY" = 1 ] && [ "$NO_SETUP" = 0 ]; then interactive=1; fi
   if [ "$interactive" = 1 ] || [ -n "$PROTECT_NAME" ] || [ "$ALLOW_RESTART" = yes ] || grep -qs '^[0-9]' "$RESTART_ALLOW_FILE" ||
     [ -n "$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT" ] || [ "$ALLOW_FIREWALL" = yes ] || grep -qs '^[0-9]' "$FIREWALL_ALLOW_FILE" ||
+    [ "$ALLOW_TUNING" = yes ] ||
     [ "$ALLOW_POOLER" = yes ] || grep -qs '^[0-9]' "$POOLER_ALLOW_FILE"; then
     say ""
     step "Looking for $(engine_label) on this server"
@@ -6918,6 +7267,7 @@ databases() {
     update_access
     pooler_access
     firewall_access
+    tuning_access
     PERM_QUIET=0
   fi
   perm_summary # permissions section
@@ -7737,6 +8087,8 @@ main() {
       --no-allow-create-cluster) ALLOW_CREATE_CLUSTER=no ;;
       --allow-firewall) ALLOW_FIREWALL=yes ;;
       --no-allow-firewall) ALLOW_FIREWALL=no ;;
+      --allow-tuning) ALLOW_TUNING=yes ;;
+      --no-allow-tuning) ALLOW_TUNING=no ;;
       --allow-pooler) ALLOW_POOLER=yes ;;
       --no-allow-pooler) ALLOW_POOLER=no ;;
       --allow-pooler-public) ALLOW_POOLER_PUBLIC=yes ;;
@@ -7809,7 +8161,7 @@ main() {
     if [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME$PROTECT_PORT$FILES_PATHS$MONGODB_REPLSET" ] || [ "$ALLOW_FILES" = yes ] || [ "$NO_FILES" = 1 ] || [ "$purge" = 1 ]; then
       perm_refuse "--permissions only changes what Rowsafe may do here: --allow-NAME, --no-allow-NAME and --no-allow-files (see --help)"
     fi
-  elif [ "$mode" != install ] && { [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME" ] || [ -n "$ALLOW_RESTART$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT$ALLOW_FIREWALL$ALLOW_POOLER$ALLOW_POOLER_PUBLIC$ALLOW_CREATE_CLUSTER" ]; }; then
+  elif [ "$mode" != install ] && { [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME" ] || [ -n "$ALLOW_RESTART$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT$ALLOW_FIREWALL$ALLOW_TUNING$ALLOW_POOLER$ALLOW_POOLER_PUBLIC$ALLOW_CREATE_CLUSTER" ]; }; then
     die "--no-setup, --protect and the --allow- options only go with an install"
   fi
   if [ "$mode" != install ] && [ "$mode" != permissions ] && { [ -n "$FILES_PATHS" ] || [ -n "$ALLOW_FILES" ] || [ "$NO_FILES" = 1 ]; }; then

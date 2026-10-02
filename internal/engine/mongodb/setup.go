@@ -206,7 +206,7 @@ func CreateLoginWith(ctx context.Context, env agent.EngineEnv, port int, adminUs
 	// rewind set aside, when you delete it).
 	privileges := bson.A{
 		bson.D{{Key: "resource", Value: bson.D{{Key: "cluster", Value: true}}},
-			{Key: "actions", Value: bson.A{"appendOplogNote", "killop", "inprog"}}},
+			{Key: "actions", Value: bson.A{"appendOplogNote", "killop", "inprog", "setParameter"}}},
 		bson.D{{Key: "resource", Value: bson.D{{Key: "db", Value: ""}, {Key: "collection", Value: ""}}},
 			{Key: "actions", Value: bson.A{"find", "insert", "update", "createCollection", "createIndex", "dropIndex", "enableProfiler", "renameCollectionSameDB", "dropCollection"}}},
 		bson.D{{Key: "resource", Value: bson.D{{Key: "db", Value: ""}, {Key: "collection", Value: "system.profile"}}},
