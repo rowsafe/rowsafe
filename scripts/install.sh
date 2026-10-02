@@ -3250,12 +3250,11 @@ update_access() {
   if [ ! -f "$UPDATES_ALLOW_FILE" ] && [ "$TTY" = 1 ] && { [ -z "$ALLOW_UPDATES" ] || [ -z "$ALLOW_SECURITY" ]; }; then
     perm_intro
   fi
-  _pg=no
-  if [ "$HOST_ENGINE" = postgresql ]; then
-    _pg=$(decide_update "$ALLOW_UPDATES" postgresql "Install PostgreSQL updates and upgrades, when someone clicks Update? A Mark is saved first." y)
-  elif [ "$ALLOW_UPDATES" = yes ]; then
-    warn "Rowsafe installs $(engine_label)'s own updates itself only for PostgreSQL so far; left off"
-  fi
+  # PostgreSQL's word is postgresql; MySQL's, MariaDB's, MongoDB's and
+  # ClickHouse's is database (the helper's db-* requests).
+  _uw=postgresql
+  [ "$HOST_ENGINE" = postgresql ] || _uw=database
+  _pg=$(decide_update "$ALLOW_UPDATES" "$_uw" "Install $(engine_label) updates and upgrades, when someone clicks Update? A Mark is saved first." y)
   _sec=$(decide_update "$ALLOW_SECURITY" security "Install this server's security updates, when someone clicks Install?" n)
   _reboot=no
   if [ "$_sec" = yes ]; then
@@ -3268,7 +3267,13 @@ update_access() {
     echo "# the dashboard and confirms. Written by the installer (root); change it"
     echo "# with sudo rowsafe-allow updates (security-updates, reboot), and"
     echo "# sudo rowsafe-allow --remove updates (...)."
-    [ "$_pg" != yes ] || echo "postgresql   # PostgreSQL minor updates and major upgrades (clusters in restart-allowed)"
+    if [ "$_pg" = yes ]; then
+      if [ "$_uw" = postgresql ]; then
+        echo "postgresql   # PostgreSQL minor updates and major upgrades (clusters in restart-allowed)"
+      else
+        echo "database     # $(engine_label) updates and upgrades (the servers in restart-allowed)"
+      fi
+    fi
     [ "$_sec" != yes ] || echo "security     # security updates (the database servers' own packages excepted)"
     [ "$_reboot" != yes ] || echo "reboot       # rebooting the server"
   } | write_file "$UPDATES_ALLOW_FILE" 0644 root:root || true
@@ -3278,7 +3283,7 @@ update_access() {
     return 0
   fi
   install_update_units
-  [ "$_pg" != yes ] || perm_ok "Rowsafe may install PostgreSQL updates and upgrade PostgreSQL when you click Update or Upgrade and confirm"
+  [ "$_pg" != yes ] || perm_ok "Rowsafe may install $(engine_label) updates and upgrade $(engine_label) when you click Update or Upgrade and confirm"
   [ "$_sec" != yes ] || perm_ok "Rowsafe may install security updates when you click Install and confirm"
   [ "$_reboot" != yes ] || perm_ok "Rowsafe may reboot this server when you click Reboot and confirm"
 }
@@ -4681,7 +4686,7 @@ perm_desc() {
   case $1 in
     restart) echo "restart or stop $(engine_label) (Restart, Rewind)" ;;
     create-cluster) echo "create a PostgreSQL cluster for a fork" ;;
-    updates) echo "install PostgreSQL updates and upgrades" ;;
+    updates) echo "install $(engine_label) updates and upgrades" ;;
     security-updates) echo "install this server's security updates" ;;
     reboot) echo "reboot this server (after an update)" ;;
     pooler) echo "install and manage PgBouncer (pooling)" ;;
@@ -4705,7 +4710,7 @@ perm_state() {
     restart | pooler | firewall) _sy=$(grep -c '^[1-9]' "$_sf" || true) ;;
     create-cluster) _sy=$(grep -c '^ports ' "$_sf" || true) ;;
     pooler-public) _sy=$(grep -qs '^[1-9]' "$_sf" && grep -cx public "$_sf" || true) ;;
-    updates) _sy=$(grep -c '^postgresql\([[:space:]#]\|$\)' "$_sf" || true) ;;
+    updates) _sy=$(grep -c '^\(postgresql\|database\)\([[:space:]#]\|$\)' "$_sf" || true) ;;
     security-updates) _sy=$(grep -c '^security\([[:space:]#]\|$\)' "$_sf" || true) ;;
     reboot) _sy=$(grep -c '^reboot\([[:space:]#]\|$\)' "$_sf" || true) ;;
   esac
@@ -4727,7 +4732,7 @@ perm_why() {
     # work for every engine; the rest is PostgreSQL's.
     case $1 in
       restart) [ -n "$(restart_pairs)" ] || echo "found no $(engine_label) service (systemd) on this server" ;;
-      security-updates | reboot) have apt-get || echo "Rowsafe installs updates with apt (Debian and Ubuntu)" ;;
+      updates | security-updates | reboot) have apt-get || echo "Rowsafe installs updates with apt (Debian and Ubuntu)" ;;
       *) echo "Rowsafe does this for PostgreSQL, and there is no PostgreSQL on this server" ;;
     esac
     return 0
