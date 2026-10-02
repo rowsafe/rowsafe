@@ -62,7 +62,7 @@ func (e *Engine) Tasks() []string {
 		protocol.TaskInspect, protocol.TaskAdopt, protocol.TaskCheck, protocol.TaskBackup,
 		protocol.TaskDrill, protocol.TaskRestorePoint, protocol.TaskMaintenance,
 		protocol.TaskRewindCopy, protocol.TaskRewindDrop, protocol.TaskRewindCompare, protocol.TaskRewindRows,
-		protocol.TaskIndexAdvisor,
+		protocol.TaskIndexAdvisor, protocol.TaskFindMoment,
 	}
 }
 
@@ -95,6 +95,12 @@ func (e *Engine) Run(ctx context.Context, env agent.EngineEnv, task *protocol.Ta
 			return nil, err
 		}
 		return nilable(s.indexAdvisor(ctx, task.ID, p, log))
+	case protocol.TaskFindMoment: // moment.go
+		var p protocol.FindMomentParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilable(s.findMoment(ctx, task.ID, p, log))
 	case protocol.TaskRestorePoint:
 		var p protocol.RestorePointParams
 		if err := decode(task, &p); err != nil {

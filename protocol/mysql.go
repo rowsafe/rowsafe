@@ -62,6 +62,7 @@ var mysqlFeatures = EngineFeatures{
 	Recommendations: true, // statement digests, catalog (internal/engine/mysql/advisor.go)
 	IndexAdvice:     true, // MySQL 8.0+ (internal/engine/mysql/indexadvisor.go)
 	Logs:            true, // error and slow query logs (internal/engine/mysql/logs.go)
+	FindMoment:      true, // the binary logs in the bucket (internal/engine/mysql/moment.go)
 }
 
 // mariadbFeatures are MySQL's without index advice: MariaDB keeps no sample
