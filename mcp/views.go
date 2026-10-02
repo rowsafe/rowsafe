@@ -141,7 +141,7 @@ type DatabaseSummary struct {
 	LastDrill       *DrillView  `json:"last_drill,omitempty"`
 	WAL             *WALView    `json:"wal,omitempty"`
 	Health          string      `json:"health" jsonschema:"ok, warning or critical"`
-	Problems        []string    `json:"problems,omitempty" jsonschema:"one line per problem; fleet_health has the next action for each"`
+	Problems        []string    `json:"problems,omitempty" jsonschema:"one line per problem"`
 }
 
 // TaskView is one task. Log is only filled by get_task.

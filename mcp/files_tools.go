@@ -35,8 +35,8 @@ type FilesFolderView struct {
 func (t *tools) addFilesReadTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "files_status",
-		Description: "Show the folders Rowsafe backs up with a database (uploads, media): each folder's status, last snapshot, size, " +
-			"and how far back files can be restored. Read-only. Restoring files is the user's to do (dashboard or `rowsafe files restore`).",
+		Description: "Shows the folders Rowsafe backs up with a database (uploads, media): each folder's status, last snapshot, size, " +
+			"and how far back files can be restored. Read-only: it restores nothing (a person restores files in the dashboard or with `rowsafe files restore`).",
 		Annotations: readOnly("Files status"),
 	}, t.filesStatus)
 }

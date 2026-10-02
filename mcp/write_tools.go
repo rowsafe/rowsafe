@@ -17,7 +17,7 @@ import (
 
 type planInput struct {
 	Database      string `json:"database" jsonschema:"database name (or ID when it is already registered). New names: 2-40 lowercase letters, digits and dashes, starting with a letter; it becomes the pgBackRest stanza and bucket path"`
-	Host          string `json:"host,omitempty" jsonschema:"only to register a new database: the host's hostname or ID from list_hosts"`
+	Host          string `json:"host,omitempty" jsonschema:"only to register a new database: the host's hostname or ID"`
 	Port          int    `json:"port,omitempty" jsonschema:"only to register: PostgreSQL port (default 5432)"`
 	SocketDir     string `json:"socket_dir,omitempty" jsonschema:"only to register: PostgreSQL Unix socket directory (default /var/run/postgresql)"`
 	RetentionFull int    `json:"retention_full,omitempty" jsonschema:"only to register: full backups to keep (default 2, about two weeks of point-in-time recovery with weekly fulls)"`
@@ -27,12 +27,12 @@ type planInput struct {
 type backupInput struct {
 	Database    string `json:"database" jsonschema:"database name or ID"`
 	Type        string `json:"type" jsonschema:"full, diff (changes since the last full; the usual choice for an ad-hoc backup) or incr (changes since the last backup of any type)"`
-	WaitSeconds int    `json:"wait_seconds,omitempty" jsonschema:"seconds to wait for the task to finish before returning (0 returns at once); if it is still running, poll get_task"`
+	WaitSeconds int    `json:"wait_seconds,omitempty" jsonschema:"seconds to wait for the task to finish before returning (0 returns at once); a task still running then is returned with its ID and status"`
 }
 
 type taskInput struct {
 	Database    string `json:"database" jsonschema:"database name or ID"`
-	WaitSeconds int    `json:"wait_seconds,omitempty" jsonschema:"seconds to wait for the task to finish before returning (0 returns at once); if it is still running, poll get_task"`
+	WaitSeconds int    `json:"wait_seconds,omitempty" jsonschema:"seconds to wait for the task to finish before returning (0 returns at once); a task still running then is returned with its ID and status"`
 }
 
 type scheduleInput struct {
@@ -46,7 +46,7 @@ type scheduleInput struct {
 // WriteResult is what a task-queuing tool returns.
 type WriteResult struct {
 	TaskDetail
-	Registered bool `json:"registered,omitempty" jsonschema:"plan_adoption registered a new database"`
+	Registered bool `json:"registered,omitempty" jsonschema:"a new database was registered"`
 }
 
 type ScheduleResult struct {
@@ -71,9 +71,9 @@ func withWait[T any](fn func(props map[string]*jsonschema.Schema)) *jsonschema.S
 func (t *tools) addWriteTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "plan_adoption",
-		Description: "Produce a read-only adopt plan for a PostgreSQL cluster: what Rowsafe would change to enable WAL archiving (pgBackRest config, stanza, archive_mode/archive_command/archive_timeout, wal_level if minimal) and whether a PostgreSQL restart will be needed. Nothing on the host changes. " +
-			"If the database is not registered yet, pass host (from list_hosts) to register it first; registering counts against the plan's database limit (402 when full). For a registered database it re-plans (e.g. after the user changed settings). " +
-			"Returns the plan task; show the plan to the user. Applying it changes PostgreSQL settings, so only a person does it: the Turn on backups button in the dashboard, or rowsafe apply NAME.",
+		Description: "Produces a read-only adopt plan for a PostgreSQL cluster: what Rowsafe would change to enable WAL archiving (pgBackRest config, stanza, archive_mode/archive_command/archive_timeout, wal_level if minimal) and whether a PostgreSQL restart will be needed. Nothing on the host changes. " +
+			"A database not registered yet is registered first when host is given; registering counts against the plan's database limit (402 when full). For a registered database it re-plans (e.g. after settings changed). " +
+			"Returns the plan task. Applying the plan changes PostgreSQL settings and is done by a person: the Turn on backups button in the dashboard, or rowsafe apply NAME.",
 		Annotations: writes("Plan adoption (read-only on the host)", false, false),
 		InputSchema: withWait[planInput](func(p map[string]*jsonschema.Schema) {
 			p["port"].Minimum, p["port"].Maximum = ptr(1.0), ptr(65535.0)
@@ -83,8 +83,8 @@ func (t *tools) addWriteTools(s *sdk.Server) {
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "run_backup",
-		Description: "Queue a backup of an active (or verifying) database now, in addition to its schedule. It runs on the host with pgBackRest, uploads to the bucket, and can take hours for a large database. " +
-			"Prefer type diff for an ad-hoc backup. A full backup reads the whole database, and afterwards retention expires the oldest full backup beyond retention_full (and the WAL only it needs), which shortens how far back point-in-time recovery reaches; use full only when needed (no recent full, or the user asks). " +
+		Description: "Queues a backup of an active (or verifying) database now, in addition to its schedule. It runs on the host with pgBackRest, uploads to the bucket, and can take hours for a large database. " +
+			"A diff backup stores only the changes since the last full. A full backup reads the whole database, and afterwards retention expires the oldest full backup beyond retention_full (and the WAL only it needs), which shortens how far back point-in-time recovery reaches. " +
 			"Fails with 409 if a backup is already queued or running.",
 		Annotations: writes("Run a backup", false, false),
 		InputSchema: withWait[backupInput](func(p map[string]*jsonschema.Schema) {
@@ -94,7 +94,7 @@ func (t *tools) addWriteTools(s *sdk.Server) {
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "run_drill",
-		Description: "Queue a restore test (Proof; task type drill) of an active database: the agent restores the latest backup plus archived WAL into a scratch cluster on the same host (private socket, no TCP, low CPU and IO priority), compares databases and table counts with production, and deletes it. " +
+		Description: "Queues a restore test (Proof; task type drill) of an active database: the agent restores the latest backup plus archived WAL into a scratch cluster on the same host (private socket, no TCP, low CPU and IO priority), compares databases and table counts with production, and deletes it. " +
 			"It needs free disk of about 1.3x the database size + 1 GiB on the host and can take hours. Fails with 409 if one is already queued or running.",
 		Annotations: writes("Run a restore test (Proof)", false, false),
 		InputSchema: withWait[taskInput](nil),
@@ -102,7 +102,7 @@ func (t *tools) addWriteTools(s *sdk.Server) {
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "verify_database",
-		Description: "Queue a WAL check (pgbackrest check): force a WAL switch and prove the segment reaches the bucket. Rowsafe runs it by itself once a database awaiting_restart has been restarted; use it to check right away, after fixing failing WAL archiving (it also rewrites the pgBackRest config archive_command reads), or to re-check a verifying database. " +
+		Description: "Queues a WAL check (pgbackrest check): forces a WAL switch and proves the segment reaches the bucket. Rowsafe runs it by itself once a database awaiting_restart has been restarted. It also rewrites the pgBackRest config that archive_command reads, so it re-checks archiving after failing WAL archiving was fixed, and re-checks a verifying database. " +
 			"The first successful check makes the database active, starts its schedules and queues its first full backup.",
 		Annotations: writes("Verify WAL archiving", false, false),
 		InputSchema: withWait[taskInput](nil),
@@ -110,8 +110,8 @@ func (t *tools) addWriteTools(s *sdk.Server) {
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "update_schedule",
-		Description: "Change a database's backup and restore test (drill) schedules (5-field cron expressions, evaluated in UTC) and/or how many full backups are kept. Omitted fields stay as they are; get_database shows the current values. " +
-			"Lowering retention_full permanently deletes older backups at the next backup, shortening the point-in-time recovery window: confirm that with the user first. A changed schedule counts from now, so it never fires a missed run as a backlog.",
+		Description: "Changes a database's backup and restore test (drill) schedules (5-field cron expressions, evaluated in UTC) and/or how many full backups are kept. Omitted fields stay as they are. " +
+			"Lowering retention_full permanently deletes older backups at the next backup, shortening the point-in-time recovery window. A changed schedule counts from now, so it never fires a missed run as a backlog.",
 		Annotations: writes("Update schedules and retention", true, true),
 		InputSchema: inputSchema[scheduleInput](func(p map[string]*jsonschema.Schema) {
 			p["retention_full"].Minimum, p["retention_full"].Maximum = ptr(1.0), ptr(52.0)

@@ -41,8 +41,8 @@ type ServerUserRow struct {
 func (t *tools) addDBAdminReadTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "list_databases_on_server",
-		Description: "List the databases (datnames), users (roles) and installed extensions inside one database server that Rowsafe protects, as its agent last read them. Read-only: names, owners, sizes and settings, never data or passwords. " +
-			"Creating or removing databases and users is for people (Databases & users in the dashboard, or `rowsafe db`).",
+		Description: "Lists the databases (datnames), users (roles) and installed extensions inside one database server that Rowsafe protects, as its agent last read them: names, owners, sizes and settings, never data or passwords. " +
+			"Read-only: it creates and removes nothing (a person does that with Databases & users in the dashboard, or `rowsafe db`).",
 		Annotations: readOnly("Databases and users on a server"),
 	}, t.listDatabasesOnServer)
 }

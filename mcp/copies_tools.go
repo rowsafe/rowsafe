@@ -24,11 +24,11 @@ type previewInput struct {
 	SQL         string `json:"sql" jsonschema:"the migration's SQL: a migration file, or what the framework generates (prisma migrate diff --script, rails db:migrate with SQL schema dumps, django sqlmigrate, alembic upgrade --sql, drizzle-kit generate, flyway/liquibase SQL)"`
 	DB          string `json:"db,omitempty" jsonschema:"the PostgreSQL database (datname) the migration runs in, if the server has several"`
 	Label       string `json:"label,omitempty" jsonschema:"a name for the preview, e.g. the migration file name"`
-	WaitSeconds *int   `json:"wait_seconds,omitempty" jsonschema:"how long to wait for the result (default and maximum: the server's limit, about 45-120 s); if it isn't done, call get_preview"`
+	WaitSeconds *int   `json:"wait_seconds,omitempty" jsonschema:"how long to wait for the result (default and maximum: the server's limit, about 45-120 s); if it isn't done by then, the result has the preview ID and status queued or running"`
 }
 
 type previewIDInput struct {
-	ID string `json:"id" jsonschema:"the preview ID (pv_...) from preview_migration"`
+	ID string `json:"id" jsonschema:"the preview ID (pv_...)"`
 }
 
 // PreviewView is a preview for an assistant.
@@ -56,7 +56,7 @@ type PreviewStatementView struct {
 
 type safeCopyInput struct {
 	Database  string   `json:"database" jsonschema:"Rowsafe database name or ID"`
-	AllowFrom []string `json:"allow_from,omitempty" jsonschema:"IP addresses or CIDR ranges that may connect (the machine you run on); default: the caller's address as Rowsafe sees it"`
+	AllowFrom []string `json:"allow_from,omitempty" jsonschema:"IP addresses or CIDR ranges that may connect (e.g. the machine the client runs on); default: the caller's address as Rowsafe sees it"`
 	Listen    string   `json:"listen,omitempty" jsonschema:"where the copy listens on the database server: private (default), public, or one of its IPs"`
 	Hours     int      `json:"hours,omitempty" jsonschema:"how long to keep it (default 24, at most 168)"`
 	DB        string   `json:"db,omitempty" jsonschema:"database for the connection string (default: the main one)"`
@@ -84,7 +84,7 @@ type SafeCopyView struct {
 
 type CreateSafeCopyOutput struct {
 	SafeCopyView
-	Password string `json:"password,omitempty" jsonschema:"shown once: keep it with the connection string (only from a local rowsafe mcp; the remote endpoint never makes passwords)"`
+	Password string `json:"password,omitempty" jsonschema:"shown only once, in this result (only from a local rowsafe mcp; the remote endpoint never makes passwords)"`
 	// PasswordURL is where a person sets the password in their browser.
 	PasswordURL string `json:"password_url,omitempty" jsonschema:"the dashboard page where the user sets the copy's password"`
 	Guidance    string `json:"guidance"`
@@ -101,7 +101,7 @@ type SafeCopiesOutput struct {
 func (t *tools) addCopiesTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "get_preview",
-		Description: "The result of a migration preview (preview_migration), by ID.",
+		Description: "The result of a migration preview, by preview ID: status, verdict (safe, careful, dangerous or failed), summary, findings, the statements worth attention and suggestions. Read-only.",
 		Annotations: readOnly("Migration preview"),
 	}, t.getPreview)
 	sdk.AddTool(s, &sdk.Tool{
@@ -118,9 +118,10 @@ func (t *tools) addCopiesTools(s *sdk.Server) {
 	}
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "preview_migration",
-		Description: "Run a migration's SQL on a fresh copy of the database, restored from its backups on its own server, and report what it would do to production: " +
+		Description: "Runs a migration's SQL on a fresh copy of the database, restored from its backups on its own server, and reports what it would do to production: " +
 			"each statement's time, locks (and what they block), tables rewritten, indexes built, rows changed, with a verdict (safe, careful, dangerous, or failed) and concrete suggestions. " +
-			"Production is never touched, so use it freely before every migration. The first preview of a database restores a copy (minutes for large ones); later ones reuse it for an hour.",
+			"Production is never touched. The first preview of a database restores a copy (minutes for large ones); later ones reuse it for an hour. " +
+			"If the preview isn't done within wait_seconds, the result has its preview ID and status queued or running.",
 		Annotations: &sdk.ToolAnnotations{Title: "Preview a migration", ReadOnlyHint: true, OpenWorldHint: ptr(false)},
 		InputSchema: inputSchema[previewInput](func(p map[string]*jsonschema.Schema) {
 			p["wait_seconds"].Minimum, p["wait_seconds"].Maximum = ptr(0.0), ptr(t.opts.MaxWait.Seconds())
@@ -128,11 +129,11 @@ func (t *tools) addCopiesTools(s *sdk.Server) {
 	}, t.previewMigration)
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "create_safe_copy",
-		Description: "Make a safe copy: a masked copy of the database (emails, names, phones, addresses, secrets... replaced with realistic fakes on the database server, before it opens) " +
-			"that you can connect to with a connection string, to test queries and migrations against real-shaped data. It runs on the database server, not production; " +
-			"it is deleted by itself after 24 hours. It works when list_safe_copies says ready (restoring takes minutes for large databases). " +
-			"With a local rowsafe mcp it returns the connection string with a password made on this machine, once; Rowsafe never sees it. " +
-			"On the remote endpoint the copy starts without a password and the user sets one in the dashboard (password_url).",
+		Description: "Makes a safe copy: a masked copy of the database (emails, names, phones, addresses, secrets... replaced with realistic fakes on the database server, before it opens) " +
+			"that accepts connections with a connection string, for testing queries and migrations against real-shaped data. It runs on the database server and never changes production; " +
+			"it is deleted by itself after 24 hours (hours sets up to 168). It accepts connections once its status is ready (restoring takes minutes for large databases). " +
+			"With a local rowsafe mcp the result has the connection string with a password made on this machine, shown once; Rowsafe never sees it. " +
+			"On the remote endpoint the copy starts without a password and a person sets one in the dashboard (password_url).",
 		Annotations: writes("Create a safe copy", false, false),
 		InputSchema: inputSchema[safeCopyInput](func(p map[string]*jsonschema.Schema) {
 			p["hours"].Minimum, p["hours"].Maximum = ptr(0.0), ptr(168.0)
@@ -140,7 +141,7 @@ func (t *tools) addCopiesTools(s *sdk.Server) {
 	}, t.createSafeCopy)
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "delete_safe_copy",
-		Description: "Delete a safe copy you no longer need (frees disk on the database server). Never affects production.",
+		Description: "Deletes a safe copy (frees disk on the database server). Production is not affected.",
 		Annotations: writes("Delete a safe copy", true, true),
 	}, t.deleteSafeCopy)
 }

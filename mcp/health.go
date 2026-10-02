@@ -38,7 +38,7 @@ type Problem struct {
 	NextAction string `json:"next_action" jsonschema:"what to do, in order"`
 	Command    string `json:"command,omitempty" jsonschema:"the rowsafe CLI command (or host command) for the next action"`
 	Tool       string `json:"tool,omitempty" jsonschema:"the MCP tool that performs the next action, when there is one"`
-	TaskID     string `json:"task_id,omitempty" jsonschema:"task to inspect with get_task"`
+	TaskID     string `json:"task_id,omitempty" jsonschema:"the task behind the problem, when there is one"`
 	Runbook    string `json:"runbook,omitempty"`
 }
 
