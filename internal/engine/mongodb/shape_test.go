@@ -24,7 +24,7 @@ func TestShapeOf(t *testing.T) {
 	}
 	op2 := bson.M{"op": "query", "ns": "shop.orders", "command": bson.M{"find": "orders",
 		"filter": bson.M{"email": "bob@example.com", "total": bson.M{"$gt": 5}, "tags": bson.A{"x"}},
-		"sort": bson.D{{Key: "created", Value: int32(-1)}}, "limit": int64(50)}}
+		"sort":   bson.D{{Key: "created", Value: int32(-1)}}, "limit": int64(50)}}
 	if shapeID("shop", shapeOf(op2)) != shapeID("shop", got) {
 		t.Fatal("same shape, different ids")
 	}

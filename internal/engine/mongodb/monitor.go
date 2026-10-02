@@ -128,12 +128,18 @@ func (e *Engine) sample(ctx context.Context, m *dbMonitor, dm *protocol.Database
 		collect.MMongoNetInRate:      toFloat(lookup(ss, "network", "bytesIn")),
 		collect.MMongoNetOutRate:     toFloat(lookup(ss, "network", "bytesOut")),
 	}
+	if v := lookup(ss, "metrics", "operation", "writeConflicts"); v != nil {
+		counters[collect.MMongoWriteConflicts] = toFloat(v)
+	}
 	if m.prev != nil {
 		secs := now.Sub(m.prevAt).Seconds()
 		for k, v := range counters {
 			if p, ok := m.prev[k]; ok && secs > 0 && v >= p {
 				metrics[k] = (v - p) / secs
 			}
+		}
+		if v, ok := metrics[collect.MMongoWriteConflicts]; ok {
+			metrics[collect.MMongoWriteConflicts] = v * 60 // per minute
 		}
 	}
 	m.prev, m.prevAt = counters, now

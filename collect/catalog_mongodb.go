@@ -18,6 +18,7 @@ const (
 	MMongoResidentBytes  = "mongodb_resident_bytes"
 	MMongoNetInRate      = "mongodb_network_in_rate"
 	MMongoNetOutRate     = "mongodb_network_out_rate"
+	MMongoWriteConflicts = "mongodb_write_conflicts_per_min"
 )
 
 func init() {
@@ -35,5 +36,6 @@ func init() {
 		Metric{MMongoResidentBytes, ScopeDatabase, "B", "MongoDB: memory the server process uses"},
 		Metric{MMongoNetInRate, ScopeDatabase, "B/s", "MongoDB: bytes received from clients per second"},
 		Metric{MMongoNetOutRate, ScopeDatabase, "B/s", "MongoDB: bytes sent to clients per second"},
+		Metric{MMongoWriteConflicts, ScopeDatabase, "/min", "MongoDB: writes that collided with another write to the same document and were retried, per minute (writeConflicts)"},
 	)
 }
