@@ -243,9 +243,14 @@ func TestOptionFileAndAccount(t *testing.T) {
 		t.Errorf("missing file: %v", err)
 	}
 	for _, f := range []flavor{flavorMySQL, flavorMariaDB} {
-		stmts := strings.Join(accountSQL(f, "", pw), ";")
-		if strings.Contains(stmts, "SUPER") || strings.Contains(stmts, "ALL PRIVILEGES") || strings.Contains(stmts, "GRANT OPTION") {
-			t.Errorf("%s grants too much: %s", f, stmts)
+		for _, stmt := range accountSQL(f, "", pw) {
+			if strings.Contains(stmt, "SUPER") || strings.Contains(stmt, "ALL PRIVILEGES") || strings.Contains(stmt, "SYSTEM_VARIABLES") {
+				t.Errorf("%s grants too much: %s", f, stmt)
+			}
+			// Only Databases & users' rights may be passed on.
+			if strings.Contains(stmt, "GRANT OPTION") && stmt != "GRANT "+ownerPrivileges+", CREATE USER ON *.* TO 'rowsafe'@'localhost' WITH GRANT OPTION" {
+				t.Errorf("%s: %s", f, stmt)
+			}
 		}
 	}
 }
@@ -279,5 +284,23 @@ func TestRowHashAndKeys(t *testing.T) {
 	}
 	if encodeKey([]sql.RawBytes{sql.RawBytes("ab"), sql.RawBytes("c")}) == k {
 		t.Error("key collision")
+	}
+}
+
+func TestDBAdminHelpers(t *testing.T) {
+	if u := parseUser("app"); u != (dbaUser{"app", "%"}) || u.display() != "app" {
+		t.Error(u)
+	}
+	if u := parseUser("app@10.0.%"); u != (dbaUser{"app", "10.0.%"}) || u.display() != "app@10.0.%" || u.sql() != "'app'@'10.0.%'" {
+		t.Error(u)
+	}
+	for plugin, want := range map[string]string{"auth_socket": protocol.PasswordSocket, "mysql_native_password": protocol.PasswordWeak,
+		"caching_sha2_password": protocol.PasswordSet} {
+		if got := passwordKind(plugin, false); got != want {
+			t.Errorf("%s: %s", plugin, got)
+		}
+	}
+	if passwordKind("caching_sha2_password", true) != protocol.PasswordNone {
+		t.Error("empty")
 	}
 }

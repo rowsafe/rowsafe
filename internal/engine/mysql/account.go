@@ -36,7 +36,13 @@ import (
 //   - INSERT, UPDATE: bringing rows back from a copy, only when a person
 //     asks for it in the dashboard;
 //   - CONNECTION_ADMIN (MySQL) / CONNECTION ADMIN (MariaDB): ending a query
-//     or session that blocks others, only when a person applies that fix.
+//     or session that blocks others, only when a person applies that fix;
+//   - CREATE USER, the database-level privileges WITH GRANT OPTION (CREATE,
+//     DROP, ALTER, DELETE...): Databases & users, creating and removing
+//     databases and users and giving users access to databases, only when
+//     a person asks in the dashboard (dbadmin.go). The server's own
+//     accounts (root, mysql.*) are never changed: MySQL protects accounts
+//     with SYSTEM_USER from accounts without it.
 
 // AccountOptions describe how to create Rowsafe's account.
 type AccountOptions struct {
@@ -166,11 +172,13 @@ func accountSQL(f flavor, version, password string) []string {
 	if f.mariadb() {
 		grants = []string{
 			"GRANT SELECT, INSERT, UPDATE, SHOW VIEW, TRIGGER, RELOAD, PROCESS, LOCK TABLES, BINLOG MONITOR, CONNECTION ADMIN ON *.* TO " + user,
+			"GRANT " + ownerPrivileges + ", CREATE USER ON *.* TO " + user + " WITH GRANT OPTION",
 		}
 	} else {
 		grants = []string{
 			"GRANT SELECT, INSERT, UPDATE, SHOW VIEW, TRIGGER, RELOAD, PROCESS, LOCK TABLES, REPLICATION CLIENT ON *.* TO " + user,
 			"GRANT BACKUP_ADMIN, CONNECTION_ADMIN ON *.* TO " + user,
+			"GRANT " + ownerPrivileges + ", CREATE USER ON *.* TO " + user + " WITH GRANT OPTION",
 		}
 	}
 	_ = version
