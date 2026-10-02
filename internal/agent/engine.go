@@ -119,6 +119,9 @@ type EngineEnv struct {
 	// Notes takes side remarks for the person at the terminal during setup
 	// discover (servers skipped and why); io.Discard elsewhere.
 	Notes io.Writer
+	// Copies are the agent's safe copy helpers (copies_engine.go); nil
+	// outside the agent.
+	Copies *CopyTools
 }
 
 // RunLow runs a command at low CPU and IO priority (LowPriority).
@@ -211,7 +214,11 @@ func engineEnv(cfg Config, runner CommandRunner, log *slog.Logger, name string) 
 	}
 }
 
-func (a *Agent) engineEnv(name string) EngineEnv { return engineEnv(a.cfg, a.runner, a.log, name) }
+func (a *Agent) engineEnv(name string) EngineEnv {
+	env := engineEnv(a.cfg, a.runner, a.log, name)
+	env.Copies = a.copyTools()
+	return env
+}
 
 // unsupportedEngine is the error for a database whose engine this agent
 // doesn't have.

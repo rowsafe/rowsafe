@@ -359,6 +359,7 @@ func (a *Agent) copiesReport() *protocol.CopiesReport {
 	for _, c := range a.copyState().all() {
 		r.Copies = append(r.Copies, c.state())
 	}
+	r.Copies = append(r.Copies, a.engineCopyStates()...)
 	if !a.cfg.Sidecar() {
 		r.Addresses = copyAddresses()
 	}
@@ -372,6 +373,7 @@ func (a *Agent) onCopiesUpdate(ctx context.Context, u *protocol.CopiesUpdate) {
 	}
 	st := a.copyState()
 	st.setExpiries(u.Expires, time.Now())
+	a.engineCopiesUpdate(ctx, u) // copies_engine.go
 	for _, id := range u.Drop {
 		if !copyIDRE.MatchString(id) {
 			continue
