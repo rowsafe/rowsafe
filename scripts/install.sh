@@ -202,6 +202,7 @@ ALLOW_UPDATES=''   # --allow-updates / --no-allow-updates (PostgreSQL updates an
 ALLOW_SECURITY=''  # --allow-security-updates / --no-allow-security-updates
 ALLOW_REBOOT=''    # --allow-reboot / --no-allow-reboot
 SETUP_STOP=0       # the plan limit was reached: don't offer more databases
+MONGODB_STANDBY='' # --mongodb-standby (yes): Rowsafe may make this MongoDB part of a standby pair
 M_CLONES=''        # --mongodb-clones (yes): this (empty) MongoDB may receive clones
 CH_CLONES=''       # --clickhouse-clones (yes): this (empty) ClickHouse may receive clones
 MYSQL_STANDBY=''   # --mysql-standby (yes) / --no-mysql-standby (no); '' = ask once, on a terminal
@@ -305,6 +306,11 @@ Options (when piping, pass them after `sh -s --`):
                          when someone adds, promotes or removes a standby and confirms);
                          an empty server can then become another server's standby
   --no-mysql-standby     don't
+  --mongodb-standby      MongoDB: let Rowsafe set up standby servers with this server:
+                         its user gets clusterManager, and root's helper may hand out
+                         the replica set's key file and add replSetName, keyFile and
+                         an address to mongod.conf (a copy kept); restarts stay the
+                         ones a person confirms (needs --allow-restart)
   --mongodb-clones       MongoDB: keep an empty server ready to receive clones of a
                          database from another server (Rowsafe's user there gets the
                          restore role)
@@ -6794,10 +6800,14 @@ setup_databases() {
       *)
         note "Found $(cluster_desc)"
         if [ "$C_ENGINE" = mongodb ] && [ "$C_DBS" = - ] &&
-          { [ "$M_CLONES" = yes ] || { [ "$TTY" = 1 ] && confirm "It has no databases. Keep it empty, ready to receive clones of a MongoDB database from another server?" n; }; }; then
+          { [ "$M_CLONES" = yes ] || [ "$MONGODB_STANDBY" = yes ] ||
+            { [ "$TTY" = 1 ] && confirm "It has no databases. Keep it empty, ready to become another server's standby or to receive clones?" n && MONGODB_STANDBY=yes; }; }; then
           M_CLONES=yes
-          if mongodb_prepare; then
-            ok "MongoDB on port $C_PORT is ready to receive clones: pick this server when you fork a MongoDB database in the dashboard"
+          # No replica set of its own: a standby joins the primary's set.
+          M_ADMIN='' M_ADMIN_PW=''
+          if mongodb_status && mongodb_login; then
+            [ "$MONGODB_STANDBY" != yes ] || mongodb_standby_allow || true
+            ok "MongoDB on port $C_PORT is ready to receive clones${MONGODB_STANDBY:+ or become a standby}: pick this server in the dashboard"
           fi
           continue
         fi
@@ -7213,16 +7223,16 @@ mongodb_as_admin() {
 
 # mongodb_login creates Rowsafe's MongoDB user.
 mongodb_login() {
-  [ "$M_LOGIN" = ok ] && [ -z "$M_CLONES" ] && return 0
+  [ "$M_LOGIN" = ok ] && [ -z "$M_CLONES" ] && [ -z "$MONGODB_STANDBY" ] && return 0
   _rc=0
-  mongodb_as_admin login ${M_CLONES:+--clones} >"$TMP/mlogin" 2>&1 || _rc=$?
+  mongodb_as_admin login ${M_CLONES:+--clones} ${MONGODB_STANDBY:+--standby} >"$TMP/mlogin" 2>&1 || _rc=$?
   while [ "$_rc" = 11 ] || [ "$_rc" = 12 ]; do
     [ "$_rc" = 12 ] && { tty_bad "MongoDB refused that login."; M_ADMIN=''; }
     [ "$_rc" = 11 ] && [ -n "$M_ADMIN" ] && { tty_bad "That user can't create users."; M_ADMIN=''; }
     mongodb_admin || { warn "MongoDB has access control on: set ROWSAFE_MONGODB_ADMIN_USER and ROWSAFE_MONGODB_ADMIN_PASSWORD (used once, never saved), or run the installer on a terminal"; return 1; }
     [ -n "${ROWSAFE_MONGODB_ADMIN_USER:-}" ] && [ "$_rc" = 12 ] && return 1
     _rc=0
-    mongodb_as_admin login ${M_CLONES:+--clones} >"$TMP/mlogin" 2>&1 || _rc=$?
+    mongodb_as_admin login ${M_CLONES:+--clones} ${MONGODB_STANDBY:+--standby} >"$TMP/mlogin" 2>&1 || _rc=$?
   done
   sed 's/^/    /' "$TMP/mlogin"
   [ "$_rc" = 0 ]
@@ -7284,6 +7294,28 @@ mongodb_replset() {
   ok "MongoDB on port $C_PORT is now a single-member replica set"
 }
 
+MONGODB_STANDBY_ALLOW_FILE=$CONFIG_DIR/mongodb-standby-allowed
+
+# mongodb_standby_allow lists the MongoDB on C_PORT in the standby allow
+# list ("PORT UNIT CONFIG"): root's helper may then hand out its replica
+# set key file, or add replSetName, keyFile and an address to its
+# configuration (keeping a copy). It restarts nothing by itself.
+mongodb_standby_allow() {
+  if [ -z "$M_CONFIG" ] || [ "$M_CONFIG" = - ] || [ ! -f "$M_CONFIG" ] || [ -z "$M_UNIT" ]; then
+    warn "MongoDB on port $C_PORT isn't started from a configuration file by a systemd unit the installer knows, so standby servers stay off for it"
+    return 1
+  fi
+  {
+    echo "# MongoDB servers Rowsafe may make part of a standby pair (written by the installer, root's)."
+    echo "# PORT UNIT CONFIG"
+    grep -s '^[0-9]' "$MONGODB_STANDBY_ALLOW_FILE" | awk -v p="$C_PORT" '$1 != p'
+    echo "$C_PORT $M_UNIT $M_CONFIG"
+  } >"$TMP/mstandby"
+  write_file "$MONGODB_STANDBY_ALLOW_FILE" 0644 root:root <"$TMP/mstandby" || true
+  restart_allowed "$C_PORT" || warn "standby servers also need Rowsafe to restart MongoDB here when someone confirms: run the installer with --allow-restart"
+  perm_ok "Rowsafe may set up standby servers with MongoDB on port $C_PORT (it restarts it only when someone confirms)"
+}
+
 # mongodb_prepare gets a MongoDB server ready for its plan. Interactive
 # unless unattended=1 (then it never restarts without --mongodb-replica-set).
 mongodb_prepare() {
@@ -7313,6 +7345,7 @@ mongodb_prepare() {
     mongodb_replset || return 1
   fi
   mongodb_login || return 1
+  [ "$MONGODB_STANDBY" != yes ] || mongodb_standby_allow || true
 }
 
 # ---------------------------------------------------------------- ClickHouse
@@ -7719,6 +7752,7 @@ main() {
       --mysql-standby) MYSQL_STANDBY=yes ;;
       --clickhouse-clones) CH_CLONES=yes ;;
       --mongodb-clones) M_CLONES=yes ;;
+      --mongodb-standby) MONGODB_STANDBY=yes ;;
       --no-mysql-standby) MYSQL_STANDBY=no ;;
       --mongodb-replica-set) MONGODB_REPLSET=yes ;;
       --no-mongodb-replica-set) MONGODB_REPLSET=no ;;

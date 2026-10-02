@@ -176,6 +176,14 @@ func CreateLogin(ctx context.Context, env agent.EngineEnv, port int, adminUser, 
 // CreateLoginWith is CreateLogin; with clones the user also gets the
 // restore role, so the (empty) server can receive clones.
 func CreateLoginWith(ctx context.Context, env agent.EngineEnv, port int, adminUser, adminPassword string, clones bool) ([]string, error) {
+	return CreateLoginRoles(ctx, env, port, adminUser, adminPassword, clones, false)
+}
+
+// CreateLoginRoles is CreateLogin with the extra roles root allowed: the
+// restore role (clones, moving in) and clusterManager (standby servers:
+// adding a member to the replica set, stepping down and reconfiguring a
+// fenced old primary, promoting).
+func CreateLoginRoles(ctx context.Context, env agent.EngineEnv, port int, adminUser, adminPassword string, clones, standby bool) ([]string, error) {
 	c, err := adminClient(ctx, port, adminUser, adminPassword)
 	if err != nil {
 		return nil, err
@@ -196,6 +204,10 @@ func CreateLoginWith(ctx context.Context, env agent.EngineEnv, port int, adminUs
 	if clones {
 		roles = append(roles, bson.D{{Key: "role", Value: "restore"}, {Key: "db", Value: "admin"}})
 		names = append(names, "restore")
+	}
+	if standby {
+		roles = append(roles, bson.D{{Key: "role", Value: "clusterManager"}, {Key: "db", Value: "admin"}})
+		names = append(names, "clusterManager")
 	}
 	// A role of its own for what Rowsafe does beyond reading: write a Mark
 	// into the oplog, stop an operation you ask it to stop, put documents
