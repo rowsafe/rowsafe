@@ -3,6 +3,7 @@ package protocol
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"math"
 	"regexp"
 	"slices"
@@ -136,6 +137,34 @@ func (s IndexSpec) Definition() string {
 		b.WriteString(" WHERE " + p)
 	}
 	return b.String()
+}
+
+// DefinitionFor is the statement that creates the index on engine: the
+// online form each engine has ("" or PostgreSQL: Definition).
+func (s IndexSpec) DefinitionFor(engine string) string {
+	switch NormalizeEngine(engine) {
+	case EngineMySQL, EngineMariaDB:
+		q := func(x string) string { return "`" + strings.ReplaceAll(x, "`", "``") + "`" }
+		cols := make([]string, len(s.Columns))
+		for i, c := range s.Columns {
+			cols[i] = q(c)
+			if slices.Contains(s.Descending, c) {
+				cols[i] += " DESC"
+			}
+		}
+		return fmt.Sprintf("CREATE INDEX %s ON %s.%s (%s) ALGORITHM=INPLACE LOCK=NONE", q(s.Name), q(s.DB), q(s.Table), strings.Join(cols, ", "))
+	case EngineMongoDB:
+		keys := make([]string, len(s.Columns))
+		for i, c := range s.Columns {
+			dir := 1
+			if slices.Contains(s.Descending, c) {
+				dir = -1
+			}
+			keys[i] = fmt.Sprintf("%q: %d", c, dir)
+		}
+		return fmt.Sprintf("db.getSiblingDB(%q).getCollection(%q).createIndex({%s}, {name: %q})", s.DB, s.Table, strings.Join(keys, ", "), s.Name)
+	}
+	return s.Definition()
 }
 
 var bareIdentRE = regexp.MustCompile(`^[a-z_][a-z0-9_$]*$`)
