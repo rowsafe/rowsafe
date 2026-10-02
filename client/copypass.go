@@ -35,13 +35,14 @@ func NewCopyPasswordFor(engine string) (password, verifier string, err error) {
 func CopyVerifier(engine, password string) (string, error) {
 	switch protocol.NormalizeEngine(engine) {
 	case protocol.EnginePostgreSQL, protocol.EngineMongoDB:
-		salt := make([]byte, 16)
+		salt, iterations := make([]byte, 16), 4096
+		if protocol.NormalizeEngine(engine) == protocol.EngineMongoDB {
+			// MongoDB's own: 15000 iterations (at least 5000) and a 28-byte
+			// salt, the only size it accepts for SCRAM-SHA-256.
+			salt, iterations = make([]byte, 28), 15000
+		}
 		if _, err := rand.Read(salt); err != nil {
 			return "", err
-		}
-		iterations := 4096
-		if protocol.NormalizeEngine(engine) == protocol.EngineMongoDB {
-			iterations = 15000 // MongoDB's default (its minimum is 5000)
 		}
 		return SCRAMVerifier(password, salt, iterations)
 	case protocol.EngineMySQL:

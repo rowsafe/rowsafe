@@ -566,8 +566,8 @@ func ValidPasswordVerifier(s string) bool { return passwordVerifierRE.MatchStrin
 //
 //   - PostgreSQL: a SCRAM-SHA-256 verifier (ValidPasswordVerifier).
 //   - MongoDB: the same SCRAM-SHA-256 verifier, at least 5000 iterations
-//     (MongoDB's minimum); the agent turns it into SCRAM-SHA-256
-//     credentials.
+//     (MongoDB's minimum) and a 28-byte salt (the only size it takes); the
+//     agent turns it into SCRAM-SHA-256 credentials.
 //   - MySQL: a caching_sha2_password hash: $A$005$ + 20 salt characters +
 //     43 SHA-256-crypt characters (5000 rounds), the salt from ./0-9A-Za-z.
 //   - MariaDB: a mysql_native_password hash: * + 40 uppercase hex digits of
@@ -581,7 +581,7 @@ var (
 	mysqlVerifierRE      = regexp.MustCompile(`^\$A\$005\$[./0-9A-Za-z]{63}$`)
 	mariadbVerifierRE    = regexp.MustCompile(`^\*[0-9A-F]{40}$`)
 	clickhouseVerifierRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	scramIterationsRE    = regexp.MustCompile(`^SCRAM-SHA-256\$([0-9]+):`)
+	scramIterationsRE    = regexp.MustCompile(`^SCRAM-SHA-256\$([0-9]+):([A-Za-z0-9+/=]+)\$`)
 )
 
 // ValidCopyVerifier reports whether s is a safe copy password verifier in
@@ -596,7 +596,7 @@ func ValidCopyVerifier(engine, s string) bool {
 		}
 		m := scramIterationsRE.FindStringSubmatch(s)
 		n, err := strconv.Atoi(m[1])
-		return err == nil && n >= 5000
+		return err == nil && n >= 5000 && len(m[2]) == 40 // a 28-byte salt, the only size MongoDB takes
 	case EngineMySQL:
 		return mysqlVerifierRE.MatchString(s)
 	case EngineMariaDB:
@@ -611,7 +611,7 @@ func ValidCopyVerifier(engine, s string) bool {
 func CopyVerifierForm(engine string) string {
 	switch NormalizeEngine(engine) {
 	case EngineMongoDB:
-		return "a SCRAM-SHA-256 verifier with at least 5000 iterations (SCRAM-SHA-256$15000:salt$StoredKey:ServerKey)"
+		return "a SCRAM-SHA-256 verifier with at least 5000 iterations and a 28-byte salt (SCRAM-SHA-256$15000:salt$StoredKey:ServerKey)"
 	case EngineMySQL:
 		return "a caching_sha2_password hash ($A$005$ + 20 salt characters + 43 hash characters)"
 	case EngineMariaDB:

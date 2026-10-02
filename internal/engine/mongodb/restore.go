@@ -115,6 +115,9 @@ func (s scratch) start(ctx context.Context, env agent.EngineEnv) (*mongo.Client,
 		}
 		net = append(bind, "--nounixsocket", "--port", strconv.Itoa(o.Port), "--auth",
 			"--tlsMode", "requireTLS", "--tlsCertificateKeyFile", filepath.Join(s.Dir, "server.pem"),
+			// MongoDB 8 wants a chain of trust even when clients bring no
+			// certificate: the copy's own certificate.
+			"--tlsCAFile", filepath.Join(s.Dir, "server.crt"), "--tlsAllowConnectionsWithoutCertificates",
 			"--tlsDisabledProtocols", "TLS1_0,TLS1_1", "--maxConns", "40")
 	}
 	args := []string{

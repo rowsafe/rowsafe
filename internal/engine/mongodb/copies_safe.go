@@ -394,6 +394,11 @@ func (e *Engine) SetCopyPassword(ctx context.Context, env agent.EngineEnv, p pro
 		return true
 	}
 	defer disconnect(c)
+	// Merging adds users but doesn't replace one: drop the old login first.
+	if err := c.Database("admin").RunCommand(ctx, bson.D{{Key: "dropUser", Value: r.Role}}).Err(); err != nil && !strings.Contains(err.Error(), "not found") {
+		env.Log.Error("setting a copy's password failed", "copy_id", p.ID, "err", err)
+		return true
+	}
 	if err := mergeUsers(ctx, c, []bson.D{u}, false); err != nil {
 		env.Log.Error("setting a copy's password failed", "copy_id", p.ID, "err", err)
 		return true
