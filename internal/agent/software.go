@@ -138,7 +138,8 @@ func (a *Agent) updateHelperActions() []string {
 
 func (a *Agent) buildSoftware(ctx context.Context) *protocol.SoftwareReport {
 	r := &protocol.SoftwareReport{CheckedAt: time.Now().UTC()}
-	if a.cfg.Sidecar() {
+	if a.cfg.Container() {
+		r.Container = true // the image's packages aren't the server's
 		return r
 	}
 	r.Allowed = a.updateAllowed()
