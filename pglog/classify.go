@@ -38,6 +38,9 @@ var (
 // it), and reads the client address out of the message when the prefix
 // had none.
 func Classify(e *Entry) {
+	if e.Kind != "" { // the other engines' parsers classify as they parse (engines.go)
+		return
+	}
 	msg := e.Message
 	switch {
 	case e.SQLState == "40P01" || strings.HasPrefix(msg, "deadlock detected"):
