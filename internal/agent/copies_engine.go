@@ -78,7 +78,9 @@ func (t *CopyTools) Cert(dir string, hosts []string) (string, bool, error) {
 
 // Expiry is a copy's expiry time for a requested one (default 24 hours,
 // at most 7 days).
-func (t *CopyTools) Expiry(requested time.Time) time.Time { return copyExpiry(requested, time.Now().UTC()) }
+func (t *CopyTools) Expiry(requested time.Time) time.Time {
+	return copyExpiry(requested, time.Now().UTC())
+}
 
 // MaskKey is the host's masking key (the same email is masked the same
 // way in every copy of every engine).
