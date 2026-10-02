@@ -111,6 +111,9 @@ func (s *Store) SetHTTPClient(c *http.Client) { s.http = c }
 // SetScheme is for tests against a plain-HTTP server: "http" or "https".
 func (s *Store) SetScheme(scheme string) { s.scheme = scheme }
 
+// FullKey is key's name in the bucket (with the Store's folder).
+func (s *Store) FullKey(key string) string { return s.fullKey(key) }
+
 func (s *Store) fullKey(key string) string {
 	key = strings.TrimLeft(key, "/")
 	if s.prefix == "" {

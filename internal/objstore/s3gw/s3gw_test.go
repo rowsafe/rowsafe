@@ -779,3 +779,39 @@ func (w lineWriter) Write(p []byte) (int, error) {
 	w(string(p))
 	return len(p), nil
 }
+
+// A key whose encrypted name would be over S3's 1,024 bytes is refused
+// up front, in plain words, and never sent to the bucket.
+func TestKeyTooLongOnceStored(t *testing.T) {
+	e := newEnv(t, nil)
+	var mu sync.Mutex
+	sent := 0
+	e.bucket.Fail = func(r *http.Request) int {
+		mu.Lock()
+		sent++
+		mu.Unlock()
+		return 0
+	}
+	ctx := context.Background()
+	ok := "backup/" + strings.Repeat("a", 500)
+	if _, err := e.client.Put(ctx, ok, bytes.NewReader([]byte("x"))); err != nil {
+		t.Fatalf("a 500-byte key: %v", err)
+	}
+	mu.Lock()
+	sent = 0
+	mu.Unlock()
+	long := "backup/data/" + strings.Repeat("t", 760) + "/data.bin"
+	if len(long) > 1024 {
+		t.Fatal("the test key must fit S3 before encryption")
+	}
+	_, err := e.client.Put(ctx, long, bytes.NewReader(payload(300<<10)))
+	var se *objstore.S3Error
+	if !errors.As(err, &se) || se.Code != "KeyTooLongError" || !strings.Contains(err.Error(), "too long to store") {
+		t.Fatalf("a key too long once encrypted: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if sent != 0 {
+		t.Fatalf("%d requests reached the bucket", sent)
+	}
+}

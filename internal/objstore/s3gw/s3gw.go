@@ -384,6 +384,11 @@ func (g *Gateway) serve(q *request) error {
 	if err := g.checkKey(key); err != nil {
 		return err
 	}
+	if write {
+		if err := g.checkStoredLen(key); err != nil {
+			return err
+		}
+	}
 	q.key = key
 	uploadID := query.Get("uploadId")
 	switch r.Method {
@@ -449,6 +454,24 @@ func (g *Gateway) checkKey(key string) error {
 	}
 	if !g.allowed(key) {
 		return accessDenied("the key %q is outside the folders this gateway serves", key)
+	}
+	return nil
+}
+
+// maxStoredKey is S3's limit on a key.
+const maxStoredKey = 1024
+
+// checkStoredLen refuses, before anything is sent, a key whose stored name
+// (encrypted, which makes it longer, under the bucket's folder) is over S3's
+// limit: the bucket would refuse it on every retry.
+func (g *Gateway) checkStoredLen(key string) error {
+	if n := len(g.cfg.Store.FullKey(g.stored(key))); n > maxStoredKey {
+		if len(key) > 120 {
+			key = key[:60] + "..." + key[len(key)-40:]
+		}
+		return errf(http.StatusBadRequest, "KeyTooLongError", "the file name %q is too long to store: encrypted and in your "+
+			"bucket's folder it would be %d bytes, over the 1,024 bytes S3 allows (shorter database or table names, or a shorter "+
+			"bucket path, fix it)", key, n)
 	}
 	return nil
 }
