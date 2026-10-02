@@ -62,6 +62,19 @@ gh attestation verify oci://ghcr.io/rowsafe/agent:1.2.3-pg17 --repo rowsafe/rows
 The floating tags (`pg17`, `pg17-alpine`, `docker-control:latest`) point to
 the same signed images as the newest release's exact tags.
 
+Each release also publishes `images.json`: the digest of every agent image
+(`pg14` to `pg18`, with and without `-alpine`), listed only after cosign
+verified it as built by this workflow at this tag, and signed with the same
+Ed25519 release key (`images.json.sig`). `rowsafe-docker-control` checks that
+signature with the key compiled into it before it updates an agent container
+("Update now" for Docker sidecars), and pulls only those digests:
+
+```sh
+curl -fsSLO https://releases.rowsafe.sh/agent/1.2.3/images.json
+curl -fsSLO https://releases.rowsafe.sh/agent/1.2.3/images.json.sig
+rowsafe-release verify-images --public-key <RELEASE_PUBLIC_KEY> images.json images.json.sig
+```
+
 ## 5. Rebuild it yourself
 
 Release builds are reproducible: CGO is off, paths are trimmed, there is no VCS stamp or build ID, and the Go toolchain is pinned in `go.mod`.

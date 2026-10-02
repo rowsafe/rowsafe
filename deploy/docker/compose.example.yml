@@ -14,6 +14,8 @@
 #
 # Update the agent (PostgreSQL keeps running):
 #   docker compose pull rowsafe-agent && docker compose up -d rowsafe-agent
+# or click Update now in the dashboard, with ROWSAFE_CONTROL_ALLOW_AGENT_UPDATE
+# on rowsafe-docker-control below.
 # A plain `docker compose pull` also pulls a newer postgres:17 if there is
 # one, and `up -d` then restarts PostgreSQL to use it.
 #
@@ -102,6 +104,12 @@ services:
   #     - postgres
   #   environment:
   #     ROWSAFE_CONTROL_SERVICE: postgres   # the name of your PostgreSQL service above
+  #     # Optional: "Update now" in the dashboard also updates the agent: this
+  #     # service pulls the release's signed ghcr.io/rowsafe/agent image and
+  #     # recreates only the rowsafe-agent container (the old one comes back
+  #     # if the new one doesn't start).
+  #     # ROWSAFE_CONTROL_ALLOW_AGENT_UPDATE: "1"
+  #     # ROWSAFE_CONTROL_AGENT_SERVICE: rowsafe-agent   # the agent's service name
   #   volumes:
   #     - /var/run/docker.sock:/var/run/docker.sock
   #     - rowsafe-control:/run/rowsafe-control

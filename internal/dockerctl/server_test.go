@@ -26,6 +26,7 @@ type fakeDocker struct {
 	mu    sync.Mutex
 	ctrs  map[string]*containerJSON
 	calls []string
+	agent fakeAgentAPI // agent_update_test.go
 }
 
 func cid(n int) string { return fmt.Sprintf("%064x", n) }
@@ -107,7 +108,7 @@ func (f *fakeDocker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(`{"message":"No such container"}`))
 			return
 		}
-		_ = json.NewEncoder(w).Encode(c)
+		f.encodeContainer(w, c)
 	case r.Method == http.MethodPost && lifecyclePath.MatchString(r.URL.Path):
 		m := lifecyclePath.FindStringSubmatch(r.URL.Path)
 		c := f.ctrs[m[1]]
@@ -117,14 +118,16 @@ func (f *fakeDocker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		switch m[2] {
 		case "stop":
-			if r.URL.Query().Get("t") != "120" {
+			if c.Config.Labels[labelService] == "postgres" && r.URL.Query().Get("t") != "120" {
 				f.t.Errorf("stop without the configured timeout: %s", r.URL.RawQuery)
 			}
 			c.State.Status = "exited"
 		case "start", "restart":
 			c.State.Status = "running"
+			f.agent.started(f, c)
 		}
 		w.WriteHeader(http.StatusNoContent)
+	case f.agent.serve(f, w, r):
 	default:
 		f.t.Errorf("unexpected Docker API call %s %s", r.Method, r.URL)
 		w.WriteHeader(http.StatusForbidden)

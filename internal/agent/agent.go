@@ -34,6 +34,8 @@ type Agent struct {
 	client *controlClient
 
 	updater *Updater // nil when self-update is unavailable
+	// ctrUpd: a Docker sidecar's container update (container_update.go).
+	ctrUpd containerUpdateState
 
 	// pusher moves spooled WAL to the repository (docker-sidecar mode only).
 	pusher *spoolPusher
@@ -242,6 +244,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			return ack, a.client.post(ctx, "/v1/agent/logs", b, &ack)
 		}})
 
+	a.finishContainerUpdate(ctx) // container_update.go: before any other work
 	backoff := a.cfg.PollInterval
 	for {
 		// Updates only happen here, between tasks, so a backup or drill is
@@ -394,7 +397,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 	for {
 		req := protocol.HeartbeatRequest{
 			Hostname: hostname, AgentVersion: Version, Platform: release.Platform(),
-			Archivers: a.archiverStats(ctx), Update: a.updater.Report(), Mode: a.cfg.Mode,
+			Archivers: a.archiverStats(ctx), Update: a.updateReport(), Mode: a.cfg.Mode, // container_update.go
 			RestartPorts: a.restartPorts(), RestartActions: a.helperActions(),
 			PermissionsHeartbeat: a.permissionsHeartbeat(), Rewinds: append(a.rewindState().states(), a.engineRewindStates()...), // permissions.go, before Software (a changed allow list refreshes it)
 			Storage: a.storageReports(), SecondCopies: a.secondCopyStatuses(),
@@ -440,6 +443,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 				}(resp.Databases)
 			}
 			a.updater.OnHeartbeat(resp.Update)
+			a.ctrUpd.heartbeatOK() // container_update.go
 			a.rewindState().setExpiries(resp.RewindExpires, time.Now())
 			a.setEngineRewindExpiries(resp.RewindExpires)
 			a.onCopiesUpdate(ctx, resp.Copies)
@@ -514,6 +518,10 @@ func (a *Agent) execute(ctx context.Context, task *protocol.Task, persist bool) 
 	defer cancel()
 	tl := &taskLog{}
 	result, err := a.runTask(tctx, task, tl)
+	if errors.Is(err, errHandedOver) && ctx.Err() != nil { // container_update.go: the next agent reports it
+		log.Info("stopped while the agent's container is replaced; the next agent reports the task")
+		return
+	}
 
 	secrets := a.secretValues() // taskerror.go
 	req := protocol.CompleteRequest{Status: protocol.StatusSucceeded, Log: protocol.Redact(tl.String(), secrets...)}
@@ -634,6 +642,10 @@ func (a *Agent) reportInterrupted(ctx context.Context) {
 		Status: protocol.StatusFailed,
 		Error: fmt.Sprintf("the agent stopped while this %s task was running (started %s): crash, kill or reboot; %s",
 			t.Type, t.StartedAt.Format(time.RFC3339), cleanup),
+	}
+	if t.Report == nil && t.Type == protocol.TaskAgentContainerUpdate {
+		a.ctrUpd.pending = &t // container_update.go: finished once the heartbeat runs
+		return
 	}
 	if t.Report != nil {
 		req = *t.Report

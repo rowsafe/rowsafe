@@ -1,6 +1,7 @@
 package dockerctl
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,12 +17,15 @@ import (
 
 // engine is a minimal Docker Engine API client over the Docker socket.
 //
-// AUDIT: these five methods are the only requests this program ever sends
-// to Docker. Every container reference in a URL is either a full 64-hex
-// container ID that Docker itself returned, or a name from this service's
-// own configuration checked against nameRE; nothing from a request reaches
-// a URL. Paths are unversioned (the daemon's current API version): the few
-// fields read below have been stable since API 1.24.
+// AUDIT: the methods of engine (here and in engine_agent.go) are the only
+// requests this program ever sends to Docker. Every container reference in
+// a URL is either a full 64-hex container ID that Docker itself returned, or
+// a name from this service's own configuration (or derived from one) checked
+// against nameRE; every image reference is the hard-coded
+// agentimages.Repository with a digest checked against its pattern, or an
+// image ID Docker returned. Nothing from a request reaches a URL as is.
+// Paths are unversioned (the daemon's current API version): the fields read
+// below have been stable since API 1.24.
 type engine struct {
 	hc *http.Client
 }
@@ -47,7 +51,8 @@ func newEngine(socket string) *engine {
 // containerJSON is the part of GET /containers/{id}/json this service reads.
 type containerJSON struct {
 	ID    string `json:"Id"`
-	Name  string `json:"Name"` // "/myapp-postgres-1"
+	Name  string `json:"Name"`  // "/myapp-postgres-1"
+	Image string `json:"Image"` // the image ID, "sha256:..."
 	State struct {
 		Status    string `json:"Status"`
 		ExitCode  int    `json:"ExitCode"`
@@ -58,6 +63,7 @@ type containerJSON struct {
 	} `json:"State"`
 	Config struct {
 		Labels map[string]string `json:"Labels"`
+		Image  string            `json:"Image"` // as created: "ghcr.io/rowsafe/agent:pg17"
 	} `json:"Config"`
 }
 
@@ -74,23 +80,35 @@ type errNotFound struct{ ref string }
 func (e errNotFound) Error() string { return "no such container: " + e.ref }
 
 func (e *engine) do(ctx context.Context, method, path string, q url.Values, timeout time.Duration) (int, []byte, error) {
+	return e.doBody(ctx, method, path, q, nil, timeout)
+}
+
+// doBody is do with a JSON request body.
+func (e *engine) doBody(ctx context.Context, method, path string, q url.Values, body []byte, timeout time.Duration) (int, []byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	u := "http://docker" + path
 	if len(q) > 0 {
 		u += "?" + q.Encode()
 	}
-	req, err := http.NewRequestWithContext(ctx, method, u, nil)
+	var rd io.Reader
+	if body != nil {
+		rd = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, u, rd)
 	if err != nil {
 		return 0, nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	res, err := e.hc.Do(req)
 	if err != nil {
 		return 0, nil, fmt.Errorf("Docker API: %w", err)
 	}
 	defer res.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(res.Body, 4<<20))
-	return res.StatusCode, body, err
+	out, err := io.ReadAll(io.LimitReader(res.Body, 4<<20))
+	return res.StatusCode, out, err
 }
 
 // dockerMessage is Docker's error body ({"message": "..."}), or the status.
@@ -109,28 +127,35 @@ func validRef(ref string) bool { return containerIDRE.MatchString(ref) || nameRE
 
 // inspect: GET /containers/{ref}/json.
 func (e *engine) inspect(ctx context.Context, ref string) (containerJSON, error) {
+	c, _, err := e.inspectRaw(ctx, ref)
+	return c, err
+}
+
+// inspectRaw is inspect, with Docker's whole answer (the agent update copies
+// the container's configuration from it).
+func (e *engine) inspectRaw(ctx context.Context, ref string) (containerJSON, []byte, error) {
 	var c containerJSON
 	if !validRef(ref) {
-		return c, fmt.Errorf("refusing container reference %q", ref)
+		return c, nil, fmt.Errorf("refusing container reference %q", ref)
 	}
 	status, body, err := e.do(ctx, http.MethodGet, "/containers/"+ref+"/json", nil, 30*time.Second)
 	if err != nil {
-		return c, err
+		return c, nil, err
 	}
 	switch status {
 	case http.StatusOK:
 	case http.StatusNotFound:
-		return c, errNotFound{ref}
+		return c, nil, errNotFound{ref}
 	default:
-		return c, fmt.Errorf("inspecting the container: %s", dockerMessage(status, body))
+		return c, nil, fmt.Errorf("inspecting the container: %s", dockerMessage(status, body))
 	}
 	if err := json.Unmarshal(body, &c); err != nil {
-		return c, fmt.Errorf("reading Docker's answer: %w", err)
+		return c, nil, fmt.Errorf("reading Docker's answer: %w", err)
 	}
 	if !containerIDRE.MatchString(c.ID) {
-		return c, fmt.Errorf("unexpected container ID %q from Docker", c.ID)
+		return c, nil, fmt.Errorf("unexpected container ID %q from Docker", c.ID)
 	}
-	return c, nil
+	return c, body, nil
 }
 
 // listByLabels: GET /containers/json?all=1 filtered by labels (key=value).
