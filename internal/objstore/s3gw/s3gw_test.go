@@ -677,3 +677,44 @@ func TestContextEndStopsGateway(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestRetriedPutJoinsUpload(t *testing.T) {
+	e := newEnv(t, nil)
+	s := e.signer()
+	var mu sync.Mutex
+	puts := 0
+	e.bucket.Fail = func(r *http.Request) int {
+		if r.Method == http.MethodPut {
+			mu.Lock()
+			puts++
+			mu.Unlock()
+			time.Sleep(time.Second) // a slow bucket
+		}
+		return 0
+	}
+	data := payload(10 << 10)
+	md := md5.Sum(data) //nolint:gosec // test
+	put := func(timeout time.Duration) (*http.Response, error) {
+		req, _ := http.NewRequest(http.MethodPut, e.gw.Endpoint("backup/slow"), bytes.NewReader(data))
+		req.Header.Set("Content-MD5", base64.StdEncoding.EncodeToString(md[:]))
+		s.sign(req, sha(data))
+		return (&http.Client{Timeout: timeout}).Do(req)
+	}
+	// ClickHouse gives up on the first attempt, then sends it again.
+	if _, err := put(200 * time.Millisecond); err == nil {
+		t.Fatal("the first attempt should time out")
+	}
+	resp, err := put(10 * time.Second)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("retry: %v %v", resp, err)
+	}
+	resp.Body.Close()
+	mu.Lock()
+	n := puts
+	mu.Unlock()
+	if n != 1 {
+		t.Fatalf("the object was stored %d times", n)
+	}
+	e.bucket.Fail = nil
+	e.checkBucket(map[string][]byte{"backup/slow": data})
+}

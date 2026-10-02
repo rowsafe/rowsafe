@@ -14,14 +14,15 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rowsafe/rowsafe/internal/objstore"
 )
 
 // seal stores what src yields, sealed, at key. Nothing is stored unless src
-// reads to EOF.
-func (g *Gateway) seal(ctx context.Context, key string, src io.Reader) (plain, stored int64, err error) {
+// reads to EOF; received is called once it has.
+func (g *Gateway) seal(ctx context.Context, key string, src io.Reader, received func()) (plain, stored int64, err error) {
 	g.heads.forget(key)
 	defer g.heads.forget(key)
 	pr, pw := io.Pipe()
@@ -40,6 +41,9 @@ func (g *Gateway) seal(ctx context.Context, key string, src io.Reader) (plain, s
 	if err == nil {
 		plain, err = io.Copy(sw, src)
 		if err == nil {
+			if received != nil {
+				received()
+			}
 			err = sw.Close()
 		}
 	}
@@ -61,19 +65,65 @@ func cmpErr(err, otherwise error) error {
 	return otherwise
 }
 
+// pendingPut is a PutObject being stored. ClickHouse stops waiting for an
+// answer after a few seconds on its first attempt and sends the object
+// again; once the whole body has arrived the upload goes on without it, and
+// the retry (same key, same Content-MD5) waits for that upload instead of
+// storing the object a second time.
+type pendingPut struct {
+	md5      string
+	received atomic.Bool // the whole body arrived
+	done     chan struct{}
+	err      error
+	etag     string
+}
+
 func (g *Gateway) putObject(q *request) error {
 	b, err := q.body()
 	if err != nil {
 		return err
 	}
-	plain, stored, err := g.seal(q.r.Context(), q.key, b)
+	cm := q.r.Header.Get("Content-MD5")
+	g.mu.Lock()
+	if p := g.puts[q.key]; p != nil && cm != "" && p.md5 == cm && p.received.Load() {
+		g.mu.Unlock()
+		if _, err := io.Copy(io.Discard, b); err != nil {
+			return err
+		}
+		select {
+		case <-p.done:
+		case <-q.r.Context().Done():
+			return q.r.Context().Err()
+		}
+		if p.err != nil {
+			return p.err
+		}
+		q.w.Header().Set("ETag", p.etag)
+		q.w.WriteHeader(http.StatusOK)
+		return nil
+	}
+	p := &pendingPut{md5: cm, done: make(chan struct{})}
+	g.puts[q.key] = p
+	g.mu.Unlock()
+	defer func() {
+		g.mu.Lock()
+		if g.puts[q.key] == p {
+			delete(g.puts, q.key)
+		}
+		g.mu.Unlock()
+		close(p.done)
+	}()
+	// The gateway's context, not the request's: see pendingPut.
+	plain, stored, err := g.seal(g.ctx, q.key, b, func() { p.received.Store(true) })
 	if err != nil {
+		p.err = err
 		return err
 	}
+	p.etag = b.etag()
 	g.objectsWritten.Add(1)
 	g.bytesWritten.Add(plain)
 	g.storedWritten.Add(stored)
-	q.w.Header().Set("ETag", b.etag())
+	q.w.Header().Set("ETag", p.etag)
 	q.w.WriteHeader(http.StatusOK)
 	return nil
 }
@@ -280,6 +330,9 @@ func (g *Gateway) getObject(q *request) error {
 		return fmt.Errorf("decrypting %s: %w", q.key, err)
 	}
 	g.objectsRead.Add(1)
+	if ranged {
+		g.rangedReads.Add(1)
+	}
 	return nil
 }
 

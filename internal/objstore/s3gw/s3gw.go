@@ -21,14 +21,17 @@
 //     the bucket still say when, never what.
 //   - A ranged GET fetches and decrypts only the segments the range touches
 //     (objstore.SealedRange, Store.GetRange, objstore.OpenAt).
-//   - A PutObject streams through Seal into the bucket. A multipart upload
-//     has to become one sealed stream, so each part is kept in a private
-//     temporary directory, encrypted with a key that only lives in memory,
-//     until the parts before it have arrived; a drainer feeds the parts in
-//     order into one Seal and one upload to the bucket as they become
-//     contiguous, so CompleteMultipartUpload only waits for the tail. Answers
-//     to UploadPart are held back while too much is waiting to be drained,
-//     which keeps that tail (and the temporary files) short.
+//   - A PutObject streams through Seal into the bucket. ClickHouse gives up
+//     on a first attempt after a few seconds and sends the object again, so
+//     an upload whose body has fully arrived finishes without the client,
+//     and the retry waits for it rather than storing the object twice.
+//   - A multipart upload has to become one sealed stream, so each part is
+//     kept in a private temporary directory, encrypted with a key that only
+//     lives in memory, until the parts before it have arrived; a drainer
+//     feeds the parts in order into one Seal and one upload to the bucket as
+//     they become contiguous, so CompleteMultipartUpload only waits for the
+//     tail. Answers to UploadPart are held back while too much is waiting to
+//     be drained, which keeps that tail (and the temporary files) short.
 //   - Close, or the end of the context given to Start, stops everything:
 //     requests in flight are cut, unfinished uploads are abandoned (nothing
 //     half-written becomes visible in the bucket), the temporary directory is
@@ -81,9 +84,11 @@ type Config struct {
 type Stats struct {
 	Requests       int64
 	ObjectsWritten int64 // objects stored (PutObject, completed multipart uploads, copies)
+	Multipart      int64 // of them, multipart uploads
 	BytesWritten   int64 // plaintext received from ClickHouse
 	StoredWritten  int64 // sealed bytes stored in the bucket
 	ObjectsRead    int64 // GetObject answers
+	RangedReads    int64 // of them, ranges
 	BytesRead      int64 // plaintext sent to ClickHouse
 	StoredRead     int64 // sealed bytes fetched from the bucket
 	Deleted        int64
@@ -108,6 +113,7 @@ type Gateway struct {
 	mu      sync.Mutex
 	closing bool
 	uploads map[string]*upload
+	puts    map[string]*pendingPut
 	wg      sync.WaitGroup // handlers and drainers
 	served  chan error
 
@@ -115,6 +121,7 @@ type Gateway struct {
 
 	requests, objectsWritten, bytesWritten, storedWritten atomic.Int64
 	objectsRead, bytesRead, storedRead, deleted, errs     atomic.Int64
+	multipart, rangedReads                                atomic.Int64
 	lastErr                                               atomic.Value // string
 
 	closeOnce sync.Once
@@ -162,7 +169,7 @@ func Start(ctx context.Context, cfg Config) (*Gateway, error) {
 	g := &Gateway{
 		cfg: cfg, log: cfg.Log, ln: ln, ctx: gctx, cancel: cancel, public: public,
 		keyID: "RS" + strings.ToUpper(randHex(9)), secret: randHex(20), tmp: tmp, tmpKey: randBytes(32),
-		uploads: map[string]*upload{}, served: make(chan error, 1),
+		uploads: map[string]*upload{}, puts: map[string]*pendingPut{}, served: make(chan error, 1),
 	}
 	g.heads.m = map[string]headEntry{}
 	g.srv = &http.Server{
@@ -215,6 +222,7 @@ func (g *Gateway) Stats() Stats {
 		Requests: g.requests.Load(), ObjectsWritten: g.objectsWritten.Load(), BytesWritten: g.bytesWritten.Load(),
 		StoredWritten: g.storedWritten.Load(), ObjectsRead: g.objectsRead.Load(), BytesRead: g.bytesRead.Load(),
 		StoredRead: g.storedRead.Load(), Deleted: g.deleted.Load(), Errors: g.errs.Load(),
+		Multipart: g.multipart.Load(), RangedReads: g.rangedReads.Load(),
 	}
 	s.LastError, _ = g.lastErr.Load().(string)
 	return s
@@ -319,7 +327,7 @@ func (g *Gateway) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		g.fail(q, err)
 	}
 	g.log.Debug("backup gateway request", "method", r.Method, "path", r.URL.Path, "query", r.URL.RawQuery,
-		"status", q.w.status, "duration", time.Since(q.start).Round(time.Millisecond))
+		"range", r.Header.Get("Range"), "status", q.w.status, "duration", time.Since(q.start).Round(time.Millisecond))
 }
 
 func (g *Gateway) serve(q *request) error {
@@ -445,8 +453,13 @@ func (g *Gateway) fail(q *request, err error) {
 	case errors.As(err, &se):
 	case errors.Is(err, objstore.ErrNotFound):
 		se = errf(http.StatusNotFound, "NoSuchKey", "the key %q does not exist", q.key)
-	case q.r.Context().Err() != nil:
+	case g.ctx.Err() != nil:
 		se = errf(http.StatusServiceUnavailable, "ServiceUnavailable", "the backup gateway is stopping")
+	case q.r.Context().Err() != nil:
+		// ClickHouse gave up waiting (it retries): not an error of ours.
+		g.log.Debug("backup gateway: the client closed the connection", "method", q.r.Method, "path", q.r.URL.Path,
+			"query", q.r.URL.RawQuery, "after", time.Since(q.start).Round(time.Millisecond))
+		return
 	default:
 		se = errf(http.StatusInternalServerError, "InternalError", "%v", err)
 	}

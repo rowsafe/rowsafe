@@ -410,6 +410,7 @@ func (g *Gateway) completeUpload(q *request, id string) error {
 	if !u.counted {
 		u.counted = true
 		g.objectsWritten.Add(1)
+		g.multipart.Add(1)
 		g.bytesWritten.Add(u.plain)
 		g.storedWritten.Add(u.stored)
 	}
