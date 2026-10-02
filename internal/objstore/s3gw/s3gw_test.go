@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -725,4 +726,56 @@ func TestRetriedPutJoinsUpload(t *testing.T) {
 	}
 	e.bucket.Fail = nil
 	e.checkBucket(map[string][]byte{"backup/slow": data})
+}
+
+// A client that disconnects mid-body leaves nothing at the key: net/http and
+// the aws-chunked reader both end such a body with io.ErrUnexpectedEOF.
+func TestCutPutStoresNothing(t *testing.T) {
+	served := make(chan string, 10) // PUTs handled
+	e := newEnv(t, func(c *Config) {
+		c.Log = slog.New(slog.NewTextHandler(lineWriter(func(line string) {
+			if strings.Contains(line, `msg="backup gateway request" method=PUT`) {
+				served <- line
+			}
+		}), &slog.HandlerOptions{Level: slog.LevelDebug}))
+	})
+	s := e.signer()
+	for _, size := range []int{10 << 10, 200 << 10} { // one request, multipart in the bucket
+		for _, mode := range []string{"unsigned", "chunked"} {
+			key := fmt.Sprintf("backup/cut-%s-%d", mode, size)
+			data := payload(size)
+			req, _ := http.NewRequest(http.MethodPut, e.gw.Endpoint(key), nil)
+			raw := data
+			if mode == "chunked" {
+				raw = chunked(s, req, data, 16<<10, false)
+			} else {
+				s.sign(req, "UNSIGNED-PAYLOAD")
+			}
+			conn, err := net.Dial("tcp", req.URL.Host)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fmt.Fprintf(conn, "PUT %s HTTP/1.1\r\nHost: %s\r\nContent-Length: %d\r\n", req.URL.RequestURI(), req.URL.Host, len(raw))
+			req.Header.Write(conn)
+			io.WriteString(conn, "\r\n")
+			conn.Write(raw[:len(raw)*3/4])
+			conn.Close()
+			select {
+			case <-served:
+			case <-time.After(10 * time.Second):
+				t.Fatalf("%s: the gateway never noticed the cut body", key)
+			}
+			if _, ok := e.bucket.Object("rowsafe/db_1/" + e.gw.stored(key)); ok {
+				t.Fatalf("%s: a truncated object was stored", key)
+			}
+		}
+	}
+	e.checkBucket(map[string][]byte{})
+}
+
+type lineWriter func(string)
+
+func (w lineWriter) Write(p []byte) (int, error) {
+	w(string(p))
+	return len(p), nil
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -152,6 +153,42 @@ func TestStorePutGetListDelete(t *testing.T) {
 	}
 	if _, err := st.Get(ctx, "a/small"); !errors.Is(err, ErrNotFound) {
 		t.Fatal("deleted object still there")
+	}
+}
+
+// cutReader yields n bytes of data and then fails like a client that
+// disconnected mid-body.
+type cutReader struct {
+	data []byte
+	err  error
+}
+
+func (c *cutReader) Read(p []byte) (int, error) {
+	if len(c.data) == 0 {
+		return 0, c.err
+	}
+	n := copy(p, c.data)
+	c.data = c.data[n:]
+	return n, nil
+}
+
+func TestStorePutStoresNothingWhenTheSourceIsCut(t *testing.T) {
+	ctx := context.Background()
+	st, srv := testStore(t)
+	for _, size := range []int{10, 1 << 10, 1500, 5000} { // small, exactly one part, multipart
+		for _, cut := range []error{io.ErrUnexpectedEOF, errors.New("connection reset")} {
+			key := fmt.Sprintf("cut/%d", size)
+			_, err := st.Put(ctx, key, &cutReader{data: make([]byte, size), err: cut})
+			if !errors.Is(err, cut) {
+				t.Fatalf("size %d, %v: Put = %v", size, cut, err)
+			}
+			if _, ok := srv.Object("rowsafe/stanza1/" + key); ok {
+				t.Fatalf("size %d, %v: a truncated object was stored", size, cut)
+			}
+		}
+	}
+	if keys := srv.Keys(); len(keys) != 0 {
+		t.Fatalf("stored: %v", keys)
 	}
 }
 

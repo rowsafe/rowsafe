@@ -340,9 +340,14 @@ func (s *Store) PutBytes(ctx context.Context, key string, data []byte) error {
 }
 
 // Put streams r into key, as one request when it is small and as a
-// multipart upload otherwise. It returns the bytes stored.
+// multipart upload otherwise. It returns the bytes stored. Nothing is
+// stored unless r reads to io.EOF: any other error from r (even
+// io.ErrUnexpectedEOF, a client cut off mid-body) abandons the upload.
 func (s *Store) Put(ctx context.Context, key string, r io.Reader) (int64, error) {
 	partSize := max(s.PartSize, 1<<10)
+	// io.ReadFull reports a short last part as io.ErrUnexpectedEOF; r's own
+	// errors are wrapped so they can't be taken for that.
+	r = sourceReader{r}
 	first := make([]byte, partSize)
 	n, err := io.ReadFull(r, first)
 	switch {
@@ -413,9 +418,6 @@ func (s *Store) Put(ctx context.Context, key string, r io.Reader) (int64, error)
 			return total, err
 		}
 		buf = buf[:m]
-		if err == io.ErrUnexpectedEOF && m == 0 {
-			break
-		}
 	}
 	var cmu bytes.Buffer
 	cmu.WriteString("<CompleteMultipartUpload>")
@@ -444,6 +446,24 @@ func (s *Store) Put(ctx context.Context, key string, r io.Reader) (int64, error)
 	}
 	return total, nil
 }
+
+// sourceReader marks the errors of Put's reader (other than io.EOF) as a
+// failed source.
+type sourceReader struct{ r io.Reader }
+
+func (s sourceReader) Read(p []byte) (int, error) {
+	n, err := s.r.Read(p)
+	if err != nil && err != io.EOF {
+		err = &SourceError{Err: err}
+	}
+	return n, err
+}
+
+// SourceError is an upload abandoned because its source failed.
+type SourceError struct{ Err error }
+
+func (e *SourceError) Error() string { return e.Err.Error() }
+func (e *SourceError) Unwrap() error { return e.Err }
 
 // Get opens key for reading. The caller closes it.
 func (s *Store) Get(ctx context.Context, key string) (io.ReadCloser, error) {
