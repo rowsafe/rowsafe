@@ -465,6 +465,9 @@ type UpgradeInfo struct {
 	DatabaseID string `json:"database_id"`
 	Database   string `json:"database"`
 	Host       string `json:"host"`
+	// Engine is the database's engine ("" for PostgreSQL); other engines'
+	// series are numbers in Major, Majors and the upgrade fields (8.4 -> 804).
+	Engine string `json:"engine,omitempty"`
 	// Version is the running version ("16.9"), Major its major.
 	Version string `json:"version,omitempty"`
 	Major   int    `json:"major,omitempty"`
