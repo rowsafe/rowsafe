@@ -199,6 +199,7 @@ ALLOW_UPDATES=''   # --allow-updates / --no-allow-updates (PostgreSQL updates an
 ALLOW_SECURITY=''  # --allow-security-updates / --no-allow-security-updates
 ALLOW_REBOOT=''    # --allow-reboot / --no-allow-reboot
 SETUP_STOP=0       # the plan limit was reached: don't offer more databases
+MYSQL_STANDBY=''   # --mysql-standby (yes) / --no-mysql-standby (no); '' = ask once, on a terminal
 MONGODB_REPLSET='' # --mongodb-replica-set (yes) / --no-mongodb-replica-set (no); '' = ask on a terminal
 
 TMP=
@@ -294,6 +295,11 @@ Options (when piping, pass them after `sh -s --`):
                          installed: --allow-X and --no-allow-X, nothing else (no
                          download, the agent and backups untouched). Prints what
                          Rowsafe may do. `sudo rowsafe-allow NAME` runs this
+  --mysql-standby        MySQL/MariaDB: let Rowsafe set up standby servers with this
+                         server (its MySQL account gets administrator rights, used only
+                         when someone adds, promotes or removes a standby and confirms);
+                         an empty server can then become another server's standby
+  --no-mysql-standby     don't
   --mongodb-replica-set  MongoDB: turn a standalone server into a single-member replica
                          set without asking (one MongoDB restart); restoring to any
                          second needs it
@@ -654,11 +660,13 @@ mysql_setup() {
 # the server's socket; or with the administrator password on a terminal).
 mysql_account() {
   [ "$C_ENGINE" = mysql ] || [ "$C_ENGINE" = mariadb ] || return 0
-  [ ! -f "$STATE_DIR/engines/$C_ENGINE/account-$C_PORT.cnf" ] || return 0
+  _sb=''
+  ! mysql_standby_wanted || _sb=1
+  [ ! -f "$STATE_DIR/engines/$C_ENGINE/account-$C_PORT.cnf" ] || [ -n "$_sb" ] || return 0
   _sock=$C_SOCK
   [ "$_sock" != - ] || _sock=''
   if "$INSTALL_DIR/rowsafe-agent" setup mysql-account --engine "$C_ENGINE" --port "$C_PORT" ${_sock:+--socket "$_sock"} \
-    --owner "$AGENT_USER" --state-dir "$STATE_DIR" >"$TMP/account.log" 2>&1 </dev/null; then
+    --owner "$AGENT_USER" --state-dir "$STATE_DIR" ${_sb:+--standby} >"$TMP/account.log" 2>&1 </dev/null; then
     note "$(cat "$TMP/account.log")"
     return 0
   fi
@@ -673,10 +681,27 @@ mysql_account() {
   _pw=''
   _rc=0
   "$INSTALL_DIR/rowsafe-agent" setup mysql-account --engine "$C_ENGINE" --port "$C_PORT" ${_sock:+--socket "$_sock"} \
-    --owner "$AGENT_USER" --state-dir "$STATE_DIR" --admin-password-file "$TMP/adminpw" >"$TMP/account.log" 2>&1 </dev/null || _rc=$?
+    --owner "$AGENT_USER" --state-dir "$STATE_DIR" --admin-password-file "$TMP/adminpw" ${_sb:+--standby} >"$TMP/account.log" 2>&1 </dev/null || _rc=$?
   rm -f "$TMP/adminpw"
   if [ "$_rc" = 0 ]; then note "$(cat "$TMP/account.log")"; return 0; fi
   sed 's/^/    /' "$TMP/account.log" >&2
+  return 1
+}
+
+# mysql_standby_wanted: --mysql-standby, or yes to the question (asked once,
+# on a terminal).
+mysql_standby_wanted() {
+  case $MYSQL_STANDBY in
+    yes) return 0 ;;
+    no) return 1 ;;
+  esac
+  [ "$TTY" = 1 ] || return 1
+  say ""
+  note "Standby servers: Rowsafe can keep a second $(engine_label "$C_ENGINE") server in sync with this one (or this one with another),"
+  note "ready to take over. For that its $(engine_label "$C_ENGINE") account needs administrator rights, used only when someone adds,"
+  note "promotes or removes a standby in the dashboard and confirms."
+  if confirm "Allow standby servers with this server?" n; then MYSQL_STANDBY=yes; return 0; fi
+  MYSQL_STANDBY=no
   return 1
 }
 # <<< mysql
@@ -6710,6 +6735,14 @@ setup_databases() {
         ;;
       *)
         note "Found $(cluster_desc)"
+        if { [ "$C_ENGINE" = mysql ] || [ "$C_ENGINE" = mariadb ]; } && [ "$C_DBS" = - ] && [ "$MYSQL_STANDBY" != no ] && # mysql
+          { [ "$MYSQL_STANDBY" = yes ] || { [ "$TTY" = 1 ] && confirm "It has no databases. Keep it empty, ready to become the standby of a database on another server?" n; }; }; then
+          MYSQL_STANDBY=yes
+          if mysql_account; then
+            ok "$(engine_label "$C_ENGINE") on port $C_PORT is ready to hold a standby: pick this server under Standby in the dashboard"
+          fi
+          continue
+        fi
         if [ "$_count" -gt 1 ] && ! confirm "Set up backups for it?" y; then
           continue
         fi
@@ -7609,6 +7642,8 @@ main() {
       --no-prompt) PROMPT=never ;;
       --no-setup) NO_SETUP=1 ;;
       --allow-restart) ALLOW_RESTART=yes ;;
+      --mysql-standby) MYSQL_STANDBY=yes ;;
+      --no-mysql-standby) MYSQL_STANDBY=no ;;
       --mongodb-replica-set) MONGODB_REPLSET=yes ;;
       --no-mongodb-replica-set) MONGODB_REPLSET=no ;;
       --no-allow-restart) ALLOW_RESTART=no ;;
