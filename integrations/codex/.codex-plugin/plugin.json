@@ -1,7 +1,7 @@
 {
   "name": "rowsafe",
   "version": "0.1.0",
-  "description": "PostgreSQL safety net for AI agents: Rowsafe MCP tools, a safety workflow skill, and a hook that sets a restore point before migrations and destructive SQL.",
+  "description": "Database safety net for AI agents (PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse): Rowsafe MCP tools, a safety workflow skill, and a hook that sets a restore point before migrations and destructive SQL.",
   "author": {
     "name": "Rowsafe",
     "url": "https://rowsafe.sh"
@@ -22,7 +22,7 @@
   "interface": {
     "displayName": "Rowsafe",
     "shortDescription": "Restore point before every migration",
-    "longDescription": "Before a migration or destructive SQL, Codex checks that your PostgreSQL database can be recovered and sets a named Rowsafe restore point (a Mark). If something breaks, you rewind to it from the Rowsafe dashboard. Codex never restores or restarts anything itself.",
+    "longDescription": "Before a migration or destructive SQL, Codex checks that your database can be recovered and sets a named Rowsafe restore point (a Mark). If something breaks, you rewind to it from the Rowsafe dashboard. Codex never restores or restarts anything itself.",
     "developerName": "Rowsafe",
     "category": "Developer Tools",
     "capabilities": [
