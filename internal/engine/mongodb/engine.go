@@ -49,6 +49,7 @@ func (e *Engine) Tasks() []string {
 		protocol.TaskInspect, protocol.TaskAdopt, protocol.TaskCheck, protocol.TaskBackup, protocol.TaskDrill,
 		protocol.TaskRestorePoint, protocol.TaskMaintenance,
 		protocol.TaskRewindCopy, protocol.TaskRewindDrop, protocol.TaskRewindCompare, protocol.TaskRewindRows,
+		protocol.TaskRewindInPlace, protocol.TaskRewindUndo, protocol.TaskRewindCleanup,
 	}
 }
 
@@ -71,6 +72,7 @@ func (e *Engine) Start(ctx context.Context, env agent.EngineEnv) {
 	e.started, e.ctx = true, ctx
 	e.mu.Unlock()
 	e.recoverCopies(ctx, env)
+	go e.recoverInPlace(ctx, env) // inplace.go
 	go func() {
 		t := time.NewTicker(time.Minute)
 		defer t.Stop()
@@ -81,6 +83,7 @@ func (e *Engine) Start(ctx context.Context, env agent.EngineEnv) {
 			case <-t.C:
 			}
 			e.expireCopies(env, time.Now())
+			e.expireKept(ctx, env, time.Now())
 			e.stopIdleShippers(10 * time.Minute)
 		}
 	}()
@@ -144,6 +147,24 @@ func (e *Engine) Run(ctx context.Context, env agent.EngineEnv, task *protocol.Ta
 			return nil, err
 		}
 		return nilIfNil(e.rewindRows(ctx, env, db, p, tl))
+	case protocol.TaskRewindInPlace:
+		var p protocol.RewindInPlaceParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.rewindInPlace(ctx, env, db, p, tl))
+	case protocol.TaskRewindUndo:
+		var p protocol.RewindUndoParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.rewindUndo(ctx, env, db, p, tl))
+	case protocol.TaskRewindCleanup:
+		var p protocol.RewindCleanupParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.rewindCleanup(ctx, env, db, p, tl))
 	}
 	return nil, fmt.Errorf("MongoDB databases can't run %s tasks", task.Type)
 }
