@@ -219,10 +219,12 @@ func (s scratch) writeConfig() (scratchState, error) {
 	if st.Keeper {
 		// Replicated tables need ClickHouse Keeper. Its Raft port listens on
 		// every interface (ClickHouse has no setting to narrow it); the task
-		// log says so.
+		// log says so. The replication port asks for a random login, so other
+		// users of this server can't fetch the copy's parts from it.
 		keeper = fmt.Sprintf(`
   <interserver_http_port>%[2]d</interserver_http_port>
   <interserver_http_host>127.0.0.1</interserver_http_host>
+  <interserver_http_credentials><user>rowsafe</user><password>%[5]s</password></interserver_http_credentials>
   <keeper_server>
     <tcp_port>%[3]d</tcp_port>
     <server_id>1</server_id>
@@ -232,7 +234,7 @@ func (s scratch) writeConfig() (scratchState, error) {
     <raft_configuration><server><id>1</id><hostname>127.0.0.1</hostname><port>%[4]d</port></server></raft_configuration>
   </keeper_server>
   <zookeeper><node><host>127.0.0.1</host><port>%[3]d</port></node></zookeeper>
-  <distributed_ddl><path>/clickhouse/task_queue/ddl</path></distributed_ddl>`, d, ports[1], ports[2], ports[3])
+  <distributed_ddl><path>/clickhouse/task_queue/ddl</path></distributed_ddl>`, d, ports[1], ports[2], ports[3], randomPassword())
 	}
 	conf := fmt.Sprintf(`<clickhouse>
   <logger><level>warning</level><log>%[1]s/log/clickhouse-server.log</log><errorlog>%[1]s/log/clickhouse-server.err.log</errorlog><size>10M</size><count>2</count><console>0</console></logger>

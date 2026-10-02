@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -529,6 +530,9 @@ func TestScratchKeeperOnlyWhenReplicated(t *testing.T) {
 		if hasKeeper != b.needsKeeper() || !strings.Contains(string(conf), "<shard>01</shard>") ||
 			!strings.Contains(string(conf), "<listen_host>127.0.0.1</listen_host>") {
 			t.Fatalf("config %d (keeper %v):\n%s", i, b.needsKeeper(), conf)
+		}
+		if b.needsKeeper() && !regexp.MustCompile(`<interserver_http_credentials><user>rowsafe</user><password>[A-Za-z0-9_-]{40}</password>`).Match(conf) {
+			t.Fatalf("the replication port has no login:\n%s", conf)
 		}
 	}
 }
