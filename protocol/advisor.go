@@ -49,7 +49,46 @@ type AdvisorFacts struct {
 	LargeTables []LargeTable `json:"large_tables"`
 	// Memory is the cluster's memory settings and cache reads.
 	Memory *MemoryFacts `json:"memory,omitempty"`
+	// ClickHouseTables are ClickHouse MergeTree tables with a layout
+	// problem: no sorting key (ORDER BY tuple()) or far too many
+	// partitions (ClickHouse only).
+	ClickHouseTables []ClickHouseTableFacts `json:"clickhouse_tables,omitempty"`
+	// Profiler is MongoDB's profiler state: query statistics come from it
+	// (MongoDB only; nil elsewhere).
+	Profiler *MongoProfiler `json:"mongodb_profiler,omitempty"`
 }
+
+// ClickHouseTableFacts is a MergeTree table whose layout makes queries or
+// inserts slow.
+type ClickHouseTableFacts struct {
+	Database   string `json:"database"`
+	Table      string `json:"table"`
+	Engine     string `json:"engine"`
+	SortingKey string `json:"sorting_key"` // "" for ORDER BY tuple()
+	// PartitionKey is the PARTITION BY expression ("" when none).
+	PartitionKey string `json:"partition_key,omitempty"`
+	Partitions   int64  `json:"partitions"`
+	Parts        int64  `json:"parts"`
+	Rows         int64  `json:"rows"`
+	Bytes        int64  `json:"bytes"`
+}
+
+// MongoProfiler is the profiler level of the databases with collections:
+// level 0 (off) means no query statistics.
+type MongoProfiler struct {
+	// Off are the databases where the profiler is off.
+	Off []string `json:"off,omitempty"`
+	// On are the databases where it records slow operations (level 1) or
+	// all of them (level 2).
+	On     []string `json:"on,omitempty"`
+	SlowMs int      `json:"slow_ms,omitempty"`
+}
+
+// MaintMongoProfile turns MongoDB's profiler on at level 1 (slow
+// operations only, slowms SlowMs, default 100) in the databases DB names
+// ("" all with collections). It is a runtime setting: nothing restarts, and
+// it resets at the next restart unless the configuration file sets it.
+const MaintMongoProfile = "mongodb_profile"
 
 // ForeignKeyWithoutIndex: every DELETE or key UPDATE on the referenced
 // table has to scan the referencing table for matching rows, and joins
