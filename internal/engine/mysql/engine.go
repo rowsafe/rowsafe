@@ -62,7 +62,7 @@ func (e *Engine) Tasks() []string {
 		protocol.TaskInspect, protocol.TaskAdopt, protocol.TaskCheck, protocol.TaskBackup,
 		protocol.TaskDrill, protocol.TaskRestorePoint, protocol.TaskMaintenance,
 		protocol.TaskRewindCopy, protocol.TaskRewindDrop, protocol.TaskRewindCompare, protocol.TaskRewindRows,
-		protocol.TaskDBAdmin, protocol.TaskSettings,
+		protocol.TaskDBAdmin, protocol.TaskSettings, protocol.TaskPooling, protocol.TaskPoolerRetarget,
 	}
 }
 
@@ -125,6 +125,18 @@ func (e *Engine) Run(ctx context.Context, env agent.EngineEnv, task *protocol.Ta
 			return nil, err
 		}
 		return nilable(s.rewindRows(ctx, p, log))
+	case protocol.TaskPooling:
+		var p protocol.PoolingParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilable(s.pooling(ctx, p, log))
+	case protocol.TaskPoolerRetarget:
+		var p protocol.PoolerRetargetParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilable(s.poolerRetarget(ctx, p, log))
 	case protocol.TaskSettings:
 		var p protocol.SettingsParams
 		if err := decode(task, &p); err != nil {

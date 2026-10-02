@@ -61,8 +61,8 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 		}
 		return res, err
 	}
-	if task.Database != nil {
-		switch task.Type { // connection pooling (pooling.go)
+	if task.Database != nil && isPostgres(*task.Database) {
+		switch task.Type { // connection pooling (pooling.go); other engines: their own (runEngineTask)
 		case protocol.TaskPooling:
 			return runRewind(ctx, task, tl, *task.Database, func(ctx context.Context, db protocol.DatabaseSpec, p protocol.PoolingParams, tl *taskLog) (*protocol.PoolingResult, error) {
 				return a.pooling(ctx, db, p, task.ID, tl)

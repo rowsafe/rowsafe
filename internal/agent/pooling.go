@@ -1051,6 +1051,10 @@ func (a *Agent) poolerStatus(ctx context.Context) *protocol.PoolerStatus {
 		if err != nil {
 			out.Error = err.Error()
 		}
+		if es := a.enginePoolerStatus(ctx); es != nil { // ProxySQL (pooling_engines.go)
+			es.Allowed, es.AllowedPorts = out.Allowed, out.AllowedPorts
+			return es
+		}
 		return out // not managed; Allowed says whether it may be
 	}
 	out.Managed, out.DatabaseID, out.Settings, out.Addresses, out.Target, out.Version = true, st.DatabaseID, st.Settings, st.Addresses, st.target(), st.Version

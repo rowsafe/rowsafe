@@ -29,6 +29,10 @@ type monitorState struct {
 	statsAt    time.Time
 	insightsAt time.Time
 	settingsAt time.Time
+	// ProxySQL (pooling.go)
+	poolQuestions float64
+	poolAt        time.Time
+	poolUsersAt   time.Time
 	// serverStart is the server's start time, kept stable across samples
 	// (uptime has a one-second granularity): with a connection ID it names
 	// a session for a fix.
@@ -183,6 +187,11 @@ func (s *server) monitor(ctx context.Context) (*protocol.DatabaseMonitoring, err
 	if now.Sub(st.statsAt) >= 5*time.Minute {
 		dm.Statements = s.statements(ctx, db)
 		st.statsAt = now
+	}
+	dm.Pooler = s.poolerStats(ctx, &st.poolQuestions, &st.poolAt)
+	if dm.Pooler != nil && now.Sub(st.poolUsersAt) >= 5*time.Minute {
+		s.syncPoolUsers(ctx, db)
+		st.poolUsersAt = now
 	}
 	if now.Sub(st.settingsAt) >= 5*time.Minute {
 		if snap, err := s.settingsSnapshot(ctx, db); err == nil {
