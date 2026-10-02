@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"strings"
 	"time"
 
 	"github.com/rowsafe/rowsafe/protocol"
