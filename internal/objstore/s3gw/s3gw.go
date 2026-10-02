@@ -15,10 +15,22 @@
 //     with the gateway's credentials; signed, unsigned and aws-chunked
 //     payloads are checked as S3 checks them. Keys must start with one of
 //     Config.Prefixes and can't leave the Store's folder.
+//   - Names in the bucket say when, never what (names.go). ClickHouse's
+//     keys name databases and tables (backup/<label>/data/<db>/<table>/...),
+//     so each object is stored under its folder (the Config.Prefixes entry
+//     it falls in, e.g. backup/<label>/, in clear: labels are times) and
+//     one opaque name, the rest of the key encrypted deterministically
+//     (synthetic IV: HMAC nonce, AES-GCM, keys derived from the passphrase).
+//     Listings decrypt the names and filter, sort and paginate ClickHouse's
+//     keys; objects whose names don't decrypt (the agent's own files) are
+//     not shown.
 //   - Sizes ClickHouse sees are plaintext sizes. Sealed segments have a fixed
 //     size, so the plaintext size follows from the stored size
-//     (objstore.PlainSize) and nothing is stored next to an object: names in
-//     the bucket still say when, never what.
+//     (objstore.PlainSize) and nothing is stored next to an object.
+//   - A file that doesn't decrypt (wrong passphrase, altered) is answered
+//     403 AccessDenied, "the backup file <key> can't be decrypted: ...":
+//     ClickHouse doesn't retry it, so a restore of a damaged backup fails
+//     at once, in plain words.
 //   - A ranged GET fetches and decrypts only the segments the range touches
 //     (objstore.SealedRange, Store.GetRange, objstore.OpenAt).
 //   - A PutObject streams through Seal into the bucket. ClickHouse gives up
@@ -118,6 +130,7 @@ type Gateway struct {
 	served  chan error
 
 	heads headCache
+	names *names
 
 	requests, objectsWritten, bytesWritten, storedWritten atomic.Int64
 	objectsRead, bytesRead, storedRead, deleted, errs     atomic.Int64
@@ -165,6 +178,12 @@ func Start(ctx context.Context, cfg Config) (*Gateway, error) {
 		os.RemoveAll(tmp)
 		return nil, err
 	}
+	nm, err := newNames(cfg.Passphrase)
+	if err != nil {
+		ln.Close()
+		os.RemoveAll(tmp)
+		return nil, err
+	}
 	gctx, cancel := context.WithCancel(ctx)
 	g := &Gateway{
 		cfg: cfg, log: cfg.Log, ln: ln, ctx: gctx, cancel: cancel, public: public,
@@ -172,6 +191,7 @@ func Start(ctx context.Context, cfg Config) (*Gateway, error) {
 		uploads: map[string]*upload{}, puts: map[string]*pendingPut{}, served: make(chan error, 1),
 	}
 	g.heads.m = map[string]headEntry{}
+	g.names = nm
 	g.srv = &http.Server{
 		Handler:           g,
 		ReadHeaderTimeout: 30 * time.Second,

@@ -20,18 +20,22 @@ import (
 // server (objstore.Seal) before it is uploaded:
 //
 //	rowsafe-clickhouse.json      what this folder is (sealed)
-//	backup/<label>/...           ClickHouse's own BACKUP (its .backup file,
+//	backup/<label>/<name>        ClickHouse's own BACKUP (its .backup file,
 //	                             metadata/ and data/ parts), written through
 //	                             the agent's gateway, which seals every object
+//	                             and encrypts its name: ClickHouse's paths name
+//	                             databases and tables, so each becomes one
+//	                             opaque <name> (s3gw/names.go)
 //	backup/<label>/backup.json   the backup's description, written last (sealed)
 //	marks/<name>.json            a Mark: the backup taken for it (sealed)
-//	check/<time>/...             what a check writes to prove the path works
+//	check/<time>/<name>          what a check writes to prove the path works
 //	                             (deleted right after)
 //
 // Labels are pgBackRest-like: a full backup is 20260925-101500F, a
 // differential one <its full's label>_20260925-111500D (only the parts
 // that changed since that full are stored; the rest is read from the
-// full). Names say when, never what.
+// full). Names say when, never what: labels and Mark names are the only
+// names in clear (a Mark's name is the one you gave it).
 
 const (
 	markerKey     = "rowsafe-clickhouse.json"
@@ -136,6 +140,23 @@ type backupDoc struct {
 	// Macros are the server's macros ({shard}, {replica}...): a restore
 	// needs them for replicated tables.
 	Macros map[string]string `json:"macros,omitempty"`
+	// Replicated is set when a database is Replicated (its tables need
+	// ClickHouse Keeper to restore, like Replicated* tables).
+	Replicated bool `json:"replicated,omitempty"`
+}
+
+// needsKeeper says whether restoring b needs ClickHouse Keeper: a
+// replicated database or table.
+func (b backupDoc) needsKeeper() bool {
+	if b.Replicated {
+		return true
+	}
+	for _, t := range b.Tables {
+		if strings.HasPrefix(t.Engine, "Replicated") || strings.HasPrefix(t.Engine, "Shared") {
+			return true
+		}
+	}
+	return false
 }
 
 // backedTable is a table in a backup, with its row count when the backup

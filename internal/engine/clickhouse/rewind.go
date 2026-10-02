@@ -184,9 +184,13 @@ func (e *Engine) rewindCopy(ctx context.Context, env agent.EngineEnv, db protoco
 	now := time.Now().UTC()
 	rec := copyRecord{ID: p.CopyID, DatabaseID: db.ID, Port: db.Port, Dir: filepath.Join(root, p.CopyID), Backup: b.Label,
 		Status: protocol.RewindCopyRestoring, Target: p.Target, CreatedAt: now, Expires: clampExpiry(p.Expires, now)}
-	s, err := newScratch(root, p.CopyID, b.Macros)
+	s, err := newScratch(root, p.CopyID, b.Macros, b.needsKeeper())
 	if err != nil {
 		return nil, err
+	}
+	if b.needsKeeper() {
+		tl.Printf("ClickHouse Keeper runs for this copy because it has replicated tables; " +
+			"its internal port listens on all interfaces while the copy exists")
 	}
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()

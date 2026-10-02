@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -32,16 +33,16 @@ func TestGrants(t *testing.T) {
 	if !slices.Equal(have, []string{"SELECT", "INSERT", "BACKUP", "KILL QUERY"}) {
 		t.Fatal(have)
 	}
-	if m := missingGrants(have); !slices.Equal(m, []string{"ALTER UPDATE", "ALTER DELETE"}) {
+	if m := missingGrants(have); !slices.Equal(m, []string{"ALTER UPDATE", "ALTER DELETE", "S3"}) {
 		t.Fatal(m)
 	}
-	if m := missingGrants(append(have, "ALTER")); len(m) != 0 {
+	if m := missingGrants(append(have, "ALTER", "SOURCES")); len(m) != 0 {
 		t.Fatal(m)
 	}
 	if m := missingGrants([]string{"ALL"}); len(m) != 0 {
 		t.Fatal(m)
 	}
-	if m := missingGrants(parseGrants("GRANT SELECT, INSERT, BACKUP, KILL QUERY, ALTER UPDATE, ALTER DELETE ON *.* TO rowsafe")); len(m) != 0 {
+	if m := missingGrants(parseGrants("GRANT SELECT, INSERT, BACKUP, KILL QUERY, ALTER UPDATE, ALTER DELETE, S3 ON *.* TO rowsafe")); len(m) != 0 {
 		t.Fatal(m)
 	}
 }
@@ -279,7 +280,7 @@ func TestUsersXMLAndStatus(t *testing.T) {
 	}
 	sum := sha256.Sum256([]byte(l.Password))
 	if !strings.Contains(x, hex.EncodeToString(sum[:])) || strings.Contains(x, l.Password) ||
-		!strings.Contains(x, "<query>GRANT SELECT, INSERT, BACKUP, KILL QUERY, ALTER UPDATE, ALTER DELETE ON *.*</query>") ||
+		!strings.Contains(x, "<query>GRANT SELECT, INSERT, BACKUP, KILL QUERY, ALTER UPDATE, ALTER DELETE, S3 ON *.*</query>") ||
 		!strings.Contains(x, "<ip>127.0.0.1</ip>") {
 		t.Fatal(x)
 	}
@@ -340,7 +341,7 @@ func TestClampExpiry(t *testing.T) {
 func TestExpireCopies(t *testing.T) {
 	env := testEnvUnit(t)
 	e := &Engine{}
-	s, err := newScratch(copyRoot(env), "c1", nil)
+	s, err := newScratch(copyRoot(env), "c1", nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +361,7 @@ func TestExpireCopies(t *testing.T) {
 		t.Fatal("an expired copy stayed", err)
 	}
 	// A leftover restore test is cleaned up at start.
-	d, _ := newScratch(drillRoot(env), "task1", nil)
+	d, _ := newScratch(drillRoot(env), "task1", nil, false)
 	e2 := &Engine{}
 	e2.recoverCopies(context.Background(), env)
 	if _, err := os.Stat(d.Dir); !os.IsNotExist(err) {
@@ -394,4 +395,41 @@ func TestLockGateway(t *testing.T) {
 		t.Fatal(err)
 	}
 	u3()
+}
+
+func TestPlainOpError(t *testing.T) {
+	msg := "Code: 499. DB::Exception: Message: the backup file backup/20261002-101500F/data/shop/orders/all_1_1_0/data.bin can't be decrypted: " +
+		"wrong encryption passphrase, or the file was altered, bucket rowsafe, key backup/... (S3_ERROR) (version 26.8.1.1)"
+	if got := plainOpError("restore", msg); got != "the backup file data/shop/orders/all_1_1_0/data.bin can't be decrypted: wrong encryption passphrase, or the file was altered" {
+		t.Fatal(got)
+	}
+	if got := plainOpError("backup", "Code: 499. AccessDenied 403"); !strings.Contains(got, "gateway refused") {
+		t.Fatal(got)
+	}
+}
+
+func TestScratchKeeperOnlyWhenReplicated(t *testing.T) {
+	root := t.TempDir()
+	plain := backupDoc{Tables: []backedTable{{Engine: "MergeTree"}, {Engine: "ReplacingMergeTree"}}}
+	repl := backupDoc{Tables: []backedTable{{Engine: "MergeTree"}, {Engine: "ReplicatedMergeTree"}}}
+	if plain.needsKeeper() || !repl.needsKeeper() || !(backupDoc{Replicated: true}).needsKeeper() ||
+		!(backupDoc{Tables: []backedTable{{Engine: "SharedMergeTree"}}}).needsKeeper() {
+		t.Fatal("needsKeeper")
+	}
+	for i, b := range []backupDoc{plain, repl} {
+		s, err := newScratch(root, fmt.Sprint("s", i), map[string]string{"shard": "01"}, b.needsKeeper())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.writeConfig(); err != nil {
+			t.Fatal(err)
+		}
+		conf, _ := os.ReadFile(s.config())
+		hasKeeper := strings.Contains(string(conf), "keeper_server") || strings.Contains(string(conf), "zookeeper") ||
+			strings.Contains(string(conf), "interserver_http_port")
+		if hasKeeper != b.needsKeeper() || !strings.Contains(string(conf), "<shard>01</shard>") ||
+			!strings.Contains(string(conf), "<listen_host>127.0.0.1</listen_host>") {
+			t.Fatalf("config %d (keeper %v):\n%s", i, b.needsKeeper(), conf)
+		}
+	}
 }

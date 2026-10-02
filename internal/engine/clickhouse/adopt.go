@@ -69,7 +69,7 @@ func adoptPlan(in serverInfo) (plan []protocol.Change, warnings []string, blocke
 	warnings = append(warnings, "ClickHouse keeps no log of changes, so it can be restored to any of its backups or Marks, "+
 		"not to any second. Take a Mark before risky changes.")
 	if in.VersionNum < minVersion {
-		blocker = fmt.Errorf("this server runs ClickHouse %s: Rowsafe's backups need ClickHouse 23.8 or newer", in.Version)
+		blocker = fmt.Errorf("this server runs ClickHouse %s: Rowsafe's backups need ClickHouse 24.8 or newer", in.Version)
 	}
 	if missing := missingGrants(in.Grants); len(missing) > 0 {
 		warnings = append(warnings, "Rowsafe's ClickHouse user lacks "+strings.Join(missing, ", ")+
@@ -151,16 +151,11 @@ func (e *Engine) check(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 	if err != nil {
 		return res, fmt.Errorf("listing your bucket: %w", err)
 	}
-	var meta string
-	for _, o := range objs {
-		if strings.HasSuffix(o.Key, "/.backup") {
-			meta = o.Key
-		}
-	}
-	if meta == "" {
+	// Its description (.backup), under its encrypted name.
+	plain, err := r.getPlain(ctx, g.StoredKey(dir+".backup"))
+	if errors.Is(err, objstore.ErrNotFound) {
 		return res, errors.New("the test backup didn't reach your bucket")
 	}
-	plain, err := r.getPlain(ctx, meta)
 	if err != nil {
 		return res, fmt.Errorf("reading the test backup back: %w", err)
 	}
