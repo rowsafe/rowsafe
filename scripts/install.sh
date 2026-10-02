@@ -199,6 +199,7 @@ ALLOW_UPDATES=''   # --allow-updates / --no-allow-updates (PostgreSQL updates an
 ALLOW_SECURITY=''  # --allow-security-updates / --no-allow-security-updates
 ALLOW_REBOOT=''    # --allow-reboot / --no-allow-reboot
 SETUP_STOP=0       # the plan limit was reached: don't offer more databases
+M_CLONES=''        # --mongodb-clones (yes): this (empty) MongoDB may receive clones
 CH_CLONES=''       # --clickhouse-clones (yes): this (empty) ClickHouse may receive clones
 MYSQL_STANDBY=''   # --mysql-standby (yes) / --no-mysql-standby (no); '' = ask once, on a terminal
 MONGODB_REPLSET='' # --mongodb-replica-set (yes) / --no-mongodb-replica-set (no); '' = ask on a terminal
@@ -301,6 +302,9 @@ Options (when piping, pass them after `sh -s --`):
                          when someone adds, promotes or removes a standby and confirms);
                          an empty server can then become another server's standby
   --no-mysql-standby     don't
+  --mongodb-clones       MongoDB: keep an empty server ready to receive clones of a
+                         database from another server (Rowsafe's user there gets the
+                         restore role)
   --clickhouse-clones    ClickHouse: keep an empty server ready to receive clones of a
                          database from another server (Rowsafe's user there may then
                          create and drop databases)
@@ -6739,6 +6743,14 @@ setup_databases() {
         ;;
       *)
         note "Found $(cluster_desc)"
+        if [ "$C_ENGINE" = mongodb ] && [ "$C_DBS" = - ] &&
+          { [ "$M_CLONES" = yes ] || { [ "$TTY" = 1 ] && confirm "It has no databases. Keep it empty, ready to receive clones of a MongoDB database from another server?" n; }; }; then
+          M_CLONES=yes
+          if mongodb_prepare; then
+            ok "MongoDB on port $C_PORT is ready to receive clones: pick this server when you fork a MongoDB database in the dashboard"
+          fi
+          continue
+        fi
         if [ "$C_ENGINE" = clickhouse ] && { [ "$C_DBS" = - ] || [ "$C_DBS" = default ]; } &&
           { [ "$CH_CLONES" = yes ] || { [ "$TTY" = 1 ] && confirm "It has no databases. Keep it empty, ready to receive clones of a ClickHouse database from another server?" n; }; }; then
           CH_CLONES=yes
@@ -7151,16 +7163,16 @@ mongodb_as_admin() {
 
 # mongodb_login creates Rowsafe's MongoDB user.
 mongodb_login() {
-  [ "$M_LOGIN" = ok ] && return 0
+  [ "$M_LOGIN" = ok ] && [ -z "$M_CLONES" ] && return 0
   _rc=0
-  mongodb_as_admin login >"$TMP/mlogin" 2>&1 || _rc=$?
+  mongodb_as_admin login ${M_CLONES:+--clones} >"$TMP/mlogin" 2>&1 || _rc=$?
   while [ "$_rc" = 11 ] || [ "$_rc" = 12 ]; do
     [ "$_rc" = 12 ] && { tty_bad "MongoDB refused that login."; M_ADMIN=''; }
     [ "$_rc" = 11 ] && [ -n "$M_ADMIN" ] && { tty_bad "That user can't create users."; M_ADMIN=''; }
     mongodb_admin || { warn "MongoDB has access control on: set ROWSAFE_MONGODB_ADMIN_USER and ROWSAFE_MONGODB_ADMIN_PASSWORD (used once, never saved), or run the installer on a terminal"; return 1; }
     [ -n "${ROWSAFE_MONGODB_ADMIN_USER:-}" ] && [ "$_rc" = 12 ] && return 1
     _rc=0
-    mongodb_as_admin login >"$TMP/mlogin" 2>&1 || _rc=$?
+    mongodb_as_admin login ${M_CLONES:+--clones} >"$TMP/mlogin" 2>&1 || _rc=$?
   done
   sed 's/^/    /' "$TMP/mlogin"
   [ "$_rc" = 0 ]
@@ -7656,6 +7668,7 @@ main() {
       --allow-restart) ALLOW_RESTART=yes ;;
       --mysql-standby) MYSQL_STANDBY=yes ;;
       --clickhouse-clones) CH_CLONES=yes ;;
+      --mongodb-clones) M_CLONES=yes ;;
       --no-mysql-standby) MYSQL_STANDBY=no ;;
       --mongodb-replica-set) MONGODB_REPLSET=yes ;;
       --no-mongodb-replica-set) MONGODB_REPLSET=no ;;

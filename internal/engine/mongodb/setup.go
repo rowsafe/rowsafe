@@ -170,6 +170,12 @@ func randomPassword() string {
 // password and saves it for the agent. adminUser may be empty on a server
 // without access control. It returns the roles given.
 func CreateLogin(ctx context.Context, env agent.EngineEnv, port int, adminUser, adminPassword string) ([]string, error) {
+	return CreateLoginWith(ctx, env, port, adminUser, adminPassword, false)
+}
+
+// CreateLoginWith is CreateLogin; with clones the user also gets the
+// restore role, so the (empty) server can receive clones.
+func CreateLoginWith(ctx context.Context, env agent.EngineEnv, port int, adminUser, adminPassword string, clones bool) ([]string, error) {
 	c, err := adminClient(ctx, port, adminUser, adminPassword)
 	if err != nil {
 		return nil, err
@@ -183,6 +189,10 @@ func CreateLogin(ctx context.Context, env agent.EngineEnv, port int, adminUser, 
 		bson.D{{Key: "role", Value: "readAnyDatabase"}, {Key: "db", Value: "admin"}},
 	}
 	names := []string{"backup", "clusterMonitor", "readAnyDatabase"}
+	if clones {
+		roles = append(roles, bson.D{{Key: "role", Value: "restore"}, {Key: "db", Value: "admin"}})
+		names = append(names, "restore")
+	}
 	// A role of its own for what Rowsafe does beyond reading: write a Mark
 	// into the oplog, stop an operation you ask it to stop, and put
 	// documents back when you bring them back from a copy.

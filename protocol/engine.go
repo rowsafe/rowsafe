@@ -204,6 +204,7 @@ var EngineCapabilities = map[string]EngineFeatures{
 		Backups: true, PointInTime: true, Proof: true,
 		RewindCopy: true, RewindRows: true, Marks: true,
 		Monitoring: true, Fixes: true,
+		Fork: true, // clones copied into an empty server (fork.go in internal/engine/mongodb)
 	},
 	// ClickHouse (internal/engine/clickhouse; clickhouse.go): BACKUP
 	// through the agent's encrypting gateway, Proof, Rewind copies and
