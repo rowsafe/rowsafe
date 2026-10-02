@@ -60,7 +60,7 @@ func (e *Engine) Tasks() []string {
 		protocol.TaskInspect, protocol.TaskAdopt, protocol.TaskCheck, protocol.TaskBackup, protocol.TaskDrill,
 		protocol.TaskRestorePoint, protocol.TaskMaintenance,
 		protocol.TaskRewindCopy, protocol.TaskRewindDrop, protocol.TaskRewindCompare, protocol.TaskRewindRows,
-		protocol.TaskPreviewMigration, protocol.TaskCopySchema,
+		protocol.TaskPreviewMigration, protocol.TaskCopySchema, protocol.TaskSafeCopy,
 	}
 }
 
@@ -111,6 +111,12 @@ func (e *Engine) Run(ctx context.Context, env agent.EngineEnv, task *protocol.Ta
 		return nilIfNil(e.backup(ctx, env, db, p, tl))
 	case protocol.TaskDrill:
 		return nilIfNil(e.drill(ctx, env, db, task.ID, tl))
+	case protocol.TaskSafeCopy:
+		var p protocol.SafeCopyParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.safeCopy(ctx, env, db, p, tl))
 	case protocol.TaskCopySchema:
 		return nilIfNil(e.copySchema(ctx, env, db))
 	case protocol.TaskPreviewMigration:

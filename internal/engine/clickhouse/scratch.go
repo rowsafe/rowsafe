@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"crypto/rand"
+	"crypto/tls"
+	"net/http"
 
 	"github.com/rowsafe/rowsafe/internal/agent"
 )
@@ -85,6 +87,20 @@ type scratchState struct {
 	Macros   map[string]string `json:"macros,omitempty"`
 	// Keeper runs an embedded ClickHouse Keeper (replicated tables).
 	Keeper bool `json:"keeper,omitempty"`
+	// Open makes it a safe copy (copies_safe.go): reachable over TLS only.
+	Open *openConf `json:"open,omitempty"`
+}
+
+// openConf opens a scratch server as a safe copy: the native protocol
+// over TLS on Port at Listen ("*" or one address), the agent's own login
+// over HTTPS on 127.0.0.1, and the copy's login only from Networks. Plain
+// ports are closed: listen_host applies to every port.
+type openConf struct {
+	Listen   string   `json:"listen"`
+	Port     int      `json:"port"`
+	Role     string   `json:"role"`
+	Verifier string   `json:"verifier,omitempty"` // sha256:<hex>; no login until it is set
+	Networks []string `json:"networks"`
 }
 
 func (s scratch) dataDir() string   { return filepath.Join(s.Dir, "data") }
@@ -157,7 +173,14 @@ func (s scratch) client() (*client, error) {
 		return nil, errors.New("the temporary ClickHouse server was never started")
 	}
 	u := &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(st.HTTPPort)), Path: "/"}
-	return newClient(u, Login{User: "default", Password: st.Password}), nil
+	c := newClient(u, Login{User: "default", Password: st.Password})
+	if st.Open != nil {
+		// A safe copy has no plain port: HTTPS on loopback, with the copy's
+		// own certificate (made here).
+		u.Scheme = "https"
+		c.http = &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, Timeout: 0}
+	}
+	return c, nil
 }
 
 // freePorts finds n free TCP ports on 127.0.0.1.
@@ -236,10 +259,21 @@ func (s scratch) writeConfig() (scratchState, error) {
   <zookeeper><node><host>127.0.0.1</host><port>%[3]d</port></node></zookeeper>
   <distributed_ddl><path>/clickhouse/task_queue/ddl</path></distributed_ddl>`, d, ports[1], ports[2], ports[3], randomPassword())
 	}
+	listen := "<listen_host>127.0.0.1</listen_host>\n  <http_port>" + strconv.Itoa(ports[0]) + "</http_port>"
+	if o := st.Open; o != nil {
+		hosts := "<listen_host>127.0.0.1</listen_host><listen_host>" + xmlText(o.Listen) + "</listen_host>"
+		if o.Listen == "*" {
+			hosts = "<listen_host>0.0.0.0</listen_host><listen_host>::</listen_host><listen_try>1</listen_try>"
+		}
+		listen = fmt.Sprintf(`%s
+  <https_port>%d</https_port>
+  <tcp_port_secure>%d</tcp_port_secure>
+  <openSSL><server><certificateFile>%[4]s/server.crt</certificateFile><privateKeyFile>%[4]s/server.key</privateKeyFile><verificationMode>none</verificationMode><loadDefaultCAFile>false</loadDefaultCAFile><disableProtocols>sslv2,sslv3,tlsv1,tlsv1_1</disableProtocols><preferServerCiphers>true</preferServerCiphers></server></openSSL>`,
+			hosts, ports[0], o.Port, d)
+	}
 	conf := fmt.Sprintf(`<clickhouse>
   <logger><level>warning</level><log>%[1]s/log/clickhouse-server.log</log><errorlog>%[1]s/log/clickhouse-server.err.log</errorlog><size>10M</size><count>2</count><console>0</console></logger>
-  <listen_host>127.0.0.1</listen_host>
-  <http_port>%[2]d</http_port>
+  %[2]s
   <path>%[1]s/data/</path>
   <tmp_path>%[1]s/tmp/</tmp_path>
   <user_files_path>%[1]s/user_files/</user_files_path>
@@ -254,25 +288,11 @@ func (s scratch) writeConfig() (scratchState, error) {
   <macros>%[3]s</macros>%[4]s
   <send_crash_reports><enabled>false</enabled></send_crash_reports>
 </clickhouse>
-`, d, ports[0], mx.String(), keeper)
-	sum := sha256.Sum256([]byte(st.Password))
-	users := fmt.Sprintf(`<clickhouse>
-  <profiles><default>
-    <max_bytes_before_external_group_by>1000000000</max_bytes_before_external_group_by>
-    <max_bytes_before_external_sort>1000000000</max_bytes_before_external_sort>
-  </default></profiles>
-  <users><default>
-    <password_sha256_hex>%s</password_sha256_hex>
-    <networks><ip>127.0.0.1</ip><ip>::1</ip></networks>
-    <profile>default</profile><quota>default</quota>
-  </default></users>
-  <quotas><default/></quotas>
-</clickhouse>
-`, hex.EncodeToString(sum[:]))
+`, d, listen, mx.String(), keeper)
 	if err := os.WriteFile(s.config(), []byte(conf), 0o600); err != nil {
 		return st, err
 	}
-	if err := os.WriteFile(filepath.Join(s.Dir, "users.xml"), []byte(users), 0o600); err != nil {
+	if err := s.writeUsers(st); err != nil {
 		return st, err
 	}
 	return st, s.saveState(st)
@@ -307,7 +327,9 @@ func (s scratch) start(ctx context.Context, env agent.EngineEnv) (*client, error
 	for {
 		err := c.ping(ctx)
 		if err == nil {
-			_ = c.exec(ctx, "SYSTEM STOP MERGES", nil)
+			if st, _ := s.loadState(); st.Open == nil {
+				_ = c.exec(ctx, "SYSTEM STOP MERGES", nil) // a safe copy is used like a server
+			}
 			return c, nil
 		}
 		if time.Now().After(deadline) || ctx.Err() != nil {
@@ -403,4 +425,42 @@ func (s scratch) remove() (int64, error) {
 		return 0, err
 	}
 	return size, nil
+}
+
+// copyUserXML is the safe copy's login in users.xml: only from the allowed
+// networks, and only once a password is set.
+func copyUserXML(o *openConf) string {
+	if o == nil || o.Verifier == "" {
+		return ""
+	}
+	var nets strings.Builder
+	for _, n := range o.Networks {
+		nets.WriteString("<ip>" + xmlText(n) + "</ip>")
+	}
+	return fmt.Sprintf(`
+  <%[1]s>
+    <password_sha256_hex>%[2]s</password_sha256_hex>
+    <networks>%[3]s</networks>
+    <profile>default</profile><quota>default</quota>
+  </%[1]s>`, o.Role, strings.TrimPrefix(o.Verifier, "sha256:"), nets.String())
+}
+
+// writeUsers writes users.xml: the agent's login on loopback, and a safe
+// copy's login (copyUserXML).
+func (s scratch) writeUsers(st scratchState) error {
+	sum := sha256.Sum256([]byte(st.Password))
+	users := fmt.Sprintf(`<clickhouse>
+  <profiles><default>
+    <max_bytes_before_external_group_by>1000000000</max_bytes_before_external_group_by>
+    <max_bytes_before_external_sort>1000000000</max_bytes_before_external_sort>
+  </default></profiles>
+  <users><default>
+    <password_sha256_hex>%s</password_sha256_hex>
+    <networks><ip>127.0.0.1</ip><ip>::1</ip></networks>
+    <profile>default</profile><quota>default</quota>
+  </default>%s</users>
+  <quotas><default/></quotas>
+</clickhouse>
+`, hex.EncodeToString(sum[:]), copyUserXML(st.Open))
+	return os.WriteFile(filepath.Join(s.Dir, "users.xml"), []byte(users), 0o600)
 }
