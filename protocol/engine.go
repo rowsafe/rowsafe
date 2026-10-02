@@ -193,26 +193,40 @@ var EngineCapabilities = map[string]EngineFeatures{
 		Fork: true, MoveIn: true, SecondCopy: true,
 	},
 	// MySQL and MariaDB (internal/engine/mysql): restarts through the root
-	// helper or the container control service; no rewind in place,
-	// standby, pooling, files or updates yet.
+	// helper or the container control service, rewinds in place (root
+	// helper, native installs); no standby, pooling, files or updates yet.
 	EngineMySQL:   mysqlFeatures,
 	EngineMariaDB: mysqlFeatures,
 	// MongoDB (internal/engine/mongodb): mongodump + oplog copying, Proof,
 	// Rewind copies and bringing documents back, Marks, Pulse, stopping a
-	// long operation and restarts (root helper). No rewind in place,
-	// standby, pooling, files or updates yet.
+	// long operation, restarts (root helper) and rewinds in place
+	// (collection renames). No standby, pooling, files or updates yet.
 	EngineMongoDB: {
 		Backups: true, PointInTime: true, Proof: true,
-		RewindCopy: true, RewindRows: true, Marks: true,
+		RewindCopy: true, RewindRows: true, RewindInPlace: true, Marks: true,
 		Monitoring: true, Fixes: true, Restart: true,
 	},
 	// ClickHouse (internal/engine/clickhouse; clickhouse.go): BACKUP
 	// through the agent's encrypting gateway, Proof, Rewind copies and
 	// bringing rows back, Marks, Pulse and stopping a query or a mutation.
-	// Restarts through the root helper (native installs). No restores to
-	// any second (ClickHouse keeps no log of changes), no rewind in place,
-	// standby, pooling, files or updates yet.
+	// Restarts through the root helper (native installs), rewinds in place
+	// to a backup or a Mark (partition swaps). No restores to any second
+	// (ClickHouse keeps no log of changes), no standby, pooling, files or
+	// updates yet.
 	EngineClickHouse: clickhouseFeatures,
+}
+
+// RewindInPlaceStopsServer reports whether rewinding a database of engine
+// in place stops and starts its server (PostgreSQL, MySQL, MariaDB: through
+// the root helper or the container control service, which root must
+// allow). MongoDB and ClickHouse swap the data through the database itself
+// and need no such permission.
+func RewindInPlaceStopsServer(engine string) bool {
+	switch NormalizeEngine(engine) {
+	case EngineMongoDB, EngineClickHouse:
+		return false
+	}
+	return true
 }
 
 // Features is the engine's EngineCapabilities entry ("" is PostgreSQL); an

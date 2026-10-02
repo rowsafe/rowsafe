@@ -630,7 +630,7 @@ func (a *Agent) reportInterrupted(ctx context.Context) {
 	cleanup := "any scratch drill cluster has been removed"
 	switch t.Type {
 	case protocol.TaskRewindInPlace, protocol.TaskRewindUndo:
-		cleanup = "the interrupted rewind was rolled back when the agent started again: PostgreSQL runs on the data it had before (see the agent's log)"
+		cleanup = "the interrupted rewind was rolled back when the agent started again: the database runs on the data it had before (see the agent's log)"
 	case protocol.TaskRewindCopy:
 		cleanup = "the half-restored copy has been removed"
 	case protocol.TaskPreviewMigration, protocol.TaskSafeCopy:

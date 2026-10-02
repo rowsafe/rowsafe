@@ -59,5 +59,5 @@ var mysqlFeatures = EngineFeatures{
 	Backups: true, PointInTime: true, Proof: true,
 	RewindCopy: true, RewindRows: true, Marks: true,
 	Monitoring: true, Fixes: true,
-	Restart: true,
+	Restart: true, RewindInPlace: true,
 }
