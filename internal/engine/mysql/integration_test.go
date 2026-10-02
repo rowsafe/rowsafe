@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -174,6 +175,42 @@ func TestIntegration(t *testing.T) {
 		t.Fatalf("drill: %+v", dr)
 	}
 	t.Logf("drill: %+v", dr)
+
+	// Guard: a migration preview on a copy; production is untouched.
+	pv := must(protocol.TaskPreviewMigration, protocol.PreviewParams{PreviewID: "p1", SQL: "-- add a column\n" +
+		"ALTER TABLE orders ADD COLUMN status VARCHAR(10) DEFAULT 'new';\n" +
+		"ALTER TABLE orders MODIFY COLUMN customer VARCHAR(200) NOT NULL;\n" +
+		"UPDATE orders SET status = 'old' WHERE id < 1000;\n" +
+		"CREATE INDEX orders_status ON orders (status);\n" +
+		"DROP TABLE nokey;\n" +
+		"GRANT SELECT ON shop.* TO 'reporting'@'%';\n" +
+		"ALTER TABLE items ADD COLUMN sku VARCHAR(5);\n"}).(*protocol.PreviewResult)
+	t.Logf("preview: %s", pv.Summary)
+	if pv.DB != "shop" || pv.Verdict != protocol.PreviewFailed || pv.Error == nil || pv.Error.Statement != 7 || pv.Error.Code != "1060" {
+		t.Fatalf("preview: %+v %+v", pv, pv.Error)
+	}
+	if s := pv.Statements[1]; len(s.Rewrites) != 1 || s.Rewrites[0].Name != "shop.orders" || len(s.Locks) != 1 || s.Locks[0].Blocks != "writes" {
+		t.Errorf("modify column: %+v", s)
+	}
+	if s := pv.Statements[2]; s.Rows == nil || *s.Rows == 0 {
+		t.Errorf("update: %+v", s)
+	}
+	if s := pv.Statements[3]; len(s.IndexBuilds) != 1 {
+		t.Errorf("create index: %+v", s)
+	}
+	if s := pv.Statements[4]; len(s.Dropped) != 1 || s.Dropped[0].Name != "shop.nokey" {
+		t.Errorf("drop table: %+v", s)
+	}
+	if s := pv.Statements[5]; s.Ran {
+		t.Errorf("grant ran on the copy: %+v", s)
+	}
+	if !slices.ContainsFunc(pv.Findings, func(f protocol.PreviewFinding) bool { return f.Rule == "partial_ddl" }) {
+		t.Errorf("findings: %+v", pv.Findings)
+	}
+	var cols int
+	if err := adb.QueryRow("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = 'shop' AND table_name = 'orders' AND column_name = 'status'").Scan(&cols); err != nil || cols != 0 {
+		t.Fatalf("the preview changed production: %v %d", err, cols)
+	}
 
 	// Rewind: a copy as it was before the accident.
 	cr := must(protocol.TaskRewindCopy, protocol.RewindCopyParams{CopyID: "c1",

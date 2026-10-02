@@ -406,7 +406,7 @@ func (s *server) scratchArgs(mysqld string, dir string, m manifest) []string {
 
 // startScratch starts the private server on dir/data and waits until it
 // answers (up to timeout).
-func (s *server) startScratch(ctx context.Context, dir string, m manifest, timeout time.Duration) (*scratch, error) {
+func (s *server) startScratch(ctx context.Context, dir string, m manifest, timeout time.Duration, extra ...string) (*scratch, error) {
 	mysqld, err := s.tool("server")
 	if err != nil {
 		return nil, fmt.Errorf("the %s server binary isn't installed here: %w", s.flavor.display(), err)
@@ -420,7 +420,7 @@ func (s *server) startScratch(ctx context.Context, dir string, m manifest, timeo
 		}
 	}
 	sc := &scratch{Dir: dir, DataDir: filepath.Join(dir, "data"), Socket: filepath.Join(dir, "socket", "mysqld.sock"),
-		Args: append(slicesClone(s.env.LowPriority), s.scratchArgs(mysqld, dir, m)...)}
+		Args: append(append(slicesClone(s.env.LowPriority), s.scratchArgs(mysqld, dir, m)...), extra...)}
 	if err := sc.start(); err != nil {
 		return nil, err
 	}
