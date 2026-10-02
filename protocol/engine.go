@@ -207,6 +207,7 @@ var EngineCapabilities = map[string]EngineFeatures{
 		Recommendations: true, // profiler, $indexStats (internal/engine/mongodb/insights.go)
 		Logs:            true, // the structured log, 4.4+ (internal/engine/mongodb/logs.go)
 		FindMoment:      true, // the oplog in the bucket (internal/engine/mongodb/moment.go)
+		DBAdmin:         true, Security: true, Files: true, SecondCopy: true,
 	},
 	// ClickHouse (internal/engine/clickhouse; clickhouse.go): BACKUP
 	// through the agent's encrypting gateway, Proof, Rewind copies and

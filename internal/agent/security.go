@@ -62,7 +62,7 @@ func (a *Agent) securityLoop(ctx context.Context) {
 		}
 		batch := protocol.SecurityReportBatch{}
 		for _, db := range dbs {
-			if isPostgres(db) { // the security check reads PostgreSQL's own settings
+			if isPostgres(db) || engineSecurity(db) != nil { // security_engines.go for the other engines
 				batch.Reports = append(batch.Reports, a.securityReport(ctx, db))
 			}
 		}
@@ -97,7 +97,13 @@ func (a *Agent) securityLoop(ctx context.Context) {
 func (a *Agent) securityReport(ctx context.Context, db protocol.DatabaseSpec) protocol.SecurityReport {
 	ctx, cancel := context.WithTimeout(ctx, securityTimeout)
 	defer cancel()
-	rep, err := a.scanSecurity(ctx, db)
+	var rep protocol.SecurityReport
+	var err error
+	if isPostgres(db) {
+		rep, err = a.scanSecurity(ctx, db)
+	} else {
+		rep, err = a.scanEngineSecurity(ctx, db)
+	}
 	rep.DatabaseID = db.ID
 	rep.CollectedAt = time.Now().UTC()
 	if err != nil {

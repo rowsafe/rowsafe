@@ -94,6 +94,10 @@ func (a *Agent) filesRestore(ctx context.Context, db protocol.DatabaseSpec, p pr
 		return nil, errors.New("choose the one folder the paths are in")
 	}
 	var refs []string
+	if p.Mode == protocol.FilesRestoreReferenced && !isPostgres(db) {
+		return nil, fmt.Errorf("restoring the files a table column points to works for PostgreSQL; for %s, restore the missing files or chosen paths",
+			protocol.EngineDisplayName(db.Engine))
+	}
 	if p.Mode == protocol.FilesRestoreReferenced {
 		refs, err = a.referencedPaths(ctx, db, *p.Reference, tl)
 		if err != nil {

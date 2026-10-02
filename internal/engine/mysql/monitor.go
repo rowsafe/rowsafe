@@ -28,6 +28,7 @@ type monitorState struct {
 	sizesAt    time.Time
 	statsAt    time.Time
 	insightsAt time.Time
+	settingsAt time.Time
 	// serverStart is the server's start time, kept stable across samples
 	// (uptime has a one-second granularity): with a connection ID it names
 	// a session for a fix.
@@ -183,6 +184,12 @@ func (s *server) monitor(ctx context.Context) (*protocol.DatabaseMonitoring, err
 	if now.Sub(st.statsAt) >= 5*time.Minute {
 		dm.Statements, dm.QueryStats = s.statements(ctx, db, st, now)
 		st.statsAt = now
+	}
+	if now.Sub(st.settingsAt) >= 5*time.Minute {
+		if snap, err := s.settingsSnapshot(ctx, db); err == nil {
+			dm.Settings = snap
+			st.settingsAt = now
+		}
 	}
 	if now.Sub(st.insightsAt) >= 30*time.Minute {
 		if ins := insights(ctx, db, st.serverStart); ins != nil {

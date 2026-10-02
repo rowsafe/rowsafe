@@ -29,7 +29,8 @@ password, when asked for, is read from stdin (one line) and never stored.
 
   rowsafe-agent mongodb login --port PORT [--admin-user NAME]
       Create (or refresh) Rowsafe's MongoDB user "rowsafe" with a new random
-      password (roles backup, clusterMonitor, readAnyDatabase and
+      password (roles backup, clusterMonitor, readAnyDatabase,
+      userAdminAnyDatabase and dbAdminAnyDatabase for Databases & users, and
       rowsafeAgent: write a Mark, stop an operation, bring documents back)
       and save it for the agent. Exit 11: an administrator's login is
       needed; 12: that login was refused.

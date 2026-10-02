@@ -128,7 +128,8 @@ func UsersXML(env agent.EngineEnv, port int) (string, error) {
 	return fmt.Sprintf(`<!-- Rowsafe's ClickHouse user (written by the Rowsafe installer). It signs in from this server only.
      SELECT, BACKUP: back up every database and compare tables with a copy; INSERT: bring rows back when you ask;
      KILL QUERY, ALTER UPDATE, ALTER DELETE: stop a query or cancel a stuck change when you ask;
-     S3: write backups to the agent's encrypting gateway on this server. -->
+     S3: write backups to the agent's encrypting gateway on this server;
+     access management, and creating databases and tables WITH GRANT OPTION: Databases & users, only when you ask in the dashboard. -->
 <clickhouse>
   <users>
     <%[1]s>
@@ -139,13 +140,15 @@ func UsersXML(env agent.EngineEnv, port int) (string, error) {
       </networks>
       <profile>default</profile>
       <quota>default</quota>
+      <access_management>1</access_management>
       <grants>
         <query>GRANT %[3]s ON *.*</query>
+        <query>GRANT %[4]s ON *.* WITH GRANT OPTION</query>
       </grants>
     </%[1]s>
   </users>
 </clickhouse>
-`, LoginUser, hex.EncodeToString(sum[:]), grantsSQL()), nil
+`, LoginUser, hex.EncodeToString(sum[:]), grantsSQL(), chOwner+", CREATE DATABASE, DROP DATABASE"), nil
 }
 
 // CreateLogin creates (or refreshes) Rowsafe's user with SQL, with a new
@@ -181,6 +184,13 @@ func CreateLogin(ctx context.Context, env agent.EngineEnv, port int, adminUser, 
 	}
 	if err == nil {
 		err = c.exec(ctx, "GRANT "+grantsSQL()+" ON *.* TO "+quoteIdent(LoginUser), nil)
+	}
+	if err == nil {
+		// Databases & users: best effort, the dashboard explains what is
+		// missing when this administrator can't pass these rights on.
+		for _, q := range adminGrantsSQL(quoteIdent(LoginUser)) {
+			_ = c.exec(ctx, q, nil)
+		}
 	}
 	if err != nil {
 		if errCode(err) == codeAccessDenied || errCode(err) == 495 || strings.Contains(err.Error(), "readonly") ||

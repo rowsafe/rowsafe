@@ -36,7 +36,17 @@ import (
 //   - INSERT, UPDATE: bringing rows back from a copy, only when a person
 //     asks for it in the dashboard;
 //   - CONNECTION_ADMIN (MySQL) / CONNECTION ADMIN (MariaDB): ending a query
-//     or session that blocks others, only when a person applies that fix.
+//     or session that blocks others, only when a person applies that fix;
+//   - CREATE USER, the database-level privileges WITH GRANT OPTION (CREATE,
+//     DROP, ALTER, DELETE...): Databases & users, creating and removing
+//     databases and users and giving users access to databases, only when
+//     a person asks in the dashboard (dbadmin.go). The server's own
+//     accounts (root, mysql.*) are never changed: MySQL protects accounts
+//     with SYSTEM_USER from accounts without it;
+//   - SYSTEM_VARIABLES_ADMIN, PERSIST_RO_VARIABLES_ADMIN (MySQL): Tuning,
+//     SET PERSIST of the settings Rowsafe explains, when a person changes
+//     them (settings.go); SUPER on MariaDB, which needs it for SET GLOBAL
+//     and keeps Rowsafe's settings in its option file instead.
 
 // AccountOptions describe how to create Rowsafe's account.
 type AccountOptions struct {
@@ -166,11 +176,18 @@ func accountSQL(f flavor, version, password string) []string {
 	if f.mariadb() {
 		grants = []string{
 			"GRANT SELECT, INSERT, UPDATE, INDEX, SHOW VIEW, TRIGGER, RELOAD, PROCESS, LOCK TABLES, BINLOG MONITOR, CONNECTION ADMIN ON *.* TO " + user,
+			"GRANT " + ownerPrivileges + ", CREATE USER ON *.* TO " + user + " WITH GRANT OPTION",
+			// Tuning: MariaDB lets only SUPER run SET GLOBAL for most
+			// settings (settings.go keeps them in Rowsafe's option file too).
+			"GRANT SUPER ON *.* TO " + user,
 		}
 	} else {
 		grants = []string{
 			"GRANT SELECT, INSERT, UPDATE, INDEX, SHOW VIEW, TRIGGER, RELOAD, PROCESS, LOCK TABLES, REPLICATION CLIENT ON *.* TO " + user,
 			"GRANT BACKUP_ADMIN, CONNECTION_ADMIN ON *.* TO " + user,
+			// Tuning: SET PERSIST of the settings Rowsafe explains (settings.go).
+			"GRANT SYSTEM_VARIABLES_ADMIN, PERSIST_RO_VARIABLES_ADMIN ON *.* TO " + user,
+			"GRANT " + ownerPrivileges + ", CREATE USER ON *.* TO " + user + " WITH GRANT OPTION",
 		}
 	}
 	_ = version

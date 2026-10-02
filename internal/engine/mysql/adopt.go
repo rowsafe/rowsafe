@@ -87,7 +87,7 @@ func readConf(path string) map[string]string {
 func renderConf(settings map[string]string) string {
 	var b strings.Builder
 	b.WriteString("# Written by Rowsafe (https://rowsafe.sh): binary log settings for backups\n")
-	b.WriteString("# and restores to any second. Rowsafe only adds to this file.\n")
+	b.WriteString("# and restores to any second, and settings changed from Rowsafe's Tuning page.\n")
 	b.WriteString("[mysqld]\n")
 	keys := make([]string, 0, len(settings))
 	for k := range settings {

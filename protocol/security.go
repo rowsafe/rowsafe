@@ -64,6 +64,12 @@ const (
 	SecFirewall = "firewall"
 	// SecFirewallOff removes Rowsafe's firewall rule for the port.
 	SecFirewallOff = "firewall_off"
+	// SecDropAnonymous removes MySQL's anonymous accounts (empty user
+	// name).
+	SecDropAnonymous = "drop_anonymous_users"
+	// SecDropTestDatabase removes MySQL's sample "test" database when it
+	// has no tables, and the rule that lets every user use test databases.
+	SecDropTestDatabase = "drop_test_database"
 )
 
 // SecurityFixParams are the params of a security_fix task.
@@ -160,6 +166,45 @@ type SecurityReport struct {
 	Firewall FirewallState `json:"firewall"`
 	// Docker: PostgreSQL runs in a container next to a sidecar agent.
 	Docker bool `json:"docker,omitempty"`
+
+	// Engine is the database's engine ("" is PostgreSQL). For MySQL,
+	// MariaDB, MongoDB and ClickHouse, ListenAddresses, Port, SSL, Roles
+	// (Password: PasswordNone, PasswordWeak, PasswordSet, PasswordSocket),
+	// Clients, HostAddresses and the version are filled like PostgreSQL's,
+	// and the rest of what the check reads is in EngineSecurity.
+	Engine         string          `json:"engine,omitempty"`
+	EngineSecurity *EngineSecurity `json:"engine_security,omitempty"`
+}
+
+// EngineSecurity is what the security check reads from MySQL, MariaDB,
+// MongoDB and ClickHouse beyond what every engine shares.
+type EngineSecurity struct {
+	// RequireTLS: the server refuses connections without TLS (MySQL's
+	// require_secure_transport, MongoDB's net.tls.mode requireTLS).
+	RequireTLS bool `json:"require_tls,omitempty"`
+	// AuthDisabled: MongoDB runs without access control, so anyone who
+	// reaches it can read and change everything.
+	AuthDisabled bool `json:"auth_disabled,omitempty"`
+	// AnonymousUsers are MySQL accounts with an empty user name
+	// ("@localhost"): anyone may log in with any name.
+	AnonymousUsers []string `json:"anonymous_users,omitempty"`
+	// TestDatabase: MySQL's sample "test" database exists, which every
+	// user may often use; TestDatabaseTables is how many tables it has.
+	TestDatabase       bool `json:"test_database,omitempty"`
+	TestDatabaseTables int  `json:"test_database_tables,omitempty"`
+	// RemoteAdmins are administrator accounts that may log in from any
+	// address (MySQL root@'%', ClickHouse users with every privilege open
+	// to every network).
+	RemoteAdmins []string `json:"remote_admins,omitempty"`
+	// OpenNoPassword are users without a password that may log in from
+	// other servers (MySQL host '%', ClickHouse networks ::/0).
+	OpenNoPassword []string `json:"open_no_password,omitempty"`
+	// LocalInfile: MySQL lets clients make the server read files from the
+	// client's machine (local_infile ON).
+	LocalInfile bool `json:"local_infile,omitempty"`
+	// ConfigFile is the server's configuration file, when known (for "Do
+	// it yourself").
+	ConfigFile string `json:"config_file,omitempty"`
 }
 
 // CertInfo describes the server's TLS certificate (never its key).

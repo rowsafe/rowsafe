@@ -63,6 +63,7 @@ func (e *Engine) Tasks() []string {
 		protocol.TaskDrill, protocol.TaskRestorePoint, protocol.TaskMaintenance,
 		protocol.TaskRewindCopy, protocol.TaskRewindDrop, protocol.TaskRewindCompare, protocol.TaskRewindRows,
 		protocol.TaskIndexAdvisor, protocol.TaskFindMoment,
+		protocol.TaskDBAdmin, protocol.TaskSettings,
 	}
 }
 
@@ -137,6 +138,18 @@ func (e *Engine) Run(ctx context.Context, env agent.EngineEnv, task *protocol.Ta
 			return nil, err
 		}
 		return nilable(s.rewindRows(ctx, p, log))
+	case protocol.TaskSettings:
+		var p protocol.SettingsParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilable(s.settings(ctx, p, log))
+	case protocol.TaskDBAdmin:
+		var p protocol.DBAdminParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilable(s.dbadmin(ctx, task.ID, p, log))
 	}
 	return nil, fmt.Errorf("unsupported %s task %q", e.flavor.display(), task.Type)
 }
