@@ -110,3 +110,44 @@ func TestMongoFindings(t *testing.T) {
 		}
 	}
 }
+
+func TestParseMongoScript(t *testing.T) {
+	script := `// migration 3
+use shop
+db.orders.updateMany({ status: 'old', created: { $lt: ISODate("2025-01-01T00:00:00Z") } }, { $set: { archived: true, n: NumberLong(5), } });
+db.getCollection("audit-log").createIndex({ at: -1 }, { name: "at_1", expireAfterSeconds: 3600 })
+db.getSiblingDB('other').users.deleteMany({ email: /@test\.com$/i })
+db.createCollection("events")
+db.logs.drop()
+`
+	calls, err := ParseMongoScript(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"use", "db.orders.updateMany", "db.audit-log.createIndex", "db.users.deleteMany", "db.createCollection", "db.logs.drop"}
+	if len(calls) != len(want) {
+		t.Fatalf("%d calls: %+v", len(calls), calls)
+	}
+	for i, w := range want {
+		if calls[i].Name() != w {
+			t.Errorf("call %d = %s, want %s", i, calls[i].Name(), w)
+		}
+	}
+	if c := calls[1]; c.Line != 3 || len(c.Args) != 2 || c.Args[1] != `{"$set":{"archived":true,"n":{"$numberLong":"5"}}}` ||
+		c.Args[0] != `{"status":"old","created":{"$lt":{"$date":"2025-01-01T00:00:00Z"}}}` {
+		t.Errorf("updateMany: %+v", c)
+	}
+	if c := calls[3]; c.DB != "other" || c.Args[0] != `{"email":{"$regularExpression":{"pattern":"@test\\.com$","options":"i"}}}` {
+		t.Errorf("deleteMany: %+v", c)
+	}
+	for _, bad := range []string{
+		"for (const d of db.orders.find()) { db.orders.updateOne({_id: d._id}, {$set: {x: 1}}) }",
+		"const x = 1; db.orders.drop()",
+		"db.orders.updateMany({}, {$set: {a: require('child_process')}})",
+		"db.orders.find().forEach(printjson)",
+	} {
+		if _, err := ParseMongoScript(bad); err == nil {
+			t.Errorf("ParseMongoScript(%q) should fail", bad)
+		}
+	}
+}
