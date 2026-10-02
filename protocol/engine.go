@@ -10,10 +10,11 @@ const (
 	EngineMySQL      = "mysql"
 	EngineMariaDB    = "mariadb"
 	EngineMongoDB    = "mongodb"
+	EngineClickHouse = "clickhouse"
 )
 
 // Engines lists the known engines, PostgreSQL first.
-var Engines = []string{EnginePostgreSQL, EngineMySQL, EngineMariaDB, EngineMongoDB}
+var Engines = []string{EnginePostgreSQL, EngineMySQL, EngineMariaDB, EngineMongoDB, EngineClickHouse}
 
 // NormalizeEngine maps "" to PostgreSQL and lowercases s. It does not
 // validate: see ValidEngine.
@@ -43,6 +44,8 @@ func EngineDisplayName(engine string) string {
 		return "MariaDB"
 	case EngineMongoDB:
 		return "MongoDB"
+	case EngineClickHouse:
+		return "ClickHouse"
 	default:
 		return e
 	}
@@ -153,6 +156,12 @@ var EngineCapabilities = map[string]EngineFeatures{
 		RewindCopy: true, RewindRows: true, Marks: true,
 		Monitoring: true, Fixes: true,
 	},
+	// ClickHouse (internal/engine/clickhouse; clickhouse.go): BACKUP
+	// through the agent's encrypting gateway, Proof, Rewind copies and
+	// bringing rows back, Marks, Pulse and stopping a query or a mutation.
+	// No restores to any second (ClickHouse keeps no log of changes), no
+	// restart, rewind in place, standby, pooling, files or updates yet.
+	EngineClickHouse: clickhouseFeatures,
 }
 
 // Features is the engine's EngineCapabilities entry ("" is PostgreSQL); an
