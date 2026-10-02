@@ -59,6 +59,9 @@ const (
 // DefaultPoolerPort is where PgBouncer listens unless told otherwise.
 const DefaultPoolerPort = 6432
 
+// DefaultProxySQLPort is where apps connect to ProxySQL (MySQL, MariaDB).
+const DefaultProxySQLPort = 6033
+
 // PoolingSettings are the choices a person makes. Zero values mean
 // "Rowsafe picks" (the agent computes them from max_connections and the
 // server's CPUs; PoolingResult.Settings has the values used).

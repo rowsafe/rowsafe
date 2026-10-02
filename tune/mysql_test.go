@@ -23,7 +23,7 @@ func mysqlSnap() map[string]protocol.PGSetting {
 
 func TestMySQLTuner(t *testing.T) {
 	tu := For(protocol.EngineMySQL)
-	if tu == nil || For(protocol.EngineMongoDB) != nil {
+	if tu == nil || For("oracle") != nil {
 		t.Fatal("For")
 	}
 	in := Input{Host: protocol.SettingsHost{MemoryBytes: 16 * gib, CPUs: 4, Disk: protocol.DiskSSD, DataDiskBytes: 200 * gib}, Settings: mysqlSnap()}

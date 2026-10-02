@@ -146,6 +146,9 @@ func (s *server) dbadmin(ctx context.Context, taskID string, p protocol.DBAdminP
 		log.Printf("failed: %v", err)
 	} else {
 		log.Printf("%s", d.res.Summary)
+		if p.Action != protocol.DBAdminList {
+			s.syncPoolUsers(ctx, d.db) // ProxySQL learns about new users and passwords (pooling.go)
+		}
 	}
 	return d.res, err
 }

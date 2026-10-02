@@ -93,4 +93,28 @@ var mongoAdminExtra = func(t *testing.T, ctx context.Context, e *Engine, env age
 	mongoTuneExtra(t, ctx, e, env, db)
 }
 
-var mongoTuneExtra = func(t *testing.T, ctx context.Context, e *Engine, env agent.EngineEnv, db protocol.DatabaseSpec) {}
+var mongoTuneExtra = func(t *testing.T, ctx context.Context, e *Engine, env agent.EngineEnv, db protocol.DatabaseSpec) {
+	c, err := connectDB(ctx, env, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer disconnect(c)
+	snap, err := e.settingsSnapshot(ctx, env, c)
+	if err != nil || len(snap.Settings) != len(mongoSettings) {
+		t.Fatalf("snapshot %v %+v", err, snap)
+	}
+	t.Logf("settings %+v blocked %q", snap.Settings, snap.ChangeBlocked)
+	for name, v := range map[string]string{"wiredtiger_cache_size": "536870912", "slow_op_threshold_ms": "150", "transaction_lifetime_limit_seconds": "90"} {
+		if err := runtimeSet(ctx, c, name, v); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	snap, _ = e.settingsSnapshot(ctx, env, c)
+	got := map[string]string{}
+	for _, s := range snap.Settings {
+		got[s.Name] = s.Setting
+	}
+	if got["wiredtiger_cache_size"] != "536870912" || got["slow_op_threshold_ms"] != "150" || got["transaction_lifetime_limit_seconds"] != "90" {
+		t.Errorf("after runtime changes: %v", got)
+	}
+}

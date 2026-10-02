@@ -184,14 +184,11 @@ func (a *Agent) firewall(ctx context.Context, db protocol.DatabaseSpec, p protoc
 	if r["phase"] == "pending" {
 		// The rule is in place: confirm only if Rowsafe and PostgreSQL are
 		// still reachable, else the helper rolls it back by itself.
-		tl.Printf("rule in place; checking the agent still reaches Rowsafe and PostgreSQL")
+		tl.Printf("rule in place; checking the agent still reaches Rowsafe and %s", protocol.EngineDisplayName(db.Engine))
 		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		err := a.client.post(cctx, "/v1/agent/security", protocol.SecurityReportBatch{}, &protocol.SecurityAck{})
 		if err == nil {
-			var c interface{ Close(context.Context) error }
-			if c, err = a.securityTarget(db).Connect(cctx, "postgres"); err == nil {
-				_ = c.Close(cctx)
-			}
+			err = a.databaseReachable(cctx, db)
 		}
 		cancel()
 		if err != nil {
@@ -212,7 +209,8 @@ func (a *Agent) firewall(ctx context.Context, db protocol.DatabaseSpec, p protoc
 		return fmt.Errorf("changing the firewall failed: %s", msg)
 	}
 	if action == fwApply {
-		res.Summary = fmt.Sprintf("The firewall lets only %s reach PostgreSQL's port %d now. SSH and other ports are unchanged.", strings.Join(addrs, ", "), db.Port)
+		res.Summary = fmt.Sprintf("The firewall lets only %s reach %s's port %d now. SSH and other ports are unchanged.", strings.Join(addrs, ", "),
+			protocol.EngineDisplayName(db.Engine), db.Port)
 	} else {
 		res.Summary = fmt.Sprintf("Rowsafe's firewall rule for port %d is removed.", db.Port)
 	}
@@ -277,4 +275,23 @@ func (a *Agent) firewallRefresh(port int) ([]byte, bool) {
 		time.Sleep(restartPoll)
 	}
 	return nil, false
+}
+
+// databaseReachable checks the agent still reaches the database: a
+// connection for PostgreSQL, a monitoring sample for the other engines.
+func (a *Agent) databaseReachable(ctx context.Context, db protocol.DatabaseSpec) error {
+	if isPostgres(db) {
+		c, err := a.securityTarget(db).Connect(ctx, "postgres")
+		if err == nil {
+			_ = c.Close(ctx)
+		}
+		return err
+	}
+	name := protocol.NormalizeEngine(db.Engine)
+	e := engineFor(name)
+	if e == nil {
+		return unsupportedEngine(name)
+	}
+	_, err := e.Monitor(ctx, a.engineEnv(name), db)
+	return err
 }

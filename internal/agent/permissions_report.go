@@ -30,6 +30,7 @@ type PermissionPaths struct {
 	UpdatesAllowFile       string // updates-allowed: postgresql, security, reboot
 	PoolerAllowFile        string // pooler-allowed: "PORT" lines and "public"
 	FirewallAllowFile      string // firewall-allowed: "PORT" lines
+	TuningAllowFile        string // tuning-allowed: "ENGINE PATH" lines
 	OwnersFile             string // owners: the passkeys root paired (JSON)
 	AllowCommand           string // rowsafe-allow
 	PGRoot                 string // where PostgreSQL's versions are installed
@@ -44,6 +45,7 @@ func DefaultPermissionPaths() PermissionPaths {
 		UpdatesAllowFile:       env("ROWSAFE_UPDATE_ALLOW_FILE", "/etc/rowsafe/updates-allowed"),
 		PoolerAllowFile:        env("ROWSAFE_POOLER_ALLOW_FILE", "/etc/rowsafe/pooler-allowed"),
 		FirewallAllowFile:      env("ROWSAFE_FIREWALL_ALLOW_FILE", "/etc/rowsafe/firewall-allowed"),
+		TuningAllowFile:        env("ROWSAFE_TUNING_ALLOW_FILE", "/etc/rowsafe/tuning-allowed"),
 		OwnersFile:             env("ROWSAFE_PERMISSIONS_OWNERS_FILE", "/etc/rowsafe/owners"),
 		AllowCommand:           "/usr/local/sbin/rowsafe-allow",
 		PGRoot:                 "/usr/lib/postgresql",
@@ -87,15 +89,12 @@ var permHave = func(name string) bool {
 // server (the installer says the same).
 const (
 	permReasonPostgresOnly = "Rowsafe does this for PostgreSQL, and there is no PostgreSQL on this server"
+	permReasonTuning       = "Rowsafe needs this only for MongoDB and ClickHouse, and neither is installed here"
+	permReasonPooler       = "Rowsafe pools PostgreSQL (PgBouncer) and MySQL or MariaDB (ProxySQL), and neither is on this server"
 	permReasonNoCluster    = "pg_createcluster isn't installed (Debian and Ubuntu's postgresql-common)"
 	permReasonNoNft        = "nftables isn't installed"
 	permReasonNoApt        = "Rowsafe installs updates with apt (Debian and Ubuntu)"
 )
-
-// anyEnginePermissions work for every engine (MySQL, MariaDB, MongoDB and
-// ClickHouse restart through the same root helper; the server's security
-// updates and reboots are the server's); the others are PostgreSQL's.
-var anyEnginePermissions = []string{protocol.PermRestart, protocol.PermSecurityUpdates, protocol.PermReboot}
 
 // ReadPermissions reads what root allowed. It never fails: an unreadable
 // file counts as never answered.
@@ -114,6 +113,9 @@ func ReadPermissions(p PermissionPaths) *protocol.PermissionsReport {
 	}
 	if lines, ok := allowFileLines(p.FirewallAllowFile); ok {
 		answer[protocol.PermFirewall] = anyLine(lines, func(f []string) bool { return isPort(f[0]) })
+	}
+	if lines, ok := allowFileLines(p.TuningAllowFile); ok {
+		answer[protocol.PermTuning] = anyLine(lines, func(f []string) bool { return (f[0] == "mongodb" || f[0] == "clickhouse") && len(f) >= 2 })
 	}
 	if lines, ok := allowFileLines(p.UpdatesAllowFile); ok {
 		for perm, word := range map[string]string{
@@ -141,6 +143,14 @@ func ReadPermissions(p PermissionPaths) *protocol.PermissionsReport {
 	return r
 }
 
+// anyEnginePermission are the permissions a server without PostgreSQL may
+// have too (MySQL, MariaDB, MongoDB or ClickHouse): restarts through the
+// same root helper, the server's own security updates and reboots, the
+// firewall, tuning, and pooling (ProxySQL, MySQL and MariaDB only).
+var anyEnginePermission = map[string]bool{protocol.PermRestart: true, protocol.PermSecurityUpdates: true,
+	protocol.PermReboot: true, protocol.PermFirewall: true, protocol.PermTuning: true,
+	protocol.PermPooler: true, protocol.PermPoolerPublic: true}
+
 // permissionsUnavailable says which permissions this server can't have,
 // and why. One that is allowed is never listed.
 func permissionsUnavailable(p PermissionPaths, allowed []string) map[string]string {
@@ -149,10 +159,14 @@ func permissionsUnavailable(p PermissionPaths, allowed []string) map[string]stri
 	for _, name := range protocol.Permissions {
 		var why string
 		switch {
-		case len(pg) == 0 && !slices.Contains(anyEnginePermissions, name):
+		case len(pg) == 0 && !anyEnginePermission[name]:
 			why = permReasonPostgresOnly
 		case name == protocol.PermCreateCluster && !permHave("pg_createcluster"):
 			why = permReasonNoCluster
+		case len(pg) == 0 && (name == protocol.PermPooler || name == protocol.PermPoolerPublic) && !permHave("mysqld") && !permHave("mariadbd"):
+			why = permReasonPooler
+		case name == protocol.PermTuning && !permHave("mongod") && !permHave("clickhouse-server") && !permHave("clickhouse"):
+			why = permReasonTuning
 		case name == protocol.PermFirewall && !permHave("nft"):
 			why = permReasonNoNft
 		case (name == protocol.PermUpdates || name == protocol.PermSecurityUpdates || name == protocol.PermReboot) && !permHave("apt-get"):

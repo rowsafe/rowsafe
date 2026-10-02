@@ -775,14 +775,11 @@ func (a *Agent) storageLoop(ctx context.Context) {
 
 func (a *Agent) measureAll(ctx context.Context, force bool) {
 	for _, db := range a.watchedDatabases() {
-		if !isPostgres(db) {
-			continue // pgBackRest's measurement
-		}
 		for _, repo := range []int{protocol.RepoPrimary, protocol.RepoSecond} {
 			if ctx.Err() != nil {
 				return
 			}
-			if repo == protocol.RepoSecond && (!a.cfg.SecondCopy() || !a.secondCopyReady(db.Stanza)) {
+			if repo == protocol.RepoSecond && (!a.cfg.SecondCopy() || a.cfg.SecondCopyError() != "" || isPostgres(db) && !a.secondCopyReady(db.Stanza)) {
 				continue
 			}
 			key := storageKey(db.ID, repo)
@@ -792,7 +789,11 @@ func (a *Agent) measureAll(ctx context.Context, force bool) {
 			if seen && !force && time.Since(last.MeasuredAt) < storageMeasureEvery {
 				continue
 			}
-			r, ok := a.measure(ctx, db, repo)
+			measure := a.measure
+			if !isPostgres(db) {
+				measure = a.measureEngine // storage_engines.go
+			}
+			r, ok := measure(ctx, db, repo)
 			if !ok {
 				continue
 			}
