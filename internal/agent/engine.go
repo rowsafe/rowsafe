@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/rowsafe/rowsafe/internal/pgbackrest"
+	"github.com/rowsafe/rowsafe/pglog"
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
@@ -46,6 +47,24 @@ type Engine interface {
 // reports nothing.
 type EngineArchiver interface {
 	Archiver(ctx context.Context, env EngineEnv, db protocol.DatabaseSpec) (*protocol.ArchiverStats, error)
+}
+
+// EngineLogs is optionally implemented by an engine whose own log Pulse
+// reads (package pglog: the same reading, redaction and sending as
+// PostgreSQL's). LogSource says where db's log is and in which format
+// (pglog.FormatMySQLError, ...), or why it can't be read (Status.Problem).
+type EngineLogs interface {
+	LogSource(ctx context.Context, env EngineEnv, db protocol.DatabaseSpec) pglog.Source
+}
+
+// locateLog finds a non-PostgreSQL database's log (pglog.Options.Locate).
+func (a *Agent) locateLog(ctx context.Context, db protocol.DatabaseSpec) (pglog.Source, bool) {
+	name := protocol.NormalizeEngine(db.Engine)
+	e, ok := engineFor(name).(EngineLogs)
+	if !ok {
+		return pglog.Source{}, false
+	}
+	return e.LogSource(ctx, a.engineEnv(name), db), true
 }
 
 // EngineRewinds is optionally implemented by an engine with Rewind copies:

@@ -205,6 +205,7 @@ var EngineCapabilities = map[string]EngineFeatures{
 		RewindCopy: true, RewindRows: true, Marks: true,
 		Monitoring: true, Fixes: true,
 		Recommendations: true, // profiler, $indexStats (internal/engine/mongodb/insights.go)
+		Logs:            true, // the structured log, 4.4+ (internal/engine/mongodb/logs.go)
 	},
 	// ClickHouse (internal/engine/clickhouse; clickhouse.go): BACKUP
 	// through the agent's encrypting gateway, Proof, Rewind copies and

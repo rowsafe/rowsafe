@@ -66,6 +66,7 @@ var clickhouseFeatures = EngineFeatures{
 	RewindCopy: true, RewindRows: true, Marks: true,
 	Monitoring: true, Fixes: true,
 	Recommendations: true, // query log, table layout (internal/engine/clickhouse/insights.go)
+	Logs:            true, // the error log (internal/engine/clickhouse/logs.go)
 }
 
 // ClickHouseStatus is ClickHouse's own health detail

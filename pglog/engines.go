@@ -2,7 +2,10 @@ package pglog
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -526,4 +529,33 @@ func cmpOr(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// EngineFileSource describes another engine's log file: readable, or why
+// not (Status.Problem). settings are the engine's logging settings as read.
+func EngineFileSource(format, path string, settings map[string]string) Source {
+	src := Source{Format: format, Path: path, Location: time.Local}
+	src.Status = protocol.LogSource{Format: format, Path: path, Settings: settings}
+	if path == "" {
+		src.Status.Problem = protocol.LogProblemNotFound
+		return src
+	}
+	f, err := os.Open(path)
+	switch {
+	case err == nil:
+		f.Close()
+		src.Status.Readable = true
+	case errors.Is(err, fs.ErrPermission):
+		src.Status.Problem = protocol.LogProblemPermission
+		src.Status.Detail = fmt.Sprintf("%s isn't readable by the agent's user", path)
+	default:
+		src.Status.Problem = protocol.LogProblemNotFound
+		src.Status.Detail = fmt.Sprintf("%s isn't there (on this server, or in the agent's container)", path)
+	}
+	return src
+}
+
+// Unreadable is a source the agent can't read, with why.
+func Unreadable(format, problem, detail string, settings map[string]string) Source {
+	return Source{Format: format, Status: protocol.LogSource{Format: format, Problem: problem, Detail: detail, Settings: settings}}
 }
