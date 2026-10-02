@@ -95,7 +95,7 @@ const (
 // anyEnginePermissions work for every engine (MySQL, MariaDB, MongoDB and
 // ClickHouse restart through the same root helper; the server's security
 // updates and reboots are the server's); the others are PostgreSQL's.
-var anyEnginePermissions = []string{protocol.PermRestart, protocol.PermSecurityUpdates, protocol.PermReboot}
+var anyEnginePermissions = []string{protocol.PermRestart, protocol.PermUpdates, protocol.PermSecurityUpdates, protocol.PermReboot}
 
 // ReadPermissions reads what root allowed. It never fails: an unreadable
 // file counts as never answered.
@@ -121,7 +121,9 @@ func ReadPermissions(p PermissionPaths) *protocol.PermissionsReport {
 			protocol.PermSecurityUpdates: protocol.UpdateAllowSecurity,
 			protocol.PermReboot:          protocol.UpdateAllowReboot,
 		} {
-			answer[perm] = anyLine(lines, func(f []string) bool { return f[0] == word })
+			answer[perm] = anyLine(lines, func(f []string) bool {
+				return f[0] == word || perm == protocol.PermUpdates && f[0] == protocol.UpdateAllowDatabase
+			})
 		}
 	}
 

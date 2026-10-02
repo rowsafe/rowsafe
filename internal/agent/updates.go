@@ -98,6 +98,7 @@ func helperOK(res map[string]string) error {
 // allow word.
 var allowPermission = map[string]string{
 	protocol.UpdateAllowPostgres: protocol.PermUpdates,
+	protocol.UpdateAllowDatabase: protocol.PermUpdates,
 	protocol.UpdateAllowSecurity: protocol.PermSecurityUpdates,
 	protocol.UpdateAllowReboot:   protocol.PermReboot,
 }

@@ -30,3 +30,22 @@ func (e *Engine) Ready(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 	}
 	return "off", nil
 }
+
+var _ agent.EngineVersioner = (*Engine)(nil)
+
+// Version is the running server's version ("8.0.40", "10.11.9").
+func (e *Engine) Version(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec) (string, error) {
+	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	conn, err := e.server(env, db).open(cctx)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	var v string
+	if err := conn.QueryRowContext(cctx, `SELECT VERSION()`).Scan(&v); err != nil {
+		return "", err
+	}
+	short, _ := numericVersion(v)
+	return short, nil
+}
