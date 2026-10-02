@@ -205,7 +205,7 @@ var EngineCapabilities = map[string]EngineFeatures{
 	EngineMongoDB: {
 		Backups: true, PointInTime: true, Proof: true,
 		RewindCopy: true, RewindRows: true, RewindInPlace: true, Marks: true,
-		Monitoring: true, Fixes: true, Restart: true, Updates: true,
+		Monitoring: true, Fixes: true, Restart: true, Updates: true, Upgrades: true,
 		Recommendations: true, // profiler, $indexStats (internal/engine/mongodb/insights.go)
 		Logs:            true, // the structured log, 4.4+ (internal/engine/mongodb/logs.go)
 		FindMoment:      true, // the oplog in the bucket (internal/engine/mongodb/moment.go)

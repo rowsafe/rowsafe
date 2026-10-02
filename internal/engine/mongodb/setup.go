@@ -188,7 +188,8 @@ func CreateLogin(ctx context.Context, env agent.EngineEnv, port int, adminUser, 
 	}
 	names := []string{"backup", "clusterMonitor", "readAnyDatabase", "userAdminAnyDatabase", "dbAdminAnyDatabase"}
 	// A role of its own for what Rowsafe does beyond reading: write a Mark
-	// into the oplog, stop an operation you ask it to stop, put documents
+	// into the oplog, stop an operation you ask it to stop, finish a major
+	// upgrade you asked for (setFeatureCompatibilityVersion), put documents
 	// back when you bring them back from a copy, read the profiler's slow
 	// operations (query statistics) and turn the profiler on when you ask,
 	// and swap collections when you rewind the whole database in place
@@ -196,7 +197,7 @@ func CreateLogin(ctx context.Context, env agent.EngineEnv, port int, adminUser, 
 	// when you delete it).
 	privileges := bson.A{
 		bson.D{{Key: "resource", Value: bson.D{{Key: "cluster", Value: true}}},
-			{Key: "actions", Value: bson.A{"appendOplogNote", "killop", "inprog"}}},
+			{Key: "actions", Value: bson.A{"appendOplogNote", "killop", "inprog", "setFeatureCompatibilityVersion"}}},
 		bson.D{{Key: "resource", Value: bson.D{{Key: "db", Value: ""}, {Key: "collection", Value: ""}}},
 			{Key: "actions", Value: bson.A{"find", "insert", "update", "createCollection", "createIndex", "enableProfiler", "renameCollectionSameDB", "dropCollection"}}},
 		bson.D{{Key: "resource", Value: bson.D{{Key: "db", Value: ""}, {Key: "collection", Value: "system.profile"}}},
