@@ -142,6 +142,9 @@ func (s *server) restoreData(ctx context.Context, st *objStore, dir string, t re
 	if err != nil {
 		return nil, err
 	}
+	if err := checkSwitches(ctx, st, last, t); err != nil { // inplace.go
+		return nil, err
+	}
 	backups, err := chain(all, last)
 	if err != nil {
 		return nil, err

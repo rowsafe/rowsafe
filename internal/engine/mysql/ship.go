@@ -84,6 +84,7 @@ type shipper struct {
 	polled    bool
 	seen      time.Time
 	force     bool
+	restart   bool // the data was swapped (rewind in place): start over from the current file
 	wake      chan struct{}
 	done      chan struct{} // closed when the goroutine stops
 	store     *objStore
@@ -151,6 +152,14 @@ func (sh *shipper) run() {
 		case <-sh.wake:
 		}
 	}
+}
+
+// restartLog tells the shipper the server now runs on swapped data.
+func (sh *shipper) restartLog() {
+	sh.mu.Lock()
+	sh.restart = true
+	sh.mu.Unlock()
+	sh.kick(true)
 }
 
 // kick asks for a poll now; force uploads whatever waits.
@@ -246,6 +255,18 @@ func (sh *shipper) pollOnce(ctx context.Context) error {
 	s := sh.srv
 	force := sh.force
 	sh.force = false
+	if sh.restart && sh.loaded {
+		// The server runs on other data now (a rewind in place or its
+		// undo): its binary log starts over or continues an older one.
+		// Ship from its current file on; what was shipped stays.
+		sh.restart = false
+		sh.state.Start, sh.state.Gap = "", ""
+		sh.created, sh.pending = map[string]binlogFile{}, map[string]time.Time{}
+		if sh.db != nil {
+			sh.db.Close()
+			sh.db = nil
+		}
+	}
 	sh.mu.Unlock()
 
 	if sh.store == nil {
