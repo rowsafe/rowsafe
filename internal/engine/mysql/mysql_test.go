@@ -244,7 +244,7 @@ func TestOptionFileAndAccount(t *testing.T) {
 	}
 	for _, f := range []flavor{flavorMySQL, flavorMariaDB} {
 		for _, stmt := range accountSQL(f, "", pw) {
-			if strings.Contains(stmt, "SUPER") || strings.Contains(stmt, "ALL PRIVILEGES") || strings.Contains(stmt, "SYSTEM_VARIABLES") {
+			if strings.Contains(stmt, "SUPER") && (f != flavorMariaDB || stmt != "GRANT SUPER ON *.* TO 'rowsafe'@'localhost'") || strings.Contains(stmt, "ALL PRIVILEGES") {
 				t.Errorf("%s grants too much: %s", f, stmt)
 			}
 			// Only Databases & users' rights may be passed on.

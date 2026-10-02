@@ -223,3 +223,7 @@ func (c *Collector) settings(ctx context.Context, t Target, at time.Time) *proto
 	s.CollectedAt = at.UTC()
 	return s
 }
+
+// HostFacts reads the host's memory, CPUs and the disk of dataDir, for the
+// other engines' settings snapshots (procRoot "" is /proc).
+func HostFacts(procRoot, dataDir string) protocol.SettingsHost { return hostFacts(procRoot, dataDir) }

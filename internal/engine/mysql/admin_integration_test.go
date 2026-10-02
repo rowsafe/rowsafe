@@ -166,6 +166,48 @@ var adminExtra = func(t *testing.T, ctx context.Context, e *Engine, env agent.En
 	tuneExtra(t, ctx, e, env, spec, run)
 }
 
-// tuneExtra is where Tuning adds its checks.
+// tuneExtra: Tuning.
 var tuneExtra = func(t *testing.T, ctx context.Context, e *Engine, env agent.EngineEnv, spec protocol.DatabaseSpec, run func(string, any) (any, error)) {
+	if e.flavor.mariadb() {
+		t.Setenv("ROWSAFE_MYSQL_CONF_FILE", filepath.Join(t.TempDir(), "server.cnf"))
+	}
+	s := e.server(env, spec)
+	db, err := s.open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := s.settingsSnapshot(ctx, db)
+	db.Close()
+	if err != nil || len(snap.Settings) < 15 || snap.Host.MemoryBytes == 0 {
+		t.Fatalf("snapshot %v %+v", err, snap)
+	}
+	byName := map[string]protocol.PGSetting{}
+	for _, st := range snap.Settings {
+		byName[st.Name] = st
+	}
+	t.Logf("buffer pool %+v", byName["innodb_buffer_pool_size"])
+	res, err := run(protocol.TaskSettings, protocol.SettingsParams{Kind: protocol.SettingsKindSet, Changes: []protocol.SettingChange{
+		{Name: "innodb_io_capacity", Value: "400"}, {Name: "slow_query_log", Value: "on"}, {Name: "long_query_time", Value: "2"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := res.(*protocol.SettingsResult)
+	t.Logf("%s %+v pending %v", r.Summary, r.Applied, r.PendingRestart)
+	if len(r.Applied) != 3 || r.Applied[0].Previous == nil {
+		t.Fatalf("%+v", r)
+	}
+	if _, err := run(protocol.TaskSettings, protocol.SettingsParams{Kind: protocol.SettingsKindSet, Changes: []protocol.SettingChange{
+		{Name: "binlog_format", Value: "MIXED"}}}); err == nil {
+		t.Error("changed binlog_format")
+	}
+	// Undo.
+	var undo []protocol.SettingChange
+	for _, a := range r.Applied {
+		undo = append(undo, protocol.SettingChange{Name: a.Name, Value: *a.Previous})
+	}
+	res, err = run(protocol.TaskSettings, protocol.SettingsParams{Kind: protocol.SettingsKindRevert, Changes: undo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Log(res.(*protocol.SettingsResult).Summary)
 }
