@@ -85,9 +85,10 @@ type MongoProfiler struct {
 }
 
 // MaintMongoProfile turns MongoDB's profiler on at level 1 (slow
-// operations only, slowms SlowMs, default 100) in the databases DB names
-// ("" all with collections). It is a runtime setting: nothing restarts, and
-// it resets at the next restart unless the configuration file sets it.
+// operations only, over slowms: 100 ms unless the server sets another) in
+// the databases Tables names (none: every database where it is off). A
+// runtime setting: nothing restarts; it goes back to off at the next
+// restart unless the configuration file sets operationProfiling.mode.
 const MaintMongoProfile = "mongodb_profile"
 
 // ForeignKeyWithoutIndex: every DELETE or key UPDATE on the referenced

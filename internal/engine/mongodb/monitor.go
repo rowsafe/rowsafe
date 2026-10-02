@@ -39,6 +39,9 @@ type dbMonitor struct {
 	lastSizes time.Time
 	dbPath    string
 	opStarts  map[int]time.Time // opid -> start, as first seen
+	// insights.go
+	profTo     time.Time // the profiler is read up to here
+	insightsAt time.Time
 }
 
 func (e *Engine) monitorFor(id string) *dbMonitor {
@@ -181,6 +184,13 @@ func (e *Engine) sample(ctx context.Context, m *dbMonitor, dm *protocol.Database
 			}
 			metrics[collect.MDatabaseSizeBytes] = float64(total)
 			m.lastSizes = now
+		}
+		dm.Statements, dm.QueryStats = m.queryStats(ctx, now, queryTextOn()) // insights.go
+	}
+	if now.Sub(m.insightsAt) >= insightsEvery {
+		if ins := insights(ctx, c); ins != nil {
+			dm.Insights = ins
+			m.insightsAt = now
 		}
 	}
 	dm.Metrics = metrics

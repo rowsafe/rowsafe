@@ -184,13 +184,16 @@ func CreateLogin(ctx context.Context, env agent.EngineEnv, port int, adminUser, 
 	}
 	names := []string{"backup", "clusterMonitor", "readAnyDatabase"}
 	// A role of its own for what Rowsafe does beyond reading: write a Mark
-	// into the oplog, stop an operation you ask it to stop, and put
-	// documents back when you bring them back from a copy.
+	// into the oplog, stop an operation you ask it to stop, put documents
+	// back when you bring them back from a copy, read the profiler's slow
+	// operations (query statistics) and turn the profiler on when you ask.
 	privileges := bson.A{
 		bson.D{{Key: "resource", Value: bson.D{{Key: "cluster", Value: true}}},
 			{Key: "actions", Value: bson.A{"appendOplogNote", "killop", "inprog"}}},
 		bson.D{{Key: "resource", Value: bson.D{{Key: "db", Value: ""}, {Key: "collection", Value: ""}}},
-			{Key: "actions", Value: bson.A{"find", "insert", "update", "createCollection", "createIndex"}}},
+			{Key: "actions", Value: bson.A{"find", "insert", "update", "createCollection", "createIndex", "enableProfiler"}}},
+		bson.D{{Key: "resource", Value: bson.D{{Key: "db", Value: ""}, {Key: "collection", Value: "system.profile"}}},
+			{Key: "actions", Value: bson.A{"find"}}},
 	}
 	roleErr := admin.RunCommand(ctx, bson.D{{Key: "createRole", Value: loginRole}, {Key: "privileges", Value: privileges}, {Key: "roles", Value: bson.A{}}}).Err()
 	if roleErr != nil && commandCode(roleErr) == 51002 { // role exists: refresh it
