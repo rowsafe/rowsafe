@@ -69,6 +69,18 @@ const (
 	FeatureFiles         = "files"           // backups of the folders that go with a database
 	FeatureUpdates       = "updates"         // package updates and version upgrades
 	// FeatureDBAdmin ("dbadmin") is in dbadmin.go.
+
+	FeatureSettings         = "settings"          // Tuning: read and change settings, "Tune for this server"
+	FeatureSecurity         = "security"          // security checks and their fixes
+	FeatureIndexAdvice      = "index_advice"      // index recommendations, checked on a copy first
+	FeatureRecommendations  = "recommendations"   // schema, query and capacity recommendations
+	FeatureLogs             = "logs"              // the database's own logs (redacted) in Pulse, and forwarding
+	FeatureFindMoment       = "find_moment"       // find when rows changed (the restore point just before)
+	FeatureSafeCopies       = "safe_copies"       // masked copies and structure-only copies for development
+	FeatureMigrationPreview = "migration_preview" // Guard: run a migration on a copy first and report
+	FeatureFork             = "fork"              // clone the database to another server, as it was at any moment
+	FeatureMoveIn           = "move_in"           // move a database in from a managed provider
+	FeatureSecondCopy       = "second_copy"       // a second copy of the backups in another bucket
 )
 
 // EngineFeatures says which Rowsafe features work for an engine. The
@@ -91,6 +103,18 @@ type EngineFeatures struct {
 	// DBAdmin: Databases & users (create databases, users and extensions
 	// inside the server; dbadmin.go).
 	DBAdmin bool `json:"dbadmin"`
+
+	Settings         bool `json:"settings"`
+	Security         bool `json:"security"`
+	IndexAdvice      bool `json:"index_advice"`
+	Recommendations  bool `json:"recommendations"`
+	Logs             bool `json:"logs"`
+	FindMoment       bool `json:"find_moment"`
+	SafeCopies       bool `json:"safe_copies"`
+	MigrationPreview bool `json:"migration_preview"`
+	Fork             bool `json:"fork"`
+	MoveIn           bool `json:"move_in"`
+	SecondCopy       bool `json:"second_copy"`
 }
 
 // Has reports whether a feature (Feature* above) is supported; unknown
@@ -127,6 +151,28 @@ func (f EngineFeatures) Has(feature string) bool {
 		return f.Updates
 	case FeatureDBAdmin:
 		return f.DBAdmin
+	case FeatureSettings:
+		return f.Settings
+	case FeatureSecurity:
+		return f.Security
+	case FeatureIndexAdvice:
+		return f.IndexAdvice
+	case FeatureRecommendations:
+		return f.Recommendations
+	case FeatureLogs:
+		return f.Logs
+	case FeatureFindMoment:
+		return f.FindMoment
+	case FeatureSafeCopies:
+		return f.SafeCopies
+	case FeatureMigrationPreview:
+		return f.MigrationPreview
+	case FeatureFork:
+		return f.Fork
+	case FeatureMoveIn:
+		return f.MoveIn
+	case FeatureSecondCopy:
+		return f.SecondCopy
 	}
 	return false
 }
@@ -141,7 +187,10 @@ var EngineCapabilities = map[string]EngineFeatures{
 		RewindCopy: true, RewindRows: true, RewindInPlace: true,
 		Marks: true, Monitoring: true, Fixes: true, Restart: true,
 		Standby: true, Pooling: true, Files: true, Updates: true,
-		DBAdmin: true,
+		DBAdmin:  true,
+		Settings: true, Security: true, IndexAdvice: true, Recommendations: true,
+		Logs: true, FindMoment: true, SafeCopies: true, MigrationPreview: true,
+		Fork: true, MoveIn: true, SecondCopy: true,
 	},
 	// MySQL and MariaDB (internal/engine/mysql): no restart, rewind in
 	// place, standby, pooling, files or updates yet.
