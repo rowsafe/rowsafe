@@ -209,6 +209,7 @@ ALLOW_POOLER=''    # --allow-pooler (yes) / --no-allow-pooler (no); '' = ask onc
 ALLOW_POOLER_PUBLIC='' # --allow-pooler-public (yes) / --no-allow-pooler-public (no): PgBouncer on every address
 ALLOW_FIREWALL=''  # --allow-firewall (yes) / --no-allow-firewall (no); '' = ask once, on a terminal
 ALLOW_TUNING=''    # --allow-tuning (yes) / --no-allow-tuning (no): MongoDB and ClickHouse settings files
+POOLER_TARGET_ADD='' POOLER_TARGET_DEL='' # --allow-pooler-target / --no-allow-pooler-target ADDRESS:PORT (ProxySQL)
 ALLOW_UPDATES=''   # --allow-updates / --no-allow-updates (PostgreSQL updates and upgrades)
 ALLOW_SECURITY=''  # --allow-security-updates / --no-allow-security-updates
 ALLOW_REBOOT=''    # --allow-reboot / --no-allow-reboot
@@ -303,6 +304,9 @@ Options (when piping, pass them after `sh -s --`):
   --allow-tuning         allow Rowsafe to change MongoDB's or ClickHouse's settings when
                          you ask under Tuning, only in its own settings file
   --no-allow-tuning      turn that off
+  --allow-pooler-target ADDRESS:PORT    let ProxySQL send connections to the MySQL
+                         on another server (the primary after a standby's promotion)
+  --no-allow-pooler-target ADDRESS:PORT  turn that off
   --allow-updates        allow Rowsafe to install PostgreSQL updates and upgrade PostgreSQL
                          when you click Update or Upgrade and confirm (needs --allow-restart)
   --no-allow-updates     turn that off
@@ -4646,6 +4650,36 @@ install_pooler_units_for_engine() {
 PROXYSQL_SERVICE_FILE=/etc/systemd/system/rowsafe-proxysql.service
 PROXYSQL_PATH_FILE=/etc/systemd/system/rowsafe-proxysql.path
 
+# pooler_target_ok ADDRESS:PORT: an IPv4 or IPv6 address, or a host name,
+# and a port (IPv6 in brackets: [fd00::6]:3306).
+pooler_target_ok() {
+  _pt_host=${1%:*} _pt_port=${1##*:}
+  _pt_host=${_pt_host#[} _pt_host=${_pt_host%]}
+  case $_pt_port in '' | *[!0-9]* | 0*) return 1 ;; esac
+  [ "${#_pt_port}" -le 5 ] && [ "$_pt_port" -ge 1 ] && [ "$_pt_port" -le 65535 ] || return 1
+  printf '%s\n' "$_pt_host" | grep -Eqx '[0-9]{1,3}(\.[0-9]{1,3}){3}|[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*|[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?'
+}
+
+# pooler_target_change applies --allow-pooler-target / --no-allow-pooler-
+# target: the "target ADDRESS PORT" lines that let ProxySQL send
+# connections to another server (the primary after a standby's promotion).
+pooler_target_change() {
+  case $HOST_ENGINE in mysql | mariadb) ;; *) perm_refuse "pooler-target is for ProxySQL, in front of MySQL or MariaDB" ;; esac
+  [ -n "$(pooler_allowed_ports)" ] || perm_refuse "pooling isn't allowed on this server: allow it first (sudo rowsafe-allow pooler)"
+  _pt=${POOLER_TARGET_ADD:-$POOLER_TARGET_DEL}
+  _pt_host=${_pt%:*} _pt_port=${_pt##*:}
+  _pt_host=${_pt_host#[} _pt_host=${_pt_host%]}
+  _line="target $_pt_host $_pt_port"
+  _rest=$(grep -vxF "$_line" "$POOLER_ALLOW_FILE" || true)
+  if [ -n "$POOLER_TARGET_ADD" ]; then
+    printf '%s\n%s\n' "$_rest" "$_line" | awk 'NF' | write_file "$POOLER_ALLOW_FILE" 0644 root:root || true
+    perm_ok "ProxySQL may send connections to $_pt_host port $_pt_port (after a standby's promotion)"
+  else
+    printf '%s\n' "$_rest" | awk 'NF' | write_file "$POOLER_ALLOW_FILE" 0644 root:root || true
+    perm_ok "ProxySQL no longer sends connections to $_pt_host port $_pt_port"
+  fi
+}
+
 install_proxysql_units() {
   [ -x "$PERMISSIONS_HELPER" ] || install_permissions_helper
   [ -x "$PERMISSIONS_HELPER" ] || { warn "pooling needs root's copy of the agent ($PERMISSIONS_HELPER); run the installer again"; return 0; }
@@ -4761,6 +4795,8 @@ write_pooler_allow() {
     echo "# PORT"
     printf '%s\n' "$1"
     if [ "$2" = 1 ]; then echo public; fi
+    # Other servers ProxySQL may send connections to (rowsafe-allow pooler-target).
+    grep -s '^target ' "$POOLER_ALLOW_FILE" || true
   } | write_file "$POOLER_ALLOW_FILE" 0644 root:root || true
 }
 
@@ -5605,6 +5641,11 @@ Names:
   firewall           limit who can reach the database's port (never SSH or other ports)
   tuning             change MongoDB's or ClickHouse's settings, in Rowsafe's own file
 
+  sudo rowsafe-allow pooler-target ADDRESS PORT
+                           let ProxySQL send connections to the MySQL on another
+                           server (the new primary after a standby's promotion)
+  sudo rowsafe-allow --remove pooler-target ADDRESS PORT   stop that
+
 Turning one off also turns off what needs it.
 EOF
   if passkeys; then
@@ -5725,6 +5766,26 @@ case ${1:-} in
     # database questions. (Paths have no spaces: the installer refuses them.)
     # shellcheck disable=SC2086 # one word per argument
     exec env ROWSAFE_VERSION="$(installed_version)" "$installer" --no-setup $_args --allow-files
+    ;;
+esac
+
+# pooler-target ADDRESS PORT (ProxySQL may send connections to another server).
+case "${1:-} ${2:-}" in
+  "pooler-target "* | "--remove pooler-target")
+    _flag=--allow-pooler-target
+    if [ "$1" = --remove ]; then
+      _flag=--no-allow-pooler-target
+      shift
+    fi
+    [ $# = 3 ] || fail "use: sudo rowsafe-allow pooler-target ADDRESS PORT, e.g. sudo rowsafe-allow pooler-target 10.0.0.6 3306" 2
+    printf '%s\n' "$2" | grep -Eqx '[0-9]{1,3}(\.[0-9]{1,3}){3}|[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*|[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?' ||
+      fail "'$2' isn't an address: give the other server's IP address or host name" 2
+    case $3 in '' | *[!0-9]* | 0*) fail "'$3' isn't a port" 2 ;; esac
+    [ "${#3}" -le 5 ] && [ "$3" -le 65535 ] || fail "'$3' isn't a port" 2
+    _target=$2:$3
+    case $2 in *:*) _target="[$2]:$3" ;; esac
+    need_installer
+    exec "$installer" --permissions --no-prompt "$_flag" "$_target"
     ;;
 esac
 
@@ -5873,6 +5934,7 @@ permissions_main() {
     yes) allow_tuning ;;
     no) disallow_tuning ;;
   esac
+  [ -z "$POOLER_TARGET_ADD$POOLER_TARGET_DEL" ] || pooler_target_change
   [ "$ALLOW_RESTART" != no ] || disallow_restarts
   if [ "$ALLOW_FILES" = no ]; then
     disallow_files
@@ -8602,6 +8664,12 @@ main() {
       --no-allow-firewall) ALLOW_FIREWALL=no ;;
       --allow-tuning) ALLOW_TUNING=yes ;;
       --no-allow-tuning) ALLOW_TUNING=no ;;
+      --allow-pooler-target | --no-allow-pooler-target)
+        [ $# -ge 2 ] || die "$1 needs ADDRESS:PORT"
+        pooler_target_ok "$2" || die "$1: give the other server's address and MySQL port, e.g. 10.0.0.6:3306"
+        if [ "$1" = --allow-pooler-target ]; then POOLER_TARGET_ADD=$2; else POOLER_TARGET_DEL=$2; fi
+        shift
+        ;;
       --allow-pooler) ALLOW_POOLER=yes ;;
       --no-allow-pooler) ALLOW_POOLER=no ;;
       --allow-pooler-public) ALLOW_POOLER_PUBLIC=yes ;;
@@ -8674,7 +8742,7 @@ main() {
     if [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME$PROTECT_PORT$FILES_PATHS$MONGODB_REPLSET" ] || [ "$ALLOW_FILES" = yes ] || [ "$NO_FILES" = 1 ] || [ "$purge" = 1 ]; then
       perm_refuse "--permissions only changes what Rowsafe may do here: --allow-NAME, --no-allow-NAME and --no-allow-files (see --help)"
     fi
-  elif [ "$mode" != install ] && { [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME" ] || [ -n "$ALLOW_RESTART$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT$ALLOW_FIREWALL$ALLOW_TUNING$ALLOW_POOLER$ALLOW_POOLER_PUBLIC$ALLOW_CREATE_CLUSTER" ]; }; then
+  elif [ "$mode" != install ] && { [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME" ] || [ -n "$ALLOW_RESTART$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT$ALLOW_FIREWALL$ALLOW_TUNING$ALLOW_POOLER$ALLOW_POOLER_PUBLIC$ALLOW_CREATE_CLUSTER$POOLER_TARGET_ADD$POOLER_TARGET_DEL" ]; }; then
     die "--no-setup, --protect and the --allow- options only go with an install"
   fi
   if [ "$mode" != install ] && [ "$mode" != permissions ] && { [ -n "$FILES_PATHS" ] || [ -n "$ALLOW_FILES" ] || [ "$NO_FILES" = 1 ]; }; then

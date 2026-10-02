@@ -132,7 +132,7 @@ func TestRemoteTarget(t *testing.T) {
 	} {
 		if err := Check(bad, al); err == nil {
 			t.Errorf("accepted %+v", bad)
-		} else if bad.ID == "x2" && !strings.Contains(err.Error(), TargetLine("10.0.0.7", 3306)) {
+		} else if bad.ID == "x2" && !strings.Contains(err.Error(), ApproveCommand("10.0.0.7", 3306)) {
 			t.Errorf("no approval hint: %v", err)
 		}
 	}

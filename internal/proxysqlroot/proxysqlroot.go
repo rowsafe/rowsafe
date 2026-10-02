@@ -127,6 +127,12 @@ type Allow struct {
 	Targets map[string]bool
 }
 
+// ApproveCommand is how root lets ProxySQL send connections to host:port on
+// another server.
+func ApproveCommand(host string, port int) string {
+	return fmt.Sprintf("sudo rowsafe-allow pooler-target %s %d", host, port)
+}
+
 // TargetLine is the allow file line that lets ProxySQL send connections to
 // host:port on another server.
 func TargetLine(host string, port int) string { return fmt.Sprintf("target %s %d", host, port) }
@@ -210,8 +216,8 @@ func Check(r Request, al Allow) error {
 			return fmt.Errorf("invalid target %q:%d", r.TargetHost, r.Target)
 		}
 		if !al.Targets[targetKey(r.TargetHost, r.Target)] {
-			return fmt.Errorf("root didn't allow ProxySQL on this server to send connections to %s:%d (root allows it by adding the line %q to %s)",
-				r.TargetHost, r.Target, TargetLine(r.TargetHost, r.Target), DefaultAllowFile)
+			return fmt.Errorf("root didn't allow ProxySQL on this server to send connections to %s:%d. Root allows it on this server with: %s",
+				r.TargetHost, r.Target, ApproveCommand(r.TargetHost, r.Target))
 		}
 	case !ports[r.Target]:
 		return fmt.Errorf("port %d is not in the allow list: pooling it from Rowsafe is not allowed", r.Target)
