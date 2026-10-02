@@ -361,7 +361,11 @@ func copiesCreateCmd(ctx context.Context, c *client.Client, args []string) error
 		}
 		req.Masking, req.NoMaskingConfirm = protocol.MaskingNone, name
 	}
-	password, verifier, err := client.NewCopyPassword()
+	d, err := c.Database(ctx, name)
+	if err != nil {
+		return apiErr(err)
+	}
+	password, verifier, err := client.NewCopyPasswordFor(d.Engine)
 	if err != nil {
 		return err
 	}
@@ -455,7 +459,11 @@ func copiesPasswordCmd(ctx context.Context, c *client.Client, args []string) err
 	if err != nil {
 		return err
 	}
-	password, verifier, err := client.NewCopyPassword()
+	d, err := c.Database(ctx, name)
+	if err != nil {
+		return apiErr(err)
+	}
+	password, verifier, err := client.NewCopyPasswordFor(d.Engine)
 	if err != nil {
 		return err
 	}

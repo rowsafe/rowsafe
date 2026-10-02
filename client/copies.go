@@ -108,6 +108,8 @@ const passwordAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456
 // SCRAM-SHA-256 verifier. Send only the verifier
 // (CreateSafeCopyRequest.PasswordVerifier): PostgreSQL checks logins
 // against it, and nobody can log in knowing only the verifier.
+//
+// Deprecated: use NewCopyPasswordFor with the database's engine.
 func NewCopyPassword() (password, verifier string, err error) {
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
@@ -150,6 +152,16 @@ func ConnectionString(cp protocol.SafeCopy, password string) string {
 	}
 	u := url.URL{Scheme: "postgresql", Host: net.JoinHostPort(cp.Host, strconv.Itoa(cp.Port)), Path: "/" + cp.DB,
 		RawQuery: "sslmode=require"}
+	// TLS is required everywhere; like sslmode=require, the client doesn't
+	// check the copy's (usually self-signed) certificate.
+	switch protocol.NormalizeEngine(cp.Engine) {
+	case protocol.EngineMySQL, protocol.EngineMariaDB:
+		u.Scheme, u.RawQuery = "mysql", "ssl-mode=REQUIRED"
+	case protocol.EngineMongoDB:
+		u.Scheme, u.RawQuery = "mongodb", "authSource=admin&tls=true&tlsAllowInvalidCertificates=true&directConnection=true"
+	case protocol.EngineClickHouse:
+		u.Scheme, u.RawQuery = "clickhouse", "secure=true&skip_verify=true"
+	}
 	if password != "" {
 		u.User = url.UserPassword(cp.Role, password)
 	} else {

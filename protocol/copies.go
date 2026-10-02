@@ -415,6 +415,9 @@ type CreatePreviewRequest struct {
 type SafeCopy struct {
 	ID         string    `json:"id"`
 	DatabaseID string    `json:"database_id"`
+	// Engine is the database's engine ("" from older control planes:
+	// PostgreSQL); it shapes the connection string and the password form.
+	Engine string `json:"engine,omitempty"`
 	Status     string    `json:"status"`
 	Masked     bool      `json:"masked"`
 	CreatedBy  string    `json:"created_by,omitempty"`

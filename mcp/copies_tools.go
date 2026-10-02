@@ -238,7 +238,7 @@ func (t *tools) createSafeCopy(ctx context.Context, _ *sdk.CallToolRequest, in s
 	}
 	req := protocol.CreateSafeCopyRequest{Hours: in.Hours, AllowFrom: in.AllowFrom, Listen: in.Listen, DB: in.DB, Masking: protocol.MaskingRules}
 	// Locally (rowsafe mcp) the password is made here, on the user's
-	// machine, and Rowsafe only gets its SCRAM verifier. On the remote
+	// machine, and Rowsafe only gets its verifier (in the engine's own form). On the remote
 	// endpoint this code runs inside Rowsafe, which must never make or see
 	// a password: the copy starts without one and a person sets it in the
 	// dashboard, in their browser.
@@ -246,7 +246,7 @@ func (t *tools) createSafeCopy(ctx context.Context, _ *sdk.CallToolRequest, in s
 	if !t.opts.Remote {
 		var verifier string
 		var err error
-		if password, verifier, err = client.NewCopyPassword(); err != nil {
+		if password, verifier, err = client.NewCopyPasswordFor(d.Engine); err != nil {
 			return nil, CreateSafeCopyOutput{}, err
 		}
 		req.PasswordVerifier = verifier
