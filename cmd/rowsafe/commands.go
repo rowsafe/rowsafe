@@ -260,8 +260,10 @@ func showCmd(ctx context.Context, c *client.Client, args []string) error {
 	fmt.Printf("Retention:  %d full backups\n", d.RetentionFull)
 	fmt.Printf("Schedules:  full %q, diff %q, restore test %q (UTC)\n", d.ScheduleFull, d.ScheduleDiff, d.ScheduleDrill)
 	if in := d.Inspect; in != nil {
-		fmt.Printf("Postgres:   %s, %s, data directory %s\n", in.ServerVersion, humanBytes(in.TotalSizeBytes), in.DataDirectory)
-		fmt.Printf("Archiving:  archive_mode=%s archive_timeout=%ds\n", in.ArchiveMode, in.ArchiveTimeoutSeconds)
+		fmt.Printf("%-11s %s, %s, data directory %s\n", protocol.EngineDisplayName(d.Engine)+":", in.ServerVersion, humanBytes(in.TotalSizeBytes), in.DataDirectory)
+		if protocol.NormalizeEngine(d.Engine) == protocol.EnginePostgreSQL {
+			fmt.Printf("Archiving:  archive_mode=%s archive_timeout=%ds\n", in.ArchiveMode, in.ArchiveTimeoutSeconds)
+		}
 		if len(in.PendingRestart) > 0 {
 			fmt.Printf("Pending:    restart needed for %s\n", strings.Join(in.PendingRestart, ", "))
 		}

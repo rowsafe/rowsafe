@@ -230,6 +230,7 @@ func (s serverInfo) inspectResult() protocol.InspectResult {
 		dbs = []protocol.DBInfo{}
 	}
 	return protocol.InspectResult{
+		Engine:        protocol.EngineMongoDB,
 		ServerVersion: s.Version, VersionNum: s.VersionNum, DataDirectory: s.DBPath, ConfigFile: s.ConfigFile,
 		Port: s.Port, IsSuperuser: slices.Contains(s.Roles, "root@admin"), ArchiveMode: mode,
 		Databases: dbs, TotalSizeBytes: s.TotalBytes,

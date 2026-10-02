@@ -278,6 +278,7 @@ func (s serverInfo) inspectResult(port int) protocol.InspectResult {
 		dbs = []protocol.DBInfo{}
 	}
 	return protocol.InspectResult{
+		Engine:        protocol.EngineClickHouse,
 		ServerVersion: s.Version, VersionNum: s.VersionNum, DataDirectory: s.DataPath,
 		Port: port, IsSuperuser: slices.Contains(s.Grants, "ALL"), ArchiveMode: "off",
 		Databases: dbs, TotalSizeBytes: s.TotalBytes,
