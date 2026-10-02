@@ -25,23 +25,42 @@ func Class(typ string) string {
 	if strings.HasSuffix(t, "[]") {
 		return ClassOther
 	}
+	// ClickHouse wrappers: Nullable(String), LowCardinality(Nullable(String)).
+	for unwrapped := true; unwrapped; {
+		unwrapped = false
+		for _, w := range []string{"nullable(", "lowcardinality("} {
+			if strings.HasPrefix(t, w) && strings.HasSuffix(t, ")") {
+				t, unwrapped = strings.TrimSpace(t[len(w):len(t)-1]), true
+			}
+		}
+	}
 	base, _, _ := strings.Cut(t, "(")
 	base = strings.TrimSpace(base)
 	if i := strings.LastIndexByte(base, '.'); i >= 0 { // public.citext
 		base = base[i+1:]
 	}
+	// MySQL: "bigint unsigned", "int zerofill".
+	base = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(strings.TrimSuffix(base, " zerofill")), " unsigned"))
 	switch base {
-	case "text", "character varying", "varchar", "character", "char", "bpchar", "citext", "name":
+	case "text", "character varying", "varchar", "character", "char", "bpchar", "citext", "name",
+		"tinytext", "mediumtext", "longtext", "string", "fixedstring", // MySQL, ClickHouse
+		"nvarchar", "nchar":
 		return ClassText
-	case "json", "jsonb":
+	case "json", "jsonb", "object":
 		return ClassJSON
-	case "inet", "cidr":
+	case "inet", "cidr", "ipv4", "ipv6":
 		return ClassInet
-	case "smallint", "integer", "bigint", "int", "int2", "int4", "int8":
+	case "smallint", "integer", "bigint", "int", "int2", "int4", "int8",
+		"tinyint", "mediumint", // MySQL (tinyint(1) is a boolean: see below)
+		"int16", "int32", "int64", "int128", "int256", "uint8", "uint16", "uint32", "uint64", "uint128", "uint256":
+		if base == "tinyint" && strings.HasPrefix(t, "tinyint(1)") {
+			return ClassOther
+		}
 		return ClassInteger
-	case "numeric", "decimal", "real", "double precision", "float4", "float8":
+	case "numeric", "decimal", "real", "double precision", "float4", "float8",
+		"double", "float", "float32", "float64", "decimal32", "decimal64", "decimal128", "decimal256":
 		return ClassNumber
-	case "date":
+	case "date", "date32", "datetime", "datetime64":
 		return ClassDate
 	}
 	if strings.HasPrefix(base, "timestamp") {
