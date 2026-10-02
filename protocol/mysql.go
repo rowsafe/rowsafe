@@ -59,4 +59,5 @@ var mysqlFeatures = EngineFeatures{
 	Backups: true, PointInTime: true, Proof: true,
 	RewindCopy: true, RewindRows: true, Marks: true,
 	Monitoring: true, Fixes: true,
+	Standby: true, // seeded from the latest backup, binary log replication (standby_*.go in internal/engine/mysql)
 }
