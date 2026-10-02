@@ -56,6 +56,13 @@ func (a *Agent) reportMigrations(ctx context.Context, sources map[string]*pgx.Co
 		var status protocol.MigrationStatus
 		switch st.Phase {
 		case protocol.MigratePhaseCopying, protocol.MigratePhaseSyncing, protocol.MigratePhaseSwitching:
+			if !isPostgres(st.Database) {
+				var ok bool
+				if status, ok = a.engineMigrationStatus(ctx, st); !ok { // engine_migrate.go
+					continue
+				}
+				break
+			}
 			if st.Subscription == "" {
 				continue
 			}

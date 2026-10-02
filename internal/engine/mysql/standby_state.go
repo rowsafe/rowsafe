@@ -227,10 +227,23 @@ func (st replicaStatus) running() bool { return st.IORunning == "Yes" && st.SQLR
 // readReplicaStatus reads the replica status (column names differ between
 // MySQL 8.0.22+ and MariaDB/older MySQL).
 func (s *server) readReplicaStatus(ctx context.Context, db *sql.DB) (replicaStatus, error) {
+	return s.channelStatus(ctx, db, "")
+}
+
+// channelStatus is readReplicaStatus for a named replication channel
+// (MariaDB: a named connection); "" is the default one.
+func (s *server) channelStatus(ctx context.Context, db *sql.DB, channel string) (replicaStatus, error) {
 	var st replicaStatus
-	rows, err := db.QueryContext(ctx, "SHOW REPLICA STATUS")
+	q1, q2 := "SHOW REPLICA STATUS", "SHOW SLAVE STATUS"
+	if channel != "" {
+		q1, q2 = "SHOW REPLICA STATUS FOR CHANNEL "+quoteString(channel), "SHOW SLAVE STATUS FOR CHANNEL "+quoteString(channel)
+		if s.flavor.mariadb() {
+			q1, q2 = "SHOW SLAVE "+quoteString(channel)+" STATUS", "SHOW SLAVE "+quoteString(channel)+" STATUS"
+		}
+	}
+	rows, err := db.QueryContext(ctx, q1)
 	if err != nil {
-		rows, err = db.QueryContext(ctx, "SHOW SLAVE STATUS")
+		rows, err = db.QueryContext(ctx, q2)
 	}
 	if err != nil {
 		return st, fmt.Errorf("reading the replication status: %w", err)

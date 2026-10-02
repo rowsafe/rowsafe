@@ -227,6 +227,11 @@ func (a *Agent) runEngineTask(ctx context.Context, task *protocol.Task, tl *task
 	if e == nil {
 		return nil, unsupportedEngine(name)
 	}
+	if task.Type == protocol.TaskMigrate || task.Type == protocol.TaskMigrateCopy {
+		if _, ok := e.(EngineMigrate); ok {
+			return a.runEngineMigrate(ctx, task, *task.Database, tl) // engine_migrate.go
+		}
+	}
 	if !slices.Contains(e.Tasks(), task.Type) {
 		return nil, fmt.Errorf("This agent can't run %s tasks for %s yet; update the agent (this is %s).",
 			task.Type, protocol.EngineDisplayName(name), Version)

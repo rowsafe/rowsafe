@@ -9,6 +9,7 @@
 #   MYSQL_IT="mysql:8.4 mariadb:10.6" sh scripts/test-mysql.sh
 #   MYSQL_IT_RUN=Standby sh scripts/test-mysql.sh   # standby servers (a second, empty server)
 #   MYSQL_IT_RUN=Clone sh scripts/test-mysql.sh     # clones into a second, empty server
+#   MYSQL_IT_RUN=MoveIn sh scripts/test-mysql.sh    # move in from the first server into the second
 set -eu
 cd "$(dirname "$0")/.."
 targets=${MYSQL_IT:-"mysql:8.4 mariadb:11.4"}
@@ -75,7 +76,7 @@ for target in $targets; do
   docker run -d --label "$proj" --network "$net" --name "$name" -e "$envpw=root-secret-$$" \
     -v "$data:/var/lib/mysql" -v "$sock:$sockdir" "$image:$version" $server_args >/dev/null
   sbargs=''
-  if [ "$run" = Standby ] || [ "$run" = Clone ]; then
+  if [ "$run" = Standby ] || [ "$run" = Clone ] || [ "$run" = MoveIn ]; then
     # The standby: an empty server of the same version, same server_id
     # (Rowsafe changes it).
     docker volume create --label "$proj" "$sock-sb" >/dev/null

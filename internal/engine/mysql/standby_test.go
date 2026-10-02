@@ -103,3 +103,40 @@ func TestListensLocallyOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestMigSource(t *testing.T) {
+	src, err := parseMigSource("mysql://admin:p%40ss%22w@db.abc.eu-west-1.rds.amazonaws.com:3307/shop?ssl-mode=required")
+	if err != nil || src.User != "admin" || src.Password != `p@ss"w` || src.Port != 3307 || src.DB != "shop" || src.SSLMode != "REQUIRED" {
+		t.Fatalf("%+v %v", src, err)
+	}
+	if provider(src.Host) != "rds" {
+		t.Error(provider(src.Host))
+	}
+	for _, bad := range []string{"postgres://a@b/c", "mysql://b:3306/c", "mysql://a@b:3306/", "mysql://a@b/mysql", "mysql://a@b/c?ssl-mode=maybe"} {
+		if _, err := parseMigSource(bad); err == nil {
+			t.Errorf("parsed %q", bad)
+		}
+	}
+	dir := t.TempDir()
+	if err := src.optionFile(dir + "/o.cnf"); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(dir + "/o.cnf")
+	if !bytes.Contains(b, []byte(`password="p@ss\"w"`)) {
+		t.Fatalf("%s", b)
+	}
+	for user, want := range map[string]string{"shop_app": "shop_app", "admin": "app", "root": "app", "x'y": "app", "rowsafe_sb_1": "app"} {
+		if got := appUserFor(user); got != want {
+			t.Errorf("%s: %s", user, got)
+		}
+	}
+	for _, line := range []string{
+		"-- CHANGE REPLICATION SOURCE TO SOURCE_LOG_FILE='mysql-bin-changelog.000123', SOURCE_LOG_POS=157;",
+		"-- CHANGE MASTER TO MASTER_LOG_FILE='mysql-bin-changelog.000123', MASTER_LOG_POS=157;",
+	} {
+		m := dumpPosRE.FindStringSubmatch(line)
+		if m == nil || m[1] != "mysql-bin-changelog.000123" || m[2] != "157" {
+			t.Errorf("%s: %v", line, m)
+		}
+	}
+}
