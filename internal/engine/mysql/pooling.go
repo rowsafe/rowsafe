@@ -29,7 +29,7 @@ import (
 // turned on and whenever the users change.
 
 // proxysqlDefaultPort is where apps connect to ProxySQL.
-const proxysqlDefaultPort = 6033
+const proxysqlDefaultPort = protocol.DefaultProxySQLPort
 
 var proxysqlResultDir = envOr("ROWSAFE_PROXYSQL_RESULT_DIR", proxysqlroot.DefaultAnswerDir)
 
