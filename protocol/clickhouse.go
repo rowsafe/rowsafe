@@ -65,6 +65,7 @@ var clickhouseFeatures = EngineFeatures{
 	Backups: true, Proof: true,
 	RewindCopy: true, RewindRows: true, Marks: true,
 	Monitoring: true, Fixes: true,
+	Fork: true, // clones restored from a backup into an empty server (fork.go in internal/engine/clickhouse)
 }
 
 // ClickHouseStatus is ClickHouse's own health detail

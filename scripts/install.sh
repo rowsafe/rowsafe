@@ -199,6 +199,7 @@ ALLOW_UPDATES=''   # --allow-updates / --no-allow-updates (PostgreSQL updates an
 ALLOW_SECURITY=''  # --allow-security-updates / --no-allow-security-updates
 ALLOW_REBOOT=''    # --allow-reboot / --no-allow-reboot
 SETUP_STOP=0       # the plan limit was reached: don't offer more databases
+CH_CLONES=''       # --clickhouse-clones (yes): this (empty) ClickHouse may receive clones
 MYSQL_STANDBY=''   # --mysql-standby (yes) / --no-mysql-standby (no); '' = ask once, on a terminal
 MONGODB_REPLSET='' # --mongodb-replica-set (yes) / --no-mongodb-replica-set (no); '' = ask on a terminal
 
@@ -300,6 +301,9 @@ Options (when piping, pass them after `sh -s --`):
                          when someone adds, promotes or removes a standby and confirms);
                          an empty server can then become another server's standby
   --no-mysql-standby     don't
+  --clickhouse-clones    ClickHouse: keep an empty server ready to receive clones of a
+                         database from another server (Rowsafe's user there may then
+                         create and drop databases)
   --mongodb-replica-set  MongoDB: turn a standalone server into a single-member replica
                          set without asking (one MongoDB restart); restoring to any
                          second needs it
@@ -6735,6 +6739,14 @@ setup_databases() {
         ;;
       *)
         note "Found $(cluster_desc)"
+        if [ "$C_ENGINE" = clickhouse ] && { [ "$C_DBS" = - ] || [ "$C_DBS" = default ]; } &&
+          { [ "$CH_CLONES" = yes ] || { [ "$TTY" = 1 ] && confirm "It has no databases. Keep it empty, ready to receive clones of a ClickHouse database from another server?" n; }; }; then
+          CH_CLONES=yes
+          if clickhouse_prepare; then
+            ok "ClickHouse on port $C_PORT is ready to receive clones: pick this server when you fork a ClickHouse database in the dashboard"
+          fi
+          continue
+        fi
         if { [ "$C_ENGINE" = mysql ] || [ "$C_ENGINE" = mariadb ]; } && [ "$C_DBS" = - ] && [ "$MYSQL_STANDBY" != no ] && # mysql
           { [ "$MYSQL_STANDBY" = yes ] || { [ "$TTY" = 1 ] && confirm "It has no databases. Keep it empty, ready to become the standby of a database on another server?" n; }; }; then
           MYSQL_STANDBY=yes
@@ -7302,7 +7314,7 @@ clickhouse_users_file() {
   # Readable by ClickHouse only: its group from the packages, else users.xml's.
   _grp=clickhouse
   getent group clickhouse >/dev/null 2>&1 || _grp=$(stat -c %G "${_dir%/*}/users.xml" 2>/dev/null || echo root)
-  if ! agent_run clickhouse login --port "$C_PORT" --users-xml >"$TMP/chusers.xml" 2>"$TMP/chlogin.err" ||
+  if ! agent_run clickhouse login --port "$C_PORT" --users-xml ${CH_CLONES:+--clones} >"$TMP/chusers.xml" 2>"$TMP/chlogin.err" ||
     ! grep -q '<clickhouse>' "$TMP/chusers.xml"; then
     sed 's/^/    /' "$TMP/chlogin.err" >&2
     return 1
@@ -7356,7 +7368,7 @@ clickhouse_as_admin() {
 # "default" without a password (a new server), then as an administrator.
 clickhouse_login() {
   _rc=0
-  clickhouse_as_admin login >"$TMP/chlogin" 2>&1 || _rc=$?
+  clickhouse_as_admin login ${CH_CLONES:+--clones} >"$TMP/chlogin" 2>&1 || _rc=$?
   while [ "$_rc" = 11 ] || [ "$_rc" = 12 ] || [ "$_rc" = 13 ]; do
     if [ -n "$CH_ADMIN" ]; then
       # That administrator didn't do: refused (12) or can't create users (13).
@@ -7375,7 +7387,7 @@ clickhouse_login() {
       return 1
     }
     _rc=0
-    clickhouse_as_admin login >"$TMP/chlogin" 2>&1 || _rc=$?
+    clickhouse_as_admin login ${CH_CLONES:+--clones} >"$TMP/chlogin" 2>&1 || _rc=$?
   done
   sed 's/^/    /' "$TMP/chlogin"
   [ "$_rc" = 0 ]
@@ -7391,7 +7403,7 @@ clickhouse_prepare() {
     return 1
   fi
   [ -n "$CH_BINARY" ] || note "Proof and Rewind copies need the clickhouse program, which comes with ClickHouse's server package; it isn't on this server."
-  [ "$CH_LOGIN" = ok ] && return 0
+  [ "$CH_LOGIN" = ok ] && [ -z "$CH_CLONES" ] && return 0
   say ""
   note "Rowsafe needs its own ClickHouse user, rowsafe, to take backups and watch the"
   note "server's health. Its password is random and saved for the agent only."
@@ -7643,6 +7655,7 @@ main() {
       --no-setup) NO_SETUP=1 ;;
       --allow-restart) ALLOW_RESTART=yes ;;
       --mysql-standby) MYSQL_STANDBY=yes ;;
+      --clickhouse-clones) CH_CLONES=yes ;;
       --no-mysql-standby) MYSQL_STANDBY=no ;;
       --mongodb-replica-set) MONGODB_REPLSET=yes ;;
       --no-mongodb-replica-set) MONGODB_REPLSET=no ;;

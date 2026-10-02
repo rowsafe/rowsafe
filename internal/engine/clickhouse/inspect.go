@@ -261,10 +261,16 @@ var neededGrants = []string{"SELECT", "INSERT", "BACKUP", "KILL QUERY", "ALTER U
 func grantsSQL() string { return strings.Join(neededGrants, ", ") }
 
 // missingGrants lists the needed privileges have doesn't cover.
-func missingGrants(have []string) []string {
+func missingGrants(have []string) []string { return missingOf(have, neededGrants) }
+
+// missingOf lists the privileges of want have doesn't cover.
+func missingOf(have, want []string) []string {
+	upper := make([]string, len(have))
+	for i, h := range have {
+		upper[i] = strings.ToUpper(h)
+	}
 	covers := func(p string) bool {
-		for _, h := range have {
-			h = strings.ToUpper(h)
+		for _, h := range upper {
 			switch {
 			case h == p, h == "ALL", h == "ALL PRIVILEGES":
 				return true
@@ -276,10 +282,14 @@ func missingGrants(have []string) []string {
 				return true
 			}
 		}
+		// CREATE and DROP may come expanded (SHOW GRANTS FINAL).
+		if p == "CREATE" || p == "DROP" {
+			return slices.Contains(upper, p+" DATABASE") && slices.Contains(upper, p+" TABLE")
+		}
 		return false
 	}
 	var out []string
-	for _, p := range neededGrants {
+	for _, p := range want {
 		if !covers(p) {
 			out = append(out, p)
 		}

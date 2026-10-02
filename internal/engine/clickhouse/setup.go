@@ -119,7 +119,11 @@ func randomPassword() string {
 // installs it as /etc/clickhouse-server/users.d/rowsafe.xml; ClickHouse
 // reloads users within seconds). The file holds only the password's
 // SHA-256.
-func UsersXML(env agent.EngineEnv, port int) (string, error) {
+func UsersXML(env agent.EngineEnv, port int) (string, error) { return UsersXMLWith(env, port, false) }
+
+// UsersXMLWith is UsersXML; with clones the user may also create and drop
+// databases and tables, so the (empty) server can receive clones.
+func UsersXMLWith(env agent.EngineEnv, port int, clones bool) (string, error) {
 	pw := randomPassword()
 	if err := saveLogin(env, port, Login{User: LoginUser, Password: pw}); err != nil {
 		return "", err
@@ -128,7 +132,7 @@ func UsersXML(env agent.EngineEnv, port int) (string, error) {
 	return fmt.Sprintf(`<!-- Rowsafe's ClickHouse user (written by the Rowsafe installer). It signs in from this server only.
      SELECT, BACKUP: back up every database and compare tables with a copy; INSERT: bring rows back when you ask;
      KILL QUERY, ALTER UPDATE, ALTER DELETE: stop a query or cancel a stuck change when you ask;
-     S3: write backups to the agent's encrypting gateway on this server. -->
+     S3: write backups to the agent's encrypting gateway on this server.%[4]s -->
 <clickhouse>
   <users>
     <%[1]s>
@@ -145,7 +149,30 @@ func UsersXML(env agent.EngineEnv, port int) (string, error) {
     </%[1]s>
   </users>
 </clickhouse>
-`, LoginUser, hex.EncodeToString(sum[:]), grantsSQL()), nil
+`, LoginUser, hex.EncodeToString(sum[:]), loginGrantsSQL(clones), cloneNote(clones)), nil
+}
+
+// cloneGrants are what receiving a clone needs beyond neededGrants: RESTORE
+// creates the databases and tables (and drops them if it fails).
+var cloneGrants = []string{"CREATE", "DROP"}
+
+func loginGrantsSQL(clones bool) string {
+	if !clones {
+		return grantsSQL()
+	}
+	return grantsSQL() + ", " + strings.Join(cloneGrants, ", ")
+}
+
+func cloneNote(clones bool) string {
+	if !clones {
+		return ""
+	}
+	return "\n     CREATE, DROP: receive clones of other ClickHouse databases into this (empty) server when you ask."
+}
+
+// cloneRights reports whether the grants cover receiving a clone.
+func cloneRights(have []string) bool {
+	return len(missingGrants(have)) == 0 && len(missingOf(have, cloneGrants)) == 0
 }
 
 // CreateLogin creates (or refreshes) Rowsafe's user with SQL, with a new
@@ -154,6 +181,12 @@ func UsersXML(env agent.EngineEnv, port int) (string, error) {
 // user may sign in from any host (the agent is another container) and its
 // password is long and random; elsewhere only from this server.
 func CreateLogin(ctx context.Context, env agent.EngineEnv, port int, adminUser, adminPassword string) error {
+	return CreateLoginWith(ctx, env, port, adminUser, adminPassword, false)
+}
+
+// CreateLoginWith is CreateLogin; with clones the user may also receive
+// clones (UsersXMLWith).
+func CreateLoginWith(ctx context.Context, env agent.EngineEnv, port int, adminUser, adminPassword string, clones bool) error {
 	admin := Login{User: adminUser, Password: adminPassword}
 	if adminUser == "" {
 		admin = Login{User: "default"}
@@ -180,7 +213,7 @@ func CreateLogin(ctx context.Context, env agent.EngineEnv, port int, adminUser, 
 		err = c.exec(ctx, "ALTER USER "+quoteIdent(LoginUser)+" "+ident, nil)
 	}
 	if err == nil {
-		err = c.exec(ctx, "GRANT "+grantsSQL()+" ON *.* TO "+quoteIdent(LoginUser), nil)
+		err = c.exec(ctx, "GRANT "+loginGrantsSQL(clones)+" ON *.* TO "+quoteIdent(LoginUser), nil)
 	}
 	if err != nil {
 		if errCode(err) == codeAccessDenied || errCode(err) == 495 || strings.Contains(err.Error(), "readonly") ||
