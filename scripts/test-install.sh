@@ -91,8 +91,8 @@ case \${1:-} in
       exit 1
     fi
     # The installer must run the self-test as postgres with agent.env loaded.
-    # (as mysql on a MySQL server)
-    if { [ "\$(id -un)" != postgres ] && [ "\$(id -un)" != mysql ]; } || [ -z "\${ROWSAFE_REPO_CIPHER_PASS:-}" ]; then
+    # (as mysql on a MySQL server, rowsafe on a ClickHouse one)
+    if { [ "\$(id -un)" != postgres ] && [ "\$(id -un)" != mysql ] && [ "\$(id -un)" != rowsafe ]; } || [ -z "\${ROWSAFE_REPO_CIPHER_PASS:-}" ]; then
       echo '{"version":"$1","ok":false,"errors":["config: not run as postgres with agent.env"]}'
       exit 1
     fi
@@ -114,13 +114,14 @@ case \${1:-} in
     fi
     echo "writing, reading and deleting a test file in Rowsafe Storage..."
     echo "Rowsafe Storage works: wrote, read back and deleted a test file" ;;
-  setup|mongodb)
+  setup|mongodb|clickhouse)
     # Answers from /tmp/rowsafe-fake: CMD.out is printed, CMD.rc holds exit
-    # codes (one per line, used in turn; the last one sticks). MongoDB
-    # helpers are mongodb-CMD; a password on stdin goes to CMD.stdin.
+    # codes (one per line, used in turn; the last one sticks). MongoDB and
+    # ClickHouse helpers are mongodb-CMD and clickhouse-CMD; a password on
+    # stdin goes to CMD.stdin.
     f=/tmp/rowsafe-fake
     pre=''
-    [ "\$1" != mongodb ] || pre=mongodb-
+    case \$1 in mongodb | clickhouse) pre=\$1- ;; esac
     shift
     echo "\$pre\$*" >>"\$f/calls"
     case " \$* " in *" --admin-user "*) cat >"\$f/\$pre\$1.stdin" ;; esac
@@ -135,7 +136,12 @@ case \${1:-} in
       [ "\$1" != --id-file ] || echo db_fake >"\$2"
       shift
     done
-    [ ! -f "\$f/\$cmd.out" ] || cat "\$f/\$cmd.out"
+    if [ "\$cmd" = clickhouse-status ] && [ -f /etc/clickhouse-server/users.d/rowsafe.xml ]; then
+      # ClickHouse loads the users.d file root installed by itself.
+      sed 's/^login=missing\$/login=ok/' "\$f/\$cmd.out"
+    elif [ -f "\$f/\$cmd.out" ]; then
+      cat "\$f/\$cmd.out"
+    fi
     rc=0
     if [ -s "\$f/\$cmd.rc" ]; then
       rc=\$(head -n 1 "\$f/\$cmd.rc")
@@ -1020,6 +1026,7 @@ guided_storage_tests() {
   create_cluster_tests
   firewall_tests
   [ "${TEST_UNITS:-0}" != 1 ] || mysql_host_tests
+  [ "${TEST_UNITS:-0}" != 1 ] || clickhouse_host_tests
 }
 
 # ------------------------------------------------------------ second copy
@@ -1405,6 +1412,7 @@ EOF
   expect_fail "--protect checks the name" "lowercase letters" "$INSTALLER" --protect Bad_Name
   pass "turning on backups: prompts, restarts, --protect, --no-setup"
   mongodb_flow_tests
+  clickhouse_flow_tests
 }
 
 # mongodb_flow_tests: a MongoDB server found by discover (engine column):
@@ -1457,6 +1465,78 @@ mongodb_flow_tests() {
   expect_fail "--no-mongodb-replica-set" "isn't ready for backups" "$INSTALLER" --protect shop --no-mongodb-replica-set
   grep -q "Skipped (--no-mongodb-replica-set)" "$W/out" || fail "--no-mongodb-replica-set: not explained"
   pass "MongoDB: engine in the plan, standalone explained, administrator login once, --protect never restarts"
+}
+
+# clickhouse_flow_tests: a ClickHouse server found by discover (engine
+# column): Rowsafe's own ClickHouse user comes before the plan, as a users.d
+# file root installs, or with an administrator's login once. Nothing restarts.
+clickhouse_flow_tests() {
+  echo "  -- ClickHouse"
+  ch='8123\t-\t26.8\t-\t/var/lib/clickhouse\t52428800\tevents\tno\t-\tevents\t50.0 MiB\tclickhouse-server.service\t-\tclickhouse'
+  chst() { printf 'port=8123\\nversion=26.8.15.10\\nlogin=%s\\nuser=clickhouse\\ndatadir=/var/lib/clickhouse\\nconfig=/etc/clickhouse-server/config.xml\\nusersd=-\\nunit=clickhouse-server.service\\nbinary=%s\\nreplicated=0\\ndocker=no' "$1" "${2:-/usr/bin/clickhouse}"; }
+  chplan='ClickHouse 26.8.15.10 on port 8123: 50.0 MiB, 1 database (events).\n\nWhat Rowsafe will change:\n  - Prepare your bucket for this database\n\nNo downtime: ClickHouse does not need a restart.'
+  usersxml='<clickhouse><users><rowsafe><password_sha256_hex>00ff</password_sha256_hex></rowsafe></users></clickhouse>'
+
+  # 1. Rowsafe's login already works: straight to the plan, with the engine.
+  scenario "discover_out=$ch" "clickhouse-status_out=$(chst ok)" "plan_out=$chplan" "wait_out=$done_" "status_out=$status"
+  tty_ok "ClickHouse with Rowsafe's login: plan, turn on" "Name it in Rowsafe\t\nTurn on backups for events now?\t\n" "$INSTALLER"
+  has "Found ClickHouse 26.8 on port 8123 (50.0 MiB; databases: events)"
+  has "No downtime: ClickHouse does not need a restart."
+  called "clickhouse-status --port 8123"
+  called "plan --name events --port 8123 --id-file"
+  called "--engine clickhouse"
+  not_called "socket-dir -"
+  not_called "clickhouse-login"
+  called "apply --database db_fake"
+
+  # 2. No login yet: root installs the agent's users.d file next to
+  #    users.xml (root:clickhouse 0640); ClickHouse loads it, no admin asked.
+  getent group clickhouse >/dev/null || groupadd --system clickhouse
+  mkdir -p /etc/clickhouse-server
+  echo '<clickhouse/>' >/etc/clickhouse-server/users.xml
+  scenario "discover_out=$ch" "clickhouse-status_out=$(chst missing -)" "clickhouse-login_out=$usersxml" "plan_out=$chplan"
+  tty_ok "ClickHouse login as a users.d file" "Name it in Rowsafe\t\nTurn on backups for events now?\tn\n" "$INSTALLER"
+  called "clickhouse-login --port 8123 --users-xml"
+  not_called "admin-user"
+  f=/etc/clickhouse-server/users.d/rowsafe.xml
+  [ "$(stat -c '%U %G %a' "$f" 2>/dev/null)" = "root clickhouse 640" ] || fail "$name: $f missing or not root:clickhouse 0640"
+  [ "$(cat "$f")" = "$usersxml" ] || fail "$name: $f isn't what the agent printed"
+  has "Rowsafe needs its own ClickHouse user, rowsafe"
+  has "ClickHouse loaded it by itself, without a restart"
+  has "Proof and Rewind copies need the clickhouse program"
+  lacks "password_sha256_hex"
+  called "plan --name events --port 8123"
+  rm -rf /etc/clickhouse-server
+
+  # 3. No users.d to use: the SQL way. "default" can't create users (13),
+  #    an administrator signs in once; the password goes to the agent on
+  #    stdin and is never printed or saved.
+  scenario "discover_out=$ch" "clickhouse-status_out=$(chst missing)" "clickhouse-login_rc=13\n12\n0" \
+    "clickhouse-login_out=Created ClickHouse user rowsafe for Rowsafe" "plan_out=$chplan"
+  tty_ok "ClickHouse login with an administrator" \
+    "Name it in Rowsafe\t\nClickHouse administrator user [default]\tadmin\nPassword for admin\twrong\nClickHouse administrator user [default]\tadmin\nPassword for admin\tCl1ck-S3cret\nTurn on backups for events now?\tn\n" "$INSTALLER"
+  has "ClickHouse refused that login."
+  called "clickhouse-login --port 8123 --admin-user admin"
+  [ "$(cat "$F/clickhouse-login.stdin")" = Cl1ck-S3cret ] || fail "$name: the administrator's password didn't reach the agent on stdin"
+  lacks "Cl1ck-S3cret"
+  ! grep -rq "Cl1ck-S3cret" /etc/rowsafe /var/lib/rowsafe 2>/dev/null || fail "$name: the administrator's password was saved"
+  called "plan --name events --port 8123"
+
+  # 4. --protect: without a way to create the user it stops before the
+  #    plan; ROWSAFE_CLICKHOUSE_ADMIN_* (no terminal) are used once.
+  scenario "discover_out=$ch" "clickhouse-status_out=$(chst missing)" clickhouse-login_rc=13
+  expect_fail "--protect: ClickHouse without a login" "ROWSAFE_CLICKHOUSE_ADMIN_USER" "$INSTALLER" --protect events
+  grep -q "isn't ready for backups" "$W/out" || fail "$name: not explained"
+  not_called "plan"
+  scenario "discover_out=$ch" "clickhouse-status_out=$(chst missing)" "clickhouse-login_rc=13\n0" "plan_out=$chplan" "wait_out=$done_"
+  expect_ok "--protect: ClickHouse administrator from the environment" \
+    env ROWSAFE_CLICKHOUSE_ADMIN_USER=admin ROWSAFE_CLICKHOUSE_ADMIN_PASSWORD=Env-S3cret "$INSTALLER" --protect events
+  called "clickhouse-login --port 8123 --admin-user admin"
+  [ "$(cat "$F/clickhouse-login.stdin")" = Env-S3cret ] || fail "$name: the administrator's password didn't reach the agent on stdin"
+  ! grep -q "Env-S3cret" "$W/out" || fail "$name: the administrator's password was printed"
+  ! grep -q "ROWSAFE_CLICKHOUSE_ADMIN" /etc/rowsafe/agent.env || fail "$name: the administrator's login went to agent.env"
+  called "apply --database db_fake"
+  pass "ClickHouse: engine in the plan, users.d file as root, administrator login once, --protect"
 }
 
 # ------------------------------------------------------------ restarts
@@ -2483,6 +2563,34 @@ mysql_host_tests() {
     grep -q '^log_bin = binlog$' /etc/mysql/conf.d/zz-rowsafe.cnf || fail "purge dropped the server's binary log settings"
   [ ! -e /etc/systemd/system/rowsafe-agent.service.d/10-mysql.conf ] || fail "uninstall left the drop-in"
   pass "MySQL server: purge keeps the server's binary log settings as a plain file"
+}
+
+# clickhouse_host_tests: a server with ClickHouse only (after the MySQL
+# one: no postgres or mysql user). The agent runs as its own user, rowsafe
+# (a unit drop-in, after clickhouse-server.service); nothing is installed
+# for backups (ClickHouse's own BACKUP), and a missing clickhouse program is
+# explained (Proof needs it).
+clickhouse_host_tests() {
+  echo "  -- a ClickHouse server (no PostgreSQL)"
+  userdel mysql 2>/dev/null || true
+  rm -f /usr/sbin/mysqld
+  printf '#!/bin/sh\necho "ClickHouse server version 26.8.15.10 (official build)."\n' >/usr/bin/clickhouse-server
+  chmod 755 /usr/bin/clickhouse-server
+  expect_ok "ClickHouse server: configured install" configured env ROWSAFE_ENROLL_TOKEN=rse_secrettoken123 "$INSTALLER" --no-setup
+  grep -q "backups, Marks and weekly restore tests for" "$W/out" || fail "$name: installer doesn't speak of ClickHouse"
+  ! grep -q "restore to any second" "$W/out" || fail "$name: promises restores to any second for ClickHouse"
+  grep -q "Proof (the weekly restore test) and Rewind copies need it" "$W/out" || fail "$name: missing clickhouse program not explained"
+  id -u rowsafe >/dev/null 2>&1 || fail "$name: no rowsafe user"
+  d=/etc/systemd/system/rowsafe-agent.service.d/10-clickhouse.conf
+  grep -qx 'User=rowsafe' "$d" && grep -qx 'After=clickhouse-server.service' "$d" || fail "$name: no drop-in running the agent as rowsafe"
+  cmp /etc/systemd/system/rowsafe-agent.service /src/deploy/systemd/rowsafe-agent.service || fail "$name: the unit itself changed"
+  [ "$(stat -c '%U %a' /etc/rowsafe/agent.env)" = "rowsafe 600" ] || fail "$name: agent.env ownership/mode"
+  ln -sf clickhouse-server /usr/bin/clickhouse
+  expect_ok "ClickHouse server: re-run with the clickhouse program" configured "$INSTALLER" --no-setup
+  grep -q "ClickHouse program at /usr/bin/clickhouse" "$W/out" || fail "$name: clickhouse program not found"
+  expect_ok "ClickHouse server: uninstall" "$INSTALLER" --uninstall
+  [ ! -e "$d" ] || fail "uninstall left the drop-in"
+  pass "ClickHouse server: agent as rowsafe after clickhouse-server.service, clickhouse program checked"
 }
 
 # ------------------------------------------------------------ updates

@@ -314,6 +314,9 @@ Environment:
   ROWSAFE_MONGODB_ADMIN_USER, ROWSAFE_MONGODB_ADMIN_PASSWORD  without a terminal: a MongoDB
                          administrator to create Rowsafe's own MongoDB user (used once,
                          never saved)
+  ROWSAFE_CLICKHOUSE_ADMIN_USER, ROWSAFE_CLICKHOUSE_ADMIN_PASSWORD  without a terminal: a
+                         ClickHouse administrator to create Rowsafe's own ClickHouse user
+                         when it can't be added as a users.d file (used once, never saved)
   ROWSAFE_URL, ROWSAFE_ENROLL_TOKEN, ROWSAFE_REPO_*  written to /etc/rowsafe/agent.env
                          (ROWSAFE_ENROLL_TOKEN may instead be the argument rse_...)
                          (ROWSAFE_URL defaults to https://api.rowsafe.sh)
@@ -357,6 +360,12 @@ Turning on backups:
   question), it restarts or stops PostgreSQL when you ask (Restart, and
   Rewind the whole database, in the dashboard), and only when someone
   confirms. Automation: --protect NAME.
+
+  ClickHouse: Rowsafe's own ClickHouse user is added as
+  /etc/clickhouse-server/users.d/rowsafe.xml (ClickHouse loads it by itself,
+  no restart), or with an administrator's login once. ClickHouse keeps no
+  log of changes, so restores go to a backup or a Mark, not to any second;
+  a backup of what changed runs every hour.
 
 What Rowsafe may do on this server:
   Rowsafe only restarts PostgreSQL, installs updates, reboots, manages
@@ -527,10 +536,36 @@ mongodb_setup() {
   fi
 }
 # <<< mongodb
+# >>> clickhouse: without PostgreSQL, MySQL/MariaDB and MongoDB but with
+# ClickHouse, the agent runs as its own system user, rowsafe, too.
+detect_clickhouse_host() {
+  [ "$HOST_ENGINE" = postgresql ] || return 0
+  id -u postgres >/dev/null 2>&1 && return 0
+  clickhouse_present || return 0
+  HOST_ENGINE=clickhouse
+  use_rowsafe_user
+  AGENT_HOME=$STATE_DIR
+}
+
+# clickhouse_setup: on a ClickHouse server without PostgreSQL, a unit
+# drop-in runs the agent as rowsafe (like mongodb_setup).
+clickhouse_setup() {
+  _dropin=/etc/systemd/system/$SERVICE.d
+  if [ "$HOST_ENGINE" != clickhouse ]; then
+    [ ! -f "$_dropin/10-clickhouse.conf" ] || { rm -f "$_dropin/10-clickhouse.conf"; UNIT_CHANGED=1; CHANGED=1; }
+    return 0
+  fi
+  install -d -m 0755 "$_dropin"
+  if printf '# Written by the Rowsafe installer: this server runs ClickHouse.\n[Unit]\nAfter=clickhouse-server.service\n[Service]\nUser=rowsafe\nGroup=rowsafe\n' |
+    write_file "$_dropin/10-clickhouse.conf" 0644 root:root; then
+    UNIT_CHANGED=1 CHANGED=1
+  fi
+}
+# <<< clickhouse
 # >>> mysql
 
 engine_label() {
-  case ${1:-$HOST_ENGINE} in mysql) echo MySQL ;; mariadb) echo MariaDB ;; mongodb) echo MongoDB ;; *) echo PostgreSQL ;; esac
+  case ${1:-$HOST_ENGINE} in mysql) echo MySQL ;; mariadb) echo MariaDB ;; mongodb) echo MongoDB ;; clickhouse) echo ClickHouse ;; *) echo PostgreSQL ;; esac
 }
 
 # ensure_mysql_tools installs the physical backup tool: mariadb-backup from
@@ -649,7 +684,7 @@ mysql_account() {
 check_postgres() {
   [ "$HOST_ENGINE" = postgresql ] || return 0 # mysql
   id -u "$AGENT_USER" >/dev/null 2>&1 ||
-    die "no '$AGENT_USER' user on this host. Rowsafe adopts an existing PostgreSQL or MongoDB; install one first."
+    die "no '$AGENT_USER' user on this host. Rowsafe adopts an existing PostgreSQL, MySQL, MariaDB, MongoDB or ClickHouse; install one first."
   PG_MAJORS=''
   for bin in /usr/lib/postgresql/*/bin/postgres; do
     [ -x "$bin" ] || continue
@@ -657,7 +692,7 @@ check_postgres() {
     PG_MAJORS="$PG_MAJORS ${major%%/*}"
   done
   PG_MAJORS=${PG_MAJORS# }
-  if [ -z "$PG_MAJORS" ] && [ -z "${ROWSAFE_PG_BIN_DIR:-}" ] && ! mongodb_present; then
+  if [ -z "$PG_MAJORS" ] && [ -z "${ROWSAFE_PG_BIN_DIR:-}" ] && ! mongodb_present && ! clickhouse_present; then
     die "no PostgreSQL server found under /usr/lib/postgresql. Restore drills need the server binaries (pg_ctl); set ROWSAFE_PG_BIN_DIR if they live elsewhere."
   fi
 }
@@ -4873,7 +4908,10 @@ permissions_main() {
   case $AGENT_USER in
     postgres) HOST_ENGINE=postgresql AGENT_HOME=/var/lib/postgresql ;;
     mysql) HOST_ENGINE=mysql ;;
-    *) HOST_ENGINE=mongodb ;;
+    *)
+      HOST_ENGINE=mongodb
+      [ ! -f "/etc/systemd/system/$SERVICE.d/10-clickhouse.conf" ] || HOST_ENGINE=clickhouse
+      ;;
   esac
   PERM_READY=1
   # One change at a time (the dashboard's and the terminal's).
@@ -6585,6 +6623,10 @@ protect_cluster() {
     note "Backups for $C_NAME are not on yet. Run this installer again when you're ready."
     return 0
   fi
+  if [ "$C_ENGINE" = clickhouse ] && ! clickhouse_prepare; then
+    note "Backups for $C_NAME are not on yet. Run this installer again when you're ready."
+    return 0
+  fi
   step "Preparing a plan"
   while :; do
     _prc=0
@@ -6695,6 +6737,9 @@ protect_unattended() {
   note "$(cluster_desc)"
   if [ "$C_ENGINE" = mongodb ]; then
     mongodb_prepare 1 || die "MongoDB on port $C_PORT isn't ready for backups (see above)"
+  fi
+  if [ "$C_ENGINE" = clickhouse ]; then
+    clickhouse_prepare || die "ClickHouse on port $C_PORT isn't ready for backups (see above)"
   fi
   _prc=0
   plan_cluster || _prc=$?
@@ -7161,6 +7206,161 @@ mongodb_prepare() {
   mongodb_login || return 1
 }
 
+# ---------------------------------------------------------------- ClickHouse
+#
+# ClickHouse servers are found by `rowsafe-agent setup discover` like
+# PostgreSQL clusters (engine column "clickhouse"). Backups go through
+# ClickHouse's own BACKUP command, so no backup tool is installed; Proof and
+# Rewind copies run the server's own `clickhouse` program. Before their
+# plan, Rowsafe gets its own ClickHouse user ("rowsafe", random password
+# saved for the agent only):
+#   - preferably as root: the agent prints a users.d file (password hash
+#     only, 127.0.0.1 and ::1 only) that root installs next to the server's
+#     users.xml; ClickHouse loads it by itself within seconds, no restart;
+#   - otherwise with an administrator's login, once (CREATE USER and GRANT;
+#     the password is never stored).
+
+CLICKHOUSE_USERS_DIR=/etc/clickhouse-server/users.d
+CLICKHOUSE_USERS_FILE=$CLICKHOUSE_USERS_DIR/rowsafe.xml
+
+clickhouse_present() {
+  have clickhouse-server || [ -x /usr/bin/clickhouse-server ] ||
+    [ -f /lib/systemd/system/clickhouse-server.service ] || [ -f /etc/systemd/system/clickhouse-server.service ] ||
+    { have pgrep && pgrep -x 'clickhouse-serv(er)?' >/dev/null 2>&1; }
+}
+
+# check_clickhouse_program: Proof and Rewind copies start a temporary
+# ClickHouse with the server's own program, which ships with its package.
+check_clickhouse_program() {
+  clickhouse_present || return 0
+  if have clickhouse || [ -x /usr/bin/clickhouse ]; then
+    ok "ClickHouse program at $(command -v clickhouse || echo /usr/bin/clickhouse) (Proof and Rewind copies use it)"
+  else
+    warn "the clickhouse program isn't on this server: backups work, but Proof (the weekly restore test) and Rewind copies need it. It comes with ClickHouse's own packages (clickhouse-common-static, installed with clickhouse-server)."
+  fi
+}
+
+# clickhouse_status reads `rowsafe-agent clickhouse status` into CH_* variables.
+CH_LOGIN='' CH_USER='' CH_USERSD='' CH_BINARY='' CH_DOCKER=''
+clickhouse_status() {
+  agent_run clickhouse status --port "$C_PORT" >"$TMP/chstatus" 2>"$TMP/chstatus.err" || return 1
+  _k() { sed -n "s/^$1=//p" "$TMP/chstatus" | head -n 1; }
+  CH_LOGIN=$(_k login) CH_USER=$(_k user) CH_USERSD=$(_k usersd) CH_BINARY=$(_k binary)
+  CH_DOCKER=$(_k docker)
+  [ "$CH_USERSD" != - ] || CH_USERSD=''
+  [ "$CH_BINARY" != - ] || CH_BINARY=''
+}
+
+# clickhouse_users_file adds Rowsafe's ClickHouse user as root: the agent
+# makes the password (saved for the agent only) and prints the users.d file,
+# root installs it (root:clickhouse 0640), then waits up to 30 seconds for
+# ClickHouse to load it. Fails, removing the file, when it can't.
+clickhouse_users_file() {
+  [ "$CH_DOCKER" != yes ] || return 1 # its users.d is inside the container
+  _dir=${CH_USERSD:-$CLICKHOUSE_USERS_DIR}
+  if [ ! -d "$_dir" ]; then
+    # ClickHouse reads users.d next to its users.xml even when the package made none.
+    [ -f "${_dir%/*}/users.xml" ] || return 1
+    install -d -m 0755 -o root -g root "$_dir"
+  fi
+  _grp=${CH_USER:-clickhouse}
+  [ "$_grp" != - ] || _grp=clickhouse
+  getent group "$_grp" >/dev/null 2>&1 || _grp=$(stat -c %G "$_dir")
+  if ! agent_run clickhouse login --port "$C_PORT" --users-xml >"$TMP/chusers.xml" 2>"$TMP/chlogin.err" ||
+    ! grep -q '<clickhouse>' "$TMP/chusers.xml"; then
+    sed 's/^/    /' "$TMP/chlogin.err" >&2
+    return 1
+  fi
+  write_file "$_dir/rowsafe.xml" 0640 "root:$_grp" <"$TMP/chusers.xml" || true
+  rm -f "$TMP/chusers.xml"
+  _i=0
+  until clickhouse_status && [ "$CH_LOGIN" = ok ]; do
+    if [ $_i -ge 30 ]; then
+      rm -f "$_dir/rowsafe.xml"
+      warn "ClickHouse didn't load $_dir/rowsafe.xml within 30 seconds (its users may come from elsewhere); removed it"
+      return 1
+    fi
+    sleep 1
+    _i=$((_i + 1))
+  done
+  ok "$_dir/rowsafe.xml: Rowsafe's own ClickHouse user, rowsafe (ClickHouse loaded it by itself, without a restart)"
+}
+
+# clickhouse_admin asks for (or takes from the environment) an
+# administrator's login, into CH_ADMIN and CH_ADMIN_PW. Never stored.
+CH_ADMIN='' CH_ADMIN_PW=''
+clickhouse_admin() {
+  [ -z "$CH_ADMIN" ] || return 0
+  if [ -n "${ROWSAFE_CLICKHOUSE_ADMIN_USER:-}" ]; then
+    CH_ADMIN=$ROWSAFE_CLICKHOUSE_ADMIN_USER CH_ADMIN_PW=${ROWSAFE_CLICKHOUSE_ADMIN_PASSWORD:-}
+    return 0
+  fi
+  [ "$TTY" = 1 ] || return 1
+  tty_say ""
+  tty_say "To create Rowsafe's own ClickHouse user, an administrator signs in once (a user"
+  tty_say "allowed to create users and grant access). The password is used for this only"
+  tty_say "and never saved."
+  ask CH_ADMIN "ClickHouse administrator user" default
+  ask_secret CH_ADMIN_PW "Password for $CH_ADMIN"
+}
+
+# clickhouse_as_admin CMD...: run an agent clickhouse command, as an
+# administrator when one signed in. Its exit status is the command's.
+clickhouse_as_admin() {
+  if [ -n "$CH_ADMIN" ]; then
+    printf '%s\n' "$CH_ADMIN_PW" | agent_in clickhouse "$@" --port "$C_PORT" --admin-user "$CH_ADMIN"
+  else
+    agent_run clickhouse "$@" --port "$C_PORT"
+  fi
+}
+
+# clickhouse_login creates Rowsafe's ClickHouse user with SQL: first as
+# "default" without a password (a new server), then as an administrator.
+clickhouse_login() {
+  _rc=0
+  clickhouse_as_admin login >"$TMP/chlogin" 2>&1 || _rc=$?
+  while [ "$_rc" = 11 ] || [ "$_rc" = 12 ] || [ "$_rc" = 13 ]; do
+    if [ -n "$CH_ADMIN" ]; then
+      # That administrator didn't do: refused (12) or can't create users (13).
+      if [ -n "${ROWSAFE_CLICKHOUSE_ADMIN_USER:-}" ] || [ "$TTY" != 1 ]; then
+        sed 's/^/    /' "$TMP/chlogin" >&2
+        return 1
+      fi
+      case $_rc in
+        12) tty_bad "ClickHouse refused that login." ;;
+        *) tty_bad "That user can't create users in ClickHouse." ;;
+      esac
+      CH_ADMIN=''
+    fi
+    clickhouse_admin || {
+      warn "Rowsafe needs its own ClickHouse user: set ROWSAFE_CLICKHOUSE_ADMIN_USER and ROWSAFE_CLICKHOUSE_ADMIN_PASSWORD (used once, never saved), or run the installer on a terminal"
+      return 1
+    }
+    _rc=0
+    clickhouse_as_admin login >"$TMP/chlogin" 2>&1 || _rc=$?
+  done
+  sed 's/^/    /' "$TMP/chlogin"
+  [ "$_rc" = 0 ]
+}
+
+# clickhouse_prepare gets a ClickHouse server ready for its plan: Rowsafe's
+# own user, root's way first. Nothing restarts.
+clickhouse_prepare() {
+  CH_ADMIN='' CH_ADMIN_PW=''
+  if ! clickhouse_status; then
+    sed 's/^/    /' "$TMP/chstatus.err" >&2
+    warn "could not reach ClickHouse on port $C_PORT (its HTTP interface)"
+    return 1
+  fi
+  [ -n "$CH_BINARY" ] || note "Proof and Rewind copies need the clickhouse program, which comes with ClickHouse's server package; it isn't on this server."
+  [ "$CH_LOGIN" = ok ] && return 0
+  say ""
+  note "Rowsafe needs its own ClickHouse user, rowsafe, to take backups and watch the"
+  note "server's health. Its password is random and saved for the agent only."
+  clickhouse_users_file && return 0
+  clickhouse_login
+}
+
 # ---------------------------------------------------------------- modes
 
 install_agent() {
@@ -7169,9 +7369,15 @@ install_agent() {
   detect_arch
   detect_host_engine # mysql
   detect_mongodb_host # mongodb
+  detect_clickhouse_host # clickhouse
   check_postgres
-  say "${BOLD}Rowsafe agent installer${RESET}: backups, restore to any second and weekly"
-  say "restore tests for the $(engine_label) on this server. Nothing changes without your yes."
+  if [ "$HOST_ENGINE" = clickhouse ]; then
+    say "${BOLD}Rowsafe agent installer${RESET}: backups, Marks and weekly restore tests for"
+    say "the ClickHouse on this server. Nothing changes without your yes."
+  else
+    say "${BOLD}Rowsafe agent installer${RESET}: backups, restore to any second and weekly"
+    say "restore tests for the $(engine_label) on this server. Nothing changes without your yes."
+  fi
   say ""
   step "Installing the Rowsafe agent on $(uname -n) ($OS_NAME, $ARCH)"
   ensure_base_tools
@@ -7208,8 +7414,9 @@ install_agent() {
   connect_in_browser
 
   # 2. Dependencies and layout.
-  if [ "$HOST_ENGINE" = postgresql ] || [ "$HOST_ENGINE" = mongodb ]; then ensure_pgbackrest; else ensure_mysql_tools; fi # mysql
+  case $HOST_ENGINE in mysql | mariadb) ensure_mysql_tools ;; *) ensure_pgbackrest ;; esac # mysql
   ensure_mongodb_tools # mongodb (only where MongoDB runs)
+  check_clickhouse_program # clickhouse (only where ClickHouse runs)
   ensure_restic # files section
   step "Installing into $INSTALL_DIR"
   make_dirs
@@ -7222,6 +7429,7 @@ install_agent() {
   install_unit
   mysql_setup # mysql
   mongodb_setup # mongodb
+  clickhouse_setup # clickhouse
   install_logrotate
   maybe_guided_storage
   second_copy
@@ -7341,6 +7549,7 @@ uninstall_agent() {
   rm -rf "$INSTALL_DIR"
   ok "service and $INSTALL_DIR removed"
   rm -f "/etc/systemd/system/$SERVICE.d/10-mysql.conf" # mysql
+  rm -f "/etc/systemd/system/$SERVICE.d/10-mongodb.conf" "/etc/systemd/system/$SERVICE.d/10-clickhouse.conf"
   if [ "$purge" = 1 ]; then
     if [ -L "$MYSQL_CONF_LINK" ]; then # mysql: keep the server's binary log settings
       cp "$CONFIG_DIR/mysql/server.cnf" "$MYSQL_CONF_LINK.rowsafe-new" 2>/dev/null &&
@@ -7348,6 +7557,10 @@ uninstall_agent() {
     fi
     rm -rf "$CONFIG_DIR" "$STATE_DIR" "$LOG_DIR" "$LOGROTATE_FILE"
     ok "$CONFIG_DIR, $STATE_DIR, $LOG_DIR and $LOGROTATE_FILE deleted"
+    if [ -f "$CLICKHOUSE_USERS_FILE" ]; then # clickhouse: its password went with $STATE_DIR
+      rm -f "$CLICKHOUSE_USERS_FILE"
+      ok "$CLICKHOUSE_USERS_FILE deleted (Rowsafe's ClickHouse user)"
+    fi
   else
     # archive_command may keep logging to $LOG_DIR, so keep rotating it.
     note "kept $CONFIG_DIR, $STATE_DIR, $LOG_DIR and $LOGROTATE_FILE (delete them with --uninstall --purge)"
