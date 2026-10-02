@@ -65,6 +65,7 @@ func mongodbCmd(ctx context.Context, args []string) int {
 	port := fs.Int("port", 27017, "mongod port")
 	adminUser := fs.String("admin-user", "", "administrator user (password on stdin)")
 	clones := fs.Bool("clones", false, "login: also the restore role, so this (empty) server can receive clones")
+	standby := fs.Bool("standby", false, "login: also clusterManager, for standby servers (adding a member, fencing, promoting)")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
@@ -100,7 +101,7 @@ func mongodbCmd(ctx context.Context, args []string) int {
 		}
 		if args[0] == "login" {
 			var roles []string
-			roles, err = mongodb.CreateLoginWith(ctx, env, *port, *adminUser, pw, *clones)
+			roles, err = mongodb.CreateLoginRoles(ctx, env, *port, *adminUser, pw, *clones, *standby)
 			if err == nil {
 				fmt.Printf("Created MongoDB user %q for Rowsafe (roles: %s); its password is saved for the agent only.\n",
 					mongodb.LoginUser, strings.Join(roles, ", "))

@@ -213,6 +213,7 @@ ALLOW_UPDATES=''   # --allow-updates / --no-allow-updates (PostgreSQL updates an
 ALLOW_SECURITY=''  # --allow-security-updates / --no-allow-security-updates
 ALLOW_REBOOT=''    # --allow-reboot / --no-allow-reboot
 SETUP_STOP=0       # the plan limit was reached: don't offer more databases
+MONGODB_STANDBY='' # --mongodb-standby (yes): Rowsafe may make this MongoDB part of a standby pair
 M_CLONES=''        # --mongodb-clones (yes): this (empty) MongoDB may receive clones
 CH_CLONES=''       # --clickhouse-clones (yes): this (empty) ClickHouse may receive clones
 MYSQL_STANDBY=''   # --mysql-standby (yes) / --no-mysql-standby (no); '' = ask once, on a terminal
@@ -319,9 +320,14 @@ Options (when piping, pass them after `sh -s --`):
                          when someone adds, promotes or removes a standby and confirms);
                          an empty server can then become another server's standby
   --no-mysql-standby     don't
+  --mongodb-standby      MongoDB: let Rowsafe set up standby servers with this server:
+                         its user gets clusterManager, and root's helper may hand out
+                         the replica set's key file and add replSetName, keyFile and
+                         an address to mongod.conf (a copy kept); restarts stay the
+                         ones a person confirms (needs --allow-restart)
   --mongodb-clones       MongoDB: keep an empty server ready to receive clones of a
                          database from another server (Rowsafe's user there gets the
-                         restore role)
+                         restore and readWriteAnyDatabase roles)
   --clickhouse-clones    ClickHouse: keep an empty server ready to receive clones of a
                          database from another server (Rowsafe's user there may then
                          create and drop databases)
@@ -1212,7 +1218,21 @@ install_helper_script() {
 # from a file another process could write.
 #
 # The agent reads the next lines to know what this helper can do.
-# actions: restart stop start create-cluster files-read files-put
+# MongoDB standbys: "ID mongodb-key-export PORT" copies the replica set's
+# key file of the MongoDB on PORT to /var/lib/rowsafe/restart/mongodb-key-out
+# (written as the agent user, which seals it to the standby server's agent);
+# "ID mongodb-standby-config PORT SETNAME key|nokey ADDR" makes the empty
+# MongoDB on PORT ready to join replica set SETNAME: it installs the key the
+# agent left in /var/lib/rowsafe/restart/mongodb-key-in (read as the agent
+# user, checked) as /etc/rowsafe/mongodb-standby-PORT.key, readable by
+# MongoDB only, and sets replication.replSetName, security.keyFile and (with
+# ADDR, an IP address) net.bindIp in its configuration file, keeping a copy
+# of the file as it was (CONFIG.rowsafe-backup). It restarts nothing: a
+# restart is a separate request a person confirmed. Both need PORT in
+# /etc/rowsafe/mongodb-standby-allowed ("PORT UNIT CONFIG", written by the
+# installer with --mongodb-standby).
+#
+# actions: restart stop start create-cluster files-read files-put mongodb-key-export mongodb-standby-config
 # update-actions: pg-minor-update pg-install-major pg-upgrade pg-upgrade-undo pg-upgrade-cleanup security-updates reboot db-minor-update db-upgrade db-upgrade-undo db-upgrade-cleanup
 #
 # The same helper manages PgBouncer when root allowed that (--allow-pooler):
@@ -1239,6 +1259,9 @@ agent_user=${ROWSAFE_AGENT_USER:-postgres}
 systemctl=${ROWSAFE_SYSTEMCTL:-systemctl}
 mode=${ROWSAFE_HELPER_MODE:-restart}
 min_interval=60
+
+mongo_allow=${ROWSAFE_MONGODB_STANDBY_ALLOW:-/etc/rowsafe/mongodb-standby-allowed}
+mongo_key_dir=${ROWSAFE_MONGODB_KEY_DIR:-/etc/rowsafe}
 
 log() { echo "rowsafe-pg-restart: $*" >&2; }
 
@@ -1697,6 +1720,108 @@ created_unit() {
   awk -v p="$1" '$1 "" == p "" && $2 ~ /^postgresql@[0-9]+-[A-Za-z0-9_.-]+\.service$/ { print $2; exit }' "$created"
 }
 
+# ---------------------------------------------------------------- MongoDB standbys
+
+# mongo_allowed PORT sets m_unit and m_conf from the MongoDB standby allow
+# list, which only root can write.
+mongo_allowed() {
+  check_root_file "$mongo_allow" "making MongoDB a standby server is not allowed on this server (install Rowsafe there with --mongodb-standby)"
+  m_line=$(awk -v p="$1" '$1 "" == p "" { print $2 " " $3; exit }' "$mongo_allow")
+  [ -n "$m_line" ] || refuse "port $1 is not in $mongo_allow"
+  m_unit=${m_line%% *}
+  m_conf=${m_line#* }
+  printf '%s\n' "$m_unit" | grep -Eq '^(mongod|mongodb)(@[A-Za-z0-9_.-]+)?\.service$' || refuse "$m_unit is not a MongoDB unit"
+  case $m_conf in
+    /etc/*.conf | /etc/*.yaml | /etc/*.yml) ;;
+    *) refuse "$m_conf is not a MongoDB configuration file under /etc" ;;
+  esac
+  case $m_conf in *..*) refuse "$m_conf is not a plain path" ;; esac
+  check_root_file "$m_conf" "$m_conf is missing"
+}
+
+# yaml_get FILE SECTION KEY prints section.key of a block-style YAML file.
+yaml_get() {
+  awk -v s="$2" -v k="$3" '
+    /^[^[:space:]#]/ { insec = ($0 ~ "^" s ":[[:space:]]*(#.*)?$") ; next }
+    insec && $0 ~ "^[[:space:]]+" k ":" {
+      sub("^[[:space:]]+" k ":[[:space:]]*", ""); sub("[[:space:]]+#.*$", ""); gsub(/["\047]/, ""); print; exit
+    }' "$1"
+}
+
+# yaml_set FILE SECTION KEY VALUE sets section.key in place: it replaces the
+# key, or adds it at the end of the section with the section's own
+# indentation, or adds the section. Inline sections ({...}) are refused.
+yaml_set() {
+  if grep -Eq "^$2:[[:space:]]*[^[:space:]#]" "$1"; then
+    refuse "$1 writes $2 inline; Rowsafe only changes block-style sections"
+  fi
+  y_tmp=$(mktemp "$1.rowsafe.XXXXXX") || refuse "cannot write next to $1"
+  awk -v s="$2" -v k="$3" -v v="$4" '
+    function put() { if (!done) { print (ind == "" ? "  " : ind) k ": " v; done = 1 } }
+    /^[^[:space:]#]/ { if (insec) put(); insec = ($0 ~ "^" s ":[[:space:]]*(#.*)?$"); if (insec) seen = 1; print; next }
+    insec && /^[[:space:]]+[^[:space:]#]/ && ind == "" { match($0, /^[[:space:]]+/); ind = substr($0, 1, RLENGTH) }
+    insec && $0 ~ "^[[:space:]]+" k ":" { put(); next }
+    { print }
+    END { if (insec) put(); if (!seen) { print ""; print s ":"; print "  " k ": " v } }' "$1" >"$y_tmp" || refuse "cannot change $1"
+  cat "$y_tmp" >"$1"
+  rm -f "$y_tmp"
+}
+
+# mongo_user is the user the MongoDB unit runs as.
+mongo_user() {
+  m_user=$("$systemctl" show -p User --value "$m_unit" 2>/dev/null)
+  [ -n "$m_user" ] || m_user=mongodb
+  id -u "$m_user" >/dev/null 2>&1 || m_user=mongod
+  id -u "$m_user" >/dev/null 2>&1 || refuse "the user MongoDB runs as is unknown"
+}
+
+mongo_key_export() {
+  mongo_allowed "$1"
+  m_key=$(yaml_get "$m_conf" security keyFile)
+  [ -n "$m_key" ] || refuse "MongoDB on port $1 has no key file in $m_conf"
+  case $m_key in /*) ;; *) refuse "the key file path in $m_conf is not absolute" ;; esac
+  [ -f "$m_key" ] && [ ! -L "$m_key" ] || refuse "$m_key is not a plain file"
+  [ "$(stat -c %s "$m_key")" -le 1100 ] || refuse "$m_key is larger than a MongoDB key file"
+  tr -d 'A-Za-z0-9+/= \n\r\t' <"$m_key" | grep -q . && refuse "$m_key is not a MongoDB key file"
+  # shellcheck disable=SC2016 # $1 expands in the inner shell
+  as_agent sh -c 'umask 077; rm -f -- "$1"; cat >"$1"' rowsafe-pg-restart "$dir/mongodb-key-out" <"$m_key" ||
+    refuse "cannot hand the key file to the agent"
+  ok=1
+}
+
+mongo_standby_config() {
+  port=$1 m_set=$2 m_keyflag=$3 m_addr=$4
+  mongo_allowed "$port"
+  m_cur=$(yaml_get "$m_conf" replication replSetName)
+  [ -z "$m_cur" ] || [ "$m_cur" = "$m_set" ] || refuse "MongoDB on port $port already names replica set $m_cur"
+  [ -e "$m_conf.rowsafe-backup" ] || cp -p "$m_conf" "$m_conf.rowsafe-backup" || refuse "cannot keep a copy of $m_conf"
+  if [ "$m_keyflag" = key ]; then
+    # shellcheck disable=SC2016
+    m_keydata=$(as_agent sh -c 'if [ -f "$1" ] && [ ! -L "$1" ]; then head -c 1100 -- "$1"; fi; rm -f -- "$1"' rowsafe-pg-restart "$dir/mongodb-key-in" 2>/dev/null)
+    m_len=$(printf '%s' "$m_keydata" | tr -d ' \n\r\t' | wc -c)
+    [ "$m_len" -ge 6 ] && [ "$m_len" -le 1024 ] || refuse "the key the agent left is not a MongoDB key"
+    printf '%s' "$m_keydata" | tr -d 'A-Za-z0-9+/= \n\r\t' | grep -q . && refuse "the key the agent left is not a MongoDB key"
+    mongo_user
+    m_keyfile=$mongo_key_dir/mongodb-standby-$port.key
+    m_tmp=$(mktemp "$mongo_key_dir/.mongodb-key.XXXXXX") || refuse "cannot write in $mongo_key_dir"
+    printf '%s\n' "$m_keydata" >"$m_tmp"
+    chown "$m_user" "$m_tmp" && chmod 0400 "$m_tmp" && mv -f "$m_tmp" "$m_keyfile" || refuse "cannot install the key file"
+    yaml_set "$m_conf" security keyFile "$m_keyfile"
+  fi
+  yaml_set "$m_conf" replication replSetName "$m_set"
+  if [ "$m_addr" != - ]; then
+    m_bind=$(yaml_get "$m_conf" net bindIp)
+    [ -n "$m_bind" ] || m_bind=127.0.0.1
+    case ",$m_bind," in
+      *",$m_addr,"* | *,0.0.0.0,* | *,::,*) ;;
+      *) yaml_set "$m_conf" net bindIp "$m_bind,$m_addr" ;;
+    esac
+  fi
+  log "MongoDB on port $port: replica set $m_set, key $m_keyflag, address $m_addr in $m_conf (a copy of it as it was: $m_conf.rowsafe-backup)"
+  add config "$m_conf"
+  ok=1
+}
+
 # create_cluster PORT MAJOR NAME: a new cluster for a fork, through its own
 # sandboxed unit, when root allowed it and PORT is in the allowed range.
 create_cluster() {
@@ -2037,6 +2162,20 @@ restart_main() {
     rest=${line#* }
     action=${rest% *}
     port=${rest#* }
+  elif printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} mongodb-key-export [0-9]{1,5}$'; then
+    # shellcheck disable=SC2086 # split the checked request into its fields
+    set -- $line
+    id=$1 action=$2
+    mongo_key_export "$3"
+    answer
+    exit 0
+  elif printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} mongodb-standby-config [0-9]{1,5} [A-Za-z0-9_-]{1,64} (key|nokey) ([0-9.]{7,15}|[0-9a-fA-F:]{2,39}|-)$'; then
+    # shellcheck disable=SC2086
+    set -- $line
+    id=$1 action=$2
+    mongo_standby_config "$3" "$4" "$5" "$6"
+    answer
+    exit 0
   elif printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} create-cluster [1-9][0-9]{3,4} [1-9][0-9] [a-z][a-z0-9_]{0,39}$'; then
     id=${line%% *}
     action=create-cluster
@@ -7487,10 +7626,14 @@ setup_databases() {
       *)
         note "Found $(cluster_desc)"
         if [ "$C_ENGINE" = mongodb ] && [ "$C_DBS" = - ] &&
-          { [ "$M_CLONES" = yes ] || { [ "$TTY" = 1 ] && confirm "It has no databases. Keep it empty, ready to receive clones of a MongoDB database from another server?" n; }; }; then
+          { [ "$M_CLONES" = yes ] || [ "$MONGODB_STANDBY" = yes ] ||
+            { [ "$TTY" = 1 ] && confirm "It has no databases. Keep it empty, ready to become another server's standby or to receive clones?" n && MONGODB_STANDBY=yes; }; }; then
           M_CLONES=yes
-          if mongodb_prepare; then
-            ok "MongoDB on port $C_PORT is ready to receive clones: pick this server when you fork a MongoDB database in the dashboard"
+          # No replica set of its own: a standby joins the primary's set.
+          M_ADMIN='' M_ADMIN_PW=''
+          if mongodb_status && mongodb_login; then
+            [ "$MONGODB_STANDBY" != yes ] || mongodb_standby_allow || true
+            ok "MongoDB on port $C_PORT is ready to receive clones${MONGODB_STANDBY:+ or become a standby}: pick this server in the dashboard"
           fi
           continue
         fi
@@ -7909,16 +8052,16 @@ mongodb_as_admin() {
 
 # mongodb_login creates Rowsafe's MongoDB user.
 mongodb_login() {
-  [ "$M_LOGIN" = ok ] && [ -z "$M_CLONES" ] && return 0
+  [ "$M_LOGIN" = ok ] && [ -z "$M_CLONES" ] && [ -z "$MONGODB_STANDBY" ] && return 0
   _rc=0
-  mongodb_as_admin login ${M_CLONES:+--clones} >"$TMP/mlogin" 2>&1 || _rc=$?
+  mongodb_as_admin login ${M_CLONES:+--clones} ${MONGODB_STANDBY:+--standby} >"$TMP/mlogin" 2>&1 || _rc=$?
   while [ "$_rc" = 11 ] || [ "$_rc" = 12 ]; do
     [ "$_rc" = 12 ] && { tty_bad "MongoDB refused that login."; M_ADMIN=''; }
     [ "$_rc" = 11 ] && [ -n "$M_ADMIN" ] && { tty_bad "That user can't create users."; M_ADMIN=''; }
     mongodb_admin || { warn "MongoDB has access control on: set ROWSAFE_MONGODB_ADMIN_USER and ROWSAFE_MONGODB_ADMIN_PASSWORD (used once, never saved), or run the installer on a terminal"; return 1; }
     [ -n "${ROWSAFE_MONGODB_ADMIN_USER:-}" ] && [ "$_rc" = 12 ] && return 1
     _rc=0
-    mongodb_as_admin login ${M_CLONES:+--clones} >"$TMP/mlogin" 2>&1 || _rc=$?
+    mongodb_as_admin login ${M_CLONES:+--clones} ${MONGODB_STANDBY:+--standby} >"$TMP/mlogin" 2>&1 || _rc=$?
   done
   sed 's/^/    /' "$TMP/mlogin"
   [ "$_rc" = 0 ]
@@ -7980,6 +8123,28 @@ mongodb_replset() {
   ok "MongoDB on port $C_PORT is now a single-member replica set"
 }
 
+MONGODB_STANDBY_ALLOW_FILE=$CONFIG_DIR/mongodb-standby-allowed
+
+# mongodb_standby_allow lists the MongoDB on C_PORT in the standby allow
+# list ("PORT UNIT CONFIG"): root's helper may then hand out its replica
+# set key file, or add replSetName, keyFile and an address to its
+# configuration (keeping a copy). It restarts nothing by itself.
+mongodb_standby_allow() {
+  if [ -z "$M_CONFIG" ] || [ "$M_CONFIG" = - ] || [ ! -f "$M_CONFIG" ] || [ -z "$M_UNIT" ]; then
+    warn "MongoDB on port $C_PORT isn't started from a configuration file by a systemd unit the installer knows, so standby servers stay off for it"
+    return 1
+  fi
+  {
+    echo "# MongoDB servers Rowsafe may make part of a standby pair (written by the installer, root's)."
+    echo "# PORT UNIT CONFIG"
+    grep -s '^[0-9]' "$MONGODB_STANDBY_ALLOW_FILE" | awk -v p="$C_PORT" '$1 != p'
+    echo "$C_PORT $M_UNIT $M_CONFIG"
+  } >"$TMP/mstandby"
+  write_file "$MONGODB_STANDBY_ALLOW_FILE" 0644 root:root <"$TMP/mstandby" || true
+  restart_allowed "$C_PORT" || warn "standby servers also need Rowsafe to restart MongoDB here when someone confirms: run the installer with --allow-restart"
+  perm_ok "Rowsafe may set up standby servers with MongoDB on port $C_PORT (it restarts it only when someone confirms)"
+}
+
 # mongodb_prepare gets a MongoDB server ready for its plan. Interactive
 # unless unattended=1 (then it never restarts without --mongodb-replica-set).
 mongodb_prepare() {
@@ -8009,6 +8174,7 @@ mongodb_prepare() {
     mongodb_replset || return 1
   fi
   mongodb_login || return 1
+  [ "$MONGODB_STANDBY" != yes ] || mongodb_standby_allow || true
 }
 
 # ---------------------------------------------------------------- ClickHouse
@@ -8415,6 +8581,7 @@ main() {
       --mysql-standby) MYSQL_STANDBY=yes ;;
       --clickhouse-clones) CH_CLONES=yes ;;
       --mongodb-clones) M_CLONES=yes ;;
+      --mongodb-standby) MONGODB_STANDBY=yes ;;
       --no-mysql-standby) MYSQL_STANDBY=no ;;
       --mongodb-replica-set) MONGODB_REPLSET=yes ;;
       --no-mongodb-replica-set) MONGODB_REPLSET=no ;;

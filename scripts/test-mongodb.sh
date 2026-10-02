@@ -24,7 +24,7 @@ DOCKERFILE
 		if ! docker run --rm -v "$HERE":/src:ro -v "$MODCACHE":/go/pkg/mod -v rowsafe-test-gocache:/root/.cache/go-build \
 			-e GOMODCACHE=/go/pkg/mod -e AUTH=$auth -e CLONE="${MONGO_CLONE:-}" -w /src "$img" bash -euc '
 			mkdir -p /data/rs /tmp/work
-			args="--dbpath /data/rs --replSet rs0 --port 27017 --bind_ip 127.0.0.1 --fork --logpath /tmp/mongod.log"
+			args="--dbpath /data/rs --replSet rs0 --port 27017 --bind_ip_all --fork --logpath /tmp/mongod.log"
 			if [ "$AUTH" = on ]; then
 				openssl rand -base64 48 > /tmp/keyfile; chmod 400 /tmp/keyfile
 				mongod $args --keyFile /tmp/keyfile >/dev/null
@@ -49,7 +49,7 @@ DOCKERFILE
 					mongod --dbpath /data/c --port 27018 --bind_ip 127.0.0.1 --fork --logpath /tmp/m2.log >/dev/null
 				fi
 				export ROWSAFE_TEST_MONGODB_CLONE_PORT=27018
-				run="TestMongoDBClone|TestMongoDBMoveIn"
+				run="TestMongoDBClone|TestMongoDBMoveIn|TestMongoDBMoveInLive|TestMongoDBStandby"
 			fi
 			ROWSAFE_TEST_MONGODB_PORT=27017 go test -count=1 -tags mongodb_integration -run "$run" -v ./internal/engine/mongodb/ 2>&1 | tail -n 80
 			exit ${PIPESTATUS[0]}

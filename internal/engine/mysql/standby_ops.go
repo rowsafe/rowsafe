@@ -236,6 +236,7 @@ func (e *Engine) StandbyTargets(ctx context.Context, env agent.EngineEnv) []prot
 		t := protocol.StandbyTarget{Engine: string(e.flavor), Port: d.Port, Version: d.Version, Socket: d.SocketDir}
 		t.Reason = e.targetReason(ctx, env, store, d)
 		t.Usable = t.Reason == ""
+		t.Standby, t.NoStandby = t.Usable, t.Reason // the same rights and an empty server
 		out = append(out, t)
 	}
 	targetsMu.Lock()
