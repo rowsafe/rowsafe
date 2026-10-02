@@ -214,6 +214,8 @@ type StandbyTarget struct {
 	Engine  string `json:"engine"`
 	Port    int    `json:"port"`
 	Version string `json:"version,omitempty"`
+	// Socket is the server's Unix socket ("" when it has none).
+	Socket string `json:"socket,omitempty"`
 	// Usable: it can be picked; Reason says why not, in plain words.
 	Usable bool   `json:"usable"`
 	Reason string `json:"reason,omitempty"`

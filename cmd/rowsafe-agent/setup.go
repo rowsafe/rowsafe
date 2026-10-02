@@ -180,6 +180,7 @@ func mysqlAccount(ctx context.Context, args []string) error {
 		adminPW   = fs.String("admin-password-file", "", "file holding the administrator's password (default: socket login)")
 		owner     = fs.String("owner", "", "OS user that owns the account file (the agent user)")
 		stateDir  = fs.String("state-dir", "", "the agent's state directory (default ROWSAFE_STATE_DIR or /var/lib/rowsafe)")
+		standby   = fs.Bool("standby", false, "also let Rowsafe set up standby servers (replication) with this server: administrator rights")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -205,7 +206,7 @@ func mysqlAccount(ctx context.Context, args []string) error {
 	}
 	msg, err := mysqlengine.CreateAccount(ctx, mysqlengine.AccountOptions{
 		Engine: *engine, Port: *port, Socket: *socket, StateDir: dir,
-		AdminUser: *adminUser, AdminPasswordFile: *adminPW, UID: uid, GID: gid,
+		AdminUser: *adminUser, AdminPasswordFile: *adminPW, UID: uid, GID: gid, Standby: *standby,
 	})
 	if err != nil {
 		return err

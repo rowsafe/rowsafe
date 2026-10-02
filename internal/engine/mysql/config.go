@@ -73,12 +73,12 @@ func loadConfig(env agent.EngineEnv) config {
 var toolNames = map[flavor]map[string][]string{
 	flavorMySQL: {
 		"backup": {"xtrabackup"}, "xbstream": {"xbstream"}, "binlog": {"mysqlbinlog"},
-		"client": {"mysql"}, "server": {"mysqld"},
+		"client": {"mysql"}, "server": {"mysqld"}, "dump": {"mysqldump"},
 	},
 	flavorMariaDB: {
 		"backup": {"mariadb-backup", "mariabackup"}, "xbstream": {"mbstream"},
 		"binlog": {"mariadb-binlog", "mysqlbinlog"}, "client": {"mariadb", "mysql"},
-		"server": {"mariadbd", "mysqld"},
+		"server": {"mariadbd", "mysqld"}, "dump": {"mariadb-dump", "mysqldump"},
 	},
 }
 
