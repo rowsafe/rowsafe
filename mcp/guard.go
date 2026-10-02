@@ -8,58 +8,129 @@ import (
 )
 
 // DestructiveDBCommand reports whether a shell command is likely to change a
-// PostgreSQL database destructively: schema migrations, resets and drops,
-// or SQL with DROP, TRUNCATE, or DELETE/UPDATE without WHERE sent to psql.
-// It returns a short reason. It is a heuristic tuned for few false
-// positives: status, dry-run and help invocations, and commands that only
-// mention a tool (echo, grep, git commit -m ...), don't match.
+// database destructively: schema migrations, resets and drops, SQL with
+// DROP, TRUNCATE, ALTER ... DROP, or DELETE/UPDATE without WHERE sent to a
+// SQL client (psql, mysql, mariadb, clickhouse-client, ...), or a MongoDB
+// shell script that drops or empties collections. It returns a short
+// reason. It is a heuristic tuned for few false positives: status, dry-run
+// and help invocations, and commands that only mention a tool (echo, grep,
+// git commit -m ...), don't match.
 //
-// readFile, if not nil, reads SQL files passed to psql -f so their contents
-// can be checked too.
+// readFile, if not nil, reads the SQL or script files passed to a client
+// (psql -f, mysql < file, clickhouse-client --queries-file, mongosh
+// script.js) so their contents can be checked too.
 func DestructiveDBCommand(command string, readFile func(string) ([]byte, error)) (string, bool) {
-	sawPsql := false
-	var psqlFiles []string
+	sawSQL, sawMongo := false, false
+	var sqlFiles, mongoFiles []string
 	for _, seg := range splitSegments(command) {
 		words := commandWords(seg)
 		if len(words) == 0 || harmlessCommand(words) {
 			continue
 		}
-		if hasAny(words, "--help", "-h", "help", "--dry-run", "--version") {
+		if helpInvocation(words) {
 			continue
 		}
 		if reason, ok := destructiveTool(words); ok {
 			return reason, true
 		}
 		for i, w := range words {
-			switch base(w) {
-			case "psql", "pgcli":
-				sawPsql = true
-				for j := i + 1; j < len(words); j++ {
-					if (words[j] == "-f" || words[j] == "--file") && j+1 < len(words) {
-						psqlFiles = append(psqlFiles, words[j+1])
-					} else if f, ok := strings.CutPrefix(words[j], "--file="); ok {
-						psqlFiles = append(psqlFiles, f)
+			switch client := clientKind(words, i); client {
+			case "sql", "mongo":
+				files := clientFiles(base(w), words[i+1:])
+				if client == "sql" {
+					sawSQL = true
+					sqlFiles = append(sqlFiles, files...)
+				} else {
+					sawMongo = true
+					mongoFiles = append(mongoFiles, files...)
+				}
+			}
+		}
+	}
+	check := func(saw bool, files []string, fn func(string) (string, bool)) (string, bool) {
+		if !saw {
+			return "", false
+		}
+		if reason, ok := fn(command); ok {
+			return reason, true
+		}
+		if readFile != nil {
+			for _, f := range files {
+				if data, err := readFile(f); err == nil {
+					if reason, ok := fn(string(data)); ok {
+						return reason + " (in " + f + ")", true
 					}
 				}
 			}
 		}
-	}
-	if !sawPsql {
 		return "", false
 	}
-	if reason, ok := destructiveSQL(command); ok {
+	if reason, ok := check(sawSQL, sqlFiles, destructiveSQL); ok {
 		return reason, true
 	}
-	if readFile != nil {
-		for _, f := range psqlFiles {
-			if data, err := readFile(f); err == nil {
-				if reason, ok := destructiveSQL(string(data)); ok {
-					return reason + " (in " + f + ")", true
-				}
+	return check(sawMongo, mongoFiles, destructiveMongo)
+}
+
+// helpInvocation is true for --help, --version and --dry-run runs. -h
+// counts only as the last word: psql, mysql and clickhouse-client take
+// -h HOST.
+func helpInvocation(words []string) bool {
+	if hasAny(words, "--help", "help", "--dry-run", "--version") {
+		return true
+	}
+	return words[len(words)-1] == "-h"
+}
+
+// clientKind says whether words[i] runs a database client: "sql" for
+// psql, pgcli, mysql, mariadb, mycli and clickhouse-client (or
+// clickhouse client), "mongo" for mongosh and mongo, "" otherwise.
+func clientKind(words []string, i int) string {
+	switch base(words[i]) {
+	case "psql", "pgcli", "mysql", "mariadb", "mycli", "clickhouse-client", "clickhouse-local":
+		return "sql"
+	case "clickhouse":
+		if i+1 < len(words) && (words[i+1] == "client" || words[i+1] == "local") {
+			return "sql"
+		}
+	case "mongosh", "mongo":
+		return "mongo"
+	}
+	return ""
+}
+
+// clientFiles lists the script files a client invocation reads: psql -f,
+// clickhouse-client --queries-file, mongosh --file or positional .js
+// files, and any client's stdin redirection (< file).
+func clientFiles(tool string, args []string) []string {
+	var files []string
+	for j := 0; j < len(args); j++ {
+		a := args[j]
+		next := func() string {
+			if j+1 < len(args) {
+				return args[j+1]
 			}
+			return ""
+		}
+		switch {
+		case a == "<" && next() != "":
+			files = append(files, next())
+		case strings.HasPrefix(a, "<") && !strings.HasPrefix(a, "<<") && len(a) > 1:
+			files = append(files, a[1:])
+		case (tool == "psql" || tool == "pgcli") && (a == "-f" || a == "--file") && next() != "":
+			files = append(files, next())
+		case (tool == "psql" || tool == "pgcli" || tool == "mongosh" || tool == "mongo") && strings.HasPrefix(a, "--file="):
+			files = append(files, strings.TrimPrefix(a, "--file="))
+		case (tool == "mongosh" || tool == "mongo") && (a == "-f" || a == "--file") && next() != "":
+			files = append(files, next())
+		case (tool == "mongosh" || tool == "mongo") && strings.HasSuffix(a, ".js") && !strings.HasPrefix(a, "-"):
+			files = append(files, a)
+		case strings.HasPrefix(tool, "clickhouse") && a == "--queries-file" && next() != "":
+			files = append(files, next())
+		case strings.HasPrefix(tool, "clickhouse") && strings.HasPrefix(a, "--queries-file="):
+			files = append(files, strings.TrimPrefix(a, "--queries-file="))
 		}
 	}
-	return "", false
+	return files
 }
 
 // splitSegments splits a command line at ;, &&, ||, | and newlines, outside quotes.
@@ -357,6 +428,18 @@ func destructiveTool(words []string) (string, bool) {
 			}
 		}
 	}
+	// MySQL, MariaDB and MongoDB client tools
+	for _, tool := range []string{"mysqladmin", "mariadb-admin"} {
+		if slices.ContainsFunc(words, func(w string) bool { return base(w) == tool }) && hasAny(words, "drop") {
+			return tool + " drop", true
+		}
+	}
+	if slices.ContainsFunc(words, func(w string) bool { return base(w) == "mongorestore" }) && hasAny(words, "--drop") {
+		return "mongorestore --drop", true
+	}
+	if slices.ContainsFunc(words, func(w string) bool { return base(w) == "myloader" }) && hasAny(words, "--overwrite-tables", "-o") {
+		return "myloader --overwrite-tables", true
+	}
 	// Package-manager scripts named like migrations (npm run db:migrate, yarn migrate).
 	for i, w := range words {
 		if in(base(w), "npm", "pnpm", "yarn", "bun") && i+1 < len(words) {
@@ -389,12 +472,14 @@ var migrationScriptRE = regexp.MustCompile(`^(db:)?(migrate|migrations?:(run|up|
 func migrationScript(s string) bool { return migrationScriptRE.MatchString(s) }
 
 var (
-	dropRE     = regexp.MustCompile(`(?i)\bdrop\s+(table|schema|database|index|view|materialized\s+view|type|function|extension|owned|sequence|trigger|column|constraint|role|user)\b`)
-	truncateRE = regexp.MustCompile(`(?i)\btruncate\s+(table\s+)?(only\s+)?[\w."]+`)
-	alterRE    = regexp.MustCompile(`(?i)\balter\s+table\s+[\w."]+\s+.*\b(drop|rename|alter\s+column\s+[\w"]+\s+(set\s+data\s+)?type)\b`)
-	deleteRE   = regexp.MustCompile(`(?i)\bdelete\s+from\s+[\w."]+`)
-	updateRE   = regexp.MustCompile(`(?i)\bupdate\s+[\w."]+\s+set\b`)
-	whereRE    = regexp.MustCompile(`(?i)\bwhere\b`)
+	dropRE     = regexp.MustCompile("(?i)\\bdrop\\s+(table|schema|database|index|view|materialized\\s+view|type|function|extension|owned|sequence|trigger|column|constraint|role|user|procedure|event|dictionary|partition|part)\\b")
+	truncateRE = regexp.MustCompile("(?i)\\btruncate\\s+(table\\s+)?(only\\s+)?[\\w.\"`]+")
+	// ALTER TABLE ... DROP/RENAME/type changes; MySQL MODIFY/CHANGE COLUMN;
+	// ClickHouse mutations (ALTER TABLE ... DELETE/UPDATE) and partition drops.
+	alterRE  = regexp.MustCompile("(?i)\\balter\\s+table\\s+[\\w.\"`]+\\s+[^;]*\\b(drop\\b|rename\\b|delete\\s+where\\b|update\\s+[\\w\"`]+\\s*=|modify\\s+column\\b|change\\s+column\\b|alter\\s+column\\s+[\\w\"`]+\\s+(set\\s+data\\s+)?type\\b)")
+	deleteRE = regexp.MustCompile("(?i)\\bdelete\\s+from\\s+[\\w.\"`]+")
+	updateRE = regexp.MustCompile("(?i)\\bupdate\\s+[\\w.\"`]+\\s+set\\b")
+	whereRE  = regexp.MustCompile(`(?i)\bwhere\b`)
 )
 
 // destructiveSQL looks for statements that remove or rewrite data wholesale.
@@ -407,6 +492,9 @@ func destructiveSQL(sql string) (string, bool) {
 	}
 	if m := alterRE.FindString(sql); m != "" {
 		return "SQL ALTER TABLE", true
+	}
+	if m := renameRE.FindString(sql); m != "" {
+		return "SQL RENAME TABLE", true
 	}
 	for _, re := range []struct {
 		re   *regexp.Regexp
@@ -421,6 +509,33 @@ func destructiveSQL(sql string) (string, bool) {
 				return "SQL " + re.name + " without WHERE", true
 			}
 		}
+	}
+	return "", false
+}
+
+var renameRE = regexp.MustCompile(`(?i)\brename\s+(table|database)\b`)
+
+var (
+	// db.orders.drop(), db.dropDatabase(), db.getCollection("x").drop(),
+	// dropIndex(es), renameCollection.
+	mongoDropRE = regexp.MustCompile(`\.(drop|dropDatabase|dropIndex|dropIndexes|renameCollection)\s*\(`)
+	// deleteMany({}), remove({}), updateMany({}, ...), replaceOne({}, ...)
+	// with an empty filter.
+	mongoEmptyFilterRE = regexp.MustCompile(`\.(deleteMany|remove|updateMany|update)\s*\(\s*(\{\s*\})?\s*[,)]`)
+	mongoDropCmdRE     = regexp.MustCompile(`(?i)(runCommand|adminCommand)\s*\(\s*\{\s*['"]?(drop|dropDatabase|dropIndexes)['"]?\s*:`)
+)
+
+// destructiveMongo looks for MongoDB shell calls that drop or empty
+// collections, or change every document.
+func destructiveMongo(js string) (string, bool) {
+	if m := mongoDropRE.FindStringSubmatch(js); m != nil {
+		return "MongoDB " + m[1] + "()", true
+	}
+	if m := mongoDropCmdRE.FindStringSubmatch(js); m != nil {
+		return "MongoDB " + m[2] + " command", true
+	}
+	if m := mongoEmptyFilterRE.FindStringSubmatch(js); m != nil {
+		return "MongoDB " + m[1] + " on every document", true
 	}
 	return "", false
 }
