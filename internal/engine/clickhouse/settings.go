@@ -82,11 +82,11 @@ func settingsSnapshot(ctx context.Context, env agent.EngineEnv, c *client) (*pro
 	}
 	in := func(xs []string) string { return "('" + strings.Join(xs, "','") + "')" } // catalog names only
 	type row struct {
-		Name     string `json:"name"`
-		Value    string `json:"value"`
-		Default  string `json:"default"`
-		Changed  int    `json:"changed"`
-		Hot      string `json:"hot"`
+		Name    string `json:"name"`
+		Value   string `json:"value"`
+		Default string `json:"default"`
+		Changed int    `json:"changed"`
+		Hot     string `json:"hot"`
 	}
 	rows, err := query[row](ctx, c, "SELECT name, value, default, toUInt8(changed) AS changed, toString(changeable_without_restart) AS hot FROM system.server_settings WHERE name IN "+in(server), nil)
 	if err != nil {
