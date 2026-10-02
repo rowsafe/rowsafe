@@ -313,7 +313,7 @@ Options (when piping, pass them after `sh -s --`):
                          ones a person confirms (needs --allow-restart)
   --mongodb-clones       MongoDB: keep an empty server ready to receive clones of a
                          database from another server (Rowsafe's user there gets the
-                         restore role)
+                         restore and readWriteAnyDatabase roles)
   --clickhouse-clones    ClickHouse: keep an empty server ready to receive clones of a
                          database from another server (Rowsafe's user there may then
                          create and drop databases)

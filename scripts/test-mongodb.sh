@@ -49,7 +49,7 @@ DOCKERFILE
 					mongod --dbpath /data/c --port 27018 --bind_ip 127.0.0.1 --fork --logpath /tmp/m2.log >/dev/null
 				fi
 				export ROWSAFE_TEST_MONGODB_CLONE_PORT=27018
-				run="TestMongoDBClone|TestMongoDBMoveIn|TestMongoDBStandby"
+				run="TestMongoDBClone|TestMongoDBMoveIn|TestMongoDBMoveInLive|TestMongoDBStandby"
 			fi
 			ROWSAFE_TEST_MONGODB_PORT=27017 go test -count=1 -tags mongodb_integration -run "$run" -v ./internal/engine/mongodb/ 2>&1 | tail -n 80
 			exit ${PIPESTATUS[0]}

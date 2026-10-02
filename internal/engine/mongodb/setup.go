@@ -202,8 +202,12 @@ func CreateLoginRoles(ctx context.Context, env agent.EngineEnv, port int, adminU
 	}
 	names := []string{"backup", "clusterMonitor", "readAnyDatabase", "userAdminAnyDatabase", "dbAdminAnyDatabase"}
 	if clones {
+		// Live move in replays the source's updates and deletes onto the
+		// copy, which restore alone cannot do.
 		roles = append(roles, bson.D{{Key: "role", Value: "restore"}, {Key: "db", Value: "admin"}})
 		names = append(names, "restore")
+		roles = append(roles, bson.D{{Key: "role", Value: "readWriteAnyDatabase"}, {Key: "db", Value: "admin"}})
+		names = append(names, "readWriteAnyDatabase")
 	}
 	if standby {
 		roles = append(roles, bson.D{{Key: "role", Value: "clusterManager"}, {Key: "db", Value: "admin"}})

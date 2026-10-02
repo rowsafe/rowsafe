@@ -92,6 +92,7 @@ func (e *Engine) migrateCredentials(ctx context.Context, env agent.EngineEnv, db
 // database was new).
 func (e *Engine) migrateCancel(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec, m agent.MigrateEnv, p protocol.MigrateParams,
 	tl agent.TaskLogger) (*protocol.MigrateActionResult, error) {
+	stopLive(m.Dir) // migrate_live.go
 	st := loadMigState(m.Dir)
 	res := &protocol.MigrateActionResult{Summary: "The migration is cancelled. The source wasn't changed."}
 	if p.DropTarget && st.CreatedDB && st.TargetDB != "" {
