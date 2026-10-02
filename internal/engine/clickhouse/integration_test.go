@@ -303,6 +303,40 @@ func TestClickHouseEndToEnd(t *testing.T) {
 		t.Fatalf("drill left %d entries", len(left))
 	}
 
+	// Guard: a migration preview on a copy; production is untouched.
+	pv, err := run[protocol.PreviewResult](t, e, env, db, protocol.TaskPreviewMigration, protocol.PreviewParams{PreviewID: "p1", DB: "shop",
+		SQL: "ALTER TABLE orders ADD COLUMN status String DEFAULT 'new';\n" +
+			"ALTER TABLE orders DELETE WHERE id < 100;\n" +
+			"INSERT INTO prices SELECT number, 1.5, 1 FROM numbers(10);\n" +
+			"SELECT * FROM url('http://example.com/x.csv', CSV);\n" +
+			"DROP TABLE notes;\n" +
+			"ALTER TABLE orders DROP COLUMN nope;\n"})
+	if err != nil {
+		t.Fatal("preview:", err)
+	}
+	t.Logf("preview: %s", pv.Summary)
+	if pv.Verdict != protocol.PreviewFailed || pv.Error == nil || pv.Error.Statement != 6 {
+		t.Fatalf("preview: %+v %+v", pv, pv.Error)
+	}
+	if s := pv.Statements[1]; !s.Ran || len(s.Rewrites) != 1 || s.Rewrites[0].Name != "shop.orders" {
+		t.Errorf("mutation: %+v", s)
+	}
+	if s := pv.Statements[2]; s.Rows == nil || *s.Rows != 10 {
+		t.Errorf("insert: %+v", s)
+	}
+	if s := pv.Statements[3]; s.Ran {
+		t.Errorf("url() ran on the copy: %+v", s)
+	}
+	if s := pv.Statements[4]; len(s.Dropped) != 1 || s.Dropped[0].Name != "shop.notes" {
+		t.Errorf("drop: %+v", s)
+	}
+	if n, err := admin.scalar(ctx, "SELECT count() FROM system.columns WHERE database = 'shop' AND table = 'orders' AND name = 'status'", nil); err != nil || n != "0" {
+		t.Fatalf("the preview changed production: %v %s", err, n)
+	}
+	if left, _ := os.ReadDir(drillRoot(env)); len(left) != 0 {
+		t.Fatalf("preview left %d entries", len(left))
+	}
+
 	// Rewind: a copy at the Mark (1200 orders).
 	cp, err := run[protocol.RewindCopyResult](t, e, env, db, protocol.TaskRewindCopy,
 		protocol.RewindCopyParams{CopyID: "copy1", Target: protocol.RewindTarget{Mark: "before-cleanup"}})
