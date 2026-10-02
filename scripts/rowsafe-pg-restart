@@ -566,7 +566,7 @@ check_root_file() {
 # (postgresql@MAJOR-NAME.service), and the units the MySQL, MariaDB,
 # MongoDB and ClickHouse packages install (mysql, mysqld, mariadb and their
 # @instance forms, mongod, mongodb, clickhouse-server).
-db_unit_re='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server)\.service$'
+db_unit_re='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server)[.]service$'
 
 # allowed_unit PORT prints the unit the restart allow list names for PORT.
 allowed_unit() {
