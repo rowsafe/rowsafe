@@ -7,9 +7,11 @@
 #
 #   sh scripts/test-mysql.sh                 # mysql 8.4 and mariadb 11.4
 #   MYSQL_IT="mysql:8.4 mariadb:10.6" sh scripts/test-mysql.sh
+#   MYSQL_IT_RUN=Standby sh scripts/test-mysql.sh   # standby servers (a second, empty server)
 set -eu
 cd "$(dirname "$0")/.."
 targets=${MYSQL_IT:-"mysql:8.4 mariadb:11.4"}
+run=${MYSQL_IT_RUN:-Integration}
 proj=rowsafe-mysql-it-$$
 work=$(mktemp -d "${TMPDIR:-/tmp}/rowsafe-mysql-it.XXXXXX")
 arch=$(docker version --format '{{.Server.Arch}}')
@@ -71,12 +73,25 @@ for target in $targets; do
   # shellcheck disable=SC2086
   docker run -d --label "$proj" --network "$net" --name "$name" -e "$envpw=root-secret-$$" \
     -v "$data:/var/lib/mysql" -v "$sock:$sockdir" "$image:$version" $server_args >/dev/null
-  for _ in $(seq 1 90); do
-    docker logs "$name" 2>&1 | grep -q "port: 3306" && break
-    sleep 2
+  sbargs=''
+  if [ "$run" = Standby ]; then
+    # The standby: an empty server of the same version, same server_id
+    # (Rowsafe changes it).
+    docker volume create --label "$proj" "$sock-sb" >/dev/null
+    # shellcheck disable=SC2086
+    docker run -d --label "$proj" --network "$net" --name "$name-sb" -e "$envpw=root-secret-$$" \
+      -v "$sock-sb:$sockdir" "$image:$version" $server_args >/dev/null
+    sbargs="-v $sock-sb:/sbsock -e ROWSAFE_MYSQL_IT_STANDBY_SOCKET=/sbsock/mysqld.sock -e ROWSAFE_MYSQL_IT_PRIMARY_HOST=$name -e ROWSAFE_MYSQL_IT_STANDBY_HOST=$name-sb"
+  fi
+  for n in "$name" ${sbargs:+"$name-sb"}; do
+    for _ in $(seq 1 90); do
+      docker logs "$n" 2>&1 | grep -q "port: 3306" && break
+      sleep 2
+    done
   done
   sleep 3
-  if ! docker run --rm --label "$proj" --network "$net" \
+  # shellcheck disable=SC2086
+  if ! docker run --rm --label "$proj" --network "$net" $sbargs \
     -v "$data:/var/lib/mysql:ro" -v "$sock:$sockdir" \
     -v "$work/mysql.test:/it/mysql.test:ro" -v "$work/rootpw:/it/rootpw:ro" -v "$work/certs/public.crt:/it/ca.crt:ro" \
     -e ROWSAFE_MYSQL_IT="$image" -e ROWSAFE_MYSQL_IT_SOCKET=$sockdir/mysqld.sock \
@@ -84,11 +99,12 @@ for target in $targets; do
     -e ROWSAFE_REPO_S3_ENDPOINT=minio -e ROWSAFE_REPO_S3_PORT=9000 -e ROWSAFE_REPO_S3_BUCKET=backups \
     -e ROWSAFE_REPO_S3_KEY=rowsafe -e ROWSAFE_REPO_S3_KEY_SECRET=rowsafe-secret-key \
     -e ROWSAFE_REPO_CIPHER_PASS=it-passphrase-0123456789abcdef -e ROWSAFE_REPO_S3_CA_FILE=/it/ca.crt \
-    --entrypoint /it/mysql.test "$agent_image" -test.run 'TestIntegration' -test.v -test.timeout 30m; then
+    --entrypoint /it/mysql.test "$agent_image" -test.run "Test$run" -test.v -test.timeout 30m; then
     status=1
     echo "--- server log ($image $version)"
     docker logs "$name" 2>&1 | tail -40
   fi
   docker rm -f "$name" >/dev/null
+  [ -z "$sbargs" ] || docker rm -f "$name-sb" >/dev/null
 done
 exit $status

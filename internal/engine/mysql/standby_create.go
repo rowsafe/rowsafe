@@ -167,6 +167,10 @@ func (s *server) checkTarget(ctx context.Context, conn *sql.DB, p protocol.Stand
 		} else {
 			_, _ = conn.ExecContext(ctx, "SET PERSIST server_id = "+strconv.FormatUint(uint64(n), 10))
 		}
+		// Sessions keep the server_id they started with: one still open
+		// would write as the primary once promoted, and the old primary
+		// would skip its changes as its own. The server is empty: end them.
+		s.endSessions(ctx, conn)
 	}
 	return nil
 }
@@ -243,7 +247,7 @@ func (s *server) seedStandby(ctx context.Context, conn *sql.DB, rec *standbyReco
 	rec.Schemas = schemas
 	if len(schemas) > 0 {
 		log.Printf("loading %s into the standby", plural(int64(len(schemas)), "database", "databases"))
-		if err := s.pipeDump(ctx, sc, append(s.dumpSchemaArgs(), append([]string{"--databases"}, schemas...)...), log); err != nil {
+		if err := s.pipeDump(ctx, sc, append(s.dumpSchemaArgs(), append([]string{"--databases"}, schemas...)...), "", log); err != nil {
 			return filePos{}, err
 		}
 	}
@@ -330,7 +334,7 @@ func (s *server) dumpSchemaArgs() []string {
 
 // pipeDump dumps from the private server into the standby's server,
 // outside its binary log.
-func (s *server) pipeDump(ctx context.Context, sc *scratch, dumpArgs []string, log agent.TaskLogger) error {
+func (s *server) pipeDump(ctx context.Context, sc *scratch, dumpArgs []string, intoDB string, log agent.TaskLogger) error {
 	dumpTool, err := s.tool("dump")
 	if err != nil {
 		return fmt.Errorf("%s's dump tool isn't installed: %w", s.flavor.display(), err)
@@ -355,6 +359,9 @@ func (s *server) pipeDump(ctx context.Context, sc *scratch, dumpArgs []string, l
 		loadArgs = append(loadArgs, "--protocol=socket")
 	} else {
 		loadArgs = append(loadArgs, "--protocol=tcp", "--host=127.0.0.1", "--port="+strconv.Itoa(s.db.Port))
+	}
+	if intoDB != "" {
+		loadArgs = append(loadArgs, intoDB)
 	}
 	load := s.lowCmd(ctx, client, loadArgs...)
 	load.Stdin = pipe
@@ -457,7 +464,7 @@ func (s *server) copyLogins(ctx context.Context, sdb *sql.DB, sc *scratch, log a
 		if !s.flavor.mariadb() {
 			args = append([]string{"--set-gtid-purged=OFF"}, args...)
 		}
-		if err := s.pipeDump(ctx, sc, args, log); err != nil {
+		if err := s.pipeDump(ctx, sc, args, "mysql", log); err != nil {
 			return users, fmt.Errorf("copying the logins (%s): %w", t, err)
 		}
 	}
@@ -551,15 +558,15 @@ func (s *server) undoStandby(ctx context.Context, conn *sql.DB, rec standbyRecor
 	if rec.Rebuild {
 		return nil // its own data, read-only: kept
 	}
+	if err := s.setReadOnly(ctx, conn, false); err != nil {
+		return err
+	}
 	c, err := conn.Conn(ctx)
 	if err != nil {
 		return err
 	}
 	defer c.Close()
 	if _, err := c.ExecContext(ctx, "SET SESSION sql_log_bin = 0"); err != nil {
-		return err
-	}
-	if err := s.setReadOnly(ctx, conn, false); err != nil {
 		return err
 	}
 	for _, u := range rec.Users {

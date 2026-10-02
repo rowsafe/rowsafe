@@ -62,13 +62,11 @@ func (e *Engine) StandbyPrepare(ctx context.Context, env agent.EngineEnv, db pro
 		return fmt.Errorf("%s only accepts connections from this server (bind_address = %s), so a standby can't follow it; "+
 			"let it listen on the address the standby reaches (a restart), then create the standby again", s.flavor.display(), bindAddr)
 	}
-	var tls string
-	_ = conn.QueryRowContext(ctx, "SELECT @@global.have_ssl").Scan(&tls)
 	_, num := numericVersion(f.Version)
 	res.Major = num / 100
 	res.SystemID = s.systemID(ctx, conn)
 	res.SizeBytes = totalSize(ctx, s)
-	res.TLS = strings.EqualFold(tls, "YES")
+	res.TLS = s.tlsOn(ctx, conn)
 	res.Settings = map[string]int{settingServerID: int(f.ServerID), settingLowerCase: f.LowerCase, settingVersion: num}
 	if strings.EqualFold(f.GTIDMode, "ON") {
 		res.Settings[settingGTID] = 1
@@ -78,6 +76,7 @@ func (e *Engine) StandbyPrepare(ctx context.Context, env agent.EngineEnv, db pro
 	if err != nil {
 		return err
 	}
+	password = password[:32] // replication passwords are at most 32 characters
 	if err := s.createReplicationUser(ctx, conn, user, password, p.StandbyAddresses); err != nil {
 		return err
 	}
@@ -86,6 +85,22 @@ func (e *Engine) StandbyPrepare(ctx context.Context, env agent.EngineEnv, db pro
 	res.Summary = fmt.Sprintf("Sealed the bucket settings and a replication login (%s, allowed from %s only) for the standby.",
 		user, strings.Join(p.StandbyAddresses, ", "))
 	return nil
+}
+
+// tlsOn reports whether the server accepts TLS connections (replication
+// then uses it).
+func (s *server) tlsOn(ctx context.Context, conn *sql.DB) bool {
+	if !s.flavor.mariadb() {
+		var n int
+		err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM performance_schema.tls_channel_status
+			WHERE CHANNEL = 'mysql_main' AND PROPERTY = 'Enabled' AND VALUE = 'Yes'`).Scan(&n)
+		if err == nil {
+			return n > 0
+		}
+	}
+	var v string
+	_ = conn.QueryRowContext(ctx, "SELECT @@global.have_ssl").Scan(&v)
+	return strings.EqualFold(v, "YES")
 }
 
 // systemID identifies the server (MySQL's server_uuid; "" on MariaDB).
