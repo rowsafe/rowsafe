@@ -23,7 +23,8 @@ import (
 //   - analyze: ANALYZE TABLE, refreshing the optimizer's statistics;
 //   - optimize: OPTIMIZE TABLE, which rebuilds a fragmented InnoDB table to
 //     give its free space back; refused unless the disk holds another copy
-//     of the table with room to spare.
+//     of the table with room to spare;
+//   - create_index, drop_index: online index changes (indexes.go).
 //
 // Sessions are named by their connection ID, which the server never reuses
 // until it restarts: BackendStart is the server's start time, and a
@@ -44,6 +45,10 @@ func (s *server) maintenance(ctx context.Context, p protocol.MaintenanceParams, 
 		err = s.tableAction(ctx, db, p, "ANALYZE TABLE", res, log)
 	case protocol.MaintOptimize:
 		err = s.tableAction(ctx, db, p, "OPTIMIZE TABLE", res, log)
+	case protocol.MaintCreateIndex: // indexes.go
+		err = s.createIndex(ctx, db, p, res, log)
+	case protocol.MaintDropIndex:
+		err = s.dropIndex(ctx, db, p, res, log)
 	default:
 		err = fmt.Errorf("%s can't run the fix %q", s.flavor.display(), p.Action)
 	}
