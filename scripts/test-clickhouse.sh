@@ -90,7 +90,7 @@ if [ "${CLICKHOUSE_CLONE:-}" = 1 ]; then
 		done
 		cd /tmp
 		su rowsafe -c "env ROWSAFE_TEST_CLICKHOUSE_PORT=8123 ROWSAFE_TEST_CLICKHOUSE_CLONE_PORT=8125 \
-			/usr/local/bin/clickhouse.test -test.v -test.count=1 -test.run TestClickHouseClone -test.timeout 20m" 2>&1 | tail -n 80
+			/usr/local/bin/clickhouse.test -test.v -test.count=1 -test.run \"TestClickHouseClone|TestClickHouseMoveIn\" -test.timeout 20m" 2>&1 | tail -n 80
 		exit ${PIPESTATUS[0]}
 	' || rc=1
 	exit $rc
