@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"regexp"
+	"strconv"
 	"time"
 )
 
@@ -557,3 +558,66 @@ var passwordVerifierRE = regexp.MustCompile(`^SCRAM-SHA-256\$[0-9]{4,7}:[A-Za-z0
 // ValidPasswordVerifier reports whether s is a SCRAM-SHA-256 verifier (and
 // nothing else: it is placed in SQL).
 func ValidPasswordVerifier(s string) bool { return passwordVerifierRE.MatchString(s) }
+
+// Safe copy passwords by engine. The requester makes the password and
+// sends only what the copy's server checks logins against, in the
+// engine's own form; the agent places it in SQL or a config file, so each
+// form is a strict pattern:
+//
+//   - PostgreSQL: a SCRAM-SHA-256 verifier (ValidPasswordVerifier).
+//   - MongoDB: the same SCRAM-SHA-256 verifier, at least 5000 iterations
+//     (MongoDB's minimum); the agent turns it into SCRAM-SHA-256
+//     credentials.
+//   - MySQL: a caching_sha2_password hash: $A$005$ + 20 salt characters +
+//     43 SHA-256-crypt characters (5000 rounds), the salt from ./0-9A-Za-z.
+//   - MariaDB: a mysql_native_password hash: * + 40 uppercase hex digits of
+//     SHA1(SHA1(password)).
+//   - ClickHouse: sha256: + the 64 lowercase hex digits of SHA256(password)
+//     (users.xml password_sha256_hex).
+//
+// Passwords are random (24 characters, about 140 bits), so even the
+// unsalted forms can't be guessed back.
+var (
+	mysqlVerifierRE      = regexp.MustCompile(`^\$A\$005\$[./0-9A-Za-z]{63}$`)
+	mariadbVerifierRE    = regexp.MustCompile(`^\*[0-9A-F]{40}$`)
+	clickhouseVerifierRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	scramIterationsRE    = regexp.MustCompile(`^SCRAM-SHA-256\$([0-9]+):`)
+)
+
+// ValidCopyVerifier reports whether s is a safe copy password verifier in
+// the engine's form.
+func ValidCopyVerifier(engine, s string) bool {
+	switch NormalizeEngine(engine) {
+	case EnginePostgreSQL:
+		return ValidPasswordVerifier(s)
+	case EngineMongoDB:
+		if !ValidPasswordVerifier(s) {
+			return false
+		}
+		m := scramIterationsRE.FindStringSubmatch(s)
+		n, err := strconv.Atoi(m[1])
+		return err == nil && n >= 5000
+	case EngineMySQL:
+		return mysqlVerifierRE.MatchString(s)
+	case EngineMariaDB:
+		return mariadbVerifierRE.MatchString(s)
+	case EngineClickHouse:
+		return clickhouseVerifierRE.MatchString(s)
+	}
+	return false
+}
+
+// CopyVerifierForm describes the verifier an engine expects, for errors.
+func CopyVerifierForm(engine string) string {
+	switch NormalizeEngine(engine) {
+	case EngineMongoDB:
+		return "a SCRAM-SHA-256 verifier with at least 5000 iterations (SCRAM-SHA-256$15000:salt$StoredKey:ServerKey)"
+	case EngineMySQL:
+		return "a caching_sha2_password hash ($A$005$ + 20 salt characters + 43 hash characters)"
+	case EngineMariaDB:
+		return "a mysql_native_password hash (* + 40 uppercase hex digits)"
+	case EngineClickHouse:
+		return "sha256: + the 64 hex digits of the password's SHA-256"
+	}
+	return "a SCRAM-SHA-256 verifier (SCRAM-SHA-256$4096:salt$StoredKey:ServerKey)"
+}
