@@ -85,10 +85,21 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 	}
 	db := *task.Database
 	if !isPostgres(db) {
-		if task.Type == protocol.TaskSecurityScan || task.Type == protocol.TaskSecurityFix {
+		switch task.Type {
+		case protocol.TaskSecurityScan, protocol.TaskSecurityFix:
 			return a.runEngineSecurityTask(ctx, task, tl, db) // security_engines.go
+		case protocol.TaskFilesBackup, protocol.TaskFilesRestore, protocol.TaskFilesUndo, protocol.TaskFilesCleanup,
+			protocol.TaskFilesBrowse, protocol.TaskFilesDiscover, protocol.TaskFilesAccess, protocol.TaskFilesCheck:
+			return a.runFilesTask(ctx, task, db, tl) // files.go: folders work the same for every engine
 		}
-		return a.runEngineTask(ctx, task, tl)
+		res, err := a.runEngineTask(ctx, task, tl)
+		if err == nil && task.Type == protocol.TaskRestorePoint {
+			var p protocol.RestorePointParams
+			if json.Unmarshal(task.Params, &p) == nil && p.Name != "" {
+				a.filesMark(db.ID, p.Name) // the Mark covers the folders too
+			}
+		}
+		return res, err
 	}
 	switch task.Type {
 	case protocol.TaskInspect:

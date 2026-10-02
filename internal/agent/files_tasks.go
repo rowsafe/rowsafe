@@ -141,7 +141,7 @@ var (
 		{"attachments", "attachments"},
 	}
 	skipDirs = map[string]bool{"node_modules": true, "vendor": true, ".git": true, ".cache": true, "cache": true,
-		"tmp": true, "proc": true, "sys": true, "rowsafe": true, "postgresql": true, "overlay2": true, "containers": true,
+		"tmp": true, "proc": true, "sys": true, "rowsafe": true, "postgresql": true, "mysql": true, "mongodb": true, "clickhouse": true, "overlay2": true, "containers": true,
 		"image": true, "buildkit": true}
 )
 
@@ -237,8 +237,13 @@ func DiscoverFolders(ctx context.Context, roots []string, mounts bool) []protoco
 var uploadVolumeRE = regexp.MustCompile(`(?i)(upload|media|storage|files|attach|document|asset|public)`)
 
 func looksLikeUploads(name string) bool {
-	return uploadVolumeRE.MatchString(name) && !strings.Contains(strings.ToLower(name), "postgres") &&
-		!strings.Contains(strings.ToLower(name), "pgdata") && !strings.Contains(strings.ToLower(name), "rowsafe")
+	l := strings.ToLower(name)
+	for _, db := range []string{"postgres", "pgdata", "rowsafe", "mysql", "mariadb", "mongo", "clickhouse"} {
+		if strings.Contains(l, db) {
+			return false
+		}
+	}
+	return uploadVolumeRE.MatchString(name)
 }
 
 // walkShallow visits directories under root up to depth, while visit says
@@ -610,7 +615,7 @@ func FilesInfoLine(c protocol.FilesCandidate) string {
 }
 
 // CleanFolderPath validates a folder path given to protect: absolute,
-// clean, not a system directory, not Rowsafe's or PostgreSQL's own.
+// clean, not a system directory, not Rowsafe's or a database server's own.
 func CleanFolderPath(p string) (string, error) {
 	if !filepath.IsAbs(p) {
 		return "", fmt.Errorf("%q is not an absolute path", p)
@@ -626,7 +631,7 @@ func CleanFolderPath(p string) (string, error) {
 		}
 	}
 	for _, bad := range []string{"/etc/", "/root/", "/boot/", "/proc/", "/sys/", "/dev/", "/run/", "/usr/", "/bin/", "/sbin/",
-		"/lib/", "/lib64/", "/var/lib/postgresql/", "/var/lib/rowsafe/", "/opt/rowsafe/", "/var/lib/docker/containers/"} {
+		"/lib/", "/lib64/", "/var/lib/postgresql/", "/var/lib/mysql/", "/var/lib/mongodb/", "/var/lib/clickhouse/", "/var/lib/rowsafe/", "/opt/rowsafe/", "/var/lib/docker/containers/"} {
 		if strings.HasPrefix(p+"/", bad) {
 			return "", fmt.Errorf("%s is a system or database folder; Rowsafe backs up the database itself separately", p)
 		}
