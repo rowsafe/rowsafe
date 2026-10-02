@@ -265,7 +265,9 @@ var neededGrants = []string{"SELECT", "INSERT", "BACKUP", "KILL QUERY", "ALTER U
 var rewindGrants = []string{"CREATE DATABASE", "CREATE TABLE", "DROP DATABASE", "DROP TABLE", "ALTER TABLE"}
 
 // grantsSQL is the privileges list of GRANT ... ON *.*.
-func grantsSQL() string { return strings.Join(append(slices.Clone(neededGrants), rewindGrants...), ", ") }
+func grantsSQL() string {
+	return strings.Join(append(slices.Clone(neededGrants), rewindGrants...), ", ")
+}
 
 // missingRewindGrants lists the rewindGrants have doesn't cover.
 func missingRewindGrants(have []string) []string {

@@ -141,7 +141,9 @@ func partitionsOf(ctx context.Context, c *client, db, table string) ([]string, e
 	return out, nil
 }
 
-func mergeTree(engine string) bool { return strings.HasSuffix(engine, "MergeTree") && !strings.HasPrefix(engine, "Replicated") }
+func mergeTree(engine string) bool {
+	return strings.HasSuffix(engine, "MergeTree") && !strings.HasPrefix(engine, "Replicated")
+}
 
 // planPairs matches production's tables with the restored ones (in
 // tmpDBName(tag, db)) and checks each can be swapped.
