@@ -368,7 +368,10 @@ type scratch struct {
 	Socket  string
 	PID     int
 	Args    []string // the command, to start it again
-	proc    *os.Process
+	// Admin signs in once the server checks accounts (a safe copy);
+	// otherwise root without a password (--skip-grant-tables).
+	Admin *account
+	proc  *os.Process
 }
 
 // scratchArgs is the command line of a private server.
@@ -467,6 +470,9 @@ func zombie(pid int) bool {
 }
 
 func (sc *scratch) connect(ctx context.Context) (*sql.DB, error) {
+	if sc.Admin != nil {
+		return openWith(ctx, *sc.Admin, sc.Socket, 0)
+	}
 	return openWith(ctx, account{User: "root", Source: "private server"}, sc.Socket, 0)
 }
 

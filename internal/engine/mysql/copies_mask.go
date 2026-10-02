@@ -90,7 +90,9 @@ func maskColumn(ctx context.Context, conn *sql.Conn, tp masking.TablePlan, c mas
 	}
 	_, _ = conn.ExecContext(ctx, "ALTER TABLE rowsafe_mask ADD INDEX old_v (old_v"+prefix+")") // not possible for JSON: the join still works
 
-	rows, err := conn.QueryContext(ctx, "SELECT DISTINCT "+col+" FROM "+table+" WHERE "+col+" IS NOT NULL")
+	// As text (dates as 2024-01-02 03:04:05, JSON as written): the values
+	// are cast back when they are compared and written.
+	rows, err := conn.QueryContext(ctx, "SELECT DISTINCT CAST("+col+" AS CHAR) FROM "+table+" WHERE "+col+" IS NOT NULL")
 	if err != nil {
 		return 0, err
 	}
