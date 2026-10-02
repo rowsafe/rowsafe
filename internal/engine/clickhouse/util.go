@@ -61,3 +61,10 @@ func saveJSONFile(path string, v any) error {
 	}
 	return os.Rename(tmp, path)
 }
+
+func cmpOr(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}

@@ -9,8 +9,11 @@
 //
 // ROWSAFE_TEST_CLICKHOUSE_USERSD, when set, is a users.d directory the test
 // may write: the login is then made the --users-xml way; otherwise with SQL
-// as "default" without a password. ROWSAFE_TEST_CLICKHOUSE_REPLICATED=1
-// says the server has a Keeper (replicated tables are tested).
+// as ROWSAFE_TEST_CLICKHOUSE_ADMIN (_PASSWORD), or "default" without a
+// password. ROWSAFE_TEST_CLICKHOUSE_REPLICATED=1 says the server has a
+// Keeper (replicated tables are tested). With ROWSAFE_CLICKHOUSE_URL and
+// the gateway variables set, it tests a Docker sidecar (the server in
+// another container).
 package clickhouse
 
 import (
@@ -115,7 +118,8 @@ func TestClickHouseEndToEnd(t *testing.T) {
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	e.Start(sctx, env)
-	admin := newClient(serverURL(port), Login{User: "default"})
+	adminUser, adminPass := os.Getenv("ROWSAFE_TEST_CLICKHOUSE_ADMIN"), os.Getenv("ROWSAFE_TEST_CLICKHOUSE_ADMIN_PASSWORD")
+	admin := newClient(serverURL(port), Login{User: cmpOr(adminUser, "default"), Password: adminPass})
 	admin.ua = "rowsafe-test" // not the agent's own queries
 
 	// The installer's login step.
@@ -155,7 +159,13 @@ func TestClickHouseEndToEnd(t *testing.T) {
 		if err := CreateLogin(ctx, env, port, "nobody", "wrong"); !errors.Is(err, ErrAdminRefused) {
 			t.Fatalf("a wrong admin login: %v", err)
 		}
-		if err := CreateLogin(ctx, env, port, "", ""); err != nil {
+		if adminUser != "" {
+			// Docker: "default" without a password is refused, an admin is needed.
+			if err := CreateLogin(ctx, env, port, "", ""); !errors.Is(err, ErrNeedAdmin) {
+				t.Fatalf("CreateLogin without an admin: %v", err)
+			}
+		}
+		if err := CreateLogin(ctx, env, port, adminUser, adminPass); err != nil {
 			t.Fatal("CreateLogin:", err)
 		}
 	}
@@ -167,8 +177,8 @@ func TestClickHouseEndToEnd(t *testing.T) {
 	if err := SaveLogin(ctx, env, port, l.User+":wrong"); !errors.Is(err, ErrAdminRefused) {
 		t.Fatalf("save-login with a wrong password: %v", err)
 	}
-	if err := SaveLogin(ctx, env, port, "default:"); err != nil {
-		t.Fatalf("save-login as default: %v", err)
+	if err := SaveLogin(ctx, env, port, cmpOr(adminUser, "default")+":"+adminPass); err != nil {
+		t.Fatalf("save-login as an admin: %v", err)
 	}
 	_ = saveLogin(env, port, l)
 
@@ -516,7 +526,7 @@ func TestClickHouseEndToEnd(t *testing.T) {
 	}
 	// Discovery sees the server.
 	found, err := e.Discover(ctx, env)
-	if err != nil || len(found) == 0 || found[0].Port != port || found[0].Version == "" {
+	if err != nil || len(found) == 0 || found[0].Port != port || found[0].Version == "" || found[0].Major < 24 {
 		t.Fatalf("discover: %+v %v", found, err)
 	}
 	t.Logf("discover: %+v", found)
