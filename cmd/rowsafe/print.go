@@ -152,7 +152,7 @@ func printTask(t protocol.TaskView) {
 func printAdopt(r protocol.AdoptResult) {
 	in := r.Inspect
 	if in.ServerVersion != "" {
-		engine := "PostgreSQL"
+		engine := protocol.EngineDisplayName(in.Engine)
 		if in.MySQL != nil {
 			engine = protocol.EngineDisplayName(in.MySQL.Engine)
 		}

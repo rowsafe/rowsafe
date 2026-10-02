@@ -1,6 +1,6 @@
 // Package agentimages is the signed list of a release's Docker agent images:
-// for each image variant ("pg17", "pg17-alpine"), the digest of
-// ghcr.io/rowsafe/agent built for that release.
+// for each image variant ("pg17", "pg17-alpine", "clickhouse26.8"), the
+// digest of ghcr.io/rowsafe/agent built for that release.
 //
 // The release workflow writes it once the images are pushed and cosign
 // verifies them as built by the workflow at the release's tag, and signs it
@@ -32,10 +32,11 @@ const Kind = "rowsafe-agent-images"
 // rowsafe-docker-control ever pulls from.
 const Repository = "ghcr.io/rowsafe/agent"
 
-// MaxSize bounds a document (a release has ten images today).
+// MaxSize bounds a document (a release has thirteen images today).
 const MaxSize = 16 << 10
 
-// VariantLabel is the image label naming its variant (agent.Dockerfile).
+// VariantLabel is the image label naming its variant (agent.Dockerfile,
+// agent-clickhouse.Dockerfile).
 const VariantLabel = "sh.rowsafe.agent.variant"
 
 // Document is the signed list.
@@ -50,11 +51,14 @@ type Document struct {
 
 var (
 	versionRE = regexp.MustCompile(`^(\d{1,6})\.(\d{1,6})\.(\d{1,6})$`)
-	variantRE = regexp.MustCompile(`^pg([1-9][0-9])(-alpine)?$`)
+	// variant is a PostgreSQL major and flavour ("pg17", "pg17-alpine"), or
+	// a ClickHouse release ("clickhouse26.8": YY.M).
+	variant   = `pg[1-9][0-9](?:-alpine)?|clickhouse[2-9][0-9]\.(?:[1-9]|1[0-2])`
+	variantRE = regexp.MustCompile(`^(?:` + variant + `)$`)
 	digestRE  = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	// tagVariantRE finds the variant at the end of a tag: "pg17",
-	// "0.5.0-pg17-alpine".
-	tagVariantRE = regexp.MustCompile(`(?:^|-)(pg[1-9][0-9](?:-alpine)?)$`)
+	// "0.5.0-pg17-alpine", "clickhouse26.8", "0.5.0-clickhouse26.8".
+	tagVariantRE = regexp.MustCompile(`(?:^|-)(` + variant + `)$`)
 )
 
 // ValidVariant reports whether v names an image variant.
@@ -73,8 +77,9 @@ func Variant(major int, alpine bool) string {
 }
 
 // VariantOfRef returns the variant an image reference of Repository names in
-// its tag ("ghcr.io/rowsafe/agent:0.5.0-pg17-alpine" -> "pg17-alpine"), or
-// "" (another repository, a digest, or another tag).
+// its tag ("ghcr.io/rowsafe/agent:0.5.0-pg17-alpine" -> "pg17-alpine",
+// "ghcr.io/rowsafe/agent:clickhouse26.8" -> "clickhouse26.8"), or "" (another
+// repository, a digest, or another tag).
 func VariantOfRef(ref string) string {
 	tag, ok := strings.CutPrefix(ref, Repository+":")
 	if !ok {

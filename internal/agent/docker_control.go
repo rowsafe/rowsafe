@@ -34,6 +34,11 @@ import (
 //
 // The heartbeat reports what is possible (RestartPorts, RestartActions and
 // DockerControl), so the dashboard offers only that.
+//
+// An agent running from another engine's image in native mode (ClickHouse;
+// Config.Container) reports DockerControl too, but uses the control
+// service only to have its own container updated (container_update.go):
+// it never restarts or stops the database's container.
 
 // dockerControl is the agent's side of the control service.
 type dockerControl struct {
@@ -62,9 +67,10 @@ func (a *Agent) dockerCall(ctx context.Context, action, id string) (dockerctl.Re
 	return a.dockerCallReq(ctx, dockerctl.Request{ID: id, Action: action}) // container_update.go
 }
 
-// dockerControlReport is the heartbeat's DockerControl (nil when native).
+// dockerControlReport is the heartbeat's DockerControl (nil outside the
+// agent images).
 func (a *Agent) dockerControlReport(ctx context.Context) *protocol.DockerControlReport {
-	if !a.cfg.Sidecar() {
+	if !a.cfg.Container() {
 		return nil
 	}
 	r := a.dockerRefresh(ctx)
@@ -77,15 +83,16 @@ func dockerUsable(r protocol.DockerControlReport) bool {
 }
 
 // dockerRefresh asks the control service about its container (at most once
-// a minute) and checks whether the data directory is writable.
+// a minute) and, in a PostgreSQL sidecar, checks whether the data directory
+// is writable.
 func (a *Agent) dockerRefresh(ctx context.Context) protocol.DockerControlReport {
 	d := &a.docker
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if !d.at.IsZero() && time.Since(d.at) < dockerReportTTL && d.report.Found && d.dataDir != "" {
+	if !d.at.IsZero() && time.Since(d.at) < dockerReportTTL && d.report.Found && (d.dataDir != "" || !a.cfg.Sidecar()) {
 		return d.report
 	}
-	r := protocol.DockerControlReport{AgentImage: imageVariant()} // container_update.go
+	r := protocol.DockerControlReport{AgentImage: a.imageVariant()} // container_update.go
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	res, err := a.dockerCall(cctx, dockerctl.ActionInspect, "heartbeat")
@@ -101,7 +108,7 @@ func (a *Agent) dockerRefresh(ctx context.Context) protocol.DockerControlReport 
 		r.Found, r.Container, r.Project, r.Service, r.State = true, res.Container, res.Project, res.Service, res.State
 		r.AgentUpdate = slices.Contains(res.Actions, dockerctl.ActionUpdateAgent)
 	}
-	if d.dataDir == "" {
+	if d.dataDir == "" && a.cfg.Sidecar() {
 		d.dataDir = a.sidecarDataDir(cctx)
 	}
 	if d.dataDir != "" {

@@ -1,0 +1,105 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# ClickHouse (the official, unmodified clickhouse/clickhouse-server image)
+# with the Rowsafe agent as a sidecar on the same compose network: full and
+# hourly differential backups to your bucket (encrypted in the agent
+# container, with your passphrase), Marks, weekly Proof, Rewind copies and
+# Pulse. ClickHouse keeps no log of changes, so restores go to a backup or
+# a Mark, not to any second.
+#
+#   1. Put the agent's settings in rowsafe-agent.env next to this file
+#      (chmod 600), with a one-time token from `rowsafe hosts enroll-token`,
+#      and ClickHouse's administrator password in clickhouse.env
+#      (CLICKHOUSE_PASSWORD=..., chmod 600).
+#   2. docker compose up -d
+#   3. Once, create Rowsafe's own ClickHouse user (type the administrator's
+#      password and press Enter; it is used once and never saved):
+#        docker compose exec rowsafe-agent rowsafe-agent clickhouse login --port 8123 --admin-user admin
+#   4. rowsafe adopt events --host db-1 --engine clickhouse --port 8123, then
+#      `rowsafe apply events` (or Turn on backups in the dashboard).
+#
+# ClickHouse sends its backups to the agent (port 9010 on the compose
+# network, never published); the agent encrypts every object before it goes
+# to your bucket, so ClickHouse never sees the bucket's keys or your
+# passphrase.
+#
+# Update the agent (ClickHouse keeps running):
+#   docker compose pull rowsafe-agent && docker compose up -d rowsafe-agent
+# or click Update now in the dashboard, with rowsafe-docker-control below.
+# A plain `docker compose pull` also pulls a newer clickhouse-server:26.8 if
+# there is one, and `up -d` then restarts ClickHouse to use it.
+
+name: myapp
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.8
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: admin
+      # The administrator may create users (Rowsafe's, once, in step 3).
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    env_file: clickhouse.env                # CLICKHOUSE_PASSWORD=...
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    volumes:
+      - chdata:/var/lib/clickhouse
+
+  # Rowsafe
+  rowsafe-agent:
+    # One image per ClickHouse version, built FROM the same
+    # clickhouse/clickhouse-server image: clickhouse26.8, clickhouse26.3,
+    # clickhouse25.8. It follows the newest Rowsafe release; to pin one, use
+    # the exact tag instead, e.g. ghcr.io/rowsafe/agent:<version>-clickhouse26.8.
+    image: ghcr.io/rowsafe/agent:clickhouse26.8
+    # The name Rowsafe shows for this host: `rowsafe adopt events --host db-1`.
+    hostname: db-1
+    restart: unless-stopped
+    environment:
+      ROWSAFE_CLICKHOUSE_URL: http://clickhouse:8123          # the clickhouse service, on the compose network
+      ROWSAFE_CLICKHOUSE_GATEWAY_URL: http://rowsafe-agent:9010 # how ClickHouse reaches the agent's gateway
+    depends_on:
+      - clickhouse
+    env_file: rowsafe-agent.env
+    volumes:
+      - rowsafe-state:/var/lib/rowsafe
+      # Optional, see "Update now" below:
+      # - rowsafe-control:/run/rowsafe-control
+
+  # Rowsafe (optional): Update now in the dashboard updates the agent. This
+  # service pulls the release's signed ghcr.io/rowsafe/agent image (checked
+  # against Rowsafe's release key) and recreates only the rowsafe-agent
+  # container; if the new one doesn't start, the old one comes back.
+  #
+  # It holds the Docker socket, which is root-equivalent on this host, so the
+  # agent never gets it; the agent asks over the rowsafe-control volume and
+  # it refuses everything else (any other container, any other Docker call).
+  # With ROWSAFE_CONTROL_UPDATE_ONLY it only updates the agent's container:
+  # it refuses to stop, start or restart ClickHouse's, whoever asks. Every
+  # request is in its log (docker compose logs
+  # rowsafe-docker-control). To turn it on, uncomment this service, the
+  # rowsafe-control volume below and the rowsafe-control mount of
+  # rowsafe-agent. See https://rowsafe.sh/docs/guides/clickhouse#update-the-agent
+  #
+  # rowsafe-docker-control:
+  #   image: ghcr.io/rowsafe/docker-control:latest   # or pin a release: :<version>
+  #   restart: unless-stopped
+  #   depends_on:
+  #     - clickhouse
+  #   environment:
+  #     ROWSAFE_CONTROL_SERVICE: clickhouse      # the name of your ClickHouse service above
+  #     ROWSAFE_CONTROL_ALLOW_UIDS: "101"        # the agent image's clickhouse user
+  #     ROWSAFE_CONTROL_UPDATE_ONLY: "1"         # only update the agent; never stop or restart ClickHouse
+  #     # ROWSAFE_CONTROL_AGENT_SERVICE: rowsafe-agent   # the agent's service name
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock
+  #     - rowsafe-control:/run/rowsafe-control
+  #   network_mode: none
+  #   read_only: true
+  #   cap_drop: [ALL]
+  #   security_opt: ["no-new-privileges:true"]
+
+volumes:
+  chdata:
+  rowsafe-state:
+  # rowsafe-control: # Rowsafe (optional): the agent asks rowsafe-docker-control here

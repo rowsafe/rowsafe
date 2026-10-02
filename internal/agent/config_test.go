@@ -50,6 +50,20 @@ func TestConfigAutoUpdate(t *testing.T) {
 	}
 }
 
+// The ClickHouse image runs in native mode; its variant says it runs from
+// an image, which is updated by replacing its container.
+func TestConfigImageVariant(t *testing.T) {
+	t.Setenv("ROWSAFE_URL", "https://rowsafe.example")
+	t.Setenv("ROWSAFE_AUTO_UPDATE", "true")
+	for value, container := range map[string]bool{"": false, "clickhouse26.8": true, "pg17": true, "latest": false} {
+		t.Setenv("ROWSAFE_IMAGE_VARIANT", value)
+		cfg, err := ConfigFromEnv()
+		if err != nil || cfg.Container() != container || cfg.AutoUpdate == container || cfg.Sidecar() {
+			t.Errorf("ROWSAFE_IMAGE_VARIANT=%q: container %v, auto-update %v, %v", value, cfg.Container(), cfg.AutoUpdate, err)
+		}
+	}
+}
+
 func TestConfigDrillPreload(t *testing.T) {
 	t.Setenv("ROWSAFE_URL", "https://rowsafe.example")
 	cfg, err := ConfigFromEnv()

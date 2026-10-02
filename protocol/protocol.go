@@ -81,6 +81,10 @@ type MaintenanceParams struct {
 	// Settings are the storage parameters of set_table_storage_params.
 	Settings map[string]string `json:"settings,omitempty"`
 	// ---- end advisor ----
+	// QueryID is the ClickHouse query of a kill_query, MutationID the
+	// mutation of a kill_mutation (clickhouse.go).
+	QueryID    string `json:"query_id,omitempty"`
+	MutationID string `json:"mutation_id,omitempty"`
 }
 
 // MaintenanceResult is the agent's report for a maintenance task.
@@ -209,7 +213,8 @@ type HeartbeatRequest struct {
 	// Software is PostgreSQL's versions, pending updates and upgrades on
 	// this host (upgrade.go); sent about every hour.
 	Software *SoftwareReport `json:"software,omitempty"`
-	// DockerControl: docker-sidecar agents only (see protocol/docker.go).
+	// DockerControl: agents running from Rowsafe's container images only
+	// (see protocol/docker.go).
 	DockerControl *DockerControlReport `json:"docker_control,omitempty"`
 	// Copies are Guard's preview and safe copies (protocol/copies.go).
 	Copies *CopiesReport `json:"copies,omitempty"`
@@ -305,6 +310,9 @@ type InspectResult struct {
 	PendingRestart         []string `json:"pending_restart,omitempty"`
 	Databases              []DBInfo `json:"databases"`
 	TotalSizeBytes         int64    `json:"total_size_bytes"`
+	// Engine is the engine the agent inspected ("" from PostgreSQL and
+	// older agents: PostgreSQL).
+	Engine string `json:"engine,omitempty"`
 	// MySQL is set for MySQL and MariaDB servers (mysql.go).
 	MySQL *MySQLInspect `json:"mysql,omitempty"`
 }
@@ -867,6 +875,9 @@ type DatabaseMonitoring struct {
 	// Settings are the PostgreSQL settings that matter (settings.go; about
 	// every 5 minutes, newer agents only).
 	Settings *SettingsSnapshot `json:"settings,omitempty"`
+	// ClickHouse is ClickHouse's own health detail (clickhouse.go; about
+	// every 5 minutes).
+	ClickHouse *ClickHouseStatus `json:"clickhouse,omitempty"`
 }
 
 // MonitoringAck answers a monitoring report.
@@ -923,6 +934,9 @@ type ActivityQuery struct {
 	// session for a cancel_query or terminate_session fix (PIDs are
 	// reused). Newer agents only.
 	BackendStart *time.Time `json:"backend_start,omitempty"`
+	// QueryID identifies a ClickHouse query (PID is 0 there) for a
+	// kill_query fix.
+	QueryID string `json:"query_id,omitempty"`
 }
 
 // Statements is the top of pg_stat_statements by total execution time,

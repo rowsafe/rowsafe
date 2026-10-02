@@ -15,7 +15,10 @@ package protocol
 
 // DockerControlReport is what a docker-sidecar agent reports about the
 // container control service (HeartbeatRequest.DockerControl). Nil from
-// native agents and from older docker agents.
+// native agents and from older docker agents. An agent running from the
+// image of an engine that runs in native mode (ClickHouse: Mode "native")
+// reports it too, for its own container updates only: it has no
+// RestartPorts or RestartActions, and no DataDir.
 type DockerControlReport struct {
 	// Found: the control service's socket is mounted in the agent container.
 	Found bool `json:"found"`
@@ -37,7 +40,7 @@ type DockerControlReport struct {
 	// container with a newer release (its operator set
 	// ROWSAFE_CONTROL_ALLOW_AGENT_UPDATE=1; agent_container_update.go).
 	AgentUpdate bool `json:"agent_update,omitempty"`
-	// AgentImage is the agent image's floating tag, e.g. "pg17" or
-	// "pg17-alpine" ("" when the agent can't tell).
+	// AgentImage is the agent image's floating tag, e.g. "pg17",
+	// "pg17-alpine" or "clickhouse26.8" ("" when the agent can't tell).
 	AgentImage string `json:"agent_image,omitempty"`
 }

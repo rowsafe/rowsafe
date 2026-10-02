@@ -8,7 +8,7 @@ import (
 )
 
 func TestNormalizeEngine(t *testing.T) {
-	for in, want := range map[string]string{"": EnginePostgreSQL, " MySQL ": EngineMySQL, "mongodb": EngineMongoDB, "oracle": "oracle"} {
+	for in, want := range map[string]string{"": EnginePostgreSQL, " MySQL ": EngineMySQL, "mongodb": EngineMongoDB, "ClickHouse": EngineClickHouse, "oracle": "oracle"} {
 		if got := NormalizeEngine(in); got != want {
 			t.Errorf("NormalizeEngine(%q) = %q, want %q", in, got, want)
 		}
@@ -16,7 +16,7 @@ func TestNormalizeEngine(t *testing.T) {
 	if !ValidEngine("") || !ValidEngine("MariaDB") || ValidEngine("oracle") {
 		t.Error("ValidEngine")
 	}
-	for e, want := range map[string]string{"": "PostgreSQL", EngineMySQL: "MySQL", EngineMariaDB: "MariaDB", EngineMongoDB: "MongoDB"} {
+	for e, want := range map[string]string{"": "PostgreSQL", EngineMySQL: "MySQL", EngineMariaDB: "MariaDB", EngineMongoDB: "MongoDB", EngineClickHouse: "ClickHouse"} {
 		if got := EngineDisplayName(e); got != want {
 			t.Errorf("EngineDisplayName(%q) = %q", e, got)
 		}

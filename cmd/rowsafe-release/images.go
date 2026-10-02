@@ -58,7 +58,7 @@ func buildImages(version, dir string) (agentimages.Document, error) {
 			continue
 		}
 		if !agentimages.ValidVariant(e.Name()) {
-			return d, fmt.Errorf("%s: not an image variant (want pg17, pg17-alpine...)", e.Name())
+			return d, fmt.Errorf("%s: not an image variant (want pg17, pg17-alpine, clickhouse26.8...)", e.Name())
 		}
 		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
 		if err != nil {

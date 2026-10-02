@@ -111,6 +111,9 @@ func (s *Store) SetHTTPClient(c *http.Client) { s.http = c }
 // SetScheme is for tests against a plain-HTTP server: "http" or "https".
 func (s *Store) SetScheme(scheme string) { s.scheme = scheme }
 
+// FullKey is key's name in the bucket (with the Store's folder).
+func (s *Store) FullKey(key string) string { return s.fullKey(key) }
+
 func (s *Store) fullKey(key string) string {
 	key = strings.TrimLeft(key, "/")
 	if s.prefix == "" {
@@ -340,9 +343,14 @@ func (s *Store) PutBytes(ctx context.Context, key string, data []byte) error {
 }
 
 // Put streams r into key, as one request when it is small and as a
-// multipart upload otherwise. It returns the bytes stored.
+// multipart upload otherwise. It returns the bytes stored. Nothing is
+// stored unless r reads to io.EOF: any other error from r (even
+// io.ErrUnexpectedEOF, a client cut off mid-body) abandons the upload.
 func (s *Store) Put(ctx context.Context, key string, r io.Reader) (int64, error) {
 	partSize := max(s.PartSize, 1<<10)
+	// io.ReadFull reports a short last part as io.ErrUnexpectedEOF; r's own
+	// errors are wrapped so they can't be taken for that.
+	r = sourceReader{r}
 	first := make([]byte, partSize)
 	n, err := io.ReadFull(r, first)
 	switch {
@@ -413,9 +421,6 @@ func (s *Store) Put(ctx context.Context, key string, r io.Reader) (int64, error)
 			return total, err
 		}
 		buf = buf[:m]
-		if err == io.ErrUnexpectedEOF && m == 0 {
-			break
-		}
 	}
 	var cmu bytes.Buffer
 	cmu.WriteString("<CompleteMultipartUpload>")
@@ -444,6 +449,24 @@ func (s *Store) Put(ctx context.Context, key string, r io.Reader) (int64, error)
 	}
 	return total, nil
 }
+
+// sourceReader marks the errors of Put's reader (other than io.EOF) as a
+// failed source.
+type sourceReader struct{ r io.Reader }
+
+func (s sourceReader) Read(p []byte) (int, error) {
+	n, err := s.r.Read(p)
+	if err != nil && err != io.EOF {
+		err = &SourceError{Err: err}
+	}
+	return n, err
+}
+
+// SourceError is an upload abandoned because its source failed.
+type SourceError struct{ Err error }
+
+func (e *SourceError) Error() string { return e.Err.Error() }
+func (e *SourceError) Unwrap() error { return e.Err }
 
 // Get opens key for reading. The caller closes it.
 func (s *Store) Get(ctx context.Context, key string) (io.ReadCloser, error) {
@@ -523,4 +546,73 @@ func (s *Store) List(ctx context.Context, prefix string) ([]Object, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out, nil
+}
+
+// Head returns key's size and modification time, or ErrNotFound.
+func (s *Store) Head(ctx context.Context, key string) (Object, error) {
+	resp, err := s.do(ctx, "check "+key, http.MethodHead, s.url(s.fullKey(key), nil), nil, nil, http.StatusOK)
+	if err != nil {
+		var se *S3Error
+		if errors.As(err, &se) && se.Status == http.StatusNotFound {
+			return Object{}, ErrNotFound
+		}
+		return Object{}, err
+	}
+	resp.Body.Close()
+	if resp.ContentLength < 0 {
+		return Object{}, fmt.Errorf("storage check %s: no size in the answer", key)
+	}
+	t, _ := http.ParseTime(resp.Header.Get("Last-Modified"))
+	return Object{Key: key, Size: resp.ContentLength, LastModified: t}, nil
+}
+
+// GetRange opens n bytes of key from offset off (n < 0: to the end) and
+// returns them with the object's full size. The range must start inside the
+// object. The caller closes the reader.
+func (s *Store) GetRange(ctx context.Context, key string, off, n int64) (io.ReadCloser, int64, error) {
+	h := http.Header{}
+	if off > 0 || n >= 0 {
+		r := "bytes=" + strconv.FormatInt(off, 10) + "-"
+		if n >= 0 {
+			r += strconv.FormatInt(off+n-1, 10)
+		}
+		h.Set("Range", r)
+	}
+	resp, err := s.do(ctx, "download "+key, http.MethodGet, s.url(s.fullKey(key), nil), nil, h, http.StatusOK, http.StatusPartialContent)
+	if err != nil {
+		var se *S3Error
+		if errors.As(err, &se) && se.Status == http.StatusNotFound {
+			return nil, 0, ErrNotFound
+		}
+		return nil, 0, err
+	}
+	if resp.StatusCode == http.StatusOK {
+		// The whole object (no range asked, or the storage ignored it).
+		size := resp.ContentLength
+		if size < 0 {
+			resp.Body.Close()
+			return nil, 0, fmt.Errorf("storage download %s: no size in the answer", key)
+		}
+		if _, err := io.CopyN(io.Discard, resp.Body, off); err != nil {
+			resp.Body.Close()
+			return nil, 0, fmt.Errorf("storage download %s: %w", key, err)
+		}
+		if n < 0 {
+			return resp.Body, size, nil
+		}
+		return readCloser{io.LimitReader(resp.Body, n), resp.Body}, size, nil
+	}
+	// Content-Range: bytes first-last/size
+	cr := resp.Header.Get("Content-Range")
+	var first, last, size int64
+	if _, err := fmt.Sscanf(cr, "bytes %d-%d/%d", &first, &last, &size); err != nil || first != off {
+		resp.Body.Close()
+		return nil, 0, fmt.Errorf("storage download %s: unexpected range %q", key, cr)
+	}
+	return resp.Body, size, nil
+}
+
+type readCloser struct {
+	io.Reader
+	io.Closer
 }

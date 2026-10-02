@@ -163,7 +163,7 @@ func TestContainerUpdateHandsOver(t *testing.T) {
 	}
 	var res protocol.AgentContainerUpdateResult
 	_ = json.Unmarshal(req2.Result, &res)
-	if res.FromVersion != "0.4.2" || res.ToVersion != "0.5.0" || res.Image == "" || !strings.Contains(res.Summary, "PostgreSQL kept running") {
+	if res.FromVersion != "0.4.2" || res.ToVersion != "0.5.0" || res.Image == "" || !strings.Contains(res.Summary, "The database kept running") {
 		t.Fatalf("result %+v", res)
 	}
 	if r := b.updateReport(); r == nil || r.State != protocol.UpdateConfirmed || r.FromVersion != "0.4.2" || !r.Container {
@@ -209,17 +209,74 @@ func TestContainerUpdateRolledBackReportedByOldAgent(t *testing.T) {
 }
 
 func TestImageVariant(t *testing.T) {
-	t.Setenv("ROWSAFE_IMAGE_VARIANT", "pg16-alpine")
-	if v := imageVariant(); v != "pg16-alpine" {
+	a := &Agent{cfg: Config{Mode: ModeDockerSidecar, ImageVariant: "pg16-alpine"}}
+	if v := a.imageVariant(); v != "pg16-alpine" {
 		t.Fatal(v)
 	}
-	t.Setenv("ROWSAFE_IMAGE_VARIANT", "")
+	a.cfg.ImageVariant = ""
 	t.Setenv("PG_MAJOR", "17")
-	if v := imageVariant(); v != "pg17" && v != "pg17-alpine" {
+	if v := a.imageVariant(); v != "pg17" && v != "pg17-alpine" {
 		t.Fatal(v)
 	}
 	t.Setenv("PG_MAJOR", "")
-	if v := imageVariant(); v != "" {
+	if v := a.imageVariant(); v != "" {
 		t.Fatal(v)
+	}
+	// ClickHouse's image runs in native mode and says its variant; a native
+	// agent without it isn't in an image, whatever PG_MAJOR says.
+	a.cfg = Config{Mode: ModeNative, ImageVariant: "clickhouse26.8"}
+	if v := a.imageVariant(); v != "clickhouse26.8" || !a.cfg.Container() {
+		t.Fatal(v)
+	}
+	t.Setenv("PG_MAJOR", "17")
+	a.cfg.ImageVariant = ""
+	if v := a.imageVariant(); v != "" || a.cfg.Container() {
+		t.Fatal(v)
+	}
+}
+
+// The ClickHouse image (native mode, ROWSAFE_IMAGE_VARIANT) is updated like a
+// PostgreSQL sidecar, and reports its variant in the heartbeat.
+func TestContainerUpdateClickHouseImage(t *testing.T) {
+	a, fc := newUpdAgent(t, "0.4.2")
+	a.cfg.Mode, a.cfg.ImageVariant = ModeNative, "clickhouse26.8"
+	if r := a.dockerControlReport(context.Background()); r == nil || r.AgentImage != "clickhouse26.8" || !r.AgentUpdate || r.DataDir != "" {
+		t.Fatalf("report %+v", r)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := a.agentContainerUpdate(ctx, updTask(t), &taskLog{})
+		done <- err
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		fc.mu.Lock()
+		started := fc.upd != nil
+		fc.mu.Unlock()
+		if started {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("update never asked")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	if err := <-done; err != errHandedOver {
+		t.Fatalf("stopped mid-update: %v", err)
+	}
+	// Without the control service it says how to add it, not the
+	// PostgreSQL restart setting.
+	a, _ = newUpdAgent(t, "0.4.2")
+	a.cfg.Mode, a.cfg.ImageVariant = ModeNative, "clickhouse26.8"
+	a.docker.call = nil
+	a.cfg.DockerControlSocket = "/nonexistent/x.sock"
+	if _, err := a.agentContainerUpdate(context.Background(), updTask(t), &taskLog{}); err == nil ||
+		!strings.Contains(err.Error(), "add the rowsafe-docker-control service") {
+		t.Fatalf("no control service: %v", err)
+	}
+	if r := a.dockerControlReport(context.Background()); r == nil || r.Found || r.AgentImage != "clickhouse26.8" {
+		t.Fatalf("report without the service %+v", r)
 	}
 }

@@ -1,8 +1,9 @@
 // Command rowsafe-docker-control lets the Rowsafe agent (a Docker sidecar)
 // stop, start and restart exactly one container, the PostgreSQL container
 // next to it, and, if its operator allows it, replace the agent's own
-// container with the signed image of a newer release, without ever giving
-// the agent the Docker socket. Opt-in: see
+// container with the signed image of a newer release (or only that:
+// ROWSAFE_CONTROL_UPDATE_ONLY=1), without ever giving the agent the Docker
+// socket. Opt-in: see
 // https://rowsafe.sh/docs/guides/docker#let-rowsafe-restart-the-container
 // and internal/dockerctl for the policy it enforces.
 package main
@@ -36,13 +37,18 @@ Usage:
 
 Environment:
   ROWSAFE_CONTROL_SERVICE     compose service to control, in this container's own
-                              compose project (default: postgres)
+                              compose project (default: postgres; e.g. clickhouse)
   ROWSAFE_CONTROL_CONTAINER   or: the name of the container to control (without compose)
   ROWSAFE_CONTROL_SOCKET      where the agent connects (default: ` + dockerctl.DefaultSocket + `)
-  ROWSAFE_CONTROL_ALLOW_UIDS  uids allowed to connect (default: 999,70)
+  ROWSAFE_CONTROL_ALLOW_UIDS  uids allowed to connect (default: 999,70; the ClickHouse
+                              agent image: 101)
   ROWSAFE_CONTROL_STOP_TIMEOUT  how long PostgreSQL may take to shut down (default: 2m)
   ROWSAFE_CONTROL_ALLOW_AGENT_UPDATE  1: also let the agent ask for its own container to be
                               replaced by the signed image of a newer release (default: off)
+  ROWSAFE_CONTROL_UPDATE_ONLY 1: only update the agent's container (turns
+                              ROWSAFE_CONTROL_ALLOW_AGENT_UPDATE on); the database's
+                              container is never stopped, started or restarted
+                              (ClickHouse: Rowsafe never restarts it) (default: off)
   ROWSAFE_CONTROL_AGENT_SERVICE   the agent's compose service (default: rowsafe-agent)
   ROWSAFE_CONTROL_AGENT_CONTAINER or: the agent container's name (without compose)
   DOCKER_HOST                 unix:///var/run/docker.sock (only Unix sockets)
@@ -100,6 +106,11 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("ROWSAFE_CONTROL_ALLOW_AGENT_UPDATE: %w", err)
 	}
+	updateOnly, err := parseAllow(env("ROWSAFE_CONTROL_UPDATE_ONLY", "0"))
+	if err != nil {
+		return fmt.Errorf("ROWSAFE_CONTROL_UPDATE_ONLY: %w", err)
+	}
+	allowUpdate = allowUpdate || updateOnly
 	srv, err := dockerctl.New(dockerctl.Config{
 		DockerSocket:     dockerSock,
 		Service:          env("ROWSAFE_CONTROL_SERVICE", ""),
@@ -111,6 +122,7 @@ func run() error {
 		AgentService:     env("ROWSAFE_CONTROL_AGENT_SERVICE", ""),
 		AgentContainer:   env("ROWSAFE_CONTROL_AGENT_CONTAINER", ""),
 		ReleasePublicKey: releasePublicKey,
+		UpdateOnly:       updateOnly,
 	})
 	if err != nil {
 		return err
@@ -126,19 +138,17 @@ func run() error {
 		return fmt.Errorf("listening on %s: %w", sock, err)
 	}
 	defer os.Remove(sock)
-	actions := dockerctl.Actions
-	if allowUpdate {
-		actions = append(append([]string(nil), actions...), dockerctl.AgentUpdateActions...)
-	}
 	log.Info("rowsafe-docker-control started", "version", version, "socket", sock, "allowed_uids", uids,
-		"actions", actions)
-	// The target may not exist yet (compose starts services in parallel):
-	// a failure here is logged and retried on the first request.
-	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	if _, err := srv.Resolve(rctx); err != nil {
-		log.Warn("the container to control isn't there yet; looking again on the first request", "err", err)
+		"actions", srv.AllowedActions(), "update_only", updateOnly)
+	if !updateOnly {
+		// The target may not exist yet (compose starts services in parallel):
+		// a failure here is logged and retried on the first request.
+		rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		if _, err := srv.Resolve(rctx); err != nil {
+			log.Warn("the container to control isn't there yet; looking again on the first request", "err", err)
+		}
+		cancel()
 	}
-	cancel()
 	return srv.Serve(ctx, ln)
 }
 

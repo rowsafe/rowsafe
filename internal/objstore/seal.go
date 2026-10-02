@@ -2,6 +2,7 @@ package objstore
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hkdf"
@@ -64,6 +65,16 @@ func masterKey(passphrase string) ([]byte, error) {
 	}
 	masterCache[id] = k
 	return k, nil
+}
+
+// DeriveKey is a 32-byte key for purpose (an HKDF info string of its own)
+// derived from the passphrase's master key, e.g. to encrypt object names.
+func DeriveKey(passphrase, purpose string) ([]byte, error) {
+	mk, err := masterKey(passphrase)
+	if err != nil {
+		return nil, err
+	}
+	return hkdf.Key(sha256.New, mk, nil, purpose, 32)
 }
 
 func segmentAEAD(passphrase string, salt []byte) (cipher.AEAD, error) {
@@ -178,6 +189,7 @@ type openReader struct {
 	plain  []byte
 	pos    int
 	n      uint32
+	segs   int64 // total segments when known (OpenAt), else 0
 	done   bool
 	err    error
 }
@@ -223,7 +235,20 @@ func (o *openReader) next() error {
 		return err
 	}
 	last := true
-	if err == nil {
+	switch {
+	case o.segs > 0:
+		// A range: the stored size says which segment is the last, and
+		// the range may end on any segment boundary before it.
+		last = int64(o.n) == o.segs-1
+		if n == 0 && err == io.EOF {
+			o.done = true
+			o.plain, o.pos = nil, 0
+			return nil
+		}
+		if !last && n < len(o.seg) {
+			return io.ErrUnexpectedEOF
+		}
+	case err == nil:
 		_, perr := o.r.Peek(1)
 		last = perr != nil
 	}
@@ -246,4 +271,77 @@ func (o *openReader) next() error {
 	o.plain, o.pos = plain, 0
 	o.done = last
 	return nil
+}
+
+// Random access to sealed objects. Every segment but the last holds exactly
+// SealSegmentSize bytes of plaintext, so the plaintext size and the stored
+// bytes behind any plaintext range follow from the stored size alone: an
+// object's size is never stored next to it.
+
+// SealHeaderSize is the size of a sealed stream's header (magic, salt and
+// nonce prefix), the part OpenAt needs besides the segments.
+const SealHeaderSize = len(sealMagic) + saltSize + prefixSize
+
+// SealSegmentSize is the plaintext size of every segment but the last.
+const SealSegmentSize = segmentSize
+
+const sealedSegment = segmentSize + tagSize
+
+// SealedSize is the stored size of plain bytes once sealed.
+func SealedSize(plain int64) int64 {
+	segs := max((plain+segmentSize-1)/segmentSize, 1)
+	return int64(SealHeaderSize) + plain + segs*tagSize
+}
+
+// PlainSize is the plaintext size of a sealed object of the given stored
+// size. It fails for a size no sealed stream can have.
+func PlainSize(sealed int64) (int64, error) {
+	body := sealed - int64(SealHeaderSize)
+	if body < tagSize {
+		return 0, fmt.Errorf("a %d-byte object is not a Rowsafe encrypted file", sealed)
+	}
+	segs := (body + sealedSegment - 1) / sealedSegment
+	if last := body - (segs-1)*sealedSegment; last < tagSize || (last == tagSize && segs > 1) {
+		return 0, fmt.Errorf("a %d-byte object is not a Rowsafe encrypted file", sealed)
+	}
+	return body - segs*tagSize, nil
+}
+
+// SealedRange maps the plaintext bytes [off, off+n) of a sealed object of
+// stored size sealed to the stored bytes [start, end) holding them; first is
+// the index of the segment at start, and skip the plaintext bytes to drop
+// from its beginning. The caller keeps 0 <= off, n > 0 and off+n within the
+// plaintext size.
+func SealedRange(sealed, off, n int64) (start, end, first, skip int64) {
+	first = off / segmentSize
+	last := (off + n - 1) / segmentSize
+	start = int64(SealHeaderSize) + first*sealedSegment
+	end = min(int64(SealHeaderSize)+(last+1)*sealedSegment, sealed)
+	return start, end, first, off - first*segmentSize
+}
+
+// OpenAt decrypts a sealed object from segment first on, reading r
+// positioned at that segment (the stored bytes from SealedRange's start).
+// header is the object's first SealHeaderSize bytes and sealed its stored
+// size, which tells which segment is the last one. The plaintext ends where
+// r ends: a cut inside a segment is io.ErrUnexpectedEOF, a cut on a segment
+// boundary is the end of the range.
+func OpenAt(r io.Reader, passphrase string, header []byte, sealed, first int64) (io.Reader, error) {
+	if len(header) < SealHeaderSize || string(header[:len(sealMagic)]) != sealMagic {
+		return nil, errors.New("not a Rowsafe encrypted file")
+	}
+	plain, err := PlainSize(sealed)
+	if err != nil {
+		return nil, err
+	}
+	segs := max((plain+segmentSize-1)/segmentSize, 1)
+	if first < 0 || first >= segs {
+		return nil, fmt.Errorf("segment %d is past the end of the file", first)
+	}
+	aead, err := segmentAEAD(passphrase, header[len(sealMagic):len(sealMagic)+saltSize])
+	if err != nil {
+		return nil, err
+	}
+	return &openReader{r: bufio.NewReaderSize(r, 256<<10), aead: aead, prefix: bytes.Clone(header[len(sealMagic)+saltSize : SealHeaderSize]),
+		seg: make([]byte, segmentSize+tagSize), n: uint32(first), segs: segs}, nil
 }
