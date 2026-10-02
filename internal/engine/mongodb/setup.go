@@ -192,7 +192,7 @@ func CreateLogin(ctx context.Context, env agent.EngineEnv, port int, adminUser, 
 	// documents back when you bring them back from a copy.
 	privileges := bson.A{
 		bson.D{{Key: "resource", Value: bson.D{{Key: "cluster", Value: true}}},
-			{Key: "actions", Value: bson.A{"appendOplogNote", "killop", "inprog"}}},
+			{Key: "actions", Value: bson.A{"appendOplogNote", "killop", "inprog", "setParameter"}}},
 		bson.D{{Key: "resource", Value: bson.D{{Key: "db", Value: ""}, {Key: "collection", Value: ""}}},
 			{Key: "actions", Value: bson.A{"find", "insert", "update", "createCollection", "createIndex"}}},
 	}

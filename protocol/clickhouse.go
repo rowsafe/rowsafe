@@ -65,7 +65,7 @@ var clickhouseFeatures = EngineFeatures{
 	Backups: true, Proof: true,
 	RewindCopy: true, RewindRows: true, Marks: true,
 	Monitoring: true, Fixes: true,
-	DBAdmin: true, Security: true, Files: true, SecondCopy: true,
+	DBAdmin: true, Security: true, Files: true, SecondCopy: true, Settings: true,
 }
 
 // ClickHouseStatus is ClickHouse's own health detail

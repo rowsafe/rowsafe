@@ -32,13 +32,14 @@ type monitorState struct {
 }
 
 type dbMonitor struct {
-	client    *mongo.Client
-	uri       string
-	prev      map[string]float64
-	prevAt    time.Time
-	lastSizes time.Time
-	dbPath    string
-	opStarts  map[int]time.Time // opid -> start, as first seen
+	client     *mongo.Client
+	uri        string
+	prev       map[string]float64
+	prevAt     time.Time
+	lastSizes  time.Time
+	settingsAt time.Time
+	dbPath     string
+	opStarts   map[int]time.Time // opid -> start, as first seen
 }
 
 func (e *Engine) monitorFor(id string) *dbMonitor {
@@ -83,6 +84,10 @@ func (e *Engine) Monitor(ctx context.Context, env agent.EngineEnv, db protocol.D
 			m.client = nil
 		}
 		dm.Error = firstLine(err.Error())
+	} else if time.Since(m.settingsAt) >= 5*time.Minute { // Tuning (settings.go)
+		if snap, err := e.settingsSnapshot(ctx, env, m.client); err == nil {
+			dm.Settings, m.settingsAt = snap, time.Now()
+		}
 	}
 	return dm, nil
 }
