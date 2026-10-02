@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -248,6 +249,28 @@ func TestClickHouseEndToEnd(t *testing.T) {
 	}
 	if b2.RepoSizeBytes >= b1.RepoSizeBytes {
 		t.Errorf("the differential backup (%d bytes) isn't smaller than the full one (%d)", b2.RepoSizeBytes, b1.RepoSizeBytes)
+	}
+	// Restore without Rowsafe: download-backup decrypts the differential
+	// backup and its full one into folders ClickHouse restores from.
+	if dl := os.Getenv("ROWSAFE_TEST_CLICKHOUSE_DOWNLOAD_DIR"); dl != "" {
+		list, err := Backups(ctx, env, db.Stanza)
+		if err != nil || len(list) != 2 || list[1].Label != b2.Label || list[1].Base != b1.Label {
+			t.Fatalf("Backups: %+v %v", list, err)
+		}
+		dirs, err := DownloadBackup(ctx, env, db.Stanza, b2.Label, dl, io.Discard)
+		if err != nil || len(dirs) != 2 {
+			t.Fatalf("DownloadBackup: %v %v", dirs, err)
+		}
+		if _, err := DownloadBackup(ctx, env, db.Stanza, b2.Label, dl, io.Discard); err == nil {
+			t.Error("DownloadBackup into a folder that isn't empty")
+		}
+		must(t, admin, "DROP DATABASE IF EXISTS shop_diy SYNC")
+		must(t, admin, "CREATE DATABASE shop_diy")
+		must(t, admin, fmt.Sprintf("RESTORE TABLE shop.orders AS shop_diy.orders FROM File('%s/') SETTINGS base_backup = File('%s/')", dirs[1], dirs[0]))
+		if n := count(t, admin, "SELECT count() FROM shop_diy.orders"); n != 1200 {
+			t.Errorf("restored without Rowsafe: %d orders, want 1200", n)
+		}
+		must(t, admin, "DROP DATABASE shop_diy SYNC")
 	}
 	time.Sleep(1100 * time.Millisecond)
 	mark, err := run[protocol.RestorePointResult](t, e, env, db, protocol.TaskRestorePoint, protocol.RestorePointParams{Name: "before-cleanup"})

@@ -51,13 +51,14 @@ cat >"$work/keeper.xml" <<'XML'
   </keeper_server>
   <zookeeper><node><host>localhost</host><port>9181</port></node></zookeeper>
   <macros><shard>01</shard><replica>r1</replica></macros>
+  <backups><allowed_path>/var/lib/rowsafe-dl/</allowed_path></backups>
 </clickhouse>
 XML
 
 image() {
 	cat >"$work/Dockerfile" <<DOCKERFILE
 FROM clickhouse/clickhouse-server:$1
-RUN useradd -m -s /bin/bash rowsafe
+RUN useradd -m -s /bin/bash rowsafe && install -d -o rowsafe -g clickhouse -m 2750 /var/lib/rowsafe-dl
 COPY keeper.xml /etc/clickhouse-server/config.d/keeper.xml
 COPY clickhouse.test rowsafe-agent /usr/local/bin/
 DOCKERFILE
@@ -100,7 +101,7 @@ for v in $VERSIONS; do
 			extra="ROWSAFE_TEST_CLICKHOUSE_USERSD=/etc/clickhouse-server/users.d"
 		fi
 		cd /tmp
-		su rowsafe -c "env ROWSAFE_TEST_CLICKHOUSE_PORT=8123 ROWSAFE_TEST_CLICKHOUSE_REPLICATED=1 $extra \
+		su rowsafe -c "env ROWSAFE_TEST_CLICKHOUSE_PORT=8123 ROWSAFE_TEST_CLICKHOUSE_REPLICATED=1 ROWSAFE_TEST_CLICKHOUSE_DOWNLOAD_DIR=/var/lib/rowsafe-dl/dl $extra \
 			/usr/local/bin/clickhouse.test -test.v -test.count=1 -test.run TestClickHouse -test.timeout 25m" 2>&1 | tail -n 150
 		exit ${PIPESTATUS[0]}
 	'; then

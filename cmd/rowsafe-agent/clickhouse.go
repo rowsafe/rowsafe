@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -45,6 +46,13 @@ for, is read from stdin (one line) and never stored (except the agent's own).
       checking it signs in and has the grants Rowsafe needs (exit 12:
       refused; missing grants are listed on stderr).
 
+  rowsafe-agent clickhouse download-backup --stanza STANZA [--label LABEL --to DIR]
+      Restore without Rowsafe: with the bucket settings and passphrase in the
+      environment (ROWSAFE_REPO_*, as in agent.env), list a database's
+      backups (STANZA is its folder in the bucket), or decrypt backup LABEL
+      (and the full backup a differential one needs) into DIR, ready for
+      ClickHouse's RESTORE ... FROM File(...). It prints the statement.
+
 Rowsafe's user needs, ON *.*: SELECT, BACKUP (back up every database and
 compare tables with a copy), INSERT (bring rows back when you ask), KILL
 QUERY, ALTER UPDATE, ALTER DELETE (stop a query or cancel a stuck change
@@ -60,6 +68,9 @@ func clickhouseCmd(ctx context.Context, args []string) int {
 			return 2
 		}
 		return 0
+	}
+	if args[0] == "download-backup" {
+		return clickhouseDownload(ctx, args[1:])
 	}
 	fs := flag.NewFlagSet("clickhouse "+args[0], flag.ContinueOnError)
 	port := fs.Int("port", 8123, "ClickHouse HTTP port")
@@ -133,4 +144,63 @@ func clickhouseCmd(ctx context.Context, args []string) int {
 	}
 	fmt.Fprintln(os.Stderr, "error:", err)
 	return 1
+}
+
+// clickhouseDownload is `rowsafe-agent clickhouse download-backup`. It
+// needs no ClickHouse and may run as root (a restore on a new server).
+func clickhouseDownload(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("clickhouse download-backup", flag.ContinueOnError)
+	stanza := fs.String("stanza", "", "the database's folder in the bucket")
+	label := fs.String("label", "", "the backup to download (without it: list the backups)")
+	to := fs.String("to", "", "an empty folder to decrypt it into")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *stanza == "" || (*label != "") != (*to != "") {
+		fmt.Fprint(os.Stderr, "usage: rowsafe-agent clickhouse download-backup --stanza STANZA [--label LABEL --to DIR]\n")
+		return 2
+	}
+	cfg, err := agent.ConfigFromEnv()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	env := agent.EngineEnvFor(cfg, protocol.EngineClickHouse, os.Stderr)
+	if *label == "" {
+		list, err := clickhouse.Backups(ctx, env, *stanza)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			return 1
+		}
+		if len(list) == 0 {
+			fmt.Println("No finished backups in this folder.")
+		}
+		for _, b := range list {
+			note := ""
+			if b.Mark != "" {
+				note = "  Mark " + b.Mark
+			}
+			fmt.Printf("%-40s %-4s finished %s%s\n", b.Label, b.Type, b.StoppedAt.UTC().Format("2006-01-02 15:04:05Z"), note)
+		}
+		return 0
+	}
+	dirs, err := clickhouse.DownloadBackup(ctx, env, *stanza, *label, *to, os.Stdout)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	abs := func(d string) string {
+		if a, err := filepath.Abs(d); err == nil {
+			return a
+		}
+		return d
+	}
+	last := abs(dirs[len(dirs)-1])
+	fmt.Printf("\nWith %s in ClickHouse's backups.allowed_path, restore it with:\n\n", abs(*to))
+	if len(dirs) == 2 {
+		fmt.Printf("  RESTORE ALL FROM File('%s/') SETTINGS base_backup = File('%s/')\n", last, abs(dirs[0]))
+	} else {
+		fmt.Printf("  RESTORE ALL FROM File('%s/')\n", last)
+	}
+	return 0
 }
