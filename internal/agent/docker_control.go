@@ -59,17 +59,7 @@ var errNoDockerControl = errors.New("the container control service is not set up
 
 // dockerCall sends one request to the control service.
 func (a *Agent) dockerCall(ctx context.Context, action, id string) (dockerctl.Response, error) {
-	req := dockerctl.Request{ID: id, Action: action}
-	if a.docker.call != nil {
-		return a.docker.call(ctx, req)
-	}
-	if a.cfg.DockerControlSocket == "" {
-		return dockerctl.Response{}, errNoDockerControl
-	}
-	if _, err := os.Stat(a.cfg.DockerControlSocket); err != nil {
-		return dockerctl.Response{}, errNoDockerControl
-	}
-	return dockerctl.Call(ctx, a.cfg.DockerControlSocket, req)
+	return a.dockerCallReq(ctx, dockerctl.Request{ID: id, Action: action}) // container_update.go
 }
 
 // dockerControlReport is the heartbeat's DockerControl (nil when native).
@@ -95,7 +85,7 @@ func (a *Agent) dockerRefresh(ctx context.Context) protocol.DockerControlReport 
 	if !d.at.IsZero() && time.Since(d.at) < dockerReportTTL && d.report.Found && d.dataDir != "" {
 		return d.report
 	}
-	var r protocol.DockerControlReport
+	r := protocol.DockerControlReport{AgentImage: imageVariant()} // container_update.go
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	res, err := a.dockerCall(cctx, dockerctl.ActionInspect, "heartbeat")
@@ -109,6 +99,7 @@ func (a *Agent) dockerRefresh(ctx context.Context) protocol.DockerControlReport 
 		r.Found, r.Error = true, res.Error
 	default:
 		r.Found, r.Container, r.Project, r.Service, r.State = true, res.Container, res.Project, res.Service, res.State
+		r.AgentUpdate = slices.Contains(res.Actions, dockerctl.ActionUpdateAgent)
 	}
 	if d.dataDir == "" {
 		d.dataDir = a.sidecarDataDir(cctx)

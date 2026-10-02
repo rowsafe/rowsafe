@@ -569,6 +569,8 @@ func TaskTimeout(taskType string) time.Duration {
 		return FilesTaskTimeout(taskType)
 	}
 	switch taskType {
+	case TaskAgentContainerUpdate: // agent_container_update.go
+		return AgentContainerUpdateTimeout
 	case TaskInspect:
 		return 2 * time.Minute
 	case TaskAdopt, TaskCheck:
@@ -641,7 +643,11 @@ type UpdateReport struct {
 	Error       string `json:"error,omitempty"`
 	// Retryable marks transient failures (e.g. a download timeout) that say
 	// nothing about the release itself and must not halt its rollout.
-	Retryable bool      `json:"retryable,omitempty"`
+	Retryable bool `json:"retryable,omitempty"`
+	// Container: a Docker sidecar's container was updated
+	// (agent_container_update.go). Its failures usually come from that one
+	// server's setup and don't halt the release for others.
+	Container bool      `json:"container,omitempty"`
 	At        time.Time `json:"at"`
 }
 

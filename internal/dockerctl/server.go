@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rowsafe/rowsafe/release/agentimages"
 )
 
 // Compose labels identifying a container's project and service.
@@ -55,6 +58,19 @@ type Config struct {
 	AllowedUIDs []int
 	Log         *slog.Logger
 
+	// AllowAgentUpdate lets the agent ask for its own container to be
+	// replaced by the signed image of a newer release (agent_update.go).
+	// Off unless the operator sets ROWSAFE_CONTROL_ALLOW_AGENT_UPDATE=1.
+	AllowAgentUpdate bool
+	// AgentService is the agent's compose service in this service's own
+	// project (default "rowsafe-agent"); AgentContainer, instead, its
+	// container name (without compose).
+	AgentService   string
+	AgentContainer string
+	// ReleasePublicKey (base64 Ed25519) verifies the images documents. Set
+	// at build time; without it agent updates are refused.
+	ReleasePublicKey string
+
 	// For tests.
 	now    func() time.Time
 	selfID func() string
@@ -78,8 +94,16 @@ type Server struct {
 	eng *engine
 	log *slog.Logger
 
-	// actMu serializes stop, start and restart.
+	// actMu serializes stop, start, restart and agent updates.
 	actMu sync.Mutex
+
+	// Agent updates (agent_update.go).
+	pub      ed25519.PublicKey
+	bg       sync.WaitGroup  // the update running in the background
+	baseCtx  context.Context // Serve's: an update stops with the service
+	upd      *AgentUpdate    // in progress or last, under mu
+	updReady bool            // the new agent said it runs, under mu
+	updTimes []time.Time     // agent updates started, last hour, under mu
 
 	mu        sync.Mutex
 	self      string // this container's ID ("" if unknown)
@@ -122,6 +146,27 @@ func New(cfg Config) (*Server, error) {
 	if len(cfg.AllowedUIDs) == 0 {
 		cfg.AllowedUIDs = []int{999, 70}
 	}
+	if cfg.AgentContainer == "" && cfg.AgentService == "" {
+		cfg.AgentService = "rowsafe-agent"
+	}
+	if cfg.AgentContainer != "" && !nameRE.MatchString(cfg.AgentContainer) {
+		return nil, fmt.Errorf("ROWSAFE_CONTROL_AGENT_CONTAINER %q is not a container name", cfg.AgentContainer)
+	}
+	if cfg.AgentContainer == "" && !nameRE.MatchString(cfg.AgentService) {
+		return nil, fmt.Errorf("ROWSAFE_CONTROL_AGENT_SERVICE %q is not a compose service name", cfg.AgentService)
+	}
+	if cfg.AllowAgentUpdate && (cfg.AgentContainer != "" && cfg.AgentContainer == cfg.Container ||
+		cfg.AgentContainer == "" && cfg.Container == "" && cfg.AgentService == cfg.Service) {
+		return nil, errors.New("the agent's container and PostgreSQL's can't be the same")
+	}
+	var pub ed25519.PublicKey
+	if cfg.ReleasePublicKey != "" {
+		k, err := agentimages.ParsePublicKey(cfg.ReleasePublicKey)
+		if err != nil {
+			return nil, err
+		}
+		pub = k
+	}
 	eng := cfg.engine
 	if eng == nil {
 		if cfg.DockerSocket == "" {
@@ -129,7 +174,15 @@ func New(cfg Config) (*Server, error) {
 		}
 		eng = newEngine(cfg.DockerSocket)
 	}
-	return &Server{cfg: cfg, eng: eng, log: cfg.Log}, nil
+	return &Server{cfg: cfg, eng: eng, log: cfg.Log, pub: pub, baseCtx: context.Background()}, nil
+}
+
+// actions are the actions this service allows.
+func (s *Server) actions() []string {
+	if s.cfg.AllowAgentUpdate {
+		return append(slices.Clone(Actions), AgentUpdateActions...)
+	}
+	return Actions
 }
 
 // describe is the configured target, for messages.
@@ -151,7 +204,8 @@ func (s *Server) Resolve(ctx context.Context) (target, error) {
 	return s.resolveLocked(ctx)
 }
 
-func (s *Server) resolveLocked(ctx context.Context) (target, error) {
+// identifySelfLocked finds this container and its compose project.
+func (s *Server) identifySelfLocked(ctx context.Context) {
 	if s.self == "" {
 		s.self = s.cfg.selfID()
 		if s.self != "" {
@@ -163,6 +217,10 @@ func (s *Server) resolveLocked(ctx context.Context) (target, error) {
 			}
 		}
 	}
+}
+
+func (s *Server) resolveLocked(ctx context.Context) (target, error) {
+	s.identifySelfLocked(ctx)
 	var t target
 	if s.cfg.Container != "" {
 		c, err := s.eng.inspect(ctx, s.cfg.Container)
@@ -275,7 +333,7 @@ func (s *Server) current(ctx context.Context) (target, containerJSON, error) {
 // response fills the container's state.
 func (s *Server) response(req Request, t target, c containerJSON) Response {
 	r := Response{OK: true, ID: req.ID, Action: req.Action, Container: t.Name, ContainerID: short(t.ID), Project: t.Project,
-		Service: t.Service, State: c.State.Status, ExitCode: c.State.ExitCode, Actions: Actions}
+		Service: t.Service, State: c.State.Status, ExitCode: c.State.ExitCode, Actions: s.actions()}
 	if c.State.Health != nil {
 		r.Health = c.State.Health.Status
 	}
@@ -323,18 +381,36 @@ func (s *Server) Do(ctx context.Context, peer Peer, req Request) (res Response) 
 			level = slog.LevelWarn
 		}
 		s.log.Log(ctx, level, "request", "peer_uid", peer.UID, "peer_pid", peer.PID, "id", req.ID, "action", req.Action,
-			"container", res.Container, "ok", res.OK, "state", res.State, "error", res.Error,
+			"version", req.Version, "container", res.Container, "ok", res.OK, "state", res.State, "error", res.Error,
 			"duration_ms", s.cfg.now().Sub(start).Milliseconds())
 	}()
+	defer func() {
+		if req.Action == ActionInspect || req.Action == ActionUpdateAgent || req.Action == ActionAgentReady {
+			res.Update = s.agentUpdateStatus()
+		}
+	}()
 	fail := func(msg string) Response {
-		return Response{ID: req.ID, Action: req.Action, Error: msg, Actions: Actions}
+		return Response{ID: req.ID, Action: req.Action, Error: msg, Actions: s.actions()}
 	}
 	if !requestIDRE.MatchString(req.ID) {
 		req.ID = ""
 		return fail("invalid request id")
 	}
-	if !slices.Contains(Actions, req.Action) {
-		return fail(fmt.Sprintf("action %q is not allowed (allowed: %s)", req.Action, strings.Join(Actions, ", ")))
+	if req.Action == ActionUpdateAgent && !s.cfg.AllowAgentUpdate {
+		return fail("updating the agent's container isn't allowed: its operator turns it on with ROWSAFE_CONTROL_ALLOW_AGENT_UPDATE=1 on this service")
+	}
+	if !slices.Contains(s.actions(), req.Action) {
+		return fail(fmt.Sprintf("action %q is not allowed (allowed: %s)", req.Action, strings.Join(s.actions(), ", ")))
+	}
+	if (req.Version != "" && req.Action != ActionUpdateAgent && req.Action != ActionAgentReady) ||
+		(req.Images != nil && req.Action != ActionUpdateAgent) {
+		return fail(fmt.Sprintf("action %q takes no version or images", req.Action))
+	}
+	switch req.Action {
+	case ActionUpdateAgent:
+		return s.startAgentUpdate(ctx, req)
+	case ActionAgentReady:
+		return s.agentReady(req)
 	}
 	if req.Action != ActionInspect {
 		s.actMu.Lock()
@@ -372,6 +448,10 @@ func (s *Server) Do(ctx context.Context, peer Peer, req Request) (res Response) 
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	stop := context.AfterFunc(ctx, func() { ln.Close() })
 	defer stop()
+	s.mu.Lock()
+	s.baseCtx = ctx
+	s.mu.Unlock()
+	defer s.bg.Wait() // an agent update rolls back before the service exits
 	sem := make(chan struct{}, maxConns)
 	var wg sync.WaitGroup
 	defer wg.Wait()

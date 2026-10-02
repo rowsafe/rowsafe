@@ -73,6 +73,13 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 			})
 		}
 	}
+	if task.Type == protocol.TaskAgentContainerUpdate { // container_update.go
+		res, err := a.agentContainerUpdate(ctx, task, tl)
+		if res == nil {
+			return nil, err
+		}
+		return res, err
+	}
 	if task.Database == nil {
 		return nil, fmt.Errorf("task %s has no database", task.Type)
 	}

@@ -5,8 +5,9 @@
 # which stay unmodified. One image per PostgreSQL major version and image
 # flavour: it carries pgBackRest and that major's server binaries (for
 # restore drills) from apt.postgresql.org, and runs as the postgres image's
-# postgres uid/gid. Published as ghcr.io/rowsafe/agent:<version>-pg<major>
-# and ...-pg<major>-alpine.
+# postgres uid/gid. Published as ghcr.io/rowsafe/agent:pg<major> and
+# ...:pg<major>-alpine (floating: the newest release), and
+# ...:<version>-pg<major>[-alpine] (exact: pins a release).
 #
 #   docker build -f deploy/docker/agent.Dockerfile --build-arg PG_MAJOR=17 -t rowsafe-agent:pg17 .
 #   # for postgres:NN-alpine (postgres is uid/gid 70 there):
@@ -45,6 +46,10 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
 FROM debian:${DEBIAN_SUITE}-slim
 ARG DEBIAN_SUITE
 ARG PG_MAJOR=17
+# The image's variant, its floating tag: pg17, pg17-alpine (set by the
+# release workflow). rowsafe-docker-control picks the same variant of a new
+# release when it updates the agent's container.
+ARG IMAGE_VARIANT=
 # Must match the postgres user of the PostgreSQL image: 999 in the Debian
 # images, 70 in the Alpine ones. The agent checks this at startup.
 ARG PG_UID=999
@@ -113,7 +118,8 @@ COPY --from=build /out/rowsafe-agent /usr/local/bin/rowsafe-agent
 
 LABEL org.opencontainers.image.title="Rowsafe agent (PostgreSQL ${PG_MAJOR} sidecar)" \
       org.opencontainers.image.source="https://github.com/rowsafe/rowsafe" \
-      org.opencontainers.image.licenses="Apache-2.0"
+      org.opencontainers.image.licenses="Apache-2.0" \
+      sh.rowsafe.agent.variant="${IMAGE_VARIANT}"
 
 ENV ROWSAFE_MODE=docker-sidecar \
     ROWSAFE_STATE_DIR=/var/lib/rowsafe \
@@ -126,6 +132,7 @@ ENV ROWSAFE_MODE=docker-sidecar \
     ROWSAFE_AUTO_UPDATE=false \
     ROWSAFE_RESTIC_BIN=/usr/local/bin/restic \
     ROWSAFE_FILES_MOUNT_DIR=/rowsafe-files \
+    ROWSAFE_IMAGE_VARIANT=${IMAGE_VARIANT} \
     PG_MAJOR=${PG_MAJOR}
 
 USER ${PG_UID}:${PG_GID}
