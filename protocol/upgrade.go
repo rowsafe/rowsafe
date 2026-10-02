@@ -61,7 +61,20 @@ const (
 	UpdateAllowPostgres = "postgresql"
 	UpdateAllowSecurity = "security" // install security updates
 	UpdateAllowReboot   = "reboot"   // reboot the server
+	// UpdateAllowDatabase: install the minor updates of, and upgrade, the
+	// MySQL, MariaDB, MongoDB or ClickHouse server on the ports in
+	// /etc/rowsafe/restart-allowed (the "updates" permission on a server
+	// without PostgreSQL).
+	UpdateAllowDatabase = "database"
 )
+
+// UpdateWord is the updates allow list's word for engine's own updates.
+func UpdateWord(engine string) string {
+	if NormalizeEngine(engine) == EnginePostgreSQL {
+		return UpdateAllowPostgres
+	}
+	return UpdateAllowDatabase
+}
 
 // Upgrade modes.
 const (
@@ -372,6 +385,15 @@ type ClusterSoftware struct {
 	// Majors are newer majors the repositories offer, oldest first.
 	Majors            []int    `json:"majors,omitempty"`
 	ExtensionPackages []string `json:"extension_packages,omitempty"`
+
+	// Other engines (MySQL, MariaDB, MongoDB, ClickHouse; Engine is ""
+	// for PostgreSQL): Series is the installed release series ("8.0",
+	// "10.11", "7.0", "25.8"); minor updates stay in it. Installed and
+	// Candidate are then full versions ("8.0.40"), Running the server's.
+	// NextSeries are newer series the package sources offer, oldest first.
+	Engine     string   `json:"engine,omitempty"`
+	Series     string   `json:"series,omitempty"`
+	NextSeries []string `json:"next_series,omitempty"`
 }
 
 // UpgradeState is a major upgrade that can still be undone or cleaned up.
@@ -427,6 +449,10 @@ type UpgradeInfo struct {
 	RestartPending bool `json:"restart_pending,omitempty"`
 	// Majors are newer majors the server's repositories offer.
 	Majors []int `json:"majors,omitempty"`
+	// Other engines: Series is the running release series ("8.0") and
+	// NextSeries the newer ones the package sources offer.
+	Series     string   `json:"series,omitempty"`
+	NextSeries []string `json:"next_series,omitempty"`
 	// Sidecar: PostgreSQL runs in Docker (Rowsafe can check and rehearse,
 	// but the upgrade itself is a change to the compose file).
 	Sidecar bool `json:"sidecar,omitempty"`

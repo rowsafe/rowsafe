@@ -1126,6 +1126,13 @@ install_helper_script() {
 #   ID pg-upgrade-cleanup PORT               remove the version kept aside by an upgrade or undo
 #   ID security-updates                      install pending security updates
 #   ID reboot                                reboot the server
+#   ID db-minor-update PORT                  newest release of the series (8.0, 10.11, 7.0, 25.8)
+#                                            of the MySQL, MariaDB, MongoDB or ClickHouse server on PORT
+#
+# db-* requests need the word "database" and act only on a port in
+# /etc/rowsafe/restart-allowed whose unit is one of those servers' units;
+# they install only that server's own packages (see db_patterns), already
+# installed ones, at the newest version of the installed series.
 #
 # Each needs its word in /etc/rowsafe/updates-allowed (root's, written by
 # the installer): "postgresql" for the pg-* requests, which also only act on
@@ -1155,7 +1162,7 @@ install_helper_script() {
 #
 # The agent reads the next lines to know what this helper can do.
 # actions: restart stop start create-cluster files-read files-put
-# update-actions: pg-minor-update pg-install-major pg-upgrade pg-upgrade-undo pg-upgrade-cleanup security-updates reboot
+# update-actions: pg-minor-update pg-install-major pg-upgrade pg-upgrade-undo pg-upgrade-cleanup security-updates reboot db-minor-update
 #
 # The same helper manages PgBouncer when root allowed that (--allow-pooler):
 # see "PgBouncer" below.
@@ -2512,6 +2519,126 @@ act_reboot() {
   exit 0
 }
 
+# ---------------------------------------------------------------- other engines
+
+# db_engine sets db_engine and db_main (the installed server package) for
+# $unit, the allowed unit of $port.
+db_engine() {
+  case $unit in
+    mongod.service | mongodb.service)
+      db_engine=mongodb
+      set -- mongodb-org-server
+      ;;
+    clickhouse-server.service)
+      db_engine=clickhouse
+      set -- clickhouse-server
+      ;;
+    mysql.service | mysqld.service | mariadb.service | mysql@*.service | mysqld@*.service | mariadb@*.service)
+      if [ -n "$(pkg_version mariadb-server)" ]; then
+        db_engine=mariadb
+        set -- mariadb-server
+      else
+        db_engine=mysql
+        set -- mysql-community-server mysql-server-8.4 mysql-server-8.0 mysql-server percona-server-server
+      fi
+      ;;
+    *) refuse "$unit is not a MySQL, MariaDB, MongoDB or ClickHouse service" ;;
+  esac
+  db_main=''
+  for p in "$@"; do
+    if [ -n "$(pkg_version "$p")" ]; then
+      db_main=$p
+      break
+    fi
+  done
+  [ -n "$db_main" ] || refuse "the $db_engine server on port $port isn't installed from packages here"
+}
+
+# db_patterns sets the engine's packages: locked ones move only within the
+# installed series; free ones (tools versioned on their own) are upgraded
+# as they come.
+db_patterns() {
+  case $db_engine in
+    mysql) locked='mysql-community-* mysql-server* mysql-client* mysql-common percona-server-*' free='percona-xtrabackup-*' ;;
+    mariadb) locked='mariadb-* libmariadb3 libmariadbd19' free='' ;;
+    mongodb) locked='mongodb-org mongodb-org-*' free='mongodb-mongosh mongodb-database-tools' ;;
+    clickhouse) locked='clickhouse-*' free='' ;;
+  esac
+}
+
+# series VERSION prints the release series of a package version:
+# "1:10.11.9+maria~deb12" -> 10.11, "8.0.40-1debian12" -> 8.0.
+series() { printf '%s\n' "$1" | sed -E 's/^[0-9]+://' | sed -nE 's/^([0-9]+\.[0-9]+).*/\1/p'; }
+
+# newest_in PKG SERIES prints the newest available version of PKG in SERIES.
+newest_in() {
+  best=''
+  for v in $(apt-cache madison "$1" 2>/dev/null | awk -F'|' '{ gsub(/ /, "", $2); print $2 }'); do
+    [ "$(series "$v")" = "$2" ] || continue
+    if [ -z "$best" ] || dpkg --compare-versions "$v" gt "$best"; then best=$v; fi
+  done
+  printf '%s' "$best"
+}
+
+# db_port checks $port's allowed unit and sets unit, db_engine, db_main.
+db_port() {
+  check_root_file "$allow" "Rowsafe may not restart the database on this server, which updating it needs (allow it on the server with: sudo rowsafe-allow restart)"
+  unit=$(allowed_unit "$port")
+  [ -n "$unit" ] || refuse "port $port is not in $allow: Rowsafe may not restart it, which updating it needs"
+  case $unit in postgresql@*) refuse "port $port is PostgreSQL's: use the pg-* requests" ;; esac
+  db_engine
+  db_patterns
+}
+
+act_db_minor_update() {
+  update_allowed database "installing database updates from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
+  db_port
+  before=$(pkg_version "$db_main")
+  ser=$(series "$before")
+  [ -n "$ser" ] || refuse "can't tell the release series of $db_main $before"
+  : >"$work_log"
+  t0=$(active_since "$unit")
+  was_active=0
+  "$systemctl" is-active --quiet "$unit" 2>/dev/null && was_active=1
+  apt_refresh
+  specs='' pkgs=''
+  for pat in $locked; do
+    for p in $(installed_pkgs "$pat"); do
+      case " $pkgs " in *" $p "*) continue ;; esac
+      v=$(newest_in "$p" "$ser")
+      [ -n "$v" ] || continue # not of this series (a shared library, a tool)
+      pkgs="$pkgs $p"
+      if dpkg --compare-versions "$v" gt "$(pkg_version "$p")"; then specs="$specs $p=$v"; fi
+    done
+  done
+  for pat in $free; do
+    for p in $(installed_pkgs "$pat"); do pkgs="$pkgs $p" specs="$specs $p"; done
+  done
+  if [ -n "$specs" ]; then
+    log "updating $db_engine $ser:$specs (request $id)"
+    # shellcheck disable=SC2086 # package specs built above from dpkg and apt
+    apt_run install -y --only-upgrade $specs || refuse "installing the update failed: $(tail_log)"
+  fi
+  after=$(pkg_version "$db_main")
+  add engine "$db_engine"
+  add series "$ser"
+  add from_package "$before"
+  add package "$after"
+  add packages "$pkgs"
+  restarted=0
+  if [ "$after" != "$before" ] && [ "$was_active" = 1 ]; then
+    if [ "$(active_since "$unit")" = "$t0" ]; then
+      # The packages didn't restart it: start the new binaries now.
+      out=$(timeout 300 "$systemctl" restart "$unit" 2>&1 </dev/null) ||
+        refuse "the update is installed, but restarting $unit failed: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
+    fi
+    restarted=1
+  fi
+  add restarted "$restarted"
+  ok=1
+  log "$db_engine on port $port: $before -> $after (restarted: $restarted)"
+}
+
 update_main() {
   result_name=update-result
   have_request "$dir/update-request" || exit 0
@@ -2536,6 +2663,10 @@ update_main() {
     # shellcheck disable=SC2086
     set -- $line
     id=$1 action=$2 port=$3 major=$4 method=$5
+  elif printf '%s\n' "$line" | grep -Eq "^$rid db-minor-update [0-9]{1,5}\$"; then
+    # shellcheck disable=SC2086
+    set -- $line
+    id=$1 action=$2 port=$3
   elif printf '%s\n' "$line" | grep -Eq "^$rid (security-updates|reboot)\$"; then
     id=${line%% *} action=${line#* }
   else
@@ -2549,6 +2680,7 @@ update_main() {
     pg-upgrade-cleanup) act_pg_upgrade_cleanup ;;
     security-updates) act_security_updates ;;
     reboot) act_reboot ;;
+    db-minor-update) act_db_minor_update ;;
   esac
   answer
 }
