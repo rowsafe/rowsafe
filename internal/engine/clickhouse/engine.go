@@ -32,6 +32,17 @@ type Engine struct {
 	// copyMu serializes copy restores (at most one per database, and the
 	// main lane runs one task at a time anyway).
 	copyMu sync.Mutex
+	// bases holds, per database, a read lock for every differential backup
+	// (a Mark too) while it runs: retention, which takes the write lock,
+	// never deletes the full backup one reads from.
+	bases sync.Map // database id -> *sync.RWMutex
+}
+
+// baseLock is the database's lock between differential backups and
+// retention (see bases).
+func (e *Engine) baseLock(db protocol.DatabaseSpec) *sync.RWMutex {
+	l, _ := e.bases.LoadOrStore(db.ID, &sync.RWMutex{})
+	return l.(*sync.RWMutex)
 }
 
 var (

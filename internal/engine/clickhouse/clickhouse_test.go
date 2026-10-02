@@ -285,6 +285,88 @@ func TestRetentionAndPick(t *testing.T) {
 	}
 }
 
+// A Mark taken while a new full backup ran reads from the previous full
+// one: retention keeps that one as long as the Mark's backup is new.
+func TestRetentionKeepsAMarksBase(t *testing.T) {
+	ctx := context.Background()
+	env := testEnvUnit(t)
+	db := protocol.DatabaseSpec{ID: "db1", Name: "a", Stanza: "a-ch", RetentionFull: 1}
+	r, err := openRepo(env, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	put := func(label, base string, stopped time.Time) {
+		typ := protocol.BackupFull
+		if base != "" {
+			typ = protocol.BackupDiff
+		}
+		_ = r.st.PutBytes(ctx, backupKey(label, ".backup"), []byte("x"))
+		if err := r.putJSON(ctx, backupKey(label, backupDocName), backupDoc{Label: label, Type: typ, Base: base, StoppedAt: stopped}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	labels := func() []string {
+		docs, _, err := r.listBackups(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, d := range docs {
+			out = append(out, d.Label)
+		}
+		slices.Sort(out)
+		return out
+	}
+	at := time.Now().UTC().Add(-30 * 24 * time.Hour).Truncate(time.Second)
+	fOld, fNew := newFullLabel(at), newFullLabel(at.Add(7*24*time.Hour))
+	put(fOld, "", at.Add(time.Minute))
+	put(fNew, "", at.Add(7*24*time.Hour+time.Hour)) // ran for an hour
+	// The Mark started while fNew ran (so on fOld) and finished after it.
+	mark := newDiffLabel(fOld, at.Add(7*24*time.Hour+30*time.Minute))
+	put(mark, fOld, at.Add(7*24*time.Hour+2*time.Hour))
+	_ = r.putJSON(ctx, markKey("m"), markDoc{Name: "m", Label: mark})
+	e := &Engine{}
+	if err := e.retention(ctx, r, db, fNew, nopLog{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := labels(); !slices.Equal(got, []string{fOld, mark, fNew}) {
+		t.Fatalf("the Mark lost its full backup: %v", got)
+	}
+
+	// A differential backup running on fOld (holding the lock) stops
+	// retention; one another agent runs (unfinished in the bucket) keeps fOld.
+	fNewer := newFullLabel(at.Add(14 * 24 * time.Hour))
+	put(fNewer, "", at.Add(14*24*time.Hour+time.Hour))
+	l := e.baseLock(db)
+	l.RLock()
+	if err := e.retention(ctx, r, db, fNewer, nopLog{}); err != nil {
+		t.Fatal(err)
+	}
+	l.RUnlock()
+	if got := labels(); len(got) != 4 {
+		t.Fatalf("retention ran while a differential backup ran: %v", got)
+	}
+	running := newDiffLabel(fOld, time.Now().UTC().Add(-time.Minute))
+	_ = r.st.PutBytes(ctx, backupKey(running, "data.bin"), []byte("x"))
+	if err := e.retention(ctx, r, db, fNewer, nopLog{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := labels(); !slices.Equal(got, []string{fOld, mark, fNewer}) {
+		t.Fatalf("with a differential backup of %s unfinished: %v", fOld, got)
+	}
+	// Once nothing needs it, it goes, with the Mark.
+	_ = r.deletePrefix(ctx, backupDir(running))
+	if err := e.retention(ctx, r, db, fNewer, nopLog{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := labels(); !slices.Equal(got, []string{fNewer}) {
+		t.Fatalf("kept %v", got)
+	}
+	if marks, _ := r.listMarks(ctx); len(marks) != 0 {
+		t.Fatalf("marks %+v", marks)
+	}
+}
+
 func TestUsersXMLAndStatus(t *testing.T) {
 	env := testEnvUnit(t)
 	x, err := UsersXML(env, 8123)

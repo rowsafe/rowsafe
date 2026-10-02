@@ -298,6 +298,12 @@ func (e *Engine) takeBackup(ctx context.Context, env agent.EngineEnv, db protoco
 	if err != nil {
 		return nil, err
 	}
+	if typ != protocol.BackupFull {
+		// Held from picking the base until this backup is saved.
+		l := e.baseLock(db)
+		l.RLock()
+		defer l.RUnlock()
+	}
 	docs, _, err := r.listBackups(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("listing backups: %w", err)
@@ -406,12 +412,21 @@ const defaultRetentionFull = 2
 
 // retention keeps the newest RetentionFull full backups with their
 // differential backups and Marks (deleting a full backup deletes what
-// depends on it), and removes unfinished uploads older than a day.
+// depends on it), and removes unfinished uploads older than a day. An
+// older full backup stays while a differential backup of it is running or
+// finished after the oldest full backup kept (a Mark taken while a new full
+// backup ran): it goes with that full backup.
 func (e *Engine) retention(ctx context.Context, r *repo, db protocol.DatabaseSpec, current string, tl agent.TaskLogger) error {
 	keep := db.RetentionFull
 	if keep <= 0 {
 		keep = defaultRetentionFull
 	}
+	l := e.baseLock(db)
+	if !l.TryLock() {
+		tl.Printf("old backups are removed after the next backup: a differential backup or a Mark is running")
+		return nil
+	}
+	defer l.Unlock()
 	docs, unfinished, err := r.listBackups(ctx)
 	if err != nil {
 		return err
@@ -423,18 +438,35 @@ func (e *Engine) retention(ctx context.Context, r *repo, db protocol.DatabaseSpe
 			}
 		}
 	}
-	var fulls []string
+	var fulls []backupDoc
 	for _, d := range docs {
 		if d.Type == protocol.BackupFull {
-			fulls = append(fulls, d.Label)
+			fulls = append(fulls, d)
 		}
 	}
 	if len(fulls) <= keep {
 		return nil
 	}
+	cutoff := fulls[len(fulls)-keep].StoppedAt
+	needed := map[string]bool{}
+	for _, d := range docs {
+		if d.Type != protocol.BackupFull && d.StoppedAt.After(cutoff) {
+			needed[baseOf(d.Label)] = true
+		}
+	}
+	for _, l := range unfinished {
+		if diffLabelRE.MatchString(l) && time.Since(labelStarted(l)) <= 24*time.Hour {
+			needed[baseOf(l)] = true // another agent's, or one ClickHouse still runs
+		}
+	}
 	gone := map[string]bool{}
 	for _, f := range fulls[:len(fulls)-keep] {
-		gone[f] = true
+		if !needed[f.Label] {
+			gone[f.Label] = true
+		}
+	}
+	if len(gone) == 0 {
+		return nil
 	}
 	removed := 0
 	// Differential backups first: their full one stays readable until none
