@@ -152,6 +152,9 @@ type StandbySecrets struct {
 	PrimaryPort      int      `json:"primary_port,omitempty"`
 	// PrimaryTLS: the primary has ssl=on (the standby then requires TLS).
 	PrimaryTLS bool `json:"primary_tls,omitempty"`
+	// EngineData is what another engine's standby needs besides (MongoDB:
+	// the replica set's name and key file, Rowsafe's login on the set).
+	EngineData map[string]string `json:"engine_data,omitempty"`
 }
 
 // StandbyRepo is the primary's pgBackRest repository, as the standby
@@ -219,6 +222,9 @@ type StandbyTarget struct {
 	// Usable: it can be picked; Reason says why not, in plain words.
 	Usable bool   `json:"usable"`
 	Reason string `json:"reason,omitempty"`
+	// NoStandby says why a usable server can receive a clone but not hold
+	// a standby ("" when it can do both).
+	NoStandby string `json:"no_standby,omitempty"`
 }
 
 // StandbyInstructions are what the control plane tells an agent about
@@ -401,6 +407,9 @@ type StandbyCreateParams struct {
 	// KeepDays is how long the data kept aside stays before the agent
 	// deletes it (default 7, 1 to 30).
 	KeepDays int `json:"keep_days,omitempty"`
+	// RestartOK: the person confirmed that the server becoming the standby
+	// may be restarted once (MongoDB: to join the replica set).
+	RestartOK bool `json:"restart_ok,omitempty"`
 }
 
 // StandbyCreateResult is the agent's report for a standby_create task.
@@ -701,6 +710,9 @@ type CreateStandbyRequest struct {
 	// Stream: set up streaming when the standby can reach the primary
 	// (default true). false: follow through the bucket only.
 	Stream *bool `json:"stream,omitempty"`
+	// Restart confirms that the server becoming the standby may be
+	// restarted once (MongoDB, to join the replica set; it holds no data).
+	Restart bool `json:"restart,omitempty"`
 }
 
 // PromoteStandbyRequest promotes the standby.

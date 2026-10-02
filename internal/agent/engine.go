@@ -165,6 +165,13 @@ type EngineEnv struct {
 	// Copies are the agent's safe copy helpers (copies_engine.go); nil
 	// outside the agent.
 	Copies *CopyTools
+	// Helper hands one request to root's helper (rowsafe-pg-restart) and
+	// waits for its answer: "ID ACTION ARGS...". Only actions root allowed
+	// at install exist there; nil outside the agent's run loop.
+	Helper func(ctx context.Context, action string, args ...string) (map[string]string, error)
+	// HelperCan reports whether root's helper may do action for the server
+	// on port (its "# actions:" line and the allow lists); nil: it can't.
+	HelperCan func(action string, port int) bool
 }
 
 // RunLow runs a command at low CPU and IO priority (LowPriority).
@@ -264,6 +271,7 @@ func (a *Agent) engineEnv(name string) EngineEnv {
 		env.Control = a.engineControl // tests
 	}
 	env.Copies = a.copyTools()
+	env.Helper, env.HelperCan = a.engineHelper, a.helperCanDo // engine_helper.go
 	return env
 }
 
