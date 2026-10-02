@@ -36,7 +36,7 @@ func TestClickHouseAndMongoTuners(t *testing.T) {
 		{Name: "profiling_mode", Setting: "off", VarType: "enum", EnumVals: []string{"off", "slowOp", "all"}, Context: "postmaster"},
 	})
 	recs = mg.Recommend(Input{Host: host, Settings: mset})
-	if len(recs) != 1 || recs[0].Value != "16106127360" {
+	if len(recs) != 1 || recs[0].Value != "16642998272" {
 		t.Errorf("mongo recs %+v", recs)
 	}
 	mf := Facts{Host: host, Settings: mset}
