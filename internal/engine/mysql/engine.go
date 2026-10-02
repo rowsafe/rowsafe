@@ -62,7 +62,7 @@ func (e *Engine) Tasks() []string {
 		protocol.TaskInspect, protocol.TaskAdopt, protocol.TaskCheck, protocol.TaskBackup,
 		protocol.TaskDrill, protocol.TaskRestorePoint, protocol.TaskMaintenance,
 		protocol.TaskRewindCopy, protocol.TaskRewindDrop, protocol.TaskRewindCompare, protocol.TaskRewindRows,
-		protocol.TaskPreviewMigration,
+		protocol.TaskPreviewMigration, protocol.TaskCopySchema,
 	}
 }
 
@@ -119,6 +119,8 @@ func (e *Engine) Run(ctx context.Context, env agent.EngineEnv, task *protocol.Ta
 			return nil, err
 		}
 		return nilable(s.rewindCompare(ctx, p, log))
+	case protocol.TaskCopySchema:
+		return nilable(s.copySchema(ctx))
 	case protocol.TaskPreviewMigration:
 		var p protocol.PreviewParams
 		if err := decode(task, &p); err != nil {
