@@ -85,6 +85,9 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 	}
 	db := *task.Database
 	if !isPostgres(db) {
+		if task.Type == protocol.TaskSecurityScan || task.Type == protocol.TaskSecurityFix {
+			return a.runEngineSecurityTask(ctx, task, tl, db) // security_engines.go
+		}
 		return a.runEngineTask(ctx, task, tl)
 	}
 	switch task.Type {

@@ -127,6 +127,45 @@ func TestAdminIntegration(t *testing.T) {
 	adminExtra(t, ctx, e, env, spec, run)
 }
 
-// adminExtra is where the security check and Tuning add their checks.
+// adminExtra: the security check (Tuning adds its own checks below).
 var adminExtra = func(t *testing.T, ctx context.Context, e *Engine, env agent.EngineEnv, spec protocol.DatabaseSpec, run func(string, any) (any, error)) {
+	s := e.server(env, spec)
+	a, _, _ := s.adminAccount()
+	adb, err := openWith(ctx, a, s.socketPath(), 3306)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adb.Close()
+	for _, q := range []string{"CREATE USER IF NOT EXISTS ''@'localhost'", "CREATE DATABASE IF NOT EXISTS test",
+		"CREATE USER IF NOT EXISTS 'nopw'@'%'", "GRANT SELECT ON `test\\_%`.* TO ''@'localhost'"} {
+		if _, err := adb.ExecContext(ctx, q); err != nil {
+			t.Fatal(q, err)
+		}
+	}
+	rep, err := e.SecurityReport(ctx, env, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	es := rep.EngineSecurity
+	t.Logf("listen %s ssl %v version %d anon %v open %v test %v remoteAdmins %v", rep.ListenAddresses, rep.SSL, rep.VersionNum, es.AnonymousUsers, es.OpenNoPassword, es.TestDatabase, es.RemoteAdmins)
+	if len(es.AnonymousUsers) != 1 || !es.TestDatabase || len(es.OpenNoPassword) != 1 || len(rep.Roles) == 0 {
+		t.Fatalf("report: %+v", es)
+	}
+	for _, a := range []string{protocol.SecDropAnonymous, protocol.SecDropTestDatabase} {
+		res, err := e.SecurityFix(ctx, env, spec, protocol.SecurityFixParams{Action: a}, &testLog{t: t})
+		if err != nil {
+			t.Fatal(a, err)
+		}
+		t.Log(res.Summary)
+	}
+	rep, _ = e.SecurityReport(ctx, env, spec)
+	if len(rep.EngineSecurity.AnonymousUsers) != 0 || rep.EngineSecurity.TestDatabase {
+		t.Errorf("after fixes: %+v", rep.EngineSecurity)
+	}
+	_, _ = adb.ExecContext(ctx, "DROP USER IF EXISTS 'nopw'@'%'")
+	tuneExtra(t, ctx, e, env, spec, run)
+}
+
+// tuneExtra is where Tuning adds its checks.
+var tuneExtra = func(t *testing.T, ctx context.Context, e *Engine, env agent.EngineEnv, spec protocol.DatabaseSpec, run func(string, any) (any, error)) {
 }
