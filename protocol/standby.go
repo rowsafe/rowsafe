@@ -219,11 +219,12 @@ type StandbyTarget struct {
 	Version string `json:"version,omitempty"`
 	// Socket is the server's Unix socket ("" when it has none).
 	Socket string `json:"socket,omitempty"`
-	// Usable: it can be picked; Reason says why not, in plain words.
+	// Usable: it can receive a clone; Reason says why not, in plain words.
 	Usable bool   `json:"usable"`
 	Reason string `json:"reason,omitempty"`
-	// NoStandby says why a usable server can receive a clone but not hold
-	// a standby ("" when it can do both).
+	// Standby: it can hold a standby; NoStandby says why not. (Usable and
+	// Reason are about receiving a clone.)
+	Standby   bool   `json:"standby,omitempty"`
 	NoStandby string `json:"no_standby,omitempty"`
 }
 
