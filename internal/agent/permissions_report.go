@@ -92,6 +92,11 @@ const (
 	permReasonNoApt        = "Rowsafe installs updates with apt (Debian and Ubuntu)"
 )
 
+// anyEnginePermissions work for every engine (MySQL, MariaDB, MongoDB and
+// ClickHouse restart through the same root helper; the server's security
+// updates and reboots are the server's); the others are PostgreSQL's.
+var anyEnginePermissions = []string{protocol.PermRestart, protocol.PermSecurityUpdates, protocol.PermReboot}
+
 // ReadPermissions reads what root allowed. It never fails: an unreadable
 // file counts as never answered.
 func ReadPermissions(p PermissionPaths) *protocol.PermissionsReport {
@@ -144,7 +149,7 @@ func permissionsUnavailable(p PermissionPaths, allowed []string) map[string]stri
 	for _, name := range protocol.Permissions {
 		var why string
 		switch {
-		case len(pg) == 0:
+		case len(pg) == 0 && !slices.Contains(anyEnginePermissions, name):
 			why = permReasonPostgresOnly
 		case name == protocol.PermCreateCluster && !permHave("pg_createcluster"):
 			why = permReasonNoCluster

@@ -129,7 +129,8 @@ func UsersXML(env agent.EngineEnv, port int) (string, error) {
      SELECT, BACKUP: back up every database and compare tables with a copy; INSERT: bring rows back when you ask;
      KILL QUERY, ALTER UPDATE, ALTER DELETE: stop a query or cancel a stuck change when you ask;
      S3: write backups to the agent's encrypting gateway on this server;
-     access management, and creating databases and tables WITH GRANT OPTION: Databases & users, only when you ask in the dashboard. -->
+     access management, and creating databases and tables WITH GRANT OPTION: Databases & users, only when you ask in the dashboard;
+     CREATE, DROP (DATABASE, TABLE), ALTER TABLE: rewind the whole server in place when you ask (restore next to production, swap partitions). -->
 <clickhouse>
   <users>
     <%[1]s>

@@ -58,7 +58,7 @@ const MaintOptimize = "optimize"
 var mysqlFeatures = EngineFeatures{
 	Backups: true, PointInTime: true, Proof: true,
 	RewindCopy: true, RewindRows: true, Marks: true,
-	Monitoring: true, Fixes: true,
+	Monitoring: true, Fixes: true, Restart: true, RewindInPlace: true,
 	Recommendations: true, // statement digests, catalog (internal/engine/mysql/advisor.go)
 	IndexAdvice:     true, // MySQL 8.0+ (internal/engine/mysql/indexadvisor.go)
 	Logs:            true, // error and slow query logs (internal/engine/mysql/logs.go)

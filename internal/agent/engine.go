@@ -76,6 +76,27 @@ type EngineRewinds interface {
 	SetRewindExpiries(env EngineEnv, exp []protocol.RewindExpiry)
 }
 
+// EngineRestarter is optionally implemented by an engine that Rowsafe can
+// restart when a person asks (Restart in the dashboard, `rowsafe restart`):
+// the agent hands the restart to the root helper (native installs, the
+// units root listed in restart-allowed) or the container control service
+// (Docker sidecar), exactly as for PostgreSQL, then calls Ready until the
+// database answers again. Ready returns a short note for the task log
+// ("binary log on") or an error while the database doesn't answer.
+type EngineRestarter interface {
+	Ready(ctx context.Context, env EngineEnv, db protocol.DatabaseSpec) (string, error)
+}
+
+// engineRestarter is db's engine as an EngineRestarter (nil when it can't
+// be restarted from Rowsafe, or for PostgreSQL).
+func engineRestarter(db protocol.DatabaseSpec) EngineRestarter {
+	if isPostgres(db) {
+		return nil
+	}
+	r, _ := engineFor(protocol.NormalizeEngine(db.Engine)).(EngineRestarter)
+	return r
+}
+
 // engineRewindStates are the registered engines' copies (heartbeat).
 func (a *Agent) engineRewindStates() []protocol.RewindState {
 	var out []protocol.RewindState
@@ -138,6 +159,9 @@ type EngineEnv struct {
 	// Notes takes side remarks for the person at the terminal during setup
 	// discover (servers skipped and why); io.Discard elsewhere.
 	Notes io.Writer
+	// Control stops and starts the database server through the root helper
+	// (engine_inplace.go); nil outside the agent's run loop.
+	Control ServerControl
 }
 
 // RunLow runs a command at low CPU and IO priority (LowPriority).
@@ -230,7 +254,14 @@ func engineEnv(cfg Config, runner CommandRunner, log *slog.Logger, name string) 
 	}
 }
 
-func (a *Agent) engineEnv(name string) EngineEnv { return engineEnv(a.cfg, a.runner, a.log, name) }
+func (a *Agent) engineEnv(name string) EngineEnv {
+	env := engineEnv(a.cfg, a.runner, a.log, name)
+	env.Control = agentControl{a}
+	if a.engineControl != nil {
+		env.Control = a.engineControl // tests
+	}
+	return env
+}
 
 // unsupportedEngine is the error for a database whose engine this agent
 // doesn't have.

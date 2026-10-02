@@ -105,8 +105,8 @@ var allowPermission = map[string]string{
 // updatesAllowed checks that root allowed word on this host and that the
 // installed helper can do action.
 func (a *Agent) updatesAllowed(word, action string) error {
-	if a.cfg.Sidecar() {
-		return errors.New("PostgreSQL runs in Docker here: Rowsafe can't install packages in your containers")
+	if a.cfg.Container() {
+		return errors.New("the agent runs in Docker here: Rowsafe can't install packages in your containers")
 	}
 	host, _ := os.Hostname()
 	if !slices.Contains(a.updateAllowed(), word) {
@@ -214,6 +214,12 @@ func (w *downtime) stop() time.Duration {
 
 // waitAnswering waits until db accepts connections as a primary.
 func (a *Agent) waitAnswering(ctx context.Context, db protocol.DatabaseSpec, timeout time.Duration) error {
+	if r := engineRestarter(db); r != nil { // another engine: until it answers (restart.go)
+		ctx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		out := &protocol.RestartResult{}
+		return a.waitBackWithin(ctx, db, out, timeout)
+	}
 	return a.ops().waitReady(ctx, db, "", timeout)
 }
 
@@ -358,14 +364,19 @@ func (a *Agent) securityUpdates(ctx context.Context, db protocol.DatabaseSpec, t
 	default:
 		res.Summary = fmt.Sprintf("Installed %d security updates.", res.Installed)
 	}
+	name := protocol.EngineDisplayName(db.Engine)
 	if len(res.HeldBack) > 0 {
-		res.Summary += " PostgreSQL's own updates are left for Update PostgreSQL."
+		if isPostgres(db) {
+			res.Summary += " PostgreSQL's own updates are left for Update PostgreSQL."
+		} else {
+			res.Summary += " The database servers' own packages were left alone (they would restart them)."
+		}
 	}
 	if res.RebootRequired {
 		res.Summary += " The server needs a reboot to finish."
 	}
 	if err := a.waitAnswering(ctx, db, updateReadyWait); err != nil {
-		res.Summary += " PostgreSQL isn't answering: " + err.Error()
+		res.Summary += " " + name + " isn't answering: " + err.Error()
 	}
 	a.refreshSoftware()
 	tl.Printf("%s", res.Summary)
@@ -388,7 +399,7 @@ func (a *Agent) rebootMarkPath() string { return filepath.Join(a.cfg.StateDir, "
 var rebootWait = 10 * time.Minute // for the reboot to happen once asked
 
 func (a *Agent) reboot(ctx context.Context, db protocol.DatabaseSpec, taskID string, tl *taskLog) (*protocol.RebootResult, error) {
-	if a.cfg.Sidecar() {
+	if a.cfg.Container() {
 		return nil, errors.New("the agent runs in Docker here and can't reboot the server")
 	}
 	if err := a.updatesAllowed(protocol.UpdateAllowReboot, actReboot); err != nil {
@@ -445,10 +456,11 @@ func (a *Agent) afterReboot(ctx context.Context, taskID string) (protocol.Comple
 	res.DowntimeMs = time.Since(m.RequestedAt).Milliseconds()
 	res.PostgresBack = werr == nil
 	req := protocol.CompleteRequest{Status: protocol.StatusSucceeded}
+	name := protocol.EngineDisplayName(m.Database.Engine)
 	if res.PostgresBack {
-		res.Summary = fmt.Sprintf("The server rebooted and PostgreSQL answered again %s after the request.", humanDuration(time.Duration(res.DowntimeMs)*time.Millisecond))
+		res.Summary = fmt.Sprintf("The server rebooted and %s answered again %s after the request.", name, humanDuration(time.Duration(res.DowntimeMs)*time.Millisecond))
 	} else {
-		res.Summary = "The server rebooted, but PostgreSQL isn't answering: " + werr.Error()
+		res.Summary = "The server rebooted, but " + name + " isn't answering: " + werr.Error()
 		req.Status, req.Error = protocol.StatusFailed, res.Summary
 	}
 	req.Result, _ = json.Marshal(res)

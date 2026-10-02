@@ -325,7 +325,10 @@ type SoftwareReport struct {
 	// PackageManager is "apt", or "" where Rowsafe can't read or install
 	// packages (Docker sidecar, other systems).
 	PackageManager string `json:"package_manager,omitempty"`
-	Error          string `json:"error,omitempty"`
+	// Container: the agent runs in a container (one of Rowsafe's agent
+	// images): it can't see or change the server's packages.
+	Container bool   `json:"container,omitempty"`
+	Error     string `json:"error,omitempty"`
 	// ListsUpdatedAt is when the package lists were last refreshed.
 	ListsUpdatedAt *time.Time `json:"lists_updated_at,omitempty"`
 	// Allowed is what root allowed Rowsafe to install or do

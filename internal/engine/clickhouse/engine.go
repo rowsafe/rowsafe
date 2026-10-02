@@ -61,6 +61,7 @@ func (e *Engine) Tasks() []string {
 		protocol.TaskRestorePoint, protocol.TaskMaintenance,
 		protocol.TaskRewindCopy, protocol.TaskRewindDrop, protocol.TaskRewindCompare, protocol.TaskRewindRows,
 		protocol.TaskDBAdmin,
+		protocol.TaskRewindInPlace, protocol.TaskRewindUndo, protocol.TaskRewindCleanup,
 	}
 }
 
@@ -75,6 +76,7 @@ func (e *Engine) Start(ctx context.Context, env agent.EngineEnv) {
 	e.started = true
 	e.mu.Unlock()
 	e.recoverCopies(ctx, env)
+	go e.recoverInPlace(ctx, env) // inplace.go
 	go func() {
 		t := time.NewTicker(time.Minute)
 		defer t.Stop()
@@ -85,6 +87,7 @@ func (e *Engine) Start(ctx context.Context, env agent.EngineEnv) {
 			case <-t.C:
 			}
 			e.expireCopies(env, time.Now())
+			e.expireKept(ctx, env, time.Now())
 		}
 	}()
 }
@@ -153,6 +156,15 @@ func (e *Engine) Run(ctx context.Context, env agent.EngineEnv, task *protocol.Ta
 			return nil, err
 		}
 		return nilIfNil(e.dbadmin(ctx, env, db, task.ID, p, tl))
+	case protocol.TaskRewindInPlace:
+		var p protocol.RewindInPlaceParams
+		return nilIfNil(e.rewindInPlace(ctx, env, db, p, tl))
+	case protocol.TaskRewindUndo:
+		var p protocol.RewindUndoParams
+		return nilIfNil(e.rewindUndo(ctx, env, db, p, tl))
+	case protocol.TaskRewindCleanup:
+		var p protocol.RewindCleanupParams
+		return nilIfNil(e.rewindCleanup(ctx, env, db, p, tl))
 	}
 	return nil, fmt.Errorf("ClickHouse databases can't run %s tasks", task.Type)
 }

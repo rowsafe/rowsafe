@@ -838,7 +838,7 @@ func (e *Engine) RewindStates(env agent.EngineEnv) []protocol.RewindState {
 		out = append(out, protocol.RewindState{ID: r.ID, DatabaseID: r.DatabaseID, Kind: protocol.RewindKindCopy, Status: r.Status,
 			SizeBytes: r.SizeBytes, Expires: &exp, CreatedAt: r.CreatedAt, RecoveredTo: r.RecoveredTo, Path: r.Dir})
 	}
-	return out
+	return append(out, env.Kept().States()...) // rewinds in place (inplace.go)
 }
 
 // SetRewindExpiries applies Extend from the control plane.

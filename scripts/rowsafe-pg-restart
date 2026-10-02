@@ -1,8 +1,9 @@
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
-# rowsafe-pg-restart: restarts or stops PostgreSQL when a person asked
+# rowsafe-pg-restart: restarts or stops PostgreSQL (or the MySQL, MariaDB,
+# MongoDB or ClickHouse server Rowsafe protects) when a person asked
 # Rowsafe to (Restart in the dashboard, `rowsafe restart`; Rewind the whole
-# database, which stops PostgreSQL, swaps its data directory and starts it),
+# database, which stops the database, swaps its data and starts it),
 # and installs PostgreSQL updates, upgrades PostgreSQL, installs security
 # updates or reboots the server when a person clicked that and root allowed
 # it (update mode, below).
@@ -549,11 +550,18 @@ check_root_file() {
   esac
 }
 
+# db_unit_re: the database units a restart, stop or start may act on,
+# whatever the allow list says: Debian's PostgreSQL cluster units
+# (postgresql@MAJOR-NAME.service), and the units the MySQL, MariaDB,
+# MongoDB and ClickHouse packages install (mysql, mysqld, mariadb and their
+# @instance forms, mongod, mongodb, clickhouse-server).
+db_unit_re='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server)\.service$'
+
 # allowed_unit PORT prints the unit the restart allow list names for PORT.
 allowed_unit() {
-  # Only Debian's cluster units (postgresql@MAJOR-NAME.service), whatever the
-  # file says; ports compare as strings.
-  awk -v p="$1" '$1 "" == p "" && $2 ~ /^postgresql@[0-9]+-[A-Za-z0-9_.-]+\.service$/ { print $2; exit }' "$allow"
+  # Only database units (db_unit_re), whatever the file says; ports compare
+  # as strings.
+  awk -v p="$1" -v re="$db_unit_re" '$1 "" == p "" && $2 ~ re { print $2; exit }' "$allow"
 }
 
 # created_unit PORT prints the unit of a cluster created for a fork on PORT
@@ -918,7 +926,7 @@ restart_main() {
   # created-clusters; both must be files only root can change.
   unit=''
   if [ -f "$allow" ] || [ -L "$allow" ] || { [ ! -f "$created" ] && [ ! -L "$created" ]; }; then
-    check_root_file "$allow" "restarting or stopping PostgreSQL from Rowsafe is not allowed on this server"
+    check_root_file "$allow" "restarting or stopping the database from Rowsafe is not allowed on this server"
     unit=$(allowed_unit "$port")
   fi
   [ -n "$unit" ] || unit=$(created_unit "$port")
@@ -931,7 +939,7 @@ restart_main() {
     last=$(cat "$stamp" 2>/dev/null || echo 0)
     case $last in '' | *[!0-9]*) last=0 ;; esac
     if [ $((now - last)) -lt "$min_interval" ]; then
-      refuse "PostgreSQL ($unit) was restarted less than a minute ago; try again in a minute"
+      refuse "$unit was restarted less than a minute ago; try again in a minute"
     fi
     echo "$now" >"$stamp"
   fi
@@ -1388,13 +1396,16 @@ act_security_updates() {
   cooldown security-updates 300
   : >"$work_log"
   apt_refresh
-  # Upgrades of installed packages from a security origin. PostgreSQL's
-  # server packages are left for Update PostgreSQL, which saves a Mark,
-  # restarts in a controlled way and checks archiving.
+  # Upgrades of installed packages from a security origin. The database
+  # servers' own packages are left alone (their upgrade would restart them):
+  # PostgreSQL's go through Update PostgreSQL, which saves a Mark, restarts
+  # in a controlled way and checks archiving; MySQL's, MariaDB's, MongoDB's
+  # and ClickHouse's aren't installed from Rowsafe yet.
   list=$(apt-get -s -o Debug::NoLocking=1 dist-upgrade 2>/dev/null |
     awk '/^Inst [^ ]+ \[/ && /-security|Debian-Security/ { print $2 }' | sort -u)
-  held=$(printf '%s\n' "$list" | grep -E '^postgresql-[0-9]+(-.+)?$' | tr '\n' ' ')
-  pkgs=$(printf '%s\n' "$list" | grep -Ev '^postgresql-[0-9]+(-.+)?$' | grep . | tr '\n' ' ')
+  db_pkgs='^(postgresql-[0-9]+(-.+)?|mysql-server(-.+)?|mysql-community-server(-.+)?|percona-server-server(-.+)?|mariadb-server(-.+)?|mongodb-org-server|mongodb-org-mongos|clickhouse-server|clickhouse-common-static)$'
+  held=$(printf '%s\n' "$list" | grep -E "$db_pkgs" | tr '\n' ' ')
+  pkgs=$(printf '%s\n' "$list" | grep -Ev "$db_pkgs" | grep . | tr '\n' ' ')
   n=0
   if [ -n "$pkgs" ]; then
     log "installing security updates: $pkgs (request $id)"

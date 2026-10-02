@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/rowsafe/rowsafe/internal/agent"
 	"github.com/rowsafe/rowsafe/protocol"
@@ -50,13 +51,14 @@ var (
 	_ agent.Engine         = (*Engine)(nil)
 	_ agent.EngineArchiver = (*Engine)(nil)
 	_ agent.EngineRewinds  = (*Engine)(nil)
+	_ agent.EngineStarter  = (*Engine)(nil)
 )
 
 // Name is protocol.EngineMySQL or protocol.EngineMariaDB.
 func (e *Engine) Name() string { return string(e.flavor) }
 
-// Tasks are the task types the engine runs. Rewind in place and restart
-// are not among them yet.
+// Tasks are the task types the engine runs (restarts run in the agent:
+// restart.go).
 func (e *Engine) Tasks() []string {
 	return []string{
 		protocol.TaskInspect, protocol.TaskAdopt, protocol.TaskCheck, protocol.TaskBackup,
@@ -64,7 +66,14 @@ func (e *Engine) Tasks() []string {
 		protocol.TaskRewindCopy, protocol.TaskRewindDrop, protocol.TaskRewindCompare, protocol.TaskRewindRows,
 		protocol.TaskIndexAdvisor, protocol.TaskFindMoment,
 		protocol.TaskDBAdmin, protocol.TaskSettings,
+		protocol.TaskRewindInPlace, protocol.TaskRewindUndo, protocol.TaskRewindCleanup,
 	}
+}
+
+// Start rolls back a rewind in place the agent was running when it
+// stopped (inplace.go).
+func (e *Engine) Start(ctx context.Context, env agent.EngineEnv) {
+	go e.recoverInPlace(ctx, env)
 }
 
 // Run runs one task.
@@ -150,6 +159,15 @@ func (e *Engine) Run(ctx context.Context, env agent.EngineEnv, task *protocol.Ta
 			return nil, err
 		}
 		return nilable(s.dbadmin(ctx, task.ID, p, log))
+	case protocol.TaskRewindInPlace:
+		var p protocol.RewindInPlaceParams
+		return nilable(s.rewindInPlace(ctx, p, log))
+	case protocol.TaskRewindUndo:
+		var p protocol.RewindUndoParams
+		return nilable(s.rewindUndo(ctx, p, log))
+	case protocol.TaskRewindCleanup:
+		var p protocol.RewindCleanupParams
+		return nilable(s.rewindCleanup(ctx, p, log))
 	}
 	return nil, fmt.Errorf("unsupported %s task %q", e.flavor.display(), task.Type)
 }
@@ -164,12 +182,13 @@ func (e *Engine) Monitor(ctx context.Context, env agent.EngineEnv, db protocol.D
 func (e *Engine) Archiver(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec) (*protocol.ArchiverStats, error) {
 	s := e.server(env, db)
 	rewinds(env).housekeeping(env)
+	expireKept(env, time.Now()) // inplace.go
 	return s.archiver(ctx)
 }
 
 // RewindStates lists this engine's copies for the heartbeat.
 func (e *Engine) RewindStates(env agent.EngineEnv) []protocol.RewindState {
-	return rewinds(env).states(string(e.flavor))
+	return append(rewinds(env).states(string(e.flavor)), env.Kept().States()...)
 }
 
 // SetRewindExpiries applies the expiries Rowsafe asks for (Extend).

@@ -380,7 +380,7 @@ func TestUsersXMLAndStatus(t *testing.T) {
 	}
 	sum := sha256.Sum256([]byte(l.Password))
 	if !strings.Contains(x, hex.EncodeToString(sum[:])) || strings.Contains(x, l.Password) ||
-		!strings.Contains(x, "<query>GRANT SELECT, INSERT, BACKUP, KILL QUERY, ALTER UPDATE, ALTER DELETE, S3 ON *.*</query>") ||
+		!strings.Contains(x, "<query>GRANT SELECT, INSERT, BACKUP, KILL QUERY, ALTER UPDATE, ALTER DELETE, S3, CREATE DATABASE, CREATE TABLE, DROP DATABASE, DROP TABLE, ALTER TABLE ON *.*</query>") ||
 		!strings.Contains(x, "<ip>127.0.0.1</ip>") {
 		t.Fatal(x)
 	}
