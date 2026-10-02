@@ -25,7 +25,7 @@ installer=/usr/local/lib/rowsafe/install.sh
 helper=/usr/local/lib/rowsafe/rowsafe-permissions
 owners=/etc/rowsafe/owners
 update='curl -fsSL https://rowsafe.sh | sudo sh'
-names='restart create-cluster updates security-updates reboot pooler pooler-public firewall'
+names='restart create-cluster updates security-updates reboot pooler pooler-public firewall tuning'
 
 usage() {
   cat <<'EOF'
@@ -51,7 +51,8 @@ Names:
   reboot             reboot this server after an update (needs security-updates)
   pooler             install and manage PgBouncer (connection pooling)
   pooler-public      let PgBouncer listen on public addresses (needs pooler)
-  firewall           limit who can reach PostgreSQL's port (never SSH or other ports)
+  firewall           limit who can reach the database's port (never SSH or other ports)
+  tuning             change MongoDB's or ClickHouse's settings, in Rowsafe's own file
 
 Turning one off also turns off what needs it.
 EOF

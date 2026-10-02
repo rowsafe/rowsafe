@@ -25,6 +25,7 @@ func permTestPaths(t *testing.T) PermissionPaths {
 		UpdatesAllowFile:       filepath.Join(dir, "updates-allowed"),
 		PoolerAllowFile:        filepath.Join(dir, "pooler-allowed"),
 		FirewallAllowFile:      filepath.Join(dir, "firewall-allowed"),
+		TuningAllowFile:        filepath.Join(dir, "tuning-allowed"),
 		OwnersFile:             filepath.Join(dir, "owners"),
 		AllowCommand:           filepath.Join(dir, "rowsafe-allow"),
 		PGRoot:                 pg,
@@ -41,6 +42,7 @@ func permWriteFile(t *testing.T, path, content string) {
 func stubPermHave(t *testing.T, have ...string) {
 	t.Helper()
 	old := permHave
+	have = append(have, "mongod") // Tuning applies (a MongoDB here too)
 	permHave = func(name string) bool { return slices.Contains(have, name) }
 	t.Cleanup(func() { permHave = old })
 }
@@ -247,5 +249,20 @@ func TestPermissionsHeartbeatRefreshesSoftware(t *testing.T) {
 	a.cfg.Mode = ModeDockerSidecar
 	if hb := a.permissionsHeartbeat(); hb.Permissions != nil {
 		t.Errorf("sidecar report = %+v", hb.Permissions)
+	}
+}
+
+func TestPermissionsTuning(t *testing.T) {
+	old := permHave
+	permHave = func(name string) bool { return name == "nft" }
+	t.Cleanup(func() { permHave = old })
+	got := permissionsUnavailable(PermissionPaths{PGRoot: t.TempDir()}, nil)
+	if got[protocol.PermTuning] != permReasonTuning || got[protocol.PermFirewall] != "" {
+		t.Errorf("no MongoDB or ClickHouse: %v", got)
+	}
+	p := permTestPaths(t)
+	permWriteFile(t, p.TuningAllowFile, "# ENGINE PATH\nmongodb /etc/mongod.conf\n")
+	if r := ReadPermissions(p); !slices.Contains(r.Allowed, protocol.PermTuning) {
+		t.Errorf("tuning not allowed: %+v", r)
 	}
 }
