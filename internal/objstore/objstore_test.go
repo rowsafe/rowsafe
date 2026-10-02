@@ -199,3 +199,93 @@ func TestSignature(t *testing.T) {
 		t.Fatal(encodePath("/b/a key+x"))
 	}
 }
+
+func TestSealedRanges(t *testing.T) {
+	for _, size := range []int{0, 1, 100, segmentSize - 1, segmentSize, segmentSize + 1, 2 * segmentSize, 3*segmentSize + 777} {
+		plain := make([]byte, size)
+		rand.Read(plain)
+		sealed := sealBytes(t, plain)
+		if got := SealedSize(int64(size)); got != int64(len(sealed)) {
+			t.Fatalf("size %d: SealedSize %d, stored %d", size, got, len(sealed))
+		}
+		if got, err := PlainSize(int64(len(sealed))); err != nil || got != int64(size) {
+			t.Fatalf("size %d: PlainSize %d %v", size, got, err)
+		}
+		ranges := [][2]int{{0, size}, {0, 1}, {size - 1, 1}, {size / 2, size / 3}, {segmentSize - 3, 10}, {segmentSize, segmentSize}}
+		for _, rg := range ranges {
+			off, n := rg[0], rg[1]
+			if off < 0 || n <= 0 || off+n > size {
+				continue
+			}
+			start, end, first, skip := SealedRange(int64(len(sealed)), int64(off), int64(n))
+			r, err := OpenAt(bytes.NewReader(sealed[start:end]), pass, sealed[:SealHeaderSize], int64(len(sealed)), first)
+			if err != nil {
+				t.Fatalf("size %d range %v: %v", size, rg, err)
+			}
+			got, err := io.ReadAll(r)
+			if err != nil {
+				t.Fatalf("size %d range %v: %v", size, rg, err)
+			}
+			if int64(len(got)) < skip+int64(n) || !bytes.Equal(got[skip:skip+int64(n)], plain[off:off+n]) {
+				t.Fatalf("size %d range %v: wrong bytes", size, rg)
+			}
+		}
+	}
+	for _, bad := range []int64{0, 44, int64(SealHeaderSize) + segmentSize + tagSize + tagSize} {
+		if _, err := PlainSize(bad); err == nil {
+			t.Errorf("PlainSize(%d) accepted", bad)
+		}
+	}
+	// A range of a tampered object, and one cut inside a segment.
+	plain := make([]byte, 3*segmentSize)
+	sealed := sealBytes(t, plain)
+	start, end, first, _ := SealedRange(int64(len(sealed)), segmentSize, 10)
+	tampered := bytes.Clone(sealed[start:end])
+	tampered[5] ^= 1
+	r, _ := OpenAt(bytes.NewReader(tampered), pass, sealed[:SealHeaderSize], int64(len(sealed)), first)
+	if _, err := io.ReadAll(r); !errors.Is(err, ErrBadPassphrase) {
+		t.Errorf("tampered range: %v", err)
+	}
+	r, _ = OpenAt(bytes.NewReader(sealed[start:end-3]), pass, sealed[:SealHeaderSize], int64(len(sealed)), first)
+	if _, err := io.ReadAll(r); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Errorf("cut range: %v", err)
+	}
+	// The middle segment can't pass for the last one (a truncated object).
+	r, _ = OpenAt(bytes.NewReader(sealed[start:end]), pass, sealed[:SealHeaderSize], int64(len(sealed))-segmentSize-tagSize, first)
+	if _, err := io.ReadAll(r); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Errorf("middle segment as the last: %v", err)
+	}
+}
+
+func TestStoreHeadAndRange(t *testing.T) {
+	ctx := context.Background()
+	st, _ := testStore(t)
+	data := []byte("0123456789abcdef")
+	if err := st.PutBytes(ctx, "r/obj", data); err != nil {
+		t.Fatal(err)
+	}
+	o, err := st.Head(ctx, "r/obj")
+	if err != nil || o.Size != int64(len(data)) {
+		t.Fatalf("head: %+v %v", o, err)
+	}
+	if _, err := st.Head(ctx, "r/none"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("head missing: %v", err)
+	}
+	for _, c := range []struct {
+		off, n int64
+		want   string
+	}{{0, -1, string(data)}, {3, 4, "3456"}, {10, -1, "abcdef"}, {15, 1, "f"}} {
+		rc, size, err := st.GetRange(ctx, "r/obj", c.off, c.n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ := io.ReadAll(rc)
+		rc.Close()
+		if string(got) != c.want || size != int64(len(data)) {
+			t.Fatalf("range %d+%d: %q size %d", c.off, c.n, got, size)
+		}
+	}
+	if _, _, err := st.GetRange(ctx, "r/none", 0, 1); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("range missing: %v", err)
+	}
+}

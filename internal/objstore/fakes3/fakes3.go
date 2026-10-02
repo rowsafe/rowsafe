@@ -1,6 +1,6 @@
-// Package fakes3 is an in-memory S3 server for tests: PUT, GET, DELETE,
-// ListObjectsV2 and multipart uploads, path-style, without signature checks
-// (it only requires an Authorization header).
+// Package fakes3 is an in-memory S3 server for tests: PUT, GET (with a
+// Range), HEAD, DELETE, ListObjectsV2 and multipart uploads, path-style,
+// without signature checks (it only requires an Authorization header).
 package fakes3
 
 import (
@@ -155,14 +155,36 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPut:
 		body, _ := io.ReadAll(r.Body)
 		s.objects[key] = body
-	case r.Method == http.MethodGet:
+	case r.Method == http.MethodGet || r.Method == http.MethodHead:
 		b, ok := s.objects[key]
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
-			io.WriteString(w, "<Error><Code>NoSuchKey</Code></Error>")
+			if r.Method == http.MethodGet {
+				io.WriteString(w, "<Error><Code>NoSuchKey</Code></Error>")
+			}
 			return
 		}
-		w.Write(b)
+		w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
+		if rg := r.Header.Get("Range"); rg != "" && r.Method == http.MethodGet {
+			var first, last int64
+			n, _ := fmt.Sscanf(rg, "bytes=%d-%d", &first, &last)
+			if n == 0 || first >= int64(len(b)) {
+				w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
+			if n == 1 || last >= int64(len(b)) {
+				last = int64(len(b)) - 1
+			}
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", first, last, len(b)))
+			w.Header().Set("Content-Length", strconv.FormatInt(last-first+1, 10))
+			w.WriteHeader(http.StatusPartialContent)
+			w.Write(b[first : last+1])
+			return
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(len(b)))
+		if r.Method == http.MethodGet {
+			w.Write(b)
+		}
 	case r.Method == http.MethodDelete:
 		delete(s.objects, key)
 		w.WriteHeader(http.StatusNoContent)
