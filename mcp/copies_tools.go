@@ -21,8 +21,8 @@ import (
 
 type previewInput struct {
 	Database    string `json:"database" jsonschema:"Rowsafe database name or ID"`
-	SQL         string `json:"sql" jsonschema:"the migration's SQL: a migration file, or what the framework generates (prisma migrate diff --script, rails db:migrate with SQL schema dumps, django sqlmigrate, alembic upgrade --sql, drizzle-kit generate, flyway/liquibase SQL)"`
-	DB          string `json:"db,omitempty" jsonschema:"the PostgreSQL database (datname) the migration runs in, if the server has several"`
+	SQL         string `json:"sql" jsonschema:"the migration: SQL for PostgreSQL, MySQL, MariaDB and ClickHouse (a migration file, or what the framework generates: prisma migrate diff --script, rails db:migrate with SQL schema dumps, django sqlmigrate, alembic upgrade --sql, drizzle-kit generate, flyway/liquibase SQL); for MongoDB, plain mongosh calls with literal arguments (db.orders.updateMany({...}, {...}), db.users.createIndex({email: 1}), db.logs.drop()), no variables, loops or functions"`
+	DB          string `json:"db,omitempty" jsonschema:"the database inside the server the migration runs in, if the server has several"`
 	Label       string `json:"label,omitempty" jsonschema:"a name for the preview, e.g. the migration file name"`
 	WaitSeconds *int   `json:"wait_seconds,omitempty" jsonschema:"how long to wait for the result (default and maximum: the server's limit, about 45-120 s); if it isn't done by then, the result has the preview ID and status queued or running"`
 }
@@ -118,9 +118,11 @@ func (t *tools) addCopiesTools(s *sdk.Server) {
 	}
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "preview_migration",
-		Description: "Runs a migration's SQL on a fresh copy of the database, restored from its backups on its own server, and reports what it would do to production: " +
-			"each statement's time, locks (and what they block), tables rewritten, indexes built, rows changed, with a verdict (safe, careful, dangerous, or failed) and concrete suggestions. " +
-			"Production is never touched. The first preview of a database restores a copy (minutes for large ones); later ones reuse it for an hour. " +
+		Description: "Runs a migration on a fresh copy of the database, restored from its backups on its own server, and reports what it would do to production: " +
+			"each statement's time, locks (and what they block), tables rewritten or dropped, indexes built, rows changed, with a verdict (safe, careful, dangerous, or failed) and concrete suggestions. " +
+			"For MySQL and MariaDB a failed migration also shows the schema changes that would stay applied (their DDL isn't transactional); for ClickHouse, mutations still running or failing. " +
+			"Works for every engine whose features include migration previews (list_databases shows the engine). " +
+			"Production is never touched. A preview restores a copy (minutes for large databases; PostgreSQL reuses it for an hour). " +
 			"If the preview isn't done within wait_seconds, the result has its preview ID and status queued or running.",
 		Annotations: &sdk.ToolAnnotations{Title: "Preview a migration", ReadOnlyHint: true, OpenWorldHint: ptr(false)},
 		InputSchema: inputSchema[previewInput](func(p map[string]*jsonschema.Schema) {
@@ -148,7 +150,7 @@ func (t *tools) addCopiesTools(s *sdk.Server) {
 
 func (t *tools) previewMigration(ctx context.Context, _ *sdk.CallToolRequest, in previewInput) (*sdk.CallToolResult, PreviewView, error) {
 	if strings.TrimSpace(in.SQL) == "" {
-		return nil, PreviewView{}, fmt.Errorf("sql is empty: pass the migration's SQL")
+		return nil, PreviewView{}, fmt.Errorf("sql is empty: pass the migration (SQL, or for MongoDB its mongosh calls)")
 	}
 	d, err := t.c.Database(ctx, in.Database)
 	if err != nil {
