@@ -305,7 +305,7 @@ func adoptCmd(ctx context.Context, c *client.Client, args []string) error {
 	socketDir := fs.String("socket-dir", "/var/run/postgresql", "Unix socket directory")
 	retention := fs.Int("retention-full", 2, "full backups to keep (weekly fulls: 2 = about 2 weeks of PITR)")
 	noWait := fs.Bool("no-wait", false, "don't wait for the plan")
-	engine := fs.String("engine", "", "database engine: postgresql (default), mysql or mariadb")
+	engine := fs.String("engine", "", "database engine: postgresql (default), mysql, mariadb, mongodb or clickhouse")
 	name, err := parse(fs, args, true)
 	if err != nil {
 		return err
@@ -327,9 +327,10 @@ func adoptCmd(ctx context.Context, c *client.Client, args []string) error {
 	if *host, err = resolveHost(ctx, c, *host); err != nil {
 		return err
 	}
-	if protocol.NormalizeEngine(*engine) == protocol.EngineMongoDB {
+	if e := protocol.NormalizeEngine(*engine); e == protocol.EngineMongoDB || e == protocol.EngineClickHouse {
 		// MongoDB: TCP on 127.0.0.1, port 27017 and daily full backups by
 		// default (the control plane fills in what isn't given).
+		// ClickHouse: its HTTP port, 8123, and the engine's own schedule.
 		set := map[string]bool{}
 		fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
 		if !set["socket-dir"] {
@@ -337,6 +338,9 @@ func adoptCmd(ctx context.Context, c *client.Client, args []string) error {
 		}
 		if !set["port"] {
 			*port = 0
+			if e == protocol.EngineClickHouse {
+				*port = 8123
+			}
 		}
 		if !set["retention-full"] {
 			*retention = 0
