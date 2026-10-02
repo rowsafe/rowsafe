@@ -1309,7 +1309,9 @@ func (a *Agent) resumeUpgrade(ctx context.Context, r upgradeRecord) error {
 		}
 		switch {
 		case r.Phase == upPhaseUndo && helperOK(ans) == nil:
-			return st.update(r.ID, func(x *upgradeRecord) { x.Status, x.Phase, x.Expires = protocol.UpgradeUndone, upPhaseDone, keepUntil(x.KeepDays, time.Now().UTC()) })
+			return st.update(r.ID, func(x *upgradeRecord) {
+				x.Status, x.Phase, x.Expires = protocol.UpgradeUndone, upPhaseDone, keepUntil(x.KeepDays, time.Now().UTC())
+			})
 		case r.Phase == upPhaseUndo:
 			return st.update(r.ID, func(x *upgradeRecord) { x.Status, x.Phase = protocol.UpgradeDone, upPhaseDone })
 		case helperOK(ans) == nil:

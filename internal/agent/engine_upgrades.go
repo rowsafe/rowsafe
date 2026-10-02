@@ -347,7 +347,9 @@ func (a *Agent) engineUpgradeUndo(ctx context.Context, db protocol.DatabaseSpec,
 		return nil, errors.New("that upgrade was undone already, or is still running")
 	}
 	from := protocol.SeriesString(r.FromMajor)
-	_ = st.update(r.ID, func(x *upgradeRecord) { x.Status, x.Phase, x.HelperID = protocol.UpgradeInProgress, upPhaseUndo, taskID+"-undo" })
+	_ = st.update(r.ID, func(x *upgradeRecord) {
+		x.Status, x.Phase, x.HelperID = protocol.UpgradeInProgress, upPhaseUndo, taskID+"-undo"
+	})
 	tl.Printf("putting %s %s and its data from before the upgrade back", name, from)
 	ans, err := a.updateHelper()(ctx, taskID+"-undo", []string{actDBUpgradeUndo, strconv.Itoa(db.Port)}, upgradeHelperWait)
 	if err == nil {

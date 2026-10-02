@@ -64,7 +64,7 @@ const MaintKillMutation = "kill_mutation"
 var clickhouseFeatures = EngineFeatures{
 	Backups: true, Proof: true,
 	RewindCopy: true, RewindRows: true, RewindInPlace: true, Marks: true,
-	Monitoring: true, Fixes: true, Restart: true, Updates: true,
+	Monitoring: true, Fixes: true, Restart: true, Updates: true, Upgrades: true,
 	Recommendations: true, // query log, table layout (internal/engine/clickhouse/insights.go)
 	Logs:            true, // the error log (internal/engine/clickhouse/logs.go)
 	DBAdmin:         true, Security: true, Files: true, SecondCopy: true,

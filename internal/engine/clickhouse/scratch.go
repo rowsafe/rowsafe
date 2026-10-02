@@ -76,6 +76,9 @@ var ErrNoBinary = errors.New("the clickhouse program isn't installed where the a
 
 type scratch struct {
 	Dir string
+	// Bin, when set, is the clickhouse program to run instead of the
+	// installed one (an upgrade rehearsal's target version).
+	Bin string
 }
 
 // scratchState is what the agent keeps about a scratch server (0600).
@@ -282,6 +285,9 @@ func (s scratch) writeConfig() (scratchState, error) {
 // answers; it stops background merges once it does.
 func (s scratch) start(ctx context.Context, env agent.EngineEnv) (*client, error) {
 	bin, isServer, err := clickhouseBinary()
+	if s.Bin != "" {
+		bin, isServer, err = s.Bin, false, nil
+	}
 	if err != nil {
 		return nil, err
 	}
