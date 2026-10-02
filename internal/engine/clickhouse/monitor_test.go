@@ -55,6 +55,10 @@ func TestStatusMutationTextFollowsQueryTextSetting(t *testing.T) {
 	if got := reasonWithoutText("something odd 'secret'"); strings.Contains(got, "secret") || got == "" {
 		t.Fatalf("reason without an error name: %q", got)
 	}
+	if got := reasonWithoutText("Code: 6. DB::Exception: Cannot parse 'X (TOPSECRET)' as UInt32. (CANNOT_PARSE_TEXT) (version 25.8.1)"); got !=
+		"CANNOT_PARSE_TEXT (the details stay on the server: query text collection is off)" {
+		t.Fatalf("a value that looks like an error name: %q", got)
+	}
 	if reasonWithoutText("") != "" {
 		t.Fatal("a mutation that hasn't failed got a reason")
 	}

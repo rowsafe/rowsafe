@@ -235,8 +235,10 @@ func reasonWithoutText(reason string) string {
 		return ""
 	}
 	const hidden = "the details stay on the server: query text collection is off"
-	if m := errorName.FindStringSubmatch(reason); m != nil {
-		return m[1] + " (" + hidden + ")"
+	// The name ends the message (values quoted in it come before).
+	line, _, _ := strings.Cut(strings.TrimSpace(reason), "\n")
+	if ms := errorName.FindAllStringSubmatch(line, -1); len(ms) > 0 {
+		return ms[len(ms)-1][1] + " (" + hidden + ")"
 	}
 	return "It fails (" + hidden + ")"
 }
