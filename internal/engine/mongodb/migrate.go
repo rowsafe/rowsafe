@@ -424,4 +424,3 @@ func (e *Engine) migrateDump(ctx context.Context, env agent.EngineEnv, db protoc
 func yamlQuote(s string) string {
 	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
 }
-
