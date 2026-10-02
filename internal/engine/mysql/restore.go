@@ -57,9 +57,12 @@ func (t restoreTarget) point() time.Time {
 }
 
 // pickBackup chooses the backup to start from.
+// errNoBackup: nothing to restore from yet.
+var errNoBackup = errors.New("there is no backup to restore from yet")
+
 func pickBackup(all []manifest, t restoreTarget) (manifest, error) {
 	if len(all) == 0 {
-		return manifest{}, errors.New("there is no backup to restore from yet")
+		return manifest{}, errNoBackup
 	}
 	if t.BackupSet != "" {
 		if !labelRE.MatchString(t.BackupSet) {

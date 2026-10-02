@@ -60,4 +60,13 @@ var mysqlFeatures = EngineFeatures{
 	RewindCopy: true, RewindRows: true, Marks: true,
 	Monitoring: true, Fixes: true,
 	Recommendations: true, // statement digests, catalog (internal/engine/mysql/advisor.go)
+	IndexAdvice:     true, // MySQL 8.0+ (internal/engine/mysql/indexadvisor.go)
 }
+
+// mariadbFeatures are MySQL's without index advice: MariaDB keeps no sample
+// of a statement's values to test an index with on a copy.
+var mariadbFeatures = func() EngineFeatures {
+	f := mysqlFeatures
+	f.IndexAdvice = false
+	return f
+}()

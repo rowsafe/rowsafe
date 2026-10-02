@@ -195,7 +195,7 @@ var EngineCapabilities = map[string]EngineFeatures{
 	// MySQL and MariaDB (internal/engine/mysql): no restart, rewind in
 	// place, standby, pooling, files or updates yet.
 	EngineMySQL:   mysqlFeatures,
-	EngineMariaDB: mysqlFeatures,
+	EngineMariaDB: mariadbFeatures,
 	// MongoDB (internal/engine/mongodb): mongodump + oplog copying, Proof,
 	// Rewind copies and bringing documents back, Marks, Pulse and stopping
 	// a long operation. No restart, rewind in place, standby, pooling,
