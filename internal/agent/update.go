@@ -82,7 +82,7 @@ type probation struct {
 // on this install; the agent then keeps running without it.
 func NewUpdater(cfg Config, logger *slog.Logger) (*Updater, string) {
 	if cfg.Container() {
-		return nil, "running from a container image, which the agent can't replace itself: update the image " +
+		return nil, "running from a container image, which the agent can't replace itself: update the image tag " +
 			"(`docker compose pull rowsafe-agent && docker compose up -d rowsafe-agent`; https://rowsafe.sh/docs/guides/docker#upgrade)"
 	}
 	if !cfg.AutoUpdate {
