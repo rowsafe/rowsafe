@@ -26,8 +26,9 @@ import (
 // least twice as fast are recommended. The samples are only read on this
 // server and run on the copy; they never leave it. Production is only read.
 //
-// MariaDB keeps no sample of a digest's values, so the advisor needs MySQL
-// 8.0 or later.
+// MariaDB and MySQL 5.7 keep no sample of a digest's values: there the
+// samples come from the slow query log, read on this server
+// (slowsamples.go), never sent.
 
 const (
 	ixTopDigests    = 200
@@ -73,22 +74,31 @@ func (s *server) indexAdvisor(ctx context.Context, taskID string, p protocol.Ind
 		}
 		return res, nil
 	}
-	if s.flavor.mariadb() {
-		res.Skipped = "MariaDB keeps no sample of each statement's values, which Rowsafe needs to test an index on a copy."
-		return done()
-	}
 	prod, err := s.open(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer prod.Close()
 	usage(ctx, prod, p.Track, res)
-	stmts, err := s.advisorStatements(ctx, prod, p)
-	switch {
-	case err != nil && strings.Contains(err.Error(), "query_sample_text"):
-		res.Skipped = "MySQL before 8.0 keeps no sample of each statement's values, which Rowsafe needs to test an index on a copy."
-		return done()
-	case err != nil:
+	// Samples: performance_schema's (MySQL 8.0+), else the slow query log's
+	// (MariaDB, MySQL 5.7).
+	var stmts []*ixStatement
+	if !s.flavor.mariadb() {
+		stmts, err = s.advisorStatements(ctx, prod, p)
+	}
+	if s.flavor.mariadb() || err != nil && strings.Contains(err.Error(), "query_sample_text") {
+		stmts, err = s.slowLogStatements(ctx, prod)
+		switch {
+		case errors.Is(err, errSlowLogOff):
+			res.Skipped = s.flavor.display() + " keeps no sample of each query's values except in its slow query log, which is off: turn it on (slow_query_log = ON, long_query_time = 1) so Rowsafe can test index ideas on a copy."
+			return done()
+		case err != nil:
+			res.Skipped = "Reading the slow query log failed: " + firstLine(err.Error())
+			return done()
+		}
+		stmts = slowStatementsFor(stmts, p)
+	}
+	if err != nil {
 		res.Skipped = "Reading the statement statistics failed: " + firstLine(err.Error())
 		return done()
 	}
@@ -302,8 +312,16 @@ func (s *server) withCopy(ctx context.Context, taskID string, log agent.TaskLogg
 
 // testIdea measures the idea's statements on the copy without and with the
 // index.
-func (s *server) testIdea(ctx context.Context, prod, copyDB *sql.DB, x *ixIdea, res *protocol.IndexAdvisorResult, log agent.TaskLogger) {
+func (s *server) testIdea(ctx context.Context, prod, copyPool *sql.DB, x *ixIdea, res *protocol.IndexAdvisorResult, log agent.TaskLogger) {
 	res.Tested++
+	// One connection: statements from the slow query log name their tables
+	// in the schema they ran in (USE), and session settings stay.
+	copyDB, err := copyPool.Conn(ctx)
+	if err != nil {
+		res.Rejected = append(res.Rejected, protocol.RejectedIndex{Spec: x.spec, Key: x.key, Reason: "connecting to the copy failed: " + firstLine(err.Error())})
+		return
+	}
+	defer copyDB.Close()
 	reject := func(reason string) {
 		log.Printf("%s: %s", x.spec.Name, reason)
 		res.Rejected = append(res.Rejected, protocol.RejectedIndex{Spec: x.spec, Key: x.key, Reason: reason})
@@ -389,10 +407,15 @@ func (s *server) testIdea(ctx context.Context, prod, copyDB *sql.DB, x *ixIdea, 
 }
 
 // explainCost is the optimizer's cost of a statement's sample, and its plan.
-func explainCost(ctx context.Context, db *sql.DB, st *ixStatement) (float64, string, error) {
+func explainCost(ctx context.Context, db *sql.Conn, st *ixStatement) (float64, string, error) {
 	var plan string
 	cctx, cancel := context.WithTimeout(ctx, ixQueryTimeout)
 	defer cancel()
+	if st.schema != "" {
+		if _, err := db.ExecContext(cctx, "USE "+quoteIdent(st.schema)); err != nil {
+			return 0, "", err
+		}
+	}
 	if err := db.QueryRowContext(cctx, "EXPLAIN FORMAT=JSON "+st.sample).Scan(&plan); err != nil {
 		return 0, "", err
 	}
@@ -401,12 +424,16 @@ func explainCost(ctx context.Context, db *sql.DB, st *ixStatement) (float64, str
 			CostInfo struct {
 				QueryCost json.Number `json:"query_cost"`
 			} `json:"cost_info"`
+			Cost json.Number `json:"cost"` // MariaDB 11+
 		} `json:"query_block"`
 	}
 	if err := json.Unmarshal([]byte(plan), &v); err != nil {
 		return 0, "", err
 	}
 	c, err := v.QueryBlock.CostInfo.QueryCost.Float64()
+	if err != nil {
+		c, err = v.QueryBlock.Cost.Float64()
+	}
 	if err != nil {
 		return 0, plan, nil // UPDATE and DELETE plans have no total cost
 	}
@@ -415,7 +442,7 @@ func explainCost(ctx context.Context, db *sql.DB, st *ixStatement) (float64, str
 
 // timeSelect runs a SELECT sample on the copy and returns its time (the best
 // of two runs; 0 for other statements or when it fails or times out).
-func timeSelect(ctx context.Context, db *sql.DB, st *ixStatement) float64 {
+func timeSelect(ctx context.Context, db *sql.Conn, st *ixStatement) float64 {
 	if !kw(firstWord(st.sample), "SELECT") || strings.Contains(strings.ToUpper(st.sample), " FOR UPDATE") {
 		return 0
 	}
