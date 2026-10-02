@@ -44,11 +44,12 @@ func (x indexInfo) definition() string {
 // advisorFacts fills ins.Advisor, ins.UnusedIndexes, ins.DuplicateIndexes
 // and ins.LargestIndexes. serverStart is when the index usage counters
 // started.
-func advisorFacts(ctx context.Context, db *sql.DB, ins *protocol.Insights, serverStart time.Time) {
+func (s *server) advisorFacts(ctx context.Context, db *sql.DB, ins *protocol.Insights, serverStart time.Time) {
 	a := &protocol.AdvisorFacts{ForeignKeys: []protocol.ForeignKeyWithoutIndex{}, NoPrimaryKey: []protocol.TableWithoutPK{},
 		IntegerKeys: []protocol.IntegerKey{}, SequencesBehind: []protocol.SequenceBehind{}, InvalidIndexes: []protocol.InvalidIndex{},
 		DuplicateConstraints: []protocol.DuplicateConstraint{}, TimestampColumns: []protocol.TimestampTable{}, LargeTables: []protocol.LargeTable{}}
 	ins.Advisor = a
+	a.SlowLog = s.slowLogFacts(ctx, db) // slowlog.go
 	idx, err := readIndexes(ctx, db)
 	if err != nil {
 		ins.Notes = append(ins.Notes, "Reading the indexes failed: "+firstLine(err.Error()))

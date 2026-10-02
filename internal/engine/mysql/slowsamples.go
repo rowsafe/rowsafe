@@ -38,7 +38,7 @@ var errSlowLogOff = errors.New("slow query log off")
 // slow query log.
 func (s *server) slowLogStatements(ctx context.Context, db *sql.DB) ([]*ixStatement, error) {
 	var on, file, output, datadir sql.NullString
-	_ = db.QueryRowContext(ctx, "SELECT @@slow_query_log, @@slow_query_log_file, @@log_output, @@datadir").Scan(&on, &file, &output, &datadir)
+	_ = db.QueryRowContext(ctx, "SELECT @@GLOBAL.slow_query_log, @@GLOBAL.slow_query_log_file, @@GLOBAL.log_output, @@datadir").Scan(&on, &file, &output, &datadir)
 	if on.String != "1" && !strings.EqualFold(on.String, "ON") || file.String == "" ||
 		output.String != "" && !strings.Contains(strings.ToUpper(output.String), "FILE") {
 		return nil, errSlowLogOff

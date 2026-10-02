@@ -185,7 +185,8 @@ func accountSQL(f flavor, version, password string) []string {
 		grants = []string{
 			"GRANT SELECT, INSERT, UPDATE, INDEX, SHOW VIEW, TRIGGER, RELOAD, PROCESS, LOCK TABLES, REPLICATION CLIENT ON *.* TO " + user,
 			"GRANT BACKUP_ADMIN, CONNECTION_ADMIN ON *.* TO " + user,
-			// Tuning: SET PERSIST of the settings Rowsafe explains (settings.go).
+			// Tuning and the "Turn on the slow query log" fix: SET PERSIST of the
+			// settings Rowsafe explains (settings.go), only when a person asks.
 			"GRANT SYSTEM_VARIABLES_ADMIN, PERSIST_RO_VARIABLES_ADMIN ON *.* TO " + user,
 			"GRANT " + ownerPrivileges + ", CREATE USER ON *.* TO " + user + " WITH GRANT OPTION",
 		}

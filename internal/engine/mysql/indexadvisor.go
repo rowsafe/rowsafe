@@ -90,7 +90,7 @@ func (s *server) indexAdvisor(ctx context.Context, taskID string, p protocol.Ind
 		stmts, err = s.slowLogStatements(ctx, prod)
 		switch {
 		case errors.Is(err, errSlowLogOff):
-			res.Skipped = s.flavor.display() + " keeps no sample of each query's values except in its slow query log, which is off: turn it on (slow_query_log = ON, long_query_time = 1) so Rowsafe can test index ideas on a copy."
+			res.Skipped = s.flavor.display() + " keeps no sample of each query's values except in its slow query log, which is off: turn it on (Pulse, Health: Turn on the slow query log) so Rowsafe can test index ideas on a copy."
 			return done()
 		case err != nil:
 			res.Skipped = "Reading the slow query log failed: " + firstLine(err.Error())

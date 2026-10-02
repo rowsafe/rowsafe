@@ -192,7 +192,7 @@ func (s *server) monitor(ctx context.Context) (*protocol.DatabaseMonitoring, err
 		}
 	}
 	if now.Sub(st.insightsAt) >= 30*time.Minute {
-		if ins := insights(ctx, db, st.serverStart); ins != nil {
+		if ins := s.insights(ctx, db, st.serverStart); ins != nil {
 			dm.Insights = ins
 			st.insightsAt = now
 		}
@@ -519,7 +519,7 @@ func isRuneStart(b byte) bool { return b&0xC0 != 0x80 }
 
 // insights: the largest tables and the free space inside InnoDB tables
 // (data_free: space a rebuild, OPTIMIZE TABLE, gives back to the disk).
-func insights(ctx context.Context, db *sql.DB, serverStart time.Time) *protocol.Insights {
+func (s *server) insights(ctx context.Context, db *sql.DB, serverStart time.Time) *protocol.Insights {
 	start := time.Now()
 	ins := &protocol.Insights{CollectedAt: start.UTC(), LargestTables: []protocol.TableSize{}, LargestIndexes: []protocol.IndexSize{},
 		TableBloat: []protocol.TableBloat{}, IndexBloat: []protocol.IndexBloat{}, UnusedIndexes: []protocol.UnusedIndex{},
@@ -563,7 +563,7 @@ func insights(ctx context.Context, db *sql.DB, serverStart time.Time) *protocol.
 		ins.TableBloat = ins.TableBloat[:20]
 	}
 	rows.Close()
-	advisorFacts(ctx, db, ins, serverStart) // advisor.go
+	s.advisorFacts(ctx, db, ins, serverStart) // advisor.go
 	ins.DurationMs = time.Since(start).Milliseconds()
 	return ins
 }
