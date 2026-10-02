@@ -54,8 +54,13 @@ type EngineStandby interface {
 	// PrimaryState is db's position as a primary (heartbeat); false when
 	// it isn't one or doesn't answer.
 	PrimaryState(ctx context.Context, env EngineEnv, db protocol.DatabaseSpec) (protocol.PrimaryState, bool)
-	// StandbyTargets are the servers on this host that could hold a
-	// standby (heartbeat).
+	EngineTargets
+}
+
+// EngineTargets is optionally implemented by an engine that reports the
+// servers on this host that could hold a standby or a clone: empty, and
+// Rowsafe's account there may load data into them (heartbeat).
+type EngineTargets interface {
 	StandbyTargets(ctx context.Context, env EngineEnv) []protocol.StandbyTarget
 }
 
@@ -328,13 +333,13 @@ func (a *Agent) holdEngineFence(ctx context.Context, f fenceRecord) {
 // targets to a heartbeat.
 func (a *Agent) engineStandbyHeartbeat(ctx context.Context, hb *protocol.StandbyHeartbeat) {
 	for _, e := range registeredEngines() {
-		es, ok := e.(EngineStandby)
-		if !ok {
-			continue
-		}
 		env := a.engineEnv(e.Name())
-		hb.Standbys = append(hb.Standbys, es.StandbyStates(ctx, env)...)
-		hb.Targets = append(hb.Targets, es.StandbyTargets(ctx, env)...)
+		if es, ok := e.(EngineStandby); ok {
+			hb.Standbys = append(hb.Standbys, es.StandbyStates(ctx, env)...)
+		}
+		if et, ok := e.(EngineTargets); ok {
+			hb.Targets = append(hb.Targets, et.StandbyTargets(ctx, env)...)
+		}
 	}
 	a.mu.Lock()
 	watched := append([]protocol.DatabaseSpec(nil), a.watched...)
