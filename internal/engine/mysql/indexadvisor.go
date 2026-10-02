@@ -84,7 +84,11 @@ func (s *server) indexAdvisor(ctx context.Context, taskID string, p protocol.Ind
 	defer prod.Close()
 	usage(ctx, prod, p.Track, res)
 	stmts, err := s.advisorStatements(ctx, prod, p)
-	if err != nil {
+	switch {
+	case err != nil && strings.Contains(err.Error(), "query_sample_text"):
+		res.Skipped = "MySQL before 8.0 keeps no sample of each statement's values, which Rowsafe needs to test an index on a copy."
+		return done()
+	case err != nil:
 		res.Skipped = "Reading the statement statistics failed: " + firstLine(err.Error())
 		return done()
 	}
