@@ -88,15 +88,21 @@ type ColumnMasker struct {
 	m     *Masker
 	c     ColumnPlan
 	taken map[string]bool
+	// seen remembers a unique column's values, so the same value seen
+	// twice (row by row) gets the same fake.
+	seen map[string]string
 }
 
 // Column returns a ColumnMasker for c.
 func (m *Masker) Column(c ColumnPlan) *ColumnMasker {
-	return &ColumnMasker{m: m, c: c, taken: map[string]bool{}}
+	return &ColumnMasker{m: m, c: c, taken: map[string]bool{}, seen: map[string]string{}}
 }
 
 // Mask is v's new value; false when the strategy leaves v alone.
 func (cm *ColumnMasker) Mask(v string) (string, bool) {
+	if nv, ok := cm.seen[v]; ok {
+		return nv, true
+	}
 	for attempt := 0; attempt < 20; attempt++ {
 		nv, ok := cm.m.Value(cm.c.Strategy, v, Options{MaxLen: cm.c.MaxLen, Attempt: attempt, Integer: cm.c.Integer})
 		if !ok {
@@ -107,6 +113,7 @@ func (cm *ColumnMasker) Mask(v string) (string, bool) {
 				continue
 			}
 			cm.taken[nv] = true
+			cm.seen[v] = nv
 		}
 		return nv, true
 	}

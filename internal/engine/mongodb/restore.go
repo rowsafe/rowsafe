@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -42,7 +43,15 @@ func (s scratch) dataDir() string { return filepath.Join(s.Dir, "data") }
 func (s scratch) sock() string {
 	return filepath.Join(s.SockDir, "mongodb-"+strconv.Itoa(scratchPort)+".sock")
 }
-func (s scratch) uri() string     { return socketURI(s.sock()) }
+func (s scratch) uri() string {
+	if o, ok := s.openConf(); ok {
+		// A safe copy checks logins and speaks TLS only: the agent signs in
+		// with the copy's admin over loopback.
+		return "mongodb://" + copyAdminUser + ":" + url.QueryEscape(o.AdminPassword) + "@127.0.0.1:" + strconv.Itoa(o.Port) +
+			"/?directConnection=true&authSource=admin&tls=true&tlsInsecure=true"
+	}
+	return socketURI(s.sock())
+}
 func (s scratch) pidFile() string { return filepath.Join(s.Dir, "mongod.pid") }
 func (s scratch) logFile() string { return filepath.Join(s.Dir, "mongod.log") }
 
@@ -93,17 +102,34 @@ func (s scratch) start(ctx context.Context, env agent.EngineEnv) (*mongo.Client,
 	if err := os.MkdirAll(s.SockDir, 0o700); err != nil {
 		return nil, err
 	}
+	net := []string{"--bind_ip", s.sock(), "--unixSocketPrefix", s.SockDir, "--port", strconv.Itoa(scratchPort)}
+	if o, ok := s.openConf(); ok {
+		// A safe copy: logins checked, TLS only, on loopback and the chosen
+		// address; no Unix socket.
+		bind := []string{"--bind_ip", "127.0.0.1," + o.Listen}
+		switch {
+		case o.Listen == "*":
+			bind = []string{"--bind_ip_all"}
+		case strings.Contains(o.Listen, ":"):
+			bind = append(bind, "--ipv6")
+		}
+		net = append(bind, "--nounixsocket", "--port", strconv.Itoa(o.Port), "--auth",
+			"--tlsMode", "requireTLS", "--tlsCertificateKeyFile", filepath.Join(s.Dir, "server.pem"),
+			"--tlsDisabledProtocols", "TLS1_0,TLS1_1", "--maxConns", "40")
+	}
 	args := []string{
 		"--dbpath", s.dataDir(),
-		"--bind_ip", s.sock(), "--unixSocketPrefix", s.SockDir, "--port", strconv.Itoa(scratchPort),
 		"--wiredTigerCacheSizeGB", "0.25",
+	}
+	args = append(args, net...)
+	args = append(args,
 		"--setParameter", "ttlMonitorEnabled=false",
 		"--setParameter", "diagnosticDataCollectionEnabled=false",
 		"--setParameter", "disableLogicalSessionCacheRefresh=true",
 		"--logpath", s.logFile(), "--logappend",
 		"--pidfilepath", s.pidFile(),
 		"--fork",
-	}
+	)
 	cmd := command(ctx, env, true, mongod, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
