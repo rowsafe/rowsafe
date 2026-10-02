@@ -214,8 +214,12 @@ var rules = []rule{
 		suggestion: "Keep the transaction short, and set lock_timeout so it gives up instead of queueing every query behind it."},
 }
 
-// staticFindings are the rules a statement matches.
+// staticFindings are the PostgreSQL rules a statement matches.
 func staticFindings(stmt string, touchedExisting bool) []rule {
+	return matchRules(rules, stmt, touchedExisting)
+}
+
+func matchRules(rules []rule, stmt string, touchedExisting bool) []rule {
 	n := Normalize(stmt)
 	var out []rule
 	for _, r := range rules {

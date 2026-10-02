@@ -64,6 +64,7 @@ var mysqlFeatures = EngineFeatures{
 	Logs:            true, // error and slow query logs (internal/engine/mysql/logs.go)
 	FindMoment:      true, // the binary logs in the bucket (internal/engine/mysql/moment.go)
 	DBAdmin:         true, Security: true, Files: true, Settings: true, SecondCopy: true,
+	MigrationPreview: true, SafeCopies: true,
 }
 
 // mariadbFeatures are MySQL's: index advice takes its samples from the

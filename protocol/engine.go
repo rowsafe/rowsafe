@@ -207,6 +207,7 @@ var EngineCapabilities = map[string]EngineFeatures{
 		FindMoment:      true, // the oplog in the bucket (internal/engine/mongodb/moment.go)
 		IndexAdvice:     true, // profiler samples tested on a copy (internal/engine/mongodb/indexadvisor.go)
 		DBAdmin:         true, Security: true, Files: true, SecondCopy: true,
+		MigrationPreview: true, SafeCopies: true,
 	},
 	// ClickHouse (internal/engine/clickhouse): protocol/clickhouse.go. No
 	// restores to any second: ClickHouse keeps no log of its changes.

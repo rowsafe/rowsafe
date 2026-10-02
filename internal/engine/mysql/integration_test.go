@@ -9,11 +9,15 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	gomysql "github.com/go-sql-driver/mysql"
+
+	"github.com/rowsafe/rowsafe/client"
 	"github.com/rowsafe/rowsafe/internal/agent"
 	"github.com/rowsafe/rowsafe/internal/pgbackrest"
 	"github.com/rowsafe/rowsafe/protocol"
@@ -175,6 +179,44 @@ func TestIntegration(t *testing.T) {
 	}
 	t.Logf("drill: %+v", dr)
 
+	// Guard: a migration preview on a copy; production is untouched.
+	pv := must(protocol.TaskPreviewMigration, protocol.PreviewParams{PreviewID: "p1", SQL: "-- add a column\n" +
+		"ALTER TABLE orders ADD COLUMN status VARCHAR(10) DEFAULT 'new';\n" +
+		"ALTER TABLE orders MODIFY COLUMN amount DECIMAL(14,3);\n" +
+		"UPDATE orders SET status = 'old' WHERE id < 1000;\n" +
+		"CREATE INDEX orders_status ON orders (status);\n" +
+		"DROP TABLE nokey;\n" +
+		"GRANT SELECT ON shop.* TO 'reporting'@'%';\n" +
+		"ALTER TABLE items ADD COLUMN sku VARCHAR(5);\n"}).(*protocol.PreviewResult)
+	t.Logf("preview: %s", pv.Summary)
+	if pv.DB != "shop" || pv.Verdict != protocol.PreviewFailed || pv.Error == nil || pv.Error.Statement != 7 || pv.Error.Code != "1060" {
+		t.Fatalf("preview: %+v %+v", pv, pv.Error)
+	}
+	if s := pv.Statements[1]; len(s.Rewrites) != 1 || s.Rewrites[0].Name != "shop.orders" || len(s.Locks) != 1 || s.Locks[0].Blocks != "writes" {
+		t.Errorf("modify column: %+v", s)
+	}
+	if s := pv.Statements[2]; s.Rows == nil || *s.Rows == 0 {
+		t.Errorf("update: %+v", s)
+	}
+	if s := pv.Statements[3]; len(s.IndexBuilds) != 1 {
+		t.Errorf("create index: %+v", s)
+	}
+	if s := pv.Statements[4]; len(s.Dropped) != 1 || s.Dropped[0].Name != "shop.nokey" {
+		t.Errorf("drop table: %+v", s)
+	}
+	if s := pv.Statements[5]; s.Ran {
+		t.Errorf("grant ran on the copy: %+v", s)
+	}
+	if !slices.ContainsFunc(pv.Findings, func(f protocol.PreviewFinding) bool { return f.Rule == "partial_ddl" }) {
+		t.Errorf("findings: %+v", pv.Findings)
+	}
+	var cols int
+	if err := adb.QueryRow("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = 'shop' AND table_name = 'orders' AND column_name = 'status'").Scan(&cols); err != nil || cols != 0 {
+		t.Fatalf("the preview changed production: %v %d", err, cols)
+	}
+
+	safeCopyIntegration(t, ctx, e, env, spec, adb)
+
 	// Rewind: a copy as it was before the accident.
 	cr := must(protocol.TaskRewindCopy, protocol.RewindCopyParams{CopyID: "c1",
 		Target: protocol.RewindTarget{Time: &before, BackupSet: full.Label}}).(*protocol.RewindCopyResult)
@@ -326,5 +368,102 @@ func (l *testLog) Printf(format string, args ...any) {
 func (l *testLog) Output(label string, out []byte) {
 	if s := strings.TrimSpace(string(out)); s != "" {
 		l.Printf("%s output:\n%s", label, s)
+	}
+}
+
+// safeCopyIntegration makes a masked safe copy, connects to it over TLS
+// with the password made here, sets a new password and deletes it.
+func safeCopyIntegration(t *testing.T, ctx context.Context, e *Engine, env agent.EngineEnv, spec protocol.DatabaseSpec, adb *sql.DB) {
+	t.Helper()
+	// Safe copies need a native agent (the test runs in the sidecar image).
+	env.Config.Mode = agent.ModeNative
+	env.Config.Copies = agent.CopiesConfig{Dir: filepath.Join(env.Config.StateDir, "copies"), PortMin: 55440, PortMax: 55460}
+	env.Copies = agent.NewCopyTools(env.Config)
+	run := func(typ string, params any) (any, error) {
+		raw, _ := json.Marshal(params)
+		return e.Run(ctx, env, &protocol.Task{ID: fmt.Sprintf("t%d", time.Now().UnixNano()), Type: typ, Database: &spec, Params: raw}, &testLog{t: t})
+	}
+	schema, err := run(protocol.TaskCopySchema, nil)
+	if err != nil {
+		t.Fatal("copy_schema:", err)
+	}
+	sr := schema.(*protocol.CopySchemaResult)
+	if !slices.ContainsFunc(sr.Databases, func(d protocol.SchemaDatabase) bool {
+		return d.Name == "shop" && slices.ContainsFunc(d.Tables, func(t protocol.SchemaTable) bool { return t.Name == "orders" && len(t.Columns) >= 5 })
+	}) {
+		t.Fatalf("copy_schema: %+v", sr)
+	}
+	pw, verifier, err := client.NewCopyPasswordFor(string(e.flavor))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := run(protocol.TaskSafeCopy, protocol.SafeCopyParams{CopyID: "sc1",
+		Masking: protocol.MaskingPlan{Mode: protocol.MaskingRules, Rules: []protocol.MaskingRule{{DB: "shop", Table: "orders", Column: "customer", Strategy: "full_name"}}},
+		Access:  protocol.CopyAccess{Listen: "*", AllowFrom: []string{"127.0.0.1"}, Role: "dev_ana", PasswordVerifier: verifier}})
+	if err != nil {
+		t.Fatal("safe copy:", err)
+	}
+	sc := res.(*protocol.SafeCopyResult)
+	t.Logf("safe copy: %s", sc.Summary)
+	if sc.Masking.Columns == 0 || sc.Port == 0 || !strings.Contains(sc.TLSCert, "BEGIN CERTIFICATE") {
+		t.Fatalf("safe copy: %+v", sc)
+	}
+	connect := func(user, pass string, tls bool) (*sql.DB, error) {
+		c := gomysql.NewConfig()
+		c.User, c.Passwd, c.Net, c.Addr, c.DBName = user, pass, "tcp", "127.0.0.1:"+strconv.Itoa(sc.Port), "shop"
+		c.Timeout = 5 * time.Second
+		if tls {
+			c.TLSConfig = "skip-verify"
+		}
+		db, err := sql.Open("mysql", c.FormatDSN())
+		if err != nil {
+			return nil, err
+		}
+		if err := db.PingContext(ctx); err != nil {
+			db.Close()
+			return nil, err
+		}
+		return db, nil
+	}
+	cdb, err := connect("dev_ana", pw, true)
+	if err != nil {
+		t.Fatal("connecting to the safe copy:", err)
+	}
+	var customer string
+	if err := cdb.QueryRowContext(ctx, "SELECT customer FROM orders WHERE id = 1400").Scan(&customer); err != nil || customer == "" || customer == "customer 1400" {
+		t.Fatalf("not masked: %q %v", customer, err)
+	}
+	if _, err := cdb.ExecContext(ctx, "UPDATE orders SET note = 'dev' WHERE id = 1400"); err != nil {
+		t.Errorf("the copy should be writable: %v", err)
+	}
+	cdb.Close()
+	if db, err := connect("dev_ana", pw, false); err == nil {
+		db.Close()
+		t.Error("the copy accepted a connection without TLS")
+	}
+	if db, err := connect("dev_ana", "wrong", true); err == nil {
+		db.Close()
+		t.Error("the copy accepted a wrong password")
+	}
+	// A new password (version 2) replaces the first.
+	pw2, v2, _ := client.NewCopyPasswordFor(string(e.flavor))
+	if !e.SetCopyPassword(ctx, env, protocol.CopyPassword{ID: "sc1", Version: 2, Verifier: v2}) {
+		t.Fatal("SetCopyPassword: not the engine's copy")
+	}
+	if db, err := connect("dev_ana", pw2, true); err != nil {
+		t.Fatal("new password:", err)
+	} else {
+		db.Close()
+	}
+	states := e.CopyStates(env)
+	if len(states) != 1 || states[0].PasswordVersion != 2 || states[0].Status != protocol.CopyReady {
+		t.Fatalf("states: %+v", states)
+	}
+	if !e.DropCopy(ctx, env, "sc1") || len(e.CopyStates(env)) != 0 {
+		t.Fatal("drop")
+	}
+	var n int
+	if err := adb.QueryRowContext(ctx, "SELECT COUNT(*) FROM shop.orders WHERE customer = 'customer 1400'").Scan(&n); err != nil || n != 1 {
+		t.Fatalf("production changed: %d %v", n, err)
 	}
 }

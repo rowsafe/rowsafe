@@ -1,5 +1,5 @@
 name: Rowsafe Mark
-description: Save a Mark (a named restore point) of your PostgreSQL before every deploy, so a bad migration can be rewound.
+description: Save a Mark (a named restore point) of your database before every deploy, so a bad migration can be rewound.
 author: Rowsafe
 branding:
   icon: bookmark
@@ -32,7 +32,8 @@ inputs:
   preview-sql:
     description: >-
       Migration SQL files to preview on a copy of the database before the Mark, as glob patterns
-      (e.g. prisma/migrations/**/migration.sql). A migration that fails on the copy stops the job.
+      (e.g. prisma/migrations/**/migration.sql; for MongoDB, .js files of plain mongosh calls).
+      A migration that fails on the copy stops the job.
       Needs a rowsafe CLI with `rowsafe preview`; skipped otherwise.
     required: false
     default: ""

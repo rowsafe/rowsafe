@@ -162,6 +162,9 @@ type EngineEnv struct {
 	// Control stops and starts the database server through the root helper
 	// (engine_inplace.go); nil outside the agent's run loop.
 	Control ServerControl
+	// Copies are the agent's safe copy helpers (copies_engine.go); nil
+	// outside the agent.
+	Copies *CopyTools
 }
 
 // RunLow runs a command at low CPU and IO priority (LowPriority).
@@ -260,6 +263,7 @@ func (a *Agent) engineEnv(name string) EngineEnv {
 	if a.engineControl != nil {
 		env.Control = a.engineControl // tests
 	}
+	env.Copies = a.copyTools()
 	return env
 }
 

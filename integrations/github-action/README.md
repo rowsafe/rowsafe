@@ -1,8 +1,8 @@
 # Rowsafe Mark: a restore point before every deploy
 
-Save a **Mark** of your PostgreSQL right before each deploy. If a migration drops the wrong column or a backfill goes wrong, you can [rewind](https://rowsafe.sh/docs/guides/restore) the database to the moment just before the deploy.
+Save a **Mark** of your database (PostgreSQL, MySQL, MariaDB, MongoDB or ClickHouse) right before each deploy. If a migration drops the wrong column or a backfill goes wrong, you can [rewind](https://rowsafe.sh/docs/guides/restore) the database to the moment just before the deploy.
 
-[Rowsafe](https://rowsafe.sh) runs backups to your own bucket, restore to any second (Rewind), a weekly restore test (Proof) and monitoring (Pulse) for the PostgreSQL you run on your own servers. This action is part of **Guard**, the safety net for changes made by CI and AI agents.
+[Rowsafe](https://rowsafe.sh) runs backups to your own bucket, restore to any second (Rewind), a weekly restore test (Proof) and monitoring (Pulse) for the databases you run on your own servers. This action is part of **Guard**, the safety net for changes made by CI and AI agents.
 
 ```yaml
 - uses: rowsafe/action@v1
@@ -76,7 +76,7 @@ rowsafe rewind compare app
 ## Security
 
 - **The CLI is verified before it runs.** It is downloaded from the [rowsafe/rowsafe release](https://github.com/rowsafe/rowsafe/releases), checked against the release's `SHA256SUMS`, and its [SLSA build provenance](https://github.com/rowsafe/rowsafe/blob/main/docs/verifying-releases.md) is verified with `gh attestation verify`: GitHub Actions built exactly this file from rowsafe/rowsafe with the release workflow at that version's tag. A cached copy is checked again on every run.
-- **Rowsafe never sees your data.** A Mark is a PostgreSQL restore point written by the Rowsafe agent on your server; no connection string or database password goes to the action. The preview runs on a copy on your server.
+- **Rowsafe never sees your data.** A Mark is a restore point written by the Rowsafe agent on your server; no connection string or database password goes to the action. The preview runs on a copy on your server.
 - **The API key stays a secret.** It's passed to the CLI in the environment and masked in logs. It can save Marks, so keep it in a secret, scoped to the deploy environment if you can.
 - Pull requests from forks don't get secrets, so run the action on pushes to your deploy branch (or in a protected environment), not on `pull_request` from forks.
 

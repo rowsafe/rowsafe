@@ -438,12 +438,17 @@ func copyDatabases(ctx context.Context, conn *pgx.Conn) ([]string, error) {
 // freeCopyPort picks a TCP port in the configured range that no copy uses
 // and nothing listens on: want (the control plane's choice) when it is.
 func (a *Agent) freeCopyPort(listen []string, want int) (int, error) {
-	used := a.copyState().usedPorts()
+	return freeCopyPortIn(a.cfg.Copies, a.copyTools().used(), listen, want)
+}
+
+// freeCopyPortIn picks a port in cfg's range that isn't in used and nothing
+// listens on (want first).
+func freeCopyPortIn(cfg CopiesConfig, used map[int]bool, listen []string, want int) (int, error) {
 	ports := []int{}
-	if want >= a.cfg.Copies.PortMin && want <= a.cfg.Copies.PortMax {
+	if want >= cfg.PortMin && want <= cfg.PortMax {
 		ports = append(ports, want)
 	}
-	for p := a.cfg.Copies.PortMin; p <= a.cfg.Copies.PortMax; p++ {
+	for p := cfg.PortMin; p <= cfg.PortMax; p++ {
 		ports = append(ports, p)
 	}
 	for _, p := range ports {
@@ -463,7 +468,7 @@ func (a *Agent) freeCopyPort(listen []string, want int) (int, error) {
 			return p, nil
 		}
 	}
-	return 0, fmt.Errorf("no free port for a copy in %d-%d (ROWSAFE_COPY_PORTS)", a.cfg.Copies.PortMin, a.cfg.Copies.PortMax)
+	return 0, fmt.Errorf("no free port for a copy in %d-%d (ROWSAFE_COPY_PORTS)", cfg.PortMin, cfg.PortMax)
 }
 
 // resolveListen checks a listen choice against the server's addresses:

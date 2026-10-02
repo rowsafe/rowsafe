@@ -55,7 +55,7 @@ type previewJSON struct {
 
 func previewCmd(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("preview", flag.ContinueOnError)
-	db := fs.String("db", "", "the PostgreSQL database the migration runs in (default: the one named like NAME, or the only one)")
+	db := fs.String("db", "", "the database the migration runs in, inside the server (default: the one named like NAME, or the only one)")
 	label := fs.String("label", "", "a name for the preview (default: the file name)")
 	format := fs.String("format", "text", "output: text, json or markdown")
 	asJSON := fs.Bool("json", false, "same as --format json")
@@ -83,7 +83,7 @@ func previewCmd(ctx context.Context, c *client.Client, args []string) error {
 	case 2:
 		name, file = pos[0], pos[1]
 	default:
-		return errors.New("usage: rowsafe preview [NAME] FILE.sql (or - to read the SQL from stdin)")
+		return errors.New("usage: rowsafe preview [NAME] FILE (.sql; for MongoDB a .js file of mongosh calls; - reads stdin)")
 	}
 	if file != "-" && *label == "" {
 		*label = filepath.Base(file)
@@ -361,7 +361,11 @@ func copiesCreateCmd(ctx context.Context, c *client.Client, args []string) error
 		}
 		req.Masking, req.NoMaskingConfirm = protocol.MaskingNone, name
 	}
-	password, verifier, err := client.NewCopyPassword()
+	d, err := c.Database(ctx, name)
+	if err != nil {
+		return apiErr(err)
+	}
+	password, verifier, err := client.NewCopyPasswordFor(d.Engine)
 	if err != nil {
 		return err
 	}
@@ -455,7 +459,11 @@ func copiesPasswordCmd(ctx context.Context, c *client.Client, args []string) err
 	if err != nil {
 		return err
 	}
-	password, verifier, err := client.NewCopyPassword()
+	d, err := c.Database(ctx, name)
+	if err != nil {
+		return apiErr(err)
+	}
+	password, verifier, err := client.NewCopyPasswordFor(d.Engine)
 	if err != nil {
 		return err
 	}

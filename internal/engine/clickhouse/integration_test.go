@@ -19,19 +19,24 @@ package clickhouse
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	rsclient "github.com/rowsafe/rowsafe/client"
 	"github.com/rowsafe/rowsafe/internal/agent"
 	"github.com/rowsafe/rowsafe/internal/objstore/fakes3"
 	"github.com/rowsafe/rowsafe/internal/objstore/s3gw"
@@ -301,6 +306,43 @@ func TestClickHouseEndToEnd(t *testing.T) {
 	t.Logf("drill: %+v", dr)
 	if left, _ := os.ReadDir(drillRoot(env)); len(left) != 0 {
 		t.Fatalf("drill left %d entries", len(left))
+	}
+
+	// Guard: a migration preview on a copy; production is untouched.
+	pv, err := run[protocol.PreviewResult](t, e, env, db, protocol.TaskPreviewMigration, protocol.PreviewParams{PreviewID: "p1", DB: "shop",
+		SQL: "ALTER TABLE orders ADD COLUMN status String DEFAULT 'new';\n" +
+			"ALTER TABLE orders DELETE WHERE id < 100;\n" +
+			"INSERT INTO prices SELECT number, 1.5, 1 FROM numbers(10);\n" +
+			"SELECT * FROM url('http://example.com/x.csv', CSV);\n" +
+			"DROP TABLE notes;\n" +
+			"ALTER TABLE orders DROP COLUMN nope;\n"})
+	if err != nil {
+		t.Fatal("preview:", err)
+	}
+	t.Logf("preview: %s", pv.Summary)
+	if pv.Verdict != protocol.PreviewFailed || pv.Error == nil || pv.Error.Statement != 6 {
+		t.Fatalf("preview: %+v %+v", pv, pv.Error)
+	}
+	if s := pv.Statements[1]; !s.Ran || len(s.Rewrites) != 1 || s.Rewrites[0].Name != "shop.orders" {
+		t.Errorf("mutation: %+v", s)
+	}
+	if s := pv.Statements[2]; s.Rows == nil || *s.Rows != 10 {
+		t.Errorf("insert: %+v", s)
+	}
+	if s := pv.Statements[3]; s.Ran {
+		t.Errorf("url() ran on the copy: %+v", s)
+	}
+	if s := pv.Statements[4]; len(s.Dropped) != 1 || s.Dropped[0].Name != "shop.notes" {
+		t.Errorf("drop: %+v", s)
+	}
+	if n, err := admin.scalar(ctx, "SELECT count() FROM system.columns WHERE database = 'shop' AND table = 'orders' AND name = 'status'", nil); err != nil || n != "0" {
+		t.Fatalf("the preview changed production: %v %s", err, n)
+	}
+	if left, _ := os.ReadDir(drillRoot(env)); len(left) != 0 {
+		t.Fatalf("preview left %d entries", len(left))
+	}
+	if !env.Config.Sidecar() {
+		safeCopyIntegration(t, e, env, db, admin)
 	}
 
 	// Rewind: a copy at the Mark (1200 orders).
@@ -601,5 +643,77 @@ func TestClickHouseEndToEnd(t *testing.T) {
 	t.Logf("broken backup, in %s: %q", time.Since(started).Round(time.Second), bad.Failures)
 	if left, _ := os.ReadDir(drillRoot(env)); len(left) != 0 {
 		t.Fatalf("drill left %d entries", len(left))
+	}
+}
+
+// safeCopyIntegration makes a masked safe copy, signs in with the password
+// made here (over HTTPS; the native port must speak TLS), sets a new one
+// and deletes it.
+func safeCopyIntegration(t *testing.T, e *Engine, env agent.EngineEnv, db protocol.DatabaseSpec, admin *client) {
+	t.Helper()
+	ctx := context.Background()
+	env.Config.Copies = agent.CopiesConfig{Dir: filepath.Join(env.Config.StateDir, "copies"), PortMin: 55440, PortMax: 55460}
+	env.Copies = agent.NewCopyTools(env.Config)
+	sr, err := run[protocol.CopySchemaResult](t, e, env, db, protocol.TaskCopySchema, nil)
+	if err != nil || !slices.ContainsFunc(sr.Databases, func(d protocol.SchemaDatabase) bool { return d.Name == "shop" && len(d.Tables) > 0 }) {
+		t.Fatalf("copy_schema: %+v %v", sr, err)
+	}
+	pw, verifier, _ := rsclient.NewCopyPasswordFor(protocol.EngineClickHouse)
+	sc, err := run[protocol.SafeCopyResult](t, e, env, db, protocol.TaskSafeCopy, protocol.SafeCopyParams{CopyID: "sc1",
+		Masking: protocol.MaskingPlan{Mode: protocol.MaskingRules},
+		Access:  protocol.CopyAccess{Listen: "*", AllowFrom: []string{"127.0.0.1"}, Role: "dev_ana", PasswordVerifier: verifier}})
+	if err != nil {
+		t.Fatal("safe copy:", err)
+	}
+	t.Logf("safe copy: %s", sc.Summary)
+	if sc.Masking.Columns == 0 {
+		t.Errorf("nothing masked: %+v", sc.Masking)
+	}
+	rec, _ := e.copyState(env).get("sc1")
+	st, err := scratchAt(rec.Dir).loadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	login := func(user, pass string) (string, error) {
+		u := &url.URL{Scheme: "https", Host: "127.0.0.1:" + strconv.Itoa(st.HTTPPort), Path: "/"}
+		c := newClient(u, Login{User: user, Password: pass})
+		c.http = &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+		return c.scalar(ctx, "SELECT any(email) FROM shop.orders WHERE email LIKE '%@example.com' OR email != ''", nil)
+	}
+	email, err := login("dev_ana", pw)
+	if err != nil {
+		t.Fatal("signing in to the safe copy:", err)
+	}
+	if prod, _ := admin.scalar(ctx, "SELECT count() FROM shop.orders WHERE email = "+quoteString(email), nil); prod != "0" {
+		t.Errorf("the copy has a real email: %s", email)
+	}
+	if _, err := login("dev_ana", "wrong"); err == nil {
+		t.Error("a wrong password signed in")
+	}
+	conn, err := tls.Dial("tcp", "127.0.0.1:"+strconv.Itoa(sc.Port), &tls.Config{InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatal("the native port doesn't speak TLS:", err)
+	}
+	conn.Close()
+	pw2, v2, _ := rsclient.NewCopyPasswordFor(protocol.EngineClickHouse)
+	if !e.SetCopyPassword(ctx, env, protocol.CopyPassword{ID: "sc1", Version: 2, Verifier: v2}) {
+		t.Fatal("SetCopyPassword: not the engine's")
+	}
+	ok := false
+	for range 20 {
+		if _, err := login("dev_ana", pw2); err == nil {
+			ok = true
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if !ok {
+		t.Fatal("the new password doesn't work")
+	}
+	if states := e.CopyStates(env); len(states) != 1 || states[0].PasswordVersion != 2 {
+		t.Fatalf("states: %+v", states)
+	}
+	if !e.DropCopy(ctx, env, "sc1") || len(e.CopyStates(env)) != 0 {
+		t.Fatal("drop")
 	}
 }

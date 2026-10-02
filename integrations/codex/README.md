@@ -1,12 +1,12 @@
 # Rowsafe Guard for OpenAI Codex
 
-The PostgreSQL safety net for AI agents, in Codex: before a migration or destructive SQL, Codex checks that the database can be recovered, sets a named Rowsafe restore point (a Mark) and tells you its name. If something breaks, you Rewind to that Mark from the Rowsafe dashboard. Codex never restores or restarts anything itself.
+The database safety net for AI agents, in Codex: before a migration or destructive SQL, Codex checks that the database can be recovered, sets a named Rowsafe restore point (a Mark) and tells you its name. If something breaks, you Rewind to that Mark from the Rowsafe dashboard. Codex never restores or restarts anything itself.
 
 This directory is a Codex plugin with three parts:
 
 - **MCP server** `rowsafe mcp --allow-restore-points` (`.mcp.json`): `safety_check`, `create_restore_point`, `list_restore_points`, and read-only fleet tools such as `database_health` and `fleet_health`.
 - **Skill** `rowsafe-safety` (`skills/`): the workflow. Check, set a Mark, tell you its name, proceed; if something goes wrong, stop and hand recovery to you.
-- **Hook** `rowsafe guard` (`hooks/hooks.json`): a `PreToolUse` hook on shell commands. It sets a Mark right before commands like `prisma migrate deploy`, `rails db:migrate`, `alembic upgrade` or `psql -c "DROP TABLE ..."`, whether or not the model remembered to.
+- **Hook** `rowsafe guard` (`hooks/hooks.json`): a `PreToolUse` hook on shell commands. It sets a Mark right before commands like `prisma migrate deploy`, `rails db:migrate`, `alembic upgrade`, `psql -c "DROP TABLE ..."`, `mysql -e "TRUNCATE ..."`, `mongosh --eval "db.orders.drop()"` or `clickhouse-client -q "ALTER TABLE ... DELETE ..."`, whether or not the model remembered to.
 
 It works in the Codex CLI and the IDE extension, which share `~/.codex/config.toml`. In Codex cloud, see [below](#codex-cloud).
 

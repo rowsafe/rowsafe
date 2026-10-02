@@ -222,7 +222,7 @@ func dropPrefixed(ctx context.Context, c *mongo.Client, prefixes ...string) (int
 			if !slices.ContainsFunc(prefixes, func(p string) bool { return strings.HasPrefix(ci.Name, p) }) {
 				continue
 			}
-			freed += collSize(ctx, c, db, ci.Name)
+			freed += collDiskSize(ctx, c, db, ci.Name)
 			if err := c.Database(db).Collection(ci.Name).Drop(ctx); err != nil {
 				return freed, fmt.Errorf("deleting %s.%s: %w", db, ci.Name, err)
 			}
@@ -239,7 +239,7 @@ func prefixedSize(ctx context.Context, c *mongo.Client, prefix string) (n int64,
 		found := false
 		for _, ci := range colls {
 			if strings.HasPrefix(ci.Name, prefix) {
-				n += collSize(ctx, c, db, ci.Name)
+				n += collDiskSize(ctx, c, db, ci.Name)
 				count++
 				found = true
 			}
@@ -251,7 +251,8 @@ func prefixedSize(ctx context.Context, c *mongo.Client, prefix string) (n int64,
 	return n, count, dbsWith
 }
 
-func collSize(ctx context.Context, c *mongo.Client, db, coll string) int64 {
+// collDiskSize is a collection's size on disk with its indexes (0 when unknown).
+func collDiskSize(ctx context.Context, c *mongo.Client, db, coll string) int64 {
 	var st struct {
 		Size    int64 `bson:"storageSize"`
 		Indexes int64 `bson:"totalIndexSize"`

@@ -40,9 +40,17 @@ func worse(a, b string) string {
 }
 
 // Assess fills in each statement's Risk and Impact, the findings, the
-// verdict and the summary from what the migration did on the copy. texts
-// are the full statements, in the same order as res.Statements.
+// verdict and the summary from what a PostgreSQL migration did on the
+// copy. texts are the full statements, in the same order as
+// res.Statements.
 func Assess(res *protocol.PreviewResult, texts []string) {
+	AssessEngine(protocol.EnginePostgreSQL, res, texts, nil)
+}
+
+// AssessEngine is Assess for the engine's dialect, with extra findings
+// the agent made itself (ClickHouse mutations still running, ...).
+func AssessEngine(engine string, res *protocol.PreviewResult, texts []string, extra []protocol.PreviewFinding) {
+	d := dialectFor(engine)
 	res.Findings = nil
 	verdict := protocol.PreviewSafe
 	lockTimeoutSet := false
@@ -97,8 +105,8 @@ func Assess(res *protocol.PreviewResult, texts []string) {
 				sev = protocol.PreviewDangerous
 			}
 			add(sev, "table_rewrite", fmt.Sprintf("%s rewrites %s (%s)", command, r.Name, humanBytes(r.SizeBytes)),
-				fmt.Sprintf("The whole table is copied to new files%s, under a lock that blocks reads and writes.", rowsNote(r.Rows)),
-				rewriteSuggestion(text))
+				fmt.Sprintf(d.rewriteDetail, rowsNote(r.Rows)),
+				d.rewriteSuggestion(text))
 		}
 		for _, r := range s.Dropped {
 			if r.SizeBytes <= 16384 && r.Rows <= 0 {
@@ -147,10 +155,10 @@ func Assess(res *protocol.PreviewResult, texts []string) {
 			case block.HeldMs >= dangerousLockMs:
 				add(protocol.PreviewDangerous, "long_lock", fmt.Sprintf("%s is blocked for %s", block.Relation, held),
 					fmt.Sprintf("While %s holds %s, production's %s on %s wait: requests pile up and time out.", command, block.Mode, block.Blocks, block.Relation),
-					lockSuggestion(res.Mode, text))
+					d.lockSuggestion(res.Mode, text))
 			case block.HeldMs >= carefulLockMs:
 				add(protocol.PreviewCareful, "lock", fmt.Sprintf("%s is blocked for %s", block.Relation, held),
-					fmt.Sprintf("Production's %s on %s wait while %s runs.", block.Blocks, block.Relation, command), lockSuggestion(res.Mode, text))
+					fmt.Sprintf("Production's %s on %s wait while %s runs.", block.Blocks, block.Relation, command), d.lockSuggestion(res.Mode, text))
 			}
 			if !lockTimeoutSet && !noTimeoutReported && block.Mode == "AccessExclusiveLock" {
 				noTimeoutReported = true
@@ -177,7 +185,13 @@ func Assess(res *protocol.PreviewResult, texts []string) {
 		}
 
 		// Recognised from the statement's text.
-		for _, r := range staticFindings(text, len(s.Locks) > 0) {
+		touched := len(s.Locks) > 0
+		if d.engine != protocol.EnginePostgreSQL {
+			// No lock sampling: a statement touched existing data when it
+			// rebuilt, dropped or changed rows of an existing table.
+			touched = touched || len(s.Rewrites) > 0 || len(s.Dropped) > 0 || (s.Rows != nil && *s.Rows > 0) || biggestTable(s) > 0
+		}
+		for _, r := range d.staticFindings(text, touched) {
 			if r.id == "create_index_blocks_writes" && biggestTable(s) < bigTableBytes && (block == nil || block.HeldMs < carefulLockMs) {
 				continue // a small table: the build is over in a moment
 			}
@@ -198,6 +212,14 @@ func Assess(res *protocol.PreviewResult, texts []string) {
 		if rank(s.Risk) > rank(worst.risk) && s.Impact != "" {
 			worst = impact{n: s.N, risk: s.Risk, text: strings.TrimSuffix(s.Impact, ".")}
 		}
+	}
+	for _, f := range extra {
+		res.Findings = append(res.Findings, f)
+		verdict = worse(verdict, f.Severity)
+	}
+	if f := d.migrationFinding(res, texts); f != nil {
+		res.Findings = append(res.Findings, *f)
+		verdict = worse(verdict, f.Severity)
 	}
 	slices.SortStableFunc(res.Findings, func(a, b protocol.PreviewFinding) int {
 		if c := cmp.Compare(rank(b.Severity), rank(a.Severity)); c != 0 {
@@ -260,11 +282,11 @@ func summary(res *protocol.PreviewResult, worstN int, worstImpact string) string
 	return msg
 }
 
-func lockSuggestion(mode, text string) string {
-	if rewriteLikely(text) {
-		return rewriteSuggestion(text)
+func (d dialect) lockSuggestion(mode, text string) string {
+	if d.engine == protocol.EnginePostgreSQL && rewriteLikely(text) {
+		return d.rewriteSuggestion(text)
 	}
-	for _, r := range staticFindings(text, true) {
+	for _, r := range d.staticFindings(text, true) {
 		if r.suggestion != "" {
 			return r.suggestion
 		}

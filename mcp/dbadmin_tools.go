@@ -26,7 +26,7 @@ type ServerDatabaseRow struct {
 	Name       string   `json:"name"`
 	Owner      string   `json:"owner"`
 	SizeBytes  int64    `json:"size_bytes"`
-	System     bool     `json:"system,omitempty" jsonschema:"one of PostgreSQL's own databases"`
+	System     bool     `json:"system,omitempty" jsonschema:"one of the server's own databases (postgres, mysql, admin, system, ...)"`
 	Extensions []string `json:"extensions,omitempty"`
 }
 

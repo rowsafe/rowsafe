@@ -250,7 +250,13 @@ func TestSuggest(t *testing.T) {
 func TestClassAndMaxLen(t *testing.T) {
 	for typ, want := range map[string]string{"character varying(255)": ClassText, "public.citext": ClassText, "jsonb": ClassJSON,
 		"bigint": ClassInteger, "numeric(12,2)": ClassNumber, "timestamp(3) with time zone": ClassDate, "uuid": ClassOther,
-		"text[]": ClassOther, "cidr": ClassInet} {
+		"text[]": ClassOther, "cidr": ClassInet,
+		// MySQL and MariaDB
+		"varchar(100)": ClassText, "longtext": ClassText, "bigint unsigned": ClassInteger, "int(11) unsigned": ClassInteger,
+		"tinyint(1)": ClassOther, "decimal(10,2)": ClassNumber, "datetime(6)": ClassDate, "json": ClassJSON,
+		// ClickHouse
+		"String": ClassText, "Nullable(String)": ClassText, "LowCardinality(Nullable(String))": ClassText, "UInt64": ClassInteger,
+		"Float64": ClassNumber, "DateTime64(3, 'UTC')": ClassDate, "IPv4": ClassInet, "UUID": ClassOther, "Array(String)": ClassOther} {
 		if got := Class(typ); got != want {
 			t.Errorf("Class(%s) = %s, want %s", typ, got, want)
 		}
