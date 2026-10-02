@@ -204,6 +204,7 @@ var EngineCapabilities = map[string]EngineFeatures{
 		Backups: true, PointInTime: true, Proof: true,
 		RewindCopy: true, RewindRows: true, Marks: true,
 		Monitoring: true, Fixes: true,
+		DBAdmin: true,
 	},
 	// ClickHouse (internal/engine/clickhouse; clickhouse.go): BACKUP
 	// through the agent's encrypting gateway, Proof, Rewind copies and
