@@ -49,9 +49,13 @@ func (e *Engine) drill(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 	if err := ensureSpace(filepath.Dir(root), int64(float64(b.DataBytes)*drillSpaceFactor)+512<<20); err != nil {
 		return fail(res, err)
 	}
-	s, err := newScratch(root, taskID, b.Macros)
+	s, err := newScratch(root, taskID, b.Macros, b.needsKeeper())
 	if err != nil {
 		return nil, err
+	}
+	if b.needsKeeper() {
+		tl.Printf("ClickHouse Keeper runs for this restore test because the backup has replicated tables; " +
+			"its internal port listens on all interfaces while the test runs")
 	}
 	defer func() {
 		if _, err := s.remove(); err != nil {

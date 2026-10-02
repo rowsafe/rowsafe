@@ -96,10 +96,18 @@ func (e *env) checkBucket(want map[string][]byte) {
 	}
 	for _, k := range keys {
 		raw, _ := e.bucket.Object(k)
-		rel := strings.TrimPrefix(k, "rowsafe/db_1/")
+		stored := strings.TrimPrefix(k, "rowsafe/db_1/")
+		// Names in the bucket: the folder in clear, the rest encrypted.
+		rel, ok := e.gw.plainKey(stored[:strings.LastIndexByte(stored, '/')+1], stored)
+		if !ok {
+			e.t.Fatalf("%s isn't an encrypted name", k)
+		}
+		if e.gw.stored(rel) != stored {
+			e.t.Fatalf("%s: the name doesn't map back (%s)", k, e.gw.stored(rel))
+		}
 		plain, ok := want[rel]
 		if !ok {
-			e.t.Fatalf("unexpected object %s", k)
+			e.t.Fatalf("unexpected object %s (%s)", k, rel)
 		}
 		if bytes.Contains(raw, marker) {
 			e.t.Fatalf("%s holds plaintext", k)
@@ -443,7 +451,7 @@ func TestChunkedPayloads(t *testing.T) {
 	b, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	expectError(t, resp, b, 403, "SignatureDoesNotMatch")
-	if _, ok := e.bucket.Object("rowsafe/db_1/backup/tampered"); ok {
+	if _, ok := e.bucket.Object("rowsafe/db_1/" + e.gw.stored("backup/tampered")); ok {
 		t.Fatal("a tampered upload was stored")
 	}
 }

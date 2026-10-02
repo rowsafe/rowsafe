@@ -32,7 +32,7 @@ func (g *Gateway) seal(ctx context.Context, key string, src io.Reader, received 
 	}
 	done := make(chan result, 1)
 	go func() {
-		n, err := g.cfg.Store.Put(ctx, key, pr)
+		n, err := g.cfg.Store.Put(ctx, g.stored(key), pr)
 		// Unblocks the writer when the storage gave up early.
 		pr.CloseWithError(cmpErr(err, errors.New("the storage stopped reading")))
 		done <- result{n, err}
@@ -136,7 +136,7 @@ func objectETag(key string, size int64, mtime time.Time) string {
 }
 
 func (g *Gateway) headObject(q *request) error {
-	o, err := g.cfg.Store.Head(q.r.Context(), q.key)
+	o, err := g.cfg.Store.Head(q.r.Context(), g.stored(q.key))
 	if err != nil {
 		return err
 	}
@@ -198,7 +198,7 @@ func (g *Gateway) header(ctx context.Context, key string) (headEntry, error) {
 	if ok {
 		return e, nil
 	}
-	rc, size, err := g.cfg.Store.GetRange(ctx, key, 0, int64(objstore.SealHeaderSize))
+	rc, size, err := g.cfg.Store.GetRange(ctx, g.stored(key), 0, int64(objstore.SealHeaderSize))
 	if err != nil {
 		return headEntry{}, err
 	}
@@ -229,7 +229,7 @@ func (g *Gateway) getObject(q *request) error {
 	)
 	if !ranged {
 		var size int64
-		rc, size, err = g.cfg.Store.GetRange(ctx, q.key, 0, -1)
+		rc, size, err = g.cfg.Store.GetRange(ctx, g.stored(q.key), 0, -1)
 		if err != nil {
 			return err
 		}
@@ -258,7 +258,7 @@ func (g *Gateway) getObject(q *request) error {
 				return err
 			}
 			s, e, sg, sk := objstore.SealedRange(head.size, first, n)
-			rc, _, err = g.cfg.Store.GetRange(ctx, q.key, s, e-s)
+			rc, _, err = g.cfg.Store.GetRange(ctx, g.stored(q.key), s, e-s)
 			if err != nil {
 				return err
 			}
@@ -273,14 +273,14 @@ func (g *Gateway) getObject(q *request) error {
 				want = int64(objstore.SealHeaderSize) + ((first+n-1)/objstore.SealSegmentSize+1)*(objstore.SealSegmentSize+16)
 			}
 			var size int64
-			rc, size, err = g.cfg.Store.GetRange(ctx, q.key, 0, want)
+			rc, size, err = g.cfg.Store.GetRange(ctx, g.stored(q.key), 0, want)
 			if err != nil {
 				return err
 			}
 			defer rc.Close()
 			h := make([]byte, objstore.SealHeaderSize)
 			if _, err := io.ReadFull(rc, h); err != nil {
-				return fmt.Errorf("%s is not a Rowsafe encrypted file: %w", q.key, err)
+				return damaged(q.key, fmt.Errorf("%s is not a Rowsafe encrypted file: %w", q.key, err))
 			}
 			g.storedRead.Add(int64(len(h)))
 			head = headEntry{header: h, size: size}
@@ -302,12 +302,20 @@ func (g *Gateway) getObject(q *request) error {
 		src, err = objstore.OpenAt(counted, g.cfg.Passphrase, head.header, head.size, seg)
 	}
 	if err != nil {
-		return fmt.Errorf("%s: %w", q.key, err)
+		return damaged(q.key, err)
 	}
 	if skip > 0 {
 		if _, err := io.CopyN(io.Discard, src, skip); err != nil {
-			return fmt.Errorf("decrypting %s: %w", q.key, err)
+			return damaged(q.key, err)
 		}
+	}
+	// The start is decrypted before answering, so a file that doesn't open
+	// fails with an answer ClickHouse doesn't retry (damaged). Past it, a
+	// failure cuts the connection; ClickHouse reads again from there and
+	// gets that answer.
+	pre := make([]byte, min(n, preDecrypt))
+	if _, err := io.ReadFull(src, pre); err != nil {
+		return damaged(q.key, err)
 	}
 	h := q.w.Header()
 	h.Set("Content-Length", strconv.FormatInt(n, 10))
@@ -319,8 +327,13 @@ func (g *Gateway) getObject(q *request) error {
 		status = http.StatusPartialContent
 	}
 	q.w.WriteHeader(status)
-	sent, err := io.CopyN(q.w, src, n)
-	g.bytesRead.Add(sent)
+	sent, err := q.w.Write(pre)
+	if err == nil {
+		var more int64
+		more, err = io.CopyN(q.w, src, n-int64(len(pre)))
+		sent += int(more)
+	}
+	g.bytesRead.Add(int64(sent))
 	g.storedRead.Add(counted.n)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -334,6 +347,20 @@ func (g *Gateway) getObject(q *request) error {
 		g.rangedReads.Add(1)
 	}
 	return nil
+}
+
+// preDecrypt is how much of an answer is decrypted before it starts.
+const preDecrypt = 4 << 20
+
+// damaged turns a decryption failure into an answer ClickHouse doesn't
+// retry (403: retrying can't help), in plain words it shows in its error;
+// other errors (the storage, the network) stay retryable.
+func damaged(key string, err error) error {
+	if errors.Is(err, objstore.ErrBadPassphrase) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		strings.Contains(err.Error(), "not a Rowsafe encrypted file") {
+		return errf(http.StatusForbidden, "AccessDenied", "the backup file %s can't be decrypted: wrong encryption passphrase, or the file was altered", key)
+	}
+	return fmt.Errorf("decrypting %s: %w", key, err)
 }
 
 // clampRange fits a parsed range to an object of plain bytes.
@@ -364,7 +391,7 @@ func (c *countReader) Read(p []byte) (int, error) {
 
 func (g *Gateway) deleteObject(q *request) error {
 	g.heads.forget(q.key)
-	if err := g.cfg.Store.Delete(q.r.Context(), q.key); err != nil {
+	if err := g.cfg.Store.Delete(q.r.Context(), g.stored(q.key)); err != nil {
 		return err
 	}
 	g.deleted.Add(1)
@@ -430,7 +457,7 @@ func (g *Gateway) deleteObjects(q *request) error {
 		go func() {
 			defer func() { <-sem; wg.Done() }()
 			g.heads.forget(key)
-			err := g.cfg.Store.Delete(q.r.Context(), key)
+			err := g.cfg.Store.Delete(q.r.Context(), g.stored(key))
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -482,7 +509,7 @@ func (g *Gateway) copyObject(q *request) error {
 		return err
 	}
 	ctx := q.r.Context()
-	rc, size, err := g.cfg.Store.GetRange(ctx, key, 0, -1)
+	rc, size, err := g.cfg.Store.GetRange(ctx, g.stored(key), 0, -1)
 	if err != nil {
 		return err
 	}
@@ -492,7 +519,7 @@ func (g *Gateway) copyObject(q *request) error {
 		return fmt.Errorf("%s: %w", key, err)
 	}
 	g.heads.forget(q.key)
-	stored, err := g.cfg.Store.Put(ctx, q.key, rc)
+	stored, err := g.cfg.Store.Put(ctx, g.stored(q.key), rc)
 	g.heads.forget(q.key)
 	if err != nil {
 		return err
@@ -567,30 +594,45 @@ func (g *Gateway) list(q *request, query url.Values) error {
 		// Resuming after a common prefix: skip all of it.
 		after += "\xff"
 	}
-	// What to list in the bucket: the prefix itself when it is inside
-	// the gateway's prefixes, else those of them it covers.
+	// What to list in the bucket: the folder (see names.go) the prefix is
+	// in, when it is inside the gateway's prefixes, else the folders of
+	// those it covers. Names are decrypted, then filtered, sorted and
+	// paginated as plaintext keys.
 	var roots []string
 	if g.allowed(prefix) {
-		roots = []string{prefix}
+		roots = []string{g.folderOf(prefix)}
 	} else {
 		for _, p := range g.cfg.Prefixes {
 			if strings.HasPrefix(p, prefix) {
-				roots = append(roots, p)
+				roots = append(roots, p[:strings.LastIndexByte(p, '/')+1])
 			}
 		}
 		if len(roots) == 0 {
 			return accessDenied("the prefix %q is outside the folders this gateway serves", prefix)
 		}
 	}
-	var objs []objstore.Object
+	type entry struct {
+		key string // ClickHouse's
+		obj objstore.Object
+	}
+	var objs []entry
+	listed := map[string]bool{}
 	for _, root := range roots {
+		if listed[root] {
+			continue
+		}
+		listed[root] = true
 		o, err := g.cfg.Store.List(q.r.Context(), root)
 		if err != nil {
 			return err
 		}
-		objs = append(objs, o...)
+		for _, ob := range o {
+			if k, ok := g.plainKey(root, ob.Key); ok && g.folderOf(k) == root {
+				objs = append(objs, entry{k, ob})
+			}
+		}
 	}
-	sort.Slice(objs, func(i, j int) bool { return objs[i].Key < objs[j].Key })
+	sort.Slice(objs, func(i, j int) bool { return objs[i].key < objs[j].key })
 	enc := func(s string) string { return s }
 	if query.Get("encoding-type") == "url" {
 		enc = func(s string) string { return strings.ReplaceAll(url.QueryEscape(s), "%2F", "/") }
@@ -599,14 +641,15 @@ func (g *Gateway) list(q *request, query url.Values) error {
 	seen := map[string]bool{}
 	count := 0
 	last := ""
-	for i, o := range objs {
-		if (i > 0 && o.Key == objs[i-1].Key) || !strings.HasPrefix(o.Key, prefix) || o.Key <= after || !g.allowed(o.Key) {
+	for i, e := range objs {
+		key, o := e.key, e.obj
+		if (i > 0 && key == objs[i-1].key) || !strings.HasPrefix(key, prefix) || key <= after || !g.allowed(key) {
 			continue
 		}
-		entry := o.Key
+		entry := key
 		if delim != "" {
-			if j := strings.Index(o.Key[len(prefix):], delim); j >= 0 {
-				entry = o.Key[:len(prefix)+j+len(delim)]
+			if j := strings.Index(key[len(prefix):], delim); j >= 0 {
+				entry = key[:len(prefix)+j+len(delim)]
 				if seen[entry] || entry <= after {
 					continue
 				}
@@ -618,7 +661,7 @@ func (g *Gateway) list(q *request, query url.Values) error {
 		}
 		count++
 		last = entry
-		if entry != o.Key {
+		if entry != key {
 			seen[entry] = true
 			res.CommonPrefixes = append(res.CommonPrefixes, commonPrefix{Prefix: enc(entry)})
 			// Skip the rest of this common prefix.
@@ -630,8 +673,8 @@ func (g *Gateway) list(q *request, query url.Values) error {
 			g.log.Warn("backup gateway: an object in the backup folder is not a Rowsafe encrypted file", "key", o.Key, "size", o.Size)
 			continue
 		}
-		res.Contents = append(res.Contents, listContents{Key: enc(o.Key), LastModified: o.LastModified.UTC().Format("2006-01-02T15:04:05.000Z"),
-			ETag: objectETag(o.Key, o.Size, o.LastModified), Size: plain, StorageClass: "STANDARD"})
+		res.Contents = append(res.Contents, listContents{Key: enc(key), LastModified: o.LastModified.UTC().Format("2006-01-02T15:04:05.000Z"),
+			ETag: objectETag(key, o.Size, o.LastModified), Size: plain, StorageClass: "STANDARD"})
 	}
 	if v2 {
 		res.KeyCount = &count

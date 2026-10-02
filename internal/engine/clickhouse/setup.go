@@ -127,7 +127,8 @@ func UsersXML(env agent.EngineEnv, port int) (string, error) {
 	sum := sha256.Sum256([]byte(pw))
 	return fmt.Sprintf(`<!-- Rowsafe's ClickHouse user (written by the Rowsafe installer). It signs in from this server only.
      SELECT, BACKUP: back up every database and compare tables with a copy; INSERT: bring rows back when you ask;
-     KILL QUERY, ALTER UPDATE, ALTER DELETE: stop a query or cancel a stuck change when you ask. -->
+     KILL QUERY, ALTER UPDATE, ALTER DELETE: stop a query or cancel a stuck change when you ask;
+     S3: write backups to the agent's encrypting gateway on this server. -->
 <clickhouse>
   <users>
     <%[1]s>

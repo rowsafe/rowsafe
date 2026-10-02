@@ -67,6 +67,16 @@ func masterKey(passphrase string) ([]byte, error) {
 	return k, nil
 }
 
+// DeriveKey is a 32-byte key for purpose (an HKDF info string of its own)
+// derived from the passphrase's master key, e.g. to encrypt object names.
+func DeriveKey(passphrase, purpose string) ([]byte, error) {
+	mk, err := masterKey(passphrase)
+	if err != nil {
+		return nil, err
+	}
+	return hkdf.Key(sha256.New, mk, nil, purpose, 32)
+}
+
 func segmentAEAD(passphrase string, salt []byte) (cipher.AEAD, error) {
 	mk, err := masterKey(passphrase)
 	if err != nil {

@@ -249,7 +249,7 @@ func (u *upload) drain() {
 	)
 	go func() {
 		defer close(putDone)
-		stored, putErr = u.g.cfg.Store.Put(u.ctx, u.key, pr)
+		stored, putErr = u.g.cfg.Store.Put(u.ctx, u.g.stored(u.key), pr)
 		pr.CloseWithError(cmpErr(putErr, errors.New("the storage stopped reading")))
 	}()
 	u.g.heads.forget(u.key)

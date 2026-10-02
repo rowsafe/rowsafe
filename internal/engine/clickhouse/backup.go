@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -190,6 +191,15 @@ func plainOpError(what, msg string) string {
 		return s + " (ClickHouse couldn't reach the agent's backup gateway)"
 	case strings.Contains(msg, "remote_url_allow_hosts"):
 		return s + " (ClickHouse's remote_url_allow_hosts setting doesn't allow the agent's backup gateway)"
+	case what == "restore" && damagedRE.MatchString(msg):
+		m := damagedRE.FindStringSubmatch(msg)
+		file := m[1]
+		if i := strings.Index(file, "/"); i >= 0 && strings.HasPrefix(file, backupPrefix) {
+			if j := strings.Index(file[i+1:], "/"); j >= 0 {
+				file = file[i+1+j+1:] // without backup/<label>/
+			}
+		}
+		return "the backup file " + file + " can't be decrypted: wrong encryption passphrase, or the file was altered"
 	case what == "restore" && (strings.Contains(msg, "Malformed message") || strings.Contains(msg, "Unexpected EOF") ||
 		strings.Contains(msg, "CHECKSUM_DOESNT_MATCH") || strings.Contains(msg, "Checksum doesn't match") ||
 		strings.Contains(msg, "CORRUPTED_DATA") || strings.Contains(msg, "CANNOT_READ_ALL_DATA") ||
@@ -198,6 +208,9 @@ func plainOpError(what, msg string) string {
 	}
 	return s
 }
+
+// damagedRE finds the gateway's answer for a file that doesn't decrypt.
+var damagedRE = regexp.MustCompile(`the backup file (\S+) can\S*t be decrypted`)
 
 // backupStatement is BACKUP DATABASE a, DATABASE b TO S3(...) SETTINGS ...
 func backupStatement(dbs []string, to, base, id string) string {
@@ -276,7 +289,7 @@ func (e *Engine) takeBackup(ctx context.Context, env agent.EngineEnv, db protoco
 		return nil, err
 	}
 	if in.VersionNum < minVersion {
-		return nil, fmt.Errorf("this server runs ClickHouse %s: Rowsafe's backups need ClickHouse 23.8 or newer", in.Version)
+		return nil, fmt.Errorf("this server runs ClickHouse %s: Rowsafe's backups need ClickHouse 24.8 or newer", in.Version)
 	}
 	if len(in.Databases) == 0 {
 		return nil, errors.New("ClickHouse has no databases of its own to back up yet")
@@ -359,7 +372,7 @@ func (e *Engine) takeBackup(ctx context.Context, env agent.EngineEnv, db protoco
 	}
 	stopped := time.Now().UTC()
 	doc := &backupDoc{Label: label, Type: typ, Mark: mark, ID: id, StartedAt: started, StoppedAt: stopped,
-		DataBytes: in.TotalBytes, Version: in.Version, Databases: in.Databases, Macros: in.Macros}
+		DataBytes: in.TotalBytes, Version: in.Version, Databases: in.Databases, Macros: in.Macros, Replicated: in.ReplicatedDB}
 	if base != nil {
 		doc.Base = base.Label
 	}

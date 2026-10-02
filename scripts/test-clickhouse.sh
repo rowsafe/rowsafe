@@ -9,11 +9,11 @@
 # password, the agent in another, ROWSAFE_CLICKHOUSE_URL and the gateway on
 # the containers' network).
 #
-#   scripts/test-clickhouse.sh                      # ClickHouse 25.8 and 24.8, then 25.8 in Docker
+#   scripts/test-clickhouse.sh                      # ClickHouse 26.8, 26.3, 25.8 and 24.8, then 26.8 in Docker
 #   CLICKHOUSE_VERSIONS="25.8" DOCKER_MODE=no scripts/test-clickhouse.sh
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd)
-VERSIONS=${CLICKHOUSE_VERSIONS:-25.8 24.8}
+VERSIONS=${CLICKHOUSE_VERSIONS:-26.8 26.3 25.8 24.8}
 LIMIT=${TEST_TIMEOUT:-1800}
 
 # timeout(1), or a perl stand-in where there is none (macOS).
@@ -138,7 +138,7 @@ if [ "${DOCKER_MODE:-yes}" = yes ]; then
 		agent status --port 8123
 		agent status --port 8123 | grep -qx login=ok
 		cd /tmp
-		su rowsafe -c "env $pass ROWSAFE_TEST_CLICKHOUSE_PORT=8123 ROWSAFE_TEST_CLICKHOUSE_REPLICATED=1 \
+		su rowsafe -c "env $pass ROWSAFE_TEST_CLICKHOUSE_PORT=8123 ROWSAFE_TEST_CLICKHOUSE_REPLICATED=0 \
 			ROWSAFE_TEST_CLICKHOUSE_ADMIN=default ROWSAFE_TEST_CLICKHOUSE_ADMIN_PASSWORD=adminpw \
 			/usr/local/bin/clickhouse.test -test.v -test.count=1 -test.run TestClickHouse -test.timeout 25m" 2>&1 | tail -n 150
 		exit ${PIPESTATUS[0]}

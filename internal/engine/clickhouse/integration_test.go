@@ -33,6 +33,7 @@ import (
 
 	"github.com/rowsafe/rowsafe/internal/agent"
 	"github.com/rowsafe/rowsafe/internal/objstore/fakes3"
+	"github.com/rowsafe/rowsafe/internal/objstore/s3gw"
 	"github.com/rowsafe/rowsafe/internal/pgbackrest"
 	"github.com/rowsafe/rowsafe/protocol"
 )
@@ -517,11 +518,14 @@ func TestClickHouseEndToEnd(t *testing.T) {
 			t.Fatalf("backup %s missing", kept)
 		}
 	}
-	// Nothing readable in the bucket.
+	// Nothing readable in the bucket, contents or names.
 	for _, k := range srv.Keys() {
 		b, _ := srv.Object(k)
 		if bytes.Contains(b, []byte("example.com")) || bytes.Contains(b, []byte("CREATE TABLE")) {
 			t.Fatalf("%s holds plaintext", k)
+		}
+		if strings.Contains(k, "shop") || strings.Contains(k, "orders") || strings.Contains(k, "/data/") || strings.Contains(k, "/metadata/") {
+			t.Fatalf("a name in the bucket says what: %s", k)
 		}
 	}
 	// Discovery sees the server.
@@ -533,8 +537,11 @@ func TestClickHouseEndToEnd(t *testing.T) {
 
 	// A broken backup fails Proof, plainly.
 	var victimKey string
+	folder := "rowsafe/" + db.Stanza + "/"
 	for _, k := range srv.Keys() {
-		if strings.Contains(k, "/backup/"+b4.Label+"/") && strings.HasSuffix(k, "/data.bin") && strings.Contains(k, "/orders/") {
+		rel := strings.TrimPrefix(k, folder)
+		plain, err := s3gw.PlainName(env.Repo.CipherPass, backupDir(b4.Label), rel)
+		if err == nil && strings.HasSuffix(plain, "/data.bin") && strings.Contains(plain, "/orders/") {
 			victimKey = k
 		}
 	}
@@ -543,11 +550,15 @@ func TestClickHouseEndToEnd(t *testing.T) {
 	}
 	obj, _ := srv.Object(victimKey)
 	obj[len(obj)/2] ^= 0xff
+	started = time.Now()
 	bad, err := run[protocol.DrillResult](t, e, env, db, protocol.TaskDrill, nil)
 	if err == nil || bad == nil || bad.Passed || len(bad.Failures) == 0 {
 		t.Fatalf("a broken backup passed Proof: %+v %v", bad, err)
 	}
-	t.Logf("broken backup: %q", bad.Failures)
+	if !strings.Contains(bad.Failures[0], "/orders/") || !strings.Contains(bad.Failures[0], "can't be decrypted") || time.Since(started) > time.Minute {
+		t.Fatalf("a broken backup failed Proof unclearly or slowly (%s): %q", time.Since(started).Round(time.Second), bad.Failures)
+	}
+	t.Logf("broken backup, in %s: %q", time.Since(started).Round(time.Second), bad.Failures)
 	if left, _ := os.ReadDir(drillRoot(env)); len(left) != 0 {
 		t.Fatalf("drill left %d entries", len(left))
 	}

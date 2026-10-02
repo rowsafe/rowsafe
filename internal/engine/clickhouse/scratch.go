@@ -31,9 +31,12 @@ import (
 // restored data (a Proof or a Rewind copy), from the same clickhouse
 // program as production. It runs as the agent's user with its data under
 // the agent's drill or rewind folder, listens on 127.0.0.1 only on random
-// ports, signs in with a random password only the agent knows, and has an
-// embedded single-node ClickHouse Keeper so replicated tables restore. Its
-// merges are stopped, so a copy stays as it was restored.
+// ports, signs in with a random password only the agent knows. When the
+// backup has replicated tables (Replicated*, Shared*), and only then, it
+// runs an embedded single-node ClickHouse Keeper so they restore; Keeper's
+// internal Raft port listens on every interface while the server runs
+// (ClickHouse can't narrow it), which the task log states. Its merges are
+// stopped, so a copy stays as it was restored.
 
 // scratchMarker is written into every scratch directory first.
 const scratchMarker = ".rowsafe-clickhouse-scratch"
@@ -80,6 +83,8 @@ type scratchState struct {
 	Password string            `json:"password"`
 	HTTPPort int               `json:"http_port"`
 	Macros   map[string]string `json:"macros,omitempty"`
+	// Keeper runs an embedded ClickHouse Keeper (replicated tables).
+	Keeper bool `json:"keeper,omitempty"`
 }
 
 func (s scratch) dataDir() string   { return filepath.Join(s.Dir, "data") }
@@ -91,7 +96,7 @@ func (s scratch) config() string    { return filepath.Join(s.Dir, "config.xml") 
 var idRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // newScratch prepares root/id (refusing anything odd) with its marker.
-func newScratch(root, id string, macros map[string]string) (scratch, error) {
+func newScratch(root, id string, macros map[string]string, keeper bool) (scratch, error) {
 	if !idRE.MatchString(id) {
 		return scratch{}, fmt.Errorf("invalid id %q", id)
 	}
@@ -118,7 +123,7 @@ func newScratch(root, id string, macros map[string]string) (scratch, error) {
 	if _, err := rand.Read(b); err != nil {
 		return s, err
 	}
-	return s, s.saveState(scratchState{Password: base64.RawURLEncoding.EncodeToString(b), Macros: macros})
+	return s, s.saveState(scratchState{Password: base64.RawURLEncoding.EncodeToString(b), Macros: macros, Keeper: keeper})
 }
 
 // scratchAt is an existing scratch directory.
@@ -210,12 +215,29 @@ func (s scratch) writeConfig() (scratchState, error) {
 		fmt.Fprintf(&mx, "<%s>%s</%s>", k, xmlText(macros[k]), k)
 	}
 	d := xmlText(s.Dir)
+	keeper := ""
+	if st.Keeper {
+		// Replicated tables need ClickHouse Keeper. Its Raft port listens on
+		// every interface (ClickHouse has no setting to narrow it); the task
+		// log says so.
+		keeper = fmt.Sprintf(`
+  <interserver_http_port>%[2]d</interserver_http_port>
+  <interserver_http_host>127.0.0.1</interserver_http_host>
+  <keeper_server>
+    <tcp_port>%[3]d</tcp_port>
+    <server_id>1</server_id>
+    <log_storage_path>%[1]s/coordination/log</log_storage_path>
+    <snapshot_storage_path>%[1]s/coordination/snapshots</snapshot_storage_path>
+    <coordination_settings><operation_timeout_ms>10000</operation_timeout_ms><session_timeout_ms>30000</session_timeout_ms><raft_logs_level>warning</raft_logs_level></coordination_settings>
+    <raft_configuration><server><id>1</id><hostname>127.0.0.1</hostname><port>%[4]d</port></server></raft_configuration>
+  </keeper_server>
+  <zookeeper><node><host>127.0.0.1</host><port>%[3]d</port></node></zookeeper>
+  <distributed_ddl><path>/clickhouse/task_queue/ddl</path></distributed_ddl>`, d, ports[1], ports[2], ports[3])
+	}
 	conf := fmt.Sprintf(`<clickhouse>
   <logger><level>warning</level><log>%[1]s/log/clickhouse-server.log</log><errorlog>%[1]s/log/clickhouse-server.err.log</errorlog><size>10M</size><count>2</count><console>0</console></logger>
   <listen_host>127.0.0.1</listen_host>
   <http_port>%[2]d</http_port>
-  <interserver_http_port>%[3]d</interserver_http_port>
-  <interserver_http_host>127.0.0.1</interserver_http_host>
   <path>%[1]s/data/</path>
   <tmp_path>%[1]s/tmp/</tmp_path>
   <user_files_path>%[1]s/user_files/</user_files_path>
@@ -227,20 +249,10 @@ func (s scratch) writeConfig() (scratchState, error) {
   <uncompressed_cache_size>0</uncompressed_cache_size>
   <mlock_executable>false</mlock_executable>
   <merge_tree><merge_with_ttl_timeout>3153600000</merge_with_ttl_timeout></merge_tree>
-  <macros>%[6]s</macros>
-  <keeper_server>
-    <tcp_port>%[4]d</tcp_port>
-    <server_id>1</server_id>
-    <log_storage_path>%[1]s/coordination/log</log_storage_path>
-    <snapshot_storage_path>%[1]s/coordination/snapshots</snapshot_storage_path>
-    <coordination_settings><operation_timeout_ms>10000</operation_timeout_ms><session_timeout_ms>30000</session_timeout_ms><raft_logs_level>warning</raft_logs_level></coordination_settings>
-    <raft_configuration><server><id>1</id><hostname>127.0.0.1</hostname><port>%[5]d</port></server></raft_configuration>
-  </keeper_server>
-  <zookeeper><node><host>127.0.0.1</host><port>%[4]d</port></node></zookeeper>
-  <distributed_ddl><path>/clickhouse/task_queue/ddl</path></distributed_ddl>
+  <macros>%[3]s</macros>%[4]s
   <send_crash_reports><enabled>false</enabled></send_crash_reports>
 </clickhouse>
-`, d, ports[0], ports[1], ports[2], ports[3], mx.String())
+`, d, ports[0], mx.String(), keeper)
 	sum := sha256.Sum256([]byte(st.Password))
 	users := fmt.Sprintf(`<clickhouse>
   <profiles><default>

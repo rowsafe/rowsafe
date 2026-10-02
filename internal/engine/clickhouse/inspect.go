@@ -35,6 +35,8 @@ type serverInfo struct {
 	Tables     []tableInfo
 	Macros     map[string]string
 	Grants     []string // privileges granted ON *.* (SHOW GRANTS FINAL)
+	// ReplicatedDB is set when a database backed up is Replicated.
+	ReplicatedDB bool
 }
 
 // tableInfo is one table, view or dictionary of a user database.
@@ -78,9 +80,9 @@ func versionNum(v string) int {
 	return n
 }
 
-// minVersion is the oldest ClickHouse Rowsafe supports (BACKUP to S3 with
-// the settings it uses).
-const minVersion = 230800
+// minVersion is the oldest ClickHouse Rowsafe supports: the oldest it is
+// tested on (24.8 LTS; make test-clickhouse).
+const minVersion = 240800
 
 // inspect reads the server's version, databases, tables and grants.
 func inspect(ctx context.Context, c *client) (serverInfo, error) {
@@ -128,6 +130,7 @@ func inspect(ctx context.Context, c *client) (serverInfo, error) {
 			in.Skipped = append(in.Skipped, fmt.Sprintf("%s (a %s database: its tables live in another system)", d.Name, d.Engine))
 		default:
 			keep[d.Name] = true
+			in.ReplicatedDB = in.ReplicatedDB || d.Engine == "Replicated"
 		}
 	}
 	tables, err := listTables(ctx, c)
@@ -239,8 +242,10 @@ func parseGrants(out string) []string {
 //   - KILL QUERY: stop a query you ask Rowsafe to stop;
 //   - ALTER UPDATE, ALTER DELETE: cancel a stuck change (mutation) you ask
 //     Rowsafe to cancel (ClickHouse requires the mutation's own privilege
-//     to cancel it).
-var neededGrants = []string{"SELECT", "INSERT", "BACKUP", "KILL QUERY", "ALTER UPDATE", "ALTER DELETE"}
+//     to cancel it);
+//   - S3: write backups to the agent's gateway (ClickHouse 26.8 checks it
+//     for BACKUP ... TO S3; READ, WRITE ON S3 in its newer syntax).
+var neededGrants = []string{"SELECT", "INSERT", "BACKUP", "KILL QUERY", "ALTER UPDATE", "ALTER DELETE", "S3"}
 
 // grantsSQL is the privileges list of GRANT ... ON *.*.
 func grantsSQL() string { return strings.Join(neededGrants, ", ") }
@@ -256,6 +261,8 @@ func missingGrants(have []string) []string {
 			case (p == "ALTER UPDATE" || p == "ALTER DELETE") && (h == "ALTER" || h == "ALTER TABLE"):
 				return true
 			case p == "ALTER UPDATE" && h == "UPDATE", p == "ALTER DELETE" && h == "DELETE":
+				return true
+			case p == "S3" && h == "SOURCES":
 				return true
 			}
 		}

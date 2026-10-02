@@ -48,7 +48,7 @@ for, is read from stdin (one line) and never stored (except the agent's own).
 Rowsafe's user needs, ON *.*: SELECT, BACKUP (back up every database and
 compare tables with a copy), INSERT (bring rows back when you ask), KILL
 QUERY, ALTER UPDATE, ALTER DELETE (stop a query or cancel a stuck change
-when you ask).
+when you ask), S3 (write backups to the agent's encrypting gateway).
 `
 
 const exitCantManageUsers = 13

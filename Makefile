@@ -5,7 +5,7 @@
 #   make lint                  go vet, gofmt, shellcheck, installer consistency
 #   make test-installer        scripts/install.sh in Debian/Ubuntu containers (Docker)
 #   make test-mongodb          the MongoDB engine on real mongo 7.0/8.0 containers (Docker)
-#   make test-clickhouse       the ClickHouse engine on real ClickHouse 25.8/24.8 containers (Docker)
+#   make test-clickhouse       the ClickHouse engine on real ClickHouse 26.8/26.3/25.8/24.8 containers (Docker)
 #   make test-rewind           a real Rewind (copy, rows, in place, undo) on a systemd Debian container (Docker)
 #   make test-pooling          real PgBouncer through the root helper on a systemd Debian container (Docker)
 #   make test-permissions      passkey-signed permission changes through root's helper on a systemd Debian container (Docker)
