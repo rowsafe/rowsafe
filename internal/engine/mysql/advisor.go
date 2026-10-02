@@ -41,7 +41,6 @@ func (x indexInfo) definition() string {
 	return fmt.Sprintf("%s %s (%s)", kind, quoteIdent(x.name), strings.Join(x.columns, ", "))
 }
 
-
 // advisorFacts fills ins.Advisor, ins.UnusedIndexes, ins.DuplicateIndexes
 // and ins.LargestIndexes. serverStart is when the index usage counters
 // started.
