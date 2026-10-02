@@ -7,6 +7,11 @@
 // with the signed image of a newer release. The agent itself never sees the
 // Docker socket.
 //
+// The ClickHouse agent image uses it only for that update: the controlled
+// container is then ClickHouse's (ROWSAFE_CONTROL_SERVICE=clickhouse), which
+// that agent never asks to stop, start or restart, and the peer uid is the
+// image's clickhouse user (ROWSAFE_CONTROL_ALLOW_UIDS=101).
+//
 // # Why a service of its own
 //
 // Access to the Docker socket is root on the Docker host: whoever can talk

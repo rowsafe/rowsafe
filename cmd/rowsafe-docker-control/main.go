@@ -36,10 +36,11 @@ Usage:
 
 Environment:
   ROWSAFE_CONTROL_SERVICE     compose service to control, in this container's own
-                              compose project (default: postgres)
+                              compose project (default: postgres; e.g. clickhouse)
   ROWSAFE_CONTROL_CONTAINER   or: the name of the container to control (without compose)
   ROWSAFE_CONTROL_SOCKET      where the agent connects (default: ` + dockerctl.DefaultSocket + `)
-  ROWSAFE_CONTROL_ALLOW_UIDS  uids allowed to connect (default: 999,70)
+  ROWSAFE_CONTROL_ALLOW_UIDS  uids allowed to connect (default: 999,70; the ClickHouse
+                              agent image: 101)
   ROWSAFE_CONTROL_STOP_TIMEOUT  how long PostgreSQL may take to shut down (default: 2m)
   ROWSAFE_CONTROL_ALLOW_AGENT_UPDATE  1: also let the agent ask for its own container to be
                               replaced by the signed image of a newer release (default: off)

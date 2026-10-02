@@ -12,7 +12,8 @@ import (
 func TestVerify(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	good := Document{Kind: Kind, Version: "0.5.0", Repository: Repository, Images: map[string]string{
-		"pg17": "sha256:" + strings.Repeat("a", 64), "pg17-alpine": "sha256:" + strings.Repeat("b", 64)}}
+		"pg17": "sha256:" + strings.Repeat("a", 64), "pg17-alpine": "sha256:" + strings.Repeat("b", 64),
+		"clickhouse26.8": "sha256:" + strings.Repeat("c", 64)}}
 	sign := func(v any) ([]byte, string) {
 		data, _ := json.Marshal(v)
 		return data, base64.StdEncoding.EncodeToString(ed25519.Sign(priv, data))
@@ -25,8 +26,13 @@ func TestVerify(t *testing.T) {
 	if ref, ok := d.Ref("pg17-alpine"); !ok || ref != Repository+"@sha256:"+strings.Repeat("b", 64) {
 		t.Fatalf("ref %q %v", ref, ok)
 	}
-	if _, ok := d.Ref("pg16"); ok {
-		t.Fatal("pg16 found")
+	if ref, ok := d.Ref("clickhouse26.8"); !ok || ref != Repository+"@sha256:"+strings.Repeat("c", 64) {
+		t.Fatalf("ref %q %v", ref, ok)
+	}
+	for _, v := range []string{"pg16", "clickhouse26.3"} {
+		if _, ok := d.Ref(v); ok {
+			t.Fatalf("%s found", v)
+		}
 	}
 	bad := func(name string, doc []byte, sig string, want string) {
 		t.Helper()
@@ -46,6 +52,7 @@ func TestVerify(t *testing.T) {
 		"no images":        {Document{Kind: Kind, Version: "0.5.0", Repository: Repository}, "lists 0 images"},
 		"bad variant":      {Document{Kind: Kind, Version: "0.5.0", Repository: Repository, Images: map[string]string{"pg17;rm": good.Images["pg17"]}}, "invalid image variant"},
 		"bad digest":       {Document{Kind: Kind, Version: "0.5.0", Repository: Repository, Images: map[string]string{"pg17": "latest"}}, "invalid digest"},
+		"bad clickhouse":   {Document{Kind: Kind, Version: "0.5.0", Repository: Repository, Images: map[string]string{"clickhouse26.8.1": good.Images["pg17"]}}, "invalid image variant"},
 		"unknown field":    {map[string]any{"kind": Kind, "version": "0.5.0", "repository": Repository, "images": good.Images, "pull": "x"}, "unknown field"},
 		// A release manifest signed with the same key is no images document.
 		"release manifest": {map[string]any{"version": "0.5.0", "artifacts": map[string]any{}}, "unknown field"},
@@ -60,16 +67,25 @@ func TestVerify(t *testing.T) {
 
 func TestVariants(t *testing.T) {
 	for ref, want := range map[string]string{
-		"ghcr.io/rowsafe/agent:pg17":                "pg17",
-		"ghcr.io/rowsafe/agent:pg18-alpine":         "pg18-alpine",
-		"ghcr.io/rowsafe/agent:0.4.2-pg15":          "pg15",
-		"ghcr.io/rowsafe/agent:0.4.2-pg15-alpine":   "pg15-alpine",
-		"ghcr.io/rowsafe/agent:0.4.2-mysql8.4":      "",
-		"ghcr.io/rowsafe/agent@sha256:" + "0":       "",
-		"docker.io/someone/agent:pg17":              "",
-		"ghcr.io/rowsafe/agent-evil:pg17":           "",
-		"ghcr.io/rowsafe/docker-control:latest":     "",
-		"ghcr.io/rowsafe/agent:0.4.2-pg15-alpine-x": "",
+		"ghcr.io/rowsafe/agent:pg17":                 "pg17",
+		"ghcr.io/rowsafe/agent:pg18-alpine":          "pg18-alpine",
+		"ghcr.io/rowsafe/agent:0.4.2-pg15":           "pg15",
+		"ghcr.io/rowsafe/agent:0.4.2-pg15-alpine":    "pg15-alpine",
+		"ghcr.io/rowsafe/agent:0.4.2-mysql8.4":       "",
+		"ghcr.io/rowsafe/agent@sha256:" + "0":        "",
+		"docker.io/someone/agent:pg17":               "",
+		"ghcr.io/rowsafe/agent-evil:pg17":            "",
+		"ghcr.io/rowsafe/docker-control:latest":      "",
+		"ghcr.io/rowsafe/agent:0.4.2-pg15-alpine-x":  "",
+		"ghcr.io/rowsafe/agent:clickhouse26.8":       "clickhouse26.8",
+		"ghcr.io/rowsafe/agent:0.5.2-clickhouse25.8": "clickhouse25.8",
+		"ghcr.io/rowsafe/agent:0.5.2-clickhouse26.3": "clickhouse26.3",
+		"ghcr.io/rowsafe/agent:clickhouse26.8.2":     "",
+		"ghcr.io/rowsafe/agent:clickhouse26":         "",
+		"ghcr.io/rowsafe/agent:clickhouse26.13":      "",
+		"ghcr.io/rowsafe/agent:0.5.2-clickhouse26_8": "",
+		"ghcr.io/rowsafe/agent:xclickhouse26.8":      "",
+		"docker.io/someone/agent:clickhouse26.8":     "",
 	} {
 		if got := VariantOfRef(ref); got != want {
 			t.Errorf("%s: %q, want %q", ref, got, want)
@@ -77,6 +93,12 @@ func TestVariants(t *testing.T) {
 	}
 	if Variant(16, true) != "pg16-alpine" || Variant(17, false) != "pg17" {
 		t.Fatal("Variant")
+	}
+	for v, want := range map[string]bool{"pg17": true, "pg17-alpine": true, "clickhouse26.8": true, "clickhouse25.12": true,
+		"clickhouse26.0": false, "clickhouse26.08": false, "clickhouse126.8": false, "clickhouse26.8-alpine": false, "mongodb8": false, "": false} {
+		if ValidVariant(v) != want {
+			t.Errorf("ValidVariant(%q) = %v", v, !want)
+		}
 	}
 	if c, ok := CompareVersions("0.10.0", "0.9.9"); !ok || c != 1 {
 		t.Fatal("compare")

@@ -6,7 +6,8 @@
 # the clickhouse program that Proof and Rewind copies run (a temporary
 # server, 127.0.0.1 only) is ClickHouse's own, of the same version. It runs
 # as the image's clickhouse user. Published as
-# ghcr.io/rowsafe/agent:<version>-clickhouse<CH_VERSION>.
+# ghcr.io/rowsafe/agent:clickhouse<CH_VERSION> (floating: the newest release)
+# and ...:<version>-clickhouse<CH_VERSION> (exact: pins a release).
 #
 #   docker build -f deploy/docker/agent-clickhouse.Dockerfile --build-arg CH_VERSION=26.8 -t rowsafe-agent:clickhouse26.8 .
 #
@@ -45,6 +46,14 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
 
 FROM clickhouse/clickhouse-server:${CH_VERSION}
 ARG CH_VERSION
+# The image's variant, its floating tag: clickhouse26.8 (set by the release
+# workflow). rowsafe-docker-control picks the same variant of a new release
+# when it updates the agent's container, and the agent knows from it that it
+# runs from an image (it is updated by replacing its container).
+ARG IMAGE_VARIANT=clickhouse${CH_VERSION}
+# The agent's version, as a label (the base image's would say its Ubuntu's):
+# rowsafe-docker-control reads it when it updates the agent's container.
+ARG VERSION=dev
 # /var/lib/rowsafe: identity, ClickHouse login, Proofs and Rewind copies
 # (a volume). The image's clickhouse user runs the agent.
 RUN install -d -o clickhouse -g clickhouse -m 0700 /var/lib/rowsafe /var/log/rowsafe \
@@ -53,7 +62,9 @@ COPY --from=build /out/rowsafe-agent /usr/local/bin/rowsafe-agent
 
 LABEL org.opencontainers.image.title="Rowsafe agent (ClickHouse ${CH_VERSION} sidecar)" \
       org.opencontainers.image.source="https://github.com/rowsafe/rowsafe" \
-      org.opencontainers.image.licenses="Apache-2.0"
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.version="${VERSION}" \
+      sh.rowsafe.agent.variant="${IMAGE_VARIANT}"
 
 # Native mode: ClickHouse needs no spool (it has no change log to copy).
 # The gateway listens on the compose network so the ClickHouse container can
@@ -66,6 +77,7 @@ ENV ROWSAFE_MODE=native \
     ROWSAFE_REWIND_DIR=/var/lib/rowsafe/rewind \
     ROWSAFE_LOG_DIR=/var/log/rowsafe \
     ROWSAFE_AUTO_UPDATE=false \
+    ROWSAFE_IMAGE_VARIANT=${IMAGE_VARIANT} \
     ROWSAFE_CLICKHOUSE_GATEWAY_LISTEN=0.0.0.0:9010
 
 USER clickhouse

@@ -12,6 +12,7 @@ import (
 
 	"github.com/rowsafe/rowsafe/internal/pgbackrest"
 	"github.com/rowsafe/rowsafe/protocol"
+	"github.com/rowsafe/rowsafe/release/agentimages"
 )
 
 // Version is set at build time with -ldflags "-X .../agent.Version=...".
@@ -111,8 +112,14 @@ type Config struct {
 	ForkTargetDir string
 	// DockerControlSocket is where the opt-in container control service
 	// listens (docker-sidecar mode; ROWSAFE_DOCKER_CONTROL_SOCKET). Absent:
-	// Rowsafe can't stop or start PostgreSQL's container.
+	// Rowsafe can't stop or start PostgreSQL's container. Agents running
+	// from another engine's image (Container) use it only for their own
+	// updates.
 	DockerControlSocket string
+	// ImageVariant is the Rowsafe agent image this agent runs from, its
+	// floating tag ("pg17", "clickhouse26.8"; ROWSAFE_IMAGE_VARIANT, set by
+	// the images), or "".
+	ImageVariant string
 	// Copies configures Guard's preview and safe copies (copies_state.go).
 	Copies CopiesConfig
 }
@@ -132,6 +139,12 @@ const (
 
 // Sidecar reports whether the agent runs as a Docker sidecar.
 func (c Config) Sidecar() bool { return c.Mode == ModeDockerSidecar }
+
+// Container reports whether the agent runs from one of Rowsafe's agent
+// images: a PostgreSQL sidecar, or the image of another engine that runs in
+// native mode (ClickHouse). Its binary is never replaced in place; its
+// container is (container_update.go).
+func (c Config) Container() bool { return c.Sidecar() || c.ImageVariant != "" }
 
 func env(name, def string) string {
 	if v := strings.TrimSpace(os.Getenv(name)); v != "" {
@@ -184,6 +197,9 @@ func ConfigFromEnv() (Config, error) {
 		}
 	}
 	c.DockerControlSocket = env("ROWSAFE_DOCKER_CONTROL_SOCKET", "/run/rowsafe-control/control.sock")
+	if v := env("ROWSAFE_IMAGE_VARIANT", ""); agentimages.ValidVariant(v) {
+		c.ImageVariant = v
+	}
 	var err error
 	if err := poolerConfigFromEnv(&c); err != nil {
 		return c, err
@@ -256,7 +272,9 @@ func ConfigFromEnv() (Config, error) {
 		if _, err := pgbackrest.SpoolDir(c.SpoolDir, "x"); err != nil {
 			return c, fmt.Errorf("ROWSAFE_SPOOL_DIR: %w", err)
 		}
-		// Container images are immutable: upgrade by changing the image tag.
+	}
+	if c.Container() {
+		// Container images are immutable: the container is replaced instead.
 		c.AutoUpdate = false
 	}
 	return c, nil

@@ -18,7 +18,9 @@ import (
 	"github.com/rowsafe/rowsafe/release/agentimages"
 )
 
-// "Update now" for a Docker sidecar (protocol/agent_container_update.go).
+// "Update now" for a Docker sidecar (protocol/agent_container_update.go):
+// any agent running from one of Rowsafe's images (Config.Container), the
+// PostgreSQL sidecars and the ClickHouse image alike.
 //
 // The agent can't replace its own container, so the task hands the
 // release's signed images document to rowsafe-docker-control, which
@@ -88,12 +90,15 @@ func (a *Agent) containerReportPath() string {
 	return filepath.Join(a.cfg.StateDir, "container-update-report.json")
 }
 
-// imageVariant is this image's floating tag ("pg17", "pg17-alpine"): the
-// image says (ROWSAFE_IMAGE_VARIANT), else PostgreSQL's major and the uid
-// (the -alpine images run as 70).
-func imageVariant() string {
-	if v := os.Getenv("ROWSAFE_IMAGE_VARIANT"); agentimages.ValidVariant(v) {
-		return v
+// imageVariant is this image's floating tag ("pg17", "pg17-alpine",
+// "clickhouse26.8"): the image says (ROWSAFE_IMAGE_VARIANT), else
+// PostgreSQL's major and the uid (the -alpine images run as 70).
+func (a *Agent) imageVariant() string {
+	if a.cfg.ImageVariant != "" {
+		return a.cfg.ImageVariant
+	}
+	if !a.cfg.Sidecar() {
+		return ""
 	}
 	major, err := strconv.Atoi(os.Getenv("PG_MAJOR"))
 	if err != nil || major < 10 || major > 99 {
@@ -111,7 +116,7 @@ func (a *Agent) updateReport() *protocol.UpdateReport {
 	c := &a.ctrUpd
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.loaded && a.cfg.Sidecar() {
+	if !c.loaded && a.cfg.Container() {
 		c.loaded = true
 		if data, err := os.ReadFile(a.containerReportPath()); err == nil {
 			var r protocol.UpdateReport
@@ -151,6 +156,11 @@ func (a *Agent) dockerCallReq(ctx context.Context, req dockerctl.Request) (docke
 	return dockerctl.Call(ctx, a.cfg.DockerControlSocket, req)
 }
 
+// dockerHowToAddControl is the plain next step without the control service
+// on an agent that only uses it for its updates (ClickHouse's image).
+const dockerHowToAddControl = `add the rowsafe-docker-control service to your compose file with ` +
+	`ROWSAFE_CONTROL_ALLOW_AGENT_UPDATE: "1" (https://rowsafe.sh/docs/guides/docker#update-the-agent-from-the-dashboard)`
+
 // dockerHowToAllowUpdate is the plain next step when updates aren't allowed.
 const dockerHowToAllowUpdate = `set ROWSAFE_CONTROL_ALLOW_AGENT_UPDATE: "1" in the environment of the rowsafe-docker-control service ` +
 	`(its newest image) and run docker compose up -d`
@@ -161,7 +171,7 @@ func (a *Agent) agentContainerUpdate(ctx context.Context, task *protocol.Task, t
 	if err := json.Unmarshal(task.Params, &p); err != nil {
 		return nil, fmt.Errorf("invalid parameters: %w", err)
 	}
-	if !a.cfg.Sidecar() {
+	if !a.cfg.Container() {
 		return nil, errors.New("this agent doesn't run in Docker: it updates itself")
 	}
 	to, err := release.ParseVersion(p.Version)
@@ -172,10 +182,14 @@ func (a *Agent) agentContainerUpdate(ctx context.Context, task *protocol.Task, t
 		return nil, fmt.Errorf("the agent already runs %s", cur)
 	}
 	res, err := a.dockerCall(ctx, dockerctl.ActionInspect, "agent-update-check")
+	howTo := dockerHowToAllow
+	if !a.cfg.Sidecar() {
+		howTo = dockerHowToAddControl
+	}
 	switch {
 	case errors.Is(err, errNoDockerControl):
 		return nil, fmt.Errorf("Rowsafe can't update the agent's container here: there is no container control service. Update it yourself "+
-			"(docker compose pull rowsafe-agent && docker compose up -d rowsafe-agent), or %s", dockerHowToAllow)
+			"(docker compose pull rowsafe-agent && docker compose up -d rowsafe-agent), or %s", howTo)
 	case err != nil:
 		return nil, err
 	case !slices.Contains(res.Actions, dockerctl.ActionUpdateAgent):
@@ -224,7 +238,7 @@ func (a *Agent) agentContainerUpdate(ctx context.Context, task *protocol.Task, t
 				state = protocol.UpdateRolledBack
 			}
 			a.setContainerReport(protocol.UpdateReport{State: state, FromVersion: Version, ToVersion: to.String(), Error: u.Error})
-			return nil, fmt.Errorf("the agent's container wasn't updated: %s. The agent keeps running %s; PostgreSQL wasn't touched", u.Error, Version)
+			return nil, fmt.Errorf("the agent's container wasn't updated: %s. The agent keeps running %s; the database wasn't touched", u.Error, Version)
 		case dockerctl.AgentUpdateSwitching, dockerctl.AgentUpdateWaiting:
 			if !switched {
 				switched = true
@@ -303,7 +317,7 @@ func (a *Agent) containerUpdateOutcome(ctx context.Context, t runningTask) (prot
 		if u.State == dockerctl.AgentUpdateDone {
 			return failed("the container control service says the update is done, but this agent runs %s", Version)
 		}
-		return failed("%s didn't come up, so the agent's previous container (%s) was started again: %s. PostgreSQL kept running",
+		return failed("%s didn't come up, so the agent's previous container (%s) was started again: %s. The database kept running",
 			mark.To, Version, u.Error)
 	}
 
@@ -337,7 +351,7 @@ func (a *Agent) containerUpdateOutcome(ctx context.Context, t runningTask) (prot
 	}
 	res := protocol.AgentContainerUpdateResult{FromVersion: mark.From, ToVersion: normVersion(Version),
 		DurationMs: time.Since(mark.StartedAt).Milliseconds()}
-	res.Summary = fmt.Sprintf("Updated the agent's container from %s to %s in %s. PostgreSQL kept running.", mark.From, res.ToVersion,
+	res.Summary = fmt.Sprintf("Updated the agent's container from %s to %s in %s. The database kept running.", mark.From, res.ToVersion,
 		humanDuration(time.Duration(res.DurationMs)*time.Millisecond))
 	if u != nil {
 		res.Image = u.Image

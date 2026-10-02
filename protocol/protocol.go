@@ -213,7 +213,8 @@ type HeartbeatRequest struct {
 	// Software is PostgreSQL's versions, pending updates and upgrades on
 	// this host (upgrade.go); sent about every hour.
 	Software *SoftwareReport `json:"software,omitempty"`
-	// DockerControl: docker-sidecar agents only (see protocol/docker.go).
+	// DockerControl: agents running from Rowsafe's container images only
+	// (see protocol/docker.go).
 	DockerControl *DockerControlReport `json:"docker_control,omitempty"`
 	// Copies are Guard's preview and safe copies (protocol/copies.go).
 	Copies *CopiesReport `json:"copies,omitempty"`

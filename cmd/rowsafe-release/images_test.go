@@ -14,7 +14,7 @@ func TestImagesSignVerify(t *testing.T) {
 	dir := t.TempDir()
 	digests := filepath.Join(dir, "digests")
 	_ = os.Mkdir(digests, 0o755)
-	for v, c := range map[string]string{"pg17": "a", "pg17-alpine": "b"} {
+	for v, c := range map[string]string{"pg17": "a", "pg17-alpine": "b", "clickhouse26.8": "c"} {
 		_ = os.WriteFile(filepath.Join(digests, v), []byte("sha256:"+strings.Repeat(c, 64)+"\n"), 0o644)
 	}
 	var out bytes.Buffer
@@ -32,7 +32,7 @@ func TestImagesSignVerify(t *testing.T) {
 	if err := verifyImagesCmd([]string{"--public-key", pub, doc, doc + ".sig"}, &v); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(v.String(), "release 1.2.3") || !strings.Contains(v.String(), "pg17-alpine") {
+	if !strings.Contains(v.String(), "release 1.2.3") || !strings.Contains(v.String(), "pg17-alpine") || !strings.Contains(v.String(), "clickhouse26.8") {
 		t.Fatalf("verify printed %q", v.String())
 	}
 	// A release manifest isn't signed as an images document, nor the reverse.

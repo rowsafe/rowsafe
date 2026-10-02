@@ -244,7 +244,7 @@ func (s *Server) agentContainer(ctx context.Context) (containerJSON, []byte, ima
 	case c.ID == self && self != "":
 		return c, nil, imageJSON{}, errors.New("the configured agent container is this control container itself; refusing it")
 	case c.ID == pgID && pgID != "":
-		return c, nil, imageJSON{}, errors.New("the configured agent container is PostgreSQL's; refusing it")
+		return c, nil, imageJSON{}, errors.New("the configured agent container is the database's; refusing it")
 	case !isAgentImage(c.Config.Image):
 		return c, nil, imageJSON{}, fmt.Errorf("the agent container runs %q, not an image of %s, so Rowsafe doesn't replace it: update it yourself",
 			c.Config.Image, agentimages.Repository)

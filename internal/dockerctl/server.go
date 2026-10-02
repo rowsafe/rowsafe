@@ -53,8 +53,9 @@ type Config struct {
 	// before killing it (the postgres images stop with SIGINT: a fast,
 	// clean shutdown).
 	StopTimeout time.Duration
-	// AllowedUIDs are the peer uids that may connect (the postgres user of
-	// the images the agent runs as: 999 Debian, 70 Alpine).
+	// AllowedUIDs are the peer uids that may connect (the user the agent
+	// image runs as: by default postgres, 999 Debian, 70 Alpine; the
+	// ClickHouse image's clickhouse user is 101, set by its operator).
 	AllowedUIDs []int
 	Log         *slog.Logger
 
@@ -157,7 +158,7 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.AllowAgentUpdate && (cfg.AgentContainer != "" && cfg.AgentContainer == cfg.Container ||
 		cfg.AgentContainer == "" && cfg.Container == "" && cfg.AgentService == cfg.Service) {
-		return nil, errors.New("the agent's container and PostgreSQL's can't be the same")
+		return nil, errors.New("the agent's container and the database's can't be the same")
 	}
 	var pub ed25519.PublicKey
 	if cfg.ReleasePublicKey != "" {
@@ -240,7 +241,7 @@ func (s *Server) resolveLocked(ctx context.Context) (target, error) {
 	} else {
 		if s.project == "" {
 			return t, errors.New("this service isn't running in a compose project, so it can't find the compose service " +
-				fmt.Sprintf("%q; set ROWSAFE_CONTROL_CONTAINER to the PostgreSQL container's name", s.cfg.Service))
+				fmt.Sprintf("%q; set ROWSAFE_CONTROL_CONTAINER to the database container's name", s.cfg.Service))
 		}
 		list, err := s.eng.listByLabels(ctx, labelProject+"="+s.project, labelService+"="+s.cfg.Service)
 		if err != nil {
@@ -252,10 +253,10 @@ func (s *Server) resolveLocked(ctx context.Context) (target, error) {
 		})
 		switch len(list) {
 		case 0:
-			return t, fmt.Errorf("found no container for %s: check ROWSAFE_CONTROL_SERVICE is your PostgreSQL service's name", s.describe())
+			return t, fmt.Errorf("found no container for %s: check ROWSAFE_CONTROL_SERVICE is your database's service name", s.describe())
 		case 1:
 		default:
-			return t, fmt.Errorf("found %d containers for %s; Rowsafe controls exactly one PostgreSQL container", len(list), s.describe())
+			return t, fmt.Errorf("found %d containers for %s; Rowsafe controls exactly one database container", len(list), s.describe())
 		}
 		c, err := s.eng.inspect(ctx, list[0].ID)
 		if err != nil {
