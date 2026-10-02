@@ -33,4 +33,11 @@ type DockerControlReport struct {
 	// Error says in plain words why the control service can't be used
 	// (e.g. it can't find the PostgreSQL service).
 	Error string `json:"error,omitempty"`
+	// AgentUpdate: the control service may also replace the agent's own
+	// container with a newer release (its operator set
+	// ROWSAFE_CONTROL_ALLOW_AGENT_UPDATE=1; agent_container_update.go).
+	AgentUpdate bool `json:"agent_update,omitempty"`
+	// AgentImage is the agent image's floating tag, e.g. "pg17" or
+	// "pg17-alpine" ("" when the agent can't tell).
+	AgentImage string `json:"agent_image,omitempty"`
 }

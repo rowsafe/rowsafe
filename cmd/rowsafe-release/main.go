@@ -37,6 +37,12 @@ Usage:
       write MANIFEST.sig; the private key is read from the named environment variable
   rowsafe-release verify --public-key B64 MANIFEST SIG
       check a signature and print the release
+  rowsafe-release images --version V --digests DIR
+      the release's Docker agent images as a document on stdout: DIR holds one file
+      per image variant (pg17, pg17-alpine...) containing its digest (sha256:...)
+  rowsafe-release sign-images [--key-env ROWSAFE_RELEASE_PRIVATE_KEY] IMAGES
+      write IMAGES.sig (rowsafe-docker-control checks it before updating an agent container)
+  rowsafe-release verify-images --public-key B64 IMAGES SIG
 
 Then publish the binaries, and on the control plane run
   rowsafed release add --manifest MANIFEST --signature MANIFEST.sig
@@ -67,6 +73,12 @@ func main() {
 		err = signCmd(os.Args[2:], os.Getenv, os.Stderr)
 	case "verify":
 		err = verifyCmd(os.Args[2:], os.Stdout)
+	case "images":
+		err = imagesCmd(os.Args[2:], os.Stdout)
+	case "sign-images":
+		err = signImagesCmd(os.Args[2:], os.Getenv, os.Stderr)
+	case "verify-images":
+		err = verifyImagesCmd(os.Args[2:], os.Stdout)
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
