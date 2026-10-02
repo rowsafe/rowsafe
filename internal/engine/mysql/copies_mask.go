@@ -48,6 +48,9 @@ func maskCopy(ctx context.Context, db *sql.DB, mariadb bool, mp protocol.Masking
 		}
 	}
 	for _, tp := range plan {
+		if _, err := conn.ExecContext(ctx, "USE "+quoteIdent(tp.DB)); err != nil {
+			return report, err
+		}
 		var n int64
 		var names []string
 		for _, c := range tp.Columns {

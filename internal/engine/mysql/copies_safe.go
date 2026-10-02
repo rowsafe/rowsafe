@@ -62,7 +62,6 @@ func accountHosts(allow []netip.Prefix) ([]string, error) {
 	return slices.Compact(out), nil
 }
 
-
 func (s *server) safeCopy(ctx context.Context, p protocol.SafeCopyParams, log agent.TaskLogger) (*protocol.SafeCopyResult, error) {
 	tools := s.env.Copies
 	switch {

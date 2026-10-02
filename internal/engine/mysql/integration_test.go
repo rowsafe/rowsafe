@@ -371,7 +371,6 @@ func (l *testLog) Output(label string, out []byte) {
 	}
 }
 
-
 // safeCopyIntegration makes a masked safe copy, connects to it over TLS
 // with the password made here, sets a new password and deletes it.
 func safeCopyIntegration(t *testing.T, ctx context.Context, e *Engine, env agent.EngineEnv, spec protocol.DatabaseSpec, adb *sql.DB) {
