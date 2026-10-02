@@ -128,15 +128,19 @@ func TestPermissionsUnavailable(t *testing.T) {
 		t.Errorf("restart unavailable: %v", r.Unavailable)
 	}
 
-	// No PostgreSQL (a MySQL server): nothing applies, and what needs an
-	// unavailable permission is unavailable too.
+	// No PostgreSQL (a MySQL server): only the firewall applies, and what
+	// needs an unavailable permission is unavailable too.
 	if err := os.RemoveAll(p.PGRoot); err != nil {
 		t.Fatal(err)
 	}
 	stubPermHave(t, "pg_createcluster", "nft", "apt-get")
 	r = ReadPermissions(p)
 	for _, name := range protocol.Permissions {
-		if r.Unavailable[name] != permReasonPostgresOnly {
+		want := permReasonPostgresOnly
+		if anyEnginePermission[name] {
+			want = ""
+		}
+		if r.Unavailable[name] != want {
 			t.Errorf("%s: %q", name, r.Unavailable[name])
 		}
 	}
