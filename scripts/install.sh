@@ -6678,7 +6678,7 @@ protect_cluster() {
 # setup_databases (interactive) goes through every cluster found.
 setup_databases() {
   if [ ! -s "$TMP/clusters" ]; then
-    note "No running PostgreSQL found that the agent can reach. Once it runs, run this installer again."
+    note "No running $(engine_label) found that the agent can reach. Once it runs, run this installer again."
     return 0
   fi
   _count=$(wc -l <"$TMP/clusters" | tr -d ' ')
@@ -7241,11 +7241,11 @@ check_clickhouse_program() {
 }
 
 # clickhouse_status reads `rowsafe-agent clickhouse status` into CH_* variables.
-CH_LOGIN='' CH_USER='' CH_USERSD='' CH_BINARY='' CH_DOCKER=''
+CH_LOGIN='' CH_USERSD='' CH_BINARY='' CH_DOCKER=''
 clickhouse_status() {
   agent_run clickhouse status --port "$C_PORT" >"$TMP/chstatus" 2>"$TMP/chstatus.err" || return 1
   _k() { sed -n "s/^$1=//p" "$TMP/chstatus" | head -n 1; }
-  CH_LOGIN=$(_k login) CH_USER=$(_k user) CH_USERSD=$(_k usersd) CH_BINARY=$(_k binary)
+  CH_LOGIN=$(_k login) CH_USERSD=$(_k usersd) CH_BINARY=$(_k binary)
   CH_DOCKER=$(_k docker)
   [ "$CH_USERSD" != - ] || CH_USERSD=''
   [ "$CH_BINARY" != - ] || CH_BINARY=''
@@ -7263,15 +7263,17 @@ clickhouse_users_file() {
     [ -f "${_dir%/*}/users.xml" ] || return 1
     install -d -m 0755 -o root -g root "$_dir"
   fi
-  _grp=${CH_USER:-clickhouse}
-  [ "$_grp" != - ] || _grp=clickhouse
-  getent group "$_grp" >/dev/null 2>&1 || _grp=$(stat -c %G "$_dir")
+  # Readable by ClickHouse only: its group from the packages, else users.xml's.
+  _grp=clickhouse
+  getent group clickhouse >/dev/null 2>&1 || _grp=$(stat -c %G "${_dir%/*}/users.xml" 2>/dev/null || echo root)
   if ! agent_run clickhouse login --port "$C_PORT" --users-xml >"$TMP/chusers.xml" 2>"$TMP/chlogin.err" ||
     ! grep -q '<clickhouse>' "$TMP/chusers.xml"; then
     sed 's/^/    /' "$TMP/chlogin.err" >&2
     return 1
   fi
-  write_file "$_dir/rowsafe.xml" 0640 "root:$_grp" <"$TMP/chusers.xml" || true
+  _mode=0640
+  [ "$_grp" != root ] || _mode=0644 # a hash of a long random password, nothing more
+  write_file "$_dir/rowsafe.xml" "$_mode" "root:$_grp" <"$TMP/chusers.xml" || true
   rm -f "$TMP/chusers.xml"
   _i=0
   until clickhouse_status && [ "$CH_LOGIN" = ok ]; do
