@@ -65,7 +65,7 @@ func (t *tools) addMonitoringTools(s *sdk.Server) {
 		Name: "database_health",
 		Description: "Health score (0-100) of a database, with findings in plain language, worst first: each has a title, an explanation and what to do. " +
 			"Many findings list fixes Rowsafe can apply itself (clean up tables, rebuild or remove an index, end a stuck session, remove an inactive replication slot, back up now, ...); a person applies them with Apply fix in the Rowsafe dashboard (Pulse, Health), after a confirmation when they are disruptive. Read-only: this tool applies nothing. " +
-			"Covers backups, restore tests and WAL archiving; whether PostgreSQL answers; disk space and a forecast of when it fills up; connections; vacuum, transaction ID wraparound and estimated bloat; blocked queries, statements that got slower, unused and duplicate indexes, tables that may lack an index; replication lag. " +
+			"Covers backups, restore tests and continuous backup; whether the database answers; disk space and a forecast of when it fills up; connections; per engine (PostgreSQL: vacuum, transaction ID wraparound and estimated bloat; MySQL and MariaDB, MongoDB and ClickHouse: their own checks such as replication, long transactions or operations, and merges and mutations); blocked queries, statements that got slower, unused and duplicate indexes, tables that may lack an index; replication lag. " +
 			"Without a database it lists every database's score and top finding. Scores: 90-100 healthy, 70-89 needs attention, 50-69 at risk, below 50 critical.",
 		Annotations: readOnly("Database health score"),
 	}, t.databaseHealth)
