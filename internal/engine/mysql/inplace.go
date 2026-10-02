@@ -224,13 +224,12 @@ func (s *server) rewindInPlace(ctx context.Context, p protocol.RewindInPlacePara
 		return nil, err
 	}
 	f, err := s.preflightInPlace(ctx, root, 1) // space is checked below, once the size is known
-	if err != nil {
-		return nil, err
+	if err == nil && f.Size > 0 {
+		err = checkSpace(root, f.Size)
 	}
-	if f.Size > 0 {
-		if err := checkSpace(root, f.Size); err != nil {
-			return nil, err
-		}
+	if err != nil {
+		_ = os.Remove(root) // empty: nothing was restored yet
+		return nil, err
 	}
 	name := s.flavor.display()
 	now := time.Now().UTC()
