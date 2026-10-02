@@ -209,67 +209,89 @@ func reachable(addrs []string, port int) (string, error) {
 		port, strings.Join(addrs, ", "))
 }
 
-// seedStandby restores the latest backup into a private server, replays
-// the binary logs to the last complete transaction and loads the
-// databases and logins into the standby's server. It returns the primary's
-// binary log position the copy is at.
+// seedStandby loads the latest copy in the bucket into the standby's
+// server and returns the primary's binary log position it is at.
 func (s *server) seedStandby(ctx context.Context, conn *sql.DB, rec *standbyRecord, log agent.TaskLogger) (filePos, error) {
-	st, err := openStore(s.env.Repo, string(s.flavor), s.db.Stanza, s.cfg.PartSizeMB)
+	log.Printf("restoring the latest backup on this server (not from the primary)")
+	loaded, err := s.loadCopy(ctx, "standby-"+rec.ID, restoreTarget{}, true, func(schemas, users []string) {
+		rec.Schemas, rec.Users = schemas, users
+		_ = standbys(s.env).put(*rec) // so an interrupted load can be undone
+	}, log)
 	if err != nil {
 		return filePos{}, err
 	}
-	dir, err := safeDir(s.env.Config.RewindDir, "standby-"+rec.ID)
+	return loaded.Pos, nil
+}
+
+// loadedCopy is what loadCopy loaded.
+type loadedCopy struct {
+	Pos         filePos    // the source's binary log position it is at (latest only)
+	RecoveredTo *time.Time // the last transaction replayed (nil: none after the backup)
+	Schemas     []string
+	Users       []string
+}
+
+// loadCopy restores the source's backups (s.env.Repo, s.db.Stanza) to t
+// into a private server next to this one (scratch id under the Rewind
+// folder) and loads its databases, routines and logins into this server,
+// outside its binary log. With latest, it replays the binary logs to the
+// last complete transaction in the bucket. loaded is called with what is
+// about to be loaded, before it is (so an interrupted load can be undone).
+func (s *server) loadCopy(ctx context.Context, id string, t restoreTarget, latest bool, loaded func(schemas, users []string), log agent.TaskLogger) (loadedCopy, error) {
+	var out loadedCopy
+	st, err := openStore(s.env.Repo, string(s.flavor), s.db.Stanza, s.cfg.PartSizeMB)
 	if err != nil {
-		return filePos{}, err
+		return out, err
+	}
+	dir, err := safeDir(s.env.Config.RewindDir, id)
+	if err != nil {
+		return out, err
 	}
 	_ = os.RemoveAll(dir) // a failed attempt's leftovers
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return filePos{}, err
+		return out, err
 	}
 	defer os.RemoveAll(dir)
-	log.Printf("restoring the latest backup on this server (not from the primary)")
-	r, err := s.restoreData(ctx, st, dir, restoreTarget{}, log)
+	r, err := s.restoreData(ctx, st, dir, t, log)
 	if err != nil {
-		return filePos{}, err
+		return out, err
 	}
-	pos, err := stopAtLastCommit(r)
-	if err != nil {
-		return filePos{}, err
+	if latest {
+		if out.Pos, err = stopAtLastCommit(r); err != nil {
+			return out, err
+		}
 	}
 	sc, err := s.startScratch(ctx, dir, r.Backup, drillStartTimeout)
 	if err != nil {
-		return filePos{}, err
+		return out, err
 	}
 	defer sc.stop(context.WithoutCancel(ctx))
-	if err := s.replay(ctx, sc, r, restoreTarget{}, log); err != nil {
-		return filePos{}, err
+	if err := s.replay(ctx, sc, r, t, log); err != nil {
+		return out, err
 	}
+	out.RecoveredTo = recoveredTo(r, t)
 	sdb, err := sc.connect(ctx)
 	if err != nil {
-		return filePos{}, err
+		return out, err
 	}
 	defer sdb.Close()
-	schemas, err := userSchemas(ctx, sdb)
-	if err != nil {
-		return filePos{}, err
+	if out.Schemas, err = userSchemas(ctx, sdb); err != nil {
+		return out, err
 	}
-	rec.Schemas = schemas
-	if err := standbys(s.env).put(*rec); err != nil { // so an interrupted load can be undone
-		return filePos{}, err
+	if out.Users, err = s.copyLoginsList(ctx, sdb); err != nil {
+		return out, err
 	}
-	if len(schemas) > 0 {
-		log.Printf("loading %s into the standby", plural(int64(len(schemas)), "database", "databases"))
-		if err := s.pipeDump(ctx, sc, append(s.dumpSchemaArgs(), append([]string{"--databases"}, schemas...)...), "", log); err != nil {
-			return filePos{}, err
+	loaded(out.Schemas, out.Users)
+	if len(out.Schemas) > 0 {
+		log.Printf("loading %s", plural(int64(len(out.Schemas)), "database", "databases"))
+		if err := s.pipeDump(ctx, sc, append(s.dumpSchemaArgs(), append([]string{"--databases"}, out.Schemas...)...), "", log); err != nil {
+			return out, err
 		}
 	}
-	users, err := s.copyLogins(ctx, sdb, sc, log)
-	rec.Users = users
-	_ = standbys(s.env).put(*rec)
-	if err != nil {
-		return filePos{}, err
+	if err := s.copyLogins(ctx, sdb, sc, len(out.Users), log); err != nil {
+		return out, err
 	}
-	return pos, nil
+	return out, nil
 }
 
 // stopAtLastCommit sets where the replay stops: the end of the last
@@ -411,38 +433,45 @@ var systemUsers = []string{"", "root", "mysql.sys", "mysql.session", "mysql.info
 var grantTables = []string{"user", "global_priv", "db", "tables_priv", "columns_priv", "procs_priv", "proxies_priv",
 	"global_grants", "role_edges", "default_roles", "password_history", "roles_mapping"}
 
-// copyLogins copies the logins (and their rights) of the restored copy
-// into the standby's server, without the system ones and Rowsafe's, and
-// returns them ('user'@'host').
-func (s *server) copyLogins(ctx context.Context, sdb *sql.DB, sc *scratch, log agent.TaskLogger) ([]string, error) {
+// loginFilter is the WHERE condition that leaves out the system logins
+// and Rowsafe's on a user column.
+func loginFilter(col string) string {
 	excluded := make([]string, len(systemUsers))
 	for i, u := range systemUsers {
 		excluded[i] = quoteString(u)
 	}
-	notSystem := func(col string) string {
-		return fmt.Sprintf("%s NOT IN (%s) AND %s NOT LIKE 'rowsafe\\_%%'", quoteIdent(col), strings.Join(excluded, ", "), quoteIdent(col))
-	}
+	return fmt.Sprintf("%s NOT IN (%s) AND %s NOT LIKE 'rowsafe\\_%%'", quoteIdent(col), strings.Join(excluded, ", "), quoteIdent(col))
+}
+
+// copyLoginsList lists the logins of the restored copy that copyLogins
+// copies ('user'@'host').
+func (s *server) copyLoginsList(ctx context.Context, sdb *sql.DB) ([]string, error) {
 	userTable := "user"
 	if s.flavor.mariadb() {
 		userTable = "global_priv" // mysql.user is a view on MariaDB 10.4+
 	}
 	var users []string
 	rows, err := sdb.QueryContext(ctx, fmt.Sprintf("SELECT CONCAT(QUOTE(User), '@', QUOTE(Host)) FROM mysql.%s WHERE %s",
-		quoteIdent(userTable), notSystem("User")))
+		quoteIdent(userTable), loginFilter("User")))
 	if err != nil {
 		return nil, fmt.Errorf("listing the logins of the restored copy: %w", err)
 	}
+	defer rows.Close()
 	for rows.Next() {
 		var u string
 		if err := rows.Scan(&u); err != nil {
-			rows.Close()
 			return nil, err
 		}
 		users = append(users, u)
 	}
-	rows.Close()
-	if len(users) == 0 {
-		return nil, nil
+	return users, rows.Err()
+}
+
+// copyLogins copies the logins (and their rights) of the restored copy
+// into this server, without the system ones and Rowsafe's.
+func (s *server) copyLogins(ctx context.Context, sdb *sql.DB, sc *scratch, n int, log agent.TaskLogger) error {
+	if n == 0 {
+		return nil
 	}
 	// Which grant tables this version has, and their user columns.
 	cols := map[string][]string{}
@@ -451,13 +480,13 @@ func (s *server) copyLogins(ctx context.Context, sdb *sql.DB, sc *scratch, log a
 		WHERE c.TABLE_SCHEMA = 'mysql' AND t.TABLE_TYPE = 'BASE TABLE'
 		  AND c.COLUMN_NAME IN ('User', 'USER', 'FROM_USER', 'TO_USER', 'DEFAULT_ROLE_USER', 'Role')`)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	for crows.Next() {
 		var t, c string
 		if err := crows.Scan(&t, &c); err != nil {
 			crows.Close()
-			return nil, err
+			return err
 		}
 		if slices.Contains(grantTables, t) {
 			cols[t] = append(cols[t], c)
@@ -470,7 +499,7 @@ func (s *server) copyLogins(ctx context.Context, sdb *sql.DB, sc *scratch, log a
 		}
 		var where []string
 		for _, c := range cols[t] {
-			where = append(where, notSystem(c))
+			where = append(where, loginFilter(c))
 		}
 		args := []string{"--no-create-info", "--replace", "--skip-triggers", "--skip-add-locks", "--compact",
 			"--where=" + strings.Join(where, " AND "), "mysql", t}
@@ -478,19 +507,19 @@ func (s *server) copyLogins(ctx context.Context, sdb *sql.DB, sc *scratch, log a
 			args = append([]string{"--set-gtid-purged=OFF"}, args...)
 		}
 		if err := s.pipeDump(ctx, sc, args, "mysql", log); err != nil {
-			return users, fmt.Errorf("copying the logins (%s): %w", t, err)
+			return fmt.Errorf("copying the logins (%s): %w", t, err)
 		}
 	}
 	tconn, err := s.open(ctx)
 	if err != nil {
-		return users, err
+		return err
 	}
 	defer tconn.Close()
 	if _, err := tconn.ExecContext(ctx, "FLUSH PRIVILEGES"); err != nil {
-		return users, err
+		return err
 	}
-	log.Printf("copied %s", plural(int64(len(users)), "login", "logins"))
-	return users, nil
+	log.Printf("copied %s", plural(int64(n), "login", "logins"))
+	return nil
 }
 
 // startReplication points the server at the primary and starts it.

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -271,4 +272,128 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// TestCloneIntegration clones a database into the second (empty) server as
+// it was at a moment, with its logins (MYSQL_IT_RUN=Clone).
+func TestCloneIntegration(t *testing.T) {
+	engine := os.Getenv("ROWSAFE_MYSQL_IT")
+	sbSocket := os.Getenv("ROWSAFE_MYSQL_IT_STANDBY_SOCKET")
+	if engine == "" || sbSocket == "" {
+		t.Skip("set ROWSAFE_MYSQL_IT and ROWSAFE_MYSQL_IT_STANDBY_SOCKET (MYSQL_IT_RUN=Clone sh scripts/test-mysql.sh)")
+	}
+	ctx := context.Background()
+	port, _ := strconv.Atoi(os.Getenv("ROWSAFE_REPO_S3_PORT"))
+	repo := pgbackrest.Repo{
+		Endpoint: os.Getenv("ROWSAFE_REPO_S3_ENDPOINT"), Bucket: os.Getenv("ROWSAFE_REPO_S3_BUCKET"),
+		Region: "us-east-1", Key: os.Getenv("ROWSAFE_REPO_S3_KEY"), KeySecret: os.Getenv("ROWSAFE_REPO_S3_KEY_SECRET"),
+		CipherPass: os.Getenv("ROWSAFE_REPO_CIPHER_PASS"), PathPrefix: "/rowsafe-clone-" + strconv.FormatInt(time.Now().Unix(), 10),
+		URIStyle: "path", Port: port, CAFile: os.Getenv("ROWSAFE_REPO_S3_CA_FILE"),
+	}
+	envFor := func(name string) agent.EngineEnv {
+		state := filepath.Join(t.TempDir(), name)
+		cfg := agent.Config{Mode: agent.ModeDockerSidecar, StateDir: state, DrillDir: filepath.Join(state, "drills"),
+			RewindDir: filepath.Join(state, "rewind")}
+		return agent.EngineEnv{Config: cfg, StateDir: filepath.Join(state, "engines", engine), Repo: repo, Runner: pgbackrest.ExecRunner{},
+			Log: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})), Notes: io.Discard}
+	}
+	envA, envB := envFor("a"), envFor("b")
+	e := &Engine{flavor: flavor(engine)}
+	specA := protocol.DatabaseSpec{ID: "db_clone_" + engine, Name: "shop", Stanza: "shop", Port: 3306,
+		SocketDir: os.Getenv("ROWSAFE_MYSQL_IT_SOCKET"), Engine: engine, RetentionFull: 2}
+	specB := specA
+	specB.SocketDir = sbSocket
+	shipPoll, shipMaxDelay = 2*time.Second, 5*time.Second
+	tl := &testLog{t: t}
+	pw, err := readSecretFile(os.Getenv("ROWSAFE_MYSQL_ADMIN_PASSWORD_FILE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := func(socket string) *sql.DB {
+		t.Helper()
+		db, err := openWith(ctx, account{User: "root", Password: pw}, socket, 3306)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return db
+	}
+	exec := func(db *sql.DB, q string, args ...any) {
+		t.Helper()
+		if _, err := db.ExecContext(ctx, q, args...); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	count := func(db *sql.DB, q string) int64 {
+		t.Helper()
+		var n int64
+		if err := db.QueryRowContext(ctx, q).Scan(&n); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		return n
+	}
+	adbA, adbB := admin(specA.SocketDir), admin(specB.SocketDir)
+	defer adbA.Close()
+	defer adbB.Close()
+	if ok, err := e.server(envA, specA).createAccountAsAdmin(ctx); err != nil || !ok {
+		t.Fatalf("account: %v %v", ok, err)
+	}
+	if ok, err := e.server(envB, specB).createAccountAsAdmin(ctx); err != nil || !ok {
+		t.Fatalf("account: %v %v", ok, err)
+	}
+	exec(adbB, standbyGrant)
+	run := func(typ string, params any) any {
+		t.Helper()
+		res, err := e.Run(ctx, envA, &protocol.Task{ID: fmt.Sprintf("t%d", time.Now().UnixNano()), Type: typ, Database: &specA, Params: mustJSON(t, params)}, tl)
+		if err != nil {
+			t.Fatalf("%s: %v", typ, err)
+		}
+		return res
+	}
+	run(protocol.TaskAdopt, protocol.AdoptParams{Apply: true})
+	run(protocol.TaskCheck, nil)
+	exec(adbA, "CREATE DATABASE shop")
+	exec(adbA, "CREATE TABLE shop.orders (id INT PRIMARY KEY, note VARCHAR(50))")
+	exec(adbA, "CREATE USER 'app'@'%' IDENTIFIED BY 'app-secret-1'")
+	exec(adbA, "GRANT SELECT, INSERT ON shop.* TO 'app'@'%'")
+	for i := 1; i <= 50; i++ {
+		exec(adbA, "INSERT INTO shop.orders VALUES (?, 'x')", i)
+	}
+	full := run(protocol.TaskBackup, protocol.BackupParams{Type: protocol.BackupFull}).(*protocol.BackupResult)
+	for i := 51; i <= 80; i++ {
+		exec(adbA, "INSERT INTO shop.orders VALUES (?, 'y')", i)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	at := time.Now().UTC().Truncate(time.Second)
+	time.Sleep(2 * time.Second)
+	exec(adbA, "DELETE FROM shop.orders WHERE id <= 10")
+	for i := 0; i < 20; i++ {
+		_, _ = e.Archiver(ctx, envA, specA)
+		time.Sleep(time.Second)
+	}
+	major, size, settings, err := e.ForkFacts(ctx, envA, specA)
+	if err != nil || major == 0 {
+		t.Fatalf("facts: %d %v", major, err)
+	}
+	res, err := e.ForkRestore(ctx, envB, protocol.ForkRestoreParams{ForkID: "fork_1", Name: "shop-staging", Source: specA,
+		Target: protocol.RewindTarget{Time: &at, BackupSet: full.Label}, Placement: protocol.ForkEmptyServer, Port: 3306, SocketDir: sbSocket,
+		Major: major, SizeBytes: size, Settings: settings}, tl)
+	if err != nil {
+		t.Fatalf("clone: %v", err)
+	}
+	t.Logf("clone: %+v", res)
+	if n := count(adbB, "SELECT COUNT(*) FROM shop.orders"); n != 80 {
+		t.Fatalf("the clone has %d orders, want 80 (as it was before the delete)", n)
+	}
+	if n := count(adbB, "SELECT COUNT(*) FROM mysql.user WHERE User = 'app'"); n != 1 {
+		t.Fatalf("the app login wasn't cloned: %d", n)
+	}
+	if res.RecoveredTo == nil || res.RecoveredTo.After(at) || len(res.Databases) != 1 {
+		t.Fatalf("result: %+v", res)
+	}
+	// A second clone into the same (now full) server is refused.
+	if _, err := e.ForkRestore(ctx, envB, protocol.ForkRestoreParams{ForkID: "fork_2", Name: "x", Source: specA,
+		Target: protocol.RewindTarget{Time: &at}, Placement: protocol.ForkEmptyServer, Port: 3306, SocketDir: sbSocket, Major: major}, tl); err == nil ||
+		!strings.Contains(err.Error(), "isn't empty") {
+		t.Fatalf("second clone: %v", err)
+	}
 }
