@@ -39,6 +39,8 @@ type dbMonitor struct {
 	prevAt     time.Time
 	lastSizes  time.Time
 	queryStart map[string]time.Time // query_id -> start, as first seen
+	qlogTo     time.Time            // the query log is read up to here (insights.go)
+	insightsAt time.Time
 }
 
 func (e *Engine) monitorFor(id string) *dbMonitor {
@@ -210,7 +212,14 @@ func (m *dbMonitor) sample(ctx context.Context, dm *protocol.DatabaseMonitoring)
 			}
 		}
 		dm.ClickHouse = status(ctx, c, int64(memLimit), queryTextOn())
+		dm.Statements, dm.QueryStats = m.queryStats(ctx, now, queryTextOn()) // insights.go
 		m.lastSizes = now
+	}
+	if now.Sub(m.insightsAt) >= insightsEvery {
+		if ins := insights(ctx, c); ins != nil {
+			dm.Insights = ins
+			m.insightsAt = now
+		}
 	}
 	dm.Metrics = metrics
 	return nil
