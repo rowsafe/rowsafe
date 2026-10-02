@@ -24,6 +24,9 @@ Usage (as root; root's copy is /usr/local/lib/rowsafe/rowsafe-permissions):
   permissions remove-owner FP   remove the passkey with fingerprint FP
   permissions apply             apply a signed change the agent received
                                 (run by rowsafe-permissions.service)
+  permissions tuning-apply      write the MongoDB or ClickHouse settings the agent
+                                asked for into Rowsafe's own files, where root
+                                allowed it (run by rowsafe-tuning.service)
 `
 
 // permissionsCmd runs `rowsafe-agent permissions ...`, or root's copy of
@@ -51,6 +54,8 @@ func permissionsCmd(ctx context.Context, args []string) int {
 		if err == nil {
 			err = permissionsPair(ctx)
 		}
+	case "tuning-apply": // tuning.go: rowsafe-tuning.service
+		err = tuningApply()
 	case "owners":
 		err = permissionsOwners()
 	case "remove-owner":
