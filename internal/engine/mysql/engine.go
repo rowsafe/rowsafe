@@ -161,12 +161,21 @@ func (e *Engine) Run(ctx context.Context, env agent.EngineEnv, task *protocol.Ta
 		return nilable(s.dbadmin(ctx, task.ID, p, log))
 	case protocol.TaskRewindInPlace:
 		var p protocol.RewindInPlaceParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
 		return nilable(s.rewindInPlace(ctx, p, log))
 	case protocol.TaskRewindUndo:
 		var p protocol.RewindUndoParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
 		return nilable(s.rewindUndo(ctx, p, log))
 	case protocol.TaskRewindCleanup:
 		var p protocol.RewindCleanupParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
 		return nilable(s.rewindCleanup(ctx, p, log))
 	}
 	return nil, fmt.Errorf("unsupported %s task %q", e.flavor.display(), task.Type)

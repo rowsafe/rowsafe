@@ -158,12 +158,21 @@ func (e *Engine) Run(ctx context.Context, env agent.EngineEnv, task *protocol.Ta
 		return nilIfNil(e.dbadmin(ctx, env, db, task.ID, p, tl))
 	case protocol.TaskRewindInPlace:
 		var p protocol.RewindInPlaceParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
 		return nilIfNil(e.rewindInPlace(ctx, env, db, p, tl))
 	case protocol.TaskRewindUndo:
 		var p protocol.RewindUndoParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
 		return nilIfNil(e.rewindUndo(ctx, env, db, p, tl))
 	case protocol.TaskRewindCleanup:
 		var p protocol.RewindCleanupParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
 		return nilIfNil(e.rewindCleanup(ctx, env, db, p, tl))
 	}
 	return nil, fmt.Errorf("ClickHouse databases can't run %s tasks", task.Type)

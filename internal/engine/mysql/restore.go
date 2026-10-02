@@ -417,6 +417,12 @@ func (s *server) startScratch(ctx context.Context, dir string, m manifest, timeo
 	if err != nil {
 		return nil, fmt.Errorf("the %s server binary isn't installed here: %w", s.flavor.display(), err)
 	}
+	return s.startScratchWith(ctx, dir, m, mysqld, nil, timeout)
+}
+
+// startScratchWith is startScratch with another server program and extra
+// options (an upgrade rehearsal's target version).
+func (s *server) startScratchWith(ctx context.Context, dir string, m manifest, mysqld string, extra []string, timeout time.Duration) (*scratch, error) {
 	for _, d := range []string{filepath.Join(dir, "socket"), filepath.Join(dir, "tmp")} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return nil, err
@@ -426,7 +432,7 @@ func (s *server) startScratch(ctx context.Context, dir string, m manifest, timeo
 		}
 	}
 	sc := &scratch{Dir: dir, DataDir: filepath.Join(dir, "data"), Socket: filepath.Join(dir, "socket", "mysqld.sock"),
-		Args: append(slicesClone(s.env.LowPriority), s.scratchArgs(mysqld, dir, m)...)}
+		Args: append(append(slicesClone(s.env.LowPriority), s.scratchArgs(mysqld, dir, m)...), extra...)}
 	if err := sc.start(); err != nil {
 		return nil, err
 	}
