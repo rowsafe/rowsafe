@@ -678,3 +678,44 @@ func jsonSame(a, b any) bool {
 	_ = json.Unmarshal(y, &q)
 	return fmt.Sprint(p) == fmt.Sprint(q)
 }
+
+// ROWSAFE_CONTROL_UPDATE_ONLY (a ClickHouse sidecar): only the agent's
+// container is updated; the database's is never stopped, started or
+// restarted, and inspect doesn't look at it.
+func TestUpdateOnly(t *testing.T) {
+	e := newAgentEnv(t, Config{UpdateOnly: true, Service: "clickhouse"})
+	if !e.s.cfg.AllowAgentUpdate {
+		t.Fatal("update-only doesn't allow updates")
+	}
+	r := e.do(ActionInspect)
+	if !r.OK || !slices.Equal(r.Actions, []string{ActionInspect, ActionUpdateAgent, ActionAgentReady}) || r.Container != "" {
+		t.Fatalf("inspect: %+v", r)
+	}
+	for _, a := range []string{ActionStop, ActionStart, ActionRestart} {
+		if r := e.do(a); r.OK || !strings.Contains(r.Error, "only updates the agent's container") {
+			t.Fatalf("%s: %+v", a, r)
+		}
+	}
+	e.d.mu.Lock()
+	calls := len(e.d.calls)
+	e.d.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("inspect or refused actions reached Docker: %v", e.d.calls)
+	}
+	// The update itself works as with ROWSAFE_CONTROL_ALLOW_AGENT_UPDATE.
+	if r := e.update(e.doc(goodDoc()), "0.5.0"); !r.OK {
+		t.Fatalf("update: %+v", r)
+	}
+	e.waitState(AgentUpdateWaiting)
+	if r := e.s.Do(context.Background(), Peer{UID: 999}, Request{ID: "started", Action: ActionAgentReady, Version: "0.5.0"}); !r.OK {
+		t.Fatalf("agent_ready: %+v", r)
+	}
+	if u := e.waitState(AgentUpdateDone, AgentUpdateRolledBack, AgentUpdateFailed); u.State != AgentUpdateDone {
+		t.Fatalf("outcome: %+v", u)
+	}
+	e.s.bg.Wait()
+	e.noPostgresChange()
+	if r := e.do(ActionInspect); !r.OK || r.Update == nil || r.Update.State != AgentUpdateDone {
+		t.Fatalf("inspect after: %+v", r)
+	}
+}

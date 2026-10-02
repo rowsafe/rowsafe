@@ -74,8 +74,9 @@ services:
   # It holds the Docker socket, which is root-equivalent on this host, so the
   # agent never gets it; the agent asks over the rowsafe-control volume and
   # it refuses everything else (any other container, any other Docker call).
-  # The ClickHouse agent only asks it to update itself, never to stop or
-  # restart ClickHouse. Every request is in its log (docker compose logs
+  # With ROWSAFE_CONTROL_UPDATE_ONLY it only updates the agent's container:
+  # it refuses to stop, start or restart ClickHouse's, whoever asks. Every
+  # request is in its log (docker compose logs
   # rowsafe-docker-control). To turn it on, uncomment this service, the
   # rowsafe-control volume below and the rowsafe-control mount of
   # rowsafe-agent. See https://rowsafe.sh/docs/guides/clickhouse#update-the-agent
@@ -88,7 +89,7 @@ services:
   #   environment:
   #     ROWSAFE_CONTROL_SERVICE: clickhouse      # the name of your ClickHouse service above
   #     ROWSAFE_CONTROL_ALLOW_UIDS: "101"        # the agent image's clickhouse user
-  #     ROWSAFE_CONTROL_ALLOW_AGENT_UPDATE: "1"
+  #     ROWSAFE_CONTROL_UPDATE_ONLY: "1"         # only update the agent; never stop or restart ClickHouse
   #     # ROWSAFE_CONTROL_AGENT_SERVICE: rowsafe-agent   # the agent's service name
   #   volumes:
   #     - /var/run/docker.sock:/var/run/docker.sock

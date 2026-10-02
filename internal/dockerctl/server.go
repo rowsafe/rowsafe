@@ -71,6 +71,12 @@ type Config struct {
 	// ReleasePublicKey (base64 Ed25519) verifies the images documents. Set
 	// at build time; without it agent updates are refused.
 	ReleasePublicKey string
+	// UpdateOnly (ROWSAFE_CONTROL_UPDATE_ONLY=1) only lets the agent update
+	// its own container: the database's container is never stopped, started
+	// or restarted (a ClickHouse sidecar: Rowsafe never restarts
+	// ClickHouse), and inspect reports only the update. It turns
+	// AllowAgentUpdate on.
+	UpdateOnly bool
 
 	// For tests.
 	now    func() time.Time
@@ -150,6 +156,9 @@ func New(cfg Config) (*Server, error) {
 	if cfg.AgentContainer == "" && cfg.AgentService == "" {
 		cfg.AgentService = "rowsafe-agent"
 	}
+	if cfg.UpdateOnly {
+		cfg.AllowAgentUpdate = true
+	}
 	if cfg.AgentContainer != "" && !nameRE.MatchString(cfg.AgentContainer) {
 		return nil, fmt.Errorf("ROWSAFE_CONTROL_AGENT_CONTAINER %q is not a container name", cfg.AgentContainer)
 	}
@@ -178,8 +187,14 @@ func New(cfg Config) (*Server, error) {
 	return &Server{cfg: cfg, eng: eng, log: cfg.Log, pub: pub, baseCtx: context.Background()}, nil
 }
 
+// AllowedActions are the actions this service allows.
+func (s *Server) AllowedActions() []string { return slices.Clone(s.actions()) }
+
 // actions are the actions this service allows.
 func (s *Server) actions() []string {
+	if s.cfg.UpdateOnly {
+		return append([]string{ActionInspect}, AgentUpdateActions...)
+	}
 	if s.cfg.AllowAgentUpdate {
 		return append(slices.Clone(Actions), AgentUpdateActions...)
 	}
@@ -397,6 +412,10 @@ func (s *Server) Do(ctx context.Context, peer Peer, req Request) (res Response) 
 		req.ID = ""
 		return fail("invalid request id")
 	}
+	if s.cfg.UpdateOnly && slices.Contains(Actions, req.Action) && req.Action != ActionInspect {
+		return fail(fmt.Sprintf("%s isn't allowed: this service only updates the agent's container (ROWSAFE_CONTROL_UPDATE_ONLY=1), "+
+			"it never stops, starts or restarts the database's", req.Action))
+	}
 	if req.Action == ActionUpdateAgent && !s.cfg.AllowAgentUpdate {
 		return fail("updating the agent's container isn't allowed: its operator turns it on with ROWSAFE_CONTROL_ALLOW_AGENT_UPDATE=1 on this service")
 	}
@@ -412,6 +431,10 @@ func (s *Server) Do(ctx context.Context, peer Peer, req Request) (res Response) 
 		return s.startAgentUpdate(ctx, req)
 	case ActionAgentReady:
 		return s.agentReady(req)
+	}
+	if req.Action == ActionInspect && s.cfg.UpdateOnly {
+		// No database container to look at: only the update (above).
+		return Response{OK: true, ID: req.ID, Action: req.Action, Actions: s.actions()}
 	}
 	if req.Action != ActionInspect {
 		s.actMu.Lock()

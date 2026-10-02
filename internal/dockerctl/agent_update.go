@@ -194,6 +194,10 @@ func isAgentImage(ref string) bool {
 func (s *Server) agentContainer(ctx context.Context) (containerJSON, []byte, imageJSON, error) {
 	s.mu.Lock()
 	s.identifySelfLocked(ctx)
+	if s.cfg.UpdateOnly && !s.resolved {
+		// Only to refuse the database's container below, when it is found.
+		_, _ = s.resolveLocked(ctx)
+	}
 	self, project, pgID := s.self, s.project, s.target.ID
 	s.mu.Unlock()
 	var c containerJSON
