@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rowsafe/rowsafe/internal/agent"
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
@@ -79,4 +80,17 @@ func TestMongoAdmin(t *testing.T) {
 	mongoAdminExtra(t, ctx, e, env, db)
 }
 
-var mongoAdminExtra = func(t *testing.T, ctx context.Context, e *Engine, env any, db protocol.DatabaseSpec) {}
+var mongoAdminExtra = func(t *testing.T, ctx context.Context, e *Engine, env agent.EngineEnv, db protocol.DatabaseSpec) {
+	rep, err := e.SecurityReport(ctx, env, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("listen %s ssl %v version %d auth off %v roles %d clients %+v", rep.ListenAddresses, rep.SSL, rep.VersionNum,
+		rep.EngineSecurity.AuthDisabled, len(rep.Roles), rep.Clients)
+	if rep.EngineSecurity.AuthDisabled || len(rep.Roles) == 0 || rep.VersionNum < 40000 {
+		t.Errorf("report %+v", rep)
+	}
+	mongoTuneExtra(t, ctx, e, env, db)
+}
+
+var mongoTuneExtra = func(t *testing.T, ctx context.Context, e *Engine, env agent.EngineEnv, db protocol.DatabaseSpec) {}

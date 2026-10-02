@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rowsafe/rowsafe/internal/agent"
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
@@ -83,4 +84,19 @@ func TestClickHouseAdmin(t *testing.T) {
 	chAdminExtra(t, ctx, e, db)
 }
 
-var chAdminExtra = func(t *testing.T, ctx context.Context, e *Engine, db protocol.DatabaseSpec) {}
+var chAdminExtra = func(t *testing.T, ctx context.Context, e *Engine, db protocol.DatabaseSpec) {
+	env, _ := testEnv(t)
+	_ = CreateLogin(ctx, env, db.Port, os.Getenv("ROWSAFE_TEST_CLICKHOUSE_ADMIN"), os.Getenv("ROWSAFE_TEST_CLICKHOUSE_ADMIN_PASSWORD"))
+	rep, err := e.SecurityReport(ctx, env, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("listen %s ssl %v version %d roles %+v open %v admins %v", rep.ListenAddresses, rep.SSL, rep.VersionNum, rep.Roles,
+		rep.EngineSecurity.OpenNoPassword, rep.EngineSecurity.RemoteAdmins)
+	if len(rep.Roles) < 2 || rep.VersionNum < 230000 {
+		t.Errorf("report %+v", rep)
+	}
+	chTuneExtra(t, ctx, e, env, db)
+}
+
+var chTuneExtra = func(t *testing.T, ctx context.Context, e *Engine, env agent.EngineEnv, db protocol.DatabaseSpec) {}

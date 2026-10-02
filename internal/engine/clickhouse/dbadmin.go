@@ -395,7 +395,7 @@ func (d *chdba) existingUser(ctx context.Context) (*chUser, error) {
 }
 
 func (d *chdba) hasAll(ctx context.Context, name string) (bool, error) {
-	n, err := d.c.scalar(ctx, "SELECT count() FROM system.grants WHERE user_name = {n:String} AND access_type = 'ALL' AND database IS NULL",
+	n, err := d.c.scalar(ctx, "SELECT count() FROM system.grants WHERE user_name = {n:String} AND access_type IN ('ALL', 'ACCESS MANAGEMENT', 'CREATE USER') AND database IS NULL",
 		map[string]string{"n": name})
 	return strings.TrimSpace(n) != "0", err
 }
@@ -515,7 +515,7 @@ func (d *chdba) inventory(ctx context.Context) (*protocol.DBInventory, error) {
 				continue
 			}
 			if g.Database == nil {
-				if g.Access == "ALL" {
+				if g.Access == "ALL" || g.Access == "ACCESS MANAGEMENT" || g.Access == "CREATE USER" {
 					all, x.Superuser = true, true
 				}
 				if g.Access == "CREATE DATABASE" || g.Access == "CREATE" || g.Access == "ALL" {
