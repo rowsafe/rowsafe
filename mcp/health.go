@@ -103,6 +103,8 @@ func hasOpen(tasks []protocol.TaskView, typ string) bool {
 func assessDatabase(s dbState, host *protocol.Host, now time.Time) []Problem {
 	d := s.db
 	name, q := d.Name, shellArg(d.Name)
+	eng, wal := engineName(d), cmp.Or(changeLog(d.Engine), "change log")
+	pg := protocol.NormalizeEngine(d.Engine) == protocol.EnginePostgreSQL
 	var out []Problem
 	add := func(p Problem) {
 		p.Database = name
@@ -115,14 +117,14 @@ func assessDatabase(s dbState, host *protocol.Host, now time.Time) []Problem {
 	}
 	if host != nil && !online(*host, now) {
 		// The host problem says what to do; here only note the consequence.
-		add(Problem{Severity: sevInfo, Kind: "host_offline", Summary: "its agent is offline: no backups, restore tests or WAL monitoring until it is back",
+		add(Problem{Severity: sevInfo, Kind: "host_offline", Summary: "its agent is offline: no backups, restore tests or monitoring until it is back",
 			NextAction: "Fix the agent on " + d.Hostname + " (see the host_offline problem for that host)."})
 	}
 
 	switch d.Status {
 	case protocol.DBPendingAdopt:
 		p := Problem{Severity: sevWarning, Kind: "not_adopted", Summary: "not protected yet: registered, but the adopt plan has not been applied",
-			NextAction: "Show the user the adopt plan (get_task on the latest adopt task, or re-plan with plan_adoption). Apply it only after explicit approval; applying uses ALTER SYSTEM + reload and never restarts PostgreSQL.",
+			NextAction: "Show the user the adopt plan (get_task on the latest adopt task, or re-plan with plan_adoption). Apply it only after explicit approval; applying never restarts " + eng + ".",
 			Command:    fmt.Sprintf("rowsafe plan %s && rowsafe apply %s", q, q), Tool: "plan_adoption"}
 		if lt := latestTask(s.tasks, protocol.TaskAdopt); lt != nil {
 			p.TaskID = lt.ID
@@ -135,13 +137,16 @@ func assessDatabase(s dbState, host *protocol.Host, now time.Time) []Problem {
 		}
 		add(p)
 	case protocol.DBAwaitingRestart:
-		detail := "archive_mode (or wal_level) is set but waits for a PostgreSQL restart, so WAL archiving has not started."
+		detail := "A setting continuous backup needs waits for a " + eng + " restart, so continuous backup has not started."
+		if pg {
+			detail = "archive_mode (or wal_level) is set but waits for a PostgreSQL restart, so WAL archiving has not started."
+		}
 		if d.Inspect != nil && len(d.Inspect.PendingRestart) > 0 {
 			detail = "Pending restart for: " + strings.Join(d.Inspect.PendingRestart, ", ") + ". " + detail
 		}
-		add(Problem{Severity: sevWarning, Kind: "awaiting_restart", Summary: "settings applied; waiting for a PostgreSQL restart, nothing is protected yet",
+		add(Problem{Severity: sevWarning, Kind: "awaiting_restart", Summary: "settings applied; waiting for a " + eng + " restart, nothing is protected yet",
 			Detail: detail,
-			NextAction: "The user restarts PostgreSQL when it suits them: Restart PostgreSQL in the dashboard, `rowsafe restart " + q + "`, or on the server. " +
+			NextAction: "The user restarts " + eng + " when it suits them: " + restartWays(d) + ". " +
 				"Rowsafe never restarts it on its own, and AI assistants can't. Rowsafe notices the restart and verifies by itself; verify_database checks right away.",
 			Command: restartCommand(d),
 			Runbook: runbookURL})
@@ -150,15 +155,15 @@ func assessDatabase(s dbState, host *protocol.Host, now time.Time) []Problem {
 		switch {
 		case lt == nil:
 			add(Problem{Severity: sevWarning, Kind: "verification_missing", Summary: "verifying, but no check task was found",
-				NextAction: "Run the WAL verification again.", Command: "rowsafe verify " + q, Tool: "verify_database"})
+				NextAction: "Run the verification again.", Command: "rowsafe verify " + q, Tool: "verify_database"})
 		case lt.Status == protocol.StatusFailed || lt.Status == protocol.StatusLost:
-			add(Problem{Severity: sevCritical, Kind: "verification_failed", Summary: "WAL verification " + lt.Status + ": no backups are scheduled",
+			add(Problem{Severity: sevCritical, Kind: "verification_failed", Summary: "verification " + lt.Status + ": no backups are scheduled",
 				Detail:     firstLine(lt.Error, 300),
-				NextAction: "Read the check task's log (get_task). Usually archive_mode is still off (PostgreSQL not restarted) or the repository credentials are wrong. Fix it, then verify again.",
+				NextAction: verifyFailedHint(d),
 				Command:    "rowsafe task " + lt.ID + " && rowsafe verify " + q, Tool: "verify_database", TaskID: lt.ID,
 				Runbook: runbookURL})
 		default:
-			add(Problem{Severity: sevInfo, Kind: "verifying", Summary: "WAL verification is " + lt.Status,
+			add(Problem{Severity: sevInfo, Kind: "verifying", Summary: "verification is " + lt.Status,
 				NextAction: "Wait for the check task to finish.", Command: "rowsafe task " + lt.ID, Tool: "get_task", TaskID: lt.ID})
 		}
 	case protocol.DBActive:
@@ -168,18 +173,29 @@ func assessDatabase(s dbState, host *protocol.Host, now time.Time) []Problem {
 
 	if a := d.Archiver; a != nil && d.Status != protocol.DBPendingAdopt {
 		if walFailing(a) {
-			add(Problem{Severity: sevCritical, Kind: "wal_archiving_failing",
+			p := Problem{Severity: sevCritical, Kind: "wal_archiving_failing",
 				Summary: fmt.Sprintf("Continuous backup is failing (last failure %s, last success %s)", ago(a.LastFailedTime, now), ago(a.LastArchivedTime, now)),
-				Detail:  "Point-in-time recovery stops at the last archived segment and pg_wal grows until the disk is full and PostgreSQL stops.",
-				NextAction: "Act now. On the host: check disk headroom (df -h), read the error (pg_stat_archiver, the PostgreSQL log, /var/log/rowsafe/" + name + "-archive-push*.log) and reproduce it with pgbackrest check. " +
-					"Typical causes: revoked or rotated bucket credentials, a missing pgBackRest config. After fixing, verify again (this rewrites the config archive_command reads).",
-				Command: "rowsafe verify " + q, Tool: "verify_database", Runbook: runbookURL})
+				Detail:  "Restores to any second stop at the last " + wal + " copied to the bucket.",
+				NextAction: "Act now. Read the error with get_database and the agent's log on " + d.Hostname + " (`journalctl -u rowsafe-agent`). " +
+					"Typical causes: revoked or rotated bucket credentials, a full disk. After fixing, verify again.",
+				Command: "rowsafe verify " + q, Tool: "verify_database", Runbook: runbookURL}
+			if pg {
+				p.Detail = "Point-in-time recovery stops at the last archived segment and pg_wal grows until the disk is full and PostgreSQL stops."
+				p.NextAction = "Act now. On the host: check disk headroom (df -h), read the error (pg_stat_archiver, the PostgreSQL log, /var/log/rowsafe/" + name + "-archive-push*.log) and reproduce it with pgbackrest check. " +
+					"Typical causes: revoked or rotated bucket credentials, a missing pgBackRest config. After fixing, verify again (this rewrites the config archive_command reads)."
+			}
+			add(p)
 		}
 		if a.Error != "" && (host == nil || online(*host, now)) {
-			add(Problem{Severity: sevCritical, Kind: "postgres_unreachable", Summary: "the agent cannot read pg_stat_archiver: PostgreSQL is probably down or refusing the agent",
+			p := Problem{Severity: sevCritical, Kind: "postgres_unreachable", Summary: "the agent cannot reach " + eng + ": it is probably down or refusing the agent",
 				Detail:     firstLine(a.Error, 300),
-				NextAction: "On " + d.Hostname + ": check PostgreSQL (pg_lsclusters, systemctl status postgresql@...), and that `sudo -u postgres psql -Xc 'select 1'` works over the registered socket and port.",
-				Runbook:    runbookURL})
+				NextAction: "On " + d.Hostname + ": check that " + eng + " is running (`systemctl status " + unitName(d.Engine) + "`, or its container) and that the agent can still sign in with the user it was set up with.",
+				Runbook:    runbookURL}
+			if pg {
+				p.Summary = "the agent cannot read pg_stat_archiver: PostgreSQL is probably down or refusing the agent"
+				p.NextAction = "On " + d.Hostname + ": check PostgreSQL (pg_lsclusters, systemctl status postgresql@...), and that `sudo -u postgres psql -Xc 'select 1'` works over the registered socket and port."
+			}
+			add(p)
 		}
 	}
 
@@ -230,12 +246,35 @@ func assessDatabase(s dbState, host *protocol.Host, now time.Time) []Problem {
 	return out
 }
 
-// restartCommand is how the user restarts d's PostgreSQL.
+// restartCommand is how the user restarts d's database server.
 func restartCommand(d protocol.Database) string {
-	if d.CanRestart {
-		return "rowsafe restart " + shellArg(d.Name) + "   # or on " + d.Hostname + ": sudo systemctl restart postgresql"
+	unit, compose := serviceName(d.Engine)
+	if canRestartFromRowsafe(d) {
+		return "rowsafe restart " + shellArg(d.Name) + "   # or on " + d.Hostname + ": sudo systemctl restart " + unit
 	}
-	return "sudo systemctl restart postgresql   # on " + d.Hostname + " (in Docker: docker compose restart postgres; restarting from Rowsafe isn't allowed there)"
+	why := "restarting from Rowsafe isn't allowed there"
+	if !protocol.EngineHas(d.Engine, protocol.FeatureRestart) {
+		why = "Rowsafe can't restart " + engineName(d) + " yet"
+	}
+	return "sudo systemctl restart " + unit + "   # on " + d.Hostname + " (in Docker: docker compose restart " + compose + "; " + why + ")"
+}
+
+// restartWays lists where the user restarts d's database server.
+func restartWays(d protocol.Database) string {
+	if protocol.EngineHas(d.Engine, protocol.FeatureRestart) {
+		return "Restart " + engineName(d) + " in the dashboard, `rowsafe restart " + shellArg(d.Name) + "`, or on the server"
+	}
+	return "on the server (Rowsafe can't restart " + engineName(d) + " yet)"
+}
+
+func unitName(engine string) string { u, _ := serviceName(engine); return u }
+
+// verifyFailedHint is the next step after a failed verification.
+func verifyFailedHint(d protocol.Database) string {
+	if protocol.NormalizeEngine(d.Engine) == protocol.EnginePostgreSQL {
+		return "Read the check task's log (get_task). Usually archive_mode is still off (PostgreSQL not restarted) or the repository credentials are wrong. Fix it, then verify again."
+	}
+	return "Read the check task's log (get_task). Usually a setting still waits for a " + engineName(d) + " restart or the bucket credentials are wrong. Fix it, then verify again."
 }
 
 func assessBackups(s dbState, now time.Time) []Problem {
@@ -341,7 +380,7 @@ func assessHost(h protocol.Host, dbNames []string, now time.Time) []Problem {
 			p.Summary = "the agent's last heartbeat was " + ago(h.LastSeenAt, now)
 		}
 		if len(dbNames) > 0 {
-			p.Detail = "Affected databases (no backups, restore tests or WAL monitoring; PostgreSQL still archives WAL): " + strings.Join(dbNames, ", ")
+			p.Detail = "Affected databases (no backups, restore tests or monitoring until the agent is back): " + strings.Join(dbNames, ", ")
 		} else {
 			p.Severity = sevWarning
 		}

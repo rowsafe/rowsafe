@@ -30,10 +30,10 @@ type SettingsOutput struct {
 func (t *tools) addSettingsTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "database_settings",
-		Description: "PostgreSQL's settings that matter for a database (memory, connections, change log and checkpoints, autovacuum, planner, parallel queries, timeouts, logging, query statistics), each with a plain explanation, its value and default, where it is set (default, postgresql.conf, postgresql.auto.conf) and whether changing it needs a restart; " +
-			"the server's memory, CPUs and disk type; settings waiting for a restart; Rowsafe's recommendations for the server (PGTune-style: shared_buffers about 25% of memory, work_mem from memory and connections, SSD costs, ...) with the reason for each; and the latest changes made through Rowsafe. " +
-			"Read-only. The archiving settings (archive_mode, archive_command, archive_timeout) are managed by Rowsafe. Settings are changed by a person with Tuning in the Rowsafe dashboard or `rowsafe tune NAME` (Rowsafe saves a Mark first and can undo a change).",
-		Annotations: readOnly("PostgreSQL settings"),
+		Description: "The database server's settings that matter (memory, connections, change log and checkpoints, maintenance, planner, timeouts, logging, query statistics), each with a plain explanation, its value and default, where it is set and whether changing it needs a restart; " +
+			"the server's memory, CPUs and disk type; settings waiting for a restart; Rowsafe's recommendations for the server (for PostgreSQL PGTune-style: shared_buffers about 25% of memory, work_mem from memory and connections, SSD costs, ...) with the reason for each; and the latest changes made through Rowsafe. " +
+			"When an engine's settings aren't available yet, it says so. Read-only. The settings continuous backup needs (PostgreSQL's archive_mode, archive_command, archive_timeout; MySQL's binary log) are managed by Rowsafe. Settings are changed by a person with Tuning in the Rowsafe dashboard or `rowsafe tune NAME` (Rowsafe saves a Mark first and can undo a change).",
+		Annotations: readOnly("Database settings"),
 		InputSchema: inputSchema[settingsInput](func(p map[string]*jsonschema.Schema) {
 			p["workload"].Enum = []any{protocol.WorkloadWeb, protocol.WorkloadAnalytics, protocol.WorkloadMixed}
 		}),
@@ -102,7 +102,7 @@ func (t *tools) databaseSettings(ctx context.Context, _ *sdk.CallToolRequest, in
 	}
 	if len(ov.PendingRestart) > 0 {
 		b.line("")
-		b.line("Waiting for a PostgreSQL restart: %s. The user restarts it from the dashboard or with `rowsafe restart`.", strings.Join(ov.PendingRestart, ", "))
+		b.line("Waiting for a restart of the database server: %s. The user restarts it when it suits them (from the dashboard or with `rowsafe restart` where Rowsafe can restart it, otherwise on the server).", strings.Join(ov.PendingRestart, ", "))
 	}
 	if len(ov.Recommendations) > 0 {
 		b.line("")

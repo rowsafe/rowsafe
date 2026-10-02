@@ -1,10 +1,12 @@
 package mcp
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -16,10 +18,11 @@ import (
 // ---- inputs ----
 
 type planInput struct {
-	Database      string `json:"database" jsonschema:"database name (or ID when it is already registered). New names: 2-40 lowercase letters, digits and dashes, starting with a letter; it becomes the pgBackRest stanza and bucket path"`
+	Database      string `json:"database" jsonschema:"database name (or ID when it is already registered). New names: 2-40 lowercase letters, digits and dashes, starting with a letter; it becomes the bucket path"`
 	Host          string `json:"host,omitempty" jsonschema:"only to register a new database: the host's hostname or ID"`
-	Port          int    `json:"port,omitempty" jsonschema:"only to register: PostgreSQL port (default 5432)"`
-	SocketDir     string `json:"socket_dir,omitempty" jsonschema:"only to register: PostgreSQL Unix socket directory (default /var/run/postgresql)"`
+	Engine        string `json:"engine,omitempty" jsonschema:"only to register: the database engine (default postgresql)"`
+	Port          int    `json:"port,omitempty" jsonschema:"only to register: the database's port (default: the engine's own, 5432 for PostgreSQL, 3306 for MySQL and MariaDB, 27017 for MongoDB, 8123 for ClickHouse)"`
+	SocketDir     string `json:"socket_dir,omitempty" jsonschema:"only to register: PostgreSQL's Unix socket directory (default /var/run/postgresql) or MySQL's socket file (default /var/run/mysqld/mysqld.sock); MongoDB and ClickHouse use TCP on 127.0.0.1"`
 	RetentionFull int    `json:"retention_full,omitempty" jsonschema:"only to register: full backups to keep (default 2, about two weeks of point-in-time recovery with weekly fulls)"`
 	WaitSeconds   int    `json:"wait_seconds,omitempty" jsonschema:"seconds to wait for the plan (usually ready in seconds when the agent is online); 0 returns at once"`
 }
@@ -71,13 +74,16 @@ func withWait[T any](fn func(props map[string]*jsonschema.Schema)) *jsonschema.S
 func (t *tools) addWriteTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "plan_adoption",
-		Description: "Produces a read-only adopt plan for a PostgreSQL cluster: what Rowsafe would change to enable WAL archiving (pgBackRest config, stanza, archive_mode/archive_command/archive_timeout, wal_level if minimal) and whether a PostgreSQL restart will be needed. Nothing on the host changes. " +
+		Description: "Produces a read-only adopt plan for a database server: what Rowsafe would change to turn on backups (for PostgreSQL: pgBackRest config, stanza, archive_mode/archive_command/archive_timeout, wal_level if minimal; for MySQL and MariaDB: the binary log settings; for MongoDB: the replica set the oplog needs) and whether a restart of the database server will be needed. Nothing on the host changes. " +
 			"A database not registered yet is registered first when host is given; registering counts against the plan's database limit (402 when full). For a registered database it re-plans (e.g. after settings changed). " +
-			"Returns the plan task. Applying the plan changes PostgreSQL settings and is done by a person: the Turn on backups button in the dashboard, or rowsafe apply NAME.",
+			"Returns the plan task. Applying the plan changes the database server's settings and is done by a person: the Turn on backups button in the dashboard, or rowsafe apply NAME.",
 		Annotations: writes("Plan adoption (read-only on the host)", false, false),
 		InputSchema: withWait[planInput](func(p map[string]*jsonschema.Schema) {
 			p["port"].Minimum, p["port"].Maximum = ptr(1.0), ptr(65535.0)
 			p["retention_full"].Minimum, p["retention_full"].Maximum = ptr(1.0), ptr(52.0)
+			for _, e := range protocol.Engines {
+				p["engine"].Enum = append(p["engine"].Enum, e)
+			}
 		}),
 	}, t.planAdoption)
 
@@ -141,10 +147,21 @@ func (t *tools) planAdoption(ctx context.Context, _ *sdk.CallToolRequest, in pla
 		return t.finish(ctx, task, d.Name, in.WaitSeconds, "Re-planning "+d.Name+" (read-only; nothing on the host changes).", false)
 	case isStatus(err, http.StatusNotFound):
 		if in.Host == "" {
-			return nil, WriteResult{}, fmt.Errorf("no database %q is registered. To register it, pass host (hostname or ID from list_hosts), plus port and socket_dir if they are not 5432 and /var/run/postgresql", in.Database)
+			return nil, WriteResult{}, fmt.Errorf("no database %q is registered. To register it, pass host (hostname or ID from list_hosts), plus engine if it isn't PostgreSQL, and port and socket_dir if they aren't the engine's defaults", in.Database)
+		}
+		if !protocol.ValidEngine(in.Engine) {
+			return nil, WriteResult{}, fmt.Errorf("unknown engine %q: use one of %s", in.Engine, strings.Join(protocol.Engines, ", "))
+		}
+		port, socket := in.Port, in.SocketDir
+		switch e := protocol.NormalizeEngine(in.Engine); e {
+		case protocol.EngineMySQL, protocol.EngineMariaDB:
+			// The defaults rowsafe adopt uses.
+			port = cmp.Or(port, 3306)
+			socket = cmp.Or(socket, map[bool]string{true: "/run/mysqld/mysqld.sock", false: "/var/run/mysqld/mysqld.sock"}[e == protocol.EngineMariaDB])
 		}
 		resp, err := t.c.CreateDatabase(ctx, protocol.CreateDatabaseRequest{
-			HostID: in.Host, Name: in.Database, Port: in.Port, SocketDir: in.SocketDir, RetentionFull: in.RetentionFull,
+			HostID: in.Host, Name: in.Database, Port: port, SocketDir: socket, RetentionFull: in.RetentionFull,
+			Engine: protocol.NormalizeEngine(in.Engine),
 		})
 		if err != nil {
 			return nil, WriteResult{}, apiError(err)
