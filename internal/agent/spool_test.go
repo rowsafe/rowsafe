@@ -376,7 +376,7 @@ func TestConfigMode(t *testing.T) {
 	if cfg.AutoUpdate {
 		t.Error("self-update must be off in a container")
 	}
-	if u, reason := NewUpdater(cfg, slog.New(slog.DiscardHandler)); u != nil || !strings.Contains(reason, "image tag") {
+	if u, reason := NewUpdater(cfg, slog.New(slog.DiscardHandler)); u != nil || !strings.Contains(reason, "container image") {
 		t.Errorf("updater %v, reason %q", u, reason)
 	}
 	t.Setenv("ROWSAFE_SPOOL_DIR", "spool")

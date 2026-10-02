@@ -7,7 +7,7 @@ require (
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/google/jsonschema-go v0.4.3
 	github.com/jackc/pgx/v5 v5.11.0
-	github.com/klauspost/compress v1.20.0
+	github.com/klauspost/compress v1.20.1
 	github.com/minio/minio-go/v7 v7.3.0
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/pganalyze/pg_query_go/v6 v6.2.2

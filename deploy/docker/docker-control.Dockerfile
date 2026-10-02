@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # rowsafe-docker-control: the opt-in service that lets the Rowsafe agent
-# stop, start and restart exactly one container (your PostgreSQL service)
-# without the agent ever seeing the Docker socket. A single static binary on
+# stop, start and restart exactly one container (your PostgreSQL service),
+# and if you allow it replace the agent's own container with a newer signed
+# image, without the agent ever seeing the Docker socket. A single static binary on
 # an empty image: no shell, no package manager, nothing else to run.
 # Published as ghcr.io/rowsafe/docker-control:<version>.
 #
@@ -21,12 +22,15 @@ COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY cmd/rowsafe-docker-control ./cmd/rowsafe-docker-control
 COPY internal/dockerctl ./internal/dockerctl
+COPY release/agentimages ./release/agentimages
 ARG VERSION=dev
+# The release key that signs the agent images documents (agent updates).
+ARG RELEASE_PUBLIC_KEY=
 ARG TARGETOS=linux
 ARG TARGETARCH
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -buildvcs=false \
-      -ldflags "-s -w -buildid= -X main.version=${VERSION}" \
+      -ldflags "-s -w -buildid= -X main.version=${VERSION} -X main.releasePublicKey=${RELEASE_PUBLIC_KEY}" \
       -o /out/rowsafe-docker-control ./cmd/rowsafe-docker-control
 
 FROM scratch

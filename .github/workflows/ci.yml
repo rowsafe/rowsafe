@@ -49,3 +49,5 @@ jobs:
           persist-credentials: false
       - name: Build the Docker agent image (PostgreSQL 17, amd64)
         run: docker build -f deploy/docker/agent.Dockerfile --build-arg PG_MAJOR=17 --build-arg VERSION=0.0.0 -t rowsafe-agent-ci .
+      - name: Build the ClickHouse agent image (26.8, amd64)
+        run: docker build -f deploy/docker/agent-clickhouse.Dockerfile --build-arg CH_VERSION=26.8 --build-arg VERSION=0.0.0 -t rowsafe-agent-clickhouse-ci .

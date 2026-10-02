@@ -4,7 +4,7 @@
 
 Everything that touches your data is here, under Apache-2.0, so you can read exactly what runs on your machines.
 
-**Documentation:** [rowsafe.sh/docs](https://rowsafe.sh/docs) · **Status:** PostgreSQL 13–18 on Linux servers and in Docker. MySQL, MariaDB, MongoDB and Redis are planned.
+**Documentation:** [rowsafe.sh/docs](https://rowsafe.sh/docs) · **Status:** PostgreSQL 13–18, MySQL 8.0/8.4, MariaDB 10.6–11.4 and MongoDB 6.0–8.0 on Linux servers and in Docker. ClickHouse 25.8, 26.3 and 26.8 too, with one difference: ClickHouse keeps no log of changes, so restores go to a backup or a Mark rather than to any second (a backup of what changed runs every hour). Redis is planned.
 
 ## Get started
 

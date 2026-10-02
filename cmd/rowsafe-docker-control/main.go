@@ -1,6 +1,8 @@
 // Command rowsafe-docker-control lets the Rowsafe agent (a Docker sidecar)
 // stop, start and restart exactly one container, the PostgreSQL container
-// next to it, without ever giving the agent the Docker socket. Opt-in: see
+// next to it, and, if its operator allows it, replace the agent's own
+// container with the signed image of a newer release, without ever giving
+// the agent the Docker socket. Opt-in: see
 // https://rowsafe.sh/docs/guides/docker#let-rowsafe-restart-the-container
 // and internal/dockerctl for the policy it enforces.
 package main
@@ -19,8 +21,12 @@ import (
 	"github.com/rowsafe/rowsafe/internal/dockerctl"
 )
 
-// version is set at build time.
-var version = "dev"
+// version and releasePublicKey (base64 Ed25519, which verifies the signed
+// agent images documents) are set at build time.
+var (
+	version          = "dev"
+	releasePublicKey = ""
+)
 
 const usage = `rowsafe-docker-control - let the Rowsafe agent restart one container
 
@@ -30,11 +36,16 @@ Usage:
 
 Environment:
   ROWSAFE_CONTROL_SERVICE     compose service to control, in this container's own
-                              compose project (default: postgres)
+                              compose project (default: postgres; e.g. clickhouse)
   ROWSAFE_CONTROL_CONTAINER   or: the name of the container to control (without compose)
   ROWSAFE_CONTROL_SOCKET      where the agent connects (default: ` + dockerctl.DefaultSocket + `)
-  ROWSAFE_CONTROL_ALLOW_UIDS  uids allowed to connect (default: 999,70)
+  ROWSAFE_CONTROL_ALLOW_UIDS  uids allowed to connect (default: 999,70; the ClickHouse
+                              agent image: 101)
   ROWSAFE_CONTROL_STOP_TIMEOUT  how long PostgreSQL may take to shut down (default: 2m)
+  ROWSAFE_CONTROL_ALLOW_AGENT_UPDATE  1: also let the agent ask for its own container to be
+                              replaced by the signed image of a newer release (default: off)
+  ROWSAFE_CONTROL_AGENT_SERVICE   the agent's compose service (default: rowsafe-agent)
+  ROWSAFE_CONTROL_AGENT_CONTAINER or: the agent container's name (without compose)
   DOCKER_HOST                 unix:///var/run/docker.sock (only Unix sockets)
 `
 
@@ -86,16 +97,27 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("ROWSAFE_CONTROL_STOP_TIMEOUT: %w", err)
 	}
+	allowUpdate, err := parseAllow(env("ROWSAFE_CONTROL_ALLOW_AGENT_UPDATE", "0"))
+	if err != nil {
+		return fmt.Errorf("ROWSAFE_CONTROL_ALLOW_AGENT_UPDATE: %w", err)
+	}
 	srv, err := dockerctl.New(dockerctl.Config{
-		DockerSocket: dockerSock,
-		Service:      env("ROWSAFE_CONTROL_SERVICE", ""),
-		Container:    env("ROWSAFE_CONTROL_CONTAINER", ""),
-		StopTimeout:  stopTimeout,
-		AllowedUIDs:  uids,
-		Log:          log,
+		DockerSocket:     dockerSock,
+		Service:          env("ROWSAFE_CONTROL_SERVICE", ""),
+		Container:        env("ROWSAFE_CONTROL_CONTAINER", ""),
+		StopTimeout:      stopTimeout,
+		AllowedUIDs:      uids,
+		Log:              log,
+		AllowAgentUpdate: allowUpdate,
+		AgentService:     env("ROWSAFE_CONTROL_AGENT_SERVICE", ""),
+		AgentContainer:   env("ROWSAFE_CONTROL_AGENT_CONTAINER", ""),
+		ReleasePublicKey: releasePublicKey,
 	})
 	if err != nil {
 		return err
+	}
+	if allowUpdate && releasePublicKey == "" {
+		log.Warn("ROWSAFE_CONTROL_ALLOW_AGENT_UPDATE is set, but this build has no release key: agent updates will be refused")
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -105,8 +127,12 @@ func run() error {
 		return fmt.Errorf("listening on %s: %w", sock, err)
 	}
 	defer os.Remove(sock)
+	actions := dockerctl.Actions
+	if allowUpdate {
+		actions = append(append([]string(nil), actions...), dockerctl.AgentUpdateActions...)
+	}
 	log.Info("rowsafe-docker-control started", "version", version, "socket", sock, "allowed_uids", uids,
-		"actions", dockerctl.Actions)
+		"actions", actions)
 	// The target may not exist yet (compose starts services in parallel):
 	// a failure here is logged and retried on the first request.
 	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -115,4 +141,15 @@ func run() error {
 	}
 	cancel()
 	return srv.Serve(ctx, ln)
+}
+
+// parseAllow reads an on/off setting: 1/true/yes or 0/false/no.
+func parseAllow(v string) (bool, error) {
+	switch strings.ToLower(v) {
+	case "1", "true", "yes", "on":
+		return true, nil
+	case "0", "false", "no", "off":
+		return false, nil
+	}
+	return false, fmt.Errorf("%q: use 1 or 0", v)
 }
