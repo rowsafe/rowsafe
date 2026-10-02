@@ -134,6 +134,8 @@ type DatabaseSummary struct {
 	ID              string      `json:"id"`
 	Host            string      `json:"host"`
 	Status          string      `json:"status" jsonschema:"pending_adopt, awaiting_restart, verifying or active"`
+	Engine          string      `json:"engine" jsonschema:"postgresql, mysql, mariadb, mongodb or clickhouse"`
+	Version         string      `json:"version,omitempty" jsonschema:"the database server's version"`
 	PostgresVersion string      `json:"postgres_version,omitempty"`
 	SizeBytes       int64       `json:"size_bytes,omitempty"`
 	LastBackup      *BackupView `json:"last_backup,omitempty"`
