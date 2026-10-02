@@ -30,6 +30,10 @@ func For(engine string) *Tuner {
 		return mysqlTuner
 	case protocol.EngineMariaDB:
 		return mariadbTuner
+	case protocol.EngineMongoDB:
+		return mongoTuner
+	case protocol.EngineClickHouse:
+		return clickhouseTuner
 	}
 	return nil
 }
