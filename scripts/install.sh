@@ -157,6 +157,7 @@ AGENT_USER=postgres
 # >>> mysql: a server with MySQL or MariaDB and no PostgreSQL runs the agent
 # as the mysql user (detect_host_engine), like postgres on a PostgreSQL one.
 HOST_ENGINE=postgresql
+PG_MAJORS=''
 AGENT_HOME=/var/lib/postgresql
 PERCONA_KEY_FPR=4D1BB29D63D98E422B2113B19334A25F8507EFA5
 MYSQL_CONF_LINK=/etc/mysql/conf.d/zz-rowsafe.cnf
@@ -615,7 +616,7 @@ ensure_mysql_tools() {
 # folders (restore tests and copies run mysqld on data under $STATE_DIR).
 mysql_setup() {
   _dropin=/etc/systemd/system/$SERVICE.d
-  if [ "$AGENT_USER" = postgres ]; then
+  if [ "$HOST_ENGINE" != mysql ] && [ "$HOST_ENGINE" != mariadb ]; then
     [ ! -f "$_dropin/10-mysql.conf" ] || { rm -f "$_dropin/10-mysql.conf"; UNIT_CHANGED=1; CHANGED=1; }
     return 0
   fi
@@ -7029,6 +7030,7 @@ use_rowsafe_user() {
 # here without them.
 ensure_mongodb_tools() {
   mongodb_present || return 0
+  [ "$HOST_ENGINE" != mongodb ] || TOOLS_SUMMARY="mongodump and the oplog, encrypted by the agent"
   if have mongodump && have mongorestore; then
     ok "MongoDB Database Tools at $(command -v mongodump)"
     return 0
@@ -7233,6 +7235,7 @@ clickhouse_present() {
 # ClickHouse with the server's own program, which ships with its package.
 check_clickhouse_program() {
   clickhouse_present || return 0
+  [ "$HOST_ENGINE" != clickhouse ] || TOOLS_SUMMARY="ClickHouse's own BACKUP, encrypted by the agent"
   if have clickhouse || [ -x /usr/bin/clickhouse ]; then
     ok "ClickHouse program at $(command -v clickhouse || echo /usr/bin/clickhouse) (Proof and Rewind copies use it)"
   else
@@ -7416,7 +7419,8 @@ install_agent() {
   connect_in_browser
 
   # 2. Dependencies and layout.
-  case $HOST_ENGINE in mysql | mariadb) ensure_mysql_tools ;; *) ensure_pgbackrest ;; esac # mysql
+  # MongoDB and ClickHouse back up with their own tools: no pgBackRest.
+  case $HOST_ENGINE in mysql | mariadb) ensure_mysql_tools ;; mongodb | clickhouse) ;; *) ensure_pgbackrest ;; esac # mysql
   ensure_mongodb_tools # mongodb (only where MongoDB runs)
   check_clickhouse_program # clickhouse (only where ClickHouse runs)
   ensure_restic # files section

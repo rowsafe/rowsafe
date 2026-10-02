@@ -599,6 +599,12 @@ with open(sys.argv[1]) as f:
             pat, _, ans = line.partition("\t")
             steps.append((pat, ans))
 
+# Questions a test doesn't care about, answered whenever they show up
+# (unless a step waits for them): the passkey offer at the end of a guided
+# setup.
+AUTO = [(p, a) for p, a in (("Pair a passkey now?", "n"),) if all(p not in s for s, _ in steps)]
+auto_seen = 0
+
 master, slave = os.openpty()
 pid = os.fork()
 if pid == 0:
@@ -618,9 +624,16 @@ status = None
 def pump(timeout):
     """Read what the terminal shows; False once CMD has exited and all is read."""
     global out, status
+    global auto_seen
     r, _, _ = select.select([master], [], [], timeout)
     if r:
         out += os.read(master, 65536)
+        for pat, ans in AUTO:
+            i = out.find(pat.encode(), auto_seen)
+            if i >= 0:
+                auto_seen = i + len(pat)
+                time.sleep(0.1)
+                os.write(master, ans.encode() + b"\r")
         return True
     if status is None:
         p, st = os.waitpid(pid, os.WNOHANG)
