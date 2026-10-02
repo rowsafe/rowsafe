@@ -182,6 +182,30 @@ func TestInPlaceIntegration(t *testing.T) {
 		t.Fatalf("after the rollback: %q", got)
 	}
 
+	// An upgrade rehearsal, the installed server standing in for the target version.
+	root := filepath.Join(base, "target")
+	for _, src := range []string{"/usr/sbin/mysqld", "/usr/sbin/mariadbd", "/usr/share/mysql", "/usr/share/mysql-8.0", "/usr/share/mysql-8.4", "/usr/share/mariadb", "/usr/lib/mysql/plugin", "/usr/lib64/mysql/plugin", "/usr/bin/mariadb-upgrade"} {
+		if _, err := os.Stat(src); err != nil {
+			continue
+		}
+		dst := filepath.Join(root, src)
+		if strings.HasPrefix(src, "/usr/lib64/") {
+			dst = filepath.Join(root, "/usr/lib/", strings.TrimPrefix(src, "/usr/lib64/"))
+		}
+		os.MkdirAll(filepath.Dir(dst), 0o755)
+		if out, err := exec.Command("cp", "-a", src, dst).CombinedOutput(); err != nil {
+			t.Fatalf("copying %s: %v %s", src, err, out)
+		}
+	}
+	reh := &protocol.UpgradeRehearsalResult{}
+	if err := e.RehearseUpgrade(ctx, env, spec, root, "99.0", reh, &testLog{t: t}); err != nil || !reh.Passed || reh.ToVersion == "" {
+		t.Fatalf("rehearsal: %v %+v", err, reh)
+	}
+	t.Logf("rehearsal: restore %.1fs, start %.1fs, %d databases", reh.RestoreSeconds, reh.UpgradeSeconds, len(reh.Databases))
+	if _, warnings, err := e.UpgradeIssues(ctx, env, spec, "8.0", "8.4"); err != nil || len(warnings) == 0 {
+		t.Fatalf("issues: %v %v", warnings, err)
+	}
+
 	must(protocol.TaskRewindCleanup, protocol.RewindCleanupParams{RewindID: "rw1"})
 	if st := e.RewindStates(env); len(st) != 0 {
 		t.Fatalf("states after cleanup %+v", st)

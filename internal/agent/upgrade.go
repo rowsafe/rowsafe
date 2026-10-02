@@ -1256,6 +1256,9 @@ func (a *Agent) upgradeCleanup(ctx context.Context, db protocol.DatabaseSpec, p 
 // removeKeptVersion asks the helper to remove the version an upgrade kept
 // aside and forgets the upgrade. The caller holds inPlaceMu.
 func (a *Agent) removeKeptVersion(ctx context.Context, r upgradeRecord, tl *taskLog) (*protocol.UpgradeCleanupResult, error) {
+	if !isPostgres(r.Database) {
+		return a.engineRemoveKept(ctx, r, tl) // engine_upgrades.go
+	}
 	res := &protocol.UpgradeCleanupResult{UpgradeID: r.ID}
 	kept := r.FromMajor
 	if r.Status == protocol.UpgradeUndone {
@@ -1299,6 +1302,25 @@ func (a *Agent) removeKeptVersion(ctx context.Context, r upgradeRecord, tl *task
 // interrupted, from the helper's answer.
 func (a *Agent) resumeUpgrade(ctx context.Context, r upgradeRecord) error {
 	st := a.upgradeState()
+	if !isPostgres(r.Database) { // engine_upgrades.go: the helper finishes or rolls back on its own
+		ans, err := a.waitUpdateResult(ctx, r.HelperID, upgradeHelperWait)
+		if err != nil {
+			return err
+		}
+		switch {
+		case r.Phase == upPhaseUndo && helperOK(ans) == nil:
+			return st.update(r.ID, func(x *upgradeRecord) {
+				x.Status, x.Phase, x.Expires = protocol.UpgradeUndone, upPhaseDone, keepUntil(x.KeepDays, time.Now().UTC())
+			})
+		case r.Phase == upPhaseUndo:
+			return st.update(r.ID, func(x *upgradeRecord) { x.Status, x.Phase = protocol.UpgradeDone, upPhaseDone })
+		case helperOK(ans) == nil:
+			return st.update(r.ID, func(x *upgradeRecord) {
+				x.Status, x.Phase, x.Expires = protocol.UpgradeDone, upPhaseDone, keepUntil(x.KeepDays, time.Now().UTC())
+			})
+		}
+		return st.remove(r.ID) // rolled back: nothing is kept
+	}
 	tl := &taskLog{}
 	defer func() {
 		for _, line := range strings.Split(strings.TrimSpace(tl.String()), "\n") {

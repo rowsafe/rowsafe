@@ -123,7 +123,9 @@ func ReadPermissions(p PermissionPaths) *protocol.PermissionsReport {
 			protocol.PermSecurityUpdates: protocol.UpdateAllowSecurity,
 			protocol.PermReboot:          protocol.UpdateAllowReboot,
 		} {
-			answer[perm] = anyLine(lines, func(f []string) bool { return f[0] == word })
+			answer[perm] = anyLine(lines, func(f []string) bool {
+				return f[0] == word || perm == protocol.PermUpdates && f[0] == protocol.UpdateAllowDatabase
+			})
 		}
 	}
 
@@ -145,9 +147,10 @@ func ReadPermissions(p PermissionPaths) *protocol.PermissionsReport {
 
 // anyEnginePermission are the permissions a server without PostgreSQL may
 // have too (MySQL, MariaDB, MongoDB or ClickHouse): restarts through the
-// same root helper, the server's own security updates and reboots, the
+// same root helper, the database's own updates, the server's security
+// updates and reboots, the
 // firewall, tuning, and pooling (ProxySQL, MySQL and MariaDB only).
-var anyEnginePermission = map[string]bool{protocol.PermRestart: true, protocol.PermSecurityUpdates: true,
+var anyEnginePermission = map[string]bool{protocol.PermRestart: true, protocol.PermUpdates: true, protocol.PermSecurityUpdates: true,
 	protocol.PermReboot: true, protocol.PermFirewall: true, protocol.PermTuning: true,
 	protocol.PermPooler: true, protocol.PermPoolerPublic: true}
 

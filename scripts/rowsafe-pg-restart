@@ -59,6 +59,17 @@
 #   ID pg-upgrade-cleanup PORT               remove the version kept aside by an upgrade or undo
 #   ID security-updates                      install pending security updates
 #   ID reboot                                reboot the server
+#   ID db-minor-update PORT                  newest release of the series (8.0, 10.11, 7.0, 25.8)
+#                                            of the MySQL, MariaDB, MongoDB or ClickHouse server on PORT
+#   ID db-upgrade PORT SERIES                that server to a newer series (8.0 -> 8.4), keeping a copy
+#                                            of its data directory and its old packages for undo
+#   ID db-upgrade-undo PORT                  back to the kept data and packages (the newer data is kept aside)
+#   ID db-upgrade-cleanup PORT               delete what an upgrade or its undo kept
+#
+# db-* requests need the word "database" and act only on a port in
+# /etc/rowsafe/restart-allowed whose unit is one of those servers' units;
+# they install only that server's own packages (see db_patterns), already
+# installed ones, at the newest version of the installed series.
 #
 # Each needs its word in /etc/rowsafe/updates-allowed (root's, written by
 # the installer): "postgresql" for the pg-* requests, which also only act on
@@ -88,7 +99,7 @@
 #
 # The agent reads the next lines to know what this helper can do.
 # actions: restart stop start create-cluster files-read files-put
-# update-actions: pg-minor-update pg-install-major pg-upgrade pg-upgrade-undo pg-upgrade-cleanup security-updates reboot
+# update-actions: pg-minor-update pg-install-major pg-upgrade pg-upgrade-undo pg-upgrade-cleanup security-updates reboot db-minor-update db-upgrade db-upgrade-undo db-upgrade-cleanup
 #
 # The same helper manages PgBouncer when root allowed that (--allow-pooler):
 # see "PgBouncer" below.
@@ -555,7 +566,7 @@ check_root_file() {
 # (postgresql@MAJOR-NAME.service), and the units the MySQL, MariaDB,
 # MongoDB and ClickHouse packages install (mysql, mysqld, mariadb and their
 # @instance forms, mongod, mongodb, clickhouse-server).
-db_unit_re='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server)\.service$'
+db_unit_re='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server)[.]service$'
 
 # allowed_unit PORT prints the unit the restart allow list names for PORT.
 allowed_unit() {
@@ -1445,12 +1456,330 @@ act_reboot() {
   exit 0
 }
 
+# ---------------------------------------------------------------- other engines
+
+# db_engine sets db_engine and db_main (the installed server package) for
+# $unit, the allowed unit of $port.
+db_engine() {
+  case $unit in
+    mongod.service | mongodb.service)
+      db_engine=mongodb
+      set -- mongodb-org-server
+      ;;
+    clickhouse-server.service)
+      db_engine=clickhouse
+      set -- clickhouse-server
+      ;;
+    mysql.service | mysqld.service | mariadb.service | mysql@*.service | mysqld@*.service | mariadb@*.service)
+      if [ -n "$(pkg_version mariadb-server)" ]; then
+        db_engine=mariadb
+        set -- mariadb-server
+      else
+        db_engine=mysql
+        set -- mysql-community-server mysql-server-8.4 mysql-server-8.0 mysql-server percona-server-server
+      fi
+      ;;
+    *) refuse "$unit is not a MySQL, MariaDB, MongoDB or ClickHouse service" ;;
+  esac
+  db_main=''
+  for p in "$@"; do
+    if [ -n "$(pkg_version "$p")" ]; then
+      db_main=$p
+      break
+    fi
+  done
+  [ -n "$db_main" ] || refuse "the $db_engine server on port $port isn't installed from packages here"
+}
+
+# db_patterns sets the engine's packages: locked ones move only within the
+# installed series; free ones (tools versioned on their own) are upgraded
+# as they come.
+db_patterns() {
+  case $db_engine in
+    mysql) locked='mysql-community-* mysql-server* mysql-client* mysql-common percona-server-*' free='percona-xtrabackup-*' ;;
+    mariadb) locked='mariadb-* libmariadb3 libmariadbd19' free='' ;;
+    mongodb) locked='mongodb-org mongodb-org-*' free='mongodb-mongosh mongodb-database-tools' ;;
+    clickhouse) locked='clickhouse-*' free='' ;;
+  esac
+}
+
+# series VERSION prints the release series of a package version:
+# "1:10.11.9+maria~deb12" -> 10.11, "8.0.40-1debian12" -> 8.0.
+series() { printf '%s\n' "$1" | sed -E 's/^[0-9]+://' | sed -nE 's/^([0-9]+\.[0-9]+).*/\1/p'; }
+
+# newest_in PKG SERIES prints the newest available version of PKG in SERIES.
+newest_in() {
+  best=''
+  for v in $(apt-cache madison "$1" 2>/dev/null | awk -F'|' '{ gsub(/ /, "", $2); print $2 }'); do
+    [ "$(series "$v")" = "$2" ] || continue
+    if [ -z "$best" ] || dpkg --compare-versions "$v" gt "$best"; then best=$v; fi
+  done
+  printf '%s' "$best"
+}
+
+# db_port checks $port's allowed unit and sets unit, db_engine, db_main.
+db_port() {
+  check_root_file "$allow" "Rowsafe may not restart the database on this server, which updating it needs (allow it on the server with: sudo rowsafe-allow restart)"
+  unit=$(allowed_unit "$port")
+  [ -n "$unit" ] || refuse "port $port is not in $allow: Rowsafe may not restart it, which updating it needs"
+  case $unit in postgresql@*) refuse "port $port is PostgreSQL's: use the pg-* requests" ;; esac
+  db_engine
+  db_patterns
+}
+
+act_db_minor_update() {
+  update_allowed database "installing database updates from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
+  db_port
+  before=$(pkg_version "$db_main")
+  ser=$(series "$before")
+  [ -n "$ser" ] || refuse "can't tell the release series of $db_main $before"
+  : >"$work_log"
+  t0=$(active_since "$unit")
+  was_active=0
+  "$systemctl" is-active --quiet "$unit" 2>/dev/null && was_active=1
+  apt_refresh
+  specs='' pkgs=''
+  for pat in $locked; do
+    for p in $(installed_pkgs "$pat"); do
+      case " $pkgs " in *" $p "*) continue ;; esac
+      v=$(newest_in "$p" "$ser")
+      [ -n "$v" ] || continue # not of this series (a shared library, a tool)
+      pkgs="$pkgs $p"
+      if dpkg --compare-versions "$v" gt "$(pkg_version "$p")"; then specs="$specs $p=$v"; fi
+    done
+  done
+  for pat in $free; do
+    for p in $(installed_pkgs "$pat"); do pkgs="$pkgs $p" specs="$specs $p"; done
+  done
+  if [ -n "$specs" ]; then
+    log "updating $db_engine $ser:$specs (request $id)"
+    # shellcheck disable=SC2086 # package specs built above from dpkg and apt
+    apt_run install -y --only-upgrade $specs || refuse "installing the update failed: $(tail_log)"
+  fi
+  after=$(pkg_version "$db_main")
+  add engine "$db_engine"
+  add series "$ser"
+  add from_package "$before"
+  add package "$after"
+  add packages "$pkgs"
+  restarted=0
+  if [ "$after" != "$before" ] && [ "$was_active" = 1 ]; then
+    if [ "$(active_since "$unit")" = "$t0" ]; then
+      # The packages didn't restart it: start the new binaries now.
+      out=$(timeout 300 "$systemctl" restart "$unit" 2>&1 </dev/null) ||
+        refuse "the update is installed, but restarting $unit failed: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
+    fi
+    restarted=1
+  fi
+  add restarted "$restarted"
+  ok=1
+  log "$db_engine on port $port: $before -> $after (restarted: $restarted)"
+}
+
+# db_datadir sets datadir, the data directory of the server on $port, from
+# the server's own configuration (never from the request), and checks it:
+# a real directory owned by the unit's own user, not a system directory.
+db_datadir() {
+  case $db_engine in
+    mysql | mariadb) datadir=$(my_print_defaults --mysqld 2>/dev/null | sed -n 's/^--datadir=//p' | tail -n 1) ;;
+    mongodb) datadir=$(awk '/^[[:space:]]*dbPath:/ { sub(/^[[:space:]]*dbPath:[[:space:]]*/, ""); gsub(/["\047]/, ""); print; exit }' /etc/mongod.conf 2>/dev/null) ;;
+    clickhouse) datadir=$(clickhouse extract-from-config --config-file /etc/clickhouse-server/config.xml --key path 2>/dev/null) ;;
+  esac
+  [ -n "$datadir" ] || case $db_engine in
+    mysql | mariadb) datadir=/var/lib/mysql ;;
+    mongodb) datadir=/var/lib/mongodb ;;
+    clickhouse) datadir=/var/lib/clickhouse ;;
+  esac
+  datadir=${datadir%/}
+  case $datadir in /*) ;; *) refuse "the data directory \"$datadir\" is not an absolute path" ;; esac
+  [ "$(realpath -e -- "$datadir" 2>/dev/null)" = "$datadir" ] || refuse "the data directory $datadir is missing or its path goes through a symbolic link"
+  case $datadir in
+    / | /etc | /etc/* | /usr | /usr/* | /var | /var/lib | /var/log | /home | /root | /root/* | /boot | /boot/* | \
+      /bin | /bin/* | /sbin | /sbin/* | /lib | /lib/* | /lib64 | /lib64/* | /proc | /proc/* | /sys | /sys/* | /dev | /dev/* | /run | /tmp | /opt | /srv | /mnt | /media | \
+      /var/lib/rowsafe | /var/lib/rowsafe/* | "$state" | "$state"/*)
+      refuse "the data directory $datadir is a system directory"
+      ;;
+  esac
+  svc_user=$("$systemctl" show -p User --value "$unit" 2>/dev/null)
+  owner=$(stat -c %U -- "$datadir")
+  [ -n "$svc_user" ] && [ "$owner" = "$svc_user" ] && [ "$owner" != root ] ||
+    refuse "the data directory $datadir isn't owned by $unit's user (${svc_user:-none})"
+}
+
+# db_stop / db_start stop and start the server, waiting for systemd.
+db_stop() { timeout 300 "$systemctl" stop "$unit" >>"$work_log" 2>&1 </dev/null; }
+db_start() {
+  "$systemctl" is-active --quiet "$unit" 2>/dev/null && return 0
+  timeout 600 "$systemctl" start "$unit" >>"$work_log" 2>&1 </dev/null
+}
+
+# db_restore_data FROM puts FROM's entries back into the data directory,
+# setting the current ones aside in $rec/after-<time> (renames on the same
+# filesystem, a copy otherwise).
+db_restore_data() {
+  aside=$rec/after-$(date -u +%Y%m%dT%H%M%SZ)
+  mkdir -p "$aside" || return 1
+  for e_ in "$datadir"/* "$datadir"/.[!.]* "$datadir"/..?*; do
+    [ -e "$e_" ] || [ -L "$e_" ] || continue
+    mv -f -- "$e_" "$aside"/ || return 1
+  done
+  cp -a --reflink=auto -- "$1"/. "$datadir"/ || return 1
+}
+
+act_db_upgrade() {
+  update_allowed database "upgrading the database from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
+  db_port
+  db_datadir
+  before=$(pkg_version "$db_main")
+  from=$(series "$before")
+  dpkg --compare-versions "$series_to" gt "$from" || refuse "$db_engine $series_to is not newer than $from"
+  rec=$state/dbupgrade-$port
+  [ ! -e "$rec" ] || refuse "an earlier upgrade of port $port is still kept: undo it or delete it first"
+  : >"$work_log"
+  apt_refresh
+  # The target versions, and the installed ones (kept as packages for undo).
+  specs='' olds=''
+  for pat in $locked; do
+    for p in $(installed_pkgs "$pat"); do
+      case " $olds " in *" $p="*) continue ;; esac
+      [ "$(series "$(pkg_version "$p")")" = "$from" ] || continue # not of this series (a shared library)
+      v=$(newest_in "$p" "$series_to")
+      [ -n "$v" ] || continue
+      olds="$olds $p=$(pkg_version "$p")"
+      specs="$specs $p=$v"
+    done
+  done
+  case " $specs " in *" $db_main="*) ;; *) refuse "this server's package sources don't offer $db_engine $series_to (add the vendor's repository for it first)" ;; esac
+  for pat in $free; do
+    for p in $(installed_pkgs "$pat"); do specs="$specs $p"; done
+  done
+  mkdir -m 0700 "$rec" && mkdir "$rec/debs" "$rec/data" || refuse "can't create $rec"
+  # Undo needs the installed packages again: download them now.
+  # shellcheck disable=SC2086 # package=version specs from dpkg and apt
+  (cd "$rec/debs" && apt_run download $olds) || {
+    rm -rf "$rec"
+    refuse "the installed packages ($before) can't be downloaded again, so the upgrade couldn't be undone; nothing changed"
+  }
+  need=$(du -sk -- "$datadir" | awk '{ print $1 }')
+  free=$(df -Pk -- "$rec" | awk 'NR == 2 { print $4 }')
+  if [ "${need:-0}" -gt 0 ] && [ "$((need + need / 10 + 262144))" -gt "${free:-0}" ]; then
+    rm -rf "$rec"
+    refuse "not enough free disk to keep a copy of the data for undo: $((need / 1024)) MB needed, $((free / 1024)) MB free"
+  fi
+  {
+    echo "engine=$db_engine"
+    echo "unit=$unit"
+    echo "datadir=$datadir"
+    echo "from_package=$before"
+    echo "from_series=$from"
+    echo "to_series=$series_to"
+    echo "status=in_progress"
+    echo "created_at=$(date +%s)"
+  } >"$rec/record"
+  log "upgrading $db_engine on port $port from $from to $series_to (request $id)"
+  t_stop=$(date +%s)
+  db_stop || {
+    db_start
+    rm -rf "$rec"
+    refuse "stopping $unit failed: $(tail_log)"
+  }
+  if ! cp -a --reflink=auto -- "$datadir"/. "$rec/data"/; then
+    db_start
+    rm -rf "$rec"
+    refuse "copying the data directory for undo failed; $db_engine runs as before"
+  fi
+  # shellcheck disable=SC2086
+  if ! apt_timeout=3600 apt_run install -y $specs; then
+    err_=$(tail_log)
+    db_rollback_upgrade
+    refuse "installing $db_engine $series_to failed ($err_); $db_engine $from runs again"
+  fi
+  if ! db_start; then
+    err_=$(tail_log)
+    db_rollback_upgrade
+    refuse "$db_engine $series_to didn't start ($err_); $db_engine $from runs again on its data"
+  fi
+  if [ "$db_engine" = mariadb ]; then
+    command -v mariadb-upgrade >/dev/null 2>&1 && timeout 3600 mariadb-upgrade >>"$work_log" 2>&1 </dev/null ||
+      log "mariadb-upgrade: $(tail_log)"
+  fi
+  after=$(pkg_version "$db_main")
+  sed -i 's/^status=.*/status=upgraded/' "$rec/record"
+  echo "to_package=$after" >>"$rec/record"
+  add engine "$db_engine"
+  add from_package "$before"
+  add package "$after"
+  add packages "$specs"
+  add datadir "$datadir"
+  add kept_bytes "$((need * 1024))"
+  add downtime_seconds "$(($(date +%s) - t_stop))"
+  ok=1
+}
+
+# db_rollback_upgrade puts the copied data and the old packages back and
+# starts the server (an upgrade that failed half-way, or an undo).
+db_rollback_upgrade() {
+  db_stop || true
+  db_restore_data "$rec/data" || log "putting the data back failed: the copy is in $rec/data"
+  # shellcheck disable=SC2086
+  apt_timeout=3600 apt_run install -y --allow-downgrades "$rec"/debs/*.deb || log "reinstalling the old packages failed: $(tail_log)"
+  db_start || log "starting $unit again failed: $(tail_log)"
+}
+
+# db_record PORT reads the record of the upgrade kept for PORT.
+db_record() {
+  rec=$state/dbupgrade-$1
+  [ -f "$rec/record" ] || refuse "no upgrade of port $1 is kept"
+  r_() { awk -F= -v k="$1" '$1 == k { print substr($0, length(k) + 2); exit }' "$rec/record"; }
+}
+
+act_db_upgrade_undo() {
+  update_allowed database "upgrading the database from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
+  db_port
+  db_record "$port"
+  [ "$(r_ status)" = upgraded ] || refuse "the upgrade of port $port was undone already"
+  [ "$(r_ unit)" = "$unit" ] || refuse "port $port runs as $unit now, not $(r_ unit) as when it was upgraded"
+  db_datadir
+  [ "$(r_ datadir)" = "$datadir" ] || refuse "the data directory is now $datadir, not $(r_ datadir) as when it was upgraded"
+  : >"$work_log"
+  t_stop=$(date +%s)
+  log "undoing the upgrade of $db_engine on port $port (request $id)"
+  db_stop || refuse "stopping $unit failed: $(tail_log)"
+  db_restore_data "$rec/data" || {
+    db_start
+    refuse "putting the old data back failed: $(tail_log)"
+  }
+  rm -rf "$rec/data"
+  # shellcheck disable=SC2086
+  apt_timeout=3600 apt_run install -y --allow-downgrades "$rec"/debs/*.deb || refuse "reinstalling $db_engine $(r_ from_series) failed: $(tail_log)"
+  db_start || refuse "$db_engine $(r_ from_series) didn't start: $(tail_log)"
+  sed -i 's/^status=.*/status=undone/' "$rec/record"
+  add engine "$db_engine"
+  add package "$(pkg_version "$db_main")"
+  add downtime_seconds "$(($(date +%s) - t_stop))"
+  ok=1
+}
+
+act_db_upgrade_cleanup() {
+  update_allowed database "upgrading the database from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
+  rec=$state/dbupgrade-$port
+  [ -d "$rec" ] || {
+    add freed_bytes 0
+    ok=1
+    return 0
+  }
+  freed=$(du -sk -- "$rec" | awk '{ print $1 * 1024 }')
+  rm -rf -- "$rec"
+  add freed_bytes "$freed"
+  ok=1
+}
+
 update_main() {
   result_name=update-result
   have_request "$dir/update-request" || exit 0
   mkdir -p "$state"
   line=$(read_request "$dir/update-request")
-  port='' major='' method='' start=''
+  port='' major='' method='' start='' series_to=''
   # Every request's exact shape; anything else is refused before it is split.
   rid='[A-Za-z0-9_-]{1,64}'
   if printf '%s\n' "$line" | grep -Eq "^$rid (pg-minor-update|pg-upgrade-cleanup) [0-9]{1,5}\$"; then
@@ -1469,6 +1798,14 @@ update_main() {
     # shellcheck disable=SC2086
     set -- $line
     id=$1 action=$2 port=$3 major=$4 method=$5
+  elif printf '%s\n' "$line" | grep -Eq "^$rid db-upgrade [0-9]{1,5} [1-9][0-9]{0,2}\.[0-9]{1,2}\$"; then
+    # shellcheck disable=SC2086
+    set -- $line
+    id=$1 action=$2 port=$3 series_to=$4
+  elif printf '%s\n' "$line" | grep -Eq "^$rid (db-minor-update|db-upgrade-undo|db-upgrade-cleanup) [0-9]{1,5}\$"; then
+    # shellcheck disable=SC2086
+    set -- $line
+    id=$1 action=$2 port=$3
   elif printf '%s\n' "$line" | grep -Eq "^$rid (security-updates|reboot)\$"; then
     id=${line%% *} action=${line#* }
   else
@@ -1482,6 +1819,10 @@ update_main() {
     pg-upgrade-cleanup) act_pg_upgrade_cleanup ;;
     security-updates) act_security_updates ;;
     reboot) act_reboot ;;
+    db-minor-update) act_db_minor_update ;;
+    db-upgrade) act_db_upgrade ;;
+    db-upgrade-undo) act_db_upgrade_undo ;;
+    db-upgrade-cleanup) act_db_upgrade_cleanup ;;
   esac
   answer
 }

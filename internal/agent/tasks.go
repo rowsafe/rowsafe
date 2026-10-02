@@ -89,6 +89,27 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 		// engine (updates.go); the database is only waited for afterwards.
 		return a.runUpgradeTask(ctx, task, tl, db)
 	}
+	if !isPostgres(db) && engineUpgrader(db) != nil {
+		switch task.Type { // engine_upgrades.go
+		case protocol.TaskUpgradeCheck:
+			return runRewind(ctx, task, tl, db, a.engineUpgradeCheck)
+		case protocol.TaskUpgradeRehearsal:
+			return runWithID(ctx, task, tl, db, a.engineUpgradeRehearsal)
+		case protocol.TaskUpgrade:
+			return runWithID(ctx, task, tl, db, a.engineUpgrade)
+		case protocol.TaskUpgradeUndo:
+			return runWithID(ctx, task, tl, db, a.engineUpgradeUndo)
+		case protocol.TaskUpgradeCleanup:
+			return runRewind(ctx, task, tl, db, a.upgradeCleanup)
+		}
+	}
+	if !isPostgres(db) && task.Type == protocol.TaskPGUpdate && engineVersioner(db) != nil {
+		res, err := a.engineUpdate(ctx, db, task.ID, tl) // engine_updates.go
+		if res == nil {
+			return nil, err
+		}
+		return res, err
+	}
 	if !isPostgres(db) && task.Type == protocol.TaskRestart && engineRestarter(db) != nil {
 		// Every engine restarts through the same root helper or container
 		// control service (restart.go).
