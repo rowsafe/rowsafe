@@ -128,7 +128,8 @@ func UsersXML(env agent.EngineEnv, port int) (string, error) {
 	return fmt.Sprintf(`<!-- Rowsafe's ClickHouse user (written by the Rowsafe installer). It signs in from this server only.
      SELECT, BACKUP: back up every database and compare tables with a copy; INSERT: bring rows back when you ask;
      KILL QUERY, ALTER UPDATE, ALTER DELETE: stop a query or cancel a stuck change when you ask;
-     S3: write backups to the agent's encrypting gateway on this server. -->
+     S3: write backups to the agent's encrypting gateway on this server;
+     CREATE, DROP (DATABASE, TABLE), ALTER TABLE: rewind the whole server in place when you ask (restore next to production, swap partitions). -->
 <clickhouse>
   <users>
     <%[1]s>

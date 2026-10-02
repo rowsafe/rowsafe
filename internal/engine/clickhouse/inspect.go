@@ -129,7 +129,7 @@ func inspect(ctx context.Context, c *client) (serverInfo, error) {
 	keep := map[string]bool{}
 	for _, d := range dbs {
 		switch {
-		case isSystemDB(d.Name):
+		case isSystemDB(d.Name), isRewindDB(d.Name): // a rewind in place's own (inplace.go): kept on this server only
 		case !slices.Contains(backupDatabaseEngines, d.Engine):
 			in.Skipped = append(in.Skipped, fmt.Sprintf("%s (a %s database: its tables live in another system)", d.Name, d.Engine))
 		default:
@@ -257,8 +257,30 @@ func parseGrants(out string) []string {
 //     for BACKUP ... TO S3; READ, WRITE ON S3 in its newer syntax).
 var neededGrants = []string{"SELECT", "INSERT", "BACKUP", "KILL QUERY", "ALTER UPDATE", "ALTER DELETE", "S3"}
 
+// rewindGrants are what rewinding the whole server in place (inplace.go)
+// needs on top: restore next to production (CREATE DATABASE, CREATE
+// TABLE), move partitions between tables (ALTER TABLE), swap and drop what
+// a rewind set aside (DROP TABLE, DROP DATABASE). Logins made before they
+// existed keep working for everything else; the installer adds them.
+var rewindGrants = []string{"CREATE DATABASE", "CREATE TABLE", "DROP DATABASE", "DROP TABLE", "ALTER TABLE"}
+
 // grantsSQL is the privileges list of GRANT ... ON *.*.
-func grantsSQL() string { return strings.Join(neededGrants, ", ") }
+func grantsSQL() string { return strings.Join(append(slices.Clone(neededGrants), rewindGrants...), ", ") }
+
+// missingRewindGrants lists the rewindGrants have doesn't cover.
+func missingRewindGrants(have []string) []string {
+	var out []string
+	for _, p := range rewindGrants {
+		word, _, _ := strings.Cut(p, " ")
+		if !slices.ContainsFunc(have, func(h string) bool {
+			h = strings.ToUpper(strings.TrimSpace(h))
+			return h == p || h == word || h == "ALL" || h == "ALL PRIVILEGES"
+		}) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
 
 // missingGrants lists the needed privileges have doesn't cover.
 func missingGrants(have []string) []string {
