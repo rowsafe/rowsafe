@@ -88,7 +88,9 @@ func loadMigState(dir string) migState {
 	return st
 }
 
-func saveMigState(dir string, st migState) error { return saveJSONFile(filepath.Join(dir, "clickhouse.json"), st) }
+func saveMigState(dir string, st migState) error {
+	return saveJSONFile(filepath.Join(dir, "clickhouse.json"), st)
+}
 
 func savedSource(dir string) (migSource, error) {
 	data, err := os.ReadFile(filepath.Join(dir, "source"))
