@@ -30,6 +30,10 @@ func dialectFor(engine string) dialect {
 			rewriteSuggestion: func(string) string {
 				return "Run mutations when the server is quiet and watch system.mutations; for deletes, a lightweight DELETE FROM ... WHERE is cheaper."
 			}}
+	case protocol.EngineMongoDB:
+		// The agent adds MongoFindings itself (per call).
+		return dialect{engine: e, rewriteDetail: "The collection is rewritten%s.",
+			rewriteSuggestion: func(string) string { return "Change large collections in batches." }}
 	}
 	return dialect{engine: protocol.EnginePostgreSQL, rules: rules,
 		rewriteDetail:     "The whole table is copied to new files%s, under a lock that blocks reads and writes.",

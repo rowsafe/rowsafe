@@ -179,7 +179,7 @@ func TestIntegration(t *testing.T) {
 	// Guard: a migration preview on a copy; production is untouched.
 	pv := must(protocol.TaskPreviewMigration, protocol.PreviewParams{PreviewID: "p1", SQL: "-- add a column\n" +
 		"ALTER TABLE orders ADD COLUMN status VARCHAR(10) DEFAULT 'new';\n" +
-		"ALTER TABLE orders MODIFY COLUMN customer VARCHAR(200) NOT NULL;\n" +
+		"ALTER TABLE orders MODIFY COLUMN amount DECIMAL(14,3);\n" +
 		"UPDATE orders SET status = 'old' WHERE id < 1000;\n" +
 		"CREATE INDEX orders_status ON orders (status);\n" +
 		"DROP TABLE nokey;\n" +
