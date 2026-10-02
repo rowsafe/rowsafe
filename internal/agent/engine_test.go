@@ -283,7 +283,9 @@ func TestEngineSecondCopy(t *testing.T) {
 // poolingEngine is a MySQL engine that runs a pooler for db_pooled.
 type poolingEngine struct{ fakeEngine }
 
-func (p *poolingEngine) PoolerManages(_ EngineEnv, db protocol.DatabaseSpec) bool { return db.ID == "db_pooled" }
+func (p *poolingEngine) PoolerManages(_ EngineEnv, db protocol.DatabaseSpec) bool {
+	return db.ID == "db_pooled"
+}
 
 func TestPoolerDatabasesIncludeEngines(t *testing.T) {
 	a := &Agent{cfg: Config{StateDir: t.TempDir()}}

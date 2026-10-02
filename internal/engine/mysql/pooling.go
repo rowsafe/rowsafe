@@ -9,8 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"net"
+	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -52,8 +52,8 @@ type poolState struct {
 	// TargetHost is another server's address after a standby's promotion
 	// ("" for this server).
 	TargetHost string `json:"target_host,omitempty"`
-	Version    string                   `json:"version"`
-	Users      string                   `json:"users"` // fingerprint of the users handed over
+	Version    string `json:"version"`
+	Users      string `json:"users"` // fingerprint of the users handed over
 }
 
 func (s *server) poolStatePath() string { return filepath.Join(s.env.StateDir, "proxysql.json") }
