@@ -40,15 +40,15 @@ func (m *dbMonitor) queryStats(ctx context.Context, now time.Time, withText bool
 		ID       string  `json:"id"`
 		Query    string  `json:"q"`
 		DB       string  `json:"db"`
-		User     string  `json:"user"`
+		User     string  `json:"usr"`
 		Calls    int64   `json:"calls"`
 		Ms       float64 `json:"ms"`
 		Rows     int64   `json:"rows"`
 		Examined int64   `json:"examined"`
 	}
 	rows, err := query[row](ctx, m.client, `
-		SELECT toString(normalized_query_hash) AS id, any(normalizeQuery(query)) AS q, any(current_database) AS db,
-		       any(user) AS user, toInt64(count()) AS calls, toFloat64(sum(query_duration_ms)) AS ms,
+		SELECT toString(reinterpretAsInt64(normalized_query_hash)) AS id, any(normalizeQuery(query)) AS q, any(current_database) AS db,
+		       any(user) AS usr, toInt64(count()) AS calls, toFloat64(sum(query_duration_ms)) AS ms,
 		       toInt64(sum(result_rows) + sum(written_rows)) AS rows, toInt64(sum(read_rows)) AS examined
 		FROM system.query_log
 		WHERE type = 'QueryFinish' AND is_initial_query AND user != {user:String} AND http_user_agent != {agent:String}

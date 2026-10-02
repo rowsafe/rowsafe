@@ -265,14 +265,14 @@ func collectionStats(ctx context.Context, coll *mongo.Collection) (*protocol.Tab
 	if cur.All(ctx, &stats) != nil || len(stats) == 0 {
 		return nil, nil
 	}
-	ss, _ := stats[0]["storageStats"].(bson.M)
+	ss := asM(stats[0]["storageStats"])
 	if ss == nil {
 		return nil, nil
 	}
 	size := &protocol.TableSize{RowsEstimate: int64(toFloat(ss["count"])), TableBytes: int64(toFloat(ss["storageSize"])),
 		IndexBytes: int64(toFloat(ss["totalIndexSize"]))}
 	size.TotalBytes = size.TableBytes + size.IndexBytes
-	sizes, _ := ss["indexSizes"].(bson.M)
+	sizes := asM(ss["indexSizes"])
 	var idx []mongoIndex
 	if cur, err := coll.Aggregate(ctx, bson.A{bson.D{{Key: "$indexStats", Value: bson.D{}}}}); err == nil {
 		var rows []bson.M
@@ -281,14 +281,14 @@ func collectionStats(ctx context.Context, coll *mongo.Collection) (*protocol.Tab
 				x := mongoIndex{}
 				x.name, _ = r["name"].(string)
 				x.bytes = int64(toFloat(sizes[x.name]))
-				if acc, ok := r["accesses"].(bson.M); ok {
+				if acc := asM(r["accesses"]); acc != nil {
 					x.ops = int64(toFloat(acc["ops"]))
 					x.since, _ = acc["since"].(time.Time)
 					if dt, ok := acc["since"].(bson.DateTime); ok {
 						x.since = dt.Time()
 					}
 				}
-				spec, _ := r["spec"].(bson.M)
+				spec := asM(r["spec"])
 				x.unique, _ = spec["unique"].(bool)
 				x.special = spec["partialFilterExpression"] != nil || spec["sparse"] == true || spec["expireAfterSeconds"] != nil
 				switch k := spec["key"].(type) {

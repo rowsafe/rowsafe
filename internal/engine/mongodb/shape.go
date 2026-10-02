@@ -21,7 +21,7 @@ import (
 func shapeOf(op bson.M) string {
 	ns, _ := op["ns"].(string)
 	_, coll, _ := strings.Cut(ns, ".")
-	cmd, _ := op["command"].(bson.M)
+	cmd := asM(op["command"])
 	kind, _ := op["op"].(string)
 	if coll == "" || cmd == nil {
 		return ""
@@ -62,9 +62,7 @@ func shapeOf(op bson.M) string {
 		q := cmd["q"]
 		if q == nil {
 			if us, ok := cmd["updates"].(bson.A); ok && len(us) > 0 {
-				if u, ok := us[0].(bson.M); ok {
-					q = u["q"]
-				}
+				q = asM(us[0])["q"]
 			}
 		}
 		part("update", orEmpty(q), false)
@@ -72,9 +70,7 @@ func shapeOf(op bson.M) string {
 		q := cmd["q"]
 		if q == nil {
 			if ds, ok := cmd["deletes"].(bson.A); ok && len(ds) > 0 {
-				if d, ok := ds[0].(bson.M); ok {
-					q = d["q"]
-				}
+				q = asM(ds[0])["q"]
 			}
 		}
 		part("delete", orEmpty(q), false)
@@ -98,6 +94,22 @@ func shapeOf(op bson.M) string {
 		b.WriteString("." + name + "()")
 	}
 	return b.String()
+}
+
+// asM is a document as a map (the driver decodes nested documents as
+// bson.D); nil when v isn't a document.
+func asM(v any) bson.M {
+	switch x := v.(type) {
+	case bson.M:
+		return x
+	case bson.D:
+		m := make(bson.M, len(x))
+		for _, e := range x {
+			m[e.Key] = e.Value
+		}
+		return m
+	}
+	return nil
 }
 
 func orEmpty(v any) any {
