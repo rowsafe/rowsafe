@@ -4058,11 +4058,115 @@ remove_pooler_units() {
   if systemd_running; then systemctl daemon-reload; fi
 }
 
+# pooler_name: PgBouncer in front of PostgreSQL, ProxySQL in front of MySQL
+# and MariaDB.
+pooler_name() {
+  case $HOST_ENGINE in mysql | mariadb) echo ProxySQL ;; *) echo PgBouncer ;; esac
+}
+
+# install_pooler_units_for_engine installs the engine's pooling helper.
+install_pooler_units_for_engine() {
+  case $HOST_ENGINE in
+    mysql | mariadb) install_proxysql_units ;;
+    *) install_pooler_units ;;
+  esac
+}
+
+# ProxySQL (MySQL, MariaDB): root's copy of the agent ($PERMISSIONS_HELPER
+# proxysql-apply) installs and configures it when the agent asks
+# ($POOLER_DIR/proxysql-request), only for ports in $POOLER_ALLOW_FILE.
+PROXYSQL_SERVICE_FILE=/etc/systemd/system/rowsafe-proxysql.service
+PROXYSQL_PATH_FILE=/etc/systemd/system/rowsafe-proxysql.path
+
+install_proxysql_units() {
+  [ -x "$PERMISSIONS_HELPER" ] || install_permissions_helper
+  [ -x "$PERMISSIONS_HELPER" ] || { warn "pooling needs root's copy of the agent ($PERMISSIONS_HELPER); run the installer again"; return 0; }
+  as_agent mkdir -p -m 0700 "$POOLER_DIR"
+  _changed=0
+  if sed "s/@AGENT_USER@/$AGENT_USER/" <<'ROWSAFE_PROXYSQL_SERVICE_EOF' | write_file "$PROXYSQL_SERVICE_FILE" 0644 root:root; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-proxysql.service: installs, configures, points or turns off
+# ProxySQL (connection pooling for MySQL and MariaDB) when someone turned
+# pooling on or off in Rowsafe, only for the ports root allowed
+# (/etc/rowsafe/pooler-allowed, sudo rowsafe-allow pooler). Started by
+# rowsafe-proxysql.path; installed by https://rowsafe.sh/install.
+
+[Unit]
+Description=Rowsafe: manage ProxySQL (connection pooling), on request
+Documentation=https://rowsafe.sh/docs/guides/connection-pooling
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/rowsafe/rowsafe-permissions proxysql-apply
+Environment=ROWSAFE_AGENT_USER=@AGENT_USER@
+TimeoutStartSec=15min
+RuntimeDirectory=rowsafe-proxysql
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+StateDirectory=rowsafe-proxysql
+StateDirectoryMode=0700
+UMask=0022
+# It installs a package (apt) and starts a service: no file system
+# sandbox, but no new privileges and no kernel changes.
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+ROWSAFE_PROXYSQL_SERVICE_EOF
+    _changed=1
+  fi
+  if write_file "$PROXYSQL_PATH_FILE" 0644 root:root <<'ROWSAFE_PROXYSQL_PATH_EOF'; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-proxysql.path: starts rowsafe-proxysql.service when the Rowsafe
+# agent asks for a pooling change. Installed by https://rowsafe.sh/install
+# only when root allowed pooling (--allow-pooler).
+
+[Unit]
+Description=Rowsafe: watch for connection pooling requests (ProxySQL)
+
+[Path]
+PathExists=/var/lib/rowsafe/pooler/proxysql-request
+Unit=rowsafe-proxysql.service
+
+[Install]
+WantedBy=multi-user.target
+ROWSAFE_PROXYSQL_PATH_EOF
+    _changed=1
+  fi
+  if systemd_running; then
+    [ "$_changed" = 0 ] || systemctl daemon-reload
+    systemctl enable --now --quiet rowsafe-proxysql.path
+  fi
+}
+
+remove_proxysql_units() {
+  [ -e "$PROXYSQL_PATH_FILE" ] || [ -e "$PROXYSQL_SERVICE_FILE" ] || return 0
+  if systemd_running; then systemctl disable --now --quiet rowsafe-proxysql.path 2>/dev/null || true; fi
+  rm -f "$PROXYSQL_PATH_FILE" "$PROXYSQL_SERVICE_FILE"
+  if systemd_running; then systemctl daemon-reload; fi
+}
+
 # pooler_ports prints the ports of this server's PostgreSQL clusters, found
 # by root: pg_lsclusters (Debian and Ubuntu), else the TCP ports that
 # processes of the agent user listen on. Never the agent's own discovery:
 # the agent user owns the agent's binary.
 pooler_ports() {
+  case $HOST_ENGINE in
+    mysql | mariadb) # ProxySQL: the ports mysqld or mariadbd (the mysql user) listen on
+      _uid=$(id -u mysql 2>/dev/null) || return 0
+      have ss || return 0
+      ss -Hltne 2>/dev/null | awk -v u="uid:$_uid" '{ for (i = 1; i <= NF; i++) if ($i == u) { n = split($4, a, ":"); print a[n] } }' |
+        awk '$1 ~ /^[0-9]+$/ && $1 != 33060' | sort -un
+      return 0
+      ;;
+  esac
   if have pg_lsclusters; then
     pg_lsclusters -h 2>/dev/null | awk '$3 ~ /^[0-9]+$/ && $3 > 0 && $3 < 65536 { print $3 }' | sort -un
     return 0
@@ -4081,10 +4185,10 @@ pooler_allowed_ports() {
 # write_pooler_allow PORTS PUBLIC writes the allow list.
 write_pooler_allow() {
   {
-    echo "# PostgreSQL clusters Rowsafe may put PgBouncer (connection pooling) in"
+    echo "# Database ports Rowsafe may put $(pooler_name) (connection pooling) in"
     echo "# front of, when someone turns pooling on in Rowsafe and confirms."
     echo "# Written by the installer (root); turn this off with:"
-    echo "# sudo rowsafe-allow --remove pooler. \"public\": PgBouncer may listen"
+    echo "# sudo rowsafe-allow --remove pooler. \"public\": the pooler may listen"
     echo "# on every address (sudo rowsafe-allow pooler-public)."
     echo "# PORT"
     printf '%s\n' "$1"
@@ -4097,14 +4201,14 @@ write_pooler_allow() {
 allow_pooler() {
   _ports=$(printf '%s\n%s\n' "$(pooler_allowed_ports)" "$(pooler_ports)" | awk 'NF' | sort -un)
   if [ -z "$_ports" ]; then
-    warn "found no PostgreSQL here, so managing PgBouncer from Rowsafe stays off"
+    warn "found no database server here, so managing $(pooler_name) from Rowsafe stays off"
     return 0
   fi
   _public=$(pooler_public_wanted)
   write_pooler_allow "$_ports" "$_public"
-  install_pooler_units
-  perm_ok "Rowsafe may install and manage PgBouncer when you turn pooling on, only when someone confirms"
-  if [ "$_public" = 1 ]; then perm_note "PgBouncer may listen on public addresses when someone chooses that: put a firewall in front of it."; fi
+  install_pooler_units_for_engine
+  perm_ok "Rowsafe may install and manage $(pooler_name) when you turn pooling on, only when someone confirms"
+  if [ "$_public" = 1 ]; then perm_note "$(pooler_name) may listen on public addresses when someone chooses that: put a firewall in front of it."; fi
 }
 
 # pooler_public_wanted prints 1 when PgBouncer may listen on every address:
@@ -4126,7 +4230,7 @@ refresh_pooler() {
   for _newport in $(pooler_ports); do
     printf '%s\n' "$_have" | grep -qx "$_newport" && continue
     # (confirm uses $_p itself.)
-    if [ "$TTY" = 1 ] && perm_ask "Also allow PgBouncer for the PostgreSQL on port $_newport?" n; then
+    if [ "$TTY" = 1 ] && perm_ask "Also allow $(pooler_name) for the $(engine_label) on port $_newport?" n; then
       _ports=$(printf '%s\n%s\n' "$_ports" "$_newport" | awk 'NF' | sort -un)
     fi
   done
@@ -4136,14 +4240,15 @@ refresh_pooler() {
   if [ "$_ports" != "$_have" ] || [ "$_public" != "$_was_public" ]; then
     write_pooler_allow "$_ports" "$_public"
   fi
-  install_pooler_units
+  install_pooler_units_for_engine
 }
 
 disallow_pooler() {
   remove_pooler_units
+  remove_proxysql_units
   if [ -d "$CONFIG_DIR" ]; then
     {
-      echo "# Managing PgBouncer from Rowsafe is off on this server."
+      echo "# Managing the connection pooler from Rowsafe is off on this server."
       echo "# Turn it on with: sudo rowsafe-allow pooler"
     } | write_file "$POOLER_ALLOW_FILE" 0644 root:root || true
   fi
@@ -4159,7 +4264,7 @@ pooler_access() {
     yes) allow_pooler ;;
     no)
       disallow_pooler
-      perm_ok "managing PgBouncer from Rowsafe is off"
+      perm_ok "managing $(pooler_name) from Rowsafe is off"
       ;;
     *)
       if [ -f "$POOLER_ALLOW_FILE" ]; then
@@ -4167,11 +4272,11 @@ pooler_access() {
         return 0
       fi
       [ "$TTY" = 1 ] && [ -n "$(pooler_ports)" ] || return 0
-      if perm_ask "Install and manage PgBouncer (connection pooling), when someone turns pooling on? Nothing is installed now." y; then
+      if perm_ask "Install and manage $(pooler_name) (connection pooling), when someone turns pooling on? Nothing is installed now." y; then
         allow_pooler
       else
         disallow_pooler
-        perm_note "OK: Rowsafe won't install or manage PgBouncer"
+        perm_note "OK: Rowsafe won't install or manage $(pooler_name)"
       fi
       ;;
   esac
@@ -4750,6 +4855,11 @@ perm_why() {
   if [ "$HOST_ENGINE" != postgresql ] || ! perm_has_postgres; then
     case $1 in
       firewall | tuning) ;; # every engine's port; MongoDB's and ClickHouse's settings
+      pooler | pooler-public) case $HOST_ENGINE in mysql | mariadb) ;; *)
+        echo "Rowsafe pools PostgreSQL (PgBouncer) and MySQL or MariaDB (ProxySQL), and neither is on this server"
+        return 0
+        ;;
+      esac ;;
       *)
         echo "Rowsafe does this for PostgreSQL, and there is no PostgreSQL on this server"
         return 0
@@ -4761,7 +4871,7 @@ perm_why() {
     restart) [ -n "$(restart_pairs)" ] || _w="found no PostgreSQL service (systemd) on this server" ;;
     create-cluster) have pg_createcluster || _w="pg_createcluster isn't installed (Debian and Ubuntu's postgresql-common)" ;;
     updates | security-updates | reboot) have apt-get || _w="Rowsafe installs updates with apt (Debian and Ubuntu)" ;;
-    pooler | pooler-public) [ -n "$(pooler_ports)$(pooler_allowed_ports)" ] || _w="found no PostgreSQL cluster here" ;;
+    pooler | pooler-public) [ -n "$(pooler_ports)$(pooler_allowed_ports)" ] || _w="found no $(engine_label) here" ;;
     tuning)
       case $HOST_ENGINE in
         mongodb) [ -n "$(mongodb_config_file)" ] || _w="found no MongoDB configuration file (/etc/mongod.conf)" ;;

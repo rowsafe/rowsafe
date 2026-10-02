@@ -142,6 +142,9 @@ func TestPermissionsUnavailable(t *testing.T) {
 		if anyEnginePermission[name] {
 			want = ""
 		}
+		if name == protocol.PermPooler || name == protocol.PermPoolerPublic {
+			want = permReasonPooler // no MySQL either
+		}
 		if r.Unavailable[name] != want {
 			t.Errorf("%s: %q", name, r.Unavailable[name])
 		}

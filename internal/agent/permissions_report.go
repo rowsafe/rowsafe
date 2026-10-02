@@ -90,6 +90,7 @@ var permHave = func(name string) bool {
 const (
 	permReasonPostgresOnly = "Rowsafe does this for PostgreSQL, and there is no PostgreSQL on this server"
 	permReasonTuning       = "Rowsafe needs this only for MongoDB and ClickHouse, and neither is installed here"
+	permReasonPooler       = "Rowsafe pools PostgreSQL (PgBouncer) and MySQL or MariaDB (ProxySQL), and neither is on this server"
 	permReasonNoCluster    = "pg_createcluster isn't installed (Debian and Ubuntu's postgresql-common)"
 	permReasonNoNft        = "nftables isn't installed"
 	permReasonNoApt        = "Rowsafe installs updates with apt (Debian and Ubuntu)"
@@ -144,7 +145,8 @@ func ReadPermissions(p PermissionPaths) *protocol.PermissionsReport {
 
 // anyEnginePermission are the permissions a server without PostgreSQL may
 // have too (MySQL, MariaDB, MongoDB or ClickHouse).
-var anyEnginePermission = map[string]bool{protocol.PermFirewall: true, protocol.PermTuning: true}
+var anyEnginePermission = map[string]bool{protocol.PermFirewall: true, protocol.PermTuning: true,
+	protocol.PermPooler: true, protocol.PermPoolerPublic: true}
 
 // permissionsUnavailable says which permissions this server can't have,
 // and why. One that is allowed is never listed.
@@ -158,6 +160,8 @@ func permissionsUnavailable(p PermissionPaths, allowed []string) map[string]stri
 			why = permReasonPostgresOnly
 		case name == protocol.PermCreateCluster && !permHave("pg_createcluster"):
 			why = permReasonNoCluster
+		case len(pg) == 0 && (name == protocol.PermPooler || name == protocol.PermPoolerPublic) && !permHave("mysqld") && !permHave("mariadbd"):
+			why = permReasonPooler
 		case name == protocol.PermTuning && !permHave("mongod") && !permHave("clickhouse-server") && !permHave("clickhouse"):
 			why = permReasonTuning
 		case name == protocol.PermFirewall && !permHave("nft"):
