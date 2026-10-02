@@ -84,4 +84,3 @@ func (s *MomentSearch) Result(from, to time.Time, notes []string, started time.T
 	res.Summary = momentsSummary(res)
 	return &res
 }
-
