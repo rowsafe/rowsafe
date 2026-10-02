@@ -279,3 +279,21 @@ func TestEngineSecondCopy(t *testing.T) {
 		t.Errorf("retention %d", s.RetentionFull)
 	}
 }
+
+// poolingEngine is a MySQL engine that runs a pooler for db_pooled.
+type poolingEngine struct{ fakeEngine }
+
+func (p *poolingEngine) PoolerManages(_ EngineEnv, db protocol.DatabaseSpec) bool { return db.ID == "db_pooled" }
+
+func TestPoolerDatabasesIncludeEngines(t *testing.T) {
+	a := &Agent{cfg: Config{StateDir: t.TempDir()}}
+	withEngine(t, &poolingEngine{fakeEngine{name: protocol.EngineMySQL}})
+	a.watched = []protocol.DatabaseSpec{{ID: "db_pooled", Engine: protocol.EngineMySQL}, {ID: "db_plain", Engine: protocol.EngineMySQL}, {ID: "db_pg"}}
+	if got := a.poolerDatabases(); len(got) != 1 || got[0] != "db_pooled" {
+		t.Errorf("pooler databases = %v", got)
+	}
+	a.savePoolerState(&poolerState{DatabaseID: "db_pg", DatabaseName: "app"})
+	if got := a.poolerDatabases(); len(got) != 2 || got[0] != "db_pg" || got[1] != "db_pooled" {
+		t.Errorf("with PgBouncer too = %v", got)
+	}
+}

@@ -1086,10 +1086,11 @@ func redactErr(err error, url string) string {
 // poolerDatabases are the Rowsafe databases the managed PgBouncer serves
 // (StandbyHeartbeat.PoolerDatabases).
 func (a *Agent) poolerDatabases() []string {
+	var out []string
 	if st, err := a.loadPoolerState(); err == nil && st != nil && st.DatabaseID != "" {
-		return []string{st.DatabaseID}
+		out = append(out, st.DatabaseID)
 	}
-	return nil
+	return append(out, a.enginePoolerDatabases()...) // ProxySQL (pooling_engines.go)
 }
 
 // poolerSources are the PgBouncer admin consoles monitoring reads.

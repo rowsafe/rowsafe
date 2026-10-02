@@ -57,7 +57,7 @@ func proxysqlApply(ctx context.Context) error {
 	if err := json.Unmarshal(data, &req); err != nil {
 		return answer(proxysqlroot.Result{Error: "invalid request"})
 	}
-	ports, public, err := proxysqlroot.Allowed(getenv("ROWSAFE_POOLER_ALLOW", proxysqlroot.DefaultAllowFile))
+	allow, err := proxysqlroot.Allowed(getenv("ROWSAFE_POOLER_ALLOW", proxysqlroot.DefaultAllowFile))
 	if err != nil {
 		return answer(proxysqlroot.Result{ID: req.ID, Error: "connection pooling isn't allowed on this server (root allows it with: sudo rowsafe-allow pooler)"})
 	}
@@ -74,7 +74,7 @@ func proxysqlApply(ctx context.Context) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
-	res := a.Apply(ctx, req, ports, public)
+	res := a.Apply(ctx, req, allow)
 	fmt.Fprintf(os.Stderr, "rowsafe-proxysql: %s %s ok=%v %s\n", req.ID, req.Action, res.OK, res.Error)
 	return answer(res)
 }
