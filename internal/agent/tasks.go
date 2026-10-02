@@ -84,6 +84,15 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 		return nil, fmt.Errorf("task %s has no database", task.Type)
 	}
 	db := *task.Database
+	if !isPostgres(db) && task.Type == protocol.TaskRestart && engineRestarter(db) != nil {
+		// Every engine restarts through the same root helper or container
+		// control service (restart.go).
+		res, err := a.restart(ctx, db, task.ID, tl)
+		if res == nil {
+			return nil, err
+		}
+		return res, err
+	}
 	if !isPostgres(db) {
 		return a.runEngineTask(ctx, task, tl)
 	}

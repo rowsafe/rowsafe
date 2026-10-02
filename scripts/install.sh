@@ -122,6 +122,9 @@ RESTART_SERVICE_FILE=/etc/systemd/system/rowsafe-pg-restart.service
 RESTART_PATH_FILE=/etc/systemd/system/rowsafe-pg-restart.path
 RESTART_ALLOW_FILE=$CONFIG_DIR/restart-allowed
 RESTART_DIR=$STATE_DIR/restart
+# The database units the restart helper acts on (its db_unit_re): Debian's
+# PostgreSQL clusters and the MySQL, MariaDB, MongoDB and ClickHouse units.
+DB_UNIT_RE='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server)\.service$'
 # Forks (--allow-create-cluster): new clusters created by their own unit,
 # started by the restart helper.
 CREATE_HELPER=$LIB_DIR/rowsafe-pg-create-cluster
@@ -1064,9 +1067,10 @@ install_helper_script() {
   if write_file "$RESTART_HELPER" 0755 root:root <<'ROWSAFE_RESTART_HELPER_EOF'; then
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
-# rowsafe-pg-restart: restarts or stops PostgreSQL when a person asked
+# rowsafe-pg-restart: restarts or stops PostgreSQL (or the MySQL, MariaDB,
+# MongoDB or ClickHouse server Rowsafe protects) when a person asked
 # Rowsafe to (Restart in the dashboard, `rowsafe restart`; Rewind the whole
-# database, which stops PostgreSQL, swaps its data directory and starts it),
+# database, which stops the database, swaps its data and starts it),
 # and installs PostgreSQL updates, upgrades PostgreSQL, installs security
 # updates or reboots the server when a person clicked that and root allowed
 # it (update mode, below).
@@ -1613,11 +1617,18 @@ check_root_file() {
   esac
 }
 
+# db_unit_re: the database units a restart, stop or start may act on,
+# whatever the allow list says: Debian's PostgreSQL cluster units
+# (postgresql@MAJOR-NAME.service), and the units the MySQL, MariaDB,
+# MongoDB and ClickHouse packages install (mysql, mysqld, mariadb and their
+# @instance forms, mongod, mongodb, clickhouse-server).
+db_unit_re='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server)\.service$'
+
 # allowed_unit PORT prints the unit the restart allow list names for PORT.
 allowed_unit() {
-  # Only Debian's cluster units (postgresql@MAJOR-NAME.service), whatever the
-  # file says; ports compare as strings.
-  awk -v p="$1" '$1 "" == p "" && $2 ~ /^postgresql@[0-9]+-[A-Za-z0-9_.-]+\.service$/ { print $2; exit }' "$allow"
+  # Only database units (db_unit_re), whatever the file says; ports compare
+  # as strings.
+  awk -v p="$1" -v re="$db_unit_re" '$1 "" == p "" && $2 ~ re { print $2; exit }' "$allow"
 }
 
 # created_unit PORT prints the unit of a cluster created for a fork on PORT
@@ -1982,7 +1993,7 @@ restart_main() {
   # created-clusters; both must be files only root can change.
   unit=''
   if [ -f "$allow" ] || [ -L "$allow" ] || { [ ! -f "$created" ] && [ ! -L "$created" ]; }; then
-    check_root_file "$allow" "restarting or stopping PostgreSQL from Rowsafe is not allowed on this server"
+    check_root_file "$allow" "restarting or stopping the database from Rowsafe is not allowed on this server"
     unit=$(allowed_unit "$port")
   fi
   [ -n "$unit" ] || unit=$(created_unit "$port")
@@ -1995,7 +2006,7 @@ restart_main() {
     last=$(cat "$stamp" 2>/dev/null || echo 0)
     case $last in '' | *[!0-9]*) last=0 ;; esac
     if [ $((now - last)) -lt "$min_interval" ]; then
-      refuse "PostgreSQL ($unit) was restarted less than a minute ago; try again in a minute"
+      refuse "$unit was restarted less than a minute ago; try again in a minute"
     fi
     echo "$now" >"$stamp"
   fi
@@ -2549,6 +2560,24 @@ ROWSAFE_RESTART_HELPER_EOF
   fi
 }
 
+# agent_user_dropin UNIT gives a helper UNIT the agent's user when it isn't
+# postgres (MySQL: mysql; MongoDB, ClickHouse: rowsafe): the helper reads
+# and removes requests with that user's privileges. Returns 0 when the
+# drop-in changed.
+agent_user_dropin() {
+  _dd=/etc/systemd/system/$1.d
+  _df=$_dd/10-agent-user.conf
+  if [ "$AGENT_USER" = postgres ]; then
+    [ -e "$_df" ] || return 1
+    rm -f "$_df"
+    rmdir "$_dd" 2>/dev/null || true
+    return 0
+  fi
+  install -d -m 0755 -o root -g root "$_dd"
+  printf '# Written by the Rowsafe installer: the agent runs as %s on this server.\n[Service]\nEnvironment=ROWSAFE_AGENT_USER=%s\n' \
+    "$AGENT_USER" "$AGENT_USER" | write_file "$_df" 0644 root:root
+}
+
 install_restart_helper() {
   install_helper_script
   _changed=$HELPER_CHANGED
@@ -2632,6 +2661,7 @@ WantedBy=multi-user.target
 ROWSAFE_RESTART_PATH_EOF
     _changed=1
   fi
+  if agent_user_dropin rowsafe-pg-restart.service; then _changed=1; fi
   if systemd_running; then
     [ "$_changed" = 0 ] || systemctl daemon-reload
     systemctl enable --now --quiet rowsafe-pg-restart.path
@@ -2647,6 +2677,8 @@ remove_restart_helper() {
     systemctl disable --now --quiet rowsafe-pg-restart.path 2>/dev/null || true
   fi
   rm -f "$RESTART_PATH_FILE" "$RESTART_SERVICE_FILE"
+  rm -f /etc/systemd/system/rowsafe-pg-restart.service.d/10-agent-user.conf
+  rmdir /etc/systemd/system/rowsafe-pg-restart.service.d 2>/dev/null || true
   [ -e "$POOLER_PATH_FILE" ] || [ -e "$FILES_PATH_FILE" ] || rm -f "$RESTART_HELPER" # PgBouncer or files still use it
   rmdir "${RESTART_HELPER%/*}" 2>/dev/null || true
   if systemd_running; then systemctl daemon-reload; fi
@@ -2660,13 +2692,21 @@ restart_pairs() {
     return 0
   fi
   [ -s "$TMP/clusters" ] || return 0
-  awk -F '\t' '($14 == "" || $14 == "postgresql") && $1 ~ /^[1-9][0-9]*$/ && $12 ~ /^postgresql@[0-9]+-[A-Za-z0-9_.-]+\.service$/ { print $1, $12 }' "$TMP/clusters"
+  awk -F '\t' -v re="$DB_UNIT_RE" '$1 ~ /^[1-9][0-9]*$/ && $12 ~ re &&
+    (($14 == "" || $14 == "postgresql") == ($12 ~ /^postgresql@/)) { print $1, $12 }' "$TMP/clusters"
 }
 
 # root_restart_pairs prints "PORT UNIT" for the clusters root finds itself
 # (pg_lsclusters, Debian's postgresql@MAJOR-NAME units), where the agent's
 # discovery didn't run (--permissions; root never needs the agent for it).
 root_restart_pairs() {
+  if [ "$HOST_ENGINE" != postgresql ]; then
+    # MySQL, MariaDB, MongoDB, ClickHouse: the agent's own discovery (as the
+    # agent user), only the units the restart helper accepts.
+    agent_run setup discover 2>/dev/null |
+      awk -F '\t' -v re="$DB_UNIT_RE" '$1 ~ /^[1-9][0-9]*$/ && $12 ~ re && $12 !~ /^postgresql@/ { print $1, $12 }'
+    return 0
+  fi
   have pg_lsclusters || return 0
   pg_lsclusters -h 2>/dev/null |
     awk '$1 ~ /^[0-9]+$/ && $2 ~ /^[A-Za-z0-9_.-]+$/ && $3 ~ /^[1-9][0-9]*$/ { print $3, "postgresql@" $1 "-" $2 ".service" }'
@@ -2680,11 +2720,11 @@ restart_allowed() {
 allow_restarts() {
   _pairs=$(restart_pairs)
   if [ -z "$_pairs" ]; then
-    warn "found no systemd service running PostgreSQL here, so restarting or stopping it from Rowsafe stays off"
+    warn "found no systemd service running $(engine_label) here, so restarting or stopping it from Rowsafe stays off"
     return 0
   fi
   {
-    echo "# PostgreSQL clusters Rowsafe may restart or stop when someone asks"
+    echo "# Databases ($(engine_label)) Rowsafe may restart or stop when someone asks"
     echo "# (Restart and Rewind in the dashboard, \`rowsafe restart\`), only when they"
     echo "# confirm. Written by the installer (root); turn this off with:"
     echo "# sudo rowsafe-allow --remove restart"
@@ -2692,7 +2732,7 @@ allow_restarts() {
     printf '%s\n' "$_pairs"
   } | write_file "$RESTART_ALLOW_FILE" 0644 root:root || true
   install_restart_helper
-  perm_ok "Rowsafe may restart or stop PostgreSQL when you ask (Restart, Rewind), only when someone confirms"
+  perm_ok "Rowsafe may restart or stop $(engine_label) when you ask (Restart, Rewind), only when someone confirms"
 }
 
 disallow_restarts() {
@@ -2700,7 +2740,7 @@ disallow_restarts() {
   rm -f "$UPDATES_ALLOW_FILE" # updates need the helper too
   if [ -d "$CONFIG_DIR" ]; then
     {
-      echo "# Restarting or stopping PostgreSQL from Rowsafe is off on this server."
+      echo "# Restarting or stopping the database from Rowsafe is off on this server."
       echo "# Turn it on with: sudo rowsafe-allow restart"
     } | write_file "$RESTART_ALLOW_FILE" 0644 root:root || true
   fi
@@ -2713,7 +2753,7 @@ restart_access() {
     yes) allow_restarts ;;
     no)
       disallow_restarts
-      perm_ok "restarting or stopping PostgreSQL from Rowsafe is off"
+      perm_ok "restarting or stopping $(engine_label) from Rowsafe is off"
       ;;
     *)
       if [ -f "$RESTART_ALLOW_FILE" ]; then
@@ -2721,11 +2761,11 @@ restart_access() {
         return 0
       fi
       [ "$TTY" = 1 ] && [ -n "$(restart_pairs)" ] || return 0
-      if perm_ask "Restart or stop PostgreSQL, when someone clicks Restart or Rewind?" y; then
+      if perm_ask "Restart or stop $(engine_label), when someone clicks Restart or Rewind?" y; then
         allow_restarts
       else
         disallow_restarts
-        perm_note "OK: Rowsafe can't restart or stop PostgreSQL"
+        perm_note "OK: Rowsafe can't restart or stop $(engine_label)"
       fi
       ;;
   esac
@@ -4497,7 +4537,7 @@ perm_need() {
 
 perm_desc() {
   case $1 in
-    restart) echo "restart or stop PostgreSQL (Restart, Rewind)" ;;
+    restart) echo "restart or stop $(engine_label) (Restart, Rewind)" ;;
     create-cluster) echo "create a PostgreSQL cluster for a fork" ;;
     updates) echo "install PostgreSQL updates and upgrades" ;;
     security-updates) echo "install this server's security updates" ;;
@@ -4541,7 +4581,13 @@ perm_has_postgres() {
 # can). The agent reports the same reasons.
 perm_why() {
   if [ "$HOST_ENGINE" != postgresql ] || ! perm_has_postgres; then
-    echo "Rowsafe does this for PostgreSQL, and there is no PostgreSQL on this server"
+    # Another engine (or none yet): restarts and the server's own updates
+    # work for every engine; the rest is PostgreSQL's.
+    case $1 in
+      restart) [ -n "$(restart_pairs)" ] || echo "found no $(engine_label) service (systemd) on this server" ;;
+      security-updates | reboot) have apt-get || echo "Rowsafe installs updates with apt (Debian and Ubuntu)" ;;
+      *) echo "Rowsafe does this for PostgreSQL, and there is no PostgreSQL on this server" ;;
+    esac
     return 0
   fi
   _w=''
@@ -4604,12 +4650,6 @@ perm_cascade() {
 # perm_summary prints what Rowsafe may do here now, and how to change it.
 perm_summary() {
   say ""
-  if [ "$HOST_ENGINE" != postgresql ] || ! perm_has_postgres; then
-    step "What Rowsafe may do on $(uname -n)"
-    note "Nothing to allow: these permissions are for PostgreSQL (restart it, install"
-    note "its updates, PgBouncer, the firewall), and there is no PostgreSQL here."
-    return 0
-  fi
   step "What Rowsafe may do on $(uname -n), only when someone clicks it and confirms"
   _first_on='' _first_off='' _rows_off='' _rows_na=''
   for _p in $PERMISSIONS; do
@@ -4908,9 +4948,9 @@ permissions_main() {
   AGENT_USER=$(stat -c '%U' "$ENV_FILE")
   case $AGENT_USER in
     postgres) HOST_ENGINE=postgresql AGENT_HOME=/var/lib/postgresql ;;
-    mysql) HOST_ENGINE=mysql ;;
+    mysql) HOST_ENGINE=mysql AGENT_HOME=$STATE_DIR ;;
     *)
-      HOST_ENGINE=mongodb
+      HOST_ENGINE=mongodb AGENT_HOME=$STATE_DIR
       [ ! -f "/etc/systemd/system/$SERVICE.d/10-clickhouse.conf" ] || HOST_ENGINE=clickhouse
       ;;
   esac

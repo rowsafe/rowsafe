@@ -22,7 +22,7 @@ Getting started
   rowsafe login                      log in with your browser
   rowsafe hosts enroll-token         the install command for a database server; the installer
                                      sets up backups there and asks before changing anything
-  rowsafe restart [NAME]             restart PostgreSQL when setup needs it (asks first)
+  rowsafe restart [NAME]             restart the database when setup needs it (asks first)
   rowsafe init NAME                  make NAME this project's database (.rowsafe.json)
   rowsafe adopt | plan | apply | verify NAME
                                      set up by hand from your workstation instead
@@ -123,12 +123,13 @@ saved login, else https://api.rowsafe.sh.`,
 	"init": `Writes {"database": NAME} to .rowsafe.json in the current directory (keeping
 other settings in an existing file). Commands run in this directory or below
 then use NAME when it is left out; so does the Claude Code guard hook.`,
-	"restart": `Rowsafe never restarts PostgreSQL on its own. It restarts it only when you ask
-(this command, Restart PostgreSQL in the dashboard, or the installer), and
-only on servers where the installer was allowed to (root decides at install
-time). If this server doesn't allow it, the task fails and says how to
-restart by hand. A database waiting for a restart to start its backups
-finishes setting up by itself once PostgreSQL is back.`,
+	"restart": `Rowsafe never restarts a database (PostgreSQL, MySQL, MariaDB, MongoDB or
+ClickHouse) on its own. It restarts it only when you ask (this command,
+Restart in the dashboard, or the installer), and only on servers where the
+installer was allowed to (root decides at install time). If this server
+doesn't allow it, the task fails and says how to restart by hand. A database
+waiting for a restart to start its backups finishes setting up by itself
+once it is back.`,
 	"fix": `Without FINDING, lists the findings of "rowsafe pulse" that Rowsafe can fix
 by itself, numbered, and (in a terminal) asks which one to apply. Fixes are
 proposed by Rowsafe and checked again right before they run: cleaning up

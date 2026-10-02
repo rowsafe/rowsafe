@@ -424,9 +424,9 @@ func verifyCmd(ctx context.Context, c *client.Client, args []string) error {
 	return waitAndReport(ctx, c, t.ID, name)
 }
 
-// restartCmd is rowsafe restart: restart a database's PostgreSQL when a
-// person asks. The agent does it only on servers where root allowed it at
-// install time; Rowsafe never restarts PostgreSQL on its own.
+// restartCmd is rowsafe restart: restart a database's server (PostgreSQL,
+// MySQL, ...) when a person asks. The agent does it only on servers where
+// root allowed it at install time; Rowsafe never restarts it on its own.
 func restartCmd(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("restart", flag.ContinueOnError)
 	yes := fs.Bool("yes", false, "don't ask for confirmation")
@@ -441,9 +441,10 @@ func restartCmd(ctx context.Context, c *client.Client, args []string) error {
 	if !d.CanRestart {
 		return errors.New(restartNotAllowed(d))
 	}
+	engine := protocol.EngineDisplayName(d.Engine)
 	fmt.Printf("Database %s on %s (%s)\n", d.Name, d.Hostname, statusText(d.Status))
-	fmt.Println("PostgreSQL restarts: it takes a few seconds; open connections are dropped and apps reconnect.")
-	if !*yes && !confirm("Restart PostgreSQL on "+d.Hostname+" now?") {
+	fmt.Println(engine + " restarts: it takes a few seconds; open connections are dropped and apps reconnect.")
+	if !*yes && !confirm("Restart "+engine+" on "+d.Hostname+" now?") {
 		return errors.New("cancelled; nothing was restarted")
 	}
 	t, err := c.CreateTask(ctx, d.Name, protocol.TaskRestart, map[string]string{"confirm": d.Name})
@@ -459,7 +460,7 @@ func restartCmd(ctx context.Context, c *client.Client, args []string) error {
 			if ae.RetryAfter > 0 {
 				wait = fmt.Sprintf("%d seconds", int(ae.RetryAfter.Seconds()))
 			}
-			return fmt.Errorf("not restarted: PostgreSQL on %s was restarted in the last 2 minutes; try again in %s", d.Hostname, wait)
+			return fmt.Errorf("not restarted: %s on %s was restarted in the last 2 minutes; try again in %s", engine, d.Hostname, wait)
 		}
 	}
 	if err != nil {
@@ -474,17 +475,38 @@ func restartCmd(ctx context.Context, c *client.Client, args []string) error {
 	return nil
 }
 
-// restartNotAllowed explains why Rowsafe can't restart d's PostgreSQL.
+// restartNotAllowed explains why Rowsafe can't restart d's database.
 func restartNotAllowed(d protocol.Database) string {
+	engine := protocol.EngineDisplayName(d.Engine)
+	service, unit := engineServiceNames(d.Engine)
+	if !protocol.EngineHas(d.Engine, protocol.FeatureRestart) {
+		return fmt.Sprintf("not restarted: Rowsafe can't restart %s yet. Restart it yourself on %s.", engine, d.Hostname)
+	}
 	if d.Archiver != nil && d.Archiver.Mode == "docker-sidecar" {
-		return fmt.Sprintf("not restarted: Rowsafe can't restart PostgreSQL's container on %s yet.\n"+
-			"Either restart it yourself: docker compose restart postgres (your PostgreSQL service's name)\n"+
+		return fmt.Sprintf("not restarted: Rowsafe can't restart %s's container on %s yet.\n"+
+			"Either restart it yourself: docker compose restart %s (your %s service's name)\n"+
 			"or allow it: add the container control service to your compose file; the database's Settings in the dashboard show the lines "+
-			"(https://rowsafe.sh/docs/guides/docker#let-rowsafe-restart-the-container).", d.Hostname)
+			"(https://rowsafe.sh/docs/guides/docker#let-rowsafe-restart-the-container).", engine, d.Hostname, service, engine)
 	}
 	return fmt.Sprintf("not restarted: %s doesn't allow restarts from Rowsafe (only root can allow it, at install time).\n"+
-		"Either restart PostgreSQL yourself, on %s:\n  sudo systemctl restart postgresql\n"+
-		"or allow it: run sudo rowsafe-allow restart on %s (an older Rowsafe: re-run the install command there with --allow-restart).", d.Hostname, d.Hostname, d.Hostname)
+		"Either restart %s yourself, on %s:\n  sudo systemctl restart %s\n"+
+		"or allow it: run sudo rowsafe-allow restart on %s (an older Rowsafe: re-run the install command there with --allow-restart).", d.Hostname, engine, d.Hostname, unit, d.Hostname)
+}
+
+// engineServiceNames are an engine's usual compose service and systemd
+// unit names, for messages.
+func engineServiceNames(engine string) (service, unit string) {
+	switch protocol.NormalizeEngine(engine) {
+	case protocol.EngineMySQL:
+		return "mysql", "mysql"
+	case protocol.EngineMariaDB:
+		return "mariadb", "mariadb"
+	case protocol.EngineMongoDB:
+		return "mongo", "mongod"
+	case protocol.EngineClickHouse:
+		return "clickhouse", "clickhouse-server"
+	}
+	return "postgres", "postgresql"
 }
 
 func backupCmd(ctx context.Context, c *client.Client, args []string) error {

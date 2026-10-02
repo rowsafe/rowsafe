@@ -122,3 +122,79 @@ func TestRestartTask(t *testing.T) {
 		t.Fatalf("sidecar: %v", err)
 	}
 }
+
+// readyEngine is a MySQL engine that can be restarted: it answers on the
+// third Ready.
+type readyEngine struct {
+	fakeEngine
+	tries int
+}
+
+func (r *readyEngine) Ready(context.Context, EngineEnv, protocol.DatabaseSpec) (string, error) {
+	r.tries++
+	if r.tries < 3 {
+		return "", errors.New("connection refused")
+	}
+	return "on", nil
+}
+
+func TestRestartTaskEngine(t *testing.T) {
+	oldPoll, oldHelper, oldBack := restartPoll, restartHelperTimeout, restartBackTimeout
+	defer func() { restartPoll, restartHelperTimeout, restartBackTimeout = oldPoll, oldHelper, oldBack }()
+	restartPoll, restartHelperTimeout, restartBackTimeout = 5*time.Millisecond, 300*time.Millisecond, 200*time.Millisecond
+
+	root := t.TempDir()
+	allow := filepath.Join(root, "restart-allowed")
+	dir := filepath.Join(root, "restart")
+	out := filepath.Join(root, "run")
+	os.Mkdir(out, 0o755)
+	os.Mkdir(dir, 0o700)
+	os.WriteFile(allow, []byte("3306 mysql.service\n"), 0o644)
+	a := &Agent{cfg: Config{RestartAllowFile: allow, RestartDir: dir, RestartResultDir: out, StateDir: root}, log: slog.New(slog.DiscardHandler)}
+	db := &protocol.DatabaseSpec{ID: "db_m", Name: "shop", Port: 3306, Engine: protocol.EngineMySQL}
+
+	// An engine that can't be restarted: the engine's own "update the agent".
+	plain := &fakeEngine{name: protocol.EngineMySQL}
+	withEngine(t, plain)
+	tl := &taskLog{}
+	if _, err := a.runTask(t.Context(), &protocol.Task{ID: "t1", Type: protocol.TaskRestart, Database: db}, tl); err == nil ||
+		!strings.Contains(err.Error(), "can't run restart tasks for MySQL") {
+		t.Fatalf("plain engine: %v", err)
+	}
+	enginesMu.Lock()
+	delete(engines, protocol.EngineMySQL)
+	enginesMu.Unlock()
+
+	e := &readyEngine{fakeEngine: fakeEngine{name: protocol.EngineMySQL}}
+	withEngine(t, e)
+	var gotReq string
+	fakeHelper(t, dir, out, func(id, port string) string {
+		gotReq = id + " " + port
+		return "id=" + id + "\nok=1\nunit=mysql.service\nfinished_at=1\n"
+	})
+	res, err := a.runTask(t.Context(), &protocol.Task{ID: "t2", Type: protocol.TaskRestart, Database: db}, tl)
+	if err != nil {
+		t.Fatal(err, tl.String())
+	}
+	r := res.(*protocol.RestartResult)
+	if gotReq != "t2 3306" || !r.Restarted || r.Unit != "mysql.service" || r.ArchiveMode != "on" || e.tries != 3 {
+		t.Fatalf("request %q, result %+v, tries %d", gotReq, r, e.tries)
+	}
+	if !strings.Contains(tl.String(), "MySQL is back after") {
+		t.Errorf("log %q", tl.String())
+	}
+
+	// A port root didn't allow: MySQL's own command.
+	other := *db
+	other.Port = 3307
+	if _, err := a.restart(t.Context(), other, "t3", tl); err == nil || !strings.Contains(err.Error(), "restarting MySQL from Rowsafe is not turned on for port 3307") ||
+		!strings.Contains(err.Error(), "sudo systemctl restart mysql") {
+		t.Fatalf("not allowed: %v", err)
+	}
+
+	// In another engine's agent image (no sidecar): restart it yourself.
+	a.cfg.ImageVariant = "clickhouse26.8"
+	if _, err := a.restart(t.Context(), *db, "t4", tl); err == nil || !strings.Contains(err.Error(), "docker compose restart mysql") {
+		t.Fatalf("container: %v", err)
+	}
+}

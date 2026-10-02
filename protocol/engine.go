@@ -192,24 +192,26 @@ var EngineCapabilities = map[string]EngineFeatures{
 		Logs: true, FindMoment: true, SafeCopies: true, MigrationPreview: true,
 		Fork: true, MoveIn: true, SecondCopy: true,
 	},
-	// MySQL and MariaDB (internal/engine/mysql): no restart, rewind in
-	// place, standby, pooling, files or updates yet.
+	// MySQL and MariaDB (internal/engine/mysql): restarts through the root
+	// helper or the container control service; no rewind in place,
+	// standby, pooling, files or updates yet.
 	EngineMySQL:   mysqlFeatures,
 	EngineMariaDB: mysqlFeatures,
 	// MongoDB (internal/engine/mongodb): mongodump + oplog copying, Proof,
-	// Rewind copies and bringing documents back, Marks, Pulse and stopping
-	// a long operation. No restart, rewind in place, standby, pooling,
-	// files or updates yet.
+	// Rewind copies and bringing documents back, Marks, Pulse, stopping a
+	// long operation and restarts (root helper). No rewind in place,
+	// standby, pooling, files or updates yet.
 	EngineMongoDB: {
 		Backups: true, PointInTime: true, Proof: true,
 		RewindCopy: true, RewindRows: true, Marks: true,
-		Monitoring: true, Fixes: true,
+		Monitoring: true, Fixes: true, Restart: true,
 	},
 	// ClickHouse (internal/engine/clickhouse; clickhouse.go): BACKUP
 	// through the agent's encrypting gateway, Proof, Rewind copies and
 	// bringing rows back, Marks, Pulse and stopping a query or a mutation.
-	// No restores to any second (ClickHouse keeps no log of changes), no
-	// restart, rewind in place, standby, pooling, files or updates yet.
+	// Restarts through the root helper (native installs). No restores to
+	// any second (ClickHouse keeps no log of changes), no rewind in place,
+	// standby, pooling, files or updates yet.
 	EngineClickHouse: clickhouseFeatures,
 }
 
