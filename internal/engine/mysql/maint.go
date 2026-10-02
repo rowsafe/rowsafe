@@ -49,6 +49,8 @@ func (s *server) maintenance(ctx context.Context, p protocol.MaintenanceParams, 
 		err = s.createIndex(ctx, db, p, res, log)
 	case protocol.MaintDropIndex:
 		err = s.dropIndex(ctx, db, p, res, log)
+	case protocol.MaintSlowLog: // slowlog.go
+		err = s.slowLogOn(ctx, db, res, log)
 	default:
 		err = fmt.Errorf("%s can't run the fix %q", s.flavor.display(), p.Action)
 	}

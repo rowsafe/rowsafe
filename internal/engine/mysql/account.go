@@ -170,7 +170,9 @@ func accountSQL(f flavor, version, password string) []string {
 	} else {
 		grants = []string{
 			"GRANT SELECT, INSERT, UPDATE, INDEX, SHOW VIEW, TRIGGER, RELOAD, PROCESS, LOCK TABLES, REPLICATION CLIENT ON *.* TO " + user,
-			"GRANT BACKUP_ADMIN, CONNECTION_ADMIN ON *.* TO " + user,
+			// SYSTEM_VARIABLES_ADMIN: the "Turn on the slow query log" fix
+			// (SET PERSIST), only when a person clicks it.
+			"GRANT BACKUP_ADMIN, CONNECTION_ADMIN, SYSTEM_VARIABLES_ADMIN ON *.* TO " + user,
 		}
 	}
 	_ = version

@@ -56,7 +56,32 @@ type AdvisorFacts struct {
 	// Profiler is MongoDB's profiler state: query statistics come from it
 	// (MongoDB only; nil elsewhere).
 	Profiler *MongoProfiler `json:"mongodb_profiler,omitempty"`
+	// SlowLog is MySQL's or MariaDB's slow query log (nil elsewhere): the
+	// index advisor's samples on MariaDB and MySQL 5.7, and Logs.
+	SlowLog *MySQLSlowLog `json:"mysql_slow_log,omitempty"`
 }
+
+// MySQLSlowLog is the slow query log's state.
+type MySQLSlowLog struct {
+	// On: slow_query_log is on and written to a file (log_output FILE).
+	On            bool    `json:"on"`
+	File          string  `json:"file,omitempty"`
+	Bytes         int64   `json:"bytes,omitempty"`
+	LongQueryTime float64 `json:"long_query_time"`
+	// CanSet: Rowsafe's account may change it (SYSTEM_VARIABLES_ADMIN or
+	// SUPER); Persist: with SET PERSIST, so it survives a restart (MySQL
+	// 8.0+).
+	CanSet  bool `json:"can_set,omitempty"`
+	Persist bool `json:"persist,omitempty"`
+	// Rotated: a logrotate configuration covers the file's folder.
+	Rotated bool `json:"rotated,omitempty"`
+}
+
+// MaintSlowLog turns MySQL's or MariaDB's slow query log on: slow_query_log
+// ON, log_output with FILE, long_query_time 1 second (kept when it is
+// already between 0.5 and 1). SET PERSIST on MySQL 8.0+ (it survives a
+// restart), SET GLOBAL elsewhere. Nothing restarts.
+const MaintSlowLog = "mysql_slow_log"
 
 // ClickHouseTableFacts is a MergeTree table whose layout makes queries or
 // inserts slow.
