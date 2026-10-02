@@ -208,8 +208,9 @@ var EngineCapabilities = map[string]EngineFeatures{
 		IndexAdvice:     true, // profiler samples tested on a copy (internal/engine/mongodb/indexadvisor.go)
 		DBAdmin:         true, Security: true, Files: true, SecondCopy: true,
 		MigrationPreview: true, SafeCopies: true,
-		Fork:   true, // clones copied into an empty server (fork.go in internal/engine/mongodb)
-		MoveIn: true, // one-time copy from Atlas or any MongoDB (migrate*.go in internal/engine/mongodb)
+		Fork:    true, // clones copied into an empty server (fork.go in internal/engine/mongodb)
+		MoveIn:  true, // one-time copy from Atlas or any MongoDB (migrate*.go in internal/engine/mongodb)
+		Standby: true, // a priority-0 member of the replica set (standby*.go in internal/engine/mongodb)
 	},
 	// ClickHouse (internal/engine/clickhouse): protocol/clickhouse.go. No
 	// restores to any second: ClickHouse keeps no log of its changes.

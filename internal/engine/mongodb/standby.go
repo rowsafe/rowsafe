@@ -75,11 +75,10 @@ func (e *Engine) StandbyPrepare(ctx context.Context, env agent.EngineEnv, db pro
 		if err != nil {
 			return err
 		}
-		l, err := loadLogin(env, db.Port)
-		if err != nil {
-			return err
-		}
-		data["key"], data["user"], data["password"], data["auth_source"] = key, l.User, l.Password, cmpOr(l.AuthSource, "admin")
+		data["key"] = key
+	}
+	if l, err := loadLogin(env, db.Port); err == nil && l.User != "" {
+		data["user"], data["password"], data["auth_source"] = l.User, l.Password, cmpOr(l.AuthSource, "admin")
 	}
 	sec.EngineData = data
 	res.Major, res.SystemID, res.SizeBytes, res.Streaming = in.VersionNum/100, in.SetName, in.TotalBytes, true
@@ -204,7 +203,7 @@ func (e *Engine) StandbyCreate(ctx context.Context, env agent.EngineEnv, db prot
 		return fail(fmt.Errorf("signing in to the primary: %w", err))
 	}
 	defer disconnect(pc)
-	if err := addMember(ctx, pc, member); err != nil {
+	if err := addMember(ctx, pc, member, p.StandbyID); err != nil {
 		return fail(fmt.Errorf("adding this server to the replica set: %w", err))
 	}
 	tl.Printf("added %s to replica set %s (priority 0, no vote): MongoDB copies the data to it now (its initial sync, from the primary)", member, set)
@@ -227,12 +226,12 @@ func (e *Engine) StandbyCreate(ctx context.Context, env agent.EngineEnv, db prot
 		return fail(fmt.Errorf("the new member didn't finish copying the data: %w", err))
 	}
 	// The set's users replaced this server's own: sign in as on the primary.
-	if key != "" {
-		l := primaryLogin
-		l.Host = ""
-		if err := saveLogin(env, p.Port, l); err != nil {
-			return fail(err)
-		}
+	l := primaryLogin
+	l.Host = ""
+	if l.User == "" {
+		_ = os.Remove(loginPath(env, p.Port))
+	} else if err := saveLogin(env, p.Port, l); err != nil {
+		return fail(err)
 	}
 	rec.Phase = protocol.StandbyPhaseFollowing
 	if err := sbPut(env, rec); err != nil {
@@ -240,13 +239,15 @@ func (e *Engine) StandbyCreate(ctx context.Context, env agent.EngineEnv, db prot
 	}
 	res := &protocol.StandbyCreateResult{StandbyID: p.StandbyID, Mode: protocol.StandbyModeStreaming, PrimaryAddress: primaryAddr,
 		DurationMs: time.Since(start).Milliseconds(),
-		Warnings: []string{"MongoDB copied the data from the primary itself (a new replica set member can't start from a backup)."},
-		Summary:  fmt.Sprintf("MongoDB on port %d is a member of replica set %s and follows the primary; it never becomes primary by itself.", p.Port, set)}
+		Warnings:   []string{"MongoDB copied the data from the primary itself (a new replica set member can't start from a backup)."},
+		Summary:    fmt.Sprintf("MongoDB on port %d is a member of replica set %s and follows the primary; it never becomes primary by itself.", p.Port, set)}
 	tl.Printf("%s", res.Summary)
 	return res, nil
 }
 
-func addMember(ctx context.Context, c *mongo.Client, host string) error {
+// addMember adds host to the set (priority 0, no vote), tagged with the
+// standby's ID so a fence finds it again.
+func addMember(ctx context.Context, c *mongo.Client, host, standbyID string) error {
 	cfg, err := replConfig(ctx, c)
 	if err != nil {
 		return err
@@ -259,7 +260,7 @@ func addMember(ctx context.Context, c *mongo.Client, host string) error {
 		}
 		maxID = max(maxID, toInt(m["_id"]))
 	}
-	members = append(members, bson.M{"_id": maxID + 1, "host": host, "priority": 0, "votes": 0})
+	members = append(members, bson.M{"_id": maxID + 1, "host": host, "priority": 0, "votes": 0, "tags": bson.M{"rowsafe": standbyID}})
 	setMembers(cfg, members)
 	return reconfig(ctx, c, cfg, false)
 }
@@ -354,9 +355,10 @@ func (e *Engine) PrimaryState(ctx context.Context, env agent.EngineEnv, db proto
 	return st, st.WALLSN != ""
 }
 
-// StandbyFence makes sure the old primary never takes writes again: every
-// member gets priority 0 (a forced reconfiguration), so it steps down and
-// no member is elected primary, also after a restart.
+// StandbyFence hands the primary role to the standby through MongoDB's own
+// election: the old primary gets priority 0 (it steps down and can't be
+// elected again, also after a restart) and the standby a vote and priority
+// 1, so it is elected once it has every write.
 func (e *Engine) StandbyFence(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec, p protocol.StandbyFenceParams, tl agent.TaskLogger) (*protocol.StandbyFenceResult, error) {
 	c, err := connectDB(ctx, env, db)
 	if err != nil {
@@ -373,8 +375,35 @@ func (e *Engine) StandbyFence(ctx context.Context, env agent.EngineEnv, db proto
 	if !hasClusterManager(in) {
 		return nil, errNoStandbyRights(db.Port)
 	}
-	if err := noneElectable(ctx, c); err != nil {
-		return nil, fmt.Errorf("fencing MongoDB: %w", err)
+	if !in.Primary {
+		return nil, errors.New("this MongoDB isn't the primary any more")
+	}
+	// 1. The standby gets a vote and may be elected.
+	cfg, err := replConfig(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	members := cfgMembers(cfg)
+	found := false
+	for _, m := range members {
+		if standbyTag(m) == p.StandbyID {
+			m["priority"], m["votes"] = 1, 1
+			found = true
+		}
+	}
+	if !found {
+		return nil, errors.New("the standby isn't in the replica set's configuration (was it removed by hand?)")
+	}
+	setMembers(cfg, members)
+	if err := reconfig(ctx, c, cfg, false); err != nil {
+		return nil, fmt.Errorf("giving the standby a vote: %w", err)
+	}
+	// 2. The primary steps down once the standby has every write (MongoDB
+	// waits for that), and may not be elected for a while; the promotion
+	// then makes that last (priority 0).
+	err = c.Database("admin").RunCommand(ctx, bson.D{{Key: "replSetStepDown", Value: 600}, {Key: "secondaryCatchUpPeriodSecs", Value: 60}}).Err()
+	if err != nil && !mongo.IsNetworkError(err) {
+		return nil, fmt.Errorf("stepping down (the standby may not have caught up): %w", err)
 	}
 	if err := waitFor(ctx, time.Minute, func() (bool, error) {
 		in, err := inspect(ctx, c)
@@ -382,33 +411,34 @@ func (e *Engine) StandbyFence(ctx context.Context, env agent.EngineEnv, db proto
 	}); err != nil {
 		return nil, errors.New("MongoDB didn't step down within a minute")
 	}
-	res := &protocol.StandbyFenceResult{FenceID: p.FenceID, Stopped: true, Method: "no member may be primary"}
+	res := &protocol.StandbyFenceResult{FenceID: p.FenceID, Stopped: true, Method: "stepped down"}
 	if rs, err := replStatus(ctx, c); err == nil {
-		if self, ok := rs.self(); ok {
-			res.CheckpointLSN = optimeLSN(self.Optime.TS)
+		if s, ok := rs.self(); ok {
+			res.CheckpointLSN = optimeLSN(s.Optime.TS)
 		}
 	}
-	res.Summary = fmt.Sprintf("MongoDB on port %d stepped down for good: no member of the replica set may become primary until the standby is promoted, also after a restart.", db.Port)
+	res.Summary = fmt.Sprintf("MongoDB on port %d stepped down once the standby had every write; the standby is being elected, and the old primary keeps priority 0 from now on.", db.Port)
 	tl.Printf("%s", res.Summary)
 	return res, nil
 }
 
-// noneElectable gives every member priority 0 (forced: the primary can't
-// accept a configuration in which it isn't electable otherwise).
-func noneElectable(ctx context.Context, c *mongo.Client) error {
-	cfg, err := replConfig(ctx, c)
-	if err != nil {
-		return err
+func standbyTag(m bson.M) string {
+	switch t := m["tags"].(type) {
+	case bson.M:
+		s, _ := t["rowsafe"].(string)
+		return s
+	case bson.D:
+		for _, e := range t {
+			if e.Key == "rowsafe" {
+				s, _ := e.Value.(string)
+				return s
+			}
+		}
 	}
-	members := cfgMembers(cfg)
-	for _, m := range members {
-		m["priority"] = 0
-	}
-	setMembers(cfg, members)
-	return reconfig(ctx, c, cfg, true)
+	return ""
 }
 
-// HoldFence keeps a fenced old primary from taking writes.
+// HoldFence keeps a fenced old primary from being the primary.
 func (e *Engine) HoldFence(ctx context.Context, env agent.EngineEnv, f protocol.Fence) (enforced, other bool, err error) {
 	c, err := connectDB(ctx, env, protocol.DatabaseSpec{Port: f.Port})
 	if err != nil {
@@ -425,14 +455,15 @@ func (e *Engine) HoldFence(ctx context.Context, env agent.EngineEnv, f protocol.
 	if !in.Primary {
 		return false, false, nil
 	}
-	if err := noneElectable(ctx, c); err != nil {
+	if err := c.Database("admin").RunCommand(ctx, bson.D{{Key: "replSetStepDown", Value: 300}, {Key: "force", Value: true}}).Err(); err != nil &&
+		!mongo.IsNetworkError(err) {
 		return false, false, err
 	}
 	return true, false, nil
 }
 
-// StandbyUnfence makes the old primary electable again (the promotion
-// didn't happen).
+// StandbyUnfence gives the old primary its role back (the promotion didn't
+// happen): priority 1 again, and the standby back to no vote.
 func (e *Engine) StandbyUnfence(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec, f protocol.Fence, tl agent.TaskLogger) (*protocol.StandbyUnfenceResult, error) {
 	c, err := connectDB(ctx, env, protocol.DatabaseSpec{Port: f.Port})
 	if err != nil {
@@ -443,15 +474,23 @@ func (e *Engine) StandbyUnfence(ctx context.Context, env agent.EngineEnv, db pro
 	if err != nil {
 		return nil, err
 	}
+	rs, err := replStatus(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	self, _ := rs.self()
 	members := cfgMembers(cfg)
 	for _, m := range members {
-		if toInt(m["votes"]) > 0 {
+		switch {
+		case standbyTag(m) != "":
+			m["priority"], m["votes"] = 0, 0
+		case strings.EqualFold(fmt.Sprint(m["host"]), self.Name):
 			m["priority"] = 1
 		}
 	}
 	setMembers(cfg, members)
 	if err := reconfig(ctx, c, cfg, true); err != nil {
-		return nil, fmt.Errorf("making MongoDB electable again: %w", err)
+		return nil, fmt.Errorf("making MongoDB the primary again: %w", err)
 	}
 	if err := waitFor(ctx, 2*time.Minute, func() (bool, error) {
 		in, err := inspect(ctx, c)
@@ -464,8 +503,10 @@ func (e *Engine) StandbyUnfence(ctx context.Context, env agent.EngineEnv, db pro
 	return res, nil
 }
 
-// StandbyPromote makes the standby the primary: once it applied what the
-// old primary wrote, it becomes the set's only voting member (forced).
+// StandbyPromote makes the standby the primary. After a fence, MongoDB
+// elects it once it has every write; when the old primary is gone (no
+// fence), it becomes the set's only voting member (a forced
+// reconfiguration on the standby).
 func (e *Engine) StandbyPromote(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec, p protocol.StandbyPromoteParams, tl agent.TaskLogger) (*protocol.StandbyPromoteResult, error) {
 	r, ok := sbGet(env, p.StandbyID)
 	if !ok {
@@ -479,45 +520,65 @@ func (e *Engine) StandbyPromote(ctx context.Context, env agent.EngineEnv, db pro
 	res := &protocol.StandbyPromoteResult{StandbyID: p.StandbyID}
 	want, haveWant := parseOptimeLSN(p.WaitForLSN)
 	var self rsMember
+	elected := false
 	err = waitFor(ctx, sbPromoteWait, func() (bool, error) {
 		rs, err := replStatus(ctx, c)
 		if err != nil {
 			return false, nil
 		}
 		self, _ = rs.self()
-		if !haveWant {
-			return true, nil
+		caught := !haveWant || optimeAtLeast(self.Optime.TS, want)
+		if caught && haveWant && self.State == 1 {
+			elected = true
 		}
-		return optimeAtLeast(self.Optime.TS, want), nil
+		return caught && (!haveWant || elected), nil
 	})
-	res.CaughtUp = err == nil && haveWant
+	res.CaughtUp = haveWant && err == nil
 	if err != nil && !p.Force {
-		return nil, fmt.Errorf("the standby hasn't applied everything the old primary wrote within %s (it is at %s, it needs %s): "+
+		return nil, fmt.Errorf("the standby hasn't taken over with everything the old primary wrote within %s (it is at %s, it needs %s): "+
 			"it was left as it is; promote anyway to accept losing the rest", sbPromoteWait, optimeLSN(self.Optime.TS), p.WaitForLSN)
 	}
-	cfg, err := replConfig(ctx, c)
-	if err != nil {
-		return nil, err
-	}
-	var mine []bson.M
-	for _, m := range cfgMembers(cfg) {
-		if strings.EqualFold(fmt.Sprint(m["host"]), r.Member) {
-			m["priority"], m["votes"] = 1, 1
-			mine = append(mine, m)
+	if !elected {
+		cfg, err := replConfig(ctx, c)
+		if err != nil {
+			return nil, err
 		}
-	}
-	if len(mine) != 1 {
-		return nil, fmt.Errorf("%s isn't in the replica set's configuration", r.Member)
-	}
-	setMembers(cfg, mine)
-	if err := reconfig(ctx, c, cfg, true); err != nil {
-		return nil, fmt.Errorf("making the standby the replica set's only voting member: %w", err)
+		var mine []bson.M
+		for _, m := range cfgMembers(cfg) {
+			if strings.EqualFold(fmt.Sprint(m["host"]), r.Member) {
+				m["priority"], m["votes"] = 1, 1
+				mine = append(mine, m)
+			}
+		}
+		if len(mine) != 1 {
+			return nil, fmt.Errorf("%s isn't in the replica set's configuration", r.Member)
+		}
+		setMembers(cfg, mine)
+		if err := reconfig(ctx, c, cfg, true); err != nil {
+			return nil, fmt.Errorf("making the standby the replica set's only voting member: %w", err)
+		}
+		tl.Printf("the old primary is gone: the standby is now the replica set's only voting member")
 	}
 	if err := waitFor(ctx, 2*time.Minute, func() (bool, error) {
 		in, err := inspect(ctx, c)
 		return err == nil && in.Primary, nil
 	}); err != nil {
 		return nil, errors.New("the standby didn't become primary within two minutes")
+	}
+	if elected {
+		// The old primary may never be elected again (also after a restart).
+		if cfg, err := replConfig(ctx, c); err == nil {
+			members := cfgMembers(cfg)
+			for _, m := range members {
+				if !strings.EqualFold(fmt.Sprint(m["host"]), r.Member) {
+					m["priority"] = 0
+				}
+			}
+			setMembers(cfg, members)
+			if err := reconfig(ctx, c, cfg, false); err != nil {
+				tl.Printf("keeping the old primary from being elected again: %v (its agent steps it down if it is)", err)
+			}
+		}
 	}
 	now := time.Now().UTC()
 	res.Promoted, res.PromotedAt, res.LastReplayAt = true, &now, &now
@@ -527,7 +588,10 @@ func (e *Engine) StandbyPromote(ctx context.Context, env agent.EngineEnv, db pro
 		}
 	}
 	_ = sbRemove(env, r.ID)
-	res.Summary = fmt.Sprintf("MongoDB on port %d is the primary now: the replica set's only voting member (the old primary left it).", r.Port)
+	res.Summary = fmt.Sprintf("MongoDB on port %d is the primary now.", r.Port)
+	if elected {
+		res.Summary += " The old primary stays in the replica set as a secondary that can't be elected."
+	}
 	tl.Printf("%s", res.Summary)
 	return res, nil
 }

@@ -31,11 +31,12 @@ import (
 // (its initial sync, from the primary: MongoDB can't start a member from a
 // logical backup) and keeps it in sync.
 //
-// Fencing an old primary reconfigures the set so that no member may become
-// primary (priority 0 everywhere, forced): it steps down and stays a
-// secondary, also after a restart. Promoting the standby makes it the only
-// voting member (a forced reconfiguration on the standby), once it has
-// applied what the old primary wrote.
+// Fencing an old primary hands its role over through MongoDB's own
+// election: it gets priority 0 (it steps down and can't be elected again,
+// also after a restart) and the standby a vote and priority 1; MongoDB
+// elects the standby once it has every write, and the old primary stays a
+// secondary. When the old primary is gone (no fence), promoting makes the
+// standby the set's only voting member (a forced reconfiguration).
 
 type sbRecord struct {
 	ID         string    `json:"id"`
