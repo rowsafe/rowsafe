@@ -36,7 +36,7 @@ func (e *Engine) StandbyCreate(ctx context.Context, env agent.EngineEnv, db prot
 		return &protocol.StandbyCreateResult{StandbyID: p.StandbyID, Mode: protocol.StandbyModeStreaming, PrimaryAddress: r.Address,
 			Summary: "The standby is already running here."}, nil
 	}
-	if r, ok := store.onPort(db.Port); ok && r.ID != p.StandbyID {
+	if r, ok := store.onPort(db.Port); ok && r.ID != p.StandbyID && r.Phase != protocol.StandbyPhaseCreating {
 		return nil, fmt.Errorf("the %s server on port %d already runs a standby here", s.flavor.display(), db.Port)
 	}
 	if sec.ReplicationUser == "" || sec.PrimaryPort == 0 {
@@ -47,6 +47,15 @@ func (e *Engine) StandbyCreate(ctx context.Context, env agent.EngineEnv, db prot
 		return nil, err
 	}
 	defer conn.Close()
+	// A creation the agent didn't finish (it restarted): put the server
+	// back as it was first. Creations run one at a time.
+	if r, ok := store.onPort(db.Port); ok && r.Phase == protocol.StandbyPhaseCreating {
+		log.Printf("cleaning up an earlier attempt that didn't finish")
+		if err := s.undoStandby(ctx, conn, r, log); err != nil {
+			return nil, fmt.Errorf("cleaning up an earlier attempt: %w", err)
+		}
+		_ = store.remove(r.ID)
+	}
 	if p.Rebuild {
 		return s.reattach(ctx, conn, p, sec, start, log)
 	}
@@ -245,6 +254,9 @@ func (s *server) seedStandby(ctx context.Context, conn *sql.DB, rec *standbyReco
 		return filePos{}, err
 	}
 	rec.Schemas = schemas
+	if err := standbys(s.env).put(*rec); err != nil { // so an interrupted load can be undone
+		return filePos{}, err
+	}
 	if len(schemas) > 0 {
 		log.Printf("loading %s into the standby", plural(int64(len(schemas)), "database", "databases"))
 		if err := s.pipeDump(ctx, sc, append(s.dumpSchemaArgs(), append([]string{"--databases"}, schemas...)...), "", log); err != nil {
@@ -253,6 +265,7 @@ func (s *server) seedStandby(ctx context.Context, conn *sql.DB, rec *standbyReco
 	}
 	users, err := s.copyLogins(ctx, sdb, sc, log)
 	rec.Users = users
+	_ = standbys(s.env).put(*rec)
 	if err != nil {
 		return filePos{}, err
 	}

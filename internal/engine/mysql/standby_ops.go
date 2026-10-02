@@ -245,7 +245,7 @@ func (e *Engine) StandbyTargets(ctx context.Context, env agent.EngineEnv) []prot
 }
 
 func (e *Engine) targetReason(ctx context.Context, env agent.EngineEnv, store *standbyStore, d agent.DiscoveredDatabase) string {
-	if _, ok := store.onPort(d.Port); ok {
+	if r, ok := store.onPort(d.Port); ok && r.Phase != protocol.StandbyPhaseCreating {
 		return "it already runs a standby"
 	}
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
