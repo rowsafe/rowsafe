@@ -49,6 +49,7 @@ func (e *Engine) Tasks() []string {
 		protocol.TaskInspect, protocol.TaskAdopt, protocol.TaskCheck, protocol.TaskBackup, protocol.TaskDrill,
 		protocol.TaskRestorePoint, protocol.TaskMaintenance,
 		protocol.TaskRewindCopy, protocol.TaskRewindDrop, protocol.TaskRewindCompare, protocol.TaskRewindRows,
+		protocol.TaskFindMoment,
 	}
 }
 
@@ -114,6 +115,12 @@ func (e *Engine) Run(ctx context.Context, env agent.EngineEnv, task *protocol.Ta
 			return nil, err
 		}
 		return nilIfNil(e.mark(ctx, env, db, p, tl))
+	case protocol.TaskFindMoment: // moment.go
+		var p protocol.FindMomentParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.findMoment(ctx, env, db, p, tl))
 	case protocol.TaskMaintenance:
 		var p protocol.MaintenanceParams
 		if err := decode(task, &p); err != nil {
