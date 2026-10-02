@@ -181,7 +181,7 @@ func (s *server) migrateCheck(ctx context.Context, m agent.MigrateEnv, p protoco
 		srcName = "MariaDB"
 	}
 	add(protocol.MigrateCheckItem{ID: "connect", Status: protocol.CheckOK,
-		Title:  fmt.Sprintf("Rowsafe reached %s %s at %s", srcName, f.Version, src.Host),
+		Title:  fmt.Sprintf("Rowsafe reached %s %s at %s", srcName, shortVersion(f.Version), src.Host),
 		Detail: fmt.Sprintf("%s: %s in %s.", src.DB, humanBytes(f.SizeBytes), plural(int64(f.Tables), "table", "tables"))})
 	if !f.TLS {
 		add(protocol.MigrateCheckItem{ID: "tls", Status: protocol.CheckWarn, Title: "The connection to the source isn't encrypted",
@@ -207,7 +207,9 @@ func (s *server) migrateCheck(ctx context.Context, m agent.MigrateEnv, p protoco
 		fail("version", fmt.Sprintf("This server runs %s, older than the source (%s)", tf.Version, f.Version), "",
 			"Move it into a server of the same version or newer.", "")
 	default:
-		add(protocol.MigrateCheckItem{ID: "version", Status: protocol.CheckOK, Title: fmt.Sprintf("%s %s here can take %s %s", s.flavor.display(), tf.Version, srcName, f.Version)})
+		tshort, _ := numericVersion(tf.Version)
+		sshort, _ := numericVersion(f.Version)
+		add(protocol.MigrateCheckItem{ID: "version", Status: protocol.CheckOK, Title: fmt.Sprintf("%s %s here can take %s %s", s.flavor.display(), tshort, srcName, sshort)})
 	}
 	if ok, err := standbyRights(ctx, conn); err != nil || !ok {
 		fail("target_rights", "Rowsafe's account on this server may not load data and set up replication",
@@ -371,3 +373,8 @@ var errNoReadOnly = fmt.Errorf("Rowsafe can't make a MySQL source read-only (man
 
 // regexpLogin is a login name Rowsafe writes into statements.
 var regexpLogin = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,32}$`)
+
+func shortVersion(v string) string {
+	short, _ := numericVersion(v)
+	return short
+}
