@@ -5,8 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -51,6 +54,8 @@ func Backups(ctx context.Context, env agent.EngineEnv, stanza string) ([]BackupI
 // DownloadBackup decrypts backup label of stanza into dir/<label>/ and, for
 // a differential backup, its full backup into dir/<base>/. It returns the
 // folders written, the full backup first. dir must be empty or missing.
+// Run as root, it gives what it writes to the clickhouse user (when there
+// is one), so ClickHouse can restore from it.
 func DownloadBackup(ctx context.Context, env agent.EngineEnv, stanza, label, dir string, progress io.Writer) ([]string, error) {
 	if !validLabel(label) {
 		return nil, fmt.Errorf("%q isn't a backup label (like 20260925-101500F)", label)
@@ -59,9 +64,11 @@ func DownloadBackup(ctx context.Context, env agent.EngineEnv, stanza, label, dir
 	if err != nil {
 		return nil, err
 	}
-	if ents, err := os.ReadDir(dir); err == nil && len(ents) > 0 {
+	ents, err := os.ReadDir(dir)
+	if err == nil && len(ents) > 0 {
 		return nil, fmt.Errorf("%s isn't empty", dir)
 	}
+	created := errors.Is(err, os.ErrNotExist)
 	var d backupDoc
 	if err := r.getJSON(ctx, backupKey(label, backupDocName), &d); err != nil {
 		var se *objstore.S3Error
@@ -74,6 +81,9 @@ func DownloadBackup(ctx context.Context, env agent.EngineEnv, stanza, label, dir
 	if d.Base != "" {
 		labels = []string{d.Base, label}
 	}
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return nil, err
+	}
 	var dirs []string
 	for _, l := range labels {
 		out := filepath.Join(dir, l)
@@ -82,7 +92,53 @@ func DownloadBackup(ctx context.Context, env agent.EngineEnv, stanza, label, dir
 		}
 		dirs = append(dirs, out)
 	}
+	if os.Geteuid() == 0 {
+		owned := dirs
+		if created {
+			owned = []string{dir}
+		}
+		if who, err := giveToClickHouse(owned); err != nil {
+			return dirs, fmt.Errorf("giving the files to the clickhouse user: %w", err)
+		} else if who != "" {
+			fmt.Fprintf(progress, "the files belong to %s, so ClickHouse can read them\n", who)
+		}
+	}
 	return dirs, nil
+}
+
+// giveToClickHouse makes the clickhouse user (and group) own roots and
+// everything in them; it returns "user:group", or "" when there is no
+// clickhouse user.
+func giveToClickHouse(roots []string) (string, error) {
+	u, err := user.Lookup("clickhouse")
+	if err != nil {
+		return "", nil
+	}
+	gid := u.Gid
+	if g, err := user.LookupGroup("clickhouse"); err == nil {
+		gid = g.Gid
+	}
+	uid, err1 := strconv.Atoi(u.Uid)
+	g, err2 := strconv.Atoi(gid)
+	if err1 != nil || err2 != nil {
+		return "", nil
+	}
+	for _, root := range roots {
+		err := filepath.WalkDir(root, func(p string, _ fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			return os.Lchown(p, uid, g)
+		})
+		if err != nil {
+			return "", err
+		}
+	}
+	group := "clickhouse"
+	if gr, err := user.LookupGroupId(gid); err == nil {
+		group = gr.Name
+	}
+	return "clickhouse:" + group, nil
 }
 
 func (r *repo) downloadOne(ctx context.Context, label, out string, progress io.Writer) error {
@@ -91,13 +147,20 @@ func (r *repo) downloadOne(ctx context.Context, label, out string, progress io.W
 	if err != nil {
 		return err
 	}
-	var files int
+	var files, skipped int
 	var bytes int64
 	for _, o := range objs {
 		if o.Key == backupKey(label, backupDocName) {
 			continue // the agent's own description, not ClickHouse's
 		}
 		plain, err := s3gw.PlainName(r.pass, folder, o.Key)
+		if errors.Is(err, s3gw.ErrNotAName) {
+			// Not a file of the backup (Rowsafe's names are one encrypted
+			// name per file, right under the backup's folder).
+			fmt.Fprintf(progress, "skipped %s: not a file Rowsafe wrote for this backup\n", o.Key)
+			skipped++
+			continue
+		}
 		if err != nil {
 			return fmt.Errorf("the name of %s can't be decrypted: wrong encryption passphrase, or it was altered", o.Key)
 		}
@@ -116,7 +179,11 @@ func (r *repo) downloadOne(ctx context.Context, label, out string, progress io.W
 	if files == 0 {
 		return fmt.Errorf("backup %s has no files", label)
 	}
-	fmt.Fprintf(progress, "%s: %d files, %s, in %s\n", label, files, humanBytes(bytes), out)
+	note := ""
+	if skipped > 0 {
+		note = fmt.Sprintf(" (%d other files skipped)", skipped)
+	}
+	fmt.Fprintf(progress, "%s: %d files, %s, in %s%s\n", label, files, humanBytes(bytes), out, note)
 	return nil
 }
 

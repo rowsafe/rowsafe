@@ -51,7 +51,9 @@ for, is read from stdin (one line) and never stored (except the agent's own).
       environment (ROWSAFE_REPO_*, as in agent.env), list a database's
       backups (STANZA is its folder in the bucket), or decrypt backup LABEL
       (and the full backup a differential one needs) into DIR, ready for
-      ClickHouse's RESTORE ... FROM File(...). It prints the statement.
+      ClickHouse's RESTORE ... FROM File(...). It prints the statement. Run
+      as root, it gives the files to the clickhouse user. Other files in the
+      backup's folder (not written by Rowsafe) are skipped and listed.
 
 Rowsafe's user needs, ON *.*: SELECT, BACKUP (back up every database and
 compare tables with a copy), INSERT (bring rows back when you ask), KILL
@@ -196,6 +198,10 @@ func clickhouseDownload(ctx context.Context, args []string) int {
 		return d
 	}
 	last := abs(dirs[len(dirs)-1])
+	if os.Geteuid() != 0 {
+		fmt.Printf("\nThe files belong to the user that ran this: ClickHouse's user must be able to read them\n"+
+			"(run this as root to give them to it, or: chown -R clickhouse:clickhouse %s).\n", abs(*to))
+	}
 	fmt.Printf("\nWith %s in ClickHouse's backups.allowed_path, restore it with:\n\n", abs(*to))
 	if len(dirs) == 2 {
 		fmt.Printf("  RESTORE ALL FROM File('%s/') SETTINGS base_backup = File('%s/')\n", last, abs(dirs[0]))

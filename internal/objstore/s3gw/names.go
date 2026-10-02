@@ -69,17 +69,23 @@ func (n *names) encode(folder, rest string) string {
 	return base64.RawURLEncoding.EncodeToString(n.aead.Seal(nonce, nonce, []byte(rest), []byte(folder)))
 }
 
-var errNotAName = errors.New("not an encrypted object name")
+// ErrNotAName: the name can't be one the gateway gave (its shape is
+// wrong: another file in the folder). ErrNameAuth: it has the shape of one
+// but doesn't open with this passphrase (the wrong passphrase, or altered).
+var (
+	ErrNotAName = errors.New("not an encrypted object name")
+	ErrNameAuth = errors.New("the object name doesn't open with this passphrase")
+)
 
 // decode is the key (without its folder) a stored name stands for.
 func (n *names) decode(folder, name string) (string, error) {
 	b, err := base64.RawURLEncoding.DecodeString(name)
-	if err != nil || len(b) < nonceSize+n.aead.Overhead() {
-		return "", errNotAName
+	if err != nil || len(b) < nonceSize+n.aead.Overhead() || strings.Contains(name, "/") {
+		return "", ErrNotAName
 	}
 	plain, err := n.aead.Open(nil, b[:nonceSize], b[nonceSize:], []byte(folder))
 	if err != nil || !hmac.Equal(n.nonce(folder, string(plain)), b[:nonceSize]) {
-		return "", errNotAName
+		return "", ErrNameAuth
 	}
 	return string(plain), nil
 }
@@ -131,15 +137,17 @@ func StoredName(passphrase, folder, rest string) (string, error) {
 	return folder + n.encode(folder, rest), nil
 }
 
-// PlainName is the key a bucket name under folder stands for.
+// PlainName is the key a bucket name under folder stands for: ErrNotAName
+// when it isn't a name the gateway gives (e.g. a key nested deeper),
+// ErrNameAuth when it doesn't open with passphrase.
 func PlainName(passphrase, folder, storedKey string) (string, error) {
 	n, err := newNames(passphrase)
 	if err != nil {
 		return "", err
 	}
 	name, ok := strings.CutPrefix(storedKey, folder)
-	if !ok {
-		return "", errNotAName
+	if !ok || strings.Contains(name, "/") {
+		return "", ErrNotAName
 	}
 	rest, err := n.decode(folder, name)
 	if err != nil {

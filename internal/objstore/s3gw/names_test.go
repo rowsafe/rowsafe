@@ -3,6 +3,7 @@ package s3gw
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -52,6 +53,16 @@ func TestNames(t *testing.T) {
 	}
 	if p, err := PlainName(testPass, folder, folder+a); err != nil || p != folder+rest {
 		t.Fatal(p, err)
+	}
+	// Other files in the folder aren't names; a name with another
+	// passphrase fails to open.
+	for _, k := range []string{folder + "backup.json", folder + "sub/" + a, folder + "notes.txt"} {
+		if _, err := PlainName(testPass, folder, k); !errors.Is(err, ErrNotAName) {
+			t.Errorf("%s: %v", k, err)
+		}
+	}
+	if _, err := PlainName(testPass+"x", folder, folder+a); !errors.Is(err, ErrNameAuth) {
+		t.Errorf("another passphrase: %v", err)
 	}
 }
 
