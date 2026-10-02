@@ -92,7 +92,7 @@ func TestRealRewind(t *testing.T) {
 		return err
 	})
 	step("check", func(tl *taskLog) error { _, err := a.check(ctx, db, tl); return err })
-	if got := a.helperActions(); strings.Join(got, " ") != "restart stop start" {
+	if got := a.helperActions(); strings.Join(got, " ") != "restart stop start create-cluster" {
 		t.Fatalf("helper actions %v", got)
 	}
 
