@@ -453,7 +453,12 @@ func TestClickHouseEndToEnd(t *testing.T) {
 	}
 
 	// A backup stopped halfway (the task cancelled) leaves nothing behind.
-	must(t, admin, "CREATE TABLE shop.big ENGINE = MergeTree ORDER BY a AS SELECT number AS a, randomPrintableASCII(100) AS b FROM numbers(300000)")
+	// Many parts: ClickHouse notices a stop request between files.
+	must(t, admin, "CREATE TABLE shop.big (a UInt64, b String) ENGINE = MergeTree ORDER BY a")
+	must(t, admin, "SYSTEM STOP MERGES shop.big")
+	for i := range 30 {
+		must(t, admin, fmt.Sprintf("INSERT INTO shop.big SELECT number, randomPrintableASCII(100) FROM numbers(%d, 10000)", i*10000))
+	}
 	t.Setenv(bandwidthEnv, "200000")
 	cctx, ccancel := context.WithTimeout(ctx, 3*time.Second)
 	started := time.Now()

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,7 +36,11 @@ const bandwidthEnv = "ROWSAFE_CLICKHOUSE_BACKUP_BANDWIDTH"
 // ROWSAFE_CLICKHOUSE_GATEWAY_LISTEN/_URL say (a Docker sidecar); a
 // temporary server of the agent's own (local) always on 127.0.0.1.
 func startGateway(ctx context.Context, env agent.EngineEnv, r *repo, prefixes []string, readOnly, local bool) (*s3gw.Gateway, error) {
-	cfg := s3gw.Config{Store: r.st, Passphrase: r.pass, Listen: "127.0.0.1:0", Prefixes: prefixes, ReadOnly: readOnly, Log: env.Log}
+	tmp := filepath.Join(env.StateDir, "gateway")
+	if err := os.MkdirAll(tmp, 0o700); err != nil {
+		return nil, err
+	}
+	cfg := s3gw.Config{Store: r.st, Passphrase: r.pass, Listen: "127.0.0.1:0", Prefixes: prefixes, ReadOnly: readOnly, TempDir: tmp, Log: env.Log}
 	if !local {
 		if v := strings.TrimSpace(os.Getenv(gatewayListenEnv)); v != "" {
 			cfg.Listen = v
@@ -161,6 +166,7 @@ func runAsync(ctx context.Context, c *client, stmt, id, what string, tl agent.Ta
 		errs = 0
 		if st.done() {
 			if st.failed() {
+				tl.Printf("ClickHouse's own message: %s", shortError(errors.New(st.Error)))
 				return st, fmt.Errorf("the %s failed: %s", what, plainOpError(what, st.Error))
 			}
 			return st, nil
@@ -188,7 +194,7 @@ func plainOpError(what, msg string) string {
 		strings.Contains(msg, "CHECKSUM_DOESNT_MATCH") || strings.Contains(msg, "Checksum doesn't match") ||
 		strings.Contains(msg, "CORRUPTED_DATA") || strings.Contains(msg, "CANNOT_READ_ALL_DATA") ||
 		strings.Contains(msg, "S3_ERROR") || strings.Contains(msg, "NoSuchKey")):
-		return "part of the backup couldn't be read back from your bucket: it is damaged or missing (" + s + ")"
+		return "part of the backup couldn't be read back from your bucket: it is damaged or missing"
 	}
 	return s
 }
@@ -210,19 +216,25 @@ func backupStatement(dbs []string, to, base, id string) string {
 	return b.String()
 }
 
-// opSettings are the query settings of a BACKUP or RESTORE, those this
-// server knows: few retries (the gateway is on this host and retries the
-// bucket itself; ClickHouse's default of 1000 keeps a stopped backup
-// retrying for an hour) and, for a backup, the bandwidth cap.
+// opSettings are the session settings of a BACKUP or RESTORE (URL
+// parameters: ClickHouse 24.8 refuses s3_* settings in a BACKUP's SETTINGS
+// clause), those this server knows: few retries (the gateway is on this
+// host and retries the bucket itself; ClickHouse's default of 1000 keeps a
+// stopped backup retrying for an hour), upload sizes the gateway handles
+// well and, for a backup, the bandwidth cap.
 func opSettings(ctx context.Context, c *client, backup bool) []string {
-	want := map[string]string{"backup_restore_s3_retry_attempts": "10", "s3_retry_attempts": "10"}
+	want := map[string]string{
+		"backup_restore_s3_retry_attempts": "20", "s3_retry_attempts": "20",
+		"s3_max_single_part_upload_size": "8388608", "s3_min_upload_part_size": "5242880",
+	}
 	if v, err := strconv.ParseInt(strings.TrimSpace(os.Getenv(bandwidthEnv)), 10, 64); err == nil && v > 0 && backup {
 		want["max_backup_bandwidth"] = strconv.FormatInt(v, 10)
 	}
 	type row struct {
 		Name string `json:"name"`
 	}
-	known, _ := query[row](ctx, c, "SELECT name FROM system.settings WHERE name IN ('backup_restore_s3_retry_attempts', 's3_retry_attempts', 'max_backup_bandwidth')", nil)
+	known, _ := query[row](ctx, c, "SELECT name FROM system.settings WHERE name IN ('backup_restore_s3_retry_attempts', 's3_retry_attempts', "+
+		"'s3_max_single_part_upload_size', 's3_min_upload_part_size', 'max_backup_bandwidth')", nil)
 	var out []string
 	for _, k := range known {
 		if v, ok := want[k.Name]; ok {
