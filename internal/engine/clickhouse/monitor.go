@@ -3,6 +3,7 @@ package clickhouse
 import (
 	"context"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -208,7 +209,7 @@ func (m *dbMonitor) sample(ctx context.Context, dm *protocol.DatabaseMonitoring)
 				dm.Sizes = append(dm.Sizes, protocol.DatabaseSize{Name: s.DB, SizeBytes: s.Bytes})
 			}
 		}
-		dm.ClickHouse = status(ctx, c, int64(memLimit))
+		dm.ClickHouse = status(ctx, c, int64(memLimit), queryTextOn())
 		m.lastSizes = now
 	}
 	dm.Metrics = metrics
@@ -223,6 +224,21 @@ func parseFloat(s string) float64 {
 func queryTextOn() bool {
 	v := strings.ToLower(strings.TrimSpace(os.Getenv("ROWSAFE_COLLECT_QUERY_TEXT")))
 	return v != "false" && v != "0" && v != "no" && v != "off"
+}
+
+var errorName = regexp.MustCompile(`\(([A-Z][A-Z0-9_]{2,})\)`)
+
+// reasonWithoutText is a mutation's error when query text isn't collected:
+// only ClickHouse's error name, never the message (it can quote values).
+func reasonWithoutText(reason string) string {
+	if strings.TrimSpace(reason) == "" {
+		return ""
+	}
+	const hidden = "the details stay on the server: query text collection is off"
+	if m := errorName.FindStringSubmatch(reason); m != nil {
+		return m[1] + " (" + hidden + ")"
+	}
+	return "It fails (" + hidden + ")"
 }
 
 // runningQueries lists the queries running for over a minute (Activity),
@@ -283,7 +299,7 @@ func runningQueries(ctx context.Context, c *client, agentUser string, withText b
 }
 
 // status reads ClickHouse's own health detail (DatabaseMonitoring.ClickHouse).
-func status(ctx context.Context, c *client, memLimit int64) *protocol.ClickHouseStatus {
+func status(ctx context.Context, c *client, memLimit int64, withText bool) *protocol.ClickHouseStatus {
 	st := &protocol.ClickHouseStatus{CollectedAt: time.Now().UTC(), MemoryLimitBytes: memLimit}
 	type partRow struct {
 		DB        string `json:"database"`
@@ -322,8 +338,15 @@ func status(ctx context.Context, c *client, memLimit int64) *protocol.ClickHouse
 		toInt64(toUnixTimestamp(latest_fail_time)) AS failed_at
 		FROM system.mutations WHERE NOT is_done ORDER BY create_time LIMIT 20`, nil); err == nil {
 		for _, m := range ms {
-			mu := protocol.ClickHouseMutation{DB: m.DB, Table: m.Table, MutationID: m.ID, Command: m.Command,
-				CreatedAt: time.Unix(m.Created, 0).UTC(), PartsToDo: m.ToDo, FailReason: firstLine(m.Reason)}
+			mu := protocol.ClickHouseMutation{DB: m.DB, Table: m.Table, MutationID: m.ID,
+				CreatedAt: time.Unix(m.Created, 0).UTC(), PartsToDo: m.ToDo}
+			// The command and its error can hold values from the data.
+			if withText {
+				mu.Command = m.Command
+				mu.FailReason = firstLine(m.Reason)
+			} else {
+				mu.FailReason = reasonWithoutText(m.Reason)
+			}
 			if m.Reason != "" && m.FailedAt > 0 {
 				t := time.Unix(m.FailedAt, 0).UTC()
 				mu.FailedAt = &t
