@@ -154,7 +154,12 @@ func (a *Agent) restart(ctx context.Context, db protocol.DatabaseSpec, taskID st
 // and fills out.ArchiveMode: PostgreSQL's archive_mode, or what another
 // engine's Ready reports ("on" once its continuous archiving can work).
 func (a *Agent) waitBack(ctx context.Context, db protocol.DatabaseSpec, out *protocol.RestartResult) error {
-	deadline := time.Now().Add(restartBackTimeout)
+	return a.waitBackWithin(ctx, db, out, restartBackTimeout)
+}
+
+// waitBackWithin is waitBack with its own timeout.
+func (a *Agent) waitBackWithin(ctx context.Context, db protocol.DatabaseSpec, out *protocol.RestartResult, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
 	for {
 		var mode string
 		var err error

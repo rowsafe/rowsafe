@@ -84,6 +84,11 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 		return nil, fmt.Errorf("task %s has no database", task.Type)
 	}
 	db := *task.Database
+	if !isPostgres(db) && (task.Type == protocol.TaskSecurityUpdates || task.Type == protocol.TaskReboot) && engineRestarter(db) != nil {
+		// The server's own updates and reboots are the same for every
+		// engine (updates.go); the database is only waited for afterwards.
+		return a.runUpgradeTask(ctx, task, tl, db)
+	}
 	if !isPostgres(db) && task.Type == protocol.TaskRestart && engineRestarter(db) != nil {
 		// Every engine restarts through the same root helper or container
 		// control service (restart.go).

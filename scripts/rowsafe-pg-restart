@@ -1396,13 +1396,16 @@ act_security_updates() {
   cooldown security-updates 300
   : >"$work_log"
   apt_refresh
-  # Upgrades of installed packages from a security origin. PostgreSQL's
-  # server packages are left for Update PostgreSQL, which saves a Mark,
-  # restarts in a controlled way and checks archiving.
+  # Upgrades of installed packages from a security origin. The database
+  # servers' own packages are left alone (their upgrade would restart them):
+  # PostgreSQL's go through Update PostgreSQL, which saves a Mark, restarts
+  # in a controlled way and checks archiving; MySQL's, MariaDB's, MongoDB's
+  # and ClickHouse's aren't installed from Rowsafe yet.
   list=$(apt-get -s -o Debug::NoLocking=1 dist-upgrade 2>/dev/null |
     awk '/^Inst [^ ]+ \[/ && /-security|Debian-Security/ { print $2 }' | sort -u)
-  held=$(printf '%s\n' "$list" | grep -E '^postgresql-[0-9]+(-.+)?$' | tr '\n' ' ')
-  pkgs=$(printf '%s\n' "$list" | grep -Ev '^postgresql-[0-9]+(-.+)?$' | grep . | tr '\n' ' ')
+  db_pkgs='^(postgresql-[0-9]+(-.+)?|mysql-server(-.+)?|mysql-community-server(-.+)?|percona-server-server(-.+)?|mariadb-server(-.+)?|mongodb-org-server|mongodb-org-mongos|clickhouse-server|clickhouse-common-static)$'
+  held=$(printf '%s\n' "$list" | grep -E "$db_pkgs" | tr '\n' ' ')
+  pkgs=$(printf '%s\n' "$list" | grep -Ev "$db_pkgs" | grep . | tr '\n' ' ')
   n=0
   if [ -n "$pkgs" ]; then
     log "installing security updates: $pkgs (request $id)"

@@ -93,9 +93,9 @@ const (
 )
 
 // anyEnginePermissions work for every engine (MySQL, MariaDB, MongoDB and
-// ClickHouse restart through the same root helper); the others are
-// PostgreSQL's.
-var anyEnginePermissions = []string{protocol.PermRestart}
+// ClickHouse restart through the same root helper; the server's security
+// updates and reboots are the server's); the others are PostgreSQL's.
+var anyEnginePermissions = []string{protocol.PermRestart, protocol.PermSecurityUpdates, protocol.PermReboot}
 
 // ReadPermissions reads what root allowed. It never fails: an unreadable
 // file counts as never answered.

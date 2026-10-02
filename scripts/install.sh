@@ -2463,13 +2463,16 @@ act_security_updates() {
   cooldown security-updates 300
   : >"$work_log"
   apt_refresh
-  # Upgrades of installed packages from a security origin. PostgreSQL's
-  # server packages are left for Update PostgreSQL, which saves a Mark,
-  # restarts in a controlled way and checks archiving.
+  # Upgrades of installed packages from a security origin. The database
+  # servers' own packages are left alone (their upgrade would restart them):
+  # PostgreSQL's go through Update PostgreSQL, which saves a Mark, restarts
+  # in a controlled way and checks archiving; MySQL's, MariaDB's, MongoDB's
+  # and ClickHouse's aren't installed from Rowsafe yet.
   list=$(apt-get -s -o Debug::NoLocking=1 dist-upgrade 2>/dev/null |
     awk '/^Inst [^ ]+ \[/ && /-security|Debian-Security/ { print $2 }' | sort -u)
-  held=$(printf '%s\n' "$list" | grep -E '^postgresql-[0-9]+(-.+)?$' | tr '\n' ' ')
-  pkgs=$(printf '%s\n' "$list" | grep -Ev '^postgresql-[0-9]+(-.+)?$' | grep . | tr '\n' ' ')
+  db_pkgs='^(postgresql-[0-9]+(-.+)?|mysql-server(-.+)?|mysql-community-server(-.+)?|percona-server-server(-.+)?|mariadb-server(-.+)?|mongodb-org-server|mongodb-org-mongos|clickhouse-server|clickhouse-common-static)$'
+  held=$(printf '%s\n' "$list" | grep -E "$db_pkgs" | tr '\n' ' ')
+  pkgs=$(printf '%s\n' "$list" | grep -Ev "$db_pkgs" | grep . | tr '\n' ' ')
   n=0
   if [ -n "$pkgs" ]; then
     log "installing security updates: $pkgs (request $id)"
@@ -3058,6 +3061,7 @@ WantedBy=multi-user.target
 ROWSAFE_UPDATE_PATH_EOF
     _changed=1
   fi
+  if agent_user_dropin rowsafe-pg-update.service; then _changed=1; fi
   if systemd_running; then
     [ "$_changed" = 0 ] || systemctl daemon-reload
     systemctl enable --now --quiet rowsafe-pg-update.path
@@ -3071,7 +3075,8 @@ remove_update_units() {
   if systemd_running; then
     systemctl disable --now --quiet rowsafe-pg-update.path 2>/dev/null || true
   fi
-  rm -f "$UPDATE_PATH_FILE" "$UPDATE_SERVICE_FILE"
+  rm -f "$UPDATE_PATH_FILE" "$UPDATE_SERVICE_FILE" /etc/systemd/system/rowsafe-pg-update.service.d/10-agent-user.conf
+  rmdir /etc/systemd/system/rowsafe-pg-update.service.d 2>/dev/null || true
   if systemd_running; then systemctl daemon-reload; fi
 }
 
@@ -3113,7 +3118,12 @@ update_access() {
   if [ ! -f "$UPDATES_ALLOW_FILE" ] && [ "$TTY" = 1 ] && { [ -z "$ALLOW_UPDATES" ] || [ -z "$ALLOW_SECURITY" ]; }; then
     perm_intro
   fi
-  _pg=$(decide_update "$ALLOW_UPDATES" postgresql "Install PostgreSQL updates and upgrades, when someone clicks Update? A Mark is saved first." y)
+  _pg=no
+  if [ "$HOST_ENGINE" = postgresql ]; then
+    _pg=$(decide_update "$ALLOW_UPDATES" postgresql "Install PostgreSQL updates and upgrades, when someone clicks Update? A Mark is saved first." y)
+  elif [ "$ALLOW_UPDATES" = yes ]; then
+    warn "Rowsafe installs $(engine_label)'s own updates itself only for PostgreSQL so far; left off"
+  fi
   _sec=$(decide_update "$ALLOW_SECURITY" security "Install this server's security updates, when someone clicks Install?" n)
   _reboot=no
   if [ "$_sec" = yes ]; then
@@ -3127,7 +3137,7 @@ update_access() {
     echo "# with sudo rowsafe-allow updates (security-updates, reboot), and"
     echo "# sudo rowsafe-allow --remove updates (...)."
     [ "$_pg" != yes ] || echo "postgresql   # PostgreSQL minor updates and major upgrades (clusters in restart-allowed)"
-    [ "$_sec" != yes ] || echo "security     # security updates (PostgreSQL's own packages excepted)"
+    [ "$_sec" != yes ] || echo "security     # security updates (the database servers' own packages excepted)"
     [ "$_reboot" != yes ] || echo "reboot       # rebooting the server"
   } | write_file "$UPDATES_ALLOW_FILE" 0644 root:root || true
   if [ "$_pg$_sec$_reboot" = nonono ]; then
