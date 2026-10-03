@@ -613,6 +613,8 @@ func TaskTimeout(taskType string) time.Duration {
 		return time.Hour
 	case TaskDBAdmin: // Databases & users (dbadmin.go); removing a large database deletes its files
 		return 30 * time.Minute
+	case TaskBackupPassphrase: // cloud.go
+		return BackupPassphraseTimeout
 	default: // backup, drill, rewind copy and in place: a large restore takes hours
 		return 12 * time.Hour
 	}

@@ -1,5 +1,7 @@
 package protocol
 
+import "time"
+
 // Servers Rowsafe creates (Create a server for me, Rowsafe Cloud).
 //
 // The control plane creates the server in a cloud account with cloud-init
@@ -37,3 +39,18 @@ type BackupPassphraseSecret struct {
 	// SecondCopy is the second copy's passphrase, when there is one.
 	SecondCopy string `json:"second_copy,omitempty"`
 }
+
+// BackupPassphraseResult is the task's result. The control plane keeps
+// Secret apart from the stored task result (like DBAdminResult.Secret) and
+// hands it out once, to whoever asked.
+type BackupPassphraseResult struct {
+	// Secret is the BackupPassphraseSecret sealed to the request's
+	// PublicKey, with the task ID as additional data (Seal).
+	Secret *SealedSecret `json:"secret,omitempty"`
+	// SecondCopy says the secret holds the second copy's passphrase too.
+	SecondCopy bool `json:"second_copy,omitempty"`
+}
+
+// BackupPassphraseTimeout is how long the agent lets the task run (it reads
+// its settings and encrypts; people wait for it in the dashboard).
+const BackupPassphraseTimeout = 2 * time.Minute

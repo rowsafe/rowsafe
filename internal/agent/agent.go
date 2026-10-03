@@ -301,9 +301,10 @@ var fastLaneTypes = []string{protocol.TaskRestorePoint, protocol.TaskCopySchema}
 // data), so they never wait behind a backup or a copy being restored.
 var sideTypes = []string{protocol.TaskMaintenance, protocol.TaskRewindCompare, protocol.TaskRewindRows,
 	protocol.TaskRewindDrop, protocol.TaskRewindCleanup,
-	protocol.TaskFindMoment, // read-only; people wait for it in the dashboard
-	protocol.TaskDBAdmin,    // Databases & users: people wait for it in the dashboard
-	protocol.TaskMigrate,    // move in: key, check, switchover... (migrate.go)
+	protocol.TaskFindMoment,       // read-only; people wait for it in the dashboard
+	protocol.TaskDBAdmin,          // Databases & users: people wait for it in the dashboard
+	protocol.TaskBackupPassphrase, // cloud servers: people wait for it in the dashboard
+	protocol.TaskMigrate,          // move in: key, check, switchover... (migrate.go)
 	protocol.TaskSettings,
 	protocol.TaskSecurityScan, protocol.TaskSecurityFix, // security.go
 	protocol.TaskPermissions} // permissions.go: people wait for it in the dashboard

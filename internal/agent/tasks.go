@@ -84,6 +84,9 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 		return nil, fmt.Errorf("task %s has no database", task.Type)
 	}
 	db := *task.Database
+	if task.Type == protocol.TaskBackupPassphrase { // every engine: the passphrase is the agent's (backup_passphrase.go)
+		return a.runBackupPassphrase(task, tl, db)
+	}
 	if !isPostgres(db) {
 		return a.runEngineTask(ctx, task, tl)
 	}
