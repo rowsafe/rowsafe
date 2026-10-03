@@ -127,10 +127,28 @@ func (r *repo) readTimeline(ctx context.Context, from, to time.Time) (*timeline,
 		}
 	}
 	slices.SortStableFunc(logs, func(a, b pitLog) int { return a.From.Compare(b.From) })
-	covered := from
+	// One record only: the one that was running at from (after a standby's
+	// promotion another server records into the same folder, and the old
+	// primary's last logs may come after the new one's first).
+	record := ""
 	for _, l := range logs {
+		if !l.From.After(from) && l.To.After(from) {
+			record = l.Record
+			break
+		}
+	}
+	if h, ok, err := r.readHead(ctx); record == "" && err == nil && ok && !h.Started.After(from) {
+		record = h.Record
+	}
+	covered := from
+	broken := false
+	for _, l := range logs {
+		if l.Record != record {
+			continue
+		}
 		if l.From.After(covered) {
-			break // a break in the record
+			broken = true // a break in the record
+			break
 		}
 		for _, e := range l.Events {
 			if e.At.After(from) && !e.At.After(to) {
@@ -144,15 +162,10 @@ func (r *repo) readTimeline(ctx context.Context, from, to time.Time) (*timeline,
 			covered = l.To
 		}
 	}
-	if h, ok, err := r.readHead(ctx); err == nil && ok && h.To.After(covered) {
+	if h, ok, err := r.readHead(ctx); err == nil && ok && h.To.After(covered) && !broken && h.Record == record && record != "" {
 		// The head goes further than the last log: nothing changed since
-		// (a round without changes writes no log), as long as the last
-		// log is of the same record.
-		if len(logs) > 0 && logs[len(logs)-1].Record == h.Record && !logs[len(logs)-1].To.Before(covered) {
-			covered = h.To
-		} else if len(logs) == 0 && !h.Started.After(from) {
-			covered = h.To
-		}
+		// (a round without changes writes no log).
+		covered = h.To
 	}
 	tl.Covered = covered
 	sortEvents(tl.Events)

@@ -40,7 +40,13 @@ type Engine struct {
 	// (pitr_ship.go).
 	ctx      context.Context
 	shippers map[string]*shipper
+	// applying: the standbys' apply loop runs (standby_follow.go);
+	// standbyLocks serialize applying, promoting and removing a standby.
+	applying     bool
+	standbyLocks sync.Map // standby id -> *chLock
 }
+
+type chLock = sync.Mutex
 
 // baseLock is the database's lock between differential backups and
 // retention (see bases).
