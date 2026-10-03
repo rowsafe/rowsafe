@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/rowsafe/rowsafe/internal/agent"
+	"github.com/rowsafe/rowsafe/masking"
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
@@ -43,9 +45,6 @@ func (e *Engine) ForkRestore(ctx context.Context, env agent.EngineEnv, p protoco
 	if p.Placement != protocol.ForkEmptyServer || p.Port < 1 || p.Port > 65535 {
 		return nil, fmt.Errorf("a %s clone goes into an empty %s server (placement %q, port %d)", e.flavor.display(), e.flavor.display(), p.Placement, p.Port)
 	}
-	if p.Masking != nil {
-		return nil, fmt.Errorf("masking isn't available for %s clones yet; nothing was restored", e.flavor.display())
-	}
 	if p.Source.Stanza == "" {
 		return nil, errors.New("the clone names no source database")
 	}
@@ -76,9 +75,20 @@ func (e *Engine) ForkRestore(ctx context.Context, env agent.EngineEnv, p protoco
 	}
 	log.Printf("restoring %s as it was at %s from its backups, next to the %s server on port %d", p.Source.Name, target.describe(), e.flavor.display(), p.Port)
 	var loadedSchemas, loadedUsers []string
+	// A masked clone is masked on the private restore, before any of it is
+	// loaded into the target server.
+	var prepare func(context.Context, *sql.DB) error
+	var maskReport *protocol.ForkMaskReport
+	if p.Masking != nil {
+		prepare = func(ctx context.Context, sdb *sql.DB) error {
+			r, err := maskFork(ctx, env, sdb, e.flavor.mariadb(), *p.Masking, log)
+			maskReport = &r
+			return err
+		}
+	}
 	loaded, err := s.loadCopy(ctx, "fork-"+p.ForkID, target, false, func(schemas, users []string) {
 		loadedSchemas, loadedUsers = schemas, users
-	}, log)
+	}, prepare, log)
 	if err != nil {
 		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
 		defer cancel()
@@ -88,7 +98,7 @@ func (e *Engine) ForkRestore(ctx context.Context, env agent.EngineEnv, p protoco
 		return nil, err
 	}
 	res := &protocol.ForkRestoreResult{ForkID: p.ForkID, Placement: p.Placement, Port: p.Port, SocketDir: p.SocketDir, Major: p.Major,
-		RecoveredTo: loaded.RecoveredTo, DurationMs: time.Since(start).Milliseconds()}
+		RecoveredTo: loaded.RecoveredTo, DurationMs: time.Since(start).Milliseconds(), Masking: maskReport}
 	if dbs, _, err := schemaSizes(ctx, conn); err == nil {
 		res.Databases = dbs
 		for _, d := range dbs {
@@ -143,4 +153,32 @@ func (s *server) checkCloneTarget(ctx context.Context, conn *sql.DB, p protocol.
 		return fmt.Errorf("lower_case_table_names is %d here and %d on the source; they must be the same", f.LowerCase, lc)
 	}
 	return nil
+}
+
+// maskFork masks a clone's private restore with the source's rules (and
+// the suggestions when asked), like a safe copy.
+func maskFork(ctx context.Context, env agent.EngineEnv, db *sql.DB, mariadb bool, fm protocol.ForkMasking, log agent.TaskLogger) (protocol.ForkMaskReport, error) {
+	key, err := forkMaskKey(env)
+	if err != nil {
+		return protocol.ForkMaskReport{}, err
+	}
+	schema, err := readCopySchema(ctx, db)
+	if err != nil {
+		return protocol.ForkMaskReport{}, err
+	}
+	var report protocol.MaskingReport
+	plan := masking.PlanFork(schema, fm, &report)
+	log.Printf("masking the clone: %d tables", len(plan))
+	err = maskTables(ctx, db, mariadb, plan, key, log, &report)
+	return masking.ForkReport(report, plan), err
+}
+
+// forkMaskKey is the host's masking key (a random one outside the agent).
+func forkMaskKey(env agent.EngineEnv) ([]byte, error) {
+	if env.Copies != nil {
+		return env.Copies.MaskKey()
+	}
+	key := make([]byte, 32)
+	_, err := rand.Read(key)
+	return key, err
 }

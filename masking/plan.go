@@ -46,6 +46,39 @@ func Plan(schema *protocol.CopySchemaResult, mp protocol.MaskingPlan, report *pr
 	for _, r := range mp.Rules {
 		rules[RuleKey(r.DB, r.Table, r.Column)] = r.Strategy
 	}
+	return plan(schema, rules, true, report)
+}
+
+// PlanFork is Plan for a clone (protocol.ForkMasking): the source's saved
+// rules, and with Suggest the suggestion for every column no rule covers.
+func PlanFork(schema *protocol.CopySchemaResult, fm protocol.ForkMasking, report *protocol.MaskingReport) []TablePlan {
+	report.Mode = protocol.MaskingRules
+	if report.Strategies == nil {
+		report.Strategies = map[string]int{}
+	}
+	if schema == nil {
+		return nil
+	}
+	rules := map[string]string{}
+	for _, r := range fm.Rules {
+		rules[RuleKey(r.DB, r.Table, r.Column)] = r.Strategy
+	}
+	return plan(schema, rules, fm.Suggest, report)
+}
+
+// ForkReport turns a masking report into a clone's, listing the masked
+// columns of plan.
+func ForkReport(r protocol.MaskingReport, plan []TablePlan) protocol.ForkMaskReport {
+	out := protocol.ForkMaskReport{Tables: r.Tables, Columns: r.Columns, Rows: r.Rows, Strategies: r.Strategies, Skipped: r.Skipped}
+	for _, t := range plan {
+		for _, c := range t.Columns {
+			out.Masked = append(out.Masked, t.DB+": "+t.Table+"."+c.Name+" ("+c.Strategy+")")
+		}
+	}
+	return out
+}
+
+func plan(schema *protocol.CopySchemaResult, rules map[string]string, suggest bool, report *protocol.MaskingReport) []TablePlan {
 	var out []TablePlan
 	for _, d := range schema.Databases {
 		for _, t := range d.Tables {
@@ -56,6 +89,8 @@ func Plan(schema *protocol.CopySchemaResult, mp protocol.MaskingPlan, report *pr
 				case saved && !Fits(strategy, c.Type):
 					report.Skipped = append(report.Skipped, fmt.Sprintf("%s.%s.%s: the rule %q doesn't fit its type %s, so the suggestion was used", d.Name, t.Name, c.Name, strategy, c.Type))
 					strategy = Suggest(t.Name, c.Name, c.Type)
+				case !saved && !suggest:
+					strategy = Keep
 				case !saved:
 					strategy = Suggest(t.Name, c.Name, c.Type)
 				}

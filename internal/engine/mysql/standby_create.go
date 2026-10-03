@@ -216,7 +216,7 @@ func (s *server) seedStandby(ctx context.Context, conn *sql.DB, rec *standbyReco
 	loaded, err := s.loadCopy(ctx, "standby-"+rec.ID, restoreTarget{}, true, func(schemas, users []string) {
 		rec.Schemas, rec.Users = schemas, users
 		_ = standbys(s.env).put(*rec) // so an interrupted load can be undone
-	}, log)
+	}, nil, log)
 	if err != nil {
 		return filePos{}, err
 	}
@@ -237,7 +237,12 @@ type loadedCopy struct {
 // outside its binary log. With latest, it replays the binary logs to the
 // last complete transaction in the bucket. loaded is called with what is
 // about to be loaded, before it is (so an interrupted load can be undone).
-func (s *server) loadCopy(ctx context.Context, id string, t restoreTarget, latest bool, loaded func(schemas, users []string), log agent.TaskLogger) (loadedCopy, error) {
+//
+// prepare, when set, runs on the private restore before anything is
+// loaded (a masked clone is masked there, so the real values never reach
+// the target).
+func (s *server) loadCopy(ctx context.Context, id string, t restoreTarget, latest bool, loaded func(schemas, users []string),
+	prepare func(context.Context, *sql.DB) error, log agent.TaskLogger) (loadedCopy, error) {
 	var out loadedCopy
 	st, err := openStore(s.env.Repo, string(s.flavor), s.db.Stanza, s.cfg.PartSizeMB)
 	if err != nil {
@@ -280,6 +285,11 @@ func (s *server) loadCopy(ctx context.Context, id string, t restoreTarget, lates
 	}
 	if out.Users, err = s.copyLoginsList(ctx, sdb); err != nil {
 		return out, err
+	}
+	if prepare != nil {
+		if err := prepare(ctx, sdb); err != nil {
+			return out, err
+		}
 	}
 	loaded(out.Schemas, out.Users)
 	if len(out.Schemas) > 0 {

@@ -34,29 +34,35 @@ func maskCopy(ctx context.Context, db *sql.DB, mariadb bool, mp protocol.Masking
 	if err != nil {
 		return report, err
 	}
-	plan := masking.Plan(schema, mp, &report)
+	err = maskTables(ctx, db, mariadb, masking.Plan(schema, mp, &report), key, log, &report)
+	report.DurationMs = time.Since(start).Milliseconds()
+	return report, err
+}
+
+// maskTables applies a masking plan.
+func maskTables(ctx context.Context, db *sql.DB, mariadb bool, plan []masking.TablePlan, key []byte, log agent.TaskLogger, report *protocol.MaskingReport) error {
 	m := masking.New(key)
 	conn, err := db.Conn(ctx)
 	if err != nil {
-		return report, err
+		return err
 	}
 	defer conn.Close()
 	for _, q := range []string{"SET SESSION foreign_key_checks = 0", "SET SESSION unique_checks = 1",
 		"SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION'", "SET SESSION time_zone = '+00:00'"} {
 		if _, err := conn.ExecContext(ctx, q); err != nil {
-			return report, err
+			return err
 		}
 	}
 	for _, tp := range plan {
 		if _, err := conn.ExecContext(ctx, "USE "+quoteIdent(tp.DB)); err != nil {
-			return report, err
+			return err
 		}
 		var n int64
 		var names []string
 		for _, c := range tp.Columns {
 			rows, err := maskColumn(ctx, conn, tp, c, m)
 			if err != nil {
-				return report, fmt.Errorf("masking %s.%s.%s: %w", tp.DB, tp.Table, c.Name, err)
+				return fmt.Errorf("masking %s.%s.%s: %w", tp.DB, tp.Table, c.Name, err)
 			}
 			n += rows
 			report.Columns++
@@ -68,8 +74,7 @@ func maskCopy(ctx context.Context, db *sql.DB, mariadb bool, mp protocol.Masking
 		log.Printf("masked %s.%s: %s, %d rows", tp.DB, tp.Table, strings.Join(names, ", "), n)
 		dropColumnStats(ctx, conn, mariadb, tp)
 	}
-	report.DurationMs = time.Since(start).Milliseconds()
-	return report, nil
+	return nil
 }
 
 func maskColumn(ctx context.Context, conn *sql.Conn, tp masking.TablePlan, c masking.ColumnPlan, m *masking.Masker) (int64, error) {
