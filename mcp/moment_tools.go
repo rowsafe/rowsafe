@@ -30,6 +30,18 @@ type findMomentInput struct {
 	// TaskID fetches an earlier search instead of starting one.
 	TaskID      string `json:"task_id,omitempty" jsonschema:"the task_id of an earlier search: returns that search's result instead of starting a new one"`
 	WaitSeconds *int   `json:"wait_seconds,omitempty" jsonschema:"how long to wait for the result (default 55); searches of long ranges can take minutes, and the result then has status running and a task_id"`
+	// ListSearches lists earlier searches instead of starting one.
+	ListSearches bool `json:"list_searches,omitempty" jsonschema:"list the recent searches of this database (and how far back a search can go) instead of starting one"`
+}
+
+// PastSearchView is an earlier find_moment search.
+type PastSearchView struct {
+	TaskID    string     `json:"task_id"`
+	Status    string     `json:"status"`
+	CreatedAt time.Time  `json:"created_at"`
+	Summary   string     `json:"summary,omitempty"`
+	From      *time.Time `json:"from,omitempty"`
+	To        *time.Time `json:"to,omitempty"`
 }
 
 // MomentView is one transaction's change to one table.
@@ -58,6 +70,9 @@ type FindMomentView struct {
 	Notes        []string     `json:"notes,omitempty"`
 	Summary      string       `json:"summary,omitempty"`
 	Guidance     string       `json:"guidance"`
+	// With list_searches.
+	Earliest *time.Time       `json:"earliest,omitempty" jsonschema:"the oldest point the change log in storage still covers"`
+	Searches []PastSearchView `json:"searches,omitempty" jsonschema:"recent searches, newest first"`
 }
 
 const momentGuidance = "Tell the user what happened and when. The database's change log doesn't record who made a change. To undo it, the user can Rewind to just before it: in the Rowsafe dashboard (Rewind, Find the moment, \"Rewind to just before this\"), or `rowsafe rewind copy NAME --at REWIND_TO`, then compare and bring the rows back. You can't restore anything yourself."
@@ -68,7 +83,8 @@ func (t *tools) addMomentTools(s *sdk.Server) {
 		Description: "Finds when rows were deleted or changed, or a table emptied (TRUNCATE) or dropped: the Rowsafe agent reads the database's change log (PostgreSQL's WAL; for other engines where supported, their binary log or oplog) in the user's own storage, on their server, " +
 			"and lists the biggest changes per transaction with the exact commit time, transaction ID, table, row count and the point in time just before it (the moment to rewind to). " +
 			"Read-only: it never changes the database and never reads row contents. " +
-			"Default range: the last 24 hours. A search can take a minute or more; while its status is queued or running, the result has a task_id, and passing that task_id returns the search's result instead of starting a new one.",
+			"Default range: the last 24 hours. A search can take a minute or more; while its status is queued or running, the result has a task_id, and passing that task_id returns the search's result instead of starting a new one. " +
+			"list_searches lists the recent searches (their task_ids and summaries) and how far back a search can go.",
 		Annotations: readOnly("Find the moment"),
 		InputSchema: inputSchema[findMomentInput](func(p map[string]*jsonschema.Schema) {
 			p["since_hours"].Minimum, p["since_hours"].Maximum = ptr(0.0), ptr(protocol.MaxMomentRange.Hours())
@@ -82,6 +98,9 @@ func (t *tools) findMoment(ctx context.Context, _ *sdk.CallToolRequest, in findM
 	d, err := t.c.Database(ctx, in.Database)
 	if err != nil {
 		return nil, FindMomentView{}, apiError(err)
+	}
+	if in.ListSearches && in.TaskID == "" {
+		return t.pastMoments(ctx, d)
 	}
 	var task protocol.TaskView
 	if in.TaskID != "" {
@@ -153,5 +172,39 @@ func (t *tools) findMoment(ctx context.Context, _ *sdk.CallToolRequest, in findM
 		b.line("Note: %s", n)
 	}
 	b.line("Next: %s", momentGuidance)
+	return text(b), out, nil
+}
+
+// pastMoments lists a database's recent find_moment searches.
+func (t *tools) pastMoments(ctx context.Context, d protocol.Database) (*sdk.CallToolResult, FindMomentView, error) {
+	info, err := t.c.Moments(ctx, d.ID)
+	if err != nil {
+		return nil, FindMomentView{}, apiError(err)
+	}
+	out := FindMomentView{Database: d.Name, Status: "listed", Earliest: info.Earliest, Searches: []PastSearchView{}, Guidance: momentGuidance}
+	var b textBuilder
+	if info.Earliest != nil {
+		b.line("A search of %s can go back to %s.", d.Name, info.Earliest.UTC().Format(time.RFC3339))
+	}
+	if len(info.Searches) == 0 {
+		b.line("No earlier searches of %s.", d.Name)
+	}
+	for i, tk := range info.Searches {
+		if i == 20 {
+			break
+		}
+		v := PastSearchView{TaskID: tk.ID, Status: tk.Status, CreatedAt: tk.CreatedAt}
+		var r protocol.FindMomentResult
+		if tk.Status == protocol.StatusSucceeded && json.Unmarshal(tk.Result, &r) == nil {
+			v.Summary, v.From, v.To = r.Summary, &r.From, &r.To
+		} else if tk.Error != "" {
+			v.Summary = firstLine(tk.Error, 200)
+		}
+		out.Searches = append(out.Searches, v)
+		b.line("- %s %s (%s): %s", v.CreatedAt.UTC().Format("2006-01-02 15:04"), v.TaskID, v.Status, orDash(v.Summary))
+	}
+	if len(out.Searches) > 0 {
+		b.line("find_moment with a task_id returns that search's full result.")
+	}
 	return text(b), out, nil
 }

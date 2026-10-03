@@ -7,6 +7,8 @@ import (
 	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/rowsafe/rowsafe/protocol"
 )
 
 // Standby is read-only here. Guard's rule: AI agents never change
@@ -17,6 +19,11 @@ import (
 const standbyGuidance = "Standby changes (create, promote / fail over, rebuild, remove, automatic failover) are for people only: " +
 	"in the Rowsafe dashboard (Standby) or with `rowsafe standby`. You can't do any of them. If the primary looks down, tell the user; " +
 	"never tell them to promote without first checking the old primary is really down or that Rowsafe can stop it."
+
+type standbyInput struct {
+	Database   string `json:"database" jsonschema:"database name or ID"`
+	Candidates bool   `json:"candidates,omitempty" jsonschema:"also list the servers that could hold a standby, and why others can't"`
+}
 
 type StandbyStatusView struct {
 	Database string `json:"database"`
@@ -34,6 +41,8 @@ type StandbyStatusView struct {
 	Move              string     `json:"move,omitempty" jsonschema:"a move to another server in progress or just done, in plain words"`
 	ConnectionStrings []string   `json:"connection_strings,omitempty" jsonschema:"connection strings that follow the primary"`
 	Guidance          string     `json:"guidance"`
+	// Candidates: with candidates.
+	Candidates []protocol.StandbyCandidate `json:"candidates,omitempty" jsonschema:"servers that could hold a standby (usable, or why not)"`
 }
 
 func (t *tools) addStandbyReadTools(s *sdk.Server) {
@@ -41,12 +50,12 @@ func (t *tools) addStandbyReadTools(s *sdk.Server) {
 		Name: "standby_status",
 		Description: "Shows a database's standby server (a second server that stays in sync, is readable for reports, and can take over): " +
 			"whether it is in sync, streaming or following through the bucket, how far behind, fenced old primaries, whether automatic failover is on, " +
-			"and connection strings that follow the primary. Read-only: it changes nothing on either server.",
+			"and connection strings that follow the primary. candidates also lists the servers that could hold a standby. Read-only: it changes nothing on either server.",
 		Annotations: readOnly("Standby status"),
 	}, t.standbyStatus)
 }
 
-func (t *tools) standbyStatus(ctx context.Context, _ *sdk.CallToolRequest, in databaseInput) (*sdk.CallToolResult, StandbyStatusView, error) {
+func (t *tools) standbyStatus(ctx context.Context, _ *sdk.CallToolRequest, in standbyInput) (*sdk.CallToolResult, StandbyStatusView, error) {
 	d, err := t.c.Database(ctx, in.Database)
 	if err != nil {
 		return nil, StandbyStatusView{}, apiError(err)
@@ -74,6 +83,13 @@ func (t *tools) standbyStatus(ctx context.Context, _ *sdk.CallToolRequest, in da
 	}
 	for _, c := range info.Connect {
 		out.ConnectionStrings = append(out.ConnectionStrings, c.Driver+": "+c.Value)
+	}
+	if in.Candidates {
+		cs, err := t.c.StandbyCandidates(ctx, d.ID)
+		if err != nil {
+			return nil, out, apiError(err)
+		}
+		out.Candidates = nonNilSlice(cs)
 	}
 	return nil, out, nil
 }
