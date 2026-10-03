@@ -60,6 +60,11 @@
 #                          with the firewall when you ask (Security in the
 #                          dashboard); never touches SSH or other ports
 #   --no-allow-firewall    turn that off again (and remove Rowsafe's rule)
+#   --firewall-ssh         for servers Rowsafe creates (implies --allow-firewall):
+#                          the firewall also limits who can reach SSH, and
+#                          PostgreSQL's port is closed to everyone until the
+#                          dashboard's allowed addresses arrive;
+#                          --no-firewall-ssh gives SSH back to you
 #   --allow-updates        allow Rowsafe to install PostgreSQL updates and upgrade
 #                          PostgreSQL when you click Update or Upgrade (needs
 #                          --allow-restart); --no-allow-updates turns it off
@@ -206,6 +211,7 @@ ALLOW_CREATE_CLUSTER='' # --allow-create-cluster (yes) / --no-allow-create-clust
 ALLOW_POOLER=''    # --allow-pooler (yes) / --no-allow-pooler (no); '' = ask once, on a terminal
 ALLOW_POOLER_PUBLIC='' # --allow-pooler-public (yes) / --no-allow-pooler-public (no): PgBouncer on every address
 ALLOW_FIREWALL=''  # --allow-firewall (yes) / --no-allow-firewall (no); '' = ask once, on a terminal
+FIREWALL_SSH=''    # --firewall-ssh (yes) / --no-firewall-ssh (no): SSH's allow list too (servers Rowsafe creates)
 ALLOW_UPDATES=''   # --allow-updates / --no-allow-updates (PostgreSQL updates and upgrades)
 ALLOW_SECURITY=''  # --allow-security-updates / --no-allow-security-updates
 ALLOW_REBOOT=''    # --allow-reboot / --no-allow-reboot
@@ -309,6 +315,10 @@ Options (when piping, pass them after `sh -s --`):
                          the firewall (nftables) when you ask, under Security in the
                          dashboard; never touches SSH or other ports
   --no-allow-firewall    turn that off (and remove Rowsafe's rule and helper)
+  --firewall-ssh         for servers Rowsafe creates (implies --allow-firewall): the
+                         firewall also limits who can reach SSH, and PostgreSQL's port
+                         is closed to everyone until the allowed addresses arrive
+  --no-firewall-ssh      Rowsafe stops limiting who can reach SSH
   --allow-updates        allow Rowsafe to install PostgreSQL updates and upgrade PostgreSQL
                          when you click Update or Upgrade and confirm (needs --allow-restart)
   --no-allow-updates     turn that off
@@ -3410,9 +3420,11 @@ update_access() {
 # $FIREWALL_ALLOW_FILE. It runs in a unit of its own: the restart helper's
 # sandbox has no network access and stays that way.
 
-install_firewall_helper() {
+# write_firewall_helper installs the helper itself (FW_HELPER_CHANGED=1
+# when it changed).
+write_firewall_helper() {
   install -d -m 0755 -o root -g root "${FIREWALL_HELPER%/*}"
-  _changed=0
+  FW_HELPER_CHANGED=0
   if write_file "$FIREWALL_HELPER" 0755 root:root <<'ROWSAFE_FIREWALL_HELPER_EOF'; then
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
@@ -3443,7 +3455,8 @@ install_firewall_helper() {
 # Rules live in one nftables table of Rowsafe's own, "inet rowsafe", which
 # matches only the allowed PostgreSQL ports: connections to such a port
 # from anywhere but the allowed addresses and the server itself are
-# dropped; SSH and every other port are never touched. The whole table is
+# dropped; SSH (unless root allowed it, see "server" below) and every other
+# port are never touched. The whole table is
 # replaced in one nft transaction, checked with nft -c first. Ports that
 # Docker publishes are not covered (their traffic is forwarded, not
 # delivered to this server), and the postgres-socket check refuses them.
@@ -3460,6 +3473,19 @@ install_firewall_helper() {
 # holds the rules). The rules are kept in /var/lib/rowsafe-firewall and
 # loaded again at boot by rowsafe-firewall-restore.service
 # ("rowsafe-firewall --restore", which drops unconfirmed rules).
+#
+# Servers Rowsafe creates in a cloud whose own firewall Rowsafe can't set
+# (an OVHcloud project without security groups) get a firewall on the server
+# itself: the installer's --firewall-ssh adds the line "ssh" to root's allow
+# list, and only then the action "server" ("ID server PORT") sets both allow
+# lists at once: /var/lib/rowsafe/firewall/addresses for PostgreSQL's PORT
+# and /var/lib/rowsafe/firewall/ssh-addresses for SSH (the ports sshd uses,
+# found here, never taken from the agent), 0 to 64 addresses each (none =
+# closed to everyone; 0.0.0.0/0 and ::/0 = open to everyone). Connections
+# from the server itself and replies to connections already made (the
+# agent's own, which only dials out) are always let through; every other
+# port, and outbound traffic, stay as they are. It is confirmed and rolled
+# back like apply, and kept as ssh-allowed and ssh-ports next to port-PORT.
 
 set -u
 set -f
@@ -3523,12 +3549,24 @@ valid_cidr() {
   case $1 in */*) [ "${1#*/}" -ge 16 ] && [ "${1#*/}" -le 128 ] || return 1 ;; esac
 }
 
-# listed_port PORT: in root's allow list (ports compare as strings).
-listed_port() {
+# allow_ok: root's allow list is a regular file only root can write.
+allow_ok() {
   [ -f "$allow" ] && [ ! -L "$allow" ] || return 1
   [ "$(stat -c '%u' "$allow")" = 0 ] || return 1
   case $(stat -c '%A' "$allow") in ?????w???? | ????????w?) return 1 ;; esac
+}
+
+# listed_port PORT: in root's allow list (ports compare as strings).
+listed_port() {
+  allow_ok || return 1
   awk -v p="$1" '$1 "" == p "" { f = 1 } END { exit !f }' "$allow"
+}
+
+# listed_ssh: root allowed SSH's allow list too (the line "ssh", written by
+# the installer's --firewall-ssh on servers Rowsafe creates).
+listed_ssh() {
+  allow_ok || return 1
+  awk '$1 == "ssh" { f = 1 } END { exit !f }' "$allow"
 }
 
 # listen_ports [UID]: the TCP ports with a listening socket (of UID).
@@ -3543,6 +3581,47 @@ ssh_port() {
     "$sshd" -T 2>/dev/null | awk '$1 == "port" { print $2 }'
     "$ss" -ltnHp 2>/dev/null | awk '/"sshd"/ { n = split($4, a, ":"); print a[n] }'
   } | awk -v p="$1" '$1 "" == p "" { f = 1 } END { exit !f }'
+}
+
+# ssh_ports prints the ports sshd uses (or is set to); 22 when none is
+# found (sshd started by its socket unit shows up as systemd).
+ssh_ports() {
+  _sp=$({
+    "$sshd" -T 2>/dev/null | awk '$1 == "port" { print $2 }'
+    "$ss" -ltnHp 2>/dev/null | awk '/"sshd"/ { n = split($4, a, ":"); print a[n] }'
+  } | grep -Ex '[1-9][0-9]{0,4}' | awk '$1 <= 65535' | sort -un)
+  if [ -n "$_sp" ]; then printf '%s\n' "$_sp"; else echo 22; fi
+}
+
+# ssh_rule prints SSH's rule file (ssh-pending replaces ssh-allowed while it
+# waits for its confirmation), or nothing when SSH is not Rowsafe's.
+ssh_rule() {
+  listed_ssh || return 0
+  if [ -f "$state/ssh-pending" ]; then
+    echo "$state/ssh-pending"
+  elif [ -f "$state/ssh-allowed" ]; then
+    echo "$state/ssh-allowed"
+  fi
+}
+
+# rule_lines PORTS FILE prints the rules letting only FILE's addresses reach
+# PORTS (one port, or several separated by commas).
+rule_lines() {
+  _d=$1
+  case $_d in *,*) _d="{ $_d }" ;; esac
+  v4=$(grep -v ':' "$2" | grep -vx '0.0.0.0/0' | paste -sd, -)
+  v6=$(grep ':' "$2" | grep -vx '::/0' | paste -sd, -)
+  if grep -qx '0.0.0.0/0' "$2"; then
+    echo "    tcp dport $_d meta nfproto ipv4 accept"
+  elif [ -n "$v4" ]; then
+    echo "    tcp dport $_d ip saddr { $v4 } accept"
+  fi
+  if grep -qx '::/0' "$2"; then
+    echo "    tcp dport $_d meta nfproto ipv6 accept"
+  elif [ -n "$v6" ]; then
+    echo "    tcp dport $_d ip6 saddr { $v6 } accept"
+  fi
+  echo "    tcp dport $_d drop"
 }
 
 # rule_files prints the rule files in $state: port-P, and pending-P which
@@ -3560,15 +3639,18 @@ render() {
   echo "  chain input {"
   echo "    type filter hook input priority filter - 5; policy accept;"
   echo "    iifname \"lo\" accept"
+  sf=$(ssh_rule)
+  sp=$(paste -sd, - <"$state/ssh-ports" 2>/dev/null)
+  if [ -n "$sf" ] && [ -n "$sp" ]; then
+    # Replies to connections already made (the agent's, an SSH session).
+    echo "    ct state established,related accept"
+    rule_lines "$sp" "$sf"
+  fi
   for f in $(rule_files); do
     p=${f##*/}
     p=${p#*-}
     valid_port "$p" || continue
-    v4=$(grep -v ':' "$f" | paste -sd, -)
-    v6=$(grep ':' "$f" | paste -sd, -)
-    [ -z "$v4" ] || echo "    tcp dport $p ip saddr { $v4 } accept"
-    [ -z "$v6" ] || echo "    tcp dport $p ip6 saddr { $v6 } accept"
-    echo "    tcp dport $p drop"
+    rule_lines "$p" "$f"
   done
   echo "  }"
   echo "}"
@@ -3579,7 +3661,7 @@ loaded() { "$nft" list table inet rowsafe >/dev/null 2>&1; }
 # load applies the rules in $state (or removes the table when none are
 # left), and checks nftables holds them.
 load() {
-  if [ -n "$(rule_files)" ]; then
+  if [ -n "$(rule_files)$(ssh_rule)" ]; then
     render >"$state/rules.nft.new" || return 1
     "$nft" -c -f "$state/rules.nft.new" 2>"$state/nft.err" || return 1
     "$nft" -f "$state/rules.nft.new" 2>"$state/nft.err" || return 1
@@ -3598,9 +3680,15 @@ load() {
 
 # publish writes the public view of each confirmed rule for the agent.
 publish() {
-  find "$out_dir" -maxdepth 1 -type f -name 'port-*' -exec rm -f {} + 2>/dev/null
+  find "$out_dir" -maxdepth 1 -type f \( -name 'port-*' -o -name ssh \) -exec rm -f {} + 2>/dev/null
   l=0
   if loaded; then l=1; fi
+  if listed_ssh && [ -f "$state/ssh-allowed" ] && tmp=$(mktemp "$out_dir/.ssh.XXXXXX"); then
+    printf 'addresses=%s\nports=%s\napplied_at=%s\nloaded=%s\n' "$(paste -sd, - <"$state/ssh-allowed")" \
+      "$(paste -sd, - <"$state/ssh-ports" 2>/dev/null)" "$(stat -c '%Y' "$state/ssh-allowed")" "$l" >"$tmp"
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$out_dir/ssh"
+  fi
   find "$state" -maxdepth 1 -type f -name 'port-*' 2>/dev/null | while read -r f; do
     p=${f##*/port-}
     tmp=$(mktemp "$out_dir/.port.XXXXXX") || return 0
@@ -3615,7 +3703,7 @@ chmod 0700 "$state"
 
 if [ "${1:-}" = --restore ]; then
   # Unconfirmed rules never come back.
-  find "$state" -maxdepth 1 -type f -name 'pending-*' -exec rm -f {} + 2>/dev/null
+  find "$state" -maxdepth 1 -type f \( -name 'pending-*' -o -name ssh-pending \) -exec rm -f {} + 2>/dev/null
   if load; then
     publish
     log "rules loaded"
@@ -3628,7 +3716,7 @@ fi
 
 line=$(read_agent_file "$dir/request" 200 | head -n 1)
 [ -n "$line" ] || exit 0
-if printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} (apply|remove|status) [1-9][0-9]{0,4}$'; then
+if printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} (apply|remove|status|server) [1-9][0-9]{0,4}$'; then
   id=${line%% *}
   rest=${line#* }
   action=${rest% *}
@@ -3651,14 +3739,20 @@ command -v "$nft" >/dev/null 2>&1 || refuse "nftables (the nft command) is not i
 valid_port "$port" || refuse "port $port can't be managed by Rowsafe: only ports 1024 to 65535"
 listed_port "$port" || refuse "port $port is not in $allow: changing the firewall for it from Rowsafe is not allowed"
 if ssh_port "$port"; then refuse "port $port is SSH's: Rowsafe never touches it"; fi
+if [ "$action" = server ] && ! listed_ssh; then
+  refuse "SSH's allow list isn't Rowsafe's on this server: only servers Rowsafe creates allow it (the installer's --firewall-ssh)"
+fi
 
 # Keep the current rules to go back to.
 rm -rf "$state/previous"
 mkdir -p "$state/previous"
 for f in $(rule_files); do cp -p "$f" "$state/previous/"; done
+for f in ssh-allowed ssh-ports; do
+  if [ -f "$state/$f" ]; then cp -p "$state/$f" "$state/previous/"; fi
+done
 
 rollback() {
-  find "$state" -maxdepth 1 -type f \( -name 'port-*' -o -name 'pending-*' \) -exec rm -f {} + 2>/dev/null
+  find "$state" -maxdepth 1 -type f \( -name 'port-*' -o -name 'pending-*' -o -name 'ssh-*' \) -exec rm -f {} + 2>/dev/null
   find "$state/previous" -maxdepth 1 -type f -exec cp -p {} "$state/" \; 2>/dev/null
   if ! load; then
     publish
@@ -3667,26 +3761,42 @@ rollback() {
   publish
 }
 
-if [ "$action" = apply ]; then
+# take_addresses FILE NEW MIN MAX [any]: the agent's addresses in FILE,
+# checked, into NEW (root's); "any" also takes 0.0.0.0/0 and ::/0.
+take_addresses() {
+  addrs=$(read_agent_file "$dir/$1" 4096 | head -n "$(($4 + 1))")
+  n=0
+  : >"$2"
+  for a in $addrs; do
+    if [ "${5:-}" = any ] && { [ "$a" = 0.0.0.0/0 ] || [ "$a" = ::/0 ]; }; then
+      :
+    elif ! valid_cidr "$a"; then
+      rm -f "$2"
+      refuse "not an address or range: $(printf '%s' "$a" | cut -c1-60)"
+    fi
+    n=$((n + 1))
+    printf '%s\n' "$a" >>"$2"
+  done
+  [ "$n" -ge "$3" ] && [ "$n" -le "$4" ] || {
+    rm -f "$2"
+    refuse "between $3 and $4 addresses are needed, got $n"
+  }
+}
+
+if [ "$action" = apply ] || [ "$action" = server ]; then
   uid=$(id -u "$agent_user" 2>/dev/null) || refuse "no $agent_user user"
   listen_ports "$uid" | grep -qx "$port" ||
     refuse "no PostgreSQL of the $agent_user user listens on port $port here (a port Docker publishes bypasses this firewall: limit it in the compose file instead)"
-  addrs=$(read_agent_file "$dir/addresses" 4096 | head -n 33)
-  n=0
-  : >"$state/new-$port"
-  for a in $addrs; do
-    valid_cidr "$a" || {
-      rm -f "$state/new-$port"
-      refuse "not an address or range: $(printf '%s' "$a" | cut -c1-60)"
-    }
-    n=$((n + 1))
-    printf '%s\n' "$a" >>"$state/new-$port"
-  done
-  [ "$n" -ge 1 ] && [ "$n" -le 32 ] || {
-    rm -f "$state/new-$port"
-    refuse "between 1 and 32 addresses are needed, got $n"
-  }
+fi
+if [ "$action" = apply ]; then
+  take_addresses addresses "$state/new-$port" 1 32
   mv -f "$state/new-$port" "$state/pending-$port"
+elif [ "$action" = server ]; then
+  take_addresses addresses "$state/new-$port" 0 64 any
+  take_addresses ssh-addresses "$state/ssh-new" 0 64 any
+  ssh_ports >"$state/ssh-ports"
+  mv -f "$state/new-$port" "$state/pending-$port"
+  mv -f "$state/ssh-new" "$state/ssh-pending"
 else
   rm -f "$state/port-$port" "$state/pending-$port"
 fi
@@ -3700,7 +3810,7 @@ if ! load; then
 fi
 log "$action port $port (request $id)"
 
-if [ "$action" = apply ]; then
+if [ "$action" = apply ] || [ "$action" = server ]; then
   # Wait for the agent to confirm it still reaches Rowsafe and PostgreSQL.
   phase=pending ok=1
   answer
@@ -3726,14 +3836,20 @@ if [ "$action" = apply ]; then
     exit 0
   fi
   mv -f "$state/pending-$port" "$state/port-$port"
+  if [ "$action" = server ]; then mv -f "$state/ssh-pending" "$state/ssh-allowed"; fi
 fi
 publish
 ok=1
 log "$action port $port: done"
 answer
 ROWSAFE_FIREWALL_HELPER_EOF
-    _changed=1
+    FW_HELPER_CHANGED=1
   fi
+}
+
+install_firewall_helper() {
+  write_firewall_helper
+  _changed=$FW_HELPER_CHANGED
   if write_file "$FIREWALL_SERVICE_FILE" 0644 root:root <<'ROWSAFE_FIREWALL_SERVICE_EOF'; then
 # SPDX-License-Identifier: Apache-2.0
 # rowsafe-firewall.service: lets only chosen addresses reach a PostgreSQL
@@ -3912,19 +4028,78 @@ firewall_listed() {
   grep -Ex '[1-9][0-9]{3,4}' "$FIREWALL_ALLOW_FILE" || true
 }
 
-# write_firewall_allow PORTS...: the allow list, written by root.
+# firewall_ssh_listed: the allow list has the line "ssh" (--firewall-ssh).
+firewall_ssh_listed() { [ -f "$FIREWALL_ALLOW_FILE" ] && grep -qx ssh "$FIREWALL_ALLOW_FILE"; }
+
+# write_firewall_allow PORTS...: the allow list, written by root. The line
+# "ssh" (SSH's allow list is Rowsafe's too) comes with --firewall-ssh and
+# stays until --no-firewall-ssh or --no-allow-firewall.
 write_firewall_allow() {
+  _fw_ssh=0
+  if [ "$FIREWALL_SSH" = yes ] || { [ "$FIREWALL_SSH" != no ] && firewall_ssh_listed; }; then _fw_ssh=1; fi
   {
     echo "# PostgreSQL ports whose firewall rule Rowsafe may set when someone asks"
     echo "# (Security in the dashboard): only the chosen addresses may reach the"
-    echo "# port. SSH and other ports are never touched. Written by the installer"
-    echo "# (root); turn this off with: sudo rowsafe-allow --remove firewall"
+    if [ "$_fw_ssh" = 1 ]; then
+      echo "# port. \"ssh\": a server Rowsafe created (--firewall-ssh), where Rowsafe"
+      echo "# also sets who may reach SSH; other ports are never touched. Written by"
+      echo "# the installer (root); turn SSH's part off with: --no-firewall-ssh"
+    else
+      echo "# port. SSH and other ports are never touched. Written by the installer"
+      echo "# (root); turn this off with: sudo rowsafe-allow --remove firewall"
+    fi
     echo "# PORT"
     printf '%s\n' "$@" | sort -un
+    if [ "$_fw_ssh" = 1 ]; then echo ssh; fi
   } | write_file "$FIREWALL_ALLOW_FILE" 0644 root:root || true
 }
 
+# firewall_restore reloads Rowsafe's rules from what the helper keeps.
+firewall_restore() {
+  [ -x "$FIREWALL_HELPER" ] || return 0
+  install -d -m 0700 -o root -g root /var/lib/rowsafe-firewall
+  install -d -m 0755 -o root -g root /run/rowsafe-firewall
+  STATE_DIRECTORY=/var/lib/rowsafe-firewall RUNTIME_DIRECTORY=/run/rowsafe-firewall "$FIREWALL_HELPER" --restore 2>"$TMP/firewall.err"
+}
+
+# firewall_close_early (--firewall-ssh, on servers Rowsafe creates): before
+# PostgreSQL listens on public addresses, its port is closed to everyone
+# but this server, until the agent applies who may connect (the helper's
+# "server" action, when the person's choice arrives from the dashboard).
+# SSH stays as it is until then. A re-run keeps the rules already there.
+firewall_close_early() {
+  have nft || apt_install nftables
+  _ports=$(firewall_ports)
+  [ -n "$_ports" ] || return 0
+  [ -d "$CONFIG_DIR" ] || install -d -m 0750 -o root -g "$AGENT_USER" "$CONFIG_DIR"
+  # shellcheck disable=SC2046,SC2086 # one port per word
+  write_firewall_allow $(firewall_listed) $_ports
+  write_firewall_helper
+  install -d -m 0700 -o root -g root /var/lib/rowsafe-firewall
+  for _p in $_ports; do
+    [ -e "/var/lib/rowsafe-firewall/port-$_p" ] || [ -e "/var/lib/rowsafe-firewall/pending-$_p" ] ||
+      : >"/var/lib/rowsafe-firewall/port-$_p"
+  done
+  if firewall_restore; then
+    ok "PostgreSQL's port ($(printf '%s' "$_ports" | paste -sd, - | sed 's/,/, /g')) is closed to everyone but this server until Rowsafe applies who may connect"
+  else
+    sed 's/^/    /' "$TMP/firewall.err" >&2
+    die "could not close PostgreSQL's port with the firewall (nftables), so PostgreSQL stays private"
+  fi
+}
+
+# firewall_ssh_off is --no-firewall-ssh: Rowsafe's SSH rule goes, the
+# PostgreSQL rules stay.
+firewall_ssh_off() {
+  firewall_ssh_listed || return 0
+  grep -vx ssh "$FIREWALL_ALLOW_FILE" | write_file "$FIREWALL_ALLOW_FILE" 0644 root:root || true
+  rm -f /var/lib/rowsafe-firewall/ssh-allowed /var/lib/rowsafe-firewall/ssh-pending /var/lib/rowsafe-firewall/ssh-ports
+  firewall_restore || warn "could not reload Rowsafe's firewall rules: $(tr '\n' ' ' <"$TMP/firewall.err")"
+  perm_ok "Rowsafe no longer limits who can reach SSH"
+}
+
 allow_firewall() {
+  if [ "$FIREWALL_SSH" = yes ] && ! command -v nft >/dev/null 2>&1; then apt_install nftables; fi
   if ! command -v nft >/dev/null 2>&1; then
     warn "nftables isn't installed here (no nft command), so limiting who can reach PostgreSQL stays off. Install it (e.g. apt install nftables), then: sudo rowsafe-allow firewall"
     return 0
@@ -3938,7 +4113,11 @@ allow_firewall() {
   # shellcheck disable=SC2086 # one port per word
   write_firewall_allow $_listed $_ports
   install_firewall_helper
-  perm_ok "Rowsafe may limit who can reach PostgreSQL's port ($(firewall_listed | paste -sd, - | sed 's/,/, /g')) when you ask (Security), never SSH or other ports"
+  if firewall_ssh_listed; then
+    perm_ok "Rowsafe may limit who can reach PostgreSQL's port ($(firewall_listed | paste -sd, - | sed 's/,/, /g')) and SSH, as set in the dashboard; never other ports"
+  else
+    perm_ok "Rowsafe may limit who can reach PostgreSQL's port ($(firewall_listed | paste -sd, - | sed 's/,/, /g')) when you ask (Security), never SSH or other ports"
+  fi
 }
 
 disallow_firewall() {
@@ -3955,6 +4134,7 @@ disallow_firewall() {
 # once on a terminal (default no). A re-run keeps the allow list as it is,
 # and adds a port it doesn't list only after a fresh yes.
 firewall_access() {
+  [ "$FIREWALL_SSH" != no ] || firewall_ssh_off
   case $ALLOW_FIREWALL in
     yes) allow_firewall ;;
     no)
@@ -7686,6 +7866,7 @@ install_agent() {
   detect_arch
   # Servers Rowsafe creates: PostgreSQL first, then the agent protects it.
   [ -z "$INSTALL_PG" ] || install_postgres
+  [ "$FIREWALL_SSH" != yes ] || firewall_close_early
   [ "$LISTEN_PUBLIC" = 0 ] || listen_public
   detect_host_engine # mysql
   detect_mongodb_host # mongodb
@@ -7941,6 +8122,8 @@ main() {
       --no-allow-create-cluster) ALLOW_CREATE_CLUSTER=no ;;
       --allow-firewall) ALLOW_FIREWALL=yes ;;
       --no-allow-firewall) ALLOW_FIREWALL=no ;;
+      --firewall-ssh) FIREWALL_SSH=yes ;;
+      --no-firewall-ssh) FIREWALL_SSH=no ;;
       --allow-pooler) ALLOW_POOLER=yes ;;
       --no-allow-pooler) ALLOW_POOLER=no ;;
       --allow-pooler-public) ALLOW_POOLER_PUBLIC=yes ;;
@@ -8030,6 +8213,11 @@ main() {
   fi
   if [ "$mode" != install ] && { [ -n "$INSTALL_PG" ] || [ "$LISTEN_PUBLIC" = 1 ]; }; then
     die "--install-postgres and --listen-public only go with an install"
+  fi
+  [ "$mode" = install ] || [ -z "$FIREWALL_SSH" ] || die "--firewall-ssh and --no-firewall-ssh only go with an install"
+  if [ "$FIREWALL_SSH" = yes ]; then
+    [ "$ALLOW_FIREWALL" != no ] || die "--firewall-ssh needs the firewall: it can't go with --no-allow-firewall"
+    ALLOW_FIREWALL=yes
   fi
   # A permission that needs another one turned off: off too (permissions
   # section; --permissions does it once it knows the server).

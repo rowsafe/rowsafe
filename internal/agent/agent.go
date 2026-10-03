@@ -304,6 +304,7 @@ var sideTypes = []string{protocol.TaskMaintenance, protocol.TaskRewindCompare, p
 	protocol.TaskFindMoment,       // read-only; people wait for it in the dashboard
 	protocol.TaskDBAdmin,          // Databases & users: people wait for it in the dashboard
 	protocol.TaskBackupPassphrase, // cloud servers: people wait for it in the dashboard
+	protocol.TaskServerFirewall,   // cloud servers: the firewall changes as soon as people ask
 	protocol.TaskMigrate,          // move in: key, check, switchover... (migrate.go)
 	protocol.TaskSettings,
 	protocol.TaskSecurityScan, protocol.TaskSecurityFix, // security.go

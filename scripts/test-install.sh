@@ -3135,6 +3135,75 @@ PGEOF
   [ ! -e "$FO/port-5432" ] || fail "remove left the port state"
   pass "firewall helper: nft rules, confirmation and rollback, pending rules, bad addresses and ports, SSH, allow list, symlinks, status, --restore, remove"
 
+  # Servers Rowsafe creates (--firewall-ssh, the line "ssh" in root's list):
+  # the "server" action sets PostgreSQL's and SSH's allow lists at once.
+  ssh_addrs() { printf '%b' "$1" | as_pg sh -c 'cat >"$1"' sh "$D/ssh-addresses"; }
+  ssh_addrs '198.51.100.7\n'
+  fw_request "fw_srv0 server 5432" '10.3.0.0/16\n' 1
+  grep -q "^error=SSH's allow list isn't Rowsafe's" "$FO/result" || fail "the server action was not refused without --firewall-ssh"
+  ! rules | grep -q . || fail "a refused server action changed the rules"
+  printf '5432\nssh\n' >/etc/rowsafe/firewall-allowed
+  ssh_addrs '198.51.100.7\n'
+  fw_request "fw_srv1 server 5432" '10.3.0.0/16\n2001:db8::/32\n' 1
+  fw_has "ok=1"
+  rules | grep -q "ct state established,related accept" || fail "replies to connections already made aren't let through: $(rules)"
+  rules | grep -q "tcp dport { 22, 2222 } ip saddr 198.51.100.7 accept" && rules | grep -q "tcp dport { 22, 2222 } drop" ||
+    fail "no SSH rules: $(rules)"
+  rules | grep -q "tcp dport 5432 ip6 saddr 2001:db8::/32 accept" && rules | grep -q "tcp dport 5432 drop" || fail "no PostgreSQL rules: $(rules)"
+  grep -qx "addresses=198.51.100.7" "$FO/ssh" && grep -qx "ports=22,2222" "$FO/ssh" && grep -qx "loaded=1" "$FO/ssh" || fail "SSH's rule not published"
+  [ -f "$W/fw-state/ssh-allowed" ] && [ ! -e "$W/fw-state/ssh-pending" ] || fail "a confirmed SSH rule was not kept"
+  # Everyone for PostgreSQL (passwords still needed), no one for SSH.
+  ssh_addrs ''
+  fw_request "fw_srv2 server 5432" '0.0.0.0/0\n::/0\n' 1
+  fw_has "ok=1"
+  rules | grep -q "tcp dport 5432 meta nfproto ipv6 accept" && ! rules | grep -q "198.51.100.7" && rules | grep -q "tcp dport { 22, 2222 } drop" ||
+    fail "open PostgreSQL, closed SSH: $(rules)"
+  # Unconfirmed: both lists come back as they were.
+  ssh_addrs '192.0.2.1\n'
+  WAIT=1 fw_request "fw_srv3 server 5432" '10.9.0.0/16\n' 0
+  fw_has "ok=0"
+  ! rules | grep -q "192.0.2.1" && ! rules | grep -q "10.9.0.0/16" && rules | grep -q "meta nfproto ipv6 accept" || fail "unconfirmed server action not rolled back: $(rules)"
+  [ ! -s "$W/fw-state/ssh-allowed" ] && [ ! -e "$W/fw-state/ssh-pending" ] || fail "an unconfirmed SSH rule was kept"
+  ssh_addrs '0.0.0.0/1\n'
+  fw_request "fw_srv4 server 5432" '' 1
+  grep -q "^error=not an address or range: 0.0.0.0/1" "$FO/result" || fail "a too wide SSH range was not refused"
+  as_pg rm -f "$D/ssh-addresses"
+  fw --restore
+  rules | grep -q "tcp dport { 22, 2222 } drop" || fail "--restore dropped SSH's rule"
+  # Root takes SSH back: its rule goes at the next load, PostgreSQL's stays.
+  printf '5432\n' >/etc/rowsafe/firewall-allowed
+  fw --restore
+  ! rules | grep -q "dport { 22" && ! rules | grep -q "ct state" && rules | grep -q "tcp dport 5432 drop" || fail "SSH's rule stayed without the ssh line: $(rules)"
+  [ ! -e "$FO/ssh" ] || fail "SSH's rule still published"
+  rm -f "$W/fw-state/ssh-allowed" "$W/fw-state/ssh-ports"
+  fw_request "fw_srv5 remove 5432" "" 0
+  ! rules | grep -q . || fail "remove left the table: $(rules)"
+  pass "firewall helper, servers Rowsafe creates: SSH and PostgreSQL at once, everyone and no one, rollback, --restore, root taking SSH back"
+
+  # The installer's --firewall-ssh: PostgreSQL's port closed before anything
+  # else, the ssh line kept until --no-firewall-ssh.
+  expect_fail "--firewall-ssh with --no-allow-firewall" "can't go with --no-allow-firewall" "$INSTALLER" --firewall-ssh --no-allow-firewall
+  expect_fail "--firewall-ssh only with an install" "only go with an install" "$INSTALLER" --firewall-ssh --uninstall
+  scenario "discover_out=$shop"
+  expect_ok "--firewall-ssh" "$INSTALLER" --firewall-ssh
+  grep -q "PostgreSQL's port (5432) is closed to everyone but this server until Rowsafe applies who may connect" "$W/out" &&
+    grep -q "and SSH, as set in the dashboard" "$W/out" || {
+    cat "$W/out" >&2
+    fail "--firewall-ssh not confirmed"
+  }
+  grep -qx ssh /etc/rowsafe/firewall-allowed && grep -qx 5432 /etc/rowsafe/firewall-allowed || fail "--firewall-ssh allow list"
+  rules | grep -q "tcp dport 5432 drop" && ! rules | grep -q "dport 22" || fail "--firewall-ssh didn't close PostgreSQL's port: $(rules)"
+  scenario "discover_out=$shop"
+  expect_ok "a re-run keeps --firewall-ssh" "$INSTALLER" --allow-firewall
+  grep -qx ssh /etc/rowsafe/firewall-allowed || fail "a re-run dropped the ssh line"
+  scenario "discover_out=$shop"
+  expect_ok "--no-firewall-ssh" "$INSTALLER" --no-firewall-ssh
+  ! grep -qx ssh /etc/rowsafe/firewall-allowed && grep -qx 5432 /etc/rowsafe/firewall-allowed || fail "--no-firewall-ssh allow list"
+  grep -q "Rowsafe no longer limits who can reach SSH" "$W/out" || fail "--no-firewall-ssh not confirmed"
+  nft delete table inet rowsafe 2>/dev/null || true
+  rm -rf /var/lib/rowsafe-firewall
+  pass "--firewall-ssh closes PostgreSQL's port first and keeps SSH's allow list Rowsafe's until --no-firewall-ssh"
+
   fw_request "fw_7 apply 5432" '10.2.0.0/16\n' 1
   expect_ok "--no-allow-firewall" "$INSTALLER" --no-allow-firewall
   [ ! -e "$H" ] && [ ! -e /etc/systemd/system/rowsafe-firewall.path ] || fail "--no-allow-firewall left the helper"
