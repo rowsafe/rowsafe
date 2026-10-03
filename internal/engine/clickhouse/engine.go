@@ -36,6 +36,10 @@ type Engine struct {
 	// (a Mark too) while it runs: retention, which takes the write lock,
 	// never deletes the full backup one reads from.
 	bases sync.Map // database id -> *sync.RWMutex
+	// ctx is the agent's (Start); shippers copy each database's changes
+	// (pitr_ship.go).
+	ctx      context.Context
+	shippers map[string]*shipper
 }
 
 // baseLock is the database's lock between differential backups and
@@ -75,6 +79,7 @@ func (e *Engine) Start(ctx context.Context, env agent.EngineEnv) {
 		return
 	}
 	e.started = true
+	e.ctx = ctx
 	e.mu.Unlock()
 	e.recoverCopies(ctx, env)
 	go e.recoverInPlace(ctx, env) // inplace.go
