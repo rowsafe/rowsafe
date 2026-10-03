@@ -395,9 +395,10 @@ Turning on backups:
 
   ClickHouse: Rowsafe's own ClickHouse user is added as
   /etc/clickhouse-server/users.d/rowsafe.xml (ClickHouse loads it by itself,
-  no restart), or with an administrator's login once. ClickHouse keeps no
-  log of changes, so restores go to a backup or a Mark, not to any second;
-  a backup of what changed runs every hour.
+  no restart), or with an administrator's login once. The agent joins the
+  clickhouse group to read (never write) ClickHouse's data folder: it copies
+  each new part to your bucket as it appears, so you can restore to any
+  second.
 
 What Rowsafe may do on this server:
   Rowsafe only restarts PostgreSQL, installs updates, reboots, manages
