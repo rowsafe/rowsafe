@@ -22,6 +22,10 @@ func (e *Engine) maintenance(ctx context.Context, env agent.EngineEnv, db protoc
 		summary, err = killQuery(ctx, env, db, p, tl)
 	case protocol.MaintKillMutation:
 		summary, err = killMutation(ctx, env, db, p, tl)
+	case protocol.MaintCreateIndex: // indexes.go
+		summary, err = e.createIndex(ctx, env, db, p, tl)
+	case protocol.MaintDropIndex:
+		summary, err = e.dropIndex(ctx, env, db, p, tl)
 	default:
 		return nil, fmt.Errorf("%s isn't a ClickHouse fix", p.Action)
 	}
@@ -113,5 +117,10 @@ func killMutation(ctx context.Context, env agent.EngineEnv, db protocol.Database
 	}
 	tl.Printf("cancelled change %s on %s.%s (%d parts were still to do): %s", p.MutationID, p.DB, p.Tables[0], ms[0].ToDo,
 		truncate(ms[0].Command, 200))
+	// The build of an index or projection Rowsafe added: remove it too.
+	if s, ok := rowsafeBuild(p.DB, p.Tables[0], ms[0].Command); ok {
+		drop(ctx, c, s, tl)
+		return fmt.Sprintf("Stopped building %s on %s.%s and removed it.", s.Name, p.DB, p.Tables[0]), nil
+	}
 	return fmt.Sprintf("Cancelled the change on %s.%s that couldn't finish. Parts it had already changed stay changed.", p.DB, p.Tables[0]), nil
 }

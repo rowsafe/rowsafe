@@ -11,10 +11,13 @@
 #
 #   scripts/test-clickhouse.sh                      # ClickHouse 26.8, 26.3, 25.8 and 24.8, then 26.8 in Docker
 #   CLICKHOUSE_VERSIONS="25.8" DOCKER_MODE=no scripts/test-clickhouse.sh
+#   TEST_RUN=TestClickHouseIndexAdvisor CLICKHOUSE_VERSIONS="26.8 24.8" DOCKER_MODE=no scripts/test-clickhouse.sh
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 VERSIONS=${CLICKHOUSE_VERSIONS:-26.8 26.3 25.8 24.8}
 LIMIT=${TEST_TIMEOUT:-1800}
+# TEST_RUN picks the tests (go test -run), e.g. TestClickHouseIndexAdvisor.
+TEST_RUN=${TEST_RUN:-TestClickHouse}
 
 # timeout(1), or a perl stand-in where there is none (macOS).
 to() {
@@ -102,7 +105,7 @@ for v in $VERSIONS; do
 	name=rowsafe-test-clickhouse-$$-${v//./}
 	containers="$containers $name"
 	echo "==> ClickHouse $v, login made with $mode"
-	if ! to "$LIMIT" docker run --rm --name "$name" -e CLICKHOUSE_SKIP_USER_SETUP=1 -e MODE=$mode --entrypoint bash "$img" -euc '
+	if ! to "$LIMIT" docker run --rm --name "$name" -e CLICKHOUSE_SKIP_USER_SETUP=1 -e MODE=$mode -e TEST_RUN="$TEST_RUN" --entrypoint bash "$img" -euc '
 		/entrypoint.sh >/tmp/server.log 2>&1 &
 		for _ in $(seq 1 120); do clickhouse-client -q "SELECT 1" >/dev/null 2>&1 && break; sleep 1; done
 		echo "server $(clickhouse-client -q "SELECT version()")"
@@ -130,8 +133,8 @@ for v in $VERSIONS; do
 			extra="ROWSAFE_TEST_CLICKHOUSE_USERSD=/etc/clickhouse-server/users.d"
 		fi
 		cd /tmp
-		su rowsafe -c "env ROWSAFE_TEST_CLICKHOUSE_PORT=8123 ROWSAFE_TEST_CLICKHOUSE_REPLICATED=1 ROWSAFE_TEST_CLICKHOUSE_DOWNLOAD_DIR=/var/lib/rowsafe-dl/dl $extra \
-			/usr/local/bin/clickhouse.test -test.v -test.count=1 -test.run TestClickHouse -test.timeout 25m" 2>&1 | tail -n 150
+		su rowsafe -c "env ROWSAFE_TEST_CLICKHOUSE_PORT=8123 ROWSAFE_TEST_CLICKHOUSE_REPLICATED=1 ROWSAFE_TEST_CLICKHOUSE_POOLING=1 ROWSAFE_TEST_CLICKHOUSE_DOWNLOAD_DIR=/var/lib/rowsafe-dl/dl $extra \
+			/usr/local/bin/clickhouse.test -test.v -test.count=1 -test.run $TEST_RUN -test.timeout 25m" 2>&1 | tail -n 150
 		exit ${PIPESTATUS[0]}
 	'; then
 		rc=1
