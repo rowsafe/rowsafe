@@ -158,3 +158,43 @@ func (r *repo) readTimeline(ctx context.Context, from, to time.Time) (*timeline,
 	sortEvents(tl.Events)
 	return tl, nil
 }
+
+// reuseWindow: a file copied earlier is reused for a new part (linked by a
+// mutation) only within this window, so a log never needs a chunk much
+// older than itself (prunePitr).
+const reuseWindow = 24 * time.Hour
+
+// prunePitr deletes the record from before oldest (the oldest backup's
+// start): restores replay from a backup's start, so older logs aren't
+// needed, nor chunks older than that by more than reuseWindow (with a day
+// to spare).
+func (r *repo) prunePitr(ctx context.Context, oldest time.Time) (int, error) {
+	n := 0
+	logs, err := r.listLogs(ctx)
+	if err != nil {
+		return n, err
+	}
+	for _, l := range logs {
+		if !l.To.Before(oldest) {
+			break
+		}
+		if err := r.st.Delete(ctx, l.Key); err != nil {
+			return n, err
+		}
+		n++
+	}
+	chunks, err := r.st.List(ctx, pitrChunks)
+	if err != nil {
+		return n, err
+	}
+	limit := oldest.Add(-reuseWindow - 24*time.Hour)
+	for _, o := range chunks {
+		if t, ok := keyTime(o.Key); ok && t.Before(limit) {
+			if err := r.st.Delete(ctx, o.Key); err != nil {
+				return n, err
+			}
+			n++
+		}
+	}
+	return n, nil
+}

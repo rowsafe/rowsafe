@@ -505,5 +505,18 @@ func (e *Engine) retention(ctx context.Context, r *repo, db protocol.DatabaseSpe
 		}
 	}
 	tl.Printf("kept the newest %d full backups: removed %d older backups (with their differential ones) and %d Marks", keep, removed, dropped)
+	oldest := time.Time{}
+	for _, d := range docs {
+		if !gone[d.Label] && (oldest.IsZero() || d.StartedAt.Before(oldest)) {
+			oldest = d.StartedAt
+		}
+	}
+	if !oldest.IsZero() {
+		if n, err := r.prunePitr(ctx, oldest); err != nil {
+			tl.Printf("note: removing the old record of changes failed (%v); it is tried again after the next backup", err)
+		} else if n > 0 {
+			tl.Printf("removed %d files of the record of changes from before the oldest backup kept", n)
+		}
+	}
 	return nil
 }

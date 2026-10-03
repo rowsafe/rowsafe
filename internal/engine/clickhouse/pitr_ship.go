@@ -28,14 +28,14 @@ import (
 // pitr_model.go.
 
 // archiveInterval is how often the copier runs
-// (ROWSAFE_CLICKHOUSE_ARCHIVE_INTERVAL, default 10s).
+// (ROWSAFE_CLICKHOUSE_ARCHIVE_INTERVAL, default 15s).
 func archiveInterval() time.Duration {
 	if v := os.Getenv("ROWSAFE_CLICKHOUSE_ARCHIVE_INTERVAL"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d >= time.Second && d <= 5*time.Minute {
 			return d
 		}
 	}
-	return 10 * time.Second
+	return 15 * time.Second
 }
 
 // partLogWait is how long a new part waits for its line in part_log
@@ -76,6 +76,7 @@ type shipLocal struct {
 type copiedFile struct {
 	Part   string       `json:"part"` // table UUID/part name it was copied with
 	Pieces []s3gw.Piece `json:"pieces"`
+	At     time.Time    `json:"at"` // when it was copied
 }
 
 type shipper struct {
@@ -683,7 +684,7 @@ func (s *shipper) copyPart(ctx context.Context, cw *chunkWriter, st *shipLocal, 
 		}
 		key := inodeKey(fi)
 		if key != "" {
-			if cf, ok := st.Files[key]; ok {
+			if cf, ok := st.Files[key]; ok && time.Since(cf.At) < reuseWindow {
 				f.Close()
 				out = append(out, pitFile{Name: n, Size: fi.Size(), Pieces: cf.Pieces})
 				continue
@@ -699,7 +700,7 @@ func (s *shipper) copyPart(ctx context.Context, cw *chunkWriter, st *shipLocal, 
 			ps = []s3gw.Piece{piece}
 		}
 		if key != "" {
-			st.Files[key] = copiedFile{Part: table + "/" + name, Pieces: ps}
+			st.Files[key] = copiedFile{Part: table + "/" + name, Pieces: ps, At: time.Now().UTC()}
 		}
 		out = append(out, pitFile{Name: n, Size: fi.Size(), Pieces: ps})
 	}

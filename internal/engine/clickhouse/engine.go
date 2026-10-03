@@ -94,6 +94,7 @@ func (e *Engine) Start(ctx context.Context, env agent.EngineEnv) {
 			}
 			e.expireCopies(env, time.Now())
 			e.expireKept(ctx, env, time.Now())
+			e.stopIdleShippers(30 * time.Minute)
 		}
 	}()
 }
