@@ -111,7 +111,7 @@ func serverBinary(engine, executable string) (string, error) {
 	return "", fmt.Errorf("%s (the %s server program) isn't on this server, so restores can't be tested or copied here", name, protocol.EngineDisplayName(engine))
 }
 
-var binVersionRE = regexp.MustCompile(`(?i)^(redis|valkey) server v=(\d+\.\d+\.\d+)`)
+var binVersionRE = regexp.MustCompile(`(?i)^(?:(redis|valkey) )?server v=(\d+\.\d+\.\d+)`)
 
 // binaryVersion runs `<bin> --version`.
 func binaryVersion(bin string) (engine string, version int, err error) {
@@ -125,7 +125,19 @@ func binaryVersion(bin string) (engine string, version int, err error) {
 	if m == nil {
 		return "", 0, fmt.Errorf("%s --version: unexpected %q", bin, firstLine(string(out)))
 	}
-	return strings.ToLower(m[1]), versionNum(m[2]), nil
+	engine = strings.ToLower(m[1])
+	if engine == "" {
+		// Valkey 7.2 says only "Server v=...": the program's real name tells.
+		real := bin
+		if p, err := filepath.EvalSymlinks(bin); err == nil {
+			real = p
+		}
+		engine = protocol.EngineRedis
+		if strings.HasPrefix(filepath.Base(real), "valkey") {
+			engine = protocol.EngineValkey
+		}
+	}
+	return engine, versionNum(m[2]), nil
 }
 
 // checkBinary makes sure bin can load a snapshot of version want.
