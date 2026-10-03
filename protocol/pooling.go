@@ -62,6 +62,12 @@ const DefaultPoolerPort = 6432
 // DefaultProxySQLPort is where apps connect to ProxySQL (MySQL, MariaDB).
 const DefaultProxySQLPort = 6033
 
+// DefaultChproxyPort is where apps connect to chproxy (ClickHouse's HTTP
+// interface). For ClickHouse, PoolingSettings.PoolSize is how many queries
+// each user runs at once and MaxClientConn how many more wait; Mode is
+// unused.
+const DefaultChproxyPort = 9090
+
 // PoolingSettings are the choices a person makes. Zero values mean
 // "Rowsafe picks" (the agent computes them from max_connections and the
 // server's CPUs; PoolingResult.Settings has the values used).
@@ -209,7 +215,10 @@ type PoolingView struct {
 	Warnings      []string  `json:"warnings,omitempty"`
 	// Connection strings (without passwords): Direct to PostgreSQL, Pooled
 	// through PgBouncer (when on).
-	Direct string       `json:"direct"`
+	Direct string `json:"direct"`
+	// Note is a plain sentence about what the pooler covers (ClickHouse:
+	// the HTTP interface only).
+	Note   string       `json:"note,omitempty"`
 	Pooled string       `json:"pooled,omitempty"`
 	Stats  *PoolerStats `json:"stats,omitempty"`
 	// Defaults are the settings Rowsafe would pick now.
