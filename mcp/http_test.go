@@ -25,6 +25,8 @@ func fakeAPI(t *testing.T) http.Handler {
 			who = protocol.WhoAmI{Org: protocol.Org{ID: "org_1"}, OAuth: &protocol.OAuthConnection{Scopes: []string{protocol.ScopeRead}}}
 		case "rso_marks":
 			who = protocol.WhoAmI{Org: protocol.Org{ID: "org_1"}, OAuth: &protocol.OAuthConnection{Scopes: []string{protocol.ScopeRead, protocol.ScopeMarks}}}
+		case "rso_act":
+			who = protocol.WhoAmI{Org: protocol.Org{ID: "org_1"}, OAuth: &protocol.OAuthConnection{Scopes: []string{protocol.ScopeRead, protocol.ScopeAct}}}
 		case "rso_nooauth": // accepted by the API but not an OAuth grant
 			who = protocol.WhoAmI{Org: protocol.Org{ID: "org_1"}}
 		default:
@@ -92,9 +94,24 @@ func TestHTTPOAuthScopesDecideTools(t *testing.T) {
 	if !slices.Contains(marks, "create_restore_point") {
 		t.Errorf("rowsafe:marks tools = %v, want create_restore_point", marks)
 	}
-	for _, w := range []string{"run_backup", "run_drill", "plan_adoption", "update_schedule", "verify_database"} {
-		if slices.Contains(marks, w) {
-			t.Errorf("OAuth token got write tool %s", w)
+	writeTools := []string{"run_backup", "run_drill", "plan_adoption", "update_schedule", "verify_database", "request_change", "cancel_approval"}
+	for _, w := range writeTools {
+		if slices.Contains(marks, w) || slices.Contains(read, w) {
+			t.Errorf("OAuth token without rowsafe:act got write tool %s", w)
+		}
+	}
+	// Anyone can see what they could ask for and how their requests went.
+	for _, r := range []string{"describe_change", "get_approval", "list_approvals"} {
+		if !slices.Contains(read, r) || !slices.Contains(marks, r) {
+			t.Errorf("read-only OAuth tools lack %s", r)
+		}
+	}
+	// rowsafe:act: every write tool, request_change included (a person
+	// approves what it asks for), and create_restore_point.
+	_, _, act := listTools(t, h, "rso_act")
+	for _, w := range append(writeTools, "create_restore_point") {
+		if !slices.Contains(act, w) {
+			t.Errorf("rowsafe:act tools = %v, missing %s", act, w)
 		}
 	}
 	// API keys keep their behavior: every write tool is listed.
@@ -123,7 +140,7 @@ func TestHTTPOAuthChallenges(t *testing.T) {
 		}
 		ch := hdr.Get("WWW-Authenticate")
 		if !strings.HasPrefix(ch, "Bearer ") || !strings.Contains(ch, `resource_metadata="`+prm+`"`) ||
-			!strings.Contains(ch, `scope="rowsafe:read rowsafe:marks"`) {
+			!strings.Contains(ch, `scope="rowsafe:read rowsafe:marks rowsafe:act"`) {
 			t.Errorf("token %q: WWW-Authenticate = %q", tc.token, ch)
 		}
 		if got := strings.Contains(ch, `error="invalid_token"`); got != tc.invalidToken {

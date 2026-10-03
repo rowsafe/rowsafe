@@ -12,7 +12,7 @@ import (
 // password or turn an extension on. People do that in the dashboard
 // (Databases & users) or with `rowsafe db`, after confirming.
 
-const dbadminGuidance = "To create or remove a database or user, reset a password or turn an extension on or off, tell the user to do it in the Rowsafe dashboard (Databases & users tab) or with `rowsafe db` in a terminal: passwords are shown only to them, end to end encrypted. You can't do it yourself."
+const dbadminGuidance = "To create or remove a database or user, reset a password or turn an extension on or off, tell the user to do it in the Rowsafe dashboard (Databases & users tab) or with `rowsafe db` in a terminal: passwords are shown only to them, end to end encrypted. You can't do it yourself; if the user wants you to, request_change manage_databases_users asks them to approve creating or removing a database or user (a new user's password is still set by them, in the dashboard)."
 
 type ServerDatabasesView struct {
 	Server    string              `json:"server" jsonschema:"the database server in Rowsafe"`

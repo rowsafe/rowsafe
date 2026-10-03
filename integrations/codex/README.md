@@ -4,7 +4,7 @@ The database safety net for AI agents, in Codex: before a migration or destructi
 
 This directory is a Codex plugin with three parts:
 
-- **MCP server** `rowsafe mcp --allow-restore-points` (`.mcp.json`): `safety_check`, `create_restore_point`, `list_restore_points`, and read-only fleet tools such as `database_health` and `fleet_health`.
+- **MCP server** `rowsafe mcp --allow-restore-points` (`.mcp.json`): `safety_check`, `create_restore_point`, `list_restore_points`, and read-only tools such as `fleet_health`, `database_health`, `list_alerts`, `live_activity` and `describe_change`. With `--allow-writes` instead, Codex can also run backups, restore tests and checks, and ask you to approve changes to production with `request_change` (see [Safety model](#safety-model)).
 - **Skill** `rowsafe-safety` (`skills/`): the workflow. Check, set a Mark, tell you its name, proceed; if something goes wrong, stop and hand recovery to you.
 - **Hook** `rowsafe guard` (`hooks/hooks.json`): a `PreToolUse` hook on shell commands. It sets a Mark right before commands like `prisma migrate deploy`, `rails db:migrate`, `alembic upgrade`, `psql -c "DROP TABLE ..."`, `mysql -e "TRUNCATE ..."`, `mongosh --eval "db.orders.drop()"` or `clickhouse-client -q "ALTER TABLE ... DELETE ..."`, whether or not the model remembered to.
 
@@ -65,7 +65,7 @@ For the hook without the plugin, put [`hooks/hooks.json`](hooks/hooks.json) in `
 
 ### Hosted endpoint, no CLI
 
-Sign in with Rowsafe (you approve Codex in the dashboard and choose whether it may save Marks; it gets read-only tools plus, if you allow it, `create_restore_point`):
+Sign in with Rowsafe (you approve Codex in the dashboard and choose what it may do: read-only tools always, `create_restore_point` if you allow Marks, and the write tools plus `request_change` if you allow it to act):
 
 ```sh
 codex mcp add rowsafe --url https://api.rowsafe.sh/mcp
@@ -107,8 +107,9 @@ What it matches is listed in the [Guard guide](https://rowsafe.sh/docs/guides/ai
 
 ## Safety model
 
-- **Codex can't restore, rewind or restart anything.** No Rowsafe MCP tool does, and the skill tells Codex never to try. Recovery is your decision, in the dashboard.
+- **Codex can't restore, rewind, restart or fix anything by itself.** No Rowsafe MCP tool does, and the skill tells Codex never to try. Recovery is your decision, in the dashboard.
 - **Read-only unless you say otherwise.** `rowsafe mcp` offers read tools only; `--allow-restore-points` (what the plugin uses) adds `create_restore_point` and nothing else. A Mark only writes a marker into the WAL; it changes no data.
+- **Changes to production need your approval.** With `--allow-writes` (or a hosted connection allowed to act), Codex can ask for a change with `request_change`: a Pulse fix, settings, a restart, a rewind, an upgrade, and the rest of what the dashboard does. It only files a request; an owner or admin approves or denies it in the dashboard, and only then does Rowsafe run it, as that person. Codex can never approve. This needs the control plane release that adds approvals.
 - **Everything goes through the Rowsafe API** with your login or key, and shows up in `rowsafe audit`. Nothing runs SQL or reads backup contents.
 - **The hook warns, it doesn't block**, when something fails (no database configured, not logged in, Rowsafe unreachable, the Mark not confirmed): the command runs and Codex is told to mention it. To block instead, set `"require_protection": true` in `.rowsafe.json` or `ROWSAFE_REQUIRE_PROTECTION=1`: the hook then checks protection first and blocks the command when the database isn't protected or the Mark can't be confirmed.
 - **It's a safety net, not a sandbox.** A destructive statement hidden in application code or an unusual wrapper won't match the hook. The skill and the MCP tools cover what the hook can't see.

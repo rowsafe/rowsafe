@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "sh.rowsafe/rowsafe",
   "title": "Rowsafe",
-  "description": "PostgreSQL backups and a safety net for AI agents: check recoverability, set restore points.",
+  "description": "Database backups and an AI agent safety net: restore points, health, changes a person approves.",
   "version": "0.4.2",
   "websiteUrl": "https://rowsafe.sh/docs/reference/mcp",
   "repository": {
@@ -25,7 +25,7 @@
       "headers": [
         {
           "name": "Authorization",
-          "description": "Optional. Without it, your AI app signs in with Rowsafe (OAuth 2.1): you approve it in the Rowsafe dashboard and it can read your databases' health, backups and recommendations, and save Marks if you allow. For clients without OAuth, send a Rowsafe API key instead.",
+          "description": "Optional. Without it, your AI app signs in with Rowsafe (OAuth 2.1): you approve it in the Rowsafe dashboard and it can read your databases' health, backups and recommendations, save Marks if you allow, and, if you allow it to act, run backups and checks and ask you to approve changes to production (nothing changes until you approve). For clients without OAuth, send a Rowsafe API key instead.",
           "value": "Bearer {rowsafe_api_key}",
           "isRequired": false,
           "isSecret": true,

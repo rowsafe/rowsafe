@@ -12,11 +12,12 @@ import (
 // Rewind is read-only here. Guard's rule: AI agents never restore over
 // production. No tool creates copies, brings rows back or rewinds a
 // database; people do that in the dashboard (Rewind) or with
-// `rowsafe rewind`, after confirming.
+// `rowsafe rewind`, after confirming, or approve an assistant's
+// request_change for it (approval_tools.go).
 
 // rewindGuidance is what an assistant tells the user when something went
 // wrong.
-const rewindGuidance = "If data was lost or damaged, tell the user they can Rewind in the Rowsafe dashboard (Rewind tab): restore a copy as it was at any second in the recovery window (or at a Mark), compare it with production and bring the missing rows back with one click, or rewind the whole database. `rowsafe rewind` does the same from a terminal. You can't do any of it yourself: AI assistants never restore over production."
+const rewindGuidance = "If data was lost or damaged, tell the user they can Rewind in the Rowsafe dashboard (Rewind tab): restore a copy as it was at any second in the recovery window (or at a Mark), compare it with production and bring the missing rows back with one click, or rewind the whole database. `rowsafe rewind` does the same from a terminal. You can't do any of it yourself: AI assistants never restore over production. If the user wants you to start it, request_change (restore_copy, compare_copy, bring_back_rows, rewind_in_place) asks them to approve it in the dashboard."
 
 type RewindWindowView struct {
 	Database string `json:"database"`
@@ -55,7 +56,7 @@ func (t *tools) addRewindReadTools(s *sdk.Server) {
 		Name: "rewind_window",
 		Description: "Shows how far back a database can be rewound: the recovery window (earliest and latest restorable second), the newest Marks (restore points), " +
 			"a restored copy if one exists, and data kept aside by a rewind of the whole database. Read-only: it restores nothing. " +
-			"Restoring a copy, bringing rows back and rewinding a database are done by a person (Rewind in the dashboard, or `rowsafe rewind`).",
+			"Restoring a copy, bringing rows back and rewinding a database are done or approved by a person (Rewind in the dashboard, `rowsafe rewind`, or a request_change they approve).",
 		Annotations: readOnly("Rewind window"),
 	}, t.rewindWindow)
 }
