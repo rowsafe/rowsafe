@@ -313,6 +313,12 @@ func (c *Client) HostMetrics(ctx context.Context, ref string, q MetricsQuery) (o
 	return out, c.do(ctx, http.MethodGet, "/v1/hosts/"+esc(ref)+"/metrics"+q.encode(), nil, &out)
 }
 
+// MetricsCatalog lists every metric Rowsafe collects, with its scope
+// (database or host), unit and meaning.
+func (c *Client) MetricsCatalog(ctx context.Context) (out []protocol.MetricInfo, err error) {
+	return out, c.do(ctx, http.MethodGet, "/v1/monitoring/metrics", nil, &out)
+}
+
 // Activity returns the newest snapshot of long-running sessions.
 func (c *Client) Activity(ctx context.Context, ref string) (out protocol.Activity, err error) {
 	return out, c.do(ctx, http.MethodGet, "/v1/databases/"+esc(ref)+"/activity", nil, &out)
@@ -321,6 +327,11 @@ func (c *Client) Activity(ctx context.Context, ref string) (out protocol.Activit
 // Alerts lists alerts by state: "firing", "resolved" or "all".
 func (c *Client) Alerts(ctx context.Context, state string, limit int) (out []protocol.Alert, err error) {
 	return out, c.do(ctx, http.MethodGet, fmt.Sprintf("/v1/alerts?state=%s&limit=%d", url.QueryEscape(state), limit), nil, &out)
+}
+
+// Alert is one alert, firing or resolved.
+func (c *Client) Alert(ctx context.Context, id string) (out protocol.Alert, err error) {
+	return out, c.do(ctx, http.MethodGet, "/v1/alerts/"+esc(id), nil, &out)
 }
 
 func (c *Client) AckAlert(ctx context.Context, id string) (out protocol.Alert, err error) {

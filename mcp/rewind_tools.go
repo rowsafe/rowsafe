@@ -10,14 +10,14 @@ import (
 )
 
 // Rewind is read-only here. Guard's rule: AI agents never restore over
-// production. No tool creates copies, brings rows back or rewinds a
-// database; people do that in the dashboard (Rewind) or with
+// production by themselves. Copies, bringing rows back and rewinding a
+// database are done by people in the dashboard (Rewind) or with
 // `rowsafe rewind`, after confirming, or approve an assistant's
 // request_change for it (approval_tools.go).
 
 // rewindGuidance is what an assistant tells the user when something went
 // wrong.
-const rewindGuidance = "If data was lost or damaged, tell the user they can Rewind in the Rowsafe dashboard (Rewind tab): restore a copy as it was at any second in the recovery window (or at a Mark), compare it with production and bring the missing rows back with one click, or rewind the whole database. `rowsafe rewind` does the same from a terminal. You can't do any of it yourself: AI assistants never restore over production. If the user wants you to start it, request_change (restore_copy, compare_copy, bring_back_rows, rewind_in_place) asks them to approve it in the dashboard."
+const rewindGuidance = "If data was lost or damaged, tell the user they can Rewind in the Rowsafe dashboard (Rewind tab): restore a copy as it was at any second in the recovery window (or at a Mark), compare it with production and bring the missing rows back with one click, or rewind the whole database. `rowsafe rewind` does the same from a terminal. Never restore anything yourself. If the user wants you to start it, request_change (restore_copy, compare_copy, bring_back_rows, rewind_in_place) asks them to approve it in the dashboard."
 
 type RewindWindowView struct {
 	Database string `json:"database"`

@@ -636,16 +636,13 @@ func approvalView(a protocol.Approval) ApprovalView {
 	return v
 }
 
-// secretKey matches JSON keys whose values must never reach an assistant.
-var secretKey = regexp.MustCompile(`(?i)password|passwd|secret|token|private|credential|connection_?string|dsn|api_?key`)
-
 // redactSecrets replaces the values of secret-looking keys, at any depth.
 // The control plane keeps secrets out of approvals; this is a second guard.
 func redactSecrets(v any) any {
 	switch x := v.(type) {
 	case map[string]any:
 		for k, val := range x {
-			if secretKey.MatchString(k) {
+			if secretKey(k) {
 				x[k] = "(hidden)"
 			} else {
 				x[k] = redactSecrets(val)

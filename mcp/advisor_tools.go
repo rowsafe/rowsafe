@@ -111,7 +111,7 @@ func (t *tools) recommendations(ctx context.Context, _ *sdk.CallToolRequest, in 
 			break
 		}
 		b.line("")
-		b.line("[%s, %s] %s", strings.ToUpper(x.Severity), x.Group, x.Title)
+		b.line("[%s, %s] %s (id %s)", strings.ToUpper(x.Severity), x.Group, x.Title, x.ID)
 		b.line("  Why: %s", x.Explanation)
 		b.line("  What to do: %s", x.Action)
 		if x.Cost != "" {

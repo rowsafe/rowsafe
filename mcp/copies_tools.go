@@ -28,7 +28,20 @@ type previewInput struct {
 }
 
 type previewIDInput struct {
-	ID string `json:"id" jsonschema:"the preview ID (pv_...)"`
+	ID       string `json:"id,omitempty" jsonschema:"the preview ID (pv_...)"`
+	Database string `json:"database,omitempty" jsonschema:"without id: list this database's recent previews"`
+}
+
+// PreviewListItem is one earlier preview.
+type PreviewListItem struct {
+	ID        string    `json:"id"`
+	Status    string    `json:"status"`
+	Verdict   string    `json:"verdict,omitempty"`
+	Label     string    `json:"label,omitempty"`
+	Summary   string    `json:"summary,omitempty"`
+	Source    string    `json:"source,omitempty" jsonschema:"dashboard, cli, action, mcp or api"`
+	CreatedBy string    `json:"created_by,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // PreviewView is a preview for an assistant.
@@ -43,6 +56,8 @@ type PreviewView struct {
 	Statements []PreviewStatementView `json:"statements,omitempty"`
 	Error      string                 `json:"error,omitempty"`
 	Guidance   string                 `json:"guidance"`
+	// Previews lists a database's previews (get_preview without id).
+	Previews []PreviewListItem `json:"previews,omitempty"`
 }
 
 type PreviewStatementView struct {
@@ -60,6 +75,37 @@ type safeCopyInput struct {
 	Listen    string   `json:"listen,omitempty" jsonschema:"where the copy listens on the database server: private (default), public, or one of its IPs"`
 	Hours     int      `json:"hours,omitempty" jsonschema:"how long to keep it (default 24, at most 168)"`
 	DB        string   `json:"db,omitempty" jsonschema:"database for the connection string (default: the main one)"`
+}
+
+type safeCopiesInput struct {
+	Database string `json:"database" jsonschema:"Rowsafe database name or ID"`
+	Masking  bool   `json:"masking,omitempty" jsonschema:"also show which columns safe copies mask and how (the masking rules)"`
+}
+
+type extendSafeCopyInput struct {
+	Database string `json:"database" jsonschema:"Rowsafe database name or ID"`
+	ID       string `json:"id" jsonschema:"the safe copy ID"`
+	Hours    int    `json:"hours" jsonschema:"keep it this many hours from now (1-168)"`
+}
+
+// MaskedColumn is one column a safe copy masks.
+type MaskedColumn struct {
+	DB       string `json:"db,omitempty"`
+	Table    string `json:"table"`
+	Column   string `json:"column"`
+	Strategy string `json:"strategy"`
+	Saved    bool   `json:"saved,omitempty" jsonschema:"set by a person; otherwise Rowsafe's suggestion"`
+}
+
+// MaskingView is what safe copies mask.
+type MaskingView struct {
+	Masked     int                            `json:"masked" jsonschema:"columns a safe copy masks today"`
+	Columns    []MaskedColumn                 `json:"columns"`
+	Truncated  bool                           `json:"truncated,omitempty"`
+	SchemaAt   *time.Time                     `json:"schema_at,omitempty" jsonschema:"when production's columns were last read"`
+	UpdatedAt  *time.Time                     `json:"updated_at,omitempty"`
+	UpdatedBy  string                         `json:"updated_by,omitempty"`
+	Strategies []protocol.MaskingStrategyInfo `json:"strategies,omitempty"`
 }
 
 type safeCopyIDInput struct {
@@ -96,17 +142,20 @@ type SafeCopiesOutput struct {
 	Limit    int            `json:"limit"`
 	Used     int            `json:"used"`
 	Reason   string         `json:"reason,omitempty" jsonschema:"why a new safe copy can't be made now, if it can't"`
+	Masking  *MaskingView   `json:"masking,omitempty"`
 }
 
 func (t *tools) addCopiesTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
-		Name:        "get_preview",
-		Description: "The result of a migration preview, by preview ID: status, verdict (safe, careful, dangerous or failed), summary, findings, the statements worth attention and suggestions. Read-only.",
+		Name: "get_preview",
+		Description: "The result of a migration preview, by preview ID: status, verdict (safe, careful, dangerous or failed), summary, findings, the statements worth attention and suggestions. " +
+			"Without an id, a database's recent previews (from the dashboard, the CLI, the GitHub Action or assistants) with their verdicts. Read-only.",
 		Annotations: readOnly("Migration preview"),
 	}, t.getPreview)
 	sdk.AddTool(s, &sdk.Tool{
-		Name:        "list_safe_copies",
-		Description: "A database's safe copies (masked copies to test against): status, where to connect, and when each is deleted. Passwords are only shown when a copy is made.",
+		Name: "list_safe_copies",
+		Description: "A database's safe copies (masked copies to test against): status, where to connect, and when each is deleted. Passwords are only shown when a copy is made. " +
+			"masking adds which columns the copies mask and how (fake emails, names, phones, ...).",
 		Annotations: readOnly("Safe copies"),
 	}, t.listSafeCopies)
 	// The rest make requests an app connected with Sign in with Rowsafe
@@ -146,6 +195,14 @@ func (t *tools) addCopiesTools(s *sdk.Server) {
 		Description: "Deletes a safe copy (frees disk on the database server). Production is not affected.",
 		Annotations: writes("Delete a safe copy", true, true),
 	}, t.deleteSafeCopy)
+	sdk.AddTool(s, &sdk.Tool{
+		Name:        "extend_safe_copy",
+		Description: "Keeps a safe copy longer: it is deleted the given number of hours from now (at most 168) instead of at its current time. Production is not affected.",
+		Annotations: writes("Keep a safe copy longer", false, true),
+		InputSchema: inputSchema[extendSafeCopyInput](func(p map[string]*jsonschema.Schema) {
+			p["hours"].Minimum, p["hours"].Maximum = ptr(1.0), ptr(168.0)
+		}),
+	}, t.extendSafeCopy)
 }
 
 func (t *tools) previewMigration(ctx context.Context, _ *sdk.CallToolRequest, in previewInput) (*sdk.CallToolResult, PreviewView, error) {
@@ -177,11 +234,51 @@ func (t *tools) previewMigration(ctx context.Context, _ *sdk.CallToolRequest, in
 }
 
 func (t *tools) getPreview(ctx context.Context, _ *sdk.CallToolRequest, in previewIDInput) (*sdk.CallToolResult, PreviewView, error) {
+	if in.ID == "" {
+		if in.Database == "" {
+			return nil, PreviewView{}, fmt.Errorf("pass id (a preview ID), or a database to list its previews")
+		}
+		return t.listPreviews(ctx, in.Database)
+	}
 	p, err := t.c.Preview(ctx, in.ID)
 	if err != nil {
 		return nil, PreviewView{}, apiError(err)
 	}
 	return previewResult(p.Database, p)
+}
+
+func (t *tools) listPreviews(ctx context.Context, ref string) (*sdk.CallToolResult, PreviewView, error) {
+	d, err := t.c.Database(ctx, ref)
+	if err != nil {
+		return nil, PreviewView{}, apiError(err)
+	}
+	ps, err := t.c.Previews(ctx, d.ID)
+	if err != nil {
+		return nil, PreviewView{}, apiError(err)
+	}
+	out := PreviewView{Database: d.Name, Status: "listed", Previews: []PreviewListItem{},
+		Guidance: "get_preview with an id shows that preview's findings and suggestions."}
+	var b textBuilder
+	if len(ps) == 0 {
+		b.line("No migration previews of %s yet. preview_migration runs one on a fresh copy.", d.Name)
+	} else {
+		b.line("Migration previews of %s, newest first:", d.Name)
+	}
+	for i, p := range ps {
+		if i == 30 {
+			b.line("... and %d more.", len(ps)-i)
+			break
+		}
+		out.Previews = append(out.Previews, PreviewListItem{ID: p.ID, Status: p.Status, Verdict: p.Verdict, Label: p.Label, Summary: p.Summary,
+			Source: p.Source, CreatedBy: p.CreatedBy, CreatedAt: p.CreatedAt})
+		what := cmpOr(p.Verdict, p.Status)
+		b.line("- %s %s%s: %s%s", p.CreatedAt.UTC().Format("2006-01-02 15:04"), p.ID, map[bool]string{true: " (" + p.Label + ")", false: ""}[p.Label != ""],
+			what, map[bool]string{true: ". " + firstLine(p.Summary, 200), false: ""}[p.Summary != ""])
+	}
+	if len(ps) > 0 {
+		b.line("Next: %s", out.Guidance)
+	}
+	return text(b), out, nil
 }
 
 func previewResult(db string, p protocol.Preview) (*sdk.CallToolResult, PreviewView, error) {
@@ -280,7 +377,7 @@ func safeCopyView(cp protocol.SafeCopy) SafeCopyView {
 		Expires: cp.Expires, DataFrom: cp.RecoveredTo, ConnectionString: cp.ConnectionString, Error: cp.Error}
 }
 
-func (t *tools) listSafeCopies(ctx context.Context, _ *sdk.CallToolRequest, in databaseInput) (*sdk.CallToolResult, SafeCopiesOutput, error) {
+func (t *tools) listSafeCopies(ctx context.Context, _ *sdk.CallToolRequest, in safeCopiesInput) (*sdk.CallToolResult, SafeCopiesOutput, error) {
 	d, err := t.c.Database(ctx, in.Database)
 	if err != nil {
 		return nil, SafeCopiesOutput{}, apiError(err)
@@ -309,7 +406,47 @@ func (t *tools) listSafeCopies(ctx context.Context, _ *sdk.CallToolRequest, in d
 	if out.Reason != "" {
 		b.line("A new safe copy can't be made now: %s", out.Reason)
 	}
+	if in.Masking {
+		m, err := t.c.Masking(ctx, d.ID)
+		if err != nil {
+			return nil, out, apiError(err)
+		}
+		out.Masking = maskingView(m)
+		b.line("")
+		if len(m.Columns) == 0 {
+			b.line("Rowsafe hasn't read %s's columns yet (it does when the first safe copy or preview is made); safe copies mask what its rules and suggestions cover.", d.Name)
+		} else {
+			b.line("Safe copies of %s mask %d columns:", d.Name, out.Masking.Masked)
+		}
+		for i, c := range out.Masking.Columns {
+			if i == 60 {
+				b.line("... and %d more in the structured result.", len(out.Masking.Columns)-i)
+				break
+			}
+			b.line("- %s.%s: %s%s", c.Table, c.Column, c.Strategy, map[bool]string{true: " (set by a person)", false: ""}[c.Saved])
+		}
+		b.line("To change what is masked, %s.", requestChange("masking_rules"))
+	}
 	return text(b), out, nil
+}
+
+func maskingView(m protocol.MaskingInfo) *MaskingView {
+	v := &MaskingView{Masked: m.Masked, Columns: []MaskedColumn{}, Truncated: m.Truncated, SchemaAt: m.SchemaAt, UpdatedAt: m.UpdatedAt,
+		UpdatedBy: m.UpdatedBy, Strategies: m.Strategies}
+	for _, c := range m.Columns {
+		if c.Strategy == "" || c.Strategy == "keep" {
+			continue
+		}
+		v.Columns = append(v.Columns, MaskedColumn{DB: c.DB, Table: c.Table, Column: c.Column, Strategy: c.Strategy, Saved: c.Saved})
+	}
+	if len(m.Columns) == 0 { // the schema wasn't read yet: the saved rules
+		for _, r := range m.Rules {
+			if r.Strategy != "keep" {
+				v.Columns = append(v.Columns, MaskedColumn{DB: r.DB, Table: r.Table, Column: r.Column, Strategy: r.Strategy, Saved: true})
+			}
+		}
+	}
+	return v
 }
 
 func (t *tools) deleteSafeCopy(ctx context.Context, _ *sdk.CallToolRequest, in safeCopyIDInput) (*sdk.CallToolResult, SafeCopyView, error) {
@@ -323,5 +460,22 @@ func (t *tools) deleteSafeCopy(ctx context.Context, _ *sdk.CallToolRequest, in s
 	}
 	var b textBuilder
 	b.line("Deleting safe copy %s of %s; it is gone within a minute.", cp.ID, d.Name)
+	return text(b), safeCopyView(cp), nil
+}
+
+func (t *tools) extendSafeCopy(ctx context.Context, _ *sdk.CallToolRequest, in extendSafeCopyInput) (*sdk.CallToolResult, SafeCopyView, error) {
+	if in.Hours < 1 || in.Hours > 168 {
+		return nil, SafeCopyView{}, fmt.Errorf("hours must be between 1 and 168")
+	}
+	d, err := t.c.Database(ctx, in.Database)
+	if err != nil {
+		return nil, SafeCopyView{}, apiError(err)
+	}
+	cp, err := t.c.ExtendSafeCopy(ctx, d.ID, in.ID, in.Hours)
+	if err != nil {
+		return nil, SafeCopyView{}, apiError(err)
+	}
+	var b textBuilder
+	b.line("Safe copy %s of %s is now deleted at %s.", cp.ID, d.Name, cp.Expires.UTC().Format(time.RFC3339))
 	return text(b), safeCopyView(cp), nil
 }

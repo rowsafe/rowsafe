@@ -88,7 +88,7 @@ type OAuthAuthorizationRequest struct {
 }
 
 // ApproveOAuthRequest approves a request for one organization. Scopes must
-// include ScopeRead and may add ScopeMarks.
+// include ScopeRead and may add ScopeMarks (and ScopeAct).
 type ApproveOAuthRequest struct {
 	OrgID  string   `json:"org_id"`
 	Scopes []string `json:"scopes"`

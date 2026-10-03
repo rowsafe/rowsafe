@@ -96,9 +96,12 @@ func NewServer(c *client.Client, opts Options) *sdk.Server {
 	t.addAdvisorTools(s)     // advisor (advisor_tools.go)
 	t.addDBAdminReadTools(s) // Databases & users: read-only (dbadmin_tools.go)
 	t.addStandbyReadTools(s)
+	t.addPulseReadTools(s)    // alerts, activity, metrics, audit (pulse_tools.go)
+	t.addOpsReadTools(s)      // security, updates, pooling, forks (ops_tools.go)
 	t.addApprovalReadTools(s) // describe_change, get_approval, list_approvals (approval_tools.go)
 	if opts.AllowWrites {
 		t.addWriteTools(s)
+		t.addActionTools(s)        // never change production (action_tools.go)
 		t.addApprovalWriteTools(s) // request_change, cancel_approval
 	}
 	if opts.AllowWrites || opts.AllowRestorePoints {
