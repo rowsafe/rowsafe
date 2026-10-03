@@ -66,7 +66,9 @@ func TestApply(t *testing.T) {
 	var ran []string
 	a := &Applier{StateDir: filepath.Join(dir, "state"), Binary: filepath.Join(dir, "bin", "chproxy"), ConfigFile: filepath.Join(dir, "chproxy.yml"),
 		UnitFile: filepath.Join(dir, "rowsafe-chproxy.service"), Arch: "test",
-		Fetch: func(ctx context.Context, url string) (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(buf.Bytes())), nil },
+		Fetch: func(ctx context.Context, url string) (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(buf.Bytes())), nil
+		},
 		Run: func(ctx context.Context, name string, args ...string) ([]byte, error) {
 			ran = append(ran, name+" "+strings.Join(args, " "))
 			if name == "systemctl" {
