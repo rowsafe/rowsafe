@@ -24,6 +24,10 @@ type pitResult struct {
 	Exact bool
 	// Note says, in plain words, what isn't exact (when !Exact).
 	Note string
+	// The state assembled (Exact only), for a standby.
+	state *pitState
+	plain map[string][]pitFile
+	base  backupDoc
 }
 
 var (
@@ -97,20 +101,11 @@ func pitAt(ctx context.Context, r *repo, t time.Time, prefer string) (*pitResult
 		return fallback(fmt.Sprintf("between %s and %s %s; backup %s is restored as it was when it finished",
 			g.From.UTC().Format(time.RFC3339), g.To.UTC().Format(time.RFC3339), g.Why, base.Label))
 	}
-	bc, err := readBackupContents(ctx, r, docs, base.Label)
+	st, plain, err := carryForward(ctx, r, docs, *base, tl)
 	if err != nil {
 		return nil, err
 	}
-	st, plain, err := stateFromBackup(ctx, r, bc, *base)
-	if err != nil {
-		return nil, err
-	}
-	for _, e := range tl.Events {
-		st.apply(e)
-		if e.Kind == evDrop {
-			delete(plain, e.Table)
-		}
-	}
+	res := &pitResult{Exact: true, state: st, plain: plain, base: *base}
 	doc, missing, err := assemble(st, plain, *base, t)
 	if err != nil {
 		return nil, err
@@ -119,7 +114,28 @@ func pitAt(ctx context.Context, r *repo, t time.Time, prefer string) (*pitResult
 		return fallback(missing + "; backup " + base.Label + " is restored as it was when it finished")
 	}
 	doc.from = base.Label
-	return &pitResult{Doc: doc, Exact: true}, nil
+	res.Doc = doc
+	return res, nil
+}
+
+// carryForward is the server as backup base holds it, with the record's
+// events (tl) applied.
+func carryForward(ctx context.Context, r *repo, docs []backupDoc, base backupDoc, tl *timeline) (*pitState, map[string][]pitFile, error) {
+	bc, err := readBackupContents(ctx, r, docs, base.Label)
+	if err != nil {
+		return nil, nil, err
+	}
+	st, plain, err := stateFromBackup(ctx, r, bc, base)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, e := range tl.Events {
+		st.apply(e)
+		if e.Kind == evDrop {
+			delete(plain, e.Table)
+		}
+	}
+	return st, plain, nil
 }
 
 // stateFromBackup is the server as backup b holds it: its databases, tables
@@ -230,6 +246,14 @@ func stateFromBackup(ctx context.Context, r *repo, bc *backupContents, b backupD
 // and table's metadata, and their data, as virtual files. missing is set
 // when some rows can't be found (a part that couldn't be copied).
 func assemble(st *pitState, plain map[string][]pitFile, base backupDoc, at time.Time) (backupDoc, string, error) {
+	return assembleSome(st, plain, base, at, nil, nil)
+}
+
+// assembleSome is assemble for the tables in only (by UUID; nil: all) and,
+// of their parts, those keep accepts (nil: all; it gets the table that
+// holds the data and the part).
+func assembleSome(st *pitState, plain map[string][]pitFile, base backupDoc, at time.Time, only map[string]bool,
+	keep func(holder string, p *pitPart) bool) (backupDoc, string, error) {
 	id := at.UTC().Format("20060102-150405.000000") + "-" + randomID("")
 	folder := pitrPrefix + "at/" + id + "/"
 	files := map[string]s3gw.VirtualFile{}
@@ -254,7 +278,7 @@ func assemble(st *pitState, plain map[string][]pitFile, base backupDoc, at time.
 	dbsUsed := map[string]bool{}
 	var tables []*pitTable
 	for _, t := range st.Tables {
-		if !isInner(t.Name) && dbByName[t.DB] != nil {
+		if !isInner(t.Name) && dbByName[t.DB] != nil && (only == nil || only[t.UUID]) {
 			tables = append(tables, t)
 		}
 	}
@@ -269,6 +293,9 @@ func assemble(st *pitState, plain map[string][]pitFile, base backupDoc, at time.
 		}
 		var bytes int64
 		for _, p := range st.Parts[holder] {
+			if keep != nil && !keep(holder, p) {
+				continue
+			}
 			srcs, ok := st.files(holder, p)
 			if !ok {
 				return doc, fmt.Sprintf("part %s of %s couldn't be copied in time", p.Name, t.key()), nil
@@ -298,6 +325,9 @@ func assemble(st *pitState, plain map[string][]pitFile, base backupDoc, at time.
 	}
 	slices.SortFunc(dbs, func(a, b *pitDB) int { return strings.Compare(a.Name, b.Name) })
 	for _, d := range dbs {
+		if only != nil && !dbsUsed[d.Name] {
+			continue
+		}
 		add("metadata/"+escapeFileName(d.Name)+".sql", s3gw.VirtualFile{Data: []byte(d.Create)})
 		if d.Engine == "Replicated" {
 			doc.Replicated = true

@@ -323,6 +323,13 @@ func (s *shipper) shipRound(ctx context.Context, c *client, r *repo, st *shipLoc
 		}
 	}
 	st.Problem = ""
+	// After a promotion the new primary records into the same folder: a
+	// newer record there means this server isn't the primary any more.
+	if h, ok, err := r.readHead(ctx); err == nil && ok && h.Record != st.Record && h.Started.After(st.Started) {
+		st.Problem = "another server now records this database's changes (its standby was promoted)"
+		_ = s.save(*st)
+		return errors.New(st.Problem)
+	}
 	if st.PollAt.IsZero() {
 		st.PollAt = st.To
 	}
