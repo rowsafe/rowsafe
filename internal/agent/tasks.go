@@ -61,8 +61,8 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 		}
 		return res, err
 	}
-	if task.Database != nil {
-		switch task.Type { // connection pooling (pooling.go)
+	if task.Database != nil && isPostgres(*task.Database) {
+		switch task.Type { // connection pooling (pooling.go); other engines: their own (runEngineTask)
 		case protocol.TaskPooling:
 			return runRewind(ctx, task, tl, *task.Database, func(ctx context.Context, db protocol.DatabaseSpec, p protocol.PoolingParams, tl *taskLog) (*protocol.PoolingResult, error) {
 				return a.pooling(ctx, db, p, task.ID, tl)
@@ -84,8 +84,57 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 		return nil, fmt.Errorf("task %s has no database", task.Type)
 	}
 	db := *task.Database
+	if !isPostgres(db) && (task.Type == protocol.TaskSecurityUpdates || task.Type == protocol.TaskReboot) && engineRestarter(db) != nil {
+		// The server's own updates and reboots are the same for every
+		// engine (updates.go); the database is only waited for afterwards.
+		return a.runUpgradeTask(ctx, task, tl, db)
+	}
+	if !isPostgres(db) && engineUpgrader(db) != nil {
+		switch task.Type { // engine_upgrades.go
+		case protocol.TaskUpgradeCheck:
+			return runRewind(ctx, task, tl, db, a.engineUpgradeCheck)
+		case protocol.TaskUpgradeRehearsal:
+			return runWithID(ctx, task, tl, db, a.engineUpgradeRehearsal)
+		case protocol.TaskUpgrade:
+			return runWithID(ctx, task, tl, db, a.engineUpgrade)
+		case protocol.TaskUpgradeUndo:
+			return runWithID(ctx, task, tl, db, a.engineUpgradeUndo)
+		case protocol.TaskUpgradeCleanup:
+			return runRewind(ctx, task, tl, db, a.upgradeCleanup)
+		}
+	}
+	if !isPostgres(db) && task.Type == protocol.TaskPGUpdate && engineVersioner(db) != nil {
+		res, err := a.engineUpdate(ctx, db, task.ID, tl) // engine_updates.go
+		if res == nil {
+			return nil, err
+		}
+		return res, err
+	}
+	if !isPostgres(db) && task.Type == protocol.TaskRestart && engineRestarter(db) != nil {
+		// Every engine restarts through the same root helper or container
+		// control service (restart.go).
+		res, err := a.restart(ctx, db, task.ID, tl)
+		if res == nil {
+			return nil, err
+		}
+		return res, err
+	}
 	if !isPostgres(db) {
-		return a.runEngineTask(ctx, task, tl)
+		switch task.Type {
+		case protocol.TaskSecurityScan, protocol.TaskSecurityFix:
+			return a.runEngineSecurityTask(ctx, task, tl, db) // security_engines.go
+		case protocol.TaskFilesBackup, protocol.TaskFilesRestore, protocol.TaskFilesUndo, protocol.TaskFilesCleanup,
+			protocol.TaskFilesBrowse, protocol.TaskFilesDiscover, protocol.TaskFilesAccess, protocol.TaskFilesCheck:
+			return a.runFilesTask(ctx, task, db, tl) // files.go: folders work the same for every engine
+		}
+		res, err := a.runEngineTask(ctx, task, tl)
+		if err == nil && task.Type == protocol.TaskRestorePoint {
+			var p protocol.RestorePointParams
+			if json.Unmarshal(task.Params, &p) == nil && p.Name != "" {
+				a.filesMark(db.ID, p.Name) // the Mark covers the folders too
+			}
+		}
+		return res, err
 	}
 	switch task.Type {
 	case protocol.TaskInspect:

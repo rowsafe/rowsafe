@@ -32,7 +32,7 @@ Getting started
   rowsafe hosts enroll-token [--ttl 1h]      the install command for a database server. The installer sets up
                                              everything there and asks before turning on backups
   rowsafe init [NAME]                        write .rowsafe.json here, so commands in this project use NAME
-  rowsafe restart [NAME] [--yes]             restart PostgreSQL, e.g. when setup needs it; asks first. Only on
+  rowsafe restart [NAME] [--yes]             restart the database, e.g. when setup needs it; asks first. Only on
                                              servers where the installer allowed it
   rowsafe version                            the CLI's version
 
@@ -225,8 +225,9 @@ Guard: the safety net for AI agents
   rowsafe guard --check COMMAND              tell whether COMMAND looks destructive (exit 0 yes, 1 no)
   (rowsafe status NAME, above, exits 3 when a database is not protected: use it to gate risky changes)
   rowsafe preview [NAME] FILE [--db DB] [--json | --format text|json|markdown] [--fail-on careful|dangerous]
-                                             run a migration (FILE, or - for stdin) on a fresh copy of the database
-                                             and report locks, rewrites, rows and time with a verdict: safe, careful,
+                                             run a migration (FILE, or - for stdin: SQL, or for MongoDB plain mongosh
+                                             calls) on a fresh copy of the database and report locks, rewrites,
+                                             dropped tables, rows and time with a verdict: safe, careful,
                                              dangerous, or failed (it fails on the copy). Never touches production.
                                              Exit 0 once the preview ran, 1 if it couldn't; with --fail-on, 3 at or
                                              above that verdict and 2 if the migration fails

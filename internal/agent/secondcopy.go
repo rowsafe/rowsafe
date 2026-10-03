@@ -201,22 +201,35 @@ func (a *Agent) secondCopyPass(ctx context.Context) {
 			a.log.Error("the second copy's settings are incomplete; it stays off until they are fixed (re-run the installer with --add-storage)", "err", msg)
 		}
 	}
+	newlyReady := false
 	for _, db := range dbs {
 		if ctx.Err() != nil {
 			return
 		}
+		if !isPostgres(db) {
+			continue // the other engines' second copy: secondcopy_engines.go
+		}
 		if a.cfg.SecondCopy() && a.cfg.SecondCopyError() == "" {
+			was := a.secondCopyReady(db.Stanza)
 			a.ensureSecondCopy(ctx, db)
+			newlyReady = newlyReady || !was && a.secondCopyReady(db.Stanza)
 		}
 	}
+	// Right after a start the databases aren't known yet (the first
+	// heartbeat's answer): a pass without them doesn't count as a sync. A
+	// database whose second copy just became ready gets its archive_command
+	// now, not in archiveSyncEvery.
 	a.second.mu.Lock()
-	sync := time.Since(a.second.lastSync) >= archiveSyncEvery
+	sync := len(dbs) > 0 && (newlyReady || time.Since(a.second.lastSync) >= archiveSyncEvery)
 	if sync {
 		a.second.lastSync = time.Now()
 	}
 	a.second.mu.Unlock()
 	if sync && !a.cfg.Sidecar() {
 		for _, db := range dbs {
+			if !isPostgres(db) {
+				continue
+			}
 			if err := a.syncArchiveCommand(ctx, db); err != nil && ctx.Err() == nil {
 				a.log.Warn("checking archive_command for the second copy failed", "database", db.Name, "err", err)
 			}
@@ -690,6 +703,12 @@ func (a *Agent) secondCopyStatuses() []protocol.SecondCopyStatus {
 			out = append(out, st)
 			continue
 		}
+		if !isPostgres(db) {
+			if s, ok := a.engineSecondCopyStatus(db, st); ok {
+				out = append(out, s)
+			}
+			continue
+		}
 		st.Ready = a.secondCopyReady(db.Stanza)
 		if a.second.pusher != nil {
 			s := a.second.pusher.Status(db.Stanza)
@@ -767,7 +786,7 @@ func (a *Agent) measureAll(ctx context.Context, force bool) {
 			if ctx.Err() != nil {
 				return
 			}
-			if repo == protocol.RepoSecond && (!a.cfg.SecondCopy() || !a.secondCopyReady(db.Stanza)) {
+			if repo == protocol.RepoSecond && (!a.cfg.SecondCopy() || a.cfg.SecondCopyError() != "" || isPostgres(db) && !a.secondCopyReady(db.Stanza)) {
 				continue
 			}
 			key := storageKey(db.ID, repo)
@@ -777,7 +796,11 @@ func (a *Agent) measureAll(ctx context.Context, force bool) {
 			if seen && !force && time.Since(last.MeasuredAt) < storageMeasureEvery {
 				continue
 			}
-			r, ok := a.measure(ctx, db, repo)
+			measure := a.measure
+			if !isPostgres(db) {
+				measure = a.measureEngine // storage_engines.go
+			}
+			r, ok := measure(ctx, db, repo)
 			if !ok {
 				continue
 			}

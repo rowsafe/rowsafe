@@ -43,6 +43,16 @@ type QueryDelta struct {
 	SharedBlksRead  int64 `json:"shared_blks_read,omitempty"`
 	TempBlksWritten int64 `json:"temp_blks_written,omitempty"`
 	// ---- end advisor ----
+	// ---- other engines (MySQL, MariaDB, MongoDB, ClickHouse) ----
+	// RowsExamined is rows (MySQL, MariaDB, ClickHouse) or documents
+	// (MongoDB) the database read to run the statement.
+	RowsExamined int64 `json:"rows_examined,omitempty"`
+	// FullScans is calls that read a whole table or collection without an
+	// index (MySQL's no_index_used, MongoDB's COLLSCAN).
+	FullScans int64 `json:"full_scans,omitempty"`
+	// TmpDiskTables is internal temporary tables written to disk (MySQL,
+	// MariaDB).
+	TmpDiskTables int64 `json:"tmp_disk_tables,omitempty"`
 }
 
 // LockSession is one session in a blocking chain: waiting for a lock, or

@@ -36,12 +36,15 @@ const bandwidthEnv = "ROWSAFE_CLICKHOUSE_BACKUP_BANDWIDTH"
 // folders ClickHouse may use. Production's server reaches it where
 // ROWSAFE_CLICKHOUSE_GATEWAY_LISTEN/_URL say (a Docker sidecar); a
 // temporary server of the agent's own (local) always on 127.0.0.1.
-func startGateway(ctx context.Context, env agent.EngineEnv, r *repo, prefixes []string, readOnly, local bool) (*s3gw.Gateway, error) {
+func startGateway(ctx context.Context, env agent.EngineEnv, r *repo, prefixes []string, readOnly, local bool, virtual ...map[string]s3gw.VirtualFile) (*s3gw.Gateway, error) {
 	tmp := filepath.Join(env.StateDir, "gateway")
 	if err := os.MkdirAll(tmp, 0o700); err != nil {
 		return nil, err
 	}
 	cfg := s3gw.Config{Store: r.st, Passphrase: r.pass, Listen: "127.0.0.1:0", Prefixes: prefixes, ReadOnly: readOnly, TempDir: tmp, Log: env.Log}
+	if len(virtual) > 0 {
+		cfg.Virtual = virtual[0]
+	}
 	if !local {
 		if v := strings.TrimSpace(os.Getenv(gatewayListenEnv)); v != "" {
 			cfg.Listen = v
@@ -502,5 +505,18 @@ func (e *Engine) retention(ctx context.Context, r *repo, db protocol.DatabaseSpe
 		}
 	}
 	tl.Printf("kept the newest %d full backups: removed %d older backups (with their differential ones) and %d Marks", keep, removed, dropped)
+	oldest := time.Time{}
+	for _, d := range docs {
+		if !gone[d.Label] && (oldest.IsZero() || d.StartedAt.Before(oldest)) {
+			oldest = d.StartedAt
+		}
+	}
+	if !oldest.IsZero() {
+		if n, err := r.prunePitr(ctx, oldest); err != nil {
+			tl.Printf("note: removing the old record of changes failed (%v); it is tried again after the next backup", err)
+		} else if n > 0 {
+			tl.Printf("removed %d files of the record of changes from before the oldest backup kept", n)
+		}
+	}
 	return nil
 }

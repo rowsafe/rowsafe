@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/rowsafe/rowsafe/internal/agent"
 	"github.com/rowsafe/rowsafe/protocol"
@@ -50,19 +51,30 @@ var (
 	_ agent.Engine         = (*Engine)(nil)
 	_ agent.EngineArchiver = (*Engine)(nil)
 	_ agent.EngineRewinds  = (*Engine)(nil)
+	_ agent.EngineStarter  = (*Engine)(nil)
 )
 
 // Name is protocol.EngineMySQL or protocol.EngineMariaDB.
 func (e *Engine) Name() string { return string(e.flavor) }
 
-// Tasks are the task types the engine runs. Rewind in place and restart
-// are not among them yet.
+// Tasks are the task types the engine runs (restarts run in the agent:
+// restart.go).
 func (e *Engine) Tasks() []string {
 	return []string{
 		protocol.TaskInspect, protocol.TaskAdopt, protocol.TaskCheck, protocol.TaskBackup,
 		protocol.TaskDrill, protocol.TaskRestorePoint, protocol.TaskMaintenance,
 		protocol.TaskRewindCopy, protocol.TaskRewindDrop, protocol.TaskRewindCompare, protocol.TaskRewindRows,
+		protocol.TaskIndexAdvisor, protocol.TaskFindMoment,
+		protocol.TaskDBAdmin, protocol.TaskSettings, protocol.TaskPooling, protocol.TaskPoolerRetarget,
+		protocol.TaskRewindInPlace, protocol.TaskRewindUndo, protocol.TaskRewindCleanup,
+		protocol.TaskPreviewMigration, protocol.TaskCopySchema, protocol.TaskSafeCopy,
 	}
+}
+
+// Start rolls back a rewind in place the agent was running when it
+// stopped (inplace.go).
+func (e *Engine) Start(ctx context.Context, env agent.EngineEnv) {
+	go e.recoverInPlace(ctx, env)
 }
 
 // Run runs one task.
@@ -88,6 +100,18 @@ func (e *Engine) Run(ctx context.Context, env agent.EngineEnv, task *protocol.Ta
 		return nilable(s.backup(ctx, p.Type, log))
 	case protocol.TaskDrill:
 		return nilable(s.drill(ctx, task.ID, log))
+	case protocol.TaskIndexAdvisor: // indexadvisor.go
+		var p protocol.IndexAdvisorParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilable(s.indexAdvisor(ctx, task.ID, p, log))
+	case protocol.TaskFindMoment: // moment.go
+		var p protocol.FindMomentParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilable(s.findMoment(ctx, task.ID, p, log))
 	case protocol.TaskRestorePoint:
 		var p protocol.RestorePointParams
 		if err := decode(task, &p); err != nil {
@@ -118,12 +142,68 @@ func (e *Engine) Run(ctx context.Context, env agent.EngineEnv, task *protocol.Ta
 			return nil, err
 		}
 		return nilable(s.rewindCompare(ctx, p, log))
+	case protocol.TaskSafeCopy:
+		var p protocol.SafeCopyParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilable(s.safeCopy(ctx, p, log))
+	case protocol.TaskCopySchema:
+		return nilable(s.copySchema(ctx))
+	case protocol.TaskPreviewMigration:
+		var p protocol.PreviewParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilable(s.previewMigration(ctx, task.ID, p, log))
 	case protocol.TaskRewindRows:
 		var p protocol.RewindRowsParams
 		if err := decode(task, &p); err != nil {
 			return nil, err
 		}
 		return nilable(s.rewindRows(ctx, p, log))
+	case protocol.TaskPooling:
+		var p protocol.PoolingParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilable(s.pooling(ctx, p, log))
+	case protocol.TaskPoolerRetarget:
+		var p protocol.PoolerRetargetParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilable(s.poolerRetarget(ctx, p, log))
+	case protocol.TaskSettings:
+		var p protocol.SettingsParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilable(s.settings(ctx, p, log))
+	case protocol.TaskDBAdmin:
+		var p protocol.DBAdminParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilable(s.dbadmin(ctx, task.ID, p, log))
+	case protocol.TaskRewindInPlace:
+		var p protocol.RewindInPlaceParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilable(s.rewindInPlace(ctx, p, log))
+	case protocol.TaskRewindUndo:
+		var p protocol.RewindUndoParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilable(s.rewindUndo(ctx, p, log))
+	case protocol.TaskRewindCleanup:
+		var p protocol.RewindCleanupParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilable(s.rewindCleanup(ctx, p, log))
 	}
 	return nil, fmt.Errorf("unsupported %s task %q", e.flavor.display(), task.Type)
 }
@@ -138,12 +218,13 @@ func (e *Engine) Monitor(ctx context.Context, env agent.EngineEnv, db protocol.D
 func (e *Engine) Archiver(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec) (*protocol.ArchiverStats, error) {
 	s := e.server(env, db)
 	rewinds(env).housekeeping(env)
+	expireKept(env, time.Now()) // inplace.go
 	return s.archiver(ctx)
 }
 
 // RewindStates lists this engine's copies for the heartbeat.
 func (e *Engine) RewindStates(env agent.EngineEnv) []protocol.RewindState {
-	return rewinds(env).states(string(e.flavor))
+	return append(rewinds(env).states(string(e.flavor)), env.Kept().States()...)
 }
 
 // SetRewindExpiries applies the expiries Rowsafe asks for (Extend).

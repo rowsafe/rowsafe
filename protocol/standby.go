@@ -152,6 +152,9 @@ type StandbySecrets struct {
 	PrimaryPort      int      `json:"primary_port,omitempty"`
 	// PrimaryTLS: the primary has ssl=on (the standby then requires TLS).
 	PrimaryTLS bool `json:"primary_tls,omitempty"`
+	// EngineData is what another engine's standby needs besides (MongoDB:
+	// the replica set's name and key file, Rowsafe's login on the set).
+	EngineData map[string]string `json:"engine_data,omitempty"`
 }
 
 // StandbyRepo is the primary's pgBackRest repository, as the standby
@@ -201,6 +204,28 @@ type StandbyHeartbeat struct {
 	// When a database's primary changes, the control plane queues a
 	// "pooler_retarget" task on every server listing it.
 	PoolerDatabases []string `json:"pooler_databases,omitempty"`
+	// Targets are the servers of other engines (MySQL, MariaDB, MongoDB)
+	// on this host that could hold a standby, and why not when they can't.
+	// PostgreSQL clusters are offered through the root helper's ports.
+	Targets []StandbyTarget `json:"standby_targets,omitempty"`
+}
+
+// StandbyTarget is a database server of another engine than PostgreSQL on
+// a host that could become a standby: empty, and Rowsafe's account there
+// may set it up (the installer asked root).
+type StandbyTarget struct {
+	Engine  string `json:"engine"`
+	Port    int    `json:"port"`
+	Version string `json:"version,omitempty"`
+	// Socket is the server's Unix socket ("" when it has none).
+	Socket string `json:"socket,omitempty"`
+	// Usable: it can receive a clone; Reason says why not, in plain words.
+	Usable bool   `json:"usable"`
+	Reason string `json:"reason,omitempty"`
+	// Standby: it can hold a standby; NoStandby says why not. (Usable and
+	// Reason are about receiving a clone.)
+	Standby   bool   `json:"standby,omitempty"`
+	NoStandby string `json:"no_standby,omitempty"`
 }
 
 // StandbyInstructions are what the control plane tells an agent about
@@ -290,6 +315,9 @@ type Fence struct {
 	// with another one is something else and is left alone.
 	SystemID string    `json:"system_id,omitempty"`
 	Since    time.Time `json:"since"`
+	// Engine is the database's engine ("" is PostgreSQL). Other engines
+	// are fenced their own way (MySQL and MariaDB: kept read-only).
+	Engine string `json:"engine,omitempty"`
 }
 
 // FenceState is how a fence holds on its server.
@@ -380,6 +408,9 @@ type StandbyCreateParams struct {
 	// KeepDays is how long the data kept aside stays before the agent
 	// deletes it (default 7, 1 to 30).
 	KeepDays int `json:"keep_days,omitempty"`
+	// RestartOK: the person confirmed that the server becoming the standby
+	// may be restarted once (MongoDB: to join the replica set).
+	RestartOK bool `json:"restart_ok,omitempty"`
 }
 
 // StandbyCreateResult is the agent's report for a standby_create task.
@@ -589,6 +620,10 @@ type StandbyView struct {
 	// it first); otherwise a promotion needs the typed confirmation that
 	// the primary is down or will stay stopped.
 	PrimaryReachable bool `json:"primary_reachable"`
+	// PoolerApprovals: ProxySQL on another server pools this database but
+	// root there hasn't let it send connections to this standby yet, so it
+	// couldn't follow a promotion; one root command each.
+	PoolerApprovals []PoolerApproval `json:"pooler_approvals,omitempty"`
 }
 
 // FenceView is a fenced old primary.
@@ -680,6 +715,9 @@ type CreateStandbyRequest struct {
 	// Stream: set up streaming when the standby can reach the primary
 	// (default true). false: follow through the bucket only.
 	Stream *bool `json:"stream,omitempty"`
+	// Restart confirms that the server becoming the standby may be
+	// restarted once (MongoDB, to join the replica set; it holds no data).
+	Restart bool `json:"restart,omitempty"`
 }
 
 // PromoteStandbyRequest promotes the standby.

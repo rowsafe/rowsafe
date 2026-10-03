@@ -32,13 +32,17 @@ type monitorState struct {
 }
 
 type dbMonitor struct {
-	client    *mongo.Client
-	uri       string
-	prev      map[string]float64
-	prevAt    time.Time
-	lastSizes time.Time
-	dbPath    string
-	opStarts  map[int]time.Time // opid -> start, as first seen
+	client     *mongo.Client
+	uri        string
+	prev       map[string]float64
+	prevAt     time.Time
+	lastSizes  time.Time
+	settingsAt time.Time
+	dbPath     string
+	opStarts   map[int]time.Time // opid -> start, as first seen
+	// insights.go
+	profTo     time.Time // the profiler is read up to here
+	insightsAt time.Time
 }
 
 func (e *Engine) monitorFor(id string) *dbMonitor {
@@ -83,6 +87,10 @@ func (e *Engine) Monitor(ctx context.Context, env agent.EngineEnv, db protocol.D
 			m.client = nil
 		}
 		dm.Error = firstLine(err.Error())
+	} else if time.Since(m.settingsAt) >= 5*time.Minute { // Tuning (settings.go)
+		if snap, err := e.settingsSnapshot(ctx, env, m.client); err == nil {
+			dm.Settings, m.settingsAt = snap, time.Now()
+		}
 	}
 	return dm, nil
 }
@@ -125,12 +133,18 @@ func (e *Engine) sample(ctx context.Context, m *dbMonitor, dm *protocol.Database
 		collect.MMongoNetInRate:      toFloat(lookup(ss, "network", "bytesIn")),
 		collect.MMongoNetOutRate:     toFloat(lookup(ss, "network", "bytesOut")),
 	}
+	if v := lookup(ss, "metrics", "operation", "writeConflicts"); v != nil {
+		counters[collect.MMongoWriteConflicts] = toFloat(v)
+	}
 	if m.prev != nil {
 		secs := now.Sub(m.prevAt).Seconds()
 		for k, v := range counters {
 			if p, ok := m.prev[k]; ok && secs > 0 && v >= p {
 				metrics[k] = (v - p) / secs
 			}
+		}
+		if v, ok := metrics[collect.MMongoWriteConflicts]; ok {
+			metrics[collect.MMongoWriteConflicts] = v * 60 // per minute
 		}
 	}
 	m.prev, m.prevAt = counters, now
@@ -181,6 +195,13 @@ func (e *Engine) sample(ctx context.Context, m *dbMonitor, dm *protocol.Database
 			}
 			metrics[collect.MDatabaseSizeBytes] = float64(total)
 			m.lastSizes = now
+		}
+		dm.Statements, dm.QueryStats = m.queryStats(ctx, now, queryTextOn()) // insights.go
+	}
+	if now.Sub(m.insightsAt) >= insightsEvery {
+		if ins := insights(ctx, c); ins != nil {
+			dm.Insights = ins
+			m.insightsAt = now
 		}
 	}
 	dm.Metrics = metrics

@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/rowsafe/rowsafe/internal/pgbackrest"
+	"github.com/rowsafe/rowsafe/pglog"
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
@@ -48,6 +49,24 @@ type EngineArchiver interface {
 	Archiver(ctx context.Context, env EngineEnv, db protocol.DatabaseSpec) (*protocol.ArchiverStats, error)
 }
 
+// EngineLogs is optionally implemented by an engine whose own log Pulse
+// reads (package pglog: the same reading, redaction and sending as
+// PostgreSQL's). LogSource says where db's log is and in which format
+// (pglog.FormatMySQLError, ...), or why it can't be read (Status.Problem).
+type EngineLogs interface {
+	LogSource(ctx context.Context, env EngineEnv, db protocol.DatabaseSpec) pglog.Source
+}
+
+// locateLog finds a non-PostgreSQL database's log (pglog.Options.Locate).
+func (a *Agent) locateLog(ctx context.Context, db protocol.DatabaseSpec) (pglog.Source, bool) {
+	name := protocol.NormalizeEngine(db.Engine)
+	e, ok := engineFor(name).(EngineLogs)
+	if !ok {
+		return pglog.Source{}, false
+	}
+	return e.LogSource(ctx, a.engineEnv(name), db), true
+}
+
 // EngineRewinds is optionally implemented by an engine with Rewind copies:
 // the agent reports them with every heartbeat next to PostgreSQL's (the
 // control plane treats a copy it no longer hears about as gone) and hands
@@ -55,6 +74,27 @@ type EngineArchiver interface {
 type EngineRewinds interface {
 	RewindStates(env EngineEnv) []protocol.RewindState
 	SetRewindExpiries(env EngineEnv, exp []protocol.RewindExpiry)
+}
+
+// EngineRestarter is optionally implemented by an engine that Rowsafe can
+// restart when a person asks (Restart in the dashboard, `rowsafe restart`):
+// the agent hands the restart to the root helper (native installs, the
+// units root listed in restart-allowed) or the container control service
+// (Docker sidecar), exactly as for PostgreSQL, then calls Ready until the
+// database answers again. Ready returns a short note for the task log
+// ("binary log on") or an error while the database doesn't answer.
+type EngineRestarter interface {
+	Ready(ctx context.Context, env EngineEnv, db protocol.DatabaseSpec) (string, error)
+}
+
+// engineRestarter is db's engine as an EngineRestarter (nil when it can't
+// be restarted from Rowsafe, or for PostgreSQL).
+func engineRestarter(db protocol.DatabaseSpec) EngineRestarter {
+	if isPostgres(db) {
+		return nil
+	}
+	r, _ := engineFor(protocol.NormalizeEngine(db.Engine)).(EngineRestarter)
+	return r
 }
 
 // engineRewindStates are the registered engines' copies (heartbeat).
@@ -119,6 +159,23 @@ type EngineEnv struct {
 	// Notes takes side remarks for the person at the terminal during setup
 	// discover (servers skipped and why); io.Discard elsewhere.
 	Notes io.Writer
+	// Control stops and starts the database server through the root helper
+	// (engine_inplace.go); nil outside the agent's run loop.
+	Control ServerControl
+	// Copies are the agent's safe copy helpers (copies_engine.go); nil
+	// outside the agent.
+	Copies *CopyTools
+	// RepoFor is the bucket of a database: the one its primary handed over
+	// when this server holds its standby, else Repo (for background work;
+	// a task's env already has it). nil outside the agent.
+	RepoFor func(dbID string) pgbackrest.Repo
+	// Helper hands one request to root's helper (rowsafe-pg-restart) and
+	// waits for its answer: "ID ACTION ARGS...". Only actions root allowed
+	// at install exist there; nil outside the agent's run loop.
+	Helper func(ctx context.Context, action string, args ...string) (map[string]string, error)
+	// HelperCan reports whether root's helper may do action for the server
+	// on port (its "# actions:" line and the allow lists); nil: it can't.
+	HelperCan func(action string, port int) bool
 }
 
 // RunLow runs a command at low CPU and IO priority (LowPriority).
@@ -211,7 +268,17 @@ func engineEnv(cfg Config, runner CommandRunner, log *slog.Logger, name string) 
 	}
 }
 
-func (a *Agent) engineEnv(name string) EngineEnv { return engineEnv(a.cfg, a.runner, a.log, name) }
+func (a *Agent) engineEnv(name string) EngineEnv {
+	env := engineEnv(a.cfg, a.runner, a.log, name)
+	env.Control = agentControl{a}
+	if a.engineControl != nil {
+		env.Control = a.engineControl // tests
+	}
+	env.Copies = a.copyTools()
+	env.RepoFor = func(dbID string) pgbackrest.Repo { return a.repoFor(protocol.DatabaseSpec{ID: dbID}) }
+	env.Helper, env.HelperCan = a.engineHelper, a.helperCanDo // engine_helper.go
+	return env
+}
 
 // unsupportedEngine is the error for a database whose engine this agent
 // doesn't have.
@@ -227,11 +294,19 @@ func (a *Agent) runEngineTask(ctx context.Context, task *protocol.Task, tl *task
 	if e == nil {
 		return nil, unsupportedEngine(name)
 	}
+	if task.Type == protocol.TaskMigrate || task.Type == protocol.TaskMigrateCopy {
+		if _, ok := e.(EngineMigrate); ok {
+			return a.runEngineMigrate(ctx, task, *task.Database, tl) // engine_migrate.go
+		}
+	}
 	if !slices.Contains(e.Tasks(), task.Type) {
 		return nil, fmt.Errorf("This agent can't run %s tasks for %s yet; update the agent (this is %s).",
 			task.Type, protocol.EngineDisplayName(name), Version)
 	}
-	return e.Run(ctx, a.engineEnv(name), task, tl)
+	if (task.Type == protocol.TaskBackup || task.Type == protocol.TaskDrill) && taskRepo(task) == protocol.RepoSecond {
+		return a.runEngineCopy2(ctx, e, task, tl) // secondcopy_engines.go
+	}
+	return e.Run(ctx, a.engineEnvFor(*task.Database), task, tl)
 }
 
 // monitorEngine collects a monitoring sample of a non-PostgreSQL database
@@ -243,7 +318,7 @@ func (a *Agent) monitorEngine(ctx context.Context, db protocol.DatabaseSpec) (*p
 	if e == nil {
 		return nil, nil
 	}
-	dm, err := e.Monitor(ctx, a.engineEnv(name), db)
+	dm, err := e.Monitor(ctx, a.engineEnvFor(db), db)
 	if dm != nil && dm.DatabaseID == "" {
 		dm.DatabaseID = db.ID
 	}
@@ -258,7 +333,7 @@ func (a *Agent) engineArchiver(ctx context.Context, db protocol.DatabaseSpec) (s
 	if ar == nil {
 		return stats, false
 	}
-	st, err := ar.Archiver(ctx, a.engineEnv(name), db)
+	st, err := ar.Archiver(ctx, a.engineEnvFor(db), db)
 	switch {
 	case err != nil:
 		stats.Error = err.Error()

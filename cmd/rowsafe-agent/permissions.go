@@ -24,6 +24,15 @@ Usage (as root; root's copy is /usr/local/lib/rowsafe/rowsafe-permissions):
   permissions remove-owner FP   remove the passkey with fingerprint FP
   permissions apply             apply a signed change the agent received
                                 (run by rowsafe-permissions.service)
+  permissions proxysql-apply    install and configure ProxySQL in front of MySQL or
+                                MariaDB where root allowed pooling (run by
+                                rowsafe-proxysql.service)
+  permissions chproxy-apply     install and run chproxy in front of ClickHouse's HTTP
+                                interface where root allowed pooling (run by
+                                rowsafe-chproxy-apply.service)
+  permissions tuning-apply      write the MongoDB or ClickHouse settings the agent
+                                asked for into Rowsafe's own files, where root
+                                allowed it (run by rowsafe-tuning.service)
 `
 
 // permissionsCmd runs `rowsafe-agent permissions ...`, or root's copy of
@@ -51,6 +60,12 @@ func permissionsCmd(ctx context.Context, args []string) int {
 		if err == nil {
 			err = permissionsPair(ctx)
 		}
+	case "tuning-apply": // tuning.go: rowsafe-tuning.service
+		err = tuningApply()
+	case "proxysql-apply": // proxysql.go: rowsafe-proxysql.service
+		err = proxysqlApply(ctx)
+	case "chproxy-apply": // chproxy.go: rowsafe-chproxy-apply.service
+		err = chproxyApply(ctx)
 	case "owners":
 		err = permissionsOwners()
 	case "remove-owner":

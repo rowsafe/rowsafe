@@ -318,10 +318,12 @@ type Migration struct {
 	// DatabaseID/DatabaseName: the Rowsafe database (target cluster).
 	DatabaseID   string `json:"database_id"`
 	DatabaseName string `json:"database_name"`
-	Hostname     string `json:"hostname"`
-	Status       string `json:"status"` // MigratePhase*
-	Method       string `json:"method,omitempty"`
-	TargetDB     string `json:"target_db,omitempty"`
+	// Engine is the target database's engine ("" is PostgreSQL).
+	Engine   string `json:"engine,omitempty"`
+	Hostname string `json:"hostname"`
+	Status   string `json:"status"` // MigratePhase*
+	Method   string `json:"method,omitempty"`
+	TargetDB string `json:"target_db,omitempty"`
 	// PublicKey: seal the source connection string to it (status ready and
 	// later, until finished).
 	PublicKey string              `json:"public_key,omitempty"`

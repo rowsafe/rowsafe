@@ -1,0 +1,217 @@
+# The proper term is pseudo_replica_mode, but we use this compatibility alias
+# to make the statement usable on server versions 8.0.24 and older.
+/*!50530 SET @@SESSION.PSEUDO_SLAVE_MODE=1*/;
+/*!50003 SET @OLD_COMPLETION_TYPE=@@COMPLETION_TYPE,COMPLETION_TYPE=0*/;
+DELIMITER /*!*/;
+# at 4
+#261002 17:44:19 server id 1  end_log_pos 127 CRC32 0x8694d2c8 	Start: binlog v 4, server v 8.4.11 created 261002 17:44:19
+# Warning: this binlog is either in use or was not closed properly.
+# at 127
+#261002 17:44:19 server id 1  end_log_pos 158 CRC32 0x6f65ce80 	Previous-GTIDs
+# [empty]
+# at 158
+#261002 17:44:19 server id 1  end_log_pos 235 CRC32 0xc85af0c5 	Anonymous_GTID	last_committed=0	sequence_number=1	rbr_only=no	original_committed_timestamp=1790963059665428	immediate_commit_timestamp=1790963059665428	transaction_length=190
+# original_commit_timestamp=1790963059665428 (2026-10-02 17:44:19.665428 UTC)
+# immediate_commit_timestamp=1790963059665428 (2026-10-02 17:44:19.665428 UTC)
+/*!80001 SET @@session.original_commit_timestamp=1790963059665428*//*!*/;
+/*!80014 SET @@session.original_server_version=80411*//*!*/;
+/*!80014 SET @@session.immediate_server_version=80411*//*!*/;
+SET @@SESSION.GTID_NEXT= 'ANONYMOUS'/*!*/;
+# at 235
+#261002 17:44:19 server id 1  end_log_pos 348 CRC32 0x0f89fd91 	Query	thread_id=45	exec_time=0	error_code=0	Xid = 679
+SET TIMESTAMP=1790963059/*!*/;
+SET @@session.pseudo_thread_id=45/*!*/;
+SET @@session.foreign_key_checks=1, @@session.sql_auto_is_null=0, @@session.unique_checks=1, @@session.autocommit=1/*!*/;
+SET @@session.sql_mode=1168113696/*!*/;
+SET @@session.auto_increment_increment=1, @@session.auto_increment_offset=1/*!*/;
+/*!\C latin1 *//*!*/;
+SET @@session.character_set_client=8,@@session.collation_connection=8,@@session.collation_server=255/*!*/;
+SET @@session.lc_time_names=0/*!*/;
+SET @@session.collation_database=DEFAULT/*!*/;
+/*!80011 SET @@session.default_collation_for_utf8mb4=255*//*!*/;
+/*!80016 SET @@session.default_table_encryption=0*//*!*/;
+CREATE DATABASE IF NOT EXISTS m
+/*!*/;
+# at 348
+#261002 17:44:19 server id 1  end_log_pos 425 CRC32 0x7a5b7530 	Anonymous_GTID	last_committed=1	sequence_number=2	rbr_only=no	original_committed_timestamp=1790963059681418	immediate_commit_timestamp=1790963059681418	transaction_length=210
+# original_commit_timestamp=1790963059681418 (2026-10-02 17:44:19.681418 UTC)
+# immediate_commit_timestamp=1790963059681418 (2026-10-02 17:44:19.681418 UTC)
+/*!80001 SET @@session.original_commit_timestamp=1790963059681418*//*!*/;
+/*!80014 SET @@session.original_server_version=80411*//*!*/;
+/*!80014 SET @@session.immediate_server_version=80411*//*!*/;
+SET @@SESSION.GTID_NEXT= 'ANONYMOUS'/*!*/;
+# at 425
+#261002 17:44:19 server id 1  end_log_pos 558 CRC32 0xe6844261 	Query	thread_id=45	exec_time=0	error_code=0	Xid = 680
+SET TIMESTAMP=1790963059/*!*/;
+/*!80013 SET @@session.sql_require_primary_key=0*//*!*/;
+CREATE TABLE m.t (id int primary key, v varchar(20))
+/*!*/;
+# at 558
+#261002 17:44:19 server id 1  end_log_pos 637 CRC32 0xf31d4ee2 	Anonymous_GTID	last_committed=2	sequence_number=3	rbr_only=yes	original_committed_timestamp=1790963059686290	immediate_commit_timestamp=1790963059686290	transaction_length=302
+/*!50718 SET TRANSACTION ISOLATION LEVEL READ COMMITTED*//*!*/;
+# original_commit_timestamp=1790963059686290 (2026-10-02 17:44:19.686290 UTC)
+# immediate_commit_timestamp=1790963059686290 (2026-10-02 17:44:19.686290 UTC)
+/*!80001 SET @@session.original_commit_timestamp=1790963059686290*//*!*/;
+/*!80014 SET @@session.original_server_version=80411*//*!*/;
+/*!80014 SET @@session.immediate_server_version=80411*//*!*/;
+SET @@SESSION.GTID_NEXT= 'ANONYMOUS'/*!*/;
+# at 637
+#261002 17:44:19 server id 1  end_log_pos 708 CRC32 0xf31bb234 	Query	thread_id=45	exec_time=0	error_code=0
+SET TIMESTAMP=1790963059/*!*/;
+BEGIN
+/*!*/;
+# at 708
+#261002 17:44:19 server id 1  end_log_pos 760 CRC32 0xef51d7fb 	Table_map: `m`.`t` mapped to number 108
+# has_generated_invisible_primary_key=0
+# at 760
+#261002 17:44:19 server id 1  end_log_pos 829 CRC32 0xe9ec9564 	Write_rows: table id 108 flags: STMT_END_F
+### INSERT INTO `m`.`t`
+### SET
+###   @1=1
+###   @2='secret1'
+### INSERT INTO `m`.`t`
+### SET
+###   @1=2
+###   @2='b'
+### INSERT INTO `m`.`t`
+### SET
+###   @1=3
+###   @2='c'
+### INSERT INTO `m`.`t`
+### SET
+###   @1=4
+###   @2='d'
+# at 829
+#261002 17:44:19 server id 1  end_log_pos 860 CRC32 0x40e12996 	Xid = 681
+COMMIT/*!*/;
+# at 860
+#261002 17:44:19 server id 1  end_log_pos 939 CRC32 0x340b8df4 	Anonymous_GTID	last_committed=3	sequence_number=4	rbr_only=yes	original_committed_timestamp=1790963059687391	immediate_commit_timestamp=1790963059687391	transaction_length=288
+/*!50718 SET TRANSACTION ISOLATION LEVEL READ COMMITTED*//*!*/;
+# original_commit_timestamp=1790963059687391 (2026-10-02 17:44:19.687391 UTC)
+# immediate_commit_timestamp=1790963059687391 (2026-10-02 17:44:19.687391 UTC)
+/*!80001 SET @@session.original_commit_timestamp=1790963059687391*//*!*/;
+/*!80014 SET @@session.original_server_version=80411*//*!*/;
+/*!80014 SET @@session.immediate_server_version=80411*//*!*/;
+SET @@SESSION.GTID_NEXT= 'ANONYMOUS'/*!*/;
+# at 939
+#261002 17:44:19 server id 1  end_log_pos 1010 CRC32 0xa6f15a61 	Query	thread_id=45	exec_time=0	error_code=0
+SET TIMESTAMP=1790963059/*!*/;
+BEGIN
+/*!*/;
+# at 1010
+#261002 17:44:19 server id 1  end_log_pos 1062 CRC32 0x8bed9184 	Table_map: `m`.`t` mapped to number 108
+# has_generated_invisible_primary_key=0
+# at 1062
+#261002 17:44:19 server id 1  end_log_pos 1117 CRC32 0xf3c1952b 	Delete_rows: table id 108 flags: STMT_END_F
+### DELETE FROM `m`.`t`
+### WHERE
+###   @1=1
+###   @2='secret1'
+### DELETE FROM `m`.`t`
+### WHERE
+###   @1=2
+###   @2='b'
+# at 1117
+#261002 17:44:19 server id 1  end_log_pos 1148 CRC32 0x7e7950f5 	Xid = 682
+COMMIT/*!*/;
+# at 1148
+#261002 17:44:19 server id 1  end_log_pos 1227 CRC32 0x6ea4f978 	Anonymous_GTID	last_committed=3	sequence_number=5	rbr_only=yes	original_committed_timestamp=1790963059688878	immediate_commit_timestamp=1790963059688878	transaction_length=292
+/*!50718 SET TRANSACTION ISOLATION LEVEL READ COMMITTED*//*!*/;
+# original_commit_timestamp=1790963059688878 (2026-10-02 17:44:19.688878 UTC)
+# immediate_commit_timestamp=1790963059688878 (2026-10-02 17:44:19.688878 UTC)
+/*!80001 SET @@session.original_commit_timestamp=1790963059688878*//*!*/;
+/*!80014 SET @@session.original_server_version=80411*//*!*/;
+/*!80014 SET @@session.immediate_server_version=80411*//*!*/;
+SET @@SESSION.GTID_NEXT= 'ANONYMOUS'/*!*/;
+# at 1227
+#261002 17:44:19 server id 1  end_log_pos 1307 CRC32 0x798ba0eb 	Query	thread_id=45	exec_time=0	error_code=0
+SET TIMESTAMP=1790963059/*!*/;
+BEGIN
+/*!*/;
+# at 1307
+#261002 17:44:19 server id 1  end_log_pos 1359 CRC32 0xd1d8e984 	Table_map: `m`.`t` mapped to number 108
+# has_generated_invisible_primary_key=0
+# at 1359
+#261002 17:44:19 server id 1  end_log_pos 1409 CRC32 0xa047f59f 	Update_rows: table id 108 flags: STMT_END_F
+### UPDATE `m`.`t`
+### WHERE
+###   @1=3
+###   @2='c'
+### SET
+###   @1=3
+###   @2='x'
+# at 1409
+#261002 17:44:19 server id 1  end_log_pos 1440 CRC32 0xe1c83cbc 	Xid = 683
+COMMIT/*!*/;
+# at 1440
+#261002 17:44:19 server id 1  end_log_pos 1517 CRC32 0x68110cdb 	Anonymous_GTID	last_committed=5	sequence_number=6	rbr_only=no	original_committed_timestamp=1790963059693770	immediate_commit_timestamp=1790963059693770	transaction_length=182
+# original_commit_timestamp=1790963059693770 (2026-10-02 17:44:19.693770 UTC)
+# immediate_commit_timestamp=1790963059693770 (2026-10-02 17:44:19.693770 UTC)
+/*!80001 SET @@session.original_commit_timestamp=1790963059693770*//*!*/;
+/*!80014 SET @@session.original_server_version=80411*//*!*/;
+/*!80014 SET @@session.immediate_server_version=80411*//*!*/;
+SET @@SESSION.GTID_NEXT= 'ANONYMOUS'/*!*/;
+# at 1517
+#261002 17:44:19 server id 1  end_log_pos 1622 CRC32 0xf16143ae 	Query	thread_id=45	exec_time=0	error_code=0	Xid = 684
+SET TIMESTAMP=1790963059/*!*/;
+/*!80013 SET @@session.sql_require_primary_key=0*//*!*/;
+CREATE TABLE m.u (a int)
+/*!*/;
+# at 1622
+#261002 17:44:19 server id 1  end_log_pos 1699 CRC32 0xa7abac5f 	Anonymous_GTID	last_committed=6	sequence_number=7	rbr_only=no	original_committed_timestamp=1790963059702924	immediate_commit_timestamp=1790963059702924	transaction_length=170
+# original_commit_timestamp=1790963059702924 (2026-10-02 17:44:19.702924 UTC)
+# immediate_commit_timestamp=1790963059702924 (2026-10-02 17:44:19.702924 UTC)
+/*!80001 SET @@session.original_commit_timestamp=1790963059702924*//*!*/;
+/*!80014 SET @@session.original_server_version=80411*//*!*/;
+/*!80014 SET @@session.immediate_server_version=80411*//*!*/;
+SET @@SESSION.GTID_NEXT= 'ANONYMOUS'/*!*/;
+# at 1699
+#261002 17:44:19 server id 1  end_log_pos 1792 CRC32 0x46fcb621 	Query	thread_id=45	exec_time=0	error_code=0	Xid = 685
+SET TIMESTAMP=1790963059/*!*/;
+TRUNCATE TABLE m.u
+/*!*/;
+# at 1792
+#261002 17:44:19 server id 1  end_log_pos 1869 CRC32 0xf76cae80 	Anonymous_GTID	last_committed=7	sequence_number=8	rbr_only=no	original_committed_timestamp=1790963059706249	immediate_commit_timestamp=1790963059706249	transaction_length=200
+# original_commit_timestamp=1790963059706249 (2026-10-02 17:44:19.706249 UTC)
+# immediate_commit_timestamp=1790963059706249 (2026-10-02 17:44:19.706249 UTC)
+/*!80001 SET @@session.original_commit_timestamp=1790963059706249*//*!*/;
+/*!80014 SET @@session.original_server_version=80411*//*!*/;
+/*!80014 SET @@session.immediate_server_version=80411*//*!*/;
+SET @@SESSION.GTID_NEXT= 'ANONYMOUS'/*!*/;
+# at 1869
+#261002 17:44:19 server id 1  end_log_pos 1992 CRC32 0x36687eaf 	Query	thread_id=45	exec_time=0	error_code=0	Xid = 686
+SET TIMESTAMP=1790963059/*!*/;
+DROP TABLE `m`.`u` /* generated by server */
+/*!*/;
+# at 1992
+#261002 17:44:19 server id 1  end_log_pos 2069 CRC32 0xb5a7570b 	Anonymous_GTID	last_committed=8	sequence_number=9	rbr_only=no	original_committed_timestamp=1790963059707795	immediate_commit_timestamp=1790963059707795	transaction_length=179
+# original_commit_timestamp=1790963059707795 (2026-10-02 17:44:19.707795 UTC)
+# immediate_commit_timestamp=1790963059707795 (2026-10-02 17:44:19.707795 UTC)
+/*!80001 SET @@session.original_commit_timestamp=1790963059707795*//*!*/;
+/*!80014 SET @@session.original_server_version=80411*//*!*/;
+/*!80014 SET @@session.immediate_server_version=80411*//*!*/;
+SET @@SESSION.GTID_NEXT= 'ANONYMOUS'/*!*/;
+# at 2069
+#261002 17:44:19 server id 1  end_log_pos 2171 CRC32 0x7c9a68dd 	Query	thread_id=45	exec_time=0	error_code=0	Xid = 687
+SET TIMESTAMP=1790963059/*!*/;
+/*!80016 SET @@session.default_table_encryption=0*//*!*/;
+CREATE DATABASE dd
+/*!*/;
+# at 2171
+#261002 17:44:19 server id 1  end_log_pos 2248 CRC32 0x939a9b64 	Anonymous_GTID	last_committed=9	sequence_number=10	rbr_only=no	original_committed_timestamp=1790963059718577	immediate_commit_timestamp=1790963059718577	transaction_length=175
+# original_commit_timestamp=1790963059718577 (2026-10-02 17:44:19.718577 UTC)
+# immediate_commit_timestamp=1790963059718577 (2026-10-02 17:44:19.718577 UTC)
+/*!80001 SET @@session.original_commit_timestamp=1790963059718577*//*!*/;
+/*!80014 SET @@session.original_server_version=80411*//*!*/;
+/*!80014 SET @@session.immediate_server_version=80411*//*!*/;
+SET @@SESSION.GTID_NEXT= 'ANONYMOUS'/*!*/;
+# at 2248
+#261002 17:44:19 server id 1  end_log_pos 2346 CRC32 0x9f62efd5 	Query	thread_id=45	exec_time=0	error_code=0	Xid = 688
+SET TIMESTAMP=1790963059/*!*/;
+DROP DATABASE dd
+/*!*/;
+SET @@SESSION.GTID_NEXT= 'AUTOMATIC' /* added by mysqlbinlog */ /*!*/;
+DELIMITER ;
+# End of log file
+/*!50003 SET COMPLETION_TYPE=@OLD_COMPLETION_TYPE*/;
+/*!50530 SET @@SESSION.PSEUDO_SLAVE_MODE=0*/;

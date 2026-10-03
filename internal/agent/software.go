@@ -40,11 +40,23 @@ const (
 	actUpgradeCleanup = "pg-upgrade-cleanup"
 	actSecurity       = "security-updates"
 	actReboot         = "reboot"
+	actDBMinorUpdate  = "db-minor-update" // other engines (engine_updates.go)
 )
 
 // softwareLoop refreshes the software report every hour, or sooner when
 // asked (refreshSoftware).
 func (a *Agent) softwareLoop(ctx context.Context) {
+	// The running versions come from the databases the control plane
+	// names: wait for its first answer (a minute at most) so the first
+	// report has them, instead of an hour without.
+	if a.hbAnswered != nil {
+		select {
+		case <-a.hbAnswered:
+		case <-time.After(time.Minute):
+		case <-ctx.Done():
+			return
+		}
+	}
 	for {
 		rctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 		r := a.buildSoftware(rctx)
@@ -106,7 +118,7 @@ func (a *Agent) updateAllowed() []string {
 			continue
 		}
 		switch f[0] {
-		case protocol.UpdateAllowPostgres, protocol.UpdateAllowSecurity, protocol.UpdateAllowReboot:
+		case protocol.UpdateAllowPostgres, protocol.UpdateAllowSecurity, protocol.UpdateAllowReboot, protocol.UpdateAllowDatabase:
 			if !slices.Contains(out, f[0]) {
 				out = append(out, f[0])
 			}
@@ -138,7 +150,8 @@ func (a *Agent) updateHelperActions() []string {
 
 func (a *Agent) buildSoftware(ctx context.Context) *protocol.SoftwareReport {
 	r := &protocol.SoftwareReport{CheckedAt: time.Now().UTC()}
-	if a.cfg.Sidecar() {
+	if a.cfg.Container() {
+		r.Container = true // the image's packages aren't the server's
 		return r
 	}
 	r.Allowed = a.updateAllowed()
@@ -160,7 +173,7 @@ func (a *Agent) buildSoftware(ctx context.Context) *protocol.SoftwareReport {
 		t := st.ModTime().UTC()
 		r.ListsUpdatedAt = &t
 	}
-	r.Clusters = a.clusterSoftware(ctx)
+	r.Clusters = append(a.clusterSoftware(ctx), a.engineSoftware(ctx)...) // engine_updates.go
 	if out, err := a.runner.Run(ctx, "apt-get", "-s", "-o", "Debug::NoLocking=1", "dist-upgrade"); err == nil {
 		pkgs := securityUpgrades(out)
 		r.SecurityUpdates = len(pkgs)

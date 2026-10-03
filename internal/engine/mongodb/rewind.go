@@ -51,6 +51,13 @@ type copyRecord struct {
 	Expires     time.Time             `json:"expires"`
 	RecoveredTo *time.Time            `json:"recovered_to,omitempty"`
 	SizeBytes   int64                 `json:"size_bytes"`
+	// Safe copies (copies_safe.go).
+	Kind            string   `json:"kind,omitempty"`
+	Listen          string   `json:"listen,omitempty"`
+	ListenPort      int      `json:"listen_port,omitempty"`
+	Role            string   `json:"role,omitempty"`
+	Networks        []string `json:"networks,omitempty"`
+	PasswordVersion int      `json:"password_version,omitempty"`
 }
 
 type copyStore struct {
@@ -122,7 +129,7 @@ func (cs *copyStore) all() []copyRecord {
 
 func (cs *copyStore) forDatabase(dbID string) (copyRecord, bool) {
 	for _, r := range cs.all() {
-		if r.DatabaseID == dbID {
+		if r.DatabaseID == dbID && r.Kind != protocol.CopyKindSafe {
 			return r, true
 		}
 	}
@@ -834,11 +841,14 @@ func (e *Engine) expireCopies(env agent.EngineEnv, now time.Time) {
 func (e *Engine) RewindStates(env agent.EngineEnv) []protocol.RewindState {
 	var out []protocol.RewindState
 	for _, r := range e.copyState(env).all() {
+		if r.Kind == protocol.CopyKindSafe {
+			continue
+		}
 		exp := r.Expires
 		out = append(out, protocol.RewindState{ID: r.ID, DatabaseID: r.DatabaseID, Kind: protocol.RewindKindCopy, Status: r.Status,
 			SizeBytes: r.SizeBytes, Expires: &exp, CreatedAt: r.CreatedAt, RecoveredTo: r.RecoveredTo, Path: r.Dir})
 	}
-	return out
+	return append(out, env.Kept().States()...) // rewinds in place (inplace.go)
 }
 
 // SetRewindExpiries applies Extend from the control plane.

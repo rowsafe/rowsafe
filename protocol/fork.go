@@ -68,6 +68,11 @@ const (
 	// (ROWSAFE_FORK_TARGET_DIR): its PostgreSQL container waits until the
 	// fork is restored into its volume, then starts on it.
 	ForkDocker = "docker"
+	// ForkEmptyServer: an existing, empty server of another engine than
+	// PostgreSQL (MySQL, MariaDB) whose Rowsafe account may load data into
+	// it (StandbyTarget): the fork is restored privately next to it and
+	// loaded into it.
+	ForkEmptyServer = "empty_server"
 )
 
 // ForkPrepareParams are the params of a fork_prepare task (on the source's

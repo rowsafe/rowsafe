@@ -176,43 +176,32 @@ func (a *Agent) dockerActions() []string {
 
 // dockerRestart is the restart task in docker-sidecar mode.
 func (a *Agent) dockerRestart(ctx context.Context, db protocol.DatabaseSpec, taskID string, tl *taskLog) (*protocol.RestartResult, error) {
+	name := protocol.EngineDisplayName(db.Engine)
 	start := time.Now()
-	tl.Printf("asking the container control service to restart PostgreSQL's container")
+	tl.Printf("asking the container control service to restart %s's container", name)
 	res, err := a.dockerCall(ctx, dockerctl.ActionRestart, taskID)
 	switch {
 	case errors.Is(err, errNoDockerControl):
-		return nil, fmt.Errorf("Rowsafe can't restart PostgreSQL running in Docker yet: %s. Or restart the container yourself "+
-			"(e.g. `docker compose restart postgres`); Rowsafe notices the restart by itself", dockerHowToAllow)
+		return nil, fmt.Errorf("Rowsafe can't restart %s running in Docker yet: %s. Or restart the container yourself "+
+			"(e.g. `docker compose restart %s`); Rowsafe notices the restart by itself", name, dockerHowToAllow, dockerServiceHint(db))
 	case err != nil:
 		return nil, err
 	case !res.OK:
-		return nil, fmt.Errorf("restarting PostgreSQL's container failed: %s", res.Error)
+		return nil, fmt.Errorf("restarting %s's container failed: %s", name, res.Error)
 	}
 	unit := res.Container
-	tl.Printf("container %s restarted; waiting for it to run and PostgreSQL to answer", unit)
+	tl.Printf("container %s restarted; waiting for it to run and %s to answer", unit, name)
 	out := &protocol.RestartResult{Restarted: true, Unit: unit}
 	if err := a.waitContainerReady(ctx, restartBackTimeout); err != nil {
 		out.DurationMs = time.Since(start).Milliseconds()
 		return out, err
 	}
-	deadline := time.Now().Add(restartBackTimeout)
-	for {
-		mode, err := a.pgArchiveMode(ctx, a.target(db))
-		if err == nil {
-			out.ArchiveMode = mode
-			break
-		}
-		if time.Now().After(deadline) || ctx.Err() != nil {
-			out.DurationMs = time.Since(start).Milliseconds()
-			return out, fmt.Errorf("container %s restarted, but PostgreSQL is not answering after %s: %w", unit, restartBackTimeout, err)
-		}
-		select {
-		case <-ctx.Done():
-		case <-time.After(4 * restartPoll):
-		}
+	if err := a.waitBack(ctx, db, out); err != nil { // restart.go
+		out.DurationMs = time.Since(start).Milliseconds()
+		return out, fmt.Errorf("container %s restarted, but %s is not answering after %s: %w", unit, name, restartBackTimeout, err)
 	}
 	out.DurationMs = time.Since(start).Milliseconds()
-	tl.Printf("PostgreSQL is back after %s; archive_mode is %s", time.Duration(out.DurationMs)*time.Millisecond, out.ArchiveMode)
+	a.logBack(tl, db, out)
 	return out, nil
 }
 
@@ -229,7 +218,7 @@ func (a *Agent) waitContainerReady(ctx context.Context, timeout time.Duration) e
 			case res.Ready():
 				return nil
 			case res.State == "exited" || res.State == "dead":
-				return fmt.Errorf("PostgreSQL's container %s stopped right after starting (exit code %d); its log says why "+
+				return fmt.Errorf("the database's container %s stopped right after starting (exit code %d); its log says why "+
 					"(docker compose logs %s)", res.Container, res.ExitCode, cmpOr(res.Service, "postgres"))
 			}
 		}
@@ -243,7 +232,7 @@ func (a *Agent) waitContainerReady(ctx context.Context, timeout time.Duration) e
 			} else if err != nil {
 				state = err.Error()
 			}
-			return fmt.Errorf("PostgreSQL's container isn't running after %s (%s)", timeout, state)
+			return fmt.Errorf("the database's container isn't running after %s (%s)", timeout, state)
 		}
 		select {
 		case <-ctx.Done():

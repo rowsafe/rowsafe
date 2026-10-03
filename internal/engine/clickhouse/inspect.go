@@ -129,7 +129,7 @@ func inspect(ctx context.Context, c *client) (serverInfo, error) {
 	keep := map[string]bool{}
 	for _, d := range dbs {
 		switch {
-		case isSystemDB(d.Name):
+		case isSystemDB(d.Name), isRewindDB(d.Name): // a rewind in place's own (inplace.go): kept on this server only
 		case !slices.Contains(backupDatabaseEngines, d.Engine):
 			in.Skipped = append(in.Skipped, fmt.Sprintf("%s (a %s database: its tables live in another system)", d.Name, d.Engine))
 		default:
@@ -257,14 +257,44 @@ func parseGrants(out string) []string {
 //     for BACKUP ... TO S3; READ, WRITE ON S3 in its newer syntax).
 var neededGrants = []string{"SELECT", "INSERT", "BACKUP", "KILL QUERY", "ALTER UPDATE", "ALTER DELETE", "S3"}
 
+// rewindGrants are what rewinding the whole server in place (inplace.go)
+// needs on top: restore next to production (CREATE DATABASE, CREATE
+// TABLE), move partitions between tables (ALTER TABLE), swap and drop what
+// a rewind set aside (DROP TABLE, DROP DATABASE). Logins made before they
+// existed keep working for everything else; the installer adds them.
+var rewindGrants = []string{"CREATE DATABASE", "CREATE TABLE", "DROP DATABASE", "DROP TABLE", "ALTER TABLE"}
+
 // grantsSQL is the privileges list of GRANT ... ON *.*.
-func grantsSQL() string { return strings.Join(neededGrants, ", ") }
+func grantsSQL() string {
+	return strings.Join(append(slices.Clone(neededGrants), rewindGrants...), ", ")
+}
+
+// missingRewindGrants lists the rewindGrants have doesn't cover.
+func missingRewindGrants(have []string) []string {
+	var out []string
+	for _, p := range rewindGrants {
+		word, _, _ := strings.Cut(p, " ")
+		if !slices.ContainsFunc(have, func(h string) bool {
+			h = strings.ToUpper(strings.TrimSpace(h))
+			return h == p || h == word || h == "ALL" || h == "ALL PRIVILEGES"
+		}) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
 
 // missingGrants lists the needed privileges have doesn't cover.
-func missingGrants(have []string) []string {
+func missingGrants(have []string) []string { return missingOf(have, neededGrants) }
+
+// missingOf lists the privileges of want have doesn't cover.
+func missingOf(have, want []string) []string {
+	upper := make([]string, len(have))
+	for i, h := range have {
+		upper[i] = strings.ToUpper(h)
+	}
 	covers := func(p string) bool {
-		for _, h := range have {
-			h = strings.ToUpper(h)
+		for _, h := range upper {
 			switch {
 			case h == p, h == "ALL", h == "ALL PRIVILEGES":
 				return true
@@ -276,10 +306,14 @@ func missingGrants(have []string) []string {
 				return true
 			}
 		}
+		// CREATE and DROP may come expanded (SHOW GRANTS FINAL).
+		if p == "CREATE" || p == "DROP" {
+			return slices.Contains(upper, p+" DATABASE") && slices.Contains(upper, p+" TABLE")
+		}
 		return false
 	}
 	var out []string
-	for _, p := range neededGrants {
+	for _, p := range want {
 		if !covers(p) {
 			out = append(out, p)
 		}
@@ -288,7 +322,7 @@ func missingGrants(have []string) []string {
 }
 
 // inspectResult is the PostgreSQL-shaped report the control plane stores.
-// ArchiveMode is always "off": ClickHouse keeps no log of changes to copy.
+// ArchiveMode is "on": the agent copies every new part (pitr_ship.go).
 func (s serverInfo) inspectResult(port int) protocol.InspectResult {
 	dbs := s.Databases
 	if dbs == nil {
@@ -297,7 +331,7 @@ func (s serverInfo) inspectResult(port int) protocol.InspectResult {
 	return protocol.InspectResult{
 		Engine:        protocol.EngineClickHouse,
 		ServerVersion: s.Version, VersionNum: s.VersionNum, DataDirectory: s.DataPath,
-		Port: port, IsSuperuser: slices.Contains(s.Grants, "ALL"), ArchiveMode: "off",
+		Port: port, IsSuperuser: slices.Contains(s.Grants, "ALL"), ArchiveMode: "on",
 		Databases: dbs, TotalSizeBytes: s.TotalBytes,
 	}
 }

@@ -474,7 +474,7 @@ func TestRestart(t *testing.T) {
 	if err := dispatch(ctx, []string{"restart", "--yes"}); err == nil || !strings.Contains(err.Error(), "offline") {
 		t.Fatalf("409: %v", err)
 	}
-	if h := helpFor([]string{"restart"}); !strings.Contains(h, "rowsafe restart [NAME] [--yes]") || !strings.Contains(h, "never restarts PostgreSQL on its own") {
+	if h := helpFor([]string{"restart"}); !strings.Contains(h, "rowsafe restart [NAME] [--yes]") || !strings.Contains(h, "never restarts a database (PostgreSQL, MySQL") {
 		t.Errorf("help restart:\n%s", h)
 	}
 }

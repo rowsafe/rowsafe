@@ -49,6 +49,9 @@
 #                          with the firewall when you ask (Security in the
 #                          dashboard); never touches SSH or other ports
 #   --no-allow-firewall    turn that off again (and remove Rowsafe's rule)
+#   --allow-tuning         allow Rowsafe to change MongoDB's or ClickHouse's settings
+#                          when you ask (Tuning), only in its own settings file
+#   --no-allow-tuning      turn that off again
 #   --allow-updates        allow Rowsafe to install PostgreSQL updates and upgrade
 #                          PostgreSQL when you click Update or Upgrade (needs
 #                          --allow-restart); --no-allow-updates turns it off
@@ -122,6 +125,9 @@ RESTART_SERVICE_FILE=/etc/systemd/system/rowsafe-pg-restart.service
 RESTART_PATH_FILE=/etc/systemd/system/rowsafe-pg-restart.path
 RESTART_ALLOW_FILE=$CONFIG_DIR/restart-allowed
 RESTART_DIR=$STATE_DIR/restart
+# The database units the restart helper acts on (its db_unit_re): Debian's
+# PostgreSQL clusters and the MySQL, MariaDB, MongoDB and ClickHouse units.
+DB_UNIT_RE='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server)[.]service$'
 # Forks (--allow-create-cluster): new clusters created by their own unit,
 # started by the restart helper.
 CREATE_HELPER=$LIB_DIR/rowsafe-pg-create-cluster
@@ -137,6 +143,13 @@ POOLER_APT_FILE=/etc/systemd/system/rowsafe-pooler-apt@.service
 POOLER_DROPIN_DIR=/etc/systemd/system/pgbouncer.service.d
 POOLER_ALLOW_FILE=$CONFIG_DIR/pooler-allowed
 POOLER_DIR=$STATE_DIR/pooler
+# Tuning for MongoDB and ClickHouse (--allow-tuning): root's copy of the
+# agent writes the settings into Rowsafe's own files, nothing else.
+TUNING_ALLOW_FILE=$CONFIG_DIR/tuning-allowed
+TUNING_SERVICE_FILE=/etc/systemd/system/rowsafe-tuning.service
+TUNING_PATH_FILE=/etc/systemd/system/rowsafe-tuning.path
+TUNING_DIR=$STATE_DIR/tuning
+
 # The firewall on request (--allow-firewall): a root helper of its own.
 FIREWALL_HELPER=$LIB_DIR/rowsafe-firewall
 FIREWALL_SERVICE_FILE=/etc/systemd/system/rowsafe-firewall.service
@@ -195,10 +208,16 @@ ALLOW_CREATE_CLUSTER='' # --allow-create-cluster (yes) / --no-allow-create-clust
 ALLOW_POOLER=''    # --allow-pooler (yes) / --no-allow-pooler (no); '' = ask once, on a terminal
 ALLOW_POOLER_PUBLIC='' # --allow-pooler-public (yes) / --no-allow-pooler-public (no): PgBouncer on every address
 ALLOW_FIREWALL=''  # --allow-firewall (yes) / --no-allow-firewall (no); '' = ask once, on a terminal
+ALLOW_TUNING=''    # --allow-tuning (yes) / --no-allow-tuning (no): MongoDB and ClickHouse settings files
+POOLER_TARGET_ADD='' POOLER_TARGET_DEL='' # --allow-pooler-target / --no-allow-pooler-target ADDRESS:PORT (ProxySQL)
 ALLOW_UPDATES=''   # --allow-updates / --no-allow-updates (PostgreSQL updates and upgrades)
 ALLOW_SECURITY=''  # --allow-security-updates / --no-allow-security-updates
 ALLOW_REBOOT=''    # --allow-reboot / --no-allow-reboot
 SETUP_STOP=0       # the plan limit was reached: don't offer more databases
+MONGODB_STANDBY='' # --mongodb-standby (yes): Rowsafe may make this MongoDB part of a standby pair
+M_CLONES=''        # --mongodb-clones (yes): this (empty) MongoDB may receive clones
+CH_CLONES=''       # --clickhouse-clones (yes): this (empty) ClickHouse may receive clones
+MYSQL_STANDBY=''   # --mysql-standby (yes) / --no-mysql-standby (no); '' = ask once, on a terminal
 MONGODB_REPLSET='' # --mongodb-replica-set (yes) / --no-mongodb-replica-set (no); '' = ask on a terminal
 
 TMP=
@@ -282,6 +301,12 @@ Options (when piping, pass them after `sh -s --`):
                          the firewall (nftables) when you ask, under Security in the
                          dashboard; never touches SSH or other ports
   --no-allow-firewall    turn that off (and remove Rowsafe's rule and helper)
+  --allow-tuning         allow Rowsafe to change MongoDB's or ClickHouse's settings when
+                         you ask under Tuning, only in its own settings file
+  --no-allow-tuning      turn that off
+  --allow-pooler-target ADDRESS:PORT    let ProxySQL send connections to the MySQL
+                         on another server (the primary after a standby's promotion)
+  --no-allow-pooler-target ADDRESS:PORT  turn that off
   --allow-updates        allow Rowsafe to install PostgreSQL updates and upgrade PostgreSQL
                          when you click Update or Upgrade and confirm (needs --allow-restart)
   --no-allow-updates     turn that off
@@ -294,6 +319,22 @@ Options (when piping, pass them after `sh -s --`):
                          installed: --allow-X and --no-allow-X, nothing else (no
                          download, the agent and backups untouched). Prints what
                          Rowsafe may do. `sudo rowsafe-allow NAME` runs this
+  --mysql-standby        MySQL/MariaDB: let Rowsafe set up standby servers with this
+                         server (its MySQL account gets administrator rights, used only
+                         when someone adds, promotes or removes a standby and confirms);
+                         an empty server can then become another server's standby
+  --no-mysql-standby     don't
+  --mongodb-standby      MongoDB: let Rowsafe set up standby servers with this server:
+                         its user gets clusterManager, and root's helper may hand out
+                         the replica set's key file and add replSetName, keyFile and
+                         an address to mongod.conf (a copy kept); restarts stay the
+                         ones a person confirms (needs --allow-restart)
+  --mongodb-clones       MongoDB: keep an empty server ready to receive clones of a
+                         database from another server (Rowsafe's user there gets the
+                         restore and readWriteAnyDatabase roles)
+  --clickhouse-clones    ClickHouse: keep an empty server ready to receive clones of a
+                         database from another server (Rowsafe's user there may then
+                         create and drop databases)
   --mongodb-replica-set  MongoDB: turn a standalone server into a single-member replica
                          set without asking (one MongoDB restart); restoring to any
                          second needs it
@@ -364,9 +405,10 @@ Turning on backups:
 
   ClickHouse: Rowsafe's own ClickHouse user is added as
   /etc/clickhouse-server/users.d/rowsafe.xml (ClickHouse loads it by itself,
-  no restart), or with an administrator's login once. ClickHouse keeps no
-  log of changes, so restores go to a backup or a Mark, not to any second;
-  a backup of what changed runs every hour.
+  no restart), or with an administrator's login once. The agent joins the
+  clickhouse group to read (never write) ClickHouse's data folder: it copies
+  each new part to your bucket as it appears, so you can restore to any
+  second.
 
 What Rowsafe may do on this server:
   Rowsafe only restarts PostgreSQL, installs updates, reboots, manages
@@ -375,7 +417,7 @@ What Rowsafe may do on this server:
   once (a re-run keeps the answers) and then shows what is allowed. Change it
   any time with `sudo rowsafe-allow` (list), `sudo rowsafe-allow NAME` (allow)
   and `sudo rowsafe-allow --remove NAME`. Names: restart, create-cluster,
-  updates, security-updates, reboot, pooler, pooler-public, firewall. Some
+  updates, security-updates, reboot, pooler, pooler-public, firewall, tuning. Some
   need another: create-cluster, updates and security-updates need restart,
   reboot needs security-updates, pooler-public needs pooler. Turning one off
   turns off what needs it.
@@ -557,7 +599,11 @@ clickhouse_setup() {
     return 0
   fi
   install -d -m 0755 "$_dropin"
-  if printf '# Written by the Rowsafe installer: this server runs ClickHouse.\n[Unit]\nAfter=clickhouse-server.service\n[Service]\nUser=rowsafe\nGroup=rowsafe\n' |
+  # The clickhouse group reads ClickHouse's data folder (never writes it):
+  # restores to any second copy each new part from there as it appears.
+  _groups=
+  getent group clickhouse >/dev/null 2>&1 && _groups='SupplementaryGroups=clickhouse\n'
+  if printf "# Written by the Rowsafe installer: this server runs ClickHouse.\n[Unit]\nAfter=clickhouse-server.service\n[Service]\nUser=rowsafe\nGroup=rowsafe\n${_groups}" |
     write_file "$_dropin/10-clickhouse.conf" 0644 root:root; then
     UNIT_CHANGED=1 CHANGED=1
   fi
@@ -654,11 +700,13 @@ mysql_setup() {
 # the server's socket; or with the administrator password on a terminal).
 mysql_account() {
   [ "$C_ENGINE" = mysql ] || [ "$C_ENGINE" = mariadb ] || return 0
-  [ ! -f "$STATE_DIR/engines/$C_ENGINE/account-$C_PORT.cnf" ] || return 0
+  _sb=''
+  ! mysql_standby_wanted || _sb=1
+  [ ! -f "$STATE_DIR/engines/$C_ENGINE/account-$C_PORT.cnf" ] || [ -n "$_sb" ] || return 0
   _sock=$C_SOCK
   [ "$_sock" != - ] || _sock=''
   if "$INSTALL_DIR/rowsafe-agent" setup mysql-account --engine "$C_ENGINE" --port "$C_PORT" ${_sock:+--socket "$_sock"} \
-    --owner "$AGENT_USER" --state-dir "$STATE_DIR" >"$TMP/account.log" 2>&1 </dev/null; then
+    --owner "$AGENT_USER" --state-dir "$STATE_DIR" ${_sb:+--standby} >"$TMP/account.log" 2>&1 </dev/null; then
     note "$(cat "$TMP/account.log")"
     return 0
   fi
@@ -673,10 +721,32 @@ mysql_account() {
   _pw=''
   _rc=0
   "$INSTALL_DIR/rowsafe-agent" setup mysql-account --engine "$C_ENGINE" --port "$C_PORT" ${_sock:+--socket "$_sock"} \
-    --owner "$AGENT_USER" --state-dir "$STATE_DIR" --admin-password-file "$TMP/adminpw" >"$TMP/account.log" 2>&1 </dev/null || _rc=$?
+    --owner "$AGENT_USER" --state-dir "$STATE_DIR" --admin-password-file "$TMP/adminpw" ${_sb:+--standby} >"$TMP/account.log" 2>&1 </dev/null || _rc=$?
   rm -f "$TMP/adminpw"
   if [ "$_rc" = 0 ]; then note "$(cat "$TMP/account.log")"; return 0; fi
   sed 's/^/    /' "$TMP/account.log" >&2
+  return 1
+}
+
+# mysql_standby_wanted: --mysql-standby, or yes to the question (asked once,
+# on a terminal).
+mysql_standby_wanted() {
+  case $MYSQL_STANDBY in
+    yes) return 0 ;;
+    no) return 1 ;;
+  esac
+  [ "$TTY" = 1 ] || return 1
+  say ""
+  note "Standby servers: Rowsafe can keep a second $(engine_label "$C_ENGINE") server in sync with this one (or this one with another),"
+  note "ready to take over. For that its $(engine_label "$C_ENGINE") account needs administrator rights, used only when someone adds,"
+  note "promotes or removes a standby in the dashboard and confirms."
+  if [ -n "$(pooler_allowed_ports)" ]; then
+    note "ProxySQL pools this server's $(engine_label "$C_ENGINE") (connection pooling): after a standby on another server is"
+    note "promoted, ProxySQL follows it only where root approved that server, with one command here:"
+    note "  sudo rowsafe-allow pooler-target STANDBY_ADDRESS PORT   (the Standby page shows the exact one)"
+  fi
+  if confirm "Allow standby servers with this server?" n; then MYSQL_STANDBY=yes; return 0; fi
+  MYSQL_STANDBY=no
   return 1
 }
 # <<< mysql
@@ -1064,9 +1134,10 @@ install_helper_script() {
   if write_file "$RESTART_HELPER" 0755 root:root <<'ROWSAFE_RESTART_HELPER_EOF'; then
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
-# rowsafe-pg-restart: restarts or stops PostgreSQL when a person asked
+# rowsafe-pg-restart: restarts or stops PostgreSQL (or the MySQL, MariaDB,
+# MongoDB or ClickHouse server Rowsafe protects) when a person asked
 # Rowsafe to (Restart in the dashboard, `rowsafe restart`; Rewind the whole
-# database, which stops PostgreSQL, swaps its data directory and starts it),
+# database, which stops the database, swaps its data and starts it),
 # and installs PostgreSQL updates, upgrades PostgreSQL, installs security
 # updates or reboots the server when a person clicked that and root allowed
 # it (update mode, below).
@@ -1122,6 +1193,17 @@ install_helper_script() {
 #   ID pg-upgrade-cleanup PORT               remove the version kept aside by an upgrade or undo
 #   ID security-updates                      install pending security updates
 #   ID reboot                                reboot the server
+#   ID db-minor-update PORT                  newest release of the series (8.0, 10.11, 7.0, 25.8)
+#                                            of the MySQL, MariaDB, MongoDB or ClickHouse server on PORT
+#   ID db-upgrade PORT SERIES                that server to a newer series (8.0 -> 8.4), keeping a copy
+#                                            of its data directory and its old packages for undo
+#   ID db-upgrade-undo PORT                  back to the kept data and packages (the newer data is kept aside)
+#   ID db-upgrade-cleanup PORT               delete what an upgrade or its undo kept
+#
+# db-* requests need the word "database" and act only on a port in
+# /etc/rowsafe/restart-allowed whose unit is one of those servers' units;
+# they install only that server's own packages (see db_patterns), already
+# installed ones, at the newest version of the installed series.
 #
 # Each needs its word in /etc/rowsafe/updates-allowed (root's, written by
 # the installer): "postgresql" for the pg-* requests, which also only act on
@@ -1150,8 +1232,22 @@ install_helper_script() {
 # from a file another process could write.
 #
 # The agent reads the next lines to know what this helper can do.
-# actions: restart stop start create-cluster files-read files-put
-# update-actions: pg-minor-update pg-install-major pg-upgrade pg-upgrade-undo pg-upgrade-cleanup security-updates reboot
+# MongoDB standbys: "ID mongodb-key-export PORT" copies the replica set's
+# key file of the MongoDB on PORT to /var/lib/rowsafe/restart/mongodb-key-out
+# (written as the agent user, which seals it to the standby server's agent);
+# "ID mongodb-standby-config PORT SETNAME key|nokey ADDR" makes the empty
+# MongoDB on PORT ready to join replica set SETNAME: it installs the key the
+# agent left in /var/lib/rowsafe/restart/mongodb-key-in (read as the agent
+# user, checked) as /etc/rowsafe/mongodb-standby-PORT.key, readable by
+# MongoDB only, and sets replication.replSetName, security.keyFile and (with
+# ADDR, an IP address) net.bindIp in its configuration file, keeping a copy
+# of the file as it was (CONFIG.rowsafe-backup). It restarts nothing: a
+# restart is a separate request a person confirmed. Both need PORT in
+# /etc/rowsafe/mongodb-standby-allowed ("PORT UNIT CONFIG", written by the
+# installer with --mongodb-standby).
+#
+# actions: restart stop start create-cluster files-read files-put mongodb-key-export mongodb-standby-config
+# update-actions: pg-minor-update pg-install-major pg-upgrade pg-upgrade-undo pg-upgrade-cleanup security-updates reboot db-minor-update db-upgrade db-upgrade-undo db-upgrade-cleanup
 #
 # The same helper manages PgBouncer when root allowed that (--allow-pooler):
 # see "PgBouncer" below.
@@ -1177,6 +1273,9 @@ agent_user=${ROWSAFE_AGENT_USER:-postgres}
 systemctl=${ROWSAFE_SYSTEMCTL:-systemctl}
 mode=${ROWSAFE_HELPER_MODE:-restart}
 min_interval=60
+
+mongo_allow=${ROWSAFE_MONGODB_STANDBY_ALLOW:-/etc/rowsafe/mongodb-standby-allowed}
+mongo_key_dir=${ROWSAFE_MONGODB_KEY_DIR:-/etc/rowsafe}
 
 log() { echo "rowsafe-pg-restart: $*" >&2; }
 
@@ -1613,11 +1712,18 @@ check_root_file() {
   esac
 }
 
+# db_unit_re: the database units a restart, stop or start may act on,
+# whatever the allow list says: Debian's PostgreSQL cluster units
+# (postgresql@MAJOR-NAME.service), and the units the MySQL, MariaDB,
+# MongoDB and ClickHouse packages install (mysql, mysqld, mariadb and their
+# @instance forms, mongod, mongodb, clickhouse-server).
+db_unit_re='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server)[.]service$'
+
 # allowed_unit PORT prints the unit the restart allow list names for PORT.
 allowed_unit() {
-  # Only Debian's cluster units (postgresql@MAJOR-NAME.service), whatever the
-  # file says; ports compare as strings.
-  awk -v p="$1" '$1 "" == p "" && $2 ~ /^postgresql@[0-9]+-[A-Za-z0-9_.-]+\.service$/ { print $2; exit }' "$allow"
+  # Only database units (db_unit_re), whatever the file says; ports compare
+  # as strings.
+  awk -v p="$1" -v re="$db_unit_re" '$1 "" == p "" && $2 ~ re { print $2; exit }' "$allow"
 }
 
 # created_unit PORT prints the unit of a cluster created for a fork on PORT
@@ -1626,6 +1732,108 @@ created_unit() {
   [ -f "$created" ] || [ -L "$created" ] || return 0
   check_root_file "$created" "$created is missing"
   awk -v p="$1" '$1 "" == p "" && $2 ~ /^postgresql@[0-9]+-[A-Za-z0-9_.-]+\.service$/ { print $2; exit }' "$created"
+}
+
+# ---------------------------------------------------------------- MongoDB standbys
+
+# mongo_allowed PORT sets m_unit and m_conf from the MongoDB standby allow
+# list, which only root can write.
+mongo_allowed() {
+  check_root_file "$mongo_allow" "making MongoDB a standby server is not allowed on this server (install Rowsafe there with --mongodb-standby)"
+  m_line=$(awk -v p="$1" '$1 "" == p "" { print $2 " " $3; exit }' "$mongo_allow")
+  [ -n "$m_line" ] || refuse "port $1 is not in $mongo_allow"
+  m_unit=${m_line%% *}
+  m_conf=${m_line#* }
+  printf '%s\n' "$m_unit" | grep -Eq '^(mongod|mongodb)(@[A-Za-z0-9_.-]+)?\.service$' || refuse "$m_unit is not a MongoDB unit"
+  case $m_conf in
+    /etc/*.conf | /etc/*.yaml | /etc/*.yml) ;;
+    *) refuse "$m_conf is not a MongoDB configuration file under /etc" ;;
+  esac
+  case $m_conf in *..*) refuse "$m_conf is not a plain path" ;; esac
+  check_root_file "$m_conf" "$m_conf is missing"
+}
+
+# yaml_get FILE SECTION KEY prints section.key of a block-style YAML file.
+yaml_get() {
+  awk -v s="$2" -v k="$3" '
+    /^[^[:space:]#]/ { insec = ($0 ~ "^" s ":[[:space:]]*(#.*)?$") ; next }
+    insec && $0 ~ "^[[:space:]]+" k ":" {
+      sub("^[[:space:]]+" k ":[[:space:]]*", ""); sub("[[:space:]]+#.*$", ""); gsub(/["\047]/, ""); print; exit
+    }' "$1"
+}
+
+# yaml_set FILE SECTION KEY VALUE sets section.key in place: it replaces the
+# key, or adds it at the end of the section with the section's own
+# indentation, or adds the section. Inline sections ({...}) are refused.
+yaml_set() {
+  if grep -Eq "^$2:[[:space:]]*[^[:space:]#]" "$1"; then
+    refuse "$1 writes $2 inline; Rowsafe only changes block-style sections"
+  fi
+  y_tmp=$(mktemp "$1.rowsafe.XXXXXX") || refuse "cannot write next to $1"
+  awk -v s="$2" -v k="$3" -v v="$4" '
+    function put() { if (!done) { print (ind == "" ? "  " : ind) k ": " v; done = 1 } }
+    /^[^[:space:]#]/ { if (insec) put(); insec = ($0 ~ "^" s ":[[:space:]]*(#.*)?$"); if (insec) seen = 1; print; next }
+    insec && /^[[:space:]]+[^[:space:]#]/ && ind == "" { match($0, /^[[:space:]]+/); ind = substr($0, 1, RLENGTH) }
+    insec && $0 ~ "^[[:space:]]+" k ":" { put(); next }
+    { print }
+    END { if (insec) put(); if (!seen) { print ""; print s ":"; print "  " k ": " v } }' "$1" >"$y_tmp" || refuse "cannot change $1"
+  cat "$y_tmp" >"$1"
+  rm -f "$y_tmp"
+}
+
+# mongo_user is the user the MongoDB unit runs as.
+mongo_user() {
+  m_user=$("$systemctl" show -p User --value "$m_unit" 2>/dev/null)
+  [ -n "$m_user" ] || m_user=mongodb
+  id -u "$m_user" >/dev/null 2>&1 || m_user=mongod
+  id -u "$m_user" >/dev/null 2>&1 || refuse "the user MongoDB runs as is unknown"
+}
+
+mongo_key_export() {
+  mongo_allowed "$1"
+  m_key=$(yaml_get "$m_conf" security keyFile)
+  [ -n "$m_key" ] || refuse "MongoDB on port $1 has no key file in $m_conf"
+  case $m_key in /*) ;; *) refuse "the key file path in $m_conf is not absolute" ;; esac
+  [ -f "$m_key" ] && [ ! -L "$m_key" ] || refuse "$m_key is not a plain file"
+  [ "$(stat -c %s "$m_key")" -le 1100 ] || refuse "$m_key is larger than a MongoDB key file"
+  tr -d 'A-Za-z0-9+/= \n\r\t' <"$m_key" | grep -q . && refuse "$m_key is not a MongoDB key file"
+  # shellcheck disable=SC2016 # $1 expands in the inner shell
+  as_agent sh -c 'umask 077; rm -f -- "$1"; cat >"$1"' rowsafe-pg-restart "$dir/mongodb-key-out" <"$m_key" ||
+    refuse "cannot hand the key file to the agent"
+  ok=1
+}
+
+mongo_standby_config() {
+  port=$1 m_set=$2 m_keyflag=$3 m_addr=$4
+  mongo_allowed "$port"
+  m_cur=$(yaml_get "$m_conf" replication replSetName)
+  [ -z "$m_cur" ] || [ "$m_cur" = "$m_set" ] || refuse "MongoDB on port $port already names replica set $m_cur"
+  [ -e "$m_conf.rowsafe-backup" ] || cp -p "$m_conf" "$m_conf.rowsafe-backup" || refuse "cannot keep a copy of $m_conf"
+  if [ "$m_keyflag" = key ]; then
+    # shellcheck disable=SC2016
+    m_keydata=$(as_agent sh -c 'if [ -f "$1" ] && [ ! -L "$1" ]; then head -c 1100 -- "$1"; fi; rm -f -- "$1"' rowsafe-pg-restart "$dir/mongodb-key-in" 2>/dev/null)
+    m_len=$(printf '%s' "$m_keydata" | tr -d ' \n\r\t' | wc -c)
+    [ "$m_len" -ge 6 ] && [ "$m_len" -le 1024 ] || refuse "the key the agent left is not a MongoDB key"
+    printf '%s' "$m_keydata" | tr -d 'A-Za-z0-9+/= \n\r\t' | grep -q . && refuse "the key the agent left is not a MongoDB key"
+    mongo_user
+    m_keyfile=$mongo_key_dir/mongodb-standby-$port.key
+    m_tmp=$(mktemp "$mongo_key_dir/.mongodb-key.XXXXXX") || refuse "cannot write in $mongo_key_dir"
+    printf '%s\n' "$m_keydata" >"$m_tmp"
+    chown "$m_user" "$m_tmp" && chmod 0400 "$m_tmp" && mv -f "$m_tmp" "$m_keyfile" || refuse "cannot install the key file"
+    yaml_set "$m_conf" security keyFile "$m_keyfile"
+  fi
+  yaml_set "$m_conf" replication replSetName "$m_set"
+  if [ "$m_addr" != - ]; then
+    m_bind=$(yaml_get "$m_conf" net bindIp)
+    [ -n "$m_bind" ] || m_bind=127.0.0.1
+    case ",$m_bind," in
+      *",$m_addr,"* | *,0.0.0.0,* | *,::,*) ;;
+      *) yaml_set "$m_conf" net bindIp "$m_bind,$m_addr" ;;
+    esac
+  fi
+  log "MongoDB on port $port: replica set $m_set, key $m_keyflag, address $m_addr in $m_conf (a copy of it as it was: $m_conf.rowsafe-backup)"
+  add config "$m_conf"
+  ok=1
 }
 
 # create_cluster PORT MAJOR NAME: a new cluster for a fork, through its own
@@ -1968,6 +2176,20 @@ restart_main() {
     rest=${line#* }
     action=${rest% *}
     port=${rest#* }
+  elif printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} mongodb-key-export [0-9]{1,5}$'; then
+    # shellcheck disable=SC2086 # split the checked request into its fields
+    set -- $line
+    id=$1 action=$2
+    mongo_key_export "$3"
+    answer
+    exit 0
+  elif printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} mongodb-standby-config [0-9]{1,5} [A-Za-z0-9_-]{1,64} (key|nokey) ([0-9.]{7,15}|[0-9a-fA-F:]{2,39}|-)$'; then
+    # shellcheck disable=SC2086
+    set -- $line
+    id=$1 action=$2
+    mongo_standby_config "$3" "$4" "$5" "$6"
+    answer
+    exit 0
   elif printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} create-cluster [1-9][0-9]{3,4} [1-9][0-9] [a-z][a-z0-9_]{0,39}$'; then
     id=${line%% *}
     action=create-cluster
@@ -1982,7 +2204,7 @@ restart_main() {
   # created-clusters; both must be files only root can change.
   unit=''
   if [ -f "$allow" ] || [ -L "$allow" ] || { [ ! -f "$created" ] && [ ! -L "$created" ]; }; then
-    check_root_file "$allow" "restarting or stopping PostgreSQL from Rowsafe is not allowed on this server"
+    check_root_file "$allow" "restarting or stopping the database from Rowsafe is not allowed on this server"
     unit=$(allowed_unit "$port")
   fi
   [ -n "$unit" ] || unit=$(created_unit "$port")
@@ -1995,7 +2217,7 @@ restart_main() {
     last=$(cat "$stamp" 2>/dev/null || echo 0)
     case $last in '' | *[!0-9]*) last=0 ;; esac
     if [ $((now - last)) -lt "$min_interval" ]; then
-      refuse "PostgreSQL ($unit) was restarted less than a minute ago; try again in a minute"
+      refuse "$unit was restarted less than a minute ago; try again in a minute"
     fi
     echo "$now" >"$stamp"
   fi
@@ -2452,13 +2674,16 @@ act_security_updates() {
   cooldown security-updates 300
   : >"$work_log"
   apt_refresh
-  # Upgrades of installed packages from a security origin. PostgreSQL's
-  # server packages are left for Update PostgreSQL, which saves a Mark,
-  # restarts in a controlled way and checks archiving.
+  # Upgrades of installed packages from a security origin. The database
+  # servers' own packages are left alone (their upgrade would restart them):
+  # PostgreSQL's go through Update PostgreSQL, which saves a Mark, restarts
+  # in a controlled way and checks archiving; MySQL's, MariaDB's, MongoDB's
+  # and ClickHouse's aren't installed from Rowsafe yet.
   list=$(apt-get -s -o Debug::NoLocking=1 dist-upgrade 2>/dev/null |
     awk '/^Inst [^ ]+ \[/ && /-security|Debian-Security/ { print $2 }' | sort -u)
-  held=$(printf '%s\n' "$list" | grep -E '^postgresql-[0-9]+(-.+)?$' | tr '\n' ' ')
-  pkgs=$(printf '%s\n' "$list" | grep -Ev '^postgresql-[0-9]+(-.+)?$' | grep . | tr '\n' ' ')
+  db_pkgs='^(postgresql-[0-9]+(-.+)?|mysql-server(-.+)?|mysql-community-server(-.+)?|percona-server-server(-.+)?|mariadb-server(-.+)?|mongodb-org-server|mongodb-org-mongos|clickhouse-server|clickhouse-common-static)$'
+  held=$(printf '%s\n' "$list" | grep -E "$db_pkgs" | tr '\n' ' ')
+  pkgs=$(printf '%s\n' "$list" | grep -Ev "$db_pkgs" | grep . | tr '\n' ' ')
   n=0
   if [ -n "$pkgs" ]; then
     log "installing security updates: $pkgs (request $id)"
@@ -2498,12 +2723,330 @@ act_reboot() {
   exit 0
 }
 
+# ---------------------------------------------------------------- other engines
+
+# db_engine sets db_engine and db_main (the installed server package) for
+# $unit, the allowed unit of $port.
+db_engine() {
+  case $unit in
+    mongod.service | mongodb.service)
+      db_engine=mongodb
+      set -- mongodb-org-server
+      ;;
+    clickhouse-server.service)
+      db_engine=clickhouse
+      set -- clickhouse-server
+      ;;
+    mysql.service | mysqld.service | mariadb.service | mysql@*.service | mysqld@*.service | mariadb@*.service)
+      if [ -n "$(pkg_version mariadb-server)" ]; then
+        db_engine=mariadb
+        set -- mariadb-server
+      else
+        db_engine=mysql
+        set -- mysql-community-server mysql-server-8.4 mysql-server-8.0 mysql-server percona-server-server
+      fi
+      ;;
+    *) refuse "$unit is not a MySQL, MariaDB, MongoDB or ClickHouse service" ;;
+  esac
+  db_main=''
+  for p in "$@"; do
+    if [ -n "$(pkg_version "$p")" ]; then
+      db_main=$p
+      break
+    fi
+  done
+  [ -n "$db_main" ] || refuse "the $db_engine server on port $port isn't installed from packages here"
+}
+
+# db_patterns sets the engine's packages: locked ones move only within the
+# installed series; free ones (tools versioned on their own) are upgraded
+# as they come.
+db_patterns() {
+  case $db_engine in
+    mysql) locked='mysql-community-* mysql-server* mysql-client* mysql-common percona-server-*' free='percona-xtrabackup-*' ;;
+    mariadb) locked='mariadb-* libmariadb3 libmariadbd19' free='' ;;
+    mongodb) locked='mongodb-org mongodb-org-*' free='mongodb-mongosh mongodb-database-tools' ;;
+    clickhouse) locked='clickhouse-*' free='' ;;
+  esac
+}
+
+# series VERSION prints the release series of a package version:
+# "1:10.11.9+maria~deb12" -> 10.11, "8.0.40-1debian12" -> 8.0.
+series() { printf '%s\n' "$1" | sed -E 's/^[0-9]+://' | sed -nE 's/^([0-9]+\.[0-9]+).*/\1/p'; }
+
+# newest_in PKG SERIES prints the newest available version of PKG in SERIES.
+newest_in() {
+  best=''
+  for v in $(apt-cache madison "$1" 2>/dev/null | awk -F'|' '{ gsub(/ /, "", $2); print $2 }'); do
+    [ "$(series "$v")" = "$2" ] || continue
+    if [ -z "$best" ] || dpkg --compare-versions "$v" gt "$best"; then best=$v; fi
+  done
+  printf '%s' "$best"
+}
+
+# db_port checks $port's allowed unit and sets unit, db_engine, db_main.
+db_port() {
+  check_root_file "$allow" "Rowsafe may not restart the database on this server, which updating it needs (allow it on the server with: sudo rowsafe-allow restart)"
+  unit=$(allowed_unit "$port")
+  [ -n "$unit" ] || refuse "port $port is not in $allow: Rowsafe may not restart it, which updating it needs"
+  case $unit in postgresql@*) refuse "port $port is PostgreSQL's: use the pg-* requests" ;; esac
+  db_engine
+  db_patterns
+}
+
+act_db_minor_update() {
+  update_allowed database "installing database updates from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
+  db_port
+  before=$(pkg_version "$db_main")
+  ser=$(series "$before")
+  [ -n "$ser" ] || refuse "can't tell the release series of $db_main $before"
+  : >"$work_log"
+  t0=$(active_since "$unit")
+  was_active=0
+  "$systemctl" is-active --quiet "$unit" 2>/dev/null && was_active=1
+  apt_refresh
+  specs='' pkgs=''
+  for pat in $locked; do
+    for p in $(installed_pkgs "$pat"); do
+      case " $pkgs " in *" $p "*) continue ;; esac
+      v=$(newest_in "$p" "$ser")
+      [ -n "$v" ] || continue # not of this series (a shared library, a tool)
+      pkgs="$pkgs $p"
+      if dpkg --compare-versions "$v" gt "$(pkg_version "$p")"; then specs="$specs $p=$v"; fi
+    done
+  done
+  for pat in $free; do
+    for p in $(installed_pkgs "$pat"); do pkgs="$pkgs $p" specs="$specs $p"; done
+  done
+  if [ -n "$specs" ]; then
+    log "updating $db_engine $ser:$specs (request $id)"
+    # shellcheck disable=SC2086 # package specs built above from dpkg and apt
+    apt_run install -y --only-upgrade $specs || refuse "installing the update failed: $(tail_log)"
+  fi
+  after=$(pkg_version "$db_main")
+  add engine "$db_engine"
+  add series "$ser"
+  add from_package "$before"
+  add package "$after"
+  add packages "$pkgs"
+  restarted=0
+  if [ "$after" != "$before" ] && [ "$was_active" = 1 ]; then
+    if [ "$(active_since "$unit")" = "$t0" ]; then
+      # The packages didn't restart it: start the new binaries now.
+      out=$(timeout 300 "$systemctl" restart "$unit" 2>&1 </dev/null) ||
+        refuse "the update is installed, but restarting $unit failed: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
+    fi
+    restarted=1
+  fi
+  add restarted "$restarted"
+  ok=1
+  log "$db_engine on port $port: $before -> $after (restarted: $restarted)"
+}
+
+# db_datadir sets datadir, the data directory of the server on $port, from
+# the server's own configuration (never from the request), and checks it:
+# a real directory owned by the unit's own user, not a system directory.
+db_datadir() {
+  case $db_engine in
+    mysql | mariadb) datadir=$(my_print_defaults --mysqld 2>/dev/null | sed -n 's/^--datadir=//p' | tail -n 1) ;;
+    mongodb) datadir=$(awk '/^[[:space:]]*dbPath:/ { sub(/^[[:space:]]*dbPath:[[:space:]]*/, ""); gsub(/["\047]/, ""); print; exit }' /etc/mongod.conf 2>/dev/null) ;;
+    clickhouse) datadir=$(clickhouse extract-from-config --config-file /etc/clickhouse-server/config.xml --key path 2>/dev/null) ;;
+  esac
+  [ -n "$datadir" ] || case $db_engine in
+    mysql | mariadb) datadir=/var/lib/mysql ;;
+    mongodb) datadir=/var/lib/mongodb ;;
+    clickhouse) datadir=/var/lib/clickhouse ;;
+  esac
+  datadir=${datadir%/}
+  case $datadir in /*) ;; *) refuse "the data directory \"$datadir\" is not an absolute path" ;; esac
+  [ "$(realpath -e -- "$datadir" 2>/dev/null)" = "$datadir" ] || refuse "the data directory $datadir is missing or its path goes through a symbolic link"
+  case $datadir in
+    / | /etc | /etc/* | /usr | /usr/* | /var | /var/lib | /var/log | /home | /root | /root/* | /boot | /boot/* | \
+      /bin | /bin/* | /sbin | /sbin/* | /lib | /lib/* | /lib64 | /lib64/* | /proc | /proc/* | /sys | /sys/* | /dev | /dev/* | /run | /tmp | /opt | /srv | /mnt | /media | \
+      /var/lib/rowsafe | /var/lib/rowsafe/* | "$state" | "$state"/*)
+      refuse "the data directory $datadir is a system directory"
+      ;;
+  esac
+  svc_user=$("$systemctl" show -p User --value "$unit" 2>/dev/null)
+  owner=$(stat -c %U -- "$datadir")
+  [ -n "$svc_user" ] && [ "$owner" = "$svc_user" ] && [ "$owner" != root ] ||
+    refuse "the data directory $datadir isn't owned by $unit's user (${svc_user:-none})"
+}
+
+# db_stop / db_start stop and start the server, waiting for systemd.
+db_stop() { timeout 300 "$systemctl" stop "$unit" >>"$work_log" 2>&1 </dev/null; }
+db_start() {
+  "$systemctl" is-active --quiet "$unit" 2>/dev/null && return 0
+  timeout 600 "$systemctl" start "$unit" >>"$work_log" 2>&1 </dev/null
+}
+
+# db_restore_data FROM puts FROM's entries back into the data directory,
+# setting the current ones aside in $rec/after-<time> (renames on the same
+# filesystem, a copy otherwise).
+db_restore_data() {
+  aside=$rec/after-$(date -u +%Y%m%dT%H%M%SZ)
+  mkdir -p "$aside" || return 1
+  for e_ in "$datadir"/* "$datadir"/.[!.]* "$datadir"/..?*; do
+    [ -e "$e_" ] || [ -L "$e_" ] || continue
+    mv -f -- "$e_" "$aside"/ || return 1
+  done
+  cp -a --reflink=auto -- "$1"/. "$datadir"/ || return 1
+}
+
+act_db_upgrade() {
+  update_allowed database "upgrading the database from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
+  db_port
+  db_datadir
+  before=$(pkg_version "$db_main")
+  from=$(series "$before")
+  dpkg --compare-versions "$series_to" gt "$from" || refuse "$db_engine $series_to is not newer than $from"
+  rec=$state/dbupgrade-$port
+  [ ! -e "$rec" ] || refuse "an earlier upgrade of port $port is still kept: undo it or delete it first"
+  : >"$work_log"
+  apt_refresh
+  # The target versions, and the installed ones (kept as packages for undo).
+  specs='' olds=''
+  for pat in $locked; do
+    for p in $(installed_pkgs "$pat"); do
+      case " $olds " in *" $p="*) continue ;; esac
+      [ "$(series "$(pkg_version "$p")")" = "$from" ] || continue # not of this series (a shared library)
+      v=$(newest_in "$p" "$series_to")
+      [ -n "$v" ] || continue
+      olds="$olds $p=$(pkg_version "$p")"
+      specs="$specs $p=$v"
+    done
+  done
+  case " $specs " in *" $db_main="*) ;; *) refuse "this server's package sources don't offer $db_engine $series_to (add the vendor's repository for it first)" ;; esac
+  for pat in $free; do
+    for p in $(installed_pkgs "$pat"); do specs="$specs $p"; done
+  done
+  mkdir -m 0700 "$rec" && mkdir "$rec/debs" "$rec/data" || refuse "can't create $rec"
+  # Undo needs the installed packages again: download them now.
+  # shellcheck disable=SC2086 # package=version specs from dpkg and apt
+  (cd "$rec/debs" && apt_run download $olds) || {
+    rm -rf "$rec"
+    refuse "the installed packages ($before) can't be downloaded again, so the upgrade couldn't be undone; nothing changed"
+  }
+  need=$(du -sk -- "$datadir" | awk '{ print $1 }')
+  free=$(df -Pk -- "$rec" | awk 'NR == 2 { print $4 }')
+  if [ "${need:-0}" -gt 0 ] && [ "$((need + need / 10 + 262144))" -gt "${free:-0}" ]; then
+    rm -rf "$rec"
+    refuse "not enough free disk to keep a copy of the data for undo: $((need / 1024)) MB needed, $((free / 1024)) MB free"
+  fi
+  {
+    echo "engine=$db_engine"
+    echo "unit=$unit"
+    echo "datadir=$datadir"
+    echo "from_package=$before"
+    echo "from_series=$from"
+    echo "to_series=$series_to"
+    echo "status=in_progress"
+    echo "created_at=$(date +%s)"
+  } >"$rec/record"
+  log "upgrading $db_engine on port $port from $from to $series_to (request $id)"
+  t_stop=$(date +%s)
+  db_stop || {
+    db_start
+    rm -rf "$rec"
+    refuse "stopping $unit failed: $(tail_log)"
+  }
+  if ! cp -a --reflink=auto -- "$datadir"/. "$rec/data"/; then
+    db_start
+    rm -rf "$rec"
+    refuse "copying the data directory for undo failed; $db_engine runs as before"
+  fi
+  # shellcheck disable=SC2086
+  if ! apt_timeout=3600 apt_run install -y $specs; then
+    err_=$(tail_log)
+    db_rollback_upgrade
+    refuse "installing $db_engine $series_to failed ($err_); $db_engine $from runs again"
+  fi
+  if ! db_start; then
+    err_=$(tail_log)
+    db_rollback_upgrade
+    refuse "$db_engine $series_to didn't start ($err_); $db_engine $from runs again on its data"
+  fi
+  if [ "$db_engine" = mariadb ]; then
+    command -v mariadb-upgrade >/dev/null 2>&1 && timeout 3600 mariadb-upgrade >>"$work_log" 2>&1 </dev/null ||
+      log "mariadb-upgrade: $(tail_log)"
+  fi
+  after=$(pkg_version "$db_main")
+  sed -i 's/^status=.*/status=upgraded/' "$rec/record"
+  echo "to_package=$after" >>"$rec/record"
+  add engine "$db_engine"
+  add from_package "$before"
+  add package "$after"
+  add packages "$specs"
+  add datadir "$datadir"
+  add kept_bytes "$((need * 1024))"
+  add downtime_seconds "$(($(date +%s) - t_stop))"
+  ok=1
+}
+
+# db_rollback_upgrade puts the copied data and the old packages back and
+# starts the server (an upgrade that failed half-way, or an undo).
+db_rollback_upgrade() {
+  db_stop || true
+  db_restore_data "$rec/data" || log "putting the data back failed: the copy is in $rec/data"
+  # shellcheck disable=SC2086
+  apt_timeout=3600 apt_run install -y --allow-downgrades "$rec"/debs/*.deb || log "reinstalling the old packages failed: $(tail_log)"
+  db_start || log "starting $unit again failed: $(tail_log)"
+}
+
+# db_record PORT reads the record of the upgrade kept for PORT.
+db_record() {
+  rec=$state/dbupgrade-$1
+  [ -f "$rec/record" ] || refuse "no upgrade of port $1 is kept"
+  r_() { awk -F= -v k="$1" '$1 == k { print substr($0, length(k) + 2); exit }' "$rec/record"; }
+}
+
+act_db_upgrade_undo() {
+  update_allowed database "upgrading the database from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
+  db_port
+  db_record "$port"
+  [ "$(r_ status)" = upgraded ] || refuse "the upgrade of port $port was undone already"
+  [ "$(r_ unit)" = "$unit" ] || refuse "port $port runs as $unit now, not $(r_ unit) as when it was upgraded"
+  db_datadir
+  [ "$(r_ datadir)" = "$datadir" ] || refuse "the data directory is now $datadir, not $(r_ datadir) as when it was upgraded"
+  : >"$work_log"
+  t_stop=$(date +%s)
+  log "undoing the upgrade of $db_engine on port $port (request $id)"
+  db_stop || refuse "stopping $unit failed: $(tail_log)"
+  db_restore_data "$rec/data" || {
+    db_start
+    refuse "putting the old data back failed: $(tail_log)"
+  }
+  rm -rf "$rec/data"
+  # shellcheck disable=SC2086
+  apt_timeout=3600 apt_run install -y --allow-downgrades "$rec"/debs/*.deb || refuse "reinstalling $db_engine $(r_ from_series) failed: $(tail_log)"
+  db_start || refuse "$db_engine $(r_ from_series) didn't start: $(tail_log)"
+  sed -i 's/^status=.*/status=undone/' "$rec/record"
+  add engine "$db_engine"
+  add package "$(pkg_version "$db_main")"
+  add downtime_seconds "$(($(date +%s) - t_stop))"
+  ok=1
+}
+
+act_db_upgrade_cleanup() {
+  update_allowed database "upgrading the database from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
+  rec=$state/dbupgrade-$port
+  [ -d "$rec" ] || {
+    add freed_bytes 0
+    ok=1
+    return 0
+  }
+  freed=$(du -sk -- "$rec" | awk '{ print $1 * 1024 }')
+  rm -rf -- "$rec"
+  add freed_bytes "$freed"
+  ok=1
+}
+
 update_main() {
   result_name=update-result
   have_request "$dir/update-request" || exit 0
   mkdir -p "$state"
   line=$(read_request "$dir/update-request")
-  port='' major='' method='' start=''
+  port='' major='' method='' start='' series_to=''
   # Every request's exact shape; anything else is refused before it is split.
   rid='[A-Za-z0-9_-]{1,64}'
   if printf '%s\n' "$line" | grep -Eq "^$rid (pg-minor-update|pg-upgrade-cleanup) [0-9]{1,5}\$"; then
@@ -2522,6 +3065,14 @@ update_main() {
     # shellcheck disable=SC2086
     set -- $line
     id=$1 action=$2 port=$3 major=$4 method=$5
+  elif printf '%s\n' "$line" | grep -Eq "^$rid db-upgrade [0-9]{1,5} [1-9][0-9]{0,2}\.[0-9]{1,2}\$"; then
+    # shellcheck disable=SC2086
+    set -- $line
+    id=$1 action=$2 port=$3 series_to=$4
+  elif printf '%s\n' "$line" | grep -Eq "^$rid (db-minor-update|db-upgrade-undo|db-upgrade-cleanup) [0-9]{1,5}\$"; then
+    # shellcheck disable=SC2086
+    set -- $line
+    id=$1 action=$2 port=$3
   elif printf '%s\n' "$line" | grep -Eq "^$rid (security-updates|reboot)\$"; then
     id=${line%% *} action=${line#* }
   else
@@ -2535,6 +3086,10 @@ update_main() {
     pg-upgrade-cleanup) act_pg_upgrade_cleanup ;;
     security-updates) act_security_updates ;;
     reboot) act_reboot ;;
+    db-minor-update) act_db_minor_update ;;
+    db-upgrade) act_db_upgrade ;;
+    db-upgrade-undo) act_db_upgrade_undo ;;
+    db-upgrade-cleanup) act_db_upgrade_cleanup ;;
   esac
   answer
 }
@@ -2547,6 +3102,24 @@ esac
 ROWSAFE_RESTART_HELPER_EOF
     HELPER_CHANGED=1
   fi
+}
+
+# agent_user_dropin UNIT gives a helper UNIT the agent's user when it isn't
+# postgres (MySQL: mysql; MongoDB, ClickHouse: rowsafe): the helper reads
+# and removes requests with that user's privileges. Returns 0 when the
+# drop-in changed.
+agent_user_dropin() {
+  _dd=/etc/systemd/system/$1.d
+  _df=$_dd/10-agent-user.conf
+  if [ "$AGENT_USER" = postgres ]; then
+    [ -e "$_df" ] || return 1
+    rm -f "$_df"
+    rmdir "$_dd" 2>/dev/null || true
+    return 0
+  fi
+  install -d -m 0755 -o root -g root "$_dd"
+  printf '# Written by the Rowsafe installer: the agent runs as %s on this server.\n[Service]\nEnvironment=ROWSAFE_AGENT_USER=%s\n' \
+    "$AGENT_USER" "$AGENT_USER" | write_file "$_df" 0644 root:root
 }
 
 install_restart_helper() {
@@ -2632,6 +3205,7 @@ WantedBy=multi-user.target
 ROWSAFE_RESTART_PATH_EOF
     _changed=1
   fi
+  if agent_user_dropin rowsafe-pg-restart.service; then _changed=1; fi
   if systemd_running; then
     [ "$_changed" = 0 ] || systemctl daemon-reload
     systemctl enable --now --quiet rowsafe-pg-restart.path
@@ -2647,6 +3221,8 @@ remove_restart_helper() {
     systemctl disable --now --quiet rowsafe-pg-restart.path 2>/dev/null || true
   fi
   rm -f "$RESTART_PATH_FILE" "$RESTART_SERVICE_FILE"
+  rm -f /etc/systemd/system/rowsafe-pg-restart.service.d/10-agent-user.conf
+  rmdir /etc/systemd/system/rowsafe-pg-restart.service.d 2>/dev/null || true
   [ -e "$POOLER_PATH_FILE" ] || [ -e "$FILES_PATH_FILE" ] || rm -f "$RESTART_HELPER" # PgBouncer or files still use it
   rmdir "${RESTART_HELPER%/*}" 2>/dev/null || true
   if systemd_running; then systemctl daemon-reload; fi
@@ -2660,13 +3236,21 @@ restart_pairs() {
     return 0
   fi
   [ -s "$TMP/clusters" ] || return 0
-  awk -F '\t' '($14 == "" || $14 == "postgresql") && $1 ~ /^[1-9][0-9]*$/ && $12 ~ /^postgresql@[0-9]+-[A-Za-z0-9_.-]+\.service$/ { print $1, $12 }' "$TMP/clusters"
+  awk -F '\t' -v re="$DB_UNIT_RE" '$1 ~ /^[1-9][0-9]*$/ && $12 ~ re &&
+    (($14 == "" || $14 == "-" || $14 == "postgresql") == ($12 ~ /^postgresql@/)) { print $1, $12 }' "$TMP/clusters"
 }
 
 # root_restart_pairs prints "PORT UNIT" for the clusters root finds itself
 # (pg_lsclusters, Debian's postgresql@MAJOR-NAME units), where the agent's
 # discovery didn't run (--permissions; root never needs the agent for it).
 root_restart_pairs() {
+  if [ "$HOST_ENGINE" != postgresql ]; then
+    # MySQL, MariaDB, MongoDB, ClickHouse: the agent's own discovery (as the
+    # agent user), only the units the restart helper accepts.
+    agent_run setup discover 2>/dev/null |
+      awk -F '\t' -v re="$DB_UNIT_RE" '$1 ~ /^[1-9][0-9]*$/ && $12 ~ re && $12 !~ /^postgresql@/ { print $1, $12 }'
+    return 0
+  fi
   have pg_lsclusters || return 0
   pg_lsclusters -h 2>/dev/null |
     awk '$1 ~ /^[0-9]+$/ && $2 ~ /^[A-Za-z0-9_.-]+$/ && $3 ~ /^[1-9][0-9]*$/ { print $3, "postgresql@" $1 "-" $2 ".service" }'
@@ -2680,11 +3264,11 @@ restart_allowed() {
 allow_restarts() {
   _pairs=$(restart_pairs)
   if [ -z "$_pairs" ]; then
-    warn "found no systemd service running PostgreSQL here, so restarting or stopping it from Rowsafe stays off"
+    warn "found no systemd service running $(engine_label) here, so restarting or stopping it from Rowsafe stays off"
     return 0
   fi
   {
-    echo "# PostgreSQL clusters Rowsafe may restart or stop when someone asks"
+    echo "# Databases ($(engine_label)) Rowsafe may restart or stop when someone asks"
     echo "# (Restart and Rewind in the dashboard, \`rowsafe restart\`), only when they"
     echo "# confirm. Written by the installer (root); turn this off with:"
     echo "# sudo rowsafe-allow --remove restart"
@@ -2692,7 +3276,7 @@ allow_restarts() {
     printf '%s\n' "$_pairs"
   } | write_file "$RESTART_ALLOW_FILE" 0644 root:root || true
   install_restart_helper
-  perm_ok "Rowsafe may restart or stop PostgreSQL when you ask (Restart, Rewind), only when someone confirms"
+  perm_ok "Rowsafe may restart or stop $(engine_label) when you ask (Restart, Rewind), only when someone confirms"
 }
 
 disallow_restarts() {
@@ -2700,7 +3284,7 @@ disallow_restarts() {
   rm -f "$UPDATES_ALLOW_FILE" # updates need the helper too
   if [ -d "$CONFIG_DIR" ]; then
     {
-      echo "# Restarting or stopping PostgreSQL from Rowsafe is off on this server."
+      echo "# Restarting or stopping the database from Rowsafe is off on this server."
       echo "# Turn it on with: sudo rowsafe-allow restart"
     } | write_file "$RESTART_ALLOW_FILE" 0644 root:root || true
   fi
@@ -2713,7 +3297,7 @@ restart_access() {
     yes) allow_restarts ;;
     no)
       disallow_restarts
-      perm_ok "restarting or stopping PostgreSQL from Rowsafe is off"
+      perm_ok "restarting or stopping $(engine_label) from Rowsafe is off"
       ;;
     *)
       if [ -f "$RESTART_ALLOW_FILE" ]; then
@@ -2721,11 +3305,11 @@ restart_access() {
         return 0
       fi
       [ "$TTY" = 1 ] && [ -n "$(restart_pairs)" ] || return 0
-      if perm_ask "Restart or stop PostgreSQL, when someone clicks Restart or Rewind?" y; then
+      if perm_ask "Restart or stop $(engine_label), when someone clicks Restart or Rewind?" y; then
         allow_restarts
       else
         disallow_restarts
-        perm_note "OK: Rowsafe can't restart or stop PostgreSQL"
+        perm_note "OK: Rowsafe can't restart or stop $(engine_label)"
       fi
       ;;
   esac
@@ -3018,6 +3602,7 @@ WantedBy=multi-user.target
 ROWSAFE_UPDATE_PATH_EOF
     _changed=1
   fi
+  if agent_user_dropin rowsafe-pg-update.service; then _changed=1; fi
   if systemd_running; then
     [ "$_changed" = 0 ] || systemctl daemon-reload
     systemctl enable --now --quiet rowsafe-pg-update.path
@@ -3031,7 +3616,8 @@ remove_update_units() {
   if systemd_running; then
     systemctl disable --now --quiet rowsafe-pg-update.path 2>/dev/null || true
   fi
-  rm -f "$UPDATE_PATH_FILE" "$UPDATE_SERVICE_FILE"
+  rm -f "$UPDATE_PATH_FILE" "$UPDATE_SERVICE_FILE" /etc/systemd/system/rowsafe-pg-update.service.d/10-agent-user.conf
+  rmdir /etc/systemd/system/rowsafe-pg-update.service.d 2>/dev/null || true
   if systemd_running; then systemctl daemon-reload; fi
 }
 
@@ -3073,7 +3659,11 @@ update_access() {
   if [ ! -f "$UPDATES_ALLOW_FILE" ] && [ "$TTY" = 1 ] && { [ -z "$ALLOW_UPDATES" ] || [ -z "$ALLOW_SECURITY" ]; }; then
     perm_intro
   fi
-  _pg=$(decide_update "$ALLOW_UPDATES" postgresql "Install PostgreSQL updates and upgrades, when someone clicks Update? A Mark is saved first." y)
+  # PostgreSQL's word is postgresql; MySQL's, MariaDB's, MongoDB's and
+  # ClickHouse's is database (the helper's db-* requests).
+  _uw=postgresql
+  [ "$HOST_ENGINE" = postgresql ] || _uw=database
+  _pg=$(decide_update "$ALLOW_UPDATES" "$_uw" "Install $(engine_label) updates and upgrades, when someone clicks Update? A Mark is saved first." y)
   _sec=$(decide_update "$ALLOW_SECURITY" security "Install this server's security updates, when someone clicks Install?" n)
   _reboot=no
   if [ "$_sec" = yes ]; then
@@ -3086,8 +3676,14 @@ update_access() {
     echo "# the dashboard and confirms. Written by the installer (root); change it"
     echo "# with sudo rowsafe-allow updates (security-updates, reboot), and"
     echo "# sudo rowsafe-allow --remove updates (...)."
-    [ "$_pg" != yes ] || echo "postgresql   # PostgreSQL minor updates and major upgrades (clusters in restart-allowed)"
-    [ "$_sec" != yes ] || echo "security     # security updates (PostgreSQL's own packages excepted)"
+    if [ "$_pg" = yes ]; then
+      if [ "$_uw" = postgresql ]; then
+        echo "postgresql   # PostgreSQL minor updates and major upgrades (clusters in restart-allowed)"
+      else
+        echo "database     # $(engine_label) updates and upgrades (the servers in restart-allowed)"
+      fi
+    fi
+    [ "$_sec" != yes ] || echo "security     # security updates (the database servers' own packages excepted)"
     [ "$_reboot" != yes ] || echo "reboot       # rebooting the server"
   } | write_file "$UPDATES_ALLOW_FILE" 0644 root:root || true
   if [ "$_pg$_sec$_reboot" = nonono ]; then
@@ -3096,9 +3692,187 @@ update_access() {
     return 0
   fi
   install_update_units
-  [ "$_pg" != yes ] || perm_ok "Rowsafe may install PostgreSQL updates and upgrade PostgreSQL when you click Update or Upgrade and confirm"
+  [ "$_pg" != yes ] || perm_ok "Rowsafe may install $(engine_label) updates and upgrade $(engine_label) when you click Update or Upgrade and confirm"
   [ "$_sec" != yes ] || perm_ok "Rowsafe may install security updates when you click Install and confirm"
   [ "$_reboot" != yes ] || perm_ok "Rowsafe may reboot this server when you click Reboot and confirm"
+}
+
+# ------------------------------------------------------------------ tuning
+
+# With root's permission (--allow-tuning, or yes at the question), a person
+# can change MongoDB's or ClickHouse's settings from Tuning in the
+# dashboard. The agent (unprivileged) writes a request to $TUNING_DIR;
+# rowsafe-tuning.path starts rowsafe-tuning.service, which runs root's copy
+# of the agent ($PERMISSIONS_HELPER tuning-apply). It accepts only a fixed
+# list of settings with plain numbers or fixed words, and writes only
+# ClickHouse's config.d/rowsafe-tuning.xml and users.d/rowsafe-tuning.xml,
+# or those settings' keys in the MongoDB configuration file listed in
+# $TUNING_ALLOW_FILE (a copy kept first; MongoDB reads it when it starts).
+
+# mongodb_config_file prints mongod's configuration file (from its systemd
+# unit, else /etc/mongod.conf), nothing when there is none.
+mongodb_config_file() {
+  _mc=''
+  if have systemctl; then
+    _mc=$(systemctl show -p ExecStart --value mongod 2>/dev/null | tr ' ;' '\n\n' | awk 'p { print; exit } /^(--config|-f)$/ { p = 1 } /^--config=/ { sub(/^--config=/, ""); print; exit }')
+  fi
+  [ -n "$_mc" ] || _mc=/etc/mongod.conf
+  case $_mc in /*) ;; *) return 0 ;; esac
+  [ -f "$_mc" ] && [ ! -L "$_mc" ] && printf '%s\n' "$_mc"
+}
+
+# tuning_target prints the allow file's line for this server.
+tuning_target() {
+  case $HOST_ENGINE in
+    mongodb) _t=$(mongodb_config_file) && [ -n "$_t" ] && echo "mongodb $_t" ;;
+    clickhouse) [ -f /etc/clickhouse-server/config.xml ] && echo "clickhouse /etc/clickhouse-server" ;;
+  esac
+}
+
+install_tuning_helper() {
+  [ -x "$PERMISSIONS_HELPER" ] || install_permissions_helper
+  [ -x "$PERMISSIONS_HELPER" ] || { warn "Tuning needs root's copy of the agent ($PERMISSIONS_HELPER); run the installer again"; return 1; }
+  as_agent mkdir -p -m 0700 "$TUNING_DIR"
+  _where=$(awk 'NF == 2 && $1 !~ /^#/ { print $2; exit }' "$TUNING_ALLOW_FILE" 2>/dev/null)
+  [ -n "$_where" ] || return 1
+  _rw=$_where
+  case $HOST_ENGINE in
+    clickhouse)
+      install -d -m 0755 -o root -g root "$_where/config.d" "$_where/users.d"
+      _rw="$_where/config.d $_where/users.d"
+      ;;
+    *) _rw=${_where%/*} ;;
+  esac
+  _changed=0
+  if sed -e "s/@AGENT_USER@/$AGENT_USER/" -e "s|@READ_WRITE@|$_rw|" <<'ROWSAFE_TUNING_SERVICE_EOF' | write_file "$TUNING_SERVICE_FILE" 0644 root:root; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-tuning.service: writes the MongoDB or ClickHouse settings a person
+# changed in Rowsafe (Tuning) into Rowsafe's own files, only where root
+# allowed it (/etc/rowsafe/tuning-allowed, sudo rowsafe-allow tuning).
+# Started by rowsafe-tuning.path; installed by https://rowsafe.sh/install.
+
+[Unit]
+Description=Rowsafe: write the database settings a person changed (Tuning)
+Documentation=https://rowsafe.sh/docs/guides/tuning
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/rowsafe/rowsafe-permissions tuning-apply
+Environment=ROWSAFE_AGENT_USER=@AGENT_USER@
+TimeoutStartSec=2min
+RuntimeDirectory=rowsafe-tuning
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+StateDirectory=rowsafe-tuning
+StateDirectoryMode=0700
+UMask=0022
+# It writes only the settings files root listed, and its own state.
+ProtectSystem=strict
+ReadWritePaths=@READ_WRITE@
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+ROWSAFE_TUNING_SERVICE_EOF
+    _changed=1
+  fi
+  if write_file "$TUNING_PATH_FILE" 0644 root:root <<'ROWSAFE_TUNING_PATH_EOF'; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-tuning.path: starts rowsafe-tuning.service when the Rowsafe agent
+# hands over a settings change (Tuning). Installed by
+# https://rowsafe.sh/install only when root allowed it (--allow-tuning).
+
+[Unit]
+Description=Rowsafe: watch for database settings changes (Tuning)
+
+[Path]
+PathExists=/var/lib/rowsafe/tuning/request
+Unit=rowsafe-tuning.service
+
+[Install]
+WantedBy=multi-user.target
+ROWSAFE_TUNING_PATH_EOF
+    _changed=1
+  fi
+  if systemd_running; then
+    [ "$_changed" = 0 ] || systemctl daemon-reload
+    systemctl enable --now --quiet rowsafe-tuning.path
+  fi
+}
+
+remove_tuning_helper() {
+  [ -e "$TUNING_PATH_FILE" ] || [ -e "$TUNING_SERVICE_FILE" ] || return 0
+  if systemd_running; then systemctl disable --now --quiet rowsafe-tuning.path 2>/dev/null || true; fi
+  rm -f "$TUNING_PATH_FILE" "$TUNING_SERVICE_FILE"
+  rm -rf /run/rowsafe-tuning
+  if systemd_running; then systemctl daemon-reload; fi
+}
+
+allow_tuning() {
+  _why=$(perm_why tuning)
+  if [ -n "$_why" ]; then
+    warn "Tuning stays off for Rowsafe: $_why"
+    return 0
+  fi
+  {
+    echo "# The settings files Rowsafe may write when someone changes settings under"
+    echo "# Tuning (only its own: ClickHouse's config.d and users.d rowsafe-tuning.xml,"
+    echo "# or a few keys of MongoDB's configuration file). Written by the installer"
+    echo "# (root); turn this off with: sudo rowsafe-allow --remove tuning"
+    echo "# ENGINE PATH"
+    tuning_target
+  } | write_file "$TUNING_ALLOW_FILE" 0644 root:root || true
+  install_tuning_helper || return 0
+  perm_ok "Rowsafe may change $(engine_label)'s settings when you ask (Tuning), only in its own files"
+}
+
+disallow_tuning() {
+  remove_tuning_helper
+  if [ -d "$CONFIG_DIR" ]; then
+    {
+      echo "# Changing database settings from Rowsafe (Tuning) is off."
+      echo "# Turn it on with: sudo rowsafe-allow tuning"
+    } | write_file "$TUNING_ALLOW_FILE" 0644 root:root || true
+  fi
+}
+
+# tuning_access applies --allow-tuning / --no-allow-tuning, or asks once on
+# a terminal (default no) where it applies (MongoDB, ClickHouse).
+tuning_access() {
+  case $ALLOW_TUNING in
+    yes) allow_tuning ;;
+    no)
+      disallow_tuning
+      perm_ok "changing $(engine_label)'s settings from Rowsafe is off"
+      ;;
+    *)
+      [ -z "$(perm_why tuning)" ] || return 0
+      if [ "$(perm_state tuning)" = yes ]; then
+        install_tuning_helper || true
+        return 0
+      fi
+      [ -f "$TUNING_ALLOW_FILE" ] && return 0 # a no, kept
+      [ "$TTY" = 1 ] || return 0
+      if perm_ask "Let Rowsafe change $(engine_label)'s settings when someone picks them under Tuning? It writes only its own settings file." n; then
+        allow_tuning
+      else
+        disallow_tuning
+        perm_note "OK: Rowsafe won't change $(engine_label)'s settings"
+      fi
+      ;;
+  esac
 }
 
 # ---------------------------------------------------------------- firewall
@@ -3117,7 +3891,7 @@ install_firewall_helper() {
   if write_file "$FIREWALL_HELPER" 0755 root:root <<'ROWSAFE_FIREWALL_HELPER_EOF'; then
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
-# rowsafe-firewall: lets only chosen addresses reach PostgreSQL's port, when
+# rowsafe-firewall: lets only chosen addresses reach a database's port, when
 # a person asked Rowsafe to (Security in the dashboard) and root allowed it
 # for that port.
 #
@@ -3142,7 +3916,7 @@ install_firewall_helper() {
 # socket of the postgres user listens on it.
 #
 # Rules live in one nftables table of Rowsafe's own, "inet rowsafe", which
-# matches only the allowed PostgreSQL ports: connections to such a port
+# matches only the allowed database ports: connections to such a port
 # from anywhere but the allowed addresses and the server itself are
 # dropped; SSH and every other port are never touched. The whole table is
 # replaced in one nft transaction, checked with nft -c first. Ports that
@@ -3170,6 +3944,9 @@ out_dir=${RUNTIME_DIRECTORY:-/run/rowsafe-firewall}
 allow=${ROWSAFE_FIREWALL_ALLOW:-/etc/rowsafe/firewall-allowed}
 state=${STATE_DIRECTORY:-/var/lib/rowsafe-firewall}
 agent_user=${ROWSAFE_AGENT_USER:-postgres}
+# The users database servers run as (PostgreSQL's is the agent's own): a
+# port is only accepted while one of them listens on it.
+db_users=${ROWSAFE_DB_USERS:-"$agent_user postgres mysql mongodb mongod clickhouse"}
 nft=${ROWSAFE_NFT:-nft}
 ss=${ROWSAFE_SS:-ss}
 sshd=${ROWSAFE_SSHD:-sshd}
@@ -3369,9 +4146,13 @@ rollback() {
 }
 
 if [ "$action" = apply ]; then
-  uid=$(id -u "$agent_user" 2>/dev/null) || refuse "no $agent_user user"
-  listen_ports "$uid" | grep -qx "$port" ||
-    refuse "no PostgreSQL of the $agent_user user listens on port $port here (a port Docker publishes bypasses this firewall: limit it in the compose file instead)"
+  db_listens=0
+  for u in $db_users; do
+    uid=$(id -u "$u" 2>/dev/null) || continue
+    if listen_ports "$uid" | grep -qx "$port"; then db_listens=1; fi
+  done
+  [ "$db_listens" = 1 ] ||
+    refuse "no database server (PostgreSQL, MySQL, MariaDB, MongoDB or ClickHouse) listens on port $port here (a port Docker publishes bypasses this firewall: limit it in the compose file instead)"
   addrs=$(read_agent_file "$dir/addresses" 4096 | head -n 33)
   n=0
   : >"$state/new-$port"
@@ -3593,14 +4374,18 @@ ssh_port_here() {
   } | awk -v p="$1" '$1 "" == p "" { f = 1 } END { exit !f }'
 }
 
-# firewall_ports prints the TCP ports PostgreSQL listens on, found by root
-# itself (pg_lsclusters, and the agent user's listening sockets), never
-# taken from the agent: 1024 to 65535, never one sshd uses.
+# firewall_ports prints the TCP ports database servers listen on, found by
+# root itself (pg_lsclusters, and the listening sockets of the agent user and
+# of the users MySQL, MariaDB, MongoDB and ClickHouse run as), never taken
+# from the agent: 1024 to 65535, never one sshd uses.
 firewall_ports() {
   {
     if command -v pg_lsclusters >/dev/null 2>&1; then pg_lsclusters -h 2>/dev/null | awk '{ print $3 }'; fi
-    if _uid=$(id -u "$AGENT_USER" 2>/dev/null) && command -v ss >/dev/null 2>&1; then
-      ss -ltnHe 2>/dev/null | awk -v u="$_uid" 'index($0, " uid:" u " ") { n = split($4, a, ":"); print a[n] }'
+    if command -v ss >/dev/null 2>&1; then
+      for _u in "$AGENT_USER" postgres mysql mongodb mongod clickhouse; do
+        _uid=$(id -u "$_u" 2>/dev/null) || continue
+        ss -ltnHe 2>/dev/null | awk -v u="$_uid" 'index($0, " uid:" u " ") { n = split($4, a, ":"); print a[n] }'
+      done
     fi
   } | grep -Ex '[1-9][0-9]{3,4}' | awk '$1 >= 1024 && $1 <= 65535' | sort -un | while read -r _p; do
     ssh_port_here "$_p" || echo "$_p"
@@ -3616,7 +4401,7 @@ firewall_listed() {
 # write_firewall_allow PORTS...: the allow list, written by root.
 write_firewall_allow() {
   {
-    echo "# PostgreSQL ports whose firewall rule Rowsafe may set when someone asks"
+    echo "# Database ports whose firewall rule Rowsafe may set when someone asks"
     echo "# (Security in the dashboard): only the chosen addresses may reach the"
     echo "# port. SSH and other ports are never touched. Written by the installer"
     echo "# (root); turn this off with: sudo rowsafe-allow --remove firewall"
@@ -3627,19 +4412,19 @@ write_firewall_allow() {
 
 allow_firewall() {
   if ! command -v nft >/dev/null 2>&1; then
-    warn "nftables isn't installed here (no nft command), so limiting who can reach PostgreSQL stays off. Install it (e.g. apt install nftables), then: sudo rowsafe-allow firewall"
+    warn "nftables isn't installed here (no nft command), so limiting who can reach $(engine_label) stays off. Install it (e.g. apt install nftables), then: sudo rowsafe-allow firewall"
     return 0
   fi
   _ports=$(firewall_ports)
   _listed=$(firewall_listed)
   if [ -z "$_ports$_listed" ]; then
-    warn "found no PostgreSQL listening here, so the firewall stays off for Rowsafe"
+    warn "found no database server listening here, so the firewall stays off for Rowsafe"
     return 0
   fi
   # shellcheck disable=SC2086 # one port per word
   write_firewall_allow $_listed $_ports
   install_firewall_helper
-  perm_ok "Rowsafe may limit who can reach PostgreSQL's port ($(firewall_listed | paste -sd, - | sed 's/,/, /g')) when you ask (Security), never SSH or other ports"
+  perm_ok "Rowsafe may limit who can reach $(engine_label)'s port ($(firewall_listed | paste -sd, - | sed 's/,/, /g')) when you ask (Security), never SSH or other ports"
 }
 
 disallow_firewall() {
@@ -3660,14 +4445,14 @@ firewall_access() {
     yes) allow_firewall ;;
     no)
       disallow_firewall
-      perm_ok "limiting who can reach PostgreSQL with the firewall is off for Rowsafe"
+      perm_ok "limiting who can reach $(engine_label) with the firewall is off for Rowsafe"
       ;;
     *)
       if [ -n "$(firewall_listed)" ]; then
         install_firewall_helper
         _new=$(firewall_ports | grep -vxF "$(firewall_listed)" || true)
         [ -n "$_new" ] && [ "$TTY" = 1 ] || return 0
-        if perm_ask "PostgreSQL also listens on port $(printf '%s' "$_new" | paste -sd, - | sed 's/,/, /g'). Allow Rowsafe's firewall rule for it too?" n; then
+        if perm_ask "$(engine_label) also listens on port $(printf '%s' "$_new" | paste -sd, - | sed 's/,/, /g'). Allow Rowsafe's firewall rule for it too?" n; then
           # shellcheck disable=SC2046 # one port per word
           write_firewall_allow $(firewall_listed) $_new
         fi
@@ -3677,7 +4462,7 @@ firewall_access() {
       [ "$TTY" = 1 ] && command -v nft >/dev/null 2>&1 || return 0
       _ports=$(firewall_ports)
       [ -n "$_ports" ] || return 0
-      if perm_ask "Limit who can reach PostgreSQL (port $(printf '%s' "$_ports" | paste -sd, - | sed 's/,/, /g')) with the firewall, when someone picks the addresses? SSH and other ports are never touched." n; then
+      if perm_ask "Limit who can reach $(engine_label) (port $(printf '%s' "$_ports" | paste -sd, - | sed 's/,/, /g')) with the firewall, when someone picks the addresses? SSH and other ports are never touched." n; then
         allow_firewall
       else
         disallow_firewall
@@ -3855,11 +4640,236 @@ remove_pooler_units() {
   if systemd_running; then systemctl daemon-reload; fi
 }
 
+# pooler_name: PgBouncer in front of PostgreSQL, ProxySQL in front of MySQL
+# and MariaDB.
+pooler_name() {
+  case $HOST_ENGINE in mysql | mariadb) echo ProxySQL ;; clickhouse) echo chproxy ;; *) echo PgBouncer ;; esac
+}
+
+# install_pooler_units_for_engine installs the engine's pooling helper.
+install_pooler_units_for_engine() {
+  case $HOST_ENGINE in
+    mysql | mariadb) install_proxysql_units ;;
+    clickhouse) install_chproxy_units ;;
+    *) install_pooler_units ;;
+  esac
+}
+
+# ProxySQL (MySQL, MariaDB): root's copy of the agent ($PERMISSIONS_HELPER
+# proxysql-apply) installs and configures it when the agent asks
+# ($POOLER_DIR/proxysql-request), only for ports in $POOLER_ALLOW_FILE.
+PROXYSQL_SERVICE_FILE=/etc/systemd/system/rowsafe-proxysql.service
+PROXYSQL_PATH_FILE=/etc/systemd/system/rowsafe-proxysql.path
+
+# pooler_target_ok ADDRESS:PORT: an IPv4 or IPv6 address, or a host name,
+# and a port (IPv6 in brackets: [fd00::6]:3306).
+pooler_target_ok() {
+  _pt_host=${1%:*} _pt_port=${1##*:}
+  _pt_host=${_pt_host#[} _pt_host=${_pt_host%]}
+  case $_pt_port in '' | *[!0-9]* | 0*) return 1 ;; esac
+  [ "${#_pt_port}" -le 5 ] && [ "$_pt_port" -ge 1 ] && [ "$_pt_port" -le 65535 ] || return 1
+  printf '%s\n' "$_pt_host" | grep -Eqx '[0-9]{1,3}(\.[0-9]{1,3}){3}|[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*|[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?'
+}
+
+# pooler_target_change applies --allow-pooler-target / --no-allow-pooler-
+# target: the "target ADDRESS PORT" lines that let ProxySQL send
+# connections to another server (the primary after a standby's promotion).
+pooler_target_change() {
+  case $HOST_ENGINE in mysql | mariadb) ;; *) perm_refuse "pooler-target is for ProxySQL, in front of MySQL or MariaDB" ;; esac
+  [ -n "$(pooler_allowed_ports)" ] || perm_refuse "pooling isn't allowed on this server: allow it first (sudo rowsafe-allow pooler)"
+  _pt=${POOLER_TARGET_ADD:-$POOLER_TARGET_DEL}
+  _pt_host=${_pt%:*} _pt_port=${_pt##*:}
+  _pt_host=${_pt_host#[} _pt_host=${_pt_host%]}
+  _line="target $_pt_host $_pt_port"
+  _rest=$(grep -vxF "$_line" "$POOLER_ALLOW_FILE" || true)
+  if [ -n "$POOLER_TARGET_ADD" ]; then
+    printf '%s\n%s\n' "$_rest" "$_line" | awk 'NF' | write_file "$POOLER_ALLOW_FILE" 0644 root:root || true
+    perm_ok "ProxySQL may send connections to $_pt_host port $_pt_port (after a standby's promotion)"
+  else
+    printf '%s\n' "$_rest" | awk 'NF' | write_file "$POOLER_ALLOW_FILE" 0644 root:root || true
+    perm_ok "ProxySQL no longer sends connections to $_pt_host port $_pt_port"
+  fi
+}
+
+install_proxysql_units() {
+  [ -x "$PERMISSIONS_HELPER" ] || install_permissions_helper
+  [ -x "$PERMISSIONS_HELPER" ] || { warn "pooling needs root's copy of the agent ($PERMISSIONS_HELPER); run the installer again"; return 0; }
+  as_agent mkdir -p -m 0700 "$POOLER_DIR"
+  _changed=0
+  if sed "s/@AGENT_USER@/$AGENT_USER/" <<'ROWSAFE_PROXYSQL_SERVICE_EOF' | write_file "$PROXYSQL_SERVICE_FILE" 0644 root:root; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-proxysql.service: installs, configures, points or turns off
+# ProxySQL (connection pooling for MySQL and MariaDB) when someone turned
+# pooling on or off in Rowsafe, only for the ports root allowed
+# (/etc/rowsafe/pooler-allowed, sudo rowsafe-allow pooler). Started by
+# rowsafe-proxysql.path; installed by https://rowsafe.sh/install.
+
+[Unit]
+Description=Rowsafe: manage ProxySQL (connection pooling), on request
+Documentation=https://rowsafe.sh/docs/guides/connection-pooling
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/rowsafe/rowsafe-permissions proxysql-apply
+Environment=ROWSAFE_AGENT_USER=@AGENT_USER@
+TimeoutStartSec=15min
+RuntimeDirectory=rowsafe-proxysql
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+StateDirectory=rowsafe-proxysql
+StateDirectoryMode=0700
+UMask=0022
+# It installs a package (apt) and starts a service: no file system
+# sandbox, but no new privileges and no kernel changes.
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+ROWSAFE_PROXYSQL_SERVICE_EOF
+    _changed=1
+  fi
+  if write_file "$PROXYSQL_PATH_FILE" 0644 root:root <<'ROWSAFE_PROXYSQL_PATH_EOF'; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-proxysql.path: starts rowsafe-proxysql.service when the Rowsafe
+# agent asks for a pooling change. Installed by https://rowsafe.sh/install
+# only when root allowed pooling (--allow-pooler).
+
+[Unit]
+Description=Rowsafe: watch for connection pooling requests (ProxySQL)
+
+[Path]
+PathExists=/var/lib/rowsafe/pooler/proxysql-request
+Unit=rowsafe-proxysql.service
+
+[Install]
+WantedBy=multi-user.target
+ROWSAFE_PROXYSQL_PATH_EOF
+    _changed=1
+  fi
+  if systemd_running; then
+    [ "$_changed" = 0 ] || systemctl daemon-reload
+    systemctl enable --now --quiet rowsafe-proxysql.path
+  fi
+}
+
+remove_proxysql_units() {
+  [ -e "$PROXYSQL_PATH_FILE" ] || [ -e "$PROXYSQL_SERVICE_FILE" ] || return 0
+  if systemd_running; then systemctl disable --now --quiet rowsafe-proxysql.path 2>/dev/null || true; fi
+  rm -f "$PROXYSQL_PATH_FILE" "$PROXYSQL_SERVICE_FILE"
+  if systemd_running; then systemctl daemon-reload; fi
+}
+
+# chproxy (ClickHouse): root's copy of the agent ($PERMISSIONS_HELPER
+# chproxy-apply) installs chproxy (its release, checked against the SHA-256
+# the agent pins) and runs it as rowsafe-chproxy.service when the agent asks
+# ($POOLER_DIR/chproxy-request), only for ports in $POOLER_ALLOW_FILE.
+CHPROXY_SERVICE_FILE=/etc/systemd/system/rowsafe-chproxy-apply.service
+CHPROXY_PATH_FILE=/etc/systemd/system/rowsafe-chproxy-apply.path
+
+install_chproxy_units() {
+  [ -x "$PERMISSIONS_HELPER" ] || install_permissions_helper
+  [ -x "$PERMISSIONS_HELPER" ] || { warn "pooling needs root's copy of the agent ($PERMISSIONS_HELPER); run the installer again"; return 0; }
+  as_agent mkdir -p -m 0700 "$POOLER_DIR"
+  _changed=0
+  if sed "s/@AGENT_USER@/$AGENT_USER/" <<'ROWSAFE_CHPROXY_SERVICE_EOF' | write_file "$CHPROXY_SERVICE_FILE" 0644 root:root; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-chproxy-apply.service: installs, configures, points or turns off
+# chproxy (connection pooling for ClickHouse's HTTP interface) when someone
+# turned pooling on or off in Rowsafe, only for the ports root allowed
+# (/etc/rowsafe/pooler-allowed, sudo rowsafe-allow pooler). chproxy itself
+# runs as rowsafe-chproxy.service. Started by rowsafe-chproxy-apply.path;
+# installed by https://rowsafe.sh/install.
+
+[Unit]
+Description=Rowsafe: manage chproxy (connection pooling), on request
+Documentation=https://rowsafe.sh/docs/guides/connection-pooling
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/rowsafe/rowsafe-permissions chproxy-apply
+Environment=ROWSAFE_AGENT_USER=@AGENT_USER@
+TimeoutStartSec=15min
+RuntimeDirectory=rowsafe-chproxy-apply
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+StateDirectory=rowsafe-chproxy-apply
+StateDirectoryMode=0700
+UMask=0022
+# It downloads chproxy, writes its unit and starts it: no file system
+# sandbox, but no new privileges and no kernel changes.
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+ROWSAFE_CHPROXY_SERVICE_EOF
+    _changed=1
+  fi
+  if write_file "$CHPROXY_PATH_FILE" 0644 root:root <<'ROWSAFE_CHPROXY_PATH_EOF'; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-chproxy-apply.path: starts rowsafe-chproxy-apply.service when the
+# Rowsafe agent asks for a pooling change. Installed by
+# https://rowsafe.sh/install only when root allowed pooling (--allow-pooler).
+
+[Unit]
+Description=Rowsafe: watch for connection pooling requests (chproxy)
+
+[Path]
+PathExists=/var/lib/rowsafe/pooler/chproxy-request
+Unit=rowsafe-chproxy-apply.service
+
+[Install]
+WantedBy=multi-user.target
+ROWSAFE_CHPROXY_PATH_EOF
+    _changed=1
+  fi
+  if systemd_running; then
+    [ "$_changed" = 0 ] || systemctl daemon-reload
+    systemctl enable --now --quiet rowsafe-chproxy-apply.path
+  fi
+}
+
+remove_chproxy_units() {
+  [ -e "$CHPROXY_PATH_FILE" ] || [ -e "$CHPROXY_SERVICE_FILE" ] || return 0
+  if systemd_running; then systemctl disable --now --quiet rowsafe-chproxy-apply.path 2>/dev/null || true; fi
+  rm -f "$CHPROXY_PATH_FILE" "$CHPROXY_SERVICE_FILE"
+  if systemd_running; then systemctl daemon-reload; fi
+}
+
 # pooler_ports prints the ports of this server's PostgreSQL clusters, found
 # by root: pg_lsclusters (Debian and Ubuntu), else the TCP ports that
 # processes of the agent user listen on. Never the agent's own discovery:
 # the agent user owns the agent's binary.
 pooler_ports() {
+  case $HOST_ENGINE in
+    mysql | mariadb) # ProxySQL: the ports mysqld or mariadbd (the mysql user) listen on
+      _uid=$(id -u mysql 2>/dev/null) || return 0
+      have ss || return 0
+      ss -Hltne 2>/dev/null | awk -v u="uid:$_uid" '{ for (i = 1; i <= NF; i++) if ($i == u) { n = split($4, a, ":"); print a[n] } }' |
+        awk '$1 ~ /^[0-9]+$/ && $1 != 33060' | sort -un
+      return 0
+      ;;
+    clickhouse) # chproxy: ClickHouse's HTTP port (http_port; chproxy covers HTTP only)
+      if have clickhouse; then
+        clickhouse extract-from-config --config-file=/etc/clickhouse-server/config.xml --key=http_port 2>/dev/null |
+          awk '$1 ~ /^[0-9]+$/ && $1 > 0 && $1 < 65536 { print $1 }' | sort -un
+      fi
+      return 0
+      ;;
+  esac
   if have pg_lsclusters; then
     pg_lsclusters -h 2>/dev/null | awk '$3 ~ /^[0-9]+$/ && $3 > 0 && $3 < 65536 { print $3 }' | sort -un
     return 0
@@ -3878,14 +4888,16 @@ pooler_allowed_ports() {
 # write_pooler_allow PORTS PUBLIC writes the allow list.
 write_pooler_allow() {
   {
-    echo "# PostgreSQL clusters Rowsafe may put PgBouncer (connection pooling) in"
+    echo "# Database ports Rowsafe may put $(pooler_name) (connection pooling) in"
     echo "# front of, when someone turns pooling on in Rowsafe and confirms."
     echo "# Written by the installer (root); turn this off with:"
-    echo "# sudo rowsafe-allow --remove pooler. \"public\": PgBouncer may listen"
+    echo "# sudo rowsafe-allow --remove pooler. \"public\": the pooler may listen"
     echo "# on every address (sudo rowsafe-allow pooler-public)."
     echo "# PORT"
     printf '%s\n' "$1"
     if [ "$2" = 1 ]; then echo public; fi
+    # Other servers ProxySQL may send connections to (rowsafe-allow pooler-target).
+    grep -s '^target ' "$POOLER_ALLOW_FILE" || true
   } | write_file "$POOLER_ALLOW_FILE" 0644 root:root || true
 }
 
@@ -3894,14 +4906,14 @@ write_pooler_allow() {
 allow_pooler() {
   _ports=$(printf '%s\n%s\n' "$(pooler_allowed_ports)" "$(pooler_ports)" | awk 'NF' | sort -un)
   if [ -z "$_ports" ]; then
-    warn "found no PostgreSQL here, so managing PgBouncer from Rowsafe stays off"
+    warn "found no database server here, so managing $(pooler_name) from Rowsafe stays off"
     return 0
   fi
   _public=$(pooler_public_wanted)
   write_pooler_allow "$_ports" "$_public"
-  install_pooler_units
-  perm_ok "Rowsafe may install and manage PgBouncer when you turn pooling on, only when someone confirms"
-  if [ "$_public" = 1 ]; then perm_note "PgBouncer may listen on public addresses when someone chooses that: put a firewall in front of it."; fi
+  install_pooler_units_for_engine
+  perm_ok "Rowsafe may install and manage $(pooler_name) when you turn pooling on, only when someone confirms"
+  if [ "$_public" = 1 ]; then perm_note "$(pooler_name) may listen on public addresses when someone chooses that: put a firewall in front of it."; fi
 }
 
 # pooler_public_wanted prints 1 when PgBouncer may listen on every address:
@@ -3923,7 +4935,7 @@ refresh_pooler() {
   for _newport in $(pooler_ports); do
     printf '%s\n' "$_have" | grep -qx "$_newport" && continue
     # (confirm uses $_p itself.)
-    if [ "$TTY" = 1 ] && perm_ask "Also allow PgBouncer for the PostgreSQL on port $_newport?" n; then
+    if [ "$TTY" = 1 ] && perm_ask "Also allow $(pooler_name) for the $(engine_label) on port $_newport?" n; then
       _ports=$(printf '%s\n%s\n' "$_ports" "$_newport" | awk 'NF' | sort -un)
     fi
   done
@@ -3933,16 +4945,21 @@ refresh_pooler() {
   if [ "$_ports" != "$_have" ] || [ "$_public" != "$_was_public" ]; then
     write_pooler_allow "$_ports" "$_public"
   fi
-  install_pooler_units
+  install_pooler_units_for_engine
 }
 
 disallow_pooler() {
   remove_pooler_units
+  remove_proxysql_units
+  remove_chproxy_units
   if [ -d "$CONFIG_DIR" ]; then
     {
-      echo "# Managing PgBouncer from Rowsafe is off on this server."
+      echo "# Managing the connection pooler from Rowsafe is off on this server."
       echo "# Turn it on with: sudo rowsafe-allow pooler"
     } | write_file "$POOLER_ALLOW_FILE" 0644 root:root || true
+  fi
+  if [ -f /etc/systemd/system/rowsafe-chproxy.service ]; then
+    perm_note "chproxy set up by Rowsafe keeps running for your apps; Rowsafe can no longer change it or turn it off (sudo systemctl disable --now rowsafe-chproxy)."
   fi
   if [ -f /etc/pgbouncer/pgbouncer.ini ] && [ "$(head -n 1 /etc/pgbouncer/pgbouncer.ini)" = ';; Managed by Rowsafe' ]; then
     perm_note "PgBouncer set up by Rowsafe keeps running for your apps; Rowsafe can no longer change it or turn it off."
@@ -3956,7 +4973,7 @@ pooler_access() {
     yes) allow_pooler ;;
     no)
       disallow_pooler
-      perm_ok "managing PgBouncer from Rowsafe is off"
+      perm_ok "managing $(pooler_name) from Rowsafe is off"
       ;;
     *)
       if [ -f "$POOLER_ALLOW_FILE" ]; then
@@ -3964,11 +4981,11 @@ pooler_access() {
         return 0
       fi
       [ "$TTY" = 1 ] && [ -n "$(pooler_ports)" ] || return 0
-      if perm_ask "Install and manage PgBouncer (connection pooling), when someone turns pooling on? Nothing is installed now." y; then
+      if perm_ask "Install and manage $(pooler_name) (connection pooling), when someone turns pooling on? Nothing is installed now." y; then
         allow_pooler
       else
         disallow_pooler
-        perm_note "OK: Rowsafe won't install or manage PgBouncer"
+        perm_note "OK: Rowsafe won't install or manage $(pooler_name)"
       fi
       ;;
   esac
@@ -4437,7 +5454,7 @@ remove_files_units() {
 # changing. The output ends with what Rowsafe may do now, then (exit 1 or
 # 2) the reason in one "error: ..." line.
 
-PERMISSIONS="restart create-cluster updates security-updates reboot pooler pooler-public firewall"
+PERMISSIONS="restart create-cluster updates security-updates reboot pooler pooler-public firewall tuning"
 PERM_QUIET=0 # 1: the summary says it all (the questions on a terminal, --permissions)
 PERM_INTRO=0 # 1 once the questions' heading is shown
 
@@ -4480,6 +5497,7 @@ perm_var() {
     pooler) echo ALLOW_POOLER ;;
     pooler-public) echo ALLOW_POOLER_PUBLIC ;;
     firewall) echo ALLOW_FIREWALL ;;
+    tuning) echo ALLOW_TUNING ;;
     *) return 1 ;;
   esac
 }
@@ -4497,14 +5515,15 @@ perm_need() {
 
 perm_desc() {
   case $1 in
-    restart) echo "restart or stop PostgreSQL (Restart, Rewind)" ;;
+    restart) echo "restart or stop $(engine_label) (Restart, Rewind)" ;;
     create-cluster) echo "create a PostgreSQL cluster for a fork" ;;
-    updates) echo "install PostgreSQL updates and upgrades" ;;
+    updates) echo "install $(engine_label) updates and upgrades" ;;
     security-updates) echo "install this server's security updates" ;;
     reboot) echo "reboot this server (after an update)" ;;
     pooler) echo "install and manage PgBouncer (pooling)" ;;
     pooler-public) echo "let PgBouncer listen on public addresses" ;;
-    firewall) echo "limit who can reach PostgreSQL (firewall)" ;;
+    firewall) echo "limit who can reach the database (firewall)" ;;
+    tuning) echo "change MongoDB's or ClickHouse's settings (Tuning)" ;;
   esac
 }
 
@@ -4516,14 +5535,16 @@ perm_state() {
     create-cluster) _sf=$CREATE_ALLOW_FILE ;;
     pooler | pooler-public) _sf=$POOLER_ALLOW_FILE ;;
     firewall) _sf=$FIREWALL_ALLOW_FILE ;;
+    tuning) _sf=$TUNING_ALLOW_FILE ;;
     *) _sf=$UPDATES_ALLOW_FILE ;;
   esac
   [ -f "$_sf" ] || return 0
   case $1 in
     restart | pooler | firewall) _sy=$(grep -c '^[1-9]' "$_sf" || true) ;;
+    tuning) _sy=$(grep -Ec '^(mongodb|clickhouse) /' "$_sf" || true) ;;
     create-cluster) _sy=$(grep -c '^ports ' "$_sf" || true) ;;
     pooler-public) _sy=$(grep -qs '^[1-9]' "$_sf" && grep -cx public "$_sf" || true) ;;
-    updates) _sy=$(grep -c '^postgresql\([[:space:]#]\|$\)' "$_sf" || true) ;;
+    updates) _sy=$(grep -c '^\(postgresql\|database\)\([[:space:]#]\|$\)' "$_sf" || true) ;;
     security-updates) _sy=$(grep -c '^security\([[:space:]#]\|$\)' "$_sf" || true) ;;
     reboot) _sy=$(grep -c '^reboot\([[:space:]#]\|$\)' "$_sf" || true) ;;
   esac
@@ -4541,20 +5562,48 @@ perm_has_postgres() {
 # can). The agent reports the same reasons.
 perm_why() {
   if [ "$HOST_ENGINE" != postgresql ] || ! perm_has_postgres; then
-    echo "Rowsafe does this for PostgreSQL, and there is no PostgreSQL on this server"
-    return 0
+    # Another engine (or none yet): restarts, the server's own updates, the
+    # firewall and tuning work for every engine, pooling for MySQL,
+    # MariaDB (ProxySQL) and ClickHouse (chproxy); the rest is PostgreSQL's.
+    case $1 in
+      restart)
+        [ -n "$(restart_pairs)" ] || echo "found no $(engine_label) service (systemd) on this server"
+        return 0
+        ;;
+      updates | security-updates | reboot)
+        have apt-get || echo "Rowsafe installs updates with apt (Debian and Ubuntu)"
+        return 0
+        ;;
+      firewall | tuning) ;; # every engine's port; MongoDB's and ClickHouse's settings
+      pooler | pooler-public) case $HOST_ENGINE in mysql | mariadb | clickhouse) ;; *)
+        echo "Rowsafe pools PostgreSQL (PgBouncer), MySQL or MariaDB (ProxySQL) and ClickHouse (chproxy), and none is on this server"
+        return 0
+        ;;
+      esac ;;
+      *)
+        echo "Rowsafe does this for PostgreSQL, and there is no PostgreSQL on this server"
+        return 0
+        ;;
+    esac
   fi
   _w=''
   case $1 in
     restart) [ -n "$(restart_pairs)" ] || _w="found no PostgreSQL service (systemd) on this server" ;;
     create-cluster) have pg_createcluster || _w="pg_createcluster isn't installed (Debian and Ubuntu's postgresql-common)" ;;
     updates | security-updates | reboot) have apt-get || _w="Rowsafe installs updates with apt (Debian and Ubuntu)" ;;
-    pooler | pooler-public) [ -n "$(pooler_ports)$(pooler_allowed_ports)" ] || _w="found no PostgreSQL cluster here" ;;
+    pooler | pooler-public) [ -n "$(pooler_ports)$(pooler_allowed_ports)" ] || _w="found no $(engine_label) here" ;;
+    tuning)
+      case $HOST_ENGINE in
+        mongodb) [ -n "$(mongodb_config_file)" ] || _w="found no MongoDB configuration file (/etc/mongod.conf)" ;;
+        clickhouse) [ -f /etc/clickhouse-server/config.xml ] || _w="found no ClickHouse configuration (/etc/clickhouse-server)" ;;
+        *) _w="Rowsafe changes $(engine_label)'s settings without it" ;;
+      esac
+      ;;
     firewall)
       if ! have nft; then
         _w="nftables isn't installed (apt install nftables)"
       elif [ -z "$(firewall_ports)$(firewall_listed)" ]; then
-        _w="found no PostgreSQL listening here"
+        _w="found no database server listening here"
       fi
       ;;
   esac
@@ -4604,10 +5653,12 @@ perm_cascade() {
 # perm_summary prints what Rowsafe may do here now, and how to change it.
 perm_summary() {
   say ""
-  if [ "$HOST_ENGINE" != postgresql ] || ! perm_has_postgres; then
+  _any=''
+  for _p in $PERMISSIONS; do [ -n "$(perm_why "$_p")" ] || _any=1; done
+  if [ -z "$_any" ] && { [ "$HOST_ENGINE" != postgresql ] || ! perm_has_postgres; }; then
     step "What Rowsafe may do on $(uname -n)"
-    note "Nothing to allow: these permissions are for PostgreSQL (restart it, install"
-    note "its updates, PgBouncer, the firewall), and there is no PostgreSQL here."
+    note "Nothing to allow here: none of these permissions apply to this server"
+    note "(no database service under systemd, no apt, no nftables)."
     return 0
   fi
   step "What Rowsafe may do on $(uname -n), only when someone clicks it and confirms"
@@ -4666,7 +5717,7 @@ installer=/usr/local/lib/rowsafe/install.sh
 helper=/usr/local/lib/rowsafe/rowsafe-permissions
 owners=/etc/rowsafe/owners
 update='curl -fsSL https://rowsafe.sh | sudo sh'
-names='restart create-cluster updates security-updates reboot pooler pooler-public firewall'
+names='restart create-cluster updates security-updates reboot pooler pooler-public firewall tuning'
 
 usage() {
   cat <<'EOF'
@@ -4692,7 +5743,13 @@ Names:
   reboot             reboot this server after an update (needs security-updates)
   pooler             install and manage PgBouncer (connection pooling)
   pooler-public      let PgBouncer listen on public addresses (needs pooler)
-  firewall           limit who can reach PostgreSQL's port (never SSH or other ports)
+  firewall           limit who can reach the database's port (never SSH or other ports)
+  tuning             change MongoDB's or ClickHouse's settings, in Rowsafe's own file
+
+  sudo rowsafe-allow pooler-target ADDRESS PORT
+                           let ProxySQL send connections to the MySQL on another
+                           server (the new primary after a standby's promotion)
+  sudo rowsafe-allow --remove pooler-target ADDRESS PORT   stop that
 
 Turning one off also turns off what needs it.
 EOF
@@ -4817,6 +5874,26 @@ case ${1:-} in
     ;;
 esac
 
+# pooler-target ADDRESS PORT (ProxySQL may send connections to another server).
+case "${1:-} ${2:-}" in
+  "pooler-target "* | "--remove pooler-target")
+    _flag=--allow-pooler-target
+    if [ "$1" = --remove ]; then
+      _flag=--no-allow-pooler-target
+      shift
+    fi
+    [ $# = 3 ] || fail "use: sudo rowsafe-allow pooler-target ADDRESS PORT, e.g. sudo rowsafe-allow pooler-target 10.0.0.6 3306" 2
+    printf '%s\n' "$2" | grep -Eqx '[0-9]{1,3}(\.[0-9]{1,3}){3}|[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*|[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?' ||
+      fail "'$2' isn't an address: give the other server's IP address or host name" 2
+    case $3 in '' | *[!0-9]* | 0*) fail "'$3' isn't a port" 2 ;; esac
+    [ "${#3}" -le 5 ] && [ "$3" -le 65535 ] || fail "'$3' isn't a port" 2
+    _target=$2:$3
+    case $2 in *:*) _target="[$2]:$3" ;; esac
+    need_installer
+    exec "$installer" --permissions --no-prompt "$_flag" "$_target"
+    ;;
+esac
+
 _flags='' _off=0 _any=0
 for _a in "$@"; do
   case $_a in
@@ -4908,9 +5985,9 @@ permissions_main() {
   AGENT_USER=$(stat -c '%U' "$ENV_FILE")
   case $AGENT_USER in
     postgres) HOST_ENGINE=postgresql AGENT_HOME=/var/lib/postgresql ;;
-    mysql) HOST_ENGINE=mysql ;;
+    mysql) HOST_ENGINE=mysql AGENT_HOME=$STATE_DIR ;;
     *)
-      HOST_ENGINE=mongodb
+      HOST_ENGINE=mongodb AGENT_HOME=$STATE_DIR
       [ ! -f "/etc/systemd/system/$SERVICE.d/10-clickhouse.conf" ] || HOST_ENGINE=clickhouse
       ;;
   esac
@@ -4958,6 +6035,11 @@ permissions_main() {
     yes) allow_firewall ;;
     no) disallow_firewall ;;
   esac
+  case $ALLOW_TUNING in
+    yes) allow_tuning ;;
+    no) disallow_tuning ;;
+  esac
+  [ -z "$POOLER_TARGET_ADD$POOLER_TARGET_DEL" ] || pooler_target_change
   [ "$ALLOW_RESTART" != no ] || disallow_restarts
   if [ "$ALLOW_FILES" = no ]; then
     disallow_files
@@ -6710,6 +7792,34 @@ setup_databases() {
         ;;
       *)
         note "Found $(cluster_desc)"
+        if [ "$C_ENGINE" = mongodb ] && [ "$C_DBS" = - ] &&
+          { [ "$M_CLONES" = yes ] || [ "$MONGODB_STANDBY" = yes ] ||
+            { [ "$TTY" = 1 ] && confirm "It has no databases. Keep it empty, ready to become another server's standby or to receive clones?" n && MONGODB_STANDBY=yes; }; }; then
+          M_CLONES=yes
+          # No replica set of its own: a standby joins the primary's set.
+          M_ADMIN='' M_ADMIN_PW=''
+          if mongodb_status && mongodb_login; then
+            [ "$MONGODB_STANDBY" != yes ] || mongodb_standby_allow || true
+            ok "MongoDB on port $C_PORT is ready to receive clones${MONGODB_STANDBY:+ or become a standby}: pick this server in the dashboard"
+          fi
+          continue
+        fi
+        if [ "$C_ENGINE" = clickhouse ] && { [ "$C_DBS" = - ] || [ "$C_DBS" = default ]; } &&
+          { [ "$CH_CLONES" = yes ] || { [ "$TTY" = 1 ] && confirm "It has no databases. Keep it empty, ready to receive clones of a ClickHouse database from another server?" n; }; }; then
+          CH_CLONES=yes
+          if clickhouse_prepare; then
+            ok "ClickHouse on port $C_PORT is ready to receive clones: pick this server when you fork a ClickHouse database in the dashboard"
+          fi
+          continue
+        fi
+        if { [ "$C_ENGINE" = mysql ] || [ "$C_ENGINE" = mariadb ]; } && [ "$C_DBS" = - ] && [ "$MYSQL_STANDBY" != no ] && # mysql
+          { [ "$MYSQL_STANDBY" = yes ] || { [ "$TTY" = 1 ] && confirm "It has no databases. Keep it empty, ready to become the standby of a database on another server?" n; }; }; then
+          MYSQL_STANDBY=yes
+          if mysql_account; then
+            ok "$(engine_label "$C_ENGINE") on port $C_PORT is ready to hold a standby: pick this server under Standby in the dashboard"
+          fi
+          continue
+        fi
         if [ "$_count" -gt 1 ] && ! confirm "Set up backups for it?" y; then
           continue
         fi
@@ -6783,6 +7893,7 @@ databases() {
   [ "$ALLOW_RESTART" != no ] || disallow_restarts
   [ -z "$ALLOW_CREATE_CLUSTER" ] || create_cluster_access # forks
   [ "$ALLOW_FIREWALL" != no ] || disallow_firewall
+  [ "$ALLOW_TUNING" != no ] || disallow_tuning
   [ "$ALLOW_POOLER" != no ] || disallow_pooler
   if [ ! -f "$STATE_DIR/agent.json" ] || ! agent_running; then
     [ -z "$PROTECT_NAME" ] || die "the agent is not running, so backups can't be turned on yet; see 'journalctl -u rowsafe-agent'"
@@ -6797,6 +7908,7 @@ databases() {
   if [ "$TTY" = 1 ] && [ "$NO_SETUP" = 0 ]; then interactive=1; fi
   if [ "$interactive" = 1 ] || [ -n "$PROTECT_NAME" ] || [ "$ALLOW_RESTART" = yes ] || grep -qs '^[0-9]' "$RESTART_ALLOW_FILE" ||
     [ -n "$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT" ] || [ "$ALLOW_FIREWALL" = yes ] || grep -qs '^[0-9]' "$FIREWALL_ALLOW_FILE" ||
+    [ "$ALLOW_TUNING" = yes ] ||
     [ "$ALLOW_POOLER" = yes ] || grep -qs '^[0-9]' "$POOLER_ALLOW_FILE"; then
     say ""
     step "Looking for $(engine_label) on this server"
@@ -6811,6 +7923,7 @@ databases() {
     update_access
     pooler_access
     firewall_access
+    tuning_access
     PERM_QUIET=0
   fi
   perm_summary # permissions section
@@ -7106,16 +8219,16 @@ mongodb_as_admin() {
 
 # mongodb_login creates Rowsafe's MongoDB user.
 mongodb_login() {
-  [ "$M_LOGIN" = ok ] && return 0
+  [ "$M_LOGIN" = ok ] && [ -z "$M_CLONES" ] && [ -z "$MONGODB_STANDBY" ] && return 0
   _rc=0
-  mongodb_as_admin login >"$TMP/mlogin" 2>&1 || _rc=$?
+  mongodb_as_admin login ${M_CLONES:+--clones} ${MONGODB_STANDBY:+--standby} >"$TMP/mlogin" 2>&1 || _rc=$?
   while [ "$_rc" = 11 ] || [ "$_rc" = 12 ]; do
     [ "$_rc" = 12 ] && { tty_bad "MongoDB refused that login."; M_ADMIN=''; }
     [ "$_rc" = 11 ] && [ -n "$M_ADMIN" ] && { tty_bad "That user can't create users."; M_ADMIN=''; }
     mongodb_admin || { warn "MongoDB has access control on: set ROWSAFE_MONGODB_ADMIN_USER and ROWSAFE_MONGODB_ADMIN_PASSWORD (used once, never saved), or run the installer on a terminal"; return 1; }
     [ -n "${ROWSAFE_MONGODB_ADMIN_USER:-}" ] && [ "$_rc" = 12 ] && return 1
     _rc=0
-    mongodb_as_admin login >"$TMP/mlogin" 2>&1 || _rc=$?
+    mongodb_as_admin login ${M_CLONES:+--clones} ${MONGODB_STANDBY:+--standby} >"$TMP/mlogin" 2>&1 || _rc=$?
   done
   sed 's/^/    /' "$TMP/mlogin"
   [ "$_rc" = 0 ]
@@ -7177,6 +8290,28 @@ mongodb_replset() {
   ok "MongoDB on port $C_PORT is now a single-member replica set"
 }
 
+MONGODB_STANDBY_ALLOW_FILE=$CONFIG_DIR/mongodb-standby-allowed
+
+# mongodb_standby_allow lists the MongoDB on C_PORT in the standby allow
+# list ("PORT UNIT CONFIG"): root's helper may then hand out its replica
+# set key file, or add replSetName, keyFile and an address to its
+# configuration (keeping a copy). It restarts nothing by itself.
+mongodb_standby_allow() {
+  if [ -z "$M_CONFIG" ] || [ "$M_CONFIG" = - ] || [ ! -f "$M_CONFIG" ] || [ -z "$M_UNIT" ]; then
+    warn "MongoDB on port $C_PORT isn't started from a configuration file by a systemd unit the installer knows, so standby servers stay off for it"
+    return 1
+  fi
+  {
+    echo "# MongoDB servers Rowsafe may make part of a standby pair (written by the installer, root's)."
+    echo "# PORT UNIT CONFIG"
+    grep -s '^[0-9]' "$MONGODB_STANDBY_ALLOW_FILE" | awk -v p="$C_PORT" '$1 != p'
+    echo "$C_PORT $M_UNIT $M_CONFIG"
+  } >"$TMP/mstandby"
+  write_file "$MONGODB_STANDBY_ALLOW_FILE" 0644 root:root <"$TMP/mstandby" || true
+  restart_allowed "$C_PORT" || warn "standby servers also need Rowsafe to restart MongoDB here when someone confirms: run the installer with --allow-restart"
+  perm_ok "Rowsafe may set up standby servers with MongoDB on port $C_PORT (it restarts it only when someone confirms)"
+}
+
 # mongodb_prepare gets a MongoDB server ready for its plan. Interactive
 # unless unattended=1 (then it never restarts without --mongodb-replica-set).
 mongodb_prepare() {
@@ -7206,6 +8341,7 @@ mongodb_prepare() {
     mongodb_replset || return 1
   fi
   mongodb_login || return 1
+  [ "$MONGODB_STANDBY" != yes ] || mongodb_standby_allow || true
 }
 
 # ---------------------------------------------------------------- ClickHouse
@@ -7269,7 +8405,7 @@ clickhouse_users_file() {
   # Readable by ClickHouse only: its group from the packages, else users.xml's.
   _grp=clickhouse
   getent group clickhouse >/dev/null 2>&1 || _grp=$(stat -c %G "${_dir%/*}/users.xml" 2>/dev/null || echo root)
-  if ! agent_run clickhouse login --port "$C_PORT" --users-xml >"$TMP/chusers.xml" 2>"$TMP/chlogin.err" ||
+  if ! agent_run clickhouse login --port "$C_PORT" --users-xml ${CH_CLONES:+--clones} >"$TMP/chusers.xml" 2>"$TMP/chlogin.err" ||
     ! grep -q '<clickhouse>' "$TMP/chusers.xml"; then
     sed 's/^/    /' "$TMP/chlogin.err" >&2
     return 1
@@ -7323,7 +8459,7 @@ clickhouse_as_admin() {
 # "default" without a password (a new server), then as an administrator.
 clickhouse_login() {
   _rc=0
-  clickhouse_as_admin login >"$TMP/chlogin" 2>&1 || _rc=$?
+  clickhouse_as_admin login ${CH_CLONES:+--clones} >"$TMP/chlogin" 2>&1 || _rc=$?
   while [ "$_rc" = 11 ] || [ "$_rc" = 12 ] || [ "$_rc" = 13 ]; do
     if [ -n "$CH_ADMIN" ]; then
       # That administrator didn't do: refused (12) or can't create users (13).
@@ -7342,7 +8478,7 @@ clickhouse_login() {
       return 1
     }
     _rc=0
-    clickhouse_as_admin login >"$TMP/chlogin" 2>&1 || _rc=$?
+    clickhouse_as_admin login ${CH_CLONES:+--clones} >"$TMP/chlogin" 2>&1 || _rc=$?
   done
   sed 's/^/    /' "$TMP/chlogin"
   [ "$_rc" = 0 ]
@@ -7358,7 +8494,7 @@ clickhouse_prepare() {
     return 1
   fi
   [ -n "$CH_BINARY" ] || note "Proof and Rewind copies need the clickhouse program, which comes with ClickHouse's server package; it isn't on this server."
-  [ "$CH_LOGIN" = ok ] && return 0
+  [ "$CH_LOGIN" = ok ] && [ -z "$CH_CLONES" ] && return 0
   say ""
   note "Rowsafe needs its own ClickHouse user, rowsafe, to take backups and watch the"
   note "server's health. Its password is random and saved for the agent only."
@@ -7545,6 +8681,8 @@ uninstall_agent() {
   remove_files_units # files section
   rm -f "$FILES_ALLOW_FILE" "$RESTIC_BIN"
   remove_pooler_units
+  remove_proxysql_units
+  remove_chproxy_units
   remove_restart_helper
   remove_create_cluster
   remove_firewall_helper
@@ -7609,6 +8747,11 @@ main() {
       --no-prompt) PROMPT=never ;;
       --no-setup) NO_SETUP=1 ;;
       --allow-restart) ALLOW_RESTART=yes ;;
+      --mysql-standby) MYSQL_STANDBY=yes ;;
+      --clickhouse-clones) CH_CLONES=yes ;;
+      --mongodb-clones) M_CLONES=yes ;;
+      --mongodb-standby) MONGODB_STANDBY=yes ;;
+      --no-mysql-standby) MYSQL_STANDBY=no ;;
       --mongodb-replica-set) MONGODB_REPLSET=yes ;;
       --no-mongodb-replica-set) MONGODB_REPLSET=no ;;
       --no-allow-restart) ALLOW_RESTART=no ;;
@@ -7626,6 +8769,14 @@ main() {
       --no-allow-create-cluster) ALLOW_CREATE_CLUSTER=no ;;
       --allow-firewall) ALLOW_FIREWALL=yes ;;
       --no-allow-firewall) ALLOW_FIREWALL=no ;;
+      --allow-tuning) ALLOW_TUNING=yes ;;
+      --no-allow-tuning) ALLOW_TUNING=no ;;
+      --allow-pooler-target | --no-allow-pooler-target)
+        [ $# -ge 2 ] || die "$1 needs ADDRESS:PORT"
+        pooler_target_ok "$2" || die "$1: give the other server's address and MySQL port, e.g. 10.0.0.6:3306"
+        if [ "$1" = --allow-pooler-target ]; then POOLER_TARGET_ADD=$2; else POOLER_TARGET_DEL=$2; fi
+        shift
+        ;;
       --allow-pooler) ALLOW_POOLER=yes ;;
       --no-allow-pooler) ALLOW_POOLER=no ;;
       --allow-pooler-public) ALLOW_POOLER_PUBLIC=yes ;;
@@ -7698,7 +8849,7 @@ main() {
     if [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME$PROTECT_PORT$FILES_PATHS$MONGODB_REPLSET" ] || [ "$ALLOW_FILES" = yes ] || [ "$NO_FILES" = 1 ] || [ "$purge" = 1 ]; then
       perm_refuse "--permissions only changes what Rowsafe may do here: --allow-NAME, --no-allow-NAME and --no-allow-files (see --help)"
     fi
-  elif [ "$mode" != install ] && { [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME" ] || [ -n "$ALLOW_RESTART$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT$ALLOW_FIREWALL$ALLOW_POOLER$ALLOW_POOLER_PUBLIC$ALLOW_CREATE_CLUSTER" ]; }; then
+  elif [ "$mode" != install ] && { [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME" ] || [ -n "$ALLOW_RESTART$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT$ALLOW_FIREWALL$ALLOW_TUNING$ALLOW_POOLER$ALLOW_POOLER_PUBLIC$ALLOW_CREATE_CLUSTER$POOLER_TARGET_ADD$POOLER_TARGET_DEL" ]; }; then
     die "--no-setup, --protect and the --allow- options only go with an install"
   fi
   if [ "$mode" != install ] && [ "$mode" != permissions ] && { [ -n "$FILES_PATHS" ] || [ -n "$ALLOW_FILES" ] || [ "$NO_FILES" = 1 ]; }; then

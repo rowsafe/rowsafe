@@ -148,6 +148,10 @@ type SettingsSnapshot struct {
 	InRecovery bool `json:"in_recovery,omitempty"`
 	// DatabaseBytes is the size of all its databases.
 	DatabaseBytes int64 `json:"database_bytes,omitempty"`
+	// ChangeBlocked says why Rowsafe can't change settings on this server
+	// (MongoDB and ClickHouse: root hasn't allowed Tuning, or the server
+	// runs in Docker); "" when it can.
+	ChangeBlocked string `json:"change_blocked,omitempty"`
 }
 
 // ---- User API ----

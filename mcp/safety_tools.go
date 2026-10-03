@@ -23,7 +23,7 @@ const (
 )
 
 type restorePointInput struct {
-	Database    string `json:"database" jsonschema:"the Rowsafe database (PostgreSQL cluster) name"`
+	Database    string `json:"database" jsonschema:"the Rowsafe database (database server) name"`
 	Name        string `json:"name,omitempty" jsonschema:"restore point name: 1-63 lowercase letters, digits, - and _. Usually names the operation, e.g. before-drop-orders or pre-migrate-20260924. Default: agent-<UTC timestamp>"`
 	WaitSeconds *int   `json:"wait_seconds,omitempty" jsonschema:"how long to wait for the restore point to be confirmed in the backup repository (default 90)"`
 }
@@ -85,14 +85,14 @@ func (t *tools) addSafetyReadTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "safety_check",
 		Description: "Reports whether a database can be recovered right now, for example before a migration, a schema change, DROP or TRUNCATE, a bulk DELETE or UPDATE, or restoring a dump over it. " +
-			"protected=true means: active, WAL archiving works, a backup finished in the last 26h and the latest restore test (Proof) passed; otherwise reasons lists each condition that does not hold. " +
-			"Also returns the last backup and full backup, the last archived WAL, the start of the recovery window, the last restore test, and open failed tasks. Read-only.",
+			"protected=true means: active, continuous backup works (PostgreSQL's WAL, MySQL's binary log, MongoDB's oplog; ClickHouse has backups only), a backup finished in the last 26h and the latest restore test (Proof) passed; otherwise reasons lists each condition that does not hold. " +
+			"Also returns the last backup and full backup, when the change log was last copied, the start of the recovery window, the last restore test, and open failed tasks. Read-only.",
 		Annotations: readOnly("Safety check before destructive changes"),
 	}, t.safetyCheck)
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "list_restore_points",
-		Description: "List a database's named restore points, newest first, with their status (archived = confirmed in the backup repository), LSN, and who created them. The database can be restored to any archived restore point.",
+		Description: "List a database's named restore points, newest first, with their status (archived = confirmed in the backup repository), position (LSN, binary log position or oplog time), and who created them. The database can be restored to any archived restore point.",
 		Annotations: readOnly("List restore points"),
 	}, t.listRestorePoints)
 }
@@ -101,7 +101,7 @@ func (t *tools) addSafetyWriteTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "create_restore_point",
 		Description: "Creates a named restore point (a Mark) on a database and waits until it is confirmed in the backup repository, so the database can be rewound to that exact moment. " +
-			"It only writes a marker into the WAL (pg_create_restore_point) and forces a WAL switch; nothing else changes. Needs an active database. " +
+			"It only records the moment: PostgreSQL writes a marker into the WAL (pg_create_restore_point) and switches WAL files; MySQL, MariaDB and MongoDB note their binary log or oplog position; ClickHouse takes a backup named after the Mark. Nothing else changes. Needs an active database. " +
 			"Returns the restore point's name, status and whether it was confirmed.",
 		Annotations: writes("Create a restore point", false, false),
 		InputSchema: inputSchema[restorePointInput](func(p map[string]*jsonschema.Schema) {
@@ -143,8 +143,13 @@ func (t *tools) safetyCheck(ctx context.Context, _ *sdk.CallToolRequest, in data
 		if p.RecoveryWindowStart != nil {
 			window = " from " + p.RecoveryWindowStart.UTC().Format(time.RFC3339)
 		}
-		b.line("PROTECTED: %s can be restored to any point%s up to about now (WAL last archived %s, last backup %s, last restore test passed %s).",
-			d.Name, window, ago(p.WALLastArchivedAt, now), ago(p.LastBackupAt, now), ago(p.LastDrillPassedAt, now))
+		if protocol.EngineHas(d.Engine, protocol.FeaturePointInTime) {
+			b.line("PROTECTED: %s can be restored to any point%s up to about now (%s last copied %s, last backup %s, last restore test passed %s).",
+				d.Name, window, changeLog(d.Engine), ago(p.WALLastArchivedAt, now), ago(p.LastBackupAt, now), ago(p.LastDrillPassedAt, now))
+		} else {
+			b.line("PROTECTED: %s can be restored to its latest backup (%s; %s keeps no change log, so a Mark is a fresh backup) and the last restore test passed %s.",
+				d.Name, ago(p.LastBackupAt, now), engineName(d), ago(p.LastDrillPassedAt, now))
+		}
 	} else {
 		out.Guidance = "NOT protected. Before any destructive operation, tell the user these reasons and ask whether to proceed anyway; don't proceed on your own. fleet_health gives the fix for each reason."
 		b.line("NOT PROTECTED: %s (status %s). If a destructive operation goes wrong, it may not be recoverable:", d.Name, p.Status)

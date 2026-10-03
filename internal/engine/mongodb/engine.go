@@ -49,6 +49,10 @@ func (e *Engine) Tasks() []string {
 		protocol.TaskInspect, protocol.TaskAdopt, protocol.TaskCheck, protocol.TaskBackup, protocol.TaskDrill,
 		protocol.TaskRestorePoint, protocol.TaskMaintenance,
 		protocol.TaskRewindCopy, protocol.TaskRewindDrop, protocol.TaskRewindCompare, protocol.TaskRewindRows,
+		protocol.TaskFindMoment, protocol.TaskIndexAdvisor,
+		protocol.TaskDBAdmin, protocol.TaskSettings,
+		protocol.TaskRewindInPlace, protocol.TaskRewindUndo, protocol.TaskRewindCleanup,
+		protocol.TaskPreviewMigration, protocol.TaskCopySchema, protocol.TaskSafeCopy,
 	}
 }
 
@@ -71,6 +75,7 @@ func (e *Engine) Start(ctx context.Context, env agent.EngineEnv) {
 	e.started, e.ctx = true, ctx
 	e.mu.Unlock()
 	e.recoverCopies(ctx, env)
+	go e.recoverInPlace(ctx, env) // inplace.go
 	go func() {
 		t := time.NewTicker(time.Minute)
 		defer t.Stop()
@@ -81,6 +86,7 @@ func (e *Engine) Start(ctx context.Context, env agent.EngineEnv) {
 			case <-t.C:
 			}
 			e.expireCopies(env, time.Now())
+			e.expireKept(ctx, env, time.Now())
 			e.stopIdleShippers(10 * time.Minute)
 		}
 	}()
@@ -108,12 +114,38 @@ func (e *Engine) Run(ctx context.Context, env agent.EngineEnv, task *protocol.Ta
 		return nilIfNil(e.backup(ctx, env, db, p, tl))
 	case protocol.TaskDrill:
 		return nilIfNil(e.drill(ctx, env, db, task.ID, tl))
+	case protocol.TaskSafeCopy:
+		var p protocol.SafeCopyParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.safeCopy(ctx, env, db, p, tl))
+	case protocol.TaskCopySchema:
+		return nilIfNil(e.copySchema(ctx, env, db))
+	case protocol.TaskPreviewMigration:
+		var p protocol.PreviewParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.previewMigration(ctx, env, db, task.ID, p, tl))
 	case protocol.TaskRestorePoint:
 		var p protocol.RestorePointParams
 		if err := decode(task, &p); err != nil {
 			return nil, err
 		}
 		return nilIfNil(e.mark(ctx, env, db, p, tl))
+	case protocol.TaskIndexAdvisor: // indexadvisor.go
+		var p protocol.IndexAdvisorParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.indexAdvisor(ctx, env, db, task.ID, p, tl))
+	case protocol.TaskFindMoment: // moment.go
+		var p protocol.FindMomentParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.findMoment(ctx, env, db, p, tl))
 	case protocol.TaskMaintenance:
 		var p protocol.MaintenanceParams
 		if err := decode(task, &p); err != nil {
@@ -144,6 +176,36 @@ func (e *Engine) Run(ctx context.Context, env agent.EngineEnv, task *protocol.Ta
 			return nil, err
 		}
 		return nilIfNil(e.rewindRows(ctx, env, db, p, tl))
+	case protocol.TaskSettings:
+		var p protocol.SettingsParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.settingsTask(ctx, env, db, p, tl))
+	case protocol.TaskDBAdmin:
+		var p protocol.DBAdminParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.dbadmin(ctx, env, db, task.ID, p, tl))
+	case protocol.TaskRewindInPlace:
+		var p protocol.RewindInPlaceParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.rewindInPlace(ctx, env, db, p, tl))
+	case protocol.TaskRewindUndo:
+		var p protocol.RewindUndoParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.rewindUndo(ctx, env, db, p, tl))
+	case protocol.TaskRewindCleanup:
+		var p protocol.RewindCleanupParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.rewindCleanup(ctx, env, db, p, tl))
 	}
 	return nil, fmt.Errorf("MongoDB databases can't run %s tasks", task.Type)
 }

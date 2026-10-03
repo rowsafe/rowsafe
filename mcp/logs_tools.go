@@ -37,7 +37,7 @@ type LogsOutput struct {
 func (t *tools) addLogTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "get_logs",
-		Description: "Reads a database's PostgreSQL log: errors, slow queries (over log_min_duration_statement), lock waits, deadlocks, failed logins, checkpoints and autovacuum, newest first, or grouped by message with counts. " +
+		Description: "Reads a database server's own log (for engines whose logs Rowsafe reads; otherwise it says so): errors, slow queries (for PostgreSQL over log_min_duration_statement), lock waits, deadlocks, failed logins, checkpoints and autovacuum, newest first, or grouped by message with counts. " +
 			"Statements are normalized ($1, $2 for values) and quoted values in messages hidden on the database server, unless the database sends full query text. Shows error spikes, the statement behind an error, and who is failing to log in. Read-only.",
 		Annotations: readOnly("Read logs"),
 		InputSchema: inputSchema[logsInput](func(p map[string]*jsonschema.Schema) {

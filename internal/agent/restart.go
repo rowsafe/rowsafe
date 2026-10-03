@@ -94,8 +94,16 @@ func (a *Agent) restartPorts() []int {
 
 func (a *Agent) restart(ctx context.Context, db protocol.DatabaseSpec, taskID string, tl *taskLog) (*protocol.RestartResult, error) {
 	host, _ := os.Hostname()
+	name := protocol.EngineDisplayName(db.Engine)
+	if !isPostgres(db) && engineRestarter(db) == nil {
+		return nil, fmt.Errorf("This agent can't restart %s yet; update the agent (this is %s).", name, Version)
+	}
 	if a.cfg.Sidecar() {
 		return a.dockerRestart(ctx, db, taskID, tl) // docker_control.go
+	}
+	if a.cfg.Container() {
+		return nil, fmt.Errorf("Rowsafe can't restart %s running in Docker from this agent: restart its container yourself "+
+			"(e.g. `docker compose restart %s`); Rowsafe notices the restart by itself", name, dockerServiceHint(db))
 	}
 	allowed, err := a.allowedClusters() // fork_helper.go
 	if err != nil {
@@ -103,12 +111,12 @@ func (a *Agent) restart(ctx context.Context, db protocol.DatabaseSpec, taskID st
 	}
 	unit, ok := allowed[db.Port]
 	if !ok {
-		return nil, fmt.Errorf("restarting PostgreSQL from Rowsafe is not turned on for port %d on %s. Restart it yourself on the server: %s "+
-			"(to allow restarts from Rowsafe, root runs %s there)", db.Port, host, a.restartHint(ctx, db), AllowHint(protocol.PermRestart))
+		return nil, fmt.Errorf("restarting %s from Rowsafe is not turned on for port %d on %s. Restart it yourself on the server: %s "+
+			"(to allow restarts from Rowsafe, root runs %s there)", name, db.Port, host, a.restartHint(ctx, db), AllowHint(protocol.PermRestart))
 	}
 	if st, err := os.Stat(a.cfg.RestartDir); err != nil || !st.IsDir() {
 		return nil, fmt.Errorf("the restart helper is not set up on %s (%s is missing): root allows it there with %s, "+
-			"or restart PostgreSQL yourself: sudo systemctl restart %s", host, a.cfg.RestartDir, AllowHint(protocol.PermRestart), strings.TrimSuffix(unit, ".service"))
+			"or restart %s yourself: sudo systemctl restart %s", host, a.cfg.RestartDir, AllowHint(protocol.PermRestart), name, strings.TrimSuffix(unit, ".service"))
 	}
 
 	start := time.Now()
@@ -116,7 +124,7 @@ func (a *Agent) restart(ctx context.Context, db protocol.DatabaseSpec, taskID st
 	res, err := a.askHelper(ctx, helperRestart, db.Port, taskID)
 	if err != nil {
 		if errors.Is(err, errRestartNoAnswer) {
-			return nil, fmt.Errorf("%w, or restart PostgreSQL yourself: sudo systemctl restart %s", err, strings.TrimSuffix(unit, ".service"))
+			return nil, fmt.Errorf("%w, or restart %s yourself: sudo systemctl restart %s", err, name, strings.TrimSuffix(unit, ".service"))
 		}
 		return nil, err
 	}
@@ -130,28 +138,90 @@ func (a *Agent) restart(ctx context.Context, db protocol.DatabaseSpec, taskID st
 	if u := res["unit"]; u != "" {
 		unit = u
 	}
-	tl.Printf("%s restarted; waiting for PostgreSQL to answer", unit)
+	tl.Printf("%s restarted; waiting for %s to answer", unit, name)
 
 	out := &protocol.RestartResult{Restarted: true, Unit: unit}
-	deadline := time.Now().Add(restartBackTimeout)
+	if err := a.waitBack(ctx, db, out); err != nil {
+		out.DurationMs = time.Since(start).Milliseconds()
+		return out, fmt.Errorf("%s restarted, but %s is not answering on port %d after %s: %w", unit, name, db.Port, restartBackTimeout, err)
+	}
+	out.DurationMs = time.Since(start).Milliseconds()
+	a.logBack(tl, db, out)
+	return out, nil
+}
+
+// waitBack waits until db answers again after a restart (restartBackTimeout)
+// and fills out.ArchiveMode: PostgreSQL's archive_mode, or what another
+// engine's Ready reports ("on" once its continuous archiving can work).
+func (a *Agent) waitBack(ctx context.Context, db protocol.DatabaseSpec, out *protocol.RestartResult) error {
+	return a.waitBackWithin(ctx, db, out, restartBackTimeout)
+}
+
+// waitBackWithin is waitBack with its own timeout.
+func (a *Agent) waitBackWithin(ctx context.Context, db protocol.DatabaseSpec, out *protocol.RestartResult, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
 	for {
-		mode, err := a.pgArchiveMode(ctx, a.target(db))
+		var mode string
+		var err error
+		if r := engineRestarter(db); r != nil {
+			mode, err = r.Ready(ctx, a.engineEnv(protocol.NormalizeEngine(db.Engine)), db)
+		} else {
+			mode, err = a.pgArchiveMode(ctx, a.target(db))
+		}
 		if err == nil {
 			out.ArchiveMode = mode
-			break
+			return nil
 		}
 		if time.Now().After(deadline) || ctx.Err() != nil {
-			out.DurationMs = time.Since(start).Milliseconds()
-			return out, fmt.Errorf("%s restarted, but PostgreSQL is not answering on port %d after %s: %w", unit, db.Port, restartBackTimeout, err)
+			return err
 		}
 		select {
 		case <-ctx.Done():
 		case <-time.After(4 * restartPoll):
 		}
 	}
-	out.DurationMs = time.Since(start).Milliseconds()
-	tl.Printf("PostgreSQL is back after %s; archive_mode is %s", time.Duration(out.DurationMs)*time.Millisecond, out.ArchiveMode)
-	return out, nil
+}
+
+// logBack logs that db answers again.
+func (a *Agent) logBack(tl *taskLog, db protocol.DatabaseSpec, out *protocol.RestartResult) {
+	took := time.Duration(out.DurationMs) * time.Millisecond
+	if isPostgres(db) {
+		tl.Printf("PostgreSQL is back after %s; archive_mode is %s", took, out.ArchiveMode)
+		return
+	}
+	tl.Printf("%s is back after %s", protocol.EngineDisplayName(db.Engine), took)
+}
+
+// engineDefaultUnit is the systemd service the vendor packages of an engine
+// install (without ".service"), for messages.
+func engineDefaultUnit(engine string) string {
+	switch protocol.NormalizeEngine(engine) {
+	case protocol.EngineMySQL:
+		return "mysql"
+	case protocol.EngineMariaDB:
+		return "mariadb"
+	case protocol.EngineMongoDB:
+		return "mongod"
+	case protocol.EngineClickHouse:
+		return "clickhouse-server"
+	}
+	return "postgresql"
+}
+
+// dockerServiceHint is the usual compose service name of db's engine, for
+// messages.
+func dockerServiceHint(db protocol.DatabaseSpec) string {
+	switch protocol.NormalizeEngine(db.Engine) {
+	case protocol.EngineMySQL:
+		return "mysql"
+	case protocol.EngineMariaDB:
+		return "mariadb"
+	case protocol.EngineMongoDB:
+		return "mongo"
+	case protocol.EngineClickHouse:
+		return "clickhouse"
+	}
+	return "postgres"
 }
 
 var errRestartNoAnswer = errors.New("no answer from the restart helper")
@@ -261,6 +331,9 @@ func parseKeyValues(s string) map[string]string {
 
 // restartHint is the command that restarts db's cluster, for messages.
 func (a *Agent) restartHint(ctx context.Context, db protocol.DatabaseSpec) string {
+	if !isPostgres(db) {
+		return "sudo systemctl restart " + engineDefaultUnit(db.Engine)
+	}
 	dataDir, major, cluster := "", 0, ""
 	if in, err := summarizeCluster(ctx, a.target(db)); err == nil {
 		dataDir, major = in.DataDirectory, in.Major()

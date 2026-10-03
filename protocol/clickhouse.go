@@ -20,19 +20,31 @@ import "time"
 //     or the passphrase. BackupFull is a full BACKUP; BackupDiff a BACKUP
 //     with base_backup = the newest full one (only the parts that changed
 //     since are copied); BackupIncr is treated as BackupDiff.
-//   - There is no continuous archiving: ClickHouse keeps no log of changes
-//     to copy. EngineFeatures.PointInTime is false, InspectResult
-//     .ArchiveMode is "off", and restores go to a backup or a Mark.
-//     Differential backups are cheap (parts never change once written), so
-//     they run every hour by default.
+//   - Continuous archiving (restores to any second): ClickHouse never
+//     changes data in place; every INSERT, merge and mutation writes a new
+//     part, and system.part_log records when, to the microsecond. The agent
+//     copies each new part from the data folder (read only: the clickhouse
+//     group, or the data volume mounted read only in Docker) to the bucket
+//     as it appears, sealed, with a log of what changed (parts, table and
+//     database definitions) under <repo path>/<stanza>/pitr/. A restore to
+//     a moment takes the newest backup that finished before it and carries
+//     it forward with that log: the parts active at that moment are served
+//     to ClickHouse as one backup. ArchiverStats report the copier
+//     (ArchiveMode "on" once it runs; ArchivedCount counts parts copied).
+//     Tables without parts (Log, Memory...) or on object storage come back
+//     as of that backup. Differential backups are cheap (parts never change
+//     once written), so they run every hour by default.
 //   - BackupResult: WALStart/WALStop are unused; Label is the backup's
 //     folder name.
 //   - RestorePointResult (a Mark): a differential backup taken on the spot
 //     and named after the Mark. LSN is that backup's label; WALFile is
 //     unused.
 //   - Rewind targets: Mark restores the Mark's backup; Time restores the
-//     newest backup that finished at or before it (BackupSet when the
-//     control plane filled it). RecoveredTo is when that backup finished.
+//     server as it was at that moment (from BackupSet when the control
+//     plane filled it, or the newest backup that finished before it).
+//     RecoveredTo is that moment; when the record can't reach it (the
+//     agent wasn't copying), the backup alone is restored and RecoveredTo
+//     is when it finished.
 //   - Rewind copies run as a separate, temporary clickhouse-server on the
 //     same host, listening on 127.0.0.1 only, with its own data folder
 //     under the agent's rewind directory (RewindCopyResult.Port is its HTTP
@@ -63,8 +75,25 @@ const MaintKillMutation = "kill_mutation"
 // clickhouseFeatures are what ClickHouse supports (EngineCapabilities).
 var clickhouseFeatures = EngineFeatures{
 	Backups: true, Proof: true,
-	RewindCopy: true, RewindRows: true, Marks: true,
-	Monitoring: true, Fixes: true,
+	PointInTime: true, // new parts copied as they appear (internal/engine/clickhouse/pitr_*.go)
+	FindMoment:  true, // from that record (internal/engine/clickhouse/moment.go)
+	Standby:     true, // follows the primary through that record (internal/engine/clickhouse/standby_*.go)
+	RewindCopy:  true, RewindRows: true, RewindInPlace: true, Marks: true,
+	Monitoring: true, Fixes: true, Restart: true, Updates: true, Upgrades: true,
+	Recommendations: true, // query log, table layout (internal/engine/clickhouse/insights.go)
+	Logs:            true, // the error log (internal/engine/clickhouse/logs.go)
+	DBAdmin:         true, Security: true, Files: true, SecondCopy: true,
+	MigrationPreview: true, SafeCopies: true,
+	Fork:     true, // clones restored from a backup into an empty server (fork.go in internal/engine/clickhouse)
+	MoveIn:   true, // one-time copy from ClickHouse Cloud or any ClickHouse (migrate.go in internal/engine/clickhouse)
+	Settings: true, // config.d and users.d through root's tuning helper (opt-in)
+	// Skipping indexes and projections tested on a copy
+	// (internal/engine/clickhouse/advisor.go, protocol/indexadvisor_clickhouse.go).
+	IndexAdvice: true,
+	// chproxy in front of the HTTP interface through root's helper (opt-in;
+	// internal/engine/clickhouse/pooling.go, internal/chproxyroot). Not the
+	// native protocol (port 9000).
+	Pooling: true,
 }
 
 // ClickHouseStatus is ClickHouse's own health detail
@@ -129,3 +158,8 @@ type ClickHouseReplica struct {
 	// LastError is the newest replication queue error (empty when none).
 	LastError string `json:"last_error,omitempty"`
 }
+
+// MarkIsBackup reports whether engine's Marks are backups of their own (a
+// differential backup taken on the spot; RestorePointResult.LSN is its
+// label), restored as they are rather than replayed to: ClickHouse.
+func MarkIsBackup(engine string) bool { return NormalizeEngine(engine) == EngineClickHouse }

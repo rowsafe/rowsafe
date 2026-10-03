@@ -9,6 +9,8 @@ func TestDestructiveDBCommand(t *testing.T) {
 	files := map[string]string{
 		"migrations/001_drop.sql": "BEGIN;\nALTER TABLE users DROP COLUMN legacy;\nCOMMIT;\n",
 		"seed.sql":                "INSERT INTO users (name) VALUES ('a');\n",
+		"scripts/cleanup.js":      "db.getCollection('sessions').deleteMany({});\n",
+		"scripts/report.js":       "printjson(db.orders.countDocuments({}));\n",
 	}
 	readFile := func(p string) ([]byte, error) {
 		if s, ok := files[p]; ok {
@@ -104,6 +106,45 @@ func TestDestructiveDBCommand(t *testing.T) {
 		{`sh -ec 'psql -c "DROP TABLE users"'`, true},
 		{`zsh -ic "npm test"`, false},
 		{`grep -ic "DROP TABLE" schema.sql`, false},
+
+		// MySQL and MariaDB.
+		{`mysql -h db.internal -u app -p app -e "DROP TABLE orders"`, true},
+		{`mysql app -e 'DELETE FROM ` + "`orders`" + `'`, true},
+		{`mariadb -e "UPDATE users SET admin = 1 WHERE id = 7"`, false},
+		{`mysql -e "ALTER TABLE users MODIFY COLUMN email VARCHAR(50)"`, true},
+		{`mysql -e "ALTER TABLE users ADD COLUMN ts TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"`, false},
+		{`mysql -e "RENAME TABLE users TO users_old"`, true},
+		{"mysql app < migrations/001_drop.sql", true},
+		{"mysql app <seed.sql", false},
+		{"docker exec -i db mariadb -uroot app -e 'truncate sessions'", true},
+		{"mysqladmin -u root drop app", true},
+		{"mysqladmin status", false},
+		{"mysql -h db -e 'SELECT 1'", false},
+		{"mysqldump app > app.sql", false},
+		{"myloader -d dump --overwrite-tables", true},
+
+		// MongoDB.
+		{`mongosh app --eval 'db.orders.drop()'`, true},
+		{`mongosh "$MONGO_URL" --eval "db.dropDatabase()"`, true},
+		{`mongosh --eval 'db.sessions.deleteMany({})'`, true},
+		{`mongosh --eval 'db.sessions.deleteMany({ expired: true })'`, false},
+		{`mongosh --eval 'db.users.updateMany({}, {$set: {admin: true}})'`, true},
+		{`mongosh --eval 'db.users.find({}).count()'`, false},
+		{`mongo app --eval 'db.runCommand({drop: "orders"})'`, true},
+		{"mongosh app scripts/cleanup.js", true},
+		{"mongosh app scripts/report.js", false},
+		{"mongorestore --drop dump/", true},
+		{"mongorestore dump/", false},
+
+		// ClickHouse.
+		{`clickhouse-client --query "DROP TABLE events"`, true},
+		{`clickhouse client -q "ALTER TABLE events DELETE WHERE ts < now() - INTERVAL 1 DAY"`, true},
+		{`clickhouse-client -q "ALTER TABLE events UPDATE status = 'x' WHERE 1"`, true},
+		{`clickhouse-client -q "ALTER TABLE events DROP PARTITION 202401"`, true},
+		{`clickhouse-client -q "ALTER TABLE events ADD COLUMN updated DateTime"`, false},
+		{`clickhouse-client -q "SELECT count() FROM events"`, false},
+		{"clickhouse-client --queries-file migrations/001_drop.sql", true},
+		{"docker exec ch clickhouse-client -q 'TRUNCATE TABLE events'", true},
 
 		// Mentions that don't run anything.
 		{`git commit -m "run prisma migrate deploy on release"`, false},

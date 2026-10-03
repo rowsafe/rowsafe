@@ -78,6 +78,7 @@ func clickhouseCmd(ctx context.Context, args []string) int {
 	port := fs.Int("port", 8123, "ClickHouse HTTP port")
 	adminUser := fs.String("admin-user", "", "administrator user (password on stdin)")
 	usersXML := fs.Bool("users-xml", false, "print a users.d file instead of creating the user with SQL")
+	clones := fs.Bool("clones", false, "also let Rowsafe create and drop databases and tables, so this (empty) server can receive clones")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
@@ -109,7 +110,7 @@ func clickhouseCmd(ctx context.Context, args []string) int {
 	case "login":
 		if *usersXML {
 			var xml string
-			if xml, err = clickhouse.UsersXML(env, *port); err == nil {
+			if xml, err = clickhouse.UsersXMLWith(env, *port, *clones); err == nil {
 				fmt.Print(xml)
 			}
 			break
@@ -118,7 +119,7 @@ func clickhouseCmd(ctx context.Context, args []string) int {
 		if *adminUser != "" {
 			pw = readSecret()
 		}
-		if err = clickhouse.CreateLogin(ctx, env, *port, *adminUser, pw); err == nil {
+		if err = clickhouse.CreateLoginWith(ctx, env, *port, *adminUser, pw, *clones); err == nil {
 			fmt.Printf("Created ClickHouse user %q for Rowsafe; its password is saved for the agent only.\n", clickhouse.LoginUser)
 		}
 	case "save-login":
@@ -154,12 +155,13 @@ func clickhouseDownload(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("clickhouse download-backup", flag.ContinueOnError)
 	stanza := fs.String("stanza", "", "the database's folder in the bucket")
 	label := fs.String("label", "", "the backup to download (without it: list the backups)")
+	at := fs.String("at", "", "a moment to download instead of a backup (RFC 3339, e.g. 2026-09-25T10:15:30Z)")
 	to := fs.String("to", "", "an empty folder to decrypt it into")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *stanza == "" || (*label != "") != (*to != "") {
-		fmt.Fprint(os.Stderr, "usage: rowsafe-agent clickhouse download-backup --stanza STANZA [--label LABEL --to DIR]\n")
+	if *stanza == "" || (*label != "" && *at != "") || (*label != "" || *at != "") != (*to != "") {
+		fmt.Fprint(os.Stderr, "usage: rowsafe-agent clickhouse download-backup --stanza STANZA [--label LABEL | --at TIME] --to DIR]\n")
 		return 2
 	}
 	cfg, err := agent.ConfigFromEnv()
@@ -184,6 +186,30 @@ func clickhouseDownload(ctx context.Context, args []string) int {
 			}
 			fmt.Printf("%-40s %-4s finished %s%s\n", b.Label, b.Type, b.StoppedAt.UTC().Format("2006-01-02 15:04:05Z"), note)
 		}
+		return 0
+	}
+	if *at != "" {
+		t, err := time.Parse(time.RFC3339Nano, *at)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error: --at:", err)
+			return 2
+		}
+		out, exact, note, err := clickhouse.DownloadMoment(ctx, env, *stanza, t, *to, os.Stdout)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			return 1
+		}
+		if !exact {
+			fmt.Fprintf(os.Stderr, "That moment can't be assembled exactly: %s.\nDownload that backup instead: --label %s\n", note, out)
+			return 1
+		}
+		if a, err := filepath.Abs(*to); err == nil {
+			fmt.Printf("\nWith %s in ClickHouse's backups.allowed_path, restore it with:\n\n", a)
+		}
+		if a, err := filepath.Abs(out); err == nil {
+			out = a
+		}
+		fmt.Printf("  RESTORE ALL FROM File('%s/')\n", out)
 		return 0
 	}
 	dirs, err := clickhouse.DownloadBackup(ctx, env, *stanza, *label, *to, os.Stdout)

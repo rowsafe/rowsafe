@@ -83,8 +83,7 @@ func pickBackup(ctx context.Context, r *repo, target restoreTarget) (backupDoc, 
 				return docs[i], nil
 			}
 		}
-		return backupDoc{}, fmt.Errorf("the oldest backup in your bucket finished at %s: pick a later moment (ClickHouse can be "+
-			"restored to its backups and Marks, not to any second)", docs[0].StoppedAt.UTC().Format(time.RFC3339))
+		return backupDoc{}, fmt.Errorf("the oldest backup in your bucket finished at %s: pick a later moment", docs[0].StoppedAt.UTC().Format(time.RFC3339))
 	}
 	return docs[len(docs)-1], nil
 }
@@ -147,12 +146,50 @@ func restoreStatement(b backupDoc, skip map[string]string, from, base, id string
 
 // restoreInto restores backup b into the scratch server c.
 func restoreInto(ctx context.Context, env agent.EngineEnv, r *repo, b backupDoc, c *client, tl agent.TaskLogger) (map[string]string, error) {
+	return restoreTo(ctx, env, r, b, c, true, tl)
+}
+
+// restoreTo restores backup b into server c; scratch: c is a private copy,
+// where merges and view refreshes are stopped afterwards (never on a real
+// server, a clone's).
+func restoreTo(ctx context.Context, env agent.EngineEnv, r *repo, b backupDoc, c *client, scratch bool, tl agent.TaskLogger) (map[string]string, error) {
+	return restoreSkipping(ctx, env, r, b, c, scratch, leftOut(b.Tables), tl)
+}
+
+// restoreOnly restores the tables of backup b listed in only ("db.name")
+// into the scratch server c, with their databases as they were.
+func restoreOnly(ctx context.Context, env agent.EngineEnv, r *repo, b backupDoc, c *client, only map[string]bool, tl agent.TaskLogger) error {
 	skip := leftOut(b.Tables)
-	prefixes := []string{backupDir(b.Label)}
-	if b.Base != "" {
-		prefixes = append(prefixes, backupDir(b.Base))
+	dbs := map[string]bool{}
+	for _, t := range b.Tables {
+		if !only[t.key()] {
+			if _, ok := skip[t.key()]; !ok {
+				skip[t.key()] = ""
+			}
+		} else if _, left := skip[t.key()]; !left {
+			dbs[t.DB] = true
+		}
 	}
-	g, err := startGateway(ctx, env, r, prefixes, true, true)
+	b.Databases = slices.DeleteFunc(slices.Clone(b.Databases), func(d protocol.DBInfo) bool { return !dbs[d.Name] })
+	if len(b.Databases) == 0 {
+		return errors.New("the backup has none of the tables to test")
+	}
+	_, err := restoreSkipping(ctx, env, r, b, c, true, skip, quietSkips{tl})
+	return err
+}
+
+// quietSkips leaves the tables not asked for out of the task log.
+type quietSkips struct{ agent.TaskLogger }
+
+func (q quietSkips) Printf(format string, args ...any) {
+	if strings.HasPrefix(format, "left out of the restore") && len(args) == 2 && args[1] == "" {
+		return
+	}
+	q.TaskLogger.Printf(format, args...)
+}
+
+func restoreSkipping(ctx context.Context, env agent.EngineEnv, r *repo, b backupDoc, c *client, scratch bool, skip map[string]string, tl agent.TaskLogger) (map[string]string, error) {
+	g, err := startGateway(ctx, env, r, b.prefixes(), true, true, b.virtual)
 	if err != nil {
 		return skip, err
 	}
@@ -170,13 +207,13 @@ func restoreInto(ctx context.Context, env agent.EngineEnv, r *repo, b backupDoc,
 	for _, k := range keys {
 		tl.Printf("left out of the restore: %s (%s)", k, skip[k])
 	}
-	what := "backup " + b.Label
+	what := b.what()
 	if b.Base != "" {
 		what += " (with its full backup " + b.Base + ")"
 	}
 	tl.Printf("restoring %s: %s of data", what, humanBytes(b.DataBytes))
 	id := randomID("rowsafe-restore-")
-	stmt := restoreStatement(b, skip, s3Expr(g, backupDir(b.Label)), base, id)
+	stmt := restoreStatement(b, skip, s3Expr(g, b.dir()), base, id)
 	progress := func(st opStatus) string {
 		if st.TotalSize > 0 {
 			return fmt.Sprintf("restoring: %s of %s read", humanBytes(st.BytesRead), humanBytes(st.TotalSize))
@@ -188,8 +225,10 @@ func restoreInto(ctx context.Context, env agent.EngineEnv, r *repo, b backupDoc,
 	}
 	// Nothing changes in a copy by itself: no merges (TTL deletes included),
 	// no view refreshes (none should be there).
-	_ = c.exec(ctx, "SYSTEM STOP MERGES", nil)
-	_ = c.exec(ctx, "SYSTEM STOP VIEWS", nil)
+	if scratch {
+		_ = c.exec(ctx, "SYSTEM STOP MERGES", nil)
+		_ = c.exec(ctx, "SYSTEM STOP VIEWS", nil)
+	}
 	return skip, nil
 }
 

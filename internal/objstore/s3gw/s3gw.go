@@ -90,6 +90,9 @@ type Config struct {
 	// a key that only lives in memory); "" = os.TempDir().
 	TempDir string
 	Log     *slog.Logger
+	// Virtual are read-only files served at these keys (virtual.go); the
+	// keys must be inside Prefixes.
+	Virtual map[string]VirtualFile
 }
 
 // Stats counts what went through a gateway.
@@ -129,8 +132,9 @@ type Gateway struct {
 	wg      sync.WaitGroup // handlers and drainers
 	served  chan error
 
-	heads headCache
-	names *names
+	heads  headCache
+	names  *names
+	sealed *objstore.SealedReader
 
 	requests, objectsWritten, bytesWritten, storedWritten atomic.Int64
 	objectsRead, bytesRead, storedRead, deleted, errs     atomic.Int64
@@ -192,6 +196,7 @@ func Start(ctx context.Context, cfg Config) (*Gateway, error) {
 	}
 	g.heads.m = map[string]headEntry{}
 	g.names = nm
+	g.sealed = &objstore.SealedReader{Store: cfg.Store, Passphrase: cfg.Passphrase}
 	g.srv = &http.Server{
 		Handler:           g,
 		ReadHeaderTimeout: 30 * time.Second,
@@ -383,6 +388,10 @@ func (g *Gateway) serve(q *request) error {
 	}
 	if err := g.checkKey(key); err != nil {
 		return err
+	}
+	if v, ok := g.virtual(key); ok {
+		q.key = key
+		return g.serveVirtual(q, v)
 	}
 	if write {
 		if err := g.checkStoredLen(key); err != nil {

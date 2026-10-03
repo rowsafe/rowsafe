@@ -53,16 +53,18 @@ var reportedSettings = []string{
 
 // Source is where a cluster's log is read.
 type Source struct {
-	Status   protocol.LogSource
-	Format   string // protocol.LogFormat*
-	Path     string // file, or systemd unit for journald
+	Status protocol.LogSource
+	Format string // protocol.LogFormat*, or an engine's (engines.go)
+	Path   string // file, or systemd unit for journald
+	// SlowPath is MySQL's slow query log, read next to its error log.
+	SlowPath string
 	Prefix   string // log_line_prefix
 	Location *time.Location
 }
 
 // sameAs reports whether two discoveries read the same log the same way.
 func (s Source) sameAs(o Source) bool {
-	return s.Format == o.Format && s.Path == o.Path && s.Prefix == o.Prefix && s.Status.Readable == o.Status.Readable &&
+	return s.Format == o.Format && s.Path == o.Path && s.SlowPath == o.SlowPath && s.Prefix == o.Prefix && s.Status.Readable == o.Status.Readable &&
 		s.Status.Problem == o.Status.Problem && s.Status.Detail == o.Status.Detail && mapsEqual(s.Status.Settings, o.Status.Settings)
 }
 

@@ -58,5 +58,19 @@ const MaintOptimize = "optimize"
 var mysqlFeatures = EngineFeatures{
 	Backups: true, PointInTime: true, Proof: true,
 	RewindCopy: true, RewindRows: true, Marks: true,
-	Monitoring: true, Fixes: true,
+	Monitoring: true, Fixes: true, Restart: true, RewindInPlace: true, Updates: true, Upgrades: true,
+	Recommendations: true, // statement digests, catalog (internal/engine/mysql/advisor.go)
+	IndexAdvice:     true, // samples from performance_schema or the slow query log (internal/engine/mysql/indexadvisor.go)
+	Logs:            true, // error and slow query logs (internal/engine/mysql/logs.go)
+	FindMoment:      true, // the binary logs in the bucket (internal/engine/mysql/moment.go)
+	DBAdmin:         true, Security: true, Files: true, Settings: true, SecondCopy: true,
+	MigrationPreview: true, SafeCopies: true,
+	Standby: true, // seeded from the latest backup, binary log replication (standby_*.go in internal/engine/mysql)
+	Fork:    true, // clones loaded into an empty server (fork.go in internal/engine/mysql)
+	MoveIn:  true, // one-time copy or live sync from a managed provider (migrate*.go in internal/engine/mysql)
+	Pooling: true, // ProxySQL through root's helper (opt-in)
 }
+
+// mariadbFeatures are MySQL's: index advice takes its samples from the
+// slow query log there (performance_schema keeps none of MariaDB's values).
+var mariadbFeatures = mysqlFeatures

@@ -49,7 +49,72 @@ type AdvisorFacts struct {
 	LargeTables []LargeTable `json:"large_tables"`
 	// Memory is the cluster's memory settings and cache reads.
 	Memory *MemoryFacts `json:"memory,omitempty"`
+	// ClickHouseTables are ClickHouse MergeTree tables with a layout
+	// problem: no sorting key (ORDER BY tuple()) or far too many
+	// partitions (ClickHouse only).
+	ClickHouseTables []ClickHouseTableFacts `json:"clickhouse_tables,omitempty"`
+	// Profiler is MongoDB's profiler state: query statistics come from it
+	// (MongoDB only; nil elsewhere).
+	Profiler *MongoProfiler `json:"mongodb_profiler,omitempty"`
+	// SlowLog is MySQL's or MariaDB's slow query log (nil elsewhere): the
+	// index advisor's samples on MariaDB and MySQL 5.7, and Logs.
+	SlowLog *MySQLSlowLog `json:"mysql_slow_log,omitempty"`
 }
+
+// MySQLSlowLog is the slow query log's state.
+type MySQLSlowLog struct {
+	// On: slow_query_log is on and written to a file (log_output FILE).
+	On            bool    `json:"on"`
+	File          string  `json:"file,omitempty"`
+	Bytes         int64   `json:"bytes,omitempty"`
+	LongQueryTime float64 `json:"long_query_time"`
+	// CanSet: Rowsafe's account may change it (SYSTEM_VARIABLES_ADMIN or
+	// SUPER); Persist: with SET PERSIST, so it survives a restart (MySQL
+	// 8.0+).
+	CanSet  bool `json:"can_set,omitempty"`
+	Persist bool `json:"persist,omitempty"`
+	// Rotated: a logrotate configuration covers the file's folder.
+	Rotated bool `json:"rotated,omitempty"`
+}
+
+// MaintSlowLog turns MySQL's or MariaDB's slow query log on: slow_query_log
+// ON, log_output with FILE, long_query_time 1 second (kept when it is
+// already between 0.5 and 1). SET PERSIST on MySQL 8.0+ (it survives a
+// restart), SET GLOBAL elsewhere. Nothing restarts.
+const MaintSlowLog = "mysql_slow_log"
+
+// ClickHouseTableFacts is a MergeTree table whose layout makes queries or
+// inserts slow.
+type ClickHouseTableFacts struct {
+	Database   string `json:"database"`
+	Table      string `json:"table"`
+	Engine     string `json:"engine"`
+	SortingKey string `json:"sorting_key"` // "" for ORDER BY tuple()
+	// PartitionKey is the PARTITION BY expression ("" when none).
+	PartitionKey string `json:"partition_key,omitempty"`
+	Partitions   int64  `json:"partitions"`
+	Parts        int64  `json:"parts"`
+	Rows         int64  `json:"rows"`
+	Bytes        int64  `json:"bytes"`
+}
+
+// MongoProfiler is the profiler level of the databases with collections:
+// level 0 (off) means no query statistics.
+type MongoProfiler struct {
+	// Off are the databases where the profiler is off.
+	Off []string `json:"off,omitempty"`
+	// On are the databases where it records slow operations (level 1) or
+	// all of them (level 2).
+	On     []string `json:"on,omitempty"`
+	SlowMs int      `json:"slow_ms,omitempty"`
+}
+
+// MaintMongoProfile turns MongoDB's profiler on at level 1 (slow
+// operations only, over slowms: 100 ms unless the server sets another) in
+// the databases Tables names (none: every database where it is off). A
+// runtime setting: nothing restarts; it goes back to off at the next
+// restart unless the configuration file sets operationProfiling.mode.
+const MaintMongoProfile = "mongodb_profile"
 
 // ForeignKeyWithoutIndex: every DELETE or key UPDATE on the referenced
 // table has to scan the referencing table for matching rows, and joins

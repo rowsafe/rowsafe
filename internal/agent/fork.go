@@ -278,7 +278,13 @@ func (a *Agent) runForkTask(ctx context.Context, task *protocol.Task, tl *taskLo
 		if err := json.Unmarshal(task.Params, &p); err != nil {
 			return nil, fmt.Errorf("invalid %s params: %w", task.Type, err)
 		}
-		res, err := a.forkRestore(ctx, p, tl)
+		var res *protocol.ForkRestoreResult
+		var err error
+		if isPostgres(p.Source) {
+			res, err = a.forkRestore(ctx, p, tl)
+		} else {
+			res, err = a.engineForkRestore(ctx, p, tl) // engine_fork.go
+		}
 		if res == nil {
 			return nil, err
 		}
@@ -315,14 +321,20 @@ func (a *Agent) forkPrepare(ctx context.Context, p protocol.ForkPrepareParams, t
 		return nil, err
 	}
 	res := &protocol.ForkPrepareResult{ForkID: p.ForkID}
-	f, err := a.readPrimaryFacts(ctx, p.Source)
-	if err != nil {
-		return nil, fmt.Errorf("reading PostgreSQL's settings: %w", err)
+	if !isPostgres(p.Source) {
+		if err := a.engineForkFacts(ctx, p.Source, res); err != nil { // engine_fork.go
+			return nil, err
+		}
+	} else {
+		f, err := a.readPrimaryFacts(ctx, p.Source)
+		if err != nil {
+			return nil, fmt.Errorf("reading PostgreSQL's settings: %w", err)
+		}
+		if f.Tablespaces > 0 {
+			return nil, fmt.Errorf("this database uses %s; Rowsafe can't fork those to another server yet", countNoun(f.Tablespaces, "tablespace", "tablespaces"))
+		}
+		res.Major, res.SystemID, res.SizeBytes, res.Settings = f.Major, f.SystemID, f.SizeBytes, f.Settings
 	}
-	if f.Tablespaces > 0 {
-		return nil, fmt.Errorf("this database uses %s; Rowsafe can't fork those to another server yet", countNoun(f.Tablespaces, "tablespace", "tablespaces"))
-	}
-	res.Major, res.SystemID, res.SizeBytes, res.Settings = f.Major, f.SystemID, f.SizeBytes, f.Settings
 	repo, err := a.handedRepo(p.Source)
 	if err != nil {
 		return nil, err

@@ -51,6 +51,12 @@ type copyRecord struct {
 	Expires     time.Time             `json:"expires"`
 	RecoveredTo *time.Time            `json:"recovered_to,omitempty"`
 	SizeBytes   int64                 `json:"size_bytes"`
+	// Safe copies (copies_safe.go).
+	Kind            string `json:"kind,omitempty"`
+	Listen          string `json:"listen,omitempty"`
+	ListenPort      int    `json:"listen_port,omitempty"`
+	Role            string `json:"role,omitempty"`
+	PasswordVersion int    `json:"password_version,omitempty"`
 }
 
 type copyStore struct {
@@ -122,7 +128,7 @@ func (cs *copyStore) all() []copyRecord {
 
 func (cs *copyStore) forDatabase(dbID string) (copyRecord, bool) {
 	for _, r := range cs.all() {
-		if r.DatabaseID == dbID {
+		if r.DatabaseID == dbID && r.Kind != protocol.CopyKindSafe {
 			return r, true
 		}
 	}
@@ -173,7 +179,7 @@ func (e *Engine) rewindCopy(ctx context.Context, env agent.EngineEnv, db protoco
 	if err != nil {
 		return nil, err
 	}
-	b, err := pickBackup(ctx, r, target)
+	b, recovered, err := e.pickTarget(ctx, env, db, r, target, tl)
 	if err != nil {
 		return nil, err
 	}
@@ -213,8 +219,8 @@ func (e *Engine) rewindCopy(ctx context.Context, env agent.EngineEnv, db protoco
 		_ = cs.remove(rec.ID)
 		return nil, err
 	}
-	tl.Printf("restoring a copy of %s as of %s (backup %s) into a temporary ClickHouse server (127.0.0.1 only)",
-		db.Name, target.describe(), b.Label)
+	tl.Printf("restoring a copy of %s as of %s (%s) into a temporary ClickHouse server (127.0.0.1 only)",
+		db.Name, target.describe(), b.what())
 	c, err := s.start(cctx, env)
 	if err != nil {
 		return fail(err)
@@ -226,8 +232,7 @@ func (e *Engine) rewindCopy(ctx context.Context, env agent.EngineEnv, db protoco
 		return fail(err)
 	}
 	rec.Status = protocol.RewindCopyReady
-	stopped := b.StoppedAt
-	rec.RecoveredTo = &stopped
+	rec.RecoveredTo = &recovered
 	rec.SizeBytes = dirSize(s.dataDir())
 	if err := cs.put(rec); err != nil {
 		return fail(err)
@@ -910,11 +915,14 @@ func (e *Engine) expireCopies(env agent.EngineEnv, now time.Time) {
 func (e *Engine) RewindStates(env agent.EngineEnv) []protocol.RewindState {
 	var out []protocol.RewindState
 	for _, r := range e.copyState(env).all() {
+		if r.Kind == protocol.CopyKindSafe {
+			continue
+		}
 		exp := r.Expires
 		out = append(out, protocol.RewindState{ID: r.ID, DatabaseID: r.DatabaseID, Kind: protocol.RewindKindCopy, Status: r.Status,
 			SizeBytes: r.SizeBytes, Expires: &exp, CreatedAt: r.CreatedAt, RecoveredTo: r.RecoveredTo, Path: r.Dir})
 	}
-	return out
+	return append(out, env.Kept().States()...) // rewinds in place (inplace.go)
 }
 
 // SetRewindExpiries applies Extend from the control plane.

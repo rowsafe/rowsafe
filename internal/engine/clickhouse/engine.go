@@ -3,8 +3,8 @@
 // the agent, into the customer's bucket), Proof (restore tests in a
 // temporary server), Rewind (a copy at a backup or a Mark, compare, bring
 // rows back), Marks, monitoring (Pulse) with two fixes (stop a query,
-// cancel a stuck mutation) and discovery for the installer. ClickHouse
-// keeps no log of changes, so there are no restores to any second. It
+// cancel a stuck mutation) and discovery for the installer; restores to any
+// second from the parts it copies as they appear (pitr_*.go). It
 // registers itself with the agent (agent.RegisterEngine); the agent binary
 // imports it for that.
 package clickhouse
@@ -36,7 +36,17 @@ type Engine struct {
 	// (a Mark too) while it runs: retention, which takes the write lock,
 	// never deletes the full backup one reads from.
 	bases sync.Map // database id -> *sync.RWMutex
+	// ctx is the agent's (Start); shippers copy each database's changes
+	// (pitr_ship.go).
+	ctx      context.Context
+	shippers map[string]*shipper
+	// applying: the standbys' apply loop runs (standby_follow.go);
+	// standbyLocks serialize applying, promoting and removing a standby.
+	applying     bool
+	standbyLocks sync.Map // standby id -> *chLock
 }
+
+type chLock = sync.Mutex
 
 // baseLock is the database's lock between differential backups and
 // retention (see bases).
@@ -60,6 +70,11 @@ func (e *Engine) Tasks() []string {
 		protocol.TaskInspect, protocol.TaskAdopt, protocol.TaskCheck, protocol.TaskBackup, protocol.TaskDrill,
 		protocol.TaskRestorePoint, protocol.TaskMaintenance,
 		protocol.TaskRewindCopy, protocol.TaskRewindDrop, protocol.TaskRewindCompare, protocol.TaskRewindRows,
+		protocol.TaskDBAdmin, protocol.TaskSettings,
+		protocol.TaskRewindInPlace, protocol.TaskRewindUndo, protocol.TaskRewindCleanup,
+		protocol.TaskPreviewMigration, protocol.TaskCopySchema, protocol.TaskSafeCopy,
+		protocol.TaskIndexAdvisor, protocol.TaskPooling, protocol.TaskPoolerRetarget,
+		protocol.TaskFindMoment,
 	}
 }
 
@@ -72,8 +87,10 @@ func (e *Engine) Start(ctx context.Context, env agent.EngineEnv) {
 		return
 	}
 	e.started = true
+	e.ctx = ctx
 	e.mu.Unlock()
 	e.recoverCopies(ctx, env)
+	go e.recoverInPlace(ctx, env) // inplace.go
 	go func() {
 		t := time.NewTicker(time.Minute)
 		defer t.Stop()
@@ -84,6 +101,9 @@ func (e *Engine) Start(ctx context.Context, env agent.EngineEnv) {
 			case <-t.C:
 			}
 			e.expireCopies(env, time.Now())
+			e.expireKept(ctx, env, time.Now())
+			e.stopIdleShippers(5 * time.Minute)
+			e.expireStandbyKept(ctx, env, time.Now())
 		}
 	}()
 }
@@ -110,6 +130,38 @@ func (e *Engine) Run(ctx context.Context, env agent.EngineEnv, task *protocol.Ta
 		return nilIfNil(e.backup(ctx, env, db, p, tl))
 	case protocol.TaskDrill:
 		return nilIfNil(e.drill(ctx, env, db, task.ID, tl))
+	case protocol.TaskPooling: // pooling.go
+		var p protocol.PoolingParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.pooling(ctx, env, db, p, tl))
+	case protocol.TaskPoolerRetarget:
+		var p protocol.PoolerRetargetParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.poolerRetarget(ctx, env, db, p, tl))
+	case protocol.TaskIndexAdvisor: // advisor.go
+		var p protocol.IndexAdvisorParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.indexAdvisor(ctx, env, db, task.ID, p, tl))
+	case protocol.TaskSafeCopy:
+		var p protocol.SafeCopyParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.safeCopy(ctx, env, db, p, tl))
+	case protocol.TaskCopySchema:
+		return nilIfNil(e.copySchema(ctx, env, db))
+	case protocol.TaskPreviewMigration:
+		var p protocol.PreviewParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.previewMigration(ctx, env, db, task.ID, p, tl))
 	case protocol.TaskRestorePoint:
 		var p protocol.RestorePointParams
 		if err := decode(task, &p); err != nil {
@@ -146,6 +198,42 @@ func (e *Engine) Run(ctx context.Context, env agent.EngineEnv, task *protocol.Ta
 			return nil, err
 		}
 		return nilIfNil(e.rewindRows(ctx, env, db, p, tl))
+	case protocol.TaskFindMoment:
+		var p protocol.FindMomentParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.findMoment(ctx, env, db, p, tl))
+	case protocol.TaskSettings:
+		var p protocol.SettingsParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.settingsTask(ctx, env, db, p, tl))
+	case protocol.TaskDBAdmin:
+		var p protocol.DBAdminParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.dbadmin(ctx, env, db, task.ID, p, tl))
+	case protocol.TaskRewindInPlace:
+		var p protocol.RewindInPlaceParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.rewindInPlace(ctx, env, db, p, tl))
+	case protocol.TaskRewindUndo:
+		var p protocol.RewindUndoParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.rewindUndo(ctx, env, db, p, tl))
+	case protocol.TaskRewindCleanup:
+		var p protocol.RewindCleanupParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.rewindCleanup(ctx, env, db, p, tl))
 	}
 	return nil, fmt.Errorf("ClickHouse databases can't run %s tasks", task.Type)
 }

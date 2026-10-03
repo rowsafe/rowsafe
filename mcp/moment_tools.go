@@ -20,7 +20,7 @@ import (
 type findMomentInput struct {
 	Database string   `json:"database" jsonschema:"the database's name or ID"`
 	Tables   []string `json:"tables,omitempty" jsonschema:"only these tables: schema.table or just table (e.g. applications)"`
-	DB       string   `json:"db,omitempty" jsonschema:"only this PostgreSQL database inside the server (datname), when it has several"`
+	DB       string   `json:"db,omitempty" jsonschema:"only this database inside the server, when it has several"`
 	// SinceHours is how far back from To to search.
 	SinceHours float64    `json:"since_hours,omitempty" jsonschema:"how many hours back to search (default 24, at most 168); ignored when from is set"`
 	From       *time.Time `json:"from,omitempty" jsonschema:"search from this time (RFC 3339)"`
@@ -39,7 +39,7 @@ type MomentView struct {
 	Kind    string    `json:"kind" jsonschema:"delete, update, truncate or drop"`
 	DB      string    `json:"db"`
 	Table   string    `json:"table,omitempty"`
-	Rows    int64     `json:"rows" jsonschema:"rows deleted or changed; for truncate and drop, PostgreSQL's last estimate of the table's size"`
+	Rows    int64     `json:"rows" jsonschema:"rows deleted or changed; for truncate and drop, the server's last estimate of the table's size"`
 	Summary string    `json:"summary"`
 	// RewindTo is the point just before the transaction.
 	RewindTo time.Time `json:"rewind_to" jsonschema:"the point in time just before this transaction: restoring to it leaves the change out"`
@@ -60,12 +60,12 @@ type FindMomentView struct {
 	Guidance     string       `json:"guidance"`
 }
 
-const momentGuidance = "Tell the user what happened and when. PostgreSQL's change log doesn't record who made a change. To undo it, the user can Rewind to just before it: in the Rowsafe dashboard (Rewind, Find the moment, \"Rewind to just before this\"), or `rowsafe rewind copy NAME --at REWIND_TO`, then compare and bring the rows back. You can't restore anything yourself."
+const momentGuidance = "Tell the user what happened and when. The database's change log doesn't record who made a change. To undo it, the user can Rewind to just before it: in the Rowsafe dashboard (Rewind, Find the moment, \"Rewind to just before this\"), or `rowsafe rewind copy NAME --at REWIND_TO`, then compare and bring the rows back. You can't restore anything yourself."
 
 func (t *tools) addMomentTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "find_moment",
-		Description: "Finds when rows were deleted or changed, or a table emptied (TRUNCATE) or dropped: the Rowsafe agent reads the database's change log (WAL) in the user's own storage, on their server, " +
+		Description: "Finds when rows were deleted or changed, or a table emptied (TRUNCATE) or dropped: the Rowsafe agent reads the database's change log (PostgreSQL's WAL; for other engines where supported, their binary log or oplog) in the user's own storage, on their server, " +
 			"and lists the biggest changes per transaction with the exact commit time, transaction ID, table, row count and the point in time just before it (the moment to rewind to). " +
 			"Read-only: it never changes the database and never reads row contents. " +
 			"Default range: the last 24 hours. A search can take a minute or more; while its status is queued or running, the result has a task_id, and passing that task_id returns the search's result instead of starting a new one.",

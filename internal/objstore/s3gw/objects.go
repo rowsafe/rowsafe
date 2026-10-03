@@ -632,6 +632,11 @@ func (g *Gateway) list(q *request, query url.Values) error {
 			}
 		}
 	}
+	for k, v := range g.cfg.Virtual {
+		if strings.HasPrefix(k, prefix) {
+			objs = append(objs, entry{k, objstore.Object{Key: k, Size: -1 - v.Size(), LastModified: virtualTime}})
+		}
+	}
 	sort.Slice(objs, func(i, j int) bool { return objs[i].key < objs[j].key })
 	enc := func(s string) string { return s }
 	if query.Get("encoding-type") == "url" {
@@ -666,6 +671,11 @@ func (g *Gateway) list(q *request, query url.Values) error {
 			res.CommonPrefixes = append(res.CommonPrefixes, commonPrefix{Prefix: enc(entry)})
 			// Skip the rest of this common prefix.
 			after = entry + "\xff"
+			continue
+		}
+		if o.Size < 0 { // virtual
+			res.Contents = append(res.Contents, listContents{Key: enc(key), LastModified: o.LastModified.UTC().Format("2006-01-02T15:04:05.000Z"),
+				ETag: virtualETag(key, -1-o.Size), Size: -1 - o.Size, StorageClass: "STANDARD"})
 			continue
 		}
 		plain, err := objstore.PlainSize(o.Size)

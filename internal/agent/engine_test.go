@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rowsafe/rowsafe/internal/pgbackrest"
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
@@ -245,5 +246,56 @@ func TestSetupDiscoverEngines(t *testing.T) {
 	_ = s.Plan(t.Context(), "crm", 3307, "", "", 10*time.Millisecond)
 	if len(f.registers) == 0 || f.registers[0].Engine != protocol.EngineMySQL || f.registers[0].Port != 3307 {
 		t.Errorf("registered %+v", f.registers)
+	}
+}
+
+func TestEngineSecondCopy(t *testing.T) {
+	dir := t.TempDir()
+	repo2 := pgbackrest.Repo{Endpoint: "s3.example.test", Bucket: "copy2", Key: "k", KeySecret: "s", CipherPass: "second-passphrase-123456", Region: "auto", PathPrefix: "/rowsafe"}
+	a := &Agent{cfg: Config{StateDir: dir, Repo2: repo2}}
+	if msg := a.cfg.SecondCopyError(); msg != "" {
+		t.Fatalf("second copy settings: %s", msg)
+	}
+	f := &fakeEngine{name: protocol.EngineMySQL, archiver: &protocol.ArchiverStats{ArchivedCount: 7}}
+	withEngine(t, f)
+	db := protocol.DatabaseSpec{ID: "db_m", Name: "shop", Port: 3306, Engine: protocol.EngineMySQL, RetentionFull: 7}
+	tl := &taskLog{}
+	if _, err := a.runTask(t.Context(), &protocol.Task{ID: "t1", Type: protocol.TaskBackup, Database: &db,
+		Params: []byte(`{"type":"full","repo":2}`)}, tl); err != nil {
+		t.Fatal(err)
+	}
+	if f.ran[0] != "backup:db_m"+copy2Suffix || f.env.Repo.Bucket != "copy2" || !strings.HasSuffix(f.env.StateDir, "copy2") {
+		t.Errorf("ran %v env %+v", f.ran, f.env)
+	}
+	if _, err := a.runTask(t.Context(), &protocol.Task{ID: "t2", Type: protocol.TaskBackup, Database: &db}, tl); err != nil || f.ran[1] != "backup:db_m" || f.env.Repo.Bucket == "copy2" {
+		t.Errorf("first storage: %v %v", err, f.ran)
+	}
+	a.watched = []protocol.DatabaseSpec{db}
+	st := a.secondCopyStatuses()
+	if len(st) != 1 || !st[0].Ready || st[0].SentCount != 7 || st[0].DatabaseID != "db_m" {
+		t.Errorf("statuses %+v", st)
+	}
+	if s := copy2Spec(db); s.RetentionFull != protocol.DefaultSecondCopyRetentionFull {
+		t.Errorf("retention %d", s.RetentionFull)
+	}
+}
+
+// poolingEngine is a MySQL engine that runs a pooler for db_pooled.
+type poolingEngine struct{ fakeEngine }
+
+func (p *poolingEngine) PoolerManages(_ EngineEnv, db protocol.DatabaseSpec) bool {
+	return db.ID == "db_pooled"
+}
+
+func TestPoolerDatabasesIncludeEngines(t *testing.T) {
+	a := &Agent{cfg: Config{StateDir: t.TempDir()}}
+	withEngine(t, &poolingEngine{fakeEngine{name: protocol.EngineMySQL}})
+	a.watched = []protocol.DatabaseSpec{{ID: "db_pooled", Engine: protocol.EngineMySQL}, {ID: "db_plain", Engine: protocol.EngineMySQL}, {ID: "db_pg"}}
+	if got := a.poolerDatabases(); len(got) != 1 || got[0] != "db_pooled" {
+		t.Errorf("pooler databases = %v", got)
+	}
+	a.savePoolerState(&poolerState{DatabaseID: "db_pg", DatabaseName: "app"})
+	if got := a.poolerDatabases(); len(got) != 2 || got[0] != "db_pg" || got[1] != "db_pooled" {
+		t.Errorf("with PgBouncer too = %v", got)
 	}
 }

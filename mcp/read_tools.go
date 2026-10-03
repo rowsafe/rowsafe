@@ -76,7 +76,9 @@ type DatabaseDetail struct {
 	ScheduleDiff  string        `json:"schedule_diff" jsonschema:"cron, UTC; empty means disabled"`
 	ScheduleDrill string        `json:"schedule_drill" jsonschema:"cron, UTC"`
 	CreatedAt     time.Time     `json:"created_at"`
-	Postgres      *PostgresView `json:"postgres,omitempty"`
+	Engine        string        `json:"engine" jsonschema:"postgresql, mysql, mariadb, mongodb or clickhouse"`
+	Version       string        `json:"version,omitempty" jsonschema:"the database server's version"`
+	Postgres      *PostgresView `json:"postgres,omitempty" jsonschema:"PostgreSQL only: its settings relevant to archiving and its databases"`
 	WAL           *WALView      `json:"wal,omitempty"`
 	RecentBackups []BackupView  `json:"recent_backups"`
 	LastFull      *BackupView   `json:"last_full_backup,omitempty"`
@@ -112,13 +114,13 @@ func (t *tools) addReadTools(s *sdk.Server) {
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "list_databases",
-		Description: "Lists every PostgreSQL cluster Rowsafe protects or is adopting, with a health summary for each: status, PostgreSQL version and size, the last backup and last full backup (with age), the last restore test (Proof, drill) and whether it passed, WAL archiving (last archived segment, lag, failure counts, whether archiving is failing), and one-line problems. Read-only.",
+		Description: "Lists every database server Rowsafe protects or is adopting (PostgreSQL, MySQL, MariaDB, MongoDB or ClickHouse), with a health summary for each: engine, status, version and size, the last backup and last full backup (with age), the last restore test (Proof, drill) and whether it passed, continuous backup (PostgreSQL's WAL, MySQL's binary log or MongoDB's oplog: last copied, failure counts, whether it is failing), and one-line problems. Read-only.",
 		Annotations: readOnly("List databases"),
 	}, t.listDatabases)
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "get_database",
-		Description: "Shows one database in depth: status, host, socket and port, retention and cron schedules (UTC), PostgreSQL settings relevant to archiving (wal_level, archive_mode, pending restart), WAL archiving stats, recent backups, recent restore tests (drills), recent tasks, and its problems with next actions. Read-only.",
+		Description: "Shows one database in depth: engine and version, status, host, socket and port, retention and cron schedules (UTC), for PostgreSQL the settings relevant to archiving (wal_level, archive_mode, pending restart), continuous backup stats (WAL, binary log or oplog), recent backups, recent restore tests (drills), recent tasks, and its problems with next actions. Read-only.",
 		Annotations: readOnly("Show database"),
 	}, t.getDatabase)
 
@@ -133,7 +135,7 @@ func (t *tools) addReadTools(s *sdk.Server) {
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "list_drills",
-		Description: "Lists a database's restore tests (Proof; task type drill), newest first. A restore test restores the latest backup plus all archived WAL into a scratch cluster on the host and compares databases and table counts with production. Shows pass/fail, the backup used, the point in time recovered to, duration, and any failures or warnings.",
+		Description: "Lists a database's restore tests (Proof; task type drill), newest first. A restore test restores the latest backup plus the change log copied since (WAL, binary log or oplog) into a scratch server on the host and compares databases and table (or collection) counts with production. Shows pass/fail, the backup used, the point in time recovered to, duration, and any failures or warnings.",
 		Annotations: readOnly("List restore tests"),
 		InputSchema: inputSchema[listInput](func(p map[string]*jsonschema.Schema) {
 			p["limit"].Minimum, p["limit"].Maximum, p["limit"].Default = ptr(1.0), ptr(50.0), []byte("10")
@@ -156,7 +158,7 @@ func (t *tools) addReadTools(s *sdk.Server) {
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "get_task",
-		Description: "Shows one task: status, timing, error, its typed result (an adopt plan or what was applied, a backup, a restore test report, a restart, or a WAL check), the end of its log, and the suggested next step. " +
+		Description: "Shows one task: status, timing, error, its typed result (an adopt plan or what was applied, a backup, a restore test report, a restart, or a verification), the end of its log, and the suggested next step. " +
 			"done is false while the task is queued or running; backups and restore tests of large databases can run for hours. Read-only.",
 		Annotations: readOnly("Show task"),
 		InputSchema: inputSchema[getTaskInput](func(p map[string]*jsonschema.Schema) {
@@ -167,7 +169,7 @@ func (t *tools) addReadTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "fleet_health",
 		Description: "Checks the whole fleet at once and lists every problem, worst first, each with the exact next action, the rowsafe CLI command, and the MCP tool that does it when there is one. " +
-			"Covers: offline agents, stale or missing backups (none in 26h, no full in 8 days), failing WAL archiving, PostgreSQL unreachable by the agent, failed or overdue restore tests, databases not yet adopted or awaiting a PostgreSQL restart, failed WAL verification, recently failed or lost tasks, tasks never picked up, rolled-back or failed agent updates, and plan limits. Read-only.",
+			"Covers: offline agents, stale or missing backups (none in 26h, no full in 8 days), failing continuous backup (WAL, binary log or oplog), a database the agent can't reach, failed or overdue restore tests, databases not yet adopted or awaiting a restart, failed verification, recently failed or lost tasks, tasks never picked up, rolled-back or failed agent updates, and plan limits. Read-only.",
 		Annotations: readOnly("Fleet health"),
 	}, t.fleetHealth)
 }
@@ -259,9 +261,13 @@ func hostsByID(hosts []protocol.Host) map[string]*protocol.Host {
 
 func summarize(s dbState, host *protocol.Host, now time.Time) DatabaseSummary {
 	d := s.db
-	sum := DatabaseSummary{Name: d.Name, ID: d.ID, Host: d.Hostname, Status: d.Status, WAL: walView(d.Archiver, now)}
+	sum := DatabaseSummary{Name: d.Name, ID: d.ID, Host: d.Hostname, Status: d.Status, WAL: walView(d.Archiver, now),
+		Engine: protocol.NormalizeEngine(d.Engine), Version: d.EngineVersion}
 	if d.Inspect != nil {
-		sum.PostgresVersion, sum.SizeBytes = d.Inspect.ServerVersion, d.Inspect.TotalSizeBytes
+		sum.Version, sum.SizeBytes = cmpOr(sum.Version, d.Inspect.ServerVersion), d.Inspect.TotalSizeBytes
+	}
+	if sum.Engine == protocol.EnginePostgreSQL {
+		sum.PostgresVersion = sum.Version
 	}
 	if len(s.backups) > 0 {
 		sum.LastBackup = ptr(backupView(s.backups[0], now))
@@ -287,8 +293,10 @@ func summarize(s dbState, host *protocol.Host, now time.Time) DatabaseSummary {
 func summaryLine(s DatabaseSummary, now time.Time) string {
 	var parts []string
 	parts = append(parts, fmt.Sprintf("%s on %s: %s, health %s", s.Name, s.Host, s.Status, strings.ToUpper(s.Health)))
-	if s.PostgresVersion != "" {
-		parts = append(parts, fmt.Sprintf("PostgreSQL %s, %s", s.PostgresVersion, humanBytes(s.SizeBytes)))
+	if s.Version != "" {
+		parts = append(parts, fmt.Sprintf("%s %s, %s", protocol.EngineDisplayName(s.Engine), s.Version, humanBytes(s.SizeBytes)))
+	} else {
+		parts = append(parts, protocol.EngineDisplayName(s.Engine))
 	}
 	if s.LastBackup != nil {
 		parts = append(parts, fmt.Sprintf("last backup %s %s", s.LastBackup.Type, ago(&s.LastBackup.FinishedAt, now)))
@@ -303,7 +311,7 @@ func summaryLine(s DatabaseSummary, now time.Time) string {
 		parts = append(parts, fmt.Sprintf("last restore test %s %s", res, ago(&s.LastDrill.At, now)))
 	}
 	if w := s.WAL; w != nil {
-		wal := "WAL last archived " + ago(w.LastArchivedAt, now)
+		wal := cmpOr(changeLog(s.Engine), "change log") + " last copied " + ago(w.LastArchivedAt, now)
 		if w.Failing {
 			wal += " (ARCHIVING FAILING)"
 		}
@@ -330,7 +338,7 @@ func (t *tools) getDatabase(ctx context.Context, _ *sdk.CallToolRequest, in data
 		Port: d.Port, SocketDir: d.SocketDir, RetentionFull: d.RetentionFull,
 		ScheduleFull: d.ScheduleFull, ScheduleDiff: d.ScheduleDiff, ScheduleDrill: d.ScheduleDrill, CreatedAt: d.CreatedAt,
 		WAL: walView(d.Archiver, now), RecentBackups: []BackupView{}, RecentDrills: []DrillView{}, RecentTasks: []TaskView{},
-		Problems: problems,
+		Problems: problems, Engine: protocol.NormalizeEngine(d.Engine), Version: d.EngineVersion,
 	}
 	if out.Problems == nil {
 		out.Problems = []Problem{}
@@ -344,7 +352,10 @@ func (t *tools) getDatabase(ctx context.Context, _ *sdk.CallToolRequest, in data
 		if len(pv.Databases) > maxInspectDBs {
 			pv.Databases = pv.Databases[:maxInspectDBs]
 		}
-		out.Postgres = pv
+		out.Version = cmpOr(out.Version, in.ServerVersion)
+		if out.Engine == protocol.EnginePostgreSQL {
+			out.Postgres = pv
+		}
 	}
 	for i, bk := range s.backups {
 		if i < 5 {
@@ -369,6 +380,9 @@ func (t *tools) getDatabase(ctx context.Context, _ *sdk.CallToolRequest, in data
 	b.line("%s (%s) on %s: %s, health %s", d.Name, d.ID, d.Hostname, d.Status, strings.ToUpper(out.Health))
 	b.line("Socket %s port %d. Retention: %d full backups. Schedules (UTC): full %q, diff %q, restore test (drill) %q.",
 		d.SocketDir, d.Port, d.RetentionFull, d.ScheduleFull, d.ScheduleDiff, d.ScheduleDrill)
+	if out.Postgres == nil && out.Version != "" {
+		b.line("%s %s.", protocol.EngineDisplayName(out.Engine), out.Version)
+	}
 	if pv := out.Postgres; pv != nil {
 		b.line("PostgreSQL %s, %s, data directory %s; wal_level=%s archive_mode=%s archive_timeout=%ds",
 			pv.Version, humanBytes(pv.TotalSizeBytes), pv.DataDirectory, pv.WalLevel, pv.ArchiveMode, pv.ArchiveTimeoutSeconds)
@@ -377,7 +391,7 @@ func (t *tools) getDatabase(ctx context.Context, _ *sdk.CallToolRequest, in data
 		}
 	}
 	if w := out.WAL; w != nil {
-		b.line("WAL: last archived %s, %d archived, %d failed (last failure %s)%s", ago(w.LastArchivedAt, now), w.ArchivedCount,
+		b.line("%s: last copied %s, %d copied, %d failed (last failure %s)%s", cmpOr(changeLog(out.Engine), "Continuous backup"), ago(w.LastArchivedAt, now), w.ArchivedCount,
 			w.FailedCount, ago(w.LastFailedAt, now), map[bool]string{true: " - ARCHIVING FAILING", false: ""}[w.Failing])
 		if w.ReportError != "" {
 			b.line("  agent can't read archiver stats: %s", firstLine(w.ReportError, 200))
@@ -612,7 +626,7 @@ func taskText(d TaskDetail) textBuilder {
 		b.line("Took %s.", time.Duration(d.DurationSeconds)*time.Second)
 	}
 	if a := d.Adopt; a != nil {
-		if a.PostgresVersion != "" {
+		if a.PostgresVersion != "" && a.WalLevel != "" {
 			b.line("PostgreSQL %s, %s, data directory %s; wal_level=%s archive_mode=%s", a.PostgresVersion, humanBytes(a.TotalSizeBytes),
 				a.DataDirectory, a.WalLevel, a.ArchiveMode)
 		}
@@ -643,7 +657,7 @@ func taskText(d TaskDetail) textBuilder {
 		}
 	}
 	if r := d.Restart; r != nil && r.Restarted {
-		b.line("Restarted %s in %.1fs; archive_mode is %s", cmpOr(r.Unit, "PostgreSQL"), float64(r.DurationMs)/1000, cmpOr(r.ArchiveMode, "unknown"))
+		b.line("Restarted %s in %.1fs; archive_mode is %s", cmpOr(r.Unit, "the database"), float64(r.DurationMs)/1000, cmpOr(r.ArchiveMode, "unknown"))
 	}
 	if r := d.Backup; r != nil {
 		b.line("Backup %s (%s): %s database, %s stored, took %s", r.Label, r.Type, humanBytes(r.SizeBytes), humanBytes(r.RepoSizeBytes),

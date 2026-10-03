@@ -36,7 +36,17 @@ import (
 //   - INSERT, UPDATE: bringing rows back from a copy, only when a person
 //     asks for it in the dashboard;
 //   - CONNECTION_ADMIN (MySQL) / CONNECTION ADMIN (MariaDB): ending a query
-//     or session that blocks others, only when a person applies that fix.
+//     or session that blocks others, only when a person applies that fix;
+//   - CREATE USER, the database-level privileges WITH GRANT OPTION (CREATE,
+//     DROP, ALTER, DELETE...): Databases & users, creating and removing
+//     databases and users and giving users access to databases, only when
+//     a person asks in the dashboard (dbadmin.go). The server's own
+//     accounts (root, mysql.*) are never changed: MySQL protects accounts
+//     with SYSTEM_USER from accounts without it;
+//   - SYSTEM_VARIABLES_ADMIN, PERSIST_RO_VARIABLES_ADMIN (MySQL): Tuning,
+//     SET PERSIST of the settings Rowsafe explains, when a person changes
+//     them (settings.go); SUPER on MariaDB, which needs it for SET GLOBAL
+//     and keeps Rowsafe's settings in its option file instead.
 
 // AccountOptions describe how to create Rowsafe's account.
 type AccountOptions struct {
@@ -52,6 +62,12 @@ type AccountOptions struct {
 	// Owner owns the account file (the agent's OS user); -1 keeps the
 	// current user.
 	UID, GID int
+	// Standby also gives the account administrator rights (ALL PRIVILEGES
+	// WITH GRANT OPTION), which standby servers need: creating the
+	// replication login on a primary, loading the copy and its logins into
+	// an empty server, making a server read-only (fencing) and promoting a
+	// replica. Root answers this question at install.
+	Standby bool
 }
 
 // CreateAccount creates (or resets) Rowsafe's MySQL account with the
@@ -120,14 +136,21 @@ func CreateAccount(ctx context.Context, o AccountOptions) (string, error) {
 	}
 	version := strings.TrimSpace(string(out))
 	stmts := accountSQL(f, version, password)
+	if o.Standby {
+		stmts = append(stmts, standbyGrant)
+	}
 	if out, err := run(strings.Join(stmts, ";\n") + ";\n"); err != nil {
 		return "", fmt.Errorf("creating the %s account failed: %s", rowsafeUser, firstLine(string(out)))
 	}
 	if err := saveAccount(stateDir, o.Port, account{User: rowsafeUser, Password: password}, o.UID, o.GID); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("Created the %s account %s@localhost for Rowsafe on %s (its password is kept in %s).",
-		f.display(), rowsafeUser, version, accountPath(stateDir, o.Port)), nil
+	extra := ""
+	if o.Standby {
+		extra = " It may also set up standby servers (replication) with this server."
+	}
+	return fmt.Sprintf("Created the %s account %s@localhost for Rowsafe on %s (its password is kept in %s).%s",
+		f.display(), rowsafeUser, version, accountPath(stateDir, o.Port), extra), nil
 }
 
 // createAccountAsAdmin creates Rowsafe's account through the driver with
@@ -165,12 +188,20 @@ func accountSQL(f flavor, version, password string) []string {
 	var grants []string
 	if f.mariadb() {
 		grants = []string{
-			"GRANT SELECT, INSERT, UPDATE, SHOW VIEW, TRIGGER, RELOAD, PROCESS, LOCK TABLES, BINLOG MONITOR, CONNECTION ADMIN ON *.* TO " + user,
+			"GRANT SELECT, INSERT, UPDATE, INDEX, SHOW VIEW, TRIGGER, RELOAD, PROCESS, LOCK TABLES, BINLOG MONITOR, CONNECTION ADMIN ON *.* TO " + user,
+			"GRANT " + ownerPrivileges + ", CREATE USER ON *.* TO " + user + " WITH GRANT OPTION",
+			// Tuning: MariaDB lets only SUPER run SET GLOBAL for most
+			// settings (settings.go keeps them in Rowsafe's option file too).
+			"GRANT SUPER ON *.* TO " + user,
 		}
 	} else {
 		grants = []string{
-			"GRANT SELECT, INSERT, UPDATE, SHOW VIEW, TRIGGER, RELOAD, PROCESS, LOCK TABLES, REPLICATION CLIENT ON *.* TO " + user,
+			"GRANT SELECT, INSERT, UPDATE, INDEX, SHOW VIEW, TRIGGER, RELOAD, PROCESS, LOCK TABLES, REPLICATION CLIENT ON *.* TO " + user,
 			"GRANT BACKUP_ADMIN, CONNECTION_ADMIN ON *.* TO " + user,
+			// Tuning and the "Turn on the slow query log" fix: SET PERSIST of the
+			// settings Rowsafe explains (settings.go), only when a person asks.
+			"GRANT SYSTEM_VARIABLES_ADMIN, PERSIST_RO_VARIABLES_ADMIN ON *.* TO " + user,
+			"GRANT " + ownerPrivileges + ", CREATE USER ON *.* TO " + user + " WITH GRANT OPTION",
 		}
 	}
 	_ = version
@@ -179,6 +210,10 @@ func accountSQL(f flavor, version, password string) []string {
 		"ALTER USER " + user + " IDENTIFIED BY " + pw,
 	}, grants...)
 }
+
+// standbyGrant gives Rowsafe's account what standby servers need (see
+// AccountOptions.Standby).
+const standbyGrant = "GRANT ALL PRIVILEGES ON *.* TO 'rowsafe'@'localhost' WITH GRANT OPTION"
 
 // saveAccount writes the account file (0600) and gives it to uid:gid.
 func saveAccount(stateDir string, port int, a account, uid, gid int) error {

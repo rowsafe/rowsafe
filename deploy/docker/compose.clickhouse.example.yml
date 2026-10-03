@@ -3,9 +3,10 @@
 # ClickHouse (the official, unmodified clickhouse/clickhouse-server image)
 # with the Rowsafe agent as a sidecar on the same compose network: full and
 # hourly differential backups to your bucket (encrypted in the agent
-# container, with your passphrase), Marks, weekly Proof, Rewind copies and
-# Pulse. ClickHouse keeps no log of changes, so restores go to a backup or
-# a Mark, not to any second.
+# container, with your passphrase), restores to any second, Marks, weekly
+# Proof, Rewind copies and Pulse. For restores to any second the agent reads
+# ClickHouse's data volume (mounted read only below) and copies each new
+# part to your bucket as it appears.
 #
 #   1. Put the agent's settings in rowsafe-agent.env next to this file
 #      (chmod 600), with a one-time token from `rowsafe hosts enroll-token`,
@@ -63,6 +64,7 @@ services:
     env_file: rowsafe-agent.env
     volumes:
       - rowsafe-state:/var/lib/rowsafe
+      - chdata:/var/lib/clickhouse:ro                         # read only: restores to any second copy new parts from it
       # Optional, see "Update now" below:
       # - rowsafe-control:/run/rowsafe-control
 

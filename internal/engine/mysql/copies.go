@@ -44,11 +44,26 @@ type copyRecord struct {
 	CreatedAt   time.Time             `json:"created_at"`
 	SizeBytes   int64                 `json:"size_bytes"`
 	Databases   []protocol.DBInfo     `json:"databases,omitempty"`
+	// Safe copies (copies_safe.go): Kind is protocol.CopyKindSafe, the
+	// address and port they listen on, the login (on each allowed host),
+	// the last password version set, and the copy's own admin account
+	// (local socket only).
+	Kind            string   `json:"kind,omitempty"`
+	Listen          string   `json:"listen,omitempty"`
+	Port            int      `json:"port,omitempty"`
+	Role            string   `json:"role,omitempty"`
+	Hosts           []string `json:"hosts,omitempty"`
+	PasswordVersion int      `json:"password_version,omitempty"`
+	AdminPassword   string   `json:"admin_password,omitempty"`
 }
 
 func (r *copyRecord) scratch() *scratch {
-	return &scratch{Dir: r.Dir, DataDir: filepath.Join(r.Dir, "data"), Socket: filepath.Join(r.Dir, "socket", "mysqld.sock"),
+	sc := &scratch{Dir: r.Dir, DataDir: filepath.Join(r.Dir, "data"), Socket: filepath.Join(r.Dir, "socket", "mysqld.sock"),
 		PID: r.PID, Args: r.Args}
+	if r.AdminPassword != "" {
+		sc.Admin = &account{User: copyAdminUser, Password: r.AdminPassword, Source: "the copy's admin"}
+	}
+	return sc
 }
 
 // copyStore keeps an engine's copies (copies.json in its state directory).
@@ -127,7 +142,7 @@ func (cs *copyStore) forDatabase(dbID string) (copyRecord, bool) {
 	defer cs.mu.Unlock()
 	cs.loadLocked()
 	for _, r := range cs.recs {
-		if r.DatabaseID == dbID {
+		if r.DatabaseID == dbID && r.Kind != protocol.CopyKindSafe {
 			return *r, true
 		}
 	}
@@ -157,7 +172,7 @@ func (cs *copyStore) states(engine string) []protocol.RewindState {
 	cs.loadLocked()
 	var out []protocol.RewindState
 	for _, r := range cs.recs {
-		if r.Engine != engine {
+		if r.Engine != engine || r.Kind == protocol.CopyKindSafe {
 			continue
 		}
 		exp := r.Expires
@@ -218,7 +233,7 @@ func (cs *copyStore) housekeeping(env agent.EngineEnv) {
 		_, active := cs.restoring[r.ID]
 		switch {
 		case active:
-		case r.Status == protocol.RewindCopyRestoring:
+		case r.Status == protocol.RewindCopyRestoring || (r.Kind == protocol.CopyKindSafe && r.Status != protocol.CopyReady):
 			interrupted = append(interrupted, *r)
 		case now.After(r.Expires):
 			expired = append(expired, *r)

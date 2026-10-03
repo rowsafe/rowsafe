@@ -19,7 +19,7 @@ const (
 	maxErrorBytes   = 2000     // one task error
 	defaultLogTail  = 4000
 	maxLogTail      = 16000
-	maxInspectDBs   = 50 // databases listed from one PostgreSQL cluster
+	maxInspectDBs   = 50 // databases listed from one database server
 	onlineThreshold = 5 * time.Minute
 )
 
@@ -104,7 +104,7 @@ type WALView struct {
 	FailedCount    int64      `json:"failed_count"`
 	LastFailedAt   *time.Time `json:"last_failed_at,omitempty"`
 	Failing        bool       `json:"failing" jsonschema:"the most recent archive attempt failed"`
-	ReportError    string     `json:"report_error,omitempty" jsonschema:"why the agent could not read pg_stat_archiver (PostgreSQL down or refusing the agent)"`
+	ReportError    string     `json:"report_error,omitempty" jsonschema:"why the agent could not read the continuous backup's state (the database is down or refusing the agent)"`
 }
 
 func walView(a *protocol.ArchiverStats, now time.Time) *WALView {
@@ -134,6 +134,8 @@ type DatabaseSummary struct {
 	ID              string      `json:"id"`
 	Host            string      `json:"host"`
 	Status          string      `json:"status" jsonschema:"pending_adopt, awaiting_restart, verifying or active"`
+	Engine          string      `json:"engine" jsonschema:"postgresql, mysql, mariadb, mongodb or clickhouse"`
+	Version         string      `json:"version,omitempty" jsonschema:"the database server's version"`
 	PostgresVersion string      `json:"postgres_version,omitempty"`
 	SizeBytes       int64       `json:"size_bytes,omitempty"`
 	LastBackup      *BackupView `json:"last_backup,omitempty"`
@@ -308,9 +310,9 @@ func nextStep(t protocol.TaskView, d TaskDetail) string {
 	case protocol.StatusFailed:
 		switch t.Type {
 		case protocol.TaskCheck:
-			return fmt.Sprintf("WAL verification failed. Read the error and log; usually archive_mode is still off (PostgreSQL not restarted) or the repository credentials are wrong. After fixing it: `rowsafe verify %s` (tool verify_database).", name)
+			return fmt.Sprintf("Verification failed. Read the error and log; usually a setting still waits for a restart of the database server (for PostgreSQL archive_mode) or the bucket credentials are wrong. After fixing it: `rowsafe verify %s` (tool verify_database).", name)
 		case protocol.TaskBackup:
-			return fmt.Sprintf("Read the error and log (pgBackRest output). After fixing the cause: `rowsafe backup %s --type diff` (tool run_backup). See https://rowsafe.sh/docs/guides/monitoring.", name)
+			return fmt.Sprintf("Read the error and log (the backup tool's output). After fixing the cause: `rowsafe backup %s --type diff` (tool run_backup). See https://rowsafe.sh/docs/guides/monitoring.", name)
 		case protocol.TaskDrill:
 			return fmt.Sprintf("Read the error and log. After fixing the cause: `rowsafe proof %s` (tool run_drill). See https://rowsafe.sh/docs/guides/monitoring.", name)
 		case protocol.TaskAdopt:
@@ -318,11 +320,11 @@ func nextStep(t protocol.TaskView, d TaskDetail) string {
 		case protocol.TaskRestorePoint:
 			return "The restore point was not created. Don't run a destructive operation relying on it; check safety_check for the cause."
 		case protocol.TaskRestart:
-			return "The PostgreSQL restart failed; the error says why (e.g. restarting from Rowsafe isn't allowed on this server). Tell the user; restarting is theirs to do, and no tool here can."
+			return "The database server's restart failed; the error says why (e.g. restarting from Rowsafe isn't allowed on this server). Tell the user; restarting is theirs to do, and no tool here can."
 		case protocol.TaskMaintenance:
 			return "The health fix didn't run; the error says why in plain words (Rowsafe checks each fix again right before it runs and leaves things alone when they changed). Tell the user; they can apply it again from the dashboard (Pulse, Health, Apply fix) if it still applies. No tool here applies fixes."
 		case protocol.TaskSecurityFix:
-			return "The security change didn't go through; the error says why (Rowsafe checks every change with PostgreSQL first and puts the previous settings back when something is off). Tell the user; they can try again from Pulse, Security in the dashboard. No tool here changes security settings."
+			return "The security change didn't go through; the error says why (Rowsafe checks every change with the database first and puts the previous settings back when something is off). Tell the user; they can try again from Pulse, Security in the dashboard. No tool here changes security settings."
 		case protocol.TaskRewindCopy, protocol.TaskRewindDrop, protocol.TaskRewindCompare, protocol.TaskRewindRows,
 			protocol.TaskRewindInPlace, protocol.TaskRewindUndo, protocol.TaskRewindCleanup:
 			return "This Rewind step failed; the error says why in plain words (a failed rewind in place puts the original data back by itself). Tell the user; they can try again from Rewind in the dashboard. No tool here rewinds."
@@ -336,11 +338,11 @@ func nextStep(t protocol.TaskView, d TaskDetail) string {
 		}
 		switch {
 		case !d.Adopt.Applied:
-			return fmt.Sprintf("This is a read-only plan; nothing changed. Show it to the user. If they approve, they apply it: the Turn on backups button in the dashboard, or `rowsafe apply %s` (AI assistants can't). Applying never restarts PostgreSQL.", name)
+			return fmt.Sprintf("This is a read-only plan; nothing changed. Show it to the user. If they approve, they apply it: the Turn on backups button in the dashboard, or `rowsafe apply %s` (AI assistants can't). Applying never restarts the database server.", name)
 		case d.Adopt.RestartRequired:
-			return fmt.Sprintf("Settings applied. PostgreSQL needs a restart for backups to start; the user restarts it when it suits them (Restart PostgreSQL in the dashboard, `rowsafe restart %s`, or on the server: sudo systemctl restart postgresql, or in Docker: docker compose restart postgres). Rowsafe never restarts it on its own, and AI assistants can't. Rowsafe notices the restart and verifies by itself; `rowsafe verify %s` (tool verify_database) checks right away.", name, name)
+			return fmt.Sprintf("Settings applied. The database server needs a restart for backups to start; the user restarts it when it suits them (Restart in the dashboard or `rowsafe restart %s` where Rowsafe can restart it, or on the server, e.g. sudo systemctl restart postgresql, mysql, mariadb or mongod, or in Docker: docker compose restart SERVICE). Rowsafe never restarts it on its own, and AI assistants can't. Rowsafe notices the restart and verifies by itself; `rowsafe verify %s` (tool verify_database) checks right away.", name, name)
 		default:
-			return fmt.Sprintf("Settings applied; a WAL verification (check) was queued automatically. Follow it with list_tasks for %s.", name)
+			return fmt.Sprintf("Settings applied; a verification (check) was queued automatically. Follow it with list_tasks for %s.", name)
 		}
 	case protocol.TaskCheck:
 		if d.CheckOK != nil && *d.CheckOK {

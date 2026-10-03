@@ -28,11 +28,17 @@ type monitorState struct {
 	sizesAt    time.Time
 	statsAt    time.Time
 	insightsAt time.Time
+	settingsAt time.Time
+	// ProxySQL (pooling.go)
+	poolQuestions float64
+	poolAt        time.Time
+	poolUsersAt   time.Time
 	// serverStart is the server's start time, kept stable across samples
 	// (uptime has a one-second granularity): with a connection ID it names
 	// a session for a fix.
 	serverStart time.Time
 	binlogSize  int64
+	stmts       *collect.StmtTracker
 }
 
 var (
@@ -180,11 +186,22 @@ func (s *server) monitor(ctx context.Context) (*protocol.DatabaseMonitoring, err
 		}
 	}
 	if now.Sub(st.statsAt) >= 5*time.Minute {
-		dm.Statements = s.statements(ctx, db)
+		dm.Statements, dm.QueryStats = s.statements(ctx, db, st, now)
 		st.statsAt = now
 	}
+	dm.Pooler = s.poolerStats(ctx, &st.poolQuestions, &st.poolAt)
+	if dm.Pooler != nil && now.Sub(st.poolUsersAt) >= 5*time.Minute {
+		s.syncPoolUsers(ctx, db)
+		st.poolUsersAt = now
+	}
+	if now.Sub(st.settingsAt) >= 5*time.Minute {
+		if snap, err := s.settingsSnapshot(ctx, db); err == nil {
+			dm.Settings = snap
+			st.settingsAt = now
+		}
+	}
 	if now.Sub(st.insightsAt) >= 30*time.Minute {
-		if ins := insights(ctx, db); ins != nil {
+		if ins := s.insights(ctx, db, st.serverStart); ins != nil {
 			dm.Insights = ins
 			st.insightsAt = now
 		}
@@ -407,8 +424,11 @@ func (s *server) replication(ctx context.Context, db *sql.DB, dm *protocol.Datab
 	dm.Replication = rs
 }
 
-// statements is the top of performance_schema's statement digests.
-func (s *server) statements(ctx context.Context, db *sql.DB) *protocol.Statements {
+// statements is the top of performance_schema's statement digests
+// (cumulative) and, through the tracker, the activity since the previous
+// reading. Digest texts are normalized by the server: literal values are
+// replaced with "?", so no data leaves the server.
+func (s *server) statements(ctx context.Context, db *sql.DB, st *monitorState, now time.Time) (*protocol.Statements, *protocol.QueryStats) {
 	out := &protocol.Statements{CollectedAt: time.Now().UTC(), Statements: []protocol.StatementStat{}}
 	var on int
 	if db.QueryRowContext(ctx, "SELECT @@performance_schema").Scan(&on) != nil || on != 1 {
@@ -416,37 +436,69 @@ func (s *server) statements(ctx context.Context, db *sql.DB) *protocol.Statement
 		if s.flavor.mariadb() {
 			out.Reason += " (MariaDB's default): add performance_schema=ON to the server's options and restart it to see the busiest statements"
 		}
-		return out
+		return out, nil
 	}
 	rows, err := db.QueryContext(ctx, `
 		SELECT COALESCE(digest, ''), COALESCE(digest_text, ''), COALESCE(schema_name, ''), count_star,
-		       sum_timer_wait / 1000000000, sum_rows_sent + sum_rows_affected
+		       sum_timer_wait / 1000000000, sum_rows_sent + sum_rows_affected, sum_rows_examined,
+		       sum_no_index_used, sum_created_tmp_disk_tables
 		FROM performance_schema.events_statements_summary_by_digest
-		WHERE digest IS NOT NULL ORDER BY sum_timer_wait DESC LIMIT 25`)
+		WHERE digest IS NOT NULL ORDER BY sum_timer_wait DESC LIMIT `+strconv.Itoa(maxDigests+1))
 	if err != nil {
 		out.Reason = "reading performance_schema failed: " + firstLine(err.Error())
-		return out
+		return out, nil
 	}
 	defer rows.Close()
 	text := collectQueryText()
+	var readings []collect.StmtReading
 	for rows.Next() {
-		var st protocol.StatementStat
+		var r collect.StmtReading
 		var digest string
-		if err := rows.Scan(&digest, &st.Query, &st.Database, &st.Calls, &st.TotalTimeMs, &st.Rows); err != nil {
+		if err := rows.Scan(&digest, &r.Query, &r.Database, &r.Calls, &r.TotalTimeMs, &r.Rows, &r.RowsExamined,
+			&r.FullScans, &r.TmpDiskTables); err != nil {
 			continue
 		}
-		st.QueryID = digestID(digest)
-		if st.Calls > 0 {
-			st.MeanTimeMs = st.TotalTimeMs / float64(st.Calls)
+		r.ID = digestID(digest)
+		if ownStatement(r.Query) {
+			continue // the agent's own monitoring
 		}
 		if !text {
-			st.Query = ""
+			r.Query = ""
 		}
-		st.Query = truncate(st.Query, 2000)
-		out.Statements = append(out.Statements, st)
+		readings = append(readings, r)
+	}
+	truncated := len(readings) > maxDigests
+	if truncated {
+		readings = readings[:maxDigests]
+	}
+	for _, r := range readings[:min(len(readings), 25)] {
+		x := protocol.StatementStat{QueryID: r.ID, Query: truncate(r.Query, 2000), Database: r.Database,
+			Calls: r.Calls, TotalTimeMs: r.TotalTimeMs, Rows: r.Rows}
+		if x.Calls > 0 {
+			x.MeanTimeMs = x.TotalTimeMs / float64(x.Calls)
+		}
+		out.Statements = append(out.Statements, x)
 	}
 	out.Available = true
-	return out
+	// The digest table restarts with the server: its start is the epoch.
+	if st.stmts == nil {
+		st.stmts = &collect.StmtTracker{}
+	}
+	qs := st.stmts.Observe(st.serverStart.Format(time.RFC3339), now, readings, truncated)
+	if qs != nil {
+		qs.CollectedAt = now.UTC()
+	}
+	return out, qs
+}
+
+// maxDigests is how many statement digests are read per round
+// (performance_schema keeps 10000 at most by default).
+const maxDigests = 5000
+
+// ownStatement: the catalog reads of the agent's own monitoring (and of
+// admin tools), left out of the statement lists.
+func ownStatement(q string) bool {
+	return strings.Contains(q, "performance_schema") || strings.Contains(q, "information_schema") || strings.HasPrefix(q, "SHOW ")
 }
 
 // digestID turns a statement digest (hex) into a 64-bit integer string.
@@ -476,7 +528,7 @@ func isRuneStart(b byte) bool { return b&0xC0 != 0x80 }
 
 // insights: the largest tables and the free space inside InnoDB tables
 // (data_free: space a rebuild, OPTIMIZE TABLE, gives back to the disk).
-func insights(ctx context.Context, db *sql.DB) *protocol.Insights {
+func (s *server) insights(ctx context.Context, db *sql.DB, serverStart time.Time) *protocol.Insights {
 	start := time.Now()
 	ins := &protocol.Insights{CollectedAt: start.UTC(), LargestTables: []protocol.TableSize{}, LargestIndexes: []protocol.IndexSize{},
 		TableBloat: []protocol.TableBloat{}, IndexBloat: []protocol.IndexBloat{}, UnusedIndexes: []protocol.UnusedIndex{},
@@ -519,6 +571,8 @@ func insights(ctx context.Context, db *sql.DB) *protocol.Insights {
 	if len(ins.TableBloat) > 20 {
 		ins.TableBloat = ins.TableBloat[:20]
 	}
+	rows.Close()
+	s.advisorFacts(ctx, db, ins, serverStart) // advisor.go
 	ins.DurationMs = time.Since(start).Milliseconds()
 	return ins
 }

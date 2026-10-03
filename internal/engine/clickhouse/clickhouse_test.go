@@ -257,7 +257,7 @@ func TestRetentionAndPick(t *testing.T) {
 	if b, err := pickBackup(ctx, r, restoreTarget{Time: at.Add(2 * time.Hour), BackupSet: f2}); err != nil || b.Label != f2 {
 		t.Fatalf("the control plane's pick wins for a moment: %+v %v", b, err)
 	}
-	if _, err := pickBackup(ctx, r, restoreTarget{Time: at}); err == nil || !strings.Contains(err.Error(), "not to any second") {
+	if _, err := pickBackup(ctx, r, restoreTarget{Time: at}); err == nil || !strings.Contains(err.Error(), "pick a later moment") {
 		t.Fatalf("before the first backup: %v", err)
 	}
 
@@ -380,7 +380,7 @@ func TestUsersXMLAndStatus(t *testing.T) {
 	}
 	sum := sha256.Sum256([]byte(l.Password))
 	if !strings.Contains(x, hex.EncodeToString(sum[:])) || strings.Contains(x, l.Password) ||
-		!strings.Contains(x, "<query>GRANT SELECT, INSERT, BACKUP, KILL QUERY, ALTER UPDATE, ALTER DELETE, S3 ON *.*</query>") ||
+		!strings.Contains(x, "<query>GRANT SELECT, INSERT, BACKUP, KILL QUERY, ALTER UPDATE, ALTER DELETE, S3, CREATE DATABASE, CREATE TABLE, DROP DATABASE, DROP TABLE, ALTER TABLE ON *.*</query>") ||
 		!strings.Contains(x, "<ip>127.0.0.1</ip>") {
 		t.Fatal(x)
 	}
@@ -534,5 +534,25 @@ func TestScratchKeeperOnlyWhenReplicated(t *testing.T) {
 		if b.needsKeeper() && !regexp.MustCompile(`<interserver_http_credentials><user>rowsafe</user><password>[A-Za-z0-9_-]{40}</password>`).Match(conf) {
 			t.Fatalf("the replication port has no login:\n%s", conf)
 		}
+	}
+}
+
+func TestMoveInCreate(t *testing.T) {
+	for in, want := range map[string]string{
+		"CREATE TABLE shop.e (a UInt8) ENGINE = SharedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}') ORDER BY a": "CREATE TABLE `moved`.e (a UInt8) ENGINE = MergeTree ORDER BY a",
+		"CREATE TABLE shop.e (a UInt8, v UInt8) ENGINE = SharedReplacingMergeTree('/p/{uuid}', '{replica}', v) ORDER BY a":    "CREATE TABLE `moved`.e (a UInt8, v UInt8) ENGINE = ReplacingMergeTree(v) ORDER BY a",
+		"CREATE TABLE shop.e (a UInt8) ENGINE = MergeTree ORDER BY a":                                                         "CREATE TABLE `moved`.e (a UInt8) ENGINE = MergeTree ORDER BY a",
+		"CREATE VIEW shop.v AS SELECT a FROM shop.e":                                                                          "CREATE VIEW `moved`.v AS SELECT a FROM `moved`.e",
+	} {
+		if got := localCreate(srcTable{Create: in}, "shop", "moved"); got != want {
+			t.Errorf("%s\n got %s\nwant %s", in, got, want)
+		}
+	}
+	src, err := parseMigSource("clickhouse://default:pw@abc.eu-west-1.aws.clickhouse.cloud/shop")
+	if err != nil || src.URL.String() != "https://abc.eu-west-1.aws.clickhouse.cloud:8443/" || src.DB != "shop" || src.Password != "pw" {
+		t.Fatalf("%+v %v", src, err)
+	}
+	if _, err := parseMigSource("https://u:p@h:8443/system"); err == nil {
+		t.Error("system database accepted")
 	}
 }

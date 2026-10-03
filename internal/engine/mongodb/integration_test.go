@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
+	rsclient "github.com/rowsafe/rowsafe/client"
 	"github.com/rowsafe/rowsafe/internal/agent"
 	"github.com/rowsafe/rowsafe/internal/objstore/fakes3"
 	"github.com/rowsafe/rowsafe/internal/pgbackrest"
@@ -192,6 +194,51 @@ func TestMongoDBEndToEnd(t *testing.T) {
 		t.Fatalf("drill left %d entries", len(left))
 	}
 
+	// Guard: a migration preview on a copy; production is untouched.
+	pv, err := run[protocol.PreviewResult](t, e, env, db, protocol.TaskPreviewMigration, protocol.PreviewParams{PreviewID: "p1", DB: "shop",
+		SQL: "// archive old orders\n" +
+			"db.orders.updateMany({ total: { $lt: 500 } }, { $set: { archived: true } });\n" +
+			"db.orders.createIndex({ archived: 1, total: -1 })\n" +
+			"db.orders.find({})\n" +
+			"db.createCollection('events')\n" +
+			"db.events.insertMany([{ a: 1 }, { a: 2 }])\n" +
+			"db.orders.deleteMany({})\n" +
+			"db.events.insertOne({ _id: ObjectId('64b7f0000000000000000000') })\n" +
+			"db.events.insertOne({ _id: ObjectId('64b7f0000000000000000000') })\n"})
+	if err != nil {
+		t.Fatal("preview:", err)
+	}
+	t.Logf("preview: %s", pv.Summary)
+	if pv.Verdict != protocol.PreviewFailed || pv.Error == nil || pv.Error.Statement != 8 || pv.Error.Code != "11000" {
+		t.Fatalf("preview: %+v %+v", pv, pv.Error)
+	}
+	if s := pv.Statements[0]; s.Rows == nil || *s.Rows != 50 {
+		t.Errorf("updateMany: %+v", s)
+	}
+	if s := pv.Statements[1]; len(s.IndexBuilds) != 1 || s.IndexBuilds[0].Name != "shop.orders.archived_1_total_-1" {
+		t.Errorf("createIndex: %+v", s)
+	}
+	if s := pv.Statements[2]; s.Ran {
+		t.Errorf("find ran: %+v", s)
+	}
+	if s := pv.Statements[5]; s.Rows == nil || *s.Rows < 1000 {
+		t.Errorf("deleteMany: %+v", s)
+	}
+	if !slices.ContainsFunc(pv.Findings, func(f protocol.PreviewFinding) bool { return f.Rule == "delete_all" }) {
+		t.Errorf("findings: %+v", pv.Findings)
+	}
+	if n, _ := orders.CountDocuments(ctx, bson.D{{Key: "archived", Value: true}}); n != 0 {
+		t.Fatalf("the preview changed production: %d archived", n)
+	}
+	if bad, err := run[protocol.PreviewResult](t, e, env, db, protocol.TaskPreviewMigration, protocol.PreviewParams{PreviewID: "p2",
+		SQL: "for (const d of db.orders.find()) { db.orders.updateOne({_id: d._id}, {$set: {x: 1}}) }"}); err != nil || bad.Verdict != protocol.PreviewFailed || bad.RestoreMs != 0 {
+		t.Fatalf("unsupported script: %+v %v", bad, err)
+	}
+	if left, _ := os.ReadDir(drillRoot(env)); len(left) != 0 {
+		t.Fatalf("preview left %d entries", len(left))
+	}
+	safeCopyIntegration(t, e, env, db)
+
 	// Rewind: a copy at t1 (before the accident).
 	cp, err := run[protocol.RewindCopyResult](t, e, env, db, protocol.TaskRewindCopy,
 		protocol.RewindCopyParams{CopyID: "copy1", Target: protocol.RewindTarget{Time: &t1}})
@@ -354,5 +401,70 @@ func TestMongoDBEndToEnd(t *testing.T) {
 	found, err := e.Discover(ctx, env)
 	if err != nil || len(found) == 0 || found[0].Port != port || found[0].Version == "" {
 		t.Fatalf("discover: %+v %v", found, err)
+	}
+}
+
+// safeCopyIntegration makes a masked safe copy, signs in over TLS with the
+// password made here, sets a new one and deletes it.
+func safeCopyIntegration(t *testing.T, e *Engine, env agent.EngineEnv, db protocol.DatabaseSpec) {
+	t.Helper()
+	ctx := context.Background()
+	env.Config.Copies = agent.CopiesConfig{Dir: filepath.Join(env.Config.StateDir, "copies"), PortMin: 55440, PortMax: 55460}
+	env.Copies = agent.NewCopyTools(env.Config)
+	sr, err := run[protocol.CopySchemaResult](t, e, env, db, protocol.TaskCopySchema, nil)
+	if err != nil || !slices.ContainsFunc(sr.Databases, func(d protocol.SchemaDatabase) bool {
+		return d.Name == "shop" && slices.ContainsFunc(d.Tables, func(t protocol.SchemaTable) bool {
+			return t.Name == "orders" && slices.ContainsFunc(t.Columns, func(c protocol.SchemaColumn) bool { return c.Name == "email" && c.Type == "string" })
+		})
+	}) {
+		t.Fatalf("copy_schema: %+v %v", sr, err)
+	}
+	pw, verifier, _ := rsclient.NewCopyPasswordFor(protocol.EngineMongoDB)
+	sc, err := run[protocol.SafeCopyResult](t, e, env, db, protocol.TaskSafeCopy, protocol.SafeCopyParams{CopyID: "sc1",
+		Masking: protocol.MaskingPlan{Mode: protocol.MaskingRules},
+		Access:  protocol.CopyAccess{Listen: "*", AllowFrom: []string{"127.0.0.1"}, Role: "dev_ana", PasswordVerifier: verifier}})
+	if err != nil {
+		t.Fatal("safe copy:", err)
+	}
+	t.Logf("safe copy: %s", sc.Summary)
+	login := func(user, pass string) (*mongo.Client, error) {
+		return connect(ctx, fmt.Sprintf("mongodb://%s:%s@127.0.0.1:%d/?authSource=admin&tls=true&tlsInsecure=true&directConnection=true", user, pass, sc.Port))
+	}
+	c, err := login("dev_ana", pw)
+	if err != nil {
+		t.Fatal("signing in to the safe copy:", err)
+	}
+	var doc struct {
+		Email string `bson:"email"`
+	}
+	if err := c.Database("shop").Collection("orders").FindOne(ctx, bson.D{{Key: "_id", Value: 5}}).Decode(&doc); err != nil || doc.Email == "" || doc.Email == "u5@example.com" {
+		t.Fatalf("not masked: %q %v", doc.Email, err)
+	}
+	if _, err := c.Database("shop").Collection("orders").InsertOne(ctx, bson.D{{Key: "_id", Value: 999999}}); err != nil {
+		t.Errorf("the copy should be writable: %v", err)
+	}
+	disconnect(c)
+	if c, err := login("dev_ana", "wrong"); err == nil {
+		disconnect(c)
+		t.Error("a wrong password signed in")
+	}
+	if c, err := connect(ctx, fmt.Sprintf("mongodb://127.0.0.1:%d/?directConnection=true", sc.Port)); err == nil {
+		disconnect(c)
+		t.Error("the copy answered without TLS")
+	}
+	pw2, v2, _ := rsclient.NewCopyPasswordFor(protocol.EngineMongoDB)
+	if !e.SetCopyPassword(ctx, env, protocol.CopyPassword{ID: "sc1", Version: 2, Verifier: v2}) {
+		t.Fatal("SetCopyPassword: not the engine's")
+	}
+	if c, err := login("dev_ana", pw2); err != nil {
+		t.Fatal("new password:", err)
+	} else {
+		disconnect(c)
+	}
+	if states := e.CopyStates(env); len(states) != 1 || states[0].PasswordVersion != 2 {
+		t.Fatalf("states: %+v", states)
+	}
+	if !e.DropCopy(ctx, env, "sc1") || len(e.CopyStates(env)) != 0 {
+		t.Fatal("drop")
 	}
 }

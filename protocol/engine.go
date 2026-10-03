@@ -67,8 +67,21 @@ const (
 	FeatureStandby       = "standby"         // standby servers (replicas Rowsafe sets up)
 	FeaturePooling       = "pooling"         // connection pooling
 	FeatureFiles         = "files"           // backups of the folders that go with a database
-	FeatureUpdates       = "updates"         // package updates and version upgrades
+	FeatureUpdates       = "updates"         // minor updates of the database's packages (and the server's security updates)
+	FeatureUpgrades      = "upgrades"        // major version upgrades, rehearsed on a copy first, with undo
 	// FeatureDBAdmin ("dbadmin") is in dbadmin.go.
+
+	FeatureSettings         = "settings"          // Tuning: read and change settings, "Tune for this server"
+	FeatureSecurity         = "security"          // security checks and their fixes
+	FeatureIndexAdvice      = "index_advice"      // index recommendations, checked on a copy first
+	FeatureRecommendations  = "recommendations"   // schema, query and capacity recommendations
+	FeatureLogs             = "logs"              // the database's own logs (redacted) in Pulse, and forwarding
+	FeatureFindMoment       = "find_moment"       // find when rows changed (the restore point just before)
+	FeatureSafeCopies       = "safe_copies"       // masked copies and structure-only copies for development
+	FeatureMigrationPreview = "migration_preview" // Guard: run a migration on a copy first and report
+	FeatureFork             = "fork"              // clone the database to another server, as it was at any moment
+	FeatureMoveIn           = "move_in"           // move a database in from a managed provider
+	FeatureSecondCopy       = "second_copy"       // a second copy of the backups in another bucket
 )
 
 // EngineFeatures says which Rowsafe features work for an engine. The
@@ -88,9 +101,22 @@ type EngineFeatures struct {
 	Pooling       bool `json:"pooling"`
 	Files         bool `json:"files"`
 	Updates       bool `json:"updates"`
+	Upgrades      bool `json:"upgrades"`
 	// DBAdmin: Databases & users (create databases, users and extensions
 	// inside the server; dbadmin.go).
 	DBAdmin bool `json:"dbadmin"`
+
+	Settings         bool `json:"settings"`
+	Security         bool `json:"security"`
+	IndexAdvice      bool `json:"index_advice"`
+	Recommendations  bool `json:"recommendations"`
+	Logs             bool `json:"logs"`
+	FindMoment       bool `json:"find_moment"`
+	SafeCopies       bool `json:"safe_copies"`
+	MigrationPreview bool `json:"migration_preview"`
+	Fork             bool `json:"fork"`
+	MoveIn           bool `json:"move_in"`
+	SecondCopy       bool `json:"second_copy"`
 }
 
 // Has reports whether a feature (Feature* above) is supported; unknown
@@ -125,8 +151,32 @@ func (f EngineFeatures) Has(feature string) bool {
 		return f.Files
 	case FeatureUpdates:
 		return f.Updates
+	case FeatureUpgrades:
+		return f.Upgrades
 	case FeatureDBAdmin:
 		return f.DBAdmin
+	case FeatureSettings:
+		return f.Settings
+	case FeatureSecurity:
+		return f.Security
+	case FeatureIndexAdvice:
+		return f.IndexAdvice
+	case FeatureRecommendations:
+		return f.Recommendations
+	case FeatureLogs:
+		return f.Logs
+	case FeatureFindMoment:
+		return f.FindMoment
+	case FeatureSafeCopies:
+		return f.SafeCopies
+	case FeatureMigrationPreview:
+		return f.MigrationPreview
+	case FeatureFork:
+		return f.Fork
+	case FeatureMoveIn:
+		return f.MoveIn
+	case FeatureSecondCopy:
+		return f.SecondCopy
 	}
 	return false
 }
@@ -140,28 +190,48 @@ var EngineCapabilities = map[string]EngineFeatures{
 		Backups: true, PointInTime: true, Proof: true,
 		RewindCopy: true, RewindRows: true, RewindInPlace: true,
 		Marks: true, Monitoring: true, Fixes: true, Restart: true,
-		Standby: true, Pooling: true, Files: true, Updates: true,
-		DBAdmin: true,
+		Standby: true, Pooling: true, Files: true, Updates: true, Upgrades: true,
+		DBAdmin:  true,
+		Settings: true, Security: true, IndexAdvice: true, Recommendations: true,
+		Logs: true, FindMoment: true, SafeCopies: true, MigrationPreview: true,
+		Fork: true, MoveIn: true, SecondCopy: true,
 	},
-	// MySQL and MariaDB (internal/engine/mysql): no restart, rewind in
-	// place, standby, pooling, files or updates yet.
+	// MySQL and MariaDB (internal/engine/mysql): protocol/mysql.go.
 	EngineMySQL:   mysqlFeatures,
-	EngineMariaDB: mysqlFeatures,
+	EngineMariaDB: mariadbFeatures,
 	// MongoDB (internal/engine/mongodb): mongodump + oplog copying, Proof,
-	// Rewind copies and bringing documents back, Marks, Pulse and stopping
-	// a long operation. No restart, rewind in place, standby, pooling,
-	// files or updates yet.
+	// Rewind (copies, documents, in place by collection renames), Marks,
+	// Pulse, restarts (root helper). No pooling: drivers pool themselves.
 	EngineMongoDB: {
 		Backups: true, PointInTime: true, Proof: true,
-		RewindCopy: true, RewindRows: true, Marks: true,
-		Monitoring: true, Fixes: true,
+		RewindCopy: true, RewindRows: true, RewindInPlace: true, Marks: true,
+		Monitoring: true, Fixes: true, Restart: true, Updates: true, Upgrades: true,
+		Recommendations: true, // profiler, $indexStats (internal/engine/mongodb/insights.go)
+		Logs:            true, // the structured log, 4.4+ (internal/engine/mongodb/logs.go)
+		FindMoment:      true, // the oplog in the bucket (internal/engine/mongodb/moment.go)
+		IndexAdvice:     true, // profiler samples tested on a copy (internal/engine/mongodb/indexadvisor.go)
+		DBAdmin:         true, Security: true, Files: true, SecondCopy: true,
+		MigrationPreview: true, SafeCopies: true,
+		Fork:     true, // clones copied into an empty server (fork.go in internal/engine/mongodb)
+		MoveIn:   true, // copy from Atlas or any MongoDB, live through a change stream (migrate*.go in internal/engine/mongodb)
+		Standby:  true, // a priority-0 member of the replica set (standby*.go in internal/engine/mongodb)
+		Settings: true, // mongod.conf through root's tuning helper (opt-in), setParameter live
 	},
-	// ClickHouse (internal/engine/clickhouse; clickhouse.go): BACKUP
-	// through the agent's encrypting gateway, Proof, Rewind copies and
-	// bringing rows back, Marks, Pulse and stopping a query or a mutation.
-	// No restores to any second (ClickHouse keeps no log of changes), no
-	// restart, rewind in place, standby, pooling, files or updates yet.
+	// ClickHouse (internal/engine/clickhouse): protocol/clickhouse.go.
 	EngineClickHouse: clickhouseFeatures,
+}
+
+// RewindInPlaceStopsServer reports whether rewinding a database of engine
+// in place stops and starts its server (PostgreSQL, MySQL, MariaDB: through
+// the root helper or the container control service, which root must
+// allow). MongoDB and ClickHouse swap the data through the database itself
+// and need no such permission.
+func RewindInPlaceStopsServer(engine string) bool {
+	switch NormalizeEngine(engine) {
+	case EngineMongoDB, EngineClickHouse:
+		return false
+	}
+	return true
 }
 
 // Features is the engine's EngineCapabilities entry ("" is PostgreSQL); an

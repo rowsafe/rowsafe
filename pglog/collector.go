@@ -54,6 +54,10 @@ type Options struct {
 	// Journalctl is the journalctl binary (default "journalctl").
 	Journalctl string
 	Now        func() time.Time
+	// Locate finds the log of a database of another engine (MySQL,
+	// MariaDB, MongoDB, ClickHouse: engines.go); ok false when the engine's
+	// log isn't read. Nil: PostgreSQL's only.
+	Locate func(ctx context.Context, spec protocol.DatabaseSpec) (src Source, ok bool)
 }
 
 // Enabled reads ROWSAFE_LOGS (default on): off, the agent never reads or
@@ -81,6 +85,12 @@ type dbState struct {
 	// idleRounds: rounds without new data while a message is being
 	// assembled; after one, it is complete.
 	idleRounds int
+
+	// The other engines (engines.go): the main log's parser, and MySQL's
+	// slow query log.
+	eng      *engineParser
+	slowFile *fileTail
+	slow     *engineParser
 
 	pending []protocol.LogEntry
 	skipped int64
@@ -154,7 +164,8 @@ func (c *Collector) read(ctx context.Context, now time.Time) {
 	}
 	keep := map[string]bool{}
 	for _, spec := range specs {
-		if protocol.NormalizeEngine(spec.Engine) != protocol.EnginePostgreSQL {
+		postgres := protocol.NormalizeEngine(spec.Engine) == protocol.EnginePostgreSQL
+		if !postgres && c.o.Locate == nil {
 			continue
 		}
 		keep[spec.ID] = true
@@ -166,13 +177,31 @@ func (c *Collector) read(ctx context.Context, now time.Time) {
 		st.spec = spec
 		if st.srcAt.IsZero() || now.Sub(st.srcAt) >= rediscoverEvery {
 			dctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-			src := c.disc.discover(dctx, Target{SocketDir: spec.SocketDir, Port: spec.Port, User: c.o.PGUser}, now)
+			var src Source
+			if postgres {
+				src = c.disc.discover(dctx, Target{SocketDir: spec.SocketDir, Port: spec.Port, User: c.o.PGUser}, now)
+			} else {
+				var ok bool
+				if src, ok = c.o.Locate(dctx, spec); !ok {
+					cancel()
+					delete(keep, spec.ID)
+					continue
+				}
+				src.Status.CheckedAt = now
+			}
 			cancel()
 			if st.srcAt.IsZero() || !src.sameAs(st.src) {
 				st.srcChanged = true
 				if src.Format != st.src.Format || src.Prefix != st.src.Prefix {
 					st.asm = nil // a new prefix or format: parse afresh
 					st.csv = CSVSplitter{}
+					st.eng = nil
+				}
+				if src.SlowPath != st.src.SlowPath {
+					if st.slowFile != nil {
+						st.slowFile.close()
+					}
+					st.slowFile, st.slow = nil, nil
 				}
 			}
 			st.src, st.srcAt = src, now
@@ -184,8 +213,12 @@ func (c *Collector) read(ctx context.Context, now time.Time) {
 			if st.file != nil {
 				st.file.close()
 			}
+			if st.slowFile != nil {
+				st.slowFile.close()
+			}
 			delete(c.dbs, id)
 			delete(c.pos.m, id)
+			delete(c.pos.m, id+slowSuffix)
 		}
 	}
 	if err := c.pos.save(); err != nil {
@@ -203,8 +236,13 @@ func (c *Collector) readDB(ctx context.Context, st *dbState, now time.Time) {
 		}
 		st.file, st.journal, st.asm = nil, nil, nil
 		st.csv = CSVSplitter{}
+		if st.slowFile != nil {
+			st.slowFile.close()
+		}
+		st.eng, st.slowFile, st.slow = nil, nil, nil
 		if st.settings != nil && !st.settings.Enabled {
 			delete(c.pos.m, id)
+			delete(c.pos.m, id+slowSuffix)
 		}
 		return
 	}
@@ -240,6 +278,7 @@ func (c *Collector) readDB(ctx context.Context, st *dbState, now time.Time) {
 			st.skipped += res.skipped / 200 // about 200 bytes a line
 		}
 		entries = c.parse(st, res, now)
+		entries = append(entries, c.readSlow(st)...)
 	}
 	st.refillTokens(now)
 	for i := range entries {
@@ -266,10 +305,54 @@ func (c *Collector) idle(st *dbState, nothingNew bool) bool {
 	return st.idleRounds >= 1
 }
 
+// slowSuffix keys the slow query log's read position.
+const slowSuffix = "/slow"
+
+// readSlow reads MySQL's slow query log, when there is one.
+func (c *Collector) readSlow(st *dbState) []Entry {
+	if st.src.SlowPath == "" {
+		return nil
+	}
+	key := st.spec.ID + slowSuffix
+	if st.slowFile == nil {
+		st.slowFile = &fileTail{pos: c.pos.m[key]}
+	}
+	res, err := st.slowFile.read(st.src.SlowPath, readPerRound)
+	if err != nil {
+		c.o.Log.Debug("reading the slow query log", "path", st.src.SlowPath, "err", err)
+	}
+	c.pos.m[key] = st.slowFile.pos
+	if st.slow == nil {
+		st.slow = newEngineParser(formatMySQLSlow)
+	}
+	lines := splitLines(res.data)
+	for _, l := range lines {
+		st.slow.Add(l)
+	}
+	// A record ends at the next one's "# Time:"; a quiet log completes it.
+	return st.slow.Take(res.reset || len(lines) == 0)
+}
+
+func splitLines(data []byte) []string {
+	if len(data) == 0 {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+}
+
 // parse turns a file read into entries.
 func (c *Collector) parse(st *dbState, res readResult, now time.Time) []Entry {
 	var out []Entry
 	switch st.src.Format {
+	case FormatMySQLError, FormatMongoJSON, FormatClickHouse: // engines.go
+		if st.eng == nil {
+			st.eng = newEngineParser(st.src.Format)
+		}
+		lines := splitLines(res.data)
+		for _, l := range lines {
+			st.eng.Add(l)
+		}
+		out = st.eng.Take(res.reset || c.idle(st, len(lines) == 0))
 	case protocol.LogFormatJSON:
 		for _, l := range strings.Split(string(res.data), "\n") {
 			if strings.TrimSpace(l) == "" {
@@ -352,7 +435,7 @@ func (c *Collector) send(ctx context.Context, now time.Time) {
 		c.fails++
 		wait := min(Round*time.Duration(1<<min(c.fails, 9)), maxBackoff)
 		if c.fails == 1 || wait == maxBackoff {
-			c.o.Log.Warn("sending PostgreSQL log entries failed", "err", err, "retry_in", wait.String())
+			c.o.Log.Warn("sending database log entries failed", "err", err, "retry_in", wait.String())
 		}
 		c.wait = now.Add(wait)
 		return
