@@ -589,7 +589,8 @@ func (e *Engine) restoreBeside(ctx context.Context, env agent.EngineEnv, r *repo
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		sb.WriteString("DATABASE " + quoteIdent(d.Name))
+		// ClickHouse's grammar: DATABASE a AS b EXCEPT TABLES ...
+		sb.WriteString("DATABASE " + quoteIdent(d.Name) + " AS " + quoteIdent(tmpDBName(tag, d.Name)))
 		var except []string
 		for _, t := range b.Tables {
 			if _, ok := skip[t.key()]; ok && t.DB == d.Name {
@@ -599,7 +600,6 @@ func (e *Engine) restoreBeside(ctx context.Context, env agent.EngineEnv, r *repo
 		if len(except) > 0 {
 			sb.WriteString(" EXCEPT TABLES " + strings.Join(except, ", "))
 		}
-		sb.WriteString(" AS " + quoteIdent(tmpDBName(tag, d.Name)))
 	}
 	id := randomID("rowsafe-rewind-")
 	sb.WriteString(" FROM " + s3Expr(g, b.dir()) + " SETTINGS id = " + quoteString(id) + ", allow_s3_native_copy = 0, allow_different_database_def = 1")
