@@ -232,7 +232,11 @@ var nameCleanRE = regexp.MustCompile(`[^a-z0-9]+`)
 func IndexName(s IndexSpec) string {
 	clean := func(x string) string { return strings.Trim(nameCleanRE.ReplaceAllString(strings.ToLower(x), "_"), "_") }
 	parts := []string{clean(s.Table)}
-	for _, c := range s.Columns {
+	cols := s.Columns
+	if len(cols) == 0 {
+		cols = s.GroupBy // a ClickHouse projection that pre-aggregates
+	}
+	for _, c := range cols {
 		parts = append(parts, clean(c))
 	}
 	body := strings.Join(slices.DeleteFunc(parts, func(p string) bool { return p == "" }), "_")
@@ -241,7 +245,7 @@ func IndexName(s IndexSpec) string {
 	}
 	sum := sha256.Sum256([]byte(s.Key()))
 	hash := hex.EncodeToString(sum[:])[:6]
-	needHash := len(s.Include) > 0 || s.Predicate() != ""
+	needHash := len(s.Include) > 0 || s.Predicate() != "" || len(s.Aggregates) > 0
 	const maxBody = 56 // rs_ + body + _idx <= 63
 	if needHash {
 		if len(body) > maxBody-7 {

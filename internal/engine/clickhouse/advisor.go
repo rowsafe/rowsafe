@@ -629,7 +629,8 @@ func testChIdea(ctx context.Context, cp *client, x *chIdea, res *protocol.IndexA
 		if x.spec.Kind != protocol.IndexKindOrderBy {
 			plan, err := cp.scalar(ctx, "EXPLAIN indexes = 1 "+st.Sample, nil, "database", st.DB)
 			if err != nil || !strings.Contains(plan, x.spec.Name) {
-				continue // ClickHouse doesn't use it for this query
+				tl.Printf("query %s: ClickHouse doesn't use %s for it", st.ID, x.spec.Name)
+				continue
 			}
 		}
 		after, err := runSample(ctx, cp, st)
@@ -638,13 +639,15 @@ func testChIdea(ctx context.Context, cp *client, x *chIdea, res *protocol.IndexA
 		}
 		g := protocol.IndexGain{QueryID: st.ID, RowsBefore: pre[i].rows, RowsAfter: after.rows, MsBefore: pre[i].ms, MsAfter: after.ms,
 			Calls: st.Calls, TotalTimeMs: st.Ms}
+		tl.Printf("query %s on the copy: %s rows read in %.1f ms before, %s rows in %.1f ms after", st.ID, commas(g.RowsBefore), g.MsBefore,
+			commas(g.RowsAfter), g.MsAfter)
 		rowsGain := float64(max(g.RowsBefore, 1)) / float64(max(g.RowsAfter, 1))
-		msGain := g.MsBefore / max(g.MsAfter, 0.01)
+		msGain := g.MsBefore / max(g.MsAfter, 1) // under a millisecond is noise
 		measurable := g.MsBefore >= chMeasurableMs
 		if rowsGain < chMinGain || measurable && msGain < chMinMsGain {
 			continue
 		}
-		g.Speedup = rowsGain
+		g.Speedup = min(rowsGain, 100) // an estimate from the rows read alone
 		if measurable {
 			g.Speedup = msGain
 		}

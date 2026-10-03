@@ -38,10 +38,10 @@ func TestClickHouseIndexAdvisor(t *testing.T) {
 		// trace_id is unique and spread over the table: a bloom filter
 		// finds the few granules that hold one.
 		"CREATE TABLE adv.events (ts DateTime, trace_id String, user_id UInt64, kind LowCardinality(String), amount Float64) ENGINE = MergeTree ORDER BY ts SETTINGS index_granularity = 8192",
-		"INSERT INTO adv.events SELECT toDateTime('2026-01-01 00:00:00') + number, hex(cityHash64(number)), number % 50000, ['a','b','c','d'][number % 4 + 1], number % 1000 FROM numbers(2000000)",
+		"INSERT INTO adv.events SELECT toDateTime('2026-01-01 00:00:00') + number, hex(cityHash64(number)), number % 50000, ['a','b','c','d'][number % 4 + 1], number % 1000 FROM numbers(1000000)",
 		// No sorting key at all.
 		"CREATE TABLE adv.logs (at DateTime, account UInt64, msg String) ENGINE = MergeTree ORDER BY tuple()",
-		"INSERT INTO adv.logs SELECT toDateTime('2026-01-01 00:00:00') + number, intDiv(number, 2000), concat('line ', toString(number)) FROM numbers(1000000)",
+		"INSERT INTO adv.logs SELECT toDateTime('2026-01-01 00:00:00') + number, intDiv(number, 2000), concat('line ', toString(number)) FROM numbers(500000)",
 	} {
 		must(t, admin, q)
 	}
