@@ -37,7 +37,9 @@ Usage:
                                             MongoDB helpers for the installer (see mongodb --help)
   rowsafe-agent clickhouse status|login|save-login ...
                                             ClickHouse helpers for the installer (see clickhouse --help)
-  rowsafe-agent unseal < FILE > PLAIN       decrypt a file Rowsafe wrote to your bucket (MongoDB, ClickHouse)
+  rowsafe-agent redis status|login|save-login|download-backup ...
+                                            Redis and Valkey helpers for the installer (see redis --help)
+  rowsafe-agent unseal < FILE > PLAIN       decrypt a file Rowsafe wrote to your bucket (MongoDB, ClickHouse, Redis)
   rowsafe-agent restore-mysql --engine mysql|mariadb --database NAME --dir DIR [--at TIME | --mark NAME]
                                             restore a MySQL/MariaDB database from your bucket into DIR
   rowsafe-agent key                         this server's key fingerprint: compare it with the one the Rowsafe
@@ -81,6 +83,8 @@ func main() {
 		os.Exit(mongodbCmd(ctx, os.Args[2:]))
 	case "clickhouse": // ClickHouse installer helpers (clickhouse.go)
 		os.Exit(clickhouseCmd(ctx, os.Args[2:]))
+	case "redis": // Redis and Valkey installer helpers (redis.go)
+		os.Exit(redisCmd(ctx, os.Args[2:]))
 	case "unseal":
 		err = unseal()
 	case "restore-mysql":
