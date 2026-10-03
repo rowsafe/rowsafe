@@ -39,12 +39,15 @@ func (e *Engine) drill(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 	if err != nil {
 		return nil, err
 	}
-	b, err := pickBackup(ctx, r, restoreTarget{Latest: true})
+	b, stopped, err := e.latestTarget(ctx, env, db, r, tl)
 	if err != nil {
 		return fail(&protocol.DrillResult{}, err)
 	}
-	stopped := b.StoppedAt
-	res := &protocol.DrillResult{BackupLabel: b.Label, RecoveredTo: &stopped}
+	label := b.Label
+	if b.virtualDir != "" {
+		label = b.from // the backup the restore started from
+	}
+	res := &protocol.DrillResult{BackupLabel: label, RecoveredTo: &stopped}
 	root := drillRoot(env)
 	if err := ensureSpace(filepath.Dir(root), int64(float64(b.DataBytes)*drillSpaceFactor)+512<<20); err != nil {
 		return fail(res, err)
@@ -77,7 +80,7 @@ func (e *Engine) drill(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 	res.DurationSeconds = time.Since(started).Seconds()
 	res.Passed = len(res.Failures) == 0
 	if res.Passed {
-		tl.Printf("Proof passed: %d databases restored from backup %s and checked in %s", len(res.Databases), b.Label,
+		tl.Printf("Proof passed: %d databases restored from %s and checked in %s", len(res.Databases), b.what(),
 			time.Since(started).Round(time.Second))
 		return res, nil
 	}

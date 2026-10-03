@@ -118,6 +118,7 @@ func pitAt(ctx context.Context, r *repo, t time.Time, prefer string) (*pitResult
 	if missing != "" {
 		return fallback(missing + "; backup " + base.Label + " is restored as it was when it finished")
 	}
+	doc.from = base.Label
 	return &pitResult{Doc: doc, Exact: true}, nil
 }
 

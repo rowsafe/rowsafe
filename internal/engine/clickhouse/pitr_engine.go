@@ -66,3 +66,26 @@ func (e *Engine) pickTarget(ctx context.Context, env agent.EngineEnv, db protoco
 		db.Name, target.Time.UTC().Format("2006-01-02 15:04:05.000000 UTC"))
 	return res.Doc, target.Time, nil
 }
+
+// latestTarget is what Proof restores: the newest moment the record
+// reaches (the newest backup carried forward with every change since), so
+// the test covers the record too; the newest backup without one.
+func (e *Engine) latestTarget(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec, r *repo, tl agent.TaskLogger) (backupDoc, time.Time, error) {
+	e.flushTo(ctx, env, db, time.Now().UTC(), tl)
+	e.mu.Lock()
+	s := e.shippers[db.ID]
+	e.mu.Unlock()
+	if s != nil {
+		if st, _ := s.snapshot(); st.Record != "" {
+			if res, err := pitAt(ctx, r, st.To, ""); err == nil && res.Exact {
+				tl.Printf("restoring %s as it was at %s: the newest backup with every change since", db.Name,
+					st.To.UTC().Format("2006-01-02 15:04:05.000000 UTC"))
+				return res.Doc, st.To, nil
+			} else if err == nil {
+				tl.Printf("note: %s", res.Note)
+			}
+		}
+	}
+	b, err := pickBackup(ctx, r, restoreTarget{Latest: true})
+	return b, b.StoppedAt, err
+}

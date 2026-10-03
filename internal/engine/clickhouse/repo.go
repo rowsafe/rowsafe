@@ -149,6 +149,7 @@ type backupDoc struct {
 	// served by the gateway under virtualDir, nothing is in the bucket.
 	virtualDir string
 	virtual    map[string]s3gw.VirtualFile
+	from       string // the backup it was carried forward from
 }
 
 // dir is the backup's folder for the gateway.
