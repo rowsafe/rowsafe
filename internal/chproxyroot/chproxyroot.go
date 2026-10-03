@@ -211,7 +211,8 @@ users:
     max_concurrent_queries: %d
     max_queue_size: %d
     max_queue_time: %ds
-    max_execution_time: 0s
+    # ClickHouse's own limits apply; chproxy's default would stop queries after 2 minutes.
+    max_execution_time: 168h
 clusters:
   - name: "local"
     nodes: ["127.0.0.1:%d"]

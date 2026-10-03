@@ -133,7 +133,7 @@ for v in $VERSIONS; do
 			extra="ROWSAFE_TEST_CLICKHOUSE_USERSD=/etc/clickhouse-server/users.d"
 		fi
 		cd /tmp
-		su rowsafe -c "env ROWSAFE_TEST_CLICKHOUSE_PORT=8123 ROWSAFE_TEST_CLICKHOUSE_REPLICATED=1 ROWSAFE_TEST_CLICKHOUSE_DOWNLOAD_DIR=/var/lib/rowsafe-dl/dl $extra \
+		su rowsafe -c "env ROWSAFE_TEST_CLICKHOUSE_PORT=8123 ROWSAFE_TEST_CLICKHOUSE_REPLICATED=1 ROWSAFE_TEST_CLICKHOUSE_POOLING=1 ROWSAFE_TEST_CLICKHOUSE_DOWNLOAD_DIR=/var/lib/rowsafe-dl/dl $extra \
 			/usr/local/bin/clickhouse.test -test.v -test.count=1 -test.run $TEST_RUN -test.timeout 25m" 2>&1 | tail -n 150
 		exit ${PIPESTATUS[0]}
 	'; then
