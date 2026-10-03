@@ -343,9 +343,9 @@ type IndexGain struct {
 	MsAfter  float64 `json:"ms_after,omitempty"`
 	// RowsBefore and RowsAfter are the rows the query read on the copy
 	// (ClickHouse: read_rows).
-	RowsBefore int64 `json:"rows_before,omitempty"`
-	RowsAfter  int64 `json:"rows_after,omitempty"`
-	Speedup  float64 `json:"speedup"`
+	RowsBefore int64   `json:"rows_before,omitempty"`
+	RowsAfter  int64   `json:"rows_after,omitempty"`
+	Speedup    float64 `json:"speedup"`
 	// Calls and TotalTimeMs are the statement's activity on production.
 	Calls       int64   `json:"calls"`
 	TotalTimeMs float64 `json:"total_time_ms"`
