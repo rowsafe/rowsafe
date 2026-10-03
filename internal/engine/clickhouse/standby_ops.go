@@ -69,7 +69,13 @@ func (e *Engine) StandbyPromote(ctx context.Context, env agent.EngineEnv, db pro
 	_ = c.exec(ctx, "DROP DATABASE IF EXISTS "+quoteIdent(standbyTmpDB)+" SYNC", nil)
 	now := time.Now().UTC()
 	applied := rec.AppliedTo
-	if err := store.remove(rec.ID); err != nil {
+	if len(rec.Kept) > 0 {
+		// The databases set aside when it was rebuilt stay their time.
+		err = store.update(rec.ID, func(r *chStandby) { r.PromotedAt = &now })
+	} else {
+		err = store.remove(rec.ID)
+	}
+	if err != nil {
 		return nil, err
 	}
 	res.Promoted, res.PromotedAt, res.LastReplayAt = true, &now, &applied
@@ -92,7 +98,7 @@ func (e *Engine) StandbyRemove(ctx context.Context, env agent.EngineEnv, db prot
 	defer l.Unlock()
 	rec, ok := store.get(p.StandbyID)
 	res := &protocol.StandbyRemoveResult{StandbyID: p.StandbyID}
-	if !ok {
+	if !ok || rec.PromotedAt != nil {
 		res.Summary = "This server has no such standby any more."
 		return res, nil
 	}
@@ -109,6 +115,9 @@ func (e *Engine) StandbyRemove(ctx context.Context, env agent.EngineEnv, db prot
 			errs = append(errs, fmt.Errorf("dropping %s: %w", d, err))
 		}
 	}
+	if len(errs) == 0 && len(rec.Kept) > 0 {
+		putBack(ctx, c, rec.Kept) // the server's own data, as it was
+	}
 	if err := setReadOnly(ctx, c, false); err != nil {
 		errs = append(errs, err)
 	}
@@ -119,7 +128,11 @@ func (e *Engine) StandbyRemove(ctx context.Context, env agent.EngineEnv, db prot
 	if err := store.remove(rec.ID); err != nil {
 		return nil, err
 	}
+	res.Restored = len(rec.Kept) > 0
 	res.Summary = fmt.Sprintf("Removed the standby: the ClickHouse server on port %d no longer follows %s, its copy was dropped and it takes writes again.", rec.Port, db.Name)
+	if res.Restored {
+		res.Summary += " Its own databases are back."
+	}
 	log.Printf("%s", res.Summary)
 	return res, nil
 }
@@ -132,6 +145,9 @@ func (e *Engine) StandbyStates(ctx context.Context, env agent.EngineEnv) []proto
 		e.wakeStandbys(env) // after an agent restart
 	}
 	for _, rec := range recs {
+		if rec.PromotedAt != nil {
+			continue
+		}
 		now := time.Now().UTC()
 		s := protocol.StandbyState{StandbyID: rec.ID, DatabaseID: rec.DatabaseID, Port: rec.Port, Phase: rec.Phase,
 			Mode: protocol.StandbyModeArchive, CheckedAt: now, Error: rec.Error}

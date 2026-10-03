@@ -30,6 +30,10 @@ type chStandby struct {
 	// DBs are the databases it restored (removing the standby drops them).
 	DBs        []string   `json:"dbs,omitempty"`
 	PromotedAt *time.Time `json:"promoted_at,omitempty"`
+	// Kept: a rebuilt old primary's own databases, set aside (original
+	// name -> name now) until KeptUntil.
+	Kept      map[string]string `json:"kept,omitempty"`
+	KeptUntil *time.Time        `json:"kept_until,omitempty"`
 }
 
 type standbyStore struct {

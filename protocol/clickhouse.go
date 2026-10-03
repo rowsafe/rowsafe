@@ -77,6 +77,7 @@ var clickhouseFeatures = EngineFeatures{
 	Backups: true, Proof: true,
 	PointInTime: true, // new parts copied as they appear (internal/engine/clickhouse/pitr_*.go)
 	FindMoment:  true, // from that record (internal/engine/clickhouse/moment.go)
+	Standby:     true, // follows the primary through that record (internal/engine/clickhouse/standby_*.go)
 	RewindCopy:  true, RewindRows: true, RewindInPlace: true, Marks: true,
 	Monitoring: true, Fixes: true, Restart: true,
 	Recommendations: true, // query log, table layout (internal/engine/clickhouse/insights.go)

@@ -27,10 +27,6 @@ var _ agent.EngineStandby = (*Engine)(nil)
 func (e *Engine) StandbyCreate(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec, p protocol.StandbyCreateParams,
 	sec protocol.StandbySecrets, log agent.TaskLogger) (*protocol.StandbyCreateResult, error) {
 	start := time.Now()
-	if p.Rebuild {
-		return nil, errors.New("a ClickHouse server that was the primary can't be turned into the new primary's standby yet: " +
-			"add a standby on an empty ClickHouse server instead, and remove this one")
-	}
 	store := e.standbyStore(env)
 	if r, ok := store.get(p.StandbyID); ok && r.Phase == protocol.StandbyPhaseFollowing {
 		return &protocol.StandbyCreateResult{StandbyID: r.ID, Mode: protocol.StandbyModeArchive, Summary: "The standby already follows its primary."}, nil
@@ -45,6 +41,24 @@ func (e *Engine) StandbyCreate(ctx context.Context, env agent.EngineEnv, db prot
 	in, err := inspect(ctx, c)
 	if err != nil {
 		return nil, err
+	}
+	var kept map[string]string
+	var keptUntil *time.Time
+	if p.Rebuild {
+		// The old primary: its databases are set aside (kept KeepDays),
+		// then it is restored like an empty server.
+		kept, err = setAside(ctx, c, in, p.StandbyID)
+		if err != nil {
+			return nil, err
+		}
+		until := agent.KeepUntil(p.KeepDays, time.Now())
+		keptUntil = &until
+		if len(kept) > 0 {
+			log.Printf("set aside the server's own databases (kept until %s): %s", until.UTC().Format("2006-01-02 15:04 UTC"), keptList(kept))
+		}
+		if in, err = inspect(ctx, c); err != nil {
+			return nil, err
+		}
 	}
 	if reason := cloneTargetReason(in); reason != "" {
 		return nil, fmt.Errorf("the ClickHouse server on port %d can't hold the standby: %s; nothing was changed", p.Port, reason)
@@ -83,7 +97,7 @@ func (e *Engine) StandbyCreate(ctx context.Context, env agent.EngineEnv, db prot
 	now := time.Now().UTC()
 	if err := store.update(p.StandbyID, func(r *chStandby) {
 		*r = chStandby{ID: p.StandbyID, DatabaseID: db.ID, Stanza: db.Stanza, Port: p.Port, Phase: protocol.StandbyPhaseCreating,
-			CreatedAt: now, DBs: dbs}
+			CreatedAt: now, DBs: dbs, Kept: kept, KeptUntil: keptUntil}
 	}); err != nil {
 		return nil, err
 	}
@@ -93,6 +107,7 @@ func (e *Engine) StandbyCreate(ctx context.Context, env agent.EngineEnv, db prot
 		for _, d := range dbs {
 			_ = c.exec(cctx, "DROP DATABASE IF EXISTS "+quoteIdent(d)+" SYNC", nil)
 		}
+		putBack(cctx, c, kept)
 		_ = store.remove(p.StandbyID)
 		return &protocol.StandbyCreateResult{StandbyID: p.StandbyID, RolledBack: true}, err
 	}
@@ -124,6 +139,9 @@ func (e *Engine) StandbyCreate(ctx context.Context, env agent.EngineEnv, db prot
 	e.wakeStandbys(env)
 	out := &protocol.StandbyCreateResult{StandbyID: p.StandbyID, Mode: protocol.StandbyModeArchive, DataDir: in.DataPath,
 		DurationMs: time.Since(start).Milliseconds()}
+	if len(kept) > 0 {
+		out.KeptDataDir, out.KeptUntil = "the "+keptList(kept)+" databases", keptUntil
+	}
 	out.Summary = fmt.Sprintf("The ClickHouse server on port %d is %s's standby: it holds %s as it was at %s and applies each new change a few seconds after it reaches your bucket. It is read-only for everyone but Rowsafe.",
 		p.Port, db.Name, db.Name, applied.UTC().Format("15:04:05 UTC"))
 	log.Printf("%s", out.Summary)
@@ -637,3 +655,63 @@ type silentLog struct{}
 
 func (silentLog) Printf(string, ...any) {}
 func (silentLog) Output(string, []byte) {}
+
+// setAside renames a server's own databases out of the way
+// (rowsafe_before_<id>_<name>, which backups and copies leave out).
+func setAside(ctx context.Context, c *client, in serverInfo, id string) (map[string]string, error) {
+	tag := strings.ToLower(strings.TrimPrefix(strings.ReplaceAll(id, "-", ""), "sby_"))
+	if len(tag) > 8 {
+		tag = tag[:8]
+	}
+	kept := map[string]string{}
+	for _, d := range in.Databases {
+		if d.Name == "default" && d.Tables == 0 {
+			continue
+		}
+		to := beforeDBName(tag, d.Name)
+		if err := c.exec(ctx, "RENAME DATABASE "+quoteIdent(d.Name)+" TO "+quoteIdent(to), nil); err != nil {
+			putBack(context.WithoutCancel(ctx), c, kept)
+			return nil, fmt.Errorf("setting database %s aside: %w", d.Name, err)
+		}
+		kept[d.Name] = to
+	}
+	return kept, nil
+}
+
+// putBack renames set-aside databases back.
+func putBack(ctx context.Context, c *client, kept map[string]string) {
+	for name, to := range kept {
+		_ = c.exec(ctx, "RENAME DATABASE "+quoteIdent(to)+" TO "+quoteIdent(name), nil)
+	}
+}
+
+func keptList(kept map[string]string) string {
+	var out []string
+	for _, to := range kept {
+		out = append(out, to)
+	}
+	slices.Sort(out)
+	return strings.Join(out, ", ")
+}
+
+// expireStandbyKept drops set-aside databases whose time is up.
+func (e *Engine) expireStandbyKept(ctx context.Context, env agent.EngineEnv, now time.Time) {
+	store := e.standbyStore(env)
+	for _, r := range store.all() {
+		if len(r.Kept) == 0 || r.KeptUntil == nil || now.Before(*r.KeptUntil) {
+			continue
+		}
+		c, err := connectDB(ctx, env, protocol.DatabaseSpec{Port: r.Port})
+		if err != nil {
+			continue
+		}
+		for _, to := range r.Kept {
+			_ = c.exec(ctx, "DROP DATABASE IF EXISTS "+quoteIdent(to)+" SYNC", nil)
+		}
+		if r.PromotedAt != nil {
+			_ = store.remove(r.ID)
+			continue
+		}
+		_ = store.update(r.ID, func(x *chStandby) { x.Kept, x.KeptUntil = nil, nil })
+	}
+}

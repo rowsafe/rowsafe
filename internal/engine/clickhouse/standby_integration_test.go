@@ -184,5 +184,56 @@ func TestClickHouseStandby(t *testing.T) {
 	if len(e.StandbyStates(ctx, env)) != 0 {
 		t.Fatal("the promoted standby is still reported")
 	}
+	oldPrimary := snap(admin)
+
+	// The new primary's own agent (another server: its own state, the same
+	// bucket) records its changes; the old primary is rebuilt as its
+	// standby, its own databases set aside.
+	env2 := env
+	env2.StateDir = t.TempDir()
+	if l, ok, _ := loadLogin(env, port2); ok {
+		if err := saveLogin(env2, port2, l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e2 := &Engine{}
+	e2.Start(sctx, env2)
+	spec2 := spec
+	spec2.Port = port2
+	if _, err := e2.Archiver(ctx, env2, spec2); err != nil {
+		t.Fatal(err)
+	}
+	waitRecord(t, e2, spec2)
+	if _, err := run[protocol.BackupResult](t, e2, env2, spec2, protocol.TaskBackup, protocol.BackupParams{Type: protocol.BackupFull}); err != nil {
+		t.Fatal("backup on the new primary:", err)
+	}
+	var sec2 protocol.StandbySecrets
+	var prep2 protocol.StandbyPrepareResult
+	if err := e2.StandbyPrepare(ctx, env2, spec2, protocol.StandbyPrepareParams{StandbyID: "sb2"}, &sec2, &prep2, tl); err != nil {
+		t.Fatal("prepare 2:", err)
+	}
+	must(t, admin2, "INSERT INTO sb.ev (ts, k, v) VALUES ('2026-01-10 00:00:00', 4, 4)")
+	now2, _ := serverNow(ctx, admin2)
+	e2.flushTo(ctx, env2, spec2, now2, tl)
+	rb, err := e.StandbyCreate(ctx, env, spec, protocol.StandbyCreateParams{StandbyID: "sb2", Port: port, Major: prep2.Major, Rebuild: true,
+		FenceID: "f1", KeepDays: 1}, sec2, tl)
+	if err != nil {
+		t.Fatal("rebuild:", err)
+	}
+	t.Log(rb.Summary, rb.KeptDataDir)
+	if rb.KeptDataDir == "" {
+		t.Fatal("the old primary's databases weren't set aside")
+	}
+	e.applyStandby(ctx, env, "sb2")
+	if a, b := snap(admin2), snap(admin); strings.Join(a, "|") != strings.Join(b, "|") {
+		t.Fatalf("rebuilt: the old primary has %q, the new one %q", b, a)
+	}
+	rm, err := e.StandbyRemove(ctx, env, spec, protocol.StandbyRemoveParams{StandbyID: "sb2"}, tl)
+	if err != nil || !rm.Restored {
+		t.Fatalf("remove: %+v %v", rm, err)
+	}
+	if got := snap(admin); strings.Join(got, "|") != strings.Join(oldPrimary, "|") {
+		t.Fatalf("after removing the rebuilt standby: %q, want its own data back %q", got, oldPrimary)
+	}
 	must(t, admin2, "DROP DATABASE sb SYNC")
 }
