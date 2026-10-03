@@ -238,11 +238,12 @@ var EngineCapabilities = map[string]EngineFeatures{
 // RewindInPlaceStopsServer reports whether rewinding a database of engine
 // in place stops and starts its server (PostgreSQL, MySQL, MariaDB: through
 // the root helper or the container control service, which root must
-// allow). MongoDB and ClickHouse swap the data through the database itself
-// and need no such permission.
+// allow). MongoDB and ClickHouse swap the data through the database itself,
+// and SQLite writes the restored copy into the live file with the online
+// backup API: they need no such permission.
 func RewindInPlaceStopsServer(engine string) bool {
 	switch NormalizeEngine(engine) {
-	case EngineMongoDB, EngineClickHouse:
+	case EngineMongoDB, EngineClickHouse, EngineSQLite:
 		return false
 	}
 	return true

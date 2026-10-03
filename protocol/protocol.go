@@ -878,6 +878,8 @@ type DatabaseMonitoring struct {
 	// ClickHouse is ClickHouse's own health detail (clickhouse.go; about
 	// every 5 minutes).
 	ClickHouse *ClickHouseStatus `json:"clickhouse,omitempty"`
+	// SQLite is SQLite's own health detail (sqlite.go; about every minute).
+	SQLite *SQLiteStatus `json:"sqlite,omitempty"`
 }
 
 // MonitoringAck answers a monitoring report.
