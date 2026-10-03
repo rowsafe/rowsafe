@@ -52,6 +52,7 @@ func TestClickHousePointInTime(t *testing.T) {
 		"INSERT INTO pit.ev SELECT toDateTime('2026-01-01 00:00:00') + number, number % 10, number FROM numbers(1000)",
 		"INSERT INTO pit.`my-prices` SELECT number, number * 1.5, 1 FROM numbers(50)",
 		"INSERT INTO pit.lg VALUES (1), (2)",
+		"SYSTEM FLUSH LOGS", // part_log and query_log exist from here (a new server makes them on the first flush)
 	} {
 		must(t, admin, q)
 	}

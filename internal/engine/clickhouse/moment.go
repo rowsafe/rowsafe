@@ -165,5 +165,10 @@ func (e *Engine) findMoment(ctx context.Context, env agent.EngineEnv, db protoco
 		"TRUNCATE and DROP PARTITION are both listed as emptied tables.")
 	res := search.Result(from, to, notes, started)
 	res.Segments = len(logs)
+	for i, m := range res.Moments {
+		if m.Kind == protocol.MomentUpdate && m.Estimated {
+			res.Moments[i].Summary = "up to " + m.Summary
+		}
+	}
 	return res, nil
 }

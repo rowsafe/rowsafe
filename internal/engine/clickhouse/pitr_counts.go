@@ -44,19 +44,12 @@ func annotate(ctx context.Context, c *client, st *shipLocal, news []livePart, pa
 				toCount[p.Table] = append(toCount[p.Table], p.Name)
 			case "update":
 				a.Change = "update"
+				a.Updated = p.Rows // until part_log says how many it rewrote
 			}
 		case info.ok && p.Rows == 0 && info.Level > 0:
 			// An empty part covering others: TRUNCATE, DROP PARTITION.
 			a.Change = "clear"
-			for _, q := range byTable[p.Table] {
-				if q.Name != p.Name && info.contains(parsePartName(q.Name, q.Partition)) {
-					if n, ok := st.Existing[q.Table+"/"+q.Name]; ok {
-						a.Cleared += n
-					} else {
-						a.Cleared += q.Rows
-					}
-				}
-			}
+			a.Cleared = clearedRows(st, p.Table, p.Name, info)
 		}
 	}
 	counted := map[string]int64{}
@@ -123,4 +116,37 @@ func tableRows(st *shipLocal, uuid string) int64 {
 		}
 	}
 	return n
+}
+
+// clearedRows adds up the rows of the parts an empty part replaced: those
+// on disk at the last round (ClickHouse may have removed them already)
+// that no other part had replaced.
+func clearedRows(st *shipLocal, table, by string, info partInfo) int64 {
+	var known []livePart
+	for k := range st.Existing {
+		t, name, _ := strings.Cut(k, "/")
+		if t == table && name != by {
+			known = append(known, livePart{Table: t, Name: name})
+		}
+	}
+	var n int64
+	for _, q := range known {
+		qi := parsePartName(q.Name, info.Partition) // the same partition, or not ok
+		if info.contains(qi) && !replacedBefore(known, by, qi) {
+			n += st.Existing[table+"/"+q.Name]
+		}
+	}
+	return n
+}
+
+// replacedBefore: another part than by (which replaces it now) already
+// replaced qi, so its rows were counted with that part.
+func replacedBefore(table []livePart, by string, qi partInfo) bool {
+	for _, o := range table {
+		oi := parsePartName(o.Name, cmpOr(o.Partition, qi.Partition))
+		if o.Name != by && oi != qi && oi.contains(qi) {
+			return true
+		}
+	}
+	return false
 }

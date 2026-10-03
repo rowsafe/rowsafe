@@ -441,7 +441,7 @@ func (s *shipper) shipRound(ctx context.Context, c *client, r *repo, st *shipLoc
 	for _, lp := range news {
 		p := &pitPart{Name: lp.Name, Partition: lp.Partition, Rows: lp.Rows, At: atLeast(time.Unix(lp.ModTime, 0).UTC())}
 		if a := notes[lp.Table+"/"+lp.Name]; a != nil {
-			p.Change, p.Deleted, p.Cleared, p.Mutation = a.Change, a.Deleted, a.Cleared, a.Mutation
+			p.Change, p.Deleted, p.Cleared, p.Mutation, p.Updated = a.Change, a.Deleted, a.Cleared, a.Mutation, a.Updated
 		}
 		files, err := s.copyPart(ctx, cw, st, lp.Table, localPath(dataPath, lp.Path), lp.Name)
 		if err != nil {
