@@ -23,12 +23,14 @@ type livePart struct {
 	Active    int    `json:"active"`
 	Disk      string `json:"disk_type"`
 	ModTime   int64  `json:"mt"` // unix seconds
+	Hash      string `json:"h"`  // hash_of_all_files: the same files, the same hash
 }
 
 // liveParts lists the parts of tables in user databases.
 func liveParts(ctx context.Context, c *client) ([]livePart, error) {
 	return query[livePart](ctx, c, `SELECT toString(t.uuid) AS t, p.name AS name, p.partition_id AS partition_id, toInt64(p.rows) AS rows,
-		p.path AS path, toInt32(p.active) AS active, toString(d.type) AS disk_type, toInt64(toUnixTimestamp(p.modification_time)) AS mt
+		p.path AS path, toInt32(p.active) AS active, toString(d.type) AS disk_type, toInt64(toUnixTimestamp(p.modification_time)) AS mt,
+		hex(p.hash_of_all_files) AS h
 		FROM system.parts AS p
 		INNER JOIN (SELECT database, name, uuid FROM system.tables WHERE database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')) AS t
 		  ON t.database = p.database AND t.name = p.table

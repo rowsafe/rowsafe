@@ -122,6 +122,10 @@ type pitPart struct {
 	// of the parts an UPDATE rewrote (more than it changed: ClickHouse
 	// doesn't count those), Cleared the rows a "clear" removed. Mutation
 	// groups a mutation's parts ("<table>/<mutation>").
+	// Hash is ClickHouse's hash_of_all_files: a standby finds its own copy
+	// of the part by it (standby_*.go).
+	Hash string `json:"hash,omitempty"`
+
 	Change   string `json:"change,omitempty"`
 	Deleted  int64  `json:"deleted,omitempty"`
 	Updated  int64  `json:"updated,omitempty"`

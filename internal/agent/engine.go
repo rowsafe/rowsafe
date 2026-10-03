@@ -165,6 +165,10 @@ type EngineEnv struct {
 	// Copies are the agent's safe copy helpers (copies_engine.go); nil
 	// outside the agent.
 	Copies *CopyTools
+	// RepoFor is the bucket of a database: the one its primary handed over
+	// when this server holds its standby, else Repo (for background work;
+	// a task's env already has it). nil outside the agent.
+	RepoFor func(dbID string) pgbackrest.Repo
 }
 
 // RunLow runs a command at low CPU and IO priority (LowPriority).
@@ -264,6 +268,7 @@ func (a *Agent) engineEnv(name string) EngineEnv {
 		env.Control = a.engineControl // tests
 	}
 	env.Copies = a.copyTools()
+	env.RepoFor = func(dbID string) pgbackrest.Repo { return a.repoFor(protocol.DatabaseSpec{ID: dbID}) }
 	return env
 }
 
