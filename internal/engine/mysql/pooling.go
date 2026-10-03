@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -347,6 +348,12 @@ func (e *Engine) PoolerStatus(ctx context.Context, env agent.EngineEnv, db proto
 		return nil
 	}
 	out := &protocol.PoolerStatus{Managed: true, DatabaseID: db.ID, Settings: st.Settings, Addresses: st.Addresses, Target: st.Target, Version: st.Version}
+	if al, err := proxysqlroot.Allowed(agent.PoolerConfigOf(env.Config).AllowFile); err == nil {
+		for t := range al.Targets {
+			out.Targets = append(out.Targets, t)
+		}
+		slices.Sort(out.Targets)
+	}
 	sdb, err := openProxySQLStats(ctx)
 	if err != nil {
 		out.Error = err.Error()

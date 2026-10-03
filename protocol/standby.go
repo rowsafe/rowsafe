@@ -620,6 +620,10 @@ type StandbyView struct {
 	// it first); otherwise a promotion needs the typed confirmation that
 	// the primary is down or will stay stopped.
 	PrimaryReachable bool `json:"primary_reachable"`
+	// PoolerApprovals: ProxySQL on another server pools this database but
+	// root there hasn't let it send connections to this standby yet, so it
+	// couldn't follow a promotion; one root command each.
+	PoolerApprovals []PoolerApproval `json:"pooler_approvals,omitempty"`
 }
 
 // FenceView is a fenced old primary.

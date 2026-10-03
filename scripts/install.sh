@@ -735,6 +735,11 @@ mysql_standby_wanted() {
   note "Standby servers: Rowsafe can keep a second $(engine_label "$C_ENGINE") server in sync with this one (or this one with another),"
   note "ready to take over. For that its $(engine_label "$C_ENGINE") account needs administrator rights, used only when someone adds,"
   note "promotes or removes a standby in the dashboard and confirms."
+  if [ -n "$(pooler_allowed_ports)" ]; then
+    note "ProxySQL pools this server's $(engine_label "$C_ENGINE") (connection pooling): after a standby on another server is"
+    note "promoted, ProxySQL follows it only where root approved that server, with one command here:"
+    note "  sudo rowsafe-allow pooler-target STANDBY_ADDRESS PORT   (the Standby page shows the exact one)"
+  fi
   if confirm "Allow standby servers with this server?" n; then MYSQL_STANDBY=yes; return 0; fi
   MYSQL_STANDBY=no
   return 1

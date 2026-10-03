@@ -35,6 +35,8 @@ import (
 	"time"
 
 	"github.com/go-sql-driver/mysql"
+
+	"github.com/rowsafe/rowsafe/protocol"
 )
 
 // Defaults (the systemd unit sets the directories).
@@ -129,9 +131,7 @@ type Allow struct {
 
 // ApproveCommand is how root lets ProxySQL send connections to host:port on
 // another server.
-func ApproveCommand(host string, port int) string {
-	return fmt.Sprintf("sudo rowsafe-allow pooler-target %s %d", host, port)
-}
+func ApproveCommand(host string, port int) string { return protocol.PoolerApprovalCommand(host, port) }
 
 // TargetLine is the allow file line that lets ProxySQL send connections to
 // host:port on another server.
