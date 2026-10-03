@@ -4144,13 +4144,14 @@ remove_pooler_units() {
 # pooler_name: PgBouncer in front of PostgreSQL, ProxySQL in front of MySQL
 # and MariaDB.
 pooler_name() {
-  case $HOST_ENGINE in mysql | mariadb) echo ProxySQL ;; *) echo PgBouncer ;; esac
+  case $HOST_ENGINE in mysql | mariadb) echo ProxySQL ;; clickhouse) echo chproxy ;; *) echo PgBouncer ;; esac
 }
 
 # install_pooler_units_for_engine installs the engine's pooling helper.
 install_pooler_units_for_engine() {
   case $HOST_ENGINE in
     mysql | mariadb) install_proxysql_units ;;
+    clickhouse) install_chproxy_units ;;
     *) install_pooler_units ;;
   esac
 }
@@ -4236,6 +4237,89 @@ remove_proxysql_units() {
   if systemd_running; then systemctl daemon-reload; fi
 }
 
+# chproxy (ClickHouse): root's copy of the agent ($PERMISSIONS_HELPER
+# chproxy-apply) installs chproxy (its release, checked against the SHA-256
+# the agent pins) and runs it as rowsafe-chproxy.service when the agent asks
+# ($POOLER_DIR/chproxy-request), only for ports in $POOLER_ALLOW_FILE.
+CHPROXY_SERVICE_FILE=/etc/systemd/system/rowsafe-chproxy-apply.service
+CHPROXY_PATH_FILE=/etc/systemd/system/rowsafe-chproxy-apply.path
+
+install_chproxy_units() {
+  [ -x "$PERMISSIONS_HELPER" ] || install_permissions_helper
+  [ -x "$PERMISSIONS_HELPER" ] || { warn "pooling needs root's copy of the agent ($PERMISSIONS_HELPER); run the installer again"; return 0; }
+  as_agent mkdir -p -m 0700 "$POOLER_DIR"
+  _changed=0
+  if sed "s/@AGENT_USER@/$AGENT_USER/" <<'ROWSAFE_CHPROXY_SERVICE_EOF' | write_file "$CHPROXY_SERVICE_FILE" 0644 root:root; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-chproxy-apply.service: installs, configures, points or turns off
+# chproxy (connection pooling for ClickHouse's HTTP interface) when someone
+# turned pooling on or off in Rowsafe, only for the ports root allowed
+# (/etc/rowsafe/pooler-allowed, sudo rowsafe-allow pooler). chproxy itself
+# runs as rowsafe-chproxy.service. Started by rowsafe-chproxy-apply.path;
+# installed by https://rowsafe.sh/install.
+
+[Unit]
+Description=Rowsafe: manage chproxy (connection pooling), on request
+Documentation=https://rowsafe.sh/docs/guides/connection-pooling
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/rowsafe/rowsafe-permissions chproxy-apply
+Environment=ROWSAFE_AGENT_USER=@AGENT_USER@
+TimeoutStartSec=15min
+RuntimeDirectory=rowsafe-chproxy-apply
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+StateDirectory=rowsafe-chproxy-apply
+StateDirectoryMode=0700
+UMask=0022
+# It downloads chproxy, writes its unit and starts it: no file system
+# sandbox, but no new privileges and no kernel changes.
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+ROWSAFE_CHPROXY_SERVICE_EOF
+    _changed=1
+  fi
+  if write_file "$CHPROXY_PATH_FILE" 0644 root:root <<'ROWSAFE_CHPROXY_PATH_EOF'; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-chproxy-apply.path: starts rowsafe-chproxy-apply.service when the
+# Rowsafe agent asks for a pooling change. Installed by
+# https://rowsafe.sh/install only when root allowed pooling (--allow-pooler).
+
+[Unit]
+Description=Rowsafe: watch for connection pooling requests (chproxy)
+
+[Path]
+PathExists=/var/lib/rowsafe/pooler/chproxy-request
+Unit=rowsafe-chproxy-apply.service
+
+[Install]
+WantedBy=multi-user.target
+ROWSAFE_CHPROXY_PATH_EOF
+    _changed=1
+  fi
+  if systemd_running; then
+    [ "$_changed" = 0 ] || systemctl daemon-reload
+    systemctl enable --now --quiet rowsafe-chproxy-apply.path
+  fi
+}
+
+remove_chproxy_units() {
+  [ -e "$CHPROXY_PATH_FILE" ] || [ -e "$CHPROXY_SERVICE_FILE" ] || return 0
+  if systemd_running; then systemctl disable --now --quiet rowsafe-chproxy-apply.path 2>/dev/null || true; fi
+  rm -f "$CHPROXY_PATH_FILE" "$CHPROXY_SERVICE_FILE"
+  if systemd_running; then systemctl daemon-reload; fi
+}
+
 # pooler_ports prints the ports of this server's PostgreSQL clusters, found
 # by root: pg_lsclusters (Debian and Ubuntu), else the TCP ports that
 # processes of the agent user listen on. Never the agent's own discovery:
@@ -4247,6 +4331,13 @@ pooler_ports() {
       have ss || return 0
       ss -Hltne 2>/dev/null | awk -v u="uid:$_uid" '{ for (i = 1; i <= NF; i++) if ($i == u) { n = split($4, a, ":"); print a[n] } }' |
         awk '$1 ~ /^[0-9]+$/ && $1 != 33060' | sort -un
+      return 0
+      ;;
+    clickhouse) # chproxy: ClickHouse's HTTP port (http_port; chproxy covers HTTP only)
+      if have clickhouse; then
+        clickhouse extract-from-config --config-file=/etc/clickhouse-server/config.xml --key=http_port 2>/dev/null |
+          awk '$1 ~ /^[0-9]+$/ && $1 > 0 && $1 < 65536 { print $1 }' | sort -un
+      fi
       return 0
       ;;
   esac
@@ -4329,11 +4420,15 @@ refresh_pooler() {
 disallow_pooler() {
   remove_pooler_units
   remove_proxysql_units
+  remove_chproxy_units
   if [ -d "$CONFIG_DIR" ]; then
     {
       echo "# Managing the connection pooler from Rowsafe is off on this server."
       echo "# Turn it on with: sudo rowsafe-allow pooler"
     } | write_file "$POOLER_ALLOW_FILE" 0644 root:root || true
+  fi
+  if [ -f /etc/systemd/system/rowsafe-chproxy.service ]; then
+    perm_note "chproxy set up by Rowsafe keeps running for your apps; Rowsafe can no longer change it or turn it off (sudo systemctl disable --now rowsafe-chproxy)."
   fi
   if [ -f /etc/pgbouncer/pgbouncer.ini ] && [ "$(head -n 1 /etc/pgbouncer/pgbouncer.ini)" = ';; Managed by Rowsafe' ]; then
     perm_note "PgBouncer set up by Rowsafe keeps running for your apps; Rowsafe can no longer change it or turn it off."
@@ -4937,8 +5032,8 @@ perm_has_postgres() {
 perm_why() {
   if [ "$HOST_ENGINE" != postgresql ] || ! perm_has_postgres; then
     # Another engine (or none yet): restarts, the server's own updates, the
-    # firewall and tuning work for every engine, pooling for MySQL and
-    # MariaDB (ProxySQL); the rest is PostgreSQL's.
+    # firewall and tuning work for every engine, pooling for MySQL,
+    # MariaDB (ProxySQL) and ClickHouse (chproxy); the rest is PostgreSQL's.
     case $1 in
       restart)
         [ -n "$(restart_pairs)" ] || echo "found no $(engine_label) service (systemd) on this server"
@@ -4949,8 +5044,8 @@ perm_why() {
         return 0
         ;;
       firewall | tuning) ;; # every engine's port; MongoDB's and ClickHouse's settings
-      pooler | pooler-public) case $HOST_ENGINE in mysql | mariadb) ;; *)
-        echo "Rowsafe pools PostgreSQL (PgBouncer) and MySQL or MariaDB (ProxySQL), and neither is on this server"
+      pooler | pooler-public) case $HOST_ENGINE in mysql | mariadb | clickhouse) ;; *)
+        echo "Rowsafe pools PostgreSQL (PgBouncer), MySQL or MariaDB (ProxySQL) and ClickHouse (chproxy), and none is on this server"
         return 0
         ;;
       esac ;;
@@ -8002,6 +8097,8 @@ uninstall_agent() {
   remove_files_units # files section
   rm -f "$FILES_ALLOW_FILE" "$RESTIC_BIN"
   remove_pooler_units
+  remove_proxysql_units
+  remove_chproxy_units
   remove_restart_helper
   remove_create_cluster
   remove_firewall_helper
