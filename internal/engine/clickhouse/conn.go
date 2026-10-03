@@ -109,6 +109,9 @@ type client struct {
 	pass string
 	http *http.Client
 	ua   string // User-Agent ("rowsafe-agent")
+	// condCache: the server has the query condition cache (25.3+), which
+	// the index advisor turns off for its measurements.
+	condCache bool
 }
 
 var sharedTransport = func() *http.Transport {

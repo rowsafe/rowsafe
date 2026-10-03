@@ -527,6 +527,9 @@ func (e *Engine) withAdvisorCopy(ctx context.Context, env agent.EngineEnv, db pr
 	if err := restoreOnly(ctx, env, r, b, cp, need, tl); err != nil {
 		return err
 	}
+	if n, err := cp.scalar(ctx, "SELECT count() FROM system.settings WHERE name = 'use_query_condition_cache'", nil); err == nil && n == "1" {
+		cp.condCache = true
+	}
 	res.CopySeconds = time.Since(began).Seconds()
 	tl.Printf("copy restored from backup %s in %s", b.Label, time.Since(began).Round(time.Second))
 	fn(cp)
@@ -560,9 +563,15 @@ func runOnce(ctx context.Context, cp *client, st *chStatement) (chRun, error) {
 	rctx, cancel := context.WithTimeout(ctx, chRunTimeout+10*time.Second)
 	defer cancel()
 	began := time.Now()
-	resp, err := cp.request(rctx, st.Sample, nil, map[string]string{"wait_end_of_query": "1", "database": st.DB,
+	settings := map[string]string{"wait_end_of_query": "1", "database": st.DB,
 		"max_execution_time": strconv.Itoa(int(chRunTimeout.Seconds())), "use_query_cache": "0",
-		"default_format": "Null", "log_queries": "0"}, nil)
+		"default_format": "Null", "log_queries": "0"}
+	if cp.condCache {
+		// 25.3+ remembers which granules a condition matched nothing in:
+		// the second run would read next to nothing, index or not.
+		settings["use_query_condition_cache"] = "0"
+	}
+	resp, err := cp.request(rctx, st.Sample, nil, settings, nil)
 	if err != nil {
 		return chRun{}, err
 	}
