@@ -242,10 +242,15 @@ func (s *shipper) save(st shipLocal) error {
 
 // archiverStats is what the heartbeat reports.
 func (st shipLocal) archiverStats(err error) *protocol.ArchiverStats {
+	// LastArchivedTime is how far the record reaches (every change up to
+	// it is in the bucket), like the newest WAL archived for PostgreSQL.
 	out := &protocol.ArchiverStats{ArchivedCount: st.Shipped, FailedCount: st.Failed,
-		LastArchivedTime: st.LastShippedAt, LastFailedTime: st.LastFailedAt, ArchiveMode: "on"}
+		LastFailedTime: st.LastFailedAt, ArchiveMode: "on"}
 	if st.Record == "" {
 		out.ArchiveMode = "off"
+	} else {
+		to := st.To
+		out.LastArchivedTime = &to
 	}
 	switch {
 	case st.Problem != "":

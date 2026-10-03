@@ -49,6 +49,11 @@ func (e *Engine) flushTo(ctx context.Context, env agent.EngineEnv, db protocol.D
 // assembled for it (pitr_restore.go); else as pickBackup. recovered is the
 // moment the restore brings back.
 func (e *Engine) pickTarget(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec, r *repo, target restoreTarget, tl agent.TaskLogger) (backupDoc, time.Time, error) {
+	if target.Mark != "" {
+		// The Mark's own backup (the control plane may name the backup a
+		// moment would start from).
+		target.BackupSet = ""
+	}
 	if target.Time.IsZero() || target.Mark != "" {
 		b, err := pickBackup(ctx, r, target)
 		return b, b.StoppedAt, err
