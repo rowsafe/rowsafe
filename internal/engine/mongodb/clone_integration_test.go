@@ -74,7 +74,7 @@ func TestMongoDBClone(t *testing.T) {
 	insert := func(from, to int) {
 		var docs []any
 		for i := from; i < to; i++ {
-			docs = append(docs, bson.D{{Key: "_id", Value: i}, {Key: "email", Value: fmt.Sprintf("u%d@example.com", i)}})
+			docs = append(docs, bson.D{{Key: "_id", Value: i}, {Key: "email", Value: fmt.Sprintf("u%d@shop.test", i)}, {Key: "note", Value: "keep me"}})
 		}
 		if _, err := orders.InsertMany(ctx, docs); err != nil {
 			t.Fatal(err)
@@ -109,9 +109,18 @@ func TestMongoDBClone(t *testing.T) {
 	}
 	tl := &testLog{t: t}
 	res, err := e.ForkRestore(ctx, env, protocol.ForkRestoreParams{ForkID: "fork_m", Name: "shop-staging", Source: db,
-		Target: protocol.RewindTarget{Time: &at}, Placement: protocol.ForkEmptyServer, Port: port2, Major: major, SizeBytes: size}, tl)
+		Target: protocol.RewindTarget{Time: &at}, Placement: protocol.ForkEmptyServer, Port: port2, Major: major, SizeBytes: size,
+		// Masked: a saved rule, and the suggestions (the email field).
+		Masking: &protocol.ForkMasking{Rules: []protocol.ForkMaskRule{{DB: "shopc", Table: "orders", Column: "note", Strategy: "lorem"}}, Suggest: true}}, tl)
 	if err != nil {
 		t.Fatal("clone:", err)
+	}
+	if res.Masking == nil || res.Masking.Columns != 2 {
+		t.Fatalf("masking: %+v", res.Masking)
+	}
+	if n, err := admin2.Database("shopc").Collection("orders").CountDocuments(ctx,
+		bson.D{{Key: "$or", Value: bson.A{bson.D{{Key: "email", Value: bson.D{{Key: "$regex", Value: "@shop\\.test$"}}}}, bson.D{{Key: "note", Value: "keep me"}}}}}); err != nil || n != 0 {
+		t.Fatalf("the clone has %d unmasked documents (%v)", n, err)
 	}
 	t.Logf("clone: %+v", res)
 	n, err := admin2.Database("shopc").Collection("orders").CountDocuments(ctx, bson.D{})

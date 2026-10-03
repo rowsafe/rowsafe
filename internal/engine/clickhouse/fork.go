@@ -2,6 +2,7 @@ package clickhouse
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/rowsafe/rowsafe/internal/agent"
+	"github.com/rowsafe/rowsafe/masking"
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
@@ -42,9 +44,6 @@ func (e *Engine) ForkRestore(ctx context.Context, env agent.EngineEnv, p protoco
 	start := time.Now()
 	if p.Placement != protocol.ForkEmptyServer || p.Port < 1 || p.Port > 65535 {
 		return nil, fmt.Errorf("a ClickHouse clone goes into an empty ClickHouse server (placement %q, port %d)", p.Placement, p.Port)
-	}
-	if p.Masking != nil {
-		return nil, errors.New("masking isn't available for ClickHouse clones yet; nothing was restored")
 	}
 	target := restoreTarget{Mark: p.Target.Mark, BackupSet: p.Target.BackupSet}
 	if p.Target.Time != nil {
@@ -97,8 +96,23 @@ func (e *Engine) ForkRestore(ctx context.Context, env agent.EngineEnv, p protoco
 		}
 		return nil, err
 	}
+	var maskReport *protocol.ForkMaskReport
+	if p.Masking != nil {
+		// Masked right after the restore, by mutation, before the clone is
+		// handed over (ClickHouse restores straight into the server).
+		r, err := maskFork(ctx, env, c, *p.Masking, tl)
+		if err != nil {
+			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+			defer cancel()
+			for _, d := range b.Databases {
+				_ = c.exec(cctx, "DROP DATABASE IF EXISTS "+quoteIdent(d.Name)+" SYNC", nil)
+			}
+			return nil, fmt.Errorf("masking the clone failed, so it was removed again: %w", err)
+		}
+		maskReport = &r
+	}
 	res := &protocol.ForkRestoreResult{ForkID: p.ForkID, Placement: p.Placement, Port: p.Port, Major: in.VersionNum / 100,
-		DurationMs: time.Since(start).Milliseconds()}
+		DurationMs: time.Since(start).Milliseconds(), Masking: maskReport}
 	recovered = recovered.UTC()
 	res.RecoveredTo = &recovered
 	if dbs, total, err := restoredDatabases(ctx, c); err == nil {
@@ -186,4 +200,32 @@ func countWord(n int, one, many string) string {
 		return "1 " + one
 	}
 	return fmt.Sprintf("%d %s", n, many)
+}
+
+// maskFork masks a restored clone with the source's rules (and the
+// suggestions when asked), like a safe copy.
+func maskFork(ctx context.Context, env agent.EngineEnv, c *client, fm protocol.ForkMasking, tl agent.TaskLogger) (protocol.ForkMaskReport, error) {
+	key, err := forkMaskKey(env)
+	if err != nil {
+		return protocol.ForkMaskReport{}, err
+	}
+	schema, err := readCopySchema(ctx, c)
+	if err != nil {
+		return protocol.ForkMaskReport{}, err
+	}
+	var report protocol.MaskingReport
+	plan := masking.PlanFork(schema, fm, &report)
+	tl.Printf("masking the clone: %d tables", len(plan))
+	err = maskTables(ctx, c, plan, key, tl, &report)
+	return masking.ForkReport(report, plan), err
+}
+
+// forkMaskKey is the host's masking key (a random one outside the agent).
+func forkMaskKey(env agent.EngineEnv) ([]byte, error) {
+	if env.Copies != nil {
+		return env.Copies.MaskKey()
+	}
+	key := make([]byte, 32)
+	_, err := rand.Read(key)
+	return key, err
 }

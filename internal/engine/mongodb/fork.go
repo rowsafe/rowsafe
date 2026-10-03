@@ -2,7 +2,7 @@ package mongodb
 
 import (
 	"context"
-	"errors"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -11,7 +11,10 @@ import (
 	"sync"
 	"time"
 
+	"go.mongodb.org/mongo-driver/v2/mongo"
+
 	"github.com/rowsafe/rowsafe/internal/agent"
+	"github.com/rowsafe/rowsafe/masking"
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
@@ -67,9 +70,6 @@ func (e *Engine) ForkRestore(ctx context.Context, env agent.EngineEnv, p protoco
 	start := time.Now()
 	if p.Placement != protocol.ForkEmptyServer || p.Port < 1 || p.Port > 65535 {
 		return nil, fmt.Errorf("a MongoDB clone goes into an empty MongoDB server (placement %q, port %d)", p.Placement, p.Port)
-	}
-	if p.Masking != nil {
-		return nil, errors.New("masking isn't available for MongoDB clones yet; nothing was restored")
 	}
 	if !idRE.MatchString(p.ForkID) {
 		return nil, fmt.Errorf("invalid fork id %q", p.ForkID)
@@ -132,6 +132,21 @@ func (e *Engine) ForkRestore(ctx context.Context, env agent.EngineEnv, p protoco
 	if err != nil {
 		return nil, err
 	}
+	// A masked clone is masked on the isolated server, before any of it is
+	// copied to the target.
+	var maskReport *protocol.ForkMaskReport
+	if p.Masking != nil {
+		mc, err := connect(ctx, s.uri())
+		if err != nil {
+			return nil, err
+		}
+		r, err := maskFork(ctx, env, mc, *p.Masking, tl)
+		disconnect(mc)
+		if err != nil {
+			return nil, fmt.Errorf("masking the clone: %w; nothing was copied", err)
+		}
+		maskReport = &r
+	}
 	tl.Printf("copying it into the MongoDB server on port %d (users and roles stay out)", p.Port)
 	if err := copyServer(ctx, env, s.uri(), loginURI(env, p.Port), tl); err != nil {
 		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
@@ -140,7 +155,7 @@ func (e *Engine) ForkRestore(ctx context.Context, env agent.EngineEnv, p protoco
 		return nil, err
 	}
 	res := &protocol.ForkRestoreResult{ForkID: p.ForkID, Placement: p.Placement, Port: p.Port, Major: in.VersionNum / 100,
-		RecoveredTo: out.RecoveredTo, DurationMs: time.Since(start).Milliseconds()}
+		RecoveredTo: out.RecoveredTo, DurationMs: time.Since(start).Milliseconds(), Masking: maskReport}
 	if res.RecoveredTo == nil {
 		t := out.Backup.StoppedAt
 		res.RecoveredTo = &t
@@ -299,4 +314,32 @@ func standbyTargetReason(env agent.EngineEnv, port int, in serverInfo) string {
 		return "Rowsafe may not restart MongoDB there: run the Rowsafe installer on that server with --allow-restart"
 	}
 	return ""
+}
+
+// maskFork masks a clone with the source's rules (and the suggestions when
+// asked), like a safe copy.
+func maskFork(ctx context.Context, env agent.EngineEnv, c *mongo.Client, fm protocol.ForkMasking, tl agent.TaskLogger) (protocol.ForkMaskReport, error) {
+	key, err := forkMaskKey(env)
+	if err != nil {
+		return protocol.ForkMaskReport{}, err
+	}
+	schema, err := readCopySchema(ctx, c)
+	if err != nil {
+		return protocol.ForkMaskReport{}, err
+	}
+	var report protocol.MaskingReport
+	plan := masking.PlanFork(schema, fm, &report)
+	tl.Printf("masking the clone: %d collections", len(plan))
+	err = maskTables(ctx, c, plan, key, tl, &report)
+	return masking.ForkReport(report, plan), err
+}
+
+// forkMaskKey is the host's masking key (a random one outside the agent).
+func forkMaskKey(env agent.EngineEnv) ([]byte, error) {
+	if env.Copies != nil {
+		return env.Copies.MaskKey()
+	}
+	key := make([]byte, 32)
+	_, err := rand.Read(key)
+	return key, err
 }

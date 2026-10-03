@@ -47,7 +47,9 @@ func TestClickHouseClone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r := cloneTargetReason(in2); !strings.Contains(r, "may not create") {
+	// Rowsafe's ordinary login may already create databases (Databases &
+	// users needs it); otherwise the reason says what is missing.
+	if r := cloneTargetReason(in2); r != "" && !strings.Contains(r, "may not create") {
 		t.Fatalf("a login without clone rights: %q", r)
 	}
 	if err := CreateLoginWith(ctx, env, port2, "", "", true); err != nil {
@@ -56,8 +58,8 @@ func TestClickHouseClone(t *testing.T) {
 
 	must(t, admin, "DROP DATABASE IF EXISTS shop SYNC")
 	must(t, admin, "CREATE DATABASE shop")
-	must(t, admin, "CREATE TABLE shop.orders (id UInt64, note String) ENGINE = MergeTree ORDER BY id")
-	must(t, admin, "INSERT INTO shop.orders SELECT number, 'x' FROM numbers(100)")
+	must(t, admin, "CREATE TABLE shop.orders (id UInt64, note String, email String) ENGINE = MergeTree ORDER BY id")
+	must(t, admin, "INSERT INTO shop.orders SELECT number, 'x', concat('buyer', toString(number), '@shop.test') FROM numbers(100)")
 	spec := protocol.DatabaseSpec{ID: "db_ch_clone", Name: "shop", Stanza: "shop", Port: port, Engine: protocol.EngineClickHouse, RetentionFull: 2}
 	if _, err := run[protocol.AdoptResult](t, e, env, spec, protocol.TaskAdopt, protocol.AdoptParams{Apply: true}); err != nil {
 		t.Fatal("adopt:", err)
@@ -66,7 +68,7 @@ func TestClickHouseClone(t *testing.T) {
 	if err != nil {
 		t.Fatal("backup:", err)
 	}
-	must(t, admin, "INSERT INTO shop.orders SELECT number + 100, 'y' FROM numbers(50)")
+	must(t, admin, "INSERT INTO shop.orders SELECT number + 100, 'y', 'late@shop.test' FROM numbers(50)")
 	if _, err := run[protocol.BackupResult](t, e, env, spec, protocol.TaskBackup, protocol.BackupParams{Type: protocol.BackupDiff}); err != nil {
 		t.Fatal("diff:", err)
 	}
@@ -80,16 +82,27 @@ func TestClickHouseClone(t *testing.T) {
 	}
 	tl := &testLog{t: t}
 	res, err := e.ForkRestore(ctx, env, protocol.ForkRestoreParams{ForkID: "fork_ch", Name: "shop-staging", Source: spec,
-		Target: protocol.RewindTarget{BackupSet: full.Label}, Placement: protocol.ForkEmptyServer, Port: port2, Major: major, SizeBytes: size}, tl)
+		Target: protocol.RewindTarget{BackupSet: full.Label}, Placement: protocol.ForkEmptyServer, Port: port2, Major: major, SizeBytes: size,
+		// Masked: a saved rule, and the suggestions (the email column).
+		Masking: &protocol.ForkMasking{Rules: []protocol.ForkMaskRule{{DB: "shop", Table: "orders", Column: "note", Strategy: "lorem"}}, Suggest: true}}, tl)
 	if err != nil {
 		t.Fatal("clone:", err)
+	}
+	if res.Masking == nil || res.Masking.Columns != 2 {
+		t.Fatalf("masking: %+v", res.Masking)
+	}
+	if n := count(t, admin2, "SELECT count() FROM shop.orders WHERE email LIKE '%@shop.test'"); n != 0 {
+		t.Fatalf("the clone has %d real emails", n)
+	}
+	if n := count(t, admin2, "SELECT count() FROM system.databases WHERE name = '_rowsafe'"); n != 0 {
+		t.Fatal("masking left its mapping database on the clone")
 	}
 	t.Logf("clone: %+v", res)
 	if n := count(t, admin2, "SELECT count() FROM shop.orders"); n != 100 {
 		t.Fatalf("the clone has %d rows, want 100 (as of the full backup)", n)
 	}
 	// Merges run on a clone (it is a real server, not a copy).
-	must(t, admin2, "INSERT INTO shop.orders VALUES (1000, 'z')")
+	must(t, admin2, "INSERT INTO shop.orders VALUES (1000, 'z', 'z@example.com')")
 	must(t, admin2, "OPTIMIZE TABLE shop.orders FINAL")
 	if res.RecoveredTo == nil || len(res.Databases) != 1 || time.Since(*res.RecoveredTo) > time.Hour {
 		t.Fatalf("result: %+v", res)
