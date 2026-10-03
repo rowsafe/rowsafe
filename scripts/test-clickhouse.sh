@@ -77,7 +77,7 @@ if [ "${CLICKHOUSE_CLONE:-}" = 1 ]; then
 	name=rowsafe-test-clickhouse-clone-$$
 	containers="$containers $name"
 	echo "==> ClickHouse $v, clone into a second server"
-	to "$LIMIT" docker run --rm --name "$name" -e CLICKHOUSE_SKIP_USER_SETUP=1 --entrypoint bash "$img" -euc '
+	to "$LIMIT" docker run --rm --name "$name" -e CLICKHOUSE_SKIP_USER_SETUP=1 -e RUN_TESTS="${TEST_RUN:-TestClickHouseClone|TestClickHouseMoveIn|TestClickHouseStandby}" --entrypoint bash "$img" -euc '
 		/entrypoint.sh >/tmp/server.log 2>&1 &
 		install -d -o clickhouse -g clickhouse /tmp/ch2
 		su clickhouse -s /bin/sh -c "clickhouse-server --config-file=/etc/clickhouse-server/config.xml -- \
@@ -92,7 +92,7 @@ if [ "${CLICKHOUSE_CLONE:-}" = 1 ]; then
 		done
 		cd /tmp
 		su rowsafe -c "env ROWSAFE_TEST_CLICKHOUSE_PORT=8123 ROWSAFE_TEST_CLICKHOUSE_CLONE_PORT=8125 \
-			/usr/local/bin/clickhouse.test -test.v -test.count=1 -test.run \"TestClickHouseClone|TestClickHouseMoveIn\" -test.timeout 20m" 2>&1 | tail -n 80
+			/usr/local/bin/clickhouse.test -test.v -test.count=1 -test.run \"$RUN_TESTS\" -test.timeout 20m" 2>&1 | tail -n 120
 		exit ${PIPESTATUS[0]}
 	' || rc=1
 	exit $rc
