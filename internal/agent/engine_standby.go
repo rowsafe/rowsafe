@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
+	"sync"
 	"time"
 
 	"github.com/rowsafe/rowsafe/internal/handoff"
@@ -337,10 +339,8 @@ func (a *Agent) engineStandbyHeartbeat(ctx context.Context, hb *protocol.Standby
 		if es, ok := e.(EngineStandby); ok {
 			hb.Standbys = append(hb.Standbys, es.StandbyStates(ctx, env)...)
 		}
-		if et, ok := e.(EngineTargets); ok {
-			hb.Targets = append(hb.Targets, et.StandbyTargets(ctx, env)...)
-		}
 	}
+	hb.Targets = append(hb.Targets, a.engineTargets(ctx)...)
 	a.mu.Lock()
 	watched := append([]protocol.DatabaseSpec(nil), a.watched...)
 	a.mu.Unlock()
@@ -360,4 +360,41 @@ func (a *Agent) engineStandbyHeartbeat(ctx context.Context, hb *protocol.Standby
 			hb.Primaries = append(hb.Primaries, st)
 		}
 	}
+}
+
+// engineTargetsEvery is how often the engines look for servers that could
+// receive a standby or a clone.
+const engineTargetsEvery = time.Minute
+
+// engineTargetsCache holds the engines' standby and clone targets. Finding
+// them connects to servers (and a server that doesn't answer takes the
+// driver's whole timeout), so it runs beside the heartbeat, never in it.
+type engineTargetsCache struct {
+	mu      sync.Mutex
+	at      time.Time
+	running bool
+	out     []protocol.StandbyTarget
+}
+
+// engineTargets is the latest list (empty until the first search ends) and
+// starts a new search when it is older than engineTargetsEvery.
+func (a *Agent) engineTargets(ctx context.Context) []protocol.StandbyTarget {
+	c := &a.engTargets
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.running && time.Since(c.at) >= engineTargetsEvery {
+		c.running = true
+		go func() {
+			var out []protocol.StandbyTarget
+			for _, e := range registeredEngines() {
+				if et, ok := e.(EngineTargets); ok {
+					out = append(out, et.StandbyTargets(ctx, a.engineEnv(e.Name()))...)
+				}
+			}
+			c.mu.Lock()
+			c.out, c.at, c.running = out, time.Now(), false
+			c.mu.Unlock()
+		}()
+	}
+	return slices.Clone(c.out)
 }

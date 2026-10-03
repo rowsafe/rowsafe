@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -166,8 +167,10 @@ func unitOf(pid int) string {
 func (e *Engine) Discover(ctx context.Context, env agent.EngineEnv) ([]agent.DiscoveredDatabase, error) {
 	procs := findMongods()
 	if len(procs) == 0 {
-		if u := os.Getenv(loginEnv); u == "" {
-			// Nothing in /proc we can see: try the default port.
+		if u := os.Getenv(loginEnv); u == "" && listening(ctx, 27017) {
+			// Nothing in /proc we can see: try the default port, when
+			// something listens there (the driver would otherwise wait
+			// its whole timeout for a server that isn't there).
 			procs = []mongodProc{{Port: 27017}}
 		}
 	}
@@ -184,6 +187,19 @@ func (e *Engine) Discover(ctx context.Context, env agent.EngineEnv) ([]agent.Dis
 		}
 	}
 	return out, nil
+}
+
+// listening reports whether something accepts connections on port on this
+// host (a quick check before the driver's long server selection).
+func listening(ctx context.Context, port int) bool {
+	cctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	c, err := (&net.Dialer{}).DialContext(cctx, "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		return false
+	}
+	c.Close()
+	return true
 }
 
 func describeServer(ctx context.Context, env agent.EngineEnv, p mongodProc) (agent.DiscoveredDatabase, bool) {
