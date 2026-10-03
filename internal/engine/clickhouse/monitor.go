@@ -46,6 +46,9 @@ type dbMonitor struct {
 	// (advisor.go: unusedObjects).
 	unused   []protocol.UnusedIndex
 	unusedAt time.Time
+	// chproxy's request counter at its last reading (pooling.go).
+	poolRequests float64
+	poolAt       time.Time
 }
 
 func (e *Engine) monitorFor(id string) *dbMonitor {
@@ -80,6 +83,7 @@ func (e *Engine) Monitor(ctx context.Context, env agent.EngineEnv, db protocol.D
 	if m.client == nil || m.login != l {
 		m.client, m.login = newClient(serverURL(db.Port), l), l
 	}
+	dm.Pooler = m.poolerStats(ctx, env, db, time.Now()) // pooling.go
 	if err := m.sample(ctx, dm); err != nil {
 		dm.Error = "can't read ClickHouse's status: " + shortError(plainLoginError(err))
 	} else if time.Since(m.settingsAt) >= 5*time.Minute { // Tuning (settings.go)
