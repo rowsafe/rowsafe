@@ -274,7 +274,12 @@ func (e *Engine) swapIn(ctx context.Context, prod, src *conn, pl inPlacePlan, re
 		if size, err := prod.integer(ctx, "DBSIZE"); err != nil || size != 0 {
 			return swapped, fmt.Errorf("the spare logical database db%d isn't empty any more (an application wrote to it)", pl.spare)
 		}
-		if _, err := prod.do(ctx, "SET", marker, "1"); err != nil {
+		// The marker goes in with the restored keys (Rowsafe's user writes
+		// only through RESTORE), so after a crash it says where they are.
+		if err := selectDB(ctx, src, n); err != nil {
+			return swapped, err
+		}
+		if _, err := src.do(ctx, "SET", marker, "1"); err != nil {
 			return swapped, err
 		}
 		copied, err := copyDatabase(ctx, src, prod, n)
@@ -298,7 +303,7 @@ func (e *Engine) swapIn(ctx context.Context, prod, src *conn, pl inPlacePlan, re
 			return swapped, err
 		}
 		_, _ = prod.do(ctx, "DEL", marker)
-		tl.Printf("db%d: %s keys swapped in", n, commas(copied))
+		tl.Printf("db%d: %s keys swapped in", n, commas(max(copied-1, 0)))
 	}
 	return swapped, nil
 }

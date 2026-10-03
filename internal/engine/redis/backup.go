@@ -16,7 +16,7 @@ import (
 
 // reuseWithin: a snapshot the replication link received this recently is
 // the backup a task asks for (the server isn't asked to fork twice).
-const reuseWithin = 10 * time.Minute
+var reuseWithin = 10 * time.Minute
 
 func (e *Engine) backup(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec, p protocol.BackupParams, tl agent.TaskLogger) (*protocol.BackupResult, error) {
 	if p.Type != "" && p.Type != protocol.BackupFull {

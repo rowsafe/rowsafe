@@ -136,7 +136,7 @@ func (e *Engine) check(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 	if err != nil {
 		return res, err
 	}
-	tl.Printf("waiting for Rowsafe's link to follow %s (the first time, the server sends it a whole snapshot)", e.display())
+	tl.Printf("waiting for Rowsafe's link to follow %s (when it starts, the server sends it a whole snapshot first)", e.display())
 	err = f.waitFollowing(ctx, 30*time.Minute)
 	var sm *snapshotModeError
 	if errors.As(err, &sm) {
@@ -159,8 +159,10 @@ func (e *Engine) check(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 	if err != nil {
 		return res, err
 	}
-	until := m.int("master_repl_offset")
-	replid := f.snapshot().StreamID
+	ls := f.snapshot()
+	// At least one command past where the link stands (the server pings
+	// every 10 seconds), so a piece of the stream makes the whole trip.
+	until, replid := max(m.int("master_repl_offset"), ls.Offset+1), ls.StreamID
 	tl.Printf("waiting for the changes up to now to reach your bucket")
 	if err := f.flush(ctx, replid, until, 3*time.Minute); err != nil {
 		return res, fmt.Errorf("copying %s's changes to your bucket: %w", e.display(), err)

@@ -19,14 +19,15 @@ import (
 //   - the replication handshake: SYNC, PSYNC, REPLCONF (snapshots and the
 //     stream of changes);
 //   - BGSAVE and LASTSAVE (snapshot mode);
-//   - DUMP and RESTORE (bringing keys back), SWAPDB and FLUSHDB (rewind in
-//     place: only into and out of an empty logical database);
+//   - DUMP and RESTORE (bringing keys back), SWAPDB, FLUSHDB and DEL (rewind
+//     in place: only into and out of an empty logical database, and its own
+//     marker key);
 //   - the fixes: CONFIG SET and REWRITE, MEMORY PURGE, CLIENT KILL.
 //
 // It holds no pub/sub channels and can't run scripts, MONITOR, DEBUG or
 // FLUSHALL.
 const aclRules = "~* resetchannels -@all +@read -keys +ping +info +select +dbsize +scan +type +exists +ttl +pttl +pexpiretime " +
-	"+object|encoding +dump +restore +swapdb +flushdb +memory|usage +memory|stats +memory|purge " +
+	"+object|encoding +dump +restore +swapdb +flushdb +del +memory|usage +memory|stats +memory|purge " +
 	"+config|get +config|set +config|rewrite +client|list +client|kill +client|setname +client|info +client|id " +
 	"+slowlog|get +slowlog|len +latency|latest +module|list +role +sync +psync +replconf +bgsave +lastsave +acl|whoami"
 

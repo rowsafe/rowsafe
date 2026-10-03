@@ -206,7 +206,11 @@ func (e *Engine) restoreInto(ctx context.Context, env agent.EngineEnv, r *repo, 
 		return out, nil, err
 	}
 	s.Bin = bin
-	tl.Printf("downloading backup %s (%s, taken %s)", cmpOr(b.Label, "kept"), humanBytes(b.StoredBytes), b.TakenAt.Format(time.RFC3339))
+	if target.Kept != "" {
+		tl.Printf("downloading the snapshot kept by the rewind (%s, taken %s)", humanBytes(b.StoredBytes), b.TakenAt.Format(time.RFC3339))
+	} else {
+		tl.Printf("downloading backup %s (%s, taken %s)", b.Label, humanBytes(b.StoredBytes), b.TakenAt.Format(time.RFC3339))
+	}
 	if err := downloadTo(ctx, r, p.BaseKey, s.rdbPath()); err != nil {
 		return out, nil, err
 	}

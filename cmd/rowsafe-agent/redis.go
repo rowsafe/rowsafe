@@ -55,8 +55,8 @@ Rowsafe's user needs: the read commands (not KEYS), INFO, CONFIG GET/SET/
 REWRITE, CLIENT LIST/KILL, SLOWLOG, LATENCY, MODULE LIST, MEMORY, SYNC,
 PSYNC and REPLCONF (snapshots and the stream of changes), BGSAVE and
 LASTSAVE (when replication is refused), DUMP and RESTORE (bringing keys
-back), SWAPDB and FLUSHDB (rewind in place, through an empty logical
-database). No pub/sub channels, scripts, MONITOR, DEBUG or FLUSHALL.
+back), SWAPDB, FLUSHDB and DEL (rewind in place, through an empty logical
+database, and its own marker key). No pub/sub channels, scripts, MONITOR, DEBUG or FLUSHALL.
 `
 
 func redisCmd(ctx context.Context, args []string) int {
