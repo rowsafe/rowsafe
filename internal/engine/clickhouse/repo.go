@@ -320,3 +320,8 @@ func (r *repo) listMarks(ctx context.Context) ([]markDoc, error) {
 	}
 	return out, nil
 }
+
+// sealed reads ranges of sealed objects in the database's folder.
+func (r *repo) sealed() *objstore.SealedReader {
+	return &objstore.SealedReader{Store: r.st, Passphrase: r.pass}
+}
