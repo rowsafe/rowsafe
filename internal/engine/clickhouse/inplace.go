@@ -475,7 +475,7 @@ func (e *Engine) rewindInPlace(ctx context.Context, env agent.EngineEnv, db prot
 	if err != nil {
 		return nil, err
 	}
-	b, err := pickBackup(ctx, r, target)
+	b, recovered, err := e.pickTarget(ctx, env, db, r, target, tl)
 	if err != nil {
 		return nil, err
 	}
@@ -518,7 +518,7 @@ func (e *Engine) rewindInPlace(ctx context.Context, env agent.EngineEnv, db prot
 
 	// 1. Restore next to production.
 	dropDBs(ctx, c, tmpNames()...)
-	tl.Printf("restoring backup %s into production under other names (rowsafe_rewind_%s_*); production keeps running", b.Label, tag)
+	tl.Printf("restoring %s into production under other names (rowsafe_rewind_%s_*); production keeps running", b.what(), tag)
 	if err := e.restoreBeside(ctx, env, r, b, c, tag, tl); err != nil {
 		return abandon(err)
 	}
@@ -546,7 +546,6 @@ func (e *Engine) rewindInPlace(ctx context.Context, env agent.EngineEnv, db prot
 		return res, fmt.Errorf("the rewind failed, and every table was put back as it was (nothing changed): %w", err)
 	}
 	dropDBs(sctx, c, tmpNames()...)
-	recovered := b.StoppedAt
 	until := agent.KeepUntil(p.KeepDays, time.Now())
 	var asides []string
 	for _, d := range dbNames {
@@ -561,8 +560,12 @@ func (e *Engine) rewindInPlace(ctx context.Context, env agent.EngineEnv, db prot
 	}
 	res.RecoveredTo, res.OldDataDir, res.KeptUntil = &recovered, rec.Path, &until
 	res.DurationMs = time.Since(start).Milliseconds()
-	res.Summary = fmt.Sprintf("Rewound %s to backup %s (%s). The data from before is kept in the rowsafe_before_%s_* databases until %s so you can undo.",
-		db.Name, b.Label, recovered.UTC().Format("15:04 UTC on 2006-01-02"), tag, until.UTC().Format("2006-01-02 15:04 UTC"))
+	to := "backup " + b.Label + " (" + recovered.UTC().Format("15:04 UTC on 2006-01-02") + ")"
+	if b.virtualDir != "" {
+		to = "how it was at " + recovered.UTC().Format("15:04:05 UTC on 2006-01-02")
+	}
+	res.Summary = fmt.Sprintf("Rewound %s to %s. The data from before is kept in the rowsafe_before_%s_* databases until %s so you can undo.",
+		db.Name, to, tag, until.UTC().Format("2006-01-02 15:04 UTC"))
 	tl.Printf("%s", res.Summary)
 	return res, nil
 }
@@ -574,11 +577,7 @@ func (e *Engine) restoreBeside(ctx context.Context, env agent.EngineEnv, r *repo
 		return err
 	}
 	defer unlock()
-	prefixes := []string{backupDir(b.Label)}
-	if b.Base != "" {
-		prefixes = append(prefixes, backupDir(b.Base))
-	}
-	g, err := startGateway(ctx, env, r, prefixes, true, false)
+	g, err := startGateway(ctx, env, r, b.prefixes(), true, false, b.virtual)
 	if err != nil {
 		return err
 	}
@@ -604,7 +603,7 @@ func (e *Engine) restoreBeside(ctx context.Context, env agent.EngineEnv, r *repo
 		sb.WriteString(" AS " + quoteIdent(tmpDBName(tag, d.Name)))
 	}
 	id := randomID("rowsafe-rewind-")
-	sb.WriteString(" FROM " + s3Expr(g, backupDir(b.Label)) + " SETTINGS id = " + quoteString(id) + ", allow_s3_native_copy = 0, allow_different_database_def = 1")
+	sb.WriteString(" FROM " + s3Expr(g, b.dir()) + " SETTINGS id = " + quoteString(id) + ", allow_s3_native_copy = 0, allow_different_database_def = 1")
 	if b.Base != "" {
 		sb.WriteString(", base_backup = " + s3Expr(g, backupDir(b.Base)))
 	}

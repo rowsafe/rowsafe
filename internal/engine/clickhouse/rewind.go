@@ -179,7 +179,7 @@ func (e *Engine) rewindCopy(ctx context.Context, env agent.EngineEnv, db protoco
 	if err != nil {
 		return nil, err
 	}
-	b, err := pickBackup(ctx, r, target)
+	b, recovered, err := e.pickTarget(ctx, env, db, r, target, tl)
 	if err != nil {
 		return nil, err
 	}
@@ -219,8 +219,8 @@ func (e *Engine) rewindCopy(ctx context.Context, env agent.EngineEnv, db protoco
 		_ = cs.remove(rec.ID)
 		return nil, err
 	}
-	tl.Printf("restoring a copy of %s as of %s (backup %s) into a temporary ClickHouse server (127.0.0.1 only)",
-		db.Name, target.describe(), b.Label)
+	tl.Printf("restoring a copy of %s as of %s (%s) into a temporary ClickHouse server (127.0.0.1 only)",
+		db.Name, target.describe(), b.what())
 	c, err := s.start(cctx, env)
 	if err != nil {
 		return fail(err)
@@ -232,8 +232,7 @@ func (e *Engine) rewindCopy(ctx context.Context, env agent.EngineEnv, db protoco
 		return fail(err)
 	}
 	rec.Status = protocol.RewindCopyReady
-	stopped := b.StoppedAt
-	rec.RecoveredTo = &stopped
+	rec.RecoveredTo = &recovered
 	rec.SizeBytes = dirSize(s.dataDir())
 	if err := cs.put(rec); err != nil {
 		return fail(err)

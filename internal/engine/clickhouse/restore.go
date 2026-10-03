@@ -155,11 +155,7 @@ func restoreInto(ctx context.Context, env agent.EngineEnv, r *repo, b backupDoc,
 // server, a clone's).
 func restoreTo(ctx context.Context, env agent.EngineEnv, r *repo, b backupDoc, c *client, scratch bool, tl agent.TaskLogger) (map[string]string, error) {
 	skip := leftOut(b.Tables)
-	prefixes := []string{backupDir(b.Label)}
-	if b.Base != "" {
-		prefixes = append(prefixes, backupDir(b.Base))
-	}
-	g, err := startGateway(ctx, env, r, prefixes, true, true)
+	g, err := startGateway(ctx, env, r, b.prefixes(), true, true, b.virtual)
 	if err != nil {
 		return skip, err
 	}
@@ -177,13 +173,13 @@ func restoreTo(ctx context.Context, env agent.EngineEnv, r *repo, b backupDoc, c
 	for _, k := range keys {
 		tl.Printf("left out of the restore: %s (%s)", k, skip[k])
 	}
-	what := "backup " + b.Label
+	what := b.what()
 	if b.Base != "" {
 		what += " (with its full backup " + b.Base + ")"
 	}
 	tl.Printf("restoring %s: %s of data", what, humanBytes(b.DataBytes))
 	id := randomID("rowsafe-restore-")
-	stmt := restoreStatement(b, skip, s3Expr(g, backupDir(b.Label)), base, id)
+	stmt := restoreStatement(b, skip, s3Expr(g, b.dir()), base, id)
 	progress := func(st opStatus) string {
 		if st.TotalSize > 0 {
 			return fmt.Sprintf("restoring: %s of %s read", humanBytes(st.BytesRead), humanBytes(st.TotalSize))

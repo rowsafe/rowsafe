@@ -36,12 +36,15 @@ const bandwidthEnv = "ROWSAFE_CLICKHOUSE_BACKUP_BANDWIDTH"
 // folders ClickHouse may use. Production's server reaches it where
 // ROWSAFE_CLICKHOUSE_GATEWAY_LISTEN/_URL say (a Docker sidecar); a
 // temporary server of the agent's own (local) always on 127.0.0.1.
-func startGateway(ctx context.Context, env agent.EngineEnv, r *repo, prefixes []string, readOnly, local bool) (*s3gw.Gateway, error) {
+func startGateway(ctx context.Context, env agent.EngineEnv, r *repo, prefixes []string, readOnly, local bool, virtual ...map[string]s3gw.VirtualFile) (*s3gw.Gateway, error) {
 	tmp := filepath.Join(env.StateDir, "gateway")
 	if err := os.MkdirAll(tmp, 0o700); err != nil {
 		return nil, err
 	}
 	cfg := s3gw.Config{Store: r.st, Passphrase: r.pass, Listen: "127.0.0.1:0", Prefixes: prefixes, ReadOnly: readOnly, TempDir: tmp, Log: env.Log}
+	if len(virtual) > 0 {
+		cfg.Virtual = virtual[0]
+	}
 	if !local {
 		if v := strings.TrimSpace(os.Getenv(gatewayListenEnv)); v != "" {
 			cfg.Listen = v

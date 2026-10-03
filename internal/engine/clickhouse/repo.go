@@ -13,6 +13,7 @@ import (
 
 	"github.com/rowsafe/rowsafe/internal/agent"
 	"github.com/rowsafe/rowsafe/internal/objstore"
+	"github.com/rowsafe/rowsafe/internal/objstore/s3gw"
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
@@ -143,6 +144,45 @@ type backupDoc struct {
 	// Replicated is set when a database is Replicated (its tables need
 	// ClickHouse Keeper to restore, like Replicated* tables).
 	Replicated bool `json:"replicated,omitempty"`
+
+	// A backup assembled for a moment (pitr_restore.go): its files are
+	// served by the gateway under virtualDir, nothing is in the bucket.
+	virtualDir string
+	virtual    map[string]s3gw.VirtualFile
+}
+
+// dir is the backup's folder for the gateway.
+func (b backupDoc) dir() string {
+	if b.virtualDir != "" {
+		return b.virtualDir
+	}
+	return backupDir(b.Label)
+}
+
+// what names b in a log line: "backup L", or "the changes up to T".
+func (b backupDoc) what() string {
+	if b.virtualDir != "" {
+		return "the backup assembled for " + b.StoppedAt.UTC().Format("2006-01-02 15:04:05.000000 UTC")
+	}
+	return "backup " + b.Label
+}
+
+// asOf says what a restore of b brings back: "as of its backup L (time)",
+// or "as it was at time" for a moment.
+func (b backupDoc) asOf(recovered time.Time) string {
+	if b.virtualDir != "" {
+		return "as it was at " + recovered.UTC().Format("15:04:05 UTC on 2006-01-02")
+	}
+	return "as of its backup " + b.Label + " (" + recovered.UTC().Format("15:04:05 UTC on 2006-01-02") + ")"
+}
+
+// prefixes are the folders a restore of b reads.
+func (b backupDoc) prefixes() []string {
+	p := []string{b.dir()}
+	if b.Base != "" {
+		p = append(p, backupDir(b.Base))
+	}
+	return p
 }
 
 // needsKeeper says whether restoring b needs ClickHouse Keeper: a

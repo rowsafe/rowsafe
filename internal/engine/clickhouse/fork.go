@@ -79,14 +79,14 @@ func (e *Engine) ForkRestore(ctx context.Context, env agent.EngineEnv, p protoco
 	if err != nil {
 		return nil, err
 	}
-	b, err := pickBackup(ctx, r, target)
+	b, recovered, err := e.pickTarget(ctx, env, p.Source, r, target, tl)
 	if err != nil {
 		return nil, err
 	}
 	if b.needsKeeper() {
 		return nil, errors.New("this backup has replicated databases or tables, which need ClickHouse Keeper on the clone's server; Rowsafe doesn't set that up, so nothing was restored")
 	}
-	tl.Printf("restoring %s's backup %s (%s) into the ClickHouse server on port %d", p.Source.Name, b.Label, target.describe(), p.Port)
+	tl.Printf("restoring %s as of %s into the ClickHouse server on port %d", p.Source.Name, target.describe(), p.Port)
 	skip, err := restoreTo(ctx, env, r, b, c, false, tl)
 	if err != nil {
 		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
@@ -100,8 +100,8 @@ func (e *Engine) ForkRestore(ctx context.Context, env agent.EngineEnv, p protoco
 	}
 	res := &protocol.ForkRestoreResult{ForkID: p.ForkID, Placement: p.Placement, Port: p.Port, Major: in.VersionNum / 100,
 		DurationMs: time.Since(start).Milliseconds()}
-	stopped := b.StoppedAt.UTC()
-	res.RecoveredTo = &stopped
+	recovered = recovered.UTC()
+	res.RecoveredTo = &recovered
 	if dbs, total, err := restoredDatabases(ctx, c); err == nil {
 		for _, d := range dbs {
 			if d.Name != "default" || d.Tables > 0 {
@@ -114,8 +114,8 @@ func (e *Engine) ForkRestore(ctx context.Context, env agent.EngineEnv, p protoco
 		res.Warnings = append(res.Warnings, fmt.Sprintf("%s was left out: %s.", k, why))
 	}
 	res.Warnings = append(res.Warnings, "ClickHouse users and grants aren't in backups: create the clone's users on it.")
-	res.Summary = fmt.Sprintf("Cloned %s as of its backup %s (%s) into the ClickHouse server on port %d (%s).", p.Source.Name, b.Label,
-		stopped.Format("15:04:05 UTC on 2006-01-02"), p.Port, countWord(len(res.Databases), "database", "databases"))
+	res.Summary = fmt.Sprintf("Cloned %s %s into the ClickHouse server on port %d (%s).", p.Source.Name, b.asOf(recovered),
+		p.Port, countWord(len(res.Databases), "database", "databases"))
 	tl.Printf("%s", res.Summary)
 	return res, nil
 }
