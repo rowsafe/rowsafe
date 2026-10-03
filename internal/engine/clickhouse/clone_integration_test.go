@@ -47,7 +47,9 @@ func TestClickHouseClone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r := cloneTargetReason(in2); !strings.Contains(r, "may not create") {
+	// Rowsafe's ordinary login may already create databases (Databases &
+	// users needs it); otherwise the reason says what is missing.
+	if r := cloneTargetReason(in2); r != "" && !strings.Contains(r, "may not create") {
 		t.Fatalf("a login without clone rights: %q", r)
 	}
 	if err := CreateLoginWith(ctx, env, port2, "", "", true); err != nil {
