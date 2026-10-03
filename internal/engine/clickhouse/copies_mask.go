@@ -31,9 +31,16 @@ func maskCopy(ctx context.Context, c *client, mp protocol.MaskingPlan, key []byt
 	if err != nil {
 		return report, err
 	}
-	plan := masking.Plan(schema, mp, &report)
+	err = maskTables(ctx, c, masking.Plan(schema, mp, &report), key, tl, &report)
+	report.DurationMs = time.Since(start).Milliseconds()
+	return report, err
+}
+
+// maskTables applies a masking plan by mutation (scratchDB holds the
+// value mappings meanwhile).
+func maskTables(ctx context.Context, c *client, plan []masking.TablePlan, key []byte, tl agent.TaskLogger, report *protocol.MaskingReport) error {
 	if len(plan) == 0 {
-		return report, nil
+		return nil
 	}
 	keys, err := query[struct {
 		DB     string `json:"database"`
@@ -42,7 +49,7 @@ func maskCopy(ctx context.Context, c *client, mp protocol.MaskingPlan, key []byt
 		Keys   string `json:"keys"`
 	}](ctx, c, `SELECT database, name, engine, concat(sorting_key, ',', primary_key, ',', partition_key) AS keys FROM system.tables`, nil)
 	if err != nil {
-		return report, err
+		return err
 	}
 	keyCols := map[string]string{}
 	engines := map[string]string{}
@@ -51,7 +58,7 @@ func maskCopy(ctx context.Context, c *client, mp protocol.MaskingPlan, key []byt
 		engines[k.DB+"."+k.Table] = k.Engine
 	}
 	if err := c.exec(ctx, "CREATE DATABASE IF NOT EXISTS "+quoteIdent(scratchDB), nil); err != nil {
-		return report, err
+		return err
 	}
 	_ = c.exec(ctx, "SYSTEM START MERGES", nil) // mutations run in the background pool
 	m := masking.New(key)
@@ -71,7 +78,7 @@ func maskCopy(ctx context.Context, c *client, mp protocol.MaskingPlan, key []byt
 			joins++
 			set, err := maskColumnSet(ctx, c, tp, col, m, fmt.Sprintf("%s_%d", maskMapTable, joins))
 			if err != nil {
-				return report, fmt.Errorf("masking %s.%s: %w", name, col.Name, err)
+				return fmt.Errorf("masking %s.%s: %w", name, col.Name, err)
 			}
 			if set == "" {
 				continue
@@ -86,15 +93,14 @@ func maskCopy(ctx context.Context, c *client, mp protocol.MaskingPlan, key []byt
 		}
 		if err := c.exec(ctx, "ALTER TABLE "+tableName(tp.DB, tp.Table)+" UPDATE "+strings.Join(sets, ", ")+" WHERE 1", nil,
 			"mutations_sync", "2", "allow_nondeterministic_mutations", "1"); err != nil {
-			return report, fmt.Errorf("masking %s: %w", name, err)
+			return fmt.Errorf("masking %s: %w", name, err)
 		}
 		report.Tables++
 		report.Rows += tp.Rows
 		tl.Printf("masked %s: %s, about %d rows", name, strings.Join(names, ", "), tp.Rows)
 	}
 	_ = c.exec(ctx, "DROP DATABASE IF EXISTS "+quoteIdent(scratchDB)+" SYNC", nil)
-	report.DurationMs = time.Since(start).Milliseconds()
-	return report, nil
+	return nil
 }
 
 // inKey reports whether column appears in a key expression list.
