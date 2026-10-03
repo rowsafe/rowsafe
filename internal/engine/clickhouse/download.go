@@ -213,3 +213,93 @@ func (r *repo) downloadFile(ctx context.Context, key, dst string) (int64, error)
 	}
 	return n, err
 }
+
+// DownloadMoment decrypts the backup assembled for moment at (the newest
+// backup before it carried forward with the record of changes) into
+// dir/<moment>/, an ordinary backup folder ClickHouse can RESTORE from. It
+// returns that folder; when the moment can't be assembled exactly, the
+// label of the backup to download instead and why (note).
+func DownloadMoment(ctx context.Context, env agent.EngineEnv, stanza string, at time.Time, dir string, progress io.Writer) (string, bool, string, error) {
+	r, err := openRepo(env, protocol.DatabaseSpec{Stanza: stanza})
+	if err != nil {
+		return "", false, "", err
+	}
+	ents, err := os.ReadDir(dir)
+	if err == nil && len(ents) > 0 {
+		return "", false, "", fmt.Errorf("%s isn't empty", dir)
+	}
+	created := errors.Is(err, os.ErrNotExist)
+	res, err := pitAt(ctx, r, at.UTC(), "")
+	if err != nil {
+		return "", false, "", err
+	}
+	if !res.Exact {
+		// Only the backup itself can be restored: download it by label.
+		return res.Doc.Label, false, res.Note, nil
+	}
+	out := filepath.Join(dir, at.UTC().Format("20060102-150405.000000"))
+	if err := os.MkdirAll(out, 0o750); err != nil {
+		return "", false, "", err
+	}
+	sr := r.sealed()
+	var files int
+	var bytes int64
+	for key, v := range res.Doc.virtual {
+		rel := strings.TrimPrefix(key, res.Doc.virtualDir)
+		if rel == "" || !filepath.IsLocal(rel) {
+			return "", false, "", fmt.Errorf("unexpected file name %q", rel)
+		}
+		dst := filepath.Join(out, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
+			return "", false, "", err
+		}
+		f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640)
+		if err != nil {
+			return "", false, "", err
+		}
+		n, err := writeVirtual(ctx, sr, v, f)
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			return "", false, "", fmt.Errorf("%s: %w", rel, err)
+		}
+		files++
+		bytes += n
+	}
+	fmt.Fprintf(progress, "%s as it was at %s: %d files, %s, in %s\n", stanza, at.UTC().Format(time.RFC3339Nano), files, humanBytes(bytes), out)
+	if os.Geteuid() == 0 {
+		owned := []string{out}
+		if created {
+			owned = []string{dir}
+		}
+		if who, err := giveToClickHouse(owned); err != nil {
+			return out, true, "", fmt.Errorf("giving the files to the clickhouse user: %w", err)
+		} else if who != "" {
+			fmt.Fprintf(progress, "the files belong to %s, so ClickHouse can read them\n", who)
+		}
+	}
+	return out, true, "", nil
+}
+
+// writeVirtual writes a virtual file's bytes to w.
+func writeVirtual(ctx context.Context, sr *objstore.SealedReader, v s3gw.VirtualFile, w io.Writer) (int64, error) {
+	if len(v.Pieces) == 0 {
+		n, err := w.Write(v.Data)
+		return int64(n), err
+	}
+	var total int64
+	for _, p := range v.Pieces {
+		rc, err := sr.Range(ctx, p.Stored, p.Off, p.Len)
+		if err != nil {
+			return total, err
+		}
+		n, err := io.Copy(w, rc)
+		rc.Close()
+		total += n
+		if err != nil {
+			return total, err
+		}
+	}
+	return total, nil
+}

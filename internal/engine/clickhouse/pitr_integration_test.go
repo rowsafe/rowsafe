@@ -5,9 +5,11 @@ package clickhouse
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -197,6 +199,20 @@ func TestClickHousePointInTime(t *testing.T) {
 	}
 	if t.Failed() {
 		return
+	}
+
+	// Without Rowsafe: a moment downloaded as an ordinary backup folder.
+	if dl := os.Getenv("ROWSAFE_TEST_CLICKHOUSE_DOWNLOAD_DIR"); dl != "" {
+		out, exact, note, err := DownloadMoment(ctx, env, db.Stanza, moments[2].at, filepath.Join(dl, "pit"), io.Discard)
+		if err != nil || !exact {
+			t.Fatalf("DownloadMoment: %s %v %s %v", out, exact, note, err)
+		}
+		must(t, admin, "DROP DATABASE IF EXISTS pit_diy SYNC")
+		must(t, admin, fmt.Sprintf("RESTORE DATABASE pit AS pit_diy FROM File('%s/')", out))
+		if got := count(t, admin, "SELECT count() FROM pit_diy.ev"); fmt.Sprint(got) != strings.Fields(moments[2].want["ev"])[0] {
+			t.Errorf("restored without Rowsafe: %d rows in ev, want %s", got, moments[2].want["ev"])
+		}
+		must(t, admin, "DROP DATABASE pit_diy SYNC")
 	}
 
 	// Proof restores the newest moment.
