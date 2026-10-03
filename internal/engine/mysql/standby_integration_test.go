@@ -352,15 +352,15 @@ func TestCloneIntegration(t *testing.T) {
 	run(protocol.TaskAdopt, protocol.AdoptParams{Apply: true})
 	run(protocol.TaskCheck, nil)
 	exec(adbA, "CREATE DATABASE shop")
-	exec(adbA, "CREATE TABLE shop.orders (id INT PRIMARY KEY, note VARCHAR(50))")
+	exec(adbA, "CREATE TABLE shop.orders (id INT PRIMARY KEY, note VARCHAR(50), email VARCHAR(100))")
 	exec(adbA, "CREATE USER 'app'@'%' IDENTIFIED BY 'app-secret-1'")
 	exec(adbA, "GRANT SELECT, INSERT ON shop.* TO 'app'@'%'")
 	for i := 1; i <= 50; i++ {
-		exec(adbA, "INSERT INTO shop.orders VALUES (?, 'x')", i)
+		exec(adbA, "INSERT INTO shop.orders VALUES (?, 'x', ?)", i, fmt.Sprintf("buyer%d@shop.test", i))
 	}
 	full := run(protocol.TaskBackup, protocol.BackupParams{Type: protocol.BackupFull}).(*protocol.BackupResult)
 	for i := 51; i <= 80; i++ {
-		exec(adbA, "INSERT INTO shop.orders VALUES (?, 'y')", i)
+		exec(adbA, "INSERT INTO shop.orders VALUES (?, 'y', ?)", i, fmt.Sprintf("buyer%d@shop.test", i))
 	}
 	time.Sleep(1100 * time.Millisecond)
 	at := time.Now().UTC().Truncate(time.Second)
@@ -376,9 +376,17 @@ func TestCloneIntegration(t *testing.T) {
 	}
 	res, err := e.ForkRestore(ctx, envB, protocol.ForkRestoreParams{ForkID: "fork_1", Name: "shop-staging", Source: specA,
 		Target: protocol.RewindTarget{Time: &at, BackupSet: full.Label}, Placement: protocol.ForkEmptyServer, Port: 3306, SocketDir: sbSocket,
-		Major: major, SizeBytes: size, Settings: settings}, tl)
+		Major: major, SizeBytes: size, Settings: settings,
+		// Masked: a saved rule, and the suggestions (the email column).
+		Masking: &protocol.ForkMasking{Rules: []protocol.ForkMaskRule{{DB: "shop", Table: "orders", Column: "note", Strategy: "null"}}, Suggest: true}}, tl)
 	if err != nil {
 		t.Fatalf("clone: %v", err)
+	}
+	if res.Masking == nil || res.Masking.Columns != 2 || len(res.Masking.Masked) != 2 {
+		t.Fatalf("masking: %+v", res.Masking)
+	}
+	if n := count(adbB, "SELECT COUNT(*) FROM shop.orders WHERE email LIKE '%@shop.test' OR note IS NOT NULL"); n != 0 {
+		t.Fatalf("the clone has %d unmasked orders", n)
 	}
 	t.Logf("clone: %+v", res)
 	if n := count(adbB, "SELECT COUNT(*) FROM shop.orders"); n != 80 {
