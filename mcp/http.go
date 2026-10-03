@@ -42,8 +42,11 @@ type clientKey struct{}
 // set, an OAuth access token (rso_...); the tools act as that credential
 // through the user API served by api. For an API key the write tools are
 // always listed: the API refuses them with 403 for a read-only key. For an
-// OAuth token the tools follow its scopes: read-only tools, plus
-// create_restore_point with rowsafe:marks. The API enforces the same scopes.
+// OAuth token the tools follow its scopes: read-only tools (describe_change,
+// get_approval and list_approvals included); create_restore_point with
+// rowsafe:marks; and with rowsafe:act every write tool, request_change
+// included (it asks a person to approve a change to production; it never
+// makes one). The API enforces the same scopes.
 func NewHTTPHandler(api http.Handler, opts HTTPOptions) http.Handler {
 	if opts.MaxWait <= 0 {
 		opts.MaxWait = 45 * time.Second
@@ -109,6 +112,7 @@ func NewHTTPHandler(api http.Handler, opts HTTPOptions) http.Handler {
 					err = &client.APIError{Status: http.StatusUnauthorized, Msg: "not an OAuth access token"}
 				} else {
 					a.marks = slices.Contains(who.OAuth.Scopes, protocol.ScopeMarks)
+					a.writes = slices.Contains(who.OAuth.Scopes, protocol.ScopeAct)
 				}
 			}
 		}
@@ -134,7 +138,7 @@ func NewHTTPHandler(api http.Handler, opts HTTPOptions) http.Handler {
 // access is what one request's credentials may use.
 type access struct {
 	c      *client.Client
-	writes bool // API key: every write tool (the API checks read-only keys)
+	writes bool // API key (the API checks read-only keys), or OAuth token with rowsafe:act
 	marks  bool // OAuth token with rowsafe:marks
 }
 

@@ -23,8 +23,10 @@ import (
 
 // Options configures the tools a server offers.
 type Options struct {
-	// AllowWrites registers the tools that queue tasks or change settings.
-	// Without it only read-only tools exist.
+	// AllowWrites registers the tools that queue tasks or change settings
+	// without touching production, and request_change, which asks a person
+	// to approve a change to production. Without it only read-only tools
+	// exist.
 	AllowWrites bool
 	// AllowRestorePoints registers create_restore_point without the other
 	// write tools. AllowWrites implies it.
@@ -45,33 +47,27 @@ type Options struct {
 
 const maxWaitLimit = 60 * time.Second
 
-const instructions = `Rowsafe is the safety net for databases people run on their own servers: PostgreSQL, MySQL, MariaDB, MongoDB and ClickHouse. It runs continuous backups (point-in-time recovery from PostgreSQL's WAL, MySQL's binary log or MongoDB's oplog; ClickHouse has scheduled backups only), restores (Rewind) and a weekly restore test (Proof, task type drill), with health monitoring (Pulse), through an agent on each database host. It never restarts a database on its own or runs arbitrary queries on production, and never sees backup contents. Features differ per engine: list_databases shows each database's engine, and a tool that doesn't apply to an engine says so; use the engine's own commands and wording (mysql, mongosh, clickhouse-client), never PostgreSQL's, for another engine. To test against real-shaped data, create_safe_copy makes a masked copy you can connect to (never production).
+const instructions = `Rowsafe is the safety net for databases people run on their own servers: PostgreSQL, MySQL, MariaDB, MongoDB and ClickHouse. It runs continuous backups (point-in-time recovery from PostgreSQL's WAL, MySQL's binary log or MongoDB's oplog; ClickHouse has scheduled backups only), restores (Rewind) and a weekly restore test (Proof, task type drill), with health monitoring (Pulse), through an agent on each database host. It never changes production on its own, never runs arbitrary queries on it, and never sees backup contents. Features differ per engine: list_databases shows each database's engine, and a tool that doesn't apply says so; use the engine's own commands and wording (mysql, mongosh, clickhouse-client), never PostgreSQL's, for another engine. To test against real-shaped data, create_safe_copy makes a masked copy you can connect to (never production).
 
 Before any destructive or risky database operation (migrations such as prisma migrate, rails db:migrate, alembic, django migrate, knex or goose; schema changes; DROP/TRUNCATE; ALTER TABLE ... DELETE/UPDATE mutations in ClickHouse; DELETE/UPDATE without a narrow WHERE; MongoDB drop(), deleteMany({}) or updateMany({}, ...); bulk data changes; restoring a dump over a database):
-1. Call safety_check on the database. If it is not protected, tell the user the reasons and get their OK before doing anything destructive. For a migration, preview_migration runs it on a fresh copy of the database first (never production; use it freely) and returns a verdict (safe, careful, dangerous or failed) with suggestions: follow them before running it for real.
+1. Call safety_check on the database. If it is not protected, tell the user the reasons and get their OK before doing anything destructive. For a migration, preview_migration runs it on a fresh copy first (never production; use it freely) and returns a verdict (safe, careful, dangerous or failed) with suggestions: follow them before running it for real.
 2. Call create_restore_point with a name that describes the operation (e.g. before-drop-orders), and tell the user the Mark's name. (If the tool is unavailable, ask the user to run: rowsafe mark DB NAME.)
 3. Proceed.
-4. If something breaks, stop. Don't try to repair data and never attempt a restore yourself: tell the user they can Rewind in the Rowsafe dashboard (restore a copy at the restore point, compare it and bring the missing rows back, or rewind the whole database), or run "rowsafe rewind". rewind_window shows how far back they can go. When data went missing or was overwritten, find_moment finds when rows were deleted or changed (read-only), so the user knows exactly which point to rewind to.
+4. If something breaks, stop. Don't try to repair data yourself and never restore over production on your own: tell the user what happened and the Mark. rewind_window shows how far back they can go; find_moment finds when rows were deleted or changed (read-only). Recovery (restore a copy, compare, bring rows back, rewind the whole database) is the user's call: they do it in the dashboard (Rewind), or you ask for it with request_change once they say so.
 
 Where to start:
-- "Is everything OK?", "why did I get an alert?", "what needs attention?": start with fleet_health; it lists each problem with the exact next step and the tool or command for it. list_databases gives a summary per database; get_database shows one in depth. get_org shows plan limits and usage (before registering a database, or to explain a 402 plan-limit error); list_hosts gives the host names and IDs plan_adoption's host input expects.
-- "Is the database healthy?", "what is slow?", "what changed?", "why is the disk filling up?": database_health, query_trends, database_insights and recommendations. get_logs explains error spikes, the statement behind an error, or failed logins.
+- "Is everything OK?", "what needs attention?": fleet_health lists each problem with the next step. list_databases summarizes each database; get_database shows one in depth; get_org shows plan limits and usage (or explains a 402); list_hosts gives host names and IDs.
+- Alerts: list_alerts. "What's running now / what's blocked?": live_activity. Disk filling up: disk_forecast. Uptime: uptime. Metrics over time: database_metrics. Security: security_status. Updates and upgrades: updates_status. Who changed what: audit_log.
+- "Is the database healthy?", "what is slow?", "what changed?": database_health, query_trends, database_insights, recommendations and weekly_pulse. get_logs explains error spikes, the statement behind an error, or failed logins.
 
-Long-running work: write tools queue tasks and return a task id. While a task is queued or running, poll get_task (every 10-30 seconds; backups and restore tests of large databases take hours); list_tasks finds tasks, get_task shows one task's result and log tail. If preview_migration isn't done in time, call get_preview with its ID. If find_moment is still queued or running, call it again with its task_id.
+Long-running work: tools that queue tasks return a task id. Poll get_task every 10-30 seconds while it is queued or running (backups and restore tests of large databases take hours); list_tasks finds tasks. If preview_migration isn't done in time, call get_preview with its ID; if find_moment is still running, call it again with its task_id.
 
-Fixes and settings:
-- When database_health, database_insights or recommendations show a fix Rowsafe can apply (clean up tables, rebuild or remove an index, end a stuck session, create an index, ...), point the user to Apply fix in the dashboard (Pulse, Health or Recommendations) instead of giving them SQL or commands; no MCP tool applies fixes. Don't suggest DROP INDEX or REINDEX for what Rowsafe handles. Suggest new indexes only as proposals for the user to review, and propose (never run) the step-by-step plans for schema changes Rowsafe can't do by itself.
-- Settings: database_settings only reads. To change settings, point the user to Tuning in the dashboard or "rowsafe tune NAME" (Rowsafe saves a Mark first and can undo a change). Never tell the user to edit the server's config files (postgresql.conf, my.cnf, mongod.conf, config.xml) or run ALTER SYSTEM / SET GLOBAL for a change Rowsafe recommends, and never change the settings Rowsafe's continuous backup relies on (PostgreSQL's archive_mode, archive_command, archive_timeout; MySQL's binary log settings; MongoDB's replica set).
-- Backups: run_backup with type diff is the usual ad-hoc backup; use full only when there is no recent full or the user asks. Confirm with the user before lowering retention_full (update_schedule), since it permanently deletes older backups.
-- Adoption: plan_adoption only plans; show the plan to the user. Applying it changes the database server's settings, so the user clicks Turn on backups in the dashboard (or runs rowsafe apply NAME).
-
-For people only (in the dashboard or with the rowsafe CLI; no MCP tool can do these):
-- Restarting a database server (Restart in the dashboard, or "rowsafe restart", where Rowsafe can restart that engine; otherwise on the server).
-- Rewinding: restoring a copy, bringing rows back, rewinding a whole database (Rewind, or "rowsafe rewind"). AI assistants never restore over production.
-- Restoring files (files_status only reads; the dashboard or "rowsafe files restore").
-- Standby servers: creating, promoting (failing over to), rebuilding or removing a standby, and automatic failover (the dashboard or "rowsafe standby"); standby_status only reads.
-- Creating or removing databases and users on a server (Databases & users in the dashboard, or "rowsafe db"); list_databases_on_server only reads.
-- Applying fixes, changing settings, applying an adopt plan, and setting a safe copy's password on the remote endpoint (password_url).`
+Changes to production go through a person. Applying a Pulse fix, changing settings, restarting, turning on backups, Rewind (restore a copy, bring rows back, rewind in place), upgrades and updates, standby failover, moving a database, connection pooling, security fixes, databases and users, restoring files, alert rules and the rest: call request_change (describe_change shows the actions and their params). It only files a request; nothing changes until an owner or admin approves it in the dashboard. Show the user the approval link, then follow it with get_approval and, once approved, the tasks with get_task. You can't approve, and a person may deny it. Only ask for a change the user asked for or agreed to: propose it first, with what it does and its risk. Without request_change (read-only access), point the user to the same button in the dashboard.
+- Fixes: when database_health, database_insights or recommendations show a fix Rowsafe can apply, use that fix (request_change apply_fix with its finding_id and fix_id) instead of giving the user SQL or commands. Don't suggest DROP INDEX or REINDEX for what Rowsafe handles; suggest new indexes only as proposals, and propose (never run) step-by-step plans for schema changes Rowsafe can't do.
+- Settings: database_settings reads them; change_settings applies Rowsafe's recommendations (it saves a Mark first and can be undone). Never tell the user to edit config files or run ALTER SYSTEM / SET GLOBAL for what Rowsafe recommends, and never change the settings continuous backup relies on (PostgreSQL's archive_mode, archive_command, archive_timeout; MySQL's binary log; MongoDB's replica set).
+- Adoption: plan_adoption only plans; show the plan, then turn_on_backups applies it.
+- Without approval, you may also: run_backup (type diff is the usual ad-hoc backup), run_drill, verify_database, update_schedule (confirm with the user before lowering retention_full: it deletes older backups), ack_alert, dismiss_recommendation, run_index_check, check_upgrade, rehearse_upgrade, run_security_check, extend_safe_copy, backup_files, check_files. None of them changes production's data or availability.
+- Passwords (a safe copy's on the remote endpoint, database users') are set by people in the dashboard; they never pass through you.`
 
 // NewServer returns an MCP server whose tools act through c.
 func NewServer(c *client.Client, opts Options) *sdk.Server {
@@ -100,8 +96,13 @@ func NewServer(c *client.Client, opts Options) *sdk.Server {
 	t.addAdvisorTools(s)     // advisor (advisor_tools.go)
 	t.addDBAdminReadTools(s) // Databases & users: read-only (dbadmin_tools.go)
 	t.addStandbyReadTools(s)
+	t.addPulseReadTools(s)    // alerts, activity, metrics, audit (pulse_tools.go)
+	t.addOpsReadTools(s)      // security, updates, pooling, forks (ops_tools.go)
+	t.addApprovalReadTools(s) // describe_change, get_approval, list_approvals (approval_tools.go)
 	if opts.AllowWrites {
 		t.addWriteTools(s)
+		t.addActionTools(s)        // never change production (action_tools.go)
+		t.addApprovalWriteTools(s) // request_change, cancel_approval
 	}
 	if opts.AllowWrites || opts.AllowRestorePoints {
 		t.addSafetyWriteTools(s)
@@ -159,7 +160,7 @@ func apiError(err error) error {
 		case http.StatusPaymentRequired:
 			return fmt.Errorf("plan limit reached (402): %s. The user can upgrade the organization's plan in the Rowsafe dashboard; get_org shows limits and usage", ae.Msg)
 		case http.StatusForbidden:
-			return fmt.Errorf("forbidden (403): %s. A read-only API key, or an app connected with \"Sign in with Rowsafe\", cannot queue tasks or change settings: ask the user to do it in the Rowsafe dashboard or with the equivalent `rowsafe` command", ae.Msg)
+			return fmt.Errorf("forbidden (403): %s. A read-only API key, or an app connected with \"Sign in with Rowsafe\" without permission to act, cannot queue tasks, change settings or ask for changes: ask the user to do it in the Rowsafe dashboard or with the equivalent `rowsafe` command (or to reconnect the app and allow it to act)", ae.Msg)
 		case http.StatusNotFound:
 			return fmt.Errorf("not found (404): %s. Names and IDs are per organization; list_databases, list_hosts and list_tasks show valid ones", ae.Msg)
 		case http.StatusConflict:

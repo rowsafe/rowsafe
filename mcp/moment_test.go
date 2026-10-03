@@ -76,7 +76,7 @@ func TestFindMomentTool(t *testing.T) {
 	}
 	txt := res.Content[0].(*sdk.TextContent).Text
 	for _, want := range []string{"1,204 rows deleted from applications", "transaction 91234", "rewind to 2026-09-24T14:05:37.123455Z",
-		"can't restore anything yourself"} {
+		"Never restore anything yourself"} {
 		if !strings.Contains(txt, want) {
 			t.Errorf("missing %q in:\n%s", want, txt)
 		}

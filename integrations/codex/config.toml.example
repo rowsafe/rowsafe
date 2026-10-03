@@ -14,9 +14,12 @@ env_vars = ["ROWSAFE_API_KEY", "ROWSAFE_URL"]
 # create_restore_point waits up to 90 s for the Mark to be confirmed.
 tool_timeout_sec = 180
 
+#    For backups, checks and request_change (changes to production that a
+#    person approves in the dashboard), use args = ["mcp", "--allow-writes"].
+
 # B. Hosted endpoint, no CLI needed. Every write tool is listed, so give it a
 #    key that can only do what you want (a --read-only key can still run
-#    safety_check but can't set Marks). Same as:
+#    safety_check but can't set Marks or ask for changes). Same as:
 #    codex mcp add rowsafe --url https://api.rowsafe.sh/mcp --bearer-token-env-var ROWSAFE_API_KEY
 # [mcp_servers.rowsafe]
 # url = "https://api.rowsafe.sh/mcp"

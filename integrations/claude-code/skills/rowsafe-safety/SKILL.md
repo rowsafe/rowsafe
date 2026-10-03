@@ -25,7 +25,7 @@ The Rowsafe tools come from its MCP server (the user signs in with Rowsafe the f
 Before a migration runs against the database, see what it would do there:
 
 1. **Get its SQL** without applying it: the migration file itself, or what the tool generates, e.g. `prisma migrate diff --from-migrations prisma/migrations --to-schema-datamodel prisma/schema.prisma --script`, `python manage.py sqlmigrate APP 0042`, `alembic upgrade head --sql`, `drizzle-kit generate` (the new `.sql` file), `liquibase update-sql`, or Flyway's `V*.sql` file.
-2. **Call `preview_migration`** with the database and the SQL. It runs the SQL on a fresh copy of the database, restored on its own server (never production), and reports each statement's locks, table rewrites, index builds, rows and time, with a verdict. The first preview of a database restores a copy and can take minutes; if it isn't done, call `get_preview`. If `preview_migration` isn't listed (apps connected with Sign in with Rowsafe get read tools and Marks only), save the SQL to a file and run `rowsafe preview DATABASE FILE.sql` with the CLI; it reports the same.
+2. **Call `preview_migration`** with the database and the SQL. It runs the SQL on a fresh copy of the database, restored on its own server (never production), and reports each statement's locks, table rewrites, index builds, rows and time, with a verdict. The first preview of a database restores a copy and can take minutes; if it isn't done, call `get_preview`. If `preview_migration` isn't listed (apps connected with Sign in with Rowsafe get it only when allowed to act), save the SQL to a file and run `rowsafe preview DATABASE FILE.sql` with the CLI; it reports the same.
 3. **Act on the verdict.** `safe`: go ahead (with the Mark above). `careful`: show the user the findings and apply the suggestions, or get their OK. `dangerous`: don't run it; rewrite it following the suggestions (e.g. `CREATE INDEX CONCURRENTLY`, a constraint `NOT VALID` then `VALIDATE`, a new column instead of a type change) and preview again. `failed`: it fails on production's data; fix it and preview again.
 
 ## Testing against real-shaped data
@@ -36,7 +36,7 @@ When you need realistic data to try a query, a migration or a feature, never use
 
 - Stop. Don't run more commands against the database, and don't try to repair data by hand.
 - Tell the user what happened, and that they can Rewind the database to the restore point by name in the Rowsafe dashboard (restore a copy, compare, bring back rows, or rewind in place).
-- Never attempt a restore yourself. Restores replace the running cluster and are the user's decision.
+- Never restore yourself. Recovery is the user's decision. If they ask you to start it and the `request_change` tool is available, you can ask for it (`restore_copy`, then `compare_copy` and `bring_back_rows`, or `rewind_in_place`): it only files a request, and nothing changes until they approve it in the Rowsafe dashboard. Give them the approval link.
 
 ## What counts as destructive
 

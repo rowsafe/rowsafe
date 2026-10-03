@@ -75,7 +75,7 @@ func TestDBAdminReadOnly(t *testing.T) {
 		t.Fatalf("%v %+v", err, res)
 	}
 	txt := res.Content[0].(*sdk.TextContent).Text
-	if !strings.Contains(txt, `"shop"`) || !strings.Contains(txt, "pg_trgm") || strings.Contains(txt, "template0") || !strings.Contains(txt, "You can't do it yourself") {
+	if !strings.Contains(txt, `"shop"`) || !strings.Contains(txt, "pg_trgm") || strings.Contains(txt, "template0") || !strings.Contains(txt, "request_change manage_databases_users") {
 		t.Errorf("list_databases_on_server:\n%s", txt)
 	}
 }
