@@ -230,7 +230,7 @@ func TestClickHouseEndToEnd(t *testing.T) {
 
 	// Plan, apply, check.
 	plan, err := run[protocol.AdoptResult](t, e, env, db, protocol.TaskAdopt, protocol.AdoptParams{})
-	if err != nil || plan.Applied || plan.Inspect.ArchiveMode != "off" || len(plan.Plan) == 0 {
+	if err != nil || plan.Applied || plan.Inspect.ArchiveMode != "on" || len(plan.Plan) == 0 {
 		t.Fatalf("plan: %+v %v", plan, err)
 	}
 	t.Logf("plan warnings: %q", plan.Warnings)

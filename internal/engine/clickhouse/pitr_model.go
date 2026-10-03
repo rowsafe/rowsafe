@@ -114,6 +114,19 @@ type pitPart struct {
 	Sources []string  `json:"sources,omitempty"`
 	// Gone is when it was replaced (State.Merged only).
 	Gone time.Time `json:"gone,omitzero"`
+
+	// For Find the moment (counts only, never values): Change is what made
+	// it, "delete" or "update" (a mutation, ALTER or lightweight) or
+	// "clear" (an empty part covering others: TRUNCATE, DROP PARTITION);
+	// Deleted the rows it removed from what it replaced, Updated the rows
+	// of the parts an UPDATE rewrote (more than it changed: ClickHouse
+	// doesn't count those), Cleared the rows a "clear" removed. Mutation
+	// groups a mutation's parts ("<table>/<mutation>").
+	Change   string `json:"change,omitempty"`
+	Deleted  int64  `json:"deleted,omitempty"`
+	Updated  int64  `json:"updated,omitempty"`
+	Cleared  int64  `json:"cleared,omitempty"`
+	Mutation string `json:"mutation,omitempty"`
 }
 
 func (p *pitPart) info() partInfo { return parsePartName(p.Name, p.Partition) }
@@ -184,6 +197,8 @@ type pitEvent struct {
 	DB    *pitDB    `json:"db,omitempty"`
 	UUID  string    `json:"uuid,omitempty"` // dropdb
 	Gap   *pitGap   `json:"gap,omitempty"`
+	// Rows: a dropped table's rows (Find the moment).
+	Rows int64 `json:"rows,omitempty"`
 }
 
 // pitState is the server at a moment: its databases, tables and the active
