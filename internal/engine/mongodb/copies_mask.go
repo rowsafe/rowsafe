@@ -34,8 +34,15 @@ func maskCopy(ctx context.Context, c *mongo.Client, mp protocol.MaskingPlan, key
 	if err != nil {
 		return report, err
 	}
+	err = maskTables(ctx, c, masking.Plan(schema, mp, &report), key, tl, &report)
+	report.DurationMs = time.Since(start).Milliseconds()
+	return report, err
+}
+
+// maskTables applies a masking plan.
+func maskTables(ctx context.Context, c *mongo.Client, plan []masking.TablePlan, key []byte, tl agent.TaskLogger, report *protocol.MaskingReport) error {
 	m := masking.New(key)
-	for _, tp := range masking.Plan(schema, mp, &report) {
+	for _, tp := range plan {
 		var cols []masking.ColumnPlan
 		for _, col := range tp.Columns {
 			if col.Name == "_id" {
@@ -49,7 +56,7 @@ func maskCopy(ctx context.Context, c *mongo.Client, mp protocol.MaskingPlan, key
 		}
 		n, failed, err := maskCollection(ctx, c.Database(tp.DB).Collection(tp.Table), cols, m)
 		if err != nil {
-			return report, fmt.Errorf("masking %s.%s: %w", tp.DB, tp.Table, err)
+			return fmt.Errorf("masking %s.%s: %w", tp.DB, tp.Table, err)
 		}
 		if failed > 0 {
 			report.Skipped = append(report.Skipped, fmt.Sprintf("%s.%s: %d documents couldn't be masked (a field inside an array, or a value the collection's validator refuses)", tp.DB, tp.Table, failed))
@@ -64,8 +71,7 @@ func maskCopy(ctx context.Context, c *mongo.Client, mp protocol.MaskingPlan, key
 		report.Rows += n
 		tl.Printf("masked %s.%s: %s, %d documents", tp.DB, tp.Table, strings.Join(names, ", "), n)
 	}
-	report.DurationMs = time.Since(start).Milliseconds()
-	return report, nil
+	return nil
 }
 
 func maskCollection(ctx context.Context, coll *mongo.Collection, cols []masking.ColumnPlan, m *masking.Masker) (changed, failed int64, err error) {
