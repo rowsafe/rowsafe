@@ -225,24 +225,9 @@ func (t *tools) updateSchedule(ctx context.Context, _ *sdk.CallToolRequest, in s
 
 // finish optionally waits for a task and reports it with next steps.
 func (t *tools) finish(ctx context.Context, task protocol.TaskView, dbName string, waitSeconds int, lead string, registered bool) (*sdk.CallToolResult, WriteResult, error) {
-	if waitSeconds > 0 {
-		deadline := time.Now().Add(min(time.Duration(waitSeconds)*time.Second, t.opts.MaxWait, maxWaitLimit))
-		for !finished(task.Status) {
-			left := time.Until(deadline)
-			if left <= 0 {
-				break
-			}
-			select {
-			case <-ctx.Done():
-				return nil, WriteResult{}, fmt.Errorf("stopped waiting (task %s continues; follow it with get_task): %w", task.ID, ctx.Err())
-			case <-time.After(min(2*time.Second, left)):
-			}
-			tk, err := t.c.Task(ctx, task.ID)
-			if err != nil {
-				return nil, WriteResult{}, fmt.Errorf("task %s was queued, but reading it failed: %w", task.ID, apiError(err))
-			}
-			task = tk
-		}
+	task, err := t.waitTask(ctx, task, waitSeconds)
+	if err != nil {
+		return nil, WriteResult{}, err
 	}
 	if task.DatabaseName == "" {
 		task.DatabaseName = dbName
@@ -257,4 +242,30 @@ func (t *tools) finish(ctx context.Context, task protocol.TaskView, dbName strin
 	full.line("%s", lead)
 	full.WriteString(b.String())
 	return text(full), out, nil
+}
+
+// waitTask waits up to waitSeconds (capped by MaxWait) for task to finish
+// and returns its newest state.
+func (t *tools) waitTask(ctx context.Context, task protocol.TaskView, waitSeconds int) (protocol.TaskView, error) {
+	if waitSeconds <= 0 {
+		return task, nil
+	}
+	deadline := time.Now().Add(min(time.Duration(waitSeconds)*time.Second, t.opts.MaxWait, maxWaitLimit))
+	for !finished(task.Status) {
+		left := time.Until(deadline)
+		if left <= 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return task, fmt.Errorf("stopped waiting (task %s continues; follow it with get_task): %w", task.ID, ctx.Err())
+		case <-time.After(min(2*time.Second, left)):
+		}
+		tk, err := t.c.Task(ctx, task.ID)
+		if err != nil {
+			return task, fmt.Errorf("task %s was queued, but reading it failed: %w", task.ID, apiError(err))
+		}
+		task = tk
+	}
+	return task, nil
 }

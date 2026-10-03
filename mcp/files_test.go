@@ -14,16 +14,21 @@ import (
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
-// Guard: no tool, whatever its arguments, backs up, restores or deletes
-// files; files_status only reads.
+// Guard: no tool, whatever its arguments, restores, deletes or changes
+// files or their settings. files_status only reads; backup_files only takes
+// snapshots (or runs the files Proof), which read the files.
 func TestNoToolRestoresFiles(t *testing.T) {
 	at := time.Date(2026, 9, 24, 14, 0, 0, 0, time.UTC)
 	reads := 0
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.Contains(r.URL.Path, "/files") {
-			if r.Method != http.MethodGet {
+			if r.Method != http.MethodGet && !(r.Method == http.MethodPost && (strings.HasSuffix(r.URL.Path, "/files/backup") || strings.HasSuffix(r.URL.Path, "/files/check"))) {
 				t.Errorf("%s %s: a tool changed files", r.Method, r.URL.Path)
+			}
+			if r.Method == http.MethodPost {
+				_ = json.NewEncoder(w).Encode(protocol.FilesTasksResponse{Tasks: []protocol.TaskView{{ID: "t_files", Type: protocol.TaskFilesBackup, Status: protocol.StatusQueued}}})
+				return
 			}
 			reads++
 			_ = json.NewEncoder(w).Encode(protocol.FilesInfo{Database: "app", Settings: protocol.FilesSettings{IntervalMinutes: 15, RetentionDays: 14},
@@ -68,7 +73,12 @@ func TestNoToolRestoresFiles(t *testing.T) {
 	found := false
 	for _, tool := range tools.Tools {
 		if strings.Contains(tool.Name, "files") {
-			if tool.Name != "files_status" || tool.Annotations == nil || !tool.Annotations.ReadOnlyHint {
+			switch {
+			case tool.Name == "backup_files":
+				if tool.Annotations == nil || tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint {
+					t.Errorf("tool %s", tool.Name)
+				}
+			case tool.Name != "files_status" || tool.Annotations == nil || !tool.Annotations.ReadOnlyHint:
 				t.Errorf("tool %s", tool.Name)
 			}
 			found = true
@@ -87,7 +97,7 @@ func TestNoToolRestoresFiles(t *testing.T) {
 		res, _ := cs.CallTool(ctx, &sdk.CallToolParams{Name: tool.Name, Arguments: in})
 		if tool.Name == "files_status" {
 			txt := res.Content[0].(*sdk.TextContent).Text
-			if !strings.Contains(txt, "/srv/app/storage: ok") || !strings.Contains(txt, "1204 files") || !strings.Contains(txt, "never restore over production") {
+			if !strings.Contains(txt, "/srv/app/storage: ok") || !strings.Contains(txt, "1204 files") || !strings.Contains(txt, "Never restore files yourself") {
 				t.Errorf("files_status:\n%s", txt)
 			}
 		}

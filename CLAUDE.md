@@ -21,7 +21,10 @@ proprietary (api.rowsafe.sh, app.rowsafe.sh).
 - `cmd/rowsafe`, `client/`: the CLI (`rowsafe login`, `adopt`, `apply`, `verify`, `status`, `mark`,
   `proof`, `pulse`, `fix`, `rewind`, `restart`, ...). `rowsafe help all` lists everything.
 - `mcp/`: the MCP server (`rowsafe mcp`, also served remotely by the control plane). Read-only
-  unless `--allow-restore-points` / `--allow-writes`; never tools that restore, restart or fix.
+  unless `--allow-restore-points` / `--allow-writes` (remote: OAuth scopes `rowsafe:marks` /
+  `rowsafe:act`). Never tools that restore, restart or fix directly: changes to production are
+  approval requests (`request_change`, catalog in `protocol/approval.go`) a person approves in the
+  dashboard; no tool can approve.
 - `scripts/install.sh`: the installer served at `curl -fsSL https://rowsafe.sh | sudo sh -s rse_...`
   (guided storage setup, finds PostgreSQL, plan → yes → apply, optional restart).
   `scripts/rowsafe-pg-restart`: the only root component (a sandboxed systemd path/service pair that

@@ -147,7 +147,7 @@ func assessDatabase(s dbState, host *protocol.Host, now time.Time) []Problem {
 		add(Problem{Severity: sevWarning, Kind: "awaiting_restart", Summary: "settings applied; waiting for a " + eng + " restart, nothing is protected yet",
 			Detail: detail,
 			NextAction: "The user restarts " + eng + " when it suits them: " + restartWays(d) + ". " +
-				"Rowsafe never restarts it on its own, and AI assistants can't. Rowsafe notices the restart and verifies by itself; verify_database checks right away.",
+				"Rowsafe never restarts it on its own; if the user wants you to start it, request_change (restart) asks them to approve it. Rowsafe notices the restart and verifies by itself; verify_database checks right away.",
 			Command: restartCommand(d),
 			Runbook: runbookURL})
 	case protocol.DBVerifying:

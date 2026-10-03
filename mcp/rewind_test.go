@@ -98,7 +98,7 @@ func TestNoToolRewinds(t *testing.T) {
 			}
 			txt := res.Content[0].(*sdk.TextContent).Text
 			if !strings.Contains(txt, "2026-09-17T01:00:00Z to 2026-09-24T14:03:00Z") || !strings.Contains(txt, "before-migration") ||
-				!strings.Contains(txt, "Rewind in the Rowsafe dashboard") || !strings.Contains(txt, "never restore over production") {
+				!strings.Contains(txt, "Rewind in the Rowsafe dashboard") || !strings.Contains(txt, "Never restore anything yourself") || !strings.Contains(txt, "request_change") {
 				t.Errorf("rewind_window:\n%s", txt)
 			}
 		}

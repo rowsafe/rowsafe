@@ -1,0 +1,659 @@
+package mcp
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"reflect"
+	"regexp"
+	"slices"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/google/jsonschema-go/jsonschema"
+	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/rowsafe/rowsafe/protocol"
+)
+
+// Approvals: an assistant asks for a change to production (request_change),
+// a person approves or denies it in the dashboard, and only then does the
+// control plane run it, as that person. No tool here can approve, and
+// request_change never calls the action's own endpoint: it only files the
+// request (POST /v1/approvals).
+
+// ---- inputs and outputs ----
+
+type requestChangeInput struct {
+	Action      string         `json:"action" jsonschema:"the change to ask for (describe_change lists them and their params)"`
+	Database    string         `json:"database,omitempty" jsonschema:"database name or ID (every action but alert_rule needs one)"`
+	Params      map[string]any `json:"params,omitempty" jsonschema:"the action's params as one object (describe_change shows them), e.g. {\"finding_id\": \"...\", \"fix_id\": \"...\"} for apply_fix or {\"confirm\": \"app\"} for restart"`
+	Reason      string         `json:"reason" jsonschema:"why, in one or two plain sentences for the person who approves it (shown as the assistant's words)"`
+	WaitSeconds int            `json:"wait_seconds,omitempty" jsonschema:"seconds to wait for a person to decide before returning (0 returns at once); get_approval follows it later"`
+}
+
+type describeChangeInput struct {
+	Action string `json:"action,omitempty" jsonschema:"an action name; omit to list every action"`
+}
+
+type approvalIDInput struct {
+	ID          string `json:"id" jsonschema:"the approval request's ID (apr_...)"`
+	WaitSeconds int    `json:"wait_seconds,omitempty" jsonschema:"seconds to wait for a person to decide before returning (0 returns at once)"`
+}
+
+type cancelApprovalInput struct {
+	ID string `json:"id" jsonschema:"the approval request's ID (apr_...)"`
+}
+
+type listApprovalsInput struct {
+	Status string `json:"status,omitempty" jsonschema:"only requests in this state (default: all)"`
+	Limit  int    `json:"limit,omitempty" jsonschema:"at most this many, newest first (default 20)"`
+}
+
+// ApprovalView is an approval request as the tools show it.
+type ApprovalView struct {
+	ID          string              `json:"id"`
+	Action      string              `json:"action"`
+	Title       string              `json:"title"`
+	Group       string              `json:"group,omitempty"`
+	Risk        string              `json:"risk,omitempty" jsonschema:"normal, disruptive or destructive"`
+	Database    string              `json:"database,omitempty"`
+	Host        string              `json:"host,omitempty"`
+	Params      map[string]any      `json:"params,omitempty"`
+	Details     []string            `json:"details,omitempty" jsonschema:"what will change, written by Rowsafe"`
+	Reason      string              `json:"reason,omitempty"`
+	RequestedBy string              `json:"requested_by,omitempty"`
+	Status      string              `json:"status" jsonschema:"pending, approved (and run), failed (approved but the call failed), denied, expired or cancelled"`
+	CreatedAt   time.Time           `json:"created_at"`
+	ExpiresAt   time.Time           `json:"expires_at"`
+	DecidedAt   *time.Time          `json:"decided_at,omitempty"`
+	DecidedBy   string              `json:"decided_by,omitempty"`
+	Note        string              `json:"note,omitempty" jsonschema:"the person's note when denying"`
+	Result      *ApprovalResultView `json:"result,omitempty"`
+	URL         string              `json:"url,omitempty" jsonschema:"the dashboard page where a person approves or denies it"`
+}
+
+type ApprovalResultView struct {
+	HTTPStatus int      `json:"http_status"`
+	Message    string   `json:"message,omitempty"`
+	TaskIDs    []string `json:"task_ids,omitempty" jsonschema:"tasks it queued: follow them with get_task"`
+	Body       any      `json:"body,omitempty" jsonschema:"the API's response (secrets removed)"`
+}
+
+type ApprovalOutput struct {
+	Approval ApprovalView `json:"approval"`
+}
+
+type ApprovalsOutput struct {
+	Approvals []ApprovalView `json:"approvals"`
+}
+
+// ChangeAction describes one action request_change can ask for.
+type ChangeAction struct {
+	Name          string         `json:"name"`
+	Title         string         `json:"title"`
+	Group         string         `json:"group"`
+	Risk          string         `json:"risk" jsonschema:"normal, disruptive or destructive (a person types the database's name to approve a destructive one)"`
+	Description   string         `json:"description,omitempty"`
+	Method        string         `json:"method,omitempty"`
+	Path          string         `json:"path,omitempty"`
+	NeedsDatabase bool           `json:"needs_database,omitempty"`
+	ParamsSchema  map[string]any `json:"params_schema,omitempty" jsonschema:"JSON schema of request_change's params for this action"`
+	Fixed         map[string]any `json:"fixed,omitempty" jsonschema:"set by Rowsafe whatever the params say"`
+}
+
+type DescribeChangeOutput struct {
+	Actions []ChangeAction `json:"actions"`
+}
+
+// ---- registration ----
+
+var approvalStatuses = []any{protocol.ApprovalPending, protocol.ApprovalApproved, protocol.ApprovalFailed,
+	protocol.ApprovalDenied, protocol.ApprovalExpired, protocol.ApprovalCancelled}
+
+// addApprovalReadTools registers what any client may use: the catalog and
+// the state of requests.
+func (t *tools) addApprovalReadTools(s *sdk.Server) {
+	sdk.AddTool(s, &sdk.Tool{
+		Name:        "describe_change",
+		Description: "Describes the changes to production a person can approve (request_change asks for them): with action, its title, what it does, its risk, the API call Rowsafe makes once approved, and the JSON schema of its params; without action, every action by group. Read-only.",
+		Annotations: readOnly("Describe a change you can ask for"),
+		InputSchema: inputSchema[describeChangeInput](func(p map[string]*jsonschema.Schema) {
+			p["action"].Enum = actionEnum()
+		}),
+	}, t.describeChange)
+
+	sdk.AddTool(s, &sdk.Tool{
+		Name:        "get_approval",
+		Description: "Shows one approval request: pending, approved (with the tasks it queued; follow them with get_task), failed, denied (with the person's note), expired or cancelled. With wait_seconds it waits for a person to decide. Read-only.",
+		Annotations: readOnly("Get an approval request"),
+		InputSchema: withWait[approvalIDInput](nil),
+	}, t.getApproval)
+
+	sdk.AddTool(s, &sdk.Tool{
+		Name:        "list_approvals",
+		Description: "Lists approval requests (changes to production assistants and API keys asked a person to approve), newest first. Read-only.",
+		Annotations: readOnly("List approval requests"),
+		InputSchema: inputSchema[listApprovalsInput](func(p map[string]*jsonschema.Schema) {
+			p["status"].Enum = approvalStatuses
+			p["limit"].Minimum, p["limit"].Maximum = ptr(1.0), ptr(100.0)
+		}),
+	}, t.listApprovals)
+}
+
+// addApprovalWriteTools registers request_change and cancel_approval.
+func (t *tools) addApprovalWriteTools(s *sdk.Server) {
+	sdk.AddTool(s, &sdk.Tool{
+		Name:        "request_change",
+		Description: requestChangeDescription(),
+		Annotations: writes("Ask a person to approve a change", false, false),
+		InputSchema: withWait[requestChangeInput](func(p map[string]*jsonschema.Schema) {
+			p["action"].Enum = actionEnum()
+			p["reason"].MinLength, p["reason"].MaxLength = ptr(1), ptr(1000)
+		}),
+	}, t.requestChange)
+
+	sdk.AddTool(s, &sdk.Tool{
+		Name:        "cancel_approval",
+		Description: "Withdraws a pending approval request you filed (for example when the user changed their mind). A decided request can't be cancelled.",
+		Annotations: writes("Cancel an approval request", false, true),
+		InputSchema: inputSchema[cancelApprovalInput](nil),
+	}, t.cancelApproval)
+}
+
+func actionEnum() []any {
+	out := make([]any, 0, len(protocol.ApprovalActions))
+	for _, a := range protocol.ApprovalActions {
+		out = append(out, a.Name)
+	}
+	return out
+}
+
+// requestChangeDescription lists the catalog by group, in catalog order.
+func requestChangeDescription() string {
+	var groups []string
+	byGroup := map[string][]string{}
+	for _, a := range protocol.ApprovalActions {
+		if _, ok := byGroup[a.Group]; !ok {
+			groups = append(groups, a.Group)
+		}
+		byGroup[a.Group] = append(byGroup[a.Group], a.Name+" ("+a.Title+")")
+	}
+	var b strings.Builder
+	b.WriteString("Asks a person to approve a change to production. Nothing changes until an owner or admin approves it in the Rowsafe dashboard; then Rowsafe runs it as that person, exactly like the dashboard's button. You can't approve. ")
+	b.WriteString("Only ask for a change the user asked for or agreed to (propose it first), and show them the approval link it returns. ")
+	b.WriteString("Call describe_change for an action's params. Most destructive or disruptive actions need params.confirm = the database's name (or a hostname), as each action's description says. reason is shown to the person, labeled as yours. ")
+	b.WriteString("With wait_seconds it waits for the decision; once approved, follow the tasks with get_task. Actions by group: ")
+	for i, g := range groups {
+		if i > 0 {
+			b.WriteString("; ")
+		}
+		fmt.Fprintf(&b, "%s: %s", g, strings.Join(byGroup[g], ", "))
+	}
+	b.WriteString(".")
+	return b.String()
+}
+
+// ---- describe_change ----
+
+var pathParam = regexp.MustCompile(`\{([a-z_]+)\}`)
+
+// pathParams are an action's path parameters other than {ref}.
+func pathParams(a protocol.ApprovalAction) []string {
+	var out []string
+	for _, m := range pathParam.FindAllStringSubmatch(a.Path, -1) {
+		if m[1] != "ref" {
+			out = append(out, m[1])
+		}
+	}
+	return out
+}
+
+// taskParamBodies are the params of task actions whose catalog entry has no
+// Body.
+var taskParamBodies = map[string]any{
+	protocol.TaskRestart: protocol.ConfirmRequest{},
+	protocol.TaskAdopt:   protocol.AdoptParams{},
+}
+
+// paramsSchema is the JSON schema of request_change's params for a.
+func paramsSchema(a protocol.ApprovalAction) (*jsonschema.Schema, error) {
+	body := a.Body
+	if body == nil && a.Task != "" {
+		body = taskParamBodies[a.Task]
+	}
+	s := &jsonschema.Schema{Type: "object", Properties: map[string]*jsonschema.Schema{}}
+	if body != nil {
+		var err error
+		if s, err = jsonschema.ForType(reflect.TypeOf(body), &jsonschema.ForOptions{IgnoreInvalidTypes: true}); err != nil {
+			return nil, fmt.Errorf("%s: %w", a.Name, err)
+		}
+		if s.Properties == nil {
+			s.Properties = map[string]*jsonschema.Schema{}
+		}
+	}
+	for k := range a.Fixed {
+		delete(s.Properties, k)
+		s.Required = slices.DeleteFunc(s.Required, func(r string) bool { return r == k })
+	}
+	for _, p := range pathParams(a) {
+		s.Properties[p] = &jsonschema.Schema{Type: "string", Description: "the " + strings.ReplaceAll(p, "_", " ") + " (part of the API path)"}
+		if !slices.Contains(s.Required, p) {
+			s.Required = append(s.Required, p)
+		}
+	}
+	if s.AdditionalProperties == nil {
+		s.AdditionalProperties = &jsonschema.Schema{Not: &jsonschema.Schema{}}
+	}
+	return s, nil
+}
+
+func changeAction(a protocol.ApprovalAction, full bool) (ChangeAction, error) {
+	out := ChangeAction{Name: a.Name, Title: a.Title, Group: a.Group, Risk: a.Risk}
+	if !full {
+		return out, nil
+	}
+	out.Description, out.Method, out.Path, out.Fixed = a.Description, a.Method, a.Path, a.Fixed
+	out.NeedsDatabase = strings.Contains(a.Path, "{ref}")
+	s, err := paramsSchema(a)
+	if err != nil {
+		return out, err
+	}
+	raw, err := json.Marshal(s)
+	if err != nil {
+		return out, err
+	}
+	if err := json.Unmarshal(raw, &out.ParamsSchema); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+func (t *tools) describeChange(_ context.Context, _ *sdk.CallToolRequest, in describeChangeInput) (*sdk.CallToolResult, DescribeChangeOutput, error) {
+	var b textBuilder
+	if in.Action == "" {
+		out := DescribeChangeOutput{Actions: []ChangeAction{}}
+		b.line("Changes a person can approve (request_change asks; describe_change ACTION shows its params):")
+		group := ""
+		for _, a := range protocol.ApprovalActions {
+			ca, _ := changeAction(a, false)
+			out.Actions = append(out.Actions, ca)
+			if a.Group != group {
+				group = a.Group
+				b.line("%s:", group)
+			}
+			b.line("  %s: %s (%s)", a.Name, a.Title, a.Risk)
+		}
+		return text(b), out, nil
+	}
+	a, ok := protocol.FindApprovalAction(in.Action)
+	if !ok {
+		return nil, DescribeChangeOutput{}, fmt.Errorf("unknown action %q: describe_change without action lists them", in.Action)
+	}
+	ca, err := changeAction(a, true)
+	if err != nil {
+		return nil, DescribeChangeOutput{}, err
+	}
+	b.line("%s (%s, risk %s): %s", a.Name, a.Title, a.Risk, a.Description)
+	b.line("Once a person approves it, Rowsafe calls %s %s as that person.", a.Method, a.Path)
+	if !ca.NeedsDatabase {
+		b.line("It isn't about one database: leave database empty.")
+	}
+	if len(a.Fixed) > 0 {
+		keys := make([]string, 0, len(a.Fixed))
+		for k := range a.Fixed {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		b.line("Set by Rowsafe whatever the params say: %s.", strings.Join(keys, ", "))
+	}
+	if a.Risk == protocol.RiskDestructive {
+		b.line("Destructive: the person types the database's name to approve it.")
+	}
+	schema, _ := json.Marshal(ca.ParamsSchema)
+	b.line("params schema: %s", schema)
+	return text(b), DescribeChangeOutput{Actions: []ChangeAction{ca}}, nil
+}
+
+// ---- request_change ----
+
+// approvalState marks a request_change retry after the client was asked to
+// open the approval link (multi round-trip): the request is already filed.
+const approvalState = "approval:"
+
+func (t *tools) requestChange(ctx context.Context, req *sdk.CallToolRequest, in requestChangeInput) (*sdk.CallToolResult, ApprovalOutput, error) {
+	if req != nil && req.Params != nil && strings.HasPrefix(req.Params.RequestState, approvalState) {
+		// The client opened (or declined to open) the approval link; the
+		// request was filed on the first call. Report it, never file again.
+		id := strings.TrimPrefix(req.Params.RequestState, approvalState)
+		a, err := t.c.Approval(ctx, id)
+		if err != nil {
+			return nil, ApprovalOutput{}, fmt.Errorf("approval request %s was filed, but reading it failed: %w", id, apiError(err))
+		}
+		lead := fmt.Sprintf("Asked a person to approve: %s.", approvalSubject(a))
+		if r, ok := req.Params.InputResponses["open_approval"].(*sdk.ElicitResult); ok && r != nil && r.Action != "accept" {
+			lead += " The user didn't open the approval link here; give it to them."
+		}
+		return t.reportApproval(ctx, a, in.WaitSeconds, lead)
+	}
+
+	act, ok := protocol.FindApprovalAction(in.Action)
+	if !ok {
+		return nil, ApprovalOutput{}, fmt.Errorf("unknown action %q: describe_change lists the changes you can ask for", in.Action)
+	}
+	if strings.TrimSpace(in.Reason) == "" {
+		return nil, ApprovalOutput{}, errors.New("reason is required: say in one or two sentences why the user wants this change")
+	}
+	if strings.Contains(act.Path, "{ref}") && strings.TrimSpace(in.Database) == "" {
+		return nil, ApprovalOutput{}, fmt.Errorf("%s needs database (list_databases shows them)", act.Name)
+	}
+	if err := checkParams(act, in.Params); err != nil {
+		return nil, ApprovalOutput{}, err
+	}
+	var params json.RawMessage
+	if len(in.Params) > 0 {
+		var err error
+		if params, err = json.Marshal(in.Params); err != nil {
+			return nil, ApprovalOutput{}, err
+		}
+	}
+	a, err := t.c.RequestApproval(ctx, protocol.CreateApprovalRequest{Action: act.Name, Database: in.Database, Params: params, Reason: strings.TrimSpace(in.Reason)})
+	if err != nil {
+		return nil, ApprovalOutput{}, approvalError(err)
+	}
+	lead := fmt.Sprintf("Asked a person to approve: %s.", approvalSubject(a))
+	if a.Status == protocol.ApprovalPending && a.URL != "" {
+		// Ask the client to open the approval page (URL elicitation).
+		open := &sdk.ElicitParams{
+			Mode:          "url",
+			Message:       fmt.Sprintf("Rowsafe: approve or deny \"%s\"%s in the dashboard. Nothing changes until you approve it.", a.Title, onDatabase(a)),
+			URL:           a.URL,
+			ElicitationID: a.ID,
+		}
+		switch t.urlElicitation(req) {
+		case elicitRoundTrip:
+			// The client opens it and calls again with RequestState, which
+			// reports this request (above) instead of filing another.
+			return &sdk.CallToolResult{InputRequests: sdk.InputRequestMap{"open_approval": open}, RequestState: approvalState + a.ID}, ApprovalOutput{}, nil
+		case elicitInBand:
+			ectx, cancel := context.WithTimeout(ctx, t.opts.MaxWait)
+			r, err := req.Session.Elicit(ectx, open)
+			cancel()
+			if err != nil || r.Action != "accept" {
+				lead += " The user didn't open the approval link here; give it to them."
+			}
+		}
+	}
+	return t.reportApproval(ctx, a, in.WaitSeconds, lead)
+}
+
+const (
+	elicitNone      = iota
+	elicitInBand    // elicitation/create during the call (protocol before 2026-07-28)
+	elicitRoundTrip // input_required result, the client calls again (2026-07-28 and later)
+)
+
+// urlElicitation says how this session can ask the client to open a URL.
+// The remote endpoint is stateless: it has no channel for an in-band request.
+func (t *tools) urlElicitation(req *sdk.CallToolRequest) int {
+	if req == nil || req.Session == nil {
+		return elicitNone
+	}
+	ip := req.Session.InitializeParams()
+	if ip == nil || ip.Capabilities == nil || ip.Capabilities.Elicitation == nil || ip.Capabilities.Elicitation.URL == nil {
+		return elicitNone
+	}
+	switch {
+	case ip.ProtocolVersion >= "2026-07-28":
+		return elicitRoundTrip
+	case t.opts.Remote:
+		return elicitNone
+	}
+	return elicitInBand
+}
+
+// checkParams catches unknown params and missing path params before filing.
+func checkParams(a protocol.ApprovalAction, params map[string]any) error {
+	s, err := paramsSchema(a)
+	if err != nil {
+		return err
+	}
+	var missing, unknown []string
+	for _, p := range pathParams(a) {
+		if v, ok := params[p]; !ok || v == nil || v == "" {
+			missing = append(missing, p)
+		}
+	}
+	for k := range params {
+		if _, ok := s.Properties[k]; !ok {
+			if _, fixed := a.Fixed[k]; !fixed {
+				unknown = append(unknown, k)
+			}
+		}
+	}
+	sort.Strings(unknown)
+	switch {
+	case len(missing) > 0:
+		return fmt.Errorf("%s needs params %s (describe_change %s shows them)", a.Name, strings.Join(missing, ", "), a.Name)
+	case len(unknown) > 0:
+		return fmt.Errorf("%s doesn't take params %s (describe_change %s shows the ones it takes)", a.Name, strings.Join(unknown, ", "), a.Name)
+	}
+	return nil
+}
+
+// approvalError is apiError, plus what a 404 can mean here: a control
+// plane from before approvals has no /v1/approvals.
+func approvalError(err error) error {
+	if isStatus(err, http.StatusNotFound) {
+		return fmt.Errorf("%w. If the names are right, this Rowsafe server may not have approvals yet: the user makes the change in the dashboard instead", apiError(err))
+	}
+	return apiError(err)
+}
+
+// ---- get, list, cancel ----
+
+func (t *tools) getApproval(ctx context.Context, _ *sdk.CallToolRequest, in approvalIDInput) (*sdk.CallToolResult, ApprovalOutput, error) {
+	a, err := t.c.Approval(ctx, in.ID)
+	if err != nil {
+		return nil, ApprovalOutput{}, apiError(err)
+	}
+	return t.reportApproval(ctx, a, in.WaitSeconds, "")
+}
+
+func (t *tools) listApprovals(ctx context.Context, _ *sdk.CallToolRequest, in listApprovalsInput) (*sdk.CallToolResult, ApprovalsOutput, error) {
+	list, err := t.c.Approvals(ctx, in.Status, clamp(in.Limit, 20, 100))
+	if err != nil {
+		return nil, ApprovalsOutput{}, approvalError(err)
+	}
+	out := ApprovalsOutput{Approvals: []ApprovalView{}}
+	var b textBuilder
+	if len(list) == 0 {
+		b.line("No approval requests%s.", map[bool]string{true: " that are " + in.Status, false: ""}[in.Status != ""])
+	}
+	for _, a := range list {
+		out.Approvals = append(out.Approvals, approvalView(a))
+		line := fmt.Sprintf("%s  %s  %s (%s)%s, asked by %s at %s", a.ID, a.Status, a.Title, a.Action, onDatabase(a), a.RequestedBy, a.CreatedAt.UTC().Format(time.RFC3339))
+		if a.DecidedBy != "" {
+			line += ", decided by " + a.DecidedBy
+		}
+		b.line("%s", line)
+	}
+	return text(b), out, nil
+}
+
+func (t *tools) cancelApproval(ctx context.Context, _ *sdk.CallToolRequest, in cancelApprovalInput) (*sdk.CallToolResult, ApprovalOutput, error) {
+	a, err := t.c.CancelApproval(ctx, in.ID)
+	if err != nil {
+		return nil, ApprovalOutput{}, apiError(err)
+	}
+	return t.reportApproval(ctx, a, 0, "Withdrew the request.")
+}
+
+// fixAsk ends the line that tells the user how to apply a finding's fixes:
+// without request_change the assistant can't; with it, the exact request.
+func (t *tools) fixAsk(findingID string, fixes []protocol.FindingFix) string {
+	if !t.opts.AllowWrites || findingID == "" || len(fixes) == 0 {
+		return "; you can't apply it."
+	}
+	ids := make([]string, 0, len(fixes))
+	for _, fx := range fixes {
+		ids = append(ids, fmt.Sprintf("%q (%s)", fx.ID, fx.Label))
+	}
+	return fmt.Sprintf(", or approves it once you ask, if they want you to: request_change apply_fix with finding_id %q and fix_id %s.", findingID, strings.Join(ids, " or "))
+}
+
+// ---- reporting ----
+
+// approvalPoll is how often a wait re-reads an approval request.
+var approvalPoll = 2 * time.Second
+
+// reportApproval optionally waits for a decision, then reports a with what
+// to do next.
+func (t *tools) reportApproval(ctx context.Context, a protocol.Approval, waitSeconds int, lead string) (*sdk.CallToolResult, ApprovalOutput, error) {
+	if waitSeconds > 0 && a.Status == protocol.ApprovalPending {
+		deadline := time.Now().Add(min(time.Duration(waitSeconds)*time.Second, t.opts.MaxWait, maxWaitLimit))
+		for a.Status == protocol.ApprovalPending {
+			left := time.Until(deadline)
+			if left <= 0 {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ApprovalOutput{}, fmt.Errorf("stopped waiting (approval request %s is still there; follow it with get_approval): %w", a.ID, ctx.Err())
+			case <-time.After(min(approvalPoll, left)):
+			}
+			next, err := t.c.Approval(ctx, a.ID)
+			if err != nil {
+				return nil, ApprovalOutput{}, fmt.Errorf("reading approval request %s failed: %w", a.ID, apiError(err))
+			}
+			a = next
+		}
+	}
+	var b textBuilder
+	if lead != "" {
+		b.line("%s", lead)
+	}
+	writeApproval(&b, a)
+	return text(b), ApprovalOutput{Approval: approvalView(a)}, nil
+}
+
+func onDatabase(a protocol.Approval) string {
+	switch {
+	case a.Database != "" && a.Host != "":
+		return " on " + a.Database + " (" + a.Host + ")"
+	case a.Database != "":
+		return " on " + a.Database
+	}
+	return ""
+}
+
+func approvalSubject(a protocol.Approval) string {
+	return fmt.Sprintf("%s%s (%s, %s)", a.Title, onDatabase(a), a.ID, a.Status)
+}
+
+func writeApproval(b *textBuilder, a protocol.Approval) {
+	b.line("%s: %s%s. Risk: %s. Status: %s.", a.ID, a.Title, onDatabase(a), a.Risk, a.Status)
+	for _, d := range a.Details {
+		b.line("  Will change: %s", d)
+	}
+	switch a.Status {
+	case protocol.ApprovalPending:
+		where := "Approvals in the Rowsafe dashboard"
+		if a.URL != "" {
+			where = a.URL
+		}
+		b.line("Nothing changes until an owner or admin of the organization approves it. Show the user this link to approve or deny it: %s", where)
+		if !a.ExpiresAt.IsZero() {
+			b.line("It expires at %s if nobody decides. Follow it with get_approval %s (with wait_seconds), and don't ask again for the same change meanwhile.", a.ExpiresAt.UTC().Format(time.RFC3339), a.ID)
+		}
+	case protocol.ApprovalApproved:
+		b.line("Approved by %s%s and run.", a.DecidedBy, decidedAt(a))
+		if r := a.Result; r != nil {
+			if r.Message != "" {
+				b.line("Result: %s", r.Message)
+			}
+			if len(r.TaskIDs) > 0 {
+				b.line("Tasks: %s. Follow them with get_task until they finish, then tell the user the outcome.", strings.Join(r.TaskIDs, ", "))
+			}
+		}
+	case protocol.ApprovalFailed:
+		msg := "no reason given"
+		if a.Result != nil && a.Result.Message != "" {
+			msg = a.Result.Message
+		}
+		b.line("Approved by %s%s, but running it failed (HTTP %d): %s. Nothing was changed by this request unless the message says otherwise; tell the user.", a.DecidedBy, decidedAt(a), resultStatus(a), msg)
+	case protocol.ApprovalDenied:
+		b.line("Denied by %s%s.", a.DecidedBy, decidedAt(a))
+		if a.Note != "" {
+			b.line("Their note: %s", a.Note)
+		}
+		b.line("Don't ask again for this change unless the user wants to.")
+	case protocol.ApprovalExpired:
+		b.line("Nobody decided in time, so it expired and nothing changed. Ask again only if the user still wants it.")
+	case protocol.ApprovalCancelled:
+		b.line("Cancelled; nothing changed.")
+	}
+}
+
+func decidedAt(a protocol.Approval) string {
+	if a.DecidedAt == nil {
+		return ""
+	}
+	return " at " + a.DecidedAt.UTC().Format(time.RFC3339)
+}
+
+func resultStatus(a protocol.Approval) int {
+	if a.Result == nil {
+		return 0
+	}
+	return a.Result.HTTPStatus
+}
+
+func approvalView(a protocol.Approval) ApprovalView {
+	v := ApprovalView{
+		ID: a.ID, Action: a.Action, Title: a.Title, Group: a.Group, Risk: a.Risk, Database: a.Database, Host: a.Host,
+		Details: a.Details, Reason: a.Reason, RequestedBy: a.RequestedBy, Status: a.Status, CreatedAt: a.CreatedAt,
+		ExpiresAt: a.ExpiresAt, DecidedAt: a.DecidedAt, DecidedBy: a.DecidedBy, Note: a.Note, URL: a.URL,
+	}
+	if len(a.Params) > 0 {
+		var p map[string]any
+		if json.Unmarshal(a.Params, &p) == nil {
+			v.Params, _ = redactSecrets(p).(map[string]any)
+		}
+	}
+	if r := a.Result; r != nil {
+		v.Result = &ApprovalResultView{HTTPStatus: r.HTTPStatus, Message: r.Message, TaskIDs: r.TaskIDs}
+		if len(r.Body) > 0 {
+			var body any
+			if json.Unmarshal(r.Body, &body) == nil {
+				v.Result.Body = redactSecrets(body)
+			}
+		}
+	}
+	return v
+}
+
+// redactSecrets replaces the values of secret-looking keys, at any depth.
+// The control plane keeps secrets out of approvals; this is a second guard.
+func redactSecrets(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, val := range x {
+			if secretKey(k) {
+				x[k] = "(hidden)"
+			} else {
+				x[k] = redactSecrets(val)
+			}
+		}
+		return x
+	case []any:
+		for i := range x {
+			x[i] = redactSecrets(x[i])
+		}
+		return x
+	}
+	return v
+}

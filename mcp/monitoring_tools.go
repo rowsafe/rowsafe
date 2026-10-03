@@ -64,7 +64,7 @@ func (t *tools) addMonitoringTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "database_health",
 		Description: "Health score (0-100) of a database, with findings in plain language, worst first: each has a title, an explanation and what to do. " +
-			"Many findings list fixes Rowsafe can apply itself (clean up tables, rebuild or remove an index, end a stuck session, remove an inactive replication slot, back up now, ...); a person applies them with Apply fix in the Rowsafe dashboard (Pulse, Health), after a confirmation when they are disruptive. Read-only: this tool applies nothing. " +
+			"Many findings list fixes Rowsafe can apply itself (clean up tables, rebuild or remove an index, end a stuck session, remove an inactive replication slot, back up now, ...); a person applies them with Apply fix in the Rowsafe dashboard (Pulse, Health), after a confirmation when they are disruptive, or approves one you ask for with request_change (apply_fix, with the finding_id and fix_id). Read-only: this tool applies nothing. " +
 			"Covers backups, restore tests and continuous backup; whether the database answers; disk space and a forecast of when it fills up; connections; per engine (PostgreSQL: vacuum, transaction ID wraparound and estimated bloat; MySQL and MariaDB, MongoDB and ClickHouse: their own checks such as replication, long transactions or operations, and merges and mutations); blocked queries, statements that got slower, unused and duplicate indexes, tables that may lack an index; replication lag. " +
 			"Without a database it lists every database's score and top finding. Scores: 90-100 healthy, 70-89 needs attention, 50-69 at risk, below 50 critical.",
 		Annotations: readOnly("Database health score"),
@@ -144,16 +144,18 @@ func (t *tools) databaseHealth(ctx context.Context, _ *sdk.CallToolRequest, in h
 		b.line("  %s", f.Explanation)
 		b.line("  What to do: %s", f.Action)
 		var fixes, unavailable []string
+		var ready []protocol.FindingFix
 		for _, fx := range f.Fixes {
 			if fx.Available {
 				fixes = append(fixes, fx.Label)
+				ready = append(ready, fx)
 			} else if fx.Reason != "" {
 				unavailable = append(unavailable, fx.Label+" (not now: "+fx.Reason+")")
 			}
 		}
 		switch {
 		case len(fixes) > 0:
-			b.line("  Rowsafe can fix this: %s. The user clicks Apply fix in the dashboard (Pulse, Health); you can't apply it.", strings.Join(fixes, "; "))
+			b.line("  Rowsafe can fix this: %s. The user clicks Apply fix in the dashboard (Pulse, Health)%s", strings.Join(fixes, "; "), t.fixAsk(f.ID, ready))
 		case len(unavailable) > 0:
 			b.line("  Rowsafe could fix this, but not right now: %s.", strings.Join(unavailable, "; "))
 		}
