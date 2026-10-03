@@ -15,9 +15,8 @@ import (
 // Clones (protocol.FeatureFork): a backup (or a Mark's) of the source,
 // restored straight into an empty ClickHouse server on the target host
 // whose Rowsafe user may create databases (`clickhouse login --clones`,
-// asked by the installer). ClickHouse keeps no log of its changes, so a
-// clone is as of a backup: the one at or before the moment picked. Its users
-// and grants aren't in the backup and aren't copied.
+// asked by the installer), as of any moment (pitr_restore.go) or a Mark.
+// Its users and grants aren't in the backup and aren't copied.
 
 var (
 	_ agent.EngineFork    = (*Engine)(nil)

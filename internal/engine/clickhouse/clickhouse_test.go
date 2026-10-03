@@ -257,7 +257,7 @@ func TestRetentionAndPick(t *testing.T) {
 	if b, err := pickBackup(ctx, r, restoreTarget{Time: at.Add(2 * time.Hour), BackupSet: f2}); err != nil || b.Label != f2 {
 		t.Fatalf("the control plane's pick wins for a moment: %+v %v", b, err)
 	}
-	if _, err := pickBackup(ctx, r, restoreTarget{Time: at}); err == nil || !strings.Contains(err.Error(), "not to any second") {
+	if _, err := pickBackup(ctx, r, restoreTarget{Time: at}); err == nil || !strings.Contains(err.Error(), "pick a later moment") {
 		t.Fatalf("before the first backup: %v", err)
 	}
 

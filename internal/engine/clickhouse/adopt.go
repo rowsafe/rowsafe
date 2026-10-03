@@ -66,8 +66,13 @@ func adoptPlan(in serverInfo) (plan []protocol.Change, warnings []string, blocke
 		{Kind: "command", Description: "Take a full backup right after, then on the schedule you choose (by default a full backup " +
 			"every week and a differential one, only what changed, every hour)"},
 	}
-	warnings = append(warnings, "ClickHouse keeps no log of changes, so it can be restored to any of its backups or Marks, "+
-		"not to any second. Take a Mark before risky changes.")
+	plan = append(plan, protocol.Change{Kind: "command", Description: "Copy every change as it happens (each new part ClickHouse " +
+		"writes, read from its data folder and encrypted on this server) so you can restore to any second"})
+	if why := dataFolderProblem(in.DataPath); why != "" {
+		warnings = append(warnings, "Restores to any second need the agent to read ClickHouse's data folder, and it can't ("+why+
+			"): run the Rowsafe installer again, or in Docker mount ClickHouse's data volume into the agent read only. "+
+			"Until then ClickHouse is restored to its backups and Marks.")
+	}
 	if in.VersionNum < minVersion {
 		blocker = fmt.Errorf("this server runs ClickHouse %s: Rowsafe's backups need ClickHouse 24.8 or newer", in.Version)
 	}

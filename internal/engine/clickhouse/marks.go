@@ -9,7 +9,7 @@ import (
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
-// Marks: ClickHouse keeps no log of changes, so a Mark is a differential
+// Marks: a Mark is a differential
 // backup taken on the spot (only what changed since the newest full
 // backup), saved under the Mark's name in the bucket. Rewind to the Mark
 // restores exactly that backup.

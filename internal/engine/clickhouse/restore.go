@@ -83,8 +83,7 @@ func pickBackup(ctx context.Context, r *repo, target restoreTarget) (backupDoc, 
 				return docs[i], nil
 			}
 		}
-		return backupDoc{}, fmt.Errorf("the oldest backup in your bucket finished at %s: pick a later moment (ClickHouse can be "+
-			"restored to its backups and Marks, not to any second)", docs[0].StoppedAt.UTC().Format(time.RFC3339))
+		return backupDoc{}, fmt.Errorf("the oldest backup in your bucket finished at %s: pick a later moment", docs[0].StoppedAt.UTC().Format(time.RFC3339))
 	}
 	return docs[len(docs)-1], nil
 }

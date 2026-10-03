@@ -322,7 +322,7 @@ func missingOf(have, want []string) []string {
 }
 
 // inspectResult is the PostgreSQL-shaped report the control plane stores.
-// ArchiveMode is always "off": ClickHouse keeps no log of changes to copy.
+// ArchiveMode is "on": the agent copies every new part (pitr_ship.go).
 func (s serverInfo) inspectResult(port int) protocol.InspectResult {
 	dbs := s.Databases
 	if dbs == nil {
@@ -331,7 +331,7 @@ func (s serverInfo) inspectResult(port int) protocol.InspectResult {
 	return protocol.InspectResult{
 		Engine:        protocol.EngineClickHouse,
 		ServerVersion: s.Version, VersionNum: s.VersionNum, DataDirectory: s.DataPath,
-		Port: port, IsSuperuser: slices.Contains(s.Grants, "ALL"), ArchiveMode: "off",
+		Port: port, IsSuperuser: slices.Contains(s.Grants, "ALL"), ArchiveMode: "on",
 		Databases: dbs, TotalSizeBytes: s.TotalBytes,
 	}
 }

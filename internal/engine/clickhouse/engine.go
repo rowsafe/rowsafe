@@ -3,8 +3,8 @@
 // the agent, into the customer's bucket), Proof (restore tests in a
 // temporary server), Rewind (a copy at a backup or a Mark, compare, bring
 // rows back), Marks, monitoring (Pulse) with two fixes (stop a query,
-// cancel a stuck mutation) and discovery for the installer. ClickHouse
-// keeps no log of changes, so there are no restores to any second. It
+// cancel a stuck mutation) and discovery for the installer; restores to any
+// second from the parts it copies as they appear (pitr_*.go). It
 // registers itself with the agent (agent.RegisterEngine); the agent binary
 // imports it for that.
 package clickhouse

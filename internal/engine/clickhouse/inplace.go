@@ -19,8 +19,7 @@ import (
 
 // Rewind the whole server in place to a backup or a Mark (and Undo).
 //
-// ClickHouse keeps no log of its changes, so a rewind goes to a backup (one
-// every hour) or a Mark. Nothing is stopped and no table is replaced: the
+// A rewind goes to any moment (pitr_restore.go), a backup or a Mark. Nothing is stopped and no table is replaced: the
 // data moves between tables, partition by partition, so materialized
 // views, dictionaries and everything that points at a table keep pointing
 // at the same table.

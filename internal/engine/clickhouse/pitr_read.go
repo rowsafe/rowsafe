@@ -175,3 +175,19 @@ func partFileList(dir string) ([]string, error) {
 	})
 	return out, err
 }
+
+// dataFolderProblem says why the agent can't read ClickHouse's data
+// folder ("" when it can).
+func dataFolderProblem(serverDataPath string) string {
+	if serverDataPath == "" {
+		return ""
+	}
+	dir := localPath(serverDataPath, strings.TrimRight(serverDataPath, "/")+"/store")
+	if _, err := os.ReadDir(dir); err != nil {
+		if os.IsNotExist(err) {
+			return dir + " isn't there"
+		}
+		return shortError(err)
+	}
+	return ""
+}

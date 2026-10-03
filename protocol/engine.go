@@ -212,8 +212,7 @@ var EngineCapabilities = map[string]EngineFeatures{
 		MoveIn:   true, // one-time copy from Atlas or any MongoDB (migrate*.go in internal/engine/mongodb)
 		Settings: true, // mongod.conf through root's tuning helper (opt-in), setParameter live
 	},
-	// ClickHouse (internal/engine/clickhouse): protocol/clickhouse.go. No
-	// restores to any second: ClickHouse keeps no log of its changes.
+	// ClickHouse (internal/engine/clickhouse): protocol/clickhouse.go.
 	EngineClickHouse: clickhouseFeatures,
 }
 
