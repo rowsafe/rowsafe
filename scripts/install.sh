@@ -33,6 +33,17 @@
 #   --protect NAME         without questions: turn on backups for this server's
 #                          PostgreSQL as NAME (never restarts it)
 #   --protect-port PORT    with --protect: the cluster on PORT (when there are several)
+#   --install-postgres VERSION  on a fresh server: install PostgreSQL VERSION
+#                          (13-18) from the PostgreSQL project's repository
+#                          (apt.postgresql.org, its signing key checked) and
+#                          start it; refuses if PostgreSQL is already installed.
+#                          With --protect, that new PostgreSQL is restarted once
+#                          if backups need it
+#   --listen-public        PostgreSQL listens on every address: TLS on (a
+#                          self-signed certificate made here), SCRAM-SHA-256
+#                          passwords for logins from the network (hostssl rules
+#                          for 0.0.0.0/0 and ::/0; local rules unchanged). Put a
+#                          firewall in front: it decides who can connect
 #   --allow-restart        allow Rowsafe to restart or stop PostgreSQL when you
 #                          ask (Restart and Rewind in the dashboard, `rowsafe
 #                          restart`); only when someone confirms
@@ -200,6 +211,9 @@ ALLOW_SECURITY=''  # --allow-security-updates / --no-allow-security-updates
 ALLOW_REBOOT=''    # --allow-reboot / --no-allow-reboot
 SETUP_STOP=0       # the plan limit was reached: don't offer more databases
 MONGODB_REPLSET='' # --mongodb-replica-set (yes) / --no-mongodb-replica-set (no); '' = ask on a terminal
+INSTALL_PG=''      # --install-postgres VERSION (servers Rowsafe creates)
+LISTEN_PUBLIC=0    # --listen-public
+PG_OURS=0          # the PostgreSQL here is the one --install-postgres installed
 
 TMP=
 CHANGED=0          # binary, unit, guard or config changed: a running agent needs a restart
@@ -258,6 +272,19 @@ Options (when piping, pass them after `sh -s --`):
                          named NAME in Rowsafe. Never restarts PostgreSQL; prints the
                          command when it needs a restart
   --protect-port PORT    with --protect: the PostgreSQL on PORT (when there are several)
+  --install-postgres VERSION
+                         on a fresh server: install PostgreSQL VERSION (13-18) from the
+                         PostgreSQL project's repository (apt.postgresql.org, its signing
+                         key checked) and start it. Refuses if PostgreSQL is already
+                         installed; a re-run keeps the one it installed. With --protect,
+                         that new PostgreSQL is restarted once if backups need it
+  --listen-public        make PostgreSQL reachable from the network: it listens on every
+                         address, with TLS (a self-signed certificate made on this server)
+                         and SCRAM-SHA-256 passwords for every login from the network
+                         (local rules stay as they are). Put a firewall in front: it
+                         decides who can connect. Restarts PostgreSQL only if it was
+                         installed by --install-postgres or you say yes; otherwise the
+                         change waits for its next restart
   --allow-restart        allow Rowsafe to restart or stop PostgreSQL when you ask
                          (Restart and Rewind in the dashboard, `rowsafe restart`),
                          only when someone confirms
@@ -362,6 +389,13 @@ Turning on backups:
   Rewind the whole database, in the dashboard), and only when someone
   confirms. Automation: --protect NAME.
 
+  A new server, without a terminal (cloud-init):
+    curl -fsSL https://rowsafe.sh | sh -s -- rse_... --no-prompt --install-postgres 17 \
+      --listen-public --storage rowsafe --protect NAME
+  installs PostgreSQL 17, makes it reachable with TLS and passwords, keeps
+  backups in Rowsafe Storage with a passphrase generated on the server (see it
+  in the dashboard, sealed to your browser) and turns them on.
+
   ClickHouse: Rowsafe's own ClickHouse user is added as
   /etc/clickhouse-server/users.d/rowsafe.xml (ClickHouse loads it by itself,
   no restart), or with an administrator's login once. ClickHouse keeps no
@@ -425,15 +459,17 @@ fetch() {
     -o "$2" "$1" </dev/null
 }
 
+apt_update() {
+  if ! DEBIAN_FRONTEND=noninteractive apt-get update -q >"$TMP/apt.log" 2>&1 </dev/null; then
+    tail -n 20 "$TMP/apt.log" >&2
+    die "apt-get update failed"
+  fi
+  APT_UPDATED=1
+}
+
 apt_install() {
   have apt-get || die "apt-get not found; install $* yourself and re-run"
-  if [ "$APT_UPDATED" = 0 ]; then
-    if ! DEBIAN_FRONTEND=noninteractive apt-get update -q >"$TMP/apt.log" 2>&1 </dev/null; then
-      tail -n 20 "$TMP/apt.log" >&2
-      die "apt-get update failed"
-    fi
-    APT_UPDATED=1
-  fi
+  [ "$APT_UPDATED" = 1 ] || apt_update
   if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends "$@" >>"$TMP/apt.log" 2>&1 </dev/null; then
     tail -n 20 "$TMP/apt.log" >&2
     die "installing $* failed"
@@ -721,6 +757,269 @@ check_openssl() {
   have curl || die "curl is required"
   have sha256sum || die "sha256sum is required"
   have base64 || die "base64 is required"
+}
+
+# ---------------------------------------------------------------- servers Rowsafe creates
+#
+# --install-postgres VERSION and --listen-public are for a fresh server
+# (Create a server for me): cloud-init runs the installer once, without a
+# terminal, to install PostgreSQL, make it reachable and protect it:
+#
+#   curl -fsSL https://rowsafe.sh | sh -s -- rse_... --no-prompt \
+#     --install-postgres 17 --listen-public --storage rowsafe --protect shop
+#
+# Running it again changes nothing that is already in place.
+
+# The PostgreSQL project's apt repository (https://www.postgresql.org/download/linux/debian/),
+# set up the way its instructions describe, with the signing key's
+# fingerprint checked before apt trusts it.
+PGDG_KEY_URL=https://www.postgresql.org/media/keys/ACCC4CF8.asc
+PGDG_KEY_FPR=B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8
+PGDG_KEY_FILE=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+PGDG_LIST=/etc/apt/sources.list.d/pgdg.list
+# The major --install-postgres installed (a re-run recognizes it as its own).
+PG_INSTALLED_FILE=$CONFIG_DIR/installed-postgresql
+# --listen-public's self-signed certificate (root's directory, the key
+# readable by the postgres group only, as PostgreSQL requires).
+PG_TLS_DIR=/etc/ssl/rowsafe-postgresql
+# Cluster --listen-public works on (pg_target).
+LP_MAJOR='' LP_NAME='' LP_PORT=''
+
+# existing_postgres describes PostgreSQL already on this server, if any:
+# server binaries, server packages or a running postgres process.
+existing_postgres() {
+  for _b in /usr/lib/postgresql/*/bin/postgres; do
+    [ -x "$_b" ] || continue
+    _m=${_b#/usr/lib/postgresql/}
+    printf 'PostgreSQL %s in /usr/lib/postgresql/%s' "${_m%%/*}" "${_m%%/*}"
+    return 0
+  done
+  if have dpkg-query; then
+    # shellcheck disable=SC2016 # dpkg-query's own ${...} fields
+    _p=$(dpkg-query -W -f '${Package} ${db:Status-Status}\n' 'postgresql-[0-9]*' 2>/dev/null | awk '$2 == "installed" { print $1; exit }')
+    if [ -n "$_p" ]; then
+      printf 'the package %s' "$_p"
+      return 0
+    fi
+  fi
+  if have pgrep && pgrep -x postgres >/dev/null 2>&1; then
+    printf 'a running PostgreSQL server'
+    return 0
+  fi
+  return 0
+}
+
+# pgdg_repo adds the PostgreSQL project's apt repository.
+pgdg_repo() {
+  # shellcheck disable=SC1091 # the system's own file
+  _codename=$(. /etc/os-release && printf '%s' "${VERSION_CODENAME:-}")
+  [ -n "$_codename" ] || die "can't tell this system's release name (VERSION_CODENAME in /etc/os-release)"
+  have gpg || apt_install gnupg
+  fetch "$PGDG_KEY_URL" "$TMP/pgdg.asc" || die "could not download the PostgreSQL project's signing key ($PGDG_KEY_URL)"
+  install -d -m 0700 "$TMP/gnupg"
+  GNUPGHOME=$TMP/gnupg gpg --batch --show-keys --with-colons "$TMP/pgdg.asc" >"$TMP/pgdg.keys" 2>/dev/null || true
+  _fpr=$(awk -F: '$1 == "fpr" { print $10; exit }' "$TMP/pgdg.keys")
+  [ "$(grep -c '^pub:' "$TMP/pgdg.keys")" = 1 ] && [ "$_fpr" = "$PGDG_KEY_FPR" ] ||
+    die "the PostgreSQL project's signing key isn't the expected one (fingerprint ${_fpr:-unreadable}); not installing PostgreSQL"
+  install -d -m 0755 -o root -g root "${PGDG_KEY_FILE%/*}"
+  write_file "$PGDG_KEY_FILE" 0644 root:root <"$TMP/pgdg.asc" || true
+  echo "deb [signed-by=$PGDG_KEY_FILE] https://apt.postgresql.org/pub/repos/apt $_codename-pgdg main" |
+    write_file "$PGDG_LIST" 0644 root:root || true
+  apt_update
+  ok "the PostgreSQL project's repository (apt.postgresql.org, key $PGDG_KEY_FPR)"
+}
+
+# install_postgres is --install-postgres VERSION: PostgreSQL from the
+# PostgreSQL project's repository, its main cluster running. It refuses on a
+# server with PostgreSQL already, unless that is the one it installed.
+install_postgres() {
+  _v=$INSTALL_PG
+  ensure_base_tools
+  if [ "$(cat "$PG_INSTALLED_FILE" 2>/dev/null)" = "$_v" ] && [ -x "/usr/lib/postgresql/$_v/bin/postgres" ]; then
+    ok "PostgreSQL $_v is installed (by an earlier run of this installer)"
+  else
+    _found=$(existing_postgres)
+    if [ -n "$_found" ]; then
+      die "PostgreSQL is already installed on this server ($_found), so --install-postgres won't install another one. Run the installer without --install-postgres to protect the PostgreSQL that is there."
+    fi
+    step "Installing PostgreSQL $_v from the PostgreSQL project's repository"
+    pgdg_repo
+    _c=$(apt-cache policy "postgresql-$_v" 2>/dev/null | awk '$1 == "Candidate:" { print $2; exit }')
+    [ -n "$_c" ] && [ "$_c" != "(none)" ] ||
+      die "PostgreSQL $_v isn't available for $OS_NAME from the PostgreSQL project's repository; pick another version (13-18)"
+    # The package creates and starts the main cluster: UTF-8, whatever
+    # locale cloud-init runs with.
+    if ! env LANG=C.UTF-8 LC_ALL=C.UTF-8 DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+      "postgresql-$_v" "postgresql-client-$_v" >>"$TMP/apt.log" 2>&1 </dev/null; then
+      tail -n 20 "$TMP/apt.log" >&2
+      die "installing PostgreSQL $_v failed"
+    fi
+    install -d -m 0750 -o root -g postgres "$CONFIG_DIR"
+    printf '%s\n' "$_v" | write_file "$PG_INSTALLED_FILE" 0644 root:root || true
+    ok "PostgreSQL $_c installed"
+  fi
+  PG_OURS=1
+  pg_ensure_cluster "$_v" main
+}
+
+# pg_cluster_status MAJOR NAME prints the cluster's status (online, down...),
+# nothing when it doesn't exist.
+pg_cluster_status() { pg_lsclusters -h 2>/dev/null | awk -v m="$1" -v n="$2" '$1 == m && $2 == n { print $4; exit }'; }
+
+# pg_ensure_cluster MAJOR NAME creates the cluster when it is missing and
+# starts it when it is down.
+pg_ensure_cluster() {
+  have pg_lsclusters || die "pg_lsclusters is missing: the PostgreSQL packages look incomplete"
+  _st=$(pg_cluster_status "$1" "$2")
+  if [ -z "$_st" ]; then
+    step "Creating PostgreSQL $1's $2 cluster"
+    if ! env LANG=C.UTF-8 LC_ALL=C.UTF-8 pg_createcluster "$1" "$2" >"$TMP/pg.log" 2>&1 </dev/null; then
+      tail -n 10 "$TMP/pg.log" | sed 's/^/    /' >&2
+      die "creating PostgreSQL $1's $2 cluster failed"
+    fi
+    _st=down
+  fi
+  case $_st in
+    online*) ;;
+    *)
+      _rc=0
+      if systemd_running; then
+        timeout 180 systemctl start "postgresql@$1-$2" >"$TMP/pg.log" 2>&1 </dev/null || _rc=$?
+      else
+        timeout 180 pg_ctlcluster "$1" "$2" start >"$TMP/pg.log" 2>&1 </dev/null || _rc=$?
+      fi
+      if [ "$_rc" != 0 ]; then
+        tail -n 10 "$TMP/pg.log" | sed 's/^/    /' >&2
+        die "PostgreSQL $1 ($2) doesn't start (see above)"
+      fi
+      ;;
+  esac
+  case $(pg_cluster_status "$1" "$2") in
+    online*) ;;
+    *) die "PostgreSQL $1 ($2) isn't running" ;;
+  esac
+  ok "PostgreSQL $1 ($2) is running on port $(pg_lsclusters -h | awk -v m="$1" -v n="$2" '$1 == m && $2 == n { print $3; exit }')"
+}
+
+# pg_restart_cluster MAJOR NAME restarts it (only for --install-postgres's
+# own cluster, or after a yes on the terminal).
+pg_restart_cluster() {
+  _rc=0
+  if systemd_running; then
+    timeout 180 systemctl restart "postgresql@$1-$2" >"$TMP/pg.log" 2>&1 </dev/null || _rc=$?
+  else
+    timeout 180 pg_ctlcluster "$1" "$2" restart >"$TMP/pg.log" 2>&1 </dev/null || _rc=$?
+  fi
+  if [ "$_rc" != 0 ]; then
+    tail -n 10 "$TMP/pg.log" | sed 's/^/    /' >&2
+    return 1
+  fi
+}
+
+# pg_sql PORT SQL runs a fixed statement as postgres and prints the result.
+pg_sql() {
+  (cd / && runuser -u postgres -- psql -X -A -t -q -v ON_ERROR_STOP=1 -p "$1" -d postgres -c "$2") </dev/null
+}
+
+# pg_target picks the cluster --listen-public works on: --install-postgres's,
+# the one on --protect-port, or the only one.
+pg_target() {
+  have pg_lsclusters || die "--listen-public needs Debian's PostgreSQL cluster tools (pg_lsclusters)"
+  if [ -n "$INSTALL_PG" ]; then
+    _line=$(pg_lsclusters -h 2>/dev/null | awk -v m="$INSTALL_PG" '$1 == m && $2 == "main"')
+  elif [ -n "$PROTECT_PORT" ]; then
+    _line=$(pg_lsclusters -h 2>/dev/null | awk -v p="$PROTECT_PORT" '$3 == p')
+  else
+    case $(pg_lsclusters -h 2>/dev/null | grep -c .) in
+      0) die "--listen-public: no PostgreSQL cluster on this server" ;;
+      1) _line=$(pg_lsclusters -h 2>/dev/null) ;;
+      *) die "--listen-public: this server has several PostgreSQL clusters; pick one with --protect NAME --protect-port PORT" ;;
+    esac
+  fi
+  [ -n "$_line" ] || die "--listen-public: found no such PostgreSQL cluster"
+  LP_MAJOR=$(printf '%s\n' "$_line" | awk '{ print $1 }')
+  LP_NAME=$(printf '%s\n' "$_line" | awk '{ print $2 }')
+  LP_PORT=$(printf '%s\n' "$_line" | awk '{ print $3 }')
+  case $(printf '%s\n' "$_line" | awk '{ print $4 }') in
+    online*) ;;
+    *) die "--listen-public: PostgreSQL $LP_MAJOR ($LP_NAME) isn't running" ;;
+  esac
+}
+
+# pg_tls_cert makes the self-signed certificate, once, on this server.
+pg_tls_cert() {
+  install -d -m 0750 -o root -g postgres "$PG_TLS_DIR"
+  if [ -s "$PG_TLS_DIR/server.key" ] && [ -s "$PG_TLS_DIR/server.crt" ]; then
+    return 0
+  fi
+  _cn=$(hostname -f 2>/dev/null || uname -n)
+  printf '%s\n' "$_cn" | grep -Eq '^[A-Za-z0-9.-]{1,253}$' || _cn=$(uname -n)
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
+    -subj "/CN=$_cn" -addext "subjectAltName=DNS:$_cn" \
+    -keyout "$TMP/pg-tls.key" -out "$TMP/pg-tls.crt" >"$TMP/openssl.log" 2>&1 ||
+    die "could not make a TLS certificate for PostgreSQL: $(tail -n 1 "$TMP/openssl.log")"
+  install -m 0640 -o root -g postgres "$TMP/pg-tls.key" "$PG_TLS_DIR/server.key"
+  install -m 0644 -o root -g root "$TMP/pg-tls.crt" "$PG_TLS_DIR/server.crt"
+  rm -f "$TMP/pg-tls.key"
+  ok "made a self-signed TLS certificate for PostgreSQL ($PG_TLS_DIR)"
+}
+
+# listen_public is --listen-public: PostgreSQL listens on every address,
+# with TLS and SCRAM-SHA-256 passwords for logins from the network (the
+# cloud firewall decides who can connect). Local rules stay as they are.
+listen_public() {
+  pg_target
+  step "Making PostgreSQL $LP_MAJOR reachable from the network (TLS and passwords only)"
+  pg_tls_cert
+  _changed=0
+  for _kv in "listen_addresses=*" "ssl=on" "ssl_cert_file=$PG_TLS_DIR/server.crt" \
+    "ssl_key_file=$PG_TLS_DIR/server.key" "password_encryption=scram-sha-256"; do
+    _k=${_kv%%=*} _val=${_kv#*=}
+    _cur=$(pg_sql "$LP_PORT" "SELECT setting FROM pg_settings WHERE name = '$_k'") ||
+      die "could not read PostgreSQL's settings on port $LP_PORT"
+    [ "$_cur" != "$_val" ] || continue
+    pg_sql "$LP_PORT" "ALTER SYSTEM SET $_k = '$_val'" >/dev/null || die "could not set $_k"
+    _changed=1
+  done
+  _hba=$(pg_sql "$LP_PORT" "SHOW hba_file") || die "could not find PostgreSQL's pg_hba.conf"
+  [ -f "$_hba" ] || die "PostgreSQL's pg_hba.conf ($_hba) isn't a file"
+  if ! grep -qs '^# Rowsafe --listen-public' "$_hba"; then
+    # The file is postgres's, in postgres's directory: written as postgres.
+    # shellcheck disable=SC2016 # $1 expands in the inner shell
+    printf '%s\n' "" "# Rowsafe --listen-public: logins from the network need TLS and a password" \
+      "# (SCRAM-SHA-256); the cloud firewall decides who can connect at all." \
+      "hostssl all             all             0.0.0.0/0               scram-sha-256" \
+      "hostssl all             all             ::/0                    scram-sha-256" |
+      (cd / && runuser -u postgres -- sh -c 'cat >>"$1"' rowsafe-hba "$_hba") || die "could not add the rules to $_hba"
+    _changed=1
+  fi
+  if [ "$_changed" = 1 ]; then
+    pg_sql "$LP_PORT" "SELECT pg_reload_conf()" >/dev/null || die "could not reload PostgreSQL"
+    sleep 1
+  fi
+  _bad=$(pg_sql "$LP_PORT" "SELECT count(*) FROM pg_hba_file_rules WHERE error IS NOT NULL") || _bad=unknown
+  [ "$_bad" = 0 ] || die "PostgreSQL rejects $_hba (see pg_hba_file_rules)"
+  _pending=$(pg_sql "$LP_PORT" "SELECT count(*) FROM pg_settings WHERE pending_restart") || _pending=0
+  if [ "$_pending" != 0 ]; then
+    if [ "$PG_OURS" = 1 ]; then
+      note "restarting the new PostgreSQL so it listens on the network"
+      pg_restart_cluster "$LP_MAJOR" "$LP_NAME" || die "restarting PostgreSQL $LP_MAJOR ($LP_NAME) failed (see above)"
+    elif [ "$TTY" = 1 ] && {
+      tty_say "PostgreSQL needs a quick restart to listen on the network. Open connections are dropped."
+      confirm "Restart PostgreSQL now?" n
+    }; then
+      pg_restart_cluster "$LP_MAJOR" "$LP_NAME" || die "restarting PostgreSQL $LP_MAJOR ($LP_NAME) failed (see above)"
+    else
+      warn "PostgreSQL listens on the network after its next restart: sudo systemctl restart postgresql@$LP_MAJOR-$LP_NAME"
+      return 0
+    fi
+  fi
+  [ "$(pg_sql "$LP_PORT" "SHOW ssl")" = on ] || die "PostgreSQL's TLS didn't turn on (see its log in /var/log/postgresql)"
+  if [ "$_changed" = 0 ] && [ "$_pending" = 0 ]; then
+    ok "PostgreSQL $LP_MAJOR listens on the network (port $LP_PORT, TLS and passwords only); nothing to change"
+  else
+    ok "PostgreSQL $LP_MAJOR listens on the network (port $LP_PORT, TLS and passwords only)"
+  fi
 }
 
 # ---------------------------------------------------------------- release
@@ -6720,7 +7019,8 @@ setup_databases() {
   done 4<"$TMP/clusters"
 }
 
-# protect_unattended is --protect NAME: no questions, never a restart.
+# protect_unattended is --protect NAME: no questions, and no restart, except
+# of the PostgreSQL --install-postgres installed (a new, empty server).
 protect_unattended() {
   step "Turning on backups for $PROTECT_NAME"
   if [ -n "$PROTECT_PORT" ]; then
@@ -6748,7 +7048,7 @@ protect_unattended() {
     0) ;;
     5) return 0 ;;
     10)
-      restart_later
+      restart_new_or_later
       return 0
       ;;
     3) die "another backup tool is set up for this PostgreSQL; run the installer on a terminal to replace it" ;;
@@ -6759,9 +7059,21 @@ protect_unattended() {
   agent_show setup apply --database "$C_ID" || _arc=$?
   case $_arc in
     0) finish_setup 3m ;;
-    10) restart_later ;;
+    10) restart_new_or_later ;;
     *) die "turning on backups for $PROTECT_NAME failed (see above)" ;;
   esac
+}
+
+# restart_new_or_later: backups wait for a restart. The PostgreSQL that
+# --install-postgres installed in this run (or an earlier one) is restarted
+# right away; any other is left for a person to restart.
+restart_new_or_later() {
+  if [ "$PG_OURS" = 1 ] && [ "$C_ENGINE" = postgresql ] && [ "$C_MAJOR" = "$INSTALL_PG" ] && [ "$C_CLUSTER" = main ] &&
+    restart_postgres; then
+    finish_setup 3m
+    return 0
+  fi
+  restart_later
 }
 
 # next_steps says how to turn on backups when the installer didn't.
@@ -7372,6 +7684,9 @@ install_agent() {
   require_root
   detect_os
   detect_arch
+  # Servers Rowsafe creates: PostgreSQL first, then the agent protects it.
+  [ -z "$INSTALL_PG" ] || install_postgres
+  [ "$LISTEN_PUBLIC" = 0 ] || listen_public
   detect_host_engine # mysql
   detect_mongodb_host # mongodb
   detect_clickhouse_host # clickhouse
@@ -7650,6 +7965,15 @@ main() {
         PROTECT_PORT=$2
         shift
         ;;
+      --install-postgres)
+        [ $# -ge 2 ] || die "--install-postgres needs a PostgreSQL version (13-18)"
+        case $2 in
+          13 | 14 | 15 | 16 | 17 | 18) INSTALL_PG=$2 ;;
+          *) die "--install-postgres: give a PostgreSQL major version from 13 to 18 (e.g. --install-postgres 17)" ;;
+        esac
+        shift
+        ;;
+      --listen-public) LISTEN_PUBLIC=1 ;;
       --check-storage) mode=check-storage ;;
       --add-storage) SECOND_COPY=add ;;
       --remove-second-copy) SECOND_COPY=remove ;;
@@ -7703,6 +8027,9 @@ main() {
   fi
   if [ "$mode" != install ] && [ "$mode" != permissions ] && { [ -n "$FILES_PATHS" ] || [ -n "$ALLOW_FILES" ] || [ "$NO_FILES" = 1 ]; }; then
     die "--files, --allow-files and --no-files only go with an install"
+  fi
+  if [ "$mode" != install ] && { [ -n "$INSTALL_PG" ] || [ "$LISTEN_PUBLIC" = 1 ]; }; then
+    die "--install-postgres and --listen-public only go with an install"
   fi
   # A permission that needs another one turned off: off too (permissions
   # section; --permissions does it once it knows the server).
