@@ -145,10 +145,10 @@ func UsersXMLWith(env agent.EngineEnv, port int, clones bool) (string, error) {
       </networks>
       <profile>default</profile>
       <quota>default</quota>
-      <access_management>1</access_management>
       <grants>
         <query>GRANT %[3]s ON *.*</query>
         <query>GRANT %[4]s ON *.* WITH GRANT OPTION</query>
+        <query>GRANT ACCESS MANAGEMENT ON *.*</query>
       </grants>
     </%[1]s>
   </users>
