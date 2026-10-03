@@ -398,6 +398,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 	t := time.NewTicker(a.cfg.HeartbeatPeriod)
 	defer t.Stop()
 	for {
+		built := time.Now()
 		req := protocol.HeartbeatRequest{
 			Hostname: hostname, AgentVersion: Version, Platform: release.Platform(),
 			Archivers: a.archiverStats(ctx), Update: a.updateReport(), Mode: a.cfg.Mode, // container_update.go
@@ -413,6 +414,9 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 			Pooler:           a.poolerStatus(ctx), // pooling.go
 		}
 		req.PoolerDatabases = a.poolerDatabases() // for Standby's pooler_retarget (pooling.go)
+		if d := time.Since(built); d > 10*time.Second {
+			a.log.Warn("putting the heartbeat together took long; the control plane may think this server is offline", "took", d.Round(time.Millisecond))
+		}
 		resp, err := a.client.heartbeat(ctx, req)
 		if isUnauthorized(err) {
 			stop := "sudo systemctl disable --now rowsafe-agent"
