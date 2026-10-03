@@ -204,6 +204,10 @@ func engineDefaultUnit(engine string) string {
 		return "mongod"
 	case protocol.EngineClickHouse:
 		return "clickhouse-server"
+	case protocol.EngineRedis:
+		return "redis-server"
+	case protocol.EngineValkey:
+		return "valkey-server"
 	}
 	return "postgresql"
 }
@@ -220,6 +224,10 @@ func dockerServiceHint(db protocol.DatabaseSpec) string {
 		return "mongo"
 	case protocol.EngineClickHouse:
 		return "clickhouse"
+	case protocol.EngineRedis:
+		return "redis"
+	case protocol.EngineValkey:
+		return "valkey"
 	}
 	return "postgres"
 }

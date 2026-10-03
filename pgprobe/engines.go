@@ -19,7 +19,8 @@ import (
 // says whether it lets this address try to log in at all and whether it
 // offers TLS (nothing is sent back). ClickHouse (its HTTP port): one
 // "SELECT 1" without credentials shows whether the default user lets
-// anyone in. MongoDB: whether the port accepts connections (whether it
+// anyone in. Redis and Valkey: one PING without credentials does the same
+// (protected mode turns strangers away before any password). MongoDB: whether the port accepts connections (whether it
 // asks for a password comes from the agent's report).
 func ProbeEngine(ctx context.Context, engine, addr string, o Options) Result {
 	if o.DialTimeout <= 0 {
@@ -35,6 +36,8 @@ func ProbeEngine(ctx context.Context, engine, addr string, o Options) Result {
 		return probeMySQL(ctx, addr, o)
 	case protocol.EngineClickHouse:
 		return probeClickHouseHTTP(ctx, addr, o)
+	case protocol.EngineRedis, protocol.EngineValkey:
+		return probeRedis(ctx, engine, addr, o)
 	}
 	conn, err := dial(ctx, addr, o)
 	if err != nil {
@@ -131,6 +134,34 @@ func probeClickHouseHTTP(ctx context.Context, addr string, o Options) Result {
 		return Result{Reachable: true, State: protocol.OutsideRefusesLogins, Detail: "ClickHouse answers but doesn't let this address log in."}
 	}
 	return Result{Reachable: true, State: protocol.OutsideAsksPassword, Detail: fmt.Sprintf("ClickHouse answers from the internet (HTTP %d).", resp.StatusCode)}
+}
+
+func probeRedis(ctx context.Context, engine, addr string, o Options) Result {
+	conn, err := dial(ctx, addr, o)
+	if err != nil {
+		return dialFailure(err)
+	}
+	defer conn.Close()
+	name := protocol.EngineDisplayName(engine)
+	_ = conn.SetDeadline(time.Now().Add(o.ReadTimeout))
+	if _, err := conn.Write([]byte("PING\r\n")); err != nil {
+		return Result{Reachable: true, State: protocol.OutsideNotPostgres, Detail: "Something answers on this port, but not like " + name + " does."}
+	}
+	line, err := bufio.NewReader(conn).ReadString('\n')
+	line = strings.TrimSpace(line)
+	switch {
+	case err != nil && line == "":
+		return Result{Reachable: true, State: protocol.OutsideNotPostgres, Detail: "Something answers on this port, but not like " + name + " does."}
+	case line == "+PONG":
+		return Result{Reachable: true, State: protocol.OutsideNoPassword, PlainLogins: true,
+			Detail: name + " answered from the internet without any password: anyone can read and change everything."}
+	case strings.HasPrefix(line, "-NOAUTH"), strings.HasPrefix(line, "-WRONGPASS"):
+		return Result{Reachable: true, State: protocol.OutsideAsksPassword, PlainLogins: true,
+			Detail: name + " answers from the internet and asks for a password: anyone can try to guess one."}
+	case strings.HasPrefix(line, "-DENIED"):
+		return Result{Reachable: true, State: protocol.OutsideRefusesLogins, Detail: name + " answers but its protected mode turns this address away."}
+	}
+	return Result{Reachable: true, State: protocol.OutsideNotPostgres, Detail: "Something answers on this port, but not like " + name + " does."}
 }
 
 func clip(s string) string {

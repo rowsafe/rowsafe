@@ -32,7 +32,7 @@ const Kind = "rowsafe-agent-images"
 // rowsafe-docker-control ever pulls from.
 const Repository = "ghcr.io/rowsafe/agent"
 
-// MaxSize bounds a document (a release has thirteen images today).
+// MaxSize bounds a document (a release has twenty-six images today).
 const MaxSize = 16 << 10
 
 // VariantLabel is the image label naming its variant (agent.Dockerfile,
@@ -51,13 +51,14 @@ type Document struct {
 
 var (
 	versionRE = regexp.MustCompile(`^(\d{1,6})\.(\d{1,6})\.(\d{1,6})$`)
-	// variant is a PostgreSQL major and flavour ("pg17", "pg17-alpine"), or
-	// a ClickHouse release ("clickhouse26.8": YY.M).
-	variant   = `pg[1-9][0-9](?:-alpine)?|clickhouse[2-9][0-9]\.(?:[1-9]|1[0-2])`
+	// variant is a PostgreSQL major and flavour ("pg17", "pg17-alpine"), a
+	// ClickHouse release ("clickhouse26.8": YY.M), or a Redis or Valkey
+	// release ("redis8.2", "redis8.10", "valkey8.1": major.minor).
+	variant   = `pg[1-9][0-9](?:-alpine)?|clickhouse[2-9][0-9]\.(?:[1-9]|1[0-2])|(?:redis|valkey)[6-9]\.(?:0|[1-9][0-9]?)`
 	variantRE = regexp.MustCompile(`^(?:` + variant + `)$`)
 	digestRE  = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	// tagVariantRE finds the variant at the end of a tag: "pg17",
-	// "0.5.0-pg17-alpine", "clickhouse26.8", "0.5.0-clickhouse26.8".
+	// "0.5.0-pg17-alpine", "clickhouse26.8", "0.5.0-clickhouse26.8", "redis8.2".
 	tagVariantRE = regexp.MustCompile(`(?:^|-)(` + variant + `)$`)
 )
 

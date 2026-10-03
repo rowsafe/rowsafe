@@ -47,7 +47,15 @@ var ErrNoLogin = errors.New("Rowsafe has no login for this server yet: run the R
 
 const hostEnv = "ROWSAFE_REDIS_HOST"
 
-func loginsDir(env agent.EngineEnv) string { return filepath.Join(env.StateDir, "logins") }
+// loginsDir is where logins are saved: the engine's state directory (the
+// second copy's pipeline has a "copy2" one below it, with the same logins).
+func loginsDir(env agent.EngineEnv) string {
+	dir := env.StateDir
+	if filepath.Base(dir) == "copy2" {
+		dir = filepath.Dir(dir)
+	}
+	return filepath.Join(dir, "logins")
+}
 
 func loginPath(env agent.EngineEnv, port int) string {
 	return filepath.Join(loginsDir(env), strconv.Itoa(port)+".json")
