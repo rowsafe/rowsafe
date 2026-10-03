@@ -383,7 +383,9 @@ func stuckClients(ctx context.Context, c *conn) []protocol.RedisClient {
 			ConnectedAt: now.Add(-time.Duration(age) * time.Second).UTC().Truncate(time.Minute), IdleSeconds: idle,
 			Command: strings.ToUpper(f["cmd"]), Blocked: blocked, OutputBufferBytes: omem, Reason: reason})
 	}
-	slices.SortFunc(out, func(a, b protocol.RedisClient) int { return cmpInt(b.OutputBufferBytes+b.IdleSeconds, a.OutputBufferBytes+a.IdleSeconds) })
+	slices.SortFunc(out, func(a, b protocol.RedisClient) int {
+		return cmpInt(b.OutputBufferBytes+b.IdleSeconds, a.OutputBufferBytes+a.IdleSeconds)
+	})
 	if len(out) > 20 {
 		out = out[:20]
 	}

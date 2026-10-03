@@ -44,7 +44,9 @@ func compareMaxKeys() int64 {
 	return defaultCompareMaxKeys
 }
 
-func copyRoot(env agent.EngineEnv, engine string) string { return filepath.Join(env.Config.RewindDir, engine) }
+func copyRoot(env agent.EngineEnv, engine string) string {
+	return filepath.Join(env.Config.RewindDir, engine)
+}
 
 // copyRecord is a copy the engine keeps (<state>/copies.json).
 type copyRecord struct {
