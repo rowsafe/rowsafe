@@ -3302,11 +3302,11 @@ cloud_container() {
   # PostgreSQL project's signing key from www.postgresql.org.
   cat /etc/ssl/certs/ca-certificates.crt "$W/tls.crt" >"$W/ca-bundle.crt"
   export CURL_CA_BUNDLE=$W/ca-bundle.crt
-  v=${TEST_PG_VERSION:-17}
+  pgv=${TEST_PG_VERSION:-17}
 
   expect_fail "--install-postgres needs a version" "needs a PostgreSQL version" "$INSTALLER" --install-postgres
   expect_fail "--install-postgres 12 refused" "from 13 to 18" "$INSTALLER" --install-postgres 12
-  expect_fail "--install-postgres only with an install" "only go with an install" "$INSTALLER" --install-postgres "$v" --uninstall
+  expect_fail "--install-postgres only with an install" "only go with an install" "$INSTALLER" --install-postgres "$pgv" --uninstall
   expect_fail "--listen-public only with an install" "only go with an install" "$INSTALLER" --listen-public --check-storage
   [ ! -e /etc/rowsafe ] || fail "a refused option wrote /etc/rowsafe"
 
@@ -3314,7 +3314,7 @@ cloud_container() {
   mkdir -p /usr/lib/postgresql/15/bin
   printf '#!/bin/sh\n' >/usr/lib/postgresql/15/bin/postgres && chmod 755 /usr/lib/postgresql/15/bin/postgres
   expect_fail "PostgreSQL already installed: refused" "PostgreSQL is already installed on this server (PostgreSQL 15" \
-    "$INSTALLER" rse_secrettoken123 --no-prompt --install-postgres "$v"
+    "$INSTALLER" rse_secrettoken123 --no-prompt --install-postgres "$pgv"
   [ ! -e /etc/apt/sources.list.d/pgdg.list ] || fail "the repository was added despite the refusal"
   rm -rf /usr/lib/postgresql
 
@@ -3331,23 +3331,23 @@ cloud_container() {
   runuser -u postgres -- "$W/fa/rowsafe-agent" run >/dev/null 2>&1 &
   agent_pid=$!
   sleep 1
-  shop="5432\t/var/run/postgresql\t$v\tmain\t/var/lib/postgresql/$v/main\t8192\tpostgres\tno\t-\tpostgres\t7.5 MiB\tpostgresql@$v-main.service\t-"
+  shop="5432\t/var/run/postgresql\t$pgv\tmain\t/var/lib/postgresql/$pgv/main\t8192\tpostgres\tno\t-\tpostgres\t7.5 MiB\tpostgresql@$pgv-main.service\t-"
   status='db_fake\tshop\tactive\trunning\thttps://app.rowsafe.test/databases/db_fake'
   scenario "discover_out=$shop" "plan_out=Restart: PostgreSQL needs one quick restart." apply_rc=10 \
     "wait_out=✓ shop is protected. The first full backup is running." "status_out=$status"
 
   cloud_init() {
     sh -c 'w=$1; shift; ROWSAFE_RELEASES_URL=https://localhost:8443/agent ROWSAFE_RESTIC_URL=https://localhost:8443/restic sh -s -- "$@" <"$w/install.sh"' \
-      cloud-init "$W" rse_secrettoken123 --no-prompt --install-postgres "$v" --listen-public --storage rowsafe --protect shop
+      cloud-init "$W" rse_secrettoken123 --no-prompt --install-postgres "$pgv" --listen-public --storage rowsafe --protect shop
   }
   expect_ok "one run, as cloud-init: PostgreSQL, network, Rowsafe Storage, protected" cloud_init
   [ -z "${TEST_SHOW:-}" ] || cat "$W/out"
   grep -q "the PostgreSQL project's repository (apt.postgresql.org, key B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8)" "$W/out" || fail "$name: no word about the repository"
   grep -qx "deb \[signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc\] https://apt.postgresql.org/pub/repos/apt $(. /etc/os-release && echo "$VERSION_CODENAME")-pgdg main" \
     /etc/apt/sources.list.d/pgdg.list || fail "$name: pgdg.list"
-  dpkg-query -W -f '${Version}\n' "postgresql-$v" | grep -q pgdg || fail "$name: postgresql-$v isn't the PostgreSQL project's package"
-  [ "$(cat /etc/rowsafe/installed-postgresql)" = "$v" ] || fail "$name: no record of the installed major"
-  pg_lsclusters -h | awk -v v="$v" '$1 == v && $2 == "main" && $4 ~ /^online/ { f = 1 } END { exit !f }' || fail "$name: the cluster isn't running"
+  dpkg-query -W -f '${Version}\n' "postgresql-$pgv" | grep -q pgdg || fail "$name: postgresql-$pgv isn't the PostgreSQL project's package"
+  [ "$(cat /etc/rowsafe/installed-postgresql)" = "$pgv" ] || fail "$name: no record of the installed major"
+  pg_lsclusters -h | awk -v m="$pgv" '$1 == m && $2 == "main" && $4 ~ /^online/ { f = 1 } END { exit !f }' || fail "$name: the cluster isn't running"
   q() { runuser -u postgres -- psql -X -A -t -q -d postgres -c "$1"; }
   [ "$(q 'SHOW listen_addresses')" = '*' ] || fail "$name: listen_addresses"
   [ "$(q 'SHOW ssl')" = on ] || fail "$name: ssl"
@@ -3367,7 +3367,7 @@ cloud_container() {
   [ "${#gen}" = 40 ] || fail "$name: no generated passphrase"
   ! grep -qF "$gen" "$W/out" || fail "$name: the passphrase was printed"
   ! grep -q rse_secrettoken123 "$W/out" || fail "$name: the token was printed"
-  pass "PostgreSQL $v from apt.postgresql.org, listening with TLS and SCRAM, protected, passphrase kept on the server"
+  pass "PostgreSQL $pgv from apt.postgresql.org, listening with TLS and SCRAM, protected, passphrase kept on the server"
 
   # From the network: TLS and a password, nothing else.
   ip=$(hostname -i | awk '{ print $1 }')
@@ -3384,10 +3384,10 @@ cloud_container() {
 
   # Again: nothing changes, nothing restarts.
   started=$(q 'SELECT pg_postmaster_start_time()')
-  scenario "discover_out=5432\t/var/run/postgresql\t$v\tmain\t/var/lib/postgresql/$v/main\t8192\tshop\tyes\tactive\tpostgres\t7.5 MiB\tpostgresql@$v-main.service\tdb_fake" \
+  scenario "discover_out=5432\t/var/run/postgresql\t$pgv\tmain\t/var/lib/postgresql/$pgv/main\t8192\tshop\tyes\tactive\tpostgres\t7.5 MiB\tpostgresql@$pgv-main.service\tdb_fake" \
     plan_rc=5 "plan_out=shop is already protected." "status_out=$status"
   expect_ok "re-run changes nothing" cloud_init
-  grep -q "PostgreSQL $v is installed (by an earlier run of this installer)" "$W/out" || fail "$name: not recognized as its own"
+  grep -q "PostgreSQL $pgv is installed (by an earlier run of this installer)" "$W/out" || fail "$name: not recognized as its own"
   grep -q "nothing to change" "$W/out" || fail "$name: --listen-public changed something"
   [ "$(q 'SELECT pg_postmaster_start_time()')" = "$started" ] || fail "$name: PostgreSQL was restarted"
   [ "$(grep -c '^hostssl' "$hba")" = 2 ] || fail "$name: pg_hba.conf rules added twice"
@@ -3396,9 +3396,9 @@ cloud_container() {
   pass "re-run: nothing changed, nothing restarted"
 
   # Another major, or the same one not installed by Rowsafe: refused.
-  expect_fail "another major refused" "already installed on this server (PostgreSQL $v" "$INSTALLER" --no-prompt --install-postgres 16 --no-setup
+  expect_fail "another major refused" "already installed on this server (PostgreSQL $pgv" "$INSTALLER" --no-prompt --install-postgres 16 --no-setup
   mv /etc/rowsafe/installed-postgresql "$W/installed-postgresql"
-  expect_fail "PostgreSQL not installed by Rowsafe refused" "already installed on this server" "$INSTALLER" --no-prompt --install-postgres "$v" --no-setup
+  expect_fail "PostgreSQL not installed by Rowsafe refused" "already installed on this server" "$INSTALLER" --no-prompt --install-postgres "$pgv" --no-setup
   mv "$W/installed-postgresql" /etc/rowsafe/installed-postgresql
   pass "refused on a server with PostgreSQL that --install-postgres didn't install"
 
