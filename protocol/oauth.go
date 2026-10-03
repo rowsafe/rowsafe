@@ -9,20 +9,26 @@ import "time"
 // bound to the MCP endpoint. They never get more than the scopes below.
 
 // OAuth scopes. AI apps can read (always) and, when the person allows it,
-// save Marks. Nothing else, ever: no restores, restarts, fixes or settings.
+// save Marks and act. Acting never changes production by itself: changes to
+// production (restores, restarts, fixes, settings, ...) are requests a person
+// approves in the dashboard (approval.go).
 const (
 	// ScopeRead reads databases' health, backups, Proof runs, Marks and
 	// recommendations: the read-only MCP tools.
 	ScopeRead = "rowsafe:read"
 	// ScopeMarks also allows create_restore_point (save a Mark).
 	ScopeMarks = "rowsafe:marks"
+	// ScopeAct also allows what doesn't change production (backups, Proof
+	// runs, checks, safe copies, migration previews, acknowledging alerts)
+	// and asking a person to approve a change to production.
+	ScopeAct = "rowsafe:act"
 	// ScopeOfflineAccess is accepted (and ignored: refresh tokens are always
 	// issued) because some clients ask for it.
 	ScopeOfflineAccess = "offline_access"
 )
 
 // OAuthScopes are the scopes an AI app can be granted, in display order.
-var OAuthScopes = []string{ScopeRead, ScopeMarks}
+var OAuthScopes = []string{ScopeRead, ScopeMarks, ScopeAct}
 
 // Token prefixes. Access tokens only work on /mcp.
 const (
