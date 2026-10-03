@@ -219,6 +219,14 @@ func (s *pitState) apply(e pitEvent) {
 			parts = map[string]*pitPart{}
 			s.Parts[e.Table] = parts
 		}
+		for name, cur := range parts {
+			if name != p.Name && cur.info().contains(pi) {
+				// Already replaced (recorded in the same second as the
+				// part that covers it): never active again.
+				s.keepMerged(e.Table, p, e.At)
+				return
+			}
+		}
 		for name, old := range parts {
 			if name != p.Name && pi.contains(old.info()) {
 				delete(parts, name)

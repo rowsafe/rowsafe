@@ -63,6 +63,11 @@ type shipLocal struct {
 	LastShippedAt *time.Time `json:"last_shipped_at,omitempty"`
 	LastFailedAt  *time.Time `json:"last_failed_at,omitempty"`
 	LastError     string     `json:"last_error,omitempty"`
+	// PollAt is when the last round read the server; LastLog is the To
+	// of the last log written (the next one starts there).
+	PollAt  time.Time      `json:"poll_at"`
+	LastLog time.Time      `json:"last_log"`
+	Pending []pendingEvent `json:"pending,omitempty"`
 	// Problem is why the copier can't work (the data folder can't be
 	// read...), in plain words.
 	Problem string `json:"problem,omitempty"`
@@ -178,6 +183,12 @@ func (s *shipper) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-s.wake:
+			// At most a round a second, however often flush asks.
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Second):
+			}
 		case <-time.After(wait):
 		}
 	}
@@ -303,9 +314,14 @@ func (s *shipper) shipRound(ctx context.Context, c *client, r *repo, st *shipLoc
 		}
 	}
 	st.Problem = ""
+	if st.PollAt.IsZero() {
+		st.PollAt = st.To
+	}
+	if st.LastLog.IsZero() {
+		st.LastLog = st.To
+	}
 
-	since := st.To.Add(-10 * time.Minute).Unix()
-	plog, havePartLog, err := partLog(ctx, c, since)
+	plog, havePartLog, err := partLog(ctx, c, st.PollAt.Add(-10*time.Minute).Unix())
 	if err != nil {
 		return fmt.Errorf("reading part_log: %w", err)
 	}
@@ -313,7 +329,7 @@ func (s *shipper) shipRound(ctx context.Context, c *client, r *repo, st *shipLoc
 	for _, p := range plog {
 		created[p.Table+"/"+p.Name] = p
 	}
-	ddl := ddlTimes(ctx, c, st.To.Add(-time.Minute).Unix())
+	ddl := ddlTimes(ctx, c, st.PollAt.Add(-10*time.Minute).Unix())
 
 	tracked := map[string]liveTable{}
 	for _, t := range tables {
@@ -327,51 +343,31 @@ func (s *shipper) shipRound(ctx context.Context, c *client, r *repo, st *shipLoc
 			nonLocal[p.Table] = true
 		}
 	}
-
-	// The round covers changes up to cutoff: a part whose line isn't in
-	// part_log yet (and isn't old enough to do without) waits for the next
-	// round, and so does everything after it.
-	cutoff := now
-	type cand struct {
-		p  livePart
-		at time.Time
-	}
-	var cands []cand
 	onDisk := map[string]bool{}
 	for _, p := range parts {
 		onDisk[p.Table+"/"+p.Name] = true
-		if _, ok := tracked[p.Table]; !ok || nonLocal[p.Table] || st.Seen[p.Table][p.Name] {
-			continue
-		}
-		mt := time.Unix(p.ModTime, 0).UTC()
-		if row, ok := created[p.Table+"/"+p.Name]; ok {
-			cands = append(cands, cand{p, time.UnixMicro(row.At).UTC()})
-			continue
-		}
-		if havePartLog && now.Sub(mt) < partLogWait {
-			if t := mt.Add(-time.Microsecond); t.Before(cutoff) {
-				cutoff = t
-			}
-			continue
-		}
-		cands = append(cands, cand{p, mt})
 	}
-	if !cutoff.After(st.To) {
-		return nil // nothing can be recorded yet
+	// Changes are noticed at most this early: after the last round.
+	floor := st.PollAt.Add(time.Microsecond)
+	atLeast := func(t time.Time) time.Time {
+		if t.Before(floor) {
+			return floor
+		}
+		return t
 	}
-	var evs []pitEvent
+	pend := func(ev pitEvent, key string, resolved bool) {
+		st.Pending = append(st.Pending, pendingEvent{Ev: ev, Key: key, Resolved: resolved, Noticed: now})
+	}
 
-	// Definitions: databases, then tables.
-	newDBs := map[string]pitDB{}
+	// 1. Definitions, noticed now; their time comes from query_log.
 	for _, d := range dbs {
-		def := pitDB{UUID: d.UUID, Name: d.Name, Engine: d.Engine, Create: d.create(), At: cutoff}
-		newDBs[d.UUID] = def
+		def := pitDB{UUID: d.UUID, Name: d.Name, Engine: d.Engine, Create: d.create(), At: floor}
 		if old, ok := st.DBs[d.UUID]; !ok || old.Name != def.Name || old.Create != def.Create {
-			def.At = st.To.Add(time.Microsecond)
-			evs = append(evs, pitEvent{At: def.At, Kind: evDB, DB: &def})
+			pend(pitEvent{At: floor, Kind: evDB, DB: &def}, "", true)
+			st.DBs[d.UUID] = def
 		}
 	}
-	newTables := map[string]pitTable{}
+	live := tablesByUUID(tables)
 	for _, t := range tables {
 		if t.UUID == "" || t.UUID == zeroUUID {
 			continue
@@ -382,138 +378,216 @@ func (s *shipper) shipRound(ctx context.Context, c *client, r *repo, st *shipLoc
 			def.Dependents = append(def.Dependents, t.DepDBs[i]+"."+t.DepTables[i])
 		}
 		old, ok := st.Tables[t.UUID]
-		def.At = old.At
-		if !ok || old.DB != def.DB || old.Name != def.Name || old.Create != def.Create || old.Parts != def.Parts {
-			at := ddlTime(ddl, t.DB+"."+t.Name, t.MetaTime, st.To, cutoff)
-			if at.After(cutoff) {
-				// Changed after the cutoff: next round.
-				if ok {
-					newTables[t.UUID] = old
-				}
-				continue
-			}
-			def.At = at
-			d := def
-			evs = append(evs, pitEvent{At: at, Kind: evTable, Table: t.UUID, Def: &d})
+		if ok && old.DB == def.DB && old.Name == def.Name && old.Create == def.Create && old.Parts == def.Parts {
+			continue
 		}
-		newTables[t.UUID] = def
+		at, resolved := floor, false
+		if dt, ok := lastIn(ddl[t.DB+"."+t.Name], st.PollAt, now); ok {
+			at, resolved = dt, true
+		} else if t.MetaTime > 0 {
+			at = atLeast(time.Unix(t.MetaTime, 0).UTC())
+		}
+		def.At = at
+		d := def
+		pend(pitEvent{At: at, Kind: evTable, Table: t.UUID, Def: &d}, "ddl:"+t.DB+"."+t.Name, resolved)
+		st.Pending[len(st.Pending)-1].After = st.PollAt
+		st.Tables[t.UUID] = def
 	}
 	for uuid, old := range st.Tables {
-		if _, ok := newTables[uuid]; ok {
+		if _, ok := live[uuid]; ok {
 			continue
 		}
-		if _, still := tablesByUUID(tables)[uuid]; still {
-			continue
+		at, resolved := floor, false
+		if dt, ok := lastIn(ddl[old.DB+"."+old.Name], st.PollAt, now); ok {
+			at, resolved = dt, true
 		}
-		at := ddlTime(ddl, old.DB+"."+old.Name, 0, st.To, cutoff)
-		if at.After(cutoff) {
-			at = cutoff
-		}
-		evs = append(evs, pitEvent{At: at, Kind: evDrop, Table: uuid})
+		pend(pitEvent{At: at, Kind: evDrop, Table: uuid}, "ddl:"+old.DB+"."+old.Name, resolved)
+		st.Pending[len(st.Pending)-1].After = st.PollAt
+		delete(st.Tables, uuid)
+	}
+	liveDBs := map[string]bool{}
+	for _, d := range dbs {
+		liveDBs[d.UUID] = true
 	}
 	for uuid := range st.DBs {
-		if _, ok := newDBs[uuid]; !ok {
-			evs = append(evs, pitEvent{At: cutoff, Kind: evDropDB, UUID: uuid})
+		if !liveDBs[uuid] {
+			pend(pitEvent{At: floor, Kind: evDropDB, UUID: uuid}, "", true)
+			delete(st.DBs, uuid)
 		}
 	}
 
-	// Parts created since the last round that are gone already (the agent
-	// was stopped, or behind, for longer than ClickHouse keeps them).
+	// 2. New parts: copied now (they are on disk now, maybe not for long);
+	// their exact time comes from part_log.
+	var news []livePart
+	for _, p := range parts {
+		if isTracked(tracked, nonLocal, p.Table) && !st.Seen[p.Table][p.Name] {
+			news = append(news, p)
+		}
+	}
+	slices.SortFunc(news, func(a, b livePart) int { return strings.Compare(a.Name, b.Name) })
+	cw := &chunkWriter{r: r}
+	defer cw.abort()
+	copied := 0
+	for _, lp := range news {
+		p := &pitPart{Name: lp.Name, Partition: lp.Partition, Rows: lp.Rows, At: atLeast(time.Unix(lp.ModTime, 0).UTC())}
+		files, err := s.copyPart(ctx, cw, st, lp.Table, localPath(dataPath, lp.Path), lp.Name)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if _, statErr := os.Stat(localPath(dataPath, lp.Path)); statErr == nil {
+				return fmt.Errorf("copying part %s: %w", lp.Name, err)
+			}
+			files = nil // removed meanwhile: its sources stand in
+		}
+		p.Files = files
+		pend(pitEvent{At: p.At, Kind: evPart, Table: lp.Table, Part: p}, lp.Table+"/"+lp.Name, false)
+		if st.Seen[lp.Table] == nil {
+			st.Seen[lp.Table] = map[string]bool{}
+		}
+		st.Seen[lp.Table][lp.Name] = true
+		copied++
+	}
+	if err := cw.close(ctx); err != nil {
+		return fmt.Errorf("storing copied parts: %w", err)
+	}
+	// Parts created since the last round and gone already (the agent was
+	// stopped, or behind, for longer than ClickHouse keeps them).
 	for _, row := range plog {
 		at := time.UnixMicro(row.At).UTC()
-		if !at.After(st.To) || at.After(cutoff) || onDisk[row.Table+"/"+row.Name] || st.Seen[row.Table][row.Name] {
+		if !at.After(st.PollAt) || onDisk[row.Table+"/"+row.Name] || st.Seen[row.Table][row.Name] {
 			continue
 		}
 		if _, ok := tracked[row.Table]; !ok {
 			continue
 		}
 		p := &pitPart{Name: row.Name, Rows: row.Rows, At: at, Sources: row.Sources}
-		evs = append(evs, pitEvent{At: at, Kind: evPart, Table: row.Table, Part: p})
+		pend(pitEvent{At: at, Kind: evPart, Table: row.Table, Part: p}, "", true)
+		if st.Seen[row.Table] == nil {
+			st.Seen[row.Table] = map[string]bool{}
+		}
+		st.Seen[row.Table][row.Name] = true
 	}
-	if !havePartLog && now.Sub(st.To) > 7*time.Minute {
-		g := &pitGap{From: st.To, To: cutoff, Why: "the agent wasn't copying ClickHouse's changes for longer than ClickHouse keeps replaced parts"}
-		evs = append(evs, pitEvent{At: st.To.Add(time.Microsecond), Kind: evGap, Gap: g})
+	if !havePartLog && now.Sub(st.PollAt) > 7*time.Minute {
+		g := &pitGap{From: st.PollAt, To: now, Why: "the agent wasn't copying ClickHouse's changes for longer than ClickHouse keeps replaced parts"}
+		pend(pitEvent{At: floor, Kind: evGap, Gap: g}, "", true)
 	}
 
-	// Copy the new parts.
-	slices.SortFunc(cands, func(a, b cand) int { return a.at.Compare(b.at) })
-	cw := &chunkWriter{r: r}
-	defer cw.abort()
-	shipped := 0
-	newSeen := map[string]map[string]bool{}
-	mark := func(table, name string) {
-		if newSeen[table] == nil {
-			newSeen[table] = map[string]bool{}
-		}
-		newSeen[table][name] = true
-	}
-	for _, cd := range cands {
-		if cd.at.After(cutoff) {
+	// 3. Exact times for what is waiting.
+	for i := range st.Pending {
+		pe := &st.Pending[i]
+		if pe.Resolved {
 			continue
 		}
-		if !cd.at.After(st.To) {
-			cd.at = st.To.Add(time.Microsecond) // seen late (no part_log line): recorded now
-		}
-		p := &pitPart{Name: cd.p.Name, Partition: cd.p.Partition, Rows: cd.p.Rows, At: cd.at}
-		if row, ok := created[cd.p.Table+"/"+cd.p.Name]; ok {
-			p.Sources = row.Sources
-		}
-		files, err := s.copyPart(ctx, cw, st, cd.p.Table, localPath(dataPath, cd.p.Path), cd.p.Name)
-		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
+		switch {
+		case pe.Ev.Kind == evPart:
+			if row, ok := created[pe.Key]; ok {
+				pe.Ev.At, pe.Resolved = time.UnixMicro(row.At).UTC(), true
+				pe.Ev.Part.At = pe.Ev.At
+				if len(pe.Ev.Part.Sources) == 0 {
+					pe.Ev.Part.Sources = row.Sources
+				}
 			}
-			if _, statErr := os.Stat(localPath(dataPath, cd.p.Path)); statErr != nil {
-				// ClickHouse removed it meanwhile: its sources stand in.
-				files = nil
-			} else {
-				return fmt.Errorf("copying part %s: %w", cd.p.Name, err)
+		case strings.HasPrefix(pe.Key, "ddl:"):
+			if dt, ok := lastIn(ddl[strings.TrimPrefix(pe.Key, "ddl:")], pe.After, pe.Noticed); ok {
+				pe.Ev.At, pe.Resolved = dt, true
 			}
 		}
-		p.Files = files
-		evs = append(evs, pitEvent{At: cd.at, Kind: evPart, Table: cd.p.Table, Part: p})
-		mark(cd.p.Table, cd.p.Name)
-		shipped++
-	}
-	if err := cw.close(ctx); err != nil {
-		return fmt.Errorf("storing copied parts: %w", err)
+		if !pe.Resolved && (now.Sub(pe.Noticed) > partLogWait || (!havePartLog && pe.Ev.Kind == evPart)) {
+			pe.Resolved = true // the time it was noticed (to the second)
+		}
+		if pe.Ev.Def != nil {
+			pe.Ev.Def.At = pe.Ev.At
+		}
 	}
 
-	// Write the log, then the state.
+	// 4. Record everything up to the first change whose time isn't known.
+	cutoff := now
+	for _, pe := range st.Pending {
+		if !pe.Resolved {
+			if t := pe.Ev.At.Truncate(time.Second).Add(-time.Microsecond); t.Before(cutoff) {
+				cutoff = t
+			}
+		}
+	}
+	if !cutoff.After(st.LastLog) {
+		cutoff = st.LastLog
+	}
+	var evs []pitEvent
+	var keep []pendingEvent
+	for _, pe := range st.Pending {
+		if pe.Resolved && !pe.Ev.At.After(cutoff) {
+			if !pe.Ev.At.After(st.LastLog) {
+				pe.Ev.At = st.LastLog.Add(time.Microsecond)
+				if pe.Ev.Part != nil {
+					pe.Ev.Part.At = pe.Ev.At
+				}
+			}
+			evs = append(evs, pe.Ev)
+			continue
+		}
+		keep = append(keep, pe)
+	}
 	if len(evs) > 0 {
 		sortEvents(evs)
-		l := pitLog{Record: st.Record, From: st.To, To: cutoff, Events: evs}
+		l := pitLog{Record: st.Record, From: st.LastLog, To: cutoff, Events: evs}
 		if err := r.putJSON(ctx, logKey(cutoff, randomID("")), l); err != nil {
 			return fmt.Errorf("storing the record of changes: %w", err)
 		}
+		st.LastLog = cutoff
 	}
-	// Seen: what is on disk now and recorded (parts that left the disk are
-	// forgotten; their names never come back).
-	seen := map[string]map[string]bool{}
-	for _, p := range parts {
-		if st.Seen[p.Table][p.Name] || newSeen[p.Table][p.Name] || !isTracked(tracked, nonLocal, p.Table) {
-			if seen[p.Table] == nil {
-				seen[p.Table] = map[string]bool{}
+	st.Pending = keep
+
+	// Seen: what is on disk now (parts that left the disk are forgotten;
+	// their names never come back).
+	for table, names := range st.Seen {
+		for name := range names {
+			if !onDisk[table+"/"+name] {
+				delete(names, name)
 			}
-			seen[p.Table][p.Name] = true
+		}
+		if len(names) == 0 {
+			delete(st.Seen, table)
+		}
+	}
+	for _, p := range parts {
+		if !isTracked(tracked, nonLocal, p.Table) {
+			if st.Seen[p.Table] == nil {
+				st.Seen[p.Table] = map[string]bool{}
+			}
+			st.Seen[p.Table][p.Name] = true
 		}
 	}
 	for k, f := range st.Files {
-		table, name, _ := strings.Cut(f.Part, "/")
-		if !onDisk[table+"/"+name] && !newSeen[table][name] {
+		if !onDisk[f.Part] {
 			delete(st.Files, k)
 		}
 	}
-	st.Seen, st.Tables, st.DBs, st.To = seen, newTables, newDBs, cutoff
-	if shipped > 0 {
+	st.PollAt = now
+	if cutoff.After(st.To) {
+		st.To = cutoff
+	}
+	if copied > 0 {
 		t := time.Now().UTC()
-		st.Shipped += int64(shipped)
+		st.Shipped += int64(copied)
 		st.LastShippedAt = &t
 	}
-	if err := r.putJSON(ctx, pitrHeadKey, pitHead{Record: st.Record, Started: st.Started, To: cutoff}); err != nil {
+	if err := r.putJSON(ctx, pitrHeadKey, pitHead{Record: st.Record, Started: st.Started, To: st.To}); err != nil {
 		return fmt.Errorf("storing the record's head: %w", err)
 	}
 	return s.save(*st)
+}
+
+// pendingEvent is a change noticed but not recorded yet: its exact time
+// isn't known yet (part_log and query_log are written every few seconds),
+// or a change before it is waiting.
+type pendingEvent struct {
+	Ev       pitEvent  `json:"ev"`
+	Key      string    `json:"key,omitempty"` // "uuid/part" or "ddl:db.table"
+	Resolved bool      `json:"resolved,omitempty"`
+	Noticed  time.Time `json:"noticed"`
+	// After: a definition changed after this (the round before).
+	After time.Time `json:"after,omitzero"`
 }
 
 const zeroUUID = "00000000-0000-0000-0000-000000000000"
@@ -560,7 +634,7 @@ func ddlTime(ddl map[string]int64, table string, metaTime int64, from, cutoff ti
 // backup; changes are recorded from here on.
 func (s *shipper) startRecord(ctx context.Context, r *repo, st *shipLocal, now time.Time, tables []liveTable, dbs []liveDB, parts []livePart) error {
 	st.Record = randomID("")
-	st.Started, st.To = now, now
+	st.Started, st.To, st.PollAt, st.LastLog, st.Pending = now, now, now, now, nil
 	st.Seen = map[string]map[string]bool{}
 	for _, p := range parts {
 		if st.Seen[p.Table] == nil {
@@ -645,16 +719,21 @@ type chunkWriter struct {
 func (w *chunkWriter) open(ctx context.Context) error {
 	w.key = chunkKey(time.Now(), randomID(""))
 	pr, pw := io.Pipe()
-	seal, err := objstore.Seal(pw, w.r.pass)
-	if err != nil {
-		return err
-	}
-	w.pw, w.seal, w.done = pw, seal, make(chan error, 1)
+	w.pw, w.done = pw, make(chan error, 1)
+	// The upload reads first: Seal writes its header right away.
 	go func() {
 		_, err := w.r.st.Put(ctx, w.key, pr)
 		pr.CloseWithError(err)
 		w.done <- err
 	}()
+	seal, err := objstore.Seal(pw, w.r.pass)
+	if err != nil {
+		pw.CloseWithError(err)
+		<-w.done
+		w.pw = nil
+		return err
+	}
+	w.seal = seal
 	return nil
 }
 

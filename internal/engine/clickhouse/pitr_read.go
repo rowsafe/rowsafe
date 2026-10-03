@@ -90,26 +90,39 @@ func liveTables(ctx context.Context, c *client) ([]liveTable, error) {
 		nil, "show_table_uuid_in_table_create_query_if_not_nil", "1")
 }
 
-// ddlTimes reads when tables were last created, changed or dropped since
-// (unix seconds), from query_log: "db.table" -> unix microseconds.
-func ddlTimes(ctx context.Context, c *client, since int64) map[string]int64 {
+// ddlTimes reads when tables were created, changed or dropped since (unix
+// seconds), from query_log: "db.table" -> unix microseconds, oldest first.
+func ddlTimes(ctx context.Context, c *client, since int64) map[string][]int64 {
 	type row struct {
 		Table string `json:"tbl"`
 		At    int64  `json:"at"`
 	}
-	rows, err := query[row](ctx, c, `SELECT arrayJoin(tables) AS tbl, toInt64(max(toUnixTimestamp64Micro(event_time_microseconds))) AS at
+	rows, err := query[row](ctx, c, `SELECT arrayJoin(tables) AS tbl, toInt64(toUnixTimestamp64Micro(event_time_microseconds)) AS at
 		FROM system.query_log
 		WHERE event_date >= toDate(toDateTime({since:Int64})) AND event_time >= toDateTime({since:Int64}) AND type = 'QueryFinish'
 		  AND query_kind IN ('Create', 'Alter', 'Drop', 'Rename')
-		GROUP BY tbl`, map[string]string{"since": fmt.Sprint(since)})
-	out := map[string]int64{}
+		ORDER BY at`, map[string]string{"since": fmt.Sprint(since)})
+	out := map[string][]int64{}
 	if err != nil {
 		return out
 	}
 	for _, r := range rows {
-		out[r.Table] = r.At
+		out[r.Table] = append(out[r.Table], r.At)
 	}
 	return out
+}
+
+// lastIn is the latest of times in (after, upTo]; ok false when none is.
+func lastIn(times []int64, after, upTo time.Time) (time.Time, bool) {
+	var best time.Time
+	ok := false
+	for _, us := range times {
+		t := time.UnixMicro(us).UTC()
+		if t.After(after) && !t.After(upTo) {
+			best, ok = t, true
+		}
+	}
+	return best, ok
 }
 
 // serverNow is the server's clock, to the microsecond.
