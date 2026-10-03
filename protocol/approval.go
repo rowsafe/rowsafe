@@ -156,7 +156,7 @@ var ApprovalActions = []ApprovalAction{
 
 	// Databases and users on the server.
 	{Name: "manage_databases_users", Group: "data", Title: "Create or remove databases and users", Method: "POST", Path: "/v1/databases/{ref}/dbadmin", Risk: RiskDisruptive, Body: DBAdminParams{},
-		Description: "Creates or removes a database or user, or changes a user's access, on the database server (list_databases_on_server shows them). Removing a database saves a Mark first. New users get their password from the person, in the dashboard."},
+		Description: "Creates a database for an existing owner, removes a database or user, or turns an extension on or off, on the database server (list_databases_on_server shows them). Removing a database saves a Mark first. Anything that makes a password (a new user, a new owner, a password reset) is for people only, in the dashboard: the password is shown only to them."},
 	{Name: "masking_rules", Group: "copies", Title: "Change masking rules", Method: "PUT", Path: "/v1/databases/{ref}/masking", Risk: RiskNormal, Body: PutMaskingRequest{},
 		Description: "Changes which columns safe copies mask and how."},
 	{Name: "delete_database", Group: "data", Title: "Stop protecting the database", Method: "DELETE", Path: "/v1/databases/{ref}", Risk: RiskDestructive,

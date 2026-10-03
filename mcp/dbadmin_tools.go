@@ -13,7 +13,7 @@ import (
 // approved by them (request_change manage_databases_users); passwords are
 // always set by people.
 
-const dbadminGuidance = "To create or remove a database or user, reset a password or turn an extension on or off, tell the user to do it in the Rowsafe dashboard (Databases & users tab) or with `rowsafe db` in a terminal: passwords are shown only to them, end to end encrypted. Don't do it any other way; if the user wants you to start it, request_change manage_databases_users asks them to approve creating or removing a database or user (a new user's password is still set by them, in the dashboard)."
+const dbadminGuidance = "To create or remove a database or user, reset a password or turn an extension on or off, tell the user to do it in the Rowsafe dashboard (Databases & users tab) or with `rowsafe db` in a terminal: passwords are shown only to them, end to end encrypted. Don't do it any other way; if the user wants you to start it, request_change manage_databases_users asks them to approve creating a database for an existing owner, removing a database or user, or an extension change. Creating a user, a new owner or a password reset is theirs alone (the password is shown only to them)."
 
 type ServerDatabasesView struct {
 	Server    string              `json:"server" jsonschema:"the database server in Rowsafe"`
