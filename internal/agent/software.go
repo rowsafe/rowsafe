@@ -46,6 +46,17 @@ const (
 // softwareLoop refreshes the software report every hour, or sooner when
 // asked (refreshSoftware).
 func (a *Agent) softwareLoop(ctx context.Context) {
+	// The running versions come from the databases the control plane
+	// names: wait for its first answer (a minute at most) so the first
+	// report has them, instead of an hour without.
+	if a.hbAnswered != nil {
+		select {
+		case <-a.hbAnswered:
+		case <-time.After(time.Minute):
+		case <-ctx.Done():
+			return
+		}
+	}
 	for {
 		rctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 		r := a.buildSoftware(rctx)

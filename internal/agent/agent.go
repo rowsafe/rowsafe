@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -116,11 +117,16 @@ type Agent struct {
 	// copyPasswordMu serializes setting safe copies' passwords.
 	copyPasswordMu sync.Mutex
 
-	perms permissionsState // what root allowed (permissions.go)
+	perms      permissionsState   // what root allowed (permissions.go)
+	engTargets engineTargetsCache // engine_standby.go
+	// hbAnswered is closed by the first heartbeat answer: from then on
+	// the agent knows its databases (watched, monitored).
+	hbAnswered     chan struct{}
+	hbAnsweredOnce sync.Once
 }
 
 func New(cfg Config, logger *slog.Logger) *Agent {
-	a := &Agent{cfg: cfg, log: logger, runner: pgbackrest.ExecRunner{}, pgArchiveMode: pginspect.ArchiveMode, swKick: make(chan struct{}, 1)}
+	a := &Agent{cfg: cfg, log: logger, runner: pgbackrest.ExecRunner{}, pgArchiveMode: pginspect.ArchiveMode, swKick: make(chan struct{}, 1), hbAnswered: make(chan struct{})}
 	u, reason := NewUpdater(cfg, logger)
 	if u == nil {
 		logger.Warn("agent self-update is off", "reason", reason)
@@ -399,23 +405,32 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 	defer t.Stop()
 	for {
 		built := time.Now()
-		req := protocol.HeartbeatRequest{
-			Hostname: hostname, AgentVersion: Version, Platform: release.Platform(),
-			Archivers: a.archiverStats(ctx), Update: a.updateReport(), Mode: a.cfg.Mode, // container_update.go
-			RestartPorts: a.restartPorts(), RestartActions: a.helperActions(),
-			PermissionsHeartbeat: a.permissionsHeartbeat(), Rewinds: append(a.rewindState().states(), a.engineRewindStates()...), // permissions.go, before Software (a changed allow list refreshes it)
-			Storage: a.storageReports(), SecondCopies: a.secondCopyStatuses(),
-			Software:         a.softwareForHeartbeat(),
-			DockerControl:    a.dockerControlReport(ctx),
-			Copies:           a.copiesReport(),
-			StandbyHeartbeat: a.standbyHeartbeat(ctx),
-			ForkHeartbeat:    a.forkHeartbeat(),   // fork.go
-			ManagedStorage:   a.storageStatus(),   // Rowsafe Storage or own bucket (storage.go)
-			Pooler:           a.poolerStatus(ctx), // pooling.go
+		var slow []string // the parts that took over a second, for the warning below
+		timed := func(name string, f func()) {
+			t0 := time.Now()
+			f()
+			if d := time.Since(t0); d > time.Second {
+				slow = append(slow, fmt.Sprintf("%s %s", name, d.Round(100*time.Millisecond)))
+			}
 		}
-		req.PoolerDatabases = a.poolerDatabases() // for Standby's pooler_retarget (pooling.go)
+		req := protocol.HeartbeatRequest{Hostname: hostname, AgentVersion: Version, Platform: release.Platform(), Mode: a.cfg.Mode}
+		timed("archiving", func() { req.Archivers = a.archiverStats(ctx) })
+		req.Update = a.updateReport() // container_update.go
+		timed("restart", func() { req.RestartPorts, req.RestartActions = a.restartPorts(), a.helperActions() })
+		timed("permissions", func() { req.PermissionsHeartbeat = a.permissionsHeartbeat() }) // permissions.go, before Software (a changed allow list refreshes it)
+		timed("rewinds", func() { req.Rewinds = append(a.rewindState().states(), a.engineRewindStates()...) })
+		timed("storage", func() { req.Storage, req.SecondCopies = a.storageReports(), a.secondCopyStatuses() })
+		timed("software", func() { req.Software = a.softwareForHeartbeat() })
+		timed("docker", func() { req.DockerControl = a.dockerControlReport(ctx) })
+		timed("copies", func() { req.Copies = a.copiesReport() })
+		timed("standby", func() { req.StandbyHeartbeat = a.standbyHeartbeat(ctx) })
+		timed("fork", func() { req.ForkHeartbeat = a.forkHeartbeat() })                 // fork.go
+		timed("managed storage", func() { req.ManagedStorage = a.storageStatus() })     // Rowsafe Storage or own bucket (storage.go)
+		timed("pooler", func() { req.Pooler = a.poolerStatus(ctx) })                    // pooling.go
+		timed("pooler databases", func() { req.PoolerDatabases = a.poolerDatabases() }) // for Standby's pooler_retarget (pooling.go)
 		if d := time.Since(built); d > 10*time.Second {
-			a.log.Warn("putting the heartbeat together took long; the control plane may think this server is offline", "took", d.Round(time.Millisecond))
+			a.log.Warn("putting the heartbeat together took long; the control plane may think this server is offline",
+				"took", d.Round(time.Millisecond), "slow", strings.Join(slow, ", "))
 		}
 		resp, err := a.client.heartbeat(ctx, req)
 		if isUnauthorized(err) {
@@ -439,6 +454,9 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 			a.watched = resp.Databases
 			a.monitored = resp.Monitored
 			a.mu.Unlock()
+			if a.hbAnswered != nil {
+				a.hbAnsweredOnce.Do(func() { close(a.hbAnswered) })
+			}
 			saveWatched(a.cfg, resp.Databases)
 			if a.pusher != nil {
 				a.ensureConfigs(ctx, resp.Databases)
