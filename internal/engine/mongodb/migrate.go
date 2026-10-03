@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 
 	"github.com/rowsafe/rowsafe/internal/agent"
 	"github.com/rowsafe/rowsafe/protocol"
@@ -116,11 +117,15 @@ func (e *Engine) Migrate(ctx context.Context, env agent.EngineEnv, db protocol.D
 		return nil, fmt.Errorf("the database name %q isn't allowed: letters, digits, dashes and underscores (1-63)", p.TargetDB)
 	}
 	if taskType == protocol.TaskMigrateCopy {
-		if p.Method != protocol.MigrateMethodDump {
-			return nil, errors.New("live sync isn't available for MongoDB yet: use the one-time copy")
-		}
 		if p.ReadOnly {
 			return nil, errNoReadOnly
+		}
+		if p.Method == protocol.MigrateMethodLive {
+			res, err := e.migrateLive(ctx, env, db, m, p, tl) // migrate_live.go
+			if res == nil {
+				return nil, err
+			}
+			return res, err
 		}
 		res, err := e.migrateDump(ctx, env, db, m, p, tl)
 		if res == nil {
@@ -150,7 +155,7 @@ func (e *Engine) Migrate(ctx context.Context, env agent.EngineEnv, db protocol.D
 	case protocol.MigrateCancel:
 		res, err = e.migrateCancel(ctx, env, db, m, p, tl)
 	case protocol.MigrateSwitchover:
-		return nil, errors.New("live sync isn't available for MongoDB yet, so there is nothing to switch over")
+		res, err = e.migrateSwitchover(ctx, env, db, m, p, tl) // migrate_live.go
 	default:
 		return nil, fmt.Errorf("%q isn't available for MongoDB", p.Action)
 	}
@@ -162,11 +167,6 @@ func (e *Engine) Migrate(ctx context.Context, env agent.EngineEnv, db protocol.D
 
 // errNoReadOnly: Rowsafe doesn't make a MongoDB source read-only.
 var errNoReadOnly = errors.New("Rowsafe can't make a MongoDB source read-only: stop your app's writes yourself, then choose \"I stopped the writes\"")
-
-// MigrateStatus: no live sync for MongoDB.
-func (e *Engine) MigrateStatus(context.Context, agent.EngineEnv, protocol.DatabaseSpec, agent.MigrateEnv) (protocol.MigrationStatus, bool) {
-	return protocol.MigrationStatus{}, false
-}
 
 func (e *Engine) migrateTarget(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec, name string) protocol.MigrateTarget {
 	t := protocol.MigrateTarget{Database: name, Port: db.Port, Addresses: hostAddresses(), ListensRemotely: true}
@@ -270,19 +270,49 @@ func (e *Engine) migrateCheck(ctx context.Context, env agent.EngineEnv, db proto
 	} else {
 		add(protocol.MigrateCheckItem{ID: "target", Status: protocol.CheckOK, Title: fmt.Sprintf("Rowsafe creates the database %s here", st.TargetDB)})
 	}
-	add(protocol.MigrateCheckItem{ID: "live", Status: protocol.CheckFail, Blocks: protocol.MigrateMethodLive,
-		Title: "Live sync isn't available for MongoDB yet",
-		Fix:   "Use the one-time copy: stop your app's writes, copy, and switch (about the copy's time without writes)."})
+	liveOK := true
+	if in.Auth && !hasRole(in.Roles, "readWriteAnyDatabase@admin") && !hasRole(in.Roles, "root@admin") {
+		liveOK = false
+		add(protocol.MigrateCheckItem{ID: "live_rights", Status: protocol.CheckFail, Blocks: protocol.MigrateMethodLive,
+			Title: "Rowsafe's MongoDB user on this server may not apply the source's updates and deletes",
+			Fix:   "Run the Rowsafe installer on this server again with --mongodb-clones (it gives Rowsafe's user readWriteAnyDatabase), or use the one-time copy."})
+	}
+	if _, err := clusterTime(ctx, sc); err != nil {
+		liveOK = false
+		add(protocol.MigrateCheckItem{ID: "live", Status: protocol.CheckFail, Blocks: protocol.MigrateMethodLive,
+			Title: "The source isn't a replica set, so live sync isn't possible", Detail: "Live sync follows the source's change stream.",
+			Fix: "Use the one-time copy: stop your app's writes, copy, and switch."})
+	} else {
+		wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		cs, err := sc.Database(src.DB).Watch(wctx, mongo.Pipeline{})
+		if err != nil {
+			liveOK = false
+			add(protocol.MigrateCheckItem{ID: "live", Status: protocol.CheckFail, Blocks: protocol.MigrateMethodLive,
+				Title: fmt.Sprintf("%s may not follow %s's changes", src.User, src.DB), Detail: plainConnError(err).Error(),
+				Fix: "Use a user with the read role on the database (Atlas: readAnyDatabase or atlasAdmin), or the one-time copy."})
+		} else {
+			_ = cs.Close(wctx)
+			add(protocol.MigrateCheckItem{ID: "live", Status: protocol.CheckOK, Title: "Rowsafe can follow the source's changes (a change stream)"})
+		}
+		cancel()
+	}
 	res.DumpOK = true
 	for _, x := range res.Checks {
 		if x.Status == protocol.CheckFail && x.Blocks == "" {
-			res.DumpOK = false
+			res.DumpOK, liveOK = false, false
 		}
 	}
+	res.LiveSync = liveOK
 	res.Method = protocol.MigrateMethodDump
+	if liveOK {
+		res.Method = protocol.MigrateMethodLive
+	}
 	res.EstimatedCopySeconds = max(res.Source.SizeBytes/(20<<20), 5)
 	res.AppUser = "app"
 	res.Summary = "Ready for a one-time copy while writes are stopped."
+	if res.LiveSync {
+		res.Summary = "Ready: live sync keeps this server in step with the source until you switch over."
+	}
 	if !res.DumpOK {
 		res.Summary = "Fix what the check found first."
 	}
@@ -338,22 +368,39 @@ func (e *Engine) migrateDump(ctx context.Context, env agent.EngineEnv, db protoc
 	}
 	m.SetPhase(protocol.MigratePhaseDumping)
 	m.Progress(protocol.MigrationStatus{Phase: protocol.MigratePhaseDumping})
-	dump, err := tool("mongodump")
+	if err := copyDatabase(ctx, env, db, m, src, st, tl); err != nil {
+		return nil, err
+	}
+	sw, err := e.finishMove(ctx, env, db, tc, m, p, src, &st)
 	if err != nil {
 		return nil, err
 	}
+	res := &protocol.MigrateCopyResult{Method: protocol.MigrateMethodDump, TablesTotal: len(sw.Tables), CreatedDatabase: true, Switchover: sw,
+		DurationMs: time.Since(start).Milliseconds()}
+	res.Summary = fmt.Sprintf("Copied %s into %s here. %s", src.DB, st.TargetDB, sw.Summary)
+	tl.Printf("%s", res.Summary)
+	return res, nil
+}
+
+// copyDatabase pipes mongodump of the source database into mongorestore
+// here (under st.TargetDB).
+func copyDatabase(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec, m agent.MigrateEnv, src migSource, st migState, tl agent.TaskLogger) error {
+	dump, err := tool("mongodump")
+	if err != nil {
+		return err
+	}
 	restore, err := tool("mongorestore")
 	if err != nil {
-		return nil, err
+		return err
 	}
 	// The URI holds the password: it goes to the tools in a config file
 	// (0600), never on the command line.
 	srcCfg, tgtCfg := filepath.Join(m.Dir, "source.yaml"), filepath.Join(m.Dir, "target.yaml")
 	if err := saveFile(srcCfg, []byte("uri: "+yamlQuote(src.URI)+"\n")); err != nil {
-		return nil, err
+		return err
 	}
 	if err := saveFile(tgtCfg, []byte("uri: "+yamlQuote(loginURI(env, db.Port))+"\n")); err != nil {
-		return nil, err
+		return err
 	}
 	defer os.Remove(srcCfg)
 	defer os.Remove(tgtCfg)
@@ -369,7 +416,7 @@ func (e *Engine) migrateDump(ctx context.Context, env agent.EngineEnv, db protoc
 	rcmd.Stdin = pr
 	rcmd.Stderr = &rerr
 	if err := rcmd.Start(); err != nil {
-		return nil, err
+		return err
 	}
 	dumpErr := dcmd.Run()
 	pw.CloseWithError(dumpErr)
@@ -377,10 +424,17 @@ func (e *Engine) migrateDump(ctx context.Context, env agent.EngineEnv, db protoc
 	tl.Output("mongorestore", summaryLines(rerr.Bytes()))
 	switch {
 	case dumpErr != nil:
-		return nil, fmt.Errorf("copying from the source failed: %v: %s", dumpErr, lastLine(derr.Bytes()))
+		return fmt.Errorf("copying from the source failed: %v: %s", dumpErr, lastLine(derr.Bytes()))
 	case restoreErr != nil:
-		return nil, fmt.Errorf("loading %s failed: %v: %s", st.TargetDB, restoreErr, lastLine(rerr.Bytes()))
+		return fmt.Errorf("loading %s failed: %v: %s", st.TargetDB, restoreErr, lastLine(rerr.Bytes()))
 	}
+	return nil
+}
+
+// finishMove compares document counts and makes the app login (the end of
+// a one-time copy and of a switchover).
+func (e *Engine) finishMove(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec, tc *mongo.Client, m agent.MigrateEnv,
+	p protocol.MigrateParams, src migSource, st *migState) (*protocol.MigrateSwitchoverResult, error) {
 	m.SetPhase(protocol.MigratePhaseRestoring)
 	sc, err := connect(ctx, src.URI)
 	if err != nil {
@@ -406,7 +460,7 @@ func (e *Engine) migrateDump(ctx context.Context, env agent.EngineEnv, db protoc
 		sw.Warnings = append(sw.Warnings, fmt.Sprintf("%d collections have a different document count than at the source: did writes go on during the copy?", sw.Mismatches))
 	}
 	user := cmpOr(p.AppUser, "app")
-	if err := e.makeAppLogin(ctx, tc, db, m, p, &st, user, sw); err != nil {
+	if err := e.makeAppLogin(ctx, tc, db, m, p, st, user, sw); err != nil {
 		return nil, err
 	}
 	m.SetPhase(protocol.MigratePhaseSwitched)
@@ -414,11 +468,7 @@ func (e *Engine) migrateDump(ctx context.Context, env agent.EngineEnv, db protoc
 	if sw.Mismatches == 0 {
 		sw.Summary += fmt.Sprintf(" Document counts match in %d collections.", len(sw.Tables))
 	}
-	res := &protocol.MigrateCopyResult{Method: protocol.MigrateMethodDump, TablesTotal: len(names), CreatedDatabase: true, Switchover: sw,
-		DurationMs: time.Since(start).Milliseconds()}
-	res.Summary = fmt.Sprintf("Copied %s into %s here. %s", src.DB, st.TargetDB, sw.Summary)
-	tl.Printf("%s", res.Summary)
-	return res, nil
+	return sw, nil
 }
 
 func yamlQuote(s string) string {

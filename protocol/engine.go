@@ -67,7 +67,8 @@ const (
 	FeatureStandby       = "standby"         // standby servers (replicas Rowsafe sets up)
 	FeaturePooling       = "pooling"         // connection pooling
 	FeatureFiles         = "files"           // backups of the folders that go with a database
-	FeatureUpdates       = "updates"         // package updates and version upgrades
+	FeatureUpdates       = "updates"         // minor updates of the database's packages (and the server's security updates)
+	FeatureUpgrades      = "upgrades"        // major version upgrades, rehearsed on a copy first, with undo
 	// FeatureDBAdmin ("dbadmin") is in dbadmin.go.
 
 	FeatureSettings         = "settings"          // Tuning: read and change settings, "Tune for this server"
@@ -100,6 +101,7 @@ type EngineFeatures struct {
 	Pooling       bool `json:"pooling"`
 	Files         bool `json:"files"`
 	Updates       bool `json:"updates"`
+	Upgrades      bool `json:"upgrades"`
 	// DBAdmin: Databases & users (create databases, users and extensions
 	// inside the server; dbadmin.go).
 	DBAdmin bool `json:"dbadmin"`
@@ -149,6 +151,8 @@ func (f EngineFeatures) Has(feature string) bool {
 		return f.Files
 	case FeatureUpdates:
 		return f.Updates
+	case FeatureUpgrades:
+		return f.Upgrades
 	case FeatureDBAdmin:
 		return f.DBAdmin
 	case FeatureSettings:
@@ -186,7 +190,7 @@ var EngineCapabilities = map[string]EngineFeatures{
 		Backups: true, PointInTime: true, Proof: true,
 		RewindCopy: true, RewindRows: true, RewindInPlace: true,
 		Marks: true, Monitoring: true, Fixes: true, Restart: true,
-		Standby: true, Pooling: true, Files: true, Updates: true,
+		Standby: true, Pooling: true, Files: true, Updates: true, Upgrades: true,
 		DBAdmin:  true,
 		Settings: true, Security: true, IndexAdvice: true, Recommendations: true,
 		Logs: true, FindMoment: true, SafeCopies: true, MigrationPreview: true,
@@ -201,7 +205,7 @@ var EngineCapabilities = map[string]EngineFeatures{
 	EngineMongoDB: {
 		Backups: true, PointInTime: true, Proof: true,
 		RewindCopy: true, RewindRows: true, RewindInPlace: true, Marks: true,
-		Monitoring: true, Fixes: true, Restart: true,
+		Monitoring: true, Fixes: true, Restart: true, Updates: true, Upgrades: true,
 		Recommendations: true, // profiler, $indexStats (internal/engine/mongodb/insights.go)
 		Logs:            true, // the structured log, 4.4+ (internal/engine/mongodb/logs.go)
 		FindMoment:      true, // the oplog in the bucket (internal/engine/mongodb/moment.go)
@@ -209,7 +213,8 @@ var EngineCapabilities = map[string]EngineFeatures{
 		DBAdmin:         true, Security: true, Files: true, SecondCopy: true,
 		MigrationPreview: true, SafeCopies: true,
 		Fork:     true, // clones copied into an empty server (fork.go in internal/engine/mongodb)
-		MoveIn:   true, // one-time copy from Atlas or any MongoDB (migrate*.go in internal/engine/mongodb)
+		MoveIn:   true, // copy from Atlas or any MongoDB, live through a change stream (migrate*.go in internal/engine/mongodb)
+		Standby:  true, // a priority-0 member of the replica set (standby*.go in internal/engine/mongodb)
 		Settings: true, // mongod.conf through root's tuning helper (opt-in), setParameter live
 	},
 	// ClickHouse (internal/engine/clickhouse): protocol/clickhouse.go.

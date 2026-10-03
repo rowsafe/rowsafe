@@ -1,6 +1,9 @@
 package protocol
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Connection pooling: a Rowsafe-managed PgBouncer in front of a database.
 //
@@ -61,6 +64,12 @@ const DefaultPoolerPort = 6432
 
 // DefaultProxySQLPort is where apps connect to ProxySQL (MySQL, MariaDB).
 const DefaultProxySQLPort = 6033
+
+// DefaultChproxyPort is where apps connect to chproxy (ClickHouse's HTTP
+// interface). For ClickHouse, PoolingSettings.PoolSize is how many queries
+// each user runs at once and MaxClientConn how many more wait; Mode is
+// unused.
+const DefaultChproxyPort = 9090
 
 // PoolingSettings are the choices a person makes. Zero values mean
 // "Rowsafe picks" (the agent computes them from max_connections and the
@@ -158,6 +167,26 @@ type PoolerStatus struct {
 	// (a Docker service, ROWSAFE_POOLER_STATS_URL): monitoring only.
 	External bool   `json:"external,omitempty"`
 	Error    string `json:"error,omitempty"` // why PgBouncer couldn't be read
+	// Targets are the other servers ("ADDRESS:PORT") root allowed the
+	// pooler to send connections to (ProxySQL: `rowsafe-allow
+	// pooler-target`), so it can follow a standby's promotion.
+	Targets []string `json:"targets,omitempty"`
+}
+
+// PoolerApprovalCommand is how root on the pooler's server lets ProxySQL
+// send connections to the MySQL at address:port on another server.
+func PoolerApprovalCommand(address string, port int) string {
+	return fmt.Sprintf("sudo rowsafe-allow pooler-target %s %d", address, port)
+}
+
+// PoolerApproval is a step a standby needs so the pooler can follow it
+// after a promotion (StandbyView.PoolerApprovals).
+type PoolerApproval struct {
+	// Hostname is the server where the pooler runs (where root runs
+	// Command).
+	Hostname string `json:"hostname"`
+	Target   string `json:"target"` // "ADDRESS:PORT"
+	Command  string `json:"command"`
 }
 
 // PoolerStats is the newest reading of PgBouncer's admin console for one
@@ -209,7 +238,10 @@ type PoolingView struct {
 	Warnings      []string  `json:"warnings,omitempty"`
 	// Connection strings (without passwords): Direct to PostgreSQL, Pooled
 	// through PgBouncer (when on).
-	Direct string       `json:"direct"`
+	Direct string `json:"direct"`
+	// Note is a plain sentence about what the pooler covers (ClickHouse:
+	// the HTTP interface only).
+	Note   string       `json:"note,omitempty"`
 	Pooled string       `json:"pooled,omitempty"`
 	Stats  *PoolerStats `json:"stats,omitempty"`
 	// Defaults are the settings Rowsafe would pick now.

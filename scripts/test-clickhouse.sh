@@ -12,10 +12,14 @@
 #   scripts/test-clickhouse.sh                      # ClickHouse 26.8, 26.3, 25.8 and 24.8, then 26.8 in Docker
 #   CLICKHOUSE_VERSIONS="25.8" DOCKER_MODE=no scripts/test-clickhouse.sh
 #   TEST_RUN=TestClickHousePointInTime FIRST_MODE=sql NATIVE_MODE=no scripts/test-clickhouse.sh
+#   TEST_RUN=TestClickHouseIndexAdvisor CLICKHOUSE_VERSIONS="26.8 24.8" DOCKER_MODE=no scripts/test-clickhouse.sh
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 VERSIONS=${CLICKHOUSE_VERSIONS:-26.8 26.3 25.8 24.8}
 LIMIT=${TEST_TIMEOUT:-1800}
+# TEST_RUN picks the tests (go test -run), e.g. TestClickHouseIndexAdvisor.
+TEST_RUN_GIVEN=${TEST_RUN:-}
+TEST_RUN=${TEST_RUN:-TestClickHouse}
 
 # timeout(1), or a perl stand-in where there is none (macOS).
 to() {
@@ -77,7 +81,7 @@ if [ "${CLICKHOUSE_CLONE:-}" = 1 ]; then
 	name=rowsafe-test-clickhouse-clone-$$
 	containers="$containers $name"
 	echo "==> ClickHouse $v, clone into a second server"
-	to "$LIMIT" docker run --rm --name "$name" -e CLICKHOUSE_SKIP_USER_SETUP=1 -e RUN_TESTS="${TEST_RUN:-TestClickHouseClone|TestClickHouseMoveIn|TestClickHouseStandby}" --entrypoint bash "$img" -euc '
+	to "$LIMIT" docker run --rm --name "$name" -e CLICKHOUSE_SKIP_USER_SETUP=1 -e RUN_TESTS="${TEST_RUN_GIVEN:-TestClickHouseClone|TestClickHouseMoveIn|TestClickHouseStandby}" --entrypoint bash "$img" -euc '
 		/entrypoint.sh >/tmp/server.log 2>&1 &
 		install -d -o clickhouse -g clickhouse /tmp/ch2
 		su clickhouse -s /bin/sh -c "clickhouse-server --config-file=/etc/clickhouse-server/config.xml -- \
@@ -98,7 +102,7 @@ if [ "${CLICKHOUSE_CLONE:-}" = 1 ]; then
 	exit $rc
 fi
 mode=${FIRST_MODE:-xml}
-RUN_TESTS=${TEST_RUN:-TestClickHouse}
+RUN_TESTS=$TEST_RUN
 native_versions=$VERSIONS
 [ "${NATIVE_MODE:-yes}" = yes ] || native_versions=""
 for v in $native_versions; do
@@ -135,7 +139,7 @@ for v in $native_versions; do
 			extra="ROWSAFE_TEST_CLICKHOUSE_USERSD=/etc/clickhouse-server/users.d"
 		fi
 		cd /tmp
-		su rowsafe -c "env ROWSAFE_TEST_CLICKHOUSE_PORT=8123 ROWSAFE_TEST_CLICKHOUSE_REPLICATED=1 ROWSAFE_TEST_CLICKHOUSE_DOWNLOAD_DIR=/var/lib/rowsafe-dl/dl $extra \
+		su rowsafe -c "env ROWSAFE_TEST_CLICKHOUSE_PORT=8123 ROWSAFE_TEST_CLICKHOUSE_REPLICATED=1 ROWSAFE_TEST_CLICKHOUSE_POOLING=1 ROWSAFE_TEST_CLICKHOUSE_DOWNLOAD_DIR=/var/lib/rowsafe-dl/dl $extra \
 			/usr/local/bin/clickhouse.test -test.v -test.count=1 -test.run \"$RUN_TESTS\" -test.timeout 25m" 2>&1 | tail -n 150
 		exit ${PIPESTATUS[0]}
 	'; then

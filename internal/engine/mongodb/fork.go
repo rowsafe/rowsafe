@@ -263,18 +263,40 @@ func (e *Engine) StandbyTargets(ctx context.Context, env agent.EngineEnv) []prot
 		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		if c, err := connectDB(cctx, env, protocol.DatabaseSpec{Port: d.Port}); err != nil {
 			t.Reason = "Rowsafe can't sign in there: run the Rowsafe installer on this server and answer yes to receiving clones"
+			t.NoStandby = t.Reason
 		} else {
 			if in, err := inspect(cctx, c); err != nil {
 				t.Reason = "Rowsafe can't sign in there: run the Rowsafe installer on this server and answer yes to receiving clones"
+				t.NoStandby = t.Reason
 			} else {
 				t.Reason = cloneTargetReason(in)
+				t.NoStandby = standbyTargetReason(env, d.Port, in)
 			}
 			disconnect(c)
 		}
 		cancel()
-		t.Usable = t.Reason == ""
+		t.Usable, t.Standby = t.Reason == "", t.NoStandby == ""
 		out = append(out, t)
 	}
 	targetsAt, targetsCache = time.Now(), out
 	return out
+}
+
+// standbyTargetReason says why a server can't become a standby ("" when
+// it can): empty, in no replica set, and root allowed it.
+func standbyTargetReason(env agent.EngineEnv, port int, in serverInfo) string {
+	if _, ok := sbOnPort(env, port); ok {
+		return "it already runs a standby"
+	}
+	switch {
+	case len(in.Databases) > 0:
+		return "it isn't empty"
+	case in.SetName != "":
+		return "it already belongs to replica set " + in.SetName
+	case env.HelperCan == nil || !env.HelperCan(helperStandbyConfig, port):
+		return "root didn't allow standby servers there: run the Rowsafe installer on that server with --mongodb-standby"
+	case !env.HelperCan("restart", port):
+		return "Rowsafe may not restart MongoDB there: run the Rowsafe installer on that server with --allow-restart"
+	}
+	return ""
 }

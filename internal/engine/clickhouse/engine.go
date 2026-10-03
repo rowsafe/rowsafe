@@ -73,6 +73,7 @@ func (e *Engine) Tasks() []string {
 		protocol.TaskDBAdmin, protocol.TaskSettings,
 		protocol.TaskRewindInPlace, protocol.TaskRewindUndo, protocol.TaskRewindCleanup,
 		protocol.TaskPreviewMigration, protocol.TaskCopySchema, protocol.TaskSafeCopy,
+		protocol.TaskIndexAdvisor, protocol.TaskPooling, protocol.TaskPoolerRetarget,
 		protocol.TaskFindMoment,
 	}
 }
@@ -129,6 +130,24 @@ func (e *Engine) Run(ctx context.Context, env agent.EngineEnv, task *protocol.Ta
 		return nilIfNil(e.backup(ctx, env, db, p, tl))
 	case protocol.TaskDrill:
 		return nilIfNil(e.drill(ctx, env, db, task.ID, tl))
+	case protocol.TaskPooling: // pooling.go
+		var p protocol.PoolingParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.pooling(ctx, env, db, p, tl))
+	case protocol.TaskPoolerRetarget:
+		var p protocol.PoolerRetargetParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.poolerRetarget(ctx, env, db, p, tl))
+	case protocol.TaskIndexAdvisor: // advisor.go
+		var p protocol.IndexAdvisorParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.indexAdvisor(ctx, env, db, task.ID, p, tl))
 	case protocol.TaskSafeCopy:
 		var p protocol.SafeCopyParams
 		if err := decode(task, &p); err != nil {

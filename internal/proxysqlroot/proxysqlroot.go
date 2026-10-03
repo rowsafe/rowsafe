@@ -35,6 +35,8 @@ import (
 	"time"
 
 	"github.com/go-sql-driver/mysql"
+
+	"github.com/rowsafe/rowsafe/protocol"
 )
 
 // Defaults (the systemd unit sets the directories).
@@ -76,8 +78,11 @@ type Request struct {
 	ID     string `json:"id"`
 	Action string `json:"action"`
 	Flavor string `json:"flavor"` // mysql or mariadb
-	// Target is the MySQL port (on 127.0.0.1).
-	Target int `json:"target"`
+	// Target is the MySQL port, on TargetHost: "" (or 127.0.0.1) for this
+	// server, else another server's address root approved in the allow file
+	// ("target ADDRESS PORT": a primary after a standby's promotion).
+	Target     int    `json:"target"`
+	TargetHost string `json:"target_host,omitempty"`
 	// Port and Listen are where ProxySQL listens for apps (addresses: the
 	// server's own; "0.0.0.0" only with "public" allowed).
 	Port          int      `json:"port,omitempty"`
@@ -112,32 +117,82 @@ var (
 	pluginOK = []string{"mysql_native_password", "caching_sha2_password"}
 )
 
-// Allowed reads the allow file: ports, and whether ProxySQL may listen on
-// public addresses.
-func Allowed(path string) (ports map[int]bool, public bool, err error) {
+// Allow is what root allowed in the allow file.
+type Allow struct {
+	// Ports on this server ProxySQL may be put in front of.
+	Ports map[int]bool
+	// Public: ProxySQL may listen on every address.
+	Public bool
+	// Targets are other servers ProxySQL may send connections to
+	// ("target ADDRESS PORT" lines, by "ADDRESS:PORT"): the new primary
+	// after a standby's promotion.
+	Targets map[string]bool
+}
+
+// ApproveCommand is how root lets ProxySQL send connections to host:port on
+// another server.
+func ApproveCommand(host string, port int) string { return protocol.PoolerApprovalCommand(host, port) }
+
+// TargetLine is the allow file line that lets ProxySQL send connections to
+// host:port on another server.
+func TargetLine(host string, port int) string { return fmt.Sprintf("target %s %d", host, port) }
+
+// Allowed reads the allow file.
+func Allowed(path string) (Allow, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, false, err
+		return Allow{}, err
 	}
-	ports = map[int]bool{}
+	al := Allow{Ports: map[int]bool{}, Targets: map[string]bool{}}
 	for _, line := range strings.Split(string(data), "\n") {
 		f := strings.Fields(line)
 		if len(f) == 0 || strings.HasPrefix(f[0], "#") {
 			continue
 		}
-		if f[0] == "public" {
-			public = true
-			continue
-		}
-		if p, err := strconv.Atoi(f[0]); err == nil && p > 0 && p < 65536 {
-			ports[p] = true
+		switch {
+		case f[0] == "public":
+			al.Public = true
+		case f[0] == "target" && len(f) == 3:
+			if p, err := strconv.Atoi(f[2]); err == nil && p > 0 && p < 65536 && validHost(f[1]) {
+				al.Targets[targetKey(f[1], p)] = true
+			}
+		default:
+			if p, err := strconv.Atoi(f[0]); err == nil && p > 0 && p < 65536 {
+				al.Ports[p] = true
+			}
 		}
 	}
-	return ports, public, nil
+	return al, nil
+}
+
+var hostnameRE = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
+
+func validHost(h string) bool {
+	if _, err := netip.ParseAddr(h); err == nil {
+		return true
+	}
+	return hostnameRE.MatchString(h)
+}
+
+func targetKey(host string, port int) string {
+	if a, err := netip.ParseAddr(host); err == nil {
+		host = a.Unmap().String()
+	}
+	return strings.ToLower(host) + ":" + strconv.Itoa(port)
+}
+
+// localTarget reports whether host means this server.
+func localTarget(host string) bool {
+	if host == "" || host == "localhost" {
+		return true
+	}
+	a, err := netip.ParseAddr(host)
+	return err == nil && a.Unmap().IsLoopback()
 }
 
 // Check validates a request.
-func Check(r Request, ports map[int]bool, public bool) error {
+func Check(r Request, al Allow) error {
+	ports, public := al.Ports, al.Public
 	if !idRE.MatchString(r.ID) {
 		return errors.New("invalid request id")
 	}
@@ -152,7 +207,19 @@ func Check(r Request, ports map[int]bool, public bool) error {
 	if r.Action == ActionOff {
 		return nil
 	}
-	if !ports[r.Target] {
+	switch {
+	case !localTarget(r.TargetHost):
+		if r.Action == ActionOn {
+			return errors.New("ProxySQL is set up in front of the database on this server; only a retarget may point it at another server")
+		}
+		if !validHost(r.TargetHost) || r.Target < 1 || r.Target > 65535 {
+			return fmt.Errorf("invalid target %q:%d", r.TargetHost, r.Target)
+		}
+		if !al.Targets[targetKey(r.TargetHost, r.Target)] {
+			return fmt.Errorf("root didn't allow ProxySQL on this server to send connections to %s:%d. Root allows it on this server with: %s",
+				r.TargetHost, r.Target, ApproveCommand(r.TargetHost, r.Target))
+		}
+	case !ports[r.Target]:
 		return fmt.Errorf("port %d is not in the allow list: pooling it from Rowsafe is not allowed", r.Target)
 	}
 	if r.Action == ActionOn {
@@ -314,9 +381,9 @@ func (a *Applier) version(ctx context.Context) string {
 }
 
 // Apply runs a request.
-func (a *Applier) Apply(ctx context.Context, r Request, ports map[int]bool, public bool) Result {
+func (a *Applier) Apply(ctx context.Context, r Request, al Allow) Result {
 	res := Result{ID: r.ID}
-	if err := Check(r, ports, public); err != nil {
+	if err := Check(r, al); err != nil {
 		res.Error = err.Error()
 		return res
 	}
@@ -340,10 +407,12 @@ func (a *Applier) Apply(ctx context.Context, r Request, ports map[int]bool, publ
 		if r.Action == ActionRetarget {
 			err = a.servers(ctx, db, r)
 		}
-		if err == nil {
+		// A retarget without users (the old primary on this server is down)
+		// keeps the users ProxySQL has.
+		if err == nil && (r.Action == ActionUsers || r.Users != nil) {
 			res.UsersSynced, res.Warnings, err = a.users(ctx, db, r)
 		}
-		res.Target = fmt.Sprintf("127.0.0.1:%d", r.Target)
+		res.Target = targetKey(a.backendHost(r), r.Target)
 	}
 	if err != nil {
 		res.Error = err.Error()
@@ -428,6 +497,14 @@ func (a *Applier) on(ctx context.Context, r Request, res *Result) error {
 	return nil
 }
 
+// backendHost is where MySQL is: the request's other server, else this one.
+func (a *Applier) backendHost(r Request) string {
+	if !localTarget(r.TargetHost) {
+		return r.TargetHost
+	}
+	return cmpOr(a.BackendHost, "127.0.0.1")
+}
+
 func (a *Applier) servers(ctx context.Context, db *sql.DB, r Request) error {
 	size := r.PoolSize
 	if size == 0 { // retarget: keep the pool size
@@ -436,7 +513,7 @@ func (a *Applier) servers(ctx context.Context, db *sql.DB, r Request) error {
 	for _, q := range []string{
 		"DELETE FROM mysql_servers WHERE hostgroup_id = 0",
 		fmt.Sprintf("INSERT INTO mysql_servers (hostgroup_id, hostname, port, max_connections, comment) VALUES (0, '%s', %d, %d, '%s')",
-			cmpOr(a.BackendHost, "127.0.0.1"), r.Target, max(size, 2), userComment),
+			a.backendHost(r), r.Target, max(size, 2), userComment),
 		"LOAD MYSQL SERVERS TO RUNTIME", "SAVE MYSQL SERVERS TO DISK",
 	} {
 		if _, err := db.ExecContext(ctx, q); err != nil {

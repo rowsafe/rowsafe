@@ -37,6 +37,9 @@ const scratchMarker = ".rowsafe-mongodb-scratch"
 type scratch struct {
 	Dir     string // the scratch directory (data, logs, oplog file)
 	SockDir string // private socket directory (short path: sockets are limited to 107 bytes)
+	// Bin, when set, is the mongod to run instead of the installed one (an
+	// upgrade rehearsal's target version).
+	Bin string
 }
 
 func (s scratch) dataDir() string { return filepath.Join(s.Dir, "data") }
@@ -96,6 +99,9 @@ var idRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 // start runs mongod on the scratch data and waits until it answers.
 func (s scratch) start(ctx context.Context, env agent.EngineEnv) (*mongo.Client, error) {
 	mongod, err := tool("mongod")
+	if s.Bin != "" {
+		mongod, err = s.Bin, nil
+	}
 	if err != nil {
 		return nil, errors.New("mongod (the MongoDB server) isn't installed on this server, so restores can't be tested here")
 	}

@@ -2,6 +2,7 @@ package clickhouse
 
 import (
 	"context"
+	"strings"
 
 	"github.com/rowsafe/rowsafe/internal/agent"
 	"github.com/rowsafe/rowsafe/protocol"
@@ -16,4 +17,16 @@ func (e *Engine) Ready(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 		return "", err
 	}
 	return "", nil
+}
+
+var _ agent.EngineVersioner = (*Engine)(nil)
+
+// Version is the running server's version ("25.8.15.35").
+func (e *Engine) Version(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec) (string, error) {
+	c, err := connectDB(ctx, env, db)
+	if err != nil {
+		return "", err
+	}
+	v, err := c.scalar(ctx, "SELECT version()", nil)
+	return strings.TrimSpace(v), err
 }

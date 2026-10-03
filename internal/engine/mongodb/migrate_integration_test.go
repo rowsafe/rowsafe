@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 
@@ -89,7 +90,7 @@ func TestMongoDBMoveIn(t *testing.T) {
 	}
 	check := run(protocol.TaskMigrate, protocol.MigrateParams{Action: protocol.MigrateCheck, Source: &box, TargetDB: "moved"}).(*protocol.MigrateCheckResult)
 	t.Logf("check: %s %+v", check.Summary, check.Checks)
-	if !check.DumpOK || check.LiveSync || check.Source.Tables != 2 {
+	if !check.DumpOK || !check.LiveSync || check.Source.Tables != 2 {
 		t.Fatalf("check: %+v", check)
 	}
 	browser, _ := e2e.GenerateKey()
@@ -121,4 +122,115 @@ func TestMongoDBMoveIn(t *testing.T) {
 		t.Fatalf("cancel left %v", names)
 	}
 	_ = src.Database("atlasdb").Drop(ctx)
+}
+
+// TestMongoDBMoveInLive moves a database with a live sync: the copy, the
+// changes made during and after it, then the switchover.
+func TestMongoDBMoveInLive(t *testing.T) {
+	port, _ := strconv.Atoi(os.Getenv("ROWSAFE_TEST_MONGODB_PORT"))
+	port2, _ := strconv.Atoi(os.Getenv("ROWSAFE_TEST_MONGODB_CLONE_PORT"))
+	if port == 0 || port2 == 0 {
+		t.Skip("ROWSAFE_TEST_MONGODB_PORT and ROWSAFE_TEST_MONGODB_CLONE_PORT not set")
+	}
+	ctx := context.Background()
+	env, _ := testEnv(t)
+	e := &Engine{}
+	adminUser, adminPW := os.Getenv("ROWSAFE_TEST_MONGODB_ADMIN"), os.Getenv("ROWSAFE_TEST_MONGODB_ADMIN_PASSWORD")
+	if _, err := CreateLoginWith(ctx, env, port2, adminUser, adminPW, true); err != nil {
+		t.Fatal("login:", err)
+	}
+	adminLogin := Login{}
+	if adminUser != "" {
+		adminLogin = Login{User: adminUser, Password: adminPW}
+	}
+	src, err := connect(ctx, strings.Replace(adminLogin.uri(port), "?", "?appName=rowsafe-test&", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer disconnect(src)
+	tgt, err := connect(ctx, strings.Replace(adminLogin.uri(port2), "?", "?appName=rowsafe-test&", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer disconnect(tgt)
+	_ = src.Database("livedb").Drop(ctx)
+	items := src.Database("livedb").Collection("items")
+	var docs []any
+	for i := 0; i < 500; i++ {
+		docs = append(docs, bson.D{{Key: "_id", Value: i}, {Key: "v", Value: 1}})
+	}
+	if _, err := items.InsertMany(ctx, docs); err != nil {
+		t.Fatal(err)
+	}
+	spec := protocol.DatabaseSpec{ID: "db_target", Name: "target", Port: port2, Engine: protocol.EngineMongoDB}
+	m := agent.MigrateEnv{ID: "mig2", Dir: filepath.Join(t.TempDir(), "mig2"), Progress: func(protocol.MigrationStatus) {}}
+	phase := ""
+	m.SetPhase = func(p string) { phase = p }
+	tl := &testLog{t: t}
+	run := func(typ string, p protocol.MigrateParams) any {
+		t.Helper()
+		p.MigrationID = m.ID
+		m.Phase = phase
+		res, err := e.Migrate(ctx, env, spec, m, typ, p, tl)
+		if err != nil {
+			t.Fatalf("%s %s: %v", typ, p.Action, err)
+		}
+		return res
+	}
+	key := run(protocol.TaskMigrate, protocol.MigrateParams{Action: protocol.MigrateKey}).(*protocol.MigrateKeyResult)
+	pub, _ := e2e.ParsePublicKey(key.PublicKey)
+	su := url.URL{Scheme: "mongodb", Host: "127.0.0.1:" + strconv.Itoa(port), Path: "/livedb", RawQuery: "directConnection=true"}
+	if adminUser != "" {
+		su.User = url.UserPassword(adminUser, adminPW)
+	}
+	box, _ := e2e.Seal(pub, protocol.MigrateInfo, protocol.MigrateSourceAAD(m.ID), []byte(su.String()))
+	check := run(protocol.TaskMigrate, protocol.MigrateParams{Action: protocol.MigrateCheck, Source: &box, TargetDB: "moved_live"}).(*protocol.MigrateCheckResult)
+	if !check.LiveSync {
+		t.Fatalf("check: %+v", check)
+	}
+	run(protocol.TaskMigrateCopy, protocol.MigrateParams{Method: protocol.MigrateMethodLive, TargetDB: "moved_live"})
+	// Changes after the copy.
+	if _, err := items.InsertOne(ctx, bson.D{{Key: "_id", Value: 500}, {Key: "v", Value: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := items.UpdateOne(ctx, bson.D{{Key: "_id", Value: 7}}, bson.D{{Key: "$set", Value: bson.D{{Key: "v", Value: 2}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := items.DeleteOne(ctx, bson.D{{Key: "_id", Value: 8}}); err != nil {
+		t.Fatal(err)
+	}
+	moved := tgt.Database("moved_live").Collection("items")
+	var status protocol.MigrationStatus
+	for i := 0; i < 30; i++ {
+		m.Phase = phase
+		status, _ = e.MigrateStatus(ctx, env, spec, m)
+		n, _ := moved.CountDocuments(ctx, bson.D{})
+		var d struct {
+			V int `bson:"v"`
+		}
+		_ = moved.FindOne(ctx, bson.D{{Key: "_id", Value: 7}}).Decode(&d)
+		if phase == protocol.MigratePhaseSyncing && n == 500 && d.V == 2 {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	t.Logf("status: %+v", status)
+	if phase != protocol.MigratePhaseSyncing {
+		t.Fatalf("phase %s: %+v", phase, status)
+	}
+	var doc struct {
+		V int `bson:"v"`
+	}
+	if err := moved.FindOne(ctx, bson.D{{Key: "_id", Value: 7}}).Decode(&doc); err != nil || doc.V != 2 {
+		t.Fatalf("the update didn't come along: %+v %v", doc, err)
+	}
+	browser, _ := e2e.GenerateKey()
+	sw := run(protocol.TaskMigrate, protocol.MigrateParams{Action: protocol.MigrateSwitchover, BrowserKey: e2e.PublicKeyString(browser.PublicKey()),
+		Host: "127.0.0.1"}).(*protocol.MigrateSwitchoverResult)
+	t.Logf("switchover: %s", sw.Summary)
+	if sw.Mismatches != 0 || phase != protocol.MigratePhaseSwitched {
+		t.Fatalf("switchover: %+v", sw)
+	}
+	run(protocol.TaskMigrate, protocol.MigrateParams{Action: protocol.MigrateCancel, DropTarget: true})
+	_ = src.Database("livedb").Drop(ctx)
 }

@@ -59,3 +59,14 @@ func TestEngineFeatures(t *testing.T) {
 		t.Errorf("engine list: %s", b)
 	}
 }
+
+func TestSeriesNumber(t *testing.T) {
+	for s, n := range map[string]int{"8.4": 804, "25.8": 2508, "10.11": 1011, "7.0": 700, "16": 0, "x.1": 0} {
+		if got := SeriesNumber(s); got != n {
+			t.Errorf("SeriesNumber(%q) = %d, want %d", s, got, n)
+		}
+		if n != 0 && SeriesString(n) != s {
+			t.Errorf("SeriesString(%d) = %q", n, SeriesString(n))
+		}
+	}
+}

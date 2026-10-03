@@ -1,6 +1,10 @@
 package protocol
 
-import "time"
+import (
+	"strconv"
+	"strings"
+	"time"
+)
 
 // ---- PostgreSQL updates and upgrades, server security updates ----
 //
@@ -61,7 +65,45 @@ const (
 	UpdateAllowPostgres = "postgresql"
 	UpdateAllowSecurity = "security" // install security updates
 	UpdateAllowReboot   = "reboot"   // reboot the server
+	// UpdateAllowDatabase: install the minor updates of, and upgrade, the
+	// MySQL, MariaDB, MongoDB or ClickHouse server on the ports in
+	// /etc/rowsafe/restart-allowed (the "updates" permission on a server
+	// without PostgreSQL).
+	UpdateAllowDatabase = "database"
 )
+
+// SeriesNumber encodes a release series ("8.4", "25.8", "10.11") as a
+// number (804, 2508, 1011), so other engines' series travel where
+// PostgreSQL's majors do (UpgradeInfo.Majors, ToMajor...). 0 when s isn't
+// one.
+func SeriesNumber(s string) int {
+	a, b, ok := strings.Cut(s, ".")
+	if !ok {
+		return 0
+	}
+	x, err1 := strconv.Atoi(a)
+	y, err2 := strconv.Atoi(b)
+	if err1 != nil || err2 != nil || x < 1 || x > 999 || y < 0 || y > 99 {
+		return 0
+	}
+	return x*100 + y
+}
+
+// SeriesString is SeriesNumber's inverse: 804 -> "8.4".
+func SeriesString(n int) string {
+	if n < 100 {
+		return ""
+	}
+	return strconv.Itoa(n/100) + "." + strconv.Itoa(n%100)
+}
+
+// UpdateWord is the updates allow list's word for engine's own updates.
+func UpdateWord(engine string) string {
+	if NormalizeEngine(engine) == EnginePostgreSQL {
+		return UpdateAllowPostgres
+	}
+	return UpdateAllowDatabase
+}
 
 // Upgrade modes.
 const (
@@ -372,6 +414,15 @@ type ClusterSoftware struct {
 	// Majors are newer majors the repositories offer, oldest first.
 	Majors            []int    `json:"majors,omitempty"`
 	ExtensionPackages []string `json:"extension_packages,omitempty"`
+
+	// Other engines (MySQL, MariaDB, MongoDB, ClickHouse; Engine is ""
+	// for PostgreSQL): Series is the installed release series ("8.0",
+	// "10.11", "7.0", "25.8"); minor updates stay in it. Installed and
+	// Candidate are then full versions ("8.0.40"), Running the server's.
+	// NextSeries are newer series the package sources offer, oldest first.
+	Engine     string   `json:"engine,omitempty"`
+	Series     string   `json:"series,omitempty"`
+	NextSeries []string `json:"next_series,omitempty"`
 }
 
 // UpgradeState is a major upgrade that can still be undone or cleaned up.
@@ -414,6 +465,9 @@ type UpgradeInfo struct {
 	DatabaseID string `json:"database_id"`
 	Database   string `json:"database"`
 	Host       string `json:"host"`
+	// Engine is the database's engine ("" for PostgreSQL); other engines'
+	// series are numbers in Major, Majors and the upgrade fields (8.4 -> 804).
+	Engine string `json:"engine,omitempty"`
 	// Version is the running version ("16.9"), Major its major.
 	Version string `json:"version,omitempty"`
 	Major   int    `json:"major,omitempty"`
@@ -427,6 +481,10 @@ type UpgradeInfo struct {
 	RestartPending bool `json:"restart_pending,omitempty"`
 	// Majors are newer majors the server's repositories offer.
 	Majors []int `json:"majors,omitempty"`
+	// Other engines: Series is the running release series ("8.0") and
+	// NextSeries the newer ones the package sources offer.
+	Series     string   `json:"series,omitempty"`
+	NextSeries []string `json:"next_series,omitempty"`
 	// Sidecar: PostgreSQL runs in Docker (Rowsafe can check and rehearse,
 	// but the upgrade itself is a change to the compose file).
 	Sidecar bool `json:"sidecar,omitempty"`

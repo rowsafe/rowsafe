@@ -42,6 +42,13 @@ type dbMonitor struct {
 	queryStart map[string]time.Time // query_id -> start, as first seen
 	qlogTo     time.Time            // the query log is read up to here (insights.go)
 	insightsAt time.Time
+	// unused skipping indexes and projections, checked once a day
+	// (advisor.go: unusedObjects).
+	unused   []protocol.UnusedIndex
+	unusedAt time.Time
+	// chproxy's request counter at its last reading (pooling.go).
+	poolRequests float64
+	poolAt       time.Time
 }
 
 func (e *Engine) monitorFor(id string) *dbMonitor {
@@ -76,6 +83,7 @@ func (e *Engine) Monitor(ctx context.Context, env agent.EngineEnv, db protocol.D
 	if m.client == nil || m.login != l {
 		m.client, m.login = newClient(serverURL(db.Port), l), l
 	}
+	dm.Pooler = m.poolerStats(ctx, env, db, time.Now()) // pooling.go
 	if err := m.sample(ctx, dm); err != nil {
 		dm.Error = "can't read ClickHouse's status: " + shortError(plainLoginError(err))
 	} else if time.Since(m.settingsAt) >= 5*time.Minute { // Tuning (settings.go)
@@ -222,6 +230,10 @@ func (m *dbMonitor) sample(ctx context.Context, dm *protocol.DatabaseMonitoring)
 	}
 	if now.Sub(m.insightsAt) >= insightsEvery {
 		if ins := insights(ctx, c); ins != nil {
+			if now.Sub(m.unusedAt) >= 24*time.Hour {
+				m.unused, m.unusedAt = unusedObjects(ctx, c, m.login.User, now), now
+			}
+			ins.UnusedIndexes = append(ins.UnusedIndexes, m.unused...)
 			dm.Insights = ins
 			m.insightsAt = now
 		}

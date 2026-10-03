@@ -9,9 +9,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -47,8 +50,11 @@ type poolState struct {
 	Addresses  []string                 `json:"addresses"`
 	Target     string                   `json:"target"`
 	TargetPort int                      `json:"target_port"`
-	Version    string                   `json:"version"`
-	Users      string                   `json:"users"` // fingerprint of the users handed over
+	// TargetHost is another server's address after a standby's promotion
+	// ("" for this server).
+	TargetHost string `json:"target_host,omitempty"`
+	Version    string `json:"version"`
+	Users      string `json:"users"` // fingerprint of the users handed over
 }
 
 func (s *server) poolStatePath() string { return filepath.Join(s.env.StateDir, "proxysql.json") }
@@ -262,24 +268,39 @@ func (s *server) poolerRetarget(ctx context.Context, p protocol.PoolerRetargetPa
 	if st == nil {
 		return nil, errors.New("Rowsafe doesn't run ProxySQL for this database")
 	}
-	if p.Host != "127.0.0.1" && p.Host != "localhost" {
-		return nil, errors.New("ProxySQL only points at this server (127.0.0.1)")
+	host := p.Host
+	switch {
+	case host == "localhost" || host == "127.0.0.1":
+		host = ""
+	case net.ParseIP(host) == nil && !hostnameRE.MatchString(host):
+		return nil, fmt.Errorf("invalid host %q", p.Host)
 	}
-	db, err := s.open(ctx)
-	if err != nil {
-		return nil, err
+	if p.Port < 1 || p.Port > 65535 {
+		return nil, fmt.Errorf("invalid port %d", p.Port)
 	}
-	users, _, err := s.poolUsers(ctx, db)
-	db.Close()
-	if err != nil {
-		return nil, err
+	// The users as this server has them (the same on the new primary: they
+	// replicate). When the server is down (the old primary after a
+	// failover), ProxySQL keeps the users it has.
+	var users []proxysqlroot.User
+	if db, err := s.open(ctx); err == nil {
+		users, _, err = s.poolUsers(ctx, db)
+		db.Close()
+		if err != nil {
+			users = nil
+		}
+	}
+	if users == nil {
+		log.Printf("%s on this server can't be read; ProxySQL keeps the users it has", s.flavor.display())
 	}
 	from := st.Target
-	r, err := s.askProxySQL(ctx, proxysqlroot.Request{Action: proxysqlroot.ActionRetarget, Target: p.Port, Users: users}, log)
+	r, err := s.askProxySQL(ctx, proxysqlroot.Request{Action: proxysqlroot.ActionRetarget, Target: p.Port, TargetHost: host, Users: users}, log)
 	if err != nil {
 		return nil, err
 	}
-	st.Target, st.TargetPort, st.Users = r.Target, p.Port, usersFingerprint(users)
+	st.Target, st.TargetPort, st.TargetHost = r.Target, p.Port, host
+	if users != nil {
+		st.Users = usersFingerprint(users)
+	}
 	if err := s.savePoolState(st); err != nil {
 		return nil, err
 	}
@@ -288,6 +309,8 @@ func (s *server) poolerRetarget(ctx context.Context, p protocol.PoolerRetargetPa
 	log.Printf("%s", res.Summary)
 	return res, nil
 }
+
+var hostnameRE = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
 
 // syncPoolUsers hands ProxySQL the users again when they changed (a user
 // created or removed in Databases & users, a new password). It runs in the
@@ -308,7 +331,7 @@ func (s *server) syncPoolUsers(ctx context.Context, db *sql.DB) {
 		defer poolSyncMu.Unlock()
 		bctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		if _, err := s.askProxySQL(bctx, proxysqlroot.Request{Action: proxysqlroot.ActionUsers, Target: st.TargetPort, Users: users}, nil); err != nil {
+		if _, err := s.askProxySQL(bctx, proxysqlroot.Request{Action: proxysqlroot.ActionUsers, Target: st.TargetPort, TargetHost: st.TargetHost, Users: users}, nil); err != nil {
 			s.env.Log.Warn("updating ProxySQL's users failed", "database_id", s.db.ID, "err", err)
 			return
 		}
@@ -325,6 +348,12 @@ func (e *Engine) PoolerStatus(ctx context.Context, env agent.EngineEnv, db proto
 		return nil
 	}
 	out := &protocol.PoolerStatus{Managed: true, DatabaseID: db.ID, Settings: st.Settings, Addresses: st.Addresses, Target: st.Target, Version: st.Version}
+	if al, err := proxysqlroot.Allowed(agent.PoolerConfigOf(env.Config).AllowFile); err == nil {
+		for t := range al.Targets {
+			out.Targets = append(out.Targets, t)
+		}
+		slices.Sort(out.Targets)
+	}
 	sdb, err := openProxySQLStats(ctx)
 	if err != nil {
 		out.Error = err.Error()
@@ -340,7 +369,15 @@ func (e *Engine) PoolerStatus(ctx context.Context, env agent.EngineEnv, db proto
 	return out
 }
 
-var _ agent.EnginePooler = (*Engine)(nil)
+var (
+	_ agent.EnginePooler        = (*Engine)(nil)
+	_ agent.EnginePoolerManaged = (*Engine)(nil)
+)
+
+// PoolerManages reports whether Rowsafe runs ProxySQL for db here.
+func (e *Engine) PoolerManages(env agent.EngineEnv, db protocol.DatabaseSpec) bool {
+	return e.server(env, db).loadPoolState() != nil
+}
 
 // openProxySQLStats opens ProxySQL's admin interface with the read-only
 // statistics credentials root's helper gave the agent.

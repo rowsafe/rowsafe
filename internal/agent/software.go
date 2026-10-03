@@ -40,6 +40,7 @@ const (
 	actUpgradeCleanup = "pg-upgrade-cleanup"
 	actSecurity       = "security-updates"
 	actReboot         = "reboot"
+	actDBMinorUpdate  = "db-minor-update" // other engines (engine_updates.go)
 )
 
 // softwareLoop refreshes the software report every hour, or sooner when
@@ -106,7 +107,7 @@ func (a *Agent) updateAllowed() []string {
 			continue
 		}
 		switch f[0] {
-		case protocol.UpdateAllowPostgres, protocol.UpdateAllowSecurity, protocol.UpdateAllowReboot:
+		case protocol.UpdateAllowPostgres, protocol.UpdateAllowSecurity, protocol.UpdateAllowReboot, protocol.UpdateAllowDatabase:
 			if !slices.Contains(out, f[0]) {
 				out = append(out, f[0])
 			}
@@ -161,7 +162,7 @@ func (a *Agent) buildSoftware(ctx context.Context) *protocol.SoftwareReport {
 		t := st.ModTime().UTC()
 		r.ListsUpdatedAt = &t
 	}
-	r.Clusters = a.clusterSoftware(ctx)
+	r.Clusters = append(a.clusterSoftware(ctx), a.engineSoftware(ctx)...) // engine_updates.go
 	if out, err := a.runner.Run(ctx, "apt-get", "-s", "-o", "Debug::NoLocking=1", "dist-upgrade"); err == nil {
 		pkgs := securityUpgrades(out)
 		r.SecurityUpdates = len(pkgs)

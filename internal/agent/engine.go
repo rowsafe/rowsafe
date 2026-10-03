@@ -169,6 +169,13 @@ type EngineEnv struct {
 	// when this server holds its standby, else Repo (for background work;
 	// a task's env already has it). nil outside the agent.
 	RepoFor func(dbID string) pgbackrest.Repo
+	// Helper hands one request to root's helper (rowsafe-pg-restart) and
+	// waits for its answer: "ID ACTION ARGS...". Only actions root allowed
+	// at install exist there; nil outside the agent's run loop.
+	Helper func(ctx context.Context, action string, args ...string) (map[string]string, error)
+	// HelperCan reports whether root's helper may do action for the server
+	// on port (its "# actions:" line and the allow lists); nil: it can't.
+	HelperCan func(action string, port int) bool
 }
 
 // RunLow runs a command at low CPU and IO priority (LowPriority).
@@ -269,6 +276,7 @@ func (a *Agent) engineEnv(name string) EngineEnv {
 	}
 	env.Copies = a.copyTools()
 	env.RepoFor = func(dbID string) pgbackrest.Repo { return a.repoFor(protocol.DatabaseSpec{ID: dbID}) }
+	env.Helper, env.HelperCan = a.engineHelper, a.helperCanDo // engine_helper.go
 	return env
 }
 

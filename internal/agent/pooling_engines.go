@@ -16,6 +16,31 @@ type EnginePooler interface {
 	PoolerStatus(ctx context.Context, env EngineEnv, db protocol.DatabaseSpec) *protocol.PoolerStatus
 }
 
+// EnginePoolerManaged is optionally implemented by an engine with pooling:
+// PoolerManages reports, cheaply (no connection), whether Rowsafe runs a
+// pooler for db on this server. Such databases are reported in the
+// heartbeat (PoolerDatabases), so a standby's promotion retargets their
+// pooler too.
+type EnginePoolerManaged interface {
+	PoolerManages(env EngineEnv, db protocol.DatabaseSpec) bool
+}
+
+// enginePoolerDatabases are the non-PostgreSQL databases whose pooler
+// Rowsafe runs here.
+func (a *Agent) enginePoolerDatabases() []string {
+	var out []string
+	for _, db := range a.watchedDatabases() {
+		if isPostgres(db) {
+			continue
+		}
+		name := protocol.NormalizeEngine(db.Engine)
+		if p, ok := engineFor(name).(EnginePoolerManaged); ok && p.PoolerManages(a.engineEnv(name), db) {
+			out = append(out, db.ID)
+		}
+	}
+	return out
+}
+
 // PoolerListenAddresses are the addresses a pooler listens on for listen
 // (protocol.PoolerListen*): 127.0.0.1, plus the server's private addresses,
 // or every address ("0.0.0.0").

@@ -34,3 +34,21 @@ func (e *Engine) Ready(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 	}
 	return "on", nil
 }
+
+var _ agent.EngineVersioner = (*Engine)(nil)
+
+// Version is the running server's version ("7.0.14").
+func (e *Engine) Version(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec) (string, error) {
+	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	c, err := connectDB(cctx, env, db)
+	if err != nil {
+		return "", err
+	}
+	defer disconnect(c)
+	in, err := inspect(cctx, c)
+	if err != nil {
+		return "", err
+	}
+	return in.Version, nil
+}

@@ -79,7 +79,7 @@ var clickhouseFeatures = EngineFeatures{
 	FindMoment:  true, // from that record (internal/engine/clickhouse/moment.go)
 	Standby:     true, // follows the primary through that record (internal/engine/clickhouse/standby_*.go)
 	RewindCopy:  true, RewindRows: true, RewindInPlace: true, Marks: true,
-	Monitoring: true, Fixes: true, Restart: true,
+	Monitoring: true, Fixes: true, Restart: true, Updates: true, Upgrades: true,
 	Recommendations: true, // query log, table layout (internal/engine/clickhouse/insights.go)
 	Logs:            true, // the error log (internal/engine/clickhouse/logs.go)
 	DBAdmin:         true, Security: true, Files: true, SecondCopy: true,
@@ -87,6 +87,13 @@ var clickhouseFeatures = EngineFeatures{
 	Fork:     true, // clones restored from a backup into an empty server (fork.go in internal/engine/clickhouse)
 	MoveIn:   true, // one-time copy from ClickHouse Cloud or any ClickHouse (migrate.go in internal/engine/clickhouse)
 	Settings: true, // config.d and users.d through root's tuning helper (opt-in)
+	// Skipping indexes and projections tested on a copy
+	// (internal/engine/clickhouse/advisor.go, protocol/indexadvisor_clickhouse.go).
+	IndexAdvice: true,
+	// chproxy in front of the HTTP interface through root's helper (opt-in;
+	// internal/engine/clickhouse/pooling.go, internal/chproxyroot). Not the
+	// native protocol (port 9000).
+	Pooling: true,
 }
 
 // ClickHouseStatus is ClickHouse's own health detail

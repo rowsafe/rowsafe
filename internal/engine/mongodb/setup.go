@@ -176,6 +176,14 @@ func CreateLogin(ctx context.Context, env agent.EngineEnv, port int, adminUser, 
 // CreateLoginWith is CreateLogin; with clones the user also gets the
 // restore role, so the (empty) server can receive clones.
 func CreateLoginWith(ctx context.Context, env agent.EngineEnv, port int, adminUser, adminPassword string, clones bool) ([]string, error) {
+	return CreateLoginRoles(ctx, env, port, adminUser, adminPassword, clones, false)
+}
+
+// CreateLoginRoles is CreateLogin with the extra roles root allowed: the
+// restore role (clones, moving in) and clusterManager (standby servers:
+// adding a member to the replica set, stepping down and reconfiguring a
+// fenced old primary, promoting).
+func CreateLoginRoles(ctx context.Context, env agent.EngineEnv, port int, adminUser, adminPassword string, clones, standby bool) ([]string, error) {
 	c, err := adminClient(ctx, port, adminUser, adminPassword)
 	if err != nil {
 		return nil, err
@@ -194,11 +202,20 @@ func CreateLoginWith(ctx context.Context, env agent.EngineEnv, port int, adminUs
 	}
 	names := []string{"backup", "clusterMonitor", "readAnyDatabase", "userAdminAnyDatabase", "dbAdminAnyDatabase"}
 	if clones {
+		// Live move in replays the source's updates and deletes onto the
+		// copy, which restore alone cannot do.
 		roles = append(roles, bson.D{{Key: "role", Value: "restore"}, {Key: "db", Value: "admin"}})
 		names = append(names, "restore")
+		roles = append(roles, bson.D{{Key: "role", Value: "readWriteAnyDatabase"}, {Key: "db", Value: "admin"}})
+		names = append(names, "readWriteAnyDatabase")
+	}
+	if standby {
+		roles = append(roles, bson.D{{Key: "role", Value: "clusterManager"}, {Key: "db", Value: "admin"}})
+		names = append(names, "clusterManager")
 	}
 	// A role of its own for what Rowsafe does beyond reading: write a Mark
-	// into the oplog, stop an operation you ask it to stop, put documents
+	// into the oplog, stop an operation you ask it to stop, finish a major
+	// upgrade you asked for (setFeatureCompatibilityVersion), put documents
 	// back when you bring them back from a copy, read the profiler's slow
 	// operations (query statistics), turn the profiler on, create or drop
 	// an index when you ask, and swap collections when you rewind the whole
@@ -206,7 +223,7 @@ func CreateLoginWith(ctx context.Context, env agent.EngineEnv, port int, adminUs
 	// rewind set aside, when you delete it).
 	privileges := bson.A{
 		bson.D{{Key: "resource", Value: bson.D{{Key: "cluster", Value: true}}},
-			{Key: "actions", Value: bson.A{"appendOplogNote", "killop", "inprog", "setParameter"}}},
+			{Key: "actions", Value: bson.A{"appendOplogNote", "killop", "inprog", "setParameter", "setFeatureCompatibilityVersion"}}},
 		bson.D{{Key: "resource", Value: bson.D{{Key: "db", Value: ""}, {Key: "collection", Value: ""}}},
 			{Key: "actions", Value: bson.A{"find", "insert", "update", "createCollection", "createIndex", "dropIndex", "enableProfiler", "renameCollectionSameDB", "dropCollection"}}},
 		bson.D{{Key: "resource", Value: bson.D{{Key: "db", Value: ""}, {Key: "collection", Value: "system.profile"}}},
