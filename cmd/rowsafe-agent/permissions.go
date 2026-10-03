@@ -29,7 +29,7 @@ Usage (as root; root's copy is /usr/local/lib/rowsafe/rowsafe-permissions):
                                 rowsafe-proxysql.service)
   permissions chproxy-apply     install and run chproxy in front of ClickHouse's HTTP
                                 interface where root allowed pooling (run by
-                                rowsafe-chproxy.service)
+                                rowsafe-chproxy-apply.service)
   permissions tuning-apply      write the MongoDB or ClickHouse settings the agent
                                 asked for into Rowsafe's own files, where root
                                 allowed it (run by rowsafe-tuning.service)
@@ -64,7 +64,7 @@ func permissionsCmd(ctx context.Context, args []string) int {
 		err = tuningApply()
 	case "proxysql-apply": // proxysql.go: rowsafe-proxysql.service
 		err = proxysqlApply(ctx)
-	case "chproxy-apply": // chproxy.go: rowsafe-chproxy.service
+	case "chproxy-apply": // chproxy.go: rowsafe-chproxy-apply.service
 		err = chproxyApply(ctx)
 	case "owners":
 		err = permissionsOwners()

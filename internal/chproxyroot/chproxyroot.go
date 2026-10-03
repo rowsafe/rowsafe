@@ -1,6 +1,6 @@
 // Package chproxyroot is the root side of connection pooling for
 // ClickHouse: root's copy of the agent (rowsafe-permissions chproxy-apply,
-// started by rowsafe-chproxy.path) installs chproxy and runs it in front of
+// started by rowsafe-chproxy-apply.path) installs chproxy and runs it in front of
 // a ClickHouse HTTP port root allowed (/etc/rowsafe/pooler-allowed,
 // `rowsafe-allow pooler`), the way the ProxySQL helper does for MySQL.
 //
@@ -42,8 +42,8 @@ import (
 // Defaults (the systemd unit sets the directories).
 const (
 	DefaultRequestDir = "/var/lib/rowsafe/pooler"
-	DefaultAnswerDir  = "/run/rowsafe-chproxy"
-	DefaultStateDir   = "/var/lib/rowsafe-chproxy"
+	DefaultAnswerDir  = "/run/rowsafe-chproxy-apply"
+	DefaultStateDir   = "/var/lib/rowsafe-chproxy-apply"
 	DefaultAllowFile  = "/etc/rowsafe/pooler-allowed"
 	DefaultBinary     = "/usr/local/lib/rowsafe/chproxy"
 	DefaultConfig     = "/etc/rowsafe/chproxy.yml"
