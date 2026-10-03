@@ -205,8 +205,9 @@ func TestClickHousePointInTime(t *testing.T) {
 		t.Fatalf("Proof: %+v %v", dr, err)
 	}
 
-	// Rewind in place to the moment after the merge.
-	target := moments[1].at
+	// Rewind in place to the moment before the TRUNCATE and the drops (in
+	// place needs the same columns as now: ev's column was added before).
+	target := moments[3].at
 	res, err := run[protocol.RewindInPlaceResult](t, e, env, db, protocol.TaskRewindInPlace,
 		protocol.RewindInPlaceParams{RewindID: "rwpit", Target: protocol.RewindTarget{Time: &target}, KeepDays: 1})
 	if err != nil {
@@ -214,9 +215,9 @@ func TestClickHousePointInTime(t *testing.T) {
 	}
 	t.Log(res.Summary)
 	got := snap(admin)
-	for _, k := range []string{"ev", "prices", "sums", "cols"} {
-		if got[k] != moments[1].want[k] {
-			t.Errorf("after the rewind in place: %s = %s, want %s", k, got[k], moments[1].want[k])
+	for _, k := range []string{"ev", "prices", "sums", "cols", "fresh", "new"} {
+		if got[k] != moments[3].want[k] {
+			t.Errorf("after the rewind in place: %s = %s, want %s", k, got[k], moments[3].want[k])
 		}
 	}
 	if _, err := run[protocol.RewindCleanupResult](t, e, env, db, protocol.TaskRewindCleanup, protocol.RewindCleanupParams{RewindID: "rwpit"}); err != nil {
