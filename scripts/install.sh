@@ -588,7 +588,11 @@ clickhouse_setup() {
     return 0
   fi
   install -d -m 0755 "$_dropin"
-  if printf '# Written by the Rowsafe installer: this server runs ClickHouse.\n[Unit]\nAfter=clickhouse-server.service\n[Service]\nUser=rowsafe\nGroup=rowsafe\n' |
+  # The clickhouse group reads ClickHouse's data folder (never writes it):
+  # restores to any second copy each new part from there as it appears.
+  _groups=
+  getent group clickhouse >/dev/null 2>&1 && _groups='SupplementaryGroups=clickhouse\n'
+  if printf "# Written by the Rowsafe installer: this server runs ClickHouse.\n[Unit]\nAfter=clickhouse-server.service\n[Service]\nUser=rowsafe\nGroup=rowsafe\n${_groups}" |
     write_file "$_dropin/10-clickhouse.conf" 0644 root:root; then
     UNIT_CHANGED=1 CHANGED=1
   fi

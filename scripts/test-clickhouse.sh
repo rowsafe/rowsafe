@@ -11,6 +11,7 @@
 #
 #   scripts/test-clickhouse.sh                      # ClickHouse 26.8, 26.3, 25.8 and 24.8, then 26.8 in Docker
 #   CLICKHOUSE_VERSIONS="25.8" DOCKER_MODE=no scripts/test-clickhouse.sh
+#   TEST_RUN=TestClickHousePointInTime FIRST_MODE=sql NATIVE_MODE=no scripts/test-clickhouse.sh
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 VERSIONS=${CLICKHOUSE_VERSIONS:-26.8 26.3 25.8 24.8}
@@ -34,6 +35,7 @@ containers=""
 cleanup() {
 	for c in $containers; do docker rm -f "$c" >/dev/null 2>&1 || true; done
 	docker network rm "rowsafe-test-clickhouse-$$" >/dev/null 2>&1 || true
+	docker volume rm "rowsafe-test-clickhouse-$$-data" >/dev/null 2>&1 || true
 	rm -rf "$work"
 }
 trap cleanup EXIT
@@ -97,7 +99,9 @@ if [ "${CLICKHOUSE_CLONE:-}" = 1 ]; then
 fi
 mode=${FIRST_MODE:-xml}
 RUN_TESTS=${TEST_RUN:-TestClickHouse}
-for v in $VERSIONS; do
+native_versions=$VERSIONS
+[ "${NATIVE_MODE:-yes}" = yes ] || native_versions=""
+for v in $native_versions; do
 	img=rowsafe-test/clickhouse:$v
 	image "$v"
 	name=rowsafe-test-clickhouse-$$-${v//./}
@@ -153,9 +157,13 @@ if [ "${DOCKER_MODE:-yes}" = yes ]; then
 	containers="$containers $server $agent"
 	docker network create "$net" >/dev/null
 	echo "==> ClickHouse $v in Docker, the agent in a sidecar"
-	to 120 docker run -d --rm --name "$server" --network "$net" --network-alias clickhouse \
+	# The agent reads the server's data volume (read only), as in the compose
+	# example: restores to any second copy new parts from it.
+	vol=$net-data
+	to 120 docker run -d --rm --name "$server" --network "$net" --network-alias clickhouse -v "$vol:/var/lib/clickhouse" \
 		-e CLICKHOUSE_PASSWORD=adminpw -e CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1 "$img" >/dev/null
-	if ! to "$LIMIT" docker run --rm --name "$agent" --network "$net" --network-alias agent --entrypoint bash "$img" -euc '
+	if ! to "$LIMIT" docker run --rm --name "$agent" --network "$net" --network-alias agent -v "$vol:/var/lib/clickhouse:ro" \
+		-e RUN_TESTS="$RUN_TESTS" --entrypoint bash "$img" -euc '
 		for _ in $(seq 1 120); do wget -qO- http://clickhouse:8123/ping >/dev/null 2>&1 && break; sleep 1; done
 		export ROWSAFE_CLICKHOUSE_URL=http://clickhouse:8123 ROWSAFE_CLICKHOUSE_GATEWAY_LISTEN=0.0.0.0:9010 ROWSAFE_CLICKHOUSE_GATEWAY_URL=http://agent:9010
 		pass="ROWSAFE_CLICKHOUSE_URL=$ROWSAFE_CLICKHOUSE_URL ROWSAFE_CLICKHOUSE_GATEWAY_LISTEN=$ROWSAFE_CLICKHOUSE_GATEWAY_LISTEN ROWSAFE_CLICKHOUSE_GATEWAY_URL=$ROWSAFE_CLICKHOUSE_GATEWAY_URL"
@@ -171,7 +179,7 @@ if [ "${DOCKER_MODE:-yes}" = yes ]; then
 		cd /tmp
 		su rowsafe -c "env $pass ROWSAFE_TEST_CLICKHOUSE_PORT=8123 ROWSAFE_TEST_CLICKHOUSE_REPLICATED=0 \
 			ROWSAFE_TEST_CLICKHOUSE_ADMIN=default ROWSAFE_TEST_CLICKHOUSE_ADMIN_PASSWORD=adminpw \
-			/usr/local/bin/clickhouse.test -test.v -test.count=1 -test.run TestClickHouse -test.timeout 25m" 2>&1 | tail -n 150
+			/usr/local/bin/clickhouse.test -test.v -test.count=1 -test.run \"$RUN_TESTS\" -test.timeout 25m" 2>&1 | tail -n 150
 		exit ${PIPESTATUS[0]}
 	'; then
 		rc=1
@@ -179,5 +187,6 @@ if [ "${DOCKER_MODE:-yes}" = yes ]; then
 	fi
 	docker rm -f "$server" >/dev/null 2>&1 || true
 	docker network rm "$net" >/dev/null 2>&1 || true
+	docker volume rm "$vol" >/dev/null 2>&1 || true
 fi
 exit $rc
