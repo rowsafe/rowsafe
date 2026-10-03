@@ -2,6 +2,7 @@ package clickhouse
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -190,4 +191,58 @@ func dataFolderProblem(serverDataPath string) string {
 		return shortError(err)
 	}
 	return ""
+}
+
+// mutationKinds reads what recent mutations do, by table UUID, partition
+// and mutation number ("uuid/partition/number"; the partition is "" for a
+// table that isn't replicated): "delete" (ALTER DELETE), "lwdelete"
+// (lightweight DELETE) or "update". Only the kind is read: the command's
+// text never leaves ClickHouse.
+func mutationKinds(ctx context.Context, c *client) map[string]string {
+	type row struct {
+		Table string   `json:"t"`
+		Parts []string `json:"parts"`
+		Nums  []int64  `json:"nums"`
+		Kind  string   `json:"kind"`
+	}
+	rows, err := query[row](ctx, c, `SELECT toString(t.uuid) AS t, m.block_numbers.partition_id AS parts, m.block_numbers.number AS nums,
+		multiIf(match(m.command, '^\\(?UPDATE _row_exists = 0'), 'lwdelete', match(m.command, '^\\(?DELETE '), 'delete',
+		        match(m.command, '^\\(?UPDATE '), 'update', '') AS kind
+		FROM system.mutations AS m
+		INNER JOIN (SELECT database, name, uuid FROM system.tables WHERE database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')) AS t
+		  ON t.database = m.database AND t.name = m.table
+		WHERE m.create_time > now() - INTERVAL 2 DAY`, nil)
+	out := map[string]string{}
+	if err != nil {
+		return out
+	}
+	for _, r := range rows {
+		if r.Kind == "" {
+			continue
+		}
+		for i := range min(len(r.Parts), len(r.Nums)) {
+			out[fmt.Sprintf("%s/%s/%d", r.Table, r.Parts[i], r.Nums[i])] = r.Kind
+		}
+	}
+	return out
+}
+
+// existingRows counts the rows of parts of a table that a lightweight
+// DELETE hasn't hidden: part name -> rows.
+func existingRows(ctx context.Context, c *client, db, table string, parts []string) map[string]int64 {
+	type row struct {
+		Part string `json:"p"`
+		N    int64  `json:"n"`
+	}
+	list, _ := json.Marshal(parts)
+	rows, err := query[row](ctx, c, "SELECT _part AS p, toInt64(count()) AS n FROM "+tableName(db, table)+
+		" WHERE _part IN {parts:Array(String)} GROUP BY _part", map[string]string{"parts": strings.ReplaceAll(string(list), `"`, `'`)})
+	out := map[string]int64{}
+	if err != nil {
+		return out
+	}
+	for _, r := range rows {
+		out[r.Part] = r.N
+	}
+	return out
 }

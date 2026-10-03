@@ -68,6 +68,9 @@ type shipLocal struct {
 	PollAt  time.Time      `json:"poll_at"`
 	LastLog time.Time      `json:"last_log"`
 	Pending []pendingEvent `json:"pending,omitempty"`
+	// Existing are the rows of each part on disk ("uuid/part") that no
+	// lightweight DELETE hid (pitr_counts.go).
+	Existing map[string]int64 `json:"existing,omitempty"`
 	// Problem is why the copier can't work (the data folder can't be
 	// read...), in plain words.
 	Problem string `json:"problem,omitempty"`
@@ -407,7 +410,7 @@ func (s *shipper) shipRound(ctx context.Context, c *client, r *repo, st *shipLoc
 		if dt, ok := lastIn(ddl[old.DB+"."+old.Name], st.PollAt, now); ok {
 			at, resolved = dt, true
 		}
-		pend(pitEvent{At: at, Kind: evDrop, Table: uuid}, "ddl:"+old.DB+"."+old.Name, resolved)
+		pend(pitEvent{At: at, Kind: evDrop, Table: uuid, Rows: tableRows(st, uuid)}, "ddl:"+old.DB+"."+old.Name, resolved)
 		st.Pending[len(st.Pending)-1].After = st.PollAt
 		delete(st.Tables, uuid)
 	}
@@ -431,11 +434,15 @@ func (s *shipper) shipRound(ctx context.Context, c *client, r *repo, st *shipLoc
 		}
 	}
 	slices.SortFunc(news, func(a, b livePart) int { return strings.Compare(a.Name, b.Name) })
+	notes := annotate(ctx, c, st, news, parts, tracked)
 	cw := &chunkWriter{r: r}
 	defer cw.abort()
 	copied := 0
 	for _, lp := range news {
 		p := &pitPart{Name: lp.Name, Partition: lp.Partition, Rows: lp.Rows, At: atLeast(time.Unix(lp.ModTime, 0).UTC())}
+		if a := notes[lp.Table+"/"+lp.Name]; a != nil {
+			p.Change, p.Deleted, p.Cleared, p.Mutation = a.Change, a.Deleted, a.Cleared, a.Mutation
+		}
 		files, err := s.copyPart(ctx, cw, st, lp.Table, localPath(dataPath, lp.Path), lp.Name)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -492,6 +499,9 @@ func (s *shipper) shipRound(ctx context.Context, c *client, r *repo, st *shipLoc
 				pe.Ev.Part.At = pe.Ev.At
 				if len(pe.Ev.Part.Sources) == 0 {
 					pe.Ev.Part.Sources = row.Sources
+				}
+				if pe.Ev.Part.Change == "update" {
+					pe.Ev.Part.Updated = row.Rows // 0: linked as it was, not rewritten
 				}
 			}
 		case strings.HasPrefix(pe.Key, "ddl:"):
@@ -567,6 +577,11 @@ func (s *shipper) shipRound(ctx context.Context, c *client, r *repo, st *shipLoc
 	for k, f := range st.Files {
 		if !onDisk[f.Part] {
 			delete(st.Files, k)
+		}
+	}
+	for k := range st.Existing {
+		if !onDisk[k] {
+			delete(st.Existing, k)
 		}
 	}
 	st.PollAt = now
@@ -648,7 +663,12 @@ func (s *shipper) startRecord(ctx context.Context, r *repo, st *shipLocal, now t
 		}
 		st.Seen[p.Table][p.Name] = true
 	}
-	st.Tables, st.DBs, st.Files = map[string]pitTable{}, map[string]pitDB{}, map[string]copiedFile{}
+	st.Tables, st.DBs, st.Files, st.Existing = map[string]pitTable{}, map[string]pitDB{}, map[string]copiedFile{}, map[string]int64{}
+	for _, p := range parts {
+		if p.Active == 1 {
+			st.Existing[p.Table+"/"+p.Name] = p.Rows
+		}
+	}
 	for _, t := range tables {
 		if t.UUID == "" || t.UUID == zeroUUID {
 			continue

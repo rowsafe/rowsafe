@@ -174,6 +174,44 @@ func TestClickHousePointInTime(t *testing.T) {
 		}
 	}
 
+	// Find the moment: what each step did, with counts.
+	from := moments[0].at.Add(-time.Minute)
+	fm, err := run[protocol.FindMomentResult](t, e, env, db, protocol.TaskFindMoment, protocol.FindMomentParams{From: &from})
+	if err != nil {
+		t.Fatalf("find moment: %v", err)
+	}
+	t.Log(fm.Summary, fm.Notes)
+	var lwDelete *protocol.Moment
+	seen := map[string]bool{}
+	for i, m := range fm.Moments {
+		t.Logf("moment %s %s %s rows=%d est=%v %s", m.Time.Format("15:04:05.000000"), m.Kind, m.Table, m.Rows, m.Estimated, m.Summary)
+		seen[m.Kind+" "+m.Table] = true
+		if m.Kind == protocol.MomentDelete && m.Table == "pit.ev" && m.Rows == 150 {
+			lwDelete = &fm.Moments[i]
+		}
+	}
+	for _, want := range []string{"delete pit.ev", "update pit.ev", "truncate pit.my-prices", "drop pit.fresh", "truncate pit.ev"} {
+		if !seen[want] {
+			t.Errorf("find moment: no %q", want)
+		}
+	}
+	if lwDelete == nil {
+		t.Fatal("find moment: the lightweight DELETE of 150 rows isn't listed")
+	}
+	// Just before it: the 150 rows are there.
+	before := lwDelete.Time.Add(-time.Microsecond)
+	if _, err := run[protocol.RewindCopyResult](t, e, env, db, protocol.TaskRewindCopy,
+		protocol.RewindCopyParams{CopyID: "pitjb", Target: protocol.RewindTarget{Time: &before}}); err != nil {
+		t.Fatal(err)
+	}
+	cc, _ := scratchAt(filepath.Join(copyRoot(env), "pitjb")).client()
+	if n := count(t, cc, "SELECT count() FROM pit.ev WHERE k = 6"); n != 150 {
+		t.Errorf("just before the DELETE: %d rows with k = 6, want 150", n)
+	}
+	if _, err := run[protocol.RewindDropResult](t, e, env, db, protocol.TaskRewindDrop, protocol.RewindDropParams{CopyID: "pitjb"}); err != nil {
+		t.Fatal(err)
+	}
+
 	// Copies at every moment.
 	for i, m := range moments {
 		at := m.at
