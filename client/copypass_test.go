@@ -18,6 +18,9 @@ func TestCopyVerifiers(t *testing.T) {
 		t.Errorf("native: %s", NativePasswordHash("secret"))
 	}
 	for _, e := range protocol.Engines {
+		if !protocol.EngineHas(e, protocol.FeatureSafeCopies) {
+			continue
+		}
 		pw, v, err := NewCopyPasswordFor(e)
 		if err != nil || len(pw) != 24 || !protocol.ValidCopyVerifier(e, v) {
 			t.Errorf("%s: %q %q %v", e, pw, v, err)
