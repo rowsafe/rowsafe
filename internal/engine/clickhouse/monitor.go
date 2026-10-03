@@ -42,6 +42,10 @@ type dbMonitor struct {
 	queryStart map[string]time.Time // query_id -> start, as first seen
 	qlogTo     time.Time            // the query log is read up to here (insights.go)
 	insightsAt time.Time
+	// unused skipping indexes and projections, checked once a day
+	// (advisor.go: unusedObjects).
+	unused   []protocol.UnusedIndex
+	unusedAt time.Time
 }
 
 func (e *Engine) monitorFor(id string) *dbMonitor {
@@ -222,6 +226,10 @@ func (m *dbMonitor) sample(ctx context.Context, dm *protocol.DatabaseMonitoring)
 	}
 	if now.Sub(m.insightsAt) >= insightsEvery {
 		if ins := insights(ctx, c); ins != nil {
+			if now.Sub(m.unusedAt) >= 24*time.Hour {
+				m.unused, m.unusedAt = unusedObjects(ctx, c, m.login.User, now), now
+			}
+			ins.UnusedIndexes = append(ins.UnusedIndexes, m.unused...)
 			dm.Insights = ins
 			m.insightsAt = now
 		}

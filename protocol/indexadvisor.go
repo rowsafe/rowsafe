@@ -50,8 +50,24 @@ type IndexSpec struct {
 	// AND d IS NOT NULL.
 	WhereNull    []string `json:"where_null,omitempty"`
 	WhereNotNull []string `json:"where_not_null,omitempty"`
-	// Name is the index name: rs_<table>_<columns>_idx (IndexName).
+	// Name is the index name: rs_<table>_<columns>_idx (IndexName);
+	// rs_<table>_<columns>_proj for a ClickHouse projection.
 	Name string `json:"name"`
+
+	// ClickHouse (clickhouse.go): Kind says what Columns mean.
+	//   - IndexKindSkip: a data-skipping index on Columns[0] of Type
+	//     (minmax, set(N), bloom_filter(p), tokenbf_v1(...), ngrambf_v1(...))
+	//     and Granularity.
+	//   - IndexKindProjection: a projection that keeps Include (empty: every
+	//     column) sorted by Columns; or, with GroupBy, one that pre-aggregates
+	//     Aggregates ("sum(amount)", "count()") by GroupBy.
+	//   - IndexKindOrderBy: advice only, a new sorting key (ORDER BY Columns)
+	//     for the table; changing it means rebuilding the table.
+	Kind        string   `json:"kind,omitempty"`
+	Type        string   `json:"type,omitempty"`
+	Granularity int      `json:"granularity,omitempty"`
+	GroupBy     []string `json:"group_by,omitempty"`
+	Aggregates  []string `json:"aggregates,omitempty"`
 }
 
 // Key identifies an index definition (not its name): two specs with the same
@@ -65,6 +81,15 @@ func (s IndexSpec) Key() string {
 	}
 	if p := s.Predicate(); p != "" {
 		parts = append(parts, "where:"+p)
+	}
+	if s.Kind != "" {
+		parts = append(parts, "kind:"+s.Kind)
+		if s.Type != "" {
+			parts = append(parts, fmt.Sprintf("type:%s/%d", s.Type, s.Granularity))
+		}
+		if len(s.GroupBy) > 0 || len(s.Aggregates) > 0 {
+			parts = append(parts, "group:"+strings.Join(sortedCopy(s.GroupBy), ",")+"/"+strings.Join(sortedCopy(s.Aggregates), ","))
+		}
 	}
 	return strings.Join(parts, "|")
 }
@@ -163,6 +188,8 @@ func (s IndexSpec) DefinitionFor(engine string) string {
 			keys[i] = fmt.Sprintf("%q: %d", c, dir)
 		}
 		return fmt.Sprintf("db.getSiblingDB(%q).getCollection(%q).createIndex({%s}, {name: %q})", s.DB, s.Table, strings.Join(keys, ", "), s.Name)
+	case EngineClickHouse:
+		return s.ClickHouseDefinition()
 	}
 	return s.Definition()
 }
@@ -192,7 +219,7 @@ func QuoteIdent(s string) string {
 }
 
 // indexNameRE is what IndexName produces.
-var indexNameRE = regexp.MustCompile(`^rs_[a-z0-9_]{1,56}_idx$`)
+var indexNameRE = regexp.MustCompile(`^rs_[a-z0-9_]{1,56}_(idx|proj)$`)
 
 // ValidIndexName reports whether name is one IndexName could produce.
 func ValidIndexName(name string) bool { return len(name) <= 63 && indexNameRE.MatchString(name) }
@@ -223,6 +250,9 @@ func IndexName(s IndexSpec) string {
 		body += "_" + hash
 	} else if len(body) > maxBody {
 		body = strings.TrimRight(body[:maxBody-7], "_") + "_" + hash
+	}
+	if s.Kind == IndexKindProjection {
+		return IndexNamePrefix + body + "_proj"
 	}
 	return IndexNamePrefix + body + "_idx"
 }
@@ -311,6 +341,10 @@ type IndexGain struct {
 	// sample values (0 when not measured: only plain SELECTs are run).
 	MsBefore float64 `json:"ms_before,omitempty"`
 	MsAfter  float64 `json:"ms_after,omitempty"`
+	// RowsBefore and RowsAfter are the rows the query read on the copy
+	// (ClickHouse: read_rows).
+	RowsBefore int64 `json:"rows_before,omitempty"`
+	RowsAfter  int64 `json:"rows_after,omitempty"`
 	Speedup  float64 `json:"speedup"`
 	// Calls and TotalTimeMs are the statement's activity on production.
 	Calls       int64   `json:"calls"`

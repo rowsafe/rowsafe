@@ -72,6 +72,9 @@ var clickhouseFeatures = EngineFeatures{
 	Fork:     true, // clones restored from a backup into an empty server (fork.go in internal/engine/clickhouse)
 	MoveIn:   true, // one-time copy from ClickHouse Cloud or any ClickHouse (migrate.go in internal/engine/clickhouse)
 	Settings: true, // config.d and users.d through root's tuning helper (opt-in)
+	// Skipping indexes and projections tested on a copy
+	// (internal/engine/clickhouse/advisor.go, protocol/indexadvisor_clickhouse.go).
+	IndexAdvice: true,
 }
 
 // ClickHouseStatus is ClickHouse's own health detail

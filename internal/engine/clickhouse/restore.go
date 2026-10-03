@@ -154,7 +154,42 @@ func restoreInto(ctx context.Context, env agent.EngineEnv, r *repo, b backupDoc,
 // where merges and view refreshes are stopped afterwards (never on a real
 // server, a clone's).
 func restoreTo(ctx context.Context, env agent.EngineEnv, r *repo, b backupDoc, c *client, scratch bool, tl agent.TaskLogger) (map[string]string, error) {
+	return restoreSkipping(ctx, env, r, b, c, scratch, leftOut(b.Tables), tl)
+}
+
+// restoreOnly restores the tables of backup b listed in only ("db.name")
+// into the scratch server c, with their databases as they were.
+func restoreOnly(ctx context.Context, env agent.EngineEnv, r *repo, b backupDoc, c *client, only map[string]bool, tl agent.TaskLogger) error {
 	skip := leftOut(b.Tables)
+	dbs := map[string]bool{}
+	for _, t := range b.Tables {
+		if !only[t.key()] {
+			if _, ok := skip[t.key()]; !ok {
+				skip[t.key()] = ""
+			}
+		} else if _, left := skip[t.key()]; !left {
+			dbs[t.DB] = true
+		}
+	}
+	b.Databases = slices.DeleteFunc(slices.Clone(b.Databases), func(d protocol.DBInfo) bool { return !dbs[d.Name] })
+	if len(b.Databases) == 0 {
+		return errors.New("the backup has none of the tables to test")
+	}
+	_, err := restoreSkipping(ctx, env, r, b, c, true, skip, quietSkips{tl})
+	return err
+}
+
+// quietSkips leaves the tables not asked for out of the task log.
+type quietSkips struct{ agent.TaskLogger }
+
+func (q quietSkips) Printf(format string, args ...any) {
+	if strings.HasPrefix(format, "left out of the restore") && len(args) == 2 && args[1] == "" {
+		return
+	}
+	q.TaskLogger.Printf(format, args...)
+}
+
+func restoreSkipping(ctx context.Context, env agent.EngineEnv, r *repo, b backupDoc, c *client, scratch bool, skip map[string]string, tl agent.TaskLogger) (map[string]string, error) {
 	prefixes := []string{backupDir(b.Label)}
 	if b.Base != "" {
 		prefixes = append(prefixes, backupDir(b.Base))
