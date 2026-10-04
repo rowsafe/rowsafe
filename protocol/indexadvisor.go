@@ -460,6 +460,9 @@ type IndexRecommendationView struct {
 	Usage *IndexUsageView `json:"usage,omitempty"`
 	// Outcome is the report a week after creation.
 	Outcome *IndexOutcome `json:"outcome,omitempty"`
+	// ForeignKey: an index for a foreign key (SQLite), with its lookup
+	// measured on the copy (IndexRecommendation.ForeignKey).
+	ForeignKey *IndexForeignKey `json:"foreign_key,omitempty"`
 }
 
 // IndexStatementView is a statement a recommendation helps.
