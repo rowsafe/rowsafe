@@ -6,7 +6,10 @@
 # non-root user like the agent, and the bucket inside the test process.
 # Then the first image runs again as a Docker sidecar (the server in its own
 # container, the test in another with ROWSAFE_REDIS_HOST and the data volume
-# mounted read only).
+# mounted read only). Each native run has a second container of the same
+# image next to it, acting as the managed provider a database moves in from
+# (TestRedisMoveIn); standbys and clones use extra servers in the test's own
+# container.
 #
 #   scripts/test-redis.sh
 #   REDIS_IMAGES="valkey/valkey:8.1" DOCKER_MODE=no scripts/test-redis.sh
@@ -35,6 +38,7 @@ containers=""
 cleanup() {
 	for c in $containers; do docker rm -f "$c" >/dev/null 2>&1 || true; done
 	docker network rm "rowsafe-test-redis-$$" >/dev/null 2>&1 || true
+	docker network rm "rowsafe-test-redis-$$-native" >/dev/null 2>&1 || true
 	docker volume rm "rowsafe-test-redis-$$-data" >/dev/null 2>&1 || true
 	rm -rf "$work"
 }
@@ -67,21 +71,27 @@ run_test() { # run_test CONTAINER USER ENV...
 
 rc=0
 first=""
+nnet="rowsafe-test-redis-$$-native"
+docker network create "$nnet" >/dev/null
+PROVIDER_PASS=rowsafe-test-provider-password
 for src in $IMAGES; do
 	tag=$(image "$src")
 	first=${first:-$tag}
 	c="rowsafe-test-redis-$$-$(echo "$src" | tr '/:.' '---')"
 	containers="$containers $c"
 	echo "==> $src (native: the server and the test in one container)"
-	docker run -d --name "$c" "$tag" sleep infinity >/dev/null
+	docker run -d --name "$c" --network "$nnet" "$tag" sleep infinity >/dev/null
 	docker exec "$c" sh -c 'su -s /bin/sh "$ROWSAFE_TEST_SERVER_USER" -c "$ROWSAFE_TEST_SERVER_BIN /etc/rowsafe-test/server.conf --daemonize yes"'
+	pv="$c-provider"
+	containers="$containers $pv"
+	docker run -d --name "$pv" --network "$nnet" "$src" sh -c "exec \$(command -v redis-server || command -v valkey-server) --protected-mode no --requirepass $PROVIDER_PASS --save ''" >/dev/null
 	sleep 1
-	if ! run_test "$c" rowsafe; then
+	if ! run_test "$c" rowsafe -e ROWSAFE_TEST_PROVIDER_ADDR="$pv:6379" -e ROWSAFE_TEST_PROVIDER_PASSWORD="$PROVIDER_PASS"; then
 		echo "FAIL: $src" >&2
 		docker exec "$c" sh -c 'tail -n 30 /data/*.log 2>/dev/null || true'
 		rc=1
 	fi
-	docker rm -f "$c" >/dev/null
+	docker rm -f "$c" "$pv" >/dev/null
 done
 
 if [ "${DOCKER_MODE:-yes}" = yes ] && [ -n "$first" ]; then

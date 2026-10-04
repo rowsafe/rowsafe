@@ -79,3 +79,20 @@ func TestCopyVerifier(t *testing.T) {
 		t.Fatal(cs)
 	}
 }
+
+func TestParseMigSource(t *testing.T) {
+	s, err := parseMigSource("redis://default:pw@cache.example.com:6380/2")
+	if err != nil || s.TLS || s.Port != 6380 || s.DB != 2 || s.User != "default" || s.Password != "pw" {
+		t.Fatalf("%+v %v", s, err)
+	}
+	s, err = parseMigSource("rediss://:pw@x.upstash.io:6379")
+	if err != nil || !s.TLS || s.DB != -1 || migProvider(s.Host) != "upstash" {
+		t.Fatalf("%+v %v", s, err)
+	}
+	if _, err := parseMigSource("mysql://x@y/z"); err == nil {
+		t.Fatal("a MySQL string passed")
+	}
+	if migProvider("master.c1.abc.use1.cache.amazonaws.com") != "elasticache" || migProvider("db.example.com") != "other" {
+		t.Fatal("providers")
+	}
+}
