@@ -190,6 +190,8 @@ func (s IndexSpec) DefinitionFor(engine string) string {
 		return fmt.Sprintf("db.getSiblingDB(%q).getCollection(%q).createIndex({%s}, {name: %q})", s.DB, s.Table, strings.Join(keys, ", "), s.Name)
 	case EngineClickHouse:
 		return s.ClickHouseDefinition()
+	case EngineSQLite:
+		return s.sqliteDefinition() // sqlite_advice.go
 	}
 	return s.Definition()
 }
@@ -333,6 +335,10 @@ type IndexRecommendation struct {
 	Statements []IndexGain `json:"statements"`
 	// Speedup is the time-weighted speedup over those statements.
 	Speedup float64 `json:"speedup"`
+	// ForeignKey: an index for a foreign key, proposed from the schema
+	// (SQLite, which keeps no query statistics: no Statements); Speedup is
+	// then its lookup's (sqlite_advice.go).
+	ForeignKey *IndexForeignKey `json:"foreign_key,omitempty"`
 }
 
 // IndexGain is one statement before and after the index, on the copy.

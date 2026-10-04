@@ -35,6 +35,7 @@ type dbMonitor struct {
 	stale    []string
 	staleAt  time.Time
 	walSizes []int64
+	adviceAt time.Time // schema facts for recommendations (advice.go)
 }
 
 func (e *Engine) monitorFor(id string) *dbMonitor {
@@ -142,6 +143,13 @@ func (e *Engine) Monitor(ctx context.Context, env agent.EngineEnv, db protocol.D
 		}
 	}
 	st.StaleStatsTables = m.stale
+	if time.Since(m.adviceAt) >= staleEvery { // advice.go
+		if ins, err := schemaInsights(ctx, c, st.JournalMode); err == nil {
+			dm.Insights, m.adviceAt = ins, time.Now()
+		} else {
+			busy.note(err)
+		}
+	}
 	if total, free, err := diskSpace(filepath.Dir(path)); err == nil && total > 0 {
 		st.DiskFreeBytes = free
 		dm.Metrics = map[string]float64{
