@@ -120,9 +120,9 @@ func TestNames(t *testing.T) {
 	for in, want := range map[string]string{
 		"/srv/shop/db/production.sqlite3":                 "shop-production",
 		"/var/lib/docker/volumes/blog_data/_data/blog.db": "blog",
-		"/home/app/pb_data/data.db":                       "app",
+		"/home/app/pb_data/data.db":                       "data",
 		"/opt/notes/storage/notes.sqlite":                 "notes",
-		"/data/app.db":                                    "sqlite",
+		"/data/app.db":                                    "app",
 		"/srv/wiki/database/database.sqlite":              "wiki",
 		"/var/www/laravel/database/database.sqlite":       "laravel",
 	} {
