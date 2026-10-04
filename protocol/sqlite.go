@@ -61,7 +61,7 @@ import (
 //     changes on a private scratch copy and compares each table's rows
 //     (by rowid, or a WITHOUT ROWID table's primary key, as a hash of
 //     their bytes: values are never decoded) before and after every
-//     transaction. Moment.DB is "main", Table "main.<name>", Kind delete,
+//     transaction. Moment.DB is "main", Table the table's name, Kind delete,
 //     update or drop (a DELETE without WHERE is a delete of every row;
 //     inserts aren't listed), LSN the transaction's stream position, XID
 //     a sequence number with the high bit set (no transaction IDs in

@@ -183,13 +183,13 @@ func TestSQLiteFindMoment(t *testing.T) {
 		t.Logf("%s %s: %s (%s)", m.Time.Format(time.StampMilli), m.LSN, m.Summary, m.Note)
 	}
 	want := map[string]int64{
-		"delete main.orders":    500,
-		"update main.customers": 60,
-		"update main.kv":        99,
-		"delete main.kv":        10,
-		"drop main.tmp":         123,
-		"delete main.orders2":   90, // 1..99 less the 9 deleted before
-		"delete main.customers": 2000,
+		"delete orders":    500,
+		"update customers": 60,
+		"update kv":        99,
+		"delete kv":        10,
+		"drop tmp":         123,
+		"delete orders2":   90, // 1..99 less the 9 deleted before
+		"delete customers": 2000,
 	}
 	for k, n := range want {
 		if got[k] != n {
@@ -201,7 +201,7 @@ func TestSQLiteFindMoment(t *testing.T) {
 			t.Errorf("unexpected change %s (%d rows)", k, got[k])
 		}
 	}
-	for k, at := range map[string]time.Time{"delete main.orders": atDelete, "update main.customers": atUpdate, "delete main.customers": atEmpty} {
+	for k, at := range map[string]time.Time{"delete orders": atDelete, "update customers": atUpdate, "delete customers": atEmpty} {
 		if m := byKey[k]; m.Time.Before(at.Add(-time.Second)) || m.Time.After(at.Add(2*time.Second)) {
 			t.Errorf("%s at %s, committed at %s", k, m.Time.Format(time.StampMilli), at.Format(time.StampMilli))
 		}
@@ -212,7 +212,7 @@ func TestSQLiteFindMoment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res2.Moments) != 1 || res2.Moments[0].Table != "main.orders2" || res2.Moments[0].Rows != 90 {
+	if len(res2.Moments) != 1 || res2.Moments[0].Table != "orders2" || res2.Moments[0].Rows != 90 {
 		t.Errorf("filtered search: %+v", res2.Moments)
 	}
 
@@ -237,7 +237,7 @@ func TestSQLiteFindMoment(t *testing.T) {
 		}
 		return n
 	}
-	m := byKey["delete main.orders"]
+	m := byKey["delete orders"]
 	justBefore := m.Time.Truncate(time.Millisecond).Add(-time.Millisecond)
 	if n := count(justBefore, "SELECT count(*) FROM orders"); n != 5000 {
 		t.Errorf("just before the delete: %d orders, want 5000", n)
@@ -245,7 +245,7 @@ func TestSQLiteFindMoment(t *testing.T) {
 	if n := count(m.Time, "SELECT count(*) FROM orders"); n != 4500 {
 		t.Errorf("at the delete: %d orders, want 4500", n)
 	}
-	m = byKey["delete main.customers"]
+	m = byKey["delete customers"]
 	if n := count(m.Time.Truncate(time.Millisecond).Add(-time.Millisecond), "SELECT count(*) FROM customers"); n != 2000 {
 		t.Errorf("just before customers were emptied: %d, want 2000", n)
 	}

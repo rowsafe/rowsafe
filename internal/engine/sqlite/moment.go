@@ -212,7 +212,7 @@ func (w *momentWatcher) start(f *os.File, pageSize int) error {
 	w.tables = map[string]*watchedTable{}
 	w.ignored = map[string]bool{}
 	for name, st := range schema {
-		if !w.search.Wants("main", "main."+name) {
+		if !w.search.Wants("main", name) {
 			w.ignored[name] = true
 		}
 		tp, err := v.walk(st.Root)
@@ -385,7 +385,7 @@ func (w *momentWatcher) compare(before, after *pageView, touched map[uint32]bool
 				delete(w.tables, name)
 				t.Name = nn
 				w.tables[nn] = t
-				w.ignored[nn] = !w.search.Wants("main", "main."+nn)
+				w.ignored[nn] = !w.search.Wants("main", nn)
 				name, nt = nn, newSchema[nn]
 			} else {
 				rows := int64(0)
@@ -398,7 +398,7 @@ func (w *momentWatcher) compare(before, after *pageView, touched map[uint32]bool
 				}
 				delete(w.tables, name)
 				if !w.ignored[name] {
-					out = append(out, protocol.Moment{Kind: protocol.MomentDrop, DB: "main", Table: "main." + name, Rows: rows})
+					out = append(out, protocol.Moment{Kind: protocol.MomentDrop, DB: "main", Table: name, Rows: rows})
 				}
 				continue
 			}
@@ -435,7 +435,7 @@ func (w *momentWatcher) compare(before, after *pageView, touched map[uint32]bool
 			return nil, fmt.Errorf("table %s: %w", name, err)
 		}
 		for _, c := range m {
-			c.DB, c.Table = "main", "main."+name
+			c.DB, c.Table = "main", name
 			out = append(out, c)
 		}
 	}
@@ -449,7 +449,7 @@ func (w *momentWatcher) compare(before, after *pageView, touched map[uint32]bool
 			return nil, fmt.Errorf("reading table %s: %w", name, err)
 		}
 		w.tables[name] = &watchedTable{schemaTable: st, pages: tp}
-		w.ignored[name] = !w.search.Wants("main", "main."+name)
+		w.ignored[name] = !w.search.Wants("main", name)
 	}
 	return out, nil
 }
