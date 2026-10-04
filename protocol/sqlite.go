@@ -114,6 +114,13 @@ var SQLiteNoServer = map[string]string{
 	FeatureLogs:     "SQLite runs inside your app and keeps no log of its own; your app's logs have its errors.",
 }
 
+// SQLiteOff is why the other features SQLite doesn't have are off, in one
+// plain sentence each (shown where people look for them).
+var SQLiteOff = map[string]string{
+	FeatureSettings: "Tuning doesn't apply to SQLite: there is no server to tune, and your app sets SQLite's options when it opens the file.",
+	FeatureMoveIn:   "Moving in from Turso or Cloudflare D1 isn't available yet.",
+}
+
 // sqliteFeatures are what SQLite supports (EngineCapabilities). A SQLite
 // database is a file that an application opens itself: there is no server
 // to restart, replicate, pool, update or log, so those flags stay off
