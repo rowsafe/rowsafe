@@ -671,12 +671,18 @@ func maskingSetCmd(ctx context.Context, c *client.Client, args []string) error {
 		return errors.New("write the column as TABLE.COLUMN (or SCHEMA.TABLE.COLUMN)")
 	}
 	table, column := ref[:i], ref[i+1:]
-	if !strings.Contains(table, ".") {
-		table = "public." + table
+	find := func(table string) int {
+		return slices.IndexFunc(info.Columns, func(col protocol.MaskingColumn) bool {
+			return col.Table == table && col.Column == column && (dbName == "" || col.DB == dbName)
+		})
 	}
-	idx := slices.IndexFunc(info.Columns, func(col protocol.MaskingColumn) bool {
-		return col.Table == table && col.Column == column && (dbName == "" || col.DB == dbName)
-	})
+	// Tables as the engine names them: "users" (SQLite, MySQL), else
+	// PostgreSQL's "public.users".
+	idx := find(table)
+	if idx < 0 && !strings.Contains(table, ".") {
+		table = "public." + table
+		idx = find(table)
+	}
 	if idx < 0 {
 		return fmt.Errorf("no column %s.%s in %s (see rowsafe masking %s --all)", table, column, name, name)
 	}
