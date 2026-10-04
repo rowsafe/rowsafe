@@ -182,15 +182,21 @@ func dropVirtual(c *sqlite3.Conn, v vtab) error {
 
 // triggersNaming are the triggers whose statement names table.
 func triggersNaming(c *sqlite3.Conn, table string) []string {
-	re := regexp.MustCompile(`(?i)(^|[^A-Za-z0-9_$])["'\[` + "`" + `]?` + regexp.QuoteMeta(table) + `["'\]` + "`" + `]?($|[^A-Za-z0-9_$])`)
 	var out []string
 	_ = queryRows(c, `SELECT name, sql FROM main.sqlite_schema WHERE type = 'trigger'`, func(s *sqlite3.Stmt) error {
-		if re.MatchString(s.ColumnText(1)) {
+		if namesTable(s.ColumnText(1), table) {
 			out = append(out, s.ColumnText(0))
 		}
 		return nil
 	})
 	return out
+}
+
+// namesTable reports whether a statement names table (as a whole word,
+// quoted or not; case-insensitive like SQLite's names).
+func namesTable(sql, table string) bool {
+	re := regexp.MustCompile(`(?i)(^|[^A-Za-z0-9_$])["'\[` + "`" + `]?` + regexp.QuoteMeta(table) + `["'\]` + "`" + `]?($|[^A-Za-z0-9_$])`)
+	return re.MatchString(sql)
 }
 
 // maskTables applies the plan in one transaction, with the triggers set

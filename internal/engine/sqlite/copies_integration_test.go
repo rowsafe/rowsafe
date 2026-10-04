@@ -72,7 +72,7 @@ func TestSQLiteSafeCopies(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("structure only: %s", so.Summary)
-	if !so.SchemaOnly || so.Path == "" || so.Path == mc.Path || so.Masking.Tables < 7 || len(so.Masking.Skipped) != 1 {
+	if !so.SchemaOnly || so.Path == "" || so.Path == mc.Path || so.Masking.Tables < 7 || len(so.Masking.Skipped) != 2 {
 		t.Errorf("result: %+v", so)
 	}
 	if d := so.Expires.Sub(time.Now()); d < 23*time.Hour || d > 25*time.Hour {

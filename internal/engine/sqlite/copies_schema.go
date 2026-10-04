@@ -419,14 +419,29 @@ func schemaOnlyCopy(ctx context.Context, src, dst string, tl agent.TaskLogger) (
 	defer rollback(d)
 	// Views and triggers may name each other: retry the ones that failed
 	// while others still get created.
+	var skipped []string // virtual tables left out: their triggers go too
+	for name, module := range modules {
+		if module != "fts5" {
+			skipped = append(skipped, name)
+			out.LeftOut = append(out.LeftOut, fmt.Sprintf("%s: a virtual table of the SQLite extension %s, which Rowsafe can't create", name, orText(module, "unknown")))
+		}
+	}
 	pending := objs
 	for round := 0; len(pending) > 0; round++ {
 		var failed []schemaObject
 		var reasons []string
+	next:
 		for _, o := range pending {
-			if o.Type == "table" && modules[o.Name] != "" && modules[o.Name] != "fts5" {
-				out.LeftOut = append(out.LeftOut, fmt.Sprintf("%s: a virtual table of the SQLite extension %s, which Rowsafe can't create", o.Name, modules[o.Name]))
+			if o.Type == "table" && slices.Contains(skipped, o.Name) {
 				continue
+			}
+			if o.Type == "trigger" {
+				for _, v := range skipped {
+					if namesTable(o.SQL, v) {
+						out.LeftOut = append(out.LeftOut, fmt.Sprintf("trigger %s: it uses %s, which was left out", o.Name, v))
+						continue next
+					}
+				}
 			}
 			if err := d.Exec(o.SQL); err != nil {
 				failed = append(failed, o)

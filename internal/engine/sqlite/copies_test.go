@@ -381,7 +381,7 @@ func TestSQLiteSchemaOnlyCopy(t *testing.T) {
 // unknown virtual table) and no row.
 func checkSchemaOnly(t *testing.T, src, dst string, out schemaOut) {
 	t.Helper()
-	if len(out.LeftOut) != 1 || !strings.Contains(out.LeftOut[0], "geo") {
+	if len(out.LeftOut) != 2 || !strings.Contains(strings.Join(out.LeftOut, "\n"), "trigger users_geo: it uses geo") {
 		t.Errorf("left out: %v", out.LeftOut)
 	}
 	if fi, err := os.Stat(dst); err != nil || fi.Mode().Perm() != 0o600 {
@@ -391,7 +391,7 @@ func checkSchemaOnly(t *testing.T, src, dst string, out schemaOut) {
 		c := mustOpenScratch(t, path)
 		defer c.Close()
 		var out []string
-		_ = queryRows(c, `SELECT type || ' ' || name FROM sqlite_schema WHERE name NOT IN ('geo', 'geo_node', 'geo_rowid', 'geo_parent') ORDER BY 1`,
+		_ = queryRows(c, `SELECT type || ' ' || name FROM sqlite_schema WHERE name NOT IN ('geo', 'geo_node', 'geo_rowid', 'geo_parent', 'users_geo') ORDER BY 1`,
 			func(s *sqlite3.Stmt) error { out = append(out, s.ColumnText(0)); return nil })
 		return out
 	}
@@ -420,7 +420,8 @@ func checkSchemaOnly(t *testing.T, src, dst string, out schemaOut) {
 		t.Errorf("journal mode %s", m)
 	}
 	// It works as the app's database: the triggers and search run.
-	if err := c.Exec(`PRAGMA foreign_keys = ON; INSERT INTO users (email, full_name) VALUES ('new@example.com', 'New Person'); UPDATE users SET full_name = 'x'`); err != nil {
+	if err := c.Exec(`PRAGMA foreign_keys = ON; INSERT INTO users (email, full_name) VALUES ('new@example.com', 'New Person'); UPDATE users SET full_name = 'x';
+		INSERT INTO users (email) VALUES ('gone@example.com'); DELETE FROM users WHERE email = 'gone@example.com'`); err != nil {
 		t.Fatal(err)
 	}
 	if n, _ := queryInt(c, `SELECT count(*) FROM users_fts WHERE users_fts MATCH 'new'`); n != 1 {
