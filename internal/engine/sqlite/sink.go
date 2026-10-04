@@ -255,7 +255,7 @@ func (s *shipper) noteCaughtUp(k *sink) {
 	poll, gen, p := s.lastPoll, s.st.Gen, s.st.pos()
 	open := !s.sp.oldestOpenAt().IsZero()
 	behind := k.st.Acked < s.sp.last()
-	attached := s.r != nil && s.off == ""
+	attached := s.attached && s.off == ""
 	s.mu.Unlock()
 	if open || behind || poll.IsZero() || !attached || gen == "" {
 		return

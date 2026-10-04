@@ -153,7 +153,7 @@ func (e *Engine) Monitor(ctx context.Context, env agent.EngineEnv, db protocol.D
 	st.VacuumEstimateSeconds = int(max(1, (2*st.FileBytes)/(50<<20)))
 	if s := e.existingShipper(db.ID); s != nil && st.JournalMode == "wal" {
 		s.mu.Lock()
-		st.Shipping = s.r != nil && s.off == ""
+		st.Shipping = s.attached && s.off == ""
 		if k := s.sinks[sinkPrimary]; k != nil && k.st.LastUploadedAt != nil {
 			t := *k.st.LastUploadedAt
 			st.LastShippedAt = &t

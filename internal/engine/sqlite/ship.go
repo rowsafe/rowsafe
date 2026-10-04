@@ -133,6 +133,7 @@ type shipper struct {
 	sinks    map[string]*sink
 	err      error  // the newest problem (nil after a good round)
 	off      string // why copying is off ("": on)
+	attached bool   // R and W are open (the run goroutine owns them)
 	lastPoll time.Time
 	lastSeen time.Time
 	lastCkpt ckptResult
@@ -243,6 +244,9 @@ func (s *shipper) run() {
 }
 
 func (s *shipper) detach() {
+	s.mu.Lock()
+	s.attached = false
+	s.mu.Unlock()
 	if s.r != nil {
 		rollback(s.r)
 		s.r.Close()
@@ -368,6 +372,9 @@ func (s *shipper) attach() error {
 	}
 	s.r, s.w, s.held = r, w, false
 	s.setOff("")
+	s.mu.Lock()
+	s.attached = true
+	s.mu.Unlock()
 	dev, ino := fileID(fi)
 	s.mu.Lock()
 	if s.st.Gen != "" && s.st.Ino != 0 && (s.st.Dev != dev || s.st.Ino != ino) {

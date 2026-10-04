@@ -27,6 +27,12 @@ func sideFiles(path string, wal bool) []string {
 // prepareSideFiles creates the missing side files of path with
 // permissions that keep working for the database's owner and group.
 func prepareSideFiles(path string, wal bool) error {
+	return prepareFiles(path, sideFiles(path, wal)...)
+}
+
+// prepareFiles creates the missing files (side files of path) with path's
+// permissions for its owner and group.
+func prepareFiles(path string, files ...string) error {
 	fi, err := os.Stat(path)
 	if err != nil {
 		return err
@@ -35,7 +41,7 @@ func prepareSideFiles(path string, wal bool) error {
 	if !ok {
 		return nil
 	}
-	for _, p := range sideFiles(path, wal) {
+	for _, p := range files {
 		if _, err := os.Lstat(p); err == nil || !errors.Is(err, os.ErrNotExist) {
 			continue // exists (the app's), or can't tell: SQLite opens it as it is
 		}
@@ -54,4 +60,27 @@ func prepareSideFiles(path string, wal bool) error {
 		}
 	}
 	return nil
+}
+
+// adoptCreated gives a side file SQLite just created for the agent (it
+// owns it) the database file's permissions for its owner and group.
+func adoptCreated(path, side string) error {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	sf, err := os.Stat(side)
+	if err != nil || !ok {
+		return nil
+	}
+	if sst, ok := sf.Sys().(*syscall.Stat_t); !ok || sst.Uid != uint32(os.Geteuid()) || sst.Uid == st.Uid {
+		return nil
+	}
+	f, err := os.OpenFile(side, os.O_RDWR|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return matchPermissions(f, fi.Mode().Perm(), st.Uid, st.Gid)
 }

@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -385,5 +386,12 @@ func (e *Engine) lastIntegrity(env agent.EngineEnv, db protocol.DatabaseSpec) (i
 }
 
 var errNotFound = errors.New("not found")
+
+func (e *Engine) logFor(env agent.EngineEnv) *slog.Logger {
+	if env.Log != nil {
+		return env.Log
+	}
+	return slog.New(slog.DiscardHandler)
+}
 
 func notExist(err error) bool { return errors.Is(err, os.ErrNotExist) }

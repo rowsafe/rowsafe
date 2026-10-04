@@ -606,3 +606,202 @@ func waitFor(t *testing.T, d time.Duration, what string, ok func() bool) {
 		time.Sleep(200 * time.Millisecond)
 	}
 }
+
+// A rollback-journal database: daily copies only (taken a few pages at a
+// time while the app writes), Marks refused, then Pulse's fixes: refresh
+// statistics, VACUUM, turn on WAL (the stream starts with a fresh copy),
+// shrink the -wal file; and the second copy in another bucket.
+func TestSQLiteRollbackJournalAndFixes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short")
+	}
+	env, _ := testEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wiki.db")
+	createAppDB(t, path, false)
+	db := testSpec(path)
+	e := startEngine(t, env)
+	ap := goApp{path}
+	last := ap.run(t, 1, 300*time.Millisecond, -1)
+
+	plan, err := run[protocol.AdoptResult](t, e, env, db, protocol.TaskAdopt, protocol.AdoptParams{Apply: true})
+	if err != nil || plan.Inspect.ArchiveMode != "off" || len(plan.Warnings) == 0 {
+		t.Fatalf("adopt: %+v %v", plan, err)
+	}
+	st, err := e.Archiver(context.Background(), env, db)
+	if err != nil || st.ArchiveMode != "on" && st.ArchiveMode != "off" {
+		t.Fatalf("archiver: %+v %v", st, err)
+	}
+	waitFor(t, 20*time.Second, "the copier to see rollback-journal mode", func() bool {
+		st, _ := e.Archiver(context.Background(), env, db)
+		return st.ArchiveMode == "off"
+	})
+	if _, err := run[protocol.CheckResult](t, e, env, db, protocol.TaskCheck, nil); err != nil {
+		t.Fatal(err)
+	}
+	// A backup while the app writes.
+	var wg sync.WaitGroup
+	done := make(chan int, 1)
+	wg.Add(1)
+	go func() { defer wg.Done(); done <- ap.run(t, last+1, 2*time.Second, -1) }()
+	b, err := run[protocol.BackupResult](t, e, env, db, protocol.TaskBackup, protocol.BackupParams{Type: protocol.BackupFull})
+	wg.Wait()
+	last = <-done
+	if err != nil || b.WALStart != "" {
+		t.Fatalf("backup: %+v %v", b, err)
+	}
+	r, _ := openRepo(env, db)
+	dst := filepath.Join(dir, "restored.db")
+	out, err := restoreTo(context.Background(), r, restoreTarget{Time: time.Now()}, dst, testLog{t})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := verify(t, dst); v == 0 || v > last {
+		t.Errorf("restored v=%d (app wrote %d)", v, last)
+	}
+	if out.Note == "" {
+		t.Error("a restore of a rollback-journal database should say it is as of the backup")
+	}
+	if _, err := run[protocol.RestorePointResult](t, e, env, db, protocol.TaskRestorePoint, protocol.RestorePointParams{Name: "m1"}); err == nil {
+		t.Error("a Mark should be refused in rollback-journal mode")
+	}
+	dm, _ := e.Monitor(context.Background(), env, db)
+	if dm.SQLite == nil || dm.SQLite.JournalMode != "delete" || dm.SQLite.Shipping {
+		t.Fatalf("monitor: %+v", dm)
+	}
+	if len(dm.SQLite.StaleStatsTables) == 0 {
+		t.Errorf("tables were never analyzed: stale statistics expected")
+	}
+
+	maint := func(action string) *protocol.MaintenanceResult {
+		t.Helper()
+		res, err := run[protocol.MaintenanceResult](t, e, env, db, protocol.TaskMaintenance, protocol.MaintenanceParams{Action: action})
+		if err != nil {
+			t.Fatalf("%s: %v", action, err)
+		}
+		t.Logf("%s: %s %v", action, res.Summary, res.Details)
+		return res
+	}
+	maint(protocol.MaintSQLiteOptimize)
+	c := mustOpen(t, path)
+	if stale, err := staleTables(c); err != nil || len(stale) > 0 {
+		t.Errorf("after optimize: %v %v", stale, err)
+	}
+	if err := c.Exec(`CREATE TABLE junk (x BLOB);
+		WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 3000) INSERT INTO junk SELECT randomblob(1500) FROM n;
+		DELETE FROM junk`); err != nil {
+		t.Fatal(err)
+	}
+	free, _ := queryInt(c, "PRAGMA freelist_count")
+	c.Close()
+	if free == 0 {
+		t.Fatal("expected free pages after deleting rows")
+	}
+	maint(protocol.MaintSQLiteVacuum)
+	c = mustOpen(t, path)
+	free, _ = queryInt(c, "PRAGMA freelist_count")
+	c.Close()
+	if free != 0 {
+		t.Errorf("free pages after VACUUM: %d", free)
+	}
+
+	// Turn on continuous backups.
+	maint(protocol.MaintSQLiteWAL)
+	if h, _, err := readDBHeader(path); !h.WAL {
+		cc := mustOpen(t, path)
+		m, _ := journalMode(cc)
+		cc.Close()
+		t.Fatalf("not in WAL mode after the fix: %+v %v (journal_mode %s)", h, err, m)
+	}
+	waitFor(t, time.Minute, "copying and the first full copy of the new stream", func() bool {
+		st, _ := e.Archiver(context.Background(), env, db)
+		s := shipperOf(e, db)
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return st.ArchiveMode == "on" && s.st.Gen != "" && !s.st.NeedSnapshot && !s.snapping
+	})
+	last = currentV(t, path)
+	last = ap.run(t, last+1, 2*time.Second, -1)
+	s := shipperOf(e, db)
+	if _, err := s.flush(context.Background(), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := restoreTo(context.Background(), r, restoreTarget{Latest: true}, dst, testLog{t}); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := verify(t, dst); v != last {
+		t.Errorf("after turning on WAL: restored v=%d, want %d", v, last)
+	}
+	// Shrink the -wal file: a new stream with a fresh copy.
+	gen := s.st.Gen
+	maint(protocol.MaintSQLiteCheckpoint)
+	if fileSize(path+"-wal") != 0 {
+		t.Errorf("-wal is %d bytes after the checkpoint", fileSize(path+"-wal"))
+	}
+	waitFor(t, time.Minute, "the fresh copy after the checkpoint", func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.st.Gen != gen && !s.st.NeedSnapshot && !s.snapping
+	})
+	last = ap.run(t, last+1, time.Second, -1)
+
+	// The second copy: its own bucket, the same stream.
+	env2, _ := testEnv(t)
+	env2.StateDir = filepath.Join(env.StateDir, "copy2")
+	db2 := db
+	db2.ID += copy2Suffix
+	if _, err := e.Archiver(context.Background(), env2, db2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run[protocol.BackupResult](t, e, env2, db2, protocol.TaskBackup, nil); err != nil {
+		t.Fatal(err)
+	}
+	last = ap.run(t, last+1, time.Second, -1)
+	if _, err := s.flush(context.Background(), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	r2, _ := openRepo(env2, db2)
+	for i, rr := range []*repo{r, r2} {
+		d := filepath.Join(dir, fmt.Sprintf("bucket-%d.db", i))
+		if _, err := restoreTo(context.Background(), rr, restoreTarget{Latest: true}, d, testLog{t}); err != nil {
+			t.Fatal(err)
+		}
+		if v, _ := verify(t, d); v != last {
+			t.Errorf("bucket %d: restored v=%d, want %d", i+1, v, last)
+		}
+	}
+	drill, err := run[protocol.DrillResult](t, e, env2, db2, protocol.TaskDrill, nil)
+	if err != nil || !drill.Passed {
+		t.Fatalf("Proof from the second copy: %+v %v", drill, err)
+	}
+}
+
+// incremental vacuum on a file with auto_vacuum=incremental.
+func TestSQLiteIncrementalVacuum(t *testing.T) {
+	env, _ := testEnv(t)
+	path := filepath.Join(t.TempDir(), "inc.db")
+	c, err := sqlite3.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{"PRAGMA auto_vacuum=INCREMENTAL", "PRAGMA journal_mode=WAL", "CREATE TABLE t (x BLOB)",
+		"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 2000) INSERT INTO t SELECT randomblob(2000) FROM n",
+		"DELETE FROM t WHERE rowid % 2 = 0"} {
+		if err := c.Exec(q); err != nil {
+			t.Fatal(q, err)
+		}
+	}
+	c.Close()
+	e := startEngine(t, env)
+	db := testSpec(path)
+	res, err := run[protocol.MaintenanceResult](t, e, env, db, protocol.TaskMaintenance, protocol.MaintenanceParams{Action: protocol.MaintSQLiteIncrementalVacuum})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Log(res.Summary)
+	c = mustOpen(t, path)
+	defer c.Close()
+	if free, _ := queryInt(c, "PRAGMA freelist_count"); free != 0 {
+		t.Errorf("free pages left: %d", free)
+	}
+}

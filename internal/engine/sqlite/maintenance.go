@@ -178,7 +178,9 @@ func (e *Engine) fixWAL(ctx context.Context, env agent.EngineEnv, db protocol.Da
 	if h.WAL {
 		return "Continuous backups were already possible: the database is in WAL mode.", nil
 	}
-	if err := prepareSideFiles(path, true); err != nil {
+	// Only the -shm file ahead: a -wal file next to a rollback-journal
+	// database would make SQLite treat it as WAL without switching it.
+	if err := prepareFiles(path, path+"-shm"); err != nil {
 		return "", err
 	}
 	c, err := openDB(ctx, path, openOpts{Busy: 10 * time.Second})
@@ -196,6 +198,9 @@ func (e *Engine) fixWAL(ctx context.Context, env agent.EngineEnv, db protocol.Da
 	}
 	if !strings.EqualFold(mode, "wal") {
 		return "", fmt.Errorf("SQLite kept the database in %s mode (an app may hold it in exclusive locking mode); nothing changed", mode)
+	}
+	if err := adoptCreated(path, path+"-wal"); err != nil {
+		e.logFor(env).Warn("giving the new -wal file the database's permissions", "path", path, "err", err)
 	}
 	c.Close()
 	if s, _, err := e.shipperFor(env, db); err == nil {
