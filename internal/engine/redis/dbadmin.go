@@ -237,13 +237,13 @@ func (d *rdba) manageBlocked(ctx context.Context) (why, command string, err erro
 		return "", "", err
 	}
 	name := d.e.display()
-	command = "curl -fsSL https://rowsafe.sh | sudo sh"
+	why = fmt.Sprintf("Rowsafe's %s user (%s) was set up before Databases & users came to %s, so it can't list or change users yet. ", name, d.me, name)
 	if inDocker() {
-		command = fmt.Sprintf("docker compose exec -it rowsafe-agent rowsafe-agent redis login --port %d --admin-user default", d.spec.Port)
+		return why + "Run the login command below once in the agent's container: it gives Rowsafe's user the rights, with the administrator's password once.",
+			fmt.Sprintf("docker compose exec -it rowsafe-agent rowsafe-agent redis login --port %d --admin-user default", d.spec.Port), nil
 	}
-	return fmt.Sprintf("Rowsafe's %s user (%s) was set up before Databases & users came to %s, so it can't list or change users yet. "+
-		"Run the Rowsafe installer on the server again (in Docker: the login command below): it gives Rowsafe's user the rights, "+
-		"with the administrator's password once.", name, d.me, name), command, nil
+	return why + "Run the Rowsafe installer on the server again: it gives Rowsafe's user the rights, with the administrator's password once.",
+		"curl -fsSL https://rowsafe.sh | sudo sh", nil
 }
 
 // readClients notes the users the server's replicas sign in with (CLIENT
