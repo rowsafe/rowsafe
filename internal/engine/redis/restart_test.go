@@ -64,3 +64,15 @@ func TestTargetsSig(t *testing.T) {
 		t.Error("a new login keeps the cached list")
 	}
 }
+
+// Redis reports used_memory_dataset unsigned: on a tiny dataset it wraps
+// around (Redis 8 with its modules). It must not read as exabytes.
+func TestUsedMemoryDatasetWraps(t *testing.T) {
+	in := infoFrom(parseInfo("redis_version:8.2.1\r\nused_memory:2097152\r\nused_memory_dataset:18446744073709550000\r\n"))
+	if in.UsedMemoryDataset != 2097152 {
+		t.Fatalf("dataset %d", in.UsedMemoryDataset)
+	}
+	if in = infoFrom(parseInfo("redis_version:8.2.1\r\nused_memory:2097152\r\nused_memory_dataset:13674\r\n")); in.UsedMemoryDataset != 13674 {
+		t.Fatalf("dataset %d", in.UsedMemoryDataset)
+	}
+}

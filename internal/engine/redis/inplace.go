@@ -100,8 +100,8 @@ func (e *Engine) preflightInPlace(ctx context.Context, prod *conn, restored map[
 		total += k.Keys
 	}
 	for _, k := range restored {
-		if total > 0 {
-			largest = max(largest, restoredBytes*k.Keys/total)
+		if total > 0 { // in floating point: bytes times keys overflows int64 on big servers
+			largest = max(largest, int64(float64(restoredBytes)*float64(k.Keys)/float64(total)))
 		}
 	}
 	limit := in.MaxMemory

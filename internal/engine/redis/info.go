@@ -124,6 +124,12 @@ func infoFrom(m infoMap) serverInfo {
 	in.RunID = m["run_id"]
 	in.UsedMemory = m.int("used_memory")
 	in.UsedMemoryDataset = m.int("used_memory_dataset")
+	if in.UsedMemoryDataset < 0 || in.UsedMemoryDataset > in.UsedMemory {
+		// Redis computes it as used_memory minus its overhead, unsigned: on a
+		// tiny dataset (modules' allocations count as overhead) it wraps
+		// around to an absurd number. At most what the server uses.
+		in.UsedMemoryDataset = in.UsedMemory
+	}
 	in.MaxMemory = m.int("maxmemory")
 	in.TotalSystemMemory = m.int("total_system_memory")
 	in.ReplID = m["master_replid"]
