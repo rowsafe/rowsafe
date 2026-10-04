@@ -26,6 +26,10 @@ import (
 // and only then runs root's own copy of the installer in its
 // permissions-only mode. The answer goes to AnswerDir/result, root's
 // directory, which the agent can read.
+//
+// A removal (protocol.TaskPermissionsRemove) takes the same path without a
+// signature: it may only turn off what protocol.PermissionsRemovable lists,
+// for this server, so it works before any passkey is paired.
 const (
 	DefaultRequestDir = "/var/lib/rowsafe/permissions" // the agent's, 0700
 	DefaultAnswerDir  = "/run/rowsafe-permissions"     // root's (RuntimeDirectory), 0755
@@ -40,11 +44,21 @@ const (
 	InstallerTimeout  = 10 * time.Minute
 )
 
-// Request is what the agent hands the helper.
+// Request is what the agent hands the helper: a signed change, or a
+// removal.
 type Request struct {
 	ID     string                          `json:"id"` // the task ID
-	Signed protocol.SignedPermissionChange `json:"signed"`
+	Signed protocol.SignedPermissionChange `json:"signed,omitzero"`
+	Remove *protocol.PermissionRemoval     `json:"remove,omitempty"`
 }
+
+// Features is what `rowsafe-permissions features` prints, one per line:
+// what this helper takes besides signed changes. The agent reports it
+// (protocol.PermissionsReport.RemoveWithoutPasskey).
+var Features = []string{FeatureRemove}
+
+// FeatureRemove: the helper applies protocol.PermissionRemoval.
+const FeatureRemove = "remove-without-passkey"
 
 // Answer is the helper's answer for request ID.
 type Answer struct {
@@ -101,7 +115,12 @@ func (h *Helper) Apply(ctx context.Context) error {
 		return h.answer(ans)
 	}
 	ans.ID = req.ID
-	res := h.apply(ctx, req)
+	var res protocol.PermissionsResult
+	if req.Remove != nil {
+		res = h.applyRemoval(ctx, req)
+	} else {
+		res = h.apply(ctx, req)
+	}
 	ans.PermissionsResult = res
 	return h.answer(ans)
 }
@@ -128,23 +147,56 @@ func (h *Helper) apply(ctx context.Context, req Request) protocol.PermissionsRes
 	}
 	h.logf("request %s: verified a change signed by %s (passkey %s), requested by %s: allow [%s], remove [%s]",
 		req.ID, owner.Name, owner.Fingerprint, change.RequestedBy, strings.Join(change.Allow, " "), strings.Join(change.Remove, " "))
-	if err := CheckRootOwned(h.Installer, false); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return refused("root's copy of the Rowsafe installer (" + h.Installer + ") is missing, so this server can't change its permissions from the dashboard yet")
-		}
-		return refused("root's copy of the Rowsafe installer can't be trusted: " + err.Error())
+	return h.runInstaller(ctx, req.ID, InstallerArgs(change))
+}
+
+// applyRemoval turns off what a removal names: no passkey, but only
+// protocol.PermissionsRemovable and only for this server.
+func (h *Helper) applyRemoval(ctx context.Context, req Request) protocol.PermissionsResult {
+	refused := func(reason string) protocol.PermissionsResult {
+		h.logf("request %s refused: %s", req.ID, reason)
+		return protocol.PermissionsResult{Refused: reason}
 	}
-	args := InstallerArgs(change)
-	h.logf("request %s: running %s %s", req.ID, h.Installer, strings.Join(args, " "))
+	if len(req.Signed.ChangeJSON) > 0 {
+		return refused("the request is malformed")
+	}
+	rm := *req.Remove
+	if err := rm.Validate(); err != nil {
+		return refused(err.Error())
+	}
+	hostID, err := h.hostID()
+	if err != nil {
+		return refused(err.Error())
+	}
+	if rm.HostID != hostID {
+		return refused("the request is for another server")
+	}
+	h.logf("request %s: turn off [%s], requested by %s (no passkey needed to turn off)",
+		req.ID, strings.Join(rm.Remove, " "), rm.RequestedBy)
+	return h.runInstaller(ctx, req.ID, InstallerArgs(&protocol.PermissionChange{Remove: rm.Remove}))
+}
+
+// runInstaller runs root's copy of the installer's permissions-only mode
+// with args, after checking it is root's.
+func (h *Helper) runInstaller(ctx context.Context, id string, args []string) protocol.PermissionsResult {
+	if err := CheckRootOwned(h.Installer, false); err != nil {
+		reason := "root's copy of the Rowsafe installer can't be trusted: " + err.Error()
+		if errors.Is(err, os.ErrNotExist) {
+			reason = "root's copy of the Rowsafe installer (" + h.Installer + ") is missing, so this server can't change its permissions from the dashboard yet"
+		}
+		h.logf("request %s refused: %s", id, reason)
+		return protocol.PermissionsResult{Refused: reason}
+	}
+	h.logf("request %s: running %s %s", id, h.Installer, strings.Join(args, " "))
 	ictx, cancel := context.WithTimeout(ctx, InstallerTimeout)
 	defer cancel()
 	out, err := h.RunInstaller(ictx, h.Installer, args)
 	tail := LastLines(out, 15, 2000)
 	if err != nil {
-		h.logf("request %s: the installer failed: %v; %s", req.ID, err, strings.ReplaceAll(tail, "\n", " | "))
+		h.logf("request %s: the installer failed: %v; %s", id, err, strings.ReplaceAll(tail, "\n", " | "))
 		return protocol.PermissionsResult{Refused: installerRefusal(err, out), Output: tail}
 	}
-	h.logf("request %s: applied", req.ID)
+	h.logf("request %s: applied", id)
 	return protocol.PermissionsResult{Applied: true, Output: tail}
 }
 

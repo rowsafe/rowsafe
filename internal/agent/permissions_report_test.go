@@ -290,3 +290,22 @@ func TestReadPermissionsSQLiteModes(t *testing.T) {
 		t.Errorf("without SQLite files: unavailable = %v", r.Unavailable)
 	}
 }
+
+func TestHelperFeatures(t *testing.T) {
+	dir := t.TempDir()
+	helper := filepath.Join(dir, "rowsafe-permissions")
+	// A helper from before `features`: it fails, so it takes nothing more.
+	_ = os.WriteFile(helper, []byte("#!/bin/sh\necho 'error: run this as root' >&2\nexit 1\n"), 0o755)
+	if got := helperFeaturesOf(helper); len(got) != 0 {
+		t.Fatalf("old helper: %v", got)
+	}
+	// A newer copy (the installer replaces the file): asked again.
+	_ = os.WriteFile(helper, []byte("#!/bin/sh\n[ \"$1\" = features ] && echo remove-without-passkey\n"), 0o755)
+	if got := helperFeaturesOf(helper); !slices.Contains(got, "remove-without-passkey") {
+		t.Fatalf("new helper: %v", got)
+	}
+	// Not root's: never reported.
+	if helperHas(helper, "remove-without-passkey") && os.Getuid() != 0 {
+		t.Fatal("a helper root doesn't own counted")
+	}
+}

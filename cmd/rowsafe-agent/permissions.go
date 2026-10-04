@@ -22,8 +22,10 @@ Usage (as root; root's copy is /usr/local/lib/rowsafe/rowsafe-permissions):
   permissions pair              pair a passkey: open the link it prints, then compare codes
   permissions owners            list the paired passkeys
   permissions remove-owner FP   remove the passkey with fingerprint FP
-  permissions apply             apply a signed change the agent received
-                                (run by rowsafe-permissions.service)
+  permissions apply             apply a signed change, or a removal, the agent
+                                received (run by rowsafe-permissions.service)
+  permissions features          what this helper takes besides signed changes
+                                (no root needed; the agent asks it)
   permissions proxysql-apply    install and configure ProxySQL in front of MySQL or
                                 MariaDB where root allowed pooling (run by
                                 rowsafe-proxysql.service)
@@ -48,6 +50,10 @@ func permissionsCmd(ctx context.Context, args []string) int {
 	}
 	if args[0] == "read-as-agent" { // internal: the helper's reader, as the agent user
 		return readAsAgent(args[1:])
+	}
+	if args[0] == "features" { // no root: the agent asks root's copy what it takes
+		fmt.Println(strings.Join(permissions.Features, "\n"))
+		return 0
 	}
 	if args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
 		fmt.Print(permissionsUsage)

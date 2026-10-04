@@ -583,7 +583,7 @@ func TaskTimeout(taskType string) time.Duration {
 		return 5 * time.Minute
 	case TaskCopySchema: // catalog queries only
 		return 5 * time.Minute
-	case TaskPermissions: // permissions.go; runs the installer's permissions-only mode
+	case TaskPermissions, TaskPermissionsRemove: // permissions.go; runs the installer's permissions-only mode
 		return 15 * time.Minute
 	case TaskSecurityScan, TaskSecurityFix: // security.go; a firewall change waits for its confirmation
 		return 10 * time.Minute
