@@ -57,6 +57,17 @@ import (
 //     online backup API: the app's open connections see the new content
 //     (RewindInPlaceStopsServer is false). The file as it was is kept for
 //     Undo (7 days by default) in the agent's rewind directory.
+//   - Find the moment (FindMomentResult): the agent replays the range's
+//     changes on a private scratch copy and compares each table's rows
+//     (by rowid, or a WITHOUT ROWID table's primary key, as a hash of
+//     their bytes: values are never decoded) before and after every
+//     transaction. Moment.DB is "main", Table "main.<name>", Kind delete,
+//     update or drop (a DELETE without WHERE is a delete of every row;
+//     inserts aren't listed), LSN the transaction's stream position, XID
+//     a sequence number with the high bit set (no transaction IDs in
+//     SQLite), Time when the agent copied the change (within a second of
+//     its commit, to the millisecond). "Just before" a change is a Time
+//     target one millisecond earlier.
 //   - Monitoring: database_size_bytes, disk_* and the sqlite_* metrics
 //     (collect/catalog_sqlite.go), and DatabaseMonitoring.SQLite below.
 //   - No server: restart, standby, pooling, updates, upgrades, Databases &
@@ -118,6 +129,7 @@ var sqliteFeatures = EngineFeatures{
 	Monitoring: true, Fixes: true, // monitor.go, maintenance.go
 	SecondCopy: true, // the same stream and backups into the second bucket (ship.go sinks)
 	Files:      true, // the app's folders next to the database (agent-wide, restic)
+	FindMoment: true, // the WAL pages replayed on a private copy, rows compared (internal/engine/sqlite/moment.go)
 }
 
 // SQLiteStatus is SQLite's own health detail (DatabaseMonitoring.SQLite),

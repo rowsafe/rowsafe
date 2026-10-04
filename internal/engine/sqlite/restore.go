@@ -26,6 +26,9 @@ type restoreTarget struct {
 	Time   time.Time
 	Mark   string
 	Latest bool
+	// BaseBefore, with Time, starts from the newest full copy at or before
+	// it instead of before Time (Find the moment replays the range).
+	BaseBefore time.Time
 }
 
 func (t restoreTarget) describe() string {
@@ -86,9 +89,13 @@ func pickSnapshot(ctx context.Context, r *repo, t restoreTarget) (snapDoc, *mark
 	case t.Latest:
 		return snaps[len(snaps)-1], nil, nil
 	}
+	at := t.Time
+	if !t.BaseBefore.IsZero() && t.BaseBefore.Before(at) {
+		at = t.BaseBefore
+	}
 	var best *snapDoc
 	for i := range snaps {
-		if !snaps[i].At.After(t.Time) {
+		if !snaps[i].At.After(at) {
 			best = &snaps[i]
 		}
 	}
@@ -101,6 +108,23 @@ func pickSnapshot(ctx context.Context, r *repo, t restoreTarget) (snapDoc, *mark
 
 // restoreTo restores t into a new file at dst (replaced if it exists).
 func restoreTo(ctx context.Context, r *repo, t restoreTarget, dst string, tl agent.TaskLogger) (restoreOut, error) {
+	return restoreWith(ctx, r, t, dst, tl, nil)
+}
+
+// replayHook watches a restore's replay, transaction by transaction
+// (Find the moment).
+type replayHook interface {
+	// beforeApply runs before a piece of a transaction (frames) is written
+	// into f; commit is the transaction's size in pages after it when this
+	// piece ends it (0 otherwise).
+	beforeApply(f *os.File, pageSize int, frames []byte, at time.Time, commit uint32) error
+	// committed runs once a transaction committed at `at` is in f; end is
+	// its position in the generation's stream.
+	committed(f *os.File, at time.Time, gen string, end pos) error
+}
+
+// restoreWith is restoreTo with a hook on the replay (nil: none).
+func restoreWith(ctx context.Context, r *repo, t restoreTarget, dst string, tl agent.TaskLogger, hook replayHook) (restoreOut, error) {
 	base, md, err := pickSnapshot(ctx, r, t)
 	out := restoreOut{Snapshot: base, RecoveredTo: base.At}
 	if err != nil {
@@ -136,7 +160,7 @@ func restoreTo(ctx context.Context, r *repo, t restoreTarget, dst string, tl age
 		return out, fmt.Errorf("the backup %s is %d bytes, its description says %d", base.Label, n, base.SizeBytes)
 	}
 	if base.Gen != "" {
-		if err := replay(ctx, r, f, base, t, md, &out, tl); err != nil {
+		if err := replay(ctx, r, f, base, t, md, &out, tl, hook); err != nil {
 			return out, err
 		}
 	} else if !t.Latest && t.Mark == "" && t.Time.After(base.At) {
@@ -157,7 +181,7 @@ func restoreTo(ctx context.Context, r *repo, t restoreTarget, dst string, tl age
 }
 
 // replay applies the generation's transactions after base's position.
-func replay(ctx context.Context, r *repo, f *os.File, base snapDoc, t restoreTarget, md *markDoc, out *restoreOut, tl agent.TaskLogger) error {
+func replay(ctx context.Context, r *repo, f *os.File, base snapDoc, t restoreTarget, md *markDoc, out *restoreOut, tl agent.TaskLogger, hook replayHook) error {
 	segs, err := r.listSegments(ctx, base.Gen)
 	if err != nil {
 		return err
@@ -221,6 +245,11 @@ func replay(ctx context.Context, r *repo, f *os.File, base snapDoc, t restoreTar
 				}
 				started = true
 			}
+			if hook != nil {
+				if err := hook.beforeApply(f, h.PageSize, frames, time.UnixMilli(tx.At).UTC(), tx.Commit); err != nil {
+					return err
+				}
+			}
 			if err := applyFrames(f, h.PageSize, frames, tx.Commit); err != nil {
 				return err
 			}
@@ -229,6 +258,11 @@ func replay(ctx context.Context, r *repo, f *os.File, base snapDoc, t restoreTar
 				lastAt = time.UnixMilli(tx.At).UTC()
 				out.Txns++
 				started = false
+				if hook != nil {
+					if err := hook.committed(f, lastAt, base.Gen, cur); err != nil {
+						return err
+					}
+				}
 			}
 			return nil
 		})
