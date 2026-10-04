@@ -148,6 +148,9 @@ var sqliteFeatures = EngineFeatures{
 	Recommendations: true, IndexAdvice: true,
 	// Guard: a migration run on a restored copy (internal/engine/sqlite/preview.go).
 	MigrationPreview: true,
+	// Masked and structure-only copies as files on the server, no port
+	// (internal/engine/sqlite/copies*.go).
+	SafeCopies: true,
 }
 
 // SQLiteStatus is SQLite's own health detail (DatabaseMonitoring.SQLite),

@@ -75,6 +75,8 @@ type safeCopyInput struct {
 	Listen    string   `json:"listen,omitempty" jsonschema:"where the copy listens on the database server: private (default), public, or one of its IPs"`
 	Hours     int      `json:"hours,omitempty" jsonschema:"how long to keep it (default 24, at most 168)"`
 	DB        string   `json:"db,omitempty" jsonschema:"database for the connection string (default: the main one)"`
+	// SchemaOnly: a structure-only copy (SQLite).
+	SchemaOnly bool `json:"schema_only,omitempty" jsonschema:"SQLite only: the structure (tables, indexes, views, triggers) without any row"`
 }
 
 type safeCopiesInput struct {
@@ -125,7 +127,10 @@ type SafeCopyView struct {
 	DataFrom  *time.Time `json:"data_from,omitempty"`
 	// ConnectionString has the password only in create_safe_copy's answer.
 	ConnectionString string `json:"connection_string,omitempty"`
-	Error            string `json:"error,omitempty"`
+	// Path is a SQLite copy's file on the database server.
+	Path       string `json:"path,omitempty" jsonschema:"SQLite: the copy's file on the database server (a file has no connection string or password)"`
+	SchemaOnly bool   `json:"schema_only,omitempty" jsonschema:"the structure only, no rows"`
+	Error      string `json:"error,omitempty"`
 }
 
 type CreateSafeCopyOutput struct {
@@ -185,7 +190,9 @@ func (t *tools) addCopiesTools(s *sdk.Server) {
 			"that accepts connections with a connection string, for testing queries and migrations against real-shaped data. It runs on the database server and never changes production; " +
 			"it is deleted by itself after 24 hours (hours sets up to 168). It accepts connections once its status is ready (restoring takes minutes for large databases). " +
 			"With a local rowsafe mcp the result has the connection string with a password made on this machine, shown once; Rowsafe never sees it. " +
-			"On the remote endpoint the copy starts without a password and a person sets one in the dashboard (password_url).",
+			"On the remote endpoint the copy starts without a password and a person sets one in the dashboard (password_url). " +
+			"For SQLite the copy is a new file on the database server instead (no connection string, port or password; only the Rowsafe agent's user and root can read it), " +
+			"and schema_only makes one with the structure only, no rows.",
 		Annotations: writes("Create a safe copy", false, false),
 		InputSchema: inputSchema[safeCopyInput](func(p map[string]*jsonschema.Schema) {
 			p["hours"].Minimum, p["hours"].Maximum = ptr(0.0), ptr(168.0)
@@ -334,6 +341,12 @@ func (t *tools) createSafeCopy(ctx context.Context, _ *sdk.CallToolRequest, in s
 	if err != nil {
 		return nil, CreateSafeCopyOutput{}, apiError(err)
 	}
+	if !client.CopyHasPassword(d.Engine) {
+		return t.createFileCopy(ctx, d, in)
+	}
+	if in.SchemaOnly {
+		return nil, CreateSafeCopyOutput{}, fmt.Errorf("schema_only is for SQLite databases; %s is %s", d.Name, protocol.EngineDisplayName(d.Engine))
+	}
 	req := protocol.CreateSafeCopyRequest{Hours: in.Hours, AllowFrom: in.AllowFrom, Listen: in.Listen, DB: in.DB, Masking: protocol.MaskingRules}
 	// Locally (rowsafe mcp) the password is made here, on the user's
 	// machine, and Rowsafe only gets its verifier (in the engine's own form). On the remote
@@ -373,9 +386,31 @@ func (t *tools) createSafeCopy(ctx context.Context, _ *sdk.CallToolRequest, in s
 	return text(b), out, nil
 }
 
+// createFileCopy makes a SQLite copy: a new file on the database server,
+// masked or the structure only. A file has no login: nothing to make here.
+func (t *tools) createFileCopy(ctx context.Context, d protocol.Database, in safeCopyInput) (*sdk.CallToolResult, CreateSafeCopyOutput, error) {
+	resp, err := t.c.CreateSafeCopy(ctx, d.ID, protocol.CreateSafeCopyRequest{Hours: in.Hours, Masking: protocol.MaskingRules, SchemaOnly: in.SchemaOnly})
+	if err != nil {
+		return nil, CreateSafeCopyOutput{}, apiError(err)
+	}
+	out := CreateSafeCopyOutput{SafeCopyView: safeCopyView(resp.Copy)}
+	what := "masked"
+	if in.SchemaOnly {
+		what = "structure only, no rows"
+	}
+	var b textBuilder
+	b.line("Copy %s of %s: %s, %s, as a new file on %s.", resp.Copy.ID, d.Name, resp.Copy.Status, what, d.Hostname)
+	out.Guidance = fmt.Sprintf("The copy is being made; list_safe_copies shows its file's path on %s once %s is ready. "+
+		"It has no password: only the Rowsafe agent's user and root on that server can read it, and Rowsafe never downloads it. "+
+		"To use it on this machine, ask the user to copy it from the server (e.g. %s). It is deleted at %s; delete_safe_copy removes it sooner. Never point anything at production's file.",
+		d.Hostname, resp.Copy.ID, client.CopyFetchCommand(d.Hostname, "<path>"), resp.Copy.Expires.UTC().Format(time.RFC3339))
+	b.line("Next: %s", out.Guidance)
+	return text(b), out, nil
+}
+
 func safeCopyView(cp protocol.SafeCopy) SafeCopyView {
 	return SafeCopyView{ID: cp.ID, Status: cp.Status, Masked: cp.Masked, Host: cp.Host, Port: cp.Port, AllowFrom: cp.AllowFrom,
-		Expires: cp.Expires, DataFrom: cp.RecoveredTo, ConnectionString: cp.ConnectionString, Error: cp.Error}
+		Expires: cp.Expires, DataFrom: cp.RecoveredTo, ConnectionString: cp.ConnectionString, Path: cp.Path, SchemaOnly: cp.SchemaOnly, Error: cp.Error}
 }
 
 func (t *tools) listSafeCopies(ctx context.Context, _ *sdk.CallToolRequest, in safeCopiesInput) (*sdk.CallToolResult, SafeCopiesOutput, error) {
@@ -402,7 +437,14 @@ func (t *tools) listSafeCopies(ctx context.Context, _ *sdk.CallToolRequest, in s
 		if !cp.Masked {
 			masked = "NOT masked"
 		}
-		b.line("%s: %s, %s, %s, deleted at %s%s", cp.ID, cp.Status, masked, orDash(cp.ConnectionString), cp.Expires.UTC().Format(time.RFC3339), errSuffix(cp.Error))
+		if cp.SchemaOnly {
+			masked = "structure only"
+		}
+		where := orDash(cp.ConnectionString)
+		if cp.Path != "" {
+			where = "file " + cp.Path + " on " + d.Hostname
+		}
+		b.line("%s: %s, %s, %s, deleted at %s%s", cp.ID, cp.Status, masked, where, cp.Expires.UTC().Format(time.RFC3339), errSuffix(cp.Error))
 	}
 	if out.Reason != "" {
 		b.line("A new safe copy can't be made now: %s", out.Reason)

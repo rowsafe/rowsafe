@@ -103,7 +103,7 @@ var (
 	reindexRE   = regexp.MustCompile(`(?i)^REINDEX\b`)
 )
 
-var unquote = preview.UnquoteSQLite
+var unquoteName = preview.UnquoteSQLite
 
 // schemaChange records what statement i (normalised text norm) did,
 // given the schema before and after it, into st.
@@ -160,7 +160,7 @@ func (t *schemaTracker) schemaChange(i int, norm string, before, after schemaSna
 	}
 	// SQLite writes the whole table again to drop a column.
 	if m := dropColRE.FindStringSubmatch(norm); m != nil {
-		name := unquote(m[1])
+		name := unquoteName(m[1])
 		if _, sz := t.dataOf(name); sz.Bytes > 0 {
 			st.Rewrites = append(st.Rewrites, protocol.PreviewRelation{Name: name, SizeBytes: sz.Bytes, Rows: sz.Rows})
 		}
@@ -175,11 +175,11 @@ func (t *schemaTracker) rowsCopied(i int, norm string) {
 	if m == nil {
 		return
 	}
-	dst := t.names[strings.ToLower(unquote(m[1]))]
+	dst := t.names[strings.ToLower(unquoteName(m[1]))]
 	if dst == nil || dst.origin != "" || dst.filledFrom != "" {
 		return
 	}
-	if src, _ := t.dataOf(unquote(m[2])); src != "" {
+	if src, _ := t.dataOf(unquoteName(m[2])); src != "" {
 		dst.filledFrom, dst.fill = src, i
 	}
 }
