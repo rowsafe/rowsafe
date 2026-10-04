@@ -59,10 +59,12 @@ func (e *Engine) previewMigration(ctx context.Context, env agent.EngineEnv, db p
 	if len(p.SQL) > maxPreviewSQL {
 		return nil, fmt.Errorf("the SQL is %s; previews take at most %s", humanBytes(int64(len(p.SQL))), humanBytes(maxPreviewSQL))
 	}
-	if p.DB != "" && p.DB != "main" && p.DB != db.Name {
+	file := filepath.Base(db.SocketDir)
+	if p.DB != "" && p.DB != "main" && p.DB != db.Name && p.DB != file {
 		return nil, fmt.Errorf("a SQLite file has one database (main): there is no database %q in it", p.DB)
 	}
-	res := &protocol.PreviewResult{PreviewID: p.PreviewID, DB: "main", Statements: []protocol.PreviewStatement{}}
+	// Reports name the file ("a copy of production.sqlite3").
+	res := &protocol.PreviewResult{PreviewID: p.PreviewID, DB: file, Statements: []protocol.PreviewStatement{}}
 	stmts, err := preview.SplitSQLite(p.SQL)
 	if err != nil {
 		res.Verdict = protocol.PreviewFailed
@@ -95,7 +97,7 @@ func (e *Engine) previewMigration(ctx context.Context, env agent.EngineEnv, db p
 	if err != nil {
 		return nil, err
 	}
-	sc := preview.SQLiteContext{JournalMode: "delete", File: filepath.Base(db.SocketDir), FileBytes: fi.Size()}
+	sc := preview.SQLiteContext{JournalMode: "delete", File: file, FileBytes: fi.Size()}
 	if h.WAL {
 		sc.JournalMode = "wal"
 	}

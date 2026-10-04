@@ -58,11 +58,11 @@ import (
 //     (RewindInPlaceStopsServer is false). The file as it was is kept for
 //     Undo (7 days by default) in the agent's rewind directory.
 //   - Migration previews run on a restored copy (kept as a CopyKindPreview
-//     copy for the next one). PreviewResult.DB is "main"; there is one
-//     write lock per file, so PreviewLock.Relation is the file's name,
-//     Blocks "writes" (reads go on in WAL mode, and also wait while it
-//     commits in rollback-journal mode, said in Mode), on the first
-//     writing statement of a transaction, held until it commits.
+//     copy for the next one). PreviewResult.DB is the file's name. There
+//     is one write lock per file, so PreviewLock.Relation is the file's
+//     name too, Blocks "writes" (reads go on in WAL mode and also wait
+//     while it commits in rollback-journal mode, said in Mode), on the
+//     first writing statement of a transaction, held until it commits.
 //   - Monitoring: database_size_bytes, disk_* and the sqlite_* metrics
 //     (collect/catalog_sqlite.go), and DatabaseMonitoring.SQLite below.
 //   - No server: restart, standby, pooling, updates, upgrades, Databases &

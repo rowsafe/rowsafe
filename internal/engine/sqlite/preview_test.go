@@ -153,7 +153,7 @@ INSERT INTO "new_users" (id, email, created) SELECT id, email, created FROM user
 DROP TABLE users;
 ALTER TABLE "new_users" RENAME TO users;
 UPDATE orders SET note = 'x' WHERE id < 100;`, 0)
-	if res.Mode != protocol.PreviewInTransaction || res.CopyReused || res.RestoreMs <= 0 || res.DataAsOf == nil || res.Error != nil || res.DB != "main" {
+	if res.Mode != protocol.PreviewInTransaction || res.CopyReused || res.RestoreMs <= 0 || res.DataAsOf == nil || res.Error != nil || res.DB != filepath.Base(path) {
 		t.Fatalf("first preview: %+v", res)
 	}
 	st := res.Statements
