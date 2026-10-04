@@ -54,6 +54,9 @@ func testEnv(t *testing.T) (agent.EngineEnv, *fakes3.Server) {
 		Log:   slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})),
 		Notes: os.Stderr,
 	}
+	if os.Getenv("ROWSAFE_SQLITE_PATHS_FILE") == "" {
+		t.Setenv("ROWSAFE_SQLITE_PATHS_FILE", filepath.Join(dir, "sqlite-paths"))
+	}
 	return env, srv
 }
 
@@ -77,7 +80,12 @@ func startEngine(t *testing.T, env agent.EngineEnv) *Engine {
 	return e
 }
 
+// testSpec is the database at path, listed as root's installer would.
 func testSpec(path string) protocol.DatabaseSpec {
+	if f, err := os.OpenFile(os.Getenv("ROWSAFE_SQLITE_PATHS_FILE"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+		fmt.Fprintln(f, path)
+		f.Close()
+	}
 	return protocol.DatabaseSpec{ID: "db-1", Name: "app", Stanza: "app-1", SocketDir: path, RetentionFull: 5, Engine: protocol.EngineSQLite}
 }
 
@@ -779,6 +787,10 @@ func TestSQLiteRollbackJournalAndFixes(t *testing.T) {
 // incremental vacuum on a file with auto_vacuum=incremental.
 func TestSQLiteIncrementalVacuum(t *testing.T) {
 	env, _ := testEnv(t)
+	if _, err := (&Engine{}).Run(context.Background(), env, &protocol.Task{Type: protocol.TaskInspect,
+		Database: &protocol.DatabaseSpec{SocketDir: "/etc/passwd", Stanza: "x"}}, testLog{t}); err == nil || !strings.Contains(err.Error(), "allowed") {
+		t.Errorf("an unlisted file: %v", err)
+	}
 	path := filepath.Join(t.TempDir(), "inc.db")
 	c, err := sqlite3.Open(path)
 	if err != nil {

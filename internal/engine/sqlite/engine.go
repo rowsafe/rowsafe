@@ -134,6 +134,9 @@ func (e *Engine) shipperFor(env agent.EngineEnv, db protocol.DatabaseSpec) (*shi
 	if !protocol.SQLitePath(db.SocketDir) {
 		return nil, "", fmt.Errorf("invalid database path %q", db.SocketDir)
 	}
+	if err := allowed(env, db.SocketDir); err != nil {
+		return nil, "", err
+	}
 	if !stanzaRE.MatchString(db.Stanza) {
 		return nil, "", fmt.Errorf("invalid stanza %q", db.Stanza)
 	}
@@ -260,6 +263,9 @@ func (e *Engine) Run(ctx context.Context, env agent.EngineEnv, task *protocol.Ta
 	db := *task.Database
 	if !protocol.SQLitePath(db.SocketDir) {
 		return nil, fmt.Errorf("this SQLite database has no valid file path (%q): edit it in the dashboard", db.SocketDir)
+	}
+	if err := allowed(env, db.SocketDir); err != nil {
+		return nil, err
 	}
 	switch task.Type {
 	case protocol.TaskInspect:

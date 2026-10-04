@@ -320,3 +320,13 @@ func hostPathFor(p string, inner, host []mountEntry) string {
 	sub := strings.TrimPrefix(inFS, strings.TrimSuffix(hm.Root, "/"))
 	return filepath.Join(hm.MountPoint, sub)
 }
+
+// allowed reports whether root (or the container's settings) gave the agent
+// this file: tasks, monitoring and copying only ever open listed files, so
+// the control plane can't point the agent at any other file it can read.
+func allowed(env agent.EngineEnv, path string) error {
+	if slices.Contains(ConfiguredPaths(env), path) {
+		return nil
+	}
+	return fmt.Errorf("%s isn't one of the SQLite files this server allowed Rowsafe to protect: run the Rowsafe installer with --sqlite %s (in Docker, add it to ROWSAFE_SQLITE_PATHS)", path, path)
+}
