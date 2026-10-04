@@ -158,6 +158,8 @@ func (t *tools) planAdoption(ctx context.Context, _ *sdk.CallToolRequest, in pla
 			// The defaults rowsafe adopt uses.
 			port = cmp.Or(port, 3306)
 			socket = cmp.Or(socket, map[bool]string{true: "/run/mysqld/mysqld.sock", false: "/var/run/mysqld/mysqld.sock"}[e == protocol.EngineMariaDB])
+		case protocol.EngineRedis, protocol.EngineValkey:
+			port = cmp.Or(port, 6379)
 		}
 		resp, err := t.c.CreateDatabase(ctx, protocol.CreateDatabaseRequest{
 			HostID: in.Host, Name: in.Database, Port: port, SocketDir: socket, RetentionFull: in.RetentionFull,

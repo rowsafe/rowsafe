@@ -307,7 +307,8 @@ func adoptCmd(ctx context.Context, c *client.Client, args []string) error {
 	socketDir := fs.String("socket-dir", "/var/run/postgresql", "Unix socket directory")
 	retention := fs.Int("retention-full", 2, "full backups to keep (weekly fulls: 2 = about 2 weeks of PITR)")
 	noWait := fs.Bool("no-wait", false, "don't wait for the plan")
-	engine := fs.String("engine", "", "database engine: postgresql (default), mysql, mariadb, mongodb or clickhouse")
+	engine := fs.String("engine", "", "database engine: postgresql (default), mysql, mariadb, mongodb, clickhouse or sqlite")
+	path := fs.String("path", "", "SQLite: the database file's absolute path on the host (in Docker, inside the agent's container)")
 	name, err := parse(fs, args, true)
 	if err != nil {
 		return err
@@ -329,10 +330,10 @@ func adoptCmd(ctx context.Context, c *client.Client, args []string) error {
 	if *host, err = resolveHost(ctx, c, *host); err != nil {
 		return err
 	}
-	if e := protocol.NormalizeEngine(*engine); e == protocol.EngineMongoDB || e == protocol.EngineClickHouse {
-		// MongoDB and ClickHouse: TCP on 127.0.0.1, their default port
-		// (27017, ClickHouse's HTTP port 8123) and backup schedule (the
-		// control plane fills in what isn't given).
+	if e := protocol.NormalizeEngine(*engine); e == protocol.EngineMongoDB || e == protocol.EngineClickHouse || e == protocol.EngineRedis || e == protocol.EngineValkey {
+		// MongoDB, ClickHouse, Redis and Valkey: TCP on 127.0.0.1, their
+		// default port (27017, ClickHouse's HTTP port 8123, 6379) and backup
+		// schedule (the control plane fills in what isn't given).
 		set := map[string]bool{}
 		fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
 		if !set["socket-dir"] {
@@ -344,6 +345,21 @@ func adoptCmd(ctx context.Context, c *client.Client, args []string) error {
 		if !set["retention-full"] {
 			*retention = 0
 		}
+	}
+	if protocol.NormalizeEngine(*engine) == protocol.EngineSQLite {
+		// A SQLite database is a file: its path, no port, the control
+		// plane's daily full backups.
+		if !protocol.SQLitePath(*path) {
+			return errors.New("--path is required for SQLite: the database file's absolute path, e.g. /srv/app/db/production.sqlite3")
+		}
+		set := map[string]bool{}
+		fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+		*port, *socketDir = 0, *path
+		if !set["retention-full"] {
+			*retention = 0
+		}
+	} else if *path != "" {
+		return errors.New("--path is for SQLite databases (--engine sqlite)")
 	}
 	resp, err := c.CreateDatabase(ctx, protocol.CreateDatabaseRequest{
 		HostID: *host, Name: name, Port: *port, SocketDir: *socketDir, RetentionFull: *retention, Engine: *engine,
@@ -505,6 +521,10 @@ func engineServiceNames(engine string) (service, unit string) {
 		return "mongo", "mongod"
 	case protocol.EngineClickHouse:
 		return "clickhouse", "clickhouse-server"
+	case protocol.EngineRedis:
+		return "redis", "redis-server"
+	case protocol.EngineValkey:
+		return "valkey", "valkey-server"
 	}
 	return "postgres", "postgresql"
 }

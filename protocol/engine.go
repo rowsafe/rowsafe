@@ -11,10 +11,13 @@ const (
 	EngineMariaDB    = "mariadb"
 	EngineMongoDB    = "mongodb"
 	EngineClickHouse = "clickhouse"
+	EngineRedis      = "redis"
+	EngineValkey     = "valkey"
+	EngineSQLite     = "sqlite"
 )
 
 // Engines lists the known engines, PostgreSQL first.
-var Engines = []string{EnginePostgreSQL, EngineMySQL, EngineMariaDB, EngineMongoDB, EngineClickHouse}
+var Engines = []string{EnginePostgreSQL, EngineMySQL, EngineMariaDB, EngineMongoDB, EngineClickHouse, EngineRedis, EngineValkey, EngineSQLite}
 
 // NormalizeEngine maps "" to PostgreSQL and lowercases s. It does not
 // validate: see ValidEngine.
@@ -46,6 +49,12 @@ func EngineDisplayName(engine string) string {
 		return "MongoDB"
 	case EngineClickHouse:
 		return "ClickHouse"
+	case EngineRedis:
+		return "Redis"
+	case EngineValkey:
+		return "Valkey"
+	case EngineSQLite:
+		return "SQLite"
 	default:
 		return e
 	}
@@ -219,16 +228,22 @@ var EngineCapabilities = map[string]EngineFeatures{
 	},
 	// ClickHouse (internal/engine/clickhouse): protocol/clickhouse.go.
 	EngineClickHouse: clickhouseFeatures,
+	// Redis and Valkey (internal/engine/redis): protocol/redis.go.
+	EngineRedis:  redisFeatures,
+	EngineValkey: valkeyFeatures,
+	// SQLite (internal/engine/sqlite): protocol/sqlite.go.
+	EngineSQLite: sqliteFeatures,
 }
 
 // RewindInPlaceStopsServer reports whether rewinding a database of engine
 // in place stops and starts its server (PostgreSQL, MySQL, MariaDB: through
 // the root helper or the container control service, which root must
-// allow). MongoDB and ClickHouse swap the data through the database itself
-// and need no such permission.
+// allow). MongoDB, ClickHouse, Redis and Valkey swap the data through the
+// database itself, and SQLite writes the restored copy into the live file
+// with the online backup API: they need no such permission.
 func RewindInPlaceStopsServer(engine string) bool {
 	switch NormalizeEngine(engine) {
-	case EngineMongoDB, EngineClickHouse:
+	case EngineMongoDB, EngineClickHouse, EngineRedis, EngineValkey, EngineSQLite:
 		return false
 	}
 	return true

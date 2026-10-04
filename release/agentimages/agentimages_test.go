@@ -80,12 +80,17 @@ func TestVariants(t *testing.T) {
 		"ghcr.io/rowsafe/agent:clickhouse26.8":       "clickhouse26.8",
 		"ghcr.io/rowsafe/agent:0.5.2-clickhouse25.8": "clickhouse25.8",
 		"ghcr.io/rowsafe/agent:0.5.2-clickhouse26.3": "clickhouse26.3",
+		"ghcr.io/rowsafe/agent:0.8.0-redis8.10":      "redis8.10",
+		"ghcr.io/rowsafe/agent:valkey8.1":            "valkey8.1",
 		"ghcr.io/rowsafe/agent:clickhouse26.8.2":     "",
 		"ghcr.io/rowsafe/agent:clickhouse26":         "",
 		"ghcr.io/rowsafe/agent:clickhouse26.13":      "",
 		"ghcr.io/rowsafe/agent:0.5.2-clickhouse26_8": "",
 		"ghcr.io/rowsafe/agent:xclickhouse26.8":      "",
 		"docker.io/someone/agent:clickhouse26.8":     "",
+		"ghcr.io/rowsafe/agent:sqlite":               "sqlite",
+		"ghcr.io/rowsafe/agent:0.8.0-sqlite":         "sqlite",
+		"ghcr.io/rowsafe/agent:sqlite3":              "",
 	} {
 		if got := VariantOfRef(ref); got != want {
 			t.Errorf("%s: %q, want %q", ref, got, want)
@@ -95,7 +100,8 @@ func TestVariants(t *testing.T) {
 		t.Fatal("Variant")
 	}
 	for v, want := range map[string]bool{"pg17": true, "pg17-alpine": true, "clickhouse26.8": true, "clickhouse25.12": true,
-		"clickhouse26.0": false, "clickhouse26.08": false, "clickhouse126.8": false, "clickhouse26.8-alpine": false, "mongodb8": false, "": false} {
+		"redis8.2": true, "redis8.10": true, "valkey8.1": true, "valkey9.0": true, "redis8.02": false, "redis8": false, "valkey8.1-alpine": false,
+		"clickhouse26.0": false, "clickhouse26.08": false, "clickhouse126.8": false, "clickhouse26.8-alpine": false, "mongodb8": false, "sqlite": true, "sqlite-alpine": false, "": false} {
 		if ValidVariant(v) != want {
 			t.Errorf("ValidVariant(%q) = %v", v, !want)
 		}

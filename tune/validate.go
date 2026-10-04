@@ -26,6 +26,8 @@ type Facts struct {
 	// installed) are accepted.
 	LibraryInstalled func(name string) bool
 	PgStatStatements string
+	// Redis is a Redis or Valkey server's facts (SettingsSnapshot.Redis).
+	Redis *protocol.RedisSettingsFacts
 }
 
 // MaxChanges is the most settings one change may touch.

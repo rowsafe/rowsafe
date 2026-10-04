@@ -181,6 +181,10 @@ func dbList(ctx context.Context, c *client.Client, args []string) error {
 	if *asJSON {
 		return printJSON(inv)
 	}
+	if isRedisInventory(inv) {
+		printRedisInventory(server, inv)
+		return nil
+	}
 	fmt.Printf("Databases on %s (PostgreSQL %s). Every one is backed up with the server.\n\n", server, inv.ServerVersion)
 	t := newTable("DATABASE", "OWNER", "SIZE", "CONNECTIONS", "EXTENSIONS")
 	for _, d := range inv.Databases {
@@ -205,7 +209,39 @@ func dbList(ctx context.Context, c *client.Client, args []string) error {
 	return nil
 }
 
+func isRedisInventory(inv *protocol.DBInventory) bool {
+	e := protocol.NormalizeEngine(inv.Engine)
+	return e == protocol.EngineRedis || e == protocol.EngineValkey
+}
+
+// printRedisInventory: the logical databases (numbered, fixed) and the ACL
+// users with their preset and keys.
+func printRedisInventory(server string, inv *protocol.DBInventory) {
+	name := protocol.EngineDisplayName(inv.Engine)
+	fmt.Printf("%s on %s (%s %s) has %d logical databases, numbered 0 to %d (a fixed number: they can't be created or removed).\n",
+		name, server, name, inv.ServerVersion, inv.LogicalDatabases, inv.LogicalDatabases-1)
+	t := newTable("DATABASE", "KEYS", "CONNECTIONS")
+	for _, d := range inv.Databases {
+		t.row(d.Name, fmt.Sprint(d.Keys), fmt.Sprint(d.Connections))
+	}
+	t.flush()
+	fmt.Println()
+	printUsers(inv)
+}
+
 func printUsers(inv *protocol.DBInventory) {
+	if inv.ManageBlocked != "" {
+		fmt.Println(inv.ManageBlocked)
+	}
+	if isRedisInventory(inv) {
+		t := newTable("USER", "CAN SIGN IN", "ACCESS", "KEYS", "NOTE")
+		for _, u := range inv.Users {
+			access := map[string]string{protocol.DBAccessReadOnly: "read-only", protocol.DBAccessReadWrite: "read-write", protocol.DBAccessOwner: "admin"}[u.Access]
+			t.row(u.Name, yesNo(u.Login), orText(access, "custom"), orText(strings.Join(u.Keys, " "), "-"), u.SystemReason)
+		}
+		t.flush()
+		return
+	}
 	t := newTable("USER", "CAN LOG IN", "DATABASES", "PASSWORD", "NOTE")
 	for _, u := range inv.Users {
 		note := u.SystemReason
@@ -341,6 +377,7 @@ func dbDrop(ctx context.Context, c *client.Client, args []string) error {
 }
 
 // dbUserAdd: rowsafe db user add USER --db DB[,DB] [--access read_only|read_write|owner] [--host H] [--on NAME]
+// (Redis and Valkey: no --db; --keys PATTERN limits the keys it reaches.)
 func dbUserAdd(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("db user add", flag.ContinueOnError)
 	on := onFlag(fs)
@@ -348,16 +385,27 @@ func dbUserAdd(ctx context.Context, c *client.Client, args []string) error {
 	fs.Var(&dbs, "db", "a database it may use (repeat, or comma-separated)")
 	access := fs.String("access", protocol.DBAccessReadWrite, "read_only, read_write or owner")
 	host := fs.String("host", "", "the address to put in the connection string (default: the one apps use)")
+	keys := fs.String("keys", "", "Redis and Valkey: the keys it may use (\"session:* cache:*\"; default every key)")
 	pos, err := positionals(fs, args)
 	if err != nil {
 		return err
 	}
 	if len(pos) != 1 {
-		return errors.New("usage: rowsafe db user add USER --db DB [--access read_only|read_write|owner] [--on NAME]")
+		return errors.New("usage: rowsafe db user add USER --db DB [--access read_only|read_write|owner] [--on NAME]\n" +
+			"       rowsafe db user add USER [--keys PATTERN] [--access ...] [--on NAME]   (Redis and Valkey)")
 	}
 	p := protocol.DBAdminParams{Action: protocol.DBAdminCreateUser, User: pos[0], Databases: dbs,
-		Access: strings.ReplaceAll(*access, "-", "_"), Host: *host}
-	if err := protocol.ValidateDBAdmin(withKeyPlaceholder(p)); err != nil {
+		Access: strings.ReplaceAll(*access, "-", "_"), Host: *host, KeyPattern: *keys}
+	// Checked in full here, but for Redis and Valkey users (--keys, no
+	// --db): the control plane checks those, as it knows the engine.
+	if *keys == "" || len(dbs) > 0 {
+		if err := protocol.ValidateDBAdmin(withKeyPlaceholder(p)); err != nil {
+			if len(dbs) == 0 {
+				return fmt.Errorf("%w (--db DB; for Redis and Valkey --keys PATTERN, \"*\" for every key)", err)
+			}
+			return err
+		}
+	} else if err := protocol.ValidNewName("user", p.User); err != nil {
 		return err
 	}
 	server, err := resolveDatabase(ctx, c, *on)

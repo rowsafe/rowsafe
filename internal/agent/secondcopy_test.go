@@ -266,3 +266,21 @@ func TestStorageMeasurement(t *testing.T) {
 		t.Error("measured again within the interval")
 	}
 }
+
+// The second copy's pipeline has its own state directory but logs in with
+// the first pipeline's saved logins (v0.7.0 looked for them under copy2).
+func TestSecondCopySharesLogins(t *testing.T) {
+	dir := t.TempDir()
+	a := &Agent{cfg: Config{StateDir: dir}, log: slog.New(slog.DiscardHandler)}
+	main, env2 := a.engineEnv("mysql"), a.engineEnv2("mysql")
+	want := filepath.Join(dir, "engines", "mysql")
+	if main.StateDir != want || env2.StateDir != filepath.Join(want, "copy2") {
+		t.Fatalf("state dirs %q, %q", main.StateDir, env2.StateDir)
+	}
+	if main.SharedStateDir() != want || env2.SharedStateDir() != want {
+		t.Errorf("shared state dirs %q, %q, want %q", main.SharedStateDir(), env2.SharedStateDir(), want)
+	}
+	if got := (EngineEnv{StateDir: "/x"}).SharedStateDir(); got != "/x" {
+		t.Errorf("SharedStateDir without MainStateDir = %q", got)
+	}
+}

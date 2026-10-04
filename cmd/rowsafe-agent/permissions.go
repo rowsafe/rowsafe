@@ -30,9 +30,13 @@ Usage (as root; root's copy is /usr/local/lib/rowsafe/rowsafe-permissions):
   permissions chproxy-apply     install and run chproxy in front of ClickHouse's HTTP
                                 interface where root allowed pooling (run by
                                 rowsafe-chproxy-apply.service)
-  permissions tuning-apply      write the MongoDB or ClickHouse settings the agent
+  permissions tuning-apply      write the MongoDB, ClickHouse, Redis or Valkey settings the agent
                                 asked for into Rowsafe's own files, where root
                                 allowed it (run by rowsafe-tuning.service)
+  permissions sqlite-modes-apply
+                                close the SQLite files the agent named to other
+                                users, only files root listed (run by
+                                rowsafe-sqlite-modes.service)
 `
 
 // permissionsCmd runs `rowsafe-agent permissions ...`, or root's copy of
@@ -62,6 +66,8 @@ func permissionsCmd(ctx context.Context, args []string) int {
 		}
 	case "tuning-apply": // tuning.go: rowsafe-tuning.service
 		err = tuningApply()
+	case "sqlite-modes-apply": // sqlite_modes.go: rowsafe-sqlite-modes.service
+		err = sqliteModesApply()
 	case "proxysql-apply": // proxysql.go: rowsafe-proxysql.service
 		err = proxysqlApply(ctx)
 	case "chproxy-apply": // chproxy.go: rowsafe-chproxy-apply.service

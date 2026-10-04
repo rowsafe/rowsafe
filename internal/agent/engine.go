@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -87,6 +88,30 @@ type EngineRestarter interface {
 	Ready(ctx context.Context, env EngineEnv, db protocol.DatabaseSpec) (string, error)
 }
 
+// EngineRestartRefuser is an engine that may refuse to be restarted, e.g.
+// a server that would come back empty. RestartRefusal says why in a plain
+// sentence ("" to go ahead); it is asked before every restart Rowsafe
+// makes (Restart, through root's helper or the container control service,
+// and updates).
+type EngineRestartRefuser interface {
+	RestartRefusal(ctx context.Context, env EngineEnv, db protocol.DatabaseSpec) string
+}
+
+// restartRefusal is db's engine's refusal of a restart (nil: go ahead).
+func (a *Agent) restartRefusal(ctx context.Context, db protocol.DatabaseSpec) error {
+	if isPostgres(db) {
+		return nil
+	}
+	r, ok := engineFor(protocol.NormalizeEngine(db.Engine)).(EngineRestartRefuser)
+	if !ok {
+		return nil
+	}
+	if msg := r.RestartRefusal(ctx, a.engineEnvFor(db), db); msg != "" {
+		return errors.New(msg)
+	}
+	return nil
+}
+
 // engineRestarter is db's engine as an EngineRestarter (nil when it can't
 // be restarted from Rowsafe, or for PostgreSQL).
 func engineRestarter(db protocol.DatabaseSpec) EngineRestarter {
@@ -144,6 +169,10 @@ type EngineEnv struct {
 	// (<ROWSAFE_STATE_DIR>/engines/<engine>). It is not created: MkdirAll
 	// it (0700) before use.
 	StateDir string
+	// MainStateDir is StateDir outside the second copy's pipeline, which
+	// gets a StateDir of its own below it (engineEnv2) but logs in with the
+	// same saved logins: read them through SharedStateDir.
+	MainStateDir string
 	// Repo is the backup storage (S3-compatible bucket, path prefix, keys,
 	// client-side encryption passphrase), shared with PostgreSQL's
 	// pgBackRest. Keep each engine's data under its own prefix.
@@ -258,14 +287,25 @@ func engineEnv(cfg Config, runner CommandRunner, log *slog.Logger, name string) 
 		log = slog.New(slog.DiscardHandler)
 	}
 	return EngineEnv{
-		Config:      cfg,
-		StateDir:    filepath.Join(cfg.StateDir, "engines", name),
-		Repo:        cfg.Repo,
-		Runner:      runner,
-		LowPriority: niceWrap(),
-		Log:         log.With("engine", name),
-		Notes:       io.Discard,
+		Config:       cfg,
+		StateDir:     filepath.Join(cfg.StateDir, "engines", name),
+		MainStateDir: filepath.Join(cfg.StateDir, "engines", name),
+		Repo:         cfg.Repo,
+		Runner:       runner,
+		LowPriority:  niceWrap(),
+		Log:          log.With("engine", name),
+		Notes:        io.Discard,
 	}
+}
+
+// SharedStateDir is where an engine keeps what both of its pipelines share,
+// such as Rowsafe's saved logins: MainStateDir, or StateDir when that is
+// unset (tests that build an EngineEnv themselves).
+func (e EngineEnv) SharedStateDir() string {
+	if e.MainStateDir != "" {
+		return e.MainStateDir
+	}
+	return e.StateDir
 }
 
 func (a *Agent) engineEnv(name string) EngineEnv {

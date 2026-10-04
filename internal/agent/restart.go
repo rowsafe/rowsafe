@@ -98,6 +98,9 @@ func (a *Agent) restart(ctx context.Context, db protocol.DatabaseSpec, taskID st
 	if !isPostgres(db) && engineRestarter(db) == nil {
 		return nil, fmt.Errorf("This agent can't restart %s yet; update the agent (this is %s).", name, Version)
 	}
+	if err := a.restartRefusal(ctx, db); err != nil { // engine.go
+		return nil, err
+	}
 	if a.cfg.Sidecar() {
 		return a.dockerRestart(ctx, db, taskID, tl) // docker_control.go
 	}
@@ -204,6 +207,10 @@ func engineDefaultUnit(engine string) string {
 		return "mongod"
 	case protocol.EngineClickHouse:
 		return "clickhouse-server"
+	case protocol.EngineRedis:
+		return "redis-server"
+	case protocol.EngineValkey:
+		return "valkey-server"
 	}
 	return "postgresql"
 }
@@ -220,6 +227,10 @@ func dockerServiceHint(db protocol.DatabaseSpec) string {
 		return "mongo"
 	case protocol.EngineClickHouse:
 		return "clickhouse"
+	case protocol.EngineRedis:
+		return "redis"
+	case protocol.EngineValkey:
+		return "valkey"
 	}
 	return "postgres"
 }

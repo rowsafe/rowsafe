@@ -13,6 +13,7 @@ import (
 	"syscall"
 
 	"github.com/rowsafe/rowsafe/internal/permissions"
+	"github.com/rowsafe/rowsafe/internal/sqliteroot"
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
@@ -31,6 +32,8 @@ type PermissionPaths struct {
 	PoolerAllowFile        string // pooler-allowed: "PORT" lines and "public"
 	FirewallAllowFile      string // firewall-allowed: "PORT" lines
 	TuningAllowFile        string // tuning-allowed: "ENGINE PATH" lines
+	SQLiteModesAllowFile   string // sqlite-modes-allowed: "sqlite-paths"
+	SQLitePathsFile        string // sqlite-paths: the SQLite files root listed
 	OwnersFile             string // owners: the passkeys root paired (JSON)
 	AllowCommand           string // rowsafe-allow
 	PGRoot                 string // where PostgreSQL's versions are installed
@@ -46,6 +49,8 @@ func DefaultPermissionPaths() PermissionPaths {
 		PoolerAllowFile:        env("ROWSAFE_POOLER_ALLOW_FILE", "/etc/rowsafe/pooler-allowed"),
 		FirewallAllowFile:      env("ROWSAFE_FIREWALL_ALLOW_FILE", "/etc/rowsafe/firewall-allowed"),
 		TuningAllowFile:        env("ROWSAFE_TUNING_ALLOW_FILE", "/etc/rowsafe/tuning-allowed"),
+		SQLiteModesAllowFile:   env("ROWSAFE_SQLITE_MODES_ALLOW_FILE", sqliteroot.DefaultAllowFile),
+		SQLitePathsFile:        env("ROWSAFE_SQLITE_PATHS_FILE", sqliteroot.DefaultListFile),
 		OwnersFile:             env("ROWSAFE_PERMISSIONS_OWNERS_FILE", "/etc/rowsafe/owners"),
 		AllowCommand:           "/usr/local/sbin/rowsafe-allow",
 		PGRoot:                 "/usr/lib/postgresql",
@@ -89,7 +94,8 @@ var permHave = func(name string) bool {
 // server (the installer says the same).
 const (
 	permReasonPostgresOnly = "Rowsafe does this for PostgreSQL, and there is no PostgreSQL on this server"
-	permReasonTuning       = "Rowsafe needs this only for MongoDB and ClickHouse, and neither is installed here"
+	permReasonSQLite       = "Rowsafe needs this only for SQLite files, and root hasn't listed any here"
+	permReasonTuning       = "Rowsafe needs this only for MongoDB, ClickHouse, Redis and Valkey, and none is installed here"
 	permReasonPooler       = "Rowsafe pools PostgreSQL (PgBouncer), MySQL or MariaDB (ProxySQL) and ClickHouse (chproxy), and none is on this server"
 	permReasonNoCluster    = "pg_createcluster isn't installed (Debian and Ubuntu's postgresql-common)"
 	permReasonNoNft        = "nftables isn't installed"
@@ -115,7 +121,12 @@ func ReadPermissions(p PermissionPaths) *protocol.PermissionsReport {
 		answer[protocol.PermFirewall] = anyLine(lines, func(f []string) bool { return isPort(f[0]) })
 	}
 	if lines, ok := allowFileLines(p.TuningAllowFile); ok {
-		answer[protocol.PermTuning] = anyLine(lines, func(f []string) bool { return (f[0] == "mongodb" || f[0] == "clickhouse") && len(f) >= 2 })
+		answer[protocol.PermTuning] = anyLine(lines, func(f []string) bool {
+			return slices.Contains([]string{"mongodb", "clickhouse", "redis", "valkey"}, f[0]) && len(f) >= 2
+		})
+	}
+	if lines, ok := allowFileLines(p.SQLiteModesAllowFile); ok {
+		answer[protocol.PermSQLiteModes] = anyLine(lines, func(f []string) bool { return f[0] == sqliteroot.AllowWord })
 	}
 	if lines, ok := allowFileLines(p.UpdatesAllowFile); ok {
 		for perm, word := range map[string]string{
@@ -152,7 +163,7 @@ func ReadPermissions(p PermissionPaths) *protocol.PermissionsReport {
 // MySQL and MariaDB, chproxy for ClickHouse).
 var anyEnginePermission = map[string]bool{protocol.PermRestart: true, protocol.PermUpdates: true, protocol.PermSecurityUpdates: true,
 	protocol.PermReboot: true, protocol.PermFirewall: true, protocol.PermTuning: true,
-	protocol.PermPooler: true, protocol.PermPoolerPublic: true}
+	protocol.PermPooler: true, protocol.PermPoolerPublic: true, protocol.PermSQLiteModes: true}
 
 // permissionsUnavailable says which permissions this server can't have,
 // and why. One that is allowed is never listed.
@@ -169,8 +180,11 @@ func permissionsUnavailable(p PermissionPaths, allowed []string) map[string]stri
 		case len(pg) == 0 && (name == protocol.PermPooler || name == protocol.PermPoolerPublic) && !permHave("mysqld") && !permHave("mariadbd") &&
 			!permHave("clickhouse-server") && !permHave("clickhouse"):
 			why = permReasonPooler
-		case name == protocol.PermTuning && !permHave("mongod") && !permHave("clickhouse-server") && !permHave("clickhouse"):
+		case name == protocol.PermTuning && !permHave("mongod") && !permHave("clickhouse-server") && !permHave("clickhouse") &&
+			!permHave("redis-server") && !permHave("valkey-server"):
 			why = permReasonTuning
+		case name == protocol.PermSQLiteModes && !sqliteListed(p.SQLitePathsFile):
+			why = permReasonSQLite
 		case name == protocol.PermFirewall && !permHave("nft"):
 			why = permReasonNoNft
 		case (name == protocol.PermUpdates || name == protocol.PermSecurityUpdates || name == protocol.PermReboot) && !permHave("apt-get"):
@@ -188,6 +202,12 @@ func permissionsUnavailable(p PermissionPaths, allowed []string) map[string]stri
 		return nil
 	}
 	return out
+}
+
+// sqliteListed: root listed at least one SQLite file for the agent.
+func sqliteListed(path string) bool {
+	l, _ := sqliteroot.Listed(path)
+	return len(l) > 0
 }
 
 // allowFileLines reads an allow file's lines, split into fields, without

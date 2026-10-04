@@ -21,6 +21,10 @@ func changeLog(engine string) string {
 		return "binary log"
 	case protocol.EngineMongoDB:
 		return "oplog"
+	case protocol.EngineRedis, protocol.EngineValkey:
+		return "replication stream"
+	case protocol.EngineSQLite:
+		return "WAL"
 	}
 	return ""
 }
@@ -37,6 +41,10 @@ func serviceName(engine string) (unit, compose string) {
 		return "mongod", "mongo"
 	case protocol.EngineClickHouse:
 		return "clickhouse-server", "clickhouse"
+	case protocol.EngineRedis:
+		return "redis-server", "redis"
+	case protocol.EngineValkey:
+		return "valkey-server", "valkey"
 	}
 	return "postgresql", "postgres"
 }

@@ -152,6 +152,9 @@ func (a *Agent) buildSoftware(ctx context.Context) *protocol.SoftwareReport {
 	r := &protocol.SoftwareReport{CheckedAt: time.Now().UTC()}
 	if a.cfg.Container() {
 		r.Container = true // the image's packages aren't the server's
+		// Redis and Valkey sidecars: the version bundled in the agent's
+		// image as the newest of the series (engine_updates.go).
+		r.Clusters = a.engineContainerSoftware(ctx)
 		return r
 	}
 	r.Allowed = a.updateAllowed()

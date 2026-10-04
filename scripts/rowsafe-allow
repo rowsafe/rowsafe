@@ -25,7 +25,7 @@ installer=/usr/local/lib/rowsafe/install.sh
 helper=/usr/local/lib/rowsafe/rowsafe-permissions
 owners=/etc/rowsafe/owners
 update='curl -fsSL https://rowsafe.sh | sudo sh'
-names='restart create-cluster updates security-updates reboot pooler pooler-public firewall tuning'
+names='restart create-cluster updates security-updates reboot pooler pooler-public firewall tuning sqlite-modes'
 
 usage() {
   cat <<'EOF'
@@ -52,7 +52,8 @@ Names:
   pooler             install and manage PgBouncer (connection pooling)
   pooler-public      let PgBouncer listen on public addresses (needs pooler)
   firewall           limit who can reach the database's port (never SSH or other ports)
-  tuning             change MongoDB's or ClickHouse's settings, in Rowsafe's own file
+  tuning             change MongoDB's, ClickHouse's, Redis's or Valkey's settings
+  sqlite-modes       close the listed SQLite files to other users (owners and ACLs stay)
 
   sudo rowsafe-allow pooler-target ADDRESS PORT
                            let ProxySQL send connections to the MySQL on another

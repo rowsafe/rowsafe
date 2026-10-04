@@ -177,7 +177,18 @@ type PreviewError struct {
 const (
 	MaskingRules = "rules" // saved rules, and suggestions for every column they don't cover
 	MaskingNone  = "none"  // no masking: an admin chose it explicitly
+	// MaskingStructure keeps every key (Redis, Valkey) with its type and
+	// time to live, and replaces every value with a placeholder: the shape
+	// of the data without any of it.
+	MaskingStructure = "structure"
 )
+
+// StructureCopies reports whether safe copies of engine can be
+// structure-only (MaskingStructure).
+func StructureCopies(engine string) bool {
+	e := NormalizeEngine(engine)
+	return e == EngineRedis || e == EngineValkey
+}
 
 // MaskingRule masks one column with a strategy (see package masking).
 type MaskingRule struct {
@@ -234,6 +245,10 @@ type SafeCopyParams struct {
 	Expires time.Time   `json:"expires"` // default 24h, at most 7 days
 	Masking MaskingPlan `json:"masking"`
 	Access  CopyAccess  `json:"access"`
+	// SchemaOnly makes a structure-only copy: the tables, indexes,
+	// triggers and views, without a row (SQLite only; Masking and Access
+	// are ignored).
+	SchemaOnly bool `json:"schema_only,omitempty"`
 }
 
 // SafeCopyResult is the agent's report for a safe_copy task.
@@ -252,6 +267,11 @@ type SafeCopyResult struct {
 	TLSOwnCert bool          `json:"tls_own_cert,omitempty"`
 	Masking    MaskingReport `json:"masking"`
 	Summary    string        `json:"summary"`
+	// Path is the copy's file on the server, for engines whose copies are
+	// files (SQLite: no port, role or password; readable only by the
+	// agent's user and root).
+	Path       string `json:"path,omitempty"`
+	SchemaOnly bool   `json:"schema_only,omitempty"`
 }
 
 // CopySchemaParams are the params of a copy_schema task.
@@ -445,6 +465,12 @@ type SafeCopy struct {
 	TLSCert     string         `json:"tls_cert,omitempty"`
 	Masking     *MaskingReport `json:"masking,omitempty"`
 	TaskID      string         `json:"task_id"`
+	// Path is the copy's file on the server (SQLite: a file copy has no
+	// address, role or password; it stays on the server, readable only by
+	// the agent's user and root). SchemaOnly: a structure-only copy (no
+	// rows).
+	Path       string `json:"path,omitempty"`
+	SchemaOnly bool   `json:"schema_only,omitempty"`
 	// Task is the safe_copy task while it runs or when it failed.
 	Task  *TaskView `json:"task,omitempty"`
 	Error string    `json:"error,omitempty"`
@@ -491,6 +517,11 @@ type CreateSafeCopyRequest struct {
 	PasswordVerifier string `json:"password_verifier,omitempty"`
 	// Role is the login role's name (default rowsafe_copy_<id>).
 	Role string `json:"role,omitempty"`
+	// SchemaOnly asks for a structure-only copy: tables, indexes, triggers
+	// and views without a row (SQLite only). A SQLite copy is a file on the
+	// server: AllowFrom, Listen, ConnectHost, DB, Role and
+	// PasswordVerifier don't apply to it.
+	SchemaOnly bool `json:"schema_only,omitempty"`
 }
 
 // CreateSafeCopyResponse is the new copy.
@@ -577,6 +608,8 @@ func ValidPasswordVerifier(s string) bool { return passwordVerifierRE.MatchStrin
 //     SHA1(SHA1(password)).
 //   - ClickHouse: sha256: + the 64 lowercase hex digits of SHA256(password)
 //     (users.xml password_sha256_hex).
+//   - Redis and Valkey: # + the 64 lowercase hex digits of SHA256(password)
+//     (what ACL SETUSER takes and ACL LIST shows).
 //
 // Passwords are random (24 characters, about 140 bits), so even the
 // unsalted forms can't be guessed back.
@@ -584,6 +617,7 @@ var (
 	mysqlVerifierRE      = regexp.MustCompile(`^\$A\$005\$[./0-9A-Za-z]{63}$`)
 	mariadbVerifierRE    = regexp.MustCompile(`^\*[0-9A-F]{40}$`)
 	clickhouseVerifierRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	redisVerifierRE      = regexp.MustCompile(`^#[0-9a-f]{64}$`)
 	scramIterationsRE    = regexp.MustCompile(`^SCRAM-SHA-256\$([0-9]+):([A-Za-z0-9+/=]+)\$`)
 )
 
@@ -606,6 +640,8 @@ func ValidCopyVerifier(engine, s string) bool {
 		return mariadbVerifierRE.MatchString(s)
 	case EngineClickHouse:
 		return clickhouseVerifierRE.MatchString(s)
+	case EngineRedis, EngineValkey:
+		return redisVerifierRE.MatchString(s)
 	}
 	return false
 }
@@ -621,6 +657,8 @@ func CopyVerifierForm(engine string) string {
 		return "a mysql_native_password hash (* + 40 uppercase hex digits)"
 	case EngineClickHouse:
 		return "sha256: + the 64 hex digits of the password's SHA-256"
+	case EngineRedis, EngineValkey:
+		return "# + the 64 lowercase hex digits of the password's SHA-256"
 	}
 	return "a SCRAM-SHA-256 verifier (SCRAM-SHA-256$4096:salt$StoredKey:ServerKey)"
 }

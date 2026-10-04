@@ -346,6 +346,9 @@ func (a *Agent) engineUpgradeUndo(ctx context.Context, db protocol.DatabaseSpec,
 	case r.Status != protocol.UpgradeDone:
 		return nil, errors.New("that upgrade was undone already, or is still running")
 	}
+	if err := a.restartRefusal(ctx, db); err != nil { // engine.go: undo restarts it
+		return nil, err
+	}
 	from := protocol.SeriesString(r.FromMajor)
 	_ = st.update(r.ID, func(x *upgradeRecord) {
 		x.Status, x.Phase, x.HelperID = protocol.UpgradeInProgress, upPhaseUndo, taskID+"-undo"

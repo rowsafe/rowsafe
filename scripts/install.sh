@@ -60,9 +60,13 @@
 #                          with the firewall when you ask (Security in the
 #                          dashboard); never touches SSH or other ports
 #   --no-allow-firewall    turn that off again (and remove Rowsafe's rule)
-#   --allow-tuning         allow Rowsafe to change MongoDB's or ClickHouse's settings
-#                          when you ask (Tuning), only in its own settings file
+#   --allow-tuning         allow Rowsafe to change MongoDB's, ClickHouse's, Redis's or
+#                          Valkey's settings when you ask (Tuning), only those settings
 #   --no-allow-tuning      turn that off again
+#   --allow-sqlite-modes   allow Rowsafe to close the listed SQLite files to the
+#                          server's other users when you click Apply fix under
+#                          Security (others' access only; owners and ACLs stay)
+#   --no-allow-sqlite-modes  turn that off again
 #   --firewall-ssh         for servers Rowsafe creates (implies --allow-firewall):
 #                          the firewall also limits who can reach SSH, and
 #                          PostgreSQL's port is closed to everyone until the
@@ -142,8 +146,9 @@ RESTART_PATH_FILE=/etc/systemd/system/rowsafe-pg-restart.path
 RESTART_ALLOW_FILE=$CONFIG_DIR/restart-allowed
 RESTART_DIR=$STATE_DIR/restart
 # The database units the restart helper acts on (its db_unit_re): Debian's
-# PostgreSQL clusters and the MySQL, MariaDB, MongoDB and ClickHouse units.
-DB_UNIT_RE='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server)[.]service$'
+# PostgreSQL clusters and the MySQL, MariaDB, MongoDB, ClickHouse, Redis and
+# Valkey units.
+DB_UNIT_RE='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server|(redis|valkey)(-server)?(@[A-Za-z0-9_.-]+)?)[.]service$'
 # Forks (--allow-create-cluster): new clusters created by their own unit,
 # started by the restart helper.
 CREATE_HELPER=$LIB_DIR/rowsafe-pg-create-cluster
@@ -151,6 +156,14 @@ CREATE_UNIT_FILE=/etc/systemd/system/rowsafe-pg-create-cluster@.service
 CREATE_ALLOW_FILE=$CONFIG_DIR/create-cluster-allowed
 CREATED_CLUSTERS_FILE=$CONFIG_DIR/created-clusters
 CREATE_PORTS=5440-5499
+# Redis and Valkey servers for standbys and clones (--redis-standby,
+# --redis-clones): created on request by the same helper, each run by
+# rowsafe-redis@PORT.service.
+REDIS_SERVERS_ALLOW_FILE=$CONFIG_DIR/redis-servers-allowed
+REDIS_CREATED_FILE=$CONFIG_DIR/redis-created
+REDIS_SERVER_UNIT=/etc/systemd/system/rowsafe-redis@.service
+REDIS_SERVERS_ROOT=/var/lib/rowsafe-redis
+REDIS_PORTS=${ROWSAFE_REDIS_PORTS:-6390-6399}
 # PgBouncer on request (--allow-pooler): the same helper, started by its own
 # path unit; the pgbouncer package goes in and out through its own unit.
 POOLER_SERVICE_FILE=/etc/systemd/system/rowsafe-pooler.service
@@ -165,6 +178,12 @@ TUNING_ALLOW_FILE=$CONFIG_DIR/tuning-allowed
 TUNING_SERVICE_FILE=/etc/systemd/system/rowsafe-tuning.service
 TUNING_PATH_FILE=/etc/systemd/system/rowsafe-tuning.path
 TUNING_DIR=$STATE_DIR/tuning
+# Closing SQLite files to other users (--allow-sqlite-modes): root's copy of
+# the agent changes only others' access to the listed SQLite files.
+SQLITE_MODES_ALLOW_FILE=$CONFIG_DIR/sqlite-modes-allowed
+SQLITE_MODES_SERVICE_FILE=/etc/systemd/system/rowsafe-sqlite-modes.service
+SQLITE_MODES_PATH_FILE=/etc/systemd/system/rowsafe-sqlite-modes.path
+SQLITE_MODES_DIR=$STATE_DIR/sqlite-modes
 
 # The firewall on request (--allow-firewall): a root helper of its own.
 FIREWALL_HELPER=$LIB_DIR/rowsafe-firewall
@@ -225,6 +244,7 @@ ALLOW_POOLER=''    # --allow-pooler (yes) / --no-allow-pooler (no); '' = ask onc
 ALLOW_POOLER_PUBLIC='' # --allow-pooler-public (yes) / --no-allow-pooler-public (no): PgBouncer on every address
 ALLOW_FIREWALL=''  # --allow-firewall (yes) / --no-allow-firewall (no); '' = ask once, on a terminal
 ALLOW_TUNING=''    # --allow-tuning (yes) / --no-allow-tuning (no): MongoDB and ClickHouse settings files
+ALLOW_SQLITE_MODES='' # --allow-sqlite-modes (yes) / --no-allow-sqlite-modes (no): close SQLite files to other users
 POOLER_TARGET_ADD='' POOLER_TARGET_DEL='' # --allow-pooler-target / --no-allow-pooler-target ADDRESS:PORT (ProxySQL)
 FIREWALL_SSH=''    # --firewall-ssh (yes) / --no-firewall-ssh (no): SSH's allow list too (servers Rowsafe creates)
 ALLOW_UPDATES=''   # --allow-updates / --no-allow-updates (PostgreSQL updates and upgrades)
@@ -235,10 +255,16 @@ MONGODB_STANDBY='' # --mongodb-standby (yes): Rowsafe may make this MongoDB part
 M_CLONES=''        # --mongodb-clones (yes): this (empty) MongoDB may receive clones
 CH_CLONES=''       # --clickhouse-clones (yes): this (empty) ClickHouse may receive clones
 MYSQL_STANDBY=''   # --mysql-standby (yes) / --no-mysql-standby (no); '' = ask once, on a terminal
+REDIS_STANDBY=''   # --redis-standby (yes): Redis/Valkey standby servers with this server
+REDIS_CLONES=''    # --redis-clones (yes): Redis/Valkey servers here may receive clones
 MONGODB_REPLSET='' # --mongodb-replica-set (yes) / --no-mongodb-replica-set (no); '' = ask on a terminal
 INSTALL_PG=''      # --install-postgres VERSION (servers Rowsafe creates)
 LISTEN_PUBLIC=0    # --listen-public
 PG_OURS=0          # the PostgreSQL here is the one --install-postgres installed
+SQLITE_PATHS=''    # --sqlite PATH, one per line
+SQLITE_LIST=$CONFIG_DIR/sqlite-paths # the agent's SQLite files (one per line)
+SQLITE_CLONE_DIRS='' # --sqlite-clone-dir DIR, one per line
+SQLITE_CLONE_LIST=$CONFIG_DIR/sqlite-clone-dirs # folders SQLite clones may be written to
 
 TMP=
 CHANGED=0          # binary, unit, guard or config changed: a running agent needs a restart
@@ -310,6 +336,12 @@ Options (when piping, pass them after `sh -s --`):
                          decides who can connect. Restarts PostgreSQL only if it was
                          installed by --install-postgres or you say yes; otherwise the
                          change waits for its next restart
+  --sqlite PATH          protect the SQLite database file PATH (repeat for several);
+                         with --protect NAME, give exactly one. The installer also finds
+                         the SQLite files running apps have open and asks about each
+  --sqlite-clone-dir DIR allow Rowsafe to write clones of SQLite databases (new files,
+                         never over an existing one) into the folder DIR; repeat for
+                         several. The agent gets write access to it (an ACL)
   --allow-restart        allow Rowsafe to restart or stop PostgreSQL when you ask
                          (Restart and Rewind in the dashboard, `rowsafe restart`),
                          only when someone confirms
@@ -334,9 +366,13 @@ Options (when piping, pass them after `sh -s --`):
                          the firewall (nftables) when you ask, under Security in the
                          dashboard; never touches SSH or other ports
   --no-allow-firewall    turn that off (and remove Rowsafe's rule and helper)
-  --allow-tuning         allow Rowsafe to change MongoDB's or ClickHouse's settings when
-                         you ask under Tuning, only in its own settings file
+  --allow-tuning         allow Rowsafe to change MongoDB's, ClickHouse's, Redis's or
+                         Valkey's settings when you ask under Tuning, only those settings
   --no-allow-tuning      turn that off
+  --allow-sqlite-modes   allow Rowsafe to close the listed SQLite files to the server's
+                         other users when you click Apply fix under Security (only
+                         others' access goes; owners, groups and ACLs stay)
+  --no-allow-sqlite-modes  turn that off
   --allow-pooler-target ADDRESS:PORT    let ProxySQL send connections to the MySQL
                          on another server (the primary after a standby's promotion)
   --no-allow-pooler-target ADDRESS:PORT  turn that off
@@ -366,6 +402,15 @@ Options (when piping, pass them after `sh -s --`):
                          the replica set's key file and add replSetName, keyFile and
                          an address to mongod.conf (a copy kept); restarts stay the
                          ones a person confirms (needs --allow-restart)
+  --redis-standby        Redis/Valkey: let Rowsafe set up standby servers with this server:
+                         Rowsafe's user may create and remove users (the standby's
+                         replication login; on Redis that amounts to administrator
+                         rights) and root's helper may create a new server here for a
+                         standby (ports 6390-6399, rowsafe-redis@PORT.service);
+                         an empty server here is handed to Rowsafe for that too
+  --redis-clones         Redis/Valkey: root's helper may create a new server here
+                         (same ports) to receive a clone of a database from another
+                         server; an empty server here is handed to Rowsafe for that
   --mongodb-clones       MongoDB: keep an empty server ready to receive clones of a
                          database from another server (Rowsafe's user there gets the
                          restore and readWriteAnyDatabase roles)
@@ -396,6 +441,9 @@ Environment:
   ROWSAFE_CLICKHOUSE_ADMIN_USER, ROWSAFE_CLICKHOUSE_ADMIN_PASSWORD  without a terminal: a
                          ClickHouse administrator to create Rowsafe's own ClickHouse user
                          when it can't be added as a users.d file (used once, never saved)
+  ROWSAFE_REDIS_ADMIN_USER, ROWSAFE_REDIS_ADMIN_PASSWORD  without a terminal: a Redis or
+                         Valkey administrator (default, for a server with only a
+                         password) to create Rowsafe's own user (used once, never saved)
   ROWSAFE_URL, ROWSAFE_ENROLL_TOKEN, ROWSAFE_REPO_*  written to /etc/rowsafe/agent.env
                          (ROWSAFE_ENROLL_TOKEN may instead be the argument rse_...)
                          (ROWSAFE_URL defaults to https://api.rowsafe.sh)
@@ -454,6 +502,28 @@ Turning on backups:
   each new part to your bucket as it appears, so you can restore to any
   second.
 
+  Redis and Valkey: Rowsafe gets its own ACL user, rowsafe (as the default
+  user when it has no password, else with an administrator's login once).
+  Redis keeps it in its ACL file or configuration file; when it can't write
+  them, the installer adds the user's line (the password's hash, never the
+  password) to the configuration file. Backups come from the server itself
+  over replication, so nothing is installed or restarted. Redis Cluster,
+  Redis older than 7.0 and Valkey older than 7.2 are not supported yet.
+
+  SQLite: a database is a file your app opens. The installer finds the
+  files running programs have open (here and inside Docker containers, as
+  root, read-only) and asks which to protect; --sqlite PATH adds one. The
+  agent then needs read and write access to the file, its -wal and -shm
+  files and their folder: the installer gives it to the agent's user with a
+  POSIX ACL (installing the acl package if needed), plus a default ACL on
+  the folder so the -wal and -shm files your app creates later are covered,
+  and prints what it changed. Owners, groups and other users' access stay as
+  they were. Files on network filesystems (NFS, SMB, sshfs...) are refused:
+  SQLite's locking isn't reliable there. Clones (Fork in the dashboard) are
+  new files written only into folders you allow with --sqlite-clone-dir (or
+  answer yes when asked): the agent gets write access to the folder (an
+  ACL, and a default ACL so the folder's owner can use the new files too).
+
 What Rowsafe may do on this server:
   Rowsafe only restarts PostgreSQL, installs updates, reboots, manages
   PgBouncer or the firewall when someone clicks that in the dashboard and
@@ -461,7 +531,8 @@ What Rowsafe may do on this server:
   once (a re-run keeps the answers) and then shows what is allowed. Change it
   any time with `sudo rowsafe-allow` (list), `sudo rowsafe-allow NAME` (allow)
   and `sudo rowsafe-allow --remove NAME`. Names: restart, create-cluster,
-  updates, security-updates, reboot, pooler, pooler-public, firewall, tuning. Some
+  updates, security-updates, reboot, pooler, pooler-public, firewall, tuning,
+  sqlite-modes. Some
   need another: create-cluster, updates and security-updates need restart,
   reboot needs security-updates, pooler-public needs pooler. Turning one off
   turns off what needs it.
@@ -655,10 +726,74 @@ clickhouse_setup() {
   fi
 }
 # <<< clickhouse
+# >>> redis: without PostgreSQL, MySQL/MariaDB, MongoDB and ClickHouse but
+# with Redis or Valkey, the agent runs as its own system user, rowsafe, too.
+# A server too old for Rowsafe is refused here, before anything changes.
+detect_redis_host() {
+  [ "$HOST_ENGINE" = postgresql ] || return 0
+  id -u postgres >/dev/null 2>&1 && return 0
+  redis_present || return 0
+  HOST_ENGINE=redis
+  if redis_find_program; then
+    HOST_ENGINE=$REDIS_FOUND_ENGINE
+    _why=$(redis_too_old "$HOST_ENGINE" "$REDIS_VERSION")
+    [ -z "$_why" ] || die "$_why. Nothing was changed on this server."
+  elif have valkey-server || [ -f /lib/systemd/system/valkey-server.service ] || [ -f /usr/lib/systemd/system/valkey-server.service ]; then
+    HOST_ENGINE=valkey
+  fi
+  use_rowsafe_user
+  AGENT_HOME=$STATE_DIR
+}
+
+# redis_setup: on a Redis or Valkey server without PostgreSQL, a unit
+# drop-in runs the agent as rowsafe. The server's group (redis or valkey)
+# lets it read, never write, the server's snapshot file, which it only uses
+# when the server refuses to send it a copy over replication. Nothing of the
+# server's (folders, modes) is changed for that.
+redis_setup() {
+  _dropin=/etc/systemd/system/$SERVICE.d
+  case $HOST_ENGINE in
+    redis | valkey) ;;
+    *)
+      [ ! -f "$_dropin/10-redis.conf" ] || { rm -f "$_dropin/10-redis.conf"; UNIT_CHANGED=1; CHANGED=1; }
+      return 0
+      ;;
+  esac
+  install -d -m 0755 "$_dropin"
+  _grp=$(redis_group)
+  if {
+    echo "# Written by the Rowsafe installer: this server runs $(engine_label)."
+    echo "[Unit]"
+    echo "After=redis-server.service redis.service valkey-server.service valkey.service"
+    echo "[Service]"
+    echo "User=rowsafe"
+    echo "Group=rowsafe"
+    [ -z "$_grp" ] || echo "SupplementaryGroups=$_grp"
+  } | write_file "$_dropin/10-redis.conf" 0644 root:root; then
+    UNIT_CHANGED=1 CHANGED=1
+  fi
+}
+
+# redis_group prints the group the Redis or Valkey packages made (redis or
+# valkey), nothing when there is none.
+redis_group() {
+  _order='redis valkey'
+  [ "$HOST_ENGINE" != valkey ] || _order='valkey redis'
+  for _g in $_order; do
+    if getent group "$_g" >/dev/null 2>&1; then
+      echo "$_g"
+      return 0
+    fi
+  done
+}
+# <<< redis
 # >>> mysql
 
 engine_label() {
-  case ${1:-$HOST_ENGINE} in mysql) echo MySQL ;; mariadb) echo MariaDB ;; mongodb) echo MongoDB ;; clickhouse) echo ClickHouse ;; *) echo PostgreSQL ;; esac
+  case ${1:-$HOST_ENGINE} in
+    mysql) echo MySQL ;; mariadb) echo MariaDB ;; mongodb) echo MongoDB ;; clickhouse) echo ClickHouse ;;
+    redis) echo Redis ;; valkey) echo Valkey ;; sqlite) echo SQLite ;; *) echo PostgreSQL ;;
+  esac
 }
 
 # ensure_mysql_tools installs the physical backup tool: mariadb-backup from
@@ -801,7 +936,7 @@ mysql_standby_wanted() {
 check_postgres() {
   [ "$HOST_ENGINE" = postgresql ] || return 0 # mysql
   id -u "$AGENT_USER" >/dev/null 2>&1 ||
-    die "no '$AGENT_USER' user on this host. Rowsafe adopts an existing PostgreSQL, MySQL, MariaDB, MongoDB or ClickHouse; install one first."
+    die "no '$AGENT_USER' user on this host. Rowsafe adopts an existing PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis or Valkey; install one first."
   PG_MAJORS=''
   for bin in /usr/lib/postgresql/*/bin/postgres; do
     [ -x "$bin" ] || continue
@@ -809,7 +944,7 @@ check_postgres() {
     PG_MAJORS="$PG_MAJORS ${major%%/*}"
   done
   PG_MAJORS=${PG_MAJORS# }
-  if [ -z "$PG_MAJORS" ] && [ -z "${ROWSAFE_PG_BIN_DIR:-}" ] && ! mongodb_present && ! clickhouse_present; then
+  if [ -z "$PG_MAJORS" ] && [ -z "${ROWSAFE_PG_BIN_DIR:-}" ] && ! mongodb_present && ! clickhouse_present && ! redis_present; then
     die "no PostgreSQL server found under /usr/lib/postgresql. Restore drills need the server binaries (pg_ctl); set ROWSAFE_PG_BIN_DIR if they live elsewhere."
   fi
 }
@@ -1444,7 +1579,7 @@ install_helper_script() {
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
 # rowsafe-pg-restart: restarts or stops PostgreSQL (or the MySQL, MariaDB,
-# MongoDB or ClickHouse server Rowsafe protects) when a person asked
+# MongoDB, ClickHouse, Redis or Valkey server Rowsafe protects) when a person asked
 # Rowsafe to (Restart in the dashboard, `rowsafe restart`; Rewind the whole
 # database, which stops the database, swaps its data and starts it),
 # and installs PostgreSQL updates, upgrades PostgreSQL, installs security
@@ -1502,10 +1637,12 @@ install_helper_script() {
 #   ID pg-upgrade-cleanup PORT               remove the version kept aside by an upgrade or undo
 #   ID security-updates                      install pending security updates
 #   ID reboot                                reboot the server
-#   ID db-minor-update PORT                  newest release of the series (8.0, 10.11, 7.0, 25.8)
-#                                            of the MySQL, MariaDB, MongoDB or ClickHouse server on PORT
+#   ID db-minor-update PORT                  newest release of the series (8.0, 10.11, 7.0, 25.8, 8.2)
+#                                            of the MySQL, MariaDB, MongoDB, ClickHouse, Redis or Valkey
+#                                            server on PORT
 #   ID db-upgrade PORT SERIES                that server to a newer series (8.0 -> 8.4), keeping a copy
 #                                            of its data directory and its old packages for undo
+#                                            (not Redis or Valkey yet)
 #   ID db-upgrade-undo PORT                  back to the kept data and packages (the newer data is kept aside)
 #   ID db-upgrade-cleanup PORT               delete what an upgrade or its undo kept
 #
@@ -1555,7 +1692,22 @@ install_helper_script() {
 # /etc/rowsafe/mongodb-standby-allowed ("PORT UNIT CONFIG", written by the
 # installer with --mongodb-standby).
 #
-# actions: restart stop start create-cluster files-read files-put mongodb-key-export mongodb-standby-config
+# Redis and Valkey servers for standbys and clones: "ID redis-create PORT
+# HASH" creates a new, empty server on PORT when root allowed it
+# (/etc/rowsafe/redis-servers-allowed, written by the installer with
+# --redis-standby or --redis-clones: "ports MIN-MAX", "engine redis|valkey",
+# "user USER"): its data directory /var/lib/rowsafe-redis/PORT (owned by
+# USER, created as USER), its configuration redis.conf and ACL file
+# users.acl there (Rowsafe's user "rowsafe" with HASH, the SHA-256 of a
+# password only the agent knows; the default user without a password,
+# which Redis's protected mode lets in from this server only), then
+# enables and starts rowsafe-redis@PORT.service and lists it in
+# /etc/rowsafe/redis-created ("PORT UNIT"), whose units restart, stop and
+# start like the ones in restart-allowed. "ID redis-remove PORT" stops and
+# disables such a server and deletes its data directory (only one listed in
+# redis-created).
+#
+# actions: restart stop start create-cluster files-read files-put mongodb-key-export mongodb-standby-config redis-create redis-remove
 # update-actions: pg-minor-update pg-install-major pg-upgrade pg-upgrade-undo pg-upgrade-cleanup security-updates reboot db-minor-update db-upgrade db-upgrade-undo db-upgrade-cleanup
 #
 # The same helper manages PgBouncer when root allowed that (--allow-pooler):
@@ -1584,6 +1736,9 @@ mode=${ROWSAFE_HELPER_MODE:-restart}
 min_interval=60
 
 mongo_allow=${ROWSAFE_MONGODB_STANDBY_ALLOW:-/etc/rowsafe/mongodb-standby-allowed}
+redis_allow=${ROWSAFE_REDIS_SERVERS_ALLOW:-/etc/rowsafe/redis-servers-allowed}
+redis_created=${ROWSAFE_REDIS_CREATED:-/etc/rowsafe/redis-created}
+redis_root=${ROWSAFE_REDIS_ROOT:-/var/lib/rowsafe-redis}
 mongo_key_dir=${ROWSAFE_MONGODB_KEY_DIR:-/etc/rowsafe}
 
 log() { echo "rowsafe-pg-restart: $*" >&2; }
@@ -2024,9 +2179,10 @@ check_root_file() {
 # db_unit_re: the database units a restart, stop or start may act on,
 # whatever the allow list says: Debian's PostgreSQL cluster units
 # (postgresql@MAJOR-NAME.service), and the units the MySQL, MariaDB,
-# MongoDB and ClickHouse packages install (mysql, mysqld, mariadb and their
-# @instance forms, mongod, mongodb, clickhouse-server).
-db_unit_re='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server)[.]service$'
+# MongoDB, ClickHouse, Redis and Valkey packages install (mysql, mysqld,
+# mariadb and their @instance forms, mongod, mongodb, clickhouse-server,
+# redis-server, redis, valkey-server, valkey and their @instance forms).
+db_unit_re='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server|(redis|valkey)(-server)?(@[A-Za-z0-9_.-]+)?)[.]service$'
 
 # allowed_unit PORT prints the unit the restart allow list names for PORT.
 allowed_unit() {
@@ -2194,6 +2350,88 @@ create_cluster() {
     fi
   fi
   [ -z "$err" ] || log "$err"
+  answer
+  exit 0
+}
+
+# ---------------------------------------------------------------- Redis and Valkey servers
+
+# redis_allowed PORT sets r_engine and r_user from the allow list, which
+# only root can write, and checks PORT is in its range.
+redis_allowed() {
+  check_root_file "$redis_allow" "creating Redis or Valkey servers is not allowed on this server (install Rowsafe there with --redis-standby or --redis-clones)"
+  r_range=$(awk '$1 == "ports" && $2 ~ /^[0-9]+-[0-9]+$/ { print $2; exit }' "$redis_allow")
+  [ -n "$r_range" ] || refuse "creating Redis or Valkey servers is not allowed on this server"
+  [ "$1" -ge "${r_range%-*}" ] && [ "$1" -le "${r_range#*-}" ] || refuse "port $1 is not in the ports Rowsafe may create servers on ($r_range)"
+  r_engine=$(awk '$1 == "engine" { print $2; exit }' "$redis_allow")
+  r_user=$(awk '$1 == "user" { print $2; exit }' "$redis_allow")
+  case $r_engine in redis | valkey) ;; *) refuse "$redis_allow names no engine (redis or valkey)" ;; esac
+  printf '%s\n' "$r_user" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$' || refuse "$redis_allow names no user"
+  id -u "$r_user" >/dev/null 2>&1 || refuse "the user $r_user doesn't exist"
+  [ "$(id -u "$r_user")" != 0 ] || refuse "Redis servers never run as root"
+}
+
+# redis_created_unit PORT prints the unit of a server created on PORT.
+redis_created_unit() {
+  [ -f "$redis_created" ] || [ -L "$redis_created" ] || return 0
+  check_root_file "$redis_created" "$redis_created is missing"
+  awk -v p="$1" '$1 "" == p "" && $2 ~ /^rowsafe-redis@[0-9]+\.service$/ { print $2; exit }' "$redis_created"
+}
+
+# as_redis CMD...: run as the server's user (its files are never root's).
+as_redis() { setpriv --reuid="$r_user" --regid="$r_user" --init-groups -- "$@"; }
+
+redis_create() {
+  port=$1 r_hash=$2
+  redis_allowed "$port"
+  check_root_file "$redis_created" "$redis_created is missing: allow it on the server with: sudo rowsafe-allow redis-servers"
+  for list in "$allow" "$redis_created"; do
+    if [ -f "$list" ] && awk -v p="$port" '$1 "" == p "" { f = 1 } END { exit !f }' "$list"; then
+      refuse "port $port is already used by a server Rowsafe manages"
+    fi
+  done
+  [ -d "$redis_root" ] && [ ! -L "$redis_root" ] || refuse "$redis_root is missing"
+  [ "$(stat -c '%U' "$redis_root")" = "$r_user" ] || refuse "$redis_root isn't owned by $r_user"
+  r_dir=$redis_root/$port
+  [ ! -e "$r_dir" ] && [ ! -L "$r_dir" ] || refuse "$r_dir already exists"
+  unit=rowsafe-redis@$port.service
+  log "redis-create $r_engine on port $port (request $id)"
+  as_redis mkdir -m 0750 "$r_dir" || refuse "cannot create $r_dir"
+  # shellcheck disable=SC2016 # $1 expands in the inner shell
+  printf '%s\n' "# Rowsafe: a $r_engine server for a standby or a clone (rowsafe-redis@$port.service)." \
+    "port $port" "bind * -::*" "protected-mode yes" "dir $r_dir" "aclfile $r_dir/users.acl" \
+    "dbfilename dump.rdb" "appendonly yes" "appendfilename appendonly.aof" "save 3600 1 300 100 60 10000" \
+    "daemonize no" "supervised no" "logfile \"\"" "databases 16" |
+    as_redis sh -c 'umask 027; cat >"$1"' rowsafe-pg-restart "$r_dir/redis.conf" || refuse "cannot write the configuration"
+  printf '%s\n' "user default on nopass ~* &* +@all" "user rowsafe on #$r_hash ~* &* +@all" |
+    as_redis sh -c 'umask 077; cat >"$1"' rowsafe-pg-restart "$r_dir/users.acl" || refuse "cannot write the ACL file"
+  printf '%s %s\n' "$port" "$unit" >>"$redis_created" || refuse "cannot update $redis_created"
+  out=$(timeout 60 "$systemctl" enable --now "$unit" 2>&1 </dev/null)
+  if [ $? = 0 ]; then
+    ok=1
+    log "redis-create $unit: done"
+  else
+    err="starting $unit failed: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
+    log "$err"
+  fi
+  answer
+  exit 0
+}
+
+redis_remove() {
+  port=$1
+  redis_allowed "$port"
+  unit=$(redis_created_unit "$port")
+  [ -n "$unit" ] || refuse "port $port is not a server Rowsafe created"
+  log "redis-remove $unit (request $id)"
+  timeout 60 "$systemctl" disable --now "$unit" >/dev/null 2>&1 </dev/null || true
+  r_dir=$redis_root/$port
+  if [ -d "$r_dir" ] && [ ! -L "$r_dir" ]; then
+    as_redis rm -rf -- "$r_dir" || refuse "cannot delete $r_dir"
+  fi
+  r_tmp=$(awk -v p="$port" '$1 "" != p ""' "$redis_created") || refuse "cannot read $redis_created"
+  printf '%s\n' "$r_tmp" | sed '/^$/d' >"$redis_created" || refuse "cannot update $redis_created"
+  ok=1
   answer
   exit 0
 }
@@ -2499,6 +2737,16 @@ restart_main() {
     mongo_standby_config "$3" "$4" "$5" "$6"
     answer
     exit 0
+  elif printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} redis-create [1-9][0-9]{3,4} [0-9a-f]{64}$'; then
+    # shellcheck disable=SC2086 # split the checked request into its fields
+    set -- $line
+    id=$1 action=$2
+    redis_create "$3" "$4"
+  elif printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} redis-remove [1-9][0-9]{3,4}$'; then
+    # shellcheck disable=SC2086
+    set -- $line
+    id=$1 action=$2
+    redis_remove "$3"
   elif printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} create-cluster [1-9][0-9]{3,4} [1-9][0-9] [a-z][a-z0-9_]{0,39}$'; then
     id=${line%% *}
     action=create-cluster
@@ -2517,6 +2765,7 @@ restart_main() {
     unit=$(allowed_unit "$port")
   fi
   [ -n "$unit" ] || unit=$(created_unit "$port")
+  [ -n "$unit" ] || unit=$(redis_created_unit "$port")
   [ -n "$unit" ] || refuse "port $port is not in $allow: restarting or stopping it from Rowsafe is not allowed"
 
   if [ "$action" = restart ]; then
@@ -2986,11 +3235,12 @@ act_security_updates() {
   # Upgrades of installed packages from a security origin. The database
   # servers' own packages are left alone (their upgrade would restart them):
   # PostgreSQL's go through Update PostgreSQL, which saves a Mark, restarts
-  # in a controlled way and checks archiving; MySQL's, MariaDB's, MongoDB's
-  # and ClickHouse's aren't installed from Rowsafe yet.
+  # in a controlled way and checks archiving; MySQL's, MariaDB's, MongoDB's,
+  # ClickHouse's, Redis's and Valkey's through db-minor-update, which saves a
+  # Mark first (when it can) and waits until the server answers again.
   list=$(apt-get -s -o Debug::NoLocking=1 dist-upgrade 2>/dev/null |
     awk '/^Inst [^ ]+ \[/ && /-security|Debian-Security/ { print $2 }' | sort -u)
-  db_pkgs='^(postgresql-[0-9]+(-.+)?|mysql-server(-.+)?|mysql-community-server(-.+)?|percona-server-server(-.+)?|mariadb-server(-.+)?|mongodb-org-server|mongodb-org-mongos|clickhouse-server|clickhouse-common-static)$'
+  db_pkgs='^(postgresql-[0-9]+(-.+)?|mysql-server(-.+)?|mysql-community-server(-.+)?|percona-server-server(-.+)?|mariadb-server(-.+)?|mongodb-org-server|mongodb-org-mongos|clickhouse-server|clickhouse-common-static|(redis|valkey)-(server|sentinel|tools))$'
   held=$(printf '%s\n' "$list" | grep -E "$db_pkgs" | tr '\n' ' ')
   pkgs=$(printf '%s\n' "$list" | grep -Ev "$db_pkgs" | grep . | tr '\n' ' ')
   n=0
@@ -3055,7 +3305,21 @@ db_engine() {
         set -- mysql-community-server mysql-server-8.4 mysql-server-8.0 mysql-server percona-server-server
       fi
       ;;
-    *) refuse "$unit is not a MySQL, MariaDB, MongoDB or ClickHouse service" ;;
+    redis-server.service | redis.service | redis-server@*.service | redis@*.service)
+      # Debian's valkey-redis-compat can answer to Redis's unit names.
+      if [ -z "$(pkg_version redis-server)" ] && [ -n "$(pkg_version valkey-server)" ]; then
+        db_engine=valkey
+        set -- valkey-server
+      else
+        db_engine=redis
+        set -- redis-server
+      fi
+      ;;
+    valkey-server.service | valkey.service | valkey-server@*.service | valkey@*.service)
+      db_engine=valkey
+      set -- valkey-server
+      ;;
+    *) refuse "$unit is not a MySQL, MariaDB, MongoDB, ClickHouse, Redis or Valkey service" ;;
   esac
   db_main=''
   for p in "$@"; do
@@ -3076,6 +3340,9 @@ db_patterns() {
     mariadb) locked='mariadb-* libmariadb3 libmariadbd19' free='' ;;
     mongodb) locked='mongodb-org mongodb-org-*' free='mongodb-mongosh mongodb-database-tools' ;;
     clickhouse) locked='clickhouse-*' free='' ;;
+    # Debian's and packages.redis.io's packages, all of one version.
+    redis) locked='redis redis-server redis-tools redis-sentinel' free='' ;;
+    valkey) locked='valkey valkey-server valkey-tools valkey-sentinel valkey-redis-compat' free='' ;;
   esac
 }
 
@@ -3160,11 +3427,19 @@ db_datadir() {
     mysql | mariadb) datadir=$(my_print_defaults --mysqld 2>/dev/null | sed -n 's/^--datadir=//p' | tail -n 1) ;;
     mongodb) datadir=$(awk '/^[[:space:]]*dbPath:/ { sub(/^[[:space:]]*dbPath:[[:space:]]*/, ""); gsub(/["\047]/, ""); print; exit }' /etc/mongod.conf 2>/dev/null) ;;
     clickhouse) datadir=$(clickhouse extract-from-config --config-file /etc/clickhouse-server/config.xml --key path 2>/dev/null) ;;
+    redis | valkey)
+      # The configuration file the unit starts the server with, then its
+      # last dir line.
+      conf_=$("$systemctl" show -p ExecStart --value "$unit" 2>/dev/null | tr -s ' ;' '\n' | grep -m 1 '\.conf$')
+      [ -n "$conf_" ] || conf_=/etc/$db_engine/$db_engine.conf
+      datadir=$(awk '$1 == "dir" { d = $2 } END { gsub(/"/, "", d); print d }' "$conf_" 2>/dev/null)
+      ;;
   esac
   [ -n "$datadir" ] || case $db_engine in
     mysql | mariadb) datadir=/var/lib/mysql ;;
     mongodb) datadir=/var/lib/mongodb ;;
     clickhouse) datadir=/var/lib/clickhouse ;;
+    redis | valkey) datadir=/var/lib/$db_engine ;;
   esac
   datadir=${datadir%/}
   case $datadir in /*) ;; *) refuse "the data directory \"$datadir\" is not an absolute path" ;; esac
@@ -3470,7 +3745,7 @@ CapabilityBoundingSet=CAP_SETUID CAP_SETGID
 AmbientCapabilities=
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=-/var/lib/rowsafe/restart -/etc/rowsafe/created-clusters
+ReadWritePaths=-/var/lib/rowsafe/restart -/etc/rowsafe/created-clusters -/etc/rowsafe/redis-created -/var/lib/rowsafe-redis
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
@@ -3968,11 +4243,14 @@ update_access() {
   if [ ! -f "$UPDATES_ALLOW_FILE" ] && [ "$TTY" = 1 ] && { [ -z "$ALLOW_UPDATES" ] || [ -z "$ALLOW_SECURITY" ]; }; then
     perm_intro
   fi
-  # PostgreSQL's word is postgresql; MySQL's, MariaDB's, MongoDB's and
-  # ClickHouse's is database (the helper's db-* requests).
+  # PostgreSQL's word is postgresql; MySQL's, MariaDB's, MongoDB's,
+  # ClickHouse's, Redis's and Valkey's is database (the helper's db-*
+  # requests; Redis and Valkey get minor updates only).
   _uw=postgresql
   [ "$HOST_ENGINE" = postgresql ] || _uw=database
-  _pg=$(decide_update "$ALLOW_UPDATES" "$_uw" "Install $(engine_label) updates and upgrades, when someone clicks Update? A Mark is saved first." y)
+  _what="updates and upgrades"
+  case $HOST_ENGINE in redis | valkey) _what="updates" ;; esac
+  _pg=$(decide_update "$ALLOW_UPDATES" "$_uw" "Install $(engine_label) $_what, when someone clicks Update? A Mark is saved first." y)
   _sec=$(decide_update "$ALLOW_SECURITY" security "Install this server's security updates, when someone clicks Install?" n)
   _reboot=no
   if [ "$_sec" = yes ]; then
@@ -3989,7 +4267,7 @@ update_access() {
       if [ "$_uw" = postgresql ]; then
         echo "postgresql   # PostgreSQL minor updates and major upgrades (clusters in restart-allowed)"
       else
-        echo "database     # $(engine_label) updates and upgrades (the servers in restart-allowed)"
+        echo "database     # $(engine_label) $_what (the servers in restart-allowed)"
       fi
     fi
     [ "$_sec" != yes ] || echo "security     # security updates (the database servers' own packages excepted)"
@@ -4001,7 +4279,12 @@ update_access() {
     return 0
   fi
   install_update_units
-  [ "$_pg" != yes ] || perm_ok "Rowsafe may install $(engine_label) updates and upgrade $(engine_label) when you click Update or Upgrade and confirm"
+  if [ "$_pg" = yes ]; then
+    case $HOST_ENGINE in
+      redis | valkey) perm_ok "Rowsafe may install $(engine_label) updates when you click Update and confirm" ;;
+      *) perm_ok "Rowsafe may install $(engine_label) updates and upgrade $(engine_label) when you click Update or Upgrade and confirm" ;;
+    esac
+  fi
   [ "$_sec" != yes ] || perm_ok "Rowsafe may install security updates when you click Install and confirm"
   [ "$_reboot" != yes ] || perm_ok "Rowsafe may reboot this server when you click Reboot and confirm"
 }
@@ -4009,14 +4292,46 @@ update_access() {
 # ------------------------------------------------------------------ tuning
 
 # With root's permission (--allow-tuning, or yes at the question), a person
-# can change MongoDB's or ClickHouse's settings from Tuning in the
+# can change MongoDB's, ClickHouse's, Redis's or Valkey's settings from Tuning in the
 # dashboard. The agent (unprivileged) writes a request to $TUNING_DIR;
 # rowsafe-tuning.path starts rowsafe-tuning.service, which runs root's copy
 # of the agent ($PERMISSIONS_HELPER tuning-apply). It accepts only a fixed
 # list of settings with plain numbers or fixed words, and writes only
 # ClickHouse's config.d/rowsafe-tuning.xml and users.d/rowsafe-tuning.xml,
 # or those settings' keys in the MongoDB configuration file listed in
-# $TUNING_ALLOW_FILE (a copy kept first; MongoDB reads it when it starts).
+# $TUNING_ALLOW_FILE (a copy kept first; MongoDB reads it when it starts),
+# or those settings' lines in the Redis or Valkey configuration file listed
+# there (a copy kept first; the agent also changes them on the running
+# server, which needs no root).
+
+# redis_config_file prints the Redis or Valkey server's configuration file
+# (what the server says, else its systemd unit's, else the usual places),
+# nothing when there is none.
+redis_config_file() {
+  _rc=${RD_CONFIG:-}
+  _units='redis-server redis valkey-server valkey'
+  _files='/etc/redis/redis.conf /etc/redis.conf /etc/valkey/valkey.conf /etc/valkey.conf'
+  if [ "$HOST_ENGINE" = valkey ]; then
+    _units='valkey-server valkey redis-server redis'
+    _files='/etc/valkey/valkey.conf /etc/valkey.conf /etc/redis/redis.conf /etc/redis.conf'
+  fi
+  if [ -z "$_rc" ] && have systemctl; then
+    for _u in $_units; do
+      _rc=$(systemctl show -p ExecStart --value "$_u" 2>/dev/null | tr ' ;' '\n\n' | awk '/^\/.*[.]conf$/ { print; exit }')
+      [ -z "$_rc" ] || break
+    done
+  fi
+  if [ -z "$_rc" ]; then
+    for _f in $_files; do
+      if [ -f "$_f" ]; then
+        _rc=$_f
+        break
+      fi
+    done
+  fi
+  case $_rc in /*) ;; *) return 0 ;; esac
+  [ -f "$_rc" ] && [ ! -L "$_rc" ] && printf '%s\n' "$_rc"
+}
 
 # mongodb_config_file prints mongod's configuration file (from its systemd
 # unit, else /etc/mongod.conf), nothing when there is none.
@@ -4035,6 +4350,7 @@ tuning_target() {
   case $HOST_ENGINE in
     mongodb) _t=$(mongodb_config_file) && [ -n "$_t" ] && echo "mongodb $_t" ;;
     clickhouse) [ -f /etc/clickhouse-server/config.xml ] && echo "clickhouse /etc/clickhouse-server" ;;
+    redis | valkey) _t=$(redis_config_file) && [ -n "$_t" ] && echo "$HOST_ENGINE $_t" ;;
   esac
 }
 
@@ -4055,7 +4371,7 @@ install_tuning_helper() {
   _changed=0
   if sed -e "s/@AGENT_USER@/$AGENT_USER/" -e "s|@READ_WRITE@|$_rw|" <<'ROWSAFE_TUNING_SERVICE_EOF' | write_file "$TUNING_SERVICE_FILE" 0644 root:root; then
 # SPDX-License-Identifier: Apache-2.0
-# rowsafe-tuning.service: writes the MongoDB or ClickHouse settings a person
+# rowsafe-tuning.service: writes the MongoDB, ClickHouse, Redis or Valkey settings a person
 # changed in Rowsafe (Tuning) into Rowsafe's own files, only where root
 # allowed it (/etc/rowsafe/tuning-allowed, sudo rowsafe-allow tuning).
 # Started by rowsafe-tuning.path; installed by https://rowsafe.sh/install.
@@ -4138,7 +4454,7 @@ allow_tuning() {
   {
     echo "# The settings files Rowsafe may write when someone changes settings under"
     echo "# Tuning (only its own: ClickHouse's config.d and users.d rowsafe-tuning.xml,"
-    echo "# or a few keys of MongoDB's configuration file). Written by the installer"
+    echo "# or a few keys of MongoDB's, Redis's or Valkey's configuration file). Written by the installer"
     echo "# (root); turn this off with: sudo rowsafe-allow --remove tuning"
     echo "# ENGINE PATH"
     tuning_target
@@ -4158,7 +4474,7 @@ disallow_tuning() {
 }
 
 # tuning_access applies --allow-tuning / --no-allow-tuning, or asks once on
-# a terminal (default no) where it applies (MongoDB, ClickHouse).
+# a terminal (default no) where it applies (MongoDB, ClickHouse, Redis, Valkey).
 tuning_access() {
   case $ALLOW_TUNING in
     yes) allow_tuning ;;
@@ -4179,6 +4495,172 @@ tuning_access() {
       else
         disallow_tuning
         perm_note "OK: Rowsafe won't change $(engine_label)'s settings"
+      fi
+      ;;
+  esac
+}
+
+# ------------------------------------------------------------ sqlite-modes
+
+# With root's permission (--allow-sqlite-modes, or yes at the question), a
+# person can close the SQLite files to the server's other users from
+# Security in the dashboard (Apply fix). The agent (unprivileged) writes a
+# request to $SQLITE_MODES_DIR; rowsafe-sqlite-modes.path starts
+# rowsafe-sqlite-modes.service, which runs root's copy of the agent
+# ($PERMISSIONS_HELPER sqlite-modes-apply). It only removes other users'
+# access (o-rwx on the files, o-w on the folder), and only from the files
+# listed in $SQLITE_LIST, their -wal, -shm and -journal files, copies of
+# them next to them (SQLite files named like them) and their folders:
+# never an owner, a group or an ACL entry.
+
+# sqlite_modes_dirs prints the folders of the listed SQLite files: the only
+# places the helper may change (its unit's ReadWritePaths).
+sqlite_modes_dirs() {
+  [ -f "$SQLITE_LIST" ] || return 0
+  while IFS= read -r _f; do
+    sqlite_path_ok "$_f" || continue
+    printf '%s\n' "${_f%/*}"
+  done <"$SQLITE_LIST" | sort -u
+}
+
+install_sqlite_modes_helper() {
+  [ -x "$PERMISSIONS_HELPER" ] || install_permissions_helper
+  [ -x "$PERMISSIONS_HELPER" ] || { warn "closing SQLite files to other users needs root's copy of the agent ($PERMISSIONS_HELPER); run the installer again"; return 1; }
+  as_agent mkdir -p -m 0700 "$SQLITE_MODES_DIR"
+  _rw=''
+  for _d in $(sqlite_modes_dirs); do _rw="$_rw -$_d"; done
+  _rwline="# No SQLite file is listed yet, so it can change nothing."
+  [ -z "$_rw" ] || _rwline="ReadWritePaths=${_rw# }"
+  _changed=0
+  if sed -e "s/@AGENT_USER@/$AGENT_USER/" -e "s|@READ_WRITE@|$_rwline|" <<'ROWSAFE_SQLITE_MODES_SERVICE_EOF' | write_file "$SQLITE_MODES_SERVICE_FILE" 0644 root:root; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-sqlite-modes.service: closes SQLite files to the server's other
+# users when a person clicks Apply fix under Security in Rowsafe: only the
+# files root listed in /etc/rowsafe/sqlite-paths, their -wal, -shm and
+# -journal files, copies of them next to them and their folders, and only
+# others' access (never an owner, a group or an ACL entry). Allowed by root
+# (/etc/rowsafe/sqlite-modes-allowed, sudo rowsafe-allow sqlite-modes).
+# Started by rowsafe-sqlite-modes.path; installed by https://rowsafe.sh/install.
+
+[Unit]
+Description=Rowsafe: close SQLite files to other users (Security)
+Documentation=https://rowsafe.sh/docs/guides/security
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/rowsafe/rowsafe-permissions sqlite-modes-apply
+Environment=ROWSAFE_AGENT_USER=@AGENT_USER@
+TimeoutStartSec=2min
+RuntimeDirectory=rowsafe-sqlite-modes
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+UMask=0022
+# It changes permissions only in the listed SQLite files' folders.
+ProtectSystem=strict
+ProtectHome=read-only
+@READ_WRITE@
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+ROWSAFE_SQLITE_MODES_SERVICE_EOF
+    _changed=1
+  fi
+  if write_file "$SQLITE_MODES_PATH_FILE" 0644 root:root <<'ROWSAFE_SQLITE_MODES_PATH_EOF'; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-sqlite-modes.path: starts rowsafe-sqlite-modes.service when the
+# Rowsafe agent asks to close SQLite files to other users. Installed by
+# https://rowsafe.sh/install only when root allowed it (--allow-sqlite-modes).
+
+[Unit]
+Description=Rowsafe: watch for SQLite files to close to other users (Security)
+
+[Path]
+PathExists=/var/lib/rowsafe/sqlite-modes/request
+Unit=rowsafe-sqlite-modes.service
+
+[Install]
+WantedBy=multi-user.target
+ROWSAFE_SQLITE_MODES_PATH_EOF
+    _changed=1
+  fi
+  if systemd_running; then
+    [ "$_changed" = 0 ] || systemctl daemon-reload
+    systemctl enable --now --quiet rowsafe-sqlite-modes.path
+  fi
+}
+
+remove_sqlite_modes_helper() {
+  [ -e "$SQLITE_MODES_PATH_FILE" ] || [ -e "$SQLITE_MODES_SERVICE_FILE" ] || return 0
+  if systemd_running; then systemctl disable --now --quiet rowsafe-sqlite-modes.path 2>/dev/null || true; fi
+  rm -f "$SQLITE_MODES_PATH_FILE" "$SQLITE_MODES_SERVICE_FILE"
+  rm -rf /run/rowsafe-sqlite-modes
+  if systemd_running; then systemctl daemon-reload; fi
+}
+
+allow_sqlite_modes() {
+  _why=$(perm_why sqlite-modes)
+  if [ -n "$_why" ]; then
+    warn "closing SQLite files to other users stays off for Rowsafe: $_why"
+    return 0
+  fi
+  {
+    echo "# Rowsafe may close the SQLite files listed in $SQLITE_LIST to the server's"
+    echo "# other users when someone clicks Apply fix under Security: others lose read"
+    echo "# and write on the files, their -wal, -shm and -journal files and copies next"
+    echo "# to them, and write on their folders. Owners, groups and ACLs stay."
+    echo "# Written by the installer (root); turn this off with:"
+    echo "# sudo rowsafe-allow --remove sqlite-modes"
+    echo "sqlite-paths"
+  } | write_file "$SQLITE_MODES_ALLOW_FILE" 0644 root:root || true
+  install_sqlite_modes_helper || return 0
+  perm_ok "Rowsafe may close the SQLite files to other users when you click Apply fix (Security)"
+}
+
+disallow_sqlite_modes() {
+  remove_sqlite_modes_helper
+  if [ -d "$CONFIG_DIR" ]; then
+    {
+      echo "# Closing SQLite files to other users from Rowsafe (Security) is off."
+      echo "# Turn it on with: sudo rowsafe-allow sqlite-modes"
+    } | write_file "$SQLITE_MODES_ALLOW_FILE" 0644 root:root || true
+  fi
+}
+
+# sqlite_modes_access applies --allow-sqlite-modes / --no-allow-sqlite-modes,
+# or asks once on a terminal (default yes) where SQLite files are listed. A
+# yes kept refreshes the folders the helper may change (files listed since).
+sqlite_modes_access() {
+  case $ALLOW_SQLITE_MODES in
+    yes) allow_sqlite_modes ;;
+    no)
+      disallow_sqlite_modes
+      perm_ok "closing SQLite files to other users from Rowsafe is off"
+      ;;
+    *)
+      [ -z "$(perm_why sqlite-modes)" ] || return 0
+      if [ "$(perm_state sqlite-modes)" = yes ]; then
+        install_sqlite_modes_helper || true
+        return 0
+      fi
+      [ -f "$SQLITE_MODES_ALLOW_FILE" ] && return 0 # a no, kept
+      [ "$TTY" = 1 ] || return 0
+      if perm_ask "Let Rowsafe close the SQLite files to this server's other users when someone clicks Apply fix under Security? Only others' access goes; owners, groups and your app's access stay." y; then
+        allow_sqlite_modes
+      else
+        disallow_sqlite_modes
+        perm_note "OK: Rowsafe won't change the SQLite files' permissions"
       fi
       ;;
   esac
@@ -4271,7 +4753,7 @@ state=${STATE_DIRECTORY:-/var/lib/rowsafe-firewall}
 agent_user=${ROWSAFE_AGENT_USER:-postgres}
 # The users database servers run as (PostgreSQL's is the agent's own): a
 # port is only accepted while one of them listens on it.
-db_users=${ROWSAFE_DB_USERS:-"$agent_user postgres mysql mongodb mongod clickhouse"}
+db_users=${ROWSAFE_DB_USERS:-"$agent_user postgres mysql mongodb mongod clickhouse redis valkey"}
 nft=${ROWSAFE_NFT:-nft}
 ss=${ROWSAFE_SS:-ss}
 sshd=${ROWSAFE_SSHD:-sshd}
@@ -4567,7 +5049,7 @@ if [ "$action" = apply ] || [ "$action" = server ]; then
     if listen_ports "$uid" | grep -qx "$port"; then db_listens=1; fi
   done
   [ "$db_listens" = 1 ] ||
-    refuse "no database server (PostgreSQL, MySQL, MariaDB, MongoDB or ClickHouse) listens on port $port here (a port Docker publishes bypasses this firewall: limit it in the compose file instead)"
+    refuse "no database server (PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis or Valkey) listens on port $port here (a port Docker publishes bypasses this firewall: limit it in the compose file instead)"
 fi
 if [ "$action" = apply ]; then
   take_addresses addresses "$state/new-$port" 1 32
@@ -4797,7 +5279,7 @@ firewall_ports() {
   {
     if command -v pg_lsclusters >/dev/null 2>&1; then pg_lsclusters -h 2>/dev/null | awk '{ print $3 }'; fi
     if command -v ss >/dev/null 2>&1; then
-      for _u in "$AGENT_USER" postgres mysql mongodb mongod clickhouse; do
+      for _u in "$AGENT_USER" postgres mysql mongodb mongod clickhouse redis valkey; do
         _uid=$(id -u "$_u" 2>/dev/null) || continue
         ss -ltnHe 2>/dev/null | awk -v u="$_uid" 'index($0, " uid:" u " ") { n = split($4, a, ":"); print a[n] }'
       done
@@ -5933,7 +6415,7 @@ remove_files_units() {
 # changing. The output ends with what Rowsafe may do now, then (exit 1 or
 # 2) the reason in one "error: ..." line.
 
-PERMISSIONS="restart create-cluster updates security-updates reboot pooler pooler-public firewall tuning"
+PERMISSIONS="restart create-cluster updates security-updates reboot pooler pooler-public firewall tuning sqlite-modes"
 PERM_QUIET=0 # 1: the summary says it all (the questions on a terminal, --permissions)
 PERM_INTRO=0 # 1 once the questions' heading is shown
 
@@ -5977,6 +6459,7 @@ perm_var() {
     pooler-public) echo ALLOW_POOLER_PUBLIC ;;
     firewall) echo ALLOW_FIREWALL ;;
     tuning) echo ALLOW_TUNING ;;
+    sqlite-modes) echo ALLOW_SQLITE_MODES ;;
     *) return 1 ;;
   esac
 }
@@ -6002,7 +6485,8 @@ perm_desc() {
     pooler) echo "install and manage PgBouncer (pooling)" ;;
     pooler-public) echo "let PgBouncer listen on public addresses" ;;
     firewall) echo "limit who can reach the database (firewall)" ;;
-    tuning) echo "change MongoDB's or ClickHouse's settings (Tuning)" ;;
+    tuning) echo "change $(engine_label)'s settings (Tuning)" ;;
+    sqlite-modes) echo "close the SQLite files to other users (Security)" ;;
   esac
 }
 
@@ -6015,12 +6499,14 @@ perm_state() {
     pooler | pooler-public) _sf=$POOLER_ALLOW_FILE ;;
     firewall) _sf=$FIREWALL_ALLOW_FILE ;;
     tuning) _sf=$TUNING_ALLOW_FILE ;;
+    sqlite-modes) _sf=$SQLITE_MODES_ALLOW_FILE ;;
     *) _sf=$UPDATES_ALLOW_FILE ;;
   esac
   [ -f "$_sf" ] || return 0
   case $1 in
     restart | pooler | firewall) _sy=$(grep -c '^[1-9]' "$_sf" || true) ;;
-    tuning) _sy=$(grep -Ec '^(mongodb|clickhouse) /' "$_sf" || true) ;;
+    tuning) _sy=$(grep -Ec '^(mongodb|clickhouse|redis|valkey) /' "$_sf" || true) ;;
+    sqlite-modes) _sy=$(grep -cx 'sqlite-paths' "$_sf" || true) ;;
     create-cluster) _sy=$(grep -c '^ports ' "$_sf" || true) ;;
     pooler-public) _sy=$(grep -qs '^[1-9]' "$_sf" && grep -cx public "$_sf" || true) ;;
     updates) _sy=$(grep -c '^\(postgresql\|database\)\([[:space:]#]\|$\)' "$_sf" || true) ;;
@@ -6050,10 +6536,14 @@ perm_why() {
         return 0
         ;;
       updates | security-updates | reboot)
+        if [ "$1" = updates ] && { [ "$HOST_ENGINE" = redis ] || [ "$HOST_ENGINE" = valkey ]; }; then
+          echo "Rowsafe doesn't install $(engine_label) updates yet"
+          return 0
+        fi
         have apt-get || echo "Rowsafe installs updates with apt (Debian and Ubuntu)"
         return 0
         ;;
-      firewall | tuning) ;; # every engine's port; MongoDB's and ClickHouse's settings
+      firewall | tuning | sqlite-modes) ;; # every engine's port; MongoDB's and ClickHouse's settings; SQLite files
       pooler | pooler-public) case $HOST_ENGINE in mysql | mariadb | clickhouse) ;; *)
         echo "Rowsafe pools PostgreSQL (PgBouncer), MySQL or MariaDB (ProxySQL) and ClickHouse (chproxy), and none is on this server"
         return 0
@@ -6075,9 +6565,11 @@ perm_why() {
       case $HOST_ENGINE in
         mongodb) [ -n "$(mongodb_config_file)" ] || _w="found no MongoDB configuration file (/etc/mongod.conf)" ;;
         clickhouse) [ -f /etc/clickhouse-server/config.xml ] || _w="found no ClickHouse configuration (/etc/clickhouse-server)" ;;
+        redis | valkey) [ -n "$(redis_config_file)" ] || _w="found no $(engine_label) configuration file (/etc/redis/redis.conf or /etc/valkey/valkey.conf)" ;;
         *) _w="Rowsafe changes $(engine_label)'s settings without it" ;;
       esac
       ;;
+    sqlite-modes) [ -n "$(sqlite_modes_dirs)" ] || _w="Rowsafe needs this only for SQLite files, and none is listed here" ;;
     firewall)
       if ! have nft; then
         _w="nftables isn't installed (apt install nftables)"
@@ -6196,7 +6688,7 @@ installer=/usr/local/lib/rowsafe/install.sh
 helper=/usr/local/lib/rowsafe/rowsafe-permissions
 owners=/etc/rowsafe/owners
 update='curl -fsSL https://rowsafe.sh | sudo sh'
-names='restart create-cluster updates security-updates reboot pooler pooler-public firewall tuning'
+names='restart create-cluster updates security-updates reboot pooler pooler-public firewall tuning sqlite-modes'
 
 usage() {
   cat <<'EOF'
@@ -6223,7 +6715,8 @@ Names:
   pooler             install and manage PgBouncer (connection pooling)
   pooler-public      let PgBouncer listen on public addresses (needs pooler)
   firewall           limit who can reach the database's port (never SSH or other ports)
-  tuning             change MongoDB's or ClickHouse's settings, in Rowsafe's own file
+  tuning             change MongoDB's, ClickHouse's, Redis's or Valkey's settings
+  sqlite-modes       close the listed SQLite files to other users (owners and ACLs stay)
 
   sudo rowsafe-allow pooler-target ADDRESS PORT
                            let ProxySQL send connections to the MySQL on another
@@ -6468,6 +6961,10 @@ permissions_main() {
     *)
       HOST_ENGINE=mongodb AGENT_HOME=$STATE_DIR
       [ ! -f "/etc/systemd/system/$SERVICE.d/10-clickhouse.conf" ] || HOST_ENGINE=clickhouse
+      if [ -f "/etc/systemd/system/$SERVICE.d/10-redis.conf" ]; then # redis
+        HOST_ENGINE=redis
+        ! grep -q 'runs Valkey' "/etc/systemd/system/$SERVICE.d/10-redis.conf" || HOST_ENGINE=valkey
+      fi
       ;;
   esac
   PERM_READY=1
@@ -6517,6 +7014,10 @@ permissions_main() {
   case $ALLOW_TUNING in
     yes) allow_tuning ;;
     no) disallow_tuning ;;
+  esac
+  case $ALLOW_SQLITE_MODES in
+    yes) allow_sqlite_modes ;;
+    no) disallow_sqlite_modes ;;
   esac
   [ -z "$POOLER_TARGET_ADD$POOLER_TARGET_DEL" ] || pooler_target_change
   [ "$ALLOW_RESTART" != no ] || disallow_restarts
@@ -8082,6 +8583,10 @@ read_cluster() {
 }
 
 cluster_desc() {
+  if [ "$C_ENGINE" = sqlite ]; then # sqlite: a file
+    printf 'SQLite database %s (%s)' "$C_SOCK" "$C_SIZE"
+    return 0
+  fi
   _d=$C_DBS
   [ "$_d" != - ] || _d=none
   printf '%s %s on port %s (%s; databases: %s)' "$(engine_label "$C_ENGINE")" "$C_MAJOR" "$C_PORT" "$C_SIZE" "$(printf '%s' "$_d" | sed 's/,/, /g')"
@@ -8189,6 +8694,10 @@ protect_cluster() {
     note "Backups for $C_NAME are not on yet. Run this installer again when you're ready."
     return 0
   fi
+  if { [ "$C_ENGINE" = redis ] || [ "$C_ENGINE" = valkey ]; } && ! redis_prepare; then
+    note "Backups for $C_NAME are not on yet. Run this installer again when you're ready."
+    return 0
+  fi
   step "Preparing a plan"
   while :; do
     _prc=0
@@ -8252,13 +8761,22 @@ setup_databases() {
       note "Found $(cluster_desc): Rowsafe protects $(engine_label "$C_ENGINE") on servers without PostgreSQL for now; skipped."
       continue
     fi
+    case $C_UNIT in rowsafe-redis@*) # redis: a standby or a clone Rowsafe created here
+      [ "$C_REG" = yes ] || {
+        note "$(cluster_desc) is a server Rowsafe created for a standby or a clone; left as it is"
+        continue
+      }
+      ;;
+    esac
     case $C_REG:$C_STATUS in
       yes:active)
         ok "$(cluster_desc) is protected as $C_NAME"
+        redis_refresh_protected
         continue
         ;;
       yes:verifying)
         ok "$(cluster_desc): backups are on as $C_NAME; Rowsafe is checking them"
+        redis_refresh_protected
         continue
         ;;
       yes:awaiting_restart)
@@ -8299,7 +8817,10 @@ setup_databases() {
           fi
           continue
         fi
-        if [ "$_count" -gt 1 ] && ! confirm "Set up backups for it?" y; then
+        if { [ "$C_ENGINE" = redis ] || [ "$C_ENGINE" = valkey ]; } && redis_target_offer; then # redis
+          continue
+        fi
+        if [ "$_count" -gt 1 ] && [ "$C_ENGINE" != sqlite ] && ! confirm "Set up backups for it?" y; then
           continue
         fi
         ask_name
@@ -8313,7 +8834,12 @@ setup_databases() {
 # of the PostgreSQL --install-postgres installed (a new, empty server).
 protect_unattended() {
   step "Turning on backups for $PROTECT_NAME"
-  if [ -n "$PROTECT_PORT" ]; then
+  _sqlite=$(printf '%s' "$SQLITE_PATHS" | head -n 1) # sqlite
+  if [ -n "$_sqlite" ]; then
+    _real=$(readlink -f -- "$_sqlite" 2>/dev/null || printf '%s' "$_sqlite")
+    _line=$(awk -F '\t' -v p="$_sqlite" -v r="$_real" '$14 == "sqlite" && ($2 == p || $2 == r)' "$TMP/clusters" | head -n 1)
+    [ -n "$_line" ] || die "the agent can't use the SQLite file $_sqlite (see above)"
+  elif [ -n "$PROTECT_PORT" ]; then
     _line=$(awk -F '\t' -v p="$PROTECT_PORT" '$1 == p' "$TMP/clusters")
     [ -n "$_line" ] || die "found no PostgreSQL on port $PROTECT_PORT that the agent can reach"
   else
@@ -8331,6 +8857,9 @@ protect_unattended() {
   fi
   if [ "$C_ENGINE" = clickhouse ]; then
     clickhouse_prepare || die "ClickHouse on port $C_PORT isn't ready for backups (see above)"
+  fi
+  if [ "$C_ENGINE" = redis ] || [ "$C_ENGINE" = valkey ]; then
+    redis_prepare || die "$(engine_label "$C_ENGINE") on port $C_PORT isn't ready for backups (see above)"
   fi
   _prc=0
   plan_cluster || _prc=$?
@@ -8384,8 +8913,10 @@ next_steps() {
 databases() {
   [ "$ALLOW_RESTART" != no ] || disallow_restarts
   [ -z "$ALLOW_CREATE_CLUSTER" ] || create_cluster_access # forks
+  [ -z "$REDIS_STANDBY$REDIS_CLONES" ] || redis_servers_access # redis
   [ "$ALLOW_FIREWALL" != no ] || disallow_firewall
   [ "$ALLOW_TUNING" != no ] || disallow_tuning
+  [ "$ALLOW_SQLITE_MODES" != no ] || disallow_sqlite_modes
   [ "$ALLOW_POOLER" != no ] || disallow_pooler
   if [ ! -f "$STATE_DIR/agent.json" ] || ! agent_running; then
     [ -z "$PROTECT_NAME" ] || die "the agent is not running, so backups can't be turned on yet; see 'journalctl -u rowsafe-agent'"
@@ -8400,7 +8931,7 @@ databases() {
   if [ "$TTY" = 1 ] && [ "$NO_SETUP" = 0 ]; then interactive=1; fi
   if [ "$interactive" = 1 ] || [ -n "$PROTECT_NAME" ] || [ "$ALLOW_RESTART" = yes ] || grep -qs '^[0-9]' "$RESTART_ALLOW_FILE" ||
     [ -n "$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT" ] || [ "$ALLOW_FIREWALL" = yes ] || grep -qs '^[0-9]' "$FIREWALL_ALLOW_FILE" ||
-    [ "$ALLOW_TUNING" = yes ] ||
+    [ "$ALLOW_TUNING" = yes ] || [ "$ALLOW_SQLITE_MODES" = yes ] || grep -qsx 'sqlite-paths' "$SQLITE_MODES_ALLOW_FILE" ||
     [ "$ALLOW_POOLER" = yes ] || grep -qs '^[0-9]' "$POOLER_ALLOW_FILE"; then
     say ""
     step "Looking for $(engine_label) on this server"
@@ -8416,6 +8947,7 @@ databases() {
     pooler_access
     firewall_access
     tuning_access
+    sqlite_modes_access
     PERM_QUIET=0
   fi
   perm_summary # permissions section
@@ -8994,7 +9526,677 @@ clickhouse_prepare() {
   clickhouse_login
 }
 
+# ---------------------------------------------------------------- Redis and Valkey
+#
+# Redis and Valkey servers are found by `rowsafe-agent setup discover` like
+# PostgreSQL clusters (engine column "redis" or "valkey"). Backups come from
+# the server itself over its replication link (a snapshot, then the stream
+# of changes), so no backup tool is installed and nothing restarts; Proof
+# and Rewind copies run the server's own program (redis-server or
+# valkey-server). Before their plan, Rowsafe gets its own ACL user
+# ("rowsafe", random password saved for the agent only): as the default
+# user when that needs no password, otherwise with an administrator's login
+# once (never stored). The server keeps the user in its ACL file or its
+# configuration file; when it can't write them, root adds the user's line
+# (the password's hash, never the password) to the configuration file.
+
+redis_present() {
+  if have redis-server || have valkey-server || [ -x /usr/bin/redis-server ] || [ -x /usr/bin/valkey-server ]; then
+    return 0
+  fi
+  for _d in /lib/systemd/system /usr/lib/systemd/system /etc/systemd/system; do
+    for _u in redis-server redis valkey-server valkey redis-server@ valkey-server@; do
+      [ ! -f "$_d/$_u.service" ] || return 0
+    done
+  done
+  have pgrep && pgrep -x 'redis-server|valkey-server' >/dev/null 2>&1
+}
+
+# redis_find_program sets REDIS_BIN, REDIS_FOUND_ENGINE (redis or valkey)
+# and REDIS_VERSION from the first server program that says what it is
+# (`redis-server --version`; Debian's valkey-redis-compat names Valkey's
+# program redis-server too). Fails when there is none.
+REDIS_BIN='' REDIS_FOUND_ENGINE='' REDIS_VERSION=''
+redis_find_program() {
+  REDIS_BIN='' REDIS_FOUND_ENGINE='' REDIS_VERSION=''
+  for _b in "$(command -v redis-server 2>/dev/null)" "$(command -v valkey-server 2>/dev/null)" \
+    /usr/bin/redis-server /usr/bin/valkey-server /usr/local/bin/redis-server /usr/local/bin/valkey-server; do
+    [ -n "$_b" ] && [ -f "$_b" ] && [ -x "$_b" ] || continue
+    _v=$("$_b" --version 2>/dev/null | sed -En 's/^(Redis|Valkey) server v=([0-9]+\.[0-9]+\.[0-9]+).*/\1 \2/p' | head -n 1 | tr '[:upper:]' '[:lower:]')
+    [ -n "$_v" ] || continue
+    REDIS_BIN=$_b REDIS_FOUND_ENGINE=${_v%% *} REDIS_VERSION=${_v#* }
+    return 0
+  done
+  return 1
+}
+
+# redis_too_old ENGINE VERSION prints why that server is too old for
+# Rowsafe (Redis 7.0, Valkey 7.2), nothing when it isn't.
+redis_too_old() {
+  _maj=${2%%.*} _min=${2#*.}
+  _min=${_min%%.*}
+  case $_maj$_min in '' | *[!0-9]*) return 0 ;; esac
+  if [ "$1" = valkey ]; then
+    if [ "$_maj" -lt 7 ] || { [ "$_maj" -eq 7 ] && [ "$_min" -lt 2 ]; }; then
+      echo "Valkey $2 is too old: Rowsafe needs Valkey 7.2 or newer"
+    fi
+  elif [ "$_maj" -lt 7 ]; then
+    echo "Redis $2 is too old: Rowsafe needs Redis 7.0 or newer (Redis's own packages, from packages.redis.io, have it for ${OS_NAME:-this system})"
+  fi
+}
+
+# check_redis_program: Proof and Rewind copies start a temporary server with
+# the server's own program, which ships with its package.
+check_redis_program() {
+  redis_present || return 0
+  case $HOST_ENGINE in redis | valkey) TOOLS_SUMMARY="$(engine_label)'s own replication stream, encrypted by the agent" ;; esac
+  if redis_find_program; then
+    ok "$(engine_label "$REDIS_FOUND_ENGINE") program at $REDIS_BIN ($REDIS_VERSION; Proof and Rewind copies use it)"
+  else
+    warn "the redis-server (or valkey-server) program isn't on this server: backups work, but Proof (the weekly restore test) and Rewind copies need it. It comes with the server's own package (redis-server or valkey-server)."
+  fi
+}
+
+# redis_status reads `rowsafe-agent redis status` into RD_* variables ("-"
+# becomes empty).
+RD_LOGIN='' RD_VERSION='' RD_CONFIG='' RD_ACLFILE='' RD_DATADIR='' RD_DBFILE='' RD_DOCKER='' RD_CLUSTER='' RD_BINARY='' RD_RIGHTS=''
+redis_status() {
+  agent_run redis status --port "$C_PORT" --engine "$C_ENGINE" >"$TMP/rdstatus" 2>"$TMP/rdstatus.err" || return 1
+  _rk() { sed -n "s/^$1=//p" "$TMP/rdstatus" | head -n 1 | sed 's/^-$//'; }
+  RD_LOGIN=$(_rk login) RD_VERSION=$(_rk version) RD_CONFIG=$(_rk config) RD_ACLFILE=$(_rk aclfile)
+  RD_DATADIR=$(_rk datadir) RD_DBFILE=$(_rk dbfilename) RD_DOCKER=$(_rk docker) RD_CLUSTER=$(_rk cluster)
+  RD_BINARY=$(_rk binary) RD_RIGHTS=$(_rk rights)
+  RD_LOGFILE=$(_rk logfile)
+}
+
+# redis_supported says why Rowsafe can't protect the server on $C_PORT
+# (Redis Cluster, too old), and fails then. The agent's plan refuses the
+# same; this says it before anything is asked.
+redis_supported() {
+  if [ "$RD_CLUSTER" = yes ]; then
+    warn "$(engine_label "$C_ENGINE") on port $C_PORT runs in cluster mode (Redis Cluster), which Rowsafe doesn't protect yet: only standalone servers, with or without replicas"
+    return 1
+  fi
+  [ -n "$RD_VERSION" ] || return 0
+  _why=$(redis_too_old "$C_ENGINE" "$RD_VERSION")
+  [ -z "$_why" ] || {
+    warn "$_why"
+    return 1
+  }
+}
+
+# redis_admin asks for (or takes from the environment) an administrator's
+# login, into RD_ADMIN and RD_ADMIN_PW. Never stored.
+RD_ADMIN='' RD_ADMIN_PW='' RD_TARGET=''
+redis_admin() {
+  [ -z "$RD_ADMIN" ] || return 0
+  if [ -n "${ROWSAFE_REDIS_ADMIN_USER:-}" ]; then
+    RD_ADMIN=$ROWSAFE_REDIS_ADMIN_USER RD_ADMIN_PW=${ROWSAFE_REDIS_ADMIN_PASSWORD:-}
+    return 0
+  fi
+  [ "$TTY" = 1 ] || return 1
+  tty_say ""
+  tty_say "$(engine_label "$C_ENGINE") asks for a password. To create Rowsafe's own user, an administrator"
+  tty_say "signs in once (a user allowed to create users; on a server with only a"
+  tty_say "password, the user is default). The password is used for this only and never saved."
+  ask RD_ADMIN "$(engine_label "$C_ENGINE") administrator user" default
+  ask_secret RD_ADMIN_PW "Password for $RD_ADMIN"
+}
+
+# redis_as_admin CMD...: run an agent redis command, as an administrator
+# when one signed in. Its exit status is the command's.
+redis_as_admin() {
+  if [ -n "$RD_ADMIN" ]; then
+    printf '%s\n' "$RD_ADMIN_PW" | agent_in redis "$@" --port "$C_PORT" --engine "$C_ENGINE" --admin-user "$RD_ADMIN"
+  else
+    agent_run redis "$@" --port "$C_PORT" --engine "$C_ENGINE"
+  fi
+}
+
+# redis_login creates (or refreshes) Rowsafe's ACL user: first as the
+# default user without a password, then as an administrator (exit 11: a
+# login is needed, 12: refused, 13: that user can't create users).
+redis_login() {
+  _name=$(engine_label "$C_ENGINE")
+  _rc=0
+  redis_as_admin login ${REDIS_STANDBY:+--standby} ${RD_TARGET:+--target "$RD_TARGET"} >"$TMP/rdlogin" 2>"$TMP/rdlogin.err" || _rc=$?
+  while [ "$_rc" = 11 ] || [ "$_rc" = 12 ] || [ "$_rc" = 13 ]; do
+    if [ -n "$RD_ADMIN" ]; then
+      if [ -n "${ROWSAFE_REDIS_ADMIN_USER:-}" ] || [ "$TTY" != 1 ]; then
+        sed 's/^/    /' "$TMP/rdlogin.err" >&2
+        return 1
+      fi
+      case $_rc in
+        13) tty_bad "That user can't create users in $_name (it needs the ACL command)." ;;
+        *) tty_bad "$_name refused that login." ;;
+      esac
+      RD_ADMIN='' RD_ADMIN_PW=''
+    fi
+    redis_admin || {
+      warn "Rowsafe needs its own $_name user: set ROWSAFE_REDIS_ADMIN_USER and ROWSAFE_REDIS_ADMIN_PASSWORD (used once, never saved), or run the installer on a terminal"
+      return 1
+    }
+    _rc=0
+    redis_as_admin login ${REDIS_STANDBY:+--standby} ${RD_TARGET:+--target "$RD_TARGET"} >"$TMP/rdlogin" 2>"$TMP/rdlogin.err" || _rc=$?
+  done
+  RD_ADMIN='' RD_ADMIN_PW=''
+  if [ "$_rc" != 0 ]; then
+    sed 's/^/    /' "$TMP/rdlogin.err" >&2
+    return 1
+  fi
+  redis_keep_login
+}
+
+# redis_keep_login makes sure Rowsafe's user survives a restart: the server
+# kept it itself (ACL file, configuration file), or root adds the user's
+# line from the agent (the password's hash only) to the configuration file.
+redis_keep_login() {
+  _name=$(engine_label "$C_ENGINE")
+  _persisted=$(sed -n 's/^persisted=//p' "$TMP/rdlogin" | head -n 1)
+  _why=$(sed -n 's/^why=//p' "$TMP/rdlogin" | head -n 1)
+  _line=$(sed -n 's/^acl_line=//p' "$TMP/rdlogin" | head -n 1)
+  rm -f "$TMP/rdlogin"
+  case $_persisted in
+    aclfile)
+      ok "Rowsafe's own $_name user, rowsafe, is ready ($_name keeps it in its ACL file)"
+      return 0
+      ;;
+    config)
+      ok "Rowsafe's own $_name user, rowsafe, is ready ($_name keeps it in its configuration file)"
+      return 0
+      ;;
+  esac
+  ok "Rowsafe's own $_name user, rowsafe, is ready"
+  redis_status || true
+  if [ -n "$RD_CONFIG" ] && [ -z "$RD_ACLFILE" ] && [ "$RD_DOCKER" != yes ] && redis_conf_add "$RD_CONFIG" "$_line"; then
+    ok "added it to $RD_CONFIG, so $_name keeps it when it restarts"
+    return 0
+  fi
+  warn "$_name forgets Rowsafe's user when it restarts${_why:+ ($_why)}. To keep it, give $_name an ACL file (the aclfile setting) or a configuration file it can write, then run this installer again."
+}
+
+# redis_conf_add FILE LINE puts the agent's "user rowsafe on #<sha256> ..."
+# line in the server's configuration file (replacing an earlier one),
+# keeping its owner and mode. Only a well-formed line, in a regular file.
+redis_conf_add() {
+  matches "$2" '^user rowsafe on #[0-9a-f]{64}( [-+~@|*a-z0-9]+)+$' || return 1
+  case $1 in /*) ;; *) return 1 ;; esac
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  _own=$(stat -c '%U:%G' "$1") && _mode=$(stat -c '%a' "$1") || return 1
+  {
+    grep -Ev '^[[:space:]]*user[[:space:]]+rowsafe([[:space:]]|$)' "$1" || true
+    printf '%s\n' "$2"
+  } | write_file "$1" "$_mode" "$_own" || true
+  grep -qxF -- "$2" "$1"
+}
+
+# redis_snapshot_note says when the agent can't read the server's snapshot
+# file. It needs it only when the server refuses to send a copy over
+# replication; nothing is changed for it.
+redis_snapshot_note() {
+  [ "$RD_DOCKER" != yes ] && [ -n "$RD_DATADIR" ] && [ -n "$RD_DBFILE" ] && have setpriv || return 0
+  _f=$RD_DATADIR/$RD_DBFILE
+  case $_f in /*) ;; *) return 0 ;; esac
+  [ -e "$_f" ] || return 0
+  _gs=$(id -G "$AGENT_USER" 2>/dev/null | tr ' ' ',')
+  if [ "$AGENT_USER" = rowsafe ]; then
+    _g=$(redis_group)
+    [ -z "$_g" ] || _gs="$_gs,$(getent group "$_g" | cut -d: -f3)"
+  fi
+  [ -n "$_gs" ] || return 0
+  setpriv --reuid="$AGENT_USER" --regid="$AGENT_USER" --groups="$_gs" -- test -r "$_f" 2>/dev/null && return 0
+  note "Rowsafe can't read $(engine_label "$C_ENGINE")'s snapshot file ($_f). It only needs it when"
+  note "$(engine_label "$C_ENGINE") refuses to send Rowsafe a copy over replication; backups don't use it otherwise."
+}
+
+# redis_target_offer hands an empty Redis or Valkey server to Rowsafe for
+# clones or standbys (--redis-clones, --redis-standby, or yes on a
+# terminal): Rowsafe's user there gets every right. Fails (and changes
+# nothing) for a server with data or without that answer.
+redis_target_offer() {
+  [ "$C_DBS" = - ] || return 1
+  RD_TARGET=''
+  case $REDIS_STANDBY:$REDIS_CLONES in
+    yes:yes) RD_TARGET=all ;;
+    yes:*) RD_TARGET=standby ;;
+    *:yes) RD_TARGET=clones ;;
+    *)
+      [ "$TTY" = 1 ] && confirm "It has no data. Keep it empty, ready to become another server's standby or to receive clones?" n || return 1
+      RD_TARGET=all
+      ;;
+  esac
+  RD_ADMIN='' RD_ADMIN_PW=''
+  if redis_status && redis_supported && redis_login; then
+    ok "$(engine_label "$C_ENGINE") on port $C_PORT is ready to hold a standby or receive clones: pick this server in the dashboard"
+  fi
+  RD_TARGET=''
+  return 0
+}
+
+# redis_servers_access lets root's helper create Redis or Valkey servers
+# for standbys and clones (--redis-standby, --redis-clones): the allow list,
+# the servers' unit and their directory. Nothing is created until a person
+# picks this server in the dashboard and confirms.
+redis_servers_access() {
+  redis_find_program || {
+    warn "the redis-server (or valkey-server) program isn't on this server, so Rowsafe can't create servers for standbys or clones here"
+    return 0
+  }
+  _user=$(redis_group)
+  [ -n "$_user" ] && id -u "$_user" >/dev/null 2>&1 || {
+    warn "no redis or valkey user on this server (the server package makes it), so Rowsafe can't create servers for standbys or clones here"
+    return 0
+  }
+  _purposes=''
+  [ "$REDIS_STANDBY" != yes ] || _purposes=standby
+  [ "$REDIS_CLONES" != yes ] || _purposes="${_purposes:+$_purposes }clones"
+  {
+    echo "# Rowsafe may create a $(engine_label "$REDIS_FOUND_ENGINE") server on one of these ports when someone"
+    echo "# sets up a standby or a clone on this server and confirms. Written by the installer (root)."
+    echo "ports $REDIS_PORTS"
+    echo "purposes $_purposes"
+    echo "engine $REDIS_FOUND_ENGINE"
+    echo "user $_user"
+  } | write_file "$REDIS_SERVERS_ALLOW_FILE" 0644 root:root || true
+  [ -f "$REDIS_CREATED_FILE" ] || {
+    echo "# Redis or Valkey servers Rowsafe created for standbys and clones (PORT UNIT)."
+  } | write_file "$REDIS_CREATED_FILE" 0644 root:root || true
+  install -d -o "$_user" -g "$_user" -m 0750 "$REDIS_SERVERS_ROOT"
+  if write_file "$REDIS_SERVER_UNIT" 0644 root:root <<ROWSAFE_REDIS_UNIT_EOF; then
+# rowsafe-redis@PORT.service: a $(engine_label "$REDIS_FOUND_ENGINE") server Rowsafe created for a standby or a
+# clone (root's helper, rowsafe-pg-restart, when root allowed it with
+# --redis-standby or --redis-clones). Its files: $REDIS_SERVERS_ROOT/PORT.
+[Unit]
+Description=Rowsafe: $(engine_label "$REDIS_FOUND_ENGINE") server on port %i (a standby or a clone)
+Documentation=https://rowsafe.sh/docs/guides/redis
+After=network.target
+
+[Service]
+Type=simple
+User=$_user
+Group=$_user
+ExecStart=$REDIS_BIN $REDIS_SERVERS_ROOT/%i/redis.conf
+Restart=on-failure
+LimitNOFILE=65535
+UMask=0027
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=$REDIS_SERVERS_ROOT/%i
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+
+[Install]
+WantedBy=multi-user.target
+ROWSAFE_REDIS_UNIT_EOF
+    if systemd_running; then systemctl daemon-reload; fi
+  fi
+  install_restart_helper
+  as_agent mkdir -p -m 0700 "$RESTART_DIR"
+  perm_ok "Rowsafe may create a $(engine_label "$REDIS_FOUND_ENGINE") server here (ports $REDIS_PORTS) for: $_purposes"
+}
+
+# redis_refresh_protected: an already protected Redis or Valkey server gets
+# the rights Rowsafe's user lacks (redis_rights_refresh).
+redis_refresh_protected() {
+  { [ "$C_ENGINE" = redis ] || [ "$C_ENGINE" = valkey ]; } || return 0
+  redis_status 2>/dev/null || return 0
+  redis_rights_refresh
+}
+
+# redis_rights_refresh gives Rowsafe's user the rights added since it was
+# made (managing ACL users: Databases & users in the dashboard) by making
+# the login again (`rights=old` in the agent's status). Never fails the run:
+# without them the dashboard only lists users.
+redis_rights_refresh() {
+  { [ "$C_ENGINE" = redis ] || [ "$C_ENGINE" = valkey ]; } || return 0
+  [ "$RD_LOGIN" = ok ] && [ "$RD_RIGHTS" = old ] || return 0
+  _name=$(engine_label "$C_ENGINE")
+  note "Rowsafe's $_name user needs a few more rights to manage $_name users from the dashboard (Databases & users)."
+  RD_ADMIN='' RD_ADMIN_PW=''
+  if redis_login; then
+    redis_status || true
+  else
+    warn "Rowsafe's $_name user keeps its current rights: the dashboard can't list or change $_name users until this installer runs again."
+  fi
+  return 0
+}
+
+# redis_agent_reads FILE: the agent's user (with the server's group when it
+# is rowsafe, as its unit gives it) can read FILE.
+redis_agent_reads() {
+  _gs=$(id -G "$AGENT_USER" 2>/dev/null | tr ' ' ',')
+  if [ "$AGENT_USER" = rowsafe ]; then
+    _g=$(redis_group)
+    [ -z "$_g" ] || _gs="$_gs,$(getent group "$_g" | cut -d: -f3)"
+  fi
+  [ -n "$_gs" ] || return 1
+  setpriv --reuid="$AGENT_USER" --regid="$AGENT_USER" --groups="$_gs" -- test -r "$1" 2>/dev/null
+}
+
+# redis_log_access lets the agent read the server's log file (Pulse's Logs
+# page), read only. Debian's packages keep it in /var/log/redis (or
+# valkey), readable by the adm group only: an access rule for the agent's
+# user on that folder, for the files that come after a rotation too, and on
+# the file. Only in a folder of the server's own (same owner as the log);
+# owners, groups and modes stay as they are, and an existing access rule
+# mask is never changed. Nothing restarts.
+RD_LOGFILE=''
+redis_log_access() {
+  [ "$RD_DOCKER" != yes ] && [ -n "$RD_LOGFILE" ] && have setpriv || return 0
+  case $RD_LOGFILE in /*) ;; *) return 0 ;; esac
+  [ -f "$RD_LOGFILE" ] || return 0
+  redis_agent_reads "$RD_LOGFILE" && return 0
+  _name=$(engine_label "$C_ENGINE")
+  _d=${RD_LOGFILE%/*}
+  have setfacl || (apt_install acl) || true
+  if [ -n "$_d" ] && [ "$(stat -c %u -- "$_d")" = "$(stat -c %u -- "$RD_LOGFILE")" ] && [ "$(stat -c %u -- "$_d")" != 0 ] &&
+    have setfacl && ! getfacl -p -s -- "$_d" "$RD_LOGFILE" 2>/dev/null | grep -q '^mask::' &&
+    setfacl -m "u:$AGENT_USER:rx" -- "$_d" && setfacl -d -m "u:$AGENT_USER:r" -- "$_d" &&
+    setfacl -m "u:$AGENT_USER:r" -- "$RD_LOGFILE" && redis_agent_reads "$RD_LOGFILE"; then
+    ok "gave the Rowsafe agent read access to $_d ($_name's own log, for the Logs page; read-only, with an ACL; nothing else changed)"
+    return 0
+  fi
+  note "Rowsafe can't read $_name's log ($RD_LOGFILE). The Logs page in the dashboard says how to let it."
+}
+
+# redis_prepare gets a Redis or Valkey server ready for its plan: supported,
+# and Rowsafe's own user. Nothing restarts.
+redis_prepare() {
+  RD_ADMIN='' RD_ADMIN_PW=''
+  _name=$(engine_label "$C_ENGINE")
+  if ! redis_status; then
+    sed 's/^/    /' "$TMP/rdstatus.err" >&2
+    warn "could not reach $_name on port $C_PORT"
+    return 1
+  fi
+  redis_supported || return 1
+  if [ "$RD_LOGIN" != ok ]; then
+    say ""
+    note "Rowsafe needs its own $_name user, rowsafe, to take backups and watch the"
+    note "server's health. Its password is random and saved for the agent only."
+    redis_login || return 1
+    redis_status || true
+    redis_supported || return 1
+  elif [ "$REDIS_STANDBY" = yes ]; then
+    # Standby rights for Rowsafe's user (a new password, saved for the agent).
+    redis_login || return 1
+  fi
+  redis_rights_refresh
+  if [ -z "$RD_BINARY" ]; then
+    note "Proof and Rewind copies need the $C_ENGINE-server program, which comes with $_name's server package; it isn't on this server."
+  fi
+  redis_snapshot_note
+  redis_log_access
+}
+
 # ---------------------------------------------------------------- modes
+
+# >>> sqlite: a SQLite database is a file an app opens itself. The agent
+# runs as rowsafe on a server without another database (as postgres next to
+# PostgreSQL), and root gives it read and write access to each file it
+# protects (sqlite_grant). The agent's list of files is $SQLITE_LIST.
+
+# sqlite_path_ok PATH: an absolute path to a database file (not a side file).
+sqlite_path_ok() {
+  printf '%s\n' "$1" | grep -Eq '^/[A-Za-z0-9._@+,=/-]+$' || return 1
+  case $1 in *-wal | *-shm | *-journal | */ | *//* | */../* | */./*) return 1 ;; esac
+  return 0
+}
+
+# detect_sqlite_host: without PostgreSQL, MySQL/MariaDB, MongoDB and
+# ClickHouse, the server's databases are SQLite files.
+detect_sqlite_host() {
+  [ "$HOST_ENGINE" = postgresql ] || return 0
+  id -u postgres >/dev/null 2>&1 && return 0
+  mongodb_present && return 0
+  clickhouse_present && return 0
+  HOST_ENGINE=sqlite
+  use_rowsafe_user
+  AGENT_HOME=$STATE_DIR
+}
+
+# sqlite_netfs DIR names DIR's filesystem when it is a network one.
+sqlite_netfs() {
+  _t=$(stat -f -c %T -- "$1" 2>/dev/null || true)
+  case $_t in nfs* | cifs | smb* | fuse* | 9p | ceph | afs | lustre | gpfs) printf '%s' "$_t" ;; esac
+}
+
+# sqlite_grant FILE gives the agent's user read and write access to FILE,
+# its -wal, -shm and -journal files and its folder, without changing owners,
+# groups or anyone else's access: a POSIX ACL entry for the agent (the
+# file's group bits then show the ACL mask, which SQLite copies to the side
+# files it creates), and a default ACL on the folder so side files created
+# later work for the agent and the file's owner. Folders above get "x" for
+# the agent where it can't pass. It prints what changed.
+sqlite_grant() {
+  _f=$1
+  _d=$(dirname -- "$_f")
+  if [ ! -f "$_f" ]; then
+    warn "$_f doesn't exist (or isn't a regular file); skipped"
+    return 1
+  fi
+  _fs=$(sqlite_netfs "$_d")
+  if [ -n "$_fs" ]; then
+    warn "$_f is on a network filesystem ($_fs): SQLite's locking isn't reliable there, so Rowsafe doesn't protect it. Move it to a local disk."
+    return 1
+  fi
+  _uid=$(stat -c %u -- "$_f")
+  _owner=$(stat -c %U -- "$_f")
+  _mode=$(stat -c %a -- "$_f")
+  if [ "$_uid" = "$(id -u "$AGENT_USER")" ]; then
+    ok "$_f belongs to $AGENT_USER already"
+    return 0
+  fi
+  have setfacl || apt_install acl
+  _g=$(( (0$_mode / 8) % 8 ))
+  _o=$(( 0$_mode % 8 ))
+  _perm() { case $1 in 7) echo rwx ;; 6) echo rw- ;; 5) echo r-x ;; 4) echo r-- ;; 3) echo -wx ;; 2) echo -w- ;; 1) echo --x ;; *) echo --- ;; esac; }
+  if setfacl -m "u:$AGENT_USER:rw" -- "$_f" 2>"$TMP/acl.err"; then
+    for _s in -wal -shm -journal; do
+      [ ! -f "$_f$_s" ] || setfacl -m "u:$AGENT_USER:rw" -- "$_f$_s" || true
+    done
+    setfacl -m "u:$AGENT_USER:rwx" -- "$_d" &&
+      setfacl -d -m "u::rw-,g::$(_perm "$_g"),o::$(_perm "$_o"),u:$AGENT_USER:rw-,u:$_owner:rw-" -- "$_d" || {
+      warn "could not set the ACL on $_d: $(head -n 1 "$TMP/acl.err" 2>/dev/null)"
+      return 1
+    }
+    _p=${_d%/*}
+    while [ -n "$_p" ]; do
+      as_agent test -x "$_p" 2>/dev/null || acl_grant_x "$_p" "$AGENT_USER" || true
+      _p=${_p%/*}
+    done
+    ok "gave the agent ($AGENT_USER) read and write access to $_f, its -wal/-shm files and $_d (ACLs; owner, group and others' access unchanged)"
+    return 0
+  fi
+  # No ACLs on this filesystem: the file's group, when it is its owner's
+  # own group (nobody else is in it) and can already write.
+  _group=$(stat -c %G -- "$_f")
+  if [ "$_group" = "$_owner" ] && [ "$_g" -ge 6 ] && [ "$(( (0$(stat -c %a -- "$_d") / 8) % 8 ))" -ge 7 ]; then
+    usermod -a -G "$_group" "$AGENT_USER" || return 1
+    SQLITE_GROUPS="$SQLITE_GROUPS $_group"
+    ok "added $AGENT_USER to the group $_group, which owns $_f and can write it (this filesystem has no ACLs)"
+    return 0
+  fi
+  warn "can't give the agent access to $_f: this filesystem has no ACLs ($(head -n 1 "$TMP/acl.err" 2>/dev/null)), and its group ($_group) isn't $_owner's own group with write access. Make the file and its folder group-writable by a group only $_owner is in, then run the installer again."
+  return 1
+}
+SQLITE_GROUPS=''
+
+# sqlite_files decides which SQLite files the agent protects: the ones
+# given with --sqlite, and (on a terminal) the ones running programs have
+# open that the person picks; each gets access (sqlite_grant) and goes to
+# $SQLITE_LIST.
+sqlite_files() {
+  [ "$NO_SETUP" = 0 ] || [ -n "$SQLITE_PATHS" ] || return 0
+  _bin=$STAGED
+  [ -x "$_bin" ] || _bin=$INSTALL_DIR/rowsafe-agent
+  : >"$TMP/sqlite-chosen"
+  printf '%s' "$SQLITE_PATHS" | while IFS= read -r _f; do
+    [ -n "$_f" ] && printf '%s\n' "$_f" >>"$TMP/sqlite-chosen"
+  done
+  if [ "$TTY" = 1 ] && [ -z "$PROTECT_NAME" ] && [ -x "$_bin" ]; then
+    "$_bin" sqlite find >"$TMP/sqlite-found" 2>/dev/null || : >"$TMP/sqlite-found"
+    if [ -s "$TMP/sqlite-found" ]; then
+      say ""
+      step "Looking for SQLite databases that apps on this server have open"
+      while IFS="$(printf '\t')" read -r _path _size _journal _pid _prog _ctr _cpath _uid _gid _sugg <&4; do
+        if [ "$_path" = - ]; then
+          note "Found $_cpath in container $_ctr ($_prog): it lives in the container's own layer, not in a volume, so the agent can't reach it. Put it in a volume to protect it."
+          continue
+        fi
+        grep -qxF -- "$_path" "$TMP/sqlite-chosen" 2>/dev/null && continue
+        grep -qxF -- "$_path" "$SQLITE_LIST" 2>/dev/null && { ok "$_path is already in Rowsafe's list"; continue; }
+        _where="opened by $_prog"
+        [ "$_ctr" = - ] || _where="$_where in container $_ctr ($_cpath)"
+        _jm="continuous backups possible (WAL)"
+        [ "$_journal" = wal ] || _jm="rollback journal: daily backups (Pulse can turn on WAL later)"
+        if confirm "Protect $_path ($(numfmt --to=iec "$_size" 2>/dev/null || printf '%s bytes' "$_size"), $_where; $_jm)?" y; then
+          printf '%s\n' "$_path" >>"$TMP/sqlite-chosen"
+        fi
+      done 4<"$TMP/sqlite-found"
+    elif [ "$HOST_ENGINE" = sqlite ] && [ -z "$SQLITE_PATHS" ]; then
+      note "No running app has a SQLite database open right now. Run the installer again with --sqlite /path/to/database.sqlite3 to add one."
+    fi
+  fi
+  [ -s "$TMP/sqlite-chosen" ] || return 0
+  step "Giving the agent access to the SQLite files"
+  install -d -m 0755 "$CONFIG_DIR"
+  [ -f "$SQLITE_LIST" ] || { : >"$SQLITE_LIST"; chmod 0644 "$SQLITE_LIST"; }
+  while IFS= read -r _f; do
+    _real=$(readlink -f -- "$_f" 2>/dev/null || printf '%s' "$_f")
+    if sqlite_grant "$_real"; then
+      grep -qxF -- "$_f" "$SQLITE_LIST" || printf '%s\n' "$_f" >>"$SQLITE_LIST"
+    fi
+  done <"$TMP/sqlite-chosen"
+  chmod 0644 "$SQLITE_LIST"
+  CHANGED=1
+}
+
+# sqlite_setup: a drop-in runs the agent as rowsafe on a SQLite server, in
+# the groups sqlite_grant used, and lets it reach database folders under
+# /home and /root, which the unit otherwise hides (ProtectHome).
+sqlite_setup() {
+  _dropin=/etc/systemd/system/$SERVICE.d
+  _conf=''
+  if [ "$HOST_ENGINE" = sqlite ]; then
+    _conf="[Unit]\nAfter=network-online.target\n[Service]\nUser=rowsafe\nGroup=rowsafe\n"
+  fi
+  _groups=$(for _g in $SQLITE_GROUPS $(sed -n 's/^SupplementaryGroups=//p' "$_dropin/20-sqlite.conf" 2>/dev/null); do echo "$_g"; done | sort -u | tr '\n' ' ')
+  _binds=''
+  if [ -f "$SQLITE_CLONE_LIST" ]; then # clone folders under /home (sqlite_clone_dirs)
+    while IFS= read -r _d; do
+      case $_d in /home/* | /root/* | /run/user/*) [ ! -d "$_d" ] || _binds="$_binds $_d" ;; esac
+    done <"$SQLITE_CLONE_LIST"
+  fi
+  if [ -f "$SQLITE_LIST" ]; then
+    while IFS= read -r _f; do
+      case $_f in /home/* | /root/* | /run/user/*)
+        _d=$(dirname -- "$(readlink -f -- "$_f" 2>/dev/null || printf '%s' "$_f")")
+        case " $_binds " in *" $_d "*) ;; *) _binds="$_binds $_d" ;; esac
+        ;;
+      esac
+    done <"$SQLITE_LIST"
+  fi
+  [ -z "$_groups" ] || _conf="${_conf}[Service]\nSupplementaryGroups=${_groups% }\n"
+  [ -z "$_binds" ] || _conf="${_conf}[Service]\nProtectHome=tmpfs\nBindPaths=${_binds# }\n"
+  if [ -z "$_conf" ]; then
+    for _old in 10-sqlite.conf 20-sqlite.conf; do
+      [ ! -f "$_dropin/$_old" ] || { rm -f "$_dropin/$_old"; UNIT_CHANGED=1; CHANGED=1; }
+    done
+    return 0
+  fi
+  install -d -m 0755 "$_dropin"
+  _name=20-sqlite.conf
+  if [ "$HOST_ENGINE" = sqlite ]; then _name=10-sqlite.conf; rm -f "$_dropin/20-sqlite.conf"; else rm -f "$_dropin/10-sqlite.conf"; fi
+  if printf "# Written by the Rowsafe installer: SQLite databases on this server.\n${_conf}" |
+    write_file "$_dropin/$_name" 0644 root:root; then
+    UNIT_CHANGED=1 CHANGED=1
+  fi
+}
+# <<< sqlite
+
+# >>> sqlite clones: folders root allows for SQLite clones (Fork), opt-in.
+# The agent writes a clone as a new file there (never over an existing one)
+# and lists the folders it may use from $SQLITE_CLONE_LIST.
+
+# sqlite_clone_grant DIR gives the agent's user write access to DIR (made
+# when missing): an ACL entry, and a default ACL so the new files work for
+# the agent and the folder's owner; "x" on the folders above where needed.
+sqlite_clone_grant() {
+  _d=$1
+  case $_d in /etc | /etc/* | /usr | /usr/* | /boot | /boot/* | /proc/* | /sys/* | /dev/* | /run | /run/* | /var/lib/rowsafe | /var/lib/rowsafe/*)
+    warn "$_d can't hold clones (a system folder); skipped"
+    return 1
+    ;;
+  esac
+  if [ ! -e "$_d" ]; then
+    install -d -m 0750 -- "$_d" || return 1
+    ok "created $_d"
+  fi
+  if [ ! -d "$_d" ] || [ -L "$_d" ] || [ "$(readlink -f -- "$_d")" != "$_d" ]; then
+    warn "$_d isn't a folder (or goes through a symbolic link): give the real folder's path; skipped"
+    return 1
+  fi
+  _fs=$(sqlite_netfs "$_d")
+  if [ -n "$_fs" ]; then
+    warn "$_d is on a network filesystem ($_fs): SQLite's locking isn't reliable there; skipped"
+    return 1
+  fi
+  if [ "$(stat -c %u -- "$_d")" = "$(id -u "$AGENT_USER")" ]; then
+    ok "$_d belongs to $AGENT_USER already"
+    return 0
+  fi
+  have setfacl || apt_install acl
+  _owner=$(stat -c %U -- "$_d")
+  _def="u::rw-,g::rw-,o::---,u:$AGENT_USER:rw-"
+  [ "$_owner" = root ] || [ "$_owner" = "$AGENT_USER" ] || _def="$_def,u:$_owner:rw-"
+  if setfacl -m "u:$AGENT_USER:rwx" -- "$_d" 2>"$TMP/acl.err" && setfacl -d -m "$_def" -- "$_d" 2>>"$TMP/acl.err"; then
+    _p=${_d%/*}
+    while [ -n "$_p" ]; do
+      as_agent test -x "$_p" 2>/dev/null || acl_grant_x "$_p" "$AGENT_USER" || true
+      _p=${_p%/*}
+    done
+    ok "the agent ($AGENT_USER) may write SQLite clones into $_d (ACLs; owner, group and others' access unchanged)"
+    return 0
+  fi
+  warn "can't give the agent write access to $_d: $(head -n 1 "$TMP/acl.err" 2>/dev/null) (this filesystem may have no ACLs: make the folder belong to $AGENT_USER instead)"
+  return 1
+}
+
+# sqlite_clone_dirs: the folders given with --sqlite-clone-dir and, on a
+# terminal on a server with SQLite databases, one the person names when
+# none is allowed yet; each gets access and goes to $SQLITE_CLONE_LIST.
+sqlite_clone_dirs() {
+  _chosen=$SQLITE_CLONE_DIRS
+  if [ -z "$_chosen" ] && [ "$TTY" = 1 ] && [ -z "$PROTECT_NAME" ] && [ ! -s "$SQLITE_CLONE_LIST" ] &&
+    { [ "$HOST_ENGINE" = sqlite ] || [ -s "$SQLITE_LIST" ]; }; then
+    say ""
+    if confirm "Allow Rowsafe to make clones of your SQLite databases (new files for staging or tests, never over an existing file) in a folder you pick?" n; then
+      _cd=''
+      while :; do
+        ask _cd "Folder for the clones" /srv/sqlite-clones
+        sqlite_path_ok "$_cd" && [ "$_cd" != / ] && break
+        tty_hint "Give an absolute folder path (letters, digits and ._@+,=- only)."
+      done
+      _chosen="$_cd
+"
+    fi
+  fi
+  [ -n "$_chosen" ] || return 0
+  step "Allowing folders for SQLite clones"
+  install -d -m 0755 "$CONFIG_DIR"
+  [ -f "$SQLITE_CLONE_LIST" ] || { : >"$SQLITE_CLONE_LIST"; chmod 0644 "$SQLITE_CLONE_LIST"; }
+  printf '%s' "$_chosen" | while IFS= read -r _d; do
+    [ -n "$_d" ] || continue
+    if sqlite_clone_grant "$_d"; then
+      grep -qxF -- "$_d" "$SQLITE_CLONE_LIST" || printf '%s\n' "$_d" >>"$SQLITE_CLONE_LIST"
+    fi
+  done
+  chmod 0644 "$SQLITE_CLONE_LIST"
+  CHANGED=1
+}
+# <<< sqlite clones
 
 install_agent() {
   require_root
@@ -9007,8 +10209,13 @@ install_agent() {
   detect_host_engine # mysql
   detect_mongodb_host # mongodb
   detect_clickhouse_host # clickhouse
+  detect_redis_host # redis
+  detect_sqlite_host # sqlite
   check_postgres
-  if [ "$HOST_ENGINE" = clickhouse ]; then
+  if [ "$HOST_ENGINE" = sqlite ]; then
+    say "${BOLD}Rowsafe agent installer${RESET}: backups, restore to any second and weekly"
+    say "restore tests for the SQLite databases on this server. Nothing changes without your yes."
+  elif [ "$HOST_ENGINE" = clickhouse ]; then
     say "${BOLD}Rowsafe agent installer${RESET}: backups, Marks and weekly restore tests for"
     say "the ClickHouse on this server. Nothing changes without your yes."
   else
@@ -9051,10 +10258,11 @@ install_agent() {
   connect_in_browser
 
   # 2. Dependencies and layout.
-  # MongoDB and ClickHouse back up with their own tools: no pgBackRest.
-  case $HOST_ENGINE in mysql | mariadb) ensure_mysql_tools ;; mongodb | clickhouse) ;; *) ensure_pgbackrest ;; esac # mysql
+  # MongoDB, ClickHouse, Redis, Valkey and SQLite back up with their own tools: no pgBackRest.
+  case $HOST_ENGINE in mysql | mariadb) ensure_mysql_tools ;; mongodb | clickhouse | redis | valkey | sqlite) ;; *) ensure_pgbackrest ;; esac # mysql
   ensure_mongodb_tools # mongodb (only where MongoDB runs)
   check_clickhouse_program # clickhouse (only where ClickHouse runs)
+  check_redis_program # redis (only where Redis or Valkey runs)
   ensure_restic # files section
   step "Installing into $INSTALL_DIR"
   make_dirs
@@ -9063,11 +10271,15 @@ install_agent() {
   install_allow_command    # permissions section
   install_guard
   install_permissions_helper # permit-host: one-click permission changes
+  sqlite_files # sqlite: which files, and the agent's access to them
+  sqlite_clone_dirs # sqlite clones: folders root allows for them
   UNIT_CHANGED=0
   install_unit
   mysql_setup # mysql
   mongodb_setup # mongodb
   clickhouse_setup # clickhouse
+  redis_setup # redis
+  sqlite_setup # sqlite
   install_logrotate
   maybe_guided_storage
   second_copy
@@ -9182,6 +10394,7 @@ uninstall_agent() {
   remove_restart_helper
   remove_create_cluster
   remove_firewall_helper
+  remove_sqlite_modes_helper
   remove_permissions_helper # permit-host
   rm -f "$GUARD_FILE" "$INSTALLER_COPY" "$ALLOW_COMMAND" # permissions section
   rmdir "$LIB_DIR" 2>/dev/null || true
@@ -9190,6 +10403,7 @@ uninstall_agent() {
   ok "service and $INSTALL_DIR removed"
   rm -f "/etc/systemd/system/$SERVICE.d/10-mysql.conf" # mysql
   rm -f "/etc/systemd/system/$SERVICE.d/10-mongodb.conf" "/etc/systemd/system/$SERVICE.d/10-clickhouse.conf"
+  rm -f "/etc/systemd/system/$SERVICE.d/10-redis.conf" # redis
   if [ "$purge" = 1 ]; then
     if [ -L "$MYSQL_CONF_LINK" ]; then # mysql: keep the server's binary log settings
       cp "$CONFIG_DIR/mysql/server.cnf" "$MYSQL_CONF_LINK.rowsafe-new" 2>/dev/null &&
@@ -9200,6 +10414,10 @@ uninstall_agent() {
     if [ -f "$CLICKHOUSE_USERS_FILE" ]; then # clickhouse: its password went with $STATE_DIR
       rm -f "$CLICKHOUSE_USERS_FILE"
       ok "$CLICKHOUSE_USERS_FILE deleted (Rowsafe's ClickHouse user)"
+    fi
+    if redis_present; then # redis: its password went with $STATE_DIR
+      note "Rowsafe's Redis or Valkey user, rowsafe, stays in the server (its password was deleted with the agent's settings)."
+      note "To remove it: redis-cli ACL DELUSER rowsafe (or valkey-cli), then delete any 'user rowsafe' line in its configuration file."
     fi
   else
     # archive_command may keep logging to $LOG_DIR, so keep rotating it.
@@ -9246,6 +10464,8 @@ main() {
       --mysql-standby) MYSQL_STANDBY=yes ;;
       --clickhouse-clones) CH_CLONES=yes ;;
       --mongodb-clones) M_CLONES=yes ;;
+      --redis-standby) REDIS_STANDBY=yes ;;
+      --redis-clones) REDIS_CLONES=yes ;;
       --mongodb-standby) MONGODB_STANDBY=yes ;;
       --no-mysql-standby) MYSQL_STANDBY=no ;;
       --mongodb-replica-set) MONGODB_REPLSET=yes ;;
@@ -9267,6 +10487,8 @@ main() {
       --no-allow-firewall) ALLOW_FIREWALL=no ;;
       --allow-tuning) ALLOW_TUNING=yes ;;
       --no-allow-tuning) ALLOW_TUNING=no ;;
+      --allow-sqlite-modes) ALLOW_SQLITE_MODES=yes ;;
+      --no-allow-sqlite-modes) ALLOW_SQLITE_MODES=no ;;
       --allow-pooler-target | --no-allow-pooler-target)
         [ $# -ge 2 ] || die "$1 needs ADDRESS:PORT"
         pooler_target_ok "$2" || die "$1: give the other server's address and MySQL port, e.g. 10.0.0.6:3306"
@@ -9291,6 +10513,20 @@ main() {
         printf '%s\n' "$2" | grep -Eq '^[a-z][a-z0-9-]{1,39}$' ||
           die "--protect: names use 2-40 lowercase letters, digits and dashes, starting with a letter"
         PROTECT_NAME=$2
+        shift
+        ;;
+      --sqlite) # sqlite
+        [ $# -ge 2 ] || die "--sqlite needs the database file's path"
+        sqlite_path_ok "$2" || die "--sqlite: give the database file's absolute path (letters, digits and ._@+,=- only), not its -wal or -shm file"
+        SQLITE_PATHS="$SQLITE_PATHS$2
+"
+        shift
+        ;;
+      --sqlite-clone-dir) # sqlite clones
+        [ $# -ge 2 ] || die "--sqlite-clone-dir needs a folder's path"
+        { sqlite_path_ok "$2" && [ "$2" != / ]; } || die "--sqlite-clone-dir: give the folder's absolute path (letters, digits and ._@+,=- only)"
+        SQLITE_CLONE_DIRS="$SQLITE_CLONE_DIRS$2
+"
         shift
         ;;
       --protect-port)
@@ -9356,7 +10592,7 @@ main() {
     if [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME$PROTECT_PORT$FILES_PATHS$MONGODB_REPLSET" ] || [ "$ALLOW_FILES" = yes ] || [ "$NO_FILES" = 1 ] || [ "$purge" = 1 ]; then
       perm_refuse "--permissions only changes what Rowsafe may do here: --allow-NAME, --no-allow-NAME and --no-allow-files (see --help)"
     fi
-  elif [ "$mode" != install ] && { [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME" ] || [ -n "$ALLOW_RESTART$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT$ALLOW_FIREWALL$ALLOW_TUNING$ALLOW_POOLER$ALLOW_POOLER_PUBLIC$ALLOW_CREATE_CLUSTER$POOLER_TARGET_ADD$POOLER_TARGET_DEL" ]; }; then
+  elif [ "$mode" != install ] && { [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME" ] || [ -n "$ALLOW_RESTART$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT$ALLOW_FIREWALL$ALLOW_TUNING$ALLOW_SQLITE_MODES$ALLOW_POOLER$ALLOW_POOLER_PUBLIC$ALLOW_CREATE_CLUSTER$POOLER_TARGET_ADD$POOLER_TARGET_DEL" ]; }; then
     die "--no-setup, --protect and the --allow- options only go with an install"
   fi
   if [ "$mode" != install ] && [ "$mode" != permissions ] && { [ -n "$FILES_PATHS" ] || [ -n "$ALLOW_FILES" ] || [ "$NO_FILES" = 1 ]; }; then
@@ -9374,6 +10610,13 @@ main() {
   # section; --permissions does it once it knows the server).
   if [ "$mode" = install ]; then perm_cascade install; fi
   [ -z "$PROTECT_PORT" ] || [ -n "$PROTECT_NAME" ] || die "--protect-port only goes with --protect"
+  if [ -n "$SQLITE_PATHS" ]; then # sqlite
+    [ "$mode" = install ] || die "--sqlite only goes with an install"
+    if [ -n "$PROTECT_NAME" ] && [ "$(printf '%s' "$SQLITE_PATHS" | grep -c .)" != 1 ]; then
+      die "--protect turns on backups for one database: give exactly one --sqlite file with it"
+    fi
+  fi
+  [ -z "$SQLITE_CLONE_DIRS" ] || [ "$mode" = install ] || die "--sqlite-clone-dir only goes with an install" # sqlite clones
   [ "$NO_SETUP" = 0 ] || [ -z "$PROTECT_NAME" ] || die "--no-setup and --protect contradict each other"
   TMP=$(mktemp -d "${TMPDIR:-/tmp}/rowsafe-install.XXXXXX")
   # The agent user writes one file into $TMP/setup (0700, its own).

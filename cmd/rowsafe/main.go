@@ -39,7 +39,9 @@ Getting started
 Manual setup, from your workstation (the installer does this for you)
   rowsafe adopt NAME [--host HOST] [--port 5432] [--socket-dir DIR] [--retention-full 2]
                                              register an existing PostgreSQL; prints a read-only plan.
-                                             --host may be omitted when the organization has one host
+                                             --host may be omitted when the organization has one host;
+                                             other engines: --engine mysql|mariadb|mongodb|clickhouse,
+                                             SQLite: --engine sqlite --path /srv/app/db/production.sqlite3
   rowsafe plan [NAME]                        re-run the read-only plan
   rowsafe apply [NAME] [--force] [--yes]     apply the plan (never restarts PostgreSQL)
   rowsafe verify [NAME]                      check now that WAL reaches your storage; backups start once it passes
@@ -234,9 +236,11 @@ Guard: the safety net for AI agents
                                              above that verdict and 2 if the migration fails
   rowsafe previews [NAME] [ID] [--json]      recent previews, or one in full
   rowsafe copies [NAME] [--json]             safe copies: masked copies developers and AI agents can connect to
-  rowsafe copies create [NAME] [--allow IP] [--listen private|public|IP|*] [--hours 24] [--db DB] [--json]
+  rowsafe copies create [NAME] [--allow IP] [--listen private|public|IP|*] [--hours 24] [--db DB] [--structure] [--json]
                                              make one: restore, mask, open it on the server for the allowed
-                                             addresses (default: this computer's). Prints the connection string once
+                                             addresses (default: this computer's). Prints the connection string once.
+                                             SQLite: a new file on the server (no password); --structure for the
+                                             structure without rows
   rowsafe copies extend [NAME] ID [--hours 24]
                                              keep a safe copy longer
   rowsafe copies delete [NAME] ID [--yes]    delete a safe copy
@@ -255,7 +259,8 @@ Databases & users: the databases, users and extensions inside a server (--on NAM
                                              to type its name)
   rowsafe db users [--json]                  users, what they can connect to and how their password is stored
   rowsafe db user add USER --db DB[,DB] [--access read_only|read_write|owner]
-                                             a new user; its password is shown once
+                                             a new user; its password is shown once (Redis and Valkey:
+                                             no --db; --keys "session:*" limits the keys it reaches)
   rowsafe db user password USER              a new password for USER, shown once
   rowsafe db user remove USER [--reassign-to USER] [--yes]
                                              remove a user; what it owns goes to --reassign-to

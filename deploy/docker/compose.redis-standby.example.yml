@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# A Redis (or Valkey) server in Docker that holds a standby, or receives a
+# clone, of a Redis database on another server, with the Rowsafe agent
+# installed on this server itself (not as a sidecar: a standby is set up
+# host to host, sealed to this server's agent key, which sidecars don't
+# have).
+#
+# The server starts empty and listens on the host's own port 6390 (host
+# networking), so the agent on the host sees it like any local server. A
+# standby connects to its primary, so the primary's port must be reachable
+# from here (not the other way round).
+#
+#   1. Install the Rowsafe agent on this server:
+#        curl -fsSL https://rowsafe.sh | sudo sh -s rse_... --redis-standby --redis-clones
+#   2. docker compose -f compose.redis-standby.example.yml up -d
+#   3. Hand the empty server to Rowsafe (Rowsafe's user there gets every
+#      right: it is Rowsafe's to fill):
+#        sudo -u rowsafe rowsafe-agent redis login --port 6390 --target all
+#   4. In the dashboard, open the database on the other server: Standby >
+#      Add a standby (or Fork) and pick this server, port 6390.
+#
+# Without Docker, the installer's --redis-standby / --redis-clones let
+# Rowsafe create such a server itself when you pick this server
+# (rowsafe-redis@PORT.service, ports 6390-6399): no compose file needed.
+#
+# Valkey: use valkey/valkey:8.1 and valkey-server below.
+
+name: standby
+
+services:
+  redis-standby:
+    image: redis:8.2
+    restart: unless-stopped
+    network_mode: host
+    # Empty, no password for the default user: Redis's protected mode then
+    # accepts connections from this server only. A standby gets the
+    # primary's users (and its default user's password) when Rowsafe sets
+    # it up.
+    # Users live in an ACL file in the data volume, so Rowsafe's login and
+    # the users a standby gets survive restarts.
+    command:
+      - sh
+      - -c
+      - 'touch /data/users.acl && chown redis /data/users.acl && exec docker-entrypoint.sh redis-server --port 6390 --aclfile /data/users.acl --appendonly yes --protected-mode yes'
+
+    volumes:
+      - redis-standby-data:/data
+
+volumes:
+  redis-standby-data:

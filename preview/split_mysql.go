@@ -9,11 +9,13 @@ import (
 
 // SplitFor splits a migration script in the engine's SQL dialect:
 // PostgreSQL's (Split), or MySQL's, MariaDB's and ClickHouse's
-// (SplitMySQL). MongoDB migrations are scripts, not SQL: they aren't split.
+// (SplitMySQL), or SQLite's (SplitSQLite). MongoDB migrations are scripts, not SQL: they aren't split.
 func SplitFor(engine, sql string) ([]Stmt, error) {
 	switch protocol.NormalizeEngine(engine) {
 	case protocol.EngineMySQL, protocol.EngineMariaDB, protocol.EngineClickHouse:
 		return SplitMySQL(sql)
+	case protocol.EngineSQLite:
+		return SplitSQLite(sql)
 	}
 	return Split(sql)
 }

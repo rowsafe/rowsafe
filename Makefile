@@ -7,6 +7,7 @@
 #   make test-installer-cloud  --install-postgres and --listen-public for real, as cloud-init runs them (Docker, network)
 #   make test-mongodb          the MongoDB engine on real mongo 7.0/8.0 containers (Docker)
 #   make test-clickhouse       the ClickHouse engine on real ClickHouse 26.8/26.3/25.8/24.8 containers (Docker)
+#   make test-redis            the Redis and Valkey engine on real redis and valkey/valkey containers (Docker)
 #   make test-rewind           a real Rewind (copy, rows, in place, undo) on a systemd Debian container (Docker)
 #   make test-pooling          real PgBouncer through the root helper on a systemd Debian container (Docker)
 #   make test-permissions      passkey-signed permission changes through root's helper on a systemd Debian container (Docker)
@@ -36,7 +37,7 @@ AGENT_LDFLAGS := -s -w -buildid= -X $(PKG)/internal/agent.Version=$(VERSION) -X 
 MAIN_LDFLAGS := -s -w -buildid= -X main.version=$(VERSION)
 GOBUILD := CGO_ENABLED=0 GOFLAGS=-mod=readonly $(GO) build -trimpath -buildvcs=false
 
-.PHONY: all build test lint check-installer test-installer test-installer-cloud test-mongodb test-clickhouse test-rewind test-secondcopy test-mysql test-upgrade test-pooling test-permissions test-action dist release check-release-env clean
+.PHONY: all build test lint check-installer test-installer test-installer-cloud test-mongodb test-clickhouse test-redis test-sqlite test-rewind test-secondcopy test-mysql test-upgrade test-pooling test-permissions test-action dist release check-release-env clean
 
 all: lint test build
 
@@ -120,6 +121,12 @@ test-mongodb:
 
 test-clickhouse:
 	bash scripts/test-clickhouse.sh
+
+test-redis:
+	bash scripts/test-redis.sh
+
+test-sqlite:
+	bash scripts/test-sqlite.sh
 
 test-rewind:
 	sh scripts/test-rewind.sh

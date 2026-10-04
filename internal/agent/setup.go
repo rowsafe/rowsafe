@@ -307,7 +307,12 @@ func (s *Setup) Discover(ctx context.Context) ([]Cluster, error) {
 	for i := range out {
 		c := &out[i]
 		for j := range registered {
-			if registered[j].Port == c.Port && protocol.NormalizeEngine(registered[j].Engine) == c.Engine {
+			if protocol.NormalizeEngine(registered[j].Engine) != c.Engine {
+				continue
+			}
+			// A SQLite database is a file: told apart by its path.
+			if c.Engine == protocol.EngineSQLite && registered[j].SocketDir == c.SocketDir ||
+				c.Engine != protocol.EngineSQLite && registered[j].Port == c.Port {
 				c.Registered = &registered[j]
 			}
 		}
@@ -322,9 +327,15 @@ func (s *Setup) Discover(ctx context.Context) ([]Cluster, error) {
 	for _, c := range out {
 		count[c.Suggested]++
 	}
+	seen := map[string]int{}
 	for i, c := range out {
 		if c.Registered == nil && count[c.Suggested] > 1 {
-			out[i].Suggested = SanitizeName(fmt.Sprintf("%s-%d", c.Suggested, c.Port))
+			if c.Engine == protocol.EngineSQLite {
+				seen[c.Suggested]++
+				out[i].Suggested = SanitizeName(fmt.Sprintf("%s-%d", c.Suggested, seen[c.Suggested]))
+			} else {
+				out[i].Suggested = SanitizeName(fmt.Sprintf("%s-%d", c.Suggested, c.Port))
+			}
 		}
 	}
 	return out, nil
@@ -646,7 +657,15 @@ func PrintPlanFor(w io.Writer, engine string, r protocol.AdoptResult) {
 		default:
 			what = fmt.Sprintf("%d databases (%s)", len(names), strings.Join(names, ", "))
 		}
-		fmt.Fprintf(w, "%s %s on port %d: %s, %s.\n\n", server, strings.Fields(in.ServerVersion + " ")[0], in.Port, humanBytes(in.TotalSizeBytes), what)
+		if protocol.NormalizeEngine(in.Engine) == protocol.EngineSQLite {
+			tables := 0
+			if len(in.Databases) > 0 {
+				tables = in.Databases[0].Tables
+			}
+			fmt.Fprintf(w, "SQLite database in %s (%s, %d tables, %s journal mode).\n\n", in.DataDirectory, humanBytes(in.TotalSizeBytes), tables, in.WalLevel)
+		} else {
+			fmt.Fprintf(w, "%s %s on port %d: %s, %s.\n\n", server, strings.Fields(in.ServerVersion + " ")[0], in.Port, humanBytes(in.TotalSizeBytes), what)
+		}
 	}
 	if r.Applied {
 		fmt.Fprintln(w, "What Rowsafe changed:")

@@ -18,15 +18,34 @@ func TestCopyVerifiers(t *testing.T) {
 		t.Errorf("native: %s", NativePasswordHash("secret"))
 	}
 	for _, e := range protocol.Engines {
+		if !protocol.EngineHas(e, protocol.FeatureSafeCopies) {
+			continue
+		}
+		if !CopyHasPassword(e) { // a file copy (SQLite)
+			if _, _, err := NewCopyPasswordFor(e); err == nil {
+				t.Errorf("%s: a file copy has no password", e)
+			}
+			continue
+		}
 		pw, v, err := NewCopyPasswordFor(e)
 		if err != nil || len(pw) != 24 || !protocol.ValidCopyVerifier(e, v) {
 			t.Errorf("%s: %q %q %v", e, pw, v, err)
 		}
 		for _, other := range protocol.Engines {
-			same := other == e || (other == protocol.EnginePostgreSQL && e == protocol.EngineMongoDB)
+			same := other == e || (other == protocol.EnginePostgreSQL && e == protocol.EngineMongoDB) ||
+				(protocol.StructureCopies(e) && protocol.StructureCopies(other)) // Redis and Valkey share their ACL's form
 			if !same && protocol.ValidCopyVerifier(other, v) {
 				t.Errorf("a %s verifier passes as %s", e, other)
 			}
 		}
+	}
+}
+
+func TestCopyFetchCommand(t *testing.T) {
+	if got := CopyFetchCommand("app-1", "/var/lib/rowsafe/rewind/sqlite-copies/sc_1/app.db"); got != "scp root@app-1:/var/lib/rowsafe/rewind/sqlite-copies/sc_1/app.db ." {
+		t.Error(got)
+	}
+	if got := CopyFetchCommand("", "/srv/my app's.db"); got != `scp root@SERVER:'/srv/my app'\''s.db' .` {
+		t.Error(got)
 	}
 }

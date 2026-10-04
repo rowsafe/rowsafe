@@ -70,7 +70,15 @@
 # real `rowsafe-release keygen/manifest/sign`, so the installer is tested
 # against exactly what `make release` publishes.
 #
-#  11. servers Rowsafe creates (--cloud, a separate run): one non-interactive
+#  11. Redis and Valkey: the setup flow with a stand-in agent (Rowsafe's ACL
+#      user as the default user, kept by the server or added to its
+#      configuration file by root, an administrator's login once, Redis
+#      Cluster and old servers refused, --protect), restarts of their units
+#      through the helper, and a Redis- or Valkey-only server with the
+#      system's own package (Debian 12 and Ubuntu 24.04: Redis 7.0, Debian
+#      13: Valkey 8.1, Ubuntu 22.04: Redis 6.0, refused before anything
+#      changes).
+#  12. servers Rowsafe creates (--cloud, a separate run): one non-interactive
 #      run as cloud-init does it (--no-prompt --install-postgres 17
 #      --listen-public --storage rowsafe --protect shop) installs real
 #      PostgreSQL from apt.postgresql.org (signing key checked), makes it
@@ -79,8 +87,10 @@
 #      with PostgreSQL already is refused. Needs the network.
 #
 # Usage: scripts/test-install.sh [IMAGE...]
-#        scripts/test-install.sh --cloud [IMAGE...]   (section 11 only)
+#        scripts/test-install.sh --cloud [IMAGE...]   (section 12 only)
 # Default images: debian:trixie debian:bookworm ubuntu:24.04 ubuntu:22.04
+# TEST_ONLY=redis runs only the Redis and Valkey cases (11); TEST_ONLY=sqlite
+# only the SQLite ones.
 # (--cloud: debian:bookworm)
 
 set -eu
@@ -124,14 +134,14 @@ case \${1:-} in
     fi
     echo "writing, reading and deleting a test file in Rowsafe Storage..."
     echo "Rowsafe Storage works: wrote, read back and deleted a test file" ;;
-  setup|mongodb|clickhouse)
+  setup|mongodb|clickhouse|redis)
     # Answers from /tmp/rowsafe-fake: CMD.out is printed, CMD.rc holds exit
-    # codes (one per line, used in turn; the last one sticks). MongoDB and
-    # ClickHouse helpers are mongodb-CMD and clickhouse-CMD; a password on
-    # stdin goes to CMD.stdin.
+    # codes (one per line, used in turn; the last one sticks). MongoDB,
+    # ClickHouse and Redis helpers are mongodb-CMD, clickhouse-CMD and
+    # redis-CMD; a password on stdin goes to CMD.stdin.
     f=/tmp/rowsafe-fake
     pre=''
-    case \$1 in mongodb | clickhouse) pre=\$1- ;; esac
+    case \$1 in mongodb | clickhouse | redis) pre=\$1- ;; esac
     shift
     echo "\$pre\$*" >>"\$f/calls"
     case " \$* " in *" --admin-user "*) cat >"\$f/\$pre\$1.stdin" ;; esac
@@ -158,6 +168,16 @@ case \${1:-} in
       [ "\$(wc -l <"\$f/\$cmd.rc")" -le 1 ] || sed -i 1d "\$f/\$cmd.rc"
     fi
     exit "\$rc" ;;
+  sqlite)
+    # (sqlite) root's look for SQLite files programs have open: sqlite-find.out
+    f=/tmp/rowsafe-fake
+    shift
+    echo "sqlite \$* (\$(id -un))" >>"\$f/calls"
+    chmod 666 "\$f/calls" 2>/dev/null || true
+    case \${1:-} in
+      find) [ ! -f "\$f/sqlite-find.out" ] || cat "\$f/sqlite-find.out" ;;
+      *) exit 2 ;;
+    esac ;;
   files)
     # (files) answers from /tmp/rowsafe-fake: files-discover.out, files-access.out, files-list.out
     f=/tmp/rowsafe-fake
@@ -237,7 +257,7 @@ host() {
   for image in $images; do
     echo "=== $image"
     docker run --rm \
-      -e TEST_PUB="$TEST_PUB" -e TEST_PRIV="$TEST_PRIV" -e TEST_UNITS="$first" -e TEST_SHOW="${TEST_SHOW:-}" \
+      -e TEST_PUB="$TEST_PUB" -e TEST_PRIV="$TEST_PRIV" -e TEST_UNITS="$first" -e TEST_SHOW="${TEST_SHOW:-}" -e TEST_ONLY="${TEST_ONLY:-}" \
       --cap-add NET_ADMIN \
       -v "$root/scripts:/src/scripts:ro" -v "$root/deploy:/src/deploy:ro" -v "$work/go:/go-release:ro" \
       "$image" sh /src/scripts/test-install.sh "$mode"
@@ -406,6 +426,15 @@ in_container() {
   publish 0.11.0 && write_manifest srv/agent/0.11.0 0.11.0 https://localhost:8443/agent/0.11.0 "$other" && sign srv/agent/0.11.0
   publish 0.12.0 && sign srv/agent/0.12.0                   # a good upgrade
   publish 0.13.0 0.13.0 fail && sign srv/agent/0.13.0       # fails its self-test
+
+  if [ "${TEST_ONLY:-}" = redis ]; then
+    redis_only_tests
+    return 0
+  fi
+  if [ "${TEST_ONLY:-}" = sqlite ]; then
+    sqlite_only_tests
+    return 0
+  fi
 
   echo "  -- signature verification (download-only, as an unprivileged user)"
   useradd -m tester
@@ -1064,6 +1093,7 @@ guided_storage_tests() {
   firewall_tests
   [ "${TEST_UNITS:-0}" != 1 ] || mysql_host_tests
   [ "${TEST_UNITS:-0}" != 1 ] || clickhouse_host_tests
+  redis_host_tests
 }
 
 # ------------------------------------------------------------ second copy
@@ -1450,6 +1480,143 @@ EOF
   pass "turning on backups: prompts, restarts, --protect, --no-setup"
   mongodb_flow_tests
   clickhouse_flow_tests
+  redis_flow_tests
+  sqlite_flow_tests
+}
+
+# sqlite_flow_tests: SQLite files, named with --sqlite or found open (root's
+# `rowsafe-agent sqlite find`): the agent gets read and write access with
+# ACLs (owner, group and mode unchanged), the file goes to the agent's list,
+# and the plan names the file (--engine sqlite --socket-dir PATH).
+sqlite_flow_tests() {
+  echo "  -- SQLite"
+  id -u shopapp >/dev/null 2>&1 || useradd --system --user-group shopapp
+  mkfile() { # PATH: a SQLite file owned by shopapp, 0644
+    install -d -o shopapp -g shopapp -m 0755 "$(dirname "$1")"
+    { printf 'SQLite format 3\000'; head -c 4080 /dev/zero; } >"$1"
+    chown shopapp:shopapp "$1"
+    chmod 0644 "$1"
+  }
+  db=/srv/shop/db/production.sqlite3
+  mkfile "$db"
+  rm -f /etc/rowsafe/sqlite-paths /etc/rowsafe/sqlite-clone-dirs
+  line="0\t$db\t0\t-\t/srv/shop/db\t4096\tshop-production\tno\t-\tshop-production\t4.0 KiB\t-\t-\tsqlite"
+  splan='SQLite database in /srv/shop/db (4.0 KiB, 2 tables, wal journal mode).\n\nWhat Rowsafe will change:\n  - Prepare your bucket for this database'
+
+  # 1. --protect with --sqlite: access, the list, the plan by path.
+  scenario "discover_out=$line" "plan_out=$splan" "wait_out=$done_" "status_out=$status"
+  expect_ok "--protect --sqlite: access, list, plan by file" "$INSTALLER" --protect shop --sqlite "$db"
+  called "plan --name shop --port 0 --socket-dir $db"
+  called "--engine sqlite"
+  called "apply --database db_fake"
+  grep -qxF "$db" /etc/rowsafe/sqlite-paths || fail "$name: $db isn't in /etc/rowsafe/sqlite-paths"
+  [ "$(stat -c '%a' /etc/rowsafe/sqlite-paths)" = 644 ] || fail "$name: /etc/rowsafe/sqlite-paths isn't 0644"
+  getfacl -p "$db" 2>/dev/null | grep -qx 'user:postgres:rw-' || fail "$name: no ACL for the agent on $db"
+  getfacl -p /srv/shop/db 2>/dev/null | grep -qx 'user:postgres:rwx' || fail "$name: no ACL for the agent on its folder"
+  getfacl -p /srv/shop/db 2>/dev/null | grep -qx 'default:user:shopapp:rw-' || fail "$name: no default ACL for the app's user"
+  [ "$(stat -c '%U %G' "$db")" = "shopapp shopapp" ] || fail "$name: the file's owner changed"
+  getfacl -p "$db" 2>/dev/null | grep -qx 'group::r--' || fail "$name: the file's group gained access"
+  grep -q "gave the agent (postgres) read and write access to $db" "$W/out" || fail "$name: the change isn't said"
+
+  # 2. A file found open, picked on a terminal; a folder for clones named
+  # when asked (none allowed yet).
+  db2=/srv/blog/blog.db
+  mkfile "$db2"
+  line2="0\t$db2\t0\t-\t/srv/blog\t4096\tblog\tno\t-\tblog\t4.0 KiB\t-\t-\tsqlite"
+  scenario "sqlite-find_out=$db2\t4096\twal\t4242\truby\t-\t-\t999\t999\tblog" "discover_out=$line2" "plan_out=$splan"
+  tty_ok "SQLite file found open: picked, access, plan" \
+    "Protect $db2\ty\nAllow Rowsafe to make clones\ty\nFolder for the clones\t/srv/tty-clones\nclose the SQLite files to this server's other users\tn\nName it in Rowsafe\t\nTurn on backups for blog now?\tn\n" "$INSTALLER"
+  called "sqlite find (root)"
+  grep -qxF /srv/tty-clones /etc/rowsafe/sqlite-clone-dirs || fail "$name: the folder for clones isn't in the list"
+  getfacl -p /srv/tty-clones 2>/dev/null | grep -qx 'user:postgres:rwx' || fail "$name: no ACL for the agent on the clones folder"
+  called "--socket-dir $db2"
+  grep -qxF "$db2" /etc/rowsafe/sqlite-paths || fail "$name: $db2 isn't in the list"
+  getfacl -p "$db2" 2>/dev/null | grep -qx 'user:postgres:rw-' || fail "$name: no ACL for the agent on $db2"
+
+  # 3. A side file is refused, and --protect takes exactly one --sqlite.
+  expect_fail "--sqlite refuses a -wal file" "not its -wal" "$INSTALLER" --sqlite "$db-wal"
+  expect_fail "--protect with two --sqlite files" "exactly one --sqlite" "$INSTALLER" --protect shop --sqlite "$db" --sqlite "$db2"
+  pass "SQLite: --sqlite and found files get ACL access, the list, plans by file; side files refused"
+  grep -qx '# Closing SQLite files to other users from Rowsafe (Security) is off.' /etc/rowsafe/sqlite-modes-allowed ||
+    fail "the no to closing SQLite files isn't kept"
+
+  # 4. --allow-sqlite-modes: root's helper may close the listed files (and
+  #    only in their folders) to other users; --no-allow-sqlite-modes removes it.
+  scenario "discover_out=$line" "plan_out=$splan"
+  expect_ok "--allow-sqlite-modes: allow list, helper units" "$INSTALLER" --allow-sqlite-modes --no-setup
+  has "Rowsafe may close the SQLite files to other users when you click Apply fix (Security)"
+  grep -qx sqlite-paths /etc/rowsafe/sqlite-modes-allowed || fail "$name: $(cat /etc/rowsafe/sqlite-modes-allowed)"
+  [ "$(stat -c '%U %a' /etc/rowsafe/sqlite-modes-allowed)" = "root 644" ] || fail "$name: allow list ownership/mode"
+  u=/etc/systemd/system/rowsafe-sqlite-modes.service
+  grep -qx 'ExecStart=/usr/local/lib/rowsafe/rowsafe-permissions sqlite-modes-apply' "$u" || fail "$name: no helper unit"
+  grep -qx 'Environment=ROWSAFE_AGENT_USER=postgres' "$u" || fail "$name: the unit doesn't name the agent's user"
+  grep -qx 'ReadWritePaths=-/srv/blog -/srv/shop/db' "$u" || fail "$name: ReadWritePaths isn't the listed files' folders: $(grep ReadWrite "$u")"
+  grep -qx 'ProtectSystem=strict' "$u" || fail "$name: the unit may write everywhere"
+  grep -qx 'PathExists=/var/lib/rowsafe/sqlite-modes/request' /etc/systemd/system/rowsafe-sqlite-modes.path || fail "$name: no path unit"
+  [ "$(stat -c '%U %a' /var/lib/rowsafe/sqlite-modes)" = "postgres 700" ] || fail "$name: request directory ownership/mode"
+  if [ "${TEST_UNITS:-0}" = 1 ]; then
+    expect_ok "systemd-analyze verify (SQLite helper units)" systemd-analyze verify "$u" /etc/systemd/system/rowsafe-sqlite-modes.path
+  fi
+  scenario "discover_out=$line" "plan_out=$splan"
+  expect_ok "--no-allow-sqlite-modes" "$INSTALLER" --no-allow-sqlite-modes --no-setup
+  [ ! -e "$u" ] && [ ! -e /etc/systemd/system/rowsafe-sqlite-modes.path ] || fail "$name: helper units left"
+  ! grep -qx sqlite-paths /etc/rowsafe/sqlite-modes-allowed || fail "$name: allow list kept"
+  pass "SQLite: --allow-sqlite-modes sets up root's helper for the listed files' folders only; --no-allow-sqlite-modes removes it"
+  rm -f /etc/rowsafe/sqlite-paths /etc/rowsafe/sqlite-modes-allowed
+
+  # 4. Folders for clones (--sqlite-clone-dir): made when missing, write
+  # access for the agent, a default ACL for the folder's owner, the list;
+  # system folders and relative paths refused; asked only once.
+  install -d -o shopapp -g shopapp -m 0750 /srv/shop/clones
+  scenario
+  expect_ok "--sqlite-clone-dir: folders allowed" "$INSTALLER" --no-setup --sqlite-clone-dir /srv/clones --sqlite-clone-dir /srv/shop/clones --sqlite-clone-dir /etc/rowsafe-clones
+  for d in /srv/clones /srv/shop/clones; do
+    grep -qxF "$d" /etc/rowsafe/sqlite-clone-dirs || fail "$name: $d isn't in /etc/rowsafe/sqlite-clone-dirs"
+    getfacl -p "$d" 2>/dev/null | grep -qx 'user:postgres:rwx' || fail "$name: no ACL for the agent on $d"
+    getfacl -p "$d" 2>/dev/null | grep -qx 'default:user:postgres:rw-' || fail "$name: no default ACL for the agent on $d"
+    runuser -u postgres -- sh -c "touch '$d/probe' && rm '$d/probe'" || fail "$name: the agent can't write in $d"
+  done
+  getfacl -p /srv/shop/clones 2>/dev/null | grep -qx 'default:user:shopapp:rw-' || fail "$name: no default ACL for the folder's owner"
+  [ "$(stat -c '%U %G' /srv/shop/clones)" = "shopapp shopapp" ] || fail "$name: the folder's owner changed"
+  getfacl -p /srv/shop/clones 2>/dev/null | grep -qx 'other::---' || fail "$name: others gained access to the folder"
+  getfacl -p /srv/shop/clones 2>/dev/null | grep -qx 'group::r-x' || fail "$name: the folder's group gained access"
+  [ "$(stat -c '%a' /etc/rowsafe/sqlite-clone-dirs)" = 644 ] || fail "$name: the list isn't 0644"
+  ! grep -q rowsafe-clones /etc/rowsafe/sqlite-clone-dirs || fail "$name: a system folder was allowed"
+  [ ! -e /etc/rowsafe-clones ] || fail "$name: a folder was made under /etc"
+  grep -q "may write SQLite clones into /srv/shop/clones" "$W/out" || fail "$name: the change isn't said"
+  expect_ok "--sqlite-clone-dir: re-run keeps one line per folder" "$INSTALLER" --no-setup --sqlite-clone-dir /srv/clones
+  [ "$(grep -cxF /srv/clones /etc/rowsafe/sqlite-clone-dirs)" = 1 ] || fail "$name: duplicate line"
+  expect_fail "--sqlite-clone-dir refuses a relative path" "absolute path" "$INSTALLER" --sqlite-clone-dir srv/clones
+  expect_fail "--sqlite-clone-dir refuses /" "absolute path" "$INSTALLER" --sqlite-clone-dir /
+  pass "SQLite clones: --sqlite-clone-dir and the question allow folders with ACLs; system folders refused"
+  rm -f /etc/rowsafe/sqlite-paths /etc/rowsafe/sqlite-clone-dirs
+}
+
+# sqlite_only_tests (TEST_ONLY=sqlite): what the SQLite cases need of the
+# rest (an install with storage, the agent running as postgres), then only
+# those cases.
+sqlite_only_tests() {
+  write_terminal_helpers
+  useradd --system --home-dir /var/lib/postgresql --create-home --shell /bin/sh postgres
+  mkdir -p /usr/lib/postgresql/17/bin /var/lib/postgresql/17/main
+  printf '#!/bin/sh\n' >/usr/lib/postgresql/17/bin/postgres && chmod 755 /usr/lib/postgresql/17/bin/postgres
+  configured() {
+    env ROWSAFE_REPO_S3_ENDPOINT=acct.eu.r2.cloudflarestorage.com ROWSAFE_REPO_S3_BUCKET=app-rowsafe \
+      ROWSAFE_REPO_S3_KEY=AKIAEXAMPLEKEY42 ROWSAFE_REPO_S3_KEY_SECRET=s3cr3t/with+base64= \
+      ROWSAFE_REPO_CIPHER_PASS='cipher-pass-that-is-long-enough/+==' "$@"
+  }
+  scenario
+  expect_ok "configured install" configured "$INSTALLER" rse_secrettoken123 --no-allow-restart --no-allow-pooler
+  echo '{"host_id":"host_1","agent_token":"rsa_x"}' >/var/lib/rowsafe/agent.json
+  chown postgres:postgres /var/lib/rowsafe/agent.json
+  runuser -u postgres -- /opt/rowsafe/rowsafe-agent run >/dev/null 2>&1 &
+  sleep 1
+  done_='Checking that changes reach your storage...\n✓ shop is protected. The first full backup is running.'
+  status='db_fake\tshop\tactive\trunning\thttps://app.rowsafe.test/databases/db_fake'
+  scenario
+  expect_ok "agent running, restarts and pooling off" "$INSTALLER" --no-allow-restart --no-allow-pooler
+  sqlite_flow_tests
+  echo "test-install: SQLite cases passed"
 }
 
 # mongodb_flow_tests: a MongoDB server found by discover (engine column):
@@ -1766,6 +1933,11 @@ EOF
   as_pg rm -f /opt/rowsafe/versions/0.12.0 "$R"
   as_pg mkdir -m 0700 "$R"
   pass "the installer doesn't follow symlinks planted in the agent's directories"
+
+  cp /etc/rowsafe/restart-allowed "$W/restart-allowed.saved"
+  redis_restart_tests
+  install -m 0644 -o root -g root "$W/restart-allowed.saved" /etc/rowsafe/restart-allowed
+  scenario "discover_out=$shop"
 
   pooler_tests
   update_tests
@@ -2628,6 +2800,319 @@ clickhouse_host_tests() {
   expect_ok "ClickHouse server: uninstall" "$INSTALLER" --uninstall
   [ ! -e "$d" ] || fail "uninstall left the drop-in"
   pass "ClickHouse server: agent as rowsafe after clickhouse-server.service, clickhouse program checked"
+}
+
+# ------------------------------------------------------------ Redis and Valkey
+
+# redis_flow_tests: a Redis or Valkey server found by discover (engine
+# column): Rowsafe's own ACL user comes before the plan, as the default user
+# or with an administrator's login once; the server keeps it, or root adds
+# its line (the password's hash) to the configuration file. Redis Cluster
+# and old servers are refused before the plan. Nothing restarts.
+redis_flow_tests() {
+  echo "  -- Redis and Valkey"
+  rd='6379\t-\t7\t-\t/var/lib/redis\t1048576\tcache\tno\t-\tdb0\t1.0 MiB\tredis-server.service\t-\tredis'
+  # rdst LOGIN [CONFIG] [CLUSTER] [VERSION] [ENGINE] [RIGHTS]
+  rdst() {
+    printf 'port=6379\\nengine=%s\\nversion=%s\\nlogin=%s\\nuser=-\\nunit=redis-server.service\\nbinary=/usr/bin/redis-server\\nconfig=%s\\naclfile=-\\ndatadir=/var/lib/redis\\ndbfilename=dump.rdb\\ndocker=no\\ncluster=%s\\nrole=master\\nneeds_auth=no\\nrights=%s' \
+      "${5:-redis}" "${4:-7.0.15}" "$1" "${2:--}" "${3:-no}" "${6:--}"
+  }
+  rdplan='Redis 7.0.15 on port 6379: 1.0 MiB, 1 database (db0).\n\nWhat Rowsafe will change:\n  - Prepare your bucket for this database\n\nNo downtime: Redis does not need a restart.'
+  hash=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  acl="user rowsafe on #$hash ~* resetchannels -@all +@read -keys +ping +config|get +acl|whoami"
+
+  # 1. Rowsafe's login already works: straight to the plan, with the engine.
+  scenario "discover_out=$rd" "redis-status_out=$(rdst ok)" "plan_out=$rdplan" "wait_out=$done_" "status_out=$status"
+  tty_ok "Redis with Rowsafe's login: plan, turn on" "Name it in Rowsafe\t\nTurn on backups for cache now?\t\n" "$INSTALLER"
+  has "Found Redis 7 on port 6379 (1.0 MiB; databases: db0)"
+  has "No downtime: Redis does not need a restart."
+  called "redis-status --port 6379 --engine redis"
+  called "plan --name cache --port 6379 --id-file"
+  called "--engine redis"
+  not_called "socket-dir -"
+  not_called "redis-login"
+  called "apply --database db_fake"
+
+  # 2. No login yet, the default user has no password: Rowsafe's user is
+  #    made as default and Redis keeps it itself; a snapshot file the agent
+  #    can't read is only mentioned.
+  install -d -m 0700 -o root -g root /var/lib/redis
+  echo REDIS0011 >/var/lib/redis/dump.rdb
+  chmod 600 /var/lib/redis/dump.rdb
+  scenario "discover_out=$rd" "redis-status_out=$(rdst missing /etc/redis/redis.conf)" "redis-login_out=persisted=config\nacl_line=$acl" "plan_out=$rdplan"
+  tty_ok "Redis login as the default user" "Name it in Rowsafe\t\nTurn on backups for cache now?\tn\n" "$INSTALLER"
+  has "Rowsafe needs its own Redis user, rowsafe"
+  has "Rowsafe's own Redis user, rowsafe, is ready (Redis keeps it in its configuration file)"
+  has "Rowsafe can't read Redis's snapshot file (/var/lib/redis/dump.rdb)"
+  called "redis-login --port 6379 --engine redis"
+  not_called "admin-user"
+  lacks "$hash"
+  called "plan --name cache --port 6379"
+  rm -rf /var/lib/redis
+
+  # 2b. The log in Debian's folder (redis:adm, 2750, the file 640): the
+  #     agent's user gets an access rule to read it (the folder's default
+  #     for the files after a rotation too); owners and modes stay.
+  ruser=''
+  id -u redis >/dev/null 2>&1 || { useradd --system --no-create-home redis && ruser=1; }
+  getent group adm >/dev/null || groupadd --system adm
+  install -d -m 2750 -o redis -g adm /var/log/redis
+  echo '1:M 04 Oct 2026 00:48:28.601 * Ready to accept connections tcp' >/var/log/redis/redis-server.log
+  chown redis:adm /var/log/redis/redis-server.log && chmod 640 /var/log/redis/redis-server.log
+  scenario "discover_out=$rd" "redis-status_out=$(rdst ok)\nlogfile=/var/log/redis/redis-server.log" "plan_out=$rdplan"
+  tty_ok "Redis: its log made readable to the agent" "Name it in Rowsafe\t\nTurn on backups for cache now?\tn\n" "$INSTALLER"
+  has "gave the Rowsafe agent read access to /var/log/redis (Redis's own log, for the Logs page; read-only, with an ACL; nothing else changed)"
+  [ "$(stat -c '%U %G %a' /var/log/redis/redis-server.log)" = "redis adm 640" ] || fail "$name: the log's owner or mode changed"
+  getfacl -p /var/log/redis 2>/dev/null | grep -qx 'default:user:postgres:r--' || fail "$name: no default ACL: $(getfacl -p /var/log/redis)"
+  setpriv --reuid=postgres --regid=postgres --init-groups -- cat /var/log/redis/redis-server.log >/dev/null || fail "$name: the agent can't read the log"
+  # A log straight in /var/log (root's folder) is only mentioned.
+  mv /var/log/redis/redis-server.log /var/log/redis-test.log && setfacl -b /var/log/redis-test.log
+  scenario "discover_out=$rd" "redis-status_out=$(rdst ok)\nlogfile=/var/log/redis-test.log" "plan_out=$rdplan"
+  tty_ok "Redis: a log in a shared folder is left alone" "Name it in Rowsafe\t\nTurn on backups for cache now?\tn\n" "$INSTALLER"
+  has "Rowsafe can't read Redis's log (/var/log/redis-test.log)"
+  ! getfacl -p -s /var/log 2>/dev/null | grep -q postgres || fail "$name: an ACL on /var/log"
+  rm -rf /var/log/redis /var/log/redis-test.log
+  [ -z "$ruser" ] || userdel redis
+
+  # 3. Redis couldn't keep it (it can't write its configuration file):
+  #    root replaces the earlier "user rowsafe" line, keeping owner and mode.
+  rgrp=''
+  getent group redis >/dev/null || { groupadd --system redis && rgrp=1; }
+  mkdir -p /etc/redis
+  printf 'bind 127.0.0.1 -::1\nport 6379\nuser rowsafe on #%s ~* +@read\ndir /var/lib/redis\n' "$(echo "$hash" | tr 0-9 9876543210)" >/etc/redis/redis.conf
+  chown root:redis /etc/redis/redis.conf
+  chmod 640 /etc/redis/redis.conf
+  scenario "discover_out=$rd" "redis-status_out=$(rdst missing /etc/redis/redis.conf)" \
+    "redis-login_out=persisted=none\nwhy=the server can't write its configuration file /etc/redis/redis.conf (ERR Rewriting config file: Permission denied)\nacl_line=$acl" \
+    "plan_out=$rdplan"
+  tty_ok "Redis login kept in its configuration file by root" "Name it in Rowsafe\t\nTurn on backups for cache now?\tn\n" "$INSTALLER"
+  has "added it to /etc/redis/redis.conf, so Redis keeps it when it restarts"
+  lacks "forgets Rowsafe's user"
+  lacks "$hash"
+  f=/etc/redis/redis.conf
+  [ "$(stat -c '%U %G %a' "$f")" = "root redis 640" ] || fail "$name: $f owner or mode changed"
+  [ "$(grep -c '^user rowsafe ' "$f")" = 1 ] && grep -qxF "$acl" "$f" || fail "$name: $f lacks the new line once: $(cat "$f")"
+  grep -qx 'port 6379' "$f" && grep -qx 'dir /var/lib/redis' "$f" || fail "$name: $f lost its settings"
+  # A malformed line from the agent is never written.
+  scenario "discover_out=$rd" "redis-status_out=$(rdst missing /etc/redis/redis.conf)" \
+    "redis-login_out=persisted=none\nacl_line=user rowsafe on nopass ~* +@all" "plan_out=$rdplan"
+  tty_ok "Redis: a malformed user line is refused" "Name it in Rowsafe\t\nTurn on backups for cache now?\tn\n" "$INSTALLER"
+  grep -qxF "$acl" "$f" && ! grep -q nopass "$f" || fail "$name: $f changed: $(cat "$f")"
+  has "Redis forgets Rowsafe's user when it restarts"
+  rm -rf /etc/redis
+  [ -z "$rgrp" ] || groupdel redis
+
+  # 4. No configuration file at all: said plainly, with how to keep it.
+  scenario "discover_out=$rd" "redis-status_out=$(rdst missing)" \
+    "redis-login_out=persisted=none\nwhy=the server runs without an ACL file or a configuration file\nacl_line=$acl" "plan_out=$rdplan"
+  tty_ok "Redis without a configuration file" "Name it in Rowsafe\t\nTurn on backups for cache now?\tn\n" "$INSTALLER"
+  has "Redis forgets Rowsafe's user when it restarts (the server runs without an ACL file or a configuration file)"
+  has "give Redis an ACL file"
+  called "plan --name cache --port 6379"
+
+  # 5. A password on the default user (11): an administrator signs in once;
+  #    a refused login (12) asks again. The password goes to the agent on
+  #    stdin and is never printed or saved.
+  scenario "discover_out=$rd" "redis-status_out=$(rdst missing /etc/redis/redis.conf)" "redis-login_rc=11\n12\n0" \
+    "redis-login_out=persisted=config\nacl_line=$acl" "plan_out=$rdplan"
+  tty_ok "Redis login with an administrator" \
+    "Name it in Rowsafe\t\nRedis administrator user [default]\t\nPassword for default\twrong\nRedis administrator user [default]\t\nPassword for default\tR3dis-S3cret\nTurn on backups for cache now?\tn\n" "$INSTALLER"
+  has "Redis asks for a password."
+  has "Redis refused that login."
+  called "redis-login --port 6379 --engine redis --admin-user default"
+  [ "$(cat "$F/redis-login.stdin")" = R3dis-S3cret ] || fail "$name: the administrator's password didn't reach the agent on stdin"
+  lacks "R3dis-S3cret"
+  ! grep -rq "R3dis-S3cret" /etc/rowsafe /var/lib/rowsafe 2>/dev/null || fail "$name: the administrator's password was saved"
+  called "plan --name cache --port 6379"
+
+  # 6. Redis Cluster and old servers: refused in one sentence, before the plan.
+  scenario "discover_out=$rd" "redis-status_out=$(rdst ok - yes)"
+  tty_ok "Redis Cluster refused" "Name it in Rowsafe\t\n" "$INSTALLER"
+  has "runs in cluster mode (Redis Cluster), which Rowsafe doesn't protect yet"
+  has "Backups for cache are not on yet."
+  not_called "plan"
+  scenario "discover_out=$rd" "redis-status_out=$(rdst missing - no 6.0.16)"
+  tty_ok "Redis 6.0 refused" "Name it in Rowsafe\t\n" "$INSTALLER"
+  has "Redis 6.0.16 is too old: Rowsafe needs Redis 7.0 or newer"
+  has "packages.redis.io"
+  not_called "redis-login"
+  not_called "plan"
+
+  # 7. Valkey: its own name and engine.
+  vk='6380\t-\t8\t-\t/var/lib/valkey\t1048576\tqueue\tno\t-\tdb0\t1.0 MiB\tvalkey-server.service\t-\tvalkey'
+  scenario "discover_out=$vk" "redis-status_out=$(rdst missing - no 8.1.1 valkey)" "redis-login_out=persisted=aclfile\nacl_line=$acl" \
+    "plan_out=Valkey 8.1.1 on port 6380: 1.0 MiB, 1 database (db0)."
+  tty_ok "Valkey: login kept in its ACL file" "Name it in Rowsafe\t\nTurn on backups for queue now?\tn\n" "$INSTALLER"
+  has "Found Valkey 8 on port 6380 (1.0 MiB; databases: db0)"
+  has "Rowsafe's own Valkey user, rowsafe, is ready (Valkey keeps it in its ACL file)"
+  called "redis-login --port 6380 --engine valkey"
+  called "--engine valkey"
+
+  # 8. --protect: without a way to create the user it stops before the
+  #    plan; ROWSAFE_REDIS_ADMIN_* (no terminal) are used once.
+  scenario "discover_out=$rd" "redis-status_out=$(rdst missing)" redis-login_rc=11
+  expect_fail "--protect: Redis without a login" "ROWSAFE_REDIS_ADMIN_USER" "$INSTALLER" --protect cache
+  grep -q "isn't ready for backups" "$W/out" || fail "$name: not explained"
+  not_called "plan"
+  scenario "discover_out=$rd" "redis-status_out=$(rdst missing /etc/redis/redis.conf)" "redis-login_rc=11\n0" \
+    "redis-login_out=persisted=config\nacl_line=$acl" "plan_out=$rdplan" "wait_out=$done_"
+  expect_ok "--protect: Redis administrator from the environment" \
+    env ROWSAFE_REDIS_ADMIN_USER=default ROWSAFE_REDIS_ADMIN_PASSWORD=Env-R3dis "$INSTALLER" --protect cache
+  called "redis-login --port 6379 --engine redis --admin-user default"
+  [ "$(cat "$F/redis-login.stdin")" = Env-R3dis ] || fail "$name: the administrator's password didn't reach the agent on stdin"
+  ! grep -q "Env-R3dis" "$W/out" || fail "$name: the administrator's password was printed"
+  ! grep -q "ROWSAFE_REDIS_ADMIN" /etc/rowsafe/agent.env || fail "$name: the administrator's login went to agent.env"
+  called "apply --database db_fake"
+
+  # 9. An already protected server whose login predates Databases & users
+  #    (rights=old): the login is made again for the new rights; with them,
+  #    nothing is asked.
+  rdon='6379\t-\t7\t-\t/var/lib/redis\t1048576\tcache\tyes\tactive\tdb0\t1.0 MiB\tredis-server.service\tdb_fake\tredis'
+  scenario "discover_out=$rdon" "redis-status_out=$(rdst ok /etc/redis/redis.conf no 7.0.15 redis old)" "redis-login_out=persisted=config\nacl_line=$acl"
+  tty_ok "Redis: an old login gets the rights to manage users" "" "$INSTALLER"
+  has "is protected as cache"
+  has "needs a few more rights to manage Redis users"
+  called "redis-login --port 6379 --engine redis"
+  not_called "plan"
+  scenario "discover_out=$rdon" "redis-status_out=$(rdst ok /etc/redis/redis.conf no 7.0.15 redis ok)"
+  tty_ok "Redis: a login with the rights is left alone" "" "$INSTALLER"
+  not_called "redis-login"
+  pass "Redis and Valkey: engine in the plan, ACL user kept across restarts, administrator login once, Cluster and old servers refused, --protect, rights refreshed"
+}
+
+# redis_restart_tests: Redis and Valkey units (redis-server, redis,
+# valkey-server, valkey and their @instance forms) go in the restart allow
+# list from the agent's discovery, and the helper restarts, stops and starts
+# them; another unit in the list is never touched.
+redis_restart_tests() {
+  echo "  -- restarts of Redis and Valkey"
+  rH=/usr/local/lib/rowsafe/rowsafe-pg-restart
+  rR=/var/lib/rowsafe/restart
+  scenario "discover_out=$shop\n6379\t-\t7\t-\t/var/lib/redis\t1048576\tcache\tno\t-\tdb0\t1.0 MiB\tredis-server.service\t-\tredis\n6380\t-\t8\t-\t/var/lib/valkey\t1048576\tqueue\tno\t-\tdb0\t1.0 MiB\tvalkey-server@queue.service\t-\tvalkey\n6381\t-\t7\t-\t/var/lib/redis\t8\tother\tno\t-\tdb0\t8 B\tsshd.service\t-\tredis"
+  expect_ok "--allow-restart with Redis and Valkey" "$INSTALLER" --allow-restart
+  a=/etc/rowsafe/restart-allowed
+  grep -qx "6379 redis-server.service" "$a" && grep -qx "6380 valkey-server@queue.service" "$a" || fail "$name: allow list: $(cat "$a")"
+  ! grep -q "sshd" "$a" || fail "$name: a unit that isn't a database's was allowed"
+  echo "6381 sshd.service" >>"$a"
+  printf '#!/bin/sh\necho "$*" >>/tmp/rowsafe-fake/systemctl.calls\n' >"$F/systemctl"
+  chmod 755 "$F/systemctl"
+  : >"$F/systemctl.calls"
+  rO=$W/redis-helper-run
+  install -d -m 0755 -o root -g root "$rO"
+  rd_request() {
+    rm -f "$rO/result"
+    printf '%s\n' "$1" | runuser -u postgres -- sh -c 'cat >"$1"' sh "$rR/request"
+    timeout 30 env ROWSAFE_SYSTEMCTL="$F/systemctl" STATE_DIRECTORY="$W/redis-helper-state" RUNTIME_DIRECTORY="$rO" "$rH" 2>>"$W/helper.log" ||
+      fail "the helper failed or hung (exit $?)"
+    [ -f "$rO/result" ] || fail "no result for: $1"
+  }
+  rd_has() { grep -qxF "$1" "$rO/result" || {
+    cat "$rO/result" >&2
+    fail "helper result lacks $1"
+  }; }
+  rd_request "rd_1 restart 6379"
+  rd_has "ok=1"
+  rd_has "unit=redis-server.service"
+  rd_request "rd_2 stop 6380"
+  rd_has "ok=1"
+  rd_has "unit=valkey-server@queue.service"
+  rd_request "rd_2 start 6380"
+  rd_has "ok=1"
+  rd_request "rd_3 restart 6381"
+  rd_has "ok=0"
+  grep -q "^error=port 6381 is not in /etc/rowsafe/restart-allowed" "$rO/result" || fail "a unit that isn't a database's was restarted"
+  [ "$(cat "$F/systemctl.calls")" = "$(printf 'restart redis-server.service\nstop valkey-server@queue.service\nstart valkey-server@queue.service')" ] ||
+    fail "helper ran: $(cat "$F/systemctl.calls")"
+  pass "Redis and Valkey units: allow list from discovery, restart, stop and start through the helper"
+}
+
+# redis_host_tests: a server with Redis or Valkey only, from the system's
+# own package: the agent runs as its own user, rowsafe (a unit drop-in,
+# after the server's unit, in the server's group to read its snapshot file);
+# nothing is installed for backups; the server program is checked (Proof
+# needs it). Ubuntu 22.04's Redis 6.0 is refused before anything changes.
+redis_host_tests() {
+  echo "  -- a Redis or Valkey server (no PostgreSQL)"
+  pkill -f 'rowsafe-agent run' 2>/dev/null || true
+  "$INSTALLER" --uninstall --purge >/dev/null 2>&1 || true
+  ! id -u postgres >/dev/null 2>&1 || userdel postgres
+  ! id -u mysql >/dev/null 2>&1 || userdel mysql
+  rm -rf /usr/lib/postgresql /var/lib/postgresql /usr/sbin/mysqld /usr/bin/clickhouse-server /usr/bin/clickhouse
+  # pgBackRest stays after an uninstall; a Redis server mustn't get it again.
+  apt-get purge -y -qq pgbackrest >/dev/null 2>&1 || true
+  # shellcheck disable=SC1091
+  os=$(. /etc/os-release && echo "$ID $VERSION_ID")
+  case $os in
+    "debian 13") pkg=valkey-server eng=Valkey ;;
+    *) pkg=redis-server eng=Redis ;;
+  esac
+  # The package's server isn't started in the container.
+  printf '#!/bin/sh\nexit 101\n' >/usr/sbin/policy-rc.d
+  chmod 755 /usr/sbin/policy-rc.d
+  apt-get install -y -qq --no-install-recommends "$pkg" >/dev/null 2>&1 || fail "could not install $pkg"
+  rm -f /usr/sbin/policy-rc.d
+  ver=$("$pkg" --version | sed -n 's/.* v=\([0-9.]*\).*/\1/p')
+  echo "  $pkg $ver"
+  if [ "$os" = "ubuntu 22.04" ]; then
+    rm -rf /etc/rowsafe /opt/rowsafe
+    ! id -u rowsafe >/dev/null 2>&1 || userdel rowsafe
+    expect_fail "Redis $ver refused before anything changes" "Redis $ver is too old: Rowsafe needs Redis 7.0 or newer" \
+      configured env ROWSAFE_ENROLL_TOKEN=rse_secrettoken123 "$INSTALLER" --no-setup
+    grep -q "packages.redis.io" "$W/out" && grep -q "Nothing was changed on this server." "$W/out" || fail "$name: not explained"
+    [ ! -e /etc/rowsafe ] && [ ! -e /opt/rowsafe ] && ! id -u rowsafe >/dev/null 2>&1 || fail "$name: something changed"
+    pass "Redis 6.0 (Ubuntu 22.04's own): refused in one sentence, nothing changed"
+    return 0
+  fi
+  expect_ok "$eng server: configured install" configured env ROWSAFE_ENROLL_TOKEN=rse_secrettoken123 "$INSTALLER" --no-setup
+  [ -z "${TEST_SHOW:-}" ] || cat "$W/out"
+  grep -q "restore tests for the $eng on this server" "$W/out" || fail "$name: installer doesn't speak of $eng"
+  grep -q "$eng program at /usr/bin/$pkg ($ver; Proof and Rewind copies use it)" "$W/out" || fail "$name: server program not found"
+  grep -q "backups      $eng's own replication stream, encrypted by the agent" "$W/out" || fail "$name: summary"
+  id -u rowsafe >/dev/null 2>&1 || fail "$name: no rowsafe user"
+  d=/etc/systemd/system/rowsafe-agent.service.d/10-redis.conf
+  grep -qx 'User=rowsafe' "$d" && grep -q '^After=.*redis-server.service' "$d" && grep -q '^After=.*valkey-server.service' "$d" ||
+    fail "$name: no drop-in running the agent as rowsafe: $(cat "$d")"
+  g=$(getent group redis valkey | head -n 1 | cut -d: -f1)
+  [ -n "$g" ] && grep -qx "SupplementaryGroups=$g" "$d" || fail "$name: the agent isn't in the server's group ($g): $(cat "$d")"
+  grep -q "this server runs $eng" "$d" || fail "$name: drop-in doesn't name $eng"
+  cmp /etc/systemd/system/rowsafe-agent.service /src/deploy/systemd/rowsafe-agent.service || fail "$name: the unit itself changed"
+  [ "$(stat -c '%U %a' /etc/rowsafe/agent.env)" = "rowsafe 600" ] || fail "$name: agent.env ownership/mode"
+  ! command -v pgbackrest >/dev/null || fail "$name: pgBackRest installed for $eng"
+  expect_ok "$eng server: re-run is idempotent" configured "$INSTALLER" --no-setup
+  expect_ok "$eng server: uninstall --purge" "$INSTALLER" --uninstall --purge
+  [ ! -e "$d" ] || fail "$name: uninstall left the drop-in"
+  grep -q "ACL DELUSER rowsafe" "$W/out" || fail "$name: how to remove Rowsafe's user isn't said"
+  pass "$eng $ver server: agent as rowsafe in the $g group after its unit, server program checked, uninstall"
+}
+
+# redis_only_tests (TEST_ONLY=redis): what the Redis and Valkey cases need
+# of the rest (an install with storage, the agent running as postgres),
+# then only those cases.
+redis_only_tests() {
+  write_terminal_helpers
+  useradd --system --home-dir /var/lib/postgresql --create-home --shell /bin/sh postgres
+  mkdir -p /usr/lib/postgresql/17/bin /var/lib/postgresql/17/main
+  printf '#!/bin/sh\n' >/usr/lib/postgresql/17/bin/postgres && chmod 755 /usr/lib/postgresql/17/bin/postgres
+  configured() {
+    env ROWSAFE_REPO_S3_ENDPOINT=acct.eu.r2.cloudflarestorage.com ROWSAFE_REPO_S3_BUCKET=app-rowsafe \
+      ROWSAFE_REPO_S3_KEY=AKIAEXAMPLEKEY42 ROWSAFE_REPO_S3_KEY_SECRET=s3cr3t/with+base64= \
+      ROWSAFE_REPO_CIPHER_PASS='cipher-pass-that-is-long-enough/+==' "$@"
+  }
+  scenario
+  expect_ok "configured install" configured "$INSTALLER" rse_secrettoken123 --no-allow-restart --no-allow-pooler
+  echo '{"host_id":"host_1","agent_token":"rsa_x"}' >/var/lib/rowsafe/agent.json
+  chown postgres:postgres /var/lib/rowsafe/agent.json
+  runuser -u postgres -- /opt/rowsafe/rowsafe-agent run >/dev/null 2>&1 &
+  sleep 1
+  shop='5432\t/var/run/postgresql\t17\tmain\t/var/lib/postgresql/17/main\t1288490189\tshop\tno\t-\tshop\t1.2 GiB\tpostgresql@17-main.service\t-'
+  done_='Checking that changes reach your storage...\n✓ shop is protected. The first full backup is running.'
+  status='db_fake\tshop\tactive\trunning\thttps://app.rowsafe.test/databases/db_fake'
+  scenario
+  expect_ok "agent running, restarts and pooling off" "$INSTALLER" --no-allow-restart --no-allow-pooler
+  redis_flow_tests
+  redis_restart_tests
+  redis_host_tests
+  echo "test-install: Redis and Valkey cases passed"
 }
 
 # ------------------------------------------------------------ updates

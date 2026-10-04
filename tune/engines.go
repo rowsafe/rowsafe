@@ -34,6 +34,8 @@ func For(engine string) *Tuner {
 		return mongoTuner
 	case protocol.EngineClickHouse:
 		return clickhouseTuner
+	case protocol.EngineRedis, protocol.EngineValkey:
+		return redisTuner
 	}
 	return nil
 }

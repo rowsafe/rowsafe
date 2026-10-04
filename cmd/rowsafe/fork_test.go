@@ -128,3 +128,40 @@ func TestForkCommands(t *testing.T) {
 		t.Fatalf("%v\n%s", err, out)
 	}
 }
+
+// SQLite clones go to a new file in one of the target's folders for clones.
+func TestPickSQLiteForkPlace(t *testing.T) {
+	tg := protocol.ForkTarget{Hostname: "app-1", Places: []protocol.ForkPlace{
+		{Placement: protocol.ForkSQLiteFile, Dir: "/srv/clones", Label: "A new file in /srv/clones"}}}
+	if !hasSQLitePlaces(tg) {
+		t.Fatal("no SQLite places")
+	}
+	p, err := pickSQLiteForkPlace(tg, "/srv/clones/staging.sqlite3")
+	if err != nil || p.Placement != protocol.ForkSQLiteFile || p.Dir != "/srv/clones" {
+		t.Fatalf("%+v %v", p, err)
+	}
+	for _, bad := range []string{"", "/srv/other/x.db", "/srv/clones/sub/x.db", "/srv/clones/x.db-wal", "/srv/clones/.x"} {
+		if _, err := pickSQLiteForkPlace(tg, bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}
+
+func TestPickForkPlaceEmptyByPort(t *testing.T) {
+	tgt := protocol.ForkTarget{Hostname: "kv-e2e", Places: []protocol.ForkPlace{
+		{Placement: protocol.ForkEmptyServer, Port: 6381}, {Placement: protocol.ForkEmptyServer, Port: 6382}}}
+	p, err := pickForkPlace(tgt, 6382, 0)
+	if err != nil || p.Port != 6382 {
+		t.Fatalf("--port 6382: %+v %v", p, err)
+	}
+	if _, err := pickForkPlace(tgt, 6390, 0); err == nil {
+		t.Fatal("a port with no empty server there")
+	}
+	if p, err := pickForkPlace(tgt, 0, 6381); err != nil || p.Port != 6381 {
+		t.Fatalf("--into-port 6381: %+v %v", p, err)
+	}
+	one := protocol.ForkTarget{Places: tgt.Places[:1]}
+	if p, err := pickForkPlace(one, 0, 0); err != nil || p.Port != 6381 {
+		t.Fatalf("the only empty server: %+v %v", p, err)
+	}
+}

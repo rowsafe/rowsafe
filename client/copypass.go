@@ -15,6 +15,31 @@ import (
 // password is made here and only its verifier, in the engine's own form,
 // goes to Rowsafe.
 
+// CopyHasPassword reports whether an engine's safe copies have a login. A
+// SQLite copy is a file on the server: no address, login or password; it
+// is readable only by the Rowsafe agent's user and root
+// (protocol.SafeCopy.Path).
+func CopyHasPassword(engine string) bool {
+	return protocol.NormalizeEngine(engine) != protocol.EngineSQLite
+}
+
+// CopyFetchCommand is how a person copies a file safe copy (SQLite) to
+// their computer, with scp from the server (Rowsafe has no download path
+// for copies). host is the server's name as the person reaches it.
+func CopyFetchCommand(host, path string) string {
+	if host == "" {
+		host = "SERVER"
+	}
+	return "scp root@" + host + ":" + shellQuote(path) + " ."
+}
+
+func shellQuote(s string) string {
+	if s != "" && strings.Trim(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._-+") == "" {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // NewCopyPasswordFor makes a random password for a safe copy of an
 // engine's database and its verifier.
 func NewCopyPasswordFor(engine string) (password, verifier string, err error) {
@@ -59,6 +84,12 @@ func CopyVerifier(engine, password string) (string, error) {
 	case protocol.EngineClickHouse:
 		sum := sha256.Sum256([]byte(password))
 		return "sha256:" + hex.EncodeToString(sum[:]), nil
+	case protocol.EngineRedis, protocol.EngineValkey:
+		sum := sha256.Sum256([]byte(password))
+		return "#" + hex.EncodeToString(sum[:]), nil
+	}
+	if !CopyHasPassword(engine) {
+		return "", fmt.Errorf("a %s copy is a file on the server: it has no password", protocol.EngineDisplayName(engine))
 	}
 	return "", fmt.Errorf("safe copies of %s databases aren't supported", protocol.EngineDisplayName(engine))
 }
