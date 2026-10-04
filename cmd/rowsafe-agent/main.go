@@ -146,18 +146,14 @@ func run(ctx context.Context) error {
 	return err
 }
 
-// otherEnginesOnly: this server has no PostgreSQL to back up (no postgres
-// user, or the agent is told so), so pgBackRest isn't needed.
+// otherEnginesOnly: this server has no PostgreSQL to back up (no server
+// binaries), so pgBackRest isn't needed.
 func otherEnginesOnly() bool {
-	if os.Getenv("ROWSAFE_SQLITE_PATHS") != "" {
-		return true
+	if os.Getenv("ROWSAFE_PG_BIN_DIR") != "" {
+		return false
 	}
-	if _, err := os.Stat("/etc/rowsafe/sqlite-paths"); err == nil {
-		if _, err := os.Stat("/usr/lib/postgresql"); err != nil {
-			return true
-		}
-	}
-	return false
+	_, err := os.Stat("/usr/lib/postgresql")
+	return err != nil
 }
 
 // sqliteContainer: the agent runs in a container with SQLite files to
