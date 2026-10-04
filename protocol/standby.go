@@ -582,6 +582,10 @@ type StandbyInfo struct {
 	// Move is the database's move to another server, if one is open or
 	// finished recently (MoveView).
 	Move *MoveView `json:"move,omitempty"`
+	// Placement (addition): where the standby runs when both servers are
+	// servers Rowsafe created ("the standby runs in another availability
+	// zone (eu-central-1b)"), in plain words; empty otherwise.
+	Placement string `json:"placement,omitempty"`
 }
 
 // StandbyServer is a server in a standby pair.
