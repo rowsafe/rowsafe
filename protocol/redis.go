@@ -107,6 +107,7 @@ var redisFeatures = EngineFeatures{
 	RewindCopy: true, RewindRows: true, RewindInPlace: true, Marks: true,
 	Monitoring: true, Fixes: true, Restart: true,
 	Files: true, SecondCopy: true,
+	Updates: true, // minor updates through root's helper (db-minor-update); not Upgrades yet
 }
 
 // valkeyFeatures are Redis's: Valkey is a fork of Redis 7.2 that speaks the
