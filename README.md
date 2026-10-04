@@ -1,10 +1,19 @@
 # Rowsafe
 
-**Sleep at night.** Rowsafe backs up the databases you already run, lets you restore to any second, and proves every week that your backups actually restore. This repository is the open-source part of [Rowsafe](https://rowsafe.sh): the agent that runs on your servers, the `rowsafe` CLI, the installer and the MCP server for AI agents.
+**The database admin you never hired.** Rowsafe looks after the databases you already run on your own servers: backups you can restore to any second, a restore test every week, monitoring with fixes you apply in one click, and a safety net for AI coding agents. This repository is the open-source part of [Rowsafe](https://rowsafe.sh): the agent that runs on your servers, the `rowsafe` CLI, the installer and the MCP server for AI agents.
 
 Everything that touches your data is here, under Apache-2.0, so you can read exactly what runs on your machines.
 
-**Documentation:** [rowsafe.sh/docs](https://rowsafe.sh/docs) · **Status:** PostgreSQL 13–18, MySQL 8.0/8.4, MariaDB 10.6–11.4 and MongoDB 6.0–8.0 on Linux servers and in Docker. ClickHouse 24.8 to 26.8 too (restores to any second from the parts the agent copies as ClickHouse writes them). Redis 7.0+ and Valkey 7.2+ too (standalone servers: restores to any second from the replication stream the agent follows as a hidden replica).
+**Documentation:** [rowsafe.sh/docs](https://rowsafe.sh/docs)
+
+**Databases**, on Linux servers and in Docker:
+
+- PostgreSQL 13–18, MySQL 8.0/8.4, MariaDB 10.6–11.4, MongoDB 6.0–8.0
+- ClickHouse 24.8–26.8 (restores to any second from the parts the agent copies as ClickHouse writes them)
+- Redis 7.0+ and Valkey 7.2+, standalone servers (restores to any second from the replication stream the agent follows as a hidden replica)
+- SQLite (restores to any second in WAL mode)
+
+Nearly every feature works on each; `protocol.EngineCapabilities` says exactly which.
 
 ## Get started
 
@@ -14,7 +23,7 @@ rowsafe hosts enroll-token                             # prints the install comm
 curl -fsSL https://rowsafe.sh | sudo sh -s rse_…       # on the database server
 ```
 
-The installer does the rest on the server: it installs the agent, sets up storage, finds PostgreSQL, shows you the plan and asks before turning on backups (and before restarting PostgreSQL, if that is needed). To set up from your workstation instead: `rowsafe adopt app`, then `rowsafe apply app`.
+The installer does the rest on the server: it installs the agent, sets up storage, finds your databases, shows you the plan and asks before turning on backups (and before restarting the database, if that is needed). To set up from your workstation instead: `rowsafe adopt app`, then `rowsafe apply app`.
 
 **Rewind**: continuous backups, restore to any second. Deleted rows by mistake? Restore a copy as it was just before, next to production, and bring the rows back.
 
@@ -44,7 +53,7 @@ rowsafe insights app      # largest tables, unused indexes, wasted space, vacuum
 rowsafe tune app          # PostgreSQL settings that suit this server; asks, then applies (undo: rowsafe settings undo)
 ```
 
-**Guard**: the safety net for AI agents and deploys. `rowsafe mcp` and the Claude Code plugin create a restore point before migrations and destructive SQL; the GitHub Action saves one before every deploy. AI assistants can read everything the dashboard shows, and ask for what it does: a change to production (a fix, a restart, a rewind, an upgrade, ...) is a request that an owner or admin approves with one click in the dashboard before Rowsafe runs it. An assistant can never approve. (Approvals need a control plane release that includes them.)
+**Guard**: the safety net for AI agents and deploys. `rowsafe mcp` and the Claude Code and Codex plugins create a restore point before migrations and destructive SQL; the GitHub Action saves one before every deploy. AI assistants can read everything the dashboard shows, and ask for what it does: a change to production (a fix, a restart, a rewind, an upgrade, ...) is a request that an owner or admin approves with one click in the dashboard before Rowsafe runs it. An assistant can never approve.
 
 Full guide: [Quickstart](https://rowsafe.sh/docs/quickstart).
 
@@ -54,12 +63,13 @@ Full guide: [Quickstart](https://rowsafe.sh/docs/quickstart).
 |---|---|
 | `cmd/rowsafe-agent`, `internal/agent` | The agent. Makes outbound HTTPS requests only and runs a fixed set of tasks: inspect, adopt, check, backup, restore test, restore point, a PostgreSQL restart when you ask for one, Rewind (a copy next to production, compare, bring rows back, rewind in place and undo) when you ask, health fixes you apply (VACUUM, ANALYZE, rebuilding or removing an index, cancelling a query, ending a session, removing an inactive replication slot), and PostgreSQL settings changes you choose (ALTER SYSTEM + reload, checked again on the server; never its own archiving settings). |
 | `cmd/rowsafe`, `client` | The CLI. |
-| `mcp`, `integrations/claude-code` | Guard: `rowsafe mcp`, an MCP server for AI assistants (read tools, restore points, and `request_change` for changes a person approves), and a Claude Code plugin that creates a restore point before migrations. |
+| `mcp`, `integrations/claude-code`, `integrations/codex` | Guard: `rowsafe mcp`, an MCP server for AI assistants (read tools, restore points, and `request_change` for changes a person approves), and Claude Code and Codex plugins that create a restore point before migrations. |
 | `integrations/github-action` | Guard in CI: a GitHub Action that saves a Mark (restore point) before every deploy, published as `rowsafe/action`. |
 | `collect` | What the agent's monitoring reads: database and host metrics, locks, replication, query statistics, table insights and PostgreSQL settings. |
 | `tune` | The settings that matter, explained; recommendations for a server's memory, CPUs and disk; and the values Rowsafe refuses. |
 | `protocol` | The API types shared by the agent, the CLI and the Rowsafe service. |
 | `internal/pgbackrest`, `internal/pginspect` | PostgreSQL backup and inspection. |
+| `internal/engine` | MySQL and MariaDB, MongoDB, ClickHouse, Redis and Valkey, and SQLite: backup, restore, monitoring and fixes for each. |
 | `scripts/install.sh` | The installer served at `https://rowsafe.sh`. |
 | `release`, `cmd/rowsafe-release` | Release signing and verification. |
 
