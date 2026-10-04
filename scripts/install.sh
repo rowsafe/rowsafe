@@ -8680,6 +8680,7 @@ redis_status() {
   RD_LOGIN=$(_rk login) RD_VERSION=$(_rk version) RD_CONFIG=$(_rk config) RD_ACLFILE=$(_rk aclfile)
   RD_DATADIR=$(_rk datadir) RD_DBFILE=$(_rk dbfilename) RD_DOCKER=$(_rk docker) RD_CLUSTER=$(_rk cluster)
   RD_BINARY=$(_rk binary)
+  RD_LOGFILE=$(_rk logfile)
 }
 
 # redis_supported says why Rowsafe can't protect the server on $C_PORT
@@ -8822,6 +8823,44 @@ redis_snapshot_note() {
   note "$(engine_label "$C_ENGINE") refuses to send Rowsafe a copy over replication; backups don't use it otherwise."
 }
 
+# redis_agent_reads FILE: the agent's user (with the server's group when it
+# is rowsafe, as its unit gives it) can read FILE.
+redis_agent_reads() {
+  _gs=$(id -G "$AGENT_USER" 2>/dev/null | tr ' ' ',')
+  if [ "$AGENT_USER" = rowsafe ]; then
+    _g=$(redis_group)
+    [ -z "$_g" ] || _gs="$_gs,$(getent group "$_g" | cut -d: -f3)"
+  fi
+  [ -n "$_gs" ] || return 1
+  setpriv --reuid="$AGENT_USER" --regid="$AGENT_USER" --groups="$_gs" -- test -r "$1" 2>/dev/null
+}
+
+# redis_log_access lets the agent read the server's log file (Pulse's Logs
+# page), read only. Debian's packages keep it in /var/log/redis (or
+# valkey), readable by the adm group only: an access rule for the agent's
+# user on that folder, for the files that come after a rotation too, and on
+# the file. Only in a folder of the server's own (same owner as the log);
+# owners, groups and modes stay as they are, and an existing access rule
+# mask is never changed. Nothing restarts.
+RD_LOGFILE=''
+redis_log_access() {
+  [ "$RD_DOCKER" != yes ] && [ -n "$RD_LOGFILE" ] && have setpriv || return 0
+  case $RD_LOGFILE in /*) ;; *) return 0 ;; esac
+  [ -f "$RD_LOGFILE" ] || return 0
+  redis_agent_reads "$RD_LOGFILE" && return 0
+  _name=$(engine_label "$C_ENGINE")
+  _d=${RD_LOGFILE%/*}
+  have setfacl || (apt_install acl) || true
+  if [ -n "$_d" ] && [ "$(stat -c %u -- "$_d")" = "$(stat -c %u -- "$RD_LOGFILE")" ] && [ "$(stat -c %u -- "$_d")" != 0 ] &&
+    have setfacl && ! getfacl -p -s -- "$_d" "$RD_LOGFILE" 2>/dev/null | grep -q '^mask::' &&
+    setfacl -m "u:$AGENT_USER:rx" -- "$_d" && setfacl -d -m "u:$AGENT_USER:r" -- "$_d" &&
+    setfacl -m "u:$AGENT_USER:r" -- "$RD_LOGFILE" && redis_agent_reads "$RD_LOGFILE"; then
+    ok "Rowsafe can read $_name's log ($RD_LOGFILE) for the Logs page: read only, by an access rule on $_d"
+    return 0
+  fi
+  note "Rowsafe can't read $_name's log ($RD_LOGFILE). The Logs page in the dashboard says how to let it."
+}
+
 # redis_prepare gets a Redis or Valkey server ready for its plan: supported,
 # and Rowsafe's own user. Nothing restarts.
 redis_prepare() {
@@ -8845,6 +8884,7 @@ redis_prepare() {
     note "Proof and Rewind copies need the $C_ENGINE-server program, which comes with $_name's server package; it isn't on this server."
   fi
   redis_snapshot_note
+  redis_log_access
 }
 
 # ---------------------------------------------------------------- modes

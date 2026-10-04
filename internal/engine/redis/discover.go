@@ -216,6 +216,9 @@ type Status struct {
 	Cluster    bool
 	Role       string
 	NeedsAuth  bool // the default user needs a password
+	// LogFile is the server's log file (logfile, made absolute against
+	// dir); "" when it logs to its standard output.
+	LogFile string
 }
 
 // ServerStatus describes the server on port (nothing answering: error).
@@ -247,6 +250,12 @@ func ServerStatus(ctx context.Context, env agent.EngineEnv, port int) (Status, e
 				}
 				st.Binary, _ = serverBinary(full.Engine, full.Executable)
 			}
+			if lf, err := c.configGet(ctx, "logfile"); err == nil && lf != "" {
+				if !filepath.IsAbs(lf) && st.Dir != "" {
+					lf = filepath.Join(st.Dir, lf)
+				}
+				st.LogFile = lf
+			}
 			c.Close()
 		}
 	}
@@ -273,4 +282,5 @@ func (s Status) Print(w io.Writer) {
 	fmt.Fprintf(w, "port=%d\nengine=%s\nversion=%s\nlogin=%s\nuser=%s\nunit=%s\nbinary=%s\nconfig=%s\naclfile=%s\ndatadir=%s\ndbfilename=%s\ndocker=%s\ncluster=%s\nrole=%s\nneeds_auth=%s\n",
 		s.Port, dash(s.Engine), dash(s.Version), dash(s.Login), dash(s.User), dash(s.Unit), dash(s.Binary), dash(s.ConfigFile),
 		dash(s.ACLFile), dash(s.Dir), dash(s.DBFilename), yn(s.Docker), yn(s.Cluster), dash(s.Role), yn(s.NeedsAuth))
+	fmt.Fprintf(w, "logfile=%s\n", dash(s.LogFile))
 }
