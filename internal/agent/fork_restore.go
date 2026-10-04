@@ -205,15 +205,9 @@ func (a *Agent) forkSourceFor(ctx context.Context, ops forkOps, p protocol.ForkR
 		if err != nil {
 			return s, fmt.Errorf("reading the source server's handoff: %w", err)
 		}
-		r := sec.Repo
-		s.repo = pgbackrest.Repo{Endpoint: r.Endpoint, Bucket: r.Bucket, Region: r.Region, Key: r.Key, KeySecret: r.KeySecret,
-			CipherPass: r.CipherPass, PathPrefix: r.PathPrefix, URIStyle: r.URIStyle, Port: r.Port, SkipTLSVerify: r.SkipTLSVerify}
-		if r.CAPEM != "" {
-			ca := filepath.Join(a.cfg.ConfigDir, "fork-"+p.ForkID+"-ca.pem")
-			if err := writeFileAtomic(ca, []byte(r.CAPEM), 0o600); err != nil {
-				return s, err
-			}
-			s.repo.CAFile = ca
+		// In Rowsafe Storage: this agent's own credentials (same organization).
+		if s.repo, err = a.repoFromHandoff(ctx, sec.Repo, filepath.Join(a.cfg.ConfigDir, "fork-"+p.ForkID+"-ca.pem")); err != nil {
+			return s, err
 		}
 		tl.Printf("opened the source server's sealed bucket settings (read access to %s's backups)", cmp.Or(p.Source.Name, p.Source.Stanza))
 	}

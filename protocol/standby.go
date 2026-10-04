@@ -178,7 +178,17 @@ type StandbyRepo struct {
 	// Folder is the primary's backup folder when it isn't the stanza's
 	// name (a setup that started fresh in a new folder).
 	Folder string `json:"folder,omitempty"`
+	// Storage is StorageRowsafe when the primary's backups are in Rowsafe
+	// Storage. Endpoint, Bucket, PathPrefix and the keys are then empty:
+	// the receiving agent asks the control plane for its own short-lived
+	// credentials (the same organization's prefix, renewed by that agent)
+	// and uses them for Folder (or the stanza) under that prefix. CipherPass
+	// is still the primary's passphrase. "" is a bucket of the customer's.
+	Storage string `json:"storage,omitempty"`
 }
+
+// RowsafeStorage reports whether the repository is in Rowsafe Storage.
+func (r StandbyRepo) RowsafeStorage() bool { return r.Storage == StorageRowsafe }
 
 // ---- Heartbeat additions (embedded in HeartbeatRequest/Response) ----
 
