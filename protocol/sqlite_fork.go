@@ -61,6 +61,7 @@ func SQLiteClonePath(dir, path string) bool {
 	return SQLiteCloneDir(dir) && SQLitePath(path) && filepath.Dir(path) == dir && SQLiteCloneName(filepath.Base(path))
 }
 
-// SQLiteNoCloneDir says how root allows clones on a server whose agent
-// reports no folder for them.
-const SQLiteNoCloneDir = "no folder there is allowed for SQLite clones: the server's owner can allow one by running the Rowsafe installer again with --sqlite-clone-dir /path/to/folder (in Docker, mount a folder and name it in ROWSAFE_SQLITE_CLONE_DIRS)"
+// SQLiteNoCloneDir is why a server whose agent reports no folder for
+// clones can't take one (the dashboard shows how root allows one:
+// --sqlite-clone-dir, or ROWSAFE_SQLITE_CLONE_DIRS in Docker).
+const SQLiteNoCloneDir = "no folder there is allowed for SQLite clones (the server's owner can allow one when installing Rowsafe there)"
