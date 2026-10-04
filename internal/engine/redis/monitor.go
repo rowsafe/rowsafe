@@ -33,6 +33,8 @@ type dbMonitor struct {
 	prevAt   time.Time
 	statusAt time.Time
 	slowID   int64 // the newest slow log entry already counted
+
+	adv advisorState // the recommendations' key sample (insights.go)
 }
 
 func (e *Engine) monitorFor(id string) *dbMonitor {
@@ -233,6 +235,7 @@ func (e *Engine) sample(ctx context.Context, env agent.EngineEnv, db protocol.Da
 		dm.Settings, _ = e.settingsSnapshot(ctx, env, c) // Tuning (settings.go)
 		m.statusAt = now
 	}
+	dm.Insights = e.advisorInsights(env, db, &m.adv) // insights.go
 	dm.Metrics = metrics
 	return nil
 }
