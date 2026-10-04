@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rowsafe/rowsafe/internal/agent"
+	"github.com/rowsafe/rowsafe/protocol"
 	mysqlengine "github.com/rowsafe/rowsafe/internal/engine/mysql"
 )
 
@@ -33,6 +34,7 @@ the agent must have connected to Rowsafe first.
       Replicas and clusters it can't reach are skipped with a note on stderr.
 
   rowsafe-agent setup plan --name NAME --port PORT [--socket-dir DIR] [--engine ENGINE] [--id-file FILE] [--timeout 3m]
+      (SQLite: --engine sqlite --socket-dir FILE, the database file, without --port)
       Add the cluster to Rowsafe (again: same database), wait for the
       read-only plan and print it. Nothing changes on this server.
       Exit 0 plan ready; 3 another backup tool is set up (apply --force
@@ -147,7 +149,13 @@ func runSetup(ctx context.Context, cmd string, args []string) error {
 		agent.WriteClusters(os.Stdout, cs)
 		return nil
 	case "plan":
-		if *name == "" || *port <= 0 {
+		if protocol.NormalizeEngine(*engine) == protocol.EngineSQLite {
+			// A SQLite database is a file: --socket-dir is its path.
+			if *name == "" || !protocol.SQLitePath(*socketDir) {
+				return errors.New("--name and --socket-dir (the database file's absolute path) are required")
+			}
+			*port = 0
+		} else if *name == "" || *port <= 0 {
 			return errors.New("--name and --port are required")
 		}
 		return s.Plan(ctx, *name, *port, *socketDir, *idFile, orDefault(3*time.Minute))

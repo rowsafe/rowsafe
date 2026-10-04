@@ -39,7 +39,9 @@ Getting started
 Manual setup, from your workstation (the installer does this for you)
   rowsafe adopt NAME [--host HOST] [--port 5432] [--socket-dir DIR] [--retention-full 2]
                                              register an existing PostgreSQL; prints a read-only plan.
-                                             --host may be omitted when the organization has one host
+                                             --host may be omitted when the organization has one host;
+                                             other engines: --engine mysql|mariadb|mongodb|clickhouse,
+                                             SQLite: --engine sqlite --path /srv/app/db/production.sqlite3
   rowsafe plan [NAME]                        re-run the read-only plan
   rowsafe apply [NAME] [--force] [--yes]     apply the plan (never restarts PostgreSQL)
   rowsafe verify [NAME]                      check now that WAL reaches your storage; backups start once it passes

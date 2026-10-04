@@ -19,12 +19,18 @@ import (
 // root) looks for the files running programs have open (/proc/*/fd, on the
 // server and inside Docker containers: FindOpen) and adds the ones the
 // person picks, plus the paths given with --sqlite, to the agent's list
-// (<config>/sqlite-paths, one per line); a Docker sidecar names its files
+// (/etc/rowsafe/sqlite-paths, one per line); a Docker sidecar names its files
 // in ROWSAFE_SQLITE_PATHS (colon-separated). Discover reports the listed
 // files the agent can open.
 
-// pathsFile is the agent's list of SQLite files, written by the installer.
-const pathsFile = "sqlite-paths"
+// PathsFile is the agent's list of SQLite files, written by the installer
+// (ROWSAFE_SQLITE_PATHS_FILE, default /etc/rowsafe/sqlite-paths).
+func PathsFile() string {
+	if p := os.Getenv("ROWSAFE_SQLITE_PATHS_FILE"); p != "" {
+		return p
+	}
+	return "/etc/rowsafe/sqlite-paths"
+}
 
 // ConfiguredPaths are the SQLite files the agent was given.
 func ConfiguredPaths(env agent.EngineEnv) []string {
@@ -38,7 +44,7 @@ func ConfiguredPaths(env agent.EngineEnv) []string {
 	for _, p := range strings.Split(os.Getenv("ROWSAFE_SQLITE_PATHS"), ":") {
 		add(p)
 	}
-	if f, err := os.Open(filepath.Join(env.Config.ConfigDir, pathsFile)); err == nil {
+	if f, err := os.Open(PathsFile()); err == nil {
 		sc := bufio.NewScanner(f)
 		for sc.Scan() {
 			if line := strings.TrimSpace(sc.Text()); line != "" && !strings.HasPrefix(line, "#") {

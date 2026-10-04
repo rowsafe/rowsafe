@@ -37,6 +37,9 @@ Usage:
                                             MongoDB helpers for the installer (see mongodb --help)
   rowsafe-agent clickhouse status|login|save-login ...
                                             ClickHouse helpers for the installer (see clickhouse --help)
+  rowsafe-agent sqlite find|status|restore ...
+                                            SQLite helpers for the installer, and restores without
+                                            Rowsafe (see sqlite --help)
   rowsafe-agent unseal < FILE > PLAIN       decrypt a file Rowsafe wrote to your bucket (MongoDB, ClickHouse)
   rowsafe-agent restore-mysql --engine mysql|mariadb --database NAME --dir DIR [--at TIME | --mark NAME]
                                             restore a MySQL/MariaDB database from your bucket into DIR
@@ -81,6 +84,8 @@ func main() {
 		os.Exit(mongodbCmd(ctx, os.Args[2:]))
 	case "clickhouse": // ClickHouse installer helpers (clickhouse.go)
 		os.Exit(clickhouseCmd(ctx, os.Args[2:]))
+	case "sqlite": // SQLite installer helpers and restores (sqlite.go)
+		os.Exit(sqliteCmd(ctx, os.Args[2:]))
 	case "unseal":
 		err = unseal()
 	case "restore-mysql":
@@ -113,7 +118,11 @@ func main() {
 
 func run(ctx context.Context) error {
 	cfg, err := agent.ConfigFromEnv()
-	if os.Geteuid() == 0 {
+	if os.Geteuid() == 0 && sqliteContainer() {
+		// The SQLite agent image shares an app's volume: when the app runs
+		// as root, so must the agent to use its files (only in its own
+		// container, never on the server).
+	} else if os.Geteuid() == 0 {
 		if err == nil && cfg.Sidecar() {
 			return fmt.Errorf("refusing to run as root: run the agent container as the postgres user of the PostgreSQL image " +
 				"(user: \"999:999\" for the Debian-based images, \"70:70\" for the Alpine ones; see https://rowsafe.sh/docs/guides/docker)")
@@ -135,6 +144,16 @@ func run(ctx context.Context) error {
 		return nil
 	}
 	return err
+}
+
+// sqliteContainer: the agent runs in a container with SQLite files to
+// protect (ROWSAFE_SQLITE_PATHS), as the app's user.
+func sqliteContainer() bool {
+	if os.Getenv("ROWSAFE_SQLITE_PATHS") == "" {
+		return false
+	}
+	_, err := os.Stat("/.dockerenv")
+	return err == nil || os.Getenv("container") != ""
 }
 
 // selftest checks, from the new binary's point of view, everything it needs

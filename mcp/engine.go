@@ -21,6 +21,8 @@ func changeLog(engine string) string {
 		return "binary log"
 	case protocol.EngineMongoDB:
 		return "oplog"
+	case protocol.EngineSQLite:
+		return "WAL"
 	}
 	return ""
 }

@@ -248,6 +248,9 @@ func assessDatabase(s dbState, host *protocol.Host, now time.Time) []Problem {
 
 // restartCommand is how the user restarts d's database server.
 func restartCommand(d protocol.Database) string {
+	if protocol.NormalizeEngine(d.Engine) == protocol.EngineSQLite {
+		return "" // a file inside the app: nothing to restart
+	}
 	unit, compose := serviceName(d.Engine)
 	if canRestartFromRowsafe(d) {
 		return "rowsafe restart " + shellArg(d.Name) + "   # or on " + d.Hostname + ": sudo systemctl restart " + unit
@@ -261,6 +264,9 @@ func restartCommand(d protocol.Database) string {
 
 // restartWays lists where the user restarts d's database server.
 func restartWays(d protocol.Database) string {
+	if protocol.NormalizeEngine(d.Engine) == protocol.EngineSQLite {
+		return protocol.SQLiteNoServer[protocol.FeatureRestart]
+	}
 	if protocol.EngineHas(d.Engine, protocol.FeatureRestart) {
 		return "Restart " + engineName(d) + " in the dashboard, `rowsafe restart " + shellArg(d.Name) + "`, or on the server"
 	}
