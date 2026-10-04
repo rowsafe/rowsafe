@@ -2638,10 +2638,10 @@ clickhouse_host_tests() {
 redis_flow_tests() {
   echo "  -- Redis and Valkey"
   rd='6379\t-\t7\t-\t/var/lib/redis\t1048576\tcache\tno\t-\tdb0\t1.0 MiB\tredis-server.service\t-\tredis'
-  # rdst LOGIN [CONFIG] [CLUSTER] [VERSION] [ENGINE]
+  # rdst LOGIN [CONFIG] [CLUSTER] [VERSION] [ENGINE] [RIGHTS]
   rdst() {
-    printf 'port=6379\\nengine=%s\\nversion=%s\\nlogin=%s\\nuser=-\\nunit=redis-server.service\\nbinary=/usr/bin/redis-server\\nconfig=%s\\naclfile=-\\ndatadir=/var/lib/redis\\ndbfilename=dump.rdb\\ndocker=no\\ncluster=%s\\nrole=master\\nneeds_auth=no' \
-      "${5:-redis}" "${4:-7.0.15}" "$1" "${2:--}" "${3:-no}"
+    printf 'port=6379\\nengine=%s\\nversion=%s\\nlogin=%s\\nuser=-\\nunit=redis-server.service\\nbinary=/usr/bin/redis-server\\nconfig=%s\\naclfile=-\\ndatadir=/var/lib/redis\\ndbfilename=dump.rdb\\ndocker=no\\ncluster=%s\\nrole=master\\nneeds_auth=no\\nrights=%s' \
+      "${5:-redis}" "${4:-7.0.15}" "$1" "${2:--}" "${3:-no}" "${6:--}"
   }
   rdplan='Redis 7.0.15 on port 6379: 1.0 MiB, 1 database (db0).\n\nWhat Rowsafe will change:\n  - Prepare your bucket for this database\n\nNo downtime: Redis does not need a restart.'
   hash=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
@@ -2765,7 +2765,21 @@ redis_flow_tests() {
   ! grep -q "Env-R3dis" "$W/out" || fail "$name: the administrator's password was printed"
   ! grep -q "ROWSAFE_REDIS_ADMIN" /etc/rowsafe/agent.env || fail "$name: the administrator's login went to agent.env"
   called "apply --database db_fake"
-  pass "Redis and Valkey: engine in the plan, ACL user kept across restarts, administrator login once, Cluster and old servers refused, --protect"
+
+  # 9. An already protected server whose login predates Databases & users
+  #    (rights=old): the login is made again for the new rights; with them,
+  #    nothing is asked.
+  rdon='6379\t-\t7\t-\t/var/lib/redis\t1048576\tcache\tyes\tactive\tdb0\t1.0 MiB\tredis-server.service\tdb_fake\tredis'
+  scenario "discover_out=$rdon" "redis-status_out=$(rdst ok /etc/redis/redis.conf no 7.0.15 redis old)" "redis-login_out=persisted=config\nacl_line=$acl"
+  tty_ok "Redis: an old login gets the rights to manage users" "" "$INSTALLER"
+  has "is protected as cache"
+  has "needs a few more rights to manage Redis users"
+  called "redis-login --port 6379 --engine redis"
+  not_called "plan"
+  scenario "discover_out=$rdon" "redis-status_out=$(rdst ok /etc/redis/redis.conf no 7.0.15 redis ok)"
+  tty_ok "Redis: a login with the rights is left alone" "" "$INSTALLER"
+  not_called "redis-login"
+  pass "Redis and Valkey: engine in the plan, ACL user kept across restarts, administrator login once, Cluster and old servers refused, --protect, rights refreshed"
 }
 
 # redis_restart_tests: Redis and Valkey units (redis-server, redis,

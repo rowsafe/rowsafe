@@ -7871,10 +7871,12 @@ setup_databases() {
     case $C_REG:$C_STATUS in
       yes:active)
         ok "$(cluster_desc) is protected as $C_NAME"
+        redis_refresh_protected
         continue
         ;;
       yes:verifying)
         ok "$(cluster_desc): backups are on as $C_NAME; Rowsafe is checking them"
+        redis_refresh_protected
         continue
         ;;
       yes:awaiting_restart)
@@ -8673,13 +8675,13 @@ check_redis_program() {
 
 # redis_status reads `rowsafe-agent redis status` into RD_* variables ("-"
 # becomes empty).
-RD_LOGIN='' RD_VERSION='' RD_CONFIG='' RD_ACLFILE='' RD_DATADIR='' RD_DBFILE='' RD_DOCKER='' RD_CLUSTER='' RD_BINARY=''
+RD_LOGIN='' RD_VERSION='' RD_CONFIG='' RD_ACLFILE='' RD_DATADIR='' RD_DBFILE='' RD_DOCKER='' RD_CLUSTER='' RD_BINARY='' RD_RIGHTS=''
 redis_status() {
   agent_run redis status --port "$C_PORT" --engine "$C_ENGINE" >"$TMP/rdstatus" 2>"$TMP/rdstatus.err" || return 1
   _rk() { sed -n "s/^$1=//p" "$TMP/rdstatus" | head -n 1 | sed 's/^-$//'; }
   RD_LOGIN=$(_rk login) RD_VERSION=$(_rk version) RD_CONFIG=$(_rk config) RD_ACLFILE=$(_rk aclfile)
   RD_DATADIR=$(_rk datadir) RD_DBFILE=$(_rk dbfilename) RD_DOCKER=$(_rk docker) RD_CLUSTER=$(_rk cluster)
-  RD_BINARY=$(_rk binary)
+  RD_BINARY=$(_rk binary) RD_RIGHTS=$(_rk rights)
 }
 
 # redis_supported says why Rowsafe can't protect the server on $C_PORT
@@ -8822,6 +8824,32 @@ redis_snapshot_note() {
   note "$(engine_label "$C_ENGINE") refuses to send Rowsafe a copy over replication; backups don't use it otherwise."
 }
 
+# redis_refresh_protected: an already protected Redis or Valkey server gets
+# the rights Rowsafe's user lacks (redis_rights_refresh).
+redis_refresh_protected() {
+  { [ "$C_ENGINE" = redis ] || [ "$C_ENGINE" = valkey ]; } || return 0
+  redis_status 2>/dev/null || return 0
+  redis_rights_refresh
+}
+
+# redis_rights_refresh gives Rowsafe's user the rights added since it was
+# made (managing ACL users: Databases & users in the dashboard) by making
+# the login again (`rights=old` in the agent's status). Never fails the run:
+# without them the dashboard only lists users.
+redis_rights_refresh() {
+  { [ "$C_ENGINE" = redis ] || [ "$C_ENGINE" = valkey ]; } || return 0
+  [ "$RD_LOGIN" = ok ] && [ "$RD_RIGHTS" = old ] || return 0
+  _name=$(engine_label "$C_ENGINE")
+  note "Rowsafe's $_name user needs a few more rights to manage $_name users from the dashboard (Databases & users)."
+  RD_ADMIN='' RD_ADMIN_PW=''
+  if redis_login; then
+    redis_status || true
+  else
+    warn "Rowsafe's $_name user keeps its current rights: the dashboard can't list or change $_name users until this installer runs again."
+  fi
+  return 0
+}
+
 # redis_prepare gets a Redis or Valkey server ready for its plan: supported,
 # and Rowsafe's own user. Nothing restarts.
 redis_prepare() {
@@ -8841,6 +8869,7 @@ redis_prepare() {
     redis_status || true
     redis_supported || return 1
   fi
+  redis_rights_refresh
   if [ -z "$RD_BINARY" ]; then
     note "Proof and Rewind copies need the $C_ENGINE-server program, which comes with $_name's server package; it isn't on this server."
   fi

@@ -216,6 +216,10 @@ type Status struct {
 	Cluster    bool
 	Role       string
 	NeedsAuth  bool // the default user needs a password
+	// Rights is "old" when the login works but lacks the rights to manage
+	// users (aclManageRules: installs from before Databases & users); the
+	// installer then makes the login again.
+	Rights string
 }
 
 // ServerStatus describes the server on port (nothing answering: error).
@@ -247,6 +251,10 @@ func ServerStatus(ctx context.Context, env agent.EngineEnv, port int) (Status, e
 				}
 				st.Binary, _ = serverBinary(full.Engine, full.Executable)
 			}
+			st.Rights = "ok"
+			if _, err := c.do(ctx, "ACL", "USERS"); isRespError(err, "NOPERM") {
+				st.Rights = "old"
+			}
 			c.Close()
 		}
 	}
@@ -270,7 +278,7 @@ func (s Status) Print(w io.Writer) {
 		}
 		return "no"
 	}
-	fmt.Fprintf(w, "port=%d\nengine=%s\nversion=%s\nlogin=%s\nuser=%s\nunit=%s\nbinary=%s\nconfig=%s\naclfile=%s\ndatadir=%s\ndbfilename=%s\ndocker=%s\ncluster=%s\nrole=%s\nneeds_auth=%s\n",
+	fmt.Fprintf(w, "port=%d\nengine=%s\nversion=%s\nlogin=%s\nuser=%s\nunit=%s\nbinary=%s\nconfig=%s\naclfile=%s\ndatadir=%s\ndbfilename=%s\ndocker=%s\ncluster=%s\nrole=%s\nneeds_auth=%s\nrights=%s\n",
 		s.Port, dash(s.Engine), dash(s.Version), dash(s.Login), dash(s.User), dash(s.Unit), dash(s.Binary), dash(s.ConfigFile),
-		dash(s.ACLFile), dash(s.Dir), dash(s.DBFilename), yn(s.Docker), yn(s.Cluster), dash(s.Role), yn(s.NeedsAuth))
+		dash(s.ACLFile), dash(s.Dir), dash(s.DBFilename), yn(s.Docker), yn(s.Cluster), dash(s.Role), yn(s.NeedsAuth), dash(s.Rights))
 }

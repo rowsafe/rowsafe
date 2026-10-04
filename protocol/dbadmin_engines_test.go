@@ -64,3 +64,54 @@ func TestConnectionURLEngines(t *testing.T) {
 		t.Error(got)
 	}
 }
+
+func TestValidateDBAdminRedis(t *testing.T) {
+	key := testSealKey(t)
+	for _, engine := range []string{EngineRedis, EngineValkey} {
+		cases := []struct {
+			p   DBAdminParams
+			bad string
+		}{
+			{DBAdminParams{Action: DBAdminList}, ""},
+			{DBAdminParams{Action: DBAdminCreateUser, User: "app", Access: DBAccessReadWrite, PublicKey: key}, ""},
+			{DBAdminParams{Action: DBAdminCreateUser, User: "app", Access: DBAccessReadOnly, KeyPattern: "session:* cache:*", PublicKey: key}, ""},
+			{DBAdminParams{Action: DBAdminCreateUser, User: "app", Access: DBAccessOwner, KeyPattern: "a b\\c", PublicKey: key}, "key pattern"},
+			{DBAdminParams{Action: DBAdminCreateUser, User: "app", Access: DBAccessReadOnly, KeyPattern: "x'y", PublicKey: key}, "key pattern"},
+			{DBAdminParams{Action: DBAdminCreateUser, User: "app", Access: DBAccessReadOnly, Databases: []string{"db0"}, PublicKey: key}, "every logical database"},
+			{DBAdminParams{Action: DBAdminCreateUser, User: "default", Access: DBAccessReadOnly, PublicKey: key}, "own names"},
+			{DBAdminParams{Action: DBAdminCreateUser, User: "rowsafe", Access: DBAccessReadOnly, PublicKey: key}, "Rowsafe's"},
+			{DBAdminParams{Action: DBAdminCreateDatabase, Database: "shop", CreateOwner: true, PublicKey: key}, "can't be created or removed"},
+			{DBAdminParams{Action: DBAdminDropDatabase, Database: "db1", Confirm: "db1"}, "can't be created or removed"},
+			{DBAdminParams{Action: DBAdminResetPassword, User: "app", PublicKey: key}, ""},
+			{DBAdminParams{Action: DBAdminDropUser, User: "app"}, ""},
+			{DBAdminParams{Action: DBAdminEnableExtension, Database: "db0", Extension: "x"}, "extensions"},
+		}
+		for _, c := range cases {
+			err := ValidateDBAdminFor(engine, c.p)
+			switch {
+			case c.bad == "" && err != nil:
+				t.Errorf("%s %+v: %v", engine, c.p, err)
+			case c.bad != "" && (err == nil || !strings.Contains(err.Error(), c.bad)):
+				t.Errorf("%s %+v: err %v, want %q", engine, c.p, err, c.bad)
+			}
+		}
+	}
+	if err := ValidateDBAdminFor(EngineMySQL, DBAdminParams{Action: DBAdminCreateUser, User: "app", Access: DBAccessReadOnly,
+		Databases: []string{"shop"}, KeyPattern: "x:*", PublicKey: key}); err == nil {
+		t.Error("key pattern accepted for MySQL")
+	}
+	if p, _ := RedisKeyPatterns("*"); p != nil {
+		t.Errorf("* = %v, want every key", p)
+	}
+	if p, _ := RedisKeyPatterns("~a:*, b:*"); len(p) != 2 || p[0] != "a:*" || p[1] != "b:*" {
+		t.Errorf("patterns %v", p)
+	}
+	c := DBConnection{Engine: EngineValkey, User: "app", Database: "0", Host: "10.0.0.5", Port: 6379, SSLMode: "prefer"}
+	if got := ConnectionURL(c, "pw"); got != "redis://app:pw@10.0.0.5:6379/0" {
+		t.Error(got)
+	}
+	c.SSLMode = "require"
+	if got := ConnectionURL(c, "pw"); got != "rediss://app:pw@10.0.0.5:6379/0" {
+		t.Error(got)
+	}
+}
