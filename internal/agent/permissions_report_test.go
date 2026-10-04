@@ -19,6 +19,7 @@ func permTestPaths(t *testing.T) PermissionPaths {
 		t.Fatal(err)
 	}
 	permWriteFile(t, filepath.Join(pg, "17", "bin", "postgres"), "")
+	permWriteFile(t, filepath.Join(dir, "sqlite-paths"), "/srv/app/db/app.sqlite3\n") // a SQLite file too
 	return PermissionPaths{
 		RestartAllowFile:       filepath.Join(dir, "restart-allowed"),
 		CreateClusterAllowFile: filepath.Join(dir, "create-cluster-allowed"),
@@ -26,6 +27,8 @@ func permTestPaths(t *testing.T) PermissionPaths {
 		PoolerAllowFile:        filepath.Join(dir, "pooler-allowed"),
 		FirewallAllowFile:      filepath.Join(dir, "firewall-allowed"),
 		TuningAllowFile:        filepath.Join(dir, "tuning-allowed"),
+		SQLiteModesAllowFile:   filepath.Join(dir, "sqlite-modes-allowed"),
+		SQLitePathsFile:        filepath.Join(dir, "sqlite-paths"),
 		OwnersFile:             filepath.Join(dir, "owners"),
 		AllowCommand:           filepath.Join(dir, "rowsafe-allow"),
 		PGRoot:                 pg,
@@ -268,5 +271,22 @@ func TestPermissionsTuning(t *testing.T) {
 	permWriteFile(t, p.TuningAllowFile, "# ENGINE PATH\nmongodb /etc/mongod.conf\n")
 	if r := ReadPermissions(p); !slices.Contains(r.Allowed, protocol.PermTuning) {
 		t.Errorf("tuning not allowed: %+v", r)
+	}
+}
+
+func TestReadPermissionsSQLiteModes(t *testing.T) {
+	stubPermHave(t, "pg_createcluster", "nft", "apt-get")
+	p := permTestPaths(t)
+	permWriteFile(t, p.SQLiteModesAllowFile, "# SQLite files Rowsafe may close to other users\nsqlite-paths\n")
+	if r := ReadPermissions(p); !slices.Contains(r.Allowed, protocol.PermSQLiteModes) {
+		t.Errorf("allowed = %v", r.Allowed)
+	}
+	permWriteFile(t, p.SQLiteModesAllowFile, "# off\n")
+	if r := ReadPermissions(p); !slices.Contains(r.Denied, protocol.PermSQLiteModes) {
+		t.Errorf("denied = %v", r.Denied)
+	}
+	permWriteFile(t, p.SQLitePathsFile, "")
+	if r := ReadPermissions(p); r.Unavailable[protocol.PermSQLiteModes] != permReasonSQLite {
+		t.Errorf("without SQLite files: unavailable = %v", r.Unavailable)
 	}
 }

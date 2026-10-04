@@ -1525,7 +1525,7 @@ sqlite_flow_tests() {
   line2="0\t$db2\t0\t-\t/srv/blog\t4096\tblog\tno\t-\tblog\t4.0 KiB\t-\t-\tsqlite"
   scenario "sqlite-find_out=$db2\t4096\twal\t4242\truby\t-\t-\t999\t999\tblog" "discover_out=$line2" "plan_out=$splan"
   tty_ok "SQLite file found open: picked, access, plan" \
-    "Protect $db2\ty\nAllow Rowsafe to make clones\ty\nFolder for the clones\t/srv/tty-clones\nName it in Rowsafe\t\nTurn on backups for blog now?\tn\n" "$INSTALLER"
+    "Protect $db2\ty\nAllow Rowsafe to make clones\ty\nFolder for the clones\t/srv/tty-clones\nclose the SQLite files to this server's other users\tn\nName it in Rowsafe\t\nTurn on backups for blog now?\tn\n" "$INSTALLER"
   called "sqlite find (root)"
   grep -qxF /srv/tty-clones /etc/rowsafe/sqlite-clone-dirs || fail "$name: the folder for clones isn't in the list"
   getfacl -p /srv/tty-clones 2>/dev/null | grep -qx 'user:postgres:rwx' || fail "$name: no ACL for the agent on the clones folder"
@@ -1537,6 +1537,32 @@ sqlite_flow_tests() {
   expect_fail "--sqlite refuses a -wal file" "not its -wal" "$INSTALLER" --sqlite "$db-wal"
   expect_fail "--protect with two --sqlite files" "exactly one --sqlite" "$INSTALLER" --protect shop --sqlite "$db" --sqlite "$db2"
   pass "SQLite: --sqlite and found files get ACL access, the list, plans by file; side files refused"
+  grep -qx '# Closing SQLite files to other users from Rowsafe (Security) is off.' /etc/rowsafe/sqlite-modes-allowed ||
+    fail "the no to closing SQLite files isn't kept"
+
+  # 4. --allow-sqlite-modes: root's helper may close the listed files (and
+  #    only in their folders) to other users; --no-allow-sqlite-modes removes it.
+  scenario "discover_out=$line" "plan_out=$splan"
+  expect_ok "--allow-sqlite-modes: allow list, helper units" "$INSTALLER" --allow-sqlite-modes --no-setup
+  has "Rowsafe may close the SQLite files to other users when you click Apply fix (Security)"
+  grep -qx sqlite-paths /etc/rowsafe/sqlite-modes-allowed || fail "$name: $(cat /etc/rowsafe/sqlite-modes-allowed)"
+  [ "$(stat -c '%U %a' /etc/rowsafe/sqlite-modes-allowed)" = "root 644" ] || fail "$name: allow list ownership/mode"
+  u=/etc/systemd/system/rowsafe-sqlite-modes.service
+  grep -qx 'ExecStart=/usr/local/lib/rowsafe/rowsafe-permissions sqlite-modes-apply' "$u" || fail "$name: no helper unit"
+  grep -qx 'Environment=ROWSAFE_AGENT_USER=postgres' "$u" || fail "$name: the unit doesn't name the agent's user"
+  grep -qx 'ReadWritePaths=-/srv/blog -/srv/shop/db' "$u" || fail "$name: ReadWritePaths isn't the listed files' folders: $(grep ReadWrite "$u")"
+  grep -qx 'ProtectSystem=strict' "$u" || fail "$name: the unit may write everywhere"
+  grep -qx 'PathExists=/var/lib/rowsafe/sqlite-modes/request' /etc/systemd/system/rowsafe-sqlite-modes.path || fail "$name: no path unit"
+  [ "$(stat -c '%U %a' /var/lib/rowsafe/sqlite-modes)" = "postgres 700" ] || fail "$name: request directory ownership/mode"
+  if [ "${TEST_UNITS:-0}" = 1 ]; then
+    expect_ok "systemd-analyze verify (SQLite helper units)" systemd-analyze verify "$u" /etc/systemd/system/rowsafe-sqlite-modes.path
+  fi
+  scenario "discover_out=$line" "plan_out=$splan"
+  expect_ok "--no-allow-sqlite-modes" "$INSTALLER" --no-allow-sqlite-modes --no-setup
+  [ ! -e "$u" ] && [ ! -e /etc/systemd/system/rowsafe-sqlite-modes.path ] || fail "$name: helper units left"
+  ! grep -qx sqlite-paths /etc/rowsafe/sqlite-modes-allowed || fail "$name: allow list kept"
+  pass "SQLite: --allow-sqlite-modes sets up root's helper for the listed files' folders only; --no-allow-sqlite-modes removes it"
+  rm -f /etc/rowsafe/sqlite-paths /etc/rowsafe/sqlite-modes-allowed
 
   # 4. Folders for clones (--sqlite-clone-dir): made when missing, write
   # access for the agent, a default ACL for the folder's owner, the list;

@@ -84,6 +84,9 @@ type SecurityFixParams struct {
 	Verifier string `json:"verifier,omitempty"`
 	// DBs: revoke_public_create.
 	DBs []string `json:"dbs,omitempty"`
+	// Paths: sqlite_tighten_modes (SecSQLiteModes), the files and the
+	// folder to close to other users (sqlite_security.go).
+	Paths []string `json:"paths,omitempty"`
 }
 
 // SecurityFixResult is the agent's report for a security_fix task.
@@ -205,6 +208,9 @@ type EngineSecurity struct {
 	// ConfigFile is the server's configuration file, when known (for "Do
 	// it yourself").
 	ConfigFile string `json:"config_file,omitempty"`
+	// SQLite is a SQLite database's file access (sqlite_security.go); it
+	// has no port, users or TLS.
+	SQLite *SQLiteSecurity `json:"sqlite,omitempty"`
 }
 
 // CertInfo describes the server's TLS certificate (never its key).

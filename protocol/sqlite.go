@@ -151,6 +151,7 @@ var sqliteFeatures = EngineFeatures{
 	// Masked and structure-only copies as files on the server, no port
 	// (internal/engine/sqlite/copies*.go).
 	SafeCopies: true,
+	Security:   true, // who on the server can reach the file (internal/engine/sqlite/security.go)
 }
 
 // SQLiteStatus is SQLite's own health detail (DatabaseMonitoring.SQLite),
