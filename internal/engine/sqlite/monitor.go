@@ -36,6 +36,7 @@ type dbMonitor struct {
 	staleAt  time.Time
 	walSizes []int64
 	adviceAt time.Time // schema facts for recommendations (advice.go)
+	schemaV  int64     // PRAGMA schema_version when they were read
 }
 
 func (e *Engine) monitorFor(id string) *dbMonitor {
@@ -143,9 +144,11 @@ func (e *Engine) Monitor(ctx context.Context, env agent.EngineEnv, db protocol.D
 		}
 	}
 	st.StaleStatsTables = m.stale
-	if time.Since(m.adviceAt) >= staleEvery { // advice.go
+	// Schema facts (advice.go): every 30 minutes, and soon after the
+	// schema changes (a migration).
+	if sv, err := queryInt(c, `PRAGMA main.schema_version`); err == nil && (time.Since(m.adviceAt) >= staleEvery || sv != m.schemaV) {
 		if ins, err := schemaInsights(ctx, c, st.JournalMode); err == nil {
-			dm.Insights, m.adviceAt = ins, time.Now()
+			dm.Insights, m.adviceAt, m.schemaV = ins, time.Now(), sv
 		} else {
 			busy.note(err)
 		}

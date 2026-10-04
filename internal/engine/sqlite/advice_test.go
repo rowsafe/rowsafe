@@ -288,6 +288,19 @@ func TestSQLiteAdvice(t *testing.T) {
 	if dm2, _ := e.Monitor(context.Background(), env, db); dm2.Insights != nil {
 		t.Error("the schema facts are sent about every 30 minutes, not every minute")
 	}
+	// A migration: sent again at the next reading.
+	cc := mustOpen(t, path)
+	if err := cc.Exec(`CREATE TABLE notes (id INTEGER PRIMARY KEY, order_id INTEGER REFERENCES orders(id))`); err != nil {
+		t.Fatal(err)
+	}
+	cc.Close()
+	if dm3, _ := e.Monitor(context.Background(), env, db); dm3.Insights == nil || dm3.Insights.Advisor.SQLite.Tables != 4 {
+		t.Errorf("after a schema change: %+v", dm3.Insights)
+	}
+	cc = mustOpen(t, path)
+	_ = cc.Exec(`DROP TABLE notes`)
+	cc.Close()
+	_, _ = e.Monitor(context.Background(), env, db)
 
 	// No backup yet: nothing tested, and it says why.
 	res, err := run[protocol.IndexAdvisorResult](t, e, env, db, protocol.TaskIndexAdvisor, protocol.IndexAdvisorParams{})
