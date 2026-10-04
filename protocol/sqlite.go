@@ -138,6 +138,8 @@ var sqliteFeatures = EngineFeatures{
 	Files:      true, // the app's folders next to the database (agent-wide, restic)
 	FindMoment: true, // the WAL pages replayed on a private copy, rows compared (internal/engine/sqlite/moment.go)
 	Fork:       true, // clones into a new file in a folder root allowed (internal/engine/sqlite/fork.go)
+	// Schema-based: SQLite keeps no query statistics (internal/engine/sqlite/advice.go, indexadvice.go).
+	Recommendations: true, IndexAdvice: true,
 }
 
 // SQLiteStatus is SQLite's own health detail (DatabaseMonitoring.SQLite),

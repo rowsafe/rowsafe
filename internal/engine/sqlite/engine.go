@@ -65,6 +65,7 @@ func (e *Engine) Tasks() []string {
 		protocol.TaskRewindCopy, protocol.TaskRewindDrop, protocol.TaskRewindCompare, protocol.TaskRewindRows,
 		protocol.TaskRewindInPlace, protocol.TaskRewindUndo, protocol.TaskRewindCleanup,
 		protocol.TaskFindMoment,
+		protocol.TaskIndexAdvisor, // indexadvice.go
 	}
 }
 
@@ -347,6 +348,12 @@ func (e *Engine) Run(ctx context.Context, env agent.EngineEnv, task *protocol.Ta
 			return nil, err
 		}
 		return nilIfNil(e.findMoment(ctx, env, db, p, task.ID, tl))
+	case protocol.TaskIndexAdvisor: // indexadvice.go
+		var p protocol.IndexAdvisorParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.indexAdvisor(ctx, env, db, task.ID, p, tl))
 	}
 	return nil, fmt.Errorf("SQLite databases can't run %s tasks", task.Type)
 }

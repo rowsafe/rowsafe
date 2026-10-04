@@ -39,6 +39,8 @@ func (e *Engine) maintenance(ctx context.Context, env agent.EngineEnv, db protoc
 		summary, details, err = e.fixOptimize(ctx, db, tl)
 	case protocol.MaintSQLiteWAL:
 		summary, err = e.fixWAL(ctx, env, db, tl)
+	case protocol.MaintCreateIndex: // indexadvice.go
+		summary, details, err = e.fixCreateIndex(ctx, db, p, tl)
 	default:
 		return nil, fmt.Errorf("%q isn't something Rowsafe does for SQLite databases", p.Action)
 	}
