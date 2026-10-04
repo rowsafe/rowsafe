@@ -2,15 +2,18 @@ package agent
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/rowsafe/rowsafe/internal/permissions"
 	"github.com/rowsafe/rowsafe/internal/sqliteroot"
@@ -36,6 +39,7 @@ type PermissionPaths struct {
 	SQLitePathsFile        string // sqlite-paths: the SQLite files root listed
 	OwnersFile             string // owners: the passkeys root paired (JSON)
 	AllowCommand           string // rowsafe-allow
+	Helper                 string // root's copy of the agent (rowsafe-permissions)
 	PGRoot                 string // where PostgreSQL's versions are installed
 }
 
@@ -53,6 +57,7 @@ func DefaultPermissionPaths() PermissionPaths {
 		SQLitePathsFile:        env("ROWSAFE_SQLITE_PATHS_FILE", sqliteroot.DefaultListFile),
 		OwnersFile:             env("ROWSAFE_PERMISSIONS_OWNERS_FILE", "/etc/rowsafe/owners"),
 		AllowCommand:           "/usr/local/sbin/rowsafe-allow",
+		Helper:                 permissions.DefaultHelper,
 		PGRoot:                 "/usr/lib/postgresql",
 	}
 }
@@ -153,7 +158,42 @@ func ReadPermissions(p PermissionPaths) *protocol.PermissionsReport {
 	r.Unavailable = permissionsUnavailable(p, r.Allowed)
 	r.AllowCommand = rootOwnedExecutable(p.AllowCommand)
 	r.Owners = readPermissionOwners(p.OwnersFile)
+	r.RemoveWithoutPasskey = helperHas(p.Helper, permissions.FeatureRemove)
 	return r
+}
+
+// helperFeatures caches what root's helper takes (`rowsafe-permissions
+// features`, which needs no root), once per version of the file. Helpers
+// from before it fail that command: no features.
+var helperFeatures struct {
+	sync.Mutex
+	key string
+	out []string
+}
+
+func helperHas(path, feature string) bool {
+	return path != "" && rootOwnedExecutable(path) && slices.Contains(helperFeaturesOf(path), feature)
+}
+
+func helperFeaturesOf(path string) []string {
+	st, err := os.Stat(path)
+	if err != nil {
+		return nil
+	}
+	key := fmt.Sprintf("%s %d %d", path, st.Size(), st.ModTime().UnixNano())
+	c := &helperFeatures
+	c.Lock()
+	defer c.Unlock()
+	if c.key != key {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, path, "features").Output()
+		c.key, c.out = key, nil
+		if err == nil {
+			c.out = strings.Fields(string(out))
+		}
+	}
+	return c.out
 }
 
 // anyEnginePermission are the permissions a server without PostgreSQL may

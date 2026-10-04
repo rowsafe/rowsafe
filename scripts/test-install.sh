@@ -1463,7 +1463,15 @@ EOF
   lacks "Looking for PostgreSQL"
   [ ! -e "$F/calls" ] || fail "$name: setup ran"
   scenario "discover_out=$shop" "plan_out=$plan" apply_rc=10
+  # Never asked (the earlier answers gone): without a terminal, what touches
+  # only the database is allowed, the server's own updates and reboots aren't.
+  rm -f /etc/rowsafe/restart-allowed /etc/rowsafe/updates-allowed /etc/rowsafe/pooler-allowed /etc/rowsafe/create-cluster-allowed
   expect_ok "--protect: turned on, restart left to the user" "$INSTALLER" --protect shop
+  grep -qx "5432 postgresql@17-main.service" /etc/rowsafe/restart-allowed || fail "--protect: restarts not allowed by default"
+  grep -q '^postgresql' /etc/rowsafe/updates-allowed && ! grep -q '^security\|^reboot' /etc/rowsafe/updates-allowed ||
+    fail "--protect: updates by default: $(cat /etc/rowsafe/updates-allowed 2>&1)"
+  grep -q "allowed      restart" "$W/out" && grep -q "not allowed  security-updates" "$W/out" || fail "--protect: the summary lacks the defaults"
+  "$INSTALLER" --permissions --no-prompt --no-allow-restart --no-allow-pooler >/dev/null 2>&1 || fail "--protect: couldn't put the earlier answers back"
   grep -q "sudo systemctl restart postgresql@17-main" "$W/out" || fail "--protect: no restart command"
   grep -q "Rowsafe notices the restart by itself" "$W/out" || fail "--protect: no auto-finish note"
   called "plan --name shop --port 5432"
@@ -1517,6 +1525,9 @@ sqlite_flow_tests() {
   [ "$(stat -c '%U %G' "$db")" = "shopapp shopapp" ] || fail "$name: the file's owner changed"
   getfacl -p "$db" 2>/dev/null | grep -qx 'group::r--' || fail "$name: the file's group gained access"
   grep -q "gave the agent (postgres) read and write access to $db" "$W/out" || fail "$name: the change isn't said"
+  # Without a terminal, closing the SQLite files to others is allowed by default.
+  grep -qx 'sqlite-paths' /etc/rowsafe/sqlite-modes-allowed || fail "$name: closing SQLite files isn't allowed by default"
+  rm -f /etc/rowsafe/sqlite-modes-allowed # never asked again, for the question below
 
   # 2. A file found open, picked on a terminal; a folder for clones named
   # when asked (none allowed yet).
@@ -1769,6 +1780,10 @@ restart_tests() {
     systemd-analyze security --offline=true --no-pager /etc/systemd/system/rowsafe-pg-restart.service 2>/dev/null |
       tail -n 1 | sed "s/^/  rowsafe-pg-restart: /"
   fi
+  # Without a terminal, PostgreSQL's updates came with it, the server's own didn't.
+  grep -q '^postgresql' /etc/rowsafe/updates-allowed && ! grep -q '^security\|^reboot' /etc/rowsafe/updates-allowed ||
+    fail "--allow-restart: updates by default: $(cat /etc/rowsafe/updates-allowed 2>&1)"
+  rm -f /etc/rowsafe/create-cluster-allowed /etc/rowsafe/updates-allowed # never asked, for the questions below
   # A re-run without the flag keeps it (and asks nothing).
   scenario "discover_out=$shop"
   tty_ok "a re-run keeps restarts allowed (and asks about updates once)" \
@@ -1826,7 +1841,7 @@ EOF
   root_free "after a restart"
   request "task_2 5432"
   result_has "ok=0"
-  result_has "error=PostgreSQL (postgresql@17-main.service) was restarted less than a minute ago; try again in a minute"
+  result_has "error=postgresql@17-main.service was restarted less than a minute ago; try again in a minute"
   request "task_3 5499"
   result_has "id=task_3"
   result_has "ok=0"
@@ -1854,7 +1869,7 @@ EOF
     fail "helper ran for stop/start: $(cat "$F/systemctl.calls")"
   request "rw_3 restart 5432"
   result_has "action=restart"
-  result_has "error=PostgreSQL (postgresql@17-main.service) was restarted less than a minute ago; try again in a minute"
+  result_has "error=postgresql@17-main.service was restarted less than a minute ago; try again in a minute"
   request "rw_4 stop 5499"
   result_has "ok=0"
   grep -q "^error=port 5499 is not in /etc/rowsafe/restart-allowed" "$O/result" || fail "unlisted port not refused for stop"
@@ -1999,7 +2014,7 @@ permissions_tests() {
   }
 
   scenario "discover_out=$shop"
-  expect_ok "a known start: restarts on, updates off" "$INSTALLER" --allow-restart --no-allow-updates --no-allow-security-updates --no-allow-pooler
+  expect_ok "a known start: restarts on, updates off" "$INSTALLER" --allow-restart --no-allow-updates --no-allow-security-updates --no-allow-pooler --no-allow-create-cluster
   snapshot >"$W/snap.before"
 
   # Without a change: the summary, and nothing written.
@@ -2020,7 +2035,7 @@ permissions_tests() {
   allow_files | cmp -s - "$W/allow.before" || fail "a refused change changed an allow list"
   perm_rc "on and off at once refused" 2 "security-updates needs restart, so it can't be allowed while restart is turned off" \
     --allow-security-updates --no-allow-restart
-  perm_rc "not possible here refused" 2 "Rowsafe can't limit who can reach PostgreSQL on this server: nftables isn't installed" --allow-firewall
+  perm_rc "not possible here refused" 2 "Rowsafe can't limit who can reach the database on this server: nftables isn't installed" --allow-firewall
   perm_rc "install options refused" 2 "--permissions only changes what Rowsafe may do" --protect shop
   [ ! -e /etc/systemd/system/rowsafe-pg-update.path ] || fail "a refused change installed the update units"
   allow_files | cmp -s - "$W/allow.before" || fail "a refused change changed an allow list"
@@ -2223,8 +2238,11 @@ files_tests() {
   getfacl -p /srv/app/storage/cvs/a.pdf 2>/dev/null | grep -qx 'user:postgres:r--' || fail "no ACL on a file"
   runuser -u postgres -- cat /srv/app/storage/cvs/a.pdf >/dev/null || fail "the agent user can't read the file"
   [ "$(stat -c '%U' /srv/app/storage/cvs/a.pdf)" = "www-data" ] || fail "ownership changed"
-  [ ! -e /etc/rowsafe/files-allowed ] || fail "--files alone allowed the root helper"
-  [ ! -e "$H" ] || fail "--files alone installed the root helper"
+  # Without a terminal, putting restored files back (and PgBouncer) is
+  # allowed by default.
+  grep -q '^/srv/app/storage ' /etc/rowsafe/files-allowed || fail "--files: putting files back isn't allowed by default: $(cat /etc/rowsafe/files-allowed 2>&1)"
+  grep -q '^[1-9]' /etc/rowsafe/pooler-allowed || fail "--files: PgBouncer isn't allowed by default"
+  rm -f /etc/rowsafe/files-allowed /etc/rowsafe/pooler-allowed # never asked, for the questions below
 
   # Without a terminal and without --files, nothing about files is done.
   scenario "discover_out=$shop_reg"
@@ -3063,6 +3081,7 @@ redis_host_tests() {
     pass "Redis 6.0 (Ubuntu 22.04's own): refused in one sentence, nothing changed"
     return 0
   fi
+  pgb_before=$(command -v pgbackrest || true) # earlier PostgreSQL sections installed it in this container
   expect_ok "$eng server: configured install" configured env ROWSAFE_ENROLL_TOKEN=rse_secrettoken123 "$INSTALLER" --no-setup
   [ -z "${TEST_SHOW:-}" ] || cat "$W/out"
   grep -q "restore tests for the $eng on this server" "$W/out" || fail "$name: installer doesn't speak of $eng"
@@ -3077,7 +3096,8 @@ redis_host_tests() {
   grep -q "this server runs $eng" "$d" || fail "$name: drop-in doesn't name $eng"
   cmp /etc/systemd/system/rowsafe-agent.service /src/deploy/systemd/rowsafe-agent.service || fail "$name: the unit itself changed"
   [ "$(stat -c '%U %a' /etc/rowsafe/agent.env)" = "rowsafe 600" ] || fail "$name: agent.env ownership/mode"
-  ! command -v pgbackrest >/dev/null || fail "$name: pgBackRest installed for $eng"
+  [ -n "$pgb_before" ] || ! command -v pgbackrest >/dev/null || fail "$name: pgBackRest installed for $eng"
+  ! grep -qi "installing pgbackrest" "$W/out" || fail "$name: the installer set up pgBackRest for $eng"
   expect_ok "$eng server: re-run is idempotent" configured "$INSTALLER" --no-setup
   expect_ok "$eng server: uninstall --purge" "$INSTALLER" --uninstall --purge
   [ ! -e "$d" ] || fail "$name: uninstall left the drop-in"
@@ -3582,7 +3602,7 @@ PGEOF
   fw_request "fw_low apply 22" '10.1.0.0/16\n' 1
   grep -q "^error=port 22 can't be managed by Rowsafe" "$FO/result" || fail "a port below 1024 was not refused"
   fw_request "fw_nopg apply 5499" '10.1.0.0/16\n' 1
-  grep -q "^error=no database server (PostgreSQL, MySQL, MariaDB, MongoDB or ClickHouse) listens on port 5499" "$FO/result" || fail "a port without PostgreSQL was not refused"
+  grep -q "^error=no database server (PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis or Valkey) listens on port 5499" "$FO/result" || fail "a port without PostgreSQL was not refused"
   printf '5432\n' >/etc/rowsafe/firewall-allowed
   for bad in "fw_5 flush 5432" "fw_5 apply" "fw_5 apply 5432 x" "fw.5 apply 5432" 'x; nft flush ruleset 5432' "fw_5 apply 05432" "fw_5 apply 99999999"; do
     fw_request "$bad" "" 0

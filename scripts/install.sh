@@ -44,6 +44,10 @@
 #                          passwords for logins from the network (hostssl rules
 #                          for 0.0.0.0/0 and ::/0; local rules unchanged). Put a
 #                          firewall in front: it decides who can connect
+#   (Permissions: without a terminal, restart, create-cluster, updates, pooler,
+#   tuning, sqlite-modes and files are allowed unless --no-allow-X; the
+#   server's own security updates, reboot, firewall and pooler-public only
+#   with --allow-X. On a terminal the installer asks, suggesting the same.)
 #   --allow-restart        allow Rowsafe to restart or stop PostgreSQL when you
 #                          ask (Restart and Rewind in the dashboard, `rowsafe
 #                          restart`); only when someone confirms
@@ -238,9 +242,9 @@ STORAGE_GUIDED=0
 NO_SETUP=0         # --no-setup
 PROTECT_NAME=''    # --protect NAME
 PROTECT_PORT=''    # --protect-port PORT
-ALLOW_RESTART=''   # --allow-restart (yes) / --no-allow-restart (no); '' = ask once, on a terminal
-ALLOW_CREATE_CLUSTER='' # --allow-create-cluster (yes) / --no-allow-create-cluster (no); '' = ask once
-ALLOW_POOLER=''    # --allow-pooler (yes) / --no-allow-pooler (no); '' = ask once, on a terminal
+ALLOW_RESTART=''   # --allow-restart (yes) / --no-allow-restart (no); '' = ask once on a terminal, else yes
+ALLOW_CREATE_CLUSTER='' # --allow-create-cluster (yes) / --no-allow-create-cluster (no); '' = ask once on a terminal, else yes
+ALLOW_POOLER=''    # --allow-pooler (yes) / --no-allow-pooler (no); '' = ask once on a terminal, else yes
 ALLOW_POOLER_PUBLIC='' # --allow-pooler-public (yes) / --no-allow-pooler-public (no): PgBouncer on every address
 ALLOW_FIREWALL=''  # --allow-firewall (yes) / --no-allow-firewall (no); '' = ask once, on a terminal
 ALLOW_TUNING=''    # --allow-tuning (yes) / --no-allow-tuning (no): MongoDB and ClickHouse settings files
@@ -483,8 +487,8 @@ Turning on backups:
   changing anything. If PostgreSQL needs a restart for backups to start, it
   asks "Restart PostgreSQL now?" (default no); if you'd rather restart later,
   Rowsafe notices the restart by itself and finishes. Rowsafe itself never
-  restarts PostgreSQL on its own: with --allow-restart (or yes at the
-  question), it restarts or stops PostgreSQL when you ask (Restart, and
+  restarts PostgreSQL on its own: unless you say no (--no-allow-restart, or
+  no at the question), it restarts or stops PostgreSQL when you ask (Restart, and
   Rewind the whole database, in the dashboard), and only when someone
   confirms. Automation: --protect NAME.
 
@@ -527,8 +531,14 @@ Turning on backups:
 What Rowsafe may do on this server:
   Rowsafe only restarts PostgreSQL, installs updates, reboots, manages
   PgBouncer or the firewall when someone clicks that in the dashboard and
-  confirms, and only what root allowed here. On a terminal the installer asks
-  once (a re-run keeps the answers) and then shows what is allowed. Change it
+  confirms, and only what root allowed here. What touches only the database
+  is allowed unless you say no: restart, create-cluster, updates, pooler,
+  tuning, sqlite-modes and putting restored files back. The server itself
+  waits for your yes: security-updates, reboot, firewall, pooler-public. On
+  a terminal the installer asks once with those answers suggested; without
+  one it takes them (--no-allow-X says no). A re-run keeps the answers, and
+  the installer then shows what is allowed. Owners and admins can turn one
+  off in the dashboard too, without a passkey. Change it
   any time with `sudo rowsafe-allow` (list), `sudo rowsafe-allow NAME` (allow)
   and `sudo rowsafe-allow --remove NAME`. Names: restart, create-cluster,
   updates, security-updates, reboot, pooler, pooler-public, firewall, tuning,
@@ -3888,8 +3898,8 @@ restart_access() {
         if grep -q '^[0-9]' "$RESTART_ALLOW_FILE"; then allow_restarts; fi
         return 0
       fi
-      [ "$TTY" = 1 ] && [ -n "$(restart_pairs)" ] || return 0
-      if perm_ask "Restart or stop $(engine_label), when someone clicks Restart or Rewind?" y; then
+      [ -n "$(restart_pairs)" ] || return 0
+      if perm_default "Restart or stop $(engine_label), when someone clicks Restart or Rewind?" y; then
         allow_restarts
       else
         disallow_restarts
@@ -4094,8 +4104,8 @@ create_cluster_access() {
       fi
       # Asked only where restarts are allowed: the created cluster is
       # stopped and started by the same helper.
-      [ "$TTY" = 1 ] && command -v pg_createcluster >/dev/null 2>&1 && grep -qs '^[0-9]' "$RESTART_ALLOW_FILE" || return 0
-      if perm_ask "Create a new PostgreSQL cluster here (ports $CREATE_PORTS), when someone forks a database to this server?" y; then
+      command -v pg_createcluster >/dev/null 2>&1 && grep -qs '^[0-9]' "$RESTART_ALLOW_FILE" || return 0
+      if perm_default "Create a new PostgreSQL cluster here (ports $CREATE_PORTS), when someone forks a database to this server?" y; then
         allow_create_clusters
       else
         disallow_create_clusters
@@ -4224,11 +4234,15 @@ decide_update() {
     if update_allowed "$2"; then echo yes; else echo no; fi
     return 0
   fi
-  if [ "$TTY" = 1 ] && confirm "$3" "$4"; then echo yes; else echo no; fi
+  # Without a terminal: the default (PostgreSQL's updates yes, the server's no).
+  if [ "$TTY" = 1 ]; then
+    if confirm "$3" "$4"; then echo yes; else echo no; fi
+  elif [ "$4" = y ]; then echo yes; else echo no; fi
 }
 
 # update_access applies --allow-updates, --allow-security-updates and
-# --allow-reboot (and their --no- forms), or asks once on a terminal.
+# --allow-reboot (and their --no- forms), or asks once on a terminal
+# (without one: the database's updates yes, the server's own no).
 update_access() {
   if [ ! -x "$RESTART_HELPER" ] || ! grep -qs '^[0-9]' "$RESTART_ALLOW_FILE"; then
     case "$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT" in
@@ -4238,7 +4252,6 @@ update_access() {
     [ ! -f "$UPDATES_ALLOW_FILE" ] || rm -f "$UPDATES_ALLOW_FILE"
     return 0
   fi
-  [ -f "$UPDATES_ALLOW_FILE" ] || [ "$TTY" = 1 ] || [ -n "$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT" ] || return 0
   # (The questions run in subshells: the heading comes first, here.)
   if [ ! -f "$UPDATES_ALLOW_FILE" ] && [ "$TTY" = 1 ] && { [ -z "$ALLOW_UPDATES" ] || [ -z "$ALLOW_SECURITY" ]; }; then
     perm_intro
@@ -4489,8 +4502,7 @@ tuning_access() {
         return 0
       fi
       [ -f "$TUNING_ALLOW_FILE" ] && return 0 # a no, kept
-      [ "$TTY" = 1 ] || return 0
-      if perm_ask "Let Rowsafe change $(engine_label)'s settings when someone picks them under Tuning? It writes only its own settings file." n; then
+      if perm_default "Let Rowsafe change $(engine_label)'s settings when someone picks them under Tuning? It writes only its own settings file." y; then
         allow_tuning
       else
         disallow_tuning
@@ -4655,8 +4667,7 @@ sqlite_modes_access() {
         return 0
       fi
       [ -f "$SQLITE_MODES_ALLOW_FILE" ] && return 0 # a no, kept
-      [ "$TTY" = 1 ] || return 0
-      if perm_ask "Let Rowsafe close the SQLite files to this server's other users when someone clicks Apply fix under Security? Only others' access goes; owners, groups and your app's access stay." y; then
+      if perm_default "Let Rowsafe close the SQLite files to this server's other users when someone clicks Apply fix under Security? Only others' access goes; owners, groups and your app's access stay." y; then
         allow_sqlite_modes
       else
         disallow_sqlite_modes
@@ -5941,8 +5952,8 @@ pooler_access() {
         if grep -q '^[0-9]' "$POOLER_ALLOW_FILE"; then refresh_pooler; fi
         return 0
       fi
-      [ "$TTY" = 1 ] && [ -n "$(pooler_ports)" ] || return 0
-      if perm_ask "Install and manage $(pooler_name) (connection pooling), when someone turns pooling on? Nothing is installed now." y; then
+      [ -n "$(pooler_ports)" ] || return 0
+      if perm_default "Install and manage $(pooler_name) (connection pooling), when someone turns pooling on? Nothing is installed now." y; then
         allow_pooler
       else
         disallow_pooler
@@ -5981,7 +5992,7 @@ FILES_DROPIN_DIR=/etc/systemd/system/rowsafe-files-helper.service.d
 FILES_DROPIN=$FILES_DROPIN_DIR/folders.conf
 OLD_FILES_DROPIN=/etc/systemd/system/rowsafe-pg-restart.service.d/rowsafe-files.conf
 FILES_PATHS=''     # --files PATH (newline-separated)
-ALLOW_FILES=''     # --allow-files (yes) / --no-allow-files (no); '' = ask once, on a terminal
+ALLOW_FILES=''     # --allow-files (yes) / --no-allow-files (no); '' = ask once on a terminal, else yes
 NO_FILES=0         # --no-files
 FILES_PROTECTED='' # folders protected by this run (newline-separated)
 FILES_DB_ID='' FILES_DB_NAME=''
@@ -6225,9 +6236,9 @@ files_access() {
         allow_files
         return 0
       fi
-      [ "$TTY" = 1 ] && [ -n "$_new" ] || return 0
-      say ""
-      if confirm "Allow Rowsafe to put restored files back into $_new, as the folder's owner? Only these folders (add others later with --files), only when someone asks and confirms." y; then
+      [ -n "$_new" ] || return 0
+      [ "$TTY" != 1 ] || say ""
+      if [ "$TTY" != 1 ] || confirm "Allow Rowsafe to put restored files back into $_new, as the folder's owner? Only these folders (add others later with --files), only when someone asks and confirms." y; then
         allow_files
       else
         disallow_files
@@ -6395,7 +6406,9 @@ remove_files_units() {
 
 # ---------------------------------------------------------------- permissions (rowsafe-allow)
 # What Rowsafe may do on this server when someone clicks it in the dashboard
-# and confirms (protocol/permissions.go): asked once on a terminal, set with
+# and confirms (protocol/permissions.go): asked once on a terminal (without
+# one: yes to what touches only the database, no to the server's own
+# updates, reboots, the firewall and public PgBouncer), set with
 # --allow-X / --no-allow-X, shown at the end, and changed later with
 # `sudo rowsafe-allow NAME`, which runs this installer's permissions-only
 # mode (--permissions) from root's copy of it in $LIB_DIR, checked against
@@ -6445,6 +6458,13 @@ perm_intro() {
 perm_ask() {
   perm_intro
   confirm "$1" "$2"
+}
+
+# perm_default QUESTION y|n: perm_ask on a terminal; without one, the
+# default (protocol.PermissionsDefault): yes for what touches only the
+# database, no for the server itself, which waits for root's yes.
+perm_default() {
+  if [ "$TTY" = 1 ]; then perm_ask "$1" "$2"; else [ "$2" = y ]; fi
 }
 
 # perm_var NAME prints the variable holding NAME's flag (yes, no or empty).

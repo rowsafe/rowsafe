@@ -371,3 +371,55 @@ func TestParseEnvFileAndRP(t *testing.T) {
 		}
 	}
 }
+
+func TestApplyRemoval(t *testing.T) {
+	removal := func(e *applyEnv, rm protocol.PermissionRemoval, extra string) {
+		data, _ := json.Marshal(Request{ID: "t1", Remove: &rm})
+		if extra != "" {
+			data = []byte(strings.Replace(string(data), `{"id"`, extra+`"id"`, 1))
+		}
+		if err := os.WriteFile(e.h.RequestPath, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// No passkey paired: a removal still goes through.
+	e := newApplyEnv(t)
+	_ = os.Remove(e.h.OwnersFile)
+	removal(e, protocol.PermissionRemoval{HostID: testHost, Remove: []string{"reboot", "restart"}, RequestedBy: "ana@example.com"}, "")
+	a := e.run()
+	if !a.Applied || a.Refused != "" {
+		t.Fatalf("removal: %+v", a)
+	}
+	args, _ := os.ReadFile(e.argsTo)
+	if got := strings.TrimSpace(string(args)); got != "--permissions --no-prompt --no-allow-restart --no-allow-reboot" {
+		t.Fatalf("installer args %q", got)
+	}
+	if !strings.Contains(e.log.String(), "turn off [reboot restart], requested by ana@example.com") {
+		t.Fatalf("journal: %s", e.log.String())
+	}
+
+	cases := map[string]struct {
+		rm    protocol.PermissionRemoval
+		extra string
+		want  string
+	}{
+		"firewall needs a passkey":      {protocol.PermissionRemoval{HostID: testHost, Remove: []string{"firewall"}}, "", "needs a passkey"},
+		"pooler-public needs a passkey": {protocol.PermissionRemoval{HostID: testHost, Remove: []string{"pooler", "pooler-public"}}, "", "needs a passkey"},
+		"unknown":                       {protocol.PermissionRemoval{HostID: testHost, Remove: []string{"root"}}, "", "unknown permission"},
+		"nothing":                       {protocol.PermissionRemoval{HostID: testHost}, "", "nothing to change"},
+		"other host":                    {protocol.PermissionRemoval{HostID: "host_02", Remove: []string{"restart"}}, "", "another server"},
+		"with a signature":              {protocol.PermissionRemoval{HostID: testHost, Remove: []string{"restart"}}, `"signed":{"change":"eyJ9"},`, "malformed"},
+	}
+	for name, c := range cases {
+		e := newApplyEnv(t)
+		removal(e, c.rm, c.extra)
+		a := e.run()
+		if a.Applied || !strings.Contains(a.Refused, c.want) {
+			t.Errorf("%s: %+v", name, a)
+		}
+		if _, err := os.Stat(e.argsTo); err == nil {
+			t.Errorf("%s: the installer ran", name)
+		}
+	}
+}
