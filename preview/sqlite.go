@@ -177,6 +177,17 @@ func AssessSQLite(res *protocol.PreviewResult, texts []string, c SQLiteContext) 
 	}
 	res.Verdict = verdict
 	res.Summary = summary(res, worstN, worstText)
+	if verdict == protocol.PreviewSafe && slices.ContainsFunc(res.Statements, func(s protocol.PreviewStatement) bool { return len(s.Rewrites) > 0 }) {
+		// Safe, but not "no table rewrites": the rebuilds were small.
+		ran := 0
+		for _, s := range res.Statements {
+			if s.Ran && s.Error == "" {
+				ran++
+			}
+		}
+		res.Summary = fmt.Sprintf("Safe: %d %s ran in %s on a copy of %s, with no long locks or data loss; the tables it rebuilds are small enough to be quick.",
+			ran, plural(ran, "statement", "statements"), humanDuration(res.DurationMs), orName(res.DB))
+	}
 }
 
 // SQLiteName matches one table name as written ("a b", [a], `a`, a),
