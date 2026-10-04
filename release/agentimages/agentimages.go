@@ -51,9 +51,9 @@ type Document struct {
 
 var (
 	versionRE = regexp.MustCompile(`^(\d{1,6})\.(\d{1,6})\.(\d{1,6})$`)
-	// variant is a PostgreSQL major and flavour ("pg17", "pg17-alpine"), or
-	// a ClickHouse release ("clickhouse26.8": YY.M).
-	variant   = `pg[1-9][0-9](?:-alpine)?|clickhouse[2-9][0-9]\.(?:[1-9]|1[0-2])`
+	// variant is a PostgreSQL major and flavour ("pg17", "pg17-alpine"), a
+	// ClickHouse release ("clickhouse26.8": YY.M), or "sqlite".
+	variant   = `pg[1-9][0-9](?:-alpine)?|clickhouse[2-9][0-9]\.(?:[1-9]|1[0-2])|sqlite`
 	variantRE = regexp.MustCompile(`^(?:` + variant + `)$`)
 	digestRE  = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	// tagVariantRE finds the variant at the end of a tag: "pg17",
