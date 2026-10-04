@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/rowsafe/rowsafe/internal/agent"
-	"github.com/rowsafe/rowsafe/protocol"
 	mysqlengine "github.com/rowsafe/rowsafe/internal/engine/mysql"
+	"github.com/rowsafe/rowsafe/protocol"
 )
 
 const setupUsage = `rowsafe-agent setup - turn on backups for this server's PostgreSQL

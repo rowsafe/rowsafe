@@ -134,4 +134,4 @@ func RestoreWithoutRowsafe(ctx context.Context, env agent.EngineEnv, stanza, dst
 type cliLog struct{}
 
 func (cliLog) Printf(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) }
-func (cliLog) Output(string, []byte)    {}
+func (cliLog) Output(string, []byte)     {}
