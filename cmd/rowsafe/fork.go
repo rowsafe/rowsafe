@@ -160,6 +160,8 @@ func pickForkPlace(t protocol.ForkTarget, port, intoPort int) (protocol.ForkPlac
 		switch {
 		case intoPort != 0 && p.Placement == protocol.ForkEmptyCluster && p.Port == intoPort:
 			return p, nil
+		case intoPort == 0 && port != 0 && p.Placement == protocol.ForkEmptyCluster && p.Port == port:
+			return p, nil // --port naming an empty server handed to Rowsafe (Redis, Valkey) is that server
 		case intoPort == 0 && p.Placement == protocol.ForkNewCluster:
 			if port != 0 {
 				p.Port = port

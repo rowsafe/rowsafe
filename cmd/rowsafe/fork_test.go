@@ -146,3 +146,15 @@ func TestPickSQLiteForkPlace(t *testing.T) {
 		}
 	}
 }
+
+func TestPickForkPlaceEmptyByPort(t *testing.T) {
+	tgt := protocol.ForkTarget{Hostname: "kv-e2e", Places: []protocol.ForkPlace{
+		{Placement: protocol.ForkEmptyCluster, Port: 6381}, {Placement: protocol.ForkEmptyCluster, Port: 6382}}}
+	p, err := pickForkPlace(tgt, 6382, 0)
+	if err != nil || p.Port != 6382 {
+		t.Fatalf("--port 6382: %+v %v", p, err)
+	}
+	if _, err := pickForkPlace(tgt, 6390, 0); err == nil {
+		t.Fatal("a port with no empty server there")
+	}
+}
