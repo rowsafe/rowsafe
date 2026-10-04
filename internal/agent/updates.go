@@ -213,13 +213,18 @@ func (w *downtime) stop() time.Duration {
 	return w.back.Sub(w.down)
 }
 
-// waitAnswering waits until db accepts connections as a primary.
+// waitAnswering waits until db accepts connections as a primary, or, on a
+// server that runs db's standby, until the standby replays again.
 func (a *Agent) waitAnswering(ctx context.Context, db protocol.DatabaseSpec, timeout time.Duration) error {
 	if r := engineRestarter(db); r != nil { // another engine: until it answers (restart.go)
 		ctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
 		out := &protocol.RestartResult{}
 		return a.waitBackWithin(ctx, db, out, timeout)
+	}
+	if _, ok := a.standbyHere(db); ok { // standby_updates.go
+		_, err := waitStandby(ctx, a.sops(), db, timeout)
+		return err
 	}
 	return a.ops().waitReady(ctx, db, "", timeout)
 }
@@ -285,7 +290,11 @@ func (a *Agent) pgUpdate(ctx context.Context, db protocol.DatabaseSpec, p protoc
 	}
 	res.DowntimeMs = w.stop().Milliseconds()
 	res.ToVersion, _, _ = a.runningVersion(ctx, db)
-	if err := a.archivingWorks(ctx, db, tl); err != nil {
+	if _, standby := a.standbyHere(db); standby {
+		// WAL archiving is the primary's job; the standby replays again.
+		res.ArchivingOK = true
+		tl.Printf("this server runs the database's standby: it replays again; WAL archiving runs on the primary")
+	} else if err := a.archivingWorks(ctx, db, tl); err != nil {
 		res.Warnings = append(res.Warnings, "checking that WAL still reaches the backups failed: "+err.Error())
 	} else {
 		res.ArchivingOK = true

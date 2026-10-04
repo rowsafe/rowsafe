@@ -122,6 +122,14 @@ type MaintenanceInfo struct {
 	Critical []CriticalFixStatus `json:"critical"`
 	// LastRun is the newest window (or Apply now) that applied something.
 	LastRun *MaintenanceRun `json:"last_run,omitempty"`
+	// Rolling (addition), for a server with a standby: how the window
+	// applies what needs a restart, in plain words (the standby first, a
+	// switchover of a few seconds, then the other server; or why it can't
+	// right now and applies it in place). "" for servers without one.
+	Rolling string `json:"rolling,omitempty"`
+	// StandbyServer (addition): this is a pair's standby server; what
+	// its window applies costs the database no downtime.
+	StandbyServer bool `json:"standby_server,omitempty"`
 }
 
 // MaintenanceRun is one window's (or one Apply now's) work on a server.

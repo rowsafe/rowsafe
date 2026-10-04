@@ -159,6 +159,7 @@ func (a *Agent) buildSoftware(ctx context.Context) *protocol.SoftwareReport {
 	}
 	r.Allowed = a.updateAllowed()
 	r.HelperActions = a.updateHelperActions()
+	r.StandbyAware = true // standby_updates.go
 	if bt := bootTime(); !bt.IsZero() {
 		r.BootedAt = &bt
 	}
@@ -253,10 +254,10 @@ func (a *Agent) clusterSoftware(ctx context.Context) []protocol.ClusterSoftware 
 }
 
 // runningVersions maps ports to the running server's version ("16.9"),
-// for the databases this agent monitors.
+// for the databases this agent monitors and the standbys it runs.
 func (a *Agent) runningVersions(ctx context.Context) map[int]string {
 	out := map[int]string{}
-	for _, db := range a.monitoredDatabases() {
+	for _, db := range append(a.monitoredDatabases(), a.standbyDatabases()...) { // and the standbys it runs (standby_updates.go)
 		if _, done := out[db.Port]; done {
 			continue
 		}
