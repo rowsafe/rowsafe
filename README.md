@@ -23,8 +23,6 @@ rowsafe hosts enroll-token                             # prints the install comm
 curl -fsSL https://rowsafe.sh | sudo sh -s rse_…       # on the database server
 ```
 
-The installer does the rest on the server: it installs the agent, sets up storage, finds your databases, shows you the plan and asks before turning on backups (and before restarting the database, if that is needed). To set up from your workstation instead: `rowsafe adopt app`, then `rowsafe apply app`.
-
 **Rewind**: continuous backups, restore to any second. Deleted rows by mistake? Restore a copy as it was just before, next to production, and bring the rows back.
 
 ```sh
