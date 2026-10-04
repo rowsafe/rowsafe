@@ -110,7 +110,24 @@ var (
 
 type targetsEntry struct {
 	at  time.Time
+	sig string
 	out []protocol.StandbyTarget
+}
+
+// targetsSig changes when a server starts or stops here, or a login is
+// saved (rowsafe-agent redis login --target, from the installer): the
+// cached list is then searched again at once, so a server just handed to
+// Rowsafe is offered within the agent's next report.
+func targetsSig(env agent.EngineEnv, procs []serverProc) string {
+	var b strings.Builder
+	for _, p := range procs {
+		b.WriteString(strconv.Itoa(p.Port))
+		b.WriteByte(',')
+	}
+	if st, err := os.Stat(loginsDir(env)); err == nil {
+		b.WriteString(st.ModTime().String())
+	}
+	return b.String()
 }
 
 // StandbyTargets lists the servers here that could hold a standby or
@@ -119,8 +136,10 @@ func (e *Engine) StandbyTargets(ctx context.Context, env agent.EngineEnv) []prot
 	if env.Config.Sidecar() || inDocker() {
 		return nil
 	}
+	procs := findServers()
+	sig := targetsSig(env, procs)
 	targetsMu.Lock()
-	if c, ok := targetsCache[e.name]; ok && time.Since(c.at) < 2*time.Minute {
+	if c, ok := targetsCache[e.name]; ok && time.Since(c.at) < 2*time.Minute && c.sig == sig {
 		targetsMu.Unlock()
 		return c.out
 	}
@@ -128,7 +147,7 @@ func (e *Engine) StandbyTargets(ctx context.Context, env agent.EngineEnv) []prot
 	var out []protocol.StandbyTarget
 	seen := map[int]bool{}
 	store := standbys(env)
-	for _, p := range findServers() {
+	for _, p := range procs {
 		if seen[p.Port] {
 			continue
 		}
@@ -207,7 +226,7 @@ func (e *Engine) StandbyTargets(ctx context.Context, env agent.EngineEnv) []prot
 		}
 	}
 	targetsMu.Lock()
-	targetsCache[e.name] = targetsEntry{at: time.Now(), out: out}
+	targetsCache[e.name] = targetsEntry{at: time.Now(), sig: sig, out: out}
 	targetsMu.Unlock()
 	return out
 }

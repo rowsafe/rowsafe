@@ -2,9 +2,12 @@ package redis
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/rowsafe/rowsafe/internal/agent"
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
@@ -43,5 +46,21 @@ func TestReplayedCounts(t *testing.T) {
 	want := "[{db0 true 354 354} {db1 true 3 3} {db2 true 5 5}]"
 	if got != want {
 		t.Fatalf("got %s, want %s", got, want)
+	}
+}
+
+func TestTargetsSig(t *testing.T) {
+	env := agent.EngineEnv{StateDir: t.TempDir()}
+	os.MkdirAll(loginsDir(env), 0o700)
+	a := targetsSig(env, []serverProc{{Port: 6379}})
+	if b := targetsSig(env, []serverProc{{Port: 6379}, {Port: 6381}}); a == b {
+		t.Error("a new server keeps the cached list")
+	}
+	time.Sleep(10 * time.Millisecond)
+	if err := saveLogin(env, 6381, Login{User: "rowsafe", Password: "x", Target: targetAll}); err != nil {
+		t.Fatal(err)
+	}
+	if b := targetsSig(env, []serverProc{{Port: 6379}}); a == b {
+		t.Error("a new login keeps the cached list")
 	}
 }
