@@ -33,6 +33,17 @@
 #   --protect NAME         without questions: turn on backups for this server's
 #                          PostgreSQL as NAME (never restarts it)
 #   --protect-port PORT    with --protect: the cluster on PORT (when there are several)
+#   --install-postgres VERSION  on a fresh server: install PostgreSQL VERSION
+#                          (13-18) from the PostgreSQL project's repository
+#                          (apt.postgresql.org, its signing key checked) and
+#                          start it; refuses if PostgreSQL is already installed.
+#                          With --protect, that new PostgreSQL is restarted once
+#                          if backups need it
+#   --listen-public        PostgreSQL listens on every address: TLS on (a
+#                          self-signed certificate made here), SCRAM-SHA-256
+#                          passwords for logins from the network (hostssl rules
+#                          for 0.0.0.0/0 and ::/0; local rules unchanged). Put a
+#                          firewall in front: it decides who can connect
 #   --allow-restart        allow Rowsafe to restart or stop PostgreSQL when you
 #                          ask (Restart and Rewind in the dashboard, `rowsafe
 #                          restart`); only when someone confirms
@@ -52,6 +63,11 @@
 #   --allow-tuning         allow Rowsafe to change MongoDB's or ClickHouse's settings
 #                          when you ask (Tuning), only in its own settings file
 #   --no-allow-tuning      turn that off again
+#   --firewall-ssh         for servers Rowsafe creates (implies --allow-firewall):
+#                          the firewall also limits who can reach SSH, and
+#                          PostgreSQL's port is closed to everyone until the
+#                          dashboard's allowed addresses arrive;
+#                          --no-firewall-ssh gives SSH back to you
 #   --allow-updates        allow Rowsafe to install PostgreSQL updates and upgrade
 #                          PostgreSQL when you click Update or Upgrade (needs
 #                          --allow-restart); --no-allow-updates turns it off
@@ -211,6 +227,7 @@ ALLOW_POOLER_PUBLIC='' # --allow-pooler-public (yes) / --no-allow-pooler-public 
 ALLOW_FIREWALL=''  # --allow-firewall (yes) / --no-allow-firewall (no); '' = ask once, on a terminal
 ALLOW_TUNING=''    # --allow-tuning (yes) / --no-allow-tuning (no): MongoDB and ClickHouse settings files
 POOLER_TARGET_ADD='' POOLER_TARGET_DEL='' # --allow-pooler-target / --no-allow-pooler-target ADDRESS:PORT (ProxySQL)
+FIREWALL_SSH=''    # --firewall-ssh (yes) / --no-firewall-ssh (no): SSH's allow list too (servers Rowsafe creates)
 ALLOW_UPDATES=''   # --allow-updates / --no-allow-updates (PostgreSQL updates and upgrades)
 ALLOW_SECURITY=''  # --allow-security-updates / --no-allow-security-updates
 ALLOW_REBOOT=''    # --allow-reboot / --no-allow-reboot
@@ -220,6 +237,9 @@ M_CLONES=''        # --mongodb-clones (yes): this (empty) MongoDB may receive cl
 CH_CLONES=''       # --clickhouse-clones (yes): this (empty) ClickHouse may receive clones
 MYSQL_STANDBY=''   # --mysql-standby (yes) / --no-mysql-standby (no); '' = ask once, on a terminal
 MONGODB_REPLSET='' # --mongodb-replica-set (yes) / --no-mongodb-replica-set (no); '' = ask on a terminal
+INSTALL_PG=''      # --install-postgres VERSION (servers Rowsafe creates)
+LISTEN_PUBLIC=0    # --listen-public
+PG_OURS=0          # the PostgreSQL here is the one --install-postgres installed
 
 TMP=
 CHANGED=0          # binary, unit, guard or config changed: a running agent needs a restart
@@ -278,6 +298,19 @@ Options (when piping, pass them after `sh -s --`):
                          named NAME in Rowsafe. Never restarts PostgreSQL; prints the
                          command when it needs a restart
   --protect-port PORT    with --protect: the PostgreSQL on PORT (when there are several)
+  --install-postgres VERSION
+                         on a fresh server: install PostgreSQL VERSION (13-18) from the
+                         PostgreSQL project's repository (apt.postgresql.org, its signing
+                         key checked) and start it. Refuses if PostgreSQL is already
+                         installed; a re-run keeps the one it installed. With --protect,
+                         that new PostgreSQL is restarted once if backups need it
+  --listen-public        make PostgreSQL reachable from the network: it listens on every
+                         address, with TLS (a self-signed certificate made on this server)
+                         and SCRAM-SHA-256 passwords for every login from the network
+                         (local rules stay as they are). Put a firewall in front: it
+                         decides who can connect. Restarts PostgreSQL only if it was
+                         installed by --install-postgres or you say yes; otherwise the
+                         change waits for its next restart
   --allow-restart        allow Rowsafe to restart or stop PostgreSQL when you ask
                          (Restart and Rewind in the dashboard, `rowsafe restart`),
                          only when someone confirms
@@ -308,6 +341,10 @@ Options (when piping, pass them after `sh -s --`):
   --allow-pooler-target ADDRESS:PORT    let ProxySQL send connections to the MySQL
                          on another server (the primary after a standby's promotion)
   --no-allow-pooler-target ADDRESS:PORT  turn that off
+  --firewall-ssh         for servers Rowsafe creates (implies --allow-firewall): the
+                         firewall also limits who can reach SSH, and PostgreSQL's port
+                         is closed to everyone until the allowed addresses arrive
+  --no-firewall-ssh      Rowsafe stops limiting who can reach SSH
   --allow-updates        allow Rowsafe to install PostgreSQL updates and upgrade PostgreSQL
                          when you click Update or Upgrade and confirm (needs --allow-restart)
   --no-allow-updates     turn that off
@@ -407,6 +444,13 @@ Turning on backups:
   Rewind the whole database, in the dashboard), and only when someone
   confirms. Automation: --protect NAME.
 
+  A new server, without a terminal (cloud-init):
+    curl -fsSL https://rowsafe.sh | sh -s -- rse_... --no-prompt --install-postgres 17 \
+      --listen-public --storage rowsafe --protect NAME
+  installs PostgreSQL 17, makes it reachable with TLS and passwords, keeps
+  backups in Rowsafe Storage with a passphrase generated on the server (see it
+  in the dashboard, sealed to your browser) and turns them on.
+
   ClickHouse: Rowsafe's own ClickHouse user is added as
   /etc/clickhouse-server/users.d/rowsafe.xml (ClickHouse loads it by itself,
   no restart), or with an administrator's login once. The agent joins the
@@ -479,15 +523,17 @@ fetch() {
     -o "$2" "$1" </dev/null
 }
 
+apt_update() {
+  if ! DEBIAN_FRONTEND=noninteractive apt-get update -q >"$TMP/apt.log" 2>&1 </dev/null; then
+    tail -n 20 "$TMP/apt.log" >&2
+    die "apt-get update failed"
+  fi
+  APT_UPDATED=1
+}
+
 apt_install() {
   have apt-get || die "apt-get not found; install $* yourself and re-run"
-  if [ "$APT_UPDATED" = 0 ]; then
-    if ! DEBIAN_FRONTEND=noninteractive apt-get update -q >"$TMP/apt.log" 2>&1 </dev/null; then
-      tail -n 20 "$TMP/apt.log" >&2
-      die "apt-get update failed"
-    fi
-    APT_UPDATED=1
-  fi
+  [ "$APT_UPDATED" = 1 ] || apt_update
   if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends "$@" >>"$TMP/apt.log" 2>&1 </dev/null; then
     tail -n 20 "$TMP/apt.log" >&2
     die "installing $* failed"
@@ -867,6 +913,269 @@ check_openssl() {
   have curl || die "curl is required"
   have sha256sum || die "sha256sum is required"
   have base64 || die "base64 is required"
+}
+
+# ---------------------------------------------------------------- servers Rowsafe creates
+#
+# --install-postgres VERSION and --listen-public are for a fresh server
+# (Create a server for me): cloud-init runs the installer once, without a
+# terminal, to install PostgreSQL, make it reachable and protect it:
+#
+#   curl -fsSL https://rowsafe.sh | sh -s -- rse_... --no-prompt \
+#     --install-postgres 17 --listen-public --storage rowsafe --protect shop
+#
+# Running it again changes nothing that is already in place.
+
+# The PostgreSQL project's apt repository (https://www.postgresql.org/download/linux/debian/),
+# set up the way its instructions describe, with the signing key's
+# fingerprint checked before apt trusts it.
+PGDG_KEY_URL=https://www.postgresql.org/media/keys/ACCC4CF8.asc
+PGDG_KEY_FPR=B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8
+PGDG_KEY_FILE=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+PGDG_LIST=/etc/apt/sources.list.d/pgdg.list
+# The major --install-postgres installed (a re-run recognizes it as its own).
+PG_INSTALLED_FILE=$CONFIG_DIR/installed-postgresql
+# --listen-public's self-signed certificate (root's directory, the key
+# readable by the postgres group only, as PostgreSQL requires).
+PG_TLS_DIR=/etc/ssl/rowsafe-postgresql
+# Cluster --listen-public works on (pg_target).
+LP_MAJOR='' LP_NAME='' LP_PORT=''
+
+# existing_postgres describes PostgreSQL already on this server, if any:
+# server binaries, server packages or a running postgres process.
+existing_postgres() {
+  for _b in /usr/lib/postgresql/*/bin/postgres; do
+    [ -x "$_b" ] || continue
+    _m=${_b#/usr/lib/postgresql/}
+    printf 'PostgreSQL %s in /usr/lib/postgresql/%s' "${_m%%/*}" "${_m%%/*}"
+    return 0
+  done
+  if have dpkg-query; then
+    # shellcheck disable=SC2016 # dpkg-query's own ${...} fields
+    _p=$(dpkg-query -W -f '${Package} ${db:Status-Status}\n' 'postgresql-[0-9]*' 2>/dev/null | awk '$2 == "installed" { print $1; exit }')
+    if [ -n "$_p" ]; then
+      printf 'the package %s' "$_p"
+      return 0
+    fi
+  fi
+  if have pgrep && pgrep -x postgres >/dev/null 2>&1; then
+    printf 'a running PostgreSQL server'
+    return 0
+  fi
+  return 0
+}
+
+# pgdg_repo adds the PostgreSQL project's apt repository.
+pgdg_repo() {
+  # shellcheck disable=SC1091 # the system's own file
+  _codename=$(. /etc/os-release && printf '%s' "${VERSION_CODENAME:-}")
+  [ -n "$_codename" ] || die "can't tell this system's release name (VERSION_CODENAME in /etc/os-release)"
+  have gpg || apt_install gnupg
+  fetch "$PGDG_KEY_URL" "$TMP/pgdg.asc" || die "could not download the PostgreSQL project's signing key ($PGDG_KEY_URL)"
+  install -d -m 0700 "$TMP/gnupg"
+  GNUPGHOME=$TMP/gnupg gpg --batch --show-keys --with-colons "$TMP/pgdg.asc" >"$TMP/pgdg.keys" 2>/dev/null || true
+  _fpr=$(awk -F: '$1 == "fpr" { print $10; exit }' "$TMP/pgdg.keys")
+  [ "$(grep -c '^pub:' "$TMP/pgdg.keys")" = 1 ] && [ "$_fpr" = "$PGDG_KEY_FPR" ] ||
+    die "the PostgreSQL project's signing key isn't the expected one (fingerprint ${_fpr:-unreadable}); not installing PostgreSQL"
+  install -d -m 0755 -o root -g root "${PGDG_KEY_FILE%/*}"
+  write_file "$PGDG_KEY_FILE" 0644 root:root <"$TMP/pgdg.asc" || true
+  echo "deb [signed-by=$PGDG_KEY_FILE] https://apt.postgresql.org/pub/repos/apt $_codename-pgdg main" |
+    write_file "$PGDG_LIST" 0644 root:root || true
+  apt_update
+  ok "the PostgreSQL project's repository (apt.postgresql.org, key $PGDG_KEY_FPR)"
+}
+
+# install_postgres is --install-postgres VERSION: PostgreSQL from the
+# PostgreSQL project's repository, its main cluster running. It refuses on a
+# server with PostgreSQL already, unless that is the one it installed.
+install_postgres() {
+  _v=$INSTALL_PG
+  ensure_base_tools
+  if [ "$(cat "$PG_INSTALLED_FILE" 2>/dev/null)" = "$_v" ] && [ -x "/usr/lib/postgresql/$_v/bin/postgres" ]; then
+    ok "PostgreSQL $_v is installed (by an earlier run of this installer)"
+  else
+    _found=$(existing_postgres)
+    if [ -n "$_found" ]; then
+      die "PostgreSQL is already installed on this server ($_found), so --install-postgres won't install another one. Run the installer without --install-postgres to protect the PostgreSQL that is there."
+    fi
+    step "Installing PostgreSQL $_v from the PostgreSQL project's repository"
+    pgdg_repo
+    _c=$(apt-cache policy "postgresql-$_v" 2>/dev/null | awk '$1 == "Candidate:" { print $2; exit }')
+    [ -n "$_c" ] && [ "$_c" != "(none)" ] ||
+      die "PostgreSQL $_v isn't available for $OS_NAME from the PostgreSQL project's repository; pick another version (13-18)"
+    # The package creates and starts the main cluster: UTF-8, whatever
+    # locale cloud-init runs with.
+    if ! env LANG=C.UTF-8 LC_ALL=C.UTF-8 DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+      "postgresql-$_v" "postgresql-client-$_v" >>"$TMP/apt.log" 2>&1 </dev/null; then
+      tail -n 20 "$TMP/apt.log" >&2
+      die "installing PostgreSQL $_v failed"
+    fi
+    install -d -m 0750 -o root -g postgres "$CONFIG_DIR"
+    printf '%s\n' "$_v" | write_file "$PG_INSTALLED_FILE" 0644 root:root || true
+    ok "PostgreSQL $_c installed"
+  fi
+  PG_OURS=1
+  pg_ensure_cluster "$_v" main
+}
+
+# pg_cluster_status MAJOR NAME prints the cluster's status (online, down...),
+# nothing when it doesn't exist.
+pg_cluster_status() { pg_lsclusters -h 2>/dev/null | awk -v m="$1" -v n="$2" '$1 == m && $2 == n { print $4; exit }'; }
+
+# pg_ensure_cluster MAJOR NAME creates the cluster when it is missing and
+# starts it when it is down.
+pg_ensure_cluster() {
+  have pg_lsclusters || die "pg_lsclusters is missing: the PostgreSQL packages look incomplete"
+  _st=$(pg_cluster_status "$1" "$2")
+  if [ -z "$_st" ]; then
+    step "Creating PostgreSQL $1's $2 cluster"
+    if ! env LANG=C.UTF-8 LC_ALL=C.UTF-8 pg_createcluster "$1" "$2" >"$TMP/pg.log" 2>&1 </dev/null; then
+      tail -n 10 "$TMP/pg.log" | sed 's/^/    /' >&2
+      die "creating PostgreSQL $1's $2 cluster failed"
+    fi
+    _st=down
+  fi
+  case $_st in
+    online*) ;;
+    *)
+      _rc=0
+      if systemd_running; then
+        timeout 180 systemctl start "postgresql@$1-$2" >"$TMP/pg.log" 2>&1 </dev/null || _rc=$?
+      else
+        timeout 180 pg_ctlcluster "$1" "$2" start >"$TMP/pg.log" 2>&1 </dev/null || _rc=$?
+      fi
+      if [ "$_rc" != 0 ]; then
+        tail -n 10 "$TMP/pg.log" | sed 's/^/    /' >&2
+        die "PostgreSQL $1 ($2) doesn't start (see above)"
+      fi
+      ;;
+  esac
+  case $(pg_cluster_status "$1" "$2") in
+    online*) ;;
+    *) die "PostgreSQL $1 ($2) isn't running" ;;
+  esac
+  ok "PostgreSQL $1 ($2) is running on port $(pg_lsclusters -h | awk -v m="$1" -v n="$2" '$1 == m && $2 == n { print $3; exit }')"
+}
+
+# pg_restart_cluster MAJOR NAME restarts it (only for --install-postgres's
+# own cluster, or after a yes on the terminal).
+pg_restart_cluster() {
+  _rc=0
+  if systemd_running; then
+    timeout 180 systemctl restart "postgresql@$1-$2" >"$TMP/pg.log" 2>&1 </dev/null || _rc=$?
+  else
+    timeout 180 pg_ctlcluster "$1" "$2" restart >"$TMP/pg.log" 2>&1 </dev/null || _rc=$?
+  fi
+  if [ "$_rc" != 0 ]; then
+    tail -n 10 "$TMP/pg.log" | sed 's/^/    /' >&2
+    return 1
+  fi
+}
+
+# pg_sql PORT SQL runs a fixed statement as postgres and prints the result.
+pg_sql() {
+  (cd / && runuser -u postgres -- psql -X -A -t -q -v ON_ERROR_STOP=1 -p "$1" -d postgres -c "$2") </dev/null
+}
+
+# pg_target picks the cluster --listen-public works on: --install-postgres's,
+# the one on --protect-port, or the only one.
+pg_target() {
+  have pg_lsclusters || die "--listen-public needs Debian's PostgreSQL cluster tools (pg_lsclusters)"
+  if [ -n "$INSTALL_PG" ]; then
+    _line=$(pg_lsclusters -h 2>/dev/null | awk -v m="$INSTALL_PG" '$1 == m && $2 == "main"')
+  elif [ -n "$PROTECT_PORT" ]; then
+    _line=$(pg_lsclusters -h 2>/dev/null | awk -v p="$PROTECT_PORT" '$3 == p')
+  else
+    case $(pg_lsclusters -h 2>/dev/null | grep -c .) in
+      0) die "--listen-public: no PostgreSQL cluster on this server" ;;
+      1) _line=$(pg_lsclusters -h 2>/dev/null) ;;
+      *) die "--listen-public: this server has several PostgreSQL clusters; pick one with --protect NAME --protect-port PORT" ;;
+    esac
+  fi
+  [ -n "$_line" ] || die "--listen-public: found no such PostgreSQL cluster"
+  LP_MAJOR=$(printf '%s\n' "$_line" | awk '{ print $1 }')
+  LP_NAME=$(printf '%s\n' "$_line" | awk '{ print $2 }')
+  LP_PORT=$(printf '%s\n' "$_line" | awk '{ print $3 }')
+  case $(printf '%s\n' "$_line" | awk '{ print $4 }') in
+    online*) ;;
+    *) die "--listen-public: PostgreSQL $LP_MAJOR ($LP_NAME) isn't running" ;;
+  esac
+}
+
+# pg_tls_cert makes the self-signed certificate, once, on this server.
+pg_tls_cert() {
+  install -d -m 0750 -o root -g postgres "$PG_TLS_DIR"
+  if [ -s "$PG_TLS_DIR/server.key" ] && [ -s "$PG_TLS_DIR/server.crt" ]; then
+    return 0
+  fi
+  _cn=$(hostname -f 2>/dev/null || uname -n)
+  printf '%s\n' "$_cn" | grep -Eq '^[A-Za-z0-9.-]{1,253}$' || _cn=$(uname -n)
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
+    -subj "/CN=$_cn" -addext "subjectAltName=DNS:$_cn" \
+    -keyout "$TMP/pg-tls.key" -out "$TMP/pg-tls.crt" >"$TMP/openssl.log" 2>&1 ||
+    die "could not make a TLS certificate for PostgreSQL: $(tail -n 1 "$TMP/openssl.log")"
+  install -m 0640 -o root -g postgres "$TMP/pg-tls.key" "$PG_TLS_DIR/server.key"
+  install -m 0644 -o root -g root "$TMP/pg-tls.crt" "$PG_TLS_DIR/server.crt"
+  rm -f "$TMP/pg-tls.key"
+  ok "made a self-signed TLS certificate for PostgreSQL ($PG_TLS_DIR)"
+}
+
+# listen_public is --listen-public: PostgreSQL listens on every address,
+# with TLS and SCRAM-SHA-256 passwords for logins from the network (the
+# cloud firewall decides who can connect). Local rules stay as they are.
+listen_public() {
+  pg_target
+  step "Making PostgreSQL $LP_MAJOR reachable from the network (TLS and passwords only)"
+  pg_tls_cert
+  _changed=0
+  for _kv in "listen_addresses=*" "ssl=on" "ssl_cert_file=$PG_TLS_DIR/server.crt" \
+    "ssl_key_file=$PG_TLS_DIR/server.key" "password_encryption=scram-sha-256"; do
+    _k=${_kv%%=*} _val=${_kv#*=}
+    _cur=$(pg_sql "$LP_PORT" "SELECT setting FROM pg_settings WHERE name = '$_k'") ||
+      die "could not read PostgreSQL's settings on port $LP_PORT"
+    [ "$_cur" != "$_val" ] || continue
+    pg_sql "$LP_PORT" "ALTER SYSTEM SET $_k = '$_val'" >/dev/null || die "could not set $_k"
+    _changed=1
+  done
+  _hba=$(pg_sql "$LP_PORT" "SHOW hba_file") || die "could not find PostgreSQL's pg_hba.conf"
+  [ -f "$_hba" ] || die "PostgreSQL's pg_hba.conf ($_hba) isn't a file"
+  if ! grep -qs '^# Rowsafe --listen-public' "$_hba"; then
+    # The file is postgres's, in postgres's directory: written as postgres.
+    # shellcheck disable=SC2016 # $1 expands in the inner shell
+    printf '%s\n' "" "# Rowsafe --listen-public: logins from the network need TLS and a password" \
+      "# (SCRAM-SHA-256); the cloud firewall decides who can connect at all." \
+      "hostssl all             all             0.0.0.0/0               scram-sha-256" \
+      "hostssl all             all             ::/0                    scram-sha-256" |
+      (cd / && runuser -u postgres -- sh -c 'cat >>"$1"' rowsafe-hba "$_hba") || die "could not add the rules to $_hba"
+    _changed=1
+  fi
+  if [ "$_changed" = 1 ]; then
+    pg_sql "$LP_PORT" "SELECT pg_reload_conf()" >/dev/null || die "could not reload PostgreSQL"
+    sleep 1
+  fi
+  _bad=$(pg_sql "$LP_PORT" "SELECT count(*) FROM pg_hba_file_rules WHERE error IS NOT NULL") || _bad=unknown
+  [ "$_bad" = 0 ] || die "PostgreSQL rejects $_hba (see pg_hba_file_rules)"
+  _pending=$(pg_sql "$LP_PORT" "SELECT count(*) FROM pg_settings WHERE pending_restart") || _pending=0
+  if [ "$_pending" != 0 ]; then
+    if [ "$PG_OURS" = 1 ]; then
+      note "restarting the new PostgreSQL so it listens on the network"
+      pg_restart_cluster "$LP_MAJOR" "$LP_NAME" || die "restarting PostgreSQL $LP_MAJOR ($LP_NAME) failed (see above)"
+    elif [ "$TTY" = 1 ] && {
+      tty_say "PostgreSQL needs a quick restart to listen on the network. Open connections are dropped."
+      confirm "Restart PostgreSQL now?" n
+    }; then
+      pg_restart_cluster "$LP_MAJOR" "$LP_NAME" || die "restarting PostgreSQL $LP_MAJOR ($LP_NAME) failed (see above)"
+    else
+      warn "PostgreSQL listens on the network after its next restart: sudo systemctl restart postgresql@$LP_MAJOR-$LP_NAME"
+      return 0
+    fi
+  fi
+  [ "$(pg_sql "$LP_PORT" "SHOW ssl")" = on ] || die "PostgreSQL's TLS didn't turn on (see its log in /var/log/postgresql)"
+  if [ "$_changed" = 0 ] && [ "$_pending" = 0 ]; then
+    ok "PostgreSQL $LP_MAJOR listens on the network (port $LP_PORT, TLS and passwords only); nothing to change"
+  else
+    ok "PostgreSQL $LP_MAJOR listens on the network (port $LP_PORT, TLS and passwords only)"
+  fi
 }
 
 # ---------------------------------------------------------------- release
@@ -3968,9 +4277,11 @@ tuning_access() {
 # $FIREWALL_ALLOW_FILE. It runs in a unit of its own: the restart helper's
 # sandbox has no network access and stays that way.
 
-install_firewall_helper() {
+# write_firewall_helper installs the helper itself (FW_HELPER_CHANGED=1
+# when it changed).
+write_firewall_helper() {
   install -d -m 0755 -o root -g root "${FIREWALL_HELPER%/*}"
-  _changed=0
+  FW_HELPER_CHANGED=0
   if write_file "$FIREWALL_HELPER" 0755 root:root <<'ROWSAFE_FIREWALL_HELPER_EOF'; then
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
@@ -4001,7 +4312,8 @@ install_firewall_helper() {
 # Rules live in one nftables table of Rowsafe's own, "inet rowsafe", which
 # matches only the allowed database ports: connections to such a port
 # from anywhere but the allowed addresses and the server itself are
-# dropped; SSH and every other port are never touched. The whole table is
+# dropped; SSH (unless root allowed it, see "server" below) and every other
+# port are never touched. The whole table is
 # replaced in one nft transaction, checked with nft -c first. Ports that
 # Docker publishes are not covered (their traffic is forwarded, not
 # delivered to this server), and the postgres-socket check refuses them.
@@ -4018,6 +4330,19 @@ install_firewall_helper() {
 # holds the rules). The rules are kept in /var/lib/rowsafe-firewall and
 # loaded again at boot by rowsafe-firewall-restore.service
 # ("rowsafe-firewall --restore", which drops unconfirmed rules).
+#
+# Servers Rowsafe creates in a cloud whose own firewall Rowsafe can't set
+# (an OVHcloud project without security groups) get a firewall on the server
+# itself: the installer's --firewall-ssh adds the line "ssh" to root's allow
+# list, and only then the action "server" ("ID server PORT") sets both allow
+# lists at once: /var/lib/rowsafe/firewall/addresses for PostgreSQL's PORT
+# and /var/lib/rowsafe/firewall/ssh-addresses for SSH (the ports sshd uses,
+# found here, never taken from the agent), 0 to 64 addresses each (none =
+# closed to everyone; 0.0.0.0/0 and ::/0 = open to everyone). Connections
+# from the server itself and replies to connections already made (the
+# agent's own, which only dials out) are always let through; every other
+# port, and outbound traffic, stay as they are. It is confirmed and rolled
+# back like apply, and kept as ssh-allowed and ssh-ports next to port-PORT.
 
 set -u
 set -f
@@ -4084,12 +4409,24 @@ valid_cidr() {
   case $1 in */*) [ "${1#*/}" -ge 16 ] && [ "${1#*/}" -le 128 ] || return 1 ;; esac
 }
 
-# listed_port PORT: in root's allow list (ports compare as strings).
-listed_port() {
+# allow_ok: root's allow list is a regular file only root can write.
+allow_ok() {
   [ -f "$allow" ] && [ ! -L "$allow" ] || return 1
   [ "$(stat -c '%u' "$allow")" = 0 ] || return 1
   case $(stat -c '%A' "$allow") in ?????w???? | ????????w?) return 1 ;; esac
+}
+
+# listed_port PORT: in root's allow list (ports compare as strings).
+listed_port() {
+  allow_ok || return 1
   awk -v p="$1" '$1 "" == p "" { f = 1 } END { exit !f }' "$allow"
+}
+
+# listed_ssh: root allowed SSH's allow list too (the line "ssh", written by
+# the installer's --firewall-ssh on servers Rowsafe creates).
+listed_ssh() {
+  allow_ok || return 1
+  awk '$1 == "ssh" { f = 1 } END { exit !f }' "$allow"
 }
 
 # listen_ports [UID]: the TCP ports with a listening socket (of UID).
@@ -4104,6 +4441,47 @@ ssh_port() {
     "$sshd" -T 2>/dev/null | awk '$1 == "port" { print $2 }'
     "$ss" -ltnHp 2>/dev/null | awk '/"sshd"/ { n = split($4, a, ":"); print a[n] }'
   } | awk -v p="$1" '$1 "" == p "" { f = 1 } END { exit !f }'
+}
+
+# ssh_ports prints the ports sshd uses (or is set to); 22 when none is
+# found (sshd started by its socket unit shows up as systemd).
+ssh_ports() {
+  _sp=$({
+    "$sshd" -T 2>/dev/null | awk '$1 == "port" { print $2 }'
+    "$ss" -ltnHp 2>/dev/null | awk '/"sshd"/ { n = split($4, a, ":"); print a[n] }'
+  } | grep -Ex '[1-9][0-9]{0,4}' | awk '$1 <= 65535' | sort -un)
+  if [ -n "$_sp" ]; then printf '%s\n' "$_sp"; else echo 22; fi
+}
+
+# ssh_rule prints SSH's rule file (ssh-pending replaces ssh-allowed while it
+# waits for its confirmation), or nothing when SSH is not Rowsafe's.
+ssh_rule() {
+  listed_ssh || return 0
+  if [ -f "$state/ssh-pending" ]; then
+    echo "$state/ssh-pending"
+  elif [ -f "$state/ssh-allowed" ]; then
+    echo "$state/ssh-allowed"
+  fi
+}
+
+# rule_lines PORTS FILE prints the rules letting only FILE's addresses reach
+# PORTS (one port, or several separated by commas).
+rule_lines() {
+  _d=$1
+  case $_d in *,*) _d="{ $_d }" ;; esac
+  v4=$(grep -v ':' "$2" | grep -vx '0.0.0.0/0' | paste -sd, -)
+  v6=$(grep ':' "$2" | grep -vx '::/0' | paste -sd, -)
+  if grep -qx '0.0.0.0/0' "$2"; then
+    echo "    tcp dport $_d meta nfproto ipv4 accept"
+  elif [ -n "$v4" ]; then
+    echo "    tcp dport $_d ip saddr { $v4 } accept"
+  fi
+  if grep -qx '::/0' "$2"; then
+    echo "    tcp dport $_d meta nfproto ipv6 accept"
+  elif [ -n "$v6" ]; then
+    echo "    tcp dport $_d ip6 saddr { $v6 } accept"
+  fi
+  echo "    tcp dport $_d drop"
 }
 
 # rule_files prints the rule files in $state: port-P, and pending-P which
@@ -4121,15 +4499,18 @@ render() {
   echo "  chain input {"
   echo "    type filter hook input priority filter - 5; policy accept;"
   echo "    iifname \"lo\" accept"
+  sf=$(ssh_rule)
+  sp=$(paste -sd, - <"$state/ssh-ports" 2>/dev/null)
+  if [ -n "$sf" ] && [ -n "$sp" ]; then
+    # Replies to connections already made (the agent's, an SSH session).
+    echo "    ct state established,related accept"
+    rule_lines "$sp" "$sf"
+  fi
   for f in $(rule_files); do
     p=${f##*/}
     p=${p#*-}
     valid_port "$p" || continue
-    v4=$(grep -v ':' "$f" | paste -sd, -)
-    v6=$(grep ':' "$f" | paste -sd, -)
-    [ -z "$v4" ] || echo "    tcp dport $p ip saddr { $v4 } accept"
-    [ -z "$v6" ] || echo "    tcp dport $p ip6 saddr { $v6 } accept"
-    echo "    tcp dport $p drop"
+    rule_lines "$p" "$f"
   done
   echo "  }"
   echo "}"
@@ -4140,7 +4521,7 @@ loaded() { "$nft" list table inet rowsafe >/dev/null 2>&1; }
 # load applies the rules in $state (or removes the table when none are
 # left), and checks nftables holds them.
 load() {
-  if [ -n "$(rule_files)" ]; then
+  if [ -n "$(rule_files)$(ssh_rule)" ]; then
     render >"$state/rules.nft.new" || return 1
     "$nft" -c -f "$state/rules.nft.new" 2>"$state/nft.err" || return 1
     "$nft" -f "$state/rules.nft.new" 2>"$state/nft.err" || return 1
@@ -4159,9 +4540,15 @@ load() {
 
 # publish writes the public view of each confirmed rule for the agent.
 publish() {
-  find "$out_dir" -maxdepth 1 -type f -name 'port-*' -exec rm -f {} + 2>/dev/null
+  find "$out_dir" -maxdepth 1 -type f \( -name 'port-*' -o -name ssh \) -exec rm -f {} + 2>/dev/null
   l=0
   if loaded; then l=1; fi
+  if listed_ssh && [ -f "$state/ssh-allowed" ] && tmp=$(mktemp "$out_dir/.ssh.XXXXXX"); then
+    printf 'addresses=%s\nports=%s\napplied_at=%s\nloaded=%s\n' "$(paste -sd, - <"$state/ssh-allowed")" \
+      "$(paste -sd, - <"$state/ssh-ports" 2>/dev/null)" "$(stat -c '%Y' "$state/ssh-allowed")" "$l" >"$tmp"
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$out_dir/ssh"
+  fi
   find "$state" -maxdepth 1 -type f -name 'port-*' 2>/dev/null | while read -r f; do
     p=${f##*/port-}
     tmp=$(mktemp "$out_dir/.port.XXXXXX") || return 0
@@ -4176,7 +4563,7 @@ chmod 0700 "$state"
 
 if [ "${1:-}" = --restore ]; then
   # Unconfirmed rules never come back.
-  find "$state" -maxdepth 1 -type f -name 'pending-*' -exec rm -f {} + 2>/dev/null
+  find "$state" -maxdepth 1 -type f \( -name 'pending-*' -o -name ssh-pending \) -exec rm -f {} + 2>/dev/null
   if load; then
     publish
     log "rules loaded"
@@ -4189,7 +4576,7 @@ fi
 
 line=$(read_agent_file "$dir/request" 200 | head -n 1)
 [ -n "$line" ] || exit 0
-if printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} (apply|remove|status) [1-9][0-9]{0,4}$'; then
+if printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} (apply|remove|status|server) [1-9][0-9]{0,4}$'; then
   id=${line%% *}
   rest=${line#* }
   action=${rest% *}
@@ -4212,14 +4599,20 @@ command -v "$nft" >/dev/null 2>&1 || refuse "nftables (the nft command) is not i
 valid_port "$port" || refuse "port $port can't be managed by Rowsafe: only ports 1024 to 65535"
 listed_port "$port" || refuse "port $port is not in $allow: changing the firewall for it from Rowsafe is not allowed"
 if ssh_port "$port"; then refuse "port $port is SSH's: Rowsafe never touches it"; fi
+if [ "$action" = server ] && ! listed_ssh; then
+  refuse "SSH's allow list isn't Rowsafe's on this server: only servers Rowsafe creates allow it (the installer's --firewall-ssh)"
+fi
 
 # Keep the current rules to go back to.
 rm -rf "$state/previous"
 mkdir -p "$state/previous"
 for f in $(rule_files); do cp -p "$f" "$state/previous/"; done
+for f in ssh-allowed ssh-ports; do
+  if [ -f "$state/$f" ]; then cp -p "$state/$f" "$state/previous/"; fi
+done
 
 rollback() {
-  find "$state" -maxdepth 1 -type f \( -name 'port-*' -o -name 'pending-*' \) -exec rm -f {} + 2>/dev/null
+  find "$state" -maxdepth 1 -type f \( -name 'port-*' -o -name 'pending-*' -o -name 'ssh-*' \) -exec rm -f {} + 2>/dev/null
   find "$state/previous" -maxdepth 1 -type f -exec cp -p {} "$state/" \; 2>/dev/null
   if ! load; then
     publish
@@ -4228,7 +4621,29 @@ rollback() {
   publish
 }
 
-if [ "$action" = apply ]; then
+# take_addresses FILE NEW MIN MAX [any]: the agent's addresses in FILE,
+# checked, into NEW (root's); "any" also takes 0.0.0.0/0 and ::/0.
+take_addresses() {
+  addrs=$(read_agent_file "$dir/$1" 4096 | head -n "$(($4 + 1))")
+  n=0
+  : >"$2"
+  for a in $addrs; do
+    if [ "${5:-}" = any ] && { [ "$a" = 0.0.0.0/0 ] || [ "$a" = ::/0 ]; }; then
+      :
+    elif ! valid_cidr "$a"; then
+      rm -f "$2"
+      refuse "not an address or range: $(printf '%s' "$a" | cut -c1-60)"
+    fi
+    n=$((n + 1))
+    printf '%s\n' "$a" >>"$2"
+  done
+  [ "$n" -ge "$3" ] && [ "$n" -le "$4" ] || {
+    rm -f "$2"
+    refuse "between $3 and $4 addresses are needed, got $n"
+  }
+}
+
+if [ "$action" = apply ] || [ "$action" = server ]; then
   db_listens=0
   for u in $db_users; do
     uid=$(id -u "$u" 2>/dev/null) || continue
@@ -4236,22 +4651,16 @@ if [ "$action" = apply ]; then
   done
   [ "$db_listens" = 1 ] ||
     refuse "no database server (PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis or Valkey) listens on port $port here (a port Docker publishes bypasses this firewall: limit it in the compose file instead)"
-  addrs=$(read_agent_file "$dir/addresses" 4096 | head -n 33)
-  n=0
-  : >"$state/new-$port"
-  for a in $addrs; do
-    valid_cidr "$a" || {
-      rm -f "$state/new-$port"
-      refuse "not an address or range: $(printf '%s' "$a" | cut -c1-60)"
-    }
-    n=$((n + 1))
-    printf '%s\n' "$a" >>"$state/new-$port"
-  done
-  [ "$n" -ge 1 ] && [ "$n" -le 32 ] || {
-    rm -f "$state/new-$port"
-    refuse "between 1 and 32 addresses are needed, got $n"
-  }
+fi
+if [ "$action" = apply ]; then
+  take_addresses addresses "$state/new-$port" 1 32
   mv -f "$state/new-$port" "$state/pending-$port"
+elif [ "$action" = server ]; then
+  take_addresses addresses "$state/new-$port" 0 64 any
+  take_addresses ssh-addresses "$state/ssh-new" 0 64 any
+  ssh_ports >"$state/ssh-ports"
+  mv -f "$state/new-$port" "$state/pending-$port"
+  mv -f "$state/ssh-new" "$state/ssh-pending"
 else
   rm -f "$state/port-$port" "$state/pending-$port"
 fi
@@ -4265,7 +4674,7 @@ if ! load; then
 fi
 log "$action port $port (request $id)"
 
-if [ "$action" = apply ]; then
+if [ "$action" = apply ] || [ "$action" = server ]; then
   # Wait for the agent to confirm it still reaches Rowsafe and PostgreSQL.
   phase=pending ok=1
   answer
@@ -4291,14 +4700,20 @@ if [ "$action" = apply ]; then
     exit 0
   fi
   mv -f "$state/pending-$port" "$state/port-$port"
+  if [ "$action" = server ]; then mv -f "$state/ssh-pending" "$state/ssh-allowed"; fi
 fi
 publish
 ok=1
 log "$action port $port: done"
 answer
 ROWSAFE_FIREWALL_HELPER_EOF
-    _changed=1
+    FW_HELPER_CHANGED=1
   fi
+}
+
+install_firewall_helper() {
+  write_firewall_helper
+  _changed=$FW_HELPER_CHANGED
   if write_file "$FIREWALL_SERVICE_FILE" 0644 root:root <<'ROWSAFE_FIREWALL_SERVICE_EOF'; then
 # SPDX-License-Identifier: Apache-2.0
 # rowsafe-firewall.service: lets only chosen addresses reach a PostgreSQL
@@ -4481,19 +4896,78 @@ firewall_listed() {
   grep -Ex '[1-9][0-9]{3,4}' "$FIREWALL_ALLOW_FILE" || true
 }
 
-# write_firewall_allow PORTS...: the allow list, written by root.
+# firewall_ssh_listed: the allow list has the line "ssh" (--firewall-ssh).
+firewall_ssh_listed() { [ -f "$FIREWALL_ALLOW_FILE" ] && grep -qx ssh "$FIREWALL_ALLOW_FILE"; }
+
+# write_firewall_allow PORTS...: the allow list, written by root. The line
+# "ssh" (SSH's allow list is Rowsafe's too) comes with --firewall-ssh and
+# stays until --no-firewall-ssh or --no-allow-firewall.
 write_firewall_allow() {
+  _fw_ssh=0
+  if [ "$FIREWALL_SSH" = yes ] || { [ "$FIREWALL_SSH" != no ] && firewall_ssh_listed; }; then _fw_ssh=1; fi
   {
     echo "# Database ports whose firewall rule Rowsafe may set when someone asks"
     echo "# (Security in the dashboard): only the chosen addresses may reach the"
-    echo "# port. SSH and other ports are never touched. Written by the installer"
-    echo "# (root); turn this off with: sudo rowsafe-allow --remove firewall"
+    if [ "$_fw_ssh" = 1 ]; then
+      echo "# port. \"ssh\": a server Rowsafe created (--firewall-ssh), where Rowsafe"
+      echo "# also sets who may reach SSH; other ports are never touched. Written by"
+      echo "# the installer (root); turn SSH's part off with: --no-firewall-ssh"
+    else
+      echo "# port. SSH and other ports are never touched. Written by the installer"
+      echo "# (root); turn this off with: sudo rowsafe-allow --remove firewall"
+    fi
     echo "# PORT"
     printf '%s\n' "$@" | sort -un
+    if [ "$_fw_ssh" = 1 ]; then echo ssh; fi
   } | write_file "$FIREWALL_ALLOW_FILE" 0644 root:root || true
 }
 
+# firewall_restore reloads Rowsafe's rules from what the helper keeps.
+firewall_restore() {
+  [ -x "$FIREWALL_HELPER" ] || return 0
+  install -d -m 0700 -o root -g root /var/lib/rowsafe-firewall
+  install -d -m 0755 -o root -g root /run/rowsafe-firewall
+  STATE_DIRECTORY=/var/lib/rowsafe-firewall RUNTIME_DIRECTORY=/run/rowsafe-firewall "$FIREWALL_HELPER" --restore 2>"$TMP/firewall.err"
+}
+
+# firewall_close_early (--firewall-ssh, on servers Rowsafe creates): before
+# PostgreSQL listens on public addresses, its port is closed to everyone
+# but this server, until the agent applies who may connect (the helper's
+# "server" action, when the person's choice arrives from the dashboard).
+# SSH stays as it is until then. A re-run keeps the rules already there.
+firewall_close_early() {
+  have nft || apt_install nftables
+  _ports=$(firewall_ports)
+  [ -n "$_ports" ] || return 0
+  [ -d "$CONFIG_DIR" ] || install -d -m 0750 -o root -g "$AGENT_USER" "$CONFIG_DIR"
+  # shellcheck disable=SC2046,SC2086 # one port per word
+  write_firewall_allow $(firewall_listed) $_ports
+  write_firewall_helper
+  install -d -m 0700 -o root -g root /var/lib/rowsafe-firewall
+  for _p in $_ports; do
+    [ -e "/var/lib/rowsafe-firewall/port-$_p" ] || [ -e "/var/lib/rowsafe-firewall/pending-$_p" ] ||
+      : >"/var/lib/rowsafe-firewall/port-$_p"
+  done
+  if firewall_restore; then
+    ok "PostgreSQL's port ($(printf '%s' "$_ports" | paste -sd, - | sed 's/,/, /g')) is closed to everyone but this server until Rowsafe applies who may connect"
+  else
+    sed 's/^/    /' "$TMP/firewall.err" >&2
+    die "could not close PostgreSQL's port with the firewall (nftables), so PostgreSQL stays private"
+  fi
+}
+
+# firewall_ssh_off is --no-firewall-ssh: Rowsafe's SSH rule goes, the
+# PostgreSQL rules stay.
+firewall_ssh_off() {
+  firewall_ssh_listed || return 0
+  grep -vx ssh "$FIREWALL_ALLOW_FILE" | write_file "$FIREWALL_ALLOW_FILE" 0644 root:root || true
+  rm -f /var/lib/rowsafe-firewall/ssh-allowed /var/lib/rowsafe-firewall/ssh-pending /var/lib/rowsafe-firewall/ssh-ports
+  firewall_restore || warn "could not reload Rowsafe's firewall rules: $(tr '\n' ' ' <"$TMP/firewall.err")"
+  perm_ok "Rowsafe no longer limits who can reach SSH"
+}
+
 allow_firewall() {
+  if [ "$FIREWALL_SSH" = yes ] && ! command -v nft >/dev/null 2>&1; then apt_install nftables; fi
   if ! command -v nft >/dev/null 2>&1; then
     warn "nftables isn't installed here (no nft command), so limiting who can reach $(engine_label) stays off. Install it (e.g. apt install nftables), then: sudo rowsafe-allow firewall"
     return 0
@@ -4507,7 +4981,11 @@ allow_firewall() {
   # shellcheck disable=SC2086 # one port per word
   write_firewall_allow $_listed $_ports
   install_firewall_helper
-  perm_ok "Rowsafe may limit who can reach $(engine_label)'s port ($(firewall_listed | paste -sd, - | sed 's/,/, /g')) when you ask (Security), never SSH or other ports"
+  if firewall_ssh_listed; then
+    perm_ok "Rowsafe may limit who can reach $(engine_label)'s port ($(firewall_listed | paste -sd, - | sed 's/,/, /g')) and SSH, as set in the dashboard; never other ports"
+  else
+    perm_ok "Rowsafe may limit who can reach $(engine_label)'s port ($(firewall_listed | paste -sd, - | sed 's/,/, /g')) when you ask (Security), never SSH or other ports"
+  fi
 }
 
 disallow_firewall() {
@@ -4524,6 +5002,7 @@ disallow_firewall() {
 # once on a terminal (default no). A re-run keeps the allow list as it is,
 # and adds a port it doesn't list only after a fresh yes.
 firewall_access() {
+  [ "$FIREWALL_SSH" != no ] || firewall_ssh_off
   case $ALLOW_FIREWALL in
     yes) allow_firewall ;;
     no)
@@ -7925,7 +8404,8 @@ setup_databases() {
   done 4<"$TMP/clusters"
 }
 
-# protect_unattended is --protect NAME: no questions, never a restart.
+# protect_unattended is --protect NAME: no questions, and no restart, except
+# of the PostgreSQL --install-postgres installed (a new, empty server).
 protect_unattended() {
   step "Turning on backups for $PROTECT_NAME"
   if [ -n "$PROTECT_PORT" ]; then
@@ -7956,7 +8436,7 @@ protect_unattended() {
     0) ;;
     5) return 0 ;;
     10)
-      restart_later
+      restart_new_or_later
       return 0
       ;;
     3) die "another backup tool is set up for this PostgreSQL; run the installer on a terminal to replace it" ;;
@@ -7967,9 +8447,21 @@ protect_unattended() {
   agent_show setup apply --database "$C_ID" || _arc=$?
   case $_arc in
     0) finish_setup 3m ;;
-    10) restart_later ;;
+    10) restart_new_or_later ;;
     *) die "turning on backups for $PROTECT_NAME failed (see above)" ;;
   esac
+}
+
+# restart_new_or_later: backups wait for a restart. The PostgreSQL that
+# --install-postgres installed in this run (or an earlier one) is restarted
+# right away; any other is left for a person to restart.
+restart_new_or_later() {
+  if [ "$PG_OURS" = 1 ] && [ "$C_ENGINE" = postgresql ] && [ "$C_MAJOR" = "$INSTALL_PG" ] && [ "$C_CLUSTER" = main ] &&
+    restart_postgres; then
+    finish_setup 3m
+    return 0
+  fi
+  restart_later
 }
 
 # next_steps says how to turn on backups when the installer didn't.
@@ -8853,6 +9345,10 @@ install_agent() {
   require_root
   detect_os
   detect_arch
+  # Servers Rowsafe creates: PostgreSQL first, then the agent protects it.
+  [ -z "$INSTALL_PG" ] || install_postgres
+  [ "$FIREWALL_SSH" != yes ] || firewall_close_early
+  [ "$LISTEN_PUBLIC" = 0 ] || listen_public
   detect_host_engine # mysql
   detect_mongodb_host # mongodb
   detect_clickhouse_host # clickhouse
@@ -9130,6 +9626,8 @@ main() {
         if [ "$1" = --allow-pooler-target ]; then POOLER_TARGET_ADD=$2; else POOLER_TARGET_DEL=$2; fi
         shift
         ;;
+      --firewall-ssh) FIREWALL_SSH=yes ;;
+      --no-firewall-ssh) FIREWALL_SSH=no ;;
       --allow-pooler) ALLOW_POOLER=yes ;;
       --no-allow-pooler) ALLOW_POOLER=no ;;
       --allow-pooler-public) ALLOW_POOLER_PUBLIC=yes ;;
@@ -9154,6 +9652,15 @@ main() {
         PROTECT_PORT=$2
         shift
         ;;
+      --install-postgres)
+        [ $# -ge 2 ] || die "--install-postgres needs a PostgreSQL version (13-18)"
+        case $2 in
+          13 | 14 | 15 | 16 | 17 | 18) INSTALL_PG=$2 ;;
+          *) die "--install-postgres: give a PostgreSQL major version from 13 to 18 (e.g. --install-postgres 17)" ;;
+        esac
+        shift
+        ;;
+      --listen-public) LISTEN_PUBLIC=1 ;;
       --check-storage) mode=check-storage ;;
       --add-storage) SECOND_COPY=add ;;
       --remove-second-copy) SECOND_COPY=remove ;;
@@ -9207,6 +9714,14 @@ main() {
   fi
   if [ "$mode" != install ] && [ "$mode" != permissions ] && { [ -n "$FILES_PATHS" ] || [ -n "$ALLOW_FILES" ] || [ "$NO_FILES" = 1 ]; }; then
     die "--files, --allow-files and --no-files only go with an install"
+  fi
+  if [ "$mode" != install ] && { [ -n "$INSTALL_PG" ] || [ "$LISTEN_PUBLIC" = 1 ]; }; then
+    die "--install-postgres and --listen-public only go with an install"
+  fi
+  [ "$mode" = install ] || [ -z "$FIREWALL_SSH" ] || die "--firewall-ssh and --no-firewall-ssh only go with an install"
+  if [ "$FIREWALL_SSH" = yes ]; then
+    [ "$ALLOW_FIREWALL" != no ] || die "--firewall-ssh needs the firewall: it can't go with --no-allow-firewall"
+    ALLOW_FIREWALL=yes
   fi
   # A permission that needs another one turned off: off too (permissions
   # section; --permissions does it once it knows the server).

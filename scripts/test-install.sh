@@ -78,10 +78,19 @@
 #      system's own package (Debian 12 and Ubuntu 24.04: Redis 7.0, Debian
 #      13: Valkey 8.1, Ubuntu 22.04: Redis 6.0, refused before anything
 #      changes).
+#  12. servers Rowsafe creates (--cloud, a separate run): one non-interactive
+#      run as cloud-init does it (--no-prompt --install-postgres 17
+#      --listen-public --storage rowsafe --protect shop) installs real
+#      PostgreSQL from apt.postgresql.org (signing key checked), makes it
+#      reachable with TLS and SCRAM only, generates the passphrase, protects it
+#      (the new PostgreSQL restarted once); a re-run changes nothing; a server
+#      with PostgreSQL already is refused. Needs the network.
 #
 # Usage: scripts/test-install.sh [IMAGE...]
+#        scripts/test-install.sh --cloud [IMAGE...]   (section 12 only)
 # Default images: debian:trixie debian:bookworm ubuntu:24.04 ubuntu:22.04
 # TEST_ONLY=redis runs only the Redis and Valkey cases (11).
+# (--cloud: debian:bookworm)
 
 set -eu
 
@@ -181,7 +190,14 @@ EOF
 
 host() {
   root=$(cd "$(dirname "$0")/.." && pwd)
-  images=${*:-debian:trixie debian:bookworm ubuntu:24.04 ubuntu:22.04}
+  mode=--in-container
+  if [ "${1:-}" = --cloud ]; then
+    shift
+    mode=--in-container-cloud
+    images=${*:-debian:bookworm}
+  else
+    images=${*:-debian:trixie debian:bookworm ubuntu:24.04 ubuntu:22.04}
+  fi
   docker info >/dev/null 2>&1 || {
     echo "test-install: Docker is not running" >&2
     exit 1
@@ -233,7 +249,7 @@ host() {
       -e TEST_PUB="$TEST_PUB" -e TEST_PRIV="$TEST_PRIV" -e TEST_UNITS="$first" -e TEST_SHOW="${TEST_SHOW:-}" -e TEST_ONLY="${TEST_ONLY:-}" \
       --cap-add NET_ADMIN \
       -v "$root/scripts:/src/scripts:ro" -v "$root/deploy:/src/deploy:ro" -v "$work/go:/go-release:ro" \
-      "$image" sh /src/scripts/test-install.sh --in-container
+      "$image" sh /src/scripts/test-install.sh "$mode"
     first=0
   done
   echo "test-install: all images passed"
@@ -310,7 +326,10 @@ sign() { # DIR [KEYFILE]
   echo >>"$1/manifest.json.sig"
 }
 
-in_container() {
+# release_setup: the release key, the rendered installer ($INSTALLER), a
+# local HTTPS release server and the signed 0.2.0 release on the stable
+# channel.
+release_setup() {
   W=/tmp/rt
   mkdir -p "$W/srv/agent"
   cd "$W"
@@ -376,6 +395,10 @@ EOF
     publish 0.2.0 && sign srv/agent/0.2.0
   fi
   mkdir -p srv/agent/stable && cp srv/agent/0.2.0/manifest.json srv/agent/0.2.0/manifest.json.sig srv/agent/stable/
+}
+
+in_container() {
+  release_setup
 
   publish 0.3.0 && sign srv/agent/0.3.0 && sed -i 's/"size": \([0-9]*\)/"size": 1\1/' srv/agent/0.3.0/manifest.json
   publish 0.4.0 && sign srv/agent/0.4.0 && sed -i 's/fake/FAKE/' "srv/agent/0.4.0/rowsafe-agent-linux-$arch" # same size
@@ -3408,6 +3431,75 @@ PGEOF
   [ ! -e "$FO/port-5432" ] || fail "remove left the port state"
   pass "firewall helper: nft rules, confirmation and rollback, pending rules, bad addresses and ports, SSH, allow list, symlinks, status, --restore, remove"
 
+  # Servers Rowsafe creates (--firewall-ssh, the line "ssh" in root's list):
+  # the "server" action sets PostgreSQL's and SSH's allow lists at once.
+  ssh_addrs() { printf '%b' "$1" | as_pg sh -c 'cat >"$1"' sh "$D/ssh-addresses"; }
+  ssh_addrs '198.51.100.7\n'
+  fw_request "fw_srv0 server 5432" '10.3.0.0/16\n' 1
+  grep -q "^error=SSH's allow list isn't Rowsafe's" "$FO/result" || fail "the server action was not refused without --firewall-ssh"
+  ! rules | grep -q . || fail "a refused server action changed the rules"
+  printf '5432\nssh\n' >/etc/rowsafe/firewall-allowed
+  ssh_addrs '198.51.100.7\n'
+  fw_request "fw_srv1 server 5432" '10.3.0.0/16\n2001:db8::/32\n' 1
+  fw_has "ok=1"
+  rules | grep -q "ct state established,related accept" || fail "replies to connections already made aren't let through: $(rules)"
+  rules | grep -q "tcp dport { 22, 2222 } ip saddr 198.51.100.7 accept" && rules | grep -q "tcp dport { 22, 2222 } drop" ||
+    fail "no SSH rules: $(rules)"
+  rules | grep -q "tcp dport 5432 ip6 saddr 2001:db8::/32 accept" && rules | grep -q "tcp dport 5432 drop" || fail "no PostgreSQL rules: $(rules)"
+  grep -qx "addresses=198.51.100.7" "$FO/ssh" && grep -qx "ports=22,2222" "$FO/ssh" && grep -qx "loaded=1" "$FO/ssh" || fail "SSH's rule not published"
+  [ -f "$W/fw-state/ssh-allowed" ] && [ ! -e "$W/fw-state/ssh-pending" ] || fail "a confirmed SSH rule was not kept"
+  # Everyone for PostgreSQL (passwords still needed), no one for SSH.
+  ssh_addrs ''
+  fw_request "fw_srv2 server 5432" '0.0.0.0/0\n::/0\n' 1
+  fw_has "ok=1"
+  rules | grep -q "tcp dport 5432 meta nfproto ipv6 accept" && ! rules | grep -q "198.51.100.7" && rules | grep -q "tcp dport { 22, 2222 } drop" ||
+    fail "open PostgreSQL, closed SSH: $(rules)"
+  # Unconfirmed: both lists come back as they were.
+  ssh_addrs '192.0.2.1\n'
+  WAIT=1 fw_request "fw_srv3 server 5432" '10.9.0.0/16\n' 0
+  fw_has "ok=0"
+  ! rules | grep -q "192.0.2.1" && ! rules | grep -q "10.9.0.0/16" && rules | grep -q "meta nfproto ipv6 accept" || fail "unconfirmed server action not rolled back: $(rules)"
+  [ ! -s "$W/fw-state/ssh-allowed" ] && [ ! -e "$W/fw-state/ssh-pending" ] || fail "an unconfirmed SSH rule was kept"
+  ssh_addrs '0.0.0.0/1\n'
+  fw_request "fw_srv4 server 5432" '' 1
+  grep -q "^error=not an address or range: 0.0.0.0/1" "$FO/result" || fail "a too wide SSH range was not refused"
+  as_pg rm -f "$D/ssh-addresses"
+  fw --restore
+  rules | grep -q "tcp dport { 22, 2222 } drop" || fail "--restore dropped SSH's rule"
+  # Root takes SSH back: its rule goes at the next load, PostgreSQL's stays.
+  printf '5432\n' >/etc/rowsafe/firewall-allowed
+  fw --restore
+  ! rules | grep -q "dport { 22" && ! rules | grep -q "ct state" && rules | grep -q "tcp dport 5432 drop" || fail "SSH's rule stayed without the ssh line: $(rules)"
+  [ ! -e "$FO/ssh" ] || fail "SSH's rule still published"
+  rm -f "$W/fw-state/ssh-allowed" "$W/fw-state/ssh-ports"
+  fw_request "fw_srv5 remove 5432" "" 0
+  ! rules | grep -q . || fail "remove left the table: $(rules)"
+  pass "firewall helper, servers Rowsafe creates: SSH and PostgreSQL at once, everyone and no one, rollback, --restore, root taking SSH back"
+
+  # The installer's --firewall-ssh: PostgreSQL's port closed before anything
+  # else, the ssh line kept until --no-firewall-ssh.
+  expect_fail "--firewall-ssh with --no-allow-firewall" "can't go with --no-allow-firewall" "$INSTALLER" --firewall-ssh --no-allow-firewall
+  expect_fail "--firewall-ssh only with an install" "only go with an install" "$INSTALLER" --firewall-ssh --uninstall
+  scenario "discover_out=$shop"
+  expect_ok "--firewall-ssh" "$INSTALLER" --firewall-ssh
+  grep -q "PostgreSQL's port (5432) is closed to everyone but this server until Rowsafe applies who may connect" "$W/out" &&
+    grep -q "and SSH, as set in the dashboard" "$W/out" || {
+    cat "$W/out" >&2
+    fail "--firewall-ssh not confirmed"
+  }
+  grep -qx ssh /etc/rowsafe/firewall-allowed && grep -qx 5432 /etc/rowsafe/firewall-allowed || fail "--firewall-ssh allow list"
+  rules | grep -q "tcp dport 5432 drop" && ! rules | grep -q "dport 22" || fail "--firewall-ssh didn't close PostgreSQL's port: $(rules)"
+  scenario "discover_out=$shop"
+  expect_ok "a re-run keeps --firewall-ssh" "$INSTALLER" --allow-firewall
+  grep -qx ssh /etc/rowsafe/firewall-allowed || fail "a re-run dropped the ssh line"
+  scenario "discover_out=$shop"
+  expect_ok "--no-firewall-ssh" "$INSTALLER" --no-firewall-ssh
+  ! grep -qx ssh /etc/rowsafe/firewall-allowed && grep -qx 5432 /etc/rowsafe/firewall-allowed || fail "--no-firewall-ssh allow list"
+  grep -q "Rowsafe no longer limits who can reach SSH" "$W/out" || fail "--no-firewall-ssh not confirmed"
+  nft delete table inet rowsafe 2>/dev/null || true
+  rm -rf /var/lib/rowsafe-firewall
+  pass "--firewall-ssh closes PostgreSQL's port first and keeps SSH's allow list Rowsafe's until --no-firewall-ssh"
+
   fw_request "fw_7 apply 5432" '10.2.0.0/16\n' 1
   expect_ok "--no-allow-firewall" "$INSTALLER" --no-allow-firewall
   [ ! -e "$H" ] && [ ! -e /etc/systemd/system/rowsafe-firewall.path ] || fail "--no-allow-firewall left the helper"
@@ -3564,7 +3656,123 @@ EOF
   pass "--no-allow-create-cluster keeps created clusters manageable; uninstall removes everything"
 }
 
+# ------------------------------------------------------------ servers Rowsafe creates
+
+# cloud_container (--cloud): --install-postgres and --listen-public for
+# real, in one non-interactive run like cloud-init's.
+cloud_container() {
+  release_setup
+  echo "  -- servers Rowsafe creates (--install-postgres, --listen-public)"
+  # The release server's CA and the public ones: the installer downloads the
+  # PostgreSQL project's signing key from www.postgresql.org.
+  cat /etc/ssl/certs/ca-certificates.crt "$W/tls.crt" >"$W/ca-bundle.crt"
+  export CURL_CA_BUNDLE=$W/ca-bundle.crt
+  pgv=${TEST_PG_VERSION:-17}
+
+  expect_fail "--install-postgres needs a version" "needs a PostgreSQL version" "$INSTALLER" --install-postgres
+  expect_fail "--install-postgres 12 refused" "from 13 to 18" "$INSTALLER" --install-postgres 12
+  expect_fail "--install-postgres only with an install" "only go with an install" "$INSTALLER" --install-postgres "$pgv" --uninstall
+  expect_fail "--listen-public only with an install" "only go with an install" "$INSTALLER" --listen-public --check-storage
+  [ ! -e /etc/rowsafe ] || fail "a refused option wrote /etc/rowsafe"
+
+  # PostgreSQL already here (binaries, a package): refused, nothing changed.
+  mkdir -p /usr/lib/postgresql/15/bin
+  printf '#!/bin/sh\n' >/usr/lib/postgresql/15/bin/postgres && chmod 755 /usr/lib/postgresql/15/bin/postgres
+  expect_fail "PostgreSQL already installed: refused" "PostgreSQL is already installed on this server (PostgreSQL 15" \
+    "$INSTALLER" rse_secrettoken123 --no-prompt --install-postgres "$pgv"
+  [ ! -e /etc/apt/sources.list.d/pgdg.list ] || fail "the repository was added despite the refusal"
+  rm -rf /usr/lib/postgresql
+
+  # By --protect time on a real server the agent has enrolled and runs. A
+  # stand-in agent: the postgres user and its state exist before the run
+  # (PostgreSQL's packages take the existing user), so the stand-in can run.
+  useradd --system --user-group --home-dir /var/lib/postgresql --create-home --shell /bin/bash postgres
+  install -d -m 0700 -o postgres -g postgres /var/lib/rowsafe
+  echo '{"host_id":"host_1","agent_token":"rsa_x"}' >/var/lib/rowsafe/agent.json
+  chown postgres:postgres /var/lib/rowsafe/agent.json
+  mkdir -p "$W/fa"
+  fake_agent 0.2.0 >"$W/fa/rowsafe-agent"
+  chmod 755 "$W" "$W/fa" "$W/fa/rowsafe-agent"
+  runuser -u postgres -- "$W/fa/rowsafe-agent" run >/dev/null 2>&1 &
+  agent_pid=$!
+  sleep 1
+  shop="5432\t/var/run/postgresql\t$pgv\tmain\t/var/lib/postgresql/$pgv/main\t8192\tpostgres\tno\t-\tpostgres\t7.5 MiB\tpostgresql@$pgv-main.service\t-"
+  status='db_fake\tshop\tactive\trunning\thttps://app.rowsafe.test/databases/db_fake'
+  scenario "discover_out=$shop" "plan_out=Restart: PostgreSQL needs one quick restart." apply_rc=10 \
+    "wait_out=✓ shop is protected. The first full backup is running." "status_out=$status"
+
+  cloud_init() {
+    sh -c 'w=$1; shift; ROWSAFE_RELEASES_URL=https://localhost:8443/agent ROWSAFE_RESTIC_URL=https://localhost:8443/restic sh -s -- "$@" <"$w/install.sh"' \
+      cloud-init "$W" rse_secrettoken123 --no-prompt --install-postgres "$pgv" --listen-public --storage rowsafe --protect shop
+  }
+  expect_ok "one run, as cloud-init: PostgreSQL, network, Rowsafe Storage, protected" cloud_init
+  [ -z "${TEST_SHOW:-}" ] || cat "$W/out"
+  grep -q "the PostgreSQL project's repository (apt.postgresql.org, key B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8)" "$W/out" || fail "$name: no word about the repository"
+  grep -qx "deb \[signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc\] https://apt.postgresql.org/pub/repos/apt $(. /etc/os-release && echo "$VERSION_CODENAME")-pgdg main" \
+    /etc/apt/sources.list.d/pgdg.list || fail "$name: pgdg.list"
+  dpkg-query -W -f '${Version}\n' "postgresql-$pgv" | grep -q pgdg || fail "$name: postgresql-$pgv isn't the PostgreSQL project's package"
+  [ "$(cat /etc/rowsafe/installed-postgresql)" = "$pgv" ] || fail "$name: no record of the installed major"
+  pg_lsclusters -h | awk -v m="$pgv" '$1 == m && $2 == "main" && $4 ~ /^online/ { f = 1 } END { exit !f }' || fail "$name: the cluster isn't running"
+  q() { runuser -u postgres -- psql -X -A -t -q -d postgres -c "$1"; }
+  [ "$(q 'SHOW listen_addresses')" = '*' ] || fail "$name: listen_addresses"
+  [ "$(q 'SHOW ssl')" = on ] || fail "$name: ssl"
+  [ "$(q 'SHOW password_encryption')" = scram-sha-256 ] || fail "$name: password_encryption"
+  [ "$(q 'SHOW server_encoding')" = UTF8 ] || fail "$name: server_encoding is $(q 'SHOW server_encoding')"
+  [ "$(stat -c '%U %G %a' /etc/ssl/rowsafe-postgresql/server.key)" = "root postgres 640" ] || fail "$name: TLS key ownership/mode"
+  hba=$(q 'SHOW hba_file')
+  [ "$(grep -c '^hostssl all  *all  *0.0.0.0/0  *scram-sha-256$' "$hba")" = 1 ] &&
+    [ "$(grep -c '^hostssl all  *all  *::/0  *scram-sha-256$' "$hba")" = 1 ] || fail "$name: pg_hba.conf rules"
+  [ "$(stat -c '%U' "$hba")" = postgres ] || fail "$name: pg_hba.conf changed owner"
+  grep -q "PostgreSQL restarted" "$W/out" || fail "$name: the new PostgreSQL wasn't restarted for backups"
+  called "plan --name shop --port 5432"
+  called "apply --database db_fake"
+  called "wait --database db_fake --timeout 3m"
+  grep -q "a backup encryption passphrase was generated" "$W/out" || fail "$name: no passphrase note"
+  gen=$(sed -n "s/^ROWSAFE_REPO_CIPHER_PASS='\([A-Za-z0-9]\{40\}\)'\$/\1/p" /etc/rowsafe/agent.env)
+  [ "${#gen}" = 40 ] || fail "$name: no generated passphrase"
+  ! grep -qF "$gen" "$W/out" || fail "$name: the passphrase was printed"
+  ! grep -q rse_secrettoken123 "$W/out" || fail "$name: the token was printed"
+  pass "PostgreSQL $pgv from apt.postgresql.org, listening with TLS and SCRAM, protected, passphrase kept on the server"
+
+  # From the network: TLS and a password, nothing else.
+  ip=$(hostname -i | awk '{ print $1 }')
+  q "CREATE ROLE app LOGIN PASSWORD 'app-password-for-the-test'" >/dev/null
+  conn="host=$ip port=5432 dbname=postgres user=app"
+  [ "$(PGPASSWORD=app-password-for-the-test psql -X -A -t "$conn sslmode=require" -c 'SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()' 2>&1)" = t ] ||
+    fail "TLS login from the network"
+  if PGPASSWORD=app-password-for-the-test psql -X "$conn sslmode=disable" -c 'SELECT 1' >"$W/out" 2>&1; then fail "a login without TLS was accepted"; fi
+  grep -q "no encryption" "$W/out" || { cat "$W/out" >&2; fail "a login without TLS wasn't refused by pg_hba.conf"; }
+  if PGPASSWORD=wrong psql -X "$conn sslmode=require" -c 'SELECT 1' >"$W/out" 2>&1; then fail "a wrong password was accepted"; fi
+  grep -q "password authentication failed" "$W/out" || { cat "$W/out" >&2; fail "a wrong password wasn't refused"; }
+  [ "$(q "SELECT rolpassword LIKE 'SCRAM-SHA-256\$%' FROM pg_authid WHERE rolname = 'app'")" = t ] || fail "the password isn't stored as SCRAM"
+  pass "from the network: TLS and SCRAM logins only"
+
+  # Again: nothing changes, nothing restarts.
+  started=$(q 'SELECT pg_postmaster_start_time()')
+  scenario "discover_out=5432\t/var/run/postgresql\t$pgv\tmain\t/var/lib/postgresql/$pgv/main\t8192\tshop\tyes\tactive\tpostgres\t7.5 MiB\tpostgresql@$pgv-main.service\tdb_fake" \
+    plan_rc=5 "plan_out=shop is already protected." "status_out=$status"
+  expect_ok "re-run changes nothing" cloud_init
+  grep -q "PostgreSQL $pgv is installed (by an earlier run of this installer)" "$W/out" || fail "$name: not recognized as its own"
+  grep -q "nothing to change" "$W/out" || fail "$name: --listen-public changed something"
+  [ "$(q 'SELECT pg_postmaster_start_time()')" = "$started" ] || fail "$name: PostgreSQL was restarted"
+  [ "$(grep -c '^hostssl' "$hba")" = 2 ] || fail "$name: pg_hba.conf rules added twice"
+  [ "$(sed -n "s/^ROWSAFE_REPO_CIPHER_PASS='\(.*\)'\$/\1/p" /etc/rowsafe/agent.env)" = "$gen" ] || fail "$name: the passphrase changed"
+  not_called "apply"
+  pass "re-run: nothing changed, nothing restarted"
+
+  # Another major, or the same one not installed by Rowsafe: refused.
+  expect_fail "another major refused" "already installed on this server (PostgreSQL $pgv" "$INSTALLER" --no-prompt --install-postgres 16 --no-setup
+  mv /etc/rowsafe/installed-postgresql "$W/installed-postgresql"
+  expect_fail "PostgreSQL not installed by Rowsafe refused" "already installed on this server" "$INSTALLER" --no-prompt --install-postgres "$pgv" --no-setup
+  mv "$W/installed-postgresql" /etc/rowsafe/installed-postgresql
+  pass "refused on a server with PostgreSQL that --install-postgres didn't install"
+
+  kill "$agent_pid" 2>/dev/null || true
+  wait "$agent_pid" 2>/dev/null || true
+}
+
 case ${1:-} in
   --in-container) in_container ;;
+  --in-container-cloud) cloud_container ;;
   *) host "$@" ;;
 esac

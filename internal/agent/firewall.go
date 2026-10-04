@@ -82,26 +82,37 @@ func (a *Agent) firewallDir() string {
 
 // firewallAllowedPorts reads the allow list; a missing file means off.
 func firewallAllowedPorts() (map[int]bool, error) {
+	ports, _, err := firewallAllowList()
+	return ports, err
+}
+
+// firewallAllowList reads the allow list: the ports, and whether the line
+// "ssh" is there (servers Rowsafe creates, installer --firewall-ssh: SSH's
+// allow list is Rowsafe's too).
+func firewallAllowList() (map[int]bool, bool, error) {
 	f, err := os.Open(firewallAllowFile)
 	if errors.Is(err, os.ErrNotExist) {
-		return map[int]bool{}, nil
+		return map[int]bool{}, false, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer f.Close()
 	out := map[int]bool{}
+	ssh := false
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		fields := strings.Fields(sc.Text())
 		if len(fields) == 0 || strings.HasPrefix(fields[0], "#") {
 			continue
 		}
-		if p, err := strconv.Atoi(fields[0]); err == nil && p > 0 && p < 65536 {
+		if fields[0] == "ssh" {
+			ssh = true
+		} else if p, err := strconv.Atoi(fields[0]); err == nil && p > 0 && p < 65536 {
 			out[p] = true
 		}
 	}
-	return out, sc.Err()
+	return out, ssh, sc.Err()
 }
 
 // firewallState is what Rowsafe may do with the firewall for port.
@@ -160,19 +171,56 @@ func (a *Agent) firewall(ctx context.Context, db protocol.DatabaseSpec, p protoc
 			addrs = append(addrs, a.String())
 		}
 	}
+	files := map[string][]string{}
+	if action == fwApply {
+		files["addresses"] = addrs
+	}
+	tl.Printf("asking the firewall helper to %s the rule for port %d", action, db.Port)
 	firewallMu.Lock()
 	defer firewallMu.Unlock()
+	err := a.firewallRequest(ctx, action, db.Port, files, func(ctx context.Context) error {
+		// The rule is in place: confirm only if Rowsafe and PostgreSQL are
+		// still reachable, else the helper rolls it back by itself.
+		tl.Printf("rule in place; checking the agent still reaches Rowsafe and %s", protocol.EngineDisplayName(db.Engine))
+		if err := a.reachesControlPlane(ctx); err != nil {
+			return err
+		}
+		return a.databaseReachable(ctx, db)
+	}, tl)
+	if err != nil {
+		return err
+	}
+	if action == fwApply {
+		res.Summary = fmt.Sprintf("The firewall lets only %s reach %s's port %d now. SSH and other ports are unchanged.", strings.Join(addrs, ", "),
+			protocol.EngineDisplayName(db.Engine), db.Port)
+	} else {
+		res.Summary = fmt.Sprintf("Rowsafe's firewall rule for port %d is removed.", db.Port)
+	}
+	tl.Printf("%s", res.Summary)
+	return nil
+}
+
+// firewallRequest hands one request to the helper and waits for its final
+// answer. files (name -> lines) are written next to the request first.
+// When the helper answers phase=pending (the new rules are loaded), the
+// agent confirms only if check passes; otherwise the helper puts the
+// previous rules back by itself. The caller holds firewallMu.
+func (a *Agent) firewallRequest(ctx context.Context, action string, port int, files map[string][]string,
+	check func(context.Context) error, tl *taskLog) error {
 	id := newFirewallID()
 	dir := a.firewallDir()
 	defer a.firewallDone()
-	if action == fwApply {
-		if err := writeFileAtomic(filepath.Join(dir, "addresses"), []byte(strings.Join(addrs, "\n")+"\n"), 0o600); err != nil {
+	for name, lines := range files {
+		data := []byte{}
+		if len(lines) > 0 {
+			data = []byte(strings.Join(lines, "\n") + "\n")
+		}
+		if err := writeFileAtomic(filepath.Join(dir, name), data, 0o600); err != nil {
 			return err
 		}
 	}
 	_ = os.Remove(filepath.Join(dir, "confirm"))
-	tl.Printf("asking the firewall helper to %s the rule for port %d", action, db.Port)
-	if err := writeFileAtomic(filepath.Join(dir, "request"), fmt.Appendf(nil, "%s %s %d\n", id, action, db.Port), 0o600); err != nil {
+	if err := writeFileAtomic(filepath.Join(dir, "request"), fmt.Appendf(nil, "%s %s %d\n", id, action, port), 0o600); err != nil {
 		return err
 	}
 	resPath := filepath.Join(firewallResultDir, "result")
@@ -182,14 +230,8 @@ func (a *Agent) firewall(ctx context.Context, db protocol.DatabaseSpec, p protoc
 		return fmt.Errorf("the firewall helper did not answer: %w (check `systemctl status rowsafe-firewall.path`)", err)
 	}
 	if r["phase"] == "pending" {
-		// The rule is in place: confirm only if Rowsafe and PostgreSQL are
-		// still reachable, else the helper rolls it back by itself.
-		tl.Printf("rule in place; checking the agent still reaches Rowsafe and %s", protocol.EngineDisplayName(db.Engine))
 		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		err := a.client.post(cctx, "/v1/agent/security", protocol.SecurityReportBatch{}, &protocol.SecurityAck{})
-		if err == nil {
-			err = a.databaseReachable(cctx, db)
-		}
+		err := check(cctx)
 		cancel()
 		if err != nil {
 			tl.Printf("not confirming (%v): the helper puts the previous rules back", err)
@@ -208,14 +250,13 @@ func (a *Agent) firewall(ctx context.Context, db protocol.DatabaseSpec, p protoc
 		}
 		return fmt.Errorf("changing the firewall failed: %s", msg)
 	}
-	if action == fwApply {
-		res.Summary = fmt.Sprintf("The firewall lets only %s reach %s's port %d now. SSH and other ports are unchanged.", strings.Join(addrs, ", "),
-			protocol.EngineDisplayName(db.Engine), db.Port)
-	} else {
-		res.Summary = fmt.Sprintf("Rowsafe's firewall rule for port %d is removed.", db.Port)
-	}
-	tl.Printf("%s", res.Summary)
 	return nil
+}
+
+// reachesControlPlane checks the agent still reaches the control plane (an
+// empty security report: answered, changes nothing).
+func (a *Agent) reachesControlPlane(ctx context.Context) error {
+	return a.client.post(ctx, "/v1/agent/security", protocol.SecurityReportBatch{}, &protocol.SecurityAck{})
 }
 
 // waitHelper waits for a helper answer that matches.
@@ -246,7 +287,7 @@ func newFirewallID() string {
 
 // firewallDone removes the agent's request files: the helper never does.
 func (a *Agent) firewallDone() {
-	for _, f := range []string{"request", "addresses", "confirm"} {
+	for _, f := range []string{"request", "addresses", "ssh-addresses", "confirm"} {
 		_ = os.Remove(filepath.Join(a.firewallDir(), f))
 	}
 }
