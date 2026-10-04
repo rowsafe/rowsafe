@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# An app with its SQLite database in a volume (a Rails 8 app here; Django,
+# Laravel, PocketBase and Go or Node apps work the same), with the Rowsafe
+# agent next to it: full copies every day and every committed change within
+# a few seconds to your bucket (encrypted in the agent container, with your
+# passphrase), restores to any second, Marks, weekly Proof, Rewind and Pulse.
+#
+# The agent shares the app's volume and runs as the app's user, so SQLite's
+# locks and its -wal and -shm files work for both. It never changes the app's
+# files except through SQLite (checkpoints, and what you ask for).
+#
+#   1. Put the agent's settings in rowsafe-agent.env next to this file
+#      (chmod 600), with a one-time token from `rowsafe hosts enroll-token`
+#      (ROWSAFE_ENROLL_TOKEN) and your bucket (ROWSAFE_REPO_*).
+#   2. Set `user:` below to the uid:gid your app runs as (Rails' image: 1000:1000;
+#      `docker compose exec app id` shows it).
+#   3. docker compose up -d
+#   4. Add the database in the dashboard (host app-1, the file
+#      /rails/storage/production.sqlite3), or:
+#        rowsafe adopt shop --host app-1 --engine sqlite --path /rails/storage/production.sqlite3
+#        rowsafe apply shop
+#
+# Restores to any second need WAL mode (Rails 8's default). A database in the
+# older rollback-journal mode gets its daily copies; Pulse offers to turn on
+# WAL. Keep the volume on a local disk: SQLite's locking isn't reliable on
+# network filesystems, and Rowsafe refuses them.
+#
+# Update the agent (the app keeps running):
+#   docker compose pull rowsafe-agent && docker compose up -d rowsafe-agent
+
+name: shop
+
+services:
+  app:
+    image: ghcr.io/example/shop:latest
+    restart: unless-stopped
+    volumes:
+      - storage:/rails/storage
+
+  # Rowsafe
+  rowsafe-agent:
+    # It follows the newest Rowsafe release; to pin one, use the exact tag
+    # instead, e.g. ghcr.io/rowsafe/agent:<version>-sqlite.
+    image: ghcr.io/rowsafe/agent:sqlite
+    # The name Rowsafe shows for this host.
+    hostname: app-1
+    restart: unless-stopped
+    # The app's user: the agent must read and write the database file, its
+    # -wal and -shm files and their folder, like the app.
+    user: "1000:1000"
+    env_file: rowsafe-agent.env              # ROWSAFE_ENROLL_TOKEN, ROWSAFE_REPO_* (chmod 600)
+    environment:
+      # The database files, as the agent sees them (colon-separated).
+      ROWSAFE_SQLITE_PATHS: /rails/storage/production.sqlite3
+    volumes:
+      # The same volume, at the same path as in the app (read-write).
+      - storage:/rails/storage
+      # The agent's identity, state and temporary restores.
+      - rowsafe-state:/var/lib/rowsafe
+
+volumes:
+  storage:
+  rowsafe-state:

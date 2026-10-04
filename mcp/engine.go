@@ -23,6 +23,8 @@ func changeLog(engine string) string {
 		return "oplog"
 	case protocol.EngineRedis, protocol.EngineValkey:
 		return "replication stream"
+	case protocol.EngineSQLite:
+		return "WAL"
 	}
 	return ""
 }

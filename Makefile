@@ -37,7 +37,7 @@ AGENT_LDFLAGS := -s -w -buildid= -X $(PKG)/internal/agent.Version=$(VERSION) -X 
 MAIN_LDFLAGS := -s -w -buildid= -X main.version=$(VERSION)
 GOBUILD := CGO_ENABLED=0 GOFLAGS=-mod=readonly $(GO) build -trimpath -buildvcs=false
 
-.PHONY: all build test lint check-installer test-installer test-installer-cloud test-mongodb test-clickhouse test-redis test-rewind test-secondcopy test-mysql test-upgrade test-pooling test-permissions test-action dist release check-release-env clean
+.PHONY: all build test lint check-installer test-installer test-installer-cloud test-mongodb test-clickhouse test-redis test-sqlite test-rewind test-secondcopy test-mysql test-upgrade test-pooling test-permissions test-action dist release check-release-env clean
 
 all: lint test build
 
@@ -124,6 +124,9 @@ test-clickhouse:
 
 test-redis:
 	bash scripts/test-redis.sh
+
+test-sqlite:
+	bash scripts/test-sqlite.sh
 
 test-rewind:
 	sh scripts/test-rewind.sh

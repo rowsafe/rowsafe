@@ -167,6 +167,16 @@ case \${1:-} in
       [ "\$(wc -l <"\$f/\$cmd.rc")" -le 1 ] || sed -i 1d "\$f/\$cmd.rc"
     fi
     exit "\$rc" ;;
+  sqlite)
+    # (sqlite) root's look for SQLite files programs have open: sqlite-find.out
+    f=/tmp/rowsafe-fake
+    shift
+    echo "sqlite \$* (\$(id -un))" >>"\$f/calls"
+    chmod 666 "\$f/calls" 2>/dev/null || true
+    case \${1:-} in
+      find) [ ! -f "\$f/sqlite-find.out" ] || cat "\$f/sqlite-find.out" ;;
+      *) exit 2 ;;
+    esac ;;
   files)
     # (files) answers from /tmp/rowsafe-fake: files-discover.out, files-access.out, files-list.out
     f=/tmp/rowsafe-fake
@@ -1466,6 +1476,60 @@ EOF
   mongodb_flow_tests
   clickhouse_flow_tests
   redis_flow_tests
+  sqlite_flow_tests
+}
+
+# sqlite_flow_tests: SQLite files, named with --sqlite or found open (root's
+# `rowsafe-agent sqlite find`): the agent gets read and write access with
+# ACLs (owner, group and mode unchanged), the file goes to the agent's list,
+# and the plan names the file (--engine sqlite --socket-dir PATH).
+sqlite_flow_tests() {
+  echo "  -- SQLite"
+  id -u shopapp >/dev/null 2>&1 || useradd --system --user-group shopapp
+  mkfile() { # PATH: a SQLite file owned by shopapp, 0644
+    install -d -o shopapp -g shopapp -m 0755 "$(dirname "$1")"
+    { printf 'SQLite format 3\000'; head -c 4080 /dev/zero; } >"$1"
+    chown shopapp:shopapp "$1"
+    chmod 0644 "$1"
+  }
+  db=/srv/shop/db/production.sqlite3
+  mkfile "$db"
+  rm -f /etc/rowsafe/sqlite-paths
+  line="0\t$db\t0\t-\t/srv/shop/db\t4096\tshop-production\tno\t-\tshop-production\t4.0 KiB\t-\t-\tsqlite"
+  splan='SQLite database in /srv/shop/db (4.0 KiB, 2 tables, wal journal mode).\n\nWhat Rowsafe will change:\n  - Prepare your bucket for this database'
+
+  # 1. --protect with --sqlite: access, the list, the plan by path.
+  scenario "discover_out=$line" "plan_out=$splan" "wait_out=$done_" "status_out=$status"
+  expect_ok "--protect --sqlite: access, list, plan by file" "$INSTALLER" --protect shop --sqlite "$db"
+  called "plan --name shop --port 0 --socket-dir $db"
+  called "--engine sqlite"
+  called "apply --database db_fake"
+  grep -qxF "$db" /etc/rowsafe/sqlite-paths || fail "$name: $db isn't in /etc/rowsafe/sqlite-paths"
+  [ "$(stat -c '%a' /etc/rowsafe/sqlite-paths)" = 644 ] || fail "$name: /etc/rowsafe/sqlite-paths isn't 0644"
+  getfacl -p "$db" 2>/dev/null | grep -qx 'user:postgres:rw-' || fail "$name: no ACL for the agent on $db"
+  getfacl -p /srv/shop/db 2>/dev/null | grep -qx 'user:postgres:rwx' || fail "$name: no ACL for the agent on its folder"
+  getfacl -p /srv/shop/db 2>/dev/null | grep -qx 'default:user:shopapp:rw-' || fail "$name: no default ACL for the app's user"
+  [ "$(stat -c '%U %G' "$db")" = "shopapp shopapp" ] || fail "$name: the file's owner changed"
+  getfacl -p "$db" 2>/dev/null | grep -qx 'group::r--' || fail "$name: the file's group gained access"
+  grep -q "gave the agent (postgres) read and write access to $db" "$W/out" || fail "$name: the change isn't said"
+
+  # 2. A file found open, picked on a terminal.
+  db2=/srv/blog/blog.db
+  mkfile "$db2"
+  line2="0\t$db2\t0\t-\t/srv/blog\t4096\tblog\tno\t-\tblog\t4.0 KiB\t-\t-\tsqlite"
+  scenario "sqlite-find_out=$db2\t4096\twal\t4242\truby\t-\t-\t999\t999\tblog" "discover_out=$line2" "plan_out=$splan"
+  tty_ok "SQLite file found open: picked, access, plan" \
+    "Protect $db2\ty\nName it in Rowsafe\t\nTurn on backups for blog now?\tn\n" "$INSTALLER"
+  called "sqlite find (root)"
+  called "--socket-dir $db2"
+  grep -qxF "$db2" /etc/rowsafe/sqlite-paths || fail "$name: $db2 isn't in the list"
+  getfacl -p "$db2" 2>/dev/null | grep -qx 'user:postgres:rw-' || fail "$name: no ACL for the agent on $db2"
+
+  # 3. A side file is refused, and --protect takes exactly one --sqlite.
+  expect_fail "--sqlite refuses a -wal file" "not its -wal" "$INSTALLER" --sqlite "$db-wal"
+  expect_fail "--protect with two --sqlite files" "exactly one --sqlite" "$INSTALLER" --protect shop --sqlite "$db" --sqlite "$db2"
+  pass "SQLite: --sqlite and found files get ACL access, the list, plans by file; side files refused"
+  rm -f /etc/rowsafe/sqlite-paths
 }
 
 # mongodb_flow_tests: a MongoDB server found by discover (engine column):

@@ -240,6 +240,8 @@ MONGODB_REPLSET='' # --mongodb-replica-set (yes) / --no-mongodb-replica-set (no)
 INSTALL_PG=''      # --install-postgres VERSION (servers Rowsafe creates)
 LISTEN_PUBLIC=0    # --listen-public
 PG_OURS=0          # the PostgreSQL here is the one --install-postgres installed
+SQLITE_PATHS=''    # --sqlite PATH, one per line
+SQLITE_LIST=$CONFIG_DIR/sqlite-paths # the agent's SQLite files (one per line)
 
 TMP=
 CHANGED=0          # binary, unit, guard or config changed: a running agent needs a restart
@@ -311,6 +313,9 @@ Options (when piping, pass them after `sh -s --`):
                          decides who can connect. Restarts PostgreSQL only if it was
                          installed by --install-postgres or you say yes; otherwise the
                          change waits for its next restart
+  --sqlite PATH          protect the SQLite database file PATH (repeat for several);
+                         with --protect NAME, give exactly one. The installer also finds
+                         the SQLite files running apps have open and asks about each
   --allow-restart        allow Rowsafe to restart or stop PostgreSQL when you ask
                          (Restart and Rewind in the dashboard, `rowsafe restart`),
                          only when someone confirms
@@ -465,6 +470,17 @@ Turning on backups:
   password) to the configuration file. Backups come from the server itself
   over replication, so nothing is installed or restarted. Redis Cluster,
   Redis older than 7.0 and Valkey older than 7.2 are not supported yet.
+
+  SQLite: a database is a file your app opens. The installer finds the
+  files running programs have open (here and inside Docker containers, as
+  root, read-only) and asks which to protect; --sqlite PATH adds one. The
+  agent then needs read and write access to the file, its -wal and -shm
+  files and their folder: the installer gives it to the agent's user with a
+  POSIX ACL (installing the acl package if needed), plus a default ACL on
+  the folder so the -wal and -shm files your app creates later are covered,
+  and prints what it changed. Owners, groups and other users' access stay as
+  they were. Files on network filesystems (NFS, SMB, sshfs...) are refused:
+  SQLite's locking isn't reliable there.
 
 What Rowsafe may do on this server:
   Rowsafe only restarts PostgreSQL, installs updates, reboots, manages
@@ -733,7 +749,7 @@ redis_group() {
 engine_label() {
   case ${1:-$HOST_ENGINE} in
     mysql) echo MySQL ;; mariadb) echo MariaDB ;; mongodb) echo MongoDB ;; clickhouse) echo ClickHouse ;;
-    redis) echo Redis ;; valkey) echo Valkey ;; *) echo PostgreSQL ;;
+    redis) echo Redis ;; valkey) echo Valkey ;; sqlite) echo SQLite ;; *) echo PostgreSQL ;;
   esac
 }
 
@@ -8173,6 +8189,10 @@ read_cluster() {
 }
 
 cluster_desc() {
+  if [ "$C_ENGINE" = sqlite ]; then # sqlite: a file
+    printf 'SQLite database %s (%s)' "$C_SOCK" "$C_SIZE"
+    return 0
+  fi
   _d=$C_DBS
   [ "$_d" != - ] || _d=none
   printf '%s %s on port %s (%s; databases: %s)' "$(engine_label "$C_ENGINE")" "$C_MAJOR" "$C_PORT" "$C_SIZE" "$(printf '%s' "$_d" | sed 's/,/, /g')"
@@ -8394,7 +8414,7 @@ setup_databases() {
           fi
           continue
         fi
-        if [ "$_count" -gt 1 ] && ! confirm "Set up backups for it?" y; then
+        if [ "$_count" -gt 1 ] && [ "$C_ENGINE" != sqlite ] && ! confirm "Set up backups for it?" y; then
           continue
         fi
         ask_name
@@ -8408,7 +8428,12 @@ setup_databases() {
 # of the PostgreSQL --install-postgres installed (a new, empty server).
 protect_unattended() {
   step "Turning on backups for $PROTECT_NAME"
-  if [ -n "$PROTECT_PORT" ]; then
+  _sqlite=$(printf '%s' "$SQLITE_PATHS" | head -n 1) # sqlite
+  if [ -n "$_sqlite" ]; then
+    _real=$(readlink -f -- "$_sqlite" 2>/dev/null || printf '%s' "$_sqlite")
+    _line=$(awk -F '\t' -v p="$_sqlite" -v r="$_real" '$14 == "sqlite" && ($2 == p || $2 == r)' "$TMP/clusters" | head -n 1)
+    [ -n "$_line" ] || die "the agent can't use the SQLite file $_sqlite (see above)"
+  elif [ -n "$PROTECT_PORT" ]; then
     _line=$(awk -F '\t' -v p="$PROTECT_PORT" '$1 == p' "$TMP/clusters")
     [ -n "$_line" ] || die "found no PostgreSQL on port $PROTECT_PORT that the agent can reach"
   else
@@ -9341,6 +9366,185 @@ redis_prepare() {
 
 # ---------------------------------------------------------------- modes
 
+# >>> sqlite: a SQLite database is a file an app opens itself. The agent
+# runs as rowsafe on a server without another database (as postgres next to
+# PostgreSQL), and root gives it read and write access to each file it
+# protects (sqlite_grant). The agent's list of files is $SQLITE_LIST.
+
+# sqlite_path_ok PATH: an absolute path to a database file (not a side file).
+sqlite_path_ok() {
+  printf '%s\n' "$1" | grep -Eq '^/[A-Za-z0-9._@+,=/-]+$' || return 1
+  case $1 in *-wal | *-shm | *-journal | */ | *//* | */../* | */./*) return 1 ;; esac
+  return 0
+}
+
+# detect_sqlite_host: without PostgreSQL, MySQL/MariaDB, MongoDB and
+# ClickHouse, the server's databases are SQLite files.
+detect_sqlite_host() {
+  [ "$HOST_ENGINE" = postgresql ] || return 0
+  id -u postgres >/dev/null 2>&1 && return 0
+  mongodb_present && return 0
+  clickhouse_present && return 0
+  HOST_ENGINE=sqlite
+  use_rowsafe_user
+  AGENT_HOME=$STATE_DIR
+}
+
+# sqlite_netfs DIR names DIR's filesystem when it is a network one.
+sqlite_netfs() {
+  _t=$(stat -f -c %T -- "$1" 2>/dev/null || true)
+  case $_t in nfs* | cifs | smb* | fuse* | 9p | ceph | afs | lustre | gpfs) printf '%s' "$_t" ;; esac
+}
+
+# sqlite_grant FILE gives the agent's user read and write access to FILE,
+# its -wal, -shm and -journal files and its folder, without changing owners,
+# groups or anyone else's access: a POSIX ACL entry for the agent (the
+# file's group bits then show the ACL mask, which SQLite copies to the side
+# files it creates), and a default ACL on the folder so side files created
+# later work for the agent and the file's owner. Folders above get "x" for
+# the agent where it can't pass. It prints what changed.
+sqlite_grant() {
+  _f=$1
+  _d=$(dirname -- "$_f")
+  if [ ! -f "$_f" ]; then
+    warn "$_f doesn't exist (or isn't a regular file); skipped"
+    return 1
+  fi
+  _fs=$(sqlite_netfs "$_d")
+  if [ -n "$_fs" ]; then
+    warn "$_f is on a network filesystem ($_fs): SQLite's locking isn't reliable there, so Rowsafe doesn't protect it. Move it to a local disk."
+    return 1
+  fi
+  _uid=$(stat -c %u -- "$_f")
+  _owner=$(stat -c %U -- "$_f")
+  _mode=$(stat -c %a -- "$_f")
+  if [ "$_uid" = "$(id -u "$AGENT_USER")" ]; then
+    ok "$_f belongs to $AGENT_USER already"
+    return 0
+  fi
+  have setfacl || apt_install acl
+  _g=$(( (0$_mode / 8) % 8 ))
+  _o=$(( 0$_mode % 8 ))
+  _perm() { case $1 in 7) echo rwx ;; 6) echo rw- ;; 5) echo r-x ;; 4) echo r-- ;; 3) echo -wx ;; 2) echo -w- ;; 1) echo --x ;; *) echo --- ;; esac; }
+  if setfacl -m "u:$AGENT_USER:rw" -- "$_f" 2>"$TMP/acl.err"; then
+    for _s in -wal -shm -journal; do
+      [ ! -f "$_f$_s" ] || setfacl -m "u:$AGENT_USER:rw" -- "$_f$_s" || true
+    done
+    setfacl -m "u:$AGENT_USER:rwx" -- "$_d" &&
+      setfacl -d -m "u::rw-,g::$(_perm "$_g"),o::$(_perm "$_o"),u:$AGENT_USER:rw-,u:$_owner:rw-" -- "$_d" || {
+      warn "could not set the ACL on $_d: $(head -n 1 "$TMP/acl.err" 2>/dev/null)"
+      return 1
+    }
+    _p=${_d%/*}
+    while [ -n "$_p" ]; do
+      as_agent test -x "$_p" 2>/dev/null || acl_grant_x "$_p" "$AGENT_USER" || true
+      _p=${_p%/*}
+    done
+    ok "gave the agent ($AGENT_USER) read and write access to $_f, its -wal/-shm files and $_d (ACLs; owner, group and others' access unchanged)"
+    return 0
+  fi
+  # No ACLs on this filesystem: the file's group, when it is its owner's
+  # own group (nobody else is in it) and can already write.
+  _group=$(stat -c %G -- "$_f")
+  if [ "$_group" = "$_owner" ] && [ "$_g" -ge 6 ] && [ "$(( (0$(stat -c %a -- "$_d") / 8) % 8 ))" -ge 7 ]; then
+    usermod -a -G "$_group" "$AGENT_USER" || return 1
+    SQLITE_GROUPS="$SQLITE_GROUPS $_group"
+    ok "added $AGENT_USER to the group $_group, which owns $_f and can write it (this filesystem has no ACLs)"
+    return 0
+  fi
+  warn "can't give the agent access to $_f: this filesystem has no ACLs ($(head -n 1 "$TMP/acl.err" 2>/dev/null)), and its group ($_group) isn't $_owner's own group with write access. Make the file and its folder group-writable by a group only $_owner is in, then run the installer again."
+  return 1
+}
+SQLITE_GROUPS=''
+
+# sqlite_files decides which SQLite files the agent protects: the ones
+# given with --sqlite, and (on a terminal) the ones running programs have
+# open that the person picks; each gets access (sqlite_grant) and goes to
+# $SQLITE_LIST.
+sqlite_files() {
+  [ "$NO_SETUP" = 0 ] || [ -n "$SQLITE_PATHS" ] || return 0
+  _bin=$STAGED
+  [ -x "$_bin" ] || _bin=$INSTALL_DIR/rowsafe-agent
+  : >"$TMP/sqlite-chosen"
+  printf '%s' "$SQLITE_PATHS" | while IFS= read -r _f; do
+    [ -n "$_f" ] && printf '%s\n' "$_f" >>"$TMP/sqlite-chosen"
+  done
+  if [ "$TTY" = 1 ] && [ -z "$PROTECT_NAME" ] && [ -x "$_bin" ]; then
+    "$_bin" sqlite find >"$TMP/sqlite-found" 2>/dev/null || : >"$TMP/sqlite-found"
+    if [ -s "$TMP/sqlite-found" ]; then
+      say ""
+      step "Looking for SQLite databases that apps on this server have open"
+      while IFS="$(printf '\t')" read -r _path _size _journal _pid _prog _ctr _cpath _uid _gid _sugg <&4; do
+        if [ "$_path" = - ]; then
+          note "Found $_cpath in container $_ctr ($_prog): it lives in the container's own layer, not in a volume, so the agent can't reach it. Put it in a volume to protect it."
+          continue
+        fi
+        grep -qxF -- "$_path" "$TMP/sqlite-chosen" 2>/dev/null && continue
+        grep -qxF -- "$_path" "$SQLITE_LIST" 2>/dev/null && { ok "$_path is already in Rowsafe's list"; continue; }
+        _where="opened by $_prog"
+        [ "$_ctr" = - ] || _where="$_where in container $_ctr ($_cpath)"
+        _jm="continuous backups possible (WAL)"
+        [ "$_journal" = wal ] || _jm="rollback journal: daily backups (Pulse can turn on WAL later)"
+        if confirm "Protect $_path ($(numfmt --to=iec "$_size" 2>/dev/null || printf '%s bytes' "$_size"), $_where; $_jm)?" y; then
+          printf '%s\n' "$_path" >>"$TMP/sqlite-chosen"
+        fi
+      done 4<"$TMP/sqlite-found"
+    elif [ "$HOST_ENGINE" = sqlite ] && [ -z "$SQLITE_PATHS" ]; then
+      note "No running app has a SQLite database open right now. Run the installer again with --sqlite /path/to/database.sqlite3 to add one."
+    fi
+  fi
+  [ -s "$TMP/sqlite-chosen" ] || return 0
+  step "Giving the agent access to the SQLite files"
+  install -d -m 0755 "$CONFIG_DIR"
+  [ -f "$SQLITE_LIST" ] || { : >"$SQLITE_LIST"; chmod 0644 "$SQLITE_LIST"; }
+  while IFS= read -r _f; do
+    _real=$(readlink -f -- "$_f" 2>/dev/null || printf '%s' "$_f")
+    if sqlite_grant "$_real"; then
+      grep -qxF -- "$_f" "$SQLITE_LIST" || printf '%s\n' "$_f" >>"$SQLITE_LIST"
+    fi
+  done <"$TMP/sqlite-chosen"
+  chmod 0644 "$SQLITE_LIST"
+  CHANGED=1
+}
+
+# sqlite_setup: a drop-in runs the agent as rowsafe on a SQLite server, in
+# the groups sqlite_grant used, and lets it reach database folders under
+# /home and /root, which the unit otherwise hides (ProtectHome).
+sqlite_setup() {
+  _dropin=/etc/systemd/system/$SERVICE.d
+  _conf=''
+  if [ "$HOST_ENGINE" = sqlite ]; then
+    _conf="[Unit]\nAfter=network-online.target\n[Service]\nUser=rowsafe\nGroup=rowsafe\n"
+  fi
+  _groups=$(for _g in $SQLITE_GROUPS $(sed -n 's/^SupplementaryGroups=//p' "$_dropin/20-sqlite.conf" 2>/dev/null); do echo "$_g"; done | sort -u | tr '\n' ' ')
+  _binds=''
+  if [ -f "$SQLITE_LIST" ]; then
+    while IFS= read -r _f; do
+      case $_f in /home/* | /root/* | /run/user/*)
+        _d=$(dirname -- "$(readlink -f -- "$_f" 2>/dev/null || printf '%s' "$_f")")
+        case " $_binds " in *" $_d "*) ;; *) _binds="$_binds $_d" ;; esac
+        ;;
+      esac
+    done <"$SQLITE_LIST"
+  fi
+  [ -z "$_groups" ] || _conf="${_conf}[Service]\nSupplementaryGroups=${_groups% }\n"
+  [ -z "$_binds" ] || _conf="${_conf}[Service]\nProtectHome=tmpfs\nBindPaths=${_binds# }\n"
+  if [ -z "$_conf" ]; then
+    for _old in 10-sqlite.conf 20-sqlite.conf; do
+      [ ! -f "$_dropin/$_old" ] || { rm -f "$_dropin/$_old"; UNIT_CHANGED=1; CHANGED=1; }
+    done
+    return 0
+  fi
+  install -d -m 0755 "$_dropin"
+  _name=20-sqlite.conf
+  if [ "$HOST_ENGINE" = sqlite ]; then _name=10-sqlite.conf; rm -f "$_dropin/20-sqlite.conf"; else rm -f "$_dropin/10-sqlite.conf"; fi
+  if printf "# Written by the Rowsafe installer: SQLite databases on this server.\n${_conf}" |
+    write_file "$_dropin/$_name" 0644 root:root; then
+    UNIT_CHANGED=1 CHANGED=1
+  fi
+}
+# <<< sqlite
+
 install_agent() {
   require_root
   detect_os
@@ -9353,8 +9557,12 @@ install_agent() {
   detect_mongodb_host # mongodb
   detect_clickhouse_host # clickhouse
   detect_redis_host # redis
+  detect_sqlite_host # sqlite
   check_postgres
-  if [ "$HOST_ENGINE" = clickhouse ]; then
+  if [ "$HOST_ENGINE" = sqlite ]; then
+    say "${BOLD}Rowsafe agent installer${RESET}: backups, restore to any second and weekly"
+    say "restore tests for the SQLite databases on this server. Nothing changes without your yes."
+  elif [ "$HOST_ENGINE" = clickhouse ]; then
     say "${BOLD}Rowsafe agent installer${RESET}: backups, Marks and weekly restore tests for"
     say "the ClickHouse on this server. Nothing changes without your yes."
   else
@@ -9397,8 +9605,8 @@ install_agent() {
   connect_in_browser
 
   # 2. Dependencies and layout.
-  # MongoDB, ClickHouse, Redis and Valkey back up with their own tools: no pgBackRest.
-  case $HOST_ENGINE in mysql | mariadb) ensure_mysql_tools ;; mongodb | clickhouse | redis | valkey) ;; *) ensure_pgbackrest ;; esac # mysql
+  # MongoDB, ClickHouse, Redis, Valkey and SQLite back up with their own tools: no pgBackRest.
+  case $HOST_ENGINE in mysql | mariadb) ensure_mysql_tools ;; mongodb | clickhouse | redis | valkey | sqlite) ;; *) ensure_pgbackrest ;; esac # mysql
   ensure_mongodb_tools # mongodb (only where MongoDB runs)
   check_clickhouse_program # clickhouse (only where ClickHouse runs)
   check_redis_program # redis (only where Redis or Valkey runs)
@@ -9410,12 +9618,14 @@ install_agent() {
   install_allow_command    # permissions section
   install_guard
   install_permissions_helper # permit-host: one-click permission changes
+  sqlite_files # sqlite: which files, and the agent's access to them
   UNIT_CHANGED=0
   install_unit
   mysql_setup # mysql
   mongodb_setup # mongodb
   clickhouse_setup # clickhouse
   redis_setup # redis
+  sqlite_setup # sqlite
   install_logrotate
   maybe_guided_storage
   second_copy
@@ -9646,6 +9856,13 @@ main() {
         PROTECT_NAME=$2
         shift
         ;;
+      --sqlite) # sqlite
+        [ $# -ge 2 ] || die "--sqlite needs the database file's path"
+        sqlite_path_ok "$2" || die "--sqlite: give the database file's absolute path (letters, digits and ._@+,=- only), not its -wal or -shm file"
+        SQLITE_PATHS="$SQLITE_PATHS$2
+"
+        shift
+        ;;
       --protect-port)
         [ $# -ge 2 ] || die "--protect-port needs a port"
         printf '%s\n' "$2" | grep -Eq '^[1-9][0-9]{0,4}$' || die "--protect-port needs a port number"
@@ -9727,6 +9944,12 @@ main() {
   # section; --permissions does it once it knows the server).
   if [ "$mode" = install ]; then perm_cascade install; fi
   [ -z "$PROTECT_PORT" ] || [ -n "$PROTECT_NAME" ] || die "--protect-port only goes with --protect"
+  if [ -n "$SQLITE_PATHS" ]; then # sqlite
+    [ "$mode" = install ] || die "--sqlite only goes with an install"
+    if [ -n "$PROTECT_NAME" ] && [ "$(printf '%s' "$SQLITE_PATHS" | grep -c .)" != 1 ]; then
+      die "--protect turns on backups for one database: give exactly one --sqlite file with it"
+    fi
+  fi
   [ "$NO_SETUP" = 0 ] || [ -z "$PROTECT_NAME" ] || die "--no-setup and --protect contradict each other"
   TMP=$(mktemp -d "${TMPDIR:-/tmp}/rowsafe-install.XXXXXX")
   # The agent user writes one file into $TMP/setup (0700, its own).

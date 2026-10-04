@@ -39,7 +39,10 @@ Usage:
                                             ClickHouse helpers for the installer (see clickhouse --help)
   rowsafe-agent redis status|login|save-login|download-backup ...
                                             Redis and Valkey helpers for the installer (see redis --help)
-  rowsafe-agent unseal < FILE > PLAIN       decrypt a file Rowsafe wrote to your bucket (MongoDB, ClickHouse, Redis)
+  rowsafe-agent sqlite find|status|restore ...
+                                            SQLite helpers for the installer, and restores without
+                                            Rowsafe (see sqlite --help)
+  rowsafe-agent unseal < FILE > PLAIN       decrypt a file Rowsafe wrote to your bucket (MongoDB, ClickHouse, Redis, SQLite)
   rowsafe-agent restore-mysql --engine mysql|mariadb --database NAME --dir DIR [--at TIME | --mark NAME]
                                             restore a MySQL/MariaDB database from your bucket into DIR
   rowsafe-agent key                         this server's key fingerprint: compare it with the one the Rowsafe
@@ -85,6 +88,8 @@ func main() {
 		os.Exit(clickhouseCmd(ctx, os.Args[2:]))
 	case "redis": // Redis and Valkey installer helpers (redis.go)
 		os.Exit(redisCmd(ctx, os.Args[2:]))
+	case "sqlite": // SQLite installer helpers and restores (sqlite.go)
+		os.Exit(sqliteCmd(ctx, os.Args[2:]))
 	case "unseal":
 		err = unseal()
 	case "restore-mysql":
@@ -117,7 +122,11 @@ func main() {
 
 func run(ctx context.Context) error {
 	cfg, err := agent.ConfigFromEnv()
-	if os.Geteuid() == 0 {
+	if os.Geteuid() == 0 && sqliteContainer() {
+		// The SQLite agent image shares an app's volume: when the app runs
+		// as root, so must the agent to use its files (only in its own
+		// container, never on the server).
+	} else if os.Geteuid() == 0 {
 		if err == nil && cfg.Sidecar() {
 			return fmt.Errorf("refusing to run as root: run the agent container as the postgres user of the PostgreSQL image " +
 				"(user: \"999:999\" for the Debian-based images, \"70:70\" for the Alpine ones; see https://rowsafe.sh/docs/guides/docker)")
@@ -141,6 +150,26 @@ func run(ctx context.Context) error {
 	return err
 }
 
+// otherEnginesOnly: this server has no PostgreSQL to back up (no server
+// binaries), so pgBackRest isn't needed.
+func otherEnginesOnly() bool {
+	if os.Getenv("ROWSAFE_PG_BIN_DIR") != "" {
+		return false
+	}
+	_, err := os.Stat("/usr/lib/postgresql")
+	return err != nil
+}
+
+// sqliteContainer: the agent runs in a container with SQLite files to
+// protect (ROWSAFE_SQLITE_PATHS), as the app's user.
+func sqliteContainer() bool {
+	if os.Getenv("ROWSAFE_SQLITE_PATHS") == "" {
+		return false
+	}
+	_, err := os.Stat("/.dockerenv")
+	return err == nil || os.Getenv("container") != ""
+}
+
 // selftest checks, from the new binary's point of view, everything it needs
 // to take over: configuration, pgBackRest, the control plane and every local
 // Postgres the running agent watches. It prints JSON and exits non-zero on
@@ -161,7 +190,11 @@ func selftest(ctx context.Context) int {
 		if cfg.SecondCopy() {
 			check("second copy settings", cfg.Repo2.ValidateAs("ROWSAFE_REPO2_"))
 		}
-		check("pgbackrest", exec.CommandContext(ctx, cfg.PgBackRestBin, "version").Run())
+		// pgBackRest backs up PostgreSQL; a server with only other engines
+		// (SQLite files, MongoDB, ClickHouse) runs without it.
+		if _, err := os.Stat(cfg.PgBackRestBin); err == nil || len(agent.WatchedTargets(cfg)) > 0 || !otherEnginesOnly() {
+			check("pgbackrest", exec.CommandContext(ctx, cfg.PgBackRestBin, "version").Run())
+		}
 		check("control plane", agent.CheckControlPlane(ctx, cfg))
 		for _, t := range agent.WatchedTargets(cfg) {
 			conn, err := t.Connect(ctx, "postgres")

@@ -885,6 +885,8 @@ type DatabaseMonitoring struct {
 	// Redis is Redis's or Valkey's own health detail (redis.go; about every
 	// 5 minutes).
 	Redis *RedisStatus `json:"redis,omitempty"`
+	// SQLite is SQLite's own health detail (sqlite.go; about every minute).
+	SQLite *SQLiteStatus `json:"sqlite,omitempty"`
 }
 
 // MonitoringAck answers a monitoring report.
