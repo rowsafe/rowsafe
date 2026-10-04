@@ -136,6 +136,14 @@ CREATE_UNIT_FILE=/etc/systemd/system/rowsafe-pg-create-cluster@.service
 CREATE_ALLOW_FILE=$CONFIG_DIR/create-cluster-allowed
 CREATED_CLUSTERS_FILE=$CONFIG_DIR/created-clusters
 CREATE_PORTS=5440-5499
+# Redis and Valkey servers for standbys and clones (--redis-standby,
+# --redis-clones): created on request by the same helper, each run by
+# rowsafe-redis@PORT.service.
+REDIS_SERVERS_ALLOW_FILE=$CONFIG_DIR/redis-servers-allowed
+REDIS_CREATED_FILE=$CONFIG_DIR/redis-created
+REDIS_SERVER_UNIT=/etc/systemd/system/rowsafe-redis@.service
+REDIS_SERVERS_ROOT=/var/lib/rowsafe-redis
+REDIS_PORTS=${ROWSAFE_REDIS_PORTS:-6390-6399}
 # PgBouncer on request (--allow-pooler): the same helper, started by its own
 # path unit; the pgbouncer package goes in and out through its own unit.
 POOLER_SERVICE_FILE=/etc/systemd/system/rowsafe-pooler.service
@@ -219,6 +227,8 @@ MONGODB_STANDBY='' # --mongodb-standby (yes): Rowsafe may make this MongoDB part
 M_CLONES=''        # --mongodb-clones (yes): this (empty) MongoDB may receive clones
 CH_CLONES=''       # --clickhouse-clones (yes): this (empty) ClickHouse may receive clones
 MYSQL_STANDBY=''   # --mysql-standby (yes) / --no-mysql-standby (no); '' = ask once, on a terminal
+REDIS_STANDBY=''   # --redis-standby (yes): Redis/Valkey standby servers with this server
+REDIS_CLONES=''    # --redis-clones (yes): Redis/Valkey servers here may receive clones
 MONGODB_REPLSET='' # --mongodb-replica-set (yes) / --no-mongodb-replica-set (no); '' = ask on a terminal
 
 TMP=
@@ -330,6 +340,15 @@ Options (when piping, pass them after `sh -s --`):
                          the replica set's key file and add replSetName, keyFile and
                          an address to mongod.conf (a copy kept); restarts stay the
                          ones a person confirms (needs --allow-restart)
+  --redis-standby        Redis/Valkey: let Rowsafe set up standby servers with this server:
+                         Rowsafe's user may create and remove users (the standby's
+                         replication login; on Redis that amounts to administrator
+                         rights) and root's helper may create a new server here for a
+                         standby (ports 6390-6399, rowsafe-redis@PORT.service);
+                         an empty server here is handed to Rowsafe for that too
+  --redis-clones         Redis/Valkey: root's helper may create a new server here
+                         (same ports) to receive a clone of a database from another
+                         server; an empty server here is handed to Rowsafe for that
   --mongodb-clones       MongoDB: keep an empty server ready to receive clones of a
                          database from another server (Rowsafe's user there gets the
                          restore and readWriteAnyDatabase roles)
@@ -1322,7 +1341,22 @@ install_helper_script() {
 # /etc/rowsafe/mongodb-standby-allowed ("PORT UNIT CONFIG", written by the
 # installer with --mongodb-standby).
 #
-# actions: restart stop start create-cluster files-read files-put mongodb-key-export mongodb-standby-config
+# Redis and Valkey servers for standbys and clones: "ID redis-create PORT
+# HASH" creates a new, empty server on PORT when root allowed it
+# (/etc/rowsafe/redis-servers-allowed, written by the installer with
+# --redis-standby or --redis-clones: "ports MIN-MAX", "engine redis|valkey",
+# "user USER"): its data directory /var/lib/rowsafe-redis/PORT (owned by
+# USER, created as USER), its configuration redis.conf and ACL file
+# users.acl there (Rowsafe's user "rowsafe" with HASH, the SHA-256 of a
+# password only the agent knows; the default user without a password,
+# which Redis's protected mode lets in from this server only), then
+# enables and starts rowsafe-redis@PORT.service and lists it in
+# /etc/rowsafe/redis-created ("PORT UNIT"), whose units restart, stop and
+# start like the ones in restart-allowed. "ID redis-remove PORT" stops and
+# disables such a server and deletes its data directory (only one listed in
+# redis-created).
+#
+# actions: restart stop start create-cluster files-read files-put mongodb-key-export mongodb-standby-config redis-create redis-remove
 # update-actions: pg-minor-update pg-install-major pg-upgrade pg-upgrade-undo pg-upgrade-cleanup security-updates reboot db-minor-update db-upgrade db-upgrade-undo db-upgrade-cleanup
 #
 # The same helper manages PgBouncer when root allowed that (--allow-pooler):
@@ -1351,6 +1385,9 @@ mode=${ROWSAFE_HELPER_MODE:-restart}
 min_interval=60
 
 mongo_allow=${ROWSAFE_MONGODB_STANDBY_ALLOW:-/etc/rowsafe/mongodb-standby-allowed}
+redis_allow=${ROWSAFE_REDIS_SERVERS_ALLOW:-/etc/rowsafe/redis-servers-allowed}
+redis_created=${ROWSAFE_REDIS_CREATED:-/etc/rowsafe/redis-created}
+redis_root=${ROWSAFE_REDIS_ROOT:-/var/lib/rowsafe-redis}
 mongo_key_dir=${ROWSAFE_MONGODB_KEY_DIR:-/etc/rowsafe}
 
 log() { echo "rowsafe-pg-restart: $*" >&2; }
@@ -1966,6 +2003,88 @@ create_cluster() {
   exit 0
 }
 
+# ---------------------------------------------------------------- Redis and Valkey servers
+
+# redis_allowed PORT sets r_engine and r_user from the allow list, which
+# only root can write, and checks PORT is in its range.
+redis_allowed() {
+  check_root_file "$redis_allow" "creating Redis or Valkey servers is not allowed on this server (install Rowsafe there with --redis-standby or --redis-clones)"
+  r_range=$(awk '$1 == "ports" && $2 ~ /^[0-9]+-[0-9]+$/ { print $2; exit }' "$redis_allow")
+  [ -n "$r_range" ] || refuse "creating Redis or Valkey servers is not allowed on this server"
+  [ "$1" -ge "${r_range%-*}" ] && [ "$1" -le "${r_range#*-}" ] || refuse "port $1 is not in the ports Rowsafe may create servers on ($r_range)"
+  r_engine=$(awk '$1 == "engine" { print $2; exit }' "$redis_allow")
+  r_user=$(awk '$1 == "user" { print $2; exit }' "$redis_allow")
+  case $r_engine in redis | valkey) ;; *) refuse "$redis_allow names no engine (redis or valkey)" ;; esac
+  printf '%s\n' "$r_user" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$' || refuse "$redis_allow names no user"
+  id -u "$r_user" >/dev/null 2>&1 || refuse "the user $r_user doesn't exist"
+  [ "$(id -u "$r_user")" != 0 ] || refuse "Redis servers never run as root"
+}
+
+# redis_created_unit PORT prints the unit of a server created on PORT.
+redis_created_unit() {
+  [ -f "$redis_created" ] || [ -L "$redis_created" ] || return 0
+  check_root_file "$redis_created" "$redis_created is missing"
+  awk -v p="$1" '$1 "" == p "" && $2 ~ /^rowsafe-redis@[0-9]+\.service$/ { print $2; exit }' "$redis_created"
+}
+
+# as_redis CMD...: run as the server's user (its files are never root's).
+as_redis() { setpriv --reuid="$r_user" --regid="$r_user" --init-groups -- "$@"; }
+
+redis_create() {
+  port=$1 r_hash=$2
+  redis_allowed "$port"
+  check_root_file "$redis_created" "$redis_created is missing: allow it on the server with: sudo rowsafe-allow redis-servers"
+  for list in "$allow" "$redis_created"; do
+    if [ -f "$list" ] && awk -v p="$port" '$1 "" == p "" { f = 1 } END { exit !f }' "$list"; then
+      refuse "port $port is already used by a server Rowsafe manages"
+    fi
+  done
+  [ -d "$redis_root" ] && [ ! -L "$redis_root" ] || refuse "$redis_root is missing"
+  [ "$(stat -c '%U' "$redis_root")" = "$r_user" ] || refuse "$redis_root isn't owned by $r_user"
+  r_dir=$redis_root/$port
+  [ ! -e "$r_dir" ] && [ ! -L "$r_dir" ] || refuse "$r_dir already exists"
+  unit=rowsafe-redis@$port.service
+  log "redis-create $r_engine on port $port (request $id)"
+  as_redis mkdir -m 0750 "$r_dir" || refuse "cannot create $r_dir"
+  # shellcheck disable=SC2016 # $1 expands in the inner shell
+  printf '%s\n' "# Rowsafe: a $r_engine server for a standby or a clone (rowsafe-redis@$port.service)." \
+    "port $port" "bind * -::*" "protected-mode yes" "dir $r_dir" "aclfile $r_dir/users.acl" \
+    "dbfilename dump.rdb" "appendonly yes" "appendfilename appendonly.aof" "save 3600 1 300 100 60 10000" \
+    "daemonize no" "supervised no" "logfile \"\"" "databases 16" |
+    as_redis sh -c 'umask 027; cat >"$1"' rowsafe-pg-restart "$r_dir/redis.conf" || refuse "cannot write the configuration"
+  printf '%s\n' "user default on nopass ~* &* +@all" "user rowsafe on #$r_hash ~* &* +@all" |
+    as_redis sh -c 'umask 077; cat >"$1"' rowsafe-pg-restart "$r_dir/users.acl" || refuse "cannot write the ACL file"
+  printf '%s %s\n' "$port" "$unit" >>"$redis_created" || refuse "cannot update $redis_created"
+  out=$(timeout 60 "$systemctl" enable --now "$unit" 2>&1 </dev/null)
+  if [ $? = 0 ]; then
+    ok=1
+    log "redis-create $unit: done"
+  else
+    err="starting $unit failed: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
+    log "$err"
+  fi
+  answer
+  exit 0
+}
+
+redis_remove() {
+  port=$1
+  redis_allowed "$port"
+  unit=$(redis_created_unit "$port")
+  [ -n "$unit" ] || refuse "port $port is not a server Rowsafe created"
+  log "redis-remove $unit (request $id)"
+  timeout 60 "$systemctl" disable --now "$unit" >/dev/null 2>&1 </dev/null || true
+  r_dir=$redis_root/$port
+  if [ -d "$r_dir" ] && [ ! -L "$r_dir" ]; then
+    as_redis rm -rf -- "$r_dir" || refuse "cannot delete $r_dir"
+  fi
+  r_tmp=$(awk -v p="$port" '$1 "" != p ""' "$redis_created") || refuse "cannot read $redis_created"
+  printf '%s\n' "$r_tmp" | sed '/^$/d' >"$redis_created" || refuse "cannot update $redis_created"
+  ok=1
+  answer
+  exit 0
+}
+
 # ---------------------------------------------------------------- files (files mode, --allow-files)
 
 # files_folder_uid prints the owner uid root recorded for exactly $fpath in
@@ -2267,6 +2386,16 @@ restart_main() {
     mongo_standby_config "$3" "$4" "$5" "$6"
     answer
     exit 0
+  elif printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} redis-create [1-9][0-9]{3,4} [0-9a-f]{64}$'; then
+    # shellcheck disable=SC2086 # split the checked request into its fields
+    set -- $line
+    id=$1 action=$2
+    redis_create "$3" "$4"
+  elif printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} redis-remove [1-9][0-9]{3,4}$'; then
+    # shellcheck disable=SC2086
+    set -- $line
+    id=$1 action=$2
+    redis_remove "$3"
   elif printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} create-cluster [1-9][0-9]{3,4} [1-9][0-9] [a-z][a-z0-9_]{0,39}$'; then
     id=${line%% *}
     action=create-cluster
@@ -2285,6 +2414,7 @@ restart_main() {
     unit=$(allowed_unit "$port")
   fi
   [ -n "$unit" ] || unit=$(created_unit "$port")
+  [ -n "$unit" ] || unit=$(redis_created_unit "$port")
   [ -n "$unit" ] || refuse "port $port is not in $allow: restarting or stopping it from Rowsafe is not allowed"
 
   if [ "$action" = restart ]; then
@@ -3238,7 +3368,7 @@ CapabilityBoundingSet=CAP_SETUID CAP_SETGID
 AmbientCapabilities=
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=-/var/lib/rowsafe/restart -/etc/rowsafe/created-clusters
+ReadWritePaths=-/var/lib/rowsafe/restart -/etc/rowsafe/created-clusters -/etc/rowsafe/redis-created -/var/lib/rowsafe-redis
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
@@ -7868,6 +7998,13 @@ setup_databases() {
       note "Found $(cluster_desc): Rowsafe protects $(engine_label "$C_ENGINE") on servers without PostgreSQL for now; skipped."
       continue
     fi
+    case $C_UNIT in rowsafe-redis@*) # redis: a standby or a clone Rowsafe created here
+      [ "$C_REG" = yes ] || {
+        note "$(cluster_desc) is a server Rowsafe created for a standby or a clone; left as it is"
+        continue
+      }
+      ;;
+    esac
     case $C_REG:$C_STATUS in
       yes:active)
         ok "$(cluster_desc) is protected as $C_NAME"
@@ -7913,6 +8050,9 @@ setup_databases() {
           if mysql_account; then
             ok "$(engine_label "$C_ENGINE") on port $C_PORT is ready to hold a standby: pick this server under Standby in the dashboard"
           fi
+          continue
+        fi
+        if { [ "$C_ENGINE" = redis ] || [ "$C_ENGINE" = valkey ]; } && redis_target_offer; then # redis
           continue
         fi
         if [ "$_count" -gt 1 ] && ! confirm "Set up backups for it?" y; then
@@ -7990,6 +8130,7 @@ next_steps() {
 databases() {
   [ "$ALLOW_RESTART" != no ] || disallow_restarts
   [ -z "$ALLOW_CREATE_CLUSTER" ] || create_cluster_access # forks
+  [ -z "$REDIS_STANDBY$REDIS_CLONES" ] || redis_servers_access # redis
   [ "$ALLOW_FIREWALL" != no ] || disallow_firewall
   [ "$ALLOW_TUNING" != no ] || disallow_tuning
   [ "$ALLOW_POOLER" != no ] || disallow_pooler
@@ -8700,7 +8841,7 @@ redis_supported() {
 
 # redis_admin asks for (or takes from the environment) an administrator's
 # login, into RD_ADMIN and RD_ADMIN_PW. Never stored.
-RD_ADMIN='' RD_ADMIN_PW=''
+RD_ADMIN='' RD_ADMIN_PW='' RD_TARGET=''
 redis_admin() {
   [ -z "$RD_ADMIN" ] || return 0
   if [ -n "${ROWSAFE_REDIS_ADMIN_USER:-}" ]; then
@@ -8732,7 +8873,7 @@ redis_as_admin() {
 redis_login() {
   _name=$(engine_label "$C_ENGINE")
   _rc=0
-  redis_as_admin login >"$TMP/rdlogin" 2>"$TMP/rdlogin.err" || _rc=$?
+  redis_as_admin login ${REDIS_STANDBY:+--standby} ${RD_TARGET:+--target "$RD_TARGET"} >"$TMP/rdlogin" 2>"$TMP/rdlogin.err" || _rc=$?
   while [ "$_rc" = 11 ] || [ "$_rc" = 12 ] || [ "$_rc" = 13 ]; do
     if [ -n "$RD_ADMIN" ]; then
       if [ -n "${ROWSAFE_REDIS_ADMIN_USER:-}" ] || [ "$TTY" != 1 ]; then
@@ -8750,7 +8891,7 @@ redis_login() {
       return 1
     }
     _rc=0
-    redis_as_admin login >"$TMP/rdlogin" 2>"$TMP/rdlogin.err" || _rc=$?
+    redis_as_admin login ${REDIS_STANDBY:+--standby} ${RD_TARGET:+--target "$RD_TARGET"} >"$TMP/rdlogin" 2>"$TMP/rdlogin.err" || _rc=$?
   done
   RD_ADMIN='' RD_ADMIN_PW=''
   if [ "$_rc" != 0 ]; then
@@ -8822,6 +8963,93 @@ redis_snapshot_note() {
   note "$(engine_label "$C_ENGINE") refuses to send Rowsafe a copy over replication; backups don't use it otherwise."
 }
 
+# redis_target_offer hands an empty Redis or Valkey server to Rowsafe for
+# clones or standbys (--redis-clones, --redis-standby, or yes on a
+# terminal): Rowsafe's user there gets every right. Fails (and changes
+# nothing) for a server with data or without that answer.
+redis_target_offer() {
+  [ "$C_DBS" = - ] || return 1
+  RD_TARGET=''
+  case $REDIS_STANDBY:$REDIS_CLONES in
+    yes:yes) RD_TARGET=all ;;
+    yes:*) RD_TARGET=standby ;;
+    *:yes) RD_TARGET=clones ;;
+    *)
+      [ "$TTY" = 1 ] && confirm "It has no data. Keep it empty, ready to become another server's standby or to receive clones?" n || return 1
+      RD_TARGET=all
+      ;;
+  esac
+  RD_ADMIN='' RD_ADMIN_PW=''
+  if redis_status && redis_supported && redis_login; then
+    ok "$(engine_label "$C_ENGINE") on port $C_PORT is ready to hold a standby or receive clones: pick this server in the dashboard"
+  fi
+  RD_TARGET=''
+  return 0
+}
+
+# redis_servers_access lets root's helper create Redis or Valkey servers
+# for standbys and clones (--redis-standby, --redis-clones): the allow list,
+# the servers' unit and their directory. Nothing is created until a person
+# picks this server in the dashboard and confirms.
+redis_servers_access() {
+  redis_find_program || {
+    warn "the redis-server (or valkey-server) program isn't on this server, so Rowsafe can't create servers for standbys or clones here"
+    return 0
+  }
+  _user=$(redis_group)
+  [ -n "$_user" ] && id -u "$_user" >/dev/null 2>&1 || {
+    warn "no redis or valkey user on this server (the server package makes it), so Rowsafe can't create servers for standbys or clones here"
+    return 0
+  }
+  _purposes=''
+  [ "$REDIS_STANDBY" != yes ] || _purposes=standby
+  [ "$REDIS_CLONES" != yes ] || _purposes="${_purposes:+$_purposes }clones"
+  {
+    echo "# Rowsafe may create a $(engine_label "$REDIS_FOUND_ENGINE") server on one of these ports when someone"
+    echo "# sets up a standby or a clone on this server and confirms. Written by the installer (root)."
+    echo "ports $REDIS_PORTS"
+    echo "purposes $_purposes"
+    echo "engine $REDIS_FOUND_ENGINE"
+    echo "user $_user"
+  } | write_file "$REDIS_SERVERS_ALLOW_FILE" 0644 root:root || true
+  [ -f "$REDIS_CREATED_FILE" ] || {
+    echo "# Redis or Valkey servers Rowsafe created for standbys and clones (PORT UNIT)."
+  } | write_file "$REDIS_CREATED_FILE" 0644 root:root || true
+  install -d -o "$_user" -g "$_user" -m 0750 "$REDIS_SERVERS_ROOT"
+  if write_file "$REDIS_SERVER_UNIT" 0644 root:root <<ROWSAFE_REDIS_UNIT_EOF; then
+# rowsafe-redis@PORT.service: a $(engine_label "$REDIS_FOUND_ENGINE") server Rowsafe created for a standby or a
+# clone (root's helper, rowsafe-pg-restart, when root allowed it with
+# --redis-standby or --redis-clones). Its files: $REDIS_SERVERS_ROOT/PORT.
+[Unit]
+Description=Rowsafe: $(engine_label "$REDIS_FOUND_ENGINE") server on port %i (a standby or a clone)
+Documentation=https://rowsafe.sh/docs/guides/redis
+After=network.target
+
+[Service]
+Type=simple
+User=$_user
+Group=$_user
+ExecStart=$REDIS_BIN $REDIS_SERVERS_ROOT/%i/redis.conf
+Restart=on-failure
+LimitNOFILE=65535
+UMask=0027
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=$REDIS_SERVERS_ROOT/%i
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+
+[Install]
+WantedBy=multi-user.target
+ROWSAFE_REDIS_UNIT_EOF
+    if systemd_running; then systemctl daemon-reload; fi
+  fi
+  install_restart_helper
+  as_agent mkdir -p -m 0700 "$RESTART_DIR"
+  perm_ok "Rowsafe may create a $(engine_label "$REDIS_FOUND_ENGINE") server here (ports $REDIS_PORTS) for: $_purposes"
+}
+
 # redis_prepare gets a Redis or Valkey server ready for its plan: supported,
 # and Rowsafe's own user. Nothing restarts.
 redis_prepare() {
@@ -8840,6 +9068,9 @@ redis_prepare() {
     redis_login || return 1
     redis_status || true
     redis_supported || return 1
+  elif [ "$REDIS_STANDBY" = yes ]; then
+    # Standby rights for Rowsafe's user (a new password, saved for the agent).
+    redis_login || return 1
   fi
   if [ -z "$RD_BINARY" ]; then
     note "Proof and Rewind copies need the $C_ENGINE-server program, which comes with $_name's server package; it isn't on this server."
@@ -9103,6 +9334,8 @@ main() {
       --mysql-standby) MYSQL_STANDBY=yes ;;
       --clickhouse-clones) CH_CLONES=yes ;;
       --mongodb-clones) M_CLONES=yes ;;
+      --redis-standby) REDIS_STANDBY=yes ;;
+      --redis-clones) REDIS_CLONES=yes ;;
       --mongodb-standby) MONGODB_STANDBY=yes ;;
       --no-mysql-standby) MYSQL_STANDBY=no ;;
       --mongodb-replica-set) MONGODB_REPLSET=yes ;;
