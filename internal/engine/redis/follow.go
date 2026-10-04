@@ -98,8 +98,10 @@ type sinkStats struct {
 	LastShippedAt *time.Time
 	LastFailedAt  *time.Time
 	LastError     string
-	// Uploaded is how far the stream of each id is in this storage.
+	// Uploaded is how far the stream of each id is in this storage;
+	// Covered until when the link is known to have been up in it.
 	Uploaded map[string]int64
+	Covered  time.Time
 }
 
 type sink struct {
@@ -879,6 +881,9 @@ func (f *follower) noteUploaded(s *sink, sg segment, fresh bool) {
 	if sg.End > s.st.Uploaded[sg.ReplID] {
 		s.st.Uploaded[sg.ReplID] = sg.End
 	}
+	if sg.To.After(s.st.Covered) {
+		s.st.Covered = sg.To
+	}
 	if fresh {
 		now := time.Now().UTC()
 		s.st.Shipped++
@@ -975,6 +980,38 @@ func (f *follower) flush(ctx context.Context, replid string, offset int64, timeo
 				return lerr
 			}
 			return fmt.Errorf("the changes haven't reached your bucket within %s", timeout)
+		case <-ch:
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+// flushTime waits until the first storage covers the moment t (a segment
+// closed after it is there), at most timeout.
+func (f *follower) flushTime(ctx context.Context, t time.Time, timeout time.Duration) error {
+	deadline := time.After(timeout)
+	for {
+		f.mu.Lock()
+		var covered time.Time
+		if s := f.sinks["1"]; s != nil {
+			covered = s.st.Covered
+		}
+		mode, problem, connected, ch := f.st.Mode, f.st.Problem, f.connected, f.changed
+		f.rotateNow = true
+		f.mu.Unlock()
+		switch {
+		case !covered.Before(t):
+			return nil
+		case mode == modeSnapshots:
+			return &snapshotModeError{problem}
+		case !connected:
+			return errors.New("Rowsafe's link isn't following the server right now")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline:
+			return fmt.Errorf("the changes up to %s haven't reached your bucket within %s", t.Format(time.RFC3339), timeout)
 		case <-ch:
 		case <-time.After(2 * time.Second):
 		}

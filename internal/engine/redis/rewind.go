@@ -156,12 +156,15 @@ func (e *Engine) flushForMoment(ctx context.Context, env agent.EngineEnv, db pro
 	if f == nil {
 		return
 	}
-	st := f.snapshot()
-	if st.Mode != modeReplica || st.StreamID == "" {
+	if f.snapshot().Mode != modeReplica {
 		return
 	}
-	// Everything received so far arrived before now, so it covers the moment.
-	_ = f.flush(ctx, st.StreamID, st.Offset, 2*time.Minute)
+	// The moment's second must be over and in the bucket.
+	end := target.Time.Truncate(time.Second).Add(time.Second)
+	if d := time.Until(end); d > 0 && d < 5*time.Second {
+		time.Sleep(d)
+	}
+	_ = f.flushTime(ctx, end, 2*time.Minute)
 }
 
 func (e *Engine) rewindCopy(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec, p protocol.RewindCopyParams, tl agent.TaskLogger) (*protocol.RewindCopyResult, error) {

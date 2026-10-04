@@ -16,7 +16,6 @@ package redis
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -521,4 +520,82 @@ func waitFor(t *testing.T, d time.Duration, ok func() bool) {
 	}
 }
 
-var _ = errors.New
+// TestRedisUnderLoad writes all the time while the link starts, drops and
+// comes back, and a backup runs; a copy as of the end must then hold
+// exactly what production holds.
+func TestRedisUnderLoad(t *testing.T) {
+	e, env, db, a := setup(t)
+	ctx := context.Background()
+	var cmds [][]any
+	for i := 0; i < 50000; i++ {
+		cmds = append(cmds, []any{"SET", fmt.Sprintf("k:%d", i), strings.Repeat("v", i%200)})
+	}
+	if _, _, err := a.pipeline(ctx, cmds); err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		w, err := connectAddr(ctx, addrOf(Login{}, db.Port), "", os.Getenv("ROWSAFE_TEST_REDIS_ADMIN_PASSWORD"), "writer")
+		if err != nil {
+			done <- err
+			return
+		}
+		defer w.Close()
+		for n := 0; ; n++ {
+			select {
+			case <-stop:
+				done <- nil
+				return
+			default:
+			}
+			batch := [][]any{{"SELECT", n % 2}}
+			for i := 0; i < 50; i++ {
+				k := fmt.Sprintf("k:%d", (n*50+i)%60000)
+				switch i % 5 {
+				case 0:
+					batch = append(batch, []any{"DEL", k})
+				case 1:
+					batch = append(batch, []any{"INCR", "counter:" + strconv.Itoa(i)})
+				case 2:
+					batch = append(batch, []any{"HSET", "h:" + strconv.Itoa(n%100), "f" + strconv.Itoa(i), n})
+				case 3:
+					batch = append(batch, []any{"MULTI"}, []any{"SET", k, n}, []any{"LPUSH", "list:" + strconv.Itoa(n%10), n}, []any{"EXEC"})
+				default:
+					batch = append(batch, []any{"SET", k, strings.Repeat("x", n%300), "PX", 3600000})
+				}
+			}
+			if _, _, err := w.pipeline(ctx, batch); err != nil {
+				done <- err
+				return
+			}
+		}
+	}()
+	mustRun[protocol.AdoptResult](t, e, env, db, protocol.TaskAdopt, protocol.AdoptParams{Apply: true})
+	mustRun[protocol.CheckResult](t, e, env, db, protocol.TaskCheck, nil)
+	mustRun[protocol.BackupResult](t, e, env, db, protocol.TaskBackup, nil)
+	time.Sleep(3 * time.Second)
+	rd(t, a, "CLIENT", "KILL", "TYPE", "replica")
+	time.Sleep(5 * time.Second)
+	close(stop)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	// Everything written is in the bucket, then a copy as of now.
+	f := e.existingFollower(db.ID)
+	m := infoMapOf(t, a, "replication")
+	if err := f.flush(ctx, f.snapshot().StreamID, m.int("master_repl_offset"), 2*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	now := time.Now().UTC()
+	mustRun[protocol.RewindCopyResult](t, e, env, db, protocol.TaskRewindCopy, protocol.RewindCopyParams{CopyID: "load",
+		Target: protocol.RewindTarget{Time: &now}})
+	cmp := mustRun[protocol.RewindCompareResult](t, e, env, db, protocol.TaskRewindCompare, protocol.RewindCompareParams{CopyID: "load"})
+	for _, d := range cmp.Tables {
+		if d.MissingInProduction+d.Changed+d.OnlyInProduction != 0 || strings.Contains(d.Note, "sample") {
+			t.Fatalf("the copy as of the end differs from production: %+v", d)
+		}
+	}
+	t.Logf("%s", cmp.Summary)
+}
