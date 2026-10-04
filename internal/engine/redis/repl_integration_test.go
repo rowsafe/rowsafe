@@ -161,7 +161,7 @@ func TestRedisStandby(t *testing.T) {
 	if _, err := CreateLoginWith(ctx, env, db.Port, "default", os.Getenv("ROWSAFE_TEST_REDIS_ADMIN_PASSWORD"), LoginOptions{Standby: true}); err != nil {
 		t.Fatal(err)
 	}
-	rd(t, a, "ACL", "SETUSER", "app", "on", ">app-secret", "~app:*", "+@all")
+	rd(t, a, "ACL", "SETUSER", "app", "reset", "on", ">app-secret", "~app:*", "+@all")
 	mustRun[protocol.AdoptResult](t, e, env, db, protocol.TaskAdopt, protocol.AdoptParams{Apply: true})
 	mustRun[protocol.CheckResult](t, e, env, db, protocol.TaskCheck, nil)
 	extraServer(t, 6391)
