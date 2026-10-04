@@ -2676,6 +2676,30 @@ redis_flow_tests() {
   called "plan --name cache --port 6379"
   rm -rf /var/lib/redis
 
+  # 2b. The log in Debian's folder (redis:adm, 2750, the file 640): the
+  #     agent's user gets an access rule to read it (the folder's default
+  #     for the files after a rotation too); owners and modes stay.
+  ruser=''
+  id -u redis >/dev/null 2>&1 || { useradd --system --no-create-home redis && ruser=1; }
+  getent group adm >/dev/null || groupadd --system adm
+  install -d -m 2750 -o redis -g adm /var/log/redis
+  echo '1:M 04 Oct 2026 00:48:28.601 * Ready to accept connections tcp' >/var/log/redis/redis-server.log
+  chown redis:adm /var/log/redis/redis-server.log && chmod 640 /var/log/redis/redis-server.log
+  scenario "discover_out=$rd" "redis-status_out=$(rdst ok)\nlogfile=/var/log/redis/redis-server.log" "plan_out=$rdplan"
+  tty_ok "Redis: its log made readable to the agent" "Name it in Rowsafe\t\nTurn on backups for cache now?\tn\n" "$INSTALLER"
+  has "Rowsafe can read Redis's log (/var/log/redis/redis-server.log) for the Logs page"
+  [ "$(stat -c '%U %G %a' /var/log/redis/redis-server.log)" = "redis adm 640" ] || fail "$name: the log's owner or mode changed"
+  getfacl -p /var/log/redis 2>/dev/null | grep -qx 'default:user:postgres:r--' || fail "$name: no default ACL: $(getfacl -p /var/log/redis)"
+  setpriv --reuid=postgres --regid=postgres --init-groups -- cat /var/log/redis/redis-server.log >/dev/null || fail "$name: the agent can't read the log"
+  # A log straight in /var/log (root's folder) is only mentioned.
+  mv /var/log/redis/redis-server.log /var/log/redis-test.log && setfacl -b /var/log/redis-test.log
+  scenario "discover_out=$rd" "redis-status_out=$(rdst ok)\nlogfile=/var/log/redis-test.log" "plan_out=$rdplan"
+  tty_ok "Redis: a log in a shared folder is left alone" "Name it in Rowsafe\t\nTurn on backups for cache now?\tn\n" "$INSTALLER"
+  has "Rowsafe can't read Redis's log (/var/log/redis-test.log)"
+  ! getfacl -p -s /var/log 2>/dev/null | grep -q postgres || fail "$name: an ACL on /var/log"
+  rm -rf /var/log/redis /var/log/redis-test.log
+  [ -z "$ruser" ] || userdel redis
+
   # 3. Redis couldn't keep it (it can't write its configuration file):
   #    root replaces the earlier "user rowsafe" line, keeping owner and mode.
   rgrp=''

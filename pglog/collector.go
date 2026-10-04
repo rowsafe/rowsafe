@@ -344,7 +344,7 @@ func splitLines(data []byte) []string {
 func (c *Collector) parse(st *dbState, res readResult, now time.Time) []Entry {
 	var out []Entry
 	switch st.src.Format {
-	case FormatMySQLError, FormatMongoJSON, FormatClickHouse: // engines.go
+	case FormatMySQLError, FormatMongoJSON, FormatClickHouse, FormatRedis: // engines.go
 		if st.eng == nil {
 			st.eng = newEngineParser(st.src.Format)
 		}

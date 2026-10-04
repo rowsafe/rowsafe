@@ -26,6 +26,7 @@ const (
 	FormatMySQLError = "mysql_error"   // MySQL/MariaDB error log (+ Source.SlowPath: the slow query log)
 	FormatMongoJSON  = "mongodb_json"  // MongoDB 4.4+ structured log
 	FormatClickHouse = "clickhouse"    // clickhouse-server.err.log (or .log)
+	FormatRedis      = "redis"         // Redis's and Valkey's log file (redis.go)
 	formatMySQLSlow  = "mysql_slowlog" // internal: the slow query log's parser
 )
 
@@ -37,6 +38,8 @@ type engineParser struct {
 	out    []Entry
 	// slow log record being read
 	slow *slowRecord
+	// redisCrash: inside a Redis or Valkey crash report (redis.go)
+	redisCrash bool
 }
 
 func newEngineParser(format string) *engineParser { return &engineParser{format: format} }
@@ -54,6 +57,8 @@ func (p *engineParser) Add(line string) {
 		}
 	case FormatClickHouse:
 		p.clickhouse(line)
+	case FormatRedis:
+		p.redis(line)
 	}
 }
 
