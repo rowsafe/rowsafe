@@ -38,7 +38,7 @@ type Login struct {
 // custom server): mongodb://user:password@host:port/?authSource=admin.
 const loginEnv = "ROWSAFE_MONGODB_URI"
 
-func loginsDir(env agent.EngineEnv) string { return filepath.Join(env.StateDir, "logins") }
+func loginsDir(env agent.EngineEnv) string { return filepath.Join(env.SharedStateDir(), "logins") }
 
 func loginPath(env agent.EngineEnv, port int) string {
 	return filepath.Join(loginsDir(env), strconv.Itoa(port)+".json")

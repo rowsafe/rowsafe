@@ -178,7 +178,7 @@ func (s *server) createAccountAsAdmin(ctx context.Context) (bool, error) {
 			return false, fmt.Errorf("creating the %s account: %w", rowsafeUser, err)
 		}
 	}
-	return true, saveAccount(s.env.StateDir, s.db.Port, account{User: rowsafeUser, Password: password}, -1, -1)
+	return true, saveAccount(s.env.SharedStateDir(), s.db.Port, account{User: rowsafeUser, Password: password}, -1, -1)
 }
 
 // accountSQL creates or resets Rowsafe's account and grants what it needs.

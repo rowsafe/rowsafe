@@ -47,7 +47,7 @@ const (
 // userAgent marks the agent's own queries (system.processes.http_user_agent).
 const userAgent = "rowsafe-agent"
 
-func loginsDir(env agent.EngineEnv) string { return filepath.Join(env.StateDir, "logins") }
+func loginsDir(env agent.EngineEnv) string { return filepath.Join(env.SharedStateDir(), "logins") }
 
 func loginPath(env agent.EngineEnv, port int) string {
 	return filepath.Join(loginsDir(env), strconv.Itoa(port)+".json")

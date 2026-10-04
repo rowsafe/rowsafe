@@ -144,6 +144,10 @@ type EngineEnv struct {
 	// (<ROWSAFE_STATE_DIR>/engines/<engine>). It is not created: MkdirAll
 	// it (0700) before use.
 	StateDir string
+	// MainStateDir is StateDir outside the second copy's pipeline, which
+	// gets a StateDir of its own below it (engineEnv2) but logs in with the
+	// same saved logins: read them through SharedStateDir.
+	MainStateDir string
 	// Repo is the backup storage (S3-compatible bucket, path prefix, keys,
 	// client-side encryption passphrase), shared with PostgreSQL's
 	// pgBackRest. Keep each engine's data under its own prefix.
@@ -258,14 +262,25 @@ func engineEnv(cfg Config, runner CommandRunner, log *slog.Logger, name string) 
 		log = slog.New(slog.DiscardHandler)
 	}
 	return EngineEnv{
-		Config:      cfg,
-		StateDir:    filepath.Join(cfg.StateDir, "engines", name),
-		Repo:        cfg.Repo,
-		Runner:      runner,
-		LowPriority: niceWrap(),
-		Log:         log.With("engine", name),
-		Notes:       io.Discard,
+		Config:       cfg,
+		StateDir:     filepath.Join(cfg.StateDir, "engines", name),
+		MainStateDir: filepath.Join(cfg.StateDir, "engines", name),
+		Repo:         cfg.Repo,
+		Runner:       runner,
+		LowPriority:  niceWrap(),
+		Log:          log.With("engine", name),
+		Notes:        io.Discard,
 	}
+}
+
+// SharedStateDir is where an engine keeps what both of its pipelines share,
+// such as Rowsafe's saved logins: MainStateDir, or StateDir when that is
+// unset (tests that build an EngineEnv themselves).
+func (e EngineEnv) SharedStateDir() string {
+	if e.MainStateDir != "" {
+		return e.MainStateDir
+	}
+	return e.StateDir
 }
 
 func (a *Agent) engineEnv(name string) EngineEnv {

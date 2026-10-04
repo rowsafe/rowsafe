@@ -57,7 +57,7 @@ func (s *server) account() (account, error) {
 		}
 		return account{User: s.cfg.User, Password: pw, Source: "ROWSAFE_MYSQL_USER"}, nil
 	}
-	return readAccountFile(accountPath(s.env.StateDir, s.db.Port))
+	return readAccountFile(accountPath(s.env.SharedStateDir(), s.db.Port))
 }
 
 // adminAccount is the administrator account for creating Rowsafe's own
