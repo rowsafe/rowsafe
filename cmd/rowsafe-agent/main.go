@@ -146,6 +146,20 @@ func run(ctx context.Context) error {
 	return err
 }
 
+// otherEnginesOnly: this server has no PostgreSQL to back up (no postgres
+// user, or the agent is told so), so pgBackRest isn't needed.
+func otherEnginesOnly() bool {
+	if os.Getenv("ROWSAFE_SQLITE_PATHS") != "" {
+		return true
+	}
+	if _, err := os.Stat("/etc/rowsafe/sqlite-paths"); err == nil {
+		if _, err := os.Stat("/usr/lib/postgresql"); err != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // sqliteContainer: the agent runs in a container with SQLite files to
 // protect (ROWSAFE_SQLITE_PATHS), as the app's user.
 func sqliteContainer() bool {
@@ -176,7 +190,11 @@ func selftest(ctx context.Context) int {
 		if cfg.SecondCopy() {
 			check("second copy settings", cfg.Repo2.ValidateAs("ROWSAFE_REPO2_"))
 		}
-		check("pgbackrest", exec.CommandContext(ctx, cfg.PgBackRestBin, "version").Run())
+		// pgBackRest backs up PostgreSQL; a server with only other engines
+		// (SQLite files, MongoDB, ClickHouse) runs without it.
+		if _, err := os.Stat(cfg.PgBackRestBin); err == nil || len(agent.WatchedTargets(cfg)) > 0 || !otherEnginesOnly() {
+			check("pgbackrest", exec.CommandContext(ctx, cfg.PgBackRestBin, "version").Run())
+		}
 		check("control plane", agent.CheckControlPlane(ctx, cfg))
 		for _, t := range agent.WatchedTargets(cfg) {
 			conn, err := t.Connect(ctx, "postgres")
