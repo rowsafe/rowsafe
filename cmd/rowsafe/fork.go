@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -153,15 +154,21 @@ func pickForkTarget(info protocol.ForkInfo, to string) (*protocol.ForkTarget, er
 	return nil, fmt.Errorf("no server %q; pass --to with one of: %s", to, strings.Join(names, ", "))
 }
 
-// pickForkPlace picks where on the server the fork goes.
+// pickForkPlace picks where on the server the fork goes. An empty server
+// (an empty PostgreSQL cluster, or an empty MySQL, MariaDB, Redis or
+// Valkey server handed to Rowsafe) is picked by its port, with --into-port
+// or --port.
 func pickForkPlace(t protocol.ForkTarget, port, intoPort int) (protocol.ForkPlace, error) {
 	var empties []protocol.ForkPlace
+	empty := func(p protocol.ForkPlace) bool {
+		return p.Placement == protocol.ForkEmptyCluster || p.Placement == protocol.ForkEmptyServer
+	}
 	for _, p := range t.Places {
 		switch {
-		case intoPort != 0 && p.Placement == protocol.ForkEmptyCluster && p.Port == intoPort:
+		case intoPort != 0 && empty(p) && p.Port == intoPort:
 			return p, nil
-		case intoPort == 0 && port != 0 && p.Placement == protocol.ForkEmptyCluster && p.Port == port:
-			return p, nil // --port naming an empty server handed to Rowsafe (Redis, Valkey) is that server
+		case intoPort == 0 && port != 0 && empty(p) && p.Port == port:
+			return p, nil
 		case intoPort == 0 && p.Placement == protocol.ForkNewCluster:
 			if port != 0 {
 				p.Port = port
@@ -170,7 +177,7 @@ func pickForkPlace(t protocol.ForkTarget, port, intoPort int) (protocol.ForkPlac
 			return p, nil
 		case intoPort == 0 && p.Placement == protocol.ForkDocker:
 			return p, nil
-		case p.Placement == protocol.ForkEmptyCluster:
+		case empty(p):
 			empties = append(empties, p)
 		}
 	}
@@ -181,14 +188,15 @@ func pickForkPlace(t protocol.ForkTarget, port, intoPort int) (protocol.ForkPlac
 	for _, p := range empties {
 		ports = append(ports, fmt.Sprint(p.Port))
 	}
-	if intoPort != 0 {
+	if intoPort != 0 || port != 0 {
+		want := cmp.Or(intoPort, port)
 		if len(ports) == 0 {
-			return protocol.ForkPlace{}, fmt.Errorf("%s has no empty PostgreSQL cluster Rowsafe may stop and start", t.Hostname)
+			return protocol.ForkPlace{}, fmt.Errorf("%s has no empty server Rowsafe may use on port %d", t.Hostname, want)
 		}
-		return protocol.ForkPlace{}, fmt.Errorf("port %d on %s isn't an empty cluster Rowsafe may use; these are: %s", intoPort, t.Hostname, strings.Join(ports, ", "))
+		return protocol.ForkPlace{}, fmt.Errorf("port %d on %s isn't an empty server Rowsafe may use; these are: %s", want, t.Hostname, strings.Join(ports, ", "))
 	}
 	if len(ports) > 0 {
-		return protocol.ForkPlace{}, fmt.Errorf("Rowsafe may not create clusters on %s; pick one of its empty clusters with --into-port (%s)", t.Hostname, strings.Join(ports, ", "))
+		return protocol.ForkPlace{}, fmt.Errorf("pick one of the empty servers on %s with --port (%s)", t.Hostname, strings.Join(ports, ", "))
 	}
 	return protocol.ForkPlace{}, fmt.Errorf("%s has no place for the fork", t.Hostname)
 }
