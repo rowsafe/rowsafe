@@ -255,7 +255,8 @@ Databases & users: the databases, users and extensions inside a server (--on NAM
                                              to type its name)
   rowsafe db users [--json]                  users, what they can connect to and how their password is stored
   rowsafe db user add USER --db DB[,DB] [--access read_only|read_write|owner]
-                                             a new user; its password is shown once
+                                             a new user; its password is shown once (Redis and Valkey:
+                                             no --db; --keys "session:*" limits the keys it reaches)
   rowsafe db user password USER              a new password for USER, shown once
   rowsafe db user remove USER [--reassign-to USER] [--yes]
                                              remove a user; what it owns goes to --reassign-to

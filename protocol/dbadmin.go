@@ -125,6 +125,11 @@ type DBAdminParams struct {
 	// create_user: Access (DBAccess*) to Databases.
 	Access    string   `json:"access,omitempty"`
 	Databases []string `json:"databases,omitempty"`
+	// KeyPattern limits a new Redis or Valkey user to the keys matching
+	// it (Redis glob patterns, space-separated: "session:* cache:*"; ""
+	// is every key). Redis users reach every logical database, so
+	// Databases stays empty for them.
+	KeyPattern string `json:"key_pattern,omitempty"`
 
 	// drop_user: who gets the objects the user owns. Required when it owns
 	// any.
@@ -211,6 +216,11 @@ func ConnectionURL(c DBConnection, password string) string {
 		scheme = "mongodb"
 	case EngineClickHouse:
 		scheme = "clickhouse"
+	case EngineRedis, EngineValkey:
+		scheme = "redis"
+		if c.SSLMode == "require" {
+			scheme = "rediss"
+		}
 	}
 	u := scheme + "://" + urlEscape(c.User)
 	if password != "" {
@@ -297,6 +307,11 @@ type DBInventory struct {
 	Extensions    []DBExtension `json:"extensions"` // available on the server
 	// Truncated: the server has more databases or users than listed.
 	Truncated bool `json:"truncated,omitempty"`
+
+	// LogicalDatabases is how many numbered logical databases a Redis or
+	// Valkey server has (its databases setting: 0 to N-1). Databases lists
+	// those that hold keys, and 0.
+	LogicalDatabases int `json:"logical_databases,omitempty"`
 }
 
 // Address kinds (DBAddress.Kind).
@@ -330,6 +345,8 @@ type DBDatabase struct {
 	System bool `json:"system,omitempty"`
 	// Connections open now.
 	Connections int `json:"connections"`
+	// Keys is the number of keys in a Redis or Valkey logical database.
+	Keys int64 `json:"keys,omitempty"`
 	// Extensions installed (nil when the database couldn't be read).
 	Extensions []DBInstalledExtension `json:"extensions,omitempty"`
 }
@@ -376,6 +393,11 @@ type DBUser struct {
 	ValidUntil *time.Time `json:"valid_until,omitempty"`
 	// Connections open now.
 	Connections int `json:"connections,omitempty"`
+	// Access is the preset a Redis or Valkey user matches (DBAccess*; ""
+	// for rules Rowsafe didn't write), Keys its key patterns ("*": every
+	// key).
+	Access string   `json:"access,omitempty"`
+	Keys   []string `json:"keys,omitempty"`
 	// System users are not changed from Rowsafe: superusers, Rowsafe's own
 	// and PostgreSQL's built-in roles. SystemReason says why.
 	System       bool   `json:"system,omitempty"`
@@ -552,7 +574,7 @@ func ValidateDBAdminFor(engine string, p DBAdminParams) error {
 		default:
 			return fmt.Errorf("access must be read_only, read_write or owner")
 		}
-		if len(p.Databases) == 0 {
+		if len(p.Databases) == 0 && engine != EngineRedis && engine != EngineValkey {
 			return fmt.Errorf("choose at least one database the user can use")
 		}
 		if len(p.Databases) > maxDBAdminList {
@@ -642,6 +664,8 @@ var systemUsers = map[string][]string{
 	EngineMariaDB:    {"root", "mysql.sys", "mysql.session", "mysql.infoschema", "mariadb.sys", "debian-sys-maint"},
 	EngineMongoDB:    {"root", "admin", "__system"},
 	EngineClickHouse: {"default"},
+	EngineRedis:      {"default"},
+	EngineValkey:     {"default"},
 }
 
 // validateDBAdminEngine checks what differs between engines: extensions,
@@ -652,6 +676,13 @@ func validateDBAdminEngine(engine string, p DBAdminParams) error {
 		return fmt.Errorf("unknown engine %q", engine)
 	}
 	name := EngineDisplayName(engine)
+	if engine == EngineRedis || engine == EngineValkey {
+		if err := validateRedisDBAdmin(name, p); err != nil {
+			return err
+		}
+	} else if p.KeyPattern != "" {
+		return fmt.Errorf("key patterns are a Redis feature; %s users get access to databases", name)
+	}
 	if engine != EnginePostgreSQL {
 		switch p.Action {
 		case DBAdminEnableExtension, DBAdminDisableExtension:
