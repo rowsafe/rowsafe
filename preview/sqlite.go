@@ -28,6 +28,10 @@ type SQLiteContext struct {
 	// DiskFreeBytes is the free space next to production's file (0:
 	// unknown).
 	DiskFreeBytes int64
+	// ForeignKeyProblems are the rows the migration left pointing at a
+	// parent row that doesn't exist (foreign_key_check after it, minus
+	// before it).
+	ForeignKeyProblems int64
 }
 
 func (c SQLiteContext) wal() bool { return strings.EqualFold(c.JournalMode, "wal") }
@@ -106,7 +110,10 @@ func AssignSQLiteLocks(res *protocol.PreviewResult, texts []string, wrote []bool
 
 // AssessSQLite is AssessEngine for a SQLite migration, with SQLite's own
 // findings: index builds and VACUUM with their wait, PRAGMA foreign_keys
-// inside a transaction, and reads waiting in rollback-journal mode.
+// inside a transaction, rows left without a parent, reads waiting in
+// rollback-journal mode. Table rebuilds are SQLite's normal way to change
+// a table, so a small, quick one isn't worth a finding, and renaming a
+// table into place as part of one doesn't break running code.
 func AssessSQLite(res *protocol.PreviewResult, texts []string, c SQLiteContext) {
 	extra := sqliteFindings(res, texts, c)
 	AssessEngine(protocol.EngineSQLite, res, texts, extra)
@@ -118,28 +125,137 @@ func AssessSQLite(res *protocol.PreviewResult, texts []string, c SQLiteContext) 
 			explained[f.Statement] = true
 		}
 	}
+	harmless := rebuildRenames(texts)
 	res.Findings = slices.DeleteFunc(res.Findings, func(f protocol.PreviewFinding) bool {
-		return explained[f.Statement] && (f.Rule == "lock" || f.Rule == "long_lock")
-	})
-	// Extra findings make their statement riskier too.
-	for _, f := range res.Findings {
+		var s *protocol.PreviewStatement
 		if f.Statement > 0 && f.Statement <= len(res.Statements) {
-			s := &res.Statements[f.Statement-1]
-			if s.Ran && s.Error == "" {
+			s = &res.Statements[f.Statement-1]
+		}
+		switch f.Rule {
+		case "lock", "long_lock":
+			return explained[f.Statement]
+		case "rename":
+			return harmless[f.Statement]
+		case "table_rewrite":
+			return s != nil && s.DurationMs < carefulLockMs && !slices.ContainsFunc(s.Rewrites, func(r protocol.PreviewRelation) bool { return r.SizeBytes >= bigTableBytes })
+		}
+		return false
+	})
+	// Risks, verdict and summary again from the findings left.
+	for i := range res.Statements {
+		if s := &res.Statements[i]; s.Ran && s.Error == "" {
+			s.Risk = protocol.PreviewSafe
+		}
+	}
+	verdict := protocol.PreviewSafe
+	for _, f := range res.Findings {
+		verdict = worse(verdict, f.Severity)
+		if f.Statement > 0 && f.Statement <= len(res.Statements) {
+			if s := &res.Statements[f.Statement-1]; s.Ran && s.Error == "" {
 				s.Risk = worse(s.Risk, f.Severity)
 			}
 		}
 	}
+	const quick = "; quick enough to be safe."
 	worstN, worstText, worstRisk := 0, "", protocol.PreviewSafe
-	for _, s := range res.Statements {
-		if s.Impact != "" && rank(s.Risk) > rank(worstRisk) {
-			worstN, worstText, worstRisk = s.N, strings.TrimSuffix(strings.TrimSuffix(s.Impact, "."), "; quick enough to be safe"), s.Risk
+	for i := range res.Statements {
+		s := &res.Statements[i]
+		verdict = worse(verdict, s.Risk)
+		switch {
+		case s.Impact == "" || !s.Ran:
+		case s.Risk == protocol.PreviewSafe && !strings.HasSuffix(s.Impact, quick) && s.Error == "":
+			s.Impact = strings.TrimSuffix(s.Impact, ".") + quick
+		case s.Risk != protocol.PreviewSafe && strings.HasSuffix(s.Impact, quick):
+			s.Impact = strings.TrimSuffix(s.Impact, quick) + "."
 		}
-		if s.Risk != protocol.PreviewSafe && strings.HasSuffix(s.Impact, "; quick enough to be safe.") {
-			res.Statements[s.N-1].Impact = strings.TrimSuffix(s.Impact, "; quick enough to be safe.") + "."
+		if s.Impact != "" && s.Ran && rank(s.Risk) > rank(worstRisk) {
+			worstN, worstText, worstRisk = s.N, strings.TrimSuffix(strings.TrimSuffix(s.Impact, quick), "."), s.Risk
 		}
 	}
+	if res.Error != nil {
+		verdict = protocol.PreviewFailed
+	}
+	res.Verdict = verdict
 	res.Summary = summary(res, worstN, worstText)
+}
+
+// SQLiteName matches one table name as written ("a b", [a], `a`, a),
+// optionally main.-qualified; UnquoteSQLite gives SQLite's name.
+const SQLiteName = `(?:(?:main|"main"|\[main\]|` + "`main`" + `)\s*\.\s*)?("(?:[^"]|"")+"|\[[^\]]+\]|` + "`(?:[^`]|``)+`" + `|[\w$]+)`
+
+// UnquoteSQLite turns a name as written into SQLite's name.
+func UnquoteSQLite(n string) string {
+	switch {
+	case len(n) >= 2 && n[0] == '"':
+		return strings.ReplaceAll(n[1:len(n)-1], `""`, `"`)
+	case len(n) >= 2 && n[0] == '`':
+		return strings.ReplaceAll(n[1:len(n)-1], "``", "`")
+	case len(n) >= 2 && n[0] == '[':
+		return n[1 : len(n)-1]
+	}
+	return n
+}
+
+var (
+	sqliteRenameRE = regexp.MustCompile(`(?i)^ALTER\s+TABLE\s+` + SQLiteName + `\s+RENAME\s+TO\s+` + SQLiteName)
+	sqliteCreateRE = regexp.MustCompile(`(?i)^CREATE\s+(?:TEMP\s+|TEMPORARY\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?` + SQLiteName)
+	sqliteDropRE   = regexp.MustCompile(`(?i)^DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?` + SQLiteName)
+)
+
+// SQLiteRename parses ALTER TABLE a RENAME TO b (lower-case names).
+func SQLiteRename(stmt string) (from, to string, ok bool) {
+	m := sqliteRenameRE.FindStringSubmatch(Normalize(stmt))
+	if m == nil {
+		return "", "", false
+	}
+	return strings.ToLower(UnquoteSQLite(m[1])), strings.ToLower(UnquoteSQLite(m[2])), true
+}
+
+func sqliteTableOf(re *regexp.Regexp, stmt string) string {
+	if m := re.FindStringSubmatch(Normalize(stmt)); m != nil {
+		return strings.ToLower(UnquoteSQLite(m[1]))
+	}
+	return ""
+}
+
+// rebuildRenames are the statements (by N) renaming a table as part of a
+// rebuild: a table the migration made moves into place, or the old table
+// moves away for a new one with its name.
+func rebuildRenames(texts []string) map[int]bool {
+	out := map[int]bool{}
+	for i, t := range texts {
+		from, _, ok := SQLiteRename(t)
+		if !ok {
+			continue
+		}
+		for j, u := range texts {
+			if sqliteTableOf(sqliteCreateRE, u) == from && j != i {
+				out[i+1] = true
+			}
+		}
+	}
+	return out
+}
+
+// renamedAwayAndDropped: the migration renames an existing table and
+// drops it under its new name (the old way to rebuild a table).
+func renamedAwayAndDropped(texts []string) bool {
+	for i, t := range texts {
+		from, to, ok := SQLiteRename(t)
+		if !ok {
+			continue
+		}
+		created := false
+		for _, u := range texts[:i] {
+			created = created || sqliteTableOf(sqliteCreateRE, u) == from
+		}
+		for _, u := range texts[i+1:] {
+			if !created && sqliteTableOf(sqliteDropRE, u) == to {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 var (
@@ -195,7 +311,7 @@ func sqliteFindings(res *protocol.PreviewResult, texts []string, c SQLiteContext
 				big = ix
 			}
 		}
-		if big != nil && sqliteCreateIndexRE.MatchString(n) && (big.SizeBytes >= bigTableBytes || s.DurationMs >= carefulLockMs) {
+		if big != nil && sqliteCreateIndexRE.MatchString(n) && (big.SizeBytes >= 10*bigTableBytes || s.DurationMs >= carefulLockMs) {
 			sev := protocol.PreviewCareful
 			if s.DurationMs >= dangerousLockMs {
 				sev = protocol.PreviewDangerous
@@ -243,6 +359,18 @@ func sqliteFindings(res *protocol.PreviewResult, texts []string, c SQLiteContext
 				}
 			}
 		}
+	}
+	if c.ForeignKeyProblems > 0 && res.Error == nil {
+		f := protocol.PreviewFinding{Rule: "foreign_key_check", Severity: protocol.PreviewCareful,
+			Title:      fmt.Sprintf("Afterwards, %s %s to a parent row that doesn't exist", humanCount(c.ForeignKeyProblems), plural(int(min(c.ForeignKeyProblems, 2)), "row points", "rows point")),
+			Detail:     "PRAGMA foreign_key_check finds them after the migration but not before. If your app turns foreign keys on, changing those rows will fail.",
+			Suggestion: "Check the migration's INSERT ... SELECT and DROP statements, and run PRAGMA foreign_key_check before committing, as SQLite's table rebuild procedure does."}
+		if renamedAwayAndDropped(texts) {
+			f.Severity = protocol.PreviewDangerous
+			f.Detail = "Renaming a table also changes the references to it in other tables (SQLite 3.26 and later), so renaming the old table away and dropping it leaves those rows pointing at a table that no longer exists. " + f.Detail
+			f.Suggestion = "Rebuild the other way round: create the new table under another name, copy the rows, drop the old table, then rename the new one into place (SQLite's own procedure)."
+		}
+		out = append(out, f)
 	}
 	return out
 }

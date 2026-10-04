@@ -64,6 +64,7 @@ func (e *Engine) Tasks() []string {
 		protocol.TaskRestorePoint, protocol.TaskMaintenance,
 		protocol.TaskRewindCopy, protocol.TaskRewindDrop, protocol.TaskRewindCompare, protocol.TaskRewindRows,
 		protocol.TaskRewindInPlace, protocol.TaskRewindUndo, protocol.TaskRewindCleanup,
+		protocol.TaskPreviewMigration, // preview.go
 	}
 }
 
@@ -110,6 +111,7 @@ func (e *Engine) Start(ctx context.Context, env agent.EngineEnv) {
 	}
 	e.mu.Unlock()
 	e.recoverCopies(env)
+	e.recoverPreviewCopies(env)   // preview_copy.go
 	go e.recoverInPlace(ctx, env) // inplace.go
 	go func() {
 		t := time.NewTicker(time.Minute)
@@ -122,6 +124,7 @@ func (e *Engine) Start(ctx context.Context, env agent.EngineEnv) {
 			}
 			e.expireCopies(env, time.Now())
 			e.expireKept(env, time.Now())
+			e.expirePreviewCopies(env, time.Now())
 			e.stopIdleShippers()
 		}
 	}()
@@ -340,6 +343,12 @@ func (e *Engine) Run(ctx context.Context, env agent.EngineEnv, task *protocol.Ta
 			return nil, err
 		}
 		return nilIfNil(e.rewindCleanup(ctx, env, db, p, tl))
+	case protocol.TaskPreviewMigration:
+		var p protocol.PreviewParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.previewMigration(ctx, env, db, p, tl))
 	}
 	return nil, fmt.Errorf("SQLite databases can't run %s tasks", task.Type)
 }
