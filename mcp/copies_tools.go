@@ -169,9 +169,10 @@ func (t *tools) addCopiesTools(s *sdk.Server) {
 		Name: "preview_migration",
 		Description: "Runs a migration on a fresh copy of the database, restored from its backups on its own server, and reports what it would do to production: " +
 			"each statement's time, locks (and what they block), tables rewritten or dropped, indexes built, rows changed, with a verdict (safe, careful, dangerous, or failed) and concrete suggestions. " +
-			"For MySQL and MariaDB a failed migration also shows the schema changes that would stay applied (their DDL isn't transactional); for ClickHouse, mutations still running or failing. " +
+			"For MySQL and MariaDB a failed migration also shows the schema changes that would stay applied (their DDL isn't transactional); for ClickHouse, mutations still running or failing; " +
+			"for SQLite, how long the app's writes wait on the file's single write lock, tables rebuilt and rows left without a parent. " +
 			"Works for every engine whose features include migration previews (list_databases shows the engine). " +
-			"Production is never touched. A preview restores a copy (minutes for large databases; PostgreSQL reuses it for an hour). " +
+			"Production is never touched. A preview restores a copy (minutes for large databases; PostgreSQL and SQLite reuse it for an hour). " +
 			"If the preview isn't done within wait_seconds, the result has its preview ID and status queued or running.",
 		Annotations: &sdk.ToolAnnotations{Title: "Preview a migration", ReadOnlyHint: true, OpenWorldHint: ptr(false)},
 		InputSchema: inputSchema[previewInput](func(p map[string]*jsonschema.Schema) {

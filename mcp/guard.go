@@ -10,15 +10,16 @@ import (
 // DestructiveDBCommand reports whether a shell command is likely to change a
 // database destructively: schema migrations, resets and drops, SQL with
 // DROP, TRUNCATE, ALTER ... DROP, or DELETE/UPDATE without WHERE sent to a
-// SQL client (psql, mysql, mariadb, clickhouse-client, ...), or a MongoDB
+// SQL client (psql, mysql, mariadb, clickhouse-client, sqlite3, ...), a
+// sqlite3 .restore over a database file, or a MongoDB
 // shell script that drops or empties collections. It returns a short
 // reason. It is a heuristic tuned for few false positives: status, dry-run
 // and help invocations, and commands that only mention a tool (echo, grep,
 // git commit -m ...), don't match.
 //
 // readFile, if not nil, reads the SQL or script files passed to a client
-// (psql -f, mysql < file, clickhouse-client --queries-file, mongosh
-// script.js) so their contents can be checked too.
+// (psql -f, mysql < file, clickhouse-client --queries-file, sqlite3 -init
+// or .read, mongosh script.js) so their contents can be checked too.
 func DestructiveDBCommand(command string, readFile func(string) ([]byte, error)) (string, bool) {
 	sawSQL, sawMongo := false, false
 	var sqlFiles, mongoFiles []string
@@ -82,11 +83,11 @@ func helpInvocation(words []string) bool {
 }
 
 // clientKind says whether words[i] runs a database client: "sql" for
-// psql, pgcli, mysql, mariadb, mycli and clickhouse-client (or
-// clickhouse client), "mongo" for mongosh and mongo, "" otherwise.
+// psql, pgcli, mysql, mariadb, mycli, clickhouse-client (or clickhouse
+// client), sqlite3 and litecli, "mongo" for mongosh and mongo, "" otherwise.
 func clientKind(words []string, i int) string {
 	switch base(words[i]) {
-	case "psql", "pgcli", "mysql", "mariadb", "mycli", "clickhouse-client", "clickhouse-local":
+	case "psql", "pgcli", "mysql", "mariadb", "mycli", "clickhouse-client", "clickhouse-local", "sqlite3", "litecli":
 		return "sql"
 	case "clickhouse":
 		if i+1 < len(words) && (words[i+1] == "client" || words[i+1] == "local") {
@@ -128,6 +129,10 @@ func clientFiles(tool string, args []string) []string {
 			files = append(files, next())
 		case strings.HasPrefix(tool, "clickhouse") && strings.HasPrefix(a, "--queries-file="):
 			files = append(files, strings.TrimPrefix(a, "--queries-file="))
+		case tool == "sqlite3" && a == "-init" && next() != "":
+			files = append(files, next())
+		case tool == "sqlite3" && sqliteReadRE.MatchString(a):
+			files = append(files, sqliteReadRE.FindStringSubmatch(a)[1])
 		}
 	}
 	return files
@@ -434,6 +439,11 @@ func destructiveTool(words []string) (string, bool) {
 			return tool + " drop", true
 		}
 	}
+	// sqlite3 app.db ".restore backup.db" replaces the database's content.
+	if slices.ContainsFunc(words, func(w string) bool { return base(w) == "sqlite3" }) &&
+		slices.ContainsFunc(words, func(w string) bool { return sqliteRestoreRE.MatchString(w) }) {
+		return "sqlite3 .restore", true
+	}
 	if slices.ContainsFunc(words, func(w string) bool { return base(w) == "mongorestore" }) && hasAny(words, "--drop") {
 		return "mongorestore --drop", true
 	}
@@ -457,6 +467,13 @@ func destructiveTool(words []string) (string, bool) {
 	}
 	return "", false
 }
+
+var (
+	// sqlite3 shell commands: .read FILE runs a script, .restore replaces
+	// the database with a backup's content.
+	sqliteReadRE    = regexp.MustCompile(`^\.read\s+['"]?([^'"\s]+)['"]?\s*$`)
+	sqliteRestoreRE = regexp.MustCompile(`(?m)^\s*\.restore\b`)
+)
 
 var railsTaskRE = regexp.MustCompile(`^db:(migrate(:(up|down|redo|reset))?|rollback|drop(:all)?|reset|purge(:all)?|schema:load|structure:load|truncate_all|seed:replant|setup|prepare)$`)
 

@@ -68,6 +68,12 @@ import (
 //     SQLite), Time when the agent copied the change (within a second of
 //     its commit, to the millisecond). "Just before" a change is a Time
 //     target one millisecond earlier.
+//   - Migration previews run on a restored copy (kept as a CopyKindPreview
+//     copy for the next one). PreviewResult.DB is the file's name. There
+//     is one write lock per file, so PreviewLock.Relation is the file's
+//     name too, Blocks "writes" (reads go on in WAL mode and also wait
+//     while it commits in rollback-journal mode, said in Mode), on the
+//     first writing statement of a transaction, held until it commits.
 //   - Monitoring: database_size_bytes, disk_* and the sqlite_* metrics
 //     (collect/catalog_sqlite.go), and DatabaseMonitoring.SQLite below.
 //   - No server: restart, standby, pooling, updates, upgrades, Databases &
@@ -140,6 +146,8 @@ var sqliteFeatures = EngineFeatures{
 	Fork:       true, // clones into a new file in a folder root allowed (internal/engine/sqlite/fork.go)
 	// Schema-based: SQLite keeps no query statistics (internal/engine/sqlite/advice.go, indexadvice.go).
 	Recommendations: true, IndexAdvice: true,
+	// Guard: a migration run on a restored copy (internal/engine/sqlite/preview.go).
+	MigrationPreview: true,
 }
 
 // SQLiteStatus is SQLite's own health detail (DatabaseMonitoring.SQLite),

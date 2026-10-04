@@ -16,6 +16,11 @@ type dialect struct {
 	// rewriteDetail explains a rebuilt table; %s is rowsNote's text.
 	rewriteDetail     string
 	rewriteSuggestion func(stmt string) string
+	// lockAdvice, when set, is how to keep a long lock off production
+	// (instead of PostgreSQL's lock_timeout advice).
+	lockAdvice string
+	// bigChangeDetail, when set, explains what a large data change costs.
+	bigChangeDetail string
 }
 
 func dialectFor(engine string) dialect {
@@ -30,6 +35,12 @@ func dialectFor(engine string) dialect {
 			rewriteSuggestion: func(string) string {
 				return "Run mutations when the server is quiet and watch system.mutations; for deletes, a lightweight DELETE FROM ... WHERE is cheaper."
 			}}
+	case protocol.EngineSQLite:
+		return dialect{engine: e, rules: sqliteRules, // sqlite.go
+			rewriteDetail:     "SQLite writes every row of the table again%s while it holds the database's write lock, and the file needs room for both copies meanwhile.",
+			rewriteSuggestion: sqliteRewriteSuggestion,
+			lockAdvice:        "SQLite has one write lock per file: put slow steps (table rebuilds, index builds, big updates) in a migration of their own, run it when traffic is low, and make sure the app waits for the lock (a busy timeout) instead of failing.",
+			bigChangeDetail:   "The app's writes wait until it commits, and SQLite's journal (the -wal file in WAL mode) grows by about as much as the rows changed."}
 	case protocol.EngineMongoDB:
 		// The agent adds MongoFindings itself (per call).
 		return dialect{engine: e, rewriteDetail: "The collection is rewritten%s.",
