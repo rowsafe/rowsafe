@@ -535,7 +535,7 @@ func compareScope(ctx context.Context, cp, prod *conn, s scope, collect func(mis
 		notes = append(notes, fmt.Sprintf("Compared the first %s keys of about %s (a sample: the counts cover only those).", commas(compared), commas(total)))
 	}
 	if shallow > 0 {
-		notes = append(notes, fmt.Sprintf("%s large values (over %d elements) were compared by type and size only.", commas(shallow), deepCompareMax))
+		notes = append(notes, fmt.Sprintf("%s large values (over %d elements or 64 KiB) were compared by type and size only.", commas(shallow), deepCompareMax))
 	}
 	// Keys added since: production's keys the copy doesn't have.
 	if s.Pattern == "*" && !sampled {
@@ -641,34 +641,36 @@ func compareKeys(ctx context.Context, cp, prod *conn, keys []string) ([]keyDiff,
 			out[i] = keyMissing
 		case ct[i] != pt[i] || cs[i] != ps[i]:
 			out[i] = keyChanged
-		case ct[i] != "string" && cs[i] > deepCompareMax, ct[i] == "string" && cs[i] > 1<<20:
+		case ct[i] != "string" && cs[i] > deepCompareMax, ct[i] == "string" && cs[i] > 64<<10:
 			shallow++
 		default:
 			deep = append(deep, i)
 		}
 	}
-	if len(deep) == 0 {
-		return out, shallow, nil
-	}
-	read := func(c *conn) ([]any, error) {
-		cmds := make([][]any, len(deep))
-		for j, i := range deep {
-			cmds[j] = valueCommand(ct[i], keys[i])
+	// Values are read a few at a time, so the agent's memory stays small.
+	for len(deep) > 0 {
+		part := deep[:min(len(deep), 50)]
+		deep = deep[len(part):]
+		read := func(c *conn) ([]any, error) {
+			cmds := make([][]any, len(part))
+			for j, i := range part {
+				cmds[j] = valueCommand(ct[i], keys[i])
+			}
+			rep, _, err := c.pipeline(ctx, cmds)
+			return rep, err
 		}
-		rep, _, err := c.pipeline(ctx, cmds)
-		return rep, err
-	}
-	cv, err := read(cp)
-	if err != nil {
-		return nil, 0, err
-	}
-	pv, err := read(prod)
-	if err != nil {
-		return nil, 0, err
-	}
-	for j, i := range deep {
-		if !sameValue(ct[i], cv[j], pv[j]) {
-			out[i] = keyChanged
+		cv, err := read(cp)
+		if err != nil {
+			return nil, 0, err
+		}
+		pv, err := read(prod)
+		if err != nil {
+			return nil, 0, err
+		}
+		for j, i := range part {
+			if !sameValue(ct[i], cv[j], pv[j]) {
+				out[i] = keyChanged
+			}
 		}
 	}
 	return out, shallow, nil
@@ -831,6 +833,13 @@ func (e *Engine) rewindRows(ctx context.Context, env agent.EngineEnv, db protoco
 // restoreKeys copies keys from the copy into production (DUMP, RESTORE)
 // with their expiry; replace overwrites what production has.
 func restoreKeys(ctx context.Context, cp, prod *conn, keys []string, replace bool, out *protocol.RewindTableRows) error {
+	// A few keys at a time: their serialized values are held in memory.
+	for len(keys) > 50 {
+		if err := restoreKeys(ctx, cp, prod, keys[:50], replace, out); err != nil {
+			return err
+		}
+		keys = keys[50:]
+	}
 	if len(keys) == 0 {
 		return nil
 	}

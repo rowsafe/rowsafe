@@ -129,7 +129,7 @@ func skipNewlines(br *bufio.Reader) error {
 }
 
 // errTooBig: the snapshot is larger than the room the agent has for it.
-var errTooBig = errors.New("the snapshot is larger than the room Rowsafe has for it")
+var errTooBig = errors.New("the snapshot is larger than the free disk space Rowsafe may use on this server")
 
 // receiveRDB copies the snapshot that follows +FULLRESYNC into w (at most
 // limit bytes) and returns its size. idle bounds the wait for each read.

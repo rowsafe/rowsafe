@@ -379,9 +379,13 @@ func (f *follower) session(parent context.Context) (failedDuringSnapshot bool, e
 		f.setSnapshotMode(snapshotProblem(nil, in.MinReplicasToWrite))
 		return false, errSnapshotMode
 	}
-	// Room for a whole snapshot, which the server may send.
-	if err := ensureSpace(f.dir, in.UsedMemoryDataset+diskReserve, "receiving the server's snapshot"); err != nil {
-		return false, err
+	// Room for the whole snapshot the server sends a new link (a link that
+	// continues needs none; if the server sends one anyway, receiving it
+	// stops at the room there is).
+	if st.ServerReplID == "" {
+		if err := ensureSpace(f.dir, in.UsedMemoryDataset+diskReserve, "receiving the server's snapshot"); err != nil {
+			return false, err
+		}
 	}
 	stop := context.AfterFunc(ctx, func() { c.Close() })
 	defer stop()

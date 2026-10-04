@@ -58,10 +58,10 @@ DOCKERFILE
 	echo "$tag"
 }
 
-run_test() { # run_test CONTAINER ENV...
-	local c=$1
-	shift
-	to "$LIMIT" docker exec "$@" -e ROWSAFE_TEST_REDIS_PORT=6379 -e ROWSAFE_TEST_REDIS_ADMIN_PASSWORD=$PASS -u rowsafe -w /tmp "$c" \
+run_test() { # run_test CONTAINER USER ENV...
+	local c=$1 u=$2
+	shift 2
+	to "$LIMIT" docker exec "$@" -e ROWSAFE_TEST_REDIS_PORT=6379 -e ROWSAFE_TEST_REDIS_ADMIN_PASSWORD=$PASS -u "$u" -w /tmp "$c" \
 		/usr/local/bin/redis.test -test.v -test.count=1 -test.timeout=$((LIMIT - 60))s -test.run "$TEST_RUN"
 }
 
@@ -76,7 +76,7 @@ for src in $IMAGES; do
 	docker run -d --name "$c" "$tag" sleep infinity >/dev/null
 	docker exec "$c" sh -c 'su -s /bin/sh "$ROWSAFE_TEST_SERVER_USER" -c "$ROWSAFE_TEST_SERVER_BIN /etc/rowsafe-test/server.conf --daemonize yes"'
 	sleep 1
-	if ! run_test "$c"; then
+	if ! run_test "$c" rowsafe; then
 		echo "FAIL: $src" >&2
 		docker exec "$c" sh -c 'tail -n 30 /data/*.log 2>/dev/null || true'
 		rc=1
@@ -96,7 +96,9 @@ if [ "${DOCKER_MODE:-yes}" = yes ] && [ -n "$first" ]; then
 	docker run -d --name "$s" --network "$net" -v "$vol:/data" "$first" sh -c 'chown "$ROWSAFE_TEST_SERVER_USER" /data; exec su -s /bin/sh "$ROWSAFE_TEST_SERVER_USER" -c "$ROWSAFE_TEST_SERVER_BIN /etc/rowsafe-test/server.conf"' >/dev/null
 	docker run -d --name "$a" --network "$net" -v "$vol:/srv-data:ro" "$first" sleep infinity >/dev/null
 	sleep 2
-	if ! run_test "$a" -e ROWSAFE_REDIS_HOST="$s" -e ROWSAFE_REDIS_DATA_DIR=/srv-data; then
+	# As the agent image runs: the image's own user (uid 999), which owns the
+	# server's files in the shared volume (the images' umask is 0077).
+	if ! run_test "$a" 999 -e ROWSAFE_REDIS_HOST="$s" -e ROWSAFE_REDIS_DATA_DIR=/srv-data; then
 		echo "FAIL: Docker sidecar" >&2
 		rc=1
 	fi
