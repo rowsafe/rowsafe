@@ -66,6 +66,10 @@ func (e *Engine) Monitor(ctx context.Context, env agent.EngineEnv, db protocol.D
 		dm.Error = "this SQLite database has no valid file path"
 		return dm, nil
 	}
+	if err := allowed(env, path); err != nil {
+		dm.Error = err.Error()
+		return dm, nil
+	}
 	m := e.monitorFor(db.ID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
