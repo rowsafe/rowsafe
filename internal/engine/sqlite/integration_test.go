@@ -93,6 +93,8 @@ func payload(i int) []byte {
 }
 
 type app interface {
+	// create makes the database (the app's schema, WAL mode).
+	create(t *testing.T)
 	// run writes transactions from start for d; truncateAt >= 0 runs a
 	// wal_checkpoint(TRUNCATE) that long after it starts. It returns the
 	// last transaction written.
@@ -124,6 +126,8 @@ func createAppDB(t *testing.T, path string, wal bool) {
 		}
 	}
 }
+
+func (a goApp) create(t *testing.T) { createAppDB(t, a.path, true) }
 
 func (a goApp) run(t *testing.T, start int, d, truncateAt time.Duration) int {
 	c, err := sqlite3.Open(a.path)
@@ -181,15 +185,35 @@ func writeTxn(c *sqlite3.Conn, i int) error {
 	return c.Exec("COMMIT")
 }
 
-// pyApp is the app in Python (C SQLite, POSIX locks, another process).
-type pyApp struct{ path string }
+// pyApp is the app in Python (C SQLite, POSIX locks, another process),
+// as its own user when ROWSAFE_TEST_SQLITE_APP_USER names one (sudo).
+type pyApp struct{ path, user string }
+
+func (a pyApp) command(args ...string) *exec.Cmd {
+	if a.user != "" {
+		return exec.Command("sudo", append([]string{"-n", "-u", a.user, "--"}, args...)...)
+	}
+	return exec.Command(args[0], args[1:]...)
+}
+
+func (a pyApp) create(t *testing.T) {
+	a.run(t, 1, 0, -1)
+	if a.user != "" {
+		// What the installer does: the agent's user may read and write the
+		// file (its folder already gives it a default ACL).
+		u := os.Getenv("USER")
+		if out, err := a.command("setfacl", "-m", "u:"+u+":rw", a.path).CombinedOutput(); err != nil {
+			t.Fatalf("setfacl: %v: %s", err, out)
+		}
+	}
+}
 
 func (a pyApp) run(t *testing.T, start int, d, truncateAt time.Duration) int {
-	args := []string{"testdata/writer.py", a.path, fmt.Sprint(d.Seconds()), fmt.Sprint(start)}
+	args := []string{"python3", "testdata/writer.py", a.path, fmt.Sprint(d.Seconds()), fmt.Sprint(start)}
 	if truncateAt >= 0 {
 		args = append(args, fmt.Sprint(truncateAt.Seconds()))
 	}
-	cmd := exec.Command("python3", args...)
+	cmd := a.command(args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -214,7 +238,7 @@ func appFor(t *testing.T, path string) app {
 		if _, err := exec.LookPath("python3"); err != nil {
 			t.Fatal("ROWSAFE_TEST_SQLITE_INTEROP=1 needs python3")
 		}
-		return pyApp{path}
+		return pyApp{path: path, user: os.Getenv("ROWSAFE_TEST_SQLITE_APP_USER")}
 	}
 	return goApp{path}
 }
@@ -223,7 +247,7 @@ func appFor(t *testing.T, path string) app {
 // transaction v, and returns v and the newest event's time.
 func verify(t *testing.T, path string) (int, time.Time) {
 	t.Helper()
-	c, err := sqlite3.OpenFlags(path, sqlite3.OPEN_READONLY)
+	c, err := openDB(context.Background(), path, openOpts{Busy: 10 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,11 +307,15 @@ func TestSQLiteContinuousArchiving(t *testing.T) {
 	}
 	env, _ := testEnv(t)
 	dir := t.TempDir()
-	path := filepath.Join(dir, "production.sqlite3")
-	createAppDB(t, path, true)
+	appDir := dir
+	if d := os.Getenv("ROWSAFE_TEST_SQLITE_DIR"); d != "" {
+		appDir = d // the app's own folder (scripts/test-sqlite.sh)
+	}
+	path := filepath.Join(appDir, fmt.Sprintf("production-%d.sqlite3", time.Now().UnixNano()))
+	ap := appFor(t, path)
+	ap.create(t)
 	db := testSpec(path)
 	e := startEngine(t, env)
-	ap := appFor(t, path)
 	last := ap.run(t, 1, 500*time.Millisecond, -1)
 
 	plan, err := run[protocol.AdoptResult](t, e, env, db, protocol.TaskAdopt, protocol.AdoptParams{})
@@ -557,13 +585,14 @@ func lastBefore(t *testing.T, path string, at time.Time) int {
 	return int(v)
 }
 
+// mustOpen opens production as the agent does (its side files prepared
+// for the app's user).
 func mustOpen(t *testing.T, path string) *sqlite3.Conn {
 	t.Helper()
-	c, err := sqlite3.Open(path)
+	c, err := openDB(context.Background(), path, openOpts{Busy: 10 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = c.BusyTimeout(10 * time.Second)
 	return c
 }
 
