@@ -296,9 +296,18 @@ func TestRedisEndToEnd(t *testing.T) {
 	mustRun[protocol.RewindDropResult](t, e, env, db, protocol.TaskRewindDrop, protocol.RewindDropParams{CopyID: "c2"})
 
 	// Proof.
+	rd(t, a, "SET", "proof:tick", "1") // after the backup: Proof counts it (the replayed server)
 	dr := mustRun[protocol.DrillResult](t, e, env, db, protocol.TaskDrill, nil)
 	if !dr.Passed || len(dr.Databases) == 0 {
 		t.Fatalf("drill: %+v", dr)
+	}
+	for _, d := range dr.Databases {
+		if d.Name == "db0" && int64(d.RestoredTables) != asInt(rd(t, a, "DBSIZE")) {
+			t.Fatalf("drill counted db0 as %d, production has %d", d.RestoredTables, asInt(rd(t, a, "DBSIZE")))
+		}
+	}
+	if _, err := os.Stat(drillRoot(env, e.name)); !os.IsNotExist(err) {
+		t.Fatalf("the drills folder is left behind: %v", err)
 	}
 
 	// Rewind in place to the Mark, then undo.

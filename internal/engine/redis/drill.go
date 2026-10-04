@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -44,6 +45,9 @@ func (e *Engine) drill(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 	}
 	e.copyMu.Lock()
 	defer e.copyMu.Unlock()
+	// The engine's folder under the drills goes too once empty (nothing
+	// else makes temporary servers there while copyMu is held).
+	defer func() { _ = os.Remove(drillRoot(env, e.name)) }()
 	fail := func(res *protocol.DrillResult, err error) (*protocol.DrillResult, error) {
 		res.Failures = append(res.Failures, err.Error())
 		res.DurationSeconds = time.Since(started).Seconds()
@@ -98,8 +102,11 @@ func (e *Engine) drill(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 				res.Warnings = append(res.Warnings, fmt.Sprintf("changes after %s are missing from your bucket (Rowsafe's link was away longer than the server "+
 					"keeps changes for it): the next backup starts a new unbroken chain", out2.GapAfter.Format(time.RFC3339)))
 			}
-			if latest, err := keyCounts(ctx, c2); err == nil && len(prod.Keyspace) > 0 {
-				compareWithProduction(latest, prod.Keyspace, res)
+			if latest, err := keyCounts(ctx, c2); err == nil {
+				if len(prod.Keyspace) > 0 {
+					compareWithProduction(latest, prod.Keyspace, res)
+				}
+				replayedCounts(latest, prod.Keyspace, res)
 			}
 			c2.Close()
 			tl.Printf("replayed %s changes made after the backup", commas(out2.Replayed))
@@ -159,6 +166,38 @@ func checkCounts(b backupDoc, got map[int]dbKeys, res *protocol.DrillResult, tl 
 		default:
 			tl.Printf("db%d: %s keys restored (the backup recorded %s)", n, commas(have.Keys), commas(want.Keys))
 		}
+	}
+}
+
+// replayedCounts makes the result's per-database counts those of the
+// fully restored server (the snapshot and every change since, as of
+// RecoveredTo), next to production's when Proof started: what was restored
+// is the data as it is now, not as of the backup.
+func replayedCounts(latest, prod map[int]dbKeys, res *protocol.DrillResult) {
+	seen := map[string]bool{}
+	for i := range res.Databases {
+		d := &res.Databases[i]
+		seen[d.Name] = true
+		n, err := strconv.Atoi(strings.TrimPrefix(d.Name, "db"))
+		if err != nil {
+			continue
+		}
+		d.RestoredTables = clampInt(latest[n].Keys)
+		if p, ok := prod[n]; ok {
+			d.SourceTables = clampInt(p.Keys)
+		}
+		d.Present = latest[n].Keys > 0 || d.SourceTables == 0
+	}
+	var idx []int
+	for n := range latest {
+		if !seen["db"+strconv.Itoa(n)] {
+			idx = append(idx, n)
+		}
+	}
+	slices.Sort(idx)
+	for _, n := range idx {
+		res.Databases = append(res.Databases, protocol.DrillDatabase{Name: "db" + strconv.Itoa(n), SourceTables: clampInt(prod[n].Keys),
+			RestoredTables: clampInt(latest[n].Keys), Present: latest[n].Keys > 0})
 	}
 }
 

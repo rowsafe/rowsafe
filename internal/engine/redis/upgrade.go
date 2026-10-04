@@ -125,6 +125,7 @@ func (e *Engine) RehearseUpgrade(ctx context.Context, env agent.EngineEnv, db pr
 	}
 	e.copyMu.Lock()
 	defer e.copyMu.Unlock()
+	defer func() { _ = os.Remove(drillRoot(env, e.name)) }() // once empty (drill.go)
 	s, err := newScratch(env, drillRoot(env, e.name), "upgrade-"+time.Now().UTC().Format("20060102T150405"))
 	if err != nil {
 		return err
