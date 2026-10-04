@@ -152,6 +152,8 @@ type SettingsSnapshot struct {
 	// (MongoDB and ClickHouse: root hasn't allowed Tuning, or the server
 	// runs in Docker); "" when it can.
 	ChangeBlocked string `json:"change_blocked,omitempty"`
+	// Redis is a Redis or Valkey server's facts (redis_settings.go).
+	Redis *RedisSettingsFacts `json:"redis,omitempty"`
 }
 
 // ---- User API ----
@@ -193,6 +195,9 @@ type SettingsOverview struct {
 	ChangeReason string `json:"change_reason,omitempty"`
 	// Busy: a settings change is queued or running.
 	Busy bool `json:"busy,omitempty"`
+	// ChangeNote says, in plain words, what to know before a change (Redis
+	// and Valkey: when changes last only until the server restarts).
+	ChangeNote string `json:"change_note,omitempty"`
 }
 
 // Setting categories, in display order.

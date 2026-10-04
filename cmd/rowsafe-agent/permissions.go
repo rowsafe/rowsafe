@@ -30,7 +30,7 @@ Usage (as root; root's copy is /usr/local/lib/rowsafe/rowsafe-permissions):
   permissions chproxy-apply     install and run chproxy in front of ClickHouse's HTTP
                                 interface where root allowed pooling (run by
                                 rowsafe-chproxy-apply.service)
-  permissions tuning-apply      write the MongoDB or ClickHouse settings the agent
+  permissions tuning-apply      write the MongoDB, ClickHouse, Redis or Valkey settings the agent
                                 asked for into Rowsafe's own files, where root
                                 allowed it (run by rowsafe-tuning.service)
   permissions sqlite-modes-apply

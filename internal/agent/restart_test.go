@@ -198,3 +198,65 @@ func TestRestartTaskEngine(t *testing.T) {
 		t.Fatalf("container: %v", err)
 	}
 }
+
+// emptyEngine is a Redis engine whose server keeps nothing on its own
+// disk: it refuses every restart.
+type emptyEngine struct {
+	versionEngine
+	asked int
+}
+
+func (e *emptyEngine) RestartRefusal(context.Context, EngineEnv, protocol.DatabaseSpec) string {
+	e.asked++
+	return "Rowsafe doesn't restart Redis: it keeps nothing on its own disk."
+}
+
+func TestRestartRefusedByEngine(t *testing.T) {
+	root := t.TempDir()
+	allow := filepath.Join(root, "restart-allowed")
+	dir := filepath.Join(root, "restart")
+	os.Mkdir(dir, 0o700)
+	os.WriteFile(allow, []byte("6379 redis-server.service\n"), 0o644)
+	a := &Agent{cfg: Config{RestartAllowFile: allow, RestartDir: dir, RestartResultDir: root, StateDir: root}, log: slog.New(slog.DiscardHandler)}
+	db := protocol.DatabaseSpec{ID: "db_r", Name: "cache", Port: 6379, Engine: protocol.EngineRedis}
+	e := &emptyEngine{versionEngine: versionEngine{readyEngine: readyEngine{fakeEngine: fakeEngine{name: protocol.EngineRedis}}, version: "7.4.6"}}
+	withEngine(t, e)
+	helped := false
+	fakeHelper(t, dir, root, func(id, port string) string {
+		helped = true
+		return "id=" + id + "\nok=1\nunit=redis-server.service\nfinished_at=1\n"
+	})
+	tl := &taskLog{}
+	// Through root's helper, and through the container control service:
+	// refused before either is asked.
+	for _, mode := range []string{"", ModeDockerSidecar} {
+		a.cfg.Mode = mode
+		if _, err := a.restart(t.Context(), db, "t1", tl); err == nil || !strings.Contains(err.Error(), "keeps nothing on its own disk") {
+			t.Fatalf("mode %q: %v", mode, err)
+		}
+	}
+	if helped || e.tries != 0 || e.asked != 2 {
+		t.Fatalf("restarted anyway (helper %v, ready %d, asked %d)", helped, e.tries, e.asked)
+	}
+
+	// Updates and an upgrade's undo restart it too: refused before root's
+	// helper is asked.
+	u := newUpgradeEnv(t)
+	os.WriteFile(u.a.cfg.RestartAllowFile, []byte("6379 redis-server.service\n"), 0o644)
+	os.WriteFile(u.a.cfg.UpdateAllowFile, []byte("database\n"), 0o644)
+	os.WriteFile(u.a.cfg.RestartHelper, []byte("#!/bin/sh\n# update-actions: db-minor-update db-upgrade-undo\n"), 0o755)
+	if _, err := u.a.engineUpdate(t.Context(), db, "t2", tl); err == nil || !strings.Contains(err.Error(), "keeps nothing on its own disk") {
+		t.Fatalf("update: %v", err)
+	}
+	st := u.a.upgradeState()
+	if err := st.put(upgradeRecord{ID: "up_1", DatabaseID: db.ID, Status: protocol.UpgradeDone, FromMajor: 7}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := u.a.engineUpgradeUndo(t.Context(), db, protocol.UpgradeUndoParams{UpgradeID: "up_1"}, "t3", tl); err == nil ||
+		!strings.Contains(err.Error(), "keeps nothing on its own disk") {
+		t.Fatalf("undo: %v", err)
+	}
+	if len(u.asked) != 0 || e.asked != 4 {
+		t.Fatalf("helper asked %q, refusal asked %d", u.asked, e.asked)
+	}
+}

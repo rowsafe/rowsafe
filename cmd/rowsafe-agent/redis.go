@@ -25,10 +25,11 @@ for, is read from stdin (one line) and never stored (except the agent's own).
 
   rowsafe-agent redis status --port PORT
       key=value lines: port engine version login user unit binary config
-      aclfile datadir dbfilename docker cluster role needs_auth ("-" when
-      empty). login is ok, missing or refused; binary is the server program
-      restore tests and copies use; needs_auth says the default user asks
-      for a password. Exit 0 when the server answered, 1 when nothing
+      aclfile datadir dbfilename docker cluster role needs_auth rights ("-"
+      when empty). login is ok, missing or refused; binary is the server
+      program restore tests and copies use; needs_auth says the default user
+      asks for a password; rights is old when the login can't manage users
+      (made before Databases & users: run login again). Exit 0 when the server answered, 1 when nothing
       answers on PORT.
 
   rowsafe-agent redis login --port PORT [--admin-user NAME] [--standby] [--target clones|standby|all]
@@ -66,7 +67,9 @@ REWRITE, CLIENT LIST/KILL, SLOWLOG, LATENCY, MODULE LIST, MEMORY, SYNC,
 PSYNC and REPLCONF (snapshots and the stream of changes), BGSAVE and
 LASTSAVE (when replication is refused), DUMP and RESTORE (bringing keys
 back), SWAPDB, FLUSHDB and DEL (rewind in place, through an empty logical
-database, and its own marker key). No pub/sub channels, scripts, MONITOR, DEBUG or FLUSHALL.
+database, and its own marker key), ACL LIST/GETUSER/USERS/SETUSER/DELUSER/
+SAVE (Databases & users: the users people create and remove from the
+dashboard). No pub/sub channels, scripts, MONITOR, DEBUG or FLUSHALL.
 `
 
 func redisCmd(ctx context.Context, args []string) int {

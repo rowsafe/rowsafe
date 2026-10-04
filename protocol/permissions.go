@@ -38,8 +38,8 @@ const (
 	PermUpdates         = "updates"          // PostgreSQL minor updates and major upgrades
 	PermSecurityUpdates = "security-updates" // the system's security updates
 	PermReboot          = "reboot"           // reboot after a security update that needs it
-	PermTuning          = "tuning"           // write MongoDB's or ClickHouse's settings into Rowsafe's own file
 	PermSQLiteModes     = "sqlite-modes"     // remove other users' access to the listed SQLite files (sqlite_security.go)
+	PermTuning          = "tuning"           // write MongoDB's, ClickHouse's, Redis's or Valkey's settings (Tuning)
 )
 
 // Permissions lists every permission in the order to show them.

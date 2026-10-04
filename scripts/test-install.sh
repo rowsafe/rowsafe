@@ -2812,10 +2812,10 @@ clickhouse_host_tests() {
 redis_flow_tests() {
   echo "  -- Redis and Valkey"
   rd='6379\t-\t7\t-\t/var/lib/redis\t1048576\tcache\tno\t-\tdb0\t1.0 MiB\tredis-server.service\t-\tredis'
-  # rdst LOGIN [CONFIG] [CLUSTER] [VERSION] [ENGINE]
+  # rdst LOGIN [CONFIG] [CLUSTER] [VERSION] [ENGINE] [RIGHTS]
   rdst() {
-    printf 'port=6379\\nengine=%s\\nversion=%s\\nlogin=%s\\nuser=-\\nunit=redis-server.service\\nbinary=/usr/bin/redis-server\\nconfig=%s\\naclfile=-\\ndatadir=/var/lib/redis\\ndbfilename=dump.rdb\\ndocker=no\\ncluster=%s\\nrole=master\\nneeds_auth=no' \
-      "${5:-redis}" "${4:-7.0.15}" "$1" "${2:--}" "${3:-no}"
+    printf 'port=6379\\nengine=%s\\nversion=%s\\nlogin=%s\\nuser=-\\nunit=redis-server.service\\nbinary=/usr/bin/redis-server\\nconfig=%s\\naclfile=-\\ndatadir=/var/lib/redis\\ndbfilename=dump.rdb\\ndocker=no\\ncluster=%s\\nrole=master\\nneeds_auth=no\\nrights=%s' \
+      "${5:-redis}" "${4:-7.0.15}" "$1" "${2:--}" "${3:-no}" "${6:--}"
   }
   rdplan='Redis 7.0.15 on port 6379: 1.0 MiB, 1 database (db0).\n\nWhat Rowsafe will change:\n  - Prepare your bucket for this database\n\nNo downtime: Redis does not need a restart.'
   hash=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
@@ -2849,6 +2849,30 @@ redis_flow_tests() {
   lacks "$hash"
   called "plan --name cache --port 6379"
   rm -rf /var/lib/redis
+
+  # 2b. The log in Debian's folder (redis:adm, 2750, the file 640): the
+  #     agent's user gets an access rule to read it (the folder's default
+  #     for the files after a rotation too); owners and modes stay.
+  ruser=''
+  id -u redis >/dev/null 2>&1 || { useradd --system --no-create-home redis && ruser=1; }
+  getent group adm >/dev/null || groupadd --system adm
+  install -d -m 2750 -o redis -g adm /var/log/redis
+  echo '1:M 04 Oct 2026 00:48:28.601 * Ready to accept connections tcp' >/var/log/redis/redis-server.log
+  chown redis:adm /var/log/redis/redis-server.log && chmod 640 /var/log/redis/redis-server.log
+  scenario "discover_out=$rd" "redis-status_out=$(rdst ok)\nlogfile=/var/log/redis/redis-server.log" "plan_out=$rdplan"
+  tty_ok "Redis: its log made readable to the agent" "Name it in Rowsafe\t\nTurn on backups for cache now?\tn\n" "$INSTALLER"
+  has "gave the Rowsafe agent read access to /var/log/redis (Redis's own log, for the Logs page; read-only, with an ACL; nothing else changed)"
+  [ "$(stat -c '%U %G %a' /var/log/redis/redis-server.log)" = "redis adm 640" ] || fail "$name: the log's owner or mode changed"
+  getfacl -p /var/log/redis 2>/dev/null | grep -qx 'default:user:postgres:r--' || fail "$name: no default ACL: $(getfacl -p /var/log/redis)"
+  setpriv --reuid=postgres --regid=postgres --init-groups -- cat /var/log/redis/redis-server.log >/dev/null || fail "$name: the agent can't read the log"
+  # A log straight in /var/log (root's folder) is only mentioned.
+  mv /var/log/redis/redis-server.log /var/log/redis-test.log && setfacl -b /var/log/redis-test.log
+  scenario "discover_out=$rd" "redis-status_out=$(rdst ok)\nlogfile=/var/log/redis-test.log" "plan_out=$rdplan"
+  tty_ok "Redis: a log in a shared folder is left alone" "Name it in Rowsafe\t\nTurn on backups for cache now?\tn\n" "$INSTALLER"
+  has "Rowsafe can't read Redis's log (/var/log/redis-test.log)"
+  ! getfacl -p -s /var/log 2>/dev/null | grep -q postgres || fail "$name: an ACL on /var/log"
+  rm -rf /var/log/redis /var/log/redis-test.log
+  [ -z "$ruser" ] || userdel redis
 
   # 3. Redis couldn't keep it (it can't write its configuration file):
   #    root replaces the earlier "user rowsafe" line, keeping owner and mode.
@@ -2939,7 +2963,21 @@ redis_flow_tests() {
   ! grep -q "Env-R3dis" "$W/out" || fail "$name: the administrator's password was printed"
   ! grep -q "ROWSAFE_REDIS_ADMIN" /etc/rowsafe/agent.env || fail "$name: the administrator's login went to agent.env"
   called "apply --database db_fake"
-  pass "Redis and Valkey: engine in the plan, ACL user kept across restarts, administrator login once, Cluster and old servers refused, --protect"
+
+  # 9. An already protected server whose login predates Databases & users
+  #    (rights=old): the login is made again for the new rights; with them,
+  #    nothing is asked.
+  rdon='6379\t-\t7\t-\t/var/lib/redis\t1048576\tcache\tyes\tactive\tdb0\t1.0 MiB\tredis-server.service\tdb_fake\tredis'
+  scenario "discover_out=$rdon" "redis-status_out=$(rdst ok /etc/redis/redis.conf no 7.0.15 redis old)" "redis-login_out=persisted=config\nacl_line=$acl"
+  tty_ok "Redis: an old login gets the rights to manage users" "" "$INSTALLER"
+  has "is protected as cache"
+  has "needs a few more rights to manage Redis users"
+  called "redis-login --port 6379 --engine redis"
+  not_called "plan"
+  scenario "discover_out=$rdon" "redis-status_out=$(rdst ok /etc/redis/redis.conf no 7.0.15 redis ok)"
+  tty_ok "Redis: a login with the rights is left alone" "" "$INSTALLER"
+  not_called "redis-login"
+  pass "Redis and Valkey: engine in the plan, ACL user kept across restarts, administrator login once, Cluster and old servers refused, --protect, rights refreshed"
 }
 
 # redis_restart_tests: Redis and Valkey units (redis-server, redis,

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -85,6 +86,30 @@ type EngineRewinds interface {
 // ("binary log on") or an error while the database doesn't answer.
 type EngineRestarter interface {
 	Ready(ctx context.Context, env EngineEnv, db protocol.DatabaseSpec) (string, error)
+}
+
+// EngineRestartRefuser is an engine that may refuse to be restarted, e.g.
+// a server that would come back empty. RestartRefusal says why in a plain
+// sentence ("" to go ahead); it is asked before every restart Rowsafe
+// makes (Restart, through root's helper or the container control service,
+// and updates).
+type EngineRestartRefuser interface {
+	RestartRefusal(ctx context.Context, env EngineEnv, db protocol.DatabaseSpec) string
+}
+
+// restartRefusal is db's engine's refusal of a restart (nil: go ahead).
+func (a *Agent) restartRefusal(ctx context.Context, db protocol.DatabaseSpec) error {
+	if isPostgres(db) {
+		return nil
+	}
+	r, ok := engineFor(protocol.NormalizeEngine(db.Engine)).(EngineRestartRefuser)
+	if !ok {
+		return nil
+	}
+	if msg := r.RestartRefusal(ctx, a.engineEnvFor(db), db); msg != "" {
+		return errors.New(msg)
+	}
+	return nil
 }
 
 // engineRestarter is db's engine as an EngineRestarter (nil when it can't

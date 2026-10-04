@@ -82,6 +82,7 @@ func (a *Agent) runEngineSecurityTask(ctx context.Context, task *protocol.Task, 
 	if err := json.Unmarshal(task.Params, &p); err != nil {
 		return nil, fmt.Errorf("invalid security_fix params: %w", err)
 	}
+	p.TaskID = task.ID // a sealed secret is bound to it
 	start := time.Now()
 	c := engineSecurity(db)
 	if c == nil {

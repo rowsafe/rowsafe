@@ -107,11 +107,18 @@ var redisFeatures = EngineFeatures{
 	RewindCopy: true, RewindRows: true, RewindInPlace: true, Marks: true,
 	Monitoring: true, Fixes: true, Restart: true,
 	Files: true, SecondCopy: true,
-	FindMoment: true, // the stream segments in the bucket, keys matched on the server (internal/engine/redis/moment.go)
-	SafeCopies: true, // masked or structure-only, opened over TLS through the agent (internal/engine/redis/copies_*.go)
-	Fork:       true, // a moment restored privately, copied key by key into an empty or new server (fork.go, targets.go)
-	Standby:    true, // a real replica with the primary's users; fencing, promotion (standby.go)
-	MoveIn:     true, // a one-time key copy, or live sync by replication where the source allows it (migrate.go)
+	FindMoment:      true, // the stream segments in the bucket, keys matched on the server (internal/engine/redis/moment.go)
+	SafeCopies:      true, // masked or structure-only, opened over TLS through the agent (internal/engine/redis/copies_*.go)
+	Fork:            true, // a moment restored privately, copied key by key into an empty or new server (fork.go, targets.go)
+	Standby:         true, // a real replica with the primary's users; fencing, promotion (standby.go)
+	MoveIn:          true, // a one-time key copy, or live sync by replication where the source allows it (migrate.go)
+	DBAdmin:         true,
+	Settings:        true, // Tuning: CONFIG SET, kept in redis.conf (settings.go)
+	Updates:         true, // minor updates through root's helper (db-minor-update)
+	Upgrades:        true, // new series rehearsed on a restored copy, then db-upgrade with undo (upgrade.go)
+	Logs:            true,
+	Recommendations: true,
+	Security:        true,
 }
 
 // valkeyFeatures are Redis's: Valkey is a fork of Redis 7.2 that speaks the

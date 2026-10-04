@@ -60,8 +60,8 @@
 #                          with the firewall when you ask (Security in the
 #                          dashboard); never touches SSH or other ports
 #   --no-allow-firewall    turn that off again (and remove Rowsafe's rule)
-#   --allow-tuning         allow Rowsafe to change MongoDB's or ClickHouse's settings
-#                          when you ask (Tuning), only in its own settings file
+#   --allow-tuning         allow Rowsafe to change MongoDB's, ClickHouse's, Redis's or
+#                          Valkey's settings when you ask (Tuning), only those settings
 #   --no-allow-tuning      turn that off again
 #   --allow-sqlite-modes   allow Rowsafe to close the listed SQLite files to the
 #                          server's other users when you click Apply fix under
@@ -366,8 +366,8 @@ Options (when piping, pass them after `sh -s --`):
                          the firewall (nftables) when you ask, under Security in the
                          dashboard; never touches SSH or other ports
   --no-allow-firewall    turn that off (and remove Rowsafe's rule and helper)
-  --allow-tuning         allow Rowsafe to change MongoDB's or ClickHouse's settings when
-                         you ask under Tuning, only in its own settings file
+  --allow-tuning         allow Rowsafe to change MongoDB's, ClickHouse's, Redis's or
+                         Valkey's settings when you ask under Tuning, only those settings
   --no-allow-tuning      turn that off
   --allow-sqlite-modes   allow Rowsafe to close the listed SQLite files to the server's
                          other users when you click Apply fix under Security (only
@@ -1637,10 +1637,12 @@ install_helper_script() {
 #   ID pg-upgrade-cleanup PORT               remove the version kept aside by an upgrade or undo
 #   ID security-updates                      install pending security updates
 #   ID reboot                                reboot the server
-#   ID db-minor-update PORT                  newest release of the series (8.0, 10.11, 7.0, 25.8)
-#                                            of the MySQL, MariaDB, MongoDB or ClickHouse server on PORT
+#   ID db-minor-update PORT                  newest release of the series (8.0, 10.11, 7.0, 25.8, 8.2)
+#                                            of the MySQL, MariaDB, MongoDB, ClickHouse, Redis or Valkey
+#                                            server on PORT
 #   ID db-upgrade PORT SERIES                that server to a newer series (8.0 -> 8.4), keeping a copy
 #                                            of its data directory and its old packages for undo
+#                                            (not Redis or Valkey yet)
 #   ID db-upgrade-undo PORT                  back to the kept data and packages (the newer data is kept aside)
 #   ID db-upgrade-cleanup PORT               delete what an upgrade or its undo kept
 #
@@ -3234,7 +3236,8 @@ act_security_updates() {
   # servers' own packages are left alone (their upgrade would restart them):
   # PostgreSQL's go through Update PostgreSQL, which saves a Mark, restarts
   # in a controlled way and checks archiving; MySQL's, MariaDB's, MongoDB's,
-  # ClickHouse's, Redis's and Valkey's aren't installed from Rowsafe yet.
+  # ClickHouse's, Redis's and Valkey's through db-minor-update, which saves a
+  # Mark first (when it can) and waits until the server answers again.
   list=$(apt-get -s -o Debug::NoLocking=1 dist-upgrade 2>/dev/null |
     awk '/^Inst [^ ]+ \[/ && /-security|Debian-Security/ { print $2 }' | sort -u)
   db_pkgs='^(postgresql-[0-9]+(-.+)?|mysql-server(-.+)?|mysql-community-server(-.+)?|percona-server-server(-.+)?|mariadb-server(-.+)?|mongodb-org-server|mongodb-org-mongos|clickhouse-server|clickhouse-common-static|(redis|valkey)-(server|sentinel|tools))$'
@@ -3302,7 +3305,21 @@ db_engine() {
         set -- mysql-community-server mysql-server-8.4 mysql-server-8.0 mysql-server percona-server-server
       fi
       ;;
-    *) refuse "$unit is not a MySQL, MariaDB, MongoDB or ClickHouse service" ;;
+    redis-server.service | redis.service | redis-server@*.service | redis@*.service)
+      # Debian's valkey-redis-compat can answer to Redis's unit names.
+      if [ -z "$(pkg_version redis-server)" ] && [ -n "$(pkg_version valkey-server)" ]; then
+        db_engine=valkey
+        set -- valkey-server
+      else
+        db_engine=redis
+        set -- redis-server
+      fi
+      ;;
+    valkey-server.service | valkey.service | valkey-server@*.service | valkey@*.service)
+      db_engine=valkey
+      set -- valkey-server
+      ;;
+    *) refuse "$unit is not a MySQL, MariaDB, MongoDB, ClickHouse, Redis or Valkey service" ;;
   esac
   db_main=''
   for p in "$@"; do
@@ -3323,6 +3340,9 @@ db_patterns() {
     mariadb) locked='mariadb-* libmariadb3 libmariadbd19' free='' ;;
     mongodb) locked='mongodb-org mongodb-org-*' free='mongodb-mongosh mongodb-database-tools' ;;
     clickhouse) locked='clickhouse-*' free='' ;;
+    # Debian's and packages.redis.io's packages, all of one version.
+    redis) locked='redis redis-server redis-tools redis-sentinel' free='' ;;
+    valkey) locked='valkey valkey-server valkey-tools valkey-sentinel valkey-redis-compat' free='' ;;
   esac
 }
 
@@ -3407,11 +3427,19 @@ db_datadir() {
     mysql | mariadb) datadir=$(my_print_defaults --mysqld 2>/dev/null | sed -n 's/^--datadir=//p' | tail -n 1) ;;
     mongodb) datadir=$(awk '/^[[:space:]]*dbPath:/ { sub(/^[[:space:]]*dbPath:[[:space:]]*/, ""); gsub(/["\047]/, ""); print; exit }' /etc/mongod.conf 2>/dev/null) ;;
     clickhouse) datadir=$(clickhouse extract-from-config --config-file /etc/clickhouse-server/config.xml --key path 2>/dev/null) ;;
+    redis | valkey)
+      # The configuration file the unit starts the server with, then its
+      # last dir line.
+      conf_=$("$systemctl" show -p ExecStart --value "$unit" 2>/dev/null | tr -s ' ;' '\n' | grep -m 1 '\.conf$')
+      [ -n "$conf_" ] || conf_=/etc/$db_engine/$db_engine.conf
+      datadir=$(awk '$1 == "dir" { d = $2 } END { gsub(/"/, "", d); print d }' "$conf_" 2>/dev/null)
+      ;;
   esac
   [ -n "$datadir" ] || case $db_engine in
     mysql | mariadb) datadir=/var/lib/mysql ;;
     mongodb) datadir=/var/lib/mongodb ;;
     clickhouse) datadir=/var/lib/clickhouse ;;
+    redis | valkey) datadir=/var/lib/$db_engine ;;
   esac
   datadir=${datadir%/}
   case $datadir in /*) ;; *) refuse "the data directory \"$datadir\" is not an absolute path" ;; esac
@@ -4215,17 +4243,14 @@ update_access() {
   if [ ! -f "$UPDATES_ALLOW_FILE" ] && [ "$TTY" = 1 ] && { [ -z "$ALLOW_UPDATES" ] || [ -z "$ALLOW_SECURITY" ]; }; then
     perm_intro
   fi
-  # PostgreSQL's word is postgresql; MySQL's, MariaDB's, MongoDB's and
-  # ClickHouse's is database (the helper's db-* requests).
+  # PostgreSQL's word is postgresql; MySQL's, MariaDB's, MongoDB's,
+  # ClickHouse's, Redis's and Valkey's is database (the helper's db-*
+  # requests; Redis and Valkey get minor updates only).
   _uw=postgresql
   [ "$HOST_ENGINE" = postgresql ] || _uw=database
-  case $HOST_ENGINE in
-    redis | valkey) # not from Rowsafe yet (the helper's db-* requests don't cover them)
-      _pg=no
-      [ "$ALLOW_UPDATES" != yes ] || warn "Rowsafe doesn't install $(engine_label) updates yet; left off"
-      ;;
-    *) _pg=$(decide_update "$ALLOW_UPDATES" "$_uw" "Install $(engine_label) updates and upgrades, when someone clicks Update? A Mark is saved first." y) ;;
-  esac
+  _what="updates and upgrades"
+  case $HOST_ENGINE in redis | valkey) _what="updates" ;; esac
+  _pg=$(decide_update "$ALLOW_UPDATES" "$_uw" "Install $(engine_label) $_what, when someone clicks Update? A Mark is saved first." y)
   _sec=$(decide_update "$ALLOW_SECURITY" security "Install this server's security updates, when someone clicks Install?" n)
   _reboot=no
   if [ "$_sec" = yes ]; then
@@ -4242,7 +4267,7 @@ update_access() {
       if [ "$_uw" = postgresql ]; then
         echo "postgresql   # PostgreSQL minor updates and major upgrades (clusters in restart-allowed)"
       else
-        echo "database     # $(engine_label) updates and upgrades (the servers in restart-allowed)"
+        echo "database     # $(engine_label) $_what (the servers in restart-allowed)"
       fi
     fi
     [ "$_sec" != yes ] || echo "security     # security updates (the database servers' own packages excepted)"
@@ -4254,7 +4279,12 @@ update_access() {
     return 0
   fi
   install_update_units
-  [ "$_pg" != yes ] || perm_ok "Rowsafe may install $(engine_label) updates and upgrade $(engine_label) when you click Update or Upgrade and confirm"
+  if [ "$_pg" = yes ]; then
+    case $HOST_ENGINE in
+      redis | valkey) perm_ok "Rowsafe may install $(engine_label) updates when you click Update and confirm" ;;
+      *) perm_ok "Rowsafe may install $(engine_label) updates and upgrade $(engine_label) when you click Update or Upgrade and confirm" ;;
+    esac
+  fi
   [ "$_sec" != yes ] || perm_ok "Rowsafe may install security updates when you click Install and confirm"
   [ "$_reboot" != yes ] || perm_ok "Rowsafe may reboot this server when you click Reboot and confirm"
 }
@@ -4262,14 +4292,46 @@ update_access() {
 # ------------------------------------------------------------------ tuning
 
 # With root's permission (--allow-tuning, or yes at the question), a person
-# can change MongoDB's or ClickHouse's settings from Tuning in the
+# can change MongoDB's, ClickHouse's, Redis's or Valkey's settings from Tuning in the
 # dashboard. The agent (unprivileged) writes a request to $TUNING_DIR;
 # rowsafe-tuning.path starts rowsafe-tuning.service, which runs root's copy
 # of the agent ($PERMISSIONS_HELPER tuning-apply). It accepts only a fixed
 # list of settings with plain numbers or fixed words, and writes only
 # ClickHouse's config.d/rowsafe-tuning.xml and users.d/rowsafe-tuning.xml,
 # or those settings' keys in the MongoDB configuration file listed in
-# $TUNING_ALLOW_FILE (a copy kept first; MongoDB reads it when it starts).
+# $TUNING_ALLOW_FILE (a copy kept first; MongoDB reads it when it starts),
+# or those settings' lines in the Redis or Valkey configuration file listed
+# there (a copy kept first; the agent also changes them on the running
+# server, which needs no root).
+
+# redis_config_file prints the Redis or Valkey server's configuration file
+# (what the server says, else its systemd unit's, else the usual places),
+# nothing when there is none.
+redis_config_file() {
+  _rc=${RD_CONFIG:-}
+  _units='redis-server redis valkey-server valkey'
+  _files='/etc/redis/redis.conf /etc/redis.conf /etc/valkey/valkey.conf /etc/valkey.conf'
+  if [ "$HOST_ENGINE" = valkey ]; then
+    _units='valkey-server valkey redis-server redis'
+    _files='/etc/valkey/valkey.conf /etc/valkey.conf /etc/redis/redis.conf /etc/redis.conf'
+  fi
+  if [ -z "$_rc" ] && have systemctl; then
+    for _u in $_units; do
+      _rc=$(systemctl show -p ExecStart --value "$_u" 2>/dev/null | tr ' ;' '\n\n' | awk '/^\/.*[.]conf$/ { print; exit }')
+      [ -z "$_rc" ] || break
+    done
+  fi
+  if [ -z "$_rc" ]; then
+    for _f in $_files; do
+      if [ -f "$_f" ]; then
+        _rc=$_f
+        break
+      fi
+    done
+  fi
+  case $_rc in /*) ;; *) return 0 ;; esac
+  [ -f "$_rc" ] && [ ! -L "$_rc" ] && printf '%s\n' "$_rc"
+}
 
 # mongodb_config_file prints mongod's configuration file (from its systemd
 # unit, else /etc/mongod.conf), nothing when there is none.
@@ -4288,6 +4350,7 @@ tuning_target() {
   case $HOST_ENGINE in
     mongodb) _t=$(mongodb_config_file) && [ -n "$_t" ] && echo "mongodb $_t" ;;
     clickhouse) [ -f /etc/clickhouse-server/config.xml ] && echo "clickhouse /etc/clickhouse-server" ;;
+    redis | valkey) _t=$(redis_config_file) && [ -n "$_t" ] && echo "$HOST_ENGINE $_t" ;;
   esac
 }
 
@@ -4308,7 +4371,7 @@ install_tuning_helper() {
   _changed=0
   if sed -e "s/@AGENT_USER@/$AGENT_USER/" -e "s|@READ_WRITE@|$_rw|" <<'ROWSAFE_TUNING_SERVICE_EOF' | write_file "$TUNING_SERVICE_FILE" 0644 root:root; then
 # SPDX-License-Identifier: Apache-2.0
-# rowsafe-tuning.service: writes the MongoDB or ClickHouse settings a person
+# rowsafe-tuning.service: writes the MongoDB, ClickHouse, Redis or Valkey settings a person
 # changed in Rowsafe (Tuning) into Rowsafe's own files, only where root
 # allowed it (/etc/rowsafe/tuning-allowed, sudo rowsafe-allow tuning).
 # Started by rowsafe-tuning.path; installed by https://rowsafe.sh/install.
@@ -4391,7 +4454,7 @@ allow_tuning() {
   {
     echo "# The settings files Rowsafe may write when someone changes settings under"
     echo "# Tuning (only its own: ClickHouse's config.d and users.d rowsafe-tuning.xml,"
-    echo "# or a few keys of MongoDB's configuration file). Written by the installer"
+    echo "# or a few keys of MongoDB's, Redis's or Valkey's configuration file). Written by the installer"
     echo "# (root); turn this off with: sudo rowsafe-allow --remove tuning"
     echo "# ENGINE PATH"
     tuning_target
@@ -4411,7 +4474,7 @@ disallow_tuning() {
 }
 
 # tuning_access applies --allow-tuning / --no-allow-tuning, or asks once on
-# a terminal (default no) where it applies (MongoDB, ClickHouse).
+# a terminal (default no) where it applies (MongoDB, ClickHouse, Redis, Valkey).
 tuning_access() {
   case $ALLOW_TUNING in
     yes) allow_tuning ;;
@@ -6422,7 +6485,7 @@ perm_desc() {
     pooler) echo "install and manage PgBouncer (pooling)" ;;
     pooler-public) echo "let PgBouncer listen on public addresses" ;;
     firewall) echo "limit who can reach the database (firewall)" ;;
-    tuning) echo "change MongoDB's or ClickHouse's settings (Tuning)" ;;
+    tuning) echo "change $(engine_label)'s settings (Tuning)" ;;
     sqlite-modes) echo "close the SQLite files to other users (Security)" ;;
   esac
 }
@@ -6442,7 +6505,7 @@ perm_state() {
   [ -f "$_sf" ] || return 0
   case $1 in
     restart | pooler | firewall) _sy=$(grep -c '^[1-9]' "$_sf" || true) ;;
-    tuning) _sy=$(grep -Ec '^(mongodb|clickhouse) /' "$_sf" || true) ;;
+    tuning) _sy=$(grep -Ec '^(mongodb|clickhouse|redis|valkey) /' "$_sf" || true) ;;
     sqlite-modes) _sy=$(grep -cx 'sqlite-paths' "$_sf" || true) ;;
     create-cluster) _sy=$(grep -c '^ports ' "$_sf" || true) ;;
     pooler-public) _sy=$(grep -qs '^[1-9]' "$_sf" && grep -cx public "$_sf" || true) ;;
@@ -6502,6 +6565,7 @@ perm_why() {
       case $HOST_ENGINE in
         mongodb) [ -n "$(mongodb_config_file)" ] || _w="found no MongoDB configuration file (/etc/mongod.conf)" ;;
         clickhouse) [ -f /etc/clickhouse-server/config.xml ] || _w="found no ClickHouse configuration (/etc/clickhouse-server)" ;;
+        redis | valkey) [ -n "$(redis_config_file)" ] || _w="found no $(engine_label) configuration file (/etc/redis/redis.conf or /etc/valkey/valkey.conf)" ;;
         *) _w="Rowsafe changes $(engine_label)'s settings without it" ;;
       esac
       ;;
@@ -6651,7 +6715,7 @@ Names:
   pooler             install and manage PgBouncer (connection pooling)
   pooler-public      let PgBouncer listen on public addresses (needs pooler)
   firewall           limit who can reach the database's port (never SSH or other ports)
-  tuning             change MongoDB's or ClickHouse's settings, in Rowsafe's own file
+  tuning             change MongoDB's, ClickHouse's, Redis's or Valkey's settings
   sqlite-modes       close the listed SQLite files to other users (owners and ACLs stay)
 
   sudo rowsafe-allow pooler-target ADDRESS PORT
@@ -8707,10 +8771,12 @@ setup_databases() {
     case $C_REG:$C_STATUS in
       yes:active)
         ok "$(cluster_desc) is protected as $C_NAME"
+        redis_refresh_protected
         continue
         ;;
       yes:verifying)
         ok "$(cluster_desc): backups are on as $C_NAME; Rowsafe is checking them"
+        redis_refresh_protected
         continue
         ;;
       yes:awaiting_restart)
@@ -9533,13 +9599,14 @@ check_redis_program() {
 
 # redis_status reads `rowsafe-agent redis status` into RD_* variables ("-"
 # becomes empty).
-RD_LOGIN='' RD_VERSION='' RD_CONFIG='' RD_ACLFILE='' RD_DATADIR='' RD_DBFILE='' RD_DOCKER='' RD_CLUSTER='' RD_BINARY=''
+RD_LOGIN='' RD_VERSION='' RD_CONFIG='' RD_ACLFILE='' RD_DATADIR='' RD_DBFILE='' RD_DOCKER='' RD_CLUSTER='' RD_BINARY='' RD_RIGHTS=''
 redis_status() {
   agent_run redis status --port "$C_PORT" --engine "$C_ENGINE" >"$TMP/rdstatus" 2>"$TMP/rdstatus.err" || return 1
   _rk() { sed -n "s/^$1=//p" "$TMP/rdstatus" | head -n 1 | sed 's/^-$//'; }
   RD_LOGIN=$(_rk login) RD_VERSION=$(_rk version) RD_CONFIG=$(_rk config) RD_ACLFILE=$(_rk aclfile)
   RD_DATADIR=$(_rk datadir) RD_DBFILE=$(_rk dbfilename) RD_DOCKER=$(_rk docker) RD_CLUSTER=$(_rk cluster)
-  RD_BINARY=$(_rk binary)
+  RD_BINARY=$(_rk binary) RD_RIGHTS=$(_rk rights)
+  RD_LOGFILE=$(_rk logfile)
 }
 
 # redis_supported says why Rowsafe can't protect the server on $C_PORT
@@ -9769,6 +9836,70 @@ ROWSAFE_REDIS_UNIT_EOF
   perm_ok "Rowsafe may create a $(engine_label "$REDIS_FOUND_ENGINE") server here (ports $REDIS_PORTS) for: $_purposes"
 }
 
+# redis_refresh_protected: an already protected Redis or Valkey server gets
+# the rights Rowsafe's user lacks (redis_rights_refresh).
+redis_refresh_protected() {
+  { [ "$C_ENGINE" = redis ] || [ "$C_ENGINE" = valkey ]; } || return 0
+  redis_status 2>/dev/null || return 0
+  redis_rights_refresh
+}
+
+# redis_rights_refresh gives Rowsafe's user the rights added since it was
+# made (managing ACL users: Databases & users in the dashboard) by making
+# the login again (`rights=old` in the agent's status). Never fails the run:
+# without them the dashboard only lists users.
+redis_rights_refresh() {
+  { [ "$C_ENGINE" = redis ] || [ "$C_ENGINE" = valkey ]; } || return 0
+  [ "$RD_LOGIN" = ok ] && [ "$RD_RIGHTS" = old ] || return 0
+  _name=$(engine_label "$C_ENGINE")
+  note "Rowsafe's $_name user needs a few more rights to manage $_name users from the dashboard (Databases & users)."
+  RD_ADMIN='' RD_ADMIN_PW=''
+  if redis_login; then
+    redis_status || true
+  else
+    warn "Rowsafe's $_name user keeps its current rights: the dashboard can't list or change $_name users until this installer runs again."
+  fi
+  return 0
+}
+
+# redis_agent_reads FILE: the agent's user (with the server's group when it
+# is rowsafe, as its unit gives it) can read FILE.
+redis_agent_reads() {
+  _gs=$(id -G "$AGENT_USER" 2>/dev/null | tr ' ' ',')
+  if [ "$AGENT_USER" = rowsafe ]; then
+    _g=$(redis_group)
+    [ -z "$_g" ] || _gs="$_gs,$(getent group "$_g" | cut -d: -f3)"
+  fi
+  [ -n "$_gs" ] || return 1
+  setpriv --reuid="$AGENT_USER" --regid="$AGENT_USER" --groups="$_gs" -- test -r "$1" 2>/dev/null
+}
+
+# redis_log_access lets the agent read the server's log file (Pulse's Logs
+# page), read only. Debian's packages keep it in /var/log/redis (or
+# valkey), readable by the adm group only: an access rule for the agent's
+# user on that folder, for the files that come after a rotation too, and on
+# the file. Only in a folder of the server's own (same owner as the log);
+# owners, groups and modes stay as they are, and an existing access rule
+# mask is never changed. Nothing restarts.
+RD_LOGFILE=''
+redis_log_access() {
+  [ "$RD_DOCKER" != yes ] && [ -n "$RD_LOGFILE" ] && have setpriv || return 0
+  case $RD_LOGFILE in /*) ;; *) return 0 ;; esac
+  [ -f "$RD_LOGFILE" ] || return 0
+  redis_agent_reads "$RD_LOGFILE" && return 0
+  _name=$(engine_label "$C_ENGINE")
+  _d=${RD_LOGFILE%/*}
+  have setfacl || (apt_install acl) || true
+  if [ -n "$_d" ] && [ "$(stat -c %u -- "$_d")" = "$(stat -c %u -- "$RD_LOGFILE")" ] && [ "$(stat -c %u -- "$_d")" != 0 ] &&
+    have setfacl && ! getfacl -p -s -- "$_d" "$RD_LOGFILE" 2>/dev/null | grep -q '^mask::' &&
+    setfacl -m "u:$AGENT_USER:rx" -- "$_d" && setfacl -d -m "u:$AGENT_USER:r" -- "$_d" &&
+    setfacl -m "u:$AGENT_USER:r" -- "$RD_LOGFILE" && redis_agent_reads "$RD_LOGFILE"; then
+    ok "gave the Rowsafe agent read access to $_d ($_name's own log, for the Logs page; read-only, with an ACL; nothing else changed)"
+    return 0
+  fi
+  note "Rowsafe can't read $_name's log ($RD_LOGFILE). The Logs page in the dashboard says how to let it."
+}
+
 # redis_prepare gets a Redis or Valkey server ready for its plan: supported,
 # and Rowsafe's own user. Nothing restarts.
 redis_prepare() {
@@ -9791,10 +9922,12 @@ redis_prepare() {
     # Standby rights for Rowsafe's user (a new password, saved for the agent).
     redis_login || return 1
   fi
+  redis_rights_refresh
   if [ -z "$RD_BINARY" ]; then
     note "Proof and Rewind copies need the $C_ENGINE-server program, which comes with $_name's server package; it isn't on this server."
   fi
   redis_snapshot_note
+  redis_log_access
 }
 
 # ---------------------------------------------------------------- modes

@@ -62,6 +62,8 @@ func (e *Engine) Tasks() []string {
 		protocol.TaskRewindInPlace, protocol.TaskRewindUndo, protocol.TaskRewindCleanup,
 		protocol.TaskFindMoment,                        // moment.go
 		protocol.TaskSafeCopy, protocol.TaskCopySchema, // copies_safe.go, copies_mask.go
+		protocol.TaskDBAdmin,
+		protocol.TaskSettings,
 	}
 }
 
@@ -190,12 +192,24 @@ func (e *Engine) Run(ctx context.Context, env agent.EngineEnv, task *protocol.Ta
 			return nil, err
 		}
 		return nilIfNil(e.findMoment(ctx, env, db, p, tl))
+	case protocol.TaskSettings:
+		var p protocol.SettingsParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.settingsTask(ctx, env, db, p, tl))
 	case protocol.TaskRewindCleanup:
 		var p protocol.RewindCleanupParams
 		if err := decode(task, &p); err != nil {
 			return nil, err
 		}
 		return nilIfNil(e.rewindCleanup(ctx, env, db, p, tl))
+	case protocol.TaskDBAdmin:
+		var p protocol.DBAdminParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.dbadmin(ctx, env, db, task.ID, p, tl))
 	}
 	return nil, fmt.Errorf("%s databases can't run %s tasks", e.display(), task.Type)
 }

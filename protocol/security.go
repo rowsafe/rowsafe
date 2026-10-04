@@ -87,6 +87,12 @@ type SecurityFixParams struct {
 	// Paths: sqlite_tighten_modes (SecSQLiteModes), the files and the
 	// folder to close to other users (sqlite_security.go).
 	Paths []string `json:"paths,omitempty"`
+	// PublicKey is the requester's sealing key (SealedSecret) for a fix
+	// that makes a password on the server (redis_require_password).
+	PublicKey string `json:"public_key,omitempty"`
+	// TaskID is set by the agent (never sent): the task a sealed secret is
+	// bound to.
+	TaskID string `json:"-"`
 }
 
 // SecurityFixResult is the agent's report for a security_fix task.
@@ -101,8 +107,12 @@ type SecurityFixResult struct {
 	// RestartNeeded: the change waits for a PostgreSQL restart.
 	RestartNeeded bool `json:"restart_needed,omitempty"`
 	// Report is a fresh scan after the change.
-	Report     *SecurityReport `json:"report,omitempty"`
-	DurationMs int64           `json:"duration_ms"`
+	Report *SecurityReport `json:"report,omitempty"`
+	// Secret is a password the fix made, sealed to the requester's key
+	// (redis_require_password); the control plane keeps it apart from the
+	// task and hands it over once, like Databases & users' passwords.
+	Secret     *SealedSecret `json:"secret,omitempty"`
+	DurationMs int64         `json:"duration_ms"`
 }
 
 // SecurityReportBatch is what the agent posts to POST /v1/agent/security
@@ -211,6 +221,8 @@ type EngineSecurity struct {
 	// SQLite is a SQLite database's file access (sqlite_security.go); it
 	// has no port, users or TLS.
 	SQLite *SQLiteSecurity `json:"sqlite,omitempty"`
+	// Redis is Redis's and Valkey's own (redis_security.go).
+	Redis *RedisSecurity `json:"redis,omitempty"`
 }
 
 // CertInfo describes the server's TLS certificate (never its key).
@@ -389,6 +401,8 @@ type SecurityActionRequest struct {
 	RequireTLS       bool     `json:"require_tls,omitempty"`
 	Role             string   `json:"role,omitempty"`
 	Verifier         string   `json:"verifier,omitempty"`
+	// PublicKey: redis_require_password (SecurityFixParams.PublicKey).
+	PublicKey string `json:"public_key,omitempty"`
 	// Confirm is the database's name.
 	Confirm string `json:"confirm"`
 }
