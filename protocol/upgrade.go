@@ -423,7 +423,25 @@ type ClusterSoftware struct {
 	Engine     string   `json:"engine,omitempty"`
 	Series     string   `json:"series,omitempty"`
 	NextSeries []string `json:"next_series,omitempty"`
+
+	// CandidateSource is where Candidate comes from when it isn't the
+	// server's package sources: CandidateAgentImage in a Redis or Valkey
+	// Docker sidecar, whose image bundles the newest release of the series
+	// at the time Rowsafe built it (the database's image itself is never
+	// changed by Rowsafe).
+	CandidateSource string `json:"candidate_source,omitempty"`
+	// PackageUpdate: the package sources offer a newer package of the same
+	// release (the distribution's own fixes, as Debian and Ubuntu ship
+	// security fixes of Redis 7.0.15 without changing its version);
+	// db-minor-update installs it. SecurityUpdate: the newest package of
+	// the series comes from a security source.
+	PackageUpdate  bool `json:"package_update,omitempty"`
+	SecurityUpdate bool `json:"security_update,omitempty"`
 }
+
+// CandidateAgentImage is ClusterSoftware.CandidateSource for a version
+// bundled in the agent's sidecar image.
+const CandidateAgentImage = "agent-image"
 
 // UpgradeState is a major upgrade that can still be undone or cleaned up.
 type UpgradeState struct {

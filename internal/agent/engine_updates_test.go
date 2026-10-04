@@ -158,3 +158,137 @@ func TestEngineUpgrade(t *testing.T) {
 		t.Fatalf("states after cleanup %+v", st)
 	}
 }
+
+// Debian's redis-server: the security source ships fixes of the same
+// release (7.0.15-1~deb12u7 -> deb12u10), a package update.
+func TestEngineSoftwareRedisDebian(t *testing.T) {
+	e := newUpgradeEnv(t)
+	os.WriteFile(e.a.cfg.RestartAllowFile, []byte("6379 redis-server.service\n"), 0o644)
+	eng := &versionEngine{readyEngine: readyEngine{fakeEngine: fakeEngine{name: protocol.EngineRedis}, tries: 5}, version: "7.0.15"}
+	withEngine(t, eng)
+	e.a.watched = []protocol.DatabaseSpec{{ID: "db_r", Port: 6379, Engine: protocol.EngineRedis}}
+	e.run.outs["dpkg-query -W -f=${Version} redis-server"] = "5:7.0.15-1~deb12u7"
+	e.run.outs["apt-cache madison redis-server"] = "redis-server | 5:7.0.15-1~deb12u10 | http://deb.debian.org/debian-security bookworm-security/main arm64 Packages\n" +
+		"redis-server | 5:7.0.15-1~deb12u7 | http://deb.debian.org/debian bookworm/main arm64 Packages\n"
+	cs := e.a.engineSoftware(context.Background())
+	if len(cs) != 1 {
+		t.Fatalf("%+v", cs)
+	}
+	c := cs[0]
+	if c.Engine != "redis" || c.Series != "7.0" || c.Installed != "7.0.15" || c.Candidate != "7.0.15" || c.CandidatePackage != "5:7.0.15-1~deb12u10" ||
+		!c.PackageUpdate || !c.SecurityUpdate || c.Major != 700 || c.Unit != "redis-server.service" {
+		t.Errorf("%+v", c)
+	}
+	// packages.redis.io: a newer release of the series, not a security source.
+	e.run.outs["dpkg-query -W -f=${Version} redis-server"] = "6:8.2.1-1rl1~bookworm1"
+	e.run.outs["apt-cache madison redis-server"] = "redis-server | 6:8.4.0-1rl1~bookworm1 | https://packages.redis.io/deb bookworm/main arm64 Packages\n" +
+		"redis-server | 6:8.2.10-1rl1~bookworm1 | https://packages.redis.io/deb bookworm/main arm64 Packages\n" +
+		"redis-server | 6:8.2.2-1rl1~bookworm1 | https://packages.redis.io/deb bookworm/main arm64 Packages\n" +
+		"redis-server | 6:8.2.1-1rl1~bookworm1 | https://packages.redis.io/deb bookworm/main arm64 Packages\n"
+	eng.version = "8.2.1"
+	c = e.a.engineSoftware(context.Background())[0]
+	if c.Candidate != "8.2.10" || c.PackageUpdate || c.SecurityUpdate || strings.Join(c.NextSeries, ",") != "8.4" {
+		t.Errorf("%+v", c)
+	}
+	// Up to date, listed by both sources: nothing to install.
+	e.run.outs["dpkg-query -W -f=${Version} redis-server"] = "5:7.0.15-1~deb12u10"
+	e.run.outs["apt-cache madison redis-server"] = "redis-server | 5:7.0.15-1~deb12u10 | http://deb.debian.org/debian bookworm/main arm64 Packages\n" +
+		"redis-server | 5:7.0.15-1~deb12u10 | http://deb.debian.org/debian-security bookworm-security/main arm64 Packages\n"
+	eng.version = "7.0.15"
+	if c = e.a.engineSoftware(context.Background())[0]; c.PackageUpdate || c.SecurityUpdate || c.Candidate != "7.0.15" {
+		t.Errorf("%+v", c)
+	}
+}
+
+// bundledEngine is a Redis engine whose sidecar image bundles a version.
+type bundledEngine struct {
+	versionEngine
+	bundled string
+}
+
+func (b *bundledEngine) BundledVersion(context.Context) (string, error) { return b.bundled, nil }
+
+// A Redis sidecar: the version bundled in the agent's image is the newest
+// Rowsafe knows for the series.
+func TestEngineContainerSoftware(t *testing.T) {
+	e := newUpgradeEnv(t)
+	e.a.cfg.ImageVariant = "redis8.2"
+	eng := &bundledEngine{versionEngine: versionEngine{readyEngine: readyEngine{fakeEngine: fakeEngine{name: protocol.EngineRedis}, tries: 5}, version: "8.2.1"}, bundled: "8.2.3"}
+	withEngine(t, eng)
+	e.a.watched = []protocol.DatabaseSpec{{ID: "db_r", Port: 6379, Engine: protocol.EngineRedis}}
+	r := e.a.buildSoftware(context.Background())
+	if !r.Container || len(r.Clusters) != 1 {
+		t.Fatalf("%+v", r)
+	}
+	c := r.Clusters[0]
+	if c.Running != "8.2.1" || c.Candidate != "8.2.3" || c.CandidateSource != protocol.CandidateAgentImage || c.Series != "8.2" || c.Installed != "" || c.Major != 802 {
+		t.Errorf("%+v", c)
+	}
+	// Another series in the image than on the server: nothing known.
+	eng.bundled = "7.4.6"
+	if c = e.a.buildSoftware(context.Background()).Clusters[0]; c.Candidate != "8.2.1" || c.CandidateSource != "" {
+		t.Errorf("%+v", c)
+	}
+	// The image is older than the server: the running version is the newest.
+	eng.bundled = "8.2.0"
+	if c = e.a.buildSoftware(context.Background()).Clusters[0]; c.Candidate != "8.2.1" {
+		t.Errorf("%+v", c)
+	}
+}
+
+// A Redis server Rowsafe can't follow keeps its snapshots: the update isn't
+// a failure, and the summary says so.
+func TestEngineUpdateRedisSnapshots(t *testing.T) {
+	e := newUpgradeEnv(t)
+	os.WriteFile(e.a.cfg.RestartAllowFile, []byte("6379 redis-server.service\n"), 0o644)
+	os.WriteFile(e.a.cfg.UpdateAllowFile, []byte("database\n"), 0o644)
+	os.WriteFile(e.a.cfg.RestartHelper, []byte("#!/bin/sh\n# update-actions: security-updates reboot db-minor-update\n"), 0o755)
+	eng := &snapshotsEngine{versionEngine: versionEngine{readyEngine: readyEngine{fakeEngine: fakeEngine{name: protocol.EngineRedis}, tries: 5}, version: "7.0.15"}}
+	withEngine(t, eng)
+	db := protocol.DatabaseSpec{ID: "db_r", Name: "cache", Port: 6379, Engine: protocol.EngineRedis}
+	e.helper = func(id string, args []string) map[string]string {
+		return map[string]string{"id": id, "ok": "1", "package": "5:7.0.15-1~deb12u10", "packages": "redis-server redis-tools", "restarted": "1"}
+	}
+	res, err := e.a.runTask(context.Background(), &protocol.Task{ID: "t1", Type: protocol.TaskPGUpdate, Database: &db}, &taskLog{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := res.(*protocol.PGUpdateResult)
+	if !r.ArchivingOK || len(r.Warnings) != 0 || !strings.HasPrefix(r.Summary, "Installed the newest Redis 7.0.15 package (5:7.0.15-1~deb12u10) and restarted Redis") ||
+		!strings.HasSuffix(r.Summary, "Backups continue as scheduled snapshots, as before.") {
+		t.Errorf("%+v", r)
+	}
+	if e.asked[0] != "db-minor-update 6379" {
+		t.Errorf("asked %v", e.asked)
+	}
+}
+
+// snapshotsEngine answers after a restart in snapshots mode.
+type snapshotsEngine struct{ versionEngine }
+
+func (s *snapshotsEngine) Ready(context.Context, EngineEnv, protocol.DatabaseSpec) (string, error) {
+	return protocol.RedisArchiveSnapshots, nil
+}
+
+func TestDebCompare(t *testing.T) {
+	for _, c := range []struct {
+		a, b string
+		want int
+	}{
+		{"5:7.0.15-1~deb12u10", "5:7.0.15-1~deb12u7", 1},
+		{"6:8.2.10-1rl1~bookworm1", "6:8.2.2-1rl1~bookworm1", 1},
+		{"8.1.1+dfsg1-3+deb13u2", "8.1.1+dfsg1-3+deb13u2", 0},
+		{"1.0~rc1", "1.0", -1},
+		{"1:1.0", "2.0", 1},
+		{"8.0.40-1debian12", "8.0.43-1debian12", -1},
+		{"1:10.11.6-0+deb12u1", "1:10.11.9+maria~deb12", -1},
+		{"7.0.15-1", "7.0.15-1build1", -1},
+	} {
+		if got := debCompare(c.a, c.b); got != c.want {
+			t.Errorf("debCompare(%q, %q) = %d, want %d", c.a, c.b, got, c.want)
+		}
+		if got := debCompare(c.b, c.a); got != -c.want {
+			t.Errorf("debCompare(%q, %q) = %d, want %d", c.b, c.a, got, -c.want)
+		}
+	}
+}

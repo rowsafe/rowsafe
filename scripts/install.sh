@@ -1269,10 +1269,12 @@ install_helper_script() {
 #   ID pg-upgrade-cleanup PORT               remove the version kept aside by an upgrade or undo
 #   ID security-updates                      install pending security updates
 #   ID reboot                                reboot the server
-#   ID db-minor-update PORT                  newest release of the series (8.0, 10.11, 7.0, 25.8)
-#                                            of the MySQL, MariaDB, MongoDB or ClickHouse server on PORT
+#   ID db-minor-update PORT                  newest release of the series (8.0, 10.11, 7.0, 25.8, 8.2)
+#                                            of the MySQL, MariaDB, MongoDB, ClickHouse, Redis or Valkey
+#                                            server on PORT
 #   ID db-upgrade PORT SERIES                that server to a newer series (8.0 -> 8.4), keeping a copy
 #                                            of its data directory and its old packages for undo
+#                                            (not Redis or Valkey yet)
 #   ID db-upgrade-undo PORT                  back to the kept data and packages (the newer data is kept aside)
 #   ID db-upgrade-cleanup PORT               delete what an upgrade or its undo kept
 #
@@ -2755,7 +2757,8 @@ act_security_updates() {
   # servers' own packages are left alone (their upgrade would restart them):
   # PostgreSQL's go through Update PostgreSQL, which saves a Mark, restarts
   # in a controlled way and checks archiving; MySQL's, MariaDB's, MongoDB's,
-  # ClickHouse's, Redis's and Valkey's aren't installed from Rowsafe yet.
+  # ClickHouse's, Redis's and Valkey's through db-minor-update, which saves a
+  # Mark first (when it can) and waits until the server answers again.
   list=$(apt-get -s -o Debug::NoLocking=1 dist-upgrade 2>/dev/null |
     awk '/^Inst [^ ]+ \[/ && /-security|Debian-Security/ { print $2 }' | sort -u)
   db_pkgs='^(postgresql-[0-9]+(-.+)?|mysql-server(-.+)?|mysql-community-server(-.+)?|percona-server-server(-.+)?|mariadb-server(-.+)?|mongodb-org-server|mongodb-org-mongos|clickhouse-server|clickhouse-common-static|(redis|valkey)-(server|sentinel|tools))$'
@@ -2823,7 +2826,21 @@ db_engine() {
         set -- mysql-community-server mysql-server-8.4 mysql-server-8.0 mysql-server percona-server-server
       fi
       ;;
-    *) refuse "$unit is not a MySQL, MariaDB, MongoDB or ClickHouse service" ;;
+    redis-server.service | redis.service | redis-server@*.service | redis@*.service)
+      # Debian's valkey-redis-compat can answer to Redis's unit names.
+      if [ -z "$(pkg_version redis-server)" ] && [ -n "$(pkg_version valkey-server)" ]; then
+        db_engine=valkey
+        set -- valkey-server
+      else
+        db_engine=redis
+        set -- redis-server
+      fi
+      ;;
+    valkey-server.service | valkey.service | valkey-server@*.service | valkey@*.service)
+      db_engine=valkey
+      set -- valkey-server
+      ;;
+    *) refuse "$unit is not a MySQL, MariaDB, MongoDB, ClickHouse, Redis or Valkey service" ;;
   esac
   db_main=''
   for p in "$@"; do
@@ -2844,6 +2861,9 @@ db_patterns() {
     mariadb) locked='mariadb-* libmariadb3 libmariadbd19' free='' ;;
     mongodb) locked='mongodb-org mongodb-org-*' free='mongodb-mongosh mongodb-database-tools' ;;
     clickhouse) locked='clickhouse-*' free='' ;;
+    # Debian's and packages.redis.io's packages, all of one version.
+    redis) locked='redis redis-server redis-tools redis-sentinel' free='' ;;
+    valkey) locked='valkey valkey-server valkey-tools valkey-sentinel valkey-redis-compat' free='' ;;
   esac
 }
 
@@ -2973,6 +2993,7 @@ db_restore_data() {
 act_db_upgrade() {
   update_allowed database "upgrading the database from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
   db_port
+  case $db_engine in redis | valkey) refuse "upgrading $db_engine to a new series isn't supported by this helper yet: minor updates are" ;; esac
   db_datadir
   before=$(pkg_version "$db_main")
   from=$(series "$before")
@@ -3736,17 +3757,14 @@ update_access() {
   if [ ! -f "$UPDATES_ALLOW_FILE" ] && [ "$TTY" = 1 ] && { [ -z "$ALLOW_UPDATES" ] || [ -z "$ALLOW_SECURITY" ]; }; then
     perm_intro
   fi
-  # PostgreSQL's word is postgresql; MySQL's, MariaDB's, MongoDB's and
-  # ClickHouse's is database (the helper's db-* requests).
+  # PostgreSQL's word is postgresql; MySQL's, MariaDB's, MongoDB's,
+  # ClickHouse's, Redis's and Valkey's is database (the helper's db-*
+  # requests; Redis and Valkey get minor updates only).
   _uw=postgresql
   [ "$HOST_ENGINE" = postgresql ] || _uw=database
-  case $HOST_ENGINE in
-    redis | valkey) # not from Rowsafe yet (the helper's db-* requests don't cover them)
-      _pg=no
-      [ "$ALLOW_UPDATES" != yes ] || warn "Rowsafe doesn't install $(engine_label) updates yet; left off"
-      ;;
-    *) _pg=$(decide_update "$ALLOW_UPDATES" "$_uw" "Install $(engine_label) updates and upgrades, when someone clicks Update? A Mark is saved first." y) ;;
-  esac
+  _what="updates and upgrades"
+  case $HOST_ENGINE in redis | valkey) _what="updates" ;; esac
+  _pg=$(decide_update "$ALLOW_UPDATES" "$_uw" "Install $(engine_label) $_what, when someone clicks Update? A Mark is saved first." y)
   _sec=$(decide_update "$ALLOW_SECURITY" security "Install this server's security updates, when someone clicks Install?" n)
   _reboot=no
   if [ "$_sec" = yes ]; then
@@ -3763,7 +3781,7 @@ update_access() {
       if [ "$_uw" = postgresql ]; then
         echo "postgresql   # PostgreSQL minor updates and major upgrades (clusters in restart-allowed)"
       else
-        echo "database     # $(engine_label) updates and upgrades (the servers in restart-allowed)"
+        echo "database     # $(engine_label) $_what (the servers in restart-allowed)"
       fi
     fi
     [ "$_sec" != yes ] || echo "security     # security updates (the database servers' own packages excepted)"
@@ -3775,7 +3793,12 @@ update_access() {
     return 0
   fi
   install_update_units
-  [ "$_pg" != yes ] || perm_ok "Rowsafe may install $(engine_label) updates and upgrade $(engine_label) when you click Update or Upgrade and confirm"
+  if [ "$_pg" = yes ]; then
+    case $HOST_ENGINE in
+      redis | valkey) perm_ok "Rowsafe may install $(engine_label) updates when you click Update and confirm" ;;
+      *) perm_ok "Rowsafe may install $(engine_label) updates and upgrade $(engine_label) when you click Update or Upgrade and confirm" ;;
+    esac
+  fi
   [ "$_sec" != yes ] || perm_ok "Rowsafe may install security updates when you click Install and confirm"
   [ "$_reboot" != yes ] || perm_ok "Rowsafe may reboot this server when you click Reboot and confirm"
 }
