@@ -18,13 +18,18 @@ type Input struct {
 	Settings         map[string]protocol.PGSetting
 	DatabaseBytes    int64
 	PgStatStatements string // SettingsSnapshot.PgStatStatements
+	// OtherDatabases is how many other databases Rowsafe protects on the
+	// same server (the control plane knows): they share its memory.
+	OtherDatabases int
+	// Redis is a Redis or Valkey server's facts (SettingsSnapshot.Redis).
+	Redis *protocol.RedisSettingsFacts
 }
 
 // InputFrom builds the input from a snapshot, with the workload and, when
 // the person corrected it, the disk type.
 func InputFrom(s protocol.SettingsSnapshot, workload, disk string) Input {
 	in := Input{Host: s.Host, VersionNum: s.VersionNum, Workload: workload, Settings: SettingsMap(s.Settings),
-		DatabaseBytes: s.DatabaseBytes, PgStatStatements: s.PgStatStatements}
+		DatabaseBytes: s.DatabaseBytes, PgStatStatements: s.PgStatStatements, Redis: s.Redis}
 	if disk == protocol.DiskSSD || disk == protocol.DiskHDD {
 		in.Host.Disk = disk
 	}

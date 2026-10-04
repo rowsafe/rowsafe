@@ -49,8 +49,8 @@
 #                          with the firewall when you ask (Security in the
 #                          dashboard); never touches SSH or other ports
 #   --no-allow-firewall    turn that off again (and remove Rowsafe's rule)
-#   --allow-tuning         allow Rowsafe to change MongoDB's or ClickHouse's settings
-#                          when you ask (Tuning), only in its own settings file
+#   --allow-tuning         allow Rowsafe to change MongoDB's, ClickHouse's, Redis's or
+#                          Valkey's settings when you ask (Tuning), only those settings
 #   --no-allow-tuning      turn that off again
 #   --allow-updates        allow Rowsafe to install PostgreSQL updates and upgrade
 #                          PostgreSQL when you click Update or Upgrade (needs
@@ -302,8 +302,8 @@ Options (when piping, pass them after `sh -s --`):
                          the firewall (nftables) when you ask, under Security in the
                          dashboard; never touches SSH or other ports
   --no-allow-firewall    turn that off (and remove Rowsafe's rule and helper)
-  --allow-tuning         allow Rowsafe to change MongoDB's or ClickHouse's settings when
-                         you ask under Tuning, only in its own settings file
+  --allow-tuning         allow Rowsafe to change MongoDB's, ClickHouse's, Redis's or
+                         Valkey's settings when you ask under Tuning, only those settings
   --no-allow-tuning      turn that off
   --allow-pooler-target ADDRESS:PORT    let ProxySQL send connections to the MySQL
                          on another server (the primary after a standby's promotion)
@@ -3783,14 +3783,46 @@ update_access() {
 # ------------------------------------------------------------------ tuning
 
 # With root's permission (--allow-tuning, or yes at the question), a person
-# can change MongoDB's or ClickHouse's settings from Tuning in the
+# can change MongoDB's, ClickHouse's, Redis's or Valkey's settings from Tuning in the
 # dashboard. The agent (unprivileged) writes a request to $TUNING_DIR;
 # rowsafe-tuning.path starts rowsafe-tuning.service, which runs root's copy
 # of the agent ($PERMISSIONS_HELPER tuning-apply). It accepts only a fixed
 # list of settings with plain numbers or fixed words, and writes only
 # ClickHouse's config.d/rowsafe-tuning.xml and users.d/rowsafe-tuning.xml,
 # or those settings' keys in the MongoDB configuration file listed in
-# $TUNING_ALLOW_FILE (a copy kept first; MongoDB reads it when it starts).
+# $TUNING_ALLOW_FILE (a copy kept first; MongoDB reads it when it starts),
+# or those settings' lines in the Redis or Valkey configuration file listed
+# there (a copy kept first; the agent also changes them on the running
+# server, which needs no root).
+
+# redis_config_file prints the Redis or Valkey server's configuration file
+# (what the server says, else its systemd unit's, else the usual places),
+# nothing when there is none.
+redis_config_file() {
+  _rc=${RD_CONFIG:-}
+  _units='redis-server redis valkey-server valkey'
+  _files='/etc/redis/redis.conf /etc/redis.conf /etc/valkey/valkey.conf /etc/valkey.conf'
+  if [ "$HOST_ENGINE" = valkey ]; then
+    _units='valkey-server valkey redis-server redis'
+    _files='/etc/valkey/valkey.conf /etc/valkey.conf /etc/redis/redis.conf /etc/redis.conf'
+  fi
+  if [ -z "$_rc" ] && have systemctl; then
+    for _u in $_units; do
+      _rc=$(systemctl show -p ExecStart --value "$_u" 2>/dev/null | tr ' ;' '\n\n' | awk '/^\/.*[.]conf$/ { print; exit }')
+      [ -z "$_rc" ] || break
+    done
+  fi
+  if [ -z "$_rc" ]; then
+    for _f in $_files; do
+      if [ -f "$_f" ]; then
+        _rc=$_f
+        break
+      fi
+    done
+  fi
+  case $_rc in /*) ;; *) return 0 ;; esac
+  [ -f "$_rc" ] && [ ! -L "$_rc" ] && printf '%s\n' "$_rc"
+}
 
 # mongodb_config_file prints mongod's configuration file (from its systemd
 # unit, else /etc/mongod.conf), nothing when there is none.
@@ -3809,6 +3841,7 @@ tuning_target() {
   case $HOST_ENGINE in
     mongodb) _t=$(mongodb_config_file) && [ -n "$_t" ] && echo "mongodb $_t" ;;
     clickhouse) [ -f /etc/clickhouse-server/config.xml ] && echo "clickhouse /etc/clickhouse-server" ;;
+    redis | valkey) _t=$(redis_config_file) && [ -n "$_t" ] && echo "$HOST_ENGINE $_t" ;;
   esac
 }
 
@@ -3829,7 +3862,7 @@ install_tuning_helper() {
   _changed=0
   if sed -e "s/@AGENT_USER@/$AGENT_USER/" -e "s|@READ_WRITE@|$_rw|" <<'ROWSAFE_TUNING_SERVICE_EOF' | write_file "$TUNING_SERVICE_FILE" 0644 root:root; then
 # SPDX-License-Identifier: Apache-2.0
-# rowsafe-tuning.service: writes the MongoDB or ClickHouse settings a person
+# rowsafe-tuning.service: writes the MongoDB, ClickHouse, Redis or Valkey settings a person
 # changed in Rowsafe (Tuning) into Rowsafe's own files, only where root
 # allowed it (/etc/rowsafe/tuning-allowed, sudo rowsafe-allow tuning).
 # Started by rowsafe-tuning.path; installed by https://rowsafe.sh/install.
@@ -3912,7 +3945,7 @@ allow_tuning() {
   {
     echo "# The settings files Rowsafe may write when someone changes settings under"
     echo "# Tuning (only its own: ClickHouse's config.d and users.d rowsafe-tuning.xml,"
-    echo "# or a few keys of MongoDB's configuration file). Written by the installer"
+    echo "# or a few keys of MongoDB's, Redis's or Valkey's configuration file). Written by the installer"
     echo "# (root); turn this off with: sudo rowsafe-allow --remove tuning"
     echo "# ENGINE PATH"
     tuning_target
@@ -3932,7 +3965,7 @@ disallow_tuning() {
 }
 
 # tuning_access applies --allow-tuning / --no-allow-tuning, or asks once on
-# a terminal (default no) where it applies (MongoDB, ClickHouse).
+# a terminal (default no) where it applies (MongoDB, ClickHouse, Redis, Valkey).
 tuning_access() {
   case $ALLOW_TUNING in
     yes) allow_tuning ;;
@@ -5606,7 +5639,7 @@ perm_desc() {
     pooler) echo "install and manage PgBouncer (pooling)" ;;
     pooler-public) echo "let PgBouncer listen on public addresses" ;;
     firewall) echo "limit who can reach the database (firewall)" ;;
-    tuning) echo "change MongoDB's or ClickHouse's settings (Tuning)" ;;
+    tuning) echo "change $(engine_label)'s settings (Tuning)" ;;
   esac
 }
 
@@ -5624,7 +5657,7 @@ perm_state() {
   [ -f "$_sf" ] || return 0
   case $1 in
     restart | pooler | firewall) _sy=$(grep -c '^[1-9]' "$_sf" || true) ;;
-    tuning) _sy=$(grep -Ec '^(mongodb|clickhouse) /' "$_sf" || true) ;;
+    tuning) _sy=$(grep -Ec '^(mongodb|clickhouse|redis|valkey) /' "$_sf" || true) ;;
     create-cluster) _sy=$(grep -c '^ports ' "$_sf" || true) ;;
     pooler-public) _sy=$(grep -qs '^[1-9]' "$_sf" && grep -cx public "$_sf" || true) ;;
     updates) _sy=$(grep -c '^\(postgresql\|database\)\([[:space:]#]\|$\)' "$_sf" || true) ;;
@@ -5683,6 +5716,7 @@ perm_why() {
       case $HOST_ENGINE in
         mongodb) [ -n "$(mongodb_config_file)" ] || _w="found no MongoDB configuration file (/etc/mongod.conf)" ;;
         clickhouse) [ -f /etc/clickhouse-server/config.xml ] || _w="found no ClickHouse configuration (/etc/clickhouse-server)" ;;
+        redis | valkey) [ -n "$(redis_config_file)" ] || _w="found no $(engine_label) configuration file (/etc/redis/redis.conf or /etc/valkey/valkey.conf)" ;;
         *) _w="Rowsafe changes $(engine_label)'s settings without it" ;;
       esac
       ;;
@@ -5831,7 +5865,7 @@ Names:
   pooler             install and manage PgBouncer (connection pooling)
   pooler-public      let PgBouncer listen on public addresses (needs pooler)
   firewall           limit who can reach the database's port (never SSH or other ports)
-  tuning             change MongoDB's or ClickHouse's settings, in Rowsafe's own file
+  tuning             change MongoDB's, ClickHouse's, Redis's or Valkey's settings
 
   sudo rowsafe-allow pooler-target ADDRESS PORT
                            let ProxySQL send connections to the MySQL on another

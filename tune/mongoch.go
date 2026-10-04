@@ -96,6 +96,9 @@ var (
 // EngineValue turns a change's value into what engine's file takes: sizes
 // in bytes, numbers as given, switches as 1/0 (ClickHouse) or true/false.
 func EngineValue(engine string, s protocol.PGSetting, value string) (string, bool) {
+	if e := protocol.NormalizeEngine(engine); e == protocol.EngineRedis || e == protocol.EngineValkey {
+		return RedisValue(s, value)
+	}
 	v, ok := MySQLValue(s, value)
 	if !ok || s.VarType != "bool" {
 		return v, ok

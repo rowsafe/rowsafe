@@ -15,7 +15,7 @@ import (
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
-// Tuning for MongoDB and ClickHouse goes through root's helper
+// Tuning for MongoDB, ClickHouse, Redis and Valkey goes through root's helper
 // (internal/tuneroot): the agent writes the request, rowsafe-tuning.path
 // starts root's copy of the agent, which writes the settings into
 // Rowsafe's own files where root allowed it, and answers.
@@ -59,7 +59,7 @@ func RequestTuning(ctx context.Context, env EngineEnv, engine string, settings m
 		return tuneroot.Result{}, err
 	}
 	data, _ := json.Marshal(req)
-	log.Printf("asking root's helper to write %d setting(s) into Rowsafe's own %s settings file", len(settings), protocol.EngineDisplayName(engine))
+	log.Printf("asking root's helper to write %d %s setting(s) into the file root allowed", len(settings), protocol.EngineDisplayName(engine))
 	if err := writeFileAtomic(filepath.Join(dir, tuneroot.RequestName), data, 0o600); err != nil {
 		return tuneroot.Result{}, err
 	}

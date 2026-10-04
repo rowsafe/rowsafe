@@ -89,7 +89,7 @@ var permHave = func(name string) bool {
 // server (the installer says the same).
 const (
 	permReasonPostgresOnly = "Rowsafe does this for PostgreSQL, and there is no PostgreSQL on this server"
-	permReasonTuning       = "Rowsafe needs this only for MongoDB and ClickHouse, and neither is installed here"
+	permReasonTuning       = "Rowsafe needs this only for MongoDB, ClickHouse, Redis and Valkey, and none is installed here"
 	permReasonPooler       = "Rowsafe pools PostgreSQL (PgBouncer), MySQL or MariaDB (ProxySQL) and ClickHouse (chproxy), and none is on this server"
 	permReasonNoCluster    = "pg_createcluster isn't installed (Debian and Ubuntu's postgresql-common)"
 	permReasonNoNft        = "nftables isn't installed"
@@ -115,7 +115,9 @@ func ReadPermissions(p PermissionPaths) *protocol.PermissionsReport {
 		answer[protocol.PermFirewall] = anyLine(lines, func(f []string) bool { return isPort(f[0]) })
 	}
 	if lines, ok := allowFileLines(p.TuningAllowFile); ok {
-		answer[protocol.PermTuning] = anyLine(lines, func(f []string) bool { return (f[0] == "mongodb" || f[0] == "clickhouse") && len(f) >= 2 })
+		answer[protocol.PermTuning] = anyLine(lines, func(f []string) bool {
+			return slices.Contains([]string{"mongodb", "clickhouse", "redis", "valkey"}, f[0]) && len(f) >= 2
+		})
 	}
 	if lines, ok := allowFileLines(p.UpdatesAllowFile); ok {
 		for perm, word := range map[string]string{
@@ -169,7 +171,8 @@ func permissionsUnavailable(p PermissionPaths, allowed []string) map[string]stri
 		case len(pg) == 0 && (name == protocol.PermPooler || name == protocol.PermPoolerPublic) && !permHave("mysqld") && !permHave("mariadbd") &&
 			!permHave("clickhouse-server") && !permHave("clickhouse"):
 			why = permReasonPooler
-		case name == protocol.PermTuning && !permHave("mongod") && !permHave("clickhouse-server") && !permHave("clickhouse"):
+		case name == protocol.PermTuning && !permHave("mongod") && !permHave("clickhouse-server") && !permHave("clickhouse") &&
+			!permHave("redis-server") && !permHave("valkey-server"):
 			why = permReasonTuning
 		case name == protocol.PermFirewall && !permHave("nft"):
 			why = permReasonNoNft
