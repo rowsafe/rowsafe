@@ -126,8 +126,9 @@ RESTART_PATH_FILE=/etc/systemd/system/rowsafe-pg-restart.path
 RESTART_ALLOW_FILE=$CONFIG_DIR/restart-allowed
 RESTART_DIR=$STATE_DIR/restart
 # The database units the restart helper acts on (its db_unit_re): Debian's
-# PostgreSQL clusters and the MySQL, MariaDB, MongoDB and ClickHouse units.
-DB_UNIT_RE='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server)[.]service$'
+# PostgreSQL clusters and the MySQL, MariaDB, MongoDB, ClickHouse, Redis and
+# Valkey units.
+DB_UNIT_RE='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server|(redis|valkey)(-server)?(@[A-Za-z0-9_.-]+)?)[.]service$'
 # Forks (--allow-create-cluster): new clusters created by their own unit,
 # started by the restart helper.
 CREATE_HELPER=$LIB_DIR/rowsafe-pg-create-cluster
@@ -359,6 +360,9 @@ Environment:
   ROWSAFE_CLICKHOUSE_ADMIN_USER, ROWSAFE_CLICKHOUSE_ADMIN_PASSWORD  without a terminal: a
                          ClickHouse administrator to create Rowsafe's own ClickHouse user
                          when it can't be added as a users.d file (used once, never saved)
+  ROWSAFE_REDIS_ADMIN_USER, ROWSAFE_REDIS_ADMIN_PASSWORD  without a terminal: a Redis or
+                         Valkey administrator (default, for a server with only a
+                         password) to create Rowsafe's own user (used once, never saved)
   ROWSAFE_URL, ROWSAFE_ENROLL_TOKEN, ROWSAFE_REPO_*  written to /etc/rowsafe/agent.env
                          (ROWSAFE_ENROLL_TOKEN may instead be the argument rse_...)
                          (ROWSAFE_URL defaults to https://api.rowsafe.sh)
@@ -409,6 +413,14 @@ Turning on backups:
   clickhouse group to read (never write) ClickHouse's data folder: it copies
   each new part to your bucket as it appears, so you can restore to any
   second.
+
+  Redis and Valkey: Rowsafe gets its own ACL user, rowsafe (as the default
+  user when it has no password, else with an administrator's login once).
+  Redis keeps it in its ACL file or configuration file; when it can't write
+  them, the installer adds the user's line (the password's hash, never the
+  password) to the configuration file. Backups come from the server itself
+  over replication, so nothing is installed or restarted. Redis Cluster,
+  Redis older than 7.0 and Valkey older than 7.2 are not supported yet.
 
 What Rowsafe may do on this server:
   Rowsafe only restarts PostgreSQL, installs updates, reboots, manages
@@ -609,10 +621,74 @@ clickhouse_setup() {
   fi
 }
 # <<< clickhouse
+# >>> redis: without PostgreSQL, MySQL/MariaDB, MongoDB and ClickHouse but
+# with Redis or Valkey, the agent runs as its own system user, rowsafe, too.
+# A server too old for Rowsafe is refused here, before anything changes.
+detect_redis_host() {
+  [ "$HOST_ENGINE" = postgresql ] || return 0
+  id -u postgres >/dev/null 2>&1 && return 0
+  redis_present || return 0
+  HOST_ENGINE=redis
+  if redis_find_program; then
+    HOST_ENGINE=$REDIS_FOUND_ENGINE
+    _why=$(redis_too_old "$HOST_ENGINE" "$REDIS_VERSION")
+    [ -z "$_why" ] || die "$_why. Nothing was changed on this server."
+  elif have valkey-server || [ -f /lib/systemd/system/valkey-server.service ] || [ -f /usr/lib/systemd/system/valkey-server.service ]; then
+    HOST_ENGINE=valkey
+  fi
+  use_rowsafe_user
+  AGENT_HOME=$STATE_DIR
+}
+
+# redis_setup: on a Redis or Valkey server without PostgreSQL, a unit
+# drop-in runs the agent as rowsafe. The server's group (redis or valkey)
+# lets it read, never write, the server's snapshot file, which it only uses
+# when the server refuses to send it a copy over replication. Nothing of the
+# server's (folders, modes) is changed for that.
+redis_setup() {
+  _dropin=/etc/systemd/system/$SERVICE.d
+  case $HOST_ENGINE in
+    redis | valkey) ;;
+    *)
+      [ ! -f "$_dropin/10-redis.conf" ] || { rm -f "$_dropin/10-redis.conf"; UNIT_CHANGED=1; CHANGED=1; }
+      return 0
+      ;;
+  esac
+  install -d -m 0755 "$_dropin"
+  _grp=$(redis_group)
+  if {
+    echo "# Written by the Rowsafe installer: this server runs $(engine_label)."
+    echo "[Unit]"
+    echo "After=redis-server.service redis.service valkey-server.service valkey.service"
+    echo "[Service]"
+    echo "User=rowsafe"
+    echo "Group=rowsafe"
+    [ -z "$_grp" ] || echo "SupplementaryGroups=$_grp"
+  } | write_file "$_dropin/10-redis.conf" 0644 root:root; then
+    UNIT_CHANGED=1 CHANGED=1
+  fi
+}
+
+# redis_group prints the group the Redis or Valkey packages made (redis or
+# valkey), nothing when there is none.
+redis_group() {
+  _order='redis valkey'
+  [ "$HOST_ENGINE" != valkey ] || _order='valkey redis'
+  for _g in $_order; do
+    if getent group "$_g" >/dev/null 2>&1; then
+      echo "$_g"
+      return 0
+    fi
+  done
+}
+# <<< redis
 # >>> mysql
 
 engine_label() {
-  case ${1:-$HOST_ENGINE} in mysql) echo MySQL ;; mariadb) echo MariaDB ;; mongodb) echo MongoDB ;; clickhouse) echo ClickHouse ;; *) echo PostgreSQL ;; esac
+  case ${1:-$HOST_ENGINE} in
+    mysql) echo MySQL ;; mariadb) echo MariaDB ;; mongodb) echo MongoDB ;; clickhouse) echo ClickHouse ;;
+    redis) echo Redis ;; valkey) echo Valkey ;; *) echo PostgreSQL ;;
+  esac
 }
 
 # ensure_mysql_tools installs the physical backup tool: mariadb-backup from
@@ -755,7 +831,7 @@ mysql_standby_wanted() {
 check_postgres() {
   [ "$HOST_ENGINE" = postgresql ] || return 0 # mysql
   id -u "$AGENT_USER" >/dev/null 2>&1 ||
-    die "no '$AGENT_USER' user on this host. Rowsafe adopts an existing PostgreSQL, MySQL, MariaDB, MongoDB or ClickHouse; install one first."
+    die "no '$AGENT_USER' user on this host. Rowsafe adopts an existing PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis or Valkey; install one first."
   PG_MAJORS=''
   for bin in /usr/lib/postgresql/*/bin/postgres; do
     [ -x "$bin" ] || continue
@@ -763,7 +839,7 @@ check_postgres() {
     PG_MAJORS="$PG_MAJORS ${major%%/*}"
   done
   PG_MAJORS=${PG_MAJORS# }
-  if [ -z "$PG_MAJORS" ] && [ -z "${ROWSAFE_PG_BIN_DIR:-}" ] && ! mongodb_present && ! clickhouse_present; then
+  if [ -z "$PG_MAJORS" ] && [ -z "${ROWSAFE_PG_BIN_DIR:-}" ] && ! mongodb_present && ! clickhouse_present && ! redis_present; then
     die "no PostgreSQL server found under /usr/lib/postgresql. Restore drills need the server binaries (pg_ctl); set ROWSAFE_PG_BIN_DIR if they live elsewhere."
   fi
 }
@@ -1135,7 +1211,7 @@ install_helper_script() {
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
 # rowsafe-pg-restart: restarts or stops PostgreSQL (or the MySQL, MariaDB,
-# MongoDB or ClickHouse server Rowsafe protects) when a person asked
+# MongoDB, ClickHouse, Redis or Valkey server Rowsafe protects) when a person asked
 # Rowsafe to (Restart in the dashboard, `rowsafe restart`; Rewind the whole
 # database, which stops the database, swaps its data and starts it),
 # and installs PostgreSQL updates, upgrades PostgreSQL, installs security
@@ -1715,9 +1791,10 @@ check_root_file() {
 # db_unit_re: the database units a restart, stop or start may act on,
 # whatever the allow list says: Debian's PostgreSQL cluster units
 # (postgresql@MAJOR-NAME.service), and the units the MySQL, MariaDB,
-# MongoDB and ClickHouse packages install (mysql, mysqld, mariadb and their
-# @instance forms, mongod, mongodb, clickhouse-server).
-db_unit_re='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server)[.]service$'
+# MongoDB, ClickHouse, Redis and Valkey packages install (mysql, mysqld,
+# mariadb and their @instance forms, mongod, mongodb, clickhouse-server,
+# redis-server, redis, valkey-server, valkey and their @instance forms).
+db_unit_re='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server|(redis|valkey)(-server)?(@[A-Za-z0-9_.-]+)?)[.]service$'
 
 # allowed_unit PORT prints the unit the restart allow list names for PORT.
 allowed_unit() {
@@ -2677,11 +2754,11 @@ act_security_updates() {
   # Upgrades of installed packages from a security origin. The database
   # servers' own packages are left alone (their upgrade would restart them):
   # PostgreSQL's go through Update PostgreSQL, which saves a Mark, restarts
-  # in a controlled way and checks archiving; MySQL's, MariaDB's, MongoDB's
-  # and ClickHouse's aren't installed from Rowsafe yet.
+  # in a controlled way and checks archiving; MySQL's, MariaDB's, MongoDB's,
+  # ClickHouse's, Redis's and Valkey's aren't installed from Rowsafe yet.
   list=$(apt-get -s -o Debug::NoLocking=1 dist-upgrade 2>/dev/null |
     awk '/^Inst [^ ]+ \[/ && /-security|Debian-Security/ { print $2 }' | sort -u)
-  db_pkgs='^(postgresql-[0-9]+(-.+)?|mysql-server(-.+)?|mysql-community-server(-.+)?|percona-server-server(-.+)?|mariadb-server(-.+)?|mongodb-org-server|mongodb-org-mongos|clickhouse-server|clickhouse-common-static)$'
+  db_pkgs='^(postgresql-[0-9]+(-.+)?|mysql-server(-.+)?|mysql-community-server(-.+)?|percona-server-server(-.+)?|mariadb-server(-.+)?|mongodb-org-server|mongodb-org-mongos|clickhouse-server|clickhouse-common-static|(redis|valkey)-(server|sentinel|tools))$'
   held=$(printf '%s\n' "$list" | grep -E "$db_pkgs" | tr '\n' ' ')
   pkgs=$(printf '%s\n' "$list" | grep -Ev "$db_pkgs" | grep . | tr '\n' ' ')
   n=0
@@ -3663,7 +3740,13 @@ update_access() {
   # ClickHouse's is database (the helper's db-* requests).
   _uw=postgresql
   [ "$HOST_ENGINE" = postgresql ] || _uw=database
-  _pg=$(decide_update "$ALLOW_UPDATES" "$_uw" "Install $(engine_label) updates and upgrades, when someone clicks Update? A Mark is saved first." y)
+  case $HOST_ENGINE in
+    redis | valkey) # not from Rowsafe yet (the helper's db-* requests don't cover them)
+      _pg=no
+      [ "$ALLOW_UPDATES" != yes ] || warn "Rowsafe doesn't install $(engine_label) updates yet; left off"
+      ;;
+    *) _pg=$(decide_update "$ALLOW_UPDATES" "$_uw" "Install $(engine_label) updates and upgrades, when someone clicks Update? A Mark is saved first." y) ;;
+  esac
   _sec=$(decide_update "$ALLOW_SECURITY" security "Install this server's security updates, when someone clicks Install?" n)
   _reboot=no
   if [ "$_sec" = yes ]; then
@@ -3946,7 +4029,7 @@ state=${STATE_DIRECTORY:-/var/lib/rowsafe-firewall}
 agent_user=${ROWSAFE_AGENT_USER:-postgres}
 # The users database servers run as (PostgreSQL's is the agent's own): a
 # port is only accepted while one of them listens on it.
-db_users=${ROWSAFE_DB_USERS:-"$agent_user postgres mysql mongodb mongod clickhouse"}
+db_users=${ROWSAFE_DB_USERS:-"$agent_user postgres mysql mongodb mongod clickhouse redis valkey"}
 nft=${ROWSAFE_NFT:-nft}
 ss=${ROWSAFE_SS:-ss}
 sshd=${ROWSAFE_SSHD:-sshd}
@@ -4152,7 +4235,7 @@ if [ "$action" = apply ]; then
     if listen_ports "$uid" | grep -qx "$port"; then db_listens=1; fi
   done
   [ "$db_listens" = 1 ] ||
-    refuse "no database server (PostgreSQL, MySQL, MariaDB, MongoDB or ClickHouse) listens on port $port here (a port Docker publishes bypasses this firewall: limit it in the compose file instead)"
+    refuse "no database server (PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis or Valkey) listens on port $port here (a port Docker publishes bypasses this firewall: limit it in the compose file instead)"
   addrs=$(read_agent_file "$dir/addresses" 4096 | head -n 33)
   n=0
   : >"$state/new-$port"
@@ -4382,7 +4465,7 @@ firewall_ports() {
   {
     if command -v pg_lsclusters >/dev/null 2>&1; then pg_lsclusters -h 2>/dev/null | awk '{ print $3 }'; fi
     if command -v ss >/dev/null 2>&1; then
-      for _u in "$AGENT_USER" postgres mysql mongodb mongod clickhouse; do
+      for _u in "$AGENT_USER" postgres mysql mongodb mongod clickhouse redis valkey; do
         _uid=$(id -u "$_u" 2>/dev/null) || continue
         ss -ltnHe 2>/dev/null | awk -v u="$_uid" 'index($0, " uid:" u " ") { n = split($4, a, ":"); print a[n] }'
       done
@@ -5571,6 +5654,10 @@ perm_why() {
         return 0
         ;;
       updates | security-updates | reboot)
+        if [ "$1" = updates ] && { [ "$HOST_ENGINE" = redis ] || [ "$HOST_ENGINE" = valkey ]; }; then
+          echo "Rowsafe doesn't install $(engine_label) updates yet"
+          return 0
+        fi
         have apt-get || echo "Rowsafe installs updates with apt (Debian and Ubuntu)"
         return 0
         ;;
@@ -5989,6 +6076,10 @@ permissions_main() {
     *)
       HOST_ENGINE=mongodb AGENT_HOME=$STATE_DIR
       [ ! -f "/etc/systemd/system/$SERVICE.d/10-clickhouse.conf" ] || HOST_ENGINE=clickhouse
+      if [ -f "/etc/systemd/system/$SERVICE.d/10-redis.conf" ]; then # redis
+        HOST_ENGINE=redis
+        ! grep -q 'runs Valkey' "/etc/systemd/system/$SERVICE.d/10-redis.conf" || HOST_ENGINE=valkey
+      fi
       ;;
   esac
   PERM_READY=1
@@ -7710,6 +7801,10 @@ protect_cluster() {
     note "Backups for $C_NAME are not on yet. Run this installer again when you're ready."
     return 0
   fi
+  if { [ "$C_ENGINE" = redis ] || [ "$C_ENGINE" = valkey ]; } && ! redis_prepare; then
+    note "Backups for $C_NAME are not on yet. Run this installer again when you're ready."
+    return 0
+  fi
   step "Preparing a plan"
   while :; do
     _prc=0
@@ -7851,6 +7946,9 @@ protect_unattended() {
   fi
   if [ "$C_ENGINE" = clickhouse ]; then
     clickhouse_prepare || die "ClickHouse on port $C_PORT isn't ready for backups (see above)"
+  fi
+  if [ "$C_ENGINE" = redis ] || [ "$C_ENGINE" = valkey ]; then
+    redis_prepare || die "$(engine_label "$C_ENGINE") on port $C_PORT isn't ready for backups (see above)"
   fi
   _prc=0
   plan_cluster || _prc=$?
@@ -8502,6 +8600,253 @@ clickhouse_prepare() {
   clickhouse_login
 }
 
+# ---------------------------------------------------------------- Redis and Valkey
+#
+# Redis and Valkey servers are found by `rowsafe-agent setup discover` like
+# PostgreSQL clusters (engine column "redis" or "valkey"). Backups come from
+# the server itself over its replication link (a snapshot, then the stream
+# of changes), so no backup tool is installed and nothing restarts; Proof
+# and Rewind copies run the server's own program (redis-server or
+# valkey-server). Before their plan, Rowsafe gets its own ACL user
+# ("rowsafe", random password saved for the agent only): as the default
+# user when that needs no password, otherwise with an administrator's login
+# once (never stored). The server keeps the user in its ACL file or its
+# configuration file; when it can't write them, root adds the user's line
+# (the password's hash, never the password) to the configuration file.
+
+redis_present() {
+  if have redis-server || have valkey-server || [ -x /usr/bin/redis-server ] || [ -x /usr/bin/valkey-server ]; then
+    return 0
+  fi
+  for _d in /lib/systemd/system /usr/lib/systemd/system /etc/systemd/system; do
+    for _u in redis-server redis valkey-server valkey redis-server@ valkey-server@; do
+      [ ! -f "$_d/$_u.service" ] || return 0
+    done
+  done
+  have pgrep && pgrep -x 'redis-server|valkey-server' >/dev/null 2>&1
+}
+
+# redis_find_program sets REDIS_BIN, REDIS_FOUND_ENGINE (redis or valkey)
+# and REDIS_VERSION from the first server program that says what it is
+# (`redis-server --version`; Debian's valkey-redis-compat names Valkey's
+# program redis-server too). Fails when there is none.
+REDIS_BIN='' REDIS_FOUND_ENGINE='' REDIS_VERSION=''
+redis_find_program() {
+  REDIS_BIN='' REDIS_FOUND_ENGINE='' REDIS_VERSION=''
+  for _b in "$(command -v redis-server 2>/dev/null)" "$(command -v valkey-server 2>/dev/null)" \
+    /usr/bin/redis-server /usr/bin/valkey-server /usr/local/bin/redis-server /usr/local/bin/valkey-server; do
+    [ -n "$_b" ] && [ -f "$_b" ] && [ -x "$_b" ] || continue
+    _v=$("$_b" --version 2>/dev/null | sed -En 's/^(Redis|Valkey) server v=([0-9]+\.[0-9]+\.[0-9]+).*/\1 \2/p' | head -n 1 | tr '[:upper:]' '[:lower:]')
+    [ -n "$_v" ] || continue
+    REDIS_BIN=$_b REDIS_FOUND_ENGINE=${_v%% *} REDIS_VERSION=${_v#* }
+    return 0
+  done
+  return 1
+}
+
+# redis_too_old ENGINE VERSION prints why that server is too old for
+# Rowsafe (Redis 7.0, Valkey 7.2), nothing when it isn't.
+redis_too_old() {
+  _maj=${2%%.*} _min=${2#*.}
+  _min=${_min%%.*}
+  case $_maj$_min in '' | *[!0-9]*) return 0 ;; esac
+  if [ "$1" = valkey ]; then
+    if [ "$_maj" -lt 7 ] || { [ "$_maj" -eq 7 ] && [ "$_min" -lt 2 ]; }; then
+      echo "Valkey $2 is too old: Rowsafe needs Valkey 7.2 or newer"
+    fi
+  elif [ "$_maj" -lt 7 ]; then
+    echo "Redis $2 is too old: Rowsafe needs Redis 7.0 or newer (Redis's own packages, from packages.redis.io, have it for ${OS_NAME:-this system})"
+  fi
+}
+
+# check_redis_program: Proof and Rewind copies start a temporary server with
+# the server's own program, which ships with its package.
+check_redis_program() {
+  redis_present || return 0
+  case $HOST_ENGINE in redis | valkey) TOOLS_SUMMARY="$(engine_label)'s own replication stream, encrypted by the agent" ;; esac
+  if redis_find_program; then
+    ok "$(engine_label "$REDIS_FOUND_ENGINE") program at $REDIS_BIN ($REDIS_VERSION; Proof and Rewind copies use it)"
+  else
+    warn "the redis-server (or valkey-server) program isn't on this server: backups work, but Proof (the weekly restore test) and Rewind copies need it. It comes with the server's own package (redis-server or valkey-server)."
+  fi
+}
+
+# redis_status reads `rowsafe-agent redis status` into RD_* variables ("-"
+# becomes empty).
+RD_LOGIN='' RD_VERSION='' RD_CONFIG='' RD_ACLFILE='' RD_DATADIR='' RD_DBFILE='' RD_DOCKER='' RD_CLUSTER='' RD_BINARY=''
+redis_status() {
+  agent_run redis status --port "$C_PORT" --engine "$C_ENGINE" >"$TMP/rdstatus" 2>"$TMP/rdstatus.err" || return 1
+  _rk() { sed -n "s/^$1=//p" "$TMP/rdstatus" | head -n 1 | sed 's/^-$//'; }
+  RD_LOGIN=$(_rk login) RD_VERSION=$(_rk version) RD_CONFIG=$(_rk config) RD_ACLFILE=$(_rk aclfile)
+  RD_DATADIR=$(_rk datadir) RD_DBFILE=$(_rk dbfilename) RD_DOCKER=$(_rk docker) RD_CLUSTER=$(_rk cluster)
+  RD_BINARY=$(_rk binary)
+}
+
+# redis_supported says why Rowsafe can't protect the server on $C_PORT
+# (Redis Cluster, too old), and fails then. The agent's plan refuses the
+# same; this says it before anything is asked.
+redis_supported() {
+  if [ "$RD_CLUSTER" = yes ]; then
+    warn "$(engine_label "$C_ENGINE") on port $C_PORT runs in cluster mode (Redis Cluster), which Rowsafe doesn't protect yet: only standalone servers, with or without replicas"
+    return 1
+  fi
+  [ -n "$RD_VERSION" ] || return 0
+  _why=$(redis_too_old "$C_ENGINE" "$RD_VERSION")
+  [ -z "$_why" ] || {
+    warn "$_why"
+    return 1
+  }
+}
+
+# redis_admin asks for (or takes from the environment) an administrator's
+# login, into RD_ADMIN and RD_ADMIN_PW. Never stored.
+RD_ADMIN='' RD_ADMIN_PW=''
+redis_admin() {
+  [ -z "$RD_ADMIN" ] || return 0
+  if [ -n "${ROWSAFE_REDIS_ADMIN_USER:-}" ]; then
+    RD_ADMIN=$ROWSAFE_REDIS_ADMIN_USER RD_ADMIN_PW=${ROWSAFE_REDIS_ADMIN_PASSWORD:-}
+    return 0
+  fi
+  [ "$TTY" = 1 ] || return 1
+  tty_say ""
+  tty_say "$(engine_label "$C_ENGINE") asks for a password. To create Rowsafe's own user, an administrator"
+  tty_say "signs in once (a user allowed to create users; on a server with only a"
+  tty_say "password, the user is default). The password is used for this only and never saved."
+  ask RD_ADMIN "$(engine_label "$C_ENGINE") administrator user" default
+  ask_secret RD_ADMIN_PW "Password for $RD_ADMIN"
+}
+
+# redis_as_admin CMD...: run an agent redis command, as an administrator
+# when one signed in. Its exit status is the command's.
+redis_as_admin() {
+  if [ -n "$RD_ADMIN" ]; then
+    printf '%s\n' "$RD_ADMIN_PW" | agent_in redis "$@" --port "$C_PORT" --engine "$C_ENGINE" --admin-user "$RD_ADMIN"
+  else
+    agent_run redis "$@" --port "$C_PORT" --engine "$C_ENGINE"
+  fi
+}
+
+# redis_login creates (or refreshes) Rowsafe's ACL user: first as the
+# default user without a password, then as an administrator (exit 11: a
+# login is needed, 12: refused, 13: that user can't create users).
+redis_login() {
+  _name=$(engine_label "$C_ENGINE")
+  _rc=0
+  redis_as_admin login >"$TMP/rdlogin" 2>"$TMP/rdlogin.err" || _rc=$?
+  while [ "$_rc" = 11 ] || [ "$_rc" = 12 ] || [ "$_rc" = 13 ]; do
+    if [ -n "$RD_ADMIN" ]; then
+      if [ -n "${ROWSAFE_REDIS_ADMIN_USER:-}" ] || [ "$TTY" != 1 ]; then
+        sed 's/^/    /' "$TMP/rdlogin.err" >&2
+        return 1
+      fi
+      case $_rc in
+        13) tty_bad "That user can't create users in $_name (it needs the ACL command)." ;;
+        *) tty_bad "$_name refused that login." ;;
+      esac
+      RD_ADMIN='' RD_ADMIN_PW=''
+    fi
+    redis_admin || {
+      warn "Rowsafe needs its own $_name user: set ROWSAFE_REDIS_ADMIN_USER and ROWSAFE_REDIS_ADMIN_PASSWORD (used once, never saved), or run the installer on a terminal"
+      return 1
+    }
+    _rc=0
+    redis_as_admin login >"$TMP/rdlogin" 2>"$TMP/rdlogin.err" || _rc=$?
+  done
+  RD_ADMIN='' RD_ADMIN_PW=''
+  if [ "$_rc" != 0 ]; then
+    sed 's/^/    /' "$TMP/rdlogin.err" >&2
+    return 1
+  fi
+  redis_keep_login
+}
+
+# redis_keep_login makes sure Rowsafe's user survives a restart: the server
+# kept it itself (ACL file, configuration file), or root adds the user's
+# line from the agent (the password's hash only) to the configuration file.
+redis_keep_login() {
+  _name=$(engine_label "$C_ENGINE")
+  _persisted=$(sed -n 's/^persisted=//p' "$TMP/rdlogin" | head -n 1)
+  _why=$(sed -n 's/^why=//p' "$TMP/rdlogin" | head -n 1)
+  _line=$(sed -n 's/^acl_line=//p' "$TMP/rdlogin" | head -n 1)
+  rm -f "$TMP/rdlogin"
+  case $_persisted in
+    aclfile)
+      ok "Rowsafe's own $_name user, rowsafe, is ready ($_name keeps it in its ACL file)"
+      return 0
+      ;;
+    config)
+      ok "Rowsafe's own $_name user, rowsafe, is ready ($_name keeps it in its configuration file)"
+      return 0
+      ;;
+  esac
+  ok "Rowsafe's own $_name user, rowsafe, is ready"
+  redis_status || true
+  if [ -n "$RD_CONFIG" ] && [ -z "$RD_ACLFILE" ] && [ "$RD_DOCKER" != yes ] && redis_conf_add "$RD_CONFIG" "$_line"; then
+    ok "added it to $RD_CONFIG, so $_name keeps it when it restarts"
+    return 0
+  fi
+  warn "$_name forgets Rowsafe's user when it restarts${_why:+ ($_why)}. To keep it, give $_name an ACL file (the aclfile setting) or a configuration file it can write, then run this installer again."
+}
+
+# redis_conf_add FILE LINE puts the agent's "user rowsafe on #<sha256> ..."
+# line in the server's configuration file (replacing an earlier one),
+# keeping its owner and mode. Only a well-formed line, in a regular file.
+redis_conf_add() {
+  matches "$2" '^user rowsafe on #[0-9a-f]{64}( [-+~@|*a-z0-9]+)+$' || return 1
+  case $1 in /*) ;; *) return 1 ;; esac
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  _own=$(stat -c '%U:%G' "$1") && _mode=$(stat -c '%a' "$1") || return 1
+  {
+    grep -Ev '^[[:space:]]*user[[:space:]]+rowsafe([[:space:]]|$)' "$1" || true
+    printf '%s\n' "$2"
+  } | write_file "$1" "$_mode" "$_own" || true
+  grep -qxF -- "$2" "$1"
+}
+
+# redis_snapshot_note says when the agent can't read the server's snapshot
+# file. It needs it only when the server refuses to send a copy over
+# replication; nothing is changed for it.
+redis_snapshot_note() {
+  [ "$RD_DOCKER" != yes ] && [ -n "$RD_DATADIR" ] && [ -n "$RD_DBFILE" ] && have setpriv || return 0
+  _f=$RD_DATADIR/$RD_DBFILE
+  case $_f in /*) ;; *) return 0 ;; esac
+  [ -e "$_f" ] || return 0
+  _gs=$(id -G "$AGENT_USER" 2>/dev/null | tr ' ' ',')
+  if [ "$AGENT_USER" = rowsafe ]; then
+    _g=$(redis_group)
+    [ -z "$_g" ] || _gs="$_gs,$(getent group "$_g" | cut -d: -f3)"
+  fi
+  [ -n "$_gs" ] || return 0
+  setpriv --reuid="$AGENT_USER" --regid="$AGENT_USER" --groups="$_gs" -- test -r "$_f" 2>/dev/null && return 0
+  note "Rowsafe can't read $(engine_label "$C_ENGINE")'s snapshot file ($_f). It only needs it when"
+  note "$(engine_label "$C_ENGINE") refuses to send Rowsafe a copy over replication; backups don't use it otherwise."
+}
+
+# redis_prepare gets a Redis or Valkey server ready for its plan: supported,
+# and Rowsafe's own user. Nothing restarts.
+redis_prepare() {
+  RD_ADMIN='' RD_ADMIN_PW=''
+  _name=$(engine_label "$C_ENGINE")
+  if ! redis_status; then
+    sed 's/^/    /' "$TMP/rdstatus.err" >&2
+    warn "could not reach $_name on port $C_PORT"
+    return 1
+  fi
+  redis_supported || return 1
+  if [ "$RD_LOGIN" != ok ]; then
+    say ""
+    note "Rowsafe needs its own $_name user, rowsafe, to take backups and watch the"
+    note "server's health. Its password is random and saved for the agent only."
+    redis_login || return 1
+    redis_status || true
+    redis_supported || return 1
+  fi
+  if [ -z "$RD_BINARY" ]; then
+    note "Proof and Rewind copies need the $C_ENGINE-server program, which comes with $_name's server package; it isn't on this server."
+  fi
+  redis_snapshot_note
+}
+
 # ---------------------------------------------------------------- modes
 
 install_agent() {
@@ -8511,6 +8856,7 @@ install_agent() {
   detect_host_engine # mysql
   detect_mongodb_host # mongodb
   detect_clickhouse_host # clickhouse
+  detect_redis_host # redis
   check_postgres
   if [ "$HOST_ENGINE" = clickhouse ]; then
     say "${BOLD}Rowsafe agent installer${RESET}: backups, Marks and weekly restore tests for"
@@ -8555,10 +8901,11 @@ install_agent() {
   connect_in_browser
 
   # 2. Dependencies and layout.
-  # MongoDB and ClickHouse back up with their own tools: no pgBackRest.
-  case $HOST_ENGINE in mysql | mariadb) ensure_mysql_tools ;; mongodb | clickhouse) ;; *) ensure_pgbackrest ;; esac # mysql
+  # MongoDB, ClickHouse, Redis and Valkey back up with their own tools: no pgBackRest.
+  case $HOST_ENGINE in mysql | mariadb) ensure_mysql_tools ;; mongodb | clickhouse | redis | valkey) ;; *) ensure_pgbackrest ;; esac # mysql
   ensure_mongodb_tools # mongodb (only where MongoDB runs)
   check_clickhouse_program # clickhouse (only where ClickHouse runs)
+  check_redis_program # redis (only where Redis or Valkey runs)
   ensure_restic # files section
   step "Installing into $INSTALL_DIR"
   make_dirs
@@ -8572,6 +8919,7 @@ install_agent() {
   mysql_setup # mysql
   mongodb_setup # mongodb
   clickhouse_setup # clickhouse
+  redis_setup # redis
   install_logrotate
   maybe_guided_storage
   second_copy
@@ -8694,6 +9042,7 @@ uninstall_agent() {
   ok "service and $INSTALL_DIR removed"
   rm -f "/etc/systemd/system/$SERVICE.d/10-mysql.conf" # mysql
   rm -f "/etc/systemd/system/$SERVICE.d/10-mongodb.conf" "/etc/systemd/system/$SERVICE.d/10-clickhouse.conf"
+  rm -f "/etc/systemd/system/$SERVICE.d/10-redis.conf" # redis
   if [ "$purge" = 1 ]; then
     if [ -L "$MYSQL_CONF_LINK" ]; then # mysql: keep the server's binary log settings
       cp "$CONFIG_DIR/mysql/server.cnf" "$MYSQL_CONF_LINK.rowsafe-new" 2>/dev/null &&
@@ -8704,6 +9053,10 @@ uninstall_agent() {
     if [ -f "$CLICKHOUSE_USERS_FILE" ]; then # clickhouse: its password went with $STATE_DIR
       rm -f "$CLICKHOUSE_USERS_FILE"
       ok "$CLICKHOUSE_USERS_FILE deleted (Rowsafe's ClickHouse user)"
+    fi
+    if redis_present; then # redis: its password went with $STATE_DIR
+      note "Rowsafe's Redis or Valkey user, rowsafe, stays in the server (its password was deleted with the agent's settings)."
+      note "To remove it: redis-cli ACL DELUSER rowsafe (or valkey-cli), then delete any 'user rowsafe' line in its configuration file."
     fi
   else
     # archive_command may keep logging to $LOG_DIR, so keep rotating it.

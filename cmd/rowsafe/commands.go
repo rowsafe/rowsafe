@@ -329,10 +329,10 @@ func adoptCmd(ctx context.Context, c *client.Client, args []string) error {
 	if *host, err = resolveHost(ctx, c, *host); err != nil {
 		return err
 	}
-	if e := protocol.NormalizeEngine(*engine); e == protocol.EngineMongoDB || e == protocol.EngineClickHouse {
-		// MongoDB and ClickHouse: TCP on 127.0.0.1, their default port
-		// (27017, ClickHouse's HTTP port 8123) and backup schedule (the
-		// control plane fills in what isn't given).
+	if e := protocol.NormalizeEngine(*engine); e == protocol.EngineMongoDB || e == protocol.EngineClickHouse || e == protocol.EngineRedis || e == protocol.EngineValkey {
+		// MongoDB, ClickHouse, Redis and Valkey: TCP on 127.0.0.1, their
+		// default port (27017, ClickHouse's HTTP port 8123, 6379) and backup
+		// schedule (the control plane fills in what isn't given).
 		set := map[string]bool{}
 		fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
 		if !set["socket-dir"] {
@@ -505,6 +505,10 @@ func engineServiceNames(engine string) (service, unit string) {
 		return "mongo", "mongod"
 	case protocol.EngineClickHouse:
 		return "clickhouse", "clickhouse-server"
+	case protocol.EngineRedis:
+		return "redis", "redis-server"
+	case protocol.EngineValkey:
+		return "valkey", "valkey-server"
 	}
 	return "postgres", "postgresql"
 }

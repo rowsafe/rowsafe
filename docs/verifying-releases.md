@@ -59,13 +59,13 @@ cosign verify ghcr.io/rowsafe/agent:1.2.3-pg17 \
 gh attestation verify oci://ghcr.io/rowsafe/agent:1.2.3-pg17 --repo rowsafe/rowsafe
 ```
 
-The floating tags (`pg17`, `pg17-alpine`, `clickhouse26.8`,
+The floating tags (`pg17`, `pg17-alpine`, `clickhouse26.8`, `redis8.2`, `valkey8.1`,
 `docker-control:latest`) point to the same signed images as the newest
 release's exact tags.
 
 Each release also publishes `images.json`: the digest of every agent image
-(`pg14` to `pg18`, with and without `-alpine`, and `clickhouse25.8`,
-`clickhouse26.3`, `clickhouse26.8`), listed only after cosign
+(`pg14` to `pg18`, with and without `-alpine`, `clickhouse25.8`,
+`clickhouse26.3`, `clickhouse26.8`, `redis7.2` to `redis8.10` and `valkey7.2` to `valkey9.2`), listed only after cosign
 verified it as built by this workflow at this tag, and signed with the same
 Ed25519 release key (`images.json.sig`). `rowsafe-docker-control` checks that
 signature with the key compiled into it before it updates an agent container

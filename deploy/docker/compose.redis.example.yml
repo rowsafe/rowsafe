@@ -1,0 +1,109 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Redis (the official, unmodified redis image) with the Rowsafe agent as a
+# sidecar on the same compose network: snapshots and every change copied to
+# your bucket (encrypted in the agent container, with your passphrase),
+# restores to any second, Marks, weekly Proof, Rewind and Pulse. The agent
+# follows Redis as a hidden replica and gets its snapshots the way a new
+# replica does: it needs no access to Redis's files.
+#
+# Valkey works the same: use valkey/valkey:8.1 and valkey-server below, the
+# agent image ghcr.io/rowsafe/agent:valkey8.1, and --engine valkey.
+#
+#   1. Put the agent's settings in rowsafe-agent.env next to this file
+#      (chmod 600), with a one-time token from `rowsafe hosts enroll-token`,
+#      and Redis's administrator password in redis.env (REDIS_PASSWORD=...,
+#      chmod 600).
+#   2. docker compose up -d
+#   3. Once, create Rowsafe's own Redis user (type the administrator's
+#      password and press Enter; it is used once and never saved):
+#        docker compose exec rowsafe-agent rowsafe-agent redis login --port 6379 --admin-user default
+#      Redis keeps it in its ACL file (/data/users.acl), so it survives
+#      restarts.
+#   4. rowsafe adopt cache --host db-1 --engine redis --port 6379, then
+#      `rowsafe apply cache` (or Turn on backups in the dashboard).
+#
+# Update the agent (Redis keeps running):
+#   docker compose pull rowsafe-agent && docker compose up -d rowsafe-agent
+# or click Update now in the dashboard, with rowsafe-docker-control below.
+
+name: myapp
+
+services:
+  redis:
+    image: redis:8.2
+    restart: unless-stopped
+    env_file: redis.env                     # REDIS_PASSWORD=...
+    # Users live in an ACL file in the data volume (Rowsafe's included). The
+    # first start writes the administrator ("default") into it with your
+    # password's hash; the image's entrypoint then runs Redis as its redis user.
+    command:
+      - sh
+      - -c
+      - >-
+        f=/data/users.acl;
+        [ -s "$$f" ] || { h=$$(printf %s "$$REDIS_PASSWORD" | sha256sum | cut -d' ' -f1);
+        echo "user default on #$$h ~* &* +@all" >"$$f"; };
+        exec docker-entrypoint.sh redis-server --aclfile "$$f" --appendonly yes
+    volumes:
+      - redisdata:/data
+
+  # Rowsafe
+  rowsafe-agent:
+    # One image per Redis version, built FROM the same redis image (its
+    # redis-server runs Proof and Rewind copies): redis8.2, redis7.4... It
+    # follows the newest Rowsafe release; to pin one, use the exact tag,
+    # e.g. ghcr.io/rowsafe/agent:<version>-redis8.2.
+    image: ghcr.io/rowsafe/agent:redis8.2
+    # The name Rowsafe shows for this host: `rowsafe adopt cache --host db-1`.
+    hostname: db-1
+    restart: unless-stopped
+    environment:
+      ROWSAFE_REDIS_HOST: redis              # the redis service, on the compose network
+      ROWSAFE_REDIS_DATA_DIR: /srv/redis-data  # only used when Redis refuses replication (snapshots from its own file)
+    depends_on:
+      - redis
+    env_file: rowsafe-agent.env
+    volumes:
+      - rowsafe-state:/var/lib/rowsafe
+      - redisdata:/srv/redis-data:ro          # read only
+      # Optional, see "Update now" below:
+      # - rowsafe-control:/run/rowsafe-control
+
+  # Rowsafe (optional): Update now in the dashboard updates the agent, and
+  # Restart restarts Redis when you click it. This service pulls the
+  # release's signed ghcr.io/rowsafe/agent image (checked against Rowsafe's
+  # release key) and recreates only the rowsafe-agent container, or
+  # restarts the redis container when asked; nothing else.
+  #
+  # It holds the Docker socket, which is root-equivalent on this host, so the
+  # agent never gets it; the agent asks over the rowsafe-control volume and
+  # it refuses everything else (any other container, any other Docker call).
+  # With ROWSAFE_CONTROL_UPDATE_ONLY it only updates the agent's container.
+  # Every request is in its log (docker compose logs rowsafe-docker-control).
+  # To turn it on, uncomment this service, the rowsafe-control volume below
+  # and the rowsafe-control mount of rowsafe-agent. See
+  # https://rowsafe.sh/docs/guides/redis
+  #
+  # rowsafe-docker-control:
+  #   image: ghcr.io/rowsafe/docker-control:latest   # or pin a release: :<version>
+  #   restart: unless-stopped
+  #   depends_on:
+  #     - redis
+  #   environment:
+  #     ROWSAFE_CONTROL_SERVICE: redis          # the name of your Redis service above
+  #     ROWSAFE_CONTROL_ALLOW_UIDS: "999"       # the agent image's redis user
+  #     # ROWSAFE_CONTROL_UPDATE_ONLY: "1"      # only update the agent; never restart Redis
+  #     # ROWSAFE_CONTROL_AGENT_SERVICE: rowsafe-agent   # the agent's service name
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock
+  #     - rowsafe-control:/run/rowsafe-control
+  #   network_mode: none
+  #   read_only: true
+  #   cap_drop: [ALL]
+  #   security_opt: ["no-new-privileges:true"]
+
+volumes:
+  redisdata:
+  rowsafe-state:
+  # rowsafe-control: # Rowsafe (optional): the agent asks rowsafe-docker-control here
