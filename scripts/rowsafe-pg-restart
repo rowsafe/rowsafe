@@ -59,10 +59,12 @@
 #   ID pg-upgrade-cleanup PORT               remove the version kept aside by an upgrade or undo
 #   ID security-updates                      install pending security updates
 #   ID reboot                                reboot the server
-#   ID db-minor-update PORT                  newest release of the series (8.0, 10.11, 7.0, 25.8)
-#                                            of the MySQL, MariaDB, MongoDB or ClickHouse server on PORT
+#   ID db-minor-update PORT                  newest release of the series (8.0, 10.11, 7.0, 25.8, 8.2)
+#                                            of the MySQL, MariaDB, MongoDB, ClickHouse, Redis or Valkey
+#                                            server on PORT
 #   ID db-upgrade PORT SERIES                that server to a newer series (8.0 -> 8.4), keeping a copy
 #                                            of its data directory and its old packages for undo
+#                                            (not Redis or Valkey yet)
 #   ID db-upgrade-undo PORT                  back to the kept data and packages (the newer data is kept aside)
 #   ID db-upgrade-cleanup PORT               delete what an upgrade or its undo kept
 #
@@ -1545,7 +1547,8 @@ act_security_updates() {
   # servers' own packages are left alone (their upgrade would restart them):
   # PostgreSQL's go through Update PostgreSQL, which saves a Mark, restarts
   # in a controlled way and checks archiving; MySQL's, MariaDB's, MongoDB's,
-  # ClickHouse's, Redis's and Valkey's aren't installed from Rowsafe yet.
+  # ClickHouse's, Redis's and Valkey's through db-minor-update, which saves a
+  # Mark first (when it can) and waits until the server answers again.
   list=$(apt-get -s -o Debug::NoLocking=1 dist-upgrade 2>/dev/null |
     awk '/^Inst [^ ]+ \[/ && /-security|Debian-Security/ { print $2 }' | sort -u)
   db_pkgs='^(postgresql-[0-9]+(-.+)?|mysql-server(-.+)?|mysql-community-server(-.+)?|percona-server-server(-.+)?|mariadb-server(-.+)?|mongodb-org-server|mongodb-org-mongos|clickhouse-server|clickhouse-common-static|(redis|valkey)-(server|sentinel|tools))$'
@@ -1613,7 +1616,21 @@ db_engine() {
         set -- mysql-community-server mysql-server-8.4 mysql-server-8.0 mysql-server percona-server-server
       fi
       ;;
-    *) refuse "$unit is not a MySQL, MariaDB, MongoDB or ClickHouse service" ;;
+    redis-server.service | redis.service | redis-server@*.service | redis@*.service)
+      # Debian's valkey-redis-compat can answer to Redis's unit names.
+      if [ -z "$(pkg_version redis-server)" ] && [ -n "$(pkg_version valkey-server)" ]; then
+        db_engine=valkey
+        set -- valkey-server
+      else
+        db_engine=redis
+        set -- redis-server
+      fi
+      ;;
+    valkey-server.service | valkey.service | valkey-server@*.service | valkey@*.service)
+      db_engine=valkey
+      set -- valkey-server
+      ;;
+    *) refuse "$unit is not a MySQL, MariaDB, MongoDB, ClickHouse, Redis or Valkey service" ;;
   esac
   db_main=''
   for p in "$@"; do
@@ -1634,6 +1651,9 @@ db_patterns() {
     mariadb) locked='mariadb-* libmariadb3 libmariadbd19' free='' ;;
     mongodb) locked='mongodb-org mongodb-org-*' free='mongodb-mongosh mongodb-database-tools' ;;
     clickhouse) locked='clickhouse-*' free='' ;;
+    # Debian's and packages.redis.io's packages, all of one version.
+    redis) locked='redis redis-server redis-tools redis-sentinel' free='' ;;
+    valkey) locked='valkey valkey-server valkey-tools valkey-sentinel valkey-redis-compat' free='' ;;
   esac
 }
 
@@ -1763,6 +1783,7 @@ db_restore_data() {
 act_db_upgrade() {
   update_allowed database "upgrading the database from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
   db_port
+  case $db_engine in redis | valkey) refuse "upgrading $db_engine to a new series isn't supported by this helper yet: minor updates are" ;; esac
   db_datadir
   before=$(pkg_version "$db_main")
   from=$(series "$before")

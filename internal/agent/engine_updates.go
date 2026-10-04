@@ -13,12 +13,12 @@ import (
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
-// Minor updates of MySQL, MariaDB, MongoDB and ClickHouse.
+// Minor updates of MySQL, MariaDB, MongoDB, ClickHouse, Redis and Valkey.
 //
 // Like PostgreSQL's: the control plane saves a Mark, the agent asks the root
 // helper's update service ("ID db-minor-update PORT"), which installs only
 // that server's own packages at the newest version of the installed series
-// (8.0, 10.11, 7.0, 25.8) from the server's package sources, and restarts
+// (8.0, 10.11, 7.0, 25.8, 8.2) from the server's package sources, and restarts
 // the allowed unit when the packages didn't. The agent then waits until the
 // database answers and reports both versions. The task keeps PostgreSQL's
 // name (pg_update).
@@ -44,6 +44,17 @@ var engineServerPackages = map[string][]string{
 	protocol.EngineMariaDB:    {"mariadb-server"},
 	protocol.EngineMongoDB:    {"mongodb-org-server"},
 	protocol.EngineClickHouse: {"clickhouse-server"},
+	// Debian's, Ubuntu's and packages.redis.io's packages share the name.
+	protocol.EngineRedis:  {"redis-server"},
+	protocol.EngineValkey: {"valkey-server"},
+}
+
+// EngineBundledVersioner is optionally implemented by an engine whose
+// Docker sidecar image is built on the database's own official image
+// (Redis, Valkey): the version of the server program bundled there, the
+// newest release of the series when Rowsafe built the image.
+type EngineBundledVersioner interface {
+	BundledVersion(ctx context.Context) (string, error)
 }
 
 var upstreamRE = regexp.MustCompile(`^(?:[0-9]+:)?([0-9]+(?:\.[0-9]+)+)`)
@@ -107,15 +118,25 @@ func (a *Agent) engineSoftware(ctx context.Context) []protocol.ClusterSoftware {
 			cs.Installed, cs.Series = upstreamVersion(cs.InstalledPackage), seriesOf(cs.InstalledPackage)
 			cs.Candidate, cs.CandidatePackage = cs.Installed, cs.InstalledPackage
 			if b, err := a.runner.Run(ctx, "apt-cache", "madison", pkg); err == nil {
-				for _, v := range parseMadison(b) {
+				for _, m := range parseMadisonSources(b) {
+					v := m.version
 					up, s := upstreamVersion(v), seriesOf(v)
 					switch {
-					case s == cs.Series && newerMinor(cs.Candidate, up):
+					case s == cs.Series && debCompare(v, cs.CandidatePackage) > 0:
+						// The newest package of the series: a newer release, or
+						// the distribution's fixes of the same one.
 						cs.Candidate, cs.CandidatePackage = up, v
+						cs.SecurityUpdate = strings.Contains(m.source, "security")
+					case s == cs.Series && v == cs.CandidatePackage && strings.Contains(m.source, "security"):
+						cs.SecurityUpdate = true // listed by both the main and the security source
 					case s != "" && newerMinor(cs.Series, s) && !slices.Contains(cs.NextSeries, s):
 						cs.NextSeries = append(cs.NextSeries, s)
 					}
 				}
+			}
+			cs.PackageUpdate = cs.Candidate == cs.Installed && cs.CandidatePackage != cs.InstalledPackage
+			if cs.CandidatePackage == cs.InstalledPackage {
+				cs.SecurityUpdate = false
 			}
 			slices.SortFunc(cs.NextSeries, func(x, y string) int {
 				if newerMinor(x, y) {
@@ -130,6 +151,64 @@ func (a *Agent) engineSoftware(ctx context.Context) []protocol.ClusterSoftware {
 			}
 		}
 		out = append(out, cs)
+	}
+	return out
+}
+
+// engineContainerSoftware reports the Redis and Valkey servers a Docker
+// sidecar follows: the running version and, as the newest release of its
+// series Rowsafe knows, the one bundled in the agent's image (Rowsafe
+// never changes the database's own image; Pulse shows the compose step).
+func (a *Agent) engineContainerSoftware(ctx context.Context) []protocol.ClusterSoftware {
+	var out []protocol.ClusterSoftware
+	for _, db := range a.engineDatabases() {
+		engine := protocol.NormalizeEngine(db.Engine)
+		bv, ok := engineFor(engine).(EngineBundledVersioner)
+		vr := engineVersioner(db)
+		if !ok || vr == nil {
+			continue
+		}
+		vctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		running, err := vr.Version(vctx, a.engineEnv(engine), db)
+		cancel()
+		if err != nil || seriesOf(running) == "" {
+			continue
+		}
+		cs := protocol.ClusterSoftware{Port: db.Port, Engine: engine, Running: running, Series: seriesOf(running), Candidate: running}
+		cs.Major = protocol.SeriesNumber(cs.Series)
+		bctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		bundled, err := bv.BundledVersion(bctx)
+		cancel()
+		if err == nil && seriesOf(bundled) == cs.Series {
+			cs.CandidateSource = protocol.CandidateAgentImage
+			if newerMinor(running, bundled) {
+				cs.Candidate = bundled
+			}
+		}
+		out = append(out, cs)
+	}
+	return out
+}
+
+// madisonEntry is one line of `apt-cache madison PKG`.
+type madisonEntry struct{ version, source string }
+
+// parseMadisonSources reads the versions of `apt-cache madison PKG` with
+// where each comes from ("http://deb.debian.org/debian-security
+// bookworm-security/main arm64 Packages").
+func parseMadisonSources(b []byte) []madisonEntry {
+	var out []madisonEntry
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Split(line, "|")
+		if len(f) >= 2 {
+			if v := strings.TrimSpace(f[1]); v != "" {
+				e := madisonEntry{version: v}
+				if len(f) >= 3 {
+					e.source = strings.TrimSpace(f[2])
+				}
+				out = append(out, e)
+			}
+		}
 	}
 	return out
 }
@@ -154,7 +233,8 @@ func (a *Agent) engineUpdate(ctx context.Context, db protocol.DatabaseSpec, task
 	name := protocol.EngineDisplayName(db.Engine)
 	if a.cfg.Container() {
 		return nil, fmt.Errorf("%s runs in Docker here, so Rowsafe can't install its updates: pull the newest image of the same version "+
-			"and recreate the container (e.g. `docker compose pull %[2]s && docker compose up -d %[2]s`); Rowsafe notices the new version by itself",
+			"and recreate the container (e.g. `docker compose pull %[2]s && docker compose up -d %[2]s`; %[1]s restarts, apps are disconnected "+
+			"for a few seconds); Rowsafe notices the new version by itself",
 			name, dockerServiceHint(db))
 	}
 	if err := a.updatesAllowed(protocol.UpdateAllowDatabase, actDBMinorUpdate); err != nil {
@@ -203,7 +283,10 @@ func (a *Agent) engineUpdate(ctx context.Context, db protocol.DatabaseSpec, task
 		res.DowntimeMs = time.Since(t0).Milliseconds() // an upper bound: the packages stop it while they are replaced
 	}
 	res.ToVersion, _ = vr.Version(ctx, env, db)
-	res.ArchivingOK = out.ArchiveMode == "on" || protocol.NormalizeEngine(db.Engine) == protocol.EngineClickHouse
+	// ClickHouse has no change log, and a Redis or Valkey server Rowsafe
+	// can't follow keeps its scheduled snapshots: neither is a failure.
+	snapshots := out.ArchiveMode == protocol.RedisArchiveSnapshots
+	res.ArchivingOK = out.ArchiveMode == "on" || snapshots || protocol.NormalizeEngine(db.Engine) == protocol.EngineClickHouse
 	if !res.ArchivingOK {
 		res.Warnings = append(res.Warnings, name+" answers, but its change log isn't on (the next check says why)")
 	}
@@ -212,11 +295,18 @@ func (a *Agent) engineUpdate(ctx context.Context, db protocol.DatabaseSpec, task
 	switch {
 	case res.ToVersion == before && !res.Restarted:
 		res.Summary = fmt.Sprintf("%s %s is already the newest %s release available to this server.", name, before, seriesOf(before))
+	case res.Restarted && res.ToVersion == before:
+		// The distribution's fixes of the same release (Debian's 7.0.15-1~deb12u10).
+		res.Summary = fmt.Sprintf("Installed the newest %s %s package (%s) and restarted %s in %s.", name, before, res.PackageVersion, name,
+			humanDuration(time.Duration(res.DurationMs)*time.Millisecond))
 	case res.Restarted:
 		res.Summary = fmt.Sprintf("Updated %s from %s to %s in %s.", name, before, res.ToVersion,
 			humanDuration(time.Duration(res.DurationMs)*time.Millisecond))
 	default:
 		res.Summary = fmt.Sprintf("Installed %s %s; %s runs until its next restart.", name, upstreamVersion(res.PackageVersion), before)
+	}
+	if snapshots {
+		res.Summary += " Backups continue as scheduled snapshots, as before."
 	}
 	tl.Printf("%s", res.Summary)
 	return res, nil
