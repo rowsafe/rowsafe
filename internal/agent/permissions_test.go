@@ -60,6 +60,29 @@ func TestPermissionsTask(t *testing.T) {
 		t.Fatal(tl.String())
 	}
 
+	// A removal: the helper gets it unsigned, as a removal.
+	rmParams, _ := json.Marshal(protocol.PermissionRemoval{HostID: "host_01", Remove: []string{"restart"}, RequestedBy: "ana@example.com"})
+	go func() {
+		req := filepath.Join(root, "permissions", permissions.RequestName)
+		for range 200 {
+			if data, err := os.ReadFile(req); err == nil {
+				var r permissions.Request
+				_ = json.Unmarshal(data, &r)
+				_ = os.Remove(req)
+				ok := r.Remove != nil && r.Remove.Remove[0] == "restart" && len(r.Signed.ChangeJSON) == 0 && !strings.Contains(string(data), `"signed"`)
+				out, _ := json.Marshal(permissions.Answer{ID: r.ID, PermissionsResult: protocol.PermissionsResult{Applied: ok}})
+				_ = os.WriteFile(filepath.Join(results, permissions.AnswerName), out, 0o644)
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+	tl = &taskLog{}
+	res, err = a.permissionsTask(context.Background(), &protocol.Task{ID: "task-rm", Type: protocol.TaskPermissionsRemove, Params: rmParams}, tl)
+	if err != nil || !res.Applied || !strings.Contains(tl.String(), "turn off restart") {
+		t.Fatalf("removal: %+v %v %s", res, err, tl.String())
+	}
+
 	// No answer: the task fails and the request is taken back.
 	task.ID = "task-2"
 	if _, err := a.permissionsTask(context.Background(), task, &taskLog{}); err == nil || !strings.Contains(err.Error(), "didn't answer") {

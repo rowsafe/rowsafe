@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/rowsafe/rowsafe/protocol"
 )
 
 // TestWriteFixtures writes a paired owner, the agent's identity and signed
@@ -43,6 +45,9 @@ func TestWriteFixtures(t *testing.T) {
 	write("request-fresh-1.json", Request{ID: "task-5", Signed: s.sign(newChange(now))})
 	write("request-fresh-2.json", Request{ID: "task-6", Signed: s.sign(newChange(now))})
 	write("request-fresh-3.json", Request{ID: "task-7", Signed: s.sign(newChange(now))})
+	// Removals: no passkey, so they work with none paired.
+	write("request-remove.json", Request{ID: "task-8", Remove: &protocol.PermissionRemoval{HostID: testHost, Remove: []string{"reboot", "restart"}, RequestedBy: "ana@example.com"}})
+	write("request-remove-firewall.json", Request{ID: "task-9", Remove: &protocol.PermissionRemoval{HostID: testHost, Remove: []string{"firewall"}}})
 	if err := os.WriteFile(filepath.Join(dir, "fingerprint"), []byte(ownerFor(t, k).Fingerprint+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

@@ -192,7 +192,7 @@ func TestFastLaneClaimsMaintenanceOneAtATime(t *testing.T) {
 	if got := slices.DeleteFunc(a.fastLaneClaim(), func(t string) bool { return t == protocol.TaskForkPrepare }); !slices.Equal(got, []string{protocol.TaskRestorePoint, protocol.TaskCopySchema, protocol.TaskMaintenance,
 		protocol.TaskRewindCompare, protocol.TaskRewindRows, protocol.TaskRewindDrop, protocol.TaskRewindCleanup,
 		protocol.TaskFindMoment, protocol.TaskDBAdmin, protocol.TaskBackupPassphrase, protocol.TaskServerFirewall, protocol.TaskMigrate, protocol.TaskSettings,
-		protocol.TaskSecurityScan, protocol.TaskSecurityFix, protocol.TaskPermissions}) || !slices.Contains(a.fastLaneClaim(), protocol.TaskForkPrepare) {
+		protocol.TaskSecurityScan, protocol.TaskSecurityFix, protocol.TaskPermissions, protocol.TaskPermissionsRemove}) || !slices.Contains(a.fastLaneClaim(), protocol.TaskForkPrepare) {
 		t.Fatalf("idle claim %v", got)
 	}
 	a.maintBusy.Store(true)

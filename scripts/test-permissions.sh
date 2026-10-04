@@ -140,7 +140,22 @@ SH
   [ "$(stat -c '%U %G %a' /etc/rowsafe/owners)" = "root root 644" ] || fail "owners file ownership/mode after a change"
   hand_over request-fresh-3.json
   answer_has 'no passkey is paired'
-  pass "owners and remove-owner (then everything is refused)"
+  pass "owners and remove-owner (then every signed change is refused)"
+
+  # Turning off needs no passkey: applied with none paired, but never the
+  # firewall (its rule would go).
+  hand_over request-remove.json
+  answer_has '"id":"task-8"'
+  answer_has '"applied":true'
+  tail -n 4 /var/lib/installer-calls | grep -qx 'args=--permissions --no-prompt --no-allow-restart --no-allow-reboot' ||
+    fail "removal flags: $(tail -n 4 /var/lib/installer-calls)"
+  journalctl -u rowsafe-permissions.service --no-pager | grep -q "turn off \[reboot restart\], requested by ana@example.com" || fail "removal not in the journal"
+  calls=$(wc -l </var/lib/installer-calls)
+  hand_over request-remove-firewall.json
+  answer_has 'needs a passkey'
+  [ "$(wc -l </var/lib/installer-calls)" = "$calls" ] || fail "the installer ran to turn off the firewall without a passkey"
+  [ "$(runuser -u postgres -- /usr/local/lib/rowsafe/rowsafe-permissions features)" = remove-without-passkey ] || fail "features as the agent user"
+  pass "turning off without a passkey: applied with none paired, never the firewall; the agent can ask what the helper takes"
 
   install -d -m 0755 -o postgres -g postgres /opt/rowsafe
   install -m 0755 -o postgres -g postgres /w/rowsafe-agent /opt/rowsafe/rowsafe-agent

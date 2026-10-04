@@ -12,9 +12,12 @@ import (
 
 // Permissions: what root on a server allowed Rowsafe to do there when a
 // person clicks it in the dashboard (restart PostgreSQL, install security
-// updates, ...). Only root on the server can change them, three ways:
+// updates, ...). What touches only the database is allowed unless root says
+// no (PermissionsDefault); the rest waits for root's yes. Root changes them
+// three ways:
 //
-//  1. the installer asks on a terminal (and --allow-X / --no-allow-X);
+//  1. the installer asks on a terminal, and without one applies
+//     PermissionsDefault (--allow-X / --no-allow-X override both);
 //  2. `sudo rowsafe-allow restart security-updates` on the server, which
 //     runs the installer's permissions-only mode;
 //  3. one click in the dashboard, signed in the browser with a passkey that
@@ -23,6 +26,11 @@ import (
 //     against the keys in /etc/rowsafe/owners (root-owned), before it changes
 //     anything. The control plane only relays the signed request: it can't
 //     make one, and a stolen dashboard session can't either.
+//
+// Turning a permission off takes less: an owner or admin turns off one in
+// PermissionsRemovable with one click and no passkey (TaskPermissionsRemove).
+// Taking power away from Rowsafe can't hurt the server, so a stolen session
+// gains nothing by it.
 //
 // Files access (per folder) stays with the installer and `rowsafe-allow
 // --files PATH`; it is not a dashboard permission.
@@ -46,6 +54,26 @@ const (
 var Permissions = []string{
 	PermRestart, PermCreateCluster, PermPooler, PermPoolerPublic,
 	PermFirewall, PermUpdates, PermSecurityUpdates, PermReboot, PermTuning, PermSQLiteModes,
+}
+
+// PermissionsDefault: what the installer allows when root isn't asked (no
+// terminal), and what it suggests yes to on a terminal. Each touches only
+// the database, runs only when a person clicks and confirms, and saves a
+// Mark first or can be undone. Not the server itself: security updates and
+// reboots, the firewall (it could cut your app off) and PgBouncer on public
+// addresses (it would expose the database) wait for root's yes.
+var PermissionsDefault = []string{
+	PermRestart, PermCreateCluster, PermPooler, PermUpdates, PermTuning, PermSQLiteModes,
+}
+
+// PermissionsRemovable: what an owner or admin may turn off from the
+// dashboard without a passkey. Turning one off never stops or changes
+// anything running (PgBouncer keeps running, settings stay), it only takes
+// the power away. Not the firewall, whose rule goes with it and opens the
+// port, nor pooler-public, which changes where PgBouncer listens: those
+// change what is reachable, so they stay passkey-signed.
+var PermissionsRemovable = []string{
+	PermRestart, PermCreateCluster, PermPooler, PermUpdates, PermSecurityUpdates, PermReboot, PermTuning, PermSQLiteModes,
 }
 
 // PermissionNeeds: a permission that only works with another one on (the
@@ -80,6 +108,9 @@ type PermissionsReport struct {
 	Unavailable map[string]string `json:"unavailable,omitempty"`
 	// AllowCommand: `rowsafe-allow` is installed (sudo rowsafe-allow NAME).
 	AllowCommand bool `json:"allow_command"`
+	// RemoveWithoutPasskey: root's helper takes TaskPermissionsRemove (it
+	// was installed by an installer that has it).
+	RemoveWithoutPasskey bool `json:"remove_without_passkey,omitempty"`
 	// Owners are the passkeys root paired with this server for one-click
 	// changes (no secret: the credential IDs and when they were added).
 	Owners []PermissionOwner `json:"owners,omitempty"`
@@ -100,6 +131,38 @@ type PermissionOwner struct {
 // applies it with the installer's permissions-only mode. Params:
 // SignedPermissionChange; result: PermissionsResult.
 const TaskPermissions = "permissions"
+
+// TaskPermissionsRemove carries a PermissionRemoval: permissions in
+// PermissionsRemovable to turn off, no passkey needed. Root's helper checks
+// the server and the names, then runs the installer's permissions-only mode
+// with --no-allow-X. Result: PermissionsResult.
+const TaskPermissionsRemove = "permissions_remove"
+
+// PermissionRemoval is a TaskPermissionsRemove's params.
+type PermissionRemoval struct {
+	HostID      string   `json:"host_id"` // the server refuses others
+	Remove      []string `json:"remove"`
+	RequestedBy string   `json:"requested_by"` // the signed-in person's email; logged
+}
+
+// Validate checks a removal's fields.
+func (r PermissionRemoval) Validate() error {
+	if r.HostID == "" {
+		return errors.New("no server")
+	}
+	if len(r.Remove) == 0 {
+		return errors.New("nothing to change")
+	}
+	for _, p := range r.Remove {
+		switch {
+		case !IsPermission(p):
+			return fmt.Errorf("unknown permission %q", p)
+		case !slices.Contains(PermissionsRemovable, p):
+			return fmt.Errorf("turning %s off changes what can reach this server, so it needs a passkey", p)
+		}
+	}
+	return nil
+}
 
 // PermissionChangeMaxAge bounds IssuedAt..ExpiresAt; the server refuses a
 // change past ExpiresAt or one it has applied before (by Nonce).

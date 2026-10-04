@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/rowsafe/rowsafe/internal/permissions"
@@ -18,6 +19,9 @@ import (
 // the signed request to root's helper (rowsafe-permissions.service, started
 // by rowsafe-permissions.path), which verifies the passkey signature
 // against the keys root paired and only then runs root's installer:
+//
+// A removal (protocol.TaskPermissionsRemove) goes the same way, unsigned:
+// the helper only turns off what protocol.PermissionsRemovable lists.
 //
 //	<state dir>/permissions/request     written by the agent: permissions.Request
 //	/run/rowsafe-permissions/result     written by the helper: permissions.Answer
@@ -49,10 +53,16 @@ func (a *Agent) permissionsTask(ctx context.Context, task *protocol.Task, tl *ta
 			"what the agent may do there is set where its containers are defined"}, nil
 	}
 	if len(task.Params) == 0 || len(task.Params) > permissions.MaxRequest/2 {
-		return nil, errors.New("the task carries no signed change")
+		return nil, errors.New("the task carries no change")
 	}
-	var signed protocol.SignedPermissionChange
-	if err := json.Unmarshal(task.Params, &signed); err != nil {
+	req := permissions.Request{ID: task.ID}
+	if task.Type == protocol.TaskPermissionsRemove {
+		var rm protocol.PermissionRemoval
+		if err := json.Unmarshal(task.Params, &rm); err != nil {
+			return nil, fmt.Errorf("the task's removal is malformed: %w", err)
+		}
+		req.Remove = &rm
+	} else if err := json.Unmarshal(task.Params, &req.Signed); err != nil {
 		return nil, fmt.Errorf("the task's signed change is malformed: %w", err)
 	}
 	if _, err := os.Stat(permissionsPathUnit); err != nil {
@@ -64,7 +74,7 @@ func (a *Agent) permissionsTask(ctx context.Context, task *protocol.Task, tl *ta
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	data, err := json.Marshal(permissions.Request{ID: task.ID, Signed: signed})
+	data, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +82,11 @@ func (a *Agent) permissionsTask(ctx context.Context, task *protocol.Task, tl *ta
 	if err := writeFileAtomic(request, data, 0o600); err != nil {
 		return nil, err
 	}
-	tl.Printf("handed the signed change to root's permissions helper; waiting for it to check the passkey signature")
+	if req.Remove != nil {
+		tl.Printf("handed the removal to root's permissions helper; waiting for it to turn off %s", strings.Join(req.Remove.Remove, ", "))
+	} else {
+		tl.Printf("handed the signed change to root's permissions helper; waiting for it to check the passkey signature")
+	}
 	ans, err := waitPermissionsAnswer(ctx, filepath.Join(permissionsResultDir, permissions.AnswerName), task.ID)
 	if err != nil {
 		_ = os.Remove(request)
@@ -84,6 +98,8 @@ func (a *Agent) permissionsTask(ctx context.Context, task *protocol.Task, tl *ta
 	}
 	res := ans.PermissionsResult
 	switch {
+	case res.Applied && req.Remove != nil:
+		tl.Printf("the server turned them off")
 	case res.Applied:
 		tl.Printf("the server verified the passkey signature and applied the change")
 	default:

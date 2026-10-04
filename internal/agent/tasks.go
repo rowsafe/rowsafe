@@ -54,7 +54,7 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 	if protocol.IsForkTask(task.Type) {
 		return a.runForkTask(ctx, task, tl) // fork*.go
 	}
-	if task.Type == protocol.TaskPermissions { // a passkey-signed change, for root's helper (permissions.go)
+	if task.Type == protocol.TaskPermissions || task.Type == protocol.TaskPermissionsRemove { // for root's helper (permissions.go)
 		res, err := a.permissionsTask(ctx, task, tl)
 		if res == nil {
 			return nil, err

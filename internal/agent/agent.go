@@ -317,7 +317,7 @@ var sideTypes = []string{protocol.TaskMaintenance, protocol.TaskRewindCompare, p
 	protocol.TaskMigrate,          // move in: key, check, switchover... (migrate.go)
 	protocol.TaskSettings,
 	protocol.TaskSecurityScan, protocol.TaskSecurityFix, // security.go
-	protocol.TaskPermissions} // permissions.go: people wait for it in the dashboard
+	protocol.TaskPermissions, protocol.TaskPermissionsRemove} // permissions.go: people wait for it in the dashboard
 
 // fastLaneClaim is what the fast lane asks for: restore points, and a side
 // task unless one is running already. Side tasks run beside the lane, one
