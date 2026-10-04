@@ -6,8 +6,9 @@
 # hammering a WAL database while the agent copies it: the app's checkpoints
 # race the agent's, its WAL resets, a wal_checkpoint(TRUNCATE) of its own
 # breaks the stream on purpose; then restores to several moments, a Mark
-# and the newest point, Proof, Rewind copy/compare/rows/in place/undo, and
-# discovery of the files running programs have open.
+# and the newest point, Proof, Rewind copy/compare/rows/in place/undo,
+# discovery of the files running programs have open, and the security
+# check's fix through root's helper (the app's files, the agent's ACL).
 #
 #   scripts/test-sqlite.sh
 #   TEST_RUN=TestFindOpen scripts/test-sqlite.sh
@@ -49,6 +50,9 @@ docker exec "$name" sh -euc '
 	useradd -m app
 	useradd -m rowsafe
 	echo "rowsafe ALL=(app) NOPASSWD: ALL" >/etc/sudoers.d/rowsafe-test
+	# TestSQLiteSecurity: root'"'"'s helper for SQLite files is this test binary,
+	# run as root (it stands in for rowsafe-sqlite-modes.service).
+	echo "rowsafe ALL=(root) NOPASSWD: /opt/pkg/sqlite.test" >>/etc/sudoers.d/rowsafe-test
 	chmod 0440 /etc/sudoers.d/rowsafe-test
 	# The app'"'"'s folder, as the installer leaves it: the agent may write in it,
 	# and SQLite side files created there work for both users.

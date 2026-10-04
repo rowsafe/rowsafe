@@ -63,6 +63,10 @@
 #   --allow-tuning         allow Rowsafe to change MongoDB's or ClickHouse's settings
 #                          when you ask (Tuning), only in its own settings file
 #   --no-allow-tuning      turn that off again
+#   --allow-sqlite-modes   allow Rowsafe to close the listed SQLite files to the
+#                          server's other users when you click Apply fix under
+#                          Security (others' access only; owners and ACLs stay)
+#   --no-allow-sqlite-modes  turn that off again
 #   --firewall-ssh         for servers Rowsafe creates (implies --allow-firewall):
 #                          the firewall also limits who can reach SSH, and
 #                          PostgreSQL's port is closed to everyone until the
@@ -166,6 +170,12 @@ TUNING_ALLOW_FILE=$CONFIG_DIR/tuning-allowed
 TUNING_SERVICE_FILE=/etc/systemd/system/rowsafe-tuning.service
 TUNING_PATH_FILE=/etc/systemd/system/rowsafe-tuning.path
 TUNING_DIR=$STATE_DIR/tuning
+# Closing SQLite files to other users (--allow-sqlite-modes): root's copy of
+# the agent changes only others' access to the listed SQLite files.
+SQLITE_MODES_ALLOW_FILE=$CONFIG_DIR/sqlite-modes-allowed
+SQLITE_MODES_SERVICE_FILE=/etc/systemd/system/rowsafe-sqlite-modes.service
+SQLITE_MODES_PATH_FILE=/etc/systemd/system/rowsafe-sqlite-modes.path
+SQLITE_MODES_DIR=$STATE_DIR/sqlite-modes
 
 # The firewall on request (--allow-firewall): a root helper of its own.
 FIREWALL_HELPER=$LIB_DIR/rowsafe-firewall
@@ -226,6 +236,7 @@ ALLOW_POOLER=''    # --allow-pooler (yes) / --no-allow-pooler (no); '' = ask onc
 ALLOW_POOLER_PUBLIC='' # --allow-pooler-public (yes) / --no-allow-pooler-public (no): PgBouncer on every address
 ALLOW_FIREWALL=''  # --allow-firewall (yes) / --no-allow-firewall (no); '' = ask once, on a terminal
 ALLOW_TUNING=''    # --allow-tuning (yes) / --no-allow-tuning (no): MongoDB and ClickHouse settings files
+ALLOW_SQLITE_MODES='' # --allow-sqlite-modes (yes) / --no-allow-sqlite-modes (no): close SQLite files to other users
 POOLER_TARGET_ADD='' POOLER_TARGET_DEL='' # --allow-pooler-target / --no-allow-pooler-target ADDRESS:PORT (ProxySQL)
 FIREWALL_SSH=''    # --firewall-ssh (yes) / --no-firewall-ssh (no): SSH's allow list too (servers Rowsafe creates)
 ALLOW_UPDATES=''   # --allow-updates / --no-allow-updates (PostgreSQL updates and upgrades)
@@ -343,6 +354,10 @@ Options (when piping, pass them after `sh -s --`):
   --allow-tuning         allow Rowsafe to change MongoDB's or ClickHouse's settings when
                          you ask under Tuning, only in its own settings file
   --no-allow-tuning      turn that off
+  --allow-sqlite-modes   allow Rowsafe to close the listed SQLite files to the server's
+                         other users when you click Apply fix under Security (only
+                         others' access goes; owners, groups and ACLs stay)
+  --no-allow-sqlite-modes  turn that off
   --allow-pooler-target ADDRESS:PORT    let ProxySQL send connections to the MySQL
                          on another server (the primary after a standby's promotion)
   --no-allow-pooler-target ADDRESS:PORT  turn that off
@@ -489,7 +504,8 @@ What Rowsafe may do on this server:
   once (a re-run keeps the answers) and then shows what is allowed. Change it
   any time with `sudo rowsafe-allow` (list), `sudo rowsafe-allow NAME` (allow)
   and `sudo rowsafe-allow --remove NAME`. Names: restart, create-cluster,
-  updates, security-updates, reboot, pooler, pooler-public, firewall, tuning. Some
+  updates, security-updates, reboot, pooler, pooler-public, firewall, tuning,
+  sqlite-modes. Some
   need another: create-cluster, updates and security-updates need restart,
   reboot needs security-updates, pooler-public needs pooler. Turning one off
   turns off what needs it.
@@ -4283,6 +4299,172 @@ tuning_access() {
   esac
 }
 
+# ------------------------------------------------------------ sqlite-modes
+
+# With root's permission (--allow-sqlite-modes, or yes at the question), a
+# person can close the SQLite files to the server's other users from
+# Security in the dashboard (Apply fix). The agent (unprivileged) writes a
+# request to $SQLITE_MODES_DIR; rowsafe-sqlite-modes.path starts
+# rowsafe-sqlite-modes.service, which runs root's copy of the agent
+# ($PERMISSIONS_HELPER sqlite-modes-apply). It only removes other users'
+# access (o-rwx on the files, o-w on the folder), and only from the files
+# listed in $SQLITE_LIST, their -wal, -shm and -journal files, copies of
+# them next to them (SQLite files named like them) and their folders:
+# never an owner, a group or an ACL entry.
+
+# sqlite_modes_dirs prints the folders of the listed SQLite files: the only
+# places the helper may change (its unit's ReadWritePaths).
+sqlite_modes_dirs() {
+  [ -f "$SQLITE_LIST" ] || return 0
+  while IFS= read -r _f; do
+    sqlite_path_ok "$_f" || continue
+    printf '%s\n' "${_f%/*}"
+  done <"$SQLITE_LIST" | sort -u
+}
+
+install_sqlite_modes_helper() {
+  [ -x "$PERMISSIONS_HELPER" ] || install_permissions_helper
+  [ -x "$PERMISSIONS_HELPER" ] || { warn "closing SQLite files to other users needs root's copy of the agent ($PERMISSIONS_HELPER); run the installer again"; return 1; }
+  as_agent mkdir -p -m 0700 "$SQLITE_MODES_DIR"
+  _rw=''
+  for _d in $(sqlite_modes_dirs); do _rw="$_rw -$_d"; done
+  _rwline="# No SQLite file is listed yet, so it can change nothing."
+  [ -z "$_rw" ] || _rwline="ReadWritePaths=${_rw# }"
+  _changed=0
+  if sed -e "s/@AGENT_USER@/$AGENT_USER/" -e "s|@READ_WRITE@|$_rwline|" <<'ROWSAFE_SQLITE_MODES_SERVICE_EOF' | write_file "$SQLITE_MODES_SERVICE_FILE" 0644 root:root; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-sqlite-modes.service: closes SQLite files to the server's other
+# users when a person clicks Apply fix under Security in Rowsafe: only the
+# files root listed in /etc/rowsafe/sqlite-paths, their -wal, -shm and
+# -journal files, copies of them next to them and their folders, and only
+# others' access (never an owner, a group or an ACL entry). Allowed by root
+# (/etc/rowsafe/sqlite-modes-allowed, sudo rowsafe-allow sqlite-modes).
+# Started by rowsafe-sqlite-modes.path; installed by https://rowsafe.sh/install.
+
+[Unit]
+Description=Rowsafe: close SQLite files to other users (Security)
+Documentation=https://rowsafe.sh/docs/guides/security
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/rowsafe/rowsafe-permissions sqlite-modes-apply
+Environment=ROWSAFE_AGENT_USER=@AGENT_USER@
+TimeoutStartSec=2min
+RuntimeDirectory=rowsafe-sqlite-modes
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+UMask=0022
+# It changes permissions only in the listed SQLite files' folders.
+ProtectSystem=strict
+ProtectHome=read-only
+@READ_WRITE@
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+ROWSAFE_SQLITE_MODES_SERVICE_EOF
+    _changed=1
+  fi
+  if write_file "$SQLITE_MODES_PATH_FILE" 0644 root:root <<'ROWSAFE_SQLITE_MODES_PATH_EOF'; then
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-sqlite-modes.path: starts rowsafe-sqlite-modes.service when the
+# Rowsafe agent asks to close SQLite files to other users. Installed by
+# https://rowsafe.sh/install only when root allowed it (--allow-sqlite-modes).
+
+[Unit]
+Description=Rowsafe: watch for SQLite files to close to other users (Security)
+
+[Path]
+PathExists=/var/lib/rowsafe/sqlite-modes/request
+Unit=rowsafe-sqlite-modes.service
+
+[Install]
+WantedBy=multi-user.target
+ROWSAFE_SQLITE_MODES_PATH_EOF
+    _changed=1
+  fi
+  if systemd_running; then
+    [ "$_changed" = 0 ] || systemctl daemon-reload
+    systemctl enable --now --quiet rowsafe-sqlite-modes.path
+  fi
+}
+
+remove_sqlite_modes_helper() {
+  [ -e "$SQLITE_MODES_PATH_FILE" ] || [ -e "$SQLITE_MODES_SERVICE_FILE" ] || return 0
+  if systemd_running; then systemctl disable --now --quiet rowsafe-sqlite-modes.path 2>/dev/null || true; fi
+  rm -f "$SQLITE_MODES_PATH_FILE" "$SQLITE_MODES_SERVICE_FILE"
+  rm -rf /run/rowsafe-sqlite-modes
+  if systemd_running; then systemctl daemon-reload; fi
+}
+
+allow_sqlite_modes() {
+  _why=$(perm_why sqlite-modes)
+  if [ -n "$_why" ]; then
+    warn "closing SQLite files to other users stays off for Rowsafe: $_why"
+    return 0
+  fi
+  {
+    echo "# Rowsafe may close the SQLite files listed in $SQLITE_LIST to the server's"
+    echo "# other users when someone clicks Apply fix under Security: others lose read"
+    echo "# and write on the files, their -wal, -shm and -journal files and copies next"
+    echo "# to them, and write on their folders. Owners, groups and ACLs stay."
+    echo "# Written by the installer (root); turn this off with:"
+    echo "# sudo rowsafe-allow --remove sqlite-modes"
+    echo "sqlite-paths"
+  } | write_file "$SQLITE_MODES_ALLOW_FILE" 0644 root:root || true
+  install_sqlite_modes_helper || return 0
+  perm_ok "Rowsafe may close the SQLite files to other users when you click Apply fix (Security)"
+}
+
+disallow_sqlite_modes() {
+  remove_sqlite_modes_helper
+  if [ -d "$CONFIG_DIR" ]; then
+    {
+      echo "# Closing SQLite files to other users from Rowsafe (Security) is off."
+      echo "# Turn it on with: sudo rowsafe-allow sqlite-modes"
+    } | write_file "$SQLITE_MODES_ALLOW_FILE" 0644 root:root || true
+  fi
+}
+
+# sqlite_modes_access applies --allow-sqlite-modes / --no-allow-sqlite-modes,
+# or asks once on a terminal (default yes) where SQLite files are listed. A
+# yes kept refreshes the folders the helper may change (files listed since).
+sqlite_modes_access() {
+  case $ALLOW_SQLITE_MODES in
+    yes) allow_sqlite_modes ;;
+    no)
+      disallow_sqlite_modes
+      perm_ok "closing SQLite files to other users from Rowsafe is off"
+      ;;
+    *)
+      [ -z "$(perm_why sqlite-modes)" ] || return 0
+      if [ "$(perm_state sqlite-modes)" = yes ]; then
+        install_sqlite_modes_helper || true
+        return 0
+      fi
+      [ -f "$SQLITE_MODES_ALLOW_FILE" ] && return 0 # a no, kept
+      [ "$TTY" = 1 ] || return 0
+      if perm_ask "Let Rowsafe close the SQLite files to this server's other users when someone clicks Apply fix under Security? Only others' access goes; owners, groups and your app's access stay." y; then
+        allow_sqlite_modes
+      else
+        disallow_sqlite_modes
+        perm_note "OK: Rowsafe won't change the SQLite files' permissions"
+      fi
+      ;;
+  esac
+}
+
 # ---------------------------------------------------------------- firewall
 
 # With root's permission (--allow-firewall, or yes at the question), a
@@ -6032,7 +6214,7 @@ remove_files_units() {
 # changing. The output ends with what Rowsafe may do now, then (exit 1 or
 # 2) the reason in one "error: ..." line.
 
-PERMISSIONS="restart create-cluster updates security-updates reboot pooler pooler-public firewall tuning"
+PERMISSIONS="restart create-cluster updates security-updates reboot pooler pooler-public firewall tuning sqlite-modes"
 PERM_QUIET=0 # 1: the summary says it all (the questions on a terminal, --permissions)
 PERM_INTRO=0 # 1 once the questions' heading is shown
 
@@ -6076,6 +6258,7 @@ perm_var() {
     pooler-public) echo ALLOW_POOLER_PUBLIC ;;
     firewall) echo ALLOW_FIREWALL ;;
     tuning) echo ALLOW_TUNING ;;
+    sqlite-modes) echo ALLOW_SQLITE_MODES ;;
     *) return 1 ;;
   esac
 }
@@ -6102,6 +6285,7 @@ perm_desc() {
     pooler-public) echo "let PgBouncer listen on public addresses" ;;
     firewall) echo "limit who can reach the database (firewall)" ;;
     tuning) echo "change MongoDB's or ClickHouse's settings (Tuning)" ;;
+    sqlite-modes) echo "close the SQLite files to other users (Security)" ;;
   esac
 }
 
@@ -6114,12 +6298,14 @@ perm_state() {
     pooler | pooler-public) _sf=$POOLER_ALLOW_FILE ;;
     firewall) _sf=$FIREWALL_ALLOW_FILE ;;
     tuning) _sf=$TUNING_ALLOW_FILE ;;
+    sqlite-modes) _sf=$SQLITE_MODES_ALLOW_FILE ;;
     *) _sf=$UPDATES_ALLOW_FILE ;;
   esac
   [ -f "$_sf" ] || return 0
   case $1 in
     restart | pooler | firewall) _sy=$(grep -c '^[1-9]' "$_sf" || true) ;;
     tuning) _sy=$(grep -Ec '^(mongodb|clickhouse) /' "$_sf" || true) ;;
+    sqlite-modes) _sy=$(grep -cx 'sqlite-paths' "$_sf" || true) ;;
     create-cluster) _sy=$(grep -c '^ports ' "$_sf" || true) ;;
     pooler-public) _sy=$(grep -qs '^[1-9]' "$_sf" && grep -cx public "$_sf" || true) ;;
     updates) _sy=$(grep -c '^\(postgresql\|database\)\([[:space:]#]\|$\)' "$_sf" || true) ;;
@@ -6156,7 +6342,7 @@ perm_why() {
         have apt-get || echo "Rowsafe installs updates with apt (Debian and Ubuntu)"
         return 0
         ;;
-      firewall | tuning) ;; # every engine's port; MongoDB's and ClickHouse's settings
+      firewall | tuning | sqlite-modes) ;; # every engine's port; MongoDB's and ClickHouse's settings; SQLite files
       pooler | pooler-public) case $HOST_ENGINE in mysql | mariadb | clickhouse) ;; *)
         echo "Rowsafe pools PostgreSQL (PgBouncer), MySQL or MariaDB (ProxySQL) and ClickHouse (chproxy), and none is on this server"
         return 0
@@ -6181,6 +6367,7 @@ perm_why() {
         *) _w="Rowsafe changes $(engine_label)'s settings without it" ;;
       esac
       ;;
+    sqlite-modes) [ -n "$(sqlite_modes_dirs)" ] || _w="Rowsafe needs this only for SQLite files, and none is listed here" ;;
     firewall)
       if ! have nft; then
         _w="nftables isn't installed (apt install nftables)"
@@ -6299,7 +6486,7 @@ installer=/usr/local/lib/rowsafe/install.sh
 helper=/usr/local/lib/rowsafe/rowsafe-permissions
 owners=/etc/rowsafe/owners
 update='curl -fsSL https://rowsafe.sh | sudo sh'
-names='restart create-cluster updates security-updates reboot pooler pooler-public firewall tuning'
+names='restart create-cluster updates security-updates reboot pooler pooler-public firewall tuning sqlite-modes'
 
 usage() {
   cat <<'EOF'
@@ -6327,6 +6514,7 @@ Names:
   pooler-public      let PgBouncer listen on public addresses (needs pooler)
   firewall           limit who can reach the database's port (never SSH or other ports)
   tuning             change MongoDB's or ClickHouse's settings, in Rowsafe's own file
+  sqlite-modes       close the listed SQLite files to other users (owners and ACLs stay)
 
   sudo rowsafe-allow pooler-target ADDRESS PORT
                            let ProxySQL send connections to the MySQL on another
@@ -6624,6 +6812,10 @@ permissions_main() {
   case $ALLOW_TUNING in
     yes) allow_tuning ;;
     no) disallow_tuning ;;
+  esac
+  case $ALLOW_SQLITE_MODES in
+    yes) allow_sqlite_modes ;;
+    no) disallow_sqlite_modes ;;
   esac
   [ -z "$POOLER_TARGET_ADD$POOLER_TARGET_DEL" ] || pooler_target_change
   [ "$ALLOW_RESTART" != no ] || disallow_restarts
@@ -8509,6 +8701,7 @@ databases() {
   [ -z "$ALLOW_CREATE_CLUSTER" ] || create_cluster_access # forks
   [ "$ALLOW_FIREWALL" != no ] || disallow_firewall
   [ "$ALLOW_TUNING" != no ] || disallow_tuning
+  [ "$ALLOW_SQLITE_MODES" != no ] || disallow_sqlite_modes
   [ "$ALLOW_POOLER" != no ] || disallow_pooler
   if [ ! -f "$STATE_DIR/agent.json" ] || ! agent_running; then
     [ -z "$PROTECT_NAME" ] || die "the agent is not running, so backups can't be turned on yet; see 'journalctl -u rowsafe-agent'"
@@ -8523,7 +8716,7 @@ databases() {
   if [ "$TTY" = 1 ] && [ "$NO_SETUP" = 0 ]; then interactive=1; fi
   if [ "$interactive" = 1 ] || [ -n "$PROTECT_NAME" ] || [ "$ALLOW_RESTART" = yes ] || grep -qs '^[0-9]' "$RESTART_ALLOW_FILE" ||
     [ -n "$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT" ] || [ "$ALLOW_FIREWALL" = yes ] || grep -qs '^[0-9]' "$FIREWALL_ALLOW_FILE" ||
-    [ "$ALLOW_TUNING" = yes ] ||
+    [ "$ALLOW_TUNING" = yes ] || [ "$ALLOW_SQLITE_MODES" = yes ] || grep -qsx 'sqlite-paths' "$SQLITE_MODES_ALLOW_FILE" ||
     [ "$ALLOW_POOLER" = yes ] || grep -qs '^[0-9]' "$POOLER_ALLOW_FILE"; then
     say ""
     step "Looking for $(engine_label) on this server"
@@ -8539,6 +8732,7 @@ databases() {
     pooler_access
     firewall_access
     tuning_access
+    sqlite_modes_access
     PERM_QUIET=0
   fi
   perm_summary # permissions section
@@ -9740,6 +9934,7 @@ uninstall_agent() {
   remove_restart_helper
   remove_create_cluster
   remove_firewall_helper
+  remove_sqlite_modes_helper
   remove_permissions_helper # permit-host
   rm -f "$GUARD_FILE" "$INSTALLER_COPY" "$ALLOW_COMMAND" # permissions section
   rmdir "$LIB_DIR" 2>/dev/null || true
@@ -9830,6 +10025,8 @@ main() {
       --no-allow-firewall) ALLOW_FIREWALL=no ;;
       --allow-tuning) ALLOW_TUNING=yes ;;
       --no-allow-tuning) ALLOW_TUNING=no ;;
+      --allow-sqlite-modes) ALLOW_SQLITE_MODES=yes ;;
+      --no-allow-sqlite-modes) ALLOW_SQLITE_MODES=no ;;
       --allow-pooler-target | --no-allow-pooler-target)
         [ $# -ge 2 ] || die "$1 needs ADDRESS:PORT"
         pooler_target_ok "$2" || die "$1: give the other server's address and MySQL port, e.g. 10.0.0.6:3306"
@@ -9926,7 +10123,7 @@ main() {
     if [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME$PROTECT_PORT$FILES_PATHS$MONGODB_REPLSET" ] || [ "$ALLOW_FILES" = yes ] || [ "$NO_FILES" = 1 ] || [ "$purge" = 1 ]; then
       perm_refuse "--permissions only changes what Rowsafe may do here: --allow-NAME, --no-allow-NAME and --no-allow-files (see --help)"
     fi
-  elif [ "$mode" != install ] && { [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME" ] || [ -n "$ALLOW_RESTART$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT$ALLOW_FIREWALL$ALLOW_TUNING$ALLOW_POOLER$ALLOW_POOLER_PUBLIC$ALLOW_CREATE_CLUSTER$POOLER_TARGET_ADD$POOLER_TARGET_DEL" ]; }; then
+  elif [ "$mode" != install ] && { [ "$NO_SETUP" = 1 ] || [ -n "$PROTECT_NAME" ] || [ -n "$ALLOW_RESTART$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT$ALLOW_FIREWALL$ALLOW_TUNING$ALLOW_SQLITE_MODES$ALLOW_POOLER$ALLOW_POOLER_PUBLIC$ALLOW_CREATE_CLUSTER$POOLER_TARGET_ADD$POOLER_TARGET_DEL" ]; }; then
     die "--no-setup, --protect and the --allow- options only go with an install"
   fi
   if [ "$mode" != install ] && [ "$mode" != permissions ] && { [ -n "$FILES_PATHS" ] || [ -n "$ALLOW_FILES" ] || [ "$NO_FILES" = 1 ]; }; then
