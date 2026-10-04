@@ -1551,7 +1551,9 @@ sqlite_flow_tests() {
     runuser -u postgres -- sh -c "touch '$d/probe' && rm '$d/probe'" || fail "$name: the agent can't write in $d"
   done
   getfacl -p /srv/shop/clones 2>/dev/null | grep -qx 'default:user:shopapp:rw-' || fail "$name: no default ACL for the folder's owner"
-  [ "$(stat -c '%U %G %a' /srv/shop/clones)" = "shopapp shopapp 750" ] || fail "$name: the folder's owner or mode changed"
+  [ "$(stat -c '%U %G' /srv/shop/clones)" = "shopapp shopapp" ] || fail "$name: the folder's owner changed"
+  getfacl -p /srv/shop/clones 2>/dev/null | grep -qx 'other::---' || fail "$name: others gained access to the folder"
+  getfacl -p /srv/shop/clones 2>/dev/null | grep -qx 'group::r-x' || fail "$name: the folder's group gained access"
   [ "$(stat -c '%a' /etc/rowsafe/sqlite-clone-dirs)" = 644 ] || fail "$name: the list isn't 0644"
   ! grep -q rowsafe-clones /etc/rowsafe/sqlite-clone-dirs || fail "$name: a system folder was allowed"
   [ ! -e /etc/rowsafe-clones ] || fail "$name: a folder was made under /etc"
