@@ -242,6 +242,8 @@ LISTEN_PUBLIC=0    # --listen-public
 PG_OURS=0          # the PostgreSQL here is the one --install-postgres installed
 SQLITE_PATHS=''    # --sqlite PATH, one per line
 SQLITE_LIST=$CONFIG_DIR/sqlite-paths # the agent's SQLite files (one per line)
+SQLITE_CLONE_DIRS='' # --sqlite-clone-dir DIR, one per line
+SQLITE_CLONE_LIST=$CONFIG_DIR/sqlite-clone-dirs # folders SQLite clones may be written to
 
 TMP=
 CHANGED=0          # binary, unit, guard or config changed: a running agent needs a restart
@@ -316,6 +318,9 @@ Options (when piping, pass them after `sh -s --`):
   --sqlite PATH          protect the SQLite database file PATH (repeat for several);
                          with --protect NAME, give exactly one. The installer also finds
                          the SQLite files running apps have open and asks about each
+  --sqlite-clone-dir DIR allow Rowsafe to write clones of SQLite databases (new files,
+                         never over an existing one) into the folder DIR; repeat for
+                         several. The agent gets write access to it (an ACL)
   --allow-restart        allow Rowsafe to restart or stop PostgreSQL when you ask
                          (Restart and Rewind in the dashboard, `rowsafe restart`),
                          only when someone confirms
@@ -480,7 +485,10 @@ Turning on backups:
   the folder so the -wal and -shm files your app creates later are covered,
   and prints what it changed. Owners, groups and other users' access stay as
   they were. Files on network filesystems (NFS, SMB, sshfs...) are refused:
-  SQLite's locking isn't reliable there.
+  SQLite's locking isn't reliable there. Clones (Fork in the dashboard) are
+  new files written only into folders you allow with --sqlite-clone-dir (or
+  answer yes when asked): the agent gets write access to the folder (an
+  ACL, and a default ACL so the folder's owner can use the new files too).
 
 What Rowsafe may do on this server:
   Rowsafe only restarts PostgreSQL, installs updates, reboots, manages
@@ -9518,6 +9526,11 @@ sqlite_setup() {
   fi
   _groups=$(for _g in $SQLITE_GROUPS $(sed -n 's/^SupplementaryGroups=//p' "$_dropin/20-sqlite.conf" 2>/dev/null); do echo "$_g"; done | sort -u | tr '\n' ' ')
   _binds=''
+  if [ -f "$SQLITE_CLONE_LIST" ]; then # clone folders under /home (sqlite_clone_dirs)
+    while IFS= read -r _d; do
+      case $_d in /home/* | /root/* | /run/user/*) [ ! -d "$_d" ] || _binds="$_binds $_d" ;; esac
+    done <"$SQLITE_CLONE_LIST"
+  fi
   if [ -f "$SQLITE_LIST" ]; then
     while IFS= read -r _f; do
       case $_f in /home/* | /root/* | /run/user/*)
@@ -9544,6 +9557,88 @@ sqlite_setup() {
   fi
 }
 # <<< sqlite
+
+# >>> sqlite clones: folders root allows for SQLite clones (Fork), opt-in.
+# The agent writes a clone as a new file there (never over an existing one)
+# and lists the folders it may use from $SQLITE_CLONE_LIST.
+
+# sqlite_clone_grant DIR gives the agent's user write access to DIR (made
+# when missing): an ACL entry, and a default ACL so the new files work for
+# the agent and the folder's owner; "x" on the folders above where needed.
+sqlite_clone_grant() {
+  _d=$1
+  case $_d in /etc | /etc/* | /usr | /usr/* | /boot | /boot/* | /proc/* | /sys/* | /dev/* | /run | /run/* | /var/lib/rowsafe | /var/lib/rowsafe/*)
+    warn "$_d can't hold clones (a system folder); skipped"
+    return 1
+    ;;
+  esac
+  if [ ! -e "$_d" ]; then
+    install -d -m 0750 -- "$_d" || return 1
+    ok "created $_d"
+  fi
+  if [ ! -d "$_d" ] || [ -L "$_d" ] || [ "$(readlink -f -- "$_d")" != "$_d" ]; then
+    warn "$_d isn't a folder (or goes through a symbolic link): give the real folder's path; skipped"
+    return 1
+  fi
+  _fs=$(sqlite_netfs "$_d")
+  if [ -n "$_fs" ]; then
+    warn "$_d is on a network filesystem ($_fs): SQLite's locking isn't reliable there; skipped"
+    return 1
+  fi
+  if [ "$(stat -c %u -- "$_d")" = "$(id -u "$AGENT_USER")" ]; then
+    ok "$_d belongs to $AGENT_USER already"
+    return 0
+  fi
+  have setfacl || apt_install acl
+  _owner=$(stat -c %U -- "$_d")
+  _def="u::rw-,g::rw-,o::---,u:$AGENT_USER:rw-"
+  [ "$_owner" = root ] || [ "$_owner" = "$AGENT_USER" ] || _def="$_def,u:$_owner:rw-"
+  if setfacl -m "u:$AGENT_USER:rwx" -- "$_d" 2>"$TMP/acl.err" && setfacl -d -m "$_def" -- "$_d" 2>>"$TMP/acl.err"; then
+    _p=${_d%/*}
+    while [ -n "$_p" ]; do
+      as_agent test -x "$_p" 2>/dev/null || acl_grant_x "$_p" "$AGENT_USER" || true
+      _p=${_p%/*}
+    done
+    ok "the agent ($AGENT_USER) may write SQLite clones into $_d (ACLs; owner, group and others' access unchanged)"
+    return 0
+  fi
+  warn "can't give the agent write access to $_d: $(head -n 1 "$TMP/acl.err" 2>/dev/null) (this filesystem may have no ACLs: make the folder belong to $AGENT_USER instead)"
+  return 1
+}
+
+# sqlite_clone_dirs: the folders given with --sqlite-clone-dir and, on a
+# terminal on a server with SQLite databases, one the person names when
+# none is allowed yet; each gets access and goes to $SQLITE_CLONE_LIST.
+sqlite_clone_dirs() {
+  _chosen=$SQLITE_CLONE_DIRS
+  if [ -z "$_chosen" ] && [ "$TTY" = 1 ] && [ -z "$PROTECT_NAME" ] && [ ! -s "$SQLITE_CLONE_LIST" ] &&
+    { [ "$HOST_ENGINE" = sqlite ] || [ -s "$SQLITE_LIST" ]; }; then
+    say ""
+    if confirm "Allow Rowsafe to make clones of your SQLite databases (new files for staging or tests, never over an existing file) in a folder you pick?" n; then
+      _cd=''
+      while :; do
+        ask _cd "Folder for the clones" /srv/sqlite-clones
+        sqlite_path_ok "$_cd" && [ "$_cd" != / ] && break
+        tty_hint "Give an absolute folder path (letters, digits and ._@+,=- only)."
+      done
+      _chosen="$_cd
+"
+    fi
+  fi
+  [ -n "$_chosen" ] || return 0
+  step "Allowing folders for SQLite clones"
+  install -d -m 0755 "$CONFIG_DIR"
+  [ -f "$SQLITE_CLONE_LIST" ] || { : >"$SQLITE_CLONE_LIST"; chmod 0644 "$SQLITE_CLONE_LIST"; }
+  printf '%s' "$_chosen" | while IFS= read -r _d; do
+    [ -n "$_d" ] || continue
+    if sqlite_clone_grant "$_d"; then
+      grep -qxF -- "$_d" "$SQLITE_CLONE_LIST" || printf '%s\n' "$_d" >>"$SQLITE_CLONE_LIST"
+    fi
+  done
+  chmod 0644 "$SQLITE_CLONE_LIST"
+  CHANGED=1
+}
+# <<< sqlite clones
 
 install_agent() {
   require_root
@@ -9619,6 +9714,7 @@ install_agent() {
   install_guard
   install_permissions_helper # permit-host: one-click permission changes
   sqlite_files # sqlite: which files, and the agent's access to them
+  sqlite_clone_dirs # sqlite clones: folders root allows for them
   UNIT_CHANGED=0
   install_unit
   mysql_setup # mysql
@@ -9863,6 +9959,13 @@ main() {
 "
         shift
         ;;
+      --sqlite-clone-dir) # sqlite clones
+        [ $# -ge 2 ] || die "--sqlite-clone-dir needs a folder's path"
+        { sqlite_path_ok "$2" && [ "$2" != / ]; } || die "--sqlite-clone-dir: give the folder's absolute path (letters, digits and ._@+,=- only)"
+        SQLITE_CLONE_DIRS="$SQLITE_CLONE_DIRS$2
+"
+        shift
+        ;;
       --protect-port)
         [ $# -ge 2 ] || die "--protect-port needs a port"
         printf '%s\n' "$2" | grep -Eq '^[1-9][0-9]{0,4}$' || die "--protect-port needs a port number"
@@ -9950,6 +10053,7 @@ main() {
       die "--protect turns on backups for one database: give exactly one --sqlite file with it"
     fi
   fi
+  [ -z "$SQLITE_CLONE_DIRS" ] || [ "$mode" = install ] || die "--sqlite-clone-dir only goes with an install" # sqlite clones
   [ "$NO_SETUP" = 0 ] || [ -z "$PROTECT_NAME" ] || die "--no-setup and --protect contradict each other"
   TMP=$(mktemp -d "${TMPDIR:-/tmp}/rowsafe-install.XXXXXX")
   # The agent user writes one file into $TMP/setup (0700, its own).

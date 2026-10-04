@@ -73,6 +73,11 @@ const (
 	// it (StandbyTarget): the fork is restored privately next to it and
 	// loaded into it.
 	ForkEmptyServer = "empty_server"
+	// ForkSQLiteFile: a new SQLite file in a folder root allowed for clones
+	// at install (StandbyTarget.Socket of a "sqlite" target;
+	// protocol/sqlite_fork.go). ForkRestoreParams.SocketDir is the new
+	// file's path; the agent never overwrites anything there.
+	ForkSQLiteFile = "sqlite_file"
 )
 
 // ForkPrepareParams are the params of a fork_prepare task (on the source's
@@ -149,7 +154,9 @@ type ForkRestoreParams struct {
 	Placement string       `json:"placement"` // Fork*
 	// Port: for a new cluster the port to create it on (0: the agent picks a
 	// free one in the allowed range); for an empty cluster its port.
-	Port      int    `json:"port,omitempty"`
+	Port int `json:"port,omitempty"`
+	// SocketDir: for ForkSQLiteFile, the new file's absolute path (in an
+	// allowed folder; it and its -wal/-shm/-journal files must not exist).
 	SocketDir string `json:"socket_dir,omitempty"`
 	// Box and SenderKey: the source agent's sealed repository settings (nil
 	// when the source is on this server: nothing moves).
@@ -321,6 +328,9 @@ type ForkPlace struct {
 	Placement string `json:"placement"` // Fork*
 	Port      int    `json:"port"`      // 0: Rowsafe picks a free port
 	Label     string `json:"label"`     // "A new PostgreSQL 18 on port 5440"
+	// Dir is the folder a ForkSQLiteFile clone is written to (the person
+	// adds a file name).
+	Dir string `json:"dir,omitempty"`
 }
 
 // CreateForkRequest creates a fork. Neither At nor Mark: now (Rowsafe saves
@@ -336,6 +346,9 @@ type CreateForkRequest struct {
 	// Fingerprint is the target agent's key fingerprint as the person
 	// confirmed it (another server only).
 	Fingerprint string `json:"fingerprint,omitempty"`
+	// Path is a SQLite clone's new file (ForkSQLiteFile): a file name in
+	// one of the place's folders (SQLiteClonePath).
+	Path string `json:"path,omitempty"`
 }
 
 // ForkView is one fork and its progress.
@@ -349,6 +362,7 @@ type ForkView struct {
 	SameServer  bool               `json:"same_server"`
 	Placement   string             `json:"placement"`
 	Port        int                `json:"port,omitempty"`
+	Path        string             `json:"path,omitempty"` // a SQLite clone's file
 	At          *time.Time         `json:"at,omitempty"`   // the chosen time
 	Mark        string             `json:"mark,omitempty"` // the chosen (or saved) Mark
 	Now         bool               `json:"now,omitempty"`

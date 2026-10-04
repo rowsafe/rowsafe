@@ -59,7 +59,13 @@ func ConfiguredPaths(env agent.EngineEnv) []string {
 // Discover lists the configured SQLite files the agent can read.
 func (e *Engine) Discover(ctx context.Context, env agent.EngineEnv) ([]agent.DiscoveredDatabase, error) {
 	var out []agent.DiscoveredDatabase
-	for _, p := range ConfiguredPaths(env) {
+	paths := ConfiguredPaths(env)
+	for _, p := range clonedPaths(env) { // the clones it made (fork.go)
+		if !slices.Contains(paths, p) {
+			paths = append(paths, p)
+		}
+	}
+	for _, p := range paths {
 		h, fi, err := readDBHeader(p)
 		if err != nil {
 			fmt.Fprintf(env.Notes, "SQLite file %s: %s; skipped.\n", p, firstLine(err.Error()))
@@ -327,6 +333,9 @@ func hostPathFor(p string, inner, host []mountEntry) string {
 func allowed(env agent.EngineEnv, path string) error {
 	if slices.Contains(ConfiguredPaths(env), path) {
 		return nil
+	}
+	if _, ok := cloneOf(env, path); ok {
+		return nil // a clone the agent made in a folder root allowed (fork.go)
 	}
 	return fmt.Errorf("%s isn't one of the SQLite files this server allowed Rowsafe to protect: run the Rowsafe installer with --sqlite %s (in Docker, add it to ROWSAFE_SQLITE_PATHS)", path, path)
 }

@@ -137,6 +137,7 @@ var sqliteFeatures = EngineFeatures{
 	SecondCopy: true, // the same stream and backups into the second bucket (ship.go sinks)
 	Files:      true, // the app's folders next to the database (agent-wide, restic)
 	FindMoment: true, // the WAL pages replayed on a private copy, rows compared (internal/engine/sqlite/moment.go)
+	Fork:       true, // clones into a new file in a folder root allowed (internal/engine/sqlite/fork.go)
 }
 
 // SQLiteStatus is SQLite's own health detail (DatabaseMonitoring.SQLite),

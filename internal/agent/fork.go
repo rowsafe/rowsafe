@@ -300,7 +300,8 @@ func (a *Agent) forkPrepare(ctx context.Context, p protocol.ForkPrepareParams, t
 	if !forkIDRE.MatchString(p.ForkID) {
 		return nil, fmt.Errorf("invalid fork id %q", p.ForkID)
 	}
-	if p.Source.ID == "" || p.Source.Stanza == "" || p.Source.Port < 1 {
+	// A SQLite database is a file: its port is 0 (protocol/sqlite.go).
+	if p.Source.ID == "" || p.Source.Stanza == "" || (p.Source.Port < 1 && protocol.NormalizeEngine(p.Source.Engine) != protocol.EngineSQLite) {
 		return nil, errors.New("the fork names no source database")
 	}
 	if a.cfg.Standby == StandbyOff {

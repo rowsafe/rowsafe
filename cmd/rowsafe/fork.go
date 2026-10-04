@@ -29,6 +29,7 @@ func forkCmd(ctx context.Context, c *client.Client, args []string) error {
 	mask := fs.Bool("mask", false, "mask personal data (emails, names, phone numbers, ...) before anyone can connect")
 	port := fs.Int("port", 0, "the port of the new PostgreSQL cluster (default: a free one)")
 	intoPort := fs.Int("into-port", 0, "use this existing, empty PostgreSQL cluster instead of creating one")
+	file := fs.String("file", "", "SQLite: the clone's new file, in one of the target's folders for clones (e.g. /srv/clones/staging.sqlite3); never overwrites a file")
 	fingerprint := fs.String("fingerprint", "", "the target server's key fingerprint (sudo -u postgres rowsafe-agent key, there)")
 	noWait := fs.Bool("no-wait", false, "return once queued")
 	asJSON := fs.Bool("json", false, "print the fork as JSON")
@@ -47,11 +48,19 @@ func forkCmd(ctx context.Context, c *client.Client, args []string) error {
 	if err != nil {
 		return err
 	}
-	place, err := pickForkPlace(*target, *port, *intoPort)
+	var place protocol.ForkPlace
+	if *file != "" || hasSQLitePlaces(*target) {
+		place, err = pickSQLiteForkPlace(*target, *file)
+	} else {
+		place, err = pickForkPlace(*target, *port, *intoPort)
+	}
 	if err != nil {
 		return err
 	}
 	req := protocol.CreateForkRequest{Name: *name, HostID: target.HostID, Placement: place.Placement, Port: place.Port, Mask: *mask}
+	if place.Placement == protocol.ForkSQLiteFile {
+		req.Path = *file
+	}
 	if req.Name == "" {
 		req.Name = source + "-fork"
 	}
@@ -182,6 +191,39 @@ func pickForkPlace(t protocol.ForkTarget, port, intoPort int) (protocol.ForkPlac
 	return protocol.ForkPlace{}, fmt.Errorf("%s has no place for the fork", t.Hostname)
 }
 
+func hasSQLitePlaces(t protocol.ForkTarget) bool {
+	for _, p := range t.Places {
+		if p.Placement == protocol.ForkSQLiteFile {
+			return true
+		}
+	}
+	return false
+}
+
+// pickSQLiteForkPlace checks a SQLite clone's file is in one of the
+// target's folders for clones.
+func pickSQLiteForkPlace(t protocol.ForkTarget, file string) (protocol.ForkPlace, error) {
+	var dirs []string
+	for _, p := range t.Places {
+		if p.Placement != protocol.ForkSQLiteFile {
+			continue
+		}
+		if file != "" && protocol.SQLiteClonePath(p.Dir, file) {
+			p.Label = "the new file " + file
+			return p, nil
+		}
+		dirs = append(dirs, p.Dir)
+	}
+	if len(dirs) == 0 {
+		return protocol.ForkPlace{}, fmt.Errorf("%s has no folder for SQLite clones", t.Hostname)
+	}
+	if file == "" {
+		return protocol.ForkPlace{}, fmt.Errorf("pass --file with the clone's new file in one of %s's folders for clones: %s", t.Hostname, strings.Join(dirs, ", "))
+	}
+	return protocol.ForkPlace{}, fmt.Errorf("%s isn't a new file name directly in one of %s's folders for clones (%s); names use letters, digits, dots, dashes and underscores",
+		file, t.Hostname, strings.Join(dirs, ", "))
+}
+
 // waitFork follows a fork until it is protected or failed, printing each
 // step as it starts.
 func waitFork(ctx context.Context, c *client.Client, v protocol.ForkView) (protocol.ForkView, error) {
@@ -229,6 +271,9 @@ func forkDone(v protocol.ForkView) string {
 	s := fmt.Sprintf("%s is ready on %s", v.Name, v.Hostname)
 	if v.Port != 0 {
 		s += fmt.Sprintf(":%d", v.Port)
+	}
+	if v.Path != "" {
+		s += " in " + v.Path
 	}
 	if v.RecoveredTo != nil {
 		s += ", restored to " + describeTime(*v.RecoveredTo)

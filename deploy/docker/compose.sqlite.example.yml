@@ -26,6 +26,12 @@
 # WAL. Keep the volume on a local disk: SQLite's locking isn't reliable on
 # network filesystems, and Rowsafe refuses them.
 #
+# Clones (Fork in the dashboard): a database as it was at any moment, as a
+# new file for staging or tests. They are written only into the folders named
+# in ROWSAFE_SQLITE_CLONE_DIRS, never over an existing file; the agent makes a
+# missing folder in a volume it can write. Uncomment that line to allow it
+# (here a folder in the app's volume, so the app sees the clones too).
+#
 # Update the agent (the app keeps running):
 #   docker compose pull rowsafe-agent && docker compose up -d rowsafe-agent
 
@@ -53,6 +59,8 @@ services:
     environment:
       # The database files, as the agent sees them (colon-separated).
       ROWSAFE_SQLITE_PATHS: /rails/storage/production.sqlite3
+      # Folders clones may be written to (colon-separated; optional).
+      # ROWSAFE_SQLITE_CLONE_DIRS: /rails/storage/clones
     volumes:
       # The same volume, at the same path as in the app (read-write).
       - storage:/rails/storage
