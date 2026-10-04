@@ -109,7 +109,8 @@ var redisFeatures = EngineFeatures{
 	Files: true, SecondCopy: true,
 	DBAdmin:         true,
 	Settings:        true, // Tuning: CONFIG SET, kept in redis.conf (settings.go)
-	Updates:         true, // minor updates through root's helper (db-minor-update); not Upgrades yet
+	Updates:         true, // minor updates through root's helper (db-minor-update)
+	Upgrades:        true, // new series rehearsed on a restored copy, then db-upgrade with undo (upgrade.go)
 	Logs:            true,
 	Recommendations: true,
 	Security:        true,

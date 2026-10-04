@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rowsafe/rowsafe/protocol"
@@ -42,6 +43,13 @@ func TestRedisUpgradeRehearsal(t *testing.T) {
 	if err := os.Symlink("check-rdb", filepath.Join(usrBin, name)); err != nil {
 		t.Fatal(err)
 	}
+	// The test server keeps nothing on disk: the upgrade's restart would
+	// empty it, so it is blocked until snapshots are on.
+	if issues, _, err := e.UpgradeIssues(ctx, env, db, "7.4", "8.2"); err != nil || len(issues) != 1 || !strings.Contains(issues[0], "keeps nothing on its own disk") {
+		t.Fatalf("issues without persistence: %v %v", issues, err)
+	}
+	rd(t, a, "CONFIG", "SET", "save", "3600 1")
+	t.Cleanup(func() { _, _ = a.do(context.Background(), "CONFIG", "SET", "save", "") })
 	if issues, warnings, err := e.UpgradeIssues(ctx, env, db, "7.4", "8.2"); err != nil || len(issues) != 0 || len(warnings) == 0 {
 		t.Fatalf("issues: %v %v %v", issues, warnings, err)
 	}

@@ -29,15 +29,23 @@ import (
 var _ agent.EngineUpgrader = (*Engine)(nil)
 
 // UpgradeIssues says what to know before upgrading from one series to
-// another. Nothing blocks a Redis or Valkey upgrade by itself: newer
-// versions load older snapshots and append-only files.
+// another: newer versions load older snapshots and append-only files, so
+// only a server that keeps nothing on disk is blocked (its restart would
+// empty it).
 func (e *Engine) UpgradeIssues(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec, from, to string) ([]string, []string, error) {
-	var warnings []string
+	var issues, warnings []string
 	name := e.display()
 	if e.name == protocol.EngineRedis && seriesMajor(from) < 8 && seriesMajor(to) >= 8 {
 		warnings = append(warnings, "Redis 8 is published under other licenses than Redis 7 (RSALv2, SSPLv1 or AGPLv3): check they suit how you use it before upgrading")
 	}
 	if c, err := connectDB(ctx, env, db); err == nil {
+		// The upgrade restarts the server: one that keeps nothing on its own
+		// disk would come back empty.
+		save, _ := c.configGet(ctx, "save")
+		aof, _ := c.configGet(ctx, "appendonly")
+		if strings.TrimSpace(save) == "" && aof != "yes" {
+			issues = append(issues, fmt.Sprintf("%s keeps nothing on its own disk (snapshots and the append-only file are off), so the restart the upgrade needs would empty it: turn on snapshots first (Tuning)", name))
+		}
 		if mods := productionModules(ctx, c); len(mods) > 0 {
 			var names []string
 			for _, m := range mods {
@@ -49,7 +57,7 @@ func (e *Engine) UpgradeIssues(ctx context.Context, env agent.EngineEnv, db prot
 		c.Close()
 	}
 	warnings = append(warnings, fmt.Sprintf("Once %s %s has written data, %s %s can't read it: undo puts back the data from before the upgrade, and what was written since is kept aside", name, to, name, from))
-	return nil, warnings, nil
+	return issues, warnings, nil
 }
 
 // seriesMajor: "7.4" -> 7.

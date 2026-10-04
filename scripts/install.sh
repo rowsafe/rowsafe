@@ -2948,11 +2948,19 @@ db_datadir() {
     mysql | mariadb) datadir=$(my_print_defaults --mysqld 2>/dev/null | sed -n 's/^--datadir=//p' | tail -n 1) ;;
     mongodb) datadir=$(awk '/^[[:space:]]*dbPath:/ { sub(/^[[:space:]]*dbPath:[[:space:]]*/, ""); gsub(/["\047]/, ""); print; exit }' /etc/mongod.conf 2>/dev/null) ;;
     clickhouse) datadir=$(clickhouse extract-from-config --config-file /etc/clickhouse-server/config.xml --key path 2>/dev/null) ;;
+    redis | valkey)
+      # The configuration file the unit starts the server with, then its
+      # last dir line.
+      conf_=$("$systemctl" show -p ExecStart --value "$unit" 2>/dev/null | tr -s ' ;' '\n' | grep -m 1 '\.conf$')
+      [ -n "$conf_" ] || conf_=/etc/$db_engine/$db_engine.conf
+      datadir=$(awk '$1 == "dir" { d = $2 } END { gsub(/"/, "", d); print d }' "$conf_" 2>/dev/null)
+      ;;
   esac
   [ -n "$datadir" ] || case $db_engine in
     mysql | mariadb) datadir=/var/lib/mysql ;;
     mongodb) datadir=/var/lib/mongodb ;;
     clickhouse) datadir=/var/lib/clickhouse ;;
+    redis | valkey) datadir=/var/lib/$db_engine ;;
   esac
   datadir=${datadir%/}
   case $datadir in /*) ;; *) refuse "the data directory \"$datadir\" is not an absolute path" ;; esac
@@ -2993,7 +3001,6 @@ db_restore_data() {
 act_db_upgrade() {
   update_allowed database "upgrading the database from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
   db_port
-  case $db_engine in redis | valkey) refuse "upgrading $db_engine to a new series isn't supported by this helper yet: minor updates are" ;; esac
   db_datadir
   before=$(pkg_version "$db_main")
   from=$(series "$before")
