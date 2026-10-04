@@ -33,8 +33,9 @@ const (
 
 func (e *Engine) indexAdvisor(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec, taskID string, p protocol.IndexAdvisorParams, tl agent.TaskLogger) (*protocol.IndexAdvisorResult, error) {
 	start := time.Now()
-	res := &protocol.IndexAdvisorResult{Generated: []string{}, Recommendations: []protocol.IndexRecommendation{},
-		Notes: []string{"SQLite keeps no query statistics, so Rowsafe suggests indexes from the schema: one for each foreign key that has none."}}
+	// SQLite keeps no query statistics: one idea for each foreign key
+	// without an index, from the whole schema.
+	res := &protocol.IndexAdvisorResult{Generated: []string{}, Recommendations: []protocol.IndexRecommendation{}, SchemaBased: true}
 	done := func() (*protocol.IndexAdvisorResult, error) {
 		res.DurationMs = time.Since(start).Milliseconds()
 		res.Summary = adviceSummary(res)

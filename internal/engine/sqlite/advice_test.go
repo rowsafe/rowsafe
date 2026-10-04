@@ -303,7 +303,7 @@ func TestSQLiteAdvice(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("%s", res.Summary)
-	if res.Tested != 1 || len(res.Recommendations) != 1 || res.CopySeconds <= 0 {
+	if res.Tested != 1 || len(res.Recommendations) != 1 || res.CopySeconds <= 0 || !res.SchemaBased {
 		t.Fatalf("advisor: %+v", res)
 	}
 	rec := res.Recommendations[0]

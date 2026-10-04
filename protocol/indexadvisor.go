@@ -317,6 +317,10 @@ type IndexAdvisorResult struct {
 	DurationMs int64    `json:"duration_ms"`
 	Notes      []string `json:"notes,omitempty"`
 	Summary    string   `json:"summary"`
+	// SchemaBased: the ideas come from the whole schema, not statements
+	// (SQLite, sqlite_advice.go), so Generated is complete even with no
+	// Statements: open recommendations missing from it are gone.
+	SchemaBased bool `json:"schema_based,omitempty"`
 }
 
 // IndexRecommendation is an index proven on a copy.
