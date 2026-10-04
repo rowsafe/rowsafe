@@ -57,6 +57,12 @@ import (
 //     online backup API: the app's open connections see the new content
 //     (RewindInPlaceStopsServer is false). The file as it was is kept for
 //     Undo (7 days by default) in the agent's rewind directory.
+//   - Migration previews run on a restored copy (kept as a CopyKindPreview
+//     copy for the next one). PreviewResult.DB is "main"; there is one
+//     write lock per file, so PreviewLock.Relation is the file's name,
+//     Blocks "writes" (reads go on in WAL mode, and also wait while it
+//     commits in rollback-journal mode, said in Mode), on the first
+//     writing statement of a transaction, held until it commits.
 //   - Monitoring: database_size_bytes, disk_* and the sqlite_* metrics
 //     (collect/catalog_sqlite.go), and DatabaseMonitoring.SQLite below.
 //   - No server: restart, standby, pooling, updates, upgrades, Databases &
@@ -118,6 +124,8 @@ var sqliteFeatures = EngineFeatures{
 	Monitoring: true, Fixes: true, // monitor.go, maintenance.go
 	SecondCopy: true, // the same stream and backups into the second bucket (ship.go sinks)
 	Files:      true, // the app's folders next to the database (agent-wide, restic)
+	// Guard: a migration run on a restored copy (internal/engine/sqlite/preview.go).
+	MigrationPreview: true,
 }
 
 // SQLiteStatus is SQLite's own health detail (DatabaseMonitoring.SQLite),

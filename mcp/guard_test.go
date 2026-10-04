@@ -146,6 +146,22 @@ func TestDestructiveDBCommand(t *testing.T) {
 		{"clickhouse-client --queries-file migrations/001_drop.sql", true},
 		{"docker exec ch clickhouse-client -q 'TRUNCATE TABLE events'", true},
 
+		// SQLite.
+		{`sqlite3 storage/production.sqlite3 "DROP TABLE orders"`, true},
+		{`sqlite3 app.db 'DELETE FROM sessions'`, true},
+		{`sqlite3 app.db "DELETE FROM sessions WHERE expires < 0"`, false},
+		{`sqlite3 app.db "ALTER TABLE users DROP COLUMN legacy"`, true},
+		{`sqlite3 app.db "ALTER TABLE users ADD COLUMN nick TEXT"`, false},
+		{"sqlite3 app.db < migrations/001_drop.sql", true},
+		{"sqlite3 app.db < seed.sql", false},
+		{`sqlite3 app.db ".read migrations/001_drop.sql"`, true},
+		{"sqlite3 -init migrations/001_drop.sql app.db .quit", true},
+		{`sqlite3 app.db ".restore backup.db"`, true},
+		{`sqlite3 app.db .dump > backup.sql`, false},
+		{`sqlite3 app.db "SELECT count(*) FROM orders"`, false},
+		{`docker exec -i pb sqlite3 /pb/pb_data/data.db "UPDATE users SET verified = 1"`, true},
+		{`litecli app.db -e "DROP TABLE t"`, true},
+
 		// Mentions that don't run anything.
 		{`git commit -m "run prisma migrate deploy on release"`, false},
 		{`grep -rn "DROP TABLE" migrations/`, false},

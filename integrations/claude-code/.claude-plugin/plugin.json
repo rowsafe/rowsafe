@@ -1,7 +1,7 @@
 {
   "name": "rowsafe",
   "version": "0.2.0",
-  "description": "Database safety net for AI agents (PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse): Rowsafe's MCP server (Sign in with Rowsafe), a safety workflow skill, and a hook that creates a restore point before migrations and destructive SQL.",
+  "description": "Database safety net for AI agents (PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, SQLite): Rowsafe's MCP server (Sign in with Rowsafe), a safety workflow skill, and a hook that creates a restore point before migrations and destructive SQL.",
   "author": { "name": "Rowsafe" },
   "homepage": "https://rowsafe.sh",
   "privacyPolicyUrl": "https://rowsafe.sh/legal/privacy",
