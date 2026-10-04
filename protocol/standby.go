@@ -226,6 +226,10 @@ type StandbyTarget struct {
 	// Reason are about receiving a clone.)
 	Standby   bool   `json:"standby,omitempty"`
 	NoStandby string `json:"no_standby,omitempty"`
+	// New: nothing runs on Port yet; root's helper creates the server
+	// there when it is picked (Redis and Valkey: --redis-standby,
+	// --redis-clones).
+	New bool `json:"new,omitempty"`
 }
 
 // StandbyInstructions are what the control plane tells an agent about

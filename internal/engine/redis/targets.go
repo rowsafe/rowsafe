@@ -188,7 +188,7 @@ func (e *Engine) StandbyTargets(ctx context.Context, env agent.EngineEnv) []prot
 			if env.HelperCan == nil || !env.HelperCan(helperRedisCreate, port) {
 				break
 			}
-			t := protocol.StandbyTarget{Engine: e.name, Port: port}
+			t := protocol.StandbyTarget{Engine: e.name, Port: port, New: true}
 			if bin, err := serverBinary(e.name, ""); err == nil {
 				if _, v, err := binaryVersion(bin); err == nil {
 					t.Version = fmt.Sprintf("%d.%d.%d", v/10000, v/100%100, v%100)
