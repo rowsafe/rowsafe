@@ -19,8 +19,8 @@ import (
 
 type findMomentInput struct {
 	Database string   `json:"database" jsonschema:"the database's name or ID"`
-	Tables   []string `json:"tables,omitempty" jsonschema:"only these tables: schema.table or just table (e.g. applications)"`
-	DB       string   `json:"db,omitempty" jsonschema:"only this database inside the server, when it has several"`
+	Tables   []string `json:"tables,omitempty" jsonschema:"only these tables: schema.table or just table (e.g. applications); Redis and Valkey: key names or patterns (user:42, session:*)"`
+	DB       string   `json:"db,omitempty" jsonschema:"only this database inside the server, when it has several (Redis and Valkey: a logical database, db0, db1...)"`
 	// SinceHours is how far back from To to search.
 	SinceHours float64    `json:"since_hours,omitempty" jsonschema:"how many hours back to search (default 24, at most 168); ignored when from is set"`
 	From       *time.Time `json:"from,omitempty" jsonschema:"search from this time (RFC 3339)"`
@@ -80,9 +80,10 @@ const momentGuidance = "Tell the user what happened and when. The database's cha
 func (t *tools) addMomentTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "find_moment",
-		Description: "Finds when rows were deleted or changed, or a table emptied (TRUNCATE) or dropped: the Rowsafe agent reads the database's change log (PostgreSQL's WAL; for other engines where supported, their binary log or oplog) in the user's own storage, on their server, " +
+		Description: "Finds when rows were deleted or changed, or a table emptied (TRUNCATE) or dropped: the Rowsafe agent reads the database's change log (PostgreSQL's WAL; for other engines where supported, their binary log, oplog, or Redis's replication stream) in the user's own storage, on their server, " +
 			"and lists the biggest changes per transaction with the exact commit time, transaction ID, table, row count and the point in time just before it (the moment to rewind to). " +
 			"Read-only: it never changes the database and never reads row contents. " +
+			"Redis and Valkey: pass key names or patterns in tables; results count the keys each change touched under the pattern searched (key names never leave the server). " +
 			"Default range: the last 24 hours. A search can take a minute or more; while its status is queued or running, the result has a task_id, and passing that task_id returns the search's result instead of starting a new one. " +
 			"list_searches lists the recent searches (their task_ids and summaries) and how far back a search can go.",
 		Annotations: readOnly("Find the moment"),
