@@ -229,6 +229,12 @@ func (a *Agent) engineStandbyCreate(ctx context.Context, es EngineStandby, db pr
 		return nil, fmt.Errorf("reading the primary's handoff: %w", err)
 	}
 	// The primary's bucket, from now on this database's repository here.
+	// In Rowsafe Storage this agent uses its own credentials for it.
+	if sec.Repo.RowsafeStorage() {
+		if err := a.ensureStorageCredentials(ctx); err != nil {
+			return nil, err
+		}
+	}
 	hadRepo := exists(a.repoPath(db.ID))
 	if err := a.saveHandedRepo(db.ID, sec.Repo); err != nil {
 		return nil, err

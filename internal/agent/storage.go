@@ -42,13 +42,18 @@ func (c Config) ValidateRepo() error {
 	if !c.RowsafeStorage() {
 		return c.Repo.Validate()
 	}
-	if strings.TrimSpace(c.Repo.CipherPass) == "" {
+	return validCipherPass(c.Repo.CipherPass)
+}
+
+// validCipherPass checks the passphrase of a repository in Rowsafe Storage.
+func validCipherPass(pass string) error {
+	if strings.TrimSpace(pass) == "" {
 		return errors.New("repository not configured, missing: ROWSAFE_REPO_CIPHER_PASS (Rowsafe Storage still encrypts backups on this server)")
 	}
-	if len(c.Repo.CipherPass) < 20 {
+	if len(pass) < 20 {
 		return errors.New("ROWSAFE_REPO_CIPHER_PASS must be at least 20 characters")
 	}
-	if strings.ContainsAny(c.Repo.CipherPass, "\n\r") {
+	if strings.ContainsAny(pass, "\n\r") {
 		return errors.New("repository settings must not contain newlines")
 	}
 	return nil
@@ -161,21 +166,76 @@ func (a *Agent) repo() (pgbackrest.Repo, error) {
 	if !a.cfg.RowsafeStorage() {
 		return a.cfg.Repo, nil
 	}
+	c, err := a.managedCreds()
+	if err != nil {
+		return pgbackrest.Repo{}, err
+	}
+	return WithStorageCredentials(a.cfg.Repo, c), nil
+}
+
+// managedCreds are the Rowsafe Storage credentials this agent holds, for
+// its own repository or one a primary handed over in Rowsafe Storage.
+func (a *Agent) managedCreds() (*protocol.StorageCredentials, error) {
 	c, refreshErr := a.storage.get()
 	if c == nil {
 		if refreshErr != "" {
-			return pgbackrest.Repo{}, fmt.Errorf("%w (last attempt: %s)", errNoStorageCredentials, refreshErr)
+			return nil, fmt.Errorf("%w (last attempt: %s)", errNoStorageCredentials, refreshErr)
 		}
-		return pgbackrest.Repo{}, errNoStorageCredentials
+		return nil, errNoStorageCredentials
 	}
 	if !c.ExpiresAt.After(time.Now()) {
 		msg := fmt.Sprintf("the Rowsafe Storage credentials expired at %s and could not be renewed", c.ExpiresAt.UTC().Format(time.RFC3339))
 		if refreshErr != "" {
 			msg += ": " + refreshErr
 		}
-		return pgbackrest.Repo{}, errors.New(msg)
+		return nil, errors.New(msg)
 	}
-	return WithStorageCredentials(a.cfg.Repo, c), nil
+	return c, nil
+}
+
+// needsManagedStorage reports whether this agent needs Rowsafe Storage
+// credentials: its own backups go there, or a primary on Rowsafe Storage
+// handed its repository over (this server is, or was promoted from, its
+// standby). Credentials are per organization, so any of its agents can get
+// them, whatever ROWSAFE_STORAGE says.
+func (a *Agent) needsManagedStorage() bool {
+	return a.cfg.RowsafeStorage() || a.hasHandedRowsafe()
+}
+
+// hasHandedRowsafe reports whether a handed-over repository is in Rowsafe
+// Storage.
+func (a *Agent) hasHandedRowsafe() bool {
+	paths, _ := filepath.Glob(filepath.Join(a.standbyDir(), "repo-*.json"))
+	for _, p := range paths {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var h handedFile
+		if json.Unmarshal(data, &h) == nil && h.RowsafeStorage {
+			return true
+		}
+	}
+	return false
+}
+
+// ensureStorageCredentials gets Rowsafe Storage credentials now unless
+// this agent holds some that last at least another day: before it takes on
+// a repository a primary on Rowsafe Storage handed over. The renewal loop
+// keeps them fresh from then on.
+func (a *Agent) ensureStorageCredentials(ctx context.Context) error {
+	if c, _ := a.storage.get(); c != nil && c.ExpiresAt.After(time.Now().Add(24*time.Hour)) {
+		return nil
+	}
+	if c, err := LoadStorageCredentials(a.cfg); err == nil && c != nil && c.ExpiresAt.After(time.Now().Add(24*time.Hour)) {
+		a.storage.set(c)
+		return nil
+	}
+	if err := a.refreshStorage(ctx); err != nil {
+		a.storage.failed(err)
+		return fmt.Errorf("this server couldn't get access to Rowsafe Storage, where the primary keeps its backups: %w", err)
+	}
+	return nil
 }
 
 // storageRefreshDue says when to ask for credentials next: now without
@@ -210,19 +270,22 @@ func (a *Agent) refreshStorage(ctx context.Context) error {
 		return fmt.Errorf("saving the Rowsafe Storage credentials: %w", err)
 	}
 	a.storage.set(&c)
-	a.rotateConfigs(WithStorageCredentials(a.cfg.Repo, &c))
+	a.rotateConfigs(WithStorageCredentials(pgbackrest.Repo{}, &c))
 	a.log.Info("renewed the Rowsafe Storage credentials", "expires_at", c.ExpiresAt.UTC().Format(time.RFC3339),
 		"next_renewal", storageRefreshDue(&c, time.Now()).UTC().Format(time.RFC3339))
 	return nil
 }
 
 // rotateConfigs puts repo's credentials into every pgBackRest config in the
-// config directory whose repository is repo, including those of databases
+// config directory whose repository is under repo's prefix (the
+// organization's, in Rowsafe Storage): this agent's own databases, those a
+// primary on Rowsafe Storage handed over, whatever their folder, and those
 // the agent doesn't watch any more: PostgreSQL may still archive with
 // them, and a config it can't use would fill its disk with WAL.
 func (a *Agent) rotateConfigs(repo pgbackrest.Repo) {
 	a.confMu.Lock()
 	defer a.confMu.Unlock()
+	root := repo.Root()
 	paths, _ := filepath.Glob(filepath.Join(a.cfg.ConfigDir, "*.conf"))
 	for _, path := range paths {
 		stanza := strings.TrimSuffix(filepath.Base(path), ".conf")
@@ -230,7 +293,7 @@ func (a *Agent) rotateConfigs(repo pgbackrest.Repo) {
 		if err != nil {
 			continue
 		}
-		if pgbackrest.Location(string(old)) != repo.Location(stanza) {
+		if !strings.HasPrefix(pgbackrest.Location(string(old)), root) {
 			continue // another repository: writeConfig moves it (repo switch)
 		}
 		conf, ok := pgbackrest.SetCredentials(string(old), repo)
@@ -246,7 +309,7 @@ func (a *Agent) rotateConfigs(repo pgbackrest.Repo) {
 // startStorage loads saved credentials and, when there are none or they are
 // due, asks for new ones once before the agent takes on work.
 func (a *Agent) startStorage(ctx context.Context) {
-	if !a.cfg.RowsafeStorage() {
+	if !a.needsManagedStorage() {
 		return
 	}
 	c, err := LoadStorageCredentials(a.cfg)
@@ -264,15 +327,30 @@ func (a *Agent) startStorage(ctx context.Context) {
 	}
 }
 
+// storageIdleCheck is how often an agent without Rowsafe Storage checks
+// whether it needs credentials now (a variable for tests).
+var storageIdleCheck = time.Hour
+
 // storageRetry is how long the agent waits after a failed renewal.
 var storageRetry = func(failures int) time.Duration {
 	return min(time.Duration(failures)*time.Minute, 15*time.Minute)
 }
 
-// managedStorageLoop renews the Rowsafe Storage credentials when they are due.
+// managedStorageLoop renews the Rowsafe Storage credentials when they are
+// due. On a server that doesn't need any (its own bucket, no standby of a
+// primary on Rowsafe Storage) it only looks again every hour.
 func (a *Agent) managedStorageLoop(ctx context.Context) {
 	failures := 0
 	for {
+		if !a.needsManagedStorage() {
+			failures = 0
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(storageIdleCheck):
+			}
+			continue
+		}
 		c, _ := a.storage.get()
 		wait := time.Until(storageRefreshDue(c, time.Now()))
 		if failures > 0 {
@@ -322,6 +400,15 @@ func (a *Agent) storageStatus() *protocol.StorageStatus {
 	st := &protocol.StorageStatus{Mode: a.cfg.Storage}
 	if !a.cfg.RowsafeStorage() {
 		st.Repo = a.cfg.Repo.ID()
+		// A standby (or promoted standby) of a primary on Rowsafe Storage
+		// uses this agent's credentials too: say when they run out.
+		if c, refreshErr := a.storage.get(); a.hasHandedRowsafe() {
+			st.RefreshError = refreshErr
+			if c != nil {
+				exp := c.ExpiresAt.UTC()
+				st.CredentialsExpireAt = &exp
+			}
+		}
 		return st
 	}
 	c, refreshErr := a.storage.get()
@@ -420,14 +507,16 @@ func lastLine(out []byte) string {
 // there, so WAL archiving continues in the new storage at once. Failures
 // are retried at most every 10 minutes per stanza.
 func (a *Agent) syncRepos(ctx context.Context, dbs []protocol.DatabaseSpec) {
-	repo, err := a.repo()
-	if err != nil {
-		return // no credentials yet: nothing to move to
-	}
 	for _, db := range dbs {
 		conf, err := os.ReadFile(a.cfg.configPath(db.Stanza))
 		if err != nil {
 			continue // not adopted yet (adopt writes the config)
+		}
+		// Where db's backups go: this agent's storage, or the repository
+		// its primary handed over (a promoted standby keeps that one).
+		repo, err := a.dbRepo(db)
+		if err != nil {
+			continue // no credentials yet: nothing to move to
 		}
 		moved := pgbackrest.Location(string(conf)) != repo.Location(db.Stanza)
 		if !moved && !a.stanzaPending(db.Stanza) {
@@ -460,11 +549,11 @@ func (a *Agent) syncRepos(ctx context.Context, dbs []protocol.DatabaseSpec) {
 // over (a standby, standby.go), else this agent's own: Rowsafe Storage or
 // its bucket.
 func (a *Agent) dbRepo(db protocol.DatabaseSpec) (pgbackrest.Repo, error) {
-	if db.ID != "" {
-		if _, err := os.Stat(a.repoPath(db.ID)); err == nil {
-			r := a.repoFor(db)
-			return r, r.Validate()
+	if r, ok, err := a.handedRepoFor(db); ok || err != nil {
+		if err != nil {
+			return r, err
 		}
+		return r, r.Validate()
 	}
 	if err := a.cfg.ValidateRepo(); err != nil {
 		return pgbackrest.Repo{}, err
@@ -473,9 +562,3 @@ func (a *Agent) dbRepo(db protocol.DatabaseSpec) (pgbackrest.Repo, error) {
 	r.Folder = a.repoFolder(db.Stanza) // a fresh start in a new folder (taskerror.go)
 	return r, err
 }
-
-// errStandbyRowsafeStorage: a primary on Rowsafe Storage can't hand its
-// repository to a standby. Its credentials are short-lived and renewed by
-// its own agent, so a copy would stop working within days.
-var errStandbyRowsafeStorage = errors.New("a standby isn't available yet for a server that keeps its backups in Rowsafe Storage: " +
-	"move this server to your own bucket first (install.sh --setup-storage)")
