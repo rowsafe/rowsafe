@@ -411,8 +411,9 @@ func TestRedisSecondCopy(t *testing.T) {
 	seed(t, a)
 	mustRun[protocol.AdoptResult](t, e, env, db, protocol.TaskAdopt, protocol.AdoptParams{Apply: true})
 	mustRun[protocol.CheckResult](t, e, env, db, protocol.TaskCheck, nil)
-	env2 := env
+	env2 := env // as the agent's engineEnv2: its own state, the first pipeline's logins
 	env2.Repo = testRepo(t, "bkt2")
+	env2.MainStateDir = env.SharedStateDir()
 	env2.StateDir = filepath.Join(env.StateDir, "copy2")
 	db2 := db
 	db2.ID += "~copy2"
