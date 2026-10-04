@@ -1,4 +1,5 @@
-// Package tuneroot is the root side of Tuning for MongoDB and ClickHouse:
+// Package tuneroot is the root side of Tuning for MongoDB, ClickHouse,
+// Redis and Valkey:
 // root's copy of the agent (rowsafe-permissions tuning-apply, started by
 // rowsafe-tuning.path) writes the settings a person changed into files of
 // Rowsafe's own, and nowhere else, only where root allowed it at install
@@ -10,6 +11,10 @@
 //   - MongoDB: the settings' keys in the configuration file root listed,
 //     edited as YAML (comments and the rest kept), with a copy kept first.
 //     MongoDB reads it when it starts.
+//   - Redis and Valkey: the settings' lines in the configuration file root
+//     listed (redis.conf, valkey.conf), with a copy kept first. The agent
+//     changes them on the running server itself (CONFIG SET); the file
+//     keeps them after a restart.
 //
 // The agent is not trusted: the request names settings from a fixed list
 // with plain numbers or fixed words; root builds every file itself. The
@@ -103,6 +108,30 @@ var mongoSettings = map[string]setting{
 }
 
 var (
+	yesNo         = []string{"yes", "no"}
+	redisPolicies = []string{"noeviction", "allkeys-lru", "allkeys-lfu", "allkeys-random", "volatile-lru", "volatile-lfu", "volatile-random", "volatile-ttl"}
+	redisSettings = map[string]setting{
+		"maxmemory":                 {kind: "int"},
+		"maxmemory-policy":          {kind: "words", words: redisPolicies},
+		"activedefrag":              {kind: "words", words: yesNo},
+		"save":                      {kind: "save"},
+		"appendonly":                {kind: "words", words: yesNo},
+		"appendfsync":               {kind: "words", words: []string{"always", "everysec", "no"}},
+		"maxclients":                {kind: "int"},
+		"timeout":                   {kind: "int"},
+		"tcp-keepalive":             {kind: "int"},
+		"slowlog-log-slower-than":   {kind: "sint"},
+		"slowlog-max-len":           {kind: "int"},
+		"latency-monitor-threshold": {kind: "int"},
+		"latency-tracking":          {kind: "words", words: yesNo},
+	}
+	sintRE = regexp.MustCompile(`^-?[0-9]{1,15}$`)
+	// saveRE: Redis's snapshot rules (pairs of seconds and changes), or
+	// "" (two quotes: off). Nothing else can reach the file.
+	saveRE = regexp.MustCompile(`^(""|[0-9]{1,9} [0-9]{1,9}( [0-9]{1,9} [0-9]{1,9}){0,7})$`)
+)
+
+var (
 	idRE   = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 	intRE  = regexp.MustCompile(`^[0-9]{1,15}$`)
 	realRE = regexp.MustCompile(`^[0-9]{1,3}(\.[0-9]{1,6})?$`)
@@ -110,10 +139,7 @@ var (
 
 // Settings lists the names root accepts for engine.
 func Settings(engine string) []string {
-	m := clickhouseSettings
-	if engine == "mongodb" {
-		m = mongoSettings
-	}
+	m := settingsOf(engine)
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
@@ -122,18 +148,26 @@ func Settings(engine string) []string {
 	return out
 }
 
+// settingsOf is engine's fixed list (nil for an unknown engine).
+func settingsOf(engine string) map[string]setting {
+	switch engine {
+	case "clickhouse":
+		return clickhouseSettings
+	case "mongodb":
+		return mongoSettings
+	case "redis", "valkey":
+		return redisSettings
+	}
+	return nil
+}
+
 // Check validates a request against the fixed lists.
 func Check(r Request) error {
 	if !idRE.MatchString(r.ID) {
 		return errors.New("invalid request id")
 	}
-	var list map[string]setting
-	switch r.Engine {
-	case "clickhouse":
-		list = clickhouseSettings
-	case "mongodb":
-		list = mongoSettings
-	default:
+	list := settingsOf(r.Engine)
+	if list == nil {
 		return fmt.Errorf("unknown engine %q", r.Engine)
 	}
 	if len(r.Settings) == 0 || len(r.Settings) > 40 {
@@ -151,6 +185,14 @@ func Check(r Request) error {
 		case "int":
 			if !intRE.MatchString(v) {
 				return fmt.Errorf("%s: %q is not a whole number", name, v)
+			}
+		case "sint":
+			if !sintRE.MatchString(v) {
+				return fmt.Errorf("%s: %q is not a whole number", name, v)
+			}
+		case "save":
+			if !saveRE.MatchString(v) {
+				return fmt.Errorf("%s: %q is not a list of seconds and changes", name, v)
 			}
 		case "real":
 			if !realRE.MatchString(v) {
@@ -242,9 +284,12 @@ func (a *Applier) Apply(r Request, where string) Result {
 	}
 	backup := filepath.Join(a.StateDir, "backups", a.Now().UTC().Format("20060102-150405")+"-"+r.ID)
 	var err error
-	if r.Engine == "clickhouse" {
+	switch r.Engine {
+	case "clickhouse":
 		res.Files, err = a.applyClickHouse(r, where, &st, backup)
-	} else {
+	case "redis", "valkey":
+		res.Files, err = a.applyRedis(r, where, &st, backup)
+	default:
 		res.Files, err = a.applyMongo(r, where, &st, backup)
 	}
 	if err == nil {
