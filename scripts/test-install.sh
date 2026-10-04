@@ -2687,7 +2687,7 @@ redis_flow_tests() {
   chown redis:adm /var/log/redis/redis-server.log && chmod 640 /var/log/redis/redis-server.log
   scenario "discover_out=$rd" "redis-status_out=$(rdst ok)\nlogfile=/var/log/redis/redis-server.log" "plan_out=$rdplan"
   tty_ok "Redis: its log made readable to the agent" "Name it in Rowsafe\t\nTurn on backups for cache now?\tn\n" "$INSTALLER"
-  has "Rowsafe can read Redis's log (/var/log/redis/redis-server.log) for the Logs page"
+  has "gave the Rowsafe agent read access to /var/log/redis (Redis's own log, for the Logs page; read-only, with an ACL; nothing else changed)"
   [ "$(stat -c '%U %G %a' /var/log/redis/redis-server.log)" = "redis adm 640" ] || fail "$name: the log's owner or mode changed"
   getfacl -p /var/log/redis 2>/dev/null | grep -qx 'default:user:postgres:r--' || fail "$name: no default ACL: $(getfacl -p /var/log/redis)"
   setpriv --reuid=postgres --regid=postgres --init-groups -- cat /var/log/redis/redis-server.log >/dev/null || fail "$name: the agent can't read the log"

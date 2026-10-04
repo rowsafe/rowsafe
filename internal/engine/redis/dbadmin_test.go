@@ -22,6 +22,16 @@ func TestPresetRules(t *testing.T) {
 			t.Errorf("%s not recognized", p.access)
 		}
 	}
+	// Redis 7.0 spells -@dangerous out command by command.
+	if got := presetOf("-@all +@read +@connection -sort_ro -client|unpause -client|unblock -client|no-evict -client|pause -client|list -client|kill -keys"); got != protocol.DBAccessReadOnly {
+		t.Errorf("7.0 read-only = %q", got)
+	}
+	if got := presetOf("+@all -@admin -sort -sort_ro -swapdb -migrate -restore-asking -restore -flushdb -keys -flushall"); got != protocol.DBAccessReadWrite {
+		t.Errorf("7.0 read-write = %q", got)
+	}
+	if presetOf("+@all -@admin") != "" || presetOf("+@all -keys") != "" {
+		t.Error("a hand-made user taken for a preset")
+	}
 	if presetOf("+@all -@dangerous") != "" || presetOf("+get") != "" {
 		t.Error("custom rules recognized as a preset")
 	}

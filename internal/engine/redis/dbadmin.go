@@ -74,7 +74,30 @@ func presetOf(commands string) string {
 			return p.access
 		}
 	}
+	// Redis 7.0 lists -@dangerous as the commands it removes (-keys
+	// -flushall ...) and folds +info back in: compare the categories, when
+	// the dangerous KEYS is among the removed commands.
+	if !slices.Contains(got, "-keys") {
+		return ""
+	}
+	for _, p := range redisPresets {
+		want := strings.Fields(p.commands)
+		if slices.Contains(want, "-@dangerous") && slices.Equal(categories(got), categories(want)) {
+			return p.access
+		}
+	}
 	return ""
+}
+
+// categories are the +@/-@ rules but -@dangerous.
+func categories(rules []string) []string {
+	var out []string
+	for _, r := range rules {
+		if len(r) > 2 && r[1] == '@' && r != "-@dangerous" {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // aclUser is ACL GETUSER's reply.

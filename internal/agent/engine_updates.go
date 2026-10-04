@@ -254,6 +254,9 @@ func (a *Agent) engineUpdate(ctx context.Context, db protocol.DatabaseSpec, task
 	if vr == nil {
 		return nil, fmt.Errorf("This agent can't update %s yet; update the agent (this is %s).", name, Version)
 	}
+	if err := a.restartRefusal(ctx, db); err != nil { // engine.go: the update restarts it
+		return nil, err
+	}
 	env := a.engineEnv(protocol.NormalizeEngine(db.Engine))
 	before, err := vr.Version(ctx, env, db)
 	if err != nil {

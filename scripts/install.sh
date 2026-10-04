@@ -8947,7 +8947,7 @@ redis_log_access() {
     have setfacl && ! getfacl -p -s -- "$_d" "$RD_LOGFILE" 2>/dev/null | grep -q '^mask::' &&
     setfacl -m "u:$AGENT_USER:rx" -- "$_d" && setfacl -d -m "u:$AGENT_USER:r" -- "$_d" &&
     setfacl -m "u:$AGENT_USER:r" -- "$RD_LOGFILE" && redis_agent_reads "$RD_LOGFILE"; then
-    ok "Rowsafe can read $_name's log ($RD_LOGFILE) for the Logs page: read only, by an access rule on $_d"
+    ok "gave the Rowsafe agent read access to $_d ($_name's own log, for the Logs page; read-only, with an ACL; nothing else changed)"
     return 0
   fi
   note "Rowsafe can't read $_name's log ($RD_LOGFILE). The Logs page in the dashboard says how to let it."

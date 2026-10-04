@@ -41,9 +41,7 @@ func (e *Engine) UpgradeIssues(ctx context.Context, env agent.EngineEnv, db prot
 	if c, err := connectDB(ctx, env, db); err == nil {
 		// The upgrade restarts the server: one that keeps nothing on its own
 		// disk would come back empty.
-		save, _ := c.configGet(ctx, "save")
-		aof, _ := c.configGet(ctx, "appendonly")
-		if strings.TrimSpace(save) == "" && aof != "yes" {
+		if keepsNothing(ctx, c) { // restart.go
 			issues = append(issues, fmt.Sprintf("%s keeps nothing on its own disk (snapshots and the append-only file are off), so the restart the upgrade needs would empty it: turn on snapshots first (Tuning)", name))
 		}
 		if mods := productionModules(ctx, c); len(mods) > 0 {
