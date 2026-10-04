@@ -339,7 +339,7 @@ type fkIdea struct {
 }
 
 func (x fkIdea) spec() protocol.IndexSpec {
-	s := protocol.IndexSpec{DB: "main", Schema: "main", Table: x.table.Name, Columns: slices.Clone(x.fk.Columns)}
+	s := protocol.IndexSpec{DB: "main", Table: x.table.Name, Columns: slices.Clone(x.fk.Columns)}
 	s.Name = protocol.IndexName(s)
 	return s
 }

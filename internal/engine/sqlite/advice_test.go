@@ -205,7 +205,7 @@ func TestAdviceCreateIndexRefusals(t *testing.T) {
 	_, path := adviceDB(t, `CREATE TABLE o (id INTEGER PRIMARY KEY, cid INTEGER)`)
 	db := testSpec(path)
 	e := &Engine{}
-	ok := protocol.IndexSpec{DB: "main", Schema: "main", Table: "o", Columns: []string{"cid"}}
+	ok := protocol.IndexSpec{DB: "main", Table: "o", Columns: []string{"cid"}}
 	ok.Name = protocol.IndexName(ok)
 	for name, spec := range map[string]protocol.IndexSpec{
 		"bad name":     {DB: "main", Schema: "main", Table: "o", Columns: []string{"cid"}, Name: `x"; DROP TABLE o; --`},
@@ -361,7 +361,7 @@ func TestSQLiteAdvice(t *testing.T) {
 
 	// Next run: nothing left to suggest; the created index is tracked.
 	res, err = run[protocol.IndexAdvisorResult](t, e, env, db, protocol.TaskIndexAdvisor, protocol.IndexAdvisorParams{
-		Track: []protocol.TrackedIndex{{DB: "main", Schema: "main", Index: rec.Spec.Name}}})
+		Track: []protocol.TrackedIndex{{DB: "main", Index: rec.Spec.Name}}})
 	if err != nil || len(res.Generated) != 0 || len(res.Usage) != 1 || !res.Usage[0].Exists {
 		t.Fatalf("after creating it: %+v %v", res, err)
 	}

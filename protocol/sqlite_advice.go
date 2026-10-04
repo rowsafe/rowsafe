@@ -22,7 +22,7 @@ import "strings"
 // The file's own state (journal mode, auto_vacuum, free pages) is in
 // SQLiteStatus. The index advisor (TaskIndexAdvisor; IndexAdvisorParams
 // .Statements are ignored) proposes one index per foreign key without one
-// (IndexSpec DB and Schema "main"), builds it on a copy restored from the
+// (IndexSpec DB "main", Schema empty: SQLite has no schemas), builds it on a copy restored from the
 // backups to measure its build time and size and to check that SQLite uses
 // it for the key's lookups (IndexRecommendation.ForeignKey), and reports
 // it. Created on production by MaintCreateIndex with CreateIndex: CREATE
