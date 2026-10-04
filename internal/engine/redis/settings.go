@@ -100,7 +100,7 @@ func (e *Engine) howKept(env agent.EngineEnv, configFile string, docker bool) (k
 	}
 	msg := fmt.Sprintf("Changes apply at once. %s keeps them in its configuration file itself when it may write it; otherwise they last until it restarts.", name)
 	if !docker {
-		msg += fmt.Sprintf(" To keep them in the file every time, root allows Tuning (%s).", agent.AllowHint(protocol.PermTuning))
+		msg += " Allowing Tuning on the server (a permission root gives when Rowsafe is installed) lets Rowsafe keep them in the file every time."
 	}
 	return protocol.RedisKeptRewrite, msg
 }

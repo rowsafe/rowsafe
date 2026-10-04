@@ -107,6 +107,7 @@ var redisFeatures = EngineFeatures{
 	RewindCopy: true, RewindRows: true, RewindInPlace: true, Marks: true,
 	Monitoring: true, Fixes: true, Restart: true,
 	Files: true, SecondCopy: true,
+	Settings: true, // Tuning: CONFIG SET, kept in redis.conf (settings.go)
 }
 
 // valkeyFeatures are Redis's: Valkey is a fork of Redis 7.2 that speaks the
