@@ -31,6 +31,11 @@ const aclRules = "~* resetchannels -@all +@read -keys +ping +info +select +dbsiz
 	"+config|get +config|set +config|rewrite +client|list +client|kill +client|setname +client|info +client|id " +
 	"+slowlog|get +slowlog|len +latency|latest +module|list +role +sync +psync +replconf +bgsave +lastsave +acl|whoami"
 
+// aclManageRules let Rowsafe's user manage ACL users (Databases & users, the
+// security fixes); installs from before they existed lack them until the
+// installer runs again, and the dashboard says so.
+const aclManageRules = "+acl|list +acl|getuser +acl|users +acl|setuser +acl|deluser +acl|save"
+
 // Installer errors (exit codes in cmd/rowsafe-agent).
 var (
 	ErrNeedAdmin       = errors.New("the server asks for a password: an administrator's login is needed once to create Rowsafe's own user (it is used once and never saved)")
@@ -98,7 +103,7 @@ func CreateLogin(ctx context.Context, env agent.EngineEnv, port int, adminUser, 
 	sum := sha256.Sum256([]byte(pw))
 	hash := "#" + hex.EncodeToString(sum[:])
 	args := []any{"ACL", "SETUSER", LoginUser, "reset", "on", hash}
-	for _, r := range strings.Fields(aclRules) {
+	for _, r := range strings.Fields(aclRules + " " + aclManageRules) {
 		args = append(args, r)
 	}
 	if _, err := c.do(ctx, args...); err != nil {
@@ -118,7 +123,7 @@ func CreateLogin(ctx context.Context, env agent.EngineEnv, port int, adminUser, 
 	if err := saveLogin(env, port, l); err != nil {
 		return res, err
 	}
-	res.ACLLine = "user " + LoginUser + " on " + hash + " " + aclRules
+	res.ACLLine = "user " + LoginUser + " on " + hash + " " + aclRules + " " + aclManageRules
 	// Kept across restarts?
 	aclfile, _ := c.configGet(ctx, "aclfile")
 	switch {

@@ -211,6 +211,11 @@ func ConnectionURL(c DBConnection, password string) string {
 		scheme = "mongodb"
 	case EngineClickHouse:
 		scheme = "clickhouse"
+	case EngineRedis, EngineValkey:
+		scheme = "redis"
+		if c.SSLMode == "require" {
+			scheme = "rediss"
+		}
 	}
 	u := scheme + "://" + urlEscape(c.User)
 	if password != "" {
