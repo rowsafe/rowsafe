@@ -83,6 +83,9 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 	if task.Type == protocol.TaskServerFirewall { // servers Rowsafe creates (server_firewall.go)
 		return a.serverFirewallTask(ctx, task, tl)
 	}
+	if task.Type == protocol.TaskAutoSecurityUpdates { // the server's own, with or without a database (auto_security.go)
+		return typed(a.autoSecurityUpdates(ctx, task.ID, tl))
+	}
 	if task.Database == nil {
 		return nil, fmt.Errorf("task %s has no database", task.Type)
 	}

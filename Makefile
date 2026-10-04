@@ -76,6 +76,11 @@ check-installer:
 		diff -u deploy/logrotate/rowsafe - || { echo "scripts/install.sh: embedded logrotate config differs from deploy/logrotate/rowsafe"; exit 1; }
 	@sed -n "/<<'ROWSAFE_RESTART_HELPER_EOF'; then\$$/,/^ROWSAFE_RESTART_HELPER_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
 		diff -u scripts/rowsafe-pg-restart - || { echo "scripts/install.sh: embedded restart helper differs from scripts/rowsafe-pg-restart"; exit 1; }
+	@# Automatic security updates: the installer's own copy of the setup is the helper's.
+	@a=$$(sed -n '/^# >>> auto-security-updates$$/,/^# <<< auto-security-updates$$/p' scripts/rowsafe-pg-restart); \
+	b=$$(sed "/<<'ROWSAFE_RESTART_HELPER_EOF'; then\$$/,/^ROWSAFE_RESTART_HELPER_EOF\$$/d" scripts/install.sh | \
+		sed -n '/^# >>> auto-security-updates$$/,/^# <<< auto-security-updates$$/p'); \
+	[ -n "$$a" ] && [ "$$a" = "$$b" ] || { echo "scripts/install.sh: the auto-security-updates block differs from scripts/rowsafe-pg-restart's"; exit 1; }
 	@sed -n "/<<'ROWSAFE_RESTART_SERVICE_EOF'; then\$$/,/^ROWSAFE_RESTART_SERVICE_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \
 		diff -u deploy/systemd/rowsafe-pg-restart.service - || { echo "scripts/install.sh: embedded unit differs from deploy/systemd/rowsafe-pg-restart.service"; exit 1; }
 	@sed -n "/<<'ROWSAFE_RESTART_PATH_EOF'; then\$$/,/^ROWSAFE_RESTART_PATH_EOF\$$/p" scripts/install.sh | sed '1d;$$d' | \

@@ -390,6 +390,10 @@ type SoftwareReport struct {
 	// Upgrades are the major upgrades on this server that can still be
 	// undone or cleaned up.
 	Upgrades []UpgradeState `json:"upgrades,omitempty"`
+	// AutoSecurity (addition): automatic security updates and what waits
+	// for a restart (maintenance.go); nil from older agents and in
+	// containers.
+	AutoSecurity *AutoSecurityReport `json:"auto_security,omitempty"`
 }
 
 // ClusterSoftware is one local PostgreSQL cluster's versions.
@@ -535,6 +539,10 @@ type UpgradeInfo struct {
 	CheckedAt *time.Time `json:"checked_at,omitempty"`
 	// Tasks are recent update and upgrade tasks, newest first.
 	Tasks []TaskView `json:"tasks,omitempty"`
+	// Maintenance (addition): the Rowsafe Cloud server's maintenance
+	// window, what it will apply and missing critical fixes; nil on other
+	// servers (maintenance.go).
+	Maintenance *MaintenanceInfo `json:"maintenance,omitempty"`
 }
 
 // ConfirmRequest carries the confirmation of a change: the database's name

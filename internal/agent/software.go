@@ -172,6 +172,11 @@ func (a *Agent) buildSoftware(ctx context.Context) *protocol.SoftwareReport {
 		return r
 	}
 	r.PackageManager = "apt"
+	// Automatic security updates (auto_security.go): a newer kernel that
+	// needrestart found waiting needs a reboot too.
+	if r.AutoSecurity = buildAutoSecurity(); r.AutoSecurity != nil && r.AutoSecurity.KernelPending {
+		r.RebootRequired = true
+	}
 	if st, err := os.Stat(aptListsDir); err == nil {
 		t := st.ModTime().UTC()
 		r.ListsUpdatedAt = &t
