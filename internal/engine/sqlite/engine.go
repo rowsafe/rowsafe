@@ -36,6 +36,7 @@ type Engine struct {
 	stateRoot string
 	shippers  map[string]*shipper
 	copies    *copyStore
+	safe      *safeStore // safe copies (copies.go)
 	mon       monitorState
 	copyMu    sync.Mutex
 	busy      sync.Map // database id -> *busyCount
@@ -64,6 +65,7 @@ func (e *Engine) Tasks() []string {
 		protocol.TaskRestorePoint, protocol.TaskMaintenance,
 		protocol.TaskRewindCopy, protocol.TaskRewindDrop, protocol.TaskRewindCompare, protocol.TaskRewindRows,
 		protocol.TaskRewindInPlace, protocol.TaskRewindUndo, protocol.TaskRewindCleanup,
+		protocol.TaskCopySchema, protocol.TaskSafeCopy, // copies*.go
 	}
 }
 
@@ -110,6 +112,7 @@ func (e *Engine) Start(ctx context.Context, env agent.EngineEnv) {
 	}
 	e.mu.Unlock()
 	e.recoverCopies(env)
+	e.recoverSafeCopies(env)      // copies.go
 	go e.recoverInPlace(ctx, env) // inplace.go
 	go func() {
 		t := time.NewTicker(time.Minute)
@@ -121,6 +124,7 @@ func (e *Engine) Start(ctx context.Context, env agent.EngineEnv) {
 			case <-t.C:
 			}
 			e.expireCopies(env, time.Now())
+			e.expireSafeCopies(env, time.Now())
 			e.expireKept(env, time.Now())
 			e.stopIdleShippers()
 		}
@@ -340,6 +344,14 @@ func (e *Engine) Run(ctx context.Context, env agent.EngineEnv, task *protocol.Ta
 			return nil, err
 		}
 		return nilIfNil(e.rewindCleanup(ctx, env, db, p, tl))
+	case protocol.TaskCopySchema:
+		return nilIfNil(e.copySchema(ctx, env, db))
+	case protocol.TaskSafeCopy:
+		var p protocol.SafeCopyParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.safeCopy(ctx, env, db, p, tl))
 	}
 	return nil, fmt.Errorf("SQLite databases can't run %s tasks", task.Type)
 }

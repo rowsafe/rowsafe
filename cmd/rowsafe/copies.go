@@ -307,7 +307,13 @@ func printSafeCopy(cp protocol.SafeCopy) {
 	if !cp.Masked {
 		masked = "NOT masked (real data)"
 	}
+	if cp.SchemaOnly {
+		masked = "structure only (no rows)"
+	}
 	fmt.Printf("Copy %s: %s, %s\n", cp.ID, cp.Status, masked)
+	if cp.Path != "" {
+		fmt.Printf("  File on the server: %s  (readable only by the Rowsafe agent's user and root)\n", cp.Path)
+	}
 	if cp.ConnectionString != "" {
 		fmt.Printf("  Connect:            %s  (password shown once when it was made)\n", cp.ConnectionString)
 	}
@@ -343,12 +349,23 @@ func copiesCreateCmd(ctx context.Context, c *client.Client, args []string) error
 	yes := fs.Bool("yes", false, "don't ask (with --no-masking: confirms it)")
 	asJSON := fs.Bool("json", false, "print JSON (includes the password)")
 	noWait := fs.Bool("no-wait", false, "return once it is queued")
+	schemaOnly := fs.Bool("schema-only", false, "SQLite: the structure only (tables, indexes, views, triggers), no rows")
 	name, err := dbArg(ctx, c, fs, args)
 	if err != nil {
 		return err
 	}
 	if *hours < 1 || *hours > 168 {
 		return errors.New("--hours must be between 1 and 168 (7 days)")
+	}
+	d, err := c.Database(ctx, name)
+	if err != nil {
+		return apiErr(err)
+	}
+	if !client.CopyHasPassword(d.Engine) {
+		return copiesCreateFile(ctx, c, d, name, *hours, *schemaOnly, *noMasking, *yes, *asJSON, *noWait)
+	}
+	if *schemaOnly {
+		return fmt.Errorf("--schema-only is for SQLite databases; %s is %s", name, protocol.EngineDisplayName(d.Engine))
 	}
 	req := protocol.CreateSafeCopyRequest{Hours: *hours, AllowFrom: allow, Listen: *listen, ConnectHost: *connectHost, DB: *db}
 	if *noMasking {
@@ -360,10 +377,6 @@ func copiesCreateCmd(ctx context.Context, c *client.Client, args []string) error
 			}
 		}
 		req.Masking, req.NoMaskingConfirm = protocol.MaskingNone, name
-	}
-	d, err := c.Database(ctx, name)
-	if err != nil {
-		return apiErr(err)
 	}
 	password, verifier, err := client.NewCopyPasswordFor(d.Engine)
 	if err != nil {
@@ -415,6 +428,67 @@ func copiesCreateCmd(ctx context.Context, c *client.Client, args []string) error
 	return nil
 }
 
+// copiesCreateFile makes a SQLite copy: a new file on the server (masked,
+// or the structure only), no address, login or password.
+func copiesCreateFile(ctx context.Context, c *client.Client, d protocol.Database, name string, hours int, schemaOnly, noMasking, yes, asJSON, noWait bool) error {
+	req := protocol.CreateSafeCopyRequest{Hours: hours, SchemaOnly: schemaOnly}
+	what := "a masked copy"
+	switch {
+	case schemaOnly:
+		what = "a structure-only copy"
+	case noMasking:
+		fmt.Printf("This copy will hold the REAL data of %s, as a file on its server.\n", name)
+		if !yes {
+			fmt.Printf("Type the database's name to confirm: ")
+			if strings.TrimSpace(readLine()) != name {
+				return errors.New("not confirmed; nothing was made")
+			}
+		}
+		req.Masking, req.NoMaskingConfirm = protocol.MaskingNone, name
+		what = "an unmasked copy"
+	}
+	resp, err := c.CreateSafeCopy(ctx, name, req)
+	if err != nil {
+		return apiErr(err)
+	}
+	if !noWait {
+		fmt.Fprintf(os.Stderr, "Making %s of %s as a new file on its server...\n", what, name)
+		t, err := c.WaitTask(ctx, resp.Task.ID, nil)
+		if err != nil {
+			return err
+		}
+		if t.Status != protocol.StatusSucceeded {
+			fmt.Printf("The copy couldn't be made: %s\n", orText(t.Error, t.Status))
+			return exitError(1)
+		}
+		if info, err := c.SafeCopies(ctx, name); err == nil {
+			for _, cp := range info.Copies {
+				if cp.ID == resp.Copy.ID {
+					resp.Copy = cp
+				}
+			}
+		}
+	}
+	if asJSON {
+		return printJSON(resp.Copy)
+	}
+	if noWait {
+		fmt.Printf("Queued copy %s. `rowsafe copies %s` shows its file once it is ready.\n", resp.Copy.ID, name)
+		return nil
+	}
+	fmt.Printf("Copy %s is ready", resp.Copy.ID)
+	if m := resp.Copy.Masking; m != nil && !resp.Copy.SchemaOnly && m.Mode != protocol.MaskingNone {
+		fmt.Printf(": %d columns masked in %d tables", m.Columns, m.Tables)
+	}
+	if resp.Copy.SchemaOnly {
+		fmt.Printf(": the structure only, no rows")
+	}
+	fmt.Printf(".\n\nIt is a file on %s, readable only by the Rowsafe agent's user and root:\n\n  %s\n\n", d.Hostname, resp.Copy.Path)
+	fmt.Printf("Copy it to your computer (Rowsafe never downloads it):\n\n  %s\n\n", client.CopyFetchCommand(d.Hostname, resp.Copy.Path))
+	fmt.Printf("It is deleted from the server by itself at %s.\n", describeTime(resp.Copy.Expires))
+	return nil
+}
+
 // copyArgs reads [NAME] ID.
 func copyArgs(ctx context.Context, c *client.Client, fs *flag.FlagSet, args []string) (string, string, error) {
 	pos, err := positionals(fs, args)
@@ -441,7 +515,7 @@ func copiesDeleteCmd(ctx context.Context, c *client.Client, args []string) error
 	if err != nil {
 		return err
 	}
-	if !*yes && !confirm(fmt.Sprintf("Delete safe copy %s of %s? Anyone using it is disconnected.", id, name)) {
+	if !*yes && !confirm(fmt.Sprintf("Delete safe copy %s of %s? Anyone using it is disconnected (a SQLite copy's file is removed).", id, name)) {
 		return errors.New("not deleted")
 	}
 	if _, err := c.DeleteSafeCopy(ctx, name, id); err != nil {
@@ -462,6 +536,9 @@ func copiesPasswordCmd(ctx context.Context, c *client.Client, args []string) err
 	d, err := c.Database(ctx, name)
 	if err != nil {
 		return apiErr(err)
+	}
+	if !client.CopyHasPassword(d.Engine) {
+		return fmt.Errorf("a %s copy is a file on the server: it has no password (only the Rowsafe agent's user and root can read it)", protocol.EngineDisplayName(d.Engine))
 	}
 	password, verifier, err := client.NewCopyPasswordFor(d.Engine)
 	if err != nil {

@@ -118,6 +118,9 @@ var sqliteFeatures = EngineFeatures{
 	Monitoring: true, Fixes: true, // monitor.go, maintenance.go
 	SecondCopy: true, // the same stream and backups into the second bucket (ship.go sinks)
 	Files:      true, // the app's folders next to the database (agent-wide, restic)
+	// Masked and structure-only copies as files on the server, no port
+	// (internal/engine/sqlite/copies*.go).
+	SafeCopies: true,
 }
 
 // SQLiteStatus is SQLite's own health detail (DatabaseMonitoring.SQLite),

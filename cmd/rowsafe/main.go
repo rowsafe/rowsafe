@@ -236,9 +236,11 @@ Guard: the safety net for AI agents
                                              above that verdict and 2 if the migration fails
   rowsafe previews [NAME] [ID] [--json]      recent previews, or one in full
   rowsafe copies [NAME] [--json]             safe copies: masked copies developers and AI agents can connect to
-  rowsafe copies create [NAME] [--allow IP] [--listen private|public|IP|*] [--hours 24] [--db DB] [--json]
+  rowsafe copies create [NAME] [--allow IP] [--listen private|public|IP|*] [--hours 24] [--db DB] [--schema-only] [--json]
                                              make one: restore, mask, open it on the server for the allowed
-                                             addresses (default: this computer's). Prints the connection string once
+                                             addresses (default: this computer's). Prints the connection string once.
+                                             SQLite: a new file on the server (no password); --schema-only for the
+                                             structure without rows
   rowsafe copies extend [NAME] ID [--hours 24]
                                              keep a safe copy longer
   rowsafe copies delete [NAME] ID [--yes]    delete a safe copy
