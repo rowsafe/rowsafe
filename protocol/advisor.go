@@ -59,6 +59,9 @@ type AdvisorFacts struct {
 	// SlowLog is MySQL's or MariaDB's slow query log (nil elsewhere): the
 	// index advisor's samples on MariaDB and MySQL 5.7, and Logs.
 	SlowLog *MySQLSlowLog `json:"mysql_slow_log,omitempty"`
+	// Redis are a Redis or Valkey server's facts (redis_advisor.go; nil
+	// elsewhere).
+	Redis *RedisAdvisorFacts `json:"redis,omitempty"`
 }
 
 // MySQLSlowLog is the slow query log's state.
