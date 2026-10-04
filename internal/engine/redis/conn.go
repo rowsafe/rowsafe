@@ -162,6 +162,8 @@ func plainConnError(err error) error {
 	case isRespError(err, "WRONGPASS", "NOAUTH") || strings.Contains(s, "invalid password") || strings.Contains(s, "invalid username-password"):
 		return errors.New("the server refused Rowsafe's login (its user is missing or has another password: Redis forgets users created " +
 			"without an ACL file or a configuration file it can write when it restarts). Run the Rowsafe installer on the server again to create it")
+	case strings.Contains(s, "no such host"):
+		return errors.New("the server's address doesn't resolve (" + firstLine(s) + "): check ROWSAFE_REDIS_HOST")
 	case strings.Contains(s, "connection refused"):
 		return errors.New("nothing answers on that port (is the server running?)")
 	case strings.Contains(s, "i/o timeout"), strings.Contains(s, "deadline exceeded"):
