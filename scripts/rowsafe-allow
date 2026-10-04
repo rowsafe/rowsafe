@@ -52,7 +52,7 @@ Names:
   pooler             install and manage PgBouncer (connection pooling)
   pooler-public      let PgBouncer listen on public addresses (needs pooler)
   firewall           limit who can reach the database's port (never SSH or other ports)
-  tuning             change MongoDB's or ClickHouse's settings, in Rowsafe's own file
+  tuning             change MongoDB's, ClickHouse's, Redis's or Valkey's settings
 
   sudo rowsafe-allow pooler-target ADDRESS PORT
                            let ProxySQL send connections to the MySQL on another

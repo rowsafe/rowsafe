@@ -60,6 +60,7 @@ func (e *Engine) Tasks() []string {
 		protocol.TaskRestorePoint, protocol.TaskMaintenance,
 		protocol.TaskRewindCopy, protocol.TaskRewindDrop, protocol.TaskRewindCompare, protocol.TaskRewindRows,
 		protocol.TaskRewindInPlace, protocol.TaskRewindUndo, protocol.TaskRewindCleanup,
+		protocol.TaskSettings,
 	}
 }
 
@@ -172,6 +173,12 @@ func (e *Engine) Run(ctx context.Context, env agent.EngineEnv, task *protocol.Ta
 			return nil, err
 		}
 		return nilIfNil(e.rewindUndo(ctx, env, db, p, tl))
+	case protocol.TaskSettings:
+		var p protocol.SettingsParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.settingsTask(ctx, env, db, p, tl))
 	case protocol.TaskRewindCleanup:
 		var p protocol.RewindCleanupParams
 		if err := decode(task, &p); err != nil {

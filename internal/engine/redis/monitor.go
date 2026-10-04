@@ -230,6 +230,7 @@ func (e *Engine) sample(ctx context.Context, env agent.EngineEnv, db protocol.Da
 	if now.Sub(m.statusAt) >= statusEvery {
 		dm.Sizes = sizesOf(in)
 		dm.Redis = e.status(ctx, db, c, info, in, reps, lat, maxClients)
+		dm.Settings, _ = e.settingsSnapshot(ctx, env, c) // Tuning (settings.go)
 		m.statusAt = now
 	}
 	dm.Metrics = metrics
