@@ -394,6 +394,11 @@ type SoftwareReport struct {
 	// for a restart (maintenance.go); nil from older agents and in
 	// containers.
 	AutoSecurity *AutoSecurityReport `json:"auto_security,omitempty"`
+	// StandbyAware (addition): the agent applies PostgreSQL updates,
+	// restarts and reboots to a standby it runs (its own port, waiting for
+	// it to replay again rather than for a primary), so Rowsafe Cloud can
+	// update a pair's standby first. False from older agents.
+	StandbyAware bool `json:"standby_aware,omitempty"`
 }
 
 // ClusterSoftware is one local PostgreSQL cluster's versions.
