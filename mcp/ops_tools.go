@@ -58,6 +58,7 @@ type UpdatesStatusView struct {
 	Upgrade          *protocol.UpgradeState           `json:"upgrade,omitempty" jsonschema:"an upgrade that can still be undone or finished"`
 	CheckedAt        *time.Time                       `json:"checked_at,omitempty" jsonschema:"when the agent last looked at the server's packages"`
 	Tasks            []TaskView                       `json:"tasks,omitempty" jsonschema:"recent update and upgrade tasks, newest first"`
+	Maintenance      *protocol.MaintenanceInfo        `json:"maintenance,omitempty" jsonschema:"Rowsafe Cloud servers only: the weekly maintenance window, what it will apply, automatic security updates and missing critical fixes (read-only)"`
 	Note             string                           `json:"note,omitempty"`
 }
 
@@ -281,7 +282,7 @@ func (t *tools) updatesStatus(ctx context.Context, _ *sdk.CallToolRequest, in da
 	out.SecurityUpdates, out.RebootRequired, out.Allowed = u.SecurityUpdates, u.RebootRequired, nonNilSlice(u.Allowed)
 	out.AutoMinorUpdates, out.NextAutoUpdate = u.AutoMinorUpdates, u.NextAutoUpdate
 	out.Check, out.CheckAt, out.Rehearsal, out.RehearsalAt, out.RehearsalValid, out.RehearsalExpires = u.Check, u.CheckAt, u.Rehearsal, u.RehearsalAt, u.RehearsalValid, u.RehearsalExpires
-	out.Upgrade, out.CheckedAt = u.Upgrade, u.CheckedAt
+	out.Upgrade, out.CheckedAt, out.Maintenance = u.Upgrade, u.CheckedAt, u.Maintenance
 	if len(u.NextSeries) > 0 {
 		out.NewerMajors = u.NextSeries
 	} else {
@@ -364,6 +365,7 @@ func (t *tools) updatesStatus(ctx context.Context, _ *sdk.CallToolRequest, in da
 		b.line("Upgrade %s (%s to %s): %s; the old version is kept until %s.", up.ID, seriesName(d.Engine, up.FromMajor), seriesName(d.Engine, up.ToMajor),
 			strings.ReplaceAll(up.Status, "_", " "), fmtTime(up.Expires))
 	}
+	maintenanceLines(&b, u.Maintenance)
 	var next []string
 	if t.opts.AllowWrites && len(out.NewerMajors) > 0 && protocol.EngineHas(d.Engine, protocol.FeatureUpgrades) {
 		next = append(next, "check_upgrade runs the upgrade preflight and rehearse_upgrade tries the upgrade on a throwaway copy; neither touches production.")
@@ -389,6 +391,62 @@ func (t *tools) updatesStatus(ctx context.Context, _ *sdk.CallToolRequest, in da
 		b.line("Changes to production run only once a person approves them in the Rowsafe dashboard.")
 	}
 	return text(b), out, nil
+}
+
+// maintenanceLines describes a Rowsafe Cloud server's maintenance window
+// (read-only: the window and updates change in the dashboard).
+func maintenanceLines(b *textBuilder, m *protocol.MaintenanceInfo) {
+	if m == nil {
+		return
+	}
+	tz := cmpOr(m.Timezone, m.RegionTimezone)
+	b.line("")
+	if m.Enabled {
+		b.line("Maintenance window: on, %s %02d:00 %s for %d minutes; next %s.", weekdayName(m.Day), m.Hour, cmpOr(tz, "UTC"), m.WindowMinutes, fmtTime(m.NextWindow))
+		if m.PostponedWindow != nil {
+			b.line("  The window of %s is postponed.", fmtTime(m.PostponedWindow))
+		}
+	} else {
+		b.line("Maintenance window: off (critical fixes are still applied once due, Sunday 03:00 %s).", cmpOr(m.RegionTimezone, cmpOr(tz, "UTC")))
+	}
+	if len(m.Pending) == 0 {
+		b.line("  The next window has nothing to apply.")
+	}
+	for _, p := range m.Pending {
+		b.line("  - %s (downtime: %s)", p.Summary, orDash(p.Downtime))
+	}
+	if m.AutoSecurityUpdates {
+		b.line("Automatic security updates: on, last installed %s.", fmtTime(m.LastSecurityUpdate))
+	} else {
+		b.line("Automatic security updates: off%s.", errSuffix(m.AutoSecurityReason))
+	}
+	for _, c := range m.Critical {
+		what := cmpOr(c.What, strings.TrimSpace(c.Package+" "+c.Version))
+		if c.CVE != "" && !strings.Contains(what, c.CVE) {
+			what += " (" + c.CVE + ")"
+		}
+		b.line("Critical fix missing: %s, applied automatically in the window of %s.", what, fmtTime(cmpTime(c.ApplyAt, &c.DueAt)))
+	}
+	if r := m.LastRun; r != nil {
+		b.line("Last maintenance: %s (%s) %s.", fmtTime(&r.WindowStart), r.Kind, r.Status)
+	}
+	b.line("The window is set in the Rowsafe dashboard.")
+}
+
+// weekdayName is day 0 (Sunday) .. 6 (Saturday) in words.
+func weekdayName(day int) string {
+	if day < 0 || day > 6 {
+		return "day " + strconv.Itoa(day)
+	}
+	return time.Weekday(day).String()
+}
+
+// cmpTime is a unless it is empty, else b.
+func cmpTime(a, b *time.Time) *time.Time {
+	if a != nil && !a.IsZero() {
+		return a
+	}
+	return b
 }
 
 // downtimes is a rehearsal's expected downtime per mode.

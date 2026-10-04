@@ -129,6 +129,49 @@ func printVersions(info protocol.UpgradeInfo) {
 		}
 		fmt.Printf(" (rowsafe fix %s)\n", info.Database)
 	}
+	printMaintenance(info.Maintenance)
+}
+
+// printMaintenance shows a Rowsafe Cloud server's maintenance window
+// (read-only: it is set in the dashboard).
+func printMaintenance(m *protocol.MaintenanceInfo) {
+	if m == nil {
+		return
+	}
+	tz := orText(m.Timezone, orText(m.RegionTimezone, "UTC"))
+	fmt.Println("Maintenance window")
+	if m.Enabled {
+		day := "day " + strconv.Itoa(m.Day)
+		if m.Day >= 0 && m.Day <= 6 {
+			day = time.Weekday(m.Day).String() + "s"
+		}
+		fmt.Printf("  Window:             %s %02d:00 (%s)", day, m.Hour, tz)
+		if m.NextWindow != nil {
+			fmt.Printf(", next %s", m.NextWindow.Local().Format("Mon 2 Jan 15:04"))
+		}
+		fmt.Println()
+	} else {
+		fmt.Println("  Window:             off (critical fixes still go in once due)")
+	}
+	for _, p := range m.Pending {
+		fmt.Printf("  Next window:        %s (downtime: %s)\n", p.Summary, orText(p.Downtime, "none"))
+	}
+	if m.AutoSecurityUpdates {
+		fmt.Print("  Security updates:   automatic")
+		if m.LastSecurityUpdate != nil {
+			fmt.Printf(", last %s", m.LastSecurityUpdate.Local().Format("Mon 2 Jan 15:04"))
+		}
+		fmt.Println()
+	} else {
+		fmt.Printf("  Security updates:   not automatic%s\n", map[bool]string{true: " (" + m.AutoSecurityReason + ")", false: ""}[m.AutoSecurityReason != ""])
+	}
+	for _, c := range m.Critical {
+		when := c.DueAt
+		if c.ApplyAt != nil {
+			when = *c.ApplyAt
+		}
+		fmt.Printf("  Critical fix:       %s, applied %s\n", orText(c.What, c.Package+" "+c.Version+" ("+c.CVE+")"), when.Local().Format("Mon 2 Jan 15:04"))
+	}
 }
 
 // ---- rowsafe upgrade [NAME] ----
@@ -495,6 +538,8 @@ func upgradeTaskName(typ string) string {
 		return "removing the kept version"
 	case protocol.TaskSecurityUpdates:
 		return "the security updates"
+	case protocol.TaskAutoSecurityUpdates:
+		return "turning on automatic security updates"
 	case protocol.TaskReboot:
 		return "the reboot"
 	}

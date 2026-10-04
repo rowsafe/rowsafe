@@ -58,6 +58,7 @@
 #   ID pg-upgrade-undo PORT start|nostart    back to the version kept by that upgrade
 #   ID pg-upgrade-cleanup PORT               remove the version kept aside by an upgrade or undo
 #   ID security-updates                      install pending security updates
+#   ID auto-security-updates                 turn on automatic security updates (see asu_setup)
 #   ID reboot                                reboot the server
 #   ID db-minor-update PORT                  newest release of the series (8.0, 10.11, 7.0, 25.8, 8.2)
 #                                            of the MySQL, MariaDB, MongoDB, ClickHouse, Redis or Valkey
@@ -76,7 +77,8 @@
 # Each needs its word in /etc/rowsafe/updates-allowed (root's, written by
 # the installer): "postgresql" for the pg-* requests, which also only act on
 # a port in /etc/rowsafe/restart-allowed whose unit is Debian's
-# postgresql@MAJOR-NAME.service; "security" and "reboot" for the others.
+# postgresql@MAJOR-NAME.service; "security" (security-updates and
+# auto-security-updates) and "reboot" for the others.
 # Package names are fixed here: a minor update installs only PORT's major
 # (never another one), a new major only postgresql-MAJOR, its client and the
 # counterparts of the extension packages PORT's major has installed. What an
@@ -130,7 +132,7 @@
 # redis-created).
 #
 # actions: restart stop start create-cluster files-read files-put mongodb-key-export mongodb-standby-config redis-create redis-remove
-# update-actions: pg-minor-update pg-install-major pg-upgrade pg-upgrade-undo pg-upgrade-cleanup security-updates reboot db-minor-update db-upgrade db-upgrade-undo db-upgrade-cleanup
+# update-actions: pg-minor-update pg-install-major pg-upgrade pg-upgrade-undo pg-upgrade-cleanup security-updates auto-security-updates reboot db-minor-update db-upgrade db-upgrade-undo db-upgrade-cleanup
 #
 # The same helper manages PgBouncer when root allowed that (--allow-pooler):
 # see "PgBouncer" below.
@@ -1680,6 +1682,206 @@ act_security_updates() {
   ok=1
 }
 
+# >>> auto-security-updates
+# Automatic security updates (Rowsafe Cloud servers): the installer's
+# --auto-security-updates and the update helper's auto-security-updates
+# request both run asu_setup, after installing unattended-upgrades and
+# needrestart. This block is the same text in scripts/install.sh and
+# scripts/rowsafe-pg-restart (make check-installer compares them).
+#
+#   - unattended-upgrades installs the distribution's security updates
+#     only (Debian-Security, Ubuntu's -security), once a day;
+#   - never PostgreSQL's packages (postgresql*, libpq*) nor the other
+#     database servers': they wait for the Rowsafe maintenance window;
+#   - needrestart restarts the services that use an updated library, never
+#     PostgreSQL (nor the other database servers or PgBouncer);
+#   - never an automatic reboot;
+#   - rowsafe-needrestart.service (a timer and an apt hook start it) lists
+#     what still waits for a restart into /run/rowsafe-updates/needrestart
+#     (root's directory, which the agent reads); it restarts nothing;
+#   - /etc/rowsafe/auto-security-updates tells the agent it is on.
+asu_marker=/etc/rowsafe/auto-security-updates
+asu_periodic=/etc/apt/apt.conf.d/20auto-upgrades
+asu_conf=/etc/apt/apt.conf.d/52rowsafe-unattended-upgrades
+asu_hook=/etc/apt/apt.conf.d/99rowsafe-needrestart
+asu_nr_conf=/etc/needrestart/conf.d/rowsafe.conf
+asu_service=/etc/systemd/system/rowsafe-needrestart.service
+asu_timer=/etc/systemd/system/rowsafe-needrestart.timer
+asu_packages='unattended-upgrades needrestart'
+asu_err=''
+
+# asu_put PATH MODE < content writes root's file PATH atomically when its
+# content changed (the temporary name ends in .dpkg-new, which apt ignores).
+asu_put() {
+  asu_new=$(mktemp --suffix=.dpkg-new "$1.XXXXXX") || {
+    asu_err="can't write $1"
+    return 1
+  }
+  cat >"$asu_new"
+  if [ -f "$1" ] && [ ! -L "$1" ] && cmp -s "$asu_new" "$1"; then
+    rm -f "$asu_new"
+    return 0
+  fi
+  chmod "$2" "$asu_new" && mv -f "$asu_new" "$1" || {
+    rm -f "$asu_new"
+    asu_err="can't write $1"
+    return 1
+  }
+}
+
+# asu_setup writes the configuration (idempotent) and starts the timer.
+asu_setup() {
+  for asu_d in /etc/apt/apt.conf.d /etc/needrestart/conf.d /etc/rowsafe; do
+    [ -d "$asu_d" ] || install -d -m 0755 "$asu_d" || {
+      asu_err="can't create $asu_d"
+      return 1
+    }
+  done
+  asu_put "$asu_periodic" 0644 <<'ASU_PERIODIC_EOF' || return 1
+// Written by Rowsafe (automatic security updates): refresh the package
+// lists and run unattended-upgrades once a day. What it installs:
+// 52rowsafe-unattended-upgrades.
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+ASU_PERIODIC_EOF
+  asu_put "$asu_conf" 0644 <<'ASU_CONF_EOF' || return 1
+// Written by Rowsafe (automatic security updates, for servers Rowsafe
+// hosts). It sorts after 50unattended-upgrades and replaces its origins:
+// only the distribution's security updates are installed, never
+// PostgreSQL's packages nor the other database servers' (Rowsafe updates
+// those in the maintenance window, a Mark saved first), and the server is
+// never rebooted. Package-Blacklist entries are regular expressions matched
+// from the start of the package name ("postgresql" holds back
+// postgresql-17, postgresql-common, postgresql-client-17...). Turn it all
+// off with the installer's --no-auto-security-updates.
+#clear Unattended-Upgrade::Origins-Pattern;
+#clear Unattended-Upgrade::Allowed-Origins;
+Unattended-Upgrade::Origins-Pattern {
+        // Debian
+        "origin=Debian,codename=${distro_codename},label=Debian-Security";
+        "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
+        // Ubuntu
+        "origin=Ubuntu,archive=${distro_codename}-security,label=Ubuntu";
+};
+Unattended-Upgrade::Package-Blacklist {
+        "postgresql";
+        "libpq";
+        "mysql-server";
+        "mysql-community-server";
+        "percona-server-server";
+        "mariadb-server";
+        "mongodb-org-server";
+        "mongodb-org-mongos";
+        "clickhouse-server";
+        "clickhouse-common-static";
+        "redis-server";
+        "redis-sentinel";
+        "valkey-server";
+        "valkey-sentinel";
+        "pgbouncer";
+};
+Unattended-Upgrade::Automatic-Reboot "false";
+Unattended-Upgrade::Automatic-Reboot-WithUsers "false";
+ASU_CONF_EOF
+  asu_put "$asu_nr_conf" 0644 <<'ASU_NR_EOF' || return 1
+# Written by Rowsafe (automatic security updates). After an update,
+# needrestart restarts the services that use an updated library by itself,
+# except PostgreSQL, the other database servers and PgBouncer: those are
+# never restarted by it and wait for the Rowsafe maintenance window (or a
+# person's click). A newer kernel never reboots the server.
+$nrconf{restart} = 'a';
+$nrconf{override_rc}->{qr(^postgresql)} = 0;
+$nrconf{override_rc}->{qr(^mysql)} = 0;
+$nrconf{override_rc}->{qr(^mariadb)} = 0;
+$nrconf{override_rc}->{qr(^mongod)} = 0;
+$nrconf{override_rc}->{qr(^clickhouse-server)} = 0;
+$nrconf{override_rc}->{qr(^redis)} = 0;
+$nrconf{override_rc}->{qr(^valkey)} = 0;
+$nrconf{override_rc}->{qr(^rowsafe-redis)} = 0;
+$nrconf{override_rc}->{qr(^pgbouncer)} = 0;
+$nrconf{kernelhints} = 0;
+$nrconf{ucodehints} = 0;
+ASU_NR_EOF
+  asu_put "$asu_service" 0644 <<'ASU_SERVICE_EOF' || return 1
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-needrestart.service: written by Rowsafe (automatic security
+# updates). Lists the services that still run an older library and whether
+# a newer kernel waits for a reboot, into /run/rowsafe-updates/needrestart
+# for the Rowsafe agent. It only lists (needrestart -b -r l): it never
+# restarts anything. Started by rowsafe-needrestart.timer and after apt
+# installs something (/etc/apt/apt.conf.d/99rowsafe-needrestart).
+
+[Unit]
+Description=Rowsafe: list what waits for a restart after updates (restarts nothing)
+Documentation=https://rowsafe.sh/docs/guides/updates
+ConditionPathExists=/usr/sbin/needrestart
+
+[Service]
+Type=oneshot
+RuntimeDirectory=rowsafe-updates
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+UMask=0022
+ExecStart=/bin/sh -c 'if /usr/sbin/needrestart -b -r l >/run/rowsafe-updates/.needrestart.new 2>/dev/null; then mv -f /run/rowsafe-updates/.needrestart.new /run/rowsafe-updates/needrestart; else rm -f /run/rowsafe-updates/.needrestart.new; fi'
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateNetwork=yes
+ASU_SERVICE_EOF
+  asu_put "$asu_timer" 0644 <<'ASU_TIMER_EOF' || return 1
+# SPDX-License-Identifier: Apache-2.0
+# rowsafe-needrestart.timer: written by Rowsafe (automatic security
+# updates); lists what waits for a restart every 30 minutes.
+
+[Unit]
+Description=Rowsafe: list what waits for a restart after updates, every 30 minutes
+Documentation=https://rowsafe.sh/docs/guides/updates
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=30min
+
+[Install]
+WantedBy=timers.target
+ASU_TIMER_EOF
+  asu_put "$asu_hook" 0644 <<'ASU_HOOK_EOF' || return 1
+// Written by Rowsafe (automatic security updates): after apt installs
+// something, list again what waits for a restart (restarts nothing).
+DPkg::Post-Invoke { "systemctl start --no-block rowsafe-needrestart.service >/dev/null 2>&1 || true"; };
+ASU_HOOK_EOF
+  if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload && systemctl enable --now --quiet rowsafe-needrestart.timer || {
+      asu_err="can't start rowsafe-needrestart.timer"
+      return 1
+    }
+    systemctl start --no-block rowsafe-needrestart.service || true
+  fi
+  # Last: the agent reports automatic security updates on once all is set.
+  asu_put "$asu_marker" 0644 <<'ASU_MARKER_EOF' || return 1
+# Rowsafe set up automatic security updates here (security updates only, never PostgreSQL's packages, no automatic restart of PostgreSQL, no reboot).
+ASU_MARKER_EOF
+}
+# <<< auto-security-updates
+# act_auto_security_updates turns on automatic security updates (servers
+# installed before the installer's --auto-security-updates): the same
+# setup, see asu_setup above.
+act_auto_security_updates() {
+  update_allowed security "turning on automatic security updates from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow security-updates)"
+  command -v apt-get >/dev/null 2>&1 || refuse "automatic security updates need apt (Debian or Ubuntu)"
+  cooldown auto-security-updates 300
+  : >"$work_log"
+  log "turning on automatic security updates (request $id)"
+  apt_refresh
+  # shellcheck disable=SC2086 # two fixed package names
+  apt_run install -y --no-install-recommends $asu_packages || refuse "installing unattended-upgrades and needrestart failed: $(tail_log)"
+  asu_setup || refuse "setting up automatic security updates failed: $asu_err"
+  add enabled 1
+  add summary "Automatic security updates are on: the server installs its security updates by itself every day, never PostgreSQL's packages, never restarts PostgreSQL and never reboots."
+  ok=1
+}
+
 # cooldown ACTION SECONDS: at most one ACTION per SECONDS (root's own stamp).
 cooldown() {
   stamp=$state/last-$1
@@ -2079,7 +2281,7 @@ update_main() {
     # shellcheck disable=SC2086
     set -- $line
     id=$1 action=$2 port=$3
-  elif printf '%s\n' "$line" | grep -Eq "^$rid (security-updates|reboot)\$"; then
+  elif printf '%s\n' "$line" | grep -Eq "^$rid (security-updates|auto-security-updates|reboot)\$"; then
     id=${line%% *} action=${line#* }
   else
     refuse "malformed request"
@@ -2091,6 +2293,7 @@ update_main() {
     pg-upgrade-undo) act_pg_upgrade_undo ;;
     pg-upgrade-cleanup) act_pg_upgrade_cleanup ;;
     security-updates) act_security_updates ;;
+    auto-security-updates) act_auto_security_updates ;;
     reboot) act_reboot ;;
     db-minor-update) act_db_minor_update ;;
     db-upgrade) act_db_upgrade ;;
