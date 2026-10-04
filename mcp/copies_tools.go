@@ -75,6 +75,7 @@ type safeCopyInput struct {
 	Listen    string   `json:"listen,omitempty" jsonschema:"where the copy listens on the database server: private (default), public, or one of its IPs"`
 	Hours     int      `json:"hours,omitempty" jsonschema:"how long to keep it (default 24, at most 168)"`
 	DB        string   `json:"db,omitempty" jsonschema:"database for the connection string (default: the main one)"`
+	Structure bool     `json:"structure,omitempty" jsonschema:"Redis and Valkey only: a structure-only copy (every key with its type and time to live, every value a placeholder) instead of a masked one"`
 }
 
 type safeCopiesInput struct {
@@ -334,6 +335,12 @@ func (t *tools) createSafeCopy(ctx context.Context, _ *sdk.CallToolRequest, in s
 		return nil, CreateSafeCopyOutput{}, apiError(err)
 	}
 	req := protocol.CreateSafeCopyRequest{Hours: in.Hours, AllowFrom: in.AllowFrom, Listen: in.Listen, DB: in.DB, Masking: protocol.MaskingRules}
+	if in.Structure {
+		if !protocol.StructureCopies(d.Engine) {
+			return nil, CreateSafeCopyOutput{}, fmt.Errorf("structure-only copies are for Redis and Valkey databases; %s is %s", d.Name, protocol.EngineDisplayName(d.Engine))
+		}
+		req.Masking = protocol.MaskingStructure
+	}
 	// Locally (rowsafe mcp) the password is made here, on the user's
 	// machine, and Rowsafe only gets its verifier (in the engine's own form). On the remote
 	// endpoint this code runs inside Rowsafe, which must never make or see

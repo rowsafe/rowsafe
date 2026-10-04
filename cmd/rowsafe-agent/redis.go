@@ -15,6 +15,9 @@ import (
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
+// exitNotEmpty: --target on a server that holds data.
+const exitNotEmpty = 14
+
 const redisUsage = `rowsafe-agent redis - Redis and Valkey helpers for the installer
 
 They run as the agent user with agent.env loaded. A password, when asked
@@ -28,7 +31,7 @@ for, is read from stdin (one line) and never stored (except the agent's own).
       for a password. Exit 0 when the server answered, 1 when nothing
       answers on PORT.
 
-  rowsafe-agent redis login --port PORT [--admin-user NAME]
+  rowsafe-agent redis login --port PORT [--admin-user NAME] [--standby] [--target clones|standby|all]
       Create (or refresh) the ACL user "rowsafe" with a new random password,
       saved for the agent only. Without --admin-user it signs in as the
       default user without a password; with it, the administrator's password
@@ -38,7 +41,14 @@ for, is read from stdin (one line) and never stored (except the agent's own).
       none), why (when none) and acl_line: the "user rowsafe on #<hash> ..."
       line (the password's hash only) root adds to the configuration file
       when persisted is none. Exit 11: an administrator's login is needed;
-      12: it was refused; 13: it can't create users.
+      12: it was refused; 13: it can't create users; 14 (--target): the
+      server isn't empty.
+      --standby: this server may have standby servers: Rowsafe's user may
+      also create and remove users (the standbys' replication logins), list
+      them (a standby gets the same users) and run REPLICAOF. On Redis that
+      amounts to administrator rights.
+      --target: this empty server receives clones or holds a standby of a
+      database on another server: Rowsafe's user gets every right on it.
 
   rowsafe-agent redis save-login --port PORT
       Save "user:password" read from stdin as the agent's login (a user you
@@ -70,6 +80,8 @@ func redisCmd(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("redis "+args[0], flag.ContinueOnError)
 	port := fs.Int("port", 6379, "the server's port")
 	adminUser := fs.String("admin-user", "", "administrator user (password on stdin)")
+	standby := fs.Bool("standby", false, "this server may have standby servers (Rowsafe's user may create replication logins)")
+	target := fs.String("target", "", "this empty server receives clones or holds a standby: clones, standby or all")
 	engine := fs.String("engine", protocol.EngineRedis, "redis or valkey")
 	stanza := fs.String("stanza", "", "the database's folder in the bucket")
 	label := fs.String("label", "", "the snapshot to download")
@@ -127,7 +139,7 @@ func redisCmd(ctx context.Context, args []string) int {
 		if *adminUser != "" {
 			pw = readSecret()
 		}
-		res, err := redis.CreateLogin(ctx, env, *port, *adminUser, pw)
+		res, err := redis.CreateLoginWith(ctx, env, *port, *adminUser, pw, redis.LoginOptions{Standby: *standby, Target: *target})
 		switch {
 		case err == nil:
 			fmt.Printf("persisted=%s\n", res.Persisted)
@@ -142,6 +154,9 @@ func redisCmd(ctx context.Context, args []string) int {
 		case errors.Is(err, redis.ErrAdminRefused):
 			fmt.Fprintln(os.Stderr, err)
 			return exitAdminRefused
+		case errors.Is(err, redis.ErrNotEmpty):
+			fmt.Fprintln(os.Stderr, err)
+			return exitNotEmpty
 		case errors.Is(err, redis.ErrCantManageUsers):
 			fmt.Fprintln(os.Stderr, err)
 			return exitCantManageUsers

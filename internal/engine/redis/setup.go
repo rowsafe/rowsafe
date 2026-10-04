@@ -48,12 +48,46 @@ type LoginResult struct {
 	Why       string // why it couldn't be kept, when Persisted is none
 }
 
+// standbyRules are what Rowsafe's user needs on a primary with standby
+// servers (--redis-standby): creating and removing the standbys'
+// replication logins, reading the users a standby gets, and REPLICAOF (an
+// old primary becomes the new one's replica). ACL SETUSER amounts to
+// administrator rights on Redis: root opts in.
+const standbyRules = "+acl|setuser +acl|deluser +acl|list +acl|getuser +acl|save +replicaof"
+
+// targetRules: an empty server root handed to Rowsafe for clones or
+// standbys is Rowsafe's to fill.
+const targetRules = "~* &* +@all"
+
+// LoginOptions extend Rowsafe's user (the installer's --redis-standby and
+// --redis-clones).
+type LoginOptions struct {
+	// Standby: this server may have standby servers (standbyRules).
+	Standby bool
+	// Target: this empty server receives clones or holds a standby
+	// ("clones", "standby" or "all"): every right.
+	Target string
+}
+
 // CreateLogin creates (or refreshes) Rowsafe's user with a new random
 // password, signing in as adminUser (default: the default user, without a
 // password unless adminPass is given), and saves the login for the agent.
 func CreateLogin(ctx context.Context, env agent.EngineEnv, port int, adminUser, adminPass string) (LoginResult, error) {
+	return CreateLoginWith(ctx, env, port, adminUser, adminPass, LoginOptions{})
+}
+
+// ErrNotEmpty: a server handed over for clones or standbys must be empty.
+var ErrNotEmpty = errors.New("that server isn't empty: only an empty server can receive clones or hold a standby")
+
+// CreateLoginWith is CreateLogin with options.
+func CreateLoginWith(ctx context.Context, env agent.EngineEnv, port int, adminUser, adminPass string, o LoginOptions) (LoginResult, error) {
 	var res LoginResult
-	l := Login{User: LoginUser}
+	switch o.Target {
+	case "", targetClones, targetStandby, targetAll:
+	default:
+		return res, fmt.Errorf("unknown target %q", o.Target)
+	}
+	l := Login{User: LoginUser, Target: o.Target}
 	addr := addrOf(l, port)
 	c, err := dial(ctx, addr)
 	if err != nil {
@@ -91,14 +125,26 @@ func CreateLogin(ctx context.Context, env agent.EngineEnv, port int, adminUser, 
 	if why := in.supported(in.Engine); why != "" {
 		return res, errors.New(why)
 	}
+	if o.Target != "" {
+		if km, err := c.info(ctx, "keyspace"); err == nil && infoFrom(km).totalKeys() > 0 {
+			return res, ErrNotEmpty
+		}
+	}
 	pw, err := randomPassword()
 	if err != nil {
 		return res, err
 	}
 	sum := sha256.Sum256([]byte(pw))
 	hash := "#" + hex.EncodeToString(sum[:])
+	rules := aclRules
+	if o.Standby {
+		rules += " " + standbyRules
+	}
+	if o.Target != "" {
+		rules = targetRules
+	}
 	args := []any{"ACL", "SETUSER", LoginUser, "reset", "on", hash}
-	for _, r := range strings.Fields(aclRules) {
+	for _, r := range strings.Fields(rules) {
 		args = append(args, r)
 	}
 	if _, err := c.do(ctx, args...); err != nil {
@@ -118,7 +164,7 @@ func CreateLogin(ctx context.Context, env agent.EngineEnv, port int, adminUser, 
 	if err := saveLogin(env, port, l); err != nil {
 		return res, err
 	}
-	res.ACLLine = "user " + LoginUser + " on " + hash + " " + aclRules
+	res.ACLLine = "user " + LoginUser + " on " + hash + " " + rules
 	// Kept across restarts?
 	aclfile, _ := c.configGet(ctx, "aclfile")
 	switch {

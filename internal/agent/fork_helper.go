@@ -53,6 +53,15 @@ func (a *Agent) allowedClusters() (map[int]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Redis and Valkey servers root's helper created for standbys and
+	// clones restart like the others (engine_helper.go).
+	if redis, err := ReadRestartAllowed(RedisCreatedFile); err == nil {
+		for p, u := range redis {
+			if _, ok := out[p]; !ok && strings.HasPrefix(u, "rowsafe-redis@") {
+				out[p] = u
+			}
+		}
+	}
 	if a.cfg.CreatedClustersFile == "" {
 		return out, nil
 	}

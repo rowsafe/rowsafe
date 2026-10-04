@@ -60,6 +60,8 @@ func (e *Engine) Tasks() []string {
 		protocol.TaskRestorePoint, protocol.TaskMaintenance,
 		protocol.TaskRewindCopy, protocol.TaskRewindDrop, protocol.TaskRewindCompare, protocol.TaskRewindRows,
 		protocol.TaskRewindInPlace, protocol.TaskRewindUndo, protocol.TaskRewindCleanup,
+		protocol.TaskFindMoment,                        // moment.go
+		protocol.TaskSafeCopy, protocol.TaskCopySchema, // copies_safe.go, copies_mask.go
 	}
 }
 
@@ -86,6 +88,7 @@ func (e *Engine) Start(ctx context.Context, env agent.EngineEnv) {
 	e.mu.Unlock()
 	e.recoverCopies(ctx, env)
 	go e.recoverInPlace(ctx, env)
+	go e.recoverSafeCopies(ctx, env) // copies_safe.go
 	go func() {
 		t := time.NewTicker(time.Minute)
 		defer t.Stop()
@@ -96,6 +99,7 @@ func (e *Engine) Start(ctx context.Context, env agent.EngineEnv) {
 			case <-t.C:
 			}
 			e.expireCopies(env, time.Now())
+			e.expireSafeCopies(env, time.Now())
 			e.expireKept(ctx, env, time.Now())
 			e.stopIdleFollowers(10 * time.Minute)
 		}
@@ -172,6 +176,20 @@ func (e *Engine) Run(ctx context.Context, env agent.EngineEnv, task *protocol.Ta
 			return nil, err
 		}
 		return nilIfNil(e.rewindUndo(ctx, env, db, p, tl))
+	case protocol.TaskSafeCopy:
+		var p protocol.SafeCopyParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.safeCopy(ctx, env, db, p, tl))
+	case protocol.TaskCopySchema:
+		return nilIfNil(e.copySchema(ctx, env, db))
+	case protocol.TaskFindMoment:
+		var p protocol.FindMomentParams
+		if err := decode(task, &p); err != nil {
+			return nil, err
+		}
+		return nilIfNil(e.findMoment(ctx, env, db, p, tl))
 	case protocol.TaskRewindCleanup:
 		var p protocol.RewindCleanupParams
 		if err := decode(task, &p); err != nil {

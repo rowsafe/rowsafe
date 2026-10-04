@@ -177,7 +177,18 @@ type PreviewError struct {
 const (
 	MaskingRules = "rules" // saved rules, and suggestions for every column they don't cover
 	MaskingNone  = "none"  // no masking: an admin chose it explicitly
+	// MaskingStructure keeps every key (Redis, Valkey) with its type and
+	// time to live, and replaces every value with a placeholder: the shape
+	// of the data without any of it.
+	MaskingStructure = "structure"
 )
+
+// StructureCopies reports whether safe copies of engine can be
+// structure-only (MaskingStructure).
+func StructureCopies(engine string) bool {
+	e := NormalizeEngine(engine)
+	return e == EngineRedis || e == EngineValkey
+}
 
 // MaskingRule masks one column with a strategy (see package masking).
 type MaskingRule struct {
@@ -577,6 +588,8 @@ func ValidPasswordVerifier(s string) bool { return passwordVerifierRE.MatchStrin
 //     SHA1(SHA1(password)).
 //   - ClickHouse: sha256: + the 64 lowercase hex digits of SHA256(password)
 //     (users.xml password_sha256_hex).
+//   - Redis and Valkey: # + the 64 lowercase hex digits of SHA256(password)
+//     (what ACL SETUSER takes and ACL LIST shows).
 //
 // Passwords are random (24 characters, about 140 bits), so even the
 // unsalted forms can't be guessed back.
@@ -584,6 +597,7 @@ var (
 	mysqlVerifierRE      = regexp.MustCompile(`^\$A\$005\$[./0-9A-Za-z]{63}$`)
 	mariadbVerifierRE    = regexp.MustCompile(`^\*[0-9A-F]{40}$`)
 	clickhouseVerifierRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	redisVerifierRE      = regexp.MustCompile(`^#[0-9a-f]{64}$`)
 	scramIterationsRE    = regexp.MustCompile(`^SCRAM-SHA-256\$([0-9]+):([A-Za-z0-9+/=]+)\$`)
 )
 
@@ -606,6 +620,8 @@ func ValidCopyVerifier(engine, s string) bool {
 		return mariadbVerifierRE.MatchString(s)
 	case EngineClickHouse:
 		return clickhouseVerifierRE.MatchString(s)
+	case EngineRedis, EngineValkey:
+		return redisVerifierRE.MatchString(s)
 	}
 	return false
 }
@@ -621,6 +637,8 @@ func CopyVerifierForm(engine string) string {
 		return "a mysql_native_password hash (* + 40 uppercase hex digits)"
 	case EngineClickHouse:
 		return "sha256: + the 64 hex digits of the password's SHA-256"
+	case EngineRedis, EngineValkey:
+		return "# + the 64 lowercase hex digits of the password's SHA-256"
 	}
 	return "a SCRAM-SHA-256 verifier (SCRAM-SHA-256$4096:salt$StoredKey:ServerKey)"
 }

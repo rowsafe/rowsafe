@@ -26,7 +26,8 @@ func TestCopyVerifiers(t *testing.T) {
 			t.Errorf("%s: %q %q %v", e, pw, v, err)
 		}
 		for _, other := range protocol.Engines {
-			same := other == e || (other == protocol.EnginePostgreSQL && e == protocol.EngineMongoDB)
+			same := other == e || (other == protocol.EnginePostgreSQL && e == protocol.EngineMongoDB) ||
+				(protocol.StructureCopies(e) && protocol.StructureCopies(other)) // Redis and Valkey share their ACL's form
 			if !same && protocol.ValidCopyVerifier(other, v) {
 				t.Errorf("a %s verifier passes as %s", e, other)
 			}

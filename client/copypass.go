@@ -59,6 +59,9 @@ func CopyVerifier(engine, password string) (string, error) {
 	case protocol.EngineClickHouse:
 		sum := sha256.Sum256([]byte(password))
 		return "sha256:" + hex.EncodeToString(sum[:]), nil
+	case protocol.EngineRedis, protocol.EngineValkey:
+		sum := sha256.Sum256([]byte(password))
+		return "#" + hex.EncodeToString(sum[:]), nil
 	}
 	return "", fmt.Errorf("safe copies of %s databases aren't supported", protocol.EngineDisplayName(engine))
 }

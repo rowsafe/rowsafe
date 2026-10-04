@@ -340,6 +340,7 @@ func copiesCreateCmd(ctx context.Context, c *client.Client, args []string) error
 	hours := fs.Int("hours", 24, "how long to keep it (at most 168)")
 	db := fs.String("db", "", "database in the connection string")
 	noMasking := fs.Bool("no-masking", false, "open it with the real data (admins; asks you to type the name)")
+	structure := fs.Bool("structure", false, "Redis and Valkey: every key with its type and time to live, every value a placeholder")
 	yes := fs.Bool("yes", false, "don't ask (with --no-masking: confirms it)")
 	asJSON := fs.Bool("json", false, "print JSON (includes the password)")
 	noWait := fs.Bool("no-wait", false, "return once it is queued")
@@ -360,6 +361,12 @@ func copiesCreateCmd(ctx context.Context, c *client.Client, args []string) error
 			}
 		}
 		req.Masking, req.NoMaskingConfirm = protocol.MaskingNone, name
+	}
+	if *structure {
+		if *noMasking {
+			return errors.New("--structure and --no-masking don't go together")
+		}
+		req.Masking = protocol.MaskingStructure
 	}
 	d, err := c.Database(ctx, name)
 	if err != nil {

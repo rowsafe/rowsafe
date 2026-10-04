@@ -112,7 +112,22 @@
 # /etc/rowsafe/mongodb-standby-allowed ("PORT UNIT CONFIG", written by the
 # installer with --mongodb-standby).
 #
-# actions: restart stop start create-cluster files-read files-put mongodb-key-export mongodb-standby-config
+# Redis and Valkey servers for standbys and clones: "ID redis-create PORT
+# HASH" creates a new, empty server on PORT when root allowed it
+# (/etc/rowsafe/redis-servers-allowed, written by the installer with
+# --redis-standby or --redis-clones: "ports MIN-MAX", "engine redis|valkey",
+# "user USER"): its data directory /var/lib/rowsafe-redis/PORT (owned by
+# USER, created as USER), its configuration redis.conf and ACL file
+# users.acl there (Rowsafe's user "rowsafe" with HASH, the SHA-256 of a
+# password only the agent knows; the default user without a password,
+# which Redis's protected mode lets in from this server only), then
+# enables and starts rowsafe-redis@PORT.service and lists it in
+# /etc/rowsafe/redis-created ("PORT UNIT"), whose units restart, stop and
+# start like the ones in restart-allowed. "ID redis-remove PORT" stops and
+# disables such a server and deletes its data directory (only one listed in
+# redis-created).
+#
+# actions: restart stop start create-cluster files-read files-put mongodb-key-export mongodb-standby-config redis-create redis-remove
 # update-actions: pg-minor-update pg-install-major pg-upgrade pg-upgrade-undo pg-upgrade-cleanup security-updates reboot db-minor-update db-upgrade db-upgrade-undo db-upgrade-cleanup
 #
 # The same helper manages PgBouncer when root allowed that (--allow-pooler):
@@ -141,6 +156,9 @@ mode=${ROWSAFE_HELPER_MODE:-restart}
 min_interval=60
 
 mongo_allow=${ROWSAFE_MONGODB_STANDBY_ALLOW:-/etc/rowsafe/mongodb-standby-allowed}
+redis_allow=${ROWSAFE_REDIS_SERVERS_ALLOW:-/etc/rowsafe/redis-servers-allowed}
+redis_created=${ROWSAFE_REDIS_CREATED:-/etc/rowsafe/redis-created}
+redis_root=${ROWSAFE_REDIS_ROOT:-/var/lib/rowsafe-redis}
 mongo_key_dir=${ROWSAFE_MONGODB_KEY_DIR:-/etc/rowsafe}
 
 log() { echo "rowsafe-pg-restart: $*" >&2; }
@@ -756,6 +774,88 @@ create_cluster() {
   exit 0
 }
 
+# ---------------------------------------------------------------- Redis and Valkey servers
+
+# redis_allowed PORT sets r_engine and r_user from the allow list, which
+# only root can write, and checks PORT is in its range.
+redis_allowed() {
+  check_root_file "$redis_allow" "creating Redis or Valkey servers is not allowed on this server (install Rowsafe there with --redis-standby or --redis-clones)"
+  r_range=$(awk '$1 == "ports" && $2 ~ /^[0-9]+-[0-9]+$/ { print $2; exit }' "$redis_allow")
+  [ -n "$r_range" ] || refuse "creating Redis or Valkey servers is not allowed on this server"
+  [ "$1" -ge "${r_range%-*}" ] && [ "$1" -le "${r_range#*-}" ] || refuse "port $1 is not in the ports Rowsafe may create servers on ($r_range)"
+  r_engine=$(awk '$1 == "engine" { print $2; exit }' "$redis_allow")
+  r_user=$(awk '$1 == "user" { print $2; exit }' "$redis_allow")
+  case $r_engine in redis | valkey) ;; *) refuse "$redis_allow names no engine (redis or valkey)" ;; esac
+  printf '%s\n' "$r_user" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$' || refuse "$redis_allow names no user"
+  id -u "$r_user" >/dev/null 2>&1 || refuse "the user $r_user doesn't exist"
+  [ "$(id -u "$r_user")" != 0 ] || refuse "Redis servers never run as root"
+}
+
+# redis_created_unit PORT prints the unit of a server created on PORT.
+redis_created_unit() {
+  [ -f "$redis_created" ] || [ -L "$redis_created" ] || return 0
+  check_root_file "$redis_created" "$redis_created is missing"
+  awk -v p="$1" '$1 "" == p "" && $2 ~ /^rowsafe-redis@[0-9]+\.service$/ { print $2; exit }' "$redis_created"
+}
+
+# as_redis CMD...: run as the server's user (its files are never root's).
+as_redis() { setpriv --reuid="$r_user" --regid="$r_user" --init-groups -- "$@"; }
+
+redis_create() {
+  port=$1 r_hash=$2
+  redis_allowed "$port"
+  check_root_file "$redis_created" "$redis_created is missing: allow it on the server with: sudo rowsafe-allow redis-servers"
+  for list in "$allow" "$redis_created"; do
+    if [ -f "$list" ] && awk -v p="$port" '$1 "" == p "" { f = 1 } END { exit !f }' "$list"; then
+      refuse "port $port is already used by a server Rowsafe manages"
+    fi
+  done
+  [ -d "$redis_root" ] && [ ! -L "$redis_root" ] || refuse "$redis_root is missing"
+  [ "$(stat -c '%U' "$redis_root")" = "$r_user" ] || refuse "$redis_root isn't owned by $r_user"
+  r_dir=$redis_root/$port
+  [ ! -e "$r_dir" ] && [ ! -L "$r_dir" ] || refuse "$r_dir already exists"
+  unit=rowsafe-redis@$port.service
+  log "redis-create $r_engine on port $port (request $id)"
+  as_redis mkdir -m 0750 "$r_dir" || refuse "cannot create $r_dir"
+  # shellcheck disable=SC2016 # $1 expands in the inner shell
+  printf '%s\n' "# Rowsafe: a $r_engine server for a standby or a clone (rowsafe-redis@$port.service)." \
+    "port $port" "bind * -::*" "protected-mode yes" "dir $r_dir" "aclfile $r_dir/users.acl" \
+    "dbfilename dump.rdb" "appendonly yes" "appendfilename appendonly.aof" "save 3600 1 300 100 60 10000" \
+    "daemonize no" "supervised no" "logfile \"\"" "databases 16" |
+    as_redis sh -c 'umask 027; cat >"$1"' rowsafe-pg-restart "$r_dir/redis.conf" || refuse "cannot write the configuration"
+  printf '%s\n' "user default on nopass ~* &* +@all" "user rowsafe on #$r_hash ~* &* +@all" |
+    as_redis sh -c 'umask 077; cat >"$1"' rowsafe-pg-restart "$r_dir/users.acl" || refuse "cannot write the ACL file"
+  printf '%s %s\n' "$port" "$unit" >>"$redis_created" || refuse "cannot update $redis_created"
+  out=$(timeout 60 "$systemctl" enable --now "$unit" 2>&1 </dev/null)
+  if [ $? = 0 ]; then
+    ok=1
+    log "redis-create $unit: done"
+  else
+    err="starting $unit failed: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
+    log "$err"
+  fi
+  answer
+  exit 0
+}
+
+redis_remove() {
+  port=$1
+  redis_allowed "$port"
+  unit=$(redis_created_unit "$port")
+  [ -n "$unit" ] || refuse "port $port is not a server Rowsafe created"
+  log "redis-remove $unit (request $id)"
+  timeout 60 "$systemctl" disable --now "$unit" >/dev/null 2>&1 </dev/null || true
+  r_dir=$redis_root/$port
+  if [ -d "$r_dir" ] && [ ! -L "$r_dir" ]; then
+    as_redis rm -rf -- "$r_dir" || refuse "cannot delete $r_dir"
+  fi
+  r_tmp=$(awk -v p="$port" '$1 "" != p ""' "$redis_created") || refuse "cannot read $redis_created"
+  printf '%s\n' "$r_tmp" | sed '/^$/d' >"$redis_created" || refuse "cannot update $redis_created"
+  ok=1
+  answer
+  exit 0
+}
+
 # ---------------------------------------------------------------- files (files mode, --allow-files)
 
 # files_folder_uid prints the owner uid root recorded for exactly $fpath in
@@ -1057,6 +1157,16 @@ restart_main() {
     mongo_standby_config "$3" "$4" "$5" "$6"
     answer
     exit 0
+  elif printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} redis-create [1-9][0-9]{3,4} [0-9a-f]{64}$'; then
+    # shellcheck disable=SC2086 # split the checked request into its fields
+    set -- $line
+    id=$1 action=$2
+    redis_create "$3" "$4"
+  elif printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} redis-remove [1-9][0-9]{3,4}$'; then
+    # shellcheck disable=SC2086
+    set -- $line
+    id=$1 action=$2
+    redis_remove "$3"
   elif printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} create-cluster [1-9][0-9]{3,4} [1-9][0-9] [a-z][a-z0-9_]{0,39}$'; then
     id=${line%% *}
     action=create-cluster
@@ -1075,6 +1185,7 @@ restart_main() {
     unit=$(allowed_unit "$port")
   fi
   [ -n "$unit" ] || unit=$(created_unit "$port")
+  [ -n "$unit" ] || unit=$(redis_created_unit "$port")
   [ -n "$unit" ] || refuse "port $port is not in $allow: restarting or stopping it from Rowsafe is not allowed"
 
   if [ "$action" = restart ]; then
