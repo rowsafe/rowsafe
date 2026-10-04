@@ -1,6 +1,6 @@
 # Rowsafe Mark: a restore point before every deploy
 
-Save a **Mark** of your database (PostgreSQL, MySQL, MariaDB, MongoDB or ClickHouse) right before each deploy. If a migration drops the wrong column or a backfill goes wrong, you can [rewind](https://rowsafe.sh/docs/guides/restore) the database to the moment just before the deploy.
+Save a **Mark** of your database (PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse or SQLite) right before each deploy. If a migration drops the wrong column or a backfill goes wrong, you can [rewind](https://rowsafe.sh/docs/guides/restore) the database to the moment just before the deploy.
 
 [Rowsafe](https://rowsafe.sh) runs backups to your own bucket, restore to any second (Rewind), a weekly restore test (Proof) and monitoring (Pulse) for the databases you run on your own servers. This action is part of **Guard**, the safety net for changes made by CI and AI agents.
 

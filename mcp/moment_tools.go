@@ -80,7 +80,7 @@ const momentGuidance = "Tell the user what happened and when. The database's cha
 func (t *tools) addMomentTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "find_moment",
-		Description: "Finds when rows were deleted or changed, or a table emptied (TRUNCATE) or dropped: the Rowsafe agent reads the database's change log (PostgreSQL's WAL; for other engines where supported, their binary log, oplog, or Redis's replication stream) in the user's own storage, on their server, " +
+		Description: "Finds when rows were deleted or changed, or a table emptied (TRUNCATE) or dropped: the Rowsafe agent reads the database's change log (PostgreSQL's WAL; for other engines where supported, their binary log, oplog, Redis's replication stream or, for SQLite, the WAL pages replayed on a private copy) in the user's own storage, on their server, " +
 			"and lists the biggest changes per transaction with the exact commit time, transaction ID, table, row count and the point in time just before it (the moment to rewind to). " +
 			"Read-only: it never changes the database and never reads row contents. " +
 			"Redis and Valkey: pass key names or patterns in tables; results count the keys each change touched under the pattern searched (key names never leave the server). " +
@@ -165,6 +165,11 @@ func (t *tools) findMoment(ctx context.Context, _ *sdk.CallToolRequest, in findM
 		if i == 30 {
 			b.line("… and %d more in the structured result.", len(out.Moments)-30)
 			break
+		}
+		if m.XID >= 1<<31 { // a sequence number, not a transaction ID (ClickHouse, SQLite)
+			b.line("- %s: %s (database %s; rewind to %s to leave it out)", m.Time.Format(time.RFC3339), m.Summary, m.DB,
+				m.RewindTo.Format("2006-01-02T15:04:05.000000Z07:00"))
+			continue
 		}
 		b.line("- %s: %s (database %s, transaction %d; rewind to %s to leave it out)", m.Time.Format(time.RFC3339), m.Summary, m.DB, m.XID,
 			m.RewindTo.Format("2006-01-02T15:04:05.000000Z07:00"))

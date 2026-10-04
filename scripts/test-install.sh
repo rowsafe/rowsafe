@@ -89,7 +89,8 @@
 # Usage: scripts/test-install.sh [IMAGE...]
 #        scripts/test-install.sh --cloud [IMAGE...]   (section 12 only)
 # Default images: debian:trixie debian:bookworm ubuntu:24.04 ubuntu:22.04
-# TEST_ONLY=redis runs only the Redis and Valkey cases (11).
+# TEST_ONLY=redis runs only the Redis and Valkey cases (11); TEST_ONLY=sqlite
+# only the SQLite ones.
 # (--cloud: debian:bookworm)
 
 set -eu
@@ -428,6 +429,10 @@ in_container() {
 
   if [ "${TEST_ONLY:-}" = redis ]; then
     redis_only_tests
+    return 0
+  fi
+  if [ "${TEST_ONLY:-}" = sqlite ]; then
+    sqlite_only_tests
     return 0
   fi
 
@@ -1494,7 +1499,7 @@ sqlite_flow_tests() {
   }
   db=/srv/shop/db/production.sqlite3
   mkfile "$db"
-  rm -f /etc/rowsafe/sqlite-paths
+  rm -f /etc/rowsafe/sqlite-paths /etc/rowsafe/sqlite-clone-dirs
   line="0\t$db\t0\t-\t/srv/shop/db\t4096\tshop-production\tno\t-\tshop-production\t4.0 KiB\t-\t-\tsqlite"
   splan='SQLite database in /srv/shop/db (4.0 KiB, 2 tables, wal journal mode).\n\nWhat Rowsafe will change:\n  - Prepare your bucket for this database'
 
@@ -1513,14 +1518,17 @@ sqlite_flow_tests() {
   getfacl -p "$db" 2>/dev/null | grep -qx 'group::r--' || fail "$name: the file's group gained access"
   grep -q "gave the agent (postgres) read and write access to $db" "$W/out" || fail "$name: the change isn't said"
 
-  # 2. A file found open, picked on a terminal.
+  # 2. A file found open, picked on a terminal; a folder for clones named
+  # when asked (none allowed yet).
   db2=/srv/blog/blog.db
   mkfile "$db2"
   line2="0\t$db2\t0\t-\t/srv/blog\t4096\tblog\tno\t-\tblog\t4.0 KiB\t-\t-\tsqlite"
   scenario "sqlite-find_out=$db2\t4096\twal\t4242\truby\t-\t-\t999\t999\tblog" "discover_out=$line2" "plan_out=$splan"
   tty_ok "SQLite file found open: picked, access, plan" \
-    "Protect $db2\ty\nName it in Rowsafe\t\nTurn on backups for blog now?\tn\n" "$INSTALLER"
+    "Protect $db2\ty\nAllow Rowsafe to make clones\ty\nFolder for the clones\t/srv/tty-clones\nclose the SQLite files to this server's other users\tn\nName it in Rowsafe\t\nTurn on backups for blog now?\tn\n" "$INSTALLER"
   called "sqlite find (root)"
+  grep -qxF /srv/tty-clones /etc/rowsafe/sqlite-clone-dirs || fail "$name: the folder for clones isn't in the list"
+  getfacl -p /srv/tty-clones 2>/dev/null | grep -qx 'user:postgres:rwx' || fail "$name: no ACL for the agent on the clones folder"
   called "--socket-dir $db2"
   grep -qxF "$db2" /etc/rowsafe/sqlite-paths || fail "$name: $db2 isn't in the list"
   getfacl -p "$db2" 2>/dev/null | grep -qx 'user:postgres:rw-' || fail "$name: no ACL for the agent on $db2"
@@ -1529,7 +1537,86 @@ sqlite_flow_tests() {
   expect_fail "--sqlite refuses a -wal file" "not its -wal" "$INSTALLER" --sqlite "$db-wal"
   expect_fail "--protect with two --sqlite files" "exactly one --sqlite" "$INSTALLER" --protect shop --sqlite "$db" --sqlite "$db2"
   pass "SQLite: --sqlite and found files get ACL access, the list, plans by file; side files refused"
-  rm -f /etc/rowsafe/sqlite-paths
+  grep -qx '# Closing SQLite files to other users from Rowsafe (Security) is off.' /etc/rowsafe/sqlite-modes-allowed ||
+    fail "the no to closing SQLite files isn't kept"
+
+  # 4. --allow-sqlite-modes: root's helper may close the listed files (and
+  #    only in their folders) to other users; --no-allow-sqlite-modes removes it.
+  scenario "discover_out=$line" "plan_out=$splan"
+  expect_ok "--allow-sqlite-modes: allow list, helper units" "$INSTALLER" --allow-sqlite-modes --no-setup
+  has "Rowsafe may close the SQLite files to other users when you click Apply fix (Security)"
+  grep -qx sqlite-paths /etc/rowsafe/sqlite-modes-allowed || fail "$name: $(cat /etc/rowsafe/sqlite-modes-allowed)"
+  [ "$(stat -c '%U %a' /etc/rowsafe/sqlite-modes-allowed)" = "root 644" ] || fail "$name: allow list ownership/mode"
+  u=/etc/systemd/system/rowsafe-sqlite-modes.service
+  grep -qx 'ExecStart=/usr/local/lib/rowsafe/rowsafe-permissions sqlite-modes-apply' "$u" || fail "$name: no helper unit"
+  grep -qx 'Environment=ROWSAFE_AGENT_USER=postgres' "$u" || fail "$name: the unit doesn't name the agent's user"
+  grep -qx 'ReadWritePaths=-/srv/blog -/srv/shop/db' "$u" || fail "$name: ReadWritePaths isn't the listed files' folders: $(grep ReadWrite "$u")"
+  grep -qx 'ProtectSystem=strict' "$u" || fail "$name: the unit may write everywhere"
+  grep -qx 'PathExists=/var/lib/rowsafe/sqlite-modes/request' /etc/systemd/system/rowsafe-sqlite-modes.path || fail "$name: no path unit"
+  [ "$(stat -c '%U %a' /var/lib/rowsafe/sqlite-modes)" = "postgres 700" ] || fail "$name: request directory ownership/mode"
+  if [ "${TEST_UNITS:-0}" = 1 ]; then
+    expect_ok "systemd-analyze verify (SQLite helper units)" systemd-analyze verify "$u" /etc/systemd/system/rowsafe-sqlite-modes.path
+  fi
+  scenario "discover_out=$line" "plan_out=$splan"
+  expect_ok "--no-allow-sqlite-modes" "$INSTALLER" --no-allow-sqlite-modes --no-setup
+  [ ! -e "$u" ] && [ ! -e /etc/systemd/system/rowsafe-sqlite-modes.path ] || fail "$name: helper units left"
+  ! grep -qx sqlite-paths /etc/rowsafe/sqlite-modes-allowed || fail "$name: allow list kept"
+  pass "SQLite: --allow-sqlite-modes sets up root's helper for the listed files' folders only; --no-allow-sqlite-modes removes it"
+  rm -f /etc/rowsafe/sqlite-paths /etc/rowsafe/sqlite-modes-allowed
+
+  # 4. Folders for clones (--sqlite-clone-dir): made when missing, write
+  # access for the agent, a default ACL for the folder's owner, the list;
+  # system folders and relative paths refused; asked only once.
+  install -d -o shopapp -g shopapp -m 0750 /srv/shop/clones
+  scenario
+  expect_ok "--sqlite-clone-dir: folders allowed" "$INSTALLER" --no-setup --sqlite-clone-dir /srv/clones --sqlite-clone-dir /srv/shop/clones --sqlite-clone-dir /etc/rowsafe-clones
+  for d in /srv/clones /srv/shop/clones; do
+    grep -qxF "$d" /etc/rowsafe/sqlite-clone-dirs || fail "$name: $d isn't in /etc/rowsafe/sqlite-clone-dirs"
+    getfacl -p "$d" 2>/dev/null | grep -qx 'user:postgres:rwx' || fail "$name: no ACL for the agent on $d"
+    getfacl -p "$d" 2>/dev/null | grep -qx 'default:user:postgres:rw-' || fail "$name: no default ACL for the agent on $d"
+    runuser -u postgres -- sh -c "touch '$d/probe' && rm '$d/probe'" || fail "$name: the agent can't write in $d"
+  done
+  getfacl -p /srv/shop/clones 2>/dev/null | grep -qx 'default:user:shopapp:rw-' || fail "$name: no default ACL for the folder's owner"
+  [ "$(stat -c '%U %G' /srv/shop/clones)" = "shopapp shopapp" ] || fail "$name: the folder's owner changed"
+  getfacl -p /srv/shop/clones 2>/dev/null | grep -qx 'other::---' || fail "$name: others gained access to the folder"
+  getfacl -p /srv/shop/clones 2>/dev/null | grep -qx 'group::r-x' || fail "$name: the folder's group gained access"
+  [ "$(stat -c '%a' /etc/rowsafe/sqlite-clone-dirs)" = 644 ] || fail "$name: the list isn't 0644"
+  ! grep -q rowsafe-clones /etc/rowsafe/sqlite-clone-dirs || fail "$name: a system folder was allowed"
+  [ ! -e /etc/rowsafe-clones ] || fail "$name: a folder was made under /etc"
+  grep -q "may write SQLite clones into /srv/shop/clones" "$W/out" || fail "$name: the change isn't said"
+  expect_ok "--sqlite-clone-dir: re-run keeps one line per folder" "$INSTALLER" --no-setup --sqlite-clone-dir /srv/clones
+  [ "$(grep -cxF /srv/clones /etc/rowsafe/sqlite-clone-dirs)" = 1 ] || fail "$name: duplicate line"
+  expect_fail "--sqlite-clone-dir refuses a relative path" "absolute path" "$INSTALLER" --sqlite-clone-dir srv/clones
+  expect_fail "--sqlite-clone-dir refuses /" "absolute path" "$INSTALLER" --sqlite-clone-dir /
+  pass "SQLite clones: --sqlite-clone-dir and the question allow folders with ACLs; system folders refused"
+  rm -f /etc/rowsafe/sqlite-paths /etc/rowsafe/sqlite-clone-dirs
+}
+
+# sqlite_only_tests (TEST_ONLY=sqlite): what the SQLite cases need of the
+# rest (an install with storage, the agent running as postgres), then only
+# those cases.
+sqlite_only_tests() {
+  write_terminal_helpers
+  useradd --system --home-dir /var/lib/postgresql --create-home --shell /bin/sh postgres
+  mkdir -p /usr/lib/postgresql/17/bin /var/lib/postgresql/17/main
+  printf '#!/bin/sh\n' >/usr/lib/postgresql/17/bin/postgres && chmod 755 /usr/lib/postgresql/17/bin/postgres
+  configured() {
+    env ROWSAFE_REPO_S3_ENDPOINT=acct.eu.r2.cloudflarestorage.com ROWSAFE_REPO_S3_BUCKET=app-rowsafe \
+      ROWSAFE_REPO_S3_KEY=AKIAEXAMPLEKEY42 ROWSAFE_REPO_S3_KEY_SECRET=s3cr3t/with+base64= \
+      ROWSAFE_REPO_CIPHER_PASS='cipher-pass-that-is-long-enough/+==' "$@"
+  }
+  scenario
+  expect_ok "configured install" configured "$INSTALLER" rse_secrettoken123 --no-allow-restart --no-allow-pooler
+  echo '{"host_id":"host_1","agent_token":"rsa_x"}' >/var/lib/rowsafe/agent.json
+  chown postgres:postgres /var/lib/rowsafe/agent.json
+  runuser -u postgres -- /opt/rowsafe/rowsafe-agent run >/dev/null 2>&1 &
+  sleep 1
+  done_='Checking that changes reach your storage...\n✓ shop is protected. The first full backup is running.'
+  status='db_fake\tshop\tactive\trunning\thttps://app.rowsafe.test/databases/db_fake'
+  scenario
+  expect_ok "agent running, restarts and pooling off" "$INSTALLER" --no-allow-restart --no-allow-pooler
+  sqlite_flow_tests
+  echo "test-install: SQLite cases passed"
 }
 
 # mongodb_flow_tests: a MongoDB server found by discover (engine column):

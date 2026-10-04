@@ -57,6 +57,23 @@ import (
 //     online backup API: the app's open connections see the new content
 //     (RewindInPlaceStopsServer is false). The file as it was is kept for
 //     Undo (7 days by default) in the agent's rewind directory.
+//   - Find the moment (FindMomentResult): the agent replays the range's
+//     changes on a private scratch copy and compares each table's rows
+//     (by rowid, or a WITHOUT ROWID table's primary key, as a hash of
+//     their bytes: values are never decoded) before and after every
+//     transaction. Moment.DB is "main", Table the table's name, Kind delete,
+//     update or drop (a DELETE without WHERE is a delete of every row;
+//     inserts aren't listed), LSN the transaction's stream position, XID
+//     a sequence number with the high bit set (no transaction IDs in
+//     SQLite), Time when the agent copied the change (within a second of
+//     its commit, to the millisecond). "Just before" a change is a Time
+//     target one millisecond earlier.
+//   - Migration previews run on a restored copy (kept as a CopyKindPreview
+//     copy for the next one). PreviewResult.DB is the file's name. There
+//     is one write lock per file, so PreviewLock.Relation is the file's
+//     name too, Blocks "writes" (reads go on in WAL mode and also wait
+//     while it commits in rollback-journal mode, said in Mode), on the
+//     first writing statement of a transaction, held until it commits.
 //   - Monitoring: database_size_bytes, disk_* and the sqlite_* metrics
 //     (collect/catalog_sqlite.go), and DatabaseMonitoring.SQLite below.
 //   - No server: restart, standby, pooling, updates, upgrades, Databases &
@@ -103,6 +120,13 @@ var SQLiteNoServer = map[string]string{
 	FeatureLogs:     "SQLite runs inside your app and keeps no log of its own; your app's logs have its errors.",
 }
 
+// SQLiteOff is why the other features SQLite doesn't have are off, in one
+// plain sentence each (shown where people look for them).
+var SQLiteOff = map[string]string{
+	FeatureSettings: "Tuning doesn't apply to SQLite: there is no server to tune, and your app sets SQLite's options when it opens the file.",
+	FeatureMoveIn:   "Moving in from Turso or Cloudflare D1 isn't available yet.",
+}
+
 // sqliteFeatures are what SQLite supports (EngineCapabilities). A SQLite
 // database is a file that an application opens itself: there is no server
 // to restart, replicate, pool, update or log, so those flags stay off
@@ -118,6 +142,16 @@ var sqliteFeatures = EngineFeatures{
 	Monitoring: true, Fixes: true, // monitor.go, maintenance.go
 	SecondCopy: true, // the same stream and backups into the second bucket (ship.go sinks)
 	Files:      true, // the app's folders next to the database (agent-wide, restic)
+	FindMoment: true, // the WAL pages replayed on a private copy, rows compared (internal/engine/sqlite/moment.go)
+	Fork:       true, // clones into a new file in a folder root allowed (internal/engine/sqlite/fork.go)
+	// Schema-based: SQLite keeps no query statistics (internal/engine/sqlite/advice.go, indexadvice.go).
+	Recommendations: true, IndexAdvice: true,
+	// Guard: a migration run on a restored copy (internal/engine/sqlite/preview.go).
+	MigrationPreview: true,
+	// Masked and structure-only copies as files on the server, no port
+	// (internal/engine/sqlite/copies*.go).
+	SafeCopies: true,
+	Security:   true, // who on the server can reach the file (internal/engine/sqlite/security.go)
 }
 
 // SQLiteStatus is SQLite's own health detail (DatabaseMonitoring.SQLite),

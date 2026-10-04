@@ -6,8 +6,10 @@
 # hammering a WAL database while the agent copies it: the app's checkpoints
 # race the agent's, its WAL resets, a wal_checkpoint(TRUNCATE) of its own
 # breaks the stream on purpose; then restores to several moments, a Mark
-# and the newest point, Proof, Rewind copy/compare/rows/in place/undo, and
-# discovery of the files running programs have open.
+# and the newest point, Proof, Rewind copy/compare/rows/in place/undo,
+# clones into a folder allowed for them, discovery of the files running
+# programs have open, and the security check's fix through root's helper
+# (the app's files, the agent's ACL).
 #
 #   scripts/test-sqlite.sh
 #   TEST_RUN=TestFindOpen scripts/test-sqlite.sh
@@ -49,18 +51,25 @@ docker exec "$name" sh -euc '
 	useradd -m app
 	useradd -m rowsafe
 	echo "rowsafe ALL=(app) NOPASSWD: ALL" >/etc/sudoers.d/rowsafe-test
+	# TestSQLiteSecurity: root'"'"'s helper for SQLite files is this test binary,
+	# run as root (it stands in for rowsafe-sqlite-modes.service).
+	echo "rowsafe ALL=(root) NOPASSWD: /opt/pkg/sqlite.test" >>/etc/sudoers.d/rowsafe-test
 	chmod 0440 /etc/sudoers.d/rowsafe-test
 	# The app'"'"'s folder, as the installer leaves it: the agent may write in it,
 	# and SQLite side files created there work for both users.
 	install -d -o app -g app -m 0755 /srv/app/db
 	setfacl -m u:rowsafe:rwx /srv/app/db
 	setfacl -d -m u::rw-,g::r--,o::r--,u:rowsafe:rw-,u:app:rw- /srv/app/db
+	# A folder for clones, as --sqlite-clone-dir leaves it (the app owns it).
+	install -d -o app -g app -m 0750 /srv/app/clones
+	setfacl -m u:rowsafe:rwx /srv/app/clones
+	setfacl -d -m u::rw-,g::rw-,o::---,u:rowsafe:rw-,u:app:rw- /srv/app/clones
 	install -d -o rowsafe -g rowsafe -m 0755 /opt/pkg
 	cp -R /work/sqlite.test /work/testdata /opt/pkg/
 	chown -R rowsafe:rowsafe /opt/pkg && chmod -R a+rX /opt/pkg
 '
 to "$LIMIT" docker exec -u rowsafe -w /opt/pkg \
 	-e USER=rowsafe -e HOME=/home/rowsafe \
-	-e ROWSAFE_TEST_SQLITE_INTEROP=1 -e ROWSAFE_TEST_SQLITE_DIR=/srv/app/db -e ROWSAFE_TEST_SQLITE_APP_USER=app \
+	-e ROWSAFE_TEST_SQLITE_INTEROP=1 -e ROWSAFE_TEST_SQLITE_DIR=/srv/app/db -e ROWSAFE_TEST_SQLITE_CLONE_DIR=/srv/app/clones -e ROWSAFE_TEST_SQLITE_APP_USER=app \
 	"$name" ./sqlite.test -test.count=1 -test.v -test.run "$TEST_RUN" -test.timeout "${LIMIT}s"
 echo "==> SQLite integration test passed"

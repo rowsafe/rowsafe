@@ -190,6 +190,8 @@ func (s IndexSpec) DefinitionFor(engine string) string {
 		return fmt.Sprintf("db.getSiblingDB(%q).getCollection(%q).createIndex({%s}, {name: %q})", s.DB, s.Table, strings.Join(keys, ", "), s.Name)
 	case EngineClickHouse:
 		return s.ClickHouseDefinition()
+	case EngineSQLite:
+		return s.sqliteDefinition() // sqlite_advice.go
 	}
 	return s.Definition()
 }
@@ -315,6 +317,10 @@ type IndexAdvisorResult struct {
 	DurationMs int64    `json:"duration_ms"`
 	Notes      []string `json:"notes,omitempty"`
 	Summary    string   `json:"summary"`
+	// SchemaBased: the ideas come from the whole schema, not statements
+	// (SQLite, sqlite_advice.go), so Generated is complete even with no
+	// Statements: open recommendations missing from it are gone.
+	SchemaBased bool `json:"schema_based,omitempty"`
 }
 
 // IndexRecommendation is an index proven on a copy.
@@ -333,6 +339,10 @@ type IndexRecommendation struct {
 	Statements []IndexGain `json:"statements"`
 	// Speedup is the time-weighted speedup over those statements.
 	Speedup float64 `json:"speedup"`
+	// ForeignKey: an index for a foreign key, proposed from the schema
+	// (SQLite, which keeps no query statistics: no Statements); Speedup is
+	// then its lookup's (sqlite_advice.go).
+	ForeignKey *IndexForeignKey `json:"foreign_key,omitempty"`
 }
 
 // IndexGain is one statement before and after the index, on the copy.
@@ -450,6 +460,9 @@ type IndexRecommendationView struct {
 	Usage *IndexUsageView `json:"usage,omitempty"`
 	// Outcome is the report a week after creation.
 	Outcome *IndexOutcome `json:"outcome,omitempty"`
+	// ForeignKey: an index for a foreign key (SQLite), with its lookup
+	// measured on the copy (IndexRecommendation.ForeignKey).
+	ForeignKey *IndexForeignKey `json:"foreign_key,omitempty"`
 }
 
 // IndexStatementView is a statement a recommendation helps.

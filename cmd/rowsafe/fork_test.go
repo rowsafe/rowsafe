@@ -128,3 +128,21 @@ func TestForkCommands(t *testing.T) {
 		t.Fatalf("%v\n%s", err, out)
 	}
 }
+
+// SQLite clones go to a new file in one of the target's folders for clones.
+func TestPickSQLiteForkPlace(t *testing.T) {
+	tg := protocol.ForkTarget{Hostname: "app-1", Places: []protocol.ForkPlace{
+		{Placement: protocol.ForkSQLiteFile, Dir: "/srv/clones", Label: "A new file in /srv/clones"}}}
+	if !hasSQLitePlaces(tg) {
+		t.Fatal("no SQLite places")
+	}
+	p, err := pickSQLiteForkPlace(tg, "/srv/clones/staging.sqlite3")
+	if err != nil || p.Placement != protocol.ForkSQLiteFile || p.Dir != "/srv/clones" {
+		t.Fatalf("%+v %v", p, err)
+	}
+	for _, bad := range []string{"", "/srv/other/x.db", "/srv/clones/sub/x.db", "/srv/clones/x.db-wal", "/srv/clones/.x"} {
+		if _, err := pickSQLiteForkPlace(tg, bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}

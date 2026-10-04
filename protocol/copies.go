@@ -245,6 +245,10 @@ type SafeCopyParams struct {
 	Expires time.Time   `json:"expires"` // default 24h, at most 7 days
 	Masking MaskingPlan `json:"masking"`
 	Access  CopyAccess  `json:"access"`
+	// SchemaOnly makes a structure-only copy: the tables, indexes,
+	// triggers and views, without a row (SQLite only; Masking and Access
+	// are ignored).
+	SchemaOnly bool `json:"schema_only,omitempty"`
 }
 
 // SafeCopyResult is the agent's report for a safe_copy task.
@@ -263,6 +267,11 @@ type SafeCopyResult struct {
 	TLSOwnCert bool          `json:"tls_own_cert,omitempty"`
 	Masking    MaskingReport `json:"masking"`
 	Summary    string        `json:"summary"`
+	// Path is the copy's file on the server, for engines whose copies are
+	// files (SQLite: no port, role or password; readable only by the
+	// agent's user and root).
+	Path       string `json:"path,omitempty"`
+	SchemaOnly bool   `json:"schema_only,omitempty"`
 }
 
 // CopySchemaParams are the params of a copy_schema task.
@@ -456,6 +465,12 @@ type SafeCopy struct {
 	TLSCert     string         `json:"tls_cert,omitempty"`
 	Masking     *MaskingReport `json:"masking,omitempty"`
 	TaskID      string         `json:"task_id"`
+	// Path is the copy's file on the server (SQLite: a file copy has no
+	// address, role or password; it stays on the server, readable only by
+	// the agent's user and root). SchemaOnly: a structure-only copy (no
+	// rows).
+	Path       string `json:"path,omitempty"`
+	SchemaOnly bool   `json:"schema_only,omitempty"`
 	// Task is the safe_copy task while it runs or when it failed.
 	Task  *TaskView `json:"task,omitempty"`
 	Error string    `json:"error,omitempty"`
@@ -502,6 +517,11 @@ type CreateSafeCopyRequest struct {
 	PasswordVerifier string `json:"password_verifier,omitempty"`
 	// Role is the login role's name (default rowsafe_copy_<id>).
 	Role string `json:"role,omitempty"`
+	// SchemaOnly asks for a structure-only copy: tables, indexes, triggers
+	// and views without a row (SQLite only). A SQLite copy is a file on the
+	// server: AllowFrom, Listen, ConnectHost, DB, Role and
+	// PasswordVerifier don't apply to it.
+	SchemaOnly bool `json:"schema_only,omitempty"`
 }
 
 // CreateSafeCopyResponse is the new copy.

@@ -163,7 +163,11 @@ func printMoments(name string, r protocol.FindMomentResult) {
 		if multiDB {
 			what += " (database " + m.DB + ")"
 		}
-		t.row(m.Time.In(time.Local).Format("2006-01-02 15:04:05 MST"), what, strconv.FormatUint(uint64(m.XID), 10))
+		xid := strconv.FormatUint(uint64(m.XID), 10)
+		if m.XID >= 1<<31 { // a sequence number (ClickHouse, SQLite), not a transaction ID
+			xid = "-"
+		}
+		t.row(m.Time.In(time.Local).Format("2006-01-02 15:04:05 MST"), what, xid)
 	}
 	t.flush()
 	fmt.Println()
@@ -180,7 +184,7 @@ func printMoments(name string, r protocol.FindMomentResult) {
 	fmt.Println()
 	fmt.Println("Rewind to just before the biggest one (a copy next to production; it never touches it):")
 	fmt.Printf("  rowsafe rewind copy %s --at %s\n", name, justBefore(big).UTC().Format("2006-01-02T15:04:05.000000Z07:00"))
-	fmt.Println("PostgreSQL's change log doesn't record who made a change, so Rowsafe can't say which user or app it was.")
+	fmt.Println("The database's change log doesn't record who made a change, so Rowsafe can't say which user or app it was.")
 }
 
 func momentBigger(a, b protocol.Moment) bool {

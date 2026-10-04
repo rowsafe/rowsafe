@@ -170,14 +170,18 @@ func AssessEngine(engine string, res *protocol.PreviewResult, texts []string, ex
 
 		// Rows changed.
 		if s.Rows != nil && (command == "UPDATE" || command == "DELETE" || command == "INSERT") {
+			bigDetail, detail := "Large changes hold row locks, bloat the table and delay replicas until they commit.", "Rows stay locked until the migration commits."
+			if d.bigChangeDetail != "" {
+				bigDetail, detail = d.bigChangeDetail, d.bigChangeDetail
+			}
 			switch n := *s.Rows; {
 			case n >= dangerousRows:
 				add(protocol.PreviewDangerous, "large_data_change", fmt.Sprintf("%s changes %s rows in one go", command, humanCount(n)),
-					"Large changes hold row locks, bloat the table and delay replicas until they commit.",
+					bigDetail,
 					"Change the rows in batches of a few thousand, outside the schema migration.")
 			case n >= carefulRows:
 				add(protocol.PreviewCareful, "large_data_change", fmt.Sprintf("%s changes %s rows in one go", command, humanCount(n)),
-					"Rows stay locked until the migration commits.", "Consider batches of a few thousand rows, outside the schema migration.")
+					detail, "Consider batches of a few thousand rows, outside the schema migration.")
 			}
 			if *s.Rows >= carefulRows {
 				parts = append(parts, fmt.Sprintf("changes %s rows", humanCount(*s.Rows)))
@@ -290,6 +294,9 @@ func (d dialect) lockSuggestion(mode, text string) string {
 		if r.suggestion != "" {
 			return r.suggestion
 		}
+	}
+	if d.lockAdvice != "" {
+		return d.lockAdvice
 	}
 	if mode == protocol.PreviewInTransaction {
 		return "Split the migration so slow steps don't run in the same transaction as statements that lock busy tables, and set lock_timeout."

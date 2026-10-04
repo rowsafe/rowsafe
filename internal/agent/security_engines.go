@@ -45,6 +45,11 @@ func (a *Agent) scanEngineSecurity(ctx context.Context, db protocol.DatabaseSpec
 	rep, err := c.SecurityReport(ctx, a.engineEnv(name), db)
 	rep.Engine = name
 	rep.Docker = a.cfg.Sidecar()
+	if db.Port == 0 { // SQLite: a file, no port to reach from anywhere
+		rep.Port, rep.HostAddresses = 0, nil
+		rep.Firewall = protocol.FirewallState{Reason: "This database has no network port."}
+		return rep, err
+	}
 	rep.Firewall = a.firewallState(db.Port)
 	if rep.Port == 0 {
 		rep.Port = db.Port
@@ -66,7 +71,11 @@ func (a *Agent) runEngineSecurityTask(ctx context.Context, task *protocol.Task, 
 		if rep.Error != "" {
 			return &rep, errors.New(rep.Error)
 		}
-		tl.Printf("security check: %d users, %d clients connected over the network", len(rep.Roles), len(rep.Clients))
+		if es := rep.EngineSecurity; es != nil && es.SQLite != nil {
+			tl.Printf("security check: %d file(s), %d copies open to other users", len(es.SQLite.Files), len(es.SQLite.OpenCopies))
+		} else {
+			tl.Printf("security check: %d users, %d clients connected over the network", len(rep.Roles), len(rep.Clients))
+		}
 		return &rep, nil
 	}
 	var p protocol.SecurityFixParams
@@ -84,6 +93,10 @@ func (a *Agent) runEngineSecurityTask(ctx context.Context, task *protocol.Task, 
 	switch p.Action {
 	case protocol.SecFirewall, protocol.SecFirewallOff: // the root helper, as for PostgreSQL (firewall.go)
 		res = &protocol.SecurityFixResult{Action: p.Action}
+		if db.Port == 0 {
+			err = errors.New("this database has no network port, so there is nothing to limit in the firewall")
+			break
+		}
 		err = a.firewall(ctx, db, p, res, tl)
 	default:
 		res, err = c.SecurityFix(ctx, a.engineEnv(name), db, p, tl)
