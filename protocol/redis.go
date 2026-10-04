@@ -108,6 +108,7 @@ var redisFeatures = EngineFeatures{
 	Monitoring: true, Fixes: true, Restart: true,
 	Files: true, SecondCopy: true,
 	FindMoment: true, // the stream segments in the bucket, keys matched on the server (internal/engine/redis/moment.go)
+	SafeCopies: true, // masked or structure-only, opened over TLS through the agent (internal/engine/redis/copies_*.go)
 }
 
 // valkeyFeatures are Redis's: Valkey is a fork of Redis 7.2 that speaks the

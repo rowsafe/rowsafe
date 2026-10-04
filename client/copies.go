@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/rowsafe/rowsafe/protocol"
@@ -161,6 +162,9 @@ func ConnectionString(cp protocol.SafeCopy, password string) string {
 		u.Scheme, u.RawQuery = "mongodb", "authSource=admin&tls=true&tlsAllowInvalidCertificates=true&directConnection=true"
 	case protocol.EngineClickHouse:
 		u.Scheme, u.RawQuery = "clickhouse", "secure=true&skip_verify=true"
+	case protocol.EngineRedis, protocol.EngineValkey:
+		// TLS (rediss); the path is the logical database's number.
+		u.Scheme, u.RawQuery, u.Path = "rediss", "", "/"+strings.TrimPrefix(cmpOrStr(cp.DB, "0"), "db")
 	}
 	if password != "" {
 		u.User = url.UserPassword(cp.Role, password)
@@ -168,4 +172,11 @@ func ConnectionString(cp protocol.SafeCopy, password string) string {
 		u.User = url.User(cp.Role)
 	}
 	return u.String()
+}
+
+func cmpOrStr(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
