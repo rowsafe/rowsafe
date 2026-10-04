@@ -76,3 +76,30 @@ func TestUsedMemoryDatasetWraps(t *testing.T) {
 		t.Fatalf("dataset %d", in.UsedMemoryDataset)
 	}
 }
+
+// A Mark saved after the server restarted (a new replication id, the same
+// offsets) is reached from a backup taken before the restart.
+func TestMarkReachableAcrossRestart(t *testing.T) {
+	a, b := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	t0 := time.Date(2026, 10, 4, 14, 0, 0, 0, time.UTC)
+	segs := []segment{
+		{ReplID: a, Start: 100, End: 200, From: t0, To: t0.Add(time.Minute)},
+		{ReplID: b, Start: 200, End: 300, From: t0.Add(2 * time.Minute), To: t0.Add(3 * time.Minute)},
+	}
+	base := backupDoc{ReplID: a, Offset: 100, Exact: true}
+	if !markReachable(base, markDoc{ReplID: b, Offset: 250}, segs) {
+		t.Error("a Mark after the restart")
+	}
+	if !markReachable(base, markDoc{ReplID: a, Offset: 150}, segs) {
+		t.Error("a Mark before the restart")
+	}
+	if markReachable(base, markDoc{ReplID: b, Offset: 350}, segs) {
+		t.Error("a Mark past what the bucket holds")
+	}
+	if markReachable(base, markDoc{ReplID: strings.Repeat("c", 40), Offset: 250}, segs) {
+		t.Error("a Mark of another stream")
+	}
+	if markReachable(backupDoc{ReplID: a, Offset: 260, Exact: true}, markDoc{ReplID: b, Offset: 250}, segs) {
+		t.Error("a backup after the Mark")
+	}
+}

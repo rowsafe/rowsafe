@@ -100,13 +100,19 @@ func plan(ctx context.Context, r *repo, target restoreTarget) (restorePlan, erro
 	case !target.Time.IsZero():
 		stop = target.Time.Truncate(time.Second).Add(time.Second - time.Nanosecond)
 	}
+	var markSegs []segment
+	if target.Mark != "" {
+		if markSegs, err = r.listSegments(ctx); err != nil {
+			return p, fmt.Errorf("listing the stream of changes: %w", err)
+		}
+	}
 	var base *backupDoc
 	for i := len(docs) - 1; i >= 0; i-- {
 		d := docs[i]
 		switch {
 		case target.Latest:
 		case target.Mark != "":
-			if !d.Exact || d.ReplID != mark.ReplID || d.Offset > mark.Offset {
+			if !markReachable(d, mark, markSegs) {
 				continue
 			}
 		default:
@@ -168,6 +174,30 @@ func plan(ctx context.Context, r *repo, target restoreTarget) (restorePlan, erro
 		p.StopTime = stop
 	}
 	return p, nil
+}
+
+// markReachable: the backup comes before the Mark in the stream, the same
+// replication id or one the stream continues into from the backup's. A
+// server restarted from its own snapshot answers its replicas' PSYNC with
+// a new replication id and the same offsets (Redis 7+), so a Mark saved
+// after a restart has another id than the backups before it.
+func markReachable(d backupDoc, mark markDoc, segs []segment) bool {
+	if !d.Exact || d.Offset > mark.Offset {
+		return false
+	}
+	if d.ReplID == mark.ReplID {
+		return true
+	}
+	chain, reach, _, _ := chainFrom(segs, d.ReplID, d.Offset)
+	if reach < mark.Offset {
+		return false
+	}
+	for _, s := range chain {
+		if s.ReplID == mark.ReplID {
+			return true
+		}
+	}
+	return false
 }
 
 // restoreOutcome says what a restore reached.
