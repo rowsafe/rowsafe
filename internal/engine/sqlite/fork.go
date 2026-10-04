@@ -65,6 +65,19 @@ func CloneDirs() []string {
 	return out
 }
 
+// prepareEnvCloneDirs makes the folders a container's settings name
+// (ROWSAFE_SQLITE_CLONE_DIRS) when they are missing: there they live in a
+// volume the agent's user can write (root's list is root's to make).
+func prepareEnvCloneDirs() {
+	for _, d := range strings.Split(os.Getenv("ROWSAFE_SQLITE_CLONE_DIRS"), ":") {
+		if d = strings.TrimSpace(d); protocol.SQLiteCloneDir(d) {
+			if _, err := os.Lstat(d); errors.Is(err, os.ErrNotExist) {
+				_ = os.MkdirAll(d, 0o750)
+			}
+		}
+	}
+}
+
 // cloneDirProblem says why the agent can't write clones into dir ("" when
 // it can).
 func cloneDirProblem(dir string) string {
@@ -92,6 +105,7 @@ func cloneDirProblem(dir string) string {
 // StandbyTargets reports the folders for clones (heartbeat): one "sqlite"
 // target per folder, Port 0, Socket the folder.
 func (e *Engine) StandbyTargets(ctx context.Context, env agent.EngineEnv) []protocol.StandbyTarget {
+	prepareEnvCloneDirs()
 	var out []protocol.StandbyTarget
 	for _, d := range CloneDirs() {
 		t := protocol.StandbyTarget{Engine: protocol.EngineSQLite, Socket: d, Reason: cloneDirProblem(d)}
@@ -224,6 +238,7 @@ func (e *Engine) ForkRestore(ctx context.Context, env agent.EngineEnv, p protoco
 		return nil, errors.New("masking isn't available for SQLite clones yet; nothing was written")
 	}
 	path := p.SocketDir
+	prepareEnvCloneDirs()
 	if r, ok := cloneOf(env, path); ok && r.ForkID == p.ForkID {
 		if _, err := os.Lstat(path); err == nil {
 			// Already done (the task ran again before its report arrived).

@@ -177,6 +177,13 @@ func TestSQLiteFork(t *testing.T) {
 		t.Fatal("a refused clone wrote its file")
 	}
 
+	// The app can use the clone (in scripts/test-sqlite.sh: as its own
+	// user, through the folder's default ACL).
+	lastClone := appFor(t, clone).run(t, vMoment+1, 200*time.Millisecond, -1)
+	if v, _ := verify(t, clone); v != lastClone || v <= vMoment {
+		t.Fatalf("the app writing the clone: v=%d, want %d", v, lastClone)
+	}
+
 	// The clone is a database of its own: its own stanza and backups.
 	db2 := protocol.DatabaseSpec{ID: "db-clone", Name: "app-staging", Stanza: "app-staging-1", SocketDir: clone, RetentionFull: 2, Engine: protocol.EngineSQLite}
 	if _, err := run[protocol.AdoptResult](t, e, env, db2, protocol.TaskAdopt, protocol.AdoptParams{Apply: true, Force: true}); err != nil {
