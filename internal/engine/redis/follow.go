@@ -137,6 +137,9 @@ func linkDir(env agent.EngineEnv, stanza string) string {
 
 // followerFor returns the database's link, starting it when needed.
 func (e *Engine) followerFor(env agent.EngineEnv, db protocol.DatabaseSpec) (*follower, error) {
+	if standbys(env).fenced(db.ID) {
+		return nil, errFenced // standby.go
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if f := e.followers[db.ID]; f != nil {

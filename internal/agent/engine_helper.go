@@ -86,7 +86,36 @@ func (a *Agent) helperCanDo(action string, port int) bool {
 	if strings.HasPrefix(action, "mongodb-") {
 		return slices.Contains(allowFilePorts(MongoDBStandbyAllowFile), port)
 	}
+	if strings.HasPrefix(action, "redis-") {
+		lo, hi := allowFileRange(RedisServersAllowFile)
+		return lo > 0 && port >= lo && port <= hi
+	}
 	return false
+}
+
+// RedisServersAllowFile is where root lets Rowsafe create Redis or Valkey
+// servers for standbys and clones ("ports MIN-MAX", "purposes ...",
+// written by the installer with --redis-standby or --redis-clones).
+var RedisServersAllowFile = "/etc/rowsafe/redis-servers-allowed"
+
+// allowFileRange is the "ports MIN-MAX" line of an allow file (0, 0: none).
+func allowFileRange(path string) (int, int) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		f := strings.Fields(line)
+		if len(f) == 2 && f[0] == "ports" {
+			lo, hi, ok := strings.Cut(f[1], "-")
+			a, err1 := strconv.Atoi(lo)
+			b, err2 := strconv.Atoi(hi)
+			if ok && err1 == nil && err2 == nil && a > 0 && a <= b && b < 65536 {
+				return a, b
+			}
+		}
+	}
+	return 0, 0
 }
 
 // helperAllActions is every word of the helper's "# actions:" line.

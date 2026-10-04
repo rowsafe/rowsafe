@@ -3,6 +3,7 @@ package redis
 import (
 	"bufio"
 	"bytes"
+	"strings"
 	"testing"
 	"time"
 
@@ -118,5 +119,25 @@ func TestRedisMomentSummary(t *testing.T) {
 	s = redisMomentSummary(protocol.Moment{Kind: protocol.MomentTruncate, DB: "db3", Table: "*"})
 	if s != "Logical database db3 emptied (FLUSHDB)" {
 		t.Fatal(s)
+	}
+}
+
+func TestChainFromFailover(t *testing.T) {
+	a, b, c := strings.Repeat("a", 40), strings.Repeat("b", 40), strings.Repeat("c", 40)
+	t0 := time.Unix(1000, 0)
+	seg := func(id string, s, e int64, from, to int) segment {
+		return segment{ReplID: id, Start: s, End: e, From: t0.Add(time.Duration(from) * time.Second), To: t0.Add(time.Duration(to) * time.Second)}
+	}
+	segs := []segment{seg(a, 0, 100, 0, 60), seg(a, 100, 200, 60, 120),
+		seg(b, 200, 300, 125, 180), seg(b, 300, 350, 180, 240), // the promoted standby, from the same offset
+		seg(c, 10, 500, 0, 600)} // another stream, not a continuation
+	chain, reach, until, gap := chainFrom(segs, a, 0)
+	if len(chain) != 4 || reach != 350 || gap || !until.Equal(t0.Add(240*time.Second)) {
+		t.Fatalf("chain %v reach %d until %v gap %v", chain, reach, until, gap)
+	}
+	// A stream that starts there long before the chain ends isn't one.
+	segs[2].From = t0.Add(-time.Hour)
+	if _, reach, _, _ := chainFrom(segs, a, 0); reach != 200 {
+		t.Fatalf("joined an unrelated stream: %d", reach)
 	}
 }

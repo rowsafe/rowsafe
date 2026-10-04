@@ -26,6 +26,11 @@ type Login struct {
 	// Host is where the server listens, "127.0.0.1" unless set (or
 	// ROWSAFE_REDIS_HOST: the database container's name for a sidecar).
 	Host string `json:"host,omitempty"`
+	// Target: an empty server root handed to Rowsafe for clones or
+	// standby servers ("clones", "standby", "all"; targets.go): its login
+	// has every right. Created: root's helper created it for Rowsafe.
+	Target  string `json:"target,omitempty"`
+	Created bool   `json:"created,omitempty"`
 }
 
 // LoginUser is Rowsafe's ACL user.

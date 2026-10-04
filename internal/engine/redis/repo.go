@@ -364,7 +364,46 @@ func cmpInt(a, b int64) int {
 // next one where the previous ended. reach is the offset the chain gets
 // to, until the moment the link was last known up (the end of the newest
 // segment), gap whether a later segment exists past a hole.
+//
+// A promoted replica (a standby Rowsafe promoted, or the server's own
+// failover) continues the same stream under a new replication id, from the
+// same offset: when the chain of replid ends, a stream of another id that
+// begins exactly there, no earlier than a minute before the chain's end,
+// carries it on.
 func chainFrom(segs []segment, replid string, offset int64) (chain []segment, reach int64, until time.Time, gap bool) {
+	chain, reach, until, gap = chainOf(segs, replid, offset)
+	starts := map[string]int64{}
+	for _, s := range segs {
+		if v, ok := starts[s.ReplID]; !ok || s.Start < v {
+			starts[s.ReplID] = s.Start
+		}
+	}
+	seen := map[string]bool{replid: true}
+	for hop := 0; hop < 16 && !gap && len(chain) > 0; hop++ {
+		next, nextFrom := "", time.Time{}
+		for _, s := range segs {
+			if seen[s.ReplID] || starts[s.ReplID] != reach || s.Start != reach || s.From.Before(until.Add(-time.Minute)) {
+				continue
+			}
+			if next == "" || s.From.Before(nextFrom) {
+				next, nextFrom = s.ReplID, s.From
+			}
+		}
+		if next == "" {
+			break
+		}
+		seen[next] = true
+		more, r, u, g := chainOf(segs, next, reach)
+		chain, reach, gap = append(chain, more...), r, g
+		if u.After(until) {
+			until = u
+		}
+	}
+	return chain, reach, until, gap
+}
+
+// chainOf is chainFrom within one replication id.
+func chainOf(segs []segment, replid string, offset int64) (chain []segment, reach int64, until time.Time, gap bool) {
 	reach = offset
 	for _, s := range segs {
 		if s.ReplID != replid || s.End < reach || s.End == reach && s.Start < reach {
