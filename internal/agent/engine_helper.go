@@ -98,6 +98,9 @@ func (a *Agent) helperCanDo(action string, port int) bool {
 // written by the installer with --redis-standby or --redis-clones).
 var RedisServersAllowFile = "/etc/rowsafe/redis-servers-allowed"
 
+// RedisCreatedFile lists the servers root's helper created ("PORT UNIT").
+var RedisCreatedFile = "/etc/rowsafe/redis-created"
+
 // allowFileRange is the "ports MIN-MAX" line of an allow file (0, 0: none).
 func allowFileRange(path string) (int, int) {
 	data, err := os.ReadFile(path)
