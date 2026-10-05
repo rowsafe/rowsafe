@@ -119,6 +119,7 @@ Codex cloud tasks read `AGENTS.md`, but agent internet access is off by default 
 | File | What it is |
 | --- | --- |
 | `.codex-plugin/plugin.json` | Plugin manifest (name, listing text, paths) |
+| `assets/icon.png` | Logo and composer icon |
 | `.mcp.json` | The MCP server the plugin connects to (hosted, Sign in with Rowsafe) |
 | `skills/rowsafe-safety/SKILL.md` | The safety workflow skill |
 | `hooks/hooks.json` | `PreToolUse` hook on shell commands: `rowsafe guard` (skipped without the CLI) |

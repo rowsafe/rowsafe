@@ -178,7 +178,7 @@ func (t *tools) addCopiesTools(s *sdk.Server) {
 			"Works for every engine whose features include migration previews (list_databases shows the engine). " +
 			"Production is never touched. A preview restores a copy (minutes for large databases; PostgreSQL and SQLite reuse it for an hour). " +
 			"If the preview isn't done within wait_seconds, the result has its preview ID and status queued or running.",
-		Annotations: &sdk.ToolAnnotations{Title: "Preview a migration", ReadOnlyHint: true, OpenWorldHint: ptr(false)},
+		Annotations: &sdk.ToolAnnotations{Title: "Preview a migration", ReadOnlyHint: true, DestructiveHint: ptr(false), OpenWorldHint: ptr(false)},
 		InputSchema: inputSchema[previewInput](func(p map[string]*jsonschema.Schema) {
 			p["wait_seconds"].Minimum, p["wait_seconds"].Maximum = ptr(0.0), ptr(t.opts.MaxWait.Seconds())
 		}),
