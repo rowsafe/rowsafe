@@ -101,3 +101,81 @@ type ServerFirewallResult struct {
 // ServerFirewallTimeout is how long the agent lets the task run (the helper
 // waits up to a minute for the agent's confirmation).
 const ServerFirewallTimeout = 5 * time.Minute
+
+// TaskServerCertificate gives a Rowsafe Cloud server a certificate from a
+// public certificate authority (Let's Encrypt) for the names apps connect
+// to (e.g. x7kq2mfa3pzd.cloud.rowsafe.sh and x7kq2mfa3pzd-ro.cloud.rowsafe.sh),
+// so clients can check it (sslmode=verify-full). The private key is made on
+// the server and never leaves it; the control plane proves the names to the
+// authority (ACME DNS-01) and only ever sees the request and the
+// certificate, both public.
+//
+// It is a database task (the server's PostgreSQL, or the standby it runs:
+// the task names the database) in two steps, ServerCertificateParams ->
+// ServerCertificateResult:
+//
+//   - CertRequest: the agent reads the certificate PostgreSQL serves
+//     (Current). When it covers every name, was issued by an authority (not
+//     self-signed) and stays valid longer than RenewBeforeDays, nothing else
+//     happens. Otherwise the agent makes a new P-256 key (kept on the
+//     server, 0600, apart from the one in use) and returns a certificate
+//     request (CSR) for exactly Names.
+//   - CertInstall: Chain (PEM, leaf first) must match the key the last
+//     request made and cover Names. The agent writes key and chain next to
+//     PostgreSQL's data (rowsafe-server.crt/.key), points ssl_cert_file and
+//     ssl_key_file at them if they don't already, reloads PostgreSQL (no
+//     restart; open connections keep theirs) and checks the new certificate
+//     is the one served; otherwise the previous files and settings are put
+//     back.
+//
+// Rowsafe Cloud servers only: Rowsafe keeps their certificate valid by
+// itself (installed when the server is set up, renewed about a month before
+// it expires). Agents that can run it say so in their heartbeat
+// (FeatureServerCertificate).
+const TaskServerCertificate = "server_certificate"
+
+// FeatureServerCertificate is in HeartbeatRequest.Features of agents that
+// run TaskServerCertificate.
+const FeatureServerCertificate = TaskServerCertificate
+
+// ServerCertificateParams.Action values.
+const (
+	CertRequest = "request"
+	CertInstall = "install"
+)
+
+// ServerCertificateParams asks for a certificate request or installs the
+// certificate issued for it.
+type ServerCertificateParams struct {
+	Action string `json:"action"` // CertRequest or CertInstall
+	// Names are the DNS names the certificate must cover, at most
+	// MaxCertificateNames.
+	Names []string `json:"names"`
+	// RenewBeforeDays (CertRequest): a current certificate expiring in
+	// fewer days is replaced. 0: 30.
+	RenewBeforeDays int `json:"renew_before_days,omitempty"`
+	// Chain (CertInstall): the issued certificate and its intermediates,
+	// PEM, leaf first.
+	Chain string `json:"chain,omitempty"`
+}
+
+// MaxCertificateNames bounds ServerCertificateParams.Names.
+const MaxCertificateNames = 4
+
+// ServerCertificateResult is what PostgreSQL serves, and the request when a
+// new certificate is needed.
+type ServerCertificateResult struct {
+	// Current is the certificate PostgreSQL serves now (after CertInstall:
+	// the new one). Nil when TLS is off.
+	Current *CertInfo `json:"current,omitempty"`
+	// CSR (CertRequest): a PEM certificate request for Names; empty when
+	// Current is fine.
+	CSR string `json:"csr,omitempty"`
+	// Why (CertRequest, with CSR): why a new one is needed, in plain words
+	// ("it expires in 20 days").
+	Why     string `json:"why,omitempty"`
+	Summary string `json:"summary"`
+}
+
+// ServerCertificateTimeout is how long the agent lets the task run.
+const ServerCertificateTimeout = 3 * time.Minute
