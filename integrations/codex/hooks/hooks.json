@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "rowsafe guard",
+            "command": "sh -c 'command -v rowsafe >/dev/null 2>&1 || exit 0; exec rowsafe guard'",
             "timeout": 120
           }
         ]
