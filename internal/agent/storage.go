@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -409,6 +410,7 @@ func (a *Agent) storageStatus() *protocol.StorageStatus {
 				st.CredentialsExpireAt = &exp
 			}
 		}
+		st.Folders = a.rowsafeFolders()
 		return st
 	}
 	c, refreshErr := a.storage.get()
@@ -418,7 +420,47 @@ func (a *Agent) storageStatus() *protocol.StorageStatus {
 		st.CredentialsExpireAt = &exp
 		st.Repo = WithStorageCredentials(a.cfg.Repo, c).ID()
 	}
+	st.Folders = a.rowsafeFolders()
 	return st
+}
+
+// rowsafeFolders are the folders this host's databases use in Rowsafe
+// Storage: the ones primaries on Rowsafe Storage handed over (this server
+// is, or was promoted from, their standby), and, when its own backups go
+// there, every watched database's. The control plane keeps them: a folder
+// is never deleted while a database still backs up to it.
+func (a *Agent) rowsafeFolders() []protocol.StorageFolder {
+	var out []protocol.StorageFolder
+	seen := map[string]bool{}
+	watched := a.watchedDatabases()
+	byFile := make(map[string]string, len(watched))
+	for _, db := range watched {
+		byFile[safeFileID(db.ID)] = db.ID
+	}
+	paths, _ := filepath.Glob(filepath.Join(a.standbyDir(), "repo-*.json"))
+	sort.Strings(paths)
+	for _, p := range paths {
+		id := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(p), "repo-"), ".json")
+		if full, ok := byFile[id]; ok {
+			id = full
+		}
+		h, ok, err := a.loadHanded(id)
+		if err != nil || !ok {
+			continue
+		}
+		seen[id] = true
+		if h.RowsafeStorage {
+			out = append(out, protocol.StorageFolder{DatabaseID: id, Folder: validFolder(h.Folder)})
+		}
+	}
+	if a.cfg.RowsafeStorage() {
+		for _, db := range watched {
+			if !seen[db.ID] { // a handed-over bucket of the customer's isn't Rowsafe Storage
+				out = append(out, protocol.StorageFolder{DatabaseID: db.ID, Folder: a.repoFolder(db.Stanza)})
+			}
+		}
+	}
+	return out
 }
 
 // ---- moving to another repository ----
