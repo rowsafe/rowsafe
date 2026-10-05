@@ -90,10 +90,17 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 		return nil, fmt.Errorf("task %s has no database", task.Type)
 	}
 	db := *task.Database
-	if isPostgres(db) && standbyHostTask(task.Type) {
-		// A Rowsafe Cloud pair's standby is updated before the switchover:
-		// the task names the database, this server runs its standby.
+	if isPostgres(db) && (standbyHostTask(task.Type) || task.Type == protocol.TaskServerCertificate) {
+		// A Rowsafe Cloud pair's standby is updated before the switchover,
+		// and serves its own certificate: the task names the database, this
+		// server runs its standby.
 		db, _ = a.onStandby(db) // standby_updates.go
+	}
+	if task.Type == protocol.TaskServerCertificate { // Rowsafe Cloud names (server_cert.go)
+		if !isPostgres(db) {
+			return nil, fmt.Errorf("certificates for Rowsafe Cloud names are only installed for PostgreSQL so far, not %s", protocol.EngineDisplayName(db.Engine))
+		}
+		return runRewind(ctx, task, tl, db, a.serverCertificate)
 	}
 	if !isPostgres(db) && (task.Type == protocol.TaskSecurityUpdates || task.Type == protocol.TaskReboot) && engineRestarter(db) != nil {
 		// The server's own updates and reboots are the same for every

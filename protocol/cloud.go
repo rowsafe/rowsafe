@@ -126,7 +126,9 @@ const ServerFirewallTimeout = 5 * time.Minute
 //     ssl_key_file at them if they don't already, reloads PostgreSQL (no
 //     restart; open connections keep theirs) and checks the new certificate
 //     is the one served; otherwise the previous files and settings are put
-//     back.
+//     back. The request's key stays until an install succeeds, so a failed
+//     install can be retried with the same chain; a retried install that
+//     already went through answers with Current and no change.
 //
 // Rowsafe Cloud servers only: Rowsafe keeps their certificate valid by
 // itself (installed when the server is set up, renewed about a month before
@@ -171,8 +173,11 @@ type ServerCertificateResult struct {
 	// CSR (CertRequest): a PEM certificate request for Names; empty when
 	// Current is fine.
 	CSR string `json:"csr,omitempty"`
-	// Why (CertRequest, with CSR): why a new one is needed, in plain words
-	// ("it expires in 20 days").
+	// Why (CertRequest, with CSR): why a new one is needed, in plain words:
+	// "encrypted connections are off", "the current certificate can't be
+	// read", "it is self-signed", "it doesn't name x.cloud.rowsafe.sh",
+	// "it expired on 2 January 2027", "it expires in 20 days" (or "today",
+	// "tomorrow").
 	Why     string `json:"why,omitempty"`
 	Summary string `json:"summary"`
 }

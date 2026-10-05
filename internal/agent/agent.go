@@ -310,11 +310,12 @@ var fastLaneTypes = []string{protocol.TaskRestorePoint, protocol.TaskCopySchema}
 // data), so they never wait behind a backup or a copy being restored.
 var sideTypes = []string{protocol.TaskMaintenance, protocol.TaskRewindCompare, protocol.TaskRewindRows,
 	protocol.TaskRewindDrop, protocol.TaskRewindCleanup,
-	protocol.TaskFindMoment,       // read-only; people wait for it in the dashboard
-	protocol.TaskDBAdmin,          // Databases & users: people wait for it in the dashboard
-	protocol.TaskBackupPassphrase, // cloud servers: people wait for it in the dashboard
-	protocol.TaskServerFirewall,   // cloud servers: the firewall changes as soon as people ask
-	protocol.TaskMigrate,          // move in: key, check, switchover... (migrate.go)
+	protocol.TaskFindMoment,        // read-only; people wait for it in the dashboard
+	protocol.TaskDBAdmin,           // Databases & users: people wait for it in the dashboard
+	protocol.TaskBackupPassphrase,  // cloud servers: people wait for it in the dashboard
+	protocol.TaskServerFirewall,    // cloud servers: the firewall changes as soon as people ask
+	protocol.TaskServerCertificate, // cloud servers: never waits behind a backup (server_cert.go)
+	protocol.TaskMigrate,           // move in: key, check, switchover... (migrate.go)
 	protocol.TaskSettings,
 	protocol.TaskSecurityScan, protocol.TaskSecurityFix, // security.go
 	protocol.TaskPermissions, protocol.TaskPermissionsRemove} // permissions.go: people wait for it in the dashboard
@@ -418,6 +419,9 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 		req := protocol.HeartbeatRequest{Hostname: hostname, AgentVersion: Version, Platform: release.Platform(), Mode: a.cfg.Mode}
 		timed("archiving", func() { req.Archivers = a.archiverStats(ctx) })
 		req.Update = a.updateReport() // container_update.go
+		if !a.cfg.Sidecar() {
+			req.Features = []string{protocol.FeatureServerCertificate} // server_cert.go: PostgreSQL's files are the agent's to change
+		}
 		timed("restart", func() { req.RestartPorts, req.RestartActions = a.restartPorts(), a.helperActions() })
 		timed("permissions", func() { req.PermissionsHeartbeat = a.permissionsHeartbeat() }) // permissions.go, before Software (a changed allow list refreshes it)
 		timed("rewinds", func() { req.Rewinds = append(a.rewindState().states(), a.engineRewindStates()...) })
