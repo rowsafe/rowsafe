@@ -316,9 +316,34 @@ func TestMoveToAnotherRepositoryCreatesStanza(t *testing.T) {
 
 func TestStorageStatusOwnBucket(t *testing.T) {
 	a, _ := storageTestAgent(t, protocol.StorageOwn)
+	a.watched = []protocol.DatabaseSpec{testDB}
 	st := a.storageStatus()
-	if st.Mode != protocol.StorageOwn || st.Repo != a.cfg.Repo.ID() || st.CredentialsExpireAt != nil {
+	if st.Mode != protocol.StorageOwn || st.Repo != a.cfg.Repo.ID() || st.CredentialsExpireAt != nil || len(st.Folders) != 0 {
 		t.Errorf("%+v", st)
+	}
+}
+
+// On Rowsafe Storage every watched database's folder is reported, a fresh
+// start's folder by its name; a database a primary with a bucket of its own
+// handed over isn't in Rowsafe Storage.
+func TestStorageStatusFolders(t *testing.T) {
+	a, _ := storageTestAgent(t, protocol.StorageRowsafe)
+	a.storage.set(testCreds("K1", 7*24*time.Hour))
+	other := protocol.DatabaseSpec{ID: "db_2", Stanza: "other"}
+	handed := protocol.DatabaseSpec{ID: "db_3", Stanza: "handed"}
+	a.watched = []protocol.DatabaseSpec{testDB, other, handed}
+	if err := os.MkdirAll(a.cfg.ConfigDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(a.cfg.repoFolderPath("other"), []byte("other-20261001-120000"), 0o600)
+	if err := a.saveHandedRepo(handed.ID, protocol.StandbyRepo{Endpoint: "primary.example.com", Bucket: "primary-bucket",
+		Key: "K", KeySecret: "S", CipherPass: testCipher}); err != nil {
+		t.Fatal(err)
+	}
+	f := a.storageStatus().Folders
+	want := []protocol.StorageFolder{{DatabaseID: "db_1"}, {DatabaseID: "db_2", Folder: "other-20261001-120000"}}
+	if len(f) != len(want) || f[0] != want[0] || f[1] != want[1] {
+		t.Errorf("folders %+v, want %+v", f, want)
 	}
 }
 
@@ -446,6 +471,12 @@ func TestStandbyOnRowsafeStorage(t *testing.T) {
 	st := standby.storageStatus()
 	if st.Mode != protocol.StorageOwn || st.CredentialsExpireAt == nil || st.Repo != standby.cfg.Repo.ID() {
 		t.Errorf("status %+v", st)
+	}
+	// ... and which folder in Rowsafe Storage it keeps (the primary's), so
+	// the control plane never deletes it while its host has its own bucket.
+	standby.watched = []protocol.DatabaseSpec{testDB, {ID: "db_2", Stanza: "other"}}
+	if f := standby.storageStatus().Folders; len(f) != 1 || f[0] != (protocol.StorageFolder{DatabaseID: testDB.ID}) {
+		t.Errorf("folders %+v", f)
 	}
 	if data, _ := json.Marshal(st); strings.Contains(string(data), "M1") {
 		t.Errorf("the heartbeat carries credentials: %s", data)

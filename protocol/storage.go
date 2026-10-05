@@ -51,6 +51,22 @@ type StorageStatus struct {
 	// and why the last renewal failed ("" when it worked).
 	CredentialsExpireAt *time.Time `json:"credentials_expire_at,omitempty"`
 	RefreshError        string     `json:"refresh_error,omitempty"`
+	// Folders are where this host's databases keep their backups in
+	// Rowsafe Storage, whatever Mode says: every database when Mode is
+	// StorageRowsafe, and a standby (or promoted standby) of a primary on
+	// Rowsafe Storage, which keeps the primary's folder even when this host
+	// has a bucket of its own. The control plane never deletes a folder
+	// listed here. Empty from agents before 0.9.1.
+	Folders []StorageFolder `json:"folders,omitempty"`
+}
+
+// StorageFolder is a database's folder in Rowsafe Storage
+// (StorageStatus.Folders).
+type StorageFolder struct {
+	DatabaseID string `json:"database_id"`
+	// Folder is the folder under the organization's prefix; "" is the
+	// database's stanza.
+	Folder string `json:"folder,omitempty"`
 }
 
 // StorageOffer answers GET /v1/storage/offer (no authentication): whether
