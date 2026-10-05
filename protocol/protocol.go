@@ -227,6 +227,10 @@ type HeartbeatRequest struct {
 	// PermissionsHeartbeat: what root allowed Rowsafe to do on this server
 	// (protocol/permissions.go).
 	PermissionsHeartbeat
+	// Features are task kinds and abilities this agent has that older
+	// agents of the same protocol lack (e.g. FeatureServerCertificate), so
+	// the control plane only asks for what the agent can do.
+	Features []string `json:"features,omitempty"`
 }
 
 // HeartbeatResponse tells the agent which databases to watch.
@@ -619,6 +623,8 @@ func TaskTimeout(taskType string) time.Duration {
 		return BackupPassphraseTimeout
 	case TaskServerFirewall: // cloud.go
 		return ServerFirewallTimeout
+	case TaskServerCertificate: // cloud.go
+		return ServerCertificateTimeout
 	default: // backup, drill, rewind copy and in place: a large restore takes hours
 		return 12 * time.Hour
 	}
