@@ -11,6 +11,9 @@ func TestDestructiveDBCommand(t *testing.T) {
 		"seed.sql":                "INSERT INTO users (name) VALUES ('a');\n",
 		"scripts/cleanup.js":      "db.getCollection('sessions').deleteMany({});\n",
 		"scripts/report.js":       "printjson(db.orders.countDocuments({}));\n",
+		"cache/reset.txt":         "SELECT 2\nFLUSHDB\n",
+		"cache/warm.txt":          "SET greeting hello\nEXPIRE greeting 60\n",
+		"scripts/clear.lua":       "return redis.call('FLUSHDB')\n",
 	}
 	readFile := func(p string) ([]byte, error) {
 		if s, ok := files[p]; ok {
@@ -161,6 +164,25 @@ func TestDestructiveDBCommand(t *testing.T) {
 		{`sqlite3 app.db "SELECT count(*) FROM orders"`, false},
 		{`docker exec -i pb sqlite3 /pb/pb_data/data.db "UPDATE users SET verified = 1"`, true},
 		{`litecli app.db -e "DROP TABLE t"`, true},
+
+		// Redis and Valkey.
+		{"redis-cli FLUSHALL", true},
+		{"redis-cli -h cache -p 6380 -a secret flushdb async", true},
+		{"redis-cli -n 2 FLUSHDB", true},
+		{"valkey-cli --user app --pass x FLUSHALL", true},
+		{"docker exec -it redis redis-cli FLUSHALL", true},
+		{"redis-cli SWAPDB 0 1", true},
+		{"redis-cli --scan --pattern 'session:*' | xargs redis-cli del", true},
+		{"redis-cli --scan --pattern 'session:*' | xargs -n 100 valkey-cli UNLINK", true},
+		{"redis-cli DEL session:42", false},
+		{"redis-cli GET flushdb", false},
+		{"redis-cli -n 1 INFO keyspace", false},
+		{"redis-cli --scan --pattern 'session:*'", false},
+		{"redis-cli -h flushall PING", false},
+		{"redis-cli < cache/reset.txt", true},
+		{"redis-cli --pipe < cache/warm.txt", false},
+		{"redis-cli --eval scripts/clear.lua", true},
+		{`grep -rn FLUSHALL scripts/`, false},
 
 		// Mentions that don't run anything.
 		{`git commit -m "run prisma migrate deploy on release"`, false},

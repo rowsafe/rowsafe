@@ -1,9 +1,8 @@
 {
   "mcpServers": {
     "rowsafe": {
-      "command": "rowsafe",
-      "args": ["mcp", "--allow-restore-points"],
-      "env_vars": ["ROWSAFE_API_KEY", "ROWSAFE_URL"],
+      "type": "streamable-http",
+      "url": "https://api.rowsafe.sh/mcp",
       "tool_timeout_sec": 180
     }
   }

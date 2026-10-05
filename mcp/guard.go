@@ -11,18 +11,20 @@ import (
 // database destructively: schema migrations, resets and drops, SQL with
 // DROP, TRUNCATE, ALTER ... DROP, or DELETE/UPDATE without WHERE sent to a
 // SQL client (psql, mysql, mariadb, clickhouse-client, sqlite3, ...), a
-// sqlite3 .restore over a database file, or a MongoDB
-// shell script that drops or empties collections. It returns a short
+// sqlite3 .restore over a database file, a MongoDB shell script that drops
+// or empties collections, or a Redis or Valkey command that empties a
+// database (FLUSHALL, FLUSHDB, SWAPDB, DEL on keys piped in). It returns a short
 // reason. It is a heuristic tuned for few false positives: status, dry-run
 // and help invocations, and commands that only mention a tool (echo, grep,
 // git commit -m ...), don't match.
 //
 // readFile, if not nil, reads the SQL or script files passed to a client
 // (psql -f, mysql < file, clickhouse-client --queries-file, sqlite3 -init
-// or .read, mongosh script.js) so their contents can be checked too.
+// or .read, mongosh script.js, redis-cli < file or --eval script.lua) so
+// their contents can be checked too.
 func DestructiveDBCommand(command string, readFile func(string) ([]byte, error)) (string, bool) {
 	sawSQL, sawMongo := false, false
-	var sqlFiles, mongoFiles []string
+	var sqlFiles, mongoFiles, redisFiles []string
 	for _, seg := range splitSegments(command) {
 		words := commandWords(seg)
 		if len(words) == 0 || harmlessCommand(words) {
@@ -36,6 +38,11 @@ func DestructiveDBCommand(command string, readFile func(string) ([]byte, error))
 		}
 		for i, w := range words {
 			switch client := clientKind(words, i); client {
+			case "redis":
+				if reason, ok := destructiveRedis(words, i); ok {
+					return reason, true
+				}
+				redisFiles = append(redisFiles, clientFiles(base(w), words[i+1:])...)
 			case "sql", "mongo":
 				files := clientFiles(base(w), words[i+1:])
 				if client == "sql" {
@@ -48,13 +55,7 @@ func DestructiveDBCommand(command string, readFile func(string) ([]byte, error))
 			}
 		}
 	}
-	check := func(saw bool, files []string, fn func(string) (string, bool)) (string, bool) {
-		if !saw {
-			return "", false
-		}
-		if reason, ok := fn(command); ok {
-			return reason, true
-		}
+	checkFiles := func(files []string, fn func(string) (string, bool)) (string, bool) {
 		if readFile != nil {
 			for _, f := range files {
 				if data, err := readFile(f); err == nil {
@@ -66,10 +67,24 @@ func DestructiveDBCommand(command string, readFile func(string) ([]byte, error))
 		}
 		return "", false
 	}
+	check := func(saw bool, files []string, fn func(string) (string, bool)) (string, bool) {
+		if !saw {
+			return "", false
+		}
+		if reason, ok := fn(command); ok {
+			return reason, true
+		}
+		return checkFiles(files, fn)
+	}
 	if reason, ok := check(sawSQL, sqlFiles, destructiveSQL); ok {
 		return reason, true
 	}
-	return check(sawMongo, mongoFiles, destructiveMongo)
+	if reason, ok := check(sawMongo, mongoFiles, destructiveMongo); ok {
+		return reason, true
+	}
+	// Redis command lines were checked word by word above (a key may be
+	// named "flushdb"); only their files are checked as text.
+	return checkFiles(redisFiles, destructiveRedisScript)
 }
 
 // helpInvocation is true for --help, --version and --dry-run runs. -h
@@ -84,7 +99,8 @@ func helpInvocation(words []string) bool {
 
 // clientKind says whether words[i] runs a database client: "sql" for
 // psql, pgcli, mysql, mariadb, mycli, clickhouse-client (or clickhouse
-// client), sqlite3 and litecli, "mongo" for mongosh and mongo, "" otherwise.
+// client), sqlite3 and litecli, "mongo" for mongosh and mongo, "redis" for
+// redis-cli and valkey-cli, "" otherwise.
 func clientKind(words []string, i int) string {
 	switch base(words[i]) {
 	case "psql", "pgcli", "mysql", "mariadb", "mycli", "clickhouse-client", "clickhouse-local", "sqlite3", "litecli":
@@ -95,6 +111,8 @@ func clientKind(words []string, i int) string {
 		}
 	case "mongosh", "mongo":
 		return "mongo"
+	case "redis-cli", "valkey-cli":
+		return "redis"
 	}
 	return ""
 }
@@ -133,6 +151,8 @@ func clientFiles(tool string, args []string) []string {
 			files = append(files, next())
 		case tool == "sqlite3" && sqliteReadRE.MatchString(a):
 			files = append(files, sqliteReadRE.FindStringSubmatch(a)[1])
+		case (tool == "redis-cli" || tool == "valkey-cli") && a == "--eval" && next() != "":
+			files = append(files, next())
 		}
 	}
 	return files
@@ -553,6 +573,53 @@ func destructiveMongo(js string) (string, bool) {
 	}
 	if m := mongoEmptyFilterRE.FindStringSubmatch(js); m != nil {
 		return "MongoDB " + m[1] + " on every document", true
+	}
+	return "", false
+}
+
+// redisValueFlags are the redis-cli (and valkey-cli) options that take a
+// value, so the word after them isn't the command.
+var redisValueFlags = []string{"-h", "-p", "-s", "-a", "-u", "-r", "-i", "-n", "-d", "-D", "-t",
+	"--user", "--pass", "--cacert", "--cacertdir", "--cert", "--key", "--tls-ciphers", "--tls-ciphersuites",
+	"--sni", "--rdb", "--functions-rdb", "--pattern", "--quoted-pattern", "--count", "--eval",
+	"--pipe-timeout", "--memkeys-samples", "--intrinsic-latency", "--lru-test", "--cluster"}
+
+// destructiveRedis checks the command that redis-cli or valkey-cli (at
+// words[i]) sends: FLUSHALL and FLUSHDB empty databases, SWAPDB exchanges
+// two of them, and DEL or UNLINK fed by xargs deletes every key piped in
+// (redis-cli --scan --pattern 'x:*' | xargs redis-cli del).
+func destructiveRedis(words []string, i int) (string, bool) {
+	cmd := ""
+	for j := i + 1; j < len(words); j++ {
+		w := words[j]
+		if slices.Contains(redisValueFlags, w) {
+			j++
+			continue
+		}
+		if strings.HasPrefix(w, "-") {
+			continue
+		}
+		cmd = strings.ToUpper(w)
+		break
+	}
+	switch cmd {
+	case "FLUSHALL", "FLUSHDB", "SWAPDB":
+		return base(words[i]) + " " + cmd, true
+	case "DEL", "UNLINK":
+		if slices.ContainsFunc(words[:i], func(w string) bool { return base(w) == "xargs" }) {
+			return base(words[i]) + " " + cmd + " on every key piped in", true
+		}
+	}
+	return "", false
+}
+
+var redisFlushRE = regexp.MustCompile(`(?i)\b(flushall|flushdb|swapdb)\b`)
+
+// destructiveRedisScript looks for FLUSHALL, FLUSHDB or SWAPDB in a file of
+// commands (redis-cli < file, --pipe) or a Lua script (--eval).
+func destructiveRedisScript(s string) (string, bool) {
+	if m := redisFlushRE.FindString(s); m != "" {
+		return "Redis " + strings.ToUpper(m), true
 	}
 	return "", false
 }

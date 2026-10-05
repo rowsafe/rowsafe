@@ -3,12 +3,12 @@
   "owner": {
     "name": "Rowsafe"
   },
-  "description": "Rowsafe integrations for Claude Code: the PostgreSQL safety net for AI agents.",
+  "description": "Rowsafe integrations for Claude Code: the database safety net for AI agents.",
   "plugins": [
     {
       "name": "rowsafe",
       "source": "./integrations/claude-code",
-      "description": "PostgreSQL safety net for AI agents: checks protection and creates a Rowsafe restore point before migrations and destructive SQL."
+      "description": "Database safety net for AI agents (PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey and SQLite): checks protection and creates a Rowsafe restore point before migrations and destructive commands."
     }
   ]
 }

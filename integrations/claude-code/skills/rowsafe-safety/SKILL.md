@@ -1,11 +1,11 @@
 ---
 name: rowsafe-safety
-description: Use before any destructive or risky change to a database protected by Rowsafe (PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse or SQLite) - running migrations (prisma, rails, alembic, django, knex, sequelize, typeorm, drizzle, goose, ...), schema changes, DROP or TRUNCATE, DELETE or UPDATE without a narrow WHERE, bulk data fixes, or restoring a dump. Checks that the database is recoverable and creates a named restore point first.
+description: Use before any destructive or risky change to a database protected by Rowsafe (PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey or SQLite) - running migrations (prisma, rails, alembic, django, knex, sequelize, typeorm, drizzle, goose, ...), schema changes, DROP or TRUNCATE, DELETE or UPDATE without a narrow WHERE, FLUSHALL or FLUSHDB, bulk data fixes, or restoring a dump. Checks that the database is recoverable and creates a named restore point first.
 ---
 
 # Rowsafe safety workflow
 
-Rowsafe continuously copies this project's database changes (PostgreSQL's and SQLite's WAL, MySQL's binary log, MongoDB's oplog; ClickHouse takes a backup for each Mark), so the database can be restored to a moment, including a named restore point. Your job is to make sure such a point exists right before you change data, and to hand recovery to the user if something goes wrong.
+Rowsafe continuously copies this project's database changes (PostgreSQL's and SQLite's WAL, MySQL's binary log, MongoDB's oplog, Redis's and Valkey's replication stream; ClickHouse takes a backup for each Mark), so the database can be restored to a moment, including a named restore point. Your job is to make sure such a point exists right before you change data, and to hand recovery to the user if something goes wrong.
 
 The Rowsafe tools come from its MCP server (the user signs in with Rowsafe the first time; Marks only if they allowed them). Some steps can also use the `rowsafe` CLI, when it is installed and logged in (`rowsafe whoami`).
 
@@ -40,6 +40,6 @@ When you need realistic data to try a query, a migration or a feature, never use
 
 ## What counts as destructive
 
-Migrations and schema changes of any tool; `DROP`, `TRUNCATE`, `ALTER TABLE ... DROP/RENAME/TYPE`; `DELETE` or `UPDATE` without a narrow `WHERE`; data backfills; `pg_restore --clean`, `dropdb`, `mysqladmin drop`, `mongorestore --drop`; MongoDB `drop()`, `deleteMany({})` or `updateMany({}, ...)`; ClickHouse `ALTER TABLE ... DELETE/UPDATE` mutations and `DROP PARTITION`; `sqlite3 ... .restore`; resetting or re-seeding a database. When unsure, treat it as destructive: a restore point costs a second.
+Migrations and schema changes of any tool; `DROP`, `TRUNCATE`, `ALTER TABLE ... DROP/RENAME/TYPE`; `DELETE` or `UPDATE` without a narrow `WHERE`; data backfills; `pg_restore --clean`, `dropdb`, `mysqladmin drop`, `mongorestore --drop`; MongoDB `drop()`, `deleteMany({})` or `updateMany({}, ...)`; ClickHouse `ALTER TABLE ... DELETE/UPDATE` mutations and `DROP PARTITION`; Redis or Valkey `FLUSHALL`, `FLUSHDB`, `SWAPDB` and deleting keys by pattern (`--scan ... | xargs redis-cli del`); `sqlite3 ... .restore`; resetting or re-seeding a database. When unsure, treat it as destructive: a restore point costs a second.
 
 Read-only work (SELECT, `EXPLAIN`, `migrate status`, generating migration files) needs none of this.
