@@ -226,9 +226,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.fastLane(ctx)
 	go a.rewindHousekeeping(ctx)
 	go a.filesLoop(ctx) // files.go: folder snapshots and the files lane
-	if a.cfg.RowsafeStorage() {
-		go a.managedStorageLoop(ctx) // Rowsafe Storage credentials (storage.go)
-	}
+	// Rowsafe Storage credentials (storage.go): for this server's own
+	// backups, or a standby's of a primary on Rowsafe Storage.
+	go a.managedStorageLoop(ctx)
 	go a.standbyLoop(ctx) // fences, primaries seen from standbys (standby.go)
 	go a.standbyLane(ctx)
 	go a.forkLoop(ctx) // fork.go: rolls back an interrupted fork restore, deletes expired kept data

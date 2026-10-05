@@ -41,6 +41,7 @@ type StandbyStatusView struct {
 	AutoFailover      bool       `json:"automatic_failover"`
 	Move              string     `json:"move,omitempty" jsonschema:"a move to another server in progress or just done, in plain words"`
 	ConnectionStrings []string   `json:"connection_strings,omitempty" jsonschema:"connection strings that follow the primary"`
+	Placement         string     `json:"placement,omitempty" jsonschema:"where the standby runs when Rowsafe created both servers (another availability zone, another datacenter, or the same datacenter)"`
 	Guidance          string     `json:"guidance"`
 	// Candidates: with candidates.
 	Candidates []protocol.StandbyCandidate `json:"candidates,omitempty" jsonschema:"servers that could hold a standby (usable, or why not)"`
@@ -66,7 +67,7 @@ func (t *tools) standbyStatus(ctx context.Context, _ *sdk.CallToolRequest, in st
 		return nil, StandbyStatusView{}, apiError(err)
 	}
 	out := StandbyStatusView{Database: d.Name, Primary: serverName(info.Primary.Hostname, info.Primary.Port),
-		AutoFailover: info.Failover.Automatic, Guidance: standbyGuidance}
+		AutoFailover: info.Failover.Automatic, Placement: info.Placement, Guidance: standbyGuidance}
 	if v := info.Standby; v != nil {
 		out.Standby = serverName(v.Server.Hostname, v.Server.Port)
 		out.Status, out.Mode, out.LagSeconds, out.LagBytes, out.LastReplayAt, out.Note = v.Status, v.Mode, v.LagSeconds, v.LagBytes, v.LastReplayAt, v.Note

@@ -98,6 +98,7 @@ func NewServer(c *client.Client, opts Options) *sdk.Server {
 	t.addStandbyReadTools(s)
 	t.addPulseReadTools(s)    // alerts, activity, metrics, audit (pulse_tools.go)
 	t.addOpsReadTools(s)      // security, updates, pooling, forks (ops_tools.go)
+	t.addCloudReadTools(s)    // private connections, read-only (cloud_tools.go)
 	t.addApprovalReadTools(s) // describe_change, get_approval, list_approvals (approval_tools.go)
 	if opts.AllowWrites {
 		t.addWriteTools(s)

@@ -327,60 +327,156 @@ var unsafeFileRE = regexp.MustCompile(`[^A-Za-z0-9_-]`)
 
 func safeFileID(id string) string { return unsafeFileRE.ReplaceAllString(id, "_") }
 
+// handedFile is what <state dir>/standby/repo-<db>.json holds: the
+// primary's repository. For Rowsafe Storage only the passphrase, the folder
+// and the TLS settings are kept: the credentials are this agent's own
+// (storage.go), minted for the organization's prefix and renewed.
+type handedFile struct {
+	pgbackrest.Repo
+	RowsafeStorage bool `json:",omitempty"`
+}
+
+// loadHanded reads the repository a primary handed over for dbID; ok is
+// false when there is none.
+func (a *Agent) loadHanded(dbID string) (h handedFile, ok bool, err error) {
+	if dbID == "" {
+		return h, false, nil
+	}
+	data, err := os.ReadFile(a.repoPath(dbID))
+	if errors.Is(err, os.ErrNotExist) {
+		return h, false, nil
+	}
+	if err != nil {
+		return h, false, err
+	}
+	if err := json.Unmarshal(data, &h); err != nil {
+		return h, false, fmt.Errorf("reading the handed-over repository settings: %w", err)
+	}
+	return h, true, nil
+}
+
+// handedRepoFor is the repository a primary handed over for db, with this
+// agent's Rowsafe Storage credentials when it is in Rowsafe Storage; ok is
+// false when there is none (db uses this agent's own storage).
+func (a *Agent) handedRepoFor(db protocol.DatabaseSpec) (r pgbackrest.Repo, ok bool, err error) {
+	h, ok, err := a.loadHanded(db.ID)
+	if !ok || err != nil {
+		return pgbackrest.Repo{}, ok, err
+	}
+	if !h.RowsafeStorage {
+		return h.Repo, true, nil
+	}
+	c, err := a.managedCreds()
+	if err != nil {
+		return h.Repo, true, err
+	}
+	return WithStorageCredentials(h.Repo, c), true, nil
+}
+
 // repoFor is the repository db's backups live in: the bucket its primary
 // handed over when this server became its standby, else this agent's own.
 func (a *Agent) repoFor(db protocol.DatabaseSpec) pgbackrest.Repo {
-	if db.ID == "" {
+	r, ok, err := a.handedRepoFor(db)
+	if !ok {
+		if err != nil {
+			a.log.Error("reading the handed-over repository settings; using this agent's own", "database_id", db.ID, "err", err)
+		}
 		return a.cfg.Repo
 	}
-	data, err := os.ReadFile(a.repoPath(db.ID))
 	if err != nil {
-		return a.cfg.Repo
-	}
-	var r pgbackrest.Repo
-	if err := json.Unmarshal(data, &r); err != nil {
-		a.log.Error("reading the handed-over repository settings; using this agent's own", "database_id", db.ID, "err", err)
-		return a.cfg.Repo
+		a.log.Warn("the handed-over repository is in Rowsafe Storage and this agent has no working credentials for it yet",
+			"database_id", db.ID, "err", err)
 	}
 	return r
 }
 
-// saveHandedRepo stores the primary's repository for db (0600).
+// errUnknownHandoffStorage: a newer agent handed over a kind of storage
+// this one doesn't know.
+var errUnknownHandoffStorage = errors.New("the primary keeps its backups in a kind of storage this agent doesn't know; update the agent on this server")
+
+// saveHandedRepo stores the primary's repository for db (0600). For
+// Rowsafe Storage this agent must hold credentials already
+// (ensureStorageCredentials).
 func (a *Agent) saveHandedRepo(dbID string, s protocol.StandbyRepo) error {
 	r := pgbackrest.Repo{Endpoint: s.Endpoint, Bucket: s.Bucket, Region: s.Region, Key: s.Key, KeySecret: s.KeySecret,
 		CipherPass: s.CipherPass, PathPrefix: s.PathPrefix, URIStyle: s.URIStyle, Port: s.Port, SkipTLSVerify: s.SkipTLSVerify,
 		Folder: validFolder(s.Folder)}
+	switch s.Storage {
+	case "", protocol.StorageOwn:
+	case protocol.StorageRowsafe:
+		// Only the location: the credentials are this agent's own.
+		r = pgbackrest.Repo{CipherPass: s.CipherPass, SkipTLSVerify: s.SkipTLSVerify, Folder: validFolder(s.Folder)}
+	default:
+		return errUnknownHandoffStorage
+	}
+	if err := os.MkdirAll(a.standbyDir(), 0o700); err != nil {
+		return err
+	}
 	if s.CAPEM != "" {
 		if err := writeFileAtomic(a.caPath(dbID), []byte(s.CAPEM), 0o600); err != nil {
 			return err
 		}
 		r.CAFile = a.caPath(dbID)
 	}
-	if err := r.Validate(); err != nil {
+	if s.RowsafeStorage() {
+		if err := validCipherPass(r.CipherPass); err != nil {
+			return fmt.Errorf("the primary's repository settings: %w", err)
+		}
+		c, err := a.managedCreds()
+		if err != nil {
+			return err
+		}
+		if err := WithStorageCredentials(r, c).Validate(); err != nil {
+			return fmt.Errorf("the primary's repository settings: %w", err)
+		}
+	} else if err := r.Validate(); err != nil {
 		return fmt.Errorf("the primary's repository settings: %w", err)
 	}
-	data, err := json.Marshal(r)
+	data, err := json.Marshal(handedFile{Repo: r, RowsafeStorage: s.RowsafeStorage()})
 	if err != nil {
 		return err
 	}
 	return writeFileAtomic(a.repoPath(dbID), data, 0o600)
 }
 
-// handedRepo is what a primary hands over: its own repository for db.
+// handedRepo is what a primary hands over: its own repository for db. A
+// repository in Rowsafe Storage goes as a location (folder, passphrase,
+// TLS settings): the other agent is in the same organization and gets its
+// own credentials for it.
 func (a *Agent) handedRepo(db protocol.DatabaseSpec) (protocol.StandbyRepo, error) {
-	if _, err := os.Stat(a.repoPath(db.ID)); err != nil && a.cfg.RowsafeStorage() {
-		return protocol.StandbyRepo{}, errStandbyRowsafeStorage
-	}
-	r := a.repoFor(db)
-	if err := r.Validate(); err != nil {
+	h, handed, err := a.loadHanded(db.ID)
+	if err != nil {
 		return protocol.StandbyRepo{}, err
+	}
+	var r pgbackrest.Repo
+	rowsafe := false
+	switch {
+	case handed && h.RowsafeStorage: // this server was a standby of a primary on Rowsafe Storage
+		r, rowsafe = h.Repo, true
+	case handed:
+		r = h.Repo
+	case a.cfg.RowsafeStorage():
+		r, rowsafe = a.cfg.Repo, true
+	default:
+		r = a.cfg.Repo
 	}
 	if r.Folder == "" {
 		r.Folder = a.repoFolder(db.Stanza) // taskerror.go
 	}
-	out := protocol.StandbyRepo{Endpoint: r.Endpoint, Bucket: r.Bucket, Region: r.Region, Key: r.Key, KeySecret: r.KeySecret,
-		CipherPass: r.CipherPass, PathPrefix: r.PathPrefix, URIStyle: r.URIStyle, Port: r.Port, SkipTLSVerify: r.SkipTLSVerify,
-		Folder: r.Folder}
+	var out protocol.StandbyRepo
+	if rowsafe {
+		if err := validCipherPass(r.CipherPass); err != nil {
+			return out, err
+		}
+		out = protocol.StandbyRepo{Storage: protocol.StorageRowsafe, CipherPass: r.CipherPass, SkipTLSVerify: r.SkipTLSVerify, Folder: r.Folder}
+	} else {
+		if err := r.Validate(); err != nil {
+			return out, err
+		}
+		out = protocol.StandbyRepo{Endpoint: r.Endpoint, Bucket: r.Bucket, Region: r.Region, Key: r.Key, KeySecret: r.KeySecret,
+			CipherPass: r.CipherPass, PathPrefix: r.PathPrefix, URIStyle: r.URIStyle, Port: r.Port, SkipTLSVerify: r.SkipTLSVerify,
+			Folder: r.Folder}
+	}
 	if r.CAFile != "" {
 		pem, err := os.ReadFile(r.CAFile)
 		if err != nil {
@@ -389,6 +485,36 @@ func (a *Agent) handedRepo(db protocol.DatabaseSpec) (protocol.StandbyRepo, erro
 		out.CAPEM = string(pem)
 	}
 	return out, nil
+}
+
+// repoFromHandoff is the repository a fork reads from (the source's
+// handoff), with this agent's Rowsafe Storage credentials when it is
+// there; caFile is where to keep the source's CA bundle, if any.
+func (a *Agent) repoFromHandoff(ctx context.Context, s protocol.StandbyRepo, caFile string) (pgbackrest.Repo, error) {
+	r := pgbackrest.Repo{Endpoint: s.Endpoint, Bucket: s.Bucket, Region: s.Region, Key: s.Key, KeySecret: s.KeySecret,
+		CipherPass: s.CipherPass, PathPrefix: s.PathPrefix, URIStyle: s.URIStyle, Port: s.Port, SkipTLSVerify: s.SkipTLSVerify,
+		Folder: validFolder(s.Folder)}
+	if s.CAPEM != "" {
+		if err := writeFileAtomic(caFile, []byte(s.CAPEM), 0o600); err != nil {
+			return r, err
+		}
+		r.CAFile = caFile
+	}
+	switch s.Storage {
+	case "", protocol.StorageOwn:
+		return r, nil
+	case protocol.StorageRowsafe:
+		if err := a.ensureStorageCredentials(ctx); err != nil {
+			return r, err
+		}
+		c, err := a.managedCreds()
+		if err != nil {
+			return r, err
+		}
+		base := pgbackrest.Repo{CipherPass: r.CipherPass, SkipTLSVerify: r.SkipTLSVerify, CAFile: r.CAFile, Folder: r.Folder}
+		return WithStorageCredentials(base, c), nil
+	}
+	return r, errUnknownHandoffStorage
 }
 
 // ---- heartbeat ----

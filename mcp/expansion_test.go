@@ -138,7 +138,12 @@ func (f *dashAPI) answer(r *http.Request, at time.Time) (any, int) {
 			return protocol.UpgradeInfo{Database: "app", Version: "16.9", Major: 16, Installed: "16.9", Candidate: "16.10", UpdateAvailable: true, Majors: []int{17, 18},
 				SecurityUpdates: 3, RebootRequired: true, Allowed: []string{"postgresql"},
 				Rehearsal: &protocol.UpgradeRehearsalResult{ToMajor: 17, Passed: true, Summary: "The upgrade to 17 worked on a copy.", SafeDowntimeSeconds: 40}, RehearsalValid: true,
-				Tasks: []protocol.TaskView{{ID: "t_up", Type: protocol.TaskUpgradeRehearsal, Status: protocol.StatusSucceeded, Result: json.RawMessage(`{"passed":true}`)}}}, ok
+				Tasks: []protocol.TaskView{{ID: "t_up", Type: protocol.TaskUpgradeRehearsal, Status: protocol.StatusSucceeded, Result: json.RawMessage(`{"passed":true}`)}},
+				Maintenance: &protocol.MaintenanceInfo{ServerID: "cs_1", Enabled: true, Day: 2, Hour: 3, Timezone: "Europe/Berlin", WindowMinutes: 120, NextWindow: &at,
+					Pending:             []protocol.MaintenanceAction{{Kind: protocol.MaintPGUpdate, Summary: "Update PostgreSQL 16.9 to 16.10", Downtime: "a few seconds"}},
+					AutoSecurityUpdates: true, LastSecurityUpdate: &at,
+					Critical: []protocol.CriticalFixStatus{{CriticalFix: protocol.CriticalFix{Kind: "package", Package: "openssl", Version: "3.0.17-1~deb12u3", CVE: "CVE-2026-1234", DueAt: at},
+						What: "OpenSSL 3.0.17-1~deb12u3 (CVE-2026-1234)", ApplyAt: &at}}}}, ok
 		case "/v1/audit-events":
 			return []protocol.AuditEvent{
 				{ID: "a1", At: at, Actor: "dashboard:ana@example.com", Action: "notification_channel.create", Target: "Ops",
@@ -270,7 +275,9 @@ func TestNewReadToolsOnlyRead(t *testing.T) {
 		{"database_metrics", map[string]any{"database": "app", "metrics": []any{"cpu", "connections_total"}, "points": true}, []string{"cpu_pct (host)", "connections_total (database)", `"points":[`}},
 		{"database_metrics", map[string]any{"host": "db1", "since_hours": 24}, []string{"Metrics of db1", "mem_used_pct (host)"}},
 		{"security_status", map[string]any{"database": "app"}, []string{"grade D, 55/100", "Can be fixed: Allow only these addresses", "request_change (action security_action)", "Encryption: warning"}},
-		{"updates_status", map[string]any{"database": "app"}, []string{"Minor update available: 16.9 -> 16.10", "Newer major versions: 17, 18", "3 operating system security updates", "needs a reboot", "It still allows the upgrade", "action upgrade_database", "check_upgrade", "action reboot_server"}},
+		{"updates_status", map[string]any{"database": "app"}, []string{"Minor update available: 16.9 -> 16.10", "Newer major versions: 17, 18", "3 operating system security updates", "needs a reboot", "It still allows the upgrade", "action upgrade_database", "check_upgrade", "action reboot_server",
+			"Maintenance window: on, Tuesday 03:00 Europe/Berlin for 120 minutes", "Update PostgreSQL 16.9 to 16.10 (downtime: a few seconds)", "Automatic security updates: on, last installed",
+			"Critical fix missing: OpenSSL 3.0.17-1~deb12u3 (CVE-2026-1234), applied automatically in the window of", `"server_id":"cs_1"`, `"cve":"CVE-2026-1234"`}},
 		{"audit_log", map[string]any{"target": "app", "since_hours": 24}, []string{"key:k1 (ci): database.update app", `"verifier":"[hidden]"`}},
 		{"audit_log", nil, []string{"notification_channel.create Ops", `"url":"[hidden]"`, "[link hidden]", "rowsafed"}},
 		{"pooling_status", map[string]any{"database": "app"}, []string{"Connection pooling for app: on, answering", "postgresql://app@db1:6432/app"}},

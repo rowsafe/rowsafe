@@ -603,6 +603,8 @@ func TaskTimeout(taskType string) time.Duration {
 		return 30 * time.Minute
 	case TaskSecurityUpdates:
 		return 2 * time.Hour
+	case TaskAutoSecurityUpdates: // maintenance.go; installs two packages
+		return 30 * time.Minute
 	case TaskStandbyPrepare, TaskStandbyRelease, TaskStandbyFence, TaskStandbyPromote, TaskStandbyRemove, TaskStandbyUnfence:
 		return 15 * time.Minute
 	case TaskForkPrepare: // fork_restore: a large restore takes hours (default)

@@ -86,7 +86,7 @@ func (a *Agent) measureEngine(ctx context.Context, db protocol.DatabaseSpec, rep
 		return protocol.RepoStorage{}, false
 	}
 	env, spec, repoCfg := a.engineEnv(name), db, a.cfg.Repo
-	if r, err := a.repo(); err == nil {
+	if r, err := a.dbRepo(db); err == nil { // Rowsafe Storage, or the primary's handed over
 		repoCfg = r
 		env.Repo = r
 	}

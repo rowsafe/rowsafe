@@ -97,6 +97,18 @@ func (r Repo) Location(stanza string) string {
 	return r.Endpoint + ":" + port + "/" + r.Bucket + repoPath(r.PathPrefix, r.folder(stanza))
 }
 
+// Root is where every folder of the repository starts, in the form
+// Location returns: endpoint, port, bucket and path prefix, ending in "/".
+// A config whose Location starts with it is in this repository, whatever
+// its folder.
+func (r Repo) Root() string {
+	port := ""
+	if r.Port != 0 {
+		port = fmt.Sprint(r.Port)
+	}
+	return r.Endpoint + ":" + port + "/" + r.Bucket + repoPath(r.PathPrefix, "")
+}
+
 // repoPath is repo1-path: the path prefix, then the stanza.
 func repoPath(pathPrefix, stanza string) string {
 	prefix := "/" + strings.Trim(pathPrefix, "/")

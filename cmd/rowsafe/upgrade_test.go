@@ -210,3 +210,20 @@ func TestUpdateAndUpgradeCommands(t *testing.T) {
 		t.Errorf("help upgrade:\n%s", h)
 	}
 }
+
+func TestPrintMaintenance(t *testing.T) {
+	next := time.Date(2026, 10, 6, 1, 0, 0, 0, time.UTC)
+	out, _ := captureStdout(t, func() error {
+		printMaintenance(&protocol.MaintenanceInfo{Enabled: true, Day: 2, Hour: 3, Timezone: "Europe/Berlin", NextWindow: &next,
+			Pending:  []protocol.MaintenanceAction{{Summary: "Update PostgreSQL 17.5 to 17.6", Downtime: "a few seconds"}},
+			Critical: []protocol.CriticalFixStatus{{What: "OpenSSL 3.0.17-1~deb12u3 (CVE-2026-1234)", ApplyAt: &next}}})
+		printMaintenance(nil)
+		return nil
+	})
+	for _, w := range []string{"Maintenance window", "Tuesdays 03:00 (Europe/Berlin), next", "Update PostgreSQL 17.5 to 17.6 (downtime: a few seconds)",
+		"Security updates:   not automatic", "Critical fix:       OpenSSL 3.0.17-1~deb12u3 (CVE-2026-1234), applied"} {
+		if !strings.Contains(out, w) {
+			t.Errorf("lacks %q:\n%s", w, out)
+		}
+	}
+}

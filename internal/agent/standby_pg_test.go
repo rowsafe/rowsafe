@@ -420,6 +420,17 @@ func TestStandbyRealPostgres(t *testing.T) {
 	if !inRec {
 		t.Fatal("the rebuilt old primary is not a standby")
 	}
+	// Rowsafe Cloud then updates it as the standby (standby_updates.go):
+	// the update's "back" is the standby replaying again, on its own port.
+	if sdb, ok := aP.onStandby(dbT); !ok || sdb.Port != primary.port {
+		t.Fatalf("the rebuilt standby isn't found for its database's tasks: %+v %v", sdb, ok)
+	}
+	if err := aP.waitAnswering(ctx, dbP, 30*time.Second); err != nil {
+		t.Fatalf("waiting for the rebuilt standby: %v", err)
+	}
+	if !slicesContainsPort(aP.standbyDatabases(), primary.port) {
+		t.Fatal("the rebuilt standby isn't in the software report's running versions")
+	}
 
 	// ---- release and remove
 	step("release on the new primary", func(tl *taskLog) error {

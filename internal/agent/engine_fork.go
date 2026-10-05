@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 
 	"github.com/rowsafe/rowsafe/internal/handoff"
-	"github.com/rowsafe/rowsafe/internal/pgbackrest"
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
@@ -83,19 +82,16 @@ func (a *Agent) engineForkRestore(ctx context.Context, p protocol.ForkRestorePar
 		if err != nil {
 			return nil, fmt.Errorf("reading the source server's handoff: %w", err)
 		}
-		r := sec.Repo
-		env.Repo = pgbackrest.Repo{Endpoint: r.Endpoint, Bucket: r.Bucket, Region: r.Region, Key: r.Key, KeySecret: r.KeySecret,
-			CipherPass: r.CipherPass, PathPrefix: r.PathPrefix, URIStyle: r.URIStyle, Port: r.Port, SkipTLSVerify: r.SkipTLSVerify}
-		if r.CAPEM != "" {
+		ca := filepath.Join(a.standbyDir(), "fork-"+safeFileID(p.ForkID)+"-ca.pem")
+		if sec.Repo.CAPEM != "" {
 			if err := os.MkdirAll(a.standbyDir(), 0o700); err != nil {
 				return nil, err
 			}
-			ca := filepath.Join(a.standbyDir(), "fork-"+safeFileID(p.ForkID)+"-ca.pem")
-			if err := writeFileAtomic(ca, []byte(r.CAPEM), 0o600); err != nil {
-				return nil, err
-			}
 			defer os.Remove(ca)
-			env.Repo.CAFile = ca
+		}
+		// In Rowsafe Storage: this agent's own credentials (same organization).
+		if env.Repo, err = a.repoFromHandoff(ctx, sec.Repo, ca); err != nil {
+			return nil, err
 		}
 		tl.Printf("opened the source server's sealed bucket settings (read access to %s's backups)", cmp.Or(p.Source.Name, p.Source.Stanza))
 	}

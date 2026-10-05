@@ -178,7 +178,17 @@ type StandbyRepo struct {
 	// Folder is the primary's backup folder when it isn't the stanza's
 	// name (a setup that started fresh in a new folder).
 	Folder string `json:"folder,omitempty"`
+	// Storage is StorageRowsafe when the primary's backups are in Rowsafe
+	// Storage. Endpoint, Bucket, PathPrefix and the keys are then empty:
+	// the receiving agent asks the control plane for its own short-lived
+	// credentials (the same organization's prefix, renewed by that agent)
+	// and uses them for Folder (or the stanza) under that prefix. CipherPass
+	// is still the primary's passphrase. "" is a bucket of the customer's.
+	Storage string `json:"storage,omitempty"`
 }
+
+// RowsafeStorage reports whether the repository is in Rowsafe Storage.
+func (r StandbyRepo) RowsafeStorage() bool { return r.Storage == StorageRowsafe }
 
 // ---- Heartbeat additions (embedded in HeartbeatRequest/Response) ----
 
@@ -582,6 +592,10 @@ type StandbyInfo struct {
 	// Move is the database's move to another server, if one is open or
 	// finished recently (MoveView).
 	Move *MoveView `json:"move,omitempty"`
+	// Placement (addition): where the standby runs when both servers are
+	// servers Rowsafe created ("the standby runs in another availability
+	// zone (eu-central-1b)"), in plain words; empty otherwise.
+	Placement string `json:"placement,omitempty"`
 }
 
 // StandbyServer is a server in a standby pair.
