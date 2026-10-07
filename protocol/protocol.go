@@ -743,6 +743,18 @@ type APIKey struct {
 	LastUsedAt *time.Time `json:"last_used_at"`
 	// ReadOnly keys may only make GET requests.
 	ReadOnly bool `json:"read_only"`
+	// CreatedBy is the email of the person who created the key ("" for
+	// keys from before Rowsafe recorded it, made by an operator, or made by
+	// another key): AI agents using the key act as them (AgentAutonomy)
+	// when ActsAsCreator.
+	CreatedBy string `json:"created_by,omitempty"`
+	// CreatedByKey is the name of the API key that created this one (its
+	// agents always ask first).
+	CreatedByKey string `json:"created_by_key,omitempty"`
+	// ActsAsCreator: made after agents could act as their person (or the
+	// creator since let it: POST /v1/api-keys/{id}/act). Older keys ask
+	// first.
+	ActsAsCreator bool `json:"acts_as_creator"`
 }
 
 type CreateAPIKeyRequest struct {

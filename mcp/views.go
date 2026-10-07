@@ -32,7 +32,7 @@ type OrgView struct {
 	PlanPeriodEnd *time.Time          `json:"plan_period_end,omitempty"`
 	// AgentAutonomy: whether changes you ask for run right away (an owner
 	// allowed it, within a budget or fully) or wait for a person.
-	AgentAutonomy *protocol.AgentAutonomy `json:"agent_autonomy,omitempty" jsonschema:"whether changes you ask for (request_change) run right away: level ask (a person approves each), budget or full, with the monthly budget and what is left"`
+	AgentAutonomy *protocol.AgentAutonomy `json:"agent_autonomy,omitempty" jsonschema:"whether changes you make (request_change) run right away: level act (the default: as the person who connected you, acting_as, with their rights), budget (new servers within an owner's budget) or ask (a person approves each), with the optional monthly budget and what is left"`
 }
 
 type HostView struct {

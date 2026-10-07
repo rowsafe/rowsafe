@@ -1,7 +1,7 @@
 {
   "name": "rowsafe",
   "version": "0.4.2",
-  "description": "Database backups and a safety net for AI agents: check recoverability and health, save restore points before risky changes, ask a person to approve changes to production.",
+  "description": "Database backups and a safety net for AI agents: check recoverability and health, save restore points before risky changes, make changes with your rights, every one audited.",
   "mcpServers": {
     "rowsafe": {
       "httpUrl": "https://api.rowsafe.sh/mcp"

@@ -17,7 +17,8 @@ import (
 // create_app_database: a new, empty database and a login for the app an
 // assistant is building, on a Rowsafe Cloud server's PostgreSQL (15 or
 // newer; usually a server it asked for). It files the create_app_database
-// approval request; a person approves it in the dashboard.
+// change request, which runs right away as the person who connected the
+// agent (from a local rowsafe mcp), or waits for a person to approve it.
 //
 // The password never passes through Rowsafe. Locally (rowsafe mcp) it is
 // made here, on the user's machine, and only its SCRAM-SHA-256 verifier is
@@ -49,10 +50,10 @@ type AppDatabaseOutput struct {
 func (t *tools) addAppDatabaseTool(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "create_app_database",
-		Description: "Asks a person to approve a new, empty PostgreSQL database and a login for the app you are building, on a Rowsafe Cloud server (PostgreSQL 15 or newer). The new user owns only that database, and only it can connect there; existing databases and users are untouched. " +
-			"Nothing changes until an owner or admin approves it in the dashboard (or right away, if your owner lets AI agents do this on their own: get_org). Rowsafe never sees the password: from a local rowsafe mcp it is made on this machine and you get the full connection string right away " +
-			"(it works once approved); on the remote endpoint the person who approves sees it once and gives it to you. Put the connection string in the app's environment (e.g. DATABASE_URL in .env), never in code or git.",
-		Annotations: writes("Ask for a database for the app", false, false),
+		Description: "Creates a new, empty PostgreSQL database and a login for the app you are building, on a Rowsafe Cloud server (PostgreSQL 15 or newer). The new user owns only that database, and only it can connect there; existing databases and users are untouched. " +
+			"Rowsafe never sees the password. From a local rowsafe mcp it is made on this machine, you get the full connection string at once, and it runs right away as the person who connected you (an owner or admin; otherwise, or if your team asks first, a person approves it; get_org). " +
+			"On the remote endpoint the password is made in the browser of the person who approves it, so it always waits for an owner or admin, who sees it once and gives it to you. Put the connection string in the app's environment (e.g. DATABASE_URL in .env), never in code or git.",
+		Annotations: writes("Create a database for the app", false, false),
 		InputSchema: withWait[appDatabaseInput](func(p map[string]*jsonschema.Schema) {
 			p["reason"].MinLength, p["reason"].MaxLength = ptr(1), ptr(1000)
 			p["name"].Pattern = "^[a-z][a-z0-9_]{0,62}$"
@@ -120,9 +121,9 @@ func (t *tools) createAppDatabase(ctx context.Context, _ *sdk.CallToolRequest, i
 	if password != "" {
 		out.DatabaseURL = protocol.ConnectionURL(conn, password)
 		out.Guidance = fmt.Sprintf("Put the connection string in the app's environment now (e.g. DATABASE_URL in .env, which git must ignore; never in code or a commit): it isn't shown again, and Rowsafe never had it. "+
-			"It works once the request is approved (right away if your owner lets agents do this on their own) and the database is created: follow it with get_approval %s and the task with get_task. "+
-			"The server must let the app's address connect (get_cloud_server shows who can; request_change cloud_firewall changes it).", a.ID)
-		b.line("Connection string (shown once, works once approved): %s", out.DatabaseURL)
+			"It works once the request is done (right away as the person who connected you, or once a person approves it) and the database is created: follow it with get_approval %s and the task with get_task. "+
+			"The server must let the app's address connect (get_cloud_server shows who can; cloud_firewall changes it).", a.ID)
+		b.line("Connection string (shown once, works once the database is created): %s", out.DatabaseURL)
 	} else {
 		out.Guidance = fmt.Sprintf("Rowsafe never makes or sees the password: when the person approves, the database server makes it and their browser shows them the connection string once. "+
 			"Ask them to put it in the app's environment (e.g. DATABASE_URL in .env, never in code or git), or to give it to you. Without the password it is %s. Follow the request with get_approval %s.",

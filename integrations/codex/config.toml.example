@@ -13,7 +13,8 @@ tool_timeout_sec = 180
 
 # B. Hosted endpoint with an API key, for CI. Every write tool is listed, so
 #    give it a key that can only do what you want (a --read-only key can still
-#    run safety_check but can't set Marks or ask for changes). Same as:
+#    run safety_check but can't set Marks or make changes). Codex acts as the
+#    person who created the key, with their rights. Same as:
 #    codex mcp add rowsafe --url https://api.rowsafe.sh/mcp --bearer-token-env-var ROWSAFE_API_KEY
 # [mcp_servers.rowsafe]
 # url = "https://api.rowsafe.sh/mcp"

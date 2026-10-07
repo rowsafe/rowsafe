@@ -53,6 +53,11 @@ type OAuthConnection struct {
 	ApprovedBy   string     `json:"approved_by"`
 	CreatedAt    time.Time  `json:"created_at"`
 	LastUsedAt   *time.Time `json:"last_used_at,omitempty"`
+	// ActsAsYou: the person who approved it consented, with ScopeAct, to
+	// the app acting as them (AgentAutonomy act). Apps connected before
+	// agents could act as their person ask first until that person lets
+	// them (POST /v1/oauth/connections/{id}/act) or reconnects them.
+	ActsAsYou bool `json:"acts_as_you"`
 }
 
 // OAuth authorization request statuses (the consent page).
@@ -92,6 +97,9 @@ type OAuthAuthorizationRequest struct {
 type ApproveOAuthRequest struct {
 	OrgID  string   `json:"org_id"`
 	Scopes []string `json:"scopes"`
+	// AgentActs: the consent page told the person that, with ScopeAct, the
+	// app acts as them; only then does the connection act (ActsAsYou).
+	AgentActs bool `json:"agent_acts,omitempty"`
 }
 
 // DenyOAuthRequest's OrgID is optional; with it the denial is audit-logged

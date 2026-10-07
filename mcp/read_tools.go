@@ -200,26 +200,54 @@ func dollars(cents int64) string {
 	return fmt.Sprintf("$%d.%02d", cents/100, cents%100)
 }
 
-// autonomyLine says whether changes you ask for run right away.
+// autonomyLine says whether changes you make run right away, and as whom.
 func autonomyLine(a *protocol.AgentAutonomy) string {
 	if a == nil || a.Level == "" || a.Level == protocol.AutonomyAsk {
-		return "AI agents: every change you ask for with request_change waits for an owner or admin to approve it (give the user the approval link)."
+		return "AI agents: your team asks first: every change you make with request_change waits for an owner or admin to approve it (give the user the approval link)."
+	}
+	budget := "There is no spending limit for AI agents"
+	if a.BudgetCents != nil {
+		budget = fmt.Sprintf("Within a %s monthly budget: agents' servers cost %s a month now", dollars(*a.BudgetCents), dollars(a.SpendCents))
+		if a.RemainingCents != nil {
+			budget += fmt.Sprintf(", %s left", dollars(*a.RemainingCents))
+		}
+	}
+	if protocol.NormalizeAutonomyLevel(a.Level) == protocol.AutonomyAct && a.AsksFirst {
+		return asksFirstLine(a)
+	}
+	if protocol.NormalizeAutonomyLevel(a.Level) == protocol.AutonomyAct {
+		who := "the person who connected you"
+		if a.ActingAs != "" {
+			who = a.ActingAs + " (who connected you)"
+		}
+		return fmt.Sprintf("AI agents: you act as %s, right away, with exactly their rights in the dashboard, like a CLI token: request_change (and create_cloud_server, cloud_firewall, apply_fix) make the change at once when they're an owner or admin; a member's changes wait for an owner or admin. "+
+			"%s; a first payment is made by an owner at a checkout link. Rowsafe saves a Mark before risky changes, needs a backup before anything that can't be undone, and has a person compare a server's key. "+
+			"Confirm disruptive, destructive or paid changes with the user in chat before making them, and only make what the user asked for or agreed to.", who, budget)
 	}
 	who := ""
 	if a.SetBy != "" {
 		who = " (" + a.SetBy + "'s setting)"
 	}
-	budget := "with no spending limit"
-	if a.BudgetCents != nil {
-		budget = fmt.Sprintf("within a %s monthly budget: agents' servers cost %s a month now", dollars(*a.BudgetCents), dollars(a.SpendCents))
-		if a.RemainingCents != nil {
-			budget += fmt.Sprintf(", %s left", dollars(*a.RemainingCents))
-		}
+	return fmt.Sprintf("AI agents: an owner let you act on your own%s %s, for new Rowsafe Cloud servers (create_cloud_server), and, on servers an agent created this way, databases for an app (create_app_database), who can connect and clones. Those run right away unless they'd go over the budget or need a checkout; everything else waits for an owner or admin to approve it. Only ask for what the user asked for or agreed to.", who, lowerFirst(budget))
+}
+
+// asksFirstLine: this agent's connection or key was made before agents
+// could act as their person, so its changes wait for a person.
+func asksFirstLine(a *protocol.AgentAutonomy) string {
+	who := "the person who connected you"
+	if a.ActingAs != "" {
+		who = a.ActingAs
 	}
-	if a.Level == protocol.AutonomyFull {
-		return fmt.Sprintf("AI agents: an owner let you make every change on your own%s, %s. request_change runs it right away (Rowsafe still checks the budget, payment and that a backup exists first; otherwise it waits for a person; it never deletes backups for you, and a server key is always compared by a person). Only ask for what the user asked for or agreed to.", who, budget)
+	return fmt.Sprintf("AI agents: you were connected before Rowsafe let AI agents act as the person who connected them (or with a key another key made), so every change you make with request_change waits for an owner or admin to approve it (give the user the approval link). "+
+		"To let you act as them right away, %s clicks \"Let it act as me\" in Rowsafe (Settings → Connected apps, or API keys), or connects you again.", who)
+}
+
+// lowerFirst lowercases an ASCII first letter.
+func lowerFirst(s string) string {
+	if s != "" && s[0] >= 'A' && s[0] <= 'Z' {
+		return string(s[0]+'a'-'A') + s[1:]
 	}
-	return fmt.Sprintf("AI agents: an owner let you act on your own%s %s, for new Rowsafe Cloud servers (create_cloud_server), and, on servers an agent created this way, databases for an app (create_app_database), who can connect and clones. Those run right away with request_change unless they'd go over the budget or need a checkout; everything else waits for an owner or admin to approve it. Only ask for what the user asked for or agreed to.", who, budget)
+	return s
 }
 
 func (t *tools) listHosts(ctx context.Context, _ *sdk.CallToolRequest, _ noInput) (*sdk.CallToolResult, HostsOutput, error) {
