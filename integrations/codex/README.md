@@ -4,8 +4,9 @@ The database safety net for AI agents, in Codex: before a migration or destructi
 
 This directory is a Codex plugin with three parts:
 
-- **MCP server** `https://api.rowsafe.sh/mcp` (`.mcp.json`): sign in with Rowsafe once; you choose the organization and what Codex may do. Always: `safety_check`, `list_restore_points` and read-only tools such as `fleet_health`, `database_health`, `list_alerts`, `live_activity` and `describe_change`. If you allow Marks: `create_restore_point`. If you allow it to act: backups, restore tests, checks, migration previews, safe copies, and `request_change`, which asks you to approve a change to production (see [Safety model](#safety-model)).
+- **MCP server** `https://api.rowsafe.sh/mcp` (`.mcp.json`): sign in with Rowsafe once; you choose the organization and what Codex may do. Always: `safety_check`, `list_restore_points` and read-only tools such as `fleet_health`, `database_health`, `list_alerts`, `live_activity`, Rowsafe Cloud's `cloud_catalog` and `get_cloud_server`, and `describe_change`. If you allow Marks: `create_restore_point`. If you allow it to act: backups, restore tests, checks, migration previews, safe copies, `request_change`, which asks you to approve a change to production or a new Rowsafe Cloud server (see [Safety model](#safety-model)), and `create_app_database`, which asks you to approve a database and login for the app.
 - **Skill** `rowsafe-safety` (`skills/`): the workflow. Check, set a Mark, tell you its name, proceed; if something goes wrong, stop and hand recovery to you.
+- **Skill** `rowsafe-new-database` (`skills/`): when the app needs a database, Codex picks the cheapest fitting Rowsafe Cloud size, asks you to approve the server (you see the price), waits until it's ready, asks for the app's own database and login, and puts the connection string in `.env`. Nothing is created or billed until you approve; the password never passes through Rowsafe.
 - **Hook** `rowsafe guard` (`hooks/hooks.json`): a `PreToolUse` hook on shell commands. With the `rowsafe` CLI installed, it sets a Mark right before commands like `prisma migrate deploy`, `rails db:migrate`, `alembic upgrade`, `psql -c "DROP TABLE ..."`, `mysql -e "TRUNCATE ..."`, `mongosh --eval "db.orders.drop()"`, `clickhouse-client -q "ALTER TABLE ... DELETE ..."` or `sqlite3 app.db "DROP TABLE ..."`, whether or not the model remembered to. Without the CLI it does nothing.
 
 It works with PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey and SQLite, in the Codex CLI and the IDE extension, which share `~/.codex/config.toml`. In Codex cloud, see [below](#codex-cloud).
@@ -91,7 +92,7 @@ What it matches is listed in the [Guard guide](https://rowsafe.sh/docs/guides/ai
 
 - **Codex can't restore, rewind, restart or fix anything by itself.** No Rowsafe MCP tool does, and the skill tells Codex never to try. Recovery is your decision, in the dashboard.
 - **Read-only unless you say otherwise.** At sign-in you choose: read-only tools only, Marks (`create_restore_point`), or acting too. A Mark only records a named point in the backup stream; it changes no data.
-- **Changes to production need your approval.** If you allowed Codex to act (or with `rowsafe mcp --allow-writes`), Codex can ask for a change with `request_change`: a Pulse fix, settings, a restart, a rewind, an upgrade, and the rest of what the dashboard does. It only files a request; an owner or admin approves or denies it in the dashboard, and only then does Rowsafe run it, as that person. Codex can never approve.
+- **Changes to production need your approval.** If you allowed Codex to act (or with `rowsafe mcp --allow-writes`), Codex can ask for a change with `request_change`: a Pulse fix, settings, a restart, a rewind, an upgrade, a Rowsafe Cloud server (you see its price before approving), and the rest of what the dashboard does. It only files a request; an owner or admin approves or denies it in the dashboard, and only then does Rowsafe run it, as that person. Codex can never approve.
 - **Everything goes through the Rowsafe API** with your sign-in or key, and shows up in the audit log. Nothing runs SQL or reads backup contents.
 - **The hook warns, it doesn't block**, when something fails (no database configured, not logged in, Rowsafe unreachable, the Mark not confirmed): the command runs and Codex is told to mention it. To block instead, set `"require_protection": true` in `.rowsafe.json` or `ROWSAFE_REQUIRE_PROTECTION=1`: the hook then checks protection first and blocks the command when the database isn't protected or the Mark can't be confirmed.
 - **It's a safety net, not a sandbox.** A destructive statement hidden in application code or an unusual wrapper won't match the hook. The skill and the MCP tools cover what the hook can't see.
@@ -122,6 +123,7 @@ Codex cloud tasks read `AGENTS.md`, but agent internet access is off by default 
 | `assets/icon.png` | Logo and composer icon |
 | `.mcp.json` | The MCP server the plugin connects to (hosted, Sign in with Rowsafe) |
 | `skills/rowsafe-safety/SKILL.md` | The safety workflow skill |
+| `skills/rowsafe-new-database/SKILL.md` | The "need a database?" skill (Rowsafe Cloud) |
 | `hooks/hooks.json` | `PreToolUse` hook on shell commands: `rowsafe guard` (skipped without the CLI) |
 | `AGENTS.snippet.md` | The workflow as an `AGENTS.md` section |
 | `config.toml.example` | Manual MCP setup, hosted or local |

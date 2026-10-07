@@ -36,6 +36,10 @@ const TaskDBAdmin = "dbadmin"
 // FeatureDBAdmin: the engine supports Databases & users (EngineFeatures.DBAdmin).
 const FeatureDBAdmin = "dbadmin"
 
+// FeatureDBAdminVerifier is in HeartbeatRequest.Features of agents that
+// create a database's new owner from DBAdminParams.PasswordVerifier.
+const FeatureDBAdminVerifier = "dbadmin_verifier"
+
 // DBAdmin actions (DBAdminParams.Action).
 const (
 	// DBAdminList reads the databases, users and extensions.
@@ -66,13 +70,14 @@ var DBAdminActions = []string{DBAdminList, DBAdminCreateDatabase, DBAdminCreateU
 	DBAdminDropUser, DBAdminEnableExtension, DBAdminDisableExtension, DBAdminDropDatabase}
 
 // DBAdminMakesPassword reports whether an action generates a password (and
-// so needs a PublicKey to seal it to).
+// so needs a PublicKey to seal it to). A new owner created from a
+// PasswordVerifier gets the requester's own password instead.
 func DBAdminMakesPassword(p DBAdminParams) bool {
 	switch p.Action {
 	case DBAdminCreateUser, DBAdminResetPassword:
 		return true
 	case DBAdminCreateDatabase:
-		return p.CreateOwner
+		return p.CreateOwner && p.PasswordVerifier == ""
 	}
 	return false
 }
@@ -150,6 +155,14 @@ type DBAdminParams struct {
 	// of the 65-byte uncompressed point) that a generated password is sealed
 	// to. Required when the action makes a password (DBAdminMakesPassword).
 	PublicKey string `json:"public_key,omitempty"`
+	// PasswordVerifier (create_database with CreateOwner, PostgreSQL only)
+	// is the SCRAM-SHA-256 verifier of a password the requester made on
+	// their own machine (ValidPasswordVerifier): the new owner gets it, so
+	// no password is made here and nothing is sealed (PublicKey stays
+	// empty). The requester already has the connection string; the result's
+	// Connection says where. Agents that take it report
+	// FeatureDBAdminVerifier.
+	PasswordVerifier string `json:"password_verifier,omitempty"`
 	// Host is the address to put in the connection string ("" : the one the
 	// agent suggests, DBInventory.SuggestedHost).
 	Host string `json:"host,omitempty"`
@@ -623,6 +636,18 @@ func ValidateDBAdminFor(engine string, p DBAdminParams) error {
 		}
 	default:
 		return fmt.Errorf("unknown action %q", p.Action)
+	}
+	if p.PasswordVerifier != "" {
+		switch {
+		case p.Action != DBAdminCreateDatabase || !p.CreateOwner:
+			return fmt.Errorf("password_verifier is only for a new database's new owner")
+		case engine != EnginePostgreSQL:
+			return fmt.Errorf("password_verifier is for PostgreSQL servers")
+		case p.PublicKey != "":
+			return fmt.Errorf("give public_key or password_verifier, not both")
+		case !ValidPasswordVerifier(p.PasswordVerifier):
+			return fmt.Errorf("password_verifier must be a SCRAM-SHA-256 verifier (SCRAM-SHA-256$4096:salt$StoredKey:ServerKey)")
+		}
 	}
 	if DBAdminMakesPassword(p) && p.PublicKey == "" {
 		return fmt.Errorf("public_key is required: the new password is encrypted to it, so only you can read it")

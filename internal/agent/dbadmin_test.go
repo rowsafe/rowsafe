@@ -413,3 +413,29 @@ func TestDBAdminCreateDatabaseCleansUp(t *testing.T) {
 		t.Errorf("left behind: %d (%v)", n, err)
 	}
 }
+
+// A new owner can get the requester's own password: only its verifier
+// comes here, PostgreSQL stores exactly that, and nothing is sealed.
+func TestDBAdminOwnerFromVerifier(t *testing.T) {
+	e := newDBAEnv(t)
+	app := e.name("app")
+	verifier, err := scramVerifierWithSalt("made-on-the-laptop-1234567890abcd", []byte("0123456789abcdef"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := e.mustRun(protocol.DBAdminParams{Action: protocol.DBAdminCreateDatabase, Database: app, CreateOwner: true,
+		PasswordVerifier: verifier, Host: "x7kq2mfa3pzd.cloud.rowsafe.sh"}, "Created the database "+app+", owned by the new user "+app)
+	if res.Secret != nil {
+		t.Error("a password was sealed for an owner made from a verifier")
+	}
+	if c := res.Connection; c == nil || c.User != app || c.Database != app || c.Host != "x7kq2mfa3pzd.cloud.rowsafe.sh" || c.Port != e.spec.Port {
+		t.Errorf("connection %+v", res.Connection)
+	}
+	if !strings.Contains(strings.Join(res.Details, " "), "never saw it") {
+		t.Errorf("details %q", res.Details)
+	}
+	var stored string
+	if err := e.admin.QueryRow(t.Context(), `SELECT rolpassword FROM pg_authid WHERE rolname = $1`, app).Scan(&stored); err != nil || stored != verifier {
+		t.Errorf("stored %q (%v), want the requester's verifier", stored, err)
+	}
+}

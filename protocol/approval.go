@@ -43,7 +43,7 @@ type ApprovalAction struct {
 	Name        string `json:"name"`
 	Title       string `json:"title"`       // "Restart the database"
 	Description string `json:"description"` // what happens, in plain language
-	Group       string `json:"group"`       // pulse, rewind, updates, standby, move, security, data, files, copies, alerts, hosts
+	Group       string `json:"group"`       // pulse, rewind, updates, standby, move, security, data, files, copies, alerts, cloud
 	Method      string `json:"method"`
 	// Path is the API path. {ref} is the request's database; any other
 	// {name} is taken from the params (and removed from the body).
@@ -55,6 +55,10 @@ type ApprovalAction struct {
 	// params say.
 	Fixed map[string]any `json:"fixed,omitempty"`
 	Risk  string         `json:"risk"`
+	// CostsMoney: approving it adds to the organization's bill (a new
+	// Rowsafe Cloud server, a bigger size). The dashboard always asks the
+	// person first and shows the price.
+	CostsMoney bool `json:"costs_money,omitempty"`
 	// Body is a zero value of the request body's type (nil: no body), for
 	// documentation and input schemas.
 	Body any `json:"-"`
@@ -155,8 +159,13 @@ var ApprovalActions = []ApprovalAction{
 		Description: "Runs one of the Security page's actions: restrict who can connect, turn on TLS, renew the certificate, move passwords to SCRAM, revoke public CREATE, listen locally only, the firewall. Setting a password is for people only (the password never leaves their browser). confirm is the database's name."},
 
 	// Databases and users on the server.
+	{Name: "create_app_database", Group: "data", Title: "Create a database for an app", Method: "POST", Path: "/v1/databases/{ref}/dbadmin",
+		Fixed: map[string]any{"action": DBAdminCreateDatabase, "create_owner": true}, Risk: RiskNormal, Body: AppDatabaseParams{},
+		Description: "Creates a new, empty PostgreSQL database owned by a new user that can connect only to it, for the app you are building (existing databases and users are untouched; it is backed up with the rest of the server). " +
+			"The password never passes through Rowsafe: use the create_app_database tool, which makes it on the user's machine and sends only its verifier, so you get the full connection string at once (it works once a person approves); " +
+			"on the remote endpoint the person who approves sees the connection string once, in their browser, and gives it to you."},
 	{Name: "manage_databases_users", Group: "data", Title: "Create or remove databases and users", Method: "POST", Path: "/v1/databases/{ref}/dbadmin", Risk: RiskDisruptive, Body: DBAdminParams{},
-		Description: "Creates a database for an existing owner, removes a database or user, or turns an extension on or off, on the database server (list_databases_on_server shows them). Removing a database saves a Mark first. Anything that makes a password (a new user, a new owner, a password reset) is for people only, in the dashboard: the password is shown only to them."},
+		Description: "Creates a database for an existing owner, removes a database or user, or turns an extension on or off, on the database server (list_databases_on_server shows them). Removing a database saves a Mark first. Anything that makes a password (a new user, a new owner, a password reset) is for people only, in the dashboard: the password is shown only to them. For a new database and login for the app you are building, use create_app_database."},
 	{Name: "masking_rules", Group: "copies", Title: "Change masking rules", Method: "PUT", Path: "/v1/databases/{ref}/masking", Risk: RiskNormal, Body: PutMaskingRequest{},
 		Description: "Changes which columns safe copies mask and how."},
 	{Name: "delete_database", Group: "data", Title: "Stop protecting the database", Method: "DELETE", Path: "/v1/databases/{ref}", Risk: RiskDestructive,
@@ -167,6 +176,27 @@ var ApprovalActions = []ApprovalAction{
 		Description: "Restores backed-up files (uploads, configs) to how they were at a second; the current files are set aside so it can be undone."},
 	{Name: "undo_files_restore", Group: "files", Title: "Undo a files restore", Method: "POST", Path: "/v1/databases/{ref}/files/restores/{restore_id}/undo", Risk: RiskDisruptive, Body: FilesConfirmRequest{},
 		Description: "Puts back the files from before a restore."},
+
+	// Rowsafe Cloud: servers Rowsafe runs for the organization, billed to it.
+	{Name: "create_cloud_server", Group: "cloud", Title: "Create a Rowsafe Cloud server", Method: "POST", Path: "/v1/cloud/servers",
+		Fixed: map[string]any{"where": "rowsafe", "engine": EnginePostgreSQL}, Risk: RiskNormal, CostsMoney: true, Body: CreateCloudServerParams{},
+		Description: "Creates a new server with PostgreSQL in Rowsafe Cloud, protected by Rowsafe from the start (backups, Proof, Pulse), for the region and size you choose from cloud_catalog. " +
+			"It costs money: the person approving sees the size, the price per hour and the most it costs a month (a standby doubles it). " +
+			"Where pay as you go isn't active yet, the person pays at a checkout right after approving and the server is created once paid. " +
+			"get_approval then shows the server's ID; get_cloud_server follows it until it's ready (about 5 to 10 minutes)."},
+	{Name: "cloud_firewall", Group: "cloud", Title: "Change who can connect", Method: "PUT", Path: "/v1/cloud/servers/{server}/firewall", Risk: RiskDisruptive, Body: CloudFirewallParams{},
+		Description: "Sets who can connect to a Rowsafe Cloud server's PostgreSQL (its firewall): allowed_ips replaces the whole list. Apps connecting from an address that is no longer listed are cut off. server is the server's name or ID (list_cloud_servers)."},
+	{Name: "resize_cloud_server", Group: "cloud", Title: "Change a Rowsafe Cloud server's size", Method: "POST", Path: "/v1/cloud/servers/{server}/resize",
+		Fixed: map[string]any{"confirm": true}, Risk: RiskDisruptive, CostsMoney: true, Body: ResizeCloudServerParams{},
+		Description: "Moves a Rowsafe Cloud server billed by the hour to another size of its cloud (cloud_catalog). Rowsafe saves a Mark first; the database is offline for a few minutes while the server restarts " +
+			"(with a standby, both change one at a time and writes pause for seconds). The disk never shrinks. The new price applies from the next full hour."},
+	{Name: "clone_to_new_server", Group: "cloud", Title: "Clone to a new Rowsafe Cloud server", Method: "POST", Path: "/v1/databases/{ref}/clone",
+		Fixed: map[string]any{"where": "rowsafe"}, Risk: RiskNormal, CostsMoney: true, Body: CloneToNewServerParams{},
+		Description: "Copies a PostgreSQL database as it was now, at a second or at a Mark onto a brand-new Rowsafe Cloud server billed by the hour (production is untouched). " +
+			"The clone holds real data and costs money until it's deleted: set delete_after_hours to have Rowsafe delete it. get_approval shows the new server's ID."},
+	{Name: "delete_cloud_server", Group: "cloud", Title: "Delete a Rowsafe Cloud server", Method: "DELETE", Path: "/v1/cloud/servers/{server}", Risk: RiskDestructive, Body: DeleteCloudServerParams{},
+		Description: "Deletes a Rowsafe Cloud server and stops its bill. Its backups stay in Rowsafe Storage while the database stays in Rowsafe, but the server and anything not backed up are gone. " +
+			"The person approving types the server's name, and Rowsafe refuses unless the backup passphrase was saved (clones excepted)."},
 
 	// Alerts.
 	{Name: "alert_rule", Group: "alerts", Title: "Change an alert rule", Method: "PUT", Path: "/v1/alert-rules/{rule}", Risk: RiskNormal, Body: UpdateAlertRuleRequest{},
@@ -203,21 +233,36 @@ type ApprovalResult struct {
 	HTTPStatus int    `json:"http_status"`
 	Message    string `json:"message,omitempty"` // the error, or a one-line summary
 	// TaskIDs are the tasks it queued (follow them with get_task).
-	TaskIDs []string        `json:"task_ids,omitempty"`
-	Body    json.RawMessage `json:"body,omitempty"` // the API's response (truncated)
+	TaskIDs []string `json:"task_ids,omitempty"`
+	// CloudServerID is the Rowsafe Cloud server it created
+	// (create_cloud_server, clone_to_new_server): follow it with
+	// GET /v1/cloud/servers/{id}.
+	CloudServerID string `json:"cloud_server_id,omitempty"`
+	// CheckoutURL: the server waits for payment. The dashboard sends the
+	// person who approved to it (an owner pays); the server is created once
+	// paid.
+	CheckoutURL string          `json:"checkout_url,omitempty"`
+	Body        json.RawMessage `json:"body,omitempty"` // the API's response (truncated)
 }
 
 // Approval is a request for a person to approve a change.
 type Approval struct {
-	ID         string          `json:"id"` // apr_...
-	Action     string          `json:"action"`
-	Title      string          `json:"title"` // the action's title
-	Group      string          `json:"group"`
-	Risk       string          `json:"risk"`
-	DatabaseID string          `json:"database_id,omitempty"`
-	Database   string          `json:"database,omitempty"`
-	Host       string          `json:"host,omitempty"`
-	Params     json.RawMessage `json:"params,omitempty"`
+	ID         string `json:"id"` // apr_...
+	Action     string `json:"action"`
+	Title      string `json:"title"` // the action's title
+	Group      string `json:"group"`
+	Risk       string `json:"risk"`
+	CostsMoney bool   `json:"costs_money,omitempty"` // the action's CostsMoney
+	// NeedsBrowserKey: approving needs the person's browser key
+	// (DecideApprovalRequest.PublicKey, ApprovalNeedsBrowserKey).
+	NeedsBrowserKey bool   `json:"needs_browser_key,omitempty"`
+	DatabaseID      string `json:"database_id,omitempty"`
+	Database        string `json:"database,omitempty"`
+	// Host is the database's server, or the Rowsafe Cloud server's name
+	// for the cloud actions about one (ServerID).
+	Host     string          `json:"host,omitempty"`
+	ServerID string          `json:"server_id,omitempty"` // cs_..., cloud actions about one server
+	Params   json.RawMessage `json:"params,omitempty"`
 	// Details are written by Rowsafe, not the assistant: what exactly will
 	// change, one line each.
 	Details     []string   `json:"details,omitempty"`
@@ -239,8 +284,31 @@ type Approval struct {
 // DecideApprovalRequest is POST /v1/approvals/{id}/approve (and deny).
 // Only a person signed in to the dashboard (owner or admin) can decide.
 type DecideApprovalRequest struct {
-	// Confirm is the database's name, required to approve a destructive
-	// action.
+	// Confirm is the database's name (a Rowsafe Cloud server's for
+	// delete_cloud_server), required to approve a destructive action.
 	Confirm string `json:"confirm,omitempty"`
 	Note    string `json:"note,omitempty"`
+	// PublicKey is the approving person's ephemeral browser key
+	// (ParseSealKey), for create_app_database filed without a password
+	// verifier: the new password is sealed to it and shown only to them.
+	PublicKey string `json:"public_key,omitempty"`
+}
+
+// ApprovalNeedsBrowserKey reports whether approving a needs the person's
+// browser key (DecideApprovalRequest.PublicKey): create_app_database filed
+// without a password verifier, whose password the agent makes and seals to
+// the person who approves.
+func ApprovalNeedsBrowserKey(a Approval) bool {
+	if a.Action != "create_app_database" {
+		return false
+	}
+	var p struct {
+		PasswordVerifier string `json:"password_verifier"`
+	}
+	if len(a.Params) > 0 {
+		if err := json.Unmarshal(a.Params, &p); err != nil {
+			return false
+		}
+	}
+	return p.PasswordVerifier == ""
 }

@@ -47,7 +47,7 @@ type Options struct {
 
 const maxWaitLimit = 60 * time.Second
 
-const instructions = `Rowsafe is the safety net for databases people run on their own servers: PostgreSQL, MySQL, MariaDB, MongoDB and ClickHouse. It runs continuous backups (point-in-time recovery from PostgreSQL's WAL, MySQL's binary log or MongoDB's oplog; ClickHouse has scheduled backups only), restores (Rewind) and a weekly restore test (Proof, task type drill), with health monitoring (Pulse), through an agent on each database host. It never changes production on its own, never runs arbitrary queries on it, and never sees backup contents. Features differ per engine: list_databases shows each database's engine, and a tool that doesn't apply says so; use the engine's own commands and wording (mysql, mongosh, clickhouse-client), never PostgreSQL's, for another engine. To test against real-shaped data, create_safe_copy makes a masked copy you can connect to (never production).
+const instructions = `Rowsafe is the safety net for databases people run on their own servers or in Rowsafe Cloud: PostgreSQL, MySQL, MariaDB, MongoDB and ClickHouse. It runs continuous backups (point-in-time recovery from PostgreSQL's WAL, MySQL's binary log or MongoDB's oplog; ClickHouse has scheduled backups only), restores (Rewind) and a weekly restore test (Proof, task type drill), with health monitoring (Pulse), through an agent on each database host. It never changes production on its own, never runs arbitrary queries on it, and never sees backup contents. Features differ per engine: list_databases shows each database's engine, and a tool that doesn't apply says so; use the engine's own commands and wording (mysql, mongosh, clickhouse-client), never PostgreSQL's, for another engine. To test against real-shaped data, create_safe_copy makes a masked copy you can connect to (never production).
 
 Before any destructive or risky database operation (migrations such as prisma migrate, rails db:migrate, alembic, django migrate, knex or goose; schema changes; DROP/TRUNCATE; ALTER TABLE ... DELETE/UPDATE mutations in ClickHouse; DELETE/UPDATE without a narrow WHERE; MongoDB drop(), deleteMany({}) or updateMany({}, ...); bulk data changes; restoring a dump over a database):
 1. Call safety_check on the database. If it is not protected, tell the user the reasons and get their OK before doing anything destructive. For a migration, preview_migration runs it on a fresh copy first (never production; use it freely) and returns a verdict (safe, careful, dangerous or failed) with suggestions: follow them before running it for real.
@@ -66,8 +66,15 @@ Changes to production go through a person. Applying a Pulse fix, changing settin
 - Fixes: when database_health, database_insights or recommendations show a fix Rowsafe can apply, use that fix (request_change apply_fix with its finding_id and fix_id) instead of giving the user SQL or commands. Don't suggest DROP INDEX or REINDEX for what Rowsafe handles; suggest new indexes only as proposals, and propose (never run) step-by-step plans for schema changes Rowsafe can't do.
 - Settings: database_settings reads them; change_settings applies Rowsafe's recommendations (it saves a Mark first and can be undone). Never tell the user to edit config files or run ALTER SYSTEM / SET GLOBAL for what Rowsafe recommends, and never change the settings continuous backup relies on (PostgreSQL's archive_mode, archive_command, archive_timeout; MySQL's binary log; MongoDB's replica set).
 - Adoption: plan_adoption only plans; show the plan, then turn_on_backups applies it.
-- Without approval, you may also: run_backup (type diff is the usual ad-hoc backup), run_drill, verify_database, update_schedule (confirm with the user before lowering retention_full: it deletes older backups), ack_alert, dismiss_recommendation, run_index_check, check_upgrade, rehearse_upgrade, run_security_check, extend_safe_copy, backup_files, check_files. None of them changes production's data or availability.
-- Passwords (a safe copy's on the remote endpoint, database users') are set by people in the dashboard; they never pass through you.`
+- Without approval, you may also: run_backup (type diff is the usual ad-hoc backup), run_drill, verify_database, update_schedule (confirm with the user before lowering retention_full: it deletes older backups), ack_alert, dismiss_recommendation, run_index_check, check_upgrade, rehearse_upgrade, run_security_check, extend_safe_copy, backup_files (with check: true it runs the files' restore test). None of them changes production's data or availability.
+- Passwords (a safe copy's on the remote endpoint, database users') are set by people in the dashboard; they never pass through you. The one exception is create_app_database from a local rowsafe mcp: the password of a new database's own login is made on the user's machine for the app you are building, and Rowsafe only gets its verifier.
+
+Need a database for the app (Rowsafe Cloud: PostgreSQL that Rowsafe runs and protects, billed to the organization)?
+1. cloud_catalog: pick a region near the app and the cheapest size that fits (a small app fits the smallest one; it names the cheapest free now, about $10 a month); don't pick a sold-out one. list_cloud_servers first: the organization may already have a server to use.
+2. request_change create_cloud_server with name, region, size and allowed_ips (the app's addresses; empty is nobody), and a reason that says what it's for and what it costs. Give the user the approval link: a person approves it, and pays at a checkout right after if pay as you go isn't active yet. Nothing is created or billed before.
+3. get_approval with wait_seconds until it's decided; once approved it shows the server's ID. get_cloud_server with wait_seconds until it's ready (5 to 10 minutes).
+4. If the app's address can't connect, request_change cloud_firewall. Then create_app_database with the server's database for the app's own database and login (approved by a person too).
+5. Put the connection string in the app's environment (e.g. DATABASE_URL in .env, which git must ignore), never in code, a commit or a chat log. Resizing (resize_cloud_server), cloning (clone_to_new_server) and deleting (delete_cloud_server) are approval requests too.`
 
 // NewServer returns an MCP server whose tools act through c.
 func NewServer(c *client.Client, opts Options) *sdk.Server {
@@ -96,14 +103,16 @@ func NewServer(c *client.Client, opts Options) *sdk.Server {
 	t.addAdvisorTools(s)     // advisor (advisor_tools.go)
 	t.addDBAdminReadTools(s) // Databases & users: read-only (dbadmin_tools.go)
 	t.addStandbyReadTools(s)
-	t.addPulseReadTools(s)    // alerts, activity, metrics, audit (pulse_tools.go)
-	t.addOpsReadTools(s)      // security, updates, pooling, forks (ops_tools.go)
-	t.addCloudReadTools(s)    // private connections, read-only (cloud_tools.go)
-	t.addApprovalReadTools(s) // describe_change, get_approval, list_approvals (approval_tools.go)
+	t.addPulseReadTools(s)        // alerts, activity, metrics, audit (pulse_tools.go)
+	t.addOpsReadTools(s)          // security, updates, pooling, forks (ops_tools.go)
+	t.addCloudReadTools(s)        // private connections, read-only (cloud_tools.go)
+	t.addRowsafeCloudReadTools(s) // catalog and servers, read-only (rowsafe_cloud_tools.go)
+	t.addApprovalReadTools(s)     // describe_change, get_approval, list_approvals (approval_tools.go)
 	if opts.AllowWrites {
 		t.addWriteTools(s)
 		t.addActionTools(s)        // never change production (action_tools.go)
 		t.addApprovalWriteTools(s) // request_change, cancel_approval
+		t.addAppDatabaseTool(s)    // create_app_database (app_database_tools.go)
 	}
 	if opts.AllowWrites || opts.AllowRestorePoints {
 		t.addSafetyWriteTools(s)
