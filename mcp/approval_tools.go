@@ -367,7 +367,7 @@ func autonomyFor(s *protocol.AgentAutonomy, a protocol.ApprovalAction) string {
 	if a.Risk == protocol.RiskDestructive {
 		ifs = append(ifs, "Rowsafe has no backup of the database yet")
 	}
-	if level == protocol.AutonomyBudget && (a.Name == "cloud_firewall" || a.Name == "clone_to_new_server") {
+	if level == protocol.AutonomyBudget && (a.Name == "cloud_firewall" || a.Name == "clone_to_new_server" || a.Name == "create_app_database") {
 		ifs = append(ifs, "the server wasn't created by an AI agent on its own")
 	}
 	if a.Name == "create_app_database" {

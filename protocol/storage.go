@@ -120,10 +120,15 @@ type StorageDatabase struct {
 }
 
 type StorageDeletion struct {
-	Prefix   string     `json:"prefix"`
-	Name     string     `json:"name"`   // the database name (the stanza)
-	Reason   string     `json:"reason"` // "database_removed", "moved", "org_deleted"
-	DeleteAt time.Time  `json:"delete_at"`
+	ID       string    `json:"id,omitempty"`
+	Prefix   string    `json:"prefix"`
+	Name     string    `json:"name"`   // the database name (the stanza)
+	Reason   string    `json:"reason"` // "database_removed", "moved", "org_deleted", "kept"
+	DeleteAt time.Time `json:"delete_at"`
+	// Kept: the backups stay until an owner deletes them (DeleteAt means
+	// nothing then): an AI agent removed the database under autonomy, and
+	// Rowsafe never deletes backups on an agent's behalf.
+	Kept     bool       `json:"kept,omitempty"`
 	Bytes    int64      `json:"bytes"`
 	WarnedAt *time.Time `json:"warned_at,omitempty"`
 }
@@ -133,4 +138,6 @@ const (
 	StorageDeletionRemoved    = "database_removed"
 	StorageDeletionMoved      = "moved"
 	StorageDeletionOrgDeleted = "org_deleted"
+	// StorageDeletionKept: kept until an owner deletes them (StorageDeletion.Kept).
+	StorageDeletionKept = "kept"
 )

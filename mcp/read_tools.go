@@ -217,9 +217,9 @@ func autonomyLine(a *protocol.AgentAutonomy) string {
 		}
 	}
 	if a.Level == protocol.AutonomyFull {
-		return fmt.Sprintf("AI agents: an owner let you make every change on your own%s, %s. request_change runs it right away (Rowsafe still checks the budget, payment and that a backup exists first; otherwise it waits for a person). Only ask for what the user asked for or agreed to.", who, budget)
+		return fmt.Sprintf("AI agents: an owner let you make every change on your own%s, %s. request_change runs it right away (Rowsafe still checks the budget, payment and that a backup exists first; otherwise it waits for a person; it never deletes backups for you, and a server key is always compared by a person). Only ask for what the user asked for or agreed to.", who, budget)
 	}
-	return fmt.Sprintf("AI agents: an owner let you act on your own%s %s, for new Rowsafe Cloud servers (create_cloud_server), databases for an app (create_app_database), and who can connect to and clones of servers an agent created this way. Those run right away with request_change unless they'd go over the budget or need a checkout; everything else waits for an owner or admin to approve it. Only ask for what the user asked for or agreed to.", who, budget)
+	return fmt.Sprintf("AI agents: an owner let you act on your own%s %s, for new Rowsafe Cloud servers (create_cloud_server), and, on servers an agent created this way, databases for an app (create_app_database), who can connect and clones. Those run right away with request_change unless they'd go over the budget or need a checkout; everything else waits for an owner or admin to approve it. Only ask for what the user asked for or agreed to.", who, budget)
 }
 
 func (t *tools) listHosts(ctx context.Context, _ *sdk.CallToolRequest, _ noInput) (*sdk.CallToolResult, HostsOutput, error) {
