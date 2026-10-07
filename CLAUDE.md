@@ -19,7 +19,9 @@ proprietary (api.rowsafe.sh, app.rowsafe.sh).
 - `protocol/`: API types shared with the control plane. `protocol/engine.go` has the per-engine
   feature flags.
 - `cmd/rowsafe`, `client/`: the CLI (`rowsafe login`, `adopt`, `apply`, `verify`, `status`, `mark`,
-  `proof`, `pulse`, `fix`, `rewind`, `restart`, ...). `rowsafe help all` lists everything.
+  `proof`, `pulse`, `fix`, `rewind`, `restart`, `cloud`, `env`, `connect`, ...). `rowsafe help all`
+  lists everything. `rowsafe cloud` acts directly on Rowsafe Cloud with a read-write key (money and
+  deletions confirmed, `--yes` in scripts); `env`/`connect` never let a password pass through Rowsafe.
 - `mcp/`: the MCP server (`rowsafe mcp`, also served remotely by the control plane). Read-only
   unless `--allow-restore-points` / `--allow-writes` (remote: OAuth scopes `rowsafe:marks` /
   `rowsafe:act`). Never tools that restore, restart or fix directly: changes to production are

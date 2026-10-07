@@ -38,6 +38,22 @@ rowsafe rewind database app --at "14:04"  # rewind in place, with undo
 
 **Guard**: `rowsafe mcp`, the Claude Code and Codex plugins and the GitHub Action save a Mark before migrations, destructive SQL and deploys. AI agents can ask for any change to production; an owner or admin approves it in the dashboard. Agents can never approve.
 
+**Rowsafe Cloud**: PostgreSQL servers Rowsafe runs for you, billed by the hour (never more than the monthly price), with all of the above on from the first minute.
+
+```sh
+rowsafe cloud sizes                         # clouds, regions, sizes, prices, what is sold out
+rowsafe cloud create shop-db --wait         # the cheapest size free now; only this computer may connect
+rowsafe env --on shop-db                    # the app's database and login, DATABASE_URL in .env
+rowsafe connect shop-db                     # psql, as a temporary user removed when you quit
+rowsafe cloud allow shop-db 203.0.113.4     # let the app's server connect
+rowsafe cloud resize shop-db medium         # a Mark first; asks before the restart
+rowsafe cloud clone shop-db shop-test --at "10m ago" --delete-after 1d
+rowsafe cloud passphrase shop-db --file shop-db-passphrase.txt
+rowsafe cloud delete shop-db                # asks you to type the name
+```
+
+The first server billed by the hour gives you a link to add a card, once. Database passwords never pass through Rowsafe: `rowsafe env` makes the password on your computer and sends only its SCRAM verifier, and other passwords are made on the database server and encrypted for your terminal. `rowsafe help cloud` has the details.
+
 Full guide: [Quickstart](https://rowsafe.sh/docs/quickstart).
 
 ## What's in this repository

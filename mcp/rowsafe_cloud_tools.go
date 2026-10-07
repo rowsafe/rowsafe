@@ -511,3 +511,13 @@ func trafficText(z client.CloudSize) string {
 	}
 	return s
 }
+
+// PriceText, HourText and TrafficText are the same words for the CLI
+// (rowsafe cloud).
+func PriceText(cents int64, currency string) string { return priceText(cents, currency) }
+
+// HourText is an hourly price in cents: "$0.014".
+func HourText(cents float64, currency string) string { return hourText(cents, currency) }
+
+// TrafficText says what traffic a size includes ("" when unlimited).
+func TrafficText(z client.CloudSize) string { return trafficText(z) }

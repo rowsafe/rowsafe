@@ -10,9 +10,12 @@ import (
 // Rowsafe Cloud as the control plane shows it: the catalog of clouds,
 // regions and sizes with their prices (GET /v1/cloud/rowsafe/catalog), and
 // the servers Rowsafe created for the org (GET /v1/cloud/servers[/{id}]).
-// Read-only here: creating, resizing, changing who can connect and deleting
-// are for people, or approval requests a person approves (protocol
-// ApprovalActions, group "cloud").
+//
+// Creating, resizing, changing who can connect, cloning and deleting
+// (cloud_change.go) are for people: the dashboard, or the CLI with a
+// read-write API key. AI assistants ask with approval requests a person
+// approves (protocol ApprovalActions, group "cloud"); the control plane
+// refuses these calls on /mcp.
 
 // CloudCatalog is Rowsafe Cloud's catalog.
 type CloudCatalog struct {
@@ -103,21 +106,30 @@ type CloudServer struct {
 	// Status: payment (waiting for payment), creating, installing, ready,
 	// resizing, deleting, deleted or failed; Step says where it is in plain
 	// words, Problem what went wrong.
-	Status      string     `json:"status"`
-	Step        string     `json:"step"`
-	Problem     *string    `json:"problem"`
-	IPv4        *string    `json:"ipv4"`
-	IPv6        *string    `json:"ipv6"`
-	DatabaseRef *string    `json:"database_ref"` // the database's name in Rowsafe, once enrolled
-	AllowedIPs  []string   `json:"allowed_ips"`
-	PlanSize    *string    `json:"plan_size"` // Rowsafe Cloud: the size ID bought
-	CreatedAt   time.Time  `json:"created_at"`
-	CreatedBy   string     `json:"created_by"`
-	DeleteAt    *time.Time `json:"delete_at"`
+	Status      string   `json:"status"`
+	Step        string   `json:"step"`
+	Problem     *string  `json:"problem"`
+	IPv4        *string  `json:"ipv4"`
+	IPv6        *string  `json:"ipv6"`
+	DatabaseRef *string  `json:"database_ref"` // the database's name in Rowsafe, once enrolled
+	AllowedIPs  []string `json:"allowed_ips"`
+	// SSHIPs may reach SSH (servers in the org's own cloud account only).
+	SSHIPs []string `json:"ssh_ips"`
+	// PassphraseSavedAt: when someone saved the backup passphrase (a
+	// server with a database can be deleted only after that).
+	PassphraseSavedAt *time.Time `json:"passphrase_saved_at"`
+	PendingSize       *string    `json:"pending_size"`
+	PlanSize          *string    `json:"plan_size"` // Rowsafe Cloud: the size ID bought
+	CreatedAt         time.Time  `json:"created_at"`
+	CreatedBy         string     `json:"created_by"`
+	DeleteAt          *time.Time `json:"delete_at"`
 	// FirewallPending: the server's own firewall still has to apply the
 	// allow list.
-	FirewallPending bool `json:"firewall_pending"`
-	Billing         *struct {
+	FirewallPending bool    `json:"firewall_pending"`
+	FirewallProblem *string `json:"firewall_problem"`
+	// DeleteAfterHours: a clone is deleted this long after it's ready.
+	DeleteAfterHours *int `json:"delete_after_hours"`
+	Billing          *struct {
 		Status           string  `json:"status"` // payment, active, canceling, past_due, ended
 		Mode             string  `json:"mode"`   // hourly or monthly
 		HourlyPriceCents float64 `json:"hourly_price_cents,omitempty"`
@@ -127,6 +139,8 @@ type CloudServer struct {
 		Currency         string  `json:"currency"`
 		CheckoutURL      *string `json:"checkout_url"`
 		CanResize        bool    `json:"can_resize"`
+		// PaidUntil: the end of the period paid for.
+		PaidUntil *time.Time `json:"paid_until"`
 	} `json:"billing"`
 	// Address: the names apps connect to (Rowsafe Cloud).
 	Address *struct {

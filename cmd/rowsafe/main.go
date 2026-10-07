@@ -36,6 +36,43 @@ Getting started
                                              servers where the installer allowed it
   rowsafe version                            the CLI's version
 
+Rowsafe Cloud: PostgreSQL servers Rowsafe runs for you, billed by the hour (never more than the monthly price)
+  rowsafe cloud sizes [--cloud CLOUD] [--region REGION] [--json]
+                                             clouds, regions and sizes: CPUs, memory, disk, the price of an hour,
+                                             the most a month costs, and what is sold out right now
+  rowsafe cloud create NAME [--cloud hetzner] [--region fsn1] [--size small] [--postgres 17]
+        [--allow me|IP|CIDR]... [--standby] [--wait] [--yes] [--json]
+                                             a new server with PostgreSQL, backups, Proof and Pulse on. Defaults:
+                                             the cheapest size free now; only this computer may connect. The first
+                                             server billed by the hour gives you a link to add a card, once
+  rowsafe cloud list [--json]                the servers Rowsafe created: status, size, price, who can connect
+  rowsafe cloud show [NAME] [--json]         one server: status, size, price, where apps connect, who can
+  rowsafe cloud wait [NAME] [--timeout 30m]  follow a server being created or resized until it's ready
+  rowsafe cloud resize [NAME] SIZE [--yes] [--wait]
+                                             another size (a Mark first; offline a few minutes while the server
+                                             restarts, a pair switches over instead). Disks never shrink
+  rowsafe cloud allow [NAME] [me|IP|CIDR]... let more addresses connect (default: this computer)
+  rowsafe cloud firewall [NAME] [--set A,B | --add A | --remove A | --clear] [--yes] [--json]
+                                             who can connect: show it, or change it (asks before cutting anyone off)
+  rowsafe cloud passphrase [NAME] [--file PATH]
+                                             the backup passphrase, encrypted for this terminal only. Save it: a
+                                             server with a database can't be deleted before
+  rowsafe cloud clone [SOURCE] NAME [--at TIME | --mark LABEL] [--delete-after 24h] [--region R] [--size S]
+        [--allow me|IP]... [--wait] [--yes] [--json]
+                                             a copy of a database as it was then (default: now) on a new server
+                                             billed by the hour, next to the source at its size by default
+  rowsafe cloud retry [NAME] [--wait]        create a server that failed to set up again
+  rowsafe cloud delete [NAME] [--with-standby] [--wait] [--yes]
+                                             delete the server and the database on it (asks you to type the name)
+  rowsafe env [DATABASE] [--on NAME] [--file .env] [--name DATABASE_URL] [--user USER] [--extension EXT]...
+        [--reset-password] [--print] [--force]
+                                             the app's database and login, with a password made for this computer
+                                             only: writes DATABASE_URL to .env (and .env to .gitignore). DATABASE
+                                             defaults to this directory's name. Never prints the password unless --print
+  rowsafe connect [DATABASE|SERVER] [--on NAME] [--user USER] [--access read_only|read_write|owner] [-- PSQL ARGS]
+                                             open psql: as a temporary user removed when you quit, or as USER (psql
+                                             asks for its password). Offers to let this computer connect first
+
 Manual setup, from your workstation (the installer does this for you)
   rowsafe adopt NAME [--host HOST] [--port 5432] [--socket-dir DIR] [--retention-full 2]
                                              register an existing PostgreSQL; prints a read-only plan.
@@ -380,6 +417,13 @@ func dispatch(ctx context.Context, args []string) error {
 	}
 	c := client.New(cfg.URL, cfg.APIKey)
 	switch cmd {
+	// Rowsafe Cloud (cloud.go), and connecting apps and people (env.go, connect.go)
+	case "cloud":
+		return cloudCmd(ctx, c, rest)
+	case "env":
+		return envCmd(ctx, c, rest)
+	case "connect":
+		return connectCmd(ctx, c, rest)
 	// Getting started and manual setup
 	case "init":
 		return initCmd(ctx, c, rest)
