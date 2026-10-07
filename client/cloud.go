@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/rowsafe/rowsafe/protocol"
 )
 
 // Rowsafe Cloud as the control plane shows it: the catalog of clouds,
@@ -31,6 +33,9 @@ type CloudCatalog struct {
 		Status    string     `json:"status"`
 		PeriodEnd *time.Time `json:"period_end"`
 	} `json:"payg"`
+	// Engines new servers can get, with their versions and ports (empty
+	// from older control planes: PostgreSQL only).
+	Engines []protocol.CloudEngine `json:"engines,omitempty"`
 }
 
 // CloudCatalogCloud is one cloud: its regions, and its sizes with their
@@ -150,6 +155,9 @@ type CloudServer struct {
 		Certificate string  `json:"certificate"` // verified, pending or unavailable
 		SSLMode     string  `json:"sslmode"`     // verify-full once verified, else require
 		Problem     *string `json:"problem"`
+		// Port is where apps connect (the engine's: 5432, 3306, 6380);
+		// 0 from older control planes (5432).
+		Port int `json:"port,omitempty"`
 	} `json:"address"`
 	Standby *struct {
 		Role        string `json:"role"` // primary or standby

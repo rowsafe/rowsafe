@@ -1,0 +1,41 @@
+package protocol
+
+import "testing"
+
+func TestCloudEngines(t *testing.T) {
+	if CloudEngines[0].Engine != EnginePostgreSQL {
+		t.Fatal("PostgreSQL must come first (the default)")
+	}
+	seen := map[string]bool{}
+	for _, e := range CloudEngines {
+		switch {
+		case !ValidEngine(e.Engine) || seen[e.Engine]:
+			t.Errorf("%s: unknown or twice", e.Engine)
+		case e.Engine == EngineMongoDB || e.Engine == EngineRedis:
+			t.Errorf("%s: its license doesn't allow Rowsafe to host it", e.Engine)
+		case e.Name != EngineDisplayName(e.Engine):
+			t.Errorf("%s: name %q", e.Engine, e.Name)
+		case !e.HasVersion(e.DefaultVersion):
+			t.Errorf("%s: default %s isn't offered", e.Engine, e.DefaultVersion)
+		case e.Port <= 1024 || e.Scheme == "" || e.InstallFlag() == "":
+			t.Errorf("%s: %+v", e.Engine, e)
+		case !EngineCapabilities[e.Engine].Backups || !EngineCapabilities[e.Engine].PointInTime || !EngineCapabilities[e.Engine].Proof:
+			t.Errorf("%s: servers Rowsafe creates need backups, restore to any second and Proof", e.Engine)
+		case e.Standby && !EngineCapabilities[e.Engine].Standby, e.Clone && !EngineCapabilities[e.Engine].Fork:
+			t.Errorf("%s: standby or clone offered without the engine's feature", e.Engine)
+		}
+		seen[e.Engine] = true
+	}
+	if e, ok := CloudEngineFor(""); !ok || e.Engine != EnginePostgreSQL || e.VersionsText() != "15, 16, 17 or 18" {
+		t.Errorf("default: %+v", e)
+	}
+	if e, ok := CloudEngineFor("Valkey"); !ok || e.Port != 6380 || e.Scheme != "rediss" || e.InstallFlag() != "--install-valkey" {
+		t.Errorf("valkey: %+v", e)
+	}
+	if _, ok := CloudEngineFor(EngineMongoDB); ok {
+		t.Error("mongodb offered")
+	}
+	if got := CloudEngineNames(); got != "PostgreSQL, MySQL, MariaDB or Valkey" {
+		t.Errorf("names: %q", got)
+	}
+}
