@@ -100,7 +100,7 @@ type SetAgentAutonomyRequest struct {
 	// OrgName is the organization's current name in the dashboard (the
 	// dashboard fills it in).
 	OrgName string `json:"org_name,omitempty"`
-	// OwnerEmails are the organization's owners (the dashboard fills them
-	// in): they get the emails about agents' actions.
+	// OwnerEmails is ignored (kept for older dashboards): the control
+	// plane asks the dashboard for the owners when it emails them.
 	OwnerEmails []string `json:"owner_emails,omitempty"`
 }
