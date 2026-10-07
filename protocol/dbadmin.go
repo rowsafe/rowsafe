@@ -114,8 +114,10 @@ type DBAdminParams struct {
 	User string `json:"user,omitempty"`
 
 	// create_database: Owner is the database's owner. With CreateOwner it
-	// is a new user (default: named like the database) that can log in and
-	// connect only to this database; without, an existing user.
+	// is a new user (default: named like the database) that can log in;
+	// only it (and superusers) may connect to the new database, and like
+	// every user it may connect to databases open to everyone. Without, an
+	// existing user.
 	Owner       string `json:"owner,omitempty"`
 	CreateOwner bool   `json:"create_owner,omitempty"`
 	// Template is template1 (default) or template0 (empty, needed for a

@@ -161,7 +161,7 @@ var ApprovalActions = []ApprovalAction{
 	// Databases and users on the server.
 	{Name: "create_app_database", Group: "data", Title: "Create a database for an app", Method: "POST", Path: "/v1/databases/{ref}/dbadmin",
 		Fixed: map[string]any{"action": DBAdminCreateDatabase, "create_owner": true}, Risk: RiskNormal, Body: AppDatabaseParams{},
-		Description: "Creates a new, empty PostgreSQL database owned by a new user that can connect only to it, for the app you are building (existing databases and users are untouched; it is backed up with the rest of the server). " +
+		Description: "Creates a new, empty PostgreSQL database and a new user that owns it, on a Rowsafe Cloud server (PostgreSQL 15 or newer), for the app you are building. Only that user (and the server's admins) can connect to the new database; existing databases and users are untouched, and it is backed up with the rest of the server. " +
 			"The password never passes through Rowsafe: use the create_app_database tool, which makes it on the user's machine and sends only its verifier, so you get the full connection string at once (it works once a person approves); " +
 			"on the remote endpoint the person who approves sees the connection string once, in their browser, and gives it to you."},
 	{Name: "manage_databases_users", Group: "data", Title: "Create or remove databases and users", Method: "POST", Path: "/v1/databases/{ref}/dbadmin", Risk: RiskDisruptive, Body: DBAdminParams{},

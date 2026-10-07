@@ -15,8 +15,8 @@ import (
 )
 
 // create_app_database: a new, empty database and a login for the app an
-// assistant is building, on a PostgreSQL server Rowsafe protects (usually a
-// Rowsafe Cloud server it asked for). It files the create_app_database
+// assistant is building, on a Rowsafe Cloud server's PostgreSQL (15 or
+// newer; usually a server it asked for). It files the create_app_database
 // approval request; a person approves it in the dashboard.
 //
 // The password never passes through Rowsafe. Locally (rowsafe mcp) it is
@@ -28,7 +28,7 @@ import (
 // that person's browser, which shows them the connection string once.
 
 type appDatabaseInput struct {
-	Database    string   `json:"database" jsonschema:"the Rowsafe database (name or ID) whose PostgreSQL server gets the new database, e.g. a Rowsafe Cloud server's database (get_cloud_server shows it)"`
+	Database    string   `json:"database" jsonschema:"the Rowsafe Cloud server's database (name or ID) whose PostgreSQL gets the new database (get_cloud_server shows it)"`
 	Name        string   `json:"name" jsonschema:"the new database's name: lowercase letters, digits and underscores, starting with a letter (like shop)"`
 	Owner       string   `json:"owner,omitempty" jsonschema:"the new user the app connects as, owner of the new database (default: the database's name)"`
 	Extensions  []string `json:"extensions,omitempty" jsonschema:"PostgreSQL extensions to turn on in it (e.g. pgcrypto, pg_trgm, vector)"`
@@ -49,7 +49,7 @@ type AppDatabaseOutput struct {
 func (t *tools) addAppDatabaseTool(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "create_app_database",
-		Description: "Asks a person to approve a new, empty PostgreSQL database and a login for the app you are building, on a server Rowsafe protects (usually a Rowsafe Cloud server; existing databases and users are untouched, and the new user can connect only to its database). " +
+		Description: "Asks a person to approve a new, empty PostgreSQL database and a login for the app you are building, on a Rowsafe Cloud server (PostgreSQL 15 or newer). The new user owns only that database, and only it can connect there; existing databases and users are untouched. " +
 			"Nothing changes until an owner or admin approves it in the dashboard. Rowsafe never sees the password: from a local rowsafe mcp it is made on this machine and you get the full connection string right away " +
 			"(it works once approved); on the remote endpoint the person who approves sees it once and gives it to you. Put the connection string in the app's environment (e.g. DATABASE_URL in .env), never in code or git.",
 		Annotations: writes("Ask for a database for the app", false, false),
@@ -79,13 +79,13 @@ func (t *tools) createAppDatabase(ctx context.Context, _ *sdk.CallToolRequest, i
 	if protocol.NormalizeEngine(d.Engine) != protocol.EnginePostgreSQL {
 		return nil, AppDatabaseOutput{}, fmt.Errorf("create_app_database is for PostgreSQL servers, and %s runs %s", d.Name, protocol.EngineDisplayName(d.Engine))
 	}
-	conn := t.appConnection(ctx, d)
+	conn, err := t.appConnection(ctx, d)
+	if err != nil {
+		return nil, AppDatabaseOutput{}, err
+	}
 	conn.User, conn.Database = owner, in.Name
 
-	params := map[string]any{"database": in.Name}
-	if conn.Host != "" {
-		params["host"] = conn.Host
-	}
+	params := map[string]any{"database": in.Name} // the host is the server's, set by Rowsafe
 	if in.Owner != "" {
 		params["owner"] = in.Owner
 	}
@@ -132,28 +132,26 @@ func (t *tools) createAppDatabase(ctx context.Context, _ *sdk.CallToolRequest, i
 	return text(b), out, nil
 }
 
-// appConnection is where apps reach d: its Rowsafe Cloud name, else the
-// address its agent suggests (no user, database or password).
-func (t *tools) appConnection(ctx context.Context, d protocol.Database) protocol.DBConnection {
-	c := protocol.DBConnection{Host: d.Hostname, Port: d.Port, SSLMode: "prefer"}
-	if list, err := t.c.CloudServerList(ctx); err == nil {
-		if srv := serverHolding(list, d); srv != nil && srv.Address != nil && srv.Address.Host != "" {
-			c.Host, c.Port, c.SSLMode = srv.Address.Host, 5432, "require"
-			return c
-		}
+// appConnection is where apps reach d: its Rowsafe Cloud server's name (or
+// address until the name works), port 5432, TLS required. The control
+// plane puts the same host in the request; nothing here picks another.
+func (t *tools) appConnection(ctx context.Context, d protocol.Database) (protocol.DBConnection, error) {
+	list, err := t.c.CloudServerList(ctx)
+	if err != nil {
+		return protocol.DBConnection{}, apiError(err)
 	}
-	if st, err := t.c.DBAdminState(ctx, d.ID); err == nil && st.Inventory != nil {
-		inv := st.Inventory
-		c.Host = cmpOr(inv.SuggestedHost, c.Host)
-		if inv.Port != 0 {
-			c.Port = inv.Port
-		}
-		if inv.SSL {
-			c.SSLMode = "require"
-		}
+	srv := serverHolding(list, d)
+	if srv == nil || srv.Where != "rowsafe" {
+		return protocol.DBConnection{}, fmt.Errorf("create_app_database is for Rowsafe Cloud servers, and %s isn't on one: the user creates databases and users there in the dashboard (Databases & users)", d.Name)
 	}
-	if c.Port == 0 {
-		c.Port = 5432
+	c := protocol.DBConnection{Port: 5432, SSLMode: "require"}
+	switch {
+	case srv.Address != nil && srv.Address.Host != "":
+		c.Host = srv.Address.Host
+	case srv.IPv4 != nil && *srv.IPv4 != "":
+		c.Host = *srv.IPv4
+	default:
+		return c, fmt.Errorf("%s has no address yet: ask again once get_cloud_server shows it ready", srv.Name)
 	}
-	return c
+	return c, nil
 }

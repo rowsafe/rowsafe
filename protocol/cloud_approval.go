@@ -80,10 +80,13 @@ type DeleteCloudServerParams struct {
 }
 
 // AppDatabaseParams is the body of POST /v1/databases/{ref}/dbadmin for
-// create_app_database: a new, empty database owned by a new user that can
-// connect only to it, on a PostgreSQL server Rowsafe protects, for an app
-// an assistant is building. The owner's password never passes through
-// Rowsafe:
+// create_app_database: a new, empty database owned by a new user, on a
+// Rowsafe Cloud server's PostgreSQL (15 or newer), for an app an assistant
+// is building. Nobody else (but the server's admins) may connect to the new
+// database; like every user, the new one may connect to the server's other
+// databases with only what is granted to everyone there (PostgreSQL 15 and
+// newer grant nobody CREATE in public schemas). The owner's password never
+// passes through Rowsafe:
 //
 //   - A local `rowsafe mcp` makes the password on the user's machine and
 //     sends only its SCRAM-SHA-256 verifier (PasswordVerifier); the
@@ -105,7 +108,8 @@ type AppDatabaseParams struct {
 	// PasswordVerifier is the SCRAM-SHA-256 verifier of a password the
 	// requester made (ValidPasswordVerifier).
 	PasswordVerifier string `json:"password_verifier,omitempty" jsonschema:"the SCRAM-SHA-256 verifier of a password made on the user's machine (the create_app_database tool makes it); never the password"`
-	// Host goes in the connection string ("": the server's Rowsafe Cloud
-	// name, else the address the agent suggests).
-	Host string `json:"host,omitempty" jsonschema:"the address apps use (default: the server's Rowsafe Cloud name, like x7kq2mfa3pzd.cloud.rowsafe.sh)"`
+	// Host goes in the connection string. Set by Rowsafe whatever the
+	// params say: the server's Rowsafe Cloud name (or its address until the
+	// name works).
+	Host string `json:"host,omitempty" jsonschema:"set by Rowsafe: the server's Rowsafe Cloud name, whatever is given here"`
 }

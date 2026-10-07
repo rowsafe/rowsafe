@@ -84,6 +84,8 @@ func (f *cloudAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(server()))
 	case r.URL.Path == "/v1/databases/shop-db" || r.URL.Path == "/v1/databases/db_shop":
 		_, _ = w.Write([]byte(`{"id":"db_shop","name":"shop-db","engine":"postgresql","hostname":"shop-db","port":5432,"status":"active"}`))
+	case r.URL.Path == "/v1/databases/self-hosted":
+		_, _ = w.Write([]byte(`{"id":"db_self","name":"self-hosted","engine":"postgresql","hostname":"db9","port":5432,"status":"active"}`))
 	case r.URL.Path == "/v1/databases/old-mysql":
 		_, _ = w.Write([]byte(`{"id":"db_my","name":"old-mysql","engine":"mysql","hostname":"db2","port":3306,"status":"active"}`))
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/approvals":
@@ -215,7 +217,7 @@ func TestCreateAppDatabaseLocal(t *testing.T) {
 		t.Fatal("the password left this machine")
 	}
 	var p protocol.AppDatabaseParams
-	if err := json.Unmarshal(filed[0].Params, &p); err != nil || p.Database != "shop" || p.Host != "x7kq2mfa3pzd.cloud.rowsafe.sh" || len(p.Extensions) != 1 {
+	if err := json.Unmarshal(filed[0].Params, &p); err != nil || p.Database != "shop" || p.Host != "" || len(p.Extensions) != 1 {
 		t.Fatalf("params %s %v", filed[0].Params, err)
 	}
 	// The verifier is the password's.
@@ -247,6 +249,9 @@ func TestCreateAppDatabaseLocal(t *testing.T) {
 	}
 	if txt, res := callText(t, cs, "create_app_database", map[string]any{"database": "old-mysql", "name": "shop", "reason": "x"}); !res.IsError || !strings.Contains(txt, "PostgreSQL") {
 		t.Errorf("mysql: %s", txt)
+	}
+	if txt, res := callText(t, cs, "create_app_database", map[string]any{"database": "self-hosted", "name": "shop", "reason": "x"}); !res.IsError || !strings.Contains(txt, "Rowsafe Cloud servers") {
+		t.Errorf("not on Rowsafe Cloud: %s", txt)
 	}
 	if txt, res := callText(t, cs, "create_app_database", map[string]any{"database": "shop-db", "name": "pg_x", "reason": "x"}); !res.IsError {
 		t.Errorf("bad name: %s", txt)

@@ -1,6 +1,6 @@
 ---
 name: rowsafe-new-database
-description: Use when the app you are building needs a PostgreSQL database and there is none yet (no DATABASE_URL, or the user asks for one) - a new Rowsafe Cloud server, or a new database and login on a server Rowsafe already protects. Picks the cheapest fitting size, asks a person to approve (it costs money), waits until it is ready, and puts the connection string in the app's environment without anyone else seeing the password.
+description: Use when the app you are building needs a PostgreSQL database and there is none yet (no DATABASE_URL, or the user asks for one) - a new Rowsafe Cloud server, or a new database and login on a Rowsafe Cloud server the organization already has. Picks the cheapest fitting size, asks a person to approve (it costs money), waits until it is ready, and puts the connection string in the app's environment without anyone else seeing the password.
 ---
 
 # Need a database? (Rowsafe Cloud)
