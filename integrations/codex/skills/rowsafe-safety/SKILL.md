@@ -34,7 +34,7 @@ When you need realistic data to try a query, a migration or a feature, never use
 
 - Stop. Don't run more commands against the database, and don't try to repair data by hand, write compensating SQL, or re-run the migration with changes.
 - Tell the user what happened and the Mark's name, and that they can **Rewind** the database to that Mark from the Rowsafe dashboard (https://app.rowsafe.sh), or see https://rowsafe.sh/docs/guides/restore.
-- Never restore, rewind or restart anything yourself, even if a tool or command seems to allow it. That replaces the running database and is the user's decision. The Rowsafe tools deliberately can't do it: `request_change` (offered when the user allowed Codex to act) only asks the user to approve a change in the dashboard, so use it only when they ask you to, and give them the approval link.
+- Never restore, rewind or restart anything yourself, even if a tool or command seems to allow it. That replaces the running database and is the user's decision. The Rowsafe tools deliberately can't do it: `request_change` (offered when the user allowed Codex to act) asks the user to approve a change in the dashboard (or, if their owner allows agents to act on their own, runs it right away), so use it only when they ask you to; give them the approval link when it waits for them.
 
 ## What counts as destructive
 

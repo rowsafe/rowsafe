@@ -15,7 +15,9 @@ import (
 // action's own API call as that person, exactly as the dashboard's button
 // does (same validation, confirmations and audit log), and stores the
 // outcome in Result. Nothing runs before a person approves, and an API key
-// or AI assistant can never approve.
+// or AI assistant can never approve, unless an owner turned on agent
+// autonomy (autonomy.go): then the control plane approves the request on
+// their behalf (Automatic) and runs it as them, within their limits.
 
 // Approval states.
 const (
@@ -279,6 +281,14 @@ type Approval struct {
 	// URL is the dashboard page where a person approves it (when the
 	// control plane knows the dashboard's address).
 	URL string `json:"url,omitempty"`
+	// Automatic: approved by the organization's agent setting
+	// (AgentAutonomy) on behalf of DecidedBy, the owner who chose it, and
+	// run right away as them, without a person deciding.
+	Automatic bool `json:"automatic,omitempty"`
+	// AutonomyNote says why a request from an AI agent was not run right
+	// away although agents may act on their own in this organization (over
+	// the budget, needs a checkout, ...); "" otherwise.
+	AutonomyNote string `json:"autonomy_note,omitempty"`
 }
 
 // DecideApprovalRequest is POST /v1/approvals/{id}/approve (and deny).

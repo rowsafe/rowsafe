@@ -36,7 +36,7 @@ When you need realistic data to try a query, a migration or a feature, never use
 
 - Stop. Don't run more commands against the database, and don't try to repair data by hand.
 - Tell the user what happened, and that they can Rewind the database to the restore point by name in the Rowsafe dashboard (restore a copy, compare, bring back rows, or rewind in place).
-- Never restore yourself. Recovery is the user's decision. If they ask you to start it and the `request_change` tool is available, you can ask for it (`restore_copy`, then `compare_copy` and `bring_back_rows`, or `rewind_in_place`): it only files a request, and nothing changes until they approve it in the Rowsafe dashboard. Give them the approval link.
+- Never restore yourself. Recovery is the user's decision. If they ask you to start it and the `request_change` tool is available, you can ask for it (`restore_copy`, then `compare_copy` and `bring_back_rows`, or `rewind_in_place`): if your owner allows agents to act on their own it happens right away (tell them what you did); otherwise nothing changes until they approve it in the Rowsafe dashboard, so give them the approval link.
 
 ## What counts as destructive
 

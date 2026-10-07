@@ -50,7 +50,7 @@ func (t *tools) addAppDatabaseTool(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "create_app_database",
 		Description: "Asks a person to approve a new, empty PostgreSQL database and a login for the app you are building, on a Rowsafe Cloud server (PostgreSQL 15 or newer). The new user owns only that database, and only it can connect there; existing databases and users are untouched. " +
-			"Nothing changes until an owner or admin approves it in the dashboard. Rowsafe never sees the password: from a local rowsafe mcp it is made on this machine and you get the full connection string right away " +
+			"Nothing changes until an owner or admin approves it in the dashboard (or right away, if your owner lets AI agents do this on their own: get_org). Rowsafe never sees the password: from a local rowsafe mcp it is made on this machine and you get the full connection string right away " +
 			"(it works once approved); on the remote endpoint the person who approves sees it once and gives it to you. Put the connection string in the app's environment (e.g. DATABASE_URL in .env), never in code or git.",
 		Annotations: writes("Ask for a database for the app", false, false),
 		InputSchema: withWait[appDatabaseInput](func(p map[string]*jsonschema.Schema) {
@@ -115,12 +115,12 @@ func (t *tools) createAppDatabase(ctx context.Context, _ *sdk.CallToolRequest, i
 	}
 	out := AppDatabaseOutput{Approval: approvalView(a), Connection: protocol.ConnectionURL(conn, "")}
 	var b textBuilder
-	b.line("Asked a person to approve: %s.", approvalSubject(a))
+	b.line("%s", requestLead(a))
 	writeApproval(&b, a)
 	if password != "" {
 		out.DatabaseURL = protocol.ConnectionURL(conn, password)
 		out.Guidance = fmt.Sprintf("Put the connection string in the app's environment now (e.g. DATABASE_URL in .env, which git must ignore; never in code or a commit): it isn't shown again, and Rowsafe never had it. "+
-			"It works once the request is approved and the database is created: follow it with get_approval %s and the task with get_task. "+
+			"It works once the request is approved (right away if your owner lets agents do this on their own) and the database is created: follow it with get_approval %s and the task with get_task. "+
 			"The server must let the app's address connect (get_cloud_server shows who can; request_change cloud_firewall changes it).", a.ID)
 		b.line("Connection string (shown once, works once approved): %s", out.DatabaseURL)
 	} else {

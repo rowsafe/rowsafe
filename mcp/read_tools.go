@@ -102,7 +102,7 @@ type PostgresView struct {
 func (t *tools) addReadTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "get_org",
-		Description: "Shows the Rowsafe organization this connection acts for: its plan, plan limits (max hosts and databases) and current usage. Read-only.",
+		Description: "Shows the Rowsafe organization this connection acts for: its plan, plan limits (max hosts and databases), current usage, and whether changes you ask for with request_change run right away (an owner let AI agents act on their own, within a budget or fully) or wait for a person to approve them. Read-only.",
 		Annotations: readOnly("Organization and plan"),
 	}, t.getOrg)
 
@@ -181,14 +181,45 @@ func (t *tools) getOrg(ctx context.Context, _ *sdk.CallToolRequest, _ noInput) (
 	if err != nil {
 		return nil, OrgView{}, apiError(err)
 	}
-	v := OrgView{ID: o.ID, Name: o.Name, Plan: o.Plan, Limits: o.Limits, Usage: o.Usage, PlanPeriodEnd: o.PlanPeriodEnd}
+	v := OrgView{ID: o.ID, Name: o.Name, Plan: o.Plan, Limits: o.Limits, Usage: o.Usage, PlanPeriodEnd: o.PlanPeriodEnd, AgentAutonomy: o.AgentAutonomy}
 	var b textBuilder
 	b.line("Organization %s (%s), %s plan", o.Name, o.ID, o.Plan)
 	b.line("Hosts: %d of %d. Databases: %d of %d.", o.Usage.Hosts, o.Limits.MaxHosts, o.Usage.Databases, o.Limits.MaxDatabases)
 	if o.PlanPeriodEnd != nil {
 		b.line("Current billing period ends %s.", o.PlanPeriodEnd.Format("2006-01-02"))
 	}
+	b.line("%s", autonomyLine(o.AgentAutonomy))
 	return text(b), v, nil
+}
+
+// dollars is cents as dollars: 1000 -> "$10", 1050 -> "$10.50".
+func dollars(cents int64) string {
+	if cents%100 == 0 {
+		return fmt.Sprintf("$%d", cents/100)
+	}
+	return fmt.Sprintf("$%d.%02d", cents/100, cents%100)
+}
+
+// autonomyLine says whether changes you ask for run right away.
+func autonomyLine(a *protocol.AgentAutonomy) string {
+	if a == nil || a.Level == "" || a.Level == protocol.AutonomyAsk {
+		return "AI agents: every change you ask for with request_change waits for an owner or admin to approve it (give the user the approval link)."
+	}
+	who := ""
+	if a.SetBy != "" {
+		who = " (" + a.SetBy + "'s setting)"
+	}
+	budget := "with no spending limit"
+	if a.BudgetCents != nil {
+		budget = fmt.Sprintf("within a %s monthly budget: agents' servers cost %s a month now", dollars(*a.BudgetCents), dollars(a.SpendCents))
+		if a.RemainingCents != nil {
+			budget += fmt.Sprintf(", %s left", dollars(*a.RemainingCents))
+		}
+	}
+	if a.Level == protocol.AutonomyFull {
+		return fmt.Sprintf("AI agents: an owner let you make every change on your own%s, %s. request_change runs it right away (Rowsafe still checks the budget, payment and that a backup exists first; otherwise it waits for a person; it never deletes backups for you, and a server key is always compared by a person). Only ask for what the user asked for or agreed to.", who, budget)
+	}
+	return fmt.Sprintf("AI agents: an owner let you act on your own%s %s, for new Rowsafe Cloud servers (create_cloud_server), and, on servers an agent created this way, databases for an app (create_app_database), who can connect and clones. Those run right away with request_change unless they'd go over the budget or need a checkout; everything else waits for an owner or admin to approve it. Only ask for what the user asked for or agreed to.", who, budget)
 }
 
 func (t *tools) listHosts(ctx context.Context, _ *sdk.CallToolRequest, _ noInput) (*sdk.CallToolResult, HostsOutput, error) {

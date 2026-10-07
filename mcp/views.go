@@ -30,6 +30,9 @@ type OrgView struct {
 	Limits        protocol.PlanLimits `json:"limits"`
 	Usage         protocol.OrgUsage   `json:"usage"`
 	PlanPeriodEnd *time.Time          `json:"plan_period_end,omitempty"`
+	// AgentAutonomy: whether changes you ask for run right away (an owner
+	// allowed it, within a budget or fully) or wait for a person.
+	AgentAutonomy *protocol.AgentAutonomy `json:"agent_autonomy,omitempty" jsonschema:"whether changes you ask for (request_change) run right away: level ask (a person approves each), budget or full, with the monthly budget and what is left"`
 }
 
 type HostView struct {

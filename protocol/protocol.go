@@ -716,6 +716,9 @@ type Org struct {
 	PolarSubscriptionID string     `json:"polar_subscription_id,omitempty"`
 	PlanPeriodEnd       *time.Time `json:"plan_period_end,omitempty"`
 	CreatedAt           time.Time  `json:"created_at"`
+	// AgentAutonomy is whether AI agents may act without approval, and
+	// within what budget (GET /v1/org fills it in).
+	AgentAutonomy *AgentAutonomy `json:"agent_autonomy,omitempty"`
 }
 
 type CreateOrgRequest struct {
