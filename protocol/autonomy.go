@@ -19,7 +19,10 @@ import (
 //	       agent (the OAuth connection's approver, the API key's creator)
 //	       when that person is an owner or admin now (the dashboard says, at
 //	       run time); a member's agent asks, as members can't make changes.
-//	       An API key that doesn't record who created it asks too.
+//	       An API key that doesn't record who created it asks too, and so
+//	       does a connection or key made before agents could act as their
+//	       person, until that person lets it (OAuthConnection.ActsAsYou,
+//	       APIKey.ActsAsCreator).
 //	budget the actions in AutonomyBudgetActions run right away for any
 //	       agent (an app database, the firewall and a clone only on Rowsafe
 //	       Cloud servers an agent created this way), on behalf of the owner
@@ -116,6 +119,11 @@ type AgentAutonomy struct {
 	// whoever connected the app or created the API key); "" when unknown
 	// or not asked by an agent. Their role is checked when a change runs.
 	ActingAs string `json:"acting_as,omitempty"`
+	// AsksFirst: the calling agent's connection or key was made before
+	// agents could act as their person (or by another key): its changes
+	// wait for a person until ActingAs lets it act (Settings → Connected
+	// apps or API keys) or it is reconnected.
+	AsksFirst bool `json:"asks_first,omitempty"`
 }
 
 // SetAgentAutonomyRequest is PUT /v1/org/agent-autonomy: only an owner

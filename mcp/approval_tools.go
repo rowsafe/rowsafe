@@ -367,6 +367,9 @@ func autonomyFor(s *protocol.AgentAutonomy, a protocol.ApprovalAction) string {
 	if s.BudgetCents != nil {
 		ifs = append(ifs, fmt.Sprintf("it would take the agents' servers over the %s monthly budget (%s a month now)", dollars(*s.BudgetCents), dollars(s.SpendCents)))
 	}
+	if level == protocol.AutonomyAct && s.AsksFirst {
+		return "You were connected before AI agents could act as the person who connected them: it waits for an owner or admin to approve it (get_org says how to let you act)."
+	}
 	if level == protocol.AutonomyAct {
 		who := "the person who connected you"
 		if s.ActingAs != "" {

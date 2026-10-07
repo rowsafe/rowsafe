@@ -112,6 +112,13 @@ func TestAutonomyWords(t *testing.T) {
 		!strings.Contains(got, "no backup of the database yet") || strings.Contains(got, "budget") || !strings.Contains(got, "Confirm it with the user") {
 		t.Errorf("act, delete: %s", got)
 	}
+	old := &protocol.AgentAutonomy{Level: protocol.AutonomyAct, ActingAs: "ana@example.com", AsksFirst: true}
+	if got := autonomyLine(old); !strings.Contains(got, "waits for an owner or admin") || !strings.Contains(got, "ana@example.com clicks \"Let it act as me\"") {
+		t.Errorf("asks first: %s", got)
+	}
+	if got := autonomyFor(old, a); !strings.Contains(got, "it waits for an owner or admin") {
+		t.Errorf("asks first, delete: %s", got)
+	}
 	standby, _ := protocol.FindApprovalAction("create_standby")
 	if got := autonomyFor(&protocol.AgentAutonomy{Level: protocol.AutonomyAct}, standby); !strings.Contains(got, "always waits for an owner or admin") {
 		t.Errorf("act, standby: %s", got)

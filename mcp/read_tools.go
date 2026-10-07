@@ -212,6 +212,9 @@ func autonomyLine(a *protocol.AgentAutonomy) string {
 			budget += fmt.Sprintf(", %s left", dollars(*a.RemainingCents))
 		}
 	}
+	if protocol.NormalizeAutonomyLevel(a.Level) == protocol.AutonomyAct && a.AsksFirst {
+		return asksFirstLine(a)
+	}
 	if protocol.NormalizeAutonomyLevel(a.Level) == protocol.AutonomyAct {
 		who := "the person who connected you"
 		if a.ActingAs != "" {
@@ -226,6 +229,17 @@ func autonomyLine(a *protocol.AgentAutonomy) string {
 		who = " (" + a.SetBy + "'s setting)"
 	}
 	return fmt.Sprintf("AI agents: an owner let you act on your own%s %s, for new Rowsafe Cloud servers (create_cloud_server), and, on servers an agent created this way, databases for an app (create_app_database), who can connect and clones. Those run right away unless they'd go over the budget or need a checkout; everything else waits for an owner or admin to approve it. Only ask for what the user asked for or agreed to.", who, lowerFirst(budget))
+}
+
+// asksFirstLine: this agent's connection or key was made before agents
+// could act as their person, so its changes wait for a person.
+func asksFirstLine(a *protocol.AgentAutonomy) string {
+	who := "the person who connected you"
+	if a.ActingAs != "" {
+		who = a.ActingAs
+	}
+	return fmt.Sprintf("AI agents: you were connected before Rowsafe let AI agents act as the person who connected them (or with a key another key made), so every change you make with request_change waits for an owner or admin to approve it (give the user the approval link). "+
+		"To let you act as them right away, %s clicks \"Let it act as me\" in Rowsafe (Settings → Connected apps, or API keys), or connects you again.", who)
 }
 
 // lowerFirst lowercases an ASCII first letter.

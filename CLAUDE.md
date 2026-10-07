@@ -30,7 +30,9 @@ proprietary (api.rowsafe.sh, app.rowsafe.sh).
   (`act`) the control plane runs them right away as the person who connected the agent, with that
   person's rights (owner or admin now; a member's agent asks); `budget` runs only the Rowsafe Cloud
   actions in `AutonomyBudgetActions` within a monthly budget; `ask` makes every change wait for an
-  owner or admin to approve in the dashboard. No tool can approve or change the setting.
+  owner or admin to approve in the dashboard. A connection or key made before agents could act
+  as their person (`OAuthConnection.ActsAsYou`, `APIKey.ActsAsCreator` false), or a key made by a
+  key, asks first. No tool can approve or change the setting.
 - `scripts/install.sh`: the installer served at `curl -fsSL https://rowsafe.sh | sudo sh -s rse_...`
   (guided storage setup, finds PostgreSQL, plan → yes → apply, optional restart).
   `scripts/rowsafe-pg-restart`: the only root component (a sandboxed systemd path/service pair that
