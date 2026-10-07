@@ -27,6 +27,14 @@ Getting started
   rowsafe adopt | plan | apply | verify NAME
                                      set up by hand from your workstation instead
 
+Rowsafe Cloud: PostgreSQL servers Rowsafe runs for you, billed by the hour
+  rowsafe cloud sizes                where, how big, and what it costs
+  rowsafe cloud create NAME          a new server; only this computer may connect at first
+  rowsafe cloud list | show | resize | allow | clone | delete
+                                     your servers (rowsafe help cloud)
+  rowsafe env [DATABASE]             the app's database and login, written to .env as DATABASE_URL
+  rowsafe connect [DATABASE]         open psql (as a temporary user; Rowsafe never sees passwords)
+
 Rewind: continuous backups, restore to any second
   rowsafe ls                         databases
   rowsafe show [NAME]                one database in detail
@@ -120,6 +128,47 @@ new API key is saved to your config directory (mode 0600). Over SSH, or with
 --no-browser, open the printed link on any device. --key logs in with an
 existing key instead. The control plane is --url, else ROWSAFE_URL, else the
 saved login, else https://api.rowsafe.sh.`,
+	"cloud": `Rowsafe Cloud servers run in Rowsafe's own cloud accounts with PostgreSQL, backups,
+Proof and Pulse on from the first minute. A read-write API key (or rowsafe
+login) creates, resizes and deletes them, like the dashboard; anything that
+costs money or deletes asks first (--yes in scripts). Servers billed by the
+hour use the organization's pay as you go: the first one gives you a link to
+add a card, once, and is created as soon as that's done.
+
+  rowsafe cloud sizes
+  rowsafe cloud create shop-db --region fsn1 --wait
+  rowsafe env --on shop-db          (in your app's directory: DATABASE_URL in .env)
+  rowsafe connect shop-db
+  rowsafe cloud allow shop-db 203.0.113.4
+  rowsafe cloud resize shop-db medium
+  rowsafe cloud clone shop-db shop-test --at "10m ago" --delete-after 1d
+  rowsafe cloud passphrase shop-db --file shop-db-passphrase.txt
+  rowsafe cloud delete shop-db
+
+NAME is the server's name (or ID); it can be left out like a database's
+("rowsafe help names"), or when the organization has one server. --allow
+takes me (this computer's public address), IP addresses and networks.`,
+	"env": `Run it in your app's directory. Without DATABASE, the directory's name is used
+(my-app: my_app). A new database gets a new user that owns it, named like
+it (--user to choose); on PostgreSQL its password is made on this computer
+and only a verifier (SCRAM-SHA-256) is sent, so Rowsafe never sees it. When
+the database exists, --user NEWUSER makes another login with full access,
+and --reset-password gives the owner (or --user) a new password; those
+passwords are made on the database server and encrypted for this terminal.
+.env is created readable only by you (an existing file keeps the other
+lines); in a git repository it is added to .gitignore unless git ignores it
+already. When the file already has the variable, nothing changes without
+--force.`,
+	"connect": `Opens psql. Without --user, Rowsafe makes a temporary user for the session
+(full access to that database; --access read_only for less), whose password
+is made on the database server and encrypted for this terminal; psql gets
+it in its environment, never on a command line, and the user is removed
+when psql exits (what it created goes to the database's owner). With --user,
+psql asks for that user's password. With DATABASE|SERVER: a database or
+server in Rowsafe picks the server, anything else is a database inside it.
+On a Rowsafe Cloud server that this computer can't reach yet, it offers to
+let it connect (--yes: without asking). Arguments after -- go to psql:
+  rowsafe connect shop -- -c "select count(*) from orders"`,
 	"init": `Writes {"database": NAME} to .rowsafe.json in the current directory (keeping
 other settings in an existing file). Commands run in this directory or below
 then use NAME when it is left out; so does the Claude Code guard hook.`,
