@@ -421,7 +421,8 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 		req.Update = a.updateReport()                            // container_update.go
 		req.Features = []string{protocol.FeatureDBAdminVerifier} // dbadmin.go: a new owner from the requester's verifier
 		if !a.cfg.Sidecar() {
-			req.Features = append(req.Features, protocol.FeatureServerCertificate) // server_cert.go: PostgreSQL's files are the agent's to change
+			req.Features = append(req.Features, protocol.FeatureServerCertificate, // server_cert.go: PostgreSQL's files are the agent's to change
+				protocol.FeatureServerCertificateEngines) // and MySQL's, MariaDB's and Valkey's set up by the installer (EngineCertificates)
 		}
 		timed("restart", func() { req.RestartPorts, req.RestartActions = a.restartPorts(), a.helperActions() })
 		timed("permissions", func() { req.PermissionsHeartbeat = a.permissionsHeartbeat() }) // permissions.go, before Software (a changed allow list refreshes it)

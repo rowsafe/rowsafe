@@ -280,7 +280,7 @@ func TestServerCertificateRefusals(t *testing.T) {
 	my := db
 	my.Engine = protocol.EngineMySQL
 	_, err := a.runTask(context.Background(), &protocol.Task{ID: "t1", Type: protocol.TaskServerCertificate, Database: &my, Params: params}, &taskLog{})
-	if err == nil || !strings.Contains(err.Error(), "only installed for PostgreSQL") {
+	if err == nil || !strings.Contains(err.Error(), "aren't installed for MySQL yet") {
 		t.Errorf("mysql: %v", err)
 	}
 	if got := protocol.TaskTimeout(protocol.TaskServerCertificate); got != protocol.ServerCertificateTimeout {

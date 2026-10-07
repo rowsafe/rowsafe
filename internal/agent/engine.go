@@ -2,10 +2,12 @@ package agent
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -75,6 +77,47 @@ func (a *Agent) locateLog(ctx context.Context, db protocol.DatabaseSpec) (pglog.
 type EngineRewinds interface {
 	RewindStates(env EngineEnv) []protocol.RewindState
 	SetRewindExpiries(env EngineEnv, exp []protocol.RewindExpiry)
+}
+
+// EngineCertificates is optionally implemented by an engine whose servers
+// can serve a certificate for a Rowsafe Cloud server's names
+// (protocol.TaskServerCertificate, server_cert.go): the agent makes the key
+// and the request, and installs the issued certificate into the files the
+// server serves, then has it load them again.
+type EngineCertificates interface {
+	ServerTLS(ctx context.Context, env EngineEnv, db protocol.DatabaseSpec) (*ServerTLS, error)
+}
+
+// ServerTLS is how one database server serves TLS, for
+// EngineCertificates.
+type ServerTLS struct {
+	// Name is the server's engine for people ("MySQL").
+	Name string
+	// CertFile and KeyFile are the absolute paths of the files the server
+	// serves (and loads again on Reload), the agent's to replace; CertFile
+	// "" when TLS is off.
+	CertFile, KeyFile string
+	// KeyMode is the key file's mode: 0600, or 0640 where the server reads
+	// it through its group.
+	KeyMode os.FileMode
+	// Reload makes the server load CertFile and KeyFile again, without a
+	// restart (open connections keep theirs).
+	Reload func(ctx context.Context) error
+	// Served is the certificate the server serves over TCP right now; nil,
+	// nil when it can't be reached that way.
+	Served func(ctx context.Context) (*x509.Certificate, error)
+	// Close releases what ServerTLS opened (nil: nothing).
+	Close func()
+}
+
+// engineCertificates is db's engine as an EngineCertificates (nil when it
+// can't install certificates, or for PostgreSQL).
+func engineCertificates(db protocol.DatabaseSpec) EngineCertificates {
+	if isPostgres(db) {
+		return nil
+	}
+	c, _ := engineFor(protocol.NormalizeEngine(db.Engine)).(EngineCertificates)
+	return c
 }
 
 // EngineRestarter is optionally implemented by an engine that Rowsafe can

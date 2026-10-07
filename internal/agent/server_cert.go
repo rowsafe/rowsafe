@@ -255,6 +255,9 @@ func (a *Agent) serverCertificate(ctx context.Context, db protocol.DatabaseSpec,
 	if err := a.nativeFilesOnly("install a certificate"); err != nil {
 		return nil, err
 	}
+	if ec := engineCertificates(db); ec != nil {
+		return a.engineServerCertificate(ctx, ec, db, p, tl) // server_cert_engines.go
+	}
 	switch p.Action {
 	case protocol.CertRequest:
 		return a.certRequest(ctx, db, p, tl)
