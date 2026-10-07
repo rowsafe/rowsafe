@@ -199,6 +199,37 @@ func TestValidateDBAdmin(t *testing.T) {
 	}
 }
 
+// A new owner can get the requester's own password (its verifier only):
+// PostgreSQL, create_database with a new owner, no key to seal to.
+func TestValidateDBAdminVerifier(t *testing.T) {
+	priv, _ := ecdh.P256().GenerateKey(rand.Reader)
+	key := EncodeSealKey(priv.PublicKey())
+	v := "SCRAM-SHA-256$4096:c2FsdHNhbHRzYWx0c2FsdA==$" + strings.Repeat("A", 43) + "=:" + strings.Repeat("B", 43) + "="
+	ok := DBAdminParams{Action: DBAdminCreateDatabase, Database: "shop", CreateOwner: true, PasswordVerifier: v}
+	if err := ValidateDBAdmin(ok); err != nil {
+		t.Fatal(err)
+	}
+	if DBAdminMakesPassword(ok) {
+		t.Error("a verifier's owner counted as a made password")
+	}
+	bad := map[string]DBAdminParams{
+		"with a key":     {Action: DBAdminCreateDatabase, Database: "shop", CreateOwner: true, PasswordVerifier: v, PublicKey: key},
+		"existing owner": {Action: DBAdminCreateDatabase, Database: "shop", Owner: "o", PasswordVerifier: v},
+		"reset password": {Action: DBAdminResetPassword, User: "x", PasswordVerifier: v},
+		"create user":    {Action: DBAdminCreateUser, User: "x", Access: DBAccessReadOnly, Databases: []string{"shop"}, PasswordVerifier: v},
+		"not a verifier": {Action: DBAdminCreateDatabase, Database: "shop", CreateOwner: true, PasswordVerifier: "hunter2"},
+		"md5 hash":       {Action: DBAdminCreateDatabase, Database: "shop", CreateOwner: true, PasswordVerifier: "md5" + strings.Repeat("a", 32)},
+	}
+	for name, p := range bad {
+		if err := ValidateDBAdmin(p); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	if err := ValidateDBAdminFor(EngineMySQL, DBAdminParams{Action: DBAdminCreateDatabase, Database: "shop", CreateOwner: true, PasswordVerifier: v}); err == nil {
+		t.Error("a verifier accepted for MySQL")
+	}
+}
+
 func TestDBExtensionUntrusted(t *testing.T) {
 	for _, n := range []string{"plpython3u", "plperlu", "pltclu", "file_fdw", "adminpack"} {
 		if !DBExtensionUntrusted(n) {

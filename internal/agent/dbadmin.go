@@ -134,7 +134,11 @@ func (a *Agent) dbadmin(ctx context.Context, db protocol.DatabaseSpec, taskID st
 		}
 	}
 	if err == nil && d.secret != nil {
-		err = d.seal(taskID, inv)
+		if p.PasswordVerifier != "" {
+			d.res.Connection = d.connection(inv) // the requester made the password: nothing to seal
+		} else {
+			err = d.seal(taskID, inv)
+		}
 	}
 	d.res.DurationMs = time.Since(start).Milliseconds()
 	if err != nil {
@@ -300,9 +304,9 @@ func newCredential() (password, verifier string, err error) {
 	return password, verifier, err
 }
 
-// seal encrypts the new password and connection string to the requester's
-// key, bound to the task.
-func (d *dba) seal(taskID string, inv *protocol.DBInventory) error {
+// connection is how to connect as the user a password is for (everything
+// but the password).
+func (d *dba) connection(inv *protocol.DBInventory) *protocol.DBConnection {
 	c := *d.secret
 	c.Port = d.spec.Port
 	c.SSLMode = "prefer"
@@ -316,6 +320,13 @@ func (d *dba) seal(taskID string, inv *protocol.DBInventory) error {
 	if c.Host == "" {
 		c.Host = "localhost"
 	}
+	return &c
+}
+
+// seal encrypts the new password and connection string to the requester's
+// key, bound to the task.
+func (d *dba) seal(taskID string, inv *protocol.DBInventory) error {
+	c := *d.connection(inv)
 	secret := protocol.DBSecret{DBConnection: c, Password: d.pw, URL: protocol.ConnectionURL(c, d.pw)}
 	plain, err := json.Marshal(secret)
 	if err != nil {
@@ -508,9 +519,13 @@ func (d *dba) createDatabase(ctx context.Context, conn *pgx.Conn) error {
 	}
 
 	if p.CreateOwner {
-		pw, verifier, err := newCredential()
-		if err != nil {
-			return err
+		// The requester's own password (only its verifier came here), or a
+		// new one sealed to their key once the database exists.
+		pw, verifier := "", p.PasswordVerifier
+		if verifier == "" {
+			if pw, verifier, err = newCredential(); err != nil {
+				return err
+			}
 		}
 		if err := d.exec(ctx, conn, fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD '(encrypted)'", owner),
 			`CREATE ROLE %I LOGIN PASSWORD %L`, owner, verifier); err != nil {
@@ -602,6 +617,9 @@ func (d *dba) createDatabase(ctx context.Context, conn *pgx.Conn) error {
 	}
 	if p.CreateOwner {
 		d.res.Summary = fmt.Sprintf("Created the database %s, owned by the new user %s. It is backed up with the rest of the server from now on.", p.Database, owner)
+		if p.PasswordVerifier != "" {
+			d.res.Details = append(d.res.Details, fmt.Sprintf("%s has the password made by whoever asked, on their own machine: Rowsafe never saw it.", owner))
+		}
 		d.secret = &protocol.DBConnection{User: owner, Database: p.Database}
 		if others, err := publicDatabases(ctx, conn); err == nil && len(others) > 0 {
 			d.res.Details = append(d.res.Details, fmt.Sprintf("Like every user, %s can also connect to %s, which %s open to everyone, but it can't read anything there it wasn't given.",

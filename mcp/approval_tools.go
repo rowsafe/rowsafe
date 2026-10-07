@@ -60,8 +60,10 @@ type ApprovalView struct {
 	Title       string              `json:"title"`
 	Group       string              `json:"group,omitempty"`
 	Risk        string              `json:"risk,omitempty" jsonschema:"normal, disruptive or destructive"`
+	CostsMoney  bool                `json:"costs_money,omitempty" jsonschema:"approving it adds to the organization's bill (the person sees the price)"`
 	Database    string              `json:"database,omitempty"`
 	Host        string              `json:"host,omitempty"`
+	ServerID    string              `json:"server_id,omitempty" jsonschema:"the Rowsafe Cloud server it is about"`
 	Params      map[string]any      `json:"params,omitempty"`
 	Details     []string            `json:"details,omitempty" jsonschema:"what will change, written by Rowsafe"`
 	Reason      string              `json:"reason,omitempty"`
@@ -80,7 +82,10 @@ type ApprovalResultView struct {
 	HTTPStatus int      `json:"http_status"`
 	Message    string   `json:"message,omitempty"`
 	TaskIDs    []string `json:"task_ids,omitempty" jsonschema:"tasks it queued: follow them with get_task"`
-	Body       any      `json:"body,omitempty" jsonschema:"the API's response (secrets removed)"`
+	// CloudServerID is the server an approval created.
+	CloudServerID string `json:"cloud_server_id,omitempty" jsonschema:"the Rowsafe Cloud server it created: follow it with get_cloud_server"`
+	CheckoutURL   string `json:"checkout_url,omitempty" jsonschema:"the server waits for payment here (an owner pays); it is created once paid"`
+	Body          any    `json:"body,omitempty" jsonschema:"the API's response (secrets removed)"`
 }
 
 type ApprovalOutput struct {
@@ -186,6 +191,7 @@ func requestChangeDescription() string {
 	b.WriteString("Asks a person to approve a change to production. Nothing changes until an owner or admin approves it in the Rowsafe dashboard; then Rowsafe runs it as that person, exactly like the dashboard's button. You can't approve. ")
 	b.WriteString("Only ask for a change the user asked for or agreed to (propose it first), and show them the approval link it returns. ")
 	b.WriteString("Call describe_change for an action's params. Most destructive or disruptive actions need params.confirm = the database's name (or a hostname), as each action's description says. reason is shown to the person, labeled as yours. ")
+	b.WriteString("The cloud actions cost money (cloud_catalog shows regions, sizes and prices); the person sees the price before approving, and leaves database empty for create_cloud_server. ")
 	b.WriteString("With wait_seconds it waits for the decision; once approved, follow the tasks with get_task. Actions by group: ")
 	for i, g := range groups {
 		if i > 0 {
@@ -240,7 +246,11 @@ func paramsSchema(a protocol.ApprovalAction) (*jsonschema.Schema, error) {
 		s.Required = slices.DeleteFunc(s.Required, func(r string) bool { return r == k })
 	}
 	for _, p := range pathParams(a) {
-		s.Properties[p] = &jsonschema.Schema{Type: "string", Description: "the " + strings.ReplaceAll(p, "_", " ") + " (part of the API path)"}
+		desc := "the " + strings.ReplaceAll(p, "_", " ") + " (part of the API path)"
+		if p == "server" {
+			desc = "the Rowsafe Cloud server's name or ID (cs_...; list_cloud_servers shows them)"
+		}
+		s.Properties[p] = &jsonschema.Schema{Type: "string", Description: desc}
 		if !slices.Contains(s.Required, p) {
 			s.Required = append(s.Required, p)
 		}
@@ -302,6 +312,9 @@ func (t *tools) describeChange(_ context.Context, _ *sdk.CallToolRequest, in des
 	if !ca.NeedsDatabase {
 		b.line("It isn't about one database: leave database empty.")
 	}
+	if a.CostsMoney {
+		b.line("It costs money: the person approving sees the size and price (cloud_catalog shows them) and decides.")
+	}
 	if len(a.Fixed) > 0 {
 		keys := make([]string, 0, len(a.Fixed))
 		for k := range a.Fixed {
@@ -311,7 +324,11 @@ func (t *tools) describeChange(_ context.Context, _ *sdk.CallToolRequest, in des
 		b.line("Set by Rowsafe whatever the params say: %s.", strings.Join(keys, ", "))
 	}
 	if a.Risk == protocol.RiskDestructive {
-		b.line("Destructive: the person types the database's name to approve it.")
+		what := "database's"
+		if slices.Contains(pathParams(a), "server") {
+			what = "server's"
+		}
+		b.line("Destructive: the person types the %s name to approve it.", what)
 	}
 	schema, _ := json.Marshal(ca.ParamsSchema)
 	b.line("params schema: %s", schema)
@@ -343,6 +360,9 @@ func (t *tools) requestChange(ctx context.Context, req *sdk.CallToolRequest, in 
 	act, ok := protocol.FindApprovalAction(in.Action)
 	if !ok {
 		return nil, ApprovalOutput{}, fmt.Errorf("unknown action %q: describe_change lists the changes you can ask for", in.Action)
+	}
+	if act.Name == "create_app_database" {
+		return nil, ApprovalOutput{}, errors.New("use the create_app_database tool for this: it makes the password without Rowsafe seeing it and gives you the connection string")
 	}
 	if strings.TrimSpace(in.Reason) == "" {
 		return nil, ApprovalOutput{}, errors.New("reason is required: say in one or two sentences why the user wants this change")
@@ -513,24 +533,9 @@ var approvalPoll = 2 * time.Second
 // reportApproval optionally waits for a decision, then reports a with what
 // to do next.
 func (t *tools) reportApproval(ctx context.Context, a protocol.Approval, waitSeconds int, lead string) (*sdk.CallToolResult, ApprovalOutput, error) {
-	if waitSeconds > 0 && a.Status == protocol.ApprovalPending {
-		deadline := time.Now().Add(min(time.Duration(waitSeconds)*time.Second, t.opts.MaxWait, maxWaitLimit))
-		for a.Status == protocol.ApprovalPending {
-			left := time.Until(deadline)
-			if left <= 0 {
-				break
-			}
-			select {
-			case <-ctx.Done():
-				return nil, ApprovalOutput{}, fmt.Errorf("stopped waiting (approval request %s is still there; follow it with get_approval): %w", a.ID, ctx.Err())
-			case <-time.After(min(approvalPoll, left)):
-			}
-			next, err := t.c.Approval(ctx, a.ID)
-			if err != nil {
-				return nil, ApprovalOutput{}, fmt.Errorf("reading approval request %s failed: %w", a.ID, apiError(err))
-			}
-			a = next
-		}
+	a, err := t.waitApproval(ctx, a, waitSeconds)
+	if err != nil {
+		return nil, ApprovalOutput{}, err
 	}
 	var b textBuilder
 	if lead != "" {
@@ -540,8 +545,35 @@ func (t *tools) reportApproval(ctx context.Context, a protocol.Approval, waitSec
 	return text(b), ApprovalOutput{Approval: approvalView(a)}, nil
 }
 
+// waitApproval waits up to waitSeconds (bounded by MaxWait) while a is
+// pending.
+func (t *tools) waitApproval(ctx context.Context, a protocol.Approval, waitSeconds int) (protocol.Approval, error) {
+	if waitSeconds > 0 && a.Status == protocol.ApprovalPending {
+		deadline := time.Now().Add(min(time.Duration(waitSeconds)*time.Second, t.opts.MaxWait, maxWaitLimit))
+		for a.Status == protocol.ApprovalPending {
+			left := time.Until(deadline)
+			if left <= 0 {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return a, fmt.Errorf("stopped waiting (approval request %s is still there; follow it with get_approval): %w", a.ID, ctx.Err())
+			case <-time.After(min(approvalPoll, left)):
+			}
+			next, err := t.c.Approval(ctx, a.ID)
+			if err != nil {
+				return a, fmt.Errorf("reading approval request %s failed: %w", a.ID, apiError(err))
+			}
+			a = next
+		}
+	}
+	return a, nil
+}
+
 func onDatabase(a protocol.Approval) string {
 	switch {
+	case a.ServerID != "" && a.Host != "":
+		return " on server " + a.Host + " (" + a.ServerID + ")"
 	case a.Database != "" && a.Host != "":
 		return " on " + a.Database + " (" + a.Host + ")"
 	case a.Database != "":
@@ -577,6 +609,19 @@ func writeApproval(b *textBuilder, a protocol.Approval) {
 			}
 			if len(r.TaskIDs) > 0 {
 				b.line("Tasks: %s. Follow them with get_task until they finish, then tell the user the outcome.", strings.Join(r.TaskIDs, ", "))
+			}
+			if r.CloudServerID != "" {
+				if r.CheckoutURL != "" {
+					b.line("Server %s waits for payment: the person who approved was sent to the checkout (%s; an owner of the organization pays). Nothing is created or billed before; once paid, it is created.", r.CloudServerID, r.CheckoutURL)
+				}
+				b.line("Follow server %s with get_cloud_server (with wait_seconds) until it's ready, about 5 to 10 minutes once created.", r.CloudServerID)
+			}
+		}
+		if a.Action == "create_app_database" {
+			if a.NeedsBrowserKey {
+				b.line("The person who approved sees the new connection string once, in their browser, when the database is ready: ask them to put it in the app's environment (e.g. DATABASE_URL in .env), or to give it to you.")
+			} else {
+				b.line("Once the task succeeded, the connection string create_app_database gave you works.")
 			}
 		}
 	case protocol.ApprovalFailed:
@@ -614,7 +659,7 @@ func resultStatus(a protocol.Approval) int {
 
 func approvalView(a protocol.Approval) ApprovalView {
 	v := ApprovalView{
-		ID: a.ID, Action: a.Action, Title: a.Title, Group: a.Group, Risk: a.Risk, Database: a.Database, Host: a.Host,
+		ID: a.ID, Action: a.Action, Title: a.Title, Group: a.Group, Risk: a.Risk, CostsMoney: a.CostsMoney, Database: a.Database, Host: a.Host, ServerID: a.ServerID,
 		Details: a.Details, Reason: a.Reason, RequestedBy: a.RequestedBy, Status: a.Status, CreatedAt: a.CreatedAt,
 		ExpiresAt: a.ExpiresAt, DecidedAt: a.DecidedAt, DecidedBy: a.DecidedBy, Note: a.Note, URL: a.URL,
 	}
@@ -625,7 +670,7 @@ func approvalView(a protocol.Approval) ApprovalView {
 		}
 	}
 	if r := a.Result; r != nil {
-		v.Result = &ApprovalResultView{HTTPStatus: r.HTTPStatus, Message: r.Message, TaskIDs: r.TaskIDs}
+		v.Result = &ApprovalResultView{HTTPStatus: r.HTTPStatus, Message: r.Message, TaskIDs: r.TaskIDs, CloudServerID: r.CloudServerID, CheckoutURL: r.CheckoutURL}
 		if len(r.Body) > 0 {
 			var body any
 			if json.Unmarshal(r.Body, &body) == nil {
