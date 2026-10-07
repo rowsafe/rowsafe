@@ -36,7 +36,15 @@ When you need realistic data to try a query, a migration or a feature, never use
 
 - Stop. Don't run more commands against the database, and don't try to repair data by hand.
 - Tell the user what happened, and that they can Rewind the database to the restore point by name in the Rowsafe dashboard (restore a copy, compare, bring back rows, or rewind in place).
-- Never restore yourself. Recovery is the user's decision. If they ask you to start it and the `request_change` tool is available, you can ask for it (`restore_copy`, then `compare_copy` and `bring_back_rows`, or `rewind_in_place`): if your owner allows agents to act on their own it happens right away (tell them what you did); otherwise nothing changes until they approve it in the Rowsafe dashboard, so give them the approval link.
+- Never restore on your own. Recovery is the user's decision. If they ask you to start it and the `request_change` tool is available, tell them first what will happen (a copy next to production, or the database rewound in place, with undo), then ask for it (`restore_copy`, then `compare_copy` and `bring_back_rows`, or `rewind_in_place`). It runs with their rights, as described below: tell them what you did, or give them the approval link if it waits for a person.
+
+## Changes through Rowsafe
+
+When the user allowed you to act, `request_change` and the direct change tools (`apply_fix`, `cloud_firewall`, `create_cloud_server`) make a change as the person who connected you, with exactly their rights in the Rowsafe dashboard.
+
+- **Only make changes the user asked for or agreed to.** Before a destructive, disruptive or paid one (a restart, a rewind, an upgrade, a resize, a new server, deleting anything), tell the user what will happen and what it costs, and wait for a clear yes. `describe_change` says what an action does.
+- **For an owner or admin it runs right away** and returns the result; tell the user what you did. It waits for an owner or admin to approve it in the dashboard instead when the user is a member, when the organization asks first or a budget would be exceeded (Settings → AI agents), when a first payment is due and the user isn't an owner, or for a standby, moving or forking a database (a person compares the server's key). Then give the user the approval link and follow it with `get_approval`.
+- **Rowsafe keeps its safety nets on**: it saves a Mark before risky changes, and a change that deletes or replaces data waits for a person when there is no backup yet. Everything you do is in the audit log as done by the user through you.
 
 ## What counts as destructive
 

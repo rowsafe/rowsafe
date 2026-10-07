@@ -281,9 +281,10 @@ type Approval struct {
 	// URL is the dashboard page where a person approves it (when the
 	// control plane knows the dashboard's address).
 	URL string `json:"url,omitempty"`
-	// Automatic: approved by the organization's agent setting
-	// (AgentAutonomy) on behalf of DecidedBy, the owner who chose it, and
-	// run right away as them, without a person deciding.
+	// Automatic: run right away by the organization's agent setting
+	// (AgentAutonomy), without a person deciding, as DecidedBy: the person
+	// who connected the agent (act), or the owner who chose the budget
+	// level. Note says which.
 	Automatic bool `json:"automatic,omitempty"`
 	// AutonomyNote says why a request from an AI agent was not run right
 	// away although agents may act on their own in this organization (over

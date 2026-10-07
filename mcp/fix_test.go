@@ -14,9 +14,10 @@ import (
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
-// Health fixes run only when a person applies or approves one: no tool
-// applies one or queues a maintenance task (request_change only files an
-// approval request), and database_health points to the fix instead of SQL.
+// Health fixes run only through Rowsafe's own fix flow: no tool calls the
+// fixes endpoint or queues a maintenance task (request_change and apply_fix
+// only file the change, which runs as the person who connected the agent or
+// waits for one), and database_health points to the fix instead of SQL.
 func TestHealthFixesAreNotForAgents(t *testing.T) {
 	var filed atomic.Int32
 	health := protocol.DatabaseHealth{Database: "app", Host: "db1", Score: 70, Grade: protocol.GradeNeedsAttention,
@@ -36,7 +37,8 @@ func TestHealthFixesAreNotForAgents(t *testing.T) {
 			var req protocol.CreateApprovalRequest
 			_ = json.NewDecoder(r.Body).Decode(&req)
 			filed.Add(1)
-			if req.Action != "apply_fix" || string(req.Params) != `{"finding_id":"idle_in_transaction","fix_id":"end:4312"}` {
+			if req.Action != "apply_fix" || (string(req.Params) != `{"finding_id":"idle_in_transaction","fix_id":"end:4312"}` &&
+				string(req.Params) != `{"confirm":"app","finding_id":"idle_in_transaction","fix_id":"end:4312"}`) {
 				t.Errorf("filed %+v (params %s)", req, req.Params)
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -82,7 +84,7 @@ func TestHealthFixesAreNotForAgents(t *testing.T) {
 		"fix_id": "end:4312", "confirm": "app", "name": "x", "action": "apply_fix", "reason": "test",
 		"params": map[string]any{"finding_id": "idle_in_transaction", "fix_id": "end:4312"}}
 	for _, tool := range tools.Tools {
-		if strings.Contains(tool.Name, "fix") || strings.Contains(tool.Name, "maint") {
+		if (strings.Contains(tool.Name, "fix") && tool.Name != "apply_fix") || strings.Contains(tool.Name, "maint") {
 			t.Errorf("tool %s", tool.Name)
 		}
 		in := map[string]any{}
@@ -99,8 +101,8 @@ func TestHealthFixesAreNotForAgents(t *testing.T) {
 		_, _ = cs.CallTool(ctx, &sdk.CallToolParams{Name: tool.Name, Arguments: in})
 	}
 
-	if n := filed.Load(); n != 1 {
-		t.Fatalf("%d approval requests filed, want 1 (request_change)", n)
+	if n := filed.Load(); n != 2 {
+		t.Fatalf("%d change requests filed, want 2 (request_change, apply_fix)", n)
 	}
 
 	res, err := cs.CallTool(ctx, &sdk.CallToolParams{Name: "database_health", Arguments: map[string]any{"database": "app"}})
@@ -115,7 +117,7 @@ func TestHealthFixesAreNotForAgents(t *testing.T) {
 	}
 	out := text.String()
 	for _, want := range []string{"Rowsafe can fix this: End this session. The user clicks Apply fix in the dashboard (Pulse, Health)",
-		`request_change apply_fix with finding_id "idle_in_transaction" and fix_id "end:4312" (End this session)`,
+		`apply_fix with database, finding_id "idle_in_transaction" and fix_id "end:4312" (End this session)`,
 		"not right now: Remove the slot (not now: The agent is offline.)", "Command: SELECT pg_drop_replication_slot('old')"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("database_health lacks %q:\n%s", want, out)

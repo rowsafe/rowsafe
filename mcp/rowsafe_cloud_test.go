@@ -232,7 +232,7 @@ func TestCreateAppDatabaseLocal(t *testing.T) {
 	if again, _ := client.SCRAMVerifier(password, salt, n); again != p.PasswordVerifier {
 		t.Fatal("the verifier isn't the password's")
 	}
-	for _, want := range []string{"Connection string (shown once, works once approved): postgresql://shop:", "DATABASE_URL in .env", "never in code", "get_approval apr_1", "https://app.rowsafe.test/approvals/apr_1"} {
+	for _, want := range []string{"Connection string (shown once, works once the database is created): postgresql://shop:", "DATABASE_URL in .env", "never in code", "get_approval apr_1", "https://app.rowsafe.test/approvals/apr_1"} {
 		if !strings.Contains(txt, want) {
 			t.Errorf("missing %q in\n%s", want, txt)
 		}

@@ -36,7 +36,7 @@ rowsafe rewind database app --at "14:04"  # rewind in place, with undo
 
 **Pulse**: a 0–100 health score with fixes you apply (`rowsafe pulse`, `rowsafe fix app`), slow queries (`rowsafe top app`), insights and tuning.
 
-**Guard**: `rowsafe mcp`, the Claude Code and Codex plugins and the GitHub Action save a Mark before migrations, destructive SQL and deploys. AI agents can ask for any change to production; an owner or admin approves it in the dashboard. Agents can never approve.
+**Guard**: `rowsafe mcp`, the Claude Code and Codex plugins and the GitHub Action save a Mark before migrations, destructive SQL and deploys. AI agents act as the person who connected them, with exactly that person's rights, like a CLI token: an owner's or admin's agent makes a change right away, a member's agent asks an owner or admin. Owners can set a monthly budget for agents, or make every change wait for approval (Settings → AI agents). Every agent action is in the audit log. Agents can never approve.
 
 **Rowsafe Cloud**: PostgreSQL servers Rowsafe runs for you, billed by the hour (never more than the monthly price), with all of the above on from the first minute.
 
@@ -72,7 +72,7 @@ Full guide: [Quickstart](https://rowsafe.sh/docs/quickstart).
 
 ## Safety
 
-- **Never restarts or changes production on its own.** Restarts, fixes, rewinds and settings changes run only when a person confirms them.
+- **Never restarts or changes production on its own.** Restarts, fixes, rewinds and settings changes run only when a person confirms them, or when an AI agent they connected asks with their rights (audited; Rowsafe saves a Mark first for risky ones).
 - **Fixes come from a fixed list** and are re-checked on the server right before they run.
 - **Restore tests and copies are isolated** from production and its backups.
 - **Your data and secrets stay on your server.** Backups are encrypted before upload; Rowsafe sees table names and counts, not rows.

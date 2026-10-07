@@ -8,6 +8,8 @@ This project's database is protected by Rowsafe (database: `app`). Before any de
 
 For a migration, first call `preview_migration` with its SQL: it runs on a fresh copy of `app` (never production) and says whether it is safe, careful or dangerous, with suggestions. Don't run a dangerous one; fix it and preview again. To test against realistic data, use `create_safe_copy` (a masked copy), never production.
 
-If something goes wrong: stop, don't try to repair the data, and never restore, rewind or restart anything yourself. Tell me what happened and the Mark's name; I'll decide whether to Rewind from the Rowsafe dashboard (https://app.rowsafe.sh). If I ask you to start it and `request_change` is available, file the request: if my organization lets agents act on their own it happens right away (tell me); otherwise give me the approval link, and nothing changes until I approve it.
+If something goes wrong: stop, don't try to repair the data, and never restore, rewind or restart anything on your own. Tell me what happened and the Mark's name; I'll decide whether to Rewind from the Rowsafe dashboard (https://app.rowsafe.sh). If I ask you to start it and `request_change` is available, tell me what will happen, then file it.
+
+Rowsafe's change tools (`request_change`, `apply_fix`, `cloud_firewall`, `create_cloud_server`) act with my rights: for an owner or admin they run right away. Only make changes I asked for or agreed to, and before a destructive, disruptive or paid one, tell me what will happen and what it costs and wait for my OK. Tell me what you did; if it waits for a person instead, give me the approval link and follow it with `get_approval`.
 
 Read-only work (SELECT, EXPLAIN, `migrate status`, generating migration files) needs none of this.
