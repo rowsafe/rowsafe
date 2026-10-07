@@ -382,6 +382,8 @@ func cloudServerView(c client.CloudServer) CloudServerView {
 		AllowedIPs: nonNilStrings(c.AllowedIPs), DeleteAt: c.DeleteAt, CreatedAt: c.CreatedAt}
 	if v.Engine == protocol.EnginePostgreSQL {
 		v.PostgreSQL = c.EngineVersion
+	} else if v.Step == "Installing PostgreSQL" { // the control plane's step name, whatever the engine
+		v.Step = "Installing " + protocol.EngineDisplayName(v.Engine)
 	}
 	eng, _ := protocol.CloudEngineFor(v.Engine)
 	port := cmpOrInt(eng.Port, 5432)
