@@ -3,6 +3,7 @@ package redis
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -81,11 +82,89 @@ func dial(ctx context.Context, addr string) (*conn, error) {
 	if strings.HasPrefix(addr, "/") {
 		network = "unix"
 	}
+	if network == "tcp" && loopbackAddr(addr) && localTLS(ctx, addr) {
+		nc, err := dialTLSLocal(ctx, addr)
+		if err != nil {
+			tlsLocal.Delete(addr) // looked again on the next dial
+			return nil, err
+		}
+		return newConn(nc), nil
+	}
 	nc, err := dialer(ctx, network, addr)
 	if err != nil {
 		return nil, err
 	}
-	return &conn{nc: nc, br: bufio.NewReaderSize(nc, 64<<10), bw: bufio.NewWriterSize(nc, 64<<10), timeout: defaultIOTTL}, nil
+	return newConn(nc), nil
+}
+
+func newConn(nc net.Conn) *conn {
+	return &conn{nc: nc, br: bufio.NewReaderSize(nc, 64<<10), bw: bufio.NewWriterSize(nc, 64<<10), timeout: defaultIOTTL}
+}
+
+// A server on this machine may speak only TLS: one the installer's
+// --listen-public set up (servers Rowsafe creates) has no plain port at
+// all, so nothing reaches it unencrypted over the network, and the agent
+// connects to its TLS port on the loopback address. Whether a loopback
+// address speaks TLS is found once (a TLS handshake: a plain server answers
+// it with something that isn't TLS) and remembered; a failed TLS dial
+// forgets it.
+var tlsLocal sync.Map // addr -> bool
+
+// tlsDetect: look for TLS on loopback addresses (tests with plain fakes
+// turn it off).
+var tlsDetect = true
+
+func loopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// localTLS reports whether the loopback address speaks TLS.
+func localTLS(ctx context.Context, addr string) bool {
+	if !tlsDetect {
+		return false
+	}
+	if v, ok := tlsLocal.Load(addr); ok {
+		return v.(bool)
+	}
+	hctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	nc, err := dialTLSLocal(hctx, addr)
+	is := err == nil
+	if is {
+		nc.Close()
+	}
+	var ne net.Error
+	if is || !errors.As(err, &ne) || !ne.Timeout() { // a timeout tells nothing: look again next time
+		var oe *net.OpError
+		if is || !errors.As(err, &oe) || oe.Op != "dial" { // nor does a refused connection
+			tlsLocal.Store(addr, is)
+		}
+	}
+	return is
+}
+
+// dialTLSLocal opens a TLS connection to a server on this machine. Its
+// certificate is for the server's public names (or self-signed): nothing
+// to verify on the loopback address.
+func dialTLSLocal(ctx context.Context, addr string) (net.Conn, error) {
+	nc, err := dialer(ctx, "tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	tc := tls.Client(nc, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}) //nolint:gosec // loopback only
+	if err := tc.HandshakeContext(ctx); err != nil {
+		nc.Close()
+		return nil, err
+	}
+	return tc, nil
 }
 
 func (c *conn) Close() error { return c.nc.Close() }

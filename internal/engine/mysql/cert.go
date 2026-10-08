@@ -19,16 +19,20 @@ import (
 )
 
 // Certificates for Rowsafe Cloud names (agent.EngineCertificates). The
-// installer's --listen-public serves TLS from <datadir>/rowsafe-server.crt
+// installer's --listen-public serves TLS from serverTLSDir/rowsafe-server.crt
 // and .key (ssl_cert and ssl_key point there, owned by mysql like the
-// agent); the agent replaces both and has the server load them again:
+// agent; outside the data directory, so backups, restores, copies and
+// rewinds never carry the key or put an older one back; servers set up
+// before had them in the data directory, which the installer moves); the
+// agent replaces both and has the server load them again:
 // ALTER INSTANCE RELOAD TLS on MySQL, FLUSH SSL on MariaDB. Nothing
 // restarts, and connections already open keep their certificate.
 
 var _ agent.EngineCertificates = (*Engine)(nil)
 
-// Files the installer's --listen-public sets up in the data directory.
+// Files the installer's --listen-public sets up.
 const (
+	serverTLSDir   = "/etc/mysql/rowsafe-tls"
 	serverCertFile = "rowsafe-server.crt"
 	serverKeyFile  = "rowsafe-server.key"
 )
@@ -86,12 +90,14 @@ func serverTLSFiles(name, dataDir, cert, key string) (*agent.ServerTLS, error) {
 	if cert == "" {
 		return st, nil
 	}
-	wantCert, wantKey := filepath.Join(dataDir, serverCertFile), filepath.Join(dataDir, serverKeyFile)
-	if abs(cert) != wantCert || abs(key) != wantKey {
-		return nil, fmt.Errorf("%s serves the certificate %s, which Rowsafe didn't set up: Rowsafe only installs certificates where it set TLS up itself (servers Rowsafe created)", name, abs(cert))
+	for _, dir := range []string{serverTLSDir, dataDir} { // the data directory: servers set up before
+		wantCert, wantKey := filepath.Join(dir, serverCertFile), filepath.Join(dir, serverKeyFile)
+		if abs(cert) == wantCert && abs(key) == wantKey {
+			st.CertFile, st.KeyFile = wantCert, wantKey
+			return st, nil
+		}
 	}
-	st.CertFile, st.KeyFile = wantCert, wantKey
-	return st, nil
+	return nil, fmt.Errorf("%s serves the certificate %s, which Rowsafe didn't set up: Rowsafe only installs certificates where it set TLS up itself (servers Rowsafe created)", name, abs(cert))
 }
 
 // Client capability flags for the TLS request (MySQL's protocol).

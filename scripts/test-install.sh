@@ -4142,7 +4142,7 @@ cloud_engine_container() {
   case $engine in
     mysql) label=MySQL unit=mysql port=3306 user=mysql ;;
     mariadb) label=MariaDB unit=mariadb port=3306 user=mysql ;;
-    valkey) label=Valkey unit=valkey-server port=6379 user=rowsafe ;;
+    valkey) label=Valkey unit=valkey-server port=6380 user=rowsafe ;;
   esac
   echo "  -- servers Rowsafe creates: --install-$engine $ver ($os, $arch)"
 
@@ -4167,7 +4167,7 @@ cloud_engine_container() {
   echo "$user" >/tmp/rowsafe-fake-user
   case $engine in
     valkey)
-      line="6379\t-\t8\t-\t/var/lib/valkey\t8192\tvalkey\tno\t-\t-\t8 KiB\tvalkey-server.service\t-\tvalkey"
+      line="6380\t-\t8\t-\t/var/lib/valkey\t8192\tvalkey\tno\t-\t-\t8 KiB\tvalkey-server.service\t-\tvalkey"
       scenario "discover_out=$line" "redis-status_out=login=missing\nversion=8.0.0\nconfig=/etc/valkey/valkey.conf\naclfile=/etc/valkey/users.acl\ncluster=no\nbinary=/usr/bin/valkey-server" \
         "redis-login_rc=11\n0" "redis-login_out=persisted=aclfile" \
         "plan_out=Backups for shop: Valkey's own replication stream." \
@@ -4220,12 +4220,12 @@ cloud_engine_container() {
       # What the agent does later: its own user kept with ACL SAVE, the
       # certificate reloaded with CONFIG SET and CONFIG REWRITE (quotes).
       printf 'AUTH admin %s\nACL SETUSER rowsafe on >agent-password-for-the-test ~* &* +@all\nACL SAVE\nCONFIG SET tls-cert-file /etc/ssl/rowsafe-valkey/rowsafe-server.crt\nCONFIG REWRITE\n' \
-        "$(cat /etc/rowsafe/valkey/admin-password)" | valkey-cli -p 6379 >"$W/cli" 2>&1
+        "$(cat /etc/rowsafe/valkey/admin-password)" | valkey-cli -s /run/valkey/valkey-server.sock >"$W/cli" 2>&1
       [ "$(grep -c '^OK$' "$W/cli")" = 5 ] || { cat "$W/cli" >&2; fail "the agent's ACL SAVE and CONFIG REWRITE"; }
       grep -q '^tls-cert-file "/etc/ssl/rowsafe-valkey/rowsafe-server.crt"$' /etc/valkey/valkey.conf || fail "CONFIG REWRITE didn't quote (the test expects it to)"
       cp /etc/valkey/users.acl "$W/users.acl"
       cp /etc/valkey/valkey.conf "$W/valkey.conf"
-      scenario "discover_out=6379\t-\t8\t-\t/var/lib/valkey\t8192\tshop\tyes\tactive\t-\t8 KiB\tvalkey-server.service\tdb_fake\tvalkey" \
+      scenario "discover_out=6380\t-\t8\t-\t/var/lib/valkey\t8192\tshop\tyes\tactive\t-\t8 KiB\tvalkey-server.service\tdb_fake\tvalkey" \
         "redis-status_out=login=ok\nversion=8.0.0\nrights=ok\nbinary=/usr/bin/valkey-server" plan_rc=5 "plan_out=shop is already protected." \
         "status_out=db_fake\tshop\tactive\trunning\thttps://app.rowsafe.test/databases/db_fake"
       ;;
@@ -4310,12 +4310,15 @@ cloud_mysql_checks() {
   called "mysql-account"
   grep -q "$label restarted" "$W/out" || fail "$name: the new $label wasn't restarted for backups"
   called "apply --database db_fake"
-  [ "$(stat -c '%U %G %a' /var/lib/mysql/rowsafe-server.crt)" = "mysql mysql 644" ] || fail "$name: certificate owner/mode"
-  [ "$(stat -c '%U %G %a' /var/lib/mysql/rowsafe-server.key)" = "mysql mysql 600" ] || fail "$name: key owner/mode"
+  [ "$(stat -c '%U %G %a' /etc/mysql/rowsafe-tls)" = "mysql mysql 750" ] || fail "$name: certificate folder owner/mode"
+  [ "$(stat -c '%U %G %a' /etc/mysql/rowsafe-tls/rowsafe-server.crt)" = "mysql mysql 644" ] || fail "$name: certificate owner/mode"
+  [ "$(stat -c '%U %G %a' /etc/mysql/rowsafe-tls/rowsafe-server.key)" = "mysql mysql 600" ] || fail "$name: key owner/mode"
+  [ ! -e /var/lib/mysql/rowsafe-server.key ] || fail "$name: the key is in the data directory (backups would carry it)"
+  grep -qx 'ReadWritePaths=-/etc/mysql/rowsafe-tls' /etc/systemd/system/rowsafe-agent.service.d/10-mysql.conf || fail "$name: the agent can't replace the certificate"
   conf=$(cloud_net_conf)
   [ "$(stat -c '%U %G %a' "$conf")" = "root root 644" ] || fail "$name: $conf owner/mode"
   grep -qx 'bind-address = \*' "$conf" && grep -qx 'require_secure_transport = ON' "$conf" &&
-    grep -qx 'ssl_cert = /var/lib/mysql/rowsafe-server.crt' "$conf" && grep -qx 'ssl_key = /var/lib/mysql/rowsafe-server.key' "$conf" &&
+    grep -qx 'ssl_cert = /etc/mysql/rowsafe-tls/rowsafe-server.crt' "$conf" && grep -qx 'ssl_key = /etc/mysql/rowsafe-tls/rowsafe-server.key' "$conf" &&
     grep -qx 'tls_version = TLSv1.2,TLSv1.3' "$conf" || { cat "$conf" >&2; fail "$name: $conf"; }
   [ "$(q 'SELECT @@bind_address')" = '*' ] || fail "$name: bind_address is $(q 'SELECT @@bind_address')"
   ss -ltnH | awk '{ print $4 }' | grep -Eqx '(\*|0\.0\.0\.0):3306' || fail "$name: not listening on every IPv4 address"
@@ -4332,7 +4335,7 @@ cloud_mysql_checks() {
   if MYSQL_PWD=app-password-for-the-test "$cli" -h "$ip" -u app $notls -e 'SELECT 1' >"$W/out" 2>&1; then fail "a login without TLS was accepted"; fi
   grep -q "insecure transport are prohibited" "$W/out" || { cat "$W/out" >&2; fail "a login without TLS wasn't refused"; }
   echo | openssl s_client -starttls mysql -connect "$ip:3306" 2>/dev/null | openssl x509 -noout -fingerprint -sha256 >"$W/fp" &&
-    [ "$(cat "$W/fp")" = "$(openssl x509 -in /var/lib/mysql/rowsafe-server.crt -noout -fingerprint -sha256)" ] || fail "the server doesn't present its certificate"
+    [ "$(cat "$W/fp")" = "$(openssl x509 -in /etc/mysql/rowsafe-tls/rowsafe-server.crt -noout -fingerprint -sha256)" ] || fail "the server doesn't present its certificate"
   q "DROP USER 'app'@'%'"
   # The agent replaces the certificate later and reloads it (same files).
   if [ "$engine" = mysql ]; then q 'ALTER INSTANCE RELOAD TLS'; else q 'FLUSH SSL'; fi
@@ -4359,7 +4362,8 @@ cloud_valkey_checks() {
   [ "$(stat -c '%U %G %a' /etc/valkey/users.acl)" = "valkey valkey 640" ] || fail "$name: users.acl owner/mode"
   grep -q '^user default off' /etc/valkey/users.acl || fail "$name: the default user isn't off"
   grep -q "^user admin on .*#$(printf '%s' "$pw" | sha256sum | cut -d' ' -f1) " /etc/valkey/users.acl || fail "$name: no admin in users.acl"
-  for l in 'aclfile /etc/valkey/users.acl' 'appendonly yes' 'appendfsync everysec' 'bind \* -::\*' 'port 6379' 'tls-port 6380' \
+  for l in 'aclfile /etc/valkey/users.acl' 'appendonly yes' 'appendfsync everysec' 'bind \* -::\*' 'port 0' 'tls-port 6380' \
+    'unixsocket /run/valkey/valkey-server.sock' 'unixsocketperm 700' \
     'tls-cert-file /etc/ssl/rowsafe-valkey/rowsafe-server.crt' 'tls-key-file /etc/ssl/rowsafe-valkey/rowsafe-server.key' \
     'tls-auth-clients no' 'tls-protocols "TLSv1.2 TLSv1.3"'; do
     [ "$(grep -c "^$l\$" /etc/valkey/valkey.conf)" = 1 ] || fail "$name: valkey.conf lacks '$l' (once)"
@@ -4370,22 +4374,23 @@ cloud_valkey_checks() {
   [ "$(stat -c '%U %G %a' /etc/ssl/rowsafe-valkey/rowsafe-server.crt)" = "rowsafe valkey 644" ] || fail "$name: certificate owner/mode"
   grep -qx 'ReadWritePaths=-/etc/ssl/rowsafe-valkey' /etc/systemd/system/rowsafe-agent.service.d/10-redis.conf || fail "$name: the agent can't replace the certificate"
   # Rowsafe's own user, created with the administrator's login (on stdin).
-  called "redis-login --port 6379 --engine valkey --admin-user admin"
+  called "redis-login --port 6380 --engine valkey --admin-user admin"
   [ "$(cat "$F/redis-login.stdin")" = "$pw" ] || fail "$name: the agent didn't get the administrator's password on stdin"
   called "apply --database db_fake"
-  # The plain port needs a password; TLS on 6380 from the network.
-  [ "$(echo PING | valkey-cli -h "$ip" -p 6379 2>&1 | head -n 1)" = "NOAUTH Authentication required." ] || fail "the plain port answers without a password"
-  [ "$(printf 'AUTH default x\n' | valkey-cli -p 6379 2>&1 | head -n 1 | cut -c1-9)" != OK ] || fail "the default user signs in"
+  # No plain port at all; the socket is root's and valkey's; TLS on 6380 from the network.
+  ! ss -ltnH | awk '{ print $4 }' | grep -q ':6379$' || fail "Valkey still listens in plain text on 6379"
+  [ "$(stat -c '%U %a' /run/valkey/valkey-server.sock)" = "valkey 700" ] || fail "$name: socket owner/mode"
+  [ "$(echo PING | valkey-cli -s /run/valkey/valkey-server.sock 2>&1 | head -n 1)" = "NOAUTH Authentication required." ] || fail "the socket answers without a password"
+  [ "$(printf 'AUTH default x\n' | valkey-cli -s /run/valkey/valkey-server.sock 2>&1 | head -n 1 | cut -c1-9)" != OK ] || fail "the default user signs in"
   [ "$(printf 'AUTH admin %s\nPING\n' "$pw" | valkey-cli -h "$ip" -p 6380 --tls --insecure 2>&1 | sed -n 2p)" = PONG ] || fail "TLS login on 6380"
   if echo PING | valkey-cli -h "$ip" -p 6380 >"$W/cli" 2>&1 && grep -q PONG "$W/cli"; then fail "plain text on the TLS port"; fi
   echo | openssl s_client -connect "$ip:6380" 2>/dev/null | openssl x509 -noout -fingerprint -sha256 >"$W/fp" &&
     [ "$(cat "$W/fp")" = "$(openssl x509 -in /etc/ssl/rowsafe-valkey/rowsafe-server.crt -noout -fingerprint -sha256)" ] || fail "Valkey doesn't present its certificate"
-  for p in 6379 6380; do
-    grep -q "tcp dport $p drop" "$W/nft" && [ -e "/var/lib/rowsafe-firewall/port-$p" ] || { cat "$W/nft" >&2; fail "$name: port $p isn't closed by the firewall"; }
-    grep -qx "$p" /etc/rowsafe/firewall-allowed || fail "$name: $p isn't in the firewall's allow list"
-  done
-  grep -q "Valkey's ports (6379, 6380) are closed to everyone but this server" "$W/out" || fail "$name: no word about the firewall"
-  pass "Valkey from the network: TLS on 6380, passwords only, the certificate at the exact paths, both ports closed by the firewall"
+  p=6380
+  grep -q "tcp dport $p drop" "$W/nft" && [ -e "/var/lib/rowsafe-firewall/port-$p" ] || { cat "$W/nft" >&2; fail "$name: port $p isn't closed by the firewall"; }
+  grep -qx "$p" /etc/rowsafe/firewall-allowed || fail "$name: $p isn't in the firewall's allow list"
+  grep -Eq "Valkey's ports? \((6379, )?6380\) (is|are) closed to everyone but this server" "$W/out" || fail "$name: no word about the firewall"
+  pass "Valkey from the network: TLS on 6380 only (no plain port), passwords only, the certificate at the exact paths, closed by the firewall"
 }
 
 case ${1:-} in

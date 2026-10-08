@@ -17,20 +17,21 @@ import (
 // create_app_database: a new, empty database and a login for the app an
 // assistant is building, on a Rowsafe Cloud server's PostgreSQL (15 or
 // newer), MySQL or MariaDB (usually a server it asked for). It files the
-// create_app_database change request, which runs right away as the person
-// who connected the agent (from a local rowsafe mcp), or waits for a person
-// to approve it. Valkey has no separate databases: a login for an app is
+// create_app_database change request. On PostgreSQL from a local rowsafe
+// mcp it runs right away as the person who connected the agent (or waits
+// for a person to approve it); on MySQL and MariaDB, and from the remote
+// endpoint, it always waits for an owner or admin, whose browser receives
+// the password. Valkey has no separate databases: a login for an app is
 // made in the dashboard.
 //
 // The password never passes through Rowsafe. Locally (rowsafe mcp) on
 // PostgreSQL it is made here, on the user's machine, and only its
 // SCRAM-SHA-256 verifier is sent: the assistant gets the full connection
-// string at once, working once the request is approved. MySQL and MariaDB
-// take no verifier: like the remote endpoint, the password is made when a
-// person approves and sealed to their browser. On the remote endpoint this code runs
-// inside Rowsafe, which must never make or see a password: the request goes
-// without one, the agent makes it when a person approves and seals it to
-// that person's browser, which shows them the connection string once.
+// string at once, working once the request is done. MySQL and MariaDB take
+// no verifier, and on the remote endpoint this code runs inside Rowsafe,
+// which must never make or see a password: the request goes without one,
+// the agent makes it when a person approves and seals it to that person's
+// browser, which shows them the connection string once.
 
 type appDatabaseInput struct {
 	Database    string   `json:"database" jsonschema:"the Rowsafe Cloud server's database (name or ID) whose PostgreSQL, MySQL or MariaDB gets the new database (get_cloud_server shows it)"`
@@ -56,7 +57,7 @@ func (t *tools) addAppDatabaseTool(s *sdk.Server) {
 		Name: "create_app_database",
 		Description: "Creates a new, empty database and a login for the app you are building, on a Rowsafe Cloud server running PostgreSQL (15 or newer), MySQL or MariaDB. The new user owns only that database, and only it can connect there; existing databases and users are untouched. " +
 			"Rowsafe never sees the password. For PostgreSQL from a local rowsafe mcp it is made on this machine, you get the full connection string at once, and it runs right away as the person who connected you (an owner or admin; otherwise, or if your team asks first, a person approves it; get_org). " +
-			"For MySQL and MariaDB, and on the remote endpoint, the password is made when an owner or admin approves it, shown once in their browser, and they give it to you. Put the connection string in the app's environment (e.g. DATABASE_URL in .env), never in code or git. " +
+			"For MySQL and MariaDB, and on the remote endpoint, it always waits for an owner or admin to approve it in the dashboard (never right away): the password is made then, shown once in their browser, and they give it to you. Put the connection string in the app's environment (e.g. DATABASE_URL in .env), never in code or git. " +
 			"Valkey servers have no separate databases: the user makes the app's login in the dashboard (Databases & users).",
 		Annotations: writes("Create a database for the app", false, false),
 		InputSchema: withWait[appDatabaseInput](func(p map[string]*jsonschema.Schema) {

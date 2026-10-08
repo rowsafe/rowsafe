@@ -123,7 +123,7 @@ func (e CloudEngine) InstallFlag() string {
 // that install certificates for Rowsafe Cloud names (TaskServerCertificate)
 // on MySQL, MariaDB and Valkey servers too, not only PostgreSQL: the server
 // set up by the installer's --listen-public serves the files
-// <data directory>/rowsafe-server.crt and .key (MySQL, MariaDB; reloaded
+// /etc/mysql/rowsafe-tls/rowsafe-server.crt and .key (MySQL, MariaDB; reloaded
 // with ALTER INSTANCE RELOAD TLS or FLUSH SSL) or
 // /etc/ssl/rowsafe-valkey/rowsafe-server.crt and .key (Valkey; reloaded by
 // CONFIG SET of the same files).

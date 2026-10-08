@@ -58,8 +58,8 @@
 #                          firewall in front: it decides who can connect.
 #                          With --install-mysql/-mariadb: port 3306 on every
 #                          address, TLS required for TCP logins; with
-#                          --install-valkey: TLS on port 6380, the plain port
-#                          6379 (password required) for this server's tools
+#                          --install-valkey: TLS on port 6380 only (no plain
+#                          port; this server's tools use a Unix socket)
 #   (Permissions: without a terminal, restart, create-cluster, updates, pooler,
 #   tuning, sqlite-modes and files are allowed unless --no-allow-X; the
 #   server's own security updates, reboot, firewall and pooler-public only
@@ -383,7 +383,7 @@ Options (when piping, pass them after `sh -s --`):
                          change waits for its next restart. With --install-mysql or
                          --install-mariadb: port 3306 on every address, TLS required for
                          logins over the network; with --install-valkey: TLS on port 6380
-                         (passwords only), the plain port 6379 for this server's own tools
+                         (passwords only) and no plain port; this server's tools use a socket
   --sqlite PATH          protect the SQLite database file PATH (repeat for several);
                          with --protect NAME, give exactly one. The installer also finds
                          the SQLite files running apps have open and asks about each
@@ -926,8 +926,12 @@ mysql_setup() {
     return 0
   fi
   install -d -m 0755 "$_dropin"
-  if printf '# Written by the Rowsafe installer: this server runs MySQL or MariaDB.\n[Unit]\nAfter=mysql.service mariadb.service\n[Service]\nUser=mysql\nGroup=mysql\n' |
-    write_file "$_dropin/10-mysql.conf" 0644 root:root; then
+  if {
+    printf '# Written by the Rowsafe installer: this server runs MySQL or MariaDB.\n[Unit]\nAfter=mysql.service mariadb.service\n[Service]\nUser=mysql\nGroup=mysql\n'
+    # --listen-public's certificate (--install-mysql/-mariadb): the agent
+    # replaces it with one from Let's Encrypt.
+    [ ! -d "$MYSQL_TLS_DIR" ] || echo "ReadWritePaths=-$MYSQL_TLS_DIR"
+  } | write_file "$_dropin/10-mysql.conf" 0644 root:root; then
     UNIT_CHANGED=1 CHANGED=1
   fi
   install -d -m 0750 -o mysql -g mysql "$CONFIG_DIR/mysql"
@@ -1349,6 +1353,14 @@ VALKEY_CONF=/etc/valkey/valkey.conf
 VALKEY_ACL=/etc/valkey/users.acl
 VALKEY_ADMIN_PW_FILE=$CONFIG_DIR/valkey/admin-password
 VALKEY_TLS_DIR=/etc/ssl/rowsafe-valkey
+# MySQL's and MariaDB's certificate (--listen-public): the mysql user's
+# folder, outside the data directory, so backups, restores, copies and
+# rewinds never carry the key or put an older one back.
+MYSQL_TLS_DIR=/etc/mysql/rowsafe-tls
+# The Unix socket this server's own tools (and the installer) use: only
+# root and the valkey user can open it. With --listen-public Valkey has no
+# plain TCP port at all.
+VALKEY_SOCK=/run/valkey/valkey-server.sock
 
 # db_record [ENGINE]: the file holding the version this installer installed.
 db_record() { printf '%s/installed-%s\n' "$CONFIG_DIR" "${1:-$INSTALL_DB}"; }
@@ -1358,12 +1370,19 @@ db_unit() {
   case $1 in mysql) echo mysql.service ;; mariadb) echo mariadb.service ;; valkey) echo valkey-server.service ;; esac
 }
 
-# db_port: the port the installed server listens on (the agent's).
-db_port() { case $INSTALL_DB in valkey) echo 6379 ;; *) echo 3306 ;; esac; }
+# db_port: the port the installed server listens on (the agent's): Valkey's
+# plain port, or its TLS port once it has no plain one (--listen-public).
+db_port() { case $INSTALL_DB in valkey) valkey_port ;; *) echo 3306 ;; esac; }
 
-# db_public_ports: the ports --listen-public opens (Valkey: the TLS port,
-# and the plain one, which the firewall keeps closed to everyone else).
-db_public_ports() { case $INSTALL_DB in valkey) echo 6379 6380 ;; *) echo 3306 ;; esac; }
+# valkey_port: the port in valkey.conf, the TLS port when the plain one is 0.
+valkey_port() {
+  awk '$1 == "port" { p = $2 } $1 == "tls-port" { t = $2 }
+    END { if (p == "0" && t != "" && t != "0") print t; else if (p == "") print 6379; else print p }' "$VALKEY_CONF" 2>/dev/null || echo 6379
+}
+
+# db_public_ports: the ports --listen-public opens (Valkey: its TLS port;
+# it has no plain one then).
+db_public_ports() { case $INSTALL_DB in valkey) echo 6380 ;; *) echo 3306 ;; esac; }
 
 # mysql_net_conf: the file --install-mysql/-mariadb keeps the network
 # settings in. MariaDB's packages read mariadb.conf.d after conf.d (and set
@@ -1463,7 +1482,8 @@ install_db_check() {
 }
 
 # repo_key FILE FINGERPRINT WHOSE KEYRING: a downloaded signing key, checked
-# (exactly one key, the pinned fingerprint, not expired), saved for apt.
+# (exactly one key, the pinned fingerprint, not expired, revoked, invalid
+# or disabled), saved for apt.
 repo_key() {
   have gpg || apt_install gnupg
   install -d -m 0700 "$TMP/gnupg"
@@ -1471,8 +1491,10 @@ repo_key() {
   _fpr=$(awk -F: '$1 == "fpr" { print $10; exit }' "$TMP/key.list")
   [ "$(grep -c '^pub:' "$TMP/key.list")" = 1 ] && [ "$_fpr" = "$2" ] ||
     die "$3 signing key isn't the expected one (fingerprint ${_fpr:-unreadable}); not installing $(engine_label "$INSTALL_DB")"
-  [ "$(awk -F: '$1 == "pub" { print $2; exit }' "$TMP/key.list")" != e ] ||
-    die "$3 signing key ($2) has expired, so apt wouldn't trust its packages; not installing $(engine_label "$INSTALL_DB"). Try again once its renewed key is published."
+  case $(awk -F: '$1 == "pub" { print $2; exit }' "$TMP/key.list") in
+    e) die "$3 signing key ($2) has expired, so apt wouldn't trust its packages; not installing $(engine_label "$INSTALL_DB"). Try again once its renewed key is published." ;;
+    r | i | d | n) die "$3 signing key ($2) is revoked or not valid; not installing $(engine_label "$INSTALL_DB")" ;;
+  esac
   GNUPGHOME=$TMP/gnupg gpg --batch --yes --dearmor -o "$TMP/key.gpg" "$1" 2>/dev/null || die "could not read $3 signing key"
   write_file "$4" 0644 root:root <"$TMP/key.gpg" || true
 }
@@ -1501,7 +1523,9 @@ mysql_repo() {
     echo "deb [signed-by=$MYSQL_KEYRING] https://repo.mysql.com/apt/$OS_ID $_codename mysql-8.4-lts" |
       write_file "$MYSQL_LIST" 0644 root:root || true
     printf '%s\n' "# Written by the Rowsafe installer (--install-mysql): MySQL's packages" \
-      "# come from Oracle's repository only." "Package: *" "Pin: origin repo.mysql.com" "Pin-Priority: 1000" |
+      "# come from Oracle's repository (and nothing else from it)." \
+      "Package: mysql-* libmysql*" "Pin: origin repo.mysql.com" "Pin-Priority: 600" "" \
+      "Package: *" "Pin: origin repo.mysql.com" "Pin-Priority: 100" |
       write_file "$MYSQL_PIN" 0644 root:root || true
     _what="Oracle's MySQL repository (repo.mysql.com, mysql-8.4-lts, key $MYSQL_KEY_FPR)"
   else
@@ -1511,7 +1535,8 @@ mysql_repo() {
       write_file "$MARIADB_LIST" 0644 root:root || true
     printf '%s\n' "# Written by the Rowsafe installer (--install-mariadb): MariaDB's packages" \
       "# come from MariaDB's repository only, never mixed with the distribution's." \
-      "Package: *" "Pin: release o=MariaDB" "Pin-Priority: 1000" |
+      "Package: mariadb-* libmariadb* galera-* mysql-common" "Pin: release o=MariaDB" "Pin-Priority: 600" "" \
+      "Package: *" "Pin: release o=MariaDB" "Pin-Priority: 100" |
       write_file "$MARIADB_PIN" 0644 root:root || true
     _what="MariaDB's repository (dlm.mariadb.com, $INSTALL_DB_VERSION, key $MARIADB_KEY_FPR)"
   fi
@@ -1736,12 +1761,27 @@ db_listen_public() {
 
 # mysql_listen_public: port 3306 on every address (IPv4 and IPv6), TLS
 # required for every login over TCP (the socket, which the agent and root
-# use, stays as it is), TLS 1.2 and 1.3 with a certificate made here.
+# use, stays as it is), TLS 1.2 and 1.3 with a certificate made here, in
+# $MYSQL_TLS_DIR (the mysql user's, 0750). A server set up before with the
+# files in its data directory gets them moved there (as the mysql user).
 mysql_listen_public() {
   _n=$(engine_label "$INSTALL_DB")
   step "Making $_n reachable from the network (TLS only)"
-  _d=$(mysql_datadir)
+  _data=$(mysql_datadir)
+  _d=$MYSQL_TLS_DIR
   _changed=0
+  [ ! -L "$_d" ] || die "$_d is a symbolic link; not using it"
+  install -d -m 0750 -o mysql -g mysql "$_d"
+  _moved=0
+  if [ ! -e "$_d/rowsafe-server.key" ] && [ -s "$_data/rowsafe-server.key" ] && [ -s "$_data/rowsafe-server.crt" ]; then
+    # shellcheck disable=SC2016 # $1 and $2 expand in the inner shell
+    (cd / && runuser -u mysql -- sh -c 'umask 077
+      cp "$1/rowsafe-server.key" "$2/rowsafe-server.key" && cp "$1/rowsafe-server.crt" "$2/rowsafe-server.crt" &&
+      chmod 0600 "$2/rowsafe-server.key" && chmod 0644 "$2/rowsafe-server.crt"' rowsafe-cert "$_data" "$_d") </dev/null ||
+      die "could not move $_n's certificate to $_d"
+    _moved=1
+    ok "moved $_n's certificate out of its data directory, to $_d"
+  fi
   if server_cert mysql "$_d" "$(cert_cn)" 0600; then
     ok "made a self-signed TLS certificate for $_n ($_d/rowsafe-server.crt)"
   fi
@@ -1767,6 +1807,10 @@ mysql_listen_public() {
   _on=$(echo 'SELECT @@require_secure_transport;' | mysql_root_sql 2>/dev/null)
   [ "$_on" = 1 ] || die "$_n doesn't require TLS for logins over the network (see $_f)"
   tls_serves 3306 "$_d/rowsafe-server.crt" mysql || die "$_n doesn't serve its TLS certificate on port 3306 (see its log)"
+  if [ "$_moved" = 1 ]; then # served from the new place: the old files go (as the mysql user)
+    # shellcheck disable=SC2016 # $1 expands in the inner shell
+    (cd / && runuser -u mysql -- sh -c 'rm -f "$1/rowsafe-server.key" "$1/rowsafe-server.crt"' rowsafe-cert "$_data") </dev/null || true
+  fi
   if [ "$_changed" = 0 ]; then
     ok "$_n listens on the network (port 3306, TLS only); nothing to change"
   else
@@ -1803,9 +1847,10 @@ valkey_conf_set() {
   return 0
 }
 
-# valkey_cli: valkey-cli on this server's plain port; the commands come on
-# stdin (a password never goes on a command line).
-valkey_cli() { (cd / && timeout 20 valkey-cli -p 6379); }
+# valkey_cli: valkey-cli on this server's Unix socket (root's; the plain
+# port is gone with --listen-public); the commands come on stdin (a
+# password never goes on a command line).
+valkey_cli() { (cd / && timeout 20 valkey-cli -s "$VALKEY_SOCK"); }
 
 # valkey_secure: the default user off, an administrator (admin) with a
 # random password that only root can read, users kept in an ACL file (the
@@ -1832,12 +1877,13 @@ valkey_secure() {
       die "could not write $VALKEY_ACL"
     _restart=1
   fi
-  if valkey_conf_set "aclfile $VALKEY_ACL" "appendonly yes" "appendfsync everysec"; then _restart=1; fi
+  if valkey_conf_set "aclfile $VALKEY_ACL" "appendonly yes" "appendfsync everysec" \
+    "unixsocket $VALKEY_SOCK" "unixsocketperm 700"; then _restart=1; fi
   if [ "$_restart" = 1 ]; then
     note "restarting the new Valkey with its users and settings"
     db_restart || die "restarting Valkey failed (see above)"
   fi
-  [ "$(echo PING | valkey_cli 2>&1 | head -n 1)" != PONG ] || die "Valkey still lets anyone in without a password on port 6379"
+  [ "$(echo PING | valkey_cli 2>&1 | head -n 1)" != PONG ] || die "Valkey still lets anyone in without a password"
   if [ -s "$VALKEY_ADMIN_PW_FILE" ]; then
     printf 'AUTH admin %s\nPING\n' "$(cat "$VALKEY_ADMIN_PW_FILE")" | valkey_cli >"$TMP/valkey.out" 2>&1 || true
     [ "$(sed -n 2p "$TMP/valkey.out")" = PONG ] || die "Valkey's administrator can't sign in (see $VALKEY_ACL)"
@@ -1856,10 +1902,12 @@ valkey_admin_login() {
 }
 
 # valkey_listen_public: TLS on port 6380 on every address (passwords only,
-# the default user is off), the plain port 6379 kept for the agent and this
-# server's tools (the firewall keeps it closed to everyone else). The
-# certificate's directory is the agent's (group valkey reads it): the agent
-# replaces the files with a certificate from Let's Encrypt.
+# the default user is off), and no plain TCP port at all (port 0): nothing
+# reaches Valkey unencrypted over the network. The agent connects to the
+# TLS port on the loopback address; this server's tools use the Unix
+# socket. The certificate's directory is the agent's (group valkey reads
+# it): the agent replaces the files with a certificate from Let's Encrypt.
+# A server set up before (plain port 6379) loses that port on a re-run.
 valkey_listen_public() {
   step "Making Valkey reachable from the network (TLS on port 6380)"
   getent group valkey >/dev/null 2>&1 || die "no valkey group on this server (Valkey's package makes it)"
@@ -1868,7 +1916,7 @@ valkey_listen_public() {
     ok "made a self-signed TLS certificate for Valkey ($VALKEY_TLS_DIR/rowsafe-server.crt)"
   fi
   _changed=0
-  if valkey_conf_set "bind * -::*" "port 6379" "tls-port 6380" \
+  if valkey_conf_set "bind * -::*" "port 0" "tls-port 6380" \
     "tls-cert-file $VALKEY_TLS_DIR/rowsafe-server.crt" "tls-key-file $VALKEY_TLS_DIR/rowsafe-server.key" \
     "tls-auth-clients no" 'tls-protocols "TLSv1.2 TLSv1.3"'; then
     _changed=1
@@ -7006,7 +7054,7 @@ disallow_pooler() {
     perm_note "chproxy set up by Rowsafe keeps running for your apps; Rowsafe can no longer change it or turn it off (sudo systemctl disable --now rowsafe-chproxy)."
   fi
   if [ -f /etc/pgbouncer/pgbouncer.ini ] && [ "$(head -n 1 /etc/pgbouncer/pgbouncer.ini)" = ';; Managed by Rowsafe' ]; then
-    perm_note "PgBouncer set up by Rowsafe keeps running for your apps; Rowsafe can no longer change it or turn it off."
+    perm_note "$(pooler_name) set up by Rowsafe keeps running for your apps; Rowsafe can no longer change it or turn it off."
   fi
 }
 
@@ -7574,8 +7622,8 @@ perm_desc() {
     updates) echo "install $(engine_label) updates and upgrades" ;;
     security-updates) echo "install this server's security updates" ;;
     reboot) echo "reboot this server (after an update)" ;;
-    pooler) echo "install and manage PgBouncer (pooling)" ;;
-    pooler-public) echo "let PgBouncer listen on public addresses" ;;
+    pooler) echo "install and manage $(pooler_name) (pooling)" ;;
+    pooler-public) echo "let $(pooler_name) listen on public addresses" ;;
     firewall) echo "limit who can reach the database (firewall)" ;;
     tuning) echo "change $(engine_label)'s settings (Tuning)" ;;
     sqlite-modes) echo "close the SQLite files to other users (Security)" ;;

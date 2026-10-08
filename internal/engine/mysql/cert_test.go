@@ -23,6 +23,13 @@ func TestServerTLSFiles(t *testing.T) {
 	if err != nil || st.CertFile != "/var/lib/mysql/rowsafe-server.crt" || st.KeyFile != "/var/lib/mysql/rowsafe-server.key" || st.KeyMode != 0o600 {
 		t.Fatalf("ours: %+v %v", st, err)
 	}
+	st, err = serverTLSFiles("MySQL", "/var/lib/mysql/", "/etc/mysql/rowsafe-tls/rowsafe-server.crt", "/etc/mysql/rowsafe-tls/rowsafe-server.key")
+	if err != nil || st.CertFile != "/etc/mysql/rowsafe-tls/rowsafe-server.crt" || st.KeyFile != "/etc/mysql/rowsafe-tls/rowsafe-server.key" {
+		t.Fatalf("outside the data directory: %+v %v", st, err)
+	}
+	if _, err := serverTLSFiles("MySQL", "/var/lib/mysql/", "/etc/mysql/rowsafe-tls/rowsafe-server.crt", "/var/lib/mysql/rowsafe-server.key"); err == nil {
+		t.Fatal("a certificate and key in different places: accepted")
+	}
 	if st, err := serverTLSFiles("MySQL", "/var/lib/mysql/", "", ""); err != nil || st.CertFile != "" {
 		t.Fatalf("TLS off: %+v %v", st, err)
 	}
