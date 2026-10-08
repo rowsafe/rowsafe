@@ -170,7 +170,7 @@ func (a *Agent) engineCertInstall(ctx context.Context, db protocol.DatabaseSpec,
 		for _, f := range []struct {
 			path string
 			old  saved
-		}{{st.KeyFile, oldKey}, {st.CertFile, oldCert}} {
+		}{{st.CertFile, oldCert}, {st.KeyFile, oldKey}} {
 			if f.old.ok {
 				_ = writeFileAtomic(f.path, f.old.data, f.old.mode)
 			} else {
@@ -184,11 +184,14 @@ func (a *Agent) engineCertInstall(ctx context.Context, db protocol.DatabaseSpec,
 		return errors.New(why + "; the previous certificate is back, nothing restarted")
 	}
 
-	if err := writeFileAtomic(st.KeyFile, keyPEM, keyMode); err != nil {
-		return nil, rollback("writing the key failed: " + err.Error())
-	}
+	// The certificate first, then its key, each replaced in one rename: a
+	// server that loads new files by itself (ClickHouse) sees the new pair
+	// as soon as the key lands, and a failed write is put back.
 	if err := writeFileAtomic(st.CertFile, chainPEM, 0o644); err != nil {
 		return nil, rollback("writing the certificate failed: " + err.Error())
+	}
+	if err := writeFileAtomic(st.KeyFile, keyPEM, keyMode); err != nil {
+		return nil, rollback("writing the key failed: " + err.Error())
 	}
 	tl.Printf("wrote the certificate for %s and its key to %s and %s", joinAnd(p.Names), st.CertFile, st.KeyFile)
 	if err := st.Reload(ctx); err != nil {

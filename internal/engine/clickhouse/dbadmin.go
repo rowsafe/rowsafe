@@ -265,16 +265,26 @@ func (d *chdba) exec(ctx context.Context, shown, q string) error {
 	return nil
 }
 
+// AppProfile is the settings profile the installer's --install-clickhouse
+// defines for apps' users (memory and threads a query may use, with
+// constraints so they can't raise them): users made in Databases & users
+// get it where it exists (servers Rowsafe created).
+const AppProfile = "rowsafe_app"
+
 // createUserSQL creates name with a new password, signing in from
 // anywhere (where ClickHouse listens and the firewall decide who reaches
-// it).
+// it), with the apps' settings profile where the server has one.
 func (d *chdba) createUserSQL(ctx context.Context, name string) error {
 	pw, err := agent.NewDBPassword()
 	if err != nil {
 		return err
 	}
 	d.pw = pw
-	return d.exec(ctx, "created the user "+name, "CREATE USER "+quoteIdent(name)+" IDENTIFIED WITH sha256_password BY "+quoteString(pw)+" HOST ANY")
+	profile := ""
+	if n, err := d.c.scalar(ctx, "SELECT count() FROM system.settings_profiles WHERE name = {n:String}", map[string]string{"n": AppProfile}); err == nil && strings.TrimSpace(n) != "0" {
+		profile = " SETTINGS PROFILE " + quoteString(AppProfile)
+	}
+	return d.exec(ctx, "created the user "+name, "CREATE USER "+quoteIdent(name)+" IDENTIFIED WITH sha256_password BY "+quoteString(pw)+" HOST ANY"+profile)
 }
 
 func (d *chdba) createDatabase(ctx context.Context) error {

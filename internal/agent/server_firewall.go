@@ -89,19 +89,18 @@ func (a *Agent) serverFirewall(ctx context.Context, p protocol.ServerFirewallPar
 	}
 	firewallMu.Lock()
 	defer firewallMu.Unlock()
-	// One request per port (the helper sets one database port at a time),
-	// each with both lists: SSH's is the same every time.
-	for _, port := range want {
-		tl.Printf("asking the firewall helper to let %s reach %s (port %d) and %s reach SSH",
-			sourcesLog(pg), dbName, port, sourcesLog(ssh))
-		err = a.firewallRequest(ctx, fwServer, port, map[string][]string{"addresses": pg, "ssh-addresses": ssh},
-			func(ctx context.Context) error {
-				tl.Printf("rules in place; checking the agent still reaches Rowsafe")
-				return a.reachesControlPlane(ctx)
-			}, tl)
-		if err != nil {
-			return nil, err
-		}
+	// One request for every port (ClickHouse: 9440 and 8443): the helper
+	// sets them and SSH's list together, and puts them all back unless
+	// the agent confirms.
+	tl.Printf("asking the firewall helper to let %s reach %s (%s) and %s reach SSH",
+		sourcesLog(pg), dbName, portsLog(want), sourcesLog(ssh))
+	err = a.firewallRequest(ctx, fwServer, want, map[string][]string{"addresses": pg, "ssh-addresses": ssh},
+		func(ctx context.Context) error {
+			tl.Printf("rules in place; checking the agent still reaches Rowsafe")
+			return a.reachesControlPlane(ctx)
+		}, tl)
+	if err != nil {
+		return nil, err
 	}
 	res := &protocol.ServerFirewallResult{Port: want[0], Postgres: pg, SSH: ssh, Engine: p.Engine}
 	if len(want) > 1 {
@@ -167,6 +166,18 @@ func parseFirewallSources(what string, in []string) ([]string, error) {
 	return out, nil
 }
 
+// portsLog is "port 5432" or "ports 9440 and 8443".
+func portsLog(ports []int) string {
+	ps := make([]string, len(ports))
+	for i, p := range ports {
+		ps[i] = strconv.Itoa(p)
+	}
+	if len(ps) == 1 {
+		return "port " + ps[0]
+	}
+	return "ports " + strings.Join(ps[:len(ps)-1], ", ") + " and " + ps[len(ps)-1]
+}
+
 func sourcesLog(s []string) string {
 	if len(s) == 0 {
 		return "no one"
@@ -203,13 +214,9 @@ func serverFirewallSummary(r *protocol.ServerFirewallResult) string {
 			return "only " + strings.Join(list, ", ") + " can reach " + what
 		}
 	}
-	dbPorts := fmt.Sprintf("port %d", r.Port)
+	dbPorts := portsLog([]int{r.Port})
 	if len(r.Ports) > 1 {
-		ps := make([]string, len(r.Ports))
-		for i, p := range r.Ports {
-			ps[i] = strconv.Itoa(p)
-		}
-		dbPorts = "ports " + strings.Join(ps[:len(ps)-1], ", ") + " and " + ps[len(ps)-1]
+		dbPorts = portsLog(r.Ports)
 	}
 	s := part(r.Postgres, fmt.Sprintf("%s (%s)", protocol.EngineDisplayName(r.Engine), dbPorts)) + ", and " + part(r.SSH, sshPort) +
 		". Other ports and outgoing connections are unchanged."

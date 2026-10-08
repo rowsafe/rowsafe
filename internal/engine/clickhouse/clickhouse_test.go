@@ -387,6 +387,16 @@ func TestUsersXMLAndStatus(t *testing.T) {
 	if fi, err := os.Stat(loginPath(env, 8123)); err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatal(fi, err)
 	}
+	// Customers' own installs: no SYSTEM RELOAD CONFIG; servers Rowsafe
+	// created: it and the system tables, named explicitly.
+	if strings.Contains(x, "SYSTEM RELOAD CONFIG") || strings.Contains(x, "ON system.*") {
+		t.Fatalf("own install: %s", x)
+	}
+	if x, err := UsersXMLFor(env, 8123, UsersXMLOptions{RowsafeServer: true}); err != nil ||
+		!strings.Contains(x, "<query>GRANT SYSTEM RELOAD CONFIG ON *.*</query>") || !strings.Contains(x, "<query>GRANT SELECT ON system.*</query>") ||
+		strings.Contains(x[strings.Index(x, "<!--")+4:strings.Index(x, "-->")], "--") { // XML comments can't hold "--"
+		t.Fatalf("server Rowsafe created: %s %v", x, err)
+	}
 	var b bytes.Buffer
 	Status{Port: 8123, Version: "25.8.1.1", Login: "ok", Replicated: "0"}.WriteTo(&b)
 	if b.String() != "port=8123\nversion=25.8.1.1\nlogin=ok\nuser=-\ndatadir=-\nconfig=-\nusersd=-\nunit=-\nbinary=-\nreplicated=0\ndocker=no\n" {

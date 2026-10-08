@@ -193,8 +193,9 @@ func TestServerFirewallRefusals(t *testing.T) {
 	}
 }
 
-// A database with two ports (ClickHouse: 9440 and 8443): one request per
-// port, each with the same lists, and a summary naming both.
+// A database with two ports (ClickHouse: 9440 and 8443): one request for
+// both (the helper sets and confirms them together, or puts both back),
+// and a summary naming both.
 func TestServerFirewallSeveralPorts(t *testing.T) {
 	a, h := serverFirewallSetup(t, "9440\n8443\nssh\n", true)
 	res, err := a.serverFirewall(context.Background(), protocol.ServerFirewallParams{Postgres: []string{"203.0.113.4"},
@@ -202,10 +203,10 @@ func TestServerFirewallSeveralPorts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := h.requests.Load(); n != 2 {
+	if n := h.requests.Load(); n != 1 {
 		t.Fatalf("the helper got %d requests", n)
 	}
-	if files := h.last.Load().(map[string]string); !strings.HasSuffix(files["request"], " server 8443") || files["addresses"] != "203.0.113.4/32\n" {
+	if files := h.last.Load().(map[string]string); !strings.HasSuffix(files["request"], " server 9440,8443") || files["addresses"] != "203.0.113.4/32\n" {
 		t.Fatalf("last request %q", files)
 	}
 	if res.Port != 9440 || !slices.Equal(res.Ports, []int{9440, 8443}) ||
@@ -217,7 +218,7 @@ func TestServerFirewallSeveralPorts(t *testing.T) {
 		!strings.Contains(err.Error(), "port 9000 is not in root's") {
 		t.Fatalf("unlisted second port: %v", err)
 	}
-	if n := h.requests.Load(); n != 2 {
+	if n := h.requests.Load(); n != 1 {
 		t.Fatalf("the helper got %d requests", n)
 	}
 }

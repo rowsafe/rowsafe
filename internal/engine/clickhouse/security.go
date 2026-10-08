@@ -50,12 +50,15 @@ func (e *Engine) SecurityReport(ctx context.Context, env agent.EngineEnv, spec p
 	if rep.ListenAddresses == "" {
 		rep.ListenAddresses = "localhost" // ClickHouse's default
 	}
-	httpsPort := 0
+	httpsPort, nativePort := 0, 0
 	for _, p := range []string{"https_port", "tcp_port_secure"} {
 		if out, err := c.scalar(ctx, "SELECT getServerPort('"+p+"')", nil); err == nil && strings.TrimSpace(out) != "" && strings.TrimSpace(out) != "0" {
 			rep.SSL = true
+			n, _ := strconv.Atoi(strings.TrimSpace(out))
 			if p == "https_port" {
-				httpsPort, _ = strconv.Atoi(strings.TrimSpace(out))
+				httpsPort = n
+			} else {
+				nativePort = n
 			}
 		}
 	}
@@ -65,10 +68,13 @@ func (e *Engine) SecurityReport(ctx context.Context, env agent.EngineEnv, spec p
 		_, errTCP := c.scalar(ctx, "SELECT getServerPort('tcp_port')", nil)
 		es.RequireTLS = errHTTP != nil && errTCP != nil
 		// Servers Rowsafe creates: the agent's HTTP port listens on the
-		// server itself only (a <protocols> entry), apps reach HTTPS; the
-		// look from the internet is at the HTTPS port.
+		// server itself only (a <protocols> entry), apps reach HTTPS and the
+		// native protocol with TLS; the look from the internet is at both.
 		if es.RequireTLS && httpsPort > 0 {
 			rep.Port = httpsPort
+			if nativePort > 0 && nativePort != httpsPort {
+				rep.OutsidePorts = []int{nativePort}
+			}
 		}
 	}
 

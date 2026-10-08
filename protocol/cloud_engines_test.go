@@ -36,7 +36,7 @@ func TestCloudEngines(t *testing.T) {
 		t.Error("mongodb offered")
 	}
 	if e, ok := CloudEngineFor("clickhouse"); !ok || e.Port != 9440 || e.PortsText() != "9440 and 8443" || e.DefaultVersion != "26.8" ||
-		e.InstallFlag() != "--install-clickhouse" || e.FitsMemory(2048) || !e.FitsMemory(4096) || e.Standby || e.Clone || e.AMD64Only {
+		e.InstallFlag() != "--install-clickhouse" || e.FitsMemory(2048) || e.FitsMemory(0) || !e.FitsMemory(4096) || e.Standby || e.Clone || e.AMD64Only {
 		t.Errorf("clickhouse: %+v", e)
 	}
 	if e, _ := CloudEngineFor(""); e.PortsText() != "5432" || len(e.FirewallPorts()) != 1 || !e.FitsMemory(1024) {

@@ -84,6 +84,9 @@ func armRefusal(e protocol.CloudEngine, z client.CloudSize) error {
 	if e.AMD64Only && z.Arch == "arm64" {
 		return fmt.Errorf("%s's own packages are built for Intel and AMD processors only, and the size %s has an Arm processor: choose another --size or --cloud", e.Name, z.ID)
 	}
+	if !e.FitsMemory(z.MemoryGB*1024) && z.MemoryGB == 0 {
+		return fmt.Errorf("%s needs a server with at least %d GB of memory, and Rowsafe can't tell how much the size %s has: choose another --size", e.Name, e.MinMemoryMB/1024, z.ID)
+	}
 	if !e.FitsMemory(z.MemoryGB * 1024) {
 		return fmt.Errorf("%s needs a server with at least %d GB of memory, and the size %s has %d GB: choose a bigger --size", e.Name, e.MinMemoryMB/1024, z.ID, z.MemoryGB)
 	}

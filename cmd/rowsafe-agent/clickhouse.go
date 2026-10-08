@@ -28,11 +28,13 @@ for, is read from stdin (one line) and never stored (except the agent's own).
       clickhouse program restore tests and copies use. Exit 0 when the
       server answered, 1 when nothing answers on PORT (its HTTP port).
 
-  rowsafe-agent clickhouse login --port PORT --users-xml
+  rowsafe-agent clickhouse login --port PORT --users-xml [--rowsafe-server]
       Make a new random password for ClickHouse user "rowsafe", save the
       login for the agent only, and print the users.d file that creates the
       user (root installs it as /etc/clickhouse-server/users.d/rowsafe.xml,
       root:clickhouse 0640; ClickHouse loads it within seconds).
+      --rowsafe-server (servers Rowsafe created, --install-clickhouse): it
+      may also SYSTEM RELOAD CONFIG (a renewed certificate) and read system.
 
   rowsafe-agent clickhouse login --port PORT [--admin-user NAME]
       Create (or refresh) "rowsafe" with SQL (CREATE USER, GRANT) with an
@@ -79,6 +81,7 @@ func clickhouseCmd(ctx context.Context, args []string) int {
 	adminUser := fs.String("admin-user", "", "administrator user (password on stdin)")
 	usersXML := fs.Bool("users-xml", false, "print a users.d file instead of creating the user with SQL")
 	clones := fs.Bool("clones", false, "also let Rowsafe create and drop databases and tables, so this (empty) server can receive clones")
+	rowsafeServer := fs.Bool("rowsafe-server", false, "a server Rowsafe created (--install-clickhouse): also SYSTEM RELOAD CONFIG and SELECT on system (with --users-xml)")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
@@ -110,7 +113,7 @@ func clickhouseCmd(ctx context.Context, args []string) int {
 	case "login":
 		if *usersXML {
 			var xml string
-			if xml, err = clickhouse.UsersXMLWith(env, *port, *clones); err == nil {
+			if xml, err = clickhouse.UsersXMLFor(env, *port, clickhouse.UsersXMLOptions{Clones: *clones, RowsafeServer: *rowsafeServer}); err == nil {
 				fmt.Print(xml)
 			}
 			break

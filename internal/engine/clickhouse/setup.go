@@ -124,18 +124,40 @@ func UsersXML(env agent.EngineEnv, port int) (string, error) { return UsersXMLWi
 // UsersXMLWith is UsersXML; with clones the user may also create and drop
 // databases and tables, so the (empty) server can receive clones.
 func UsersXMLWith(env agent.EngineEnv, port int, clones bool) (string, error) {
+	return UsersXMLFor(env, port, UsersXMLOptions{Clones: clones})
+}
+
+// UsersXMLOptions are what a users.d file for Rowsafe's user may add.
+type UsersXMLOptions struct {
+	// Clones: create and drop databases and tables (an empty server that
+	// receives clones).
+	Clones bool
+	// RowsafeServer: a server Rowsafe created (the installer's
+	// --install-clickhouse): SYSTEM RELOAD CONFIG, to load a renewed
+	// certificate for the server's Rowsafe Cloud name without a restart,
+	// and reading the system tables named explicitly (its access control
+	// requires a grant for them). Never on customers' own installs.
+	RowsafeServer bool
+}
+
+// UsersXMLFor is UsersXML with options.
+func UsersXMLFor(env agent.EngineEnv, port int, o UsersXMLOptions) (string, error) {
 	pw := randomPassword()
 	if err := saveLogin(env, port, Login{User: LoginUser, Password: pw}); err != nil {
 		return "", err
 	}
 	sum := sha256.Sum256([]byte(pw))
+	extraNote, extraGrants := "", ""
+	if o.RowsafeServer {
+		extraNote = "\n     SELECT on system and SYSTEM RELOAD CONFIG (servers Rowsafe created): read the server's health, load a renewed certificate without a restart."
+		extraGrants = "\n        <query>GRANT SELECT ON system.*</query>\n        <query>GRANT SYSTEM RELOAD CONFIG ON *.*</query>"
+	}
 	return fmt.Sprintf(`<!-- Rowsafe's ClickHouse user (written by the Rowsafe installer). It signs in from this server only.
      SELECT, BACKUP: back up every database and compare tables with a copy; INSERT: bring rows back when you ask;
      KILL QUERY, ALTER UPDATE, ALTER DELETE: stop a query or cancel a stuck change when you ask;
      S3: write backups to the agent's encrypting gateway on this server;
      access management, and creating databases and tables WITH GRANT OPTION: Databases & users, only when you ask in the dashboard;
-     CREATE, DROP (DATABASE, TABLE), ALTER TABLE: rewind the whole server in place when you ask (restore next to production, swap partitions);
-     SYSTEM RELOAD CONFIG: load a renewed TLS certificate without a restart (servers Rowsafe created). -->
+     CREATE, DROP (DATABASE, TABLE), ALTER TABLE: rewind the whole server in place when you ask (restore next to production, swap partitions).%[5]s -->
 <clickhouse>
   <users>
     <%[1]s>
@@ -149,13 +171,12 @@ func UsersXMLWith(env agent.EngineEnv, port int, clones bool) (string, error) {
       <grants>
         <query>GRANT %[3]s ON *.*</query>
         <query>GRANT %[4]s ON *.* WITH GRANT OPTION</query>
-        <query>GRANT ACCESS MANAGEMENT ON *.*</query>
-        <query>GRANT SYSTEM RELOAD CONFIG ON *.*</query>
+        <query>GRANT ACCESS MANAGEMENT ON *.*</query>%[6]s
       </grants>
     </%[1]s>
   </users>
 </clickhouse>
-`, LoginUser, hex.EncodeToString(sum[:]), loginGrantsSQL(clones), chOwner+", CREATE DATABASE, DROP DATABASE"), nil
+`, LoginUser, hex.EncodeToString(sum[:]), loginGrantsSQL(o.Clones), chOwner+", CREATE DATABASE, DROP DATABASE", extraNote, extraGrants), nil
 }
 
 // cloneGrants are what receiving a clone needs beyond neededGrants: RESTORE

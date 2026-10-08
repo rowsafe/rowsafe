@@ -132,10 +132,11 @@ func (e CloudEngine) PortsText() string {
 	return strings.Join(s[:len(s)-1], ", ") + " and " + s[len(s)-1]
 }
 
-// FitsMemory reports whether a server with memoryMB of memory can run it
-// (0: unknown, allowed; the installer checks again on the server).
+// FitsMemory reports whether a server with memoryMB of memory can run it.
+// An engine that needs a minimum isn't risked on a size whose memory
+// isn't known (0); the installer checks again on the server.
 func (e CloudEngine) FitsMemory(memoryMB int) bool {
-	return e.MinMemoryMB == 0 || memoryMB == 0 || memoryMB >= e.MinMemoryMB
+	return e.MinMemoryMB == 0 || memoryMB >= e.MinMemoryMB
 }
 
 // HasVersion reports whether a new server can get version v.

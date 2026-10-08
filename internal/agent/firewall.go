@@ -178,7 +178,7 @@ func (a *Agent) firewall(ctx context.Context, db protocol.DatabaseSpec, p protoc
 	tl.Printf("asking the firewall helper to %s the rule for port %d", action, db.Port)
 	firewallMu.Lock()
 	defer firewallMu.Unlock()
-	err := a.firewallRequest(ctx, action, db.Port, files, func(ctx context.Context) error {
+	err := a.firewallRequest(ctx, action, []int{db.Port}, files, func(ctx context.Context) error {
 		// The rule is in place: confirm only if Rowsafe and PostgreSQL are
 		// still reachable, else the helper rolls it back by itself.
 		tl.Printf("rule in place; checking the agent still reaches Rowsafe and %s", protocol.EngineDisplayName(db.Engine))
@@ -205,7 +205,7 @@ func (a *Agent) firewall(ctx context.Context, db protocol.DatabaseSpec, p protoc
 // When the helper answers phase=pending (the new rules are loaded), the
 // agent confirms only if check passes; otherwise the helper puts the
 // previous rules back by itself. The caller holds firewallMu.
-func (a *Agent) firewallRequest(ctx context.Context, action string, port int, files map[string][]string,
+func (a *Agent) firewallRequest(ctx context.Context, action string, ports []int, files map[string][]string,
 	check func(context.Context) error, tl *taskLog) error {
 	id := newFirewallID()
 	dir := a.firewallDir()
@@ -220,7 +220,12 @@ func (a *Agent) firewallRequest(ctx context.Context, action string, port int, fi
 		}
 	}
 	_ = os.Remove(filepath.Join(dir, "confirm"))
-	if err := writeFileAtomic(filepath.Join(dir, "request"), fmt.Appendf(nil, "%s %s %d\n", id, action, port), 0o600); err != nil {
+	// One port, or several for "server" ("9440,8443"): set and confirmed together.
+	ps := make([]string, len(ports))
+	for i, p := range ports {
+		ps[i] = strconv.Itoa(p)
+	}
+	if err := writeFileAtomic(filepath.Join(dir, "request"), fmt.Appendf(nil, "%s %s %s\n", id, action, strings.Join(ps, ",")), 0o600); err != nil {
 		return err
 	}
 	resPath := filepath.Join(firewallResultDir, "result")
