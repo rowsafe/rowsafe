@@ -68,33 +68,45 @@ func (a *Agent) serverFirewall(ctx context.Context, p protocol.ServerFirewallPar
 	if !sshAllowed {
 		return nil, errors.New("root didn't let Rowsafe set who may reach SSH on this server (the installer's --firewall-ssh, used only on servers Rowsafe creates)")
 	}
-	port := p.Port
-	if port == 0 {
+	want := slices.Clone(p.Ports)
+	if len(want) == 0 {
+		want = []int{p.Port}
+	}
+	if len(want) == 1 && want[0] == 0 {
 		if len(ports) != 1 {
 			return nil, fmt.Errorf("root's firewall allow list (%s) has %d %s ports: say which one", firewallAllowFile, len(ports), dbName)
 		}
-		for port = range ports {
+		for want[0] = range ports {
 		}
 	}
-	if !ports[port] {
-		return nil, fmt.Errorf("port %d is not in root's firewall allow list (%s)", port, firewallAllowFile)
+	for i, port := range want {
+		if !ports[port] || slices.Contains(want[:i], port) {
+			return nil, fmt.Errorf("port %d is not in root's firewall allow list (%s)", port, firewallAllowFile)
+		}
 	}
 	if _, err := os.Stat(a.firewallDir()); err != nil {
 		return nil, errors.New("the firewall helper is not set up on this server: root sets it up with the installer's --allow-firewall --firewall-ssh")
 	}
-	tl.Printf("asking the firewall helper to let %s reach %s (port %d) and %s reach SSH",
-		sourcesLog(pg), dbName, port, sourcesLog(ssh))
 	firewallMu.Lock()
 	defer firewallMu.Unlock()
-	err = a.firewallRequest(ctx, fwServer, port, map[string][]string{"addresses": pg, "ssh-addresses": ssh},
-		func(ctx context.Context) error {
-			tl.Printf("rules in place; checking the agent still reaches Rowsafe")
-			return a.reachesControlPlane(ctx)
-		}, tl)
-	if err != nil {
-		return nil, err
+	// One request per port (the helper sets one database port at a time),
+	// each with both lists: SSH's is the same every time.
+	for _, port := range want {
+		tl.Printf("asking the firewall helper to let %s reach %s (port %d) and %s reach SSH",
+			sourcesLog(pg), dbName, port, sourcesLog(ssh))
+		err = a.firewallRequest(ctx, fwServer, port, map[string][]string{"addresses": pg, "ssh-addresses": ssh},
+			func(ctx context.Context) error {
+				tl.Printf("rules in place; checking the agent still reaches Rowsafe")
+				return a.reachesControlPlane(ctx)
+			}, tl)
+		if err != nil {
+			return nil, err
+		}
 	}
-	res := &protocol.ServerFirewallResult{Port: port, Postgres: pg, SSH: ssh, Engine: p.Engine}
+	res := &protocol.ServerFirewallResult{Port: want[0], Postgres: pg, SSH: ssh, Engine: p.Engine}
+	if len(want) > 1 {
+		res.Ports = want
+	}
 	if data, err := os.ReadFile(filepath.Join(firewallResultDir, "ssh")); err == nil {
 		for _, f := range strings.Split(parseKeyValues(string(data))["ports"], ",") {
 			if n, err := strconv.Atoi(strings.TrimSpace(f)); err == nil && n > 0 && n < 65536 {
@@ -191,7 +203,15 @@ func serverFirewallSummary(r *protocol.ServerFirewallResult) string {
 			return "only " + strings.Join(list, ", ") + " can reach " + what
 		}
 	}
-	s := part(r.Postgres, fmt.Sprintf("%s (port %d)", protocol.EngineDisplayName(r.Engine), r.Port)) + ", and " + part(r.SSH, sshPort) +
+	dbPorts := fmt.Sprintf("port %d", r.Port)
+	if len(r.Ports) > 1 {
+		ps := make([]string, len(r.Ports))
+		for i, p := range r.Ports {
+			ps[i] = strconv.Itoa(p)
+		}
+		dbPorts = "ports " + strings.Join(ps[:len(ps)-1], ", ") + " and " + ps[len(ps)-1]
+	}
+	s := part(r.Postgres, fmt.Sprintf("%s (%s)", protocol.EngineDisplayName(r.Engine), dbPorts)) + ", and " + part(r.SSH, sshPort) +
 		". Other ports and outgoing connections are unchanged."
 	return strings.ToUpper(s[:1]) + s[1:]
 }

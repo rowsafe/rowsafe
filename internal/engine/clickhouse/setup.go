@@ -134,7 +134,8 @@ func UsersXMLWith(env agent.EngineEnv, port int, clones bool) (string, error) {
      KILL QUERY, ALTER UPDATE, ALTER DELETE: stop a query or cancel a stuck change when you ask;
      S3: write backups to the agent's encrypting gateway on this server;
      access management, and creating databases and tables WITH GRANT OPTION: Databases & users, only when you ask in the dashboard;
-     CREATE, DROP (DATABASE, TABLE), ALTER TABLE: rewind the whole server in place when you ask (restore next to production, swap partitions). -->
+     CREATE, DROP (DATABASE, TABLE), ALTER TABLE: rewind the whole server in place when you ask (restore next to production, swap partitions);
+     SYSTEM RELOAD CONFIG: load a renewed TLS certificate without a restart (servers Rowsafe created). -->
 <clickhouse>
   <users>
     <%[1]s>
@@ -149,6 +150,7 @@ func UsersXMLWith(env agent.EngineEnv, port int, clones bool) (string, error) {
         <query>GRANT %[3]s ON *.*</query>
         <query>GRANT %[4]s ON *.* WITH GRANT OPTION</query>
         <query>GRANT ACCESS MANAGEMENT ON *.*</query>
+        <query>GRANT SYSTEM RELOAD CONFIG ON *.*</query>
       </grants>
     </%[1]s>
   </users>

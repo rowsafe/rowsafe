@@ -66,6 +66,16 @@ func TestProbeClickHouse(t *testing.T) {
 	if r.State != protocol.OutsideAsksPassword {
 		t.Errorf("%+v", r)
 	}
+	// An HTTPS port (servers Rowsafe creates: 8443): asked again over TLS.
+	tlsAuth := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("Code: 516. DB::Exception: default: Authentication failed"))
+	}))
+	defer tlsAuth.Close()
+	r = ProbeEngine(context.Background(), protocol.EngineClickHouse, strings.TrimPrefix(tlsAuth.URL, "https://"), Options{})
+	if r.State != protocol.OutsideAsksPassword || r.PlainLogins || !strings.HasSuffix(r.Detail, "(over TLS)") {
+		t.Errorf("over TLS: %+v", r)
+	}
 	r = ProbeEngine(context.Background(), protocol.EngineMongoDB, "127.0.0.1:1", Options{})
 	if r.State != protocol.OutsideClosed {
 		t.Errorf("%+v", r)

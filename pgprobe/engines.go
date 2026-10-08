@@ -102,6 +102,21 @@ func probeMySQL(ctx context.Context, addr string, o Options) Result {
 }
 
 func probeClickHouseHTTP(ctx context.Context, addr string, o Options) Result {
+	res := probeClickHouseOnce(ctx, addr, o, false)
+	if res.Reachable && res.State == protocol.OutsideNotPostgres {
+		// An HTTPS port (servers Rowsafe creates: ClickHouse's 8443, the
+		// plain ports on the server itself only) doesn't answer plain HTTP:
+		// ask again over TLS.
+		if t := probeClickHouseOnce(ctx, addr, o, true); t.State != protocol.OutsideNotPostgres && t.State != protocol.OutsideError {
+			t.PlainLogins, t.TLS = false, true
+			t.Detail += " (over TLS)"
+			return t
+		}
+	}
+	return res
+}
+
+func probeClickHouseOnce(ctx context.Context, addr string, o Options, overTLS bool) Result {
 	conn, err := dial(ctx, addr, o)
 	if err != nil {
 		return dialFailure(err)
@@ -109,10 +124,17 @@ func probeClickHouseHTTP(ctx context.Context, addr string, o Options) Result {
 	conn.Close()
 	tr := &http.Transport{DialContext: func(ctx context.Context, network, a string) (net.Conn, error) { return dial(ctx, addr, o) },
 		DisableKeepAlives: true}
+	scheme := "http"
+	if overTLS {
+		scheme = "https"
+		// Only whether ClickHouse lets strangers in: its certificate isn't checked.
+		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12} //nolint:gosec // a look from outside, nothing sent
+		tr.DialTLSContext = nil
+	}
 	defer tr.CloseIdleConnections()
 	c := &http.Client{Transport: tr, Timeout: o.DialTimeout + o.ReadTimeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/?query=SELECT%201", nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, scheme+"://"+addr+"/?query=SELECT%201", nil)
 	resp, err := c.Do(req)
 	if err != nil {
 		return Result{Reachable: true, State: protocol.OutsideNotPostgres, Detail: "Something answers on this port, but not like ClickHouse's HTTP interface does."}
@@ -133,6 +155,9 @@ func probeClickHouseHTTP(ctx context.Context, addr string, o Options) Result {
 			Detail: "ClickHouse answers from the internet and asks for a password: anyone can try to guess one."}
 	case strings.Contains(text, "Code: 195"):
 		return Result{Reachable: true, State: protocol.OutsideRefusesLogins, Detail: "ClickHouse answers but doesn't let this address log in."}
+	case resp.StatusCode == http.StatusBadRequest && (overTLS || strings.Contains(text, "HTTPS")):
+		// A web server, or plain HTTP sent to an HTTPS port.
+		return Result{Reachable: true, State: protocol.OutsideNotPostgres, Detail: "Something answers on this port, but not like ClickHouse's HTTP interface does."}
 	}
 	return Result{Reachable: true, State: protocol.OutsideAsksPassword, Detail: fmt.Sprintf("ClickHouse answers from the internet (HTTP %d).", resp.StatusCode)}
 }
