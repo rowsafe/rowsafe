@@ -23,7 +23,7 @@ import "time"
 type CreateCloudServerParams struct {
 	Where string `json:"where,omitempty" jsonschema:"set by Rowsafe: rowsafe (Rowsafe Cloud)"`
 	// Engine is one of CloudEngines ("" is PostgreSQL).
-	Engine string `json:"engine,omitempty" jsonschema:"the database: postgresql (the default), mysql, mariadb or valkey (cloud_catalog lists them with their versions and ports)"`
+	Engine string `json:"engine,omitempty" jsonschema:"the database: postgresql (the default), mysql, mariadb, valkey or clickhouse (cloud_catalog lists them with their versions, ports and the sizes they need)"`
 	// Name is the server's name and its database's.
 	Name string `json:"name" jsonschema:"the server's name, also its database's: 2 to 40 lowercase letters, digits and hyphens, starting with a letter (like shop-db)"`
 	// Region decides the cloud (region IDs are unique across clouds).
@@ -31,7 +31,7 @@ type CreateCloudServerParams struct {
 	Size   string `json:"size" jsonschema:"a size ID from cloud_catalog offered in that region and not sold out there (small, medium, ...)"`
 	// EngineVersion is the engine's version ("" is its default:
 	// CloudEngine.DefaultVersion).
-	EngineVersion string `json:"engine_version,omitempty" jsonschema:"the engine's version (default: the newest that Rowsafe recommends): PostgreSQL 15, 16, 17 or 18 (default 17); MySQL 8.4; MariaDB 11.8; Valkey 8"`
+	EngineVersion string `json:"engine_version,omitempty" jsonschema:"the engine's version (default: the newest that Rowsafe recommends): PostgreSQL 15, 16, 17 or 18 (default 17); MySQL 8.4; MariaDB 11.8; Valkey 8; ClickHouse 26.3 or 26.8 (default 26.8)"`
 	// AllowedIPs may connect to the database; empty: nobody until
 	// cloud_firewall opens it.
 	AllowedIPs []string `json:"allowed_ips,omitempty" jsonschema:"who can connect to the database: IP addresses or networks (203.0.113.4 or 203.0.113.0/24); empty: nobody until cloud_firewall opens it"`

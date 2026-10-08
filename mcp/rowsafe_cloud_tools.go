@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"net"
 	"slices"
 	"strconv"
 	"strings"
@@ -44,6 +45,8 @@ type CatalogEngine struct {
 	Versions       []string `json:"versions" jsonschema:"what create_cloud_server's engine_version takes"`
 	DefaultVersion string   `json:"default_version"`
 	Port           int      `json:"port" jsonschema:"where apps connect, always with TLS"`
+	Ports          []int    `json:"ports,omitempty" jsonschema:"every port apps connect to when there are several (ClickHouse: 9440 native protocol, 8443 HTTPS)"`
+	MinMemoryGB    int      `json:"min_memory_gb,omitempty" jsonschema:"sizes with less memory can't run it"`
 	Standby        bool     `json:"standby" jsonschema:"a standby server can be added"`
 	Note           string   `json:"note,omitempty"`
 }
@@ -96,7 +99,7 @@ type CloudServerView struct {
 	Step       string   `json:"step,omitempty" jsonschema:"where it is, in plain words"`
 	Problem    string   `json:"problem,omitempty"`
 	Price      string   `json:"price,omitempty"`
-	Engine     string   `json:"engine,omitempty" jsonschema:"the database: postgresql, mysql, mariadb or valkey"`
+	Engine     string   `json:"engine,omitempty" jsonschema:"the database: postgresql, mysql, mariadb, valkey or clickhouse"`
 	Version    string   `json:"version,omitempty" jsonschema:"the engine's version"`
 	PostgreSQL string   `json:"postgresql,omitempty" jsonschema:"the PostgreSQL major version (PostgreSQL servers)"`
 	Database   string   `json:"database,omitempty" jsonschema:"its database in Rowsafe (name), once ready: what database takes in the other tools"`
@@ -107,7 +110,10 @@ type CloudServerView struct {
 	Port     int    `json:"port,omitempty"`
 	SSLMode  string `json:"sslmode,omitempty" jsonschema:"require, or verify-full once a public certificate is installed (PostgreSQL's sslmode; every engine requires TLS)"`
 	// Connection is the connection string without user and password.
-	Connection  string     `json:"connection,omitempty" jsonschema:"the connection string with USER and PASSWORD to fill in (postgresql://, mysql:// or rediss://)"`
+	Connection string `json:"connection,omitempty" jsonschema:"the connection string with USER and PASSWORD to fill in (postgresql://, mysql://, rediss:// or clickhouse://)"`
+	// HTTPS is ClickHouse's HTTPS interface (port 8443), next to Connection
+	// (its native protocol with TLS, 9440).
+	HTTPS       string     `json:"https,omitempty" jsonschema:"ClickHouse servers: the HTTPS interface's URL (port 8443), for HTTP clients and drivers"`
 	CheckoutURL string     `json:"checkout_url,omitempty" jsonschema:"waiting for payment: where an owner pays"`
 	Standby     string     `json:"standby,omitempty"`
 	CloneOf     string     `json:"clone_of,omitempty"`
@@ -176,15 +182,23 @@ func (t *tools) cloudCatalog(ctx context.Context, _ *sdk.CallToolRequest, _ noIn
 		engines = protocol.CloudEngines[:1]
 	}
 	for _, e := range engines {
-		out.Engines = append(out.Engines, CatalogEngine{Engine: e.Engine, Name: e.Name, Versions: e.Versions, DefaultVersion: e.DefaultVersion,
-			Port: e.Port, Standby: e.Standby, Note: e.Note})
-		line := fmt.Sprintf("Database %s (engine %s): versions %s (default %s), apps connect on port %d with TLS", e.Name, e.Engine,
-			strings.Join(e.Versions, ", "), e.DefaultVersion, e.Port)
+		ce := CatalogEngine{Engine: e.Engine, Name: e.Name, Versions: e.Versions, DefaultVersion: e.DefaultVersion,
+			Port: e.Port, Standby: e.Standby, Note: e.Note, MinMemoryGB: e.MinMemoryMB / 1024}
+		ports := "port " + e.PortsText()
+		if len(e.Ports) > 1 {
+			ce.Ports, ports = e.Ports, "ports "+e.PortsText()
+		}
+		out.Engines = append(out.Engines, ce)
+		line := fmt.Sprintf("Database %s (engine %s): versions %s (default %s), apps connect on %s with TLS", e.Name, e.Engine,
+			strings.Join(e.Versions, ", "), e.DefaultVersion, ports)
 		if !e.Standby {
 			line += "; no standby server yet"
 		}
 		if e.AMD64Only {
 			line += "; not on arm64 sizes"
+		}
+		if e.MinMemoryMB > 0 {
+			line += fmt.Sprintf("; sizes with %d GB of memory or more", e.MinMemoryMB/1024)
 		}
 		b.line("%s.", line)
 	}
@@ -318,6 +332,9 @@ func (t *tools) getCloudServer(ctx context.Context, _ *sdk.CallToolRequest, in c
 			b.line("Apps connect to %s port %d with sslmode=%s (read-only queries: %s). Who can connect: %s.", v.Host, v.Port, v.SSLMode, cmpOr(v.ReadHost, v.Host), allowedText(v.AllowedIPs))
 		default:
 			b.line("Apps connect to %s port %d, always with TLS (%s). Who can connect: %s.", v.Host, v.Port, v.Connection, allowedText(v.AllowedIPs))
+			if v.HTTPS != "" {
+				b.line("ClickHouse's HTTPS interface: %s (user and password as HTTP basic authentication, the database as ?database=DBNAME).", v.HTTPS)
+			}
 		}
 	}
 	b.line("Next: %s", out.Guidance)
@@ -421,10 +438,13 @@ func cloudServerView(c client.CloudServer) CloudServerView {
 		switch v.Engine {
 		case protocol.EnginePostgreSQL:
 			conn.Database, conn.SSLMode = "DBNAME", v.SSLMode
-		case protocol.EngineMySQL, protocol.EngineMariaDB:
+		case protocol.EngineMySQL, protocol.EngineMariaDB, protocol.EngineClickHouse:
 			conn.Database = "DBNAME"
 		}
 		v.Connection = protocol.ConnectionURL(conn, "PASSWORD")
+		if v.Engine == protocol.EngineClickHouse && len(eng.Ports) > 1 {
+			v.HTTPS = "https://" + net.JoinHostPort(v.Host, strconv.Itoa(eng.Ports[1]))
+		}
 	}
 	if s := c.Standby; s != nil {
 		v.Standby = s.Role

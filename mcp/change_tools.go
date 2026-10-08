@@ -18,7 +18,7 @@ type createCloudServerInput struct {
 	Name          string   `json:"name" jsonschema:"the server's name, also its database's: 2 to 40 lowercase letters, digits and hyphens, starting with a letter (like shop-db)"`
 	Region        string   `json:"region" jsonschema:"a region ID from cloud_catalog (it decides the cloud): pick one near the app"`
 	Size          string   `json:"size" jsonschema:"a size ID from cloud_catalog offered in that region and not sold out (a small app fits the smallest)"`
-	Engine        string   `json:"engine,omitempty" jsonschema:"the database: postgresql (default), mysql, mariadb or valkey, as cloud_catalog offers them (MySQL not on Arm sizes)"`
+	Engine        string   `json:"engine,omitempty" jsonschema:"the database: postgresql (default), mysql, mariadb, valkey or clickhouse, as cloud_catalog offers them (MySQL not on Arm sizes; ClickHouse on sizes with 4 GB of memory or more)"`
 	EngineVersion string   `json:"engine_version,omitempty" jsonschema:"the engine's version from cloud_catalog (PostgreSQL 15, 16, 17 or 18, default 17)"`
 	AllowedIPs    []string `json:"allowed_ips,omitempty" jsonschema:"who can connect to the database: the app's IP addresses or networks (203.0.113.4 or 203.0.113.0/24); empty: nobody until cloud_firewall opens it"`
 	Standby       bool     `json:"standby,omitempty" jsonschema:"also a standby server of the same size, ready to take over (clouds billed by the hour only); it doubles the price"`
@@ -50,7 +50,7 @@ func (t *tools) addChangeTools(s *sdk.Server) {
 	}
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "create_cloud_server",
-		Description: "Creates a Rowsafe Cloud server: a database (PostgreSQL by default; MySQL, MariaDB or Valkey where cloud_catalog offers them) that Rowsafe runs and protects from the start (backups, Proof, Pulse), billed to the organization. Pick the region and size with cloud_catalog, " +
+		Description: "Creates a Rowsafe Cloud server: a database (PostgreSQL by default; MySQL, MariaDB, Valkey or ClickHouse where cloud_catalog offers them) that Rowsafe runs and protects from the start (backups, Proof, Pulse), billed to the organization. Pick the region and size with cloud_catalog, " +
 			"tell the user the size and the price (per hour, and the most a month; a standby doubles it) and get their OK first." + actsAs + "create_cloud_server. " +
 			"A first payment (pay as you go not active yet, or a cloud billed by the month) is made by an owner at a checkout: an owner's request comes back with the checkout link to give them; the server is created once paid. " +
 			"Then follow it with get_cloud_server (wait_seconds) until it's ready, about 5 to 10 minutes.",

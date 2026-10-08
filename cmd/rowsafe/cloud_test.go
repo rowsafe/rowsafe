@@ -870,6 +870,8 @@ func TestCloudEngines(t *testing.T) {
 		{"--engine mysql --size arm-s", "Intel and AMD processors only"},
 		{"--engine valkey --postgres 16", "--postgres is PostgreSQL's version"},
 		{"--postgres 16 --engine-version 17", "disagree"},
+		{"--engine clickhouse --cloud ovh --size value-s", "ClickHouse needs a server with at least 4 GB of memory, and the size value-s has 2 GB"},
+		{"--engine clickhouse --engine-version 25.8", "ClickHouse 26.3, 26.8 on new servers, not 25.8"},
 	} {
 		args := append([]string{"cloud", "create", "x-db", "--yes"}, strings.Fields(tc.args)...)
 		if _, err := run(t, args...); err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -907,6 +909,21 @@ func TestCloudEngines(t *testing.T) {
 		if _, err := run(t, cmd...); err == nil || !strings.Contains(err.Error(), "PostgreSQL only today, and cache-db runs Valkey") {
 			t.Errorf("%s: %v", cmd[0], err)
 		}
+	}
+	out, err = run(t, "cloud", "create", "events-db", "--engine", "clickhouse", "--yes")
+	if req := f.created[len(f.created)-1]; err != nil || req.Engine != "clickhouse" || req.EngineVersion != "26.8" || req.Size != "arm-s" {
+		t.Errorf("clickhouse: %v %+v\n%s", err, req, out)
+	}
+	s = f.server("events-db")
+	s.Status, s.Port = "ready", 9440
+	out, err = run(t, "cloud", "show", "events-db")
+	if err != nil || !strings.Contains(out, "ClickHouse 26.8") ||
+		!strings.Contains(out, "port 9440, always with TLS (clickhouse://USER:PASSWORD@x7kq2mfa3pzd.cloud.rowsafe.sh:9440/DBNAME?secure=true)") ||
+		!strings.Contains(out, "https://x7kq2mfa3pzd.cloud.rowsafe.sh:8443") {
+		t.Errorf("show clickhouse: %v\n%s", err, out)
+	}
+	if out, err = run(t, "cloud", "sizes"); err != nil || !strings.Contains(out, "ClickHouse (clickhouse): 26.3, 26.8, default 26.8; apps connect on ports 9440 and 8443 with TLS; no standby yet; sizes with 4 GB of memory or more") {
+		t.Errorf("sizes clickhouse: %v\n%s", err, out)
 	}
 	if got := serverPort(client.CloudServer{Engine: "mysql"}); got != 3306 {
 		t.Errorf("mysql port %d", got)

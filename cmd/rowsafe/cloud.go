@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -796,6 +798,9 @@ func printServer(s client.CloudServer) {
 			row("Connect to", fmt.Sprintf("%s port %d, sslmode=%s", host, port, ssl))
 		} else {
 			row("Connect to", fmt.Sprintf("%s port %d, always with TLS (%s)", host, port, engineURLExample(s, host, port)))
+			if e, ok := protocol.CloudEngineFor(s.Engine); ok && e.Engine == protocol.EngineClickHouse && len(e.Ports) > 1 {
+				row("HTTPS interface", "https://"+net.JoinHostPort(host, strconv.Itoa(e.Ports[1])))
+			}
 		}
 		if s.Address != nil && s.Address.ReadHost != "" && s.Address.ReadHost != host {
 			row("Read-only queries", s.Address.ReadHost)
