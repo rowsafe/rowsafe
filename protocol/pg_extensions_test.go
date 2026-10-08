@@ -33,12 +33,12 @@ func TestNormalizePGExtensions(t *testing.T) {
 }
 
 func TestPGPackagedExtensions(t *testing.T) {
-	want := map[string]string{"vector": "postgresql-16-pgvector", "postgis": "postgresql-16-postgis-3", "timescaledb": "timescaledb-2-oss-postgresql-16"}
+	want := map[string]string{"vector": "postgresql-16-pgvector", "postgis": "postgresql-16-postgis-3", "timescaledb": "postgresql-16-timescaledb"}
 	for _, e := range PGPackagedExtensions {
 		if e.Package(16) != want[e.Name] {
 			t.Errorf("%s: package %q", e.Name, e.Package(16))
 		}
-		if strings.Contains(e.Package(16), "timescaledb-2-postgresql") {
+		if strings.Contains(e.Package(16), "timescaledb-2") {
 			t.Errorf("%s: the Timescale License edition", e.Name)
 		}
 		if e.Preload != (e.Name == "timescaledb") {
@@ -72,5 +72,25 @@ func TestDBAdminRestartOnlyForPreload(t *testing.T) {
 		if err := ValidateDBAdmin(p); err == nil || !strings.Contains(err.Error(), "restart only goes") {
 			t.Errorf("%+v: %v", p, err)
 		}
+	}
+}
+
+func TestExtensionUse(t *testing.T) {
+	for _, c := range [][2]string{{"2.28.3", "2.30.2"}, {"0.8.0", "0.8.1"}, {"3.5", "3.5.1"}, {"2.9.0", "2.10.0"}} {
+		if !ExtensionVersionLess(c[0], c[1]) || ExtensionVersionLess(c[1], c[0]) {
+			t.Errorf("%s < %s", c[0], c[1])
+		}
+	}
+	if ExtensionVersionLess("2.30.2", "2.30.2") || ExtensionVersionLess("x", "2.0") {
+		t.Error("equal or unreadable")
+	}
+	u := ExtensionUse{Name: "timescaledb", Preload: true, DefaultVersion: "2.30.2",
+		Databases: []ExtensionInDatabase{{Database: "app", Version: "2.30.2"}, {Database: "metrics", Version: "2.30.0"}}}
+	if o := u.Outdated(); len(o) != 1 || o[0] != "metrics" {
+		t.Errorf("outdated %v", o)
+	}
+	req := RequiredLibraries([]ExtensionUse{u, {Name: "vector", Databases: []ExtensionInDatabase{{Database: "app", Version: "0.8.1"}}}})
+	if len(req) != 1 || req["timescaledb"] != "TimescaleDB (turned on in app and metrics)" {
+		t.Errorf("required %v", req)
 	}
 }

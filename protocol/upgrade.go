@@ -200,6 +200,11 @@ type UpgradeCheck struct {
 	Status string `json:"status"` // Check*
 	Title  string `json:"title"`
 	Detail string `json:"detail,omitempty"`
+	// FixFinding and FixID name a Pulse fix that clears it (POST
+	// /v1/databases/{ref}/fixes), when there is one: e.g. updating
+	// TimescaleDB in the databases first.
+	FixFinding string `json:"fix_finding,omitempty"`
+	FixID      string `json:"fix_id,omitempty"`
 }
 
 // UpgradeMode says whether a mode can be used and what it needs.

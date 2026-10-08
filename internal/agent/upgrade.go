@@ -236,6 +236,14 @@ func (a *Agent) runUpgradeChecks(ctx context.Context, db protocol.DatabaseSpec, 
 		}
 	}
 
+	// TimescaleDB (pg_extensions.go): its versions must move too.
+	if !a.cfg.Sidecar() && to > f.Major {
+		if c, ok := a.timescaleUpgradeCheck(ctx, db, f.Major, to); ok {
+			add(c.ID, c.Status, c.Title, c.Detail, true)
+			res.Checks[len(res.Checks)-1].FixFinding, res.Checks[len(res.Checks)-1].FixID = c.FixFinding, c.FixID
+		}
+	}
+
 	// Where it runs.
 	switch {
 	case a.cfg.Sidecar():
@@ -543,6 +551,10 @@ func (a *Agent) upgradeRehearsal(ctx context.Context, db protocol.DatabaseSpec, 
 		if !pathExists(filepath.Join(newBin, "pg_upgrade")) {
 			return finish(fmt.Errorf("PostgreSQL %d was installed, but %s is missing", to, filepath.Join(newBin, "pg_upgrade")))
 		}
+	}
+	if missing := a.timescaleLibrariesMissing(ctx, db, to); len(missing) > 0 {
+		return finish(fmt.Errorf("PostgreSQL %d's TimescaleDB package doesn't have TimescaleDB %s, which your databases run, so the upgrade can't carry it. "+
+			"Update TimescaleDB in the databases first (Pulse: Update TimescaleDB), then rehearse again", to, strings.Join(missing, ", ")))
 	}
 	if res.ToVersion == "" {
 		if out, err := a.runner.Run(ctx, filepath.Join(newBin, "postgres"), "--version"); err == nil {

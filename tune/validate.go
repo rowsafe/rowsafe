@@ -2,6 +2,7 @@ package tune
 
 import (
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"strconv"
@@ -26,6 +27,11 @@ type Facts struct {
 	// installed) are accepted.
 	LibraryInstalled func(name string) bool
 	PgStatStatements string
+	// Required are libraries shared_preload_libraries must keep, each with
+	// why in plain words (protocol.RequiredLibraries: an extension turned
+	// on in a database needs it). A change that drops one is refused;
+	// KeepRequiredLibraries puts them back first for Rowsafe's own changes.
+	Required map[string]string
 	// Redis is a Redis or Valkey server's facts (SettingsSnapshot.Redis).
 	Redis *protocol.RedisSettingsFacts
 }
@@ -125,6 +131,9 @@ func validateOne(c protocol.SettingChange, f Facts) error {
 			return refuse(name, "it takes effect only after a restart, and Rowsafe only changes restart settings it knows how to check. Change it on the server if you need to")
 		}
 	}
+	if err := checkRequired(c, f); err != nil {
+		return err
+	}
 	if c.Reset {
 		return nil
 	}
@@ -132,6 +141,54 @@ func validateOne(c protocol.SettingChange, f Facts) error {
 		return err
 	}
 	return checkLimits(s, c.Value, f)
+}
+
+// checkRequired refuses dropping a library an extension in use needs.
+func checkRequired(c protocol.SettingChange, f Facts) error {
+	if c.Name != "shared_preload_libraries" || len(f.Required) == 0 {
+		return nil
+	}
+	var keep []string
+	if !c.Reset {
+		keep = Libraries(c.Value)
+	}
+	for _, lib := range slices.Sorted(maps.Keys(f.Required)) {
+		if !slices.Contains(keep, lib) {
+			return refuse(c.Name, "PostgreSQL would start without %s, which %s needs: its tables would stop working. Keep %s in the list", lib, f.Required[lib], lib)
+		}
+	}
+	return nil
+}
+
+// KeepRequiredLibraries puts back into a shared_preload_libraries change
+// the libraries an extension in use needs (Rowsafe's own changes: tuning,
+// fixes, undoing an earlier change). It returns the changes and the
+// libraries it put back (none: changes unchanged).
+func KeepRequiredLibraries(changes []protocol.SettingChange, required map[string]string) ([]protocol.SettingChange, []string) {
+	if len(required) == 0 {
+		return changes, nil
+	}
+	out := slices.Clone(changes)
+	var kept []string
+	for i, c := range out {
+		if c.Name != "shared_preload_libraries" {
+			continue
+		}
+		value := ""
+		if !c.Reset {
+			value = c.Value
+		}
+		for _, lib := range slices.Sorted(maps.Keys(required)) {
+			if !slices.Contains(Libraries(value), lib) {
+				value = WithLibrary(value, lib)
+				kept = append(kept, lib)
+			}
+		}
+		if len(kept) > 0 {
+			out[i] = protocol.SettingChange{Name: c.Name, Value: value}
+		}
+	}
+	return out, kept
 }
 
 // checkType catches obvious mistakes early; PostgreSQL checks the value

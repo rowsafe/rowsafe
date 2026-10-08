@@ -3307,6 +3307,10 @@ case $cmd in
         echo "Inst postgresql-17 [17.5-1] (17.6-1 Debian-Security:13/stable-security [arm64])"
         echo "Inst tzdata [2025a-1] (2025b-1 Debian:13/stable [all])" ;;
       ' -s remove '*) shift 2; for p in "$@"; do echo "Remv $p [1.0-1]"; done ;;
+      *' -s '*' install '*postgresql-17-postgis-3*)
+        echo "Inst postgresql-17 [17.5-1] (17.6-1 apt.postgresql.org [arm64])"
+        echo "Inst postgresql-17-postgis-3 (3.6.4-1 apt.postgresql.org [arm64])" ;;
+      *' -s '*' install '*) for p in "$@"; do :; done; echo "Inst $p (1.0-1 apt.postgresql.org [all])" ;;
       *' remove '*) rm -f "$S/installed-18" ;;
       *' install '*--only-upgrade*postgresql-17*) echo 17.6-1 >"$S/version-17" ;;
       *' install '*postgresql-17-pgvector*)
@@ -3429,8 +3433,8 @@ FAKE_EOF
   chmod 644 "$U"
 
   # An extension's package: only the names Rowsafe installs, only that
-  # name's package for the cluster's major, never the Timescale License
-  # edition of TimescaleDB.
+  # name's package for the cluster's major, only when apt changes no
+  # installed package.
   for bad in "u5a pg-install-extension 5432 pg_cron" "u5a pg-install-extension 5432 vector extra" "u5a pg-install-extension 5432" \
     "u5a pg-install-extension 5432 timescaledb-2-postgresql-17" "u5a pg-install-extension 5432 vector;reboot" "u5a pg-install-extension x vector"; do
     urequest "$bad"
@@ -3444,13 +3448,12 @@ FAKE_EOF
   u_has "version=0.8.1-1"
   u_called "install -y --no-install-recommends postgresql-17-pgvector"
   ! grep -q "restart" "$F/systemctl.calls" || fail "installing an extension restarted something: $(cat "$F/systemctl.calls")"
-  echo 2.30.2 >"$S/version-timescaledb-2-postgresql-17"
-  urequest "u5c pg-install-extension 5432 timescaledb"
+  urequest "u5c pg-install-extension 5432 postgis"
   u_has "ok=0"
-  grep -q "^error=TimescaleDB's Timescale License edition (timescaledb-2-postgresql-17) is installed here" "$O/update-result" ||
-    fail "the Timescale License edition wasn't refused: $(cat "$O/update-result")"
-  ! grep -q "install" "$S/calls" || fail "the helper installed something next to the Timescale License edition"
-  rm -f "$S/version-timescaledb-2-postgresql-17" /usr/share/postgresql/17/extension/vector.control
+  grep -q "^error=installing postgresql-17-postgis-3 would also update postgresql-17 (it needs a newer PostgreSQL 17): install PostgreSQL's update first" "$O/update-result" ||
+    fail "an extension that would update PostgreSQL wasn't refused: $(cat "$O/update-result")"
+  ! grep -q " install -y" "$S/calls" || fail "the helper installed something that would update PostgreSQL: $(cat "$S/calls")"
+  rm -f /usr/share/postgresql/17/extension/vector.control
   urequest "u5d pg-install-extension 5499 vector"
   grep -q "^error=port 5499 is not in /etc/rowsafe/restart-allowed" "$O/update-result" || fail "an extension for an unlisted port not refused"
 
@@ -4207,7 +4210,7 @@ cloud_pg_extension_checks() {
     case $e in
       vector) p=postgresql-$pgv-pgvector ;;
       postgis) p=postgresql-$pgv-postgis-3 ;;
-      timescaledb) p=timescaledb-2-oss-postgresql-$pgv ;;
+      timescaledb) p=postgresql-$pgv-timescaledb ;;
     esac
     [ "$(dpkg-query -W -f '${db:Status-Status}' "$p" 2>/dev/null)" = installed ] || fail "$name: $p isn't installed"
     for d in postgres template1; do
@@ -4236,12 +4239,8 @@ cloud_pg_extension_checks() {
       q 'SHOW shared_preload_libraries' | tr ',' '\n' | tr -d ' ' | grep -qx timescaledb || fail "$name: TimescaleDB isn't loaded at start"
       [ "$(q 'SHOW timescaledb.telemetry_level')" = off ] || fail "$name: TimescaleDB's telemetry is $(q 'SHOW timescaledb.telemetry_level')"
       [ "$(q 'SHOW timescaledb.license')" = apache ] || fail "$name: TimescaleDB's license is $(q 'SHOW timescaledb.license')"
-      ! dpkg-query -W -f '${db:Status-Status}' "timescaledb-2-postgresql-$pgv" 2>/dev/null | grep -qx installed || fail "$name: the Timescale License edition is installed"
-      [ -z "$(apt-cache policy "timescaledb-2-postgresql-$pgv" 2>/dev/null | awk '$1 == "Candidate:" && $2 != "(none)"')" ] ||
-        fail "$name: the Timescale License edition could be installed: $(apt-cache policy "timescaledb-2-postgresql-$pgv")"
-      grep -qx "Pin-Priority: -1" /etc/apt/preferences.d/rowsafe-timescaledb || fail "$name: no pin for Timescale's repository"
-      grep -q "TimescaleDB's repository (packagecloud.io/timescale/timescaledb, Apache-2.0 edition only, key 1005FB68604CE9B8F6879CF759F18EDF47F24417)" "$W/out" ||
-        fail "$name: no word about TimescaleDB's repository"
+      dpkg-query -W -f '${Version}' "postgresql-$pgv-timescaledb" | grep -q pgdg || fail "$name: TimescaleDB isn't the PostgreSQL project's package"
+      ! grep -rqs -e packagecloud -e timescale /etc/apt/sources.list /etc/apt/sources.list.d || fail "$name: another package source was added"
       q "CREATE TABLE metrics (time timestamptz NOT NULL, device int, value double precision);
          SELECT create_hypertable('metrics', by_range('time', INTERVAL '1 day'));
          INSERT INTO metrics SELECT t, 1, 1.5 FROM generate_series(now() - interval '3 days', now(), interval '1 hour') t" >/dev/null || fail "$name: a hypertable"
@@ -4274,14 +4273,14 @@ cloud_pg_extensions_later() {
       fail "the helper didn't install $e"
     }
     if [ "$e" = timescaledb ]; then
-      grep -qx "Pin-Priority: -1" /etc/apt/preferences.d/rowsafe-timescaledb || fail "the helper didn't pin Timescale's repository"
-      ! dpkg-query -W -f '${db:Status-Status}' "timescaledb-2-postgresql-$pgv" 2>/dev/null | grep -qx installed || fail "the Timescale License edition is installed"
+      ! grep -rqs -e packagecloud -e timescale /etc/apt/sources.list /etc/apt/sources.list.d || fail "the helper added a package source"
       q "ALTER SYSTEM SET shared_preload_libraries = 'timescaledb'" >/dev/null
       pg_ctlcluster "$pgv" main restart || fail "PostgreSQL doesn't restart with TimescaleDB"
       q "ALTER SYSTEM SET timescaledb.telemetry_level = 'off'" >/dev/null
       q "SELECT pg_reload_conf()" >/dev/null
     fi
     q "CREATE EXTENSION IF NOT EXISTS $e" >/dev/null || fail "turning on $e after the helper installed it"
+    [ "$e" != timescaledb ] || [ "$(q 'SHOW timescaledb.license')" = apache ] || fail "TimescaleDB's license is $(q 'SHOW timescaledb.license')"
   done
   pass "the root helper installed $TEST_PG_EXTENSIONS_LATER for real (pg-install-extension), turned on afterwards"
 }

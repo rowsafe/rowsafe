@@ -621,7 +621,7 @@ func (d *dba) createDatabase(ctx context.Context, conn *pgx.Conn) error {
 			return err
 		}
 		for _, e := range p.Extensions {
-			if err := d.exec(ctx, tx, "", `CREATE EXTENSION IF NOT EXISTS %I CASCADE`, e); err != nil {
+			if err := d.createExtension(ctx, tx, e, true); err != nil {
 				return fmt.Errorf("enabling %s: %w", e, err)
 			}
 		}
@@ -1161,7 +1161,7 @@ func (d *dba) enableExtension(ctx context.Context, conn *pgx.Conn) error {
 	if _, ok := avail[p.Extension]; !ok {
 		return notAvailable(p.Extension)
 	}
-	if err := d.exec(ctx, c, "", `CREATE EXTENSION IF NOT EXISTS %I CASCADE`, p.Extension); err != nil {
+	if err := d.createExtension(ctx, c, p.Extension, false); err != nil {
 		return err
 	}
 	after, err := installedExtensions(ctx, c)

@@ -85,6 +85,9 @@ type MaintenanceParams struct {
 	// mutation of a kill_mutation (clickhouse.go).
 	QueryID    string `json:"query_id,omitempty"`
 	MutationID string `json:"mutation_id,omitempty"`
+	// Extension and Databases: update_extension (pg_extensions.go).
+	Extension string   `json:"extension,omitempty"`
+	Databases []string `json:"databases,omitempty"`
 }
 
 // MaintenanceResult is the agent's report for a maintenance task.

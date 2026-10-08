@@ -154,6 +154,10 @@ type SettingsSnapshot struct {
 	ChangeBlocked string `json:"change_blocked,omitempty"`
 	// Redis is a Redis or Valkey server's facts (redis_settings.go).
 	Redis *RedisSettingsFacts `json:"redis,omitempty"`
+	// Extensions (PostgreSQL) are the extensions Rowsafe installs that are
+	// turned on in a database here (pg_extensions.go): settings changes
+	// keep what they need loaded, and Pulse watches them.
+	Extensions []ExtensionUse `json:"extensions,omitempty"`
 }
 
 // ---- User API ----

@@ -54,13 +54,13 @@
 #
 #   ID pg-minor-update PORT                  newest minor release of PORT's major
 #   ID pg-install-major PORT MAJOR           install MAJOR (and PORT's extensions for it)
-#   ID pg-install-extension PORT NAME        install an extension's package for PORT's major:
-#                                            NAME vector (postgresql-MAJOR-pgvector), postgis
+#   ID pg-install-extension PORT NAME        install an extension's package for PORT's major from
+#                                            the package sources PostgreSQL comes from: NAME vector
+#                                            (postgresql-MAJOR-pgvector), postgis
 #                                            (postgresql-MAJOR-postgis-3) or timescaledb
-#                                            (timescaledb-2-oss-postgresql-MAJOR, the Apache-2.0
-#                                            edition, from Timescale's repository, which it adds
-#                                            with its signing key checked and apt pinned to that
-#                                            edition); nothing else, no restart
+#                                            (postgresql-MAJOR-timescaledb); only when apt would
+#                                            install new packages and change no installed one
+#                                            (which could restart PostgreSQL); no restart
 #   ID pg-upgrade PORT MAJOR METHOD          pg_upgradecluster to MAJOR (copy, clone or link)
 #   ID pg-upgrade-undo PORT start|nostart    back to the version kept by that upgrade
 #   ID pg-upgrade-cleanup PORT               remove the version kept aside by an upgrade or undo
@@ -1288,6 +1288,12 @@ apt_run() {
 
 apt_refresh() { apt_run update || log "apt-get update failed; using the package lists as they are"; }
 
+# apt_sim ARGS... prints what apt-get would do (-s: simulate, as root, no
+# change), the log getting it too.
+apt_sim() {
+  timeout "${apt_timeout:-300}" env DEBIAN_FRONTEND=noninteractive apt-get -s -q -o DPkg::Lock::Timeout=600 "$@" 2>>"$work_log" </dev/null
+}
+
 # active_since UNIT: when UNIT last became active (monotonic microseconds).
 active_since() { "$systemctl" show -p ActiveEnterTimestampMonotonic --value "$1" 2>/dev/null; }
 
@@ -1412,6 +1418,9 @@ act_pg_minor_update() {
   m=$c_major
   before=$(pkg_version "postgresql-$m")
   [ -n "$before" ] || refuse "PostgreSQL $m is not installed from packages here (postgresql-$m)"
+  # The extension packages (postgresql-MAJOR-*) come along, TimescaleDB's
+  # too: its package carries one version, so the agent runs ALTER
+  # EXTENSION timescaledb UPDATE in each database right after the restart.
   pkgs="postgresql-$m postgresql-client-$m libpq5 $(installed_pkgs "postgresql-$m-*" | tr '\n' ' ')"
   : >"$work_log"
   t0=$(active_since "$unit")
@@ -1453,11 +1462,8 @@ act_pg_install_major() {
   before=$(lsclusters | awk -v m="$major" '$1 == m { printf " %s ", $2 }')
   pkgs="postgresql-$major postgresql-client-$major"
   missing=''
-  for p in $(installed_pkgs "postgresql-$c_major-*") $(installed_pkgs "timescaledb-2-oss-postgresql-$c_major"); do
-    case $p in
-      timescaledb-2-oss-postgresql-*) n=timescaledb-2-oss-postgresql-$major ;;
-      *) n=postgresql-$major-${p#postgresql-"$c_major"-} ;;
-    esac
+  for p in $(installed_pkgs "postgresql-$c_major-*"); do
+    n=postgresql-$major-${p#postgresql-"$c_major"-}
     c=$(candidate "$n")
     if [ -n "$c" ] && [ "$c" != "(none)" ]; then pkgs="$pkgs $n"; else missing="$missing $n"; fi
   done
@@ -1490,89 +1496,12 @@ ext_package() {
   case $1 in
     vector) echo "postgresql-$2-pgvector" ;;
     postgis) echo "postgresql-$2-postgis-3" ;;
-    timescaledb) echo "timescaledb-2-oss-postgresql-$2" ;;
+    timescaledb) echo "postgresql-$2-timescaledb" ;;
   esac
 }
 
-# TimescaleDB's own repository, as the installer's --pg-extensions adds it:
-# the signing key's fingerprint checked (and refused when expired or
-# revoked), apt pinned so only the Apache-2.0 edition and its loader ever
-# come from it.
-ts_key_url=https://packagecloud.io/timescale/timescaledb/gpgkey
-ts_key_fpr=1005FB68604CE9B8F6879CF759F18EDF47F24417
-ts_keyring=${ROWSAFE_TS_KEYRING:-/usr/share/keyrings/rowsafe-timescaledb.gpg}
-ts_list=${ROWSAFE_TS_LIST:-/etc/apt/sources.list.d/rowsafe-timescaledb.list}
-ts_pin=${ROWSAFE_TS_PIN:-/etc/apt/preferences.d/rowsafe-timescaledb}
-
-# ts_repo adds it (once). Sets why and returns 1 when it can't.
-ts_repo() {
-  why=''
-  [ ! -s "$ts_keyring" ] || [ ! -s "$ts_list" ] || [ ! -s "$ts_pin" ] || return 0
-  # shellcheck disable=SC1091 # the system's own file
-  os_id=$(. /etc/os-release && printf '%s' "${ID:-}")
-  # shellcheck disable=SC1091
-  codename=$(. /etc/os-release && printf '%s' "${VERSION_CODENAME:-}")
-  case $os_id in
-    debian | ubuntu) ;;
-    *)
-      why="TimescaleDB's repository has packages for Debian and Ubuntu only"
-      return 1
-      ;;
-  esac
-  printf '%s\n' "$codename" | grep -Eq '^[a-z]{2,20}$' || {
-    why="can't tell this system's release name"
-    return 1
-  }
-  command -v curl >/dev/null 2>&1 || {
-    why="curl is missing, which downloading TimescaleDB's signing key needs"
-    return 1
-  }
-  command -v gpg >/dev/null 2>&1 || apt_run install -y --no-install-recommends gnupg || {
-    why="installing gnupg failed: $(tail_log)"
-    return 1
-  }
-  k=$(mktemp -d) || {
-    why="no temporary directory"
-    return 1
-  }
-  if ! curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 20 --max-time 300 \
-    -o "$k/key.asc" "$ts_key_url" </dev/null >>"$work_log" 2>&1; then
-    rm -rf "$k"
-    why="could not download TimescaleDB's signing key ($ts_key_url)"
-    return 1
-  fi
-  GNUPGHOME=$k gpg --batch --show-keys --with-colons "$k/key.asc" >"$k/keys" 2>/dev/null || true
-  fpr=$(awk -F: '$1 == "fpr" { print $10; exit }' "$k/keys")
-  validity=$(awk -F: '$1 == "pub" { print $2; exit }' "$k/keys")
-  if [ "$(grep -c '^pub:' "$k/keys")" != 1 ] || [ "$fpr" != "$ts_key_fpr" ]; then
-    rm -rf "$k"
-    why="TimescaleDB's signing key isn't the expected one (fingerprint ${fpr:-unreadable})"
-    return 1
-  fi
-  case $validity in
-    e | r | i | d | n)
-      rm -rf "$k"
-      why="TimescaleDB's signing key ($ts_key_fpr) has expired or is revoked, so apt wouldn't trust its packages"
-      return 1
-      ;;
-  esac
-  GNUPGHOME=$k gpg --batch --yes --dearmor -o "$k/key.gpg" "$k/key.asc" 2>/dev/null &&
-    install -m 0644 -o root -g root "$k/key.gpg" "$ts_keyring" || {
-    rm -rf "$k"
-    why="could not install TimescaleDB's signing key"
-    return 1
-  }
-  rm -rf "$k"
-  printf 'deb [signed-by=%s] https://packagecloud.io/timescale/timescaledb/%s/ %s main\n' "$ts_keyring" "$os_id" "$codename" >"$ts_list.tmp" &&
-    chmod 0644 "$ts_list.tmp" && mv -f "$ts_list.tmp" "$ts_list"
-  printf '%s\n' "# Written by Rowsafe (pg-install-extension timescaledb): from Timescale's" \
-    "# repository only TimescaleDB's Apache-2.0 edition and its loader, nothing else." \
-    "Package: timescaledb-2-oss-postgresql-* timescaledb-2-loader-postgresql-*" "Pin: origin packagecloud.io" "Pin-Priority: 600" "" \
-    "Package: *" "Pin: origin packagecloud.io" "Pin-Priority: -1" >"$ts_pin.tmp" &&
-    chmod 0644 "$ts_pin.tmp" && mv -f "$ts_pin.tmp" "$ts_pin"
-  log "added TimescaleDB's repository (key $ts_key_fpr)"
-  return 0
-}
+# pkg_installed PACKAGE: installed (not merely its configuration files left).
+pkg_installed() { [ "$(dpkg-query -W -f='${db:Status-Status}' "$1" 2>/dev/null)" = installed ]; }
 
 act_pg_install_extension() {
   update_allowed postgresql "installing PostgreSQL extensions from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
@@ -1585,14 +1514,17 @@ act_pg_install_extension() {
   pkg=$(ext_package "$ext" "$m")
   [ -n "$pkg" ] || refuse "Rowsafe doesn't install the extension $ext"
   : >"$work_log"
-  if [ "$ext" = timescaledb ]; then
-    [ "$(pkg_version "timescaledb-2-postgresql-$m")" = "" ] ||
-      refuse "TimescaleDB's Timescale License edition (timescaledb-2-postgresql-$m) is installed here; Rowsafe installs only the Apache-2.0 edition"
-    ts_repo || refuse "$why"
-  fi
   apt_refresh
   c=$(candidate "$pkg")
   [ -n "$c" ] && [ "$c" != "(none)" ] || refuse "$pkg isn't available for PostgreSQL $m from this server's package sources"
+  # Only new packages: if apt would also upgrade or remove an installed one
+  # (a newer PostgreSQL the extension's package needs), that could restart
+  # PostgreSQL, which this never does.
+  if ! pkg_installed "$pkg"; then
+    sim=$(apt_timeout=300 apt_sim install --no-install-recommends "$pkg") || refuse "apt can't install $pkg: $(tail_log)"
+    changed=$(printf '%s\n' "$sim" | awk '($1 == "Inst" && $3 ~ /^\[/) || $1 == "Remv" { printf "%s ", $2 }')
+    [ -z "$changed" ] || refuse "installing $pkg would also update $changed(it needs a newer PostgreSQL $m): install PostgreSQL's update first, then turn the extension on"
+  fi
   log "installing $pkg (request $id)"
   apt_run install -y --no-install-recommends "$pkg" || refuse "installing $pkg failed: $(tail_log)"
   [ -f "/usr/share/postgresql/$m/extension/$ext.control" ] || refuse "$pkg is installed, but PostgreSQL $m has no $ext extension"

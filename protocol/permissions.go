@@ -43,7 +43,7 @@ const (
 	PermPooler          = "pooler"           // install and run PgBouncer
 	PermPoolerPublic    = "pooler-public"    // PgBouncer may listen on every address
 	PermFirewall        = "firewall"         // open and close database ports in the firewall
-	PermUpdates         = "updates"          // PostgreSQL minor updates and major upgrades
+	PermUpdates         = "updates"          // PostgreSQL minor updates and major upgrades, and installing pgvector's, PostGIS's and TimescaleDB's packages from PostgreSQL's repository
 	PermSecurityUpdates = "security-updates" // the system's security updates
 	PermReboot          = "reboot"           // reboot after a security update that needs it
 	PermSQLiteModes     = "sqlite-modes"     // remove other users' access to the listed SQLite files (sqlite_security.go)
