@@ -39,10 +39,12 @@ Getting started
 Rowsafe Cloud: PostgreSQL servers Rowsafe runs for you, billed by the hour (never more than the monthly price)
   rowsafe cloud sizes [--cloud CLOUD] [--region REGION] [--json]
                                              clouds, regions and sizes: CPUs, memory, disk, the price of an hour,
-                                             the most a month costs, and what is sold out right now
+                                             the most a month costs, what is sold out right now, and the
+                                             databases a new server can run
   rowsafe cloud create NAME [--cloud hetzner] [--region fsn1] [--size small] [--postgres 17]
+        [--engine postgresql|mysql|mariadb|valkey] [--engine-version V]
         [--allow me|IP|CIDR]... [--standby] [--wait] [--yes] [--json]
-                                             a new server with PostgreSQL, backups, Proof and Pulse on. Defaults:
+                                             a new server with PostgreSQL (or the --engine offered), backups, Proof and Pulse on. Defaults:
                                              the cheapest size free now; only this computer may connect. The first
                                              server billed by the hour gives you a link to add a card, once
   rowsafe cloud list [--json]                the servers Rowsafe created: status, size, price, who can connect

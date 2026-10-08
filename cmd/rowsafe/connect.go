@@ -125,7 +125,8 @@ func requirePostgres(ctx context.Context, c *client.Client, server, what string)
 		return apiErr(err)
 	}
 	if e := protocol.NormalizeEngine(d.Engine); e != protocol.EnginePostgreSQL {
-		return fmt.Errorf("%s is for PostgreSQL, and %s runs %s: make a login with `rowsafe db user add` and use its own client", what, server, protocol.EngineDisplayName(d.Engine))
+		return fmt.Errorf("%s is for PostgreSQL only today, and %s runs %s: make a login with `rowsafe db user add` (or in the dashboard, Databases & users) and use %s's own client; `rowsafe cloud show` gives the host and port",
+			what, server, protocol.EngineDisplayName(d.Engine), protocol.EngineDisplayName(d.Engine))
 	}
 	return nil
 }

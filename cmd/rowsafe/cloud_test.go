@@ -40,6 +40,10 @@ type fakeCloud struct {
 	params     []protocol.DBAdminParams
 	inv        protocol.DBInventory
 	noVerifier bool // the agent is too old for password verifiers
+	// engines: the catalog's (nil: an older control plane's, PostgreSQL
+	// only); armSize: a size of Hetzner's with an Arm processor.
+	engines []protocol.CloudEngine
+	armSize bool
 }
 
 func newFakeCloud() *fakeCloud {
@@ -87,14 +91,7 @@ func (f *fakeCloud) addServer(name, status string) *client.CloudServer {
 		MemoryMB int `json:"memory_mb"`
 		DiskGB   int `json:"disk_gb"`
 	}{2, 4096, 40}
-	s.Address = &struct {
-		Host        string  `json:"host"`
-		ReadHost    string  `json:"read_host"`
-		Published   bool    `json:"published"`
-		Certificate string  `json:"certificate"`
-		SSLMode     string  `json:"sslmode"`
-		Problem     *string `json:"problem"`
-	}{Host: host, SSLMode: "verify-full"}
+	s.Address = &client.CloudAddress{Host: host, SSLMode: "verify-full"}
 	f.servers = append(f.servers, s)
 	return s
 }
@@ -118,7 +115,16 @@ func (f *fakeCloud) handler(t *testing.T) http.Handler {
 			h(w, r)
 		}
 	}
-	mux.HandleFunc("GET /v1/cloud/rowsafe/catalog", lock(func(w http.ResponseWriter, r *http.Request) { j(w, 200, catalog(f.payg)) }))
+	mux.HandleFunc("GET /v1/cloud/rowsafe/catalog", lock(func(w http.ResponseWriter, r *http.Request) {
+		cat := catalog(f.payg)
+		cat.Engines = f.engines
+		if f.armSize {
+			cl := &cat.Clouds[1]
+			cl.Sizes = append(cl.Sizes, client.CloudSize{ID: "arm-s", Name: "Arm S", CPUs: 2, MemoryGB: 4, DiskGB: 40, PriceCents: 499, HourlyPriceCents: 0.7,
+				Currency: "USD", Arch: "arm64"})
+		}
+		j(w, 200, cat)
+	}))
 	mux.HandleFunc("GET /v1/cloud/servers", lock(func(w http.ResponseWriter, r *http.Request) {
 		out := []client.CloudServer{}
 		for _, s := range f.servers {
@@ -143,6 +149,7 @@ func (f *fakeCloud) handler(t *testing.T) http.Handler {
 		f.created = append(f.created, req)
 		s := f.addServer(req.Name, "creating")
 		s.AllowedIPs, s.DatabaseRef = req.AllowedIPs, nil
+		s.Engine, s.EngineVersion = req.Engine, req.EngineVersion
 		if f.payg != "active" {
 			s.Status = "payment"
 			j(w, 200, map[string]any{"checkout_url": "https://app.example/api/rowsafe-cloud/checkout/" + s.ID, "server": s})
@@ -231,7 +238,11 @@ func (f *fakeCloud) handler(t *testing.T) http.Handler {
 		j(w, 200, out)
 	}))
 	mux.HandleFunc("GET /v1/databases/{ref}", lock(func(w http.ResponseWriter, r *http.Request) {
-		j(w, 200, protocol.Database{ID: "db_" + r.PathValue("ref"), Name: r.PathValue("ref"), Engine: protocol.EnginePostgreSQL, Status: protocol.DBActive})
+		engine := protocol.EnginePostgreSQL
+		if s := f.server(r.PathValue("ref")); s != nil && s.Engine != "" {
+			engine = s.Engine
+		}
+		j(w, 200, protocol.Database{ID: "db_" + r.PathValue("ref"), Name: r.PathValue("ref"), Engine: engine, Status: protocol.DBActive})
 	}))
 	mux.HandleFunc("GET /v1/databases/{ref}/dbadmin", lock(func(w http.ResponseWriter, r *http.Request) {
 		inv := f.inv
@@ -831,5 +842,73 @@ func TestPublicAddresses(t *testing.T) {
 		if got, err := parseSource(in); err != nil || got != want {
 			t.Errorf("parseSource(%q) = %q, %v", in, got, err)
 		}
+	}
+}
+
+// rowsafe cloud create --engine: the catalog's engines and versions, MySQL
+// kept off Arm sizes, --postgres still PostgreSQL's; cloud sizes lists the
+// engines; show gives the engine's port and connection string; env and
+// connect say they are PostgreSQL's only today.
+func TestCloudEngines(t *testing.T) {
+	f := newFakeCloud()
+	f.armSize = true
+	cloudEnv(t, f)
+
+	// An older control plane: PostgreSQL only, and the Arm size is the cheapest.
+	if _, err := run(t, "cloud", "create", "my-db", "--engine", "mysql", "--yes"); err == nil || !strings.Contains(err.Error(), "doesn't offer --engine mysql: choose postgresql") {
+		t.Fatalf("not offered: %v", err)
+	}
+	if out, err := run(t, "cloud", "create", "pg-db", "--yes"); err != nil || f.created[0].Size != "arm-s" || f.created[0].Engine != "postgresql" || f.created[0].EngineVersion != "17" {
+		t.Fatalf("postgresql on arm: %v %+v\n%s", err, f.created, out)
+	}
+
+	f.engines = protocol.CloudEngines
+	for _, tc := range []struct{ args, want string }{
+		{"--engine mongodb", "doesn't host MongoDB"},
+		{"--engine mysql --engine-version 8.0", "MySQL 8.4 on new servers, not 8.0"},
+		{"--engine valkey --standby", "standby server is offered for PostgreSQL so far"},
+		{"--engine mysql --size arm-s", "Intel and AMD processors only"},
+		{"--engine valkey --postgres 16", "--postgres is PostgreSQL's version"},
+		{"--postgres 16 --engine-version 17", "disagree"},
+	} {
+		args := append([]string{"cloud", "create", "x-db", "--yes"}, strings.Fields(tc.args)...)
+		if _, err := run(t, args...); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %v", tc.args, err)
+		}
+	}
+	out, err := run(t, "cloud", "create", "orders-db", "--engine", "mysql", "--yes")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	req := f.created[len(f.created)-1]
+	if req.Engine != "mysql" || req.EngineVersion != "8.4" || req.Size != "small" || !strings.Contains(out, "New server orders-db: MySQL 8.4 on Hetzner") {
+		t.Errorf("mysql: %+v\n%s", req, out)
+	}
+	out, err = run(t, "cloud", "create", "cache-db", "--engine", "Valkey", "--yes")
+	if req := f.created[len(f.created)-1]; err != nil || req.Engine != "valkey" || req.EngineVersion != "8" || req.Size != "arm-s" {
+		t.Errorf("valkey: %v %+v\n%s", err, req, out)
+	}
+
+	out, err = run(t, "cloud", "sizes")
+	for _, want := range []string{"Databases (--engine, --engine-version):", "MySQL (mysql): 8.4, default 8.4; apps connect on port 3306 with TLS; no standby yet; Intel and AMD sizes only (not Arm)",
+		"Valkey (valkey): 8, default 8; apps connect on port 6380", "Arm processor: not for MySQL"} {
+		if err != nil || !strings.Contains(out, want) {
+			t.Errorf("sizes lacks %q: %v\n%s", want, err, out)
+		}
+	}
+
+	s := f.server("cache-db")
+	s.Status, s.Port = "ready", 6380
+	out, err = run(t, "cloud", "show", "cache-db")
+	if err != nil || !strings.Contains(out, "Valkey 8") || !strings.Contains(out, "x7kq2mfa3pzd.cloud.rowsafe.sh port 6380, always with TLS (rediss://USER:PASSWORD@x7kq2mfa3pzd.cloud.rowsafe.sh:6380/)") {
+		t.Errorf("show: %v\n%s", err, out)
+	}
+	for _, cmd := range [][]string{{"env", "--on", "cache-db", "--file", filepath.Join(t.TempDir(), ".env")}, {"connect", "--on", "cache-db"}} {
+		if _, err := run(t, cmd...); err == nil || !strings.Contains(err.Error(), "PostgreSQL only today, and cache-db runs Valkey") {
+			t.Errorf("%s: %v", cmd[0], err)
+		}
+	}
+	if got := serverPort(client.CloudServer{Engine: "mysql"}); got != 3306 {
+		t.Errorf("mysql port %d", got)
 	}
 }

@@ -100,6 +100,9 @@ func envCmd(ctx context.Context, c *client.Client, args []string) error {
 		return apiErr(err)
 	}
 	engine := protocol.NormalizeEngine(d.Engine)
+	if err := requirePostgres(ctx, c, server, "rowsafe env"); err != nil { // connect.go
+		return err
+	}
 	inv, err := pgInventory(ctx, c, server, true)
 	if err != nil {
 		return err
