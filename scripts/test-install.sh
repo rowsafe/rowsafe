@@ -3795,12 +3795,12 @@ PGEOF
   ssh_addrs ''
   fw_request "fw_srv6 server 5432,5433" '10.4.0.0/16\n' 1
   fw_has "ok=1"
-  rules | grep -q "tcp dport 5432 ip saddr { 10.4.0.0/16 } accept" && rules | grep -q "tcp dport 5433 ip saddr { 10.4.0.0/16 } accept" ||
+  rules | grep -q "tcp dport 5432 ip saddr 10.4.0.0/16 accept" && rules | grep -q "tcp dport 5433 ip saddr 10.4.0.0/16 accept" ||
     fail "two ports in one request: $(rules)"
   [ -f "$W/fw-state/port-5432" ] && [ -f "$W/fw-state/port-5433" ] && [ ! -e "$W/fw-state/pending-5433" ] || fail "two ports not kept"
   WAIT=1 fw_request "fw_srv7 server 5432,5433" '10.5.0.0/16\n' 0
   fw_has "ok=0"
-  ! rules | grep -q "10.5.0.0/16" && rules | grep -q "tcp dport 5433 ip saddr { 10.4.0.0/16 } accept" || fail "two unconfirmed ports not both put back: $(rules)"
+  ! rules | grep -q "10.5.0.0/16" && rules | grep -q "tcp dport 5433 ip saddr 10.4.0.0/16 accept" || fail "two unconfirmed ports not both put back: $(rules)"
   fw_request "fw_srv8 server 5432,5499" '10.6.0.0/16\n' 1
   grep -q "^error=port 5499 is not in" "$FO/result" && ! rules | grep -q "10.6.0.0/16" || fail "a request with an unlisted port changed something: $(rules)"
   fw_request "fw_srv9 apply 5432,5433" '10.6.0.0/16\n' 1
