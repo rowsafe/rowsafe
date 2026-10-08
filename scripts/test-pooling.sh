@@ -83,6 +83,11 @@ ENV container=docker
 RUN apt-get update -qq && \\
     apt-get install -y -qq --no-install-recommends systemd systemd-sysv dbus ca-certificates procps util-linux postgresql >/dev/null && \\
     rm -f /lib/systemd/system/multi-user.target.wants/getty* && apt-get clean && rm -rf /var/lib/apt/lists/*
+# (binfmt masked: a privileged container shares the host's binfmt_misc, and
+# systemd-binfmt unregisters every entry when it stops, emulation included.)
+RUN ln -sf /dev/null /etc/systemd/system/systemd-binfmt.service && \\
+    ln -sf /dev/null /etc/systemd/system/proc-sys-fs-binfmt_misc.automount && \\
+    ln -sf /dev/null /etc/systemd/system/proc-sys-fs-binfmt_misc.mount
 STOPSIGNAL SIGRTMIN+3
 CMD ["/lib/systemd/systemd"]
 EOF
