@@ -26,7 +26,8 @@ import (
 )
 
 // The bucket. Everything of one database lives under
-// <ROWSAFE_REPO_PATH_PREFIX>/<engine>/<database name>/:
+// <ROWSAFE_REPO_PATH_PREFIX>/<engine>/<database name>/ (in Rowsafe Storage
+// <org's prefix>/<database name>/, the folder it keeps per database):
 //
 //	repository.json.age                       marker: engine, database, created
 //	backups/<label>/data.xbs.zst.age          the backup stream (xbstream)
@@ -53,6 +54,7 @@ type objStore struct {
 	prefix   string // "rowsafe/mysql/shop/"
 	pass     string
 	partSize uint64
+	creds    string // the credentials it was opened with (they are renewed: shipper)
 }
 
 // openStore connects to the bucket for one database.
@@ -97,7 +99,7 @@ func openStore(repo pgbackrest.Repo, engine, stanza string, partSizeMB int) (*ob
 		region = "us-east-1"
 	}
 	mc, err := minio.New(endpoint, &minio.Options{
-		Creds:        credentials.NewStaticV4(repo.Key, repo.KeySecret, ""),
+		Creds:        credentials.NewStaticV4(repo.Key, repo.KeySecret, repo.Token), // Token: Rowsafe Storage's temporary credentials
 		Secure:       true,
 		Region:       region,
 		BucketLookup: lookup,
@@ -110,8 +112,15 @@ func openStore(repo pgbackrest.Repo, engine, stanza string, partSizeMB int) (*ob
 	if prefix != "" {
 		prefix += "/"
 	}
+	// In Rowsafe Storage a database's folder is <PathPrefix>/<stanza>/: the
+	// one Rowsafe Storage keeps for it and deletes with it.
+	folder := engine + "/" + stanza + "/"
+	if repo.Managed {
+		folder = stanza + "/"
+	}
 	return &objStore{
-		mc: mc, bucket: repo.Bucket, prefix: prefix + engine + "/" + stanza + "/", pass: repo.CipherPass,
+		mc: mc, bucket: repo.Bucket, prefix: prefix + folder, pass: repo.CipherPass,
+		creds:    repo.Key + "\x00" + repo.Token,
 		partSize: uint64(max(partSizeMB, 16)) << 20,
 	}, nil
 }

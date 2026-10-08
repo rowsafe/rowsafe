@@ -237,6 +237,25 @@ func TestSignature(t *testing.T) {
 	}
 }
 
+// TestSignatureSessionToken: temporary credentials (Rowsafe Storage) send
+// and sign their session token.
+func TestSignatureSessionToken(t *testing.T) {
+	st, err := New(pgbackrest.Repo{Endpoint: "acct.r2.cloudflarestorage.com", Bucket: "b", Key: "AKID", KeySecret: "secret",
+		Token: "session-token", PathPrefix: "/orgs/org_1"}, "shop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest(http.MethodGet, "https://acct.r2.cloudflarestorage.com/b/orgs/org_1/shop/x", nil)
+	st.sign(req, emptySHA256)
+	if req.Header.Get("x-amz-security-token") != "session-token" ||
+		!strings.Contains(req.Header.Get("Authorization"), "SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-amz-security-token,") {
+		t.Fatalf("token: %q, authorization: %s", req.Header.Get("x-amz-security-token"), req.Header.Get("Authorization"))
+	}
+	if st.FullKey("x") != "orgs/org_1/shop/x" {
+		t.Fatal(st.FullKey("x"))
+	}
+}
+
 func TestSealedRanges(t *testing.T) {
 	for _, size := range []int{0, 1, 100, segmentSize - 1, segmentSize, segmentSize + 1, 2 * segmentSize, 3*segmentSize + 777} {
 		plain := make([]byte, size)

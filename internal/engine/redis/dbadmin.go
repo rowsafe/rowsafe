@@ -175,6 +175,19 @@ type rdba struct {
 	replicas     int
 }
 
+// tlsOnly reports whether apps reach the server on port with TLS: it is the
+// server's tls-port (a server Rowsafe created listens with TLS on 6380 and
+// has no plain port), so connection strings say rediss:// (sslmode
+// require), like the password reset in the security check does.
+func (d *rdba) tlsOnly(ctx context.Context, port int) bool {
+	v, err := d.c.configGet(ctx, "tls-port")
+	if err != nil {
+		return false
+	}
+	tp, _ := strconv.Atoi(v)
+	return tp > 0 && tp == port
+}
+
 func (e *Engine) dbadmin(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec, taskID string, p protocol.DBAdminParams, log agent.TaskLogger) (*protocol.DBAdminResult, error) {
 	if err := protocol.ValidateDBAdminFor(e.name, p); err != nil {
 		return nil, agent.Sentence(err)
@@ -224,7 +237,7 @@ func (e *Engine) dbadmin(ctx context.Context, env agent.EngineEnv, db protocol.D
 		}
 	}
 	if err == nil && d.secret != nil {
-		cn := agent.DBConnectionFor(*d.secret, p.Host, inv, db.Port, false)
+		cn := agent.DBConnectionFor(*d.secret, p.Host, inv, db.Port, d.tlsOnly(ctx, db.Port))
 		var sealed *protocol.SealedSecret
 		if sealed, err = agent.SealDBSecret(p.PublicKey, taskID, cn, d.pw); err == nil {
 			d.res.Secret, d.res.Connection = sealed, &cn

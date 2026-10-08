@@ -527,12 +527,17 @@ func (sc *scratch) stop(ctx context.Context) {
 		return
 	}
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	shutdown := false
 	if db, err := sc.connect(cctx); err == nil {
-		_, _ = db.ExecContext(cctx, "SHUTDOWN")
+		_, err = db.ExecContext(cctx, "SHUTDOWN")
+		shutdown = err == nil
 		db.Close()
 	}
 	cancel()
 	for _, sig := range []syscall.Signal{0, syscall.SIGTERM, syscall.SIGKILL} {
+		if sig == 0 && !shutdown {
+			continue // nobody asked it to stop (it checks accounts now, after a replay): SIGTERM at once
+		}
 		if sig != 0 {
 			_ = syscall.Kill(sc.PID, sig)
 		}
@@ -580,6 +585,16 @@ func (s *server) replay(ctx context.Context, sc *scratch, res *restored, t resto
 	}
 	apply := s.lowCmd(ctx, client, "--no-defaults", "--protocol=socket", "--socket="+sc.Socket, "--user=root", "--binary-mode")
 	apply.Stdin = pipe
+	// Account changes in the binary logs (CREATE USER, GRANT, ALTER USER...:
+	// Databases & users makes them) are refused by a server that checks no
+	// accounts (--skip-grant-tables). FLUSH PRIVILEGES first turns the
+	// checks on, the replaying session keeping every right (MySQL's and
+	// MariaDB's documented way); the server starts again afterwards, back to
+	// checking nothing, for what follows on its private socket.
+	flush := sc.Admin == nil
+	if flush {
+		apply.Stdin = io.MultiReader(strings.NewReader("FLUSH PRIVILEGES;\n"), pipe)
+	}
 	applyOut := &tailBuffer{max: 16 << 10}
 	apply.Stdout, apply.Stderr = applyOut, applyOut
 	if err := dump.Start(); err != nil {
@@ -602,6 +617,15 @@ func (s *server) replay(ctx context.Context, sc *scratch, res *restored, t resto
 	if derr != nil {
 		log.Output(filepath.Base(binlogTool), dumpErr.Bytes())
 		return fmt.Errorf("reading the binary logs failed: %s", lastErrorLine(dumpErr.Bytes()))
+	}
+	if flush {
+		sc.stop(ctx)
+		if err := sc.start(); err != nil {
+			return err
+		}
+		if err := sc.wait(ctx, drillStartTimeout); err != nil {
+			return fmt.Errorf("after replaying the binary logs: %w", err)
+		}
 	}
 	return nil
 }

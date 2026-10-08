@@ -131,6 +131,7 @@ func WithStorageCredentials(base pgbackrest.Repo, c *protocol.StorageCredentials
 	if r.URIStyle == "" {
 		r.URIStyle = "path"
 	}
+	r.Managed = true
 	return r
 }
 
@@ -172,6 +173,22 @@ func (a *Agent) repo() (pgbackrest.Repo, error) {
 		return pgbackrest.Repo{}, err
 	}
 	return WithStorageCredentials(a.cfg.Repo, c), nil
+}
+
+// ownRepo is this agent's own repository as engines that write to it
+// themselves need it: for Rowsafe Storage, with the current temporary
+// credentials (they are renewed, so callers take it again for each piece of
+// work). Without credentials yet it is the configured one, which engines
+// refuse as not configured until the credentials arrive.
+func (a *Agent) ownRepo() pgbackrest.Repo {
+	if !a.cfg.RowsafeStorage() {
+		return a.cfg.Repo
+	}
+	r, err := a.repo()
+	if err != nil { // no credentials yet (the heartbeat reports why)
+		return a.cfg.Repo
+	}
+	return r
 }
 
 // managedCreds are the Rowsafe Storage credentials this agent holds, for

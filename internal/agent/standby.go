@@ -381,7 +381,7 @@ func (a *Agent) repoFor(db protocol.DatabaseSpec) pgbackrest.Repo {
 		if err != nil {
 			a.log.Error("reading the handed-over repository settings; using this agent's own", "database_id", db.ID, "err", err)
 		}
-		return a.cfg.Repo
+		return a.ownRepo() // storage.go: with Rowsafe Storage's credentials
 	}
 	if err != nil {
 		a.log.Warn("the handed-over repository is in Rowsafe Storage and this agent has no working credentials for it yet",

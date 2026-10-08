@@ -170,6 +170,7 @@ func (s *server) safeCopy(ctx context.Context, p protocol.SafeCopyParams, log ag
 	if err := s.replay(cctx, sc, r, restoreTarget{}, log); err != nil {
 		return fail(err)
 	}
+	rec.PID = sc.PID // replay starts the private server again
 	if rec.RecoveredTo = recoveredTo(r, restoreTarget{}); rec.RecoveredTo == nil {
 		t := r.Backup.StoppedAt
 		rec.RecoveredTo = &t
