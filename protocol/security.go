@@ -140,6 +140,11 @@ type SecurityReport struct {
 	ServerVersion   string `json:"server_version,omitempty"`
 	ListenAddresses string `json:"listen_addresses"`
 	Port            int    `json:"port"`
+	// OutsidePorts (addition) are more ports apps reach the server on,
+	// which the look from the internet checks too (ClickHouse on servers
+	// Rowsafe creates: its native protocol with TLS, 9440, next to HTTPS
+	// on Port, 8443).
+	OutsidePorts []int `json:"outside_ports,omitempty"`
 	// PendingRestart lists security settings changed but waiting for a
 	// restart (listen_addresses, port).
 	PendingRestart []string `json:"pending_restart,omitempty"`

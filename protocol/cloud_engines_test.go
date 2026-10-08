@@ -17,7 +17,7 @@ func TestCloudEngines(t *testing.T) {
 			t.Errorf("%s: name %q", e.Engine, e.Name)
 		case !e.HasVersion(e.DefaultVersion):
 			t.Errorf("%s: default %s isn't offered", e.Engine, e.DefaultVersion)
-		case e.Port <= 1024 || e.Scheme == "" || e.InstallFlag() == "":
+		case e.Port <= 1024 || e.Scheme == "" || e.InstallFlag() == "" || e.FirewallPorts()[0] != e.Port:
 			t.Errorf("%s: %+v", e.Engine, e)
 		case !EngineCapabilities[e.Engine].Backups || !EngineCapabilities[e.Engine].PointInTime || !EngineCapabilities[e.Engine].Proof:
 			t.Errorf("%s: servers Rowsafe creates need backups, restore to any second and Proof", e.Engine)
@@ -35,7 +35,14 @@ func TestCloudEngines(t *testing.T) {
 	if _, ok := CloudEngineFor(EngineMongoDB); ok {
 		t.Error("mongodb offered")
 	}
-	if got := CloudEngineNames(); got != "PostgreSQL, MySQL, MariaDB or Valkey" {
+	if e, ok := CloudEngineFor("clickhouse"); !ok || e.Port != 9440 || e.PortsText() != "9440 and 8443" || e.DefaultVersion != "26.8" ||
+		e.InstallFlag() != "--install-clickhouse" || e.FitsMemory(2048) || e.FitsMemory(0) || !e.FitsMemory(4096) || e.Standby || e.Clone || e.AMD64Only {
+		t.Errorf("clickhouse: %+v", e)
+	}
+	if e, _ := CloudEngineFor(""); e.PortsText() != "5432" || len(e.FirewallPorts()) != 1 || !e.FitsMemory(1024) {
+		t.Errorf("postgresql ports: %v", e.FirewallPorts())
+	}
+	if got := CloudEngineNames(); got != "PostgreSQL, MySQL, MariaDB, Valkey or ClickHouse" {
 		t.Errorf("names: %q", got)
 	}
 }

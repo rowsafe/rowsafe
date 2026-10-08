@@ -192,3 +192,33 @@ func TestServerFirewallRefusals(t *testing.T) {
 		t.Fatalf("the helper got %d requests", n)
 	}
 }
+
+// A database with two ports (ClickHouse: 9440 and 8443): one request for
+// both (the helper sets and confirms them together, or puts both back),
+// and a summary naming both.
+func TestServerFirewallSeveralPorts(t *testing.T) {
+	a, h := serverFirewallSetup(t, "9440\n8443\nssh\n", true)
+	res, err := a.serverFirewall(context.Background(), protocol.ServerFirewallParams{Postgres: []string{"203.0.113.4"},
+		Port: 9440, Ports: []int{9440, 8443}, Engine: protocol.EngineClickHouse}, &taskLog{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := h.requests.Load(); n != 1 {
+		t.Fatalf("the helper got %d requests", n)
+	}
+	if files := h.last.Load().(map[string]string); !strings.HasSuffix(files["request"], " server 9440,8443") || files["addresses"] != "203.0.113.4/32\n" {
+		t.Fatalf("last request %q", files)
+	}
+	if res.Port != 9440 || !slices.Equal(res.Ports, []int{9440, 8443}) ||
+		!strings.HasPrefix(res.Summary, "Only 203.0.113.4/32 can reach ClickHouse (ports 9440 and 8443), and no one but this server can reach SSH") {
+		t.Fatalf("result %+v", res)
+	}
+	// A port root didn't list is refused before the helper hears of it.
+	if _, err := a.serverFirewall(context.Background(), protocol.ServerFirewallParams{Port: 9440, Ports: []int{9440, 9000}}, &taskLog{}); err == nil ||
+		!strings.Contains(err.Error(), "port 9000 is not in root's") {
+		t.Fatalf("unlisted second port: %v", err)
+	}
+	if n := h.requests.Load(); n != 1 {
+		t.Fatalf("the helper got %d requests", n)
+	}
+}

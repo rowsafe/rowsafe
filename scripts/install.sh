@@ -50,7 +50,14 @@
 #                          (Debian 13; Debian 12: bookworm-backports): the
 #                          default user off, an admin user whose random
 #                          password stays root's (/etc/rowsafe/valkey), an ACL
-#                          file, appendonly. Only one --install-X per run
+#                          file, appendonly
+#   --install-clickhouse VERSION  the same for ClickHouse 26.3 or 26.8 (LTS)
+#                          from ClickHouse's repository (packages.clickhouse.com,
+#                          key checked, pinned to the series): the default user
+#                          locked, an admin user (this server only) whose random
+#                          password stays root's (/etc/rowsafe/clickhouse),
+#                          settings for servers from 4 GB of memory. Only one
+#                          --install-X per run
 #   --listen-public        PostgreSQL listens on every address: TLS on (a
 #                          self-signed certificate made here), SCRAM-SHA-256
 #                          passwords for logins from the network (hostssl rules
@@ -59,7 +66,9 @@
 #                          With --install-mysql/-mariadb: port 3306 on every
 #                          address, TLS required for TCP logins; with
 #                          --install-valkey: TLS on port 6380 only (no plain
-#                          port; this server's tools use a Unix socket)
+#                          port; this server's tools use a Unix socket); with
+#                          --install-clickhouse: TLS only on 9440 (native) and
+#                          8443 (HTTPS), plain 9000 and 8123 on 127.0.0.1 only
 #   (Permissions: without a terminal, restart, create-cluster, updates, pooler,
 #   tuning, sqlite-modes and files are allowed unless --no-allow-X; the
 #   server's own security updates, reboot, firewall and pooler-public only
@@ -284,12 +293,14 @@ REDIS_STANDBY=''   # --redis-standby (yes): Redis/Valkey standby servers with th
 REDIS_CLONES=''    # --redis-clones (yes): Redis/Valkey servers here may receive clones
 MONGODB_REPLSET='' # --mongodb-replica-set (yes) / --no-mongodb-replica-set (no); '' = ask on a terminal
 INSTALL_PG=''      # --install-postgres VERSION (servers Rowsafe creates)
-INSTALL_DB=''      # --install-mysql / --install-mariadb / --install-valkey: mysql, mariadb or valkey
-INSTALL_DB_VERSION='' # its version (8.4; 11.4 or 11.8; 8)
+INSTALL_DB=''      # --install-mysql / -mariadb / -valkey / -clickhouse: mysql, mariadb, valkey or clickhouse
+INSTALL_DB_VERSION='' # its version (8.4; 11.4 or 11.8; 8; 26.3 or 26.8)
 LISTEN_PUBLIC=0    # --listen-public
 PG_OURS=0          # the PostgreSQL here is the one --install-postgres installed
 DB_OURS=0          # the INSTALL_DB server here is the one this installer installed
-INSTALL_TWICE="--install-postgres, --install-mysql, --install-mariadb and --install-valkey each install a database server on a fresh server: give only one"
+DB_STARTED=0       # this run started it (its settings were in place before)
+CH_CONF_CHANGED=0  # --install-clickhouse's settings changed in this run
+INSTALL_TWICE="--install-postgres, --install-mysql, --install-mariadb, --install-valkey and --install-clickhouse each install a database server on a fresh server: give only one"
 SQLITE_PATHS=''    # --sqlite PATH, one per line
 SQLITE_LIST=$CONFIG_DIR/sqlite-paths # the agent's SQLite files (one per line)
 SQLITE_CLONE_DIRS='' # --sqlite-clone-dir DIR, one per line
@@ -371,7 +382,14 @@ Options (when piping, pass them after `sh -s --`):
                          Debian 12 from bookworm-backports; not on Ubuntu yet): the default
                          user turned off, an administrator "admin" with a random password
                          kept for root only in /etc/rowsafe/valkey/admin-password, users
-                         kept in /etc/valkey/users.acl, appendonly on.
+                         kept in /etc/valkey/users.acl, appendonly on
+  --install-clickhouse VERSION
+                         the same for ClickHouse 26.3 or 26.8 (long-term support) from
+                         ClickHouse's repository (packages.clickhouse.com, its signing key
+                         checked; updates stay on that series): the default user can't sign
+                         in, an administrator "admin" (this server only) with a random
+                         password kept for root only in /etc/rowsafe/clickhouse/admin-password,
+                         settings for small servers. Needs 4 GB of memory or more.
                          Each --install-X refuses when a database server is already
                          installed (a re-run keeps the one it installed); give only one
   --listen-public        make PostgreSQL reachable from the network: it listens on every
@@ -383,7 +401,9 @@ Options (when piping, pass them after `sh -s --`):
                          change waits for its next restart. With --install-mysql or
                          --install-mariadb: port 3306 on every address, TLS required for
                          logins over the network; with --install-valkey: TLS on port 6380
-                         (passwords only) and no plain port; this server's tools use a socket
+                         (passwords only) and no plain port; this server's tools use a socket;
+                         with --install-clickhouse: TLS only, on 9440 (native protocol) and
+                         8443 (HTTPS); the plain ports 9000 and 8123 on 127.0.0.1 only
   --sqlite PATH          protect the SQLite database file PATH (repeat for several);
                          with --protect NAME, give exactly one. The installer also finds
                          the SQLite files running apps have open and asks about each
@@ -548,7 +568,8 @@ Turning on backups:
   installs PostgreSQL 17, makes it reachable with TLS and passwords, keeps
   backups in Rowsafe Storage with a passphrase generated on the server (see it
   in the dashboard, sealed to your browser) and turns them on. The same with
-  --install-mysql 8.4, --install-mariadb 11.8 or --install-valkey 8 instead.
+  --install-mysql 8.4, --install-mariadb 11.8, --install-valkey 8 or
+  --install-clickhouse 26.8 instead.
 
   ClickHouse: Rowsafe's own ClickHouse user is added as
   /etc/clickhouse-server/users.d/rowsafe.xml (ClickHouse loads it by itself,
@@ -795,7 +816,11 @@ clickhouse_setup() {
   # restores to any second copy each new part from there as it appears.
   _groups=
   getent group clickhouse >/dev/null 2>&1 && _groups='SupplementaryGroups=clickhouse\n'
-  if printf "# Written by the Rowsafe installer: this server runs ClickHouse.\n[Unit]\nAfter=clickhouse-server.service\n[Service]\nUser=rowsafe\nGroup=rowsafe\n${_groups}" |
+  # --listen-public's certificate (--install-clickhouse): the agent
+  # replaces it with one from Let's Encrypt.
+  _rw=
+  [ ! -d "$CLICKHOUSE_TLS_DIR" ] || _rw="ReadWritePaths=-$CLICKHOUSE_TLS_DIR\n"
+  if printf '# Written by the Rowsafe installer: this server runs ClickHouse.\n[Unit]\nAfter=clickhouse-server.service\n[Service]\nUser=rowsafe\nGroup=rowsafe\n%b%b' "$_groups" "$_rw" |
     write_file "$_dropin/10-clickhouse.conf" 0644 root:root; then
     UNIT_CHANGED=1 CHANGED=1
   fi
@@ -1361,18 +1386,41 @@ MYSQL_TLS_DIR=/etc/mysql/rowsafe-tls
 # root and the valkey user can open it. With --listen-public Valkey has no
 # plain TCP port at all.
 VALKEY_SOCK=/run/valkey/valkey-server.sock
+# ClickHouse's own repository (https://clickhouse.com/docs/install/debian_ubuntu),
+# its "lts" channel, signed by "ClickHouse Inc. Repositories Key".
+CLICKHOUSE_KEY_URL=https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key
+CLICKHOUSE_KEY_FPR=3A9EA1193A97B548BE1457D48919F6BD2B48D754
+CLICKHOUSE_KEYRING=/usr/share/keyrings/rowsafe-clickhouse.gpg
+CLICKHOUSE_LIST=/etc/apt/sources.list.d/rowsafe-clickhouse.list
+CLICKHOUSE_PIN=/etc/apt/preferences.d/rowsafe-clickhouse
+# --install-clickhouse's files: settings (config.d, merged over the
+# packages' config.xml), the default user locked and the administrator
+# (users.d), the administrator's password (root's only), the unit drop-in
+# that lets the clickhouse group (the agent) read the data folder, and
+# --listen-public's certificate (written as the agent, which replaces it
+# with one from Let's Encrypt; ClickHouse reads it through its group).
+CLICKHOUSE_CONF=/etc/clickhouse-server/config.d/zz-rowsafe.xml
+CLICKHOUSE_NET_CONF=/etc/clickhouse-server/config.d/zz-rowsafe-network.xml
+CLICKHOUSE_ADMIN_FILE=/etc/clickhouse-server/users.d/zz-rowsafe-admin.xml
+CLICKHOUSE_ADMIN_PW_FILE=$CONFIG_DIR/clickhouse/admin-password
+CLICKHOUSE_DROPIN=/etc/systemd/system/clickhouse-server.service.d/rowsafe.conf
+CLICKHOUSE_TLS_DIR=/etc/ssl/rowsafe-clickhouse
 
 # db_record [ENGINE]: the file holding the version this installer installed.
 db_record() { printf '%s/installed-%s\n' "$CONFIG_DIR" "${1:-$INSTALL_DB}"; }
 
 # db_unit ENGINE: the systemd unit of the server its packages install.
 db_unit() {
-  case $1 in mysql) echo mysql.service ;; mariadb) echo mariadb.service ;; valkey) echo valkey-server.service ;; esac
+  case $1 in
+    mysql) echo mysql.service ;; mariadb) echo mariadb.service ;; valkey) echo valkey-server.service ;;
+    clickhouse) echo clickhouse-server.service ;;
+  esac
 }
 
 # db_port: the port the installed server listens on (the agent's): Valkey's
-# plain port, or its TLS port once it has no plain one (--listen-public).
-db_port() { case $INSTALL_DB in valkey) valkey_port ;; *) echo 3306 ;; esac; }
+# plain port, or its TLS port once it has no plain one (--listen-public);
+# ClickHouse's HTTP interface (8123, this server only).
+db_port() { case $INSTALL_DB in valkey) valkey_port ;; clickhouse) echo 8123 ;; *) echo 3306 ;; esac; }
 
 # valkey_port: the port in valkey.conf, the TLS port when the plain one is 0.
 valkey_port() {
@@ -1381,8 +1429,9 @@ valkey_port() {
 }
 
 # db_public_ports: the ports --listen-public opens (Valkey: its TLS port;
-# it has no plain one then).
-db_public_ports() { case $INSTALL_DB in valkey) echo 6380 ;; *) echo 3306 ;; esac; }
+# it has no plain one then; ClickHouse: the native protocol's and HTTPS's
+# TLS ports).
+db_public_ports() { case $INSTALL_DB in valkey) echo 6380 ;; clickhouse) echo 9440 8443 ;; *) echo 3306 ;; esac; }
 
 # mysql_net_conf: the file --install-mysql/-mariadb keeps the network
 # settings in. MariaDB's packages read mariadb.conf.d after conf.d (and set
@@ -1400,6 +1449,7 @@ db_program() {
     mysql) _p=/usr/sbin/mysqld ;;
     mariadb) _p=/usr/sbin/mariadbd ;;
     valkey) _p=/usr/bin/valkey-server ;;
+    clickhouse) _p=/usr/bin/clickhouse-server ;;
   esac
   [ -x "$_p" ] && echo "$_p"
 }
@@ -1468,6 +1518,13 @@ install_db_check() {
         ubuntu*) die "Valkey 8 isn't packaged for Ubuntu yet (Ubuntu 24.04 has Valkey 7.2); use Debian 12 or 13 for Valkey" ;;
         *) die "Valkey 8 is installed from Debian's own packages; use Debian 12 or 13 for Valkey" ;;
       esac
+      ;;
+    clickhouse)
+      case $OS_ID in debian | ubuntu) ;; *) die "--install-clickhouse works on Debian and Ubuntu; $OS_NAME isn't one of them" ;; esac
+      # A 4 GB server shows a little less (the kernel's share).
+      _mb=$(mem_mb)
+      [ "$_mb" -ge 3000 ] ||
+        die "ClickHouse needs a server with at least 4 GB of memory, and this one has $_mb MB. Choose a bigger server for ClickHouse."
       ;;
   esac
   if ! db_ours; then
@@ -1544,7 +1601,29 @@ mysql_repo() {
   ok "$_what"
 }
 
-# install_database is --install-mysql, --install-mariadb or --install-valkey:
+# mem_mb prints this server's memory in MB (MemTotal).
+# (ROWSAFE_MEMINFO: another file in its place, for the installer's tests.)
+mem_mb() { awk '$1 == "MemTotal:" { printf "%d\n", $2 / 1024; f = 1 } END { if (!f) print 0 }' "${ROWSAFE_MEMINFO:-/proc/meminfo}" 2>/dev/null || echo 0; }
+
+# clickhouse_repo adds ClickHouse's repository (its "lts" channel), pinned
+# to the series asked for (26.3.*, 26.8.*): routine updates stay on it, and
+# nothing else from that repository is installed on its own.
+clickhouse_repo() {
+  fetch "$CLICKHOUSE_KEY_URL" "$TMP/repo.asc" || die "could not download ClickHouse's signing key ($CLICKHOUSE_KEY_URL)"
+  repo_key "$TMP/repo.asc" "$CLICKHOUSE_KEY_FPR" "ClickHouse's" "$CLICKHOUSE_KEYRING"
+  echo "deb [signed-by=$CLICKHOUSE_KEYRING] https://packages.clickhouse.com/deb lts main" |
+    write_file "$CLICKHOUSE_LIST" 0644 root:root || true
+  printf '%s\n' "# Written by the Rowsafe installer (--install-clickhouse): ClickHouse's packages" \
+    "# come from ClickHouse's repository and stay on the $INSTALL_DB_VERSION long-term support series." \
+    "Package: clickhouse-*" "Pin: version $INSTALL_DB_VERSION.*" "Pin-Priority: 600" "" \
+    "Package: *" "Pin: origin packages.clickhouse.com" "Pin-Priority: 100" |
+    write_file "$CLICKHOUSE_PIN" 0644 root:root || true
+  apt_update
+  ok "ClickHouse's repository (packages.clickhouse.com, lts, $INSTALL_DB_VERSION.*, key $CLICKHOUSE_KEY_FPR)"
+}
+
+# install_database is --install-mysql, --install-mariadb, --install-valkey or
+# --install-clickhouse:
 # the server installed and running with secure defaults. It refuses on a
 # server with a database server already, unless that is the one it
 # installed.
@@ -1597,6 +1676,14 @@ install_database() {
           die "installing Valkey 8 failed"
         fi
         ;;
+      clickhouse)
+        step "Installing ClickHouse $INSTALL_DB_VERSION (long-term support) from ClickHouse's repository"
+        clickhouse_repo
+        _c=$(apt_candidate clickhouse-server)
+        case $_c in "$INSTALL_DB_VERSION".*) ;; *) die "ClickHouse $INSTALL_DB_VERSION isn't available for $OS_NAME ($ARCH) from ClickHouse's repository (found ${_c:-nothing})" ;; esac
+        # The packages don't start the server: its settings are in place first.
+        apt_install clickhouse-server clickhouse-client
+        ;;
     esac
     [ -n "$(db_program "$INSTALL_DB")" ] || die "$_n's packages installed, but its server program isn't there"
     [ -d "$CONFIG_DIR" ] || install -d -m 0750 -o root -g root "$CONFIG_DIR"
@@ -1604,9 +1691,12 @@ install_database() {
     ok "$_n $(db_version) installed"
   fi
   DB_OURS=1
+  CH_CONF_CHANGED=0
+  [ "$INSTALL_DB" != clickhouse ] || clickhouse_conf
   db_running
   case $INSTALL_DB in
     valkey) valkey_secure ;;
+    clickhouse) clickhouse_secure ;;
     *) mysql_secure ;;
   esac
 }
@@ -1615,6 +1705,7 @@ install_database() {
 db_version() {
   case $INSTALL_DB in
     valkey) valkey-server --version 2>/dev/null | sed -n 's/.* v=\([0-9.]*\).*/\1/p' ;;
+    clickhouse) clickhouse-server --version 2>/dev/null | sed -n 's/.*version \([0-9][0-9.]*[0-9]\).*/\1/p' | head -n 1 ;;
     *) "$(db_program "$INSTALL_DB")" --version 2>/dev/null | sed -n 's/.*Ver \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' ;;
   esac
 }
@@ -1623,6 +1714,7 @@ db_version() {
 db_running() {
   _u=$(db_unit "$INSTALL_DB")
   if ! systemctl is-active --quiet "$_u" || ! systemctl is-enabled --quiet "$_u" 2>/dev/null; then
+    systemctl is-active --quiet "$_u" || DB_STARTED=1
     if ! timeout 300 systemctl enable --now --quiet "$_u" >"$TMP/db.log" 2>&1 </dev/null; then
       journalctl -u "$_u" -n 15 --no-pager >>"$TMP/db.log" 2>/dev/null || true
       tail -n 20 "$TMP/db.log" | sed 's/^/    /' >&2
@@ -1631,6 +1723,10 @@ db_running() {
   fi
   case $INSTALL_DB in
     valkey) [ "$(db_version | cut -d. -f1)" = 8 ] || die "the Valkey here is $(db_version), not Valkey 8" ;;
+    clickhouse)
+      case $(db_version) in "$INSTALL_DB_VERSION".*) ;; *) die "the ClickHouse here is $(db_version), not ClickHouse $INSTALL_DB_VERSION" ;; esac
+      clickhouse_ready || die "ClickHouse started but doesn't answer on 127.0.0.1:8123 (see /var/log/clickhouse-server)"
+      ;;
   esac
   ok "$(engine_label "$INSTALL_DB") $(db_version) is running on port $(db_port)"
 }
@@ -1751,10 +1847,11 @@ tls_serves() {
   [ -n "$_want" ] && [ "$_want" = "$_got" ]
 }
 
-# db_listen_public is --listen-public for --install-mysql/-mariadb/-valkey.
+# db_listen_public is --listen-public for --install-mysql/-mariadb/-valkey/-clickhouse.
 db_listen_public() {
   case $INSTALL_DB in
     valkey) valkey_listen_public ;;
+    clickhouse) clickhouse_listen_public ;;
     *) mysql_listen_public ;;
   esac
 }
@@ -1928,6 +2025,268 @@ valkey_listen_public() {
     ok "Valkey listens on the network (TLS on port 6380, passwords only); nothing to change"
   else
     ok "Valkey listens on the network (TLS on port 6380, passwords only)"
+  fi
+}
+
+# clickhouse_http FILE [USER PASSWORD]: the query in FILE on this server's
+# HTTP interface (127.0.0.1:8123), as USER (the password goes on stdin,
+# never on a command line); prints the answer, fails unless ClickHouse
+# answered 200 (an error's text is printed all the same).
+clickhouse_http() {
+  if [ -n "${2:-}" ]; then
+    _r=$(printf 'header = "X-ClickHouse-User: %s"\nheader = "X-ClickHouse-Key: %s"\n' "$2" "$3" |
+      curl -sS --max-time 30 -K - -w '\n%{http_code}' --data-binary @"$1" http://127.0.0.1:8123/) || return 1
+  else
+    _r=$(curl -sS --max-time 30 -w '\n%{http_code}' --data-binary @"$1" http://127.0.0.1:8123/) || return 1
+  fi
+  printf '%s\n' "$_r" | sed '$d'
+  [ "$(printf '%s\n' "$_r" | tail -n 1)" = 200 ]
+}
+
+# clickhouse_ready: ClickHouse answers on 127.0.0.1:8123 (waits up to a minute).
+clickhouse_ready() {
+  _i=0
+  until [ "$(curl -s --max-time 5 http://127.0.0.1:8123/ping 2>/dev/null)" = Ok. ]; do
+    [ $_i -lt 60 ] || return 1
+    sleep 1
+    _i=$((_i + 1))
+  done
+}
+
+# clickhouse_conf: --install-clickhouse's settings and users, all in place
+# before ClickHouse first starts (CH_CONF_CHANGED=1 when the settings
+# changed):
+#   - config.d: this server only until --listen-public; no MySQL,
+#     PostgreSQL or interserver ports, no clusters (the packages' test
+#     clusters point at other hosts); access control that asks a grant for
+#     the system tables and information_schema (users made in Databases &
+#     users see their own databases); a log of information, not traces,
+#     kept to 500 MB; system tables of traces and metrics kept a week;
+#     memory for servers from 4 GB (ClickHouse at most 75% of it below
+#     16 GB, each cache at most a tenth).
+#   - users.d: the default user can't sign in (no address matches it, no
+#     password opens it); an administrator (admin, this server only, may
+#     manage users) whose random password only root can read; rowsafe_app,
+#     the profile apps' users get (memory and threads a query may use, with
+#     constraints so they can't raise them).
+#   - a unit drop-in that lets the clickhouse group (Rowsafe's agent) read
+#     the data folder again whenever ClickHouse starts, since the packages
+#     make it the clickhouse user's only at each update.
+clickhouse_conf() {
+  _mb=$(mem_mb)
+  _cpus=$(nproc 2>/dev/null || echo 2)
+  install -d -m 0755 -o root -g root "${CLICKHOUSE_DROPIN%/*}"
+  if printf '%s\n' "# Written by the Rowsafe installer (--install-clickhouse): Rowsafe's agent (group" \
+    "# clickhouse) reads new parts from the data folder (never writes there) so you can" \
+    "# restore to any second. ClickHouse's packages make the folder the clickhouse user's" \
+    "# only whenever they're updated; each start gives the group its read access back." \
+    "[Service]" "ExecStartPre=-/bin/chmod 0750 /var/lib/clickhouse" | write_file "$CLICKHOUSE_DROPIN" 0644 root:root; then
+    CH_CONF_CHANGED=1
+    systemctl daemon-reload 2>/dev/null || true
+  fi
+  [ -d "${CLICKHOUSE_CONF%/*}" ] || die "ClickHouse's configuration folder ${CLICKHOUSE_CONF%/*} isn't there"
+  if {
+    echo "<!-- Written by the Rowsafe installer (install-clickhouse). ClickHouse listens on this"
+    echo "     server only (listen-public adds TLS on 9440 and 8443, $CLICKHOUSE_NET_CONF);"
+    echo "     no MySQL, PostgreSQL or interserver ports, no clusters; grants needed for system tables;"
+    echo "     a log of information kept to 500 MB; traces and metrics kept a week; memory set for a"
+    echo "     server of $(((_mb + 512) / 1024)) GB. -->"
+    echo "<clickhouse>"
+    echo "  <mysql_port remove=\"remove\"/>"
+    echo "  <postgresql_port remove=\"remove\"/>"
+    echo "  <interserver_http_port remove=\"remove\"/>"
+    echo "  <remote_servers replace=\"replace\"/>"
+    echo "  <access_control_improvements>"
+    echo "    <select_from_system_db_requires_grant>true</select_from_system_db_requires_grant>"
+    echo "    <select_from_information_schema_requires_grant>true</select_from_information_schema_requires_grant>"
+    echo "    <settings_constraints_replace_previous>true</settings_constraints_replace_previous>"
+    echo "    <on_cluster_queries_require_cluster_grant>true</on_cluster_queries_require_cluster_grant>"
+    echo "  </access_control_improvements>"
+    echo "  <logger>"
+    echo "    <level>information</level>"
+    echo "    <size>100M</size>"
+    echo "    <count>5</count>"
+    echo "  </logger>"
+    if [ "$_mb" -lt 16000 ]; then
+      echo "  <max_server_memory_usage_to_ram_ratio>0.75</max_server_memory_usage_to_ram_ratio>"
+      echo "  <cache_size_to_ram_max_ratio>0.1</cache_size_to_ram_max_ratio>"
+      echo "  <mark_cache_size>$((_mb * 1048576 / 16))</mark_cache_size>"
+      echo "  <index_mark_cache_size>$((_mb * 1048576 / 32))</index_mark_cache_size>"
+      echo "  <primary_index_cache_size>$((_mb * 1048576 / 16))</primary_index_cache_size>"
+      echo "  <uncompressed_cache_size>$((_mb * 1048576 / 32))</uncompressed_cache_size>"
+    fi
+    echo "  <text_log>"
+    echo "    <level>information</level>"
+    echo "    <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>"
+    echo "  </text_log>"
+    for _t in trace_log metric_log asynchronous_metric_log query_thread_log query_metric_log; do
+      echo "  <$_t><ttl>event_date + INTERVAL 7 DAY DELETE</ttl></$_t>"
+    done
+    echo "  <error_log><ttl>event_date + INTERVAL 30 DAY DELETE</ttl></error_log>"
+    echo "</clickhouse>"
+  } | write_file "$CLICKHOUSE_CONF" 0640 root:clickhouse; then
+    CH_CONF_CHANGED=1
+  fi
+  install -d -m 0700 -o root -g root "${CLICKHOUSE_ADMIN_PW_FILE%/*}"
+  if [ ! -s "$CLICKHOUSE_ADMIN_PW_FILE" ]; then
+    ( umask 077; openssl rand -hex 32 >"$TMP/clickhouse-admin" ) || die "could not make a password"
+    install -m 0600 -o root -g root "$TMP/clickhouse-admin" "$CLICKHOUSE_ADMIN_PW_FILE"
+    rm -f "$TMP/clickhouse-admin"
+  fi
+  _h=$(tr -d '\n' <"$CLICKHOUSE_ADMIN_PW_FILE" | sha256sum | cut -d' ' -f1)
+  # Apps' queries: at most 40% of the memory and every processor, which
+  # they can't raise (ClickHouse keeps 25% for itself and the server).
+  _appmem=$((_mb * 1048576 / 100 * 40))
+  # The default user's password hash has no known password (all zeros).
+  if {
+    echo "<!-- Written by the Rowsafe installer (install-clickhouse). The default user can't sign in:"
+    echo "     no address matches it and no password opens it. admin manages users, from this server"
+    echo "     only; its password is in $CLICKHOUSE_ADMIN_PW_FILE (root's only). rowsafe_app is the"
+    echo "     profile of apps' users made in Databases & users. -->"
+    echo "<clickhouse>"
+    echo "  <users>"
+    echo "    <default replace=\"replace\">"
+    echo "      <password_sha256_hex>0000000000000000000000000000000000000000000000000000000000000000</password_sha256_hex>"
+    echo "      <networks><host_regexp>^$</host_regexp></networks>"
+    echo "      <profile>default</profile>"
+    echo "      <quota>default</quota>"
+    echo "    </default>"
+    echo "    <admin>"
+    echo "      <password_sha256_hex>$_h</password_sha256_hex>"
+    echo "      <networks><ip>127.0.0.1</ip><ip>::1</ip></networks>"
+    echo "      <profile>default</profile>"
+    echo "      <quota>default</quota>"
+    echo "      <access_management>1</access_management>"
+    echo "      <named_collection_control>1</named_collection_control>"
+    echo "      <show_named_collections>1</show_named_collections>"
+    echo "      <show_named_collections_secrets>1</show_named_collections_secrets>"
+    echo "    </admin>"
+    echo "  </users>"
+    echo "  <profiles>"
+    echo "    <rowsafe_app>"
+    echo "      <profile>default</profile>"
+    echo "      <max_memory_usage>$_appmem</max_memory_usage>"
+    echo "      <max_threads>$_cpus</max_threads>"
+    echo "      <constraints>"
+    echo "        <max_memory_usage><max>$_appmem</max></max_memory_usage>"
+    echo "        <max_threads><max>$_cpus</max></max_threads>"
+    echo "      </constraints>"
+    echo "    </rowsafe_app>"
+    echo "  </profiles>"
+    echo "</clickhouse>"
+  } | write_file "$CLICKHOUSE_ADMIN_FILE" 0640 root:clickhouse; then
+    CH_CONF_CHANGED=1
+  fi
+}
+
+# clickhouse_secure: the settings and users clickhouse_conf put in place,
+# checked on the running server (the default user turned away, the
+# administrator in), the data folder readable by the agent's group.
+# Restarts only the ClickHouse this installer installed, and only when its
+# settings changed while it ran.
+clickhouse_secure() {
+  _mb=$(mem_mb)
+  (cd / && runuser -u clickhouse -- chmod 0750 /var/lib/clickhouse) </dev/null || die "could not let the clickhouse group read /var/lib/clickhouse"
+  if [ "$CH_CONF_CHANGED" = 1 ] && [ "$DB_STARTED" != 1 ]; then
+    note "restarting the new ClickHouse with its settings"
+    db_restart || die "restarting ClickHouse failed (see above)"
+    clickhouse_ready || die "ClickHouse doesn't answer after its restart (see /var/log/clickhouse-server)"
+  fi
+  # ClickHouse loads users.d by itself within seconds.
+  echo 'SELECT currentUser()' >"$TMP/ch.sql"
+  _i=0
+  until [ "$(clickhouse_http "$TMP/ch.sql" admin "$(cat "$CLICKHOUSE_ADMIN_PW_FILE")" 2>/dev/null)" = admin ] &&
+    clickhouse_http "$TMP/ch.sql" 2>&1 | grep -Eq 'Code: (516|194)[.]'; do
+    if [ $_i -ge 30 ]; then
+      clickhouse_http "$TMP/ch.sql" >&2 || true
+      die "ClickHouse still lets the default user in, or its administrator can't sign in (see $CLICKHOUSE_ADMIN_FILE)"
+    fi
+    sleep 1
+    _i=$((_i + 1))
+  done
+  ok "ClickHouse: the default user can't sign in; an administrator (admin, this server only) whose password only root can read ($CLICKHOUSE_ADMIN_PW_FILE); settings for $(((_mb + 512) / 1024)) GB of memory"
+}
+
+# clickhouse_public_listeners prints ClickHouse's listening sockets that
+# aren't on a loopback address (ADDRESS:PORT, one per line).
+clickhouse_public_listeners() {
+  _uid=$(id -u clickhouse 2>/dev/null) || return 0
+  ss -ltnHe 2>/dev/null | awk -v u="$_uid" 'index($0, " uid:" u " ") {
+    n = split($4, a, ":"); p = a[n]; h = substr($4, 1, length($4) - length(p) - 1)
+    if (h ~ /^127[.]/ || h == "[::1]" || h == "::1" || h ~ /^\[::ffff:127[.]/) next
+    print $4 }' | sort -u
+}
+
+# clickhouse_listen_public: TLS on every address, the native protocol on
+# 9440 and HTTPS on 8443, from a certificate made here in
+# $CLICKHOUSE_TLS_DIR (the agent's, group clickhouse; the agent replaces it
+# with one from Let's Encrypt); the plain ports (8123 for the agent, 9000 for
+# this server's clickhouse-client) on 127.0.0.1 only; TLS 1.2 and 1.3.
+# ClickHouse listens on :: (IPv4 and IPv6) where the server has a global
+# IPv6 address, else on 0.0.0.0. Then nothing of ClickHouse's may listen
+# beyond this server but 9440 and 8443. A re-run changes nothing in place.
+clickhouse_listen_public() {
+  step "Making ClickHouse reachable from the network (TLS only, ports 9440 and 8443)"
+  getent group clickhouse >/dev/null 2>&1 || die "no clickhouse group on this server (ClickHouse's package makes it)"
+  [ ! -L "$CLICKHOUSE_TLS_DIR" ] || die "$CLICKHOUSE_TLS_DIR is a symbolic link; not using it"
+  install -d -m 2750 -o "$AGENT_USER" -g clickhouse "$CLICKHOUSE_TLS_DIR"
+  if server_cert "$AGENT_USER" "$CLICKHOUSE_TLS_DIR" "$(cert_cn)" 0640; then
+    ok "made a self-signed TLS certificate for ClickHouse ($CLICKHOUSE_TLS_DIR/rowsafe-server.crt)"
+  fi
+  _host=0.0.0.0
+  if awk '$4 == "00" && $6 != "lo" { f = 1 } END { exit !f }' /proc/net/if_inet6 2>/dev/null; then _host=::; fi
+  _changed=0
+  if {
+    echo "<!-- Written by the Rowsafe installer (listen-public): ClickHouse is reachable from the network"
+    echo "     with TLS only, the native protocol on 9440 and HTTPS on 8443; the firewall decides who can"
+    echo "     connect. The plain ports, 8123 (HTTP) and 9000 (native), are this server's only (Rowsafe's"
+    echo "     agent, clickhouse-client here). Rowsafe's agent replaces the certificate (same files). -->"
+    echo "<clickhouse>"
+    echo "  <listen_host replace=\"replace\">$_host</listen_host>"
+    echo "  <http_port remove=\"remove\"/>"
+    echo "  <tcp_port remove=\"remove\"/>"
+    echo "  <https_port>8443</https_port>"
+    echo "  <tcp_port_secure>9440</tcp_port_secure>"
+    echo "  <protocols>"
+    echo "    <rowsafe_local_http>"
+    echo "      <type>http</type>"
+    echo "      <host>127.0.0.1</host>"
+    echo "      <port>8123</port>"
+    echo "      <description>plain HTTP, this server only</description>"
+    echo "    </rowsafe_local_http>"
+    echo "    <rowsafe_local_tcp>"
+    echo "      <type>tcp</type>"
+    echo "      <host>127.0.0.1</host>"
+    echo "      <port>9000</port>"
+    echo "      <description>native protocol, this server only</description>"
+    echo "    </rowsafe_local_tcp>"
+    echo "  </protocols>"
+    echo "  <openSSL>"
+    echo "    <server>"
+    echo "      <certificateFile>$CLICKHOUSE_TLS_DIR/rowsafe-server.crt</certificateFile>"
+    echo "      <privateKeyFile>$CLICKHOUSE_TLS_DIR/rowsafe-server.key</privateKeyFile>"
+    echo "      <verificationMode>none</verificationMode>"
+    echo "      <disableProtocols>sslv2,sslv3,tlsv1,tlsv1_1</disableProtocols>"
+    echo "      <preferServerCiphers>true</preferServerCiphers>"
+    echo "    </server>"
+    echo "  </openSSL>"
+    echo "</clickhouse>"
+  } | write_file "$CLICKHOUSE_NET_CONF" 0640 root:clickhouse; then
+    _changed=1
+    note "restarting the new ClickHouse so it listens on the network"
+    db_restart || die "restarting ClickHouse failed (see above)"
+  fi
+  clickhouse_ready || die "ClickHouse doesn't answer on 127.0.0.1:8123 any more (see /var/log/clickhouse-server)"
+  for _p in 9440 8443; do
+    tls_serves "$_p" "$CLICKHOUSE_TLS_DIR/rowsafe-server.crt" || die "ClickHouse doesn't serve its TLS certificate on port $_p (see /var/log/clickhouse-server)"
+  done
+  have ss || apt_install iproute2
+  _open=$(clickhouse_public_listeners | awk '{ n = split($1, a, ":"); if (a[n] != "9440" && a[n] != "8443") print }')
+  [ -z "$_open" ] || die "ClickHouse listens beyond this server on more than 9440 and 8443 ($(printf '%s' "$_open" | paste -sd, - | sed 's/,/, /g')); see $CLICKHOUSE_NET_CONF"
+  if [ "$_changed" = 0 ]; then
+    ok "ClickHouse listens on the network (TLS on 9440 and 8443, passwords only); nothing to change"
+  else
+    ok "ClickHouse listens on the network (TLS on 9440 and 8443, passwords only; 8123 and 9000 on this server only)"
   fi
 }
 
@@ -5859,6 +6218,8 @@ write_firewall_helper() {
 # itself: the installer's --firewall-ssh adds the line "ssh" to root's allow
 # list, and only then the action "server" ("ID server PORT") sets both allow
 # lists at once: /var/lib/rowsafe/firewall/addresses for PostgreSQL's PORT
+# (or several ports, "ID server P1,P2", each with the same list, set and
+# confirmed together: ClickHouse's 9440 and 8443)
 # and /var/lib/rowsafe/firewall/ssh-addresses for SSH (the ports sshd uses,
 # found here, never taken from the agent), 0 to 64 addresses each (none =
 # closed to everyone; 0.0.0.0/0 and ::/0 = open to everyone). Connections
@@ -6099,7 +6460,7 @@ fi
 
 line=$(read_agent_file "$dir/request" 200 | head -n 1)
 [ -n "$line" ] || exit 0
-if printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} (apply|remove|status|server) [1-9][0-9]{0,4}$'; then
+if printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} (apply|remove|status|server) [1-9][0-9]{0,4}(,[1-9][0-9]{0,4}){0,3}$'; then
   id=${line%% *}
   rest=${line#* }
   action=${rest% *}
@@ -6107,6 +6468,9 @@ if printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} (apply|remove|status|s
 else
   refuse "malformed request"
 fi
+# ports: PORT, or for "server" up to four, set together.
+ports=$(printf '%s\n' "$port" | tr ',' ' ')
+case $port in *,*) [ "$action" = server ] || refuse "malformed request" ;; esac
 # Each request is handled once (the agent removes it once it has the answer).
 [ "$(cat "$state/last-request" 2>/dev/null)" != "$id" ] || exit 0
 printf '%s\n' "$id" >"$state/last-request"
@@ -6119,9 +6483,11 @@ if [ "$action" = status ]; then
 fi
 
 command -v "$nft" >/dev/null 2>&1 || refuse "nftables (the nft command) is not installed on this server"
-valid_port "$port" || refuse "port $port can't be managed by Rowsafe: only ports 1024 to 65535"
-listed_port "$port" || refuse "port $port is not in $allow: changing the firewall for it from Rowsafe is not allowed"
-if ssh_port "$port"; then refuse "port $port is SSH's: Rowsafe never touches it"; fi
+for p in $ports; do
+  valid_port "$p" || refuse "port $p can't be managed by Rowsafe: only ports 1024 to 65535"
+  listed_port "$p" || refuse "port $p is not in $allow: changing the firewall for it from Rowsafe is not allowed"
+  if ssh_port "$p"; then refuse "port $p is SSH's: Rowsafe never touches it"; fi
+done
 if [ "$action" = server ] && ! listed_ssh; then
   refuse "SSH's allow list isn't Rowsafe's on this server: only servers Rowsafe creates allow it (the installer's --firewall-ssh)"
 fi
@@ -6167,22 +6533,25 @@ take_addresses() {
 }
 
 if [ "$action" = apply ] || [ "$action" = server ]; then
-  db_listens=0
-  for u in $db_users; do
-    uid=$(id -u "$u" 2>/dev/null) || continue
-    if listen_ports "$uid" | grep -qx "$port"; then db_listens=1; fi
+  for p in $ports; do
+    db_listens=0
+    for u in $db_users; do
+      uid=$(id -u "$u" 2>/dev/null) || continue
+      if listen_ports "$uid" | grep -qx "$p"; then db_listens=1; fi
+    done
+    [ "$db_listens" = 1 ] ||
+      refuse "no database server (PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis or Valkey) listens on port $p here (a port Docker publishes bypasses this firewall: limit it in the compose file instead)"
   done
-  [ "$db_listens" = 1 ] ||
-    refuse "no database server (PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis or Valkey) listens on port $port here (a port Docker publishes bypasses this firewall: limit it in the compose file instead)"
 fi
 if [ "$action" = apply ]; then
   take_addresses addresses "$state/new-$port" 1 32
   mv -f "$state/new-$port" "$state/pending-$port"
 elif [ "$action" = server ]; then
-  take_addresses addresses "$state/new-$port" 0 64 any
+  take_addresses addresses "$state/new-server" 0 64 any
   take_addresses ssh-addresses "$state/ssh-new" 0 64 any
   ssh_ports >"$state/ssh-ports"
-  mv -f "$state/new-$port" "$state/pending-$port"
+  for p in $ports; do cp -p "$state/new-server" "$state/pending-$p"; done
+  rm -f "$state/new-server"
   mv -f "$state/ssh-new" "$state/ssh-pending"
 else
   rm -f "$state/port-$port" "$state/pending-$port"
@@ -6222,7 +6591,7 @@ if [ "$action" = apply ] || [ "$action" = server ]; then
     answer
     exit 0
   fi
-  mv -f "$state/pending-$port" "$state/port-$port"
+  for p in $ports; do mv -f "$state/pending-$p" "$state/port-$p"; done
   if [ "$action" = server ]; then mv -f "$state/ssh-pending" "$state/ssh-allowed"; fi
 fi
 publish
@@ -6398,14 +6767,21 @@ ssh_port_here() {
 # firewall_ports prints the TCP ports database servers listen on, found by
 # root itself (pg_lsclusters, and the listening sockets of the agent user and
 # of the users MySQL, MariaDB, MongoDB and ClickHouse run as), never taken
-# from the agent: 1024 to 65535, never one sshd uses.
+# from the agent: 1024 to 65535, never one sshd uses. On a ClickHouse
+# server, ports it listens on for this server only (127.0.0.1 or ::1: the
+# plain 8123 and 9000 of --install-clickhouse) aren't firewall ports.
 firewall_ports() {
+  _lo_only=0
+  [ "$HOST_ENGINE" != clickhouse ] || _lo_only=1
   {
     if command -v pg_lsclusters >/dev/null 2>&1; then pg_lsclusters -h 2>/dev/null | awk '{ print $3 }'; fi
     if command -v ss >/dev/null 2>&1; then
       for _u in "$AGENT_USER" postgres mysql mongodb mongod clickhouse redis valkey; do
         _uid=$(id -u "$_u" 2>/dev/null) || continue
-        ss -ltnHe 2>/dev/null | awk -v u="$_uid" 'index($0, " uid:" u " ") { n = split($4, a, ":"); print a[n] }'
+        ss -ltnHe 2>/dev/null | awk -v u="$_uid" -v lo="$_lo_only" 'index($0, " uid:" u " ") {
+          n = split($4, a, ":"); h = substr($4, 1, length($4) - length(a[n]) - 1)
+          if (lo == 1 && (h ~ /^127[.]/ || h == "[::1]" || h == "::1")) next
+          print a[n] }'
       done
     fi
   } | grep -Ex '[1-9][0-9]{3,4}' | awk '$1 >= 1024 && $1 <= 65535' | sort -un | while read -r _p; do
@@ -10584,7 +10960,10 @@ clickhouse_users_file() {
   # Readable by ClickHouse only: its group from the packages, else users.xml's.
   _grp=clickhouse
   getent group clickhouse >/dev/null 2>&1 || _grp=$(stat -c %G "${_dir%/*}/users.xml" 2>/dev/null || echo root)
-  if ! agent_run clickhouse login --port "$C_PORT" --users-xml ${CH_CLONES:+--clones} >"$TMP/chusers.xml" 2>"$TMP/chlogin.err" ||
+  # The ClickHouse --install-clickhouse installed: its certificate reload and system tables too.
+  _rs=''
+  [ "$DB_OURS" != 1 ] || [ "$INSTALL_DB" != clickhouse ] || _rs=--rowsafe-server
+  if ! agent_run clickhouse login --port "$C_PORT" --users-xml ${CH_CLONES:+--clones} $_rs >"$TMP/chusers.xml" 2>"$TMP/chlogin.err" ||
     ! grep -q '<clickhouse>' "$TMP/chusers.xml"; then
     sed 's/^/    /' "$TMP/chlogin.err" >&2
     return 1
@@ -11727,12 +12106,13 @@ main() {
         esac
         shift
         ;;
-      --install-mysql | --install-mariadb | --install-valkey)
+      --install-mysql | --install-mariadb | --install-valkey | --install-clickhouse)
         _e=${1#--install-}
         case $_e in
           mysql) _want='8.4' _eg='--install-mysql 8.4: MySQL 8.4, the long-term support release' ;;
           mariadb) _want='11.4 11.8' _eg='--install-mariadb 11.8 (or 11.4), the long-term support releases' ;;
           valkey) _want='8' _eg='--install-valkey 8' ;;
+          clickhouse) _want='26.3 26.8' _eg='--install-clickhouse 26.8 (or 26.3), the long-term support releases' ;;
         esac
         [ $# -ge 2 ] || die "$1 needs a version: $_eg"
         [ -z "$INSTALL_PG$INSTALL_DB" ] || die "$INSTALL_TWICE"
@@ -11798,7 +12178,7 @@ main() {
     die "--files, --allow-files and --no-files only go with an install"
   fi
   if [ "$mode" != install ] && { [ -n "$INSTALL_PG$INSTALL_DB" ] || [ "$LISTEN_PUBLIC" = 1 ]; }; then
-    die "--install-postgres, --install-mysql, --install-mariadb, --install-valkey and --listen-public only go with an install"
+    die "--install-postgres, --install-mysql, --install-mariadb, --install-valkey, --install-clickhouse and --listen-public only go with an install"
   fi
   [ "$mode" = install ] || [ -z "$FIREWALL_SSH" ] || die "--firewall-ssh and --no-firewall-ssh only go with an install"
   [ "$mode" = install ] || [ "$mode" = permissions ] || [ -z "$AUTO_SECURITY" ] ||

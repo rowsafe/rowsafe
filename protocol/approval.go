@@ -163,9 +163,9 @@ var ApprovalActions = []ApprovalAction{
 	// Databases and users on the server.
 	{Name: "create_app_database", Group: "data", Title: "Create a database for an app", Method: "POST", Path: "/v1/databases/{ref}/dbadmin",
 		Fixed: map[string]any{"action": DBAdminCreateDatabase, "create_owner": true}, Risk: RiskNormal, Body: AppDatabaseParams{},
-		Description: "Creates a new, empty database and a new user that owns it, on a Rowsafe Cloud server's PostgreSQL (15 or newer), MySQL or MariaDB, for the app you are building. Only that user (and the server's admins) can connect to the new database; existing databases and users are untouched, and it is backed up with the rest of the server. " +
+		Description: "Creates a new, empty database and a new user that owns it, on a Rowsafe Cloud server's PostgreSQL (15 or newer), MySQL, MariaDB or ClickHouse, for the app you are building. Only that user (and the server's admins) can connect to the new database; existing databases and users are untouched, and it is backed up with the rest of the server. " +
 			"The password never passes through Rowsafe: for PostgreSQL use the create_app_database tool, which makes it on the user's machine and sends only its verifier, so you get the full connection string at once (it works once a person approves); " +
-			"for MySQL and MariaDB, and on the remote endpoint, the person who approves sees the connection string once, in their browser, and gives it to you. " +
+			"for MySQL, MariaDB and ClickHouse, and on the remote endpoint, the person who approves sees the connection string once, in their browser, and gives it to you. " +
 			"Valkey has no separate databases: a login for the app is made in the dashboard (Databases & users)."},
 	{Name: "manage_databases_users", Group: "data", Title: "Create or remove databases and users", Method: "POST", Path: "/v1/databases/{ref}/dbadmin", Risk: RiskDisruptive, Body: DBAdminParams{},
 		Description: "Creates a database for an existing owner, removes a database or user, or turns an extension on or off, on the database server (list_databases_on_server shows them). Removing a database saves a Mark first. Anything that makes a password (a new user, a new owner, a password reset) is for people only, in the dashboard: the password is shown only to them. For a new database and login for the app you are building, use create_app_database."},
@@ -183,7 +183,7 @@ var ApprovalActions = []ApprovalAction{
 	// Rowsafe Cloud: servers Rowsafe runs for the organization, billed to it.
 	{Name: "create_cloud_server", Group: "cloud", Title: "Create a Rowsafe Cloud server", Method: "POST", Path: "/v1/cloud/servers",
 		Fixed: map[string]any{"where": "rowsafe"}, Risk: RiskNormal, CostsMoney: true, Body: CreateCloudServerParams{},
-		Description: "Creates a new server in Rowsafe Cloud with PostgreSQL (the default), MySQL, MariaDB or Valkey (engine, engine_version: cloud_catalog lists them), protected by Rowsafe from the start (backups, Proof, Pulse), for the region and size you choose from cloud_catalog. " +
+		Description: "Creates a new server in Rowsafe Cloud with PostgreSQL (the default), MySQL, MariaDB, Valkey or ClickHouse (engine, engine_version: cloud_catalog lists them), protected by Rowsafe from the start (backups, Proof, Pulse), for the region and size you choose from cloud_catalog. " +
 			"It costs money: the person approving sees the size, the price per hour and the most it costs a month (a standby doubles it). " +
 			"Where pay as you go isn't active yet, the person pays at a checkout right after approving and the server is created once paid. " +
 			"get_approval then shows the server's ID; get_cloud_server follows it until it's ready (about 5 to 10 minutes)."},

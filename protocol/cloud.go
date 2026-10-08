@@ -17,12 +17,14 @@ import "time"
 // reachable from the network: listen_addresses '*', TLS on with a
 // self-signed certificate, scram-sha-256 for remote logins (the cloud
 // firewall decides who may connect). --install-mysql 8.4,
-// --install-mariadb 11.8 and --install-valkey 8 do the same for the other
-// engines servers Rowsafe creates can get (CloudEngines in
-// cloud_engines.go): TCP logins only with TLS (MySQL's and MariaDB's
-// require_secure_transport, Valkey's TLS port 6380), no anonymous or
-// remote root logins (Valkey: its default user off), and the
-// administrator's login stays on the server. The backup passphrase is generated on
+// --install-mariadb 11.8, --install-valkey 8 and --install-clickhouse 26.8
+// do the same for the other engines servers Rowsafe creates can get
+// (CloudEngines in cloud_engines.go): TCP logins only with TLS (MySQL's and
+// MariaDB's require_secure_transport, Valkey's TLS port 6380, ClickHouse's
+// 9440 and 8443 with its plain ports on the server itself only), no
+// anonymous or remote root logins (Valkey: its default user off;
+// ClickHouse: its default user locked), and the administrator's login
+// stays on the server. The backup passphrase is generated on
 // the server and stays there; the person saves their own copy through
 // TaskBackupPassphrase, sealed to their browser.
 //
@@ -90,6 +92,10 @@ type ServerFirewallParams struct {
 	// Port is PostgreSQL's port; 0 = the one port root's allow list has.
 	// (Postgres and Port are the database's, whatever its engine.)
 	Port int `json:"port,omitempty"`
+	// Ports (addition) are all the database's ports when it has more than
+	// one, Port first (ClickHouse: 9440 and 8443); each gets the same allow
+	// list. Empty: Port alone. Agents before it set Port only.
+	Ports []int `json:"ports,omitempty"`
 	// Engine names the database's engine in the summary ("" PostgreSQL).
 	Engine string `json:"engine,omitempty"`
 }
@@ -99,7 +105,9 @@ const MaxServerFirewallSources = 64
 
 // ServerFirewallResult is what the firewall lets through now.
 type ServerFirewallResult struct {
-	Port     int      `json:"port"`
+	Port int `json:"port"`
+	// Ports (addition): every port set, Port first, when there are several.
+	Ports    []int    `json:"ports,omitempty"`
 	Postgres []string `json:"postgres"`
 	SSH      []string `json:"ssh"`
 	// SSHPorts are the ports sshd uses here (found by root's helper).

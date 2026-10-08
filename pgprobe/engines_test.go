@@ -2,11 +2,14 @@ package pgprobe
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/binary"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rowsafe/rowsafe/protocol"
 )
@@ -66,8 +69,81 @@ func TestProbeClickHouse(t *testing.T) {
 	if r.State != protocol.OutsideAsksPassword {
 		t.Errorf("%+v", r)
 	}
+	// An HTTPS port (servers Rowsafe creates: 8443): asked again over TLS.
+	tlsAuth := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("Code: 516. DB::Exception: default: Authentication failed"))
+	}))
+	defer tlsAuth.Close()
+	r = ProbeEngine(context.Background(), protocol.EngineClickHouse, strings.TrimPrefix(tlsAuth.URL, "https://"), Options{})
+	if r.State != protocol.OutsideAsksPassword || r.PlainLogins || !strings.HasSuffix(r.Detail, "(over TLS)") {
+		t.Errorf("over TLS: %+v", r)
+	}
 	r = ProbeEngine(context.Background(), protocol.EngineMongoDB, "127.0.0.1:1", Options{})
 	if r.State != protocol.OutsideClosed {
 		t.Errorf("%+v", r)
+	}
+}
+
+// nativeServer answers ClickHouse's native Hello with kind (0 Hello, 2 an
+// exception with code), over TLS when tlsOn.
+func nativeServer(t *testing.T, kind uint64, code int32, tlsOn bool) string {
+	t.Helper()
+	var ln net.Listener
+	var err error
+	if tlsOn {
+		srv := httptest.NewTLSServer(nil) // for its test certificate
+		certs := srv.TLS.Certificates
+		srv.Close()
+		ln, err = tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: certs})
+	} else {
+		ln, err = net.Listen("tcp", "127.0.0.1:0")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			buf := make([]byte, 256)
+			_, _ = c.Read(buf)
+			out := binary.AppendUvarint(nil, kind)
+			if kind == 2 {
+				out = binary.LittleEndian.AppendUint32(out, uint32(code))
+				for _, s := range []string{"DB::Exception", "default: Authentication failed"} {
+					out = binary.AppendUvarint(out, uint64(len(s)))
+					out = append(out, s...)
+				}
+			}
+			_, _ = c.Write(out)
+			c.Close()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// ClickHouse's native protocol (9000; 9440 with TLS on servers Rowsafe
+// creates): a password asked, an address turned away, a stranger let in.
+func TestProbeClickHouseNative(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		kind  uint64
+		code  int32
+		tlsOn bool
+		state string
+	}{
+		{2, 516, true, protocol.OutsideAsksPassword},
+		{2, 194, false, protocol.OutsideAsksPassword},
+		{2, 195, true, protocol.OutsideRefusesLogins},
+		{0, 0, false, protocol.OutsideNoPassword},
+	} {
+		r := ProbeEngine(ctx, protocol.EngineClickHouse, nativeServer(t, tc.kind, tc.code, tc.tlsOn), Options{ReadTimeout: 2 * time.Second})
+		if r.State != tc.state || r.TLS != tc.tlsOn || (tc.tlsOn && r.PlainLogins) {
+			t.Errorf("%+v: %+v", tc, r)
+		}
 	}
 }

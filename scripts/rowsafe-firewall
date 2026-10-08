@@ -51,6 +51,8 @@
 # itself: the installer's --firewall-ssh adds the line "ssh" to root's allow
 # list, and only then the action "server" ("ID server PORT") sets both allow
 # lists at once: /var/lib/rowsafe/firewall/addresses for PostgreSQL's PORT
+# (or several ports, "ID server P1,P2", each with the same list, set and
+# confirmed together: ClickHouse's 9440 and 8443)
 # and /var/lib/rowsafe/firewall/ssh-addresses for SSH (the ports sshd uses,
 # found here, never taken from the agent), 0 to 64 addresses each (none =
 # closed to everyone; 0.0.0.0/0 and ::/0 = open to everyone). Connections
@@ -291,7 +293,7 @@ fi
 
 line=$(read_agent_file "$dir/request" 200 | head -n 1)
 [ -n "$line" ] || exit 0
-if printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} (apply|remove|status|server) [1-9][0-9]{0,4}$'; then
+if printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} (apply|remove|status|server) [1-9][0-9]{0,4}(,[1-9][0-9]{0,4}){0,3}$'; then
   id=${line%% *}
   rest=${line#* }
   action=${rest% *}
@@ -299,6 +301,9 @@ if printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} (apply|remove|status|s
 else
   refuse "malformed request"
 fi
+# ports: PORT, or for "server" up to four, set together.
+ports=$(printf '%s\n' "$port" | tr ',' ' ')
+case $port in *,*) [ "$action" = server ] || refuse "malformed request" ;; esac
 # Each request is handled once (the agent removes it once it has the answer).
 [ "$(cat "$state/last-request" 2>/dev/null)" != "$id" ] || exit 0
 printf '%s\n' "$id" >"$state/last-request"
@@ -311,9 +316,11 @@ if [ "$action" = status ]; then
 fi
 
 command -v "$nft" >/dev/null 2>&1 || refuse "nftables (the nft command) is not installed on this server"
-valid_port "$port" || refuse "port $port can't be managed by Rowsafe: only ports 1024 to 65535"
-listed_port "$port" || refuse "port $port is not in $allow: changing the firewall for it from Rowsafe is not allowed"
-if ssh_port "$port"; then refuse "port $port is SSH's: Rowsafe never touches it"; fi
+for p in $ports; do
+  valid_port "$p" || refuse "port $p can't be managed by Rowsafe: only ports 1024 to 65535"
+  listed_port "$p" || refuse "port $p is not in $allow: changing the firewall for it from Rowsafe is not allowed"
+  if ssh_port "$p"; then refuse "port $p is SSH's: Rowsafe never touches it"; fi
+done
 if [ "$action" = server ] && ! listed_ssh; then
   refuse "SSH's allow list isn't Rowsafe's on this server: only servers Rowsafe creates allow it (the installer's --firewall-ssh)"
 fi
@@ -359,22 +366,25 @@ take_addresses() {
 }
 
 if [ "$action" = apply ] || [ "$action" = server ]; then
-  db_listens=0
-  for u in $db_users; do
-    uid=$(id -u "$u" 2>/dev/null) || continue
-    if listen_ports "$uid" | grep -qx "$port"; then db_listens=1; fi
+  for p in $ports; do
+    db_listens=0
+    for u in $db_users; do
+      uid=$(id -u "$u" 2>/dev/null) || continue
+      if listen_ports "$uid" | grep -qx "$p"; then db_listens=1; fi
+    done
+    [ "$db_listens" = 1 ] ||
+      refuse "no database server (PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis or Valkey) listens on port $p here (a port Docker publishes bypasses this firewall: limit it in the compose file instead)"
   done
-  [ "$db_listens" = 1 ] ||
-    refuse "no database server (PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis or Valkey) listens on port $port here (a port Docker publishes bypasses this firewall: limit it in the compose file instead)"
 fi
 if [ "$action" = apply ]; then
   take_addresses addresses "$state/new-$port" 1 32
   mv -f "$state/new-$port" "$state/pending-$port"
 elif [ "$action" = server ]; then
-  take_addresses addresses "$state/new-$port" 0 64 any
+  take_addresses addresses "$state/new-server" 0 64 any
   take_addresses ssh-addresses "$state/ssh-new" 0 64 any
   ssh_ports >"$state/ssh-ports"
-  mv -f "$state/new-$port" "$state/pending-$port"
+  for p in $ports; do cp -p "$state/new-server" "$state/pending-$p"; done
+  rm -f "$state/new-server"
   mv -f "$state/ssh-new" "$state/ssh-pending"
 else
   rm -f "$state/port-$port" "$state/pending-$port"
@@ -414,7 +424,7 @@ if [ "$action" = apply ] || [ "$action" = server ]; then
     answer
     exit 0
   fi
-  mv -f "$state/pending-$port" "$state/port-$port"
+  for p in $ports; do mv -f "$state/pending-$p" "$state/port-$p"; done
   if [ "$action" = server ]; then mv -f "$state/ssh-pending" "$state/ssh-allowed"; fi
 fi
 publish

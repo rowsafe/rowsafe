@@ -55,9 +55,9 @@ type AppDatabaseOutput struct {
 func (t *tools) addAppDatabaseTool(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "create_app_database",
-		Description: "Creates a new, empty database and a login for the app you are building, on a Rowsafe Cloud server running PostgreSQL (15 or newer), MySQL or MariaDB. The new user owns only that database, and only it can connect there; existing databases and users are untouched. " +
+		Description: "Creates a new, empty database and a login for the app you are building, on a Rowsafe Cloud server running PostgreSQL (15 or newer), MySQL, MariaDB or ClickHouse. The new user owns only that database, and only it can connect there; existing databases and users are untouched. " +
 			"Rowsafe never sees the password. For PostgreSQL from a local rowsafe mcp it is made on this machine, you get the full connection string at once, and it runs right away as the person who connected you (an owner or admin; otherwise, or if your team asks first, a person approves it; get_org). " +
-			"For MySQL and MariaDB, and on the remote endpoint, it always waits for an owner or admin to approve it in the dashboard (never right away): the password is made then, shown once in their browser, and they give it to you. Put the connection string in the app's environment (e.g. DATABASE_URL in .env), never in code or git. " +
+			"For MySQL, MariaDB and ClickHouse, and on the remote endpoint, it always waits for an owner or admin to approve it in the dashboard (never right away): the password is made then, shown once in their browser, and they give it to you. Put the connection string in the app's environment (e.g. DATABASE_URL in .env), never in code or git. " +
 			"Valkey servers have no separate databases: the user makes the app's login in the dashboard (Databases & users).",
 		Annotations: writes("Create a database for the app", false, false),
 		InputSchema: withWait[appDatabaseInput](func(p map[string]*jsonschema.Schema) {
@@ -85,12 +85,12 @@ func (t *tools) createAppDatabase(ctx context.Context, _ *sdk.CallToolRequest, i
 	}
 	engine := protocol.NormalizeEngine(d.Engine)
 	switch engine {
-	case protocol.EnginePostgreSQL, protocol.EngineMySQL, protocol.EngineMariaDB:
+	case protocol.EnginePostgreSQL, protocol.EngineMySQL, protocol.EngineMariaDB, protocol.EngineClickHouse:
 	case protocol.EngineValkey, protocol.EngineRedis:
 		return nil, AppDatabaseOutput{}, fmt.Errorf("%s runs %s, which has no separate databases: the user makes a login for the app in the dashboard (Databases & users), which shows its password once; "+
 			"the app connects with rediss:// (TLS), the server's host and port (get_cloud_server shows them)", d.Name, protocol.EngineDisplayName(engine))
 	default:
-		return nil, AppDatabaseOutput{}, fmt.Errorf("create_app_database is for PostgreSQL, MySQL and MariaDB servers, and %s runs %s", d.Name, protocol.EngineDisplayName(engine))
+		return nil, AppDatabaseOutput{}, fmt.Errorf("create_app_database is for PostgreSQL, MySQL, MariaDB and ClickHouse servers, and %s runs %s", d.Name, protocol.EngineDisplayName(engine))
 	}
 	conn, err := t.appConnection(ctx, d)
 	if err != nil {
@@ -109,7 +109,7 @@ func (t *tools) createAppDatabase(ctx context.Context, _ *sdk.CallToolRequest, i
 		params["extensions"] = in.Extensions
 	}
 	// Locally the password is made here and only its verifier leaves this
-	// machine (PostgreSQL). Remotely, and for MySQL and MariaDB, nothing is
+	// machine (PostgreSQL). Remotely, and for MySQL, MariaDB and ClickHouse, nothing is
 	// made: the person who approves gets it.
 	password := ""
 	if !t.opts.Remote && engine == protocol.EnginePostgreSQL {

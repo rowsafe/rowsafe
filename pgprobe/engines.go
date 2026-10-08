@@ -102,6 +102,36 @@ func probeMySQL(ctx context.Context, addr string, o Options) Result {
 }
 
 func probeClickHouseHTTP(ctx context.Context, addr string, o Options) Result {
+	res := probeClickHouseHTTPS(ctx, addr, o)
+	if res.Reachable && res.State == protocol.OutsideNotPostgres {
+		// Not ClickHouse's HTTP interface: its native protocol (9000, or
+		// 9440 with TLS on servers Rowsafe creates)?
+		for _, overTLS := range []bool{false, true} {
+			if n := probeClickHouseNative(ctx, addr, o, overTLS); n.State != protocol.OutsideNotPostgres && n.State != protocol.OutsideError {
+				return n
+			}
+		}
+	}
+	return res
+}
+
+// probeClickHouseHTTPS is the HTTP interface, plain or over TLS.
+func probeClickHouseHTTPS(ctx context.Context, addr string, o Options) Result {
+	res := probeClickHouseOnce(ctx, addr, o, false)
+	if res.Reachable && res.State == protocol.OutsideNotPostgres {
+		// An HTTPS port (servers Rowsafe creates: ClickHouse's 8443, the
+		// plain ports on the server itself only) doesn't answer plain HTTP:
+		// ask again over TLS.
+		if t := probeClickHouseOnce(ctx, addr, o, true); t.State != protocol.OutsideNotPostgres && t.State != protocol.OutsideError {
+			t.PlainLogins, t.TLS = false, true
+			t.Detail += " (over TLS)"
+			return t
+		}
+	}
+	return res
+}
+
+func probeClickHouseOnce(ctx context.Context, addr string, o Options, overTLS bool) Result {
 	conn, err := dial(ctx, addr, o)
 	if err != nil {
 		return dialFailure(err)
@@ -109,10 +139,17 @@ func probeClickHouseHTTP(ctx context.Context, addr string, o Options) Result {
 	conn.Close()
 	tr := &http.Transport{DialContext: func(ctx context.Context, network, a string) (net.Conn, error) { return dial(ctx, addr, o) },
 		DisableKeepAlives: true}
+	scheme := "http"
+	if overTLS {
+		scheme = "https"
+		// Only whether ClickHouse lets strangers in: its certificate isn't checked.
+		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12} //nolint:gosec // a look from outside, nothing sent
+		tr.DialTLSContext = nil
+	}
 	defer tr.CloseIdleConnections()
 	c := &http.Client{Transport: tr, Timeout: o.DialTimeout + o.ReadTimeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/?query=SELECT%201", nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, scheme+"://"+addr+"/?query=SELECT%201", nil)
 	resp, err := c.Do(req)
 	if err != nil {
 		return Result{Reachable: true, State: protocol.OutsideNotPostgres, Detail: "Something answers on this port, but not like ClickHouse's HTTP interface does."}
@@ -133,8 +170,74 @@ func probeClickHouseHTTP(ctx context.Context, addr string, o Options) Result {
 			Detail: "ClickHouse answers from the internet and asks for a password: anyone can try to guess one."}
 	case strings.Contains(text, "Code: 195"):
 		return Result{Reachable: true, State: protocol.OutsideRefusesLogins, Detail: "ClickHouse answers but doesn't let this address log in."}
+	case resp.StatusCode == http.StatusBadRequest && (overTLS || strings.Contains(text, "HTTPS")):
+		// A web server, or plain HTTP sent to an HTTPS port.
+		return Result{Reachable: true, State: protocol.OutsideNotPostgres, Detail: "Something answers on this port, but not like ClickHouse's HTTP interface does."}
 	}
 	return Result{Reachable: true, State: protocol.OutsideAsksPassword, Detail: fmt.Sprintf("ClickHouse answers from the internet (HTTP %d).", resp.StatusCode)}
+}
+
+// probeClickHouseNative greets ClickHouse in its native protocol as the
+// default user without a password (a Hello packet) and reads the first
+// answer: a Hello back means it let a stranger in; an exception says
+// whether it asks for a password or turns this address away.
+func probeClickHouseNative(ctx context.Context, addr string, o Options, overTLS bool) Result {
+	notCH := Result{Reachable: true, State: protocol.OutsideNotPostgres, Detail: "Something answers on this port, but not like ClickHouse does."}
+	conn, err := dial(ctx, addr, o)
+	if err != nil {
+		return dialFailure(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(o.ReadTimeout))
+	if overTLS {
+		tc := tls.Client(conn, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}) //nolint:gosec // a look from outside, nothing sent but a greeting
+		if err := tc.HandshakeContext(ctx); err != nil {
+			return notCH
+		}
+		conn = tc
+	}
+	var hello []byte
+	uvarint := func(v uint64) { hello = binary.AppendUvarint(hello, v) }
+	str := func(s string) { uvarint(uint64(len(s))); hello = append(hello, s...) }
+	uvarint(0) // Hello
+	str("rowsafe-check")
+	uvarint(1)
+	uvarint(0)
+	uvarint(54460) // protocol revision
+	str("")        // database
+	str("default")
+	str("")
+	if _, err := conn.Write(hello); err != nil {
+		return notCH
+	}
+	r := bufio.NewReader(conn)
+	kind, err := binary.ReadUvarint(r)
+	if err != nil {
+		return notCH
+	}
+	tlsWord := ""
+	if overTLS {
+		tlsWord = " (over TLS)"
+	}
+	switch kind {
+	case 0: // Hello: in without a password
+		return Result{Reachable: true, State: protocol.OutsideNoPassword, PlainLogins: !overTLS, TLS: overTLS,
+			Detail: "ClickHouse let the internet in without any password (its default user)" + tlsWord + "."}
+	case 2: // Exception: code (Int32), name, message
+		var code int32
+		if err := binary.Read(r, binary.LittleEndian, &code); err != nil {
+			return notCH
+		}
+		switch code {
+		case 195: // IP_ADDRESS_NOT_ALLOWED
+			return Result{Reachable: true, State: protocol.OutsideRefusesLogins, TLS: overTLS, Detail: "ClickHouse answers but doesn't let this address log in" + tlsWord + "."}
+		case 516, 194, 192: // AUTHENTICATION_FAILED, REQUIRED_PASSWORD, UNKNOWN_USER
+			return Result{Reachable: true, State: protocol.OutsideAsksPassword, PlainLogins: !overTLS, TLS: overTLS,
+				Detail: "ClickHouse answers from the internet and asks for a password" + tlsWord + ": anyone can try to guess one."}
+		}
+		return Result{Reachable: true, State: protocol.OutsideAsksPassword, TLS: overTLS, Detail: fmt.Sprintf("ClickHouse answers from the internet (error %d)%s.", code, tlsWord)}
+	}
+	return notCH
 }
 
 func probeRedis(ctx context.Context, engine, addr string, o Options) Result {

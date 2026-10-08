@@ -62,27 +62,33 @@ func chooseEngine(cat client.CloudCatalog, name, version, pg string, standby boo
 }
 
 // catalogFor is the catalog without the sizes engine can't run on (MySQL's
-// packages are built for Intel and AMD only); a size asked for by name that
-// is one of them is kept, so pickCloud's error doesn't hide why (see
-// armRefusal).
+// packages are built for Intel and AMD only; ClickHouse needs 4 GB of
+// memory); a size asked for by name that is one of them is kept, so
+// pickCloud's error doesn't hide why (see armRefusal).
 func catalogFor(cat client.CloudCatalog, e protocol.CloudEngine, size string) client.CloudCatalog {
-	if !e.AMD64Only {
+	if !e.AMD64Only && e.MinMemoryMB == 0 {
 		return cat
 	}
 	out := cat
 	out.Clouds = nil
 	for _, cl := range cat.Clouds {
-		cl.Sizes = slices.DeleteFunc(slices.Clone(cl.Sizes), func(z client.CloudSize) bool { return z.Arch == "arm64" && z.ID != size })
+		cl.Sizes = slices.DeleteFunc(slices.Clone(cl.Sizes), func(z client.CloudSize) bool { return armRefusal(e, z) != nil && z.ID != size })
 		out.Clouds = append(out.Clouds, cl)
 	}
 	return out
 }
 
 // armRefusal refuses a size with an Arm processor for an engine built for
-// Intel and AMD only.
+// Intel and AMD only, and one with too little memory for the engine.
 func armRefusal(e protocol.CloudEngine, z client.CloudSize) error {
 	if e.AMD64Only && z.Arch == "arm64" {
 		return fmt.Errorf("%s's own packages are built for Intel and AMD processors only, and the size %s has an Arm processor: choose another --size or --cloud", e.Name, z.ID)
+	}
+	if !e.FitsMemory(z.MemoryGB*1024) && z.MemoryGB == 0 {
+		return fmt.Errorf("%s needs a server with at least %d GB of memory, and Rowsafe can't tell how much the size %s has: choose another --size", e.Name, e.MinMemoryMB/1024, z.ID)
+	}
+	if !e.FitsMemory(z.MemoryGB * 1024) {
+		return fmt.Errorf("%s needs a server with at least %d GB of memory, and the size %s has %d GB: choose a bigger --size", e.Name, e.MinMemoryMB/1024, z.ID, z.MemoryGB)
 	}
 	return nil
 }
@@ -107,12 +113,19 @@ func printEngines(cat client.CloudCatalog) {
 	}
 	fmt.Println("Databases (--engine, --engine-version):")
 	for _, e := range offered {
-		line := fmt.Sprintf("  %s (%s): %s, default %s; apps connect on port %d with TLS", e.Name, e.Engine, strings.Join(e.Versions, ", "), e.DefaultVersion, e.Port)
+		ports := "port " + e.PortsText()
+		if len(e.FirewallPorts()) > 1 {
+			ports = "ports " + e.PortsText()
+		}
+		line := fmt.Sprintf("  %s (%s): %s, default %s; apps connect on %s with TLS", e.Name, e.Engine, strings.Join(e.Versions, ", "), e.DefaultVersion, ports)
 		if !e.Standby {
 			line += "; no standby yet"
 		}
 		if e.AMD64Only {
 			line += "; Intel and AMD sizes only (not Arm)"
+		}
+		if e.MinMemoryMB > 0 {
+			line += fmt.Sprintf("; sizes with %d GB of memory or more", e.MinMemoryMB/1024)
 		}
 		fmt.Println(line)
 	}
