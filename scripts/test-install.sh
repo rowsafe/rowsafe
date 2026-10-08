@@ -86,10 +86,15 @@
 #      (the new PostgreSQL restarted once); a re-run changes nothing; a server
 #      with PostgreSQL already is refused. Then the same with --install-mysql
 #      8.4 (Debian 12, amd64), --install-mariadb 11.8 (Debian 13) and 11.4
-#      (Debian 12) and --install-valkey 8 (Debian 12 and 13), each in a
+#      (Debian 12), --install-valkey 8 (Debian 12 and 13) and
+#      --install-clickhouse 26.8 (Debian 12; Debian 13 amd64) and 26.3
+#      (Debian 13), each in a
 #      container with systemd, with --firewall-ssh: the package from its own
 #      source (key checked, pinned), secure defaults (root through the
-#      socket; Valkey's default user off and its admin's password root's),
+#      socket; Valkey's default user off and its admin's password root's;
+#      ClickHouse's default user locked, its admin's password root's, the
+#      plain ports on 127.0.0.1 only, a renewed certificate loaded without a
+#      restart),
 #      TLS from the network with the certificate at the exact paths, the
 #      ports closed by the firewall before the server listens publicly,
 #      Rowsafe's own login made unattended, the new server restarted once; a
@@ -102,7 +107,7 @@
 # Default images: debian:trixie debian:bookworm ubuntu:24.04 ubuntu:22.04
 # TEST_ONLY=redis runs only the Redis and Valkey cases (11); TEST_ONLY=sqlite
 # only the SQLite ones.
-# (--cloud: debian:bookworm for PostgreSQL; TEST_ONLY=postgres,mysql,mariadb,valkey
+# (--cloud: debian:bookworm for PostgreSQL; TEST_ONLY=postgres,mysql,mariadb,valkey,clickhouse
 # picks engines, CLOUD_RUNS the ENGINE:VERSION:IMAGE:PLATFORM runs, TEST_KEEP=1
 # keeps a failed run's container)
 
@@ -186,8 +191,10 @@ case \${1:-} in
       [ "\$1" != --id-file ] || echo db_fake >"\$2"
       shift
     done
-    if [ "\$cmd" = clickhouse-status ] && [ -f /etc/clickhouse-server/users.d/rowsafe.xml ]; then
-      # ClickHouse loads the users.d file root installed by itself.
+    if [ "\$cmd" = clickhouse-status ] && { [ -f /etc/clickhouse-server/users.d/rowsafe.xml ] ||
+      [ "\$(curl -s -H 'X-ClickHouse-User: rowsafe' -H 'X-ClickHouse-Key: agent-password-for-the-test' --data-binary 'SELECT 1' http://127.0.0.1:8123/ 2>/dev/null)" = 1 ]; }; then
+      # ClickHouse loads the users.d file root installed by itself (--cloud:
+      # a real ClickHouse lets Rowsafe's user in; its folder isn't the agent's to read).
       sed 's/^login=missing\$/login=ok/' "\$f/\$cmd.out"
     elif [ -f "\$f/\$cmd.out" ]; then
       cat "\$f/\$cmd.out"
@@ -259,7 +266,7 @@ host() {
     done
     # The rendered installer, as `make release` puts it in the manifest.
     sed "s|@RELEASE_PUBLIC_KEY@|$TEST_PUB|" "$root/scripts/install.sh" >"$d/install.sh"
-    "$work/rowsafe-release" manifest --version 0.2.0 --base-url https://localhost:8443/agent --dist "$d" >"$d/manifest.json"
+    "$work/rowsafe-release" manifest --version 0.2.0 --base-url https://localhost:18443/agent --dist "$d" >"$d/manifest.json"
     ROWSAFE_RELEASE_PRIVATE_KEY=$TEST_PRIV "$work/rowsafe-release" sign "$d/manifest.json" 2>/dev/null
     "$work/rowsafe-release" verify --public-key "$TEST_PUB" "$d/manifest.json" "$d/manifest.json.sig" >/dev/null
     echo "test-install: release 0.2.0 made and signed by rowsafe-release"
@@ -304,11 +311,12 @@ host() {
 # cloud_host (--cloud): PostgreSQL in a plain container per image, then
 # MySQL, MariaDB and Valkey each in a container with systemd as PID 1 (their
 # packages start the servers with systemd; Valkey's unit sandbox matters).
-# TEST_ONLY picks some of postgres, mysql, mariadb, valkey (default: all).
-# Each run: ENGINE:VERSION:IMAGE:PLATFORM (MySQL's packages are amd64 only).
-CLOUD_RUNS=${CLOUD_RUNS:-"mysql:8.4:debian:bookworm:linux/amd64 mariadb:11.8:debian:trixie: mariadb:11.4:debian:bookworm: valkey:8:debian:bookworm: valkey:8:debian:trixie:"}
+# TEST_ONLY picks some of postgres, mysql, mariadb, valkey, clickhouse
+# (default: all). Each run: ENGINE:VERSION:IMAGE:PLATFORM (MySQL's packages
+# are amd64 only; the others run on the host's processor unless one is named).
+CLOUD_RUNS=${CLOUD_RUNS:-"mysql:8.4:debian:bookworm:linux/amd64 mariadb:11.8:debian:trixie: mariadb:11.4:debian:bookworm: valkey:8:debian:bookworm: valkey:8:debian:trixie: clickhouse:26.8:debian:bookworm: clickhouse:26.3:debian:trixie: clickhouse:26.8:debian:bookworm:linux/amd64"}
 cloud_host() {
-  only=$(printf '%s' "${TEST_ONLY:-postgres mysql mariadb valkey}" | tr ',' ' ')
+  only=$(printf '%s' "${TEST_ONLY:-postgres mysql mariadb valkey clickhouse}" | tr ',' ' ')
   case " $only " in
     *" postgres "*)
       for image in $images; do
@@ -412,7 +420,7 @@ publish() {
     fake_agent "$v" "${3:-}" >"$d/rowsafe-agent-linux-$a"
   done
   cp "$W/install.sh" "$d/install.sh"
-  write_manifest "$d" "$v" "https://localhost:8443/agent/$dir"
+  write_manifest "$d" "$v" "https://localhost:18443/agent/$dir"
 }
 
 # write_manifest DIR VERSION URLBASE [ARCHS]: indented like Go's MarshalIndent.
@@ -474,7 +482,7 @@ release_setup() {
   sed "s|@RELEASE_PUBLIC_KEY@|$pub|" /src/scripts/install.sh >install.sh
   # An executable wrapper (not a function) so `env VAR=... $INSTALLER` works.
   INSTALLER=$W/installer
-  printf '#!/bin/sh\nexec env ROWSAFE_RELEASES_URL=https://localhost:8443/agent ROWSAFE_RESTIC_URL=https://localhost:8443/restic sh %s/install.sh "$@"\n' "$W" >"$INSTALLER"
+  printf '#!/bin/sh\nexec env ROWSAFE_RELEASES_URL=https://localhost:18443/agent ROWSAFE_RESTIC_URL=https://localhost:18443/restic sh %s/install.sh "$@"\n' "$W" >"$INSTALLER"
   chmod 755 "$INSTALLER"
   cp /src/scripts/install.sh placeholder-install.sh
 
@@ -490,13 +498,13 @@ class Quiet(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *args):
         pass
 handler = functools.partial(Quiet, directory="srv")
-srv = http.server.ThreadingHTTPServer(("127.0.0.1", 8443), handler)
+srv = http.server.ThreadingHTTPServer(("127.0.0.1", 18443), handler)
 srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
 srv.serve_forever()
 EOF
   python3 server.py &
   for _ in 1 2 3 4 5 6 7 8 9 10; do
-    curl -s -o /dev/null https://localhost:8443/ && break
+    curl -s -o /dev/null https://localhost:18443/ && break
     sleep 0.5
   done
 
@@ -526,7 +534,7 @@ in_container() {
   publish 0.10.0 && sed -i 's|https://localhost|http://localhost|' srv/agent/0.10.0/manifest.json && sign srv/agent/0.10.0
   other=amd64
   [ "$arch" = amd64 ] && other=arm64
-  publish 0.11.0 && write_manifest srv/agent/0.11.0 0.11.0 https://localhost:8443/agent/0.11.0 "$other" && sign srv/agent/0.11.0
+  publish 0.11.0 && write_manifest srv/agent/0.11.0 0.11.0 https://localhost:18443/agent/0.11.0 "$other" && sign srv/agent/0.11.0
   publish 0.12.0 && sign srv/agent/0.12.0                   # a good upgrade
   publish 0.13.0 0.13.0 fail && sign srv/agent/0.13.0       # fails its self-test
 
@@ -542,7 +550,7 @@ in_container() {
   echo "  -- signature verification (download-only, as an unprivileged user)"
   useradd -m tester
   chmod 755 "$W" && chmod 644 install.sh placeholder-install.sh
-  as_tester() { runuser -u tester -- env CURL_CA_BUNDLE="$CURL_CA_BUNDLE" ROWSAFE_RELEASES_URL=https://localhost:8443/agent "$@"; }
+  as_tester() { runuser -u tester -- env CURL_CA_BUNDLE="$CURL_CA_BUNDLE" ROWSAFE_RELEASES_URL=https://localhost:18443/agent "$@"; }
   expect_ok "good release by version" as_tester env ROWSAFE_VERSION=v0.2.0 sh install.sh --download-only /tmp/dl1
   cmp /tmp/dl1/rowsafe-agent "srv/agent/0.2.0/rowsafe-agent-linux-$arch" || fail "downloaded binary differs"
   expect_ok "good release by channel" as_tester sh install.sh --download-only /tmp/dl2
@@ -556,7 +564,7 @@ in_container() {
   expect_fail "signed by another key" "signature is INVALID" as_tester env ROWSAFE_VERSION=0.9.0 sh install.sh --download-only /tmp/dl10
   expect_fail "http artifact URL" "invalid download URL" as_tester env ROWSAFE_VERSION=0.10.0 sh install.sh --download-only /tmp/dl11
   expect_fail "no build for this platform" "no build for linux/$arch" as_tester env ROWSAFE_VERSION=0.11.0 sh install.sh --download-only /tmp/dl12
-  expect_fail "http releases URL" "must be an https URL" env ROWSAFE_RELEASES_URL=http://localhost:8443/agent sh install.sh --download-only /tmp/dl13
+  expect_fail "http releases URL" "must be an https URL" env ROWSAFE_RELEASES_URL=http://localhost:18443/agent sh install.sh --download-only /tmp/dl13
   for n in 3 4 5 6 7 8 9 10 11 12 13; do
     [ ! -e /tmp/dl$n ] || fail "a refused release left files in /tmp/dl$n"
   done
@@ -656,14 +664,14 @@ in_container() {
 
   # Exactly as piped from curl: sh -s rse_...
   expect_ok "re-run is idempotent (piped, token as argument)" \
-    sh -c 'ROWSAFE_RELEASES_URL=https://localhost:8443/agent ROWSAFE_RESTIC_URL=https://localhost:8443/restic sh -s rse_secrettoken123 <"$1/install.sh"' piped "$W"
+    sh -c 'ROWSAFE_RELEASES_URL=https://localhost:18443/agent ROWSAFE_RESTIC_URL=https://localhost:18443/restic sh -s rse_secrettoken123 <"$1/install.sh"' piped "$W"
   grep -q "already on disk" "$W/out" || fail "binary downloaded again"
   grep -q "unchanged" "$W/out" || fail "env file changed on a plain re-run"
   # (permissions) Piped, the script can't copy itself: it downloads the
   # release's installer and checks it against the signed manifest.
   rm /usr/local/lib/rowsafe/install.sh
   expect_ok "piped: the installer copy is downloaded and checked" \
-    sh -c 'ROWSAFE_RELEASES_URL=https://localhost:8443/agent ROWSAFE_RESTIC_URL=https://localhost:8443/restic sh -s rse_secrettoken123 <"$1/install.sh"' piped "$W"
+    sh -c 'ROWSAFE_RELEASES_URL=https://localhost:18443/agent ROWSAFE_RESTIC_URL=https://localhost:18443/restic sh -s rse_secrettoken123 <"$1/install.sh"' piped "$W"
   cmp /usr/local/lib/rowsafe/install.sh "$W/install.sh" || fail "the downloaded installer copy differs"
   grep -q "kept at /usr/local/lib/rowsafe/install.sh" "$W/out" || fail "no word about the installer copy"
   # A release whose installer doesn't match its signed manifest: no copy.
@@ -671,7 +679,7 @@ in_container() {
   echo '# tampered' >>srv/agent/0.2.0/install.sh
   rm /usr/local/lib/rowsafe/install.sh
   expect_ok "piped: a tampered installer is not kept" \
-    sh -c 'ROWSAFE_RELEASES_URL=https://localhost:8443/agent ROWSAFE_RESTIC_URL=https://localhost:8443/restic sh -s <"$1/install.sh"' piped "$W"
+    sh -c 'ROWSAFE_RELEASES_URL=https://localhost:18443/agent ROWSAFE_RESTIC_URL=https://localhost:18443/restic sh -s <"$1/install.sh"' piped "$W"
   grep -q "doesn't match the signed manifest; not keeping it" "$W/out" || fail "a tampered installer copy went unnoticed"
   [ ! -e /usr/local/lib/rowsafe/install.sh ] || fail "a tampered installer was kept"
   cp "$W/install.sh.good" srv/agent/0.2.0/install.sh
@@ -1050,7 +1058,7 @@ guided_storage_tests() {
   # R2 in the EU, a generated passphrase that must be confirmed.
   tty_ok "fresh install: R2 (EU), generated passphrase" \
     "Bucket URL\t\nChoose 1-6\t1\nCloudflare account ID\t$acct\nEU jurisdiction\ty\nBucket name\trowsafe-test\nAccess key ID\t$key\nSecret access key\t$secret\nChoose 1-2\t1\nto continue\tzzzz\nto continue\t{capture:[│|] {6}[A-Za-z0-9]{36}([A-Za-z0-9]{4}) }\n" \
-    sh -c 'ROWSAFE_RELEASES_URL=https://localhost:8443/agent ROWSAFE_RESTIC_URL=https://localhost:8443/restic sh -s rse_secrettoken123 <"$1/install.sh"' piped "$W"
+    sh -c 'ROWSAFE_RELEASES_URL=https://localhost:18443/agent ROWSAFE_RESTIC_URL=https://localhost:18443/restic sh -s rse_secrettoken123 <"$1/install.sh"' piped "$W"
   has "Where should Rowsafe store your backups?"
   has "backup storage works: wrote, read back and deleted a test file"
   has "Save this in your password manager now."
@@ -1273,7 +1281,7 @@ rowsafe_storage_tests() {
   # the passphrase is generated, shown once and confirmed.
   tty_ok "fresh install: Rowsafe Storage" \
     "Choose 1-2\t\nChoose 1-2\t1\nto continue\t{capture:[│|] {6}[A-Za-z0-9]{36}([A-Za-z0-9]{4}) }\n" \
-    sh -c 'ROWSAFE_URL=$2 ROWSAFE_RELEASES_URL=https://localhost:8443/agent ROWSAFE_RESTIC_URL=https://localhost:8443/restic sh -s rse_secrettoken123 <"$1/install.sh"' piped "$W" "$api"
+    sh -c 'ROWSAFE_URL=$2 ROWSAFE_RELEASES_URL=https://localhost:18443/agent ROWSAFE_RESTIC_URL=https://localhost:18443/restic sh -s rse_secrettoken123 <"$1/install.sh"' piped "$W" "$api"
   has "Where should backups go?"
   has "1) Rowsafe Storage     nothing to set up (10 GB free)"
   has "Rowsafe can't read them"
@@ -2301,8 +2309,8 @@ files_tests() {
   mkdir -p "srv/restic-bad/v$rv"
   echo "not restic" | bzip2 >"srv/restic-bad/v$rv/restic_${rv}_linux_$arch.bz2"
   scenario
-  expect_ok "a tampered restic is refused" configured env ROWSAFE_RELEASES_URL=https://localhost:8443/agent \
-    ROWSAFE_RESTIC_URL=https://localhost:8443/restic-bad sh "$W/install.sh" rse_secrettoken123
+  expect_ok "a tampered restic is refused" configured env ROWSAFE_RELEASES_URL=https://localhost:18443/agent \
+    ROWSAFE_RESTIC_URL=https://localhost:18443/restic-bad sh "$W/install.sh" rse_secrettoken123
   grep -q "does not match the SHA-256 of the official $rv release" "$W/out" || fail "tampered restic not reported"
   [ ! -e "$RB" ] || fail "a tampered restic was installed"
   if [ -f "srv/restic/v$rv/restic_${rv}_linux_$arch.bz2" ]; then
@@ -3991,6 +3999,11 @@ install_db_option_tests() {
   expect_fail "--install-valkey 7.2 refused" "Rowsafe installs Valkey 8, not '7.2'" "$INSTALLER" --install-valkey 7.2
   expect_fail "--install-valkey needs a version" "needs a version" "$INSTALLER" --install-valkey
   expect_fail "--install-mariadb only with an install" "only go with an install" "$INSTALLER" --install-mariadb 11.8 --uninstall
+  expect_fail "--install-clickhouse 25.8 refused" "Rowsafe installs ClickHouse 26.3 or 26.8, not '25.8'" "$INSTALLER" --install-clickhouse 25.8
+  expect_fail "--install-clickhouse with --install-valkey refused" "give only one" "$INSTALLER" --install-clickhouse 26.8 --install-valkey 8
+  printf 'MemTotal:        2014280 kB\n' >"$W/meminfo-2g"
+  expect_fail "--install-clickhouse on 2 GB refused" "ClickHouse needs a server with at least 4 GB of memory, and this one has 1967 MB" \
+    env ROWSAFE_MEMINFO="$W/meminfo-2g" "$INSTALLER" rse_secrettoken123 --no-prompt --install-clickhouse 26.8
   mkdir -p "$W/arm64"
   printf '#!/bin/sh\ncase "${1:-}" in -m) echo aarch64 ;; *) exec /bin/uname "$@" ;; esac\n' >"$W/arm64/uname"
   chmod 755 "$W/arm64/uname"
@@ -4009,7 +4022,7 @@ install_db_option_tests() {
     expect_fail "--install-mariadb without systemd refused" "needs systemd" "$INSTALLER" rse_secrettoken123 --no-prompt --install-mariadb 11.8
   [ ! -e /etc/rowsafe ] && [ ! -e /opt/rowsafe ] && [ -z "$(ls /etc/apt/sources.list.d/rowsafe-* 2>/dev/null)" ] ||
     fail "a refused --install option changed something"
-  pass "--install-mysql, --install-mariadb and --install-valkey: refusals change nothing"
+  pass "--install-mysql, --install-mariadb, --install-valkey and --install-clickhouse: refusals change nothing"
 }
 
 # cloud_container (--cloud): --install-postgres and --listen-public for
@@ -4056,7 +4069,7 @@ cloud_container() {
     "wait_out=✓ shop is protected. The first full backup is running." "status_out=$status"
 
   cloud_init() {
-    sh -c 'w=$1; shift; ROWSAFE_RELEASES_URL=https://localhost:8443/agent ROWSAFE_RESTIC_URL=https://localhost:8443/restic sh -s -- "$@" <"$w/install.sh"' \
+    sh -c 'w=$1; shift; ROWSAFE_RELEASES_URL=https://localhost:18443/agent ROWSAFE_RESTIC_URL=https://localhost:18443/restic sh -s -- "$@" <"$w/install.sh"' \
       cloud-init "$W" rse_secrettoken123 --no-prompt --install-postgres "$pgv" --listen-public --storage rowsafe --protect shop
   }
   expect_ok "one run, as cloud-init: PostgreSQL, network, Rowsafe Storage, protected" cloud_init
@@ -4143,6 +4156,7 @@ cloud_engine_container() {
     mysql) label=MySQL unit=mysql port=3306 user=mysql ;;
     mariadb) label=MariaDB unit=mariadb port=3306 user=mysql ;;
     valkey) label=Valkey unit=valkey-server port=6380 user=rowsafe ;;
+    clickhouse) label=ClickHouse unit=clickhouse-server port=8123 user=rowsafe ;;
   esac
   echo "  -- servers Rowsafe creates: --install-$engine $ver ($os, $arch)"
 
@@ -4166,6 +4180,12 @@ cloud_engine_container() {
   # its unit enrolls it at once (agent.json).
   echo "$user" >/tmp/rowsafe-fake-user
   case $engine in
+    clickhouse)
+      line="8123\t-\t$ver\t-\t/var/lib/clickhouse\t8192\tclickhouse\tno\t-\t-\t8 KiB\tclickhouse-server.service\t-\tclickhouse"
+      scenario "discover_out=$line" "clickhouse-status_out=$(ch_status missing)" "clickhouse-login_out=$(ch_users_xml)" \
+        "plan_out=Backups for shop: ClickHouse's own BACKUP, and each new part as it appears." \
+        "wait_out=✓ shop is protected. The first full backup is running." "status_out=db_fake\tshop\tactive\trunning\thttps://app.rowsafe.test/databases/db_fake"
+      ;;
     valkey)
       line="6380\t-\t8\t-\t/var/lib/valkey\t8192\tvalkey\tno\t-\t-\t8 KiB\tvalkey-server.service\t-\tvalkey"
       scenario "discover_out=$line" "redis-status_out=login=missing\nversion=8.0.0\nconfig=/etc/valkey/valkey.conf\naclfile=/etc/valkey/users.acl\ncluster=no\nbinary=/usr/bin/valkey-server" \
@@ -4181,7 +4201,7 @@ cloud_engine_container() {
   esac
 
   cloud_init() {
-    sh -c 'w=$1; shift; ROWSAFE_RELEASES_URL=https://localhost:8443/agent ROWSAFE_RESTIC_URL=https://localhost:8443/restic sh -s -- "$@" <"$w/install.sh"' \
+    sh -c 'w=$1; shift; ROWSAFE_RELEASES_URL=https://localhost:18443/agent ROWSAFE_RESTIC_URL=https://localhost:18443/restic sh -s -- "$@" <"$w/install.sh"' \
       cloud-init "$W" rse_secrettoken123 --no-prompt --install-"$engine" "$ver" --listen-public --storage rowsafe --protect shop \
       --allow-restart --firewall-ssh
   }
@@ -4190,7 +4210,7 @@ cloud_engine_container() {
   cp "$W/out" "$W/first.out"
   [ "$(cat "/etc/rowsafe/installed-$engine")" = "$ver" ] || fail "$name: no record of the installed version"
   systemctl is-active --quiet "$unit" && systemctl is-enabled --quiet "$unit" || fail "$name: $unit isn't running and enabled"
-  grep -q "restore tests for the $label on this server" "$W/out" || fail "$name: the installer doesn't speak of $label"
+  grep -q "the $label on this server" "$W/out" || fail "$name: the installer doesn't speak of $label"
   [ "$(stat -c '%U %a' /etc/rowsafe/agent.env)" = "$user 600" ] || fail "$name: the agent doesn't run as $user"
   # (Only the permissions summary may say what is for PostgreSQL only.)
   ! grep -i postgresql "$W/out" | grep -qv '^ *unavailable ' || { grep -i postgresql "$W/out" >&2; fail "$name: the output speaks of PostgreSQL"; }
@@ -4210,12 +4230,22 @@ cloud_engine_container() {
   case $engine in
     mysql | mariadb) cloud_mysql_checks ;;
     valkey) cloud_valkey_checks ;;
+    clickhouse) cloud_clickhouse_checks ;;
   esac
   pass "$label $ver: installed from its own source with its key checked, secure defaults, TLS from the network, protected"
 
   # Again: nothing changes, nothing restarts.
   pid=$(systemctl show -p MainPID --value "$unit")
   case $engine in
+    clickhouse)
+      for f in /etc/clickhouse-server/config.d/zz-rowsafe.xml /etc/clickhouse-server/config.d/zz-rowsafe-network.xml \
+        /etc/clickhouse-server/users.d/zz-rowsafe-admin.xml /etc/clickhouse-server/users.d/rowsafe.xml /etc/apt/preferences.d/rowsafe-clickhouse; do
+        cp "$f" "$W/$(basename "$f").before"
+      done
+      scenario "discover_out=8123\t-\t$ver\t-\t/var/lib/clickhouse\t8192\tshop\tyes\tactive\t-\t8 KiB\tclickhouse-server.service\tdb_fake\tclickhouse" \
+        "clickhouse-status_out=$(ch_status ok)" plan_rc=5 "plan_out=shop is already protected." \
+        "status_out=db_fake\tshop\tactive\trunning\thttps://app.rowsafe.test/databases/db_fake"
+      ;;
     valkey)
       # What the agent does later: its own user kept with ACL SAVE, the
       # certificate reloaded with CONFIG SET and CONFIG REWRITE (quotes).
@@ -4239,11 +4269,18 @@ cloud_engine_container() {
   expect_ok "re-run changes nothing" cloud_init
   grep -q "$label $ver is installed (by an earlier run of this installer)" "$W/out" || fail "$name: not recognized as its own"
   grep -q "$label listens on the network.*nothing to change" "$W/out" || fail "$name: --listen-public changed something"
-  grep -q "restore tests for the $label on this server" "$W/out" || fail "$name: the re-run took this server for another engine"
+  grep -q "the $label on this server" "$W/out" || fail "$name: the re-run took this server for another engine"
   [ "$(systemctl show -p MainPID --value "$unit")" = "$pid" ] || fail "$name: $label was restarted"
   [ "$(stat -c '%U' /etc/rowsafe/agent.env)" = "$user" ] || fail "$name: the agent's user changed"
   not_called "apply"
   case $engine in
+    clickhouse)
+      for f in /etc/clickhouse-server/config.d/zz-rowsafe.xml /etc/clickhouse-server/config.d/zz-rowsafe-network.xml \
+        /etc/clickhouse-server/users.d/zz-rowsafe-admin.xml /etc/clickhouse-server/users.d/rowsafe.xml /etc/apt/preferences.d/rowsafe-clickhouse; do
+        cmp -s "$f" "$W/$(basename "$f").before" || fail "$name: $f changed"
+      done
+      not_called "clickhouse-login"
+      ;;
     valkey)
       cmp -s /etc/valkey/users.acl "$W/users.acl" || fail "$name: the ACL file changed"
       cmp -s /etc/valkey/valkey.conf "$W/valkey.conf" || { diff "$W/valkey.conf" /etc/valkey/valkey.conf >&2; fail "$name: valkey.conf changed"; }
@@ -4255,6 +4292,12 @@ cloud_engine_container() {
   # Another engine, another version, or the same one not installed by Rowsafe: refused.
   other=valkey other_ver=8 other_label=Valkey
   [ "$engine" != valkey ] || other=mariadb other_ver=11.8 other_label=MariaDB
+  if [ "$engine" = clickhouse ]; then
+    alt=26.3
+    [ "$ver" != 26.3 ] || alt=26.8
+    expect_fail "another ClickHouse version refused" "ClickHouse $ver is already installed on this server (by an earlier run of this installer)" \
+      "$INSTALLER" --no-prompt --install-clickhouse "$alt" --no-setup
+  fi
   expect_fail "--install-$other on this $label server refused" "is already installed on this server, so --install-$other won't install $other_label next to it" \
     "$INSTALLER" --no-prompt --install-"$other" "$other_ver" --no-setup
   if [ "$engine" = mariadb ]; then
@@ -4391,6 +4434,112 @@ cloud_valkey_checks() {
   grep -qx "$p" /etc/rowsafe/firewall-allowed || fail "$name: $p isn't in the firewall's allow list"
   grep -Eq "Valkey's ports? \((6379, )?6380\) (is|are) closed to everyone but this server" "$W/out" || fail "$name: no word about the firewall"
   pass "Valkey from the network: TLS on 6380 only (no plain port), passwords only, the certificate at the exact paths, closed by the firewall"
+}
+
+# ch_status LOGIN: what `rowsafe-agent clickhouse status` says of the new
+# server (the stand-in agent says login=ok once root installed users.d/rowsafe.xml).
+ch_status() {
+  printf 'port=8123\nversion=%s\nlogin=%s\nuser=clickhouse\ndatadir=/var/lib/clickhouse/\nconfig=/etc/clickhouse-server/config.xml\nusersd=/etc/clickhouse-server/users.d\nunit=clickhouse-server.service\nbinary=/usr/bin/clickhouse\nreplicated=0\ndocker=no' \
+    "$ver" "$1"
+}
+
+# ch_users_xml: Rowsafe's own user as the agent's `clickhouse login
+# --users-xml` makes it (internal/engine/clickhouse/setup.go), with a
+# password the test knows.
+ch_users_xml() {
+  printf '<clickhouse>\n  <users>\n    <rowsafe>\n      <password_sha256_hex>%s</password_sha256_hex>\n      <networks>\n        <ip>127.0.0.1</ip>\n        <ip>::1</ip>\n      </networks>\n      <profile>default</profile>\n      <quota>default</quota>\n      <grants>\n        <query>GRANT SELECT, INSERT, BACKUP, KILL QUERY, ALTER UPDATE, ALTER DELETE, S3, CREATE DATABASE, CREATE TABLE, DROP DATABASE, DROP TABLE, ALTER TABLE ON *.*</query>\n        <query>GRANT ACCESS MANAGEMENT ON *.*</query>\n        <query>GRANT SYSTEM RELOAD CONFIG ON *.*</query>\n      </grants>\n    </rowsafe>\n  </users>\n</clickhouse>' \
+    "$(printf '%s' agent-password-for-the-test | sha256sum | cut -d' ' -f1)"
+}
+
+# cloud_clickhouse_checks: ClickHouse after the cloud-init run.
+cloud_clickhouse_checks() {
+  grep -q "ClickHouse's repository (packages.clickhouse.com, lts, $ver.\*, key 3A9EA1193A97B548BE1457D48919F6BD2B48D754)" "$W/out" || fail "$name: no word about the repository"
+  grep -qx 'deb \[signed-by=/usr/share/keyrings/rowsafe-clickhouse.gpg\] https://packages.clickhouse.com/deb lts main' /etc/apt/sources.list.d/rowsafe-clickhouse.list ||
+    fail "$name: rowsafe-clickhouse.list"
+  grep -qx "Pin: version $ver.\*" /etc/apt/preferences.d/rowsafe-clickhouse && grep -qx 'Pin: origin packages.clickhouse.com' /etc/apt/preferences.d/rowsafe-clickhouse ||
+    fail "$name: no pin"
+  for pkg in clickhouse-server clickhouse-client clickhouse-common-static; do
+    dpkg-query -W -f '${Version}\n' "$pkg" | grep -q "^$ver\." || fail "$name: $pkg isn't $ver ($(dpkg-query -W -f '${Version}' "$pkg"))"
+  done
+  apt-cache policy clickhouse-server | awk '$1 == "Candidate:" { print $2 }' | grep -q "^$ver\." || fail "$name: apt would leave the $ver series"
+  ! command -v pgbackrest >/dev/null 2>&1 || fail "$name: pgBackRest installed for ClickHouse"
+  [ "$(stat -c '%U %G %a' /etc/rowsafe/clickhouse)" = "root root 700" ] || fail "$name: /etc/rowsafe/clickhouse owner/mode"
+  [ "$(stat -c '%U %G %a' /etc/rowsafe/clickhouse/admin-password)" = "root root 600" ] || fail "$name: admin-password owner/mode"
+  pw=$(cat /etc/rowsafe/clickhouse/admin-password)
+  printf '%s\n' "$pw" | grep -Eqx '[0-9a-f]{64}' || fail "$name: the admin password isn't 64 hex digits"
+  ! grep -qF "$pw" "$W/out" || fail "$name: the admin password was printed"
+  adm=/etc/clickhouse-server/users.d/zz-rowsafe-admin.xml
+  grep -q "<password_sha256_hex>$(printf '%s' "$pw" | sha256sum | cut -d' ' -f1)</password_sha256_hex>" "$adm" || fail "$name: no admin in $adm"
+  ! grep -qF "$pw" "$adm" || fail "$name: the admin password itself is in $adm"
+  [ "$(stat -c '%G %a' "$adm")" = "clickhouse 640" ] || fail "$name: $adm group/mode"
+  chq() { # chq USER PASSWORD QUERY: on this server's plain HTTP port
+    printf 'header = "X-ClickHouse-User: %s"\nheader = "X-ClickHouse-Key: %s"\n' "$1" "$2" | curl -sS -K - --data-binary "$3" http://127.0.0.1:8123/
+  }
+  [ "$(chq admin "$pw" 'SELECT currentUser()')" = admin ] || fail "$name: the administrator can't sign in on this server"
+  chq default '' 'SELECT 1' | grep -q 'Authentication failed' || fail "$name: the default user signs in"
+  curl -sS --data-binary 'SELECT 1' http://127.0.0.1:8123/ | grep -q 'Authentication failed' || fail "$name: anyone signs in as default"
+  [ "$(chq admin "$pw" "SELECT count() FROM system.users WHERE name = 'default' AND toString(auth_type) LIKE '%no_password%'")" = 0 ] || fail "$name: default has no password"
+  # Settings for a small server; no MySQL, PostgreSQL or interserver ports.
+  [ "$(chq admin "$pw" "SELECT value FROM system.server_settings WHERE name = 'max_server_memory_usage_to_ram_ratio'")" = 0.75 ] || fail "$name: memory ratio"
+  [ "$(chq admin "$pw" "SELECT value FROM system.server_settings WHERE name = 'cache_size_to_ram_max_ratio'")" = 0.1 ] || fail "$name: cache ratio"
+  grep -q '<level>information</level>' /etc/clickhouse-server/config.d/zz-rowsafe.xml || fail "$name: log level"
+  ! ss -ltnH | awk '{ print $4 }' | grep -Eq ':(9004|9005|9009)$' || { ss -ltn >&2; fail "$name: MySQL, PostgreSQL or interserver ports listen"; }
+  # The data folder: the clickhouse group (the agent) reads it, again at every start.
+  [ "$(stat -c '%U %G %a' /var/lib/clickhouse)" = "clickhouse clickhouse 750" ] || fail "$name: /var/lib/clickhouse owner/mode"
+  grep -qx 'ExecStartPre=/bin/chmod 0750 /var/lib/clickhouse' /etc/systemd/system/clickhouse-server.service.d/rowsafe.conf || fail "$name: no start drop-in"
+  runuser -u rowsafe -g rowsafe -G clickhouse -- ls /var/lib/clickhouse/store >/dev/null || fail "$name: the agent (group clickhouse, as its unit gives it) can't read the data folder"
+  # Rowsafe's own user, installed by root as a users.d file (no administrator asked).
+  called "clickhouse-login --port 8123 --users-xml"
+  [ "$(stat -c '%U %G %a' /etc/clickhouse-server/users.d/rowsafe.xml)" = "root clickhouse 640" ] || fail "$name: users.d/rowsafe.xml owner/mode"
+  [ "$(chq rowsafe agent-password-for-the-test 'SELECT currentUser()')" = rowsafe ] || fail "$name: Rowsafe's user can't sign in"
+  called "apply --database db_fake"
+  grep -qx 'SupplementaryGroups=clickhouse' /etc/systemd/system/rowsafe-agent.service.d/10-clickhouse.conf &&
+    grep -qx 'ReadWritePaths=-/etc/ssl/rowsafe-clickhouse' /etc/systemd/system/rowsafe-agent.service.d/10-clickhouse.conf || fail "$name: the agent's drop-in"
+  # TLS: the certificate at the exact paths; plain ports on 127.0.0.1 only.
+  [ "$(stat -c '%U %G %a' /etc/ssl/rowsafe-clickhouse)" = "rowsafe clickhouse 2750" ] || fail "$name: certificate folder owner/mode"
+  [ "$(stat -c '%U %G %a' /etc/ssl/rowsafe-clickhouse/rowsafe-server.key)" = "rowsafe clickhouse 640" ] || fail "$name: key owner/mode"
+  [ "$(stat -c '%U %G %a' /etc/ssl/rowsafe-clickhouse/rowsafe-server.crt)" = "rowsafe clickhouse 644" ] || fail "$name: certificate owner/mode"
+  ss -ltnH | awk '{ print $4 }' >"$W/listen"
+  grep -qx '127.0.0.1:8123' "$W/listen" && grep -qx '127.0.0.1:9000' "$W/listen" || { cat "$W/listen" >&2; fail "$name: the plain ports aren't on 127.0.0.1"; }
+  ! grep -Eq '^(\*|0\.0\.0\.0|\[::\]):(8123|9000)$' "$W/listen" || { cat "$W/listen" >&2; fail "$name: a plain port listens on every address"; }
+  for p in 9440 8443; do
+    grep -Eqx "(\*|0\.0\.0\.0|\[::\]):$p" "$W/listen" || { cat "$W/listen" >&2; fail "$name: $p doesn't listen on every address"; }
+    grep -q "tcp dport $p drop" "$W/nft" && [ -e "/var/lib/rowsafe-firewall/port-$p" ] || { cat "$W/nft" >&2; fail "$name: port $p isn't closed by the firewall"; }
+    grep -qx "$p" /etc/rowsafe/firewall-allowed || fail "$name: $p isn't in the firewall's allow list"
+    echo | openssl s_client -connect "$ip:$p" 2>/dev/null | openssl x509 -noout -fingerprint -sha256 >"$W/fp" &&
+      [ "$(cat "$W/fp")" = "$(openssl x509 -in /etc/ssl/rowsafe-clickhouse/rowsafe-server.crt -noout -fingerprint -sha256)" ] || fail "ClickHouse doesn't present its certificate on $p"
+    if echo | openssl s_client -tls1_1 -connect "$ip:$p" >"$W/tls11" 2>&1 && grep -q 'Cipher is [A-Z]' "$W/tls11"; then fail "TLS 1.1 accepted on $p"; fi
+  done
+  grep -Eq "ClickHouse's ports \(([0-9]+, )*8443(, [0-9]+)*\) are closed to everyone but this server" "$W/out" && grep -q '9440' "$W/out" || fail "$name: no word about the firewall"
+  # From the network: an app's user over TLS (native protocol and HTTPS); nothing plain.
+  chq admin "$pw" "CREATE USER app IDENTIFIED WITH sha256_password BY 'app-password-for-the-test'" >/dev/null
+  chq admin "$pw" 'GRANT SELECT ON system.one TO app' >/dev/null
+  [ "$(clickhouse-client --host "$ip" --port 9440 --secure --accept-invalid-certificate --user app --password app-password-for-the-test -q 'SELECT 41 + 1' 2>&1)" = 42 ] ||
+    fail "TLS login on 9440"
+  [ "$(curl -sS -k -u app:app-password-for-the-test --data-binary 'SELECT 42' "https://$ip:8443/")" = 42 ] || fail "HTTPS login on 8443"
+  if clickhouse-client --host "$ip" --port 9000 --user app --password app-password-for-the-test -q 'SELECT 1' >"$W/plain" 2>&1; then fail "plain native protocol from the network"; fi
+  if curl -sS -u app:app-password-for-the-test --data-binary 'SELECT 1' "http://$ip:8123/" >"$W/plain" 2>&1; then fail "plain HTTP from the network"; fi
+  if curl -sS -k --data-binary 'SELECT 1' "https://$ip:8443/" 2>&1 | grep -qx 1; then fail "HTTPS without a password"; fi
+  # The administrator signs in from this server's own addresses only (HOST
+  # LOCAL; this container's address is one of them, so it is read, not tried).
+  [ "$(chq admin "$pw" "SELECT empty(host_ip) AND host_names = ['localhost'] AND empty(host_names_regexp) FROM system.users WHERE name = 'admin'")" = 1 ] ||
+    fail "$name: the administrator may sign in from elsewhere"
+  chq admin "$pw" 'DROP USER app' >/dev/null
+  # What the agent does with a renewed certificate: the same files, written
+  # by the agent's user, loaded with SYSTEM RELOAD CONFIG; nothing restarts.
+  pid=$(systemctl show -p MainPID --value clickhouse-server)
+  # shellcheck disable=SC2016 # expands in the inner shell
+  runuser -u rowsafe -- sh -c 'cd /etc/ssl/rowsafe-clickhouse && umask 027 &&
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 30 -subj /CN=renewed.test \
+      -keyout k.new -out c.new >/dev/null 2>&1 && chmod 0640 k.new && chmod 0644 c.new && mv -f k.new rowsafe-server.key && mv -f c.new rowsafe-server.crt' ||
+    fail "the agent's user can't replace the certificate"
+  [ -z "$(chq rowsafe agent-password-for-the-test 'SYSTEM RELOAD CONFIG')" ] || fail "Rowsafe's user can't SYSTEM RELOAD CONFIG"
+  want=$(openssl x509 -in /etc/ssl/rowsafe-clickhouse/rowsafe-server.crt -noout -fingerprint -sha256)
+  for p in 9440 8443; do
+    [ "$(echo | openssl s_client -connect "127.0.0.1:$p" 2>/dev/null | openssl x509 -noout -fingerprint -sha256)" = "$want" ] || fail "the renewed certificate isn't served on $p"
+  done
+  [ "$(systemctl show -p MainPID --value clickhouse-server)" = "$pid" ] || fail "ClickHouse restarted for the certificate"
+  pass "ClickHouse from the network: TLS only on 9440 and 8443, plain ports on this server only, a renewed certificate loaded without a restart"
 }
 
 case ${1:-} in
