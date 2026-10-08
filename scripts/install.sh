@@ -39,11 +39,27 @@
 #                          start it; refuses if PostgreSQL is already installed.
 #                          With --protect, that new PostgreSQL is restarted once
 #                          if backups need it
+#   --install-mysql 8.4    the same for MySQL 8.4 (LTS) from Oracle's repository
+#                          (repo.mysql.com, key checked; Intel/AMD only): root
+#                          signs in through the server's socket only, no
+#                          password, no anonymous users, no test database
+#   --install-mariadb VERSION  the same for MariaDB 11.4 or 11.8 (LTS) from
+#                          MariaDB's repository (dlm.mariadb.com, key checked;
+#                          11.4 isn't published for Debian 13)
+#   --install-valkey 8     the same for Valkey 8 from Debian's own archive
+#                          (Debian 13; Debian 12: bookworm-backports): the
+#                          default user off, an admin user whose random
+#                          password stays root's (/etc/rowsafe/valkey), an ACL
+#                          file, appendonly. Only one --install-X per run
 #   --listen-public        PostgreSQL listens on every address: TLS on (a
 #                          self-signed certificate made here), SCRAM-SHA-256
 #                          passwords for logins from the network (hostssl rules
 #                          for 0.0.0.0/0 and ::/0; local rules unchanged). Put a
-#                          firewall in front: it decides who can connect
+#                          firewall in front: it decides who can connect.
+#                          With --install-mysql/-mariadb: port 3306 on every
+#                          address, TLS required for TCP logins; with
+#                          --install-valkey: TLS on port 6380, the plain port
+#                          6379 (password required) for this server's tools
 #   (Permissions: without a terminal, restart, create-cluster, updates, pooler,
 #   tuning, sqlite-modes and files are allowed unless --no-allow-X; the
 #   server's own security updates, reboot, firewall and pooler-public only
@@ -268,8 +284,12 @@ REDIS_STANDBY=''   # --redis-standby (yes): Redis/Valkey standby servers with th
 REDIS_CLONES=''    # --redis-clones (yes): Redis/Valkey servers here may receive clones
 MONGODB_REPLSET='' # --mongodb-replica-set (yes) / --no-mongodb-replica-set (no); '' = ask on a terminal
 INSTALL_PG=''      # --install-postgres VERSION (servers Rowsafe creates)
+INSTALL_DB=''      # --install-mysql / --install-mariadb / --install-valkey: mysql, mariadb or valkey
+INSTALL_DB_VERSION='' # its version (8.4; 11.4 or 11.8; 8)
 LISTEN_PUBLIC=0    # --listen-public
 PG_OURS=0          # the PostgreSQL here is the one --install-postgres installed
+DB_OURS=0          # the INSTALL_DB server here is the one this installer installed
+INSTALL_TWICE="--install-postgres, --install-mysql, --install-mariadb and --install-valkey each install a database server on a fresh server: give only one"
 SQLITE_PATHS=''    # --sqlite PATH, one per line
 SQLITE_LIST=$CONFIG_DIR/sqlite-paths # the agent's SQLite files (one per line)
 SQLITE_CLONE_DIRS='' # --sqlite-clone-dir DIR, one per line
@@ -338,13 +358,32 @@ Options (when piping, pass them after `sh -s --`):
                          key checked) and start it. Refuses if PostgreSQL is already
                          installed; a re-run keeps the one it installed. With --protect,
                          that new PostgreSQL is restarted once if backups need it
+  --install-mysql 8.4    on a fresh server: install MySQL 8.4 (the long-term support
+                         release) from Oracle's repository (repo.mysql.com, its signing
+                         key checked; Intel and AMD processors only) and start it. root
+                         signs in only through the server's own socket (no password),
+                         no anonymous users, no test database
+  --install-mariadb VERSION
+                         the same for MariaDB 11.4 or 11.8 (long-term support) from
+                         MariaDB's repository (dlm.mariadb.com, its signing key checked).
+                         Debian 13 has 11.8 only
+  --install-valkey 8     the same for Valkey 8 from the distribution itself (Debian 13;
+                         Debian 12 from bookworm-backports; not on Ubuntu yet): the default
+                         user turned off, an administrator "admin" with a random password
+                         kept for root only in /etc/rowsafe/valkey/admin-password, users
+                         kept in /etc/valkey/users.acl, appendonly on.
+                         Each --install-X refuses when a database server is already
+                         installed (a re-run keeps the one it installed); give only one
   --listen-public        make PostgreSQL reachable from the network: it listens on every
                          address, with TLS (a self-signed certificate made on this server)
                          and SCRAM-SHA-256 passwords for every login from the network
                          (local rules stay as they are). Put a firewall in front: it
                          decides who can connect. Restarts PostgreSQL only if it was
                          installed by --install-postgres or you say yes; otherwise the
-                         change waits for its next restart
+                         change waits for its next restart. With --install-mysql or
+                         --install-mariadb: port 3306 on every address, TLS required for
+                         logins over the network; with --install-valkey: TLS on port 6380
+                         (passwords only), the plain port 6379 for this server's own tools
   --sqlite PATH          protect the SQLite database file PATH (repeat for several);
                          with --protect NAME, give exactly one. The installer also finds
                          the SQLite files running apps have open and asks about each
@@ -508,7 +547,8 @@ Turning on backups:
       --listen-public --storage rowsafe --protect NAME
   installs PostgreSQL 17, makes it reachable with TLS and passwords, keeps
   backups in Rowsafe Storage with a passphrase generated on the server (see it
-  in the dashboard, sealed to your browser) and turns them on.
+  in the dashboard, sealed to your browser) and turns them on. The same with
+  --install-mysql 8.4, --install-mariadb 11.8 or --install-valkey 8 instead.
 
   ClickHouse: Rowsafe's own ClickHouse user is added as
   /etc/clickhouse-server/users.d/rowsafe.xml (ClickHouse loads it by itself,
@@ -676,9 +716,11 @@ detect_os() {
 # detect_host_engine: without a postgres user but with MySQL or MariaDB,
 # Rowsafe protects MySQL/MariaDB and the agent runs as the mysql user, which
 # can read the data directory (backups) and start private servers on it
-# (restore tests, Rewind copies).
+# (restore tests, Rewind copies). pgBackRest's package (through
+# postgresql-common) makes a postgres user on MySQL servers too: a postgres
+# user without any PostgreSQL server here doesn't make this a PostgreSQL one.
 detect_host_engine() {
-  id -u postgres >/dev/null 2>&1 && return 0
+  id -u postgres >/dev/null 2>&1 && postgres_server_here && return 0
   id -u mysql >/dev/null 2>&1 || return 0
   for _b in /usr/sbin/mariadbd /usr/sbin/mysqld; do
     [ -x "$_b" ] || continue
@@ -688,6 +730,18 @@ detect_host_engine() {
     AGENT_HOME=$STATE_DIR
     return 0
   done
+}
+
+# postgres_server_here: PostgreSQL's server is on this server (its programs,
+# a running postgres, or ROWSAFE_PG_BIN_DIR pointing at them), or there is
+# no MySQL or MariaDB server to take its place.
+postgres_server_here() {
+  [ -x /usr/sbin/mysqld ] || [ -x /usr/sbin/mariadbd ] || return 0
+  [ -z "${ROWSAFE_PG_BIN_DIR:-}" ] || return 0
+  for _b in /usr/lib/postgresql/*/bin/postgres; do
+    [ ! -x "$_b" ] || return 0
+  done
+  have pgrep && pgrep -x postgres >/dev/null 2>&1
 }
 # <<< mysql
 
@@ -790,6 +844,9 @@ redis_setup() {
     echo "User=rowsafe"
     echo "Group=rowsafe"
     [ -z "$_grp" ] || echo "SupplementaryGroups=$_grp"
+    # --listen-public's certificate (--install-valkey): the agent replaces
+    # it with one from Let's Encrypt.
+    [ ! -d "$VALKEY_TLS_DIR" ] || echo "ReadWritePaths=-$VALKEY_TLS_DIR"
   } | write_file "$_dropin/10-redis.conf" 0644 root:root; then
     UNIT_CHANGED=1 CHANGED=1
   fi
@@ -1255,6 +1312,574 @@ listen_public() {
     ok "PostgreSQL $LP_MAJOR listens on the network (port $LP_PORT, TLS and passwords only); nothing to change"
   else
     ok "PostgreSQL $LP_MAJOR listens on the network (port $LP_PORT, TLS and passwords only)"
+  fi
+}
+
+# ---------------------------------------------------------------- MySQL, MariaDB and Valkey on servers Rowsafe creates
+#
+# --install-mysql 8.4, --install-mariadb 11.4|11.8 and --install-valkey 8 do
+# for those engines what --install-postgres does: on a fresh server, the
+# database server from a source whose signing key is checked, running, with
+# secure defaults; --listen-public then makes it reachable with TLS (the
+# firewall decides who can connect). Only the server this installer
+# installed is ever restarted, and a re-run changes nothing that is in place.
+
+# Oracle's MySQL apt repository (https://dev.mysql.com/downloads/repo/apt/),
+# signed by MySQL Release Engineering's key. RPM-GPG-KEY-mysql-2025 is that
+# key with its current expiry date (the -2023 file still has the old one).
+MYSQL_KEY_URL=https://repo.mysql.com/RPM-GPG-KEY-mysql-2025
+MYSQL_KEY_FPR=BCA43417C3B485DD128EC6D4B7B3B788A8D3785C
+MYSQL_KEYRING=/usr/share/keyrings/rowsafe-mysql.gpg
+MYSQL_LIST=/etc/apt/sources.list.d/rowsafe-mysql.list
+MYSQL_PIN=/etc/apt/preferences.d/rowsafe-mysql
+# MariaDB's own repository (https://mariadb.org/download/?t=repo-config),
+# signed by the MariaDB Signing Key.
+MARIADB_KEY_URL=https://mariadb.org/mariadb_release_signing_key.pgp
+MARIADB_KEY_FPR=177F4010FE56CA3336300305F1656F24C74CD1D8
+MARIADB_KEYRING=/usr/share/keyrings/rowsafe-mariadb.gpg
+MARIADB_LIST=/etc/apt/sources.list.d/rowsafe-mariadb.list
+MARIADB_PIN=/etc/apt/preferences.d/rowsafe-mariadb
+# Valkey 8 on Debian 12 comes from bookworm-backports (Debian's own archive).
+BACKPORTS_LIST=/etc/apt/sources.list.d/rowsafe-bookworm-backports.list
+# Valkey: Debian's package files, the ACL file (Rowsafe's own user is kept
+# there by the agent's ACL SAVE), the administrator's password (root's
+# only), and --listen-public's certificate (written as the agent, which
+# replaces it with one from Let's Encrypt).
+VALKEY_CONF=/etc/valkey/valkey.conf
+VALKEY_ACL=/etc/valkey/users.acl
+VALKEY_ADMIN_PW_FILE=$CONFIG_DIR/valkey/admin-password
+VALKEY_TLS_DIR=/etc/ssl/rowsafe-valkey
+
+# db_record [ENGINE]: the file holding the version this installer installed.
+db_record() { printf '%s/installed-%s\n' "$CONFIG_DIR" "${1:-$INSTALL_DB}"; }
+
+# db_unit ENGINE: the systemd unit of the server its packages install.
+db_unit() {
+  case $1 in mysql) echo mysql.service ;; mariadb) echo mariadb.service ;; valkey) echo valkey-server.service ;; esac
+}
+
+# db_port: the port the installed server listens on (the agent's).
+db_port() { case $INSTALL_DB in valkey) echo 6379 ;; *) echo 3306 ;; esac; }
+
+# db_public_ports: the ports --listen-public opens (Valkey: the TLS port,
+# and the plain one, which the firewall keeps closed to everyone else).
+db_public_ports() { case $INSTALL_DB in valkey) echo 6379 6380 ;; *) echo 3306 ;; esac; }
+
+# mysql_net_conf: the file --install-mysql/-mariadb keeps the network
+# settings in. MariaDB's packages read mariadb.conf.d after conf.d (and set
+# bind-address in 50-server.cnf there), so its file sorts last in it.
+mysql_net_conf() {
+  case $INSTALL_DB in
+    mariadb) echo /etc/mysql/mariadb.conf.d/zz-rowsafe-network.cnf ;;
+    *) echo /etc/mysql/conf.d/zz-rowsafe-network.cnf ;;
+  esac
+}
+
+# db_program ENGINE: the installed server's program, if it is there.
+db_program() {
+  case $1 in
+    mysql) _p=/usr/sbin/mysqld ;;
+    mariadb) _p=/usr/sbin/mariadbd ;;
+    valkey) _p=/usr/bin/valkey-server ;;
+  esac
+  [ -x "$_p" ] && echo "$_p"
+}
+
+# db_ours: the server of --install-X is the one an earlier run installed.
+db_ours() {
+  [ "$(cat "$(db_record)" 2>/dev/null)" = "$INSTALL_DB_VERSION" ] && [ -n "$(db_program "$INSTALL_DB")" ]
+}
+
+# existing_database describes a database server already on this server, if
+# any: PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis or Valkey.
+existing_database() {
+  _found=$(existing_postgres)
+  if [ -n "$_found" ]; then
+    printf '%s' "$_found"
+    return 0
+  fi
+  for _b in /usr/sbin/mariadbd /usr/sbin/mysqld; do
+    [ -x "$_b" ] || continue
+    _ver=$("$_b" --version 2>/dev/null | sed -n 's/.*Ver \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p')
+    if "$_b" --version 2>/dev/null | grep -qi mariadb; then _n=MariaDB; else _n=MySQL; fi
+    printf '%s%s in %s' "$_n" "${_ver:+ $_ver}" "$_b"
+    return 0
+  done
+  if have dpkg-query; then
+    # shellcheck disable=SC2016 # dpkg-query's own ${...} fields
+    _p=$(dpkg-query -W -f '${Package} ${db:Status-Status}\n' 'mysql-server*' 'mysql-community-server*' 'mariadb-server*' \
+      'percona-server-server*' 'mongodb-org-server' 'clickhouse-server' 'redis-server' 'valkey-server' 2>/dev/null |
+      awk '$2 == "installed" { print $1; exit }')
+    if [ -n "$_p" ]; then
+      printf 'the package %s' "$_p"
+      return 0
+    fi
+  fi
+  if have pgrep && pgrep -x 'mysqld|mariadbd' >/dev/null 2>&1; then
+    printf 'a running MySQL or MariaDB server'
+    return 0
+  fi
+  if mongodb_present; then printf 'MongoDB'; return 0; fi
+  if clickhouse_present; then printf 'ClickHouse'; return 0; fi
+  if redis_present; then
+    if redis_find_program; then printf '%s %s' "$(engine_label "$REDIS_FOUND_ENGINE")" "$REDIS_VERSION"; else printf 'Redis or Valkey'; fi
+    return 0
+  fi
+  return 0
+}
+
+# install_db_check refuses what can't work here, before anything changes.
+install_db_check() {
+  _n=$(engine_label "$INSTALL_DB")
+  case $INSTALL_DB in
+    mysql)
+      [ "$ARCH" = amd64 ] ||
+        die "MySQL's own packages are built for Intel and AMD processors only; this server is $ARCH. MariaDB, a close relative of MySQL, runs here: --install-mariadb 11.8"
+      case $OS_ID in debian | ubuntu) ;; *) die "Oracle publishes MySQL's packages for Debian and Ubuntu; $OS_NAME isn't one of them" ;; esac
+      ;;
+    mariadb)
+      case $OS_ID in debian | ubuntu) ;; *) die "--install-mariadb works on Debian and Ubuntu; $OS_NAME isn't one of them" ;; esac
+      if [ "$INSTALL_DB_VERSION" = 11.4 ] && [ "$OS_ID $OS_VERSION" = "debian 13" ]; then
+        die "MariaDB 11.4 isn't published for Debian 13; install MariaDB 11.8 instead (--install-mariadb 11.8), also a long-term support release"
+      fi
+      ;;
+    valkey)
+      case "$OS_ID $OS_VERSION" in
+        "debian 12" | "debian 13") ;;
+        ubuntu*) die "Valkey 8 isn't packaged for Ubuntu yet (Ubuntu 24.04 has Valkey 7.2); use Debian 12 or 13 for Valkey" ;;
+        *) die "Valkey 8 is installed from Debian's own packages; use Debian 12 or 13 for Valkey" ;;
+      esac
+      ;;
+  esac
+  if ! db_ours; then
+    if [ "$(cat "$(db_record)" 2>/dev/null)" != "" ] && [ -n "$(db_program "$INSTALL_DB")" ]; then
+      die "$_n $(cat "$(db_record)") is already installed on this server (by an earlier run of this installer), so --install-$INSTALL_DB won't install $_n $INSTALL_DB_VERSION. Run the installer with --install-$INSTALL_DB $(cat "$(db_record)"), or without --install-$INSTALL_DB."
+    fi
+    _found=$(existing_database)
+    [ -z "$_found" ] ||
+      die "$_found is already installed on this server, so --install-$INSTALL_DB won't install $_n next to it. Run the installer without --install-$INSTALL_DB to protect the one that is there."
+  fi
+  systemd_running || die "--install-$INSTALL_DB needs systemd (the service manager of Debian and Ubuntu) to run $_n; it isn't running here"
+}
+
+# repo_key FILE FINGERPRINT WHOSE KEYRING: a downloaded signing key, checked
+# (exactly one key, the pinned fingerprint, not expired), saved for apt.
+repo_key() {
+  have gpg || apt_install gnupg
+  install -d -m 0700 "$TMP/gnupg"
+  GNUPGHOME=$TMP/gnupg gpg --batch --show-keys --with-colons "$1" >"$TMP/key.list" 2>/dev/null || true
+  _fpr=$(awk -F: '$1 == "fpr" { print $10; exit }' "$TMP/key.list")
+  [ "$(grep -c '^pub:' "$TMP/key.list")" = 1 ] && [ "$_fpr" = "$2" ] ||
+    die "$3 signing key isn't the expected one (fingerprint ${_fpr:-unreadable}); not installing $(engine_label "$INSTALL_DB")"
+  [ "$(awk -F: '$1 == "pub" { print $2; exit }' "$TMP/key.list")" != e ] ||
+    die "$3 signing key ($2) has expired, so apt wouldn't trust its packages; not installing $(engine_label "$INSTALL_DB"). Try again once its renewed key is published."
+  GNUPGHOME=$TMP/gnupg gpg --batch --yes --dearmor -o "$TMP/key.gpg" "$1" 2>/dev/null || die "could not read $3 signing key"
+  write_file "$4" 0644 root:root <"$TMP/key.gpg" || true
+}
+
+# os_codename prints VERSION_CODENAME (bookworm, noble...).
+os_codename() {
+  # shellcheck disable=SC1091 # the system's own file
+  _codename=$(. /etc/os-release && printf '%s' "${VERSION_CODENAME:-}")
+  [ -n "$_codename" ] || die "can't tell this system's release name (VERSION_CODENAME in /etc/os-release)"
+  printf '%s\n' "$_codename"
+}
+
+# apt_candidate PACKAGE [RELEASE] prints the version apt would install
+# (from RELEASE, like apt-get -t), nothing when there is none.
+apt_candidate() {
+  apt-cache ${2:+-t "$2"} policy "$1" 2>/dev/null | awk '$1 == "Candidate:" && $2 != "(none)" { print $2; exit }'
+}
+
+# mysql_repo adds Oracle's repository for MySQL 8.4 (or MariaDB's for
+# MariaDB VERSION), pinned so the distribution's own packages never mix in.
+mysql_repo() {
+  _codename=$(os_codename)
+  if [ "$INSTALL_DB" = mysql ]; then
+    fetch "$MYSQL_KEY_URL" "$TMP/repo.asc" || die "could not download MySQL's signing key ($MYSQL_KEY_URL)"
+    repo_key "$TMP/repo.asc" "$MYSQL_KEY_FPR" "MySQL's" "$MYSQL_KEYRING"
+    echo "deb [signed-by=$MYSQL_KEYRING] https://repo.mysql.com/apt/$OS_ID $_codename mysql-8.4-lts" |
+      write_file "$MYSQL_LIST" 0644 root:root || true
+    printf '%s\n' "# Written by the Rowsafe installer (--install-mysql): MySQL's packages" \
+      "# come from Oracle's repository only." "Package: *" "Pin: origin repo.mysql.com" "Pin-Priority: 1000" |
+      write_file "$MYSQL_PIN" 0644 root:root || true
+    _what="Oracle's MySQL repository (repo.mysql.com, mysql-8.4-lts, key $MYSQL_KEY_FPR)"
+  else
+    fetch "$MARIADB_KEY_URL" "$TMP/repo.asc" || die "could not download MariaDB's signing key ($MARIADB_KEY_URL)"
+    repo_key "$TMP/repo.asc" "$MARIADB_KEY_FPR" "MariaDB's" "$MARIADB_KEYRING"
+    echo "deb [signed-by=$MARIADB_KEYRING] https://dlm.mariadb.com/repo/mariadb-server/$INSTALL_DB_VERSION/repo/$OS_ID $_codename main" |
+      write_file "$MARIADB_LIST" 0644 root:root || true
+    printf '%s\n' "# Written by the Rowsafe installer (--install-mariadb): MariaDB's packages" \
+      "# come from MariaDB's repository only, never mixed with the distribution's." \
+      "Package: *" "Pin: release o=MariaDB" "Pin-Priority: 1000" |
+      write_file "$MARIADB_PIN" 0644 root:root || true
+    _what="MariaDB's repository (dlm.mariadb.com, $INSTALL_DB_VERSION, key $MARIADB_KEY_FPR)"
+  fi
+  apt_update
+  ok "$_what"
+}
+
+# install_database is --install-mysql, --install-mariadb or --install-valkey:
+# the server installed and running with secure defaults. It refuses on a
+# server with a database server already, unless that is the one it
+# installed.
+install_database() {
+  _n=$(engine_label "$INSTALL_DB")
+  install_db_check
+  ensure_base_tools
+  if db_ours; then
+    ok "$_n $INSTALL_DB_VERSION is installed (by an earlier run of this installer)"
+  else
+    case $INSTALL_DB in
+      mysql)
+        step "Installing MySQL 8.4 from Oracle's repository"
+        mysql_repo
+        _c=$(apt_candidate mysql-community-server)
+        case $_c in 8.4.*) ;; *) die "MySQL 8.4 isn't available for $OS_NAME from Oracle's repository (found ${_c:-nothing})" ;; esac
+        mysql_local_conf
+        # root signs in through the socket only (auth_socket): no password.
+        printf '%s\n' "mysql-community-server mysql-community-server/root-pass password " \
+          "mysql-community-server mysql-community-server/re-root-pass password " | debconf-set-selections
+        apt_install mysql-community-server mysql-client
+        ;;
+      mariadb)
+        step "Installing MariaDB $INSTALL_DB_VERSION from MariaDB's repository"
+        mysql_repo
+        _c=$(apt_candidate mariadb-server)
+        case ${_c#*:} in "$INSTALL_DB_VERSION".*) ;; *) die "MariaDB $INSTALL_DB_VERSION isn't available for $OS_NAME from MariaDB's repository (found ${_c:-nothing})" ;; esac
+        mysql_local_conf
+        apt_install mariadb-server mariadb-client mariadb-backup
+        ;;
+      valkey)
+        step "Installing Valkey 8 from Debian's own packages"
+        _t=''
+        if [ "$OS_VERSION" = 12 ]; then
+          _t=bookworm-backports
+          if ! grep -Eqs '(^|[[:space:]])bookworm-backports([[:space:]]|$)' /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; then
+            _kr=''
+            [ ! -f /usr/share/keyrings/debian-archive-keyring.gpg ] || _kr=' [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg]'
+            printf '%s\n' "# Written by the Rowsafe installer (--install-valkey): Valkey 8 for Debian 12." \
+              "deb$_kr https://deb.debian.org/debian bookworm-backports main" | write_file "$BACKPORTS_LIST" 0644 root:root || true
+            APT_UPDATED=0
+          fi
+        fi
+        [ "$APT_UPDATED" = 1 ] || apt_update
+        _c=$(apt_candidate valkey-server "$_t")
+        case ${_c#*:} in 8.*) ;; *) die "Valkey 8 isn't available for $OS_NAME from Debian's archive (found ${_c:-nothing})" ;; esac
+        if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends ${_t:+-t "$_t"} valkey-server valkey-tools \
+          >>"$TMP/apt.log" 2>&1 </dev/null; then
+          tail -n 20 "$TMP/apt.log" >&2
+          die "installing Valkey 8 failed"
+        fi
+        ;;
+    esac
+    [ -n "$(db_program "$INSTALL_DB")" ] || die "$_n's packages installed, but its server program isn't there"
+    [ -d "$CONFIG_DIR" ] || install -d -m 0750 -o root -g root "$CONFIG_DIR"
+    printf '%s\n' "$INSTALL_DB_VERSION" | write_file "$(db_record)" 0644 root:root || true
+    ok "$_n $(db_version) installed"
+  fi
+  DB_OURS=1
+  db_running
+  case $INSTALL_DB in
+    valkey) valkey_secure ;;
+    *) mysql_secure ;;
+  esac
+}
+
+# db_version prints the installed server's version.
+db_version() {
+  case $INSTALL_DB in
+    valkey) valkey-server --version 2>/dev/null | sed -n 's/.* v=\([0-9.]*\).*/\1/p' ;;
+    *) "$(db_program "$INSTALL_DB")" --version 2>/dev/null | sed -n 's/.*Ver \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' ;;
+  esac
+}
+
+# db_running: the installed server is enabled and running.
+db_running() {
+  _u=$(db_unit "$INSTALL_DB")
+  if ! systemctl is-active --quiet "$_u" || ! systemctl is-enabled --quiet "$_u" 2>/dev/null; then
+    if ! timeout 300 systemctl enable --now --quiet "$_u" >"$TMP/db.log" 2>&1 </dev/null; then
+      journalctl -u "$_u" -n 15 --no-pager >>"$TMP/db.log" 2>/dev/null || true
+      tail -n 20 "$TMP/db.log" | sed 's/^/    /' >&2
+      die "$(engine_label "$INSTALL_DB") doesn't start (see above)"
+    fi
+  fi
+  case $INSTALL_DB in
+    valkey) [ "$(db_version | cut -d. -f1)" = 8 ] || die "the Valkey here is $(db_version), not Valkey 8" ;;
+  esac
+  ok "$(engine_label "$INSTALL_DB") $(db_version) is running on port $(db_port)"
+}
+
+# db_restart: restarts the server this installer installed (never another).
+db_restart() {
+  [ "$DB_OURS" = 1 ] || return 1
+  _u=$(db_unit "$INSTALL_DB")
+  if ! timeout 300 systemctl restart "$_u" >"$TMP/db.log" 2>&1 </dev/null; then
+    journalctl -u "$_u" -n 15 --no-pager >>"$TMP/db.log" 2>/dev/null || true
+    tail -n 20 "$TMP/db.log" | sed 's/^/    /' >&2
+    return 1
+  fi
+}
+
+# mysql_local_conf: before the packages start the server, it listens on
+# this server only (--listen-public opens it once the firewall is in
+# place); MySQL's X Protocol (port 33060), which Rowsafe doesn't use, off.
+mysql_local_conf() {
+  _f=$(mysql_net_conf)
+  [ ! -e "$_f" ] || return 0
+  install -d -m 0755 -o root -g root /etc/mysql "${_f%/*}"
+  {
+    echo "# Written by the Rowsafe installer (--install-$INSTALL_DB): $(engine_label "$INSTALL_DB") listens on this"
+    echo "# server only. --listen-public replaces this file."
+    echo "[mysqld]"
+    echo "bind-address = 127.0.0.1"
+    [ "$INSTALL_DB" != mysql ] || echo "mysqlx = OFF"
+  } | write_file "$_f" 0644 root:root || true
+}
+
+# mysql_root_sql: the statements on stdin, run as MySQL's/MariaDB's root
+# through the server's socket (root signs in with no password there).
+mysql_root_sql() {
+  _cli=mysql
+  [ "$INSTALL_DB" != mariadb ] || _cli=mariadb
+  (cd / && "$_cli" --protocol=socket -u root -N -B)
+}
+
+# mysql_secure: no anonymous users, no test database, root only through
+# the socket (no password, nothing from the network). Fixed statements,
+# idempotent.
+mysql_secure() {
+  if [ "$INSTALL_DB" = mariadb ]; then
+    mysql_root_sql >"$TMP/secure.log" 2>&1 <<'ROWSAFE_MARIADB_SECURE_EOF' || { sed 's/^/    /' "$TMP/secure.log" >&2; die "could not set MariaDB's secure defaults through its socket as root"; }
+DROP USER IF EXISTS ''@'localhost', ''@'%', 'root'@'%', 'root'@'127.0.0.1', 'root'@'::1';
+ALTER USER 'root'@'localhost' IDENTIFIED VIA unix_socket;
+DROP DATABASE IF EXISTS test;
+DELETE FROM mysql.db WHERE Db = 'test' OR Db LIKE 'test\_%';
+FLUSH PRIVILEGES;
+SELECT COUNT(*) FROM mysql.global_priv WHERE User = '' OR (User = 'root' AND Host <> 'localhost');
+SELECT JSON_VALUE(Priv, '$.plugin') FROM mysql.global_priv WHERE User = 'root' AND Host = 'localhost';
+ROWSAFE_MARIADB_SECURE_EOF
+    _plugin=unix_socket
+  else
+    mysql_root_sql >"$TMP/secure.log" 2>&1 <<'ROWSAFE_MYSQL_SECURE_EOF' || { sed 's/^/    /' "$TMP/secure.log" >&2; die "could not set MySQL's secure defaults through its socket as root"; }
+DROP USER IF EXISTS ''@'localhost', ''@'%', 'root'@'%', 'root'@'127.0.0.1', 'root'@'::1';
+ALTER USER 'root'@'localhost' IDENTIFIED WITH auth_socket;
+DROP DATABASE IF EXISTS test;
+DELETE FROM mysql.db WHERE Db = 'test' OR Db LIKE 'test\_%';
+FLUSH PRIVILEGES;
+SELECT COUNT(*) FROM mysql.user WHERE User = '' OR (User = 'root' AND Host <> 'localhost');
+SELECT plugin FROM mysql.user WHERE User = 'root' AND Host = 'localhost';
+ROWSAFE_MYSQL_SECURE_EOF
+    _plugin=auth_socket
+  fi
+  [ "$(sed -n 1p "$TMP/secure.log")" = 0 ] && [ "$(sed -n 2p "$TMP/secure.log")" = "$_plugin" ] || {
+    sed 's/^/    /' "$TMP/secure.log" >&2
+    die "$(engine_label "$INSTALL_DB") still has anonymous users or a root that signs in from elsewhere (see above)"
+  }
+  ok "$(engine_label "$INSTALL_DB"): root signs in through the server's socket only, no anonymous users, no test database"
+}
+
+# mysql_datadir prints the server's data directory, as the server says.
+mysql_datadir() {
+  _d=$(echo 'SELECT @@datadir;' | mysql_root_sql 2>/dev/null) || die "could not ask $(engine_label "$INSTALL_DB") for its data directory"
+  _d=${_d%/}
+  printf '%s\n' "$_d" | grep -Eq '^/[A-Za-z0-9._/-]+$' && [ -d "$_d" ] && [ "$(stat -c %U "$_d")" = mysql ] ||
+    die "$(engine_label "$INSTALL_DB")'s data directory (${_d:-unknown}) isn't a directory of the mysql user"
+  printf '%s\n' "$_d"
+}
+
+# server_cert USER DIR CN KEYMODE: a self-signed certificate (P-256, ten
+# years) as DIR/rowsafe-server.crt (0644) and .key (KEYMODE), written by
+# USER in USER's directory (root never writes there). An existing pair is
+# kept: the agent replaces it with one from Let's Encrypt.
+server_cert() {
+  if [ -s "$2/rowsafe-server.key" ] && [ -s "$2/rowsafe-server.crt" ]; then
+    return 1
+  fi
+  # shellcheck disable=SC2016 # $1..$3 expand in the inner shell
+  (cd / && runuser -u "$1" -- sh -c 'umask 077
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
+      -subj "/CN=$2" -addext "subjectAltName=DNS:$2" \
+      -keyout "$1/rowsafe-server.key.rowsafe-new" -out "$1/rowsafe-server.crt.rowsafe-new" >/dev/null &&
+      chmod "$3" "$1/rowsafe-server.key.rowsafe-new" && chmod 0644 "$1/rowsafe-server.crt.rowsafe-new" &&
+      mv -f "$1/rowsafe-server.key.rowsafe-new" "$1/rowsafe-server.key" &&
+      mv -f "$1/rowsafe-server.crt.rowsafe-new" "$1/rowsafe-server.crt"' rowsafe-cert "$2" "$3" "$4") </dev/null 2>"$TMP/cert.log" || {
+    tail -n 5 "$TMP/cert.log" | sed 's/^/    /' >&2
+    die "could not make a TLS certificate for $(engine_label "$INSTALL_DB") in $2"
+  }
+  return 0
+}
+
+# cert_cn: this server's name for its certificate.
+cert_cn() {
+  _cn=$(hostname -f 2>/dev/null || uname -n)
+  printf '%s\n' "$_cn" | grep -Eq '^[A-Za-z0-9.-]{1,253}$' || _cn=$(uname -n)
+  printf '%s\n' "$_cn"
+}
+
+# tls_serves PORT CERT [STARTTLS]: the server on 127.0.0.1:PORT presents
+# CERT in a TLS handshake.
+tls_serves() {
+  _want=$(openssl x509 -in "$2" -noout -fingerprint -sha256 2>/dev/null) || return 1
+  _got=$(timeout 20 openssl s_client ${3:+-starttls "$3"} -connect "127.0.0.1:$1" </dev/null 2>/dev/null |
+    openssl x509 -noout -fingerprint -sha256 2>/dev/null) || return 1
+  [ -n "$_want" ] && [ "$_want" = "$_got" ]
+}
+
+# db_listen_public is --listen-public for --install-mysql/-mariadb/-valkey.
+db_listen_public() {
+  case $INSTALL_DB in
+    valkey) valkey_listen_public ;;
+    *) mysql_listen_public ;;
+  esac
+}
+
+# mysql_listen_public: port 3306 on every address (IPv4 and IPv6), TLS
+# required for every login over TCP (the socket, which the agent and root
+# use, stays as it is), TLS 1.2 and 1.3 with a certificate made here.
+mysql_listen_public() {
+  _n=$(engine_label "$INSTALL_DB")
+  step "Making $_n reachable from the network (TLS only)"
+  _d=$(mysql_datadir)
+  _changed=0
+  if server_cert mysql "$_d" "$(cert_cn)" 0600; then
+    ok "made a self-signed TLS certificate for $_n ($_d/rowsafe-server.crt)"
+  fi
+  _f=$(mysql_net_conf)
+  if {
+    echo "# Written by the Rowsafe installer (--listen-public): $_n listens on every address;"
+    echo "# logins over the network need TLS (the socket stays as it is). The firewall"
+    echo "# decides who can connect. Rowsafe's agent replaces the certificate (same files)."
+    echo "[mysqld]"
+    echo "bind-address = *"
+    [ "$INSTALL_DB" != mysql ] || echo "mysqlx = OFF"
+    echo "require_secure_transport = ON"
+    echo "ssl_cert = $_d/rowsafe-server.crt"
+    echo "ssl_key = $_d/rowsafe-server.key"
+    echo "tls_version = TLSv1.2,TLSv1.3"
+  } | write_file "$_f" 0644 root:root; then
+    _changed=1
+  fi
+  if [ "$_changed" = 1 ]; then
+    note "restarting the new $_n so it listens on the network"
+    db_restart || die "restarting $_n failed (see above)"
+  fi
+  _on=$(echo 'SELECT @@require_secure_transport;' | mysql_root_sql 2>/dev/null)
+  [ "$_on" = 1 ] || die "$_n doesn't require TLS for logins over the network (see $_f)"
+  tls_serves 3306 "$_d/rowsafe-server.crt" mysql || die "$_n doesn't serve its TLS certificate on port 3306 (see its log)"
+  if [ "$_changed" = 0 ]; then
+    ok "$_n listens on the network (port 3306, TLS only); nothing to change"
+  else
+    ok "$_n listens on the network (port 3306, TLS only)"
+  fi
+}
+
+# valkey_conf_set "KEY VALUE"...: those settings in valkey.conf, each
+# replacing the line it had (values compared without quotes, as CONFIG
+# REWRITE writes them) or added at the end. Written as the valkey user (its
+# directory; CONFIG REWRITE keeps working). Returns 0 when it changed.
+valkey_conf_set() {
+  [ -f "$VALKEY_CONF" ] && [ ! -L "$VALKEY_CONF" ] || die "$VALKEY_CONF isn't Valkey's configuration file"
+  printf '%s\n' "$@" | awk '
+    function norm(s) { gsub(/"/, "", s); gsub(/[[:space:]]+/, " ", s); sub(/^ /, "", s); sub(/ $/, "", s); return s }
+    NR == FNR { k = tolower($1); want[k] = $0; order[++n] = k; next }
+    (tolower($1) in want) {
+      k = tolower($1)
+      if (k in done) next
+      done[k] = 1
+      if (norm($0) == norm(want[k])) print; else print want[k]
+      next
+    }
+    { print }
+    END {
+      # CONFIG REWRITE drops a bind line that says what Valkey does anyway.
+      dflt["bind"] = "bind * -::*"; dflt["port"] = "port 6379"; dflt["appendfsync"] = "appendfsync everysec"
+      for (i = 1; i <= n; i++) if (!(order[i] in done) && norm(want[order[i]]) != dflt[order[i]]) print want[order[i]]
+    }' - "$VALKEY_CONF" >"$TMP/valkey.conf"
+  cmp -s "$TMP/valkey.conf" "$VALKEY_CONF" && return 1
+  # shellcheck disable=SC2016 # $1 expands in the inner shell
+  (cd / && runuser -u valkey -- sh -c 'umask 027; cat >"$1.rowsafe-new" && mv -f "$1.rowsafe-new" "$1"' rowsafe-valkey "$VALKEY_CONF") <"$TMP/valkey.conf" ||
+    die "could not write $VALKEY_CONF"
+  return 0
+}
+
+# valkey_cli: valkey-cli on this server's plain port; the commands come on
+# stdin (a password never goes on a command line).
+valkey_cli() { (cd / && timeout 20 valkey-cli -p 6379); }
+
+# valkey_secure: the default user off, an administrator (admin) with a
+# random password that only root can read, users kept in an ACL file (the
+# agent's ACL SAVE writes Rowsafe's user there), appendonly on (RDB
+# snapshots stay). Restarts only the Valkey this installer installed.
+valkey_secure() {
+  have valkey-cli || die "valkey-cli is missing (Debian's valkey-tools package has it)"
+  install -d -m 0700 -o root -g root "${VALKEY_ADMIN_PW_FILE%/*}"
+  _restart=0
+  if [ ! -s "$VALKEY_ADMIN_PW_FILE" ]; then
+    if [ -e "$VALKEY_ACL" ]; then
+      warn "$VALKEY_ACL exists but Valkey's administrator password isn't in $VALKEY_ADMIN_PW_FILE; Valkey's users were left as they are"
+    else
+      ( umask 077; openssl rand -hex 32 >"$TMP/valkey-admin" ) || die "could not make a password"
+      install -m 0600 -o root -g root "$TMP/valkey-admin" "$VALKEY_ADMIN_PW_FILE"
+      rm -f "$TMP/valkey-admin"
+    fi
+  fi
+  if [ ! -e "$VALKEY_ACL" ] && [ -s "$VALKEY_ADMIN_PW_FILE" ]; then
+    _h=$(tr -d '\n' <"$VALKEY_ADMIN_PW_FILE" | sha256sum | cut -d' ' -f1)
+    # shellcheck disable=SC2016 # $1 expands in the inner shell
+    printf '%s\n' "user default off resetchannels -@all" "user admin on #$_h ~* &* +@all" |
+      (cd / && runuser -u valkey -- sh -c 'umask 027; cat >"$1.rowsafe-new" && mv -f "$1.rowsafe-new" "$1"' rowsafe-valkey "$VALKEY_ACL") ||
+      die "could not write $VALKEY_ACL"
+    _restart=1
+  fi
+  if valkey_conf_set "aclfile $VALKEY_ACL" "appendonly yes" "appendfsync everysec"; then _restart=1; fi
+  if [ "$_restart" = 1 ]; then
+    note "restarting the new Valkey with its users and settings"
+    db_restart || die "restarting Valkey failed (see above)"
+  fi
+  [ "$(echo PING | valkey_cli 2>&1 | head -n 1)" != PONG ] || die "Valkey still lets anyone in without a password on port 6379"
+  if [ -s "$VALKEY_ADMIN_PW_FILE" ]; then
+    printf 'AUTH admin %s\nPING\n' "$(cat "$VALKEY_ADMIN_PW_FILE")" | valkey_cli >"$TMP/valkey.out" 2>&1 || true
+    [ "$(sed -n 2p "$TMP/valkey.out")" = PONG ] || die "Valkey's administrator can't sign in (see $VALKEY_ACL)"
+  fi
+  ok "Valkey: the default user is off, an administrator (admin) whose password only root can read ($VALKEY_ADMIN_PW_FILE), users kept in $VALKEY_ACL, appendonly on"
+}
+
+# valkey_admin_login gives the installer (only its own run, never saved
+# elsewhere, never printed) the administrator's login, so Rowsafe's own
+# Valkey user is created without questions. A login the person gave
+# (ROWSAFE_REDIS_ADMIN_USER) goes first.
+valkey_admin_login() {
+  [ -z "${ROWSAFE_REDIS_ADMIN_USER:-}" ] && [ -s "$VALKEY_ADMIN_PW_FILE" ] || return 0
+  ROWSAFE_REDIS_ADMIN_USER='admin'
+  ROWSAFE_REDIS_ADMIN_PASSWORD=$(cat "$VALKEY_ADMIN_PW_FILE")
+}
+
+# valkey_listen_public: TLS on port 6380 on every address (passwords only,
+# the default user is off), the plain port 6379 kept for the agent and this
+# server's tools (the firewall keeps it closed to everyone else). The
+# certificate's directory is the agent's (group valkey reads it): the agent
+# replaces the files with a certificate from Let's Encrypt.
+valkey_listen_public() {
+  step "Making Valkey reachable from the network (TLS on port 6380)"
+  getent group valkey >/dev/null 2>&1 || die "no valkey group on this server (Valkey's package makes it)"
+  install -d -m 2750 -o "$AGENT_USER" -g valkey "$VALKEY_TLS_DIR"
+  if server_cert "$AGENT_USER" "$VALKEY_TLS_DIR" "$(cert_cn)" 0640; then
+    ok "made a self-signed TLS certificate for Valkey ($VALKEY_TLS_DIR/rowsafe-server.crt)"
+  fi
+  _changed=0
+  if valkey_conf_set "bind * -::*" "port 6379" "tls-port 6380" \
+    "tls-cert-file $VALKEY_TLS_DIR/rowsafe-server.crt" "tls-key-file $VALKEY_TLS_DIR/rowsafe-server.key" \
+    "tls-auth-clients no" 'tls-protocols "TLSv1.2 TLSv1.3"'; then
+    _changed=1
+    note "restarting the new Valkey so it listens on the network"
+    db_restart || die "restarting Valkey failed (see above)"
+  fi
+  tls_serves 6380 "$VALKEY_TLS_DIR/rowsafe-server.crt" || die "Valkey doesn't serve its TLS certificate on port 6380 (see /var/log/valkey)"
+  if [ "$_changed" = 0 ]; then
+    ok "Valkey listens on the network (TLS on port 6380, passwords only); nothing to change"
+  else
+    ok "Valkey listens on the network (TLS on port 6380, passwords only)"
   fi
 }
 
@@ -4317,7 +4942,9 @@ create_cluster_access() {
         return 0
       fi
       # Asked only where restarts are allowed: the created cluster is
-      # stopped and started by the same helper.
+      # stopped and started by the same helper. Only next to a PostgreSQL
+      # server (pgBackRest brings pg_createcluster to MySQL servers too).
+      [ "$HOST_ENGINE" = postgresql ] && perm_has_postgres || return 0
       command -v pg_createcluster >/dev/null 2>&1 && grep -qs '^[0-9]' "$RESTART_ALLOW_FILE" || return 0
       if perm_default "Create a new PostgreSQL cluster here (ports $CREATE_PORTS), when someone forks a database to this server?" y; then
         allow_create_clusters
@@ -4631,7 +5258,7 @@ auto_security_updates() {
     return 0
   fi
   systemd_running || note "systemd isn't running here: the list of what waits for a restart starts with it"
-  ok "on: this server installs its security updates by itself every day; never PostgreSQL's packages, never a restart of PostgreSQL, never a reboot"
+  ok "on: this server installs its security updates by itself every day; never $(engine_label)'s packages, never a restart of $(engine_label), never a reboot"
 }
 
 # remove_auto_security_updates removes Rowsafe's files for automatic
@@ -5778,14 +6405,19 @@ firewall_restore() {
   STATE_DIRECTORY=/var/lib/rowsafe-firewall RUNTIME_DIRECTORY=/run/rowsafe-firewall "$FIREWALL_HELPER" --restore 2>"$TMP/firewall.err"
 }
 
-# firewall_close_early (--firewall-ssh, on servers Rowsafe creates): before
-# PostgreSQL listens on public addresses, its port is closed to everyone
-# but this server, until the agent applies who may connect (the helper's
-# "server" action, when the person's choice arrives from the dashboard).
-# SSH stays as it is until then. A re-run keeps the rules already there.
+# firewall_close_early [PORT...] (--firewall-ssh, on servers Rowsafe
+# creates): before the database server listens on public addresses, its
+# ports (those it listens on, and PORT...: the ones --listen-public is
+# about to open) are closed to everyone but this server, until the agent
+# applies who may connect (the helper's "server" action, when the person's
+# choice arrives from the dashboard). SSH stays as it is until then. A
+# re-run keeps the rules already there.
 firewall_close_early() {
   have nft || apt_install nftables
-  _ports=$(firewall_ports)
+  _ports=$({
+    firewall_ports
+    [ $# = 0 ] || printf '%s\n' "$@"
+  } | grep -Ex '[1-9][0-9]{3,4}' | sort -un)
   [ -n "$_ports" ] || return 0
   [ -d "$CONFIG_DIR" ] || install -d -m 0750 -o root -g "$AGENT_USER" "$CONFIG_DIR"
   # shellcheck disable=SC2046,SC2086 # one port per word
@@ -5796,11 +6428,13 @@ firewall_close_early() {
     [ -e "/var/lib/rowsafe-firewall/port-$_p" ] || [ -e "/var/lib/rowsafe-firewall/pending-$_p" ] ||
       : >"/var/lib/rowsafe-firewall/port-$_p"
   done
+  _s='' _is=is
+  [ "$(printf '%s\n' "$_ports" | grep -c .)" = 1 ] || _s=s _is=are
   if firewall_restore; then
-    ok "PostgreSQL's port ($(printf '%s' "$_ports" | paste -sd, - | sed 's/,/, /g')) is closed to everyone but this server until Rowsafe applies who may connect"
+    ok "$(engine_label)'s port$_s ($(printf '%s' "$_ports" | paste -sd, - | sed 's/,/, /g')) $_is closed to everyone but this server until Rowsafe applies who may connect"
   else
     sed 's/^/    /' "$TMP/firewall.err" >&2
-    die "could not close PostgreSQL's port with the firewall (nftables), so PostgreSQL stays private"
+    die "could not close $(engine_label)'s port$_s with the firewall (nftables), so $(engine_label) stays private"
   fi
 }
 
@@ -9018,7 +9652,7 @@ discover() {
   : >"$TMP/clusters"
   if ! agent_run setup discover >"$TMP/clusters" 2>"$TMP/discover.err"; then
     sed 's/^/    /' "$TMP/discover.err" >&2
-    warn "could not look for PostgreSQL on this server"
+    warn "could not look for $(engine_label) on this server"
     : >"$TMP/clusters"
     return 1
   fi
@@ -9289,7 +9923,8 @@ setup_databases() {
 }
 
 # protect_unattended is --protect NAME: no questions, and no restart, except
-# of the PostgreSQL --install-postgres installed (a new, empty server).
+# of the server --install-postgres, --install-mysql, --install-mariadb or
+# --install-valkey installed (a new, empty server).
 protect_unattended() {
   step "Turning on backups for $PROTECT_NAME"
   _sqlite=$(printf '%s' "$SQLITE_PATHS" | head -n 1) # sqlite
@@ -9299,12 +9934,16 @@ protect_unattended() {
     [ -n "$_line" ] || die "the agent can't use the SQLite file $_sqlite (see above)"
   elif [ -n "$PROTECT_PORT" ]; then
     _line=$(awk -F '\t' -v p="$PROTECT_PORT" '$1 == p' "$TMP/clusters")
-    [ -n "$_line" ] || die "found no PostgreSQL on port $PROTECT_PORT that the agent can reach"
+    [ -n "$_line" ] || die "found no $(engine_label) on port $PROTECT_PORT that the agent can reach"
   else
     case $(wc -l <"$TMP/clusters" | tr -d ' ') in
-      0) die "found no running PostgreSQL that the agent can reach" ;;
+      0) die "found no running $(engine_label) that the agent can reach" ;;
       1) _line=$(cat "$TMP/clusters") ;;
-      *) die "found several PostgreSQL clusters (ports $(cut -f1 "$TMP/clusters" | tr '\n' ' ')); pick one with --protect-port" ;;
+      *)
+        _what='PostgreSQL clusters'
+        [ "$HOST_ENGINE" = postgresql ] || _what="$(engine_label) servers"
+        die "found several $_what (ports $(cut -f1 "$TMP/clusters" | tr '\n' ' ')); pick one with --protect-port"
+        ;;
     esac
   fi
   read_cluster "$_line"
@@ -9328,7 +9967,7 @@ protect_unattended() {
       restart_new_or_later
       return 0
       ;;
-    3) die "another backup tool is set up for this PostgreSQL; run the installer on a terminal to replace it" ;;
+    3) die "another backup tool is set up for this $(engine_label "$C_ENGINE"); run the installer on a terminal to replace it" ;;
     7) die "the name $PROTECT_NAME is taken in your Rowsafe organization; pick another with --protect" ;;
     *) die "could not turn on backups for $PROTECT_NAME (see above)" ;;
   esac
@@ -9343,12 +9982,22 @@ protect_unattended() {
 
 # restart_new_or_later: backups wait for a restart. The PostgreSQL that
 # --install-postgres installed in this run (or an earlier one) is restarted
-# right away; any other is left for a person to restart.
+# right away, and so is the MySQL, MariaDB or Valkey of --install-X (its
+# own unit, on its own port); any other is left for a person to restart.
 restart_new_or_later() {
   if [ "$PG_OURS" = 1 ] && [ "$C_ENGINE" = postgresql ] && [ "$C_MAJOR" = "$INSTALL_PG" ] && [ "$C_CLUSTER" = main ] &&
     restart_postgres; then
     finish_setup 3m
     return 0
+  fi
+  if [ "$DB_OURS" = 1 ] && [ "$C_ENGINE" = "$INSTALL_DB" ] && [ "$C_PORT" = "$(db_port)" ]; then
+    step "Restarting $(engine_label "$C_ENGINE")"
+    if db_restart; then
+      ok "$(engine_label "$C_ENGINE") restarted"
+      finish_setup 3m
+      return 0
+    fi
+    warn "restarting $(engine_label "$C_ENGINE") failed"
   fi
   restart_later
 }
@@ -9394,7 +10043,7 @@ databases() {
     say ""
     step "Looking for $(engine_label) on this server"
     if ! discover; then
-      [ -z "$PROTECT_NAME" ] || die "could not look for PostgreSQL (see above)"
+      [ -z "$PROTECT_NAME" ] || die "could not look for $(engine_label) (see above)"
       next_steps
       return 0
     fi
@@ -10660,15 +11309,30 @@ install_agent() {
   require_root
   detect_os
   detect_arch
-  # Servers Rowsafe creates: PostgreSQL first, then the agent protects it.
+  # Servers Rowsafe creates: the database server first, then the agent
+  # protects it. PostgreSQL's ports close and open right away; MySQL's,
+  # MariaDB's and Valkey's once the agent's user is known (the files the
+  # firewall and --listen-public write belong to it), the server listening
+  # on this server only until then.
   [ -z "$INSTALL_PG" ] || install_postgres
-  [ "$FIREWALL_SSH" != yes ] || firewall_close_early
-  [ "$LISTEN_PUBLIC" = 0 ] || listen_public
+  [ -z "$INSTALL_DB" ] || install_database
+  if [ -z "$INSTALL_DB" ]; then
+    [ "$FIREWALL_SSH" != yes ] || firewall_close_early
+    [ "$LISTEN_PUBLIC" = 0 ] || listen_public
+  fi
   detect_host_engine # mysql
   detect_mongodb_host # mongodb
   detect_clickhouse_host # clickhouse
   detect_redis_host # redis
   detect_sqlite_host # sqlite
+  if [ -n "$INSTALL_DB" ]; then
+    [ "$HOST_ENGINE" = "$INSTALL_DB" ] ||
+      die "the $(engine_label "$INSTALL_DB") this installer installed isn't what Rowsafe finds on this server ($(engine_label))"
+    # shellcheck disable=SC2046 # one port per word
+    [ "$FIREWALL_SSH" != yes ] || firewall_close_early $(db_public_ports)
+    [ "$LISTEN_PUBLIC" = 0 ] || db_listen_public
+    [ "$INSTALL_DB" != valkey ] || valkey_admin_login
+  fi
   check_postgres
   if [ "$HOST_ENGINE" = sqlite ]; then
     say "${BOLD}Rowsafe agent installer${RESET}: backups, restore to any second and weekly"
@@ -10821,7 +11485,7 @@ summary() {
   say ""
   say "${BOLD}Rowsafe agent $REL_VERSION: $1${RESET}"
   say "    binary       $INSTALL_DIR/versions/$REL_VERSION/rowsafe-agent"
-  say "    config       $ENV_FILE (postgres, 0600)"
+  say "    config       $ENV_FILE ($AGENT_USER, 0600)"
   if [ -n "${TOOLS_SUMMARY:-}" ]; then say "    backups      $TOOLS_SUMMARY"; else say "    pgBackRest   ${PGBR_VERSION:-unknown}"; fi
   ! storage_configured || say "    storage      $(storage_desc)"
   [ -z "${PG_SUMMARY:-}" ] || say "    PostgreSQL   $PG_SUMMARY"
@@ -10872,6 +11536,11 @@ uninstall_agent() {
     if [ -L "$MYSQL_CONF_LINK" ]; then # mysql: keep the server's binary log settings
       cp "$CONFIG_DIR/mysql/server.cnf" "$MYSQL_CONF_LINK.rowsafe-new" 2>/dev/null &&
         mv -f "$MYSQL_CONF_LINK.rowsafe-new" "$MYSQL_CONF_LINK" || rm -f "$MYSQL_CONF_LINK"
+    fi
+    if [ -s "$VALKEY_ADMIN_PW_FILE" ]; then # --install-valkey: Valkey's administrator stays the server's
+      install -d -m 0700 -o root -g root /root
+      install -m 0600 -o root -g root "$VALKEY_ADMIN_PW_FILE" /root/valkey-admin-password
+      ok "Valkey's administrator password (user admin) moved to /root/valkey-admin-password (root only)"
     fi
     rm -rf "$CONFIG_DIR" "$STATE_DIR" "$LOG_DIR" "$LOGROTATE_FILE"
     ok "$CONFIG_DIR, $STATE_DIR, $LOG_DIR and $LOGROTATE_FILE deleted"
@@ -11003,9 +11672,25 @@ main() {
         ;;
       --install-postgres)
         [ $# -ge 2 ] || die "--install-postgres needs a PostgreSQL version (13-18)"
+        [ -z "$INSTALL_PG$INSTALL_DB" ] || die "$INSTALL_TWICE"
         case $2 in
           13 | 14 | 15 | 16 | 17 | 18) INSTALL_PG=$2 ;;
           *) die "--install-postgres: give a PostgreSQL major version from 13 to 18 (e.g. --install-postgres 17)" ;;
+        esac
+        shift
+        ;;
+      --install-mysql | --install-mariadb | --install-valkey)
+        _e=${1#--install-}
+        case $_e in
+          mysql) _want='8.4' _eg='--install-mysql 8.4: MySQL 8.4, the long-term support release' ;;
+          mariadb) _want='11.4 11.8' _eg='--install-mariadb 11.8 (or 11.4), the long-term support releases' ;;
+          valkey) _want='8' _eg='--install-valkey 8' ;;
+        esac
+        [ $# -ge 2 ] || die "$1 needs a version: $_eg"
+        [ -z "$INSTALL_PG$INSTALL_DB" ] || die "$INSTALL_TWICE"
+        case " $_want " in
+          *" $2 "*) INSTALL_DB=$_e INSTALL_DB_VERSION=$2 ;;
+          *) die "$1: Rowsafe installs $(engine_label "$_e") $(printf '%s' "$_want" | sed 's/ / or /'), not '$2' ($_eg)" ;;
         esac
         shift
         ;;
@@ -11064,8 +11749,8 @@ main() {
   if [ "$mode" != install ] && [ "$mode" != permissions ] && { [ -n "$FILES_PATHS" ] || [ -n "$ALLOW_FILES" ] || [ "$NO_FILES" = 1 ]; }; then
     die "--files, --allow-files and --no-files only go with an install"
   fi
-  if [ "$mode" != install ] && { [ -n "$INSTALL_PG" ] || [ "$LISTEN_PUBLIC" = 1 ]; }; then
-    die "--install-postgres and --listen-public only go with an install"
+  if [ "$mode" != install ] && { [ -n "$INSTALL_PG$INSTALL_DB" ] || [ "$LISTEN_PUBLIC" = 1 ]; }; then
+    die "--install-postgres, --install-mysql, --install-mariadb, --install-valkey and --listen-public only go with an install"
   fi
   [ "$mode" = install ] || [ -z "$FIREWALL_SSH" ] || die "--firewall-ssh and --no-firewall-ssh only go with an install"
   [ "$mode" = install ] || [ "$mode" = permissions ] || [ -z "$AUTO_SECURITY" ] ||
