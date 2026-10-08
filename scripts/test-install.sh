@@ -84,14 +84,27 @@
 #      PostgreSQL from apt.postgresql.org (signing key checked), makes it
 #      reachable with TLS and SCRAM only, generates the passphrase, protects it
 #      (the new PostgreSQL restarted once); a re-run changes nothing; a server
-#      with PostgreSQL already is refused. Needs the network.
+#      with PostgreSQL already is refused. Then the same with --install-mysql
+#      8.4 (Debian 12, amd64), --install-mariadb 11.8 (Debian 13) and 11.4
+#      (Debian 12) and --install-valkey 8 (Debian 12 and 13), each in a
+#      container with systemd, with --firewall-ssh: the package from its own
+#      source (key checked, pinned), secure defaults (root through the
+#      socket; Valkey's default user off and its admin's password root's),
+#      TLS from the network with the certificate at the exact paths, the
+#      ports closed by the firewall before the server listens publicly,
+#      Rowsafe's own login made unattended, the new server restarted once; a
+#      re-run (after what the agent does later: ACL SAVE, CONFIG REWRITE)
+#      changes nothing; other servers refused. Needs the network.
+#      The regular run checks the --install-X refusals that need nothing.
 #
 # Usage: scripts/test-install.sh [IMAGE...]
 #        scripts/test-install.sh --cloud [IMAGE...]   (section 12 only)
 # Default images: debian:trixie debian:bookworm ubuntu:24.04 ubuntu:22.04
 # TEST_ONLY=redis runs only the Redis and Valkey cases (11); TEST_ONLY=sqlite
 # only the SQLite ones.
-# (--cloud: debian:bookworm)
+# (--cloud: debian:bookworm for PostgreSQL; TEST_ONLY=postgres,mysql,mariadb,valkey
+# picks engines, CLOUD_RUNS the ENGINE:VERSION:IMAGE:PLATFORM runs, TEST_KEEP=1
+# keeps a failed run's container)
 
 set -eu
 
@@ -119,12 +132,18 @@ case \${1:-} in
     echo '{"version":"$1","platform":"linux/x","ok":true,"checks":["config","repository settings","pgbackrest","control plane"]}' ;;
   inspect)
     printf '{\n  "server_version": "17.6 (Debian 17.6-1)",\n  "data_directory": "/var/lib/postgresql/17/main",\n  "archive_mode": "off"\n}\n' ;;
-  run) i=0; while [ \$i -lt 1800 ]; do sleep 1; i=\$((i + 1)); done ;; # at most 30 minutes, even if nothing kills it
+  run)
+    # Started by its unit (systemd containers, --cloud): enrolled at once.
+    if [ -n "\${ROWSAFE_ENROLL_TOKEN:-}" ] && [ ! -e /var/lib/rowsafe/agent.json ]; then
+      echo '{"host_id":"host_1","agent_token":"rsa_x"}' >/var/lib/rowsafe/agent.json 2>/dev/null || true
+    fi
+    i=0; while [ \$i -lt 1800 ]; do sleep 1; i=\$((i + 1)); done ;; # at most 30 minutes, even if nothing kills it
   storage)
-    # Rowsafe Storage test: must run as postgres with agent.env loaded.
+    # Rowsafe Storage test: must run as postgres (the agent's user:
+    # /tmp/rowsafe-fake-user) with agent.env loaded.
     f=/tmp/rowsafe-fake
     echo "storage \$*" >>"\$f/calls" 2>/dev/null || true
-    if [ "\$(id -un)" != postgres ] || [ "\${ROWSAFE_STORAGE:-}" != rowsafe ]; then
+    if [ "\$(id -un)" != "\$(cat /tmp/rowsafe-fake-user 2>/dev/null || echo postgres)" ] || [ "\${ROWSAFE_STORAGE:-}" != rowsafe ]; then
       echo "storage test must run as postgres with ROWSAFE_STORAGE=rowsafe from agent.env" >&2
       exit 1
     fi
@@ -146,7 +165,18 @@ case \${1:-} in
     echo "\$pre\$*" >>"\$f/calls"
     case " \$* " in *" --admin-user "*) cat >"\$f/\$pre\$1.stdin" ;; esac
     set -- "\$pre\$@"
-    if [ "\$(id -un)" != postgres ] || [ -z "\${ROWSAFE_REPO_CIPHER_PASS:-}" ] || [ -n "\${ROWSAFE_TEST_LEAK:-}" ]; then
+    if [ "\$1" = mysql-account ] && [ -f /tmp/rowsafe-fake-user ]; then
+      # (--cloud) root creates Rowsafe's account through the server's
+      # socket, as the real agent does: root must get in without a password.
+      [ "\$(id -u)" = 0 ] || { echo "setup mysql-account must run as root" >&2; exit 1; }
+      cli=mysql
+      ! command -v mariadb >/dev/null 2>&1 || cli=mariadb
+      who=\$(cd / && "\$cli" --protocol=socket -u root -N -B -e 'SELECT CURRENT_USER()' </dev/null 2>&1)
+      [ "\$who" = root@localhost ] || { echo "root can't sign in through the socket: \$who" >&2; exit 1; }
+      echo "Rowsafe's account is ready (root signed in through the socket)"
+      exit 0
+    fi
+    if [ "\$(id -un)" != "\$(cat /tmp/rowsafe-fake-user 2>/dev/null || echo postgres)" ] || [ -z "\${ROWSAFE_REPO_CIPHER_PASS:-}" ] || [ -n "\${ROWSAFE_TEST_LEAK:-}" ]; then
       echo "setup must run as postgres with only agent.env" >&2
       exit 1
     fi
@@ -188,7 +218,7 @@ case \${1:-} in
       access) if [ -f "\$f/files-access.out" ]; then cat "\$f/files-access.out"; else echo yes; fi ;;
       list) [ ! -f "\$f/files-list.out" ] || cat "\$f/files-list.out" ;;
       add)
-        [ "\$(id -un)" = postgres ] && [ -n "\${ROWSAFE_REPO_CIPHER_PASS:-}" ] || exit 1
+        [ "\$(id -un)" = "\$(cat /tmp/rowsafe-fake-user 2>/dev/null || echo postgres)" ] && [ -n "\${ROWSAFE_REPO_CIPHER_PASS:-}" ] || exit 1
         echo "fld_1 \$5" ;;
       *) exit 2 ;;
     esac ;;
@@ -214,7 +244,7 @@ host() {
     exit 1
   }
   work=$(mktemp -d "${TMPDIR:-/tmp}/rowsafe-test-install.XXXXXX")
-  trap 'rm -rf "$work"' EXIT
+  trap 'rm -rf "$work"; [ -z "${cloud_name:-}" ] || docker rm -f "$cloud_name" >/dev/null 2>&1' EXIT
   mkdir -p "$work/go"
 
   TEST_PUB='' TEST_PRIV=''
@@ -253,6 +283,11 @@ host() {
     fi
   done
 
+  if [ "$mode" = --in-container-cloud ]; then
+    cloud_host
+    echo "test-install: all cloud runs passed"
+    return 0
+  fi
   first=1
   for image in $images; do
     echo "=== $image"
@@ -264,6 +299,74 @@ host() {
     first=0
   done
   echo "test-install: all images passed"
+}
+
+# cloud_host (--cloud): PostgreSQL in a plain container per image, then
+# MySQL, MariaDB and Valkey each in a container with systemd as PID 1 (their
+# packages start the servers with systemd; Valkey's unit sandbox matters).
+# TEST_ONLY picks some of postgres, mysql, mariadb, valkey (default: all).
+# Each run: ENGINE:VERSION:IMAGE:PLATFORM (MySQL's packages are amd64 only).
+CLOUD_RUNS=${CLOUD_RUNS:-"mysql:8.4:debian:bookworm:linux/amd64 mariadb:11.8:debian:trixie: mariadb:11.4:debian:bookworm: valkey:8:debian:bookworm: valkey:8:debian:trixie:"}
+cloud_host() {
+  only=$(printf '%s' "${TEST_ONLY:-postgres mysql mariadb valkey}" | tr ',' ' ')
+  case " $only " in
+    *" postgres "*)
+      for image in $images; do
+        echo "=== $image: --install-postgres"
+        docker run --rm -e TEST_PUB="$TEST_PUB" -e TEST_PRIV="$TEST_PRIV" -e TEST_SHOW="${TEST_SHOW:-}" \
+          --cap-add NET_ADMIN \
+          -v "$root/scripts:/src/scripts:ro" -v "$root/deploy:/src/deploy:ro" -v "$work/go:/go-release:ro" \
+          "$image" sh /src/scripts/test-install.sh --in-container-cloud
+      done
+      ;;
+  esac
+  for run in $CLOUD_RUNS; do
+    engine=${run%%:*} rest=${run#*:}
+    version=${rest%%:*} rest=${rest#*:}
+    platform=${rest##*:} image=${rest%:*}
+    case " $only " in *" $engine "*) ;; *) continue ;; esac
+    echo "=== $image${platform:+ ($platform)}: --install-$engine $version"
+    tag=rowsafe-test/cloud:$(printf '%s' "$image${platform:+-$platform}" | tr ':/' '--')
+    docker build -q --pull ${platform:+--platform "$platform"} -t "$tag" - >/dev/null <<EOF
+FROM $image
+ENV container=docker
+RUN apt-get update -qq && \\
+    apt-get install -y -qq --no-install-recommends systemd systemd-sysv dbus ca-certificates procps iproute2 >/dev/null && \\
+    rm -f /lib/systemd/system/multi-user.target.wants/getty* /usr/sbin/policy-rc.d && apt-get clean && rm -rf /var/lib/apt/lists/* && \\
+    ln -sf /dev/null /etc/systemd/system/systemd-binfmt.service && \\
+    ln -sf /dev/null /etc/systemd/system/proc-sys-fs-binfmt_misc.automount && \\
+    ln -sf /dev/null /etc/systemd/system/proc-sys-fs-binfmt_misc.mount
+# (binfmt masked: a privileged container shares the host's binfmt_misc, and
+# systemd-binfmt unregisters every entry when it stops, emulation included.)
+STOPSIGNAL SIGRTMIN+3
+CMD ["/lib/systemd/systemd"]
+EOF
+    cloud_name=rowsafe-test-cloud-$engine-$$
+    docker rm -f "$cloud_name" >/dev/null 2>&1 || true
+    docker run -d --name "$cloud_name" ${platform:+--platform "$platform"} --privileged --cgroupns=host \
+      -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /run/lock \
+      -v "$root/scripts:/src/scripts:ro" -v "$root/deploy:/src/deploy:ro" -v "$work/go:/go-release:ro" "$tag" >/dev/null
+    i=0
+    until docker exec "$cloud_name" systemctl is-system-running --wait >/dev/null 2>&1 ||
+      [ "$(docker exec "$cloud_name" systemctl is-system-running 2>/dev/null)" = degraded ]; do
+      i=$((i + 1))
+      [ "$i" -lt 240 ] || {
+        docker rm -f "$cloud_name" >/dev/null 2>&1
+        echo "test-install: systemd did not start in the container" >&2
+        exit 1
+      }
+      sleep 1
+    done
+    rc=0
+    docker exec -e TEST_PUB="$TEST_PUB" -e TEST_PRIV="$TEST_PRIV" -e TEST_SHOW="${TEST_SHOW:-}" \
+      "$cloud_name" sh /src/scripts/test-install.sh --in-container-cloud-engine "$engine" "$version" || rc=$?
+    if [ "$rc" != 0 ] && [ -n "${TEST_KEEP:-}" ]; then
+      echo "test-install: kept the container $cloud_name (TEST_KEEP)" >&2
+      cloud_name=''
+    fi
+    [ -z "$cloud_name" ] || docker rm -f "$cloud_name" >/dev/null 2>&1 || true
+    [ "$rc" = 0 ] || exit "$rc"
+  done
 }
 
 # ------------------------------------------------------------ container side
@@ -461,9 +564,14 @@ in_container() {
 
   echo "  -- install, reconfigure, upgrade, uninstall"
   expect_fail "requires root" "run the installer as root" as_tester sh install.sh
+  install_db_option_tests
   useradd --system --home-dir /var/lib/postgresql --create-home --shell /bin/sh postgres
   mkdir -p /usr/lib/postgresql/17/bin /var/lib/postgresql/17/main
   printf '#!/bin/sh\n' >/usr/lib/postgresql/17/bin/postgres && chmod 755 /usr/lib/postgresql/17/bin/postgres
+  expect_fail "--install-mariadb on a server with PostgreSQL refused" \
+    "PostgreSQL 17 in /usr/lib/postgresql/17 is already installed on this server, so --install-mariadb won't install MariaDB next to it" \
+    "$INSTALLER" rse_secrettoken123 --no-prompt --install-mariadb 11.8
+  [ ! -e /etc/rowsafe ] && [ -z "$(ls /etc/apt/sources.list.d/rowsafe-* 2>/dev/null)" ] || fail "$name: something was written"
 
   # The enrollment token as an argument: refused combinations write
   # nothing and never echo a token.
@@ -3867,6 +3975,43 @@ EOF
 
 # ------------------------------------------------------------ servers Rowsafe creates
 
+# install_db_option_tests: --install-mysql, --install-mariadb and
+# --install-valkey refused before anything changes (no network): two
+# --install options, versions Rowsafe doesn't install, MySQL on arm64
+# (uname stood in), MariaDB 11.4 on Debian 13, Valkey on Ubuntu, and a
+# server without systemd.
+install_db_option_tests() {
+  # shellcheck disable=SC1091
+  os=$(. /etc/os-release && echo "$ID $VERSION_ID")
+  expect_fail "--install-mysql with --install-postgres refused" "give only one" "$INSTALLER" --install-mysql 8.4 --install-postgres 17
+  expect_fail "--install-valkey with --install-mariadb refused" "give only one" "$INSTALLER" --install-valkey 8 --install-mariadb 11.8
+  expect_fail "--install-mysql twice refused" "give only one" "$INSTALLER" --install-mysql 8.4 --install-mysql 8.4
+  expect_fail "--install-mysql 8.0 refused" "Rowsafe installs MySQL 8.4, not '8.0'" "$INSTALLER" --install-mysql 8.0
+  expect_fail "--install-mariadb 10.11 refused" "Rowsafe installs MariaDB 11.4 or 11.8, not '10.11'" "$INSTALLER" --install-mariadb 10.11
+  expect_fail "--install-valkey 7.2 refused" "Rowsafe installs Valkey 8, not '7.2'" "$INSTALLER" --install-valkey 7.2
+  expect_fail "--install-valkey needs a version" "needs a version" "$INSTALLER" --install-valkey
+  expect_fail "--install-mariadb only with an install" "only go with an install" "$INSTALLER" --install-mariadb 11.8 --uninstall
+  mkdir -p "$W/arm64"
+  printf '#!/bin/sh\ncase "${1:-}" in -m) echo aarch64 ;; *) exec /bin/uname "$@" ;; esac\n' >"$W/arm64/uname"
+  chmod 755 "$W/arm64/uname"
+  expect_fail "--install-mysql on arm64 refused" "MySQL's own packages are built for Intel and AMD processors only; this server is arm64" \
+    env PATH="$W/arm64:$PATH" "$INSTALLER" rse_secrettoken123 --no-prompt --install-mysql 8.4
+  case $os in
+    ubuntu*)
+      expect_fail "--install-valkey on Ubuntu refused" "Valkey 8 isn't packaged for Ubuntu yet" "$INSTALLER" rse_secrettoken123 --no-prompt --install-valkey 8
+      ;;
+    "debian 13")
+      expect_fail "--install-mariadb 11.4 on Debian 13 refused" "MariaDB 11.4 isn't published for Debian 13; install MariaDB 11.8 instead" \
+        "$INSTALLER" rse_secrettoken123 --no-prompt --install-mariadb 11.4
+      ;;
+  esac
+  [ -d /run/systemd/system ] ||
+    expect_fail "--install-mariadb without systemd refused" "needs systemd" "$INSTALLER" rse_secrettoken123 --no-prompt --install-mariadb 11.8
+  [ ! -e /etc/rowsafe ] && [ ! -e /opt/rowsafe ] && [ -z "$(ls /etc/apt/sources.list.d/rowsafe-* 2>/dev/null)" ] ||
+    fail "a refused --install option changed something"
+  pass "--install-mysql, --install-mariadb and --install-valkey: refusals change nothing"
+}
+
 # cloud_container (--cloud): --install-postgres and --listen-public for
 # real, in one non-interactive run like cloud-init's.
 cloud_container() {
@@ -3980,8 +4125,277 @@ cloud_container() {
   wait "$agent_pid" 2>/dev/null || true
 }
 
+# cloud_engine_container ENGINE VERSION (--cloud, in a container with
+# systemd): --install-mysql, --install-mariadb or --install-valkey for real,
+# in one non-interactive run like cloud-init's, with --listen-public,
+# --firewall-ssh and --protect; then a re-run that changes nothing and the
+# refusals.
+cloud_engine_container() {
+  engine=$1 ver=$2
+  release_setup
+  apt-get install -y -qq --no-install-recommends nftables >/dev/null
+  cat /etc/ssl/certs/ca-certificates.crt "$W/tls.crt" >"$W/ca-bundle.crt"
+  export CURL_CA_BUNDLE=$W/ca-bundle.crt
+  F=/tmp/rowsafe-fake
+  # shellcheck disable=SC1091
+  os=$(. /etc/os-release && echo "$ID $VERSION_ID")
+  case $engine in
+    mysql) label=MySQL unit=mysql port=3306 user=mysql ;;
+    mariadb) label=MariaDB unit=mariadb port=3306 user=mysql ;;
+    valkey) label=Valkey unit=valkey-server port=6380 user=rowsafe ;;
+  esac
+  echo "  -- servers Rowsafe creates: --install-$engine $ver ($os, $arch)"
+
+  # Refused before anything changes: another database server already here.
+  if [ "$engine" = valkey ]; then
+    printf '#!/bin/sh\necho "/usr/sbin/mysqld  Ver 8.4.3 for Linux on x86_64 (MySQL Community Server - GPL)"\n' >/usr/sbin/mysqld
+    chmod 755 /usr/sbin/mysqld
+    expect_fail "MySQL already here: --install-valkey refused" "MySQL 8.4.3 in /usr/sbin/mysqld is already installed on this server, so --install-valkey won't install Valkey next to it" \
+      "$INSTALLER" rse_secrettoken123 --no-prompt --install-valkey "$ver"
+    rm -f /usr/sbin/mysqld
+  else
+    printf '#!/bin/sh\necho "Valkey server v=8.1.1 sha=00000000:0 malloc=jemalloc-5.3.0 bits=64 build=0"\n' >/usr/local/bin/valkey-server
+    chmod 755 /usr/local/bin/valkey-server
+    expect_fail "Valkey already here: --install-$engine refused" "Valkey 8.1.1 is already installed on this server, so --install-$engine won't install $label next to it" \
+      "$INSTALLER" rse_secrettoken123 --no-prompt --install-"$engine" "$ver"
+    rm -f /usr/local/bin/valkey-server
+  fi
+  [ ! -e /etc/rowsafe ] && [ -z "$(ls /etc/apt/sources.list.d/rowsafe-* 2>/dev/null)" ] || fail "$name: something was written"
+
+  # The stand-in agent runs as the engine's agent user (mysql or rowsafe);
+  # its unit enrolls it at once (agent.json).
+  echo "$user" >/tmp/rowsafe-fake-user
+  case $engine in
+    valkey)
+      line="6380\t-\t8\t-\t/var/lib/valkey\t8192\tvalkey\tno\t-\t-\t8 KiB\tvalkey-server.service\t-\tvalkey"
+      scenario "discover_out=$line" "redis-status_out=login=missing\nversion=8.0.0\nconfig=/etc/valkey/valkey.conf\naclfile=/etc/valkey/users.acl\ncluster=no\nbinary=/usr/bin/valkey-server" \
+        "redis-login_rc=11\n0" "redis-login_out=persisted=aclfile" \
+        "plan_out=Backups for shop: Valkey's own replication stream." \
+        "wait_out=✓ shop is protected. The first full backup is running." "status_out=db_fake\tshop\tactive\trunning\thttps://app.rowsafe.test/databases/db_fake"
+      ;;
+    *)
+      line="3306\t/run/mysqld/mysqld.sock\t$ver\t-\t/var/lib/mysql\t8192\t$engine\tno\t-\t-\t1.2 MiB\t$unit.service\t-\t$engine"
+      scenario "discover_out=$line" "plan_out=Restart: $label needs one quick restart (binary log settings)." apply_rc=10 \
+        "wait_out=✓ shop is protected. The first full backup is running." "status_out=db_fake\tshop\tactive\trunning\thttps://app.rowsafe.test/databases/db_fake"
+      ;;
+  esac
+
+  cloud_init() {
+    sh -c 'w=$1; shift; ROWSAFE_RELEASES_URL=https://localhost:8443/agent ROWSAFE_RESTIC_URL=https://localhost:8443/restic sh -s -- "$@" <"$w/install.sh"' \
+      cloud-init "$W" rse_secrettoken123 --no-prompt --install-"$engine" "$ver" --listen-public --storage rowsafe --protect shop \
+      --allow-restart --firewall-ssh
+  }
+  expect_ok "one run, as cloud-init: $label $ver, network, firewall, Rowsafe Storage, protected" cloud_init
+  [ -z "${TEST_SHOW:-}" ] || cat "$W/out"
+  cp "$W/out" "$W/first.out"
+  [ "$(cat "/etc/rowsafe/installed-$engine")" = "$ver" ] || fail "$name: no record of the installed version"
+  systemctl is-active --quiet "$unit" && systemctl is-enabled --quiet "$unit" || fail "$name: $unit isn't running and enabled"
+  grep -q "restore tests for the $label on this server" "$W/out" || fail "$name: the installer doesn't speak of $label"
+  [ "$(stat -c '%U %a' /etc/rowsafe/agent.env)" = "$user 600" ] || fail "$name: the agent doesn't run as $user"
+  # (Only the permissions summary may say what is for PostgreSQL only.)
+  ! grep -i postgresql "$W/out" | grep -qv '^ *unavailable ' || { grep -i postgresql "$W/out" >&2; fail "$name: the output speaks of PostgreSQL"; }
+  gen=$(sed -n "s/^ROWSAFE_REPO_CIPHER_PASS='\([A-Za-z0-9]\{40\}\)'\$/\1/p" /etc/rowsafe/agent.env)
+  [ "${#gen}" = 40 ] || fail "$name: no generated passphrase"
+  ! grep -qF "$gen" "$W/out" || fail "$name: the passphrase was printed"
+  ! grep -q rse_secrettoken123 "$W/out" || fail "$name: the token was printed"
+  called "plan --name shop --port $port"
+  called "wait --database db_fake --timeout 3m"
+  # The firewall closed the ports before the server listened publicly.
+  closed=$(grep -n "closed to everyone but this server" "$W/out" | head -n 1 | cut -d: -f1)
+  public=$(grep -n "$label listens on the network" "$W/out" | head -n 1 | cut -d: -f1)
+  [ -n "$closed" ] && [ -n "$public" ] && [ "$closed" -lt "$public" ] || fail "$name: the ports weren't closed before $label listened on the network"
+  ip=$(hostname -i | awk '{ print $1 }')
+  nft list table inet rowsafe >"$W/nft" || fail "$name: no firewall table"
+
+  case $engine in
+    mysql | mariadb) cloud_mysql_checks ;;
+    valkey) cloud_valkey_checks ;;
+  esac
+  pass "$label $ver: installed from its own source with its key checked, secure defaults, TLS from the network, protected"
+
+  # Again: nothing changes, nothing restarts.
+  pid=$(systemctl show -p MainPID --value "$unit")
+  case $engine in
+    valkey)
+      # What the agent does later: its own user kept with ACL SAVE, the
+      # certificate reloaded with CONFIG SET and CONFIG REWRITE (quotes).
+      printf 'AUTH admin %s\nACL SETUSER rowsafe on >agent-password-for-the-test ~* &* +@all\nACL SAVE\nCONFIG SET tls-cert-file /etc/ssl/rowsafe-valkey/rowsafe-server.crt\nCONFIG REWRITE\n' \
+        "$(cat /etc/rowsafe/valkey/admin-password)" | valkey-cli -s /run/valkey/valkey-server.sock >"$W/cli" 2>&1
+      [ "$(grep -c '^OK$' "$W/cli")" = 5 ] || { cat "$W/cli" >&2; fail "the agent's ACL SAVE and CONFIG REWRITE"; }
+      grep -q '^tls-cert-file "/etc/ssl/rowsafe-valkey/rowsafe-server.crt"$' /etc/valkey/valkey.conf || fail "CONFIG REWRITE didn't quote (the test expects it to)"
+      cp /etc/valkey/users.acl "$W/users.acl"
+      cp /etc/valkey/valkey.conf "$W/valkey.conf"
+      scenario "discover_out=6380\t-\t8\t-\t/var/lib/valkey\t8192\tshop\tyes\tactive\t-\t8 KiB\tvalkey-server.service\tdb_fake\tvalkey" \
+        "redis-status_out=login=ok\nversion=8.0.0\nrights=ok\nbinary=/usr/bin/valkey-server" plan_rc=5 "plan_out=shop is already protected." \
+        "status_out=db_fake\tshop\tactive\trunning\thttps://app.rowsafe.test/databases/db_fake"
+      ;;
+    *)
+      cp "$(cloud_net_conf)" "$W/net.cnf"
+      scenario "discover_out=3306\t/run/mysqld/mysqld.sock\t$ver\t-\t/var/lib/mysql\t8192\tshop\tyes\tactive\t-\t1.2 MiB\t$unit.service\tdb_fake\t$engine" \
+        plan_rc=5 "plan_out=shop is already protected." "status_out=db_fake\tshop\tactive\trunning\thttps://app.rowsafe.test/databases/db_fake"
+      ;;
+  esac
+  cp /var/lib/rowsafe-firewall/port-"$port" "$W/fw-port" 2>/dev/null || true
+  expect_ok "re-run changes nothing" cloud_init
+  grep -q "$label $ver is installed (by an earlier run of this installer)" "$W/out" || fail "$name: not recognized as its own"
+  grep -q "$label listens on the network.*nothing to change" "$W/out" || fail "$name: --listen-public changed something"
+  grep -q "restore tests for the $label on this server" "$W/out" || fail "$name: the re-run took this server for another engine"
+  [ "$(systemctl show -p MainPID --value "$unit")" = "$pid" ] || fail "$name: $label was restarted"
+  [ "$(stat -c '%U' /etc/rowsafe/agent.env)" = "$user" ] || fail "$name: the agent's user changed"
+  not_called "apply"
+  case $engine in
+    valkey)
+      cmp -s /etc/valkey/users.acl "$W/users.acl" || fail "$name: the ACL file changed"
+      cmp -s /etc/valkey/valkey.conf "$W/valkey.conf" || { diff "$W/valkey.conf" /etc/valkey/valkey.conf >&2; fail "$name: valkey.conf changed"; }
+      ;;
+    *) cmp -s "$(cloud_net_conf)" "$W/net.cnf" || fail "$name: the network settings changed" ;;
+  esac
+  pass "re-run: nothing changed, nothing restarted, still $label's agent"
+
+  # Another engine, another version, or the same one not installed by Rowsafe: refused.
+  other=valkey other_ver=8 other_label=Valkey
+  [ "$engine" != valkey ] || other=mariadb other_ver=11.8 other_label=MariaDB
+  expect_fail "--install-$other on this $label server refused" "is already installed on this server, so --install-$other won't install $other_label next to it" \
+    "$INSTALLER" --no-prompt --install-"$other" "$other_ver" --no-setup
+  if [ "$engine" = mariadb ]; then
+    alt=11.4
+    [ "$ver" != 11.4 ] || alt=11.8
+    if [ "$os" != "debian 13" ]; then
+      expect_fail "another MariaDB version refused" "MariaDB $ver is already installed on this server (by an earlier run of this installer)" \
+        "$INSTALLER" --no-prompt --install-mariadb "$alt" --no-setup
+    fi
+  fi
+  mv "/etc/rowsafe/installed-$engine" "$W/installed"
+  expect_fail "$label not installed by Rowsafe refused" "already installed on this server" "$INSTALLER" --no-prompt --install-"$engine" "$ver" --no-setup
+  mv "$W/installed" "/etc/rowsafe/installed-$engine"
+  pass "refused on a server with a database server --install-$engine didn't install"
+}
+
+# cloud_net_conf: where --install-mysql/-mariadb keeps the network settings.
+cloud_net_conf() {
+  if [ "$engine" = mariadb ]; then echo /etc/mysql/mariadb.conf.d/zz-rowsafe-network.cnf; else echo /etc/mysql/conf.d/zz-rowsafe-network.cnf; fi
+}
+
+# cloud_mysql_checks: MySQL or MariaDB after the cloud-init run.
+cloud_mysql_checks() {
+  cli=mysql
+  [ "$engine" != mariadb ] || cli=mariadb
+  q() { "$cli" --protocol=socket -u root -N -B -e "$1"; }
+  if [ "$engine" = mysql ]; then
+    grep -q "Oracle's MySQL repository (repo.mysql.com, mysql-8.4-lts, key BCA43417C3B485DD128EC6D4B7B3B788A8D3785C)" "$W/out" || fail "$name: no word about the repository"
+    # shellcheck disable=SC1091
+    grep -qx "deb \[signed-by=/usr/share/keyrings/rowsafe-mysql.gpg\] https://repo.mysql.com/apt/$(. /etc/os-release && echo "$ID $VERSION_CODENAME") mysql-8.4-lts" \
+      /etc/apt/sources.list.d/rowsafe-mysql.list || fail "$name: rowsafe-mysql.list"
+    grep -qx 'Pin: origin repo.mysql.com' /etc/apt/preferences.d/rowsafe-mysql || fail "$name: no pin"
+    pkg=mysql-community-server
+    dpkg-query -W -f '${Version}\n' "$pkg" | grep -q '^8\.4\.' || fail "$name: $pkg isn't 8.4"
+    apt-cache policy "$pkg" | grep -A1 '^ \*\*\*' | grep -q 'repo.mysql.com' || fail "$name: $pkg isn't Oracle's"
+    [ "$(q "SELECT plugin FROM mysql.user WHERE User = 'root' AND Host = 'localhost'")" = auth_socket ] || fail "$name: root isn't auth_socket"
+    [ "$(q "SELECT COUNT(*) FROM mysql.user WHERE User = '' OR (User = 'root' AND Host <> 'localhost')")" = 0 ] || fail "$name: anonymous or remote root"
+    dpkg -s percona-xtrabackup-84 >/dev/null 2>&1 || fail "$name: Percona XtraBackup 8.4 not installed"
+    ! ss -ltnH | awk '{ print $4 }' | grep -q ':33060$' || fail "$name: MySQL's X Protocol listens"
+  else
+    grep -q "MariaDB's repository (dlm.mariadb.com, $ver, key 177F4010FE56CA3336300305F1656F24C74CD1D8)" "$W/out" || fail "$name: no word about the repository"
+    # shellcheck disable=SC1091
+    grep -qx "deb \[signed-by=/usr/share/keyrings/rowsafe-mariadb.gpg\] https://dlm.mariadb.com/repo/mariadb-server/$ver/repo/$(. /etc/os-release && echo "$ID $VERSION_CODENAME") main" \
+      /etc/apt/sources.list.d/rowsafe-mariadb.list || fail "$name: rowsafe-mariadb.list"
+    grep -qx 'Pin: release o=MariaDB' /etc/apt/preferences.d/rowsafe-mariadb || fail "$name: no pin"
+    for pkg in mariadb-server mariadb-client mariadb-backup mariadb-common; do
+      dpkg-query -W -f '${Version}\n' "$pkg" | grep -q "^1:$ver\.[0-9]*+maria" || fail "$name: $pkg isn't MariaDB's own $ver ($(dpkg-query -W -f '${Version}' "$pkg"))"
+    done
+    [ "$(q "SELECT JSON_VALUE(Priv, '\$.plugin') FROM mysql.global_priv WHERE User = 'root' AND Host = 'localhost'")" = unix_socket ] || fail "$name: root isn't unix_socket"
+    [ "$(q "SELECT COUNT(*) FROM mysql.global_priv WHERE User = '' OR (User = 'root' AND Host <> 'localhost')")" = 0 ] || fail "$name: anonymous or remote root"
+  fi
+  [ -z "$(q "SHOW DATABASES LIKE 'test'")" ] || fail "$name: a test database"
+  called "mysql-account"
+  grep -q "$label restarted" "$W/out" || fail "$name: the new $label wasn't restarted for backups"
+  called "apply --database db_fake"
+  [ "$(stat -c '%U %G %a' /etc/mysql/rowsafe-tls)" = "mysql mysql 750" ] || fail "$name: certificate folder owner/mode"
+  [ "$(stat -c '%U %G %a' /etc/mysql/rowsafe-tls/rowsafe-server.crt)" = "mysql mysql 644" ] || fail "$name: certificate owner/mode"
+  [ "$(stat -c '%U %G %a' /etc/mysql/rowsafe-tls/rowsafe-server.key)" = "mysql mysql 600" ] || fail "$name: key owner/mode"
+  [ ! -e /var/lib/mysql/rowsafe-server.key ] || fail "$name: the key is in the data directory (backups would carry it)"
+  grep -qx 'ReadWritePaths=-/etc/mysql/rowsafe-tls' /etc/systemd/system/rowsafe-agent.service.d/10-mysql.conf || fail "$name: the agent can't replace the certificate"
+  conf=$(cloud_net_conf)
+  [ "$(stat -c '%U %G %a' "$conf")" = "root root 644" ] || fail "$name: $conf owner/mode"
+  grep -qx 'bind-address = \*' "$conf" && grep -qx 'require_secure_transport = ON' "$conf" &&
+    grep -qx 'ssl_cert = /etc/mysql/rowsafe-tls/rowsafe-server.crt' "$conf" && grep -qx 'ssl_key = /etc/mysql/rowsafe-tls/rowsafe-server.key' "$conf" &&
+    grep -qx 'tls_version = TLSv1.2,TLSv1.3' "$conf" || { cat "$conf" >&2; fail "$name: $conf"; }
+  [ "$(q 'SELECT @@bind_address')" = '*' ] || fail "$name: bind_address is $(q 'SELECT @@bind_address')"
+  ss -ltnH | awk '{ print $4 }' | grep -Eqx '(\*|0\.0\.0\.0):3306' || fail "$name: not listening on every IPv4 address"
+  grep -q 'tcp dport 3306 drop' "$W/nft" && [ -e /var/lib/rowsafe-firewall/port-3306 ] || { cat "$W/nft" >&2; fail "$name: port 3306 isn't closed by the firewall"; }
+  grep -qx 3306 /etc/rowsafe/firewall-allowed || fail "$name: 3306 isn't in the firewall's allow list"
+  grep -q "$label's port (3306) is closed to everyone but this server" "$W/out" || fail "$name: no word about the firewall"
+  # From the network: TLS only.
+  q "CREATE USER IF NOT EXISTS 'app'@'%' IDENTIFIED BY 'app-password-for-the-test'"
+  if [ "$engine" = mysql ]; then tls=--ssl-mode=REQUIRED notls=--ssl-mode=DISABLED; else tls='--ssl --ssl-verify-server-cert=0' notls=--skip-ssl; fi
+  # shellcheck disable=SC2086 # options
+  c=$(MYSQL_PWD=app-password-for-the-test "$cli" -h "$ip" -u app $tls -N -B -e "SHOW STATUS LIKE 'Ssl_cipher'" 2>&1 | cut -f2)
+  [ -n "$c" ] && ! printf '%s' "$c" | grep -q ERROR || fail "TLS login from the network: $c"
+  # shellcheck disable=SC2086 # options
+  if MYSQL_PWD=app-password-for-the-test "$cli" -h "$ip" -u app $notls -e 'SELECT 1' >"$W/out" 2>&1; then fail "a login without TLS was accepted"; fi
+  grep -q "insecure transport are prohibited" "$W/out" || { cat "$W/out" >&2; fail "a login without TLS wasn't refused"; }
+  echo | openssl s_client -starttls mysql -connect "$ip:3306" 2>/dev/null | openssl x509 -noout -fingerprint -sha256 >"$W/fp" &&
+    [ "$(cat "$W/fp")" = "$(openssl x509 -in /etc/mysql/rowsafe-tls/rowsafe-server.crt -noout -fingerprint -sha256)" ] || fail "the server doesn't present its certificate"
+  q "DROP USER 'app'@'%'"
+  # The agent replaces the certificate later and reloads it (same files).
+  if [ "$engine" = mysql ]; then q 'ALTER INSTANCE RELOAD TLS'; else q 'FLUSH SSL'; fi
+  # pgBackRest (the storage test) brings a postgres user; still a MySQL server.
+  pass "$label from the network: TLS only, its certificate at the exact paths"
+}
+
+# cloud_valkey_checks: Valkey after the cloud-init run.
+cloud_valkey_checks() {
+  if [ "$os" = "debian 12" ]; then
+    grep -qx 'deb \[signed-by=/usr/share/keyrings/debian-archive-keyring.gpg\] https://deb.debian.org/debian bookworm-backports main' \
+      /etc/apt/sources.list.d/rowsafe-bookworm-backports.list || fail "$name: no bookworm-backports source"
+    dpkg-query -W -f '${Version}\n' valkey-server | grep -q '^8\..*bpo12' || fail "$name: valkey-server isn't bookworm-backports' 8"
+  else
+    [ ! -e /etc/apt/sources.list.d/rowsafe-bookworm-backports.list ] || fail "$name: backports added on $os"
+    dpkg-query -W -f '${Version}\n' valkey-server | grep -q '^8\.' || fail "$name: valkey-server isn't 8"
+  fi
+  ! command -v pgbackrest >/dev/null 2>&1 || fail "$name: pgBackRest installed for Valkey"
+  [ "$(stat -c '%U %G %a' /etc/rowsafe/valkey)" = "root root 700" ] || fail "$name: /etc/rowsafe/valkey owner/mode"
+  [ "$(stat -c '%U %G %a' /etc/rowsafe/valkey/admin-password)" = "root root 600" ] || fail "$name: admin-password owner/mode"
+  pw=$(cat /etc/rowsafe/valkey/admin-password)
+  printf '%s\n' "$pw" | grep -Eqx '[0-9a-f]{64}' || fail "$name: the admin password isn't 64 hex digits"
+  ! grep -qF "$pw" "$W/out" || fail "$name: the admin password was printed"
+  [ "$(stat -c '%U %G %a' /etc/valkey/users.acl)" = "valkey valkey 640" ] || fail "$name: users.acl owner/mode"
+  grep -q '^user default off' /etc/valkey/users.acl || fail "$name: the default user isn't off"
+  grep -q "^user admin on .*#$(printf '%s' "$pw" | sha256sum | cut -d' ' -f1) " /etc/valkey/users.acl || fail "$name: no admin in users.acl"
+  for l in 'aclfile /etc/valkey/users.acl' 'appendonly yes' 'appendfsync everysec' 'bind \* -::\*' 'port 0' 'tls-port 6380' \
+    'unixsocket /run/valkey/valkey-server.sock' 'unixsocketperm 700' \
+    'tls-cert-file /etc/ssl/rowsafe-valkey/rowsafe-server.crt' 'tls-key-file /etc/ssl/rowsafe-valkey/rowsafe-server.key' \
+    'tls-auth-clients no' 'tls-protocols "TLSv1.2 TLSv1.3"'; do
+    [ "$(grep -c "^$l\$" /etc/valkey/valkey.conf)" = 1 ] || fail "$name: valkey.conf lacks '$l' (once)"
+  done
+  [ "$(stat -c '%U %G %a' /etc/valkey/valkey.conf)" = "valkey valkey 640" ] || fail "$name: valkey.conf owner/mode"
+  [ "$(stat -c '%U %G %a' /etc/ssl/rowsafe-valkey)" = "rowsafe valkey 2750" ] || fail "$name: certificate folder owner/mode"
+  [ "$(stat -c '%U %G %a' /etc/ssl/rowsafe-valkey/rowsafe-server.key)" = "rowsafe valkey 640" ] || fail "$name: key owner/mode"
+  [ "$(stat -c '%U %G %a' /etc/ssl/rowsafe-valkey/rowsafe-server.crt)" = "rowsafe valkey 644" ] || fail "$name: certificate owner/mode"
+  grep -qx 'ReadWritePaths=-/etc/ssl/rowsafe-valkey' /etc/systemd/system/rowsafe-agent.service.d/10-redis.conf || fail "$name: the agent can't replace the certificate"
+  # Rowsafe's own user, created with the administrator's login (on stdin).
+  called "redis-login --port 6380 --engine valkey --admin-user admin"
+  [ "$(cat "$F/redis-login.stdin")" = "$pw" ] || fail "$name: the agent didn't get the administrator's password on stdin"
+  called "apply --database db_fake"
+  # No plain port at all; the socket is root's and valkey's; TLS on 6380 from the network.
+  ! ss -ltnH | awk '{ print $4 }' | grep -q ':6379$' || fail "Valkey still listens in plain text on 6379"
+  [ "$(stat -c '%U %a' /run/valkey/valkey-server.sock)" = "valkey 700" ] || fail "$name: socket owner/mode"
+  [ "$(echo PING | valkey-cli -s /run/valkey/valkey-server.sock 2>&1 | head -n 1)" = "NOAUTH Authentication required." ] || fail "the socket answers without a password"
+  [ "$(printf 'AUTH default x\n' | valkey-cli -s /run/valkey/valkey-server.sock 2>&1 | head -n 1 | cut -c1-9)" != OK ] || fail "the default user signs in"
+  [ "$(printf 'AUTH admin %s\nPING\n' "$pw" | valkey-cli -h "$ip" -p 6380 --tls --insecure 2>&1 | sed -n 2p)" = PONG ] || fail "TLS login on 6380"
+  if echo PING | valkey-cli -h "$ip" -p 6380 >"$W/cli" 2>&1 && grep -q PONG "$W/cli"; then fail "plain text on the TLS port"; fi
+  echo | openssl s_client -connect "$ip:6380" 2>/dev/null | openssl x509 -noout -fingerprint -sha256 >"$W/fp" &&
+    [ "$(cat "$W/fp")" = "$(openssl x509 -in /etc/ssl/rowsafe-valkey/rowsafe-server.crt -noout -fingerprint -sha256)" ] || fail "Valkey doesn't present its certificate"
+  p=6380
+  grep -q "tcp dport $p drop" "$W/nft" && [ -e "/var/lib/rowsafe-firewall/port-$p" ] || { cat "$W/nft" >&2; fail "$name: port $p isn't closed by the firewall"; }
+  grep -qx "$p" /etc/rowsafe/firewall-allowed || fail "$name: $p isn't in the firewall's allow list"
+  grep -Eq "Valkey's ports? \((6379, )?6380\) (is|are) closed to everyone but this server" "$W/out" || fail "$name: no word about the firewall"
+  pass "Valkey from the network: TLS on 6380 only (no plain port), passwords only, the certificate at the exact paths, closed by the firewall"
+}
+
 case ${1:-} in
   --in-container) in_container ;;
   --in-container-cloud) cloud_container ;;
+  --in-container-cloud-engine) cloud_engine_container "$2" "$3" ;;
   *) host "$@" ;;
 esac

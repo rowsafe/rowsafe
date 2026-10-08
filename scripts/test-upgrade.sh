@@ -142,6 +142,11 @@ RUN apt-get update -qq && \\
     echo "PostgreSQL 16: installing \$older, newest \$newest" && \\
     apt-get install -y -qq --no-install-recommends postgresql-16=\$older postgresql-client-16=\$older postgresql-16-cron >/dev/null && \\
     rm /etc/apt/sources.list.d/pgdg-archive.list && apt-get update -qq && apt-get clean
+# (binfmt masked: a privileged container shares the host's binfmt_misc, and
+# systemd-binfmt unregisters every entry when it stops, emulation included.)
+RUN ln -sf /dev/null /etc/systemd/system/systemd-binfmt.service && \\
+    ln -sf /dev/null /etc/systemd/system/proc-sys-fs-binfmt_misc.automount && \\
+    ln -sf /dev/null /etc/systemd/system/proc-sys-fs-binfmt_misc.mount
 STOPSIGNAL SIGRTMIN+3
 CMD ["/lib/systemd/systemd"]
 EOF

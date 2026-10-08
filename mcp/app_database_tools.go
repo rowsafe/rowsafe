@@ -16,20 +16,25 @@ import (
 
 // create_app_database: a new, empty database and a login for the app an
 // assistant is building, on a Rowsafe Cloud server's PostgreSQL (15 or
-// newer; usually a server it asked for). It files the create_app_database
-// change request, which runs right away as the person who connected the
-// agent (from a local rowsafe mcp), or waits for a person to approve it.
+// newer), MySQL or MariaDB (usually a server it asked for). It files the
+// create_app_database change request. On PostgreSQL from a local rowsafe
+// mcp it runs right away as the person who connected the agent (or waits
+// for a person to approve it); on MySQL and MariaDB, and from the remote
+// endpoint, it always waits for an owner or admin, whose browser receives
+// the password. Valkey has no separate databases: a login for an app is
+// made in the dashboard.
 //
-// The password never passes through Rowsafe. Locally (rowsafe mcp) it is
-// made here, on the user's machine, and only its SCRAM-SHA-256 verifier is
-// sent: the assistant gets the full connection string at once, working
-// once the request is approved. On the remote endpoint this code runs
-// inside Rowsafe, which must never make or see a password: the request goes
-// without one, the agent makes it when a person approves and seals it to
-// that person's browser, which shows them the connection string once.
+// The password never passes through Rowsafe. Locally (rowsafe mcp) on
+// PostgreSQL it is made here, on the user's machine, and only its
+// SCRAM-SHA-256 verifier is sent: the assistant gets the full connection
+// string at once, working once the request is done. MySQL and MariaDB take
+// no verifier, and on the remote endpoint this code runs inside Rowsafe,
+// which must never make or see a password: the request goes without one,
+// the agent makes it when a person approves and seals it to that person's
+// browser, which shows them the connection string once.
 
 type appDatabaseInput struct {
-	Database    string   `json:"database" jsonschema:"the Rowsafe Cloud server's database (name or ID) whose PostgreSQL gets the new database (get_cloud_server shows it)"`
+	Database    string   `json:"database" jsonschema:"the Rowsafe Cloud server's database (name or ID) whose PostgreSQL, MySQL or MariaDB gets the new database (get_cloud_server shows it)"`
 	Name        string   `json:"name" jsonschema:"the new database's name: lowercase letters, digits and underscores, starting with a letter (like shop)"`
 	Owner       string   `json:"owner,omitempty" jsonschema:"the new user the app connects as, owner of the new database (default: the database's name)"`
 	Extensions  []string `json:"extensions,omitempty" jsonschema:"PostgreSQL extensions to turn on in it (e.g. pgcrypto, pg_trgm, vector)"`
@@ -50,9 +55,10 @@ type AppDatabaseOutput struct {
 func (t *tools) addAppDatabaseTool(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "create_app_database",
-		Description: "Creates a new, empty PostgreSQL database and a login for the app you are building, on a Rowsafe Cloud server (PostgreSQL 15 or newer). The new user owns only that database, and only it can connect there; existing databases and users are untouched. " +
-			"Rowsafe never sees the password. From a local rowsafe mcp it is made on this machine, you get the full connection string at once, and it runs right away as the person who connected you (an owner or admin; otherwise, or if your team asks first, a person approves it; get_org). " +
-			"On the remote endpoint the password is made in the browser of the person who approves it, so it always waits for an owner or admin, who sees it once and gives it to you. Put the connection string in the app's environment (e.g. DATABASE_URL in .env), never in code or git.",
+		Description: "Creates a new, empty database and a login for the app you are building, on a Rowsafe Cloud server running PostgreSQL (15 or newer), MySQL or MariaDB. The new user owns only that database, and only it can connect there; existing databases and users are untouched. " +
+			"Rowsafe never sees the password. For PostgreSQL from a local rowsafe mcp it is made on this machine, you get the full connection string at once, and it runs right away as the person who connected you (an owner or admin; otherwise, or if your team asks first, a person approves it; get_org). " +
+			"For MySQL and MariaDB, and on the remote endpoint, it always waits for an owner or admin to approve it in the dashboard (never right away): the password is made then, shown once in their browser, and they give it to you. Put the connection string in the app's environment (e.g. DATABASE_URL in .env), never in code or git. " +
+			"Valkey servers have no separate databases: the user makes the app's login in the dashboard (Databases & users).",
 		Annotations: writes("Create a database for the app", false, false),
 		InputSchema: withWait[appDatabaseInput](func(p map[string]*jsonschema.Schema) {
 			p["reason"].MinLength, p["reason"].MaxLength = ptr(1), ptr(1000)
@@ -77,8 +83,14 @@ func (t *tools) createAppDatabase(ctx context.Context, _ *sdk.CallToolRequest, i
 	if err != nil {
 		return nil, AppDatabaseOutput{}, apiError(err)
 	}
-	if protocol.NormalizeEngine(d.Engine) != protocol.EnginePostgreSQL {
-		return nil, AppDatabaseOutput{}, fmt.Errorf("create_app_database is for PostgreSQL servers, and %s runs %s", d.Name, protocol.EngineDisplayName(d.Engine))
+	engine := protocol.NormalizeEngine(d.Engine)
+	switch engine {
+	case protocol.EnginePostgreSQL, protocol.EngineMySQL, protocol.EngineMariaDB:
+	case protocol.EngineValkey, protocol.EngineRedis:
+		return nil, AppDatabaseOutput{}, fmt.Errorf("%s runs %s, which has no separate databases: the user makes a login for the app in the dashboard (Databases & users), which shows its password once; "+
+			"the app connects with rediss:// (TLS), the server's host and port (get_cloud_server shows them)", d.Name, protocol.EngineDisplayName(engine))
+	default:
+		return nil, AppDatabaseOutput{}, fmt.Errorf("create_app_database is for PostgreSQL, MySQL and MariaDB servers, and %s runs %s", d.Name, protocol.EngineDisplayName(engine))
 	}
 	conn, err := t.appConnection(ctx, d)
 	if err != nil {
@@ -91,12 +103,16 @@ func (t *tools) createAppDatabase(ctx context.Context, _ *sdk.CallToolRequest, i
 		params["owner"] = in.Owner
 	}
 	if len(in.Extensions) > 0 {
+		if engine != protocol.EnginePostgreSQL {
+			return nil, AppDatabaseOutput{}, fmt.Errorf("extensions are PostgreSQL's, and %s runs %s: leave extensions out", d.Name, protocol.EngineDisplayName(engine))
+		}
 		params["extensions"] = in.Extensions
 	}
 	// Locally the password is made here and only its verifier leaves this
-	// machine. Remotely nothing is made: the person who approves gets it.
+	// machine (PostgreSQL). Remotely, and for MySQL and MariaDB, nothing is
+	// made: the person who approves gets it.
 	password := ""
-	if !t.opts.Remote {
+	if !t.opts.Remote && engine == protocol.EnginePostgreSQL {
 		var verifier string
 		if password, verifier, err = client.NewCopyPasswordFor(protocol.EnginePostgreSQL); err != nil {
 			return nil, AppDatabaseOutput{}, err
@@ -134,8 +150,9 @@ func (t *tools) createAppDatabase(ctx context.Context, _ *sdk.CallToolRequest, i
 }
 
 // appConnection is where apps reach d: its Rowsafe Cloud server's name (or
-// address until the name works), port 5432, TLS required. The control
-// plane puts the same host in the request; nothing here picks another.
+// address until the name works), the engine's port, TLS required. The
+// control plane puts the same host in the request; nothing here picks
+// another.
 func (t *tools) appConnection(ctx context.Context, d protocol.Database) (protocol.DBConnection, error) {
 	list, err := t.c.CloudServerList(ctx)
 	if err != nil {
@@ -145,7 +162,11 @@ func (t *tools) appConnection(ctx context.Context, d protocol.Database) (protoco
 	if srv == nil || srv.Where != "rowsafe" {
 		return protocol.DBConnection{}, fmt.Errorf("create_app_database is for Rowsafe Cloud servers, and %s isn't on one: the user creates databases and users there in the dashboard (Databases & users)", d.Name)
 	}
-	c := protocol.DBConnection{Port: 5432, SSLMode: "require"}
+	eng, _ := protocol.CloudEngineFor(d.Engine)
+	c := protocol.DBConnection{Engine: protocol.NormalizeEngine(d.Engine), Port: cmpOrInt(eng.Port, 5432), SSLMode: "require"}
+	if srv.Address != nil && srv.Address.Port != 0 {
+		c.Port = srv.Address.Port
+	}
 	switch {
 	case srv.Address != nil && srv.Address.Host != "":
 		c.Host = srv.Address.Host

@@ -16,7 +16,13 @@ import "time"
 // refuses when PostgreSQL is already installed). --listen-public makes it
 // reachable from the network: listen_addresses '*', TLS on with a
 // self-signed certificate, scram-sha-256 for remote logins (the cloud
-// firewall decides who may connect). The backup passphrase is generated on
+// firewall decides who may connect). --install-mysql 8.4,
+// --install-mariadb 11.8 and --install-valkey 8 do the same for the other
+// engines servers Rowsafe creates can get (CloudEngines in
+// cloud_engines.go): TCP logins only with TLS (MySQL's and MariaDB's
+// require_secure_transport, Valkey's TLS port 6380), no anonymous or
+// remote root logins (Valkey: its default user off), and the
+// administrator's login stays on the server. The backup passphrase is generated on
 // the server and stays there; the person saves their own copy through
 // TaskBackupPassphrase, sealed to their browser.
 //
@@ -82,7 +88,10 @@ type ServerFirewallParams struct {
 	Postgres []string `json:"postgres"`
 	SSH      []string `json:"ssh"`
 	// Port is PostgreSQL's port; 0 = the one port root's allow list has.
+	// (Postgres and Port are the database's, whatever its engine.)
 	Port int `json:"port,omitempty"`
+	// Engine names the database's engine in the summary ("" PostgreSQL).
+	Engine string `json:"engine,omitempty"`
 }
 
 // MaxServerFirewallSources bounds each allow list.
@@ -95,6 +104,7 @@ type ServerFirewallResult struct {
 	SSH      []string `json:"ssh"`
 	// SSHPorts are the ports sshd uses here (found by root's helper).
 	SSHPorts []int  `json:"ssh_ports,omitempty"`
+	Engine   string `json:"engine,omitempty"`
 	Summary  string `json:"summary"`
 }
 

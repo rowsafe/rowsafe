@@ -28,9 +28,11 @@ type cloudAPI struct {
 	reads   int
 	payg    string
 	decided *protocol.Approval
+	// dbEngine: shop-db's engine ("" PostgreSQL).
+	dbEngine string
 }
 
-const cloudCatalogJSON = `{"clouds":[
+var cloudCatalogJSON = `{"clouds":[
  {"provider":"hetzner","name":"Hetzner","billing":"hourly","standby":true,
   "regions":[{"id":"fsn1","name":"Falkenstein, Germany","country":"DE"},{"id":"ash","name":"Ashburn, United States","country":"US"}],
   "sizes":[
@@ -83,7 +85,7 @@ func (f *cloudAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/v1/cloud/servers/cs_1":
 		_, _ = w.Write([]byte(server()))
 	case r.URL.Path == "/v1/databases/shop-db" || r.URL.Path == "/v1/databases/db_shop":
-		_, _ = w.Write([]byte(`{"id":"db_shop","name":"shop-db","engine":"postgresql","hostname":"shop-db","port":5432,"status":"active"}`))
+		_, _ = w.Write([]byte(`{"id":"db_shop","name":"shop-db","engine":"` + cmpOr(f.dbEngine, "postgresql") + `","hostname":"shop-db","port":5432,"status":"active"}`))
 	case r.URL.Path == "/v1/databases/self-hosted":
 		_, _ = w.Write([]byte(`{"id":"db_self","name":"self-hosted","engine":"postgresql","hostname":"db9","port":5432,"status":"active"}`))
 	case r.URL.Path == "/v1/databases/old-mysql":
@@ -247,8 +249,8 @@ func TestCreateAppDatabaseLocal(t *testing.T) {
 		"params": map[string]any{"database": "x"}, "reason": "x"}); !res.IsError || !strings.Contains(txt, "create_app_database tool") {
 		t.Errorf("request_change: %s", txt)
 	}
-	if txt, res := callText(t, cs, "create_app_database", map[string]any{"database": "old-mysql", "name": "shop", "reason": "x"}); !res.IsError || !strings.Contains(txt, "PostgreSQL") {
-		t.Errorf("mysql: %s", txt)
+	if txt, res := callText(t, cs, "create_app_database", map[string]any{"database": "old-mysql", "name": "shop", "reason": "x"}); !res.IsError || !strings.Contains(txt, "Rowsafe Cloud servers") {
+		t.Errorf("mysql on a server of its own: %s", txt)
 	}
 	if txt, res := callText(t, cs, "create_app_database", map[string]any{"database": "self-hosted", "name": "shop", "reason": "x"}); !res.IsError || !strings.Contains(txt, "Rowsafe Cloud servers") {
 		t.Errorf("not on Rowsafe Cloud: %s", txt)
@@ -326,7 +328,7 @@ func TestDescribeCloudChanges(t *testing.T) {
 			t.Errorf("create_cloud_server: missing %q in %s", want, txt)
 		}
 	}
-	if strings.Contains(txt, `"where":{`) || strings.Contains(txt, `"engine":{`) {
+	if strings.Contains(txt, `"where":{`) || !strings.Contains(txt, `"engine":{`) {
 		t.Errorf("fixed fields offered as params: %s", txt)
 	}
 	txt, _ = callText(t, cs, "describe_change", map[string]any{"action": "delete_cloud_server"})

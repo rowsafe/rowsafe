@@ -20,8 +20,10 @@ import (
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
-// rowsafe cloud: Rowsafe Cloud, PostgreSQL servers Rowsafe runs in its own
-// cloud accounts, billed by the hour (never more than the monthly price).
+// rowsafe cloud: Rowsafe Cloud, database servers (PostgreSQL, and MySQL,
+// MariaDB or Valkey where the catalog offers them: cloud_engines.go)
+// Rowsafe runs in its own cloud accounts, billed by the hour (never more
+// than the monthly price).
 // A read-write API key (or `rowsafe login`) acts directly, like the
 // dashboard: create, resize, change who can connect, clone and delete.
 // Money and deletions are confirmed first (--yes in scripts).
@@ -136,13 +138,18 @@ func cloudServerFor(ctx context.Context, c *client.Client, name string) *client.
 }
 
 // serverEndpoint is where apps reach a server Rowsafe created: its name
-// (or address until it has one), port 5432, and the sslmode to use.
+// (or address until it has one), its engine's port (5432 for PostgreSQL),
+// and the sslmode to use.
 func serverEndpoint(s client.CloudServer) (host string, port int, sslmode string) {
+	port = serverPort(s) // cloud_engines.go
 	switch {
 	case s.Address != nil && s.Address.Host != "":
-		return s.Address.Host, 5432, orText(s.Address.SSLMode, "require")
+		if s.Address.Port != 0 {
+			port = s.Address.Port
+		}
+		return s.Address.Host, port, orText(s.Address.SSLMode, "require")
 	case s.IPv4 != nil && *s.IPv4 != "":
-		return *s.IPv4, 5432, "require"
+		return *s.IPv4, port, "require"
 	}
 	return "", 0, ""
 }
@@ -317,6 +324,7 @@ func cloudSizes(ctx context.Context, c *client.Client, args []string) error {
 			billing += "; can have a standby server"
 		}
 		fmt.Printf("%s (--cloud %s): %s\n", cl.Name, cl.Provider, billing)
+		amdOnly := amd64OnlyEngines(cat) // cloud_engines.go
 		var regions []string
 		for _, r := range cl.Regions {
 			if *region == "" || r.ID == *region {
@@ -343,6 +351,9 @@ func cloudSizes(ctx context.Context, c *client.Client, args []string) error {
 			if tr := mcp.TrafficText(z); tr != "" {
 				note = append(note, tr)
 			}
+			if z.Arch == "arm64" && amdOnly != "" {
+				note = append(note, "Arm processor: not for "+amdOnly)
+			}
 			t.row("  "+z.ID, fmt.Sprint(z.CPUs), fmt.Sprintf("%d GB", z.MemoryGB), fmt.Sprintf("%d GB", z.DiskGB), hour,
 				mcp.PriceText(z.PriceCents, z.Currency), orText(strings.Join(note, "; "), "-"))
 		}
@@ -368,10 +379,11 @@ func cloudSizes(ctx context.Context, c *client.Client, args []string) error {
 		fmt.Println("Pay as you go isn't set up yet: the first server billed by the hour gives you a link to add a card, once.")
 	}
 	fmt.Printf("The organization may have %d Rowsafe Cloud servers at a time (%d billed by the hour).\n", cat.MaxServers, cat.MaxHourlyServers)
+	printEngines(cat) // cloud_engines.go
 	if p, err := pickCloud(cat, *cloudName, *region, "", false); err == nil {
 		fmt.Printf("Cheapest free now: %s.\n", p.describe(false))
 	}
-	fmt.Println("Create one: rowsafe cloud create NAME [--region REGION] [--size SIZE]")
+	fmt.Println("Create one: rowsafe cloud create NAME [--region REGION] [--size SIZE] [--engine ENGINE]")
 	return nil
 }
 
@@ -413,14 +425,17 @@ func confirmMoney(yes bool, what string) error {
 	return nil
 }
 
-// cloudCreate: rowsafe cloud create NAME [--cloud C] [--region R] [--size S] [--postgres 17]
+// cloudCreate: rowsafe cloud create NAME [--cloud C] [--region R] [--size S]
+// [--engine postgresql|mysql|mariadb|valkey] [--engine-version V] [--postgres 17]
 // [--allow me|IP|CIDR]... [--standby] [--wait] [--yes] [--json]
 func cloudCreate(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("cloud create", flag.ContinueOnError)
 	cloudName := fs.String("cloud", "", "the cloud (hetzner, digitalocean, aws...; default: the cheapest)")
 	region := fs.String("region", "", "the region, e.g. fsn1 (it decides the cloud; default: where the cheapest size is free)")
 	size := fs.String("size", "", "the size, e.g. small (default: the cheapest free now)")
-	pg := fs.String("postgres", "", "PostgreSQL major version: 15, 16, 17 or 18 (default 17)")
+	pg := fs.String("postgres", "", "PostgreSQL major version: 15, 16, 17 or 18 (default 17); the same as --engine postgresql --engine-version")
+	engineName := fs.String("engine", "", "the database: postgresql (default), mysql, mariadb or valkey (`rowsafe cloud sizes` lists what is offered)")
+	engineVersion := fs.String("engine-version", "", "the engine's version (default: the one Rowsafe recommends; `rowsafe cloud sizes` lists them)")
 	var allow csvList
 	fs.Var(&allow, "allow", "who can connect: me (this computer), an IP address or a network; repeat or comma-separate (default: me; none: nobody yet)")
 	standby := fs.Bool("standby", false, "also a standby server of the same size, ready to take over (doubles the price)")
@@ -438,17 +453,19 @@ func cloudCreate(ctx context.Context, c *client.Client, args []string) error {
 	if err := checkServerName(name); err != nil {
 		return err
 	}
-	switch *pg {
-	case "", "15", "16", "17", "18":
-	default:
-		return fmt.Errorf("--postgres %s: Rowsafe installs PostgreSQL 15, 16, 17 or 18 on new servers", *pg)
-	}
 	cat, err := c.CloudCatalog(ctx)
 	if err != nil {
 		return cloudErr(err)
 	}
-	pick, err := pickCloud(cat, *cloudName, *region, *size, *standby)
+	engine, version, err := chooseEngine(cat, *engineName, *engineVersion, *pg, *standby) // cloud_engines.go
 	if err != nil {
+		return err
+	}
+	pick, err := pickCloud(catalogFor(cat, engine, *size), *cloudName, *region, *size, *standby)
+	if err != nil {
+		return err
+	}
+	if err := armRefusal(engine, pick.Size); err != nil {
 		return err
 	}
 	if *standby && !pick.Cloud.Standby {
@@ -459,7 +476,7 @@ func cloudCreate(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	out := msgOut(*asJSON)
-	fmt.Fprintf(out, "New server %s: PostgreSQL %s on %s.\n", name, orText(*pg, "17"), pick.describe(*standby))
+	fmt.Fprintf(out, "New server %s: %s %s on %s.\n", name, engine.Name, version, pick.describe(*standby))
 	fmt.Fprintf(out, "Who can connect: %s.\n", sourcesText(allowed))
 	if pick.Cloud.Billing == "hourly" && cat.Payg.Status != "active" && cat.Payg.Status != "past_due" && cat.Payg.Status != "canceling" {
 		fmt.Fprintln(out, "Pay as you go isn't set up yet: you get a link to add a card, once; the server is created as soon as that's done.")
@@ -468,7 +485,7 @@ func cloudCreate(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	res, err := c.CreateCloudServer(ctx, client.CreateCloudServerRequest{Where: "rowsafe", Provider: pick.Cloud.Provider,
-		Region: pick.Region.ID, Size: pick.Size.ID, Name: name, Engine: protocol.EnginePostgreSQL, EngineVersion: *pg,
+		Region: pick.Region.ID, Size: pick.Size.ID, Name: name, Engine: engine.Engine, EngineVersion: version,
 		AllowedIPs: allowed, Standby: *standby})
 	if err != nil {
 		return apiErr(err)
@@ -769,13 +786,17 @@ func printServer(s client.CloudServer) {
 		}
 	}
 	if s.EngineVersion != "" {
-		row("PostgreSQL", s.EngineVersion)
+		row("Database", protocol.EngineDisplayName(s.Engine)+" "+s.EngineVersion)
 	}
 	if s.DatabaseRef != nil {
 		row("Database in Rowsafe", *s.DatabaseRef)
 	}
 	if host, port, ssl := serverEndpoint(s); host != "" {
-		row("Connect to", fmt.Sprintf("%s port %d, sslmode=%s", host, port, ssl))
+		if protocol.NormalizeEngine(s.Engine) == protocol.EnginePostgreSQL {
+			row("Connect to", fmt.Sprintf("%s port %d, sslmode=%s", host, port, ssl))
+		} else {
+			row("Connect to", fmt.Sprintf("%s port %d, always with TLS (%s)", host, port, engineURLExample(s, host, port)))
+		}
 		if s.Address != nil && s.Address.ReadHost != "" && s.Address.ReadHost != host {
 			row("Read-only queries", s.Address.ReadHost)
 		}

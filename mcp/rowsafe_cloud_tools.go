@@ -25,6 +25,8 @@ import (
 // CloudCatalogOutput is cloud_catalog's result.
 type CloudCatalogOutput struct {
 	Clouds []CatalogCloud `json:"clouds"`
+	// Engines are the databases a new server can get.
+	Engines []CatalogEngine `json:"engines"`
 	// PayAsYouGo is the org's pay-as-you-go subscription (clouds billed by
 	// the hour): none, active, canceling, past_due or ended.
 	PayAsYouGo       string `json:"pay_as_you_go" jsonschema:"the org's pay-as-you-go subscription for clouds billed by the hour: none (the first server goes through a checkout), active (servers are created right away), canceling, past_due or ended"`
@@ -33,6 +35,17 @@ type CloudCatalogOutput struct {
 	// Cheapest is the cheapest size that is free somewhere right now.
 	Cheapest *CatalogPick `json:"cheapest,omitempty"`
 	Guidance string       `json:"guidance"`
+}
+
+// CatalogEngine is a database a new server can get.
+type CatalogEngine struct {
+	Engine         string   `json:"engine" jsonschema:"what create_cloud_server's engine takes"`
+	Name           string   `json:"name"`
+	Versions       []string `json:"versions" jsonschema:"what create_cloud_server's engine_version takes"`
+	DefaultVersion string   `json:"default_version"`
+	Port           int      `json:"port" jsonschema:"where apps connect, always with TLS"`
+	Standby        bool     `json:"standby" jsonschema:"a standby server can be added"`
+	Note           string   `json:"note,omitempty"`
 }
 
 // CatalogCloud is one cloud in the catalog.
@@ -83,14 +96,18 @@ type CloudServerView struct {
 	Step       string   `json:"step,omitempty" jsonschema:"where it is, in plain words"`
 	Problem    string   `json:"problem,omitempty"`
 	Price      string   `json:"price,omitempty"`
-	PostgreSQL string   `json:"postgresql,omitempty" jsonschema:"the PostgreSQL major version"`
+	Engine     string   `json:"engine,omitempty" jsonschema:"the database: postgresql, mysql, mariadb or valkey"`
+	Version    string   `json:"version,omitempty" jsonschema:"the engine's version"`
+	PostgreSQL string   `json:"postgresql,omitempty" jsonschema:"the PostgreSQL major version (PostgreSQL servers)"`
 	Database   string   `json:"database,omitempty" jsonschema:"its database in Rowsafe (name), once ready: what database takes in the other tools"`
-	AllowedIPs []string `json:"allowed_ips" jsonschema:"who can connect to PostgreSQL (cloud_firewall changes it)"`
+	AllowedIPs []string `json:"allowed_ips" jsonschema:"who can connect to the database (cloud_firewall changes it)"`
 	// Connection: how apps connect (everything but the user and password).
-	Host        string     `json:"host,omitempty" jsonschema:"the name apps connect to (it follows the primary)"`
-	ReadHost    string     `json:"read_host,omitempty" jsonschema:"the name for read-only queries (the standby, else the primary)"`
-	Port        int        `json:"port,omitempty"`
-	SSLMode     string     `json:"sslmode,omitempty" jsonschema:"require, or verify-full once a public certificate is installed"`
+	Host     string `json:"host,omitempty" jsonschema:"the name apps connect to (it follows the primary)"`
+	ReadHost string `json:"read_host,omitempty" jsonschema:"the name for read-only queries (the standby, else the primary)"`
+	Port     int    `json:"port,omitempty"`
+	SSLMode  string `json:"sslmode,omitempty" jsonschema:"require, or verify-full once a public certificate is installed (PostgreSQL's sslmode; every engine requires TLS)"`
+	// Connection is the connection string without user and password.
+	Connection  string     `json:"connection,omitempty" jsonschema:"the connection string with USER and PASSWORD to fill in (postgresql://, mysql:// or rediss://)"`
 	CheckoutURL string     `json:"checkout_url,omitempty" jsonschema:"waiting for payment: where an owner pays"`
 	Standby     string     `json:"standby,omitempty"`
 	CloneOf     string     `json:"clone_of,omitempty"`
@@ -121,7 +138,8 @@ func (t *tools) addRowsafeCloudReadTools(s *sdk.Server) {
 		Name: "cloud_catalog",
 		Description: "Shows what a new Rowsafe Cloud server can be: each cloud with its regions and sizes (CPUs, memory, disk), the price of an hour and the most a month costs " +
 			"(or the monthly price), the traffic included, where a size is sold out right now, whether servers there can have a standby, whether the organization's pay as you go is active, " +
-			"and how many servers it may have. Use it before create_cloud_server or clone_to_new_server (request_change) to pick the region and the cheapest size that fits. Read-only.",
+			"how many servers it may have, and the databases a new server can get (PostgreSQL, MySQL, MariaDB, Valkey) with their versions and ports. " +
+			"Use it before create_cloud_server or clone_to_new_server (request_change) to pick the database, the region and the cheapest size that fits. Read-only.",
 		Annotations: readOnly("Rowsafe Cloud catalog"),
 	}, t.cloudCatalog)
 
@@ -135,7 +153,7 @@ func (t *tools) addRowsafeCloudReadTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "get_cloud_server",
 		Description: "Shows one server Rowsafe created: status and progress step (or what went wrong), region, size and price, how apps connect (host name like x7kq2mfa3pzd.cloud.rowsafe.sh, read-only host, port, sslmode), " +
-			"who can connect, its database once ready, and what to do next. With wait_seconds it waits while the server is being set up. Read-only.",
+			"the connection string to fill in (postgresql://, mysql:// or rediss://), who can connect, its database once ready, and what to do next. With wait_seconds it waits while the server is being set up. Read-only.",
 		Annotations: readOnly("Rowsafe Cloud server"),
 		InputSchema: withWait[cloudServerInput](nil),
 	}, t.getCloudServer)
@@ -153,6 +171,23 @@ func (t *tools) cloudCatalog(ctx context.Context, _ *sdk.CallToolRequest, _ noIn
 	}
 	out := CloudCatalogOutput{Clouds: []CatalogCloud{}, PayAsYouGo: cmpOr(cat.Payg.Status, "none"), MaxServers: cat.MaxServers, MaxHourlyServers: cat.MaxHourlyServers}
 	var b textBuilder
+	engines := cat.Engines
+	if len(engines) == 0 { // an older control plane: PostgreSQL only
+		engines = protocol.CloudEngines[:1]
+	}
+	for _, e := range engines {
+		out.Engines = append(out.Engines, CatalogEngine{Engine: e.Engine, Name: e.Name, Versions: e.Versions, DefaultVersion: e.DefaultVersion,
+			Port: e.Port, Standby: e.Standby, Note: e.Note})
+		line := fmt.Sprintf("Database %s (engine %s): versions %s (default %s), apps connect on port %d with TLS", e.Name, e.Engine,
+			strings.Join(e.Versions, ", "), e.DefaultVersion, e.Port)
+		if !e.Standby {
+			line += "; no standby server yet"
+		}
+		if e.AMD64Only {
+			line += "; not on arm64 sizes"
+		}
+		b.line("%s.", line)
+	}
 	var best *CatalogPick
 	var bestCents int64 = math.MaxInt64
 	for _, c := range cat.Clouds {
@@ -226,7 +261,8 @@ func (t *tools) cloudCatalog(ctx context.Context, _ *sdk.CallToolRequest, _ noIn
 		b.line("Cheapest free now: %s size %s in %s (%s).", best.Cloud, best.Size, best.Region, price)
 	}
 	out.Guidance = "Pick the cheapest size that fits the app (a small app's database fits the smallest size), in a region near the app. " +
-		"Then ask for it with request_change create_cloud_server (name, region, size, allowed_ips; the reason says what it's for). Nothing is created or billed until a person approves it."
+		"Then ask for it with request_change create_cloud_server (name, region, size, allowed_ips, and engine with engine_version when the app needs MySQL, MariaDB or Valkey rather than PostgreSQL; " +
+		"the reason says what it's for). Nothing is created or billed until a person approves it."
 	b.line("Next: %s", out.Guidance)
 	return text(b), out, nil
 }
@@ -277,7 +313,12 @@ func (t *tools) getCloudServer(ctx context.Context, _ *sdk.CallToolRequest, in c
 	var b textBuilder
 	b.line("%s", cloudServerLine(v))
 	if v.Host != "" {
-		b.line("Apps connect to %s port %d with sslmode=%s (read-only queries: %s). Who can connect: %s.", v.Host, v.Port, v.SSLMode, cmpOr(v.ReadHost, v.Host), allowedText(v.AllowedIPs))
+		switch protocol.NormalizeEngine(v.Engine) {
+		case protocol.EnginePostgreSQL:
+			b.line("Apps connect to %s port %d with sslmode=%s (read-only queries: %s). Who can connect: %s.", v.Host, v.Port, v.SSLMode, cmpOr(v.ReadHost, v.Host), allowedText(v.AllowedIPs))
+		default:
+			b.line("Apps connect to %s port %d, always with TLS (%s). Who can connect: %s.", v.Host, v.Port, v.Connection, allowedText(v.AllowedIPs))
+		}
 	}
 	b.line("Next: %s", out.Guidance)
 	return text(b), out, nil
@@ -337,7 +378,15 @@ func serverHolding(list []client.CloudServer, d protocol.Database) *client.Cloud
 
 func cloudServerView(c client.CloudServer) CloudServerView {
 	v := CloudServerView{ID: c.ID, Name: c.Name, Where: c.Where, Cloud: c.Provider, Region: c.Region, RegionName: c.RegionName, Size: c.Size,
-		Status: c.Status, Step: c.Step, PostgreSQL: c.EngineVersion, AllowedIPs: nonNilStrings(c.AllowedIPs), DeleteAt: c.DeleteAt, CreatedAt: c.CreatedAt}
+		Status: c.Status, Step: c.Step, Engine: protocol.NormalizeEngine(c.Engine), Version: c.EngineVersion,
+		AllowedIPs: nonNilStrings(c.AllowedIPs), DeleteAt: c.DeleteAt, CreatedAt: c.CreatedAt}
+	if v.Engine == protocol.EnginePostgreSQL {
+		v.PostgreSQL = c.EngineVersion
+	} else if v.Step == "Installing PostgreSQL" { // the control plane's step name, whatever the engine
+		v.Step = "Installing " + protocol.EngineDisplayName(v.Engine)
+	}
+	eng, _ := protocol.CloudEngineFor(v.Engine)
+	port := cmpOrInt(eng.Port, 5432)
 	if c.Problem != nil {
 		v.Problem = *c.Problem
 	}
@@ -363,9 +412,19 @@ func cloudServerView(c client.CloudServer) CloudServerView {
 		}
 	}
 	if a := c.Address; a != nil && a.Host != "" {
-		v.Host, v.ReadHost, v.Port, v.SSLMode = a.Host, a.ReadHost, 5432, cmpOr(a.SSLMode, "require")
+		v.Host, v.ReadHost, v.Port, v.SSLMode = a.Host, a.ReadHost, cmpOrInt(a.Port, port), cmpOr(a.SSLMode, "require")
 	} else if c.IPv4 != nil && *c.IPv4 != "" {
-		v.Host, v.Port, v.SSLMode = *c.IPv4, 5432, "require"
+		v.Host, v.Port, v.SSLMode = *c.IPv4, port, "require"
+	}
+	if v.Host != "" {
+		conn := protocol.DBConnection{Engine: v.Engine, User: "USER", Host: v.Host, Port: v.Port, SSLMode: "require"}
+		switch v.Engine {
+		case protocol.EnginePostgreSQL:
+			conn.Database, conn.SSLMode = "DBNAME", v.SSLMode
+		case protocol.EngineMySQL, protocol.EngineMariaDB:
+			conn.Database = "DBNAME"
+		}
+		v.Connection = protocol.ConnectionURL(conn, "PASSWORD")
 	}
 	if s := c.Standby; s != nil {
 		v.Standby = s.Role
@@ -402,8 +461,8 @@ func cloudServerLine(v CloudServerView) string {
 	if v.Price != "" {
 		line += ", " + v.Price
 	}
-	if v.PostgreSQL != "" {
-		line += ", PostgreSQL " + v.PostgreSQL
+	if v.Engine != "" {
+		line += ", " + strings.TrimSpace(protocol.EngineDisplayName(v.Engine)+" "+v.Version)
 	}
 	if v.Database != "" {
 		line += ", database " + v.Database
@@ -460,13 +519,25 @@ func cloudServerGuidance(v CloudServerView, canAsk bool) string {
 		if len(v.AllowedIPs) == 0 {
 			next = append(next, "Nobody can connect yet: "+ask("ask for request_change cloud_firewall with the addresses the app (or this machine) connects from"))
 		}
-		if v.Database != "" {
+		switch {
+		case v.Database != "" && v.Engine == protocol.EngineValkey:
+			next = append(next, "For the app's own login, the user makes one in the dashboard (Databases & users), which shows the password once; "+
+				"put the connection string (rediss://, port "+strconv.Itoa(v.Port)+") in the app's environment (e.g. REDIS_URL in .env), never in code or git")
+		case v.Database != "":
 			next = append(next, "For the app's own database and login, "+ask("call create_app_database with database "+v.Database)+
 				"; put the connection string in the app's environment (e.g. DATABASE_URL in .env), never in code or git")
 		}
 		return "Ready. " + strings.Join(next, ". ") + "."
 	}
 	return "Status " + v.Status + "."
+}
+
+// cmpOrInt is a, or b when a is 0.
+func cmpOrInt(a, b int) int {
+	if a != 0 {
+		return a
+	}
+	return b
 }
 
 // ---- money ----

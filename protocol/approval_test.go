@@ -94,7 +94,7 @@ func TestCloudApprovalActions(t *testing.T) {
 		t.Errorf("cloud actions %v, want %v", cloud, want)
 	}
 	c, _ := FindApprovalAction("create_cloud_server")
-	if strings.Contains(c.Path, "{ref}") || c.Fixed["where"] != "rowsafe" || c.Fixed["engine"] != EnginePostgreSQL {
+	if strings.Contains(c.Path, "{ref}") || c.Fixed["where"] != "rowsafe" || c.Fixed["engine"] != nil {
 		t.Errorf("create_cloud_server %+v", c)
 	}
 	d, _ := FindApprovalAction("delete_cloud_server")

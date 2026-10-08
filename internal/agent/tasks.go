@@ -97,8 +97,8 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 		db, _ = a.onStandby(db) // standby_updates.go
 	}
 	if task.Type == protocol.TaskServerCertificate { // Rowsafe Cloud names (server_cert.go)
-		if !isPostgres(db) {
-			return nil, fmt.Errorf("certificates for Rowsafe Cloud names are only installed for PostgreSQL so far, not %s", protocol.EngineDisplayName(db.Engine))
+		if !isPostgres(db) && engineCertificates(db) == nil {
+			return nil, fmt.Errorf("certificates for Rowsafe Cloud names aren't installed for %s yet", protocol.EngineDisplayName(db.Engine))
 		}
 		return runRewind(ctx, task, tl, db, a.serverCertificate)
 	}

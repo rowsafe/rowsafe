@@ -52,7 +52,8 @@ func (a *Agent) serverFirewall(ctx context.Context, p protocol.ServerFirewallPar
 	if a.cfg.Sidecar() {
 		return nil, errors.New("this agent runs in Docker, where the server's firewall isn't Rowsafe's to set")
 	}
-	pg, err := parseFirewallSources("PostgreSQL", p.Postgres)
+	dbName := protocol.EngineDisplayName(p.Engine)
+	pg, err := parseFirewallSources(dbName, p.Postgres)
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +71,7 @@ func (a *Agent) serverFirewall(ctx context.Context, p protocol.ServerFirewallPar
 	port := p.Port
 	if port == 0 {
 		if len(ports) != 1 {
-			return nil, fmt.Errorf("root's firewall allow list (%s) has %d PostgreSQL ports: say which one", firewallAllowFile, len(ports))
+			return nil, fmt.Errorf("root's firewall allow list (%s) has %d %s ports: say which one", firewallAllowFile, len(ports), dbName)
 		}
 		for port = range ports {
 		}
@@ -81,8 +82,8 @@ func (a *Agent) serverFirewall(ctx context.Context, p protocol.ServerFirewallPar
 	if _, err := os.Stat(a.firewallDir()); err != nil {
 		return nil, errors.New("the firewall helper is not set up on this server: root sets it up with the installer's --allow-firewall --firewall-ssh")
 	}
-	tl.Printf("asking the firewall helper to let %s reach PostgreSQL (port %d) and %s reach SSH",
-		sourcesLog(pg), port, sourcesLog(ssh))
+	tl.Printf("asking the firewall helper to let %s reach %s (port %d) and %s reach SSH",
+		sourcesLog(pg), dbName, port, sourcesLog(ssh))
 	firewallMu.Lock()
 	defer firewallMu.Unlock()
 	err = a.firewallRequest(ctx, fwServer, port, map[string][]string{"addresses": pg, "ssh-addresses": ssh},
@@ -93,7 +94,7 @@ func (a *Agent) serverFirewall(ctx context.Context, p protocol.ServerFirewallPar
 	if err != nil {
 		return nil, err
 	}
-	res := &protocol.ServerFirewallResult{Port: port, Postgres: pg, SSH: ssh}
+	res := &protocol.ServerFirewallResult{Port: port, Postgres: pg, SSH: ssh, Engine: p.Engine}
 	if data, err := os.ReadFile(filepath.Join(firewallResultDir, "ssh")); err == nil {
 		for _, f := range strings.Split(parseKeyValues(string(data))["ports"], ",") {
 			if n, err := strconv.Atoi(strings.TrimSpace(f)); err == nil && n > 0 && n < 65536 {
@@ -190,7 +191,7 @@ func serverFirewallSummary(r *protocol.ServerFirewallResult) string {
 			return "only " + strings.Join(list, ", ") + " can reach " + what
 		}
 	}
-	s := part(r.Postgres, fmt.Sprintf("PostgreSQL (port %d)", r.Port)) + ", and " + part(r.SSH, sshPort) +
+	s := part(r.Postgres, fmt.Sprintf("%s (port %d)", protocol.EngineDisplayName(r.Engine), r.Port)) + ", and " + part(r.SSH, sshPort) +
 		". Other ports and outgoing connections are unchanged."
 	return strings.ToUpper(s[:1]) + s[1:]
 }

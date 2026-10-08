@@ -3,6 +3,7 @@ package pgprobe
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -137,6 +138,20 @@ func probeClickHouseHTTP(ctx context.Context, addr string, o Options) Result {
 }
 
 func probeRedis(ctx context.Context, engine, addr string, o Options) Result {
+	res := probeRedisOnce(ctx, engine, addr, o, false)
+	if res.Reachable && res.State == protocol.OutsideNotPostgres {
+		// A TLS-only port (servers Rowsafe creates: Valkey on 6380) answers
+		// plain text with a TLS alert: ask again over TLS.
+		if t := probeRedisOnce(ctx, engine, addr, o, true); t.State != protocol.OutsideNotPostgres && t.State != protocol.OutsideError {
+			t.PlainLogins = false
+			t.Detail += " (over TLS)"
+			return t
+		}
+	}
+	return res
+}
+
+func probeRedisOnce(ctx context.Context, engine, addr string, o Options, overTLS bool) Result {
 	conn, err := dial(ctx, addr, o)
 	if err != nil {
 		return dialFailure(err)
@@ -144,6 +159,14 @@ func probeRedis(ctx context.Context, engine, addr string, o Options) Result {
 	defer conn.Close()
 	name := protocol.EngineDisplayName(engine)
 	_ = conn.SetDeadline(time.Now().Add(o.ReadTimeout))
+	if overTLS {
+		host, _, _ := net.SplitHostPort(addr)
+		tc := tls.Client(conn, &tls.Config{ServerName: host, InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}) //nolint:gosec // only asks whether it answers
+		if err := tc.HandshakeContext(ctx); err != nil {
+			return Result{Reachable: true, State: protocol.OutsideNotPostgres, Detail: "Something answers on this port, but not like " + name + " does."}
+		}
+		conn = tc
+	}
 	if _, err := conn.Write([]byte("PING\r\n")); err != nil {
 		return Result{Reachable: true, State: protocol.OutsideNotPostgres, Detail: "Something answers on this port, but not like " + name + " does."}
 	}

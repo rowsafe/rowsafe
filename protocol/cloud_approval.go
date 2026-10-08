@@ -21,28 +21,30 @@ import "time"
 // Rowsafe Cloud server (create_cloud_server). GET /v1/cloud/rowsafe/catalog
 // lists the regions and sizes with their prices.
 type CreateCloudServerParams struct {
-	Where  string `json:"where,omitempty" jsonschema:"set by Rowsafe: rowsafe (Rowsafe Cloud)"`
-	Engine string `json:"engine,omitempty" jsonschema:"set by Rowsafe: postgresql"`
+	Where string `json:"where,omitempty" jsonschema:"set by Rowsafe: rowsafe (Rowsafe Cloud)"`
+	// Engine is one of CloudEngines ("" is PostgreSQL).
+	Engine string `json:"engine,omitempty" jsonschema:"the database: postgresql (the default), mysql, mariadb or valkey (cloud_catalog lists them with their versions and ports)"`
 	// Name is the server's name and its database's.
 	Name string `json:"name" jsonschema:"the server's name, also its database's: 2 to 40 lowercase letters, digits and hyphens, starting with a letter (like shop-db)"`
 	// Region decides the cloud (region IDs are unique across clouds).
 	Region string `json:"region" jsonschema:"a region ID from cloud_catalog; it decides the cloud"`
 	Size   string `json:"size" jsonschema:"a size ID from cloud_catalog offered in that region and not sold out there (small, medium, ...)"`
-	// EngineVersion is the PostgreSQL major ("" is the default, 17).
-	EngineVersion string `json:"engine_version,omitempty" jsonschema:"PostgreSQL major version: 15, 16, 17 or 18 (default 17)"`
-	// AllowedIPs may connect to PostgreSQL; empty: nobody until
+	// EngineVersion is the engine's version ("" is its default:
+	// CloudEngine.DefaultVersion).
+	EngineVersion string `json:"engine_version,omitempty" jsonschema:"the engine's version (default: the newest that Rowsafe recommends): PostgreSQL 15, 16, 17 or 18 (default 17); MySQL 8.4; MariaDB 11.8; Valkey 8"`
+	// AllowedIPs may connect to the database; empty: nobody until
 	// cloud_firewall opens it.
-	AllowedIPs []string `json:"allowed_ips,omitempty" jsonschema:"who can connect to PostgreSQL: IP addresses or networks (203.0.113.4 or 203.0.113.0/24); empty: nobody until cloud_firewall opens it"`
+	AllowedIPs []string `json:"allowed_ips,omitempty" jsonschema:"who can connect to the database: IP addresses or networks (203.0.113.4 or 203.0.113.0/24); empty: nobody until cloud_firewall opens it"`
 	// Standby also creates a standby server of the same size (clouds billed
-	// by the hour), which doubles the price.
-	Standby bool `json:"standby,omitempty" jsonschema:"also a standby server of the same size, ready to take over (clouds billed by the hour only); it doubles the price"`
+	// by the hour), which doubles the price. PostgreSQL only so far.
+	Standby bool `json:"standby,omitempty" jsonschema:"PostgreSQL only: also a standby server of the same size, ready to take over (clouds billed by the hour only); it doubles the price"`
 }
 
 // CloudFirewallParams is the body of PUT /v1/cloud/servers/{server}/firewall
 // on a Rowsafe Cloud server (cloud_firewall): the whole list of who may
-// connect to PostgreSQL afterwards. Rowsafe Cloud servers have no SSH.
+// connect to the database afterwards. Rowsafe Cloud servers have no SSH.
 type CloudFirewallParams struct {
-	AllowedIPs []string `json:"allowed_ips" jsonschema:"the whole list of who can connect to PostgreSQL afterwards (it replaces the current one): IP addresses or networks (203.0.113.4 or 203.0.113.0/24); empty closes it to everyone"`
+	AllowedIPs []string `json:"allowed_ips" jsonschema:"the whole list of who can connect to the database afterwards (it replaces the current one): IP addresses or networks (203.0.113.4 or 203.0.113.0/24); empty closes it to everyone"`
 }
 
 // ResizeCloudServerParams is the body of POST
@@ -81,8 +83,9 @@ type DeleteCloudServerParams struct {
 
 // AppDatabaseParams is the body of POST /v1/databases/{ref}/dbadmin for
 // create_app_database: a new, empty database owned by a new user, on a
-// Rowsafe Cloud server's PostgreSQL (15 or newer), for an app an assistant
-// is building. Nobody else (but the server's admins) may connect to the new
+// Rowsafe Cloud server's PostgreSQL (15 or newer), MySQL or MariaDB, for an
+// app an assistant is building (MySQL and MariaDB: the password sealed to
+// the approving person's browser, like the remote endpoint's). Nobody else (but the server's admins) may connect to the new
 // database; like every user, the new one may connect to the server's other
 // databases with only what is granted to everyone there (PostgreSQL 15 and
 // newer grant nobody CREATE in public schemas). The owner's password never

@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/rowsafe/rowsafe/protocol"
 )
 
 // Rowsafe Cloud as the control plane shows it: the catalog of clouds,
@@ -31,6 +33,9 @@ type CloudCatalog struct {
 		Status    string     `json:"status"`
 		PeriodEnd *time.Time `json:"period_end"`
 	} `json:"payg"`
+	// Engines new servers can get, with their versions and ports (empty
+	// from older control planes: PostgreSQL only).
+	Engines []protocol.CloudEngine `json:"engines,omitempty"`
 }
 
 // CloudCatalogCloud is one cloud: its regions, and its sizes with their
@@ -72,12 +77,29 @@ type CloudSize struct {
 	Regions []string `json:"regions,omitempty"`
 	// UnavailableRegions: offered there, but none free right now.
 	UnavailableRegions []string `json:"unavailable_regions,omitempty"`
+	// Arch is the processor: amd64 or arm64 ("" from older control
+	// planes). Engines built for Intel and AMD only (MySQL) can't run on
+	// arm64 sizes.
+	Arch string `json:"arch,omitempty"`
 	// Bandwidth: outbound traffic included per billing cycle and the price
 	// of each GB above it; nil, or IncludedGB nil or negative: unlimited.
 	Bandwidth *struct {
 		IncludedGB      *int64   `json:"included_gb"`
 		ExtraCentsPerGB *float64 `json:"extra_cents_per_gb"`
 	} `json:"bandwidth,omitempty"`
+}
+
+// CloudAddress is the names apps connect to (Rowsafe Cloud).
+type CloudAddress struct {
+	Host        string  `json:"host"`
+	ReadHost    string  `json:"read_host"`
+	Published   bool    `json:"published"`
+	Certificate string  `json:"certificate"` // verified, pending or unavailable
+	SSLMode     string  `json:"sslmode"`     // verify-full once verified, else require
+	Problem     *string `json:"problem"`
+	// Port is where apps connect (the engine's: 5432, 3306, 6380); 0 from
+	// older control planes (5432).
+	Port int `json:"port,omitempty"`
 }
 
 // CloudCatalog reads Rowsafe Cloud's catalog (404 when this control plane
@@ -143,14 +165,10 @@ type CloudServer struct {
 		PaidUntil *time.Time `json:"paid_until"`
 	} `json:"billing"`
 	// Address: the names apps connect to (Rowsafe Cloud).
-	Address *struct {
-		Host        string  `json:"host"`
-		ReadHost    string  `json:"read_host"`
-		Published   bool    `json:"published"`
-		Certificate string  `json:"certificate"` // verified, pending or unavailable
-		SSLMode     string  `json:"sslmode"`     // verify-full once verified, else require
-		Problem     *string `json:"problem"`
-	} `json:"address"`
+	Address *CloudAddress `json:"address"`
+	// Port is where apps connect: the engine's port (5432, 3306, Valkey's
+	// 6380), always with TLS; 0 from older control planes (5432).
+	Port    int `json:"port,omitempty"`
 	Standby *struct {
 		Role        string `json:"role"` // primary or standby
 		PartnerID   string `json:"partner_id"`
