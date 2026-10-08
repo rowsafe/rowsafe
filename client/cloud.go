@@ -125,6 +125,9 @@ type CloudServer struct {
 	} `json:"size_info"`
 	Engine        string `json:"engine"`
 	EngineVersion string `json:"engine_version"`
+	// Extensions are the PostgreSQL extensions installed at create time
+	// (protocol.PGPackagedExtensions' names).
+	Extensions []string `json:"extensions,omitempty"`
 	// Status: payment (waiting for payment), creating, installing, ready,
 	// resizing, deleting, deleted or failed; Step says where it is in plain
 	// words, Problem what went wrong.

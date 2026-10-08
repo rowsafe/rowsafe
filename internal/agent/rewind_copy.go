@@ -235,9 +235,7 @@ func (a *Agent) rewindCopy(ctx context.Context, db protocol.DatabaseSpec, p prot
 		return fail(err)
 	}
 	spec := scratchSpec{Name: "copy", Port: port, SocketDir: socketDir, Major: prod.Major()}
-	if a.cfg.DrillPreload == DrillPreloadProduction {
-		spec.Preload = prod.SharedPreloadLibraries
-	}
+	spec.Preload = a.scratchPreload(prod.SharedPreloadLibraries, prod.Major()) // pg_extensions.go
 	if err := a.writeScratchConf(dataDir, spec); err != nil {
 		return fail(err)
 	}

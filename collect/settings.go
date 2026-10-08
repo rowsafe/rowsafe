@@ -43,7 +43,16 @@ func ReadSettings(ctx context.Context, t Target, procRoot string) (*protocol.Set
 		return nil, fmt.Errorf("connecting to PostgreSQL on %s port %d as %s: %w", t.SocketDir, t.Port, t.User, err)
 	}
 	defer conn.Close(context.WithoutCancel(ctx))
-	return readSettings(ctx, conn, procRoot)
+	snap, err := readSettings(ctx, conn, procRoot)
+	if err != nil {
+		return nil, err
+	}
+	// The extensions Rowsafe installs and where they are on (a failure
+	// leaves them out: settings changes and Pulse then know less).
+	if uses, err := ExtensionUse(ctx, t, conn); err == nil {
+		snap.Extensions = uses
+	}
+	return snap, nil
 }
 
 func readSettings(ctx context.Context, conn *pgx.Conn, procRoot string) (*protocol.SettingsSnapshot, error) {

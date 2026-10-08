@@ -37,6 +37,9 @@ type CreateCloudServerRequest struct {
 	EngineVersion string   `json:"engine_version,omitempty"`
 	AllowedIPs    []string `json:"allowed_ips"`
 	Standby       bool     `json:"standby,omitempty"`
+	// Extensions (PostgreSQL 15 to 18): installed and turned on from the
+	// start (protocol.PGPackagedExtensions' names).
+	Extensions []string `json:"extensions,omitempty"`
 }
 
 // CreateCloneRequest copies a database, as it was now, at a moment or at a

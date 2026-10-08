@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -19,6 +20,7 @@ func offeredEngines(cat client.CloudCatalog) []protocol.CloudEngine {
 		return cat.Engines
 	}
 	e, _ := protocol.CloudEngineFor(protocol.EnginePostgreSQL)
+	e.Extensions = nil // an older control plane doesn't install them
 	return []protocol.CloudEngine{e}
 }
 
@@ -150,4 +152,51 @@ func engineURLExample(s client.CloudServer, host string, port int) string {
 		conn.Database = "DBNAME"
 	}
 	return protocol.ConnectionURL(conn, "PASSWORD")
+}
+
+// engineChoices lists --engine's values for help: "postgresql (default),
+// mysql, mariadb, valkey or clickhouse" (protocol.CloudEngines).
+func engineChoices() string {
+	names := make([]string, len(protocol.CloudEngines))
+	for i, e := range protocol.CloudEngines {
+		names[i] = e.Engine
+		if e.Engine == protocol.EnginePostgreSQL {
+			names[i] += " (default)"
+		}
+	}
+	if len(names) < 2 {
+		return strings.Join(names, "")
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " or " + names[len(names)-1]
+}
+
+// chooseExtensions reads --extensions: PostgreSQL 15 to 18 only, from
+// protocol.PGPackagedExtensions (nil for none).
+func chooseExtensions(e protocol.CloudEngine, version string, names []string) ([]string, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	if e.Engine != protocol.EnginePostgreSQL {
+		return nil, fmt.Errorf("--extensions are PostgreSQL extensions; %s has none: leave it out", e.Name)
+	}
+	if len(e.Extensions) == 0 {
+		return nil, errors.New("this Rowsafe doesn't install extensions on new servers yet: leave out --extensions and turn them on later with `rowsafe db ext on`")
+	}
+	out, err := protocol.NormalizePGExtensions(names, version)
+	if err != nil {
+		return nil, fmt.Errorf("--extensions: %s", strings.TrimSuffix(err.Error(), "."))
+	}
+	return out, nil
+}
+
+// extensionTitles names extensions for people: "pgvector, PostGIS".
+func extensionTitles(names []string) string {
+	out := make([]string, len(names))
+	for i, n := range names {
+		out[i] = n
+		if e, ok := protocol.PGPackagedExtensionFor(n); ok {
+			out[i] = e.Title
+		}
+	}
+	return strings.Join(out, ", ")
 }

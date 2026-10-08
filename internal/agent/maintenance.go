@@ -102,6 +102,8 @@ func validateMaintenance(p protocol.MaintenanceParams) error {
 		}
 	case protocol.MaintCreateIndex, protocol.MaintDropInvalidIndex, protocol.MaintSyncSequence, protocol.MaintSetTableStorageParams: // advisor
 		return validateAdvisorMaintenance(p)
+	case protocol.MaintUpdateExtension: // pg_extensions.go
+		return validateUpdateExtension(p)
 	}
 	return nil
 }
@@ -289,6 +291,8 @@ func (a *Agent) maintenance(ctx context.Context, db protocol.DatabaseSpec, p pro
 		err = m.dropSlot(ctx)
 	case protocol.MaintLogSettings: // logsettings.go
 		err = m.logSettings(ctx)
+	case protocol.MaintUpdateExtension: // pg_extensions.go
+		err = m.updateExtension(ctx)
 	case protocol.MaintCreateIndex, protocol.MaintDropInvalidIndex, protocol.MaintSyncSequence, protocol.MaintSetTableStorageParams: // advisor
 		err = m.advisorAction(ctx)
 	}
@@ -338,6 +342,9 @@ func (m *maint) connect(ctx context.Context, dbname string, settings map[string]
 }
 
 func closeConn(ctx context.Context, conn *pgx.Conn) {
+	if conn == nil {
+		return
+	}
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	conn.Close(cctx)

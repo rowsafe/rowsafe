@@ -322,6 +322,7 @@ cloud_host() {
       for image in $images; do
         echo "=== $image: --install-postgres"
         docker run --rm -e TEST_PUB="$TEST_PUB" -e TEST_PRIV="$TEST_PRIV" -e TEST_SHOW="${TEST_SHOW:-}" \
+          -e TEST_PG_VERSION -e TEST_PG_EXTENSIONS -e TEST_PG_EXTENSIONS_LATER \
           --cap-add NET_ADMIN \
           -v "$root/scripts:/src/scripts:ro" -v "$root/deploy:/src/deploy:ro" -v "$work/go:/go-release:ro" \
           "$image" sh /src/scripts/test-install.sh --in-container-cloud
@@ -3306,8 +3307,15 @@ case $cmd in
         echo "Inst postgresql-17 [17.5-1] (17.6-1 Debian-Security:13/stable-security [arm64])"
         echo "Inst tzdata [2025a-1] (2025b-1 Debian:13/stable [all])" ;;
       ' -s remove '*) shift 2; for p in "$@"; do echo "Remv $p [1.0-1]"; done ;;
+      *' -s '*' install '*postgresql-17-postgis-3*)
+        echo "Inst postgresql-17 [17.5-1] (17.6-1 apt.postgresql.org [arm64])"
+        echo "Inst postgresql-17-postgis-3 (3.6.4-1 apt.postgresql.org [arm64])" ;;
+      *' -s '*' install '*) for p in "$@"; do :; done; echo "Inst $p (1.0-1 apt.postgresql.org [all])" ;;
       *' remove '*) rm -f "$S/installed-18" ;;
       *' install '*--only-upgrade*postgresql-17*) echo 17.6-1 >"$S/version-17" ;;
+      *' install '*postgresql-17-pgvector*)
+        mkdir -p /usr/share/postgresql/17/extension && touch /usr/share/postgresql/17/extension/vector.control
+        echo 0.8.1-1 >"$S/version-17-pgvector" ;;
       *' install '*postgresql-18*)
         touch "$S/installed-18"
         mkdir -p /usr/lib/postgresql/18/bin && touch /usr/lib/postgresql/18/bin/pg_upgrade && chmod 755 /usr/lib/postgresql/18/bin/pg_upgrade
@@ -3423,6 +3431,31 @@ FAKE_EOF
   urequest "u5 pg-minor-update 5432"
   u_has "error=$U is writable by others than root"
   chmod 644 "$U"
+
+  # An extension's package: only the names Rowsafe installs, only that
+  # name's package for the cluster's major, only when apt changes no
+  # installed package.
+  for bad in "u5a pg-install-extension 5432 pg_cron" "u5a pg-install-extension 5432 vector extra" "u5a pg-install-extension 5432" \
+    "u5a pg-install-extension 5432 timescaledb-2-postgresql-17" "u5a pg-install-extension 5432 vector;reboot" "u5a pg-install-extension x vector"; do
+    urequest "$bad"
+    u_has "ok=0"
+    u_has "error=malformed request"
+    [ ! -s "$S/calls" ] || fail "the helper ran something for a malformed request: $bad"
+  done
+  urequest "u5b pg-install-extension 5432 vector"
+  u_has "ok=1"
+  u_has "package=postgresql-17-pgvector"
+  u_has "version=0.8.1-1"
+  u_called "install -y --no-install-recommends postgresql-17-pgvector"
+  ! grep -q "restart" "$F/systemctl.calls" || fail "installing an extension restarted something: $(cat "$F/systemctl.calls")"
+  urequest "u5c pg-install-extension 5432 postgis"
+  u_has "ok=0"
+  grep -q "^error=installing postgresql-17-postgis-3 would also update postgresql-17 (it needs a newer PostgreSQL 17): install PostgreSQL's update first" "$O/update-result" ||
+    fail "an extension that would update PostgreSQL wasn't refused: $(cat "$O/update-result")"
+  ! grep -q " install -y" "$S/calls" || fail "the helper installed something that would update PostgreSQL: $(cat "$S/calls")"
+  rm -f /usr/share/postgresql/17/extension/vector.control
+  urequest "u5d pg-install-extension 5499 vector"
+  grep -q "^error=port 5499 is not in /etc/rowsafe/restart-allowed" "$O/update-result" || fail "an extension for an unlisted port not refused"
 
   # A new major: its packages and the extension's; the package's own
   # cluster dropped.
@@ -4020,6 +4053,13 @@ install_db_option_tests() {
   expect_fail "--install-mariadb only with an install" "only go with an install" "$INSTALLER" --install-mariadb 11.8 --uninstall
   expect_fail "--install-clickhouse 25.8 refused" "Rowsafe installs ClickHouse 26.3 or 26.8, not '25.8'" "$INSTALLER" --install-clickhouse 25.8
   expect_fail "--install-clickhouse with --install-valkey refused" "give only one" "$INSTALLER" --install-clickhouse 26.8 --install-valkey 8
+  expect_fail "--pg-extensions without --install-postgres refused" "only goes with --install-postgres" "$INSTALLER" --pg-extensions vector
+  expect_fail "--pg-extensions with --install-mysql refused" "only goes with --install-postgres" "$INSTALLER" --install-mysql 8.4 --pg-extensions vector
+  expect_fail "--pg-extensions: an unknown name refused" "Rowsafe installs vector (pgvector), postgis (PostGIS) and timescaledb (TimescaleDB), not 'pg_cron'" \
+    "$INSTALLER" --install-postgres 17 --pg-extensions vector,pg_cron
+  expect_fail "--pg-extensions: a package name refused" "not 'timescaledb-2-postgresql-17'" "$INSTALLER" --install-postgres 17 --pg-extensions timescaledb-2-postgresql-17
+  expect_fail "--pg-extensions on PostgreSQL 14 refused" "for PostgreSQL 15 to 18, not 14" "$INSTALLER" --install-postgres 14 --pg-extensions timescaledb
+  expect_fail "--pg-extensions needs names" "needs extensions" "$INSTALLER" --install-postgres 17 --pg-extensions ,
   printf 'MemTotal:        2014280 kB\n' >"$W/meminfo-2g"
   expect_fail "--install-clickhouse on 2 GB refused" "ClickHouse needs a server with at least 4 GB of memory, and this one has 1967 MB" \
     env ROWSAFE_MEMINFO="$W/meminfo-2g" "$INSTALLER" rse_secrettoken123 --no-prompt --install-clickhouse 26.8
@@ -4041,7 +4081,7 @@ install_db_option_tests() {
     expect_fail "--install-mariadb without systemd refused" "needs systemd" "$INSTALLER" rse_secrettoken123 --no-prompt --install-mariadb 11.8
   [ ! -e /etc/rowsafe ] && [ ! -e /opt/rowsafe ] && [ -z "$(ls /etc/apt/sources.list.d/rowsafe-* 2>/dev/null)" ] ||
     fail "a refused --install option changed something"
-  pass "--install-mysql, --install-mariadb, --install-valkey and --install-clickhouse: refusals change nothing"
+  pass "--install-mysql, --install-mariadb, --install-valkey, --install-clickhouse and --pg-extensions: refusals change nothing"
 }
 
 # cloud_container (--cloud): --install-postgres and --listen-public for
@@ -4087,9 +4127,12 @@ cloud_container() {
   scenario "discover_out=$shop" "plan_out=Restart: PostgreSQL needs one quick restart." apply_rc=10 \
     "wait_out=✓ shop is protected. The first full backup is running." "status_out=$status"
 
+  # TEST_PG_EXTENSIONS (default all three; "" for none) at install,
+  # TEST_PG_EXTENSIONS_LATER through the root helper afterwards.
+  pgx=${TEST_PG_EXTENSIONS-vector,postgis,timescaledb}
   cloud_init() {
     sh -c 'w=$1; shift; ROWSAFE_RELEASES_URL=https://localhost:18443/agent ROWSAFE_RESTIC_URL=https://localhost:18443/restic sh -s -- "$@" <"$w/install.sh"' \
-      cloud-init "$W" rse_secrettoken123 --no-prompt --install-postgres "$pgv" --listen-public --storage rowsafe --protect shop
+      cloud-init "$W" rse_secrettoken123 --no-prompt --install-postgres "$pgv" ${pgx:+--pg-extensions "$pgx"} --listen-public --storage rowsafe --protect shop
   }
   expect_ok "one run, as cloud-init: PostgreSQL, network, Rowsafe Storage, protected" cloud_init
   [ -z "${TEST_SHOW:-}" ] || cat "$W/out"
@@ -4119,6 +4162,7 @@ cloud_container() {
   ! grep -qF "$gen" "$W/out" || fail "$name: the passphrase was printed"
   ! grep -q rse_secrettoken123 "$W/out" || fail "$name: the token was printed"
   pass "PostgreSQL $pgv from apt.postgresql.org, listening with TLS and SCRAM, protected, passphrase kept on the server"
+  [ -z "$pgx" ] || cloud_pg_extension_checks
 
   # From the network: TLS and a password, nothing else.
   ip=$(hostname -i | awk '{ print $1 }')
@@ -4140,6 +4184,7 @@ cloud_container() {
   expect_ok "re-run changes nothing" cloud_init
   grep -q "PostgreSQL $pgv is installed (by an earlier run of this installer)" "$W/out" || fail "$name: not recognized as its own"
   grep -q "nothing to change" "$W/out" || fail "$name: --listen-public changed something"
+  [ -z "$pgx" ] || grep -q "extensions $(printf '%s' "$pgx" | sed 's/,/, /g'): nothing to change" "$W/out" || fail "$name: --pg-extensions changed something"
   [ "$(q 'SELECT pg_postmaster_start_time()')" = "$started" ] || fail "$name: PostgreSQL was restarted"
   [ "$(grep -c '^hostssl' "$hba")" = 2 ] || fail "$name: pg_hba.conf rules added twice"
   [ "$(sed -n "s/^ROWSAFE_REPO_CIPHER_PASS='\(.*\)'\$/\1/p" /etc/rowsafe/agent.env)" = "$gen" ] || fail "$name: the passphrase changed"
@@ -4153,8 +4198,91 @@ cloud_container() {
   mv "$W/installed-postgresql" /etc/rowsafe/installed-postgresql
   pass "refused on a server with PostgreSQL that --install-postgres didn't install"
 
+  [ -z "${TEST_PG_EXTENSIONS_LATER:-}" ] || cloud_pg_extensions_later
+
   kill "$agent_pid" 2>/dev/null || true
   wait "$agent_pid" 2>/dev/null || true
+}
+
+# cloud_pg_extension_checks: what --pg-extensions $pgx did, used for real.
+cloud_pg_extension_checks() {
+  for e in $(printf '%s' "$pgx" | tr ',' ' '); do
+    case $e in
+      vector) p=postgresql-$pgv-pgvector ;;
+      postgis) p=postgresql-$pgv-postgis-3 ;;
+      timescaledb) p=postgresql-$pgv-timescaledb ;;
+    esac
+    [ "$(dpkg-query -W -f '${db:Status-Status}' "$p" 2>/dev/null)" = installed ] || fail "$name: $p isn't installed"
+    for d in postgres template1; do
+      [ "$(runuser -u postgres -- psql -X -A -t -q -d "$d" -c "SELECT count(*) FROM pg_extension WHERE extname = '$e'")" = 1 ] ||
+        fail "$name: $e isn't on in $d"
+    done
+  done
+  q "CREATE DATABASE later_app" >/dev/null
+  [ "$(runuser -u postgres -- psql -X -A -t -q -d later_app -c "SELECT count(*) FROM pg_extension WHERE extname IN ($(printf "'%s'" "$pgx" | sed "s/,/','/g"))")" = \
+    "$(printf '%s' "$pgx" | tr ',' '\n' | grep -c .)" ] || fail "$name: a new database doesn't have the extensions"
+  case ",$pgx," in
+    *,vector,*)
+      q "CREATE TABLE items (id int PRIMARY KEY, embedding vector(3)); INSERT INTO items VALUES (1, '[1,2,3]'), (2, '[3,2,1]');
+         CREATE INDEX ON items USING hnsw (embedding vector_l2_ops)" >/dev/null || fail "$name: pgvector"
+      [ "$(q "SELECT id FROM items ORDER BY embedding <-> '[3,2,2]' LIMIT 1")" = 2 ] || fail "$name: pgvector's nearest neighbour"
+      ;;
+  esac
+  case ",$pgx," in
+    *,postgis,*)
+      [ "$(q "SELECT ST_Distance('SRID=4326;POINT(13.40 52.52)'::geography, 'SRID=4326;POINT(2.35 48.86)'::geography) / 1000 BETWEEN 870 AND 890")" = t ] ||
+        fail "$name: PostGIS's distance Berlin-Paris: $(q "SELECT ST_Distance('SRID=4326;POINT(13.40 52.52)'::geography, 'SRID=4326;POINT(2.35 48.86)'::geography)")"
+      ;;
+  esac
+  case ",$pgx," in
+    *,timescaledb,*)
+      q 'SHOW shared_preload_libraries' | tr ',' '\n' | tr -d ' ' | grep -qx timescaledb || fail "$name: TimescaleDB isn't loaded at start"
+      [ "$(q 'SHOW timescaledb.telemetry_level')" = off ] || fail "$name: TimescaleDB's telemetry is $(q 'SHOW timescaledb.telemetry_level')"
+      [ "$(q 'SHOW timescaledb.license')" = apache ] || fail "$name: TimescaleDB's license is $(q 'SHOW timescaledb.license')"
+      dpkg-query -W -f '${Version}' "postgresql-$pgv-timescaledb" | grep -q pgdg || fail "$name: TimescaleDB isn't the PostgreSQL project's package"
+      ! grep -rqs -e packagecloud -e timescale /etc/apt/sources.list /etc/apt/sources.list.d || fail "$name: another package source was added"
+      q "CREATE TABLE metrics (time timestamptz NOT NULL, device int, value double precision);
+         SELECT create_hypertable('metrics', by_range('time', INTERVAL '1 day'));
+         INSERT INTO metrics SELECT t, 1, 1.5 FROM generate_series(now() - interval '3 days', now(), interval '1 hour') t" >/dev/null || fail "$name: a hypertable"
+      [ "$(q "SELECT count(*) > 1 FROM timescaledb_information.chunks WHERE hypertable_name = 'metrics'")" = t ] || fail "$name: no chunks"
+      [ "$(q "SELECT count(DISTINCT time_bucket('1 day', time)) >= 3 FROM metrics")" = t ] || fail "$name: time_bucket"
+      ;;
+  esac
+  q "DROP DATABASE later_app" >/dev/null
+  pass "--pg-extensions $pgx: packages, loaded, on in postgres, template1 and a new database, used for real"
+}
+
+# cloud_pg_extensions_later: TEST_PG_EXTENSIONS_LATER through the root
+# helper's update mode (pg-install-extension), for real, then turned on as
+# the agent does (TimescaleDB: shared_preload_libraries and a restart).
+cloud_pg_extensions_later() {
+  hd=$W/helper
+  install -d -m 0755 "$hd" "$hd/out" "$hd/state"
+  install -d -m 0700 -o postgres -g postgres "$hd/req"
+  printf 'postgresql\n' >"$hd/updates-allowed"
+  printf '5432 postgresql@%s-main.service\n' "$pgv" >"$hd/restart-allowed"
+  chmod 644 "$hd/updates-allowed" "$hd/restart-allowed"
+  for e in $TEST_PG_EXTENSIONS_LATER; do
+    printf 'later%s pg-install-extension 5432 %s\n' "$e" "$e" | runuser -u postgres -- sh -c 'cat >"$1"' sh "$hd/req/update-request"
+    rm -f "$hd/out/update-result"
+    timeout 1200 env ROWSAFE_HELPER_MODE=update ROWSAFE_RESTART_DIR="$hd/req" ROWSAFE_UPDATES_ALLOW="$hd/updates-allowed" \
+      ROWSAFE_RESTART_ALLOW="$hd/restart-allowed" RUNTIME_DIRECTORY="$hd/out" STATE_DIRECTORY="$hd/state" \
+      sh /src/scripts/rowsafe-pg-restart 2>>"$W/helper.log" || fail "the helper failed for $e"
+    grep -qx ok=1 "$hd/out/update-result" || {
+      cat "$hd/out/update-result" "$hd/state/update.log" >&2
+      fail "the helper didn't install $e"
+    }
+    if [ "$e" = timescaledb ]; then
+      ! grep -rqs -e packagecloud -e timescale /etc/apt/sources.list /etc/apt/sources.list.d || fail "the helper added a package source"
+      q "ALTER SYSTEM SET shared_preload_libraries = 'timescaledb'" >/dev/null
+      pg_ctlcluster "$pgv" main restart || fail "PostgreSQL doesn't restart with TimescaleDB"
+      q "ALTER SYSTEM SET timescaledb.telemetry_level = 'off'" >/dev/null
+      q "SELECT pg_reload_conf()" >/dev/null
+    fi
+    q "CREATE EXTENSION IF NOT EXISTS $e" >/dev/null || fail "turning on $e after the helper installed it"
+    [ "$e" != timescaledb ] || [ "$(q 'SHOW timescaledb.license')" = apache ] || fail "TimescaleDB's license is $(q 'SHOW timescaledb.license')"
+  done
+  pass "the root helper installed $TEST_PG_EXTENSIONS_LATER for real (pg-install-extension), turned on afterwards"
 }
 
 # cloud_engine_container ENGINE VERSION (--cloud, in a container with

@@ -54,6 +54,13 @@
 #
 #   ID pg-minor-update PORT                  newest minor release of PORT's major
 #   ID pg-install-major PORT MAJOR           install MAJOR (and PORT's extensions for it)
+#   ID pg-install-extension PORT NAME        install an extension's package for PORT's major from
+#                                            the package sources PostgreSQL comes from: NAME vector
+#                                            (postgresql-MAJOR-pgvector), postgis
+#                                            (postgresql-MAJOR-postgis-3) or timescaledb
+#                                            (postgresql-MAJOR-timescaledb); only when apt would
+#                                            install new packages and change no installed one
+#                                            (which could restart PostgreSQL); no restart
 #   ID pg-upgrade PORT MAJOR METHOD          pg_upgradecluster to MAJOR (copy, clone or link)
 #   ID pg-upgrade-undo PORT start|nostart    back to the version kept by that upgrade
 #   ID pg-upgrade-cleanup PORT               remove the version kept aside by an upgrade or undo
@@ -132,7 +139,7 @@
 # redis-created).
 #
 # actions: restart stop start create-cluster files-read files-put mongodb-key-export mongodb-standby-config redis-create redis-remove
-# update-actions: pg-minor-update pg-install-major pg-upgrade pg-upgrade-undo pg-upgrade-cleanup security-updates auto-security-updates reboot db-minor-update db-upgrade db-upgrade-undo db-upgrade-cleanup
+# update-actions: pg-minor-update pg-install-major pg-install-extension pg-upgrade pg-upgrade-undo pg-upgrade-cleanup security-updates auto-security-updates reboot db-minor-update db-upgrade db-upgrade-undo db-upgrade-cleanup
 #
 # The same helper manages PgBouncer when root allowed that (--allow-pooler):
 # see "PgBouncer" below.
@@ -1281,6 +1288,12 @@ apt_run() {
 
 apt_refresh() { apt_run update || log "apt-get update failed; using the package lists as they are"; }
 
+# apt_sim ARGS... prints what apt-get would do (-s: simulate, as root, no
+# change), the log getting it too.
+apt_sim() {
+  timeout "${apt_timeout:-300}" env DEBIAN_FRONTEND=noninteractive apt-get -s -q -o DPkg::Lock::Timeout=600 "$@" 2>>"$work_log" </dev/null
+}
+
 # active_since UNIT: when UNIT last became active (monotonic microseconds).
 active_since() { "$systemctl" show -p ActiveEnterTimestampMonotonic --value "$1" 2>/dev/null; }
 
@@ -1405,6 +1418,9 @@ act_pg_minor_update() {
   m=$c_major
   before=$(pkg_version "postgresql-$m")
   [ -n "$before" ] || refuse "PostgreSQL $m is not installed from packages here (postgresql-$m)"
+  # The extension packages (postgresql-MAJOR-*) come along, TimescaleDB's
+  # too: its package carries one version, so the agent runs ALTER
+  # EXTENSION timescaledb UPDATE in each database right after the restart.
   pkgs="postgresql-$m postgresql-client-$m libpq5 $(installed_pkgs "postgresql-$m-*" | tr '\n' ' ')"
   : >"$work_log"
   t0=$(active_since "$unit")
@@ -1471,6 +1487,49 @@ act_pg_install_major() {
   add packages "$pkgs"
   add missing "$missing"
   add dropped "$dropped"
+  ok=1
+}
+
+# The extensions Rowsafe installs (protocol.PGPackagedExtensions): each
+# name's one package, for the cluster's major.
+ext_package() {
+  case $1 in
+    vector) echo "postgresql-$2-pgvector" ;;
+    postgis) echo "postgresql-$2-postgis-3" ;;
+    timescaledb) echo "postgresql-$2-timescaledb" ;;
+  esac
+}
+
+# pkg_installed PACKAGE: installed (not merely its configuration files left).
+pkg_installed() { [ "$(dpkg-query -W -f='${db:Status-Status}' "$1" 2>/dev/null)" = installed ]; }
+
+act_pg_install_extension() {
+  update_allowed postgresql "installing PostgreSQL extensions from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
+  cluster_for_port "$port"
+  m=$c_major
+  case $m in
+    15 | 16 | 17 | 18) ;;
+    *) refuse "Rowsafe installs pgvector, PostGIS and TimescaleDB for PostgreSQL 15 to 18, not $m" ;;
+  esac
+  pkg=$(ext_package "$ext" "$m")
+  [ -n "$pkg" ] || refuse "Rowsafe doesn't install the extension $ext"
+  : >"$work_log"
+  apt_refresh
+  c=$(candidate "$pkg")
+  [ -n "$c" ] && [ "$c" != "(none)" ] || refuse "$pkg isn't available for PostgreSQL $m from this server's package sources"
+  # Only new packages: if apt would also upgrade or remove an installed one
+  # (a newer PostgreSQL the extension's package needs), that could restart
+  # PostgreSQL, which this never does.
+  if ! pkg_installed "$pkg"; then
+    sim=$(apt_timeout=300 apt_sim install --no-install-recommends "$pkg") || refuse "apt can't install $pkg: $(tail_log)"
+    changed=$(printf '%s\n' "$sim" | awk '($1 == "Inst" && $3 ~ /^\[/) || $1 == "Remv" { printf "%s ", $2 }')
+    [ -z "$changed" ] || refuse "installing $pkg would also update $changed(it needs a newer PostgreSQL $m): install PostgreSQL's update first, then turn the extension on"
+  fi
+  log "installing $pkg (request $id)"
+  apt_run install -y --no-install-recommends "$pkg" || refuse "installing $pkg failed: $(tail_log)"
+  [ -f "/usr/share/postgresql/$m/extension/$ext.control" ] || refuse "$pkg is installed, but PostgreSQL $m has no $ext extension"
+  add package "$pkg"
+  add version "$(pkg_version "$pkg")"
   ok=1
 }
 
@@ -2254,7 +2313,7 @@ update_main() {
   have_request "$dir/update-request" || exit 0
   mkdir -p "$state"
   line=$(read_request "$dir/update-request")
-  port='' major='' method='' start='' series_to=''
+  port='' major='' method='' start='' series_to='' ext=''
   # Every request's exact shape; anything else is refused before it is split.
   rid='[A-Za-z0-9_-]{1,64}'
   if printf '%s\n' "$line" | grep -Eq "^$rid (pg-minor-update|pg-upgrade-cleanup) [0-9]{1,5}\$"; then
@@ -2269,6 +2328,10 @@ update_main() {
     # shellcheck disable=SC2086
     set -- $line
     id=$1 action=$2 port=$3 major=$4
+  elif printf '%s\n' "$line" | grep -Eq "^$rid pg-install-extension [0-9]{1,5} (vector|postgis|timescaledb)\$"; then
+    # shellcheck disable=SC2086
+    set -- $line
+    id=$1 action=$2 port=$3 ext=$4
   elif printf '%s\n' "$line" | grep -Eq "^$rid pg-upgrade [0-9]{1,5} [1-9][0-9] (copy|clone|link)\$"; then
     # shellcheck disable=SC2086
     set -- $line
@@ -2289,6 +2352,7 @@ update_main() {
   case $action in
     pg-minor-update) act_pg_minor_update ;;
     pg-install-major) act_pg_install_major ;;
+    pg-install-extension) act_pg_install_extension ;;
     pg-upgrade) act_pg_upgrade ;;
     pg-upgrade-undo) act_pg_upgrade_undo ;;
     pg-upgrade-cleanup) act_pg_upgrade_cleanup ;;

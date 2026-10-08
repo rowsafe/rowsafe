@@ -46,7 +46,8 @@ confirms. Root decides here which ones it may do at all.
 Names:
   restart            restart or stop PostgreSQL (Restart, Rewind in place)
   create-cluster     create a PostgreSQL cluster here for a fork (needs restart)
-  updates            install PostgreSQL updates and upgrades (needs restart)
+  updates            install PostgreSQL updates and upgrades, and pgvector, PostGIS and
+                     TimescaleDB packages from PostgreSQL's repository (needs restart)
   security-updates   install this server's security updates (needs restart)
   reboot             reboot this server after an update (needs security-updates)
   pooler             install and manage PgBouncer (connection pooling)

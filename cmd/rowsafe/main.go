@@ -42,9 +42,10 @@ Rowsafe Cloud: PostgreSQL servers Rowsafe runs for you, billed by the hour (neve
                                              the most a month costs, what is sold out right now, and the
                                              databases a new server can run
   rowsafe cloud create NAME [--cloud hetzner] [--region fsn1] [--size small] [--postgres 17]
-        [--engine postgresql|mysql|mariadb|valkey] [--engine-version V]
-        [--allow me|IP|CIDR]... [--standby] [--wait] [--yes] [--json]
-                                             a new server with PostgreSQL (or the --engine offered), backups, Proof and Pulse on. Defaults:
+        [--engine postgresql|mysql|mariadb|valkey|clickhouse] [--engine-version V]
+        [--extensions vector,postgis,timescaledb] [--allow me|IP|CIDR]... [--standby] [--wait] [--yes] [--json]
+                                             a new server with PostgreSQL (or the --engine offered), backups, Proof and Pulse on;
+                                             --extensions: pgvector, PostGIS, TimescaleDB (PostgreSQL 15-18) on from the start. Defaults:
                                              the cheapest size free now; only this computer may connect. The first
                                              server billed by the hour gives you a link to add a card, once
   rowsafe cloud list [--json]                the servers Rowsafe created: status, size, price, who can connect
@@ -303,8 +304,9 @@ Databases & users: the databases, users and extensions inside a server (--on NAM
   rowsafe db user password USER              a new password for USER, shown once
   rowsafe db user remove USER [--reassign-to USER] [--yes]
                                              remove a user; what it owns goes to --reassign-to
-  rowsafe db ext on|off DB EXTENSION [--allow-untrusted]
-                                             turn an extension on or off in one database
+  rowsafe db ext on|off DB EXTENSION [--allow-untrusted] [--restart]
+                                             turn an extension on or off in one database (pgvector, PostGIS and
+                                             TimescaleDB are installed first; TimescaleDB needs --restart: a Mark, one restart)
   Passwords are encrypted on the server for this terminal only; Rowsafe never sees them.
 
 Admin

@@ -479,23 +479,38 @@ func dbUserRemove(ctx context.Context, c *client.Client, args []string) error {
 	return err
 }
 
-// dbExt: rowsafe db ext on|off DB EXT [--allow-untrusted] [--on NAME]
+// dbExt: rowsafe db ext on|off DB EXT [--allow-untrusted] [--restart] [--on NAME]
+// pgvector (vector), PostGIS (postgis) and TimescaleDB (timescaledb) are
+// installed first where root allowed PostgreSQL updates; TimescaleDB needs
+// --restart (a Mark first, then one restart).
 func dbExt(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("db ext", flag.ContinueOnError)
 	on := onFlag(fs)
 	untrusted := fs.Bool("allow-untrusted", false, "allow an extension that lets database users run programs on the server")
+	restart := fs.Bool("restart", false, "allow the one restart an extension loaded at start needs (timescaledb): Rowsafe saves a Mark, then restarts PostgreSQL (apps are disconnected for a few seconds)")
 	pos, err := positionals(fs, args)
 	if err != nil {
 		return err
 	}
 	if len(pos) != 3 || (pos[0] != "on" && pos[0] != "off") {
-		return errors.New("usage: rowsafe db ext on|off DB EXTENSION [--on NAME]")
+		return errors.New("usage: rowsafe db ext on|off DB EXTENSION [--restart] [--on NAME]")
 	}
 	p := protocol.DBAdminParams{Action: protocol.DBAdminEnableExtension, Database: pos[1], Extension: pos[2]}
+	if e, ok := protocol.PGPackagedExtensionFor(pos[2]); ok {
+		p.Extension = e.Name // pgvector -> vector
+	}
 	if pos[0] == "off" {
 		p.Action = protocol.DBAdminDisableExtension
 	} else if *untrusted {
 		p.AllowUntrusted, p.Confirm = true, pos[2]
+	}
+	if *restart {
+		if e, ok := protocol.PGPackagedExtensionFor(p.Extension); p.Action != protocol.DBAdminEnableExtension || !ok || !e.Preload {
+			return errors.New("--restart only goes with turning on an extension loaded when PostgreSQL starts (timescaledb)")
+		}
+		p.Restart = true
+	} else if e, ok := protocol.PGPackagedExtensionFor(p.Extension); ok && e.Preload && p.Action == protocol.DBAdminEnableExtension {
+		fmt.Fprintf(os.Stderr, "%s is loaded when PostgreSQL starts: unless it is loaded already, turning it on restarts PostgreSQL once. Add --restart to allow that (Rowsafe saves a Mark first).\n", e.Title)
 	}
 	server, err := resolveDatabase(ctx, c, *on)
 	if err != nil {

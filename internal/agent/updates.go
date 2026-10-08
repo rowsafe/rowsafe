@@ -299,6 +299,17 @@ func (a *Agent) pgUpdate(ctx context.Context, db protocol.DatabaseSpec, p protoc
 	} else {
 		res.ArchivingOK = true
 	}
+	// Newer packages of the extensions Rowsafe installs (TimescaleDB,
+	// pgvector, PostGIS) take effect in each database with ALTER EXTENSION
+	// UPDATE: done now, with the update's restart and after its Mark (a
+	// standby follows its primary's).
+	var extSaid string
+	if _, standby := a.standbyHere(db); !standby {
+		var extErr error
+		if extSaid, extErr = a.updateOutdatedExtensions(ctx, db, tl); extErr != nil {
+			res.Warnings = append(res.Warnings, "updating the extensions in the databases failed: "+extErr.Error()+". Pulse offers it again.")
+		}
+	}
 	a.refreshSoftware()
 	res.DurationMs = time.Since(start).Milliseconds()
 	switch {
@@ -309,6 +320,9 @@ func (a *Agent) pgUpdate(ctx context.Context, db protocol.DatabaseSpec, p protoc
 			humanDuration(time.Duration(res.DurationMs)*time.Millisecond), downtimeText(res.DowntimeMs))
 	default:
 		res.Summary = fmt.Sprintf("Installed PostgreSQL %s; it runs %s until its next restart.", minorOf(res.PackageVersion), res.ToVersion)
+	}
+	if extSaid != "" {
+		res.Summary += " " + extSaid
 	}
 	if !res.ArchivingOK {
 		res.Summary += " Checking that backups still work failed; see the warnings."

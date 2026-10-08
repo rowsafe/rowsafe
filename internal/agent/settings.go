@@ -87,8 +87,19 @@ func (a *Agent) changeSettings(ctx context.Context, db protocol.DatabaseSpec, p 
 			return nil, fmt.Errorf("%s is set on PostgreSQL's command line (for example `-c %s=...` in Docker), which overrides anything Rowsafe sets: change it there", c.Name, c.Name)
 		}
 	}
+	// Libraries an extension in use needs (TimescaleDB) stay loaded: put
+	// back into Rowsafe's own changes (tuning, a fix, undoing an earlier
+	// change), refused when a person drops one (pg_extensions.go).
+	required := protocol.RequiredLibraries(before.Extensions)
+	var kept []string
+	if p.Kind != protocol.SettingsKindSet {
+		changes, kept = tune.KeepRequiredLibraries(changes, required)
+		for _, lib := range kept {
+			tl.Printf("keeping %s in shared_preload_libraries: %s needs it", lib, required[lib])
+		}
+	}
 	facts := tune.Facts{Host: before.Host, Settings: current, Complete: true, PgStatStatements: before.PgStatStatements,
-		LibraryInstalled: func(lib string) bool { return libraryInstalled(ctx, conn, lib) }}
+		LibraryInstalled: func(lib string) bool { return libraryInstalled(ctx, conn, lib) }, Required: required}
 	if err := tune.Validate(changes, facts); err != nil {
 		return nil, err
 	}
@@ -158,6 +169,9 @@ func (a *Agent) changeSettings(ctx context.Context, db protocol.DatabaseSpec, p 
 		res.Extension = ext
 	}
 	res.Summary = settingsSummary(changes, pending, current)
+	if len(kept) > 0 {
+		res.Summary += fmt.Sprintf(" Rowsafe kept %s loaded: %s needs it.", strings.Join(kept, ", "), required[kept[0]])
+	}
 	tl.Printf("%s", res.Summary)
 	return res, nil
 }

@@ -92,6 +92,7 @@ type Agent struct {
 	upgrades         *upgradeStore
 	upgradeOnce      sync.Once
 	updateHelperFn   updateHelperFunc
+	extOpsFn         func(protocol.DatabaseSpec, *taskLog) extensionOps // tests: what turning on a packaged extension needs (pg_extensions.go)
 	pingDB           func(context.Context, protocol.DatabaseSpec) error
 	checkArchivingFn func(context.Context, protocol.DatabaseSpec) error
 	finishBackupsFn  func(context.Context, protocol.DatabaseSpec) error
