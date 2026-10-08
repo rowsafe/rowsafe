@@ -353,6 +353,7 @@ func (e EngineEnv) SharedStateDir() string {
 
 func (a *Agent) engineEnv(name string) EngineEnv {
 	env := engineEnv(a.cfg, a.runner, a.log, name)
+	env.Repo = a.ownRepo() // storage.go: Rowsafe Storage's current credentials
 	env.Control = agentControl{a}
 	if a.engineControl != nil {
 		env.Control = a.engineControl // tests

@@ -36,6 +36,7 @@ type Store struct {
 	region   string
 	key      string
 	secret   string
+	token    string // session token of temporary credentials (Rowsafe Storage)
 	hostPath bool   // virtual-host style
 	prefix   string // "" or "a/b" (no leading or trailing slash)
 	http     *http.Client
@@ -99,7 +100,7 @@ func New(repo pgbackrest.Repo, sub string) (*Store, error) {
 	}
 	prefix := strings.Trim(strings.Trim(repo.PathPrefix, "/")+"/"+strings.Trim(sub, "/"), "/")
 	return &Store{
-		endpoint: endpoint, bucket: repo.Bucket, region: region, key: repo.Key, secret: repo.KeySecret,
+		endpoint: endpoint, bucket: repo.Bucket, region: region, key: repo.Key, secret: repo.KeySecret, token: repo.Token,
 		hostPath: repo.URIStyle == "host", prefix: prefix,
 		http: &http.Client{Transport: tr}, scheme: scheme, now: time.Now, PartSize: 16 << 20,
 	}, nil
@@ -206,6 +207,10 @@ func (s *Store) sign(req *http.Request, payloadHash string) {
 	req.Host = host
 
 	names := []string{"host", "x-amz-content-sha256", "x-amz-date"}
+	if s.token != "" { // temporary credentials (Rowsafe Storage): the session token is signed too
+		req.Header.Set("x-amz-security-token", s.token)
+		names = append(names, "x-amz-security-token")
+	}
 	for k := range req.Header {
 		lk := strings.ToLower(k)
 		if lk == "content-type" || lk == "content-md5" {

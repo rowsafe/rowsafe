@@ -90,6 +90,32 @@ func TestConfigStorageEnv(t *testing.T) {
 	}
 }
 
+// TestEnginesGetRowsafeStorageCredentials: engines that write to the
+// bucket themselves (MySQL, MariaDB, Valkey...) get Rowsafe Storage's
+// current temporary credentials, renewed ones on the next call.
+func TestEnginesGetRowsafeStorageCredentials(t *testing.T) {
+	a, _ := storageTestAgent(t, protocol.StorageRowsafe)
+	if r := a.engineEnv("mysql").Repo; r.Key != "" || r.Managed {
+		t.Errorf("no credentials yet: %+v", r)
+	}
+	a.storage.set(testCreds("K1", time.Hour))
+	db := protocol.DatabaseSpec{ID: "db_my", Engine: "mysql", Stanza: "shop"}
+	for name, r := range map[string]pgbackrest.Repo{"engineEnv": a.engineEnv("mysql").Repo, "engineEnvFor": a.engineEnvFor(db).Repo,
+		"RepoFor": a.engineEnv("mysql").RepoFor(db.ID)} {
+		if r.Key != "K1" || r.Token != "T-K1" || r.Bucket != "rowsafe-storage-eu" || r.PathPrefix != "/orgs/org_1" || !r.Managed || r.Validate() != nil {
+			t.Errorf("%s: %+v", name, r)
+		}
+	}
+	a.storage.set(testCreds("K2", time.Hour))
+	if r := a.engineEnvFor(db).Repo; r.Key != "K2" || r.Token != "T-K2" {
+		t.Errorf("renewed: %+v", r)
+	}
+	own, _ := storageTestAgent(t, protocol.StorageOwn)
+	if r := own.engineEnvFor(db).Repo; r != own.cfg.Repo {
+		t.Errorf("own bucket: %+v", r)
+	}
+}
+
 func TestRepoNeedsCredentials(t *testing.T) {
 	a, _ := storageTestAgent(t, protocol.StorageRowsafe)
 	if _, err := a.repo(); err == nil || !strings.Contains(err.Error(), "waiting for Rowsafe Storage credentials") {

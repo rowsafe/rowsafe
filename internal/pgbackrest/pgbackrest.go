@@ -51,6 +51,13 @@ type Repo struct {
 	// are: "" means the stanza's name. A setup that found the usual folder
 	// taken starts fresh in another one (protocol.ExistingBackupsNewFolder).
 	Folder string
+
+	// Managed: the repository is Rowsafe Storage (the agent's temporary
+	// credentials, agent.WithStorageCredentials). Rowsafe Storage keeps, and
+	// deletes, each database's backups as the folder <PathPrefix>/<stanza>/,
+	// so engines that write objects themselves put everything of a database
+	// there, never in a folder shared by an engine's databases.
+	Managed bool
 }
 
 // folder is the repository folder for stanza.

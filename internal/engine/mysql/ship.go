@@ -269,6 +269,11 @@ func (sh *shipper) pollOnce(ctx context.Context) error {
 	}
 	sh.mu.Unlock()
 
+	// Rowsafe Storage's credentials are renewed (s is the newest view):
+	// open the bucket again with the new ones.
+	if sh.store != nil && sh.store.creds != s.env.Repo.Key+"\x00"+s.env.Repo.Token {
+		sh.store = nil
+	}
 	if sh.store == nil {
 		st, err := openStore(s.env.Repo, string(s.flavor), s.db.Stanza, s.cfg.PartSizeMB)
 		if err != nil {
