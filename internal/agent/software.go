@@ -245,7 +245,7 @@ func (a *Agent) clusterSoftware(ctx context.Context) []protocol.ClusterSoftware 
 		}
 		slices.Sort(cs2.Majors)
 		if out, err := a.runner.Run(ctx, "dpkg-query", "-W", "-f=${db:Status-Abbrev} ${Package}\\n",
-			"postgresql-"+strconv.Itoa(c.Major)+"-*"); err == nil || len(out) > 0 {
+			"postgresql-"+strconv.Itoa(c.Major)+"-*", "timescaledb-2-oss-postgresql-"+strconv.Itoa(c.Major)); err == nil || len(out) > 0 {
 			cs2.ExtensionPackages = parseInstalledPackages(out)
 		}
 		cs = append(cs, cs2)

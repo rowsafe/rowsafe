@@ -75,6 +75,12 @@ type dba struct {
 	ssl    bool
 	secret *protocol.DBConnection // the user and database a new password is for
 	pw     string
+	// The extensions Rowsafe installs (pg_extensions.go): the task's ID
+	// (helper requests), what the server needs for them, and whether
+	// PostgreSQL was restarted (sessions opened before are gone).
+	taskID    string
+	ext       extensionOps
+	restarted bool
 }
 
 // dbadmin runs one Databases & users action.
@@ -85,7 +91,10 @@ func (a *Agent) dbadmin(ctx context.Context, db protocol.DatabaseSpec, taskID st
 	start := time.Now()
 	t := a.target(db)
 	t.AppName = dbaAppName
-	d := &dba{t: t, spec: db, p: p, tl: tl, res: &protocol.DBAdminResult{Action: p.Action}}
+	d := &dba{t: t, spec: db, p: p, tl: tl, res: &protocol.DBAdminResult{Action: p.Action}, taskID: taskID, ext: a.extensionOps(db, tl)}
+	if a.extOpsFn != nil {
+		d.ext = a.extOpsFn(db, tl)
+	}
 	conn, err := d.connectAny(ctx)
 	if err != nil {
 		return nil, sentence(err)
@@ -119,8 +128,36 @@ func (a *Agent) dbadmin(ctx context.Context, db protocol.DatabaseSpec, taskID st
 	}
 
 	// The list after the action, also after a failure, so the dashboard
-	// shows what is there now.
+	// shows what is there now (on a new session after a restart).
+	if d.restarted {
+		closeConn(ctx, conn)
+		if conn, err2 := d.connectAny(ctx); err2 == nil {
+			defer closeConn(ctx, conn)
+			return d.finish(ctx, conn, start, err)
+		} else if err == nil {
+			err = err2
+		}
+		d.res.DurationMs = time.Since(start).Milliseconds()
+		return d.res, sentence(err)
+	}
+	return d.finish(ctx, conn, start, err)
+}
+
+// finish reads the list after an action, seals a new password and says
+// how it went.
+func (d *dba) finish(ctx context.Context, conn *pgx.Conn, start time.Time, err error) (*protocol.DBAdminResult, error) {
+	t, db, p, tl, taskID := d.t, d.spec, d.p, d.tl, d.taskID
 	inv, ierr := dbInventory(ctx, t, conn, db.Port, d.me)
+	if ierr == nil && isPostgres(db) {
+		avail, aerr := availableExtensions(ctx, conn)
+		var preload string
+		if aerr == nil {
+			aerr = conn.QueryRow(ctx, `SELECT current_setting('shared_preload_libraries')`).Scan(&preload)
+		}
+		if aerr == nil {
+			inv.Packaged = packagedInventory(avail, preload, d.vnum/10000, d.ext)
+		}
+	}
 	if ierr != nil {
 		tl.Printf("couldn't read the databases and users afterwards: %v", ierr)
 		if p.Action == protocol.DBAdminList && err == nil {
@@ -440,6 +477,9 @@ func installedExtensions(ctx context.Context, q querier) (map[string]string, err
 }
 
 func notAvailable(ext string) error {
+	if e, ok := protocol.PGPackagedExtensionFor(ext); ok && e.Name == ext {
+		return fmt.Errorf("%s isn't installed on this server yet: create the database without it, then turn it on there (Rowsafe installs its package first)", e.Title)
+	}
 	return fmt.Errorf("PostgreSQL on this server doesn't have the %s extension: it comes in a separate package that has to be installed on the server first", ext)
 }
 
@@ -1096,13 +1136,10 @@ func (d *dba) enableExtension(ctx context.Context, conn *pgx.Conn) error {
 	if err != nil {
 		return err
 	}
-	defer closeConn(ctx, c)
+	defer func() { closeConn(ctx, c) }()
 	avail, err := availableExtensions(ctx, c)
 	if err != nil {
 		return err
-	}
-	if _, ok := avail[p.Extension]; !ok {
-		return notAvailable(p.Extension)
 	}
 	before, err := installedExtensions(ctx, c)
 	if err != nil {
@@ -1111,6 +1148,18 @@ func (d *dba) enableExtension(ctx context.Context, conn *pgx.Conn) error {
 	if v, ok := before[p.Extension]; ok {
 		d.res.Summary = fmt.Sprintf("%s is already on in %s (version %s).", p.Extension, p.Database, v)
 		return nil
+	}
+	if ext, ok := protocol.PGPackagedExtensionFor(p.Extension); ok && ext.Name == p.Extension {
+		// pgvector, PostGIS, TimescaleDB: the package first, and what it
+		// needs loaded (pg_extensions.go).
+		nc, err := d.enablePackaged(ctx, c, ext, avail)
+		c = nc
+		if err != nil {
+			return err
+		}
+	}
+	if _, ok := avail[p.Extension]; !ok {
+		return notAvailable(p.Extension)
 	}
 	if err := d.exec(ctx, c, "", `CREATE EXTENSION IF NOT EXISTS %I CASCADE`, p.Extension); err != nil {
 		return err

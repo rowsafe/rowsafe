@@ -428,18 +428,20 @@ func confirmMoney(yes bool, what string) error {
 }
 
 // cloudCreate: rowsafe cloud create NAME [--cloud C] [--region R] [--size S]
-// [--engine postgresql|mysql|mariadb|valkey] [--engine-version V] [--postgres 17]
-// [--allow me|IP|CIDR]... [--standby] [--wait] [--yes] [--json]
+// [--engine postgresql|mysql|mariadb|valkey|clickhouse] [--engine-version V] [--postgres 17]
+// [--extensions vector,postgis,timescaledb] [--allow me|IP|CIDR]... [--standby] [--wait] [--yes] [--json]
 func cloudCreate(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("cloud create", flag.ContinueOnError)
 	cloudName := fs.String("cloud", "", "the cloud (hetzner, digitalocean, aws...; default: the cheapest)")
 	region := fs.String("region", "", "the region, e.g. fsn1 (it decides the cloud; default: where the cheapest size is free)")
 	size := fs.String("size", "", "the size, e.g. small (default: the cheapest free now)")
 	pg := fs.String("postgres", "", "PostgreSQL major version: 15, 16, 17 or 18 (default 17); the same as --engine postgresql --engine-version")
-	engineName := fs.String("engine", "", "the database: postgresql (default), mysql, mariadb or valkey (`rowsafe cloud sizes` lists what is offered)")
+	engineName := fs.String("engine", "", "the database: "+engineChoices()+" (`rowsafe cloud sizes` lists what is offered)")
 	engineVersion := fs.String("engine-version", "", "the engine's version (default: the one Rowsafe recommends; `rowsafe cloud sizes` lists them)")
-	var allow csvList
+	var allow, exts csvList
 	fs.Var(&allow, "allow", "who can connect: me (this computer), an IP address or a network; repeat or comma-separate (default: me; none: nobody yet)")
+	fs.Var(&exts, "extensions", fmt.Sprintf("PostgreSQL %d to %d: extensions installed and turned on from the start: vector (pgvector), postgis (PostGIS), timescaledb (TimescaleDB, Apache-2.0 edition); comma-separated",
+		protocol.PGExtensionsMinMajor, protocol.PGExtensionsMaxMajor))
 	standby := fs.Bool("standby", false, "also a standby server of the same size, ready to take over (doubles the price)")
 	wait := fs.Bool("wait", false, "follow it until it's ready")
 	yes := fs.Bool("yes", false, "don't ask (it costs money: --yes is the confirmation)")
@@ -463,6 +465,10 @@ func cloudCreate(ctx context.Context, c *client.Client, args []string) error {
 	if err != nil {
 		return err
 	}
+	extensions, err := chooseExtensions(engine, version, exts) // cloud_engines.go
+	if err != nil {
+		return err
+	}
 	pick, err := pickCloud(catalogFor(cat, engine, *size), *cloudName, *region, *size, *standby)
 	if err != nil {
 		return err
@@ -479,6 +485,9 @@ func cloudCreate(ctx context.Context, c *client.Client, args []string) error {
 	}
 	out := msgOut(*asJSON)
 	fmt.Fprintf(out, "New server %s: %s %s on %s.\n", name, engine.Name, version, pick.describe(*standby))
+	if len(extensions) > 0 {
+		fmt.Fprintf(out, "Extensions: %s (in the postgres database and every new one).\n", extensionTitles(extensions))
+	}
 	fmt.Fprintf(out, "Who can connect: %s.\n", sourcesText(allowed))
 	if pick.Cloud.Billing == "hourly" && cat.Payg.Status != "active" && cat.Payg.Status != "past_due" && cat.Payg.Status != "canceling" {
 		fmt.Fprintln(out, "Pay as you go isn't set up yet: you get a link to add a card, once; the server is created as soon as that's done.")
@@ -488,7 +497,7 @@ func cloudCreate(ctx context.Context, c *client.Client, args []string) error {
 	}
 	res, err := c.CreateCloudServer(ctx, client.CreateCloudServerRequest{Where: "rowsafe", Provider: pick.Cloud.Provider,
 		Region: pick.Region.ID, Size: pick.Size.ID, Name: name, Engine: engine.Engine, EngineVersion: version,
-		AllowedIPs: allowed, Standby: *standby})
+		AllowedIPs: allowed, Standby: *standby, Extensions: extensions})
 	if err != nil {
 		return apiErr(err)
 	}
@@ -789,6 +798,9 @@ func printServer(s client.CloudServer) {
 	}
 	if s.EngineVersion != "" {
 		row("Database", protocol.EngineDisplayName(s.Engine)+" "+s.EngineVersion)
+	}
+	if len(s.Extensions) > 0 {
+		row("Extensions", extensionTitles(s.Extensions))
 	}
 	if s.DatabaseRef != nil {
 		row("Database in Rowsafe", *s.DatabaseRef)

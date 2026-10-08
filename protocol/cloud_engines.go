@@ -53,6 +53,10 @@ type CloudEngine struct {
 	MinMemoryMB int `json:"min_memory_mb,omitempty"`
 	// Note says what is special about it, in plain words ("" for nothing).
 	Note string `json:"note,omitempty"`
+	// Extensions (PostgreSQL) are the extensions a new server can get
+	// installed and turned on (PGPackagedExtensions; versions
+	// PGExtensionsMinMajor to PGExtensionsMaxMajor).
+	Extensions []PGPackagedExtension `json:"extensions,omitempty"`
 }
 
 // CloudEngines are the engines new servers can get, PostgreSQL first.
@@ -73,7 +77,7 @@ type CloudEngine struct {
 //     on the server itself only. 4 GB of memory at least.
 var CloudEngines = []CloudEngine{
 	{Engine: EnginePostgreSQL, Name: "PostgreSQL", Versions: []string{"15", "16", "17", "18"}, DefaultVersion: "17",
-		Port: 5432, Scheme: "postgresql", Standby: true, Clone: true},
+		Port: 5432, Scheme: "postgresql", Standby: true, Clone: true, Extensions: PGPackagedExtensions},
 	{Engine: EngineMySQL, Name: "MySQL", Versions: []string{"8.4"}, DefaultVersion: "8.4",
 		Port: 3306, Scheme: "mysql", AMD64Only: true,
 		Note: "MySQL 8.4 LTS from Oracle's own packages, which are built for Intel and AMD processors only."},

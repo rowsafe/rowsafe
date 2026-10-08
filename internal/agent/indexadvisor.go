@@ -833,9 +833,7 @@ func (a *Agent) withAdvisorCopy(ctx context.Context, db protocol.DatabaseSpec, t
 		return fmt.Errorf("restoring the copy: %w", err)
 	}
 	spec := scratchSpec{Name: advisorCopyName, Port: a.cfg.DrillPort, SocketDir: socketDir, Major: prod.Major()}
-	if a.cfg.DrillPreload == DrillPreloadProduction {
-		spec.Preload = prod.SharedPreloadLibraries
-	}
+	spec.Preload = a.scratchPreload(prod.SharedPreloadLibraries, prod.Major()) // pg_extensions.go
 	if err := a.writeScratchConf(dataDir, spec); err != nil {
 		return err
 	}

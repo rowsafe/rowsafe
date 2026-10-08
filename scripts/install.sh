@@ -39,6 +39,12 @@
 #                          start it; refuses if PostgreSQL is already installed.
 #                          With --protect, that new PostgreSQL is restarted once
 #                          if backups need it
+#   --pg-extensions LIST   with --install-postgres (15-18): install and turn on
+#                          vector (pgvector), postgis (PostGIS) and/or
+#                          timescaledb (TimescaleDB's Apache-2.0 edition, from
+#                          Timescale's repository, key checked, pinned; loaded
+#                          at start, telemetry off) in the postgres database
+#                          and template1
 #   --install-mysql 8.4    the same for MySQL 8.4 (LTS) from Oracle's repository
 #                          (repo.mysql.com, key checked; Intel/AMD only): root
 #                          signs in through the server's socket only, no
@@ -293,6 +299,7 @@ REDIS_STANDBY=''   # --redis-standby (yes): Redis/Valkey standby servers with th
 REDIS_CLONES=''    # --redis-clones (yes): Redis/Valkey servers here may receive clones
 MONGODB_REPLSET='' # --mongodb-replica-set (yes) / --no-mongodb-replica-set (no); '' = ask on a terminal
 INSTALL_PG=''      # --install-postgres VERSION (servers Rowsafe creates)
+PG_EXTENSIONS=''   # --pg-extensions NAME,... (with --install-postgres): vector, postgis, timescaledb
 INSTALL_DB=''      # --install-mysql / -mariadb / -valkey / -clickhouse: mysql, mariadb, valkey or clickhouse
 INSTALL_DB_VERSION='' # its version (8.4; 11.4 or 11.8; 8; 26.3 or 26.8)
 LISTEN_PUBLIC=0    # --listen-public
@@ -369,6 +376,11 @@ Options (when piping, pass them after `sh -s --`):
                          key checked) and start it. Refuses if PostgreSQL is already
                          installed; a re-run keeps the one it installed. With --protect,
                          that new PostgreSQL is restarted once if backups need it
+  --pg-extensions LIST   with --install-postgres (15-18): install and turn on vector
+                         (pgvector), postgis (PostGIS) and/or timescaledb (TimescaleDB's
+                         Apache-2.0 edition from Timescale's repository, its key checked;
+                         loaded at start, telemetry off), comma-separated, in the postgres
+                         database and template1 (so new databases have them too)
   --install-mysql 8.4    on a fresh server: install MySQL 8.4 (the long-term support
                          release) from Oracle's repository (repo.mysql.com, its signing
                          key checked; Intel and AMD processors only) and start it. root
@@ -1106,6 +1118,19 @@ PG_INSTALLED_FILE=$CONFIG_DIR/installed-postgresql
 PG_TLS_DIR=/etc/ssl/rowsafe-postgresql
 # Cluster --listen-public works on (pg_target).
 LP_MAJOR='' LP_NAME='' LP_PORT=''
+# --pg-extensions: the extensions Rowsafe installs, from a fixed list (the
+# names in CREATE EXTENSION; protocol.PGPackagedExtensions): pgvector and
+# PostGIS from the PostgreSQL project's repository, TimescaleDB's
+# Apache-2.0 edition from Timescale's own (packagecloud.io), signing key
+# checked and apt pinned so nothing else from it is ever installed (never
+# the Timescale License edition, whose license forbids offering it as a
+# service).
+PG_EXTENSIONS_ALLOWED='vector postgis timescaledb'
+TIMESCALE_KEY_URL=https://packagecloud.io/timescale/timescaledb/gpgkey
+TIMESCALE_KEY_FPR=1005FB68604CE9B8F6879CF759F18EDF47F24417
+TIMESCALE_KEYRING=/usr/share/keyrings/rowsafe-timescaledb.gpg
+TIMESCALE_LIST=/etc/apt/sources.list.d/rowsafe-timescaledb.list
+TIMESCALE_PIN=/etc/apt/preferences.d/rowsafe-timescaledb
 
 # existing_postgres describes PostgreSQL already on this server, if any:
 # server binaries, server packages or a running postgres process.
@@ -1149,6 +1174,118 @@ pgdg_repo() {
     write_file "$PGDG_LIST" 0644 root:root || true
   apt_update
   ok "the PostgreSQL project's repository (apt.postgresql.org, key $PGDG_KEY_FPR)"
+}
+
+# pg_ext_package NAME MAJOR prints the package of an extension Rowsafe
+# installs (nothing for any other name).
+pg_ext_package() {
+  case $1 in
+    vector) echo "postgresql-$2-pgvector" ;;
+    postgis) echo "postgresql-$2-postgis-3" ;;
+    timescaledb) echo "timescaledb-2-oss-postgresql-$2" ;;
+  esac
+}
+
+# timescale_repo adds TimescaleDB's own repository, pinned: from it, only
+# the Apache-2.0 edition (timescaledb-2-oss-postgresql-*) and the loader it
+# needs, never anything else (the Timescale License edition included).
+timescale_repo() {
+  _codename=$(os_codename)
+  case $OS_ID in
+    debian | ubuntu) ;;
+    *) die "TimescaleDB's repository has packages for Debian and Ubuntu only, not $OS_NAME" ;;
+  esac
+  fetch "$TIMESCALE_KEY_URL" "$TMP/repo.asc" || die "could not download TimescaleDB's signing key ($TIMESCALE_KEY_URL)"
+  repo_key "$TMP/repo.asc" "$TIMESCALE_KEY_FPR" "TimescaleDB's" "$TIMESCALE_KEYRING" TimescaleDB
+  echo "deb [signed-by=$TIMESCALE_KEYRING] https://packagecloud.io/timescale/timescaledb/$OS_ID/ $_codename main" |
+    write_file "$TIMESCALE_LIST" 0644 root:root || true
+  printf '%s\n' "# Written by the Rowsafe installer (--pg-extensions timescaledb): from Timescale's" \
+    "# repository only TimescaleDB's Apache-2.0 edition and its loader, nothing else." \
+    "Package: timescaledb-2-oss-postgresql-* timescaledb-2-loader-postgresql-*" "Pin: origin packagecloud.io" "Pin-Priority: 600" "" \
+    "Package: *" "Pin: origin packagecloud.io" "Pin-Priority: -1" |
+    write_file "$TIMESCALE_PIN" 0644 root:root || true
+  apt_update
+  ok "TimescaleDB's repository (packagecloud.io/timescale/timescaledb, Apache-2.0 edition only, key $TIMESCALE_KEY_FPR)"
+}
+
+# pg_sql_in PORT DATABASE SQL is pg_sql in another database.
+pg_sql_in() {
+  (cd / && runuser -u postgres -- psql -X -A -t -q -v ON_ERROR_STOP=1 -p "$1" -d "$2" -c "$3") </dev/null
+}
+
+# pg_extensions_setup is --pg-extensions on the PostgreSQL --install-postgres
+# installed: the packages, TimescaleDB loaded at start (its telemetry off;
+# the new PostgreSQL restarted once for it) and each extension turned on in
+# the postgres database and in template1, so databases created later have
+# them too. A re-run changes nothing.
+pg_extensions_setup() {
+  [ -n "$PG_EXTENSIONS" ] || return 0
+  _m=$INSTALL_PG
+  _port=$(pg_lsclusters -h 2>/dev/null | awk -v m="$_m" '$1 == m && $2 == "main" { print $3; exit }')
+  [ -n "$_port" ] || die "--pg-extensions: PostgreSQL $_m's main cluster isn't there"
+  _names=$(printf '%s' "$PG_EXTENSIONS" | tr ',' ' ')
+  _want=''
+  for _e in $_names; do
+    _p=$(pg_ext_package "$_e" "$_m")
+    [ "$(dpkg-query -W -f '${db:Status-Status}' "$_p" 2>/dev/null)" = installed ] || _want="$_want $_p"
+  done
+  if [ -n "$_want" ]; then
+    step "Installing PostgreSQL extensions:$_want"
+    case " $_names " in
+      *" timescaledb "*) [ -s "$TIMESCALE_PIN" ] && [ -s "$TIMESCALE_LIST" ] && [ -s "$TIMESCALE_KEYRING" ] || timescale_repo ;;
+    esac
+    for _p in $_want; do
+      [ -n "$(apt_candidate "$_p")" ] ||
+        die "$_p isn't available for PostgreSQL $_m on $OS_NAME ($ARCH); not installing the extensions. Choose another PostgreSQL version or leave it out."
+    done
+    # shellcheck disable=SC2086 # package names from pg_ext_package
+    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends $_want >>"$TMP/apt.log" 2>&1 </dev/null; then
+      tail -n 20 "$TMP/apt.log" >&2
+      die "installing$_want failed"
+    fi
+  fi
+  ! dpkg-query -W -f '${db:Status-Status}' "timescaledb-2-postgresql-$_m" 2>/dev/null | grep -qx installed ||
+    die "TimescaleDB's Timescale License edition (timescaledb-2-postgresql-$_m) is installed here; Rowsafe uses only the Apache-2.0 edition"
+  _changed=0
+  case " $_names " in
+    *" timescaledb "*)
+      _cur=$(pg_sql "$_port" "SELECT setting FROM pg_settings WHERE name = 'shared_preload_libraries'") ||
+        die "could not read PostgreSQL's settings"
+      if ! printf '%s\n' "$_cur" | tr ',' '\n' | tr -d ' "' | grep -qx timescaledb; then
+        _lits=''
+        for _l in $(printf '%s' "$_cur" | tr ',' ' ' | tr -d '"'); do
+          printf '%s\n' "$_l" | grep -Eq '^[A-Za-z0-9_.$/-]+$' || die "unexpected library in shared_preload_libraries: $_l"
+          _lits="$_lits'$_l', "
+        done
+        pg_sql "$_port" "ALTER SYSTEM SET shared_preload_libraries = ${_lits}'timescaledb'" >/dev/null ||
+          die "could not add TimescaleDB to shared_preload_libraries"
+        pg_restart_cluster "$_m" main || die "PostgreSQL $_m doesn't start with TimescaleDB loaded (see above)"
+        ok "TimescaleDB loads when PostgreSQL starts (PostgreSQL restarted)"
+        _changed=1
+      fi
+      if [ "$(pg_sql "$_port" "SELECT current_setting('timescaledb.telemetry_level', true)")" != off ]; then
+        pg_sql "$_port" "ALTER SYSTEM SET timescaledb.telemetry_level = 'off'" >/dev/null &&
+          pg_sql "$_port" "SELECT pg_reload_conf()" >/dev/null || die "could not turn TimescaleDB's telemetry off"
+        ok "TimescaleDB's telemetry is off"
+        _changed=1
+      fi
+      ;;
+  esac
+  for _db in postgres template1; do
+    for _e in $_names; do
+      [ "$(pg_sql_in "$_port" "$_db" "SELECT count(*) FROM pg_extension WHERE extname = '$_e'")" = 0 ] || continue
+      pg_sql_in "$_port" "$_db" "CREATE EXTENSION IF NOT EXISTS $_e" >/dev/null 2>"$TMP/ext.log" || {
+        sed 's/^/    /' "$TMP/ext.log" >&2
+        die "turning on $_e in the $_db database failed"
+      }
+      _changed=1
+    done
+  done
+  if [ "$_changed" = 1 ] || [ -n "$_want" ]; then
+    ok "extensions on in the postgres database and every new one: $(printf '%s' "$PG_EXTENSIONS" | sed 's/,/, /g')"
+  else
+    ok "extensions $(printf '%s' "$PG_EXTENSIONS" | sed 's/,/, /g'): nothing to change"
+  fi
 }
 
 # install_postgres is --install-postgres VERSION: PostgreSQL from the
@@ -1542,15 +1679,16 @@ install_db_check() {
 # (exactly one key, the pinned fingerprint, not expired, revoked, invalid
 # or disabled), saved for apt.
 repo_key() {
+  _what=${5:-$(engine_label "$INSTALL_DB")}
   have gpg || apt_install gnupg
   install -d -m 0700 "$TMP/gnupg"
   GNUPGHOME=$TMP/gnupg gpg --batch --show-keys --with-colons "$1" >"$TMP/key.list" 2>/dev/null || true
   _fpr=$(awk -F: '$1 == "fpr" { print $10; exit }' "$TMP/key.list")
   [ "$(grep -c '^pub:' "$TMP/key.list")" = 1 ] && [ "$_fpr" = "$2" ] ||
-    die "$3 signing key isn't the expected one (fingerprint ${_fpr:-unreadable}); not installing $(engine_label "$INSTALL_DB")"
+    die "$3 signing key isn't the expected one (fingerprint ${_fpr:-unreadable}); not installing $_what"
   case $(awk -F: '$1 == "pub" { print $2; exit }' "$TMP/key.list") in
-    e) die "$3 signing key ($2) has expired, so apt wouldn't trust its packages; not installing $(engine_label "$INSTALL_DB"). Try again once its renewed key is published." ;;
-    r | i | d | n) die "$3 signing key ($2) is revoked or not valid; not installing $(engine_label "$INSTALL_DB")" ;;
+    e) die "$3 signing key ($2) has expired, so apt wouldn't trust its packages; not installing $_what. Try again once its renewed key is published." ;;
+    r | i | d | n) die "$3 signing key ($2) is revoked or not valid; not installing $_what" ;;
   esac
   GNUPGHOME=$TMP/gnupg gpg --batch --yes --dearmor -o "$TMP/key.gpg" "$1" 2>/dev/null || die "could not read $3 signing key"
   write_file "$4" 0644 root:root <"$TMP/key.gpg" || true
@@ -2685,6 +2823,13 @@ install_helper_script() {
 #
 #   ID pg-minor-update PORT                  newest minor release of PORT's major
 #   ID pg-install-major PORT MAJOR           install MAJOR (and PORT's extensions for it)
+#   ID pg-install-extension PORT NAME        install an extension's package for PORT's major:
+#                                            NAME vector (postgresql-MAJOR-pgvector), postgis
+#                                            (postgresql-MAJOR-postgis-3) or timescaledb
+#                                            (timescaledb-2-oss-postgresql-MAJOR, the Apache-2.0
+#                                            edition, from Timescale's repository, which it adds
+#                                            with its signing key checked and apt pinned to that
+#                                            edition); nothing else, no restart
 #   ID pg-upgrade PORT MAJOR METHOD          pg_upgradecluster to MAJOR (copy, clone or link)
 #   ID pg-upgrade-undo PORT start|nostart    back to the version kept by that upgrade
 #   ID pg-upgrade-cleanup PORT               remove the version kept aside by an upgrade or undo
@@ -2763,7 +2908,7 @@ install_helper_script() {
 # redis-created).
 #
 # actions: restart stop start create-cluster files-read files-put mongodb-key-export mongodb-standby-config redis-create redis-remove
-# update-actions: pg-minor-update pg-install-major pg-upgrade pg-upgrade-undo pg-upgrade-cleanup security-updates auto-security-updates reboot db-minor-update db-upgrade db-upgrade-undo db-upgrade-cleanup
+# update-actions: pg-minor-update pg-install-major pg-install-extension pg-upgrade pg-upgrade-undo pg-upgrade-cleanup security-updates auto-security-updates reboot db-minor-update db-upgrade db-upgrade-undo db-upgrade-cleanup
 #
 # The same helper manages PgBouncer when root allowed that (--allow-pooler):
 # see "PgBouncer" below.
@@ -4077,8 +4222,11 @@ act_pg_install_major() {
   before=$(lsclusters | awk -v m="$major" '$1 == m { printf " %s ", $2 }')
   pkgs="postgresql-$major postgresql-client-$major"
   missing=''
-  for p in $(installed_pkgs "postgresql-$c_major-*"); do
-    n=postgresql-$major-${p#postgresql-"$c_major"-}
+  for p in $(installed_pkgs "postgresql-$c_major-*") $(installed_pkgs "timescaledb-2-oss-postgresql-$c_major"); do
+    case $p in
+      timescaledb-2-oss-postgresql-*) n=timescaledb-2-oss-postgresql-$major ;;
+      *) n=postgresql-$major-${p#postgresql-"$c_major"-} ;;
+    esac
     c=$(candidate "$n")
     if [ -n "$c" ] && [ "$c" != "(none)" ]; then pkgs="$pkgs $n"; else missing="$missing $n"; fi
   done
@@ -4102,6 +4250,123 @@ act_pg_install_major() {
   add packages "$pkgs"
   add missing "$missing"
   add dropped "$dropped"
+  ok=1
+}
+
+# The extensions Rowsafe installs (protocol.PGPackagedExtensions): each
+# name's one package, for the cluster's major.
+ext_package() {
+  case $1 in
+    vector) echo "postgresql-$2-pgvector" ;;
+    postgis) echo "postgresql-$2-postgis-3" ;;
+    timescaledb) echo "timescaledb-2-oss-postgresql-$2" ;;
+  esac
+}
+
+# TimescaleDB's own repository, as the installer's --pg-extensions adds it:
+# the signing key's fingerprint checked (and refused when expired or
+# revoked), apt pinned so only the Apache-2.0 edition and its loader ever
+# come from it.
+ts_key_url=https://packagecloud.io/timescale/timescaledb/gpgkey
+ts_key_fpr=1005FB68604CE9B8F6879CF759F18EDF47F24417
+ts_keyring=${ROWSAFE_TS_KEYRING:-/usr/share/keyrings/rowsafe-timescaledb.gpg}
+ts_list=${ROWSAFE_TS_LIST:-/etc/apt/sources.list.d/rowsafe-timescaledb.list}
+ts_pin=${ROWSAFE_TS_PIN:-/etc/apt/preferences.d/rowsafe-timescaledb}
+
+# ts_repo adds it (once). Sets why and returns 1 when it can't.
+ts_repo() {
+  why=''
+  [ ! -s "$ts_keyring" ] || [ ! -s "$ts_list" ] || [ ! -s "$ts_pin" ] || return 0
+  # shellcheck disable=SC1091 # the system's own file
+  os_id=$(. /etc/os-release && printf '%s' "${ID:-}")
+  # shellcheck disable=SC1091
+  codename=$(. /etc/os-release && printf '%s' "${VERSION_CODENAME:-}")
+  case $os_id in
+    debian | ubuntu) ;;
+    *)
+      why="TimescaleDB's repository has packages for Debian and Ubuntu only"
+      return 1
+      ;;
+  esac
+  printf '%s\n' "$codename" | grep -Eq '^[a-z]{2,20}$' || {
+    why="can't tell this system's release name"
+    return 1
+  }
+  command -v curl >/dev/null 2>&1 || {
+    why="curl is missing, which downloading TimescaleDB's signing key needs"
+    return 1
+  }
+  command -v gpg >/dev/null 2>&1 || apt_run install -y --no-install-recommends gnupg || {
+    why="installing gnupg failed: $(tail_log)"
+    return 1
+  }
+  k=$(mktemp -d) || {
+    why="no temporary directory"
+    return 1
+  }
+  if ! curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 20 --max-time 300 \
+    -o "$k/key.asc" "$ts_key_url" </dev/null >>"$work_log" 2>&1; then
+    rm -rf "$k"
+    why="could not download TimescaleDB's signing key ($ts_key_url)"
+    return 1
+  fi
+  GNUPGHOME=$k gpg --batch --show-keys --with-colons "$k/key.asc" >"$k/keys" 2>/dev/null || true
+  fpr=$(awk -F: '$1 == "fpr" { print $10; exit }' "$k/keys")
+  validity=$(awk -F: '$1 == "pub" { print $2; exit }' "$k/keys")
+  if [ "$(grep -c '^pub:' "$k/keys")" != 1 ] || [ "$fpr" != "$ts_key_fpr" ]; then
+    rm -rf "$k"
+    why="TimescaleDB's signing key isn't the expected one (fingerprint ${fpr:-unreadable})"
+    return 1
+  fi
+  case $validity in
+    e | r | i | d | n)
+      rm -rf "$k"
+      why="TimescaleDB's signing key ($ts_key_fpr) has expired or is revoked, so apt wouldn't trust its packages"
+      return 1
+      ;;
+  esac
+  GNUPGHOME=$k gpg --batch --yes --dearmor -o "$k/key.gpg" "$k/key.asc" 2>/dev/null &&
+    install -m 0644 -o root -g root "$k/key.gpg" "$ts_keyring" || {
+    rm -rf "$k"
+    why="could not install TimescaleDB's signing key"
+    return 1
+  }
+  rm -rf "$k"
+  printf 'deb [signed-by=%s] https://packagecloud.io/timescale/timescaledb/%s/ %s main\n' "$ts_keyring" "$os_id" "$codename" >"$ts_list.tmp" &&
+    chmod 0644 "$ts_list.tmp" && mv -f "$ts_list.tmp" "$ts_list"
+  printf '%s\n' "# Written by Rowsafe (pg-install-extension timescaledb): from Timescale's" \
+    "# repository only TimescaleDB's Apache-2.0 edition and its loader, nothing else." \
+    "Package: timescaledb-2-oss-postgresql-* timescaledb-2-loader-postgresql-*" "Pin: origin packagecloud.io" "Pin-Priority: 600" "" \
+    "Package: *" "Pin: origin packagecloud.io" "Pin-Priority: -1" >"$ts_pin.tmp" &&
+    chmod 0644 "$ts_pin.tmp" && mv -f "$ts_pin.tmp" "$ts_pin"
+  log "added TimescaleDB's repository (key $ts_key_fpr)"
+  return 0
+}
+
+act_pg_install_extension() {
+  update_allowed postgresql "installing PostgreSQL extensions from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
+  cluster_for_port "$port"
+  m=$c_major
+  case $m in
+    15 | 16 | 17 | 18) ;;
+    *) refuse "Rowsafe installs pgvector, PostGIS and TimescaleDB for PostgreSQL 15 to 18, not $m" ;;
+  esac
+  pkg=$(ext_package "$ext" "$m")
+  [ -n "$pkg" ] || refuse "Rowsafe doesn't install the extension $ext"
+  : >"$work_log"
+  if [ "$ext" = timescaledb ]; then
+    [ "$(pkg_version "timescaledb-2-postgresql-$m")" = "" ] ||
+      refuse "TimescaleDB's Timescale License edition (timescaledb-2-postgresql-$m) is installed here; Rowsafe installs only the Apache-2.0 edition"
+    ts_repo || refuse "$why"
+  fi
+  apt_refresh
+  c=$(candidate "$pkg")
+  [ -n "$c" ] && [ "$c" != "(none)" ] || refuse "$pkg isn't available for PostgreSQL $m from this server's package sources"
+  log "installing $pkg (request $id)"
+  apt_run install -y --no-install-recommends "$pkg" || refuse "installing $pkg failed: $(tail_log)"
+  [ -f "/usr/share/postgresql/$m/extension/$ext.control" ] || refuse "$pkg is installed, but PostgreSQL $m has no $ext extension"
+  add package "$pkg"
+  add version "$(pkg_version "$pkg")"
   ok=1
 }
 
@@ -4885,7 +5150,7 @@ update_main() {
   have_request "$dir/update-request" || exit 0
   mkdir -p "$state"
   line=$(read_request "$dir/update-request")
-  port='' major='' method='' start='' series_to=''
+  port='' major='' method='' start='' series_to='' ext=''
   # Every request's exact shape; anything else is refused before it is split.
   rid='[A-Za-z0-9_-]{1,64}'
   if printf '%s\n' "$line" | grep -Eq "^$rid (pg-minor-update|pg-upgrade-cleanup) [0-9]{1,5}\$"; then
@@ -4900,6 +5165,10 @@ update_main() {
     # shellcheck disable=SC2086
     set -- $line
     id=$1 action=$2 port=$3 major=$4
+  elif printf '%s\n' "$line" | grep -Eq "^$rid pg-install-extension [0-9]{1,5} (vector|postgis|timescaledb)\$"; then
+    # shellcheck disable=SC2086
+    set -- $line
+    id=$1 action=$2 port=$3 ext=$4
   elif printf '%s\n' "$line" | grep -Eq "^$rid pg-upgrade [0-9]{1,5} [1-9][0-9] (copy|clone|link)\$"; then
     # shellcheck disable=SC2086
     set -- $line
@@ -4920,6 +5189,7 @@ update_main() {
   case $action in
     pg-minor-update) act_pg_minor_update ;;
     pg-install-major) act_pg_install_major ;;
+    pg-install-extension) act_pg_install_extension ;;
     pg-upgrade) act_pg_upgrade ;;
     pg-upgrade-undo) act_pg_upgrade_undo ;;
     pg-upgrade-cleanup) act_pg_upgrade_cleanup ;;
@@ -11742,6 +12012,7 @@ install_agent() {
   # firewall and --listen-public write belong to it), the server listening
   # on this server only until then.
   [ -z "$INSTALL_PG" ] || install_postgres
+  [ -z "$INSTALL_PG" ] || pg_extensions_setup
   [ -z "$INSTALL_DB" ] || install_database
   if [ -z "$INSTALL_DB" ]; then
     [ "$FIREWALL_SSH" != yes ] || firewall_close_early
@@ -12122,6 +12393,20 @@ main() {
         esac
         shift
         ;;
+      --pg-extensions)
+        [ $# -ge 2 ] || die "--pg-extensions needs extensions: vector, postgis and/or timescaledb (comma-separated)"
+        _pe=''
+        for _e in $(printf '%s' "$2" | tr ',' ' '); do
+          case " $PG_EXTENSIONS_ALLOWED " in
+            *" $_e "*) ;;
+            *) die "--pg-extensions: Rowsafe installs vector (pgvector), postgis (PostGIS) and timescaledb (TimescaleDB), not '$_e'" ;;
+          esac
+          case ",$_pe," in *",$_e,"*) ;; *) _pe=${_pe:+$_pe,}$_e ;; esac
+        done
+        [ -n "$_pe" ] || die "--pg-extensions needs extensions: vector, postgis and/or timescaledb (comma-separated)"
+        PG_EXTENSIONS=$_pe
+        shift
+        ;;
       --listen-public) LISTEN_PUBLIC=1 ;;
       --check-storage) mode=check-storage ;;
       --add-storage) SECOND_COPY=add ;;
@@ -12179,6 +12464,13 @@ main() {
   fi
   if [ "$mode" != install ] && { [ -n "$INSTALL_PG$INSTALL_DB" ] || [ "$LISTEN_PUBLIC" = 1 ]; }; then
     die "--install-postgres, --install-mysql, --install-mariadb, --install-valkey, --install-clickhouse and --listen-public only go with an install"
+  fi
+  if [ -n "$PG_EXTENSIONS" ]; then
+    [ -n "$INSTALL_PG" ] || die "--pg-extensions only goes with --install-postgres (servers Rowsafe creates)"
+    case $INSTALL_PG in
+      15 | 16 | 17 | 18) ;;
+      *) die "--pg-extensions: Rowsafe installs these extensions for PostgreSQL 15 to 18, not $INSTALL_PG" ;;
+    esac
   fi
   [ "$mode" = install ] || [ -z "$FIREWALL_SSH" ] || die "--firewall-ssh and --no-firewall-ssh only go with an install"
   [ "$mode" = install ] || [ "$mode" = permissions ] || [ -z "$AUTO_SECURITY" ] ||

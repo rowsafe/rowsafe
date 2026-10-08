@@ -149,6 +149,14 @@ type DBAdminParams struct {
 	// control plane requires Confirm to be the extension's name for it.
 	AllowUntrusted bool `json:"allow_untrusted,omitempty"`
 
+	// Restart (enable_extension of an extension loaded when PostgreSQL
+	// starts: TimescaleDB, PGPackagedExtension.Preload): the person
+	// confirmed that Rowsafe restarts PostgreSQL once to load it (apps are
+	// disconnected for a few seconds). The control plane saves a Mark
+	// first. Without it, such an extension isn't turned on unless it is
+	// loaded already.
+	Restart bool `json:"restart,omitempty"`
+
 	// Confirm: drop_database needs the database's name; enabling an
 	// untrusted extension its name.
 	Confirm string `json:"confirm,omitempty"`
@@ -320,6 +328,10 @@ type DBInventory struct {
 	Databases     []DBDatabase  `json:"databases"`
 	Users         []DBUser      `json:"users"`
 	Extensions    []DBExtension `json:"extensions"` // available on the server
+	// Packaged are the extensions Rowsafe installs (PGPackagedExtensions),
+	// whether they are here already or not (agents that install them; nil
+	// from older agents and other engines).
+	Packaged []DBPackagedExtension `json:"packaged,omitempty"`
 	// Truncated: the server has more databases or users than listed.
 	Truncated bool `json:"truncated,omitempty"`
 
@@ -427,6 +439,28 @@ type DBExtension struct {
 	// Untrusted: it lets database users run code as the server's operating
 	// system user, or read its files (DBExtensionUntrusted).
 	Untrusted bool `json:"untrusted,omitempty"`
+}
+
+// DBPackagedExtension is one of the extensions Rowsafe installs, on this
+// server.
+type DBPackagedExtension struct {
+	Name  string `json:"name"`  // CREATE EXTENSION name: vector, postgis, timescaledb
+	Title string `json:"title"` // pgvector, PostGIS, TimescaleDB
+	// Installed: its package is on the server (PostgreSQL lists it as
+	// available).
+	Installed bool `json:"installed"`
+	// Preload: it is loaded when PostgreSQL starts; Loaded: it is now
+	// (in shared_preload_libraries). Turning on one that isn't loaded
+	// restarts PostgreSQL once (DBAdminParams.Restart).
+	Preload bool `json:"preload,omitempty"`
+	Loaded  bool `json:"loaded,omitempty"`
+	// CanInstall: Rowsafe can install its package here (root allowed
+	// PostgreSQL updates, the helper can, the version has it). Blocked
+	// says why not, in plain words, when it isn't installed.
+	CanInstall bool   `json:"can_install,omitempty"`
+	Blocked    string `json:"blocked,omitempty"`
+	// CanRestart: Rowsafe may restart PostgreSQL here (for Preload).
+	CanRestart bool `json:"can_restart,omitempty"`
 }
 
 // DBExtensionUntrusted reports whether an extension lets database users
@@ -625,6 +659,11 @@ func ValidateDBAdminFor(engine string, p DBAdminParams) error {
 		}
 		if p.Action == DBAdminDisableExtension && p.Extension == "plpgsql" {
 			return fmt.Errorf("plpgsql is part of PostgreSQL; Rowsafe doesn't remove it")
+		}
+		if p.Restart {
+			if e, ok := PGPackagedExtensionFor(p.Extension); p.Action != DBAdminEnableExtension || !ok || !e.Preload || e.Name != p.Extension {
+				return fmt.Errorf("a restart only goes with turning on an extension that is loaded when PostgreSQL starts (timescaledb)")
+			}
 		}
 	case DBAdminDropDatabase:
 		if err := ValidExistingName("database", p.Database); err != nil {

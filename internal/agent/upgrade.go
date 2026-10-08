@@ -620,9 +620,7 @@ func (a *Agent) upgradeRehearsal(ctx context.Context, db protocol.DatabaseSpec, 
 		return finish(fmt.Errorf("restoring the backup failed: %w", err))
 	}
 	spec := scratchSpec{Name: "rehearsal", Port: port, SocketDir: socketDir, Major: f.Major}
-	if a.cfg.DrillPreload == DrillPreloadProduction {
-		spec.Preload = prod.SharedPreloadLibraries
-	}
+	spec.Preload = a.scratchPreload(prod.SharedPreloadLibraries, prod.Major()) // pg_extensions.go
 	if err := a.writeScratchConf(dataDir, spec); err != nil {
 		return finish(err)
 	}

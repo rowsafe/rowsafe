@@ -49,6 +49,7 @@ type CatalogEngine struct {
 	MinMemoryGB    int      `json:"min_memory_gb,omitempty" jsonschema:"sizes with less memory can't run it"`
 	Standby        bool     `json:"standby" jsonschema:"a standby server can be added"`
 	Note           string   `json:"note,omitempty"`
+	Extensions     []string `json:"extensions,omitempty" jsonschema:"what create_cloud_server's extensions takes (PostgreSQL 15 to 18)"`
 }
 
 // CatalogCloud is one cloud in the catalog.
@@ -179,11 +180,16 @@ func (t *tools) cloudCatalog(ctx context.Context, _ *sdk.CallToolRequest, _ noIn
 	var b textBuilder
 	engines := cat.Engines
 	if len(engines) == 0 { // an older control plane: PostgreSQL only
-		engines = protocol.CloudEngines[:1]
+		pg := protocol.CloudEngines[0]
+		pg.Extensions = nil // an older control plane doesn't install them
+		engines = []protocol.CloudEngine{pg}
 	}
 	for _, e := range engines {
 		ce := CatalogEngine{Engine: e.Engine, Name: e.Name, Versions: e.Versions, DefaultVersion: e.DefaultVersion,
 			Port: e.Port, Standby: e.Standby, Note: e.Note, MinMemoryGB: e.MinMemoryMB / 1024}
+		for _, x := range e.Extensions {
+			ce.Extensions = append(ce.Extensions, x.Name)
+		}
 		ports := "port " + e.PortsText()
 		if len(e.Ports) > 1 {
 			ce.Ports, ports = e.Ports, "ports "+e.PortsText()
@@ -199,6 +205,14 @@ func (t *tools) cloudCatalog(ctx context.Context, _ *sdk.CallToolRequest, _ noIn
 		}
 		if e.MinMemoryMB > 0 {
 			line += fmt.Sprintf("; sizes with %d GB of memory or more", e.MinMemoryMB/1024)
+		}
+		if len(e.Extensions) > 0 {
+			names := make([]string, len(e.Extensions))
+			for i, x := range e.Extensions {
+				names[i] = x.Name + " (" + x.Title + ")"
+			}
+			line += fmt.Sprintf("; extensions Rowsafe installs from the start (extensions, PostgreSQL %d to %d): %s",
+				protocol.PGExtensionsMinMajor, protocol.PGExtensionsMaxMajor, strings.Join(names, ", "))
 		}
 		b.line("%s.", line)
 	}

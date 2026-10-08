@@ -281,9 +281,7 @@ func (a *Agent) drillFrom(ctx context.Context, db protocol.DatabaseSpec, taskID 
 	// isolation settings are also pinned at the end of postgresql.auto.conf
 	// (see drillSettings).
 	spec := scratchSpec{Port: a.cfg.DrillPort, SocketDir: socketDir, Major: prod.Major()}
-	if a.cfg.DrillPreload == DrillPreloadProduction {
-		spec.Preload = prod.SharedPreloadLibraries
-	}
+	spec.Preload = a.scratchPreload(prod.SharedPreloadLibraries, prod.Major()) // pg_extensions.go
 	if err := a.writeScratchConf(dataDir, spec); err != nil {
 		return finish(err)
 	}
@@ -294,7 +292,7 @@ func (a *Agent) drillFrom(ctx context.Context, db protocol.DatabaseSpec, taskID 
 	}
 	scratch := pginspect.Target{SocketDir: socketDir, Port: a.cfg.DrillPort, User: a.cfg.PGUser}
 	conn, spec, err := a.startScratchFallback(ctx, tl, spec, scratch, pgCtl, dir, timeout, prod.SharedPreloadLibraries)
-	if spec.Preload != "" && a.cfg.DrillPreload != DrillPreloadProduction {
+	if spec.Preload != a.scratchPreload(prod.SharedPreloadLibraries, prod.Major()) && a.cfg.DrillPreload != DrillPreloadProduction {
 		res.Warnings = append(res.Warnings, fmt.Sprintf(
 			"the restored cluster only started with production's shared_preload_libraries (%s) loaded", spec.Preload))
 	}
@@ -370,7 +368,7 @@ func (a *Agent) writeScratchConf(dataDir string, spec scratchSpec) error {
 func (a *Agent) startScratchFallback(ctx context.Context, tl *taskLog, spec scratchSpec, t pginspect.Target,
 	pgCtl, dir string, timeout time.Duration, prodPreload string) (*pgx.Conn, scratchSpec, error) {
 	conn, err := a.startScratch(ctx, tl, spec, t, pgCtl, dir, timeout)
-	if err != nil && spec.Preload == "" && prodPreload != "" && ctx.Err() == nil {
+	if err != nil && spec.Preload != prodPreload && prodPreload != "" && ctx.Err() == nil {
 		// Production's libraries are left out by default so none of their
 		// code (and no background worker) runs on restored data. A cluster
 		// whose WAL needs one (e.g. a custom WAL resource manager) cannot

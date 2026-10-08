@@ -38,6 +38,10 @@ type CreateCloudServerParams struct {
 	// Standby also creates a standby server of the same size (clouds billed
 	// by the hour), which doubles the price. PostgreSQL only so far.
 	Standby bool `json:"standby,omitempty" jsonschema:"PostgreSQL only: also a standby server of the same size, ready to take over (clouds billed by the hour only); it doubles the price"`
+	// Extensions (PostgreSQL 15 to 18) are installed and turned on in the
+	// new server's postgres database and in every database created
+	// afterwards: PGPackagedExtensions' names.
+	Extensions []string `json:"extensions,omitempty" jsonschema:"PostgreSQL 15 to 18 only: extensions installed and turned on from the start (in the postgres database and every database created later): vector (pgvector), postgis (PostGIS), timescaledb (TimescaleDB, Apache-2.0 edition). Others that come with PostgreSQL are turned on later with manage_databases_users"`
 }
 
 // CloudFirewallParams is the body of PUT /v1/cloud/servers/{server}/firewall

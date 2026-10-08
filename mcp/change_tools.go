@@ -22,6 +22,7 @@ type createCloudServerInput struct {
 	EngineVersion string   `json:"engine_version,omitempty" jsonschema:"the engine's version from cloud_catalog (PostgreSQL 15, 16, 17 or 18, default 17)"`
 	AllowedIPs    []string `json:"allowed_ips,omitempty" jsonschema:"who can connect to the database: the app's IP addresses or networks (203.0.113.4 or 203.0.113.0/24); empty: nobody until cloud_firewall opens it"`
 	Standby       bool     `json:"standby,omitempty" jsonschema:"also a standby server of the same size, ready to take over (clouds billed by the hour only); it doubles the price"`
+	Extensions    []string `json:"extensions,omitempty" jsonschema:"PostgreSQL 15 to 18 only: extensions installed and turned on from the start, in the postgres database and every database created later: vector (pgvector), postgis (PostGIS), timescaledb (TimescaleDB, Apache-2.0 edition; loaded at start)"`
 	Reason        string   `json:"reason" jsonschema:"what it's for and what it costs, in one or two plain sentences (recorded with the change)"`
 	WaitSeconds   int      `json:"wait_seconds,omitempty" jsonschema:"when it waits for a person: seconds to wait for their decision (0 returns at once)"`
 }
@@ -91,6 +92,9 @@ func (t *tools) createCloudServer(ctx context.Context, req *sdk.CallToolRequest,
 	}
 	if in.Standby {
 		p["standby"] = true
+	}
+	if len(in.Extensions) > 0 {
+		p["extensions"] = in.Extensions
 	}
 	return t.fileChange(ctx, req, "create_cloud_server", "", p, in.Reason, in.WaitSeconds)
 }

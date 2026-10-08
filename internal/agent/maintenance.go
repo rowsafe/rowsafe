@@ -338,6 +338,9 @@ func (m *maint) connect(ctx context.Context, dbname string, settings map[string]
 }
 
 func closeConn(ctx context.Context, conn *pgx.Conn) {
+	if conn == nil {
+		return
+	}
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	conn.Close(cctx)

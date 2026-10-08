@@ -138,9 +138,7 @@ func (a *Agent) restoreGuardCopy(ctx context.Context, db protocol.DatabaseSpec, 
 		return nil, err
 	}
 	spec := scratchSpec{Name: "guard", Port: rec.Port, SocketDir: socketDir, Major: prod.Major()}
-	if a.cfg.DrillPreload == DrillPreloadProduction {
-		spec.Preload = prod.SharedPreloadLibraries
-	}
+	spec.Preload = a.scratchPreload(prod.SharedPreloadLibraries, prod.Major()) // pg_extensions.go
 	if err := a.writeCopyConf(dataDir, spec, "", nil); err != nil {
 		return nil, err
 	}
