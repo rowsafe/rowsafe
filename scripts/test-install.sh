@@ -1828,6 +1828,7 @@ clickhouse_flow_tests() {
   scenario "discover_out=$ch" "clickhouse-status_out=$(chst missing -)" "clickhouse-login_out=$usersxml" "plan_out=$chplan"
   tty_ok "ClickHouse login as a users.d file" "Name it in Rowsafe\t\nTurn on backups for events now?\tn\n" "$INSTALLER"
   called "clickhouse-login --port 8123 --users-xml"
+  not_called "rowsafe-server" # SYSTEM RELOAD CONFIG only on servers Rowsafe created
   not_called "admin-user"
   f=/etc/clickhouse-server/users.d/rowsafe.xml
   [ "$(stat -c '%U %G %a' "$f" 2>/dev/null)" = "root clickhouse 640" ] || fail "$name: $f missing or not root:clickhouse 0640"
@@ -3788,6 +3789,24 @@ PGEOF
   ssh_addrs '0.0.0.0/1\n'
   fw_request "fw_srv4 server 5432" '' 1
   grep -q "^error=not an address or range: 0.0.0.0/1" "$FO/result" || fail "a too wide SSH range was not refused"
+  # Several ports in one request (ClickHouse's 9440 and 8443): set,
+  # confirmed and put back together.
+  printf '5432\n5433\nssh\n' >/etc/rowsafe/firewall-allowed
+  ssh_addrs ''
+  fw_request "fw_srv6 server 5432,5433" '10.4.0.0/16\n' 1
+  fw_has "ok=1"
+  rules | grep -q "tcp dport 5432 ip saddr { 10.4.0.0/16 } accept" && rules | grep -q "tcp dport 5433 ip saddr { 10.4.0.0/16 } accept" ||
+    fail "two ports in one request: $(rules)"
+  [ -f "$W/fw-state/port-5432" ] && [ -f "$W/fw-state/port-5433" ] && [ ! -e "$W/fw-state/pending-5433" ] || fail "two ports not kept"
+  WAIT=1 fw_request "fw_srv7 server 5432,5433" '10.5.0.0/16\n' 0
+  fw_has "ok=0"
+  ! rules | grep -q "10.5.0.0/16" && rules | grep -q "tcp dport 5433 ip saddr { 10.4.0.0/16 } accept" || fail "two unconfirmed ports not both put back: $(rules)"
+  fw_request "fw_srv8 server 5432,5499" '10.6.0.0/16\n' 1
+  grep -q "^error=port 5499 is not in" "$FO/result" && ! rules | grep -q "10.6.0.0/16" || fail "a request with an unlisted port changed something: $(rules)"
+  fw_request "fw_srv9 apply 5432,5433" '10.6.0.0/16\n' 1
+  grep -q "^error=malformed request" "$FO/result" || fail "several ports accepted for apply"
+  fw_request "fw_srv10 remove 5433" "" 0
+  printf '5432\nssh\n' >/etc/rowsafe/firewall-allowed
   as_pg rm -f "$D/ssh-addresses"
   fw --restore
   rules | grep -q "tcp dport { 22, 2222 } drop" || fail "--restore dropped SSH's rule"
@@ -3799,7 +3818,7 @@ PGEOF
   rm -f "$W/fw-state/ssh-allowed" "$W/fw-state/ssh-ports"
   fw_request "fw_srv5 remove 5432" "" 0
   ! rules | grep -q . || fail "remove left the table: $(rules)"
-  pass "firewall helper, servers Rowsafe creates: SSH and PostgreSQL at once, everyone and no one, rollback, --restore, root taking SSH back"
+  pass "firewall helper, servers Rowsafe creates: SSH and PostgreSQL at once, several ports together, everyone and no one, rollback, --restore, root taking SSH back"
 
   # The installer's --firewall-ssh: PostgreSQL's port closed before anything
   # else, the ssh line kept until --no-firewall-ssh.
@@ -4447,7 +4466,7 @@ ch_status() {
 # --users-xml` makes it (internal/engine/clickhouse/setup.go), with a
 # password the test knows.
 ch_users_xml() {
-  printf '<clickhouse>\n  <users>\n    <rowsafe>\n      <password_sha256_hex>%s</password_sha256_hex>\n      <networks>\n        <ip>127.0.0.1</ip>\n        <ip>::1</ip>\n      </networks>\n      <profile>default</profile>\n      <quota>default</quota>\n      <grants>\n        <query>GRANT SELECT, INSERT, BACKUP, KILL QUERY, ALTER UPDATE, ALTER DELETE, S3, CREATE DATABASE, CREATE TABLE, DROP DATABASE, DROP TABLE, ALTER TABLE ON *.*</query>\n        <query>GRANT ACCESS MANAGEMENT ON *.*</query>\n        <query>GRANT SYSTEM RELOAD CONFIG ON *.*</query>\n      </grants>\n    </rowsafe>\n  </users>\n</clickhouse>' \
+  printf '<clickhouse>\n  <users>\n    <rowsafe>\n      <password_sha256_hex>%s</password_sha256_hex>\n      <networks>\n        <ip>127.0.0.1</ip>\n        <ip>::1</ip>\n      </networks>\n      <profile>default</profile>\n      <quota>default</quota>\n      <grants>\n        <query>GRANT SELECT, INSERT, BACKUP, KILL QUERY, ALTER UPDATE, ALTER DELETE, S3, CREATE DATABASE, CREATE TABLE, DROP DATABASE, DROP TABLE, ALTER TABLE ON *.*</query>\n        <query>GRANT ACCESS MANAGEMENT ON *.*</query>\n        <query>GRANT SELECT ON system.*</query>\n        <query>GRANT SYSTEM RELOAD CONFIG ON *.*</query>\n      </grants>\n    </rowsafe>\n  </users>\n</clickhouse>' \
     "$(printf '%s' agent-password-for-the-test | sha256sum | cut -d' ' -f1)"
 }
 
@@ -4486,10 +4505,10 @@ cloud_clickhouse_checks() {
   ! ss -ltnH | awk '{ print $4 }' | grep -Eq ':(9004|9005|9009)$' || { ss -ltn >&2; fail "$name: MySQL, PostgreSQL or interserver ports listen"; }
   # The data folder: the clickhouse group (the agent) reads it, again at every start.
   [ "$(stat -c '%U %G %a' /var/lib/clickhouse)" = "clickhouse clickhouse 750" ] || fail "$name: /var/lib/clickhouse owner/mode"
-  grep -qx 'ExecStartPre=/bin/chmod 0750 /var/lib/clickhouse' /etc/systemd/system/clickhouse-server.service.d/rowsafe.conf || fail "$name: no start drop-in"
+  grep -qx 'ExecStartPre=-/bin/chmod 0750 /var/lib/clickhouse' /etc/systemd/system/clickhouse-server.service.d/rowsafe.conf || fail "$name: no start drop-in"
   runuser -u rowsafe -g rowsafe -G clickhouse -- ls /var/lib/clickhouse/store >/dev/null || fail "$name: the agent (group clickhouse, as its unit gives it) can't read the data folder"
   # Rowsafe's own user, installed by root as a users.d file (no administrator asked).
-  called "clickhouse-login --port 8123 --users-xml"
+  called "clickhouse-login --port 8123 --users-xml --rowsafe-server"
   [ "$(stat -c '%U %G %a' /etc/clickhouse-server/users.d/rowsafe.xml)" = "root clickhouse 640" ] || fail "$name: users.d/rowsafe.xml owner/mode"
   [ "$(chq rowsafe agent-password-for-the-test 'SELECT currentUser()')" = rowsafe ] || fail "$name: Rowsafe's user can't sign in"
   called "apply --database db_fake"
@@ -4510,7 +4529,8 @@ cloud_clickhouse_checks() {
       [ "$(cat "$W/fp")" = "$(openssl x509 -in /etc/ssl/rowsafe-clickhouse/rowsafe-server.crt -noout -fingerprint -sha256)" ] || fail "ClickHouse doesn't present its certificate on $p"
     if echo | openssl s_client -tls1_1 -connect "$ip:$p" >"$W/tls11" 2>&1 && grep -q 'Cipher is [A-Z]' "$W/tls11"; then fail "TLS 1.1 accepted on $p"; fi
   done
-  grep -Eq "ClickHouse's ports \(([0-9]+, )*8443(, [0-9]+)*\) are closed to everyone but this server" "$W/out" && grep -q '9440' "$W/out" || fail "$name: no word about the firewall"
+  grep -q "ClickHouse's ports (8443, 9440) are closed to everyone but this server" "$W/out" || fail "$name: no word about the firewall"
+  ! grep -Eqx '8123|9000' /etc/rowsafe/firewall-allowed || fail "$name: the plain ports (this server's only) are in the firewall's allow list"
   # From the network: an app's user over TLS (native protocol and HTTPS); nothing plain.
   chq admin "$pw" "CREATE USER app IDENTIFIED WITH sha256_password BY 'app-password-for-the-test'" >/dev/null
   chq admin "$pw" 'GRANT SELECT ON system.one TO app' >/dev/null
@@ -4520,6 +4540,19 @@ cloud_clickhouse_checks() {
   if clickhouse-client --host "$ip" --port 9000 --user app --password app-password-for-the-test -q 'SELECT 1' >"$W/plain" 2>&1; then fail "plain native protocol from the network"; fi
   if curl -sS -u app:app-password-for-the-test --data-binary 'SELECT 1' "http://$ip:8123/" >"$W/plain" 2>&1; then fail "plain HTTP from the network"; fi
   if curl -sS -k --data-binary 'SELECT 1' "https://$ip:8443/" 2>&1 | grep -qx 1; then fail "HTTPS without a password"; fi
+  # Access control: the system tables need a grant; no clusters (the
+  # packages' test ones point elsewhere); apps' users (made like Databases &
+  # users does, as Rowsafe's user) get rowsafe_app's limits and can't raise them.
+  [ "$(chq admin "$pw" 'SELECT count() FROM system.clusters')" = 0 ] || fail "$name: clusters are configured"
+  chq rowsafe agent-password-for-the-test "CREATE USER app2 IDENTIFIED WITH sha256_password BY 'app2-password-for-the-test' HOST ANY SETTINGS PROFILE 'rowsafe_app'" >/dev/null
+  chq rowsafe agent-password-for-the-test 'CREATE DATABASE appdb2' >/dev/null
+  chq rowsafe agent-password-for-the-test 'GRANT SELECT, INSERT, CREATE TABLE ON appdb2.* TO app2' >/dev/null
+  [ "$(chq app2 app2-password-for-the-test 'SELECT count() FROM system.tables WHERE database = currentDatabase()')" = 0 ] || fail "$name: an app's user can't list its own tables"
+  chq app2 app2-password-for-the-test 'SELECT count() FROM system.query_log' | grep -q 'ACCESS_DENIED' || fail "$name: an app's user reads system.query_log"
+  chq app2 app2-password-for-the-test 'SELECT 1 SETTINGS max_memory_usage = 999999999999' | grep -q 'SETTING_CONSTRAINT_VIOLATION' || fail "$name: an app's user raised its memory limit"
+  [ "$(chq app2 app2-password-for-the-test "SELECT getSetting('max_threads') <= $(nproc)")" = 1 ] || fail "$name: rowsafe_app's threads"
+  chq admin "$pw" 'DROP USER app2' >/dev/null
+  chq admin "$pw" 'DROP DATABASE appdb2' >/dev/null
   # The administrator signs in from this server's own addresses only (HOST
   # LOCAL; this container's address is one of them, so it is read, not tried).
   [ "$(chq admin "$pw" "SELECT empty(host_ip) AND host_names = ['localhost'] AND empty(host_names_regexp) FROM system.users WHERE name = 'admin'")" = 1 ] ||
