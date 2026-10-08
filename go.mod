@@ -11,7 +11,7 @@ require (
 	github.com/minio/minio-go/v7 v7.3.0
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/ncruces/go-sqlite3 v0.35.6
-	github.com/pganalyze/pg_query_go/v6 v6.2.2
+	github.com/pganalyze/pg_query_go/v6 v6.2.5
 	github.com/wasilibs/go-pgquery v0.0.0-20260915022521-81f99195012b
 	go.mongodb.org/mongo-driver/v2 v2.9.1
 	go.yaml.in/yaml/v3 v3.0.5
