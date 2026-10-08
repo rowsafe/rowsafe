@@ -427,6 +427,7 @@ func (s *server) rewindCopy(ctx context.Context, p protocol.RewindCopyParams, lo
 	if err := s.replay(cctx, sc, r, target, log); err != nil {
 		return fail(err)
 	}
+	rec.PID = sc.PID // replay starts the private server again
 	rec.RecoveredTo = recoveredTo(r, target)
 	if rec.RecoveredTo == nil {
 		t := r.Backup.StoppedAt
