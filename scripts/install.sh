@@ -64,6 +64,13 @@
 #                          password stays root's (/etc/rowsafe/clickhouse),
 #                          settings for servers from 4 GB of memory. Only one
 #                          --install-X per run
+#   --install-opensearch 3 the same for OpenSearch 3 from OpenSearch's repository
+#                          (artifacts.opensearch.org, key checked, pinned to 3.x;
+#                          no demo certificates or users): an administrator
+#                          "admin" whose random password stays root's
+#                          (/etc/rowsafe/opensearch), TLS on 9200, the
+#                          node-to-node port on 127.0.0.1 only, half the memory
+#                          for its heap, Performance Analyzer off. Needs 4 GB
 #   --listen-public        PostgreSQL listens on every address: TLS on (a
 #                          self-signed certificate made here), SCRAM-SHA-256
 #                          passwords for logins from the network (hostssl rules
@@ -74,7 +81,9 @@
 #                          --install-valkey: TLS on port 6380 only (no plain
 #                          port; this server's tools use a Unix socket); with
 #                          --install-clickhouse: TLS only on 9440 (native) and
-#                          8443 (HTTPS), plain 9000 and 8123 on 127.0.0.1 only
+#                          8443 (HTTPS), plain 9000 and 8123 on 127.0.0.1 only;
+#                          --install-opensearch: HTTPS on 9200 only, 9300 on
+#                          127.0.0.1
 #   (Permissions: without a terminal, restart, create-cluster, updates, pooler,
 #   tuning, sqlite-modes and files are allowed unless --no-allow-X; the
 #   server's own security updates, reboot, firewall and pooler-public only
@@ -188,8 +197,8 @@ RESTART_ALLOW_FILE=$CONFIG_DIR/restart-allowed
 RESTART_DIR=$STATE_DIR/restart
 # The database units the restart helper acts on (its db_unit_re): Debian's
 # PostgreSQL clusters and the MySQL, MariaDB, MongoDB, ClickHouse, Redis and
-# Valkey units.
-DB_UNIT_RE='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server|(redis|valkey)(-server)?(@[A-Za-z0-9_.-]+)?)[.]service$'
+# Valkey units (and OpenSearch's).
+DB_UNIT_RE='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server|opensearch|(redis|valkey)(-server)?(@[A-Za-z0-9_.-]+)?)[.]service$'
 # Forks (--allow-create-cluster): new clusters created by their own unit,
 # started by the restart helper.
 CREATE_HELPER=$LIB_DIR/rowsafe-pg-create-cluster
@@ -308,8 +317,10 @@ LISTEN_PUBLIC=0    # --listen-public
 PG_OURS=0          # the PostgreSQL here is the one --install-postgres installed
 DB_OURS=0          # the INSTALL_DB server here is the one this installer installed
 DB_STARTED=0       # this run started it (its settings were in place before)
+DB_FRESH=0         # this run installed it (nothing runs on it yet)
 CH_CONF_CHANGED=0  # --install-clickhouse's settings changed in this run
-INSTALL_TWICE="--install-postgres, --install-mysql, --install-mariadb, --install-valkey and --install-clickhouse each install a database server on a fresh server: give only one"
+OS_CONF_CHANGED=0  # --install-opensearch's settings changed in this run
+INSTALL_TWICE="--install-postgres, --install-mysql, --install-mariadb, --install-valkey, --install-clickhouse and --install-opensearch each install a database server on a fresh server: give only one"
 SQLITE_PATHS=''    # --sqlite PATH, one per line
 SQLITE_LIST=$CONFIG_DIR/sqlite-paths # the agent's SQLite files (one per line)
 SQLITE_CLONE_DIRS='' # --sqlite-clone-dir DIR, one per line
@@ -404,6 +415,14 @@ Options (when piping, pass them after `sh -s --`):
                          in, an administrator "admin" (this server only) with a random
                          password kept for root only in /etc/rowsafe/clickhouse/admin-password,
                          settings for small servers. Needs 4 GB of memory or more.
+  --install-opensearch 3 the same for OpenSearch 3 (one server, no cluster) from OpenSearch's
+                         repository (artifacts.opensearch.org, its signing key checked;
+                         updates stay on 3.x), without its demo certificates and users:
+                         an administrator "admin" with a random password kept for root
+                         only in /etc/rowsafe/opensearch/admin-password, HTTPS on port
+                         9200 (a certificate made here), the node-to-node port 9300 on
+                         127.0.0.1 only, half of the memory for OpenSearch (at most 31 GB),
+                         Performance Analyzer off. Needs 4 GB of memory or more.
                          Each --install-X refuses when a database server is already
                          installed (a re-run keeps the one it installed); give only one
   --listen-public        make PostgreSQL reachable from the network: it listens on every
@@ -417,7 +436,9 @@ Options (when piping, pass them after `sh -s --`):
                          logins over the network; with --install-valkey: TLS on port 6380
                          (passwords only) and no plain port; this server's tools use a socket;
                          with --install-clickhouse: TLS only, on 9440 (native protocol) and
-                         8443 (HTTPS); the plain ports 9000 and 8123 on 127.0.0.1 only
+                         8443 (HTTPS); the plain ports 9000 and 8123 on 127.0.0.1 only;
+                         with --install-opensearch: HTTPS on 9200 (passwords only); 9300
+                         stays on 127.0.0.1
   --sqlite PATH          protect the SQLite database file PATH (repeat for several);
                          with --protect NAME, give exactly one. The installer also finds
                          the SQLite files running apps have open and asks about each
@@ -534,6 +555,9 @@ Environment:
   ROWSAFE_REDIS_ADMIN_USER, ROWSAFE_REDIS_ADMIN_PASSWORD  without a terminal: a Redis or
                          Valkey administrator (default, for a server with only a
                          password) to create Rowsafe's own user (used once, never saved)
+  ROWSAFE_OPENSEARCH_ADMIN_USER, ROWSAFE_OPENSEARCH_ADMIN_PASSWORD  without a terminal: an
+                         OpenSearch administrator (a user with all_access, e.g. admin)
+                         to create Rowsafe's own OpenSearch user (used once, never saved)
   ROWSAFE_URL, ROWSAFE_ENROLL_TOKEN, ROWSAFE_REPO_*  written to /etc/rowsafe/agent.env
                          (ROWSAFE_ENROLL_TOKEN may instead be the argument rse_...)
                          (ROWSAFE_URL defaults to https://api.rowsafe.sh)
@@ -584,8 +608,8 @@ Turning on backups:
   installs PostgreSQL 17, makes it reachable with TLS and passwords, keeps
   backups in Rowsafe Storage with a passphrase generated on the server (see it
   in the dashboard, sealed to your browser) and turns them on. The same with
-  --install-mysql 8.4, --install-mariadb 11.8, --install-valkey 8 or
-  --install-clickhouse 26.8 instead.
+  --install-mysql 8.4, --install-mariadb 11.8, --install-valkey 8,
+  --install-clickhouse 26.8 or --install-opensearch 3 instead.
 
   ClickHouse: Rowsafe's own ClickHouse user is added as
   /etc/clickhouse-server/users.d/rowsafe.xml (ClickHouse loads it by itself,
@@ -601,6 +625,21 @@ Turning on backups:
   password) to the configuration file. Backups come from the server itself
   over replication, so nothing is installed or restarted. Redis Cluster,
   Redis older than 7.0 and Valkey older than 7.2 are not supported yet.
+
+  OpenSearch: backups are OpenSearch's own snapshots, taken into a folder
+  of its own, /var/lib/rowsafe-opensearch/snapshots (the opensearch user's;
+  the agent joins the opensearch group to read it and OpenSearch's
+  settings, never to write them), then encrypted and copied to your bucket.
+  OpenSearch only takes snapshots into a folder listed in path.repo, and
+  Rowsafe's own OpenSearch user (rowsafe, made with an administrator's login
+  once) may manage users only when its role is listed in
+  plugins.security.restapi.roles_enabled: the installer adds both to
+  /etc/opensearch/opensearch.yml (the previous file kept next to it as
+  opensearch.yml.rowsafe-backup). OpenSearch reads them when it starts: on
+  a terminal the installer asks before restarting it; otherwise backups
+  start after its next restart. Without the security plugin no login is
+  needed, but then anyone who reaches port 9200 can read and change
+  everything: keep it closed to the network.
 
   SQLite: a database is a file your app opens. The installer finds the
   files running programs have open (here and inside Docker containers, as
@@ -906,11 +945,62 @@ redis_group() {
   done
 }
 # <<< redis
+# >>> opensearch: without PostgreSQL, MySQL/MariaDB, MongoDB, ClickHouse,
+# Redis and Valkey but with OpenSearch, the agent runs as its own system
+# user, rowsafe, too.
+detect_opensearch_host() {
+  [ "$HOST_ENGINE" = postgresql ] || return 0
+  id -u postgres >/dev/null 2>&1 && return 0
+  opensearch_present || return 0
+  HOST_ENGINE=opensearch
+  use_rowsafe_user
+  AGENT_HOME=$STATE_DIR
+}
+
+# opensearch_setup: on an OpenSearch server without PostgreSQL, a unit
+# drop-in runs the agent as rowsafe. The opensearch group lets it read
+# (never write) OpenSearch's settings (/etc/opensearch: Proof and Rewind
+# copies start a temporary OpenSearch with the server's JVM and log
+# settings) and the snapshots OpenSearch takes into Rowsafe's folder. The
+# rowsafe user joins that group in /etc/group too, so the installer's own
+# runs of the agent (runuser) read the same files.
+opensearch_setup() {
+  _dropin=/etc/systemd/system/$SERVICE.d
+  if [ "$HOST_ENGINE" != opensearch ]; then
+    [ ! -f "$_dropin/10-opensearch.conf" ] || { rm -f "$_dropin/10-opensearch.conf"; UNIT_CHANGED=1; CHANGED=1; }
+    return 0
+  fi
+  install -d -m 0755 "$_dropin"
+  _grp=''
+  if getent group opensearch >/dev/null 2>&1; then
+    _grp=opensearch
+    if ! id -nG "$AGENT_USER" 2>/dev/null | tr ' ' '\n' | grep -qx opensearch; then
+      usermod -a -G opensearch "$AGENT_USER" || die "could not add the $AGENT_USER user to the opensearch group"
+      ok "the $AGENT_USER user (the agent) joined the opensearch group: it reads OpenSearch's settings and snapshots, never writes them"
+    fi
+  fi
+  if {
+    echo "# Written by the Rowsafe installer: this server runs OpenSearch."
+    echo "[Unit]"
+    echo "After=opensearch.service"
+    echo "[Service]"
+    echo "User=rowsafe"
+    echo "Group=rowsafe"
+    [ -z "$_grp" ] || echo "SupplementaryGroups=$_grp"
+    # The REST port's certificate (--install-opensearch): the agent
+    # replaces it with one from Let's Encrypt; OpenSearch reloads it.
+    [ ! -d "$OPENSEARCH_TLS_DIR" ] || echo "ReadWritePaths=-$OPENSEARCH_TLS_DIR"
+  } | write_file "$_dropin/10-opensearch.conf" 0644 root:root; then
+    UNIT_CHANGED=1 CHANGED=1
+  fi
+}
+# <<< opensearch
 # >>> mysql
 
 engine_label() {
   case ${1:-$HOST_ENGINE} in
     mysql) echo MySQL ;; mariadb) echo MariaDB ;; mongodb) echo MongoDB ;; clickhouse) echo ClickHouse ;;
+    opensearch) echo OpenSearch ;;
     redis) echo Redis ;; valkey) echo Valkey ;; sqlite) echo SQLite ;; *) echo PostgreSQL ;;
   esac
 }
@@ -1067,7 +1157,8 @@ check_postgres() {
     PG_MAJORS="$PG_MAJORS ${major%%/*}"
   done
   PG_MAJORS=${PG_MAJORS# }
-  if [ -z "$PG_MAJORS" ] && [ -z "${ROWSAFE_PG_BIN_DIR:-}" ] && ! mongodb_present && ! clickhouse_present && ! redis_present; then
+  if [ -z "$PG_MAJORS" ] && [ -z "${ROWSAFE_PG_BIN_DIR:-}" ] && ! mongodb_present && ! clickhouse_present && ! redis_present &&
+    ! opensearch_present; then
     die "no PostgreSQL server found under /usr/lib/postgresql. Restore drills need the server binaries (pg_ctl); set ROWSAFE_PG_BIN_DIR if they live elsewhere."
   fi
 }
@@ -1514,6 +1605,39 @@ CLICKHOUSE_ADMIN_FILE=/etc/clickhouse-server/users.d/zz-rowsafe-admin.xml
 CLICKHOUSE_ADMIN_PW_FILE=$CONFIG_DIR/clickhouse/admin-password
 CLICKHOUSE_DROPIN=/etc/systemd/system/clickhouse-server.service.d/rowsafe.conf
 CLICKHOUSE_TLS_DIR=/etc/ssl/rowsafe-clickhouse
+# >>> opensearch
+# OpenSearch's own repository (https://opensearch.org/downloads/), the 3.x
+# series, signed by OpenSearch's release key for 3.0.0 and later.
+OPENSEARCH_KEY_URL=https://artifacts.opensearch.org/publickeys/opensearch-release.pgp
+OPENSEARCH_KEY_FPR=A8B2D9E04CD51FEF6AA2DB53BA81D99981191457
+OPENSEARCH_KEYRING=/usr/share/keyrings/rowsafe-opensearch.gpg
+OPENSEARCH_LIST=/etc/apt/sources.list.d/rowsafe-opensearch.list
+OPENSEARCH_PIN=/etc/apt/preferences.d/rowsafe-opensearch
+# OpenSearch's files (the package's places), Rowsafe's snapshot folder (in
+# path.repo; OpenSearch writes there, the agent reads through the group),
+# and --install-opensearch's own: the heap, the administrator's password
+# (root's only), the unit drop-in, the memory map limit, the node-to-node
+# certificates (root's; only OpenSearch reads the key) and the REST port's
+# certificate (written as the agent, which replaces it with one from Let's
+# Encrypt; OpenSearch reads it through its group and reloads it by itself).
+OPENSEARCH_HOME=/usr/share/opensearch
+OPENSEARCH_CONF_DIR=/etc/opensearch
+OPENSEARCH_YML=$OPENSEARCH_CONF_DIR/opensearch.yml
+OPENSEARCH_SNAPSHOTS=/var/lib/rowsafe-opensearch/snapshots
+# The weekly refresh of OpenSearch's signing key (its signing subkey expires;
+# OpenSearch renews it under the same pinned fingerprint): the script, its
+# systemd units, and the status the agent reports to Pulse.
+OPENSEARCH_KEY_SCRIPT=/usr/local/lib/rowsafe/opensearch-key-refresh
+OPENSEARCH_KEY_UNIT=/etc/systemd/system/rowsafe-opensearch-key.service
+OPENSEARCH_KEY_TIMER=/etc/systemd/system/rowsafe-opensearch-key.timer
+OPENSEARCH_KEY_STATUS=/var/lib/rowsafe-opensearch/key-status
+OPENSEARCH_HEAP_FILE=$OPENSEARCH_CONF_DIR/jvm.options.d/rowsafe-heap.options
+OPENSEARCH_ADMIN_PW_FILE=$CONFIG_DIR/opensearch/admin-password
+OPENSEARCH_DROPIN=/etc/systemd/system/opensearch.service.d/rowsafe.conf
+OPENSEARCH_SYSCTL=/etc/sysctl.d/90-rowsafe-opensearch.conf
+OPENSEARCH_TRANSPORT_DIR=/etc/ssl/rowsafe-opensearch-transport
+OPENSEARCH_TLS_DIR=/etc/ssl/rowsafe-opensearch
+# <<< opensearch
 
 # db_record [ENGINE]: the file holding the version this installer installed.
 db_record() { printf '%s/installed-%s\n' "$CONFIG_DIR" "${1:-$INSTALL_DB}"; }
@@ -1523,13 +1647,14 @@ db_unit() {
   case $1 in
     mysql) echo mysql.service ;; mariadb) echo mariadb.service ;; valkey) echo valkey-server.service ;;
     clickhouse) echo clickhouse-server.service ;;
+    opensearch) echo opensearch.service ;;
   esac
 }
 
 # db_port: the port the installed server listens on (the agent's): Valkey's
 # plain port, or its TLS port once it has no plain one (--listen-public);
 # ClickHouse's HTTP interface (8123, this server only).
-db_port() { case $INSTALL_DB in valkey) valkey_port ;; clickhouse) echo 8123 ;; *) echo 3306 ;; esac; }
+db_port() { case $INSTALL_DB in valkey) valkey_port ;; clickhouse) echo 8123 ;; opensearch) echo 9200 ;; *) echo 3306 ;; esac; }
 
 # valkey_port: the port in valkey.conf, the TLS port when the plain one is 0.
 valkey_port() {
@@ -1540,7 +1665,7 @@ valkey_port() {
 # db_public_ports: the ports --listen-public opens (Valkey: its TLS port;
 # it has no plain one then; ClickHouse: the native protocol's and HTTPS's
 # TLS ports).
-db_public_ports() { case $INSTALL_DB in valkey) echo 6380 ;; clickhouse) echo 9440 8443 ;; *) echo 3306 ;; esac; }
+db_public_ports() { case $INSTALL_DB in valkey) echo 6380 ;; clickhouse) echo 9440 8443 ;; opensearch) echo 9200 ;; *) echo 3306 ;; esac; }
 
 # mysql_net_conf: the file --install-mysql/-mariadb keeps the network
 # settings in. MariaDB's packages read mariadb.conf.d after conf.d (and set
@@ -1559,6 +1684,7 @@ db_program() {
     mariadb) _p=/usr/sbin/mariadbd ;;
     valkey) _p=/usr/bin/valkey-server ;;
     clickhouse) _p=/usr/bin/clickhouse-server ;;
+    opensearch) _p=$OPENSEARCH_HOME/bin/opensearch ;;
   esac
   [ -x "$_p" ] && echo "$_p"
 }
@@ -1586,7 +1712,7 @@ existing_database() {
   if have dpkg-query; then
     # shellcheck disable=SC2016 # dpkg-query's own ${...} fields
     _p=$(dpkg-query -W -f '${Package} ${db:Status-Status}\n' 'mysql-server*' 'mysql-community-server*' 'mariadb-server*' \
-      'percona-server-server*' 'mongodb-org-server' 'clickhouse-server' 'redis-server' 'valkey-server' 2>/dev/null |
+      'percona-server-server*' 'mongodb-org-server' 'clickhouse-server' 'redis-server' 'valkey-server' 'opensearch' 2>/dev/null |
       awk '$2 == "installed" { print $1; exit }')
     if [ -n "$_p" ]; then
       printf 'the package %s' "$_p"
@@ -1599,6 +1725,7 @@ existing_database() {
   fi
   if mongodb_present; then printf 'MongoDB'; return 0; fi
   if clickhouse_present; then printf 'ClickHouse'; return 0; fi
+  if opensearch_present; then printf 'OpenSearch'; return 0; fi
   if redis_present; then
     if redis_find_program; then printf '%s %s' "$(engine_label "$REDIS_FOUND_ENGINE")" "$REDIS_VERSION"; else printf 'Redis or Valkey'; fi
     return 0
@@ -1634,6 +1761,13 @@ install_db_check() {
       _mb=$(mem_mb)
       [ "$_mb" -ge 3000 ] ||
         die "ClickHouse needs a server with at least 4 GB of memory, and this one has $_mb MB. Choose a bigger server for ClickHouse."
+      ;;
+    opensearch)
+      case $OS_ID in debian | ubuntu) ;; *) die "--install-opensearch works on Debian and Ubuntu; $OS_NAME isn't one of them" ;; esac
+      # A 4 GB server shows a little less (the kernel's share).
+      _mb=$(mem_mb)
+      [ "$_mb" -ge 3500 ] ||
+        die "OpenSearch needs a server with at least 4 GB of memory, and this one has $_mb MB. Choose a bigger server for OpenSearch."
       ;;
   esac
   if ! db_ours; then
@@ -1794,19 +1928,36 @@ install_database() {
         # The packages don't start the server: its settings are in place first.
         apt_install clickhouse-server clickhouse-client
         ;;
+      opensearch)
+        step "Installing OpenSearch 3 from OpenSearch's repository"
+        opensearch_repo
+        _c=$(apt_candidate opensearch)
+        case $_c in 3.*) ;; *) die "OpenSearch 3 isn't available for $OS_NAME ($ARCH) from OpenSearch's repository (found ${_c:-nothing})" ;; esac
+        note "OpenSearch $_c: about 800 MB to download (it brings its own Java)"
+        # Without the demo configuration (its certificates and users with
+        # known passwords). The package doesn't start the server: its
+        # settings and its only user are in place first.
+        DISABLE_INSTALL_DEMO_CONFIG=true
+        export DISABLE_INSTALL_DEMO_CONFIG
+        apt_install opensearch
+        unset DISABLE_INSTALL_DEMO_CONFIG
+        ;;
     esac
     [ -n "$(db_program "$INSTALL_DB")" ] || die "$_n's packages installed, but its server program isn't there"
     [ -d "$CONFIG_DIR" ] || install -d -m 0750 -o root -g root "$CONFIG_DIR"
     printf '%s\n' "$INSTALL_DB_VERSION" | write_file "$(db_record)" 0644 root:root || true
+    DB_FRESH=1
     ok "$_n $(db_version) installed"
   fi
   DB_OURS=1
   CH_CONF_CHANGED=0
   [ "$INSTALL_DB" != clickhouse ] || clickhouse_conf
+  [ "$INSTALL_DB" != opensearch ] || opensearch_conf # opensearch
   db_running
   case $INSTALL_DB in
     valkey) valkey_secure ;;
     clickhouse) clickhouse_secure ;;
+    opensearch) opensearch_secure ;;
     *) mysql_secure ;;
   esac
 }
@@ -1816,6 +1967,7 @@ db_version() {
   case $INSTALL_DB in
     valkey) valkey-server --version 2>/dev/null | sed -n 's/.* v=\([0-9.]*\).*/\1/p' ;;
     clickhouse) clickhouse-server --version 2>/dev/null | sed -n 's/.*version \([0-9][0-9.]*[0-9]\).*/\1/p' | head -n 1 ;;
+    opensearch) opensearch_pkg_version ;; # (the package's: starting the JVM just for it takes seconds)
     *) "$(db_program "$INSTALL_DB")" --version 2>/dev/null | sed -n 's/.*Ver \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' ;;
   esac
 }
@@ -1836,6 +1988,10 @@ db_running() {
     clickhouse)
       case $(db_version) in "$INSTALL_DB_VERSION".*) ;; *) die "the ClickHouse here is $(db_version), not ClickHouse $INSTALL_DB_VERSION" ;; esac
       clickhouse_ready || die "ClickHouse started but doesn't answer on 127.0.0.1:8123 (see /var/log/clickhouse-server)"
+      ;;
+    opensearch)
+      case $(db_version) in 3.*) ;; *) die "the OpenSearch here is $(db_version), not OpenSearch 3" ;; esac
+      opensearch_ready || die "OpenSearch started but doesn't answer on https://127.0.0.1:9200 (see /var/log/opensearch)"
       ;;
   esac
   ok "$(engine_label "$INSTALL_DB") $(db_version) is running on port $(db_port)"
@@ -1957,11 +2113,12 @@ tls_serves() {
   [ -n "$_want" ] && [ "$_want" = "$_got" ]
 }
 
-# db_listen_public is --listen-public for --install-mysql/-mariadb/-valkey/-clickhouse.
+# db_listen_public is --listen-public for --install-mysql/-mariadb/-valkey/-clickhouse/-opensearch.
 db_listen_public() {
   case $INSTALL_DB in
     valkey) valkey_listen_public ;;
     clickhouse) clickhouse_listen_public ;;
+    opensearch) opensearch_listen_public ;;
     *) mysql_listen_public ;;
   esac
 }
@@ -2399,6 +2556,503 @@ clickhouse_listen_public() {
     ok "ClickHouse listens on the network (TLS on 9440 and 8443, passwords only; 8123 and 9000 on this server only)"
   fi
 }
+
+# >>> opensearch
+# opensearch_repo adds OpenSearch's repository (its 3.x series), pinned so
+# updates stay on OpenSearch 3 and nothing else from that repository is
+# installed on its own. Its signing key must be the pinned one, and still
+# able to sign: apt refuses packages from an expired or revoked key.
+opensearch_repo() {
+  fetch "$OPENSEARCH_KEY_URL" "$TMP/repo.asc" || die "could not download OpenSearch's signing key ($OPENSEARCH_KEY_URL)"
+  repo_key "$TMP/repo.asc" "$OPENSEARCH_KEY_FPR" "OpenSearch's" "$OPENSEARCH_KEYRING"
+  # (repo_key's listing of the key: a signing key, or its own primary, valid now)
+  awk -F: -v now="$(date +%s)" '($1 == "pub" || $1 == "sub") && $12 ~ /s/ && $2 !~ /^[eridn]$/ && ($7 == "" || $7 + 0 > now) { f = 1 }
+    END { exit !f }' "$TMP/key.list" ||
+    die "OpenSearch's signing key ($OPENSEARCH_KEY_FPR) has no signing key that is still valid, so apt wouldn't trust its packages; not installing OpenSearch. Try again once its renewed key is published."
+  echo "deb [signed-by=$OPENSEARCH_KEYRING] https://artifacts.opensearch.org/releases/bundle/opensearch/3.x/apt stable main" |
+    write_file "$OPENSEARCH_LIST" 0644 root:root || true
+  printf '%s\n' "# Written by the Rowsafe installer (--install-opensearch): OpenSearch comes from" \
+    "# OpenSearch's repository and stays on the 3.x series." \
+    "Package: opensearch" "Pin: version 3.*" "Pin-Priority: 600" "" \
+    "Package: *" "Pin: origin artifacts.opensearch.org" "Pin-Priority: 100" |
+    write_file "$OPENSEARCH_PIN" 0644 root:root || true
+  apt_update
+  ok "OpenSearch's repository (artifacts.opensearch.org, 3.x, key $OPENSEARCH_KEY_FPR)"
+  opensearch_key_timer
+}
+
+# opensearch_key_timer installs the weekly refresh of OpenSearch's signing
+# key: the key is downloaded again and, only when it is still exactly one
+# key with the pinned fingerprint and a signing key valid now, replaces the
+# one apt uses. Its status (ok, or why apt can't trust the repository any
+# more) is read by the agent for Pulse.
+opensearch_key_timer() {
+  install -d -m 0755 -o root -g root "${OPENSEARCH_KEY_SCRIPT%/*}"
+  [ -d "${OPENSEARCH_KEY_STATUS%/*}" ] || install -d -m 0755 -o root -g root "${OPENSEARCH_KEY_STATUS%/*}"
+  _changed=0
+  if {
+    echo '#!/bin/sh'
+    echo '# Written by the Rowsafe installer (--install-opensearch): keeps apt trusting'
+    echo "# OpenSearch's repository when OpenSearch renews its signing key (same fingerprint)."
+    echo 'set -u'
+    echo "url=$OPENSEARCH_KEY_URL"
+    echo "fpr=$OPENSEARCH_KEY_FPR"
+    echo "keyring=$OPENSEARCH_KEYRING"
+    echo "status=$OPENSEARCH_KEY_STATUS"
+    cat <<'ROWSAFE_OS_KEY_EOF'
+tmp=$(mktemp -d) || exit 1
+trap 'rm -rf "$tmp"' EXIT
+mkdir -m 0700 "$tmp/g"
+say() { printf '%s
+' "$1" >"$status.new" && chmod 0644 "$status.new" && mv -f "$status.new" "$status"; }
+# valid LISTING: a signing key (or a primary that signs) valid now.
+valid() {
+  awk -F: -v now="$(date +%s)" '($1 == "pub" || $1 == "sub") && $12 ~ /s/ && $2 !~ /^[eridn]$/ && ($7 == "" || $7 + 0 > now) { f = 1 } END { exit !f }' "$1"
+}
+if curl -fsSL --max-time 60 -o "$tmp/key.asc" "$url"; then
+  GNUPGHOME=$tmp/g gpg --batch --show-keys --with-colons "$tmp/key.asc" >"$tmp/list" 2>/dev/null
+  got=$(awk -F: '$1 == "fpr" { print $10; exit }' "$tmp/list")
+  if [ "$(grep -c '^pub:' "$tmp/list")" = 1 ] && [ "$got" = "$fpr" ] && valid "$tmp/list" &&
+    GNUPGHOME=$tmp/g gpg --batch --yes --dearmor -o "$tmp/key.gpg" "$tmp/key.asc" 2>/dev/null; then
+    cmp -s "$tmp/key.gpg" "$keyring" || { install -m 0644 "$tmp/key.gpg" "$keyring.new" && mv -f "$keyring.new" "$keyring"; }
+  fi
+fi
+GNUPGHOME=$tmp/g gpg --batch --show-keys --with-colons "$keyring" >"$tmp/have" 2>/dev/null
+if valid "$tmp/have"; then
+  say ok
+else
+  say "OpenSearch's signing key on this server has expired and OpenSearch hasn't published a renewed one with the same fingerprint yet, so apt can't install OpenSearch's updates (Rowsafe checks again every week)."
+fi
+ROWSAFE_OS_KEY_EOF
+  } | write_file "$OPENSEARCH_KEY_SCRIPT" 0755 root:root; then _changed=1; fi
+  if printf '%s\n' "# Written by the Rowsafe installer (--install-opensearch)." "[Unit]" \
+    "Description=Rowsafe: refresh OpenSearch's repository signing key (same fingerprint)" "After=network-online.target" \
+    "[Service]" "Type=oneshot" "ExecStart=$OPENSEARCH_KEY_SCRIPT" "PrivateTmp=true" "NoNewPrivileges=true" |
+    write_file "$OPENSEARCH_KEY_UNIT" 0644 root:root; then _changed=1; fi
+  if printf '%s\n' "# Written by the Rowsafe installer (--install-opensearch)." "[Unit]" \
+    "Description=Rowsafe: refresh OpenSearch's repository signing key every week" "[Timer]" \
+    "OnCalendar=weekly" "RandomizedDelaySec=6h" "Persistent=true" "[Install]" "WantedBy=timers.target" |
+    write_file "$OPENSEARCH_KEY_TIMER" 0644 root:root; then _changed=1; fi
+  if systemd_running; then
+    [ "$_changed" = 0 ] || systemctl daemon-reload 2>/dev/null || true
+    systemctl enable --now --quiet rowsafe-opensearch-key.timer 2>/dev/null || warn "could not turn on the weekly refresh of OpenSearch's signing key"
+  fi
+  "$OPENSEARCH_KEY_SCRIPT" >/dev/null 2>&1 || true
+  [ "$(cat "$OPENSEARCH_KEY_STATUS" 2>/dev/null)" = ok ] || warn "apt doesn't trust OpenSearch's repository key now (see $OPENSEARCH_KEY_STATUS)"
+}
+
+# opensearch_pkg_version prints the installed opensearch package's version.
+opensearch_pkg_version() {
+  # shellcheck disable=SC2016 # dpkg-query's own ${...} fields
+  dpkg-query -W -f '${db:Status-Status} ${Version}\n' opensearch 2>/dev/null | awk '$1 == "installed" { sub(/^[0-9]+:/, "", $2); print $2; exit }'
+}
+
+# opensearch_https PATH [USER PASSWORD] prints the HTTP status of a GET on
+# this server's REST port (https://127.0.0.1:9200), 000 when nothing
+# answers; the body goes to $TMP/os.body. The password goes to curl on
+# stdin, never on a command line.
+opensearch_https() {
+  if [ -n "${2:-}" ]; then
+    printf 'user = "%s:%s"\n' "$2" "$3" |
+      curl -sk --max-time 30 -K - -o "$TMP/os.body" -w '%{http_code}' "https://127.0.0.1:9200$1" 2>/dev/null || true
+  else
+    curl -sk --max-time 30 -o "$TMP/os.body" -w '%{http_code}' "https://127.0.0.1:9200$1" 2>/dev/null </dev/null || true
+  fi
+}
+
+# opensearch_ready: OpenSearch answers on https://127.0.0.1:9200 and asks
+# for a password (waits up to 5 minutes: a small server starts it slowly).
+opensearch_ready() {
+  _i=0
+  until [ "$(opensearch_https /)" = 401 ]; do
+    [ $_i -lt 300 ] || return 1
+    ! systemctl is-failed --quiet opensearch.service 2>/dev/null || return 1
+    sleep 2
+    _i=$((_i + 2))
+  done
+}
+
+# opensearch_put FILE < content: FILE (in OpenSearch's folder, which its
+# packages make the opensearch user's) written as the opensearch user when
+# its content changed. Returns 0 when it changed.
+opensearch_put() {
+  cat >"$TMP/os.put"
+  if [ -f "$1" ] && cmp -s "$TMP/os.put" "$1"; then
+    return 1
+  fi
+  [ ! -L "$1" ] || die "$1 is a symbolic link; not writing it"
+  # shellcheck disable=SC2016 # $1 expands in the inner shell
+  (cd / && runuser -u opensearch -- sh -c 'umask 027; cat >"$1.rowsafe-new" && mv -f "$1.rowsafe-new" "$1"' rowsafe-opensearch "$1") <"$TMP/os.put" ||
+    die "could not write $1"
+  return 0
+}
+
+# opensearch_hash prints the bcrypt hash of the administrator's password
+# for internal_users.yml, made by OpenSearch's own tool (the password goes
+# to it in its environment, never on a command line).
+opensearch_hash() {
+  _t=$OPENSEARCH_HOME/plugins/opensearch-security/tools/hash.sh
+  [ -x "$_t" ] || die "OpenSearch's password tool ($_t) isn't there"
+  ROWSAFE_OPENSEARCH_PW=$(cat "$OPENSEARCH_ADMIN_PW_FILE") OPENSEARCH_JAVA_HOME=$OPENSEARCH_HOME/jdk \
+    "$_t" -env ROWSAFE_OPENSEARCH_PW 2>/dev/null </dev/null | grep -E '^[$]2[aby][$][0-9]{2}[$][./A-Za-z0-9]{53}$' | tail -n 1 || true
+}
+
+# opensearch_snapshot_dir: Rowsafe's snapshot folder, OpenSearch's to write
+# (opensearch:opensearch, 2750: the agent reads it through the group), in a
+# folder of root's.
+opensearch_snapshot_dir() {
+  _p=${OPENSEARCH_SNAPSHOTS%/*}
+  [ ! -L "$_p" ] && [ ! -L "$OPENSEARCH_SNAPSHOTS" ] || die "$_p or $OPENSEARCH_SNAPSHOTS is a symbolic link; not using it"
+  install -d -m 0750 -o root -g opensearch "$_p"
+  install -d -m 2750 -o opensearch -g opensearch "$OPENSEARCH_SNAPSHOTS"
+}
+
+# opensearch_transport_certs: the node-to-node certificate (port 9300, this
+# server only), signed by an authority made here whose key is deleted once
+# it signed. root's folder; only the opensearch user reads the key.
+opensearch_transport_certs() {
+  _d=$OPENSEARCH_TRANSPORT_DIR
+  [ ! -L "$_d" ] || die "$_d is a symbolic link; not using it"
+  install -d -m 0755 -o root -g root "$_d"
+  if [ -s "$_d/node.key" ] && [ -s "$_d/node.crt" ] && [ -s "$_d/ca.crt" ]; then
+    return 0
+  fi
+  rm -f "$TMP/os-ca.key" "$TMP/os-ca.crt" "$TMP/os-node.key" "$TMP/os-node.csr" "$TMP/os-node.crt"
+  (
+    cd "$TMP" &&
+      openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 -subj /CN=rowsafe-opensearch-ca \
+        -keyout os-ca.key -out os-ca.crt &&
+      openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -subj /CN=rowsafe-opensearch-node \
+        -keyout os-node.key -out os-node.csr &&
+      printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth,clientAuth\n' >os-node.ext &&
+      openssl x509 -req -in os-node.csr -CA os-ca.crt -CAkey os-ca.key -set_serial "0x$(openssl rand -hex 16)" -days 3650 \
+        -extfile os-node.ext -out os-node.crt
+  ) </dev/null >"$TMP/cert.log" 2>&1 || {
+    rm -f "$TMP/os-ca.key" "$TMP/os-node.key"
+    tail -n 5 "$TMP/cert.log" | sed 's/^/    /' >&2
+    die "could not make OpenSearch's node-to-node certificate"
+  }
+  rm -f "$TMP/os-ca.key" "$TMP/os-node.csr" "$TMP/os-node.ext"
+  install -m 0644 -o root -g root "$TMP/os-ca.crt" "$_d/ca.crt"
+  install -m 0644 -o root -g root "$TMP/os-node.crt" "$_d/node.crt"
+  install -m 0400 -o opensearch -g opensearch "$TMP/os-node.key" "$_d/node.key"
+  rm -f "$TMP/os-node.key"
+  OS_CONF_CHANGED=1
+  ok "made OpenSearch's node-to-node certificate ($_d; the key of the authority that signed it was deleted)"
+}
+
+# opensearch_sysctl: the memory map limit OpenSearch needs (vm.max_map_count
+# 262144; its package sets it too). Inside a container the host decides:
+# then only a warning.
+opensearch_sysctl() {
+  _cur=$(cat /proc/sys/vm/max_map_count 2>/dev/null || echo 0)
+  [ "${_cur:-0}" -lt 262144 ] || return 0
+  printf '%s\n' "# Written by the Rowsafe installer (--install-opensearch): OpenSearch maps many" \
+    "# files into memory." "vm.max_map_count = 262144" | write_file "$OPENSEARCH_SYSCTL" 0644 root:root || true
+  (echo 262144 >/proc/sys/vm/max_map_count) 2>/dev/null || true
+  _cur=$(cat /proc/sys/vm/max_map_count 2>/dev/null || echo 0)
+  if [ "${_cur:-0}" -ge 262144 ]; then
+    ok "vm.max_map_count is 262144, as OpenSearch needs ($OPENSEARCH_SYSCTL)"
+  else
+    warn "this server's kernel keeps vm.max_map_count at ${_cur:-?} (OpenSearch asks for 262144; inside a container the host decides). OpenSearch runs, but may fail with a lot of data."
+  fi
+}
+
+# opensearch_pa_off: OpenSearch's Performance Analyzer (a separate service
+# its package ships) stays off: stopped, disabled and masked.
+opensearch_pa_off() {
+  _u=opensearch-performance-analyzer.service
+  [ -n "$(systemctl list-unit-files --no-legend "$_u" 2>/dev/null)" ] || return 0
+  [ "$(systemctl is-enabled "$_u" 2>/dev/null)" != masked ] || return 0
+  systemctl disable --now --quiet "$_u" 2>/dev/null || true
+  if systemctl mask --quiet "$_u" 2>/dev/null; then
+    ok "OpenSearch's Performance Analyzer (its own service) is off"
+  else
+    warn "could not turn off OpenSearch's Performance Analyzer ($_u)"
+  fi
+}
+
+# opensearch_yml HOST: --install-opensearch's opensearch.yml (it replaces
+# the package's), the REST port on HOST (127.0.0.1 until --listen-public).
+# Returns 0 when it changed.
+# OS_ENDPOINTS_OFF are the security plugin's REST endpoints Rowsafe's role
+# never needs (it manages users, roles and their mappings only):
+# plugins.security.restapi.endpoints_disabled.rowsafe_agent.
+OS_ENDPOINTS_OFF="ACTIONGROUPS TENANTS AUDIT ALLOWLIST NODESDN SSL CACHE"
+
+# opensearch_endpoints_off prints those settings, one line each.
+opensearch_endpoints_off() {
+  for _ep in $OS_ENDPOINTS_OFF; do
+    echo "plugins.security.restapi.endpoints_disabled.rowsafe_agent.$_ep: [\"GET\", \"PUT\", \"POST\", \"DELETE\", \"PATCH\"]"
+  done
+}
+
+opensearch_yml() {
+  _node=''
+  if grep -qs '^# Written by the Rowsafe installer' "$OPENSEARCH_YML"; then
+    _node=$(sed -n 's/^node\.name: *//p' "$OPENSEARCH_YML" | head -n 1)
+  fi
+  if ! printf '%s\n' "$_node" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$'; then
+    _node=$(uname -n | cut -d. -f1)
+    printf '%s\n' "$_node" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$' || _node=rowsafe-1
+  fi
+  _t=$OPENSEARCH_TRANSPORT_DIR
+  {
+    echo "# Written by the Rowsafe installer (--install-opensearch): one OpenSearch server (no"
+    echo "# cluster); HTTPS on port 9200 (this server only until --listen-public; the firewall"
+    echo "# decides who can connect), the node-to-node port 9300 on 127.0.0.1 only; only signed-in"
+    echo "# users (the security plugin); snapshots in Rowsafe's folder (path.repo). Rowsafe's agent"
+    echo "# replaces the REST port's certificate (the same files); OpenSearch reloads it by itself."
+    echo "cluster.name: rowsafe"
+    echo "node.name: $_node"
+    echo "path.data: /var/lib/opensearch"
+    echo "path.logs: /var/log/opensearch"
+    echo "path.repo: [\"$OPENSEARCH_SNAPSHOTS\"]"
+    echo "discovery.type: single-node"
+    echo "network.host: 127.0.0.1"
+    echo "http.host: \"$1\""
+    echo "http.port: 9200"
+    echo "transport.host: 127.0.0.1"
+    echo "transport.port: 9300"
+    echo "cluster.default_number_of_replicas: 0"
+    echo "plugins.security.ssl.transport.pemcert_filepath: $_t/node.crt"
+    echo "plugins.security.ssl.transport.pemkey_filepath: $_t/node.key"
+    echo "plugins.security.ssl.transport.pemtrustedcas_filepath: $_t/ca.crt"
+    echo "plugins.security.ssl.transport.enforce_hostname_verification: false"
+    echo "plugins.security.ssl.http.enabled: true"
+    echo "plugins.security.ssl.http.pemcert_filepath: $OPENSEARCH_TLS_DIR/rowsafe-server.crt"
+    echo "plugins.security.ssl.http.pemkey_filepath: $OPENSEARCH_TLS_DIR/rowsafe-server.key"
+    echo "plugins.security.ssl.http.pemtrustedcas_filepath: $_t/ca.crt"
+    echo "plugins.security.ssl.http.clientauth_mode: NONE"
+    echo "plugins.security.ssl.http.enabled_protocols: [\"TLSv1.3\", \"TLSv1.2\"]"
+    echo "plugins.security.ssl.certificates_hot_reload.enabled: true"
+    echo "plugins.security.ssl.http.enforce_cert_reload_dn_verification: false"
+    echo "plugins.security.allow_default_init_securityindex: true"
+    echo "plugins.security.nodes_dn: [\"CN=rowsafe-opensearch-node\"]"
+    echo "plugins.security.restapi.roles_enabled: [\"all_access\", \"rowsafe_agent\"]"
+    opensearch_endpoints_off
+    echo "plugins.security.system_indices.enabled: true"
+  } | opensearch_put "$OPENSEARCH_YML"
+}
+
+# opensearch_conf: --install-opensearch's settings and its only user, all
+# in place before OpenSearch first starts (OS_CONF_CHANGED=1 when they
+# changed):
+#   - opensearch.yml (opensearch_yml), the security plugin's users (only an
+#     administrator, admin, whose random password only root can read; the
+#     package's demo users, with passwords everyone knows, never exist) and
+#     roles mapping (only admin has all_access; Rowsafe maps its own role
+#     through OpenSearch's API);
+#   - the heap: half of the memory, at most 31 GB;
+#   - a unit drop-in: 5 minutes to start (a small server starts it slowly)
+#     and files only its group may read (the snapshots the agent reads);
+#   - the memory map limit, Performance Analyzer off, Rowsafe's snapshot
+#     folder, the node-to-node certificate and the REST port's certificate
+#     (its folder is the agent's, so the agent's user is made here).
+# opensearch_mem_mb is the memory OpenSearch may use, in MB: the server's,
+# or less where a control group limits this server (a container; on a
+# virtual machine there is no limit). Its heap is half of it.
+opensearch_mem_mb() {
+  _m=$(mem_mb)
+  if [ -z "${ROWSAFE_MEMINFO:-}" ] && [ -r /sys/fs/cgroup/memory.max ]; then
+    _l=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo max)
+    case $_l in
+      '' | max | *[!0-9]*) ;;
+      *) [ $((_l / 1048576)) -ge "$_m" ] || _m=$((_l / 1048576)) ;;
+    esac
+  fi
+  echo "$_m"
+}
+
+opensearch_conf() {
+  OS_CONF_CHANGED=0
+  getent group opensearch >/dev/null 2>&1 || die "no opensearch group on this server (OpenSearch's package makes it)"
+  [ -d "$OPENSEARCH_CONF_DIR/opensearch-security" ] && [ ! -L "$OPENSEARCH_CONF_DIR" ] ||
+    die "OpenSearch's configuration folder $OPENSEARCH_CONF_DIR isn't there"
+  use_rowsafe_user
+  _mb=$(opensearch_mem_mb)
+  opensearch_sysctl
+  opensearch_pa_off
+  install -d -m 0755 -o root -g root "${OPENSEARCH_DROPIN%/*}"
+  if printf '%s\n' "# Written by the Rowsafe installer (--install-opensearch): a small server needs more" \
+    "# than the package's 75 seconds to start OpenSearch; the files OpenSearch writes (the" \
+    "# snapshots in Rowsafe's folder, which the agent reads through the group) aren't for other users." \
+    "[Service]" "TimeoutStartSec=300" "UMask=0027" | write_file "$OPENSEARCH_DROPIN" 0644 root:root; then
+    OS_CONF_CHANGED=1
+    systemctl daemon-reload 2>/dev/null || true
+  fi
+  opensearch_snapshot_dir
+  opensearch_transport_certs
+  [ ! -L "$OPENSEARCH_TLS_DIR" ] || die "$OPENSEARCH_TLS_DIR is a symbolic link; not using it"
+  install -d -m 2750 -o "$AGENT_USER" -g opensearch "$OPENSEARCH_TLS_DIR"
+  if server_cert "$AGENT_USER" "$OPENSEARCH_TLS_DIR" "$(cert_cn)" 0640; then
+    OS_CONF_CHANGED=1
+    ok "made a self-signed TLS certificate for OpenSearch's port 9200 ($OPENSEARCH_TLS_DIR/rowsafe-server.crt)"
+  fi
+  install -d -m 0700 -o root -g root "${OPENSEARCH_ADMIN_PW_FILE%/*}"
+  if [ ! -s "$OPENSEARCH_ADMIN_PW_FILE" ]; then
+    ( umask 077; openssl rand -hex 32 >"$TMP/opensearch-admin" ) || die "could not make a password"
+    install -m 0600 -o root -g root "$TMP/opensearch-admin" "$OPENSEARCH_ADMIN_PW_FILE"
+    rm -f "$TMP/opensearch-admin"
+  fi
+  # The security plugin reads these once, when OpenSearch first starts
+  # (later, users live in OpenSearch itself): the package's own files have
+  # its demo users, so they are replaced before that, and only then.
+  _sec=$OPENSEARCH_CONF_DIR/opensearch-security
+  if ! grep -qs '^# Written by the Rowsafe installer' "$_sec/internal_users.yml"; then
+    _h=$(opensearch_hash)
+    [ -n "$_h" ] || die "could not hash OpenSearch's administrator password with OpenSearch's own tool"
+    if {
+      echo "# Written by the Rowsafe installer (--install-opensearch): the only user is the administrator,"
+      echo "# admin; its password is in $OPENSEARCH_ADMIN_PW_FILE (root's only). OpenSearch reads this"
+      echo "# file when it first starts; its users are kept in OpenSearch itself after that."
+      echo "_meta:"
+      echo "  type: \"internalusers\""
+      echo "  config_version: 2"
+      echo "admin:"
+      echo "  hash: \"$_h\""
+      echo "  reserved: true"
+      echo "  description: \"The administrator (Rowsafe installer)\""
+    } | opensearch_put "$_sec/internal_users.yml"; then
+      OS_CONF_CHANGED=1
+    fi
+  fi
+  if ! grep -qs '^# Written by the Rowsafe installer' "$_sec/roles_mapping.yml"; then
+    if {
+      echo "# Written by the Rowsafe installer (--install-opensearch): only the administrator has"
+      echo "# all_access. OpenSearch reads this file when it first starts."
+      echo "_meta:"
+      echo "  type: \"rolesmapping\""
+      echo "  config_version: 2"
+      echo "all_access:"
+      echo "  reserved: true"
+      echo "  users:"
+      echo "    - \"admin\""
+      echo "  description: \"The administrator\""
+    } | opensearch_put "$_sec/roles_mapping.yml"; then
+      OS_CONF_CHANGED=1
+    fi
+  fi
+  OS_HEAP=$((_mb / 2))
+  [ "$OS_HEAP" -le 31744 ] || OS_HEAP=31744
+  [ -d "${OPENSEARCH_HEAP_FILE%/*}" ] || (cd / && runuser -u opensearch -- mkdir -m 0750 "${OPENSEARCH_HEAP_FILE%/*}") </dev/null ||
+    die "could not make ${OPENSEARCH_HEAP_FILE%/*}"
+  if printf '%s\n' "# Written by the Rowsafe installer (--install-opensearch): half of this server's memory" \
+    "# ($_mb MB), at most 31 GB." "-Xms${OS_HEAP}m" "-Xmx${OS_HEAP}m" | opensearch_put "$OPENSEARCH_HEAP_FILE"; then
+    OS_CONF_CHANGED=1
+  fi
+  # A re-run keeps the network address --listen-public set.
+  _host=127.0.0.1
+  if grep -qs '^# Written by the Rowsafe installer' "$OPENSEARCH_YML"; then
+    case $(sed -n 's/^http\.host: *"\([^"]*\)" *$/\1/p' "$OPENSEARCH_YML" | head -n 1) in
+      0.0.0.0) _host=0.0.0.0 ;;
+      ::) _host=:: ;;
+    esac
+  fi
+  if opensearch_yml "$_host"; then OS_CONF_CHANGED=1; fi
+}
+
+# opensearch_secure: the settings and user opensearch_conf put in place,
+# checked on the running server (nobody in without a password, nor with
+# the demo's admin:admin; the administrator in; no demo users; its
+# certificate served). Restarts only the OpenSearch this installer
+# installed, and only when its settings changed while it ran.
+# opensearch_may_restart WHY: the OpenSearch --install-opensearch installed
+# may restart now: right away while nothing can use it yet (installed or
+# started in this run), otherwise only when a person says yes here. Without
+# a terminal it says the change waits for the next restart.
+opensearch_may_restart() {
+  if [ "$DB_FRESH" = 1 ] || [ "$DB_STARTED" = 1 ]; then
+    return 0
+  fi
+  if [ "$TTY" = 1 ]; then
+    tty_say "OpenSearch reads $1 when it starts. A restart takes a minute or so; open connections"
+    tty_say "are dropped and apps reconnect."
+    confirm "Restart OpenSearch now?" n && return 0
+  fi
+  note "OpenSearch's new settings ($1) take effect at its next restart: Restart in the Rowsafe dashboard, or sudo systemctl restart opensearch"
+  OS_RESTART_PENDING=1
+  return 1
+}
+OS_RESTART_PENDING=0
+
+opensearch_secure() {
+  if [ "$OS_CONF_CHANGED" = 1 ] && [ "$DB_STARTED" != 1 ] && opensearch_may_restart "its settings"; then
+    note "restarting OpenSearch with its settings"
+    db_restart || die "restarting OpenSearch failed (see above)"
+  fi
+  opensearch_ready || die "OpenSearch doesn't answer on https://127.0.0.1:9200 (see /var/log/opensearch)"
+  _pw=$(cat "$OPENSEARCH_ADMIN_PW_FILE")
+  [ "$(opensearch_https /_plugins/_security/authinfo admin "$_pw")" = 200 ] ||
+    die "OpenSearch's administrator can't sign in (see $OPENSEARCH_CONF_DIR/opensearch-security/internal_users.yml)"
+  [ "$(opensearch_https /_plugins/_security/authinfo admin admin)" = 401 ] || die "OpenSearch still lets the demo's admin:admin in"
+  [ "$(opensearch_https /_plugins/_security/api/internalusers admin "$_pw")" = 200 ] || die "could not list OpenSearch's users as its administrator"
+  for _u in kibanaserver kibanaro logstash readall snapshotrestore anomalyadmin; do
+    ! grep -q "\"$_u\"" "$TMP/os.body" || die "OpenSearch has the demo user $_u (with a password everyone knows)"
+  done
+  _pw=''
+  tls_serves 9200 "$OPENSEARCH_TLS_DIR/rowsafe-server.crt" || die "OpenSearch doesn't serve its TLS certificate on port 9200 (see /var/log/opensearch)"
+  ok "OpenSearch: only signed-in users, an administrator (admin) whose password only root can read ($OPENSEARCH_ADMIN_PW_FILE), no demo users, HTTPS on port 9200, ${OS_HEAP:-?} MB of memory for it"
+}
+
+# opensearch_admin_login gives the installer (only its own run, never saved
+# elsewhere, never printed) the administrator's login, so Rowsafe's own
+# OpenSearch user is created without questions (--install-opensearch). A
+# login the person gave (ROWSAFE_OPENSEARCH_ADMIN_USER) goes first.
+opensearch_admin_login() {
+  [ -z "${ROWSAFE_OPENSEARCH_ADMIN_USER:-}" ] && [ -s "$OPENSEARCH_ADMIN_PW_FILE" ] || return 0
+  ROWSAFE_OPENSEARCH_ADMIN_USER='admin'
+  ROWSAFE_OPENSEARCH_ADMIN_PASSWORD=$(cat "$OPENSEARCH_ADMIN_PW_FILE")
+}
+
+# opensearch_public_listeners prints OpenSearch's listening sockets that
+# aren't on a loopback address (ADDRESS:PORT, one per line).
+opensearch_public_listeners() {
+  _uid=$(id -u opensearch 2>/dev/null) || return 0
+  ss -ltnHe 2>/dev/null | awk -v u="$_uid" 'index($0, " uid:" u " ") {
+    n = split($4, a, ":"); p = a[n]; h = substr($4, 1, length($4) - length(p) - 1)
+    if (h ~ /^127[.]/ || h == "[::1]" || h == "::1" || h ~ /^\[::ffff:127[.]/) next
+    print $4 }' | sort -u
+}
+
+# opensearch_listen_public: HTTPS on port 9200 on every address (passwords
+# only; the firewall decides who can connect), with the certificate made
+# here in $OPENSEARCH_TLS_DIR (the agent's, group opensearch; the agent
+# replaces it with one from Let's Encrypt and OpenSearch reloads it); TLS
+# 1.2 and 1.3. OpenSearch listens on :: (IPv4 and IPv6) where the server
+# has a global IPv6 address, else on 0.0.0.0. The node-to-node port 9300
+# stays on 127.0.0.1: nothing of OpenSearch's may listen beyond this server
+# but 9200. A re-run changes nothing in place.
+opensearch_listen_public() {
+  step "Making OpenSearch reachable from the network (HTTPS on port 9200)"
+  _host=0.0.0.0
+  if awk '$4 == "00" && $6 != "lo" { f = 1 } END { exit !f }' /proc/net/if_inet6 2>/dev/null; then _host=::; fi
+  _changed=0
+  if opensearch_yml "$_host"; then
+    _changed=1
+    if opensearch_may_restart "where it listens"; then
+      note "restarting OpenSearch so it listens on the network"
+      db_restart || die "restarting OpenSearch failed (see above)"
+    fi
+  fi
+  opensearch_ready || die "OpenSearch doesn't answer on https://127.0.0.1:9200 any more (see /var/log/opensearch)"
+  if [ "$OS_RESTART_PENDING" = 1 ]; then
+    ok "OpenSearch listens on the network after its next restart (HTTPS on 9200 only)"
+    return 0
+  fi
+  tls_serves 9200 "$OPENSEARCH_TLS_DIR/rowsafe-server.crt" || die "OpenSearch doesn't serve its TLS certificate on port 9200 (see /var/log/opensearch)"
+  have ss || apt_install iproute2
+  _all=$(opensearch_public_listeners)
+  _open=$(printf '%s\n' "$_all" | awk 'NF { n = split($1, a, ":"); if (a[n] != "9200") print }')
+  [ -z "$_open" ] || die "OpenSearch listens beyond this server on more than 9200 ($(printf '%s' "$_open" | paste -sd, - | sed 's/,/, /g')); see $OPENSEARCH_YML"
+  printf '%s\n' "$_all" | grep -q ':9200$' || die "OpenSearch doesn't listen on the network on port 9200; see $OPENSEARCH_YML"
+  if [ "$_changed" = 0 ]; then
+    ok "OpenSearch listens on the network (HTTPS on 9200, passwords only); nothing to change"
+  else
+    ok "OpenSearch listens on the network (HTTPS on 9200, passwords only; 9300 on this server only)"
+  fi
+}
+# <<< opensearch
 
 # ---------------------------------------------------------------- release
 
@@ -3353,8 +4007,9 @@ check_root_file() {
 # (postgresql@MAJOR-NAME.service), and the units the MySQL, MariaDB,
 # MongoDB, ClickHouse, Redis and Valkey packages install (mysql, mysqld,
 # mariadb and their @instance forms, mongod, mongodb, clickhouse-server,
-# redis-server, redis, valkey-server, valkey and their @instance forms).
-db_unit_re='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server|(redis|valkey)(-server)?(@[A-Za-z0-9_.-]+)?)[.]service$'
+# redis-server, redis, valkey-server, valkey and their @instance forms; and
+# opensearch).
+db_unit_re='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server|opensearch|(redis|valkey)(-server)?(@[A-Za-z0-9_.-]+)?)[.]service$'
 
 # allowed_unit PORT prints the unit the restart allow list names for PORT.
 allowed_unit() {
@@ -3953,7 +4608,11 @@ restart_main() {
   fi
 
   log "$action $unit (request $id)"
-  out=$(timeout 120 "$systemctl" "$action" "$unit" 2>&1 </dev/null)
+  # OpenSearch (a Java server with its plugins) can take minutes to start
+  # on a small server.
+  wait=120
+  case $unit in opensearch.service) wait=600 ;; esac
+  out=$(timeout "$wait" "$systemctl" "$action" "$unit" 2>&1 </dev/null)
   rc=$?
   if [ "$rc" = 0 ]; then
     ok=1
@@ -4464,7 +5123,7 @@ act_security_updates() {
   # Mark first (when it can) and waits until the server answers again.
   list=$(apt-get -s -o Debug::NoLocking=1 dist-upgrade 2>/dev/null |
     awk '/^Inst [^ ]+ \[/ && /-security|Debian-Security/ { print $2 }' | sort -u)
-  db_pkgs='^(postgresql-[0-9]+(-.+)?|mysql-server(-.+)?|mysql-community-server(-.+)?|percona-server-server(-.+)?|mariadb-server(-.+)?|mongodb-org-server|mongodb-org-mongos|clickhouse-server|clickhouse-common-static|(redis|valkey)-(server|sentinel|tools))$'
+  db_pkgs='^(postgresql-[0-9]+(-.+)?|mysql-server(-.+)?|mysql-community-server(-.+)?|percona-server-server(-.+)?|mariadb-server(-.+)?|mongodb-org-server|mongodb-org-mongos|clickhouse-server|clickhouse-common-static|opensearch|(redis|valkey)-(server|sentinel|tools))$'
   held=$(printf '%s\n' "$list" | grep -E "$db_pkgs" | tr '\n' ' ')
   pkgs=$(printf '%s\n' "$list" | grep -Ev "$db_pkgs" | grep . | tr '\n' ' ')
   n=0
@@ -4574,6 +5233,7 @@ Unattended-Upgrade::Package-Blacklist {
         "mongodb-org-mongos";
         "clickhouse-server";
         "clickhouse-common-static";
+        "opensearch";
         "redis-server";
         "redis-sentinel";
         "valkey-server";
@@ -4595,6 +5255,7 @@ $nrconf{override_rc}->{qr(^mysql)} = 0;
 $nrconf{override_rc}->{qr(^mariadb)} = 0;
 $nrconf{override_rc}->{qr(^mongod)} = 0;
 $nrconf{override_rc}->{qr(^clickhouse-server)} = 0;
+$nrconf{override_rc}->{qr(^opensearch)} = 0;
 $nrconf{override_rc}->{qr(^redis)} = 0;
 $nrconf{override_rc}->{qr(^valkey)} = 0;
 $nrconf{override_rc}->{qr(^rowsafe-redis)} = 0;
@@ -5729,6 +6390,7 @@ Unattended-Upgrade::Package-Blacklist {
         "mongodb-org-mongos";
         "clickhouse-server";
         "clickhouse-common-static";
+        "opensearch";
         "redis-server";
         "redis-sentinel";
         "valkey-server";
@@ -5750,6 +6412,7 @@ $nrconf{override_rc}->{qr(^mysql)} = 0;
 $nrconf{override_rc}->{qr(^mariadb)} = 0;
 $nrconf{override_rc}->{qr(^mongod)} = 0;
 $nrconf{override_rc}->{qr(^clickhouse-server)} = 0;
+$nrconf{override_rc}->{qr(^opensearch)} = 0;
 $nrconf{override_rc}->{qr(^redis)} = 0;
 $nrconf{override_rc}->{qr(^valkey)} = 0;
 $nrconf{override_rc}->{qr(^rowsafe-redis)} = 0;
@@ -5909,7 +6572,12 @@ update_access() {
   [ "$HOST_ENGINE" = postgresql ] || _uw=database
   _what="updates and upgrades"
   case $HOST_ENGINE in redis | valkey) _what="updates" ;; esac
-  _pg=$(decide_update "$ALLOW_UPDATES" "$_uw" "Install $(engine_label) $_what, when someone clicks Update? A Mark is saved first." y)
+  if [ "$HOST_ENGINE" = opensearch ]; then
+    _pg=no # Rowsafe doesn't install OpenSearch's updates yet (apt does, as you run it)
+    [ "$ALLOW_UPDATES" != yes ] || warn "Rowsafe doesn't install OpenSearch's updates yet; --allow-updates left off"
+  else
+    _pg=$(decide_update "$ALLOW_UPDATES" "$_uw" "Install $(engine_label) $_what, when someone clicks Update? A Mark is saved first." y)
+  fi
   _sec=$(decide_update "$ALLOW_SECURITY" security "Install this server's security updates, when someone clicks Install?" n)
   _reboot=no
   if [ "$_sec" = yes ]; then
@@ -6413,7 +7081,7 @@ state=${STATE_DIRECTORY:-/var/lib/rowsafe-firewall}
 agent_user=${ROWSAFE_AGENT_USER:-postgres}
 # The users database servers run as (PostgreSQL's is the agent's own): a
 # port is only accepted while one of them listens on it.
-db_users=${ROWSAFE_DB_USERS:-"$agent_user postgres mysql mongodb mongod clickhouse redis valkey"}
+db_users=${ROWSAFE_DB_USERS:-"$agent_user postgres mysql mongodb mongod clickhouse redis valkey opensearch"}
 nft=${ROWSAFE_NFT:-nft}
 ss=${ROWSAFE_SS:-ss}
 sshd=${ROWSAFE_SSHD:-sshd}
@@ -6948,14 +7616,20 @@ ssh_port_here() {
 firewall_ports() {
   _lo_only=0
   [ "$HOST_ENGINE" != clickhouse ] || _lo_only=1
+  [ "$HOST_ENGINE" != opensearch ] || _lo_only=1 # opensearch: 9300 (and 9200 before --listen-public) on 127.0.0.1
   {
     if command -v pg_lsclusters >/dev/null 2>&1; then pg_lsclusters -h 2>/dev/null | awk '{ print $3 }'; fi
     if command -v ss >/dev/null 2>&1; then
-      for _u in "$AGENT_USER" postgres mysql mongodb mongod clickhouse redis valkey; do
+      for _u in "$AGENT_USER" postgres mysql mongodb mongod clickhouse redis valkey opensearch; do
         _uid=$(id -u "$_u" 2>/dev/null) || continue
-        ss -ltnHe 2>/dev/null | awk -v u="$_uid" -v lo="$_lo_only" 'index($0, " uid:" u " ") {
+        # OpenSearch's node-to-node port (9300) is never one apps reach: it
+        # stays out of the list even where it listens publicly (Pulse says so).
+        _skip=''
+        [ "$_u" != opensearch ] || _skip=9300
+        ss -ltnHe 2>/dev/null | awk -v u="$_uid" -v lo="$_lo_only" -v skip="$_skip" 'index($0, " uid:" u " ") {
           n = split($4, a, ":"); h = substr($4, 1, length($4) - length(a[n]) - 1)
-          if (lo == 1 && (h ~ /^127[.]/ || h == "[::1]" || h == "::1")) next
+          if (skip != "" && a[n] == skip) next
+          if (lo == 1 && (h ~ /^127[.]/ || h == "[::1]" || h == "::1" || h ~ /^\[::ffff:127[.]/)) next
           print a[n] }'
       done
     fi
@@ -8227,7 +8901,7 @@ perm_why() {
         return 0
         ;;
       updates | security-updates | reboot)
-        if [ "$1" = updates ] && { [ "$HOST_ENGINE" = redis ] || [ "$HOST_ENGINE" = valkey ]; }; then
+        if [ "$1" = updates ] && { [ "$HOST_ENGINE" = redis ] || [ "$HOST_ENGINE" = valkey ] || [ "$HOST_ENGINE" = opensearch ]; }; then
           echo "Rowsafe doesn't install $(engine_label) updates yet"
           return 0
         fi
@@ -8653,6 +9327,7 @@ permissions_main() {
     *)
       HOST_ENGINE=mongodb AGENT_HOME=$STATE_DIR
       [ ! -f "/etc/systemd/system/$SERVICE.d/10-clickhouse.conf" ] || HOST_ENGINE=clickhouse
+      [ ! -f "/etc/systemd/system/$SERVICE.d/10-opensearch.conf" ] || HOST_ENGINE=opensearch
       if [ -f "/etc/systemd/system/$SERVICE.d/10-redis.conf" ]; then # redis
         HOST_ENGINE=redis
         ! grep -q 'runs Valkey' "/etc/systemd/system/$SERVICE.d/10-redis.conf" || HOST_ENGINE=valkey
@@ -10386,6 +11061,10 @@ protect_cluster() {
     note "Backups for $C_NAME are not on yet. Run this installer again when you're ready."
     return 0
   fi
+  if [ "$C_ENGINE" = opensearch ] && ! opensearch_prepare; then # opensearch
+    note "Backups for $C_NAME are not on yet. Run this installer again when you're ready."
+    return 0
+  fi
   if { [ "$C_ENGINE" = redis ] || [ "$C_ENGINE" = valkey ]; } && ! redis_prepare; then
     note "Backups for $C_NAME are not on yet. Run this installer again when you're ready."
     return 0
@@ -10554,6 +11233,9 @@ protect_unattended() {
   fi
   if [ "$C_ENGINE" = clickhouse ]; then
     clickhouse_prepare || die "ClickHouse on port $C_PORT isn't ready for backups (see above)"
+  fi
+  if [ "$C_ENGINE" = opensearch ]; then # opensearch
+    opensearch_prepare 1 || die "OpenSearch on port $C_PORT isn't ready for backups (see above)"
   fi
   if [ "$C_ENGINE" = redis ] || [ "$C_ENGINE" = valkey ]; then
     redis_prepare || die "$(engine_label "$C_ENGINE") on port $C_PORT isn't ready for backups (see above)"
@@ -11236,6 +11918,354 @@ clickhouse_prepare() {
   clickhouse_login
 }
 
+# ---------------------------------------------------------------- OpenSearch
+# >>> opensearch
+#
+# OpenSearch servers are found by `rowsafe-agent setup discover` like
+# PostgreSQL clusters (engine column "opensearch"). Backups are OpenSearch's
+# own snapshots into Rowsafe's folder ($OPENSEARCH_SNAPSHOTS), which the
+# agent encrypts and copies to the bucket, so no backup tool is installed;
+# Proof and Rewind copies start a temporary OpenSearch with the server's
+# own program. Before their plan:
+#   - OpenSearch must allow snapshots in that folder (path.repo) and, with
+#     the security plugin, let Rowsafe's role manage users (Databases &
+#     users: plugins.security.restapi.roles_enabled). Both are read when
+#     OpenSearch starts: the installer adds them to opensearch.yml (a copy
+#     of the previous file kept next to it) and they take one restart, only
+#     with a person's yes (on a terminal), else at the next restart;
+#   - Rowsafe gets its own OpenSearch user ("rowsafe", random password
+#     saved for the agent only) through the security plugin's API, with an
+#     administrator's login once (never stored). Without the security
+#     plugin nothing signs in.
+
+opensearch_present() {
+  [ -x "$OPENSEARCH_HOME/bin/opensearch" ] ||
+    [ -f /lib/systemd/system/opensearch.service ] || [ -f /usr/lib/systemd/system/opensearch.service ] ||
+    [ -f /etc/systemd/system/opensearch.service ] ||
+    { have dpkg-query && [ -n "$(opensearch_pkg_version)" ]; }
+}
+
+# check_opensearch_program: Proof and Rewind copies start a temporary
+# OpenSearch with the server's own program, which ships with its package.
+check_opensearch_program() {
+  opensearch_present || return 0
+  [ "$HOST_ENGINE" != opensearch ] || TOOLS_SUMMARY="OpenSearch's own snapshots, encrypted by the agent"
+  if [ -x "$OPENSEARCH_HOME/bin/opensearch" ]; then
+    ok "OpenSearch program at $OPENSEARCH_HOME/bin/opensearch (Proof and Rewind copies use it)"
+  else
+    warn "OpenSearch's program isn't in $OPENSEARCH_HOME: backups work, but Proof (the weekly restore test) and Rewind copies need it. It comes with OpenSearch's own package."
+  fi
+}
+
+# opensearch_status reads `rowsafe-agent opensearch status` into OS_* variables.
+OS_LOGIN='' OS_SECURITY='' OS_REPO='' OS_RESTAPI='' OS_CONFIG='' OS_UNIT='' OS_VERSION='' OS_TLS=''
+opensearch_status() {
+  agent_run opensearch status --port "$C_PORT" >"$TMP/osstatus" 2>"$TMP/osstatus.err" || return 1
+  _k() { sed -n "s/^$1=//p" "$TMP/osstatus" | head -n 1; }
+  OS_LOGIN=$(_k login) OS_SECURITY=$(_k security) OS_REPO=$(_k repo) OS_RESTAPI=$(_k restapi)
+  OS_CONFIG=$(_k config) OS_UNIT=$(_k unit) OS_VERSION=$(_k version) OS_TLS=$(_k tls)
+  [ "$OS_CONFIG" != - ] || OS_CONFIG=''
+  [ "$OS_UNIT" != - ] || OS_UNIT=''
+  [ -n "$OS_UNIT" ] || [ "$C_UNIT" = - ] || OS_UNIT=$C_UNIT
+}
+
+# opensearch_admin asks for (or takes from the environment) an
+# administrator's login, into OS_ADMIN and OS_ADMIN_PW. Never stored.
+OS_ADMIN='' OS_ADMIN_PW=''
+opensearch_admin() {
+  [ -z "$OS_ADMIN" ] || return 0
+  if [ -n "${ROWSAFE_OPENSEARCH_ADMIN_USER:-}" ]; then
+    OS_ADMIN=$ROWSAFE_OPENSEARCH_ADMIN_USER OS_ADMIN_PW=${ROWSAFE_OPENSEARCH_ADMIN_PASSWORD:-}
+    return 0
+  fi
+  [ "$TTY" = 1 ] || return 1
+  tty_say ""
+  tty_say "To create Rowsafe's own OpenSearch user, an administrator signs in once (a user"
+  tty_say "with the all_access role, like admin). The password is used for this only and"
+  tty_say "never saved."
+  ask OS_ADMIN "OpenSearch administrator user" admin
+  ask_secret OS_ADMIN_PW "Password for $OS_ADMIN"
+}
+
+# opensearch_as_admin CMD...: run an agent opensearch command, as an
+# administrator when one signed in (the password on stdin). Its exit status
+# is the command's.
+opensearch_as_admin() {
+  if [ -n "$OS_ADMIN" ]; then
+    printf '%s\n' "$OS_ADMIN_PW" | agent_in opensearch "$@" --port "$C_PORT" --admin-user "$OS_ADMIN"
+  else
+    agent_run opensearch "$@" --port "$C_PORT"
+  fi
+}
+
+# opensearch_login creates Rowsafe's OpenSearch user through the security
+# plugin's API: first without a login (no security plugin: nothing to
+# create), then as an administrator.
+opensearch_login() {
+  _rc=0
+  opensearch_as_admin login >"$TMP/oslogin" 2>&1 || _rc=$?
+  while [ "$_rc" = 11 ] || [ "$_rc" = 12 ] || [ "$_rc" = 13 ]; do
+    if [ -n "$OS_ADMIN" ]; then
+      # That administrator didn't do: refused (12) or can't create users (13).
+      if [ -n "${ROWSAFE_OPENSEARCH_ADMIN_USER:-}" ] || [ "$TTY" != 1 ]; then
+        sed 's/^/    /' "$TMP/oslogin" >&2
+        return 1
+      fi
+      case $_rc in
+        12) tty_bad "OpenSearch refused that login." ;;
+        *) tty_bad "That user can't create users in OpenSearch." ;;
+      esac
+      OS_ADMIN=''
+    fi
+    opensearch_admin || {
+      warn "Rowsafe needs its own OpenSearch user: set ROWSAFE_OPENSEARCH_ADMIN_USER and ROWSAFE_OPENSEARCH_ADMIN_PASSWORD (used once, never saved), or run the installer on a terminal"
+      return 1
+    }
+    _rc=0
+    opensearch_as_admin login >"$TMP/oslogin" 2>&1 || _rc=$?
+  done
+  OS_ADMIN_PW=''
+  sed 's/^/    /' "$TMP/oslogin"
+  [ "$_rc" = 0 ]
+}
+
+# opensearch_yml_add FILE KEY VALUE DEFAULT prints FILE with VALUE added to
+# the list KEY holds (DEFAULT, a list, when FILE doesn't set KEY). Exit 1:
+# VALUE is there already; 2 or 3: FILE sets KEY in a form the installer doesn't
+# change (a nested block, a comment after it, a key without items,
+# twice).
+opensearch_yml_add() {
+  _kre=$(printf '%s' "$2" | sed 's/[.]/[.]/g')
+  _leaf=${2##*.}
+  grep -v '^[[:space:]]*#' "$1" >"$TMP/os.yml.nc" || true
+  _n=$(grep -c "^${_kre}[[:space:]]*:" "$TMP/os.yml.nc" || true)
+  _o=$(grep -E "(^|[[:space:].{,])${_leaf}[[:space:]]*:" "$TMP/os.yml.nc" | grep -vc "^${_kre}[[:space:]]*:" || true)
+  [ "$_o" = 0 ] || return 2
+  case $_n in
+    0)
+      cat "$1"
+      [ ! -s "$1" ] || [ -z "$(tail -c 1 "$1")" ] || echo
+      printf '%s: %s\n' "$2" "$4"
+      return 0
+      ;;
+    1) ;;
+    *) return 2 ;;
+  esac
+  _cur=$(sed -n "s/^${_kre}[[:space:]]*:[[:space:]]*//p" "$TMP/os.yml.nc" | sed 's/[[:space:]]*$//')
+  if [ -z "$_cur" ]; then
+    # A block list (OpenSearch's demo configuration writes them):
+    #   KEY:
+    #   - item
+    # VALUE becomes one more item, like the others; nothing else is read.
+    awk -v k="^${_kre}[[:space:]]*:[[:space:]]*$" -v v="$3" '
+      BEGIN { st = 0 }
+      st == 0 && $0 ~ k { print; st = 1; next }
+      st == 1 && /^[[:space:]]*-[[:space:]]*[^[:space:]]/ {
+        item = $0; sub(/^[[:space:]]*-[[:space:]]*/, "", item); sub(/[[:space:]]*(#.*)?$/, "", item); gsub(/["\047]/, "", item)
+        if (item == v) found = 1
+        ind = $0; sub(/-.*/, "", ind); n++; print; next }
+      st == 1 { if (n == 0) exit 3; if (!found) print ind "- " v; st = 2 }
+      { print }
+      END { if (st == 1) { if (n == 0) exit 3; if (!found) print ind "- " v }; if (found) exit 1 }' "$1"
+    return $?
+  fi
+  case $_cur in *'#'* | *'{'* | *'}'*) return 2 ;; esac
+  # Already there (quoted or not)?
+  printf '%s\n' "$_cur" | tr -d "[]\"'" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -qxF "$3" && return 1
+  case $_cur in
+    \[*\])
+      _in=$(printf '%s' "$_cur" | sed 's/^\[//; s/\]$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+      case $_in in *'['* | *']'*) return 2 ;; esac
+      _new="[${_in:+$_in, }\"$3\"]"
+      ;;
+    *'['* | *']'*) return 2 ;;
+    *) _new="[$_cur, \"$3\"]" ;; # a single value: now a list
+  esac
+  awk -v k="^${_kre}[[:space:]]*:" -v line="$2: $_new" '$0 ~ k { print line; next } { print }' "$1"
+}
+
+# opensearch_settings: what Rowsafe needs in opensearch.yml, which
+# OpenSearch reads when it starts: Rowsafe's snapshot folder in path.repo
+# and, with the security plugin, Rowsafe's role (rowsafe_agent) in
+# plugins.security.restapi.roles_enabled (when the file doesn't list it,
+# OpenSearch's own default, all_access and security_rest_api_access, plus
+# Rowsafe's). The file is changed as its owner; the previous one is kept
+# next to it, root's only. OS_YML_CHANGED=1 when it changed. Fails, saying
+# what to do, when the file sets them in a form the installer doesn't edit.
+OS_YML_CHANGED=0
+opensearch_settings() {
+  OS_YML_CHANGED=0
+  _f=${OS_CONFIG:-$OPENSEARCH_YML}
+  if [ ! -f "$_f" ] || [ -L "$_f" ]; then
+    warn "OpenSearch's settings file ($_f) isn't a file the installer can change"
+    note "Do it yourself: add \"$OPENSEARCH_SNAPSHOTS\" to path.repo (and \"rowsafe_agent\" to"
+    note "plugins.security.restapi.roles_enabled), restart OpenSearch, then run this installer again."
+    return 1
+  fi
+  if getent group opensearch >/dev/null 2>&1; then
+    opensearch_snapshot_dir
+  else
+    warn "no opensearch group on this server (OpenSearch's package makes it), so Rowsafe can't read the snapshots OpenSearch takes"
+    return 1
+  fi
+  cp "$_f" "$TMP/os.yml.new"
+  _bad=''
+  _rc=0
+  opensearch_yml_add "$TMP/os.yml.new" path.repo "$OPENSEARCH_SNAPSHOTS" "[\"$OPENSEARCH_SNAPSHOTS\"]" >"$TMP/os.yml.next" || _rc=$?
+  case $_rc in 0) cp "$TMP/os.yml.next" "$TMP/os.yml.new" ;; 1) ;; *) _bad=path.repo ;; esac
+  _roles=''
+  if [ "$OS_SECURITY" != off ]; then
+    _roles=1
+    _rc=0
+    opensearch_yml_add "$TMP/os.yml.new" plugins.security.restapi.roles_enabled rowsafe_agent \
+      '["all_access", "security_rest_api_access", "rowsafe_agent"]' >"$TMP/os.yml.next" || _rc=$?
+    case $_rc in 0) cp "$TMP/os.yml.next" "$TMP/os.yml.new" ;; 1) ;; *) _bad="${_bad:+$_bad and }plugins.security.restapi.roles_enabled" ;; esac
+  fi
+  if [ -n "$_roles" ] && [ -z "$_bad" ] && ! grep -q '^plugins\.security\.restapi\.endpoints_disabled\.rowsafe_agent' "$TMP/os.yml.new"; then
+    # Rowsafe's role reaches users, roles and their mappings only.
+    { cat "$TMP/os.yml.new"; [ -z "$(tail -c 1 "$TMP/os.yml.new")" ] || echo; opensearch_endpoints_off; } >"$TMP/os.yml.next"
+    cp "$TMP/os.yml.next" "$TMP/os.yml.new"
+  fi
+  if [ -n "$_bad" ]; then
+    warn "$_f sets $_bad in a way the installer doesn't change by itself; it was left as it is"
+    note "Do it yourself: in $_f, add \"$OPENSEARCH_SNAPSHOTS\" to path.repo"
+    [ -z "$_roles" ] || note "and \"rowsafe_agent\" to plugins.security.restapi.roles_enabled (one line each, like"
+    [ -z "$_roles" ] || note "plugins.security.restapi.roles_enabled: [\"all_access\", \"security_rest_api_access\", \"rowsafe_agent\"]),"
+    note "restart OpenSearch ($(restart_cmd)), then run this installer again."
+    return 1
+  fi
+  cmp -s "$TMP/os.yml.new" "$_f" && return 0
+  [ -e "$_f.rowsafe-backup" ] || install -m 0600 -o root -g root "$_f" "$_f.rowsafe-backup"
+  _owner=$(stat -c %U "$_f")
+  # shellcheck disable=SC2016 # $1 expands in the inner shell
+  (cd / && runuser -u "$_owner" -- sh -c 'cat >"$1"' rowsafe-opensearch "$_f") <"$TMP/os.yml.new" || die "could not write $_f"
+  OS_YML_CHANGED=1
+  if [ -n "$_roles" ]; then
+    ok "$_f: snapshots allowed in Rowsafe's folder (path.repo), Rowsafe's role may manage users (roles_enabled); the previous file is $_f.rowsafe-backup"
+  else
+    ok "$_f: snapshots allowed in Rowsafe's folder (path.repo); the previous file is $_f.rowsafe-backup"
+  fi
+}
+
+# opensearch_restart restarts OpenSearch (a person said yes, or it is the
+# one --install-opensearch installed) and waits until it answers again.
+opensearch_restart() {
+  step "Restarting OpenSearch"
+  if ! timeout 300 systemctl restart "$OS_UNIT" >"$TMP/restart.log" 2>&1 </dev/null; then
+    tail -n 5 "$TMP/restart.log" | sed 's/^/    /' >&2
+    warn "restarting OpenSearch failed"
+    return 1
+  fi
+  _i=0
+  until opensearch_status; do
+    [ $_i -lt 300 ] || { warn "OpenSearch doesn't answer on port $C_PORT after its restart"; return 1; }
+    sleep 2
+    _i=$((_i + 2))
+  done
+  ok "OpenSearch restarted"
+}
+
+# opensearch_prepare [UNATTENDED] gets an OpenSearch server ready for its
+# plan: its settings, Rowsafe's own user, and (when the settings are new to
+# the running server) one restart: the one --install-opensearch installed
+# at once; another only with a yes on a terminal (never when UNATTENDED=1),
+# else at its next restart.
+# opensearch_demo_check warns about what OpenSearch's demo configuration
+# left on a server of one's own (never for production): users that sign in
+# with their published passwords, its published certificates, and its
+# published super administrator certificate (CN=kirk). That certificate's
+# key is made readable to OpenSearch's user only: Rowsafe's agent, in
+# OpenSearch's group to read its settings and snapshots, must not be able to
+# read it (OpenSearch itself doesn't need it; securityadmin.sh runs as root).
+opensearch_demo_check() {
+  _d=$OPENSEARCH_CONF_DIR
+  for _k in "$_d/kirk-key.pem" "$_d/admin-key.pem"; do
+    [ -f "$_k" ] && [ ! -L "$_k" ] || continue
+    case $(stat -c %a "$_k" 2>/dev/null) in
+      600 | 400) ;;
+      *) chmod 0600 "$_k" && ok "$_k (the demo's super administrator key): readable by OpenSearch's user only now, not by its group (Rowsafe's agent is in it)" ;;
+    esac
+  done
+  _found=''
+  if [ "$OS_SECURITY" != off ] && [ "$OS_TLS" = on ]; then
+    for _u in admin:admin kibanaserver:kibanaserver kibanaro:kibanaro logstash:logstash readall:readall snapshotrestore:snapshotrestore; do
+      [ "$(opensearch_https /_plugins/_security/authinfo "${_u%%:*}" "${_u#*:}")" != 200 ] || _found="${_found:+$_found, }${_u%%:*}"
+    done
+  fi
+  _yml=${OS_CONFIG:-$OPENSEARCH_YML}
+  _certs=0 _kirk=0
+  grep -Eqs '^[[:space:]]*plugins\.security\.allow_unsafe_democertificates:[[:space:]]*true' "$_yml" && _certs=1
+  [ ! -f "$_d/esnode.pem" ] || _certs=1
+  grep -Eqis '(admin_dn|^[[:space:]]*-).*CN=kirk' "$_yml" && _kirk=1
+  [ -n "$_found$_kirk" ] || [ "$_certs" = 1 ] || return 0
+  say ""
+  warn "OpenSearch on port $C_PORT still has parts of its demo configuration, which are published and never meant for production:"
+  [ -z "$_found" ] || note "  - users that sign in with their published passwords: $_found"
+  [ "$_certs" = 0 ] || note "  - its demo certificates (their keys are public): anyone can read or fake its TLS"
+  [ "$_kirk" = 0 ] || note "  - its demo super administrator certificate (CN=kirk) is trusted (plugins.security.authcz.admin_dn): its key is public"
+  note "Rowsafe goes on (backups are on either way). Do it yourself: give those users new passwords or remove them,"
+  note "and replace the demo certificates with your own (or set the server up again with Rowsafe: --install-opensearch)."
+  note "Pulse shows these until they're gone."
+}
+
+opensearch_prepare() {
+  _unattended=${1:-0}
+  OS_ADMIN='' OS_ADMIN_PW=''
+  if ! opensearch_status; then
+    sed 's/^/    /' "$TMP/osstatus.err" >&2
+    warn "could not reach OpenSearch on port $C_PORT"
+    return 1
+  fi
+  [ -x "$OPENSEARCH_HOME/bin/opensearch" ] ||
+    note "Proof and Rewind copies need OpenSearch's program, which comes with its package; it isn't in $OPENSEARCH_HOME."
+  if [ "$OS_SECURITY" = off ]; then
+    say ""
+    warn "OpenSearch on port $C_PORT runs without its security plugin: anyone who can reach port $C_PORT can read and change everything in it. Keep that port closed to the network (a firewall), or turn security on."
+  fi
+  opensearch_settings || return 1
+  opensearch_demo_check
+  if [ "$OS_LOGIN" != ok ]; then
+    if [ "$OS_LOGIN" != none ]; then
+      say ""
+      note "Rowsafe needs its own OpenSearch user, rowsafe, to take snapshots and watch the"
+      note "server's health. Its password is random and saved for the agent only."
+    fi
+    opensearch_login || return 1
+  fi
+  opensearch_status || true
+  _need=$OS_YML_CHANGED
+  [ "$OS_REPO" = ok ] || _need=1
+  [ "$OS_SECURITY" = off ] || [ "$OS_RESTAPI" = ok ] || _need=1
+  [ "$_need" = 1 ] || return 0
+  say ""
+  if [ -z "$OS_UNIT" ]; then
+    note "OpenSearch reads these settings when it starts: restart it, and backups start then."
+    return 0
+  fi
+  if [ "$DB_OURS" = 1 ] && [ "$INSTALL_DB" = opensearch ]; then
+    # The one this installer installed: right away only in the run that
+    # installed it, else with a person's yes (opensearch_may_restart).
+    if opensearch_may_restart "path.repo and Rowsafe's role"; then
+      opensearch_restart && return 0
+    fi
+    return 0
+  elif [ "$_unattended" != 1 ] && [ "$TTY" = 1 ] && {
+    tty_say "OpenSearch reads these settings when it starts, so backups start after one restart."
+    tty_say "It takes a minute or so; open connections are dropped and apps reconnect."
+    confirm "Restart OpenSearch now?" n
+  }; then
+    opensearch_restart && return 0
+  fi
+  note "OpenSearch reads these settings when it starts: backups start after its next restart."
+  note "Restart it when it suits you: sudo systemctl restart ${OS_UNIT%.service}"
+  if restart_allowed "$C_PORT"; then
+    note "(or with Restart in the Rowsafe dashboard). Rowsafe notices the restart by itself."
+  else
+    note "Rowsafe notices the restart by itself."
+  fi
+}
+# <<< opensearch
+
 # ---------------------------------------------------------------- Redis and Valkey
 #
 # Redis and Valkey servers are found by `rowsafe-agent setup discover` like
@@ -11661,6 +12691,7 @@ detect_sqlite_host() {
   id -u postgres >/dev/null 2>&1 && return 0
   mongodb_present && return 0
   clickhouse_present && return 0
+  opensearch_present && return 0
   HOST_ENGINE=sqlite
   use_rowsafe_user
   AGENT_HOME=$STATE_DIR
@@ -11928,6 +12959,7 @@ install_agent() {
   detect_mongodb_host # mongodb
   detect_clickhouse_host # clickhouse
   detect_redis_host # redis
+  detect_opensearch_host # opensearch
   detect_sqlite_host # sqlite
   if [ -n "$INSTALL_DB" ]; then
     [ "$HOST_ENGINE" = "$INSTALL_DB" ] ||
@@ -11936,6 +12968,7 @@ install_agent() {
     [ "$FIREWALL_SSH" != yes ] || firewall_close_early $(db_public_ports)
     [ "$LISTEN_PUBLIC" = 0 ] || db_listen_public
     [ "$INSTALL_DB" != valkey ] || valkey_admin_login
+    [ "$INSTALL_DB" != opensearch ] || opensearch_admin_login # opensearch
   fi
   check_postgres
   if [ "$HOST_ENGINE" = sqlite ]; then
@@ -11944,6 +12977,9 @@ install_agent() {
   elif [ "$HOST_ENGINE" = clickhouse ]; then
     say "${BOLD}Rowsafe agent installer${RESET}: backups, Marks and weekly restore tests for"
     say "the ClickHouse on this server. Nothing changes without your yes."
+  elif [ "$HOST_ENGINE" = opensearch ]; then # opensearch: snapshots, not every second
+    say "${BOLD}Rowsafe agent installer${RESET}: backups, Marks and weekly restore tests for"
+    say "the OpenSearch on this server. Nothing changes without your yes."
   else
     say "${BOLD}Rowsafe agent installer${RESET}: backups, restore to any second and weekly"
     say "restore tests for the $(engine_label) on this server. Nothing changes without your yes."
@@ -11985,10 +13021,11 @@ install_agent() {
 
   # 2. Dependencies and layout.
   # MongoDB, ClickHouse, Redis, Valkey and SQLite back up with their own tools: no pgBackRest.
-  case $HOST_ENGINE in mysql | mariadb) ensure_mysql_tools ;; mongodb | clickhouse | redis | valkey | sqlite) ;; *) ensure_pgbackrest ;; esac # mysql
+  case $HOST_ENGINE in mysql | mariadb) ensure_mysql_tools ;; mongodb | clickhouse | redis | valkey | sqlite | opensearch) ;; *) ensure_pgbackrest ;; esac # mysql
   ensure_mongodb_tools # mongodb (only where MongoDB runs)
   check_clickhouse_program # clickhouse (only where ClickHouse runs)
   check_redis_program # redis (only where Redis or Valkey runs)
+  check_opensearch_program # opensearch (only where OpenSearch runs)
   ensure_restic # files section
   step "Installing into $INSTALL_DIR"
   make_dirs
@@ -12005,6 +13042,7 @@ install_agent() {
   mongodb_setup # mongodb
   clickhouse_setup # clickhouse
   redis_setup # redis
+  opensearch_setup # opensearch
   sqlite_setup # sqlite
   install_logrotate
   case $AUTO_SECURITY in
@@ -12136,10 +13174,26 @@ uninstall_agent() {
   rm -f "/etc/systemd/system/$SERVICE.d/10-mysql.conf" # mysql
   rm -f "/etc/systemd/system/$SERVICE.d/10-mongodb.conf" "/etc/systemd/system/$SERVICE.d/10-clickhouse.conf"
   rm -f "/etc/systemd/system/$SERVICE.d/10-redis.conf" # redis
+  if [ -f "$OPENSEARCH_KEY_TIMER" ]; then # opensearch: the signing key's refresh is Rowsafe's
+    if systemd_running; then systemctl disable --now --quiet rowsafe-opensearch-key.timer 2>/dev/null || true; fi
+    rm -f "$OPENSEARCH_KEY_TIMER" "$OPENSEARCH_KEY_UNIT" "$OPENSEARCH_KEY_SCRIPT" "$OPENSEARCH_KEY_STATUS"
+    rmdir "$LIB_DIR" 2>/dev/null || true
+  fi
+  if [ -f "/etc/systemd/system/$SERVICE.d/10-opensearch.conf" ]; then # opensearch
+    rm -f "/etc/systemd/system/$SERVICE.d/10-opensearch.conf"
+    if id -nG rowsafe 2>/dev/null | tr ' ' '\n' | grep -qx opensearch; then
+      gpasswd -d rowsafe opensearch >/dev/null 2>&1 || true
+    fi
+  fi
   if [ "$purge" = 1 ]; then
     if [ -L "$MYSQL_CONF_LINK" ]; then # mysql: keep the server's binary log settings
       cp "$CONFIG_DIR/mysql/server.cnf" "$MYSQL_CONF_LINK.rowsafe-new" 2>/dev/null &&
         mv -f "$MYSQL_CONF_LINK.rowsafe-new" "$MYSQL_CONF_LINK" || rm -f "$MYSQL_CONF_LINK"
+    fi
+    if [ -s "$OPENSEARCH_ADMIN_PW_FILE" ]; then # --install-opensearch: OpenSearch's administrator stays the server's
+      install -d -m 0700 -o root -g root /root
+      install -m 0600 -o root -g root "$OPENSEARCH_ADMIN_PW_FILE" /root/opensearch-admin-password
+      ok "OpenSearch's administrator password (user admin) moved to /root/opensearch-admin-password (root only)"
     fi
     if [ -s "$VALKEY_ADMIN_PW_FILE" ]; then # --install-valkey: Valkey's administrator stays the server's
       install -d -m 0700 -o root -g root /root
@@ -12151,6 +13205,11 @@ uninstall_agent() {
     if [ -f "$CLICKHOUSE_USERS_FILE" ]; then # clickhouse: its password went with $STATE_DIR
       rm -f "$CLICKHOUSE_USERS_FILE"
       ok "$CLICKHOUSE_USERS_FILE deleted (Rowsafe's ClickHouse user)"
+    fi
+    if opensearch_present; then # opensearch: its password went with $STATE_DIR
+      note "Rowsafe's OpenSearch user, rowsafe, and its role, rowsafe_agent, stay in OpenSearch (the password was deleted"
+      note "with the agent's settings), and so do the snapshots in $OPENSEARCH_SNAPSHOTS. An administrator can delete"
+      note "them in OpenSearch (Security, Internal users and Roles), then remove that folder from path.repo."
     fi
     if redis_present; then # redis: its password went with $STATE_DIR
       note "Rowsafe's Redis or Valkey user, rowsafe, stays in the server (its password was deleted with the agent's settings)."
@@ -12283,13 +13342,14 @@ main() {
         esac
         shift
         ;;
-      --install-mysql | --install-mariadb | --install-valkey | --install-clickhouse)
+      --install-mysql | --install-mariadb | --install-valkey | --install-clickhouse | --install-opensearch)
         _e=${1#--install-}
         case $_e in
           mysql) _want='8.4' _eg='--install-mysql 8.4: MySQL 8.4, the long-term support release' ;;
           mariadb) _want='11.4 11.8' _eg='--install-mariadb 11.8 (or 11.4), the long-term support releases' ;;
           valkey) _want='8' _eg='--install-valkey 8' ;;
           clickhouse) _want='26.3 26.8' _eg='--install-clickhouse 26.8 (or 26.3), the long-term support releases' ;;
+          opensearch) _want='3' _eg='--install-opensearch 3' ;;
         esac
         [ $# -ge 2 ] || die "$1 needs a version: $_eg"
         [ -z "$INSTALL_PG$INSTALL_DB" ] || die "$INSTALL_TWICE"
@@ -12371,7 +13431,7 @@ main() {
     die "--files, --allow-files and --no-files only go with an install"
   fi
   if [ "$mode" != install ] && { [ -n "$INSTALL_PG$INSTALL_DB" ] || [ "$LISTEN_PUBLIC" = 1 ]; }; then
-    die "--install-postgres, --install-mysql, --install-mariadb, --install-valkey, --install-clickhouse and --listen-public only go with an install"
+    die "--install-postgres, --install-mysql, --install-mariadb, --install-valkey, --install-clickhouse, --install-opensearch and --listen-public only go with an install"
   fi
   if [ -n "$PG_EXTENSIONS" ]; then
     [ -n "$INSTALL_PG" ] || die "--pg-extensions only goes with --install-postgres (servers Rowsafe creates)"

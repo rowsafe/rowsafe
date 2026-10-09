@@ -525,6 +525,8 @@ func engineServiceNames(engine string) (service, unit string) {
 		return "redis", "redis-server"
 	case protocol.EngineValkey:
 		return "valkey", "valkey-server"
+	case protocol.EngineOpenSearch:
+		return "opensearch", "opensearch"
 	}
 	return "postgres", "postgresql"
 }

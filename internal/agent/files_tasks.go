@@ -373,7 +373,7 @@ func (a *Agent) askFilesHelper(ctx context.Context, action, args, id string) (ma
 	if err := writeFileAtomic(request, []byte(id+" "+action+" "+args+"\n"), 0o600); err != nil {
 		return nil, err
 	}
-	res, err := waitRestartResult(ctx, filepath.Join(a.cfg.RestartResultDir, "files-result"), id)
+	res, err := waitRestartResult(ctx, filepath.Join(a.cfg.RestartResultDir, "files-result"), id, restartHelperTimeout)
 	if err != nil {
 		_ = os.Remove(request)
 		if errors.Is(err, errRestartNoAnswer) {

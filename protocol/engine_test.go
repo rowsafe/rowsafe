@@ -16,7 +16,7 @@ func TestNormalizeEngine(t *testing.T) {
 	if !ValidEngine("") || !ValidEngine("MariaDB") || ValidEngine("oracle") {
 		t.Error("ValidEngine")
 	}
-	for e, want := range map[string]string{"": "PostgreSQL", EngineMySQL: "MySQL", EngineMariaDB: "MariaDB", EngineMongoDB: "MongoDB", EngineClickHouse: "ClickHouse", EngineRedis: "Redis", EngineValkey: "Valkey", EngineSQLite: "SQLite"} {
+	for e, want := range map[string]string{"": "PostgreSQL", EngineMySQL: "MySQL", EngineMariaDB: "MariaDB", EngineMongoDB: "MongoDB", EngineClickHouse: "ClickHouse", EngineRedis: "Redis", EngineValkey: "Valkey", EngineSQLite: "SQLite", EngineOpenSearch: "OpenSearch"} {
 		if got := EngineDisplayName(e); got != want {
 			t.Errorf("EngineDisplayName(%q) = %q", e, got)
 		}

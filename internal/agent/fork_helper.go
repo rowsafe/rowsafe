@@ -289,7 +289,7 @@ func (a *Agent) askCreateCluster(ctx context.Context, port, major int, name, id 
 	if err := writeFileAtomic(request, []byte(line), 0o600); err != nil {
 		return "", err
 	}
-	res, err := waitRestartResult(ctx, filepath.Join(a.cfg.RestartResultDir, "result"), id)
+	res, err := waitRestartResult(ctx, filepath.Join(a.cfg.RestartResultDir, "result"), id, restartHelperTimeout)
 	if err != nil {
 		_ = os.Remove(request)
 		if errors.Is(err, errRestartNoAnswer) {

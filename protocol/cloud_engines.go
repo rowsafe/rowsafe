@@ -75,6 +75,7 @@ type CloudEngine struct {
 //     and Arm), pinned to the series. Apps connect with TLS only: the native
 //     protocol on 9440 and HTTPS on 8443; the plain ports (9000, 8123) listen
 //     on the server itself only. 4 GB of memory at least.
+//   - OpenSearch 3 (opensearch.go adds itself).
 var CloudEngines = []CloudEngine{
 	{Engine: EnginePostgreSQL, Name: "PostgreSQL", Versions: []string{"15", "16", "17", "18"}, DefaultVersion: "17",
 		Port: 5432, Scheme: "postgresql", Standby: true, Clone: true, Extensions: PGPackagedExtensions},
@@ -169,6 +170,8 @@ func (e CloudEngine) InstallFlag() string {
 		return "--install-valkey"
 	case EngineClickHouse:
 		return "--install-clickhouse"
+	case EngineOpenSearch:
+		return "--install-opensearch"
 	}
 	return ""
 }

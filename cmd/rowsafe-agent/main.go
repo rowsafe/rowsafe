@@ -39,6 +39,8 @@ Usage:
                                             ClickHouse helpers for the installer (see clickhouse --help)
   rowsafe-agent redis status|login|save-login|download-backup ...
                                             Redis and Valkey helpers for the installer (see redis --help)
+  rowsafe-agent opensearch status|login|save-login|hash|download-backup ...
+                                            OpenSearch helpers for the installer (see opensearch --help)
   rowsafe-agent sqlite find|status|restore ...
                                             SQLite helpers for the installer, and restores without
                                             Rowsafe (see sqlite --help)
@@ -90,6 +92,8 @@ func main() {
 		os.Exit(redisCmd(ctx, os.Args[2:]))
 	case "sqlite": // SQLite installer helpers and restores (sqlite.go)
 		os.Exit(sqliteCmd(ctx, os.Args[2:]))
+	case "opensearch": // OpenSearch installer helpers (opensearch.go)
+		os.Exit(opensearchCmd(ctx, os.Args[2:]))
 	case "unseal":
 		err = unseal()
 	case "restore-mysql":

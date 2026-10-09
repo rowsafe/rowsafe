@@ -39,6 +39,8 @@ func ProbeEngine(ctx context.Context, engine, addr string, o Options) Result {
 		return probeClickHouseHTTP(ctx, addr, o)
 	case protocol.EngineRedis, protocol.EngineValkey:
 		return probeRedis(ctx, engine, addr, o)
+	case protocol.EngineOpenSearch:
+		return probeOpenSearch(ctx, addr, o) // opensearch.go
 	}
 	conn, err := dial(ctx, addr, o)
 	if err != nil {

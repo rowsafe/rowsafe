@@ -55,6 +55,8 @@ func EngineDisplayName(engine string) string {
 		return "Valkey"
 	case EngineSQLite:
 		return "SQLite"
+	case EngineOpenSearch:
+		return "OpenSearch"
 	default:
 		return e
 	}
@@ -233,6 +235,7 @@ var EngineCapabilities = map[string]EngineFeatures{
 	EngineValkey: valkeyFeatures,
 	// SQLite (internal/engine/sqlite): protocol/sqlite.go.
 	EngineSQLite: sqliteFeatures,
+	// OpenSearch (internal/engine/opensearch) adds itself: protocol/opensearch.go.
 }
 
 // RewindInPlaceStopsServer reports whether rewinding a database of engine
@@ -243,7 +246,7 @@ var EngineCapabilities = map[string]EngineFeatures{
 // with the online backup API: they need no such permission.
 func RewindInPlaceStopsServer(engine string) bool {
 	switch NormalizeEngine(engine) {
-	case EngineMongoDB, EngineClickHouse, EngineRedis, EngineValkey, EngineSQLite:
+	case EngineMongoDB, EngineClickHouse, EngineRedis, EngineValkey, EngineSQLite, EngineOpenSearch:
 		return false
 	}
 	return true

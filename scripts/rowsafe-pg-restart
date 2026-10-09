@@ -612,8 +612,9 @@ check_root_file() {
 # (postgresql@MAJOR-NAME.service), and the units the MySQL, MariaDB,
 # MongoDB, ClickHouse, Redis and Valkey packages install (mysql, mysqld,
 # mariadb and their @instance forms, mongod, mongodb, clickhouse-server,
-# redis-server, redis, valkey-server, valkey and their @instance forms).
-db_unit_re='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server|(redis|valkey)(-server)?(@[A-Za-z0-9_.-]+)?)[.]service$'
+# redis-server, redis, valkey-server, valkey and their @instance forms; and
+# opensearch).
+db_unit_re='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server|opensearch|(redis|valkey)(-server)?(@[A-Za-z0-9_.-]+)?)[.]service$'
 
 # allowed_unit PORT prints the unit the restart allow list names for PORT.
 allowed_unit() {
@@ -1212,7 +1213,11 @@ restart_main() {
   fi
 
   log "$action $unit (request $id)"
-  out=$(timeout 120 "$systemctl" "$action" "$unit" 2>&1 </dev/null)
+  # OpenSearch (a Java server with its plugins) can take minutes to start
+  # on a small server.
+  wait=120
+  case $unit in opensearch.service) wait=600 ;; esac
+  out=$(timeout "$wait" "$systemctl" "$action" "$unit" 2>&1 </dev/null)
   rc=$?
   if [ "$rc" = 0 ]; then
     ok=1
@@ -1723,7 +1728,7 @@ act_security_updates() {
   # Mark first (when it can) and waits until the server answers again.
   list=$(apt-get -s -o Debug::NoLocking=1 dist-upgrade 2>/dev/null |
     awk '/^Inst [^ ]+ \[/ && /-security|Debian-Security/ { print $2 }' | sort -u)
-  db_pkgs='^(postgresql-[0-9]+(-.+)?|mysql-server(-.+)?|mysql-community-server(-.+)?|percona-server-server(-.+)?|mariadb-server(-.+)?|mongodb-org-server|mongodb-org-mongos|clickhouse-server|clickhouse-common-static|(redis|valkey)-(server|sentinel|tools))$'
+  db_pkgs='^(postgresql-[0-9]+(-.+)?|mysql-server(-.+)?|mysql-community-server(-.+)?|percona-server-server(-.+)?|mariadb-server(-.+)?|mongodb-org-server|mongodb-org-mongos|clickhouse-server|clickhouse-common-static|opensearch|(redis|valkey)-(server|sentinel|tools))$'
   held=$(printf '%s\n' "$list" | grep -E "$db_pkgs" | tr '\n' ' ')
   pkgs=$(printf '%s\n' "$list" | grep -Ev "$db_pkgs" | grep . | tr '\n' ' ')
   n=0
@@ -1833,6 +1838,7 @@ Unattended-Upgrade::Package-Blacklist {
         "mongodb-org-mongos";
         "clickhouse-server";
         "clickhouse-common-static";
+        "opensearch";
         "redis-server";
         "redis-sentinel";
         "valkey-server";
@@ -1854,6 +1860,7 @@ $nrconf{override_rc}->{qr(^mysql)} = 0;
 $nrconf{override_rc}->{qr(^mariadb)} = 0;
 $nrconf{override_rc}->{qr(^mongod)} = 0;
 $nrconf{override_rc}->{qr(^clickhouse-server)} = 0;
+$nrconf{override_rc}->{qr(^opensearch)} = 0;
 $nrconf{override_rc}->{qr(^redis)} = 0;
 $nrconf{override_rc}->{qr(^valkey)} = 0;
 $nrconf{override_rc}->{qr(^rowsafe-redis)} = 0;

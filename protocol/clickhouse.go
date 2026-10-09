@@ -161,5 +161,9 @@ type ClickHouseReplica struct {
 
 // MarkIsBackup reports whether engine's Marks are backups of their own (a
 // differential backup taken on the spot; RestorePointResult.LSN is its
-// label), restored as they are rather than replayed to: ClickHouse.
-func MarkIsBackup(engine string) bool { return NormalizeEngine(engine) == EngineClickHouse }
+// label), restored as they are rather than replayed to: ClickHouse, and
+// OpenSearch (a snapshot taken on the spot).
+func MarkIsBackup(engine string) bool {
+	e := NormalizeEngine(engine)
+	return e == EngineClickHouse || e == EngineOpenSearch
+}

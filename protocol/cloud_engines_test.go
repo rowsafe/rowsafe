@@ -1,6 +1,9 @@
 package protocol
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestCloudEngines(t *testing.T) {
 	if CloudEngines[0].Engine != EnginePostgreSQL {
@@ -19,8 +22,12 @@ func TestCloudEngines(t *testing.T) {
 			t.Errorf("%s: default %s isn't offered", e.Engine, e.DefaultVersion)
 		case e.Port <= 1024 || e.Scheme == "" || e.InstallFlag() == "" || e.FirewallPorts()[0] != e.Port:
 			t.Errorf("%s: %+v", e.Engine, e)
-		case !EngineCapabilities[e.Engine].Backups || !EngineCapabilities[e.Engine].PointInTime || !EngineCapabilities[e.Engine].Proof:
-			t.Errorf("%s: servers Rowsafe creates need backups, restore to any second and Proof", e.Engine)
+		case !EngineCapabilities[e.Engine].Backups || !EngineCapabilities[e.Engine].Proof:
+			t.Errorf("%s: servers Rowsafe creates need backups and Proof", e.Engine)
+		case !EngineCapabilities[e.Engine].PointInTime && (e.Engine != EngineOpenSearch || !strings.Contains(e.Note, "not to any second")):
+			// OpenSearch keeps no log of its changes: its restores go back to
+			// a snapshot, which its note says.
+			t.Errorf("%s: servers Rowsafe creates need restore to any second, or a note that says it isn't there", e.Engine)
 		case e.Standby && !EngineCapabilities[e.Engine].Standby, e.Clone && !EngineCapabilities[e.Engine].Fork:
 			t.Errorf("%s: standby or clone offered without the engine's feature", e.Engine)
 		}
@@ -42,7 +49,11 @@ func TestCloudEngines(t *testing.T) {
 	if e, _ := CloudEngineFor(""); e.PortsText() != "5432" || len(e.FirewallPorts()) != 1 || !e.FitsMemory(1024) {
 		t.Errorf("postgresql ports: %v", e.FirewallPorts())
 	}
-	if got := CloudEngineNames(); got != "PostgreSQL, MySQL, MariaDB, Valkey or ClickHouse" {
-		t.Errorf("names: %q", got)
+	if e, ok := CloudEngineFor("OpenSearch"); !ok || e.Port != 9200 || e.Scheme != "https" || e.InstallFlag() != "--install-opensearch" ||
+		e.FitsMemory(2048) || !e.FitsMemory(4096) || e.Standby || e.Clone || e.DefaultVersion != "3" || EngineHas(EngineOpenSearch, FeaturePointInTime) {
+		t.Errorf("opensearch: %+v", e)
+	}
+	if !strings.Contains(CloudEngineNames(), "ClickHouse") || !strings.Contains(CloudEngineNames(), "OpenSearch") {
+		t.Errorf("names: %q", CloudEngineNames())
 	}
 }

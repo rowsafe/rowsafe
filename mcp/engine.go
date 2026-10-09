@@ -45,6 +45,8 @@ func serviceName(engine string) (unit, compose string) {
 		return "redis-server", "redis"
 	case protocol.EngineValkey:
 		return "valkey-server", "valkey"
+	case protocol.EngineOpenSearch:
+		return "opensearch", "opensearch"
 	}
 	return "postgresql", "postgres"
 }

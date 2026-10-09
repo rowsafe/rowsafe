@@ -913,6 +913,9 @@ type DatabaseMonitoring struct {
 	Redis *RedisStatus `json:"redis,omitempty"`
 	// SQLite is SQLite's own health detail (sqlite.go; about every minute).
 	SQLite *SQLiteStatus `json:"sqlite,omitempty"`
+	// OpenSearch is OpenSearch's own health detail (opensearch.go; about
+	// every minute).
+	OpenSearch *OpenSearchStatus `json:"opensearch,omitempty"`
 }
 
 // MonitoringAck answers a monitoring report.

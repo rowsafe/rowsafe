@@ -244,6 +244,8 @@ func ConnectionURL(c DBConnection, password string) string {
 		if c.SSLMode == "require" {
 			scheme = "rediss"
 		}
+	case EngineOpenSearch:
+		return openSearchURL(c, host, password) // opensearch_dbadmin.go
 	}
 	u := scheme + "://" + urlEscape(c.User)
 	if password != "" {
@@ -374,6 +376,9 @@ type DBDatabase struct {
 	Connections int `json:"connections"`
 	// Keys is the number of keys in a Redis or Valkey logical database.
 	Keys int64 `json:"keys,omitempty"`
+	// Documents is the number of documents in an OpenSearch index or data
+	// stream.
+	Documents int64 `json:"documents,omitempty"`
 	// Extensions installed (nil when the database couldn't be read).
 	Extensions []DBInstalledExtension `json:"extensions,omitempty"`
 }
@@ -744,6 +749,10 @@ func validateDBAdminEngine(engine string, p DBAdminParams) error {
 	name := EngineDisplayName(engine)
 	if engine == EngineRedis || engine == EngineValkey {
 		if err := validateRedisDBAdmin(name, p); err != nil {
+			return err
+		}
+	} else if engine == EngineOpenSearch {
+		if err := validateOpenSearchDBAdmin(p); err != nil { // opensearch_dbadmin.go
 			return err
 		}
 	} else if p.KeyPattern != "" {

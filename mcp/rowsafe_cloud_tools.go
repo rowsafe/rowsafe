@@ -100,7 +100,7 @@ type CloudServerView struct {
 	Step       string   `json:"step,omitempty" jsonschema:"where it is, in plain words"`
 	Problem    string   `json:"problem,omitempty"`
 	Price      string   `json:"price,omitempty"`
-	Engine     string   `json:"engine,omitempty" jsonschema:"the database: postgresql, mysql, mariadb, valkey or clickhouse"`
+	Engine     string   `json:"engine,omitempty" jsonschema:"the database: postgresql, mysql, mariadb, valkey, clickhouse or opensearch"`
 	Version    string   `json:"version,omitempty" jsonschema:"the engine's version"`
 	PostgreSQL string   `json:"postgresql,omitempty" jsonschema:"the PostgreSQL major version (PostgreSQL servers)"`
 	Database   string   `json:"database,omitempty" jsonschema:"its database in Rowsafe (name), once ready: what database takes in the other tools"`
@@ -111,7 +111,7 @@ type CloudServerView struct {
 	Port     int    `json:"port,omitempty"`
 	SSLMode  string `json:"sslmode,omitempty" jsonschema:"require, or verify-full once a public certificate is installed (PostgreSQL's sslmode; every engine requires TLS)"`
 	// Connection is the connection string without user and password.
-	Connection string `json:"connection,omitempty" jsonschema:"the connection string with USER and PASSWORD to fill in (postgresql://, mysql://, rediss:// or clickhouse://)"`
+	Connection string `json:"connection,omitempty" jsonschema:"the connection string with USER and PASSWORD to fill in (postgresql://, mysql://, rediss://, clickhouse:// or https:// for OpenSearch)"`
 	// HTTPS is ClickHouse's HTTPS interface (port 8443), next to Connection
 	// (its native protocol with TLS, 9440).
 	HTTPS       string     `json:"https,omitempty" jsonschema:"ClickHouse servers: the HTTPS interface's URL (port 8443), for HTTP clients and drivers"`
@@ -145,7 +145,7 @@ func (t *tools) addRowsafeCloudReadTools(s *sdk.Server) {
 		Name: "cloud_catalog",
 		Description: "Shows what a new Rowsafe Cloud server can be: each cloud with its regions and sizes (CPUs, memory, disk), the price of an hour and the most a month costs " +
 			"(or the monthly price), the traffic included, where a size is sold out right now, whether servers there can have a standby, whether the organization's pay as you go is active, " +
-			"how many servers it may have, and the databases a new server can get (PostgreSQL, MySQL, MariaDB, Valkey) with their versions and ports. " +
+			"how many servers it may have, and the databases a new server can get (PostgreSQL, MySQL, MariaDB, Valkey, ClickHouse, OpenSearch where offered) with their versions and ports. " +
 			"Use it before create_cloud_server or clone_to_new_server (request_change) to pick the database, the region and the cheapest size that fits. Read-only.",
 		Annotations: readOnly("Rowsafe Cloud catalog"),
 	}, t.cloudCatalog)
@@ -289,8 +289,9 @@ func (t *tools) cloudCatalog(ctx context.Context, _ *sdk.CallToolRequest, _ noIn
 		b.line("Cheapest free now: %s size %s in %s (%s).", best.Cloud, best.Size, best.Region, price)
 	}
 	out.Guidance = "Pick the cheapest size that fits the app (a small app's database fits the smallest size), in a region near the app. " +
-		"Then ask for it with request_change create_cloud_server (name, region, size, allowed_ips, and engine with engine_version when the app needs MySQL, MariaDB or Valkey rather than PostgreSQL; " +
-		"the reason says what it's for). Nothing is created or billed until a person approves it."
+		"Then ask for it with request_change create_cloud_server (name, region, size, allowed_ips, and engine with engine_version when the app needs MySQL, MariaDB, Valkey, ClickHouse or OpenSearch rather than PostgreSQL; " +
+		"the reason says what it's for). It runs as the person who connected you, with their rights: an owner's or admin's request creates the server (and its cost) right away, " +
+		"unless the organization asks for approval first; a member's waits for an owner or admin. Confirm the size and its price with the user before asking."
 	b.line("Next: %s", out.Guidance)
 	return text(b), out, nil
 }
