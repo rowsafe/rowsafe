@@ -121,3 +121,44 @@ func TestCloudCatalogEngines(t *testing.T) {
 		t.Errorf("engines %s %v", b, err)
 	}
 }
+
+// create_cloud_server's engine list and size limits come from
+// protocol.CloudEngines: every engine a new server can get is named, with
+// its minimum memory.
+func TestCreateCloudServerEngines(t *testing.T) {
+	cs := connect(t, &cloudAPI{t: t}, Options{AllowWrites: true, MaxWait: time.Second}, nil)
+	tools, err := cs.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tl := range tools.Tools {
+		if tl.Name != "create_cloud_server" {
+			continue
+		}
+		b, _ := json.Marshal(tl.InputSchema)
+		var schema struct {
+			Properties map[string]struct {
+				Description string `json:"description"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(b, &schema); err != nil {
+			t.Fatal(err)
+		}
+		field := schema.Properties["engine"].Description
+		for _, e := range protocol.CloudEngines {
+			if !strings.Contains(field, e.Engine) {
+				t.Errorf("engine field lacks %s: %s", e.Engine, field)
+			}
+			if !strings.Contains(tl.Description, e.Name) {
+				t.Errorf("description lacks %s: %s", e.Name, tl.Description)
+			}
+		}
+		for _, want := range []string{"postgresql (default)", "MySQL not on Arm sizes", "ClickHouse and OpenSearch on sizes with 4 GB of memory or more", "Qdrant 2 GB or more"} {
+			if !strings.Contains(field, want) {
+				t.Errorf("engine field lacks %q: %s", want, field)
+			}
+		}
+		return
+	}
+	t.Fatal("no create_cloud_server tool")
+}
