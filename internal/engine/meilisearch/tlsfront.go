@@ -24,9 +24,17 @@ import (
 // Plain HTTP on that port gets a short refusal saying to use HTTPS.
 //
 // It runs as its own sandboxed systemd service
-// (rowsafe-meilisearch-tls.service, a dynamic user in the group that may
-// read the key), not inside the agent: updating or restarting the agent
-// never interrupts apps' connections.
+// (rowsafe-meilisearch-tls.service, as the system user
+// rowsafe-meilisearch-tls, whose group may read the key), not inside the
+// agent: updating or restarting the agent never interrupts apps'
+// connections.
+//
+// Limits: a connection idle for IdleTimeout in either direction is closed;
+// once one side has finished, the other gets CloseGrace to finish too;
+// one address holds at most MaxPerIP connections. Meilisearch sees every
+// request as coming from 127.0.0.1 (it takes no PROXY protocol), so the
+// front logs each new client address (once per 10 minutes) and every
+// refusal.
 
 // FrontOptions configure RunTLSFront.
 type FrontOptions struct {
@@ -34,9 +42,16 @@ type FrontOptions struct {
 	Backend  string // "127.0.0.1:7701"
 	CertFile string
 	KeyFile  string
-	// MaxConns caps open connections (0: 4096).
+	// MaxConns caps open connections (0: 4096), MaxPerIP those from one
+	// address (0: 256).
 	MaxConns int
-	Log      *slog.Logger
+	MaxPerIP int
+	// IdleTimeout closes a connection nothing was read on for that long
+	// (0: 5 minutes); CloseGrace is how long the other direction may go on
+	// once one has ended (0: 30 seconds).
+	IdleTimeout time.Duration
+	CloseGrace  time.Duration
+	Log         *slog.Logger
 }
 
 // certReloader serves the certificate files, loading them again (at most
@@ -123,9 +138,7 @@ func RunTLSFront(ctx context.Context, o FrontOptions) error {
 	if o.Log == nil {
 		o.Log = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
-	if o.MaxConns <= 0 {
-		o.MaxConns = 4096
-	}
+	o.defaults()
 	if _, _, err := net.SplitHostPort(o.Backend); err != nil {
 		return fmt.Errorf("--to: %w", err)
 	}
@@ -141,9 +154,67 @@ func RunTLSFront(ctx context.Context, o FrontOptions) error {
 	return serveFront(ctx, ln, rl, o)
 }
 
+// clients counts open connections per address and when each address was
+// last logged.
+type clients struct {
+	mu     sync.Mutex
+	open   map[string]int
+	logged map[string]time.Time
+}
+
+func (c *clients) add(ip string, max int) (ok, log bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.open[ip] >= max {
+		return false, false
+	}
+	c.open[ip]++
+	now := time.Now()
+	if now.Sub(c.logged[ip]) > 10*time.Minute {
+		c.logged[ip] = now
+		log = true
+	}
+	if len(c.logged) > 100000 { // forget old addresses
+		for k, t := range c.logged {
+			if now.Sub(t) > 10*time.Minute {
+				delete(c.logged, k)
+			}
+		}
+	}
+	return true, log
+}
+
+func (c *clients) done(ip string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.open[ip]--; c.open[ip] <= 0 {
+		delete(c.open, ip)
+	}
+}
+
+func (o *FrontOptions) defaults() {
+	if o.MaxConns <= 0 {
+		o.MaxConns = 4096
+	}
+	if o.MaxPerIP <= 0 {
+		o.MaxPerIP = 256
+	}
+	if o.IdleTimeout <= 0 {
+		o.IdleTimeout = 5 * time.Minute
+	}
+	if o.CloseGrace <= 0 {
+		o.CloseGrace = 30 * time.Second
+	}
+	if o.Log == nil {
+		o.Log = slog.New(slog.NewTextHandler(os.Stderr, nil))
+	}
+}
+
 func serveFront(ctx context.Context, ln net.Listener, rl *certReloader, o FrontOptions) error {
+	o.defaults()
 	cfg := frontTLSConfig(rl)
 	sem := make(chan struct{}, o.MaxConns)
+	cl := &clients{open: map[string]int{}, logged: map[string]time.Time{}}
 	var wg sync.WaitGroup
 	go func() {
 		<-ctx.Done()
@@ -163,17 +234,30 @@ func serveFront(ctx context.Context, ln net.Listener, rl *certReloader, o FrontO
 			}
 			return err
 		}
+		ip := remoteIP(nc)
 		select {
 		case sem <- struct{}{}:
 		default:
 			nc.Close() // too many connections: refuse rather than queue
+			o.Log.Warn("refused a connection: too many open", "client", ip, "max", o.MaxConns)
 			continue
+		}
+		ok, logIt := cl.add(ip, o.MaxPerIP)
+		if !ok {
+			<-sem
+			nc.Close()
+			o.Log.Warn("refused a connection: too many from one address", "client", ip, "max_per_address", o.MaxPerIP)
+			continue
+		}
+		if logIt {
+			o.Log.Info("client", "address", ip)
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			handleFrontConn(ctx, nc, cfg, o.Backend)
+			defer cl.done(ip)
+			handleFrontConn(ctx, nc, cfg, o)
 		}()
 	}
 }
@@ -186,7 +270,30 @@ type peekedConn struct {
 
 func (p *peekedConn) Read(b []byte) (int, error) { return p.br.Read(b) }
 
-func handleFrontConn(ctx context.Context, nc net.Conn, cfg *tls.Config, backend string) {
+func remoteIP(c net.Conn) string {
+	if a, ok := c.RemoteAddr().(*net.TCPAddr); ok {
+		return a.IP.String()
+	}
+	h, _, err := net.SplitHostPort(c.RemoteAddr().String())
+	if err != nil {
+		return c.RemoteAddr().String()
+	}
+	return h
+}
+
+// idleReader reads from c with a fresh deadline before every read.
+type idleReader struct {
+	c    net.Conn
+	idle time.Duration
+}
+
+func (r idleReader) Read(b []byte) (int, error) {
+	_ = r.c.SetReadDeadline(time.Now().Add(r.idle))
+	return r.c.Read(b)
+}
+
+func handleFrontConn(ctx context.Context, nc net.Conn, cfg *tls.Config, o FrontOptions) {
+	backend := o.Backend
 	defer nc.Close()
 	_ = nc.SetDeadline(time.Now().Add(15 * time.Second))
 	br := bufio.NewReader(nc)
@@ -214,20 +321,25 @@ func handleFrontConn(ctx context.Context, nc net.Conn, cfg *tls.Config, backend 
 	defer bc.Close()
 	done := make(chan struct{}, 2)
 	go func() {
-		_, _ = io.Copy(bc, tc)
+		_, _ = io.Copy(bc, idleReader{c: tc, idle: o.IdleTimeout})
 		if t, ok := bc.(*net.TCPConn); ok {
 			_ = t.CloseWrite()
 		}
 		done <- struct{}{}
 	}()
 	go func() {
-		_, _ = io.Copy(tc, bc)
+		_, _ = io.Copy(tc, idleReader{c: bc, idle: o.IdleTimeout})
 		_ = tc.CloseWrite()
 		done <- struct{}{}
 	}()
 	select {
 	case <-done:
-		<-done
+		// One side finished: the other gets a little while, then both close.
+		select {
+		case <-done:
+		case <-time.After(o.CloseGrace):
+		case <-ctx.Done():
+		}
 	case <-ctx.Done():
 	}
 }

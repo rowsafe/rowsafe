@@ -130,6 +130,9 @@ func meilisearchCmd(ctx context.Context, args []string) int {
 		return 1
 	}
 	fmt.Printf("version=%s\ntls=%s\nkey_uid=%s\nno_auth=%s\n", res.Version, yesNo(res.TLS), dash(res.KeyUID), yesNo(res.NoAuth))
+	if len(res.Leftover) > 0 {
+		fmt.Printf("leftover_keys=%s\n", strings.Join(res.Leftover, ","))
+	}
 	return 0
 }
 

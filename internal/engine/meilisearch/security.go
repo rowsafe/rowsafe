@@ -3,7 +3,6 @@ package meilisearch
 import (
 	"context"
 	"fmt"
-	"slices"
 	"time"
 
 	"github.com/rowsafe/rowsafe/internal/agent"
@@ -38,7 +37,7 @@ func (e *Engine) SecurityReport(ctx context.Context, env agent.EngineEnv, db pro
 	rep.SSL = s.LocalPort > 0 || s.TLS
 	es.RequireTLS = rep.SSL
 	// Without a master key Meilisearch answers anyone, with no key at all.
-	open := newClient(map[bool]string{true: "https", false: "http"}[s.TLS && s.LocalPort == 0], s.localPort(), "")
+	open := newClient(map[bool]string{true: "https", false: "http"}[s.TLS && s.LocalPort == 0], s.localPort(), "", prodCheck(s))
 	defer open.close()
 	if _, err := open.version(ctx); err == nil {
 		es.AuthDisabled = true
@@ -56,7 +55,7 @@ func (e *Engine) SecurityReport(ctx context.Context, env agent.EngineEnv, db pro
 				break
 			}
 			canLogin := k.ExpiresAt == nil || k.ExpiresAt.After(now)
-			rep.Roles = append(rep.Roles, protocol.RoleInfo{Name: keyLabel(k), Superuser: slices.Contains(k.Actions, "*"),
+			rep.Roles = append(rep.Roles, protocol.RoleInfo{Name: keyLabel(k), Superuser: isAdminKey(k),
 				CanLogin: canLogin, Password: protocol.PasswordSet, ValidUntil: k.ExpiresAt})
 		}
 	}

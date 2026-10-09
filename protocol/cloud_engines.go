@@ -231,6 +231,7 @@ const FeatureServerCertificateClickHouse = "server_certificate_clickhouse"
 // (tls.cert_ttl); gRPC loads a renewed certificate at Qdrant's next restart
 // (Pulse says so and offers the restart: QdrantStatus.GRPCOldCert).
 const FeatureServerCertificateQdrant = "server_certificate_qdrant"
+
 // FeatureServerCertificateMeilisearch is in HeartbeatRequest.Features of
 // agents that install certificates for Rowsafe Cloud names on Meilisearch
 // servers too: the installer's --listen-public serves

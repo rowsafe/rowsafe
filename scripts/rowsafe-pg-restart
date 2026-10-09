@@ -185,6 +185,20 @@ qdrant_pin_tgz_arm64=6970b93b56fa1203f0cea47d2f330fdb654988fd56617aa77e8478cffd3
 qdrant_releases=${ROWSAFE_QDRANT_RELEASES_URL:-https://github.com/qdrant/qdrant/releases/download}
 qdrant_bin=/usr/bin/qdrant
 
+# Meilisearch (db-minor-update on meilisearch.service): its Community
+# Edition release from GitHub (never the Enterprise Edition), pinned by
+# Rowsafe with the SHA-256 of each file, here (the same pins as the
+# installer's MEILI_* settings) or in the installer of the newest release
+# signed with the Rowsafe release key. Any other version opens Meilisearch's
+# data only through its dumpless upgrade (MEILI_UPGRADE_DB, for that one
+# start), after Rowsafe saved a Mark.
+meili_pin_version=1.54.3
+meili_pin_amd64=0ece934f9791f0db83e1184f4f505a38eae7d93ff1c47efaa9426cf2b3a12ba7
+meili_pin_arm64=09ce5f9531bb205a10fe57854f64a4b59d16166a03de7fa76392a629ccfe81c4
+meili_releases=${ROWSAFE_MEILISEARCH_RELEASES_URL:-https://github.com/meilisearch/meilisearch/releases/download}
+meili_bin=/usr/local/bin/meilisearch
+meili_lib=/usr/local/lib/meilisearch
+
 log() { echo "rowsafe-pg-restart: $*" >&2; }
 
 # as_agent runs a command with the agent user's privileges.
@@ -2027,7 +2041,12 @@ db_engine() {
       db_engine=qdrant db_main=qdrant
       return 0
       ;;
-    *) refuse "$unit is not a MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey or Qdrant service" ;;
+    meilisearch.service)
+      # Meilisearch's program comes from its release on GitHub (meilisearch_update).
+      db_engine=meilisearch db_main=meilisearch
+      return 0
+      ;;
+    *) refuse "$unit is not a MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey, Qdrant or Meilisearch service" ;;
   esac
   db_main=''
   for p in "$@"; do
@@ -2091,6 +2110,19 @@ version_gt() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | 
 # nothing) when anything doesn't.
 qdrant_signed_pins() {
   sp_version='' sp_deb_amd64='' sp_tgz_arm64=''
+  signed_installer "$1" || return 1
+  _v=$(sed -n 's/^QDRANT_VERSION=\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' "$1/install.sh" | head -n 1)
+  _a=$(sed -n 's/^QDRANT_DEB_AMD64_SHA256=\([0-9a-f]\{64\}\)$/\1/p' "$1/install.sh" | head -n 1)
+  _r=$(sed -n 's/^QDRANT_TGZ_ARM64_SHA256=\([0-9a-f]\{64\}\)$/\1/p' "$1/install.sh" | head -n 1)
+  [ -n "$_v" ] && [ -n "$_a" ] && [ -n "$_r" ] || return 1
+  sp_version=$_v sp_deb_amd64=$_a sp_tgz_arm64=$_r
+}
+
+# signed_installer DIR downloads the installer of the newest release
+# (stable) into DIR/install.sh once the release manifest's signature checks
+# out against the Rowsafe release key and the installer's SHA-256 and size
+# against the manifest. Fails when anything doesn't.
+signed_installer() {
   _key=${ROWSAFE_RELEASE_PUBLIC_KEY:-} _url=${ROWSAFE_RELEASES_URL:-}
   printf '%s' "$_key" | grep -Eq '^[A-Za-z0-9+/]{43}=$' || return 1
   case $_url in https://*) ;; *) return 1 ;; esac
@@ -2101,7 +2133,7 @@ qdrant_signed_pins() {
   tr -d ' \t\r\n' <"$1/manifest.sig" >"$1/sig.b64"
   grep -Eq '^[A-Za-z0-9+/]{86}==$' "$1/sig.b64" && base64 -d <"$1/sig.b64" >"$1/sig.bin" 2>/dev/null || return 1
   openssl pkeyutl -verify -pubin -inkey "$1/release.pub" -rawin -in "$1/manifest.json" -sigfile "$1/sig.bin" >/dev/null 2>&1 || {
-    log "the newest release's manifest isn't signed by the Rowsafe release key; using this server's own Qdrant pins"
+    log "the newest release's manifest isn't signed by the Rowsafe release key; using this server's own pins"
     return 1
   }
   _art=$(tr -d ' \t\r\n' <"$1/manifest.json" | sed -n 's|.*"install\.sh":{\([^}]*\)}.*|\1|p')
@@ -2111,11 +2143,6 @@ qdrant_signed_pins() {
   [ -n "$_iurl" ] && [ -n "$_isha" ] && [ -n "$_isize" ] || return 1
   _get "$_iurl" "$1/install.sh" "$_isize" || return 1
   [ "$(sha256sum "$1/install.sh" | cut -d' ' -f1)" = "$_isha" ] && [ "$(wc -c <"$1/install.sh" | tr -d ' ')" = "$_isize" ] || return 1
-  _v=$(sed -n 's/^QDRANT_VERSION=\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' "$1/install.sh" | head -n 1)
-  _a=$(sed -n 's/^QDRANT_DEB_AMD64_SHA256=\([0-9a-f]\{64\}\)$/\1/p' "$1/install.sh" | head -n 1)
-  _r=$(sed -n 's/^QDRANT_TGZ_ARM64_SHA256=\([0-9a-f]\{64\}\)$/\1/p' "$1/install.sh" | head -n 1)
-  [ -n "$_v" ] && [ -n "$_a" ] && [ -n "$_r" ] || return 1
-  sp_version=$_v sp_deb_amd64=$_a sp_tgz_arm64=$_r
 }
 
 # qdrant_update installs the newest pinned Qdrant release of the installed
@@ -2189,11 +2216,99 @@ qdrant_update() {
   log "Qdrant on port $port: $before -> $after (restarted: $restarted)"
 }
 
+# meili_signed_pins DIR sets sp_version, sp_amd64 and sp_arm64 from the
+# installer of the newest signed release (see qdrant_signed_pins).
+meili_signed_pins() {
+  sp_version='' sp_amd64='' sp_arm64=''
+  signed_installer "$1" || return 1
+  _v=$(sed -n 's/^MEILI_VERSION=\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' "$1/install.sh" | head -n 1)
+  _a=$(sed -n 's/^MEILI_SHA256_AMD64=\([0-9a-f]\{64\}\)$/\1/p' "$1/install.sh" | head -n 1)
+  _r=$(sed -n 's/^MEILI_SHA256_ARM64=\([0-9a-f]\{64\}\)$/\1/p' "$1/install.sh" | head -n 1)
+  [ -n "$_v" ] && [ -n "$_a" ] && [ -n "$_r" ] || return 1
+  sp_version=$_v sp_amd64=$_a sp_arm64=$_r
+}
+
+# meili_version PROGRAM prints a Meilisearch program's version.
+meili_version() { "$1" --version 2>/dev/null | sed -n 's/^meilisearch \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' | head -n 1; }
+
+# meilisearch_update installs the newest Meilisearch release Rowsafe pins
+# (same major version), checked against its SHA-256 pin, into its own
+# folder, then switches the program and restarts meilisearch.service once
+# with Meilisearch's dumpless upgrade (someone clicked Update, Rowsafe saved
+# a Mark first, or Rowsafe Cloud's maintenance window started it). When the
+# new version doesn't start, the previous one is put back and started.
+meilisearch_update() {
+  [ -L "$meili_bin" ] || refuse "Meilisearch's program isn't $meili_bin (Rowsafe updates only the Meilisearch its installer set up)"
+  cur=$(readlink -f "$meili_bin" 2>/dev/null)
+  case $cur in "$meili_lib"/[0-9]*/meilisearch) ;; *) refuse "$meili_bin doesn't point to a Meilisearch Rowsafe installed" ;; esac
+  before=$(meili_version "$cur")
+  [ -n "$before" ] || refuse "can't tell which Meilisearch $cur is"
+  "$systemctl" is-active --quiet "$unit" 2>/dev/null || refuse "Meilisearch ($unit) isn't running: start it first, then update it"
+  arch=$(dpkg --print-architecture 2>/dev/null)
+  case $arch in amd64 | arm64) ;; *) refuse "Meilisearch's releases have no build for $arch" ;; esac
+  : >"$work_log"
+  ms_dir=$(mktemp -d /var/tmp/rowsafe-meilisearch.XXXXXX) || refuse "can't make a temporary folder"
+  v=$meili_pin_version sum_amd64=$meili_pin_amd64 sum_arm64=$meili_pin_arm64 from=installed
+  if meili_signed_pins "$ms_dir" && version_gt "$sp_version" "$v"; then
+    v=$sp_version sum_amd64=$sp_amd64 sum_arm64=$sp_arm64 from=signed
+  fi
+  add engine meilisearch
+  add series "${before%.*}"
+  add from_package "$before"
+  if [ "${v%%.*}" != "${before%%.*}" ] || ! version_gt "$v" "$before"; then
+    rm -rf "$ms_dir"
+    add package "$before"
+    add packages meilisearch
+    add restarted 0
+    ok=1
+    log "Meilisearch $before on port $port is the newest release Rowsafe pins"
+    return 0
+  fi
+  if [ "$arch" = amd64 ]; then file=meilisearch-linux-amd64 sum=$sum_amd64; else file=meilisearch-linux-aarch64 sum=$sum_arm64; fi
+  log "updating Meilisearch $before to $v ($from pins, request $id)"
+  curl -fsSL --proto '=https' --max-time 900 --max-filesize 1073741824 -o "$ms_dir/$file" "$meili_releases/v$v/$file" 2>>"$work_log" ||
+    { rm -rf "$ms_dir"; refuse "downloading Meilisearch $v failed: $(tail_log)"; }
+  got=$(sha256sum "$ms_dir/$file" | cut -d' ' -f1)
+  [ "$got" = "$sum" ] || { rm -rf "$ms_dir"; refuse "the Meilisearch $v file doesn't match the SHA-256 Rowsafe pinned for it (got $got); nothing was installed"; }
+  new=$meili_lib/$v/meilisearch
+  install -d -m 0755 -o root -g root "$meili_lib/$v" && install -m 0755 -o root -g root "$ms_dir/$file" "$new.rowsafe-new" &&
+    mv -f "$new.rowsafe-new" "$new" || { rm -rf "$ms_dir"; refuse "installing Meilisearch $v failed"; }
+  rm -rf "$ms_dir"
+  [ "$(meili_version "$new")" = "$v" ] || refuse "Meilisearch $v was installed, but it doesn't run here"
+  # One start with the dumpless upgrade, from a drop-in that lives in /run.
+  dropin=/run/systemd/system/$unit.d/50-rowsafe-upgrade.conf
+  mkdir -p "/run/systemd/system/$unit.d" && printf '[Service]\nEnvironment=MEILI_UPGRADE_DB=true\n' >"$dropin" ||
+    refuse "can't prepare Meilisearch's upgrade"
+  ln -sfn "$new" "$meili_bin.rowsafe-new" && mv -f "$meili_bin.rowsafe-new" "$meili_bin"
+  "$systemctl" daemon-reload
+  out=$(timeout 900 "$systemctl" restart "$unit" 2>&1 </dev/null)
+  rc=$?
+  sleep 5
+  if [ "$rc" != 0 ] || ! "$systemctl" is-active --quiet "$unit"; then
+    ln -sfn "$cur" "$meili_bin.rowsafe-new" && mv -f "$meili_bin.rowsafe-new" "$meili_bin"
+    rm -f "$dropin"
+    "$systemctl" daemon-reload
+    timeout 300 "$systemctl" restart "$unit" </dev/null >/dev/null 2>&1 || true
+    refuse "Meilisearch $v didn't start ($(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)); Meilisearch $before was put back. If it doesn't answer, restore the Mark Rowsafe saved before the update"
+  fi
+  rm -f "$dropin"
+  "$systemctl" daemon-reload
+  add package "$v"
+  add packages meilisearch
+  add restarted 1
+  ok=1
+  log "Meilisearch on port $port: $before -> $v (dumpless upgrade, restarted)"
+}
+
 act_db_minor_update() {
   update_allowed database "installing database updates from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
   db_port
   if [ "$db_engine" = qdrant ]; then
     qdrant_update
+    return 0
+  fi
+  if [ "$db_engine" = meilisearch ]; then
+    meilisearch_update
     return 0
   fi
   before=$(pkg_version "$db_main")

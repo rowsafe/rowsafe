@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -107,7 +108,7 @@ func startProd(t *testing.T, bin string) *prod {
 	return &prod{sc: sc, master: sc.Key, snaps: filepath.Join(sc.Dir, "snapshots")}
 }
 
-func (p *prod) admin() *client { return newClient("http", p.sc.Port, p.master) }
+func (p *prod) admin() *client { return newClient("http", p.sc.Port, p.master, noCheck) }
 
 func addDocs(t *testing.T, c *client, uid string, from, to int) {
 	t.Helper()
@@ -148,11 +149,18 @@ func count(t *testing.T, c *client, uid string) int64 {
 	return s.NumberOfDocuments
 }
 
+// noCheck: the test's instances run as the test's user, on any machine.
+func noCheck(int) error { return nil }
+
 func TestIntegration(t *testing.T) {
 	bin := os.Getenv("ROWSAFE_TEST_MEILISEARCH_BIN")
 	if bin == "" {
 		t.Skip("ROWSAFE_TEST_MEILISEARCH_BIN is not set")
 	}
+	// The program is in a temporary folder and /proc may be missing (macOS):
+	// the listener and program checks have their own tests.
+	checkListeners, trustAnyProgram = runtime.GOOS == "linux", true
+	t.Cleanup(func() { checkListeners, trustAnyProgram = true, false })
 	ctx := context.Background()
 	p := startProd(t, bin)
 	admin := p.admin()
@@ -260,7 +268,7 @@ func TestIntegration(t *testing.T) {
 		t.Fatalf("copy %+v", cp)
 	}
 	// Production's keys don't open the copy.
-	if _, err := newClient("http", cp.Port, p.master).stats(ctx); err == nil || !isAuthError(err) {
+	if _, err := newClient("http", cp.Port, p.master, noCheck).stats(ctx); err == nil || !isAuthError(err) {
 		t.Fatalf("the master key opens the copy: %v", err)
 	}
 	cmp := mustRun[protocol.RewindCompareResult](t, e, env, db, protocol.TaskRewindCompare, protocol.RewindCompareParams{CopyID: "c1"})
@@ -341,7 +349,7 @@ func TestIntegration(t *testing.T) {
 	if raw, _ := json.Marshal(da); strings.Contains(string(raw), secret.Password) {
 		t.Fatal("the key is in the result in the clear")
 	}
-	front := newClient("http", db.Port, secret.Password)
+	front := newClient("http", db.Port, secret.Password, noCheck)
 	var sr struct {
 		Hits []map[string]any `json:"hits"`
 	}

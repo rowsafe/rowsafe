@@ -58,7 +58,8 @@ Usage:
                                             (root) passkeys that may change this server's permissions
                                             from the dashboard (see permissions --help)
   rowsafe-agent selftest                    check this binary can run here (used before self-update)
-  rowsafe-agent storage test [--wait 60s]   write, read back and delete a test file in the backup
+  rowsafe-agent storage test [--wait 60s] [--own-client]
+                                            write, read back and delete a test file in the backup
                                             storage (Rowsafe Storage or your bucket)
   rowsafe-agent health                      container health check (docker-sidecar mode)
   rowsafe-agent version
@@ -282,10 +283,11 @@ func keyCmd() error {
 // storage runs `rowsafe-agent storage test`.
 func storage(ctx context.Context, args []string) error {
 	if len(args) == 0 || args[0] != "test" {
-		return errors.New("usage: rowsafe-agent storage test [--wait 60s]")
+		return errors.New("usage: rowsafe-agent storage test [--wait 60s] [--own-client]")
 	}
 	fs := flag.NewFlagSet("storage test", flag.ContinueOnError)
 	wait := fs.Duration("wait", 0, "Rowsafe Storage: how long to wait for the agent to enroll and get credentials")
+	own := fs.Bool("own-client", false, "the engine backs up with its own tools: test with the agent's S3 client, not pgBackRest")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -293,5 +295,5 @@ func storage(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return agent.StorageTest(ctx, cfg, os.Stdout, *wait)
+	return agent.StorageTest(ctx, cfg, os.Stdout, *wait, *own)
 }

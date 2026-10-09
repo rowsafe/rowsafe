@@ -1,6 +1,7 @@
 package meilisearch
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -36,9 +38,81 @@ import (
 
 // Kept record phases (agent.KeptRecord.Phase).
 const (
-	phaseCopying = "copying" // restored indexes are being exported under temporary names
-	phaseSwapped = "swapped" // the swap is done
+	phaseCopying = "copying" // restored indexes are being exported under temporary names; no swap asked for
+	// phaseSwapping: the swap was asked for (saved before the request;
+	// Extra["swap_task"] once Meilisearch gave its task). Until its task is
+	// known to have failed, nothing under the temporary names is deleted:
+	// once swapped, they are production's indexes as they were.
+	phaseSwapping = "swapping"
+	phaseSwapped  = "swapped" // the swap is done
+	phaseUndoing  = "undoing" // the swap back was asked for (Extra["undo_task"])
 )
+
+// The outcome of a swap Rowsafe asked for, read from Meilisearch's queue.
+const (
+	swapSucceeded = "succeeded"
+	swapFailed    = "failed"  // failed or canceled: nothing was swapped
+	swapAbsent    = "absent"  // never reached the queue: nothing will be swapped
+	swapPending   = "pending" // enqueued or processing
+	swapUnknown   = "unknown" // Meilisearch didn't say
+)
+
+// swapStatus reads what became of the swap (which: "swap" or "undo") rec
+// asked for. With no task uid saved (the agent stopped as it asked), the
+// queue is searched for a swap naming rec's temporary names.
+func swapStatus(ctx context.Context, c *client, rec *agent.KeptRecord, which string) string {
+	prefix, _ := planFromExtra(rec.Extra)
+	if id, err := strconv.ParseInt(rec.Extra[which+"_task"], 10, 64); err == nil {
+		t, err := c.task(ctx, id)
+		if err != nil {
+			return swapUnknown
+		}
+		return swapOutcome(t.Status)
+	}
+	since, err := time.Parse(time.RFC3339, rec.Extra[which+"_since"])
+	if err != nil || prefix == "" {
+		return swapUnknown
+	}
+	ts, _, err := c.taskPage(ctx, url.Values{"types": {"indexSwap"}, "afterEnqueuedAt": {since.Add(-time.Second).UTC().Format(time.RFC3339)},
+		"limit": {"100"}})
+	if err != nil {
+		return swapUnknown
+	}
+	for _, t := range ts {
+		if bytes.Contains(t.Details, []byte(`"`+prefix)) {
+			if rec.Extra == nil {
+				rec.Extra = map[string]string{}
+			}
+			rec.Extra[which+"_task"] = strconv.FormatInt(t.id(), 10)
+			return swapOutcome(t.Status)
+		}
+	}
+	// Not in the queue: a request still on its way could arrive, so only
+	// after a while does absent mean never.
+	if time.Since(since) < 10*time.Minute {
+		return swapPending
+	}
+	return swapAbsent
+}
+
+func swapOutcome(status string) string {
+	switch status {
+	case "succeeded":
+		return swapSucceeded
+	case "failed", "canceled":
+		return swapFailed
+	case "enqueued", "processing":
+		return swapPending
+	}
+	return swapUnknown
+}
+
+// errSwapPending: the swap is asked for but not finished; nothing is
+// deleted and the agent records the outcome when Meilisearch has one.
+func errSwapPending(what string) error {
+	return fmt.Errorf("Meilisearch hasn't finished %s yet (it waits in its task queue). Rowsafe deletes nothing meanwhile and "+
+		"records the outcome as soon as Meilisearch has one; check Rewind again in a few minutes", what)
+}
 
 // restorePrefix is the temporary names' prefix for a rewind.
 func restorePrefix(rewindID string) string {
@@ -109,6 +183,11 @@ func (e *Engine) rewindInPlace(ctx context.Context, env agent.EngineEnv, db prot
 		return nil, err
 	}
 	defer pc.close()
+	if v, err := pc.version(ctx); err == nil {
+		if why := protocol.MeilisearchInPlaceProblem(v.PkgVersion); why != "" {
+			return nil, errors.New(why)
+		}
+	}
 	if s.TLS {
 		return nil, errors.New("Meilisearch serves TLS itself on this server, so it can't receive the restored indexes from a temporary " +
 			"Meilisearch here: restore a copy and bring documents back instead")
@@ -206,6 +285,11 @@ func (e *Engine) rewindInPlace(ctx context.Context, env agent.EngineEnv, db prot
 			plural(int64(len(snap.Indexes)), "index", "indexes"), plural(snap.documents(), "document", "documents"))
 		body := map[string]any{"url": "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(s.localPort())), "apiKey": tk.Key,
 			"indexes": map[string]any{prefix + "*": map[string]any{"overrideSettings": true}}}
+		// The temporary Meilisearch sends that key to production's port:
+		// checked just before.
+		if err := prodCheck(s)(s.localPort()); err != nil {
+			return fail(err)
+		}
 		t, err = sc2.enqueue(ctx, http.MethodPost, "/export", nil, body)
 		if err == nil {
 			_, err = sc2.waitTask(ctx, t, 24*time.Hour)
@@ -260,15 +344,33 @@ func (e *Engine) rewindInPlace(ctx context.Context, env agent.EngineEnv, db prot
 			sp.Swapped = append(sp.Swapped, i.UID)
 		}
 	}
-	rec.Phase, rec.Extra = phaseCopying, sp.extra(prefix)
-	_ = kept.Put(rec)
 	if req := sp.request(prefix, false); len(req) > 0 {
+		// Saved before asking: from here on, a failure deletes nothing
+		// until Meilisearch says the swap failed.
+		rec.Phase, rec.Extra = phaseSwapping, sp.extra(prefix)
+		rec.Extra["swap_since"] = time.Now().UTC().Format(time.RFC3339)
+		if err := kept.Put(rec); err != nil {
+			return fail(err)
+		}
 		t, err := pc.enqueue(ctx, http.MethodPost, "/swap-indexes", nil, req)
 		if err == nil {
+			rec.Extra["swap_task"] = strconv.FormatInt(t.id(), 10)
+			_ = kept.Put(rec)
 			_, err = pc.waitTask(ctx, t, time.Hour)
 		}
 		if err != nil {
-			return fail(fmt.Errorf("swapping the restored indexes into place: %w", err))
+			sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+			st := swapStatus(sctx, pc, &rec, "swap")
+			cancel()
+			switch st {
+			case swapSucceeded: // swapped after all
+			case swapFailed, swapAbsent:
+				return fail(fmt.Errorf("swapping the restored indexes into place: %w", err))
+			default:
+				_ = kept.Put(rec)
+				res.DurationMs = time.Since(start).Milliseconds()
+				return res, errSwapPending("putting the restored indexes in place")
+			}
 		}
 	}
 	until := agent.KeepUntil(keepDays, time.Now())
@@ -309,17 +411,40 @@ func (e *Engine) rewindUndo(ctx context.Context, env agent.EngineEnv, db protoco
 		return nil, err
 	}
 	defer pc.close()
+	if rec.Phase == phaseUndoing {
+		return nil, errSwapPending("an Undo asked for before")
+	}
 	prefix, sp := planFromExtra(rec.Extra)
 	if req := sp.request(prefix, true); len(req) > 0 {
+		rec.Phase = phaseUndoing
+		rec.Extra["undo_since"] = time.Now().UTC().Format(time.RFC3339)
+		delete(rec.Extra, "undo_task")
+		if err := kept.Put(rec); err != nil {
+			return nil, err
+		}
 		t, err := pc.enqueue(ctx, http.MethodPost, "/swap-indexes", nil, req)
 		if err == nil {
+			rec.Extra["undo_task"] = strconv.FormatInt(t.id(), 10)
+			_ = kept.Put(rec)
 			_, err = pc.waitTask(ctx, t, time.Hour)
 		}
 		if err != nil {
-			return nil, fmt.Errorf("swapping the indexes back: %w", err)
+			sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+			st := swapStatus(sctx, pc, &rec, "undo")
+			cancel()
+			switch st {
+			case swapSucceeded:
+			case swapFailed, swapAbsent:
+				rec.Phase = phaseSwapped
+				_ = kept.Put(rec)
+				return nil, fmt.Errorf("swapping the indexes back: %w", err)
+			default:
+				_ = kept.Put(rec)
+				return nil, errSwapPending("swapping the indexes back")
+			}
 		}
 	}
-	rec.Status, rec.Undo = protocol.RewindKeptAfterUndo, true
+	rec.Status, rec.Undo, rec.Phase = protocol.RewindKeptAfterUndo, true, phaseSwapped
 	rec.SizeBytes = prefixedSize(ctx, pc, prefix)
 	_ = kept.Put(rec)
 	exp := rec.Expires
@@ -340,7 +465,7 @@ func (e *Engine) rewindCleanup(ctx context.Context, env agent.EngineEnv, db prot
 	if rec.DatabaseID != db.ID {
 		return nil, fmt.Errorf("the rewind %s isn't this database's", p.RewindID)
 	}
-	if rec.Status == protocol.RewindInProgress {
+	if rec.Status == protocol.RewindInProgress || rec.Phase == phaseSwapping || rec.Phase == phaseUndoing {
 		return nil, agent.ErrRewindBusy
 	}
 	pc, _, err := connect(ctx, env, db)
@@ -360,12 +485,19 @@ func (e *Engine) rewindCleanup(ctx context.Context, env agent.EngineEnv, db prot
 	return res, nil
 }
 
-// expireKept deletes kept indexes past their expiry, and finishes rewinds
-// an agent restart interrupted before the swap (nothing was swapped: the
-// temporary indexes go).
+// expireKept deletes kept indexes past their expiry, records swaps that
+// finished after the task that asked for them stopped (an error, a
+// timeout, an agent restart), and finishes rewinds an agent restart
+// interrupted before the swap was asked for (nothing was swapped: the
+// temporary indexes go). While a swap's outcome is unknown, nothing is
+// deleted.
 func (e *Engine) expireKept(ctx context.Context, env agent.EngineEnv, now time.Time) {
 	kept := env.Kept()
 	for _, rec := range kept.All() {
+		if rec.Phase == phaseSwapping || rec.Phase == phaseUndoing {
+			e.settleSwap(ctx, env, rec, now)
+			continue
+		}
 		interrupted := rec.Status == protocol.RewindInProgress && rec.Phase == phaseCopying && now.Sub(rec.CreatedAt) > 25*time.Hour
 		expired := rec.Status != protocol.RewindInProgress && !rec.Expires.IsZero() && now.After(rec.Expires)
 		if !interrupted && !expired {
@@ -381,6 +513,42 @@ func (e *Engine) expireKept(ctx context.Context, env agent.EngineEnv, now time.T
 		pc.close()
 		_ = kept.Remove(rec.ID)
 		env.Log.Info("removed the indexes kept from a rewind", "rewind_id", rec.ID, "indexes", n)
+	}
+}
+
+// settleSwap records the outcome of a swap (or swap back) asked for
+// earlier, once Meilisearch has one.
+func (e *Engine) settleSwap(ctx context.Context, env agent.EngineEnv, rec agent.KeptRecord, now time.Time) {
+	kept := env.Kept()
+	pc, _, err := connect(ctx, env, rec.Database)
+	if err != nil {
+		return
+	}
+	defer pc.close()
+	undo := rec.Phase == phaseUndoing
+	which := map[bool]string{true: "undo", false: "swap"}[undo]
+	st := swapStatus(ctx, pc, &rec, which)
+	prefix, _ := planFromExtra(rec.Extra)
+	switch {
+	case st == swapSucceeded && undo:
+		rec.Status, rec.Undo, rec.Phase = protocol.RewindKeptAfterUndo, true, phaseSwapped
+		rec.SizeBytes = prefixedSize(ctx, pc, prefix)
+		_ = kept.Put(rec)
+		env.Log.Info("recorded an Undo Meilisearch finished later", "rewind_id", rec.ID)
+	case st == swapSucceeded:
+		rec.Status, rec.Phase, rec.Expires = protocol.RewindKeptBefore, phaseSwapped, agent.KeepUntil(rec.KeepDays, now)
+		rec.SizeBytes = prefixedSize(ctx, pc, prefix)
+		_ = kept.Put(rec)
+		env.Log.Info("recorded a rewind's swap Meilisearch finished later", "rewind_id", rec.ID)
+	case (st == swapFailed || st == swapAbsent) && undo:
+		rec.Phase = phaseSwapped // the rewound indexes stay in place, Undo can be asked again
+		_ = kept.Put(rec)
+	case st == swapFailed || st == swapAbsent:
+		n := deletePrefixed(ctx, pc, prefix) // nothing was swapped: these are the restored copies
+		_ = kept.Remove(rec.ID)
+		env.Log.Info("removed the temporary indexes of a rewind whose swap failed", "rewind_id", rec.ID, "indexes", n)
+	default:
+		_ = kept.Put(rec) // pending or unknown: ask again later, delete nothing
 	}
 }
 

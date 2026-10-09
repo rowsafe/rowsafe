@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -80,6 +81,33 @@ const (
 	MeilisearchRestorePrefix = "rowsafe-restore-"
 )
 
+// MeilisearchVersion is the Meilisearch release Rowsafe installs and
+// updates to (the installer's MEILI_VERSION and the root helper's
+// meili_pin_version, with the SHA-256 of its files). Updates go to a newer
+// pinned release of the same major version, through Meilisearch's dumpless
+// upgrade, after a Mark.
+const MeilisearchVersion = "1.54.3"
+
+// MeilisearchInPlaceMinVersion is the oldest Meilisearch a rewind in place
+// works on: it copies indexes with POST /export (Meilisearch 1.16) and
+// swaps them in with renames (POST /swap-indexes with "rename",
+// Meilisearch 1.18).
+const MeilisearchInPlaceMinVersion = "1.18"
+
+// MeilisearchInPlaceProblem says why a rewind in place can't run on
+// version ("" when it can, or when the version is unknown).
+func MeilisearchInPlaceProblem(version string) string {
+	var maj, minor int
+	if _, err := fmt.Sscanf(strings.TrimPrefix(version, "v"), "%d.%d", &maj, &minor); err != nil {
+		return ""
+	}
+	if maj < 1 || maj == 1 && minor < 18 {
+		return fmt.Sprintf("Rewind in place needs Meilisearch %s or newer, and this server runs %s: restore a copy and bring documents back "+
+			"instead, or update Meilisearch first", MeilisearchInPlaceMinVersion, version)
+	}
+	return ""
+}
+
 // Meilisearch fixes (MaintenanceParams.Action).
 const (
 	// MaintMeiliCompactIndex compacts one index (Tables[0], its uid) when
@@ -100,6 +128,7 @@ var meilisearchFeatures = EngineFeatures{
 	RewindCopy: true, RewindRows: true, RewindInPlace: true,
 	Monitoring: true, Fixes: true,
 	Restart:  true, // through root's helper (meilisearch.service), only when root allowed it
+	Updates:  true, // the newest pinned release (MeilisearchVersion), by the root helper, on servers Rowsafe's installer set up
 	DBAdmin:  true, // indexes and API keys
 	Security: true,
 }
@@ -150,12 +179,14 @@ type MeilisearchIndex struct {
 
 // MeiliTask is one task of Meilisearch's queue (no payload).
 type MeiliTask struct {
-	UID        int64      `json:"uid"`
-	Type       string     `json:"type"`
-	IndexUID   string     `json:"index_uid,omitempty"`
-	Status     string     `json:"status"`
-	ErrorCode  string     `json:"error_code,omitempty"`
-	Error      string     `json:"error,omitempty"` // Meilisearch's message, at most 300 characters
+	UID       int64  `json:"uid"`
+	Type      string `json:"type"`
+	IndexUID  string `json:"index_uid,omitempty"`
+	Status    string `json:"status"`
+	ErrorCode string `json:"error_code,omitempty"`
+	// Error is the code in plain words. Meilisearch's own message never
+	// leaves the server: it can quote documents.
+	Error      string     `json:"error,omitempty"`
 	EnqueuedAt *time.Time `json:"enqueued_at,omitempty"`
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
 }

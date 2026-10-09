@@ -2135,7 +2135,11 @@ db_running() {
       qdrant_ready || die "Qdrant started but doesn't answer on 127.0.0.1:6333 (see: journalctl -u qdrant)"
       ;;
     meilisearch)
-      [ "$(db_version)" = "$MEILI_VERSION" ] || die "the Meilisearch here is $(db_version), not Meilisearch $MEILI_VERSION"
+      case $(db_version) in
+        "$MEILI_VERSION") ;;
+        "${MEILI_VERSION%%.*}".*) note "Meilisearch $(db_version) runs here (this installer brings $MEILI_VERSION; Rowsafe updates it when someone asks)" ;;
+        *) die "the Meilisearch here is $(db_version), not Meilisearch $MEILI_VERSION" ;;
+      esac
       if [ "${DB_UNIT_CHANGED:-0}" = 1 ] && [ "$DB_STARTED" != 1 ]; then
         note "restarting the Meilisearch this installer installed, with its new settings"
         db_restart || die "restarting Meilisearch failed (see journalctl -u meilisearch)"
@@ -4141,6 +4145,20 @@ qdrant_pin_tgz_arm64=6970b93b56fa1203f0cea47d2f330fdb654988fd56617aa77e8478cffd3
 qdrant_releases=${ROWSAFE_QDRANT_RELEASES_URL:-https://github.com/qdrant/qdrant/releases/download}
 qdrant_bin=/usr/bin/qdrant
 
+# Meilisearch (db-minor-update on meilisearch.service): its Community
+# Edition release from GitHub (never the Enterprise Edition), pinned by
+# Rowsafe with the SHA-256 of each file, here (the same pins as the
+# installer's MEILI_* settings) or in the installer of the newest release
+# signed with the Rowsafe release key. Any other version opens Meilisearch's
+# data only through its dumpless upgrade (MEILI_UPGRADE_DB, for that one
+# start), after Rowsafe saved a Mark.
+meili_pin_version=1.54.3
+meili_pin_amd64=0ece934f9791f0db83e1184f4f505a38eae7d93ff1c47efaa9426cf2b3a12ba7
+meili_pin_arm64=09ce5f9531bb205a10fe57854f64a4b59d16166a03de7fa76392a629ccfe81c4
+meili_releases=${ROWSAFE_MEILISEARCH_RELEASES_URL:-https://github.com/meilisearch/meilisearch/releases/download}
+meili_bin=/usr/local/bin/meilisearch
+meili_lib=/usr/local/lib/meilisearch
+
 log() { echo "rowsafe-pg-restart: $*" >&2; }
 
 # as_agent runs a command with the agent user's privileges.
@@ -5983,7 +6001,12 @@ db_engine() {
       db_engine=qdrant db_main=qdrant
       return 0
       ;;
-    *) refuse "$unit is not a MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey or Qdrant service" ;;
+    meilisearch.service)
+      # Meilisearch's program comes from its release on GitHub (meilisearch_update).
+      db_engine=meilisearch db_main=meilisearch
+      return 0
+      ;;
+    *) refuse "$unit is not a MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey, Qdrant or Meilisearch service" ;;
   esac
   db_main=''
   for p in "$@"; do
@@ -6047,6 +6070,19 @@ version_gt() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | 
 # nothing) when anything doesn't.
 qdrant_signed_pins() {
   sp_version='' sp_deb_amd64='' sp_tgz_arm64=''
+  signed_installer "$1" || return 1
+  _v=$(sed -n 's/^QDRANT_VERSION=\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' "$1/install.sh" | head -n 1)
+  _a=$(sed -n 's/^QDRANT_DEB_AMD64_SHA256=\([0-9a-f]\{64\}\)$/\1/p' "$1/install.sh" | head -n 1)
+  _r=$(sed -n 's/^QDRANT_TGZ_ARM64_SHA256=\([0-9a-f]\{64\}\)$/\1/p' "$1/install.sh" | head -n 1)
+  [ -n "$_v" ] && [ -n "$_a" ] && [ -n "$_r" ] || return 1
+  sp_version=$_v sp_deb_amd64=$_a sp_tgz_arm64=$_r
+}
+
+# signed_installer DIR downloads the installer of the newest release
+# (stable) into DIR/install.sh once the release manifest's signature checks
+# out against the Rowsafe release key and the installer's SHA-256 and size
+# against the manifest. Fails when anything doesn't.
+signed_installer() {
   _key=${ROWSAFE_RELEASE_PUBLIC_KEY:-} _url=${ROWSAFE_RELEASES_URL:-}
   printf '%s' "$_key" | grep -Eq '^[A-Za-z0-9+/]{43}=$' || return 1
   case $_url in https://*) ;; *) return 1 ;; esac
@@ -6057,7 +6093,7 @@ qdrant_signed_pins() {
   tr -d ' \t\r\n' <"$1/manifest.sig" >"$1/sig.b64"
   grep -Eq '^[A-Za-z0-9+/]{86}==$' "$1/sig.b64" && base64 -d <"$1/sig.b64" >"$1/sig.bin" 2>/dev/null || return 1
   openssl pkeyutl -verify -pubin -inkey "$1/release.pub" -rawin -in "$1/manifest.json" -sigfile "$1/sig.bin" >/dev/null 2>&1 || {
-    log "the newest release's manifest isn't signed by the Rowsafe release key; using this server's own Qdrant pins"
+    log "the newest release's manifest isn't signed by the Rowsafe release key; using this server's own pins"
     return 1
   }
   _art=$(tr -d ' \t\r\n' <"$1/manifest.json" | sed -n 's|.*"install\.sh":{\([^}]*\)}.*|\1|p')
@@ -6067,11 +6103,6 @@ qdrant_signed_pins() {
   [ -n "$_iurl" ] && [ -n "$_isha" ] && [ -n "$_isize" ] || return 1
   _get "$_iurl" "$1/install.sh" "$_isize" || return 1
   [ "$(sha256sum "$1/install.sh" | cut -d' ' -f1)" = "$_isha" ] && [ "$(wc -c <"$1/install.sh" | tr -d ' ')" = "$_isize" ] || return 1
-  _v=$(sed -n 's/^QDRANT_VERSION=\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' "$1/install.sh" | head -n 1)
-  _a=$(sed -n 's/^QDRANT_DEB_AMD64_SHA256=\([0-9a-f]\{64\}\)$/\1/p' "$1/install.sh" | head -n 1)
-  _r=$(sed -n 's/^QDRANT_TGZ_ARM64_SHA256=\([0-9a-f]\{64\}\)$/\1/p' "$1/install.sh" | head -n 1)
-  [ -n "$_v" ] && [ -n "$_a" ] && [ -n "$_r" ] || return 1
-  sp_version=$_v sp_deb_amd64=$_a sp_tgz_arm64=$_r
 }
 
 # qdrant_update installs the newest pinned Qdrant release of the installed
@@ -6145,11 +6176,99 @@ qdrant_update() {
   log "Qdrant on port $port: $before -> $after (restarted: $restarted)"
 }
 
+# meili_signed_pins DIR sets sp_version, sp_amd64 and sp_arm64 from the
+# installer of the newest signed release (see qdrant_signed_pins).
+meili_signed_pins() {
+  sp_version='' sp_amd64='' sp_arm64=''
+  signed_installer "$1" || return 1
+  _v=$(sed -n 's/^MEILI_VERSION=\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' "$1/install.sh" | head -n 1)
+  _a=$(sed -n 's/^MEILI_SHA256_AMD64=\([0-9a-f]\{64\}\)$/\1/p' "$1/install.sh" | head -n 1)
+  _r=$(sed -n 's/^MEILI_SHA256_ARM64=\([0-9a-f]\{64\}\)$/\1/p' "$1/install.sh" | head -n 1)
+  [ -n "$_v" ] && [ -n "$_a" ] && [ -n "$_r" ] || return 1
+  sp_version=$_v sp_amd64=$_a sp_arm64=$_r
+}
+
+# meili_version PROGRAM prints a Meilisearch program's version.
+meili_version() { "$1" --version 2>/dev/null | sed -n 's/^meilisearch \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' | head -n 1; }
+
+# meilisearch_update installs the newest Meilisearch release Rowsafe pins
+# (same major version), checked against its SHA-256 pin, into its own
+# folder, then switches the program and restarts meilisearch.service once
+# with Meilisearch's dumpless upgrade (someone clicked Update, Rowsafe saved
+# a Mark first, or Rowsafe Cloud's maintenance window started it). When the
+# new version doesn't start, the previous one is put back and started.
+meilisearch_update() {
+  [ -L "$meili_bin" ] || refuse "Meilisearch's program isn't $meili_bin (Rowsafe updates only the Meilisearch its installer set up)"
+  cur=$(readlink -f "$meili_bin" 2>/dev/null)
+  case $cur in "$meili_lib"/[0-9]*/meilisearch) ;; *) refuse "$meili_bin doesn't point to a Meilisearch Rowsafe installed" ;; esac
+  before=$(meili_version "$cur")
+  [ -n "$before" ] || refuse "can't tell which Meilisearch $cur is"
+  "$systemctl" is-active --quiet "$unit" 2>/dev/null || refuse "Meilisearch ($unit) isn't running: start it first, then update it"
+  arch=$(dpkg --print-architecture 2>/dev/null)
+  case $arch in amd64 | arm64) ;; *) refuse "Meilisearch's releases have no build for $arch" ;; esac
+  : >"$work_log"
+  ms_dir=$(mktemp -d /var/tmp/rowsafe-meilisearch.XXXXXX) || refuse "can't make a temporary folder"
+  v=$meili_pin_version sum_amd64=$meili_pin_amd64 sum_arm64=$meili_pin_arm64 from=installed
+  if meili_signed_pins "$ms_dir" && version_gt "$sp_version" "$v"; then
+    v=$sp_version sum_amd64=$sp_amd64 sum_arm64=$sp_arm64 from=signed
+  fi
+  add engine meilisearch
+  add series "${before%.*}"
+  add from_package "$before"
+  if [ "${v%%.*}" != "${before%%.*}" ] || ! version_gt "$v" "$before"; then
+    rm -rf "$ms_dir"
+    add package "$before"
+    add packages meilisearch
+    add restarted 0
+    ok=1
+    log "Meilisearch $before on port $port is the newest release Rowsafe pins"
+    return 0
+  fi
+  if [ "$arch" = amd64 ]; then file=meilisearch-linux-amd64 sum=$sum_amd64; else file=meilisearch-linux-aarch64 sum=$sum_arm64; fi
+  log "updating Meilisearch $before to $v ($from pins, request $id)"
+  curl -fsSL --proto '=https' --max-time 900 --max-filesize 1073741824 -o "$ms_dir/$file" "$meili_releases/v$v/$file" 2>>"$work_log" ||
+    { rm -rf "$ms_dir"; refuse "downloading Meilisearch $v failed: $(tail_log)"; }
+  got=$(sha256sum "$ms_dir/$file" | cut -d' ' -f1)
+  [ "$got" = "$sum" ] || { rm -rf "$ms_dir"; refuse "the Meilisearch $v file doesn't match the SHA-256 Rowsafe pinned for it (got $got); nothing was installed"; }
+  new=$meili_lib/$v/meilisearch
+  install -d -m 0755 -o root -g root "$meili_lib/$v" && install -m 0755 -o root -g root "$ms_dir/$file" "$new.rowsafe-new" &&
+    mv -f "$new.rowsafe-new" "$new" || { rm -rf "$ms_dir"; refuse "installing Meilisearch $v failed"; }
+  rm -rf "$ms_dir"
+  [ "$(meili_version "$new")" = "$v" ] || refuse "Meilisearch $v was installed, but it doesn't run here"
+  # One start with the dumpless upgrade, from a drop-in that lives in /run.
+  dropin=/run/systemd/system/$unit.d/50-rowsafe-upgrade.conf
+  mkdir -p "/run/systemd/system/$unit.d" && printf '[Service]\nEnvironment=MEILI_UPGRADE_DB=true\n' >"$dropin" ||
+    refuse "can't prepare Meilisearch's upgrade"
+  ln -sfn "$new" "$meili_bin.rowsafe-new" && mv -f "$meili_bin.rowsafe-new" "$meili_bin"
+  "$systemctl" daemon-reload
+  out=$(timeout 900 "$systemctl" restart "$unit" 2>&1 </dev/null)
+  rc=$?
+  sleep 5
+  if [ "$rc" != 0 ] || ! "$systemctl" is-active --quiet "$unit"; then
+    ln -sfn "$cur" "$meili_bin.rowsafe-new" && mv -f "$meili_bin.rowsafe-new" "$meili_bin"
+    rm -f "$dropin"
+    "$systemctl" daemon-reload
+    timeout 300 "$systemctl" restart "$unit" </dev/null >/dev/null 2>&1 || true
+    refuse "Meilisearch $v didn't start ($(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)); Meilisearch $before was put back. If it doesn't answer, restore the Mark Rowsafe saved before the update"
+  fi
+  rm -f "$dropin"
+  "$systemctl" daemon-reload
+  add package "$v"
+  add packages meilisearch
+  add restarted 1
+  ok=1
+  log "Meilisearch on port $port: $before -> $v (dumpless upgrade, restarted)"
+}
+
 act_db_minor_update() {
   update_allowed database "installing database updates from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
   db_port
   if [ "$db_engine" = qdrant ]; then
     qdrant_update
+    return 0
+  fi
+  if [ "$db_engine" = meilisearch ]; then
+    meilisearch_update
     return 0
   fi
   before=$(pkg_version "$db_main")
@@ -6902,14 +7021,15 @@ create_cluster_access() {
 # helper does only what $UPDATES_ALLOW_FILE lists. It needs the restart
 # helper (PostgreSQL updates restart the cluster).
 
-# update_releases_dropin: on a Qdrant server Rowsafe installed, tells the
-# update helper where Rowsafe's signed releases are and their key, so it can
-# take Qdrant's newer pins from the newest signed release (qdrant_update).
+# update_releases_dropin: on a Qdrant or Meilisearch server Rowsafe
+# installed, tells the update helper where Rowsafe's signed releases are and
+# their key, so it can take newer pins from the newest signed release
+# (qdrant_update, meilisearch_update).
 update_releases_dropin() {
   _df=/etc/systemd/system/rowsafe-pg-update.service.d/20-releases.conf
   case $RELEASE_PUBLIC_KEY in *@*) _key='' ;; *) _key=$RELEASE_PUBLIC_KEY ;; esac
   _url=${ROWSAFE_RELEASES_URL:-$DEFAULT_RELEASES_URL}
-  if [ -z "$_key" ] || [ ! -f "$QDRANT_UNIT_FILE" ] || ! printf '%s' "$_key" | grep -Eq '^[A-Za-z0-9+/]{43}=$' ||
+  if [ -z "$_key" ] || { [ ! -f "$QDRANT_UNIT_FILE" ] && [ ! -f "$MEILI_UNIT_FILE" ]; } || ! printf '%s' "$_key" | grep -Eq '^[A-Za-z0-9+/]{43}=$' ||
     ! printf '%s' "$_url" | grep -Eq '^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~/%+-]*)?$'; then
     [ -e "$_df" ] || return 1
     rm -f "$_df"
@@ -7795,7 +7915,7 @@ state=${STATE_DIRECTORY:-/var/lib/rowsafe-firewall}
 agent_user=${ROWSAFE_AGENT_USER:-postgres}
 # The users database servers run as (PostgreSQL's is the agent's own): a
 # port is only accepted while one of them listens on it.
-db_users=${ROWSAFE_DB_USERS:-"$agent_user postgres mysql mongodb mongod clickhouse redis valkey opensearch qdrant"}
+db_users=${ROWSAFE_DB_USERS:-"$agent_user postgres mysql mongodb mongod clickhouse redis valkey opensearch qdrant meilisearch rowsafe-meilisearch-tls"}
 nft=${ROWSAFE_NFT:-nft}
 ss=${ROWSAFE_SS:-ss}
 sshd=${ROWSAFE_SSHD:-sshd}
@@ -8335,7 +8455,7 @@ firewall_ports() {
   {
     if command -v pg_lsclusters >/dev/null 2>&1; then pg_lsclusters -h 2>/dev/null | awk '{ print $3 }'; fi
     if command -v ss >/dev/null 2>&1; then
-      for _u in "$AGENT_USER" postgres mysql mongodb mongod clickhouse redis valkey opensearch qdrant meilisearch; do
+      for _u in "$AGENT_USER" postgres mysql mongodb mongod clickhouse redis valkey opensearch qdrant meilisearch "$MEILI_TLS_GROUP"; do
         _uid=$(id -u "$_u" 2>/dev/null) || continue
         # OpenSearch's node-to-node port (9300) is never one apps reach: it
         # stays out of the list even where it listens publicly (Pulse says so).
@@ -10048,6 +10168,7 @@ permissions_main() {
         ! grep -q 'runs Valkey' "/etc/systemd/system/$SERVICE.d/10-redis.conf" || HOST_ENGINE=valkey
       fi
       [ ! -f "/etc/systemd/system/$SERVICE.d/10-qdrant.conf" ] || HOST_ENGINE=qdrant # qdrant
+      [ ! -f "/etc/systemd/system/$SERVICE.d/10-meilisearch.conf" ] || HOST_ENGINE=meilisearch # meilisearch
       ;;
   esac
   PERM_READY=1
@@ -10938,11 +11059,27 @@ rowsafe_storage_passphrase_note() {
   say "    and Rowsafe can't recover it. Show it with: sudo grep CIPHER_PASS $ENV_FILE"
 }
 
+# storage_test_client: engines that back up with their own tools have no
+# pgBackRest, so the agent tests the storage with its own S3 client.
+storage_test_client() {
+  case $HOST_ENGINE in
+    mongodb | clickhouse | redis | valkey | sqlite | opensearch | qdrant | meilisearch) echo --own-client ;;
+    *)
+      # --check-storage on an installed server: PostgreSQL's agent runs as
+      # postgres and MySQL's as mysql (both use pgBackRest); the others not.
+      if [ -f "$ENV_FILE" ]; then
+        case $(stat -c '%U' "$ENV_FILE" 2>/dev/null) in postgres | mysql | '') ;; *) echo --own-client ;; esac
+      fi
+      ;;
+  esac
+}
+
 # rowsafe_storage_test runs the agent's storage test once it is enrolled.
 rowsafe_storage_test() {
   say ""
   step "Testing Rowsafe Storage"
-  if agent_show storage test --wait 60s; then
+  # shellcheck disable=SC2046 # one flag or none
+  if agent_show storage test --wait 60s $(storage_test_client); then
     return 0
   fi
   warn "Rowsafe Storage didn't work yet (see above). The agent keeps trying; test again with --check-storage"
@@ -11344,7 +11481,8 @@ check_storage() {
   if on_rowsafe_storage; then
     [ -f "$STATE_DIR/agent.json" ] || die "the agent has not connected to Rowsafe yet, so Rowsafe Storage can't be tested"
     step "Testing Rowsafe Storage"
-    agent_show storage test --wait 30s || die "the Rowsafe Storage test failed; nothing was changed"
+    # shellcheck disable=SC2046 # one flag or none
+    agent_show storage test --wait 30s $(storage_test_client) || die "the Rowsafe Storage test failed; nothing was changed"
     return 0
   fi
   load_storage
@@ -13499,6 +13637,18 @@ meilisearch_asset() {
 # points $MEILI_BIN at it. The download goes to /var/tmp (on disk: the
 # program is about 350 MB, more than a small server's /tmp in memory).
 meilisearch_install_binary() {
+  # A Meilisearch that already holds data stays on its version: another
+  # version opens its data only through Rowsafe's update (a Mark first, then
+  # Meilisearch's dumpless upgrade and a restart: the root helper's
+  # db-minor-update), never because the installer ran again.
+  _cur=$(readlink -f "$MEILI_BIN" 2>/dev/null)
+  if [ -n "$_cur" ] && [ -x "$_cur" ] && [ -f "$MEILI_DB/VERSION" ]; then
+    _cv=$("$_cur" --version 2>/dev/null | sed -n 's/^meilisearch //p' | head -n 1)
+    if [ -n "$_cv" ] && [ "$_cv" != "$MEILI_VERSION" ]; then
+      note "Meilisearch $_cv stays as it is (this installer brings $MEILI_VERSION): update it from Rowsafe (Updates), which takes a Mark first"
+      return 0
+    fi
+  fi
   _want=$(meilisearch_sha256)
   [ -n "$_want" ] || die "Rowsafe has no Meilisearch $MEILI_VERSION build for $ARCH"
   _dest=$MEILI_LIB/$MEILI_VERSION/meilisearch
@@ -13757,11 +13907,96 @@ meilisearch_front() {
     sleep 1
   done
   meilisearch_public_listeners
+  meilisearch_front_refresh
   if [ "${_front_changed:-0}" = 1 ]; then
     ok "Meilisearch listens on the network (HTTPS on port $MEILI_PORT only, through Rowsafe's TLS front; plain HTTP on 127.0.0.1 only)"
   else
     ok "Meilisearch listens on the network (HTTPS on port $MEILI_PORT only, through Rowsafe's TLS front); nothing to change"
   fi
+}
+
+# meilisearch_front_refresh: when the agent updates itself, root's copy of
+# it that runs the TLS front follows: rowsafe-meilisearch-tls-refresh.path
+# notices the agent's program change, and the refresh (root) copies the new
+# program only when its SHA-256 is the one the release's signed manifest
+# gives (checked against the Rowsafe release key), then restarts the front
+# (open connections reconnect). Anything that doesn't check out leaves the
+# front as it is.
+MEILI_REFRESH=$LIB_DIR/rowsafe-meilisearch-tls-refresh
+MEILI_REFRESH_SERVICE=/etc/systemd/system/rowsafe-meilisearch-tls-refresh.service
+MEILI_REFRESH_PATH=/etc/systemd/system/rowsafe-meilisearch-tls-refresh.path
+meilisearch_front_refresh() {
+  case $RELEASE_PUBLIC_KEY in *@*) _key='' ;; *) _key=$RELEASE_PUBLIC_KEY ;; esac
+  _url=${ROWSAFE_RELEASES_URL:-$DEFAULT_RELEASES_URL}
+  _url=${_url%/}
+  if [ -z "$_key" ] || ! printf '%s' "$_key" | grep -Eq '^[A-Za-z0-9+/]{43}=$' ||
+    ! printf '%s' "$_url" | grep -Eq '^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~/%+-]*)?$'; then
+    note "the TLS front won't follow agent updates by itself here (no release key in this installer): run the installer again after one"
+    return 0
+  fi
+  _r=0
+  sed -e "s|@KEY@|$_key|" -e "s|@URL@|$_url|" -e "s|@ARCH@|$ARCH|" -e "s|@AGENT@|$INSTALL_DIR/rowsafe-agent|" -e "s|@FRONT@|$MEILI_FRONT_BIN|" \
+    <<'ROWSAFE_MEILI_REFRESH_EOF' | write_file "$MEILI_REFRESH" 0755 root:root || _r=$?
+#!/bin/sh
+# Written by the Rowsafe installer: copies the agent's new program to Rowsafe's
+# TLS front for Meilisearch once its SHA-256 matches the release's manifest
+# signed with the Rowsafe release key, then restarts the front.
+set -u
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+key='@KEY@' base='@URL@' arch='@ARCH@' agent='@AGENT@' front='@FRONT@'
+new=$(readlink -f "$agent") || exit 0
+[ -f "$new" ] || exit 0
+! cmp -s "$new" "$front" || exit 0
+v=$(basename "$(dirname "$new")")
+printf '%s' "$v" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$' || { echo "the agent's program isn't in a version folder ($new); the TLS front stays as it is" >&2; exit 0; }
+v=${v#v}
+t=$(mktemp -d) || exit 0
+trap 'rm -rf "$t"' EXIT
+get() { curl -fsS --proto '=https' --max-time 60 --max-filesize "$3" -o "$2" "$1"; }
+get "$base/$v/manifest.json" "$t/m.json" 1048576 && get "$base/$v/manifest.json.sig" "$t/m.sig" 4096 ||
+  { echo "can't fetch the signed manifest of rowsafe-agent $v; the TLS front stays as it is" >&2; exit 0; }
+printf '%s\n%s\n%s\n' '-----BEGIN PUBLIC KEY-----' "MCowBQYDK2VwAyEA$key" '-----END PUBLIC KEY-----' >"$t/k.pub"
+tr -d ' \t\r\n' <"$t/m.sig" >"$t/s.b64"
+grep -Eq '^[A-Za-z0-9+/]{86}==$' "$t/s.b64" && base64 -d <"$t/s.b64" >"$t/s.bin" 2>/dev/null &&
+  openssl pkeyutl -verify -pubin -inkey "$t/k.pub" -rawin -in "$t/m.json" -sigfile "$t/s.bin" >/dev/null 2>&1 ||
+  { echo "the manifest of rowsafe-agent $v isn't signed by the Rowsafe release key; the TLS front stays as it is" >&2; exit 0; }
+flat=$(tr -d ' \t\r\n' <"$t/m.json")
+mv=$(printf '%s\n' "$flat" | sed -n 's/.*"version":"v\{0,1\}\([^"]*\)".*/\1/p')
+[ "$mv" = "$v" ] || { echo "the signed manifest is for $mv, not $v; the TLS front stays as it is" >&2; exit 0; }
+sha=$(printf '%s\n' "$flat" | sed -n "s|.*\"linux/$arch\":{\([^}]*\)}.*|\1|p" | sed -n 's/.*"sha256":"\([0-9a-f]\{64\}\)".*/\1/p')
+cat "$new" >"$t/agent" || exit 0
+[ -n "$sha" ] && [ "$(sha256sum "$t/agent" | cut -d' ' -f1)" = "$sha" ] ||
+  { echo "rowsafe-agent $v here doesn't match its signed manifest; the TLS front stays as it is" >&2; exit 0; }
+install -m 0755 -o root -g root "$t/agent" "$front.rowsafe-new" && mv -f "$front.rowsafe-new" "$front" || exit 1
+echo "Rowsafe's TLS front for Meilisearch now runs rowsafe-agent $v"
+systemctl try-restart rowsafe-meilisearch-tls.service
+ROWSAFE_MEILI_REFRESH_EOF
+  [ "$_r" = 0 ] || [ "$_r" = 1 ] || die "could not write $MEILI_REFRESH"
+  write_file "$MEILI_REFRESH_SERVICE" 0644 root:root <<ROWSAFE_MEILI_REFRESH_SERVICE_EOF || true
+# Written by the Rowsafe installer: Rowsafe's TLS front for Meilisearch follows
+# agent updates (rowsafe-meilisearch-tls-refresh.path starts it).
+[Unit]
+Description=Rowsafe: update the TLS front for Meilisearch after an agent update
+
+[Service]
+Type=oneshot
+ExecStart=$MEILI_REFRESH
+ROWSAFE_MEILI_REFRESH_SERVICE_EOF
+  write_file "$MEILI_REFRESH_PATH" 0644 root:root <<ROWSAFE_MEILI_REFRESH_PATH_EOF || true
+# Written by the Rowsafe installer: notices the agent's program change.
+[Unit]
+Description=Rowsafe: watch the agent's program for the TLS front for Meilisearch
+
+[Path]
+PathChanged=$INSTALL_DIR/rowsafe-agent
+Unit=rowsafe-meilisearch-tls-refresh.service
+
+[Install]
+WantedBy=paths.target
+ROWSAFE_MEILI_REFRESH_PATH_EOF
+  systemctl daemon-reload
+  systemctl enable --now --quiet rowsafe-meilisearch-tls-refresh.path 2>/dev/null ||
+    warn "the TLS front won't follow agent updates by itself (rowsafe-meilisearch-tls-refresh.path didn't start)"
 }
 
 # meilisearch_public_listeners: nothing of Meilisearch's listens beyond this
@@ -13777,7 +14012,7 @@ meilisearch_public_listeners() {
 
 # ---- protecting a Meilisearch that runs here (adopt), and the logins
 
-MS_PID='' MS_BIN='' MS_DB='' MS_SNAP='' MS_ADDR='' MS_KEY='' MS_UNIT='' MS_ANALYTICS='' MS_CWD=''
+MS_PID='' MS_BIN='' MS_DB='' MS_SNAP='' MS_ADDR='' MS_KEY='' MS_UNIT='' MS_ANALYTICS='' MS_CWD='' MS_UID=''
 
 # meilisearch_procs prints "PID PORT" for each Meilisearch process here: the
 # port ss sees it listen on, or, where ss can't tell which process owns a
@@ -13860,6 +14095,7 @@ meilisearch_v() {
 # meilisearch_settings_of PID reads that process's settings into MS_*.
 meilisearch_settings_of() {
   MS_PID=$1
+  MS_UID=$(awk '/^Uid:/ { print $2; exit }' "/proc/$MS_PID/status" 2>/dev/null)
   MS_BIN=$(readlink "/proc/$MS_PID/exe" 2>/dev/null)
   if [ -z "$MS_BIN" ]; then # (no CAP_SYS_PTRACE) its command's own path, when absolute
     MS_BIN=$(tr '\0' '\n' <"/proc/$MS_PID/cmdline" 2>/dev/null | head -n 1)
@@ -13903,6 +14139,67 @@ meilisearch_find() {
       ;;
   esac
   [ -n "$MS_BIN" ] && [ -x "$MS_BIN" ] || { warn "can't find the program of the Meilisearch on port $1"; return 1; }
+  # A process is only taken for this Meilisearch when its user owns the data
+  # (a process name proves nothing: any user can name a program meilisearch).
+  case $MS_UID in '' | *[!0-9]*) warn "can't tell which user the Meilisearch on port $1 runs as"; return 1 ;; esac
+  _o=$(stat -c %u "$MS_DB" 2>/dev/null)
+  [ "$_o" = "$MS_UID" ] || {
+    warn "the process on port $1 runs as $(id -nu "$MS_UID" 2>/dev/null || echo "uid $MS_UID"), but its data folder $MS_DB belongs to ${_o:+$(id -nu "$_o" 2>/dev/null || echo "uid $_o")}${_o:-nobody}: Rowsafe doesn't take it for that Meilisearch"
+    return 1
+  }
+  if [ -d "$MS_SNAP" ]; then
+    _o=$(stat -c %u "$MS_SNAP" 2>/dev/null)
+    [ "$_o" = "$MS_UID" ] || {
+      warn "Meilisearch's snapshot folder $MS_SNAP doesn't belong to the user it runs as: Rowsafe reads snapshots only from Meilisearch's own folder"
+      return 1
+    }
+  fi
+  _o=$(stat -c %u "$MS_BIN" 2>/dev/null)
+  [ "$_o" = 0 ] || [ "$_o" = "$MS_UID" ] || {
+    warn "the Meilisearch program $MS_BIN belongs to another user than root or Meilisearch's: Rowsafe doesn't run it"
+    return 1
+  }
+  meilisearch_trusted_copy || return 1
+}
+
+# root_only PATH: PATH and every folder above it are root's and nobody
+# else can write to them.
+root_only() {
+  _r=$1
+  while :; do
+    [ "$(stat -c %u "$_r" 2>/dev/null)" = 0 ] || return 1
+    if [ ! -L "$_r" ]; then
+      _m=$(stat -c %a "$_r" 2>/dev/null) || return 1
+      [ $((0$_m & 18)) = 0 ] || return 1 # 022: group or others may write
+    fi
+    [ "$_r" != / ] || return 0
+    _r=$(dirname "$_r")
+  done
+}
+
+# meilisearch_trusted_copy: the agent runs Meilisearch's program for Proof
+# and Rewind only when root owns it and every folder above it. Otherwise
+# root copies the program that runs (the process's own image) to
+# $MEILI_LIB/adopted/SHA256/meilisearch and the agent uses that copy (run
+# the installer again after updating Meilisearch).
+meilisearch_trusted_copy() {
+  _real=$(readlink -f "$MS_BIN" 2>/dev/null)
+  if [ -n "$_real" ] && root_only "$_real" && root_only "$(dirname "$MS_BIN")"; then
+    return 0
+  fi
+  _src=/proc/$MS_PID/exe
+  [ -r "$_src" ] || _src=$MS_BIN
+  cat "$_src" >"$TMP/meili-bin" 2>/dev/null || { warn "can't read the Meilisearch program to keep root's copy of it"; return 1; }
+  _sum=$(sha256_of "$TMP/meili-bin")
+  _dest=$MEILI_LIB/adopted/$_sum/meilisearch
+  if [ ! -x "$_dest" ] || [ "$(sha256_of "$_dest")" != "$_sum" ]; then
+    install -d -m 0755 -o root -g root "$MEILI_LIB" "$MEILI_LIB/adopted" "$MEILI_LIB/adopted/$_sum"
+    install -m 0755 -o root -g root "$TMP/meili-bin" "$_dest.rowsafe-new" && mv -f "$_dest.rowsafe-new" "$_dest" ||
+      { rm -f "$TMP/meili-bin"; warn "could not keep root's copy of the Meilisearch program"; return 1; }
+  fi
+  rm -f "$TMP/meili-bin"
+  ok "Rowsafe runs root's copy of this Meilisearch program for Proof and Rewind ($_dest): $MS_BIN can be changed by users other than root"
+  MS_BIN=$_dest
 }
 
 # meilisearch_snapshot_access lets the agent read the snapshot folder (made
@@ -13945,6 +14242,7 @@ meilisearch_login() {
       return 1
     }
     ok "Rowsafe's own Meilisearch API key is ready (made with the master key, which stays root's)"
+    meilisearch_leftover
     return 0
   fi
   meilisearch_find "$_port" || return 1
@@ -13976,7 +14274,15 @@ meilisearch_login() {
   else
     ok "Rowsafe's own Meilisearch API key is ready (made with the master key, which isn't kept)"
   fi
+  meilisearch_leftover
   [ "$MS_ANALYTICS" = no ] || note "Meilisearch sends anonymous usage data to its makers; turn it off with --no-analytics if you like (Pulse says so too)."
+}
+
+# meilisearch_leftover says when an older key of Rowsafe's couldn't be
+# deleted (the next run tries again).
+meilisearch_leftover() {
+  _l=$(sed -n 's/^leftover_keys=//p' "$TMP/mslogin" 2>/dev/null)
+  [ -z "$_l" ] || warn "Meilisearch kept an older API key of Rowsafe's ($_l): run this installer again to remove it"
 }
 
 # meilisearch_logins (before discovery): Rowsafe's key for every Meilisearch
@@ -14533,6 +14839,10 @@ uninstall_agent() {
   fi
   rm -f "/etc/systemd/system/$SERVICE.d/10-qdrant.conf" # qdrant
   rm -f "/etc/systemd/system/$SERVICE.d/10-meilisearch.conf" # meilisearch
+  if [ -f "$MEILI_REFRESH_PATH" ]; then # meilisearch: the front no longer follows an agent that is gone
+    if systemd_running; then systemctl disable --now --quiet rowsafe-meilisearch-tls-refresh.path 2>/dev/null || true; fi
+    rm -f "$MEILI_REFRESH_PATH" "$MEILI_REFRESH_SERVICE" "$MEILI_REFRESH"
+  fi
   if [ -f "$MEILI_FRONT_UNIT" ]; then # meilisearch: apps keep reaching it
     note "Rowsafe's TLS front for Meilisearch (rowsafe-meilisearch-tls) keeps serving port $MEILI_PORT; its certificate is no longer renewed."
   fi

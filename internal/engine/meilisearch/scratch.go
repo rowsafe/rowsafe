@@ -50,6 +50,10 @@ func newScratch(root, id, bin string) (*scratch, error) {
 	if !idRE.MatchString(id) {
 		return nil, fmt.Errorf("invalid id %q", id)
 	}
+	bin, err := trustedProgram(bin)
+	if err != nil {
+		return nil, err
+	}
 	root = filepath.Clean(root)
 	dir := filepath.Join(root, id)
 	if _, err := os.Lstat(dir); err == nil {
@@ -80,6 +84,10 @@ func scratchAt(dir, bin string) (*scratch, error) {
 	if err != nil {
 		return nil, err
 	}
+	bin, err = trustedProgram(bin)
+	if err != nil {
+		return nil, err
+	}
 	return &scratch{Dir: dir, Bin: bin, Key: string(key)}, nil
 }
 
@@ -96,7 +104,9 @@ func (s *scratch) remove() error {
 	return os.RemoveAll(s.Dir)
 }
 
-// freePort is a TCP port free on 127.0.0.1 now.
+// freePort is a TCP port free on 127.0.0.1 now. Another user could take it
+// before the temporary Meilisearch does: its client checks that the agent's
+// own user listens there before every connection (scratchCheck).
 func freePort() (int, error) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -149,10 +159,14 @@ func (s *scratch) start(ctx context.Context, o startOptions) error {
 		if o.Upgrade {
 			args = append(args, "--upgrade-db")
 		}
+		bin, err := trustedProgram(s.Bin) // checked again before each start
+		if err != nil {
+			return err
+		}
 		s.out = &tailBuffer{}
-		cmd := exec.Command(s.Bin, args...)
+		cmd := exec.Command(bin, args...)
 		cmd.Dir = s.Dir
-		cmd.Env = []string{"MEILI_MASTER_KEY=" + s.Key, "HOME=" + s.Dir, "PATH=/usr/bin:/bin"}
+		cmd.Env = append(minimalEnv(), "MEILI_MASTER_KEY="+s.Key, "HOME="+s.Dir)
 		cmd.Stdout, cmd.Stderr = s.out, s.out
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // stopped with the agent's unit (systemd stops the whole group)
 		if err := cmd.Start(); err != nil {
@@ -207,7 +221,7 @@ func (s *scratch) waitReady(ctx context.Context, timeout time.Duration) error {
 }
 
 // client is a client for the instance with its master key.
-func (s *scratch) client() *client { return newClient("http", s.Port, s.Key) }
+func (s *scratch) client() *client { return newClient("http", s.Port, s.Key, scratchCheck) }
 
 // stop stops the instance (SIGTERM, then SIGKILL after 20 seconds).
 func (s *scratch) stop() {
@@ -329,11 +343,18 @@ func restoreScratch(ctx context.Context, env agent.EngineEnv, r *repo, s server,
 
 var binVersionRE = regexp.MustCompile(`(?m)^meilisearch (\d+\.\d+\.\d+)`)
 
-// binaryVersion runs `<bin> --version`.
+// binaryVersion runs `<bin> --version` (a program root owns, with a
+// minimal environment).
 func binaryVersion(bin string) (string, error) {
+	real, err := trustedProgram(bin)
+	if err != nil {
+		return "", err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, bin, "--version").Output()
+	cmd := exec.CommandContext(ctx, real, "--version")
+	cmd.Env, cmd.Dir = minimalEnv(), "/"
+	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("the Meilisearch program %s doesn't run for Rowsafe's user (%v): run the Rowsafe installer on the server again", bin, err)
 	}

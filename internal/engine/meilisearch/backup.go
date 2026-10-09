@@ -162,6 +162,12 @@ func retention(ctx context.Context, r *repo, db protocol.DatabaseSpec, current s
 		if err := r.deleteBackup(ctx, l); err != nil {
 			return err
 		}
+		// A Mark whose snapshot is gone can't be restored: its record goes too.
+		for _, k := range marked[l] {
+			if err := r.st.Delete(ctx, k); err != nil {
+				return err
+			}
+		}
 	}
 	if tl != nil && len(drop) > 0 {
 		tl.Printf("removed %s past the retention window (%d days)", plural(int64(len(drop)), "older snapshot", "older snapshots"), max(db.RetentionFull, 1))
@@ -170,7 +176,7 @@ func retention(ctx context.Context, r *repo, db protocol.DatabaseSpec, current s
 }
 
 // retainDrop picks the labels to delete (docs oldest first).
-func retainDrop(docs []backupDoc, marked map[string]bool, days int, now time.Time) []string {
+func retainDrop(docs []backupDoc, marked map[string][]string, days int, now time.Time) []string {
 	if len(docs) <= 1 {
 		return nil
 	}
@@ -186,7 +192,7 @@ func retainDrop(docs []backupDoc, marked map[string]bool, days int, now time.Tim
 		case age <= keepAllFor:
 		case age > window:
 			drop = append(drop, d.Label)
-		case marked[d.Label], newestOfDay[d.TakenAt.UTC().Format("2006-01-02")] == d.Label:
+		case len(marked[d.Label]) > 0, newestOfDay[d.TakenAt.UTC().Format("2006-01-02")] == d.Label:
 		default:
 			drop = append(drop, d.Label)
 		}

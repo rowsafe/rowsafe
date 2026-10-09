@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -55,6 +56,9 @@ type LoginResult struct {
 	TLS     bool
 	KeyUID  string
 	NoAuth  bool // the instance has no master key: Rowsafe needs no key
+	// Leftover: uids of Rowsafe's older keys Meilisearch didn't delete
+	// (the installer says so; the next run tries again).
+	Leftover []string
 }
 
 // ErrNeedMasterKey: the instance asks for a key and none was given.
@@ -81,7 +85,16 @@ func Login(ctx context.Context, env agent.EngineEnv, opts LoginOptions, masterKe
 	if s.LocalPort == s.Port {
 		s.LocalPort = 0
 	}
-	c, tls, err := probe(ctx, s.localPort(), masterKey)
+	// The program runs for Proof and Rewind: root's only (program.go).
+	if _, err := trustedProgram(s.Binary); err != nil {
+		return res, err
+	}
+	// The snapshot folder is the instance's: its user owns it.
+	if u := ownerUID(s.SnapshotDir); u >= 0 && !slices.Contains(meilisearchUIDs(s), u) {
+		return res, fmt.Errorf("the snapshot folder %s belongs to %s, not to the user Meilisearch runs as: Rowsafe doesn't read snapshots from it",
+			s.SnapshotDir, userName(u))
+	}
+	c, tls, err := probe(ctx, s.localPort(), masterKey, prodCheck(s))
 	if err != nil {
 		return res, err
 	}
@@ -153,24 +166,35 @@ func Login(ctx context.Context, env agent.EngineEnv, opts LoginOptions, masterKe
 		_ = c.deleteKey(context.WithoutCancel(ctx), k.UID)
 		return res, err
 	}
+	// Older keys of Rowsafe's go, each tried twice; one that stays is
+	// reported (and tried again by the next run, found by its name).
 	for _, uid := range old {
-		if uid != k.UID {
-			_ = c.deleteKey(ctx, uid)
+		if uid == k.UID {
+			continue
+		}
+		err := c.deleteKey(ctx, uid)
+		if err != nil && !isCode(err, "api_key_not_found") {
+			time.Sleep(time.Second)
+			err = c.deleteKey(ctx, uid)
+		}
+		if err != nil && !isCode(err, "api_key_not_found") {
+			res.Leftover = append(res.Leftover, uid)
 		}
 	}
 	res.KeyUID = k.UID
 	return res, nil
 }
 
-// probe connects to 127.0.0.1:port with key, over plain HTTP or else TLS.
-func probe(ctx context.Context, port int, key string) (*client, bool, error) {
-	c := newClient("http", port, key)
+// probe connects to 127.0.0.1:port with key, over plain HTTP or else TLS
+// (the health check, which carries no key), once check passed.
+func probe(ctx context.Context, port int, key string, check listenerCheck) (*client, bool, error) {
+	c := newClient("http", port, key, check)
 	err := c.health(ctx)
 	if err == nil {
 		return c, false, nil
 	}
 	c.close()
-	t := newClient("https", port, key)
+	t := newClient("https", port, key, check)
 	if terr := t.health(ctx); terr == nil {
 		return t, true, nil
 	}
@@ -193,8 +217,10 @@ func ServerStatus(ctx context.Context, env agent.EngineEnv, port int) Status {
 	local := port
 	if lerr == nil {
 		local = s.localPort()
+	} else {
+		s = server{Port: port}
 	}
-	c, tls, err := probe(ctx, local, "")
+	c, tls, err := probe(ctx, local, "", prodCheck(s))
 	if err != nil {
 		return st
 	}

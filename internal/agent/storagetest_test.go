@@ -24,7 +24,10 @@ func TestStorageTestWithoutPgBackRest(t *testing.T) {
 			CipherPass: "storage-test-passphrase-123", PathPrefix: "/rowsafe"},
 	}
 	var out bytes.Buffer
-	if err := StorageTest(context.Background(), cfg, &out, time.Second); err != nil {
+	if err := StorageTest(context.Background(), cfg, &out, time.Second, false); err == nil || !strings.Contains(err.Error(), "pgBackRest") {
+		t.Fatalf("without pgBackRest and without --own-client: %v", err)
+	}
+	if err := StorageTest(context.Background(), cfg, &out, time.Second, true); err != nil {
 		t.Fatalf("StorageTest: %v", err)
 	}
 	if !strings.Contains(out.String(), "works: wrote, read back and deleted a test file") {
@@ -35,7 +38,7 @@ func TestStorageTestWithoutPgBackRest(t *testing.T) {
 	}
 
 	srv.Fail = func(r *http.Request) int { return 403 }
-	if err := StorageTest(context.Background(), cfg, &out, time.Second); err == nil || !strings.Contains(err.Error(), "could not write to") {
+	if err := StorageTest(context.Background(), cfg, &out, time.Second, true); err == nil || !strings.Contains(err.Error(), "could not write to") {
 		t.Fatalf("a refused write: %v", err)
 	}
 }

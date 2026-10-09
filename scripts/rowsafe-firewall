@@ -71,7 +71,7 @@ state=${STATE_DIRECTORY:-/var/lib/rowsafe-firewall}
 agent_user=${ROWSAFE_AGENT_USER:-postgres}
 # The users database servers run as (PostgreSQL's is the agent's own): a
 # port is only accepted while one of them listens on it.
-db_users=${ROWSAFE_DB_USERS:-"$agent_user postgres mysql mongodb mongod clickhouse redis valkey opensearch qdrant"}
+db_users=${ROWSAFE_DB_USERS:-"$agent_user postgres mysql mongodb mongod clickhouse redis valkey opensearch qdrant meilisearch rowsafe-meilisearch-tls"}
 nft=${ROWSAFE_NFT:-nft}
 ss=${ROWSAFE_SS:-ss}
 sshd=${ROWSAFE_SSHD:-sshd}

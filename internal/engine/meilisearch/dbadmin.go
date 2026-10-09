@@ -102,10 +102,16 @@ func (d *mdba) protectedReason(k apiKey) string {
 		return "Rowsafe's own key"
 	case strings.HasPrefix(k.name(), "Rowsafe rewind "):
 		return "a key of a rewind in progress"
-	case slices.Contains(k.Actions, "*"):
-		return "an administrator key (every right): change it with the master key"
+	case isAdminKey(k):
+		return "an administrator key (every right, or it can make keys with any right): change it with the master key"
 	}
 	return ""
+}
+
+// isAdminKey: the key can do everything, or make keys (which can have
+// every right).
+func isAdminKey(k apiKey) bool {
+	return slices.ContainsFunc(k.Actions, func(a string) bool { return a == "*" || a == "keys.*" || a == "keys.create" || a == "keys.update" })
 }
 
 func (d *mdba) wait(ctx context.Context, t task, err error) error {
@@ -322,7 +328,7 @@ func (d *mdba) inventory(ctx context.Context) (*protocol.DBInventory, error) {
 			inv.Truncated = true
 			break
 		}
-		u := protocol.DBUser{Name: keyLabel(k), Login: k.ExpiresAt == nil || k.ExpiresAt.After(now), Superuser: slices.Contains(k.Actions, "*"),
+		u := protocol.DBUser{Name: keyLabel(k), Login: k.ExpiresAt == nil || k.ExpiresAt.After(now), Superuser: isAdminKey(k),
 			Password: protocol.PasswordSet, ValidUntil: k.ExpiresAt, Databases: k.Indexes, Access: protocol.MeilisearchKeyAccess(k.Actions)}
 		if why := d.protectedReason(k); why != "" {
 			u.System, u.SystemReason = true, why

@@ -35,7 +35,7 @@ func TestRetainDrop(t *testing.T) {
 		at := now.Add(-time.Duration(h) * time.Hour)
 		docs = append(docs, backupDoc{Label: newLabel(at), TakenAt: at})
 	}
-	marked := map[string]bool{newLabel(now.Add(-5*24*time.Hour - 3*time.Hour)): true}
+	marked := map[string][]string{newLabel(now.Add(-5*24*time.Hour - 3*time.Hour)): {"marks/m.json"}}
 	drop := retainDrop(docs, marked, 7, now)
 	keep := map[string]bool{}
 	for _, d := range docs {

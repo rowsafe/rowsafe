@@ -17,17 +17,21 @@ import (
 )
 
 // client speaks Meilisearch's HTTP API to one instance on this server
-// (127.0.0.1), with one API key. Over TLS (an instance serving its own
-// certificate on loopback) the certificate isn't checked: the connection
-// never leaves the server, and the certificate is made for the server's
-// public names, not 127.0.0.1.
+// (127.0.0.1), with one API key. Before each new connection the port's
+// listener is checked (listener.go): any user can listen on a free port, so
+// nothing secret goes to a port Meilisearch's user doesn't hold. Over TLS
+// (an instance serving its own certificate on loopback) the certificate
+// isn't checked: the connection never leaves the server, the certificate
+// is made for the server's public names, and the listener check stands in.
 type client struct {
 	base string // http://127.0.0.1:7700
 	key  string
 	http *http.Client
 }
 
-// apiError is an error Meilisearch answered with.
+// apiError is an error Meilisearch answered with. Its message can quote
+// documents (a field that didn't parse), so it never leaves the agent:
+// Error says the code in plain words.
 type apiError struct {
 	Status  int
 	Code    string `json:"code"`
@@ -36,10 +40,47 @@ type apiError struct {
 }
 
 func (e *apiError) Error() string {
-	if e.Message == "" {
-		return fmt.Sprintf("Meilisearch answered HTTP %d", e.Status)
+	return "Meilisearch: " + codeWords(e.Code, e.Type, e.Status)
+}
+
+// codeWords says an error code in plain words, without Meilisearch's
+// message.
+func codeWords(code, typ string, status int) string {
+	switch code {
+	case "":
+		if status != 0 {
+			return fmt.Sprintf("it answered HTTP %d", status)
+		}
+		return "it refused the request"
+	case "index_not_found":
+		return "the index doesn't exist (index_not_found)"
+	case "index_already_exists":
+		return "an index with that name already exists (index_already_exists)"
+	case "missing_authorization_header", "invalid_api_key":
+		return "the API key was refused (" + code + ")"
+	case "api_key_not_found":
+		return "that API key doesn't exist (api_key_not_found)"
+	case "invalid_api_key_actions":
+		return "it doesn't know some of the key's actions (invalid_api_key_actions)"
+	case "no_space_left_on_device":
+		return "the disk is full (no_space_left_on_device)"
+	case "database_size_limit_reached":
+		return "the database reached its size limit (database_size_limit_reached)"
+	case "task_not_found":
+		return "the task doesn't exist (task_not_found)"
+	case "document_not_found":
+		return "the document doesn't exist (document_not_found)"
+	case "index_primary_key_no_candidate_found", "index_primary_key_multiple_candidates_found", "missing_document_id", "invalid_document_id":
+		return "documents without a usable primary key (" + code + ")"
+	case "invalid_document_fields", "malformed_payload", "bad_request":
+		return "it refused the data it was sent (" + code + ")"
+	case "internal":
+		return "an internal error (internal)"
 	}
-	return "Meilisearch: " + firstLine(e.Message)
+	if typ != "" {
+		return fmt.Sprintf("it refused the request (%s, %s)", code, typ)
+	}
+	return "it refused the request (" + code + ")"
 }
 
 // isCode reports whether err is Meilisearch's error code.
@@ -54,10 +95,21 @@ func isAuthError(err error) bool {
 	return errors.As(err, &ae) && (ae.Status == http.StatusUnauthorized || ae.Status == http.StatusForbidden)
 }
 
-func newClient(scheme string, port int, key string) *client {
+// newClient is a client for 127.0.0.1:port; check vets the port's
+// listener before every new connection (prodCheck or scratchCheck).
+func newClient(scheme string, port int, key string, check listenerCheck) *client {
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	tr := &http.Transport{
-		Proxy:               nil, // never through a proxy: this server only
-		DialContext:         (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
+		Proxy: nil, // never through a proxy: this server only
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if check == nil {
+				return nil, errors.New("Rowsafe sends nothing to Meilisearch before checking who listens on its port")
+			}
+			if err := check(port); err != nil {
+				return nil, err
+			}
+			return dialer.DialContext(ctx, network, addr)
+		},
 		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}, //nolint:gosec // loopback only, see client
 		MaxIdleConnsPerHost: 4,
 		IdleConnTimeout:     90 * time.Second,
@@ -103,7 +155,7 @@ func (c *client) do(ctx context.Context, method, path string, q url.Values, body
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if c.key != "" {
+	if c.key != "" && path != "/health" { // the health check needs no key: none is sent
 		req.Header.Set("Authorization", "Bearer "+c.key)
 	}
 	resp, err := c.http.Do(req)
@@ -306,8 +358,8 @@ func (c *client) waitTask(ctx context.Context, enq task, timeout time.Duration) 
 		if t.done() {
 			if t.Status != "succeeded" {
 				msg := t.Status
-				if t.Error != nil && t.Error.Message != "" {
-					msg += ": " + firstLine(t.Error.Message)
+				if t.Error != nil {
+					msg += ": " + codeWords(t.Error.Code, t.Error.Type, 0)
 				}
 				return t, fmt.Errorf("Meilisearch's task %d (%s) %s", id, t.Type, msg)
 			}

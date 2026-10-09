@@ -140,7 +140,7 @@ func dial(ctx context.Context, s server) (*client, error) {
 	if s.TLS && s.LocalPort == 0 {
 		scheme = "https"
 	}
-	c := newClient(scheme, s.localPort(), s.Key)
+	c := newClient(scheme, s.localPort(), s.Key, prodCheck(s))
 	hctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if err := c.health(hctx); err != nil {

@@ -192,7 +192,8 @@ func status(ctx context.Context, c *client, s server, st globalStats, now time.T
 		t := ts[0]
 		lt := &protocol.MeiliTask{UID: t.id(), Type: t.Type, IndexUID: t.index(), Status: t.Status, EnqueuedAt: t.EnqueuedAt, FinishedAt: t.FinishedAt}
 		if t.Error != nil {
-			lt.ErrorCode, lt.Error = t.Error.Code, firstLine(t.Error.Message)
+			// The code only: Meilisearch's message can quote the documents.
+			lt.ErrorCode, lt.Error = t.Error.Code, codeWords(t.Error.Code, t.Error.Type, 0)
 		}
 		if !strings.HasPrefix(lt.IndexUID, protocol.MeilisearchRestorePrefix) {
 			ms.LastFailedTask = lt

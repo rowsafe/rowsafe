@@ -264,17 +264,18 @@ var markNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
 
 func markKey(name string) string { return marksPrefix + name + ".json" }
 
-// markedLabels are the snapshots Marks point at.
-func (r *repo) markedLabels(ctx context.Context) (map[string]bool, error) {
+// markedLabels are the snapshots Marks point at, each with its Marks'
+// records (keys under marks/).
+func (r *repo) markedLabels(ctx context.Context) (map[string][]string, error) {
 	objs, err := r.st.List(ctx, marksPrefix)
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]bool{}
+	out := map[string][]string{}
 	for _, o := range objs {
 		var m markDoc
 		if err := r.getJSON(ctx, o.Key, &m); err == nil && m.Label != "" {
-			out[m.Label] = true
+			out[m.Label] = append(out[m.Label], o.Key)
 		}
 	}
 	return out, nil
