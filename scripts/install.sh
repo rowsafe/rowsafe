@@ -2141,7 +2141,10 @@ db_running() {
         db_restart || die "restarting Meilisearch failed (see journalctl -u meilisearch)"
       fi
       _mp=$(meilisearch_addr | sed 's/.*://')
-      meilisearch_ready "$_mp" || die "Meilisearch started but doesn't answer on 127.0.0.1:$_mp (see journalctl -u meilisearch)"
+      if ! meilisearch_ready "$_mp"; then
+        journalctl -u meilisearch -n 15 --no-pager 2>/dev/null | sed 's/^/    /' >&2 || true
+        die "Meilisearch started but doesn't answer on 127.0.0.1:$_mp (see above)"
+      fi
       ;;
   esac
   ok "$(engine_label "$INSTALL_DB") $(db_version) is running on port $(db_port)"
