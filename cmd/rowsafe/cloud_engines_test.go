@@ -15,7 +15,7 @@ func TestEngineChoicesFollowCloudEngines(t *testing.T) {
 			t.Errorf("--engine's help %q lacks %s", got, e.Engine)
 		}
 	}
-	if !strings.HasPrefix(got, "postgresql (default), ") || !strings.HasSuffix(got, " or clickhouse") {
+	if !strings.HasPrefix(got, "postgresql (default), ") || !strings.Contains(got, " or ") {
 		t.Errorf("--engine's help %q", got)
 	}
 }

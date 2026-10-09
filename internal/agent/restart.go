@@ -211,6 +211,8 @@ func engineDefaultUnit(engine string) string {
 		return "redis-server"
 	case protocol.EngineValkey:
 		return "valkey-server"
+	case protocol.EngineOpenSearch:
+		return "opensearch"
 	}
 	return "postgresql"
 }
@@ -231,6 +233,8 @@ func dockerServiceHint(db protocol.DatabaseSpec) string {
 		return "redis"
 	case protocol.EngineValkey:
 		return "valkey"
+	case protocol.EngineOpenSearch:
+		return "opensearch"
 	}
 	return "postgres"
 }

@@ -148,7 +148,7 @@ func serverPort(s client.CloudServer) int {
 // isn't PostgreSQL.
 func engineURLExample(s client.CloudServer, host string, port int) string {
 	conn := protocol.DBConnection{Engine: protocol.NormalizeEngine(s.Engine), User: "USER", Host: host, Port: port, SSLMode: "require"}
-	if conn.Engine != protocol.EngineValkey && conn.Engine != protocol.EngineRedis {
+	if conn.Engine != protocol.EngineValkey && conn.Engine != protocol.EngineRedis && conn.Engine != protocol.EngineOpenSearch {
 		conn.Database = "DBNAME"
 	}
 	return protocol.ConnectionURL(conn, "PASSWORD")
