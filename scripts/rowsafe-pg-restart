@@ -1213,7 +1213,11 @@ restart_main() {
   fi
 
   log "$action $unit (request $id)"
-  out=$(timeout 120 "$systemctl" "$action" "$unit" 2>&1 </dev/null)
+  # OpenSearch (a Java server with its plugins) can take minutes to start
+  # on a small server.
+  wait=120
+  case $unit in opensearch.service) wait=600 ;; esac
+  out=$(timeout "$wait" "$systemctl" "$action" "$unit" 2>&1 </dev/null)
   rc=$?
   if [ "$rc" = 0 ]; then
     ok=1

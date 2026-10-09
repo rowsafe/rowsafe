@@ -59,6 +59,21 @@ func (e *Engine) SecurityReport(ctx context.Context, env agent.EngineEnv, db pro
 		}
 	}
 	rep.ListenAddresses = listen
+	// What OpenSearch's demo configuration left (never for production).
+	demo := &protocol.OpenSearchStatus{TLS: in.TLS, SecurityPlugin: in.Security}
+	demoCheck(ctx, db.Port, demo, true)
+	if len(demo.DemoUsers) > 0 {
+		rep.Notes = append(rep.Notes, "OpenSearch's demo users sign in with their published passwords: "+strings.Join(demo.DemoUsers, ", "))
+	}
+	if demo.DemoCertificates {
+		rep.Notes = append(rep.Notes, "OpenSearch uses or allows its demo certificates, whose keys are published")
+	}
+	if demo.DemoAdminDN {
+		rep.Notes = append(rep.Notes, "OpenSearch trusts its demo super administrator certificate (CN=kirk), whose key is published")
+	}
+	if transportPublic(ctx, c) {
+		rep.Notes = append(rep.Notes, "OpenSearch's node-to-node port (9300) listens beyond this server")
+	}
 	if in.Security {
 		d := &dba{c: c, db: db, in: in}
 		users, err := d.users(ctx)

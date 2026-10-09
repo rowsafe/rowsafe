@@ -45,9 +45,10 @@ type osUser struct {
 }
 
 type osRole struct {
-	Reserved bool     `json:"reserved"`
-	Cluster  []string `json:"cluster_permissions"`
-	Index    []struct {
+	Reserved    bool     `json:"reserved"`
+	Description string   `json:"description"`
+	Cluster     []string `json:"cluster_permissions"`
+	Index       []struct {
 		Patterns []string `json:"index_patterns"`
 		Actions  []string `json:"allowed_actions"`
 	} `json:"index_permissions"`
@@ -180,6 +181,38 @@ func protectedReason(name string, u osUser) string {
 	return ""
 }
 
+// madeByRowsafe: a role Rowsafe made for a user (its description says so).
+func madeByRowsafe(r osRole) bool { return strings.HasPrefix(r.Description, "Made by Rowsafe for ") }
+
+// administrator reports whether user is mapped to all_access (OpenSearch's
+// administrators are never changed from Rowsafe).
+func (d *dba) administrator(ctx context.Context, user string) (bool, error) {
+	var maps map[string]osMapping
+	if err := d.c.get(ctx, secAPI+"rolesmapping", &maps); err != nil {
+		return false, err
+	}
+	for role, m := range maps {
+		if (role == "all_access" || role == "security_manager") && slices.Contains(m.Users, user) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// userRole reads the role Rowsafe would make for user (ok false: none).
+func (d *dba) userRole(ctx context.Context, user string) (osRole, bool, error) {
+	var v map[string]osRole
+	err := d.c.get(ctx, secAPI+"roles/"+pathEscape(userRolePrefix+user), &v)
+	if statusOf(err) == http.StatusNotFound {
+		return osRole{}, false, nil
+	}
+	if err != nil {
+		return osRole{}, false, err
+	}
+	r, ok := v[userRolePrefix+user]
+	return r, ok, nil
+}
+
 func (d *dba) newPassword() (string, error) {
 	pw, err := agent.NewDBPassword()
 	if err != nil {
@@ -202,6 +235,11 @@ func (d *dba) createUser(ctx context.Context, name, access string, patterns []st
 		return fmt.Errorf("unknown access %q", access)
 	}
 	role := userRolePrefix + name
+	if r, ok, err := d.userRole(ctx, name); err != nil {
+		return err
+	} else if ok && !madeByRowsafe(r) {
+		return fmt.Errorf("a role named %s exists already, and Rowsafe didn't make it: pick another user name", role)
+	}
 	body := map[string]any{
 		"description":         "Made by Rowsafe for " + name + " (" + access + ")",
 		"cluster_permissions": pre.cluster,
@@ -250,6 +288,11 @@ func (d *dba) resetPassword(ctx context.Context) error {
 	if why := protectedReason(d.p.User, u); why != "" {
 		return fmt.Errorf("%s is %s: Rowsafe doesn't change it", d.p.User, why)
 	}
+	if admin, err := d.administrator(ctx, d.p.User); err != nil {
+		return err
+	} else if admin {
+		return fmt.Errorf("%s is one of OpenSearch's administrators (all_access): Rowsafe doesn't change it", d.p.User)
+	}
 	pw, err := d.newPassword()
 	if err != nil {
 		return err
@@ -276,10 +319,23 @@ func (d *dba) dropUser(ctx context.Context) error {
 	if why := protectedReason(d.p.User, u); why != "" {
 		return fmt.Errorf("%s is %s: Rowsafe doesn't remove it", d.p.User, why)
 	}
+	if admin, err := d.administrator(ctx, d.p.User); err != nil {
+		return err
+	} else if admin {
+		return fmt.Errorf("%s is one of OpenSearch's administrators (all_access): Rowsafe doesn't remove it", d.p.User)
+	}
+	r, mine, err := d.userRole(ctx, d.p.User)
+	if err != nil {
+		return err
+	}
 	if err := d.c.do(ctx, http.MethodDelete, secAPI+"internalusers/"+pathEscape(d.p.User), nil, nil); err != nil {
 		return fmt.Errorf("removing %s: %w", d.p.User, err)
 	}
 	role := userRolePrefix + d.p.User
+	if !mine || !madeByRowsafe(r) {
+		d.res.Summary = fmt.Sprintf("Removed the user %s.", d.p.User)
+		return nil
+	}
 	for _, kind := range []string{"rolesmapping/", "roles/"} {
 		if err := d.c.do(ctx, http.MethodDelete, secAPI+kind+pathEscape(role), nil, nil); err != nil && statusOf(err) != http.StatusNotFound {
 			d.log.Printf("note: removing %s%s: %v", kind, role, err)
@@ -420,6 +476,8 @@ func (d *dba) inventory(ctx context.Context) (*protocol.DBInventory, error) {
 		}
 		if why := protectedReason(n, u); why != "" {
 			x.System, x.SystemReason = true, why
+		} else if x.Superuser {
+			x.System, x.SystemReason = true, "one of OpenSearch's administrators (all_access)"
 		}
 		inv.Users = append(inv.Users, x)
 		if len(inv.Users) >= 500 {

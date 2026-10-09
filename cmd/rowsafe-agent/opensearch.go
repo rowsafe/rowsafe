@@ -1,14 +1,12 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/rowsafe/rowsafe/internal/agent"
@@ -70,10 +68,7 @@ func opensearchCmd(ctx context.Context, args []string) int {
 		}
 		return 0
 	}
-	readSecret := func() string {
-		line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
-		return strings.TrimRight(line, "\r\n")
-	}
+	readSecret := readSecretLine // nothing shown when typed on a terminal
 	switch args[0] {
 	case "hash":
 		pw := readSecret()

@@ -201,6 +201,23 @@ type OpenSearchStatus struct {
 	// port speaks TLS.
 	SecurityPlugin bool `json:"security_plugin"`
 	TLS            bool `json:"tls"`
+	// TransportPublic: the node-to-node port (9300) listens beyond this
+	// server (it should stay on 127.0.0.1 for a single node).
+	TransportPublic bool `json:"transport_public,omitempty"`
+	// What OpenSearch's demo configuration leaves (never for production):
+	// DemoUsers are its users that still sign in with their published
+	// passwords; DemoCertificates: its published certificates are allowed
+	// (allow_unsafe_democertificates) or served; DemoAdminDN: its published
+	// super administrator certificate (CN=kirk) is trusted; AdminKeyReadable:
+	// that certificate's key is readable by more than OpenSearch's user.
+	DemoUsers        []string `json:"demo_users,omitempty"`
+	DemoCertificates bool     `json:"demo_certificates,omitempty"`
+	DemoAdminDN      bool     `json:"demo_admin_dn,omitempty"`
+	AdminKeyReadable bool     `json:"admin_key_readable,omitempty"`
+	// PackageKeyProblem says, in plain words, why apt can't trust
+	// OpenSearch's repository any more (its signing key expired and couldn't
+	// be refreshed): updates stop until it is fixed. "" when fine or unknown.
+	PackageKeyProblem string `json:"package_key_problem,omitempty"`
 	// Snapshots: the newest snapshot of Rowsafe's repository and how many
 	// it holds; RepoBytes is the repository's size on this server's disk.
 	LastSnapshotAt *time.Time `json:"last_snapshot_at,omitempty"`

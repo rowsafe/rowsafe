@@ -45,6 +45,9 @@ type nodeConf struct {
 	TransportHost   string
 	HotReload       bool
 	ReloadDNChecked bool
+	// What OpenSearch's demo configuration sets.
+	AdminDN         []string
+	UnsafeDemoCerts bool
 }
 
 // readNodeConf reads conf/opensearch.yml (nested or flat keys).
@@ -107,6 +110,8 @@ func readNodeConf(confDir string) nodeConf {
 	nc.HTTPTLS = str("plugins.security.ssl.http.enabled") == "true"
 	nc.HotReload = str("plugins.security.ssl.certificates_hot_reload.enabled") == "true"
 	nc.ReloadDNChecked = str("plugins.security.ssl.http.enforce_cert_reload_dn_verification") != "false"
+	nc.AdminDN = list("plugins.security.authcz.admin_dn")
+	nc.UnsafeDemoCerts = str("plugins.security.allow_unsafe_democertificates") == "true"
 	return nc
 }
 

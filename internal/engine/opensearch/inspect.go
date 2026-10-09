@@ -20,6 +20,7 @@ type serverInfo struct {
 	VersionNum   int // major*10000 + minor*100 + patch
 	Distribution string
 	ClusterName  string
+	ClusterUUID  string
 	Nodes        int
 	Status       string
 	TLS          bool
@@ -100,6 +101,7 @@ func atoi64(s string) int64 { n, _ := strconv.ParseInt(strings.TrimSpace(s), 10,
 // rootInfo is GET /.
 type rootInfo struct {
 	ClusterName string `json:"cluster_name"`
+	ClusterUUID string `json:"cluster_uuid"`
 	Version     struct {
 		Distribution string `json:"distribution"`
 		Number       string `json:"number"`
@@ -164,7 +166,7 @@ func inspect(ctx context.Context, c *client) (serverInfo, error) {
 	if err != nil {
 		return in, err
 	}
-	in.Version, in.Distribution, in.ClusterName = r.Version.Number, r.Version.Distribution, r.ClusterName
+	in.Version, in.Distribution, in.ClusterName, in.ClusterUUID = r.Version.Number, r.Version.Distribution, r.ClusterName, r.ClusterUUID
 	in.VersionNum = versionNum(in.Version)
 	in.TLS = c.scheme == "https" || c.base.Scheme == "https"
 	var h struct {

@@ -28,6 +28,9 @@ type dbMonitor struct {
 	// the disk watermarks, read every 10 minutes
 	wm   [3]float64
 	wmAt time.Time
+	// the demo users found, tried every demoEvery
+	demoUsers []string
+	demoAt    time.Time
 }
 
 func (e *Engine) monitorFor(id string) *dbMonitor {
@@ -121,6 +124,15 @@ func (e *Engine) Monitor(ctx context.Context, env agent.EngineEnv, db protocol.D
 				st.LastSnapshotAt = &t
 			}
 		}
+	}
+	st.TransportPublic = transportPublic(ctx, c)
+	st.PackageKeyProblem = packageKeyProblem()
+	try := time.Since(m.demoAt) > demoEvery
+	demoCheck(ctx, db.Port, st, try)
+	if try {
+		m.demoUsers, m.demoAt = st.DemoUsers, time.Now()
+	} else {
+		st.DemoUsers = m.demoUsers
 	}
 	dm.Metrics, dm.OpenSearch = metrics, st
 	return dm, nil

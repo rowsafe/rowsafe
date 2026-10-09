@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -142,17 +143,7 @@ func (e *Engine) dropKept(ctx context.Context, env agent.EngineEnv, db protocol.
 	lock := e.repoLock(db)
 	lock.Lock()
 	defer lock.Unlock()
-	for _, x := range mine {
-		if err := deleteSnapshot(ctx, c, snapshotName(x.Label)); err != nil {
-			return err
-		}
-		_ = r.st.Delete(ctx, docKey(x.Label))
-	}
-	dir, err := repoDir(in)
-	if err != nil {
-		return err
-	}
-	if _, err := r.syncRepo(ctx, dir); err != nil {
+	if err := dropSnapshots(ctx, c, r, in, labelsOf(mine)); err != nil {
 		return err
 	}
 	keptMu.Lock()
@@ -165,6 +156,85 @@ func (e *Engine) dropKept(ctx context.Context, env agent.EngineEnv, db protocol.
 		}
 	}
 	return saveKept(env, rest)
+}
+
+func labelsOf(k []keptEntry) []string {
+	out := make([]string, len(k))
+	for i, x := range k {
+		out[i] = x.Label
+	}
+	return out
+}
+
+// dropSnapshots deletes Rowsafe's snapshots of labels (and their records),
+// then the bucket follows with what those deletions removed. The caller
+// holds the database's lock.
+func dropSnapshots(ctx context.Context, c *client, r *repo, in serverInfo, labels []string) error {
+	dir, err := repoDir(in)
+	if err != nil {
+		return err
+	}
+	before, err := localSet(dir)
+	if err != nil {
+		return err
+	}
+	for _, l := range labels {
+		if err := deleteSnapshot(ctx, c, snapshotName(l)); err != nil {
+			return err
+		}
+		_ = r.st.Delete(ctx, docKey(l))
+	}
+	after, err := localSet(dir)
+	if err != nil {
+		return err
+	}
+	_, err = r.syncRepo(ctx, dir, in.ClusterUUID, gone(before, after))
+	return err
+}
+
+// upsertKept records (or updates) a kept snapshot.
+func upsertKept(env agent.EngineEnv, k keptEntry) error {
+	keptMu.Lock()
+	defer keptMu.Unlock()
+	all := loadKept(env)
+	i := slices.IndexFunc(all, func(x keptEntry) bool { return x.Label == k.Label })
+	if i >= 0 {
+		all[i] = k
+	} else {
+		all = append(all, k)
+	}
+	return saveKept(env, all)
+}
+
+const autoCreate = "action.auto_create_index"
+
+// pauseAutoCreate turns automatic index creation off (a transient cluster
+// setting, which a restart also clears) and returns what puts the previous
+// value back.
+func pauseAutoCreate(ctx context.Context, c *client) (func(), error) {
+	var cur struct {
+		Transient map[string]any `json:"transient"`
+	}
+	if err := c.get(ctx, "/_cluster/settings?flat_settings=true", &cur); err != nil {
+		return nil, err
+	}
+	prev, had := cur.Transient[autoCreate]
+	set := func(ctx context.Context, v any) error {
+		return c.do(ctx, http.MethodPut, "/_cluster/settings", map[string]any{"transient": map[string]any{autoCreate: v}}, nil)
+	}
+	if err := set(ctx, false); err != nil {
+		if s := statusOf(err); s == http.StatusForbidden || s == http.StatusUnauthorized {
+			return nil, errors.New("Rowsafe's OpenSearch role can't pause index creation during the rewind (it is from an older Rowsafe): run the Rowsafe installer on this server again, then rewind")
+		}
+		return nil, fmt.Errorf("pausing index creation: %w", err)
+	}
+	return func() {
+		var v any
+		if had {
+			v = prev
+		}
+		_ = set(context.WithoutCancel(ctx), v)
+	}, nil
 }
 
 // replaceAll deletes every index and data stream of the server and
@@ -252,8 +322,24 @@ func (e *Engine) swap(ctx context.Context, env agent.EngineEnv, db protocol.Data
 	until := time.Now().UTC().Add(time.Duration(keepDays) * 24 * time.Hour)
 	t.Doc.KeepUntil = &until
 	_ = r.putJSON(ctx, docKey(t.Doc.Label), t.Doc)
-	kept = keptEntry{RewindID: rewindID, DatabaseID: db.ID, Port: db.Port, Stanza: db.Stanza, Label: t.Doc.Label, Status: status,
+	kept = keptEntry{RewindID: rewindID, DatabaseID: db.ID, Port: db.Port, Stanza: db.Stanza, Label: t.Doc.Label, Status: protocol.RewindInProgress,
 		CreatedAt: time.Now().UTC(), Expires: until, SizeBytes: in.totalBytes()}
+	// Kept before anything is deleted: an agent that stops halfway still
+	// knows the snapshot that holds the data.
+	if err := upsertKept(env, kept); err != nil {
+		return kept, false, fmt.Errorf("recording the snapshot kept for Undo, nothing was changed: %w", err)
+	}
+	defer func() {
+		kept.Status = status
+		_ = upsertKept(env, kept)
+	}()
+	// Apps writing meanwhile would make the removed indices again (automatic
+	// index creation) and the restore would fail: paused until it is done.
+	resume, err := pauseAutoCreate(ctx, c)
+	if err != nil {
+		return kept, false, err
+	}
+	defer resume()
 	if err := replaceAll(ctx, c, in, target, tl); err != nil {
 		tl.Printf("the restore failed (%v): putting back everything as it was", err)
 		now, ierr := inspect(context.WithoutCancel(ctx), c)
@@ -301,10 +387,8 @@ func (e *Engine) rewindInPlace(ctx context.Context, env agent.EngineEnv, db prot
 	if kept.Label != "" {
 		at := doc.StoppedAt
 		kept.RecoveredTo = &at
-		keptMu.Lock()
-		k := loadKept(env)
-		_ = saveKept(env, append(k, kept))
-		keptMu.Unlock()
+		kept.Status = protocol.RewindKeptBefore
+		_ = upsertKept(env, kept)
 		res.OldDataDir = "snapshot " + snapshotName(kept.Label)
 		res.KeptUntil = &kept.Expires
 	}
@@ -336,15 +420,10 @@ func (e *Engine) rewindUndo(ctx context.Context, env agent.EngineEnv, db protoco
 	after, rolled, err := e.swap(ctx, env, db, p.RewindID, before.Label, protocol.RewindKeptAfterUndo, 7, tl)
 	res := &protocol.RewindUndoResult{RewindID: p.RewindID, RolledBack: rolled, DurationMs: time.Since(start).Milliseconds()}
 	if err != nil {
-		if after.Label != "" {
-			keptMu.Lock()
-			_ = saveKept(env, append(loadKept(env), after))
-			keptMu.Unlock()
-		}
 		return res, err
 	}
 	// The snapshot from before is now live again: drop it, keep the rewound
-	// state instead.
+	// state instead (swap recorded it).
 	keptMu.Lock()
 	k := loadKept(env)
 	var rest []keptEntry
@@ -353,21 +432,19 @@ func (e *Engine) rewindUndo(ctx context.Context, env agent.EngineEnv, db protoco
 			rest = append(rest, x)
 		}
 	}
-	_ = saveKept(env, append(rest, after))
+	_ = saveKept(env, rest)
 	keptMu.Unlock()
 	if c, err := connectDB(ctx, env, db); err == nil {
-		lock := e.repoLock(db)
-		lock.Lock()
-		_ = deleteSnapshot(ctx, c, snapshotName(before.Label))
-		if r, err := openRepo(env, db); err == nil {
-			_ = r.st.Delete(ctx, docKey(before.Label))
-			if in, err := inspect(ctx, c); err == nil {
-				if dir, err := repoDir(in); err == nil {
-					_, _ = r.syncRepo(ctx, dir)
+		if in, err := inspect(ctx, c); err == nil {
+			if r, err := openRepo(env, db); err == nil {
+				lock := e.repoLock(db)
+				lock.Lock()
+				if err := dropSnapshots(ctx, c, r, in, []string{before.Label}); err != nil {
+					tl.Printf("note: removing the snapshot from before the rewind: %v", err)
 				}
+				lock.Unlock()
 			}
 		}
-		lock.Unlock()
 	}
 	res.RewoundDataDir = "snapshot " + snapshotName(after.Label)
 	res.KeptUntil = &after.Expires

@@ -80,6 +80,13 @@ plugins.security.ssl.http.enforce_cert_reload_dn_verification: false
 plugins.security.allow_default_init_securityindex: true
 plugins.security.nodes_dn: ["CN=rowsafe-opensearch-node"]
 plugins.security.restapi.roles_enabled: ["all_access", "rowsafe_agent"]
+plugins.security.restapi.endpoints_disabled.rowsafe_agent.ACTIONGROUPS: ["GET", "PUT", "POST", "DELETE", "PATCH"]
+plugins.security.restapi.endpoints_disabled.rowsafe_agent.TENANTS: ["GET", "PUT", "POST", "DELETE", "PATCH"]
+plugins.security.restapi.endpoints_disabled.rowsafe_agent.AUDIT: ["GET", "PUT", "POST", "DELETE", "PATCH"]
+plugins.security.restapi.endpoints_disabled.rowsafe_agent.ALLOWLIST: ["GET", "PUT", "POST", "DELETE", "PATCH"]
+plugins.security.restapi.endpoints_disabled.rowsafe_agent.NODESDN: ["GET", "PUT", "POST", "DELETE", "PATCH"]
+plugins.security.restapi.endpoints_disabled.rowsafe_agent.SSL: ["GET", "PUT", "POST", "DELETE", "PATCH"]
+plugins.security.restapi.endpoints_disabled.rowsafe_agent.CACHE: ["GET", "PUT", "POST", "DELETE", "PATCH"]
 plugins.security.system_indices.enabled: true
 YML
 

@@ -39,7 +39,11 @@ import (
 var (
 	restartHelperTimeout = 150 * time.Second // the helper allows systemctl 120s
 	restartBackTimeout   = 2 * time.Minute   // PostgreSQL answering again
-	restartPoll          = 250 * time.Millisecond
+	// OpenSearch, a Java server with its plugins, takes longer on a small
+	// server: the helper allows systemctl 600s for it.
+	slowHelperTimeout = 630 * time.Second
+	slowBackTimeout   = 10 * time.Minute
+	restartPoll       = 250 * time.Millisecond
 )
 
 var restartIDRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
@@ -157,6 +161,9 @@ func (a *Agent) restart(ctx context.Context, db protocol.DatabaseSpec, taskID st
 // and fills out.ArchiveMode: PostgreSQL's archive_mode, or what another
 // engine's Ready reports ("on" once its continuous archiving can work).
 func (a *Agent) waitBack(ctx context.Context, db protocol.DatabaseSpec, out *protocol.RestartResult) error {
+	if protocol.NormalizeEngine(db.Engine) == protocol.EngineOpenSearch {
+		return a.waitBackWithin(ctx, db, out, slowBackTimeout)
+	}
 	return a.waitBackWithin(ctx, db, out, restartBackTimeout)
 }
 
@@ -267,7 +274,11 @@ func (a *Agent) askHelper(ctx context.Context, action string, port int, id strin
 	if err := writeFileAtomic(request, []byte(line), 0o600); err != nil {
 		return nil, err
 	}
-	res, err := waitRestartResult(ctx, filepath.Join(a.cfg.RestartResultDir, "result"), id)
+	wait := restartHelperTimeout
+	if allowed, err := a.allowedClusters(); err == nil && allowed[port] == "opensearch.service" {
+		wait = slowHelperTimeout // the helper gives OpenSearch 600s
+	}
+	res, err := waitRestartResult(ctx, filepath.Join(a.cfg.RestartResultDir, "result"), id, wait)
 	if err != nil {
 		_ = os.Remove(request)
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errRestartNoAnswer) {
@@ -314,8 +325,8 @@ func (a *Agent) helperActions() []string {
 }
 
 // waitRestartResult waits for the helper's result for request id.
-func waitRestartResult(ctx context.Context, path, id string) (map[string]string, error) {
-	deadline := time.Now().Add(restartHelperTimeout)
+func waitRestartResult(ctx context.Context, path, id string, timeout time.Duration) (map[string]string, error) {
+	deadline := time.Now().Add(timeout)
 	for {
 		if data, err := os.ReadFile(path); err == nil {
 			res := parseKeyValues(string(data))

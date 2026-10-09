@@ -3,9 +3,12 @@ package opensearch
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -32,7 +35,43 @@ type Login struct {
 	User     string `json:"user,omitempty"`
 	Password string `json:"password,omitempty"`
 	NoAuth   bool   `json:"no_auth,omitempty"`
+	// TLS: the login was made over HTTPS, so it is never sent over plain
+	// HTTP. PublicKey pins the server's key then (base64 SHA-256 of its
+	// SubjectPublicKeyInfo): on loopback, where the certificate isn't
+	// checked, only that key or the key of the certificate Rowsafe manages
+	// (serverTLSDir, renewed by the agent) is trusted.
+	TLS       bool   `json:"tls,omitempty"`
+	PublicKey string `json:"public_key,omitempty"`
 }
+
+// spki is a certificate's pinned form.
+func spki(c *x509.Certificate) string {
+	sum := sha256.Sum256(c.RawSubjectPublicKeyInfo)
+	return base64.StdEncoding.EncodeToString(sum[:])
+}
+
+// managedKey is the pinned form of the certificate Rowsafe manages ("" when
+// there is none).
+func managedKey() string {
+	data, err := os.ReadFile(filepath.Join(tlsDir, serverCertFile))
+	if err != nil {
+		return ""
+	}
+	b, _ := pem.Decode(data)
+	if b == nil {
+		return ""
+	}
+	c, err := x509.ParseCertificate(b.Bytes)
+	if err != nil {
+		return ""
+	}
+	return spki(c)
+}
+
+// errKeyChanged: the server on the port presents a key Rowsafe wasn't told
+// about.
+var errKeyChanged = errors.New("OpenSearch's TLS key on this server changed since Rowsafe's user was made, so Rowsafe doesn't send its password: " +
+	"if you changed OpenSearch's certificate, run the Rowsafe installer on this server again to trust the new one")
 
 // LoginUser is Rowsafe's OpenSearch user, and LoginRole its role.
 const (
@@ -147,7 +186,23 @@ func tlsConfig(host string) *tls.Config {
 
 func newClient(base *url.URL, l Login) *client {
 	u := *base
-	tr := &http.Transport{TLSClientConfig: tlsConfig(u.Host), Proxy: nil, MaxIdleConnsPerHost: 4,
+	tc := tlsConfig(u.Host)
+	if l.PublicKey != "" && tc.InsecureSkipVerify {
+		tc.VerifyPeerCertificate = func(raw [][]byte, _ [][]*x509.Certificate) error {
+			if len(raw) == 0 {
+				return errKeyChanged
+			}
+			c, err := x509.ParseCertificate(raw[0])
+			if err != nil {
+				return err
+			}
+			if k := spki(c); k == l.PublicKey || k == managedKey() {
+				return nil
+			}
+			return errKeyChanged
+		}
+	}
+	tr := &http.Transport{TLSClientConfig: tc, Proxy: nil, MaxIdleConnsPerHost: 4,
 		DialContext: (&net.Dialer{Timeout: 10 * time.Second}).DialContext, TLSHandshakeTimeout: 10 * time.Second}
 	return &client{base: &u, login: l, http: &http.Client{Transport: tr}, scheme: u.Scheme}
 }
@@ -324,9 +379,17 @@ func dial(ctx context.Context, port int, l Login) (*client, error) {
 	defer cancel()
 	_, _, err := c.raw(cctx, http.MethodGet, "/", nil, "")
 	if err != nil && base.Scheme == "https" && notTLS(err) {
+		// Plain HTTP only for a server on this machine that never had TLS
+		// with this login: a login made over TLS never goes in the clear.
+		if l.TLS || !loopback(base.Host) {
+			return c, errors.New("OpenSearch answers without TLS on this port now, and Rowsafe doesn't send its login in the clear: is it still the same server?")
+		}
 		base.Scheme = "http"
 		c = newClient(base, l)
 		_, _, err = c.raw(cctx, http.MethodGet, "/", nil, "")
+	}
+	if err != nil && errors.Is(err, errKeyChanged) || err != nil && strings.Contains(err.Error(), errKeyChanged.Error()) {
+		return c, errKeyChanged
 	}
 	if err == nil || statusOf(err) != 0 {
 		schemes.Store(base.Host, base.Scheme)

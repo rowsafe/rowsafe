@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rowsafe/rowsafe/internal/agent"
 	"github.com/rowsafe/rowsafe/internal/objstore/fakes3"
@@ -63,25 +64,60 @@ func TestSyncAndDownload(t *testing.T) {
 	writeFile(t, local, "snap-u1.dat", "snap")
 	writeFile(t, local, "index-0", rd(map[string]string{"one": "u1"}, map[string][]string{"A": {"u1"}}))
 	writeFile(t, local, "index.latest", gen(0))
-	st, err := r.syncRepo(ctx, local)
+	if err := r.ensureMarker(ctx, "s", "cluster-1"); err != nil {
+		t.Fatal(err)
+	}
+	st, err := r.syncRepo(ctx, local, "cluster-1", nil)
 	if err != nil || st.Uploaded != 5 || st.Deleted != 0 {
 		t.Fatalf("first sync: %+v %v", st, err)
 	}
-	// A second snapshot: index B, a new generation; the old one goes.
+	// Another cluster (a server set up again) never touches the folder.
+	if _, err := r.syncRepo(ctx, local, "cluster-2", nil); err != errOtherCluster {
+		t.Fatalf("another cluster: %v", err)
+	}
+	// An empty repository copies nothing and deletes nothing.
+	if _, err := r.syncRepo(ctx, t.TempDir(), "cluster-1", nil); err == nil {
+		t.Fatal("an empty repository was copied")
+	}
+	// A second snapshot: index B, a new generation (index-0 superseded); and
+	// a file that vanished without Rowsafe deleting anything stays.
 	writeFile(t, local, "indices/B/0/__b1", "data b1")
 	writeFile(t, local, "index-1", rd(map[string]string{"one": "u1", "two": "u2"}, map[string][]string{"A": {"u1"}, "B": {"u2"}}))
 	_ = os.Remove(filepath.Join(local, "index-0"))
+	_ = os.Remove(filepath.Join(local, "indices/A/0/__a1"))
 	writeFile(t, local, "index.latest", gen(1))
-	st, err = r.syncRepo(ctx, local)
-	if err != nil || st.Uploaded != 3 || st.Deleted != 1 {
+	st, err = r.syncRepo(ctx, local, "cluster-1", nil)
+	if err != nil || st.Uploaded != 3 || st.Deleted != 0 {
 		t.Fatalf("second sync: %+v %v", st, err)
+	}
+	// After the grace period: the superseded index-0 goes, __a1 (nobody
+	// deleted a snapshot) stays.
+	deleteGrace = 0
+	defer func() { deleteGrace = 24 * time.Hour }()
+	if st, err = r.syncRepo(ctx, local, "cluster-1", nil); err != nil || st.Deleted != 1 {
+		t.Fatalf("after the grace: %+v %v", st, err)
+	}
+	if !hasKey(s3.Keys(), "repo/indices/A/0/__a1") {
+		t.Error("a file Rowsafe didn't delete was removed from the bucket")
+	}
+	// Rowsafe deleted snapshot one: what that removed goes.
+	writeFile(t, local, "indices/A/0/__a1", "data a1")
+	if st, err = r.syncRepo(ctx, local, "cluster-1", []string{"indices/A/0/__a1"}); err != nil || st.Deleted != 0 {
+		t.Fatalf("present again: %+v %v", st, err)
+	}
+	_ = os.Remove(filepath.Join(local, "indices/A/0/__a1"))
+	if st, err = r.syncRepo(ctx, local, "cluster-1", []string{"indices/A/0/__a1"}); err != nil || st.Deleted != 1 {
+		t.Fatalf("removed by Rowsafe: %+v %v", st, err)
 	}
 	for _, k := range s3.Keys() {
 		obj, _ := s3.Object(k)
-		if !bytes.HasPrefix(obj, []byte("RWSF1\n")) || bytes.Contains(obj, []byte("data a1")) {
+		if strings.HasSuffix(k, ".json") && !strings.Contains(k, "/repo/") {
+			continue
+		}
+		if !bytes.HasPrefix(obj, []byte("RWSF1\n")) {
 			t.Errorf("%s isn't sealed", k)
 		}
-		if strings.HasSuffix(k, "/index-0") {
+		if strings.HasSuffix(k, "/index-0") || strings.HasSuffix(k, "__a1") {
 			t.Errorf("%s should be gone", k)
 		}
 	}
@@ -93,9 +129,18 @@ func TestSyncAndDownload(t *testing.T) {
 		t.Errorf("B: %q", b)
 	}
 	if _, err := os.Stat(filepath.Join(out, "indices/A/0/__a1")); err == nil {
-		t.Error("index A isn't in snapshot two: not downloaded")
+		t.Error("index A's files are gone")
 	}
 	if _, err := r.download(ctx, t.TempDir(), "three"); err == nil {
 		t.Error("a snapshot that isn't there")
 	}
+}
+
+func hasKey(keys []string, suffix string) bool {
+	for _, k := range keys {
+		if strings.HasSuffix(k, suffix) {
+			return true
+		}
+	}
+	return false
 }

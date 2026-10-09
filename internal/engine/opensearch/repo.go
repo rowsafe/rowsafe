@@ -28,14 +28,20 @@ import (
 //	rowsafe-opensearch.json   what this folder is
 //	repo/<path>               each file of OpenSearch's snapshot repository,
 //	                          under the same name (OpenSearch names data
-//	                          files by random ids: names never say what)
+//	                          files and index folders by random ids; the
+//	                          repository keeps the default fixed shard paths,
+//	                          so snapshot_shard_paths/, whose file names would
+//	                          carry index names, stays empty: names never say
+//	                          what; the integration test checks it)
+//	repo-pending-deletions.json  files waiting out the grace period (syncRepo)
 //	backups/<label>.json      what a snapshot holds: its indices and their
 //	                          documents (for Proof and the dashboard)
 //
 // The repository's files never change once written, except index.latest
 // (which root index-N is current): new files go up first, index-N next,
-// index.latest last, and only then are files OpenSearch deleted removed
-// from the bucket, so the bucket always holds a whole repository.
+// index.latest last, so the bucket always holds a whole repository. Files
+// leave the bucket only as syncRepo allows (what Rowsafe's own deletions
+// removed, after a grace period, never a recorded snapshot's).
 
 const (
 	markerKey  = "rowsafe-opensearch.json"
@@ -143,25 +149,41 @@ func (r *repo) getSealedTo(ctx context.Context, key, path string) (int64, error)
 	return n, err
 }
 
-// marker describes the folder.
+// marker describes the folder. ClusterUUID is the OpenSearch cluster whose
+// snapshot repository the folder copies: another one (a rebuilt or
+// re-enrolled server, an empty repository) never overwrites it.
 type marker struct {
-	Engine    string    `json:"engine"`
-	Database  string    `json:"database"`
-	CreatedAt time.Time `json:"created_at"`
+	Engine      string    `json:"engine"`
+	Database    string    `json:"database"`
+	CreatedAt   time.Time `json:"created_at"`
+	ClusterUUID string    `json:"cluster_uuid,omitempty"`
 }
 
-// ensureMarker writes the folder's marker, refusing a folder of another
-// engine.
-func (r *repo) ensureMarker(ctx context.Context, name string) error {
+// errOtherCluster: the folder copies another OpenSearch's repository.
+var errOtherCluster = errors.New("this database's folder in your bucket holds the snapshots of another OpenSearch (an earlier server, or one set up again). " +
+	"Rowsafe doesn't overwrite them: set this server up as a new database (a new folder), or restore those snapshots first")
+
+// ensureMarker writes the folder's marker (with the cluster's id), refusing
+// a folder of another engine or of another OpenSearch cluster.
+func (r *repo) ensureMarker(ctx context.Context, name, clusterUUID string) error {
 	var m marker
 	switch err := r.getJSON(ctx, markerKey, &m); {
 	case err == nil:
 		if m.Engine != protocol.EngineOpenSearch {
 			return fmt.Errorf("the bucket folder already holds %s backups", protocol.EngineDisplayName(m.Engine))
 		}
+		if m.ClusterUUID != "" && clusterUUID != "" && m.ClusterUUID != clusterUUID {
+			return errOtherCluster
+		}
+		if m.ClusterUUID == "" && clusterUUID != "" {
+			m.ClusterUUID = clusterUUID
+			if err := r.putJSON(ctx, markerKey, m); err != nil {
+				return fmt.Errorf("writing to your bucket: %w", err)
+			}
+		}
 		return nil
 	case errors.Is(err, objstore.ErrNotFound):
-		if err := r.putJSON(ctx, markerKey, marker{Engine: protocol.EngineOpenSearch, Database: name, CreatedAt: time.Now().UTC()}); err != nil {
+		if err := r.putJSON(ctx, markerKey, marker{Engine: protocol.EngineOpenSearch, Database: name, CreatedAt: time.Now().UTC(), ClusterUUID: clusterUUID}); err != nil {
 			return fmt.Errorf("writing to your bucket: %w", err)
 		}
 		return nil
@@ -284,13 +306,65 @@ type syncStats struct {
 	Deleted       int
 	Files         int
 	RepoBytes     int64
+	// Held says why deletions were held back ("" when none were).
+	Held string
 }
 
-// syncRepo makes the bucket's repo/ the same as the local repository dir.
-// Only one snapshot or deletion may run meanwhile (the caller holds the
-// database's lock).
-func (r *repo) syncRepo(ctx context.Context, dir string) (syncStats, error) {
+// Deletions from the bucket are careful: the bucket is the copy that
+// survives the server. A file is removed only when Rowsafe itself deleted
+// the snapshot that needed it (the files that disappeared from the
+// repository while Rowsafe deleted snapshots: removed), or when it is a
+// superseded root index-N; never a snapshot's own files while a backup
+// record (backups/*.json) still names the snapshot; only after a grace
+// period (deleteGrace) during which the file stayed gone from the
+// repository; and never more than maxDeleteShare of the bucket's files in
+// one go (something emptied the repository: the copy is kept and the task
+// log says so).
+const (
+	pendingKey     = "repo-pending-deletions.json"
+	maxDeleteShare = 0.5
+)
+
+// deleteGrace (a variable for tests).
+var deleteGrace = 24 * time.Hour
+
+// localSet is the repository's files, by relative path.
+func localSet(dir string) (map[string]bool, error) {
+	files, err := localRepoFiles(dir)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool, len(files))
+	for _, f := range files {
+		out[f.Rel] = true
+	}
+	return out, nil
+}
+
+// gone lists what was in before and isn't in after.
+func gone(before, after map[string]bool) []string {
+	var out []string
+	for f := range before {
+		if !after[f] {
+			out = append(out, f)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+var rootIndexRE = regexp.MustCompile(`^index-([0-9]+)$`)
+
+// syncRepo copies the local repository dir to the bucket's repo/: new and
+// changed files go up; removed (files that disappeared while Rowsafe
+// deleted snapshots) and superseded root index-N files are deleted after
+// the grace period. clusterUUID is the server's: the folder must be its
+// (ensureMarker). The caller holds the database's lock.
+func (r *repo) syncRepo(ctx context.Context, dir, clusterUUID string, removed []string) (syncStats, error) {
 	var st syncStats
+	if err := r.ensureMarker(ctx, "", clusterUUID); err != nil {
+		return st, err
+	}
 	local, err := localRepoFiles(dir)
 	if err != nil {
 		return st, err
@@ -303,12 +377,20 @@ func (r *repo) syncRepo(ctx context.Context, dir string) (syncStats, error) {
 	for _, o := range remote {
 		have[strings.TrimPrefix(o.Key, repoPrefix)] = o.Size
 	}
+	if len(local) == 0 && len(remote) > 0 {
+		return st, errors.New("OpenSearch's snapshot folder on this server is empty, but your bucket holds its snapshots: Rowsafe keeps them and copies nothing until the folder is OpenSearch's again")
+	}
 	var todo []repoFile
 	keep := make(map[string]bool, len(local))
+	latest := int64(-1)
 	for _, f := range local {
 		keep[f.Rel] = true
 		st.Files++
 		st.RepoBytes += f.Size
+		if m := rootIndexRE.FindStringSubmatch(f.Rel); m != nil {
+			n, _ := strconv.ParseInt(m[1], 10, 64)
+			latest = max(latest, n)
+		}
 		size, ok := have[f.Rel]
 		if ok && size == objstore.SealedSize(f.Size) && f.Rel != "index.latest" {
 			continue
@@ -327,15 +409,74 @@ func (r *repo) syncRepo(ctx context.Context, dir string) (syncStats, error) {
 		}
 		i = j
 	}
-	for _, o := range remote {
-		rel := strings.TrimPrefix(o.Key, repoPrefix)
+
+	// What may go: what Rowsafe's deletions removed, superseded index-N.
+	cand := map[string]bool{}
+	for _, f := range removed {
+		cand[f] = true
+	}
+	for rel := range have {
+		if m := rootIndexRE.FindStringSubmatch(rel); m != nil {
+			if n, _ := strconv.ParseInt(m[1], 10, 64); latest >= 0 && n < latest {
+				cand[rel] = true
+			}
+		}
+	}
+	// Never a recorded snapshot's own files.
+	if docs, err := r.listDocs(ctx); err == nil {
+		for _, d := range docs {
+			if d.UUID != "" {
+				delete(cand, "snap-"+d.UUID+".dat")
+				delete(cand, "meta-"+d.UUID+".dat")
+			}
+		}
+	} else {
+		return st, fmt.Errorf("reading the backup records in your bucket: %w", err)
+	}
+	var pending map[string]time.Time
+	if err := r.getJSON(ctx, pendingKey, &pending); err != nil && !errors.Is(err, objstore.ErrNotFound) {
+		return st, fmt.Errorf("reading your bucket: %w", err)
+	}
+	if pending == nil {
+		pending = map[string]time.Time{}
+	}
+	now := time.Now().UTC()
+	for rel := range pending {
 		if keep[rel] {
+			delete(pending, rel) // back in the repository: keep it
+		}
+	}
+	for rel := range cand {
+		if _, ok := have[rel]; ok && !keep[rel] {
+			if _, ok := pending[rel]; !ok {
+				pending[rel] = now
+			}
+		}
+	}
+	var due []string
+	for rel, since := range pending {
+		if _, ok := have[rel]; !ok {
+			delete(pending, rel)
 			continue
 		}
-		if err := r.st.Delete(ctx, o.Key); err != nil {
-			return st, fmt.Errorf("removing %s from your bucket: %w", o.Key, err)
+		if now.Sub(since) >= deleteGrace {
+			due = append(due, rel)
 		}
+	}
+	slices.Sort(due)
+	if len(due) > 20 && float64(len(due)) > maxDeleteShare*float64(len(have)) {
+		st.Held = fmt.Sprintf("%d of the %d files in your bucket would go at once: Rowsafe keeps them (something may have emptied the snapshot folder)", len(due), len(have))
+		due = nil
+	}
+	for _, rel := range due {
+		if err := r.st.Delete(ctx, repoPrefix+rel); err != nil {
+			return st, fmt.Errorf("removing %s from your bucket: %w", rel, err)
+		}
+		delete(pending, rel)
 		st.Deleted++
+	}
+	if err := r.putJSON(ctx, pendingKey, pending); err != nil {
+		return st, fmt.Errorf("writing to your bucket: %w", err)
 	}
 	return st, nil
 }

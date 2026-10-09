@@ -290,7 +290,8 @@ func (t *tools) cloudCatalog(ctx context.Context, _ *sdk.CallToolRequest, _ noIn
 	}
 	out.Guidance = "Pick the cheapest size that fits the app (a small app's database fits the smallest size), in a region near the app. " +
 		"Then ask for it with request_change create_cloud_server (name, region, size, allowed_ips, and engine with engine_version when the app needs MySQL, MariaDB, Valkey, ClickHouse or OpenSearch rather than PostgreSQL; " +
-		"the reason says what it's for). Nothing is created or billed until a person approves it."
+		"the reason says what it's for). It runs as the person who connected you, with their rights: an owner's or admin's request creates the server (and its cost) right away, " +
+		"unless the organization asks for approval first; a member's waits for an owner or admin. Confirm the size and its price with the user before asking."
 	b.line("Next: %s", out.Guidance)
 	return text(b), out, nil
 }

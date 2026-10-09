@@ -62,7 +62,7 @@ func (e *Engine) adopt(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 		return res, err
 	}
 	tl.Printf("preparing the bucket folder for %s", db.Name)
-	if err := r.ensureMarker(ctx, db.Name); err != nil {
+	if err := r.ensureMarker(ctx, db.Name, in.ClusterUUID); err != nil {
 		return res, err
 	}
 	res.Applied = true
@@ -94,7 +94,7 @@ func (e *Engine) check(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 	if err != nil {
 		return res, err
 	}
-	if err := r.ensureMarker(ctx, db.Name); err != nil {
+	if err := r.ensureMarker(ctx, db.Name, in.ClusterUUID); err != nil {
 		return res, err
 	}
 	if err := r.putJSON(ctx, "check.json", map[string]time.Time{"checked_at": time.Now().UTC()}); err != nil {
@@ -161,9 +161,12 @@ func (e *Engine) take(ctx context.Context, env agent.EngineEnv, db protocol.Data
 		doc.Indices = append(doc.Indices, docIndex{Name: i.Name, DataStream: i.DataStream, DocsBefore: before[i.Name], DocsAfter: after[i.Name]})
 	}
 	tl.Printf("snapshot done in %s; copying its new files to your bucket, encrypted on this server", snap.end().Sub(snap.start()).Round(time.Millisecond))
-	st, err := r.syncRepo(ctx, dir)
+	st, err := r.syncRepo(ctx, dir, in.ClusterUUID, nil)
 	if err != nil {
 		return res, err
+	}
+	if st.Held != "" {
+		tl.Printf("note: %s", st.Held)
 	}
 	doc.StoredBytes = st.StoredBytes
 	if err := r.putJSON(ctx, docKey(label), doc); err != nil {
@@ -231,9 +234,17 @@ func (e *Engine) retention(ctx context.Context, c *client, r *repo, db protocol.
 		}
 	}
 	if len(fulls) <= keep {
-		return syncAfter(ctx, r, in)
+		return nil
 	}
 	oldest := fulls[len(fulls)-keep]
+	dir, err := repoDir(in)
+	if err != nil {
+		return err
+	}
+	before, err := localSet(dir)
+	if err != nil {
+		return err
+	}
 	removed := 0
 	for _, s := range snaps {
 		l := labelOf(s.Snapshot)
@@ -249,16 +260,14 @@ func (e *Engine) retention(ctx context.Context, c *client, r *repo, db protocol.
 	if removed > 0 && tl != nil {
 		tl.Printf("kept the newest %d full snapshots and everything since: removed %d older snapshots", keep, removed)
 	}
-	return syncAfter(ctx, r, in)
-}
-
-// syncAfter copies the repository to the bucket after deletions.
-func syncAfter(ctx context.Context, r *repo, in serverInfo) error {
-	dir, err := repoDir(in)
+	after, err := localSet(dir)
 	if err != nil {
 		return err
 	}
-	_, err = r.syncRepo(ctx, dir)
+	st, err := r.syncRepo(ctx, dir, in.ClusterUUID, gone(before, after))
+	if err == nil && st.Held != "" && tl != nil {
+		tl.Printf("note: %s", st.Held)
+	}
 	return err
 }
 

@@ -30,10 +30,15 @@ import (
 // openSearchPatternRE: an index name or pattern Rowsafe writes into a role:
 // lowercase letters, digits and - _ . +, with * for any characters; not
 // starting with "_", "-", "+" or "." (system indices).
-var openSearchPatternRE = regexp.MustCompile(`^[a-z0-9*][a-z0-9_.*+-]{0,62}$`)
+// A pattern starts with a letter or digit, so it never reaches OpenSearch's
+// own (dot) indices.
+var openSearchPatternRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_.*+-]{0,62}$`)
 
 // ValidOpenSearchPattern checks an index name or pattern of a user's access.
 func ValidOpenSearchPattern(p string) error {
+	if strings.HasPrefix(p, "*") {
+		return fmt.Errorf("%q would reach every index, OpenSearch's own included: name the indices, or a prefix with * after it (logs-*)", p)
+	}
 	if !openSearchPatternRE.MatchString(p) {
 		return fmt.Errorf("%q can't be used as an index or pattern: use lowercase letters, digits and - _ . with * for any characters (logs-*)", p)
 	}

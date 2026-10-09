@@ -13,6 +13,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -76,6 +78,7 @@ func (e *Engine) Start(ctx context.Context, env agent.EngineEnv) {
 	e.started = true
 	e.mu.Unlock()
 	e.recoverCopies(ctx, env)
+	go e.sweepDrills(env)
 	go func() {
 		t := time.NewTicker(time.Minute)
 		defer t.Stop()
@@ -205,4 +208,32 @@ func (e *Engine) inspectTask(ctx context.Context, env agent.EngineEnv, db protoc
 	}
 	r := in.inspectResult(db.Port)
 	return &r, nil
+}
+
+// sweepDrills removes temporary servers a restore test left when the agent
+// stopped in the middle of it (only folders with the scratch marker; the
+// agent's own sweep of the drill folder looks at its top level only).
+func (e *Engine) sweepDrills(env agent.EngineEnv) {
+	e.copyMu.Lock()
+	defer e.copyMu.Unlock()
+	root := drillRoot(env)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	for _, d := range entries {
+		dir := filepath.Join(root, d.Name())
+		if !d.IsDir() || !idRE.MatchString(d.Name()) {
+			continue
+		}
+		if _, err := os.Lstat(filepath.Join(dir, scratchMarker)); err != nil {
+			continue
+		}
+		if _, err := scratchAt(dir).remove(); err != nil {
+			env.Log.Error("removing a leftover restore test failed", "dir", dir, "err", err)
+		} else {
+			env.Log.Warn("removed a leftover restore test (decrypted copy) from an interrupted run", "dir", dir)
+		}
+	}
+	_ = os.Remove(root)
 }

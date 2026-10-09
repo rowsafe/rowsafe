@@ -38,6 +38,7 @@ var (
 // plugins.security.restapi.roles_enabled (opensearch.yml).
 var (
 	agentCluster = []string{"cluster_monitor", "cluster_composite_ops", "cluster:admin/snapshot/*", "cluster:admin/repository/*",
+		"cluster:admin/settings/update", // only to pause automatic index creation during a rewind in place (inplace.go)
 		"indices:data/write/bulk", "indices:data/read/scroll*", "indices:admin/index_template/get", "indices:admin/template/get"}
 	agentIndex = []string{"indices_monitor", "read", "write", "delete", "create_index", "indices:admin/delete", "indices:admin/close*",
 		"indices:admin/open", "indices:admin/mapping/put", "indices:admin/mappings/get", "indices:admin/get", "indices:admin/settings/update",
@@ -158,6 +159,24 @@ func ServerStatus(ctx context.Context, env agent.EngineEnv, port int) (Status, e
 	return st, nil
 }
 
+// pinLogin signs in with l and, over TLS, records that and the server's key
+// in l (Login.TLS, Login.PublicKey).
+func pinLogin(ctx context.Context, port int, l *Login) error {
+	c, err := dial(ctx, port, *l)
+	if err != nil {
+		return err
+	}
+	if c.base.Scheme != "https" {
+		return nil
+	}
+	cert, err := servedCert(ctx, c.base.Host)
+	if err != nil {
+		return err
+	}
+	l.TLS, l.PublicKey = true, spki(cert)
+	return nil
+}
+
 // HashPassword is the bcrypt hash OpenSearch's internal_users.yml takes.
 func HashPassword(pw string) (string, error) {
 	h, err := bcrypt.GenerateFromPassword([]byte(pw), 12)
@@ -206,7 +225,7 @@ func CreateLogin(ctx context.Context, env agent.EngineEnv, port int, adminUser, 
 		return fmt.Errorf("giving Rowsafe's user its role: %w", err)
 	}
 	l := Login{User: LoginUser, Password: pw}
-	if _, err := dial(ctx, port, l); err != nil {
+	if err := pinLogin(ctx, port, &l); err != nil {
 		return fmt.Errorf("Rowsafe's new user can't sign in: %w", err)
 	}
 	return saveLogin(env, port, l)
@@ -228,6 +247,12 @@ func SaveLogin(ctx context.Context, env agent.EngineEnv, port int, userPass stri
 		return errors.New("give the login as user:password")
 	}
 	l := Login{User: u, Password: pw}
+	if err := pinLogin(ctx, port, &l); err != nil {
+		if statusOf(err) == http.StatusUnauthorized {
+			return ErrAdminRefused
+		}
+		return err
+	}
 	c, err := dial(ctx, port, l)
 	if err != nil {
 		if statusOf(err) == http.StatusUnauthorized {

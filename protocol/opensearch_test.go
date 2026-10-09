@@ -37,6 +37,8 @@ func TestOpenSearchDBAdmin(t *testing.T) {
 	bad := []DBAdminParams{
 		{Action: DBAdminCreateUser, User: "app", Access: DBAccessReadOnly, Databases: []string{".opendistro_security"}, PublicKey: key},
 		{Action: DBAdminCreateUser, User: "app", Access: DBAccessReadOnly, Databases: []string{"Logs"}, PublicKey: key},
+		{Action: DBAdminCreateUser, User: "app", Access: DBAccessReadOnly, Databases: []string{"*"}, PublicKey: key},
+		{Action: DBAdminCreateUser, User: "app", Access: DBAccessReadOnly, Databases: []string{"*logs"}, PublicKey: key},
 		{Action: DBAdminCreateUser, User: "admin", Access: DBAccessReadOnly, Databases: []string{"logs"}, PublicKey: key},
 		{Action: DBAdminCreateUser, User: "app", Access: DBAccessReadOnly, PublicKey: key},
 		{Action: DBAdminDropUser, User: "app", ReassignTo: "other"},

@@ -4915,6 +4915,11 @@ cloud_opensearch_checks() {
   grep -qx 'TimeoutStartSec=300' /etc/systemd/system/opensearch.service.d/rowsafe.conf && grep -qx 'UMask=0027' /etc/systemd/system/opensearch.service.d/rowsafe.conf ||
     fail "$name: OpenSearch's unit drop-in"
   [ "$(cat /proc/sys/vm/max_map_count)" -ge 262144 ] || fail "$name: vm.max_map_count is $(cat /proc/sys/vm/max_map_count)"
+  # The signing key's weekly refresh, and what Rowsafe's role can't reach.
+  systemctl is-enabled --quiet rowsafe-opensearch-key.timer || fail "$name: the signing key's refresh isn't on"
+  [ "$(cat /var/lib/rowsafe-opensearch/key-status)" = ok ] || fail "$name: the signing key's status: $(cat /var/lib/rowsafe-opensearch/key-status 2>&1)"
+  [ "$(grep -c '^plugins\.security\.restapi\.endpoints_disabled\.rowsafe_agent\.' /etc/opensearch/opensearch.yml)" = 7 ] ||
+    fail "$name: Rowsafe's role isn't kept off the security endpoints it doesn't need"
   if [ -n "$(systemctl list-unit-files --no-legend opensearch-performance-analyzer.service 2>/dev/null)" ]; then
     [ "$(systemctl is-enabled opensearch-performance-analyzer.service 2>/dev/null)" = masked ] || fail "$name: Performance Analyzer isn't masked"
     ! systemctl is-active --quiet opensearch-performance-analyzer.service || fail "$name: Performance Analyzer runs"
@@ -5023,6 +5028,10 @@ cloud_opensearch_own() {
     printf '%s\n' "$r" | grep -q "$role" || fail "$name: roles_enabled lacks $role ($r)"
   done
   [ "$(grep -c '^plugins.security.restapi.roles_enabled:' "$yml")" = 1 ] || fail "$name: roles_enabled twice"
+  [ "$(grep -c '^plugins\.security\.restapi\.endpoints_disabled\.rowsafe_agent\.' "$yml")" = 7 ] || fail "$name: endpoints_disabled for Rowsafe's role"
+  # The demo configuration: said plainly; its super administrator's key kept from the agent's group.
+  grep -q "parts of its demo configuration" "$W/out" || fail "$name: no word about the demo configuration"
+  [ ! -f /etc/opensearch/kirk-key.pem ] || [ "$(stat -c %a /etc/opensearch/kirk-key.pem)" = 600 ] || fail "$name: kirk-key.pem is readable by OpenSearch's group"
   [ "$(stat -c '%U %G %a' "$yml.rowsafe-backup")" = "root root 600" ] || fail "$name: the copy of opensearch.yml owner/mode"
   cmp -s "$yml.rowsafe-backup" "$W/opensearch.yml.orig" || fail "$name: the copy isn't the previous opensearch.yml"
   [ "$(stat -c '%U %G %a' "$yml")" = "$(stat -c '%U %G %a' "$W/opensearch.yml.orig")" ] || fail "$name: opensearch.yml's owner or mode changed"

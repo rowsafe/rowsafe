@@ -105,6 +105,7 @@ const (
 	permReasonNoCluster    = "pg_createcluster isn't installed (Debian and Ubuntu's postgresql-common)"
 	permReasonNoNft        = "nftables isn't installed"
 	permReasonNoApt        = "Rowsafe installs updates with apt (Debian and Ubuntu)"
+	permReasonOpenSearch   = "Rowsafe doesn't install OpenSearch's updates yet: apt updates it as you run it"
 )
 
 // ReadPermissions reads what root allowed. It never fails: an unreadable
@@ -229,6 +230,8 @@ func permissionsUnavailable(p PermissionPaths, allowed []string) map[string]stri
 			why = permReasonNoNft
 		case (name == protocol.PermUpdates || name == protocol.PermSecurityUpdates || name == protocol.PermReboot) && !permHave("apt-get"):
 			why = permReasonNoApt
+		case name == protocol.PermUpdates && len(pg) == 0 && openSearchOnly():
+			why = permReasonOpenSearch
 		}
 		// Permissions is ordered so a permission's need comes before it.
 		if need, ok := protocol.PermissionNeeds[name]; ok && why == "" && out[need] != "" {
@@ -373,4 +376,18 @@ func AllowHint(name string) string {
 		return "sudo rowsafe-allow " + name
 	}
 	return "the Rowsafe installer with --allow-" + name
+}
+
+// openSearchOnly: OpenSearch is this server's only database server (its
+// updates aren't Rowsafe's to install yet).
+func openSearchOnly() bool {
+	if _, err := os.Stat("/usr/share/opensearch/bin/opensearch"); err != nil {
+		return false
+	}
+	for _, p := range []string{"mysqld", "mariadbd", "mongod", "clickhouse-server", "clickhouse", "redis-server", "valkey-server"} {
+		if permHave(p) {
+			return false
+		}
+	}
+	return true
 }

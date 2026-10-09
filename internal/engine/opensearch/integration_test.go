@@ -142,6 +142,13 @@ func TestOpenSearch(t *testing.T) {
 		t.Fatalf("status: %+v %v", st, err)
 	}
 	t.Logf("status: %+v", st)
+	// Rowsafe's role can't reach the security endpoints it has no use for
+	// (plugins.security.restapi.endpoints_disabled.rowsafe_agent).
+	if rc, err := connectPort(ctx, env, 9200); err != nil {
+		t.Fatal(err)
+	} else if err := rc.get(ctx, secAPI+"actiongroups", nil); statusOf(err) != http.StatusForbidden {
+		t.Errorf("Rowsafe's role reads action groups: %v", err)
+	}
 
 	// Some data: an index and a data stream.
 	a := admin(t)
@@ -189,6 +196,16 @@ func TestOpenSearch(t *testing.T) {
 	}
 	if repoKeys < 5 {
 		t.Fatalf("the repository's copy in the bucket has %d files", repoKeys)
+	}
+	// No file name in the repository says what is in it.
+	if files, err := localRepoFiles(defaultRepoDir); err != nil {
+		t.Fatal(err)
+	} else {
+		for _, f := range files {
+			if strings.Contains(f.Rel, "products") || strings.Contains(f.Rel, "logs") {
+				t.Errorf("an index name in the repository: %s", f.Rel)
+			}
+		}
 	}
 
 	// More documents, a Mark, then some deleted.
@@ -267,6 +284,13 @@ func TestOpenSearch(t *testing.T) {
 	}
 	if n := count(t, a, "products"); n != 50 {
 		t.Fatalf("after rewind: %d", n)
+	}
+	var cs struct {
+		Transient map[string]any `json:"transient"`
+	}
+	_ = a.get(ctx, "/_cluster/settings?flat_settings=true", &cs)
+	if _, ok := cs.Transient["action.auto_create_index"]; ok {
+		t.Errorf("automatic index creation is still paused: %v", cs.Transient)
 	}
 	if err := a.get(ctx, "/extra", nil); statusOf(err) != http.StatusNotFound {
 		t.Fatalf("an index made after the snapshot is still there: %v", err)
