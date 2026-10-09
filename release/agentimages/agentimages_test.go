@@ -91,6 +91,9 @@ func TestVariants(t *testing.T) {
 		"ghcr.io/rowsafe/agent:sqlite":               "sqlite",
 		"ghcr.io/rowsafe/agent:0.8.0-sqlite":         "sqlite",
 		"ghcr.io/rowsafe/agent:sqlite3":              "",
+		"ghcr.io/rowsafe/agent:qdrant1.19":           "qdrant1.19",
+		"ghcr.io/rowsafe/agent:0.9.9-qdrant1.19":     "qdrant1.19",
+		"ghcr.io/rowsafe/agent:qdrant1.19.2":         "",
 	} {
 		if got := VariantOfRef(ref); got != want {
 			t.Errorf("%s: %q, want %q", ref, got, want)
@@ -101,7 +104,7 @@ func TestVariants(t *testing.T) {
 	}
 	for v, want := range map[string]bool{"pg17": true, "pg17-alpine": true, "clickhouse26.8": true, "clickhouse25.12": true,
 		"redis8.2": true, "redis8.10": true, "valkey8.1": true, "valkey9.0": true, "redis8.02": false, "redis8": false, "valkey8.1-alpine": false,
-		"clickhouse26.0": false, "clickhouse26.08": false, "clickhouse126.8": false, "clickhouse26.8-alpine": false, "mongodb8": false, "sqlite": true, "sqlite-alpine": false, "": false} {
+		"clickhouse26.0": false, "clickhouse26.08": false, "clickhouse126.8": false, "clickhouse26.8-alpine": false, "mongodb8": false, "qdrant1.19": true, "qdrant1.19.2": false, "qdrant1": false, "sqlite": true, "sqlite-alpine": false, "": false} {
 		if ValidVariant(v) != want {
 			t.Errorf("ValidVariant(%q) = %v", v, !want)
 		}

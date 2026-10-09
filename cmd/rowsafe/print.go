@@ -99,6 +99,8 @@ func printTask(t protocol.TaskView) {
 			}
 			if strings.Contains(r.LSN, ":") { // MySQL / MariaDB: a binary log position
 				fmt.Printf("Mark %q at binary log position %s, %s\n", r.Name, r.LSN, state)
+			} else if r.WALFile == "" { // a Mark taken as a backup of its own (Qdrant, ...)
+				fmt.Printf("Mark %q saved as backup %s, %s\n", r.Name, r.LSN, state)
 			} else {
 				fmt.Printf("Restore point %q at LSN %s (WAL %s), %s\n", r.Name, r.LSN, r.WALFile, state)
 			}
@@ -135,8 +137,12 @@ func printTask(t protocol.TaskView) {
 	case protocol.TaskRestart:
 		var r protocol.RestartResult
 		if json.Unmarshal(t.Result, &r) == nil && r.Restarted {
-			fmt.Printf("Restarted %s in %.1fs; archive_mode is %s\n", cmp.Or(r.Unit, "PostgreSQL"),
-				float64(r.DurationMs)/1000, cmp.Or(r.ArchiveMode, "unknown"))
+			if r.ArchiveMode == "" { // an engine without WAL archiving (ClickHouse, Qdrant, ...)
+				fmt.Printf("Restarted %s in %.1fs\n", cmp.Or(r.Unit, "the database"), float64(r.DurationMs)/1000)
+			} else {
+				fmt.Printf("Restarted %s in %.1fs; archive_mode is %s\n", cmp.Or(r.Unit, "PostgreSQL"),
+					float64(r.DurationMs)/1000, r.ArchiveMode)
+			}
 		}
 	case protocol.TaskPooling, protocol.TaskPoolerRetarget:
 		poolingResult(t)

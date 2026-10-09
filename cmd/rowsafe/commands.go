@@ -307,7 +307,7 @@ func adoptCmd(ctx context.Context, c *client.Client, args []string) error {
 	socketDir := fs.String("socket-dir", "/var/run/postgresql", "Unix socket directory")
 	retention := fs.Int("retention-full", 2, "full backups to keep (weekly fulls: 2 = about 2 weeks of PITR)")
 	noWait := fs.Bool("no-wait", false, "don't wait for the plan")
-	engine := fs.String("engine", "", "database engine: postgresql (default), mysql, mariadb, mongodb, clickhouse or sqlite")
+	engine := fs.String("engine", "", "database engine: postgresql (default), mysql, mariadb, mongodb, clickhouse, redis, valkey, qdrant or sqlite")
 	path := fs.String("path", "", "SQLite: the database file's absolute path on the host (in Docker, inside the agent's container)")
 	name, err := parse(fs, args, true)
 	if err != nil {
@@ -330,9 +330,11 @@ func adoptCmd(ctx context.Context, c *client.Client, args []string) error {
 	if *host, err = resolveHost(ctx, c, *host); err != nil {
 		return err
 	}
-	if e := protocol.NormalizeEngine(*engine); e == protocol.EngineMongoDB || e == protocol.EngineClickHouse || e == protocol.EngineRedis || e == protocol.EngineValkey {
-		// MongoDB, ClickHouse, Redis and Valkey: TCP on 127.0.0.1, their
-		// default port (27017, ClickHouse's HTTP port 8123, 6379) and backup
+	if e := protocol.NormalizeEngine(*engine); e == protocol.EngineMongoDB || e == protocol.EngineClickHouse || e == protocol.EngineRedis || e == protocol.EngineValkey ||
+		e == protocol.EngineQdrant {
+		// MongoDB, ClickHouse, Redis, Valkey and Qdrant: TCP on 127.0.0.1,
+		// their default port (27017, ClickHouse's HTTP port 8123, 6379,
+		// Qdrant's REST port 6333) and backup
 		// schedule (the control plane fills in what isn't given).
 		set := map[string]bool{}
 		fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
@@ -527,6 +529,8 @@ func engineServiceNames(engine string) (service, unit string) {
 		return "valkey", "valkey-server"
 	case protocol.EngineOpenSearch:
 		return "opensearch", "opensearch"
+	case protocol.EngineQdrant:
+		return "qdrant", "qdrant"
 	}
 	return "postgres", "postgresql"
 }
@@ -834,7 +838,7 @@ func taskName(typ string) string {
 	case protocol.TaskCheck:
 		return "WAL check"
 	case protocol.TaskRestart:
-		return "PostgreSQL restart"
+		return "restart"
 	case protocol.TaskMaintenance:
 		return "fix"
 	case protocol.TaskIndexAdvisor:

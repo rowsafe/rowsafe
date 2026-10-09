@@ -21,8 +21,11 @@ import (
 // offers TLS (nothing is sent back). ClickHouse (its HTTP port): one
 // "SELECT 1" without credentials shows whether the default user lets
 // anyone in. Redis and Valkey: one PING without credentials does the same
-// (protected mode turns strangers away before any password). MongoDB: whether the port accepts connections (whether it
-// asks for a password comes from the agent's report).
+// (protected mode turns strangers away before any password). Qdrant (REST
+// or gRPC): one request without a key (listing the collections) shows
+// whether it asks for one, and whether it speaks plain HTTP. MongoDB:
+// whether the port accepts connections (whether it asks for a password
+// comes from the agent's report).
 func ProbeEngine(ctx context.Context, engine, addr string, o Options) Result {
 	if o.DialTimeout <= 0 {
 		o.DialTimeout = 5 * time.Second
@@ -41,6 +44,8 @@ func ProbeEngine(ctx context.Context, engine, addr string, o Options) Result {
 		return probeRedis(ctx, engine, addr, o)
 	case protocol.EngineOpenSearch:
 		return probeOpenSearch(ctx, addr, o) // opensearch.go
+	case protocol.EngineQdrant:
+		return probeQdrant(ctx, addr, o)
 	}
 	conn, err := dial(ctx, addr, o)
 	if err != nil {

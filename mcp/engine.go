@@ -47,6 +47,8 @@ func serviceName(engine string) (unit, compose string) {
 		return "valkey-server", "valkey"
 	case protocol.EngineOpenSearch:
 		return "opensearch", "opensearch"
+	case protocol.EngineQdrant:
+		return "qdrant", "qdrant"
 	}
 	return "postgresql", "postgres"
 }

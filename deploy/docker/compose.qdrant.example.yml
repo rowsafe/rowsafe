@@ -1,0 +1,69 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Qdrant (the official, unmodified qdrant/qdrant image) with the Rowsafe
+# agent as a sidecar on the same compose network: Qdrant's own snapshots,
+# taken through its API, encrypted in the agent container (with your
+# passphrase) and copied to your bucket; Marks; weekly Proof; Rewind (a
+# copy, or the whole server back to a snapshot, with Undo); Pulse. The agent
+# needs no access to Qdrant's files. Restores go back to a snapshot (hourly
+# by default), not to any second: Qdrant keeps no log of its changes to
+# replay.
+#
+#   1. Put the agent's settings in rowsafe-agent.env next to this file
+#      (chmod 600), with a one-time token from `rowsafe hosts enroll-token`,
+#      and Qdrant's keys in qdrant.env (chmod 600):
+#        QDRANT__SERVICE__API_KEY=<your admin key>
+#        QDRANT__SERVICE__ALT_API_KEY=<a second random key, Rowsafe's own>
+#      (openssl rand -hex 32 makes one.) Rowsafe's key is separate from
+#      yours: you can change it alone, and with JSON Web Tokens on (below)
+#      the agent never sends it to Qdrant, only tokens it signs with it,
+#      valid for a few minutes.
+#   2. docker compose up -d
+#   3. Once, give the agent Rowsafe's key (paste it and press Enter; it is
+#      saved in the agent's volume only):
+#        docker compose exec rowsafe-agent rowsafe-agent qdrant login --port 6333
+#   4. rowsafe adopt vectors --host db-1 --engine qdrant --port 6333, then
+#      `rowsafe apply vectors` (or Turn on backups in the dashboard).
+#
+# Update the agent (Qdrant keeps running):
+#   docker compose pull rowsafe-agent && docker compose up -d rowsafe-agent
+
+name: myapp
+
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.19.2
+    restart: unless-stopped
+    env_file: qdrant.env                     # QDRANT__SERVICE__API_KEY, QDRANT__SERVICE__ALT_API_KEY
+    environment:
+      QDRANT__SERVICE__JWT_RBAC: "true"       # keys made in Databases & users are tokens
+      QDRANT__SERVICE__ENABLE_SNAPSHOT_URL_RECOVERY: "false"
+      QDRANT__TELEMETRY_DISABLED: "true"
+    ports:
+      - "127.0.0.1:6333:6333"                # REST, this host only (put TLS in front to open it)
+      - "127.0.0.1:6334:6334"                # gRPC
+    volumes:
+      - qdrantdata:/qdrant/storage
+
+  # Rowsafe
+  rowsafe-agent:
+    # One image per Qdrant release series, built FROM the same qdrant image
+    # (its qdrant program runs Proof and Rewind copies): qdrant1.19. It
+    # follows the newest Rowsafe release; to pin one, use the exact tag,
+    # e.g. ghcr.io/rowsafe/agent:<version>-qdrant1.19.
+    image: ghcr.io/rowsafe/agent:qdrant1.19
+    # The name Rowsafe shows for this host: `rowsafe adopt vectors --host db-1`.
+    hostname: db-1
+    restart: unless-stopped
+    environment:
+      # The qdrant service on the compose network (private to this host).
+      ROWSAFE_QDRANT_URL: http://qdrant:6333
+    depends_on:
+      - qdrant
+    env_file: rowsafe-agent.env
+    volumes:
+      - rowsafe-state:/var/lib/rowsafe
+
+volumes:
+  qdrantdata:
+  rowsafe-state:

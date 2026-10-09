@@ -53,8 +53,9 @@ var (
 	versionRE = regexp.MustCompile(`^(\d{1,6})\.(\d{1,6})\.(\d{1,6})$`)
 	// variant is a PostgreSQL major and flavour ("pg17", "pg17-alpine"), a
 	// ClickHouse release ("clickhouse26.8": YY.M), a Redis or Valkey
-	// release ("redis8.2", "redis8.10", "valkey8.1": major.minor), or "sqlite".
-	variant   = `pg[1-9][0-9](?:-alpine)?|clickhouse[2-9][0-9]\.(?:[1-9]|1[0-2])|(?:redis|valkey)[6-9]\.(?:0|[1-9][0-9]?)|sqlite`
+	// release ("redis8.2", "redis8.10", "valkey8.1": major.minor), a Qdrant
+	// release series ("qdrant1.19"), or "sqlite".
+	variant   = `pg[1-9][0-9](?:-alpine)?|clickhouse[2-9][0-9]\.(?:[1-9]|1[0-2])|(?:redis|valkey)[6-9]\.(?:0|[1-9][0-9]?)|qdrant[1-9]\.(?:0|[1-9][0-9]?)|sqlite`
 	variantRE = regexp.MustCompile(`^(?:` + variant + `)$`)
 	digestRE  = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	// tagVariantRE finds the variant at the end of a tag: "pg17",

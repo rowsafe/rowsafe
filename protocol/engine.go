@@ -14,10 +14,13 @@ const (
 	EngineRedis      = "redis"
 	EngineValkey     = "valkey"
 	EngineSQLite     = "sqlite"
+	EngineQdrant     = "qdrant"
 )
 
 // Engines lists the known engines, PostgreSQL first.
-var Engines = []string{EnginePostgreSQL, EngineMySQL, EngineMariaDB, EngineMongoDB, EngineClickHouse, EngineRedis, EngineValkey, EngineSQLite}
+var Engines = []string{EnginePostgreSQL, EngineMySQL, EngineMariaDB, EngineMongoDB, EngineClickHouse, EngineRedis, EngineValkey, EngineSQLite,
+	EngineQdrant,
+}
 
 // NormalizeEngine maps "" to PostgreSQL and lowercases s. It does not
 // validate: see ValidEngine.
@@ -57,6 +60,8 @@ func EngineDisplayName(engine string) string {
 		return "SQLite"
 	case EngineOpenSearch:
 		return "OpenSearch"
+	case EngineQdrant:
+		return "Qdrant"
 	default:
 		return e
 	}
@@ -236,6 +241,8 @@ var EngineCapabilities = map[string]EngineFeatures{
 	// SQLite (internal/engine/sqlite): protocol/sqlite.go.
 	EngineSQLite: sqliteFeatures,
 	// OpenSearch (internal/engine/opensearch) adds itself: protocol/opensearch.go.
+	// Qdrant (internal/engine/qdrant): protocol/qdrant.go.
+	EngineQdrant: qdrantFeatures,
 }
 
 // RewindInPlaceStopsServer reports whether rewinding a database of engine
@@ -246,7 +253,7 @@ var EngineCapabilities = map[string]EngineFeatures{
 // with the online backup API: they need no such permission.
 func RewindInPlaceStopsServer(engine string) bool {
 	switch NormalizeEngine(engine) {
-	case EngineMongoDB, EngineClickHouse, EngineRedis, EngineValkey, EngineSQLite, EngineOpenSearch:
+	case EngineMongoDB, EngineClickHouse, EngineRedis, EngineValkey, EngineSQLite, EngineOpenSearch, EngineQdrant:
 		return false
 	}
 	return true

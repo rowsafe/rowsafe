@@ -41,10 +41,12 @@ Usage:
                                             Redis and Valkey helpers for the installer (see redis --help)
   rowsafe-agent opensearch status|login|save-login|hash|download-backup ...
                                             OpenSearch helpers for the installer (see opensearch --help)
+  rowsafe-agent qdrant status|login|save-login|download-backup ...
+                                            Qdrant helpers for the installer (see qdrant --help)
   rowsafe-agent sqlite find|status|restore ...
                                             SQLite helpers for the installer, and restores without
                                             Rowsafe (see sqlite --help)
-  rowsafe-agent unseal < FILE > PLAIN       decrypt a file Rowsafe wrote to your bucket (MongoDB, ClickHouse, Redis, SQLite)
+  rowsafe-agent unseal < FILE > PLAIN       decrypt a file Rowsafe wrote to your bucket (MongoDB, ClickHouse, Redis, SQLite, Qdrant)
   rowsafe-agent restore-mysql --engine mysql|mariadb --database NAME --dir DIR [--at TIME | --mark NAME]
                                             restore a MySQL/MariaDB database from your bucket into DIR
   rowsafe-agent key                         this server's key fingerprint: compare it with the one the Rowsafe
@@ -90,6 +92,8 @@ func main() {
 		os.Exit(clickhouseCmd(ctx, os.Args[2:]))
 	case "redis": // Redis and Valkey installer helpers (redis.go)
 		os.Exit(redisCmd(ctx, os.Args[2:]))
+	case "qdrant": // Qdrant installer helpers (qdrant.go)
+		os.Exit(qdrantCmd(ctx, os.Args[2:]))
 	case "sqlite": // SQLite installer helpers and restores (sqlite.go)
 		os.Exit(sqliteCmd(ctx, os.Args[2:]))
 	case "opensearch": // OpenSearch installer helpers (opensearch.go)

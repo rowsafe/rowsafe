@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
 # rowsafe-pg-restart: restarts or stops PostgreSQL (or the MySQL, MariaDB,
-# MongoDB, ClickHouse, Redis or Valkey server Rowsafe protects) when a person asked
+# MongoDB, ClickHouse, Redis, Valkey or Qdrant server Rowsafe protects) when a person asked
 # Rowsafe to (Restart in the dashboard, `rowsafe restart`; Rewind the whole
 # database, which stops the database, swaps its data and starts it),
 # and installs PostgreSQL updates, upgrades PostgreSQL, installs security
@@ -612,9 +612,9 @@ check_root_file() {
 # (postgresql@MAJOR-NAME.service), and the units the MySQL, MariaDB,
 # MongoDB, ClickHouse, Redis and Valkey packages install (mysql, mysqld,
 # mariadb and their @instance forms, mongod, mongodb, clickhouse-server,
-# redis-server, redis, valkey-server, valkey and their @instance forms; and
-# opensearch).
-db_unit_re='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server|opensearch|(redis|valkey)(-server)?(@[A-Za-z0-9_.-]+)?)[.]service$'
+# redis-server, redis, valkey-server, valkey and their @instance forms;
+# opensearch and qdrant).
+db_unit_re='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server|opensearch|(redis|valkey)(-server)?(@[A-Za-z0-9_.-]+)?|qdrant)[.]service$'
 
 # allowed_unit PORT prints the unit the restart allow list names for PORT.
 allowed_unit() {

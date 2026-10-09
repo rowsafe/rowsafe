@@ -231,6 +231,15 @@ func ConnectionURL(c DBConnection, password string) string {
 	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") { // IPv6
 		host = "[" + host + "]"
 	}
+	if NormalizeEngine(c.Engine) == EngineQdrant {
+		// Qdrant's clients take the REST URL and the key apart: the key
+		// (password) is never in the URL.
+		scheme := "http"
+		if c.SSLMode == "require" {
+			scheme = "https"
+		}
+		return fmt.Sprintf("%s://%s:%d", scheme, host, c.Port)
+	}
 	scheme := "postgresql"
 	switch NormalizeEngine(c.Engine) {
 	case EngineMySQL, EngineMariaDB:
@@ -379,6 +388,8 @@ type DBDatabase struct {
 	// Documents is the number of documents in an OpenSearch index or data
 	// stream.
 	Documents int64 `json:"documents,omitempty"`
+	// Points is the number of points in a Qdrant collection.
+	Points int64 `json:"points,omitempty"`
 	// Extensions installed (nil when the database couldn't be read).
 	Extensions []DBInstalledExtension `json:"extensions,omitempty"`
 }
@@ -628,7 +639,7 @@ func ValidateDBAdminFor(engine string, p DBAdminParams) error {
 		default:
 			return fmt.Errorf("access must be read_only, read_write or owner")
 		}
-		if len(p.Databases) == 0 && engine != EngineRedis && engine != EngineValkey {
+		if len(p.Databases) == 0 && engine != EngineRedis && engine != EngineValkey && engine != EngineQdrant {
 			return fmt.Errorf("choose at least one database the user can use")
 		}
 		if len(p.Databases) > maxDBAdminList {
@@ -717,6 +728,7 @@ var systemDatabases = map[string][]string{
 	EngineMariaDB:    {"mysql", "sys", "information_schema", "performance_schema"},
 	EngineMongoDB:    {"admin", "local", "config"},
 	EngineClickHouse: {"system", "information_schema", "INFORMATION_SCHEMA", "default"},
+	EngineQdrant:     {QdrantKeysCollection},
 }
 
 // SystemDatabaseFor reports whether name is one of engine's own databases.
@@ -757,6 +769,11 @@ func validateDBAdminEngine(engine string, p DBAdminParams) error {
 		}
 	} else if p.KeyPattern != "" {
 		return fmt.Errorf("key patterns are a Redis feature; %s users get access to databases", name)
+	}
+	if engine == EngineQdrant {
+		if err := validateQdrantDBAdmin(p); err != nil {
+			return err
+		}
 	}
 	if engine != EnginePostgreSQL {
 		switch p.Action {

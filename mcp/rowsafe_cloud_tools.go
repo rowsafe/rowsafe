@@ -114,7 +114,9 @@ type CloudServerView struct {
 	Connection string `json:"connection,omitempty" jsonschema:"the connection string with USER and PASSWORD to fill in (postgresql://, mysql://, rediss://, clickhouse:// or https:// for OpenSearch)"`
 	// HTTPS is ClickHouse's HTTPS interface (port 8443), next to Connection
 	// (its native protocol with TLS, 9440).
-	HTTPS       string     `json:"https,omitempty" jsonschema:"ClickHouse servers: the HTTPS interface's URL (port 8443), for HTTP clients and drivers"`
+	HTTPS string `json:"https,omitempty" jsonschema:"ClickHouse servers: the HTTPS interface's URL (port 8443), for HTTP clients and drivers"`
+	// GRPC is Qdrant's gRPC API (host:6334, TLS), next to Connection (REST).
+	GRPC        string     `json:"grpc,omitempty" jsonschema:"Qdrant servers: the gRPC API's address (port 6334, TLS); Connection is the REST URL (port 6333)"`
 	CheckoutURL string     `json:"checkout_url,omitempty" jsonschema:"waiting for payment: where an owner pays"`
 	Standby     string     `json:"standby,omitempty"`
 	CloneOf     string     `json:"clone_of,omitempty"`
@@ -350,6 +352,9 @@ func (t *tools) getCloudServer(ctx context.Context, _ *sdk.CallToolRequest, in c
 			if v.HTTPS != "" {
 				b.line("ClickHouse's HTTPS interface: %s (user and password as HTTP basic authentication, the database as ?database=DBNAME).", v.HTTPS)
 			}
+			if v.GRPC != "" {
+				b.line("Qdrant's gRPC API: %s with TLS. Apps send an API key (header api-key) the user makes in the dashboard (Databases & users), shown once to them only.", v.GRPC)
+			}
 		}
 	}
 	b.line("Next: %s", out.Guidance)
@@ -459,6 +464,9 @@ func cloudServerView(c client.CloudServer) CloudServerView {
 		v.Connection = protocol.ConnectionURL(conn, "PASSWORD")
 		if v.Engine == protocol.EngineClickHouse && len(eng.Ports) > 1 {
 			v.HTTPS = "https://" + net.JoinHostPort(v.Host, strconv.Itoa(eng.Ports[1]))
+		}
+		if v.Engine == protocol.EngineQdrant && len(eng.Ports) > 1 {
+			v.GRPC = net.JoinHostPort(v.Host, strconv.Itoa(eng.Ports[1]))
 		}
 	}
 	if s := c.Standby; s != nil {

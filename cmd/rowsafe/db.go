@@ -139,6 +139,14 @@ func printSecret(s *protocol.DBSecret) {
 	if s == nil {
 		return
 	}
+	if protocol.NormalizeEngine(s.Engine) == protocol.EngineQdrant {
+		// An API key (a token) and the REST URL, kept apart: Qdrant's
+		// clients take them separately.
+		fmt.Printf("\nAPI key %s for Qdrant (save it now: Rowsafe doesn't keep it and can't show it again):\n\n", s.User)
+		fmt.Printf("  key       %s\n  url       %s (REST)\n  grpc      %s:6334 (gRPC, TLS)\n", s.Password, s.URL, s.Host)
+		fmt.Printf("\nIn a .env file:\n  QDRANT_URL=%s\n  QDRANT_API_KEY=%s\n", s.URL, s.Password)
+		return
+	}
 	fmt.Printf("\nConnection string for %s (save it now: Rowsafe doesn't keep the password and can't show it again):\n\n", s.User)
 	fmt.Printf("  %s\n\n", s.URL)
 	fmt.Printf("  user      %s\n  password  %s\n  database  %s\n  host      %s\n  port      %d\n  sslmode   %s\n", s.User, s.Password, s.Database, s.Host, s.Port, s.SSLMode)
@@ -183,6 +191,17 @@ func dbList(ctx context.Context, c *client.Client, args []string) error {
 	}
 	if isRedisInventory(inv) {
 		printRedisInventory(server, inv)
+		return nil
+	}
+	if protocol.NormalizeEngine(inv.Engine) == protocol.EngineQdrant {
+		fmt.Printf("Collections on %s (Qdrant %s). Every one is backed up with the server.\n\n", server, inv.ServerVersion)
+		t := newTable("COLLECTION", "POINTS", "SIZE")
+		for _, d := range inv.Databases {
+			t.row(d.Name, fmt.Sprint(d.Points), humanBytes(d.SizeBytes))
+		}
+		t.flush()
+		fmt.Println()
+		printUsers(inv)
 		return nil
 	}
 	fmt.Printf("Databases on %s (PostgreSQL %s). Every one is backed up with the server.\n\n", server, inv.ServerVersion)
@@ -232,6 +251,15 @@ func printRedisInventory(server string, inv *protocol.DBInventory) {
 func printUsers(inv *protocol.DBInventory) {
 	if inv.ManageBlocked != "" {
 		fmt.Println(inv.ManageBlocked)
+	}
+	if protocol.NormalizeEngine(inv.Engine) == protocol.EngineQdrant {
+		t := newTable("KEY", "ACCESS", "COLLECTIONS", "NOTE")
+		for _, u := range inv.Users {
+			access := map[string]string{protocol.DBAccessReadOnly: "read-only", protocol.DBAccessReadWrite: "read-write", protocol.DBAccessOwner: "admin"}[u.Access]
+			t.row(u.Name, orText(access, "custom"), orText(strings.Join(u.Databases, ", "), "every one"), u.SystemReason)
+		}
+		t.flush()
+		return
 	}
 	if isRedisInventory(inv) {
 		t := newTable("USER", "CAN SIGN IN", "ACCESS", "KEYS", "NOTE")
@@ -392,14 +420,23 @@ func dbUserAdd(ctx context.Context, c *client.Client, args []string) error {
 	}
 	if len(pos) != 1 {
 		return errors.New("usage: rowsafe db user add USER --db DB [--access read_only|read_write|owner] [--on NAME]\n" +
-			"       rowsafe db user add USER [--keys PATTERN] [--access ...] [--on NAME]   (Redis and Valkey)")
+			"       rowsafe db user add USER [--keys PATTERN] [--access ...] [--on NAME]   (Redis and Valkey)\n" +
+			"       rowsafe db user add KEY [--db COLLECTION] [--access ...] [--on NAME]   (Qdrant: an API key)")
 	}
 	p := protocol.DBAdminParams{Action: protocol.DBAdminCreateUser, User: pos[0], Databases: dbs,
 		Access: strings.ReplaceAll(*access, "-", "_"), Host: *host, KeyPattern: *keys}
 	// Checked in full here, but for Redis and Valkey users (--keys, no
-	// --db): the control plane checks those, as it knows the engine.
+	// --db): the control plane checks those, as it knows the engine. A
+	// Qdrant key may reach every collection (no --db): the server's engine
+	// says which rules apply.
 	if *keys == "" || len(dbs) > 0 {
-		if err := protocol.ValidateDBAdmin(withKeyPlaceholder(p)); err != nil {
+		engine := protocol.EnginePostgreSQL
+		if len(dbs) == 0 && *on != "" {
+			if d, err := c.Database(ctx, *on); err == nil {
+				engine = protocol.NormalizeEngine(d.Engine)
+			}
+		}
+		if err := protocol.ValidateDBAdminFor(engine, withKeyPlaceholder(p)); err != nil {
 			if len(dbs) == 0 {
 				return fmt.Errorf("%w (--db DB; for Redis and Valkey --keys PATTERN, \"*\" for every key)", err)
 			}

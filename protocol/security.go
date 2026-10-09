@@ -228,6 +228,8 @@ type EngineSecurity struct {
 	SQLite *SQLiteSecurity `json:"sqlite,omitempty"`
 	// Redis is Redis's and Valkey's own (redis_security.go).
 	Redis *RedisSecurity `json:"redis,omitempty"`
+	// Qdrant is Qdrant's own (qdrant.go).
+	Qdrant *QdrantSecurity `json:"qdrant,omitempty"`
 }
 
 // CertInfo describes the server's TLS certificate (never its key).

@@ -166,17 +166,19 @@ case \${1:-} in
     fi
     echo "writing, reading and deleting a test file in Rowsafe Storage..."
     echo "Rowsafe Storage works: wrote, read back and deleted a test file" ;;
-  setup|mongodb|clickhouse|redis|opensearch)
+  setup|mongodb|clickhouse|redis|opensearch|qdrant)
     # Answers from /tmp/rowsafe-fake: CMD.out is printed, CMD.rc holds exit
     # codes (one per line, used in turn; the last one sticks). MongoDB,
-    # ClickHouse, Redis and OpenSearch helpers are mongodb-CMD, clickhouse-CMD,
-    # redis-CMD and opensearch-CMD; a password on stdin goes to CMD.stdin.
+    # ClickHouse, Redis, OpenSearch and Qdrant helpers are mongodb-CMD,
+    # clickhouse-CMD, redis-CMD, opensearch-CMD and qdrant-CMD; a password (a
+    # Qdrant key) on stdin goes to CMD.stdin.
     f=/tmp/rowsafe-fake
     pre=''
-    case \$1 in mongodb | clickhouse | redis | opensearch) pre=\$1- ;; esac
+    case \$1 in mongodb | clickhouse | redis | opensearch | qdrant) pre=\$1- ;; esac
     shift
     echo "\$pre\$*" >>"\$f/calls"
     case " \$* " in *" --admin-user "*) cat >"\$f/\$pre\$1.stdin" ;; esac
+    case \$pre\$1 in qdrant-login | qdrant-save-login) cat >"\$f/\$pre\$1.stdin" ;; esac
     set -- "\$pre\$@"
     if [ "\$1" = mysql-account ] && [ -f /tmp/rowsafe-fake-user ]; then
       # (--cloud) root creates Rowsafe's account through the server's
@@ -373,12 +375,12 @@ opensearch_host_prep() {
 # cloud_host (--cloud): PostgreSQL in a plain container per image, then
 # MySQL, MariaDB and Valkey each in a container with systemd as PID 1 (their
 # packages start the servers with systemd; Valkey's unit sandbox matters).
-# TEST_ONLY picks some of postgres, mysql, mariadb, valkey, clickhouse
-# (default: all). Each run: ENGINE:VERSION:IMAGE:PLATFORM (MySQL's packages
+# TEST_ONLY picks some of postgres, mysql, mariadb, valkey, clickhouse,
+# qdrant (default: all). Each run: ENGINE:VERSION:IMAGE:PLATFORM (MySQL's packages
 # are amd64 only; the others run on the host's processor unless one is named).
-CLOUD_RUNS=${CLOUD_RUNS:-"mysql:8.4:debian:bookworm:linux/amd64 mariadb:11.8:debian:trixie: mariadb:11.4:debian:bookworm: valkey:8:debian:bookworm: valkey:8:debian:trixie: clickhouse:26.8:debian:bookworm: clickhouse:26.3:debian:trixie: clickhouse:26.8:debian:bookworm:linux/amd64 opensearch:3:debian:bookworm: opensearch:3:debian:trixie: opensearch-own:3:debian:bookworm:"}
+CLOUD_RUNS=${CLOUD_RUNS:-"mysql:8.4:debian:bookworm:linux/amd64 mariadb:11.8:debian:trixie: mariadb:11.4:debian:bookworm: valkey:8:debian:bookworm: valkey:8:debian:trixie: clickhouse:26.8:debian:bookworm: clickhouse:26.3:debian:trixie: clickhouse:26.8:debian:bookworm:linux/amd64 opensearch:3:debian:bookworm: opensearch:3:debian:trixie: opensearch-own:3:debian:bookworm: qdrant:1.19:debian:bookworm: qdrant:1.19:debian:trixie: qdrant:1.19:debian:bookworm:linux/amd64"}
 cloud_host() {
-  only=$(printf '%s' "${TEST_ONLY:-postgres mysql mariadb valkey clickhouse opensearch}" | tr ',' ' ')
+  only=$(printf '%s' "${TEST_ONLY:-postgres mysql mariadb valkey clickhouse opensearch qdrant}" | tr ',' ' ')
   case " $only " in
     *" postgres "*)
       for image in $images; do
@@ -1674,6 +1676,7 @@ EOF
   pass "turning on backups: prompts, restarts, --protect, --no-setup"
   mongodb_flow_tests
   clickhouse_flow_tests
+  qdrant_flow_tests
   redis_flow_tests
   sqlite_flow_tests
 }
@@ -1939,6 +1942,59 @@ clickhouse_flow_tests() {
   ! grep -q "ROWSAFE_CLICKHOUSE_ADMIN" /etc/rowsafe/agent.env || fail "$name: the administrator's login went to agent.env"
   called "apply --database db_fake"
   pass "ClickHouse: engine in the plan, users.d file as root, administrator login once, --protect"
+}
+
+qdrant_flow_tests() {
+  echo "  -- Qdrant"
+  qd='6333\t-\t1\t-\t/var/lib/qdrant/storage\t1048576\tvectors\tno\t-\tdocs\t1.0 MiB\tqdrant.service\t-\tqdrant'
+  qdst() { printf 'port=6333\\nengine=qdrant\\nversion=1.19.2\\nlogin=%s\\ntls=no\\njwt=%s\\nbinary=%s\\ndocker=no\\ncluster=no\\nconfig=/etc/qdrant/config.yaml\\nunit=qdrant.service\\ncollections=1' "$1" "${2:-unknown}" "${3:-/usr/bin/qdrant}"; }
+  qdplan='Qdrant 1.19.2 on port 6333: 1.0 MiB, 1 collection (docs).\n\nWhat Rowsafe will change:\n  - Prepare your bucket for this database\n\nNo downtime: Qdrant does not need a restart.'
+
+  # 1. Rowsafe's key already works: straight to the plan, with the engine.
+  scenario "discover_out=$qd" "qdrant-status_out=$(qdst ok yes)" "plan_out=$qdplan" "wait_out=$done_" "status_out=$status"
+  tty_ok "Qdrant with Rowsafe's key: plan, turn on" "Name it in Rowsafe\t\nTurn on backups for vectors now?\t\n" "$INSTALLER"
+  called "qdrant-status --port 6333"
+  called "plan --name vectors --port 6333 --id-file"
+  called "--engine qdrant"
+  not_called "qdrant-login"
+  not_called "qdrant-save-login"
+  called "apply --database db_fake"
+
+  # 2. No key yet, on a terminal: the person's api_key, typed once, goes to
+  #    the agent on stdin, never printed or saved elsewhere.
+  scenario "discover_out=$qd" "qdrant-status_out=$(qdst missing)" "plan_out=$qdplan"
+  tty_ok "Qdrant key typed once" "Name it in Rowsafe\t\nQdrant api_key\tQd-Typed-Key-123\nTurn on backups for vectors now?\tn\n" "$INSTALLER"
+  called "qdrant-save-login --port 6333"
+  [ "$(cat "$F/qdrant-save-login.stdin")" = Qd-Typed-Key-123 ] || fail "$name: the key didn't reach the agent on stdin"
+  lacks "Qd-Typed-Key-123"
+  ! grep -rq "Qd-Typed-Key-123" /etc/rowsafe 2>/dev/null || fail "$name: the key was saved by root"
+  called "plan --name vectors --port 6333"
+
+  # 3. --protect: ROWSAFE_QDRANT_API_KEY (no terminal), else the api_key
+  #    in Qdrant's configuration file, else it stops before the plan.
+  scenario "discover_out=$qd" "qdrant-status_out=$(qdst missing)" "plan_out=$qdplan" "wait_out=$done_"
+  expect_ok "--protect: Qdrant key from the environment" env ROWSAFE_QDRANT_API_KEY=Env-Qd-Key-456 "$INSTALLER" --protect vectors
+  [ "$(cat "$F/qdrant-save-login.stdin")" = Env-Qd-Key-456 ] || fail "$name: the key didn't reach the agent on stdin"
+  ! grep -q "Env-Qd-Key-456" "$W/out" || fail "$name: the key was printed"
+  ! grep -q "ROWSAFE_QDRANT_API_KEY" /etc/rowsafe/agent.env || fail "$name: the key went to agent.env"
+  called "apply --database db_fake"
+  printf 'service:\n  host: 0.0.0.0\n  api_key: "Conf-Qd-Key-789" # the admin key\n' >"$W/qdrant.yaml"
+  scenario "discover_out=$qd" "qdrant-status_out=$(qdst missing)" "plan_out=$qdplan" "wait_out=$done_"
+  expect_ok "--protect: Qdrant key from its configuration file" env ROWSAFE_QDRANT_CONFIG="$W/qdrant.yaml" "$INSTALLER" --protect vectors
+  [ "$(cat "$F/qdrant-save-login.stdin")" = Conf-Qd-Key-789 ] || fail "$name: the configuration file's key didn't reach the agent"
+  grep -q "uses the api_key from Qdrant's configuration file" "$W/out" || fail "$name: not said where the key came from"
+  ! grep -q "Conf-Qd-Key-789" "$W/out" || fail "$name: the key was printed"
+  scenario "discover_out=$qd" "qdrant-status_out=$(qdst missing)"
+  expect_fail "--protect: Qdrant without a key" "ROWSAFE_QDRANT_API_KEY" "$INSTALLER" --protect vectors
+  grep -q "isn't ready for backups" "$W/out" || fail "$name: not explained"
+  not_called "plan"
+
+  # 4. A Qdrant without keys: protected, with a warning.
+  scenario "discover_out=$qd" "qdrant-status_out=$(qdst none)" "plan_out=$qdplan" "wait_out=$done_"
+  expect_ok "--protect: Qdrant without keys" "$INSTALLER" --protect vectors
+  grep -q "asks for no key" "$W/out" || fail "$name: no warning about a Qdrant without keys"
+  not_called "qdrant-save-login"
+  pass "Qdrant: engine in the plan, Rowsafe's key from root, the environment, its configuration or typed once, never printed"
 }
 
 # ------------------------------------------------------------ restarts
@@ -4124,6 +4180,8 @@ install_db_option_tests() {
   expect_fail "--install-clickhouse with --install-valkey refused" "give only one" "$INSTALLER" --install-clickhouse 26.8 --install-valkey 8
   expect_fail "--install-opensearch 2 refused" "Rowsafe installs OpenSearch 3, not '2'" "$INSTALLER" --install-opensearch 2
   expect_fail "--install-opensearch with --install-clickhouse refused" "give only one" "$INSTALLER" --install-opensearch 3 --install-clickhouse 26.8
+  expect_fail "--install-qdrant 1.18 refused" "Rowsafe installs Qdrant 1.19, not '1.18'" "$INSTALLER" --install-qdrant 1.18
+  expect_fail "--install-qdrant with --install-clickhouse refused" "give only one" "$INSTALLER" --install-qdrant 1.19 --install-clickhouse 26.8
   expect_fail "--pg-extensions without --install-postgres refused" "only goes with --install-postgres" "$INSTALLER" --pg-extensions vector
   expect_fail "--pg-extensions with --install-mysql refused" "only goes with --install-postgres" "$INSTALLER" --install-mysql 8.4 --pg-extensions vector
   expect_fail "--pg-extensions: an unknown name refused" "Rowsafe installs vector (pgvector), postgis (PostGIS) and timescaledb (TimescaleDB), not 'pg_cron'" \
@@ -4136,6 +4194,9 @@ install_db_option_tests() {
     env ROWSAFE_MEMINFO="$W/meminfo-2g" "$INSTALLER" rse_secrettoken123 --no-prompt --install-clickhouse 26.8
   expect_fail "--install-opensearch on 2 GB refused" "OpenSearch needs a server with at least 4 GB of memory, and this one has 1967 MB" \
     env ROWSAFE_MEMINFO="$W/meminfo-2g" "$INSTALLER" rse_secrettoken123 --no-prompt --install-opensearch 3
+  printf 'MemTotal:        1004280 kB\n' >"$W/meminfo-1g"
+  expect_fail "--install-qdrant on 1 GB refused" "Qdrant needs a server with at least 2 GB of memory, and this one has 980 MB" \
+    env ROWSAFE_MEMINFO="$W/meminfo-1g" "$INSTALLER" rse_secrettoken123 --no-prompt --install-qdrant 1.19
   mkdir -p "$W/arm64"
   printf '#!/bin/sh\ncase "${1:-}" in -m) echo aarch64 ;; *) exec /bin/uname "$@" ;; esac\n' >"$W/arm64/uname"
   chmod 755 "$W/arm64/uname"
@@ -4154,7 +4215,8 @@ install_db_option_tests() {
     expect_fail "--install-mariadb without systemd refused" "needs systemd" "$INSTALLER" rse_secrettoken123 --no-prompt --install-mariadb 11.8
   [ ! -e /etc/rowsafe ] && [ ! -e /opt/rowsafe ] && [ -z "$(ls /etc/apt/sources.list.d/rowsafe-* 2>/dev/null)" ] ||
     fail "a refused --install option changed something"
-  pass "--install-mysql, --install-mariadb, --install-valkey, --install-clickhouse, --install-opensearch and --pg-extensions: refusals change nothing"
+  [ ! -e /usr/bin/qdrant ] || fail "a refused --install-qdrant installed Qdrant"
+  pass "--install-mysql, --install-mariadb, --install-valkey, --install-clickhouse, --install-opensearch, --install-qdrant and --pg-extensions: refusals change nothing"
 }
 
 # cloud_container (--cloud): --install-postgres and --listen-public for
@@ -4378,6 +4440,7 @@ cloud_engine_container() {
     valkey) label=Valkey unit=valkey-server port=6380 user=rowsafe ;;
     clickhouse) label=ClickHouse unit=clickhouse-server port=8123 user=rowsafe ;;
     opensearch) label=OpenSearch unit=opensearch port=9200 user=rowsafe ;;
+    qdrant) label=Qdrant unit=qdrant port=6333 user=rowsafe ;;
   esac
   echo "  -- servers Rowsafe creates: --install-$engine $ver ($os, $arch)"
   [ "$engine" != opensearch ] || opensearch_test_prep # opensearch
@@ -4397,6 +4460,7 @@ cloud_engine_container() {
     rm -f /usr/local/bin/valkey-server
   fi
   [ ! -e /etc/rowsafe ] && [ -z "$(ls /etc/apt/sources.list.d/rowsafe-* 2>/dev/null)" ] || fail "$name: something was written"
+  [ "$engine" != qdrant ] || [ ! -e /usr/bin/qdrant ] || fail "$name: Qdrant was installed anyway"
 
   # The stand-in agent runs as the engine's agent user (mysql or rowsafe);
   # its unit enrolls it at once (agent.json).
@@ -4422,6 +4486,12 @@ cloud_engine_container() {
       # The rest as on a 4 GB server (the container sees the host's memory).
       printf 'MemTotal:        4000000 kB\n' >"$W/meminfo-4g"
       export ROWSAFE_MEMINFO="$W/meminfo-4g"
+      ;;
+    qdrant)
+      line="6333\t-\t1\t-\t/var/lib/qdrant/storage\t8192\tqdrant\tno\t-\t-\t8 KiB\tqdrant.service\t-\tqdrant"
+      scenario "discover_out=$line" "qdrant-status_out=$(qd_status missing)" "qdrant-login_out=jwt=true" \
+        "plan_out=Backups for shop: Qdrant's own snapshots, encrypted on this server." \
+        "wait_out=✓ shop is protected. The first full backup is running." "status_out=db_fake\tshop\tactive\trunning\thttps://app.rowsafe.test/databases/db_fake"
       ;;
     valkey)
       line="6380\t-\t8\t-\t/var/lib/valkey\t8192\tvalkey\tno\t-\t-\t8 KiB\tvalkey-server.service\t-\tvalkey"
@@ -4469,6 +4539,7 @@ cloud_engine_container() {
     valkey) cloud_valkey_checks ;;
     clickhouse) cloud_clickhouse_checks ;;
     opensearch) cloud_opensearch_checks ;;
+    qdrant) cloud_qdrant_checks ;;
   esac
   pass "$label $ver: installed from its own source with its key checked, secure defaults, TLS from the network, protected"
 
@@ -4488,6 +4559,14 @@ cloud_engine_container() {
       for f in $(os_files); do cp "$f" "$W/$(basename "$f").before"; done
       scenario "discover_out=9200\t-\t3\t-\t/var/lib/opensearch\t8192\tshop\tyes\tactive\t-\t8 KiB\topensearch.service\tdb_fake\topensearch" \
         "opensearch-status_out=$(os_status ok)" plan_rc=5 "plan_out=shop is already protected." \
+      ;;
+    qdrant)
+      for f in /etc/qdrant/config.yaml /etc/qdrant/qdrant.env /etc/systemd/system/qdrant.service /etc/rowsafe/qdrant/api-key \
+        /etc/rowsafe/qdrant/alt-api-key /etc/rowsafe/qdrant/read-only-api-key /etc/ssl/rowsafe-qdrant/rowsafe-server.crt; do
+        cp "$f" "$W/$(basename "$f").before"
+      done
+      scenario "discover_out=6333\t-\t1\t-\t/var/lib/qdrant/storage\t8192\tshop\tyes\tactive\t-\t8 KiB\tqdrant.service\tdb_fake\tqdrant" \
+        "qdrant-status_out=$(qd_status ok)" plan_rc=5 "plan_out=shop is already protected." \
         "status_out=db_fake\tshop\tactive\trunning\thttps://app.rowsafe.test/databases/db_fake"
       ;;
     valkey)
@@ -4531,6 +4610,13 @@ cloud_engine_container() {
       done
       not_called "opensearch-login"
       ;;
+    qdrant)
+      for f in /etc/qdrant/config.yaml /etc/qdrant/qdrant.env /etc/systemd/system/qdrant.service /etc/rowsafe/qdrant/api-key \
+        /etc/rowsafe/qdrant/alt-api-key /etc/rowsafe/qdrant/read-only-api-key /etc/ssl/rowsafe-qdrant/rowsafe-server.crt; do
+        cmp -s "$f" "$W/$(basename "$f").before" || fail "$name: $f changed"
+      done
+      not_called "qdrant-login"
+      ;;
     valkey)
       cmp -s /etc/valkey/users.acl "$W/users.acl" || fail "$name: the ACL file changed"
       cmp -s /etc/valkey/valkey.conf "$W/valkey.conf" || { diff "$W/valkey.conf" /etc/valkey/valkey.conf >&2; fail "$name: valkey.conf changed"; }
@@ -4541,6 +4627,7 @@ cloud_engine_container() {
 
   # Another engine, another version, or the same one not installed by Rowsafe: refused.
   other=valkey other_ver=8 other_label=Valkey
+  [ "$engine" != qdrant ] || [ "$os" != "debian 13" ] || other=clickhouse other_ver=26.8 other_label=ClickHouse
   [ "$engine" != valkey ] || other=mariadb other_ver=11.8 other_label=MariaDB
   if [ "$engine" = clickhouse ]; then
     alt=26.3
@@ -5089,6 +5176,116 @@ cloud_opensearch_own() {
   pass "OpenSearch's own server: a form not edited is left alone; uninstall leaves OpenSearch as it is"
 }
 # <<< opensearch
+
+# qd_status LOGIN: what `rowsafe-agent qdrant status` says of the new server.
+qd_status() {
+  printf 'port=6333\nengine=qdrant\nversion=1.19.2\nlogin=%s\ntls=yes\njwt=yes\nbinary=/usr/bin/qdrant\ndocker=no\ncluster=no\nconfig=/etc/qdrant/config.yaml\nunit=qdrant.service\ncollections=0' "$1"
+}
+
+# qd_jwt KEYFILE CLAIMS: a token Qdrant takes, signed with the key in
+# KEYFILE (HS256), as the agent signs its own.
+qd_jwt() {
+  b64() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+  _h=$(printf '{"alg":"HS256","typ":"JWT"}' | b64)
+  _p=$(printf '%s' "$2" | b64)
+  _s=$(printf '%s' "$_h.$_p" | openssl dgst -sha256 -mac HMAC -macopt "key:$(cat "$1")" -binary | b64)
+  printf '%s.%s.%s' "$_h" "$_p" "$_s"
+}
+
+# qdc KEY METHOD PATH [BODY]: the HTTP status of a request to Qdrant from
+# the network (TLS, the certificate not checked), the key on stdin.
+qdc() {
+  printf 'header = "api-key: %s"\n' "$1" |
+    curl -sk -K - -o "$W/qd.body" -w '%{http_code}' -X "$2" -H 'Content-Type: application/json' ${4:+--data "$4"} "https://$ip:6333$3" || true
+}
+
+# cloud_qdrant_checks: Qdrant after the cloud-init run.
+cloud_qdrant_checks() {
+  grep -Eq "Qdrant 1[.]19[.][0-9]+ downloaded and checked [(]SHA-256 [0-9a-f]{64}[)]" "$W/out" || fail "$name: no word about the checked download"
+  [ "$(/usr/bin/qdrant --version | head -n 1)" = "qdrant 1.19.2" ] || fail "$name: /usr/bin/qdrant isn't 1.19.2"
+  if [ "$(dpkg --print-architecture)" = amd64 ]; then
+    [ "$(dpkg-query -W -f '${Version}' qdrant)" = 1.19.2-1 ] || fail "$name: the qdrant package isn't 1.19.2-1"
+  fi
+  ! command -v pgbackrest >/dev/null 2>&1 || fail "$name: pgBackRest installed for Qdrant"
+  [ "$(stat -c '%U %G %a' /etc/rowsafe/qdrant)" = "root root 700" ] || fail "$name: /etc/rowsafe/qdrant owner/mode"
+  for k in api-key read-only-api-key alt-api-key; do
+    [ "$(stat -c '%U %G %a' "/etc/rowsafe/qdrant/$k")" = "root root 600" ] || fail "$name: $k owner/mode"
+    grep -Eqx '[0-9a-f]{64}' "/etc/rowsafe/qdrant/$k" || fail "$name: $k isn't 64 hex digits"
+    ! grep -qF "$(cat "/etc/rowsafe/qdrant/$k")" "$W/out" || fail "$name: $k was printed"
+    ! grep -qF "$(cat "/etc/rowsafe/qdrant/$k")" /etc/qdrant/config.yaml || fail "$name: $k is in config.yaml"
+  done
+  [ "$(stat -c '%U %G %a' /etc/qdrant/qdrant.env)" = "root root 600" ] || fail "$name: qdrant.env owner/mode"
+  grep -qx "QDRANT__SERVICE__ALT_API_KEY=$(cat /etc/rowsafe/qdrant/alt-api-key)" /etc/qdrant/qdrant.env || fail "$name: qdrant.env lacks Rowsafe's key"
+  [ "$(cat /etc/rowsafe/qdrant-keys)" = "api_key read_only_api_key alt_api_key" ] || fail "$name: the names of the keys set"
+  [ "$(stat -c '%U %G %a' /etc/qdrant/config.yaml)" = "root qdrant 640" ] || fail "$name: config.yaml owner/mode"
+  for l in 'telemetry_disabled: true' '  enable_tls: true' '  jwt_rbac: true' '  enable_cors: false' '  enable_snapshot_url_recovery: false' \
+    '  enabled: false' '  cert_ttl: 60' '  cert: /etc/ssl/rowsafe-qdrant/rowsafe-server.crt'; do
+    grep -qx "$l" /etc/qdrant/config.yaml || fail "$name: config.yaml lacks '$l'"
+  done
+  # Its own user, sandboxed.
+  [ "$(systemctl show -p User --value qdrant)" = qdrant ] && [ "$(systemctl show -p NoNewPrivileges --value qdrant)" = yes ] &&
+    [ "$(systemctl show -p ProtectSystem --value qdrant)" = strict ] && [ "$(systemctl show -p PrivateTmp --value qdrant)" = yes ] ||
+    fail "$name: Qdrant's unit isn't sandboxed"
+  [ "$(ps -o user= -p "$(systemctl show -p MainPID --value qdrant)")" = qdrant ] || fail "$name: Qdrant doesn't run as qdrant"
+  [ "$(stat -c '%U %G %a' /var/lib/qdrant/storage)" = "qdrant qdrant 750" ] || fail "$name: storage owner/mode"
+  # The agent reads the settings (its group), never the keys.
+  runuser -u rowsafe -g rowsafe -G qdrant -- cat /etc/qdrant/config.yaml >/dev/null || fail "$name: the agent can't read Qdrant's settings"
+  if runuser -u rowsafe -g rowsafe -G qdrant -- cat /etc/qdrant/qdrant.env >/dev/null 2>&1; then fail "$name: the agent reads Qdrant's keys"; fi
+  grep -qx 'SupplementaryGroups=qdrant' /etc/systemd/system/rowsafe-agent.service.d/10-qdrant.conf &&
+    grep -qx 'ReadWritePaths=-/etc/ssl/rowsafe-qdrant' /etc/systemd/system/rowsafe-agent.service.d/10-qdrant.conf || fail "$name: the agent's drop-in"
+  # Rowsafe's own key (alt_api_key), given to the agent on stdin by root.
+  called "qdrant-login --port 6333"
+  [ "$(cat "$F/qdrant-login.stdin")" = "$(cat /etc/rowsafe/qdrant/alt-api-key)" ] || fail "$name: the agent didn't get Rowsafe's key on stdin"
+  called "apply --database db_fake"
+  grep -qx '6333 qdrant.service' /etc/rowsafe/restart-allowed || fail "$name: restarts (--allow-restart) don't name qdrant.service"
+  # TLS: the certificate at the exact paths, on both ports, from the network.
+  [ "$(stat -c '%U %G %a' /etc/ssl/rowsafe-qdrant)" = "rowsafe qdrant 2750" ] || fail "$name: certificate folder owner/mode"
+  [ "$(stat -c '%U %G %a' /etc/ssl/rowsafe-qdrant/rowsafe-server.key)" = "rowsafe qdrant 640" ] || fail "$name: key owner/mode"
+  [ "$(stat -c '%U %G %a' /etc/ssl/rowsafe-qdrant/rowsafe-server.crt)" = "rowsafe qdrant 644" ] || fail "$name: certificate owner/mode"
+  ss -ltnHp | awk '{ print $4 }' >"$W/listen"
+  for p in 6333 6334; do
+    grep -Eqx "(\*|0\.0\.0\.0|\[::\]):$p" "$W/listen" || { cat "$W/listen" >&2; fail "$name: $p doesn't listen on every address"; }
+    grep -q "tcp dport $p drop" "$W/nft" && [ -e "/var/lib/rowsafe-firewall/port-$p" ] || { cat "$W/nft" >&2; fail "$name: port $p isn't closed by the firewall"; }
+    grep -qx "$p" /etc/rowsafe/firewall-allowed || fail "$name: $p isn't in the firewall's allow list"
+    echo | openssl s_client -connect "$ip:$p" 2>/dev/null | openssl x509 -noout -fingerprint -sha256 >"$W/fp" &&
+      [ "$(cat "$W/fp")" = "$(openssl x509 -in /etc/ssl/rowsafe-qdrant/rowsafe-server.crt -noout -fingerprint -sha256)" ] || fail "Qdrant doesn't present its certificate on $p"
+  done
+  ! grep -q ':6335$' "$W/listen" || fail "$name: the cluster port 6335 listens"
+  grep -q "Qdrant's ports (6333, 6334) are closed to everyone but this server" "$W/out" || fail "$name: no word about the firewall"
+  # Keys: nothing without one; the read-only key reads but can't write; a
+  # token signed with Rowsafe's key works; plain HTTP is answered nowhere.
+  [ "$(qdc '' GET /collections)" = 401 ] || fail "Qdrant answers the network without a key"
+  [ "$(qdc "$(cat /etc/rowsafe/qdrant/api-key)" PUT /collections/app '{"vectors":{"size":4,"distance":"Cosine"}}')" = 200 ] || fail "the admin key can't create a collection"
+  [ "$(qdc "$(cat /etc/rowsafe/qdrant/read-only-api-key)" GET /collections/app)" = 200 ] || fail "the read-only key can't read"
+  [ "$(qdc "$(cat /etc/rowsafe/qdrant/read-only-api-key)" DELETE /collections/app)" = 403 ] || fail "the read-only key can delete"
+  tok=$(qd_jwt /etc/rowsafe/qdrant/alt-api-key "{\"access\":\"m\",\"exp\":$(($(date +%s) + 300))}")
+  [ "$(qdc "$tok" POST '/snapshots?wait=true')" = 200 ] || fail "a token signed with Rowsafe's key can't take a snapshot"
+  snap=$(sed -n 's/.*"name":"\([^"]*\)".*/\1/p' "$W/qd.body")
+  [ -n "$snap" ] && [ "$(qdc "$tok" DELETE "/snapshots/$snap")" = 200 ] || fail "deleting the snapshot"
+  [ "$(qdc "$(qd_jwt /etc/rowsafe/qdrant/alt-api-key '{"access":"r"}')" DELETE /collections/app)" = 403 ] || fail "a read-only token can delete"
+  [ "$(qdc "$(qd_jwt /etc/rowsafe/qdrant/read-only-api-key '{"access":"m"}')" GET /collections)" = 401 ] ||
+    [ "$(qdc "$(qd_jwt /etc/rowsafe/qdrant/read-only-api-key '{"access":"m"}')" GET /collections)" = 403 ] || fail "a token signed with the read-only key works"
+  [ "$(qdc "$(cat /etc/rowsafe/qdrant/api-key)" DELETE /collections/app)" = 200 ] || fail "removing the test collection"
+  if curl -s --max-time 5 "http://$ip:6333/" 2>/dev/null | grep -q qdrant; then fail "plain HTTP from the network"; fi
+  # What the agent does with a renewed certificate: the same files, written
+  # by the agent's user; Qdrant serves it on REST within a minute
+  # (tls.cert_ttl), without a restart.
+  pid=$(systemctl show -p MainPID --value qdrant)
+  # shellcheck disable=SC2016 # expands in the inner shell
+  runuser -u rowsafe -- sh -c 'cd /etc/ssl/rowsafe-qdrant && umask 027 &&
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 30 -subj /CN=renewed.test \
+      -keyout k.new -out c.new >/dev/null 2>&1 && chmod 0640 k.new && chmod 0644 c.new && mv -f k.new rowsafe-server.key && mv -f c.new rowsafe-server.crt' ||
+    fail "the agent's user can't replace the certificate"
+  want=$(openssl x509 -in /etc/ssl/rowsafe-qdrant/rowsafe-server.crt -noout -fingerprint -sha256)
+  i=0
+  until [ "$(echo | openssl s_client -connect 127.0.0.1:6333 2>/dev/null | openssl x509 -noout -fingerprint -sha256)" = "$want" ]; do
+    i=$((i + 1))
+    [ "$i" -lt 100 ] || fail "the renewed certificate isn't served on 6333 within 100 seconds"
+    sleep 1
+  done
+  [ "$(systemctl show -p MainPID --value qdrant)" = "$pid" ] || fail "Qdrant restarted for the certificate"
+  pass "Qdrant from the network: TLS only on 6333 and 6334, keys only (Rowsafe's signs tokens), no cluster port, a renewed certificate loaded without a restart"
+}
 
 case ${1:-} in
   --in-container) in_container ;;
