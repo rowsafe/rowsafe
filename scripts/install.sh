@@ -13985,7 +13985,7 @@ meilisearch_logins() {
   [ "$HOST_ENGINE" = meilisearch ] || return 0
   have ss || apt_install iproute2 # which process listens where
   _ports=$(meilisearch_ports)
-  if [ -f "$MEILI_FRONT_UNIT" ]; then _ports=$(printf '%s\n' "$_ports" | grep -vx "$MEILI_LOCAL_PORT"; echo "$MEILI_PORT"); fi
+  if [ -f "$MEILI_FRONT_UNIT" ]; then _ports=$(printf '%s\n' "$_ports" | awk -v l="$MEILI_LOCAL_PORT" '$0 != "" && $0 != l'; echo "$MEILI_PORT"); fi
   for _p in $_ports; do
     _st=$(agent_run meilisearch status --port "$_p" 2>/dev/null | sed -n 's/^login=//p')
     [ "$_st" = ok ] && continue

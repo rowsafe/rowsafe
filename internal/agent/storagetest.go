@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rowsafe/rowsafe/internal/objstore"
 	"github.com/rowsafe/rowsafe/internal/pgbackrest"
 	"github.com/rowsafe/rowsafe/protocol"
 )
@@ -46,6 +47,15 @@ func StorageTest(ctx context.Context, cfg Config, w io.Writer, wait time.Duratio
 	probe := "rowsafe-storage-test-" + hex.EncodeToString(suffix[:])
 	host, _ := os.Hostname()
 	content := []byte("Rowsafe storage test from " + host + "\n")
+	if _, err := os.Stat(cfg.PgBackRestBin); err != nil {
+		// Engines that back up with their own tools have no pgBackRest:
+		// the agent's own storage client does the same round trip.
+		if err := objstoreRoundTrip(ctx, repo, probe, content, where); err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "%s works: wrote, read back and deleted a test file\n", strings.ToUpper(where[:1])+where[1:])
+		return nil
+	}
 	run := func(stdin []byte, args ...string) ([]byte, error) {
 		cctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()
@@ -185,3 +195,29 @@ func loadState(cfg Config) (state, error) {
 }
 
 func cfgStatePath(cfg Config) string { return filepath.Join(cfg.StateDir, "agent.json") }
+
+// objstoreRoundTrip writes, reads back and deletes probe with the agent's
+// own S3 client (servers without pgBackRest).
+func objstoreRoundTrip(ctx context.Context, repo pgbackrest.Repo, probe string, content []byte, where string) error {
+	st, err := objstore.New(repo, "")
+	if err != nil {
+		return err
+	}
+	cctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	if err := st.PutBytes(cctx, probe, content); err != nil {
+		return fmt.Errorf("could not write to %s (%v)", where, redact(err.Error(), repo))
+	}
+	back, err := st.GetBytes(cctx, probe)
+	if err != nil || !bytes.Equal(back, content) {
+		_ = st.Delete(cctx, probe)
+		if err == nil {
+			err = errors.New("the file read back differs")
+		}
+		return fmt.Errorf("wrote a test file to %s but could not read it back (%v)", where, redact(err.Error(), repo))
+	}
+	if err := st.Delete(cctx, probe); err != nil {
+		return fmt.Errorf("could not delete the test file from %s (%v)", where, redact(err.Error(), repo))
+	}
+	return nil
+}
