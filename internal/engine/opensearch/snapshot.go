@@ -227,13 +227,16 @@ func deleteSnapshot(ctx context.Context, c *client, name string) error {
 	return err
 }
 
+// maxCounted caps the indices counted one by one around a snapshot.
+const maxCounted = 500
+
 // refreshCounts makes recent writes visible and counts each index's
-// documents (top-level ones, like apps see them).
+// documents (top-level ones, like apps see them), the first maxCounted.
 func refreshCounts(ctx context.Context, c *client, in serverInfo) map[string]int64 {
 	_ = c.do(ctx, http.MethodPost, "/_refresh?ignore_unavailable=true&expand_wildcards=open", nil, nil)
 	out := map[string]int64{}
-	for _, i := range in.Indices {
-		if !i.Open {
+	for n, i := range in.Indices {
+		if !i.Open || n >= maxCounted {
 			continue
 		}
 		var v struct {

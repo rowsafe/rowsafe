@@ -38,8 +38,10 @@ func (e *Engine) adopt(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 			" can read and change everything. Pulse explains how to turn it on.")
 	}
 	if dirErr != nil {
+		// Not RestartRequired: OpenSearch keeps no change log for the control
+		// plane to watch; the apply below says what is missing, and a new
+		// adopt after the restart turns backups on.
 		res.Warnings = append(res.Warnings, firstSentence(dirErr))
-		res.RestartRequired = true
 	}
 	if !p.Apply {
 		tl.Printf("plan only: nothing was changed")

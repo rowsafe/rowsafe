@@ -149,6 +149,8 @@ func (e *Engine) drill(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 			res.Failures = append(res.Failures, fmt.Sprintf("the index %s is missing from the restored copy", want.Name))
 		case i.Health != "green":
 			res.Failures = append(res.Failures, fmt.Sprintf("the index %s came back %s, not green", want.Name, i.Health))
+		case want.DocsBefore == 0 && want.DocsAfter == 0 && got[want.Name] > 0:
+			// Not counted when the snapshot was taken (over maxCounted indices).
 		case want.DocsBefore == want.DocsAfter && got[want.Name] != want.DocsAfter:
 			res.Failures = append(res.Failures, fmt.Sprintf("the index %s has %s documents in the restored copy, but %s when the snapshot was taken",
 				want.Name, commas(got[want.Name]), commas(want.DocsAfter)))
