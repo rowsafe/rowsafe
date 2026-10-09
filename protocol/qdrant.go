@@ -16,11 +16,15 @@ import (
 //     number of points, clamped). Distributed (cluster) mode is refused at
 //     adopt with a plain sentence. Qdrant 1.13 or newer.
 //   - DatabaseSpec.Port is the server's REST port. The agent connects to
-//     127.0.0.1 (https when the server has TLS on: the connection never
-//     leaves the machine, so the certificate, made for the server's public
-//     names, isn't checked against a name; else http), or to
-//     ROWSAFE_QDRANT_URL in a Docker sidecar (checked against
-//     ROWSAFE_QDRANT_CA_FILE when set). SocketDir is unused.
+//     127.0.0.1 and checks it reaches Qdrant before sending anything
+//     secret: with the certificate Rowsafe made or put on the server
+//     (/etc/ssl/rowsafe-qdrant), the one served must be that one;
+//     otherwise the port's listening socket must belong to the user Qdrant
+//     runs as (or root, Docker's port forwarding), never to another user.
+//     In a Docker sidecar it connects to ROWSAFE_QDRANT_URL: https checked
+//     against ROWSAFE_QDRANT_CA_FILE (required), or plain http on the
+//     compose network with short-lived tokens only, never the key itself.
+//     SocketDir is unused.
 //   - Rowsafe's access: Qdrant has no role that can take a full snapshot
 //     without every right, so Rowsafe gets a key of its own, separate from
 //     the server's own keys: the alternative key (service.alt_api_key),
@@ -28,7 +32,11 @@ import (
 //     keys (api_key, read_only_api_key) stay root's and never reach
 //     Rowsafe. With JWT access control on (service.jwt_rbac), the agent
 //     never sends its key at all: it signs a token valid for a few minutes
-//     for each request. Root can rotate Rowsafe's key alone.
+//     for each request, read-only for monitoring and checks, with every
+//     right only for snapshots, restores, fixes and keys. Without JWT
+//     access control, the key itself goes to Qdrant (on 127.0.0.1, or over
+//     TLS). Root can rotate Rowsafe's key alone; doing so also ends every
+//     key made in Databases & users (they are signed with it).
 //   - Backups are Qdrant's own full storage snapshot (every collection and
 //     alias; POST /snapshots), downloaded from the server over its API as
 //     Qdrant writes it, encrypted on the server (objstore.Seal) and stored
@@ -62,19 +70,60 @@ import (
 //   - Databases & users: "users" are API keys, JSON Web Tokens the agent
 //     signs on the server with Rowsafe's key (JWT access control must be
 //     on), shown once to the person who asked (sealed like a password).
-//     Each is tied to a point in QdrantKeysCollection, so removing a key
-//     (or making it a new token) revokes the old token at once. Access:
-//     read_only (every collection, or the ones chosen), read_write (the
-//     collections chosen: Qdrant has no read-write right on every
+//     Access: read_only (every collection, or the ones chosen), read_write
+//     (the collections chosen: Qdrant has no read-write right on every
 //     collection short of admin) or owner (admin: everything, including
-//     creating and deleting collections and snapshots). "Databases" are
-//     collections: created by apps (with their vector size and distance),
-//     removed from the dashboard (Mark first, like other engines).
+//     creating and deleting collections and snapshots).
+//     Each token is valid only while a point in QdrantKeysCollection holds
+//     its key's name and a random nonce (Qdrant's value_exists). The agent
+//     keeps its own list of the keys it made, outside Qdrant, readable only
+//     by it, and makes the collection match that list on every change,
+//     every list and every monitoring pass: anything else there (a point
+//     Rowsafe didn't write, another nonce) is deleted and reported
+//     (QdrantStatus.KeyListRepaired). What removal guarantees:
+//       - read-only and read-write keys can't write QdrantKeysCollection,
+//         so removing one, or making it a new token, ends its token at once;
+//       - an admin key can write every collection, Rowsafe's own included,
+//         so a misused one could put its point back between two checks:
+//         admin keys therefore always expire (DBAdminParams.ExpiresDays,
+//         at most QdrantAdminKeyMaxDays), an expiry Qdrant checks from the
+//         signed token itself. Removing an admin key ends it at once unless
+//         it was used against Rowsafe's list, and for certain when it
+//         expires; making Rowsafe's key new on the server (root) ends every
+//         key at once.
+//     Removing a collection gives the keys limited to it a new nonce: their
+//     tokens stop working (a new collection of the same name must not be
+//     open to them) and the person makes new tokens.
+//     "Databases" are collections: created by apps (with their vector size
+//     and distance), removed from the dashboard (Mark first, like other
+//     engines).
+//   - Updates (FeatureUpdates): Qdrant's releases come from GitHub, pinned
+//     by version and SHA-256 in the installer that the signed release
+//     manifest itself pins (QdrantVersion). The root update helper installs
+//     the newest pinned release of the server's series (1.19.x) only when a
+//     person asks (Update, or Rowsafe Cloud's maintenance window), checks
+//     its SHA-256 and restarts Qdrant.
 
 // QdrantKeysCollection is the collection where Rowsafe records the API
 // keys made in Databases & users (one point per key, no vectors); a key's
 // token is valid only while its point is there.
 const QdrantKeysCollection = "rowsafe_keys"
+
+// Expiry of the keys made in Databases & users (DBAdminParams.ExpiresDays):
+// admin keys always expire (QdrantAdminKeyDefaultDays when none is given,
+// at most QdrantAdminKeyMaxDays); the others expire only when asked (at
+// most QdrantKeyMaxDays).
+const (
+	QdrantAdminKeyDefaultDays = 30
+	QdrantAdminKeyMaxDays     = 90
+	QdrantKeyMaxDays          = 365
+)
+
+// QdrantVersion is the Qdrant release Rowsafe installs and updates to:
+// scripts/install.sh pins the same version with the SHA-256 of its files
+// (a test checks they agree). An older release of the same series is an
+// update (FeatureUpdates).
+const QdrantVersion = "1.19.2"
 
 // Qdrant fixes (MaintenanceParams.Action), proposed by health and checked
 // again by the agent before anything changes. Both act through Qdrant's
@@ -94,6 +143,16 @@ const (
 	// background; searches keep working and read from disk (slower on a
 	// cold cache). Every named vector of the collection moves.
 	MaintQdrantVectorsOnDisk = "qdrant_vectors_on_disk"
+	// MaintQdrantRevokeAdminKeys removes every admin key made in Databases
+	// & users (after someone changed Rowsafe's list of keys): their tokens
+	// stop working unless a misused one keeps writing its point back, which
+	// the agent keeps undoing until the key expires.
+	MaintQdrantRevokeAdminKeys = "qdrant_revoke_admin_keys"
+	// MaintQdrantDropSnapshots deletes the snapshot files on the server's
+	// disk that Rowsafe didn't make (QdrantStatus.LocalSnapshots), through
+	// Qdrant's API: full snapshots and each collection's. Rowsafe's backups
+	// are in the bucket and aren't touched.
+	MaintQdrantDropSnapshots = "qdrant_drop_snapshots"
 )
 
 // QdrantMinMemoryMB is the least memory a server Rowsafe creates gets for
@@ -105,6 +164,7 @@ var qdrantFeatures = EngineFeatures{
 	Backups: true, Proof: true,
 	RewindCopy: true, RewindInPlace: true, Marks: true,
 	Monitoring: true, Fixes: true, Restart: true,
+	Updates:  true, // the newest pinned release of the series, by the root helper (QdrantVersion)
 	DBAdmin:  true, // API keys (JWTs signed on the server), collections listed and removed
 	Security: true, // TLS, keys, JWT, CORS, snapshot recovery from URLs, the look from the internet
 }
@@ -132,11 +192,33 @@ type QdrantStatus struct {
 	// GRPCOldCert: gRPC serves another certificate than REST (Qdrant loads
 	// a renewed certificate for gRPC only when it restarts).
 	GRPCOldCert bool `json:"grpc_old_cert,omitempty"`
-	// LocalSnapshots counts snapshot files on the server's disk and their
-	// size (full and per collection): Rowsafe deletes its own after the
-	// upload; others are someone else's.
+	// LocalSnapshots counts the full snapshot files on the server's disk
+	// and their size: Rowsafe deletes its own after the upload; others are
+	// someone else's (MaintQdrantDropSnapshots deletes them).
 	LocalSnapshots      int   `json:"local_snapshots,omitempty"`
 	LocalSnapshotsBytes int64 `json:"local_snapshots_bytes,omitempty"`
+	// KeyListRepaired: the last time the agent found Rowsafe's list of
+	// keys (QdrantKeysCollection) changed by someone else and put it back,
+	// reported for 7 days. Only an admin key (or the server's own api_key)
+	// can do that.
+	KeyListRepaired *QdrantKeyRepair `json:"key_list_repaired,omitempty"`
+}
+
+// QdrantKeyRepair is what the agent undid in Rowsafe's list of keys.
+type QdrantKeyRepair struct {
+	At time.Time `json:"at"`
+	// Removed counts the entries deleted (points Rowsafe didn't write, or
+	// with another nonce than the key's).
+	Removed int `json:"removed"`
+	// Restored counts the keys whose entry was missing or changed and that
+	// the agent wrote back (their tokens work again, as the person left them).
+	Restored int `json:"restored,omitempty"`
+	// Keys names the keys those entries claimed (at most 20; "" entries
+	// named none).
+	Keys []string `json:"keys,omitempty"`
+	// AdminKeys counts the admin keys made in Databases & users at the time
+	// (any of them could have done it).
+	AdminKeys int `json:"admin_keys"`
 }
 
 // Qdrant collection statuses (QdrantCollection.Status).
@@ -223,6 +305,15 @@ func validateQdrantDBAdmin(p DBAdminParams) error {
 	case DBAdminCreateDatabase:
 		return fmt.Errorf("Qdrant collections are created by your app, with its vector size and distance; " +
 			"once it has made one, give it a key to that collection here")
+	case DBAdminCreateUser, DBAdminResetPassword:
+		if p.ExpiresDays < 0 || p.ExpiresDays > QdrantKeyMaxDays {
+			return fmt.Errorf("a key expires in 1 to %d days (or never, for read-only and read-write keys)", QdrantKeyMaxDays)
+		}
+		if p.Access == DBAccessOwner && p.ExpiresDays > QdrantAdminKeyMaxDays {
+			return fmt.Errorf("an admin key expires within %d days: it can change Rowsafe's own list of keys, so its expiry is what certainly ends it", QdrantAdminKeyMaxDays)
+		}
+	}
+	switch p.Action {
 	case DBAdminCreateUser:
 		if p.Access == DBAccessReadWrite && len(p.Databases) == 0 {
 			return fmt.Errorf("Qdrant gives read-write access per collection: choose the collections, " +

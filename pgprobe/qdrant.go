@@ -34,7 +34,12 @@ func probeQdrant(ctx context.Context, addr string, o Options) Result {
 		}
 		return r
 	}
-	if r, ok := qdrantGRPC(ctx, addr, o); ok {
+	if r, ok := qdrantGRPC(ctx, addr, o, true); ok {
+		return r
+	}
+	if r, ok := qdrantGRPC(ctx, addr, o, false); ok {
+		r.TLS, r.PlainLogins = false, true
+		r.Detail += " Without TLS: keys and data cross the internet in the clear."
 		return r
 	}
 	if r, ok := qdrantREST(ctx, addr, o, false); ok {
@@ -86,17 +91,23 @@ func qdrantREST(ctx context.Context, addr string, o Options, overTLS bool) (Resu
 	return Result{}, false
 }
 
-// qdrantGRPC lists the collections without a key over gRPC with TLS
-// (qdrant.Collections/List, an empty message): grpc-status 0 means it let
-// a stranger in, 16 (unauthenticated) or 7 (permission denied) that it
-// asks for a key.
-func qdrantGRPC(ctx context.Context, addr string, o Options) (Result, bool) {
+// qdrantGRPC lists the collections without a key over gRPC, with TLS or
+// in plain HTTP/2 (h2c) (qdrant.Collections/List, an empty message):
+// grpc-status 0 means it let a stranger in, 16 (unauthenticated) or 7
+// (permission denied) that it asks for a key.
+func qdrantGRPC(ctx context.Context, addr string, o Options, overTLS bool) (Result, bool) {
 	tr := &http.Transport{DialContext: func(ctx context.Context, network, a string) (net.Conn, error) { return dial(ctx, addr, o) },
 		ForceAttemptHTTP2: true, DisableKeepAlives: true,
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12, NextProtos: []string{"h2"}}} //nolint:gosec // a look from outside
+	scheme := "https"
+	if !overTLS {
+		scheme = "http"
+		tr.Protocols = new(http.Protocols)
+		tr.Protocols.SetUnencryptedHTTP2(true)
+	}
 	defer tr.CloseIdleConnections()
 	c := &http.Client{Transport: tr, Timeout: o.DialTimeout + o.ReadTimeout}
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+addr+"/qdrant.Collections/List", strings.NewReader("\x00\x00\x00\x00\x00"))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, scheme+"://"+addr+"/qdrant.Collections/List", strings.NewReader("\x00\x00\x00\x00\x00"))
 	req.Header.Set("Content-Type", "application/grpc")
 	req.Header.Set("TE", "trailers")
 	resp, err := c.Do(req)
@@ -114,11 +125,15 @@ func qdrantGRPC(ctx context.Context, addr string, o Options) (Result, bool) {
 	}
 	switch status {
 	case "0":
-		return Result{Reachable: true, State: protocol.OutsideNoPassword, TLS: true,
+		return Result{Reachable: true, State: protocol.OutsideNoPassword, TLS: overTLS,
 			Detail: "Qdrant's gRPC API listed its collections to the internet without any key: anyone can read and delete them."}, true
 	case "16", "7":
-		return Result{Reachable: true, State: protocol.OutsideAsksPassword, TLS: true,
-			Detail: "Qdrant's gRPC API answers from the internet (over TLS) and asks for a key: anyone can try one."}, true
+		how := "over TLS"
+		if !overTLS {
+			how = "without TLS"
+		}
+		return Result{Reachable: true, State: protocol.OutsideAsksPassword, TLS: overTLS,
+			Detail: "Qdrant's gRPC API answers from the internet (" + how + ") and asks for a key: anyone can try one."}, true
 	}
 	return Result{}, false
 }

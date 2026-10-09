@@ -127,7 +127,7 @@ if [ "${DOCKER_MODE:-yes}" = yes ] && [ -n "$first" ]; then
 	docker run -d --name "$s" --network "$net" --network-alias server --entrypoint /qdrant/qdrant -w /qdrant "$first" --config-path /etc/rowsafe-test/config.yaml >/dev/null
 	docker run -d --name "$a" --network "$net" --entrypoint sleep "$first" infinity >/dev/null
 	wait_ready "$s"
-	if ! run_test "$a" -e ROWSAFE_QDRANT_URL=https://server:6333; then
+	if ! run_test "$a" -e ROWSAFE_QDRANT_URL=https://server:6333 -e ROWSAFE_QDRANT_CA_FILE=/etc/rowsafe-test/cert.pem; then
 		echo "FAIL: Docker sidecar" >&2
 		rc=1
 	fi

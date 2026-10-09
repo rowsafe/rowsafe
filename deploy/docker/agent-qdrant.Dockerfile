@@ -10,7 +10,7 @@
 # (floating: the newest release) and ...:<version>-qdrant<X.Y> (exact: pins
 # a release).
 #
-#   docker build -f deploy/docker/agent-qdrant.Dockerfile --build-arg DB_VERSION=1.19.2 -t rowsafe-agent:qdrant1.19 .
+#   docker build -f deploy/docker/agent-qdrant.Dockerfile -t rowsafe-agent:qdrant1.19 .
 #
 # The agent reaches Qdrant over the compose network
 # (ROWSAFE_QDRANT_URL=http://qdrant:6333, or https:// with TLS on) with
@@ -18,8 +18,12 @@
 # through its API: it needs no access to Qdrant's files. See
 # deploy/docker/compose.qdrant.example.yml.
 
-# The exact Qdrant release (its image tag without the "v").
+# The exact Qdrant release (its image tag without the "v"), and that tag's
+# image by digest (the multi-platform index): a tag moved upstream can't
+# change what the agent image is built on. scripts/check-qdrant-pins.sh
+# checks it against the registry; a test checks it goes with DB_VERSION.
 ARG DB_VERSION=1.19.2
+ARG DB_IMAGE_DIGEST=sha256:b7b0444c4c351c970b98e90a6f89c2ee4287c65b44e52b4cb503fa5b2aa927ad
 
 FROM --platform=$BUILDPLATFORM golang:1.26 AS build
 WORKDIR /src
@@ -45,7 +49,7 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
       -ldflags "-s -w -X github.com/rowsafe/rowsafe/internal/agent.Version=${VERSION}" \
       -o /out/rowsafe-agent ./cmd/rowsafe-agent
 
-FROM qdrant/qdrant:v${DB_VERSION}
+FROM qdrant/qdrant:v${DB_VERSION}@${DB_IMAGE_DIGEST}
 ARG DB_VERSION
 # The image's variant, its floating tag: qdrant1.19 (set by the release
 # workflow). rowsafe-docker-control picks the same variant of a new release

@@ -112,9 +112,14 @@ func (e *Engine) SecurityReport(ctx context.Context, env agent.EngineEnv, db pro
 	if l.Key != "" && l.Source == "alt" {
 		rep.Roles = append(rep.Roles, protocol.RoleInfo{Name: "rowsafe (Rowsafe's key)", Superuser: true, CanLogin: true, Password: protocol.PasswordSet})
 	}
-	if keys, err := listKeys(ctx, c); err == nil {
-		for _, k := range keys {
-			rep.Roles = append(rep.Roles, protocol.RoleInfo{Name: k.Name, Superuser: k.Access == protocol.DBAccessOwner, CanLogin: true, Password: protocol.PasswordSet})
+	// The keys made in Databases & users, after making Rowsafe's list in
+	// Qdrant match the agent's own (keys.go).
+	if l.Key != "" && l.JWT {
+		if list, _, err := reconcile(ctx, env, db.Port, c); err == nil {
+			for _, k := range list.Keys {
+				rep.Roles = append(rep.Roles, protocol.RoleInfo{Name: k.Name, Superuser: k.admin(), CanLogin: true, Password: protocol.PasswordSet,
+					ValidUntil: k.ExpiresAt})
+			}
 		}
 	}
 	return rep, nil

@@ -16,12 +16,14 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"math"
 	mrand "math/rand/v2"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -352,8 +354,7 @@ func TestQdrant(t *testing.T) {
 		if sec.Password == "" || strings.Contains(sec.URL, sec.Password) || !strings.HasPrefix(sec.URL, "http") {
 			t.Fatalf("secret: url %q", sec.URL)
 		}
-		reader, err := newClient(ctx, Login{Key: sec.Password}, db.Port)
-		must(t, err)
+		reader := tokenClient(t, sec.Password, db.Port)
 		defer reader.Close()
 		if names, err := reader.collectionNames(ctx); err != nil || strings.Join(names, ",") != "docs" {
 			t.Fatalf("the reader sees %v (%v)", names, err)
@@ -369,6 +370,77 @@ func TestQdrant(t *testing.T) {
 		if _, err := reader.collectionNames(ctx); err == nil {
 			t.Fatal("a removed key still works")
 		}
+
+		// An admin key (it always expires) can write Rowsafe's collection:
+		// it brings the removed key back, and adds an entry of its own. The
+		// next check (monitoring) undoes both and reports it.
+		boss := makeTestKey(t, e, env, db, priv, pub, protocol.DBAdminParams{Action: protocol.DBAdminCreateUser, User: "boss", Access: protocol.DBAccessOwner})
+		if boss.user.ValidUntil == nil || boss.user.ValidUntil.Sub(time.Now()) < 29*24*time.Hour || boss.user.ValidUntil.Sub(time.Now()) > 31*24*time.Hour {
+			t.Fatalf("an admin key expires in 30 days by default: %+v", boss.user)
+		}
+		if !strings.Contains(boss.summary, "expires on") {
+			t.Fatalf("summary: %s", boss.summary)
+		}
+		bc := tokenClient(t, boss.token, db.Port)
+		defer bc.Close()
+		readerNonce := tokenNonce(t, sec.Password)
+		must(t, bc.call(ctx, http.MethodPut, collPath(protocol.QdrantKeysCollection)+"/points", url.Values{"wait": {"true"}}, map[string]any{"points": []any{
+			map[string]any{"id": keyPointID("reader"), "vector": map[string]any{}, "payload": map[string]any{"key": "reader", "nonce": readerNonce}},
+			map[string]any{"id": "6f1d8d3e-0000-4000-8000-000000000001", "vector": map[string]any{}, "payload": map[string]any{"key": "reader", "nonce": readerNonce}},
+		}}, nil))
+		if _, err := reader.collectionNames(ctx); err != nil {
+			t.Fatalf("the admin key didn't bring the key back (the test's premise): %v", err)
+		}
+		dm, err := e.Monitor(ctx, env, db)
+		must(t, err)
+		if _, err := reader.collectionNames(ctx); err == nil {
+			t.Fatal("a removed key brought back by an admin key still works after the check")
+		}
+		if dm.Qdrant == nil || dm.Qdrant.KeyListRepaired == nil || dm.Qdrant.KeyListRepaired.Removed != 2 ||
+			dm.Qdrant.KeyListRepaired.AdminKeys != 1 || strings.Join(dm.Qdrant.KeyListRepaired.Keys, ",") != "reader" {
+			t.Fatalf("the repair isn't reported: %+v", dm.Qdrant)
+		}
+		// Deleting a key's entry (another admin-key trick) is undone too.
+		must(t, deleteKeyByName(ctx, bc, "boss"))
+		if _, err := bc.collectionNames(ctx); err == nil {
+			t.Fatal("the premise: without its entry a key's token stops")
+		}
+		dm, err = e.Monitor(ctx, env, db)
+		must(t, err)
+		if _, err := bc.collectionNames(ctx); err != nil || dm.Qdrant.KeyListRepaired.Restored != 1 {
+			t.Fatalf("a key's entry deleted by someone else isn't written back: %v %+v", err, dm.Qdrant.KeyListRepaired)
+		}
+
+		// Removing a collection: keys limited to it go, keys that also
+		// reached it need a new token.
+		must(t, a.call(ctx, http.MethodPut, collPath("tmp"), nil, map[string]any{"vectors": map[string]any{"size": 8, "distance": "Cosine"}}, nil))
+		both := makeTestKey(t, e, env, db, priv, pub, protocol.DBAdminParams{Action: protocol.DBAdminCreateUser, User: "both",
+			Access: protocol.DBAccessReadWrite, Databases: []string{"docs", "tmp"}})
+		only := makeTestKey(t, e, env, db, priv, pub, protocol.DBAdminParams{Action: protocol.DBAdminCreateUser, User: "only",
+			Access: protocol.DBAccessReadOnly, Databases: []string{"tmp"}})
+		drop := mustRun[protocol.DBAdminResult](t, e, env, db, protocol.TaskDBAdmin, protocol.DBAdminParams{Action: protocol.DBAdminDropDatabase,
+			Database: "tmp", Confirm: "tmp"})
+		if !strings.Contains(drop.Summary, "(only) were removed") || !strings.Contains(drop.Summary, "(both)") || !strings.Contains(drop.Summary, "make a new token") {
+			t.Fatalf("summary: %s", drop.Summary)
+		}
+		for _, k := range []testKey{both, only} {
+			kc := tokenClient(t, k.token, db.Port)
+			if _, err := kc.collectionNames(ctx); err == nil {
+				t.Fatalf("%s's token still works after its collection went", k.user.Name)
+			}
+			kc.Close()
+		}
+		renewed := makeTestKey(t, e, env, db, priv, pub, protocol.DBAdminParams{Action: protocol.DBAdminResetPassword, User: "both"})
+		rc := tokenClient(t, renewed.token, db.Port)
+		if names, err := rc.collectionNames(ctx); err != nil || strings.Join(names, ",") != "docs" {
+			t.Fatalf("both's new token: %v %v", names, err)
+		}
+		rc.Close()
+		gone := mustRun[protocol.MaintenanceResult](t, e, env, db, protocol.TaskMaintenance, protocol.MaintenanceParams{Action: protocol.MaintQdrantRevokeAdminKeys})
+		if _, err := bc.collectionNames(ctx); err == nil || !strings.Contains(gone.Summary, "boss") {
+			t.Fatalf("admin keys removed: %v %s", err, gone.Summary)
+		}
+		mustRun[protocol.DBAdminResult](t, e, env, db, protocol.TaskDBAdmin, protocol.DBAdminParams{Action: protocol.DBAdminDropUser, User: "both"})
 		// Rowsafe's own collection stays out of the lists.
 		lst := mustRun[protocol.DBAdminResult](t, e, env, db, protocol.TaskDBAdmin, protocol.DBAdminParams{Action: protocol.DBAdminList})
 		for _, d := range lst.Inventory.Databases {
@@ -425,4 +497,65 @@ func TestQdrant(t *testing.T) {
 			t.Fatalf("%d scheduled snapshots kept: %+v", plain, docs)
 		}
 	})
+}
+
+// tokenClient reaches the server with a key's token, as an app would.
+func tokenClient(t *testing.T, token string, port int) *client {
+	t.Helper()
+	c, err := newClient(context.Background(), Login{}, port)
+	must(t, err)
+	c.bearer = token
+	return c
+}
+
+// tokenNonce reads a key token's nonce (its value_exists claim).
+func tokenNonce(t *testing.T, token string) string {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		t.Fatalf("not a token")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	must(t, err)
+	var c struct {
+		ValueExists struct {
+			Matches []struct{ Key, Value string } `json:"matches"`
+		} `json:"value_exists"`
+	}
+	must(t, json.Unmarshal(raw, &c))
+	for _, m := range c.ValueExists.Matches {
+		if m.Key == "nonce" {
+			return m.Value
+		}
+	}
+	t.Fatal("no nonce in the token")
+	return ""
+}
+
+type testKey struct {
+	token   string
+	summary string
+	user    protocol.DBUser
+}
+
+// makeTestKey runs create_user or reset_password and opens the token.
+func makeTestKey(t *testing.T, e *Engine, env agent.EngineEnv, db protocol.DatabaseSpec, priv *ecdh.PrivateKey, pub string, p protocol.DBAdminParams) testKey {
+	t.Helper()
+	p.PublicKey = pub
+	raw, _ := json.Marshal(p)
+	id := "task_" + p.User + strconv.Itoa(mrand.IntN(1_000_000))
+	out, err := e.Run(context.Background(), env, &protocol.Task{ID: id, Type: protocol.TaskDBAdmin, Database: &db, Params: raw}, &testLog{t: t})
+	must(t, err)
+	res := out.(*protocol.DBAdminResult)
+	plain, err := protocol.Open(priv, []byte(id), res.Secret)
+	must(t, err)
+	var sec protocol.DBSecret
+	must(t, json.Unmarshal(plain, &sec))
+	k := testKey{token: sec.Password, summary: res.Summary}
+	for _, u := range res.Inventory.Users {
+		if u.Name == p.User {
+			k.user = u
+		}
+	}
+	return k
 }

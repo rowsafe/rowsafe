@@ -111,14 +111,38 @@ type qdrantProc struct {
 // a container's process sits in docker-ID.scope or /docker/ID.
 func cgroupUnit(cgroup string) (unit string, container bool) {
 	for _, line := range strings.Split(cgroup, "\n") {
-		if i := strings.LastIndex(line, "/"); i >= 0 && strings.HasSuffix(line, ".service") {
-			return line[i+1:], false
+		// Only a system service (…/system.slice/NAME.service): a user's own
+		// units (user.slice) are no service root set up.
+		if i := strings.LastIndex(line, "/system.slice/"); i >= 0 && strings.HasSuffix(line, ".service") &&
+			!strings.Contains(line[i+len("/system.slice/"):], "/") {
+			return line[i+len("/system.slice/"):], false
 		}
 		if strings.Contains(line, "docker") || strings.Contains(line, "containerd") || strings.Contains(line, "libpod") {
 			container = true
 		}
 	}
 	return "", container
+}
+
+// portUnit is the systemd unit of the Qdrant listening on port: the
+// qdrant.service process running as the user that holds the port's
+// listening socket ("" when none: Docker, or a Qdrant not started by
+// systemd's qdrant.service). docker reports a Qdrant in a container.
+func portUnit(port int, docker bool) (string, bool) {
+	uids, err := listenerUIDs(port)
+	procs := findProcs()
+	for _, p := range procs {
+		docker = docker || p.Docker
+	}
+	if err != nil {
+		return "", docker
+	}
+	for _, p := range procs {
+		if p.Unit == "qdrant.service" && slices.Contains(uids, procUID(p.PID)) {
+			return p.Unit, docker
+		}
+	}
+	return "", docker
 }
 
 // findProcs lists the running qdrant processes (their program is named
@@ -229,10 +253,7 @@ func ServerStatus(ctx context.Context, env agent.EngineEnv, port int) (Status, e
 		return st, errNotQdrant
 	}
 	st.Version, st.TLS = r.Version, c.base.Scheme == "https"
-	if procs := findProcs(); len(procs) > 0 {
-		st.Unit = procs[0].Unit
-		st.Docker = st.Docker || procs[0].Docker
-	}
+	st.Unit, st.Docker = portUnit(port, st.Docker)
 	if b, err := serverBinary(); err == nil {
 		st.Binary = b
 	}
@@ -337,6 +358,15 @@ func SaveLogin(ctx context.Context, env agent.EngineEnv, port int, key, source, 
 	jwtErr := try(true)
 	jwt := jwtErr == nil
 	if !jwt {
+		// The key itself goes to Qdrant only when tokens aren't an option:
+		// with JSON Web Tokens on (its configuration says so), a refused
+		// token means a wrong key, and sending the key itself proves nothing.
+		if fc, _, ok := readConfig(); ok && fc.Service.JWTRBAC != nil && *fc.Service.JWTRBAC {
+			if errors.Is(jwtErr, errNotQdrant) {
+				return res, jwtErr
+			}
+			return res, fmt.Errorf("Qdrant refused tokens signed with this key: %w", jwtErr)
+		}
 		if err := try(false); err != nil {
 			if errors.Is(err, errNotQdrant) {
 				return res, err

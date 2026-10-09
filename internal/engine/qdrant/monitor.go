@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strconv"
@@ -208,8 +209,22 @@ func (e *Engine) Monitor(ctx context.Context, env agent.EngineEnv, db protocol.D
 			dm.Error = "can't read Qdrant's status: " + err.Error()
 		}
 	}
+	// Rowsafe's list of keys in Qdrant, made to match the agent's own on
+	// every pass (keys.go): what someone else changed is undone and
+	// reported.
+	var repair *protocol.QdrantKeyRepair
+	if l, _, _ := loadLogin(env, db.Port); l.Key != "" && l.JWT {
+		if list, rr, err := reconcile(ctx, env, db.Port, c); err == nil {
+			repair = recentRepair(list, now)
+			if rr.Removed > 0 || rr.Restored > 0 {
+				slog.Warn("someone changed Rowsafe's list of Qdrant keys; put back", "port", db.Port, "removed", rr.Removed,
+					"restored", rr.Restored, "keys", strings.Join(rr.Keys, ","))
+			}
+		}
+	}
 	if st := m.status; st != nil {
 		st.ResidentBytes = int64(p.Resident)
+		st.KeyListRepaired = repair
 		if st.TotalMemoryBytes > 0 {
 			metrics[collect.MQdrantMemoryUsedPct] = 100 * p.Resident / float64(st.TotalMemoryBytes)
 		}

@@ -37,6 +37,15 @@ func engineVersioner(db protocol.DatabaseSpec) EngineVersioner {
 	return v
 }
 
+// EngineSoftwareReporter is optionally implemented by an engine whose
+// server doesn't come from the distribution's package sources (Qdrant:
+// releases Rowsafe pins): the program installed and the update the root
+// helper would install (Installed, Series, Candidate...). ok false: nothing
+// to report here.
+type EngineSoftwareReporter interface {
+	Software(ctx context.Context, env EngineEnv, db protocol.DatabaseSpec) (protocol.ClusterSoftware, bool)
+}
+
 // engineServerPackages are each engine's server packages, the first one
 // installed being the one whose version counts.
 var engineServerPackages = map[string][]string{
@@ -106,6 +115,16 @@ func (a *Agent) engineSoftware(ctx context.Context) []protocol.ClusterSoftware {
 			vctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 			cs.Running, _ = v.Version(vctx, a.engineEnv(engine), db)
 			cancel()
+		}
+		if r, ok := engineFor(engine).(EngineSoftwareReporter); ok {
+			sctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			sw, ok := r.Software(sctx, a.engineEnv(engine), db)
+			cancel()
+			if ok {
+				sw.Port, sw.Engine, sw.Unit, sw.Running = cs.Port, cs.Engine, cs.Unit, cs.Running
+				out = append(out, sw)
+			}
+			continue
 		}
 		pkg := ""
 		for _, p := range engineServerPackages[engine] {
@@ -289,7 +308,12 @@ func (a *Agent) engineUpdate(ctx context.Context, db protocol.DatabaseSpec, task
 	// ClickHouse has no change log, and a Redis or Valkey server Rowsafe
 	// can't follow keeps its scheduled snapshots: neither is a failure.
 	snapshots := out.ArchiveMode == protocol.RedisArchiveSnapshots
-	res.ArchivingOK = out.ArchiveMode == "on" || snapshots || protocol.NormalizeEngine(db.Engine) == protocol.EngineClickHouse
+	switch protocol.NormalizeEngine(db.Engine) {
+	case protocol.EngineClickHouse, protocol.EngineQdrant: // no change log to archive
+		res.ArchivingOK = true
+	default:
+		res.ArchivingOK = out.ArchiveMode == "on" || snapshots
+	}
 	if !res.ArchivingOK {
 		res.Warnings = append(res.Warnings, name+" answers, but its change log isn't on (the next check says why)")
 	}

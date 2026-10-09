@@ -2,13 +2,8 @@ package qdrant
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -19,138 +14,11 @@ import (
 
 // Databases & users for Qdrant: "users" are API keys, JSON Web Tokens the
 // agent signs on the server with Rowsafe's key and hands only to the person
-// who asked (sealed to their browser's key). Each key is a point in
-// Rowsafe's own collection (protocol.QdrantKeysCollection: its name,
-// access, collections and a random nonce, no vector); its token is valid
-// only while that point holds that nonce (Qdrant's value_exists), so
-// removing the key, or making it a new token, revokes the old token at
-// once. "Databases" are the collections, listed with their points;
-// removing one deletes it (the control plane takes a Mark first).
-
-// keyRecord is a key as its point holds it.
-type keyRecord struct {
-	Name        string   `json:"key"`
-	Nonce       string   `json:"nonce"`
-	Access      string   `json:"access"`
-	Collections []string `json:"collections,omitempty"`
-	CreatedAt   string   `json:"created_at"`
-}
-
-// keyPointID is a key's point: a UUID made from its name.
-func keyPointID(name string) string {
-	h := sha256.Sum256([]byte("rowsafe-key:" + name))
-	b := h[:16]
-	b[6] = b[6]&0x0f | 0x50 // version 5-like
-	b[8] = b[8]&0x3f | 0x80
-	x := hex.EncodeToString(b)
-	return x[:8] + "-" + x[8:12] + "-" + x[12:16] + "-" + x[16:20] + "-" + x[20:]
-}
-
-func newNonce() (string, error) {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
-}
-
-// ensureKeysCollection creates Rowsafe's keys collection (no vectors) and
-// its payload indexes when missing.
-func ensureKeysCollection(ctx context.Context, c *client) error {
-	_, err := c.collection(ctx, protocol.QdrantKeysCollection)
-	if err == nil {
-		return nil
-	}
-	if !isStatus(err, http.StatusNotFound) {
-		return err
-	}
-	if err := c.call(ctx, http.MethodPut, collPath(protocol.QdrantKeysCollection), nil,
-		map[string]any{"vectors": map[string]any{}, "on_disk_payload": false}, nil); err != nil {
-		return fmt.Errorf("creating Rowsafe's keys collection: %w", err)
-	}
-	for _, f := range []string{"key", "nonce"} {
-		if err := c.call(ctx, http.MethodPut, collPath(protocol.QdrantKeysCollection)+"/index", url.Values{"wait": {"true"}},
-			map[string]any{"field_name": f, "field_schema": "keyword"}, nil); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// listKeys reads the keys made in Databases & users.
-func listKeys(ctx context.Context, c *client) ([]keyRecord, error) {
-	var out struct {
-		Points []struct {
-			Payload keyRecord `json:"payload"`
-		} `json:"points"`
-	}
-	err := c.call(ctx, http.MethodPost, collPath(protocol.QdrantKeysCollection)+"/points/scroll", nil,
-		map[string]any{"limit": 1000, "with_payload": true, "with_vector": false}, &out)
-	if isStatus(err, http.StatusNotFound) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var keys []keyRecord
-	for _, p := range out.Points {
-		if p.Payload.Name != "" {
-			keys = append(keys, p.Payload)
-		}
-	}
-	slices.SortFunc(keys, func(a, b keyRecord) int { return strings.Compare(a.Name, b.Name) })
-	return keys, nil
-}
-
-func putKey(ctx context.Context, c *client, k keyRecord) error {
-	pt := map[string]any{"id": keyPointID(k.Name), "vector": map[string]any{}, "payload": k}
-	return c.call(ctx, http.MethodPut, collPath(protocol.QdrantKeysCollection)+"/points", url.Values{"wait": {"true"}},
-		map[string]any{"points": []any{pt}}, nil)
-}
-
-func deleteKey(ctx context.Context, c *client, name string) error {
-	return c.call(ctx, http.MethodPost, collPath(protocol.QdrantKeysCollection)+"/points/delete", url.Values{"wait": {"true"}},
-		map[string]any{"points": []string{keyPointID(name)}}, nil)
-}
-
-// keyClaims are the token's claims for k.
-func keyClaims(k keyRecord) map[string]any {
-	var access any
-	switch {
-	case k.Access == protocol.DBAccessOwner:
-		access = "m"
-	case len(k.Collections) == 0:
-		access = "r"
-	default:
-		mode := "r"
-		if k.Access == protocol.DBAccessReadWrite {
-			mode = "rw"
-		}
-		var list []map[string]any
-		for _, c := range k.Collections {
-			list = append(list, map[string]any{"collection": c, "access": mode})
-		}
-		access = list
-	}
-	return map[string]any{
-		"access":  access,
-		"subject": k.Name,
-		"value_exists": map[string]any{"collection": protocol.QdrantKeysCollection,
-			"matches": []map[string]any{{"key": "key", "value": k.Name}, {"key": "nonce", "value": k.Nonce}}},
-	}
-}
-
-func accessWords(k keyRecord) string {
-	switch {
-	case k.Access == protocol.DBAccessOwner:
-		return "admin access to every collection"
-	case len(k.Collections) == 0:
-		return "read-only access to every collection"
-	case k.Access == protocol.DBAccessReadWrite:
-		return "read-write access to " + strings.Join(k.Collections, ", ")
-	}
-	return "read-only access to " + strings.Join(k.Collections, ", ")
-}
+// who asked (sealed to their browser's key). The agent's own list of keys
+// (keys.go) says which exist; Rowsafe's collection in Qdrant only lets
+// Qdrant check them (value_exists), and reconcile keeps it to the list.
+// "Databases" are the collections, listed with their points; removing one
+// deletes it (the control plane takes a Mark first).
 
 func (e *Engine) dbadmin(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec, taskID string, p protocol.DBAdminParams, tl agent.TaskLogger) (*protocol.DBAdminResult, error) {
 	if err := protocol.ValidateDBAdminFor(protocol.EngineQdrant, p); err != nil {
@@ -165,37 +33,50 @@ func (e *Engine) dbadmin(ctx context.Context, env agent.EngineEnv, db protocol.D
 	l, _, _ := loadLogin(env, db.Port)
 	res := &protocol.DBAdminResult{Action: p.Action}
 	var token string
-	var made *keyRecord
+	var made *keyEntry
 	if p.Action != protocol.DBAdminList {
 		if why, _ := manageBlocked(l); why != "" {
 			err = errors.New(why)
 		}
 	}
 	if err == nil {
-		switch p.Action {
-		case protocol.DBAdminList:
-		case protocol.DBAdminCreateUser, protocol.DBAdminResetPassword:
-			made, token, err = makeKey(ctx, c, l, p)
-			if err == nil {
-				if p.Action == protocol.DBAdminCreateUser {
-					res.Summary = fmt.Sprintf("Made the key %s, with %s.", made.Name, accessWords(*made))
-				} else {
-					res.Summary = fmt.Sprintf("Made a new token for the key %s; the old one no longer works.", made.Name)
+		keysMu.Lock()
+		var list keyList
+		var rr reconcileResult
+		list, rr, err = reconcileLocked(ctx, env, db.Port, c)
+		logReconcile(tl, rr)
+		if err == nil {
+			switch p.Action {
+			case protocol.DBAdminList:
+			case protocol.DBAdminCreateUser, protocol.DBAdminResetPassword:
+				made, token, err = makeKey(ctx, env, db.Port, c, l, &list, p)
+				if err == nil {
+					res.Summary = madeWords(p.Action, *made)
 				}
+			case protocol.DBAdminDropUser:
+				var k keyEntry
+				k, err = dropKey(ctx, env, db.Port, c, &list, p.User)
+				if err == nil {
+					res.Summary = droppedWords(k)
+				}
+			case protocol.DBAdminDropDatabase:
+				var renewed, removed []string
+				renewed, removed, err = dropCollection(ctx, env, db.Port, c, &list, p.Database)
+				if err == nil {
+					res.Summary = fmt.Sprintf("Removed the collection %s.", p.Database)
+					if len(removed) > 0 {
+						res.Summary += fmt.Sprintf(" The keys limited to it (%s) were removed with it.", strings.Join(removed, ", "))
+					}
+					if len(renewed) > 0 {
+						res.Summary += fmt.Sprintf(" The keys that also reached it (%s) keep their other collections, but their tokens "+
+							"stopped working: make a new token for each in Databases & users.", strings.Join(renewed, ", "))
+					}
+				}
+			default:
+				err = fmt.Errorf("Qdrant has no %s", strings.ReplaceAll(p.Action, "_", " "))
 			}
-		case protocol.DBAdminDropUser:
-			err = dropKey(ctx, c, p.User)
-			if err == nil {
-				res.Summary = fmt.Sprintf("Removed the key %s: its token no longer works.", p.User)
-			}
-		case protocol.DBAdminDropDatabase:
-			err = dropCollection(ctx, c, p.Database)
-			if err == nil {
-				res.Summary = fmt.Sprintf("Removed the collection %s.", p.Database)
-			}
-		default:
-			err = fmt.Errorf("Qdrant has no %s", strings.ReplaceAll(p.Action, "_", " "))
 		}
+		keysMu.Unlock()
 	}
 	inv, ierr := inventory(ctx, env, db, c, l)
 	if ierr != nil {
@@ -241,22 +122,55 @@ func manageBlocked(l Login) (string, string) {
 	return "", ""
 }
 
+// logReconcile says in the task's log what reconcile undid.
+func logReconcile(tl agent.TaskLogger, rr reconcileResult) {
+	if rr.Removed > 0 || rr.Restored > 0 {
+		tl.Printf("someone changed Rowsafe's list of keys in Qdrant: removed %d entries Rowsafe didn't write, wrote back %d keys (%s)",
+			rr.Removed, rr.Restored, strings.Join(rr.Keys, ", "))
+	}
+	if len(rr.Expired) > 0 {
+		tl.Printf("keys past their expiry left the list: %s", strings.Join(rr.Expired, ", "))
+	}
+}
+
+func madeWords(action string, k keyEntry) string {
+	var b strings.Builder
+	if action == protocol.DBAdminCreateUser {
+		fmt.Fprintf(&b, "Made the key %s, with %s.", k.Name, accessWords(k))
+	} else {
+		fmt.Fprintf(&b, "Made a new token for the key %s; the old one no longer works.", k.Name)
+	}
+	if k.ExpiresAt != nil {
+		fmt.Fprintf(&b, " It expires on %s.", dateWords(k.ExpiresAt))
+	}
+	if k.admin() {
+		b.WriteString(" An admin key can change everything here, Rowsafe's list of keys included, so its expiry is what ends it for certain.")
+	}
+	return b.String()
+}
+
+func droppedWords(k keyEntry) string {
+	if !k.admin() {
+		return fmt.Sprintf("Removed the key %s: its token no longer works.", k.Name)
+	}
+	return fmt.Sprintf("Removed the admin key %s: its token stops working now, unless it was misused to change Rowsafe's list of keys "+
+		"(Rowsafe undoes such changes and tells you); it ends for certain when it expires, on %s.", k.Name, dateWords(k.ExpiresAt))
+}
+
 // makeKey makes a new key (create_user) or a new token for one
-// (reset_password), and signs its token.
-func makeKey(ctx context.Context, c *client, l Login, p protocol.DBAdminParams) (*keyRecord, string, error) {
+// (reset_password), records it in the list, writes its point and signs
+// its token. keysMu is held.
+func makeKey(ctx context.Context, env agent.EngineEnv, port int, c *client, l Login, list *keyList, p protocol.DBAdminParams) (*keyEntry, string, error) {
 	if err := ensureKeysCollection(ctx, c); err != nil {
 		return nil, "", err
 	}
-	keys, err := listKeys(ctx, c)
-	if err != nil {
-		return nil, "", err
-	}
-	i := slices.IndexFunc(keys, func(k keyRecord) bool { return k.Name == p.User })
+	i := list.find(p.User)
 	nonce, err := newNonce()
 	if err != nil {
 		return nil, "", err
 	}
-	var k keyRecord
+	now := time.Now().UTC()
+	var k keyEntry
 	switch p.Action {
 	case protocol.DBAdminCreateUser:
 		if i >= 0 {
@@ -271,76 +185,164 @@ func makeKey(ctx context.Context, c *client, l Login, p protocol.DBAdminParams) 
 				return nil, "", fmt.Errorf("there is no collection %s", d)
 			}
 		}
-		k = keyRecord{Name: p.User, Access: p.Access, Collections: slices.Clone(p.Databases), CreatedAt: time.Now().UTC().Format(time.RFC3339)}
-		if k.Access == protocol.DBAccessOwner {
+		k = keyEntry{Name: p.User, Access: p.Access, Collections: slices.Clone(p.Databases), CreatedAt: now}
+		if k.admin() {
 			k.Collections = nil
 		}
 	default:
 		if i < 0 {
 			return nil, "", fmt.Errorf("there is no key named %s made in Rowsafe", p.User)
 		}
-		k = keys[i]
+		k = list.Keys[i]
 	}
-	k.Nonce = nonce
-	if err := putKey(ctx, c, k); err != nil {
+	days, err := expiryDays(k, p.ExpiresDays)
+	if err != nil {
+		return nil, "", err
+	}
+	k.Nonce, k.ExpiresDays, k.ExpiresAt = nonce, days, nil
+	if days > 0 {
+		at := now.Add(time.Duration(days) * 24 * time.Hour)
+		k.ExpiresAt = &at
+	}
+	next := *list
+	next.Keys = slices.Clone(list.Keys)
+	if i >= 0 {
+		next.Keys[i] = k
+	} else {
+		next.Keys = append(next.Keys, k)
+	}
+	// The list first: a point the list doesn't hold would be removed.
+	if err := saveKeyList(env, port, next); err != nil {
+		return nil, "", err
+	}
+	*list = next
+	undo := func() {
+		uctx := context.WithoutCancel(ctx)
+		_ = deleteKeyByName(uctx, c, k.Name)
+		if i < 0 {
+			list.Keys = slices.DeleteFunc(list.Keys, func(e keyEntry) bool { return e.Name == k.Name })
+			_ = saveKeyList(env, port, *list)
+		}
+	}
+	if err := deleteKeyByName(ctx, c, k.Name); err != nil { // other points naming it
+		undo()
+		return nil, "", err
+	}
+	if err := putKeyPoints(ctx, c, []keyEntry{k}); err != nil {
+		undo()
 		return nil, "", fmt.Errorf("recording the key: %w", err)
 	}
 	token, err := signToken(l.Key, keyClaims(k))
 	if err != nil {
+		undo()
 		return nil, "", err
 	}
 	// The token must work before it is handed out.
-	check := &client{base: c.base, http: c.http, key: token}
+	check := &client{base: c.base, http: c.http, bearer: token}
 	if _, err := check.root(ctx); err == nil {
 		if _, err := check.collectionNames(ctx); err != nil {
-			_ = deleteKey(context.WithoutCancel(ctx), c, k.Name)
+			undo()
 			return nil, "", fmt.Errorf("Qdrant doesn't take the new key: %w", err)
 		}
 	}
 	return &k, token, nil
 }
 
-func dropKey(ctx context.Context, c *client, name string) error {
-	keys, err := listKeys(ctx, c)
-	if err != nil {
-		return err
+// dropKey removes a key: from the list, then every point that names it.
+func dropKey(ctx context.Context, env agent.EngineEnv, port int, c *client, list *keyList, name string) (keyEntry, error) {
+	i := list.find(name)
+	if i < 0 {
+		return keyEntry{}, fmt.Errorf("there is no key named %s made in Rowsafe (Qdrant's own keys are root's, in its configuration)", name)
 	}
-	if !slices.ContainsFunc(keys, func(k keyRecord) bool { return k.Name == name }) {
-		return fmt.Errorf("there is no key named %s made in Rowsafe (Qdrant's own keys are root's, in its configuration)", name)
+	k := list.Keys[i]
+	list.Keys = slices.Delete(slices.Clone(list.Keys), i, i+1)
+	if err := saveKeyList(env, port, *list); err != nil {
+		return k, err
 	}
-	return deleteKey(ctx, c, name)
+	return k, deleteKeyByName(ctx, c, name)
 }
 
-func dropCollection(ctx context.Context, c *client, name string) error {
+// revokeAdminKeys removes every admin key (MaintQdrantRevokeAdminKeys).
+func revokeAdminKeys(ctx context.Context, env agent.EngineEnv, port int, c *client) ([]keyEntry, error) {
+	keysMu.Lock()
+	defer keysMu.Unlock()
+	list, _, err := reconcileLocked(ctx, env, port, c)
+	if err != nil {
+		return nil, err
+	}
+	var gone []keyEntry
+	for _, k := range slices.Clone(list.Keys) {
+		if !k.admin() {
+			continue
+		}
+		if _, err := dropKey(ctx, env, port, c, &list, k.Name); err != nil {
+			return gone, err
+		}
+		gone = append(gone, k)
+	}
+	// What Pulse reported is dealt with: a misused key that keeps changing
+	// the list makes the next check report it again.
+	if list.Repair != nil {
+		list.Repair = nil
+		if err := saveKeyList(env, port, list); err != nil {
+			return gone, err
+		}
+	}
+	return gone, nil
+}
+
+// dropCollection deletes a collection. Keys limited to it go with it; keys
+// that also reached other collections lose it and get a new nonce, so the
+// token that named it stops working (a new collection of the same name
+// must not be open to it): renewed lists them, for new tokens.
+func dropCollection(ctx context.Context, env agent.EngineEnv, port int, c *client, list *keyList, name string) (renewed, removed []string, err error) {
 	if ownColl(name) {
-		return errors.New("that collection is Rowsafe's own (the keys made here); Rowsafe doesn't remove it")
+		return nil, nil, errors.New("that collection is Rowsafe's own (the keys made here); Rowsafe doesn't remove it")
 	}
 	names, err := c.collectionNames(ctx)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	if !slices.Contains(names, name) {
-		return fmt.Errorf("there is no collection %s", name)
+		return nil, nil, fmt.Errorf("there is no collection %s", name)
 	}
 	if err := c.deleteCollection(ctx, name); err != nil {
-		return err
+		return nil, nil, err
 	}
-	// Keys limited to it lose it.
-	keys, err := listKeys(ctx, c)
-	if err != nil {
-		return nil
-	}
-	for _, k := range keys {
-		if i := slices.Index(k.Collections, name); i >= 0 {
-			k.Collections = slices.Delete(k.Collections, i, i+1)
-			if len(k.Collections) == 0 {
-				_ = deleteKey(ctx, c, k.Name)
-			} else {
-				_ = putKey(ctx, c, k)
-			}
+	next := *list
+	next.Keys = nil
+	var changed []keyEntry
+	for _, k := range list.Keys {
+		i := slices.Index(k.Collections, name)
+		if i < 0 {
+			next.Keys = append(next.Keys, k)
+			continue
 		}
+		if len(k.Collections) == 1 {
+			removed = append(removed, k.Name)
+			continue
+		}
+		k.Collections = slices.Delete(slices.Clone(k.Collections), i, i+1)
+		nonce, err := newNonce()
+		if err != nil {
+			return nil, nil, err
+		}
+		k.Nonce = nonce
+		next.Keys = append(next.Keys, k)
+		changed = append(changed, k)
+		renewed = append(renewed, k.Name)
 	}
-	return nil
+	if len(changed) == 0 && len(removed) == 0 {
+		return nil, nil, nil
+	}
+	if err := saveKeyList(env, port, next); err != nil {
+		return nil, nil, err
+	}
+	*list = next
+	for _, n := range removed {
+		_ = deleteKeyByName(ctx, c, n)
+	}
+	return renewed, removed, putKeyPoints(ctx, c, changed)
 }
 
 // inventory lists the collections and keys.
@@ -370,13 +372,18 @@ func inventory(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpe
 		inv.Users = append(inv.Users, protocol.DBUser{Name: "rowsafe", Login: true, Superuser: true, Password: protocol.PasswordSet, Access: protocol.DBAccessOwner,
 			System: true, SystemReason: "Rowsafe's own key (it makes the keys here and the backups)"})
 	}
-	keys, err := listKeys(ctx, c)
+	if inv.ManageBlocked != "" {
+		return inv, nil // no keys can be made here
+	}
+	list, _, err := reconcile(ctx, env, db.Port, c) // what it undid is reported by monitoring
 	if err != nil {
 		return inv, err
 	}
+	keys := slices.Clone(list.Keys)
+	slices.SortFunc(keys, func(a, b keyEntry) int { return strings.Compare(a.Name, b.Name) })
 	for _, k := range keys {
 		u := protocol.DBUser{Name: k.Name, Login: true, Password: protocol.PasswordSet, Access: k.Access, Databases: k.Collections,
-			Superuser: k.Access == protocol.DBAccessOwner}
+			Superuser: k.admin(), ValidUntil: k.ExpiresAt}
 		inv.Users = append(inv.Users, u)
 	}
 	return inv, nil

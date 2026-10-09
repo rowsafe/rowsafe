@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/rowsafe/rowsafe/internal/agent"
@@ -29,6 +30,13 @@ func (e *Engine) maintenance(ctx context.Context, env agent.EngineEnv, db protoc
 		err = indexField(ctx, c, p, res, tl)
 	case protocol.MaintQdrantVectorsOnDisk:
 		err = vectorsOnDisk(ctx, c, p, res, tl)
+	case protocol.MaintQdrantRevokeAdminKeys:
+		err = revokeAdmin(ctx, env, db, c, res, tl)
+	case protocol.MaintQdrantDropSnapshots:
+		l := e.dbLock(db.ID) // never while a backup uploads its snapshot
+		l.Lock()
+		err = e.dropSnapshots(ctx, c, res, tl)
+		l.Unlock()
 	default:
 		return nil, fmt.Errorf("Qdrant has no fix called %q", p.Action)
 	}
@@ -102,5 +110,55 @@ func vectorsOnDisk(ctx context.Context, c *client, p protocol.MaintenanceParams,
 	}
 	res.Summary = fmt.Sprintf("Collection %s now keeps its vectors on disk. Qdrant moves them in the background and frees the memory as it goes; "+
 		"searches keep working and read from disk.", p.DB)
+	return nil
+}
+
+// revokeAdmin removes every admin key made in Databases & users.
+func revokeAdmin(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec, c *client, res *protocol.MaintenanceResult, tl agent.TaskLogger) error {
+	if l, _, _ := loadLogin(env, db.Port); l.Key == "" || !l.JWT {
+		return errors.New("no keys are made in Rowsafe on this Qdrant (JSON Web Tokens are off)")
+	}
+	gone, err := revokeAdminKeys(ctx, env, db.Port, c)
+	var names []string
+	for _, k := range gone {
+		names = append(names, k.Name)
+	}
+	if err != nil {
+		return fmt.Errorf("removing the admin keys (removed so far: %s): %w", strings.Join(names, ", "), err)
+	}
+	if len(gone) == 0 {
+		res.Summary = "Nothing to do: there are no admin keys made in Rowsafe on this server."
+		return nil
+	}
+	tl.Printf("removed the admin keys %s", strings.Join(names, ", "))
+	res.Summary = fmt.Sprintf("Removed the admin keys %s: their tokens stop working now. If one was misused to change Rowsafe's list of keys, "+
+		"Rowsafe keeps undoing that until it expires (at the latest %d days after it was made or renewed).",
+		strings.Join(names, ", "), protocol.QdrantAdminKeyMaxDays)
+	return nil
+}
+
+// dropSnapshots deletes the full snapshots on the server's disk that
+// Rowsafe didn't make (it deletes its own after the upload).
+func (e *Engine) dropSnapshots(ctx context.Context, c *client, res *protocol.MaintenanceResult, tl agent.TaskLogger) error {
+	snaps, err := c.listFullSnapshots(ctx)
+	if err != nil {
+		return err
+	}
+	if len(snaps) == 0 {
+		res.Summary = "Nothing to do: no snapshot files are left on the server's disk."
+		return nil
+	}
+	var freed int64
+	n := 0
+	for _, s := range snaps {
+		if err := c.deleteFullSnapshot(ctx, s.Name); err != nil {
+			return fmt.Errorf("deleting snapshot %s (deleted %d so far): %w", s.Name, n, err)
+		}
+		e.pendingDone(s.Name)
+		n++
+		freed += s.Size
+		tl.Printf("deleted snapshot %s (%s)", s.Name, humanBytes(s.Size))
+	}
+	res.Summary = fmt.Sprintf("Deleted %d snapshot files from the server's disk, freeing %s. Your backups in the bucket are untouched.", n, humanBytes(freed))
 	return nil
 }

@@ -7,6 +7,8 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -53,13 +55,13 @@ func TestSignToken(t *testing.T) {
 
 func TestKeyClaims(t *testing.T) {
 	cases := []struct {
-		k    keyRecord
+		k    keyEntry
 		want string
 	}{
-		{keyRecord{Name: "a", Nonce: "n", Access: protocol.DBAccessOwner}, `"access":"m"`},
-		{keyRecord{Name: "a", Nonce: "n", Access: protocol.DBAccessReadOnly}, `"access":"r"`},
-		{keyRecord{Name: "a", Nonce: "n", Access: protocol.DBAccessReadOnly, Collections: []string{"docs"}}, `"access":[{"access":"r","collection":"docs"}]`},
-		{keyRecord{Name: "a", Nonce: "n", Access: protocol.DBAccessReadWrite, Collections: []string{"docs", "b"}},
+		{keyEntry{Name: "a", Nonce: "n", Access: protocol.DBAccessOwner}, `"access":"m"`},
+		{keyEntry{Name: "a", Nonce: "n", Access: protocol.DBAccessReadOnly}, `"access":"r"`},
+		{keyEntry{Name: "a", Nonce: "n", Access: protocol.DBAccessReadOnly, Collections: []string{"docs"}}, `"access":[{"access":"r","collection":"docs"}]`},
+		{keyEntry{Name: "a", Nonce: "n", Access: protocol.DBAccessReadWrite, Collections: []string{"docs", "b"}},
 			`"access":[{"access":"rw","collection":"docs"},{"access":"rw","collection":"b"}]`},
 	}
 	for _, c := range cases {
@@ -69,8 +71,13 @@ func TestKeyClaims(t *testing.T) {
 			t.Errorf("claims %s, want %s", s, c.want)
 		}
 		if strings.Contains(s, `"exp"`) {
-			t.Errorf("a key's token shouldn't expire by itself: %s", s)
+			t.Errorf("a key without an expiry got one: %s", s)
 		}
+	}
+	at := time.Unix(1_900_000_000, 0)
+	raw, _ := json.Marshal(keyClaims(keyEntry{Name: "a", Nonce: "n", Access: protocol.DBAccessOwner, ExpiresAt: &at}))
+	if !strings.Contains(string(raw), `"exp":1900000000`) {
+		t.Errorf("an expiring key's token carries no exp: %s", raw)
 	}
 	if keyPointID("a") == keyPointID("b") || len(keyPointID("a")) != 36 {
 		t.Error("point ids")
@@ -239,9 +246,85 @@ func TestCgroupUnit(t *testing.T) {
 		{"0::/system.slice/docker-3f2a9c.scope\n", "", true},                         // Qdrant's own image
 		{"12:memory:/docker/3f2a9c\n0::/docker/3f2a9c\n", "", true},
 		{"0::/user.slice/user-1000.slice/session-2.scope\n", "", false},
+		{"0::/user.slice/user-1000.slice/user@1000.service/app.slice/qdrant.service\n", "", false}, // a user's own unit
+		{"0::/system.slice/qdrant.service/extra\n", "", false},
 	} {
 		if u, c := cgroupUnit(tc.cg); u != tc.unit || c != tc.container {
 			t.Errorf("cgroupUnit(%q) = %q, %v; want %q, %v", tc.cg, u, c, tc.unit, tc.container)
 		}
+	}
+}
+
+func TestAccessFor(t *testing.T) {
+	for _, c := range []struct{ method, path, want string }{
+		{"GET", "/collections", "r"},
+		{"GET", "/snapshots/full.snapshot", "r"},
+		{"GET", "/metrics", "r"},
+		{"POST", "/collections/docs/points/scroll", "r"},
+		{"POST", "/collections/docs/points/count", "r"},
+		{"POST", "/collections/docs/points/query", "r"},
+		{"POST", "/collections/docs/points", "r"}, // points by id
+		{"PUT", "/collections/docs/points", "m"},
+		{"POST", "/collections/docs/points/delete", "m"},
+		{"POST", "/snapshots", "m"},
+		{"POST", "/collections/docs/snapshots/upload", "m"},
+		{"DELETE", "/snapshots/x", "m"},
+		{"PUT", "/collections/docs/index", "m"},
+		{"PATCH", "/collections/docs", "m"},
+		{"POST", "/points/scroll", "m"}, // not under a collection
+	} {
+		if got := accessFor(c.method, c.path); got != c.want {
+			t.Errorf("%s %s: %s, want %s", c.method, c.path, got, c.want)
+		}
+	}
+}
+
+func TestExpiryDays(t *testing.T) {
+	admin := keyEntry{Access: protocol.DBAccessOwner}
+	ro := keyEntry{Access: protocol.DBAccessReadOnly}
+	for _, c := range []struct {
+		k     keyEntry
+		asked int
+		want  int
+		bad   bool
+	}{
+		{admin, 0, protocol.QdrantAdminKeyDefaultDays, false},
+		{admin, 7, 7, false},
+		{admin, 91, 0, true},
+		{keyEntry{Access: protocol.DBAccessOwner, ExpiresDays: 14}, 0, 14, false}, // a new token keeps the key's choice
+		{ro, 0, 0, false},
+		{ro, 365, 365, false},
+		{ro, 366, 0, true},
+	} {
+		got, err := expiryDays(c.k, c.asked)
+		if (err != nil) != c.bad || got != c.want {
+			t.Errorf("%+v asked %d: %d %v", c.k, c.asked, got, err)
+		}
+	}
+}
+
+func TestListenerUIDs(t *testing.T) {
+	dir := t.TempDir()
+	tcp := "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n" +
+		"   0: 0100007F:18BD 00000000:0000 0A 00000000:00000000 00:00000000 00000000   997        0 1111 1 0 100 0 0 10 0\n" +
+		"   1: 00000000:18BE 00000000:0000 0A 00000000:00000000 00:00000000 00000000   997        0 2222 1 0 100 0 0 10 0\n" +
+		"   2: 0100007F:18BD 0100007F:D431 01 00000000:00000000 00:00000000 00000000  1000        0 3333 1 0 100 0 0 10 0\n"
+	tcp6 := "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n" +
+		"   0: 00000000000000000000000000000000:18BD 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1001        0 4444 1 0 100 0 0 10 0\n"
+	os.WriteFile(filepath.Join(dir, "tcp"), []byte(tcp), 0o644)
+	os.WriteFile(filepath.Join(dir, "tcp6"), []byte(tcp6), 0o644)
+	old := procNet
+	procNet = dir
+	defer func() { procNet = old }()
+	uids, err := listenerUIDs(6333) // 0x18BD
+	if err != nil || len(uids) != 2 || uids[0] != 997 || uids[1] != 1001 {
+		t.Fatalf("6333: %v %v (the established connection of uid 1000 isn't a listener)", uids, err)
+	}
+	if _, err := listenerUIDs(6399); err == nil {
+		t.Error("nothing listens on 6399")
+	}
+	// uid 1001 (another user's listener on ::) makes the port not Qdrant's.
+	if err := checkListener(6333); err == nil || !strings.Contains(err.Error(), "not by Qdrant") {
+		t.Errorf("a stranger's listener: %v", err)
 	}
 }

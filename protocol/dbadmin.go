@@ -137,6 +137,11 @@ type DBAdminParams struct {
 	// is every key). Redis users reach every logical database, so
 	// Databases stays empty for them.
 	KeyPattern string `json:"key_pattern,omitempty"`
+	// ExpiresDays: a new Qdrant key (or its new token, reset_password)
+	// expires that many days from now. 0: a new admin key gets
+	// QdrantAdminKeyDefaultDays and another key never expires; a new token
+	// keeps the key's choice. Qdrant only.
+	ExpiresDays int `json:"expires_days,omitempty"`
 
 	// drop_user: who gets the objects the user owns. Required when it owns
 	// any.
@@ -769,6 +774,9 @@ func validateDBAdminEngine(engine string, p DBAdminParams) error {
 		}
 	} else if p.KeyPattern != "" {
 		return fmt.Errorf("key patterns are a Redis feature; %s users get access to databases", name)
+	}
+	if engine != EngineQdrant && p.ExpiresDays != 0 {
+		return fmt.Errorf("expiring keys are a Qdrant feature; %s users have passwords", name)
 	}
 	if engine == EngineQdrant {
 		if err := validateQdrantDBAdmin(p); err != nil {

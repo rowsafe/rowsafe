@@ -477,9 +477,10 @@ jobs:
         env:
           VARIANT: ${{ matrix.variant }}
         run: |
-          # The exact release Rowsafe pins for the series (the installer's QDRANT_VERSION).
+          # The exact release Rowsafe pins for the series (the installer's QDRANT_VERSION),
+          # and its image by digest (deploy/docker/agent-qdrant.Dockerfile's DB_IMAGE_DIGEST).
           case $VARIANT in
-            qdrant1.19) echo "DB_VERSION=1.19.2" >>"$GITHUB_ENV" ;;
+            qdrant1.19) { echo "DB_VERSION=1.19.2"; echo "DB_IMAGE_DIGEST=sha256:b7b0444c4c351c970b98e90a6f89c2ee4287c65b44e52b4cb503fa5b2aa927ad"; } >>"$GITHUB_ENV" ;;
             *) echo "::error::no pinned Qdrant release for $VARIANT"; exit 1 ;;
           esac
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
@@ -500,6 +501,7 @@ jobs:
             VERSION=${{ env.VERSION }}
             IMAGE_VARIANT=${{ matrix.variant }}
             DB_VERSION=${{ env.DB_VERSION }}
+            DB_IMAGE_DIGEST=${{ env.DB_IMAGE_DIGEST }}
           tags: ${{ env.TAGS }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}

@@ -4539,7 +4539,7 @@ cloud_engine_container() {
     valkey) cloud_valkey_checks ;;
     clickhouse) cloud_clickhouse_checks ;;
     opensearch) cloud_opensearch_checks ;;
-    qdrant) cloud_qdrant_checks ;;
+    qdrant) cloud_qdrant_checks && cloud_qdrant_update ;;
   esac
   pass "$label $ver: installed from its own source with its key checked, secure defaults, TLS from the network, protected"
 
@@ -5199,6 +5199,50 @@ qdc() {
     curl -sk -K - -o "$W/qd.body" -w '%{http_code}' -X "$2" -H 'Content-Type: application/json' ${4:+--data "$4"} "https://$ip:6333$3" || true
 }
 
+# cloud_qdrant_update: the root helper's Qdrant update (db-minor-update on
+# qdrant.service), for real: nothing to do at the pinned release; from an
+# "older" program (a stand-in saying 1.19.1), the pinned release downloaded
+# from GitHub, checked and installed, and Qdrant restarted.
+cloud_qdrant_update() {
+  hd=$W/qhelper
+  install -d -m 0755 "$hd" "$hd/out" "$hd/state"
+  install -d -m 0700 -o rowsafe -g rowsafe "$hd/req"
+  printf 'database\n' >"$hd/updates-allowed"
+  printf '6333 qdrant.service\n' >"$hd/restart-allowed"
+  chmod 644 "$hd/updates-allowed" "$hd/restart-allowed"
+  qd_helper() {
+    printf '%s db-minor-update 6333\n' "$1" | runuser -u rowsafe -- sh -c 'cat >"$1"' sh "$hd/req/update-request"
+    rm -f "$hd/out/update-result"
+    timeout 1200 env ROWSAFE_HELPER_MODE=update ROWSAFE_AGENT_USER=rowsafe ROWSAFE_RESTART_DIR="$hd/req" ROWSAFE_UPDATES_ALLOW="$hd/updates-allowed" \
+      ROWSAFE_RESTART_ALLOW="$hd/restart-allowed" RUNTIME_DIRECTORY="$hd/out" STATE_DIRECTORY="$hd/state" \
+      sh /src/scripts/rowsafe-pg-restart 2>>"$W/qhelper.log" || fail "$name: the helper failed ($1)"
+  }
+  pid=$(systemctl show -p MainPID --value qdrant)
+  qd_helper qdu1
+  grep -qx ok=1 "$hd/out/update-result" && grep -qx package=1.19.2 "$hd/out/update-result" && grep -qx restarted=0 "$hd/out/update-result" ||
+    { cat "$hd/out/update-result" "$W/qhelper.log" >&2; fail "$name: the pinned release isn't 'already the newest'"; }
+  [ "$(systemctl show -p MainPID --value qdrant)" = "$pid" ] || fail "$name: nothing to update, yet Qdrant restarted"
+  # An older program on disk: a stand-in that says 1.19.1 and runs the real one.
+  mv /usr/bin/qdrant /usr/local/lib/qdrant-real
+  printf '#!/bin/sh\ncase "${1:-}" in --version) echo "qdrant 1.19.1" ;; *) exec /usr/local/lib/qdrant-real "$@" ;; esac\n' >/usr/bin/qdrant
+  chmod 0755 /usr/bin/qdrant
+  qd_helper qdu2
+  grep -qx ok=1 "$hd/out/update-result" && grep -qx from_package=1.19.1 "$hd/out/update-result" && grep -qx package=1.19.2 "$hd/out/update-result" &&
+    grep -qx restarted=1 "$hd/out/update-result" || { cat "$hd/out/update-result" "$W/qhelper.log" >&2; fail "$name: the helper didn't update Qdrant"; }
+  [ "$(/usr/bin/qdrant --version)" = "qdrant 1.19.2" ] && [ ! -L /usr/bin/qdrant ] && head -c 4 /usr/bin/qdrant | grep -q ELF ||
+    fail "$name: /usr/bin/qdrant isn't Qdrant 1.19.2's program after the update"
+  [ "$(systemctl show -p MainPID --value qdrant)" != "$pid" ] || fail "$name: Qdrant wasn't restarted on the new program"
+  rm -f /usr/local/lib/qdrant-real
+  i=0
+  until [ "$(qdc '' GET /collections)" = 401 ]; do
+    i=$((i + 1))
+    [ $i -lt 60 ] || fail "$name: Qdrant doesn't answer after the update"
+    sleep 1
+  done
+  grep -q 'Qdrant on port 6333: 1.19.1 -> 1.19.2 (restarted: 1)' "$W/qhelper.log" || fail "$name: the helper's log"
+  pass "the root helper updates Qdrant to the pinned release (SHA-256 checked), restarts it, and does nothing at the pinned one"
+}
+
 # cloud_qdrant_checks: Qdrant after the cloud-init run.
 cloud_qdrant_checks() {
   grep -Eq "Qdrant 1[.]19[.][0-9]+ downloaded and checked [(]SHA-256 [0-9a-f]{64}[)]" "$W/out" || fail "$name: no word about the checked download"
@@ -5217,7 +5261,7 @@ cloud_qdrant_checks() {
   [ "$(stat -c '%U %G %a' /etc/qdrant/qdrant.env)" = "root root 600" ] || fail "$name: qdrant.env owner/mode"
   grep -qx "QDRANT__SERVICE__ALT_API_KEY=$(cat /etc/rowsafe/qdrant/alt-api-key)" /etc/qdrant/qdrant.env || fail "$name: qdrant.env lacks Rowsafe's key"
   [ "$(cat /etc/rowsafe/qdrant-keys)" = "api_key read_only_api_key alt_api_key" ] || fail "$name: the names of the keys set"
-  [ "$(stat -c '%U %G %a' /etc/qdrant/config.yaml)" = "root qdrant 640" ] || fail "$name: config.yaml owner/mode"
+  [ "$(stat -c '%U %G %a' /etc/qdrant/config.yaml)" = "root root 644" ] || fail "$name: config.yaml owner/mode (keyless, readable)"
   for l in 'telemetry_disabled: true' '  enable_tls: true' '  jwt_rbac: true' '  enable_cors: false' '  enable_snapshot_url_recovery: false' \
     '  enabled: false' '  cert_ttl: 60' '  cert: /etc/ssl/rowsafe-qdrant/rowsafe-server.crt'; do
     grep -qx "$l" /etc/qdrant/config.yaml || fail "$name: config.yaml lacks '$l'"
@@ -5228,11 +5272,14 @@ cloud_qdrant_checks() {
     fail "$name: Qdrant's unit isn't sandboxed"
   [ "$(ps -o user= -p "$(systemctl show -p MainPID --value qdrant)")" = qdrant ] || fail "$name: Qdrant doesn't run as qdrant"
   [ "$(stat -c '%U %G %a' /var/lib/qdrant/storage)" = "qdrant qdrant 750" ] || fail "$name: storage owner/mode"
-  # The agent reads the settings (its group), never the keys.
-  runuser -u rowsafe -g rowsafe -G qdrant -- cat /etc/qdrant/config.yaml >/dev/null || fail "$name: the agent can't read Qdrant's settings"
-  if runuser -u rowsafe -g rowsafe -G qdrant -- cat /etc/qdrant/qdrant.env >/dev/null 2>&1; then fail "$name: the agent reads Qdrant's keys"; fi
-  grep -qx 'SupplementaryGroups=qdrant' /etc/systemd/system/rowsafe-agent.service.d/10-qdrant.conf &&
+  # The agent reads the settings, never the keys nor Qdrant's files: it isn't
+  # in Qdrant's group.
+  runuser -u rowsafe -g rowsafe -- cat /etc/qdrant/config.yaml >/dev/null || fail "$name: the agent can't read Qdrant's settings"
+  if runuser -u rowsafe -g rowsafe -- cat /etc/qdrant/qdrant.env >/dev/null 2>&1; then fail "$name: the agent reads Qdrant's keys"; fi
+  if runuser -u rowsafe -g rowsafe -- ls /var/lib/qdrant/storage >/dev/null 2>&1; then fail "$name: the agent reads Qdrant's files"; fi
+  ! grep -q 'SupplementaryGroups' /etc/systemd/system/rowsafe-agent.service.d/10-qdrant.conf &&
     grep -qx 'ReadWritePaths=-/etc/ssl/rowsafe-qdrant' /etc/systemd/system/rowsafe-agent.service.d/10-qdrant.conf || fail "$name: the agent's drop-in"
+  [ "$(systemctl is-enabled qdrant 2>/dev/null)" = enabled ] || fail "$name: qdrant.service is $(systemctl is-enabled qdrant 2>&1) after the install (masked while the package went in)"
   # Rowsafe's own key (alt_api_key), given to the agent on stdin by root.
   called "qdrant-login --port 6333"
   [ "$(cat "$F/qdrant-login.stdin")" = "$(cat /etc/rowsafe/qdrant/alt-api-key)" ] || fail "$name: the agent didn't get Rowsafe's key on stdin"

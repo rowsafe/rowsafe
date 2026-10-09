@@ -253,10 +253,16 @@ func printUsers(inv *protocol.DBInventory) {
 		fmt.Println(inv.ManageBlocked)
 	}
 	if protocol.NormalizeEngine(inv.Engine) == protocol.EngineQdrant {
-		t := newTable("KEY", "ACCESS", "COLLECTIONS", "NOTE")
+		t := newTable("KEY", "ACCESS", "COLLECTIONS", "EXPIRES", "NOTE")
 		for _, u := range inv.Users {
 			access := map[string]string{protocol.DBAccessReadOnly: "read-only", protocol.DBAccessReadWrite: "read-write", protocol.DBAccessOwner: "admin"}[u.Access]
-			t.row(u.Name, orText(access, "custom"), orText(strings.Join(u.Databases, ", "), "every one"), u.SystemReason)
+			expires := "never"
+			if u.ValidUntil != nil {
+				expires = u.ValidUntil.Local().Format("2006-01-02")
+			} else if u.System {
+				expires = "-"
+			}
+			t.row(u.Name, orText(access, "custom"), orText(strings.Join(u.Databases, ", "), "every one"), expires, u.SystemReason)
 		}
 		t.flush()
 		return
@@ -414,6 +420,8 @@ func dbUserAdd(ctx context.Context, c *client.Client, args []string) error {
 	access := fs.String("access", protocol.DBAccessReadWrite, "read_only, read_write or owner")
 	host := fs.String("host", "", "the address to put in the connection string (default: the one apps use)")
 	keys := fs.String("keys", "", "Redis and Valkey: the keys it may use (\"session:* cache:*\"; default every key)")
+	expires := fs.Int("expires", 0, fmt.Sprintf("Qdrant: the key expires in DAYS (admin keys always do: %d by default, at most %d)",
+		protocol.QdrantAdminKeyDefaultDays, protocol.QdrantAdminKeyMaxDays))
 	pos, err := positionals(fs, args)
 	if err != nil {
 		return err
@@ -421,17 +429,17 @@ func dbUserAdd(ctx context.Context, c *client.Client, args []string) error {
 	if len(pos) != 1 {
 		return errors.New("usage: rowsafe db user add USER --db DB [--access read_only|read_write|owner] [--on NAME]\n" +
 			"       rowsafe db user add USER [--keys PATTERN] [--access ...] [--on NAME]   (Redis and Valkey)\n" +
-			"       rowsafe db user add KEY [--db COLLECTION] [--access ...] [--on NAME]   (Qdrant: an API key)")
+			"       rowsafe db user add KEY [--db COLLECTION] [--access ...] [--expires DAYS] [--on NAME]   (Qdrant: an API key)")
 	}
 	p := protocol.DBAdminParams{Action: protocol.DBAdminCreateUser, User: pos[0], Databases: dbs,
-		Access: strings.ReplaceAll(*access, "-", "_"), Host: *host, KeyPattern: *keys}
+		Access: strings.ReplaceAll(*access, "-", "_"), Host: *host, KeyPattern: *keys, ExpiresDays: *expires}
 	// Checked in full here, but for Redis and Valkey users (--keys, no
 	// --db): the control plane checks those, as it knows the engine. A
 	// Qdrant key may reach every collection (no --db): the server's engine
 	// says which rules apply.
 	if *keys == "" || len(dbs) > 0 {
 		engine := protocol.EnginePostgreSQL
-		if len(dbs) == 0 && *on != "" {
+		if (len(dbs) == 0 || *expires != 0) && *on != "" {
 			if d, err := c.Database(ctx, *on); err == nil {
 				engine = protocol.NormalizeEngine(d.Engine)
 			}
@@ -462,11 +470,12 @@ func dbUserAdd(ctx context.Context, c *client.Client, args []string) error {
 	return nil
 }
 
-// dbUserPassword: rowsafe db user password USER [--host H] [--on NAME]
+// dbUserPassword: rowsafe db user password USER [--host H] [--expires DAYS] [--on NAME]
 func dbUserPassword(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("db user password", flag.ContinueOnError)
 	on := onFlag(fs)
 	host := fs.String("host", "", "the address to put in the connection string (default: the one apps use)")
+	expires := fs.Int("expires", 0, "Qdrant: the new token expires in DAYS (default: as the key did)")
 	pos, err := positionals(fs, args)
 	if err != nil {
 		return err
@@ -482,7 +491,7 @@ func dbUserPassword(ctx context.Context, c *client.Client, args []string) error 
 	if err != nil {
 		return err
 	}
-	_, res, secret, err := dbRun(ctx, c, server, protocol.DBAdminParams{Action: protocol.DBAdminResetPassword, User: pos[0], Host: *host}, key)
+	_, res, secret, err := dbRun(ctx, c, server, protocol.DBAdminParams{Action: protocol.DBAdminResetPassword, User: pos[0], Host: *host, ExpiresDays: *expires}, key)
 	printDBResult(res)
 	if err != nil {
 		return err

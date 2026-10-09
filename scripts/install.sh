@@ -1043,7 +1043,9 @@ qdrant_setup() {
     echo "[Service]"
     echo "User=rowsafe"
     echo "Group=rowsafe"
-    ! getent group qdrant >/dev/null 2>&1 || echo "SupplementaryGroups=qdrant"
+    # Not in Qdrant's group: the agent reads Qdrant's settings (keyless,
+    # readable by all), never its files or keys; Qdrant reads the
+    # certificate's key through the folder's group (setgid).
     # --listen-public's certificate (--install-qdrant): the agent replaces
     # it with one from Let's Encrypt.
     [ ! -d "$QDRANT_TLS_DIR" ] || echo "ReadWritePaths=-$QDRANT_TLS_DIR"
@@ -1706,7 +1708,7 @@ QDRANT_DEB_AMD64=qdrant_${QDRANT_VERSION}-1_amd64.deb
 QDRANT_DEB_AMD64_SHA256=c05e56a92fbece506ea7d3d4b56d911d2e905cccf7b7df87465647ee1a1e5f61
 QDRANT_TGZ_ARM64=qdrant-aarch64-unknown-linux-musl.tar.gz
 QDRANT_TGZ_ARM64_SHA256=6970b93b56fa1203f0cea47d2f330fdb654988fd56617aa77e8478cffd3c0ccb
-# Its settings (no keys: root:qdrant 0640), its keys (random, root's only:
+# Its settings (no keys: root's, readable by all), its keys (random, root's only:
 # the admin key, the read-only key and Rowsafe's own key, alt_api_key, which
 # the agent gets), the environment file systemd gives Qdrant the keys in
 # (root's only, outside Rowsafe's folder: Qdrant keeps working after an
@@ -3204,10 +3206,22 @@ qdrant_install() {
   qdrant_user
   case $_f in
     *.deb)
+      # Nothing of the package's may start Qdrant with its own defaults
+      # (no keys, every address): its service stays masked until Rowsafe's
+      # unit and settings are in place (qdrant_conf).
+      _masked=0
+      if [ ! -e "$QDRANT_UNIT_FILE" ] && systemd_running; then
+        systemctl mask --quiet qdrant.service 2>/dev/null && _masked=1
+      fi
       if ! DEBIAN_FRONTEND=noninteractive dpkg --force-confold -i "$TMP/qdrant/$_f" >>"$TMP/apt.log" 2>&1 </dev/null; then
         tail -n 20 "$TMP/apt.log" >&2
+        [ "$_masked" = 0 ] || systemctl unmask --quiet qdrant.service 2>/dev/null || true
         die "installing Qdrant's package failed"
       fi
+      _shipped=$(dpkg -L qdrant 2>/dev/null | grep -E '^/(lib|usr/lib|etc)/(systemd|init[.]d)/' || true)
+      [ -z "$_shipped" ] || die "Qdrant's package brought a service of its own ($(printf '%s' "$_shipped" | paste -sd, -)); not using it"
+      ! pgrep -x qdrant >/dev/null 2>&1 || die "Qdrant started before Rowsafe set its keys and settings; not going on"
+      [ "$_masked" = 0 ] || systemctl unmask --quiet qdrant.service 2>/dev/null || true
       ;;
     *)
       (cd "$TMP/qdrant" && tar -xzf "$_f" qdrant) || die "unpacking Qdrant's program failed"
@@ -3291,7 +3305,7 @@ qdrant_conf() {
   # The package's own file (or none) gives way to Rowsafe's; Rowsafe's own
   # stays as it is (--listen-public's settings).
   if ! grep -qs '^# Written by the Rowsafe installer (--install-qdrant)' "$QDRANT_CONF"; then
-    qdrant_config 127.0.0.1 false | write_file "$QDRANT_CONF" 0640 root:qdrant || true
+    qdrant_config 127.0.0.1 false | write_file "$QDRANT_CONF" 0644 root:root || true
     QD_CONF_CHANGED=1
   fi
   # shellcheck disable=SC2016 # systemd's own syntax
@@ -3350,10 +3364,21 @@ qdrant_url() {
   if grep -qs '^  enable_tls: true' "$QDRANT_CONF"; then printf 'https://127.0.0.1:6333%s' "$1"; else printf 'http://127.0.0.1:6333%s' "$1"; fi
 }
 
+# qdrant_port_ours: every socket listening on 6333 is the qdrant user's
+# (any user can listen on a free port; a key goes only to Qdrant).
+qdrant_port_ours() {
+  _uid=$(id -u qdrant 2>/dev/null) || return 1
+  have ss || apt_install iproute2
+  _owners=$(ss -ltnHe 'sport = :6333' 2>/dev/null | sed -n 's/.* uid:\([0-9]*\) .*/\1/p' | sort -u)
+  [ "$_owners" = "$_uid" ]
+}
+
 # qdrant_code PATH [KEYFILE]: the HTTP status Qdrant answers on PATH, with
-# the key in KEYFILE (given to curl on stdin, never on a command line).
+# the key in KEYFILE (given to curl on stdin, never on a command line, and
+# only once port 6333 is checked to be Qdrant's).
 qdrant_code() {
   if [ -n "${2:-}" ]; then
+    qdrant_port_ours || die "port 6333 isn't held by Qdrant (the qdrant user) alone; not sending it a key (see: ss -ltnpe 'sport = :6333')"
     printf 'header = "api-key: %s"\n' "$(cat "$2")" |
       curl -sk -o /dev/null -w '%{http_code}' --max-time 10 -K - "$(qdrant_url "$1")" 2>/dev/null || true
   else
@@ -3416,7 +3441,7 @@ qdrant_listen_public() {
   _host=0.0.0.0
   if awk '$4 == "00" && $6 != "lo" { f = 1 } END { exit !f }' /proc/net/if_inet6 2>/dev/null; then _host=::; fi
   _changed=0
-  if qdrant_config "$_host" true | write_file "$QDRANT_CONF" 0640 root:qdrant; then
+  if qdrant_config "$_host" true | write_file "$QDRANT_CONF" 0644 root:root; then
     _changed=1
     note "restarting the new Qdrant so it listens on the network"
     db_restart || die "restarting Qdrant failed (see above)"
@@ -4040,6 +4065,19 @@ redis_allow=${ROWSAFE_REDIS_SERVERS_ALLOW:-/etc/rowsafe/redis-servers-allowed}
 redis_created=${ROWSAFE_REDIS_CREATED:-/etc/rowsafe/redis-created}
 redis_root=${ROWSAFE_REDIS_ROOT:-/var/lib/rowsafe-redis}
 mongo_key_dir=${ROWSAFE_MONGODB_KEY_DIR:-/etc/rowsafe}
+
+# Qdrant (db-minor-update on qdrant.service): its official release from
+# GitHub, the newest of the installed series that Rowsafe pinned with the
+# SHA-256 of its files, here (written by root's installer; the same pins as
+# its QDRANT_* settings) or in the installer of the newest release signed
+# with the Rowsafe release key (ROWSAFE_RELEASE_PUBLIC_KEY and
+# ROWSAFE_RELEASES_URL, set by root in the update unit). Nothing from a
+# download runs before its SHA-256 matches a pin.
+qdrant_pin_version=1.19.2
+qdrant_pin_deb_amd64=c05e56a92fbece506ea7d3d4b56d911d2e905cccf7b7df87465647ee1a1e5f61
+qdrant_pin_tgz_arm64=6970b93b56fa1203f0cea47d2f330fdb654988fd56617aa77e8478cffd3c0ccb
+qdrant_releases=${ROWSAFE_QDRANT_RELEASES_URL:-https://github.com/qdrant/qdrant/releases/download}
+qdrant_bin=/usr/bin/qdrant
 
 log() { echo "rowsafe-pg-restart: $*" >&2; }
 
@@ -5878,7 +5916,12 @@ db_engine() {
       db_engine=valkey
       set -- valkey-server
       ;;
-    *) refuse "$unit is not a MySQL, MariaDB, MongoDB, ClickHouse, Redis or Valkey service" ;;
+    qdrant.service)
+      # Qdrant's program comes from its release on GitHub (qdrant_update).
+      db_engine=qdrant db_main=qdrant
+      return 0
+      ;;
+    *) refuse "$unit is not a MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey or Qdrant service" ;;
   esac
   db_main=''
   for p in "$@"; do
@@ -5929,9 +5972,124 @@ db_port() {
   db_patterns
 }
 
+# qdrant_version prints the version of Qdrant's program on disk.
+qdrant_version() { "$qdrant_bin" --version 2>/dev/null | sed -n 's/^qdrant \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' | head -n 1; }
+
+# version_gt A B: version A is newer than B (1.19.10 > 1.19.9).
+version_gt() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n 1)" = "$1" ]; }
+
+# qdrant_signed_pins DIR sets sp_version, sp_deb_amd64 and sp_tgz_arm64
+# from the installer of the newest release (stable), once the release
+# manifest's signature checks out against the Rowsafe release key and the
+# installer's SHA-256 and size against the manifest. Fails (and sets
+# nothing) when anything doesn't.
+qdrant_signed_pins() {
+  sp_version='' sp_deb_amd64='' sp_tgz_arm64=''
+  _key=${ROWSAFE_RELEASE_PUBLIC_KEY:-} _url=${ROWSAFE_RELEASES_URL:-}
+  printf '%s' "$_key" | grep -Eq '^[A-Za-z0-9+/]{43}=$' || return 1
+  case $_url in https://*) ;; *) return 1 ;; esac
+  _url=${_url%/}
+  _get() { curl -fsS --proto '=https' --max-time 60 --max-filesize "$3" -o "$2" "$1" 2>>"$work_log"; }
+  _get "$_url/stable/manifest.json" "$1/manifest.json" 1048576 && _get "$_url/stable/manifest.json.sig" "$1/manifest.sig" 4096 || return 1
+  printf '%s\n%s\n%s\n' '-----BEGIN PUBLIC KEY-----' "MCowBQYDK2VwAyEA$_key" '-----END PUBLIC KEY-----' >"$1/release.pub"
+  tr -d ' \t\r\n' <"$1/manifest.sig" >"$1/sig.b64"
+  grep -Eq '^[A-Za-z0-9+/]{86}==$' "$1/sig.b64" && base64 -d <"$1/sig.b64" >"$1/sig.bin" 2>/dev/null || return 1
+  openssl pkeyutl -verify -pubin -inkey "$1/release.pub" -rawin -in "$1/manifest.json" -sigfile "$1/sig.bin" >/dev/null 2>&1 || {
+    log "the newest release's manifest isn't signed by the Rowsafe release key; using this server's own Qdrant pins"
+    return 1
+  }
+  _art=$(tr -d ' \t\r\n' <"$1/manifest.json" | sed -n 's|.*"install\.sh":{\([^}]*\)}.*|\1|p')
+  _iurl=$(printf '%s\n' "$_art" | sed -n 's/.*"url":"\(https:\/\/[A-Za-z0-9._~\/%+:-]*\)".*/\1/p')
+  _isha=$(printf '%s\n' "$_art" | sed -n 's/.*"sha256":"\([0-9a-f]\{64\}\)".*/\1/p')
+  _isize=$(printf '%s\n' "$_art" | sed -n 's/.*"size":\([1-9][0-9]\{0,7\}\).*/\1/p')
+  [ -n "$_iurl" ] && [ -n "$_isha" ] && [ -n "$_isize" ] || return 1
+  _get "$_iurl" "$1/install.sh" "$_isize" || return 1
+  [ "$(sha256sum "$1/install.sh" | cut -d' ' -f1)" = "$_isha" ] && [ "$(wc -c <"$1/install.sh" | tr -d ' ')" = "$_isize" ] || return 1
+  _v=$(sed -n 's/^QDRANT_VERSION=\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' "$1/install.sh" | head -n 1)
+  _a=$(sed -n 's/^QDRANT_DEB_AMD64_SHA256=\([0-9a-f]\{64\}\)$/\1/p' "$1/install.sh" | head -n 1)
+  _r=$(sed -n 's/^QDRANT_TGZ_ARM64_SHA256=\([0-9a-f]\{64\}\)$/\1/p' "$1/install.sh" | head -n 1)
+  [ -n "$_v" ] && [ -n "$_a" ] && [ -n "$_r" ] || return 1
+  sp_version=$_v sp_deb_amd64=$_a sp_tgz_arm64=$_r
+}
+
+# qdrant_update installs the newest pinned Qdrant release of the installed
+# series (1.19.x), checked against its SHA-256 pin, and restarts qdrant.service
+# (someone clicked Update, or Rowsafe Cloud's maintenance window started it).
+qdrant_update() {
+  [ -x "$qdrant_bin" ] && [ ! -L "$qdrant_bin" ] || refuse "Qdrant's program isn't at $qdrant_bin (Rowsafe updates only the Qdrant its installer set up)"
+  before=$(qdrant_version)
+  [ -n "$before" ] || refuse "can't tell which Qdrant $qdrant_bin is"
+  ser=${before%.*}
+  arch=$(dpkg --print-architecture 2>/dev/null)
+  case $arch in amd64 | arm64) ;; *) refuse "Qdrant's releases have no build for $arch" ;; esac
+  : >"$work_log"
+  qd_dir=$(mktemp -d) || refuse "can't make a temporary folder"
+  # The pins: this server's own, and the newest signed release's when newer.
+  v=$qdrant_pin_version sum_amd64=$qdrant_pin_deb_amd64 sum_arm64=$qdrant_pin_tgz_arm64 from=installed
+  if qdrant_signed_pins "$qd_dir" && version_gt "$sp_version" "$v"; then
+    v=$sp_version sum_amd64=$sp_deb_amd64 sum_arm64=$sp_tgz_arm64 from=signed
+  fi
+  add engine qdrant
+  add series "$ser"
+  add from_package "$before"
+  restarted=0
+  if [ "${v%.*}" != "$ser" ] || ! version_gt "$v" "$before"; then
+    # Nothing newer of this series pinned (a newer series is an upgrade).
+    rm -rf "$qd_dir"
+    add package "$before"
+    add packages qdrant
+    add restarted 0
+    ok=1
+    log "Qdrant $before on port $port is the newest pinned $ser release"
+    return 0
+  fi
+  if [ "$arch" = amd64 ]; then
+    file=qdrant_${v}-1_amd64.deb sum=$sum_amd64
+  else
+    file=qdrant-aarch64-unknown-linux-musl.tar.gz sum=$sum_arm64
+  fi
+  log "updating Qdrant $before to $v ($from pins, request $id)"
+  curl -fsSL --proto '=https' --max-time 900 --max-filesize 536870912 -o "$qd_dir/$file" "$qdrant_releases/v$v/$file" 2>>"$work_log" ||
+    { rm -rf "$qd_dir"; refuse "downloading Qdrant $v failed: $(tail_log)"; }
+  got=$(sha256sum "$qd_dir/$file" | cut -d' ' -f1)
+  [ "$got" = "$sum" ] || { rm -rf "$qd_dir"; refuse "the Qdrant $v file doesn't match the SHA-256 Rowsafe pinned for it (got $got); nothing was installed"; }
+  t0=$(active_since "$unit")
+  was_active=0
+  "$systemctl" is-active --quiet "$unit" 2>/dev/null && was_active=1
+  case $file in
+    *.deb)
+      DEBIAN_FRONTEND=noninteractive dpkg --force-confold -i "$qd_dir/$file" >>"$work_log" 2>&1 </dev/null ||
+        { rm -rf "$qd_dir"; refuse "installing Qdrant $v failed: $(tail_log)"; }
+      ;;
+    *)
+      (cd "$qd_dir" && tar -xzf "$file" qdrant) 2>>"$work_log" && [ -f "$qd_dir/qdrant" ] && [ ! -L "$qd_dir/qdrant" ] ||
+        { rm -rf "$qd_dir"; refuse "Qdrant $v's release file holds no program"; }
+      install -m 0755 -o root -g root "$qd_dir/qdrant" "$qdrant_bin.rowsafe-new" && mv -f "$qdrant_bin.rowsafe-new" "$qdrant_bin" ||
+        { rm -rf "$qd_dir"; refuse "installing Qdrant $v failed"; }
+      ;;
+  esac
+  rm -rf "$qd_dir"
+  after=$(qdrant_version)
+  [ "$after" = "$v" ] || refuse "Qdrant $v was installed, but $qdrant_bin says it is ${after:-something else}"
+  if [ "$was_active" = 1 ] && [ "$(active_since "$unit")" = "$t0" ]; then
+    out=$(timeout 300 "$systemctl" restart "$unit" 2>&1 </dev/null) ||
+      refuse "Qdrant $v is installed, but restarting $unit failed: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
+    restarted=1
+  fi
+  add package "$after"
+  add packages qdrant
+  add restarted "$restarted"
+  ok=1
+  log "Qdrant on port $port: $before -> $after (restarted: $restarted)"
+}
+
 act_db_minor_update() {
   update_allowed database "installing database updates from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
   db_port
+  if [ "$db_engine" = qdrant ]; then
+    qdrant_update
+    return 0
+  fi
   before=$(pkg_version "$db_main")
   ser=$(series "$before")
   [ -n "$ser" ] || refuse "can't tell the release series of $db_main $before"
@@ -6682,6 +6840,24 @@ create_cluster_access() {
 # helper does only what $UPDATES_ALLOW_FILE lists. It needs the restart
 # helper (PostgreSQL updates restart the cluster).
 
+# update_releases_dropin: on a Qdrant server Rowsafe installed, tells the
+# update helper where Rowsafe's signed releases are and their key, so it can
+# take Qdrant's newer pins from the newest signed release (qdrant_update).
+update_releases_dropin() {
+  _df=/etc/systemd/system/rowsafe-pg-update.service.d/20-releases.conf
+  case $RELEASE_PUBLIC_KEY in *@*) _key='' ;; *) _key=$RELEASE_PUBLIC_KEY ;; esac
+  _url=${ROWSAFE_RELEASES_URL:-$DEFAULT_RELEASES_URL}
+  if [ -z "$_key" ] || [ ! -f "$QDRANT_UNIT_FILE" ] || ! printf '%s' "$_key" | grep -Eq '^[A-Za-z0-9+/]{43}=$' ||
+    ! printf '%s' "$_url" | grep -Eq '^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~/%+-]*)?$'; then
+    [ -e "$_df" ] || return 1
+    rm -f "$_df"
+    return 0
+  fi
+  install -d -m 0755 -o root -g root /etc/systemd/system/rowsafe-pg-update.service.d
+  printf '# Written by the Rowsafe installer: Qdrant'"'"'s updates take their pins from Rowsafe'"'"'s signed releases.\n[Service]\nEnvironment=ROWSAFE_RELEASE_PUBLIC_KEY=%s\nEnvironment=ROWSAFE_RELEASES_URL=%s\n' \
+    "$_key" "${_url%/}" | write_file "$_df" 0644 root:root
+}
+
 install_update_units() {
   _changed=0
   if write_file "$UPDATE_SERVICE_FILE" 0644 root:root <<'ROWSAFE_UPDATE_SERVICE_EOF'; then
@@ -6754,6 +6930,7 @@ ROWSAFE_UPDATE_PATH_EOF
     _changed=1
   fi
   if agent_user_dropin rowsafe-pg-update.service; then _changed=1; fi
+  if update_releases_dropin; then _changed=1; fi
   if systemd_running; then
     [ "$_changed" = 0 ] || systemctl daemon-reload
     systemctl enable --now --quiet rowsafe-pg-update.path
@@ -6767,7 +6944,8 @@ remove_update_units() {
   if systemd_running; then
     systemctl disable --now --quiet rowsafe-pg-update.path 2>/dev/null || true
   fi
-  rm -f "$UPDATE_PATH_FILE" "$UPDATE_SERVICE_FILE" /etc/systemd/system/rowsafe-pg-update.service.d/10-agent-user.conf
+  rm -f "$UPDATE_PATH_FILE" "$UPDATE_SERVICE_FILE" /etc/systemd/system/rowsafe-pg-update.service.d/10-agent-user.conf \
+    /etc/systemd/system/rowsafe-pg-update.service.d/20-releases.conf
   rmdir /etc/systemd/system/rowsafe-pg-update.service.d 2>/dev/null || true
   if systemd_running; then systemctl daemon-reload; fi
 }
@@ -13702,7 +13880,7 @@ uninstall_agent() {
       note "them in OpenSearch (Security, Internal users and Roles), then remove that folder from path.repo."
     fi
     if [ -s "$QDRANT_ENV_FILE" ]; then # --install-qdrant: Qdrant's keys stay the server's
-      note "Qdrant's keys stay in $QDRANT_ENV_FILE (root only); Rowsafe's own key there (QDRANT__SERVICE__ALT_API_KEY) can go."
+      note "Qdrant's keys stay in $QDRANT_ENV_FILE (root only). Rowsafe's own key there (QDRANT__SERVICE__ALT_API_KEY) can go: removing or changing it also ends every key made in Databases & users (they are signed with it)."
     fi
     if redis_present; then # redis: its password went with $STATE_DIR
       note "Rowsafe's Redis or Valkey user, rowsafe, stays in the server (its password was deleted with the agent's settings)."

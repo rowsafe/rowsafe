@@ -108,13 +108,19 @@ func inDocker() bool { return strings.TrimSpace(os.Getenv(urlEnv)) != "" }
 
 // client talks to one Qdrant server's REST API.
 type client struct {
-	base    *url.URL
-	http    *http.Client
-	key     string
-	jwt     bool
+	base *url.URL
+	http *http.Client
+	key  string
+	jwt  bool
+	// bearer is a token sent as it is (a key's own token, to check it).
+	bearer  string
 	tokenMu sync.Mutex
-	token   string
-	tokenAt time.Time
+	tokens  map[string]agentToken // by access ("r", "m")
+}
+
+type agentToken struct {
+	token string
+	at    time.Time
 }
 
 // signToken makes a JWT (HS256) with claims, signed with key, the way
@@ -135,8 +141,38 @@ func signToken(key string, claims map[string]any) (string, error) {
 // agentTokenTTL is how long the agent's own tokens are valid.
 const agentTokenTTL = 5 * time.Minute
 
-// authHeader sets the request's credentials.
-func (c *client) authHeader(h http.Header) error {
+// readPOSTs are the POST requests that only read (searches, counts,
+// scrolls, points by id): a read-only token does for them.
+var readPOSTs = []string{"/points", "/points/count", "/points/scroll", "/points/query", "/points/query/batch", "/points/query/groups",
+	"/points/search", "/points/search/batch", "/points/search/groups", "/points/recommend", "/points/recommend/batch",
+	"/points/recommend/groups", "/points/discover", "/points/discover/batch", "/points/facet"}
+
+// accessFor is the least access a request needs: "r" (read-only: every
+// GET, snapshot downloads included, and the reading POSTs) or "m" (every
+// right: snapshots, restores, fixes, keys, collections).
+func accessFor(method, path string) string {
+	switch method {
+	case http.MethodGet, http.MethodHead:
+		return "r"
+	case http.MethodPost:
+		for _, s := range readPOSTs {
+			if strings.HasSuffix(path, s) && strings.HasPrefix(path, "/collections/") {
+				return "r"
+			}
+		}
+	}
+	return "m"
+}
+
+// authHeader sets the request's credentials: with JWT access control, a
+// token of the agent's own with the least access the request needs (valid
+// for a few minutes); without, the key itself (only over a connection
+// checked to reach Qdrant, newClient).
+func (c *client) authHeader(h http.Header, access string) error {
+	if c.bearer != "" {
+		h.Set("authorization", "Bearer "+c.bearer)
+		return nil
+	}
 	if c.key == "" {
 		return nil
 	}
@@ -146,15 +182,20 @@ func (c *client) authHeader(h http.Header) error {
 	}
 	c.tokenMu.Lock()
 	defer c.tokenMu.Unlock()
-	if c.token == "" || time.Since(c.tokenAt) > agentTokenTTL/2 {
+	if c.tokens == nil {
+		c.tokens = map[string]agentToken{}
+	}
+	t := c.tokens[access]
+	if t.token == "" || time.Since(t.at) > agentTokenTTL/2 {
 		now := time.Now()
-		t, err := signToken(c.key, map[string]any{"access": "m", "exp": now.Add(agentTokenTTL).Unix(), "subject": "rowsafe-agent"})
+		tok, err := signToken(c.key, map[string]any{"access": access, "exp": now.Add(agentTokenTTL).Unix(), "subject": "rowsafe-agent"})
 		if err != nil {
 			return err
 		}
-		c.token, c.tokenAt = t, now
+		t = agentToken{token: tok, at: now}
+		c.tokens[access] = t
 	}
-	h.Set("authorization", "Bearer "+c.token)
+	h.Set("authorization", "Bearer "+t.token)
 	return nil
 }
 
@@ -227,7 +268,7 @@ func (c *client) request(ctx context.Context, method, path string, q url.Values,
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
-	if err := c.authHeader(req.Header); err != nil {
+	if err := c.authHeader(req.Header, accessFor(method, path)); err != nil {
 		return nil, err
 	}
 	resp, err := c.http.Do(req)
@@ -292,26 +333,34 @@ func plainConnError(err error) error {
 	return err
 }
 
-// tlsFor is how the agent checks the server's certificate: on this
-// machine (loopback) the certificate is for the server's public names or
-// self-signed, and the connection never leaves the machine, so it is read
-// but not checked against a name; a sidecar's URL is checked against
-// ROWSAFE_QDRANT_CA_FILE when set.
+// errCAFile explains a sidecar reaching Qdrant over https without a CA.
+var errCAFile = errors.New("Rowsafe reaches Qdrant in another container over https only when it can check its certificate: " +
+	"set ROWSAFE_QDRANT_CA_FILE to the certificate (or its authority) Qdrant serves")
+
+// tlsFor is how the agent checks the server's certificate. A sidecar's
+// URL is checked against ROWSAFE_QDRANT_CA_FILE (required). On this
+// machine (loopback) the connection never leaves it: localDialTLS checks
+// it is Qdrant's (listener.go); the certificate, made for the server's
+// public names, isn't checked against a name.
 func tlsFor(base *url.URL) (*tls.Config, error) {
 	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
-	if ca := strings.TrimSpace(os.Getenv(caEnv)); ca != "" && !isLoopback(base.Hostname()) {
-		pem, err := os.ReadFile(ca)
-		if err != nil {
-			return nil, err
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("%s holds no certificate", ca)
-		}
-		cfg.RootCAs = pool
+	if isLoopback(base.Hostname()) {
+		cfg.InsecureSkipVerify = true //nolint:gosec // loopback: localDialTLS checks the certificate is Rowsafe's or the listener Qdrant's
 		return cfg, nil
 	}
-	cfg.InsecureSkipVerify = true //nolint:gosec // loopback, or a sidecar's private network without a CA file
+	ca := strings.TrimSpace(os.Getenv(caEnv))
+	if ca == "" {
+		return nil, errCAFile
+	}
+	pem, err := os.ReadFile(ca)
+	if err != nil {
+		return nil, err
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("%s holds no certificate", ca)
+	}
+	cfg.RootCAs = pool
 	return cfg, nil
 }
 
@@ -330,6 +379,10 @@ func newHTTPClient(base *url.URL) (*http.Client, error) {
 	}
 	tr := &http.Transport{TLSClientConfig: cfg, Proxy: nil, MaxIdleConnsPerHost: 4, IdleConnTimeout: 30 * time.Second,
 		DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext, TLSHandshakeTimeout: 10 * time.Second}
+	if isLoopback(base.Hostname()) {
+		tr.DialContext = localDial
+		tr.DialTLSContext = localDialTLS(cfg)
+	}
 	return &http.Client{Transport: tr}, nil
 }
 
@@ -378,9 +431,16 @@ func baseURL(ctx context.Context, l Login, port int) (*url.URL, error) {
 		return nil, fmt.Errorf("%s isn't a Qdrant URL (https://host:6333)", raw)
 	}
 	// Plain HTTP only on this machine, or to the database's container on
-	// a Docker sidecar's compose network (private to the host).
-	if u.Scheme == "http" && !isLoopback(u.Hostname()) && os.Getenv("ROWSAFE_MODE") != "docker-sidecar" {
-		return nil, fmt.Errorf("Rowsafe reaches Qdrant only over TLS, on this machine, or as a Docker sidecar on its compose network; %s is plain HTTP to another host", raw)
+	// a Docker sidecar's compose network (private to the host), and there
+	// with short-lived tokens only, never the key itself.
+	if u.Scheme == "http" && !isLoopback(u.Hostname()) {
+		if os.Getenv("ROWSAFE_MODE") != "docker-sidecar" {
+			return nil, fmt.Errorf("Rowsafe reaches Qdrant only over TLS, on this machine, or as a Docker sidecar on its compose network; %s is plain HTTP to another host", raw)
+		}
+		if l.Key != "" && !l.JWT {
+			return nil, fmt.Errorf("Rowsafe doesn't send Qdrant's key in the clear (%s is plain HTTP): turn on TLS in Qdrant "+
+				"(and set ROWSAFE_QDRANT_CA_FILE), or JSON Web Tokens (service.jwt_rbac: true) so only short-lived tokens cross", raw)
+		}
 	}
 	return u, nil
 }
