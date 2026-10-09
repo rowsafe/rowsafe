@@ -1,11 +1,16 @@
 package mcp
 
 import (
+	"cmp"
 	"context"
+	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/rowsafe/rowsafe/protocol"
 )
 
 // Direct tools for the most common changes to production, so an agent
@@ -18,7 +23,7 @@ type createCloudServerInput struct {
 	Name          string   `json:"name" jsonschema:"the server's name, also its database's: 2 to 40 lowercase letters, digits and hyphens, starting with a letter (like shop-db)"`
 	Region        string   `json:"region" jsonschema:"a region ID from cloud_catalog (it decides the cloud): pick one near the app"`
 	Size          string   `json:"size" jsonschema:"a size ID from cloud_catalog offered in that region and not sold out (a small app fits the smallest)"`
-	Engine        string   `json:"engine,omitempty" jsonschema:"the database: postgresql (default), mysql, mariadb, valkey, clickhouse or opensearch, as cloud_catalog offers them (MySQL not on Arm sizes; ClickHouse and OpenSearch on sizes with 4 GB of memory or more)"`
+	Engine        string   `json:"engine,omitempty" jsonschema:"the database (postgresql by default), as cloud_catalog offers them; cloudEngineField lists them when the tool is added"`
 	EngineVersion string   `json:"engine_version,omitempty" jsonschema:"the engine's version from cloud_catalog (PostgreSQL 15, 16, 17 or 18, default 17)"`
 	AllowedIPs    []string `json:"allowed_ips,omitempty" jsonschema:"who can connect to the database: the app's IP addresses or networks (203.0.113.4 or 203.0.113.0/24); empty: nobody until cloud_firewall opens it"`
 	Standby       bool     `json:"standby,omitempty" jsonschema:"also a standby server of the same size, ready to take over (clouds billed by the hour only); it doubles the price"`
@@ -51,7 +56,7 @@ func (t *tools) addChangeTools(s *sdk.Server) {
 	}
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "create_cloud_server",
-		Description: "Creates a Rowsafe Cloud server: a database (PostgreSQL by default; MySQL, MariaDB, Valkey, ClickHouse or Qdrant where cloud_catalog offers them) that Rowsafe runs and protects from the start (backups, Proof, Pulse), billed to the organization. Pick the region and size with cloud_catalog, " +
+		Description: "Creates a Rowsafe Cloud server: a database (PostgreSQL by default; " + cloudEngineNames(false) + " where cloud_catalog offers them) that Rowsafe runs and protects from the start (backups, Proof, Pulse), billed to the organization. Pick the region and size with cloud_catalog, " +
 			"tell the user the size and the price (per hour, and the most a month; a standby doubles it) and get their OK first." + actsAs + "create_cloud_server. " +
 			"A first payment (pay as you go not active yet, or a cloud billed by the month) is made by an owner at a checkout: an owner's request comes back with the checkout link to give them; the server is created once paid. " +
 			"Then follow it with get_cloud_server (wait_seconds) until it's ready, about 5 to 10 minutes.",
@@ -59,6 +64,7 @@ func (t *tools) addChangeTools(s *sdk.Server) {
 		InputSchema: withWait[createCloudServerInput](func(p map[string]*jsonschema.Schema) {
 			reason(p)
 			p["name"].Pattern = "^[a-z][a-z0-9-]{1,39}$"
+			p["engine"].Description = cloudEngineField()
 		}),
 	}, t.createCloudServer)
 
@@ -113,4 +119,79 @@ func (t *tools) applyFix(ctx context.Context, req *sdk.CallToolRequest, in apply
 		p["confirm"] = c
 	}
 	return t.fileChange(ctx, req, "apply_fix", in.Database, p, in.Reason, in.WaitSeconds)
+}
+
+// cloudEngineField is create_cloud_server's engine description, from
+// protocol.CloudEngines so a new engine shows up by itself: the IDs, then
+// which sizes can't run which engines (processors, memory).
+func cloudEngineField() string {
+	ids := make([]string, len(protocol.CloudEngines))
+	for i, e := range protocol.CloudEngines {
+		ids[i] = e.Engine
+		if e.Engine == protocol.EnginePostgreSQL {
+			ids[i] += " (default)"
+		}
+	}
+	s := "the database: " + orList(ids) + ", as cloud_catalog offers them"
+	if limits := cloudEngineLimits(); limits != "" {
+		s += " (" + limits + ")"
+	}
+	return s
+}
+
+// cloudEngineNames lists the engines new servers can get by name for a
+// sentence ("MySQL, MariaDB, ... or OpenSearch"), PostgreSQL only when
+// withPostgres.
+func cloudEngineNames(withPostgres bool) string {
+	var names []string
+	for _, e := range protocol.CloudEngines {
+		if withPostgres || e.Engine != protocol.EnginePostgreSQL {
+			names = append(names, e.Name)
+		}
+	}
+	return orList(names)
+}
+
+// cloudEngineLimits says which sizes can't run which engines: "MySQL not on
+// Arm sizes; ClickHouse and OpenSearch on sizes with 4 GB of memory or
+// more; Qdrant 2 GB or more".
+func cloudEngineLimits() string {
+	var arm []string
+	byMemory := map[int][]string{}
+	for _, e := range protocol.CloudEngines {
+		if e.AMD64Only {
+			arm = append(arm, e.Name)
+		}
+		if e.MinMemoryMB > 0 {
+			byMemory[e.MinMemoryMB] = append(byMemory[e.MinMemoryMB], e.Name)
+		}
+	}
+	var parts []string
+	if len(arm) > 0 {
+		parts = append(parts, andList(arm)+" not on Arm sizes")
+	}
+	mems := make([]int, 0, len(byMemory))
+	for m := range byMemory {
+		mems = append(mems, m)
+	}
+	slices.SortFunc(mems, func(a, b int) int { return cmp.Compare(b, a) })
+	for i, m := range mems {
+		gb := fmt.Sprintf("%g GB", float64(m)/1024)
+		if i == 0 {
+			parts = append(parts, andList(byMemory[m])+" on sizes with "+gb+" of memory or more")
+		} else {
+			parts = append(parts, andList(byMemory[m])+" "+gb+" or more")
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
+func orList(s []string) string  { return joinList(s, " or ") }
+func andList(s []string) string { return joinList(s, " and ") }
+
+func joinList(s []string, last string) string {
+	if len(s) < 2 {
+		return strings.Join(s, "")
+	}
+	return strings.Join(s[:len(s)-1], ", ") + last + s[len(s)-1]
 }

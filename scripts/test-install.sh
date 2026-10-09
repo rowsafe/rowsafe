@@ -1984,6 +1984,23 @@ qdrant_flow_tests() {
   [ "$(cat "$F/qdrant-save-login.stdin")" = Conf-Qd-Key-789 ] || fail "$name: the configuration file's key didn't reach the agent"
   grep -q "uses the api_key from Qdrant's configuration file" "$W/out" || fail "$name: not said where the key came from"
   ! grep -q "Conf-Qd-Key-789" "$W/out" || fail "$name: the key was printed"
+  grep -q "service.alt_api_key" "$W/out" || fail "$name: not said how to give Rowsafe a key of its own"
+  # Root set an alternative key in the configuration file: Rowsafe's own
+  # (qdrant login), never the apps' api_key, and on a later run too.
+  printf 'service:\n  api_key: "Conf-Qd-Key-789"\n  alt_api_key: Conf-Qd-Alt-321\n' >"$W/qdrant.yaml"
+  scenario "discover_out=$qd" "qdrant-status_out=$(qdst missing)" "plan_out=$qdplan" "wait_out=$done_"
+  expect_ok "--protect: Rowsafe's own key from Qdrant's configuration file" env ROWSAFE_QDRANT_CONFIG="$W/qdrant.yaml" "$INSTALLER" --protect vectors
+  [ "$(cat "$F/qdrant-login.stdin")" = Conf-Qd-Alt-321 ] || fail "$name: the alternative key didn't reach the agent"
+  not_called "qdrant-save-login"
+  ! grep -q "Conf-Qd-Alt-321" "$W/out" || fail "$name: the key was printed"
+  scenario "discover_out=$qd" "qdrant-status_out=$(qdst ok yes)" "plan_out=$qdplan" "wait_out=$done_"
+  expect_ok "--protect: an alternative key added later replaces the api_key" env ROWSAFE_QDRANT_CONFIG="$W/qdrant.yaml" "$INSTALLER" --protect vectors
+  [ "$(cat "$F/qdrant-login.stdin")" = Conf-Qd-Alt-321 ] || fail "$name: the alternative key didn't reach the agent"
+  scenario "discover_out=$qd" "qdrant-status_out=$(qdst ok yes)" "qdrant-login_rc=12" "plan_out=$qdplan" "wait_out=$done_"
+  expect_ok "--protect: an alternative key Qdrant hasn't loaded yet" env ROWSAFE_QDRANT_CONFIG="$W/qdrant.yaml" "$INSTALLER" --protect vectors
+  grep -q "restart Qdrant when it suits you" "$W/out" || fail "$name: not said why the key was refused"
+  not_called "qdrant-save-login"
+  called "apply --database db_fake"
   scenario "discover_out=$qd" "qdrant-status_out=$(qdst missing)"
   expect_fail "--protect: Qdrant without a key" "ROWSAFE_QDRANT_API_KEY" "$INSTALLER" --protect vectors
   grep -q "isn't ready for backups" "$W/out" || fail "$name: not explained"

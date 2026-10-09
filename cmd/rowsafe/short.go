@@ -91,6 +91,11 @@ set, or when the organization has one database ("rowsafe help names").
 "rowsafe help COMMAND" shows a command's details; "rowsafe help all" lists everything.
 `
 
+func init() {
+	helpDetails["adopt"] = "--engine is one of " + adoptEngineList() + ".\n" +
+		"Without --port, --socket-dir and --retention-full, each engine gets its own defaults."
+}
+
 // helpDetails adds explanations that don't fit the one-line reference.
 var helpDetails = map[string]string{
 	"names": nameRules,

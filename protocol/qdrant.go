@@ -26,17 +26,25 @@ import (
 //     compose network with short-lived tokens only, never the key itself.
 //     SocketDir is unused.
 //   - Rowsafe's access: Qdrant has no role that can take a full snapshot
-//     without every right, so Rowsafe gets a key of its own, separate from
-//     the server's own keys: the alternative key (service.alt_api_key),
-//     which root sets and hands to the agent at install. The server's own
-//     keys (api_key, read_only_api_key) stay root's and never reach
-//     Rowsafe. With JWT access control on (service.jwt_rbac), the agent
-//     never sends its key at all: it signs a token valid for a few minutes
-//     for each request, read-only for monitoring and checks, with every
-//     right only for snapshots, restores, fixes and keys. Without JWT
-//     access control, the key itself goes to Qdrant (on 127.0.0.1, or over
-//     TLS). Root can rotate Rowsafe's key alone; doing so also ends every
-//     key made in Databases & users (they are signed with it).
+//     without every right, so Rowsafe gets a key of its own where it can,
+//     separate from the server's own keys: the alternative key
+//     (service.alt_api_key), which --install-qdrant makes, or which root
+//     set in Qdrant's configuration file on a Qdrant already running; root
+//     hands it to the agent at install. The server's own keys (api_key,
+//     read_only_api_key) then stay root's and never reach Rowsafe, and root
+//     can rotate Rowsafe's key alone; doing so also ends every key made in
+//     Databases & users (they are signed with it). Qdrant reads keys only
+//     when it starts, and Rowsafe never restarts it on its own: on a Qdrant
+//     already running without an alternative key, the agent gets the key
+//     the person gives (normally the api_key, which the apps use too), so
+//     changing that key means giving the agent the new one (the installer
+//     again); the installer says how to give Rowsafe a key of its own, and
+//     uses it on its next run. With JWT access control on
+//     (service.jwt_rbac), the agent never sends its key at all: it signs a
+//     token valid for a few minutes for each request, read-only for
+//     monitoring and checks, with every right only for snapshots,
+//     restores, fixes and keys. Without JWT access control, the key itself
+//     goes to Qdrant (on 127.0.0.1, or over TLS).
 //   - Backups are Qdrant's own full storage snapshot (every collection and
 //     alias; POST /snapshots), downloaded from the server over its API as
 //     Qdrant writes it, encrypted on the server (objstore.Seal) and stored

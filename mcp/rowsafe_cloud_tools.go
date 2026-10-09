@@ -100,7 +100,7 @@ type CloudServerView struct {
 	Step       string   `json:"step,omitempty" jsonschema:"where it is, in plain words"`
 	Problem    string   `json:"problem,omitempty"`
 	Price      string   `json:"price,omitempty"`
-	Engine     string   `json:"engine,omitempty" jsonschema:"the database: postgresql, mysql, mariadb, valkey, clickhouse or opensearch"`
+	Engine     string   `json:"engine,omitempty" jsonschema:"the database's engine (postgresql, mysql, ...: cloud_catalog lists them)"`
 	Version    string   `json:"version,omitempty" jsonschema:"the engine's version"`
 	PostgreSQL string   `json:"postgresql,omitempty" jsonschema:"the PostgreSQL major version (PostgreSQL servers)"`
 	Database   string   `json:"database,omitempty" jsonschema:"its database in Rowsafe (name), once ready: what database takes in the other tools"`
@@ -147,7 +147,7 @@ func (t *tools) addRowsafeCloudReadTools(s *sdk.Server) {
 		Name: "cloud_catalog",
 		Description: "Shows what a new Rowsafe Cloud server can be: each cloud with its regions and sizes (CPUs, memory, disk), the price of an hour and the most a month costs " +
 			"(or the monthly price), the traffic included, where a size is sold out right now, whether servers there can have a standby, whether the organization's pay as you go is active, " +
-			"how many servers it may have, and the databases a new server can get (PostgreSQL, MySQL, MariaDB, Valkey, ClickHouse, OpenSearch where offered) with their versions and ports. " +
+			"how many servers it may have, and the databases a new server can get (" + cloudEngineNames(true) + ", where offered) with their versions and ports. " +
 			"Use it before create_cloud_server or clone_to_new_server (request_change) to pick the database, the region and the cheapest size that fits. Read-only.",
 		Annotations: readOnly("Rowsafe Cloud catalog"),
 	}, t.cloudCatalog)
@@ -291,7 +291,7 @@ func (t *tools) cloudCatalog(ctx context.Context, _ *sdk.CallToolRequest, _ noIn
 		b.line("Cheapest free now: %s size %s in %s (%s).", best.Cloud, best.Size, best.Region, price)
 	}
 	out.Guidance = "Pick the cheapest size that fits the app (a small app's database fits the smallest size), in a region near the app. " +
-		"Then ask for it with request_change create_cloud_server (name, region, size, allowed_ips, and engine with engine_version when the app needs MySQL, MariaDB, Valkey, ClickHouse or OpenSearch rather than PostgreSQL; " +
+		"Then ask for it with request_change create_cloud_server (name, region, size, allowed_ips, and engine with engine_version when the app needs " + cloudEngineNames(false) + " rather than PostgreSQL; " +
 		"the reason says what it's for). It runs as the person who connected you, with their rights: an owner's or admin's request creates the server (and its cost) right away, " +
 		"unless the organization asks for approval first; a member's waits for an owner or admin. Confirm the size and its price with the user before asking."
 	b.line("Next: %s", out.Guidance)

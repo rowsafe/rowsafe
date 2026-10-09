@@ -1026,8 +1026,9 @@ detect_qdrant_host() {
   AGENT_HOME=$STATE_DIR
 }
 # qdrant_setup: on a Qdrant server without PostgreSQL, a unit drop-in runs
-# the agent as rowsafe. The qdrant group lets it read Qdrant's settings
-# (/etc/qdrant/config.yaml: no keys there, those are root's); everything
+# the agent as rowsafe, outside Qdrant's group: it reads Qdrant's settings
+# only where everyone can (/etc/qdrant/config.yaml: no keys there with
+# --install-qdrant, those are root's), never Qdrant's files; everything
 # else goes through Qdrant's API.
 qdrant_setup() {
   _dropin=/etc/systemd/system/$SERVICE.d
@@ -3178,9 +3179,10 @@ opensearch_listen_public() {
 # A Qdrant someone runs already is found by `rowsafe-agent setup discover`
 # like the other engines (engine "qdrant"). Backups go through its API (its
 # own snapshots), so no backup tool is installed and nothing restarts.
-# Rowsafe needs a key that manages snapshots: ROWSAFE_QDRANT_API_KEY, the
+# Rowsafe needs a key that manages snapshots: its own, the alt_api_key root
+# set in Qdrant's configuration file, else ROWSAFE_QDRANT_API_KEY, the
 # api_key in its configuration file, or one typed here (saved for the agent
-# only).
+# only; qdrant_prepare).
 
 qdrant_present() {
   have qdrant || [ -x /usr/bin/qdrant ] ||
@@ -3488,12 +3490,13 @@ qdrant_status() {
   [ "$QD_BINARY" != - ] || QD_BINARY=''
 }
 
-# qdrant_config_key prints the api_key in Qdrant's configuration file, when
-# root can read one there.
+# qdrant_config_key [NAME] prints the key NAME (api_key, the default, or
+# alt_api_key) in Qdrant's configuration file, when root can read one there.
 qdrant_config_key() {
+  _name=${1:-api_key}
   for _f in "${ROWSAFE_QDRANT_CONFIG:-}" "$QDRANT_CONF" /etc/qdrant/config/production.yaml; do
     [ -n "$_f" ] && [ -f "$_f" ] && [ ! -L "$_f" ] || continue
-    _v=$(sed -n 's/^[[:space:]]*api_key:[[:space:]]*"\{0,1\}\([^"#[:space:]]*\)"\{0,1\}.*$/\1/p' "$_f" | head -n 1)
+    _v=$(sed -n "s/^[[:space:]]*$_name:[[:space:]]*\"\{0,1\}\([^\"#[:space:]]*\)\"\{0,1\}.*\$/\1/p" "$_f" | head -n 1)
     if [ -n "$_v" ]; then
       printf '%s\n' "$_v"
       return 0
@@ -3502,10 +3505,14 @@ qdrant_config_key() {
   return 1
 }
 
-# qdrant_prepare gets a Qdrant server ready for its plan: Rowsafe's key,
-# root's way first (the alternative key --install-qdrant made), else the
-# person's (ROWSAFE_QDRANT_API_KEY, the configuration file's api_key, or
-# typed here once), saved for the agent only. Nothing restarts.
+# qdrant_prepare gets a Qdrant server ready for its plan: Rowsafe's own key
+# first (the alternative key, service.alt_api_key, that --install-qdrant
+# made or that root set in Qdrant's configuration file), which root can
+# change without touching the apps' keys; else the person's
+# (ROWSAFE_QDRANT_API_KEY, the configuration file's api_key, or typed here
+# once). Saved for the agent only, given on stdin. Nothing restarts: adding
+# an alternative key to a Qdrant already running needs a restart, which is
+# root's to do.
 qdrant_prepare() {
   if ! qdrant_status; then
     sed 's/^/    /' "$TMP/qdstatus.err" >&2
@@ -3513,20 +3520,28 @@ qdrant_prepare() {
     return 1
   fi
   [ -n "$QD_BINARY" ] || note "Proof and Rewind copies need the qdrant program, which isn't on this server."
-  case $QD_LOGIN in
-    ok) return 0 ;;
-    none)
-      warn "Qdrant on port $C_PORT asks for no key: anyone who can reach it can read and delete every collection. Pulse shows how to turn keys on."
-      return 0
-      ;;
-  esac
-  if [ -s "$QDRANT_KEYS_DIR/alt-api-key" ]; then
+  if [ "$QD_LOGIN" = none ]; then
+    warn "Qdrant on port $C_PORT asks for no key: anyone who can reach it can read and delete every collection. Pulse shows how to turn keys on."
+    return 0
+  fi
+  if [ "$QD_LOGIN" != ok ] && [ -s "$QDRANT_KEYS_DIR/alt-api-key" ]; then
     if agent_in qdrant login --port "$C_PORT" <"$QDRANT_KEYS_DIR/alt-api-key" >"$TMP/qdlogin" 2>&1; then
       ok "Rowsafe's own Qdrant key (alt_api_key) saved for the agent only; it signs short-lived tokens with it, the key never goes to Qdrant"
       return 0
     fi
     sed 's/^/    /' "$TMP/qdlogin" >&2
   fi
+  # An alternative key root set in the configuration file is tried on every
+  # run, so one added later replaces the api_key Rowsafe was given.
+  if _alt=$(qdrant_config_key alt_api_key); then
+    if printf '%s\n' "$_alt" | agent_in qdrant login --port "$C_PORT" >"$TMP/qdlogin" 2>&1; then
+      ok "Rowsafe's own Qdrant key (the alt_api_key in Qdrant's configuration file) saved for the agent only; you can change it without touching your apps' api_key"
+      return 0
+    fi
+    sed 's/^/    /' "$TMP/qdlogin" >&2
+    note "Qdrant refused the alt_api_key in its configuration file (it reads it when it starts: restart Qdrant when it suits you, then run this installer again)."
+  fi
+  [ "$QD_LOGIN" != ok ] || return 0
   _key=${ROWSAFE_QDRANT_API_KEY:-}
   if [ -z "$_key" ] && _key=$(qdrant_config_key); then
     note "Rowsafe uses the api_key from Qdrant's configuration file (saved for the agent only, never sent to Rowsafe)."
@@ -3546,6 +3561,7 @@ qdrant_prepare() {
     return 1
   fi
   ok "the Qdrant key is saved for the agent only"
+  note "When your apps use this key too (the api_key), changing it means running this installer again. For a key of Rowsafe's own that you can change alone, set service.alt_api_key in Qdrant's configuration file, restart Qdrant when it suits you, and run this installer again."
   qdrant_status || return 0
   [ "$QD_JWT" != no ] ||
     note "Qdrant's JSON Web Tokens are off (service.jwt_rbac): backups work; Databases & users makes keys once they are on."
