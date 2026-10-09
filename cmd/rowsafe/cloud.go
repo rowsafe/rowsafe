@@ -813,6 +813,10 @@ func printServer(s client.CloudServer) {
 			if e, ok := protocol.CloudEngineFor(s.Engine); ok && e.Engine == protocol.EngineClickHouse && len(e.Ports) > 1 {
 				row("HTTPS interface", "https://"+net.JoinHostPort(host, strconv.Itoa(e.Ports[1])))
 			}
+			if e, ok := protocol.CloudEngineFor(s.Engine); ok && e.Engine == protocol.EngineQdrant && len(e.Ports) > 1 {
+				row("gRPC", net.JoinHostPort(host, strconv.Itoa(e.Ports[1]))+" (TLS)")
+				row("API key", "make one in the dashboard (Databases & users): it is shown once, to you only")
+			}
 		}
 		if s.Address != nil && s.Address.ReadHost != "" && s.Address.ReadHost != host {
 			row("Read-only queries", s.Address.ReadHost)

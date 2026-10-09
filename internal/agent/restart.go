@@ -220,6 +220,8 @@ func engineDefaultUnit(engine string) string {
 		return "valkey-server"
 	case protocol.EngineOpenSearch:
 		return "opensearch"
+	case protocol.EngineQdrant:
+		return "qdrant"
 	}
 	return "postgresql"
 }
@@ -242,6 +244,8 @@ func dockerServiceHint(db protocol.DatabaseSpec) string {
 		return "valkey"
 	case protocol.EngineOpenSearch:
 		return "opensearch"
+	case protocol.EngineQdrant:
+		return "qdrant"
 	}
 	return "postgres"
 }

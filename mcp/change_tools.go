@@ -51,7 +51,7 @@ func (t *tools) addChangeTools(s *sdk.Server) {
 	}
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "create_cloud_server",
-		Description: "Creates a Rowsafe Cloud server: a database (PostgreSQL by default; MySQL, MariaDB, Valkey or ClickHouse where cloud_catalog offers them) that Rowsafe runs and protects from the start (backups, Proof, Pulse), billed to the organization. Pick the region and size with cloud_catalog, " +
+		Description: "Creates a Rowsafe Cloud server: a database (PostgreSQL by default; MySQL, MariaDB, Valkey, ClickHouse or Qdrant where cloud_catalog offers them) that Rowsafe runs and protects from the start (backups, Proof, Pulse), billed to the organization. Pick the region and size with cloud_catalog, " +
 			"tell the user the size and the price (per hour, and the most a month; a standby doubles it) and get their OK first." + actsAs + "create_cloud_server. " +
 			"A first payment (pay as you go not active yet, or a cloud billed by the month) is made by an owner at a checkout: an owner's request comes back with the checkout link to give them; the server is created once paid. " +
 			"Then follow it with get_cloud_server (wait_seconds) until it's ready, about 5 to 10 minutes.",

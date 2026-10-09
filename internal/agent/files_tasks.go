@@ -141,7 +141,7 @@ var (
 		{"attachments", "attachments"},
 	}
 	skipDirs = map[string]bool{"node_modules": true, "vendor": true, ".git": true, ".cache": true, "cache": true,
-		"tmp": true, "proc": true, "sys": true, "rowsafe": true, "postgresql": true, "mysql": true, "mongodb": true, "clickhouse": true, "overlay2": true, "containers": true,
+		"tmp": true, "proc": true, "sys": true, "rowsafe": true, "postgresql": true, "mysql": true, "mongodb": true, "clickhouse": true, "qdrant": true, "overlay2": true, "containers": true,
 		"image": true, "buildkit": true}
 )
 
@@ -238,7 +238,7 @@ var uploadVolumeRE = regexp.MustCompile(`(?i)(upload|media|storage|files|attach|
 
 func looksLikeUploads(name string) bool {
 	l := strings.ToLower(name)
-	for _, db := range []string{"postgres", "pgdata", "rowsafe", "mysql", "mariadb", "mongo", "clickhouse"} {
+	for _, db := range []string{"postgres", "pgdata", "rowsafe", "mysql", "mariadb", "mongo", "clickhouse", "qdrant"} {
 		if strings.Contains(l, db) {
 			return false
 		}

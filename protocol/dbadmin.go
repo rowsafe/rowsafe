@@ -137,6 +137,11 @@ type DBAdminParams struct {
 	// is every key). Redis users reach every logical database, so
 	// Databases stays empty for them.
 	KeyPattern string `json:"key_pattern,omitempty"`
+	// ExpiresDays: a new Qdrant key (or its new token, reset_password)
+	// expires that many days from now. 0: a new admin key gets
+	// QdrantAdminKeyDefaultDays and another key never expires; a new token
+	// keeps the key's choice. Qdrant only.
+	ExpiresDays int `json:"expires_days,omitempty"`
 
 	// drop_user: who gets the objects the user owns. Required when it owns
 	// any.
@@ -230,6 +235,15 @@ func ConnectionURL(c DBConnection, password string) string {
 	host := c.Host
 	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") { // IPv6
 		host = "[" + host + "]"
+	}
+	if NormalizeEngine(c.Engine) == EngineQdrant {
+		// Qdrant's clients take the REST URL and the key apart: the key
+		// (password) is never in the URL.
+		scheme := "http"
+		if c.SSLMode == "require" {
+			scheme = "https"
+		}
+		return fmt.Sprintf("%s://%s:%d", scheme, host, c.Port)
 	}
 	scheme := "postgresql"
 	switch NormalizeEngine(c.Engine) {
@@ -379,6 +393,8 @@ type DBDatabase struct {
 	// Documents is the number of documents in an OpenSearch index or data
 	// stream.
 	Documents int64 `json:"documents,omitempty"`
+	// Points is the number of points in a Qdrant collection.
+	Points int64 `json:"points,omitempty"`
 	// Extensions installed (nil when the database couldn't be read).
 	Extensions []DBInstalledExtension `json:"extensions,omitempty"`
 }
@@ -628,7 +644,7 @@ func ValidateDBAdminFor(engine string, p DBAdminParams) error {
 		default:
 			return fmt.Errorf("access must be read_only, read_write or owner")
 		}
-		if len(p.Databases) == 0 && engine != EngineRedis && engine != EngineValkey {
+		if len(p.Databases) == 0 && engine != EngineRedis && engine != EngineValkey && engine != EngineQdrant {
 			return fmt.Errorf("choose at least one database the user can use")
 		}
 		if len(p.Databases) > maxDBAdminList {
@@ -717,6 +733,7 @@ var systemDatabases = map[string][]string{
 	EngineMariaDB:    {"mysql", "sys", "information_schema", "performance_schema"},
 	EngineMongoDB:    {"admin", "local", "config"},
 	EngineClickHouse: {"system", "information_schema", "INFORMATION_SCHEMA", "default"},
+	EngineQdrant:     {QdrantKeysCollection},
 }
 
 // SystemDatabaseFor reports whether name is one of engine's own databases.
@@ -757,6 +774,14 @@ func validateDBAdminEngine(engine string, p DBAdminParams) error {
 		}
 	} else if p.KeyPattern != "" {
 		return fmt.Errorf("key patterns are a Redis feature; %s users get access to databases", name)
+	}
+	if engine != EngineQdrant && p.ExpiresDays != 0 {
+		return fmt.Errorf("expiring keys are a Qdrant feature; %s users have passwords", name)
+	}
+	if engine == EngineQdrant {
+		if err := validateQdrantDBAdmin(p); err != nil {
+			return err
+		}
 	}
 	if engine != EnginePostgreSQL {
 		switch p.Action {

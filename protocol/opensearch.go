@@ -94,7 +94,7 @@ var OpenSearchSystemUsers = []string{"admin", "kibanaserver", "kibanaro", "logst
 // listens on the server itself only. 4 GB of memory at least (half of it
 // for OpenSearch's heap).
 var opensearchCloud = CloudEngine{Engine: EngineOpenSearch, Name: "OpenSearch", Versions: []string{"3"}, DefaultVersion: "3",
-	Port: 9200, Scheme: "https", MinMemoryMB: 4096,
+	Port: 9200, Scheme: "https", MinMemoryMB: 4096, SnapshotsOnly: true,
 	Note: "OpenSearch 3 from OpenSearch's own packages, one node. Apps connect over HTTPS on port 9200 with a user and password. " +
 		"Backups are its own snapshots, every 30 minutes and on every Mark: restores go back to a snapshot, not to any second. Sizes with 4 GB of memory or more."}
 

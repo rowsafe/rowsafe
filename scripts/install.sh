@@ -70,7 +70,16 @@
 #                          "admin" whose random password stays root's
 #                          (/etc/rowsafe/opensearch), TLS on 9200, the
 #                          node-to-node port on 127.0.0.1 only, half the memory
-#                          for its heap, Performance Analyzer off. Needs 4 GB
+#                          for its heap, Performance Analyzer off. Needs 4 GB of memory.
+#   --install-qdrant 1.19  the same for Qdrant 1.19 (Apache-2.0) from Qdrant's
+#                          official release (GitHub; the Debian package on
+#                          Intel/AMD, the static program on Arm), pinned and
+#                          checked against its SHA-256: its own user and a
+#                          sandboxed systemd unit, telemetry off, an admin key,
+#                          a read-only key and Rowsafe's own key (all random,
+#                          root's only, /etc/rowsafe/qdrant), JSON Web Tokens
+#                          for the keys made in Databases & users; servers from
+#                          2 GB of memory. Only one --install-X per run
 #   --listen-public        PostgreSQL listens on every address: TLS on (a
 #                          self-signed certificate made here), SCRAM-SHA-256
 #                          passwords for logins from the network (hostssl rules
@@ -84,6 +93,8 @@
 #                          8443 (HTTPS), plain 9000 and 8123 on 127.0.0.1 only;
 #                          --install-opensearch: HTTPS on 9200 only, 9300 on
 #                          127.0.0.1
+#                          with --install-qdrant: TLS only, REST on 6333 and
+#                          gRPC on 6334 (the cluster port stays closed)
 #   (Permissions: without a terminal, restart, create-cluster, updates, pooler,
 #   tuning, sqlite-modes and files are allowed unless --no-allow-X; the
 #   server's own security updates, reboot, firewall and pooler-public only
@@ -197,8 +208,8 @@ RESTART_ALLOW_FILE=$CONFIG_DIR/restart-allowed
 RESTART_DIR=$STATE_DIR/restart
 # The database units the restart helper acts on (its db_unit_re): Debian's
 # PostgreSQL clusters and the MySQL, MariaDB, MongoDB, ClickHouse, Redis and
-# Valkey units (and OpenSearch's).
-DB_UNIT_RE='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server|opensearch|(redis|valkey)(-server)?(@[A-Za-z0-9_.-]+)?)[.]service$'
+# Valkey units (and OpenSearch's and Qdrant's).
+DB_UNIT_RE='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server|opensearch|(redis|valkey)(-server)?(@[A-Za-z0-9_.-]+)?|qdrant)[.]service$'
 # Forks (--allow-create-cluster): new clusters created by their own unit,
 # started by the restart helper.
 CREATE_HELPER=$LIB_DIR/rowsafe-pg-create-cluster
@@ -311,8 +322,8 @@ REDIS_CLONES=''    # --redis-clones (yes): Redis/Valkey servers here may receive
 MONGODB_REPLSET='' # --mongodb-replica-set (yes) / --no-mongodb-replica-set (no); '' = ask on a terminal
 INSTALL_PG=''      # --install-postgres VERSION (servers Rowsafe creates)
 PG_EXTENSIONS=''   # --pg-extensions NAME,... (with --install-postgres): vector, postgis, timescaledb
-INSTALL_DB=''      # --install-mysql / -mariadb / -valkey / -clickhouse: mysql, mariadb, valkey or clickhouse
-INSTALL_DB_VERSION='' # its version (8.4; 11.4 or 11.8; 8; 26.3 or 26.8)
+INSTALL_DB=''      # --install-mysql / -mariadb / -valkey / -clickhouse / -qdrant: mysql, mariadb, valkey, clickhouse or qdrant
+INSTALL_DB_VERSION='' # its version (8.4; 11.4 or 11.8; 8; 26.3 or 26.8; 1.19)
 LISTEN_PUBLIC=0    # --listen-public
 PG_OURS=0          # the PostgreSQL here is the one --install-postgres installed
 DB_OURS=0          # the INSTALL_DB server here is the one this installer installed
@@ -320,7 +331,8 @@ DB_STARTED=0       # this run started it (its settings were in place before)
 DB_FRESH=0         # this run installed it (nothing runs on it yet)
 CH_CONF_CHANGED=0  # --install-clickhouse's settings changed in this run
 OS_CONF_CHANGED=0  # --install-opensearch's settings changed in this run
-INSTALL_TWICE="--install-postgres, --install-mysql, --install-mariadb, --install-valkey, --install-clickhouse and --install-opensearch each install a database server on a fresh server: give only one"
+QD_CONF_CHANGED=0  # --install-qdrant's settings, keys or unit changed in this run
+INSTALL_TWICE="--install-postgres, --install-mysql, --install-mariadb, --install-valkey, --install-clickhouse, --install-opensearch and --install-qdrant each install a database server on a fresh server: give only one"
 SQLITE_PATHS=''    # --sqlite PATH, one per line
 SQLITE_LIST=$CONFIG_DIR/sqlite-paths # the agent's SQLite files (one per line)
 SQLITE_CLONE_DIRS='' # --sqlite-clone-dir DIR, one per line
@@ -423,6 +435,12 @@ Options (when piping, pass them after `sh -s --`):
                          9200 (a certificate made here), the node-to-node port 9300 on
                          127.0.0.1 only, half of the memory for OpenSearch (at most 31 GB),
                          Performance Analyzer off. Needs 4 GB of memory or more.
+  --install-qdrant 1.19  the same for Qdrant 1.19 (Apache-2.0) from Qdrant's official
+                         release on GitHub (pinned, its SHA-256 checked before anything
+                         runs; the Debian package on Intel/AMD, the static program on
+                         Arm): its own user, a sandboxed unit, telemetry off, an admin
+                         key, a read-only key and Rowsafe's own key, random and kept for
+                         root only in /etc/rowsafe/qdrant. Needs 2 GB of memory or more.
                          Each --install-X refuses when a database server is already
                          installed (a re-run keeps the one it installed); give only one
   --listen-public        make PostgreSQL reachable from the network: it listens on every
@@ -439,6 +457,7 @@ Options (when piping, pass them after `sh -s --`):
                          8443 (HTTPS); the plain ports 9000 and 8123 on 127.0.0.1 only;
                          with --install-opensearch: HTTPS on 9200 (passwords only); 9300
                          stays on 127.0.0.1
+                         with --install-qdrant: TLS only, REST on 6333 and gRPC on 6334
   --sqlite PATH          protect the SQLite database file PATH (repeat for several);
                          with --protect NAME, give exactly one. The installer also finds
                          the SQLite files running apps have open and asks about each
@@ -609,7 +628,7 @@ Turning on backups:
   backups in Rowsafe Storage with a passphrase generated on the server (see it
   in the dashboard, sealed to your browser) and turns them on. The same with
   --install-mysql 8.4, --install-mariadb 11.8, --install-valkey 8,
-  --install-clickhouse 26.8 or --install-opensearch 3 instead.
+  --install-clickhouse 26.8, --install-opensearch 3 or --install-qdrant 1.19 instead.
 
   ClickHouse: Rowsafe's own ClickHouse user is added as
   /etc/clickhouse-server/users.d/rowsafe.xml (ClickHouse loads it by itself,
@@ -995,13 +1014,53 @@ opensearch_setup() {
   fi
 }
 # <<< opensearch
+# >>> qdrant: without PostgreSQL, MySQL/MariaDB, MongoDB, ClickHouse, Redis
+# and Valkey but with Qdrant, the agent runs as its own system user,
+# rowsafe, too.
+detect_qdrant_host() {
+  [ "$HOST_ENGINE" = postgresql ] || return 0
+  id -u postgres >/dev/null 2>&1 && return 0
+  qdrant_present || return 0
+  HOST_ENGINE=qdrant
+  use_rowsafe_user
+  AGENT_HOME=$STATE_DIR
+}
+# qdrant_setup: on a Qdrant server without PostgreSQL, a unit drop-in runs
+# the agent as rowsafe. The qdrant group lets it read Qdrant's settings
+# (/etc/qdrant/config.yaml: no keys there, those are root's); everything
+# else goes through Qdrant's API.
+qdrant_setup() {
+  _dropin=/etc/systemd/system/$SERVICE.d
+  if [ "$HOST_ENGINE" != qdrant ]; then
+    [ ! -f "$_dropin/10-qdrant.conf" ] || { rm -f "$_dropin/10-qdrant.conf"; UNIT_CHANGED=1; CHANGED=1; }
+    return 0
+  fi
+  install -d -m 0755 "$_dropin"
+  if {
+    echo "# Written by the Rowsafe installer: this server runs Qdrant."
+    echo "[Unit]"
+    echo "After=qdrant.service"
+    echo "[Service]"
+    echo "User=rowsafe"
+    echo "Group=rowsafe"
+    # Not in Qdrant's group: the agent reads Qdrant's settings (keyless,
+    # readable by all), never its files or keys; Qdrant reads the
+    # certificate's key through the folder's group (setgid).
+    # --listen-public's certificate (--install-qdrant): the agent replaces
+    # it with one from Let's Encrypt.
+    [ ! -d "$QDRANT_TLS_DIR" ] || echo "ReadWritePaths=-$QDRANT_TLS_DIR"
+  } | write_file "$_dropin/10-qdrant.conf" 0644 root:root; then
+    UNIT_CHANGED=1 CHANGED=1
+  fi
+}
+# <<< qdrant
 # >>> mysql
 
 engine_label() {
   case ${1:-$HOST_ENGINE} in
     mysql) echo MySQL ;; mariadb) echo MariaDB ;; mongodb) echo MongoDB ;; clickhouse) echo ClickHouse ;;
     opensearch) echo OpenSearch ;;
-    redis) echo Redis ;; valkey) echo Valkey ;; sqlite) echo SQLite ;; *) echo PostgreSQL ;;
+    redis) echo Redis ;; valkey) echo Valkey ;; sqlite) echo SQLite ;; qdrant) echo Qdrant ;; *) echo PostgreSQL ;;
   esac
 }
 
@@ -1149,7 +1208,7 @@ mysql_standby_wanted() {
 check_postgres() {
   [ "$HOST_ENGINE" = postgresql ] || return 0 # mysql
   id -u "$AGENT_USER" >/dev/null 2>&1 ||
-    die "no '$AGENT_USER' user on this host. Rowsafe adopts an existing PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis or Valkey; install one first."
+    die "no '$AGENT_USER' user on this host. Rowsafe adopts an existing PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey or Qdrant; install one first."
   PG_MAJORS=''
   for bin in /usr/lib/postgresql/*/bin/postgres; do
     [ -x "$bin" ] || continue
@@ -1158,7 +1217,7 @@ check_postgres() {
   done
   PG_MAJORS=${PG_MAJORS# }
   if [ -z "$PG_MAJORS" ] && [ -z "${ROWSAFE_PG_BIN_DIR:-}" ] && ! mongodb_present && ! clickhouse_present && ! redis_present &&
-    ! opensearch_present; then
+    ! opensearch_present && ! qdrant_present; then
     die "no PostgreSQL server found under /usr/lib/postgresql. Restore drills need the server binaries (pg_ctl); set ROWSAFE_PG_BIN_DIR if they live elsewhere."
   fi
 }
@@ -1638,6 +1697,32 @@ OPENSEARCH_SYSCTL=/etc/sysctl.d/90-rowsafe-opensearch.conf
 OPENSEARCH_TRANSPORT_DIR=/etc/ssl/rowsafe-opensearch-transport
 OPENSEARCH_TLS_DIR=/etc/ssl/rowsafe-opensearch
 # <<< opensearch
+# Qdrant (--install-qdrant): its official release on GitHub, pinned to one
+# version and checked against the SHA-256 Rowsafe recorded for it before
+# anything runs (Qdrant publishes no signatures or checksum files; GitHub's
+# own digests of these files say the same): the Debian package on Intel and
+# AMD, the static program on Arm (Qdrant publishes no Arm package).
+QDRANT_VERSION=1.19.2
+QDRANT_URL=https://github.com/qdrant/qdrant/releases/download/v$QDRANT_VERSION
+QDRANT_DEB_AMD64=qdrant_${QDRANT_VERSION}-1_amd64.deb
+QDRANT_DEB_AMD64_SHA256=c05e56a92fbece506ea7d3d4b56d911d2e905cccf7b7df87465647ee1a1e5f61
+QDRANT_TGZ_ARM64=qdrant-aarch64-unknown-linux-musl.tar.gz
+QDRANT_TGZ_ARM64_SHA256=6970b93b56fa1203f0cea47d2f330fdb654988fd56617aa77e8478cffd3c0ccb
+# Its settings (no keys: root's, readable by all), its keys (random, root's only:
+# the admin key, the read-only key and Rowsafe's own key, alt_api_key, which
+# the agent gets), the environment file systemd gives Qdrant the keys in
+# (root's only, outside Rowsafe's folder: Qdrant keeps working after an
+# uninstall),
+# the names of the keys set (for the security check, no values), its unit,
+# its data, and --listen-public's certificate (written as the agent, which
+# replaces it with one from Let's Encrypt; Qdrant reads it through its group).
+QDRANT_CONF=/etc/qdrant/config.yaml
+QDRANT_KEYS_DIR=$CONFIG_DIR/qdrant
+QDRANT_ENV_FILE=/etc/qdrant/qdrant.env
+QDRANT_KEYS_SET=$CONFIG_DIR/qdrant-keys
+QDRANT_UNIT_FILE=/etc/systemd/system/qdrant.service
+QDRANT_DATA=/var/lib/qdrant
+QDRANT_TLS_DIR=/etc/ssl/rowsafe-qdrant
 
 # db_record [ENGINE]: the file holding the version this installer installed.
 db_record() { printf '%s/installed-%s\n' "$CONFIG_DIR" "${1:-$INSTALL_DB}"; }
@@ -1648,13 +1733,14 @@ db_unit() {
     mysql) echo mysql.service ;; mariadb) echo mariadb.service ;; valkey) echo valkey-server.service ;;
     clickhouse) echo clickhouse-server.service ;;
     opensearch) echo opensearch.service ;;
+    qdrant) echo qdrant.service ;;
   esac
 }
 
 # db_port: the port the installed server listens on (the agent's): Valkey's
 # plain port, or its TLS port once it has no plain one (--listen-public);
 # ClickHouse's HTTP interface (8123, this server only).
-db_port() { case $INSTALL_DB in valkey) valkey_port ;; clickhouse) echo 8123 ;; opensearch) echo 9200 ;; *) echo 3306 ;; esac; }
+db_port() { case $INSTALL_DB in valkey) valkey_port ;; clickhouse) echo 8123 ;; opensearch) echo 9200 ;; qdrant) echo 6333 ;; *) echo 3306 ;; esac; }
 
 # valkey_port: the port in valkey.conf, the TLS port when the plain one is 0.
 valkey_port() {
@@ -1665,7 +1751,7 @@ valkey_port() {
 # db_public_ports: the ports --listen-public opens (Valkey: its TLS port;
 # it has no plain one then; ClickHouse: the native protocol's and HTTPS's
 # TLS ports).
-db_public_ports() { case $INSTALL_DB in valkey) echo 6380 ;; clickhouse) echo 9440 8443 ;; opensearch) echo 9200 ;; *) echo 3306 ;; esac; }
+db_public_ports() { case $INSTALL_DB in valkey) echo 6380 ;; clickhouse) echo 9440 8443 ;; opensearch) echo 9200 ;; qdrant) echo 6333 6334 ;; *) echo 3306 ;; esac; }
 
 # mysql_net_conf: the file --install-mysql/-mariadb keeps the network
 # settings in. MariaDB's packages read mariadb.conf.d after conf.d (and set
@@ -1685,6 +1771,7 @@ db_program() {
     valkey) _p=/usr/bin/valkey-server ;;
     clickhouse) _p=/usr/bin/clickhouse-server ;;
     opensearch) _p=$OPENSEARCH_HOME/bin/opensearch ;;
+    qdrant) _p=/usr/bin/qdrant ;;
   esac
   [ -x "$_p" ] && echo "$_p"
 }
@@ -1726,6 +1813,7 @@ existing_database() {
   if mongodb_present; then printf 'MongoDB'; return 0; fi
   if clickhouse_present; then printf 'ClickHouse'; return 0; fi
   if opensearch_present; then printf 'OpenSearch'; return 0; fi
+  if qdrant_present; then printf 'Qdrant'; return 0; fi
   if redis_present; then
     if redis_find_program; then printf '%s %s' "$(engine_label "$REDIS_FOUND_ENGINE")" "$REDIS_VERSION"; else printf 'Redis or Valkey'; fi
     return 0
@@ -1768,6 +1856,13 @@ install_db_check() {
       _mb=$(mem_mb)
       [ "$_mb" -ge 3500 ] ||
         die "OpenSearch needs a server with at least 4 GB of memory, and this one has $_mb MB. Choose a bigger server for OpenSearch."
+      ;;
+    qdrant)
+      case $OS_ID in debian | ubuntu) ;; *) die "--install-qdrant works on Debian and Ubuntu; $OS_NAME isn't one of them" ;; esac
+      # A 2 GB server shows a little less (the kernel's share).
+      _mb=$(mem_mb)
+      [ "$_mb" -ge 1500 ] ||
+        die "Qdrant needs a server with at least 2 GB of memory, and this one has $_mb MB. Choose a bigger server for Qdrant."
       ;;
   esac
   if ! db_ours; then
@@ -1866,8 +1961,8 @@ clickhouse_repo() {
   ok "ClickHouse's repository (packages.clickhouse.com, lts, $INSTALL_DB_VERSION.*, key $CLICKHOUSE_KEY_FPR)"
 }
 
-# install_database is --install-mysql, --install-mariadb, --install-valkey or
-# --install-clickhouse:
+# install_database is --install-mysql, --install-mariadb, --install-valkey,
+# --install-clickhouse or --install-qdrant:
 # the server installed and running with secure defaults. It refuses on a
 # server with a database server already, unless that is the one it
 # installed.
@@ -1942,6 +2037,10 @@ install_database() {
         apt_install opensearch
         unset DISABLE_INSTALL_DEMO_CONFIG
         ;;
+      qdrant)
+        step "Installing Qdrant $QDRANT_VERSION from Qdrant's official release"
+        qdrant_install
+        ;;
     esac
     [ -n "$(db_program "$INSTALL_DB")" ] || die "$_n's packages installed, but its server program isn't there"
     [ -d "$CONFIG_DIR" ] || install -d -m 0750 -o root -g root "$CONFIG_DIR"
@@ -1951,13 +2050,16 @@ install_database() {
   fi
   DB_OURS=1
   CH_CONF_CHANGED=0
+  QD_CONF_CHANGED=0
   [ "$INSTALL_DB" != clickhouse ] || clickhouse_conf
   [ "$INSTALL_DB" != opensearch ] || opensearch_conf # opensearch
+  [ "$INSTALL_DB" != qdrant ] || qdrant_conf
   db_running
   case $INSTALL_DB in
     valkey) valkey_secure ;;
     clickhouse) clickhouse_secure ;;
     opensearch) opensearch_secure ;;
+    qdrant) qdrant_secure ;;
     *) mysql_secure ;;
   esac
 }
@@ -1968,6 +2070,7 @@ db_version() {
     valkey) valkey-server --version 2>/dev/null | sed -n 's/.* v=\([0-9.]*\).*/\1/p' ;;
     clickhouse) clickhouse-server --version 2>/dev/null | sed -n 's/.*version \([0-9][0-9.]*[0-9]\).*/\1/p' | head -n 1 ;;
     opensearch) opensearch_pkg_version ;; # (the package's: starting the JVM just for it takes seconds)
+    qdrant) /usr/bin/qdrant --version 2>/dev/null | sed -n 's/^qdrant v*\([0-9][0-9.]*[0-9]\).*/\1/p' | head -n 1 ;;
     *) "$(db_program "$INSTALL_DB")" --version 2>/dev/null | sed -n 's/.*Ver \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' ;;
   esac
 }
@@ -1992,6 +2095,10 @@ db_running() {
     opensearch)
       case $(db_version) in 3.*) ;; *) die "the OpenSearch here is $(db_version), not OpenSearch 3" ;; esac
       opensearch_ready || die "OpenSearch started but doesn't answer on https://127.0.0.1:9200 (see /var/log/opensearch)"
+      ;;
+    qdrant)
+      case $(db_version) in "$INSTALL_DB_VERSION".*) ;; *) die "the Qdrant here is $(db_version), not Qdrant $INSTALL_DB_VERSION" ;; esac
+      qdrant_ready || die "Qdrant started but doesn't answer on 127.0.0.1:6333 (see: journalctl -u qdrant)"
       ;;
   esac
   ok "$(engine_label "$INSTALL_DB") $(db_version) is running on port $(db_port)"
@@ -2113,12 +2220,13 @@ tls_serves() {
   [ -n "$_want" ] && [ "$_want" = "$_got" ]
 }
 
-# db_listen_public is --listen-public for --install-mysql/-mariadb/-valkey/-clickhouse/-opensearch.
+# db_listen_public is --listen-public for --install-mysql/-mariadb/-valkey/-clickhouse/-opensearch/-qdrant.
 db_listen_public() {
   case $INSTALL_DB in
     valkey) valkey_listen_public ;;
     clickhouse) clickhouse_listen_public ;;
     opensearch) opensearch_listen_public ;;
+    qdrant) qdrant_listen_public ;;
     *) mysql_listen_public ;;
   esac
 }
@@ -3053,6 +3161,397 @@ opensearch_listen_public() {
   fi
 }
 # <<< opensearch
+# ---------------------------------------------------------------- Qdrant
+#
+# --install-qdrant: Qdrant's official release (QDRANT_VERSION, SHA-256
+# checked), its own system user, settings and keys in place before it first
+# starts, a sandboxed systemd unit. Qdrant listens on this server only
+# (plain HTTP on 127.0.0.1) until --listen-public turns TLS on for REST
+# (6333) and gRPC (6334) on every address. Its keys are random and root's:
+# the admin key (api_key), a read-only key and Rowsafe's own key
+# (alt_api_key), which the agent gets at protect time and uses to sign
+# tokens valid for a few minutes (JSON Web Tokens are on: jwt_rbac), and to
+# sign the keys people make in Databases & users. Telemetry off; snapshots
+# can't be fetched from URLs (a server-side request to any address); no
+# cluster (the peers' port, 6335, never opens).
+#
+# A Qdrant someone runs already is found by `rowsafe-agent setup discover`
+# like the other engines (engine "qdrant"). Backups go through its API (its
+# own snapshots), so no backup tool is installed and nothing restarts.
+# Rowsafe needs a key that manages snapshots: ROWSAFE_QDRANT_API_KEY, the
+# api_key in its configuration file, or one typed here (saved for the agent
+# only).
+
+qdrant_present() {
+  have qdrant || [ -x /usr/bin/qdrant ] ||
+    [ -f /lib/systemd/system/qdrant.service ] || [ -f /etc/systemd/system/qdrant.service ] ||
+    { have pgrep && pgrep -x qdrant >/dev/null 2>&1; }
+}
+
+# qdrant_install downloads Qdrant's release file for this processor,
+# checks its SHA-256 against the one recorded here and installs it. Nothing
+# from the download runs before the check.
+qdrant_install() {
+  case $ARCH in
+    amd64) _f=$QDRANT_DEB_AMD64 _sum=$QDRANT_DEB_AMD64_SHA256 ;;
+    arm64) _f=$QDRANT_TGZ_ARM64 _sum=$QDRANT_TGZ_ARM64_SHA256 ;;
+    *) die "Qdrant's release has no build for $ARCH" ;;
+  esac
+  install -d -m 0700 "$TMP/qdrant"
+  fetch "$QDRANT_URL/$_f" "$TMP/qdrant/$_f" || die "could not download Qdrant $QDRANT_VERSION ($QDRANT_URL/$_f)"
+  _got=$(sha256_of "$TMP/qdrant/$_f")
+  [ "$_got" = "$_sum" ] ||
+    die "the Qdrant $QDRANT_VERSION file downloaded from GitHub doesn't match the SHA-256 this installer recorded for it (got $_got); not installing it"
+  ok "Qdrant $QDRANT_VERSION downloaded and checked (SHA-256 $_sum)"
+  qdrant_user
+  case $_f in
+    *.deb)
+      # Nothing of the package's may start Qdrant with its own defaults
+      # (no keys, every address): its service stays masked until Rowsafe's
+      # unit and settings are in place (qdrant_conf).
+      _masked=0
+      if [ ! -e "$QDRANT_UNIT_FILE" ] && systemd_running; then
+        systemctl mask --quiet qdrant.service 2>/dev/null && _masked=1
+      fi
+      if ! DEBIAN_FRONTEND=noninteractive dpkg --force-confold -i "$TMP/qdrant/$_f" >>"$TMP/apt.log" 2>&1 </dev/null; then
+        tail -n 20 "$TMP/apt.log" >&2
+        [ "$_masked" = 0 ] || systemctl unmask --quiet qdrant.service 2>/dev/null || true
+        die "installing Qdrant's package failed"
+      fi
+      _shipped=$(dpkg -L qdrant 2>/dev/null | grep -E '^/(lib|usr/lib|etc)/(systemd|init[.]d)/' || true)
+      [ -z "$_shipped" ] || die "Qdrant's package brought a service of its own ($(printf '%s' "$_shipped" | paste -sd, -)); not using it"
+      ! pgrep -x qdrant >/dev/null 2>&1 || die "Qdrant started before Rowsafe set its keys and settings; not going on"
+      [ "$_masked" = 0 ] || systemctl unmask --quiet qdrant.service 2>/dev/null || true
+      ;;
+    *)
+      (cd "$TMP/qdrant" && tar -xzf "$_f" qdrant) || die "unpacking Qdrant's program failed"
+      [ -f "$TMP/qdrant/qdrant" ] && [ ! -L "$TMP/qdrant/qdrant" ] || die "Qdrant's release file holds no program"
+      install -m 0755 -o root -g root "$TMP/qdrant/qdrant" /usr/bin/qdrant
+      ;;
+  esac
+  rm -rf "$TMP/qdrant"
+}
+
+# qdrant_user: Qdrant's own system user and group, no shell, no home of
+# its own beyond the data folder.
+qdrant_user() {
+  getent group qdrant >/dev/null 2>&1 || groupadd --system qdrant || die "could not create the qdrant group"
+  id -u qdrant >/dev/null 2>&1 ||
+    useradd --system --gid qdrant --home-dir "$QDRANT_DATA" --no-create-home --shell /usr/sbin/nologin qdrant ||
+    die "could not create the qdrant user"
+}
+
+# qdrant_config HOST TLS: Qdrant's settings (no keys), on stdout.
+qdrant_config() {
+  echo "# Written by the Rowsafe installer (--install-qdrant). Qdrant's keys aren't here:"
+  echo "# systemd gives them to Qdrant from root's $QDRANT_ENV_FILE."
+  echo "log_level: INFO"
+  echo "telemetry_disabled: true"
+  echo "storage:"
+  echo "  storage_path: $QDRANT_DATA/storage"
+  echo "  snapshots_path: $QDRANT_DATA/snapshots"
+  echo "  on_disk_payload: true"
+  echo "service:"
+  echo "  host: $1"
+  echo "  http_port: 6333"
+  echo "  grpc_port: 6334"
+  echo "  enable_tls: $2"
+  echo "  enable_cors: false"
+  echo "  jwt_rbac: true"
+  echo "  enable_snapshot_url_recovery: false"
+  echo "  static_content_dir: $QDRANT_DATA/static"
+  echo "cluster:"
+  echo "  enabled: false"
+  echo "  p2p:"
+  echo "    host: 127.0.0.1"
+  echo "    port: 6335"
+  echo "tls:"
+  echo "  cert: $QDRANT_TLS_DIR/rowsafe-server.crt"
+  echo "  key: $QDRANT_TLS_DIR/rowsafe-server.key"
+  echo "  # Read again every minute: the agent replaces the files (REST loads them"
+  echo "  # by itself; gRPC at Qdrant's next restart)."
+  echo "  cert_ttl: 60"
+}
+
+# qdrant_conf: --install-qdrant's settings, keys and unit, all in place
+# before Qdrant first starts. A re-run keeps the keys and --listen-public's
+# settings.
+qdrant_conf() {
+  qdrant_user
+  for _d in "$QDRANT_DATA" "$QDRANT_DATA/storage" "$QDRANT_DATA/snapshots"; do
+    [ ! -L "$_d" ] || die "$_d is a symbolic link; not using it"
+    install -d -m 0750 -o qdrant -g qdrant "$_d"
+  done
+  [ ! -L "$QDRANT_KEYS_DIR" ] || die "$QDRANT_KEYS_DIR is a symbolic link; not using it"
+  install -d -m 0700 -o root -g root "$QDRANT_KEYS_DIR"
+  for _k in api-key read-only-api-key alt-api-key; do
+    [ ! -s "$QDRANT_KEYS_DIR/$_k" ] || continue
+    ( umask 077; openssl rand -hex 32 >"$TMP/qdrant-key" ) || die "could not make a key"
+    install -m 0600 -o root -g root "$TMP/qdrant-key" "$QDRANT_KEYS_DIR/$_k"
+    rm -f "$TMP/qdrant-key"
+  done
+  install -d -m 0755 -o root -g root /etc/qdrant
+  # The keys reach Qdrant only through systemd (it reads this file as root).
+  # printf is the shell's own: the keys never appear on a command line.
+  if {
+    printf '# Written by the Rowsafe installer (--install-qdrant): Qdrant'"'"'s keys, root'"'"'s only.\n'
+    printf 'QDRANT__SERVICE__API_KEY=%s\n' "$(cat "$QDRANT_KEYS_DIR/api-key")"
+    printf 'QDRANT__SERVICE__READ_ONLY_API_KEY=%s\n' "$(cat "$QDRANT_KEYS_DIR/read-only-api-key")"
+    printf 'QDRANT__SERVICE__ALT_API_KEY=%s\n' "$(cat "$QDRANT_KEYS_DIR/alt-api-key")"
+  } | write_file "$QDRANT_ENV_FILE" 0600 root:root; then
+    QD_CONF_CHANGED=1
+  fi
+  echo "api_key read_only_api_key alt_api_key" | write_file "$QDRANT_KEYS_SET" 0644 root:root || true
+  # The package's own file (or none) gives way to Rowsafe's; Rowsafe's own
+  # stays as it is (--listen-public's settings).
+  if ! grep -qs '^# Written by the Rowsafe installer (--install-qdrant)' "$QDRANT_CONF"; then
+    qdrant_config 127.0.0.1 false | write_file "$QDRANT_CONF" 0644 root:root || true
+    QD_CONF_CHANGED=1
+  fi
+  # shellcheck disable=SC2016 # systemd's own syntax
+  if {
+    echo "# Written by the Rowsafe installer (--install-qdrant): Qdrant $QDRANT_VERSION, sandboxed."
+    echo "[Unit]"
+    echo "Description=Qdrant vector database (installed by Rowsafe)"
+    echo "Documentation=https://qdrant.tech/documentation/"
+    echo "After=network-online.target"
+    echo "Wants=network-online.target"
+    echo "[Service]"
+    echo "Type=simple"
+    echo "User=qdrant"
+    echo "Group=qdrant"
+    echo "EnvironmentFile=$QDRANT_ENV_FILE"
+    echo "WorkingDirectory=$QDRANT_DATA"
+    echo "ExecStart=/usr/bin/qdrant --config-path $QDRANT_CONF --disable-telemetry"
+    echo "Restart=on-failure"
+    echo "RestartSec=5"
+    echo "TimeoutStopSec=300"
+    echo "LimitNOFILE=65536"
+    echo "UMask=0027"
+    echo "NoNewPrivileges=yes"
+    echo "ProtectSystem=strict"
+    echo "ReadWritePaths=$QDRANT_DATA"
+    echo "ProtectHome=yes"
+    echo "PrivateTmp=yes"
+    echo "PrivateDevices=yes"
+    echo "ProtectKernelTunables=yes"
+    echo "ProtectKernelModules=yes"
+    echo "ProtectKernelLogs=yes"
+    echo "ProtectControlGroups=yes"
+    echo "ProtectClock=yes"
+    echo "ProtectHostname=yes"
+    echo "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK"
+    echo "RestrictNamespaces=yes"
+    echo "RestrictRealtime=yes"
+    echo "RestrictSUIDSGID=yes"
+    echo "LockPersonality=yes"
+    echo "MemoryDenyWriteExecute=yes"
+    echo "SystemCallArchitectures=native"
+    echo "SystemCallFilter=@system-service"
+    echo "SystemCallErrorNumber=EPERM"
+    echo "CapabilityBoundingSet="
+    echo "AmbientCapabilities="
+    echo "[Install]"
+    echo "WantedBy=multi-user.target"
+  } | write_file "$QDRANT_UNIT_FILE" 0644 root:root; then
+    systemctl daemon-reload
+    QD_CONF_CHANGED=1
+  fi
+}
+
+# qdrant_url PATH: the server's REST URL on this server (https once TLS is on).
+qdrant_url() {
+  if grep -qs '^  enable_tls: true' "$QDRANT_CONF"; then printf 'https://127.0.0.1:6333%s' "$1"; else printf 'http://127.0.0.1:6333%s' "$1"; fi
+}
+
+# qdrant_port_ours: every socket listening on 6333 is the qdrant user's
+# (any user can listen on a free port; a key goes only to Qdrant).
+qdrant_port_ours() {
+  _uid=$(id -u qdrant 2>/dev/null) || return 1
+  have ss || apt_install iproute2
+  _owners=$(ss -ltnHe 'sport = :6333' 2>/dev/null | sed -n 's/.* uid:\([0-9]*\) .*/\1/p' | sort -u)
+  [ "$_owners" = "$_uid" ]
+}
+
+# qdrant_code PATH [KEYFILE]: the HTTP status Qdrant answers on PATH, with
+# the key in KEYFILE (given to curl on stdin, never on a command line, and
+# only once port 6333 is checked to be Qdrant's).
+qdrant_code() {
+  if [ -n "${2:-}" ]; then
+    qdrant_port_ours || die "port 6333 isn't held by Qdrant (the qdrant user) alone; not sending it a key (see: ss -ltnpe 'sport = :6333')"
+    printf 'header = "api-key: %s"\n' "$(cat "$2")" |
+      curl -sk -o /dev/null -w '%{http_code}' --max-time 10 -K - "$(qdrant_url "$1")" 2>/dev/null || true
+  else
+    curl -sk -o /dev/null -w '%{http_code}' --max-time 10 "$(qdrant_url "$1")" 2>/dev/null || true
+  fi
+}
+
+# qdrant_ready: Qdrant answers on 127.0.0.1:6333 (waits up to two minutes).
+qdrant_ready() {
+  _i=0
+  until curl -sk --max-time 5 "$(qdrant_url /)" 2>/dev/null | grep -q '"title":"qdrant'; do
+    [ $_i -lt 120 ] || return 1
+    sleep 1
+    _i=$((_i + 1))
+  done
+}
+
+# qdrant_listeners prints Qdrant's listening sockets (ADDRESS:PORT).
+qdrant_listeners() {
+  _uid=$(id -u qdrant 2>/dev/null) || return 0
+  ss -ltnHe 2>/dev/null | awk -v u="$_uid" 'index($0, " uid:" u " ") { print $4 }' | sort -u
+}
+
+# qdrant_secure: the keys checked on the running server (nothing without
+# one, Rowsafe's own and the admin key in), no cluster port. Restarts only
+# the Qdrant this installer installed, and only when its settings changed
+# while it ran.
+qdrant_secure() {
+  if [ "$QD_CONF_CHANGED" = 1 ] && [ "$DB_STARTED" != 1 ]; then
+    note "restarting the new Qdrant with its settings"
+    db_restart || die "restarting Qdrant failed (see above)"
+    qdrant_ready || die "Qdrant doesn't answer after its restart (see: journalctl -u qdrant)"
+  fi
+  case $(qdrant_code /collections) in
+    401 | 403) ;;
+    *) die "Qdrant answers without a key (see $QDRANT_ENV_FILE and: journalctl -u qdrant)" ;;
+  esac
+  for _k in api-key alt-api-key read-only-api-key; do
+    [ "$(qdrant_code /collections "$QDRANT_KEYS_DIR/$_k")" = 200 ] || die "Qdrant doesn't take its $_k (see $QDRANT_ENV_FILE)"
+  done
+  have ss || apt_install iproute2
+  ! qdrant_listeners | grep -q ':6335$' || die "Qdrant listens on its cluster port (6335); see $QDRANT_CONF"
+  ok "Qdrant: nothing without a key; an admin key, a read-only key and Rowsafe's own key, all random and root's only ($QDRANT_KEYS_DIR); telemetry off; no cluster port"
+}
+
+# qdrant_listen_public: TLS on every address, REST on 6333 and gRPC on
+# 6334, from a certificate made here in $QDRANT_TLS_DIR (the agent's, group
+# qdrant; the agent replaces it with one from Let's Encrypt). Qdrant
+# listens on :: (IPv4 and IPv6) where the server has a global IPv6 address,
+# else on 0.0.0.0; plain HTTP is answered nowhere; nothing of Qdrant's
+# listens beyond this server but 6333 and 6334.
+qdrant_listen_public() {
+  step "Making Qdrant reachable from the network (TLS only, ports 6333 and 6334)"
+  getent group qdrant >/dev/null 2>&1 || die "no qdrant group on this server"
+  [ ! -L "$QDRANT_TLS_DIR" ] || die "$QDRANT_TLS_DIR is a symbolic link; not using it"
+  install -d -m 2750 -o "$AGENT_USER" -g qdrant "$QDRANT_TLS_DIR"
+  if server_cert "$AGENT_USER" "$QDRANT_TLS_DIR" "$(cert_cn)" 0640; then
+    ok "made a self-signed TLS certificate for Qdrant ($QDRANT_TLS_DIR/rowsafe-server.crt)"
+  fi
+  _host=0.0.0.0
+  if awk '$4 == "00" && $6 != "lo" { f = 1 } END { exit !f }' /proc/net/if_inet6 2>/dev/null; then _host=::; fi
+  _changed=0
+  if qdrant_config "$_host" true | write_file "$QDRANT_CONF" 0644 root:root; then
+    _changed=1
+    note "restarting the new Qdrant so it listens on the network"
+    db_restart || die "restarting Qdrant failed (see above)"
+  fi
+  qdrant_ready || die "Qdrant doesn't answer on 127.0.0.1:6333 any more (see: journalctl -u qdrant)"
+  tls_serves 6333 "$QDRANT_TLS_DIR/rowsafe-server.crt" || die "Qdrant doesn't serve its TLS certificate on port 6333 (see: journalctl -u qdrant)"
+  if ! tls_serves 6334 "$QDRANT_TLS_DIR/rowsafe-server.crt"; then
+    # gRPC reads the certificate only when Qdrant starts: after the agent
+    # renewed it, gRPC serves the previous one until the next restart
+    # (Pulse offers it; nothing restarts here).
+    [ "$_changed" = 0 ] && timeout 20 openssl s_client -connect 127.0.0.1:6334 </dev/null 2>/dev/null | grep -q 'BEGIN CERTIFICATE' ||
+      die "Qdrant doesn't serve its TLS certificate on port 6334 (see: journalctl -u qdrant)"
+    note "gRPC (6334) still serves the previous certificate: Qdrant loads the renewed one at its next restart (Pulse offers it)"
+  fi
+  ! curl -s --max-time 5 http://127.0.0.1:6333/ 2>/dev/null | grep -q qdrant || die "Qdrant still answers plain HTTP on port 6333"
+  have ss || apt_install iproute2
+  _open=$(qdrant_listeners | awk '{ n = split($1, a, ":"); if (a[n] != "6333" && a[n] != "6334") print }')
+  [ -z "$_open" ] || die "Qdrant listens on more than 6333 and 6334 ($(printf '%s' "$_open" | paste -sd, - | sed 's/,/, /g')); see $QDRANT_CONF"
+  if [ "$_changed" = 0 ]; then
+    ok "Qdrant listens on the network (TLS on 6333 and 6334, keys only); nothing to change"
+  else
+    ok "Qdrant listens on the network (TLS on 6333 and 6334, keys only)"
+  fi
+}
+
+# check_qdrant_program: Proof and Rewind copies start a temporary Qdrant
+# with the server's own program.
+check_qdrant_program() {
+  qdrant_present || return 0
+  [ "$HOST_ENGINE" != qdrant ] || TOOLS_SUMMARY="Qdrant's own snapshots, encrypted by the agent"
+  if have qdrant || [ -x /usr/bin/qdrant ]; then
+    ok "Qdrant program at $(command -v qdrant || echo /usr/bin/qdrant) (Proof and Rewind copies use it)"
+  else
+    warn "the qdrant program isn't on this server (Qdrant runs in a container?): backups work, but Proof (the weekly restore test) and Rewind copies need it. In Docker, use the Rowsafe agent image for Qdrant (see https://rowsafe.sh/docs/guides/docker)."
+  fi
+}
+
+# qdrant_status reads `rowsafe-agent qdrant status` into QD_* variables.
+QD_LOGIN='' QD_BINARY='' QD_TLS='' QD_JWT=''
+qdrant_status() {
+  agent_run qdrant status --port "$C_PORT" >"$TMP/qdstatus" 2>"$TMP/qdstatus.err" || return 1
+  _k() { sed -n "s/^$1=//p" "$TMP/qdstatus" | head -n 1; }
+  QD_LOGIN=$(_k login) QD_BINARY=$(_k binary) QD_TLS=$(_k tls) QD_JWT=$(_k jwt)
+  [ "$QD_BINARY" != - ] || QD_BINARY=''
+}
+
+# qdrant_config_key prints the api_key in Qdrant's configuration file, when
+# root can read one there.
+qdrant_config_key() {
+  for _f in "${ROWSAFE_QDRANT_CONFIG:-}" "$QDRANT_CONF" /etc/qdrant/config/production.yaml; do
+    [ -n "$_f" ] && [ -f "$_f" ] && [ ! -L "$_f" ] || continue
+    _v=$(sed -n 's/^[[:space:]]*api_key:[[:space:]]*"\{0,1\}\([^"#[:space:]]*\)"\{0,1\}.*$/\1/p' "$_f" | head -n 1)
+    if [ -n "$_v" ]; then
+      printf '%s\n' "$_v"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# qdrant_prepare gets a Qdrant server ready for its plan: Rowsafe's key,
+# root's way first (the alternative key --install-qdrant made), else the
+# person's (ROWSAFE_QDRANT_API_KEY, the configuration file's api_key, or
+# typed here once), saved for the agent only. Nothing restarts.
+qdrant_prepare() {
+  if ! qdrant_status; then
+    sed 's/^/    /' "$TMP/qdstatus.err" >&2
+    warn "could not reach Qdrant on port $C_PORT"
+    return 1
+  fi
+  [ -n "$QD_BINARY" ] || note "Proof and Rewind copies need the qdrant program, which isn't on this server."
+  case $QD_LOGIN in
+    ok) return 0 ;;
+    none)
+      warn "Qdrant on port $C_PORT asks for no key: anyone who can reach it can read and delete every collection. Pulse shows how to turn keys on."
+      return 0
+      ;;
+  esac
+  if [ -s "$QDRANT_KEYS_DIR/alt-api-key" ]; then
+    if agent_in qdrant login --port "$C_PORT" <"$QDRANT_KEYS_DIR/alt-api-key" >"$TMP/qdlogin" 2>&1; then
+      ok "Rowsafe's own Qdrant key (alt_api_key) saved for the agent only; it signs short-lived tokens with it, the key never goes to Qdrant"
+      return 0
+    fi
+    sed 's/^/    /' "$TMP/qdlogin" >&2
+  fi
+  _key=${ROWSAFE_QDRANT_API_KEY:-}
+  if [ -z "$_key" ] && _key=$(qdrant_config_key); then
+    note "Rowsafe uses the api_key from Qdrant's configuration file (saved for the agent only, never sent to Rowsafe)."
+  fi
+  if [ -z "$_key" ] && [ "$TTY" = 1 ]; then
+    tty_say ""
+    tty_say "Rowsafe needs a Qdrant key that can take snapshots (your api_key: Qdrant has no"
+    tty_say "smaller role for that). It is saved for the agent only and never sent to Rowsafe."
+    ask_secret _key "Qdrant api_key"
+  fi
+  if [ -z "$_key" ]; then
+    warn "Rowsafe needs a Qdrant key: set ROWSAFE_QDRANT_API_KEY (saved for the agent only), or run the installer on a terminal"
+    return 1
+  fi
+  if ! printf '%s\n' "$_key" | agent_in qdrant save-login --port "$C_PORT" >"$TMP/qdlogin" 2>&1; then
+    sed 's/^/    /' "$TMP/qdlogin" >&2
+    return 1
+  fi
+  ok "the Qdrant key is saved for the agent only"
+  qdrant_status || return 0
+  [ "$QD_JWT" != no ] ||
+    note "Qdrant's JSON Web Tokens are off (service.jwt_rbac): backups work; Databases & users makes keys once they are on."
+  [ "$QD_TLS" != no ] ||
+    note "Qdrant doesn't use TLS here: keys and data cross the network in the clear when apps connect from other servers."
+}
 
 # ---------------------------------------------------------------- release
 
@@ -3396,7 +3895,7 @@ install_helper_script() {
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
 # rowsafe-pg-restart: restarts or stops PostgreSQL (or the MySQL, MariaDB,
-# MongoDB, ClickHouse, Redis or Valkey server Rowsafe protects) when a person asked
+# MongoDB, ClickHouse, Redis, Valkey or Qdrant server Rowsafe protects) when a person asked
 # Rowsafe to (Restart in the dashboard, `rowsafe restart`; Rewind the whole
 # database, which stops the database, swaps its data and starts it),
 # and installs PostgreSQL updates, upgrades PostgreSQL, installs security
@@ -3566,6 +4065,19 @@ redis_allow=${ROWSAFE_REDIS_SERVERS_ALLOW:-/etc/rowsafe/redis-servers-allowed}
 redis_created=${ROWSAFE_REDIS_CREATED:-/etc/rowsafe/redis-created}
 redis_root=${ROWSAFE_REDIS_ROOT:-/var/lib/rowsafe-redis}
 mongo_key_dir=${ROWSAFE_MONGODB_KEY_DIR:-/etc/rowsafe}
+
+# Qdrant (db-minor-update on qdrant.service): its official release from
+# GitHub, the newest of the installed series that Rowsafe pinned with the
+# SHA-256 of its files, here (written by root's installer; the same pins as
+# its QDRANT_* settings) or in the installer of the newest release signed
+# with the Rowsafe release key (ROWSAFE_RELEASE_PUBLIC_KEY and
+# ROWSAFE_RELEASES_URL, set by root in the update unit). Nothing from a
+# download runs before its SHA-256 matches a pin.
+qdrant_pin_version=1.19.2
+qdrant_pin_deb_amd64=c05e56a92fbece506ea7d3d4b56d911d2e905cccf7b7df87465647ee1a1e5f61
+qdrant_pin_tgz_arm64=6970b93b56fa1203f0cea47d2f330fdb654988fd56617aa77e8478cffd3c0ccb
+qdrant_releases=${ROWSAFE_QDRANT_RELEASES_URL:-https://github.com/qdrant/qdrant/releases/download}
+qdrant_bin=/usr/bin/qdrant
 
 log() { echo "rowsafe-pg-restart: $*" >&2; }
 
@@ -4007,9 +4519,9 @@ check_root_file() {
 # (postgresql@MAJOR-NAME.service), and the units the MySQL, MariaDB,
 # MongoDB, ClickHouse, Redis and Valkey packages install (mysql, mysqld,
 # mariadb and their @instance forms, mongod, mongodb, clickhouse-server,
-# redis-server, redis, valkey-server, valkey and their @instance forms; and
-# opensearch).
-db_unit_re='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server|opensearch|(redis|valkey)(-server)?(@[A-Za-z0-9_.-]+)?)[.]service$'
+# redis-server, redis, valkey-server, valkey and their @instance forms;
+# opensearch and qdrant).
+db_unit_re='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server|opensearch|(redis|valkey)(-server)?(@[A-Za-z0-9_.-]+)?|qdrant)[.]service$'
 
 # allowed_unit PORT prints the unit the restart allow list names for PORT.
 allowed_unit() {
@@ -5404,7 +5916,12 @@ db_engine() {
       db_engine=valkey
       set -- valkey-server
       ;;
-    *) refuse "$unit is not a MySQL, MariaDB, MongoDB, ClickHouse, Redis or Valkey service" ;;
+    qdrant.service)
+      # Qdrant's program comes from its release on GitHub (qdrant_update).
+      db_engine=qdrant db_main=qdrant
+      return 0
+      ;;
+    *) refuse "$unit is not a MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey or Qdrant service" ;;
   esac
   db_main=''
   for p in "$@"; do
@@ -5455,9 +5972,124 @@ db_port() {
   db_patterns
 }
 
+# qdrant_version prints the version of Qdrant's program on disk.
+qdrant_version() { "$qdrant_bin" --version 2>/dev/null | sed -n 's/^qdrant \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' | head -n 1; }
+
+# version_gt A B: version A is newer than B (1.19.10 > 1.19.9).
+version_gt() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n 1)" = "$1" ]; }
+
+# qdrant_signed_pins DIR sets sp_version, sp_deb_amd64 and sp_tgz_arm64
+# from the installer of the newest release (stable), once the release
+# manifest's signature checks out against the Rowsafe release key and the
+# installer's SHA-256 and size against the manifest. Fails (and sets
+# nothing) when anything doesn't.
+qdrant_signed_pins() {
+  sp_version='' sp_deb_amd64='' sp_tgz_arm64=''
+  _key=${ROWSAFE_RELEASE_PUBLIC_KEY:-} _url=${ROWSAFE_RELEASES_URL:-}
+  printf '%s' "$_key" | grep -Eq '^[A-Za-z0-9+/]{43}=$' || return 1
+  case $_url in https://*) ;; *) return 1 ;; esac
+  _url=${_url%/}
+  _get() { curl -fsS --proto '=https' --max-time 60 --max-filesize "$3" -o "$2" "$1" 2>>"$work_log"; }
+  _get "$_url/stable/manifest.json" "$1/manifest.json" 1048576 && _get "$_url/stable/manifest.json.sig" "$1/manifest.sig" 4096 || return 1
+  printf '%s\n%s\n%s\n' '-----BEGIN PUBLIC KEY-----' "MCowBQYDK2VwAyEA$_key" '-----END PUBLIC KEY-----' >"$1/release.pub"
+  tr -d ' \t\r\n' <"$1/manifest.sig" >"$1/sig.b64"
+  grep -Eq '^[A-Za-z0-9+/]{86}==$' "$1/sig.b64" && base64 -d <"$1/sig.b64" >"$1/sig.bin" 2>/dev/null || return 1
+  openssl pkeyutl -verify -pubin -inkey "$1/release.pub" -rawin -in "$1/manifest.json" -sigfile "$1/sig.bin" >/dev/null 2>&1 || {
+    log "the newest release's manifest isn't signed by the Rowsafe release key; using this server's own Qdrant pins"
+    return 1
+  }
+  _art=$(tr -d ' \t\r\n' <"$1/manifest.json" | sed -n 's|.*"install\.sh":{\([^}]*\)}.*|\1|p')
+  _iurl=$(printf '%s\n' "$_art" | sed -n 's/.*"url":"\(https:\/\/[A-Za-z0-9._~\/%+:-]*\)".*/\1/p')
+  _isha=$(printf '%s\n' "$_art" | sed -n 's/.*"sha256":"\([0-9a-f]\{64\}\)".*/\1/p')
+  _isize=$(printf '%s\n' "$_art" | sed -n 's/.*"size":\([1-9][0-9]\{0,7\}\).*/\1/p')
+  [ -n "$_iurl" ] && [ -n "$_isha" ] && [ -n "$_isize" ] || return 1
+  _get "$_iurl" "$1/install.sh" "$_isize" || return 1
+  [ "$(sha256sum "$1/install.sh" | cut -d' ' -f1)" = "$_isha" ] && [ "$(wc -c <"$1/install.sh" | tr -d ' ')" = "$_isize" ] || return 1
+  _v=$(sed -n 's/^QDRANT_VERSION=\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' "$1/install.sh" | head -n 1)
+  _a=$(sed -n 's/^QDRANT_DEB_AMD64_SHA256=\([0-9a-f]\{64\}\)$/\1/p' "$1/install.sh" | head -n 1)
+  _r=$(sed -n 's/^QDRANT_TGZ_ARM64_SHA256=\([0-9a-f]\{64\}\)$/\1/p' "$1/install.sh" | head -n 1)
+  [ -n "$_v" ] && [ -n "$_a" ] && [ -n "$_r" ] || return 1
+  sp_version=$_v sp_deb_amd64=$_a sp_tgz_arm64=$_r
+}
+
+# qdrant_update installs the newest pinned Qdrant release of the installed
+# series (1.19.x), checked against its SHA-256 pin, and restarts qdrant.service
+# (someone clicked Update, or Rowsafe Cloud's maintenance window started it).
+qdrant_update() {
+  [ -x "$qdrant_bin" ] && [ ! -L "$qdrant_bin" ] || refuse "Qdrant's program isn't at $qdrant_bin (Rowsafe updates only the Qdrant its installer set up)"
+  before=$(qdrant_version)
+  [ -n "$before" ] || refuse "can't tell which Qdrant $qdrant_bin is"
+  ser=${before%.*}
+  arch=$(dpkg --print-architecture 2>/dev/null)
+  case $arch in amd64 | arm64) ;; *) refuse "Qdrant's releases have no build for $arch" ;; esac
+  : >"$work_log"
+  qd_dir=$(mktemp -d) || refuse "can't make a temporary folder"
+  # The pins: this server's own, and the newest signed release's when newer.
+  v=$qdrant_pin_version sum_amd64=$qdrant_pin_deb_amd64 sum_arm64=$qdrant_pin_tgz_arm64 from=installed
+  if qdrant_signed_pins "$qd_dir" && version_gt "$sp_version" "$v"; then
+    v=$sp_version sum_amd64=$sp_deb_amd64 sum_arm64=$sp_tgz_arm64 from=signed
+  fi
+  add engine qdrant
+  add series "$ser"
+  add from_package "$before"
+  restarted=0
+  if [ "${v%.*}" != "$ser" ] || ! version_gt "$v" "$before"; then
+    # Nothing newer of this series pinned (a newer series is an upgrade).
+    rm -rf "$qd_dir"
+    add package "$before"
+    add packages qdrant
+    add restarted 0
+    ok=1
+    log "Qdrant $before on port $port is the newest pinned $ser release"
+    return 0
+  fi
+  if [ "$arch" = amd64 ]; then
+    file=qdrant_${v}-1_amd64.deb sum=$sum_amd64
+  else
+    file=qdrant-aarch64-unknown-linux-musl.tar.gz sum=$sum_arm64
+  fi
+  log "updating Qdrant $before to $v ($from pins, request $id)"
+  curl -fsSL --proto '=https' --max-time 900 --max-filesize 536870912 -o "$qd_dir/$file" "$qdrant_releases/v$v/$file" 2>>"$work_log" ||
+    { rm -rf "$qd_dir"; refuse "downloading Qdrant $v failed: $(tail_log)"; }
+  got=$(sha256sum "$qd_dir/$file" | cut -d' ' -f1)
+  [ "$got" = "$sum" ] || { rm -rf "$qd_dir"; refuse "the Qdrant $v file doesn't match the SHA-256 Rowsafe pinned for it (got $got); nothing was installed"; }
+  t0=$(active_since "$unit")
+  was_active=0
+  "$systemctl" is-active --quiet "$unit" 2>/dev/null && was_active=1
+  case $file in
+    *.deb)
+      DEBIAN_FRONTEND=noninteractive dpkg --force-confold -i "$qd_dir/$file" >>"$work_log" 2>&1 </dev/null ||
+        { rm -rf "$qd_dir"; refuse "installing Qdrant $v failed: $(tail_log)"; }
+      ;;
+    *)
+      (cd "$qd_dir" && tar -xzf "$file" qdrant) 2>>"$work_log" && [ -f "$qd_dir/qdrant" ] && [ ! -L "$qd_dir/qdrant" ] ||
+        { rm -rf "$qd_dir"; refuse "Qdrant $v's release file holds no program"; }
+      install -m 0755 -o root -g root "$qd_dir/qdrant" "$qdrant_bin.rowsafe-new" && mv -f "$qdrant_bin.rowsafe-new" "$qdrant_bin" ||
+        { rm -rf "$qd_dir"; refuse "installing Qdrant $v failed"; }
+      ;;
+  esac
+  rm -rf "$qd_dir"
+  after=$(qdrant_version)
+  [ "$after" = "$v" ] || refuse "Qdrant $v was installed, but $qdrant_bin says it is ${after:-something else}"
+  if [ "$was_active" = 1 ] && [ "$(active_since "$unit")" = "$t0" ]; then
+    out=$(timeout 300 "$systemctl" restart "$unit" 2>&1 </dev/null) ||
+      refuse "Qdrant $v is installed, but restarting $unit failed: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
+    restarted=1
+  fi
+  add package "$after"
+  add packages qdrant
+  add restarted "$restarted"
+  ok=1
+  log "Qdrant on port $port: $before -> $after (restarted: $restarted)"
+}
+
 act_db_minor_update() {
   update_allowed database "installing database updates from Rowsafe is not allowed on this server (allow it on the server with: sudo rowsafe-allow updates)"
   db_port
+  if [ "$db_engine" = qdrant ]; then
+    qdrant_update
+    return 0
+  fi
   before=$(pkg_version "$db_main")
   ser=$(series "$before")
   [ -n "$ser" ] || refuse "can't tell the release series of $db_main $before"
@@ -6208,6 +6840,24 @@ create_cluster_access() {
 # helper does only what $UPDATES_ALLOW_FILE lists. It needs the restart
 # helper (PostgreSQL updates restart the cluster).
 
+# update_releases_dropin: on a Qdrant server Rowsafe installed, tells the
+# update helper where Rowsafe's signed releases are and their key, so it can
+# take Qdrant's newer pins from the newest signed release (qdrant_update).
+update_releases_dropin() {
+  _df=/etc/systemd/system/rowsafe-pg-update.service.d/20-releases.conf
+  case $RELEASE_PUBLIC_KEY in *@*) _key='' ;; *) _key=$RELEASE_PUBLIC_KEY ;; esac
+  _url=${ROWSAFE_RELEASES_URL:-$DEFAULT_RELEASES_URL}
+  if [ -z "$_key" ] || [ ! -f "$QDRANT_UNIT_FILE" ] || ! printf '%s' "$_key" | grep -Eq '^[A-Za-z0-9+/]{43}=$' ||
+    ! printf '%s' "$_url" | grep -Eq '^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~/%+-]*)?$'; then
+    [ -e "$_df" ] || return 1
+    rm -f "$_df"
+    return 0
+  fi
+  install -d -m 0755 -o root -g root /etc/systemd/system/rowsafe-pg-update.service.d
+  printf '# Written by the Rowsafe installer: Qdrant'"'"'s updates take their pins from Rowsafe'"'"'s signed releases.\n[Service]\nEnvironment=ROWSAFE_RELEASE_PUBLIC_KEY=%s\nEnvironment=ROWSAFE_RELEASES_URL=%s\n' \
+    "$_key" "${_url%/}" | write_file "$_df" 0644 root:root
+}
+
 install_update_units() {
   _changed=0
   if write_file "$UPDATE_SERVICE_FILE" 0644 root:root <<'ROWSAFE_UPDATE_SERVICE_EOF'; then
@@ -6280,6 +6930,7 @@ ROWSAFE_UPDATE_PATH_EOF
     _changed=1
   fi
   if agent_user_dropin rowsafe-pg-update.service; then _changed=1; fi
+  if update_releases_dropin; then _changed=1; fi
   if systemd_running; then
     [ "$_changed" = 0 ] || systemctl daemon-reload
     systemctl enable --now --quiet rowsafe-pg-update.path
@@ -6293,7 +6944,8 @@ remove_update_units() {
   if systemd_running; then
     systemctl disable --now --quiet rowsafe-pg-update.path 2>/dev/null || true
   fi
-  rm -f "$UPDATE_PATH_FILE" "$UPDATE_SERVICE_FILE" /etc/systemd/system/rowsafe-pg-update.service.d/10-agent-user.conf
+  rm -f "$UPDATE_PATH_FILE" "$UPDATE_SERVICE_FILE" /etc/systemd/system/rowsafe-pg-update.service.d/10-agent-user.conf \
+    /etc/systemd/system/rowsafe-pg-update.service.d/20-releases.conf
   rmdir /etc/systemd/system/rowsafe-pg-update.service.d 2>/dev/null || true
   if systemd_running; then systemctl daemon-reload; fi
 }
@@ -7081,7 +7733,7 @@ state=${STATE_DIRECTORY:-/var/lib/rowsafe-firewall}
 agent_user=${ROWSAFE_AGENT_USER:-postgres}
 # The users database servers run as (PostgreSQL's is the agent's own): a
 # port is only accepted while one of them listens on it.
-db_users=${ROWSAFE_DB_USERS:-"$agent_user postgres mysql mongodb mongod clickhouse redis valkey opensearch"}
+db_users=${ROWSAFE_DB_USERS:-"$agent_user postgres mysql mongodb mongod clickhouse redis valkey opensearch qdrant"}
 nft=${ROWSAFE_NFT:-nft}
 ss=${ROWSAFE_SS:-ss}
 sshd=${ROWSAFE_SSHD:-sshd}
@@ -7620,7 +8272,7 @@ firewall_ports() {
   {
     if command -v pg_lsclusters >/dev/null 2>&1; then pg_lsclusters -h 2>/dev/null | awk '{ print $3 }'; fi
     if command -v ss >/dev/null 2>&1; then
-      for _u in "$AGENT_USER" postgres mysql mongodb mongod clickhouse redis valkey opensearch; do
+      for _u in "$AGENT_USER" postgres mysql mongodb mongod clickhouse redis valkey opensearch qdrant; do
         _uid=$(id -u "$_u" 2>/dev/null) || continue
         # OpenSearch's node-to-node port (9300) is never one apps reach: it
         # stays out of the list even where it listens publicly (Pulse says so).
@@ -9332,6 +9984,7 @@ permissions_main() {
         HOST_ENGINE=redis
         ! grep -q 'runs Valkey' "/etc/systemd/system/$SERVICE.d/10-redis.conf" || HOST_ENGINE=valkey
       fi
+      [ ! -f "/etc/systemd/system/$SERVICE.d/10-qdrant.conf" ] || HOST_ENGINE=qdrant # qdrant
       ;;
   esac
   PERM_READY=1
@@ -11069,6 +11722,10 @@ protect_cluster() {
     note "Backups for $C_NAME are not on yet. Run this installer again when you're ready."
     return 0
   fi
+  if [ "$C_ENGINE" = qdrant ] && ! qdrant_prepare; then
+    note "Backups for $C_NAME are not on yet. Run this installer again when you're ready."
+    return 0
+  fi
   step "Preparing a plan"
   while :; do
     _prc=0
@@ -11239,6 +11896,9 @@ protect_unattended() {
   fi
   if [ "$C_ENGINE" = redis ] || [ "$C_ENGINE" = valkey ]; then
     redis_prepare || die "$(engine_label "$C_ENGINE") on port $C_PORT isn't ready for backups (see above)"
+  fi
+  if [ "$C_ENGINE" = qdrant ]; then
+    qdrant_prepare || die "Qdrant on port $C_PORT isn't ready for backups (see above)"
   fi
   _prc=0
   plan_cluster || _prc=$?
@@ -12692,6 +13352,7 @@ detect_sqlite_host() {
   mongodb_present && return 0
   clickhouse_present && return 0
   opensearch_present && return 0
+  qdrant_present && return 0
   HOST_ENGINE=sqlite
   use_rowsafe_user
   AGENT_HOME=$STATE_DIR
@@ -12960,6 +13621,7 @@ install_agent() {
   detect_clickhouse_host # clickhouse
   detect_redis_host # redis
   detect_opensearch_host # opensearch
+  detect_qdrant_host # qdrant
   detect_sqlite_host # sqlite
   if [ -n "$INSTALL_DB" ]; then
     [ "$HOST_ENGINE" = "$INSTALL_DB" ] ||
@@ -12980,6 +13642,9 @@ install_agent() {
   elif [ "$HOST_ENGINE" = opensearch ]; then # opensearch: snapshots, not every second
     say "${BOLD}Rowsafe agent installer${RESET}: backups, Marks and weekly restore tests for"
     say "the OpenSearch on this server. Nothing changes without your yes."
+  elif [ "$HOST_ENGINE" = qdrant ]; then
+    say "${BOLD}Rowsafe agent installer${RESET}: snapshot backups, Marks and weekly restore tests"
+    say "for the Qdrant on this server. Nothing changes without your yes."
   else
     say "${BOLD}Rowsafe agent installer${RESET}: backups, restore to any second and weekly"
     say "restore tests for the $(engine_label) on this server. Nothing changes without your yes."
@@ -13021,11 +13686,12 @@ install_agent() {
 
   # 2. Dependencies and layout.
   # MongoDB, ClickHouse, Redis, Valkey and SQLite back up with their own tools: no pgBackRest.
-  case $HOST_ENGINE in mysql | mariadb) ensure_mysql_tools ;; mongodb | clickhouse | redis | valkey | sqlite | opensearch) ;; *) ensure_pgbackrest ;; esac # mysql
+  case $HOST_ENGINE in mysql | mariadb) ensure_mysql_tools ;; mongodb | clickhouse | redis | valkey | sqlite | opensearch | qdrant) ;; *) ensure_pgbackrest ;; esac # mysql
   ensure_mongodb_tools # mongodb (only where MongoDB runs)
   check_clickhouse_program # clickhouse (only where ClickHouse runs)
   check_redis_program # redis (only where Redis or Valkey runs)
   check_opensearch_program # opensearch (only where OpenSearch runs)
+  check_qdrant_program # qdrant (only where Qdrant runs)
   ensure_restic # files section
   step "Installing into $INSTALL_DIR"
   make_dirs
@@ -13043,6 +13709,7 @@ install_agent() {
   clickhouse_setup # clickhouse
   redis_setup # redis
   opensearch_setup # opensearch
+  qdrant_setup # qdrant
   sqlite_setup # sqlite
   install_logrotate
   case $AUTO_SECURITY in
@@ -13185,6 +13852,7 @@ uninstall_agent() {
       gpasswd -d rowsafe opensearch >/dev/null 2>&1 || true
     fi
   fi
+  rm -f "/etc/systemd/system/$SERVICE.d/10-qdrant.conf" # qdrant
   if [ "$purge" = 1 ]; then
     if [ -L "$MYSQL_CONF_LINK" ]; then # mysql: keep the server's binary log settings
       cp "$CONFIG_DIR/mysql/server.cnf" "$MYSQL_CONF_LINK.rowsafe-new" 2>/dev/null &&
@@ -13210,6 +13878,9 @@ uninstall_agent() {
       note "Rowsafe's OpenSearch user, rowsafe, and its role, rowsafe_agent, stay in OpenSearch (the password was deleted"
       note "with the agent's settings), and so do the snapshots in $OPENSEARCH_SNAPSHOTS. An administrator can delete"
       note "them in OpenSearch (Security, Internal users and Roles), then remove that folder from path.repo."
+    fi
+    if [ -s "$QDRANT_ENV_FILE" ]; then # --install-qdrant: Qdrant's keys stay the server's
+      note "Qdrant's keys stay in $QDRANT_ENV_FILE (root only). Rowsafe's own key there (QDRANT__SERVICE__ALT_API_KEY) can go: removing or changing it also ends every key made in Databases & users (they are signed with it)."
     fi
     if redis_present; then # redis: its password went with $STATE_DIR
       note "Rowsafe's Redis or Valkey user, rowsafe, stays in the server (its password was deleted with the agent's settings)."
@@ -13342,7 +14013,7 @@ main() {
         esac
         shift
         ;;
-      --install-mysql | --install-mariadb | --install-valkey | --install-clickhouse | --install-opensearch)
+      --install-mysql | --install-mariadb | --install-valkey | --install-clickhouse | --install-opensearch | --install-qdrant)
         _e=${1#--install-}
         case $_e in
           mysql) _want='8.4' _eg='--install-mysql 8.4: MySQL 8.4, the long-term support release' ;;
@@ -13350,6 +14021,7 @@ main() {
           valkey) _want='8' _eg='--install-valkey 8' ;;
           clickhouse) _want='26.3 26.8' _eg='--install-clickhouse 26.8 (or 26.3), the long-term support releases' ;;
           opensearch) _want='3' _eg='--install-opensearch 3' ;;
+          qdrant) _want='1.19' _eg='--install-qdrant 1.19' ;;
         esac
         [ $# -ge 2 ] || die "$1 needs a version: $_eg"
         [ -z "$INSTALL_PG$INSTALL_DB" ] || die "$INSTALL_TWICE"
@@ -13431,7 +14103,7 @@ main() {
     die "--files, --allow-files and --no-files only go with an install"
   fi
   if [ "$mode" != install ] && { [ -n "$INSTALL_PG$INSTALL_DB" ] || [ "$LISTEN_PUBLIC" = 1 ]; }; then
-    die "--install-postgres, --install-mysql, --install-mariadb, --install-valkey, --install-clickhouse, --install-opensearch and --listen-public only go with an install"
+    die "--install-postgres, --install-mysql, --install-mariadb, --install-valkey, --install-clickhouse, --install-opensearch, --install-qdrant and --listen-public only go with an install"
   fi
   if [ -n "$PG_EXTENSIONS" ]; then
     [ -n "$INSTALL_PG" ] || die "--pg-extensions only goes with --install-postgres (servers Rowsafe creates)"

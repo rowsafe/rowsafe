@@ -9,7 +9,8 @@ import (
 // Engines on servers Rowsafe creates (Rowsafe Cloud, and "Create a server
 // for me" in an organization's own cloud account). The installer installs
 // the engine from its project's own packages (--install-postgres,
-// --install-mysql, --install-mariadb, --install-valkey, --install-clickhouse),
+// --install-mysql, --install-mariadb, --install-valkey, --install-clickhouse,
+// --install-qdrant),
 // makes it listen on
 // every address with TLS on (--listen-public: the firewall decides who can
 // connect) and turns its backups on; the control plane opens the engine's
@@ -51,6 +52,10 @@ type CloudEngine struct {
 	AMD64Only bool `json:"amd64_only,omitempty"`
 	// MinMemoryMB: sizes with less memory can't run it (ClickHouse: 4 GB).
 	MinMemoryMB int `json:"min_memory_mb,omitempty"`
+	// SnapshotsOnly: backups are snapshots on a schedule, and restores go
+	// back to one of them (or a Mark), not to any second (Qdrant: it keeps
+	// no log of its changes to replay). Said wherever restores are offered.
+	SnapshotsOnly bool `json:"snapshots_only,omitempty"`
 	// Note says what is special about it, in plain words ("" for nothing).
 	Note string `json:"note,omitempty"`
 	// Extensions (PostgreSQL) are the extensions a new server can get
@@ -76,6 +81,13 @@ type CloudEngine struct {
 //     protocol on 9440 and HTTPS on 8443; the plain ports (9000, 8123) listen
 //     on the server itself only. 4 GB of memory at least.
 //   - OpenSearch 3 (opensearch.go adds itself).
+//   - Qdrant 1.19 (Apache-2.0), Qdrant's official release from GitHub
+//     (the Debian package on Intel/AMD, the static program on Arm), pinned
+//     to an exact version and checked against its SHA-256 before anything
+//     runs. Apps connect with TLS only: REST on 6333 and gRPC on 6334, with
+//     an API key made in Databases & users; the cluster port (6335) stays
+//     closed (single node). Backups are full snapshots every hour; restores
+//     go back to one of them, not to any second. 2 GB of memory at least.
 var CloudEngines = []CloudEngine{
 	{Engine: EnginePostgreSQL, Name: "PostgreSQL", Versions: []string{"15", "16", "17", "18"}, DefaultVersion: "17",
 		Port: 5432, Scheme: "postgresql", Standby: true, Clone: true, Extensions: PGPackagedExtensions},
@@ -90,6 +102,9 @@ var CloudEngines = []CloudEngine{
 	{Engine: EngineClickHouse, Name: "ClickHouse", Versions: []string{"26.3", "26.8"}, DefaultVersion: "26.8",
 		Port: 9440, Ports: []int{9440, 8443}, Scheme: "clickhouse", MinMemoryMB: 4096,
 		Note: "ClickHouse 26.8 or 26.3 LTS from ClickHouse's own packages. Apps connect with TLS: the native protocol on port 9440 (clickhouse-client --secure) and HTTPS on port 8443. Sizes with 4 GB of memory or more."},
+	{Engine: EngineQdrant, Name: "Qdrant", Versions: []string{"1.19"}, DefaultVersion: "1.19",
+		Port: 6333, Ports: []int{6333, 6334}, Scheme: "https", MinMemoryMB: QdrantMinMemoryMB, SnapshotsOnly: true,
+		Note: "Qdrant 1.19, the open-source vector database, from Qdrant's official release. Apps connect with TLS and an API key: REST on port 6333 and gRPC on port 6334. Backups are snapshots every hour: restores go back to one of them, not to any second. Sizes with 2 GB of memory or more."},
 }
 
 // CloudEngineFor finds an engine new servers can get ("" is PostgreSQL).
@@ -103,7 +118,7 @@ func CloudEngineFor(engine string) (CloudEngine, bool) {
 }
 
 // CloudEngineNames lists the engines' names for a sentence: "PostgreSQL,
-// MySQL, MariaDB, Valkey or ClickHouse".
+// MySQL, MariaDB, Valkey, ClickHouse or Qdrant".
 func CloudEngineNames() string {
 	names := make([]string, len(CloudEngines))
 	for i, e := range CloudEngines {
@@ -172,6 +187,8 @@ func (e CloudEngine) InstallFlag() string {
 		return "--install-clickhouse"
 	case EngineOpenSearch:
 		return "--install-opensearch"
+	case EngineQdrant:
+		return "--install-qdrant"
 	}
 	return ""
 }
@@ -193,3 +210,12 @@ const FeatureServerCertificateEngines = "server_certificate_engines"
 // (reloaded with SYSTEM RELOAD CONFIG; ClickHouse also notices new files by
 // itself within seconds).
 const FeatureServerCertificateClickHouse = "server_certificate_clickhouse"
+
+// FeatureServerCertificateQdrant is in HeartbeatRequest.Features of agents
+// that install certificates for Rowsafe Cloud names on Qdrant servers too:
+// the installer's --listen-public serves
+// /etc/ssl/rowsafe-qdrant/rowsafe-server.crt and .key on 6333 (REST) and
+// 6334 (gRPC). Qdrant reads them again by itself every minute for REST
+// (tls.cert_ttl); gRPC loads a renewed certificate at Qdrant's next restart
+// (Pulse says so and offers the restart: QdrantStatus.GRPCOldCert).
+const FeatureServerCertificateQdrant = "server_certificate_qdrant"

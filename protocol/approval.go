@@ -183,7 +183,7 @@ var ApprovalActions = []ApprovalAction{
 	// Rowsafe Cloud: servers Rowsafe runs for the organization, billed to it.
 	{Name: "create_cloud_server", Group: "cloud", Title: "Create a Rowsafe Cloud server", Method: "POST", Path: "/v1/cloud/servers",
 		Fixed: map[string]any{"where": "rowsafe"}, Risk: RiskNormal, CostsMoney: true, Body: CreateCloudServerParams{},
-		Description: "Creates a new server in Rowsafe Cloud with PostgreSQL (the default), MySQL, MariaDB, Valkey or ClickHouse (engine, engine_version: cloud_catalog lists them), protected by Rowsafe from the start (backups, Proof, Pulse), for the region and size you choose from cloud_catalog. " +
+		Description: "Creates a new server in Rowsafe Cloud with PostgreSQL (the default), MySQL, MariaDB, Valkey, ClickHouse or Qdrant (engine, engine_version: cloud_catalog lists them), protected by Rowsafe from the start (backups, Proof, Pulse), for the region and size you choose from cloud_catalog. " +
 			"It costs money: the person approving sees the size, the price per hour and the most it costs a month (a standby doubles it). " +
 			"Where pay as you go isn't active yet, the person pays at a checkout right after approving and the server is created once paid. " +
 			"get_approval then shows the server's ID; get_cloud_server follows it until it's ready (about 5 to 10 minutes)."},

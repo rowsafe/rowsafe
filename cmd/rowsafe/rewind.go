@@ -373,6 +373,10 @@ func rewindCopyCmd(ctx context.Context, c *client.Client, args []string) error {
 	var r protocol.RewindCopyResult
 	_ = json.Unmarshal(done.Result, &r)
 	fmt.Println(orText(r.Summary, "The copy is ready."))
+	if d, err := c.Database(ctx, name); err == nil && !protocol.EngineHas(d.Engine, protocol.FeatureRewindRows) {
+		fmt.Printf("\nNext: rowsafe rewind database %s %s    (the whole database back to it, with Undo)\n", name, rewindTargetArg(t, markName))
+		return nil
+	}
 	fmt.Printf("\nNext: rowsafe rewind compare %s    (which rows differ from production)\n", name)
 	return nil
 }
@@ -785,4 +789,15 @@ func apiErr(err error) error {
 		return errors.New(ae.Msg)
 	}
 	return err
+}
+
+// rewindTargetArg is the target as the CLI takes it again.
+func rewindTargetArg(t *time.Time, mark string) string {
+	if mark != "" {
+		return "--mark " + mark
+	}
+	if t != nil {
+		return "--at " + t.UTC().Format(time.RFC3339)
+	}
+	return ""
 }

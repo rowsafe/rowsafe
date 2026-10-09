@@ -24,10 +24,8 @@ func TestCloudEngines(t *testing.T) {
 			t.Errorf("%s: %+v", e.Engine, e)
 		case !EngineCapabilities[e.Engine].Backups || !EngineCapabilities[e.Engine].Proof:
 			t.Errorf("%s: servers Rowsafe creates need backups and Proof", e.Engine)
-		case !EngineCapabilities[e.Engine].PointInTime && (e.Engine != EngineOpenSearch || !strings.Contains(e.Note, "not to any second")):
-			// OpenSearch keeps no log of its changes: its restores go back to
-			// a snapshot, which its note says.
-			t.Errorf("%s: servers Rowsafe creates need restore to any second, or a note that says it isn't there", e.Engine)
+		case EngineCapabilities[e.Engine].PointInTime == e.SnapshotsOnly:
+			t.Errorf("%s: restores to any second (%v) must be said (snapshots only: %v)", e.Engine, EngineCapabilities[e.Engine].PointInTime, e.SnapshotsOnly)
 		case e.Standby && !EngineCapabilities[e.Engine].Standby, e.Clone && !EngineCapabilities[e.Engine].Fork:
 			t.Errorf("%s: standby or clone offered without the engine's feature", e.Engine)
 		}
@@ -53,7 +51,14 @@ func TestCloudEngines(t *testing.T) {
 		e.FitsMemory(2048) || !e.FitsMemory(4096) || e.Standby || e.Clone || e.DefaultVersion != "3" || EngineHas(EngineOpenSearch, FeaturePointInTime) {
 		t.Errorf("opensearch: %+v", e)
 	}
-	if !strings.Contains(CloudEngineNames(), "ClickHouse") || !strings.Contains(CloudEngineNames(), "OpenSearch") {
+	if !strings.Contains(CloudEngineNames(), "ClickHouse") || !strings.Contains(CloudEngineNames(), "OpenSearch") || !strings.Contains(CloudEngineNames(), "Qdrant") {
 		t.Errorf("names: %q", CloudEngineNames())
+	}
+	if e, ok := CloudEngineFor("qdrant"); !ok || e.Port != 6333 || e.PortsText() != "6333 and 6334" || e.InstallFlag() != "--install-qdrant" ||
+		e.FitsMemory(1024) || !e.FitsMemory(2048) || e.Standby || e.Clone || e.AMD64Only || !e.SnapshotsOnly || e.Scheme != "https" {
+		t.Errorf("qdrant: %+v", e)
+	}
+	if !MarkIsBackup(EngineQdrant) || RewindInPlaceStopsServer(EngineQdrant) {
+		t.Error("qdrant: Marks are snapshots, rewinds in place go through its API")
 	}
 }

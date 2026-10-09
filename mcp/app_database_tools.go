@@ -89,6 +89,9 @@ func (t *tools) createAppDatabase(ctx context.Context, _ *sdk.CallToolRequest, i
 	case protocol.EngineValkey, protocol.EngineRedis:
 		return nil, AppDatabaseOutput{}, fmt.Errorf("%s runs %s, which has no separate databases: the user makes a login for the app in the dashboard (Databases & users), which shows its password once; "+
 			"the app connects with rediss:// (TLS), the server's host and port (get_cloud_server shows them)", d.Name, protocol.EngineDisplayName(engine))
+	case protocol.EngineQdrant:
+		return nil, AppDatabaseOutput{}, fmt.Errorf("%s runs Qdrant, whose collections the app creates itself (with its vector size and distance): the user makes an API key for the app "+
+			"in the dashboard (Databases & users), which shows it once; the app connects to https://<host>:6333 (REST) or port 6334 (gRPC) with that key (get_cloud_server shows the host)", d.Name)
 	default:
 		return nil, AppDatabaseOutput{}, fmt.Errorf("create_app_database is for PostgreSQL, MySQL, MariaDB and ClickHouse servers, and %s runs %s", d.Name, protocol.EngineDisplayName(engine))
 	}

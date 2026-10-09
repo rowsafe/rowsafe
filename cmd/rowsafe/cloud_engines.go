@@ -129,6 +129,9 @@ func printEngines(cat client.CloudCatalog) {
 		if e.MinMemoryMB > 0 {
 			line += fmt.Sprintf("; sizes with %d GB of memory or more", e.MinMemoryMB/1024)
 		}
+		if e.SnapshotsOnly {
+			line += "; backups are snapshots (restores go back to one, not to any second)"
+		}
 		fmt.Println(line)
 	}
 }

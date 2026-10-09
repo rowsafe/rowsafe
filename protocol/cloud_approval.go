@@ -31,7 +31,7 @@ type CreateCloudServerParams struct {
 	Size   string `json:"size" jsonschema:"a size ID from cloud_catalog offered in that region and not sold out there (small, medium, ...)"`
 	// EngineVersion is the engine's version ("" is its default:
 	// CloudEngine.DefaultVersion).
-	EngineVersion string `json:"engine_version,omitempty" jsonschema:"the engine's version (default: the newest that Rowsafe recommends): PostgreSQL 15, 16, 17 or 18 (default 17); MySQL 8.4; MariaDB 11.8; Valkey 8; ClickHouse 26.3 or 26.8 (default 26.8)"`
+	EngineVersion string `json:"engine_version,omitempty" jsonschema:"the engine's version (default: the newest that Rowsafe recommends): PostgreSQL 15, 16, 17 or 18 (default 17); MySQL 8.4; MariaDB 11.8; Valkey 8; ClickHouse 26.3 or 26.8 (default 26.8); Qdrant 1.19"`
 	// AllowedIPs may connect to the database; empty: nobody until
 	// cloud_firewall opens it.
 	AllowedIPs []string `json:"allowed_ips,omitempty" jsonschema:"who can connect to the database: IP addresses or networks (203.0.113.4 or 203.0.113.0/24); empty: nobody until cloud_firewall opens it"`
