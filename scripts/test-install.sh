@@ -108,14 +108,24 @@
 #      folder and role to opensearch.yml (a copy kept), makes Rowsafe's user
 #      with an administrator's login and doesn't restart it; after a restart
 #      the real agent finds everything in place.
+#      --install-meilisearch 1.54 (Debian 12 and 13, arm64 and amd64): the
+#      Community Edition binary checked against the pinned SHA-256 (a
+#      tampered one refused), its sandboxed unit, the master key root's only
+#      and handed to the agent on stdin once, production mode, analytics off,
+#      Meilisearch itself on 127.0.0.1:7701, Rowsafe's TLS front (the real
+#      agent program) on 7700: HTTPS only, plain HTTP refused, TLS 1.1
+#      refused, a renewed certificate served without a restart.
 #      The regular run checks the --install-X refusals that need nothing.
 #
 # Usage: scripts/test-install.sh [IMAGE...]
 #        scripts/test-install.sh --cloud [IMAGE...]   (section 12 only)
 # Default images: debian:trixie debian:bookworm ubuntu:24.04 ubuntu:22.04
+# TEST_ONLY=meilisearch only a Meilisearch running here, protected (the
+# master key found in its configuration, Rowsafe's key made on stdin, the
+# snapshots readable by the agent through an ACL; the real Meilisearch).
 # TEST_ONLY=redis runs only the Redis and Valkey cases (11); TEST_ONLY=sqlite
 # only the SQLite ones.
-# (--cloud: debian:bookworm for PostgreSQL; TEST_ONLY=postgres,mysql,mariadb,valkey,clickhouse,opensearch
+# (--cloud: debian:bookworm for PostgreSQL; TEST_ONLY=postgres,mysql,mariadb,valkey,clickhouse,opensearch,qdrant,meilisearch
 # picks engines, CLOUD_RUNS the ENGINE:VERSION:IMAGE:PLATFORM runs, TEST_KEEP=1
 # keeps a failed run's container)
 
@@ -166,19 +176,25 @@ case \${1:-} in
     fi
     echo "writing, reading and deleting a test file in Rowsafe Storage..."
     echo "Rowsafe Storage works: wrote, read back and deleted a test file" ;;
-  setup|mongodb|clickhouse|redis|opensearch|qdrant)
+  setup|mongodb|clickhouse|redis|opensearch|qdrant|meilisearch)
     # Answers from /tmp/rowsafe-fake: CMD.out is printed, CMD.rc holds exit
     # codes (one per line, used in turn; the last one sticks). MongoDB,
-    # ClickHouse, Redis, OpenSearch and Qdrant helpers are mongodb-CMD,
-    # clickhouse-CMD, redis-CMD, opensearch-CMD and qdrant-CMD; a password (a
-    # Qdrant key) on stdin goes to CMD.stdin.
+    # ClickHouse, Redis, OpenSearch, Qdrant and Meilisearch helpers are
+    # mongodb-CMD, clickhouse-CMD, redis-CMD, opensearch-CMD, qdrant-CMD and
+    # meilisearch-CMD; a password (a Qdrant key, a Meilisearch master key) on
+    # stdin goes to CMD.stdin. (--cloud) Meilisearch's TLS front is the real
+    # agent's.
+    if [ "\$1" = meilisearch ] && [ "\${2:-}" = tls-front ]; then
+      shift
+      exec "/go-release/real/rowsafe-agent-linux-\$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')" meilisearch "\$@"
+    fi
     f=/tmp/rowsafe-fake
     pre=''
-    case \$1 in mongodb | clickhouse | redis | opensearch | qdrant) pre=\$1- ;; esac
+    case \$1 in mongodb | clickhouse | redis | opensearch | qdrant | meilisearch) pre=\$1- ;; esac
     shift
     echo "\$pre\$*" >>"\$f/calls"
     case " \$* " in *" --admin-user "*) cat >"\$f/\$pre\$1.stdin" ;; esac
-    case \$pre\$1 in qdrant-login | qdrant-save-login) cat >"\$f/\$pre\$1.stdin" ;; esac
+    case \$pre\$1 in qdrant-login | qdrant-save-login | meilisearch-login) cat >"\$f/\$pre\$1.stdin" ;; esac
     set -- "\$pre\$@"
     if [ "\$1" = mysql-account ] && [ -f /tmp/rowsafe-fake-user ]; then
       # (--cloud) root creates Rowsafe's account through the server's
@@ -308,6 +324,39 @@ host() {
     fi
   done
 
+  # (meilisearch: --cloud, or TEST_ONLY=meilisearch) The pinned Meilisearch
+  # release, verified against the installer's SHA-256 (kept in the user's
+  # cache between runs) and served by the local release server, and the
+  # real agent for Rowsafe's TLS front.
+  meili=0
+  if [ "$mode" = --in-container-cloud ]; then
+    case " $(printf '%s' "${TEST_ONLY:-meilisearch}" | tr ',' ' ') " in *" meilisearch "*) meili=1 ;; esac
+  elif [ "${TEST_ONLY:-}" = meilisearch ]; then
+    meili=1
+  fi
+  if [ "$meili" = 1 ]; then
+    mv=$(sed -n 's/^MEILI_VERSION=//p' "$root/scripts/install.sh")
+    cache=${XDG_CACHE_HOME:-$HOME/.cache}/rowsafe-test-install/meilisearch/v$mv
+    mkdir -p "$work/go/meilisearch/v$mv" "$work/go/real" "$cache"
+    for arch in amd64 arm64; do
+      asset=meilisearch-linux-$arch
+      [ "$arch" = amd64 ] || asset=meilisearch-linux-aarch64
+      sum=$(sed -n "s/^MEILI_SHA256_$(echo "$arch" | tr a-z A-Z)=//p" "$root/scripts/install.sh")
+      sha() { (sha256sum "$1" 2>/dev/null || shasum -a 256 "$1") | cut -d' ' -f1; }
+      if [ ! -f "$cache/$asset" ] || [ "$(sha "$cache/$asset")" != "$sum" ]; then
+        if ! curl -fsSL --retry 3 -o "$cache/$asset" "https://github.com/meilisearch/meilisearch/releases/download/v$mv/$asset" ||
+          [ "$(sha "$cache/$asset")" != "$sum" ]; then
+          rm -f "$cache/$asset"
+          echo "test-install: could not fetch Meilisearch $mv for $arch with the pinned SHA-256" >&2
+          exit 1
+        fi
+      fi
+      ln "$cache/$asset" "$work/go/meilisearch/v$mv/$asset" 2>/dev/null || cp "$cache/$asset" "$work/go/meilisearch/v$mv/$asset"
+      (cd "$root" && CGO_ENABLED=0 GOOS=linux GOARCH=$arch GOWORK=off go build -o "$work/go/real/rowsafe-agent-linux-$arch" ./cmd/rowsafe-agent) ||
+        { echo "test-install: building the agent for linux/$arch failed (Meilisearch's TLS front)" >&2; exit 1; }
+    done
+  fi
+
   if [ "$mode" = --in-container-cloud ]; then
     opensearch_host_prep # opensearch
     cloud_host
@@ -319,7 +368,7 @@ host() {
     echo "=== $image"
     docker run --rm \
       -e TEST_PUB="$TEST_PUB" -e TEST_PRIV="$TEST_PRIV" -e TEST_UNITS="$first" -e TEST_SHOW="${TEST_SHOW:-}" -e TEST_ONLY="${TEST_ONLY:-}" \
-      --cap-add NET_ADMIN \
+      --cap-add NET_ADMIN --cap-add SYS_PTRACE \
       -v "$root/scripts:/src/scripts:ro" -v "$root/deploy:/src/deploy:ro" -v "$work/go:/go-release:ro" \
       "$image" sh /src/scripts/test-install.sh "$mode"
     first=0
@@ -378,9 +427,9 @@ opensearch_host_prep() {
 # TEST_ONLY picks some of postgres, mysql, mariadb, valkey, clickhouse,
 # qdrant (default: all). Each run: ENGINE:VERSION:IMAGE:PLATFORM (MySQL's packages
 # are amd64 only; the others run on the host's processor unless one is named).
-CLOUD_RUNS=${CLOUD_RUNS:-"mysql:8.4:debian:bookworm:linux/amd64 mariadb:11.8:debian:trixie: mariadb:11.4:debian:bookworm: valkey:8:debian:bookworm: valkey:8:debian:trixie: clickhouse:26.8:debian:bookworm: clickhouse:26.3:debian:trixie: clickhouse:26.8:debian:bookworm:linux/amd64 opensearch:3:debian:bookworm: opensearch:3:debian:trixie: opensearch-own:3:debian:bookworm: qdrant:1.19:debian:bookworm: qdrant:1.19:debian:trixie: qdrant:1.19:debian:bookworm:linux/amd64"}
+CLOUD_RUNS=${CLOUD_RUNS:-"mysql:8.4:debian:bookworm:linux/amd64 mariadb:11.8:debian:trixie: mariadb:11.4:debian:bookworm: valkey:8:debian:bookworm: valkey:8:debian:trixie: clickhouse:26.8:debian:bookworm: clickhouse:26.3:debian:trixie: clickhouse:26.8:debian:bookworm:linux/amd64 opensearch:3:debian:bookworm: opensearch:3:debian:trixie: opensearch-own:3:debian:bookworm: qdrant:1.19:debian:bookworm: qdrant:1.19:debian:trixie: qdrant:1.19:debian:bookworm:linux/amd64 meilisearch:1.54:debian:trixie: meilisearch:1.54:debian:bookworm:linux/amd64"}
 cloud_host() {
-  only=$(printf '%s' "${TEST_ONLY:-postgres mysql mariadb valkey clickhouse opensearch qdrant}" | tr ',' ' ')
+  only=$(printf '%s' "${TEST_ONLY:-postgres mysql mariadb valkey clickhouse opensearch qdrant meilisearch}" | tr ',' ' ')
   case " $only " in
     *" postgres "*)
       for image in $images; do
@@ -554,7 +603,7 @@ release_setup() {
   sed "s|@RELEASE_PUBLIC_KEY@|$pub|" /src/scripts/install.sh >install.sh
   # An executable wrapper (not a function) so `env VAR=... $INSTALLER` works.
   INSTALLER=$W/installer
-  printf '#!/bin/sh\nexec env ROWSAFE_RELEASES_URL=https://localhost:18443/agent ROWSAFE_RESTIC_URL=https://localhost:18443/restic sh %s/install.sh "$@"\n' "$W" >"$INSTALLER"
+  printf '#!/bin/sh\nexec env ROWSAFE_RELEASES_URL=https://localhost:18443/agent ROWSAFE_RESTIC_URL=https://localhost:18443/restic ROWSAFE_MEILISEARCH_URL=https://localhost:18443/meilisearch sh %s/install.sh "$@"\n' "$W" >"$INSTALLER"
   chmod 755 "$INSTALLER"
   cp /src/scripts/install.sh placeholder-install.sh
 
@@ -583,6 +632,7 @@ EOF
   # ---- releases
   mkdir -p srv/restic
   [ ! -d /go-release/restic ] || cp -r /go-release/restic/. srv/restic/ # (files) the pinned restic
+  [ ! -d /go-release/meilisearch ] || { mkdir -p srv/meilisearch && cp -r /go-release/meilisearch/. srv/meilisearch/; } # (meilisearch) the pinned release
   if [ -d /go-release/0.2.0 ]; then
     cp -r /go-release/0.2.0 srv/agent/0.2.0 # signed by rowsafe-release
   else
@@ -616,6 +666,10 @@ in_container() {
   fi
   if [ "${TEST_ONLY:-}" = sqlite ]; then
     sqlite_only_tests
+    return 0
+  fi
+  if [ "${TEST_ONLY:-}" = meilisearch ]; then
+    meilisearch_only_tests
     return 0
   fi
 
@@ -3365,6 +3419,115 @@ redis_host_tests() {
   pass "$eng $ver server: agent as rowsafe in the $g group after its unit, server program checked, uninstall"
 }
 
+# meilisearch_only_tests (TEST_ONLY=meilisearch): a server that runs a
+# Meilisearch of its own (the real program, the pinned release, started here
+# as its own user from a configuration file, without systemd): the installer
+# runs the agent as rowsafe, finds the instance's program, folders, address
+# and master key from its process, hands the master key to the agent once on
+# stdin (never printed, never kept), and lets the agent read the snapshot
+# folder through an ACL (owners and modes unchanged).
+meilisearch_only_tests() {
+  echo "  -- a Meilisearch running here (adopt)"
+  # (No iproute2 here: the installer installs it to see which process listens where.)
+  apt-get purge -y -qq iproute2 >/dev/null 2>&1 || true
+  ! command -v ss >/dev/null 2>&1 || fail "ss is still here"
+  mver=$(sed -n 's/^MEILI_VERSION=//p' "$W/install.sh")
+  asset=meilisearch-linux-$arch
+  [ "$arch" = amd64 ] || asset=meilisearch-linux-aarch64
+  [ -f "/go-release/meilisearch/v$mver/$asset" ] || fail "no Meilisearch release for the test (host side)"
+  install -d -m 0755 /opt/meili
+  install -m 0755 "/go-release/meilisearch/v$mver/$asset" /opt/meili/meilisearch
+  useradd --system --home-dir /srv/meili --create-home --shell /usr/sbin/nologin meili
+  chmod 0700 /srv/meili
+  mk=adopt-test-master-key-0123456789abcdef
+  printf 'db_path = "/srv/meili/data.ms"\nsnapshot_dir = "/srv/meili/snapshots"\nhttp_addr = "127.0.0.1:7700"\nmaster_key = "%s"\nenv = "production"\n' "$mk" >/etc/meilisearch.toml
+  chown root:meili /etc/meilisearch.toml && chmod 0640 /etc/meilisearch.toml
+  (cd /srv/meili && runuser -u meili -- /opt/meili/meilisearch --config-file-path /etc/meilisearch.toml >/srv/meili/log 2>&1 &)
+  i=0
+  until curl -fs http://127.0.0.1:7700/health >/dev/null 2>&1; do
+    i=$((i + 1))
+    [ "$i" -lt 60 ] || { cat /srv/meili/log >&2; fail "Meilisearch didn't start"; }
+    sleep 1
+  done
+  [ ! -e /srv/meili/snapshots ] || fail "the snapshot folder exists before Rowsafe asks"
+  configured() {
+    env ROWSAFE_REPO_S3_ENDPOINT=acct.eu.r2.cloudflarestorage.com ROWSAFE_REPO_S3_BUCKET=app-rowsafe \
+      ROWSAFE_REPO_S3_KEY=AKIAEXAMPLEKEY42 ROWSAFE_REPO_S3_KEY_SECRET=s3cr3t/with+base64= \
+      ROWSAFE_REPO_CIPHER_PASS='cipher-pass-that-is-long-enough/+==' "$@"
+  }
+  echo rowsafe >/tmp/rowsafe-fake-user
+  scenario
+  expect_ok "Meilisearch server: configured install" configured env ROWSAFE_ENROLL_TOKEN=rse_secrettoken123 "$INSTALLER" --no-setup
+  [ -z "${TEST_SHOW:-}" ] || cat "$W/out"
+  grep -q "hourly snapshots, Marks and weekly restore tests" "$W/out" && grep -q "for the Meilisearch on this server" "$W/out" ||
+    fail "$name: the installer doesn't speak of Meilisearch's snapshots"
+  grep -q "backups      Meilisearch's own snapshots, encrypted by the agent" "$W/out" || fail "$name: summary"
+  ! command -v pgbackrest >/dev/null 2>&1 || fail "$name: pgBackRest installed for Meilisearch"
+  [ "$(stat -c '%U %a' /etc/rowsafe/agent.env)" = "rowsafe 600" ] || fail "$name: the agent doesn't run as rowsafe"
+  d=/etc/systemd/system/rowsafe-agent.service.d/10-meilisearch.conf
+  grep -qx 'User=rowsafe' "$d" && grep -qx 'After=meilisearch.service' "$d" || { cat "$d" >&2; fail "$name: the agent's drop-in"; }
+  curl -fs http://127.0.0.1:7700/health >/dev/null 2>&1 || { tail -n 20 /srv/meili/log >&2; fail "$name: Meilisearch stopped during the install"; }
+  pass "a Meilisearch server: the agent as rowsafe after meilisearch.service, no pgBackRest"
+
+  # The agent "runs" (stand-in): protect it unattended.
+  echo '{"host_id":"host_1","agent_token":"rsa_x"}' >/var/lib/rowsafe/agent.json
+  chown rowsafe:rowsafe /var/lib/rowsafe/agent.json
+  runuser -u rowsafe -- /opt/rowsafe/rowsafe-agent run >/dev/null 2>&1 &
+  sleep 1
+  line='7700\t-\t1\t-\t/srv/meili/data.ms\t65536\tsearch\tno\t-\t-\t64 KiB\t-\t-\tmeilisearch'
+  scenario "discover_out=$line" "meilisearch-status_out=answers=yes\ntls=no\nversion=$mver\nlogin=missing" \
+    "meilisearch-login_out=version=$mver\ntls=no\nkey_uid=0f0e\nno_auth=no" \
+    "plan_out=Backups for search: Meilisearch's own snapshots, every hour." \
+    "wait_out=✓ search is protected. The first full backup is running." "status_out=db_fake\tsearch\tactive\trunning\thttps://app.rowsafe.test/databases/db_fake"
+  curl -fs http://127.0.0.1:7700/health >/dev/null 2>&1 || { tail -n 20 /srv/meili/log >&2; fail "Meilisearch stopped before --protect"; }
+  if ! "$INSTALLER" --protect search >"$W/out" 2>&1; then
+    cat "$W/out" >&2
+    echo "--- debug: ss, processes, fake calls" >&2
+    ss -ltnp >&2 2>&1 || true
+    ps -eo pid,user,comm,args | grep -i meili >&2 || true
+    cat "$F/calls" >&2 2>/dev/null || true
+    fail "protected unattended (--protect search)"
+  fi
+  pass "protected unattended (--protect search)"
+  [ -z "${TEST_SHOW:-}" ] || cat "$W/out"
+  called "meilisearch-login --port 7700 --binary /opt/meili/meilisearch --db-path /srv/meili/data.ms --snapshot-dir /srv/meili/snapshots --listen 127.0.0.1 --analytics yes"
+  [ "$(cat "$F/meilisearch-login.stdin")" = "$mk" ] || fail "$name: the agent didn't get the master key (from the configuration file) on stdin"
+  ! grep -qF "$mk" "$W/out" || fail "$name: the master key was printed"
+  ! grep -rqsF "$mk" /etc/rowsafe /var/lib/rowsafe /etc/systemd/system || fail "$name: the master key is in Rowsafe's files"
+  grep -q "Meilisearch sends anonymous usage data to its makers" "$W/out" || fail "$name: analytics on isn't said"
+  called "plan --name search --port 7700"
+  called "--engine meilisearch"
+  [ "$(stat -c '%U %a' /srv/meili/snapshots)" = "meili 755" ] || [ "$(stat -c '%U' /srv/meili/snapshots)" = meili ] || fail "$name: the snapshot folder isn't Meilisearch's"
+  setpriv --reuid=rowsafe --regid=rowsafe --clear-groups test -r /srv/meili/snapshots -a -x /srv/meili/snapshots || fail "$name: the agent can't read the snapshot folder"
+  [ "$(stat -c '%U %G' /srv/meili)" = "meili meili" ] && getfacl -p /srv/meili 2>/dev/null | grep -qx 'group::---' &&
+    getfacl -p /srv/meili 2>/dev/null | grep -qx 'other::---' || fail "$name: Meilisearch's folder's owner or access changed"
+  # (Passing through /srv/meili, the agent also sees what Meilisearch leaves
+  # readable to everyone there; its API key reads the documents anyway.)
+  # A snapshot Meilisearch writes there is readable by the agent.
+  curl -fs -X POST -H "Authorization: Bearer $mk" http://127.0.0.1:7700/snapshots >/dev/null
+  i=0
+  until [ -s /srv/meili/snapshots/data.ms.snapshot ] || [ "$i" -ge 30 ]; do sleep 1; i=$((i + 1)); done
+  setpriv --reuid=rowsafe --regid=rowsafe --clear-groups test -r /srv/meili/snapshots/data.ms.snapshot || fail "$name: the agent can't read the snapshot"
+  pass "Meilisearch adopted: the master key from its configuration, given to the agent once on stdin, never printed or kept; snapshots readable through an ACL"
+
+  # No master key found and no terminal: refused with what to set.
+  pkill -f '/opt/meili/meilisearch' || true
+  sleep 1
+  sed -i '/^master_key/d' /etc/meilisearch.toml
+  printf 'master_key = "%s"\n' "$mk" >/srv/meili/other.toml
+  (cd /srv/meili && runuser -u meili -- env MEILI_MASTER_KEY="$mk" /opt/meili/meilisearch --config-file-path /etc/meilisearch.toml >/srv/meili/log 2>&1 &)
+  i=0
+  until curl -fs http://127.0.0.1:7700/health >/dev/null 2>&1; do i=$((i + 1)); [ "$i" -lt 60 ] || fail "Meilisearch didn't start again"; sleep 1; done
+  scenario "discover_out=$line" "meilisearch-status_out=answers=yes\ntls=no\nversion=$mver\nlogin=missing" \
+    "meilisearch-login_out=version=$mver\ntls=no\nkey_uid=0f0f\nno_auth=no" "plan_rc=5" "plan_out=search is already protected."
+  expect_ok "the master key from the process's environment" "$INSTALLER" --protect search
+  [ "$(cat "$F/meilisearch-login.stdin")" = "$mk" ] || fail "$name: the master key from the environment didn't reach the agent"
+  ! grep -qF "$mk" "$W/out" || fail "$name: the master key was printed"
+  pass "the master key found in Meilisearch's environment too"
+  pkill -f '/opt/meili/meilisearch' || true
+  echo "test-install: Meilisearch cases passed"
+}
+
 # redis_only_tests (TEST_ONLY=redis): what the Redis and Valkey cases need
 # of the rest (an install with storage, the agent running as postgres),
 # then only those cases.
@@ -4458,6 +4621,7 @@ cloud_engine_container() {
     clickhouse) label=ClickHouse unit=clickhouse-server port=8123 user=rowsafe ;;
     opensearch) label=OpenSearch unit=opensearch port=9200 user=rowsafe ;;
     qdrant) label=Qdrant unit=qdrant port=6333 user=rowsafe ;;
+    meilisearch) label=Meilisearch unit=meilisearch port=7700 user=rowsafe ;;
   esac
   echo "  -- servers Rowsafe creates: --install-$engine $ver ($os, $arch)"
   [ "$engine" != opensearch ] || opensearch_test_prep # opensearch
@@ -4479,10 +4643,28 @@ cloud_engine_container() {
   [ ! -e /etc/rowsafe ] && [ -z "$(ls /etc/apt/sources.list.d/rowsafe-* 2>/dev/null)" ] || fail "$name: something was written"
   [ "$engine" != qdrant ] || [ ! -e /usr/bin/qdrant ] || fail "$name: Qdrant was installed anyway"
 
+  if [ "$engine" = meilisearch ]; then
+    # A binary that isn't the one Rowsafe pinned is refused, before anything changes.
+    mkdir -p "$W/srv/bad/v1.54.3"
+    for a in meilisearch-linux-amd64 meilisearch-linux-aarch64; do echo 'not meilisearch' >"$W/srv/bad/v1.54.3/$a"; done
+    expect_fail "a Meilisearch binary that doesn't match the pinned SHA-256 refused" "doesn't match the SHA-256 Rowsafe pinned for it" \
+      env ROWSAFE_RELEASES_URL=https://localhost:18443/agent ROWSAFE_MEILISEARCH_URL=https://localhost:18443/bad \
+      sh "$W/install.sh" rse_secrettoken123 --no-prompt --install-meilisearch "$ver" --no-setup
+    [ ! -e /usr/local/bin/meilisearch ] && [ -z "$(ls /usr/local/lib/meilisearch/*/meilisearch 2>/dev/null)" ] || fail "$name: the binary was installed"
+    rm -rf /etc/rowsafe /var/tmp/rowsafe-meilisearch.*
+  fi
+
   # The stand-in agent runs as the engine's agent user (mysql or rowsafe);
   # its unit enrolls it at once (agent.json).
   echo "$user" >/tmp/rowsafe-fake-user
   case $engine in
+    meilisearch)
+      line="7700\t-\t1\t-\t/var/lib/meilisearch/data/data.ms\t8192\tmeilisearch\tno\t-\t-\t8 KiB\tmeilisearch.service\t-\tmeilisearch"
+      scenario "discover_out=$line" "meilisearch-status_out=answers=yes\ntls=no\nversion=1.54.3\nlogin=missing" \
+        "meilisearch-login_out=version=1.54.3\ntls=no\nkey_uid=0f0e\nno_auth=no" \
+        "plan_out=Backups for shop: Meilisearch's own snapshots, every hour." \
+        "wait_out=✓ shop is protected. The first full backup is running." "status_out=db_fake\tshop\tactive\trunning\thttps://app.rowsafe.test/databases/db_fake"
+      ;;
     clickhouse)
       line="8123\t-\t$ver\t-\t/var/lib/clickhouse\t8192\tclickhouse\tno\t-\t-\t8 KiB\tclickhouse-server.service\t-\tclickhouse"
       scenario "discover_out=$line" "clickhouse-status_out=$(ch_status missing)" "clickhouse-login_out=$(ch_users_xml)" \
@@ -4525,7 +4707,7 @@ cloud_engine_container() {
   esac
 
   cloud_init() {
-    sh -c 'w=$1; shift; ROWSAFE_RELEASES_URL=https://localhost:18443/agent ROWSAFE_RESTIC_URL=https://localhost:18443/restic sh -s -- "$@" <"$w/install.sh"' \
+    sh -c 'w=$1; shift; ROWSAFE_RELEASES_URL=https://localhost:18443/agent ROWSAFE_RESTIC_URL=https://localhost:18443/restic ROWSAFE_MEILISEARCH_URL=https://localhost:18443/meilisearch sh -s -- "$@" <"$w/install.sh"' \
       cloud-init "$W" rse_secrettoken123 --no-prompt --install-"$engine" "$ver" --listen-public --storage rowsafe --protect shop \
       --allow-restart --firewall-ssh
   }
@@ -4557,12 +4739,21 @@ cloud_engine_container() {
     clickhouse) cloud_clickhouse_checks ;;
     opensearch) cloud_opensearch_checks ;;
     qdrant) cloud_qdrant_checks && cloud_qdrant_update ;;
+    meilisearch) cloud_meilisearch_checks ;;
   esac
   pass "$label $ver: installed from its own source with its key checked, secure defaults, TLS from the network, protected"
 
   # Again: nothing changes, nothing restarts.
   pid=$(systemctl show -p MainPID --value "$unit")
   case $engine in
+    meilisearch)
+      cp /etc/systemd/system/meilisearch.service "$W/meili.unit"
+      cp /etc/systemd/system/rowsafe-meilisearch-tls.service "$W/front.unit"
+      fpid=$(systemctl show -p MainPID --value rowsafe-meilisearch-tls)
+      scenario "discover_out=7700\t-\t1\t-\t/var/lib/meilisearch/data/data.ms\t8192\tshop\tyes\tactive\t-\t8 KiB\tmeilisearch.service\tdb_fake\tmeilisearch" \
+        "meilisearch-status_out=answers=yes\ntls=no\nversion=1.54.3\nlogin=ok" plan_rc=5 "plan_out=shop is already protected." \
+        "status_out=db_fake\tshop\tactive\trunning\thttps://app.rowsafe.test/databases/db_fake"
+      ;;
     clickhouse)
       for f in /etc/clickhouse-server/config.d/zz-rowsafe.xml /etc/clickhouse-server/config.d/zz-rowsafe-network.xml \
         /etc/clickhouse-server/users.d/zz-rowsafe-admin.xml /etc/clickhouse-server/users.d/rowsafe.xml /etc/apt/preferences.d/rowsafe-clickhouse; do
@@ -4637,6 +4828,12 @@ cloud_engine_container() {
     valkey)
       cmp -s /etc/valkey/users.acl "$W/users.acl" || fail "$name: the ACL file changed"
       cmp -s /etc/valkey/valkey.conf "$W/valkey.conf" || { diff "$W/valkey.conf" /etc/valkey/valkey.conf >&2; fail "$name: valkey.conf changed"; }
+      ;;
+    meilisearch)
+      cmp -s /etc/systemd/system/meilisearch.service "$W/meili.unit" || fail "$name: Meilisearch's unit changed"
+      cmp -s /etc/systemd/system/rowsafe-meilisearch-tls.service "$W/front.unit" || fail "$name: the TLS front's unit changed"
+      [ "$(systemctl show -p MainPID --value rowsafe-meilisearch-tls)" = "$fpid" ] || fail "$name: the TLS front was restarted"
+      not_called "meilisearch-login"
       ;;
     *) cmp -s "$(cloud_net_conf)" "$W/net.cnf" || fail "$name: the network settings changed" ;;
   esac
@@ -4788,6 +4985,110 @@ cloud_valkey_checks() {
   grep -qx "$p" /etc/rowsafe/firewall-allowed || fail "$name: $p isn't in the firewall's allow list"
   grep -Eq "Valkey's ports? \((6379, )?6380\) (is|are) closed to everyone but this server" "$W/out" || fail "$name: no word about the firewall"
   pass "Valkey from the network: TLS on 6380 only (no plain port), passwords only, the certificate at the exact paths, closed by the firewall"
+}
+
+# cloud_meilisearch_checks: Meilisearch after the cloud-init run.
+cloud_meilisearch_checks() {
+  mver=$(sed -n 's/^MEILI_VERSION=//p' "$W/install.sh")
+  bin=/usr/local/lib/meilisearch/$mver/meilisearch
+  [ "$(stat -c '%U %G %a' "$bin")" = "root root 755" ] && [ "$(readlink /usr/local/bin/meilisearch)" = "$bin" ] || fail "$name: the program's owner, mode or link"
+  sum=$(sed -n "s/^MEILI_SHA256_$(echo "$arch" | tr a-z A-Z)=//p" "$W/install.sh")
+  [ "$(sha256sum "$bin" | cut -d' ' -f1)" = "$sum" ] || fail "$name: the program isn't the pinned Community Edition build"
+  [ "$(/usr/local/bin/meilisearch --version)" = "meilisearch $mver" ] || fail "$name: version"
+  grep -q "Meilisearch $mver (Community Edition), SHA-256 checked" "$W/out" || fail "$name: no word about the check"
+  ! command -v pgbackrest >/dev/null 2>&1 || fail "$name: pgBackRest installed for Meilisearch"
+  # The master key: root's only, never printed, handed to the agent once on stdin.
+  [ "$(stat -c '%U %G %a' /etc/meilisearch/master-key.env)" = "root root 600" ] || fail "$name: master key file owner/mode"
+  mk=$(sed -n 's/^MEILI_MASTER_KEY=//p' /etc/meilisearch/master-key.env)
+  printf '%s\n' "$mk" | grep -Eqx '[0-9a-f]{64}' || fail "$name: the master key isn't 64 hex digits"
+  ! grep -qF "$mk" "$W/out" || fail "$name: the master key was printed"
+  ! grep -rqsF "$mk" /etc/rowsafe /var/lib/rowsafe /etc/systemd/system || fail "$name: the master key is in Rowsafe's files or a unit"
+  called "meilisearch-login --port 7700 --local-port 7701 --binary /usr/local/bin/meilisearch --db-path /var/lib/meilisearch/data/data.ms --snapshot-dir /var/lib/meilisearch/snapshots --unit meilisearch.service --listen \* --rowsafe"
+  [ "$(cat "$F/meilisearch-login.stdin")" = "$mk" ] || fail "$name: the agent didn't get the master key on stdin"
+  called "apply --database db_fake"
+  # The unit: its user, production, no analytics, this server only, sandboxed.
+  u=/etc/systemd/system/meilisearch.service
+  [ "$(systemctl show -p User --value meilisearch)" = meilisearch ] || fail "$name: not run as meilisearch"
+  for want in '--env production' '--no-analytics' '--http-addr 127.0.0.1:7701' '--db-path /var/lib/meilisearch/data/data.ms' \
+    '--snapshot-dir /var/lib/meilisearch/snapshots' '--max-indexing-memory '; do
+    grep -q -- "^ExecStart=.*$want" "$u" || fail "$name: the unit lacks $want"
+  done
+  for want in EnvironmentFile=/etc/meilisearch/master-key.env NoNewPrivileges=yes ProtectSystem=strict ReadWritePaths=/var/lib/meilisearch \
+    PrivateTmp=yes CapabilityBoundingSet= SystemCallFilter=@system-service; do
+    grep -qx "$want" "$u" || fail "$name: the unit lacks $want"
+  done
+  [ "$(stat -c '%U %G %a' /var/lib/meilisearch/data)" = "meilisearch meilisearch 700" ] || fail "$name: the data folder's owner/mode"
+  [ "$(stat -c '%U %G %a' /var/lib/meilisearch/snapshots)" = "meilisearch meilisearch 750" ] || fail "$name: the snapshot folder's owner/mode"
+  d=/etc/systemd/system/rowsafe-agent.service.d/10-meilisearch.conf
+  grep -qx 'User=rowsafe' "$d" && grep -qx 'SupplementaryGroups=meilisearch' "$d" && grep -qx 'ReadWritePaths=-/etc/ssl/rowsafe-meilisearch' "$d" ||
+    { cat "$d" >&2; fail "$name: the agent's drop-in"; }
+  # A key is needed; the master key works; plain HTTP only on 127.0.0.1.
+  [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7701/indexes)" = 401 ] || fail "Meilisearch answers without a key"
+  [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $mk" http://127.0.0.1:7701/indexes)" = 200 ] || fail "the master key doesn't work"
+  ss -ltnH | awk '{ print $4 }' | grep -qx '127.0.0.1:7701' || fail "Meilisearch isn't on 127.0.0.1:7701"
+  ! ss -ltnH | awk '{ print $4 }' | grep -Eq '^(0\.0\.0\.0|\*|\[::\]):7701$' || fail "Meilisearch's plain port listens beyond this server"
+  if curl -s -m 5 "http://$ip:7701/health" >/dev/null 2>&1; then fail "plain HTTP reaches Meilisearch from the network"; fi
+  # The snapshots are the agent's to read, the data isn't.
+  curl -s -X POST -H "Authorization: Bearer $mk" http://127.0.0.1:7701/snapshots >/dev/null
+  i=0
+  until [ -s /var/lib/meilisearch/snapshots/data.ms.snapshot ] || [ "$i" -ge 30 ]; do
+    sleep 1
+    i=$((i + 1))
+  done
+  mgid=$(getent group meilisearch | cut -d: -f3)
+  setpriv --reuid=rowsafe --regid=rowsafe --groups="$mgid" test -r /var/lib/meilisearch/snapshots/data.ms.snapshot ||
+    fail "the agent can't read Meilisearch's snapshot"
+  if setpriv --reuid=rowsafe --regid=rowsafe --groups="$mgid" ls /var/lib/meilisearch/data >/dev/null 2>&1; then
+    fail "the agent can read Meilisearch's data folder"
+  fi
+  # Rowsafe's TLS front: HTTPS on 7700 with the certificate at the exact paths.
+  [ "$(stat -c '%U %G %a' /etc/ssl/rowsafe-meilisearch)" = "rowsafe rowsafe-meilisearch-tls 2750" ] || fail "$name: certificate folder owner/mode"
+  [ "$(stat -c '%U %G %a' /etc/ssl/rowsafe-meilisearch/rowsafe-server.key)" = "rowsafe rowsafe-meilisearch-tls 640" ] || fail "$name: key owner/mode"
+  [ "$(stat -c '%U %G %a' /usr/local/lib/rowsafe/rowsafe-meilisearch-tls)" = "root root 755" ] || fail "$name: the front's program isn't root's"
+  f=/etc/systemd/system/rowsafe-meilisearch-tls.service
+  grep -qx User=rowsafe-meilisearch-tls "$f" && grep -qx MemoryDenyWriteExecute=yes "$f" && grep -qx CapabilityBoundingSet= "$f" || fail "$name: the front's unit"
+  systemctl is-active --quiet rowsafe-meilisearch-tls && systemctl is-enabled --quiet rowsafe-meilisearch-tls || fail "$name: the front isn't running and enabled"
+  fu=$(ps -o uid= -p "$(systemctl show -p MainPID --value rowsafe-meilisearch-tls)" | tr -d ' ')
+  [ "$fu" = "$(id -u rowsafe-meilisearch-tls)" ] || fail "$name: the front runs as uid '$fu'"
+  ! id -nG rowsafe-meilisearch-tls | tr ' ' '\n' | grep -qx meilisearch || fail "$name: the front's user is in Meilisearch's group"
+  [ "$(curl -sk -o /dev/null -w '%{http_code}' "https://$ip:7700/indexes")" = 401 ] || fail "HTTPS on 7700 without a key isn't refused"
+  [ "$(curl -sk -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $mk" "https://$ip:7700/indexes")" = 200 ] || fail "HTTPS on 7700 with the key"
+  curl -sk -X POST -H "Authorization: Bearer $mk" -H 'Content-Type: application/json' "https://$ip:7700/indexes/movies/documents" \
+    --data '[{"id":1,"title":"Carol"},{"id":2,"title":"Heat"}]' >/dev/null
+  i=0
+  until curl -sk -H "Authorization: Bearer $mk" -H 'Content-Type: application/json' "https://$ip:7700/indexes/movies/search" --data '{"q":"heat"}' 2>/dev/null |
+    grep -q '"Heat"'; do
+    i=$((i + 1))
+    [ "$i" -lt 30 ] || fail "a search over HTTPS through the front"
+    sleep 1
+  done
+  [ "$(curl -s -o "$W/plain" -w '%{http_code}' "http://$ip:7700/indexes")" = 400 ] && grep -q 'HTTPS only' "$W/plain" || fail "plain HTTP on 7700 isn't refused"
+  if echo | openssl s_client -connect "$ip:7700" -tls1_1 >/dev/null 2>&1; then fail "TLS 1.1 accepted on 7700"; fi
+  fp() { echo | openssl s_client -connect "$ip:7700" 2>/dev/null | openssl x509 -noout -fingerprint -sha256; }
+  [ "$(fp)" = "$(openssl x509 -in /etc/ssl/rowsafe-meilisearch/rowsafe-server.crt -noout -fingerprint -sha256)" ] || fail "the front doesn't present the certificate"
+  # A renewed certificate (as the agent writes it: certificate, then key) is
+  # served without restarting anything.
+  mpid=$(systemctl show -p MainPID --value meilisearch) fpid=$(systemctl show -p MainPID --value rowsafe-meilisearch-tls)
+  # shellcheck disable=SC2016 # $1 expands in the inner shell
+  (cd / && runuser -u rowsafe -- sh -c 'umask 027; cd "$1" &&
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 -subj /CN=renewed.example \
+      -keyout .new.key -out .new.crt >/dev/null 2>&1 && chmod 0644 .new.crt && chmod 0640 .new.key &&
+    mv -f .new.crt rowsafe-server.crt && mv -f .new.key rowsafe-server.key' \
+    renew /etc/ssl/rowsafe-meilisearch) || fail "renewing the certificate as the agent"
+  i=0
+  until [ "$(fp)" = "$(openssl x509 -in /etc/ssl/rowsafe-meilisearch/rowsafe-server.crt -noout -fingerprint -sha256)" ]; do
+    i=$((i + 1))
+    [ "$i" -lt 20 ] || fail "the renewed certificate isn't served"
+    sleep 1
+  done
+  [ "$(systemctl show -p MainPID --value meilisearch)" = "$mpid" ] && [ "$(systemctl show -p MainPID --value rowsafe-meilisearch-tls)" = "$fpid" ] ||
+    fail "renewing the certificate restarted something"
+  # The firewall: 7700 closed before the front listened, nothing for 7701.
+  grep -q 'tcp dport 7700 drop' "$W/nft" && [ -e /var/lib/rowsafe-firewall/port-7700 ] || { cat "$W/nft" >&2; fail "$name: port 7700 isn't closed by the firewall"; }
+  grep -qx 7700 /etc/rowsafe/firewall-allowed && ! grep -qx 7701 /etc/rowsafe/firewall-allowed || fail "$name: the firewall's allow list"
+  grep -q "Meilisearch's port (7700) is closed to everyone but this server" "$W/out" || fail "$name: no word about the firewall"
+  grep -qx '7700 meilisearch.service' /etc/rowsafe/restart-allowed || fail "$name: restarts of meilisearch.service aren't allowed on 7700"
+  pass "Meilisearch from the network: HTTPS only on 7700 (TLS 1.2+), plain HTTP refused, a renewed certificate served without a restart"
 }
 
 # ch_status LOGIN: what `rowsafe-agent clickhouse status` says of the new

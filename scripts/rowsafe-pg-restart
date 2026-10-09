@@ -626,8 +626,8 @@ check_root_file() {
 # MongoDB, ClickHouse, Redis and Valkey packages install (mysql, mysqld,
 # mariadb and their @instance forms, mongod, mongodb, clickhouse-server,
 # redis-server, redis, valkey-server, valkey and their @instance forms;
-# opensearch and qdrant).
-db_unit_re='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server|opensearch|(redis|valkey)(-server)?(@[A-Za-z0-9_.-]+)?|qdrant)[.]service$'
+# opensearch, qdrant and meilisearch).
+db_unit_re='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server|opensearch|(redis|valkey)(-server)?(@[A-Za-z0-9_.-]+)?|qdrant|meilisearch)[.]service$'
 
 # allowed_unit PORT prints the unit the restart allow list names for PORT.
 allowed_unit() {

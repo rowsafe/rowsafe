@@ -62,7 +62,12 @@
 #                          key checked, pinned to the series): the default user
 #                          locked, an admin user (this server only) whose random
 #                          password stays root's (/etc/rowsafe/clickhouse),
-#                          settings for servers from 4 GB of memory. Only one
+#                          settings for servers from 4 GB of memory
+#   --install-meilisearch 1.54  the same for Meilisearch 1.54 (Community Edition,
+#                          MIT) from Meilisearch's GitHub releases, the binary
+#                          checked against the SHA-256 pinned here: a master key
+#                          made here (root's only), production mode, analytics
+#                          off, this server only, a sandboxed unit. Only one
 #                          --install-X per run
 #   --install-opensearch 3 the same for OpenSearch 3 from OpenSearch's repository
 #                          (artifacts.opensearch.org, key checked, pinned to 3.x;
@@ -95,6 +100,8 @@
 #                          127.0.0.1
 #                          with --install-qdrant: TLS only, REST on 6333 and
 #                          gRPC on 6334 (the cluster port stays closed)
+#                          with --install-meilisearch: HTTPS only on 7700 through
+#                          Rowsafe's TLS front, Meilisearch on 127.0.0.1:7701
 #   (Permissions: without a terminal, restart, create-cluster, updates, pooler,
 #   tuning, sqlite-modes and files are allowed unless --no-allow-X; the
 #   server's own security updates, reboot, firewall and pooler-public only
@@ -208,8 +215,8 @@ RESTART_ALLOW_FILE=$CONFIG_DIR/restart-allowed
 RESTART_DIR=$STATE_DIR/restart
 # The database units the restart helper acts on (its db_unit_re): Debian's
 # PostgreSQL clusters and the MySQL, MariaDB, MongoDB, ClickHouse, Redis and
-# Valkey units (and OpenSearch's and Qdrant's).
-DB_UNIT_RE='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server|opensearch|(redis|valkey)(-server)?(@[A-Za-z0-9_.-]+)?|qdrant)[.]service$'
+# Valkey units (and OpenSearch's, Qdrant's and Meilisearch's).
+DB_UNIT_RE='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server|opensearch|(redis|valkey)(-server)?(@[A-Za-z0-9_.-]+)?|qdrant|meilisearch)[.]service$'
 # Forks (--allow-create-cluster): new clusters created by their own unit,
 # started by the restart helper.
 CREATE_HELPER=$LIB_DIR/rowsafe-pg-create-cluster
@@ -322,8 +329,8 @@ REDIS_CLONES=''    # --redis-clones (yes): Redis/Valkey servers here may receive
 MONGODB_REPLSET='' # --mongodb-replica-set (yes) / --no-mongodb-replica-set (no); '' = ask on a terminal
 INSTALL_PG=''      # --install-postgres VERSION (servers Rowsafe creates)
 PG_EXTENSIONS=''   # --pg-extensions NAME,... (with --install-postgres): vector, postgis, timescaledb
-INSTALL_DB=''      # --install-mysql / -mariadb / -valkey / -clickhouse / -qdrant: mysql, mariadb, valkey, clickhouse or qdrant
-INSTALL_DB_VERSION='' # its version (8.4; 11.4 or 11.8; 8; 26.3 or 26.8; 1.19)
+INSTALL_DB=''      # --install-mysql / -mariadb / -valkey / -clickhouse / -qdrant / -meilisearch: mysql, mariadb, valkey, clickhouse, qdrant or meilisearch
+INSTALL_DB_VERSION='' # its version (8.4; 11.4 or 11.8; 8; 26.3 or 26.8; 1.19; 1.54)
 LISTEN_PUBLIC=0    # --listen-public
 PG_OURS=0          # the PostgreSQL here is the one --install-postgres installed
 DB_OURS=0          # the INSTALL_DB server here is the one this installer installed
@@ -332,7 +339,7 @@ DB_FRESH=0         # this run installed it (nothing runs on it yet)
 CH_CONF_CHANGED=0  # --install-clickhouse's settings changed in this run
 OS_CONF_CHANGED=0  # --install-opensearch's settings changed in this run
 QD_CONF_CHANGED=0  # --install-qdrant's settings, keys or unit changed in this run
-INSTALL_TWICE="--install-postgres, --install-mysql, --install-mariadb, --install-valkey, --install-clickhouse, --install-opensearch and --install-qdrant each install a database server on a fresh server: give only one"
+INSTALL_TWICE="--install-postgres, --install-mysql, --install-mariadb, --install-valkey, --install-clickhouse, --install-opensearch, --install-qdrant and --install-meilisearch each install a database server on a fresh server: give only one"
 SQLITE_PATHS=''    # --sqlite PATH, one per line
 SQLITE_LIST=$CONFIG_DIR/sqlite-paths # the agent's SQLite files (one per line)
 SQLITE_CLONE_DIRS='' # --sqlite-clone-dir DIR, one per line
@@ -441,6 +448,12 @@ Options (when piping, pass them after `sh -s --`):
                          Arm): its own user, a sandboxed unit, telemetry off, an admin
                          key, a read-only key and Rowsafe's own key, random and kept for
                          root only in /etc/rowsafe/qdrant. Needs 2 GB of memory or more.
+  --install-meilisearch 1.54
+                         the same for Meilisearch 1.54 (Community Edition, MIT) from
+                         Meilisearch's GitHub releases, the program checked against the
+                         SHA-256 Rowsafe pins for it: a master key made on this server
+                         (root's only, /etc/meilisearch/master-key.env), production mode,
+                         analytics off, a sandboxed service, snapshots readable by the agent.
                          Each --install-X refuses when a database server is already
                          installed (a re-run keeps the one it installed); give only one
   --listen-public        make PostgreSQL reachable from the network: it listens on every
@@ -458,6 +471,9 @@ Options (when piping, pass them after `sh -s --`):
                          with --install-opensearch: HTTPS on 9200 (passwords only); 9300
                          stays on 127.0.0.1
                          with --install-qdrant: TLS only, REST on 6333 and gRPC on 6334
+                         with --install-meilisearch: HTTPS only on 7700 (Rowsafe's TLS front,
+                         which serves renewed certificates without a restart), Meilisearch
+                         itself on 127.0.0.1:7701
   --sqlite PATH          protect the SQLite database file PATH (repeat for several);
                          with --protect NAME, give exactly one. The installer also finds
                          the SQLite files running apps have open and asks about each
@@ -628,7 +644,7 @@ Turning on backups:
   backups in Rowsafe Storage with a passphrase generated on the server (see it
   in the dashboard, sealed to your browser) and turns them on. The same with
   --install-mysql 8.4, --install-mariadb 11.8, --install-valkey 8,
-  --install-clickhouse 26.8, --install-opensearch 3 or --install-qdrant 1.19 instead.
+  --install-clickhouse 26.8, --install-opensearch 3, --install-qdrant 1.19 or --install-meilisearch 1.54 instead.
 
   ClickHouse: Rowsafe's own ClickHouse user is added as
   /etc/clickhouse-server/users.d/rowsafe.xml (ClickHouse loads it by itself,
@@ -1061,7 +1077,7 @@ engine_label() {
   case ${1:-$HOST_ENGINE} in
     mysql) echo MySQL ;; mariadb) echo MariaDB ;; mongodb) echo MongoDB ;; clickhouse) echo ClickHouse ;;
     opensearch) echo OpenSearch ;;
-    redis) echo Redis ;; valkey) echo Valkey ;; sqlite) echo SQLite ;; qdrant) echo Qdrant ;; *) echo PostgreSQL ;;
+    redis) echo Redis ;; valkey) echo Valkey ;; sqlite) echo SQLite ;; qdrant) echo Qdrant ;; meilisearch) echo Meilisearch ;; *) echo PostgreSQL ;;
   esac
 }
 
@@ -1218,7 +1234,7 @@ check_postgres() {
   done
   PG_MAJORS=${PG_MAJORS# }
   if [ -z "$PG_MAJORS" ] && [ -z "${ROWSAFE_PG_BIN_DIR:-}" ] && ! mongodb_present && ! clickhouse_present && ! redis_present &&
-    ! opensearch_present && ! qdrant_present; then
+    ! opensearch_present && ! qdrant_present && ! meilisearch_present; then
     die "no PostgreSQL server found under /usr/lib/postgresql. Restore drills need the server binaries (pg_ctl); set ROWSAFE_PG_BIN_DIR if they live elsewhere."
   fi
 }
@@ -1735,13 +1751,14 @@ db_unit() {
     clickhouse) echo clickhouse-server.service ;;
     opensearch) echo opensearch.service ;;
     qdrant) echo qdrant.service ;;
+    meilisearch) echo meilisearch.service ;;
   esac
 }
 
 # db_port: the port the installed server listens on (the agent's): Valkey's
 # plain port, or its TLS port once it has no plain one (--listen-public);
 # ClickHouse's HTTP interface (8123, this server only).
-db_port() { case $INSTALL_DB in valkey) valkey_port ;; clickhouse) echo 8123 ;; opensearch) echo 9200 ;; qdrant) echo 6333 ;; *) echo 3306 ;; esac; }
+db_port() { case $INSTALL_DB in valkey) valkey_port ;; clickhouse) echo 8123 ;; opensearch) echo 9200 ;; qdrant) echo 6333 ;; meilisearch) echo "$MEILI_PORT" ;; *) echo 3306 ;; esac; }
 
 # valkey_port: the port in valkey.conf, the TLS port when the plain one is 0.
 valkey_port() {
@@ -1752,7 +1769,7 @@ valkey_port() {
 # db_public_ports: the ports --listen-public opens (Valkey: its TLS port;
 # it has no plain one then; ClickHouse: the native protocol's and HTTPS's
 # TLS ports).
-db_public_ports() { case $INSTALL_DB in valkey) echo 6380 ;; clickhouse) echo 9440 8443 ;; opensearch) echo 9200 ;; qdrant) echo 6333 6334 ;; *) echo 3306 ;; esac; }
+db_public_ports() { case $INSTALL_DB in valkey) echo 6380 ;; clickhouse) echo 9440 8443 ;; opensearch) echo 9200 ;; qdrant) echo 6333 6334 ;; meilisearch) echo "$MEILI_PORT" ;; *) echo 3306 ;; esac; }
 
 # mysql_net_conf: the file --install-mysql/-mariadb keeps the network
 # settings in. MariaDB's packages read mariadb.conf.d after conf.d (and set
@@ -1773,6 +1790,7 @@ db_program() {
     clickhouse) _p=/usr/bin/clickhouse-server ;;
     opensearch) _p=$OPENSEARCH_HOME/bin/opensearch ;;
     qdrant) _p=/usr/bin/qdrant ;;
+    meilisearch) _p=$MEILI_BIN ;;
   esac
   [ -x "$_p" ] && echo "$_p"
 }
@@ -1819,6 +1837,7 @@ existing_database() {
     if redis_find_program; then printf '%s %s' "$(engine_label "$REDIS_FOUND_ENGINE")" "$REDIS_VERSION"; else printf 'Redis or Valkey'; fi
     return 0
   fi
+  if meilisearch_present; then printf 'Meilisearch'; return 0; fi
   return 0
 }
 
@@ -1864,6 +1883,10 @@ install_db_check() {
       _mb=$(mem_mb)
       [ "$_mb" -ge 1500 ] ||
         die "Qdrant needs a server with at least 2 GB of memory, and this one has $_mb MB. Choose a bigger server for Qdrant."
+      ;;
+    meilisearch)
+      case $OS_ID in debian | ubuntu) ;; *) die "--install-meilisearch works on Debian and Ubuntu; $OS_NAME isn't one of them" ;; esac
+      [ -n "$(meilisearch_sha256)" ] || die "Rowsafe installs Meilisearch on Intel/AMD and Arm (64-bit) servers; this one is $ARCH"
       ;;
   esac
   if ! db_ours; then
@@ -1973,6 +1996,10 @@ install_database() {
   ensure_base_tools
   if db_ours; then
     ok "$_n $INSTALL_DB_VERSION is installed (by an earlier run of this installer)"
+    if [ "$INSTALL_DB" = meilisearch ]; then # the program and the unit as this installer wants them
+      meilisearch_install_binary
+      if meilisearch_unit; then systemctl daemon-reload; DB_UNIT_CHANGED=1; fi
+    fi
   else
     case $INSTALL_DB in
       mysql)
@@ -2042,6 +2069,10 @@ install_database() {
         step "Installing Qdrant $QDRANT_VERSION from Qdrant's official release"
         qdrant_install
         ;;
+      meilisearch)
+        step "Installing Meilisearch $MEILI_VERSION (Community Edition) from Meilisearch's releases"
+        meilisearch_install
+        ;;
     esac
     [ -n "$(db_program "$INSTALL_DB")" ] || die "$_n's packages installed, but its server program isn't there"
     [ -d "$CONFIG_DIR" ] || install -d -m 0750 -o root -g root "$CONFIG_DIR"
@@ -2061,6 +2092,7 @@ install_database() {
     clickhouse) clickhouse_secure ;;
     opensearch) opensearch_secure ;;
     qdrant) qdrant_secure ;;
+    meilisearch) meilisearch_secure ;;
     *) mysql_secure ;;
   esac
 }
@@ -2072,6 +2104,7 @@ db_version() {
     clickhouse) clickhouse-server --version 2>/dev/null | sed -n 's/.*version \([0-9][0-9.]*[0-9]\).*/\1/p' | head -n 1 ;;
     opensearch) opensearch_pkg_version ;; # (the package's: starting the JVM just for it takes seconds)
     qdrant) /usr/bin/qdrant --version 2>/dev/null | sed -n 's/^qdrant v*\([0-9][0-9.]*[0-9]\).*/\1/p' | head -n 1 ;;
+    meilisearch) "$MEILI_BIN" --version 2>/dev/null | sed -n 's/^meilisearch //p' | head -n 1 ;;
     *) "$(db_program "$INSTALL_DB")" --version 2>/dev/null | sed -n 's/.*Ver \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' ;;
   esac
 }
@@ -2100,6 +2133,15 @@ db_running() {
     qdrant)
       case $(db_version) in "$INSTALL_DB_VERSION".*) ;; *) die "the Qdrant here is $(db_version), not Qdrant $INSTALL_DB_VERSION" ;; esac
       qdrant_ready || die "Qdrant started but doesn't answer on 127.0.0.1:6333 (see: journalctl -u qdrant)"
+      ;;
+    meilisearch)
+      [ "$(db_version)" = "$MEILI_VERSION" ] || die "the Meilisearch here is $(db_version), not Meilisearch $MEILI_VERSION"
+      if [ "${DB_UNIT_CHANGED:-0}" = 1 ] && [ "$DB_STARTED" != 1 ]; then
+        note "restarting the Meilisearch this installer installed, with its new settings"
+        db_restart || die "restarting Meilisearch failed (see journalctl -u meilisearch)"
+      fi
+      _mp=$(meilisearch_addr | sed 's/.*://')
+      meilisearch_ready "$_mp" || die "Meilisearch started but doesn't answer on 127.0.0.1:$_mp (see journalctl -u meilisearch)"
       ;;
   esac
   ok "$(engine_label "$INSTALL_DB") $(db_version) is running on port $(db_port)"
@@ -2228,6 +2270,7 @@ db_listen_public() {
     clickhouse) clickhouse_listen_public ;;
     opensearch) opensearch_listen_public ;;
     qdrant) qdrant_listen_public ;;
+    meilisearch) meilisearch_listen_public ;; # the TLS front starts once the agent is here (meilisearch_front)
     *) mysql_listen_public ;;
   esac
 }
@@ -4536,8 +4579,8 @@ check_root_file() {
 # MongoDB, ClickHouse, Redis and Valkey packages install (mysql, mysqld,
 # mariadb and their @instance forms, mongod, mongodb, clickhouse-server,
 # redis-server, redis, valkey-server, valkey and their @instance forms;
-# opensearch and qdrant).
-db_unit_re='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server|opensearch|(redis|valkey)(-server)?(@[A-Za-z0-9_.-]+)?|qdrant)[.]service$'
+# opensearch, qdrant and meilisearch).
+db_unit_re='^(postgresql@[0-9]+-[A-Za-z0-9_.-]+|mysqld?|mariadb|(mysqld?|mariadb)@[A-Za-z0-9_.-]+|mongod|mongodb|clickhouse-server|opensearch|(redis|valkey)(-server)?(@[A-Za-z0-9_.-]+)?|qdrant|meilisearch)[.]service$'
 
 # allowed_unit PORT prints the unit the restart allow list names for PORT.
 allowed_unit() {
@@ -8285,10 +8328,11 @@ firewall_ports() {
   _lo_only=0
   [ "$HOST_ENGINE" != clickhouse ] || _lo_only=1
   [ "$HOST_ENGINE" != opensearch ] || _lo_only=1 # opensearch: 9300 (and 9200 before --listen-public) on 127.0.0.1
+  [ "$HOST_ENGINE" != meilisearch ] || _lo_only=1 # behind Rowsafe's TLS front, Meilisearch is on 127.0.0.1 only
   {
     if command -v pg_lsclusters >/dev/null 2>&1; then pg_lsclusters -h 2>/dev/null | awk '{ print $3 }'; fi
     if command -v ss >/dev/null 2>&1; then
-      for _u in "$AGENT_USER" postgres mysql mongodb mongod clickhouse redis valkey opensearch qdrant; do
+      for _u in "$AGENT_USER" postgres mysql mongodb mongod clickhouse redis valkey opensearch qdrant meilisearch; do
         _uid=$(id -u "$_u" 2>/dev/null) || continue
         # OpenSearch's node-to-node port (9300) is never one apps reach: it
         # stays out of the list even where it listens publicly (Pulse says so).
@@ -11594,6 +11638,7 @@ agent_running() {
 # tab-separated lines of `rowsafe-agent setup discover`).
 discover() {
   : >"$TMP/clusters"
+  meilisearch_logins # meilisearch: Rowsafe's key first (its API can't say where its files are)
   if ! agent_run setup discover >"$TMP/clusters" 2>"$TMP/discover.err"; then
     sed 's/^/    /' "$TMP/discover.err" >&2
     warn "could not look for $(engine_label) on this server"
@@ -11739,6 +11784,10 @@ protect_cluster() {
     return 0
   fi
   if [ "$C_ENGINE" = qdrant ] && ! qdrant_prepare; then
+    note "Backups for $C_NAME are not on yet. Run this installer again when you're ready."
+    return 0
+  fi
+  if [ "$C_ENGINE" = meilisearch ] && ! meilisearch_prepare; then
     note "Backups for $C_NAME are not on yet. Run this installer again when you're ready."
     return 0
   fi
@@ -11915,6 +11964,9 @@ protect_unattended() {
   fi
   if [ "$C_ENGINE" = qdrant ]; then
     qdrant_prepare || die "Qdrant on port $C_PORT isn't ready for backups (see above)"
+  fi
+  if [ "$C_ENGINE" = meilisearch ]; then
+    meilisearch_prepare || die "Meilisearch on port $C_PORT isn't ready for backups (see above)"
   fi
   _prc=0
   plan_cluster || _prc=$?
@@ -13346,6 +13398,607 @@ redis_prepare() {
   redis_log_access
 }
 
+# >>> meilisearch: Meilisearch Community Edition (MIT; never the Enterprise
+# Edition, BUSL). On a server without PostgreSQL, MySQL/MariaDB, MongoDB,
+# ClickHouse, Redis or Valkey but with Meilisearch, the agent runs as its own
+# system user, rowsafe. Meilisearch's API can't say where its program and
+# folders are, so root finds them here (from the running process) and hands
+# them, with the master key on stdin, to `rowsafe-agent meilisearch login`,
+# which makes Rowsafe's own API key with it and never keeps the master key.
+#
+# --install-meilisearch 1.54 (servers Rowsafe creates) installs the release
+# binary from Meilisearch's GitHub releases. Meilisearch publishes no checksum
+# file or signature for its binaries, so the installer pins the SHA-256 of the
+# Community Edition's assets (meilisearch-linux-amd64 and -aarch64, never the
+# meilisearch-enterprise-* ones) as GitHub records them for the release, and
+# refuses any file that doesn't match.
+MEILI_VERSION=1.54.3
+MEILI_SERIES=1.54
+MEILI_SHA256_AMD64=0ece934f9791f0db83e1184f4f505a38eae7d93ff1c47efaa9426cf2b3a12ba7
+MEILI_SHA256_ARM64=09ce5f9531bb205a10fe57854f64a4b59d16166a03de7fa76392a629ccfe81c4
+MEILI_RELEASES=${ROWSAFE_MEILISEARCH_URL:-https://github.com/meilisearch/meilisearch/releases/download}
+# --install-meilisearch's files: the program (root's), the data (meilisearch's
+# only: data/ is 0700), the snapshots (its group reads them: the agent is in
+# it), the master key (root's only; systemd hands it to Meilisearch) and the
+# unit, sandboxed. --listen-public: Meilisearch on 127.0.0.1:7701 and
+# Rowsafe's TLS front on 7700 (its own unit and system user, whose group may
+# read only the key), from a certificate in $MEILI_TLS_DIR (the agent's, which
+# replaces it with one from Let's Encrypt; the front loads it by itself).
+MEILI_LIB=/usr/local/lib/meilisearch
+MEILI_BIN=/usr/local/bin/meilisearch
+MEILI_HOME=/var/lib/meilisearch
+MEILI_DB=$MEILI_HOME/data/data.ms
+MEILI_SNAPSHOTS=$MEILI_HOME/snapshots
+MEILI_DUMPS=$MEILI_HOME/dumps
+MEILI_KEY_FILE=/etc/meilisearch/master-key.env
+MEILI_UNIT_FILE=/etc/systemd/system/meilisearch.service
+MEILI_TLS_DIR=/etc/ssl/rowsafe-meilisearch
+MEILI_TLS_GROUP=rowsafe-meilisearch-tls # the front's user and group
+MEILI_FRONT_BIN=$LIB_DIR/rowsafe-meilisearch-tls
+MEILI_FRONT_UNIT=/etc/systemd/system/rowsafe-meilisearch-tls.service
+MEILI_PORT=7700
+MEILI_LOCAL_PORT=7701
+
+# meilisearch_present: Meilisearch's program, unit or process is here.
+meilisearch_present() {
+  if have meilisearch || [ -x "$MEILI_BIN" ]; then return 0; fi
+  for _d in /lib/systemd/system /usr/lib/systemd/system /etc/systemd/system; do
+    [ ! -f "$_d/meilisearch.service" ] || return 0
+  done
+  have pgrep && pgrep -x meilisearch >/dev/null 2>&1
+}
+
+detect_meilisearch_host() {
+  [ "$HOST_ENGINE" = postgresql ] || return 0
+  id -u postgres >/dev/null 2>&1 && return 0
+  meilisearch_present || return 0
+  HOST_ENGINE=meilisearch
+  use_rowsafe_user
+  AGENT_HOME=$STATE_DIR
+}
+
+# meilisearch_setup: on a Meilisearch server, a unit drop-in runs the agent as
+# rowsafe, in Meilisearch's group (it reads the snapshots there, never the
+# data folder), and lets it replace --listen-public's certificate.
+meilisearch_setup() {
+  _dropin=/etc/systemd/system/$SERVICE.d
+  if [ "$HOST_ENGINE" != meilisearch ]; then
+    [ ! -f "$_dropin/10-meilisearch.conf" ] || { rm -f "$_dropin/10-meilisearch.conf"; UNIT_CHANGED=1; CHANGED=1; }
+    return 0
+  fi
+  install -d -m 0755 "$_dropin"
+  if {
+    echo "# Written by the Rowsafe installer: this server runs Meilisearch."
+    echo "[Unit]"
+    echo "After=meilisearch.service"
+    echo "[Service]"
+    echo "User=rowsafe"
+    echo "Group=rowsafe"
+    ! getent group meilisearch >/dev/null 2>&1 || echo "SupplementaryGroups=meilisearch"
+    [ ! -d "$MEILI_TLS_DIR" ] || echo "ReadWritePaths=-$MEILI_TLS_DIR"
+  } | write_file "$_dropin/10-meilisearch.conf" 0644 root:root; then
+    UNIT_CHANGED=1 CHANGED=1
+  fi
+}
+
+# meilisearch_sha256 prints the pinned SHA-256 of this architecture's binary.
+meilisearch_sha256() {
+  case $ARCH in amd64) echo "$MEILI_SHA256_AMD64" ;; arm64) echo "$MEILI_SHA256_ARM64" ;; esac
+}
+
+# meilisearch_asset is this architecture's Community Edition asset.
+meilisearch_asset() {
+  case $ARCH in amd64) echo meilisearch-linux-amd64 ;; arm64) echo meilisearch-linux-aarch64 ;; esac
+}
+
+# meilisearch_install_binary downloads the pinned release into
+# $MEILI_LIB/$MEILI_VERSION (root's, 0755) after checking its SHA-256, and
+# points $MEILI_BIN at it. The download goes to /var/tmp (on disk: the
+# program is about 350 MB, more than a small server's /tmp in memory).
+meilisearch_install_binary() {
+  _want=$(meilisearch_sha256)
+  [ -n "$_want" ] || die "Rowsafe has no Meilisearch $MEILI_VERSION build for $ARCH"
+  _dest=$MEILI_LIB/$MEILI_VERSION/meilisearch
+  if [ -x "$_dest" ] && [ "$(sha256_of "$_dest")" = "$_want" ]; then
+    :
+  else
+    _dl=$(mktemp -d /var/tmp/rowsafe-meilisearch.XXXXXX) || die "could not make a download folder in /var/tmp"
+    _url=$MEILI_RELEASES/v$MEILI_VERSION/$(meilisearch_asset)
+    if ! fetch "$_url" "$_dl/meilisearch"; then
+      rm -rf "$_dl"
+      die "could not download Meilisearch $MEILI_VERSION ($_url)"
+    fi
+    _got=$(sha256_of "$_dl/meilisearch")
+    if [ "$_got" != "$_want" ]; then
+      rm -rf "$_dl"
+      die "the Meilisearch $MEILI_VERSION download doesn't match the SHA-256 Rowsafe pinned for it ($_got, not $_want); not installing it"
+    fi
+    install -d -m 0755 -o root -g root "$MEILI_LIB" "$MEILI_LIB/$MEILI_VERSION"
+    install -m 0755 -o root -g root "$_dl/meilisearch" "$_dest.rowsafe-new"
+    mv -f "$_dest.rowsafe-new" "$_dest"
+    rm -rf "$_dl"
+  fi
+  "$_dest" --version 2>/dev/null | grep -qx "meilisearch $MEILI_VERSION" ||
+    die "the Meilisearch program in $_dest doesn't run here (see '$_dest --version')"
+  ln -sfn "$_dest" "$MEILI_BIN.rowsafe-new" && mv -f "$MEILI_BIN.rowsafe-new" "$MEILI_BIN"
+  ok "Meilisearch $MEILI_VERSION (Community Edition), SHA-256 checked: $_dest"
+}
+
+# meilisearch_indexing_memory prints the indexing memory limit for this
+# server, in bytes: half its memory, at least 256 MiB, at most 8 GiB
+# (Meilisearch's own default is two thirds, which leaves too little next to
+# searches and the agent on a small server).
+meilisearch_indexing_memory() {
+  _mb=$(mem_mb)
+  _m=$((_mb / 2))
+  [ "$_m" -ge 256 ] || _m=256
+  [ "$_m" -le 8192 ] || _m=8192
+  echo $((_m * 1024 * 1024))
+}
+
+# meilisearch_addr: where --install-meilisearch's Meilisearch listens: this
+# server only; behind Rowsafe's TLS front with --listen-public.
+meilisearch_addr() {
+  if [ "$LISTEN_PUBLIC" = 1 ] || [ -f "$MEILI_FRONT_UNIT" ]; then
+    echo "127.0.0.1:$MEILI_LOCAL_PORT"
+  else
+    echo "127.0.0.1:$MEILI_PORT"
+  fi
+}
+
+# meilisearch_unit writes Meilisearch's sandboxed unit (production mode, no
+# analytics, its folders, the indexing memory limit). Returns 0 when it
+# changed.
+meilisearch_unit() {
+  {
+    echo "# Written by the Rowsafe installer (--install-meilisearch): Meilisearch $MEILI_SERIES"
+    echo "# (Community Edition). The master key comes from $MEILI_KEY_FILE (root's only)."
+    echo "[Unit]"
+    echo "Description=Meilisearch (installed by Rowsafe)"
+    echo "Documentation=https://www.meilisearch.com/docs"
+    echo "Wants=network-online.target"
+    echo "After=network-online.target"
+    echo ""
+    echo "[Service]"
+    echo "Type=simple"
+    echo "User=meilisearch"
+    echo "Group=meilisearch"
+    echo "EnvironmentFile=$MEILI_KEY_FILE"
+    echo "WorkingDirectory=$MEILI_HOME"
+    # Snapshots are assembled in a temporary folder first: on disk, next to
+    # the data (Debian 13's /tmp is in memory).
+    echo "Environment=TMPDIR=$MEILI_HOME/tmp"
+    echo "ExecStart=$MEILI_BIN --env production --no-analytics --http-addr $(meilisearch_addr) --db-path $MEILI_DB --snapshot-dir $MEILI_SNAPSHOTS --dump-dir $MEILI_DUMPS --max-indexing-memory $(meilisearch_indexing_memory)"
+    echo "Restart=on-failure"
+    echo "RestartSec=5"
+    echo "TimeoutStopSec=120"
+    echo "LimitNOFILE=65535"
+    echo "UMask=0027"
+    echo "NoNewPrivileges=yes"
+    echo "ProtectSystem=strict"
+    echo "ReadWritePaths=$MEILI_HOME"
+    echo "ProtectHome=yes"
+    echo "PrivateTmp=yes"
+    echo "PrivateDevices=yes"
+    echo "ProtectKernelTunables=yes"
+    echo "ProtectKernelModules=yes"
+    echo "ProtectKernelLogs=yes"
+    echo "ProtectControlGroups=yes"
+    echo "ProtectClock=yes"
+    echo "ProtectHostname=yes"
+    echo "ProtectProc=invisible"
+    echo "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK"
+    echo "RestrictNamespaces=yes"
+    echo "RestrictRealtime=yes"
+    echo "RestrictSUIDSGID=yes"
+    echo "LockPersonality=yes"
+    echo "SystemCallArchitectures=native"
+    echo "SystemCallFilter=@system-service"
+    echo "SystemCallErrorNumber=EPERM"
+    echo "CapabilityBoundingSet="
+    echo "AmbientCapabilities="
+    echo ""
+    echo "[Install]"
+    echo "WantedBy=multi-user.target"
+  } | write_file "$MEILI_UNIT_FILE" 0644 root:root
+}
+
+# meilisearch_install is --install-meilisearch: the program, its user and
+# folders, a master key made here, the unit; started on this server only.
+meilisearch_install() {
+  meilisearch_install_binary
+  if ! id -u meilisearch >/dev/null 2>&1; then
+    useradd --system --user-group --home-dir "$MEILI_HOME" --no-create-home --shell /usr/sbin/nologin meilisearch ||
+      die "could not create the meilisearch user"
+  fi
+  install -d -m 0750 -o meilisearch -g meilisearch "$MEILI_HOME" "$MEILI_SNAPSHOTS"
+  install -d -m 0700 -o meilisearch -g meilisearch "$MEILI_HOME/data" "$MEILI_DUMPS" "$MEILI_HOME/tmp"
+  if [ ! -s "$MEILI_KEY_FILE" ]; then
+    install -d -m 0755 -o root -g root /etc/meilisearch
+    ( umask 077; printf 'MEILI_MASTER_KEY=%s\n' "$(openssl rand -hex 32)" >"$TMP/meili-key" ) || die "could not make a master key"
+    install -m 0600 -o root -g root "$TMP/meili-key" "$MEILI_KEY_FILE"
+    rm -f "$TMP/meili-key"
+    ok "made Meilisearch's master key ($MEILI_KEY_FILE, root's only; it never leaves this server)"
+  fi
+  meilisearch_unit || true
+  systemctl daemon-reload
+}
+
+# meilisearch_master_key prints the master key of --install-meilisearch's
+# Meilisearch (root's file).
+meilisearch_master_key() { sed -n 's/^MEILI_MASTER_KEY=//p' "$MEILI_KEY_FILE" 2>/dev/null | head -n 1; }
+
+# meilisearch_ready waits until the Meilisearch on 127.0.0.1:PORT answers.
+meilisearch_ready() {
+  _i=0
+  while [ "$_i" -lt 120 ]; do
+    curl -fsS --max-time 3 "http://127.0.0.1:$1/health" 2>/dev/null | grep -q available && return 0
+    sleep 1
+    _i=$((_i + 1))
+  done
+  return 1
+}
+
+# meilisearch_secure checks --install-meilisearch's defaults hold: it asks
+# for a key, it is in production mode, analytics off, this server only.
+meilisearch_secure() {
+  _p=${MEILI_ADDR_PORT:-$(meilisearch_addr | sed 's/.*://')}
+  meilisearch_ready "$_p" || die "Meilisearch doesn't answer on 127.0.0.1:$_p (see journalctl -u meilisearch)"
+  _code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$_p/indexes" 2>/dev/null)
+  [ "$_code" = 401 ] || die "Meilisearch answers without a key (HTTP $_code); its master key isn't in effect"
+  ok "Meilisearch asks for a key (master key root's only), production mode, analytics off, on this server only until --listen-public"
+}
+
+# meilisearch_listen_public is --listen-public for --install-meilisearch:
+# Meilisearch moves to 127.0.0.1:7701 (a restart of the one this installer
+# installed) and its certificate is made; Rowsafe's TLS front on 7700 starts
+# once the agent's program is here (meilisearch_front).
+meilisearch_listen_public() {
+  step "Making Meilisearch reachable from the network (TLS only, through Rowsafe's TLS front)"
+  if ! id -u "$MEILI_TLS_GROUP" >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$MEILI_TLS_GROUP" ||
+      die "could not create the user $MEILI_TLS_GROUP for Rowsafe's TLS front"
+  fi
+  [ ! -L "$MEILI_TLS_DIR" ] || die "$MEILI_TLS_DIR is a symbolic link; not using it"
+  install -d -m 2750 -o "$AGENT_USER" -g "$MEILI_TLS_GROUP" "$MEILI_TLS_DIR"
+  if server_cert "$AGENT_USER" "$MEILI_TLS_DIR" "$(cert_cn)" 0640; then
+    ok "made a self-signed TLS certificate for Meilisearch ($MEILI_TLS_DIR/rowsafe-server.crt)"
+  fi
+  if meilisearch_unit; then
+    systemctl daemon-reload
+    note "restarting the new Meilisearch so it listens behind Rowsafe's TLS front (127.0.0.1:$MEILI_LOCAL_PORT)"
+    db_restart || die "restarting Meilisearch failed (see journalctl -u meilisearch)"
+  fi
+  MEILI_ADDR_PORT=$MEILI_LOCAL_PORT meilisearch_secure
+}
+
+# meilisearch_front (after the agent's program is installed): Rowsafe's TLS
+# front on 7700, a root-owned copy of the verified agent program run by
+# its own unit as its own system user $MEILI_TLS_GROUP (it reads the key,
+# and nothing of Meilisearch's or the agent's). Updating or removing the agent
+# never stops it.
+meilisearch_front() {
+  [ "$INSTALL_DB" = meilisearch ] && [ "$LISTEN_PUBLIC" = 1 ] || return 0
+  _front_changed=0
+  _src=$STAGED
+  [ -x "$_src" ] || _src=$INSTALL_DIR/rowsafe-agent
+  install -d -m 0755 -o root -g root "$LIB_DIR"
+  if [ ! -x "$MEILI_FRONT_BIN" ] || ! cmp -s "$_src" "$MEILI_FRONT_BIN"; then
+    install -m 0755 -o root -g root "$_src" "$MEILI_FRONT_BIN.rowsafe-new"
+    mv -f "$MEILI_FRONT_BIN.rowsafe-new" "$MEILI_FRONT_BIN"
+    _front_changed=1
+  fi
+  _listen="0.0.0.0:$MEILI_PORT"
+  [ -z "$(ip -6 addr show scope global 2>/dev/null)" ] || _listen="[::]:$MEILI_PORT"
+  if {
+    echo "# Written by the Rowsafe installer (--install-meilisearch --listen-public): TLS on"
+    echo "# port $MEILI_PORT for Meilisearch (127.0.0.1:$MEILI_LOCAL_PORT). It serves renewed certificates"
+    echo "# from $MEILI_TLS_DIR without a restart."
+    echo "[Unit]"
+    echo "Description=Rowsafe's TLS front for Meilisearch"
+    echo "Documentation=https://rowsafe.sh/docs"
+    echo "After=network-online.target meilisearch.service"
+    echo "Wants=network-online.target"
+    echo ""
+    echo "[Service]"
+    echo "Type=simple"
+    echo "ExecStart=$MEILI_FRONT_BIN meilisearch tls-front --listen $_listen --to 127.0.0.1:$MEILI_LOCAL_PORT --cert $MEILI_TLS_DIR/rowsafe-server.crt --key $MEILI_TLS_DIR/rowsafe-server.key"
+    echo "User=$MEILI_TLS_GROUP"
+    echo "Group=$MEILI_TLS_GROUP"
+    echo "Restart=always"
+    echo "RestartSec=2"
+    echo "LimitNOFILE=16384"
+    echo "NoNewPrivileges=yes"
+    echo "ProtectSystem=strict"
+    echo "ProtectHome=yes"
+    echo "PrivateTmp=yes"
+    echo "PrivateDevices=yes"
+    echo "ProtectKernelTunables=yes"
+    echo "ProtectKernelModules=yes"
+    echo "ProtectKernelLogs=yes"
+    echo "ProtectControlGroups=yes"
+    echo "ProtectClock=yes"
+    echo "ProtectHostname=yes"
+    echo "ProtectProc=invisible"
+    echo "RestrictAddressFamilies=AF_INET AF_INET6"
+    echo "RestrictNamespaces=yes"
+    echo "RestrictRealtime=yes"
+    echo "RestrictSUIDSGID=yes"
+    echo "LockPersonality=yes"
+    echo "MemoryDenyWriteExecute=yes"
+    echo "SystemCallArchitectures=native"
+    echo "SystemCallFilter=@system-service"
+    echo "SystemCallErrorNumber=EPERM"
+    echo "CapabilityBoundingSet="
+    echo "AmbientCapabilities="
+    echo ""
+    echo "[Install]"
+    echo "WantedBy=multi-user.target"
+  } | write_file "$MEILI_FRONT_UNIT" 0644 root:root; then
+    _front_changed=1
+  fi
+  systemctl daemon-reload
+  if [ "${_front_changed:-0}" = 1 ]; then
+    systemctl enable --quiet rowsafe-meilisearch-tls.service
+    systemctl restart rowsafe-meilisearch-tls.service || true
+  else
+    systemctl enable --now --quiet rowsafe-meilisearch-tls.service || true
+  fi
+  _i=0
+  until tls_serves "$MEILI_PORT" "$MEILI_TLS_DIR/rowsafe-server.crt"; do
+    _i=$((_i + 1))
+    if [ "$_i" -ge 20 ]; then
+      journalctl -u rowsafe-meilisearch-tls -n 10 --no-pager 2>/dev/null | sed 's/^/    /' >&2
+      die "Rowsafe's TLS front doesn't serve Meilisearch's certificate on port $MEILI_PORT (see above)"
+    fi
+    sleep 1
+  done
+  meilisearch_public_listeners
+  if [ "${_front_changed:-0}" = 1 ]; then
+    ok "Meilisearch listens on the network (HTTPS on port $MEILI_PORT only, through Rowsafe's TLS front; plain HTTP on 127.0.0.1 only)"
+  else
+    ok "Meilisearch listens on the network (HTTPS on port $MEILI_PORT only, through Rowsafe's TLS front); nothing to change"
+  fi
+}
+
+# meilisearch_public_listeners: nothing of Meilisearch's listens beyond this
+# server but the front's port.
+meilisearch_public_listeners() {
+  have ss || return 0
+  ss -ltnH 2>/dev/null | awk '{ print $4 }' | while IFS= read -r _a; do
+    _port=${_a##*:}
+    case $_a in 127.0.0.1:* | "[::1]":* | "::1":*) continue ;; esac
+    [ "$_port" != "$MEILI_LOCAL_PORT" ] || die "Meilisearch's plain port $MEILI_LOCAL_PORT listens beyond this server ($_a)"
+  done
+}
+
+# ---- protecting a Meilisearch that runs here (adopt), and the logins
+
+MS_PID='' MS_BIN='' MS_DB='' MS_SNAP='' MS_ADDR='' MS_KEY='' MS_UNIT='' MS_ANALYTICS='' MS_CWD=''
+
+# meilisearch_procs prints "PID PORT" for each Meilisearch process here: the
+# port ss sees it listen on, or, where ss can't tell which process owns a
+# socket (root without CAP_SYS_PTRACE, in some containers), the port of
+# its own --http-addr setting.
+meilisearch_procs() {
+  have pgrep || return 0
+  for _mp in $(pgrep -x meilisearch); do
+    _port=''
+    if have ss; then
+      _port=$(ss -ltnpH 2>/dev/null | awk -v p="pid=$_mp," 'index($0, p) && /users:\(\("meilisearch",/ { a = $4; sub(/.*:/, "", a); print a; exit }')
+    fi
+    if [ -z "$_port" ]; then
+      meilisearch_settings_of "$_mp"
+      _port=${MS_ADDR##*:}
+    fi
+    case $_port in '' | *[!0-9]*) continue ;; esac
+    echo "$_mp $_port"
+  done
+}
+
+# meilisearch_ports lists the TCP ports Meilisearch processes listen on.
+meilisearch_ports() { meilisearch_procs | awk '{ print $2 }' | sort -un; }
+
+# meilisearch_pid PORT: the Meilisearch process listening on PORT.
+meilisearch_pid() { meilisearch_procs | awk -v p="$1" '$2 == p { print $1; exit }'; }
+
+# meilisearch_arg NAME prints the value of --NAME (or --NAME=V) in $MS_PID's
+# command line; nothing when absent. --NAME alone (a flag) prints "yes".
+meilisearch_arg() {
+  tr '\0' '\n' <"/proc/$MS_PID/cmdline" 2>/dev/null | awk -v n="--$1" '
+    f { print; exit }
+    $0 == n { f = 1; next }
+    index($0, n "=") == 1 { print substr($0, length(n) + 2); exit }
+  '
+}
+
+meilisearch_flag() {
+  tr '\0' '\n' <"/proc/$MS_PID/cmdline" 2>/dev/null | grep -qx -- "--$1"
+}
+
+# meilisearch_env NAME prints NAME from $MS_PID's environment.
+meilisearch_env() {
+  tr '\0' '\n' <"/proc/$MS_PID/environ" 2>/dev/null | sed -n "s/^$1=//p" | head -n 1
+}
+
+# meilisearch_toml KEY prints KEY's value in the configuration file (simple
+# `key = value` lines; quotes removed).
+meilisearch_toml() {
+  [ -n "$MS_CONFIG" ] && [ -f "$MS_CONFIG" ] || return 0
+  sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$MS_CONFIG" | head -n 1 | sed 's/[[:space:]]*#.*$//; s/^"\(.*\)"$/\1/; s/^'"'"'\(.*\)'"'"'$/\1/'
+}
+
+# meilisearch_abs PATH: PATH, relative ones from the process's folder.
+meilisearch_abs() {
+  case $1 in
+    /*) printf '%s\n' "$1" ;;
+    '') ;;
+    *) [ -z "$MS_CWD" ] || printf '%s/%s\n' "${MS_CWD%/}" "${1#./}" ;; # unknown without the process's folder
+  esac
+}
+
+# meilisearch_find PORT reads the Meilisearch listening on PORT: its
+# program, folders, address, unit and master key (command line, then
+# environment, then configuration file, as Meilisearch reads them). It
+# fails, saying why, for one Rowsafe can't protect from here.
+MS_CONFIG=''
+
+# meilisearch_v CLI ENV TOML DEFAULT: one of $MS_PID's settings, as
+# Meilisearch reads them: its command line, then its environment, then its
+# configuration file.
+meilisearch_v() {
+  _x=$(meilisearch_arg "$1")
+  [ -n "$_x" ] || _x=$(meilisearch_env "$2")
+  [ -n "$_x" ] || _x=$(meilisearch_toml "$3")
+  [ -n "$_x" ] || _x=$4
+  printf '%s\n' "$_x"
+}
+
+# meilisearch_settings_of PID reads that process's settings into MS_*.
+meilisearch_settings_of() {
+  MS_PID=$1
+  MS_BIN=$(readlink "/proc/$MS_PID/exe" 2>/dev/null)
+  if [ -z "$MS_BIN" ]; then # (no CAP_SYS_PTRACE) its command's own path, when absolute
+    MS_BIN=$(tr '\0' '\n' <"/proc/$MS_PID/cmdline" 2>/dev/null | head -n 1)
+    case $MS_BIN in /*) ;; *) MS_BIN='' ;; esac
+  fi
+  MS_CWD=$(readlink "/proc/$MS_PID/cwd" 2>/dev/null)
+  MS_CONFIG=$(meilisearch_arg config-file-path)
+  [ -n "$MS_CONFIG" ] || MS_CONFIG=$(meilisearch_env MEILI_CONFIG_FILE_PATH)
+  [ -n "$MS_CONFIG" ] || [ -z "$MS_CWD" ] || MS_CONFIG=$MS_CWD/config.toml
+  MS_CONFIG=$(meilisearch_abs "$MS_CONFIG")
+  MS_DB=$(meilisearch_abs "$(meilisearch_v db-path MEILI_DB_PATH db_path ./data.ms)")
+  MS_SNAP=$(meilisearch_abs "$(meilisearch_v snapshot-dir MEILI_SNAPSHOT_DIR snapshot_dir snapshots/)")
+  MS_SNAP=${MS_SNAP%/}
+  MS_ADDR=$(meilisearch_v http-addr MEILI_HTTP_ADDR http_addr localhost:7700)
+  MS_KEY=$(meilisearch_v master-key MEILI_MASTER_KEY master_key '')
+  MS_ANALYTICS=yes
+  if meilisearch_flag no-analytics || [ "$(meilisearch_toml no_analytics)" = true ]; then MS_ANALYTICS=no; fi
+  case $(meilisearch_env MEILI_NO_ANALYTICS) in '' | n | no | f | false | off | 0) ;; *) MS_ANALYTICS=no ;; esac
+  MS_UNIT=$(sed -n 's|^0::.*/\([A-Za-z0-9@_.-]*\.service\)$|\1|p' "/proc/$MS_PID/cgroup" 2>/dev/null | head -n 1)
+}
+
+meilisearch_find() {
+  _mp=$(meilisearch_pid "$1")
+  [ -n "$_mp" ] || { warn "no Meilisearch process listens on port $1"; return 1; }
+  if [ "$(readlink "/proc/$_mp/ns/mnt" 2>/dev/null || echo unknown)" != "$(readlink /proc/1/ns/mnt 2>/dev/null || echo unknown)" ]; then
+    warn "the Meilisearch on port $1 runs in a container: Rowsafe protects a Meilisearch installed on the server itself for now"
+    return 1
+  fi
+  meilisearch_settings_of "$_mp"
+  if [ -z "$MS_DB" ] || [ -z "$MS_SNAP" ]; then
+    warn "can't tell the folder the Meilisearch on port $1 runs in (root can't look at its process here), so its relative folders are unknown: give it absolute ones (--db-path, --snapshot-dir)"
+    return 1
+  fi
+  case $MS_DB$MS_SNAP in
+    *[!A-Za-z0-9._@+,=/-]*) warn "Meilisearch's folders ($MS_DB, $MS_SNAP) have characters Rowsafe doesn't accept in paths"; return 1 ;;
+  esac
+  case $MS_SNAP in
+    /home/* | /root/* | /root)
+      warn "Meilisearch writes its snapshots under $MS_SNAP, a home folder Rowsafe's agent may not read: give it a snapshot folder elsewhere (--snapshot-dir /var/lib/meilisearch/snapshots), restart it, then run this installer again"
+      return 1
+      ;;
+  esac
+  [ -n "$MS_BIN" ] && [ -x "$MS_BIN" ] || { warn "can't find the program of the Meilisearch on port $1"; return 1; }
+}
+
+# meilisearch_snapshot_access lets the agent read the snapshot folder (made
+# as Meilisearch's user when missing; ACLs, owners and modes unchanged).
+meilisearch_snapshot_access() {
+  _d=$1
+  if [ ! -d "$_d" ]; then
+    _owner=$(stat -c %U "/proc/$MS_PID" 2>/dev/null)
+    [ -n "$_owner" ] || return 1
+    (cd / && runuser -u "$_owner" -- mkdir -p "$_d") </dev/null || { warn "could not make Meilisearch's snapshot folder $_d"; return 1; }
+  fi
+  as_agent test -r "$_d" -a -x "$_d" 2>/dev/null && return 0
+  have setfacl || apt_install acl
+  mkdir -p "$TMP/acl"
+  if ! acl_grant_read "$_d" "$AGENT_USER" "$TMP/acl"; then
+    warn "could not give the agent read access to Meilisearch's snapshot folder $_d"
+    return 1
+  fi
+  _p=${_d%/*}
+  while [ -n "$_p" ]; do
+    as_agent test -x "$_p" 2>/dev/null || acl_grant_x "$_p" "$AGENT_USER" || true
+    _p=${_p%/*}
+  done
+  ok "the agent may read Meilisearch's snapshots in $_d and pass through the folders above it (ACLs; owners and modes unchanged)"
+}
+
+# meilisearch_login PORT: Rowsafe's own API key for the Meilisearch on PORT
+# (the port apps use), made with its master key, which is used once.
+meilisearch_login() {
+  _port=$1
+  if [ -f "$(db_record meilisearch)" ] && [ -s "$MEILI_KEY_FILE" ] && { [ "$_port" = "$MEILI_PORT" ] || [ "$_port" = "$MEILI_LOCAL_PORT" ]; }; then
+    # --install-meilisearch's: everything is known.
+    _local='' _listen=127.0.0.1
+    if [ -f "$MEILI_FRONT_UNIT" ]; then _port=$MEILI_PORT _local=$MEILI_LOCAL_PORT _listen='*'; fi
+    meilisearch_master_key | agent_in meilisearch login --port "$_port" ${_local:+--local-port "$_local"} --binary "$MEILI_BIN" \
+      --db-path "$MEILI_DB" --snapshot-dir "$MEILI_SNAPSHOTS" --unit meilisearch.service --listen "$_listen" --rowsafe \
+      --max-indexing-memory "$(meilisearch_indexing_memory)" --analytics no >"$TMP/mslogin" 2>"$TMP/mslogin.err" || {
+      sed 's/^/    /' "$TMP/mslogin.err" >&2
+      warn "could not make Rowsafe's API key for Meilisearch"
+      return 1
+    }
+    ok "Rowsafe's own Meilisearch API key is ready (made with the master key, which stays root's)"
+    return 0
+  fi
+  meilisearch_find "$_port" || return 1
+  meilisearch_snapshot_access "$MS_SNAP" || return 1
+  _host=${MS_ADDR%:*}
+  case $_host in localhost | 127.0.0.1 | "[::1]" | ::1) _listen=127.0.0.1 ;; 0.0.0.0 | "[::]" | "") _listen='*' ;; *) _listen=$_host ;; esac
+  _key=$MS_KEY
+  if [ -z "$_key" ] && [ -n "${ROWSAFE_MEILISEARCH_MASTER_KEY:-}" ]; then _key=$ROWSAFE_MEILISEARCH_MASTER_KEY; fi
+  _rc=0
+  printf '%s\n' "$_key" | agent_in meilisearch login --port "$_port" --binary "$MS_BIN" --db-path "$MS_DB" --snapshot-dir "$MS_SNAP" \
+    ${MS_UNIT:+--unit "$MS_UNIT"} --listen "$_listen" --analytics "$MS_ANALYTICS" >"$TMP/mslogin" 2>"$TMP/mslogin.err" || _rc=$?
+  if [ "$_rc" = 11 ] && [ "$TTY" = 1 ]; then
+    tty_say ""
+    tty_say "Meilisearch asks for a key and Rowsafe couldn't find its master key. It is used once, to make"
+    tty_say "Rowsafe's own API key, and never saved."
+    ask_secret _key "Meilisearch master key"
+    _rc=0
+    printf '%s\n' "$_key" | agent_in meilisearch login --port "$_port" --binary "$MS_BIN" --db-path "$MS_DB" --snapshot-dir "$MS_SNAP" \
+      ${MS_UNIT:+--unit "$MS_UNIT"} --listen "$_listen" --analytics "$MS_ANALYTICS" >"$TMP/mslogin" 2>"$TMP/mslogin.err" || _rc=$?
+  fi
+  _key='' MS_KEY=''
+  if [ "$_rc" != 0 ]; then
+    sed 's/^/    /' "$TMP/mslogin.err" >&2
+    [ "$_rc" != 11 ] || warn "set ROWSAFE_MEILISEARCH_MASTER_KEY (used once, never saved), or run the installer on a terminal"
+    return 1
+  fi
+  if [ "$(sed -n 's/^no_auth=//p' "$TMP/mslogin")" = yes ]; then
+    warn "Meilisearch on port $_port has no master key: anyone who reaches it can read and change everything. Give it one (--master-key), then run this installer again."
+  else
+    ok "Rowsafe's own Meilisearch API key is ready (made with the master key, which isn't kept)"
+  fi
+  [ "$MS_ANALYTICS" = no ] || note "Meilisearch sends anonymous usage data to its makers; turn it off with --no-analytics if you like (Pulse says so too)."
+}
+
+# meilisearch_logins (before discovery): Rowsafe's key for every Meilisearch
+# here without one yet.
+meilisearch_logins() {
+  [ "$HOST_ENGINE" = meilisearch ] || return 0
+  have ss || apt_install iproute2 # which process listens where
+  _ports=$(meilisearch_ports)
+  if [ -f "$MEILI_FRONT_UNIT" ]; then _ports=$(printf '%s\n' "$_ports" | grep -vx "$MEILI_LOCAL_PORT"; echo "$MEILI_PORT"); fi
+  for _p in $_ports; do
+    _st=$(agent_run meilisearch status --port "$_p" 2>/dev/null | sed -n 's/^login=//p')
+    [ "$_st" = ok ] && continue
+    meilisearch_login "$_p" || warn "Meilisearch on port $_p stays unprotected for now (see above)"
+  done
+}
+
+# meilisearch_prepare gets the Meilisearch on $C_PORT ready for its plan:
+# Rowsafe's key works. Nothing restarts.
+meilisearch_prepare() {
+  have ss || apt_install iproute2
+  _st=$(agent_run meilisearch status --port "$C_PORT" 2>/dev/null | sed -n 's/^login=//p')
+  [ "$_st" = ok ] || meilisearch_login "$C_PORT"
+}
+# <<< meilisearch
+
 # ---------------------------------------------------------------- modes
 
 # >>> sqlite: a SQLite database is a file an app opens itself. The agent
@@ -13638,6 +14291,7 @@ install_agent() {
   detect_redis_host # redis
   detect_opensearch_host # opensearch
   detect_qdrant_host # qdrant
+  detect_meilisearch_host # meilisearch
   detect_sqlite_host # sqlite
   if [ -n "$INSTALL_DB" ]; then
     [ "$HOST_ENGINE" = "$INSTALL_DB" ] ||
@@ -13661,6 +14315,9 @@ install_agent() {
   elif [ "$HOST_ENGINE" = qdrant ]; then
     say "${BOLD}Rowsafe agent installer${RESET}: snapshot backups, Marks and weekly restore tests"
     say "for the Qdrant on this server. Nothing changes without your yes."
+  elif [ "$HOST_ENGINE" = meilisearch ]; then
+    say "${BOLD}Rowsafe agent installer${RESET}: hourly snapshots, Marks and weekly restore tests"
+    say "for the Meilisearch on this server. Nothing changes without your yes."
   else
     say "${BOLD}Rowsafe agent installer${RESET}: backups, restore to any second and weekly"
     say "restore tests for the $(engine_label) on this server. Nothing changes without your yes."
@@ -13702,16 +14359,18 @@ install_agent() {
 
   # 2. Dependencies and layout.
   # MongoDB, ClickHouse, Redis, Valkey and SQLite back up with their own tools: no pgBackRest.
-  case $HOST_ENGINE in mysql | mariadb) ensure_mysql_tools ;; mongodb | clickhouse | redis | valkey | sqlite | opensearch | qdrant) ;; *) ensure_pgbackrest ;; esac # mysql
+  case $HOST_ENGINE in mysql | mariadb) ensure_mysql_tools ;; mongodb | clickhouse | redis | valkey | sqlite | opensearch | qdrant | meilisearch) ;; *) ensure_pgbackrest ;; esac # mysql
   ensure_mongodb_tools # mongodb (only where MongoDB runs)
   check_clickhouse_program # clickhouse (only where ClickHouse runs)
   check_redis_program # redis (only where Redis or Valkey runs)
   check_opensearch_program # opensearch (only where OpenSearch runs)
   check_qdrant_program # qdrant (only where Qdrant runs)
+  [ "$HOST_ENGINE" != meilisearch ] || TOOLS_SUMMARY="Meilisearch's own snapshots, encrypted by the agent" # meilisearch
   ensure_restic # files section
   step "Installing into $INSTALL_DIR"
   make_dirs
   [ "$need_binary" = 0 ] || install_binary
+  meilisearch_front # meilisearch: Rowsafe's TLS front (--install-meilisearch --listen-public)
   install_installer_copy   # permissions section
   install_allow_command    # permissions section
   install_guard
@@ -13726,6 +14385,7 @@ install_agent() {
   redis_setup # redis
   opensearch_setup # opensearch
   qdrant_setup # qdrant
+  meilisearch_setup # meilisearch
   sqlite_setup # sqlite
   install_logrotate
   case $AUTO_SECURITY in
@@ -13869,6 +14529,10 @@ uninstall_agent() {
     fi
   fi
   rm -f "/etc/systemd/system/$SERVICE.d/10-qdrant.conf" # qdrant
+  rm -f "/etc/systemd/system/$SERVICE.d/10-meilisearch.conf" # meilisearch
+  if [ -f "$MEILI_FRONT_UNIT" ]; then # meilisearch: apps keep reaching it
+    note "Rowsafe's TLS front for Meilisearch (rowsafe-meilisearch-tls) keeps serving port $MEILI_PORT; its certificate is no longer renewed."
+  fi
   if [ "$purge" = 1 ]; then
     if [ -L "$MYSQL_CONF_LINK" ]; then # mysql: keep the server's binary log settings
       cp "$CONFIG_DIR/mysql/server.cnf" "$MYSQL_CONF_LINK.rowsafe-new" 2>/dev/null &&
@@ -13897,6 +14561,9 @@ uninstall_agent() {
     fi
     if [ -s "$QDRANT_ENV_FILE" ]; then # --install-qdrant: Qdrant's keys stay the server's
       note "Qdrant's keys stay in $QDRANT_ENV_FILE (root only). Rowsafe's own key there (QDRANT__SERVICE__ALT_API_KEY) can go: removing or changing it also ends every key made in Databases & users (they are signed with it)."
+    fi
+    if meilisearch_present; then # meilisearch: its key went with $STATE_DIR
+      note "Rowsafe's Meilisearch API key (named Rowsafe) stays in Meilisearch until you delete it with the master key."
     fi
     if redis_present; then # redis: its password went with $STATE_DIR
       note "Rowsafe's Redis or Valkey user, rowsafe, stays in the server (its password was deleted with the agent's settings)."
@@ -14029,7 +14696,7 @@ main() {
         esac
         shift
         ;;
-      --install-mysql | --install-mariadb | --install-valkey | --install-clickhouse | --install-opensearch | --install-qdrant)
+      --install-mysql | --install-mariadb | --install-valkey | --install-clickhouse | --install-opensearch | --install-qdrant | --install-meilisearch)
         _e=${1#--install-}
         case $_e in
           mysql) _want='8.4' _eg='--install-mysql 8.4: MySQL 8.4, the long-term support release' ;;
@@ -14038,6 +14705,7 @@ main() {
           clickhouse) _want='26.3 26.8' _eg='--install-clickhouse 26.8 (or 26.3), the long-term support releases' ;;
           opensearch) _want='3' _eg='--install-opensearch 3' ;;
           qdrant) _want='1.19' _eg='--install-qdrant 1.19' ;;
+          meilisearch) _want="$MEILI_SERIES" _eg="--install-meilisearch $MEILI_SERIES (Meilisearch Community Edition)" ;;
         esac
         [ $# -ge 2 ] || die "$1 needs a version: $_eg"
         [ -z "$INSTALL_PG$INSTALL_DB" ] || die "$INSTALL_TWICE"
@@ -14119,7 +14787,7 @@ main() {
     die "--files, --allow-files and --no-files only go with an install"
   fi
   if [ "$mode" != install ] && { [ -n "$INSTALL_PG$INSTALL_DB" ] || [ "$LISTEN_PUBLIC" = 1 ]; }; then
-    die "--install-postgres, --install-mysql, --install-mariadb, --install-valkey, --install-clickhouse, --install-opensearch, --install-qdrant and --listen-public only go with an install"
+    die "--install-postgres, --install-mysql, --install-mariadb, --install-valkey, --install-clickhouse, --install-opensearch, --install-qdrant, --install-meilisearch and --listen-public only go with an install"
   fi
   if [ -n "$PG_EXTENSIONS" ]; then
     [ -n "$INSTALL_PG" ] || die "--pg-extensions only goes with --install-postgres (servers Rowsafe creates)"
