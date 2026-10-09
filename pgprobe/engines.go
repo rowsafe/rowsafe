@@ -46,6 +46,8 @@ func ProbeEngine(ctx context.Context, engine, addr string, o Options) Result {
 		return probeOpenSearch(ctx, addr, o) // opensearch.go
 	case protocol.EngineQdrant:
 		return probeQdrant(ctx, addr, o)
+	case protocol.EngineMeilisearch:
+		return probeMeilisearch(ctx, addr, o) // meilisearch.go
 	}
 	conn, err := dial(ctx, addr, o)
 	if err != nil {

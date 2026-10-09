@@ -162,8 +162,9 @@ type ClickHouseReplica struct {
 // MarkIsBackup reports whether engine's Marks are backups of their own (a
 // differential backup taken on the spot; RestorePointResult.LSN is its
 // label), restored as they are rather than replayed to: ClickHouse,
-// OpenSearch (a snapshot taken on the spot) and Qdrant (a full snapshot).
+// OpenSearch (a snapshot taken on the spot), Qdrant (a full snapshot) and
+// Meilisearch (a snapshot).
 func MarkIsBackup(engine string) bool {
 	e := NormalizeEngine(engine)
-	return e == EngineClickHouse || e == EngineOpenSearch || e == EngineQdrant
+	return e == EngineClickHouse || e == EngineOpenSearch || e == EngineQdrant || e == EngineMeilisearch
 }

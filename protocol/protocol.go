@@ -918,6 +918,9 @@ type DatabaseMonitoring struct {
 	OpenSearch *OpenSearchStatus `json:"opensearch,omitempty"`
 	// Qdrant is Qdrant's own health detail (qdrant.go; about every 5 minutes).
 	Qdrant *QdrantStatus `json:"qdrant,omitempty"`
+	// Meilisearch is Meilisearch's own health detail (meilisearch.go;
+	// about every 5 minutes).
+	Meilisearch *MeilisearchStatus `json:"meilisearch,omitempty"`
 }
 
 // MonitoringAck answers a monitoring report.

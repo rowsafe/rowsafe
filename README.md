@@ -12,6 +12,7 @@ This repository is the open-source part of [Rowsafe](https://rowsafe.sh): the ag
 - Redis 7.0+ and Valkey 7.2+ (standalone servers)
 - SQLite (restore to any second needs WAL mode)
 - Qdrant 1.13+ (single servers; snapshot backups: restores go back to a snapshot, not to any second)
+- Meilisearch 1.12+, Community Edition, on Linux servers (hourly snapshots: restores go back to a snapshot or a Mark, not to any second)
 
 Features per database: `protocol.EngineCapabilities`.
 
@@ -67,7 +68,7 @@ Full guide: [Quickstart](https://rowsafe.sh/docs/quickstart).
 | `collect`, `tune` | Monitoring, and settings recommendations. |
 | `protocol` | API types shared by the agent, the CLI and the control plane. |
 | `internal/pgbackrest`, `internal/pginspect` | PostgreSQL. |
-| `internal/engine` | MySQL/MariaDB, MongoDB, ClickHouse, Redis/Valkey, SQLite, Qdrant. |
+| `internal/engine` | MySQL/MariaDB, MongoDB, ClickHouse, Redis/Valkey, SQLite, Qdrant, Meilisearch. |
 | `scripts/install.sh` | The installer served at `https://rowsafe.sh`. |
 | `release`, `cmd/rowsafe-release` | Release signing and verification. |
 

@@ -222,6 +222,8 @@ func engineDefaultUnit(engine string) string {
 		return "opensearch"
 	case protocol.EngineQdrant:
 		return "qdrant"
+	case protocol.EngineMeilisearch:
+		return "meilisearch"
 	}
 	return "postgresql"
 }
@@ -246,6 +248,8 @@ func dockerServiceHint(db protocol.DatabaseSpec) string {
 		return "opensearch"
 	case protocol.EngineQdrant:
 		return "qdrant"
+	case protocol.EngineMeilisearch:
+		return "meilisearch"
 	}
 	return "postgres"
 }

@@ -43,10 +43,13 @@ Usage:
                                             OpenSearch helpers for the installer (see opensearch --help)
   rowsafe-agent qdrant status|login|save-login|download-backup ...
                                             Qdrant helpers for the installer (see qdrant --help)
+  rowsafe-agent meilisearch status|login|tls-front|download-backup ...
+                                            Meilisearch helpers for the installer, its TLS front, and
+                                            restores without Rowsafe (see meilisearch --help)
   rowsafe-agent sqlite find|status|restore ...
                                             SQLite helpers for the installer, and restores without
                                             Rowsafe (see sqlite --help)
-  rowsafe-agent unseal < FILE > PLAIN       decrypt a file Rowsafe wrote to your bucket (MongoDB, ClickHouse, Redis, SQLite, Qdrant)
+  rowsafe-agent unseal < FILE > PLAIN       decrypt a file Rowsafe wrote to your bucket (MongoDB, ClickHouse, Redis, SQLite, Qdrant, Meilisearch)
   rowsafe-agent restore-mysql --engine mysql|mariadb --database NAME --dir DIR [--at TIME | --mark NAME]
                                             restore a MySQL/MariaDB database from your bucket into DIR
   rowsafe-agent key                         this server's key fingerprint: compare it with the one the Rowsafe
@@ -55,7 +58,8 @@ Usage:
                                             (root) passkeys that may change this server's permissions
                                             from the dashboard (see permissions --help)
   rowsafe-agent selftest                    check this binary can run here (used before self-update)
-  rowsafe-agent storage test [--wait 60s]   write, read back and delete a test file in the backup
+  rowsafe-agent storage test [--wait 60s] [--own-client]
+                                            write, read back and delete a test file in the backup
                                             storage (Rowsafe Storage or your bucket)
   rowsafe-agent health                      container health check (docker-sidecar mode)
   rowsafe-agent version
@@ -94,6 +98,8 @@ func main() {
 		os.Exit(redisCmd(ctx, os.Args[2:]))
 	case "qdrant": // Qdrant installer helpers (qdrant.go)
 		os.Exit(qdrantCmd(ctx, os.Args[2:]))
+	case "meilisearch": // Meilisearch installer helpers and TLS front (meilisearch.go)
+		os.Exit(meilisearchCmd(ctx, os.Args[2:]))
 	case "sqlite": // SQLite installer helpers and restores (sqlite.go)
 		os.Exit(sqliteCmd(ctx, os.Args[2:]))
 	case "opensearch": // OpenSearch installer helpers (opensearch.go)
@@ -277,10 +283,11 @@ func keyCmd() error {
 // storage runs `rowsafe-agent storage test`.
 func storage(ctx context.Context, args []string) error {
 	if len(args) == 0 || args[0] != "test" {
-		return errors.New("usage: rowsafe-agent storage test [--wait 60s]")
+		return errors.New("usage: rowsafe-agent storage test [--wait 60s] [--own-client]")
 	}
 	fs := flag.NewFlagSet("storage test", flag.ContinueOnError)
 	wait := fs.Duration("wait", 0, "Rowsafe Storage: how long to wait for the agent to enroll and get credentials")
+	own := fs.Bool("own-client", false, "the engine backs up with its own tools: test with the agent's S3 client, not pgBackRest")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -288,5 +295,5 @@ func storage(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return agent.StorageTest(ctx, cfg, os.Stdout, *wait)
+	return agent.StorageTest(ctx, cfg, os.Stdout, *wait, *own)
 }

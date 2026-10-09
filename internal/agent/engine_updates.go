@@ -309,7 +309,7 @@ func (a *Agent) engineUpdate(ctx context.Context, db protocol.DatabaseSpec, task
 	// can't follow keeps its scheduled snapshots: neither is a failure.
 	snapshots := out.ArchiveMode == protocol.RedisArchiveSnapshots
 	switch protocol.NormalizeEngine(db.Engine) {
-	case protocol.EngineClickHouse, protocol.EngineQdrant: // no change log to archive
+	case protocol.EngineClickHouse, protocol.EngineQdrant, protocol.EngineMeilisearch: // no change log to archive
 		res.ArchivingOK = true
 	default:
 		res.ArchivingOK = out.ArchiveMode == "on" || snapshots

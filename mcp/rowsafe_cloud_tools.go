@@ -111,7 +111,7 @@ type CloudServerView struct {
 	Port     int    `json:"port,omitempty"`
 	SSLMode  string `json:"sslmode,omitempty" jsonschema:"require, or verify-full once a public certificate is installed (PostgreSQL's sslmode; every engine requires TLS)"`
 	// Connection is the connection string without user and password.
-	Connection string `json:"connection,omitempty" jsonschema:"the connection string with USER and PASSWORD to fill in (postgresql://, mysql://, rediss://, clickhouse:// or https:// for OpenSearch)"`
+	Connection string `json:"connection,omitempty" jsonschema:"the connection string with USER and PASSWORD to fill in (postgresql://, mysql://, rediss://, clickhouse:// or https:// for OpenSearch), or Meilisearch's https:// address (its API key goes in a header)"`
 	// HTTPS is ClickHouse's HTTPS interface (port 8443), next to Connection
 	// (its native protocol with TLS, 9440).
 	HTTPS string `json:"https,omitempty" jsonschema:"ClickHouse servers: the HTTPS interface's URL (port 8443), for HTTP clients and drivers"`
@@ -566,6 +566,9 @@ func cloudServerGuidance(v CloudServerView, canAsk bool) string {
 		case v.Database != "" && v.Engine == protocol.EngineValkey:
 			next = append(next, "For the app's own login, the user makes one in the dashboard (Databases & users), which shows the password once; "+
 				"put the connection string (rediss://, port "+strconv.Itoa(v.Port)+") in the app's environment (e.g. REDIS_URL in .env), never in code or git")
+		case v.Database != "" && v.Engine == protocol.EngineMeilisearch:
+			next = append(next, "For the app's own API key (search-only for browsers, or one that can add documents for the backend), the user makes one in the dashboard "+
+				"(Databases & users), which shows it once; put the address ("+v.Connection+") and the key in the app's environment (e.g. MEILISEARCH_URL and MEILISEARCH_KEY in .env), never in code or git")
 		case v.Database != "":
 			next = append(next, "For the app's own database and login, "+ask("call create_app_database with database "+v.Database)+
 				"; put the connection string in the app's environment (e.g. DATABASE_URL in .env), never in code or git")

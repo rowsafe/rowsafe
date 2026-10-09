@@ -51,7 +51,8 @@ func TestCloudEngines(t *testing.T) {
 		e.FitsMemory(2048) || !e.FitsMemory(4096) || e.Standby || e.Clone || e.DefaultVersion != "3" || EngineHas(EngineOpenSearch, FeaturePointInTime) {
 		t.Errorf("opensearch: %+v", e)
 	}
-	if !strings.Contains(CloudEngineNames(), "ClickHouse") || !strings.Contains(CloudEngineNames(), "OpenSearch") || !strings.Contains(CloudEngineNames(), "Qdrant") {
+	if !strings.Contains(CloudEngineNames(), "ClickHouse") || !strings.Contains(CloudEngineNames(), "OpenSearch") || !strings.Contains(CloudEngineNames(), "Qdrant") ||
+		!strings.Contains(CloudEngineNames(), "Meilisearch") {
 		t.Errorf("names: %q", CloudEngineNames())
 	}
 	if e, ok := CloudEngineFor("qdrant"); !ok || e.Port != 6333 || e.PortsText() != "6333 and 6334" || e.InstallFlag() != "--install-qdrant" ||
@@ -60,5 +61,12 @@ func TestCloudEngines(t *testing.T) {
 	}
 	if !MarkIsBackup(EngineQdrant) || RewindInPlaceStopsServer(EngineQdrant) {
 		t.Error("qdrant: Marks are snapshots, rewinds in place go through its API")
+	}
+	if e, ok := CloudEngineFor("meilisearch"); !ok || e.Port != 7700 || e.Scheme != "https" || e.InstallFlag() != "--install-meilisearch" ||
+		e.Standby || e.Clone || e.AMD64Only || !e.FitsMemory(1024) || e.PortsText() != "7700" || !e.SnapshotsOnly {
+		t.Errorf("meilisearch: %+v", e)
+	}
+	if !MarkIsBackup(EngineMeilisearch) || RewindInPlaceStopsServer(EngineMeilisearch) {
+		t.Error("meilisearch: Marks are snapshots, rewinds in place go through its API")
 	}
 }

@@ -649,13 +649,17 @@ func PrintPlanFor(w io.Writer, engine string, r protocol.AdoptResult) {
 				names = append(names, d.Name)
 			}
 		}
-		what := "no databases of your own yet"
+		one, many := "database", "databases"
+		if protocol.NormalizeEngine(in.Engine) == protocol.EngineMeilisearch {
+			one, many = "index", "indexes"
+		}
+		what := "no " + many + " of your own yet"
 		switch len(names) {
 		case 0:
 		case 1:
-			what = "1 database (" + names[0] + ")"
+			what = "1 " + one + " (" + names[0] + ")"
 		default:
-			what = fmt.Sprintf("%d databases (%s)", len(names), strings.Join(names, ", "))
+			what = fmt.Sprintf("%d %s (%s)", len(names), many, strings.Join(names, ", "))
 		}
 		if protocol.NormalizeEngine(in.Engine) == protocol.EngineSQLite {
 			tables := 0

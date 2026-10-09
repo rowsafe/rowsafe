@@ -10,7 +10,7 @@ import (
 // for me" in an organization's own cloud account). The installer installs
 // the engine from its project's own packages (--install-postgres,
 // --install-mysql, --install-mariadb, --install-valkey, --install-clickhouse,
-// --install-qdrant),
+// --install-qdrant, --install-meilisearch),
 // makes it listen on
 // every address with TLS on (--listen-public: the firewall decides who can
 // connect) and turns its backups on; the control plane opens the engine's
@@ -18,7 +18,8 @@ import (
 // certificate from a public authority for it (TaskServerCertificate).
 //
 // Licenses: Rowsafe Cloud never hosts MongoDB (SSPL) or Redis (RSAL, SSPL,
-// AGPL); Valkey (BSD) is offered instead of Redis.
+// AGPL); Valkey (BSD) is offered instead of Redis. Meilisearch is its
+// Community Edition (MIT) only, never the Enterprise Edition (BUSL).
 
 // CloudEngine is one engine a new server can get.
 type CloudEngine struct {
@@ -88,6 +89,12 @@ type CloudEngine struct {
 //     an API key made in Databases & users; the cluster port (6335) stays
 //     closed (single node). Backups are full snapshots every hour; restores
 //     go back to one of them, not to any second. 2 GB of memory at least.
+//   - Meilisearch 1.54 (Community Edition, MIT), the release binary from
+//     Meilisearch's GitHub releases, checked against the SHA-256 the
+//     installer pins (Meilisearch publishes no checksums or signatures of
+//     its own). Apps connect with TLS on 7700 through Rowsafe's TLS front,
+//     which loads renewed certificates without a restart; Meilisearch
+//     itself listens on 127.0.0.1 only.
 var CloudEngines = []CloudEngine{
 	{Engine: EnginePostgreSQL, Name: "PostgreSQL", Versions: []string{"15", "16", "17", "18"}, DefaultVersion: "17",
 		Port: 5432, Scheme: "postgresql", Standby: true, Clone: true, Extensions: PGPackagedExtensions},
@@ -105,6 +112,9 @@ var CloudEngines = []CloudEngine{
 	{Engine: EngineQdrant, Name: "Qdrant", Versions: []string{"1.19"}, DefaultVersion: "1.19",
 		Port: 6333, Ports: []int{6333, 6334}, Scheme: "https", MinMemoryMB: QdrantMinMemoryMB, SnapshotsOnly: true,
 		Note: "Qdrant 1.19, the open-source vector database, from Qdrant's official release. Apps connect with TLS and an API key: REST on port 6333 and gRPC on port 6334. Backups are snapshots every hour: restores go back to one of them, not to any second. Sizes with 2 GB of memory or more."},
+	{Engine: EngineMeilisearch, Name: "Meilisearch", Versions: []string{"1.54"}, DefaultVersion: "1.54",
+		Port: MeilisearchPort, Scheme: "https", SnapshotsOnly: true,
+		Note: "Meilisearch 1.54, the open-source search engine (Community Edition). Apps connect with HTTPS on port 7700 with an API key. Backups are snapshots every hour: restores go back to one of them, not to any second."},
 }
 
 // CloudEngineFor finds an engine new servers can get ("" is PostgreSQL).
@@ -189,6 +199,8 @@ func (e CloudEngine) InstallFlag() string {
 		return "--install-opensearch"
 	case EngineQdrant:
 		return "--install-qdrant"
+	case EngineMeilisearch:
+		return "--install-meilisearch"
 	}
 	return ""
 }
@@ -219,3 +231,10 @@ const FeatureServerCertificateClickHouse = "server_certificate_clickhouse"
 // (tls.cert_ttl); gRPC loads a renewed certificate at Qdrant's next restart
 // (Pulse says so and offers the restart: QdrantStatus.GRPCOldCert).
 const FeatureServerCertificateQdrant = "server_certificate_qdrant"
+
+// FeatureServerCertificateMeilisearch is in HeartbeatRequest.Features of
+// agents that install certificates for Rowsafe Cloud names on Meilisearch
+// servers too: the installer's --listen-public serves
+// /etc/ssl/rowsafe-meilisearch/rowsafe-server.crt and .key on 7700 through
+// Rowsafe's TLS front, which loads new files by itself (no restart).
+const FeatureServerCertificateMeilisearch = "server_certificate_meilisearch"

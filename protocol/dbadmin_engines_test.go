@@ -115,3 +115,46 @@ func TestValidateDBAdminRedis(t *testing.T) {
 		t.Error(got)
 	}
 }
+
+func TestMeilisearchDBAdmin(t *testing.T) {
+	pk := testSealKey(t)
+	ok := []DBAdminParams{
+		{Action: DBAdminList},
+		{Action: DBAdminCreateDatabase, Database: "movies-2026"},
+		{Action: DBAdminCreateDatabase, Database: "movies", CreateOwner: true, Owner: "movies_app", PublicKey: pk},
+		{Action: DBAdminCreateUser, User: "front_search", Access: DBAccessReadOnly, Databases: []string{"movies"}, PublicKey: pk},
+		{Action: DBAdminCreateUser, User: "indexer", Access: DBAccessReadWrite, Databases: []string{"*"}, PublicKey: pk},
+		{Action: DBAdminResetPassword, User: "indexer", PublicKey: pk},
+		{Action: DBAdminDropUser, User: "indexer"},
+		{Action: DBAdminDropDatabase, Database: "movies-2026", Confirm: "movies-2026"},
+	}
+	for _, p := range ok {
+		if err := ValidateDBAdminFor(EngineMeilisearch, p); err != nil {
+			t.Errorf("%+v: %v", p, err)
+		}
+	}
+	bad := []DBAdminParams{
+		{Action: DBAdminCreateDatabase, Database: "movies 2026"},
+		{Action: DBAdminCreateDatabase, Database: "movies", Owner: "someone"},
+		{Action: DBAdminCreateUser, User: "x", Access: DBAccessReadOnly, Databases: []string{"bad name"}, PublicKey: pk},
+		{Action: DBAdminCreateUser, User: "x", Access: DBAccessReadOnly, PublicKey: pk},
+		{Action: DBAdminCreateUser, User: "x", Access: DBAccessReadOnly, Databases: []string{"movies"}},
+		{Action: DBAdminCreateUser, User: "x", Access: DBAccessReadOnly, Databases: []string{"movies"}, KeyPattern: "a:*", PublicKey: pk},
+		{Action: DBAdminDropUser, User: "x", ReassignTo: "y"},
+		{Action: DBAdminEnableExtension, Database: "movies", Extension: "vector"},
+		{Action: DBAdminDropDatabase, Database: "movies", Confirm: "nope"},
+	}
+	for _, p := range bad {
+		if err := ValidateDBAdminFor(EngineMeilisearch, p); err == nil {
+			t.Errorf("accepted %+v", p)
+		}
+	}
+	c := DBConnection{Engine: EngineMeilisearch, User: "front_search", Database: "movies", Host: "search.example", Port: 7700, SSLMode: "require"}
+	if got := ConnectionURL(c, "secret"); got != "https://search.example:7700" {
+		t.Errorf("url %q", got)
+	}
+	c.SSLMode, c.Host = "prefer", "::1"
+	if got := ConnectionURL(c, "secret"); got != "http://[::1]:7700" {
+		t.Errorf("url %q", got)
+	}
+}
