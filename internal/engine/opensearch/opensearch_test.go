@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -136,5 +137,19 @@ func TestSupported(t *testing.T) {
 		if bad.supported() == "" {
 			t.Errorf("%+v accepted", bad)
 		}
+	}
+}
+
+func TestScratchJVMOptions(t *testing.T) {
+	in := "-Xms1g\n-Xmx1g\n9-:-Xlog:gc*,gc+age=trace,safepoint:file=/var/log/opensearch/gc.log:utctime\n-XX:HeapDumpPath=/var/lib/opensearch\n" +
+		"-XX:ErrorFile=/var/log/opensearch/hs_err_pid%p.log\n8:-Xloggc:/var/log/opensearch/gc.log\n-XX:+HeapDumpOnOutOfMemoryError\n21-:-javaagent:agent/opensearch-agent.jar\n"
+	got := string(scratchJVMOptions([]byte(in)))
+	for _, gone := range []string{"/var/log/opensearch", "/var/lib/opensearch", "HeapDumpOnOutOfMemoryError"} {
+		if strings.Contains(got, gone) {
+			t.Errorf("%q left in %q", gone, got)
+		}
+	}
+	if !strings.Contains(got, "-javaagent:agent/opensearch-agent.jar") || !strings.Contains(got, "-Xmx1g") {
+		t.Errorf("kept: %q", got)
 	}
 }

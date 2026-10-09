@@ -138,8 +138,12 @@ func (s scratch) loadState() (scratchState, error) {
 	return st, err
 }
 
-// scratchHeapMB is the temporary server's heap: 512 MB, 1 GB on servers
-// with 16 GB of memory or more.
+// scratchNeedMB is the free memory a temporary server needs to start
+// (what one with little data takes: its heap grows as it is used).
+const scratchNeedMB = 700
+
+// scratchHeapMB is the temporary server's largest heap: 512 MB, 1 GB on
+// servers with 16 GB of memory or more.
 func scratchHeapMB() int {
 	if mb := memTotalMB(); mb >= 16000 {
 		return 1024
@@ -166,11 +170,22 @@ func memAvailableMB() (int64, bool) {
 	if avail < 0 {
 		return 0, false
 	}
+	// A container's limit: what its processes hold, not the files it read
+	// (the page cache gives way).
 	if lim, err := os.ReadFile("/sys/fs/cgroup/memory.max"); err == nil {
 		if l, err := strconv.ParseInt(strings.TrimSpace(string(lim)), 10, 64); err == nil {
 			if cur, err := os.ReadFile("/sys/fs/cgroup/memory.current"); err == nil {
 				if c, err := strconv.ParseInt(strings.TrimSpace(string(cur)), 10, 64); err == nil {
-					avail = min(avail, (l-c)/(1<<20))
+					st := map[string]int64{}
+					if data, err := os.ReadFile("/sys/fs/cgroup/memory.stat"); err == nil {
+						for _, line := range strings.Split(string(data), "\n") {
+							if f := strings.Fields(line); len(f) == 2 {
+								st[f[0]], _ = strconv.ParseInt(f[1], 10, 64)
+							}
+						}
+					}
+					used := c - st["file"] + st["shmem"]
+					avail = min(avail, (l-used)/(1<<20))
 				}
 			}
 		}
@@ -295,6 +310,9 @@ plugins.security.check_snapshot_restore_write_privileges: false
 					"appender.console.layout.pattern = [%d{ISO8601}][%-5p][%-25c{1.}] %marker%m%n\nrootLogger.level = info\nrootLogger.appenderRef.console.ref = console\n")
 			}
 		}
+		if name == "jvm.options" {
+			data = scratchJVMOptions(data)
+		}
 		if err := os.WriteFile(filepath.Join(conf, name), data, 0o600); err != nil {
 			return err
 		}
@@ -302,7 +320,10 @@ plugins.security.check_snapshot_restore_write_privileges: false
 	if err := os.MkdirAll(filepath.Join(conf, "jvm.options.d"), 0o700); err != nil {
 		return err
 	}
-	heap := fmt.Sprintf("-Xms%[1]dm\n-Xmx%[1]dm\n-XX:HeapDumpPath=%[2]s\n-XX:ErrorFile=%[2]s/hs_err_pid%%p.log\n", st.HeapMB, s.logDir())
+	// The heap's memory is taken as it is used (not all at start, as
+	// production's is), and the JVM's other memory is kept small.
+	heap := fmt.Sprintf("-Xms64m\n-Xmx%[1]dm\n-XX:-AlwaysPreTouch\n-XX:MaxDirectMemorySize=128m\n-XX:ReservedCodeCacheSize=96m\n"+
+		"-XX:HeapDumpPath=%[2]s\n-XX:-HeapDumpOnOutOfMemoryError\n-XX:ErrorFile=%[2]s/hs_err_pid%%p.log\n", st.HeapMB, s.logDir())
 	if err := os.WriteFile(filepath.Join(conf, "jvm.options.d", "rowsafe-scratch.options"), []byte(heap), 0o600); err != nil {
 		return err
 	}
@@ -316,6 +337,27 @@ plugins.security.check_snapshot_restore_write_privileges: false
 		}
 	}
 	return nil
+}
+
+// scratchJVMOptions is production's jvm.options without what names
+// production's own files (the GC log, heap dumps, crash logs: the packages
+// put them under /var/log/opensearch and /var/lib/opensearch, which the
+// temporary server can't and mustn't write).
+func scratchJVMOptions(data []byte) []byte {
+	var out []string
+	for _, line := range strings.Split(string(data), "\n") {
+		opt := strings.TrimSpace(line)
+		if i := strings.Index(opt, ":-"); i >= 0 && i < 6 && !strings.HasPrefix(opt, "-") {
+			opt = opt[i+1:] // "9-:-Xlog..." (a JVM version range first)
+		}
+		switch {
+		case strings.HasPrefix(opt, "-Xlog:"), strings.HasPrefix(opt, "-XX:HeapDumpPath"), strings.HasPrefix(opt, "-XX:ErrorFile"),
+			strings.HasPrefix(opt, "-Xloggc"), strings.HasPrefix(opt, "-XX:+HeapDumpOnOutOfMemoryError"):
+			continue
+		}
+		out = append(out, line)
+	}
+	return []byte(strings.Join(out, "\n"))
 }
 
 // copyTree copies the regular files under src that the agent can read
@@ -423,9 +465,9 @@ func (s scratch) start(ctx context.Context) error {
 	s.stop()
 	// Production comes first: the temporary server starts only when the
 	// machine has room for its heap and the rest of its Java process.
-	if avail, ok := memAvailableMB(); ok && avail < int64(st.HeapMB)+600 {
+	if avail, ok := memAvailableMB(); ok && avail < scratchNeedMB {
 		return fmt.Errorf("not enough free memory on this server to start a temporary OpenSearch now (it needs about %d MB, %d MB are free): "+
-			"production keeps its memory; try again when the server is less busy, or give it more memory", st.HeapMB+600, avail)
+			"production keeps its memory; try again when the server is less busy, or give it more memory", scratchNeedMB, avail)
 	}
 	ports, err := freePorts(2)
 	if err != nil {
@@ -447,7 +489,9 @@ func (s scratch) start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(bin)
+	// If memory runs out anyway, the kernel stops this server, never
+	// production: the highest out-of-memory score there is.
+	cmd := exec.Command("/bin/sh", "-c", `echo 1000 >/proc/self/oom_score_adj 2>/dev/null; exec "$0" "$@"`, bin)
 	cmd.Dir = home // its JVM options name files relative to the program's folder
 	cmd.Env = []string{
 		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
