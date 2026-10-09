@@ -147,6 +147,13 @@ func printSecret(s *protocol.DBSecret) {
 		fmt.Printf("\nIn a .env file:\n  QDRANT_URL=%s\n  QDRANT_API_KEY=%s\n", s.URL, s.Password)
 		return
 	}
+	if protocol.NormalizeEngine(s.Engine) == protocol.EngineMeilisearch {
+		// An API key, sent with each request; the URL is the instance's address.
+		fmt.Printf("\nAPI key %s (save it now: Rowsafe doesn't keep it and can't show it again):\n\n", s.User)
+		fmt.Printf("  url       %s\n  key       %s\n  index     %s\n", s.URL, s.Password, s.Database)
+		fmt.Printf("\nIn a .env file:\n  MEILISEARCH_URL=%s\n  MEILISEARCH_KEY=%s\n", s.URL, s.Password)
+		return
+	}
 	fmt.Printf("\nConnection string for %s (save it now: Rowsafe doesn't keep the password and can't show it again):\n\n", s.User)
 	fmt.Printf("  %s\n\n", s.URL)
 	fmt.Printf("  user      %s\n  password  %s\n  database  %s\n  host      %s\n  port      %d\n  sslmode   %s\n", s.User, s.Password, s.Database, s.Host, s.Port, s.SSLMode)

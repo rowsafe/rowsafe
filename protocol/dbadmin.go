@@ -260,6 +260,18 @@ func ConnectionURL(c DBConnection, password string) string {
 		}
 	case EngineOpenSearch:
 		return openSearchURL(c, host, password) // opensearch_dbadmin.go
+	case EngineMeilisearch:
+		// The instance's address: the key is the password, sent in a
+		// header, never in the URL.
+		scheme = "http"
+		if c.SSLMode == "require" {
+			scheme = "https"
+		}
+		u := scheme + "://" + host
+		if c.Port != 0 {
+			u += fmt.Sprintf(":%d", c.Port)
+		}
+		return u
 	}
 	u := scheme + "://" + urlEscape(c.User)
 	if password != "" {
@@ -602,7 +614,8 @@ func ValidateDBAdminFor(engine string, p DBAdminParams) error {
 	case DBAdminList:
 		return nil
 	case DBAdminCreateDatabase:
-		if err := ValidNewName("database", p.Database); err != nil {
+		// Meilisearch's indexes take - too (validateMeilisearchDBAdmin).
+		if err := ValidNewName("database", p.Database); err != nil && engine != EngineMeilisearch {
 			return err
 		}
 		if p.CreateOwner {
@@ -613,7 +626,7 @@ func ValidateDBAdminFor(engine string, p DBAdminParams) error {
 			if err := ValidNewName("user", owner); err != nil {
 				return err
 			}
-		} else if err := ValidExistingName("owner", p.Owner); err != nil {
+		} else if err := ValidExistingName("owner", p.Owner); err != nil && engine != EngineMeilisearch { // indexes have no owner
 			return fmt.Errorf("choose who owns the database: an existing user, or a new one")
 		}
 		switch p.Template {
@@ -780,6 +793,11 @@ func validateDBAdminEngine(engine string, p DBAdminParams) error {
 	}
 	if engine == EngineQdrant {
 		if err := validateQdrantDBAdmin(p); err != nil {
+			return err
+		}
+	}
+	if engine == EngineMeilisearch {
+		if err := validateMeilisearchDBAdmin(p); err != nil {
 			return err
 		}
 	}

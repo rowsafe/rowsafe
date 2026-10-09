@@ -547,6 +547,8 @@ func engineServiceNames(engine string) (service, unit string) {
 		return "opensearch", "opensearch"
 	case protocol.EngineQdrant:
 		return "qdrant", "qdrant"
+	case protocol.EngineMeilisearch:
+		return "meilisearch", "meilisearch"
 	}
 	return "postgres", "postgresql"
 }

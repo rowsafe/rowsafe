@@ -15,11 +15,13 @@ const (
 	EngineValkey     = "valkey"
 	EngineSQLite     = "sqlite"
 	EngineQdrant     = "qdrant"
+	// EngineMeilisearch is Meilisearch Community Edition (meilisearch.go).
+	EngineMeilisearch = "meilisearch"
 )
 
 // Engines lists the known engines, PostgreSQL first.
 var Engines = []string{EnginePostgreSQL, EngineMySQL, EngineMariaDB, EngineMongoDB, EngineClickHouse, EngineRedis, EngineValkey, EngineSQLite,
-	EngineQdrant,
+	EngineQdrant, EngineMeilisearch,
 }
 
 // NormalizeEngine maps "" to PostgreSQL and lowercases s. It does not
@@ -62,6 +64,8 @@ func EngineDisplayName(engine string) string {
 		return "OpenSearch"
 	case EngineQdrant:
 		return "Qdrant"
+	case EngineMeilisearch:
+		return "Meilisearch"
 	default:
 		return e
 	}
@@ -243,6 +247,8 @@ var EngineCapabilities = map[string]EngineFeatures{
 	// OpenSearch (internal/engine/opensearch) adds itself: protocol/opensearch.go.
 	// Qdrant (internal/engine/qdrant): protocol/qdrant.go.
 	EngineQdrant: qdrantFeatures,
+	// Meilisearch (internal/engine/meilisearch): protocol/meilisearch.go.
+	EngineMeilisearch: meilisearchFeatures,
 }
 
 // RewindInPlaceStopsServer reports whether rewinding a database of engine
@@ -250,10 +256,11 @@ var EngineCapabilities = map[string]EngineFeatures{
 // the root helper or the container control service, which root must
 // allow). MongoDB, ClickHouse, Redis and Valkey swap the data through the
 // database itself, and SQLite writes the restored copy into the live file
-// with the online backup API: they need no such permission.
+// with the online backup API, and Meilisearch swaps indexes: they need no
+// such permission.
 func RewindInPlaceStopsServer(engine string) bool {
 	switch NormalizeEngine(engine) {
-	case EngineMongoDB, EngineClickHouse, EngineRedis, EngineValkey, EngineSQLite, EngineOpenSearch, EngineQdrant:
+	case EngineMongoDB, EngineClickHouse, EngineRedis, EngineValkey, EngineSQLite, EngineOpenSearch, EngineQdrant, EngineMeilisearch:
 		return false
 	}
 	return true

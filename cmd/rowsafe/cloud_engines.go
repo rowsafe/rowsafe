@@ -154,6 +154,7 @@ func engineURLExample(s client.CloudServer, host string, port int) string {
 	if conn.Engine != protocol.EngineValkey && conn.Engine != protocol.EngineRedis && conn.Engine != protocol.EngineOpenSearch {
 		conn.Database = "DBNAME"
 	}
+	// (Meilisearch: the address alone; apps send an API key with each request.)
 	return protocol.ConnectionURL(conn, "PASSWORD")
 }
 

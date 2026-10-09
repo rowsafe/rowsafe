@@ -92,6 +92,9 @@ func (t *tools) createAppDatabase(ctx context.Context, _ *sdk.CallToolRequest, i
 	case protocol.EngineQdrant:
 		return nil, AppDatabaseOutput{}, fmt.Errorf("%s runs Qdrant, whose collections the app creates itself (with its vector size and distance): the user makes an API key for the app "+
 			"in the dashboard (Databases & users), which shows it once; the app connects to https://<host>:6333 (REST) or port 6334 (gRPC) with that key (get_cloud_server shows the host)", d.Name)
+	case protocol.EngineMeilisearch:
+		return nil, AppDatabaseOutput{}, fmt.Errorf("%s runs Meilisearch, which has indexes and API keys rather than databases and logins: the user makes an API key for the app "+
+			"in the dashboard (Databases & users), which shows it once; the app sends it to https://HOST:%d (get_cloud_server shows the host)", d.Name, protocol.MeilisearchPort)
 	default:
 		return nil, AppDatabaseOutput{}, fmt.Errorf("create_app_database is for PostgreSQL, MySQL, MariaDB and ClickHouse servers, and %s runs %s", d.Name, protocol.EngineDisplayName(engine))
 	}
