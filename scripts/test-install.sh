@@ -4739,7 +4739,7 @@ cloud_engine_container() {
     clickhouse) cloud_clickhouse_checks ;;
     opensearch) cloud_opensearch_checks ;;
     qdrant) cloud_qdrant_checks && cloud_qdrant_update ;;
-    meilisearch) cloud_meilisearch_checks ;;
+    meilisearch) cloud_meilisearch_checks && cloud_meilisearch_update ;;
   esac
   pass "$label $ver: installed from its own source with its key checked, secure defaults, TLS from the network, protected"
 
@@ -5559,6 +5559,87 @@ cloud_qdrant_update() {
   done
   grep -q 'Qdrant on port 6333: 1.19.1 -> 1.19.2 (restarted: 1)' "$W/qhelper.log" || fail "$name: the helper's log"
   pass "the root helper updates Qdrant to the pinned release (SHA-256 checked), restarts it, and does nothing at the pinned one"
+}
+
+# cloud_meilisearch_update: the root helper's update (db-minor-update):
+# nothing at the pinned release; from an older one (a stand-in that says
+# 1.54.2 and runs the real program), the pinned release is installed from
+# its download (SHA-256 checked) into its own folder, the program switched
+# and Meilisearch restarted once with its dumpless upgrade (a drop-in in
+# /run, gone afterwards).
+cloud_meilisearch_update() {
+  hd=$W/mhelper
+  install -d -m 0755 "$hd" "$hd/out" "$hd/state"
+  install -d -m 0700 -o rowsafe -g rowsafe "$hd/req"
+  printf 'database\n' >"$hd/updates-allowed"
+  printf '7700 meilisearch.service\n' >"$hd/restart-allowed"
+  chmod 644 "$hd/updates-allowed" "$hd/restart-allowed"
+  ms_helper() {
+    printf '%s db-minor-update 7700\n' "$1" | runuser -u rowsafe -- sh -c 'cat >"$1"' sh "$hd/req/update-request"
+    rm -f "$hd/out/update-result"
+    timeout 1200 env ROWSAFE_HELPER_MODE=update ROWSAFE_AGENT_USER=rowsafe ROWSAFE_RESTART_DIR="$hd/req" ROWSAFE_UPDATES_ALLOW="$hd/updates-allowed" \
+      ROWSAFE_RESTART_ALLOW="$hd/restart-allowed" RUNTIME_DIRECTORY="$hd/out" STATE_DIRECTORY="$hd/state" \
+      ROWSAFE_MEILISEARCH_RELEASES_URL=https://localhost:18443/meilisearch \
+      sh /src/scripts/rowsafe-pg-restart 2>>"$W/mhelper.log" || fail "$name: the helper failed ($1)"
+  }
+  mver=$(sed -n 's/^MEILI_VERSION=//p' "$W/install.sh")
+  real=/usr/local/lib/meilisearch/$mver/meilisearch
+  pid=$(systemctl show -p MainPID --value meilisearch)
+  ms_helper msu1
+  grep -qx ok=1 "$hd/out/update-result" && grep -qx "package=$mver" "$hd/out/update-result" && grep -qx restarted=0 "$hd/out/update-result" ||
+    { cat "$hd/out/update-result" "$W/mhelper.log" >&2; fail "$name: the pinned release isn't 'already the newest'"; }
+  [ "$(systemctl show -p MainPID --value meilisearch)" = "$pid" ] || fail "$name: nothing to update, yet Meilisearch restarted"
+  # An older program: a stand-in that says 1.54.2 and runs the real one,
+  # which the update downloads again into its folder.
+  install -d -m 0755 /usr/local/lib/meilisearch/1.54.2
+  mv "$real" /usr/local/lib/meilisearch/1.54.2/real
+  printf '#!/bin/sh\ncase "${1:-}" in --version) echo "meilisearch 1.54.2" ;; *) exec /usr/local/lib/meilisearch/1.54.2/real "$@" ;; esac\n' \
+    >/usr/local/lib/meilisearch/1.54.2/meilisearch
+  chmod 0755 /usr/local/lib/meilisearch/1.54.2/meilisearch
+  ln -sfn /usr/local/lib/meilisearch/1.54.2/meilisearch /usr/local/bin/meilisearch
+  ms_helper msu2
+  grep -qx ok=1 "$hd/out/update-result" && grep -qx from_package=1.54.2 "$hd/out/update-result" && grep -qx "package=$mver" "$hd/out/update-result" &&
+    grep -qx restarted=1 "$hd/out/update-result" || { cat "$hd/out/update-result" "$W/mhelper.log" >&2; fail "$name: the helper didn't update Meilisearch"; }
+  [ "$(readlink /usr/local/bin/meilisearch)" = "$real" ] && [ "$(/usr/local/bin/meilisearch --version)" = "meilisearch $mver" ] &&
+    [ "$(stat -c '%U %a' "$real")" = "root 755" ] || fail "$name: the program isn't Meilisearch $mver's after the update"
+  [ "$(systemctl show -p MainPID --value meilisearch)" != "$pid" ] || fail "$name: Meilisearch wasn't restarted on the new program"
+  [ ! -e /run/systemd/system/meilisearch.service.d/50-rowsafe-upgrade.conf ] || fail "$name: the upgrade drop-in stayed"
+  ! systemctl show -p Environment --value meilisearch | grep -q MEILI_UPGRADE_DB || fail "$name: the next start would upgrade again"
+  rm -rf /usr/local/lib/meilisearch/1.54.2
+  i=0
+  until curl -fsS --max-time 3 http://127.0.0.1:7701/health 2>/dev/null | grep -q available; do
+    i=$((i + 1))
+    [ $i -lt 60 ] || fail "$name: Meilisearch doesn't answer after the update"
+    sleep 1
+  done
+  grep -q "Meilisearch on port 7700: 1.54.2 -> $mver (dumpless upgrade, restarted)" "$W/mhelper.log" || fail "$name: the helper's log"
+  pass "the root helper updates Meilisearch to the pinned release (SHA-256 checked, dumpless upgrade, one restart), and does nothing at the pinned one"
+
+  # The TLS front follows agent updates: root's refresh copies the agent's
+  # program only when it matches the release's signed manifest.
+  systemctl is-enabled --quiet rowsafe-meilisearch-tls-refresh.path || fail "$name: the front's refresh path unit isn't enabled"
+  front=/usr/local/lib/rowsafe/rowsafe-meilisearch-tls
+  agent=$(readlink -f /opt/rowsafe/rowsafe-agent)
+  cp "$agent" "$W/agent.orig"
+  printf 'stale' >>"$front"
+  /usr/local/lib/rowsafe/rowsafe-meilisearch-tls-refresh >"$W/refresh.out" 2>&1 || fail "$name: the refresh failed: $(cat "$W/refresh.out")"
+  cmp -s "$agent" "$front" && grep -q "now runs rowsafe-agent" "$W/refresh.out" || fail "$name: the front wasn't refreshed: $(cat "$W/refresh.out")"
+  [ "$(stat -c '%U %a' "$front")" = "root 755" ] || fail "$name: the front's program owner or mode"
+  printf 'tampered' >>"$agent"
+  printf 'stale' >>"$front"
+  cp "$front" "$W/front.before"
+  /usr/local/lib/rowsafe/rowsafe-meilisearch-tls-refresh >"$W/refresh.out" 2>&1
+  cmp -s "$front" "$W/front.before" && grep -q "doesn't match its signed manifest" "$W/refresh.out" ||
+    fail "$name: a program that doesn't match the signed manifest reached the front: $(cat "$W/refresh.out")"
+  cat "$W/agent.orig" >"$agent"
+  /usr/local/lib/rowsafe/rowsafe-meilisearch-tls-refresh >/dev/null 2>&1
+  i=0
+  until systemctl is-active --quiet rowsafe-meilisearch-tls && echo | openssl s_client -connect 127.0.0.1:7700 2>/dev/null | grep -q "BEGIN CERTIFICATE"; do
+    i=$((i + 1))
+    [ $i -lt 30 ] || fail "$name: the TLS front doesn't serve after its refresh"
+    sleep 1
+  done
+  pass "the TLS front follows agent updates: copied only when it matches the signed manifest, then restarted"
 }
 
 # cloud_qdrant_checks: Qdrant after the cloud-init run.
