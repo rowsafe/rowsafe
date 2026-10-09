@@ -114,6 +114,14 @@ func ServerStatus(ctx context.Context, env agent.EngineEnv, port int) (Status, e
 	} else if statusOf(err) == http.StatusUnauthorized {
 		st.Security = "on"
 	}
+	// Before Rowsafe's user exists, what opensearch.yml says (in effect
+	// after OpenSearch's next start); with a login, what the API answers.
+	if conf.Read && st.Security == "on" {
+		st.RestAPI = "no"
+		if slices.Contains(conf.RestAPIRoles, LoginRole) {
+			st.RestAPI = "ok"
+		}
+	}
 	l, ok, lerr := loadLogin(env, port)
 	switch {
 	case lerr != nil:

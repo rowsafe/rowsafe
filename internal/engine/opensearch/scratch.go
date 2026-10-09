@@ -147,6 +147,37 @@ func scratchHeapMB() int {
 	return 512
 }
 
+// memAvailableMB is the memory the machine can give a new process now
+// (MemAvailable, and a container's own limit), ok false when unknown.
+func memAvailableMB() (int64, bool) {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0, false
+	}
+	var avail int64 = -1
+	for _, line := range strings.Split(string(data), "\n") {
+		if rest, ok := strings.CutPrefix(line, "MemAvailable:"); ok {
+			if f := strings.Fields(rest); len(f) > 0 {
+				n, _ := strconv.ParseInt(f[0], 10, 64)
+				avail = n / 1024
+			}
+		}
+	}
+	if avail < 0 {
+		return 0, false
+	}
+	if lim, err := os.ReadFile("/sys/fs/cgroup/memory.max"); err == nil {
+		if l, err := strconv.ParseInt(strings.TrimSpace(string(lim)), 10, 64); err == nil {
+			if cur, err := os.ReadFile("/sys/fs/cgroup/memory.current"); err == nil {
+				if c, err := strconv.ParseInt(strings.TrimSpace(string(cur)), 10, 64); err == nil {
+					avail = min(avail, (l-c)/(1<<20))
+				}
+			}
+		}
+	}
+	return avail, true
+}
+
 // memTotalMB is the machine's memory (0 when unknown).
 func memTotalMB() int64 {
 	data, err := os.ReadFile("/proc/meminfo")
@@ -390,6 +421,12 @@ func (s scratch) start(ctx context.Context) error {
 		return err
 	}
 	s.stop()
+	// Production comes first: the temporary server starts only when the
+	// machine has room for its heap and the rest of its Java process.
+	if avail, ok := memAvailableMB(); ok && avail < int64(st.HeapMB)+600 {
+		return fmt.Errorf("not enough free memory on this server to start a temporary OpenSearch now (it needs about %d MB, %d MB are free): "+
+			"production keeps its memory; try again when the server is less busy, or give it more memory", st.HeapMB+600, avail)
+	}
 	ports, err := freePorts(2)
 	if err != nil {
 		return err
