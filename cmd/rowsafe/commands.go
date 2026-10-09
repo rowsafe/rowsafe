@@ -303,50 +303,21 @@ func showCmd(ctx context.Context, c *client.Client, args []string) error {
 func adoptCmd(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("adopt", flag.ContinueOnError)
 	host := fs.String("host", "", "host ID or hostname (see `rowsafe hosts list`); optional with a single host")
-	port := fs.Int("port", 5432, "Postgres port")
+	port := fs.Int("port", 5432, "the database's port (PostgreSQL 5432; other engines default to their own)")
 	socketDir := fs.String("socket-dir", "/var/run/postgresql", "Unix socket directory")
-	retention := fs.Int("retention-full", 2, "full backups to keep (weekly fulls: 2 = about 2 weeks of PITR)")
+	retention := fs.Int("retention-full", 2, "full backups to keep (PostgreSQL's weekly fulls: 2 = about 2 weeks of PITR; other engines default to their own)")
 	noWait := fs.Bool("no-wait", false, "don't wait for the plan")
-	engine := fs.String("engine", "", "database engine: postgresql (default), mysql, mariadb, mongodb, clickhouse, redis, valkey, qdrant or sqlite")
+	engine := fs.String("engine", "", "database engine: "+adoptEngineList())
 	path := fs.String("path", "", "SQLite: the database file's absolute path on the host (in Docker, inside the agent's container)")
 	name, err := parse(fs, args, true)
 	if err != nil {
 		return err
 	}
-	if e := protocol.NormalizeEngine(*engine); e == protocol.EngineMySQL || e == protocol.EngineMariaDB {
-		// MySQL and MariaDB defaults: port 3306, the Debian/Docker socket.
-		set := map[string]bool{}
-		fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
-		if !set["port"] {
-			*port = 3306
-		}
-		if !set["socket-dir"] {
-			*socketDir = "/var/run/mysqld/mysqld.sock"
-			if e == protocol.EngineMariaDB {
-				*socketDir = "/run/mysqld/mysqld.sock" // the mariadb images' own path
-			}
-		}
-	}
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	adoptDefaults(*engine, set, port, socketDir, retention)
 	if *host, err = resolveHost(ctx, c, *host); err != nil {
 		return err
-	}
-	if e := protocol.NormalizeEngine(*engine); e == protocol.EngineMongoDB || e == protocol.EngineClickHouse || e == protocol.EngineRedis || e == protocol.EngineValkey ||
-		e == protocol.EngineQdrant {
-		// MongoDB, ClickHouse, Redis, Valkey and Qdrant: TCP on 127.0.0.1,
-		// their default port (27017, ClickHouse's HTTP port 8123, 6379,
-		// Qdrant's REST port 6333) and backup
-		// schedule (the control plane fills in what isn't given).
-		set := map[string]bool{}
-		fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
-		if !set["socket-dir"] {
-			*socketDir = ""
-		}
-		if !set["port"] {
-			*port = 0
-		}
-		if !set["retention-full"] {
-			*retention = 0
-		}
 	}
 	if protocol.NormalizeEngine(*engine) == protocol.EngineSQLite {
 		// A SQLite database is a file: its path, no port, the control
@@ -354,12 +325,7 @@ func adoptCmd(ctx context.Context, c *client.Client, args []string) error {
 		if !protocol.SQLitePath(*path) {
 			return errors.New("--path is required for SQLite: the database file's absolute path, e.g. /srv/app/db/production.sqlite3")
 		}
-		set := map[string]bool{}
-		fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
 		*port, *socketDir = 0, *path
-		if !set["retention-full"] {
-			*retention = 0
-		}
 	} else if *path != "" {
 		return errors.New("--path is for SQLite databases (--engine sqlite)")
 	}
@@ -375,6 +341,56 @@ func adoptCmd(ctx context.Context, c *client.Client, args []string) error {
 		return nil
 	}
 	return waitAndReport(ctx, c, resp.Task.ID, name)
+}
+
+// adoptEngineList is --engine's list for help, from protocol.Engines so a
+// new engine shows up by itself: "postgresql (default), mysql, ... or
+// sqlite".
+func adoptEngineList() string {
+	names := make([]string, 0, len(protocol.Engines))
+	for _, e := range protocol.Engines {
+		if e == protocol.EnginePostgreSQL {
+			e += " (default)"
+		}
+		names = append(names, e)
+	}
+	if len(names) < 2 {
+		return strings.Join(names, "")
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " or " + names[len(names)-1]
+}
+
+// adoptDefaults replaces rowsafe adopt's PostgreSQL defaults (port 5432,
+// its socket directory, 2 weekly fulls) for another engine, leaving the
+// flags set on the command line (set) alone. MySQL and MariaDB get port
+// 3306 and their socket; SQLite has a path instead (adoptCmd); every other
+// engine (MongoDB, ClickHouse, Redis, Valkey, OpenSearch, Qdrant and any
+// added later) is TCP on 127.0.0.1, and 0 lets the control plane fill in
+// its own port and backup schedule.
+func adoptDefaults(engine string, set map[string]bool, port *int, socketDir *string, retention *int) {
+	switch e := protocol.NormalizeEngine(engine); e {
+	case protocol.EnginePostgreSQL:
+	case protocol.EngineMySQL, protocol.EngineMariaDB:
+		if !set["port"] {
+			*port = 3306
+		}
+		if !set["socket-dir"] {
+			*socketDir = "/var/run/mysqld/mysqld.sock"
+			if e == protocol.EngineMariaDB {
+				*socketDir = "/run/mysqld/mysqld.sock" // the mariadb images' own path
+			}
+		}
+	default:
+		if !set["socket-dir"] {
+			*socketDir = ""
+		}
+		if !set["port"] {
+			*port = 0
+		}
+		if !set["retention-full"] {
+			*retention = 0
+		}
+	}
 }
 
 func planCmd(ctx context.Context, c *client.Client, args []string) error {
