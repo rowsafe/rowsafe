@@ -17,7 +17,7 @@ import (
 // Direct actions that never change production: acknowledging an alert,
 // setting a recommendation aside, checks and rehearsals that run on copies
 // or only read, and file snapshots. Changes to production go through
-// request_change, which a person approves.
+// request_change, as the person who connected the assistant.
 
 type alertIDInput struct {
 	AlertID string `json:"alert_id" jsonschema:"the alert's ID (from list_alerts)"`
@@ -85,7 +85,7 @@ func (t *tools) addActionTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "run_index_check",
 		Description: "Looks for missing indexes now: Rowsafe takes the database's slowest and most frequent queries, tries candidate indexes on a copy restored from the backups on the database's server (never production), and keeps the ones that make queries faster. " +
-			"It can take many minutes. Its results show in recommendations (group indexes) with how much faster each index made each query; creating one on production is a fix a person approves.",
+			"It can take many minutes. Its results show in recommendations (group indexes) with how much faster each index made each query; creating one on production is a fix (apply_fix), once the user agrees.",
 		Annotations: writes("Check for missing indexes (on a copy)", false, false),
 		InputSchema: withWait[taskInput](nil),
 	}, t.runIndexCheck)
@@ -93,7 +93,7 @@ func (t *tools) addActionTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "check_upgrade",
 		Description: "Runs the read-only preflight for a major version upgrade on the database's server: packages, extensions, disk space, replicas and standbys, what blocks the upgrade and which modes are possible. Nothing changes. " +
-			"Then rehearse_upgrade tries the upgrade on a copy. The real upgrade is a change to production a person approves (request_change, action upgrade_database).",
+			"Then rehearse_upgrade tries the upgrade on a copy. The real upgrade is a change to production: request_change, action upgrade_database, once the user agrees.",
 		Annotations: writes("Check an upgrade (read-only)", false, false),
 		InputSchema: withWait[upgradeTaskInput](nil),
 	}, t.checkUpgrade)
@@ -101,7 +101,7 @@ func (t *tools) addActionTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "rehearse_upgrade",
 		Description: "Rehearses a major version upgrade on a throwaway copy: restores the newest backup on the database's server, upgrades the copy, checks it and measures the downtime the real upgrade would have, then deletes the copy. Production is never touched. " +
-			"It needs free disk for a copy and can take a long time for a large database. A passed rehearsal is what allows the real upgrade, which a person approves (request_change, action upgrade_database).",
+			"It needs free disk for a copy and can take a long time for a large database. A passed rehearsal is what allows the real upgrade (request_change, action upgrade_database, once the user agrees).",
 		Annotations: writes("Rehearse an upgrade (on a copy)", false, false),
 		InputSchema: withWait[upgradeTaskInput](nil),
 	}, t.rehearseUpgrade)
@@ -190,7 +190,7 @@ func (t *tools) runIndexCheck(ctx context.Context, _ *sdk.CallToolRequest, in ta
 	}
 	return t.actionResult(ctx, d, []protocol.TaskView{task}, in.WaitSeconds,
 		"Checking "+d.Name+" for missing indexes on a copy (production is never touched).",
-		"When it's done, recommendations (group indexes) lists the indexes that helped, with how much faster each query got. Creating one on production is a fix a person approves: "+requestChange("apply_fix")+".")
+		"When it's done, recommendations (group indexes) lists the indexes that helped, with how much faster each query got. Creating one on production is a fix: "+requestChange("apply_fix")+".")
 }
 
 // upgradeTarget turns "17" or "8.4" into the API's number (0: newest).
@@ -237,11 +237,11 @@ func (t *tools) upgradeTask(ctx context.Context, in upgradeTaskInput, rehearse b
 	}
 	var resp protocol.UpgradeTasksResponse
 	lead := "Checking whether " + d.Name + " can be upgraded (read-only; nothing changes)."
-	next := "If it can, rehearse_upgrade tries it on a copy; the real upgrade is for a person to approve: " + requestChange("upgrade_database") + "."
+	next := "If it can, rehearse_upgrade tries it on a copy; for the real upgrade, " + requestChange("upgrade_database") + "."
 	if rehearse {
 		resp, err = t.c.RehearseUpgrade(ctx, d.ID, to)
 		lead = "Rehearsing the upgrade of " + d.Name + " on a throwaway copy (production is never touched)."
-		next = "A passed rehearsal allows the real upgrade, which a person approves: " + requestChange("upgrade_database") + ". updates_status shows whether the rehearsal still allows it."
+		next = "A passed rehearsal allows the real upgrade: " + requestChange("upgrade_database") + ". updates_status shows whether the rehearsal still allows it."
 	} else {
 		resp, err = t.c.CheckUpgrade(ctx, d.ID, to)
 	}
@@ -334,7 +334,7 @@ func (t *tools) backupFiles(ctx context.Context, _ *sdk.CallToolRequest, in file
 		lead += ", tagged " + in.Mark
 	}
 	return t.actionResult(ctx, d, resp.Tasks, in.WaitSeconds, lead+" (reads the files only).",
-		"files_status shows the new snapshot. Restoring files is for a person to approve: "+requestChange("restore_files")+".")
+		"files_status shows the new snapshot. To restore files, "+requestChange("restore_files")+".")
 }
 
 // actionResult waits for the last of tasks (the one that matters when a

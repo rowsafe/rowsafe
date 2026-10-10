@@ -15,8 +15,8 @@ import (
 )
 
 // Read-only views of the dashboard's Security, Updates, Pooling and Fork
-// pages. Changes there are for people (or request_change, which a person
-// approves).
+// pages. Changes there are made by people, or with request_change as the
+// person who connected the assistant.
 
 type SecurityStatusView struct {
 	Database   string                   `json:"database"`
@@ -388,7 +388,7 @@ func (t *tools) updatesStatus(ctx context.Context, _ *sdk.CallToolRequest, in da
 		for _, n := range next {
 			b.line("- %s", n)
 		}
-		b.line("Changes to production run only once a person approves them in the Rowsafe dashboard.")
+		b.line("Make a change to production only once the user agrees.")
 	}
 	return text(b), out, nil
 }
@@ -616,7 +616,7 @@ func (t *tools) listForks(ctx context.Context, _ *sdk.CallToolRequest, in forksI
 				}
 				when = fmt.Sprintf(" (any second from %s to %s)", fmtTime(info.Window.Earliest), latest)
 			}
-			b.line("A new fork can be made%s; to make one, %s.", when, requestChange("fork_database"))
+			b.line("A new fork can be made%s; the user makes one in the Rowsafe dashboard (AI agents can't: a person compares the server's key).", when)
 		} else if info.Hint != "" {
 			b.line("A new fork can't be made now: %s", info.Hint)
 		}

@@ -14,11 +14,11 @@ import (
 // Standby is read-only here. Guard's rule: AI agents never change
 // production's topology by themselves. Creating, promoting, rebuilding or
 // removing a standby and automatic failover are done by people in the
-// dashboard (Standby) or with `rowsafe standby`, or approved by them
-// (request_change, approval_tools.go).
+// dashboard (Standby) or with `rowsafe standby`, or by an assistant once
+// they agree (request_change, approval_tools.go).
 
-const standbyGuidance = "Standby changes (create, promote / fail over, rebuild, remove, automatic failover) are made by a person: " +
-	"in the Rowsafe dashboard (Standby) or with `rowsafe standby`, or by approving your request_change (create_standby, promote_standby, rebuild_standby, remove_standby, failover_settings). If the primary looks down, tell the user; " +
+const standbyGuidance = "Standby changes (create, promote / fail over, rebuild, remove, automatic failover) are the user's call: " +
+	"in the Rowsafe dashboard (Standby) or with `rowsafe standby`, or with your request_change once they agree (promote_standby, remove_standby, failover_settings; creating or rebuilding a standby needs a person to compare the server's key, so the user does those in the dashboard). If the primary looks down, tell the user; " +
 	"never tell them to promote without first checking the old primary is really down or that Rowsafe can stop it."
 
 type standbyInput struct {

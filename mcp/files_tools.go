@@ -9,10 +9,10 @@ import (
 
 // Files are read-only here, apart from backup_files (action_tools.go).
 // People restore them in the dashboard (Files, in Rewind) or with
-// `rowsafe files restore`, after confirming, or approve an assistant's
-// request_change (restore_files).
+// `rowsafe files restore`, after confirming, or an assistant does it once
+// they agree (request_change restore_files).
 
-const filesGuidance = "If files (uploads, CVs, media) were deleted or damaged, tell the user they can bring them back in the Rowsafe dashboard (Rewind, then Files): missing files only, the files a table column refers to, or the whole folder as it was at a point in time. `rowsafe files restore` does the same from a terminal. Never restore files yourself; if the user wants you to start it, request_change (restore_files) asks them to approve it in the dashboard."
+const filesGuidance = "If files (uploads, CVs, media) were deleted or damaged, tell the user they can bring them back in the Rowsafe dashboard (Rewind, then Files): missing files only, the files a table column refers to, or the whole folder as it was at a point in time. `rowsafe files restore` does the same from a terminal. Never restore files on your own; if the user wants you to do it, request_change (restore_files) does it once they agree."
 
 type filesStatusInput struct {
 	Database string     `json:"database" jsonschema:"database name or ID"`

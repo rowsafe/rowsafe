@@ -21,15 +21,15 @@ func engineServerJSON(engine, version string, port int) string {
 
 func itoa(n int) string { b, _ := json.Marshal(n); return string(b) }
 
-// MySQL, MariaDB and Valkey servers: their port, connection string and
-// next steps; create_app_database for MySQL without a verifier (the
-// person who approves sees the password), refused for Valkey.
+// MySQL, MariaDB, Valkey and ClickHouse servers: their port, connection
+// string and next steps; create_app_database is refused (the password is
+// made in the user's browser, or there are no separate databases).
 func TestCloudEngineServers(t *testing.T) {
 	f := &cloudAPI{t: t, servers: []string{engineServerJSON("mysql", "8.4", 3306)}, dbEngine: "mysql"}
 	cs := connect(t, f, Options{AllowWrites: true, MaxWait: time.Second}, nil)
 	txt, res := callText(t, cs, "get_cloud_server", map[string]any{"server": "shop-db"})
 	if res.IsError || !strings.Contains(txt, "MySQL 8.4") || !strings.Contains(txt, "port 3306, always with TLS (mysql://USER:PASSWORD@x7kq2mfa3pzd.cloud.rowsafe.sh:3306/DBNAME?ssl-mode=REQUIRED)") ||
-		!strings.Contains(txt, "create_app_database with database shop-db") {
+		!strings.Contains(txt, "the user makes them in the dashboard (Databases & users)") || strings.Contains(txt, "create_app_database") {
 		t.Fatalf("mysql server: %s", txt)
 	}
 	var out CloudServerOutput
@@ -39,16 +39,12 @@ func TestCloudEngineServers(t *testing.T) {
 	}
 
 	txt, res = callText(t, cs, "create_app_database", map[string]any{"database": "shop-db", "name": "shop", "reason": "The shop app needs a database."})
-	if res.IsError {
-		t.Fatal(txt)
-	}
-	_, filed := f.snapshot()
-	var p protocol.AppDatabaseParams
-	if len(filed) != 1 || json.Unmarshal(filed[0].Params, &p) != nil || p.PasswordVerifier != "" || p.Database != "shop" {
-		t.Fatalf("filed %+v", filed)
-	}
-	if !strings.Contains(txt, "mysql://shop@x7kq2mfa3pzd.cloud.rowsafe.sh:3306/shop?ssl-mode=REQUIRED") || strings.Contains(txt, "shown once, works once approved") {
+	if !res.IsError || !strings.Contains(txt, "must be made in the user's browser") || !strings.Contains(txt, "mysql://shop@x7kq2mfa3pzd.cloud.rowsafe.sh:3306/shop?ssl-mode=REQUIRED") ||
+		strings.Contains(txt, "rowsafe mcp --allow-writes") {
 		t.Errorf("mysql app database: %s", txt)
+	}
+	if _, filed := f.snapshot(); len(filed) != 0 {
+		t.Fatalf("filed %+v", filed)
 	}
 	if txt, res := callText(t, cs, "create_app_database", map[string]any{"database": "shop-db", "name": "shop", "extensions": []string{"pgcrypto"}, "reason": "x"}); !res.IsError ||
 		!strings.Contains(txt, "extensions are PostgreSQL's") {
@@ -69,13 +65,13 @@ func TestCloudEngineServers(t *testing.T) {
 	}
 
 	// ClickHouse: clickhouse:// with TLS on 9440, the HTTPS interface on
-	// 8443, create_app_database without a verifier.
+	// 8443, the app's database made by the user in the dashboard.
 	f = &cloudAPI{t: t, servers: []string{engineServerJSON("clickhouse", "26.8", 9440)}, dbEngine: "clickhouse"}
 	cs = connect(t, f, Options{AllowWrites: true, MaxWait: time.Second}, nil)
 	txt, res = callText(t, cs, "get_cloud_server", map[string]any{"server": "shop-db"})
 	if res.IsError || !strings.Contains(txt, "ClickHouse 26.8") ||
 		!strings.Contains(txt, "clickhouse://USER:PASSWORD@x7kq2mfa3pzd.cloud.rowsafe.sh:9440/DBNAME?secure=true") ||
-		!strings.Contains(txt, "https://x7kq2mfa3pzd.cloud.rowsafe.sh:8443") || !strings.Contains(txt, "create_app_database with database shop-db") {
+		!strings.Contains(txt, "https://x7kq2mfa3pzd.cloud.rowsafe.sh:8443") || !strings.Contains(txt, "the user makes them in the dashboard (Databases & users)") {
 		t.Fatalf("clickhouse server: %s", txt)
 	}
 	b, _ = json.Marshal(res.StructuredContent)
@@ -83,10 +79,10 @@ func TestCloudEngineServers(t *testing.T) {
 		t.Fatalf("clickhouse view %s %v", b, err)
 	}
 	txt, res = callText(t, cs, "create_app_database", map[string]any{"database": "shop-db", "name": "events", "reason": "The app's events."})
-	if res.IsError || !strings.Contains(txt, "clickhouse://events@x7kq2mfa3pzd.cloud.rowsafe.sh:9440/events?secure=true") {
+	if !res.IsError || !strings.Contains(txt, "clickhouse://events@x7kq2mfa3pzd.cloud.rowsafe.sh:9440/events?secure=true") {
 		t.Errorf("clickhouse app database: %s", txt)
 	}
-	if _, filed := f.snapshot(); len(filed) != 1 || json.Unmarshal(filed[0].Params, &p) != nil || p.PasswordVerifier != "" || p.Database != "events" {
+	if _, filed := f.snapshot(); len(filed) != 0 {
 		t.Fatalf("clickhouse filed %+v", filed)
 	}
 }

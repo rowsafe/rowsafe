@@ -1,21 +1,17 @@
 package mcp
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
-	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
-
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
-// autonomyAPI is a fake Rowsafe API whose organization lets agents act on
-// their own: request_change comes back approved automatically, with its
-// result, from the one POST.
+// autonomyAPI is a fake Rowsafe API: request_change comes back done right
+// away, with its result, from the one POST.
 type autonomyAPI struct {
 	t        *testing.T
 	autonomy *protocol.AgentAutonomy
@@ -36,45 +32,40 @@ func (f *autonomyAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.posts++
 		var req protocol.CreateApprovalRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		a := pendingApproval(req)
-		now := a.CreatedAt
-		a.Status, a.Automatic, a.DecidedBy, a.DecidedAt, a.Note = protocol.ApprovalApproved, true, "dashboard:ana@example.com", &now, f.note
+		a := approvalRecord(req)
+		a.Note = f.note
 		a.Result = &protocol.ApprovalResult{HTTPStatus: http.StatusCreated, Message: "Approved: Rowsafe is creating the server.", CloudServerID: "cs_1", CheckoutURL: f.checkout}
 		f.last = req
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(a)
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/approvals/"):
 		f.gets++
-		_ = json.NewEncoder(w).Encode(pendingApproval(protocol.CreateApprovalRequest{Action: "restart"}))
+		_ = json.NewEncoder(w).Encode(approvalRecord(protocol.CreateApprovalRequest{Action: "restart"}))
 	default:
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"error":"not found"}`))
 	}
 }
 
-func TestRequestChangeRunsRightAway(t *testing.T) {
+// Within a budget, a new server is made on behalf of the owner who chose it,
+// in the one call.
+func TestRequestChangeWithinBudget(t *testing.T) {
 	budget, left := int64(5000), int64(4000)
 	api := &autonomyAPI{t: t, autonomy: &protocol.AgentAutonomy{Level: protocol.AutonomyBudget, BudgetCents: &budget, SpendCents: 1000, RemainingCents: &left, SetBy: "ana@example.com"}}
-	elicited := false
-	cs := connect(t, api, Options{AllowWrites: true, MaxWait: 5 * time.Second}, &sdk.ClientOptions{
-		ElicitationHandler: func(_ context.Context, _ *sdk.ElicitRequest) (*sdk.ElicitResult, error) {
-			elicited = true
-			return &sdk.ElicitResult{Action: "accept"}, nil
-		},
-	})
+	cs := connect(t, api, Options{AllowWrites: true, MaxWait: 5 * time.Second}, nil)
 	txt, res := callText(t, cs, "request_change", map[string]any{"action": "create_cloud_server",
-		"params": map[string]any{"name": "shop-db", "region": "fsn1", "size": "small"}, "reason": "The shop needs a database.", "wait_seconds": 30})
+		"params": map[string]any{"name": "shop-db", "region": "fsn1", "size": "small"}, "reason": "The shop needs a database."})
 	if res.IsError {
 		t.Fatal(txt)
 	}
-	for _, want := range []string{"Done right away, without waiting for a person", "Approved automatically by ana@example.com's agent setting",
+	for _, want := range []string{"Done within the budget an owner set for AI agents", "Done on behalf of ana@example.com, within the budget they set for AI agents",
 		"Follow server cs_1 with get_cloud_server"} {
 		if !strings.Contains(txt, want) {
 			t.Errorf("missing %q in %s", want, txt)
 		}
 	}
-	if strings.Contains(txt, "Show the user this link") || elicited || api.posts != 1 || api.gets != 0 {
-		t.Errorf("an automatic approval asked for a person (elicited %v, %d posts, %d reads): %s", elicited, api.posts, api.gets, txt)
+	if api.posts != 1 || api.gets != 0 {
+		t.Errorf("%d posts, %d reads: %s", api.posts, api.gets, txt)
 	}
 	var out ApprovalOutput
 	b, _ := json.Marshal(res.StructuredContent)
@@ -87,18 +78,20 @@ func TestRequestChangeRunsRightAway(t *testing.T) {
 		t.Errorf("get_org: %s", txt)
 	}
 	txt, _ = callText(t, cs, "describe_change", map[string]any{"action": "create_cloud_server"})
-	if !strings.Contains(txt, "runs it right away unless it would take the agents' servers over the $50 monthly budget") {
+	if !strings.Contains(txt, "any AI agent may make it on behalf of the owner who chose the agents' budget, if it stays within the $50 monthly budget") {
 		t.Errorf("describe_change create_cloud_server: %s", txt)
 	}
 	txt, _ = callText(t, cs, "describe_change", map[string]any{"action": "restart"})
-	if !strings.Contains(txt, "waits for an owner or admin to approve it") {
+	if !strings.Contains(txt, "It runs right away as the person who connected you") || strings.Contains(txt, "budget") {
 		t.Errorf("describe_change restart: %s", txt)
 	}
 }
 
 func TestAutonomyWords(t *testing.T) {
-	if got := autonomyLine(nil); !strings.Contains(got, "waits for an owner or admin") {
-		t.Errorf("ask: %s", got)
+	for _, a := range []*protocol.AgentAutonomy{nil, {Level: protocol.AutonomyAsk}} {
+		if got := autonomyLine(a); !strings.Contains(got, "you act as the person who connected you, right away") {
+			t.Errorf("%+v: %s", a, got)
+		}
 	}
 	for _, level := range []string{protocol.AutonomyAct, protocol.AutonomyFull} {
 		got := autonomyLine(&protocol.AgentAutonomy{Level: level, Unlimited: true, SetBy: "bob@example.com", ActingAs: "ana@example.com"})
@@ -108,30 +101,30 @@ func TestAutonomyWords(t *testing.T) {
 		}
 	}
 	a, _ := protocol.FindApprovalAction("delete_cloud_server")
-	if got := autonomyFor(&protocol.AgentAutonomy{Level: protocol.AutonomyAct, ActingAs: "ana@example.com"}, a); !strings.Contains(got, "makes it right away as ana@example.com (who connected you)") ||
+	if got := autonomyFor(&protocol.AgentAutonomy{Level: protocol.AutonomyAct, ActingAs: "ana@example.com"}, a); !strings.Contains(got, "It runs right away as ana@example.com (who connected you)") ||
 		!strings.Contains(got, "no backup of the database yet") || strings.Contains(got, "budget") || !strings.Contains(got, "Confirm it with the user") {
 		t.Errorf("act, delete: %s", got)
 	}
 	old := &protocol.AgentAutonomy{Level: protocol.AutonomyAct, ActingAs: "ana@example.com", AsksFirst: true}
-	if got := autonomyLine(old); !strings.Contains(got, "waits for an owner or admin") || !strings.Contains(got, "ana@example.com clicks \"Let it act as me\"") {
+	if got := autonomyLine(old); !strings.Contains(got, "Rowsafe refuses the changes") || !strings.Contains(got, "ana@example.com clicks \"Let it act as me\"") {
 		t.Errorf("asks first: %s", got)
 	}
-	if got := autonomyFor(old, a); !strings.Contains(got, "it waits for an owner or admin") {
+	if got := autonomyFor(old, a); !strings.Contains(got, "Rowsafe refuses your changes as them until ana@example.com lets you act") {
 		t.Errorf("asks first, delete: %s", got)
 	}
 	standby, _ := protocol.FindApprovalAction("create_standby")
-	if got := autonomyFor(&protocol.AgentAutonomy{Level: protocol.AutonomyAct}, standby); !strings.Contains(got, "always waits for an owner or admin") {
+	if got := autonomyFor(&protocol.AgentAutonomy{Level: protocol.AutonomyAct}, standby); !strings.Contains(got, "AI agents can't make it") {
 		t.Errorf("act, standby: %s", got)
 	}
-	if got := autonomyFor(&protocol.AgentAutonomy{Level: protocol.AutonomyBudget}, a); !strings.Contains(got, "waits for an owner or admin") {
+	if got := autonomyFor(&protocol.AgentAutonomy{Level: protocol.AutonomyBudget}, a); !strings.Contains(got, "It runs right away as the person who connected you") {
 		t.Errorf("budget, delete: %s", got)
 	}
-	// A pending request explains why it wasn't done right away.
+	// An earlier record that waited for a person is shown as not run.
 	var b textBuilder
-	p := pendingApproval(protocol.CreateApprovalRequest{Action: "create_cloud_server"})
-	p.AutonomyNote = "Over the $50 agent budget."
+	p := approvalRecord(protocol.CreateApprovalRequest{Action: "create_cloud_server"})
+	p.Status, p.Automatic, p.AutonomyNote = protocol.ApprovalPending, false, "Over the $50 agent budget."
 	writeApproval(&b, p)
-	if s := b.String(); !strings.Contains(s, "Not done right away: Over the $50 agent budget.") || !strings.Contains(s, "Show the user this link") {
+	if s := b.String(); !strings.Contains(s, "Not run (it waited for a person") || strings.Contains(s, "link") {
 		t.Errorf("pending: %s", s)
 	}
 }
@@ -147,12 +140,12 @@ func TestActAsPerson(t *testing.T) {
 	if res.IsError {
 		t.Fatal(txt)
 	}
-	for _, want := range []string{"Done: Restart the database on app (db1) (apr_1, approved), as ana@example.com", "Done as ana@example.com", "no approval was needed"} {
+	for _, want := range []string{"Done: Restart the database on app (db1) (apr_1, approved), as ana@example.com", "Done as ana@example.com", "owners' digest"} {
 		if !strings.Contains(txt, want) {
 			t.Errorf("missing %q in %s", want, txt)
 		}
 	}
-	if strings.Contains(txt, "Show the user this link") || strings.Contains(txt, "agent setting") {
+	if strings.Contains(txt, "approve ") || strings.Contains(txt, "budget") {
 		t.Errorf("request_change: %s", txt)
 	}
 

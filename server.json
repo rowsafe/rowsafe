@@ -25,7 +25,7 @@
       "headers": [
         {
           "name": "Authorization",
-          "description": "Optional. Without it, your AI app signs in with Rowsafe (OAuth 2.1): you approve it in the Rowsafe dashboard and it can read your databases' health, backups and recommendations, save Marks if you allow, and, if you allow it to act, run backups and checks and make changes as you, with your rights (an owner can make AI agents' changes wait for approval instead). With an API key, it acts as the person who created the key. For clients without OAuth, send a Rowsafe API key instead.",
+          "description": "Optional. Without it, your AI app signs in with Rowsafe (OAuth 2.1): you approve it in the Rowsafe dashboard and it can read your databases' health, backups and recommendations, save Marks if you allow, and, if you allow it to act, run backups and checks and make changes as you, right away, with your rights. With an API key, it acts as the person who created the key. For clients without OAuth, send a Rowsafe API key instead.",
           "value": "Bearer {rowsafe_api_key}",
           "isRequired": false,
           "isSecret": true,

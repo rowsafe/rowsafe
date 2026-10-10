@@ -38,7 +38,7 @@ rowsafe rewind database app --at "14:04"  # rewind in place, with undo
 
 **Pulse**: a 0–100 health score with fixes you apply (`rowsafe pulse`, `rowsafe fix app`), slow queries (`rowsafe top app`), insights and tuning.
 
-**Guard**: `rowsafe mcp`, the Claude Code and Codex plugins and the GitHub Action save a Mark before migrations, destructive SQL and deploys. AI agents act as the person who connected them, with exactly that person's rights, like a CLI token: an owner's or admin's agent makes a change right away, a member's agent asks an owner or admin. Owners can set a monthly budget for agents, or make every change wait for approval (Settings → AI agents). Every agent action is in the audit log. Agents can never approve.
+**Guard**: `rowsafe mcp`, the Claude Code and Codex plugins and the GitHub Action save a Mark before migrations, destructive SQL and deploys. AI agents act as the person who connected them, right away, with exactly that person's rights, like a CLI token; what that person can't do, Rowsafe refuses and says why. Owners can set a monthly budget for agents (Settings → AI agents). Every agent action is in the audit log.
 
 **Rowsafe Cloud**: PostgreSQL servers Rowsafe runs for you, billed by the hour (never more than the monthly price), with all of the above on from the first minute.
 

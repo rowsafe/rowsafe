@@ -94,7 +94,7 @@ func TestHTTPOAuthScopesDecideTools(t *testing.T) {
 	if !slices.Contains(marks, "create_restore_point") {
 		t.Errorf("rowsafe:marks tools = %v, want create_restore_point", marks)
 	}
-	writeTools := []string{"run_backup", "run_drill", "plan_adoption", "update_schedule", "verify_database", "request_change", "cancel_approval"}
+	writeTools := []string{"run_backup", "run_drill", "plan_adoption", "update_schedule", "verify_database", "request_change"}
 	for _, w := range writeTools {
 		if slices.Contains(marks, w) || slices.Contains(read, w) {
 			t.Errorf("OAuth token without rowsafe:act got write tool %s", w)

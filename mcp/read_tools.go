@@ -102,7 +102,7 @@ type PostgresView struct {
 func (t *tools) addReadTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "get_org",
-		Description: "Shows the Rowsafe organization this connection acts for: its plan, plan limits (max hosts and databases), current usage, and whether changes you ask for with request_change run right away (an owner let AI agents act on their own, within a budget or fully) or wait for a person to approve them. Read-only.",
+		Description: "Shows the Rowsafe organization this connection acts for: its plan, plan limits (max hosts and databases), current usage, and how changes you make with request_change run: as whom (the person who connected you), with what rights, and within what budget. Read-only.",
 		Annotations: readOnly("Organization and plan"),
 	}, t.getOrg)
 
@@ -200,10 +200,10 @@ func dollars(cents int64) string {
 	return fmt.Sprintf("$%d.%02d", cents/100, cents%100)
 }
 
-// autonomyLine says whether changes you make run right away, and as whom.
+// autonomyLine says how changes you make run, and as whom.
 func autonomyLine(a *protocol.AgentAutonomy) string {
-	if a == nil || a.Level == "" || a.Level == protocol.AutonomyAsk {
-		return "AI agents: your team asks first: every change you make with request_change waits for an owner or admin to approve it (give the user the approval link)."
+	if a == nil {
+		a = &protocol.AgentAutonomy{}
 	}
 	budget := "There is no spending limit for AI agents"
 	if a.BudgetCents != nil {
@@ -212,34 +212,40 @@ func autonomyLine(a *protocol.AgentAutonomy) string {
 			budget += fmt.Sprintf(", %s left", dollars(*a.RemainingCents))
 		}
 	}
-	if protocol.NormalizeAutonomyLevel(a.Level) == protocol.AutonomyAct && a.AsksFirst {
-		return asksFirstLine(a)
-	}
-	if protocol.NormalizeAutonomyLevel(a.Level) == protocol.AutonomyAct {
-		who := "the person who connected you"
-		if a.ActingAs != "" {
-			who = a.ActingAs + " (who connected you)"
+	extra := ""
+	if protocol.NormalizeAutonomyLevel(cmpOr(a.Level, protocol.AutonomyDefault)) == protocol.AutonomyBudget {
+		owner := "An owner"
+		if a.SetBy != "" {
+			owner = a.SetBy
 		}
-		return fmt.Sprintf("AI agents: you act as %s, right away, with exactly their rights in the dashboard, like a CLI token: request_change (and create_cloud_server, cloud_firewall, apply_fix) make the change at once when they're an owner or admin; a member's changes wait for an owner or admin. "+
-			"%s; a first payment is made by an owner at a checkout link. Rowsafe saves a Mark before risky changes, needs a backup before anything that can't be undone, and has a person compare a server's key. "+
-			"Confirm disruptive, destructive or paid changes with the user in chat before making them, and only make what the user asked for or agreed to.", who, budget)
+		extra = fmt.Sprintf("%s also lets any AI agent create Rowsafe Cloud servers on their behalf (create_cloud_server), and, on servers an agent created this way, databases for an app, who can connect and clones, %s. ", owner, lowerFirst(budget))
+		budget = ""
 	}
-	who := ""
-	if a.SetBy != "" {
-		who = " (" + a.SetBy + "'s setting)"
+	if a.AsksFirst {
+		return strings.TrimSpace(asksFirstLine(a) + extra)
 	}
-	return fmt.Sprintf("AI agents: an owner let you act on your own%s %s, for new Rowsafe Cloud servers (create_cloud_server), and, on servers an agent created this way, databases for an app (create_app_database), who can connect and clones. Those run right away unless they'd go over the budget or need a checkout; everything else waits for an owner or admin to approve it. Only ask for what the user asked for or agreed to.", who, lowerFirst(budget))
+	who := "the person who connected you"
+	if a.ActingAs != "" {
+		who = a.ActingAs + " (who connected you)"
+	}
+	line := fmt.Sprintf("AI agents: you act as %s, right away, with exactly their rights in the dashboard, like a CLI token: request_change (and create_cloud_server, cloud_firewall, apply_fix) make the change at once, or Rowsafe refuses it and says why (for example, a member's changes: an owner or admin makes them). ", who)
+	if budget != "" {
+		line += budget + "; a first payment is made by an owner at a checkout link. "
+	}
+	return line + extra + "Rowsafe saves a Mark before risky changes, needs a backup before anything that can't be undone, and leaves comparing a server's key to a person in the dashboard. " +
+		"Confirm disruptive, destructive or paid changes with the user in chat before making them, and only make what the user asked for or agreed to."
 }
 
 // asksFirstLine: this agent's connection or key was made before agents
-// could act as their person, so its changes wait for a person.
+// could act as their person, so Rowsafe refuses its changes until that
+// person lets it act.
 func asksFirstLine(a *protocol.AgentAutonomy) string {
 	who := "the person who connected you"
 	if a.ActingAs != "" {
 		who = a.ActingAs
 	}
-	return fmt.Sprintf("AI agents: you were connected before Rowsafe let AI agents act as the person who connected them (or with a key another key made), so every change you make with request_change waits for an owner or admin to approve it (give the user the approval link). "+
-		"To let you act as them right away, %s clicks \"Let it act as me\" in Rowsafe (Settings → Connected apps, or API keys), or connects you again.", who)
+	return fmt.Sprintf("AI agents: you were connected before Rowsafe let AI agents act as the person who connected them (or with a key another key made), so Rowsafe refuses the changes you make with request_change. "+
+		"To let you act as them, %s clicks \"Let it act as me\" in Rowsafe (Settings → Connected apps, or API keys), or connects you again. ", who)
 }
 
 // lowerFirst lowercases an ASCII first letter.

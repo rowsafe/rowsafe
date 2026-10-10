@@ -16,8 +16,8 @@ import (
 
 // Health fixes run only through Rowsafe's own fix flow: no tool calls the
 // fixes endpoint or queues a maintenance task (request_change and apply_fix
-// only file the change, which runs as the person who connected the agent or
-// waits for one), and database_health points to the fix instead of SQL.
+// only send the change, which runs as the person who connected the agent or
+// is refused), and database_health points to the fix instead of SQL.
 func TestHealthFixesAreNotForAgents(t *testing.T) {
 	var filed atomic.Int32
 	health := protocol.DatabaseHealth{Database: "app", Host: "db1", Score: 70, Grade: protocol.GradeNeedsAttention,
@@ -42,7 +42,7 @@ func TestHealthFixesAreNotForAgents(t *testing.T) {
 				t.Errorf("filed %+v (params %s)", req, req.Params)
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(protocol.Approval{ID: "apr_1", Action: req.Action, Status: protocol.ApprovalPending})
+			_ = json.NewEncoder(w).Encode(protocol.Approval{ID: "apr_1", Action: req.Action, Status: protocol.ApprovalApproved})
 			return
 		}
 		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/tasks") {

@@ -16,37 +16,34 @@ import (
 
 // create_app_database: a new, empty database and a login for the app an
 // assistant is building, on a Rowsafe Cloud server's PostgreSQL (15 or
-// newer), MySQL or MariaDB (usually a server it asked for). It files the
-// create_app_database change request. On PostgreSQL from a local rowsafe
-// mcp it runs right away as the person who connected the agent (or waits
-// for a person to approve it); on MySQL and MariaDB, and from the remote
-// endpoint, it always waits for an owner or admin, whose browser receives
-// the password. Valkey has no separate databases: a login for an app is
-// made in the dashboard.
+// newer) (usually a server it made). It makes the create_app_database
+// change right away as the person who connected the agent, or Rowsafe
+// refuses it with the reason.
 //
 // The password never passes through Rowsafe. Locally (rowsafe mcp) on
 // PostgreSQL it is made here, on the user's machine, and only its
 // SCRAM-SHA-256 verifier is sent: the assistant gets the full connection
-// string at once, working once the request is done. MySQL and MariaDB take
-// no verifier, and on the remote endpoint this code runs inside Rowsafe,
-// which must never make or see a password: the request goes without one,
-// the agent makes it when a person approves and seals it to that person's
-// browser, which shows them the connection string once.
+// string at once, working once the change ran. MySQL, MariaDB and
+// ClickHouse take no verifier, and on the remote endpoint this code runs
+// inside Rowsafe, which must never make or see a password: there the
+// password must be made in the person's browser, so the tool refuses and
+// the user creates the database in the dashboard (Databases & users).
+// Valkey, Qdrant and Meilisearch have no separate databases: a login or key
+// for an app is made in the dashboard.
 
 type appDatabaseInput struct {
-	Database    string   `json:"database" jsonschema:"the Rowsafe Cloud server's database (name or ID) whose PostgreSQL, MySQL or MariaDB gets the new database (get_cloud_server shows it)"`
-	Name        string   `json:"name" jsonschema:"the new database's name: lowercase letters, digits and underscores, starting with a letter (like shop)"`
-	Owner       string   `json:"owner,omitempty" jsonschema:"the new user the app connects as, owner of the new database (default: the database's name)"`
-	Extensions  []string `json:"extensions,omitempty" jsonschema:"PostgreSQL extensions to turn on in it (e.g. pgcrypto, pg_trgm, vector)"`
-	Reason      string   `json:"reason" jsonschema:"why, in one or two plain sentences for the person who approves it (shown as the assistant's words)"`
-	WaitSeconds int      `json:"wait_seconds,omitempty" jsonschema:"seconds to wait for a person to decide before returning (0 returns at once); get_approval follows it later"`
+	Database   string   `json:"database" jsonschema:"the Rowsafe Cloud server's database (name or ID) whose PostgreSQL gets the new database (get_cloud_server shows it)"`
+	Name       string   `json:"name" jsonschema:"the new database's name: lowercase letters, digits and underscores, starting with a letter (like shop)"`
+	Owner      string   `json:"owner,omitempty" jsonschema:"the new user the app connects as, owner of the new database (default: the database's name)"`
+	Extensions []string `json:"extensions,omitempty" jsonschema:"PostgreSQL extensions to turn on in it (e.g. pgcrypto, pg_trgm, vector)"`
+	Reason     string   `json:"reason" jsonschema:"why, in one or two plain sentences (recorded with the change, labeled as yours)"`
 }
 
 // AppDatabaseOutput is create_app_database's result.
 type AppDatabaseOutput struct {
 	Approval ApprovalView `json:"approval"`
 	// DatabaseURL is only in this result, from a local rowsafe mcp.
-	DatabaseURL string `json:"database_url,omitempty" jsonschema:"the connection string with the password, shown only here, once (local rowsafe mcp): it works once the request is approved and the database is created"`
+	DatabaseURL string `json:"database_url,omitempty" jsonschema:"the connection string with the password, shown only here, once (local rowsafe mcp): it works once the database is created"`
 	// Connection is the connection string without the password.
 	Connection string `json:"connection" jsonschema:"the connection string without the password"`
 	Guidance   string `json:"guidance"`
@@ -55,12 +52,12 @@ type AppDatabaseOutput struct {
 func (t *tools) addAppDatabaseTool(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "create_app_database",
-		Description: "Creates a new, empty database and a login for the app you are building, on a Rowsafe Cloud server running PostgreSQL (15 or newer), MySQL, MariaDB or ClickHouse. The new user owns only that database, and only it can connect there; existing databases and users are untouched. " +
-			"Rowsafe never sees the password. For PostgreSQL from a local rowsafe mcp it is made on this machine, you get the full connection string at once, and it runs right away as the person who connected you (an owner or admin; otherwise, or if your team asks first, a person approves it; get_org). " +
-			"For MySQL, MariaDB and ClickHouse, and on the remote endpoint, it always waits for an owner or admin to approve it in the dashboard (never right away): the password is made then, shown once in their browser, and they give it to you. Put the connection string in the app's environment (e.g. DATABASE_URL in .env), never in code or git. " +
-			"Valkey servers have no separate databases: the user makes the app's login in the dashboard (Databases & users).",
+		Description: "Creates a new, empty database and a login for the app you are building, on a Rowsafe Cloud server running PostgreSQL (15 or newer). The new user owns only that database, and only it can connect there; existing databases and users are untouched. " +
+			"Rowsafe never sees the password: from a local rowsafe mcp it is made on this machine, you get the full connection string at once, and it runs right away as the person who connected you (Rowsafe refuses it, and says why, if they can't make it in the dashboard). Put the connection string in the app's environment (e.g. DATABASE_URL in .env), never in code or git. " +
+			"On MySQL, MariaDB and ClickHouse, and on the remote endpoint, the password must be made in the user's browser: the user creates the database in the dashboard (Databases & users), which shows them the connection string once. " +
+			"Valkey, Qdrant and Meilisearch have no separate databases: the user makes the app's login or key in the dashboard (Databases & users).",
 		Annotations: writes("Create a database for the app", false, false),
-		InputSchema: withWait[appDatabaseInput](func(p map[string]*jsonschema.Schema) {
+		InputSchema: inputSchema[appDatabaseInput](func(p map[string]*jsonschema.Schema) {
 			p["reason"].MinLength, p["reason"].MaxLength = ptr(1), ptr(1000)
 			p["name"].Pattern = "^[a-z][a-z0-9_]{0,62}$"
 		}),
@@ -115,16 +112,22 @@ func (t *tools) createAppDatabase(ctx context.Context, _ *sdk.CallToolRequest, i
 		params["extensions"] = in.Extensions
 	}
 	// Locally the password is made here and only its verifier leaves this
-	// machine (PostgreSQL). Remotely, and for MySQL, MariaDB and ClickHouse, nothing is
-	// made: the person who approves gets it.
-	password := ""
-	if !t.opts.Remote && engine == protocol.EnginePostgreSQL {
-		var verifier string
-		if password, verifier, err = client.NewCopyPasswordFor(protocol.EnginePostgreSQL); err != nil {
-			return nil, AppDatabaseOutput{}, err
+	// machine (PostgreSQL). Remotely, and for MySQL, MariaDB and ClickHouse,
+	// it must be made in the person's browser: AI agents can't.
+	if t.opts.Remote || engine != protocol.EnginePostgreSQL {
+		local := ""
+		if engine == protocol.EnginePostgreSQL {
+			local = " (A local `rowsafe mcp --allow-writes` can make it instead: the password is made on the user's machine.)"
 		}
-		params["password_verifier"] = verifier
+		return nil, AppDatabaseOutput{}, fmt.Errorf("the password for a new database on %s must be made in the user's browser and is shown only to them, so AI agents can't create it here: "+
+			"ask the user to create it in the Rowsafe dashboard (Databases & users), which shows them the connection string once, and to put it in the app's environment (e.g. DATABASE_URL in .env, never in code or git) or give it to you. "+
+			"Without the password it is %s.%s", d.Name, protocol.ConnectionURL(conn, ""), local)
 	}
+	password, verifier, err := client.NewCopyPasswordFor(protocol.EnginePostgreSQL)
+	if err != nil {
+		return nil, AppDatabaseOutput{}, err
+	}
+	params["password_verifier"] = verifier
 	raw, err := json.Marshal(params)
 	if err != nil {
 		return nil, AppDatabaseOutput{}, err
@@ -133,23 +136,18 @@ func (t *tools) createAppDatabase(ctx context.Context, _ *sdk.CallToolRequest, i
 	if err != nil {
 		return nil, AppDatabaseOutput{}, approvalError(err)
 	}
-	if a, err = t.waitApproval(ctx, a, in.WaitSeconds); err != nil {
-		return nil, AppDatabaseOutput{}, err
-	}
 	out := AppDatabaseOutput{Approval: approvalView(a), Connection: protocol.ConnectionURL(conn, "")}
 	var b textBuilder
 	b.line("%s", requestLead(a))
 	writeApproval(&b, a)
-	if password != "" {
-		out.DatabaseURL = protocol.ConnectionURL(conn, password)
-		out.Guidance = fmt.Sprintf("Put the connection string in the app's environment now (e.g. DATABASE_URL in .env, which git must ignore; never in code or a commit): it isn't shown again, and Rowsafe never had it. "+
-			"It works once the request is done (right away as the person who connected you, or once a person approves it) and the database is created: follow it with get_approval %s and the task with get_task. "+
-			"The server must let the app's address connect (get_cloud_server shows who can; cloud_firewall changes it).", a.ID)
-		b.line("Connection string (shown once, works once the database is created): %s", out.DatabaseURL)
+	if a.Status != protocol.ApprovalApproved {
+		out.Guidance = "Nothing was created: tell the user why (above). The connection string made for it won't work; ask again for a new one if the user still wants the database."
 	} else {
-		out.Guidance = fmt.Sprintf("Rowsafe never makes or sees the password: when the person approves, the database server makes it and their browser shows them the connection string once. "+
-			"Ask them to put it in the app's environment (e.g. DATABASE_URL in .env, never in code or git), or to give it to you. Without the password it is %s. Follow the request with get_approval %s.",
-			out.Connection, a.ID)
+		out.DatabaseURL = protocol.ConnectionURL(conn, password)
+		out.Guidance = "Put the connection string in the app's environment now (e.g. DATABASE_URL in .env, which git must ignore; never in code or a commit): it isn't shown again, and Rowsafe never had it. " +
+			"It works once the database is created: follow the task with get_task. " +
+			"The server must let the app's address connect (get_cloud_server shows who can; cloud_firewall changes it)."
+		b.line("Connection string (shown once, works once the database is created): %s", out.DatabaseURL)
 	}
 	b.line("Next: %s", out.Guidance)
 	return text(b), out, nil
