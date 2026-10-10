@@ -9,7 +9,7 @@ This directory is a Codex plugin with three parts:
 - **Skill** `rowsafe-new-database` (`skills/`): when the app needs a database, Codex picks the cheapest fitting Rowsafe Cloud size, tells you the price and gets your OK, creates the server (with a checkout link if pay as you go isn't on yet), waits until it's ready, gets the app's own database and login (made in the dashboard, where your browser makes its password, or `create_app_database` from a local `rowsafe mcp`), and puts the connection string in `.env`. The password never passes through Rowsafe.
 - **Hook** `rowsafe guard` (`hooks/hooks.json`): a `PreToolUse` hook on shell commands. With the `rowsafe` CLI installed, it sets a Mark right before commands like `prisma migrate deploy`, `rails db:migrate`, `alembic upgrade`, `psql -c "DROP TABLE ..."`, `mysql -e "TRUNCATE ..."`, `mongosh --eval "db.orders.drop()"`, `clickhouse-client -q "ALTER TABLE ... DELETE ..."` or `sqlite3 app.db "DROP TABLE ..."`, whether or not the model remembered to. Without the CLI it does nothing.
 
-It works with PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey, SQLite and Qdrant, in the Codex CLI and the IDE extension, which share `~/.codex/config.toml`. In Codex cloud, see [below](#codex-cloud).
+It works with PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey, SQLite, Qdrant, OpenSearch and Meilisearch, in the Codex CLI and the IDE extension, which share `~/.codex/config.toml`. In Codex cloud, see [below](#codex-cloud).
 
 ## Requirements
 

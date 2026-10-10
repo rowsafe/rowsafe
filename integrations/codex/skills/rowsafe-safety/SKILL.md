@@ -1,11 +1,11 @@
 ---
 name: rowsafe-safety
-description: Use before any destructive or risky change to a database protected by Rowsafe (PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey, SQLite or Qdrant) - running migrations (prisma, rails, alembic, django, knex, sequelize, typeorm, drizzle, goose, flyway, ...), schema changes, DROP or TRUNCATE, DELETE or UPDATE without a narrow WHERE, FLUSHALL or FLUSHDB, bulk data fixes, resets or re-seeding, or restoring a dump. Checks that the database is recoverable and sets a named restore point (a Mark) first. Not needed for read-only work such as SELECT, EXPLAIN or migrate status.
+description: Use before any destructive or risky change to a database protected by Rowsafe (PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey, SQLite, Qdrant, OpenSearch or Meilisearch) - running migrations (prisma, rails, alembic, django, knex, sequelize, typeorm, drizzle, goose, flyway, ...), schema changes, DROP or TRUNCATE, DELETE or UPDATE without a narrow WHERE, FLUSHALL or FLUSHDB, bulk data fixes, resets or re-seeding, or restoring a dump. Checks that the database is recoverable and sets a named restore point (a Mark) first. Not needed for read-only work such as SELECT, EXPLAIN or migrate status.
 ---
 
 # Rowsafe safety workflow
 
-Rowsafe continuously copies this project's database changes (PostgreSQL's and SQLite's WAL, MySQL's binary log, MongoDB's oplog, Redis's and Valkey's replication stream; ClickHouse and Qdrant take a backup for each Mark), so the database can be rewound to a moment, including a named restore point (a Mark). Your job is to make sure a Mark exists right before you change data, to tell the user its name, and to hand recovery to the user if something goes wrong.
+Rowsafe continuously copies this project's database changes (PostgreSQL's and SQLite's WAL, MySQL's binary log, MongoDB's oplog, Redis's and Valkey's replication stream; ClickHouse, Qdrant, OpenSearch and Meilisearch take a snapshot for each Mark), so the database can be rewound to a moment, including a named restore point (a Mark). Your job is to make sure a Mark exists right before you change data, to tell the user its name, and to hand recovery to the user if something goes wrong.
 
 ## Before a destructive or risky database operation
 
@@ -45,8 +45,12 @@ When the user allowed Codex to act, `request_change` and the direct change tools
 - **If Rowsafe refuses**, nothing changed: tell the user the reason it gives and what they can do. For example, a member's change is made by an owner or admin; adding a standby, moving or forking a database is done in the dashboard (a person compares the server's key). If there's no backup yet, offer to run one (`run_backup`) and try again once it finished.
 - **Rowsafe keeps its safety nets on**: it saves a Mark before risky changes, needs a backup before a change that deletes or replaces data, and keeps the backups of a database you remove until an owner deletes them. Everything Codex does is in the audit log as done by the user through Codex.
 
+## The `rowsafe` CLI
+
+When the CLI is installed and logged in (`rowsafe whoami`), it does everything the dashboard does, with the user's rights, like `doctl` or `aws`: `rowsafe --help` lists it (backups, Marks, Rewind, fixes, settings, security, updates, standby, moves, pooling, databases and users, Rowsafe Cloud servers, alerts, logs). Add `--json` to read its output. Changes that are disruptive or destructive ask for confirmation; pass `--yes` only after the user agreed in chat. If Rowsafe refuses, the CLI prints the reason: tell the user.
+
 ## What counts as destructive
 
-Migrations and schema changes of any tool; `DROP`, `TRUNCATE`, `ALTER TABLE ... DROP/RENAME/TYPE`; `DELETE` or `UPDATE` without a narrow `WHERE`; data backfills; `pg_restore --clean`, `dropdb`, `mysqladmin drop`, `mongorestore --drop`; MongoDB `drop()`, `deleteMany({})` or `updateMany({}, ...)`; ClickHouse `ALTER TABLE ... DELETE/UPDATE` mutations and `DROP PARTITION`; Redis or Valkey `FLUSHALL`, `FLUSHDB`, `SWAPDB` and deleting keys by pattern (`--scan ... | xargs redis-cli del`); `sqlite3 ... .restore`; Qdrant: deleting a collection or points by filter (`DELETE /collections/NAME`, `points/delete`), recreating a collection; resetting or re-seeding a database. When unsure, treat it as destructive: a Mark costs a second.
+Migrations and schema changes of any tool; `DROP`, `TRUNCATE`, `ALTER TABLE ... DROP/RENAME/TYPE`; `DELETE` or `UPDATE` without a narrow `WHERE`; data backfills; `pg_restore --clean`, `dropdb`, `mysqladmin drop`, `mongorestore --drop`; MongoDB `drop()`, `deleteMany({})` or `updateMany({}, ...)`; ClickHouse `ALTER TABLE ... DELETE/UPDATE` mutations and `DROP PARTITION`; Redis or Valkey `FLUSHALL`, `FLUSHDB`, `SWAPDB` and deleting keys by pattern (`--scan ... | xargs redis-cli del`); `sqlite3 ... .restore`; Qdrant: deleting a collection or points by filter (`DELETE /collections/NAME`, `points/delete`), recreating a collection; OpenSearch: deleting an index or data stream (`DELETE /NAME`), `_delete_by_query`, closing or shrinking an index; Meilisearch: deleting an index (`DELETE /indexes/NAME`), deleting all documents, swapping indexes; resetting or re-seeding a database. When unsure, treat it as destructive: a Mark costs a second.
 
 Read-only work (`SELECT`, `EXPLAIN`, `migrate status`, generating migration files, reading schema) needs none of this.

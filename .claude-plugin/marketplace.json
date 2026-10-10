@@ -8,7 +8,7 @@
     {
       "name": "rowsafe",
       "source": "./integrations/claude-code",
-      "description": "Database safety net for AI agents (PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey and SQLite): checks protection and creates a Rowsafe restore point before migrations and destructive commands."
+      "description": "Database safety net for AI agents (PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey, SQLite, Qdrant, OpenSearch and Meilisearch): checks protection and creates a Rowsafe restore point before migrations and destructive commands."
     }
   ]
 }
