@@ -246,6 +246,13 @@ case \${1:-} in
       [ "\$(wc -l <"\$f/\$cmd.rc")" -le 1 ] || sed -i 1d "\$f/\$cmd.rc"
     fi
     exit "\$rc" ;;
+  postgres)
+    # (--cloud) Rowsafe's recommended settings for the new PostgreSQL: the
+    # real agent's (built from this tree), run as postgres.
+    echo "postgres \$* (\$(id -un))" >>/tmp/rowsafe-fake/calls 2>/dev/null || true
+    r=/go-release/real/rowsafe-agent-linux-\$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
+    [ -x "\$r" ] || { echo "no real agent here" >&2; exit 2; }
+    exec "\$r" "\$@" ;;
   sqlite)
     # (sqlite) root's look for SQLite files programs have open: sqlite-find.out
     f=/tmp/rowsafe-fake
@@ -362,6 +369,19 @@ host() {
       (cd "$root" && CGO_ENABLED=0 GOOS=linux GOARCH=$arch GOWORK=off go build -o "$work/go/real/rowsafe-agent-linux-$arch" ./cmd/rowsafe-agent) ||
         { echo "test-install: building the agent for linux/$arch failed (Meilisearch's TLS front)" >&2; exit 1; }
     done
+  fi
+
+  # (--cloud, postgres) The real agent: the new PostgreSQL's settings come
+  # from it (rowsafe-agent postgres tune).
+  if [ "$mode" = --in-container-cloud ]; then
+    case " $(printf '%s' "${TEST_ONLY:-postgres}" | tr ',' ' ') " in
+      *" postgres "*)
+        case $(docker info --format '{{.Architecture}}') in aarch64 | arm64) parch=arm64 ;; *) parch=amd64 ;; esac
+        [ -x "$work/go/real/rowsafe-agent-linux-$parch" ] ||
+          (cd "$root" && CGO_ENABLED=0 GOOS=linux GOARCH=$parch GOWORK=off go build -o "$work/go/real/rowsafe-agent-linux-$parch" ./cmd/rowsafe-agent) ||
+          { echo "test-install: building the agent for linux/$parch failed (PostgreSQL's settings)" >&2; exit 1; }
+        ;;
+    esac
   fi
 
   if [ "$mode" = --in-container-cloud ]; then
@@ -4660,6 +4680,20 @@ cloud_container() {
   [ "$(q "SELECT count(*) FROM pg_extension WHERE extname = 'pg_stat_statements'")" = 1 ] || fail "$name: pg_stat_statements isn't on in postgres"
   [ "$(q 'SELECT count(*) > 0 FROM pg_stat_statements')" = t ] || fail "$name: pg_stat_statements records nothing"
   pass "query statistics on (pg_stat_statements)"
+  # Rowsafe's recommended settings for this server (the agent's, as Tune for
+  # this server recommends) from the start, with the same single restart:
+  # shared_buffers a quarter of the memory this container sees (rounded down
+  # to 16 MB, from 2 GB to 256 MB), not PostgreSQL's 128 MB.
+  grep -q "PostgreSQL tuned for this server (Rowsafe's recommended settings): .*shared_buffers = " "$W/out" || fail "$name: PostgreSQL wasn't tuned for this server"
+  grep -q "pg_stat_statements loads when PostgreSQL starts; the new settings are in effect (PostgreSQL restarted)" "$W/out" || fail "$name: not one restart for both"
+  called "postgres tune --port 5432 (postgres)"
+  [ ! -e /etc/rowsafe/tune-postgresql ] || fail "$name: tuning still pending"
+  ram=$(awk '$1 == "MemTotal:" { printf "%.0f\n", $2 * 1024 }' /proc/meminfo) # (mawk's %d stops at 2 GB)
+  sb=$(q "SELECT setting::bigint * 8192 FROM pg_settings WHERE name = 'shared_buffers'")
+  awk -v sb="$sb" -v ram="$ram" 'BEGIN { q = ram / 4; exit !(sb <= q && sb > q - 268435456 && sb >= 134217728) }' ||
+    fail "$name: shared_buffers is $sb bytes on a server with $ram bytes of memory"
+  [ "$(q "SELECT count(*) FROM pg_settings WHERE pending_restart")" = 0 ] || fail "$name: settings still wait for a restart"
+  pass "PostgreSQL tuned for this server: shared_buffers $(q 'SHOW shared_buffers') of $(awk -v r="$ram" 'BEGIN { printf "%.0f", r / 1048576 }') MB"
   # Rowsafe Cloud's automatic security updates: set up, and their first run now, not tomorrow.
   [ -f /etc/apt/apt.conf.d/52rowsafe-unattended-upgrades ] && [ -f /etc/rowsafe/auto-security-updates ] || fail "$name: automatic security updates aren't set up"
   grep -q "Installing the security updates that are out already" "$W/out" || fail "$name: no first run of the security updates"
@@ -4690,6 +4724,7 @@ cloud_container() {
   grep -q "nothing to change" "$W/out" || fail "$name: --listen-public changed something"
   [ -z "$pgx" ] || grep -q "extensions $(printf '%s' "$pgx" | sed 's/,/, /g'): nothing to change" "$W/out" || fail "$name: --pg-extensions changed something"
   [ "$(q 'SELECT pg_postmaster_start_time()')" = "$started" ] || fail "$name: PostgreSQL was restarted"
+  ! grep -q "PostgreSQL tuned for this server" "$W/out" || fail "$name: tuned again"
   [ "$(grep -c '^hostssl' "$hba")" = 2 ] || fail "$name: pg_hba.conf rules added twice"
   [ "$(sed -n "s/^ROWSAFE_REPO_CIPHER_PASS='\(.*\)'\$/\1/p" /etc/rowsafe/agent.env)" = "$gen" ] || fail "$name: the passphrase changed"
   not_called "apply"

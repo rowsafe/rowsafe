@@ -37,8 +37,10 @@
 #                          (13-18) from the PostgreSQL project's repository
 #                          (apt.postgresql.org, its signing key checked) and
 #                          start it; refuses if PostgreSQL is already installed.
-#                          With --protect, that new PostgreSQL is restarted once
-#                          if backups need it
+#                          It starts with query statistics on and Rowsafe's
+#                          recommended settings for the server's memory and
+#                          CPUs. With --protect, that new PostgreSQL is
+#                          restarted once if backups need it
 #   --pg-extensions LIST   with --install-postgres (15-18): install and turn on
 #                          vector (pgvector), postgis (PostGIS) and/or
 #                          timescaledb (TimescaleDB, Apache-2.0 code only), all
@@ -414,8 +416,10 @@ Options (when piping, pass them after `sh -s --`):
                          on a fresh server: install PostgreSQL VERSION (13-18) from the
                          PostgreSQL project's repository (apt.postgresql.org, its signing
                          key checked) and start it. Refuses if PostgreSQL is already
-                         installed; a re-run keeps the one it installed. With --protect,
-                         that new PostgreSQL is restarted once if backups need it
+                         installed; a re-run keeps the one it installed. It starts with
+                         query statistics on and Rowsafe's recommended settings for the
+                         server's memory and CPUs. With --protect, that new PostgreSQL is
+                         restarted once if backups need it
   --pg-extensions LIST   with --install-postgres (15-18): install and turn on vector
                          (pgvector), postgis (PostGIS) and/or timescaledb (TimescaleDB, its
                          Apache-2.0 code only; loaded at start, telemetry off), all from the
@@ -1424,6 +1428,9 @@ PGDG_KEY_FILE=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
 PGDG_LIST=/etc/apt/sources.list.d/pgdg.list
 # The major --install-postgres installed (a re-run recognizes it as its own).
 PG_INSTALLED_FILE=$CONFIG_DIR/installed-postgresql
+# There while the PostgreSQL --install-postgres installed waits for Rowsafe's
+# recommended settings (pg_tune_new: once, while it is new).
+PG_TUNE_FILE=$CONFIG_DIR/tune-postgresql
 # --listen-public's self-signed certificate (root's directory, the key
 # readable by the postgres group only, as PostgreSQL requires).
 PG_TLS_DIR=/etc/ssl/rowsafe-postgresql
@@ -1510,18 +1517,59 @@ pg_preload_add() {
     die "could not add $2 to shared_preload_libraries"
 }
 
+# pg_tune_new PORT gives the PostgreSQL --install-postgres installed
+# Rowsafe's recommended settings for this server (what Tune for this server
+# recommends, from the agent's own rules: `rowsafe-agent postgres tune`, run
+# as postgres), once, while it is new and empty: a server Rowsafe creates
+# doesn't start with PostgreSQL's defaults. True when a setting waits for a
+# restart. Only while $PG_TUNE_FILE is there (written when this installer
+# installed PostgreSQL), so a re-run, or a PostgreSQL in use, is never
+# tuned. A failure only warns: Tune for this server offers the same.
+pg_tune_new() {
+  [ -f "$PG_TUNE_FILE" ] || return 1
+  # The verified agent, where postgres may run it: the staged one, or a copy
+  # of the download in a folder of root's (not /tmp, which may be noexec).
+  _tb=$STAGED _td=''
+  if [ "$need_binary" = 1 ]; then
+    install -d -m 0755 -o root -g root "$LIB_DIR" && _td=$(mktemp -d "$LIB_DIR/.tune.XXXXXX") && chmod 0755 "$_td" &&
+      install -m 0755 -o root -g root "$TMP/rowsafe-agent" "$_td/rowsafe-agent" ||
+      die "could not copy the agent for PostgreSQL's settings"
+    _tb=$_td/rowsafe-agent
+  fi
+  _rc=0
+  (cd / && runuser -u postgres -- "$_tb" postgres tune --port "$1") </dev/null >"$TMP/tune.out" 2>"$TMP/tune.log" || _rc=$?
+  [ -z "$_td" ] || rm -rf "$_td"
+  rm -f "$PG_TUNE_FILE"
+  if [ "$_rc" != 0 ]; then
+    tail -n 5 "$TMP/tune.log" | sed 's/^/    /' >&2
+    warn "Rowsafe's recommended settings for this server weren't applied (see above); Tune for this server in the dashboard offers them"
+    return 1
+  fi
+  _set=$(awk '$1 == "changed" { printf "%s%s = %s", s, $2, $3; s = ", " }' "$TMP/tune.out")
+  if [ -z "$_set" ]; then
+    ok "PostgreSQL's settings already suit this server"
+    return 1
+  fi
+  ok "PostgreSQL tuned for this server (Rowsafe's recommended settings): $_set"
+  grep -qx 'restart yes' "$TMP/tune.out"
+}
+
 # pg_stat_statements_setup turns on query statistics in the PostgreSQL
 # --install-postgres installed, so Pulse shows slow queries from the first
-# day: pg_stat_statements loaded at start (the new, empty PostgreSQL
-# restarted once for it) and created in the postgres database, where
-# Rowsafe reads it. A re-run changes nothing.
+# day: pg_stat_statements loaded at start and created in the postgres
+# database, where Rowsafe reads it. The new, empty PostgreSQL restarts once,
+# for it and for Rowsafe's recommended settings (pg_tune_new). A re-run
+# changes nothing.
 pg_stat_statements_setup() {
   _m=$INSTALL_PG
   _port=$(pg_lsclusters -h 2>/dev/null | awk -v m="$_m" '$1 == m && $2 == "main" { print $3; exit }')
   [ -n "$_port" ] || die "PostgreSQL $_m's main cluster isn't there"
-  if pg_preload_add "$_port" pg_stat_statements; then
-    pg_restart_cluster "$_m" main || die "PostgreSQL $_m doesn't start with pg_stat_statements loaded (see above)"
-    ok "pg_stat_statements loads when PostgreSQL starts (PostgreSQL restarted)"
+  _why=''
+  ! pg_preload_add "$_port" pg_stat_statements || _why='pg_stat_statements loads when PostgreSQL starts'
+  ! pg_tune_new "$_port" || _why="${_why:+$_why; }the new settings are in effect"
+  if [ -n "$_why" ]; then
+    pg_restart_cluster "$_m" main || die "PostgreSQL $_m doesn't start with its new settings (see above)"
+    ok "$_why (PostgreSQL restarted)"
   fi
   if [ "$(pg_sql "$_port" "SELECT count(*) FROM pg_extension WHERE extname = 'pg_stat_statements'")" = 0 ]; then
     pg_sql "$_port" "SET search_path = pg_catalog, public; CREATE EXTENSION IF NOT EXISTS pg_stat_statements SCHEMA public" >/dev/null ||
@@ -1616,6 +1664,7 @@ install_postgres() {
       apt_install_as "PostgreSQL $_v" "postgresql-$_v" "postgresql-client-$_v"
     ) || exit 1
     install -d -m 0750 -o root -g postgres "$CONFIG_DIR"
+    printf '%s\n' "$_v" | write_file "$PG_TUNE_FILE" 0644 root:root || true
     printf '%s\n' "$_v" | write_file "$PG_INSTALLED_FILE" 0644 root:root || true
     ok "PostgreSQL $_c installed"
   fi
@@ -14820,6 +14869,42 @@ sqlite_clone_dirs() {
 }
 # <<< sqlite clones
 
+# agent_release resolves, verifies and (unless that version is on disk
+# already) downloads the release into $TMP, once. --install-postgres does it
+# before installing PostgreSQL: the new PostgreSQL's settings come from the
+# agent (pg_tune_new).
+RELEASE_READY=0
+agent_release() {
+  [ "$RELEASE_READY" = 0 ] || return 0
+  resolve_release
+  installed=$(installed_version)
+  if [ -n "$installed" ]; then
+    case $(version_cmp "$REL_VERSION" "$installed") in
+      -1)
+        if [ -z "$WANT_VERSION" ]; then
+          note "installed version $installed is newer than $RELEASE_SOURCE ($REL_VERSION); keeping it"
+          KEEP_INSTALLED=1
+          REL_VERSION=$installed
+        elif [ "${ROWSAFE_ALLOW_DOWNGRADE:-}" = 1 ]; then
+          warn "downgrading from $installed to $REL_VERSION. Pin the host to $REL_VERSION in the control plane, or it will be offered $installed again."
+        else
+          die "rowsafe-agent $installed is installed; refusing to downgrade to $REL_VERSION (set ROWSAFE_ALLOW_DOWNGRADE=1 if you mean it)"
+        fi
+        ;;
+    esac
+  fi
+  STAGED=$INSTALL_DIR/versions/$REL_VERSION/rowsafe-agent
+  need_binary=1
+  if [ "$KEEP_INSTALLED" = 1 ]; then
+    need_binary=0
+  elif [ -x "$STAGED" ] && [ "$(sha256_of "$STAGED")" = "$REL_SHA" ]; then
+    need_binary=0
+    ok "rowsafe-agent $REL_VERSION is already on disk and matches the manifest"
+  fi
+  [ "$need_binary" = 0 ] || download_binary
+  RELEASE_READY=1
+}
+
 install_agent() {
   require_root
   root_expiry_lift
@@ -14830,7 +14915,11 @@ install_agent() {
   # MariaDB's and Valkey's once the agent's user is known (the files the
   # firewall and --listen-public write belong to it), the server listening
   # on this server only until then.
-  [ -z "$INSTALL_PG" ] || install_postgres
+  if [ -n "$INSTALL_PG" ]; then
+    ensure_base_tools
+    agent_release
+    install_postgres
+  fi
   [ -z "$INSTALL_PG" ] || pg_extensions_setup
   [ -z "$INSTALL_DB" ] || install_database
   if [ -z "$INSTALL_DB" ]; then
@@ -14879,32 +14968,7 @@ install_agent() {
   ensure_base_tools
 
   # 1. Resolve and verify the release. Nothing on the host changes if this fails.
-  resolve_release
-  installed=$(installed_version)
-  if [ -n "$installed" ]; then
-    case $(version_cmp "$REL_VERSION" "$installed") in
-      -1)
-        if [ -z "$WANT_VERSION" ]; then
-          note "installed version $installed is newer than $RELEASE_SOURCE ($REL_VERSION); keeping it"
-          KEEP_INSTALLED=1
-          REL_VERSION=$installed
-        elif [ "${ROWSAFE_ALLOW_DOWNGRADE:-}" = 1 ]; then
-          warn "downgrading from $installed to $REL_VERSION. Pin the host to $REL_VERSION in the control plane, or it will be offered $installed again."
-        else
-          die "rowsafe-agent $installed is installed; refusing to downgrade to $REL_VERSION (set ROWSAFE_ALLOW_DOWNGRADE=1 if you mean it)"
-        fi
-        ;;
-    esac
-  fi
-  STAGED=$INSTALL_DIR/versions/$REL_VERSION/rowsafe-agent
-  need_binary=1
-  if [ "$KEEP_INSTALLED" = 1 ]; then
-    need_binary=0
-  elif [ -x "$STAGED" ] && [ "$(sha256_of "$STAGED")" = "$REL_SHA" ]; then
-    need_binary=0
-    ok "rowsafe-agent $REL_VERSION is already on disk and matches the manifest"
-  fi
-  [ "$need_binary" = 0 ] || download_binary
+  agent_release
 
   # No enrollment token: have someone approve this server in the browser.
   connect_in_browser
