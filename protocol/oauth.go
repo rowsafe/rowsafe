@@ -9,9 +9,10 @@ import "time"
 // bound to the MCP endpoint. They never get more than the scopes below.
 
 // OAuth scopes. AI apps can read (always) and, when the person allows it,
-// save Marks and act. Acting never changes production by itself: changes to
-// production (restores, restarts, fixes, settings, ...) are requests a person
-// approves in the dashboard (approval.go).
+// save Marks and act. With ScopeAct, the app changes production (restores,
+// restarts, fixes, settings, ...) as the person who connected it, with
+// exactly their rights, or is refused with the reason (approval.go,
+// autonomy.go).
 const (
 	// ScopeRead reads databases' health, backups, Proof runs, Marks and
 	// recommendations: the read-only MCP tools.
@@ -20,7 +21,7 @@ const (
 	ScopeMarks = "rowsafe:marks"
 	// ScopeAct also allows what doesn't change production (backups, Proof
 	// runs, checks, safe copies, migration previews, acknowledging alerts)
-	// and asking a person to approve a change to production.
+	// and changes to production as the person who connected the app.
 	ScopeAct = "rowsafe:act"
 	// ScopeOfflineAccess is accepted (and ignored: refresh tokens are always
 	// issued) because some clients ask for it.
@@ -55,8 +56,9 @@ type OAuthConnection struct {
 	LastUsedAt   *time.Time `json:"last_used_at,omitempty"`
 	// ActsAsYou: the person who approved it consented, with ScopeAct, to
 	// the app acting as them (AgentAutonomy act). Apps connected before
-	// agents could act as their person ask first until that person lets
-	// them (POST /v1/oauth/connections/{id}/act) or reconnects them.
+	// agents could act as their person can't make changes (refused) until
+	// that person lets them (POST /v1/oauth/connections/{id}/act) or
+	// reconnects them.
 	ActsAsYou bool `json:"acts_as_you"`
 }
 

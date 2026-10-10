@@ -262,7 +262,7 @@ Guard: the safety net for AI agents
   rowsafe mcp [--allow-restore-points | --allow-writes]
                                              MCP server on stdio for AI assistants (https://rowsafe.sh/docs/reference/mcp); read-only
                                              unless restore points or all write tools are allowed (changes to
-                                             production are only requests a person approves in the dashboard)
+                                             production run as the signed-in person, with their rights)
   rowsafe guard                              Claude Code PreToolUse hook: before a destructive database
                                              command, create a restore point (https://rowsafe.sh/docs/guides/ai-agents)
   rowsafe guard --check COMMAND              tell whether COMMAND looks destructive (exit 0 yes, 1 no)

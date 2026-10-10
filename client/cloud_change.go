@@ -11,8 +11,8 @@ import (
 
 // Changes to servers Rowsafe created, as a person makes them (the
 // dashboard's own calls): owners and admins, or a read-write API key. The
-// control plane refuses them for AI assistants (/mcp), which ask with
-// approval requests instead.
+// control plane refuses them for AI assistants (/mcp), which make them with
+// request_change (POST /v1/approvals) instead.
 //
 //	POST   /v1/cloud/servers                 CreateCloudServerRequest -> 201 CloudServer,
 //	                                         or 200 {"checkout_url", "server"} when it waits for payment
