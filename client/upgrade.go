@@ -52,3 +52,15 @@ func (c *Client) UndoUpgrade(ctx context.Context, ref, upgradeID, confirm string
 func (c *Client) CleanupUpgrade(ctx context.Context, ref, upgradeID, confirm string) (out protocol.UpgradeTasksResponse, err error) {
 	return out, c.do(ctx, http.MethodPost, dbPath(ref)+"/upgrades/"+esc(upgradeID)+"/cleanup", protocol.ConfirmRequest{Confirm: confirm}, &out)
 }
+
+// InstallSecurityUpdates installs the server's pending security updates
+// (a Mark first; services keep running). confirm is the database's name.
+func (c *Client) InstallSecurityUpdates(ctx context.Context, ref, confirm string) (out protocol.UpgradeTasksResponse, err error) {
+	return out, c.do(ctx, http.MethodPost, dbPath(ref)+"/security-updates", protocol.ConfirmRequest{Confirm: confirm}, &out)
+}
+
+// RebootServer reboots the database's server (a Mark first; everything on
+// it stops for a minute or two). confirm is the server's hostname.
+func (c *Client) RebootServer(ctx context.Context, ref, confirm string) (out protocol.UpgradeTasksResponse, err error) {
+	return out, c.do(ctx, http.MethodPost, dbPath(ref)+"/reboot", protocol.ConfirmRequest{Confirm: confirm}, &out)
+}

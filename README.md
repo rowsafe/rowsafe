@@ -56,6 +56,8 @@ rowsafe cloud delete shop-db                # asks you to type the name
 
 The first server billed by the hour gives you a link to add a card, once. Database passwords never pass through Rowsafe: `rowsafe env` makes the password on your computer and sends only its SCRAM verifier, and other passwords are made on the database server and encrypted for your terminal. `rowsafe help cloud` has the details.
 
+**The CLI does what the dashboard does**, as the person behind the key and with that person's rights: security (`rowsafe security fix app restrict_access --allow 10.0.0.0/16`), the server's security updates and reboots, alert rules, logs and log forwarding, the maintenance window, standbys, moves, upgrades and more. Every change asks first on a terminal; scripts and AI agents pass `--yes`, and `--json` prints JSON. `rowsafe help all` lists everything.
+
 Full guide: [Quickstart](https://rowsafe.sh/docs/quickstart).
 
 ## What's in this repository

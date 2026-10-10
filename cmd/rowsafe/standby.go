@@ -26,6 +26,7 @@ var standbySubs = map[string]subcommand{
 	"remove":   standbyRemoveCmd,
 	"failover": standbyFailoverCmd,
 	"unfence":  standbyUnfenceCmd,
+	"forget":   standbyForgetCmd,
 }
 
 func standbyCmd(ctx context.Context, c *client.Client, args []string) error {
@@ -543,5 +544,36 @@ func standbyUnfenceCmd(ctx context.Context, c *client.Client, args []string) err
 		return apiErr(err)
 	}
 	fmt.Println("Starting it again; follow it with: rowsafe standby " + name)
+	return nil
+}
+
+// standbyForgetCmd: rowsafe standby forget [NAME] [--host SERVER] [--yes]:
+// stop watching a fenced old primary. It stays stopped; Rowsafe just stops
+// keeping it so (e.g. the server was retired).
+func standbyForgetCmd(ctx context.Context, c *client.Client, args []string) error {
+	fs := flag.NewFlagSet("standby forget", flag.ContinueOnError)
+	host := fs.String("host", "", "the fenced server")
+	yes := fs.Bool("yes", false, "don't ask; confirms with the fenced server's name")
+	name, err := dbArg(ctx, c, fs, args)
+	if err != nil {
+		return err
+	}
+	info, err := c.StandbyInfo(ctx, name)
+	if err != nil {
+		return apiErr(err)
+	}
+	f, err := fenceFor(info, *host)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Stop watching %s, the fenced old primary of %s. PostgreSQL there stays stopped, but Rowsafe no longer\n", f.Server.Hostname, name)
+	fmt.Println("keeps it stopped: if someone starts it, two primaries may take writes.")
+	if err := confirmTyped(*yes, f.Server.Hostname); err != nil {
+		return err
+	}
+	if _, err := c.ForgetFence(ctx, name, protocol.ForgetFenceRequest{FenceID: f.ID, Confirm: f.Server.Hostname}); err != nil {
+		return fmt.Errorf("not changed: %w", apiErr(err))
+	}
+	fmt.Printf("Rowsafe no longer watches %s.\n", f.Server.Hostname)
 	return nil
 }

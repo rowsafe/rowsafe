@@ -19,3 +19,17 @@ func (c *Client) Security(ctx context.Context, ref string) (out protocol.Securit
 func (c *Client) CheckSecurity(ctx context.Context, ref string) (out protocol.SecurityCheckResponse, err error) {
 	return out, c.do(ctx, http.MethodPost, dbPath(ref)+"/security/check", nil, &out)
 }
+
+// UpdateSecuritySettings changes a database's security settings (today:
+// whether Rowsafe checks its port from the internet) and returns the view.
+func (c *Client) UpdateSecuritySettings(ctx context.Context, ref string, req protocol.UpdateSecuritySettingsRequest) (out protocol.SecurityView, err error) {
+	return out, c.do(ctx, http.MethodPatch, dbPath(ref)+"/security", req, &out)
+}
+
+// SecurityAction runs one security action (protocol.Sec*). req.Confirm is
+// the database's name. A new password travels only as its SCRAM verifier
+// (set_password), or is made on the server and sealed to req.PublicKey
+// (redis_require_password: DBAdminSecret fetches it).
+func (c *Client) SecurityAction(ctx context.Context, ref string, req protocol.SecurityActionRequest) (out protocol.SecurityActionResponse, err error) {
+	return out, c.do(ctx, http.MethodPost, dbPath(ref)+"/security/actions", req, &out)
+}

@@ -1,16 +1,11 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"crypto/ecdh"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
-	"os"
-	"os/exec"
-	"strings"
 
 	"github.com/rowsafe/rowsafe/client"
 	"github.com/rowsafe/rowsafe/protocol"
@@ -110,33 +105,8 @@ func progressText(m protocol.Migration) string {
 // readSource reads the source connection string: from --source-env, from
 // stdin when it isn't a terminal, or typed without echo.
 func readSource(envVar string) (string, error) {
-	if envVar != "" {
-		v := strings.TrimSpace(os.Getenv(envVar))
-		if v == "" {
-			return "", fmt.Errorf("$%s is empty", envVar)
-		}
-		return v, nil
-	}
-	if !stdinIsTerminal() {
-		line, err := bufio.NewReader(stdin).ReadString('\n')
-		if err != nil && !errors.Is(err, io.EOF) {
-			return "", err
-		}
-		return strings.TrimSpace(line), nil
-	}
-	fmt.Print("Paste the connection string of the database to move in (it isn't shown; it is encrypted\n" +
+	return readSecret(envVar, "Paste the connection string of the database to move in (it isn't shown; it is encrypted\n"+
 		"here to your server's key, so Rowsafe never sees it):\n> ")
-	off := exec.Command("stty", "-echo")
-	off.Stdin = os.Stdin
-	echoOff := off.Run() == nil
-	line := readLine()
-	if echoOff {
-		on := exec.Command("stty", "echo")
-		on.Stdin = os.Stdin
-		_ = on.Run()
-	}
-	fmt.Println()
-	return strings.TrimSpace(line), nil
 }
 
 func migrateStartCmd(ctx context.Context, c *client.Client, args []string) error {

@@ -126,6 +126,74 @@ func hostsChannel(ctx context.Context, c *client.Client, args []string) error {
 	return nil
 }
 
+// hostsPermissions: rowsafe hosts permissions HOST [--json]: what root
+// allowed Rowsafe to do on the server. Root turns them on there (sudo
+// rowsafe-allow NAME); a person turns one off in the dashboard.
+func hostsPermissions(ctx context.Context, c *client.Client, args []string) error {
+	fs := flag.NewFlagSet("hosts permissions", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "print JSON")
+	pos, err := parseN(fs, args, "HOST")
+	if err != nil {
+		return err
+	}
+	v, err := c.HostPermissions(ctx, pos[0])
+	if err != nil {
+		return apiErr(err)
+	}
+	if *asJSON {
+		return printJSON(v)
+	}
+	fmt.Printf("What Rowsafe may do on %s, when a person clicks and confirms (root decides):\n\n", v.Hostname)
+	t := newTable("PERMISSION", "STATE", "NOTE")
+	for _, p := range v.Permissions {
+		note := p.Reason
+		if note == "" && p.Needs != "" {
+			note = "needs " + p.Needs
+		}
+		t.row(p.Name, strings.ReplaceAll(p.State, "_", " "), orDash(note))
+	}
+	t.flush()
+	switch {
+	case v.Sidecar:
+		fmt.Println("\nRowsafe runs in Docker here: these are set where its containers are defined.")
+	case v.AllowCommand:
+		fmt.Printf("\nTo allow one, as root on %s: sudo rowsafe-allow NAME\n", v.Hostname)
+	}
+	return nil
+}
+
+// hostsUpdate: rowsafe hosts update HOST [--version V] [--json]: offer the
+// agent the newest release now, ahead of the staged rollout.
+func hostsUpdate(ctx context.Context, c *client.Client, args []string) error {
+	fs := flag.NewFlagSet("hosts update", flag.ContinueOnError)
+	version := fs.String("version", "", "a specific release (default: the newest on the host's channel)")
+	asJSON := fs.Bool("json", false, "print JSON")
+	pos, err := parseN(fs, args, "HOST")
+	if err != nil {
+		return err
+	}
+	u, err := c.UpdateAgentNow(ctx, pos[0], *version)
+	if err != nil {
+		return apiErr(err)
+	}
+	if *asJSON {
+		return printJSON(u)
+	}
+	switch {
+	case u.Requested != "":
+		how := "on its next heartbeat (within a minute)"
+		if u.Container {
+			how = "by replacing its container"
+		}
+		fmt.Printf("%s: the agent updates from %s to %s %s.\n", u.Hostname, orDash(u.Running), u.Requested, how)
+	case !u.Behind:
+		fmt.Printf("%s: the agent is up to date (%s).\n", u.Hostname, orDash(u.Running))
+	default:
+		fmt.Printf("%s: agent %s, %s.\n", u.Hostname, orDash(u.Running), orText(u.Status, "no update requested"))
+	}
+	return nil
+}
+
 func orgShow(ctx context.Context, c *client.Client, args []string) error {
 	if _, err := parse(flag.NewFlagSet("org", flag.ContinueOnError), args, false); err != nil {
 		return err
@@ -867,6 +935,10 @@ func taskName(typ string) string {
 		return "security check"
 	case protocol.TaskSecurityFix:
 		return "security fix"
+	case protocol.TaskSecurityUpdates:
+		return "security updates"
+	case protocol.TaskReboot:
+		return "reboot"
 	case protocol.TaskRewindCopy, protocol.TaskRewindDrop, protocol.TaskRewindCompare, protocol.TaskRewindRows,
 		protocol.TaskRewindInPlace, protocol.TaskRewindUndo, protocol.TaskRewindCleanup:
 		return rewindTaskName(typ)

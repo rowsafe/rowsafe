@@ -51,6 +51,8 @@ Move in: leave your managed database, keep the safety net
 Updates and upgrades
   rowsafe update [NAME]              install PostgreSQL's newest minor release (asks first)
   rowsafe upgrade [NAME] --to 18     check, rehearse on a copy, then upgrade (rowsafe help upgrade)
+  rowsafe security-updates | reboot [NAME]
+                                     the server's security updates; a reboot (both ask first)
 
 Proof: the weekly restore test
   rowsafe proof [NAME]               run the restore test now
@@ -63,6 +65,8 @@ Pulse: health and monitoring
   rowsafe top [NAME]                 queries that take the most time, and which got slower
   rowsafe settings [NAME]            PostgreSQL's settings; rowsafe tune [NAME]: what suits the server
   rowsafe recommendations [NAME]     what would make it better, why and what it costs
+  rowsafe security [NAME]            who can reach the database and how they log in; fix it (asks first)
+  rowsafe logs [NAME]                the database's logs (rowsafe log-destinations: forward them)
   rowsafe alerts                     firing alerts (rowsafe channels: where they go)
   rowsafe report                     "Your weekly Pulse", the weekly email
 
@@ -99,6 +103,11 @@ func init() {
 // helpDetails adds explanations that don't fit the one-line reference.
 var helpDetails = map[string]string{
 	"names": nameRules,
+	"security": `Rowsafe never sees passwords: set_password makes the new password on this
+computer and sends only its SCRAM verifier (or --password-env VAR uses yours);
+redis_require_password's password is made on the server and encrypted for
+this terminal only. Actions that change who can connect ask you to type the
+database's name first (--yes in scripts).`,
 	"rewind": `Deleted rows by mistake? Restore a copy as it was just before (it runs next to
 production on your server, on a private socket, and never touches production),
 compare it with production, and bring the missing rows back:
