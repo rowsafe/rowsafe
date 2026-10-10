@@ -346,6 +346,7 @@ SQLITE_CLONE_DIRS='' # --sqlite-clone-dir DIR, one per line
 SQLITE_CLONE_LIST=$CONFIG_DIR/sqlite-clone-dirs # folders SQLite clones may be written to
 
 TMP=
+ROOT_EXPIRY_LIFTED=0 # root_expiry_lift: put root's first-login password change back on exit
 CHANGED=0          # binary, unit, guard or config changed: a running agent needs a restart
 KEEP_INSTALLED=0   # the installed version is newer than the channel's: leave it
 APT_UPDATED=0
@@ -376,6 +377,7 @@ cleanup() {
   # Never leave the terminal with echo off (Ctrl-C at a hidden prompt).
   if [ "$TTY" = 1 ] && [ -n "$TTY_SAVED" ]; then stty "$TTY_SAVED" <&3 2>/dev/null || true; fi
   if [ -n "$TMP" ]; then rm -rf "$TMP"; fi
+  root_expiry_restore
 }
 trap cleanup EXIT
 # After Ctrl-C at a question, end the half-typed line before exiting.
@@ -792,6 +794,35 @@ write_file() {
 
 require_root() {
   [ "$(id -u)" -eq 0 ] || die "run the installer as root (e.g. pipe it to 'sudo sh')"
+}
+
+# root_expiry_lift: some clouds make root's password expire at the first
+# boot of a server created without an SSH key (Hetzner, DigitalOcean: the
+# password they email must be changed at the first login). PAM then refuses
+# chfn even to root, so package scripts that create their user with
+# `adduser --gecos` fail (postgresql-common: "chfn: PAM: Authentication token
+# is no longer valid; new one required") and nothing installs. While this
+# installer runs, root's password counts as changed today; on exit
+# (root_expiry_restore, from cleanup) the first-login change is required
+# again, as the cloud set it. The password itself never changes.
+root_expiry_lift() {
+  [ "$ROOT_EXPIRY_LIFTED" = 0 ] || return 0
+  [ -r /etc/shadow ] && have chage || return 0
+  [ "$(awk -F: '$1 == "root" { print $3; exit }' /etc/shadow)" = 0 ] || return 0
+  if chage -d "$(date -u +%Y-%m-%d)" root 2>/dev/null; then
+    ROOT_EXPIRY_LIFTED=1
+    note "root's password must be changed at its first login (the cloud set it so): lifted while this installer installs packages, required again when it ends"
+  else
+    warn "root's password must be changed at its first login, and Rowsafe couldn't lift that while it installs packages; packages that create a user may fail"
+  fi
+}
+
+# root_expiry_restore requires root's first-login password change again
+# (root_expiry_lift).
+root_expiry_restore() {
+  [ "$ROOT_EXPIRY_LIFTED" = 1 ] || return 0
+  ROOT_EXPIRY_LIFTED=0
+  chage -d 0 root 2>/dev/null || warn "couldn't require root's first-login password change again (chage -d 0 root)"
 }
 
 detect_arch() {
@@ -10150,6 +10181,7 @@ install_installer_copy() {
 # permissions_main is --permissions.
 permissions_main() {
   require_root
+  root_expiry_lift
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   export PATH
   [ -f "$ENV_FILE" ] && [ -e "$INSTALL_DIR/rowsafe-agent" ] ||
@@ -14580,6 +14612,7 @@ sqlite_clone_dirs() {
 
 install_agent() {
   require_root
+  root_expiry_lift
   detect_os
   detect_arch
   # Servers Rowsafe creates: the database server first, then the agent
