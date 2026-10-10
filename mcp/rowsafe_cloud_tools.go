@@ -17,9 +17,9 @@ import (
 )
 
 // Rowsafe Cloud, read-only: the catalog (clouds, regions, sizes and their
-// prices) and the servers Rowsafe created. Asking for a server, a firewall
+// prices) and the servers Rowsafe created. Making a server, a firewall
 // change, a new size, a clone or a deletion is request_change (the "cloud"
-// group): a person approves it in the dashboard, where the price is shown.
+// group) or a direct tool, as the person who connected the assistant.
 
 // ---- outputs ----
 
@@ -136,7 +136,7 @@ type CloudServerOutput struct {
 }
 
 type cloudServerInput struct {
-	Server      string `json:"server" jsonschema:"the server's name or ID (cs_...): list_cloud_servers shows them, get_approval shows the ID of one an approval created"`
+	Server      string `json:"server" jsonschema:"the server's name or ID (cs_...): list_cloud_servers shows them, the result of create_cloud_server shows the ID of one it created"`
 	WaitSeconds int    `json:"wait_seconds,omitempty" jsonschema:"while it is being created, installed or resized, wait up to this many seconds for it to be ready (0 returns at once); call again to keep waiting"`
 }
 
@@ -274,13 +274,13 @@ func (t *tools) cloudCatalog(ctx context.Context, _ *sdk.CallToolRequest, _ noIn
 	out.Cheapest = best
 	switch out.PayAsYouGo {
 	case "active":
-		b.line("Pay as you go is active: servers billed by the hour are created as soon as a person approves.")
+		b.line("Pay as you go is active: servers billed by the hour are created right away.")
 	case "past_due":
 		b.line("Pay as you go: the last payment failed; an owner updates the payment method in Settings → Billing before new hourly servers can be created.")
 	case "canceling":
 		b.line("Pay as you go is canceled: an owner keeps it in Settings → Billing before new hourly servers can be created.")
 	default:
-		b.line("Pay as you go isn't active yet: the first server billed by the hour goes through a checkout right after a person approves it (an owner pays), and is created once paid.")
+		b.line("Pay as you go isn't active yet: the first server billed by the hour goes through a checkout (an owner pays), and is created once paid.")
 	}
 	b.line("The organization may have %d Rowsafe Cloud servers at a time (%d billed by the hour).", cat.MaxServers, cat.MaxHourlyServers)
 	if best != nil {
@@ -291,9 +291,8 @@ func (t *tools) cloudCatalog(ctx context.Context, _ *sdk.CallToolRequest, _ noIn
 		b.line("Cheapest free now: %s size %s in %s (%s).", best.Cloud, best.Size, best.Region, price)
 	}
 	out.Guidance = "Pick the cheapest size that fits the app (a small app's database fits the smallest size), in a region near the app. " +
-		"Then ask for it with request_change create_cloud_server (name, region, size, allowed_ips, and engine with engine_version when the app needs " + cloudEngineNames(false) + " rather than PostgreSQL; " +
-		"the reason says what it's for). It runs as the person who connected you, with their rights: an owner's or admin's request creates the server (and its cost) right away, " +
-		"unless the organization asks for approval first; a member's waits for an owner or admin. Confirm the size and its price with the user before asking."
+		"Confirm the size and its price with the user, then make it with create_cloud_server (name, region, size, allowed_ips, and engine with engine_version when the app needs " + cloudEngineNames(false) + " rather than PostgreSQL; " +
+		"the reason says what it's for). It runs right away as the person who connected you, with their rights, and creates the server (and its cost); if Rowsafe refuses (a member, a first payment only an owner makes, ...), tell the user why."
 	b.line("Next: %s", out.Guidance)
 	return text(b), out, nil
 }
@@ -540,7 +539,7 @@ func cloudServerGuidance(v CloudServerView, canAsk bool) string {
 		if canAsk {
 			return what
 		}
-		return "the user can do it in the Rowsafe dashboard (you can't ask for changes with this connection)"
+		return "the user can do it in the Rowsafe dashboard (you can't make changes with this connection)"
 	}
 	switch v.Status {
 	case "payment":
@@ -560,7 +559,7 @@ func cloudServerGuidance(v CloudServerView, canAsk bool) string {
 	case "ready":
 		var next []string
 		if len(v.AllowedIPs) == 0 {
-			next = append(next, "Nobody can connect yet: "+ask("ask for request_change cloud_firewall with the addresses the app (or this machine) connects from"))
+			next = append(next, "Nobody can connect yet: "+ask("once the user agrees, use cloud_firewall with the addresses the app (or this machine) connects from"))
 		}
 		switch {
 		case v.Database != "" && v.Engine == protocol.EngineValkey:
@@ -569,6 +568,12 @@ func cloudServerGuidance(v CloudServerView, canAsk bool) string {
 		case v.Database != "" && v.Engine == protocol.EngineMeilisearch:
 			next = append(next, "For the app's own API key (search-only for browsers, or one that can add documents for the backend), the user makes one in the dashboard "+
 				"(Databases & users), which shows it once; put the address ("+v.Connection+") and the key in the app's environment (e.g. MEILISEARCH_URL and MEILISEARCH_KEY in .env), never in code or git")
+		case v.Database != "" && v.Engine == protocol.EngineQdrant:
+			next = append(next, "For the app's own API key, the user makes one in the dashboard (Databases & users), which shows it once; "+
+				"put the address ("+v.Connection+") and the key in the app's environment, never in code or git")
+		case v.Database != "" && v.Engine != "" && v.Engine != protocol.EnginePostgreSQL:
+			next = append(next, "For the app's own database and login, the user makes them in the dashboard (Databases & users), which shows the connection string once "+
+				"(its password is made in their browser, so AI agents can't); put it in the app's environment (e.g. DATABASE_URL in .env), never in code or git")
 		case v.Database != "":
 			next = append(next, "For the app's own database and login, "+ask("call create_app_database with database "+v.Database)+
 				"; put the connection string in the app's environment (e.g. DATABASE_URL in .env), never in code or git")

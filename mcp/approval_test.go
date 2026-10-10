@@ -1,7 +1,6 @@
 package mcp
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -9,7 +8,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,9 +17,11 @@ import (
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
-// approvalAPI is a fake Rowsafe API for the approval tools. It records every
-// request, files approvals, and answers GET /v1/approvals/{id} with the
-// states in decide (one per read; the last one repeats).
+// approvalAPI is a fake Rowsafe API for the change tools. It records every
+// request; POST /v1/approvals runs the change as the person who connected
+// the agent (or refuses it with refuse: "403 why"), and GET
+// /v1/approvals/{id} answers with the records in decide (one per read; the
+// last one repeats).
 type approvalAPI struct {
 	t      *testing.T
 	mu     sync.Mutex
@@ -29,6 +29,8 @@ type approvalAPI struct {
 	filed  []protocol.CreateApprovalRequest
 	decide []protocol.Approval
 	reads  int
+	refuse int    // the HTTP status of a refusal (0: run it)
+	why    string // the refusal's reason
 }
 
 func (f *approvalAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -44,22 +46,22 @@ func (f *approvalAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.t.Errorf("decoding %s: %v", body, err)
 		}
 		f.filed = append(f.filed, req)
-		a := pendingApproval(req)
+		if f.refuse != 0 {
+			w.WriteHeader(f.refuse)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": f.why})
+			return
+		}
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(a)
+		_ = json.NewEncoder(w).Encode(approvalRecord(req))
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/approvals/apr_"):
-		a := pendingApproval(protocol.CreateApprovalRequest{Action: "restart", Database: "app"})
+		a := approvalRecord(protocol.CreateApprovalRequest{Action: "restart", Database: "app"})
 		if len(f.decide) > 0 {
 			a = f.decide[min(f.reads, len(f.decide)-1)]
 		}
 		f.reads++
 		_ = json.NewEncoder(w).Encode(a)
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/approvals":
-		_ = json.NewEncoder(w).Encode([]protocol.Approval{pendingApproval(protocol.CreateApprovalRequest{Action: "restart", Database: "app"})})
-	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/cancel"):
-		a := pendingApproval(protocol.CreateApprovalRequest{Action: "restart", Database: "app"})
-		a.Status = protocol.ApprovalCancelled
-		_ = json.NewEncoder(w).Encode(a)
+		_ = json.NewEncoder(w).Encode([]protocol.Approval{approvalRecord(protocol.CreateApprovalRequest{Action: "restart", Database: "app"})})
 	default:
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"error":"not found"}`))
@@ -72,13 +74,17 @@ func (f *approvalAPI) snapshot() ([]string, []protocol.CreateApprovalRequest) {
 	return slices.Clone(f.calls), slices.Clone(f.filed)
 }
 
-func pendingApproval(req protocol.CreateApprovalRequest) protocol.Approval {
+// approvalRecord is the record of a change done right away as
+// ana@example.com, the person who connected the agent.
+func approvalRecord(req protocol.CreateApprovalRequest) protocol.Approval {
 	a, _ := protocol.FindApprovalAction(req.Action)
 	now := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
 	return protocol.Approval{ID: "apr_1", Action: req.Action, Title: a.Title, Group: a.Group, Risk: a.Risk,
 		Database: req.Database, Host: "db1", Params: req.Params, Reason: req.Reason, RequestedBy: "key:k_1 (test)",
-		Status: protocol.ApprovalPending, CreatedAt: now, ExpiresAt: now.Add(protocol.ApprovalTTL),
-		Details: []string{"Restarts PostgreSQL 18 on db1"}, URL: "https://app.rowsafe.test/approvals/apr_1"}
+		Status: protocol.ApprovalApproved, CreatedAt: now, DecidedAt: &now, DecidedBy: "dashboard:ana@example.com", Automatic: true,
+		Note:    "Done right away as ana@example.com through their AI agent test.",
+		Details: []string{"Restarts PostgreSQL 18 on db1"}, URL: "https://app.rowsafe.test/ai/actions/apr_1",
+		Result: &protocol.ApprovalResult{HTTPStatus: http.StatusAccepted, TaskIDs: []string{"tk_1"}}}
 }
 
 func connect(t *testing.T, api http.Handler, opts Options, copts *sdk.ClientOptions) *sdk.ClientSession {
@@ -122,10 +128,10 @@ func callText(t *testing.T, cs *sdk.ClientSession, name string, args map[string]
 	return b.String(), res
 }
 
-// request_change only files an approval request: one POST /v1/approvals
-// with the action, database, params and reason, and never the action's own
-// endpoint.
-func TestRequestChangeOnlyFilesAnApproval(t *testing.T) {
+// request_change sends one POST /v1/approvals with the action, database,
+// params and reason, never the action's own endpoint, and reports the
+// change done as the person who connected the agent.
+func TestRequestChangeActsOnce(t *testing.T) {
 	f := &approvalAPI{t: t}
 	cs := connect(t, f, Options{AllowWrites: true, MaxWait: time.Second}, nil)
 	txt, res := callText(t, cs, "request_change", map[string]any{"action": "restart", "database": "app",
@@ -141,16 +147,45 @@ func TestRequestChangeOnlyFilesAnApproval(t *testing.T) {
 	if got.Action != "restart" || got.Database != "app" || got.Reason != "Settings changed and need a restart." || string(got.Params) != `{"confirm":"app"}` {
 		t.Errorf("filed %+v (params %s)", got, got.Params)
 	}
-	for _, want := range []string{"apr_1", "Restart the database on app (db1)", "Nothing changes until an owner or admin",
-		"https://app.rowsafe.test/approvals/apr_1", "Will change: Restarts PostgreSQL 18 on db1"} {
+	for _, want := range []string{"Done: Restart the database on app (db1) (apr_1, approved), as ana@example.com", "Done as ana@example.com",
+		"Changes: Restarts PostgreSQL 18 on db1", "Tasks: tk_1"} {
 		if !strings.Contains(txt, want) {
 			t.Errorf("missing %q in:\n%s", want, txt)
 		}
 	}
+	for _, not := range []string{"approve ", "waits for", "link"} {
+		if strings.Contains(txt, not) {
+			t.Errorf("%q in:\n%s", not, txt)
+		}
+	}
 	var out ApprovalOutput
 	raw, _ := json.Marshal(res.StructuredContent)
-	if err := json.Unmarshal(raw, &out); err != nil || out.Approval.ID != "apr_1" || out.Approval.Status != protocol.ApprovalPending {
+	if err := json.Unmarshal(raw, &out); err != nil || out.Approval.ID != "apr_1" || out.Approval.Status != protocol.ApprovalApproved || !out.Approval.Automatic {
 		t.Errorf("structured = %s (%v)", raw, err)
+	}
+}
+
+// A refusal is an error that gives the user the reason and what to do;
+// nothing waits.
+func TestRequestChangeRefused(t *testing.T) {
+	f := &approvalAPI{t: t, refuse: http.StatusForbidden,
+		why: "Rowsafe has no backup of app yet, and this can't be undone easily: take a backup first, then try again."}
+	cs := connect(t, f, Options{AllowWrites: true, MaxWait: time.Second}, nil)
+	args := map[string]any{"action": "remove_standby", "database": "app", "params": map[string]any{"confirm": "app"}, "reason": "Not needed."}
+	txt, res := callText(t, cs, "request_change", args)
+	for _, want := range []string{"Rowsafe refused this change, and nothing changed: Rowsafe has no backup of app yet", "Tell the user why", "run_backup"} {
+		if !res.IsError || !strings.Contains(txt, want) {
+			t.Errorf("missing %q (error %v) in:\n%s", want, res.IsError, txt)
+		}
+	}
+	f.mu.Lock()
+	f.refuse, f.why = http.StatusServiceUnavailable, "Rowsafe couldn't confirm the role of ana@example.com, who connected this AI agent: try again in a minute"
+	f.mu.Unlock()
+	if txt, res := callText(t, cs, "request_change", args); !res.IsError || !strings.Contains(txt, "nothing changed (503)") || !strings.Contains(txt, "Try again in a minute") {
+		t.Errorf("503: %s", txt)
+	}
+	if calls, _ := f.snapshot(); len(calls) != 2 {
+		t.Errorf("calls = %v, want 2 POSTs and no reads", calls)
 	}
 }
 
@@ -234,21 +269,17 @@ func TestDescribeChangeEveryAction(t *testing.T) {
 	}
 }
 
-func TestGetApprovalWaitsForADecision(t *testing.T) {
-	defer func(d time.Duration) { approvalPoll = d }(approvalPoll)
-	approvalPoll = 10 * time.Millisecond
-	pending := pendingApproval(protocol.CreateApprovalRequest{Action: "apply_fix", Database: "app"})
-	approved := pending
-	approved.Status, approved.DecidedBy, approved.DecidedAt = protocol.ApprovalApproved, "ana@example.test", ptr(pending.CreatedAt.Add(time.Minute))
-	approved.Result = &protocol.ApprovalResult{HTTPStatus: 202, Message: "Queued the fix", TaskIDs: []string{"tk_9"},
+func TestGetApproval(t *testing.T) {
+	done := approvalRecord(protocol.CreateApprovalRequest{Action: "apply_fix", Database: "app"})
+	done.Result = &protocol.ApprovalResult{HTTPStatus: 202, Message: "Queued the fix", TaskIDs: []string{"tk_9"},
 		Body: json.RawMessage(`{"tasks":[{"id":"tk_9"}],"password":"hunter2"}`)}
-	f := &approvalAPI{t: t, decide: []protocol.Approval{pending, pending, approved}}
+	f := &approvalAPI{t: t, decide: []protocol.Approval{done}}
 	cs := connect(t, f, Options{MaxWait: 30 * time.Second}, nil)
-	txt, res := callText(t, cs, "get_approval", map[string]any{"id": "apr_1", "wait_seconds": 10})
+	txt, res := callText(t, cs, "get_approval", map[string]any{"id": "apr_1"})
 	if res.IsError {
 		t.Fatal(txt)
 	}
-	for _, want := range []string{"Approved by ana@example.test", "Tasks: tk_9", "get_task"} {
+	for _, want := range []string{"Done as ana@example.com", "Tasks: tk_9", "get_task"} {
 		if !strings.Contains(txt, want) {
 			t.Errorf("missing %q in:\n%s", want, txt)
 		}
@@ -257,22 +288,30 @@ func TestGetApprovalWaitsForADecision(t *testing.T) {
 	if strings.Contains(string(raw), "hunter2") || strings.Contains(txt, "hunter2") {
 		t.Errorf("a secret reached the output: %s", raw)
 	}
-	if calls, _ := f.snapshot(); len(calls) != 3 {
-		t.Errorf("calls = %v, want 3 reads", calls)
-	}
 
-	denied := pending
-	denied.Status, denied.DecidedBy, denied.Note = protocol.ApprovalDenied, "ana@example.test", "not during business hours"
-	f.mu.Lock()
-	f.decide, f.reads = []protocol.Approval{denied}, 0
-	f.mu.Unlock()
-	txt, _ = callText(t, cs, "get_approval", map[string]any{"id": "apr_1"})
-	if !strings.Contains(txt, "Denied by ana@example.test") || !strings.Contains(txt, "not during business hours") {
-		t.Errorf("denied:\n%s", txt)
+	failed := done
+	failed.Status, failed.Result = protocol.ApprovalFailed, &protocol.ApprovalResult{HTTPStatus: 409, Message: "A backup is running."}
+	// An earlier record, from when changes waited for a person.
+	denied := approvalRecord(protocol.CreateApprovalRequest{Action: "apply_fix", Database: "app"})
+	denied.Status, denied.Automatic, denied.Note, denied.Result = protocol.ApprovalDenied, false, "not during business hours", nil
+	for _, c := range []struct {
+		a    protocol.Approval
+		want string
+	}{
+		{failed, "Ran as ana@example.com (as the person who connected you) at 2026-10-04T12:00:00Z, and it failed (HTTP 409): A backup is running."},
+		{denied, "Not run (a person declined it, from when AI agents' changes waited for a person), so nothing changed."},
+	} {
+		f.mu.Lock()
+		f.decide, f.reads = []protocol.Approval{c.a}, 0
+		f.mu.Unlock()
+		if txt, _ := callText(t, cs, "get_approval", map[string]any{"id": "apr_1"}); !strings.Contains(txt, c.want) {
+			t.Errorf("%s: missing %q in:\n%s", c.a.Status, c.want, txt)
+		}
 	}
 }
 
-// Read-only sessions can see approvals but not ask for or cancel one.
+// Read-only sessions can see what agents did but not make a change; nothing
+// approves, denies, cancels or waits for a decision.
 func TestApprovalToolsByAccess(t *testing.T) {
 	names := func(cs *sdk.ClientSession) []string {
 		res, err := cs.ListTools(t.Context(), nil)
@@ -282,8 +321,17 @@ func TestApprovalToolsByAccess(t *testing.T) {
 		var out []string
 		for _, tl := range res.Tools {
 			out = append(out, tl.Name)
-			if strings.Contains(tl.Name, "approve") || strings.Contains(tl.Name, "deny") || strings.Contains(tl.Name, "decide") {
-				t.Errorf("tool %s: assistants can't decide approvals", tl.Name)
+			if strings.Contains(tl.Name, "approve") || strings.Contains(tl.Name, "deny") || strings.Contains(tl.Name, "decide") || strings.Contains(tl.Name, "cancel_approval") {
+				t.Errorf("tool %s: nothing waits for a decision", tl.Name)
+			}
+			if slices.Contains([]string{"request_change", "get_approval", "create_cloud_server", "cloud_firewall", "apply_fix", "create_app_database"}, tl.Name) {
+				schema, _ := json.Marshal(tl.InputSchema)
+				if strings.Contains(string(schema), "wait_seconds") {
+					t.Errorf("%s waits: %s", tl.Name, schema)
+				}
+			}
+			if strings.Contains(tl.Description, "approval link") || strings.Contains(tl.Description, "Ask me first") {
+				t.Errorf("%s: %s", tl.Name, tl.Description)
 			}
 		}
 		return out
@@ -294,82 +342,27 @@ func TestApprovalToolsByAccess(t *testing.T) {
 			t.Errorf("read-only lacks %s", n)
 		}
 	}
-	for _, n := range []string{"request_change", "cancel_approval"} {
-		if slices.Contains(ro, n) {
-			t.Errorf("read-only has %s", n)
-		}
+	if slices.Contains(ro, "request_change") {
+		t.Error("read-only has request_change")
 	}
 	rw := names(connect(t, &approvalAPI{t: t}, Options{AllowWrites: true}, nil))
-	if !slices.Contains(rw, "request_change") || !slices.Contains(rw, "cancel_approval") {
+	if !slices.Contains(rw, "request_change") {
 		t.Errorf("writes: %v", rw)
 	}
 }
 
-// A client that takes URL elicitations is asked to open the approval page,
-// in band (older protocol versions) or with a multi round-trip result, and
-// the request is filed once either way.
-func TestRequestChangeOpensTheApprovalPage(t *testing.T) {
-	for _, version := range []string{"", "2025-11-25"} {
-		t.Run("protocol "+version, func(t *testing.T) {
-			f := &approvalAPI{t: t}
-			var asked atomic.Pointer[sdk.ElicitParams]
-			copts := &sdk.ClientOptions{
-				Capabilities: &sdk.ClientCapabilities{Elicitation: &sdk.ElicitationCapabilities{URL: &sdk.URLElicitationCapabilities{}}},
-				ElicitationHandler: func(_ context.Context, req *sdk.ElicitRequest) (*sdk.ElicitResult, error) {
-					asked.Store(req.Params)
-					return &sdk.ElicitResult{Action: "decline"}, nil
-				},
-			}
-			cs := connectVersion(t, f, Options{AllowWrites: true, MaxWait: 5 * time.Second}, copts, version)
-			txt, res := callText(t, cs, "request_change", map[string]any{"action": "apply_fix", "database": "app",
-				"params": map[string]any{"finding_id": "bloat", "fix_id": "vacuum"}, "reason": "The orders table is bloated."})
-			if res.IsError {
-				t.Fatal(txt)
-			}
-			p := asked.Load()
-			if p == nil || p.Mode != "url" || p.URL != "https://app.rowsafe.test/approvals/apr_1" || p.ElicitationID != "apr_1" {
-				t.Fatalf("elicitation = %+v", p)
-			}
-			_, filed := f.snapshot()
-			if len(filed) != 1 || filed[0].Action != "apply_fix" {
-				t.Errorf("filed = %+v, want one apply_fix", filed)
-			}
-			if !strings.Contains(txt, "didn't open the approval link") || !strings.Contains(txt, "https://app.rowsafe.test/approvals/apr_1") {
-				t.Errorf("text:\n%s", txt)
-			}
-		})
-	}
-	// The stateless remote endpoint can't ask in band: it just returns the link.
-	f := &approvalAPI{t: t}
-	var asked atomic.Bool
-	copts := &sdk.ClientOptions{
-		Capabilities: &sdk.ClientCapabilities{Elicitation: &sdk.ElicitationCapabilities{URL: &sdk.URLElicitationCapabilities{}}},
-		ElicitationHandler: func(context.Context, *sdk.ElicitRequest) (*sdk.ElicitResult, error) {
-			asked.Store(true)
-			return &sdk.ElicitResult{Action: "accept"}, nil
-		},
-	}
-	cs := connectVersion(t, f, Options{AllowWrites: true, Remote: true, MaxWait: time.Second}, copts, "2025-11-25")
-	txt, res := callText(t, cs, "request_change", map[string]any{"action": "restart", "database": "app",
-		"params": map[string]any{"confirm": "app"}, "reason": "Pending settings."})
-	if res.IsError || asked.Load() || !strings.Contains(txt, "https://app.rowsafe.test/approvals/apr_1") {
-		t.Errorf("remote, older protocol: asked %v, text:\n%s", asked.Load(), txt)
-	}
-}
-
-func TestListAndCancelApprovals(t *testing.T) {
+func TestListApprovals(t *testing.T) {
 	f := &approvalAPI{t: t}
 	cs := connect(t, f, Options{AllowWrites: true, MaxWait: time.Second}, nil)
-	txt, res := callText(t, cs, "list_approvals", map[string]any{"status": "pending"})
-	if res.IsError || !strings.Contains(txt, "apr_1  pending  Restart the database (restart) on app (db1)") {
+	txt, res := callText(t, cs, "list_approvals", map[string]any{"status": "approved"})
+	if res.IsError || !strings.Contains(txt, "apr_1  approved  Restart the database (restart) on app (db1), by key:k_1 (test) at 2026-10-04T12:00:00Z, as ana@example.com") {
 		t.Errorf("list_approvals:\n%s", txt)
 	}
-	txt, res = callText(t, cs, "cancel_approval", map[string]any{"id": "apr_1"})
-	if res.IsError || !strings.Contains(txt, "Cancelled; nothing changed.") {
-		t.Errorf("cancel_approval:\n%s", txt)
+	if txt, res := callText(t, cs, "list_approvals", map[string]any{"status": "pending"}); !res.IsError {
+		t.Errorf("pending is no longer a state to list: %s", txt)
 	}
 	calls, _ := f.snapshot()
-	if !slices.Equal(calls, []string{"GET /v1/approvals", "POST /v1/approvals/apr_1/cancel"}) {
+	if !slices.Equal(calls, []string{"GET /v1/approvals"}) {
 		t.Errorf("calls = %v", calls)
 	}
 }

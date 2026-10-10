@@ -1,6 +1,9 @@
 package protocol
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 // A server key is always compared by a person, whatever the level.
 func TestAutonomyPersonActions(t *testing.T) {
@@ -15,16 +18,17 @@ func TestAutonomyPersonActions(t *testing.T) {
 		}
 	}
 	if !AutonomyMayCover(AutonomyAct, "restart") || !AutonomyMayCover(AutonomyFull, "restart") || AutonomyMayCover(AutonomyBudget, "restart") ||
-		!AutonomyMayCover(AutonomyBudget, "create_app_database") || AutonomyMayCover(AutonomyAsk, "create_cloud_server") ||
-		AutonomyMayCover(AutonomyAct, "no_such_action") {
+		!AutonomyMayCover(AutonomyBudget, "create_app_database") || !AutonomyMayCover(AutonomyAsk, "create_cloud_server") ||
+		AutonomyMayCover(AutonomyAct, "no_such_action") || AutonomyMayCover("", "restart") {
 		t.Error("coverage")
 	}
 }
 
-// The earlier full level reads as act, the default.
+// The earlier full and the removed ask levels read as act, the default.
 func TestNormalizeAutonomyLevel(t *testing.T) {
-	if NormalizeAutonomyLevel(AutonomyFull) != AutonomyAct || NormalizeAutonomyLevel(AutonomyAsk) != AutonomyAsk ||
-		AutonomyDefault != AutonomyAct || AutonomyLevels[0] != AutonomyDefault {
+	if NormalizeAutonomyLevel(AutonomyFull) != AutonomyAct || NormalizeAutonomyLevel(AutonomyAsk) != AutonomyAct ||
+		NormalizeAutonomyLevel(AutonomyBudget) != AutonomyBudget ||
+		AutonomyDefault != AutonomyAct || AutonomyLevels[0] != AutonomyDefault || slices.Contains(AutonomyLevels, AutonomyAsk) {
 		t.Error("levels")
 	}
 }

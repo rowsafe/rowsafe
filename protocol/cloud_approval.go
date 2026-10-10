@@ -2,13 +2,13 @@ package protocol
 
 import "time"
 
-// Rowsafe Cloud through approvals. An AI assistant (MCP) or an API key asks
-// for a Rowsafe Cloud server, a firewall change, a new size, a clone or a
-// deletion with request_change (the "cloud" group of ApprovalActions); an
-// owner or admin approves it in the dashboard, which states the money
-// plainly (size, price per hour, the most a month, region); then the
-// control plane makes the dashboard's own call as that person. Nothing is
-// created, changed or billed before a person approves.
+// Rowsafe Cloud for AI agents. An AI assistant (MCP) or an API key makes a
+// Rowsafe Cloud server, a firewall change, a new size, a clone or a
+// deletion with request_change (the "cloud" group of ApprovalActions) or
+// the direct tools; the control plane makes the dashboard's own call as the
+// person who connected it, right away, or refuses with the reason
+// (autonomy.go). The agent states the money plainly to its user (size,
+// price per hour, the most a month, region) and gets their OK first.
 //
 // These are the bodies of those calls as an assistant fills them in. Fields
 // marked "set by Rowsafe" are the action's Fixed fields: whatever the
@@ -55,7 +55,7 @@ type CloudFirewallParams struct {
 // /v1/cloud/servers/{server}/resize (resize_cloud_server).
 type ResizeCloudServerParams struct {
 	Size    string `json:"size" jsonschema:"the new size's ID from cloud_catalog, in the server's cloud; a server's disk never shrinks"`
-	Confirm bool   `json:"confirm,omitempty" jsonschema:"set by Rowsafe: true (the person approving confirms)"`
+	Confirm bool   `json:"confirm,omitempty" jsonschema:"set by Rowsafe: true (the agent confirmed with its user first)"`
 }
 
 // CloneToNewServerParams is the body of POST /v1/databases/{ref}/clone onto
@@ -78,9 +78,9 @@ type CloneToNewServerParams struct {
 
 // DeleteCloudServerParams is what an assistant gives for DELETE
 // /v1/cloud/servers/{server} (delete_cloud_server). The rest of the body is
-// the person's: the name they type to approve (confirm_name), and whether
-// the backup passphrase was saved (passphrase_saved, from the server's own
-// record), set by the control plane when they approve.
+// set by the control plane: the server's name as the confirmation
+// (confirm_name), and whether the backup passphrase was saved
+// (passphrase_saved, from the server's own record).
 type DeleteCloudServerParams struct {
 	WithStandby bool `json:"with_standby,omitempty" jsonschema:"the server has a standby server: delete both"`
 }
@@ -88,8 +88,9 @@ type DeleteCloudServerParams struct {
 // AppDatabaseParams is the body of POST /v1/databases/{ref}/dbadmin for
 // create_app_database: a new, empty database owned by a new user, on a
 // Rowsafe Cloud server's PostgreSQL (15 or newer), MySQL or MariaDB, for an
-// app an assistant is building (MySQL and MariaDB: the password sealed to
-// the approving person's browser, like the remote endpoint's). Nobody else (but the server's admins) may connect to the new
+// app an assistant is building (MySQL and MariaDB: the password is made in
+// the person's browser, like the remote endpoint's, so an agent's request
+// is refused and the user creates it in the dashboard). Nobody else (but the server's admins) may connect to the new
 // database; like every user, the new one may connect to the server's other
 // databases with only what is granted to everyone there (PostgreSQL 15 and
 // newer grant nobody CREATE in public schemas). The owner's password never
@@ -97,12 +98,12 @@ type DeleteCloudServerParams struct {
 //
 //   - A local `rowsafe mcp` makes the password on the user's machine and
 //     sends only its SCRAM-SHA-256 verifier (PasswordVerifier); the
-//     assistant has the full connection string right away, working once a
-//     person approves.
-//   - Without a verifier (the remote /mcp endpoint), the agent makes the
-//     password when a person approves, sealed end to end to that person's
-//     browser (DBAdminParams.PublicKey), which shows them the connection
-//     string once.
+//     assistant has the full connection string right away, working once the
+//     change ran.
+//   - Without a verifier (the remote /mcp endpoint), the password must be
+//     made sealed end to end to the person's browser (DBAdminParams.
+//     PublicKey), which shows them the connection string once: an agent's
+//     request is refused and the user creates it in the dashboard.
 //
 // It never touches existing databases or users.
 type AppDatabaseParams struct {

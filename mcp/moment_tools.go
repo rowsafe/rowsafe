@@ -75,7 +75,7 @@ type FindMomentView struct {
 	Searches []PastSearchView `json:"searches,omitempty" jsonschema:"recent searches, newest first"`
 }
 
-const momentGuidance = "Tell the user what happened and when. The database's change log doesn't record who made a change. To undo it, the user can Rewind to just before it: in the Rowsafe dashboard (Rewind, Find the moment, \"Rewind to just before this\"), or `rowsafe rewind copy NAME --at REWIND_TO`, then compare and bring the rows back. Never restore anything yourself; if the user wants you to start it, request_change (restore_copy at that time, then compare_copy and bring_back_rows) asks them to approve each step in the dashboard."
+const momentGuidance = "Tell the user what happened and when. The database's change log doesn't record who made a change. To undo it, the user can Rewind to just before it: in the Rowsafe dashboard (Rewind, Find the moment, \"Rewind to just before this\"), or `rowsafe rewind copy NAME --at REWIND_TO`, then compare and bring the rows back. Never restore anything on your own; if the user wants you to do it, request_change (restore_copy at that time, then compare_copy and bring_back_rows) does each step once they agree."
 
 func (t *tools) addMomentTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{

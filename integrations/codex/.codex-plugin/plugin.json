@@ -30,7 +30,7 @@
   "interface": {
     "displayName": "Rowsafe",
     "shortDescription": "Safety net for your database",
-    "longDescription": "Before a migration or destructive command, Codex checks that your database can be recovered and sets a named Rowsafe restore point (a Mark). If something breaks, you rewind to it from the Rowsafe dashboard. Sign in with Rowsafe once; you choose what Codex may do. Codex never restores or restarts anything on its own: when you ask and have allowed it to act, it makes the change with your rights, and every change is in the audit log. An owner can make AI agents' changes wait for approval instead. Works with PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey, SQLite and Qdrant.",
+    "longDescription": "Before a migration or destructive command, Codex checks that your database can be recovered and sets a named Rowsafe restore point (a Mark). If something breaks, you rewind to it from the Rowsafe dashboard. Sign in with Rowsafe once; you choose what Codex may do. Codex never restores or restarts anything on its own: when you ask and have allowed it to act, it makes the change right away with your rights, and every change is in the audit log. Works with PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey, SQLite and Qdrant.",
     "developerName": "Rowsafe",
     "category": "Developer Tools",
     "capabilities": [

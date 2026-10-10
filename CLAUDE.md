@@ -24,15 +24,17 @@ proprietary (api.rowsafe.sh, app.rowsafe.sh).
   deletions confirmed, `--yes` in scripts); `env`/`connect` never let a password pass through Rowsafe.
 - `mcp/`: the MCP server (`rowsafe mcp`, also served remotely by the control plane). Read-only
   unless `--allow-restore-points` / `--allow-writes` (remote: OAuth scopes `rowsafe:marks` /
-  `rowsafe:act`). Changes to production are filed as change requests (`request_change`, and the
-  direct `create_cloud_server`, `cloud_firewall`, `apply_fix`; catalog in `protocol/approval.go`).
-  The organization's agent setting (`protocol/autonomy.go`) decides what happens: at the default
-  (`act`) the control plane runs them right away as the person who connected the agent, with that
-  person's rights (owner or admin now; a member's agent asks); `budget` runs only the Rowsafe Cloud
-  actions in `AutonomyBudgetActions` within a monthly budget; `ask` makes every change wait for an
-  owner or admin to approve in the dashboard. A connection or key made before agents could act
-  as their person (`OAuthConnection.ActsAsYou`, `APIKey.ActsAsCreator` false), or a key made by a
-  key, asks first. No tool can approve or change the setting.
+  `rowsafe:act`). Changes to production go through `request_change` (and the direct
+  `create_cloud_server`, `cloud_firewall`, `apply_fix`; catalog in `protocol/approval.go`).
+  The control plane runs them right away as the person who connected the agent, with exactly that
+  person's rights (owner or admin now), or refuses (403) with a reason the agent tells its user
+  (a member, a key without a creator, a server key to compare, no backup yet, over the budget,
+  ...). Nothing waits for approval (founder, 2026-10-10); the agent confirms disruptive,
+  destructive and paid changes with its user first. `protocol/autonomy.go`: `act` (default) or
+  `budget` (any agent may run `AutonomyBudgetActions` as the owner who chose it, within a monthly
+  budget); `ask` is gone (read as act). A connection or key made before agents could act as their
+  person (`OAuthConnection.ActsAsYou`, `APIKey.ActsAsCreator` false), or a key made by a key, is
+  refused until its person lets it act. No tool can change the setting.
 - `scripts/install.sh`: the installer served at `curl -fsSL https://rowsafe.sh | sudo sh -s rse_...`
   (guided storage setup, finds PostgreSQL, plan → yes → apply, optional restart).
   `scripts/rowsafe-pg-restart`: the only root component (a sandboxed systemd path/service pair that

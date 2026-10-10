@@ -15,9 +15,9 @@ import (
 //
 // Creating, resizing, changing who can connect, cloning and deleting
 // (cloud_change.go) are for people: the dashboard, or the CLI with a
-// read-write API key. AI assistants ask with approval requests a person
-// approves (protocol ApprovalActions, group "cloud"); the control plane
-// refuses these calls on /mcp.
+// read-write API key. AI assistants make them with request_change
+// (protocol ApprovalActions, group "cloud"), as the person who connected
+// them; the control plane refuses these calls on /mcp.
 
 // CloudCatalog is Rowsafe Cloud's catalog.
 type CloudCatalog struct {

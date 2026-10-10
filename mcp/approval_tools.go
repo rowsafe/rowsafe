@@ -16,29 +16,27 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/rowsafe/rowsafe/client"
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
 // Changes to production: an assistant makes one with request_change (or a
-// direct tool for a common one: change_tools.go), which files it as an
-// approval request (POST /v1/approvals); it never calls the action's own
-// endpoint. By default (protocol.AgentAutonomy, act) the control plane runs
-// it right away as the person who connected the assistant, with their
-// rights in the dashboard: the request comes back approved (Automatic),
-// with its result, in the same call. It waits for an owner or admin
-// instead when the team asks first, when that person is a member, or when
-// a safety net needs a person; then a person approves or denies it in the
-// dashboard, and the control plane runs it as them. No tool here can
-// approve.
+// direct tool for a common one: change_tools.go), which sends it to POST
+// /v1/approvals; it never calls the action's own endpoint. The control plane
+// runs it right away as the person who connected the assistant, with
+// exactly their rights in the dashboard (protocol.AgentAutonomy), and
+// returns the record (approved: done, or failed), or refuses it (403) with
+// the reason, which the assistant tells its user. Nothing waits for a
+// person. The tool names keep "approval" for compatibility: get_approval and
+// list_approvals show what AI agents did.
 
 // ---- inputs and outputs ----
 
 type requestChangeInput struct {
-	Action      string         `json:"action" jsonschema:"the change to ask for (describe_change lists them and their params)"`
-	Database    string         `json:"database,omitempty" jsonschema:"database name or ID (every action but alert_rule needs one)"`
-	Params      map[string]any `json:"params,omitempty" jsonschema:"the action's params as one object (describe_change shows them), e.g. {\"finding_id\": \"...\", \"fix_id\": \"...\"} for apply_fix or {\"confirm\": \"app\"} for restart"`
-	Reason      string         `json:"reason" jsonschema:"why, in one or two plain sentences for the person who approves it (shown as the assistant's words)"`
-	WaitSeconds int            `json:"wait_seconds,omitempty" jsonschema:"when it waits for a person: seconds to wait for their decision before returning (0 returns at once); get_approval follows it later"`
+	Action   string         `json:"action" jsonschema:"the change to make (describe_change lists them and their params)"`
+	Database string         `json:"database,omitempty" jsonschema:"database name or ID (every action but alert_rule and the Rowsafe Cloud ones needs one)"`
+	Params   map[string]any `json:"params,omitempty" jsonschema:"the action's params as one object (describe_change shows them), e.g. {\"finding_id\": \"...\", \"fix_id\": \"...\"} for apply_fix or {\"confirm\": \"app\"} for restart"`
+	Reason   string         `json:"reason" jsonschema:"why, in one or two plain sentences (recorded with the change, labeled as yours)"`
 }
 
 type describeChangeInput struct {
@@ -46,52 +44,47 @@ type describeChangeInput struct {
 }
 
 type approvalIDInput struct {
-	ID          string `json:"id" jsonschema:"the approval request's ID (apr_...)"`
-	WaitSeconds int    `json:"wait_seconds,omitempty" jsonschema:"seconds to wait for a person to decide before returning (0 returns at once)"`
-}
-
-type cancelApprovalInput struct {
-	ID string `json:"id" jsonschema:"the approval request's ID (apr_...)"`
+	ID string `json:"id" jsonschema:"the change's ID (apr_...)"`
 }
 
 type listApprovalsInput struct {
-	Status string `json:"status,omitempty" jsonschema:"only requests in this state (default: all)"`
+	Status string `json:"status,omitempty" jsonschema:"only changes in this state: approved (done) or failed (default: all)"`
 	Limit  int    `json:"limit,omitempty" jsonschema:"at most this many, newest first (default 20)"`
 }
 
-// ApprovalView is an approval request as the tools show it.
+// ApprovalView is a change an AI agent made, as the tools show it.
 type ApprovalView struct {
 	ID          string              `json:"id"`
 	Action      string              `json:"action"`
 	Title       string              `json:"title"`
 	Group       string              `json:"group,omitempty"`
 	Risk        string              `json:"risk,omitempty" jsonschema:"normal, disruptive or destructive"`
-	CostsMoney  bool                `json:"costs_money,omitempty" jsonschema:"approving it adds to the organization's bill (the person sees the price)"`
+	CostsMoney  bool                `json:"costs_money,omitempty" jsonschema:"it adds to the organization's bill"`
 	Database    string              `json:"database,omitempty"`
 	Host        string              `json:"host,omitempty"`
 	ServerID    string              `json:"server_id,omitempty" jsonschema:"the Rowsafe Cloud server it is about"`
 	Params      map[string]any      `json:"params,omitempty"`
-	Details     []string            `json:"details,omitempty" jsonschema:"what will change, written by Rowsafe"`
+	Details     []string            `json:"details,omitempty" jsonschema:"what it changes, written by Rowsafe"`
 	Reason      string              `json:"reason,omitempty"`
 	RequestedBy string              `json:"requested_by,omitempty"`
-	Status      string              `json:"status" jsonschema:"pending, approved (and run), failed (approved but the call failed), denied, expired or cancelled"`
+	Status      string              `json:"status" jsonschema:"approved (done) or failed (the call failed); earlier records may say pending, denied, expired or cancelled (never run)"`
 	CreatedAt   time.Time           `json:"created_at"`
 	ExpiresAt   time.Time           `json:"expires_at"`
 	DecidedAt   *time.Time          `json:"decided_at,omitempty"`
-	DecidedBy   string              `json:"decided_by,omitempty"`
-	Note        string              `json:"note,omitempty" jsonschema:"the person's note when denying"`
+	DecidedBy   string              `json:"decided_by,omitempty" jsonschema:"who it ran as"`
+	Note        string              `json:"note,omitempty" jsonschema:"how it ran (on earlier records: a person's note)"`
 	Result      *ApprovalResultView `json:"result,omitempty"`
-	URL         string              `json:"url,omitempty" jsonschema:"the dashboard page where a person approves or denies it"`
-	Automatic   bool                `json:"automatic,omitempty" jsonschema:"done right away, without a person deciding: as the person who connected you (decided_by), or within the budget an owner set for AI agents"`
-	// AutonomyNote: why it waits for a person.
-	AutonomyNote string `json:"autonomy_note,omitempty" jsonschema:"why it waits for a person instead of running right away (a member's request, over the budget, a first payment, no backup yet, ...)"`
+	URL         string              `json:"url,omitempty" jsonschema:"its page in the Rowsafe dashboard"`
+	Automatic   bool                `json:"automatic,omitempty" jsonschema:"done right away: as the person who connected you (decided_by), or within the budget an owner set for AI agents"`
+	// AutonomyNote: on earlier records, why it waited for a person.
+	AutonomyNote string `json:"autonomy_note,omitempty" jsonschema:"earlier records only: why it waited for a person"`
 }
 
 type ApprovalResultView struct {
 	HTTPStatus int      `json:"http_status"`
 	Message    string   `json:"message,omitempty"`
 	TaskIDs    []string `json:"task_ids,omitempty" jsonschema:"tasks it queued: follow them with get_task"`
-	// CloudServerID is the server an approval created.
+	// CloudServerID is the server the change created.
 	CloudServerID string `json:"cloud_server_id,omitempty" jsonschema:"the Rowsafe Cloud server it created: follow it with get_cloud_server"`
 	CheckoutURL   string `json:"checkout_url,omitempty" jsonschema:"the server waits for its first payment here (an owner of the organization pays; give the link to the user); it is created once paid"`
 	Body          any    `json:"body,omitempty" jsonschema:"the API's response (secrets removed)"`
@@ -105,7 +98,7 @@ type ApprovalsOutput struct {
 	Approvals []ApprovalView `json:"approvals"`
 }
 
-// ChangeAction describes one action request_change can ask for.
+// ChangeAction describes one action request_change can make.
 type ChangeAction struct {
 	Name          string         `json:"name"`
 	Title         string         `json:"title"`
@@ -125,16 +118,17 @@ type DescribeChangeOutput struct {
 
 // ---- registration ----
 
-var approvalStatuses = []any{protocol.ApprovalPending, protocol.ApprovalApproved, protocol.ApprovalFailed,
-	protocol.ApprovalDenied, protocol.ApprovalExpired, protocol.ApprovalCancelled}
+// approvalStatuses are the states a change has now (earlier records may
+// have others; listing without a status shows them).
+var approvalStatuses = []any{protocol.ApprovalApproved, protocol.ApprovalFailed}
 
 // addApprovalReadTools registers what any client may use: the catalog and
-// the state of requests.
+// the record of what AI agents did.
 func (t *tools) addApprovalReadTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "describe_change",
-		Description: "Describes the changes to production request_change makes: with action, its title, what it does, its risk, the API call Rowsafe makes, whether it runs right away here (as the person who connected you) or waits for a person, and the JSON schema of its params; without action, every action by group. Read-only.",
-		Annotations: readOnly("Describe a change you can ask for"),
+		Description: "Describes the changes to production request_change makes: with action, its title, what it does, its risk, the API call Rowsafe makes as the person who connected you, what would make Rowsafe refuse it here, and the JSON schema of its params; without action, every action by group. Read-only.",
+		Annotations: readOnly("Describe a change you can make"),
 		InputSchema: inputSchema[describeChangeInput](func(p map[string]*jsonschema.Schema) {
 			p["action"].Enum = actionEnum()
 		}),
@@ -142,15 +136,15 @@ func (t *tools) addApprovalReadTools(s *sdk.Server) {
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "get_approval",
-		Description: "Shows one change request: pending (waiting for a person), approved (done; with the tasks it queued: follow them with get_task), failed, denied (with the person's note), expired or cancelled. With wait_seconds it waits for a person to decide. Read-only.",
-		Annotations: readOnly("Get an approval request"),
-		InputSchema: withWait[approvalIDInput](nil),
+		Description: "Shows a change an AI agent made (request_change, create_cloud_server, cloud_firewall, apply_fix, create_app_database): done (with the tasks it queued: follow them with get_task) or failed (with why). Read-only.",
+		Annotations: readOnly("Get a change an AI agent made"),
+		InputSchema: inputSchema[approvalIDInput](nil),
 	}, t.getApproval)
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "list_approvals",
-		Description: "Lists changes to production AI agents and API keys made or asked for (done right away, or waiting for a person), newest first. Read-only.",
-		Annotations: readOnly("List approval requests"),
+		Description: "Lists the changes to production AI agents and API keys made in this organization, newest first. Read-only.",
+		Annotations: readOnly("List changes AI agents made"),
 		InputSchema: inputSchema[listApprovalsInput](func(p map[string]*jsonschema.Schema) {
 			p["status"].Enum = approvalStatuses
 			p["limit"].Minimum, p["limit"].Maximum = ptr(1.0), ptr(100.0)
@@ -158,25 +152,18 @@ func (t *tools) addApprovalReadTools(s *sdk.Server) {
 	}, t.listApprovals)
 }
 
-// addApprovalWriteTools registers request_change and cancel_approval (and
-// the direct tools for common changes, change_tools.go).
+// addApprovalWriteTools registers request_change (and the direct tools for
+// common changes, change_tools.go).
 func (t *tools) addApprovalWriteTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "request_change",
 		Description: requestChangeDescription(),
 		Annotations: writes("Make a change to production (as the person who connected you)", true, false),
-		InputSchema: withWait[requestChangeInput](func(p map[string]*jsonschema.Schema) {
+		InputSchema: inputSchema[requestChangeInput](func(p map[string]*jsonschema.Schema) {
 			p["action"].Enum = actionEnum()
 			p["reason"].MinLength, p["reason"].MaxLength = ptr(1), ptr(1000)
 		}),
 	}, t.requestChange)
-
-	sdk.AddTool(s, &sdk.Tool{
-		Name:        "cancel_approval",
-		Description: "Withdraws a request of yours that waits for a person (for example when the user changed their mind). A decided or done request can't be cancelled.",
-		Annotations: writes("Cancel an approval request", false, true),
-		InputSchema: inputSchema[cancelApprovalInput](nil),
-	}, t.cancelApproval)
 	t.addChangeTools(s)
 }
 
@@ -187,6 +174,9 @@ func actionEnum() []any {
 	}
 	return out
 }
+
+// refusedHint is what an assistant does when Rowsafe refuses a change.
+const refusedHint = "If Rowsafe refuses (it says why), nothing changed: tell the user the reason and what they can do; if there's no backup yet, offer to run_backup and try again once it finished. "
 
 // requestChangeDescription lists the catalog by group, in catalog order.
 func requestChangeDescription() string {
@@ -199,12 +189,11 @@ func requestChangeDescription() string {
 		byGroup[a.Group] = append(byGroup[a.Group], a.Name+" ("+a.Title+")")
 	}
 	var b strings.Builder
-	b.WriteString("Makes a change to production, exactly like the dashboard's button. By default it runs right away as the person who connected you, with exactly their rights in the dashboard (like a CLI token), and returns the result in this call (status approved, done right away). ")
-	b.WriteString("It waits for an owner or admin instead when your team chose \"Ask me first\", when the person who connected you is a member, or when a safety net needs a person (it says why: no backup yet, a first payment only an owner makes, a server key to compare, over the agents' budget); then show the user the approval link it returns. You can't approve. ")
-	b.WriteString("Only make a change the user asked for or agreed to, and confirm a disruptive, destructive or paid one with the user in chat first, saying what will happen and what it costs. ")
+	b.WriteString("Makes a change to production, exactly like the dashboard's button, right away as the person who connected you, with exactly their rights in the dashboard (like a CLI token). It returns the result in this call: approved (done) or failed (with why). ")
+	b.WriteString("Only make a change the user asked for or agreed to, and before a disruptive, destructive or paid one, tell the user in chat what will happen (and what it costs) and get their OK. ")
+	b.WriteString(refusedHint)
 	b.WriteString("Call describe_change for an action's params. Most destructive or disruptive actions need params.confirm = the database's name (or a hostname), as each action's description says. reason is recorded with the change, labeled as yours. ")
-	b.WriteString("The cloud actions cost money (cloud_catalog shows regions, sizes and prices; leave database empty for create_cloud_server). Rowsafe saves a Mark before risky changes, as for a person. ")
-	b.WriteString("When it waits for a person, wait_seconds waits for the decision; once done, follow the tasks with get_task. Actions by group: ")
+	b.WriteString("The cloud actions cost money (cloud_catalog shows regions, sizes and prices; leave database empty for create_cloud_server). Rowsafe saves a Mark before risky changes. Follow the tasks with get_task. Actions by group: ")
 	for i, g := range groups {
 		if i > 0 {
 			b.WriteString("; ")
@@ -320,7 +309,7 @@ func (t *tools) describeChange(ctx context.Context, _ *sdk.CallToolRequest, in d
 		return nil, DescribeChangeOutput{}, err
 	}
 	b.line("%s (%s, risk %s): %s", a.Name, a.Title, a.Risk, a.Description)
-	b.line("Rowsafe calls %s %s as the person who connected you (or, when it waits for a person, as the person who approves it).", a.Method, a.Path)
+	b.line("Rowsafe calls %s %s as the person who connected you.", a.Method, a.Path)
 	if o, err := t.c.Org(ctx); err == nil {
 		b.line("%s", autonomyFor(o.AgentAutonomy, a))
 	}
@@ -343,104 +332,91 @@ func (t *tools) describeChange(ctx context.Context, _ *sdk.CallToolRequest, in d
 		if slices.Contains(pathParams(a), "server") {
 			what = "server's"
 		}
-		b.line("Destructive: confirm with the user in chat first. When it runs right away, Rowsafe types the %s name for you and records that it did; when it waits for a person, they type it to approve.", what)
+		b.line("Destructive: confirm with the user in chat first. Rowsafe types the %s name for you and records that it did.", what)
 	}
 	schema, _ := json.Marshal(ca.ParamsSchema)
 	b.line("params schema: %s", schema)
 	return text(b), DescribeChangeOutput{Actions: []ChangeAction{ca}}, nil
 }
 
-// autonomyFor says whether a can run right away under the org's agent
-// setting, so the assistant can tell the user before making it.
+// autonomyFor says how a runs under the org's agent setting, and what would
+// make Rowsafe refuse it, so the assistant can tell the user before making
+// it.
 func autonomyFor(s *protocol.AgentAutonomy, a protocol.ApprovalAction) string {
-	level := protocol.AutonomyAsk
-	if s != nil && s.Level != "" {
-		level = protocol.NormalizeAutonomyLevel(s.Level)
+	if s == nil {
+		s = &protocol.AgentAutonomy{}
 	}
-	if !protocol.AutonomyMayCover(level, a.Name) {
-		if slices.Contains(protocol.AutonomyPersonActions, a.Name) {
-			return "It always waits for an owner or admin: a person compares the server's key with the one Rowsafe shows."
+	if slices.Contains(protocol.AutonomyPersonActions, a.Name) {
+		return "AI agents can't make it: a person compares the server's key with the one Rowsafe shows, so the user does it in the Rowsafe dashboard."
+	}
+	level := protocol.NormalizeAutonomyLevel(cmpOr(s.Level, protocol.AutonomyDefault))
+	who := "the person who connected you"
+	if s.ActingAs != "" {
+		who = s.ActingAs + " (who connected you)"
+	}
+	var out []string
+	if level == protocol.AutonomyBudget && protocol.AutonomyMayCover(level, a.Name) {
+		line := "In this organization any AI agent may make it on behalf of the owner who chose the agents' budget"
+		if a.Name != "create_cloud_server" {
+			line += ", on a Rowsafe Cloud server an AI agent created this way"
 		}
-		return "In this organization it waits for an owner or admin to approve it (get_org shows the agent setting)."
-	}
-	var ifs []string
-	if s.BudgetCents != nil {
-		ifs = append(ifs, fmt.Sprintf("it would take the agents' servers over the %s monthly budget (%s a month now)", dollars(*s.BudgetCents), dollars(s.SpendCents)))
-	}
-	if level == protocol.AutonomyAct && s.AsksFirst {
-		return "You were connected before AI agents could act as the person who connected them: it waits for an owner or admin to approve it (get_org says how to let you act)."
-	}
-	if level == protocol.AutonomyAct {
-		who := "the person who connected you"
-		if s.ActingAs != "" {
-			who = s.ActingAs + " (who connected you)"
+		var ifs []string
+		if s.BudgetCents != nil {
+			ifs = append(ifs, fmt.Sprintf("it stays within the %s monthly budget (%s a month now)", dollars(*s.BudgetCents), dollars(s.SpendCents)))
 		}
-		ifs = append([]string{who + " isn't an owner or admin now"}, ifs...)
 		if a.CostsMoney {
-			ifs = append(ifs, "it needs a first payment and they aren't an owner (an owner gets the checkout link)")
+			ifs = append(ifs, "it needs no checkout")
 		}
-		if a.Risk == protocol.RiskDestructive {
-			ifs = append(ifs, "Rowsafe has no backup of the database yet")
+		if len(ifs) > 0 {
+			line += ", if " + strings.Join(ifs, " and ")
 		}
-		if a.Name == "create_app_database" {
-			ifs = append(ifs, "the password must be made for a person (remote endpoint)")
-		}
-		ifs = append(ifs, "Rowsafe finds another reason a person should decide (it says why)")
-		return fmt.Sprintf("In this organization AI agents act as the person who connected them: request_change makes it right away as %s, with their rights in the dashboard, unless %s. Confirm it with the user before making it.", who, strings.Join(ifs, ", or "))
+		out = append(out, line+".")
 	}
-	line := "In this organization an owner let AI agents make this change on their own: request_change runs it right away unless "
+	if s.AsksFirst {
+		person := "the person who connected you"
+		if s.ActingAs != "" {
+			person = s.ActingAs
+		}
+		out = append(out, fmt.Sprintf("You were connected before AI agents could act as the person who connected them, so Rowsafe refuses your changes as them until %s lets you act (Settings → Connected apps or API keys) or connects you again (get_org).", person))
+		return strings.Join(out, " ")
+	}
+	refuses := []string{"they aren't an owner or admin now (members can't make changes in the dashboard either)"}
+	if s.BudgetCents != nil && level == protocol.AutonomyAct {
+		refuses = append(refuses, fmt.Sprintf("it would take the agents' servers over the %s monthly budget (%s a month now)", dollars(*s.BudgetCents), dollars(s.SpendCents)))
+	}
 	if a.CostsMoney {
-		ifs = append(ifs, "it needs a checkout")
+		refuses = append(refuses, "it needs a first payment and they aren't an owner (an owner gets the checkout link)")
 	}
-	if level == protocol.AutonomyBudget && (a.Name == "cloud_firewall" || a.Name == "clone_to_new_server" || a.Name == "create_app_database") {
-		ifs = append(ifs, "the server wasn't created by an AI agent on its own")
+	if a.Risk == protocol.RiskDestructive {
+		refuses = append(refuses, "Rowsafe has no backup of the database yet (take one with run_backup, then try again)")
 	}
 	if a.Name == "create_app_database" {
-		ifs = append(ifs, "the password must be made for the person (remote endpoint)")
+		refuses = append(refuses, "the password must be made in the user's browser (MySQL, MariaDB, ClickHouse, or the remote endpoint): the user creates it in the dashboard")
 	}
-	ifs = append(ifs, "Rowsafe finds another reason a person should decide (it says why)")
-	return line + strings.Join(ifs, ", or ") + ". Tell the user before asking that it will happen right away."
+	runs := "It runs"
+	if len(out) > 0 {
+		runs = "Otherwise it runs"
+	}
+	line := fmt.Sprintf("%s right away as %s, with their rights in the dashboard. Rowsafe refuses it, and says why, if %s.", runs, who, strings.Join(refuses, ", or if "))
+	if a.Risk != protocol.RiskNormal || a.CostsMoney {
+		line += " Confirm it with the user before making it."
+	}
+	return strings.Join(append(out, line), " ")
 }
 
 // ---- request_change ----
 
-// approvalState marks a request_change retry after the client was asked to
-// open the approval link (multi round-trip): the request is already filed.
-const approvalState = "approval:"
-
-// retrying: the client calls a change tool again after it was asked to
-// open the approval link (multi round-trip).
-func retrying(req *sdk.CallToolRequest) bool {
-	return req != nil && req.Params != nil && strings.HasPrefix(req.Params.RequestState, approvalState)
-}
-
-func (t *tools) requestChange(ctx context.Context, req *sdk.CallToolRequest, in requestChangeInput) (*sdk.CallToolResult, ApprovalOutput, error) {
-	if !retrying(req) && strings.TrimSpace(in.Action) == "create_app_database" {
+func (t *tools) requestChange(ctx context.Context, _ *sdk.CallToolRequest, in requestChangeInput) (*sdk.CallToolResult, ApprovalOutput, error) {
+	if strings.TrimSpace(in.Action) == "create_app_database" {
 		return nil, ApprovalOutput{}, errors.New("use the create_app_database tool for this: it makes the password without Rowsafe seeing it and gives you the connection string")
 	}
-	return t.fileChange(ctx, req, in.Action, in.Database, in.Params, in.Reason, in.WaitSeconds)
+	return t.fileChange(ctx, in.Action, in.Database, in.Params, in.Reason)
 }
 
-// fileChange files a change (POST /v1/approvals) and reports it: done right
-// away, or waiting for a person (then it asks the client to open the
-// approval link when it can). request_change and the direct change tools
-// (change_tools.go) share it.
-func (t *tools) fileChange(ctx context.Context, req *sdk.CallToolRequest, action, database string, in map[string]any, reason string, wait int) (*sdk.CallToolResult, ApprovalOutput, error) {
-	if retrying(req) {
-		// The client opened (or declined to open) the approval link; the
-		// request was filed on the first call. Report it, never file again.
-		id := strings.TrimPrefix(req.Params.RequestState, approvalState)
-		a, err := t.c.Approval(ctx, id)
-		if err != nil {
-			return nil, ApprovalOutput{}, fmt.Errorf("change request %s was filed, but reading it failed: %w", id, apiError(err))
-		}
-		lead := requestLead(a)
-		if r, ok := req.Params.InputResponses["open_approval"].(*sdk.ElicitResult); ok && r != nil && r.Action != "accept" {
-			lead += " The user didn't open the approval link here; give it to them."
-		}
-		return t.reportApproval(ctx, a, wait, lead)
-	}
-
+// fileChange makes a change (POST /v1/approvals) and reports it: done or
+// failed, or refused with the reason (an error). request_change and the
+// direct change tools (change_tools.go) share it.
+func (t *tools) fileChange(ctx context.Context, action, database string, in map[string]any, reason string) (*sdk.CallToolResult, ApprovalOutput, error) {
 	act, ok := protocol.FindApprovalAction(strings.TrimSpace(action))
 	if !ok {
 		return nil, ApprovalOutput{}, fmt.Errorf("unknown action %q: describe_change lists the changes you can make", action)
@@ -465,30 +441,7 @@ func (t *tools) fileChange(ctx context.Context, req *sdk.CallToolRequest, action
 	if err != nil {
 		return nil, ApprovalOutput{}, approvalError(err)
 	}
-	lead := requestLead(a)
-	if a.Status == protocol.ApprovalPending && a.URL != "" {
-		// Ask the client to open the approval page (URL elicitation).
-		open := &sdk.ElicitParams{
-			Mode:          "url",
-			Message:       fmt.Sprintf("Rowsafe: approve or deny \"%s\"%s in the dashboard. Nothing changes until it is approved.", a.Title, onDatabase(a)),
-			URL:           a.URL,
-			ElicitationID: a.ID,
-		}
-		switch t.urlElicitation(req) {
-		case elicitRoundTrip:
-			// The client opens it and calls again with RequestState, which
-			// reports this request (above) instead of filing another.
-			return &sdk.CallToolResult{InputRequests: sdk.InputRequestMap{"open_approval": open}, RequestState: approvalState + a.ID}, ApprovalOutput{}, nil
-		case elicitInBand:
-			ectx, cancel := context.WithTimeout(ctx, t.opts.MaxWait)
-			r, err := req.Session.Elicit(ectx, open)
-			cancel()
-			if err != nil || r.Action != "accept" {
-				lead += " The user didn't open the approval link here; give it to them."
-			}
-		}
-	}
-	return t.reportApproval(ctx, a, wait, lead)
+	return t.reportApproval(a, requestLead(a))
 }
 
 // actedAsPerson: done right away as the person who connected the agent
@@ -497,43 +450,24 @@ func actedAsPerson(a protocol.Approval) bool {
 	return a.Automatic && strings.HasPrefix(a.Note, "Done right away as ")
 }
 
-// requestLead is the first line about a change just filed: done right away,
-// or waiting for a person.
+// requestLead is the first line about a change just made.
 func requestLead(a protocol.Approval) string {
+	ok := a.Status == protocol.ApprovalApproved
 	switch {
-	case actedAsPerson(a) && a.Status == protocol.ApprovalApproved:
+	case actedAsPerson(a) && ok:
 		return fmt.Sprintf("Done: %s, as %s (you act with their rights in the dashboard).", approvalSubject(a), ownerOf(a.DecidedBy))
 	case actedAsPerson(a):
-		return fmt.Sprintf("Tried right away as %s, and it failed: %s.", ownerOf(a.DecidedBy), approvalSubject(a))
+		return fmt.Sprintf("Tried as %s, and it failed: %s.", ownerOf(a.DecidedBy), approvalSubject(a))
+	case a.Automatic && ok:
+		return fmt.Sprintf("Done within the budget an owner set for AI agents: %s.", approvalSubject(a))
 	case a.Automatic:
-		return fmt.Sprintf("Done right away, without waiting for a person (within the budget an owner set for AI agents): %s.", approvalSubject(a))
+		return fmt.Sprintf("Tried within the budget an owner set for AI agents, and it failed: %s.", approvalSubject(a))
+	case ok:
+		return fmt.Sprintf("Done: %s.", approvalSubject(a))
+	case a.Status == protocol.ApprovalFailed:
+		return fmt.Sprintf("It failed: %s.", approvalSubject(a))
 	}
-	return fmt.Sprintf("Waiting for a person to approve: %s.", approvalSubject(a))
-}
-
-const (
-	elicitNone      = iota
-	elicitInBand    // elicitation/create during the call (protocol before 2026-07-28)
-	elicitRoundTrip // input_required result, the client calls again (2026-07-28 and later)
-)
-
-// urlElicitation says how this session can ask the client to open a URL.
-// The remote endpoint is stateless: it has no channel for an in-band request.
-func (t *tools) urlElicitation(req *sdk.CallToolRequest) int {
-	if req == nil || req.Session == nil {
-		return elicitNone
-	}
-	ip := req.Session.InitializeParams()
-	if ip == nil || ip.Capabilities == nil || ip.Capabilities.Elicitation == nil || ip.Capabilities.Elicitation.URL == nil {
-		return elicitNone
-	}
-	switch {
-	case ip.ProtocolVersion >= "2026-07-28":
-		return elicitRoundTrip
-	case t.opts.Remote:
-		return elicitNone
-	}
-	return elicitInBand
+	return fmt.Sprintf("Not done: %s.", approvalSubject(a))
 }
 
 // checkParams catches unknown params and missing path params before filing.
@@ -565,23 +499,42 @@ func checkParams(a protocol.ApprovalAction, params map[string]any) error {
 	return nil
 }
 
-// approvalError is apiError, plus what a 404 can mean here: a control
-// plane from before approvals has no /v1/approvals.
+// approvalError is apiError, with what a refusal means here: Rowsafe
+// refuses an agent's change (403) with the reason, which the assistant
+// tells the user; 503 and 429 are worth trying again; a control plane from
+// before agents could make changes has no /v1/approvals (404).
 func approvalError(err error) error {
-	if isStatus(err, http.StatusNotFound) {
-		return fmt.Errorf("%w. If the names are right, this Rowsafe server may not have approvals yet: the user makes the change in the dashboard instead", apiError(err))
+	var ae *client.APIError
+	if errors.As(err, &ae) {
+		switch ae.Status {
+		case http.StatusForbidden:
+			return fmt.Errorf("Rowsafe refused this change, and nothing changed: %s Tell the user why and what they can do (as it says). If it says there's no backup yet, offer to take one (run_backup) and try again once it finished. Don't try to get around it", sentence(ae.Msg))
+		case http.StatusServiceUnavailable, http.StatusTooManyRequests:
+			return fmt.Errorf("nothing changed (%d): %s Try again in a minute", ae.Status, sentence(ae.Msg))
+		case http.StatusNotFound:
+			return fmt.Errorf("%w. If the names are right, this Rowsafe server may not take changes from AI agents yet: the user makes the change in the dashboard instead", apiError(err))
+		}
 	}
 	return apiError(err)
 }
 
-// ---- get, list, cancel ----
+// sentence ends s with a full stop when it has no ending punctuation.
+func sentence(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.ContainsAny(s[len(s)-1:], ".!?") {
+		return s
+	}
+	return s + "."
+}
+
+// ---- get, list ----
 
 func (t *tools) getApproval(ctx context.Context, _ *sdk.CallToolRequest, in approvalIDInput) (*sdk.CallToolResult, ApprovalOutput, error) {
 	a, err := t.c.Approval(ctx, in.ID)
 	if err != nil {
 		return nil, ApprovalOutput{}, apiError(err)
 	}
-	return t.reportApproval(ctx, a, in.WaitSeconds, "")
+	return t.reportApproval(a, "")
 }
 
 func (t *tools) listApprovals(ctx context.Context, _ *sdk.CallToolRequest, in listApprovalsInput) (*sdk.CallToolResult, ApprovalsOutput, error) {
@@ -592,25 +545,17 @@ func (t *tools) listApprovals(ctx context.Context, _ *sdk.CallToolRequest, in li
 	out := ApprovalsOutput{Approvals: []ApprovalView{}}
 	var b textBuilder
 	if len(list) == 0 {
-		b.line("No approval requests%s.", map[bool]string{true: " that are " + in.Status, false: ""}[in.Status != ""])
+		b.line("No changes by AI agents%s.", map[bool]string{true: " that are " + in.Status, false: ""}[in.Status != ""])
 	}
 	for _, a := range list {
 		out.Approvals = append(out.Approvals, approvalView(a))
-		line := fmt.Sprintf("%s  %s  %s (%s)%s, asked by %s at %s", a.ID, a.Status, a.Title, a.Action, onDatabase(a), a.RequestedBy, a.CreatedAt.UTC().Format(time.RFC3339))
-		if a.DecidedBy != "" {
-			line += ", decided by " + a.DecidedBy
+		line := fmt.Sprintf("%s  %s  %s (%s)%s, by %s at %s", a.ID, a.Status, a.Title, a.Action, onDatabase(a), a.RequestedBy, a.CreatedAt.UTC().Format(time.RFC3339))
+		if a.DecidedBy != "" && (a.Status == protocol.ApprovalApproved || a.Status == protocol.ApprovalFailed) {
+			line += ", as " + ownerOf(a.DecidedBy)
 		}
 		b.line("%s", line)
 	}
 	return text(b), out, nil
-}
-
-func (t *tools) cancelApproval(ctx context.Context, _ *sdk.CallToolRequest, in cancelApprovalInput) (*sdk.CallToolResult, ApprovalOutput, error) {
-	a, err := t.c.CancelApproval(ctx, in.ID)
-	if err != nil {
-		return nil, ApprovalOutput{}, apiError(err)
-	}
-	return t.reportApproval(ctx, a, 0, "Withdrew the request.")
 }
 
 // fixAsk ends the line that tells the user how to apply a finding's fixes:
@@ -628,47 +573,14 @@ func (t *tools) fixAsk(findingID string, fixes []protocol.FindingFix) string {
 
 // ---- reporting ----
 
-// approvalPoll is how often a wait re-reads an approval request.
-var approvalPoll = 2 * time.Second
-
-// reportApproval optionally waits for a decision, then reports a with what
-// to do next.
-func (t *tools) reportApproval(ctx context.Context, a protocol.Approval, waitSeconds int, lead string) (*sdk.CallToolResult, ApprovalOutput, error) {
-	a, err := t.waitApproval(ctx, a, waitSeconds)
-	if err != nil {
-		return nil, ApprovalOutput{}, err
-	}
+// reportApproval reports a with what to do next.
+func (t *tools) reportApproval(a protocol.Approval, lead string) (*sdk.CallToolResult, ApprovalOutput, error) {
 	var b textBuilder
 	if lead != "" {
 		b.line("%s", lead)
 	}
 	writeApproval(&b, a)
 	return text(b), ApprovalOutput{Approval: approvalView(a)}, nil
-}
-
-// waitApproval waits up to waitSeconds (bounded by MaxWait) while a is
-// pending.
-func (t *tools) waitApproval(ctx context.Context, a protocol.Approval, waitSeconds int) (protocol.Approval, error) {
-	if waitSeconds > 0 && a.Status == protocol.ApprovalPending {
-		deadline := time.Now().Add(min(time.Duration(waitSeconds)*time.Second, t.opts.MaxWait, maxWaitLimit))
-		for a.Status == protocol.ApprovalPending {
-			left := time.Until(deadline)
-			if left <= 0 {
-				break
-			}
-			select {
-			case <-ctx.Done():
-				return a, fmt.Errorf("stopped waiting (approval request %s is still there; follow it with get_approval): %w", a.ID, ctx.Err())
-			case <-time.After(min(approvalPoll, left)):
-			}
-			next, err := t.c.Approval(ctx, a.ID)
-			if err != nil {
-				return a, fmt.Errorf("reading approval request %s failed: %w", a.ID, apiError(err))
-			}
-			a = next
-		}
-	}
-	return a, nil
 }
 
 func onDatabase(a protocol.Approval) string {
@@ -690,29 +602,17 @@ func approvalSubject(a protocol.Approval) string {
 func writeApproval(b *textBuilder, a protocol.Approval) {
 	b.line("%s: %s%s. Risk: %s. Status: %s.", a.ID, a.Title, onDatabase(a), a.Risk, a.Status)
 	for _, d := range a.Details {
-		b.line("  Will change: %s", d)
+		b.line("  Changes: %s", d)
 	}
 	switch a.Status {
-	case protocol.ApprovalPending:
-		if a.AutonomyNote != "" {
-			b.line("Not done right away: %s", a.AutonomyNote)
-		}
-		where := "Approvals in the Rowsafe dashboard"
-		if a.URL != "" {
-			where = a.URL
-		}
-		b.line("Nothing changes until an owner or admin of the organization approves it. Show the user this link to approve or deny it: %s", where)
-		if !a.ExpiresAt.IsZero() {
-			b.line("It expires at %s if nobody decides. Follow it with get_approval %s (with wait_seconds), and don't make the same change again meanwhile.", a.ExpiresAt.UTC().Format(time.RFC3339), a.ID)
-		}
 	case protocol.ApprovalApproved:
 		switch {
 		case actedAsPerson(a):
-			b.line("Done as %s%s, with their rights in the dashboard: no approval was needed (it's in the audit log and the owners' digest of what AI agents did). Tell the user what you did.", ownerOf(a.DecidedBy), decidedAt(a))
+			b.line("Done as %s%s, with their rights in the dashboard (it's in the audit log and the owners' digest of what AI agents did). Tell the user what you did.", ownerOf(a.DecidedBy), decidedAt(a))
 		case a.Automatic:
-			b.line("Approved automatically by %s's agent setting%s and run (no person decided; the owners are emailed about it). Tell the user what you did.", ownerOf(a.DecidedBy), decidedAt(a))
+			b.line("Done on behalf of %s, within the budget they set for AI agents%s (the owners are emailed about it). Tell the user what you did.", ownerOf(a.DecidedBy), decidedAt(a))
 		default:
-			b.line("Approved by %s%s and run.", a.DecidedBy, decidedAt(a))
+			b.line("Done as %s%s.", ownerOf(a.DecidedBy), decidedAt(a))
 		}
 		if r := a.Result; r != nil {
 			if r.Message != "" {
@@ -722,22 +622,17 @@ func writeApproval(b *textBuilder, a protocol.Approval) {
 				b.line("Tasks: %s. Follow them with get_task until they finish, then tell the user the outcome.", strings.Join(r.TaskIDs, ", "))
 			}
 			if r.CloudServerID != "" {
-				switch {
-				case r.CheckoutURL != "" && a.Automatic:
+				if r.CheckoutURL != "" {
 					b.line("Server %s waits for its first payment: give the user this checkout link (an owner of the organization pays there): %s. Nothing is created or billed before; once paid, it is created.", r.CloudServerID, r.CheckoutURL)
-				case r.CheckoutURL != "":
-					b.line("Server %s waits for payment: the person who approved was sent to the checkout (%s; an owner of the organization pays). Nothing is created or billed before; once paid, it is created.", r.CloudServerID, r.CheckoutURL)
 				}
 				b.line("Follow server %s with get_cloud_server (with wait_seconds) until it's ready, about 5 to 10 minutes once created.", r.CloudServerID)
 			}
 		}
 		if a.Action == "create_app_database" {
 			if a.NeedsBrowserKey {
-				b.line("The person who approved sees the new connection string once, in their browser, when the database is ready: ask them to put it in the app's environment (e.g. DATABASE_URL in .env), or to give it to you.")
-			} else if a.Automatic {
-				b.line("Once the task succeeded (get_task), the connection string create_app_database gave you works.")
+				b.line("The new connection string was shown once, in the browser of the person it ran as: ask the user for it if the app needs it.")
 			} else {
-				b.line("Once the task succeeded, the connection string create_app_database gave you works.")
+				b.line("Once the task succeeded (get_task), the connection string create_app_database gave you works.")
 			}
 		}
 	case protocol.ApprovalFailed:
@@ -745,24 +640,22 @@ func writeApproval(b *textBuilder, a protocol.Approval) {
 		if a.Result != nil && a.Result.Message != "" {
 			msg = a.Result.Message
 		}
-		by := a.DecidedBy
+		by := ownerOf(a.DecidedBy)
 		switch {
 		case actedAsPerson(a):
-			by = ownerOf(a.DecidedBy) + " (right away, as the person who connected you)"
+			by += " (as the person who connected you)"
 		case a.Automatic:
-			by = ownerOf(a.DecidedBy) + "'s agent setting (automatically)"
+			by += " (within the budget they set for AI agents)"
 		}
-		b.line("Approved by %s%s, but running it failed (HTTP %d): %s. Nothing was changed by this request unless the message says otherwise; tell the user.", by, decidedAt(a), resultStatus(a), msg)
-	case protocol.ApprovalDenied:
-		b.line("Denied by %s%s.", a.DecidedBy, decidedAt(a))
-		if a.Note != "" {
-			b.line("Their note: %s", a.Note)
+		b.line("Ran as %s%s, and it failed (HTTP %d): %s. Nothing was changed by it unless the message says otherwise; tell the user.", by, decidedAt(a), resultStatus(a), msg)
+	default:
+		// Earlier records, from when changes waited for a person: never run.
+		why := map[string]string{protocol.ApprovalDenied: "a person declined it", protocol.ApprovalExpired: "nobody decided in time",
+			protocol.ApprovalCancelled: "it was withdrawn", protocol.ApprovalPending: "it waited for a person"}[a.Status]
+		if why == "" {
+			why = "Rowsafe didn't run it"
 		}
-		b.line("Don't make this change again unless the user wants to.")
-	case protocol.ApprovalExpired:
-		b.line("Nobody decided in time, so it expired and nothing changed. Make it again only if the user still wants it.")
-	case protocol.ApprovalCancelled:
-		b.line("Cancelled; nothing changed.")
+		b.line("Not run (%s, from when AI agents' changes waited for a person), so nothing changed. Make the change again only if the user still wants it.", why)
 	}
 }
 

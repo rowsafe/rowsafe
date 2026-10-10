@@ -45,8 +45,9 @@ type clientKey struct{}
 // OAuth token the tools follow its scopes: read-only tools (describe_change,
 // get_approval and list_approvals included); create_restore_point with
 // rowsafe:marks; and with rowsafe:act every write tool, request_change
-// included (it asks a person to approve a change to production; it never
-// makes one). The API enforces the same scopes.
+// included (it makes a change to production as the person who connected
+// the app, or is refused with the reason). The API enforces the same
+// scopes.
 func NewHTTPHandler(api http.Handler, opts HTTPOptions) http.Handler {
 	if opts.MaxWait <= 0 {
 		opts.MaxWait = 45 * time.Second

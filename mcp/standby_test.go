@@ -91,7 +91,7 @@ func TestNoToolChangesStandby(t *testing.T) {
 		if tool.Name == "standby_status" {
 			found = true
 			txt := res.Content[0].(*sdk.TextContent).Text
-			if !strings.Contains(txt, "db-2:5432") || !strings.Contains(txt, "streaming") || !strings.Contains(txt, "made by a person") || !strings.Contains(txt, "request_change") {
+			if !strings.Contains(txt, "db-2:5432") || !strings.Contains(txt, "streaming") || !strings.Contains(txt, "the user's call") || !strings.Contains(txt, "request_change") {
 				t.Errorf("standby_status:\n%s", txt)
 			}
 		}

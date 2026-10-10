@@ -5,42 +5,48 @@ import (
 	"time"
 )
 
-// Approvals: AI assistants (MCP) and API keys can ask for any change the
-// dashboard makes to production (apply a fix, change settings, restart,
-// rewind, upgrade, promote a standby, ...), but only a person runs it.
+// AI agents' changes. The names say "approval" for compatibility, but
+// nothing waits for one (founder, 2026-10-10): an AI assistant (MCP), a
+// connected app or an API key makes any change the dashboard makes to
+// production (apply a fix, change settings, restart, rewind, upgrade,
+// promote a standby, ...) as the person who connected it (autonomy.go).
 //
-// POST /v1/approvals files a request for one of ApprovalActions. An owner or
-// admin opens its page in the dashboard (Approval.URL), reads what will
-// change, and approves or denies it. On approve, the control plane makes the
+// POST /v1/approvals asks for one of ApprovalActions. The control plane
+// checks it, writes up what will change (Details), and right away makes the
 // action's own API call as that person, exactly as the dashboard's button
-// does (same validation, confirmations and audit log), and stores the
-// outcome in Result. Nothing runs before a person approves, and an API key
-// or AI assistant can never approve, unless an owner turned on agent
-// autonomy (autonomy.go): then the control plane approves the request on
-// their behalf (Automatic) and runs it as them, within their limits.
+// does (same validation, confirmations and audit log): 201 with Status
+// approved (done; Result has the outcome and the tasks to follow) or failed
+// (Result.Message says why), Automatic set. Or it refuses with 403 and the
+// reason (a member, a key without a creator, a server key to compare, no
+// backup yet, over the budget, ...), and nothing is stored: the agent tells
+// its user why and what they can do. GET /v1/approvals lists what AI
+// agents did; the dashboard shows each at Approval.URL. No API key or AI
+// assistant can change what agents may do.
 
-// Approval states.
+// Approval states. Only approved and failed are made now; the others are
+// kept for records from before approvals were removed.
 const (
-	ApprovalPending   = "pending"
-	ApprovalApproved  = "approved"  // approved and run; Result has the outcome
-	ApprovalFailed    = "failed"    // approved, but the call failed (Result.Message says why)
-	ApprovalDenied    = "denied"    // a person said no (Note may say why)
-	ApprovalExpired   = "expired"   // nobody decided within ApprovalTTL
-	ApprovalCancelled = "cancelled" // withdrawn by whoever asked
+	ApprovalPending   = "pending"   // no longer made: nothing waits for a person
+	ApprovalApproved  = "approved"  // done; Result has the outcome
+	ApprovalFailed    = "failed"    // the call failed (Result.Message says why)
+	ApprovalDenied    = "denied"    // earlier records only: a person said no
+	ApprovalExpired   = "expired"   // earlier records only: nobody decided in time
+	ApprovalCancelled = "cancelled" // earlier records only: withdrawn
 )
 
-// ApprovalTTL is how long a request waits for a person.
+// ApprovalTTL is how long a request waited for a person, when requests
+// waited (earlier records only).
 const ApprovalTTL = 24 * time.Hour
 
-// How much an action can disturb production. The dashboard asks a person to
-// type the database's name to approve a destructive one.
+// How much an action can disturb production. An agent tells its user what
+// will happen and gets their OK before a disruptive or destructive one.
 const (
 	RiskNormal      = "normal"      // changes Rowsafe or a copy, not what apps see
 	RiskDisruptive  = "disruptive"  // apps may notice: a restart, a short pause, a switch
 	RiskDestructive = "destructive" // replaces or deletes data, or removes the way back
 )
 
-// ApprovalAction is one change an assistant can ask for.
+// ApprovalAction is one change an AI agent can make.
 type ApprovalAction struct {
 	Name        string `json:"name"`
 	Title       string `json:"title"`       // "Restart the database"
@@ -57,16 +63,16 @@ type ApprovalAction struct {
 	// params say.
 	Fixed map[string]any `json:"fixed,omitempty"`
 	Risk  string         `json:"risk"`
-	// CostsMoney: approving it adds to the organization's bill (a new
-	// Rowsafe Cloud server, a bigger size). The dashboard always asks the
-	// person first and shows the price.
+	// CostsMoney: it adds to the organization's bill (a new Rowsafe Cloud
+	// server, a bigger size). An agent tells its user the price and gets
+	// their OK first.
 	CostsMoney bool `json:"costs_money,omitempty"`
 	// Body is a zero value of the request body's type (nil: no body), for
 	// documentation and input schemas.
 	Body any `json:"-"`
 }
 
-// ApprovalActions are every change an assistant can ask a person to approve.
+// ApprovalActions are every change an AI agent can make as its person.
 // It is the single list: the control plane only runs these, and the MCP
 // tools document them from here.
 var ApprovalActions = []ApprovalAction{
@@ -120,11 +126,11 @@ var ApprovalActions = []ApprovalAction{
 
 	// Standby servers.
 	{Name: "create_standby", Group: "standby", Title: "Create a standby", Method: "POST", Path: "/v1/databases/{ref}/standby", Risk: RiskNormal, Body: CreateStandbyRequest{},
-		Description: "Sets up a standby server that follows the database, ready to take over."},
+		Description: "Sets up a standby server that follows the database, ready to take over. " + personOnly},
 	{Name: "promote_standby", Group: "standby", Title: "Fail over to the standby", Method: "POST", Path: "/v1/databases/{ref}/standby/promote", Risk: RiskDisruptive, Body: PromoteStandbyRequest{},
 		Description: "Makes the standby the primary (the old primary is fenced). Apps must reconnect to the new primary. confirm is the database's name."},
 	{Name: "rebuild_standby", Group: "standby", Title: "Rebuild the standby", Method: "POST", Path: "/v1/databases/{ref}/standby/rebuild", Risk: RiskNormal, Body: RebuildStandbyRequest{},
-		Description: "Rebuilds a broken or lagging standby from scratch."},
+		Description: "Rebuilds a broken or lagging standby from scratch. " + personOnly},
 	{Name: "remove_standby", Group: "standby", Title: "Remove the standby", Method: "POST", Path: "/v1/databases/{ref}/standby/remove", Risk: RiskDestructive, Body: StandbyConfirmRequest{},
 		Description: "Stops and removes the standby; the database has no standby afterwards. confirm is the database's name."},
 	{Name: "unfence", Group: "standby", Title: "Start the fenced old primary", Method: "POST", Path: "/v1/databases/{ref}/standby/unfence", Risk: RiskDisruptive, Body: UnfenceRequest{},
@@ -136,7 +142,7 @@ var ApprovalActions = []ApprovalAction{
 
 	// Moving a database to another server.
 	{Name: "move_database", Group: "move", Title: "Move to another server", Method: "POST", Path: "/v1/databases/{ref}/move", Risk: RiskNormal, Body: MoveRequest{},
-		Description: "Starts moving the database to another server: Rowsafe builds a copy there that follows production. Nothing switches until move_switch."},
+		Description: "Starts moving the database to another server: Rowsafe builds a copy there that follows production. Nothing switches until move_switch. " + personOnly},
 	{Name: "move_schedule", Group: "move", Title: "Schedule the switch of a move", Method: "POST", Path: "/v1/databases/{ref}/move/schedule", Risk: RiskDisruptive, Body: MoveScheduleRequest{},
 		Description: "Sets when a move switches apps to the new server."},
 	{Name: "move_switch", Group: "move", Title: "Switch to the new server now", Method: "POST", Path: "/v1/databases/{ref}/move/switch", Risk: RiskDisruptive, Body: StandbyConfirmRequest{},
@@ -148,7 +154,7 @@ var ApprovalActions = []ApprovalAction{
 	{Name: "move_finish", Group: "move", Title: "Finish a move", Method: "POST", Path: "/v1/databases/{ref}/move/finish", Risk: RiskDestructive, Body: MoveFinishRequest{},
 		Description: "Ends a move and stops the old server for good (no switching back). confirm is the old server's hostname."},
 	{Name: "fork_database", Group: "move", Title: "Fork the database", Method: "POST", Path: "/v1/databases/{ref}/forks", Risk: RiskNormal, Body: CreateForkRequest{},
-		Description: "Makes an independent new database from this one at a point in time (now, a second or a Mark), on this or another server."},
+		Description: "Makes an independent new database from this one at a point in time (now, a second or a Mark), on this or another server. " + personOnly},
 
 	// Connection pooling and security.
 	{Name: "pooling_on", Group: "security", Title: "Turn on connection pooling", Method: "PUT", Path: "/v1/databases/{ref}/pooling", Risk: RiskNormal, Body: PoolingRequest{},
@@ -164,8 +170,8 @@ var ApprovalActions = []ApprovalAction{
 	{Name: "create_app_database", Group: "data", Title: "Create a database for an app", Method: "POST", Path: "/v1/databases/{ref}/dbadmin",
 		Fixed: map[string]any{"action": DBAdminCreateDatabase, "create_owner": true}, Risk: RiskNormal, Body: AppDatabaseParams{},
 		Description: "Creates a new, empty database and a new user that owns it, on a Rowsafe Cloud server's PostgreSQL (15 or newer), MySQL, MariaDB or ClickHouse, for the app you are building. Only that user (and the server's admins) can connect to the new database; existing databases and users are untouched, and it is backed up with the rest of the server. " +
-			"The password never passes through Rowsafe: for PostgreSQL use the create_app_database tool, which makes it on the user's machine and sends only its verifier, so you get the full connection string at once (it works once a person approves); " +
-			"for MySQL, MariaDB and ClickHouse, and on the remote endpoint, the person who approves sees the connection string once, in their browser, and gives it to you. " +
+			"The password never passes through Rowsafe: for PostgreSQL use the create_app_database tool, which makes it on the user's machine and sends only its verifier, so you get the full connection string at once; " +
+			"for MySQL, MariaDB and ClickHouse, and on the remote endpoint, the password must be made in the user's browser, so the user creates it in the dashboard (Databases & users) and gives you the connection string. " +
 			"Valkey has no separate databases: a login for the app is made in the dashboard (Databases & users)."},
 	{Name: "manage_databases_users", Group: "data", Title: "Create or remove databases and users", Method: "POST", Path: "/v1/databases/{ref}/dbadmin", Risk: RiskDisruptive, Body: DBAdminParams{},
 		Description: "Creates a database for an existing owner, removes a database or user, or turns an extension on or off, on the database server (list_databases_on_server shows them). Removing a database saves a Mark first. Turning on vector (pgvector), postgis (PostGIS) or timescaledb (TimescaleDB, Apache-2.0 edition) installs its package first where root allowed PostgreSQL updates; timescaledb is loaded when PostgreSQL starts, so it needs restart: true (Rowsafe saves a Mark, then restarts PostgreSQL once: apps are disconnected for a few seconds; tell the user first). Anything that makes a password (a new user, a new owner, a password reset) is for people only, in the dashboard: the password is shown only to them. For a new database and login for the app you are building, use create_app_database."},
@@ -184,9 +190,9 @@ var ApprovalActions = []ApprovalAction{
 	{Name: "create_cloud_server", Group: "cloud", Title: "Create a Rowsafe Cloud server", Method: "POST", Path: "/v1/cloud/servers",
 		Fixed: map[string]any{"where": "rowsafe"}, Risk: RiskNormal, CostsMoney: true, Body: CreateCloudServerParams{},
 		Description: "Creates a new server in Rowsafe Cloud with PostgreSQL (the default), MySQL, MariaDB, Valkey, ClickHouse or Qdrant (engine, engine_version: cloud_catalog lists them), protected by Rowsafe from the start (backups, Proof, Pulse), for the region and size you choose from cloud_catalog. " +
-			"It costs money: the person approving sees the size, the price per hour and the most it costs a month (a standby doubles it). " +
-			"Where pay as you go isn't active yet, the person pays at a checkout right after approving and the server is created once paid. " +
-			"get_approval then shows the server's ID; get_cloud_server follows it until it's ready (about 5 to 10 minutes)."},
+			"It costs money: tell the user the size, the price per hour and the most it costs a month (a standby doubles it), and get their OK first. " +
+			"Where pay as you go isn't active yet, an owner pays at a checkout (the result has the link) and the server is created once paid. " +
+			"The result shows the server's ID; get_cloud_server follows it until it's ready (about 5 to 10 minutes)."},
 	{Name: "cloud_firewall", Group: "cloud", Title: "Change who can connect", Method: "PUT", Path: "/v1/cloud/servers/{server}/firewall", Risk: RiskDisruptive, Body: CloudFirewallParams{},
 		Description: "Sets who can connect to a Rowsafe Cloud server's database (its firewall): allowed_ips replaces the whole list. Apps connecting from an address that is no longer listed are cut off. server is the server's name or ID (list_cloud_servers)."},
 	{Name: "resize_cloud_server", Group: "cloud", Title: "Change a Rowsafe Cloud server's size", Method: "POST", Path: "/v1/cloud/servers/{server}/resize",
@@ -196,15 +202,18 @@ var ApprovalActions = []ApprovalAction{
 	{Name: "clone_to_new_server", Group: "cloud", Title: "Clone to a new Rowsafe Cloud server", Method: "POST", Path: "/v1/databases/{ref}/clone",
 		Fixed: map[string]any{"where": "rowsafe"}, Risk: RiskNormal, CostsMoney: true, Body: CloneToNewServerParams{},
 		Description: "Copies a PostgreSQL database as it was now, at a second or at a Mark onto a brand-new Rowsafe Cloud server billed by the hour (production is untouched). " +
-			"The clone holds real data and costs money until it's deleted: set delete_after_hours to have Rowsafe delete it. get_approval shows the new server's ID."},
+			"The clone holds real data and costs money until it's deleted: set delete_after_hours to have Rowsafe delete it. The result shows the new server's ID."},
 	{Name: "delete_cloud_server", Group: "cloud", Title: "Delete a Rowsafe Cloud server", Method: "DELETE", Path: "/v1/cloud/servers/{server}", Risk: RiskDestructive, Body: DeleteCloudServerParams{},
 		Description: "Deletes a Rowsafe Cloud server and stops its bill. Its backups stay in Rowsafe Storage while the database stays in Rowsafe, but the server and anything not backed up are gone. " +
-			"The person approving types the server's name, and Rowsafe refuses unless the backup passphrase was saved (clones excepted)."},
+			"Rowsafe types the server's name as the confirmation, and refuses unless the backup passphrase was saved (clones excepted)."},
 
 	// Alerts.
 	{Name: "alert_rule", Group: "alerts", Title: "Change an alert rule", Method: "PUT", Path: "/v1/alert-rules/{rule}", Risk: RiskNormal, Body: UpdateAlertRuleRequest{},
 		Description: "Turns an alert rule on or off or changes its threshold, how long it must last, or its severity (list_alerts shows the rules)."},
 }
+
+// personOnly ends the actions in AutonomyPersonActions.
+const personOnly = "AI agents can't do this: it needs a person to compare the server's key, so the user does it in the Rowsafe dashboard."
 
 // FindApprovalAction returns the action with that name.
 func FindApprovalAction(name string) (ApprovalAction, bool) {
@@ -225,13 +234,13 @@ type CreateApprovalRequest struct {
 	// Params holds the action's path parameters and body fields as one
 	// JSON object.
 	Params json.RawMessage `json:"params,omitempty"`
-	// Reason says why, in the assistant's words. The dashboard shows it
-	// labeled as the assistant's, next to what Rowsafe itself says will
-	// change.
+	// Reason says why, in the assistant's words. The record of what AI
+	// agents did shows it labeled as the assistant's, next to what Rowsafe
+	// itself says changed.
 	Reason string `json:"reason"`
 }
 
-// ApprovalResult is what running an approved action returned.
+// ApprovalResult is what running the action returned.
 type ApprovalResult struct {
 	HTTPStatus int    `json:"http_status"`
 	Message    string `json:"message,omitempty"` // the error, or a one-line summary
@@ -241,14 +250,13 @@ type ApprovalResult struct {
 	// (create_cloud_server, clone_to_new_server): follow it with
 	// GET /v1/cloud/servers/{id}.
 	CloudServerID string `json:"cloud_server_id,omitempty"`
-	// CheckoutURL: the server waits for payment. The dashboard sends the
-	// person who approved to it (an owner pays); the server is created once
-	// paid.
+	// CheckoutURL: the server waits for payment at this checkout (an owner
+	// pays); the server is created once paid.
 	CheckoutURL string          `json:"checkout_url,omitempty"`
 	Body        json.RawMessage `json:"body,omitempty"` // the API's response (truncated)
 }
 
-// Approval is a request for a person to approve a change.
+// Approval is a change an AI agent made (the record of what AI agents did).
 type Approval struct {
 	ID         string `json:"id"` // apr_...
 	Action     string `json:"action"`
@@ -256,8 +264,8 @@ type Approval struct {
 	Group      string `json:"group"`
 	Risk       string `json:"risk"`
 	CostsMoney bool   `json:"costs_money,omitempty"` // the action's CostsMoney
-	// NeedsBrowserKey: approving needs the person's browser key
-	// (DecideApprovalRequest.PublicKey, ApprovalNeedsBrowserKey).
+	// NeedsBrowserKey: it needs the person's browser key
+	// (ApprovalNeedsBrowserKey), so an agent's request is refused.
 	NeedsBrowserKey bool   `json:"needs_browser_key,omitempty"`
 	DatabaseID      string `json:"database_id,omitempty"`
 	Database        string `json:"database,omitempty"`
@@ -273,28 +281,28 @@ type Approval struct {
 	RequestedBy string     `json:"requested_by"` // e.g. "app:oc_1 (Claude)" or "key:k_1 (laptop)"
 	Status      string     `json:"status"`
 	CreatedAt   time.Time  `json:"created_at"`
-	ExpiresAt   time.Time  `json:"expires_at"`
+	ExpiresAt   time.Time  `json:"expires_at"` // earlier records only
 	DecidedAt   *time.Time `json:"decided_at,omitempty"`
 	DecidedBy   string     `json:"decided_by,omitempty"`
-	Note        string     `json:"note,omitempty"` // the person's note when denying
-	// Result is set once an approved action ran.
+	Note        string     `json:"note,omitempty"` // who it ran as, or (earlier records) a person's note
+	// Result is set once the action ran.
 	Result *ApprovalResult `json:"result,omitempty"`
-	// URL is the dashboard page where a person approves it (when the
-	// control plane knows the dashboard's address).
+	// URL is the record's page in the dashboard (<app>/ai/actions/<id>),
+	// when the control plane knows the dashboard's address.
 	URL string `json:"url,omitempty"`
 	// Automatic: run right away by the organization's agent setting
-	// (AgentAutonomy), without a person deciding, as DecidedBy: the person
-	// who connected the agent (act), or the owner who chose the budget
-	// level. Note says which.
+	// (AgentAutonomy) as DecidedBy: the person who connected the agent
+	// (act), or the owner who chose the budget level. Note says which.
+	// Every record made now has it.
 	Automatic bool `json:"automatic,omitempty"`
-	// AutonomyNote says why a request from an AI agent was not run right
-	// away although agents may act on their own in this organization (over
-	// the budget, needs a checkout, ...); "" otherwise.
+	// AutonomyNote is set on earlier records only: why an agent's request
+	// waited for a person (refused now, with the reason, instead).
 	AutonomyNote string `json:"autonomy_note,omitempty"`
 }
 
-// DecideApprovalRequest is POST /v1/approvals/{id}/approve (and deny).
-// Only a person signed in to the dashboard (owner or admin) can decide.
+// DecideApprovalRequest was POST /v1/approvals/{id}/approve (and deny),
+// removed with approvals; the type is kept for compatibility and no longer
+// used.
 type DecideApprovalRequest struct {
 	// Confirm is the database's name (a Rowsafe Cloud server's for
 	// delete_cloud_server), required to approve a destructive action.
@@ -306,10 +314,10 @@ type DecideApprovalRequest struct {
 	PublicKey string `json:"public_key,omitempty"`
 }
 
-// ApprovalNeedsBrowserKey reports whether approving a needs the person's
-// browser key (DecideApprovalRequest.PublicKey): create_app_database filed
-// without a password verifier, whose password the agent makes and seals to
-// the person who approves.
+// ApprovalNeedsBrowserKey reports whether a needs the person's browser key:
+// create_app_database without a password verifier, whose password must be
+// made in the person's browser. An agent's request like that is refused:
+// the user creates it in the dashboard.
 func ApprovalNeedsBrowserKey(a Approval) bool {
 	if a.Action != "create_app_database" {
 		return false

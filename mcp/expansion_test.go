@@ -283,7 +283,7 @@ func TestNewReadToolsOnlyRead(t *testing.T) {
 		{"pooling_status", map[string]any{"database": "app"}, []string{"Connection pooling for app: on, answering", "postgresql://app@db1:6432/app"}},
 		{"pooling_status", map[string]any{"database": "mongo"}, []string{"Rowsafe doesn't offer connection pooling"}},
 		{"weekly_pulse", nil, []string{"Your weekly Pulse", "All 3 databases are protected."}},
-		{"list_forks", map[string]any{"database": "app"}, []string{"app-staging (fk_1): ready on db2", "action fork_database", "mi_1: syncing from rds rds.example.com:5432 (live), 4 of 4 tables"}},
+		{"list_forks", map[string]any{"database": "app"}, []string{"app-staging (fk_1): ready on db2", "the user makes one in the Rowsafe dashboard", "mi_1: syncing from rds rds.example.com:5432 (live), 4 of 4 tables"}},
 		{"get_preview", map[string]any{"database": "app"}, []string{"pv_1 (0042_orders.sql): careful. Rewrites orders."}},
 		{"list_safe_copies", map[string]any{"database": "app", "masking": true}, []string{"mask 1 columns", "public.users.email: email", "action masking_rules"}},
 		{"find_moment", map[string]any{"database": "app", "list_searches": true}, []string{"t_m (succeeded): 1,204 rows deleted"}},

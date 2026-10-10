@@ -18,8 +18,8 @@ const pulseFixPrompt = `Fix what Pulse found on DATABASE.
 
 1. Call database_health for DATABASE (and recommendations for what it suggests beyond health). List the findings that have a fix Rowsafe can apply, worst first: for each, what is wrong, what the fix does, whether it is disruptive, and its finding_id and fix_id. Leave out fixes that aren't available right now (say why).
 2. Ask me which ones to apply. Don't ask for any I didn't pick.
-3. For each one I pick, call request_change with action apply_fix, database DATABASE, params {"finding_id": ..., "fix_id": ...} (plus "confirm": the database's name when the fix asks for one) and a one-sentence reason in my words. It runs right away as me, or, when it waits for a person, show me the approval link.
-4. Follow each with get_task (or get_approval with wait_seconds 60 while it waits) and tell me how each went; if one was denied or failed, say so and stop there. Finally call database_health again and tell me the new score.`
+3. For each one I pick, call request_change with action apply_fix, database DATABASE, params {"finding_id": ..., "fix_id": ...} (plus "confirm": the database's name when the fix asks for one) and a one-sentence reason in my words. It runs right away as me; if Rowsafe refuses one, tell me why.
+4. Follow each with get_task and tell me how each went; if one was refused or failed, say so and stop there. Finally call database_health again and tell me the new score.`
 
 func addPrompts(s *sdk.Server) {
 	s.AddPrompt(&sdk.Prompt{

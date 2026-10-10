@@ -97,7 +97,7 @@ func (f *cloudAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.t.Errorf("decoding %s: %v", body, err)
 		}
 		f.filed = append(f.filed, req)
-		a := pendingApproval(req)
+		a := approvalRecord(req)
 		a.Details = []string{"Create a database for an app on shop-db"}
 		a.NeedsBrowserKey = protocol.ApprovalNeedsBrowserKey(a)
 		w.WriteHeader(http.StatusCreated)
@@ -123,7 +123,7 @@ func TestCloudCatalog(t *testing.T) {
 		"size medium (Medium): 4 CPUs, 8 GB memory, 80 GB disk, $0.035 an hour, at most $25 a month; only in fsn1",
 		"OVHcloud Value (a subscription per server, paid before it is created)", "$12 a month",
 		"Pay as you go isn't active yet", "Cheapest free now: Hetzner size small in fsn1 ($0.014 an hour, at most $10 a month)",
-		"request_change create_cloud_server",
+		"make it with create_cloud_server",
 	} {
 		if !strings.Contains(txt, want) {
 			t.Errorf("missing %q in\n%s", want, txt)
@@ -179,10 +179,10 @@ func TestCloudServers(t *testing.T) {
 		t.Fatalf("%s %v", b, err)
 	}
 
-	// With writes allowed, the next steps are requests.
+	// With writes allowed, the next steps are changes the agent makes.
 	cs = connect(t, f, Options{AllowWrites: true, MaxWait: time.Second}, nil)
 	txt, _ = callText(t, cs, "get_cloud_server", map[string]any{"server": "shop-db"})
-	if !strings.Contains(txt, "request_change cloud_firewall") || !strings.Contains(txt, "create_app_database with database shop-db") || !strings.Contains(txt, "never in code or git") {
+	if !strings.Contains(txt, "use cloud_firewall") || !strings.Contains(txt, "create_app_database with database shop-db") || !strings.Contains(txt, "never in code or git") {
 		t.Errorf("ready: %s", txt)
 	}
 	if _, res := callText(t, cs, "get_cloud_server", map[string]any{"server": "nope"}); !res.IsError {
@@ -234,7 +234,7 @@ func TestCreateAppDatabaseLocal(t *testing.T) {
 	if again, _ := client.SCRAMVerifier(password, salt, n); again != p.PasswordVerifier {
 		t.Fatal("the verifier isn't the password's")
 	}
-	for _, want := range []string{"Connection string (shown once, works once the database is created): postgresql://shop:", "DATABASE_URL in .env", "never in code", "get_approval apr_1", "https://app.rowsafe.test/approvals/apr_1"} {
+	for _, want := range []string{"Connection string (shown once, works once the database is created): postgresql://shop:", "DATABASE_URL in .env", "never in code", "get_task", "Done as ana@example.com"} {
 		if !strings.Contains(txt, want) {
 			t.Errorf("missing %q in\n%s", want, txt)
 		}
@@ -260,53 +260,48 @@ func TestCreateAppDatabaseLocal(t *testing.T) {
 	}
 }
 
-// On the remote endpoint nothing makes a password: the person who approves
-// gets it.
+// On the remote endpoint nothing makes a password: the password must be
+// made in the user's browser, so the tool refuses and says where the user
+// does it; nothing is sent.
 func TestCreateAppDatabaseRemote(t *testing.T) {
 	f := &cloudAPI{t: t, servers: []string{cloudServerJSON("ready", "Ready", nil)}}
 	cs := connect(t, f, Options{AllowWrites: true, Remote: true, MaxWait: time.Second}, nil)
 	txt, res := callText(t, cs, "create_app_database", map[string]any{"database": "shop-db", "name": "shop", "owner": "shop_app", "reason": "For the shop app."})
-	if res.IsError {
-		t.Fatal(txt)
+	for _, want := range []string{"must be made in the user's browser", "Databases & users", "local `rowsafe mcp --allow-writes`",
+		"postgresql://shop_app@x7kq2mfa3pzd.cloud.rowsafe.sh:5432/shop?sslmode=require"} {
+		if !res.IsError || !strings.Contains(txt, want) {
+			t.Errorf("missing %q (error %v) in %s", want, res.IsError, txt)
+		}
 	}
-	_, filed := f.snapshot()
-	if len(filed) != 1 || strings.Contains(string(filed[0].Params), "verifier") || strings.Contains(string(filed[0].Params), "password") {
+	if _, filed := f.snapshot(); len(filed) != 0 {
 		t.Fatalf("filed %+v", filed)
 	}
-	var out AppDatabaseOutput
-	b, _ := json.Marshal(res.StructuredContent)
-	if err := json.Unmarshal(b, &out); err != nil || out.DatabaseURL != "" || out.Connection != "postgresql://shop_app@x7kq2mfa3pzd.cloud.rowsafe.sh:5432/shop?sslmode=require" {
-		t.Fatalf("%s %v", b, err)
-	}
-	if !strings.Contains(txt, "their browser shows them the connection string once") {
-		t.Errorf("guidance: %s", txt)
-	}
 
-	// Approved: the person saw it.
-	a := pendingApproval(filed[0])
-	a.Status, a.DecidedBy, a.NeedsBrowserKey = protocol.ApprovalApproved, "dashboard:ada@example.com", true
+	// An earlier record whose password a person's browser got.
+	a := approvalRecord(protocol.CreateApprovalRequest{Action: "create_app_database", Database: "shop-db", Params: json.RawMessage(`{"database":"shop"}`)})
+	a.NeedsBrowserKey = true
 	a.Result = &protocol.ApprovalResult{HTTPStatus: 202, Message: "Done: Rowsafe queued a task.", TaskIDs: []string{"task_9"}}
 	f.mu.Lock()
 	f.decided = &a
 	f.mu.Unlock()
 	txt, _ = callText(t, cs, "get_approval", map[string]any{"id": "apr_1"})
-	if !strings.Contains(txt, "task_9") || !strings.Contains(txt, "sees the new connection string once, in their browser") {
-		t.Errorf("approved: %s", txt)
+	if !strings.Contains(txt, "task_9") || !strings.Contains(txt, "shown once, in the browser of the person it ran as") {
+		t.Errorf("done: %s", txt)
 	}
 }
 
-// get_approval tells the assistant which server an approval created, and
-// that it waits for payment.
+// get_approval tells the assistant which server a change created, and that
+// it waits for payment.
 func TestApprovalCreatedServer(t *testing.T) {
 	f := &cloudAPI{t: t, servers: []string{cloudServerJSON("payment", "", nil)}}
-	a := pendingApproval(protocol.CreateApprovalRequest{Action: "create_cloud_server", Params: json.RawMessage(`{"name":"shop-db","region":"fsn1","size":"small"}`)})
-	a.Status, a.DecidedBy, a.CostsMoney = protocol.ApprovalApproved, "dashboard:ada@example.com", true
-	a.Result = &protocol.ApprovalResult{HTTPStatus: 200, Message: "Approved: it waits for payment.", CloudServerID: "cs_1",
+	a := approvalRecord(protocol.CreateApprovalRequest{Action: "create_cloud_server", Params: json.RawMessage(`{"name":"shop-db","region":"fsn1","size":"small"}`)})
+	a.CostsMoney = true
+	a.Result = &protocol.ApprovalResult{HTTPStatus: 200, Message: "It waits for payment.", CloudServerID: "cs_1",
 		CheckoutURL: "https://app.rowsafe.test/api/rowsafe-cloud/checkout/cs_1", Body: json.RawMessage(`{"checkout_url":"https://x","server":{"id":"cs_1"}}`)}
 	f.decided = &a
 	cs := connect(t, f, Options{AllowWrites: true, MaxWait: time.Second}, nil)
 	txt, res := callText(t, cs, "get_approval", map[string]any{"id": "apr_1"})
-	for _, want := range []string{"Server cs_1 waits for payment", "/api/rowsafe-cloud/checkout/cs_1", "Follow server cs_1 with get_cloud_server"} {
+	for _, want := range []string{"Server cs_1 waits for its first payment", "/api/rowsafe-cloud/checkout/cs_1", "Follow server cs_1 with get_cloud_server"} {
 		if !strings.Contains(txt, want) {
 			t.Errorf("missing %q in %s", want, txt)
 		}
@@ -319,7 +314,7 @@ func TestApprovalCreatedServer(t *testing.T) {
 }
 
 // describe_change explains the cloud actions: money, no database for a new
-// server, the server's name in params.server, the person types it to delete.
+// server, the server's name in params.server, Rowsafe types it to delete.
 func TestDescribeCloudChanges(t *testing.T) {
 	cs := connect(t, &cloudAPI{t: t, servers: []string{cloudServerJSON("ready", "Ready", nil)}}, Options{MaxWait: time.Second}, nil)
 	txt, _ := callText(t, cs, "describe_change", map[string]any{"action": "create_cloud_server"})

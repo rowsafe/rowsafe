@@ -30,9 +30,9 @@ type OrgView struct {
 	Limits        protocol.PlanLimits `json:"limits"`
 	Usage         protocol.OrgUsage   `json:"usage"`
 	PlanPeriodEnd *time.Time          `json:"plan_period_end,omitempty"`
-	// AgentAutonomy: whether changes you ask for run right away (an owner
-	// allowed it, within a budget or fully) or wait for a person.
-	AgentAutonomy *protocol.AgentAutonomy `json:"agent_autonomy,omitempty" jsonschema:"whether changes you make (request_change) run right away: level act (the default: as the person who connected you, acting_as, with their rights), budget (new servers within an owner's budget) or ask (a person approves each), with the optional monthly budget and what is left"`
+	// AgentAutonomy: how changes you make run (as whom, within what
+	// budget).
+	AgentAutonomy *protocol.AgentAutonomy `json:"agent_autonomy,omitempty" jsonschema:"how changes you make (request_change) run: level act (the default: right away as the person who connected you, acting_as, with their rights) or budget (also new Rowsafe Cloud servers within an owner's budget, on their behalf), with the optional monthly budget and what is left; asks_first: you can't make changes until acting_as lets you act"`
 }
 
 type HostView struct {
@@ -341,7 +341,7 @@ func nextStep(t protocol.TaskView, d TaskDetail) string {
 		}
 		switch {
 		case !d.Adopt.Applied:
-			return fmt.Sprintf("This is a read-only plan; nothing changed. Show it to the user. If they approve, they apply it: the Turn on backups button in the dashboard, or `rowsafe apply %s` (AI assistants can't). Applying never restarts the database server.", name)
+			return fmt.Sprintf("This is a read-only plan; nothing changed. Show it to the user. If they agree, it is applied with the Turn on backups button in the dashboard, `rowsafe apply %s`, or request_change turn_on_backups. Applying never restarts the database server.", name)
 		case d.Adopt.RestartRequired:
 			return fmt.Sprintf("Settings applied. The database server needs a restart for backups to start; the user restarts it when it suits them (Restart in the dashboard or `rowsafe restart %s` where Rowsafe can restart it, or on the server, e.g. sudo systemctl restart postgresql, mysql, mariadb or mongod, or in Docker: docker compose restart SERVICE). Rowsafe never restarts it on its own, and AI assistants can't. Rowsafe notices the restart and verifies by itself; `rowsafe verify %s` (tool verify_database) checks right away.", name, name)
 		default:

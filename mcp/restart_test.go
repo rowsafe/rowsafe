@@ -16,8 +16,9 @@ import (
 
 // AI assistants must never restart the database themselves: no tool may
 // queue a restart task, whatever arguments it gets. request_change may only
-// file an approval request for one (a person approves it in the dashboard),
-// and no tool decides an approval.
+// send the change request for one (the control plane runs it as the person
+// who connected the agent, through the dashboard's own call), and no tool
+// approves or denies anything.
 func TestNoToolRestartsPostgres(t *testing.T) {
 	var queued, filed atomic.Int32
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -32,7 +33,7 @@ func TestNoToolRestartsPostgres(t *testing.T) {
 				t.Errorf("filed %+v", req)
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(protocol.Approval{ID: "apr_1", Action: req.Action, Status: protocol.ApprovalPending})
+			_ = json.NewEncoder(w).Encode(protocol.Approval{ID: "apr_1", Action: req.Action, Status: protocol.ApprovalApproved})
 			return
 		}
 		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/tasks") {
@@ -95,6 +96,6 @@ func TestNoToolRestartsPostgres(t *testing.T) {
 		t.Fatal("no tool queued any task: the test doesn't reach the task endpoint")
 	}
 	if n := filed.Load(); n != 1 {
-		t.Fatalf("%d approval requests filed, want 1 (request_change)", n)
+		t.Fatalf("%d change requests filed, want 1 (request_change)", n)
 	}
 }

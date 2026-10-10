@@ -124,7 +124,7 @@ func assessDatabase(s dbState, host *protocol.Host, now time.Time) []Problem {
 	switch d.Status {
 	case protocol.DBPendingAdopt:
 		p := Problem{Severity: sevWarning, Kind: "not_adopted", Summary: "not protected yet: registered, but the adopt plan has not been applied",
-			NextAction: "Show the user the adopt plan (get_task on the latest adopt task, or re-plan with plan_adoption). Apply it only after explicit approval; applying never restarts " + eng + ".",
+			NextAction: "Show the user the adopt plan (get_task on the latest adopt task, or re-plan with plan_adoption). Apply it only once the user agrees; applying never restarts " + eng + ".",
 			Command:    fmt.Sprintf("rowsafe plan %s && rowsafe apply %s", q, q), Tool: "plan_adoption"}
 		if lt := latestTask(s.tasks, protocol.TaskAdopt); lt != nil {
 			p.TaskID = lt.ID
@@ -147,7 +147,7 @@ func assessDatabase(s dbState, host *protocol.Host, now time.Time) []Problem {
 		add(Problem{Severity: sevWarning, Kind: "awaiting_restart", Summary: "settings applied; waiting for a " + eng + " restart, nothing is protected yet",
 			Detail: detail,
 			NextAction: "The user restarts " + eng + " when it suits them: " + restartWays(d) + ". " +
-				"Rowsafe never restarts it on its own; if the user wants you to start it, request_change (restart) asks them to approve it. Rowsafe notices the restart and verifies by itself; verify_database checks right away.",
+				"Rowsafe never restarts it on its own; if the user wants you to do it, request_change (restart) does it once they agree. Rowsafe notices the restart and verifies by itself; verify_database checks right away.",
 			Command: restartCommand(d),
 			Runbook: runbookURL})
 	case protocol.DBVerifying:

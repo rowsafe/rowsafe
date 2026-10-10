@@ -97,7 +97,7 @@ func TestNoToolRestoresFiles(t *testing.T) {
 		res, _ := cs.CallTool(ctx, &sdk.CallToolParams{Name: tool.Name, Arguments: in})
 		if tool.Name == "files_status" {
 			txt := res.Content[0].(*sdk.TextContent).Text
-			if !strings.Contains(txt, "/srv/app/storage: ok") || !strings.Contains(txt, "1204 files") || !strings.Contains(txt, "Never restore files yourself") {
+			if !strings.Contains(txt, "/srv/app/storage: ok") || !strings.Contains(txt, "1204 files") || !strings.Contains(txt, "Never restore files on your own") {
 				t.Errorf("files_status:\n%s", txt)
 			}
 		}

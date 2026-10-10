@@ -250,9 +250,9 @@ func (t *tools) featureDB(ctx context.Context, ref, feature, what string) (d pro
 	return d, "", nil
 }
 
-// requestChange is how an assistant asks a person for a change.
+// requestChange is how an assistant makes a change to production.
 func requestChange(action string) string {
-	return fmt.Sprintf("ask for it with request_change (action %s); a person approves it in the Rowsafe dashboard", action)
+	return fmt.Sprintf("make it with request_change (action %s) once the user agrees, or the user does it in the Rowsafe dashboard", action)
 }
 
 var linkRE = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^\s"'<>]+`)

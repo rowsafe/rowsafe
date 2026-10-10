@@ -719,8 +719,8 @@ type Org struct {
 	PolarSubscriptionID string     `json:"polar_subscription_id,omitempty"`
 	PlanPeriodEnd       *time.Time `json:"plan_period_end,omitempty"`
 	CreatedAt           time.Time  `json:"created_at"`
-	// AgentAutonomy is whether AI agents may act without approval, and
-	// within what budget (GET /v1/org fills it in).
+	// AgentAutonomy is how AI agents act in the organization, and within
+	// what budget (GET /v1/org fills it in).
 	AgentAutonomy *AgentAutonomy `json:"agent_autonomy,omitempty"`
 }
 
@@ -752,11 +752,11 @@ type APIKey struct {
 	// when ActsAsCreator.
 	CreatedBy string `json:"created_by,omitempty"`
 	// CreatedByKey is the name of the API key that created this one (its
-	// agents always ask first).
+	// agents can't make changes until the person lets it act).
 	CreatedByKey string `json:"created_by_key,omitempty"`
 	// ActsAsCreator: made after agents could act as their person (or the
-	// creator since let it: POST /v1/api-keys/{id}/act). Older keys ask
-	// first.
+	// creator since let it: POST /v1/api-keys/{id}/act). Older keys'
+	// changes are refused until then.
 	ActsAsCreator bool `json:"acts_as_creator"`
 }
 
