@@ -108,15 +108,21 @@ func (c *controlClient) complete(ctx context.Context, taskID string, req protoco
 
 // ---- setup (rowsafe-agent setup, run by the installer) ----
 
+// setupRegister is idempotent, so a control plane away for a moment is
+// asked again (transient.go).
 func (c *controlClient) setupRegister(ctx context.Context, req protocol.SetupRegisterRequest) (protocol.SetupDatabase, error) {
 	var resp protocol.SetupDatabase
-	err := c.post(ctx, "/v1/agent/setup/databases", req, &resp)
+	err := retryTransient(ctx, controlPlaneWait, func(ctx context.Context) error {
+		return c.post(ctx, "/v1/agent/setup/databases", req, &resp)
+	})
 	return resp, err
 }
 
 func (c *controlClient) setupList(ctx context.Context) ([]protocol.SetupDatabase, error) {
 	var resp protocol.SetupDatabaseList
-	err := c.get(ctx, "/v1/agent/setup/databases", &resp)
+	err := retryTransient(ctx, controlPlaneWait, func(ctx context.Context) error {
+		return c.get(ctx, "/v1/agent/setup/databases", &resp)
+	})
 	return resp.Databases, err
 }
 

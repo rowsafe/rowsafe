@@ -14,23 +14,31 @@ import (
 )
 
 // CheckControlPlane verifies the control plane is reachable and healthy.
+// A control plane away for a moment (a deploy: no connection, 502, 503) is
+// asked again for up to three minutes.
 func CheckControlPlane(ctx context.Context, cfg Config) error {
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.ControlURL+"/healthz", nil)
-	if err != nil {
-		return err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("healthz returned %d", resp.StatusCode)
-	}
-	return nil
+	return retryTransient(ctx, controlPlaneWait, func(ctx context.Context) error {
+		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.ControlURL+"/healthz", nil)
+		if err != nil {
+			return err
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return err
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return &httpError{Status: resp.StatusCode, Msg: fmt.Sprintf("healthz returned %d", resp.StatusCode)}
+		}
+		return nil
+	})
 }
+
+// controlPlaneWait is how long setup calls wait for a control plane that
+// is briefly away (transient.go).
+var controlPlaneWait = 3 * time.Minute
 
 // The running agent saves the databases it watches so a staged binary's
 // self-test can check it reaches the same Postgres clusters.

@@ -152,6 +152,10 @@ func (a *Agent) spoolCLI(stanza string) (pgbackrest.CLI, bool) {
 
 func (a *Agent) statePath() string { return filepath.Join(a.cfg.StateDir, "agent.json") }
 
+// enrollWait is how long the first enrollment waits for a control plane
+// that is briefly away.
+var enrollWait = 5 * time.Minute
+
 // ensureEnrolled loads saved credentials or enrolls with a one-time token.
 func (a *Agent) ensureEnrolled(ctx context.Context) error {
 	if data, err := os.ReadFile(a.statePath()); err == nil {
@@ -169,8 +173,15 @@ func (a *Agent) ensureEnrolled(ctx context.Context) error {
 		return fmt.Errorf("not enrolled: set ROWSAFE_ENROLL_TOKEN (create one with `rowsafe hosts enroll-token`)")
 	}
 	hostname, _ := os.Hostname()
-	resp, err := newControlClient(a.cfg.ControlURL, "").enroll(ctx, protocol.EnrollRequest{
-		Token: a.cfg.EnrollToken, Hostname: hostname, AgentVersion: Version,
+	var resp protocol.EnrollResponse
+	// A control plane away for a moment (a deploy) is asked again: the
+	// token stays unused until it answers (transient.go).
+	err := retryTransient(ctx, enrollWait, func(ctx context.Context) error {
+		var err error
+		resp, err = newControlClient(a.cfg.ControlURL, "").enroll(ctx, protocol.EnrollRequest{
+			Token: a.cfg.EnrollToken, Hostname: hostname, AgentVersion: Version,
+		})
+		return err
 	})
 	if err != nil {
 		return fmt.Errorf("enrolling: %w", err)
