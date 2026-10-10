@@ -3335,7 +3335,9 @@ qdrant_config() {
   echo "  snapshots_path: $QDRANT_DATA/snapshots"
   echo "  on_disk_payload: true"
   echo "service:"
-  echo "  host: $1"
+  # An IPv6 address is quoted: a plain :: isn't a YAML value, and Qdrant
+  # wouldn't start (an IPv4 one stays as before, so a re-run changes nothing).
+  case $1 in *:*) echo "  host: \"$1\"" ;; *) echo "  host: $1" ;; esac
   echo "  http_port: 6333"
   echo "  grpc_port: 6334"
   echo "  enable_tls: $2"
