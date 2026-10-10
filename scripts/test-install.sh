@@ -4416,6 +4416,16 @@ cloud_container() {
   expect_fail "--listen-public only with an install" "only go with an install" "$INSTALLER" --listen-public --check-storage
   [ ! -e /etc/rowsafe ] || fail "a refused option wrote /etc/rowsafe"
 
+  # Root's password must be changed at its first login, as Hetzner and
+  # DigitalOcean set it on a server created without an SSH key: PAM then
+  # refuses chfn to root, and `adduser --gecos` in postgresql-common's
+  # package script failed the whole install. The installer lifts it while
+  # it runs and requires it again when it ends, even when it fails.
+  root_lastchg() { awk -F: '$1 == "root" { print $3 }' /etc/shadow; }
+  chage -d 0 root
+  ! adduser --system --quiet --no-create-home --group --gecos "first-login probe" rowsafe-probe >/dev/null 2>&1 ||
+    fail "adduser --gecos worked with root's password expired: the test doesn't set up what clouds do"
+
   # PostgreSQL already here (binaries, a package): refused, nothing changed.
   mkdir -p /usr/lib/postgresql/15/bin
   printf '#!/bin/sh\n' >/usr/lib/postgresql/15/bin/postgres && chmod 755 /usr/lib/postgresql/15/bin/postgres
@@ -4423,6 +4433,10 @@ cloud_container() {
     "$INSTALLER" rse_secrettoken123 --no-prompt --install-postgres "$pgv"
   [ ! -e /etc/apt/sources.list.d/pgdg.list ] || fail "the repository was added despite the refusal"
   rm -rf /usr/lib/postgresql
+  grep -q "root's password must be changed at its first login (the cloud set it so): lifted while this installer installs packages" "$W/out" ||
+    fail "no word about root's first-login password change"
+  [ "$(root_lastchg)" = 0 ] || fail "root's first-login password change isn't required again after a failed run"
+  pass "root's first-login password change: lifted while the installer runs, required again after a failed run"
 
   # By --protect time on a real server the agent has enrolled and runs. A
   # stand-in agent: the postgres user and its state exist before the run
@@ -4449,7 +4463,10 @@ cloud_container() {
     sh -c 'w=$1; shift; ROWSAFE_RELEASES_URL=https://localhost:18443/agent ROWSAFE_RESTIC_URL=https://localhost:18443/restic sh -s -- "$@" <"$w/install.sh"' \
       cloud-init "$W" rse_secrettoken123 --no-prompt --install-postgres "$pgv" ${pgx:+--pg-extensions "$pgx"} --listen-public --storage rowsafe --protect shop
   }
+  chage -d 0 root # as the cloud set it (above)
   expect_ok "one run, as cloud-init: PostgreSQL, network, Rowsafe Storage, protected" cloud_init
+  [ "$(root_lastchg)" = 0 ] || fail "root's first-login password change isn't required again after the run"
+  grep -q "root's password must be changed at its first login" "$W/out" || fail "no word about root's first-login password change"
   [ -z "${TEST_SHOW:-}" ] || cat "$W/out"
   grep -q "the PostgreSQL project's repository (apt.postgresql.org, key B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8)" "$W/out" || fail "$name: no word about the repository"
   grep -qx "deb \[signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc\] https://apt.postgresql.org/pub/repos/apt $(. /etc/os-release && echo "$VERSION_CODENAME")-pgdg main" \
