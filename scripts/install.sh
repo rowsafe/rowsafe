@@ -1495,6 +1495,41 @@ pg_sql_in() {
   (cd / && runuser -u postgres -- psql -X -A -t -q -v ON_ERROR_STOP=1 -p "$1" -d "$2" -c "$3") </dev/null
 }
 
+# pg_preload_add PORT LIBRARY adds LIBRARY to shared_preload_libraries (the
+# others kept); false when it is there already. It loads at the next restart.
+pg_preload_add() {
+  _cur=$(pg_sql "$1" "SELECT setting FROM pg_settings WHERE name = 'shared_preload_libraries'") ||
+    die "could not read PostgreSQL's settings"
+  printf '%s\n' "$_cur" | tr ',' '\n' | tr -d ' "' | grep -qx "$2" && return 1
+  _lits=''
+  for _l in $(printf '%s' "$_cur" | tr ',' ' ' | tr -d '"'); do
+    printf '%s\n' "$_l" | grep -Eq '^[A-Za-z0-9_.$/-]+$' || die "unexpected library in shared_preload_libraries: $_l"
+    _lits="$_lits'$_l', "
+  done
+  pg_sql "$1" "ALTER SYSTEM SET shared_preload_libraries = ${_lits}'$2'" >/dev/null ||
+    die "could not add $2 to shared_preload_libraries"
+}
+
+# pg_stat_statements_setup turns on query statistics in the PostgreSQL
+# --install-postgres installed, so Pulse shows slow queries from the first
+# day: pg_stat_statements loaded at start (the new, empty PostgreSQL
+# restarted once for it) and created in the postgres database, where
+# Rowsafe reads it. A re-run changes nothing.
+pg_stat_statements_setup() {
+  _m=$INSTALL_PG
+  _port=$(pg_lsclusters -h 2>/dev/null | awk -v m="$_m" '$1 == m && $2 == "main" { print $3; exit }')
+  [ -n "$_port" ] || die "PostgreSQL $_m's main cluster isn't there"
+  if pg_preload_add "$_port" pg_stat_statements; then
+    pg_restart_cluster "$_m" main || die "PostgreSQL $_m doesn't start with pg_stat_statements loaded (see above)"
+    ok "pg_stat_statements loads when PostgreSQL starts (PostgreSQL restarted)"
+  fi
+  if [ "$(pg_sql "$_port" "SELECT count(*) FROM pg_extension WHERE extname = 'pg_stat_statements'")" = 0 ]; then
+    pg_sql "$_port" "SET search_path = pg_catalog, public; CREATE EXTENSION IF NOT EXISTS pg_stat_statements SCHEMA public" >/dev/null ||
+      die "turning on pg_stat_statements failed"
+    ok "query statistics are on (pg_stat_statements)"
+  fi
+}
+
 # pg_extensions_setup is --pg-extensions on the PostgreSQL --install-postgres
 # installed: the packages, TimescaleDB loaded at start (its telemetry off;
 # the new PostgreSQL restarted once for it) and each extension turned on in
@@ -1523,16 +1558,7 @@ pg_extensions_setup() {
   _changed=0
   case " $_names " in
     *" timescaledb "*)
-      _cur=$(pg_sql "$_port" "SELECT setting FROM pg_settings WHERE name = 'shared_preload_libraries'") ||
-        die "could not read PostgreSQL's settings"
-      if ! printf '%s\n' "$_cur" | tr ',' '\n' | tr -d ' "' | grep -qx timescaledb; then
-        _lits=''
-        for _l in $(printf '%s' "$_cur" | tr ',' ' ' | tr -d '"'); do
-          printf '%s\n' "$_l" | grep -Eq '^[A-Za-z0-9_.$/-]+$' || die "unexpected library in shared_preload_libraries: $_l"
-          _lits="$_lits'$_l', "
-        done
-        pg_sql "$_port" "ALTER SYSTEM SET shared_preload_libraries = ${_lits}'timescaledb'" >/dev/null ||
-          die "could not add TimescaleDB to shared_preload_libraries"
+      if pg_preload_add "$_port" timescaledb; then
         pg_restart_cluster "$_m" main || die "PostgreSQL $_m doesn't start with TimescaleDB loaded (see above)"
         ok "TimescaleDB loads when PostgreSQL starts (PostgreSQL restarted)"
         _changed=1
@@ -1595,6 +1621,7 @@ install_postgres() {
   fi
   PG_OURS=1
   pg_ensure_cluster "$_v" main
+  pg_stat_statements_setup
 }
 
 # pg_cluster_status MAJOR NAME prints the cluster's status (online, down...),
@@ -7531,6 +7558,26 @@ auto_security_updates() {
   fi
   systemd_running || note "systemd isn't running here: the list of what waits for a restart starts with it"
   ok "on: this server installs its security updates by itself every day; never $(engine_label)'s packages, never a restart of $(engine_label), never a reboot"
+}
+
+# asu_first_run is --auto-security-updates' first run, now: a new server
+# starts with the security fixes already out instead of waiting for the
+# daily run. The same unattended-upgrades and rules (security fixes only,
+# never the database's packages, no restart of it, no reboot); if it can't
+# finish, the daily run tries again.
+asu_first_run() {
+  # Only with Rowsafe's rules in place (asu_setup writes the marker last):
+  # without them unattended-upgrades could update the database's packages.
+  [ -f "$asu_conf" ] && [ -f "$asu_marker" ] && have unattended-upgrade || return 0
+  step "Installing the security updates that are out already"
+  [ -n "${APT_UPDATED:-}" ] || apt_update
+  apt_lock_wait
+  if timeout 1800 unattended-upgrade >"$TMP/uu.log" 2>&1 </dev/null; then
+    ok "security updates installed"
+  else
+    tail -n 5 "$TMP/uu.log" | sed 's/^/    /' >&2
+    warn "installing the security updates now didn't finish; the daily run tries again"
+  fi
 }
 
 # remove_auto_security_updates removes Rowsafe's files for automatic
@@ -14894,7 +14941,7 @@ install_agent() {
   sqlite_setup # sqlite
   install_logrotate
   case $AUTO_SECURITY in
-    yes) auto_security_updates ;;
+    yes) auto_security_updates && asu_first_run ;;
     no) remove_auto_security_updates ;;
     *) [ ! -f "$asu_marker" ] || auto_security_updates ;; # a re-run refreshes Rowsafe's files
   esac

@@ -80,10 +80,11 @@
 #      changes).
 #  12. servers Rowsafe creates (--cloud, a separate run): one non-interactive
 #      run as cloud-init does it (--no-prompt --install-postgres 17
-#      --listen-public --storage rowsafe --protect shop) installs real
-#      PostgreSQL from apt.postgresql.org (signing key checked), makes it
-#      reachable with TLS and SCRAM only, generates the passphrase, protects it
-#      (the new PostgreSQL restarted once); a re-run changes nothing; a server
+#      --listen-public --storage rowsafe --protect shop --auto-security-updates)
+#      installs real PostgreSQL from apt.postgresql.org (signing key checked)
+#      with query statistics on, makes it reachable with TLS and SCRAM only,
+#      generates the passphrase, protects it (the new PostgreSQL restarted
+#      once), installs the security updates out already; a re-run changes nothing; a server
 #      with PostgreSQL already is refused. Then the same with --install-mysql
 #      8.4 (Debian 12, amd64), --install-mariadb 11.8 (Debian 13) and 11.4
 #      (Debian 12), --install-valkey 8 (Debian 12 and 13) and
@@ -4620,7 +4621,8 @@ cloud_container() {
   pgx=${TEST_PG_EXTENSIONS-vector,postgis,timescaledb}
   cloud_init() {
     sh -c 'w=$1; shift; ROWSAFE_RELEASES_URL=https://localhost:18443/agent ROWSAFE_RESTIC_URL=https://localhost:18443/restic sh -s -- "$@" <"$w/install.sh"' \
-      cloud-init "$W" rse_secrettoken123 --no-prompt --install-postgres "$pgv" ${pgx:+--pg-extensions "$pgx"} --listen-public --storage rowsafe --protect shop
+      cloud-init "$W" rse_secrettoken123 --no-prompt --install-postgres "$pgv" ${pgx:+--pg-extensions "$pgx"} --listen-public --storage rowsafe --protect shop \
+      --auto-security-updates
   }
   chage -d 0 root # as the cloud set it (above)
   expect_ok "one run, as cloud-init: PostgreSQL, network, Rowsafe Storage, protected" cloud_init
@@ -4653,6 +4655,17 @@ cloud_container() {
   ! grep -qF "$gen" "$W/out" || fail "$name: the passphrase was printed"
   ! grep -q rse_secrettoken123 "$W/out" || fail "$name: the token was printed"
   pass "PostgreSQL $pgv from apt.postgresql.org, listening with TLS and SCRAM, protected, passphrase kept on the server"
+  # Query statistics from the first day: loaded at start, created in postgres.
+  q 'SHOW shared_preload_libraries' | tr ',' '\n' | tr -d ' ' | grep -qx pg_stat_statements || fail "$name: pg_stat_statements isn't loaded at start"
+  [ "$(q "SELECT count(*) FROM pg_extension WHERE extname = 'pg_stat_statements'")" = 1 ] || fail "$name: pg_stat_statements isn't on in postgres"
+  [ "$(q 'SELECT count(*) > 0 FROM pg_stat_statements')" = t ] || fail "$name: pg_stat_statements records nothing"
+  pass "query statistics on (pg_stat_statements)"
+  # Rowsafe Cloud's automatic security updates: set up, and their first run now, not tomorrow.
+  [ -f /etc/apt/apt.conf.d/52rowsafe-unattended-upgrades ] && [ -f /etc/rowsafe/auto-security-updates ] || fail "$name: automatic security updates aren't set up"
+  grep -q "Installing the security updates that are out already" "$W/out" || fail "$name: no first run of the security updates"
+  grep -q -e "security updates installed" -e "the daily run tries again" "$W/out" || fail "$name: the first run of the security updates didn't end"
+  pg_lsclusters -h | awk -v m="$pgv" '$1 == m && $2 == "main" && $4 ~ /^online/ { f = 1 } END { exit !f }' || fail "$name: PostgreSQL isn't running after the security updates"
+  pass "automatic security updates on, first run done at setup"
   [ -z "$pgx" ] || cloud_pg_extension_checks
 
   # From the network: TLS and a password, nothing else.
@@ -4728,6 +4741,7 @@ cloud_pg_extension_checks() {
   case ",$pgx," in
     *,timescaledb,*)
       q 'SHOW shared_preload_libraries' | tr ',' '\n' | tr -d ' ' | grep -qx timescaledb || fail "$name: TimescaleDB isn't loaded at start"
+      q 'SHOW shared_preload_libraries' | tr ',' '\n' | tr -d ' ' | grep -qx pg_stat_statements || fail "$name: TimescaleDB replaced pg_stat_statements"
       [ "$(q 'SHOW timescaledb.telemetry_level')" = off ] || fail "$name: TimescaleDB's telemetry is $(q 'SHOW timescaledb.telemetry_level')"
       [ "$(q 'SHOW timescaledb.license')" = apache ] || fail "$name: TimescaleDB's license is $(q 'SHOW timescaledb.license')"
       dpkg-query -W -f '${Version}' "postgresql-$pgv-timescaledb" | grep -q pgdg || fail "$name: TimescaleDB isn't the PostgreSQL project's package"
