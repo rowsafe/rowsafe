@@ -38,6 +38,7 @@ func cloudCmd(ctx context.Context, c *client.Client, args []string) error {
 		"sizes": cloudSizes, "create": cloudCreate, "list": cloudList, "ls": cloudList, "show": cloudShow,
 		"wait": cloudWait, "resize": cloudResize, "allow": cloudAllow, "firewall": cloudFirewall,
 		"delete": cloudDelete, "passphrase": cloudPassphrase, "clone": cloudClone, "retry": cloudRetry,
+		"maintenance": cloudMaintenanceCmd, "delete-after": cloudDeleteAfter,
 	}
 	if run, ok := subs[args[0]]; ok {
 		return run(ctx, c, args[1:])

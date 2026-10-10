@@ -22,6 +22,9 @@ proprietary (api.rowsafe.sh, app.rowsafe.sh).
   `proof`, `pulse`, `fix`, `rewind`, `restart`, `cloud`, `env`, `connect`, ...). `rowsafe help all`
   lists everything. `rowsafe cloud` acts directly on Rowsafe Cloud with a read-write key (money and
   deletions confirmed, `--yes` in scripts); `env`/`connect` never let a password pass through Rowsafe.
+  The CLI covers what the dashboard does with an API key (`security`, `security-updates`, `reboot`,
+  `alerts rules set`, `logs`, `log-destinations`, `cloud maintenance`, ...): new changes use
+  `confirm.go` (`--yes`; refused without a terminal) and offer `--json`.
 - `mcp/`: the MCP server (`rowsafe mcp`, also served remotely by the control plane). Read-only
   unless `--allow-restore-points` / `--allow-writes` (remote: OAuth scopes `rowsafe:marks` /
   `rowsafe:act`). Changes to production go through `request_change` (and the direct

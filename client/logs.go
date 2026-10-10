@@ -55,3 +55,34 @@ func (c *Client) LogGroups(ctx context.Context, ref string, q LogsQuery) (out pr
 func (c *Client) LogsOverview(ctx context.Context, ref string) (out protocol.LogsOverview, err error) {
 	return out, c.do(ctx, http.MethodGet, "/v1/databases/"+esc(ref)+"/logs/overview", nil, &out)
 }
+
+// UpdateLogSettings turns sending a database's logs to Rowsafe on or off,
+// and full text (literal values) on or off.
+func (c *Client) UpdateLogSettings(ctx context.Context, ref string, req protocol.UpdateLogSettingsRequest) (out protocol.LogSettings, err error) {
+	return out, c.do(ctx, http.MethodPatch, "/v1/databases/"+esc(ref)+"/logs/settings", req, &out)
+}
+
+// LogDestinations lists where the organization's logs are forwarded.
+func (c *Client) LogDestinations(ctx context.Context) (out []protocol.LogDestination, err error) {
+	return out, c.do(ctx, http.MethodGet, "/v1/log-destinations", nil, &out)
+}
+
+// CreateLogDestination adds one; a webhook's signing secret comes back once.
+func (c *Client) CreateLogDestination(ctx context.Context, req protocol.CreateLogDestinationRequest) (out protocol.LogDestination, err error) {
+	return out, c.do(ctx, http.MethodPost, "/v1/log-destinations", req, &out)
+}
+
+// UpdateLogDestination changes one; omitted fields are kept.
+func (c *Client) UpdateLogDestination(ctx context.Context, id string, req protocol.UpdateLogDestinationRequest) (out protocol.LogDestination, err error) {
+	return out, c.do(ctx, http.MethodPatch, "/v1/log-destinations/"+esc(id), req, &out)
+}
+
+// DeleteLogDestination removes one.
+func (c *Client) DeleteLogDestination(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/log-destinations/"+esc(id), nil, nil)
+}
+
+// TestLogDestination sends a test entry now.
+func (c *Client) TestLogDestination(ctx context.Context, id string) (out protocol.ChannelTestResult, err error) {
+	return out, c.do(ctx, http.MethodPost, "/v1/log-destinations/"+esc(id)+"/test", nil, &out)
+}

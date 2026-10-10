@@ -20,6 +20,14 @@ func alertsCmd(ctx context.Context, c *client.Client, args []string) error {
 		case "ack":
 			return alertsAck(ctx, c, args[1:])
 		case "rules":
+			if len(args) > 1 {
+				switch args[1] {
+				case "set":
+					return alertRulesSet(ctx, c, args[2:])
+				case "reset":
+					return alertRulesReset(ctx, c, args[2:])
+				}
+			}
 			return alertRulesList(ctx, c, args[1:])
 		}
 	}
@@ -101,12 +109,17 @@ func alertsAck(ctx context.Context, c *client.Client, args []string) error {
 }
 
 func alertRulesList(ctx context.Context, c *client.Client, args []string) error {
-	if _, err := parse(flag.NewFlagSet("alerts rules", flag.ContinueOnError), args, false); err != nil {
+	fs := flag.NewFlagSet("alerts rules", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "print JSON")
+	if _, err := parse(fs, args, false); err != nil {
 		return err
 	}
 	rules, err := c.AlertRules(ctx)
 	if err != nil {
 		return err
+	}
+	if *asJSON {
+		return printJSON(rules)
 	}
 	t := newTable("RULE", "ENABLED", "SEVERITY", "THRESHOLD", "FOR", "SCOPE", "TITLE")
 	for _, r := range rules {
@@ -124,7 +137,144 @@ func alertRulesList(ctx context.Context, c *client.Client, args []string) error 
 		t.row(r.Rule, enabled, r.Severity, th, (time.Duration(r.ForSeconds) * time.Second).String(), r.Scope, r.Title)
 	}
 	t.flush()
-	fmt.Println("\n* customized for this organization (change rules in the dashboard or with PUT /v1/alert-rules/RULE)")
+	fmt.Println("\n* customized for this organization (rowsafe alerts rules set RULE ..., or reset RULE)")
+	return nil
+}
+
+// alertRuleOverride is the organization's current override of r: the
+// fields that differ from the defaults (the API replaces the whole override).
+func alertRuleOverride(r protocol.AlertRule) protocol.UpdateAlertRuleRequest {
+	var req protocol.UpdateAlertRuleRequest
+	if !r.Enabled {
+		off := false
+		req.Enabled = &off
+	}
+	if r.Threshold != nil && (r.Defaults.Threshold == nil || *r.Threshold != *r.Defaults.Threshold) {
+		th := *r.Threshold
+		req.Threshold = &th
+	}
+	if r.ForSeconds != r.Defaults.ForSeconds {
+		f := r.ForSeconds
+		req.ForSeconds = &f
+	}
+	if r.Severity != "" && r.Severity != r.Defaults.Severity {
+		sev := r.Severity
+		req.Severity = &sev
+	}
+	return req
+}
+
+func findAlertRule(ctx context.Context, c *client.Client, name string) (protocol.AlertRule, error) {
+	rules, err := c.AlertRules(ctx)
+	if err != nil {
+		return protocol.AlertRule{}, err
+	}
+	var names []string
+	for _, r := range rules {
+		if r.Rule == name {
+			return r, nil
+		}
+		names = append(names, r.Rule)
+	}
+	return protocol.AlertRule{}, fmt.Errorf("no alert rule %q; the rules: %s", name, strings.Join(names, ", "))
+}
+
+func printAlertRule(r protocol.AlertRule) {
+	state := "on"
+	if !r.Enabled {
+		state = "off"
+	}
+	fmt.Printf("%s: %s, %s", r.Rule, state, r.Severity)
+	if r.Threshold != nil {
+		fmt.Printf(", threshold %s %s", strconv.FormatFloat(*r.Threshold, 'f', -1, 64), r.Unit)
+	}
+	fmt.Printf(", for %s", time.Duration(r.ForSeconds)*time.Second)
+	if r.Customized {
+		fmt.Print(" (customized)")
+	}
+	fmt.Println()
+}
+
+// alertRulesSet: rowsafe alerts rules set RULE [--on|--off] [--threshold N]
+// [--for 5m] [--severity warning|critical] [--json]. What isn't given stays.
+func alertRulesSet(ctx context.Context, c *client.Client, args []string) error {
+	fs := flag.NewFlagSet("alerts rules set", flag.ContinueOnError)
+	on := fs.Bool("on", false, "turn the rule on")
+	off := fs.Bool("off", false, "turn the rule off")
+	threshold := fs.Float64("threshold", 0, "the threshold, in the rule's unit")
+	dur := fs.Duration("for", 0, "how long it must last before the alert fires (e.g. 5m)")
+	severity := fs.String("severity", "", "warning or critical")
+	asJSON := fs.Bool("json", false, "print JSON")
+	pos, err := parseN(fs, args, "RULE")
+	if err != nil {
+		return err
+	}
+	if *on && *off {
+		return errors.New("--on or --off, not both")
+	}
+	r, err := findAlertRule(ctx, c, pos[0])
+	if err != nil {
+		return err
+	}
+	req := alertRuleOverride(r)
+	changed, noThreshold := false, false
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "on", "off":
+			v := *on
+			req.Enabled, changed = &v, true
+			if v {
+				req.Enabled = nil // on is the default
+			}
+		case "threshold":
+			if r.Threshold == nil && r.Defaults.Threshold == nil {
+				noThreshold = true
+				return
+			}
+			v := *threshold
+			req.Threshold, changed = &v, true
+		case "for":
+			v := int(dur.Seconds())
+			req.ForSeconds, changed = &v, true
+		case "severity":
+			v := *severity
+			req.Severity, changed = &v, true
+		}
+	})
+	if noThreshold {
+		return fmt.Errorf("%s has no threshold to change", r.Rule)
+	}
+	if !changed {
+		return errors.New("nothing to change: pass --on, --off, --threshold, --for or --severity")
+	}
+	out, err := c.UpdateAlertRule(ctx, r.Rule, req)
+	if err != nil {
+		return apiErr(err)
+	}
+	if *asJSON {
+		return printJSON(out)
+	}
+	printAlertRule(out)
+	return nil
+}
+
+// alertRulesReset: rowsafe alerts rules reset RULE [--json]: back to the
+// defaults.
+func alertRulesReset(ctx context.Context, c *client.Client, args []string) error {
+	fs := flag.NewFlagSet("alerts rules reset", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "print JSON")
+	pos, err := parseN(fs, args, "RULE")
+	if err != nil {
+		return err
+	}
+	out, err := c.UpdateAlertRule(ctx, pos[0], protocol.UpdateAlertRuleRequest{})
+	if err != nil {
+		return apiErr(err)
+	}
+	if *asJSON {
+		return printJSON(out)
+	}
+	printAlertRule(out)
 	return nil
 }
 

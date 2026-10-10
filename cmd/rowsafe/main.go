@@ -65,6 +65,15 @@ Rowsafe Cloud: PostgreSQL servers Rowsafe runs for you, billed by the hour (neve
                                              a copy of a database as it was then (default: now) on a new server
                                              billed by the hour, next to the source at its size by default
   rowsafe cloud retry [NAME] [--wait]        create a server that failed to set up again
+  rowsafe cloud delete-after [NAME] 24h|never
+                                             when Rowsafe deletes a clone (from now; never keeps it)
+  rowsafe cloud maintenance [NAME] [--json]  the weekly maintenance window: when, what it applies next, critical fixes
+  rowsafe cloud maintenance set [NAME] [--day sun] [--hour 3] [--timezone ZONE] [--on | --off] [--json]
+                                             move the window, or turn it off (critical fixes still go in once due)
+  rowsafe cloud maintenance postpone [NAME]  skip the next window, once
+  rowsafe cloud maintenance apply-now [NAME] [--yes] [--json]
+                                             apply what the next window would, now (a Mark first; asks you to type
+                                             the server's name)
   rowsafe cloud delete [NAME] [--with-standby] [--wait] [--yes]
                                              delete the server and the database on it (asks you to type the name)
   rowsafe env [DATABASE] [--on NAME] [--file .env] [--name DATABASE_URL] [--user USER] [--extension EXT]...
@@ -99,6 +108,8 @@ Rewind: continuous backups, restore to any second
                                              LABEL defaults to manual-<UTC time>. --json prints the Mark
                                              (status, restore_from_backup) for scripts and CI
   rowsafe marks [NAME]                       restore points
+  rowsafe storage [NAME] [--json]            what the backups take in each storage, the cost a month, the second
+                                             copy, and ways to spend less
   rowsafe set [NAME] [--retention-full N] [--full-schedule CRON] [--diff-schedule CRON] [--proof-schedule CRON]
                                              change retention and schedules (5-field cron, UTC; --diff-schedule "" disables diffs)
   rowsafe remove NAME [--keep-archiving] [--yes]
@@ -169,7 +180,12 @@ Updates and upgrades: PostgreSQL kept current, with a Mark first
                                              fast hard-links the data (undo restores from the backup)
   rowsafe upgrade undo [NAME] [--yes]        go back to the version the upgrade kept (7 days)
   rowsafe upgrade cleanup [NAME] [--yes]     remove the kept version (frees disk; no undo afterwards)
-  (Security updates and reboots: rowsafe fix, on servers where the installer allowed them)
+  rowsafe security-updates [NAME] [--yes] [--no-wait] [--json]
+                                             install the server's security updates (a Mark first; services keep
+                                             running, the database isn't restarted). Only where root allowed it
+  rowsafe reboot [NAME] [--yes] [--no-wait] [--json]
+                                             reboot the database's server (a Mark first; a minute or two offline;
+                                             asks you to type the server's name). Only where root allowed it
 
 Standby: a second server that stays in sync, is readable, and takes over
   rowsafe standby [NAME] [--json]            the standby, how far behind it is, fenced old primaries, automatic
@@ -186,6 +202,9 @@ Standby: a second server that stays in sync, is readable, and takes over
   rowsafe standby failover [NAME] --on|--off [--after 3m] [--max-data-loss 1m] [--yes]
                                              automatic failover (off by default)
   rowsafe standby remove [NAME] [--yes]      remove the standby; its cluster gets its own data back
+  rowsafe standby forget [NAME] [--host SERVER] [--yes]
+                                             stop watching a fenced old primary (it stays stopped; asks you to
+                                             type its name)
   rowsafe move [NAME] --to SERVER [--port N] [--at TIME] [--keep-days 7] [--fingerprint F]
                                              move the database to another server: a standby there, then a
                                              planned switchover (nothing lost); the old server is kept stopped
@@ -231,7 +250,10 @@ Pulse: health, monitoring and alerts
   rowsafe activity [NAME]                    queries running, or idle in a transaction, for over a minute
   rowsafe alerts [--all | --resolved]        firing alerts (with --all, resolved ones too)
   rowsafe alerts ack ID                      acknowledge a firing alert: no more reminders
-  rowsafe alerts rules                       built-in alert rules with this org's settings
+  rowsafe alerts rules [--json]              built-in alert rules with this org's settings
+  rowsafe alerts rules set RULE [--on | --off] [--threshold N] [--for 5m] [--severity warning|critical] [--json]
+                                             change a rule for this organization (what you don't pass stays)
+  rowsafe alerts rules reset RULE [--json]   back to the defaults
   rowsafe channels list
   rowsafe channels add --type email --name NAME --address A [--address B] [--min-severity warning]
   rowsafe channels add --type slack|discord|webhook --name NAME --url URL [--min-severity warning]
@@ -240,6 +262,32 @@ Pulse: health, monitoring and alerts
   rowsafe channels test ID                   send a test notification now
   rowsafe report [--preview [--html]] [--on | --off] [--to A,B] [--send-test]
                                              "Your weekly Pulse", the weekly email: settings, preview, test
+  rowsafe security [NAME] [--json]           security grade, checklist and findings: who can reach the database,
+                                             how they log in, TLS, and what Rowsafe can do about it
+  rowsafe security check [NAME] [--no-wait] [--json]
+                                             check again now (and from the internet, when that is on)
+  rowsafe security set [NAME] --outside-check on|off [--json]
+                                             let Rowsafe check the database's port from the internet, or not
+  rowsafe security fix [NAME] [ACTION] [--allow me|IP|CIDR]... [--require-tls] [--role USER]
+        [--password-env VAR] [--yes] [--no-wait] [--json]
+                                             without ACTION: the actions and whether each can run now. E.g.
+                                             restrict_access --allow 10.0.0.0/16, enable_tls, firewall, set_password
+                                             --role app (the password is made here; Rowsafe never sees it)
+  rowsafe logs [NAME] [--kind errors|locks|maintenance|KIND] [--search TEXT] [--limit 50] [--groups] [--follow] [--json]
+                                             the database's log entries (redacted on the server), newest last;
+                                             --groups: repeated messages of the last 24 hours
+  rowsafe logs set [NAME] [--send on|off] [--full-text on|off] [--json]
+                                             send the logs to Rowsafe or not; keep literal values or not
+  rowsafe log-destinations list [--json]     where the organization's logs are forwarded
+  rowsafe log-destinations add --type datadog|betterstack|papertrail|loki|elasticsearch|webhook|syslog --name NAME
+        [--site S] [--url U] [--host H --port P] [--username U] [--index I] [--kinds errors,locks]
+        [--database NAME]... [--secret-env VAR] [--json]
+                                             forward logs there; the API key or token comes from VAR, is typed or
+                                             piped, never an argument
+  rowsafe log-destinations test ID           send a test entry now
+  rowsafe log-destinations off ID            pause forwarding there
+  rowsafe log-destinations on ID             forward there again
+  rowsafe log-destinations remove ID [--yes] stop forwarding there
   rowsafe pooling status [NAME] [--json]     connection pooling (PgBouncer): state, connection strings, pools
   rowsafe pooling on [NAME] [--mode transaction|session] [--pool-size N] [--max-client-conn N]
         [--listen local|private|public] [--port 6432] [--yes]
@@ -318,6 +366,9 @@ Admin
   rowsafe hosts unpin HOST                   follow the host's update channel again
   rowsafe hosts channel HOST NAME            switch the host's update channel (e.g. stable, beta)
   rowsafe hosts remove HOST [--yes]          remove a host without databases and revoke its agent
+  rowsafe hosts permissions HOST [--json]    what root allowed Rowsafe to do there (restart, updates, firewall...)
+  rowsafe hosts update HOST [--version V] [--json]
+                                             update the host's agent now, ahead of the staged rollout
   rowsafe org                                plan, limits and usage
   rowsafe api-keys list
   rowsafe api-keys create NAME [--read-only] the key is shown once; read-only keys can only read
@@ -325,6 +376,9 @@ Admin
   rowsafe audit [--limit N]                  who changed what, newest first
 
 Backups, proof and mark wait for the task to finish; pass --no-wait to return at once.
+Changes ask first on a terminal. Scripts and AI agents pass --yes; without a terminal, a change without --yes is
+refused. --json prints JSON for scripts (messages go to stderr). The CLI acts as the person behind the key, with
+that person's rights; when it can't, the error says why.
 
 Environment: ROWSAFE_URL and ROWSAFE_API_KEY override the saved login; ROWSAFE_DATABASE names the database.
 `
@@ -501,6 +555,21 @@ func dispatch(ctx context.Context, args []string) error {
 		return reportCmd(ctx, c, rest)
 	case "pooling":
 		return poolingCmd(ctx, c, rest)
+	case "security": // security.go
+		return securityCmd(ctx, c, rest)
+	case "security-updates":
+		return securityUpdatesCmd(ctx, c, rest)
+	case "reboot":
+		return rebootCmd(ctx, c, rest)
+	case "logs": // logs.go
+		return logsCmd(ctx, c, rest)
+	case "log-destinations":
+		return group(ctx, c, "log-destinations", rest, map[string]subcommand{
+			"list": logDestList, "add": logDestAdd, "remove": logDestRemove, "test": logDestTest,
+			"on": logDestToggle(true), "off": logDestToggle(false),
+		})
+	case "storage":
+		return storageCmd(ctx, c, rest)
 	case "settings": // settings.go
 		return settingsCmd(ctx, c, rest)
 	case "tune":
@@ -533,6 +602,7 @@ func dispatch(ctx context.Context, args []string) error {
 	case "hosts":
 		return group(ctx, c, "hosts", rest, map[string]subcommand{
 			"list": hostsList, "pin": hostsPin, "unpin": hostsUnpin, "channel": hostsChannel, "remove": hostsRemove,
+			"permissions": hostsPermissions, "update": hostsUpdate,
 			"enroll-token": func(ctx context.Context, c *client.Client, args []string) error {
 				return hostsEnrollToken(ctx, c, cfg, args)
 			},
