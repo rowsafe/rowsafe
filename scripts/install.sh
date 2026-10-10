@@ -350,6 +350,12 @@ ROOT_EXPIRY_LIFTED=0 # root_expiry_lift: put root's first-login password change 
 CHANGED=0          # binary, unit, guard or config changed: a running agent needs a restart
 KEEP_INSTALLED=0   # the installed version is newer than the channel's: leave it
 APT_UPDATED=0
+# Seconds to wait for another package manager (unattended-upgrades) and
+# between attempts when apt failed for a moment (tests shorten them).
+APT_LOCK_WAIT=${ROWSAFE_APT_LOCK_WAIT:-600}
+case $APT_LOCK_WAIT in '' | *[!0-9]*) APT_LOCK_WAIT=600 ;; esac
+APT_RETRY_SLEEP=${ROWSAFE_APT_RETRY_SLEEP:-5 15 30}
+case $APT_RETRY_SLEEP in *[!0-9\ ]*) APT_RETRY_SLEEP='5 15 30' ;; esac
 
 # Colours only on a terminal, and never with NO_COLOR (https://no-color.org).
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != dumb ]; then
@@ -756,22 +762,125 @@ fetch() {
     -o "$2" "$1" </dev/null
 }
 
+# >>> apt: packages from apt. At a server's first boot another package
+# manager often has the package database (unattended-upgrades, cloud-init):
+# every apt-get and dpkg here waits for it (up to APT_LOCK_WAIT seconds) and
+# runs again, up to 3 times (APT_RETRY_SLEEP seconds apart), when it failed
+# for a moment: a lock taken in between, a mirror's hiccup. Their output
+# goes to $TMP/apt.log.
+
+# apt_lock_holder prints who has the package database ("unattended-upgrades,
+# pid 3669"), nothing when nobody does. apt and dpkg lock their lock files
+# with fcntl, which /proc/locks lists by inode (flock(1) wouldn't see them,
+# and fuser isn't on every minimal image); the holder must have the file
+# open.
+apt_lock_holder() {
+  [ -r /proc/locks ] || return 0
+  for _apt_f in /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock; do
+    _apt_i=$(stat -c %i "$_apt_f" 2>/dev/null) || continue
+    for _apt_pid in $(awk -v i="$_apt_i" '$2 != "->" && $6 ~ (":" i "$") && $5 ~ /^[1-9][0-9]*$/ { print $5 }' /proc/locks 2>/dev/null); do
+      for _apt_fd in "/proc/$_apt_pid/fd/"*; do
+        [ "$(readlink "$_apt_fd" 2>/dev/null)" = "$_apt_f" ] || continue
+        _apt_name=$(cat "/proc/$_apt_pid/comm" 2>/dev/null) || _apt_name=''
+        case $_apt_name in
+          unattended-upgr*) _apt_name=unattended-upgrades ;;
+          '') _apt_name='another program' ;;
+        esac
+        printf '%s, pid %s\n' "$_apt_name" "$_apt_pid"
+        return 0
+      done
+    done
+  done
+  return 0
+}
+
+# apt_lock_wait waits while another package manager has the package
+# database: up to APT_LOCK_WAIT seconds, saying so once.
+apt_lock_wait() {
+  _apt_holder=$(apt_lock_holder)
+  [ -n "$_apt_holder" ] || return 0
+  note "waiting for another package manager to finish ($_apt_holder)..."
+  _apt_waited=0
+  while [ -n "$_apt_holder" ]; do
+    if [ "$_apt_waited" -ge "$APT_LOCK_WAIT" ]; then
+      if [ "$APT_LOCK_WAIT" -ge 120 ]; then _apt_waited="$((APT_LOCK_WAIT / 60)) minutes"; else _apt_waited="$APT_LOCK_WAIT seconds"; fi
+      die "another package manager (${_apt_holder%%,*}) kept the package database locked for $_apt_waited; run the installer again once it is done"
+    fi
+    sleep 2
+    _apt_waited=$((_apt_waited + 2))
+    _apt_holder=$(apt_lock_holder)
+  done
+}
+
+# apt_get ARGS... runs apt-get once no other package manager has the
+# package database (apt waits too, should one take it in between).
+apt_get() {
+  apt_lock_wait
+  env LC_ALL=C.UTF-8 LANGUAGE='' DEBIAN_FRONTEND=noninteractive apt-get -q -o "DPkg::Lock::Timeout=$APT_LOCK_WAIT" "$@" >>"$TMP/apt.log" 2>&1 </dev/null
+}
+
+# dpkg_get ARGS... is apt_get for dpkg (a downloaded package).
+dpkg_get() {
+  apt_lock_wait
+  env LC_ALL=C.UTF-8 LANGUAGE='' DEBIAN_FRONTEND=noninteractive dpkg "$@" >>"$TMP/apt.log" 2>&1 </dev/null
+}
+
+# apt_transient reads apt's or dpkg's output and prints "fetch" (a download
+# failed) or "lock" (another package manager took the package database)
+# when it failed for a moment; it fails for anything else.
+apt_transient() {
+  awk '
+    /^E: (Could not get lock|Unable to acquire|Unable to lock)|^dpkg: error: .*locked by another process/ { l = 1 }
+    /Failed to fetch|Unable to fetch|Temporary failure resolving|Could not resolve|Could not connect|Connection failed|Connection timed out|Connection reset|Hash Sum mismatch|File has unexpected size|Mirror sync in progress|Some index files failed to download|Bad Gateway|Service Unavailable|Gateway Time-?out/ { f = 1 }
+    END { if (f) print "fetch"; else if (l) print "lock"; else exit 1 }'
+}
+
+# apt_retry CMD... runs CMD (apt_get or dpkg_get with their arguments) and
+# runs it again when it failed for a moment (apt_transient), the package
+# lists refreshed first after a failed download. Nothing was installed then,
+# so trying again is safe; anything else fails at once.
+apt_retry() {
+  : >>"$TMP/apt.log"
+  for _apt_s in $APT_RETRY_SLEEP -; do
+    _apt_from=$(($(wc -l <"$TMP/apt.log") + 1))
+    "$@" && return 0
+    _apt_rc=$?
+    [ "$_apt_s" != - ] || return "$_apt_rc"
+    _apt_why=$(tail -n "+$_apt_from" "$TMP/apt.log" | apt_transient) || return "$_apt_rc"
+    if [ "$_apt_why" = lock ]; then
+      note "another package manager took the package database; trying again in $_apt_s seconds"
+    else
+      note "downloading packages failed for a moment; trying again in $_apt_s seconds"
+    fi
+    sleep "$_apt_s"
+    if [ "$_apt_why" = fetch ] && [ "$1" = apt_get ] && [ "$2" != update ]; then apt_get update || true; fi
+  done
+}
+
 apt_update() {
-  if ! DEBIAN_FRONTEND=noninteractive apt-get update -q >"$TMP/apt.log" 2>&1 </dev/null; then
+  : >"$TMP/apt.log"
+  if ! apt_retry apt_get update; then
     tail -n 20 "$TMP/apt.log" >&2
     die "apt-get update failed"
   fi
   APT_UPDATED=1
 }
 
-apt_install() {
-  have apt-get || die "apt-get not found; install $* yourself and re-run"
+# apt_install_as WHAT ARGS... installs packages (apt-get install's ARGS:
+# PACKAGE..., -t RELEASE), "installing WHAT failed" otherwise.
+apt_install_as() {
+  _apt_what=$1
+  shift
+  have apt-get || die "apt-get not found; install $_apt_what yourself and re-run"
   [ "$APT_UPDATED" = 1 ] || apt_update
-  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends "$@" >>"$TMP/apt.log" 2>&1 </dev/null; then
+  if ! apt_retry apt_get install -y --no-install-recommends "$@"; then
     tail -n 20 "$TMP/apt.log" >&2
-    die "installing $* failed"
+    die "installing $_apt_what failed"
   fi
 }
+
+apt_install() { apt_install_as "$*" "$@"; }
+# <<< apt
 
 # as_agent CMD... runs CMD as the agent user. Everything under /opt/rowsafe
 # and /var/lib/rowsafe (the agent's own directories) is changed this way:
@@ -1409,10 +1518,7 @@ pg_extensions_setup() {
         die "$_p isn't available for PostgreSQL $_m on $OS_NAME ($ARCH); not installing the extensions. Choose another PostgreSQL version or leave it out."
     done
     # shellcheck disable=SC2086 # package names from pg_ext_package
-    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends $_want >>"$TMP/apt.log" 2>&1 </dev/null; then
-      tail -n 20 "$TMP/apt.log" >&2
-      die "installing$_want failed"
-    fi
+    apt_install $_want
   fi
   _changed=0
   case " $_names " in
@@ -1473,16 +1579,16 @@ install_postgres() {
     fi
     step "Installing PostgreSQL $_v from the PostgreSQL project's repository"
     pgdg_repo
-    _c=$(apt-cache policy "postgresql-$_v" 2>/dev/null | awk '$1 == "Candidate:" { print $2; exit }')
-    [ -n "$_c" ] && [ "$_c" != "(none)" ] ||
+    _c=$(apt_candidate "postgresql-$_v")
+    [ -n "$_c" ] ||
       die "PostgreSQL $_v isn't available for $OS_NAME from the PostgreSQL project's repository; pick another version (13-18)"
     # The package creates and starts the main cluster: UTF-8, whatever
     # locale cloud-init runs with.
-    if ! env LANG=C.UTF-8 LC_ALL=C.UTF-8 DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
-      "postgresql-$_v" "postgresql-client-$_v" >>"$TMP/apt.log" 2>&1 </dev/null; then
-      tail -n 20 "$TMP/apt.log" >&2
-      die "installing PostgreSQL $_v failed"
-    fi
+    (
+      LANG=C.UTF-8 LC_ALL=C.UTF-8
+      export LANG LC_ALL
+      apt_install_as "PostgreSQL $_v" "postgresql-$_v" "postgresql-client-$_v"
+    ) || exit 1
     install -d -m 0750 -o root -g postgres "$CONFIG_DIR"
     printf '%s\n' "$_v" | write_file "$PG_INSTALLED_FILE" 0644 root:root || true
     ok "PostgreSQL $_c installed"
@@ -1961,7 +2067,7 @@ os_codename() {
 # apt_candidate PACKAGE [RELEASE] prints the version apt would install
 # (from RELEASE, like apt-get -t), nothing when there is none.
 apt_candidate() {
-  apt-cache ${2:+-t "$2"} policy "$1" 2>/dev/null | awk '$1 == "Candidate:" && $2 != "(none)" { print $2; exit }'
+  LC_ALL=C.UTF-8 LANGUAGE='' apt-cache ${2:+-t "$2"} policy "$1" 2>/dev/null | awk '$1 == "Candidate:" && $2 != "(none)" { print $2; exit }'
 }
 
 # mysql_repo adds Oracle's repository for MySQL 8.4 (or MariaDB's for
@@ -2068,11 +2174,7 @@ install_database() {
         [ "$APT_UPDATED" = 1 ] || apt_update
         _c=$(apt_candidate valkey-server "$_t")
         case ${_c#*:} in 8.*) ;; *) die "Valkey 8 isn't available for $OS_NAME from Debian's archive (found ${_c:-nothing})" ;; esac
-        if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends ${_t:+-t "$_t"} valkey-server valkey-tools \
-          >>"$TMP/apt.log" 2>&1 </dev/null; then
-          tail -n 20 "$TMP/apt.log" >&2
-          die "installing Valkey 8 failed"
-        fi
+        apt_install_as "Valkey 8" ${_t:+-t "$_t"} valkey-server valkey-tools
         ;;
       clickhouse)
         step "Installing ClickHouse $INSTALL_DB_VERSION (long-term support) from ClickHouse's repository"
@@ -3296,7 +3398,7 @@ qdrant_install() {
       if [ ! -e "$QDRANT_UNIT_FILE" ] && systemd_running; then
         systemctl mask --quiet qdrant.service 2>/dev/null && _masked=1
       fi
-      if ! DEBIAN_FRONTEND=noninteractive dpkg --force-confold -i "$TMP/qdrant/$_f" >>"$TMP/apt.log" 2>&1 </dev/null; then
+      if ! apt_retry dpkg_get --force-confold -i "$TMP/qdrant/$_f"; then
         tail -n 20 "$TMP/apt.log" >&2
         [ "$_masked" = 0 ] || systemctl unmask --quiet qdrant.service 2>/dev/null || true
         die "installing Qdrant's package failed"
@@ -4357,19 +4459,35 @@ pooler_apt() {
     pooler_refuse "$1 of the pgbouncer package failed: $(tail -n 3 "$state/apt.log" 2>/dev/null | tr '\n' ' ' | cut -c1-300)$(printf '%s' "$_out" | tr '\n' ' ' | cut -c1-100)"
 }
 
+# pooler_apt_get SECONDS ARGS... runs apt-get for at most SECONDS, its
+# output added to the package log.
+pooler_apt_get() {
+  pa_secs=$1
+  shift
+  timeout "$pa_secs" env LC_ALL=C.UTF-8 LANGUAGE='' "$apt_get" -o DPkg::Lock::Timeout=300 "$@" </dev/null >>"$state/apt.log" 2>&1
+}
+
 # pooler_apt_main runs in rowsafe-pooler-apt@ACTION.service: root started it,
 # with nothing from the agent but the unit's instance name.
 pooler_apt_main() {
   state=${STATE_DIRECTORY:-/var/lib/rowsafe-pooler}
   export DEBIAN_FRONTEND=noninteractive
+  : >"$state/apt.log"
+  # apt waits up to 5 minutes for another package manager
+  # (unattended-upgrades), and a failed attempt is tried once more.
   case ${ROWSAFE_APT_ACTION:-} in
     install)
-      if ! timeout 600 "$apt_get" install -y -q --no-install-recommends pgbouncer </dev/null >"$state/apt.log" 2>&1; then
-        timeout 300 "$apt_get" update -q </dev/null >>"$state/apt.log" 2>&1 || true
-        timeout 600 "$apt_get" install -y -q --no-install-recommends pgbouncer </dev/null >>"$state/apt.log" 2>&1 || exit 1
+      if ! pooler_apt_get 600 install -y -q --no-install-recommends pgbouncer; then
+        pooler_apt_get 300 update -q || true
+        pooler_apt_get 600 install -y -q --no-install-recommends pgbouncer || exit 1
       fi
       ;;
-    purge) timeout 600 "$apt_get" purge -y -q pgbouncer </dev/null >"$state/apt.log" 2>&1 || exit 1 ;;
+    purge)
+      if ! pooler_apt_get 600 purge -y -q pgbouncer; then
+        sleep 10
+        pooler_apt_get 600 purge -y -q pgbouncer || exit 1
+      fi
+      ;;
     *)
       log "unknown package action"
       exit 1
@@ -5300,23 +5418,66 @@ installed_pkgs() {
     grep -Ev -- '-(dbgsym|dbg|doc)$'
 }
 
-candidate() { apt-cache policy "$1" 2>/dev/null | awk '$1 == "Candidate:" { print $2; exit }'; }
+candidate() { LC_ALL=C.UTF-8 LANGUAGE='' apt-cache policy "$1" 2>/dev/null | awk '$1 == "Candidate:" { print $2; exit }'; }
 
-# apt_run ARGS... runs apt-get non-interactively, keeping configuration
-# files as they are and never restarting services by itself (needrestart).
-apt_run() {
-  timeout "${apt_timeout:-1800}" env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1 \
+# apt_once ARGS... runs apt-get once, non-interactively, keeping
+# configuration files as they are and never restarting services by itself
+# (needrestart). apt waits up to 10 minutes for another package manager
+# (unattended-upgrades).
+apt_once() {
+  timeout "${apt_timeout:-1800}" env LC_ALL=C.UTF-8 LANGUAGE='' DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1 \
     APT_LISTCHANGES_FRONTEND=none UCF_FORCE_CONFFOLD=1 \
     apt-get -q -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
-    "$@" >>"$work_log" 2>&1 </dev/null
+    "$@"
 }
+
+# dpkg_once ARGS... runs dpkg once (a downloaded package).
+dpkg_once() { env LC_ALL=C.UTF-8 LANGUAGE='' DEBIAN_FRONTEND=noninteractive dpkg "$@"; }
+
+# pkg_transient reads apt's or dpkg's output and prints "fetch" (a download
+# failed) or "lock" (another package manager took the package database)
+# when it failed for a moment; it fails for anything else.
+pkg_transient() {
+  awk '
+    /^E: (Could not get lock|Unable to acquire|Unable to lock)|^dpkg: error: .*locked by another process/ { l = 1 }
+    /Failed to fetch|Unable to fetch|Temporary failure resolving|Could not resolve|Could not connect|Connection failed|Connection timed out|Connection reset|Hash Sum mismatch|File has unexpected size|Mirror sync in progress|Some index files failed to download|Bad Gateway|Service Unavailable|Gateway Time-?out/ { f = 1 }
+    END { if (f) print "fetch"; else if (l) print "lock"; else exit 1 }'
+}
+
+# Seconds between attempts when apt failed for a moment (tests shorten them).
+pkg_retry_sleep=${ROWSAFE_APT_RETRY_SLEEP:-5 15 30}
+case $pkg_retry_sleep in *[!0-9\ ]*) pkg_retry_sleep='5 15 30' ;; esac
+
+# pkg_retry CMD... runs CMD (apt_once or dpkg_once with their arguments),
+# its output added to the log, and runs it again, up to 3 times, when it
+# failed for a moment (pkg_transient), the package lists refreshed first
+# after a failed download. Nothing was installed then, so trying again is
+# safe; anything else fails at once.
+pkg_retry() {
+  : >>"$work_log"
+  for pr_s in $pkg_retry_sleep -; do
+    pr_from=$(($(wc -l <"$work_log") + 1))
+    "$@" >>"$work_log" 2>&1 </dev/null && return 0
+    pr_rc=$?
+    [ "$pr_s" != - ] || return "$pr_rc"
+    pr_why=$(tail -n "+$pr_from" "$work_log" | pkg_transient) || return "$pr_rc"
+    log "the package manager failed for a moment ($pr_why); trying again in $pr_s seconds"
+    sleep "$pr_s"
+    if [ "$pr_why" = fetch ] && [ "$1" = apt_once ] && [ "$2" != update ]; then
+      apt_once update >>"$work_log" 2>&1 </dev/null || true
+    fi
+  done
+}
+
+# apt_run ARGS... is apt_once ARGS, tried again when it failed for a moment.
+apt_run() { pkg_retry apt_once "$@"; }
 
 apt_refresh() { apt_run update || log "apt-get update failed; using the package lists as they are"; }
 
 # apt_sim ARGS... prints what apt-get would do (-s: simulate, as root, no
 # change), the log getting it too.
 apt_sim() {
-  timeout "${apt_timeout:-300}" env DEBIAN_FRONTEND=noninteractive apt-get -s -q -o DPkg::Lock::Timeout=600 "$@" 2>>"$work_log" </dev/null
+  timeout "${apt_timeout:-300}" env LC_ALL=C.UTF-8 LANGUAGE='' DEBIAN_FRONTEND=noninteractive apt-get -s -q -o DPkg::Lock::Timeout=600 "$@" 2>>"$work_log" </dev/null
 }
 
 # active_since UNIT: when UNIT last became active (monotonic microseconds).
@@ -6184,7 +6345,7 @@ qdrant_update() {
   "$systemctl" is-active --quiet "$unit" 2>/dev/null && was_active=1
   case $file in
     *.deb)
-      DEBIAN_FRONTEND=noninteractive dpkg --force-confold -i "$qd_dir/$file" >>"$work_log" 2>&1 </dev/null ||
+      pkg_retry dpkg_once --force-confold -i "$qd_dir/$file" ||
         { rm -rf "$qd_dir"; refuse "installing Qdrant $v failed: $(tail_log)"; }
       ;;
     *)
@@ -9252,7 +9413,7 @@ ensure_restic() {
 # restic_from_distro falls back to the distribution's package when it is
 # recent enough (0.17 or newer); the agent finds it on PATH.
 restic_from_distro() {
-  _v=$(apt-cache policy restic 2>/dev/null | awk '/Candidate:/ { print $2 }' | sed 's/^[0-9]*://; s/[-+~].*//')
+  _v=$(LC_ALL=C.UTF-8 LANGUAGE='' apt-cache policy restic 2>/dev/null | awk '/Candidate:/ { print $2 }' | sed 's/^[0-9]*://; s/[-+~].*//')
   case $_v in
     0.1[7-9]* | 0.[2-9][0-9]* | [1-9]*)
       if apt_install restic 2>/dev/null; then

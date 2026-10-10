@@ -116,6 +116,12 @@
 #      agent program) on 7700: HTTPS only, plain HTTP refused, TLS 1.1
 #      refused, a renewed certificate served without a restart.
 #      The regular run checks the --install-X refusals that need nothing.
+#  13. a busy package manager (unattended-upgrades at a first boot): package
+#      installs and list refreshes wait for a real lock on dpkg's and apt's
+#      lock files, saying so once, a lock never freed is a plain error, and
+#      apt failing for a moment (a lock taken in between, a failed download)
+#      is tried again, the lists refreshed first; the restart helper's
+#      updates too.
 #
 # Usage: scripts/test-install.sh [IMAGE...]
 #        scripts/test-install.sh --cloud [IMAGE...]   (section 12 only)
@@ -124,7 +130,7 @@
 # master key found in its configuration, Rowsafe's key made on stdin, the
 # snapshots readable by the agent through an ACL; the real Meilisearch).
 # TEST_ONLY=redis runs only the Redis and Valkey cases (11); TEST_ONLY=sqlite
-# only the SQLite ones.
+# only the SQLite ones; TEST_ONLY=apt only the busy package manager (13).
 # (--cloud: debian:bookworm for PostgreSQL; TEST_ONLY=postgres,mysql,mariadb,valkey,clickhouse,opensearch,qdrant,meilisearch
 # picks engines, CLOUD_RUNS the ENGINE:VERSION:IMAGE:PLATFORM runs, TEST_KEEP=1
 # keeps a failed run's container)
@@ -660,6 +666,10 @@ in_container() {
   publish 0.12.0 && sign srv/agent/0.12.0                   # a good upgrade
   publish 0.13.0 0.13.0 fail && sign srv/agent/0.13.0       # fails its self-test
 
+  if [ "${TEST_ONLY:-}" = apt ]; then
+    apt_tests
+    return 0
+  fi
   if [ "${TEST_ONLY:-}" = redis ]; then
     redis_only_tests
     return 0
@@ -672,6 +682,8 @@ in_container() {
     meilisearch_only_tests
     return 0
   fi
+
+  apt_tests
 
   echo "  -- signature verification (download-only, as an unprivileged user)"
   useradd -m tester
@@ -869,6 +881,145 @@ in_container() {
   [ ! -e /etc/rowsafe ] && [ ! -e /var/lib/rowsafe ] && [ ! -e /var/log/rowsafe ] && [ ! -e /etc/logrotate.d/rowsafe ] || fail "purge result"
   expect_fail "--purge needs --uninstall" "only goes with --uninstall" "$INSTALLER" --purge
   guided_storage_tests
+}
+
+# ------------------------------------------------------------ busy apt
+
+# apt_tests: package installs while another package manager has the
+# package database, as unattended-upgrades does at a server's first boot,
+# with the installer's own apt functions (and the restart helper's): a real
+# fcntl lock on dpkg's and apt's lock files (apt honours it) is waited for,
+# saying so once, and a lock never freed is a plain error; apt failing for a
+# moment (a stand-in apt-get) is tried again, the lists refreshed after a
+# failed download; anything else fails at once with the old message.
+apt_tests() {
+  echo "  -- package manager busy (unattended-upgrades at a first boot)"
+  {
+    echo 'set -eu'
+    echo 'have() { command -v "$1" >/dev/null 2>&1; }'
+    echo "note() { printf '    %s\\n' \"\$*\"; }"
+    echo "die() { printf 'error: %s\\n' \"\$*\" >&2; exit 1; }"
+    sed -n '/^APT_LOCK_WAIT=/,/^case \$APT_RETRY_SLEEP/p' /src/scripts/install.sh
+    sed -n '/^# >>> apt:/,/^# <<< apt$/p' /src/scripts/install.sh
+    echo 'APT_UPDATED=${APT_UPDATED:-0} TMP=$(mktemp -d)'
+    echo '"$@"'
+  } >"$W/apt-lib.sh"
+  grep -q '^apt_install()' "$W/apt-lib.sh" || fail "the installer's apt functions weren't found"
+  cat >"$W/aptlock.py" <<'PY'
+import fcntl, sys, time
+f = open(sys.argv[1], "a")
+fcntl.lockf(f, fcntl.LOCK_EX)
+open(sys.argv[2], "w").close()
+time.sleep(float(sys.argv[3]))
+PY
+  # hold_lock FILE SECONDS: a process with FILE locked like dpkg locks it.
+  hold_lock() {
+    rm -f "$W/locked"
+    python3 "$W/aptlock.py" "$1" "$W/locked" "$2" &
+    holder=$!
+    i=0
+    until [ -e "$W/locked" ]; do
+      i=$((i + 1))
+      [ "$i" -lt 50 ] || fail "the lock holder didn't start"
+      sleep 0.1
+    done
+  }
+  # shellcheck disable=SC2016 # dpkg-query's own ${...} fields
+  less_installed() { [ "$(dpkg-query -W -f '${db:Status-Status}' less 2>/dev/null)" = installed ]; }
+  apt-get purge -y -qq less >/dev/null 2>&1 || true
+
+  hold_lock /var/lib/dpkg/lock-frontend 6
+  t0=$(date +%s)
+  expect_ok "an install waits for another package manager" env APT_UPDATED=1 sh "$W/apt-lib.sh" apt_install less
+  [ $(($(date +%s) - t0)) -ge 4 ] || fail "the install didn't wait for the lock"
+  [ "$(grep -c "waiting for another package manager to finish (python3, pid $holder)\.\.\.$" "$W/out")" = 1 ] || {
+    cat "$W/out" >&2
+    fail "the wait wasn't said exactly once"
+  }
+  less_installed || fail "less wasn't installed"
+  wait "$holder" || true
+  apt-get purge -y -qq less >/dev/null 2>&1 || true
+
+  hold_lock /var/lib/apt/lists/lock 3
+  expect_ok "refreshing the package lists waits too" sh "$W/apt-lib.sh" apt_update
+  grep -q "waiting for another package manager to finish (python3, pid $holder)" "$W/out" || fail "apt-get update didn't wait for the lists lock"
+  wait "$holder" || true
+
+  hold_lock /var/lib/dpkg/lock 60
+  t0=$(date +%s)
+  expect_fail "a lock never freed is a plain error" \
+    "error: another package manager (python3) kept the package database locked for 3 seconds; run the installer again once it is done" \
+    env ROWSAFE_APT_LOCK_WAIT=3 APT_UPDATED=1 sh "$W/apt-lib.sh" apt_install less
+  [ $(($(date +%s) - t0)) -lt 20 ] || fail "the wait for the lock wasn't bounded"
+  ! less_installed || fail "less was installed while dpkg was locked"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  # A stand-in apt-get: FAKE_APT says how its installs fail, a number of
+  # times (FAKE_APT_FAILS) or always; FAKE_APT_UPDATE=1 fails its updates.
+  mkdir -p "$W/fakeapt"
+  cat >"$W/fakeapt/apt-get" <<'APT_EOF'
+#!/bin/sh
+d=$(dirname "$0")
+echo "$*" >>"$d/calls"
+case " $* " in
+  *" update "*)
+    [ -z "${FAKE_APT_UPDATE:-}" ] || { echo "E: Failed to fetch http://deb.example.test/dists/x/InRelease  Temporary failure resolving 'deb.example.test'"; exit 100; } ;;
+  *" install "* | *" purge "*)
+    [ "$(grep -c ' install \| purge ' "$d/calls")" -le "${FAKE_APT_FAILS:-1000}" ] || exit 0
+    case $FAKE_APT in
+      fetch) echo "E: Failed to fetch http://deb.example.test/pool/main/l/less/less_1.deb  503  Service Unavailable [IP: 192.0.2.1 80]" ;;
+      lock)
+        echo "E: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 4242 (unattended-upgr)"
+        echo "E: Unable to acquire the dpkg frontend lock (/var/lib/dpkg/lock-frontend), is another process using it?" ;;
+      *) echo "E: Unable to locate package $(for a; do :; done; echo "$a")" ;;
+    esac
+    exit 100 ;;
+esac
+exit 0
+APT_EOF
+  chmod 755 "$W/fakeapt/apt-get"
+  fake_apt() { # MODE FAILS CMD...
+    rm -f "$W/fakeapt/calls"
+    fa_mode=$1 fa_fails=$2
+    shift 2
+    env PATH="$W/fakeapt:$PATH" FAKE_APT="$fa_mode" FAKE_APT_FAILS="$fa_fails" ROWSAFE_APT_RETRY_SLEEP='0 0 0' APT_UPDATED=1 "$@"
+  }
+  apt_calls() { tr '\n' ';' <"$W/fakeapt/calls" | sed 's/-q -o DPkg::Lock::Timeout=600 //g'; }
+
+  expect_ok "a failed download is tried again" fake_apt fetch 2 sh "$W/apt-lib.sh" apt_install less
+  [ "$(apt_calls)" = "install -y --no-install-recommends less;update;install -y --no-install-recommends less;update;install -y --no-install-recommends less;" ] ||
+    fail "attempts after a failed download: $(apt_calls)"
+  [ "$(grep -c "downloading packages failed for a moment; trying again in 0 seconds" "$W/out")" = 2 ] || { cat "$W/out" >&2; fail "the retries weren't said"; }
+  expect_ok "a lock taken in between is tried again" fake_apt lock 1 sh "$W/apt-lib.sh" apt_install less
+  [ "$(apt_calls)" = "install -y --no-install-recommends less;install -y --no-install-recommends less;" ] || fail "attempts after a lock: $(apt_calls)"
+  grep -q "another package manager took the package database; trying again in 0 seconds" "$W/out" || fail "the lock retry wasn't said"
+  expect_fail "a mirror down for good fails after 4 attempts" "error: installing less failed" fake_apt fetch 1000 sh "$W/apt-lib.sh" apt_install less
+  [ "$(grep -c ' install ' "$W/fakeapt/calls")" = 4 ] || fail "attempts: $(apt_calls)"
+  grep -q "E: Failed to fetch" "$W/out" || fail "apt's error wasn't shown"
+  expect_fail "a package that isn't there fails at once" "error: installing nosuch failed" fake_apt missing 1000 sh "$W/apt-lib.sh" apt_install nosuch
+  [ "$(apt_calls)" = "install -y --no-install-recommends nosuch;" ] || fail "a lasting failure was tried again: $(apt_calls)"
+  grep -q "E: Unable to locate package nosuch" "$W/out" || fail "apt's error wasn't shown"
+  expect_fail "a failed update is tried again, then an error" "error: apt-get update failed" \
+    fake_apt x 0 env FAKE_APT_UPDATE=1 sh "$W/apt-lib.sh" apt_update
+  [ "$(apt_calls)" = "update;update;update;update;" ] || fail "update attempts: $(apt_calls)"
+  grep -q "Temporary failure resolving" "$W/out" || fail "apt's error wasn't shown"
+
+  # The restart helper's apt_run (updates on request): the same retries.
+  {
+    echo 'set -u'
+    echo 'log() { echo "rowsafe-pg-restart: $*" >&2; }'
+    echo 'work_log=$(mktemp)'
+    sed -n '/^# apt_once ARGS/,/^apt_run()/p' /src/scripts/rowsafe-pg-restart
+    echo '"$@"; rc=$?; cat "$work_log"; exit $rc'
+  } >"$W/helper-apt.sh"
+  grep -q '^apt_run()' "$W/helper-apt.sh" || fail "the helper's apt functions weren't found"
+  expect_ok "the update helper tries a lock taken in between again" fake_apt lock 1 sh "$W/helper-apt.sh" apt_run install -y --only-upgrade less
+  [ "$(grep -c 'install -y --only-upgrade less' "$W/fakeapt/calls")" = 2 ] || fail "helper attempts: $(apt_calls)"
+  grep -q "trying again in 0 seconds" "$W/out" || fail "the helper didn't log its retry"
+  expect_fail "the update helper fails at once otherwise" "Unable to locate package" fake_apt missing 1000 sh "$W/helper-apt.sh" apt_run install -y less
+  [ "$(grep -c 'install -y less' "$W/fakeapt/calls")" = 1 ] || fail "the helper tried a lasting failure again: $(apt_calls)"
+  pass "busy package manager: waits, retries and plain errors"
 }
 
 # ------------------------------------------------------------ guided setup
@@ -3070,6 +3221,14 @@ APT_EOF
 mysql_host_tests() {
   echo "  -- a MySQL server (no PostgreSQL)"
   pkill -u postgres -f 'rowsafe-agent run' 2>/dev/null || true
+  # Every postgres process gone first (userdel refuses a logged-in user).
+  pkill -u postgres 2>/dev/null || true
+  _w=0
+  while pgrep -u postgres >/dev/null 2>&1 && [ "$_w" -lt 20 ]; do
+    sleep 1
+    _w=$((_w + 1))
+  done
+  pkill -9 -u postgres 2>/dev/null || true
   userdel -r postgres 2>/dev/null || userdel postgres
   rm -rf /usr/lib/postgresql /var/lib/postgresql
   useradd --system --home-dir /nonexistent --no-create-home --shell /bin/false mysql

@@ -364,19 +364,35 @@ pooler_apt() {
     pooler_refuse "$1 of the pgbouncer package failed: $(tail -n 3 "$state/apt.log" 2>/dev/null | tr '\n' ' ' | cut -c1-300)$(printf '%s' "$_out" | tr '\n' ' ' | cut -c1-100)"
 }
 
+# pooler_apt_get SECONDS ARGS... runs apt-get for at most SECONDS, its
+# output added to the package log.
+pooler_apt_get() {
+  pa_secs=$1
+  shift
+  timeout "$pa_secs" env LC_ALL=C.UTF-8 LANGUAGE='' "$apt_get" -o DPkg::Lock::Timeout=300 "$@" </dev/null >>"$state/apt.log" 2>&1
+}
+
 # pooler_apt_main runs in rowsafe-pooler-apt@ACTION.service: root started it,
 # with nothing from the agent but the unit's instance name.
 pooler_apt_main() {
   state=${STATE_DIRECTORY:-/var/lib/rowsafe-pooler}
   export DEBIAN_FRONTEND=noninteractive
+  : >"$state/apt.log"
+  # apt waits up to 5 minutes for another package manager
+  # (unattended-upgrades), and a failed attempt is tried once more.
   case ${ROWSAFE_APT_ACTION:-} in
     install)
-      if ! timeout 600 "$apt_get" install -y -q --no-install-recommends pgbouncer </dev/null >"$state/apt.log" 2>&1; then
-        timeout 300 "$apt_get" update -q </dev/null >>"$state/apt.log" 2>&1 || true
-        timeout 600 "$apt_get" install -y -q --no-install-recommends pgbouncer </dev/null >>"$state/apt.log" 2>&1 || exit 1
+      if ! pooler_apt_get 600 install -y -q --no-install-recommends pgbouncer; then
+        pooler_apt_get 300 update -q || true
+        pooler_apt_get 600 install -y -q --no-install-recommends pgbouncer || exit 1
       fi
       ;;
-    purge) timeout 600 "$apt_get" purge -y -q pgbouncer </dev/null >"$state/apt.log" 2>&1 || exit 1 ;;
+    purge)
+      if ! pooler_apt_get 600 purge -y -q pgbouncer; then
+        sleep 10
+        pooler_apt_get 600 purge -y -q pgbouncer || exit 1
+      fi
+      ;;
     *)
       log "unknown package action"
       exit 1
@@ -1307,23 +1323,66 @@ installed_pkgs() {
     grep -Ev -- '-(dbgsym|dbg|doc)$'
 }
 
-candidate() { apt-cache policy "$1" 2>/dev/null | awk '$1 == "Candidate:" { print $2; exit }'; }
+candidate() { LC_ALL=C.UTF-8 LANGUAGE='' apt-cache policy "$1" 2>/dev/null | awk '$1 == "Candidate:" { print $2; exit }'; }
 
-# apt_run ARGS... runs apt-get non-interactively, keeping configuration
-# files as they are and never restarting services by itself (needrestart).
-apt_run() {
-  timeout "${apt_timeout:-1800}" env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1 \
+# apt_once ARGS... runs apt-get once, non-interactively, keeping
+# configuration files as they are and never restarting services by itself
+# (needrestart). apt waits up to 10 minutes for another package manager
+# (unattended-upgrades).
+apt_once() {
+  timeout "${apt_timeout:-1800}" env LC_ALL=C.UTF-8 LANGUAGE='' DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1 \
     APT_LISTCHANGES_FRONTEND=none UCF_FORCE_CONFFOLD=1 \
     apt-get -q -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
-    "$@" >>"$work_log" 2>&1 </dev/null
+    "$@"
 }
+
+# dpkg_once ARGS... runs dpkg once (a downloaded package).
+dpkg_once() { env LC_ALL=C.UTF-8 LANGUAGE='' DEBIAN_FRONTEND=noninteractive dpkg "$@"; }
+
+# pkg_transient reads apt's or dpkg's output and prints "fetch" (a download
+# failed) or "lock" (another package manager took the package database)
+# when it failed for a moment; it fails for anything else.
+pkg_transient() {
+  awk '
+    /^E: (Could not get lock|Unable to acquire|Unable to lock)|^dpkg: error: .*locked by another process/ { l = 1 }
+    /Failed to fetch|Unable to fetch|Temporary failure resolving|Could not resolve|Could not connect|Connection failed|Connection timed out|Connection reset|Hash Sum mismatch|File has unexpected size|Mirror sync in progress|Some index files failed to download|Bad Gateway|Service Unavailable|Gateway Time-?out/ { f = 1 }
+    END { if (f) print "fetch"; else if (l) print "lock"; else exit 1 }'
+}
+
+# Seconds between attempts when apt failed for a moment (tests shorten them).
+pkg_retry_sleep=${ROWSAFE_APT_RETRY_SLEEP:-5 15 30}
+case $pkg_retry_sleep in *[!0-9\ ]*) pkg_retry_sleep='5 15 30' ;; esac
+
+# pkg_retry CMD... runs CMD (apt_once or dpkg_once with their arguments),
+# its output added to the log, and runs it again, up to 3 times, when it
+# failed for a moment (pkg_transient), the package lists refreshed first
+# after a failed download. Nothing was installed then, so trying again is
+# safe; anything else fails at once.
+pkg_retry() {
+  : >>"$work_log"
+  for pr_s in $pkg_retry_sleep -; do
+    pr_from=$(($(wc -l <"$work_log") + 1))
+    "$@" >>"$work_log" 2>&1 </dev/null && return 0
+    pr_rc=$?
+    [ "$pr_s" != - ] || return "$pr_rc"
+    pr_why=$(tail -n "+$pr_from" "$work_log" | pkg_transient) || return "$pr_rc"
+    log "the package manager failed for a moment ($pr_why); trying again in $pr_s seconds"
+    sleep "$pr_s"
+    if [ "$pr_why" = fetch ] && [ "$1" = apt_once ] && [ "$2" != update ]; then
+      apt_once update >>"$work_log" 2>&1 </dev/null || true
+    fi
+  done
+}
+
+# apt_run ARGS... is apt_once ARGS, tried again when it failed for a moment.
+apt_run() { pkg_retry apt_once "$@"; }
 
 apt_refresh() { apt_run update || log "apt-get update failed; using the package lists as they are"; }
 
 # apt_sim ARGS... prints what apt-get would do (-s: simulate, as root, no
 # change), the log getting it too.
 apt_sim() {
-  timeout "${apt_timeout:-300}" env DEBIAN_FRONTEND=noninteractive apt-get -s -q -o DPkg::Lock::Timeout=600 "$@" 2>>"$work_log" </dev/null
+  timeout "${apt_timeout:-300}" env LC_ALL=C.UTF-8 LANGUAGE='' DEBIAN_FRONTEND=noninteractive apt-get -s -q -o DPkg::Lock::Timeout=600 "$@" 2>>"$work_log" </dev/null
 }
 
 # active_since UNIT: when UNIT last became active (monotonic microseconds).
@@ -2191,7 +2250,7 @@ qdrant_update() {
   "$systemctl" is-active --quiet "$unit" 2>/dev/null && was_active=1
   case $file in
     *.deb)
-      DEBIAN_FRONTEND=noninteractive dpkg --force-confold -i "$qd_dir/$file" >>"$work_log" 2>&1 </dev/null ||
+      pkg_retry dpkg_once --force-confold -i "$qd_dir/$file" ||
         { rm -rf "$qd_dir"; refuse "installing Qdrant $v failed: $(tail_log)"; }
       ;;
     *)
