@@ -151,24 +151,42 @@ func (e *Engine) mark(ctx context.Context, env agent.EngineEnv, db protocol.Data
 
 // StoredObjects lists the database's objects in env's storage: backups
 // under backupPrefix (one folder per label; a collection's snapshot under
-// data/ counts in the folder of the backup that took it); no continuous
-// archive.
+// data/ counts in the folder of the oldest kept backup that names it, so a
+// backup retention removed never shows up again; one no backup names is
+// left out of the backups); no continuous archive.
 func (e *Engine) StoredObjects(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec) ([]agent.StoredObject, string, string, error) {
 	r, err := openRepo(env, db)
 	if err != nil {
 		return nil, "", "", err
 	}
 	objs, err := r.st.List(ctx, "")
+	if err != nil {
+		return nil, backupPrefix, "", err
+	}
+	owner := map[string]string{} // data key -> label of the oldest backup naming it
+	docs, _, err := r.listBackups(ctx)
+	if err != nil {
+		return nil, backupPrefix, "", err
+	}
+	for _, d := range docs { // oldest first
+		for _, cd := range d.Collections {
+			if _, ok := owner[cd.Object]; cd.Object != "" && !ok {
+				owner[cd.Object] = d.Label
+			}
+		}
+	}
 	out := make([]agent.StoredObject, 0, len(objs))
 	for _, o := range objs {
 		key := o.Key
-		// data/20261011-140000F-0003.snapshot -> backup/20261011-140000F/0003.snapshot
-		if rest, ok := strings.CutPrefix(key, dataPrefix); ok && len(rest) > 17 && labelRE.MatchString(rest[:16]) && rest[16] == '-' {
-			key = backupPrefix + rest[:16] + "/" + rest[17:]
+		if rest, ok := strings.CutPrefix(key, dataPrefix); ok {
+			key = "unnamed/" + rest
+			if l := owner[o.Key]; l != "" {
+				key = backupPrefix + l + "/" + rest
+			}
 		}
 		out = append(out, agent.StoredObject{Key: key, Size: o.Size, LastModified: o.LastModified})
 	}
-	return out, backupPrefix, "", err
+	return out, backupPrefix, "", nil
 }
 
 // Ready says whether Qdrant answers again after a restart, every collection

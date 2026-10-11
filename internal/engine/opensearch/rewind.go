@@ -186,10 +186,14 @@ func (e *Engine) rewindCopy(ctx context.Context, env agent.EngineEnv, db protoco
 		drop()
 		return nil, fmt.Errorf("reading your bucket: %w", err)
 	}
-	doc, err := pickDoc(docs, p.Target.BackupSet, p.Target.Time)
+	doc, err := pickDoc(docs, p.Target.BackupSet, p.Target.Time, false)
 	if err != nil {
 		drop()
 		return nil, err
+	}
+	if p.Target.BackupSet != "" && doc.Label != p.Target.BackupSet {
+		tl.Printf("note: OpenSearch backups are snapshots, and %s is no longer kept: the copy is the newest one taken at or before %s (%s)",
+			p.Target.BackupSet, p.Target.Time.UTC().Format("15:04:05 UTC"), doc.StoppedAt.UTC().Format("2006-01-02 15:04:05 UTC"))
 	}
 	m.Label = doc.Label
 	e.copyMu.Lock()

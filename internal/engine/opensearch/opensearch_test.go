@@ -86,28 +86,32 @@ func TestPickDoc(t *testing.T) {
 		{Label: "20261009-004000R", Kind: kindRewind, StoppedAt: t0.Add(40 * time.Minute)},
 		{Label: "20261009-010000D", Kind: kindDiff, StoppedAt: t0.Add(time.Hour)},
 	}
-	if d, _ := pickDoc(docs, "", nil); d.Label != "20261009-010000D" {
+	if d, _ := pickDoc(docs, "", nil, false); d.Label != "20261009-010000D" {
 		t.Errorf("newest: %s", d.Label)
 	}
 	at := t0.Add(45 * time.Minute)
-	if d, _ := pickDoc(docs, "", &at); d.Label != "20261009-003000D" {
+	if d, _ := pickDoc(docs, "", &at, false); d.Label != "20261009-003000D" {
 		t.Errorf("at: %s", d.Label)
 	}
-	if d, _ := pickDoc(docs, "20261009-000000F", nil); d.Label != "20261009-000000F" {
+	if d, _ := pickDoc(docs, "20261009-000000F", nil, false); d.Label != "20261009-000000F" {
 		t.Errorf("label: %s", d.Label)
 	}
-	if _, err := pickDoc(docs, "20261009-004000R", nil); err == nil {
+	if _, err := pickDoc(docs, "20261009-004000R", nil, false); err == nil {
 		t.Error("a snapshot kept for an Undo isn't a restore target")
 	}
-	if _, err := pickDoc(nil, "", nil); err == nil {
+	if _, err := pickDoc(nil, "", nil, false); err == nil {
 		t.Error("no snapshot")
 	}
 	// A snapshot retention removed: the newest kept one at or before the moment.
-	if d, err := pickDoc(docs, "20261009-004500D", &at); err != nil || d.Label != "20261009-003000D" {
+	if d, err := pickDoc(docs, "20261009-004500D", &at, false); err != nil || d.Label != "20261009-003000D" {
 		t.Errorf("removed label: %s %v", d.Label, err)
 	}
-	if _, err := pickDoc(docs, "20261009-004500D", nil); err == nil {
+	if _, err := pickDoc(docs, "20261009-004500D", nil, false); err == nil {
 		t.Error("a removed label without a moment")
+	}
+	// A rewind in place never goes elsewhere: it names the nearest kept one.
+	if _, err := pickDoc(docs, "20261009-004500D", &at, true); err == nil || !strings.Contains(err.Error(), "00:30:00") {
+		t.Errorf("in place: %v", err)
 	}
 }
 
@@ -241,5 +245,27 @@ func TestRetainDrop(t *testing.T) {
 	}
 	if d := retainDrop(snaps[len(snaps)-1:], 7, now.Add(30*24*time.Hour)); len(d) != 0 {
 		t.Error("the newest snapshot always stays")
+	}
+}
+
+// Full snapshots more often than daily never shrink the window below a day.
+func TestRetainDropHourlyFulls(t *testing.T) {
+	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	var snaps []snapInfo
+	for m := 48 * 60; m >= 0; m -= 5 {
+		at := now.Add(-time.Duration(m) * time.Minute)
+		kind := kindDiff
+		if at.Minute() == 0 {
+			kind = kindFull
+		}
+		snaps = append(snaps, snapInfo{Snapshot: snapshotName(newLabel(at, kind)), State: "SUCCESS", StartMS: at.UnixMilli()})
+	}
+	mark := now.Add(-20*time.Hour + time.Second)
+	snaps = append(snaps, snapInfo{Snapshot: snapshotName(newLabel(mark, kindMark)), State: "SUCCESS", StartMS: mark.UnixMilli()})
+	slices.SortFunc(snaps, func(a, b snapInfo) int { return int(a.StartMS - b.StartMS) })
+	for _, n := range retainDrop(snaps, 7, now) {
+		if at := labelTime(labelOf(n)); now.Sub(at) <= keepAllFor {
+			t.Fatalf("dropped %s from the last day", n)
+		}
 	}
 }

@@ -64,16 +64,23 @@ func restoreDoc(ctx context.Context, r *repo, doc backupDoc, s scratch, tl agent
 // pickDoc is the snapshot to restore: label's, else the newest finished one
 // at or before at (nil: the newest). A label retention removed (snapshots
 // older than a day are kept one an hour) gives way to the newest kept one
-// at or before at.
-func pickDoc(docs []backupDoc, label string, at *time.Time) (backupDoc, error) {
+// at or before at, unless exact (a rewind in place goes to the snapshot a
+// person confirmed or nowhere: the error names the nearest kept one).
+func pickDoc(docs []backupDoc, label string, at *time.Time, exact bool) (backupDoc, error) {
 	if label != "" {
 		for _, d := range docs {
 			if d.Label == label && d.Kind != kindRewind {
 				return d, nil
 			}
 		}
-		if at == nil {
-			return backupDoc{}, fmt.Errorf("the snapshot %s isn't in your bucket any more (retention removed it?)", label)
+		if at == nil || exact {
+			msg := fmt.Sprintf("the snapshot %s isn't in your bucket any more (retention keeps one an hour after a day)", label)
+			if at != nil {
+				if near, err := pickDoc(docs, "", at, false); err == nil {
+					msg += fmt.Sprintf(": the nearest kept one before it is from %s; rewind to that one instead", near.StoppedAt.UTC().Format("2006-01-02 15:04:05 UTC"))
+				}
+			}
+			return backupDoc{}, errors.New(msg)
 		}
 	}
 	var best *backupDoc
@@ -108,7 +115,7 @@ func (e *Engine) drill(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 	if err != nil {
 		return nil, fmt.Errorf("reading your bucket: %w", err)
 	}
-	doc, err := pickDoc(docs, "", nil)
+	doc, err := pickDoc(docs, "", nil, false)
 	if err != nil {
 		return nil, err
 	}

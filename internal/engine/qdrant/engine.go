@@ -38,6 +38,12 @@ type Engine struct {
 	// (pending.json in the state directory).
 	pendingPath string
 	pending     []string
+	// fullMu guards full-next.json in the state directory: databases whose
+	// next backup takes every collection again (fullNext).
+	fullMu sync.Mutex
+	// ops are each database's collections' operation numbers as last seen
+	// (opsWatch), by database id.
+	ops map[string]map[string][]int64
 }
 
 var (

@@ -253,7 +253,13 @@ func (r *repo) freshLabel(ctx context.Context, t time.Time) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if len(objs) == 0 {
+		// Nor its collection snapshots: a backup named again may outlive
+		// the one that took them.
+		data, err := r.st.List(ctx, dataPrefix+l+"-")
+		if err != nil {
+			return "", err
+		}
+		if len(objs) == 0 && len(data) == 0 {
 			return l, nil
 		}
 		t = t.Add(time.Second)

@@ -208,6 +208,7 @@ func (e *Engine) Monitor(ctx context.Context, env agent.EngineEnv, db protocol.D
 		} else if m.status == nil {
 			dm.Error = "can't read Qdrant's status: " + err.Error()
 		}
+		e.opsWatch(ctx, env, db, c) // fullnext.go: a snapshot recovered outside Rowsafe
 	}
 	// Rowsafe's list of keys in Qdrant, made to match the agent's own on
 	// every pass (keys.go): what someone else changed is undone and

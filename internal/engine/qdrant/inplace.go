@@ -230,6 +230,7 @@ func (e *Engine) rewindInPlace(ctx context.Context, env agent.EngineEnv, db prot
 	if err != nil {
 		return nil, err
 	}
+	target.Exact = true
 	kept := env.Kept()
 	for _, r := range kept.ForDatabase(db.ID) {
 		if r.Status == protocol.RewindInProgress {
@@ -299,12 +300,16 @@ func (e *Engine) rewindInPlace(ctx context.Context, env agent.EngineEnv, db prot
 	if err := kept.Put(rec); err != nil {
 		return abandon(err)
 	}
+	e.setFullNext(env, db.ID, "Rowsafe rewound this server to an earlier snapshot") // fullnext.go
 	steps := 0
 	err = loadInto(ctx, prod, u, func(step string) {
 		steps++
 		rec.Extra["done"] = strings.Trim(rec.Extra["done"]+","+step, ",")
 		_ = kept.Put(rec)
 	}, tl)
+	if steps > 0 {
+		e.backupAfterRestore(ctx, env, db, prod, r, tl)
+	}
 	res := &protocol.RewindInPlaceResult{RewindID: p.RewindID, RecoveredTo: &recovered}
 	until := agent.KeepUntil(p.KeepDays, time.Now())
 	rec.Status, rec.Phase, rec.Expires, rec.SizeBytes = protocol.RewindKeptBefore, "", until, before.StoredBytes
@@ -394,12 +399,16 @@ func (e *Engine) rewindUndo(ctx context.Context, env agent.EngineEnv, db protoco
 	}
 	rec.Phase = mipLoading
 	_ = kept.Put(rec)
+	e.setFullNext(env, db.ID, "Rowsafe undid a rewind of this server") // fullnext.go
 	steps := 0
 	err = loadInto(ctx, prod, u, func(step string) {
 		steps++
 		rec.Extra["done"] = strings.Trim(rec.Extra["done"]+","+step, ",")
 		_ = kept.Put(rec)
 	}, tl)
+	if steps > 0 {
+		e.backupAfterRestore(ctx, env, db, prod, r, tl)
+	}
 	res := &protocol.RewindUndoResult{RewindID: rec.ID}
 	until := agent.KeepUntil(rec.KeepDays, time.Now())
 	if err != nil && steps == 0 {

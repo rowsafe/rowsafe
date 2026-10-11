@@ -154,3 +154,67 @@ func TestPickRemovedLabel(t *testing.T) {
 		t.Fatal("a Mark's removed backup")
 	}
 }
+
+func TestWentBackAndFullNext(t *testing.T) {
+	if wentBack([]int64{5, 9}, []int64{5, 9}) || wentBack(nil, []int64{1}) || !wentBack([]int64{5, 9}, []int64{5, 3}) {
+		t.Fatal("wentBack")
+	}
+	e := &Engine{}
+	env := agent.EngineEnv{StateDir: t.TempDir()}
+	if e.fullNext(env, "db1") != "" {
+		t.Fatal("set from the start")
+	}
+	e.setFullNext(env, "db1", "rewound")
+	if (&Engine{}).fullNext(env, "db1") != "rewound" { // another agent run reads it back
+		t.Fatal("not kept")
+	}
+	e.setFullNext(env, "db1", "")
+	if e.fullNext(env, "db1") != "" {
+		t.Fatal("not cleared")
+	}
+}
+
+// A rewind in place goes to the backup a person confirmed or nowhere.
+func TestPickExact(t *testing.T) {
+	ctx := context.Background()
+	r := testRepo(t)
+	t0 := time.Date(2026, 10, 9, 10, 0, 0, 0, time.UTC)
+	if err := r.putDoc(ctx, backupDoc{Label: newLabel(t0), TakenAt: t0}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := pick(ctx, r, restoreTarget{Time: t0.Add(50 * time.Minute), Label: newLabel(t0.Add(45 * time.Minute)), Exact: true})
+	if err == nil || !strings.Contains(err.Error(), "2026-10-09 10:00:00 UTC") {
+		t.Fatalf("in place: %v", err)
+	}
+}
+
+// Storage reports count a collection snapshot under the oldest kept backup
+// naming it, never under a backup retention removed.
+func TestStoredObjects(t *testing.T) {
+	ctx := context.Background()
+	s3 := fakes3.New("b")
+	defer s3.Close()
+	env := agent.EngineEnv{Repo: pgbackrest.Repo{Endpoint: "http://" + s3.Host(), Bucket: "b", Key: "k", KeySecret: "s", Region: "us-east-1",
+		CipherPass: "test-passphrase-123456"}}
+	db := protocol.DatabaseSpec{Stanza: "s"}
+	r, _ := openRepo(env, db)
+	shared, mine, orphan := dataKey("20261011-120000F", 0), dataKey("20261011-121500F", 0), dataKey("20261011-110000F", 0)
+	for _, k := range []string{shared, mine, orphan} {
+		_ = r.st.PutBytes(ctx, k, []byte("x"))
+	}
+	_ = r.putDoc(ctx, backupDoc{Label: "20261011-121500F", Collections: []collDoc{{Name: "a", Object: shared}, {Name: "b", Object: mine}}})
+	_ = r.putDoc(ctx, backupDoc{Label: "20261011-123000F", Collections: []collDoc{{Name: "a", Object: shared}}})
+	objs, prefix, _, err := (&Engine{}).StoredObjects(ctx, env, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := map[string]int{}
+	for _, o := range objs {
+		if l, _, ok := strings.Cut(strings.TrimPrefix(o.Key, prefix), "/"); ok && strings.HasPrefix(o.Key, prefix) {
+			labels[l]++
+		}
+	}
+	if labels["20261011-120000F"] != 0 || labels["20261011-110000F"] != 0 || labels["20261011-121500F"] != 3 || labels["20261011-123000F"] != 1 {
+		t.Fatalf("labels %v", labels)
+	}
+}

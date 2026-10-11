@@ -213,8 +213,17 @@ func (e *Engine) backup(ctx context.Context, env agent.EngineEnv, db protocol.Da
 		typ = protocol.BackupDiff
 	}
 	tl.Printf("backup %s complete", t.Doc.Label)
-	return &protocol.BackupResult{Label: t.Doc.Label, Type: typ, StartedAt: t.Doc.StartedAt, StoppedAt: t.Doc.StoppedAt,
-		SizeBytes: in.totalBytes(), RepoSizeBytes: t.Sync.RepoBytes}, nil
+	res := &protocol.BackupResult{Label: t.Doc.Label, Type: typ, StartedAt: t.Doc.StartedAt, StoppedAt: t.Doc.StoppedAt,
+		SizeBytes: in.totalBytes(), RepoSizeBytes: t.Sync.RepoBytes}
+	if snaps, err := listSnapshots(ctx, c); err == nil { // what retention kept (protocol.BackupResult.Kept)
+		res.Kept = []string{}
+		for _, s := range snaps {
+			if l := labelOf(s.Snapshot); l != "" {
+				res.Kept = append(res.Kept, l)
+			}
+		}
+	}
+	return res, nil
 }
 
 // Retention: the newest RetentionFull full snapshots (one a day by
@@ -229,6 +238,9 @@ const (
 	keepAllFor    = 24 * time.Hour
 	keepHourlyFor = 7 * 24 * time.Hour
 )
+
+// minWindow is the shortest retention window (a variable for tests).
+var minWindow = 24 * time.Hour
 
 // retainDrop picks the snapshots retention deletes (snaps as OpenSearch
 // lists them, oldest first): Rowsafe's own only, never one kept for Undo.
@@ -251,6 +263,11 @@ func retainDrop(snaps []snapInfo, keepFull int, now time.Time) []string {
 	var oldest time.Time // the window's start (zero: everything is in it)
 	if len(fulls) > keepFull {
 		oldest = fulls[len(fulls)-keepFull]
+	}
+	// Full snapshots more often than daily (a person's schedule) never
+	// shrink the window below a day: Marks and the last day's snapshots stay.
+	if oldest.After(now.Add(-minWindow)) {
+		oldest = now.Add(-minWindow)
 	}
 	// The newest snapshot of each hour, among those between the tiers.
 	hourly := map[string]string{}

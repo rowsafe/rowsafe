@@ -266,8 +266,16 @@ func TestIntegration(t *testing.T) {
 	if b3 := mustRun[protocol.BackupResult](t, e, env, db, protocol.TaskBackup, nil); b3.RepoSizeBytes == 0 {
 		t.Fatalf("a backup after a new key: %+v", b3)
 	}
-	if b4 := mustRun[protocol.BackupResult](t, e, env, db, protocol.TaskBackup, nil); b4.RepoSizeBytes != 0 {
+	b4 := mustRun[protocol.BackupResult](t, e, env, db, protocol.TaskBackup, nil)
+	if b4.RepoSizeBytes != 0 || !slices.Contains(b4.Kept, b4.Label) {
 		t.Fatalf("a backup with nothing changed: %+v", b4)
+	}
+	// An experimental feature turned on changes no task: still a change.
+	if err := admin.do(ctx, http.MethodPatch, "/experimental-features", nil, map[string]any{"metrics": true}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if b5 := mustRun[protocol.BackupResult](t, e, env, db, protocol.TaskBackup, nil); b5.RepoSizeBytes == 0 {
+		t.Fatalf("a backup after an experimental feature was turned on: %+v", b5)
 	}
 	drill := mustRun[protocol.DrillResult](t, e, env, db, protocol.TaskDrill, nil)
 	if !drill.Passed || len(drill.Databases) != 2 || drill.Databases[1].RestoredTables != 50 && drill.Databases[0].RestoredTables != 50 {

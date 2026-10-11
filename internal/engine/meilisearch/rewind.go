@@ -201,9 +201,13 @@ func (e *Engine) rewindCopy(ctx context.Context, env agent.EngineEnv, db protoco
 	if err != nil {
 		return nil, err
 	}
-	doc, err := pick(ctx, r, p.Target)
+	doc, err := pick(ctx, r, p.Target, false)
 	if err != nil {
 		return nil, err
+	}
+	if p.Target.BackupSet != "" && doc.Label != p.Target.BackupSet {
+		tl.Printf("note: Meilisearch backups are snapshots, and %s is no longer kept: the copy is the newest one taken at or before the moment (%s)",
+			p.Target.BackupSet, doc.TakenAt.UTC().Format("2006-01-02 15:04:05 UTC"))
 	}
 	now := time.Now().UTC()
 	expires := clampExpiry(p.Expires, now)

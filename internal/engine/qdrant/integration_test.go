@@ -19,6 +19,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	mrand "math/rand/v2"
@@ -26,6 +27,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -343,6 +345,20 @@ func TestQdrant(t *testing.T) {
 		if ip.KeptUntil == nil {
 			t.Fatalf("in place: %+v", ip)
 		}
+		// Right after, a backup of every collection as they are now.
+		r, err := openRepo(env, db)
+		must(t, err)
+		docs, _, err := r.listBackups(ctx)
+		must(t, err)
+		last := docs[len(docs)-1]
+		for _, cd := range last.Collections {
+			if !strings.HasPrefix(cd.Object, dataPrefix+last.Label+"-") {
+				t.Fatalf("after the rewind, backup %s names %s for %s", last.Label, cd.Object, cd.Name)
+			}
+		}
+		if e.fullNext(env, db.ID) != "" {
+			t.Fatal("the next backup still takes everything again")
+		}
 		names, _ := a.collectionNames(ctx)
 		if strings.Join(names, ",") != "docs,named" || count(t, a, "docs") != 250 || count(t, a, "named") != 2 {
 			t.Fatalf("after the rewind: %v docs=%d", names, count(t, a, "docs"))
@@ -362,6 +378,51 @@ func TestQdrant(t *testing.T) {
 		cl := mustRun[protocol.RewindCleanupResult](t, e, env, db, protocol.TaskRewindCleanup, protocol.RewindCleanupParams{RewindID: "rw1"})
 		if !cl.Removed {
 			t.Fatalf("cleanup: %+v", cl)
+		}
+	})
+
+	t.Run("a snapshot recovered outside Rowsafe never passes for a later state", func(t *testing.T) {
+		r, err := openRepo(env, db)
+		must(t, err)
+		object := func(label string) string {
+			t.Helper()
+			docs, _, err := r.listBackups(ctx)
+			must(t, err)
+			for _, d := range docs {
+				if d.Label == label {
+					return d.collection("docs").Object
+				}
+			}
+			t.Fatalf("no backup %s", label)
+			return ""
+		}
+		// Qdrant's own snapshot of docs as it is now, for the recovery.
+		snap, err := a.collectionSnapshot(ctx, "docs")
+		must(t, err)
+		file := filepath.Join(t.TempDir(), "docs.snapshot")
+		resp, err := a.request(ctx, http.MethodGet, collPath("docs")+"/snapshots/"+url.PathEscape(snap.Name), nil, nil, "")
+		must(t, err)
+		f, _ := os.Create(file)
+		_, err = io.Copy(f, resp.Body)
+		resp.Body.Close()
+		f.Close()
+		must(t, err)
+		must(t, a.deleteCollectionSnapshot(ctx, "docs", snap.Name))
+		e.opsWatch(ctx, env, db, a)
+		addPoints(t, a, "docs", 5001, 1)
+		b2 := mustRun[protocol.BackupResult](t, e, env, db, protocol.TaskBackup, nil)
+		// Recovered outside Rowsafe, then one other write: the operation
+		// numbers and segments are those seen before. The agent's monitor
+		// looks every few minutes; here once in between.
+		must(t, uploadCollection(ctx, a, "docs", file))
+		e.opsWatch(ctx, env, db, a)
+		addPoints(t, a, "docs", 6001, 1)
+		b3 := mustRun[protocol.BackupResult](t, e, env, db, protocol.TaskBackup, nil)
+		if object(b3.Label) == object(b2.Label) {
+			t.Fatal("the backup after the recovery named the snapshot of before it")
+		}
+		if b3.Kept == nil || !slices.Contains(b3.Kept, b3.Label) || !slices.Contains(b3.Kept, b2.Label) {
+			t.Fatalf("kept: %v", b3.Kept)
 		}
 	})
 

@@ -93,3 +93,24 @@ func TestSnapshotDue(t *testing.T) {
 		t.Error("SnapshotEngine")
 	}
 }
+
+func TestQuickSnapshotsFor(t *testing.T) {
+	for _, c := range []struct {
+		engine, version string
+		want            bool
+	}{
+		{EngineQdrant, "1.19.2", true}, {EngineQdrant, "1.17.0", true}, {EngineQdrant, "v1.16.3", false}, {EngineQdrant, "", false},
+		{EngineOpenSearch, "", true}, {EngineMeilisearch, "1.12.0", true}, {EnginePostgreSQL, "17", false},
+	} {
+		if got := QuickSnapshotsFor(c.engine, c.version); got != c.want {
+			t.Errorf("%s %s: %v", c.engine, c.version, got)
+		}
+	}
+	if SnapshotRest(10*time.Hour, 15*time.Minute) != SnapshotMaxRest {
+		t.Error("the rest is capped")
+	}
+	now := time.Now()
+	if !SnapshotDue(10*time.Minute, now.Add(time.Hour), now, 15*time.Minute) {
+		t.Error("a finish time in the future never holds snapshots back")
+	}
+}

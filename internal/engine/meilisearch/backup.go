@@ -47,10 +47,19 @@ func (e *Engine) takeSnapshot(ctx context.Context, env agent.EngineEnv, db proto
 			"it gives Rowsafe's user read access to it", s.SnapshotDir, err)
 	}
 	// Nothing changed since the newest snapshot: record it again.
-	keys := keysMark(ctx, c, s)
+	keys, settings := keysMark(ctx, c, s), instanceSettingsMark(ctx, c)
 	if docs, _, err := r.listBackups(ctx); err == nil && len(docs) > 0 {
 		prev := docs[len(docs)-1]
-		if prev.Version == doc.Version && unchangedSince(ctx, c, prev.Changes, keys) {
+		holder := prev
+		if prev.Data != "" {
+			for _, d := range docs {
+				if d.Label == prev.Data {
+					holder = d
+				}
+			}
+		}
+		fresh := holder.Label == prev.dataLabel() && doc.StartedAt.Sub(holder.TakenAt) <= reuseMaxAge
+		if fresh && prev.Version == doc.Version && unchangedSince(ctx, c, prev.Changes, keys, settings) {
 			return e.recordUnchanged(ctx, r, doc, prev, tl)
 		}
 	}
@@ -70,7 +79,7 @@ func (e *Engine) takeSnapshot(ctx context.Context, env agent.EngineEnv, db proto
 		doc.TakenAt = t.StartedAt.UTC()
 	}
 	if t.EnqueuedAt != nil {
-		doc.Changes = &changeMark{TaskUID: t.id(), TaskEnqueuedAt: enqueuedText(t.EnqueuedAt), Keys: keys}
+		doc.Changes = &changeMark{TaskUID: t.id(), TaskEnqueuedAt: enqueuedText(t.EnqueuedAt), Keys: keys, Settings: settings}
 	}
 	in, err := inspect(ctx, c)
 	if err != nil {
@@ -160,7 +169,14 @@ func (e *Engine) backup(ctx context.Context, env agent.EngineEnv, db protocol.Da
 	if err := retention(ctx, r, db, doc.Label, time.Now(), tl); err != nil {
 		tl.Printf("note: removing old backups failed (%v); it is tried again after the next backup", err)
 	}
-	return backupResult(doc), nil
+	res := backupResult(doc)
+	if docs, _, err := r.listBackups(ctx); err == nil { // what retention kept (protocol.BackupResult.Kept)
+		res.Kept = []string{}
+		for _, d := range docs {
+			res.Kept = append(res.Kept, d.Label)
+		}
+	}
+	return res, nil
 }
 
 func backupResult(d backupDoc) *protocol.BackupResult {

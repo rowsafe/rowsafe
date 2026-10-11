@@ -236,7 +236,16 @@ func (e *Engine) backup(ctx context.Context, env agent.EngineEnv, db protocol.Da
 	if err != nil {
 		return nil, err
 	}
-	return backupResult(doc), nil
+	res := backupResult(doc)
+	if r, err := openRepo(env, db); err == nil {
+		if docs, _, err := r.listBackups(ctx); err == nil {
+			res.Kept = []string{}
+			for _, d := range docs {
+				res.Kept = append(res.Kept, d.Label)
+			}
+		}
+	}
+	return res, nil
 }
 
 func backupResult(d backupDoc) *protocol.BackupResult {
@@ -278,9 +287,17 @@ func (e *Engine) takeBackup(ctx context.Context, env agent.EngineEnv, db protoco
 	if len(docs) > 0 {
 		prev = &docs[len(docs)-1]
 	}
-	doc, err := e.storeCollections(ctx, c, r, in, prev, source, mark, tl)
+	e.opsWatch(ctx, env, db, c) // fullnext.go: operation numbers that went back since last seen
+	why := e.fullNext(env, db.ID)
+	if why != "" {
+		tl.Printf("every collection is taken again: %s", why)
+	}
+	doc, err := e.storeCollections(ctx, c, r, in, prev, why != "", source, mark, tl)
 	if err != nil {
 		return doc, err
+	}
+	if why != "" && e.fullNext(env, db.ID) == why {
+		e.setFullNext(env, db.ID, "")
 	}
 	tl.Printf("backup %s complete: %d collections, %s points, %s stored (encrypted on this server)",
 		doc.Label, doc.userCollections(), commas(doc.totalPoints()), humanBytes(doc.StoredBytes))

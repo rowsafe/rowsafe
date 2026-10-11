@@ -21,6 +21,9 @@ type restoreTarget struct {
 	Label  string // BackupSet
 	Kept   string // a rewind's kept data: kept/<id>/ (After: kept/<id>/after/)
 	After  bool
+	// Exact: the backup Label names or nothing (a rewind in place never
+	// goes to another moment than the one a person confirmed).
+	Exact bool
 }
 
 func targetFrom(t protocol.RewindTarget) (restoreTarget, error) {
@@ -101,11 +104,15 @@ func pick(ctx context.Context, r *repo, t restoreTarget) (string, backupDoc, err
 				return backupPrefix + d.Label + "/", d, nil
 			}
 		}
-		// A Mark's backup, or no moment to go by: nothing else will do. A
-		// backup retention removed otherwise gives way to the newest kept
-		// one at or before the moment.
-		if t.Mark != "" || t.Time.IsZero() {
-			return "", backupDoc{}, fmt.Errorf("backup %s isn't in your bucket any more", label)
+		// A Mark's backup, a rewind in place, or no moment to go by: nothing
+		// else will do. A backup retention removed otherwise gives way to the
+		// newest kept one at or before the moment (a copy says which).
+		if t.Mark != "" || t.Time.IsZero() || t.Exact {
+			msg := fmt.Sprintf("backup %s isn't in your bucket any more (retention keeps one an hour after a day)", label)
+			if near := nearestBefore(docs, t.Time); t.Exact && !t.Time.IsZero() && near != nil {
+				msg += fmt.Sprintf(": the nearest kept one before it is from %s; rewind to that one instead", near.TakenAt.UTC().Format("2006-01-02 15:04:05 UTC"))
+			}
+			return "", backupDoc{}, errors.New(msg)
 		}
 	}
 	if t.Latest || t.Time.IsZero() {
@@ -204,4 +211,15 @@ func restoreInto(ctx context.Context, env agent.EngineEnv, r *repo, t restoreTar
 		return out, nil, err
 	}
 	return out, c, nil
+}
+
+// nearestBefore is the newest backup taken at or before t (nil if none).
+func nearestBefore(docs []backupDoc, t time.Time) *backupDoc {
+	var best *backupDoc
+	for i := range docs {
+		if !docs[i].TakenAt.After(t) {
+			best = &docs[i]
+		}
+	}
+	return best
 }
