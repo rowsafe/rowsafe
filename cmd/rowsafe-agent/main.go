@@ -33,6 +33,9 @@ Usage:
   rowsafe-agent files discover|access|list|add ...
                                             the folders that go with a database
                                             (used by the installer; see files --help)
+  rowsafe-agent postgres tune [--port 5432]
+                                            Rowsafe's recommended settings for a new PostgreSQL
+                                            (used by the installer; see postgres --help)
   rowsafe-agent mongodb status|login|initiate|save-uri ...
                                             MongoDB helpers for the installer (see mongodb --help)
   rowsafe-agent clickhouse status|login|save-login ...
@@ -90,6 +93,8 @@ func main() {
 		os.Exit(setup(ctx, os.Args[2:]))
 	case "files":
 		os.Exit(filesCmd(ctx, os.Args[2:])) // files.go
+	case "postgres": // PostgreSQL installer helpers (postgres.go)
+		os.Exit(postgresCmd(ctx, os.Args[2:]))
 	case "mongodb": // MongoDB installer helpers (mongodb.go)
 		os.Exit(mongodbCmd(ctx, os.Args[2:]))
 	case "clickhouse": // ClickHouse installer helpers (clickhouse.go)

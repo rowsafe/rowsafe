@@ -37,8 +37,10 @@
 #                          (13-18) from the PostgreSQL project's repository
 #                          (apt.postgresql.org, its signing key checked) and
 #                          start it; refuses if PostgreSQL is already installed.
-#                          With --protect, that new PostgreSQL is restarted once
-#                          if backups need it
+#                          It starts with query statistics on and Rowsafe's
+#                          recommended settings for the server's memory and
+#                          CPUs. With --protect, that new PostgreSQL is
+#                          restarted once if backups need it
 #   --pg-extensions LIST   with --install-postgres (15-18): install and turn on
 #                          vector (pgvector), postgis (PostGIS) and/or
 #                          timescaledb (TimescaleDB, Apache-2.0 code only), all
@@ -333,6 +335,9 @@ INSTALL_DB=''      # --install-mysql / -mariadb / -valkey / -clickhouse / -qdran
 INSTALL_DB_VERSION='' # its version (8.4; 11.4 or 11.8; 8; 26.3 or 26.8; 1.19; 1.54)
 LISTEN_PUBLIC=0    # --listen-public
 PG_OURS=0          # the PostgreSQL here is the one --install-postgres installed
+PG_RESTART_WHY=''  # what waits for its one restart (pg_new_start), "; "-separated
+PG_PRELOAD_ADDED='' # the libraries pg_preload_add added
+PG_EXT_INSTALLED='' # the --pg-extensions packages this run installed
 DB_OURS=0          # the INSTALL_DB server here is the one this installer installed
 DB_STARTED=0       # this run started it (its settings were in place before)
 DB_FRESH=0         # this run installed it (nothing runs on it yet)
@@ -414,8 +419,10 @@ Options (when piping, pass them after `sh -s --`):
                          on a fresh server: install PostgreSQL VERSION (13-18) from the
                          PostgreSQL project's repository (apt.postgresql.org, its signing
                          key checked) and start it. Refuses if PostgreSQL is already
-                         installed; a re-run keeps the one it installed. With --protect,
-                         that new PostgreSQL is restarted once if backups need it
+                         installed; a re-run keeps the one it installed. It starts with
+                         query statistics on and Rowsafe's recommended settings for the
+                         server's memory and CPUs. With --protect, that new PostgreSQL is
+                         restarted once if backups need it
   --pg-extensions LIST   with --install-postgres (15-18): install and turn on vector
                          (pgvector), postgis (PostGIS) and/or timescaledb (TimescaleDB, its
                          Apache-2.0 code only; loaded at start, telemetry off), all from the
@@ -1424,6 +1431,9 @@ PGDG_KEY_FILE=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
 PGDG_LIST=/etc/apt/sources.list.d/pgdg.list
 # The major --install-postgres installed (a re-run recognizes it as its own).
 PG_INSTALLED_FILE=$CONFIG_DIR/installed-postgresql
+# There while the PostgreSQL --install-postgres installed waits for Rowsafe's
+# recommended settings (pg_tune_new: once, while it is new).
+PG_TUNE_FILE=$CONFIG_DIR/tune-postgresql
 # --listen-public's self-signed certificate (root's directory, the key
 # readable by the postgres group only, as PostgreSQL requires).
 PG_TLS_DIR=/etc/ssl/rowsafe-postgresql
@@ -1495,48 +1505,150 @@ pg_sql_in() {
   (cd / && runuser -u postgres -- psql -X -A -t -q -v ON_ERROR_STOP=1 -p "$1" -d "$2" -c "$3") </dev/null
 }
 
-# pg_extensions_setup is --pg-extensions on the PostgreSQL --install-postgres
-# installed: the packages, TimescaleDB loaded at start (its telemetry off;
-# the new PostgreSQL restarted once for it) and each extension turned on in
-# the postgres database and in template1, so databases created later have
-# them too. A re-run changes nothing.
-pg_extensions_setup() {
-  [ -n "$PG_EXTENSIONS" ] || return 0
+# pg_preload_add PORT LIBRARY... adds the LIBRARYs that aren't loaded yet
+# to shared_preload_libraries and sets PG_PRELOAD_ADDED to them; false when
+# all are loaded already. The others are kept: those PostgreSQL runs with and
+# those its files give the next start (an earlier ALTER SYSTEM, the tuning).
+# They load at the next restart. Only libraries whose package is installed:
+# PostgreSQL doesn't start with a missing one.
+pg_preload_add() {
+  _pp=$1
+  shift
+  _cur=$(pg_sql "$_pp" "SELECT setting FROM pg_settings WHERE name = 'shared_preload_libraries'") ||
+    die "could not read PostgreSQL's settings"
+  _next=$(pg_sql "$_pp" "SELECT setting FROM pg_file_settings WHERE name = 'shared_preload_libraries' AND error IS NULL ORDER BY seqno DESC LIMIT 1") ||
+    die "could not read PostgreSQL's settings files"
+  PG_PRELOAD_ADDED=''
+  for _l in "$@"; do
+    printf '%s\n' "$_cur" | tr ',' '\n' | tr -d ' "' | grep -qx "$_l" || PG_PRELOAD_ADDED="$PG_PRELOAD_ADDED $_l"
+  done
+  [ -n "$PG_PRELOAD_ADDED" ] || return 1
+  _lits='' _seen=' '
+  for _l in $(printf '%s,%s' "$_cur" "$_next" | tr ',' ' ' | tr -d '"') $PG_PRELOAD_ADDED; do
+    printf '%s\n' "$_l" | grep -Eq '^[A-Za-z0-9_.$/-]+$' || die "unexpected library in shared_preload_libraries: $_l"
+    case $_seen in *" $_l "*) continue ;; esac
+    _seen="$_seen$_l "
+    _lits="$_lits${_lits:+, }'$_l'"
+  done
+  pg_sql "$_pp" "ALTER SYSTEM SET shared_preload_libraries = $_lits" >/dev/null ||
+    die "could not add$PG_PRELOAD_ADDED to shared_preload_libraries"
+}
+
+# pg_tune_new PORT gives the PostgreSQL --install-postgres installed
+# Rowsafe's recommended settings for this server (what Tune for this server
+# recommends, from the agent's own rules: `rowsafe-agent postgres tune`, run
+# as postgres), once, while it is new and empty: a server Rowsafe creates
+# doesn't start with PostgreSQL's defaults. True when a setting waits for a
+# restart. Only while $PG_TUNE_FILE is there (written when this installer
+# installed PostgreSQL), so a re-run, or a PostgreSQL in use, is never
+# tuned. A failure only warns: Tune for this server offers the same.
+pg_tune_new() {
+  [ -f "$PG_TUNE_FILE" ] || return 1
+  # The verified agent, where postgres may run it: the staged one, or a copy
+  # of the download in a folder of root's (not /tmp, which may be noexec).
+  _tb=$STAGED _td=''
+  if [ "$need_binary" = 1 ]; then
+    install -d -m 0755 -o root -g root "$LIB_DIR" && _td=$(mktemp -d "$LIB_DIR/.tune.XXXXXX") && chmod 0755 "$_td" &&
+      install -m 0755 -o root -g root "$TMP/rowsafe-agent" "$_td/rowsafe-agent" ||
+      die "could not copy the agent for PostgreSQL's settings"
+    _tb=$_td/rowsafe-agent
+  fi
+  _rc=0
+  (cd / && runuser -u postgres -- "$_tb" postgres tune --port "$1") </dev/null >"$TMP/tune.out" 2>"$TMP/tune.log" || _rc=$?
+  [ -z "$_td" ] || rm -rf "$_td"
+  rm -f "$PG_TUNE_FILE"
+  if [ "$_rc" != 0 ]; then
+    tail -n 5 "$TMP/tune.log" | sed 's/^/    /' >&2
+    warn "Rowsafe's recommended settings for this server weren't applied (see above); Tune for this server in the dashboard offers them"
+    return 1
+  fi
+  _set=$(awk '$1 == "changed" { printf "%s%s = %s", s, $2, $3; s = ", " }' "$TMP/tune.out")
+  if [ -z "$_set" ]; then
+    ok "PostgreSQL's settings already suit this server"
+    return 1
+  fi
+  ok "PostgreSQL tuned for this server (Rowsafe's recommended settings): $_set"
+  grep -qx 'restart yes' "$TMP/tune.out"
+}
+
+# pg_restart_why REASON adds REASON to what waits for the new PostgreSQL's
+# one restart (pg_new_start).
+pg_restart_why() { PG_RESTART_WHY="${PG_RESTART_WHY:+$PG_RESTART_WHY; }$1"; }
+
+# pg_new_prepare readies the PostgreSQL --install-postgres installed for its
+# one restart, while it is new and empty: the --pg-extensions packages first
+# (a library loaded at start must be there, or PostgreSQL doesn't start),
+# then what loads at start (pg_stat_statements, so Pulse shows slow queries
+# from the first day, and TimescaleDB) and Rowsafe's recommended settings
+# (pg_tune_new). PG_RESTART_WHY says what waits; pg_new_start restarts once
+# for all of it (and for --listen-public's settings). A re-run changes
+# nothing.
+pg_new_prepare() {
   _m=$INSTALL_PG
   _port=$(pg_lsclusters -h 2>/dev/null | awk -v m="$_m" '$1 == m && $2 == "main" { print $3; exit }')
-  [ -n "$_port" ] || die "--pg-extensions: PostgreSQL $_m's main cluster isn't there"
+  [ -n "$_port" ] || die "PostgreSQL $_m's main cluster isn't there"
   _names=$(printf '%s' "$PG_EXTENSIONS" | tr ',' ' ')
-  _want=''
+  PG_EXT_INSTALLED=''
   for _e in $_names; do
     _p=$(pg_ext_package "$_e" "$_m")
-    [ "$(dpkg-query -W -f '${db:Status-Status}' "$_p" 2>/dev/null)" = installed ] || _want="$_want $_p"
+    [ "$(dpkg-query -W -f '${db:Status-Status}' "$_p" 2>/dev/null)" = installed ] || PG_EXT_INSTALLED="$PG_EXT_INSTALLED $_p"
   done
-  if [ -n "$_want" ]; then
-    step "Installing PostgreSQL extensions from the PostgreSQL project's repository:$_want"
-    for _p in $_want; do
+  if [ -n "$PG_EXT_INSTALLED" ]; then
+    step "Installing PostgreSQL extensions from the PostgreSQL project's repository:$PG_EXT_INSTALLED"
+    for _p in $PG_EXT_INSTALLED; do
       [ -n "$(apt_candidate "$_p")" ] ||
         die "$_p isn't available for PostgreSQL $_m on $OS_NAME ($ARCH); not installing the extensions. Choose another PostgreSQL version or leave it out."
     done
     # shellcheck disable=SC2086 # package names from pg_ext_package
-    apt_install $_want
+    apt_install $PG_EXT_INSTALLED
   fi
-  _changed=0
+  # The tuning first: it sets shared_preload_libraries from what runs now.
+  _tuned=0
+  ! pg_tune_new "$_port" || _tuned=1
+  _libs=pg_stat_statements
   case " $_names " in
     *" timescaledb "*)
-      _cur=$(pg_sql "$_port" "SELECT setting FROM pg_settings WHERE name = 'shared_preload_libraries'") ||
-        die "could not read PostgreSQL's settings"
-      if ! printf '%s\n' "$_cur" | tr ',' '\n' | tr -d ' "' | grep -qx timescaledb; then
-        _lits=''
-        for _l in $(printf '%s' "$_cur" | tr ',' ' ' | tr -d '"'); do
-          printf '%s\n' "$_l" | grep -Eq '^[A-Za-z0-9_.$/-]+$' || die "unexpected library in shared_preload_libraries: $_l"
-          _lits="$_lits'$_l', "
-        done
-        pg_sql "$_port" "ALTER SYSTEM SET shared_preload_libraries = ${_lits}'timescaledb'" >/dev/null ||
-          die "could not add TimescaleDB to shared_preload_libraries"
-        pg_restart_cluster "$_m" main || die "PostgreSQL $_m doesn't start with TimescaleDB loaded (see above)"
-        ok "TimescaleDB loads when PostgreSQL starts (PostgreSQL restarted)"
-        _changed=1
-      fi
+      [ -e "/usr/lib/postgresql/$_m/lib/timescaledb.so" ] ||
+        die "TimescaleDB's library for PostgreSQL $_m isn't there (postgresql-$_m-timescaledb); not loading it at start"
+      _libs="$_libs timescaledb"
+      ;;
+  esac
+  # shellcheck disable=SC2086 # one library per word
+  if pg_preload_add "$_port" $_libs; then
+    # "pg_stat_statements loads", "pg_stat_statements and TimescaleDB load"
+    pg_restart_why "$(printf '%s\n' $PG_PRELOAD_ADDED | sed 's/^timescaledb$/TimescaleDB/' |
+      awk '{ a[NR] = $0 } END { for (i = 1; i <= NR; i++) printf "%s%s", (i == 1 ? "" : (i == NR ? " and " : ", ")), a[i]; printf "%s", (NR > 1 ? " load" : " loads") }') when PostgreSQL starts"
+  fi
+  [ "$_tuned" = 0 ] || pg_restart_why "the new settings are in effect"
+}
+
+# pg_new_start restarts the PostgreSQL --install-postgres installed once, for
+# all that waits (PG_RESTART_WHY: pg_new_prepare, --listen-public), then
+# turns on query statistics (pg_stat_statements in the postgres database,
+# where Rowsafe reads it) and --pg-extensions (TimescaleDB's telemetry off
+# first) in the postgres database and in template1, so databases created
+# later have them too. A re-run changes nothing and restarts nothing.
+pg_new_start() {
+  _m=$INSTALL_PG
+  _port=$(pg_lsclusters -h 2>/dev/null | awk -v m="$_m" '$1 == m && $2 == "main" { print $3; exit }')
+  [ -n "$_port" ] || die "PostgreSQL $_m's main cluster isn't there"
+  if [ -n "$PG_RESTART_WHY" ]; then
+    pg_restart_cluster "$_m" main || die "PostgreSQL $_m doesn't start with its new settings (see above)"
+    ok "$PG_RESTART_WHY (PostgreSQL restarted)"
+    PG_RESTART_WHY=''
+  fi
+  if [ "$(pg_sql "$_port" "SELECT count(*) FROM pg_extension WHERE extname = 'pg_stat_statements'")" = 0 ]; then
+    pg_sql "$_port" "SET search_path = pg_catalog, public; CREATE EXTENSION IF NOT EXISTS pg_stat_statements SCHEMA public" >/dev/null ||
+      die "turning on pg_stat_statements failed"
+    ok "query statistics are on (pg_stat_statements)"
+  fi
+  [ -n "$PG_EXTENSIONS" ] || return 0
+  _names=$(printf '%s' "$PG_EXTENSIONS" | tr ',' ' ')
+  _changed=0
+  [ -z "$PG_EXT_INSTALLED" ] || _changed=1
+  case " $_names " in
+    *" timescaledb "*)
+      case " $PG_PRELOAD_ADDED " in *" timescaledb "*) _changed=1 ;; esac
       if [ "$(pg_sql "$_port" "SELECT current_setting('timescaledb.telemetry_level', true)")" != off ]; then
         pg_sql "$_port" "ALTER SYSTEM SET timescaledb.telemetry_level = 'off'" >/dev/null &&
           pg_sql "$_port" "SELECT pg_reload_conf()" >/dev/null || die "could not turn TimescaleDB's telemetry off"
@@ -1557,7 +1669,7 @@ pg_extensions_setup() {
       _changed=1
     done
   done
-  if [ "$_changed" = 1 ] || [ -n "$_want" ]; then
+  if [ "$_changed" = 1 ]; then
     ok "extensions on in the postgres database and every new one: $(printf '%s' "$PG_EXTENSIONS" | sed 's/,/, /g')"
   else
     ok "extensions $(printf '%s' "$PG_EXTENSIONS" | sed 's/,/, /g'): nothing to change"
@@ -1590,11 +1702,13 @@ install_postgres() {
       apt_install_as "PostgreSQL $_v" "postgresql-$_v" "postgresql-client-$_v"
     ) || exit 1
     install -d -m 0750 -o root -g postgres "$CONFIG_DIR"
+    printf '%s\n' "$_v" | write_file "$PG_TUNE_FILE" 0644 root:root || true
     printf '%s\n' "$_v" | write_file "$PG_INSTALLED_FILE" 0644 root:root || true
     ok "PostgreSQL $_c installed"
   fi
   PG_OURS=1
   pg_ensure_cluster "$_v" main
+  pg_new_prepare
 }
 
 # pg_cluster_status MAJOR NAME prints the cluster's status (online, down...),
@@ -1737,8 +1851,9 @@ listen_public() {
   _pending=$(pg_sql "$LP_PORT" "SELECT count(*) FROM pg_settings WHERE pending_restart") || _pending=0
   if [ "$_pending" != 0 ]; then
     if [ "$PG_OURS" = 1 ]; then
-      note "restarting the new PostgreSQL so it listens on the network"
-      pg_restart_cluster "$LP_MAJOR" "$LP_NAME" || die "restarting PostgreSQL $LP_MAJOR ($LP_NAME) failed (see above)"
+      # The new PostgreSQL: with the rest that waits for its one restart
+      # (pg_new_start, right after).
+      pg_restart_why "it listens on the network"
     elif [ "$TTY" = 1 ] && {
       tty_say "PostgreSQL needs a quick restart to listen on the network. Open connections are dropped."
       confirm "Restart PostgreSQL now?" n
@@ -7531,6 +7646,26 @@ auto_security_updates() {
   fi
   systemd_running || note "systemd isn't running here: the list of what waits for a restart starts with it"
   ok "on: this server installs its security updates by itself every day; never $(engine_label)'s packages, never a restart of $(engine_label), never a reboot"
+}
+
+# asu_first_run is --auto-security-updates' first run, now: a new server
+# starts with the security fixes already out instead of waiting for the
+# daily run. The same unattended-upgrades and rules (security fixes only,
+# never the database's packages, no restart of it, no reboot); if it can't
+# finish, the daily run tries again.
+asu_first_run() {
+  # Only with Rowsafe's rules in place (asu_setup writes the marker last):
+  # without them unattended-upgrades could update the database's packages.
+  [ -f "$asu_conf" ] && [ -f "$asu_marker" ] && have unattended-upgrade || return 0
+  step "Installing the security updates that are out already"
+  [ -n "${APT_UPDATED:-}" ] || apt_update
+  apt_lock_wait
+  if timeout 1800 unattended-upgrade >"$TMP/uu.log" 2>&1 </dev/null; then
+    ok "security updates installed"
+  else
+    tail -n 5 "$TMP/uu.log" | sed 's/^/    /' >&2
+    warn "installing the security updates now didn't finish; the daily run tries again"
+  fi
 }
 
 # remove_auto_security_updates removes Rowsafe's files for automatic
@@ -14773,6 +14908,42 @@ sqlite_clone_dirs() {
 }
 # <<< sqlite clones
 
+# agent_release resolves, verifies and (unless that version is on disk
+# already) downloads the release into $TMP, once. --install-postgres does it
+# before installing PostgreSQL: the new PostgreSQL's settings come from the
+# agent (pg_tune_new).
+RELEASE_READY=0
+agent_release() {
+  [ "$RELEASE_READY" = 0 ] || return 0
+  resolve_release
+  installed=$(installed_version)
+  if [ -n "$installed" ]; then
+    case $(version_cmp "$REL_VERSION" "$installed") in
+      -1)
+        if [ -z "$WANT_VERSION" ]; then
+          note "installed version $installed is newer than $RELEASE_SOURCE ($REL_VERSION); keeping it"
+          KEEP_INSTALLED=1
+          REL_VERSION=$installed
+        elif [ "${ROWSAFE_ALLOW_DOWNGRADE:-}" = 1 ]; then
+          warn "downgrading from $installed to $REL_VERSION. Pin the host to $REL_VERSION in the control plane, or it will be offered $installed again."
+        else
+          die "rowsafe-agent $installed is installed; refusing to downgrade to $REL_VERSION (set ROWSAFE_ALLOW_DOWNGRADE=1 if you mean it)"
+        fi
+        ;;
+    esac
+  fi
+  STAGED=$INSTALL_DIR/versions/$REL_VERSION/rowsafe-agent
+  need_binary=1
+  if [ "$KEEP_INSTALLED" = 1 ]; then
+    need_binary=0
+  elif [ -x "$STAGED" ] && [ "$(sha256_of "$STAGED")" = "$REL_SHA" ]; then
+    need_binary=0
+    ok "rowsafe-agent $REL_VERSION is already on disk and matches the manifest"
+  fi
+  [ "$need_binary" = 0 ] || download_binary
+  RELEASE_READY=1
+}
+
 install_agent() {
   require_root
   root_expiry_lift
@@ -14783,13 +14954,19 @@ install_agent() {
   # MariaDB's and Valkey's once the agent's user is known (the files the
   # firewall and --listen-public write belong to it), the server listening
   # on this server only until then.
-  [ -z "$INSTALL_PG" ] || install_postgres
-  [ -z "$INSTALL_PG" ] || pg_extensions_setup
+  if [ -n "$INSTALL_PG" ]; then
+    ensure_base_tools
+    agent_release
+    install_postgres
+  fi
   [ -z "$INSTALL_DB" ] || install_database
   if [ -z "$INSTALL_DB" ]; then
     [ "$FIREWALL_SSH" != yes ] || firewall_close_early
     [ "$LISTEN_PUBLIC" = 0 ] || listen_public
   fi
+  # The new PostgreSQL's one restart, for everything above, then the
+  # extensions that need it.
+  [ -z "$INSTALL_PG" ] || pg_new_start
   detect_host_engine # mysql
   detect_mongodb_host # mongodb
   detect_clickhouse_host # clickhouse
@@ -14832,32 +15009,7 @@ install_agent() {
   ensure_base_tools
 
   # 1. Resolve and verify the release. Nothing on the host changes if this fails.
-  resolve_release
-  installed=$(installed_version)
-  if [ -n "$installed" ]; then
-    case $(version_cmp "$REL_VERSION" "$installed") in
-      -1)
-        if [ -z "$WANT_VERSION" ]; then
-          note "installed version $installed is newer than $RELEASE_SOURCE ($REL_VERSION); keeping it"
-          KEEP_INSTALLED=1
-          REL_VERSION=$installed
-        elif [ "${ROWSAFE_ALLOW_DOWNGRADE:-}" = 1 ]; then
-          warn "downgrading from $installed to $REL_VERSION. Pin the host to $REL_VERSION in the control plane, or it will be offered $installed again."
-        else
-          die "rowsafe-agent $installed is installed; refusing to downgrade to $REL_VERSION (set ROWSAFE_ALLOW_DOWNGRADE=1 if you mean it)"
-        fi
-        ;;
-    esac
-  fi
-  STAGED=$INSTALL_DIR/versions/$REL_VERSION/rowsafe-agent
-  need_binary=1
-  if [ "$KEEP_INSTALLED" = 1 ]; then
-    need_binary=0
-  elif [ -x "$STAGED" ] && [ "$(sha256_of "$STAGED")" = "$REL_SHA" ]; then
-    need_binary=0
-    ok "rowsafe-agent $REL_VERSION is already on disk and matches the manifest"
-  fi
-  [ "$need_binary" = 0 ] || download_binary
+  agent_release
 
   # No enrollment token: have someone approve this server in the browser.
   connect_in_browser
@@ -14894,7 +15046,7 @@ install_agent() {
   sqlite_setup # sqlite
   install_logrotate
   case $AUTO_SECURITY in
-    yes) auto_security_updates ;;
+    yes) auto_security_updates && asu_first_run ;;
     no) remove_auto_security_updates ;;
     *) [ ! -f "$asu_marker" ] || auto_security_updates ;; # a re-run refreshes Rowsafe's files
   esac

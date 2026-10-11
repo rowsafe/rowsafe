@@ -80,10 +80,11 @@
 #      changes).
 #  12. servers Rowsafe creates (--cloud, a separate run): one non-interactive
 #      run as cloud-init does it (--no-prompt --install-postgres 17
-#      --listen-public --storage rowsafe --protect shop) installs real
-#      PostgreSQL from apt.postgresql.org (signing key checked), makes it
-#      reachable with TLS and SCRAM only, generates the passphrase, protects it
-#      (the new PostgreSQL restarted once); a re-run changes nothing; a server
+#      --listen-public --storage rowsafe --protect shop --auto-security-updates)
+#      installs real PostgreSQL from apt.postgresql.org (signing key checked)
+#      with query statistics on, makes it reachable with TLS and SCRAM only,
+#      generates the passphrase, protects it (the new PostgreSQL restarted
+#      once), installs the security updates out already; a re-run changes nothing; a server
 #      with PostgreSQL already is refused. Then the same with --install-mysql
 #      8.4 (Debian 12, amd64), --install-mariadb 11.8 (Debian 13) and 11.4
 #      (Debian 12), --install-valkey 8 (Debian 12 and 13) and
@@ -245,6 +246,13 @@ case \${1:-} in
       [ "\$(wc -l <"\$f/\$cmd.rc")" -le 1 ] || sed -i 1d "\$f/\$cmd.rc"
     fi
     exit "\$rc" ;;
+  postgres)
+    # (--cloud) Rowsafe's recommended settings for the new PostgreSQL: the
+    # real agent's (built from this tree), run as postgres.
+    echo "postgres \$* (\$(id -un))" >>/tmp/rowsafe-fake/calls 2>/dev/null || true
+    r=/go-release/real/rowsafe-agent-linux-\$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
+    [ -x "\$r" ] || { echo "no real agent here" >&2; exit 2; }
+    exec "\$r" "\$@" ;;
   sqlite)
     # (sqlite) root's look for SQLite files programs have open: sqlite-find.out
     f=/tmp/rowsafe-fake
@@ -361,6 +369,19 @@ host() {
       (cd "$root" && CGO_ENABLED=0 GOOS=linux GOARCH=$arch GOWORK=off go build -o "$work/go/real/rowsafe-agent-linux-$arch" ./cmd/rowsafe-agent) ||
         { echo "test-install: building the agent for linux/$arch failed (Meilisearch's TLS front)" >&2; exit 1; }
     done
+  fi
+
+  # (--cloud, postgres) The real agent: the new PostgreSQL's settings come
+  # from it (rowsafe-agent postgres tune).
+  if [ "$mode" = --in-container-cloud ]; then
+    case " $(printf '%s' "${TEST_ONLY:-postgres}" | tr ',' ' ') " in
+      *" postgres "*)
+        case $(docker info --format '{{.Architecture}}') in aarch64 | arm64) parch=arm64 ;; *) parch=amd64 ;; esac
+        [ -x "$work/go/real/rowsafe-agent-linux-$parch" ] ||
+          (cd "$root" && CGO_ENABLED=0 GOOS=linux GOARCH=$parch GOWORK=off go build -o "$work/go/real/rowsafe-agent-linux-$parch" ./cmd/rowsafe-agent) ||
+          { echo "test-install: building the agent for linux/$parch failed (PostgreSQL's settings)" >&2; exit 1; }
+        ;;
+    esac
   fi
 
   if [ "$mode" = --in-container-cloud ]; then
@@ -4620,7 +4641,8 @@ cloud_container() {
   pgx=${TEST_PG_EXTENSIONS-vector,postgis,timescaledb}
   cloud_init() {
     sh -c 'w=$1; shift; ROWSAFE_RELEASES_URL=https://localhost:18443/agent ROWSAFE_RESTIC_URL=https://localhost:18443/restic sh -s -- "$@" <"$w/install.sh"' \
-      cloud-init "$W" rse_secrettoken123 --no-prompt --install-postgres "$pgv" ${pgx:+--pg-extensions "$pgx"} --listen-public --storage rowsafe --protect shop
+      cloud-init "$W" rse_secrettoken123 --no-prompt --install-postgres "$pgv" ${pgx:+--pg-extensions "$pgx"} --listen-public --storage rowsafe --protect shop \
+      --auto-security-updates
   }
   chage -d 0 root # as the cloud set it (above)
   expect_ok "one run, as cloud-init: PostgreSQL, network, Rowsafe Storage, protected" cloud_init
@@ -4653,6 +4675,42 @@ cloud_container() {
   ! grep -qF "$gen" "$W/out" || fail "$name: the passphrase was printed"
   ! grep -q rse_secrettoken123 "$W/out" || fail "$name: the token was printed"
   pass "PostgreSQL $pgv from apt.postgresql.org, listening with TLS and SCRAM, protected, passphrase kept on the server"
+  # Query statistics from the first day: loaded at start, created in postgres.
+  q 'SHOW shared_preload_libraries' | tr ',' '\n' | tr -d ' ' | grep -qx pg_stat_statements || fail "$name: pg_stat_statements isn't loaded at start"
+  [ "$(q "SELECT count(*) FROM pg_extension WHERE extname = 'pg_stat_statements'")" = 1 ] || fail "$name: pg_stat_statements isn't on in postgres"
+  [ "$(q 'SELECT count(*) > 0 FROM pg_stat_statements')" = t ] || fail "$name: pg_stat_statements records nothing"
+  pass "query statistics on (pg_stat_statements)"
+  # Rowsafe's recommended settings for this server (the agent's, as Tune for
+  # this server recommends) from the start, with the same single restart:
+  # shared_buffers a quarter of the memory this container sees (rounded down
+  # to 16 MB, from 2 GB to 256 MB), not PostgreSQL's 128 MB.
+  grep -q "PostgreSQL tuned for this server (Rowsafe's recommended settings): .*shared_buffers = " "$W/out" || fail "$name: PostgreSQL wasn't tuned for this server"
+  # One restart for everything the new PostgreSQL needs (its libraries, the
+  # extensions' packages installed before, the new settings, the network),
+  # and the one backups need: PostgreSQL's log has the package's first start
+  # and those two, nothing more.
+  case ",$pgx," in
+    *,timescaledb,*) libs="pg_stat_statements and TimescaleDB load" ;;
+    *) libs="pg_stat_statements loads" ;;
+  esac
+  grep -q "$libs when PostgreSQL starts; the new settings are in effect; it listens on the network (PostgreSQL restarted)" "$W/out" || fail "$name: not one restart for all"
+  [ "$(grep -c "(PostgreSQL restarted)" "$W/out")" = 1 ] || fail "$name: the new PostgreSQL restarted $(grep -c "(PostgreSQL restarted)" "$W/out") times for its settings"
+  starts=$(grep -c "database system is ready to accept connections" "/var/log/postgresql/postgresql-$pgv-main.log")
+  [ "$starts" = 3 ] || fail "$name: PostgreSQL started $starts times in the first run, not 3 (the package's, the one restart, the one for backups)"
+  called "postgres tune --port 5432 (postgres)"
+  [ ! -e /etc/rowsafe/tune-postgresql ] || fail "$name: tuning still pending"
+  ram=$(awk '$1 == "MemTotal:" { printf "%.0f\n", $2 * 1024 }' /proc/meminfo) # (mawk's %d stops at 2 GB)
+  sb=$(q "SELECT setting::bigint * 8192 FROM pg_settings WHERE name = 'shared_buffers'")
+  awk -v sb="$sb" -v ram="$ram" 'BEGIN { q = ram / 4; exit !(sb <= q && sb > q - 268435456 && sb >= 134217728) }' ||
+    fail "$name: shared_buffers is $sb bytes on a server with $ram bytes of memory"
+  [ "$(q "SELECT count(*) FROM pg_settings WHERE pending_restart")" = 0 ] || fail "$name: settings still wait for a restart"
+  pass "PostgreSQL tuned for this server: shared_buffers $(q 'SHOW shared_buffers') of $(awk -v r="$ram" 'BEGIN { printf "%.0f", r / 1048576 }') MB"
+  # Rowsafe Cloud's automatic security updates: set up, and their first run now, not tomorrow.
+  [ -f /etc/apt/apt.conf.d/52rowsafe-unattended-upgrades ] && [ -f /etc/rowsafe/auto-security-updates ] || fail "$name: automatic security updates aren't set up"
+  grep -q "Installing the security updates that are out already" "$W/out" || fail "$name: no first run of the security updates"
+  grep -q -e "security updates installed" -e "the daily run tries again" "$W/out" || fail "$name: the first run of the security updates didn't end"
+  pg_lsclusters -h | awk -v m="$pgv" '$1 == m && $2 == "main" && $4 ~ /^online/ { f = 1 } END { exit !f }' || fail "$name: PostgreSQL isn't running after the security updates"
+  pass "automatic security updates on, first run done at setup"
   [ -z "$pgx" ] || cloud_pg_extension_checks
 
   # From the network: TLS and a password, nothing else.
@@ -4677,6 +4735,7 @@ cloud_container() {
   grep -q "nothing to change" "$W/out" || fail "$name: --listen-public changed something"
   [ -z "$pgx" ] || grep -q "extensions $(printf '%s' "$pgx" | sed 's/,/, /g'): nothing to change" "$W/out" || fail "$name: --pg-extensions changed something"
   [ "$(q 'SELECT pg_postmaster_start_time()')" = "$started" ] || fail "$name: PostgreSQL was restarted"
+  ! grep -q "PostgreSQL tuned for this server" "$W/out" || fail "$name: tuned again"
   [ "$(grep -c '^hostssl' "$hba")" = 2 ] || fail "$name: pg_hba.conf rules added twice"
   [ "$(sed -n "s/^ROWSAFE_REPO_CIPHER_PASS='\(.*\)'\$/\1/p" /etc/rowsafe/agent.env)" = "$gen" ] || fail "$name: the passphrase changed"
   not_called "apply"
@@ -4728,6 +4787,7 @@ cloud_pg_extension_checks() {
   case ",$pgx," in
     *,timescaledb,*)
       q 'SHOW shared_preload_libraries' | tr ',' '\n' | tr -d ' ' | grep -qx timescaledb || fail "$name: TimescaleDB isn't loaded at start"
+      q 'SHOW shared_preload_libraries' | tr ',' '\n' | tr -d ' ' | grep -qx pg_stat_statements || fail "$name: TimescaleDB replaced pg_stat_statements"
       [ "$(q 'SHOW timescaledb.telemetry_level')" = off ] || fail "$name: TimescaleDB's telemetry is $(q 'SHOW timescaledb.telemetry_level')"
       [ "$(q 'SHOW timescaledb.license')" = apache ] || fail "$name: TimescaleDB's license is $(q 'SHOW timescaledb.license')"
       dpkg-query -W -f '${Version}' "postgresql-$pgv-timescaledb" | grep -q pgdg || fail "$name: TimescaleDB isn't the PostgreSQL project's package"
