@@ -377,7 +377,7 @@ func (e *Engine) rewindInPlace(ctx context.Context, env agent.EngineEnv, db prot
 	if err != nil {
 		return nil, fmt.Errorf("reading your bucket: %w", err)
 	}
-	doc, err := pickDoc(docs, p.Target.BackupSet, p.Target.Time)
+	doc, err := pickDoc(docs, p.Target.BackupSet, p.Target.Time, true)
 	if err != nil {
 		return nil, err
 	}

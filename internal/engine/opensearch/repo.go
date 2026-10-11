@@ -246,6 +246,40 @@ func (r *repo) listDocs(ctx context.Context) ([]backupDoc, error) {
 	return out, nil
 }
 
+// uuidCache remembers each backup record's snapshot UUID (which never
+// changes once written), by the record's place in the bucket: a copy to
+// the bucket every few minutes reads only the records it hasn't seen.
+var uuidCache sync.Map // location + key -> uuid
+
+// recordedUUIDs lists the snapshot UUIDs the bucket's backup records name.
+func (r *repo) recordedUUIDs(ctx context.Context) ([]string, error) {
+	objs, err := r.st.List(ctx, docsPrefix)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, o := range objs {
+		label := strings.TrimSuffix(strings.TrimPrefix(o.Key, docsPrefix), ".json")
+		if !labelRE.MatchString(label) {
+			continue
+		}
+		ck := r.st.Location() + "\x00" + o.Key
+		if u, ok := uuidCache.Load(ck); ok {
+			out = append(out, u.(string))
+			continue
+		}
+		var d backupDoc
+		if err := r.getJSON(ctx, o.Key, &d); err != nil {
+			return nil, fmt.Errorf("reading %s: %w", o.Key, err)
+		}
+		if d.UUID != "" {
+			uuidCache.Store(ck, d.UUID)
+			out = append(out, d.UUID)
+		}
+	}
+	return out, nil
+}
+
 // ---- the repository's copy in the bucket
 
 // repoFile is one file of the local repository.
@@ -423,12 +457,10 @@ func (r *repo) syncRepo(ctx context.Context, dir, clusterUUID string, removed []
 		}
 	}
 	// Never a recorded snapshot's own files.
-	if docs, err := r.listDocs(ctx); err == nil {
-		for _, d := range docs {
-			if d.UUID != "" {
-				delete(cand, "snap-"+d.UUID+".dat")
-				delete(cand, "meta-"+d.UUID+".dat")
-			}
+	if uuids, err := r.recordedUUIDs(ctx); err == nil {
+		for _, u := range uuids {
+			delete(cand, "snap-"+u+".dat")
+			delete(cand, "meta-"+u+".dat")
 		}
 	} else {
 		return st, fmt.Errorf("reading the backup records in your bucket: %w", err)

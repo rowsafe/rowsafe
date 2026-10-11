@@ -196,7 +196,7 @@ func (e *Engine) rewindInPlace(ctx context.Context, env agent.EngineEnv, db prot
 	if err != nil {
 		return nil, err
 	}
-	doc, err := pick(ctx, r, p.Target)
+	doc, err := pick(ctx, r, p.Target, true)
 	if err != nil {
 		return nil, err
 	}

@@ -62,28 +62,36 @@ func restoreDoc(ctx context.Context, r *repo, doc backupDoc, s scratch, tl agent
 }
 
 // pickDoc is the snapshot to restore: label's, else the newest finished one
-// at or before at (nil: the newest).
-func pickDoc(docs []backupDoc, label string, at *time.Time) (backupDoc, error) {
+// at or before at (nil: the newest). A label retention removed (snapshots
+// older than a day are kept one an hour) gives way to the newest kept one
+// at or before at, unless exact (a rewind in place goes to the snapshot a
+// person confirmed or nowhere: the error names the nearest kept one).
+func pickDoc(docs []backupDoc, label string, at *time.Time, exact bool) (backupDoc, error) {
+	if label != "" {
+		for _, d := range docs {
+			if d.Label == label && d.Kind != kindRewind {
+				return d, nil
+			}
+		}
+		if at == nil || exact {
+			msg := fmt.Sprintf("the snapshot %s isn't in your bucket any more (retention keeps one an hour after a day)", label)
+			if at != nil {
+				if near, err := pickDoc(docs, "", at, false); err == nil {
+					msg += fmt.Sprintf(": the nearest kept one before it is from %s; rewind to that one instead", near.StoppedAt.UTC().Format("2006-01-02 15:04:05 UTC"))
+				}
+			}
+			return backupDoc{}, errors.New(msg)
+		}
+	}
 	var best *backupDoc
 	for i := range docs {
 		d := &docs[i]
-		if d.Kind == kindRewind {
+		if d.Kind == kindRewind || at != nil && d.StoppedAt.After(*at) {
 			continue
 		}
-		switch {
-		case label != "":
-			if d.Label == label {
-				return *d, nil
-			}
-		case at != nil && d.StoppedAt.After(*at):
-		default:
-			if best == nil || d.StoppedAt.After(best.StoppedAt) {
-				best = d
-			}
+		if best == nil || d.StoppedAt.After(best.StoppedAt) {
+			best = d
 		}
-	}
-	if label != "" {
-		return backupDoc{}, fmt.Errorf("the snapshot %s isn't in your bucket any more (retention removed it?)", label)
 	}
 	if best == nil {
 		return backupDoc{}, errors.New("there is no snapshot in your bucket yet: Proof runs once the first backup has finished")
@@ -107,7 +115,7 @@ func (e *Engine) drill(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 	if err != nil {
 		return nil, fmt.Errorf("reading your bucket: %w", err)
 	}
-	doc, err := pickDoc(docs, "", nil)
+	doc, err := pickDoc(docs, "", nil, false)
 	if err != nil {
 		return nil, err
 	}

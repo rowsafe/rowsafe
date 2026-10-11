@@ -28,15 +28,16 @@ import "time"
 //     index and data stream (not the security plugin's own index or other
 //     system indices); a full one starts a retention period, like
 //     pgBackRest's full backups. Retention keeps the newest RetentionFull
-//     full snapshots and every snapshot and Mark newer than the oldest of
-//     them, through OpenSearch (which deletes only files no kept snapshot
+//     full snapshots and, newer than the oldest of them, every Mark,
+//     every snapshot of the last day and the newest of each hour for a
+//     week, through OpenSearch (which deletes only files no kept snapshot
 //     needs), then the bucket follows. BackupResult.Label is the backup's
 //     label (20261009-013000F, 20261009-013000D); the snapshot's name is
 //     "rowsafe-" + its label in lowercase.
 //   - There is no log of changes: restores go back to a snapshot (a backup
 //     or a Mark), never to any second (PointInTime is off). A new database
-//     gets a snapshot every 30 minutes (OpenSearchScheduleDiff) and a full
-//     one every day.
+//     gets a snapshot every 5 minutes (OpenSearchScheduleDiff; snapshots.go)
+//     and a full one every day.
 //   - RestorePointResult (a Mark, MarkIsBackup): a snapshot taken on the
 //     spot and named after the Mark. LSN is its label; WALFile is unused.
 //   - Proof restores the newest snapshot from the bucket (not from the
@@ -96,14 +97,16 @@ var OpenSearchSystemUsers = []string{"admin", "kibanaserver", "kibanaro", "logst
 var opensearchCloud = CloudEngine{Engine: EngineOpenSearch, Name: "OpenSearch", Versions: []string{"3"}, DefaultVersion: "3",
 	Port: 9200, Scheme: "https", MinMemoryMB: 4096, SnapshotsOnly: true,
 	Note: "OpenSearch 3 from OpenSearch's own packages, one node. Apps connect over HTTPS on port 9200 with a user and password. " +
-		"Backups are its own snapshots, every 30 minutes and on every Mark: restores go back to a snapshot, not to any second. Sizes with 4 GB of memory or more."}
+		"Backups are its own snapshots, every 5 minutes and on every Mark, each copying only what is new: restores go back to a snapshot, not to any second. Sizes with 4 GB of memory or more."}
 
 // OpenSearchScheduleFull and OpenSearchScheduleDiff are a new OpenSearch
 // database's backup schedules: a full snapshot every day (01:00 UTC) and
-// one every 30 minutes in between. Every snapshot copies only new files.
+// one every 5 minutes in between. Every snapshot copies only new files:
+// a quiet server's takes a fraction of a second and adds a few small files
+// (snapshots.go).
 const (
 	OpenSearchScheduleFull = "0 1 * * *"
-	OpenSearchScheduleDiff = "*/30 * * * *"
+	OpenSearchScheduleDiff = "*/5 * * * *"
 	OpenSearchPort         = 9200
 )
 

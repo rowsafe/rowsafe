@@ -161,8 +161,10 @@ func (e *Engine) mark(ctx context.Context, env agent.EngineEnv, db protocol.Data
 }
 
 // pick is the snapshot a rewind target restores: a Mark's, or the newest
-// taken at or before a moment.
-func pick(ctx context.Context, r *repo, t protocol.RewindTarget) (backupDoc, error) {
+// taken at or before a moment. With exact (a rewind in place), a backup
+// the control plane named that retention removed is refused, naming the
+// nearest kept one, rather than replaced by it.
+func pick(ctx context.Context, r *repo, t protocol.RewindTarget, exact bool) (backupDoc, error) {
 	if (t.Mark == "") == (t.Time == nil) {
 		return backupDoc{}, errors.New("pick a moment or a Mark (exactly one)")
 	}
@@ -197,6 +199,16 @@ func pick(ctx context.Context, r *repo, t protocol.RewindTarget) (backupDoc, err
 			if d.Label == t.BackupSet && !d.TakenAt.After(at) {
 				return d, nil
 			}
+		}
+		if exact {
+			msg := fmt.Sprintf("the snapshot %s isn't in your bucket any more (retention keeps one an hour after 6 hours)", t.BackupSet)
+			for i := len(docs) - 1; i >= 0; i-- {
+				if !docs[i].TakenAt.After(at) {
+					msg += fmt.Sprintf(": the nearest kept one before it is from %s; rewind to that one instead", docs[i].TakenAt.UTC().Format("2006-01-02 15:04:05 UTC"))
+					break
+				}
+			}
+			return backupDoc{}, errors.New(msg)
 		}
 	}
 	for i := len(docs) - 1; i >= 0; i-- {

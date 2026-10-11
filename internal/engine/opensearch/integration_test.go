@@ -376,7 +376,10 @@ func TestOpenSearch(t *testing.T) {
 		t.Fatalf("security: %+v %v", rep, err)
 	}
 
-	// Retention keeps the newest 2 full snapshots and what follows.
+	// Retention keeps the newest 2 full snapshots and what follows (the
+	// window's day minimum aside, which a test can't wait out).
+	minWindow = 0
+	defer func() { minWindow = 24 * time.Hour }()
 	for range 2 {
 		time.Sleep(1100 * time.Millisecond)
 		mustRun[protocol.BackupResult](t, e, env, db, protocol.TaskBackup, protocol.BackupParams{Type: protocol.BackupFull})

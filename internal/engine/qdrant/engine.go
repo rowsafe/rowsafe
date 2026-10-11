@@ -1,6 +1,6 @@
-// Package qdrant is Rowsafe's Qdrant engine: Qdrant's own full storage
-// snapshots, taken over its API and encrypted on the server into the
-// customer's bucket; Proof and Rewind (a copy, rewind in place with Undo)
+// Package qdrant is Rowsafe's Qdrant engine: Qdrant's own snapshots of
+// each collection that changed, taken over its API and encrypted on the
+// server into the customer's bucket; Proof and Rewind (a copy, rewind in place with Undo)
 // on a private temporary Qdrant; Marks; Pulse with fixes; the security
 // check; API keys in Databases & users; certificates for Rowsafe Cloud
 // names; restarts and discovery for the installer (protocol/qdrant.go).
@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,6 +38,12 @@ type Engine struct {
 	// (pending.json in the state directory).
 	pendingPath string
 	pending     []string
+	// fullMu guards full-next.json in the state directory: databases whose
+	// next backup takes every collection again (fullNext).
+	fullMu sync.Mutex
+	// ops are each database's collections' operation numbers as last seen
+	// (opsWatch), by database id.
+	ops map[string]map[string][]int64
 }
 
 var (
@@ -64,7 +71,8 @@ func (e *Engine) Tasks() []string {
 }
 
 // dbLock serializes snapshots of one database (a Mark and a backup at once
-// would make Qdrant take two full snapshots side by side).
+// would make Qdrant take two snapshots side by side) and what they write
+// to the bucket.
 func (e *Engine) dbLock(id string) *sync.Mutex {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -146,9 +154,13 @@ func (e *Engine) cleanPending(ctx context.Context, c *client, tl agent.TaskLogge
 	e.mu.Lock()
 	left := slices.Clone(e.pending)
 	e.mu.Unlock()
-	for _, name := range left {
-		if err := c.deleteFullSnapshot(ctx, name); err == nil {
-			e.pendingDone(name)
+	for _, entry := range left {
+		name, del := entry, c.deleteFullSnapshot
+		if p := strings.Split(entry, "\x00"); len(p) == 3 && p[0] == "collection" { // pendingColl
+			name, del = p[2], func(ctx context.Context, snap string) error { return c.deleteCollectionSnapshot(ctx, p[1], snap) }
+		}
+		if err := del(ctx, name); err == nil {
+			e.pendingDone(entry)
 			tl.Printf("deleted snapshot %s, left on the server's disk by an earlier backup", name)
 		}
 	}

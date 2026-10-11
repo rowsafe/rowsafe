@@ -321,7 +321,7 @@ func restoreScratch(ctx context.Context, env agent.EngineEnv, r *repo, s server,
 		return nil, err
 	}
 	tl.Printf("downloading snapshot %s (%s) and decrypting it on this server", doc.Label, humanBytes(doc.SnapshotBytes))
-	if _, err := download(ctx, r, doc.Label, sc.snapshotPath()); err != nil {
+	if _, err := download(ctx, r, doc.dataLabel(), sc.snapshotPath()); err != nil {
 		_ = sc.remove()
 		return nil, err
 	}

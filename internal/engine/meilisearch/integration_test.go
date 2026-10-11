@@ -249,6 +249,34 @@ func TestIntegration(t *testing.T) {
 	if _, err := run[protocol.RestorePointResult](t, e, env, db, protocol.TaskRestorePoint, protocol.RestorePointParams{Name: "before-delete"}); err == nil {
 		t.Fatal("a second Mark with the same name")
 	}
+	// Nothing changed since the backup: the Mark and the next backup record
+	// its snapshot again instead of taking another; a new key is a change.
+	rp, _ := openRepo(env, db)
+	var md backupDoc
+	if err := rp.getJSON(ctx, backupKey(mk.LSN, backupDocName), &md); err != nil || md.Data != b.Label {
+		t.Fatalf("the Mark's backup: %+v %v", md, err)
+	}
+	if b2 := mustRun[protocol.BackupResult](t, e, env, db, protocol.TaskBackup, nil); b2.RepoSizeBytes != 0 || b2.Label == b.Label {
+		t.Fatalf("a backup with nothing changed: %+v", b2)
+	}
+	name := "search-only"
+	if _, err := admin.createKey(ctx, apiKey{Name: &name, Actions: []string{"search"}, Indexes: []string{"*"}}); err != nil {
+		t.Fatal(err)
+	}
+	if b3 := mustRun[protocol.BackupResult](t, e, env, db, protocol.TaskBackup, nil); b3.RepoSizeBytes == 0 {
+		t.Fatalf("a backup after a new key: %+v", b3)
+	}
+	b4 := mustRun[protocol.BackupResult](t, e, env, db, protocol.TaskBackup, nil)
+	if b4.RepoSizeBytes != 0 || !slices.Contains(b4.Kept, b4.Label) {
+		t.Fatalf("a backup with nothing changed: %+v", b4)
+	}
+	// An experimental feature turned on changes no task: still a change.
+	if err := admin.do(ctx, http.MethodPatch, "/experimental-features", nil, map[string]any{"metrics": true}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if b5 := mustRun[protocol.BackupResult](t, e, env, db, protocol.TaskBackup, nil); b5.RepoSizeBytes == 0 {
+		t.Fatalf("a backup after an experimental feature was turned on: %+v", b5)
+	}
 	drill := mustRun[protocol.DrillResult](t, e, env, db, protocol.TaskDrill, nil)
 	if !drill.Passed || len(drill.Databases) != 2 || drill.Databases[1].RestoredTables != 50 && drill.Databases[0].RestoredTables != 50 {
 		t.Fatalf("drill %+v", drill)

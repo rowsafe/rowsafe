@@ -30,11 +30,15 @@ import (
 //     asks for one, reads the file Meilisearch writes into its snapshot
 //     folder, encrypts it on the server (objstore.Seal) and stores it
 //     under <repo path>/<stanza>/backup/<label>/. Every backup is whole;
-//     BackupDiff and BackupIncr are taken as full. They run every hour by
-//     default. There is no restore to any second (PointInTime is false):
-//     restores go back to a snapshot. DatabaseSpec.RetentionFull counts
-//     days: every snapshot of the last 48 hours is kept, then the newest of
-//     each day (and those Marks point at) within that many days.
+//     BackupDiff and BackupIncr are taken as full. They run every 15 minutes
+//     by default (MeilisearchSchedule); one that finds nothing changed
+//     since the newest snapshot records that snapshot again (its
+//     backup.json names it) instead of taking another (snapshots.go).
+//     There is no restore to any second (PointInTime is false): restores
+//     go back to a snapshot. DatabaseSpec.RetentionFull counts days: every
+//     snapshot of the last 6 hours is kept, the newest of each hour for 48
+//     hours, then the newest of each day (and those Marks point at) within
+//     that many days.
 //   - RestorePointResult (a Mark): a snapshot taken on the spot, named
 //     after the Mark. LSN is that snapshot's label.
 //   - Rewind targets: Mark restores the Mark's snapshot; Time the newest

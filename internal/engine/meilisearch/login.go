@@ -28,7 +28,12 @@ var agentKeyActions = []string{
 	"snapshots.create", "keys.get", "keys.create", "keys.delete",
 	"indexes.create", "indexes.delete", "indexes.swap", "indexes.compact",
 	"documents.get", "documents.add",
+	// What changes outside tasks, read for a fingerprint only (changes.go).
+	"experimental.get", "network.get", "webhooks.get", "chats.get", "chatsSettings.get",
 }
+
+// newerActions are agentKeyActions an older Meilisearch may not know.
+var newerActions = []string{"indexes.compact", "experimental.get", "network.get", "webhooks.get", "chats.get", "chatsSettings.get"}
 
 const (
 	agentKeyName = "Rowsafe"
@@ -144,7 +149,7 @@ func Login(ctx context.Context, env agent.EngineEnv, opts LoginOptions, masterKe
 		// indexes): the rest is what the agent needs.
 		var older []string
 		for _, a := range agentKeyActions {
-			if a != "indexes.compact" {
+			if !slices.Contains(newerActions, a) {
 				older = append(older, a)
 			}
 		}

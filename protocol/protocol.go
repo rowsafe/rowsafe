@@ -379,6 +379,11 @@ type BackupResult struct {
 	WALStart      string    `json:"wal_start,omitempty"`
 	WALStop       string    `json:"wal_stop,omitempty"`
 	Repo          int       `json:"repo,omitempty"` // RepoSecond for a backup to the second copy
+	// Kept (OpenSearch, Qdrant, Meilisearch: snapshots.go) lists the label
+	// of every backup still in storage after this one's retention, this one
+	// included; nil when the agent doesn't say. The control plane forgets
+	// the others: a restore never names a backup that is gone.
+	Kept []string `json:"kept,omitempty"`
 }
 
 type DrillResult struct {
@@ -514,6 +519,10 @@ type Database struct {
 	// it ("18.1", "8.4.3", "7.0.12"); for PostgreSQL it mirrors
 	// Inspect.ServerVersion. "" until known.
 	EngineVersion string `json:"engine_version,omitempty"`
+	// QuickSnapshots: snapshots of this OpenSearch, Qdrant or Meilisearch
+	// database may run every few minutes (snapshots.go): its agent takes
+	// them cheaply. Without it, schedules run at most once an hour.
+	QuickSnapshots bool `json:"quick_snapshots,omitempty"`
 }
 
 type CreateTaskRequest struct {
