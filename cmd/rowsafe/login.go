@@ -207,7 +207,13 @@ func loginWithBrowser(ctx context.Context, url, name string, browser bool) (conf
 	}
 }
 
-func whoami(ctx context.Context) error {
+func whoami(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("whoami", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	asJSON := fs.Bool("json", false, "print JSON")
+	if _, err := parse(fs, args, false); err != nil {
+		return err
+	}
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -215,6 +221,12 @@ func whoami(ctx context.Context) error {
 	me, err := client.New(cfg.URL, cfg.APIKey).WhoAmI(ctx)
 	if err != nil {
 		return err
+	}
+	if *asJSON {
+		return printJSON(struct {
+			URL string `json:"url"`
+			protocol.WhoAmI
+		}{cfg.URL, me})
 	}
 	fmt.Printf("Control plane: %s\n", cfg.URL)
 	fmt.Printf("Organization:  %s (%s), %s plan\n", me.Org.Name, me.Org.ID, me.Org.Plan)
@@ -224,6 +236,9 @@ func whoami(ctx context.Context) error {
 			access = "read-only"
 		}
 		fmt.Printf("API key:       %s (%s), %s\n", k.Name, k.ID, access)
+		if k.CreatedBy != "" {
+			fmt.Printf("Acts as:       %s, with their rights in the dashboard\n", k.CreatedBy)
+		}
 	}
 	if os.Getenv("ROWSAFE_API_KEY") != "" {
 		fmt.Println("(credentials from ROWSAFE_API_KEY)")

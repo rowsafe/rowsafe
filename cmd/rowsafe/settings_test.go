@@ -200,7 +200,7 @@ func TestTune(t *testing.T) {
 		t.Fatalf("%v\n%s", err, out)
 	}
 	for _, want := range []string{"Tune shop for this server (16 GB memory, 4 CPUs, SSD; workload: mixed)", "* shared_buffers: 128 MB -> 4 GB (after a restart)",
-		"A quarter of memory.", "  idle_in_transaction_session_timeout: off -> 10 min (optional: --all adds it)", "Apply 2 changes?"} {
+		"A quarter of memory.", "  idle_in_transaction_session_timeout: off -> 10 min (optional: --all adds it)"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("tune lacks %q:\n%s", want, out)
 		}

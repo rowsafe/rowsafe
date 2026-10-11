@@ -946,10 +946,17 @@ func taskName(typ string) string {
 	return typ
 }
 
+// The question goes to stderr, so --json output on stdout stays JSON. With
+// no terminal and no answer piped in, it says how to confirm (--yes)
+// instead of only "cancelled".
 func confirm(prompt string) bool {
-	fmt.Printf("%s [y/N] ", prompt)
+	fmt.Fprintf(os.Stderr, "%s [y/N] ", prompt)
 	line, _ := bufio.NewReader(stdin).ReadString('\n')
-	return strings.EqualFold(strings.TrimSpace(line), "y") || strings.EqualFold(strings.TrimSpace(line), "yes")
+	line = strings.TrimSpace(line)
+	if line == "" && !stdinIsTerminal() {
+		fmt.Fprintln(os.Stderr, "\nNo terminal to ask on: pass --yes to confirm.")
+	}
+	return strings.EqualFold(line, "y") || strings.EqualFold(line, "yes")
 }
 
 func marksCmd(ctx context.Context, c *client.Client, args []string) error {

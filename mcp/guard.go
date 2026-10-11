@@ -25,9 +25,22 @@ import (
 func DestructiveDBCommand(command string, readFile func(string) ([]byte, error)) (string, bool) {
 	sawSQL, sawMongo := false, false
 	var sqlFiles, mongoFiles, redisFiles []string
+	var piped []string // the files cat pipes into the next segment (cat drop.sql | psql)
 	for _, seg := range splitSegments(command) {
-		words := commandWords(seg)
-		if len(words) == 0 || harmlessCommand(words) {
+		words := commandWords(seg.text)
+		in := piped
+		piped = nil
+		if len(words) == 0 {
+			continue
+		}
+		if harmlessCommand(words) {
+			if seg.pipes && base(words[0]) == "cat" {
+				for _, w := range words[1:] {
+					if !strings.HasPrefix(w, "-") {
+						piped = append(piped, w)
+					}
+				}
+			}
 			continue
 		}
 		if helpInvocation(words) {
@@ -43,8 +56,9 @@ func DestructiveDBCommand(command string, readFile func(string) ([]byte, error))
 					return reason, true
 				}
 				redisFiles = append(redisFiles, clientFiles(base(w), words[i+1:])...)
+				redisFiles = append(redisFiles, in...)
 			case "sql", "mongo":
-				files := clientFiles(base(w), words[i+1:])
+				files := append(clientFiles(base(w), words[i+1:]), in...)
 				if client == "sql" {
 					sawSQL = true
 					sqlFiles = append(sqlFiles, files...)
@@ -89,9 +103,14 @@ func DestructiveDBCommand(command string, readFile func(string) ([]byte, error))
 
 // helpInvocation is true for --help, --version and --dry-run runs. -h
 // counts only as the last word: psql, mysql and clickhouse-client take
-// -h HOST.
+// -h HOST. A bare "help" (prisma help, manage.py help) doesn't count for a
+// database client, whose SQL may name a table help (psql -c "DROP TABLE
+// help").
 func helpInvocation(words []string) bool {
-	if hasAny(words, "--help", "help", "--dry-run", "--version") {
+	if hasAny(words, "--help", "--dry-run", "--version") {
+		return true
+	}
+	if hasAny(words, "help") && !slices.ContainsFunc(words, func(w string) bool { return clientKind([]string{w}, 0) != "" || base(w) == "clickhouse" }) {
 		return true
 	}
 	return words[len(words)-1] == "-h"
@@ -158,16 +177,26 @@ func clientFiles(tool string, args []string) []string {
 	return files
 }
 
-// splitSegments splits a command line at ;, &&, ||, | and newlines, outside quotes.
-func splitSegments(s string) []string {
-	var segs []string
+// segment is one command of a command line; pipes is true when its output
+// goes to the next one (a single |).
+type segment struct {
+	text  string
+	pipes bool
+}
+
+// splitSegments splits a command line at ;, &&, ||, |, newlines and the
+// parentheses of subshells ((cd api && rails db:migrate)), outside quotes.
+func splitSegments(s string) []segment {
+	var segs []segment
 	var cur strings.Builder
 	var quote rune
+	pipe := false
 	flush := func() {
 		if t := strings.TrimSpace(cur.String()); t != "" {
-			segs = append(segs, t)
+			segs = append(segs, segment{text: t, pipes: pipe})
 		}
 		cur.Reset()
+		pipe = false
 	}
 	rs := []rune(s)
 	for i := 0; i < len(rs); i++ {
@@ -187,7 +216,19 @@ func splitSegments(s string) []string {
 			quote = r
 			cur.WriteRune(r)
 			continue
-		case r == ';' || r == '\n' || r == '|' || r == '&':
+		case r == '|':
+			// A single | (or |&) pipes into the next command; || doesn't.
+			if i+1 < len(rs) && rs[i+1] == '|' {
+				i++
+			} else {
+				pipe = true
+				if i+1 < len(rs) && rs[i+1] == '&' {
+					i++
+				}
+			}
+			flush()
+			continue
+		case r == ';' || r == '\n' || r == '&' || r == '(' || r == ')':
 			flush()
 			continue
 		}
@@ -482,6 +523,19 @@ func destructiveTool(words []string) (string, bool) {
 			}
 			if migrationScript(script) {
 				return base(w) + " run " + script, true
+			}
+		}
+	}
+	// Make and just targets named like migrations (make migrate, just db:migrate).
+	if tool := base(words[0]); (tool == "make" || tool == "just") && !hasAny(words, "-n", "--just-print", "--recon", "--list", "--show") {
+		for j := 1; j < len(words); j++ {
+			w := words[j]
+			switch {
+			case slices.Contains([]string{"-C", "-f", "--file", "--directory", "--justfile", "--working-directory", "-j", "-I"}, w):
+				j++ // the option's value
+			case strings.HasPrefix(w, "-") || envAssignRE.MatchString(w):
+			case migrationScript(w):
+				return tool + " " + w, true
 			}
 		}
 	}

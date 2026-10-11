@@ -43,7 +43,7 @@ func (t *tools) addDBAdminReadTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "list_databases_on_server",
 		Description: "Lists the databases (datnames), users (roles) and installed extensions inside one database server that Rowsafe protects, as its agent last read them: names, owners, sizes and settings, never data or passwords. " +
-			"Read-only: it creates and removes nothing (a person does that with Databases & users in the dashboard, or `rowsafe db`).",
+			"Read-only: it creates and removes nothing. To create a database for an existing owner, remove a database or user, or turn an extension on or off, use request_change manage_databases_users once the user agrees; anything that makes a password is done by the user in the dashboard (Databases & users), and create_app_database makes a new database and login for the app you are building.",
 		Annotations: readOnly("Databases and users on a server"),
 	}, t.listDatabasesOnServer)
 }

@@ -30,7 +30,7 @@ type restorePointInput struct {
 
 type ProtectionView struct {
 	Database            string     `json:"database"`
-	Protected           bool       `json:"protected" jsonschema:"true only if every condition holds: active, WAL archiving working and reported, a backup in the last 26h, and the latest restore drill passed within 8 days"`
+	Protected           bool       `json:"protected" jsonschema:"true only if every condition holds: active, WAL archiving working and reported, a backup in the last 26h, and the latest restore test (Proof) passed within 8 days"`
 	Reasons             []string   `json:"reasons" jsonschema:"each condition that does not hold"`
 	Status              string     `json:"status"`
 	CheckedAt           time.Time  `json:"checked_at"`

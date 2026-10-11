@@ -469,7 +469,7 @@ func (t *tools) getDatabase(ctx context.Context, _ *sdk.CallToolRequest, in data
 		b.line("Last full backup %s finished %s", out.LastFull.Label, ago(&out.LastFull.FinishedAt, now))
 	}
 	for _, dr := range out.RecentDrills {
-		b.line("Drill %s %s (backup %s)", passFail(dr.Passed), ago(&dr.At, now), dr.BackupLabel)
+		b.line("Restore test (Proof) %s %s (backup %s)", passFail(dr.Passed), ago(&dr.At, now), dr.BackupLabel)
 	}
 	for _, tk := range out.RecentTasks {
 		b.line("Task %s %s %s, created %s%s", tk.ID, tk.Type, tk.Status, ago(&tk.CreatedAt, now), errSuffix(tk.Error))
