@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
@@ -28,7 +29,7 @@ Getting started
   rowsafe login [--no-browser] [--url URL]   log in with your browser (default URL https://api.rowsafe.sh)
   rowsafe login --key rsk_... [--url URL]    log in with an existing API key (CI, scripts)
   rowsafe logout [--keep-key]                forget the login and revoke the key "rowsafe login" created
-  rowsafe whoami                             control plane, organization, plan and API key in use
+  rowsafe whoami [--json]                    control plane, organization, plan, API key in use and who it acts as
   rowsafe hosts enroll-token [--ttl 1h]      the install command for a database server. The installer sets up
                                              everything there and asks before turning on backups
   rowsafe init [NAME]                        write .rowsafe.json here, so commands in this project use NAME
@@ -435,6 +436,11 @@ func main() {
 		fmt.Print(helpFor(args[1:]))
 		return
 	}
+	if topic, ok := helpRequest(args); ok {
+		// rowsafe COMMAND --help: the command's reference, logged in or not.
+		fmt.Print(helpFor(topic))
+		return
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -443,9 +449,46 @@ func main() {
 		if errors.As(err, &exit) {
 			os.Exit(int(exit)) // the command already said what happened
 		}
+		if errors.Is(err, flag.ErrHelp) {
+			return // the flag package printed the command's flags
+		}
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
+}
+
+// helpRequest reports whether args ask for a command's help (rowsafe cloud
+// create --help, rowsafe mark -h) and returns the help topic: the longest
+// run of leading words with a reference entry (rowsafe cloud create mydb
+// --help is about cloud create). Words after "--" belong to another program
+// (rowsafe connect app -- psql --help), and guard --check takes a command.
+func helpRequest(args []string) ([]string, bool) {
+	help := false
+	for i, a := range args {
+		if a == "--" || (a == "--check" && i > 0 && args[0] == "guard") {
+			break
+		}
+		if a == "--help" || a == "-help" || a == "-h" {
+			help = true
+			break
+		}
+	}
+	if !help {
+		return nil, false
+	}
+	var words []string
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") {
+			break
+		}
+		words = append(words, a)
+	}
+	for n := len(words); n > 1; n-- {
+		if len(referenceLines(strings.Join(words[:n], " "))) > 0 {
+			return words[:n], true
+		}
+	}
+	return words[:min(len(words), 1)], true
 }
 
 // exitError carries a non-zero exit code for failed tasks.
@@ -465,7 +508,7 @@ func dispatch(ctx context.Context, args []string) error {
 	case "logout":
 		return logout(ctx, rest)
 	case "whoami":
-		return whoami(ctx)
+		return whoami(ctx, rest)
 	case "guard":
 		return guard(ctx, rest)
 	}

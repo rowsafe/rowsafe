@@ -605,6 +605,19 @@ func TestBrowserLogin(t *testing.T) {
 	if err := dispatch(ctx, []string{"whoami"}); err != nil {
 		t.Fatal(err)
 	}
+	// --json for scripts; flags it doesn't take are refused, not ignored.
+	out, err := captureStdout(t, func() error { return dispatch(ctx, []string{"whoami", "--json"}) })
+	var me struct {
+		URL string           `json:"url"`
+		Org protocol.Org     `json:"org"`
+		Key *protocol.APIKey `json:"api_key"`
+	}
+	if err != nil || json.Unmarshal([]byte(out), &me) != nil || me.URL != ts.URL || me.Org.Name != "Acme" || me.Key == nil || me.Key.ID != "key_x" {
+		t.Fatalf("whoami --json: %v\n%s", err, out)
+	}
+	if err := dispatch(ctx, []string{"whoami", "--yes"}); err == nil {
+		t.Fatal("whoami took a flag it doesn't have")
+	}
 	if err := dispatch(ctx, []string{"logout"}); err != nil {
 		t.Fatal(err)
 	}
@@ -697,6 +710,32 @@ func TestHelp(t *testing.T) {
 	}
 }
 
+// rowsafe COMMAND --help prints the command's reference (not "error: flag:
+// help requested" and exit 1, nor "not logged in").
+func TestHelpRequest(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string // "" = not a help request
+	}{
+		{[]string{"backup", "--help"}, "backup"},
+		{[]string{"backup", "app", "-h"}, "backup"},
+		{[]string{"cloud", "create", "shop", "--region", "fsn1", "--help"}, "cloud create"},
+		{[]string{"rewind", "copy", "app", "-help"}, "rewind copy"},
+		{[]string{"log-destinations", "add", "--help"}, "log-destinations add"},
+		{[]string{"backup", "app"}, ""},
+		{[]string{"connect", "app", "--", "psql", "--help"}, ""},
+		{[]string{"guard", "--check", "--help"}, ""},
+	} {
+		topic, ok := helpRequest(tc.args)
+		if got := strings.Join(topic, " "); ok != (tc.want != "") || got != tc.want {
+			t.Errorf("helpRequest(%q) = %q, %v; want %q", tc.args, got, ok, tc.want)
+		}
+		if ok && strings.Contains(helpFor(topic), "No help") {
+			t.Errorf("helpRequest(%q): no help for %q", tc.args, topic)
+		}
+	}
+}
+
 func TestPulseExitCodes(t *testing.T) {
 	f := &fakeAPI{dbs: dbs("app", "old"), health: map[string]int{"app": 95, "old": 40}}
 	_, _ = cliEnv(t, f)
@@ -758,6 +797,21 @@ func captureStdout(t *testing.T, fn func() error) (string, error) {
 	w.Close()
 	os.Stdout = old
 	return <-done, ferr
+}
+
+// confirm asks on stderr (stdout stays the command's output, JSON included)
+// and reads the answer; without one it says no.
+func TestConfirmAsksOnStderr(t *testing.T) {
+	t.Cleanup(func() { stdin, stdinIsTerminal = os.Stdin, func() bool { return false } })
+	stdinIsTerminal = func() bool { return false }
+	for answer, want := range map[string]bool{"y\n": true, "YES\n": true, "n\n": false, "": false} {
+		stdin = strings.NewReader(answer)
+		var got bool
+		out, _ := captureStdout(t, func() error { got = confirm("Remove app?"); return nil })
+		if got != want || out != "" {
+			t.Errorf("answer %q: %v, stdout %q", answer, got, out)
+		}
+	}
 }
 
 func TestFix(t *testing.T) {
