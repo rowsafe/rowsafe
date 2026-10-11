@@ -45,6 +45,9 @@ type facts struct {
 	Encrypted      bool
 	PageSize       int64
 	LowerCase      int
+	// ReplicaUpdates: the server writes what it replicates to its own
+	// binary log (log_replica_updates, log_slave_updates).
+	ReplicaUpdates bool
 }
 
 var versionRE = regexp.MustCompile(`^(\d+)\.(\d+)\.(\d+)`)
@@ -104,6 +107,11 @@ func (s *server) readFacts(ctx context.Context, db *sql.DB) (facts, error) {
 			f.Encrypted = enc == 1
 		}
 		_ = db.QueryRowContext(ctx, "SELECT @@gtid_mode").Scan(&f.GTIDMode)
+	}
+	var ru int
+	if db.QueryRowContext(ctx, "SELECT @@global.log_replica_updates").Scan(&ru) == nil ||
+		db.QueryRowContext(ctx, "SELECT @@global.log_slave_updates").Scan(&ru) == nil {
+		f.ReplicaUpdates = ru == 1
 	}
 	f.Replica = s.isReplica(ctx, db)
 	return f, nil

@@ -234,7 +234,7 @@ func (e *Engine) StandbyTargets(ctx context.Context, env agent.EngineEnv) []prot
 	var out []protocol.StandbyTarget
 	for _, d := range found {
 		t := protocol.StandbyTarget{Engine: string(e.flavor), Port: d.Port, Version: d.Version, Socket: d.SocketDir}
-		t.Reason = e.targetReason(ctx, env, store, d)
+		t.Reason, t.Replication = e.targetReason(ctx, env, store, d)
 		t.Usable = t.Reason == ""
 		t.Standby, t.NoStandby = t.Usable, t.Reason // the same rights and an empty server
 		out = append(out, t)
@@ -245,28 +245,35 @@ func (e *Engine) StandbyTargets(ctx context.Context, env agent.EngineEnv) []prot
 	return out
 }
 
-func (e *Engine) targetReason(ctx context.Context, env agent.EngineEnv, store *standbyStore, d agent.DiscoveredDatabase) string {
+// targetReason says why the server can't take a standby or a clone ("" when
+// it can), and whether Rowsafe's account there may set up replication (nil:
+// not known).
+func (e *Engine) targetReason(ctx context.Context, env agent.EngineEnv, store *standbyStore, d agent.DiscoveredDatabase) (string, *bool) {
 	if r, ok := store.onPort(d.Port); ok && r.Phase != protocol.StandbyPhaseCreating {
-		return "it already runs a standby"
+		return "it already runs a standby", nil
 	}
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	s := e.server(env, protocol.DatabaseSpec{Engine: string(e.flavor), Port: d.Port, SocketDir: d.SocketDir})
 	conn, err := s.open(cctx)
 	if err != nil {
-		return "Rowsafe has no account on it: run the Rowsafe installer on this server and answer yes to standby servers"
+		return "Rowsafe has no account on it: run the Rowsafe installer on this server and answer yes to standby servers", nil
 	}
 	defer conn.Close()
-	if ok, err := standbyRights(cctx, conn); err != nil || !ok {
-		return "Rowsafe's account there may not set up standby servers: run the Rowsafe installer on this server again and answer yes to standby servers"
+	ok, err := standbyRights(cctx, conn)
+	if err != nil {
+		return "Rowsafe's account there may not set up standby servers: run the Rowsafe installer on this server again and answer yes to standby servers", nil
+	}
+	if !ok {
+		return "Rowsafe's account there may not set up standby servers: run the Rowsafe installer on this server again and answer yes to standby servers", &ok
 	}
 	if schemas, err := userSchemas(cctx, conn); err != nil {
-		return err.Error()
+		return err.Error(), &ok
 	} else if len(schemas) > 0 {
-		return "it isn't empty (databases: " + strings.Join(schemas, ", ") + ")"
+		return "it isn't empty (databases: " + strings.Join(schemas, ", ") + ")", &ok
 	}
 	if st, err := s.readReplicaStatus(cctx, conn); err == nil && st.Configured {
-		return "it already replicates from " + st.SourceHost
+		return "it already replicates from " + st.SourceHost, &ok
 	}
-	return ""
+	return "", &ok
 }

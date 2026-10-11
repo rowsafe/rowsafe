@@ -42,9 +42,10 @@ type CloudEngine struct {
 	Scheme string `json:"scheme"`
 	// Standby: "With a standby" (a second server ready to take over) is
 	// offered for servers Rowsafe creates with this engine; Clone: "Clone to
-	// a new server" can create one. PostgreSQL only so far: other engines
-	// have standbys and clones on servers people run themselves (their own
-	// EngineCapabilities), not yet on servers Rowsafe creates.
+	// a new server" can create one. PostgreSQL, MySQL and MariaDB so far:
+	// the other engines have standbys and clones on servers people run
+	// themselves (their own EngineCapabilities), not yet on servers Rowsafe
+	// creates.
 	Standby bool `json:"standby"`
 	Clone   bool `json:"clone"`
 	// AMD64Only: the engine's packages exist for Intel and AMD processors
@@ -70,6 +71,9 @@ type CloudEngine struct {
 //   - PostgreSQL 15 to 18 from apt.postgresql.org (default 17).
 //   - MySQL 8.4 LTS from Oracle's apt repository (repo.mysql.com; amd64
 //     only). Newer series aren't offered until the agent backs them up.
+//     GTIDs on from the start; a standby follows by GTID (MySQL and
+//     MariaDB both: the installer's --mysql-standby on every server
+//     Rowsafe creates with them).
 //   - MariaDB 11.8 LTS (supported until 2030) from MariaDB's own
 //     repository. 11.4 isn't offered: MariaDB publishes it for Debian 12 and
 //     Ubuntu but not for Debian 13, which most clouds' servers run.
@@ -100,10 +104,10 @@ var CloudEngines = []CloudEngine{
 	{Engine: EnginePostgreSQL, Name: "PostgreSQL", Versions: []string{"15", "16", "17", "18"}, DefaultVersion: "17",
 		Port: 5432, Scheme: "postgresql", Standby: true, Clone: true, Extensions: PGPackagedExtensions},
 	{Engine: EngineMySQL, Name: "MySQL", Versions: []string{"8.4"}, DefaultVersion: "8.4",
-		Port: 3306, Scheme: "mysql", AMD64Only: true,
+		Port: 3306, Scheme: "mysql", AMD64Only: true, Standby: true, Clone: true,
 		Note: "MySQL 8.4 LTS from Oracle's own packages, which are built for Intel and AMD processors only."},
 	{Engine: EngineMariaDB, Name: "MariaDB", Versions: []string{"11.8"}, DefaultVersion: "11.8",
-		Port: 3306, Scheme: "mysql", Note: "MariaDB 11.8 LTS, supported until 2030, from MariaDB's own packages."},
+		Port: 3306, Scheme: "mysql", Standby: true, Clone: true, Note: "MariaDB 11.8 LTS, supported until 2030, from MariaDB's own packages."},
 	{Engine: EngineValkey, Name: "Valkey", Versions: []string{"8"}, DefaultVersion: "8",
 		Port: 6380, Scheme: "rediss",
 		Note: "Valkey 8, the open-source Redis: Redis clients and redis-cli work with it. Apps connect with TLS on port 6380."},

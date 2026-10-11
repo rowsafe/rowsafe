@@ -28,6 +28,12 @@ import (
 //	ROWSAFE_MYSQL_IT_STANDBY_SOCKET  the second (empty) server's socket
 //	ROWSAFE_MYSQL_IT_PRIMARY_HOST    the first server's host name on the network
 //	ROWSAFE_MYSQL_IT_STANDBY_HOST    the second server's host name
+//	ROWSAFE_MYSQL_IT_GTID            1: both servers set up for GTIDs (it follows by GTID);
+//	                                 mixed: the primary only (MySQL: the empty server's
+//	                                 gtid_mode is switched to match; MariaDB: by position)
+//
+// With GTIDs it also switches back: the first server becomes the primary
+// again and the second follows it, on its own data both times.
 func TestStandbyIntegration(t *testing.T) {
 	engine := os.Getenv("ROWSAFE_MYSQL_IT")
 	sbSocket := os.Getenv("ROWSAFE_MYSQL_IT_STANDBY_SOCKET")
@@ -60,6 +66,8 @@ func TestStandbyIntegration(t *testing.T) {
 	}
 	envA, envB := envFor("a"), envFor("b")
 	e := &Engine{flavor: flavor(engine)}
+	gtidIT := os.Getenv("ROWSAFE_MYSQL_IT_GTID")
+	wantGTID := gtidIT == "1" || gtidIT == "mixed" && !e.flavor.mariadb()
 	specA := protocol.DatabaseSpec{ID: "db_sb_" + engine, Name: "shop", Stanza: "shop", Port: 3306,
 		SocketDir: os.Getenv("ROWSAFE_MYSQL_IT_SOCKET"), Engine: engine, RetentionFull: 2}
 	specB := specA
@@ -167,6 +175,17 @@ func TestStandbyIntegration(t *testing.T) {
 	t.Logf("create: %+v", cres)
 	adbB.Close() // its sessions were ended (server_id changed)
 	adbB = admin(specB.SocketDir)
+	followsByGTID := func(db *sql.DB, spec protocol.DatabaseSpec, env agent.EngineEnv) {
+		t.Helper()
+		st, err := e.server(env, spec).readReplicaStatus(ctx, db)
+		if err != nil || !st.Configured || st.GTID != wantGTID {
+			t.Fatalf("replica status: %+v %v (want GTID %v)", st, err, wantGTID)
+		}
+	}
+	followsByGTID(adbB, specB, envB)
+	if wantGTID && !strings.Contains(cres.Summary, "by GTID") || !wantGTID && !strings.Contains(cres.Summary, "by binary log position") {
+		t.Fatalf("summary: %s", cres.Summary)
+	}
 	waitCount(adbB, "SELECT COUNT(*) FROM shop.orders", 210)
 	exec(adbA, "INSERT INTO shop.orders VALUES (211, 'replicated')")
 	waitCount(adbB, "SELECT COUNT(*) FROM shop.orders", 211)
@@ -245,20 +264,63 @@ func TestStandbyIntegration(t *testing.T) {
 		t.Logf("old primary as a standby: %+v", e.StandbyStates(ctx, envA))
 	}
 	waitCount(adbA, "SELECT COUNT(*) FROM shop.orders", 213)
+	followsByGTID(adbA, specA, envA)
+
+	// And back: the second server stops taking writes, the first is the
+	// primary again, the second follows it on its own data.
+	fence2 := protocol.Fence{ID: "f2", DatabaseID: specA.ID, Port: 3306, SocketDir: specB.SocketDir, SystemID: prep2.SystemID, Engine: engine}
+	fres2, err := e.StandbyFence(ctx, envB, specB, protocol.StandbyFenceParams{FenceID: "f2", StandbyID: "sb2", SystemID: prep2.SystemID}, tl)
+	if err != nil || fres2.CheckpointLSN == "" {
+		t.Fatalf("fence 2: %+v %v", fres2, err)
+	}
+	pres2, err := e.StandbyPromote(ctx, envA, specA, protocol.StandbyPromoteParams{StandbyID: "sb2", WaitForLSN: fres2.CheckpointLSN}, tl)
+	if err != nil || !pres2.Promoted || !pres2.CaughtUp {
+		t.Fatalf("promote 2: %+v %v", pres2, err)
+	}
+	if _, err := appA.ExecContext(ctx, "INSERT INTO shop.orders VALUES (214, 'back on the first server')"); err != nil {
+		t.Fatalf("the first server refused a write after switching back: %v", err)
+	}
+	var sec3 protocol.StandbySecrets
+	sec3.PrimaryPort, sec3.PrimaryAddresses = 3306, []string{ipA}
+	var prep3 protocol.StandbyPrepareResult
+	if err := e.StandbyPrepare(ctx, envA, specA, protocol.StandbyPrepareParams{StandbyID: "sb3", StandbyAddresses: []string{ipB}, Stream: true},
+		&sec3, &prep3, tl); err != nil {
+		t.Fatalf("prepare 3: %v", err)
+	}
+	rres3, err := e.StandbyCreate(ctx, envB, specB, protocol.StandbyCreateParams{StandbyID: "sb3", Port: 3306, SocketDir: specB.SocketDir,
+		Rebuild: true, FenceID: "f2", Reattach: true, SwitchLSN: pres2.ReplayLSN, Settings: prep3.Settings, Major: prep3.Major}, sec3, tl)
+	if err != nil || !rres3.Reattached {
+		t.Fatalf("reattach 2: %+v %v", rres3, err)
+	}
+	if enforced, _, _ := e.HoldFence(ctx, envB, fence2); enforced {
+		t.Fatal("the fence fought the second rebuilt standby")
+	}
+	exec(adbA, "INSERT INTO shop.orders VALUES (215, 'follows again')")
+	waitCount(adbB, "SELECT COUNT(*) FROM shop.orders", 215)
+	followsByGTID(adbB, specB, envB)
+	if _, err := appB.ExecContext(ctx, "INSERT INTO shop.orders VALUES (997, 'x')"); err == nil {
+		t.Fatal("the second server took a write as a standby again")
+	}
 
 	// Remove: the rebuilt old primary keeps its data; release drops the login.
-	rm, err := e.StandbyRemove(ctx, envA, specA, protocol.StandbyRemoveParams{StandbyID: "sb2"}, tl)
+	rm, err := e.StandbyRemove(ctx, envB, specB, protocol.StandbyRemoveParams{StandbyID: "sb3"}, tl)
 	if err != nil || rm.Restored {
 		t.Fatalf("remove: %+v %v", rm, err)
 	}
-	if n := count(adbA, "SELECT COUNT(*) FROM shop.orders"); n != 213 {
+	if n := count(adbB, "SELECT COUNT(*) FROM shop.orders"); n != 215 {
 		t.Fatalf("the rebuilt standby lost data: %d", n)
 	}
-	if _, err := e.StandbyRelease(ctx, envB, specB, protocol.StandbyReleaseParams{StandbyID: "sb2"}, tl); err != nil {
-		t.Fatalf("release: %v", err)
+	// The first server's earlier login (sb1) went when it prepared sb3;
+	// the second server is read-only again: its release waits.
+	if rel, err := e.StandbyRelease(ctx, envB, specB, protocol.StandbyReleaseParams{StandbyID: "sb2"}, tl); err != nil ||
+		!strings.Contains(rel.Summary, "read-only") {
+		t.Fatalf("release on the read-only server: %+v %v", rel, err)
 	}
-	if n := count(adbB, "SELECT COUNT(*) FROM mysql.user WHERE User LIKE 'rowsafe\\_sb\\_%'"); n != 0 {
-		t.Fatalf("replication logins left: %d", n)
+	if _, err := e.StandbyRelease(ctx, envA, specA, protocol.StandbyReleaseParams{StandbyID: "sb3"}, tl); err != nil {
+		t.Fatalf("release sb3: %v", err)
+	}
+	if n := count(adbA, "SELECT COUNT(*) FROM mysql.user WHERE User LIKE 'rowsafe\\_sb\\_%'"); n != 0 {
+		t.Fatalf("replication logins left on the primary: %d", n)
 	}
 }
 

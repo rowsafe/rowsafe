@@ -28,8 +28,11 @@ import (
 // bucket are replayed up to the last complete transaction, and its
 // databases, routines and logins are loaded into the standby's server
 // (without writing them to its own binary log). The standby then
-// replicates from the primary from exactly that binary log position, with
-// a replication login made for its addresses only, and stays read-only.
+// replicates from the primary from exactly that point, with a replication
+// login made for its addresses only, and stays read-only: by GTID when both
+// servers can (standby_gtid.go: it is given the primary's GTIDs at that
+// point, read from the files in the bucket), else from that binary log
+// position.
 //
 // Promoting it waits until it has applied everything the old primary
 // wrote (the position the old primary stopped at, when it could be fenced),
@@ -37,18 +40,25 @@ import (
 // read-only (super_read_only on MySQL) and ends its client sessions; the
 // agent keeps it read-only, also across restarts (SET PERSIST on MySQL, the
 // settings file Rowsafe writes on MariaDB).
+//
+// The old primary then follows the new one on its own data: by GTID (after
+// checking it holds nothing the new primary lacks), else from where the
+// new primary took over.
 
 // standbyRecord is a standby this server runs.
 type standbyRecord struct {
-	ID         string    `json:"id"`
-	DatabaseID string    `json:"database_id"`
-	Port       int       `json:"port"`
-	Socket     string    `json:"socket,omitempty"`
-	Phase      string    `json:"phase"` // protocol.StandbyPhase*
-	Address    string    `json:"primary_address,omitempty"`
-	PrimPort   int       `json:"primary_port,omitempty"`
-	ReplUser   string    `json:"replication_user,omitempty"`
-	Rebuild    bool      `json:"rebuild,omitempty"`
+	ID         string `json:"id"`
+	DatabaseID string `json:"database_id"`
+	Port       int    `json:"port"`
+	Socket     string `json:"socket,omitempty"`
+	Phase      string `json:"phase"` // protocol.StandbyPhase*
+	Address    string `json:"primary_address,omitempty"`
+	PrimPort   int    `json:"primary_port,omitempty"`
+	ReplUser   string `json:"replication_user,omitempty"`
+	Rebuild    bool   `json:"rebuild,omitempty"`
+	// GTID: it follows by GTID (SOURCE_AUTO_POSITION, MASTER_USE_GTID),
+	// not by binary log position (gtid.go).
+	GTID       bool      `json:"gtid,omitempty"`
 	Schemas    []string  `json:"schemas,omitempty"` // loaded by Rowsafe (dropped on removal)
 	Users      []string  `json:"users,omitempty"`   // 'user'@'host' loaded by Rowsafe
 	CreatedAt  time.Time `json:"created_at"`
@@ -220,6 +230,8 @@ type replicaStatus struct {
 	SecondsBehind *int64
 	IOError       string
 	SQLError      string
+	// GTID: it follows by GTID (Auto_Position 1, Using_Gtid Slave_Pos).
+	GTID bool
 }
 
 func (st replicaStatus) running() bool { return st.IORunning == "Yes" && st.SQLRunning == "Yes" }
@@ -288,6 +300,7 @@ func (s *server) channelStatus(ctx context.Context, db *sql.DB, channel string) 
 			st.SecondsBehind = &n
 		}
 	}
+	st.GTID = get("Auto_Position") == "1" || strings.HasSuffix(strings.ToLower(get("Using_Gtid")), "_pos")
 	st.IOError = get("Last_IO_Error")
 	st.SQLError = get("Last_SQL_Error")
 	return st, rows.Err()
@@ -297,7 +310,9 @@ func (s *server) channelStatus(ctx context.Context, db *sql.DB, channel string) 
 // says REPLICA and SOURCE, MariaDB and older MySQL SLAVE and MASTER.
 type replicaWords struct {
 	Change, Start, Stop, Reset, Host, Port, User, Password, File, Pos, SSL, PosWait string
-	PublicKey                                                                       bool
+	// AutoPos follows by GTID instead of File and Pos.
+	AutoPos   string
+	PublicKey bool
 }
 
 func (s *server) words(version string) replicaWords {
@@ -305,12 +320,15 @@ func (s *server) words(version string) replicaWords {
 	if !s.flavor.mariadb() && n >= 80023 {
 		return replicaWords{Change: "CHANGE REPLICATION SOURCE TO", Start: "START REPLICA", Stop: "STOP REPLICA",
 			Reset: "RESET REPLICA ALL", Host: "SOURCE_HOST", Port: "SOURCE_PORT", User: "SOURCE_USER", Password: "SOURCE_PASSWORD",
-			File: "SOURCE_LOG_FILE", Pos: "SOURCE_LOG_POS", SSL: "SOURCE_SSL", PosWait: "SOURCE_POS_WAIT", PublicKey: true}
+			File: "SOURCE_LOG_FILE", Pos: "SOURCE_LOG_POS", SSL: "SOURCE_SSL", PosWait: "SOURCE_POS_WAIT",
+			AutoPos: "SOURCE_AUTO_POSITION = 1", PublicKey: true}
 	}
 	w := replicaWords{Change: "CHANGE MASTER TO", Start: "START SLAVE", Stop: "STOP SLAVE", Reset: "RESET SLAVE ALL",
 		Host: "MASTER_HOST", Port: "MASTER_PORT", User: "MASTER_USER", Password: "MASTER_PASSWORD",
-		File: "MASTER_LOG_FILE", Pos: "MASTER_LOG_POS", SSL: "MASTER_SSL", PosWait: "MASTER_POS_WAIT"}
-	if !s.flavor.mariadb() && n >= 80000 {
+		File: "MASTER_LOG_FILE", Pos: "MASTER_LOG_POS", SSL: "MASTER_SSL", PosWait: "MASTER_POS_WAIT", AutoPos: "MASTER_AUTO_POSITION = 1"}
+	if s.flavor.mariadb() {
+		w.AutoPos = "MASTER_USE_GTID = slave_pos"
+	} else if n >= 80000 {
 		w.PublicKey = true
 	}
 	return w

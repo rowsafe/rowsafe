@@ -23,7 +23,16 @@ const (
 	settingServerID  = "server_id"              // the primary's server_id
 	settingLowerCase = "lower_case_table_names" // must be the same on the standby
 	settingVersion   = "version"                // numeric version (80403)
+	// settingReplicaUpdates: 1 when the server writes what it replicates to
+	// its own binary log (log_replica_updates, log_slave_updates). Absent
+	// from older agents: the standby then follows by position.
+	settingReplicaUpdates = "log_replica_updates"
+	settingLogBin         = "log_bin" // 1: the binary log is on
 )
+
+// secretGTIDExecuted (StandbySecrets.EngineData, MySQL with GTIDs): the
+// primary's gtid_executed when it prepared the standby.
+const secretGTIDExecuted = "gtid_executed"
 
 // StandbyPrepare checks the primary can be followed and creates the
 // standby's replication login, allowed from the standby's addresses only.
@@ -71,6 +80,7 @@ func (e *Engine) StandbyPrepare(ctx context.Context, env agent.EngineEnv, db pro
 	if strings.EqualFold(f.GTIDMode, "ON") {
 		res.Settings[settingGTID] = 1
 	}
+	res.Settings[settingReplicaUpdates], res.Settings[settingLogBin] = boolInt(f.ReplicaUpdates), boolInt(f.LogBin)
 	user := replicationUser(p.StandbyID)
 	password, err := randomPassword()
 	if err != nil {
@@ -81,6 +91,15 @@ func (e *Engine) StandbyPrepare(ctx context.Context, env agent.EngineEnv, db pro
 		return err
 	}
 	sec.ReplicationUser, sec.ReplicationPassword, sec.PrimaryTLS = user, password, res.TLS
+	if res.Settings[settingGTID] == 1 {
+		// What this server holds: an old primary following it by GTID must
+		// hold nothing more (standby_gtid.go).
+		var executed string
+		if err := conn.QueryRowContext(ctx, "SELECT @@global.gtid_executed").Scan(&executed); err != nil {
+			return fmt.Errorf("reading the GTIDs this server holds: %w", err)
+		}
+		sec.EngineData = map[string]string{secretGTIDExecuted: strings.Join(strings.Fields(executed), "")}
+	}
 	res.Streaming, res.ReplicationRole = true, user
 	res.Summary = fmt.Sprintf("Sealed the bucket settings and a replication login (%s, allowed from %s only) for the standby.",
 		user, strings.Join(p.StandbyAddresses, ", "))
@@ -125,7 +144,9 @@ func listensLocallyOnly(bind string) bool {
 }
 
 // createReplicationUser creates (or resets) the standby's login for each
-// address, outside the binary log (it is this server's own business).
+// address, outside the binary log (it is this server's own business). A
+// primary has one standby: the logins of earlier ones (left on a server
+// that was a standby meanwhile, read-only, after a switchover) go.
 func (s *server) createReplicationUser(ctx context.Context, conn *sql.DB, user, password string, addrs []string) error {
 	if !standbyUserRE.MatchString(user) {
 		return fmt.Errorf("invalid replication user %q", user)
@@ -138,7 +159,7 @@ func (s *server) createReplicationUser(ctx context.Context, conn *sql.DB, user, 
 	if _, err := c.ExecContext(ctx, "SET SESSION sql_log_bin = 0"); err != nil {
 		return err
 	}
-	if err := dropReplicationUser(ctx, c, user); err != nil {
+	if err := dropReplicationUsers(ctx, c); err != nil {
 		return err
 	}
 	for _, a := range addrs {
@@ -159,22 +180,34 @@ func (s *server) createReplicationUser(ctx context.Context, conn *sql.DB, user, 
 
 // dropReplicationUser drops the login at every host.
 func dropReplicationUser(ctx context.Context, c *sql.Conn, user string) error {
-	rows, err := c.QueryContext(ctx, "SELECT Host FROM mysql.user WHERE User = ?", user)
+	return dropLogins(ctx, c, "SELECT User, Host FROM mysql.user WHERE User = ?", user)
+}
+
+// dropReplicationUsers drops every standby login of Rowsafe's here.
+func dropReplicationUsers(ctx context.Context, c *sql.Conn) error {
+	return dropLogins(ctx, c, `SELECT User, Host FROM mysql.user WHERE User LIKE 'rowsafe\_sb\_%'`)
+}
+
+func dropLogins(ctx context.Context, c *sql.Conn, q string, args ...any) error {
+	rows, err := c.QueryContext(ctx, q, args...)
 	if err != nil {
 		return err
 	}
-	var hosts []string
+	type login struct{ user, host string }
+	var found []login
 	for rows.Next() {
-		var h string
-		if err := rows.Scan(&h); err != nil {
+		var l login
+		if err := rows.Scan(&l.user, &l.host); err != nil {
 			rows.Close()
 			return err
 		}
-		hosts = append(hosts, h)
+		if standbyUserRE.MatchString(l.user) {
+			found = append(found, l)
+		}
 	}
 	rows.Close()
-	for _, h := range hosts {
-		if _, err := c.ExecContext(ctx, "DROP USER IF EXISTS "+quoteString(user)+"@"+quoteString(h)); err != nil {
+	for _, l := range found {
+		if _, err := c.ExecContext(ctx, "DROP USER IF EXISTS "+quoteString(l.user)+"@"+quoteString(l.host)); err != nil {
 			return err
 		}
 	}
@@ -189,6 +222,15 @@ func (e *Engine) StandbyRelease(ctx context.Context, env agent.EngineEnv, db pro
 		return nil, err
 	}
 	defer conn.Close()
+	user := replicationUser(p.StandbyID)
+	if ro, err := s.isReadOnly(ctx, conn); err == nil && ro {
+		// A standby (or a fenced old primary) now: nothing changes on a
+		// read-only server. The login goes when it prepares its next standby.
+		res := &protocol.StandbyReleaseResult{StandbyID: p.StandbyID, Summary: fmt.Sprintf("Kept the replication login %s for now: this server is "+
+			"read-only. Rowsafe drops it when this server is the primary again and prepares a standby.", user)}
+		log.Printf("%s", res.Summary)
+		return res, nil
+	}
 	c, err := conn.Conn(ctx)
 	if err != nil {
 		return nil, err
@@ -197,7 +239,6 @@ func (e *Engine) StandbyRelease(ctx context.Context, env agent.EngineEnv, db pro
 	if _, err := c.ExecContext(ctx, "SET SESSION sql_log_bin = 0"); err != nil {
 		return nil, err
 	}
-	user := replicationUser(p.StandbyID)
 	if err := dropReplicationUser(ctx, c, user); err != nil {
 		return nil, err
 	}

@@ -34,7 +34,19 @@ const (
 	evXID                = 16
 	evTransactionPayload = 40  // MySQL binlog_transaction_compression
 	evMariaStartEncrypt  = 164 // MariaDB encrypt_binlog
+	// GTIDs (gtid.go).
+	evGTID          = 33  // MySQL: the next transaction's GTID
+	evAnonymousGTID = 34  // MySQL: a transaction without a GTID
+	evPreviousGTIDs = 35  // MySQL: the GTIDs of every earlier file
+	evGTIDTagged    = 42  // MySQL 8.3+: a tagged GTID
+	evMariaGTID     = 162 // MariaDB: the next event group's GTID
+	evMariaGTIDList = 163 // MariaDB: the binary log state at the file's start
 )
+
+// bodyLimit: scanEvents hands the body of these events to its callback
+// (at most this many bytes of it).
+var bodyLimit = map[byte]int{evQuery: 64 << 10, evGTID: 64, evPreviousGTIDs: 16 << 20, evGTIDTagged: 64,
+	evMariaGTID: 64, evMariaGTIDList: 16 << 20}
 
 // binlogFile is one binary log file.
 type binlogFile struct {
@@ -130,7 +142,8 @@ func readBinlogCreated(path string) (int64, error) {
 // scanEvents walks the events of a binary log file (from its start) until
 // fn returns false or the file ends. A partial event at the end (a file
 // still being written) ends the walk without error. body is the event's
-// body for query events (at most 64 KiB of it), nil for the others.
+// body for query and GTID events (at most bodyLimit of it), nil for the
+// others.
 func scanEvents(r io.Reader, fn func(pos int64, h eventHeader, body []byte) bool) error {
 	br := bufio.NewReaderSize(r, 1<<20)
 	magic := make([]byte, 4)
@@ -158,8 +171,8 @@ func scanEvents(r io.Reader, fn func(pos int64, h eventHeader, body []byte) bool
 		}
 		rest := int(h.Size) - eventHeaderLen
 		var body []byte
-		if h.Type == evQuery {
-			n := min(rest, 64<<10)
+		if limit, ok := bodyLimit[h.Type]; ok {
+			n := min(rest, limit)
 			body = make([]byte, n)
 			if _, err := io.ReadFull(br, body); err != nil {
 				return nil

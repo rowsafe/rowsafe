@@ -36,8 +36,9 @@ type CreateCloudServerParams struct {
 	// cloud_firewall opens it.
 	AllowedIPs []string `json:"allowed_ips,omitempty" jsonschema:"who can connect to the database: IP addresses or networks (203.0.113.4 or 203.0.113.0/24); empty: nobody until cloud_firewall opens it"`
 	// Standby also creates a standby server of the same size (clouds billed
-	// by the hour), which doubles the price. PostgreSQL only so far.
-	Standby bool `json:"standby,omitempty" jsonschema:"PostgreSQL only: also a standby server of the same size, ready to take over (clouds billed by the hour only); it doubles the price"`
+	// by the hour), which doubles the price. PostgreSQL, MySQL and MariaDB
+	// (CloudEngine.Standby).
+	Standby bool `json:"standby,omitempty" jsonschema:"PostgreSQL, MySQL and MariaDB: also a standby server of the same size, ready to take over (clouds billed by the hour only); it doubles the price"`
 	// Extensions (PostgreSQL 15 to 18) are installed and turned on in the
 	// new server's postgres database and in every database created
 	// afterwards: PGPackagedExtensions' names.

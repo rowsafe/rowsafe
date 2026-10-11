@@ -4942,10 +4942,15 @@ cloud_engine_container() {
       ;;
   esac
 
+  # MySQL and MariaDB: --mysql-standby, as the control plane asks (a
+  # standby can be added later).
+  sbflag=''
+  case $engine in mysql | mariadb) sbflag=--mysql-standby ;; esac
   cloud_init() {
+    # shellcheck disable=SC2086 # $sbflag: one flag or none
     sh -c 'w=$1; shift; ROWSAFE_RELEASES_URL=https://localhost:18443/agent ROWSAFE_RESTIC_URL=https://localhost:18443/restic ROWSAFE_MEILISEARCH_URL=https://localhost:18443/meilisearch sh -s -- "$@" <"$w/install.sh"' \
       cloud-init "$W" rse_secrettoken123 --no-prompt --install-"$engine" "$ver" --listen-public --storage rowsafe --protect shop \
-      --allow-restart --firewall-ssh
+      --allow-restart --firewall-ssh $sbflag
   }
   expect_ok "one run, as cloud-init: $label $ver, network, firewall, Rowsafe Storage, protected" cloud_init
   [ -z "${TEST_SHOW:-}" ] || cat "$W/out"
@@ -5028,6 +5033,7 @@ cloud_engine_container() {
       ;;
     *)
       cp "$(cloud_net_conf)" "$W/net.cnf"
+      cp "$rconf" "$W/repl.cnf"
       scenario "discover_out=3306\t/run/mysqld/mysqld.sock\t$ver\t-\t/var/lib/mysql\t8192\tshop\tyes\tactive\t-\t1.2 MiB\t$unit.service\tdb_fake\t$engine" \
         plan_rc=5 "plan_out=shop is already protected." "status_out=db_fake\tshop\tactive\trunning\thttps://app.rowsafe.test/databases/db_fake"
       ;;
@@ -5071,7 +5077,10 @@ cloud_engine_container() {
       [ "$(systemctl show -p MainPID --value rowsafe-meilisearch-tls)" = "$fpid" ] || fail "$name: the TLS front was restarted"
       not_called "meilisearch-login"
       ;;
-    *) cmp -s "$(cloud_net_conf)" "$W/net.cnf" || fail "$name: the network settings changed" ;;
+    *)
+      cmp -s "$(cloud_net_conf)" "$W/net.cnf" || fail "$name: the network settings changed"
+      cmp -s "$rconf" "$W/repl.cnf" || fail "$name: the replication settings changed"
+      ;;
   esac
   pass "re-run: nothing changed, nothing restarted, still $label's agent"
 
@@ -5138,6 +5147,18 @@ cloud_mysql_checks() {
   fi
   [ -z "$(q "SHOW DATABASES LIKE 'test'")" ] || fail "$name: a test database"
   called "mysql-account"
+  called "mysql-account .*--standby" # --mysql-standby: a standby can be added later
+  # What standby servers need, set when the server was installed.
+  rconf=/etc/mysql/conf.d/zz-rowsafe-replication.cnf
+  [ "$engine" != mariadb ] || rconf=/etc/mysql/mariadb.conf.d/zz-rowsafe-replication.cnf
+  [ "$(stat -c '%U %G %a' "$rconf")" = "root root 644" ] || fail "$name: $rconf owner/mode"
+  sid=$(q 'SELECT @@server_id')
+  grep -qx "server_id = $sid" "$rconf" && [ "$sid" -ge 2 ] || { cat "$rconf" >&2; fail "$name: server_id is $sid"; }
+  if [ "$engine" = mysql ]; then
+    [ "$(q 'SELECT @@gtid_mode, @@enforce_gtid_consistency' | tr '\t' ' ')" = "ON ON" ] || fail "$name: GTIDs aren't on"
+  else
+    [ "$(q 'SELECT @@log_bin, @@binlog_format, @@log_slave_updates' | tr '\t' ' ')" = "1 ROW 1" ] || fail "$name: binary log settings: $(q 'SELECT @@log_bin, @@binlog_format, @@log_slave_updates')"
+  fi
   grep -q "$label restarted" "$W/out" || fail "$name: the new $label wasn't restarted for backups"
   called "apply --database db_fake"
   [ "$(stat -c '%U %G %a' /etc/mysql/rowsafe-tls)" = "mysql mysql 750" ] || fail "$name: certificate folder owner/mode"

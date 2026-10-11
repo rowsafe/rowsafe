@@ -240,6 +240,10 @@ type StandbyTarget struct {
 	// there when it is picked (Redis and Valkey: --redis-standby,
 	// --redis-clones).
 	New bool `json:"new,omitempty"`
+	// Replication (MySQL, MariaDB): Rowsafe's account there may set up
+	// replication (the installer's --mysql-standby), which a primary needs
+	// for a standby too; nil from older agents.
+	Replication *bool `json:"replication,omitempty"`
 }
 
 // StandbyInstructions are what the control plane tells an agent about
