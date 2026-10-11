@@ -192,7 +192,7 @@ func requestChangeDescription() string {
 	b.WriteString("Makes a change to production, exactly like the dashboard's button, right away as the person who connected you, with exactly their rights in the dashboard (like a CLI token). It returns the result in this call: approved (done) or failed (with why). ")
 	b.WriteString("Only make a change the user asked for or agreed to, and before a disruptive, destructive or paid one, tell the user in chat what will happen (and what it costs) and get their OK. ")
 	b.WriteString(refusedHint)
-	b.WriteString("Call describe_change for an action's params. Most destructive or disruptive actions need params.confirm = the database's name (or a hostname), as each action's description says. reason is recorded with the change, labeled as yours. ")
+	b.WriteString("Call describe_change for an action's params. Many disruptive actions need params.confirm = the database's name (or a hostname), as each action's description says; for a destructive one Rowsafe types the confirmation and records it (you still confirm with the user in chat first). reason is recorded with the change, labeled as yours. ")
 	b.WriteString("The cloud actions cost money (cloud_catalog shows regions, sizes and prices; leave database empty for create_cloud_server). Rowsafe saves a Mark before risky changes. Follow the tasks with get_task. Actions by group: ")
 	for i, g := range groups {
 		if i > 0 {
@@ -336,16 +336,16 @@ func (t *tools) describeChange(ctx context.Context, _ *sdk.CallToolRequest, in d
 }
 
 // destructiveConfirm says who types a destructive action's confirmation.
-// Rowsafe types a Rowsafe Cloud server's name (delete_cloud_server); the
-// database actions take params.confirm, which the dashboard's call checks
-// like a person's typed name, so leaving it out fails the change.
+// Rowsafe types it, as the person would, and records that it did: a Rowsafe
+// Cloud server's name (delete_cloud_server), or the database's name (or the
+// hostname the description names) in params.confirm.
 func destructiveConfirm(a protocol.ApprovalAction, ca ChangeAction) string {
 	if slices.Contains(pathParams(a), "server") {
 		return "Rowsafe types the server's name for you and records that it did."
 	}
 	if _, fixed := a.Fixed["confirm"]; !fixed {
 		if props, _ := ca.ParamsSchema["properties"].(map[string]any); props["confirm"] != nil {
-			return "Pass params.confirm as its description says (the database's name, or the hostname it names): Rowsafe checks it, and the change fails without it."
+			return "Rowsafe types the confirmation for you (as its description says) and records that it did: leave params.confirm out."
 		}
 	}
 	return ""
