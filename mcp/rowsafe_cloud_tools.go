@@ -109,7 +109,7 @@ type CloudServerView struct {
 	Host     string `json:"host,omitempty" jsonschema:"the name apps connect to (it follows the primary)"`
 	ReadHost string `json:"read_host,omitempty" jsonschema:"the name for read-only queries (the standby, else the primary)"`
 	Port     int    `json:"port,omitempty"`
-	SSLMode  string `json:"sslmode,omitempty" jsonschema:"require, or verify-full once a public certificate is installed (PostgreSQL's sslmode; every engine requires TLS)"`
+	SSLMode  string `json:"sslmode,omitempty" jsonschema:"require, or verify-full once a public certificate is installed (PostgreSQL's sslmode, then with sslrootcert=system; every engine requires TLS)"`
 	// Connection is the connection string without user and password.
 	Connection string `json:"connection,omitempty" jsonschema:"the connection string with USER and PASSWORD to fill in (postgresql://, mysql://, rediss://, clickhouse:// or https:// for OpenSearch), or Meilisearch's https:// address (its API key goes in a header)"`
 	// HTTPS is ClickHouse's HTTPS interface (port 8443), next to Connection
@@ -346,6 +346,9 @@ func (t *tools) getCloudServer(ctx context.Context, _ *sdk.CallToolRequest, in c
 		switch protocol.NormalizeEngine(v.Engine) {
 		case protocol.EnginePostgreSQL:
 			b.line("Apps connect to %s port %d with sslmode=%s (read-only queries: %s). Who can connect: %s.", v.Host, v.Port, v.SSLMode, cmpOr(v.ReadHost, v.Host), allowedText(v.AllowedIPs))
+			if v.SSLMode == "verify-full" {
+				b.line("%s", protocol.PGRootCertGuidance)
+			}
 		default:
 			b.line("Apps connect to %s port %d, always with TLS (%s). Who can connect: %s.", v.Host, v.Port, v.Connection, allowedText(v.AllowedIPs))
 			if v.HTTPS != "" {
@@ -457,6 +460,9 @@ func cloudServerView(c client.CloudServer) CloudServerView {
 		switch v.Engine {
 		case protocol.EnginePostgreSQL:
 			conn.Database, conn.SSLMode = "DBNAME", v.SSLMode
+			if v.SSLMode == "verify-full" {
+				conn.SSLRootCert = protocol.SSLRootCertSystem
+			}
 		case protocol.EngineMySQL, protocol.EngineMariaDB, protocol.EngineClickHouse:
 			conn.Database = "DBNAME"
 		}

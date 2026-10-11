@@ -304,6 +304,7 @@ func connectCmd(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	conn := protocol.DBConnection{User: *user, Database: dbname, Host: t.Host, Port: t.Port, SSLMode: t.SSLMode}
+	psqlTLS(&conn, psql) // pgtls.go
 	if *user != "" {
 		fmt.Fprintf(os.Stderr, "Connecting to %s on %s as %s; psql asks for its password.\n", dbname, server, *user)
 		return psqlExit(runPSQL(psql, append([]string{protocol.ConnectionURL(conn, "")}, extra...), []string{"PGAPPNAME=rowsafe connect"}))
