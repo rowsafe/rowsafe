@@ -501,7 +501,6 @@ func writeTestCert(t *testing.T, cert, key string) *x509.Certificate {
 	return c
 }
 
-
 // PgBouncer on public addresses takes encrypted connections only, with
 // PostgreSQL's certificate, and serves a renewed one after Rowsafe installs
 // it for PostgreSQL.
