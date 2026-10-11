@@ -110,6 +110,10 @@ type PoolingResult struct {
 	Addresses []string `json:"addresses,omitempty"`
 	// Target is where PgBouncer sends connections ("127.0.0.1:5432").
 	Target string `json:"target,omitempty"`
+	// Encrypted: PgBouncer takes encrypted connections only (TLS, with
+	// PostgreSQL's own certificate). Always when it listens on public
+	// addresses; apps connect with sslmode=require (or verify-full).
+	Encrypted bool `json:"encrypted,omitempty"`
 	// Warnings are things the person should know: roles whose md5
 	// passwords can't log in through PgBouncer, a pg_hba.conf that refuses
 	// password logins from PgBouncer...
@@ -163,6 +167,9 @@ type PoolerStatus struct {
 	// Addresses PgBouncer listens on; Target is where it sends connections.
 	Addresses []string `json:"addresses,omitempty"`
 	Target    string   `json:"target,omitempty"`
+	// Encrypted: PgBouncer takes encrypted connections only
+	// (PoolingResult.Encrypted).
+	Encrypted bool `json:"encrypted,omitempty"`
 	// External: the agent watches a PgBouncer that Rowsafe doesn't manage
 	// (a Docker service, ROWSAFE_POOLER_STATS_URL): monitoring only.
 	External bool   `json:"external,omitempty"`
@@ -232,6 +239,13 @@ type PoolingView struct {
 	Version   string   `json:"version,omitempty"`
 	Addresses []string `json:"addresses,omitempty"`
 	Target    string   `json:"target,omitempty"`
+	// Encrypted: PgBouncer takes encrypted connections only; Pooled then
+	// asks for TLS (sslmode).
+	Encrypted bool `json:"encrypted,omitempty"`
+	// PublicOnly: on a Rowsafe Cloud server apps connect over the
+	// internet, through Who can connect: PgBouncer listens on the server's
+	// public address, port DefaultPoolerPort, encrypted, and nowhere else.
+	PublicOnly bool `json:"public_only,omitempty"`
 	// OtherDatabase: the server's pooler already serves another database.
 	OtherDatabase string    `json:"other_database,omitempty"`
 	LastTask      *TaskView `json:"last_task,omitempty"`

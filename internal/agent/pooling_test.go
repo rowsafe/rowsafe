@@ -229,3 +229,78 @@ func TestPoolerStatus(t *testing.T) {
 		t.Fatalf("sidecar without a stats URL: %+v", st)
 	}
 }
+
+func TestPoolerTLSFiles(t *testing.T) {
+	dir := t.TempDir()
+	cert, key := filepath.Join(dir, "server.crt"), filepath.Join(dir, "server.key")
+	os.WriteFile(cert, []byte("cert"), 0o644)
+	os.WriteFile(key, []byte("key"), 0o600)
+	on := tlsSettings{ssl: "on", certFile: cert, keyFile: key}
+	if c, k, why := poolerTLSFiles(on, nil, true, "db1"); c != cert || k != key || why != "" {
+		t.Fatalf("PostgreSQL's files: %q %q %q", c, k, why)
+	}
+	for name, tc := range map[string]struct {
+		s      tlsSettings
+		err    error
+		helper bool
+		want   string
+	}{
+		"settings unreadable": {on, os.ErrPermission, true, "couldn't read PostgreSQL's encryption settings"},
+		"ssl off":             {tlsSettings{ssl: "off", certFile: cert, keyFile: key}, nil, true, "ssl is off"},
+		"odd name":            {tlsSettings{ssl: "on", certFile: dir + "/my cert.pem", keyFile: key}, nil, true, "file name"},
+		"dot dot":             {tlsSettings{ssl: "on", certFile: dir + "/../x/server.crt", keyFile: key}, nil, true, "file name"},
+		"missing key":         {tlsSettings{ssl: "on", certFile: cert, keyFile: dir + "/gone.key"}, nil, true, "can't read " + dir + "/gone.key"},
+		"old helper":          {on, nil, false, "run the install command there again"},
+	} {
+		if c, k, why := poolerTLSFiles(tc.s, tc.err, tc.helper, "db1"); c != "" || k != "" || !strings.Contains(why, tc.want) {
+			t.Errorf("%s: %q %q %q", name, c, k, why)
+		}
+	}
+	for _, p := range []string{"/var/lib/postgresql/17/main/rowsafe-server.crt", "/etc/ssl/certs/ssl-cert-snakeoil.pem"} {
+		if !validTLSPath(p) {
+			t.Errorf("%s refused", p)
+		}
+	}
+	for _, p := range []string{"relative.crt", "/a/../b", "/a/./b", "/a//b", "/a/b/..", "/a b", "/a;b", "/a\nb"} {
+		if validTLSPath(p) {
+			t.Errorf("%q accepted", p)
+		}
+	}
+	// The helper's request carries the paths.
+	a := &Agent{}
+	kv := a.configureArgs(poolerState{TLSMode: "require", TLSCert: cert, TLSKey: key, Settings: protocol.PoolingSettings{Port: 6432}}, false)
+	got := map[string]string{}
+	for _, p := range kv {
+		got[p[0]] = p[1]
+		if !poolerValueRE.MatchString(p[1]) {
+			t.Errorf("%s=%q doesn't pass the request's pattern", p[0], p[1])
+		}
+	}
+	if got["tls_mode"] != "require" || got["tls_cert"] != cert || got["tls_key"] != key {
+		t.Fatalf("configure args %v", got)
+	}
+	if kv := a.configureArgs(poolerState{}, false); slices.ContainsFunc(kv, func(p [2]string) bool { return strings.HasPrefix(p[0], "tls") }) {
+		t.Fatalf("TLS args without TLS: %v", kv)
+	}
+}
+
+func TestPoolerHelperActions(t *testing.T) {
+	dir := t.TempDir()
+	a := &Agent{cfg: Config{RestartHelper: filepath.Join(dir, "helper")}}
+	if acts := a.poolerHelperActions(); acts != nil {
+		t.Fatalf("no helper: %v", acts)
+	}
+	os.WriteFile(a.cfg.RestartHelper, []byte("#!/bin/sh\n# pooler-actions: install configure reload off\n"), 0o755)
+	if slices.Contains(a.poolerHelperActions(), helperTLS) {
+		t.Fatal("an old helper can encrypt")
+	}
+	// The real helper says it can.
+	data, err := os.ReadFile("../../scripts/rowsafe-pg-restart")
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(a.cfg.RestartHelper, data, 0o755)
+	if !slices.Contains(a.poolerHelperActions(), helperTLS) {
+		t.Fatalf("the helper's actions: %v", a.poolerHelperActions())
+	}
+}

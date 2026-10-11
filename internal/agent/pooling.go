@@ -40,6 +40,13 @@ import (
 //	/etc/pgbouncer/userlist.txt      root:postgres 0640: rowsafe_pgbouncer's password
 //	<state dir>/pooling.json         what the agent set up (database, settings, target)
 //
+// Listening on public addresses, PgBouncer takes encrypted connections only
+// (client_tls_sslmode = require), with the certificate and key PostgreSQL
+// serves (its ssl_cert_file and ssl_key_file, which the agent's user reads:
+// PgBouncer runs as that same user, so nothing new can read the key). When
+// Rowsafe installs a new certificate for PostgreSQL (server_cert.go),
+// PgBouncer follows it (poolerFollowCert).
+//
 // Clients log in with their own PostgreSQL user and password: PgBouncer
 // looks passwords up with auth_query, as the role rowsafe_pgbouncer, through
 // a SECURITY DEFINER function the agent creates (rowsafe_pgbouncer.
@@ -123,8 +130,13 @@ type poolerState struct {
 	// DBNames are the databases with an entry of their own (poolerDBList).
 	DBNames string `json:"db_names,omitempty"`
 	// Databases where the lookup function was created (AuthDB "").
-	FunctionDBs []string  `json:"function_dbs,omitempty"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	FunctionDBs []string `json:"function_dbs,omitempty"`
+	// TLSMode "require": clients must encrypt, with TLSCert and TLSKey
+	// (PostgreSQL's files); "" no TLS.
+	TLSMode   string    `json:"tls_mode,omitempty"`
+	TLSCert   string    `json:"tls_cert,omitempty"`
+	TLSKey    string    `json:"tls_key,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 func (s *poolerState) target() string {
@@ -196,7 +208,28 @@ func poolerPublicAllowed(path string) bool {
 
 // ---- the root helper ----
 
-var poolerValueRE = regexp.MustCompile(`^[A-Za-z0-9.:,*_-]{0,300}$`)
+var poolerValueRE = regexp.MustCompile(`^[A-Za-z0-9.:,*/_-]{0,300}$`)
+
+// helperTLS is the helper's "# pooler-actions:" word for client TLS.
+const helperTLS = "tls"
+
+// poolerHelperActions reads what the installed helper can do in PgBouncer
+// mode (its "# pooler-actions:" line).
+func (a *Agent) poolerHelperActions() []string {
+	if a.cfg.RestartHelper == "" {
+		return nil
+	}
+	data, err := os.ReadFile(a.cfg.RestartHelper)
+	if err != nil {
+		return nil
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if rest, ok := strings.CutPrefix(line, "# pooler-actions:"); ok {
+			return strings.Fields(rest)
+		}
+	}
+	return nil
+}
 
 // askPooler hands one request to the helper in PgBouncer mode and waits for
 // its answer.
@@ -471,9 +504,14 @@ func dropLookupRole(ctx context.Context, connect func(context.Context, string) (
 	return nil
 }
 
-// tcpConnect logs in as rowsafe_pgbouncer over TCP, like PgBouncer does.
-func tcpConnect(ctx context.Context, host string, port int, password, db string) (*pgx.Conn, error) {
-	cfg, err := pgx.ParseConfig("")
+// tcpConnect logs in as rowsafe_pgbouncer over TCP, like PgBouncer does
+// (encrypted: through a PgBouncer that takes encrypted connections only).
+func tcpConnect(ctx context.Context, host string, port int, password, db string, encrypted bool) (*pgx.Conn, error) {
+	conninfo := ""
+	if encrypted {
+		conninfo = "sslmode=require host=" + host // TLS needs the host when the configuration is made
+	}
+	cfg, err := pgx.ParseConfig(conninfo)
 	if err != nil {
 		return nil, err
 	}
@@ -495,7 +533,7 @@ func checkTarget(ctx context.Context, host string, port int, password, authDB st
 	if db == "" {
 		db = "postgres"
 	}
-	conn, err := tcpConnect(ctx, host, port, password, db)
+	conn, err := tcpConnect(ctx, host, port, password, db, false)
 	if err != nil {
 		return false, nil, err
 	}
@@ -635,10 +673,12 @@ func (a *Agent) poolingOn(ctx context.Context, db protocol.DatabaseSpec, want pr
 		return nil, err
 	}
 	facts, err := readClusterFacts(ctx, conn)
-	conn.Close(context.WithoutCancel(ctx))
 	if err != nil {
+		conn.Close(context.WithoutCancel(ctx))
 		return nil, fmt.Errorf("reading PostgreSQL's settings: %w", err)
 	}
+	tlsSet, tlsErr := readTLSSettings(ctx, conn)
+	conn.Close(context.WithoutCancel(ctx))
 	if facts.inRecovery && fresh {
 		return nil, errors.New("this PostgreSQL is a standby: turn pooling on for the primary (the role PgBouncer uses is created there and replicated)")
 	}
@@ -650,9 +690,28 @@ func (a *Agent) poolingOn(ctx context.Context, db protocol.DatabaseSpec, want pr
 	if err != nil {
 		return nil, err
 	}
+	// Public addresses: encrypted connections only. A PgBouncer that
+	// listened publicly before Rowsafe could encrypt keeps working as it
+	// was (with a warning) until encryption can be turned on.
+	var tlsWarning string
+	tlsMode, tlsCert, tlsKey, why := "", "", "", ""
+	if settings.Listen == protocol.PoolerListenPublic {
+		tlsCert, tlsKey, why = poolerTLSFiles(tlsSet, tlsErr, slices.Contains(a.poolerHelperActions(), helperTLS), host)
+		switch {
+		case why == "":
+			tlsMode = "require"
+		case fresh || st.Settings.Listen != protocol.PoolerListenPublic || st.TLSMode != "":
+			return nil, fmt.Errorf("PgBouncer listens on public addresses only with encryption, and %s", why)
+		default:
+			tlsWarning = "PgBouncer still takes unencrypted connections on public addresses: " + why
+		}
+	}
 
 	tl.Printf("asking the root helper to install PgBouncer if needed")
 	res := &protocol.PoolingResult{Action: protocol.PoolingOn, Settings: settings, Addresses: addrs}
+	if tlsWarning != "" {
+		res.Warnings = append(res.Warnings, tlsWarning)
+	}
 	ans, err := a.askPooler(ctx, "install", nil, taskID, poolerInstallTimeout)
 	if err != nil {
 		return res, fmt.Errorf("installing PgBouncer: %w", err)
@@ -668,7 +727,7 @@ func (a *Agent) poolingOn(ctx context.Context, db protocol.DatabaseSpec, want pr
 	}
 
 	next := poolerState{DatabaseID: db.ID, DatabaseName: db.Name, DBPort: db.Port, Settings: settings, Addresses: addrs,
-		TargetHost: "127.0.0.1", TargetPort: db.Port, Version: res.Version}
+		TargetHost: "127.0.0.1", TargetPort: db.Port, Version: res.Version, TLSMode: tlsMode, TLSCert: tlsCert, TLSKey: tlsKey}
 	if !fresh {
 		next.TargetHost, next.TargetPort, next.FunctionDBs = st.TargetHost, st.TargetPort, st.FunctionDBs
 	}
@@ -721,6 +780,9 @@ func (a *Agent) poolingOn(ctx context.Context, db protocol.DatabaseSpec, want pr
 	}
 	tl.Printf("asking the root helper to write PgBouncer's configuration (%s mode, %d connections per pool, listening on %s port %d)",
 		settings.Mode, settings.PoolSize, strings.Join(addrs, ", "), settings.Port)
+	if next.TLSMode != "" {
+		tl.Printf("encrypted connections only, with PostgreSQL's certificate %s", next.TLSCert)
+	}
 	if _, err := a.askPooler(ctx, "configure", kv, taskID, poolerHelperTimeout); err != nil {
 		return res, fmt.Errorf("configuring PgBouncer: %w", err)
 	}
@@ -748,9 +810,12 @@ func (a *Agent) poolingOn(ctx context.Context, db protocol.DatabaseSpec, want pr
 		}
 		res.Warnings = append(res.Warnings, note)
 	}
-	res.On, res.Target, res.Version = true, next.target(), next.Version
+	res.On, res.Target, res.Version, res.Encrypted = true, next.target(), next.Version, next.TLSMode != ""
 	res.Summary = fmt.Sprintf("Pooling is on: PgBouncer %s listens on %s, port %d, in %s mode, with up to %d server connections per pool.",
 		next.Version, listenWords(addrs), settings.Port, settings.Mode, settings.PoolSize)
+	if res.Encrypted {
+		res.Summary += " It takes encrypted connections only (sslmode=require)."
+	}
 	tl.Printf("%s", res.Summary)
 	return res, nil
 }
@@ -785,7 +850,88 @@ func (a *Agent) configureArgs(st poolerState, restart bool) [][2]string {
 	if st.DBNames != "" {
 		kv = append(kv, [2]string{"dbs", st.DBNames})
 	}
+	if st.TLSMode != "" {
+		kv = append(kv, [2]string{"tls_mode", st.TLSMode}, [2]string{"tls_cert", st.TLSCert}, [2]string{"tls_key", st.TLSKey})
+	}
 	return kv
+}
+
+// poolerTLSPathRE is a certificate or key path the helper takes.
+var poolerTLSPathRE = regexp.MustCompile(`^/[A-Za-z0-9._/-]{1,250}$`)
+
+func validTLSPath(p string) bool {
+	return poolerTLSPathRE.MatchString(p) && filepath.Clean(p) == p && !strings.Contains(p, "/../") && !strings.HasSuffix(p, "/..")
+}
+
+// poolerTLSFiles are the certificate and key PgBouncer serves to clients:
+// PostgreSQL's own (s, read from PostgreSQL; err when that failed), which
+// the agent's user (PgBouncer's) must be able to read. why says in plain
+// words why there are none (helperTLS: the root helper can set them).
+func poolerTLSFiles(s tlsSettings, err error, helperTLS bool, host string) (cert, key, why string) {
+	switch {
+	case err != nil:
+		return "", "", fmt.Sprintf("Rowsafe couldn't read PostgreSQL's encryption settings on %s (%v).", host, err)
+	case s.ssl != "on" || s.certFile == "" || s.keyFile == "":
+		return "", "", fmt.Sprintf("PostgreSQL on %s doesn't encrypt connections (ssl is off), so there is no certificate for PgBouncer. Turn encryption on for PostgreSQL first.", host)
+	case !validTLSPath(s.certFile) || !validTLSPath(s.keyFile):
+		return "", "", fmt.Sprintf("PostgreSQL's certificate or key on %s has a file name Rowsafe can't hand to PgBouncer (%s, %s).", host, s.certFile, s.keyFile)
+	}
+	for _, f := range []string{s.certFile, s.keyFile} {
+		fh, err := os.Open(f)
+		if err != nil {
+			return "", "", fmt.Sprintf("PgBouncer runs as the same user as the Rowsafe agent, which can't read %s on %s.", f, host)
+		}
+		fh.Close()
+	}
+	if !helperTLS {
+		return "", "", fmt.Sprintf("the Rowsafe helper on %s is too old to set up encryption for PgBouncer: run the install command there again.", host)
+	}
+	return s.certFile, s.keyFile, ""
+}
+
+// poolerFollowCert has PgBouncer serve the certificate Rowsafe just
+// installed for PostgreSQL on db's cluster (certFile, keyFile): the helper
+// points PgBouncer at the files when their names changed, then PgBouncer
+// reloads (new connections get the new certificate, open ones keep
+// theirs). It says what happened, for the task's summary ("" when
+// PgBouncer doesn't encrypt here); a failure doesn't undo the certificate.
+func (a *Agent) poolerFollowCert(ctx context.Context, db protocol.DatabaseSpec, certFile, keyFile string, tl *taskLog) string {
+	if a.cfg.Sidecar() {
+		return ""
+	}
+	poolerMu.Lock()
+	defer poolerMu.Unlock()
+	st, err := a.loadPoolerState()
+	if err != nil || st == nil || st.TLSMode == "" || st.DBPort != db.Port {
+		return ""
+	}
+	failed := func(err error) string {
+		tl.Printf("PgBouncer didn't take the new certificate: %v", err)
+		return " PgBouncer still serves the previous certificate (" + strings.TrimSuffix(err.Error(), ".") + "): change its settings once to have it take the new one."
+	}
+	password, err := readUserlistPassword(a.cfg.Pooler.Userlist)
+	if err != nil {
+		return failed(err)
+	}
+	if st.TLSCert != certFile || st.TLSKey != keyFile {
+		if !validTLSPath(certFile) || !validTLSPath(keyFile) {
+			return failed(fmt.Errorf("the file names %s and %s can't be handed to PgBouncer", certFile, keyFile))
+		}
+		next := *st
+		next.TLSCert, next.TLSKey = certFile, keyFile
+		tl.Printf("asking the root helper to point PgBouncer at the new certificate %s", certFile)
+		if _, err := a.askPooler(ctx, "configure", a.configureArgs(next, false), "", poolerHelperTimeout); err != nil {
+			return failed(err)
+		}
+		if err := a.savePoolerState(&next); err != nil {
+			return failed(err)
+		}
+		st = &next
+	}
+	if err := a.reloadPooler(ctx, *st, password, "", tl); err != nil {
+		return failed(err)
+	}
+	return " PgBouncer serves it too."
 }
 
 // adminTarget is PgBouncer's admin console for the agent.
@@ -824,7 +970,7 @@ func (a *Agent) verifyPooler(ctx context.Context, st poolerState, password strin
 	}
 	deadline := time.Now().Add(20 * time.Second)
 	for {
-		conn, err := tcpConnect(ctx, host, st.Settings.Port, password, db)
+		conn, err := tcpConnect(ctx, host, st.Settings.Port, password, db, st.TLSMode != "")
 		if err == nil {
 			var one int
 			err = conn.QueryRow(ctx, `SELECT 1`).Scan(&one)
@@ -1058,6 +1204,7 @@ func (a *Agent) poolerStatus(ctx context.Context) *protocol.PoolerStatus {
 		return out // not managed; Allowed says whether it may be
 	}
 	out.Managed, out.DatabaseID, out.Settings, out.Addresses, out.Target, out.Version = true, st.DatabaseID, st.Settings, st.Addresses, st.target(), st.Version
+	out.Encrypted = st.TLSMode != ""
 	password, err := readUserlistPassword(a.cfg.Pooler.Userlist)
 	if err != nil {
 		out.Error = err.Error()

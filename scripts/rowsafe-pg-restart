@@ -245,7 +245,11 @@ have_request() { as_agent test -e "$1" -o -L "$1" 2>/dev/null; }
 # pooler-reload or pooler-off. Every value is checked against a strict
 # pattern, and the helper writes PgBouncer's configuration itself from its
 # own template: PgBouncer only ever sends connections to an allowed port on
-# 127.0.0.1. That unit has no network and a read-only system; installing or
+# 127.0.0.1. With tls_mode=require, PgBouncer takes encrypted connections
+# only, with tls_cert and tls_key: PostgreSQL's own certificate and key,
+# which PgBouncer reads as the agent's user (root only checks that user can
+# read them, and never reads them itself, so nothing new can read the key).
+# That unit has no network and a read-only system; installing or
 # removing the pgbouncer package (the only package the helper touches) runs
 # in rowsafe-pooler-apt@install.service or @purge.service
 # (ROWSAFE_HELPER_MODE=pooler-apt), which takes no input from the agent, at
@@ -253,7 +257,7 @@ have_request() { as_agent test -e "$1" -o -L "$1" 2>/dev/null; }
 # id, action, ok, error, version, installed, removed, running and
 # finished_at.
 #
-# pooler-actions: install configure reload off
+# pooler-actions: install configure reload off tls
 
 pooler_allow=${ROWSAFE_POOLER_ALLOW:-/etc/rowsafe/pooler-allowed}
 pgb_dir=${ROWSAFE_PGBOUNCER_DIR:-/etc/pgbouncer}
@@ -466,6 +470,24 @@ pooler_configure() {
   for _d in $(printf '%s' "$_dbs" | tr ',' ' '); do
     printf '%s\n' "$_d" | grep -Eq '^[A-Za-z0-9_-]{1,63}$' && [ "$_d" != pgbouncer ] || pooler_refuse "invalid database name in dbs"
   done
+  # Encrypted connections only: PostgreSQL's certificate and key, which the
+  # agent's user (PgBouncer's) must read itself.
+  _tls=$(pooler_kv tls_mode)
+  _tls_cert='' _tls_key=''
+  case $_tls in
+    '') ;;
+    require)
+      _tls_cert=$(pooler_kv tls_cert)
+      _tls_key=$(pooler_kv tls_key)
+      for _f in "$_tls_cert" "$_tls_key"; do
+        printf '%s\n' "$_f" | grep -Eq '^/[A-Za-z0-9._/-]{1,250}$' || pooler_refuse "invalid certificate or key path"
+        case $_f in */../* | */.. | */./* | */. | *//*) pooler_refuse "invalid certificate or key path" ;; esac
+        as_agent test -f "$_f" && as_agent test -r "$_f" ||
+          pooler_refuse "$agent_user can't read $_f, so PgBouncer couldn't either"
+      done
+      ;;
+    *) pooler_refuse "tls_mode must be require" ;;
+  esac
 
   pooler_secure_dir
   # Keep PgBouncer's own files, to put back when pooling is turned off.
@@ -518,6 +540,12 @@ pooler_configure() {
     echo "ignore_startup_parameters = extra_float_digits"
     echo "server_lifetime = 3600"
     echo "server_idle_timeout = 600"
+    if [ -n "$_tls" ]; then
+      echo "client_tls_sslmode = $_tls"
+      echo "client_tls_cert_file = $_tls_cert"
+      echo "client_tls_key_file = $_tls_key"
+      echo "client_tls_protocols = secure"
+    fi
   } >"$state/pgbouncer.new"
   pooler_put "$state/pgbouncer.new" "$pgb_dir/pgbouncer.ini"
 
@@ -597,7 +625,7 @@ pooler_main() {
   line=$(as_agent sh -c '
     if [ -f "$1" ] && [ ! -L "$1" ]; then timeout 5 head -c 2000 -- "$1"; fi
     rm -f -- "$1"' rowsafe-pg-restart "$request" 2>/dev/null | head -n 1)
-  printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} pooler-[a-z]{1,20}( [a-z_]{1,20}=[A-Za-z0-9.:,*_-]{0,300}){0,20}$' ||
+  printf '%s\n' "$line" | grep -Eq '^[A-Za-z0-9_-]{1,64} pooler-[a-z]{1,20}( [a-z_]{1,20}=[A-Za-z0-9.:,*/_-]{0,300}){0,20}$' ||
     pooler_refuse "malformed request"
   id=${line%% *}
   rest=${line#* }
