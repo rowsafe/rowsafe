@@ -58,11 +58,18 @@ type standbyRecord struct {
 	Rebuild    bool   `json:"rebuild,omitempty"`
 	// GTID: it follows by GTID (SOURCE_AUTO_POSITION, MASTER_USE_GTID),
 	// not by binary log position (gtid.go).
-	GTID       bool      `json:"gtid,omitempty"`
-	Schemas    []string  `json:"schemas,omitempty"` // loaded by Rowsafe (dropped on removal)
-	Users      []string  `json:"users,omitempty"`   // 'user'@'host' loaded by Rowsafe
-	CreatedAt  time.Time `json:"created_at"`
-	StreamSeen time.Time `json:"streaming_seen_at,omitzero"`
+	GTID bool `json:"gtid,omitempty"`
+	// KeyPin is the SHA-256 of the key the primary serves TLS with, as it
+	// sealed it, and ReplPassword the replication login's password (both
+	// for the key checks, standby_tls.go); KeyMismatch: the primary showed
+	// another key, and the standby stopped receiving.
+	KeyPin       string    `json:"key_pin,omitempty"`
+	ReplPassword string    `json:"replication_password,omitempty"`
+	KeyMismatch  bool      `json:"key_mismatch,omitempty"`
+	Schemas      []string  `json:"schemas,omitempty"` // loaded by Rowsafe (dropped on removal)
+	Users        []string  `json:"users,omitempty"`   // 'user'@'host' loaded by Rowsafe
+	CreatedAt    time.Time `json:"created_at"`
+	StreamSeen   time.Time `json:"streaming_seen_at,omitzero"`
 }
 
 type standbyFile struct {
@@ -232,6 +239,8 @@ type replicaStatus struct {
 	SQLError      string
 	// GTID: it follows by GTID (Auto_Position 1, Using_Gtid Slave_Pos).
 	GTID bool
+	// SourceServerID is the source's server_id.
+	SourceServerID string
 }
 
 func (st replicaStatus) running() bool { return st.IORunning == "Yes" && st.SQLRunning == "Yes" }
@@ -300,6 +309,10 @@ func (s *server) channelStatus(ctx context.Context, db *sql.DB, channel string) 
 			st.SecondsBehind = &n
 		}
 	}
+	st.SourceServerID = get("Source_Server_Id", "Master_Server_Id")
+	if st.SourceServerID == "0" {
+		st.SourceServerID = ""
+	}
 	st.GTID = get("Auto_Position") == "1" || strings.HasSuffix(strings.ToLower(get("Using_Gtid")), "_pos")
 	st.IOError = get("Last_IO_Error")
 	st.SQLError = get("Last_SQL_Error")
@@ -310,8 +323,10 @@ func (s *server) channelStatus(ctx context.Context, db *sql.DB, channel string) 
 // says REPLICA and SOURCE, MariaDB and older MySQL SLAVE and MASTER.
 type replicaWords struct {
 	Change, Start, Stop, Reset, Host, Port, User, Password, File, Pos, SSL, PosWait string
-	// AutoPos follows by GTID instead of File and Pos.
+	// AutoPos follows by GTID instead of File and Pos; SSLVerify has the
+	// replica check the primary's certificate itself (MariaDB 11.3+).
 	AutoPos   string
+	SSLVerify string
 	PublicKey bool
 }
 
@@ -328,6 +343,9 @@ func (s *server) words(version string) replicaWords {
 		File: "MASTER_LOG_FILE", Pos: "MASTER_LOG_POS", SSL: "MASTER_SSL", PosWait: "MASTER_POS_WAIT", AutoPos: "MASTER_AUTO_POSITION = 1"}
 	if s.flavor.mariadb() {
 		w.AutoPos = "MASTER_USE_GTID = slave_pos"
+		if n >= 110300 {
+			w.SSLVerify = "MASTER_SSL_VERIFY_SERVER_CERT = 1"
+		}
 	} else if n >= 80000 {
 		w.PublicKey = true
 	}
@@ -419,7 +437,13 @@ func (s *server) setReadOnly(ctx context.Context, db *sql.DB, on bool) error {
 		if _, err := db.ExecContext(ctx, "SET GLOBAL read_only = "+v); err != nil {
 			return err
 		}
-		return s.persistSetting("read_only", map[bool]string{true: "1", false: ""}[on])
+		if err := s.persistSetting("read_only", map[bool]string{true: "1", false: ""}[on]); err != nil {
+			return err
+		}
+		if on {
+			return s.lockWriters(ctx, db) // standby_lock.go
+		}
+		return s.unlockWriters(ctx, db)
 	}
 	if on {
 		if _, err := db.ExecContext(ctx, "SET PERSIST super_read_only = ON"); err != nil {

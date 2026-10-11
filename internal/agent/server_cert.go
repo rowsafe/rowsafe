@@ -127,6 +127,43 @@ func newCertRequest(names []string) (keyPEM, csrPEM []byte, err error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	return certRequestFor(key, names)
+}
+
+// readECKey reads a P-256 key file (SEC 1 or PKCS #8 PEM); ok false when it
+// can't be read or is another kind of key.
+func readECKey(path string) (*ecdsa.PrivateKey, bool) {
+	if path == "" {
+		return nil, false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, false
+	}
+	var key *ecdsa.PrivateKey
+	switch block.Type {
+	case "EC PRIVATE KEY":
+		key, err = x509.ParseECPrivateKey(block.Bytes)
+	case "PRIVATE KEY":
+		var k any
+		k, err = x509.ParsePKCS8PrivateKey(block.Bytes)
+		key, _ = k.(*ecdsa.PrivateKey)
+	default:
+		return nil, false
+	}
+	if err != nil || key == nil || key.Curve != elliptic.P256() {
+		return nil, false
+	}
+	return key, true
+}
+
+// certRequestFor is a certificate request for exactly names with key, and
+// the key as SEC 1 PEM.
+func certRequestFor(key *ecdsa.PrivateKey, names []string) (keyPEM, csrPEM []byte, err error) {
 	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
 		Subject:            pkix.Name{CommonName: names[0]},
 		DNSNames:           names,

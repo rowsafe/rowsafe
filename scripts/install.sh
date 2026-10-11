@@ -2452,13 +2452,14 @@ mysql_local_conf() {
 # mysql_replication_conf: before the packages start the new server, what
 # standby servers need (a second server Rowsafe keeps in sync, both ways
 # after a switchover): its own random server_id; MySQL: GTIDs on
-# (gtid_mode, enforce_gtid_consistency); MariaDB: the binary log (ROW)
-# and log_slave_updates on, so a promoted standby's binary log holds the
-# old primary's transactions with their GTIDs. A new server only: a re-run
-# never changes it.
+# (gtid_mode, enforce_gtid_consistency); MariaDB: the binary log (ROW),
+# log_slave_updates (a promoted standby's binary log holds the old
+# primary's transactions with their GTIDs) and gtid_strict_mode. In
+# conf.d for both, before Rowsafe's own option file (zz-rowsafe.cnf, which
+# sorts after it): a server_id the agent changes later wins. A new server
+# only: a re-run never changes it.
 mysql_replication_conf() {
   _f=/etc/mysql/conf.d/zz-rowsafe-replication.cnf
-  [ "$INSTALL_DB" != mariadb ] || _f=/etc/mysql/mariadb.conf.d/zz-rowsafe-replication.cnf
   [ ! -e "$_f" ] || return 0
   install -d -m 0755 -o root -g root /etc/mysql "${_f%/*}"
   _sid=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
@@ -2472,6 +2473,7 @@ mysql_replication_conf() {
       echo "log_bin = mysql-bin"
       echo "binlog_format = ROW"
       echo "log_slave_updates = ON"
+      echo "gtid_strict_mode = ON"
     else
       echo "gtid_mode = ON"
       echo "enforce_gtid_consistency = ON"

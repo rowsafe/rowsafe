@@ -5150,14 +5150,17 @@ cloud_mysql_checks() {
   called "mysql-account .*--standby" # --mysql-standby: a standby can be added later
   # What standby servers need, set when the server was installed.
   rconf=/etc/mysql/conf.d/zz-rowsafe-replication.cnf
-  [ "$engine" != mariadb ] || rconf=/etc/mysql/mariadb.conf.d/zz-rowsafe-replication.cnf
   [ "$(stat -c '%U %G %a' "$rconf")" = "root root 644" ] || fail "$name: $rconf owner/mode"
   sid=$(q 'SELECT @@server_id')
   grep -qx "server_id = $sid" "$rconf" && [ "$sid" -ge 2 ] || { cat "$rconf" >&2; fail "$name: server_id is $sid"; }
   if [ "$engine" = mysql ]; then
     [ "$(q 'SELECT @@gtid_mode, @@enforce_gtid_consistency' | tr '\t' ' ')" = "ON ON" ] || fail "$name: GTIDs aren't on"
   else
-    [ "$(q 'SELECT @@log_bin, @@binlog_format, @@log_slave_updates' | tr '\t' ' ')" = "1 ROW 1" ] || fail "$name: binary log settings: $(q 'SELECT @@log_bin, @@binlog_format, @@log_slave_updates')"
+    [ "$(q 'SELECT @@log_bin, @@binlog_format, @@log_slave_updates, @@gtid_strict_mode' | tr '\t' ' ')" = "1 ROW 1 1" ] ||
+      fail "$name: binary log settings: $(q 'SELECT @@log_bin, @@binlog_format, @@log_slave_updates, @@gtid_strict_mode')"
+    # Rowsafe's own option file (where the agent keeps a server_id it changes) is read after it.
+    [ "$(printf '%s\n' /etc/mysql/conf.d/zz-rowsafe-replication.cnf /etc/mysql/conf.d/zz-rowsafe.cnf | LC_ALL=C sort | tail -1)" = /etc/mysql/conf.d/zz-rowsafe.cnf ] ||
+      fail "$name: zz-rowsafe.cnf isn't read after the replication settings"
   fi
   grep -q "$label restarted" "$W/out" || fail "$name: the new $label wasn't restarted for backups"
   called "apply --database db_fake"

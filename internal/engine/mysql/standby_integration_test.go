@@ -50,6 +50,20 @@ func TestStandbyIntegration(t *testing.T) {
 		return addrs[0]
 	}
 	ipA, ipB := ipOf(os.Getenv("ROWSAFE_MYSQL_IT_PRIMARY_HOST")), ipOf(os.Getenv("ROWSAFE_MYSQL_IT_STANDBY_HOST"))
+	// The agents run in this container (sidecars), not on the servers: the
+	// replication logins also let it in (the key checks sign in from here).
+	ipAgent := ""
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range addrs {
+			if n, ok := a.(*net.IPNet); ok && n.IP.To4() != nil && !n.IP.IsLoopback() {
+				ipAgent = n.IP.String()
+				break
+			}
+		}
+	}
+	if ipAgent == "" {
+		t.Fatal("this container's address")
+	}
 	port, _ := strconv.Atoi(os.Getenv("ROWSAFE_REPO_S3_PORT"))
 	repo := pgbackrest.Repo{
 		Endpoint: os.Getenv("ROWSAFE_REPO_S3_ENDPOINT"), Bucket: os.Getenv("ROWSAFE_REPO_S3_BUCKET"),
@@ -124,7 +138,9 @@ func TestStandbyIntegration(t *testing.T) {
 		if ok, err := e.server(x.env, x.spec).createAccountAsAdmin(ctx); err != nil || !ok {
 			t.Fatalf("account: %v %v", ok, err)
 		}
-		exec(x.db, standbyGrant)
+		for _, g := range standbyGrants {
+			exec(x.db, g)
+		}
 	}
 
 	// The primary: backups on, data, an app login, a full backup, more data.
@@ -142,6 +158,13 @@ func TestStandbyIntegration(t *testing.T) {
 	exec(adbA, "CREATE TABLE shop.orders (id INT PRIMARY KEY, note VARCHAR(50))")
 	exec(adbA, "CREATE USER 'app'@'%' IDENTIFIED BY 'app-secret-1'")
 	exec(adbA, "GRANT SELECT, INSERT ON shop.* TO 'app'@'%'")
+	// A login with every right (MariaDB: READ_ONLY ADMIN, which read_only
+	// lets write).
+	exec(adbA, "CREATE USER 'boss'@'%' IDENTIFIED BY 'boss-secret-1'")
+	exec(adbA, "GRANT ALL PRIVILEGES ON *.* TO 'boss'@'%'")
+	boss := func(socket string) (*sql.DB, error) {
+		return openWith(ctx, account{User: "boss", Password: "boss-secret-1"}, socket, 3306)
+	}
 	for i := 1; i <= 100; i++ {
 		exec(adbA, "INSERT INTO shop.orders VALUES (?, 'before backup')", i)
 	}
@@ -162,7 +185,7 @@ func TestStandbyIntegration(t *testing.T) {
 	var sec protocol.StandbySecrets
 	sec.PrimaryPort, sec.PrimaryAddresses = 3306, []string{ipA}
 	var prep protocol.StandbyPrepareResult
-	if err := e.StandbyPrepare(ctx, envA, specA, protocol.StandbyPrepareParams{StandbyID: "sb1", StandbyAddresses: []string{ipB}, Stream: true},
+	if err := e.StandbyPrepare(ctx, envA, specA, protocol.StandbyPrepareParams{StandbyID: "sb1", StandbyAddresses: []string{ipB, ipAgent}, Stream: true},
 		&sec, &prep, tl); err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
@@ -212,6 +235,22 @@ func TestStandbyIntegration(t *testing.T) {
 	if _, err := appB.ExecContext(ctx, "INSERT INTO shop.orders VALUES (999, 'x')"); err == nil {
 		t.Fatal("the standby took a write")
 	}
+	// Nor can a login with every right: MariaDB's is locked while the
+	// standby is read-only, MySQL's super_read_only stops it.
+	if bdb, err := boss(sbSocket); e.flavor.mariadb() {
+		if err == nil {
+			bdb.Close()
+			t.Fatal("a login that bypasses read_only signs in to the MariaDB standby")
+		}
+	} else {
+		if err != nil {
+			t.Fatalf("boss on the standby: %v", err)
+		}
+		if _, err := bdb.ExecContext(ctx, "INSERT INTO shop.orders VALUES (997, 'x')"); err == nil {
+			t.Fatal("a login with every right wrote on the MySQL standby")
+		}
+		bdb.Close()
+	}
 
 	// Fence the primary, promote the standby.
 	fres, err := e.StandbyFence(ctx, envA, specA, protocol.StandbyFenceParams{FenceID: "f1", StandbyID: "sb1", SystemID: prep.SystemID}, tl)
@@ -238,15 +277,39 @@ func TestStandbyIntegration(t *testing.T) {
 	if err != nil || !pres.Promoted || !pres.CaughtUp || pres.ReplayLSN == "" {
 		t.Fatalf("promote: %+v %v", pres, err)
 	}
+	at212 := time.Now().UTC()
 	if _, err := appB.ExecContext(ctx, "INSERT INTO shop.orders VALUES (212, 'on the new primary')"); err != nil {
 		t.Fatalf("the new primary refused a write: %v", err)
 	}
+	if e.flavor.mariadb() {
+		if bdb, err := boss(sbSocket); err != nil {
+			t.Fatalf("the login with every right isn't unlocked on the new primary: %v", err)
+		} else {
+			bdb.Close()
+		}
+		if bdb, err := boss(specA.SocketDir); err == nil {
+			bdb.Close()
+			t.Fatal("a login that bypasses read_only signs in to the fenced old primary")
+		}
+	}
+	// A restore after the switch, before the new primary's first backup:
+	// the old primary's backup, its binary log up to the switch, then the
+	// new primary's own (the switch recorded in the bucket).
+	for i := 0; i < 12; i++ {
+		_, _ = e.Archiver(ctx, envB, specB)
+		time.Sleep(time.Second)
+	}
+	dr := run(envB, specB, protocol.TaskDrill, nil).(*protocol.DrillResult)
+	if !dr.Passed || dr.RecoveredTo == nil || dr.RecoveredTo.Unix() < at212.Unix() {
+		t.Fatalf("a restore after the switch stopped at it: recovered to %v (the new primary wrote at %v): %+v", dr.RecoveredTo, at212, dr)
+	}
+	t.Logf("restored across the switch, to %v", dr.RecoveredTo)
 
 	// The old primary follows the new one.
 	var sec2 protocol.StandbySecrets
 	sec2.PrimaryPort, sec2.PrimaryAddresses = 3306, []string{ipB}
 	var prep2 protocol.StandbyPrepareResult
-	if err := e.StandbyPrepare(ctx, envB, specB, protocol.StandbyPrepareParams{StandbyID: "sb2", StandbyAddresses: []string{ipA}, Stream: true},
+	if err := e.StandbyPrepare(ctx, envB, specB, protocol.StandbyPrepareParams{StandbyID: "sb2", StandbyAddresses: []string{ipA, ipAgent}, Stream: true},
 		&sec2, &prep2, tl); err != nil {
 		t.Fatalf("prepare 2: %v", err)
 	}
@@ -283,7 +346,7 @@ func TestStandbyIntegration(t *testing.T) {
 	var sec3 protocol.StandbySecrets
 	sec3.PrimaryPort, sec3.PrimaryAddresses = 3306, []string{ipA}
 	var prep3 protocol.StandbyPrepareResult
-	if err := e.StandbyPrepare(ctx, envA, specA, protocol.StandbyPrepareParams{StandbyID: "sb3", StandbyAddresses: []string{ipB}, Stream: true},
+	if err := e.StandbyPrepare(ctx, envA, specA, protocol.StandbyPrepareParams{StandbyID: "sb3", StandbyAddresses: []string{ipB, ipAgent}, Stream: true},
 		&sec3, &prep3, tl); err != nil {
 		t.Fatalf("prepare 3: %v", err)
 	}
@@ -402,7 +465,9 @@ func TestCloneIntegration(t *testing.T) {
 	if ok, err := e.server(envB, specB).createAccountAsAdmin(ctx); err != nil || !ok {
 		t.Fatalf("account: %v %v", ok, err)
 	}
-	exec(adbB, standbyGrant)
+	for _, g := range standbyGrants {
+		exec(adbB, g)
+	}
 	run := func(typ string, params any) any {
 		t.Helper()
 		res, err := e.Run(ctx, envA, &protocol.Task{ID: fmt.Sprintf("t%d", time.Now().UnixNano()), Type: typ, Database: &specA, Params: mustJSON(t, params)}, tl)

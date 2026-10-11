@@ -315,17 +315,27 @@ func (idx binlogIndex) contiguous(f binlogFile) ([]binlogChunk, int64) {
 // next finds the file that follows f, written by server (f's own, or the
 // one its contents say for a file from an older agent; "" when not known):
 // the next number, created at or after f (the earliest such, if the server
-// started over later), never another server's.
+// started over later), never another server's (candidates).
 func (idx binlogIndex) next(f binlogFile, server string) (binlogFile, bool) {
+	c := idx.candidates(f, server)
+	if len(c) == 0 {
+		return binlogFile{}, false
+	}
+	return c[0], true
+}
+
+// candidates are the files that may follow f, best first: the same
+// server's (known), then files from older agents (which don't say whose
+// they are: the caller checks their first event), each by creation.
+func (idx binlogIndex) candidates(f binlogFile, server string) []binlogFile {
 	base, n, ok := binlogSeq(f.Name)
 	if !ok {
-		return binlogFile{}, false
+		return nil
 	}
 	if f.Server != "" {
 		server = f.Server
 	}
-	var best binlogFile
-	found := false
+	var out []binlogFile
 	for g := range idx {
 		gb, gn, ok := binlogSeq(g.Name)
 		if !ok || gb != base || gn != n+1 || g.Created < f.Created {
@@ -334,13 +344,18 @@ func (idx binlogIndex) next(f binlogFile, server string) (binlogFile, bool) {
 		if server != "" && g.Server != "" && g.Server != server {
 			continue // the other server's file of that name (a standby pair)
 		}
-		// The same server's (known) first, then the earliest.
-		if !found || (g.Server == server) != (best.Server == server) && g.Server == server ||
-			(g.Server == server) == (best.Server == server) && g.Created < best.Created {
-			best, found = g, true
-		}
+		out = append(out, g)
 	}
-	return best, found
+	slices.SortFunc(out, func(a, b binlogFile) int {
+		if (a.Server == server) != (b.Server == server) {
+			if a.Server == server {
+				return -1
+			}
+			return 1
+		}
+		return int(a.Created - b.Created)
+	})
+	return out
 }
 
 // find returns the stored file f names (by name and creation, and server
@@ -407,4 +422,56 @@ func (p position) String() string {
 func isBinlogName(s string) bool {
 	_, _, ok := binlogSeq(s)
 	return ok && !strings.Contains(s, "/")
+}
+
+// ---- switches between servers ----
+
+// binlogLink records that the database moved to another server (a
+// standby's promotion, StandbyPromote): the old primary's history ends at
+// From (its file and position, as the new primary applied it), and the new
+// primary's own begins with To, a file it started for that at the
+// promotion. A restore whose chain reaches From, and the old primary
+// shipped nothing more, goes on in To; until the new primary's first
+// backup, that is the only way to a moment after the switch.
+type binlogLink struct {
+	From linkFrom   `json:"from"`
+	To   binlogFile `json:"to"`
+	At   time.Time  `json:"at"`
+}
+
+// linkFrom is where the old primary's history ends.
+type linkFrom struct {
+	Name   string `json:"name"`
+	Server string `json:"server"`
+	Pos    int64  `json:"pos"`
+}
+
+// linkKey is the link to f in the bucket.
+func linkKey(f binlogFile) string {
+	return fmt.Sprintf("binlogs/links/%s~%d~%s.json.age", f.Name, f.Created, f.Server)
+}
+
+var linkKeyRE = regexp.MustCompile(`^binlogs/links/([A-Za-z0-9._-]+)~(\d+)~(\d{1,10})\.json\.age$`)
+
+// parseLinkKey reads a link key: the file it leads to.
+func parseLinkKey(key string) (binlogFile, bool) {
+	m := linkKeyRE.FindStringSubmatch(key)
+	if m == nil {
+		return binlogFile{}, false
+	}
+	created, err := strconv.ParseInt(m[2], 10, 64)
+	return binlogFile{Name: m[1], Created: created, Server: m[3]}, err == nil
+}
+
+// linksTo lists the links in the bucket (the files they lead to), newest
+// first.
+func linksTo(objs []objInfo) []binlogFile {
+	var out []binlogFile
+	for _, o := range objs {
+		if f, ok := parseLinkKey(o.Key); ok {
+			out = append(out, f)
+		}
+	}
+	slices.SortFunc(out, func(a, b binlogFile) int { return int(b.Created - a.Created) })
+	return out
 }

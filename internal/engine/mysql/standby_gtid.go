@@ -76,6 +76,20 @@ func (s *server) matchGTIDMode(ctx context.Context, conn *sql.DB, cur string, on
 	return nil
 }
 
+// resetBinlogSQL clears a server's binary logs (and MySQL's GTIDs).
+func resetBinlogSQL(mariadb bool, version string) string {
+	if _, n := numericVersion(version); !mariadb && n >= 80200 {
+		return "RESET BINARY LOGS AND GTIDS"
+	}
+	return "RESET MASTER"
+}
+
+// resetBinlog clears the binary logs of an empty server.
+func (s *server) resetBinlog(ctx context.Context, conn *sql.DB, version string) error {
+	_, err := conn.ExecContext(ctx, resetBinlogSQL(s.flavor.mariadb(), version))
+	return err
+}
+
 // adoptGTIDs makes the seeded standby hold the primary's GTIDs at the seed:
 // its own binary logs and GTIDs are cleared (it holds nothing of its own:
 // the copy was loaded outside its binary log), then MySQL's gtid_purged or
@@ -108,11 +122,7 @@ func (s *server) adoptGTIDs(ctx context.Context, conn *sql.DB, g seedGTIDs, vers
 	if _, err := parseGTIDSet(g.Set); err != nil {
 		return err
 	}
-	reset := "RESET MASTER"
-	if _, n := numericVersion(version); n >= 80200 {
-		reset = "RESET BINARY LOGS AND GTIDS"
-	}
-	if _, err := c.ExecContext(ctx, reset); err != nil {
+	if _, err := c.ExecContext(ctx, resetBinlogSQL(false, version)); err != nil {
 		return fmt.Errorf("clearing the standby's own GTIDs: %w", err)
 	}
 	if g.Set != "" {
@@ -123,6 +133,33 @@ func (s *server) adoptGTIDs(ctx context.Context, conn *sql.DB, g seedGTIDs, vers
 	return nil
 }
 
+// mariaExtra lists the GTIDs of own (a MariaDB binary log state) that
+// theirs doesn't hold: for each domain and server, a later sequence number
+// than theirs has ("" when none).
+func mariaExtra(own, theirs string) (string, error) {
+	o, err := parseMariaState(own)
+	if err != nil {
+		return "", err
+	}
+	t, err := parseMariaState(theirs)
+	if err != nil {
+		return "", err
+	}
+	var extra []string
+	for _, g := range o {
+		held := false
+		for _, x := range t {
+			if x.Domain == g.Domain && x.Server == g.Server && x.Seq >= g.Seq {
+				held = true
+			}
+		}
+		if !held {
+			extra = append(extra, g.String())
+		}
+	}
+	return strings.Join(extra, ","), nil
+}
+
 // prepareReattachGTID gets a fenced old primary ready to follow the new
 // primary by GTID from its own data. MySQL: it must hold no transaction
 // the new primary lacks; the new primary's GTIDs come sealed with the
@@ -131,6 +168,18 @@ func (s *server) adoptGTIDs(ctx context.Context, conn *sql.DB, g seedGTIDs, vers
 // position set here (its own binary log's).
 func (s *server) prepareReattachGTID(ctx context.Context, conn *sql.DB, sec protocol.StandbySecrets) error {
 	if s.flavor.mariadb() {
+		if theirs, ok := sec.EngineData[secretGTIDBinlogState]; ok {
+			var own string
+			if err := conn.QueryRowContext(ctx, "SELECT @@global.gtid_binlog_state").Scan(&own); err != nil {
+				return err
+			}
+			if extra, err := mariaExtra(own, theirs); err != nil {
+				return fmt.Errorf("comparing with the new primary's GTIDs: %w", err)
+			} else if extra != "" {
+				return fmt.Errorf("the old primary holds changes the new primary doesn't have (GTIDs %s), so Rowsafe won't turn it into a standby: "+
+					"keep it as it is, and add a standby on an empty server instead", extra)
+			}
+		}
 		if _, err := conn.ExecContext(ctx, "SET GLOBAL gtid_slave_pos = @@global.gtid_binlog_pos"); err != nil {
 			return fmt.Errorf("setting where the old primary follows from: %w", err)
 		}

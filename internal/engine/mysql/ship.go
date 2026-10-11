@@ -100,7 +100,8 @@ var (
 func shipperFor(s *server) *shipper {
 	shippersMu.Lock()
 	defer shippersMu.Unlock()
-	sh := shippers[s.db.ID]
+	key := s.env.StateDir + "\x00" + s.db.ID // one agent's (tests run two in one process)
+	sh := shippers[key]
 	if sh != nil {
 		select {
 		case <-sh.done:
@@ -114,7 +115,7 @@ func shipperFor(s *server) *shipper {
 			created:   map[string]binlogFile{}, pending: map[string]time.Time{},
 			wake: make(chan struct{}, 1), done: make(chan struct{}),
 		}
-		shippers[s.db.ID] = sh
+		shippers[key] = sh
 		sh.srv = s
 		sh.seen = time.Now()
 		go sh.run()

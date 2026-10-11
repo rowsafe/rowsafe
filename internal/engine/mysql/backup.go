@@ -511,7 +511,10 @@ func expiredBinlogs(objs []objInfo, kept []manifest, oldest manifest) []string {
 	for _, o := range objs {
 		f, _, _, ok := parseChunkKey(o.Key)
 		if !ok {
-			continue
+			// A switch to another server goes with the file it leads to.
+			if f, ok = parseLinkKey(o.Key); !ok {
+				continue
+			}
 		}
 		before := oldest.Binlog.File.Created
 		if c, ok := first[f.Server]; ok && f.Server != "" {

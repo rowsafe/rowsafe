@@ -137,7 +137,7 @@ func CreateAccount(ctx context.Context, o AccountOptions) (string, error) {
 	version := strings.TrimSpace(string(out))
 	stmts := accountSQL(f, version, password)
 	if o.Standby {
-		stmts = append(stmts, standbyGrant)
+		stmts = append(stmts, standbyGrants...)
 	}
 	if out, err := run(strings.Join(stmts, ";\n") + ";\n"); err != nil {
 		return "", fmt.Errorf("creating the %s account failed: %s", rowsafeUser, firstLine(string(out)))
@@ -173,8 +173,13 @@ func (s *server) createAccountAsAdmin(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	c, err := db.Conn(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer c.Close()
 	for _, stmt := range accountSQL(s.flavor, version, password) {
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
+		if _, err := c.ExecContext(ctx, stmt); err != nil {
 			return false, fmt.Errorf("creating the %s account: %w", rowsafeUser, err)
 		}
 	}
@@ -206,14 +211,25 @@ func accountSQL(f flavor, version, password string) []string {
 	}
 	_ = version
 	return append([]string{
+		// The account is this server's own: never in its binary log (a
+		// standby would get this server's password for its own account).
+		"SET SESSION sql_log_bin = 0",
 		"CREATE USER IF NOT EXISTS " + user + " IDENTIFIED BY " + pw,
 		"ALTER USER " + user + " IDENTIFIED BY " + pw,
 	}, grants...)
 }
 
-// standbyGrant gives Rowsafe's account what standby servers need (see
-// AccountOptions.Standby).
-const standbyGrant = "GRANT ALL PRIVILEGES ON *.* TO 'rowsafe'@'localhost' WITH GRANT OPTION"
+// standbyGrants give Rowsafe's account what standby servers need (see
+// AccountOptions.Standby): loading a copy of every database, its routines,
+// views and logins into an empty server, replication and its settings,
+// the logins standbys replicate with. Not FILE (reading and writing the
+// server's files) or SHUTDOWN. (MariaDB: READ_ONLY ADMIN stays, which
+// setting read_only itself needs; the agent never writes on a read-only
+// server.)
+var standbyGrants = []string{
+	"GRANT ALL PRIVILEGES ON *.* TO 'rowsafe'@'localhost' WITH GRANT OPTION",
+	"REVOKE FILE, SHUTDOWN ON *.* FROM 'rowsafe'@'localhost'",
+}
 
 // saveAccount writes the account file (0600) and gives it to uid:gid.
 func saveAccount(stateDir string, port int, a account, uid, gid int) error {

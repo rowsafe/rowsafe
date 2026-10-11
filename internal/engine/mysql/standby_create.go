@@ -72,13 +72,17 @@ func (e *Engine) StandbyCreate(ctx context.Context, env agent.EngineEnv, db prot
 		return nil, err
 	}
 	log.Printf("the primary answers at %s:%d", addr, sec.PrimaryPort)
+	if err := checkSealedKey(ctx, addr, sec, log); err != nil {
+		return nil, err
+	}
 	if p.SizeBytes > 0 {
 		if err := checkSpace(env.Config.RewindDir, p.SizeBytes); err != nil {
 			return nil, err
 		}
 	}
 	rec := standbyRecord{ID: p.StandbyID, DatabaseID: db.ID, Port: db.Port, Socket: db.SocketDir, Phase: protocol.StandbyPhaseCreating,
-		Address: addr, PrimPort: sec.PrimaryPort, ReplUser: sec.ReplicationUser, CreatedAt: time.Now().UTC()}
+		Address: addr, PrimPort: sec.PrimaryPort, ReplUser: sec.ReplicationUser, CreatedAt: time.Now().UTC(),
+		KeyPin: sec.EngineData[secretTLSKey], ReplPassword: sec.ReplicationPassword}
 	if err := store.put(rec); err != nil {
 		return nil, err
 	}
@@ -106,6 +110,13 @@ func (e *Engine) StandbyCreate(ctx context.Context, env agent.EngineEnv, db prot
 		}
 		log.Printf("loaded the copy; it holds the primary's transactions up to %s (GTIDs %s)", pos, cmpOr(cmpOr(loaded.GTIDs.Pos, loaded.GTIDs.Set), "none"))
 	} else {
+		// By position: the position must be in the primary's own binary
+		// log (after a switchover, the copy in the bucket can end in the
+		// other server's until the new primary's first backup).
+		if sid, ok := p.Settings[settingServerID]; ok && loaded.PosServer != "" && loaded.PosServer != strconv.Itoa(sid) {
+			return fail(fmt.Errorf("the latest backup and binary logs in the bucket end in another server's binary log (the database moved to this " +
+				"primary recently): add the standby once the primary's first backup is done"))
+		}
 		log.Printf("loaded the copy; it continues from the primary's binary log at %s", pos)
 	}
 	rec.GTID = byGTID
@@ -203,6 +214,14 @@ func (s *server) checkTarget(ctx context.Context, conn *sql.DB, p protocol.Stand
 		// would write as the primary once promoted, and the old primary
 		// would skip its changes as its own. The server is empty: end them.
 		s.endSessions(ctx, conn)
+		// Its binary log starts over under the new server_id: the files it
+		// has were written as the old one (and the bucket keys files by the
+		// server that wrote them).
+		if f.LogBin {
+			if err := s.resetBinlog(ctx, conn, f.Version); err != nil {
+				return fmt.Errorf("starting the binary log over after changing server_id: %w", err)
+			}
+		}
 	}
 	return nil
 }
@@ -246,6 +265,7 @@ func (s *server) seedStandby(ctx context.Context, conn *sql.DB, rec *standbyReco
 type loadedCopy struct {
 	Pos         filePos    // the source's binary log position it is at (latest only)
 	GTIDs       seedGTIDs  // the source's GTIDs at Pos (latest only; gtid.go)
+	PosServer   string     // the server_id of the server whose file Pos is in ("" when not known)
 	GTIDErr     error      // why GTIDs couldn't be read
 	RecoveredTo *time.Time // the last transaction replayed (nil: none after the backup)
 	Schemas     []string
@@ -287,6 +307,11 @@ func (s *server) loadCopy(ctx context.Context, id string, t restoreTarget, lates
 			return out, err
 		}
 		out.GTIDs, out.GTIDErr = seedGTIDsAt(r, dir, out.Pos, s.flavor.mariadb())
+		if id, err := readBinlogFile(filepath.Join(dir, "binlogs", out.Pos.File)); err == nil {
+			out.PosServer = id.Server
+		} else if b := r.Backup.Binlog.File; b.Name == out.Pos.File {
+			out.PosServer = b.Server
+		}
 	}
 	sc, err := s.startScratch(ctx, dir, r.Backup, drillStartTimeout)
 	if err != nil {
@@ -581,6 +606,9 @@ func (s *server) startReplication(ctx context.Context, conn *sql.DB, addr string
 	}
 	if sec.PrimaryTLS {
 		opts = append(opts, w.SSL+" = 1")
+		if w.SSLVerify != "" {
+			opts = append(opts, w.SSLVerify)
+		}
 	}
 	if w.PublicKey {
 		key := "GET_SOURCE_PUBLIC_KEY"
@@ -693,6 +721,9 @@ func (s *server) reattach(ctx context.Context, conn *sql.DB, p protocol.StandbyC
 	if err != nil {
 		return nil, err
 	}
+	if err := checkSealedKey(ctx, addr, sec, log); err != nil {
+		return nil, err
+	}
 	if byGTID {
 		if err := s.prepareReattachGTID(ctx, conn, sec); err != nil {
 			return nil, err
@@ -700,7 +731,8 @@ func (s *server) reattach(ctx context.Context, conn *sql.DB, p protocol.StandbyC
 	}
 	store := standbys(s.env)
 	rec := standbyRecord{ID: p.StandbyID, DatabaseID: s.db.ID, Port: s.db.Port, Socket: s.db.SocketDir, Phase: protocol.StandbyPhaseCreating,
-		Address: addr, PrimPort: sec.PrimaryPort, ReplUser: sec.ReplicationUser, Rebuild: true, GTID: byGTID, CreatedAt: time.Now().UTC()}
+		Address: addr, PrimPort: sec.PrimaryPort, ReplUser: sec.ReplicationUser, Rebuild: true, GTID: byGTID, CreatedAt: time.Now().UTC(),
+		KeyPin: sec.EngineData[secretTLSKey], ReplPassword: sec.ReplicationPassword}
 	if err := store.put(rec); err != nil {
 		return nil, err
 	}

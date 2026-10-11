@@ -92,11 +92,14 @@ for target in $targets; do
   if [ "$run" = Standby ] || [ "$run" = Clone ] || [ "$run" = MoveIn ]; then
     # The standby: an empty server of the same version, same server_id
     # (Rowsafe changes it).
+    # Its data in a folder of its own name: the test reads both servers'
+    # binary logs (as each one's agent does on its own server).
     docker volume create --label "$proj" "$sock-sb" >/dev/null
+    docker volume create --label "$proj" "$data-sb" >/dev/null
     # shellcheck disable=SC2086
     docker run -d --label "$proj" --network "$net" --name "$name-sb" -e "$envpw=root-secret-$$" \
-      -v "$sock-sb:$sockdir" "$image:$version" $sb_args >/dev/null
-    sbargs="-e ROWSAFE_MYSQL_IT_GTID=$gtid -v $sock-sb:/sbsock -e ROWSAFE_MYSQL_IT_STANDBY_SOCKET=/sbsock/mysqld.sock -e ROWSAFE_MYSQL_IT_PRIMARY_HOST=$name -e ROWSAFE_MYSQL_IT_STANDBY_HOST=$name-sb"
+      -v "$sock-sb:$sockdir" -v "$data-sb:/var/lib/mysql-sb" "$image:$version" $sb_args --datadir=/var/lib/mysql-sb >/dev/null
+    sbargs="-e ROWSAFE_MYSQL_IT_GTID=$gtid -v $data-sb:/var/lib/mysql-sb:ro -v $sock-sb:/sbsock -e ROWSAFE_MYSQL_IT_STANDBY_SOCKET=/sbsock/mysqld.sock -e ROWSAFE_MYSQL_IT_PRIMARY_HOST=$name -e ROWSAFE_MYSQL_IT_STANDBY_HOST=$name-sb"
   fi
   for n in "$name" ${sbargs:+"$name-sb"}; do
     for _ in $(seq 1 90); do
