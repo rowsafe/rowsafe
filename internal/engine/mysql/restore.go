@@ -240,7 +240,7 @@ func (s *server) fetchBinlogs(ctx context.Context, st *objStore, dir string, res
 		return err
 	}
 	idx := indexBinlogs(objs)
-	cur, ok := idx.find(from.File.Name, from.File.Created, res.Backup.StoppedAt.Add(time.Minute))
+	cur, ok := idx.find(from.File, res.Backup.StoppedAt.Add(time.Minute))
 	if !ok {
 		if t.Mark != nil || t.Time != nil && t.Time.After(res.Backup.StoppedAt) {
 			return fmt.Errorf("the binary logs written after the backup %s (from %s) aren't in the bucket", res.Backup.Label, from)
@@ -270,14 +270,22 @@ func (s *server) fetchBinlogs(ctx context.Context, st *objStore, dir string, res
 		res.Binlogs = append(res.Binlogs, local)
 		total += end
 		if t.Mark != nil && t.Mark.Position.File.Name == cur.Name &&
-			(t.Mark.Position.File.Created == 0 || t.Mark.Position.File.Created == cur.Created) {
+			(t.Mark.Position.File.Created == 0 || t.Mark.Position.File.same(cur)) {
 			if end < t.Mark.Position.Pos {
 				return fmt.Errorf("the binary log up to the Mark %s isn't in the bucket", t.Mark.Name)
 			}
 			res.StopPos = t.Mark.Position.Pos
 			break
 		}
-		next, ok := idx.next(cur)
+		// The server that wrote it: a file from an older agent says so
+		// itself (its first event), so the chain stays on that server.
+		server := cur.Server
+		if server == "" {
+			if id, err := readBinlogFile(local); err == nil {
+				server = id.Server
+			}
+		}
+		next, ok := idx.next(cur, server)
 		if !ok {
 			if t.Mark != nil {
 				return fmt.Errorf("the binary logs up to the Mark %s aren't in the bucket", t.Mark.Name)

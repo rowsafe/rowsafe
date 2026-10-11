@@ -43,9 +43,9 @@ func TestBinlogScan(t *testing.T) {
 	if err := os.WriteFile(path, f.Bytes(), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	created, err := readBinlogCreated(path)
-	if err != nil || created != 1000 {
-		t.Fatalf("created %d %v", created, err)
+	id, err := readBinlogFile(path)
+	if err != nil || id != (binlogFile{Name: "mysql-bin.000001", Created: 1000, Server: "0"}) {
+		t.Fatalf("identity %+v %v", id, err)
 	}
 	for _, tc := range []struct {
 		stop time.Time
@@ -73,7 +73,7 @@ func TestBinlogScan(t *testing.T) {
 	if err := os.WriteFile(path, enc, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readBinlogCreated(path); err != errBinlogEncrypted {
+	if _, err := readBinlogFile(path); err != errBinlogEncrypted {
 		t.Errorf("encrypted: %v", err)
 	}
 }
@@ -98,14 +98,17 @@ func TestBinlogIndex(t *testing.T) {
 	if _, end := idx.contiguous(b); end != 120 {
 		t.Errorf("b stops at the hole: %d", end)
 	}
-	if n, ok := idx.next(a); !ok || n != b {
+	if n, ok := idx.next(a, ""); !ok || n != b {
 		t.Errorf("next of a: %+v", n)
 	}
-	if f, ok := idx.find("binlog.000008", 0, time.Unix(150, 0)); !ok || f != reset {
+	if f, ok := idx.find(binlogFile{Name: "binlog.000008"}, time.Unix(150, 0)); !ok || f != reset {
 		t.Errorf("find before 150: %+v", f)
 	}
-	if f, ok := idx.find("binlog.000008", 0, time.Time{}); !ok || f != b {
+	if f, ok := idx.find(binlogFile{Name: "binlog.000008"}, time.Time{}); !ok || f != b {
 		t.Errorf("find newest: %+v", f)
+	}
+	if f, ok := idx.find(binlogFile{Name: "binlog.000008", Created: 200, Server: "7"}, time.Time{}); !ok || f != b {
+		t.Errorf("find by identity (an older agent's file): %+v", f)
 	}
 	if f, from, to, ok := parseChunkKey(chunkKey(a, 12, 34)); !ok || f != a || from != 12 || to != 34 {
 		t.Error("parseChunkKey")
@@ -302,5 +305,58 @@ func TestDBAdminHelpers(t *testing.T) {
 	}
 	if passwordKind("caching_sha2_password", true) != protocol.PasswordNone {
 		t.Error("empty")
+	}
+}
+
+// The two servers of a standby pair name their files alike: a chain stays
+// on one server, and retention keeps each server's files its kept backups
+// need (after a switchover and back, the first server's current file is
+// older than the second server's backups).
+func TestBinlogPair(t *testing.T) {
+	a2 := binlogFile{Name: "mysql-bin.000002", Created: 100, Server: "11"} // the first server
+	b1 := binlogFile{Name: "mysql-bin.000001", Created: 200, Server: "22"} // the standby, promoted
+	b2 := binlogFile{Name: "mysql-bin.000002", Created: 250, Server: "22"}
+	b3 := binlogFile{Name: "mysql-bin.000003", Created: 300, Server: "22"}
+	a3 := binlogFile{Name: "mysql-bin.000003", Created: 400, Server: "11"} // back on the first server
+	legacy := binlogFile{Name: "mysql-bin.000001", Created: 50}            // an older agent's
+	var objs []objInfo
+	for _, f := range []binlogFile{a2, b1, b2, b3, a3, legacy} {
+		objs = append(objs, objInfo{Key: chunkKey(f, 0, 100)})
+	}
+	if f, from, to, ok := parseChunkKey(chunkKey(b2, 0, 100)); !ok || f != b2 || from != 0 || to != 100 ||
+		chunkKey(b2, 0, 100) != "binlogs/mysql-bin.000002~250~22/000000000000-000000000100.zst.age" {
+		t.Fatalf("server in the key: %+v %s", f, chunkKey(b2, 0, 100))
+	}
+	idx := indexBinlogs(objs)
+	if n, ok := idx.next(a2, ""); !ok || n != a3 {
+		t.Errorf("the first server's chain went to %+v (want its own %+v, not the standby's %+v)", n, a3, b3)
+	}
+	if n, ok := idx.next(b2, ""); !ok || n != b3 {
+		t.Errorf("the second server's chain: %+v", n)
+	}
+	// An older agent's file: the server its contents name decides.
+	if n, ok := idx.next(binlogFile{Name: "mysql-bin.000002", Created: 90}, "11"); !ok || n != a3 {
+		t.Errorf("legacy file of the first server: %+v", n)
+	}
+	if f, ok := idx.find(binlogFile{Name: "mysql-bin.000002", Created: 100, Server: "11"}, time.Time{}); !ok || f != a2 {
+		t.Errorf("find: %+v", f)
+	}
+	// Kept: the second server's backup (from b2) and the first server's
+	// after switching back (from a2, its file all along).
+	kept := []manifest{{Label: "B2"}, {Label: "B3"}}
+	kept[0].Binlog.File, kept[1].Binlog.File = b2, a2
+	got := map[string]bool{}
+	for _, k := range expiredBinlogs(objs, kept, kept[0]) {
+		got[k] = true
+	}
+	for _, f := range []binlogFile{a2, b2, b3, a3} {
+		if got[chunkKey(f, 0, 100)] {
+			t.Errorf("%s removed, a kept backup needs it", f.dir())
+		}
+	}
+	for _, f := range []binlogFile{b1, legacy} {
+		if !got[chunkKey(f, 0, 100)] {
+			t.Errorf("%s kept, no backup needs it", f.dir())
+		}
 	}
 }

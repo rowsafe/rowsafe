@@ -285,8 +285,8 @@ func (s *server) backup(ctx context.Context, typ string, log agent.TaskLogger) (
 		return nil, err
 	}
 	if m.Binlog.File.Name != "" {
-		if created, err := readBinlogCreated(filepath.Join(filepath.Dir(f.LogBinBasename), m.Binlog.File.Name)); err == nil {
-			m.Binlog.File.Created = created
+		if id, err := readBinlogFile(filepath.Join(filepath.Dir(f.LogBinBasename), m.Binlog.File.Name)); err == nil {
+			m.Binlog.File = id
 		}
 	}
 	if err := st.putJSON(ctx, backupKey(label, manifestObject), m); err != nil {
@@ -463,13 +463,15 @@ func (s *server) expire(ctx context.Context, st *objStore, all []manifest, log a
 		}
 	}
 	// Binary logs created before the file the oldest kept backup starts
-	// from are no longer needed.
+	// from are no longer needed (expiredBinlogs).
 	if oldest != nil && oldest.Binlog.File.Created > 0 {
-		for _, o := range objs {
-			if f, _, _, ok := parseChunkKey(o.Key); ok && f.Created < oldest.Binlog.File.Created {
-				keys = append(keys, o.Key)
+		var kept []manifest
+		for _, m := range all {
+			if keep[fullOf(m.Label)] {
+				kept = append(kept, m)
 			}
 		}
+		keys = append(keys, expiredBinlogs(objs, kept, *oldest)...)
 		// Marks older than the oldest backup can't be restored any more.
 		marks, _ := s.listMarks(ctx, st)
 		for _, mk := range marks {
@@ -485,6 +487,41 @@ func (s *server) expire(ctx context.Context, st *objStore, all []manifest, log a
 		log.Printf("retention (%d full backups): removed %s", keepFull, strings.Join(drop, ", "))
 	}
 	return s.removeOrphans(ctx, st, all)
+}
+
+// expiredBinlogs are the binary log objects no kept backup needs: a
+// server's files created before the file its oldest kept backup starts from.
+// The two servers of a standby pair both hold the database in turn: a file
+// of the server that holds it now may be older than the other server's
+// backups and still be its current one. Files of a server no kept backup
+// started from, and files from older agents (no server), go when they are
+// older than the oldest kept backup's file.
+func expiredBinlogs(objs []objInfo, kept []manifest, oldest manifest) []string {
+	first := map[string]int64{} // server -> its oldest kept backup's file
+	for _, m := range kept {
+		f := m.Binlog.File
+		if f.Server == "" || f.Created == 0 {
+			continue
+		}
+		if c, ok := first[f.Server]; !ok || f.Created < c {
+			first[f.Server] = f.Created
+		}
+	}
+	var keys []string
+	for _, o := range objs {
+		f, _, _, ok := parseChunkKey(o.Key)
+		if !ok {
+			continue
+		}
+		before := oldest.Binlog.File.Created
+		if c, ok := first[f.Server]; ok && f.Server != "" {
+			before = c
+		}
+		if f.Created < before {
+			keys = append(keys, o.Key)
+		}
+	}
+	return keys
 }
 
 // removeOrphans deletes backup folders without a manifest (failed or

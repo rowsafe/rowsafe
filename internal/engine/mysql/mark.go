@@ -55,8 +55,8 @@ func (s *server) mark(ctx context.Context, p protocol.RestorePointParams, log ag
 	if err := db.QueryRowContext(ctx, "SELECT IFNULL(@@log_bin_basename, '')").Scan(&basename); err != nil {
 		return nil, err
 	}
-	if created, err := readBinlogCreated(filepath.Join(filepath.Dir(basename), pos.File.Name)); err == nil {
-		pos.File.Created = created
+	if id, err := readBinlogFile(filepath.Join(filepath.Dir(basename), pos.File.Name)); err == nil {
+		pos.File = id
 	} else {
 		return nil, fmt.Errorf("reading the binary log %s: %w", pos.File.Name, err)
 	}
