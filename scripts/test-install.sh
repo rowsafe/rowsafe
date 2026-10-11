@@ -4685,7 +4685,18 @@ cloud_container() {
   # shared_buffers a quarter of the memory this container sees (rounded down
   # to 16 MB, from 2 GB to 256 MB), not PostgreSQL's 128 MB.
   grep -q "PostgreSQL tuned for this server (Rowsafe's recommended settings): .*shared_buffers = " "$W/out" || fail "$name: PostgreSQL wasn't tuned for this server"
-  grep -q "pg_stat_statements loads when PostgreSQL starts; the new settings are in effect (PostgreSQL restarted)" "$W/out" || fail "$name: not one restart for both"
+  # One restart for everything the new PostgreSQL needs (its libraries, the
+  # extensions' packages installed before, the new settings, the network),
+  # and the one backups need: PostgreSQL's log has the package's first start
+  # and those two, nothing more.
+  case ",$pgx," in
+    *,timescaledb,*) libs="pg_stat_statements and TimescaleDB load" ;;
+    *) libs="pg_stat_statements loads" ;;
+  esac
+  grep -q "$libs when PostgreSQL starts; the new settings are in effect; it listens on the network (PostgreSQL restarted)" "$W/out" || fail "$name: not one restart for all"
+  [ "$(grep -c "(PostgreSQL restarted)" "$W/out")" = 1 ] || fail "$name: the new PostgreSQL restarted $(grep -c "(PostgreSQL restarted)" "$W/out") times for its settings"
+  starts=$(grep -c "database system is ready to accept connections" "/var/log/postgresql/postgresql-$pgv-main.log")
+  [ "$starts" = 3 ] || fail "$name: PostgreSQL started $starts times in the first run, not 3 (the package's, the one restart, the one for backups)"
   called "postgres tune --port 5432 (postgres)"
   [ ! -e /etc/rowsafe/tune-postgresql ] || fail "$name: tuning still pending"
   ram=$(awk '$1 == "MemTotal:" { printf "%.0f\n", $2 * 1024 }' /proc/meminfo) # (mawk's %d stops at 2 GB)

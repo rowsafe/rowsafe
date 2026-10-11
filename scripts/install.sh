@@ -335,6 +335,9 @@ INSTALL_DB=''      # --install-mysql / -mariadb / -valkey / -clickhouse / -qdran
 INSTALL_DB_VERSION='' # its version (8.4; 11.4 or 11.8; 8; 26.3 or 26.8; 1.19; 1.54)
 LISTEN_PUBLIC=0    # --listen-public
 PG_OURS=0          # the PostgreSQL here is the one --install-postgres installed
+PG_RESTART_WHY=''  # what waits for its one restart (pg_new_start), "; "-separated
+PG_PRELOAD_ADDED='' # the libraries pg_preload_add added
+PG_EXT_INSTALLED='' # the --pg-extensions packages this run installed
 DB_OURS=0          # the INSTALL_DB server here is the one this installer installed
 DB_STARTED=0       # this run started it (its settings were in place before)
 DB_FRESH=0         # this run installed it (nothing runs on it yet)
@@ -1502,19 +1505,33 @@ pg_sql_in() {
   (cd / && runuser -u postgres -- psql -X -A -t -q -v ON_ERROR_STOP=1 -p "$1" -d "$2" -c "$3") </dev/null
 }
 
-# pg_preload_add PORT LIBRARY adds LIBRARY to shared_preload_libraries (the
-# others kept); false when it is there already. It loads at the next restart.
+# pg_preload_add PORT LIBRARY... adds the LIBRARYs that aren't loaded yet
+# to shared_preload_libraries and sets PG_PRELOAD_ADDED to them; false when
+# all are loaded already. The others are kept: those PostgreSQL runs with and
+# those its files give the next start (an earlier ALTER SYSTEM, the tuning).
+# They load at the next restart. Only libraries whose package is installed:
+# PostgreSQL doesn't start with a missing one.
 pg_preload_add() {
-  _cur=$(pg_sql "$1" "SELECT setting FROM pg_settings WHERE name = 'shared_preload_libraries'") ||
+  _pp=$1
+  shift
+  _cur=$(pg_sql "$_pp" "SELECT setting FROM pg_settings WHERE name = 'shared_preload_libraries'") ||
     die "could not read PostgreSQL's settings"
-  printf '%s\n' "$_cur" | tr ',' '\n' | tr -d ' "' | grep -qx "$2" && return 1
-  _lits=''
-  for _l in $(printf '%s' "$_cur" | tr ',' ' ' | tr -d '"'); do
-    printf '%s\n' "$_l" | grep -Eq '^[A-Za-z0-9_.$/-]+$' || die "unexpected library in shared_preload_libraries: $_l"
-    _lits="$_lits'$_l', "
+  _next=$(pg_sql "$_pp" "SELECT setting FROM pg_file_settings WHERE name = 'shared_preload_libraries' AND error IS NULL ORDER BY seqno DESC LIMIT 1") ||
+    die "could not read PostgreSQL's settings files"
+  PG_PRELOAD_ADDED=''
+  for _l in "$@"; do
+    printf '%s\n' "$_cur" | tr ',' '\n' | tr -d ' "' | grep -qx "$_l" || PG_PRELOAD_ADDED="$PG_PRELOAD_ADDED $_l"
   done
-  pg_sql "$1" "ALTER SYSTEM SET shared_preload_libraries = ${_lits}'$2'" >/dev/null ||
-    die "could not add $2 to shared_preload_libraries"
+  [ -n "$PG_PRELOAD_ADDED" ] || return 1
+  _lits='' _seen=' '
+  for _l in $(printf '%s,%s' "$_cur" "$_next" | tr ',' ' ' | tr -d '"') $PG_PRELOAD_ADDED; do
+    printf '%s\n' "$_l" | grep -Eq '^[A-Za-z0-9_.$/-]+$' || die "unexpected library in shared_preload_libraries: $_l"
+    case $_seen in *" $_l "*) continue ;; esac
+    _seen="$_seen$_l "
+    _lits="$_lits${_lits:+, }'$_l'"
+  done
+  pg_sql "$_pp" "ALTER SYSTEM SET shared_preload_libraries = $_lits" >/dev/null ||
+    die "could not add$PG_PRELOAD_ADDED to shared_preload_libraries"
 }
 
 # pg_tune_new PORT gives the PostgreSQL --install-postgres installed
@@ -1554,63 +1571,84 @@ pg_tune_new() {
   grep -qx 'restart yes' "$TMP/tune.out"
 }
 
-# pg_stat_statements_setup turns on query statistics in the PostgreSQL
-# --install-postgres installed, so Pulse shows slow queries from the first
-# day: pg_stat_statements loaded at start and created in the postgres
-# database, where Rowsafe reads it. The new, empty PostgreSQL restarts once,
-# for it and for Rowsafe's recommended settings (pg_tune_new). A re-run
-# changes nothing.
-pg_stat_statements_setup() {
+# pg_restart_why REASON adds REASON to what waits for the new PostgreSQL's
+# one restart (pg_new_start).
+pg_restart_why() { PG_RESTART_WHY="${PG_RESTART_WHY:+$PG_RESTART_WHY; }$1"; }
+
+# pg_new_prepare readies the PostgreSQL --install-postgres installed for its
+# one restart, while it is new and empty: the --pg-extensions packages first
+# (a library loaded at start must be there, or PostgreSQL doesn't start),
+# then what loads at start (pg_stat_statements, so Pulse shows slow queries
+# from the first day, and TimescaleDB) and Rowsafe's recommended settings
+# (pg_tune_new). PG_RESTART_WHY says what waits; pg_new_start restarts once
+# for all of it (and for --listen-public's settings). A re-run changes
+# nothing.
+pg_new_prepare() {
   _m=$INSTALL_PG
   _port=$(pg_lsclusters -h 2>/dev/null | awk -v m="$_m" '$1 == m && $2 == "main" { print $3; exit }')
   [ -n "$_port" ] || die "PostgreSQL $_m's main cluster isn't there"
-  _why=''
-  ! pg_preload_add "$_port" pg_stat_statements || _why='pg_stat_statements loads when PostgreSQL starts'
-  ! pg_tune_new "$_port" || _why="${_why:+$_why; }the new settings are in effect"
-  if [ -n "$_why" ]; then
+  _names=$(printf '%s' "$PG_EXTENSIONS" | tr ',' ' ')
+  PG_EXT_INSTALLED=''
+  for _e in $_names; do
+    _p=$(pg_ext_package "$_e" "$_m")
+    [ "$(dpkg-query -W -f '${db:Status-Status}' "$_p" 2>/dev/null)" = installed ] || PG_EXT_INSTALLED="$PG_EXT_INSTALLED $_p"
+  done
+  if [ -n "$PG_EXT_INSTALLED" ]; then
+    step "Installing PostgreSQL extensions from the PostgreSQL project's repository:$PG_EXT_INSTALLED"
+    for _p in $PG_EXT_INSTALLED; do
+      [ -n "$(apt_candidate "$_p")" ] ||
+        die "$_p isn't available for PostgreSQL $_m on $OS_NAME ($ARCH); not installing the extensions. Choose another PostgreSQL version or leave it out."
+    done
+    # shellcheck disable=SC2086 # package names from pg_ext_package
+    apt_install $PG_EXT_INSTALLED
+  fi
+  # The tuning first: it sets shared_preload_libraries from what runs now.
+  _tuned=0
+  ! pg_tune_new "$_port" || _tuned=1
+  _libs=pg_stat_statements
+  case " $_names " in
+    *" timescaledb "*)
+      [ -e "/usr/lib/postgresql/$_m/lib/timescaledb.so" ] ||
+        die "TimescaleDB's library for PostgreSQL $_m isn't there (postgresql-$_m-timescaledb); not loading it at start"
+      _libs="$_libs timescaledb"
+      ;;
+  esac
+  # shellcheck disable=SC2086 # one library per word
+  if pg_preload_add "$_port" $_libs; then
+    # "pg_stat_statements loads", "pg_stat_statements and TimescaleDB load"
+    pg_restart_why "$(printf '%s\n' $PG_PRELOAD_ADDED | sed 's/^timescaledb$/TimescaleDB/' |
+      awk '{ a[NR] = $0 } END { for (i = 1; i <= NR; i++) printf "%s%s", (i == 1 ? "" : (i == NR ? " and " : ", ")), a[i]; printf "%s", (NR > 1 ? " load" : " loads") }') when PostgreSQL starts"
+  fi
+  [ "$_tuned" = 0 ] || pg_restart_why "the new settings are in effect"
+}
+
+# pg_new_start restarts the PostgreSQL --install-postgres installed once, for
+# all that waits (PG_RESTART_WHY: pg_new_prepare, --listen-public), then
+# turns on query statistics (pg_stat_statements in the postgres database,
+# where Rowsafe reads it) and --pg-extensions (TimescaleDB's telemetry off
+# first) in the postgres database and in template1, so databases created
+# later have them too. A re-run changes nothing and restarts nothing.
+pg_new_start() {
+  _m=$INSTALL_PG
+  _port=$(pg_lsclusters -h 2>/dev/null | awk -v m="$_m" '$1 == m && $2 == "main" { print $3; exit }')
+  [ -n "$_port" ] || die "PostgreSQL $_m's main cluster isn't there"
+  if [ -n "$PG_RESTART_WHY" ]; then
     pg_restart_cluster "$_m" main || die "PostgreSQL $_m doesn't start with its new settings (see above)"
-    ok "$_why (PostgreSQL restarted)"
+    ok "$PG_RESTART_WHY (PostgreSQL restarted)"
+    PG_RESTART_WHY=''
   fi
   if [ "$(pg_sql "$_port" "SELECT count(*) FROM pg_extension WHERE extname = 'pg_stat_statements'")" = 0 ]; then
     pg_sql "$_port" "SET search_path = pg_catalog, public; CREATE EXTENSION IF NOT EXISTS pg_stat_statements SCHEMA public" >/dev/null ||
       die "turning on pg_stat_statements failed"
     ok "query statistics are on (pg_stat_statements)"
   fi
-}
-
-# pg_extensions_setup is --pg-extensions on the PostgreSQL --install-postgres
-# installed: the packages, TimescaleDB loaded at start (its telemetry off;
-# the new PostgreSQL restarted once for it) and each extension turned on in
-# the postgres database and in template1, so databases created later have
-# them too. A re-run changes nothing.
-pg_extensions_setup() {
   [ -n "$PG_EXTENSIONS" ] || return 0
-  _m=$INSTALL_PG
-  _port=$(pg_lsclusters -h 2>/dev/null | awk -v m="$_m" '$1 == m && $2 == "main" { print $3; exit }')
-  [ -n "$_port" ] || die "--pg-extensions: PostgreSQL $_m's main cluster isn't there"
   _names=$(printf '%s' "$PG_EXTENSIONS" | tr ',' ' ')
-  _want=''
-  for _e in $_names; do
-    _p=$(pg_ext_package "$_e" "$_m")
-    [ "$(dpkg-query -W -f '${db:Status-Status}' "$_p" 2>/dev/null)" = installed ] || _want="$_want $_p"
-  done
-  if [ -n "$_want" ]; then
-    step "Installing PostgreSQL extensions from the PostgreSQL project's repository:$_want"
-    for _p in $_want; do
-      [ -n "$(apt_candidate "$_p")" ] ||
-        die "$_p isn't available for PostgreSQL $_m on $OS_NAME ($ARCH); not installing the extensions. Choose another PostgreSQL version or leave it out."
-    done
-    # shellcheck disable=SC2086 # package names from pg_ext_package
-    apt_install $_want
-  fi
   _changed=0
+  [ -z "$PG_EXT_INSTALLED" ] || _changed=1
   case " $_names " in
     *" timescaledb "*)
-      if pg_preload_add "$_port" timescaledb; then
-        pg_restart_cluster "$_m" main || die "PostgreSQL $_m doesn't start with TimescaleDB loaded (see above)"
-        ok "TimescaleDB loads when PostgreSQL starts (PostgreSQL restarted)"
-        _changed=1
-      fi
+      case " $PG_PRELOAD_ADDED " in *" timescaledb "*) _changed=1 ;; esac
       if [ "$(pg_sql "$_port" "SELECT current_setting('timescaledb.telemetry_level', true)")" != off ]; then
         pg_sql "$_port" "ALTER SYSTEM SET timescaledb.telemetry_level = 'off'" >/dev/null &&
           pg_sql "$_port" "SELECT pg_reload_conf()" >/dev/null || die "could not turn TimescaleDB's telemetry off"
@@ -1631,7 +1669,7 @@ pg_extensions_setup() {
       _changed=1
     done
   done
-  if [ "$_changed" = 1 ] || [ -n "$_want" ]; then
+  if [ "$_changed" = 1 ]; then
     ok "extensions on in the postgres database and every new one: $(printf '%s' "$PG_EXTENSIONS" | sed 's/,/, /g')"
   else
     ok "extensions $(printf '%s' "$PG_EXTENSIONS" | sed 's/,/, /g'): nothing to change"
@@ -1670,7 +1708,7 @@ install_postgres() {
   fi
   PG_OURS=1
   pg_ensure_cluster "$_v" main
-  pg_stat_statements_setup
+  pg_new_prepare
 }
 
 # pg_cluster_status MAJOR NAME prints the cluster's status (online, down...),
@@ -1813,8 +1851,9 @@ listen_public() {
   _pending=$(pg_sql "$LP_PORT" "SELECT count(*) FROM pg_settings WHERE pending_restart") || _pending=0
   if [ "$_pending" != 0 ]; then
     if [ "$PG_OURS" = 1 ]; then
-      note "restarting the new PostgreSQL so it listens on the network"
-      pg_restart_cluster "$LP_MAJOR" "$LP_NAME" || die "restarting PostgreSQL $LP_MAJOR ($LP_NAME) failed (see above)"
+      # The new PostgreSQL: with the rest that waits for its one restart
+      # (pg_new_start, right after).
+      pg_restart_why "it listens on the network"
     elif [ "$TTY" = 1 ] && {
       tty_say "PostgreSQL needs a quick restart to listen on the network. Open connections are dropped."
       confirm "Restart PostgreSQL now?" n
@@ -14920,12 +14959,14 @@ install_agent() {
     agent_release
     install_postgres
   fi
-  [ -z "$INSTALL_PG" ] || pg_extensions_setup
   [ -z "$INSTALL_DB" ] || install_database
   if [ -z "$INSTALL_DB" ]; then
     [ "$FIREWALL_SSH" != yes ] || firewall_close_early
     [ "$LISTEN_PUBLIC" = 0 ] || listen_public
   fi
+  # The new PostgreSQL's one restart, for everything above, then the
+  # extensions that need it.
+  [ -z "$INSTALL_PG" ] || pg_new_start
   detect_host_engine # mysql
   detect_mongodb_host # mongodb
   detect_clickhouse_host # clickhouse
