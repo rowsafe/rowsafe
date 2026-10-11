@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -283,5 +284,26 @@ func TestAlterSystemQuoting(t *testing.T) {
 		if _, err := alterSystem("archive_command", bad); err == nil {
 			t.Errorf("value %q should be refused", bad)
 		}
+	}
+}
+
+// A drill directory a stopping restore still writes into is removed once
+// the writes stop, not left on the server's disk.
+func TestRemoveAllSettled(t *testing.T) {
+	dir := t.TempDir()
+	calls := 0
+	drillRemoveAll = func(p string) error {
+		calls++
+		if calls < 3 {
+			return &os.PathError{Op: "unlinkat", Path: p, Err: syscall.ENOTEMPTY}
+		}
+		return os.RemoveAll(p)
+	}
+	defer func() { drillRemoveAll = os.RemoveAll }()
+	if err := removeAllSettled(dir); err != nil || calls != 3 {
+		t.Fatalf("calls %d, %v", calls, err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("still there: %v", err)
 	}
 }

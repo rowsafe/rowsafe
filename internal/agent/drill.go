@@ -491,7 +491,25 @@ func (a *Agent) removeDrill(dir, pgCtl string) error {
 	if err := a.stopScratch(filepath.Join(dir, "data"), pgCtl); err != nil {
 		return err
 	}
-	return os.RemoveAll(dir)
+	return removeAllSettled(dir)
+}
+
+// drillRemoveAll is os.RemoveAll (a variable for tests).
+var drillRemoveAll = os.RemoveAll
+
+// removeAllSettled removes dir, trying again for a few seconds while a
+// process that is going away still writes into it: a restore stopped with
+// the agent (SIGTERM) can add files for a moment, and RemoveAll then fails
+// with "directory not empty", leaving the copy on the server's disk.
+func removeAllSettled(dir string) error {
+	var err error
+	for i := 0; i < 20; i++ {
+		if err = drillRemoveAll(dir); err == nil {
+			return nil
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return err
 }
 
 // stopScratch stops the scratch postmaster serving dataDir, if any.
