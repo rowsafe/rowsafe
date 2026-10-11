@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -45,6 +46,14 @@ func (e *Engine) takeSnapshot(ctx context.Context, env agent.EngineEnv, db proto
 		return doc, fmt.Errorf("Rowsafe can't read Meilisearch's snapshot folder %s (%v): run the Rowsafe installer on the server again, "+
 			"it gives Rowsafe's user read access to it", s.SnapshotDir, err)
 	}
+	// Nothing changed since the newest snapshot: record it again.
+	keys := keysMark(ctx, c, s)
+	if docs, _, err := r.listBackups(ctx); err == nil && len(docs) > 0 {
+		prev := docs[len(docs)-1]
+		if prev.Version == doc.Version && unchangedSince(ctx, c, prev.Changes, keys) {
+			return e.recordUnchanged(ctx, r, doc, prev, tl)
+		}
+	}
 	before, _ := os.Stat(s.snapshotFile())
 
 	tl.Printf("asking Meilisearch for a snapshot (it runs after the tasks already waiting; searches go on)")
@@ -59,6 +68,9 @@ func (e *Engine) takeSnapshot(ctx context.Context, env agent.EngineEnv, db proto
 	doc.TakenAt = doc.StartedAt
 	if t.StartedAt != nil {
 		doc.TakenAt = t.StartedAt.UTC()
+	}
+	if t.EnqueuedAt != nil {
+		doc.Changes = &changeMark{TaskUID: t.id(), TaskEnqueuedAt: enqueuedText(t.EnqueuedAt), Keys: keys}
 	}
 	in, err := inspect(ctx, c)
 	if err != nil {
@@ -107,6 +119,25 @@ func (e *Engine) takeSnapshot(ctx context.Context, env agent.EngineEnv, db proto
 	return doc, nil
 }
 
+// recordUnchanged records that snapshot prev still holds everything: a
+// new backup (a moment Rewind can pick) whose data is prev's.
+func (e *Engine) recordUnchanged(ctx context.Context, r *repo, doc, prev backupDoc, tl agent.TaskLogger) (backupDoc, error) {
+	doc.TakenAt = time.Now().UTC()
+	var err error
+	if doc.Label, err = r.freshLabel(ctx, doc.TakenAt); err != nil {
+		return doc, err
+	}
+	doc.Data, doc.Changes = prev.dataLabel(), prev.Changes
+	doc.SnapshotBytes, doc.DatabaseBytes, doc.Indexes = prev.SnapshotBytes, prev.DatabaseBytes, prev.Indexes
+	doc.StoppedAt = time.Now().UTC()
+	if err := r.putJSON(ctx, backupKey(doc.Label, backupDocName), doc); err != nil {
+		_ = r.deleteBackup(context.WithoutCancel(ctx), doc.Label)
+		return doc, fmt.Errorf("saving the backup's description: %w", err)
+	}
+	tl.Printf("nothing changed since snapshot %s: recorded that it still holds everything, without a new snapshot", doc.Data)
+	return doc, nil
+}
+
 func (e *Engine) backup(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec, p protocol.BackupParams, tl agent.TaskLogger) (*protocol.BackupResult, error) {
 	if p.Type != "" && p.Type != protocol.BackupFull {
 		tl.Printf("Meilisearch backups are always whole snapshots; taking one instead of a %s backup", p.Type)
@@ -119,8 +150,13 @@ func (e *Engine) backup(ctx context.Context, env agent.EngineEnv, db protocol.Da
 	if err != nil {
 		return nil, err
 	}
-	tl.Printf("backup %s complete: %s in %s, %s stored (encrypted on this server)", doc.Label,
-		plural(int64(len(doc.Indexes)), "index", "indexes"), humanBytes(doc.DatabaseBytes), humanBytes(doc.StoredBytes))
+	if doc.Data == "" {
+		tl.Printf("backup %s complete: %s in %s, %s stored (encrypted on this server)", doc.Label,
+			plural(int64(len(doc.Indexes)), "index", "indexes"), humanBytes(doc.DatabaseBytes), humanBytes(doc.StoredBytes))
+	} else {
+		tl.Printf("backup %s complete: %s in %s, as in snapshot %s", doc.Label,
+			plural(int64(len(doc.Indexes)), "index", "indexes"), humanBytes(doc.DatabaseBytes), doc.Data)
+	}
 	if err := retention(ctx, r, db, doc.Label, time.Now(), tl); err != nil {
 		tl.Printf("note: removing old backups failed (%v); it is tried again after the next backup", err)
 	}
@@ -133,10 +169,16 @@ func backupResult(d backupDoc) *protocol.BackupResult {
 }
 
 // Retention: RetentionFull is how many days of snapshots are kept. Every
-// snapshot of the last 48 hours stays; older ones, the newest of each day
-// (UTC) and those Marks point at; nothing older than the window, except
-// the newest snapshot, which always stays.
-const keepAllFor = 48 * time.Hour
+// snapshot of the last keepAllFor stays, then the newest of each hour up
+// to keepHourlyFor, then the newest of each day (UTC) and those Marks
+// point at; nothing older than the window, except the newest snapshot,
+// which always stays. With a snapshot every 15 minutes that is at most
+// about 70 of them, and fewer when nothing changed in between (such a
+// backup records the snapshot before it, and only that one is stored).
+const (
+	keepAllFor    = 6 * time.Hour
+	keepHourlyFor = 48 * time.Hour
+)
 
 func retention(ctx context.Context, r *repo, db protocol.DatabaseSpec, current string, now time.Time, tl agent.TaskLogger) error {
 	docs, unfinished, err := r.listBackups(ctx)
@@ -159,6 +201,7 @@ func retention(ctx context.Context, r *repo, db protocol.DatabaseSpec, current s
 	}
 	drop := retainDrop(docs, marked, max(db.RetentionFull, 1), now)
 	for _, l := range drop {
+		docCache.Delete(r.st.Location() + "\x00" + backupKey(l, backupDocName))
 		if err := r.deleteBackup(ctx, l); err != nil {
 			return err
 		}
@@ -175,15 +218,33 @@ func retention(ctx context.Context, r *repo, db protocol.DatabaseSpec, current s
 	return nil
 }
 
-// retainDrop picks the labels to delete (docs oldest first).
+// retainDrop picks the labels to delete (docs oldest first). A snapshot
+// whose data a kept backup records again (nothing changed since) stays
+// with it.
 func retainDrop(docs []backupDoc, marked map[string][]string, days int, now time.Time) []string {
+	drop := retainByAge(docs, marked, days, now)
+	gone := map[string]bool{}
+	for _, l := range drop {
+		gone[l] = true
+	}
+	needed := map[string]bool{}
+	for _, d := range docs {
+		if !gone[d.Label] {
+			needed[d.dataLabel()] = true
+		}
+	}
+	return slices.DeleteFunc(drop, func(l string) bool { return needed[l] })
+}
+
+func retainByAge(docs []backupDoc, marked map[string][]string, days int, now time.Time) []string {
 	if len(docs) <= 1 {
 		return nil
 	}
 	window := time.Duration(days) * 24 * time.Hour
-	newestOfDay := map[string]string{}
-	for _, d := range docs {
-		newestOfDay[d.TakenAt.UTC().Format("2006-01-02")] = d.Label // oldest first: the last one wins
+	newestOfDay, newestOfHour := map[string]string{}, map[string]string{}
+	for _, d := range docs { // oldest first: the last one wins
+		newestOfDay[d.TakenAt.UTC().Format("2006-01-02")] = d.Label
+		newestOfHour[d.TakenAt.UTC().Format("2006-01-02T15")] = d.Label
 	}
 	var drop []string
 	for _, d := range docs[:len(docs)-1] { // the newest always stays
@@ -193,6 +254,7 @@ func retainDrop(docs []backupDoc, marked map[string][]string, days int, now time
 		case age > window:
 			drop = append(drop, d.Label)
 		case len(marked[d.Label]) > 0, newestOfDay[d.TakenAt.UTC().Format("2006-01-02")] == d.Label:
+		case age <= keepHourlyFor && newestOfHour[d.TakenAt.UTC().Format("2006-01-02T15")] == d.Label:
 		default:
 			drop = append(drop, d.Label)
 		}

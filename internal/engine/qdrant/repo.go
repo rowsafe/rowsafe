@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rowsafe/rowsafe/internal/agent"
@@ -21,8 +22,13 @@ import (
 // server (objstore.Seal) before it is uploaded:
 //
 //	rowsafe-qdrant.json                     what this folder is (sealed)
-//	backup/<label>/storage.snapshot         Qdrant's full storage snapshot (sealed)
-//	backup/<label>/backup.json              its description, written last (sealed)
+//	backup/<label>/backup.json              a backup's description, written last (sealed):
+//	                                        its collections and where each one's snapshot is
+//	data/<label>-<n>.snapshot               one collection's snapshot, taken by backup <label>
+//	                                        (sealed); later backups of an unchanged collection
+//	                                        name it again instead of taking another
+//	backup/<label>/storage.snapshot         Qdrant's full storage snapshot (sealed): backups
+//	                                        made before Rowsafe took one snapshot per collection
 //	marks/<name>.json                       a Mark: the label of its backup (sealed)
 //	kept/<rewind id>/storage.snapshot, backup.json
 //	                                        the data from before a rewind in place (Undo);
@@ -33,6 +39,7 @@ import (
 const (
 	markerKey     = "rowsafe-qdrant.json"
 	backupPrefix  = "backup/"
+	dataPrefix    = "data/"
 	marksPrefix   = "marks/"
 	keptPrefix    = "kept/"
 	snapshotName  = "storage.snapshot"
@@ -170,6 +177,15 @@ type collDoc struct {
 	Vectors  []string `json:"vectors,omitempty"` // dense vector names ("" for the unnamed one)
 	Sparse   []string `json:"sparse,omitempty"`
 	Snapshot string   `json:"snapshot,omitempty"` // its file inside the full snapshot
+	// One snapshot per collection (backupDoc.Format formatCollections):
+	// Object is its key in the bucket (data/...), Bytes and Checksum its
+	// size and SHA-256 (plain), Change the collection's state it holds
+	// (changes.go) and TakenAt when Qdrant took it.
+	Object   string    `json:"object,omitempty"`
+	Bytes    int64     `json:"bytes,omitempty"`
+	Checksum string    `json:"checksum,omitempty"`
+	Change   string    `json:"change,omitempty"`
+	TakenAt  time.Time `json:"taken_at,omitzero"`
 }
 
 // backupDoc describes one snapshot.
@@ -191,7 +207,13 @@ type backupDoc struct {
 	Collections   []collDoc         `json:"collections"`
 	Aliases       map[string]string `json:"aliases,omitempty"`
 	DataBytes     int64             `json:"data_bytes,omitempty"`
+	// Format is formatCollections when each collection has its own
+	// snapshot under data/ (0: one full storage snapshot in the folder).
+	Format int `json:"format,omitempty"`
 }
+
+// formatCollections: a backup made of one snapshot per collection.
+const formatCollections = 2
 
 // totalPoints counts the people's points (Rowsafe's own collection and
 // collections whose count isn't known left out).
@@ -239,6 +261,21 @@ func (r *repo) freshLabel(ctx context.Context, t time.Time) (string, error) {
 	return "", errors.New("too many snapshots in the same moment")
 }
 
+// docCache holds the backup descriptions already read, by their place in
+// the bucket (a description changes only when a Mark names its backup,
+// which writes it through putDoc): backups every few minutes don't read
+// them all each time.
+var docCache sync.Map // location + key -> backupDoc
+
+func (r *repo) docCacheKey(key string) string { return r.st.Location() + "\x00" + key }
+
+// putDoc writes a backup's description.
+func (r *repo) putDoc(ctx context.Context, d backupDoc) error {
+	key := backupKey(d.Label, backupDocName)
+	docCache.Delete(r.docCacheKey(key))
+	return r.putJSON(ctx, key, d)
+}
+
 // listBackups returns the finished snapshots (with backup.json), oldest
 // first, and the labels of unfinished uploads.
 func (r *repo) listBackups(ctx context.Context) ([]backupDoc, []string, error) {
@@ -267,10 +304,16 @@ func (r *repo) listBackups(ctx context.Context) ([]backupDoc, []string, error) {
 			unfinished = append(unfinished, l)
 			continue
 		}
+		ck := r.docCacheKey(backupKey(l, backupDocName))
+		if d, ok := docCache.Load(ck); ok {
+			docs = append(docs, d.(backupDoc))
+			continue
+		}
 		var d backupDoc
 		if err := r.getJSON(ctx, backupKey(l, backupDocName), &d); err != nil {
 			return nil, nil, fmt.Errorf("reading backup %s: %w", l, err)
 		}
+		docCache.Store(ck, d)
 		docs = append(docs, d)
 	}
 	slices.SortFunc(docs, func(a, b backupDoc) int { return strings.Compare(a.Label, b.Label) })
@@ -280,6 +323,7 @@ func (r *repo) listBackups(ctx context.Context) ([]backupDoc, []string, error) {
 // deletePrefix removes every object under prefix, the description first so
 // a partly deleted snapshot is never taken for a finished one.
 func (r *repo) deletePrefix(ctx context.Context, prefix string) error {
+	docCache.Delete(r.docCacheKey(prefix + backupDocName))
 	if err := r.st.Delete(ctx, prefix+backupDocName); err != nil && !errors.Is(err, objstore.ErrNotFound) {
 		return err
 	}

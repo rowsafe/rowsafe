@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/rowsafe/rowsafe/internal/agent"
@@ -57,8 +58,8 @@ func (e *Engine) adopt(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 	res := &protocol.AdoptResult{Inspect: in.inspectResult(db.Port, configPath())}
 	res.Plan = []protocol.Change{
 		{Kind: "command", Description: "Prepare your bucket for this database (a folder with its own encrypted backups)"},
-		{Kind: "command", Description: "Take Qdrant's own full snapshot (every collection and alias) on the schedule you choose, encrypt it on this server " +
-			"and copy it to your bucket, then delete it from the server's disk"},
+		{Kind: "command", Description: "Every 15 minutes by default, take Qdrant's own snapshot of each collection that changed since the last one (one at a time), " +
+			"encrypt it on this server and copy it to your bucket, then delete it from the server's disk; a quiet server costs nothing"},
 		{Kind: "command", Description: "Restores go back to a snapshot (or a Mark, a snapshot taken when you ask), not to any second: Qdrant keeps no log of its changes Rowsafe could replay"},
 	}
 	res.Warnings = in.warnings(l, c.base.Scheme == "https")
@@ -149,7 +150,9 @@ func (e *Engine) mark(ctx context.Context, env agent.EngineEnv, db protocol.Data
 }
 
 // StoredObjects lists the database's objects in env's storage: backups
-// under backupPrefix (one folder per label); no continuous archive.
+// under backupPrefix (one folder per label; a collection's snapshot under
+// data/ counts in the folder of the backup that took it); no continuous
+// archive.
 func (e *Engine) StoredObjects(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec) ([]agent.StoredObject, string, string, error) {
 	r, err := openRepo(env, db)
 	if err != nil {
@@ -158,7 +161,12 @@ func (e *Engine) StoredObjects(ctx context.Context, env agent.EngineEnv, db prot
 	objs, err := r.st.List(ctx, "")
 	out := make([]agent.StoredObject, 0, len(objs))
 	for _, o := range objs {
-		out = append(out, agent.StoredObject{Key: o.Key, Size: o.Size, LastModified: o.LastModified})
+		key := o.Key
+		// data/20261011-140000F-0003.snapshot -> backup/20261011-140000F/0003.snapshot
+		if rest, ok := strings.CutPrefix(key, dataPrefix); ok && len(rest) > 17 && labelRE.MatchString(rest[:16]) && rest[16] == '-' {
+			key = backupPrefix + rest[:16] + "/" + rest[17:]
+		}
+		out = append(out, agent.StoredObject{Key: key, Size: o.Size, LastModified: o.LastModified})
 	}
 	return out, backupPrefix, "", err
 }

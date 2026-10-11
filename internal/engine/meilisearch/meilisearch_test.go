@@ -44,7 +44,7 @@ func TestRetainDrop(t *testing.T) {
 	for _, d := range docs {
 		age := now.Sub(d.TakenAt)
 		switch {
-		case age <= keepAllFor && !keep[d.Label]:
+		case age <= keepHourlyFor && !keep[d.Label]:
 			t.Errorf("%s (%s old) dropped inside 48 hours", d.Label, age)
 		case age > 7*24*time.Hour && keep[d.Label] && d.Label != docs[len(docs)-1].Label:
 			t.Errorf("%s (%s old) kept past the window", d.Label, age)
@@ -56,7 +56,7 @@ func TestRetainDrop(t *testing.T) {
 	// Past 48 hours: one a day (the newest of each day) plus the Mark's.
 	days := map[string]int{}
 	for _, d := range docs {
-		if keep[d.Label] && now.Sub(d.TakenAt) > keepAllFor {
+		if keep[d.Label] && now.Sub(d.TakenAt) > keepHourlyFor {
 			days[d.TakenAt.Format("2006-01-02")]++
 		}
 	}
@@ -72,6 +72,56 @@ func TestRetainDrop(t *testing.T) {
 	}
 	if got := retainDrop(old[:1], nil, 7, now); got != nil {
 		t.Errorf("one: %v", got)
+	}
+}
+
+func TestRetainDropEvery15Minutes(t *testing.T) {
+	now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+	var docs []backupDoc
+	// A snapshot every 15 minutes for 3 days; nothing changed for the last
+	// 3 days and a half hour before that, so those backups record the
+	// snapshot taken just before (holder).
+	holder := ""
+	for m := 3 * 24 * 4; m >= 0; m-- {
+		at := now.Add(-time.Duration(m) * 15 * time.Minute)
+		d := backupDoc{Label: newLabel(at), TakenAt: at}
+		if age := now.Sub(at); age <= 30*time.Hour && age > 26*time.Hour {
+			if holder == "" {
+				holder = d.Label
+			} else {
+				d.Data = holder
+			}
+		}
+		docs = append(docs, d)
+	}
+	drop := retainDrop(docs, nil, 7, now)
+	keep := map[string]bool{}
+	for _, d := range docs {
+		keep[d.Label] = !slices.Contains(drop, d.Label)
+	}
+	perHour := map[string]int{}
+	for _, d := range docs {
+		age := now.Sub(d.TakenAt)
+		switch {
+		case age <= keepAllFor && !keep[d.Label]:
+			t.Errorf("%s (%s old) dropped inside %s", d.Label, age, keepAllFor)
+		case age > keepAllFor && keep[d.Label] && d.Label != holder:
+			perHour[d.TakenAt.Format("2006-01-02T15")]++
+		}
+		if keep[d.Label] && d.Data != "" && !keep[d.Data] {
+			t.Errorf("%s is kept but the snapshot it records (%s) isn't", d.Label, d.Data)
+		}
+	}
+	for h, n := range perHour {
+		if n != 1 {
+			t.Errorf("hour %s keeps %d", h, n)
+		}
+	}
+	if !keep[holder] {
+		t.Error("the snapshot kept backups record was dropped")
+	}
+	if n := len(docs) - len(drop); n > 24+42+3 {
+		t.Errorf("kept %d", n)
 	}
 }
 

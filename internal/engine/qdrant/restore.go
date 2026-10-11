@@ -101,7 +101,12 @@ func pick(ctx context.Context, r *repo, t restoreTarget) (string, backupDoc, err
 				return backupPrefix + d.Label + "/", d, nil
 			}
 		}
-		return "", backupDoc{}, fmt.Errorf("backup %s isn't in your bucket any more", label)
+		// A Mark's backup, or no moment to go by: nothing else will do. A
+		// backup retention removed otherwise gives way to the newest kept
+		// one at or before the moment.
+		if t.Mark != "" || t.Time.IsZero() {
+			return "", backupDoc{}, fmt.Errorf("backup %s isn't in your bucket any more", label)
+		}
 	}
 	if t.Latest || t.Time.IsZero() {
 		d := docs[len(docs)-1]
@@ -120,13 +125,23 @@ func pick(ctx context.Context, r *repo, t restoreTarget) (string, backupDoc, err
 	return backupPrefix + best.Label + "/", *best, nil
 }
 
+// openStorage reads the full storage snapshot of the backup under prefix
+// (storageReader).
+func openStorage(ctx context.Context, r *repo, prefix string) (io.ReadCloser, error) {
+	var d backupDoc
+	if err := r.getJSON(ctx, prefix+backupDocName, &d); err != nil {
+		return nil, fmt.Errorf("reading the backup's description: %w", err)
+	}
+	return storageReader(ctx, r, prefix, d)
+}
+
 // downloadSnapshot decrypts the snapshot under prefix into path.
 func downloadSnapshot(ctx context.Context, r *repo, prefix, path string) (int64, error) {
-	pr, closer, err := r.getSealed(ctx, prefix+snapshotName)
+	pr, err := openStorage(ctx, r, prefix)
 	if err != nil {
 		return 0, fmt.Errorf("downloading the snapshot: %w", err)
 	}
-	defer closer.Close()
+	defer pr.Close()
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return 0, err

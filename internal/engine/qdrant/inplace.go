@@ -55,11 +55,11 @@ type unpacked struct {
 // writes its collection snapshots into dir.
 func unpackSnapshot(ctx context.Context, r *repo, prefix, dir string) (unpacked, error) {
 	u := unpacked{Dir: dir, Members: map[string]string{}}
-	pr, closer, err := r.getSealed(ctx, prefix+snapshotName)
+	pr, err := openStorage(ctx, r, prefix)
 	if err != nil {
 		return u, fmt.Errorf("downloading the snapshot: %w", err)
 	}
-	defer closer.Close()
+	defer pr.Close()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return u, err
 	}

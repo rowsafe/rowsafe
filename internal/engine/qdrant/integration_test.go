@@ -301,6 +301,37 @@ func TestQdrant(t *testing.T) {
 		}
 	})
 
+	t.Run("only collections that changed are snapshotted again", func(t *testing.T) {
+		r, err := openRepo(env, db)
+		must(t, err)
+		docs, _, err := r.listBackups(ctx)
+		must(t, err)
+		objects := map[string]map[string]string{}
+		for _, d := range docs {
+			if d.Format != formatCollections {
+				t.Fatalf("backup %s isn't one snapshot per collection", d.Label)
+			}
+			objects[d.Label] = map[string]string{}
+			for _, c := range d.Collections {
+				objects[d.Label][c.Name] = c.Object
+			}
+		}
+		first, marked := objects[b1.Label], objects[mk.LSN]
+		if first["docs"] == "" || marked["docs"] == first["docs"] || marked["named"] != first["named"] {
+			t.Fatalf("the Mark after a write to docs: %v, the backup before: %v", marked, first)
+		}
+		b2 := mustRun[protocol.BackupResult](t, e, env, db, protocol.TaskBackup, nil)
+		if b2.RepoSizeBytes != 0 {
+			t.Fatalf("a backup with nothing changed stored %d bytes", b2.RepoSizeBytes)
+		}
+		for _, name := range []string{"docs", "named"} {
+			var left []snapshotInfo
+			if err := a.call(ctx, http.MethodGet, collPath(name)+"/snapshots", nil, nil, &left); err != nil || len(left) != 0 {
+				t.Fatalf("snapshots of %s left on the server: %v %v", name, left, err)
+			}
+		}
+	})
+
 	t.Run("rewind in place and undo", func(t *testing.T) {
 		must(t, a.call(ctx, http.MethodPost, collPath("docs")+"/points/delete", map[string][]string{"wait": {"true"}},
 			map[string]any{"filter": map[string]any{"must": []any{map[string]any{"key": "n", "range": map[string]any{"lte": 100}}}}}, nil))

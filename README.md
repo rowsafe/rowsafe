@@ -11,8 +11,9 @@ This repository is the open-source part of [Rowsafe](https://rowsafe.sh): the ag
 - PostgreSQL 13–18, MySQL 8.0/8.4, MariaDB 10.6–11.4, MongoDB 6.0–8.0, ClickHouse 24.8–26.8
 - Redis 7.0+ and Valkey 7.2+ (standalone servers)
 - SQLite (restore to any second needs WAL mode)
-- Qdrant 1.13+ (single servers; snapshot backups: restores go back to a snapshot, not to any second)
-- Meilisearch 1.12+, Community Edition, on Linux servers (hourly snapshots: restores go back to a snapshot or a Mark, not to any second)
+- OpenSearch 2.x/3.x (single node; snapshots every 5 minutes: restores go back to a snapshot or a Mark, not to any second)
+- Qdrant 1.13+ (single servers; snapshots every 15 minutes, only of the collections that changed: restores go back to a snapshot or a Mark, not to any second)
+- Meilisearch 1.12+, Community Edition, on Linux servers (snapshots every 15 minutes when something changed: restores go back to a snapshot or a Mark, not to any second)
 
 Features per database: `protocol.EngineCapabilities`.
 

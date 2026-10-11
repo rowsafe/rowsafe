@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rowsafe/rowsafe/internal/agent"
@@ -153,6 +154,22 @@ type backupDoc struct {
 	DatabaseBytes int64 `json:"database_bytes"`
 	// Indexes are the indexes when the snapshot was taken, for Proof.
 	Indexes []indexDoc `json:"indexes"`
+	// Data is the label of the backup whose data.snapshot holds this
+	// one's data ("" for its own): a backup that finds nothing changed
+	// since the newest snapshot records that snapshot again (a few hundred
+	// bytes) instead of having Meilisearch copy everything once more.
+	Data string `json:"data,omitempty"`
+	// Changes says which state of the instance the snapshot holds
+	// (changes.go): nil for backups made before Rowsafe compared them.
+	Changes *changeMark `json:"changes,omitempty"`
+}
+
+// dataLabel is the label whose data.snapshot holds d's data.
+func (d backupDoc) dataLabel() string {
+	if d.Data != "" {
+		return d.Data
+	}
+	return d.Label
 }
 
 // indexDoc is one index in a snapshot: its documents and a fingerprint of
@@ -195,6 +212,10 @@ func (r *repo) freshLabel(ctx context.Context, t time.Time) (string, error) {
 	return "", errors.New("too many snapshots in the same moment")
 }
 
+// docCache holds the backup descriptions already read, by their place in
+// the bucket: backups every few minutes don't read them all each time.
+var docCache sync.Map // location + key -> backupDoc
+
 // listBackups returns the finished snapshots, oldest first, and the labels
 // of unfinished uploads.
 func (r *repo) listBackups(ctx context.Context) ([]backupDoc, []string, error) {
@@ -223,10 +244,17 @@ func (r *repo) listBackups(ctx context.Context) ([]backupDoc, []string, error) {
 			unfinished = append(unfinished, l)
 			continue
 		}
+		// A description never changes once written: read each once.
+		ck := r.st.Location() + "\x00" + backupKey(l, backupDocName)
+		if d, ok := docCache.Load(ck); ok {
+			docs = append(docs, d.(backupDoc))
+			continue
+		}
 		var d backupDoc
 		if err := r.getJSON(ctx, backupKey(l, backupDocName), &d); err != nil {
 			return nil, nil, fmt.Errorf("reading backup %s: %w", l, err)
 		}
+		docCache.Store(ck, d)
 		docs = append(docs, d)
 	}
 	slices.SortFunc(docs, func(a, b backupDoc) int { return strings.Compare(a.Label, b.Label) })
@@ -237,6 +265,7 @@ func (r *repo) listBackups(ctx context.Context) ([]backupDoc, []string, error) {
 // deleted one is never taken for a finished one.
 func (r *repo) deleteBackup(ctx context.Context, label string) error {
 	prefix := backupPrefix + label + "/"
+	docCache.Delete(r.st.Location() + "\x00" + prefix + backupDocName)
 	if err := r.st.Delete(ctx, prefix+backupDocName); err != nil && !errors.Is(err, objstore.ErrNotFound) {
 		return err
 	}

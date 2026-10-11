@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -251,7 +252,7 @@ func (e *Engine) takeBackup(ctx context.Context, env agent.EngineEnv, db protoco
 		return backupDoc{}, err
 	}
 	defer c.Close()
-	in, err := inspect(ctx, c, true)
+	in, err := inspect(ctx, c, false)
 	if err != nil {
 		return backupDoc{}, err
 	}
@@ -269,29 +270,36 @@ func (e *Engine) takeBackup(ctx context.Context, env agent.EngineEnv, db protoco
 	l := e.dbLock(db.ID)
 	l.Lock()
 	defer l.Unlock()
-	doc, err := e.storeSnapshot(ctx, c, r, in, source, backupPrefix, tl)
+	docs, _, err := r.listBackups(ctx)
+	if err != nil {
+		return backupDoc{}, fmt.Errorf("reading your bucket: %w", err)
+	}
+	var prev *backupDoc
+	if len(docs) > 0 {
+		prev = &docs[len(docs)-1]
+	}
+	doc, err := e.storeCollections(ctx, c, r, in, prev, source, mark, tl)
 	if err != nil {
 		return doc, err
 	}
-	if mark != "" {
-		doc.Mark = mark
-		_ = r.putJSON(ctx, backupKey(doc.Label, backupDocName), doc)
-	}
-	tl.Printf("backup %s complete: %d collections, %s points, a %s snapshot, %s stored (encrypted on this server)",
-		doc.Label, doc.userCollections(), commas(doc.totalPoints()), humanBytes(doc.SnapshotBytes), humanBytes(doc.StoredBytes))
+	tl.Printf("backup %s complete: %d collections, %s points, %s stored (encrypted on this server)",
+		doc.Label, doc.userCollections(), commas(doc.totalPoints()), humanBytes(doc.StoredBytes))
 	if err := retention(ctx, r, db, doc.Label, time.Now(), tl); err != nil {
 		tl.Printf("note: removing old backups failed (%v); it is tried again after the next backup", err)
 	}
 	return doc, nil
 }
 
-// Retention: the newest RetentionFull snapshots (defaultRetention when the
-// control plane doesn't say), plus the newest snapshot of each of the last
-// dailyDays days, so the backups reach back a week while the latest hours
-// have one every hour. Marks' snapshots stay while they are newer than the
-// oldest snapshot kept, and go with their Mark after that.
+// Retention: the newest RetentionFull backups (defaultRetention when the
+// control plane doesn't say), plus the newest backup of each hour of the
+// last hourlyFor and of each of the last dailyDays days, so the backups
+// reach back a week while the latest hours have one every few minutes.
+// Marks' backups stay while they are newer than the oldest backup kept, and
+// go with their Mark after that. A collection's snapshot stays while a kept
+// backup names it (gcData).
 const (
 	defaultRetention = 24
+	hourlyFor        = 24 * time.Hour
 	dailyDays        = 7
 )
 
@@ -307,15 +315,19 @@ func keepSet(docs []backupDoc, keepN int, now time.Time) map[string]bool {
 	for i := len(plain) - 1; i >= 0 && len(plain)-i <= keepN; i-- {
 		keep[plain[i].Label] = true
 	}
-	days := map[string]bool{}
+	days, hours := map[string]bool{}, map[string]bool{}
 	for i := len(plain) - 1; i >= 0; i-- {
 		d := plain[i]
-		if now.Sub(d.TakenAt) > dailyDays*24*time.Hour {
+		age := now.Sub(d.TakenAt)
+		if age > dailyDays*24*time.Hour {
 			break
 		}
-		day := d.TakenAt.UTC().Format("2006-01-02")
-		if !days[day] {
+		if day := d.TakenAt.UTC().Format("2006-01-02"); !days[day] {
 			days[day] = true
+			keep[d.Label] = true
+		}
+		if hour := d.TakenAt.UTC().Format("2006-01-02T15"); age <= hourlyFor && !hours[hour] {
+			hours[hour] = true
 			keep[d.Label] = true
 		}
 	}
@@ -361,7 +373,15 @@ func retention(ctx context.Context, r *repo, db protocol.DatabaseSpec, current s
 			gone[d.Label] = true
 		}
 	}
+	kept := slices.DeleteFunc(slices.Clone(docs), func(d backupDoc) bool { return gone[d.Label] })
+	freed, err := gcData(ctx, r, kept, current)
+	if err != nil {
+		return err
+	}
 	if len(gone) == 0 {
+		if freed > 0 {
+			tl.Printf("removed %d collection snapshots no backup names any more", freed)
+		}
 		return nil
 	}
 	marks, err := r.marks(ctx)
@@ -377,6 +397,7 @@ func retention(ctx context.Context, r *repo, db protocol.DatabaseSpec, current s
 			dropped++
 		}
 	}
-	tl.Printf("kept the newest %d snapshots and one a day for %d days: removed %d older snapshots and %d Marks", keepN, dailyDays, len(gone), dropped)
+	tl.Printf("kept the newest %d backups, one an hour for a day and one a day for %d days: removed %d older backups (%d collection snapshots no backup names any more) and %d Marks",
+		keepN, dailyDays, len(gone), freed, dropped)
 	return nil
 }

@@ -62,28 +62,29 @@ func restoreDoc(ctx context.Context, r *repo, doc backupDoc, s scratch, tl agent
 }
 
 // pickDoc is the snapshot to restore: label's, else the newest finished one
-// at or before at (nil: the newest).
+// at or before at (nil: the newest). A label retention removed (snapshots
+// older than a day are kept one an hour) gives way to the newest kept one
+// at or before at.
 func pickDoc(docs []backupDoc, label string, at *time.Time) (backupDoc, error) {
+	if label != "" {
+		for _, d := range docs {
+			if d.Label == label && d.Kind != kindRewind {
+				return d, nil
+			}
+		}
+		if at == nil {
+			return backupDoc{}, fmt.Errorf("the snapshot %s isn't in your bucket any more (retention removed it?)", label)
+		}
+	}
 	var best *backupDoc
 	for i := range docs {
 		d := &docs[i]
-		if d.Kind == kindRewind {
+		if d.Kind == kindRewind || at != nil && d.StoppedAt.After(*at) {
 			continue
 		}
-		switch {
-		case label != "":
-			if d.Label == label {
-				return *d, nil
-			}
-		case at != nil && d.StoppedAt.After(*at):
-		default:
-			if best == nil || d.StoppedAt.After(best.StoppedAt) {
-				best = d
-			}
+		if best == nil || d.StoppedAt.After(best.StoppedAt) {
+			best = d
 		}
-	}
-	if label != "" {
-		return backupDoc{}, fmt.Errorf("the snapshot %s isn't in your bucket any more (retention removed it?)", label)
 	}
 	if best == nil {
 		return backupDoc{}, errors.New("there is no snapshot in your bucket yet: Proof runs once the first backup has finished")

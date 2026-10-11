@@ -102,6 +102,13 @@ func TestPickDoc(t *testing.T) {
 	if _, err := pickDoc(nil, "", nil); err == nil {
 		t.Error("no snapshot")
 	}
+	// A snapshot retention removed: the newest kept one at or before the moment.
+	if d, err := pickDoc(docs, "20261009-004500D", &at); err != nil || d.Label != "20261009-003000D" {
+		t.Errorf("removed label: %s %v", d.Label, err)
+	}
+	if _, err := pickDoc(docs, "20261009-004500D", nil); err == nil {
+		t.Error("a removed label without a moment")
+	}
 }
 
 func TestSnapshotIndices(t *testing.T) {
@@ -151,5 +158,88 @@ func TestScratchJVMOptions(t *testing.T) {
 	}
 	if !strings.Contains(got, "-javaagent:agent/opensearch-agent.jar") || !strings.Contains(got, "-Xmx1g") {
 		t.Errorf("kept: %q", got)
+	}
+}
+
+func TestRetainDrop(t *testing.T) {
+	now := time.Date(2026, 10, 11, 12, 2, 0, 0, time.UTC)
+	var snaps []snapInfo
+	add := func(at time.Time, kind string) {
+		snaps = append(snaps, snapInfo{Snapshot: snapshotName(newLabel(at, kind)), State: "SUCCESS", StartMS: at.UnixMilli()})
+	}
+	// A full snapshot every day at 01:00 for 10 days, one every 5 minutes
+	// in between, a Mark 3 days ago, a snapshot kept for Undo 9 days ago,
+	// and someone else's snapshot.
+	start := now.Add(-10 * 24 * time.Hour).Truncate(24 * time.Hour)
+	for at := start; !at.After(now); at = at.Add(5 * time.Minute) {
+		switch {
+		case at.Hour() == 1 && at.Minute() == 0:
+			add(at, kindFull)
+		default:
+			add(at, kindDiff)
+		}
+	}
+	add(now.Add(-72*time.Hour+time.Second), kindMark)
+	add(now.Add(-9*24*time.Hour+time.Second), kindRewind)
+	snaps = append(snaps, snapInfo{Snapshot: "nightly-1", State: "SUCCESS", StartMS: now.Add(-20 * 24 * time.Hour).UnixMilli()})
+	slices.SortFunc(snaps, func(a, b snapInfo) int { return int(a.StartMS - b.StartMS) })
+
+	drop := retainDrop(snaps, 7, now)
+	dropped := map[string]bool{}
+	for _, n := range drop {
+		if labelOf(n) == "" {
+			t.Fatalf("someone else's snapshot is in the plan: %s", n)
+		}
+		dropped[n] = true
+	}
+	oldestFull := time.Date(2026, 10, 5, 1, 0, 0, 0, time.UTC) // the 7th newest daily full
+	perHour := map[string]int{}
+	kept := 0
+	for _, s := range snaps {
+		l, age := labelOf(s.Snapshot), now.Sub(s.start())
+		if dropped[s.Snapshot] {
+			continue
+		}
+		kept++
+		switch {
+		case l == "", labelKind(l) == kindRewind || labelKind(l) == kindMark:
+		case s.start().Before(oldestFull):
+			t.Errorf("kept %s from before the window", s.Snapshot)
+		case labelKind(l) == kindDiff && age > keepAllFor:
+			perHour[s.start().Format("2006010215")]++
+		}
+	}
+	for h, n := range perHour {
+		if n != 1 {
+			t.Errorf("hour %s keeps %d snapshots, want 1", h, n)
+		}
+	}
+	for _, s := range snaps {
+		l, age := labelOf(s.Snapshot), now.Sub(s.start())
+		switch {
+		case l == "":
+		case labelKind(l) == kindRewind && dropped[s.Snapshot]:
+			t.Error("the snapshot kept for Undo was dropped")
+		case labelKind(l) == kindMark && dropped[s.Snapshot]:
+			t.Error("a Mark inside the window was dropped")
+		case labelKind(l) == kindFull && !s.start().Before(oldestFull) && dropped[s.Snapshot]:
+			t.Errorf("a full snapshot inside the window was dropped: %s", s.Snapshot)
+		case age <= keepAllFor && dropped[s.Snapshot]:
+			t.Errorf("a snapshot of the last day was dropped: %s", s.Snapshot)
+		}
+	}
+	// A day of 5-minute snapshots, then one an hour for the rest of the week.
+	if kept < 288+24*5 || kept > 288+24*7+20 {
+		t.Errorf("kept %d snapshots", kept)
+	}
+	if !slices.Contains(drop, snapshotName(newLabel(start.Add(5*time.Minute), kindDiff))) {
+		t.Error("the oldest snapshot stays")
+	}
+	// Few full snapshots yet: the tiers still apply, nothing before them goes.
+	if d := retainDrop(snaps[len(snaps)-400:], 7, now); len(d) == 0 || slices.Contains(d, snaps[len(snaps)-1].Snapshot) {
+		t.Errorf("young server: %d dropped", len(d))
+	}
+	if d := retainDrop(snaps[len(snaps)-1:], 7, now.Add(30*24*time.Hour)); len(d) != 0 {
+		t.Error("the newest snapshot always stays")
 	}
 }

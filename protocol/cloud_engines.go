@@ -87,8 +87,9 @@ type CloudEngine struct {
 //     to an exact version and checked against its SHA-256 before anything
 //     runs. Apps connect with TLS only: REST on 6333 and gRPC on 6334, with
 //     an API key made in Databases & users; the cluster port (6335) stays
-//     closed (single node). Backups are full snapshots every hour; restores
-//     go back to one of them, not to any second. 2 GB of memory at least.
+//     closed (single node). Backups are snapshots of the collections that
+//     changed, every 15 minutes (snapshots.go); restores go back to one of
+//     them, not to any second. 2 GB of memory at least.
 //   - Meilisearch 1.54 (Community Edition, MIT), the release binary from
 //     Meilisearch's GitHub releases, checked against the SHA-256 the
 //     installer pins (Meilisearch publishes no checksums or signatures of
@@ -111,10 +112,10 @@ var CloudEngines = []CloudEngine{
 		Note: "ClickHouse 26.8 or 26.3 LTS from ClickHouse's own packages. Apps connect with TLS: the native protocol on port 9440 (clickhouse-client --secure) and HTTPS on port 8443. Sizes with 4 GB of memory or more."},
 	{Engine: EngineQdrant, Name: "Qdrant", Versions: []string{"1.19"}, DefaultVersion: "1.19",
 		Port: 6333, Ports: []int{6333, 6334}, Scheme: "https", MinMemoryMB: QdrantMinMemoryMB, SnapshotsOnly: true,
-		Note: "Qdrant 1.19, the open-source vector database, from Qdrant's official release. Apps connect with TLS and an API key: REST on port 6333 and gRPC on port 6334. Backups are snapshots every hour: restores go back to one of them, not to any second. Sizes with 2 GB of memory or more."},
+		Note: "Qdrant 1.19, the open-source vector database, from Qdrant's official release. Apps connect with TLS and an API key: REST on port 6333 and gRPC on port 6334. Backups are snapshots every 15 minutes, of the collections that changed: restores go back to one of them, not to any second. Sizes with 2 GB of memory or more."},
 	{Engine: EngineMeilisearch, Name: "Meilisearch", Versions: []string{"1.54"}, DefaultVersion: "1.54",
 		Port: MeilisearchPort, Scheme: "https", SnapshotsOnly: true,
-		Note: "Meilisearch 1.54, the open-source search engine (Community Edition). Apps connect with HTTPS on port 7700 with an API key. Backups are snapshots every hour: restores go back to one of them, not to any second."},
+		Note: "Meilisearch 1.54, the open-source search engine (Community Edition). Apps connect with HTTPS on port 7700 with an API key. Backups are snapshots every 15 minutes when something changed: restores go back to one of them, not to any second."},
 }
 
 // CloudEngineFor finds an engine new servers can get ("" is PostgreSQL).

@@ -29,7 +29,7 @@ func (e *Engine) adopt(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 	dir, dirErr := repoDir(in)
 	res.Plan = []protocol.Change{
 		{Kind: "command", Description: "Prepare your bucket for this database (a folder with its own encrypted backups)"},
-		{Kind: "command", Description: "Take OpenSearch's own snapshots into " + dir + " on this server, every 30 minutes and on every Mark"},
+		{Kind: "command", Description: "Take OpenSearch's own snapshots into " + dir + " on this server, every 5 minutes by default and on every Mark"},
 		{Kind: "command", Description: "Copy each snapshot's new files to your bucket, encrypted on this server; OpenSearch never sees the bucket"},
 	}
 	res.Warnings = append(res.Warnings, "OpenSearch keeps no log of its changes: restores go back to a snapshot (a backup or a Mark), not to any second.")
@@ -66,7 +66,7 @@ func (e *Engine) adopt(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 		return res, err
 	}
 	res.Applied = true
-	tl.Printf("backups are on: the first snapshot runs now, then every 30 minutes")
+	tl.Printf("backups are on: the first snapshot runs now, then every 5 minutes by default (each copies only what is new)")
 	return res, nil
 }
 
@@ -217,26 +217,86 @@ func (e *Engine) backup(ctx context.Context, env agent.EngineEnv, db protocol.Da
 		SizeBytes: in.totalBytes(), RepoSizeBytes: t.Sync.RepoBytes}, nil
 }
 
-// retention keeps the newest RetentionFull full snapshots and every
-// snapshot and Mark newer than the oldest of them; a snapshot kept for an
-// Undo stays until its time is up (inplace.go). OpenSearch deletes the files no kept
-// snapshot needs; the bucket then follows. tl may be nil.
+// Retention: the newest RetentionFull full snapshots (one a day by
+// default) start the window; inside it every snapshot of the last
+// keepAllFor stays, then the newest of each hour up to keepHourlyFor, then
+// only the full ones (one a day). Marks stay for the whole window, and the
+// newest snapshot always stays. A snapshot kept for an Undo stays until its
+// time is up (inplace.go). Snapshots every few minutes stay cheap: each one
+// copies only new files, and the tiers keep their number bounded (about
+// 300 a day for a day, then 24 a day for a week).
+const (
+	keepAllFor    = 24 * time.Hour
+	keepHourlyFor = 7 * 24 * time.Hour
+)
+
+// retainDrop picks the snapshots retention deletes (snaps as OpenSearch
+// lists them, oldest first): Rowsafe's own only, never one kept for Undo.
+func retainDrop(snaps []snapInfo, keepFull int, now time.Time) []string {
+	keepFull = max(keepFull, 1)
+	var fulls []time.Time
+	newest := ""
+	for _, s := range snaps {
+		l := labelOf(s.Snapshot)
+		if l == "" || labelKind(l) == kindRewind {
+			continue
+		}
+		if s.State == "SUCCESS" {
+			newest = s.Snapshot
+			if labelKind(l) == kindFull {
+				fulls = append(fulls, s.start())
+			}
+		}
+	}
+	var oldest time.Time // the window's start (zero: everything is in it)
+	if len(fulls) > keepFull {
+		oldest = fulls[len(fulls)-keepFull]
+	}
+	// The newest snapshot of each hour, among those between the tiers.
+	hourly := map[string]string{}
+	for _, s := range snaps {
+		if l := labelOf(s.Snapshot); l != "" && labelKind(l) == kindDiff && s.State == "SUCCESS" {
+			hourly[s.start().UTC().Format("2006010215")] = s.Snapshot // oldest first: the last one wins
+		}
+	}
+	var drop []string
+	for _, s := range snaps {
+		l := labelOf(s.Snapshot)
+		if l == "" || labelKind(l) == kindRewind || s.Snapshot == newest {
+			continue
+		}
+		if s.start().Before(oldest) {
+			drop = append(drop, s.Snapshot)
+			continue
+		}
+		if labelKind(l) != kindDiff {
+			continue // full snapshots and Marks stay for the window
+		}
+		age := now.Sub(s.start())
+		switch {
+		case s.State != "SUCCESS" && age > time.Hour:
+			drop = append(drop, s.Snapshot) // a failed or partial one
+		case age <= keepAllFor:
+		case age <= keepHourlyFor && hourly[s.start().UTC().Format("2006010215")] == s.Snapshot:
+		default:
+			drop = append(drop, s.Snapshot)
+		}
+	}
+	return drop
+}
+
+// retention deletes what retainDrop picks through OpenSearch (which
+// deletes only the files no kept snapshot needs); the bucket then follows.
+// tl may be nil.
 func (e *Engine) retention(ctx context.Context, c *client, r *repo, db protocol.DatabaseSpec, in serverInfo, tl agent.TaskLogger) error {
-	keep := max(db.RetentionFull, 1)
 	snaps, err := listSnapshots(ctx, c)
 	if err != nil {
 		return err
 	}
-	var fulls []time.Time
-	for _, s := range snaps {
-		if l := labelOf(s.Snapshot); labelKind(l) == kindFull && s.State == "SUCCESS" {
-			fulls = append(fulls, s.start())
-		}
-	}
-	if len(fulls) <= keep {
+	drop := retainDrop(snaps, db.RetentionFull, time.Now())
+	if len(drop) == 0 {
 		return nil
 	}
-	oldest := fulls[len(fulls)-keep]
 	dir, err := repoDir(in)
 	if err != nil {
 		return err
@@ -246,19 +306,16 @@ func (e *Engine) retention(ctx context.Context, c *client, r *repo, db protocol.
 		return err
 	}
 	removed := 0
-	for _, s := range snaps {
-		l := labelOf(s.Snapshot)
-		if l == "" || labelKind(l) == kindRewind || !s.start().Before(oldest) {
-			continue
-		}
-		if err := deleteSnapshot(ctx, c, s.Snapshot); err != nil {
+	for _, name := range drop {
+		if err := deleteSnapshot(ctx, c, name); err != nil {
 			return err
 		}
-		_ = r.st.Delete(ctx, docKey(l))
+		_ = r.st.Delete(ctx, docKey(labelOf(name)))
 		removed++
 	}
 	if removed > 0 && tl != nil {
-		tl.Printf("kept the newest %d full snapshots and everything since: removed %d older snapshots", keep, removed)
+		tl.Printf("removed %d older snapshots (kept: every snapshot of the last day, one an hour for a week, the newest %d full ones and their Marks)",
+			removed, max(db.RetentionFull, 1))
 	}
 	after, err := localSet(dir)
 	if err != nil {

@@ -3,6 +3,7 @@ package protocol
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCloudEngines(t *testing.T) {
@@ -68,5 +69,27 @@ func TestCloudEngines(t *testing.T) {
 	}
 	if !MarkIsBackup(EngineMeilisearch) || RewindInPlaceStopsServer(EngineMeilisearch) {
 		t.Error("meilisearch: Marks are snapshots, rewinds in place go through its API")
+	}
+}
+
+func TestSnapshotDue(t *testing.T) {
+	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		took, ago, every time.Duration
+		want             bool
+	}{
+		{30 * time.Second, 5 * time.Minute, 5 * time.Minute, true}, // quick
+		{0, time.Minute, 5 * time.Minute, true},                    // nothing known
+		{2 * time.Minute, 5 * time.Minute, 5 * time.Minute, false}, // 2 minutes of every 5: rest 6
+		{2 * time.Minute, 6 * time.Minute, 5 * time.Minute, true},  // rested
+		{10 * time.Minute, 15 * time.Minute, 15 * time.Minute, false},
+		{10 * time.Minute, 30 * time.Minute, 15 * time.Minute, true},
+	} {
+		if got := SnapshotDue(c.took, now.Add(-c.ago), now, c.every); got != c.want {
+			t.Errorf("took %s, %s ago, every %s: %v", c.took, c.ago, c.every, got)
+		}
+	}
+	if !SnapshotEngine("qdrant") || !SnapshotEngine(EngineOpenSearch) || !SnapshotEngine(EngineMeilisearch) || SnapshotEngine("") {
+		t.Error("SnapshotEngine")
 	}
 }

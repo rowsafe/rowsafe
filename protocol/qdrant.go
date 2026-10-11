@@ -45,12 +45,18 @@ import (
 //     monitoring and checks, with every right only for snapshots,
 //     restores, fixes and keys. Without JWT access control, the key itself
 //     goes to Qdrant (on 127.0.0.1, or over TLS).
-//   - Backups are Qdrant's own full storage snapshot (every collection and
-//     alias; POST /snapshots), downloaded from the server over its API as
-//     Qdrant writes it, encrypted on the server (objstore.Seal) and stored
-//     under <repo path>/<stanza>/; the snapshot is then deleted from the
-//     server's disk. Every backup is full (BackupDiff and BackupIncr are
-//     taken as full); WALStart/WALStop are unused.
+//   - Backups are Qdrant's own snapshots of each collection (POST
+//     /collections/<name>/snapshots), one at a time, of the collections
+//     that changed since the newest backup only (snapshots.go): each is
+//     downloaded from the server over its API as Qdrant writes it,
+//     encrypted on the server (objstore.Seal), stored under <repo
+//     path>/<stanza>/data/ and deleted from the server's disk; a backup's
+//     description names the snapshot of every collection and the aliases.
+//     Restores put them together into Qdrant's full storage snapshot.
+//     Backups made before that are one full storage snapshot (POST
+//     /snapshots) and restore as before. Every backup is whole (BackupDiff
+//     and BackupIncr are taken as full); WALStart/WALStop are unused. They
+//     run every 15 minutes by default (QdrantSchedule).
 //   - No continuous archiving: restores go back to a backup, not to any
 //     second (PointInTime is false). A Mark is a backup taken on the spot
 //     and named after the Mark (RestorePointResult.LSN is its label).

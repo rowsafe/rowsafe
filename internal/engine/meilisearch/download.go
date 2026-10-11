@@ -53,6 +53,10 @@ func DownloadBackup(ctx context.Context, env agent.EngineEnv, stanza, label, to 
 	if err != nil {
 		return err
 	}
-	_, err = download(ctx, r, label, to)
+	var d backupDoc
+	if err := r.getJSON(ctx, backupKey(label, backupDocName), &d); err != nil {
+		return fmt.Errorf("reading backup %s: %w", label, err)
+	}
+	_, err = download(ctx, r, d.dataLabel(), to)
 	return err
 }
