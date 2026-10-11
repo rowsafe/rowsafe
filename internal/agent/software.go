@@ -159,7 +159,8 @@ func (a *Agent) buildSoftware(ctx context.Context) *protocol.SoftwareReport {
 	}
 	r.Allowed = a.updateAllowed()
 	r.HelperActions = a.updateHelperActions()
-	r.StandbyAware = true // standby_updates.go
+	r.StandbyAware = true    // standby_updates.go
+	r.StandbySettings = true // settings.go (SettingsParams.Standby)
 	if bt := bootTime(); !bt.IsZero() {
 		r.BootedAt = &bt
 	}

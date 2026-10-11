@@ -60,6 +60,16 @@ type SettingChange struct {
 type SettingsParams struct {
 	Kind    string          `json:"kind"` // SettingsKind*
 	Changes []SettingChange `json:"changes"`
+	// Standby (addition): the change is for this server's standby of the
+	// database, not for a primary. The Rowsafe Cloud maintenance window
+	// gives a pair's standby the settings its primary waits to restart with
+	// (query statistics) before it restarts the standby and switches over
+	// to it. ALTER SYSTEM works on a hot standby (it writes
+	// postgresql.auto.conf, which isn't replicated). Only settings that
+	// wait for a restart, and none of the ones Rowsafe's standby
+	// configuration sets. Agents without SoftwareReport.StandbySettings
+	// refuse every change on a standby.
+	Standby bool `json:"standby,omitempty"`
 }
 
 // SettingsResult is the agent's report for a settings task.

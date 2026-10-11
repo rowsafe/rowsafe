@@ -40,17 +40,26 @@ func (a *Agent) standbyHere(db protocol.DatabaseSpec) (standbyRecord, bool) {
 // onStandby is db as this server's standby of it (its own port and socket
 // directory), and whether this server runs one.
 func (a *Agent) onStandby(db protocol.DatabaseSpec) (protocol.DatabaseSpec, bool) {
-	if db.ID == "" {
+	r, ok := a.followingStandby(db)
+	if !ok {
 		return db, false
+	}
+	out := db
+	out.Port, out.SocketDir = r.Database.Port, r.Database.SocketDir
+	return out, true
+}
+
+// followingStandby is the standby of db this server runs (following).
+func (a *Agent) followingStandby(db protocol.DatabaseSpec) (standbyRecord, bool) {
+	if db.ID == "" {
+		return standbyRecord{}, false
 	}
 	for _, r := range a.sb().standbys() {
 		if r.DatabaseID == db.ID && r.Phase == protocol.StandbyPhaseFollowing {
-			out := db
-			out.Port, out.SocketDir = r.Database.Port, r.Database.SocketDir
-			return out, true
+			return r, true
 		}
 	}
-	return db, false
+	return standbyRecord{}, false
 }
 
 // standbyDatabases are the standbys this server runs, as databases (their
