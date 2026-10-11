@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -252,26 +253,54 @@ func (c *Client) Protection(ctx context.Context, ref string) (out protocol.Prote
 	return out, c.do(ctx, http.MethodGet, "/v1/databases/"+esc(ref)+"/protection", nil, &out)
 }
 
-// WaitTask polls until the task finishes or ctx ends.
+// WaitTask polls until the task finishes or ctx ends. A few failed polls in
+// a row (the network, a deploy of the control plane, 5xx or 429) don't end
+// the wait: the task goes on without us, and waits can last hours.
 func (c *Client) WaitTask(ctx context.Context, id string, onTick func(protocol.TaskView)) (protocol.TaskView, error) {
+	var last protocol.TaskView
+	failures := 0
 	for {
 		t, err := c.Task(ctx, id)
-		if err != nil {
-			return t, err
-		}
-		if onTick != nil {
-			onTick(t)
-		}
-		switch t.Status {
-		case protocol.StatusSucceeded, protocol.StatusFailed, protocol.StatusLost, protocol.StatusCancelled:
-			return t, nil
+		switch {
+		case err != nil:
+			if failures++; failures > waitTaskRetries || !transient(ctx, err) {
+				return last, err
+			}
+		default:
+			failures, last = 0, t
+			if onTick != nil {
+				onTick(t)
+			}
+			switch t.Status {
+			case protocol.StatusSucceeded, protocol.StatusFailed, protocol.StatusLost, protocol.StatusCancelled:
+				return t, nil
+			}
 		}
 		select {
 		case <-ctx.Done():
-			return t, ctx.Err()
-		case <-time.After(2 * time.Second):
+			return last, ctx.Err()
+		case <-time.After(waitTaskPoll):
 		}
 	}
+}
+
+// waitTaskRetries is how many failed polls in a row WaitTask rides out.
+const waitTaskRetries = 5
+
+// waitTaskPoll is how often WaitTask polls; tests shorten it.
+var waitTaskPoll = 2 * time.Second
+
+// transient: a failed request worth trying again (not one Rowsafe refused,
+// and not because ctx ended).
+func transient(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	var ae *APIError
+	if errors.As(err, &ae) {
+		return ae.Status >= 500 || ae.Status == http.StatusTooManyRequests
+	}
+	return true
 }
 
 // ---- Monitoring and alerting ----
