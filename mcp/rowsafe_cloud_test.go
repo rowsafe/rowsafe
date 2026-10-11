@@ -330,13 +330,18 @@ func TestDescribeCloudChanges(t *testing.T) {
 	if !strings.Contains(txt, "types the server's name") || !strings.Contains(txt, "list_cloud_servers") || strings.Contains(txt, "confirm_name") {
 		t.Errorf("delete_cloud_server: %s", txt)
 	}
-	// A database's destructive actions take params.confirm: the dashboard's
-	// call checks it, and Rowsafe doesn't type it.
-	for _, action := range []string{"rewind_in_place", "remove_standby", "finish_upgrade"} {
+	// A database's destructive actions: Rowsafe types the confirmation
+	// (the agent still confirms with the user in chat first).
+	for _, action := range []string{"rewind_in_place", "remove_standby", "finish_upgrade", "move_finish"} {
 		txt, _ = callText(t, cs, "describe_change", map[string]any{"action": action})
-		if !strings.Contains(txt, "Pass params.confirm") || strings.Contains(txt, "types the database's name") {
+		if !strings.Contains(txt, "Rowsafe types the confirmation for you") || !strings.Contains(txt, "confirm with the user in chat first") ||
+			strings.Contains(txt, "Pass params.confirm") {
 			t.Errorf("%s: %s", action, txt)
 		}
+	}
+	// A disruptive one still takes the name from the agent.
+	if txt, _ = callText(t, cs, "describe_change", map[string]any{"action": "promote_standby"}); !strings.Contains(txt, "confirm is the database's name") {
+		t.Errorf("promote_standby: %s", txt)
 	}
 	// One without a confirmation says nothing about it.
 	if txt, _ = callText(t, cs, "describe_change", map[string]any{"action": "delete_database"}); strings.Contains(txt, "confirm") && !strings.Contains(txt, "confirm with the user") {
