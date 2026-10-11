@@ -22,7 +22,10 @@ The tools come from Rowsafe's MCP server. Making changes (`create_cloud_server`,
 6. **Get the app its own database and login.** Rowsafe never makes or sees the password.
    - Through a local `rowsafe mcp` (the CLI) on PostgreSQL: call `create_app_database` with the server's database (as `get_cloud_server` shows it), a `name` for the app's database, and a reason. The password is made on this machine and Rowsafe only gets its verifier: you get the full connection string at once, shown only once. It works once `get_task` shows the task succeeded.
    - Connected with Sign in with Rowsafe (this plugin's server), or on MySQL, MariaDB or ClickHouse: the password must be made in the user's browser, so ask the user to create the database in the Rowsafe dashboard (Databases & users), which shows them the connection string once. Ask them to paste it into the app's `.env` themselves, or to give it to you.
-7. **Store it safely.** Put the connection string in the app's environment, e.g. `DATABASE_URL` in `.env`, and make sure `.env` is in `.gitignore`. Never put it in code, a commit or a log, and don't repeat it back in the chat. Keep `sslmode=require` as given.
+7. **Store it safely.** Put the connection string in the app's environment, e.g. `DATABASE_URL` in `.env`, and make sure `.env` is in `.gitignore`. Never put it in code, a commit or a log, and don't repeat it back in the chat. Keep its encryption settings:
+   - `sslmode=verify-full&sslrootcert=system` (a server whose name has a public certificate): the app checks the server's certificate against the system's trusted ones. That works as given with libpq 16 or later (psql, psycopg, Ruby's `pg`, PHP) and Go's pgx. Node (`pg`, postgres.js, Prisma, Drizzle), Go's lib/pq and Rust read `sslrootcert` as a file name and already trust public certificates: remove `&sslrootcert=system`, keep `sslmode=verify-full`. Python's asyncpg can't use the system's certificates from a connection string: use `sslmode=require`. With libpq older than 16 (Debian 12, Ubuntu 22.04), use `sslrootcert=/etc/ssl/certs/ca-certificates.crt` instead of `system`. `rowsafe env` does this fitting itself.
+   - `sslmode=require` (the certificate isn't public yet): keep it.
+   - Never lower it to `prefer` or `disable`.
 
 ## Later
 

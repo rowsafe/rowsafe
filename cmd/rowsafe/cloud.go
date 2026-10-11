@@ -808,7 +808,11 @@ func printServer(s client.CloudServer) {
 	}
 	if host, port, ssl := serverEndpoint(s); host != "" {
 		if protocol.NormalizeEngine(s.Engine) == protocol.EnginePostgreSQL {
-			row("Connect to", fmt.Sprintf("%s port %d, sslmode=%s", host, port, ssl))
+			to := fmt.Sprintf("%s port %d, sslmode=%s", host, port, ssl)
+			if ssl == "verify-full" {
+				to += ", sslrootcert=system" // pgtls.go
+			}
+			row("Connect to", to)
 		} else {
 			row("Connect to", fmt.Sprintf("%s port %d, always with TLS (%s)", host, port, engineURLExample(s, host, port)))
 			if e, ok := protocol.CloudEngineFor(s.Engine); ok && e.Engine == protocol.EngineClickHouse && len(e.Ports) > 1 {

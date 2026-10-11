@@ -211,8 +211,12 @@ type DBConnection struct {
 	Database string `json:"database"`
 	Host     string `json:"host"`
 	Port     int    `json:"port"`
-	// SSLMode is "require" when the server has TLS on, else "prefer".
+	// SSLMode is "require" when the server has TLS on, else "prefer"
+	// ("verify-full" for a Rowsafe Cloud name with a public certificate).
 	SSLMode string `json:"sslmode"`
+	// SSLRootCert is PostgreSQL's sslrootcert: SSLRootCertSystem, or a file
+	// of trusted certificates; "" leaves it to the client.
+	SSLRootCert string `json:"sslrootcert,omitempty"`
 	// AuthSource is the database the user is defined in (MongoDB).
 	AuthSource string `json:"auth_source,omitempty"`
 }
@@ -226,6 +230,25 @@ type DBSecret struct {
 	// (mysql://, mongodb://, clickhouse:// for the other engines).
 	URL string `json:"url"`
 }
+
+// SSLRootCertSystem is sslrootcert=system: libpq 16 and later (psql,
+// psycopg, Ruby's pg, PHP) and Go's pgx check the server's certificate
+// against the operating system's trusted ones. Rowsafe Cloud names have
+// public (Let's Encrypt) certificates, so with sslmode=verify-full that is
+// all a libpq client needs; without it libpq looks for
+// ~/.postgresql/root.crt and refuses to connect. Older libpq, Node's pg and
+// postgres.js, Go's lib/pq, Rust's sqlx and Python's asyncpg read it as a
+// file name instead: Node, Go and Rust drivers trust public certificates
+// without it (PGRootCertGuidance).
+const SSLRootCertSystem = "system"
+
+// PGRootCertGuidance tells an AI agent how to fit a PostgreSQL connection
+// string with sslmode=verify-full&sslrootcert=system to the app's driver.
+const PGRootCertGuidance = "The connection string checks the server's certificate (sslmode=verify-full) against the system's trusted ones (sslrootcert=system), " +
+	"which libpq 16 or later understands (psql, psycopg, Ruby's pg, PHP) and Go's pgx. Fit it to the app's driver: " +
+	"Node (pg, postgres.js, Prisma, Drizzle), Go's lib/pq and Rust read sslrootcert as a file and already trust public certificates, so remove &sslrootcert=system; " +
+	"Python's asyncpg can't use the system's certificates from a connection string, so use sslmode=require there (still encrypted); " +
+	"with libpq older than 16, use the system's certificate file instead of system (sslrootcert=/etc/ssl/certs/ca-certificates.crt on Debian and Ubuntu)."
 
 // ConnectionURL is the connection string for c with password:
 // postgresql:// (PostgreSQL), mysql:// (MySQL, MariaDB), mongodb:// or
@@ -287,6 +310,9 @@ func ConnectionURL(c DBConnection, password string) string {
 	case "postgresql":
 		if c.SSLMode != "" {
 			q = append(q, "sslmode="+c.SSLMode)
+		}
+		if c.SSLRootCert != "" {
+			q = append(q, "sslrootcert="+strings.ReplaceAll(urlEscape(c.SSLRootCert), "%2F", "/")) // a path reads better unescaped
 		}
 	case "mysql":
 		if c.SSLMode == "require" {

@@ -147,6 +147,9 @@ func (t *tools) createAppDatabase(ctx context.Context, _ *sdk.CallToolRequest, i
 		out.Guidance = "Put the connection string in the app's environment now (e.g. DATABASE_URL in .env, which git must ignore; never in code or a commit): it isn't shown again, and Rowsafe never had it. " +
 			"It works once the database is created: follow the task with get_task. " +
 			"The server must let the app's address connect (get_cloud_server shows who can; cloud_firewall changes it)."
+		if conn.SSLRootCert != "" {
+			out.Guidance += " " + protocol.PGRootCertGuidance
+		}
 		b.line("Connection string (shown once, works once the database is created): %s", out.DatabaseURL)
 	}
 	b.line("Next: %s", out.Guidance)
@@ -154,7 +157,8 @@ func (t *tools) createAppDatabase(ctx context.Context, _ *sdk.CallToolRequest, i
 }
 
 // appConnection is where apps reach d: its Rowsafe Cloud server's name (or
-// address until the name works), the engine's port, TLS required. The
+// address until the name works), the engine's port, TLS required (and the
+// certificate checked once the name has a public one, PostgreSQL). The
 // control plane puts the same host in the request; nothing here picks
 // another.
 func (t *tools) appConnection(ctx context.Context, d protocol.Database) (protocol.DBConnection, error) {
@@ -174,6 +178,10 @@ func (t *tools) appConnection(ctx context.Context, d protocol.Database) (protoco
 	switch {
 	case srv.Address != nil && srv.Address.Host != "":
 		c.Host = srv.Address.Host
+		if srv.Address.SSLMode == "verify-full" && c.Engine == protocol.EnginePostgreSQL {
+			// Its name has a public certificate: check it (protocol.SSLRootCertSystem).
+			c.SSLMode, c.SSLRootCert = "verify-full", protocol.SSLRootCertSystem
+		}
 	case srv.IPv4 != nil && *srv.IPv4 != "":
 		c.Host = *srv.IPv4
 	default:

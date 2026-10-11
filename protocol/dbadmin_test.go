@@ -252,4 +252,19 @@ func TestConnectionURL(t *testing.T) {
 	if got := ConnectionURL(c, "p@ss:w/rd"); got != "postgresql://My%20User:p%40ss%3Aw%2Frd@[::1]:6432/a%2Fb?sslmode=prefer" {
 		t.Error(got)
 	}
+	// A Rowsafe Cloud name with a public certificate: checked against the
+	// system's trusted certificates, or a file of them.
+	c = DBConnection{User: "app", Database: "app", Host: "x7kq2mfa3pzd.cloud.rowsafe.sh", Port: 5432, SSLMode: "verify-full", SSLRootCert: SSLRootCertSystem}
+	if got := ConnectionURL(c, "pw"); got != "postgresql://app:pw@x7kq2mfa3pzd.cloud.rowsafe.sh:5432/app?sslmode=verify-full&sslrootcert=system" {
+		t.Error(got)
+	}
+	c.SSLRootCert = "/etc/ssl/cert.pem"
+	if got := ConnectionURL(c, ""); got != "postgresql://app@x7kq2mfa3pzd.cloud.rowsafe.sh:5432/app?sslmode=verify-full&sslrootcert=/etc/ssl/cert.pem" {
+		t.Error(got)
+	}
+	// Only PostgreSQL takes it.
+	c = DBConnection{Engine: EngineMySQL, User: "app", Database: "app", Host: "h", Port: 3306, SSLMode: "require", SSLRootCert: SSLRootCertSystem}
+	if got := ConnectionURL(c, "pw"); got != "mysql://app:pw@h:3306/app?ssl-mode=REQUIRED" {
+		t.Error(got)
+	}
 }

@@ -337,3 +337,39 @@ func (f *cloudAPI) snapshot() ([]string, []protocol.CreateApprovalRequest) {
 	defer f.mu.Unlock()
 	return append([]string(nil), f.calls...), append([]protocol.CreateApprovalRequest(nil), f.filed...)
 }
+
+// Once the server's name has a public certificate, PostgreSQL connection
+// strings check it (sslmode=verify-full) against the system's trusted
+// certificates (sslrootcert=system), and the agent learns how to fit that to
+// the app's driver.
+func TestCloudVerifiedCertificate(t *testing.T) {
+	verified := strings.Replace(cloudServerJSON("ready", "Ready", []string{"203.0.113.4/32"}),
+		`"certificate":"pending","sslmode":"require"`, `"certificate":"verified","sslmode":"verify-full"`, 1)
+	f := &cloudAPI{t: t, servers: []string{verified}}
+	cs := connect(t, f, Options{AllowWrites: true, MaxWait: time.Second}, nil)
+
+	txt, res := callText(t, cs, "get_cloud_server", map[string]any{"server": "cs_1"})
+	var out CloudServerOutput
+	b, _ := json.Marshal(res.StructuredContent)
+	if err := json.Unmarshal(b, &out); err != nil || res.IsError ||
+		out.Server.Connection != "postgresql://USER:PASSWORD@x7kq2mfa3pzd.cloud.rowsafe.sh:5432/DBNAME?sslmode=verify-full&sslrootcert=system" {
+		t.Fatalf("%s %v", b, err)
+	}
+	if !strings.Contains(txt, "with sslmode=verify-full") || !strings.Contains(txt, protocol.PGRootCertGuidance) {
+		t.Errorf("get_cloud_server: %s", txt)
+	}
+
+	_, res = callText(t, cs, "create_app_database", map[string]any{"database": "shop-db", "name": "shop", "reason": "The shop app needs its own database."})
+	var app AppDatabaseOutput
+	b, _ = json.Marshal(res.StructuredContent)
+	if err := json.Unmarshal(b, &app); err != nil || res.IsError {
+		t.Fatalf("%s %v", b, err)
+	}
+	u, err := url.Parse(app.DatabaseURL)
+	if err != nil || u.Query().Get("sslmode") != "verify-full" || u.Query().Get("sslrootcert") != "system" {
+		t.Fatalf("database_url %q (%v)", app.DatabaseURL, err)
+	}
+	if !strings.Contains(app.Guidance, "remove &sslrootcert=system") || !strings.Contains(app.Guidance, "asyncpg") {
+		t.Errorf("guidance: %s", app.Guidance)
+	}
+}

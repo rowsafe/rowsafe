@@ -116,7 +116,7 @@ func envCmd(ctx context.Context, c *client.Client, args []string) error {
 		host = t.Host // the name apps connect to
 	}
 
-	var url string
+	var password string
 	var conn protocol.DBConnection
 	switch db := findDatabase(inv, dbname); {
 	case db == nil:
@@ -130,7 +130,7 @@ func envCmd(ctx context.Context, c *client.Client, args []string) error {
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "Creating the database %s on %s, owned by a new user %s...\n", dbname, server, owner)
-		conn, url, err = createWithPassword(ctx, c, server, engine, p)
+		conn, password, err = createWithPassword(ctx, c, server, engine, p)
 		if err != nil {
 			return err
 		}
@@ -150,7 +150,7 @@ func envCmd(ctx context.Context, c *client.Client, args []string) error {
 				return errors.New("cancelled; nothing changed")
 			}
 		}
-		conn, url, err = sealedPassword(ctx, c, server, dbname, protocol.DBAdminParams{Action: protocol.DBAdminResetPassword, User: u, Host: host})
+		conn, password, err = sealedPassword(ctx, c, server, dbname, protocol.DBAdminParams{Action: protocol.DBAdminResetPassword, User: u, Host: host})
 		if err != nil {
 			return err
 		}
@@ -170,16 +170,26 @@ func envCmd(ctx context.Context, c *client.Client, args []string) error {
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "Creating the user %s with full access to %s on %s...\n", *user, dbname, server)
-		if conn, url, err = sealedPassword(ctx, c, server, dbname, p); err != nil {
+		if conn, password, err = sealedPassword(ctx, c, server, dbname, p); err != nil {
 			return err
 		}
 	}
 
+	// A Rowsafe Cloud name with a public certificate: the app checks it
+	// (pgtls.go).
+	tlsNote := ""
+	if terr == nil && t.Cloud != nil && t.SSLMode == "verify-full" && conn.Host == t.Host {
+		tlsNote = appTLS(&conn, ".")
+	}
+	url := protocol.ConnectionURL(conn, password)
 	if err := writeEnvKey(*file, *name, url); err != nil {
 		return fmt.Errorf("the login was made, but writing %s failed (%w); run `rowsafe env --force` for a new one", *file, err)
 	}
 	fmt.Printf("Wrote %s to %s: database %s, user %s, on %s port %d.\n", *name, *file, conn.Database, conn.User, conn.Host, conn.Port)
 	fmt.Println("The password was made for this computer only; Rowsafe never saw it.")
+	if tlsNote != "" {
+		fmt.Println(tlsNote)
+	}
 	if note, err := ensureGitignored(*file); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 	} else if note != "" {
@@ -195,12 +205,13 @@ func envCmd(ctx context.Context, c *client.Client, args []string) error {
 	return nil
 }
 
-// createWithPassword creates a database and its new owner. On PostgreSQL
-// the password is made here and only its verifier is sent; an agent too old
-// for that makes it on the server and seals it to this terminal instead.
-func createWithPassword(ctx context.Context, c *client.Client, server, engine string, p protocol.DBAdminParams) (protocol.DBConnection, string, error) {
+// createWithPassword creates a database and its new owner, and returns how
+// to connect and the password. On PostgreSQL the password is made here and
+// only its verifier is sent; an agent too old for that makes it on the
+// server and seals it to this terminal instead.
+func createWithPassword(ctx context.Context, c *client.Client, server, engine string, p protocol.DBAdminParams) (conn protocol.DBConnection, password string, err error) {
 	if engine == protocol.EnginePostgreSQL {
-		password, verifier, err := client.NewCopyPasswordFor(protocol.EnginePostgreSQL)
+		pw, verifier, err := client.NewCopyPasswordFor(protocol.EnginePostgreSQL)
 		if err != nil {
 			return protocol.DBConnection{}, "", err
 		}
@@ -208,8 +219,7 @@ func createWithPassword(ctx context.Context, c *client.Client, server, engine st
 		_, res, _, err := dbRun(ctx, c, server, p, nil)
 		switch {
 		case err == nil && res != nil && res.Connection != nil:
-			conn := *res.Connection
-			return conn, protocol.ConnectionURL(conn, password), nil
+			return *res.Connection, pw, nil
 		case err == nil:
 			return protocol.DBConnection{}, "", errors.New("the database was created, but the agent didn't say where to connect: `rowsafe db` shows it")
 		case apiStatus(err) != http.StatusConflict || !strings.Contains(err.Error(), "update"):
@@ -222,7 +232,8 @@ func createWithPassword(ctx context.Context, c *client.Client, server, engine st
 }
 
 // sealedPassword runs an action whose password the database server makes and
-// encrypts for this terminal, and returns the connection string to dbname.
+// encrypts for this terminal, and returns how to connect to dbname and the
+// password.
 func sealedPassword(ctx context.Context, c *client.Client, server, dbname string, p protocol.DBAdminParams) (protocol.DBConnection, string, error) {
 	key, err := newSealKey()
 	if err != nil {
@@ -240,7 +251,7 @@ func sealedPassword(ctx context.Context, c *client.Client, server, dbname string
 	if dbname != "" {
 		conn.Database = dbname
 	}
-	return conn, protocol.ConnectionURL(conn, secret.Password), nil
+	return conn, secret.Password, nil
 }
 
 // ---- .env files ----
