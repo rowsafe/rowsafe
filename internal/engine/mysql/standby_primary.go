@@ -264,6 +264,10 @@ func (e *Engine) PrimaryState(ctx context.Context, env agent.EngineEnv, db proto
 	return st, st.WALLSN != ""
 }
 
+// fenceShipWait bounds how long a fence waits for the old primary's last
+// binary log bytes to reach the bucket (a variable for tests).
+var fenceShipWait = 30 * time.Second
+
 // StandbyFence makes the old primary read-only for good and ends its
 // client sessions; its last position is where the standby must get to.
 func (e *Engine) StandbyFence(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec, p protocol.StandbyFenceParams, log agent.TaskLogger) (*protocol.StandbyFenceResult, error) {
@@ -292,6 +296,16 @@ func (e *Engine) StandbyFence(ctx context.Context, env agent.EngineEnv, db proto
 		res.Warnings = append(res.Warnings, "couldn't read the last binary log position: "+err.Error())
 	} else {
 		res.CheckpointLSN = filePos{File: pos.File.Name, Pos: pos.Pos}.String()
+		// Its last changes go to the bucket now (not up to a minute later):
+		// restores to any second until the switch don't wait for this
+		// server, which no longer holds the database.
+		if s.env.Repo.Bucket != "" {
+			if _, err := shipperFor(s).waitShipped(ctx, pos, fenceShipWait); err != nil {
+				res.Warnings = append(res.Warnings, "its last changes may not all be in the bucket yet: "+err.Error())
+			} else {
+				log.Printf("its binary log up to %s is in the bucket", res.CheckpointLSN)
+			}
+		}
 	}
 	res.Summary = fmt.Sprintf("Made %s on port %d read-only for good and ended its client sessions; the agent keeps it read-only.", s.flavor.display(), db.Port)
 	if res.CheckpointLSN != "" {
