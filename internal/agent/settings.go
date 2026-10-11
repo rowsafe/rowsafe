@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -25,8 +27,14 @@ import (
 //   - Rowsafe's archiving settings (and recovery and connection settings)
 //     are never changed;
 //   - nothing changes while PostgreSQL's configuration has errors, or on a
-//     standby, or for a setting given on PostgreSQL's command line (which
-//     would override it anyway);
+//     standby (except below), or for a setting given on PostgreSQL's
+//     command line (which would override it anyway);
+//   - a Rowsafe Cloud pair's standby gets, when the task says so
+//     (SettingsParams.Standby), the settings its primary waits to restart
+//     with, before the maintenance window restarts it and switches over to
+//     it: only settings that wait for a restart, none that Rowsafe's
+//     standby configuration sets, and its block in postgresql.auto.conf is
+//     kept as it was (ALTER SYSTEM rewrites the file without comments);
 //   - values PostgreSQL might not start with are refused (package tune:
 //     shared_buffers against this host's memory, libraries that aren't
 //     installed, huge_pages=on, too few connections);
@@ -61,12 +69,24 @@ func (a *Agent) changeSettings(ctx context.Context, db protocol.DatabaseSpec, p 
 		return nil, fmt.Errorf("unknown kind of settings change %q", p.Kind)
 	}
 	changes := tune.Normalize(p.Changes)
+	var standby standbyRecord
+	if p.Standby {
+		r, ok := a.followingStandby(db) // standby_updates.go
+		if !ok {
+			return nil, errors.New("this server doesn't run a standby of this database")
+		}
+		standby = r
+		db.Port, db.SocketDir = r.Database.Port, r.Database.SocketDir
+	}
 	before, err := collect.ReadSettings(ctx, a.settingsTarget(db), settingsProcRoot)
 	if err != nil {
 		return nil, err
 	}
-	if before.InRecovery {
+	switch {
+	case before.InRecovery && !p.Standby:
 		return nil, errors.New("this server is a standby: change settings on the primary")
+	case !before.InRecovery && p.Standby:
+		return nil, errors.New("the database's standby on this server isn't in recovery: Rowsafe changed nothing")
 	}
 	if len(before.ConfigErrors) > 0 {
 		return nil, fmt.Errorf("PostgreSQL's configuration has errors that would stop it at its next restart, so Rowsafe changes nothing until they are fixed on the server: %s",
@@ -97,6 +117,20 @@ func (a *Agent) changeSettings(ctx context.Context, db protocol.DatabaseSpec, p 
 		for _, lib := range kept {
 			tl.Printf("keeping %s in shared_preload_libraries: %s needs it", lib, required[lib])
 		}
+	}
+	if p.Standby {
+		if err := standbySettingsAllowed(changes, current); err != nil {
+			return nil, err
+		}
+		keep, err := standbyConfKeeper(standby.DataDir)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { // after ALTER SYSTEM, and after putting values back
+			if err := keep(); err != nil {
+				tl.Printf("putting Rowsafe's standby block back in postgresql.auto.conf: %v", err)
+			}
+		}()
 	}
 	facts := tune.Facts{Host: before.Host, Settings: current, Complete: true, PgStatStatements: before.PgStatStatements,
 		LibraryInstalled: func(lib string) bool { return libraryInstalled(ctx, conn, lib) }, Required: required}
@@ -163,7 +197,9 @@ func (a *Agent) changeSettings(ctx context.Context, db protocol.DatabaseSpec, p 
 		}
 	}
 
-	if ext, err := ensureStatements(ctx, conn, changes, after, tl); err != nil {
+	if p.Standby {
+		// Read-only: the extension comes from the primary's catalog.
+	} else if ext, err := ensureStatements(ctx, conn, changes, after, tl); err != nil {
 		tl.Printf("creating the pg_stat_statements extension failed: %v", err)
 	} else {
 		res.Extension = ext
@@ -399,4 +435,82 @@ func pgMessage(err error) error {
 		return errors.New(msg)
 	}
 	return err
+}
+
+// standbySettingsAllowed refuses what a standby's settings task may not
+// change: settings that apply without a restart (a standby's own value
+// would quietly differ from its primary's), and those Rowsafe's standby
+// configuration sets (standbyBlock).
+func standbySettingsAllowed(changes []protocol.SettingChange, current map[string]protocol.PGSetting) error {
+	for _, c := range changes {
+		if c.Name == "hot_standby" || slices.Contains(hotStandbySettings, c.Name) {
+			return fmt.Errorf("Rowsafe sets %s on a standby itself (from the primary's value)", c.Name)
+		}
+		if s, ok := current[c.Name]; !ok || tune.ApplyMode(s.Context) != "restart" {
+			return fmt.Errorf("on a standby Rowsafe only changes settings that wait for a restart, and %s doesn't", c.Name)
+		}
+	}
+	return nil
+}
+
+// standbyConfKeeper reads Rowsafe's standby block in dataDir's
+// postgresql.auto.conf and returns what puts it back after ALTER SYSTEM
+// rewrote the file: PostgreSQL keeps every setting in order (the one it
+// changes moves to the end) but drops comments, the block's markers among
+// them, so a later setStandbyConf couldn't replace the block any more.
+func standbyConfKeeper(dataDir string) (func() error, error) {
+	path := filepath.Join(dataDir, "postgresql.auto.conf")
+	cur, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	block := hbaBlockRE.FindString(string(cur))
+	if block == "" {
+		return func() error { return nil }, nil
+	}
+	return func() error {
+		now, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if strings.Contains(string(now), block) {
+			return nil
+		}
+		return writeFileAtomic(path, []byte(withStandbyBlock(string(now), block)), 0o600)
+	}, nil
+}
+
+// withStandbyBlock is content (as ALTER SYSTEM wrote it) with block's
+// settings as the block again, at the end: the last line of each of its
+// names is taken out (the block's own, as the block never names a setting
+// the task changes) and the block appended as it was, so the values in
+// effect stay the same.
+func withStandbyBlock(content, block string) string {
+	names := map[string]bool{}
+	for _, l := range strings.Split(block, "\n") {
+		if n := confLineName(l); n != "" {
+			names[n] = true
+		}
+	}
+	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if n := confLineName(lines[i]); names[n] {
+			delete(names, n)
+			lines = slices.Delete(lines, i, i+1)
+		}
+	}
+	return strings.TrimRight(strings.Join(lines, "\n"), "\n") + "\n\n" + strings.TrimLeft(block, "\n")
+}
+
+// confLineName is the setting a configuration line sets ("" for comments
+// and blank lines).
+func confLineName(line string) string {
+	l := strings.TrimSpace(line)
+	if l == "" || strings.HasPrefix(l, "#") {
+		return ""
+	}
+	if i := strings.IndexAny(l, " \t="); i > 0 {
+		return strings.ToLower(l[:i])
+	}
+	return ""
 }

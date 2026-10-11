@@ -404,6 +404,9 @@ type SoftwareReport struct {
 	// it to replay again rather than for a primary), so Rowsafe Cloud can
 	// update a pair's standby first. False from older agents.
 	StandbyAware bool `json:"standby_aware,omitempty"`
+	// StandbySettings (addition): the agent applies settings tasks with
+	// SettingsParams.Standby to a standby it runs. False from older agents.
+	StandbySettings bool `json:"standby_settings,omitempty"`
 }
 
 // ClusterSoftware is one local PostgreSQL cluster's versions.

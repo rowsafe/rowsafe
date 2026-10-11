@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -331,6 +332,60 @@ func TestStandbyRealPostgres(t *testing.T) {
 	if len(ph.Primaries) != 1 || len(ph.Primaries[0].Streams) != 1 || ph.Primaries[0].Streams[0].Role != "rowsafe_standby_sby_1" {
 		t.Fatalf("primary heartbeat: %+v", ph.Primaries)
 	}
+
+	// ---- a setting that waits for a restart, on the standby (the Rowsafe
+	// Cloud window turns on query statistics there before restarting it
+	// and switching over to it)
+	preload := func(standby bool, name, value string) (*protocol.SettingsResult, error) {
+		return aT.changeSettings(ctx, dbP, protocol.SettingsParams{Kind: protocol.SettingsKindFix, Standby: standby,
+			Changes: []protocol.SettingChange{{Name: name, Value: value}}}, &taskLog{})
+	}
+	for _, c := range []struct{ name, value, want string }{
+		{"work_mem", "8MB", "wait for a restart"},
+		{"max_connections", "500", "sets max_connections on a standby itself"},
+		{"archive_mode", "off", "never"},
+	} {
+		if _, err := preload(true, c.name, c.value); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s on the standby: %v, want %q", c.name, err, c.want)
+		}
+	}
+	if _, err := aP.changeSettings(ctx, dbP, protocol.SettingsParams{Kind: protocol.SettingsKindFix, Standby: true,
+		Changes: []protocol.SettingChange{{Name: "shared_preload_libraries", Value: "pg_stat_statements"}}}, &taskLog{}); err == nil ||
+		!strings.Contains(err.Error(), "doesn't run a standby") {
+		t.Errorf("a standby change on the primary's server: %v", err)
+	}
+	var sres *protocol.SettingsResult
+	step("the primary's preload libraries on the standby", func(tl *taskLog) (err error) {
+		sres, err = aT.changeSettings(ctx, dbP, protocol.SettingsParams{Kind: protocol.SettingsKindFix, Standby: true,
+			Changes: []protocol.SettingChange{{Name: "shared_preload_libraries", Value: "pg_stat_statements"}}}, tl)
+		return err
+	})
+	if sres.Snapshot == nil || !sres.Snapshot.InRecovery || !slices.Contains(sres.PendingRestart, "shared_preload_libraries") || sres.Extension != "" {
+		t.Fatalf("standby settings result: %+v", sres)
+	}
+	auto := string(mustRead(t, filepath.Join(target.dir, "postgresql.auto.conf")))
+	if !strings.Contains(auto, hbaBegin("sby_1")) || !strings.Contains(auto, hbaEnd("sby_1")) ||
+		!strings.Contains(auto, "shared_preload_libraries = 'pg_stat_statements'") ||
+		strings.Count(auto, "primary_conninfo") != 1 || strings.Index(auto, "shared_preload_libraries") > strings.Index(auto, hbaBegin("sby_1")) {
+		t.Fatalf("the standby's postgresql.auto.conf:\n%s", auto)
+	}
+	// The window's restart of the standby: it loads the library and
+	// streams again.
+	for _, action := range []string{helperStop, helperStart} {
+		if err := ops.helper(ctx, action, target.port, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var spl string
+	sqlOn(target, `SELECT current_setting('shared_preload_libraries'), pg_is_in_recovery()`, &spl, &inRec)
+	if spl != "pg_stat_statements" || !inRec {
+		t.Fatalf("after the standby's restart: shared_preload_libraries %q, in recovery %v", spl, inRec)
+	}
+	waitFor("the restarted standby to stream again", func() bool {
+		var n int
+		sqlOn(target, `SELECT count(*) FROM pg_stat_wal_receiver WHERE status = 'streaming'`, &n)
+		return n == 1
+	})
 
 	// ---- fence the primary
 	sqlOn(primary, `INSERT INTO orders VALUES (201, 'last before the fence')`)
