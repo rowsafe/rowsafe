@@ -330,6 +330,18 @@ func TestDescribeCloudChanges(t *testing.T) {
 	if !strings.Contains(txt, "types the server's name") || !strings.Contains(txt, "list_cloud_servers") || strings.Contains(txt, "confirm_name") {
 		t.Errorf("delete_cloud_server: %s", txt)
 	}
+	// A database's destructive actions take params.confirm: the dashboard's
+	// call checks it, and Rowsafe doesn't type it.
+	for _, action := range []string{"rewind_in_place", "remove_standby", "finish_upgrade"} {
+		txt, _ = callText(t, cs, "describe_change", map[string]any{"action": action})
+		if !strings.Contains(txt, "Pass params.confirm") || strings.Contains(txt, "types the database's name") {
+			t.Errorf("%s: %s", action, txt)
+		}
+	}
+	// One without a confirmation says nothing about it.
+	if txt, _ = callText(t, cs, "describe_change", map[string]any{"action": "delete_database"}); strings.Contains(txt, "confirm") && !strings.Contains(txt, "confirm with the user") {
+		t.Errorf("delete_database: %s", txt)
+	}
 }
 
 func (f *cloudAPI) snapshot() ([]string, []protocol.CreateApprovalRequest) {

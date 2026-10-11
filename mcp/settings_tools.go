@@ -13,8 +13,8 @@ import (
 )
 
 // Settings: a read-only view of PostgreSQL's settings and what Rowsafe
-// recommends. No MCP tool changes settings: a person does, in the
-// dashboard (Tuning) or with rowsafe tune / rowsafe settings set.
+// recommends. Settings change through request_change (change_settings,
+// revert_settings), the dashboard (Tuning) or rowsafe tune / settings set.
 
 type settingsInput struct {
 	Database string `json:"database" jsonschema:"database name or ID"`

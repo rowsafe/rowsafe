@@ -76,7 +76,7 @@ func (t *tools) addWriteTools(s *sdk.Server) {
 		Name: "plan_adoption",
 		Description: "Produces a read-only adopt plan for a database server: what Rowsafe would change to turn on backups (for PostgreSQL: pgBackRest config, stanza, archive_mode/archive_command/archive_timeout, wal_level if minimal; for MySQL and MariaDB: the binary log settings; for MongoDB: the replica set the oplog needs) and whether a restart of the database server will be needed. Nothing on the host changes. " +
 			"A database not registered yet is registered first when host is given; registering counts against the plan's database limit (402 when full). For a registered database it re-plans (e.g. after settings changed). " +
-			"Returns the plan task. Applying the plan changes the database server's settings and is done by a person: the Turn on backups button in the dashboard, or rowsafe apply NAME.",
+			"Returns the plan task. Applying the plan changes the database server's settings: show the plan to the user, and once they agree apply it with request_change turn_on_backups (or they click Turn on backups in the dashboard).",
 		Annotations: writes("Plan adoption (read-only on the host)", false, false),
 		InputSchema: withWait[planInput](func(p map[string]*jsonschema.Schema) {
 			p["port"].Minimum, p["port"].Maximum = ptr(1.0), ptr(65535.0)

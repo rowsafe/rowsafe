@@ -328,15 +328,27 @@ func (t *tools) describeChange(ctx context.Context, _ *sdk.CallToolRequest, in d
 		b.line("Set by Rowsafe whatever the params say: %s.", strings.Join(keys, ", "))
 	}
 	if a.Risk == protocol.RiskDestructive {
-		what := "database's"
-		if slices.Contains(pathParams(a), "server") {
-			what = "server's"
-		}
-		b.line("Destructive: confirm with the user in chat first. Rowsafe types the %s name for you and records that it did.", what)
+		b.line("Destructive: confirm with the user in chat first. %s", destructiveConfirm(a, ca))
 	}
 	schema, _ := json.Marshal(ca.ParamsSchema)
 	b.line("params schema: %s", schema)
 	return text(b), DescribeChangeOutput{Actions: []ChangeAction{ca}}, nil
+}
+
+// destructiveConfirm says who types a destructive action's confirmation.
+// Rowsafe types a Rowsafe Cloud server's name (delete_cloud_server); the
+// database actions take params.confirm, which the dashboard's call checks
+// like a person's typed name, so leaving it out fails the change.
+func destructiveConfirm(a protocol.ApprovalAction, ca ChangeAction) string {
+	if slices.Contains(pathParams(a), "server") {
+		return "Rowsafe types the server's name for you and records that it did."
+	}
+	if _, fixed := a.Fixed["confirm"]; !fixed {
+		if props, _ := ca.ParamsSchema["properties"].(map[string]any); props["confirm"] != nil {
+			return "Pass params.confirm as its description says (the database's name, or the hostname it names): Rowsafe checks it, and the change fails without it."
+		}
+	}
+	return ""
 }
 
 // autonomyFor says how a runs under the org's agent setting, and what would
