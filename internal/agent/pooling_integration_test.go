@@ -2,12 +2,15 @@ package agent
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +23,7 @@ import (
 
 	"github.com/rowsafe/rowsafe/collect"
 	"github.com/rowsafe/rowsafe/internal/pgbouncer"
+	"github.com/rowsafe/rowsafe/pgprobe"
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
@@ -49,13 +53,19 @@ func poolFreePort(t *testing.T) int {
 
 func poolStartCluster(t *testing.T, base, name string) tempCluster {
 	t.Helper()
+	return poolStartClusterOpts(t, base, name, "")
+}
+
+// poolStartClusterOpts starts a cluster with extra server options.
+func poolStartClusterOpts(t *testing.T, base, name, extra string) tempCluster {
+	t.Helper()
 	c := tempCluster{dir: filepath.Join(base, name), sock: base, port: poolFreePort(t)}
 	u, _ := user.Current()
 	out, err := exec.Command("initdb", "-D", c.dir, "-U", u.Username, "--auth-local=trust", "--auth-host=scram-sha-256", "-E", "UTF8", "--no-locale").CombinedOutput()
 	if err != nil {
 		t.Fatalf("initdb: %v\n%s", err, out)
 	}
-	opts := fmt.Sprintf("-p %d -k %s -c listen_addresses=127.0.0.1 -c max_connections=60", c.port, c.sock)
+	opts := fmt.Sprintf("-p %d -k %s -c listen_addresses=127.0.0.1 -c max_connections=60 %s", c.port, c.sock, extra)
 	start := exec.Command("pg_ctl", "-D", c.dir, "-o", opts, "-l", filepath.Join(base, name+".log"), "-w", "start")
 	start.Env = append(os.Environ(), "LC_ALL=en_US.UTF-8")
 	if out, err := start.CombinedOutput(); err != nil {
@@ -76,7 +86,7 @@ type fakePgbHelper struct {
 	cmd                      *exec.Cmd
 	requests                 atomic.Int32
 	lastAction, lastListen   string
-	lastTarget               string
+	lastTarget, lastTLS      string
 	stop                     chan struct{}
 	allowedPort              int
 	installedNow, removedNow bool
@@ -157,6 +167,11 @@ func (h *fakePgbHelper) handle(action string, kv map[string]string) error {
 			fmt.Fprintf(&b, "max_prepared_statements = %s\n", kv["prepared"])
 		}
 		b.WriteString("server_reset_query = DISCARD ALL\nignore_startup_parameters = extra_float_digits\nserver_lifetime = 3600\nserver_idle_timeout = 600\n")
+		if kv["tls_mode"] != "" {
+			fmt.Fprintf(&b, "client_tls_sslmode = %s\nclient_tls_cert_file = %s\nclient_tls_key_file = %s\nclient_tls_protocols = secure\n",
+				kv["tls_mode"], kv["tls_cert"], kv["tls_key"])
+		}
+		h.lastTLS = kv["tls_mode"] + " " + kv["tls_cert"]
 		os.WriteFile(ini, []byte(b.String()), 0o640)
 		h.lastListen, h.lastTarget = kv["listen"], kv["target_host"]+":"+kv["target_port"]
 		h.mu.Lock()
@@ -465,4 +480,202 @@ func runLoad(ctx context.Context, t *testing.T, port, clients, queries int) {
 		}()
 	}
 	wg.Wait()
+}
+
+// writeTestCert writes a self-signed certificate and key PostgreSQL and
+// PgBouncer can serve.
+func writeTestCert(t *testing.T, cert, key string) *x509.Certificate {
+	t.Helper()
+	certPEM, keyPEM, err := selfSignedCert("db.example.test", []net.IP{net.IPv4(127, 0, 0, 1)}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeKeyPair(cert, key, certPEM, keyPEM); err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(certPEM)
+	c, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+
+// PgBouncer on public addresses takes encrypted connections only, with
+// PostgreSQL's certificate, and serves a renewed one after Rowsafe installs
+// it for PostgreSQL.
+//
+//	ROWSAFE_TEST_PGBOUNCER=1 go test ./internal/agent -run TestPoolingRealTLS
+func TestPoolingRealTLS(t *testing.T) {
+	if os.Getenv("ROWSAFE_TEST_PGBOUNCER") != "1" {
+		t.Skip("set ROWSAFE_TEST_PGBOUNCER=1 (needs initdb, pg_ctl and pgbouncer)")
+	}
+	for _, bin := range []string{"initdb", "pg_ctl", "pgbouncer"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			t.Skipf("%s not found", bin)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	base, err := os.MkdirTemp("/tmp", "rspt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if !t.Failed() {
+			os.RemoveAll(base)
+		}
+	})
+	certDir := filepath.Join(base, "tls")
+	os.MkdirAll(certDir, 0o700)
+	cert, key := filepath.Join(certDir, "server.crt"), filepath.Join(certDir, "server.key")
+	first := writeTestCert(t, cert, key)
+	pg := poolStartClusterOpts(t, base, "a", fmt.Sprintf("-c ssl=on -c ssl_cert_file=%s -c ssl_key_file=%s", cert, key))
+	u, _ := user.Current()
+	conn, err := pginspectConnect(ctx, pg, u.Username)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{`SET password_encryption = 'scram-sha-256'`, `CREATE ROLE app LOGIN PASSWORD 'app-secret'`, `CREATE DATABASE shop OWNER app`} {
+		if _, err := conn.Exec(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	conn.Close(ctx)
+
+	state := filepath.Join(base, "state")
+	h := &fakePgbHelper{t: t, dir: filepath.Join(state, "pooler"), resultDir: filepath.Join(base, "run"), confDir: filepath.Join(base, "etc"),
+		sockDir: base, stop: make(chan struct{}), allowedPort: pg.port}
+	for _, d := range []string{h.dir, h.resultDir, h.confDir} {
+		os.MkdirAll(d, 0o700)
+	}
+	go h.run()
+	t.Cleanup(func() {
+		close(h.stop)
+		h.mu.Lock()
+		h.stopLocked()
+		h.mu.Unlock()
+	})
+	allow := filepath.Join(base, "pooler-allowed")
+	os.WriteFile(allow, []byte(fmt.Sprintf("%d\npublic\n", pg.port)), 0o644)
+	helper := filepath.Join(base, "rowsafe-pg-restart")
+	os.WriteFile(helper, []byte("#!/bin/sh\n# pooler-actions: install configure reload off tls\n"), 0o755)
+	a := &Agent{cfg: Config{StateDir: state, Mode: ModeNative, PGUser: u.Username, RestartHelper: helper, Pooler: PoolerConfig{
+		AllowFile: allow, Dir: h.dir, ResultDir: h.resultDir, SocketDir: base, Userlist: filepath.Join(h.confDir, "userlist.txt")}}}
+	db := protocol.DatabaseSpec{ID: "db_1", Name: "shop", Port: pg.port, SocketDir: pg.sock}
+	poolerPort := poolFreePort(t)
+
+	tl := &taskLog{}
+	res, err := a.pooling(ctx, db, protocol.PoolingParams{Action: protocol.PoolingOn,
+		Settings: protocol.PoolingSettings{Listen: protocol.PoolerListenPublic, Port: poolerPort}}, "task_on", tl)
+	if err != nil {
+		t.Fatalf("pooling on: %v\n%s", err, tl)
+	}
+	if !res.On || !res.Encrypted || !slices.Equal(res.Addresses, []string{"*"}) || h.lastTLS != "require "+cert {
+		t.Fatalf("result %+v, helper's TLS %q", res, h.lastTLS)
+	}
+	t.Logf("on: %s", res.Summary)
+	if st := a.poolerStatus(ctx); !st.Encrypted || !st.Running {
+		t.Fatalf("status %+v", st)
+	}
+
+	login := func(host, sslmode string) error {
+		cfg, err := pgx.ParseConfig(fmt.Sprintf("postgres://app:app-secret@%s:%d/shop?sslmode=%s", host, poolerPort, sslmode))
+		if err != nil {
+			return err
+		}
+		cfg.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+		c, err := pgx.ConnectConfig(ctx, cfg)
+		if err != nil {
+			return err
+		}
+		defer c.Close(ctx)
+		var one int
+		return c.QueryRow(ctx, `SELECT 1`).Scan(&one)
+	}
+	// PgBouncer refuses unencrypted TCP logins on every address alike;
+	// ROWSAFE_TEST_POOLER_ADDR adds one of this machine's addresses other
+	// machines reach (a sandbox or a local firewall may block it).
+	hosts := []string{"127.0.0.1"}
+	if ip := os.Getenv("ROWSAFE_TEST_POOLER_ADDR"); ip != "" {
+		hosts = append(hosts, ip)
+	}
+	for _, host := range hosts {
+		if err := login(host, "require"); err != nil {
+			t.Fatalf("an encrypted login on %s: %v", host, err)
+		}
+		if err := login(host, "disable"); err == nil {
+			t.Fatalf("an unencrypted login on %s worked", host)
+		} else {
+			t.Logf("unencrypted on %s: %v", host, err)
+		}
+		r := probeServed(ctx, net.JoinHostPort(host, strconv.Itoa(poolerPort)), pgprobe.Options{})
+		if !r.TLS || r.PlainLogins || r.Cert == nil || !r.Cert.Equal(first) {
+			t.Fatalf("probe on %s: %+v", host, r)
+		}
+	}
+
+	// Rowsafe renews PostgreSQL's certificate in place: PgBouncer serves
+	// the new one after a reload, without a restart.
+	pid := h.cmd.Process.Pid
+	second := writeTestCert(t, cert, key)
+	tl = &taskLog{}
+	if note := a.poolerFollowCert(ctx, db, cert, key, tl); !strings.Contains(note, "PgBouncer serves it too") {
+		t.Fatalf("follow: %q\n%s", note, tl)
+	}
+	waitServed := func(want *x509.Certificate) {
+		t.Helper()
+		for i := 0; ; i++ {
+			r := probeServed(ctx, net.JoinHostPort("127.0.0.1", strconv.Itoa(poolerPort)), pgprobe.Options{})
+			if r.Cert != nil && r.Cert.Equal(want) {
+				return
+			}
+			if i == 40 {
+				t.Fatalf("PgBouncer serves %v, not the new certificate", r.Cert)
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+	}
+	waitServed(second)
+	if h.cmd.Process.Pid != pid {
+		t.Fatal("PgBouncer restarted to take the new certificate")
+	}
+
+	// New files (a certificate from an authority replacing the first one):
+	// the helper points PgBouncer at them.
+	cert2, key2 := filepath.Join(certDir, "rowsafe-server.crt"), filepath.Join(certDir, "rowsafe-server.key")
+	third := writeTestCert(t, cert2, key2)
+	if note := a.poolerFollowCert(ctx, db, cert2, key2, &taskLog{}); !strings.Contains(note, "PgBouncer serves it too") {
+		t.Fatalf("follow new files: %q", note)
+	}
+	if h.lastTLS != "require "+cert2 {
+		t.Fatalf("the helper's TLS: %q", h.lastTLS)
+	}
+	waitServed(third)
+	if st, _ := a.loadPoolerState(); st.TLSCert != cert2 || st.TLSKey != key2 {
+		t.Fatalf("state %+v", st)
+	}
+	if err := login("127.0.0.1", "require"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Another database's certificate leaves PgBouncer alone.
+	other := db
+	other.Port++
+	if note := a.poolerFollowCert(ctx, other, cert, key, &taskLog{}); note != "" {
+		t.Fatalf("another cluster: %q", note)
+	}
+
+	// A helper from before encryption: public is refused for a fresh
+	// setup, never set up unencrypted.
+	if _, err := a.pooling(ctx, db, protocol.PoolingParams{Action: protocol.PoolingOff}, "task_off", &taskLog{}); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(helper, []byte("#!/bin/sh\n# pooler-actions: install configure reload off\n"), 0o755)
+	_, err = a.pooling(ctx, db, protocol.PoolingParams{Action: protocol.PoolingOn,
+		Settings: protocol.PoolingSettings{Listen: protocol.PoolerListenPublic, Port: poolerPort}}, "task_on2", &taskLog{})
+	if err == nil || !strings.Contains(err.Error(), "only with encryption") || !strings.Contains(err.Error(), "run the install command") {
+		t.Fatalf("public without a certificate: %v", err)
+	}
 }

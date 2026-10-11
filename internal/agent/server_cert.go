@@ -493,6 +493,8 @@ func (a *Agent) certInstall(ctx context.Context, db protocol.DatabaseSpec, p pro
 	res := &protocol.ServerCertificateResult{Current: describeCert(leaf)}
 	res.Summary = fmt.Sprintf("Installed a certificate for %s from %s, valid until %s. PostgreSQL reloaded; nothing restarted.",
 		joinAnd(p.Names), certIssuerName(leaf), leaf.NotAfter.UTC().Format("2 January 2006"))
+	// PgBouncer, when it encrypts with PostgreSQL's certificate (pooling.go).
+	res.Summary += a.poolerFollowCert(ctx, db, newCert, newKey, tl)
 	tl.Printf("%s", res.Summary)
 	return res, nil
 }
