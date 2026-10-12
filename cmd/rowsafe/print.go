@@ -82,39 +82,41 @@ func firstLine(s string, n int) string {
 	return s
 }
 
+// printTask is rowsafe task ID: the task, what it did, and what went wrong.
 func printTask(t protocol.TaskView) {
 	fmt.Printf("Task %s: %s %s\n", t.ID, t.Type, strings.ToUpper(t.Status))
+	printTaskResult(t)
+	printTaskTrouble(t)
+}
+
+// printTaskResult prints what a task did, and reports whether it printed
+// anything.
+func printTaskResult(t protocol.TaskView) bool {
 	switch t.Type {
 	case protocol.TaskAdopt:
 		var r protocol.AdoptResult
-		if json.Unmarshal(t.Result, &r) == nil {
+		if json.Unmarshal(t.Result, &r) == nil && (r.Inspect.ServerVersion != "" || len(r.Plan) > 0 || len(r.Warnings) > 0) {
 			printAdopt(r)
+			return true
 		}
 	case protocol.TaskRestorePoint:
 		var r protocol.RestorePointResult
 		if json.Unmarshal(t.Result, &r) == nil && r.LSN != "" {
-			state := "archived"
-			if !r.Archived {
-				state = "NOT yet confirmed in the repository"
-			}
-			if strings.Contains(r.LSN, ":") { // MySQL / MariaDB: a binary log position
-				fmt.Printf("Mark %q at binary log position %s, %s\n", r.Name, r.LSN, state)
-			} else if r.WALFile == "" { // a Mark taken as a backup of its own (Qdrant, ...)
-				fmt.Printf("Mark %q saved as backup %s, %s\n", r.Name, r.LSN, state)
-			} else {
-				fmt.Printf("Restore point %q at LSN %s (WAL %s), %s\n", r.Name, r.LSN, r.WALFile, state)
-			}
+			fmt.Println(markText(r))
+			return true
 		}
 	case protocol.TaskBackup:
 		var r protocol.BackupResult
 		if json.Unmarshal(t.Result, &r) == nil && r.Label != "" {
 			fmt.Printf("Backup %s (%s): %s database, %s stored, took %s\n", r.Label, r.Type,
 				humanBytes(r.SizeBytes), humanBytes(r.RepoSizeBytes), r.StoppedAt.Sub(r.StartedAt).Round(time.Second))
+			return true
 		}
 	case protocol.TaskDrill:
 		var r protocol.DrillResult
 		if json.Unmarshal(t.Result, &r) == nil && r.BackupLabel != "" {
 			printDrill(r)
+			return true
 		}
 	case protocol.TaskMaintenance:
 		var r protocol.MaintenanceResult
@@ -123,16 +125,19 @@ func printTask(t protocol.TaskView) {
 			for _, d := range r.Details {
 				fmt.Printf("  %s\n", d)
 			}
+			return true
 		}
 	case protocol.TaskSettings:
 		var r protocol.SettingsResult
 		if json.Unmarshal(t.Result, &r) == nil && r.Summary != "" {
 			fmt.Println(r.Summary)
+			return true
 		}
 	case protocol.TaskSecurityFix: // protocol/security.go
 		var r protocol.SecurityFixResult
 		if json.Unmarshal(t.Result, &r) == nil && r.Summary != "" {
 			fmt.Println(r.Summary)
+			return true
 		}
 	case protocol.TaskRestart:
 		var r protocol.RestartResult
@@ -143,12 +148,33 @@ func printTask(t protocol.TaskView) {
 				fmt.Printf("Restarted %s in %.1fs; archive_mode is %s\n", cmp.Or(r.Unit, "PostgreSQL"),
 					float64(r.DurationMs)/1000, r.ArchiveMode)
 			}
+			return true
 		}
 	case protocol.TaskPooling, protocol.TaskPoolerRetarget:
-		poolingResult(t)
+		return poolingResult(t)
 	}
+	return false
+}
+
+// markText says where a Mark is and whether the backups have it yet.
+func markText(r protocol.RestorePointResult) string {
+	where := fmt.Sprintf("LSN %s, WAL %s", r.LSN, r.WALFile)
+	switch {
+	case strings.Contains(r.LSN, ":"): // MySQL / MariaDB: a binary log position
+		where = "binary log position " + r.LSN
+	case r.WALFile == "": // a Mark taken as a backup of its own (Qdrant, ...)
+		where = "backup " + r.LSN
+	}
+	if !r.Archived {
+		return fmt.Sprintf("Mark %q made (%s), but NOT yet confirmed in the backups.", r.Name, where)
+	}
+	return fmt.Sprintf("Mark %q saved (%s).", r.Name, where)
+}
+
+// printTaskTrouble prints a task's error, and its log when it didn't succeed.
+func printTaskTrouble(t protocol.TaskView) {
 	if t.Error != "" {
-		fmt.Printf("\nError: %s\n", t.Error)
+		fmt.Printf("Error: %s\n", t.Error)
 	}
 	if t.Log != "" && t.Status != protocol.StatusSucceeded {
 		fmt.Printf("\nLog:\n%s", t.Log)
@@ -228,10 +254,23 @@ func updateText(r *protocol.UpdateReport) string {
 	if r == nil {
 		return "-"
 	}
-	s := r.State + " " + r.ToVersion
+	when := ""
 	if !r.At.IsZero() {
 		at := r.At
-		s += " " + ago(&at)
+		when = " " + ago(&at)
+	}
+	var s string
+	switch r.State {
+	case protocol.UpdateStaged, protocol.UpdateSwitched:
+		s = "updating to " + r.ToVersion
+	case protocol.UpdateConfirmed:
+		s = "updated to " + r.ToVersion + when
+	case protocol.UpdateRolledBack:
+		s = "update to " + r.ToVersion + " rolled back" + when
+	case protocol.UpdateFailed:
+		s = "update to " + r.ToVersion + " failed" + when
+	default:
+		s = r.State + " " + r.ToVersion + when
 	}
 	if r.Error != "" {
 		s += ": " + firstLine(r.Error, 50)

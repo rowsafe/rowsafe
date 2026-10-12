@@ -136,17 +136,21 @@ func login(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	org := cfg.Org.Name
+	if org == "" {
+		org = cfg.Org.ID
+	}
+	at := ""
+	if cfg.URL != protocol.DefaultAPIURL {
+		at = " at " + cfg.URL
+	}
+	fmt.Printf("Logged in to %s%s. Key saved to %s\n", org, at, p)
 	// A previous browser login's key is no longer used by anything.
 	if saved.KeyID != "" && saved.APIKey != cfg.APIKey && saved.URL == cfg.URL {
 		if err := client.New(saved.URL, saved.APIKey).Logout(ctx); err == nil {
 			fmt.Printf("Revoked the previous login's API key (%s).\n", saved.KeyID)
 		}
 	}
-	org := cfg.Org.Name
-	if org == "" {
-		org = cfg.Org.ID
-	}
-	fmt.Printf("Logged in to %s at %s. Credentials saved to %s\n", org, cfg.URL, p)
 	return nil
 }
 
@@ -165,11 +169,10 @@ func loginWithBrowser(ctx context.Context, url, name string, browser bool) (conf
 	if err != nil {
 		return config{}, fmt.Errorf("starting the login at %s: %w", url, err)
 	}
-	fmt.Printf("To log in, open\n\n  %s\n\nand confirm the code %s\n\n", start.VerificationURIComplete, start.UserCode)
-	if browser {
-		if openBrowser(start.VerificationURIComplete) == nil {
-			fmt.Println("Opened it in your browser.")
-		}
+	if browser && openBrowser(start.VerificationURIComplete) == nil {
+		fmt.Printf("Confirm the code %s in your browser (or open this link):\n  %s\n", start.UserCode, start.VerificationURIComplete)
+	} else {
+		fmt.Printf("Open this link on any device and confirm the code %s:\n  %s\n", start.UserCode, start.VerificationURIComplete)
 	}
 	fmt.Println("Waiting for you to approve...")
 
@@ -228,21 +231,23 @@ func whoami(ctx context.Context, args []string) error {
 			protocol.WhoAmI
 		}{cfg.URL, me})
 	}
-	fmt.Printf("Control plane: %s\n", cfg.URL)
+	// Who first (organization, person), then the key and where it points.
 	fmt.Printf("Organization:  %s (%s), %s plan\n", me.Org.Name, me.Org.ID, me.Org.Plan)
 	if k := me.APIKey; k != nil {
+		if k.CreatedBy != "" {
+			fmt.Printf("Acts as:       %s, with their rights in the dashboard\n", k.CreatedBy)
+		}
 		access := "read-write"
 		if k.ReadOnly {
 			access = "read-only"
 		}
-		fmt.Printf("API key:       %s (%s), %s\n", k.Name, k.ID, access)
-		if k.CreatedBy != "" {
-			fmt.Printf("Acts as:       %s, with their rights in the dashboard\n", k.CreatedBy)
+		from := ""
+		if os.Getenv("ROWSAFE_API_KEY") != "" {
+			from = ", from ROWSAFE_API_KEY"
 		}
+		fmt.Printf("API key:       %s (%s), %s%s\n", k.Name, k.ID, access, from)
 	}
-	if os.Getenv("ROWSAFE_API_KEY") != "" {
-		fmt.Println("(credentials from ROWSAFE_API_KEY)")
-	}
+	fmt.Printf("Control plane: %s\n", cfg.URL)
 	return nil
 }
 

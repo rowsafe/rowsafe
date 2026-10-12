@@ -199,7 +199,7 @@ func envCmd(ctx context.Context, c *client.Client, args []string) error {
 		fmt.Printf("\n  %s\n\n", url)
 	}
 	if terr == nil && t.Cloud != nil {
-		fmt.Printf("Who can connect to %s: %s. Let your app's server in with `rowsafe cloud allow %s ADDRESS`.\n",
+		fmt.Printf("Who can connect to %s: %s.\n\nNext: rowsafe cloud allow %s ADDRESS   (let your app's server in)\n",
 			t.Cloud.Name, sourcesText(t.Cloud.AllowedIPs), t.Cloud.Name)
 	}
 	return nil

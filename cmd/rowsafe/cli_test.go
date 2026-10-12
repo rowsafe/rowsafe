@@ -67,7 +67,7 @@ func (f *fakeAPI) handler(t *testing.T) http.Handler {
 		}
 		j(w, 404, protocol.Error{Error: "not found"})
 	}))
-	for _, p := range []string{"backups", "drills", "tasks"} {
+	for _, p := range []string{"backups", "drills", "tasks", "restore-points"} {
 		mux.HandleFunc("GET /v1/databases/{ref}/"+p, authed(func(w http.ResponseWriter, r *http.Request) { j(w, 200, []any{}) }))
 	}
 	mux.HandleFunc("GET /v1/tasks", authed(func(w http.ResponseWriter, r *http.Request) {
@@ -111,7 +111,8 @@ func (f *fakeAPI) handler(t *testing.T) http.Handler {
 				tk.Status = protocol.StatusSucceeded
 				switch tk.Type {
 				case protocol.TaskRestorePoint:
-					tk.Result, _ = json.Marshal(protocol.RestorePointResult{Name: "before-fix-drop-20260924-120000", Archived: true})
+					tk.Result, _ = json.Marshal(protocol.RestorePointResult{Name: "before-fix-drop-20260924-120000", Archived: true,
+						LSN: "0/3000060", WALFile: "000000010000000000000003"})
 				case protocol.TaskMaintenance:
 					var p protocol.MaintenanceParams
 					_ = json.Unmarshal(tk.Params, &p)
@@ -148,8 +149,11 @@ func (f *fakeAPI) handler(t *testing.T) http.Handler {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		f.mu.Lock()
 		f.marks = append(f.marks, r.PathValue("ref")+"/"+req.Name)
+		tk := protocol.TaskView{ID: fmt.Sprintf("task_%d", len(f.tasks)+1), Type: protocol.TaskRestorePoint, Status: protocol.StatusQueued,
+			DatabaseName: r.PathValue("ref")}
+		f.tasks = append(f.tasks, tk)
 		f.mu.Unlock()
-		j(w, 201, protocol.TaskView{ID: "task_1", Type: protocol.TaskRestorePoint, Status: protocol.StatusQueued})
+		j(w, 201, tk)
 	}))
 	mux.HandleFunc("GET /v1/databases/{ref}/health", authed(func(w http.ResponseWriter, r *http.Request) {
 		score, ok := f.health[r.PathValue("ref")]
@@ -923,5 +927,63 @@ func TestFix(t *testing.T) {
 	}
 	if h := helpFor([]string{"fix"}); !strings.Contains(h, "rowsafe fix [NAME]") || !strings.Contains(h, "Apply fix") {
 		t.Errorf("help fix:\n%s", h)
+	}
+}
+
+// The text output leads with the verdict and what needs doing, says each
+// fact once, and ends with at most one hint.
+func TestTextOutput(t *testing.T) {
+	seen := time.Now().Add(-90 * time.Second)
+	f := &fakeAPI{dbs: dbs("app", "billing"), protected: map[string]bool{"app": true},
+		hosts: []protocol.Host{
+			{ID: "h_1", Hostname: "db1", AgentVersion: "0.9.4", UpdateChannel: "stable", LastSeenAt: &seen,
+				LastUpdate: &protocol.UpdateReport{State: protocol.UpdateFailed, ToVersion: "0.9.5", Error: "bad signature", At: seen}},
+			{ID: "h_2", Hostname: "db2", AgentVersion: "0.9.5", UpdateChannel: "stable", PinnedVersion: "0.9.5", LastSeenAt: &seen,
+				LastUpdate: &protocol.UpdateReport{State: protocol.UpdateConfirmed, ToVersion: "0.9.5", At: seen}}}}
+	f.dbs[0].Hostname, f.dbs[1].Hostname = "db1", "db2"
+	_, _ = cliEnv(t, f)
+	out := func(args ...string) string {
+		t.Helper()
+		s, _ := captureStdout(t, func() error { return dispatch(t.Context(), args) })
+		return s
+	}
+	lines := func(s string) []string { return strings.Split(strings.TrimRight(s, "\n"), "\n") }
+
+	if got := lines(out("status")); !strings.HasPrefix(got[0], "Needs attention: ") || !strings.Contains(got[0], "2 hosts, 2 databases") {
+		t.Errorf("status: the verdict comes first:\n%s", strings.Join(got, "\n"))
+	}
+	if got := out("status", "billing"); !strings.HasPrefix(got, "billing is NOT PROTECTED:\n  - no restore drill has run yet\n\nLast backup:") {
+		t.Errorf("status NAME: the verdict and its reasons first, then the facts:\n%s", got)
+	}
+	if got := lines(out("ls")); got[0] != "NAME     STATUS  LAST WAL ARCHIVED  ENGINE      SIZE  HOST" || !strings.HasPrefix(got[1], "app      active") {
+		t.Errorf("ls:\n%s", strings.Join(got, "\n"))
+	}
+	got := lines(out("hosts", "list"))
+	if !strings.HasPrefix(got[0], "HOST  LAST SEEN  AGENT") || !strings.Contains(got[1], "0.9.4 (update to 0.9.5 failed 1m ago: bad signature)") ||
+		!strings.Contains(got[2], "0.9.5  ") || strings.Contains(got[2], "updated") || !strings.Contains(got[2], "pinned to 0.9.5") {
+		t.Errorf("hosts list:\n%s", strings.Join(got, "\n"))
+	}
+	if got := lines(out("whoami")); len(got) != 3 || !strings.HasPrefix(got[0], "Organization:  Acme (org_1), pro plan") ||
+		got[1] != "API key:       ci (key_x), read-write, from ROWSAFE_API_KEY" || !strings.HasPrefix(got[2], "Control plane: ") {
+		t.Errorf("whoami:\n%s", strings.Join(got, "\n"))
+	}
+	for args, want := range map[string]string{
+		"backups app": "No backups of app yet. Back up now: rowsafe backup app\n",
+		"marks app":   "No Marks on app yet. Make one: rowsafe mark app LABEL\n",
+		"proofs app":  "No restore tests of app yet. Run one now: rowsafe proof app\n",
+	} {
+		if got := out(strings.Fields(args)...); got != want {
+			t.Errorf("rowsafe %s = %q, want %q", args, got, want)
+		}
+	}
+	if got := out("mark", "app", "before-x"); got != "Mark \"before-fix-drop-20260924-120000\" saved (LSN 0/3000060, WAL 000000010000000000000003).\n\n"+
+		"To go back to it: rowsafe rewind copy app --mark before-fix-drop-20260924-120000 (a copy next to production), or Rewind in the dashboard\n" {
+		t.Errorf("mark:\n%s", got)
+	}
+	if got := out("backup", "app"); !strings.HasPrefix(got, "Backup done (task task_") || strings.Contains(got, "SUCCEEDED") {
+		t.Errorf("backup:\n%s", got)
+	}
+	if got := out("verify", "app"); got != "WAL archiving works on app. Its first full backup is queued.\n\nNext: rowsafe tasks app   (follow it)\n" {
+		t.Errorf("verify:\n%s", got)
 	}
 }

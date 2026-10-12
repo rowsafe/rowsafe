@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/rowsafe/rowsafe/client"
@@ -386,7 +387,7 @@ func cloudSizes(ctx context.Context, c *client.Client, args []string) error {
 	if p, err := pickCloud(cat, *cloudName, *region, "", false); err == nil {
 		fmt.Printf("Cheapest free now: %s.\n", p.describe(false))
 	}
-	fmt.Println("Create one: rowsafe cloud create NAME [--region REGION] [--size SIZE] [--engine ENGINE]")
+	fmt.Println("\nNext: rowsafe cloud create NAME [--region REGION] [--size SIZE] [--engine ENGINE]")
 	return nil
 }
 
@@ -490,7 +491,8 @@ func cloudCreate(ctx context.Context, c *client.Client, args []string) error {
 		fmt.Fprintf(out, "Extensions: %s (in the postgres database and every new one).\n", extensionTitles(extensions))
 	}
 	fmt.Fprintf(out, "Who can connect: %s.\n", sourcesText(allowed))
-	if pick.Cloud.Billing == "hourly" && cat.Payg.Status != "active" && cat.Payg.Status != "past_due" && cat.Payg.Status != "canceling" {
+	if !*yes && pick.Cloud.Billing == "hourly" && cat.Payg.Status != "active" && cat.Payg.Status != "past_due" && cat.Payg.Status != "canceling" {
+		// Said before asking; with --yes, the link after creating says it.
 		fmt.Fprintln(out, "Pay as you go isn't set up yet: you get a link to add a card, once; the server is created as soon as that's done.")
 	}
 	if err := confirmMoney(*yes, "create "+name); err != nil {
@@ -519,14 +521,14 @@ func afterCreate(ctx context.Context, c *client.Client, res client.CloudServerCr
 	out := msgOut(asJSON)
 	s := res.Server
 	if res.CheckoutURL != "" {
-		if hourly {
-			fmt.Fprintf(out, "\n%s waits for payment: add a card once for pay as you go (an owner of the organization), and it is created right after:\n\n  %s\n\n", s.Name, res.CheckoutURL)
-			fmt.Fprintln(out, "Nothing is billed before. After that, new servers billed by the hour are created right away.")
-		} else {
-			fmt.Fprintf(out, "\n%s is paid by the month: pay for it here (an owner of the organization), and it is created right after:\n\n  %s\n\n", s.Name, res.CheckoutURL)
-		}
+		opened := ""
 		if !asJSON && stdinIsTerminal() && canOpenBrowser() && openBrowser(res.CheckoutURL) == nil {
-			fmt.Fprintln(out, "Opened it in your browser.")
+			opened = " (opened in your browser)"
+		}
+		if hourly {
+			fmt.Fprintf(out, "\n%s waits for payment: an owner of the organization adds a card once for pay as you go, and it is created right after. Nothing is billed before%s:\n  %s\n", s.Name, opened, res.CheckoutURL)
+		} else {
+			fmt.Fprintf(out, "\n%s is paid by the month: an owner of the organization pays for it, and it is created right after%s:\n  %s\n", s.Name, opened, res.CheckoutURL)
 		}
 	}
 	if wait {
@@ -541,28 +543,36 @@ func afterCreate(ctx context.Context, c *client.Client, res client.CloudServerCr
 	}
 	switch s.Status {
 	case "ready":
-		fmt.Println()
-		printServer(s)
+		// Where, size and who can connect were said before creating it.
+		fmt.Printf("\n%s is ready.\n", s.Name)
+		connectRows(s, serverRow)
 		printNext(s)
 	case "payment":
-		fmt.Printf("Follow it with `rowsafe cloud wait %s`.\n", s.Name)
+		fmt.Printf("\nNext: rowsafe cloud wait %s   (follow it)\n", s.Name)
 	default:
-		fmt.Printf("Creating %s: about 5 to 10 minutes. Follow it with `rowsafe cloud wait %s`.\n", s.Name, s.Name)
+		fmt.Printf("Creating %s: about 5 to 10 minutes.\n\nNext: rowsafe cloud wait %s   (follow it)\n", s.Name, s.Name)
 	}
 	return nil
 }
 
+// printNext ends what is said about a ready server: the commands to run
+// next, once.
 func printNext(s client.CloudServer) {
 	ref := s.Name
 	if s.DatabaseRef != nil {
 		ref = *s.DatabaseRef
 	}
 	fmt.Println("\nNext:")
-	fmt.Printf("  rowsafe env --on %s       a database and login for your app, written to .env as DATABASE_URL\n", ref)
-	fmt.Printf("  rowsafe connect %s        open psql\n", ref)
+	t := &table{w: tabwriter.NewWriter(os.Stdout, 0, 0, 4, ' ', 0)}
 	if len(s.AllowedIPs) == 0 {
-		fmt.Printf("  rowsafe cloud allow %s    let this computer (or your app's address) connect\n", s.Name)
+		t.row("  rowsafe cloud allow "+s.Name, "let this computer (or your app's address) connect")
 	}
+	t.row("  rowsafe env --on "+ref, "a database and login for your app, written to .env as DATABASE_URL")
+	t.row("  rowsafe connect "+ref, "open psql")
+	if s.DatabaseRef != nil && s.Clone == nil && s.PassphraseSavedAt == nil {
+		t.row("  rowsafe cloud passphrase "+s.Name+" --file FILE", "save the backup passphrase (only you can read it)")
+	}
+	t.flush()
 }
 
 // ---- wait ----
@@ -754,12 +764,22 @@ func cloudShow(ctx context.Context, c *client.Client, args []string) error {
 	return nil
 }
 
+// serverRow prints one "Label: value" line of a server.
+func serverRow(k, v string) { fmt.Printf("  %-19s %s\n", k+":", v) }
+
+// printServer is rowsafe cloud show: status and what needs doing first, then
+// where and how to connect, then the details.
 func printServer(s client.CloudServer) {
-	row := func(k, v string) { fmt.Printf("  %-19s %s\n", k+":", v) }
-	fmt.Printf("%s (%s)\n", s.Name, s.ID)
-	row("Status", serverStatus(s))
+	row := serverRow
+	fmt.Printf("%s (%s): %s\n", s.Name, s.ID, serverStatus(s))
 	if p := deref(s.Problem); p != "" {
 		row("Problem", p)
+	}
+	if b := s.Billing; b != nil && b.CheckoutURL != nil {
+		row("Pay at", *b.CheckoutURL)
+	}
+	if s.DatabaseRef != nil && s.Clone == nil && s.PassphraseSavedAt == nil {
+		row("Backup passphrase", "not saved yet")
 	}
 	cloud := s.Provider
 	if s.Billing != nil && s.Billing.Cloud != "" {
@@ -772,9 +792,24 @@ func printServer(s client.CloudServer) {
 	if s.Where == "account" {
 		where += ", in your own cloud account"
 	}
+	if s.EngineVersion != "" {
+		row("Database", protocol.EngineDisplayName(s.Engine)+" "+s.EngineVersion)
+	}
+	if len(s.Extensions) > 0 {
+		row("Extensions", extensionTitles(s.Extensions))
+	}
+	connectRows(s, row)
+	who := sourcesText(s.AllowedIPs)
+	if s.FirewallPending {
+		who += " (being applied on the server)"
+	}
+	if p := deref(s.FirewallProblem); p != "" {
+		who += " (problem: " + p + ")"
+	}
+	row("Who can connect", who)
 	row("Where", where)
 	size := serverSize(s)
-	if s.Billing != nil && s.Billing.SizeName != "" && s.Billing.SizeName != size {
+	if s.Billing != nil && s.Billing.SizeName != "" && !strings.EqualFold(s.Billing.SizeName, size) {
 		size += " (" + s.Billing.SizeName + ")"
 	}
 	if z := s.SizeInfo; z != nil {
@@ -793,48 +828,10 @@ func printServer(s client.CloudServer) {
 			price += " (billing: " + b.Status + ")"
 		}
 		row("Price", price)
-		if b.CheckoutURL != nil {
-			row("Pay at", *b.CheckoutURL)
-		}
 	}
-	if s.EngineVersion != "" {
-		row("Database", protocol.EngineDisplayName(s.Engine)+" "+s.EngineVersion)
-	}
-	if len(s.Extensions) > 0 {
-		row("Extensions", extensionTitles(s.Extensions))
-	}
-	if s.DatabaseRef != nil {
+	if s.DatabaseRef != nil && *s.DatabaseRef != s.Name {
 		row("Database in Rowsafe", *s.DatabaseRef)
 	}
-	if host, port, ssl := serverEndpoint(s); host != "" {
-		if protocol.NormalizeEngine(s.Engine) == protocol.EnginePostgreSQL {
-			to := fmt.Sprintf("%s port %d, sslmode=%s", host, port, ssl)
-			if ssl == "verify-full" {
-				to += ", sslrootcert=system" // pgtls.go
-			}
-			row("Connect to", to)
-		} else {
-			row("Connect to", fmt.Sprintf("%s port %d, always with TLS (%s)", host, port, engineURLExample(s, host, port)))
-			if e, ok := protocol.CloudEngineFor(s.Engine); ok && e.Engine == protocol.EngineClickHouse && len(e.Ports) > 1 {
-				row("HTTPS interface", "https://"+net.JoinHostPort(host, strconv.Itoa(e.Ports[1])))
-			}
-			if e, ok := protocol.CloudEngineFor(s.Engine); ok && e.Engine == protocol.EngineQdrant && len(e.Ports) > 1 {
-				row("gRPC", net.JoinHostPort(host, strconv.Itoa(e.Ports[1]))+" (TLS)")
-				row("API key", "make one in the dashboard (Databases & users): it is shown once, to you only")
-			}
-		}
-		if s.Address != nil && s.Address.ReadHost != "" && s.Address.ReadHost != host {
-			row("Read-only queries", s.Address.ReadHost)
-		}
-	}
-	who := sourcesText(s.AllowedIPs)
-	if s.FirewallPending {
-		who += " (being applied on the server)"
-	}
-	if p := deref(s.FirewallProblem); p != "" {
-		who += " (problem: " + p + ")"
-	}
-	row("Who can connect", who)
 	if sb := s.Standby; sb != nil {
 		v := sb.Role
 		if sb.PartnerName != "" {
@@ -858,14 +855,37 @@ func printServer(s client.CloudServer) {
 	if s.DeleteAt != nil {
 		row("Deleted by itself", describeTime(*s.DeleteAt))
 	}
-	if s.DatabaseRef != nil && s.Clone == nil {
-		if s.PassphraseSavedAt != nil {
-			row("Backup passphrase", "saved "+ago(s.PassphraseSavedAt))
-		} else {
-			row("Backup passphrase", "not saved yet: rowsafe cloud passphrase "+s.Name+" --file FILE")
-		}
+	if s.PassphraseSavedAt != nil {
+		row("Backup passphrase", "saved "+ago(s.PassphraseSavedAt))
 	}
 	row("Created", describeTime(s.CreatedAt)+prefix(" by ", s.CreatedBy))
+}
+
+// connectRows prints where apps connect to a server.
+func connectRows(s client.CloudServer, row func(k, v string)) {
+	host, port, ssl := serverEndpoint(s)
+	if host == "" {
+		return
+	}
+	if protocol.NormalizeEngine(s.Engine) == protocol.EnginePostgreSQL {
+		to := fmt.Sprintf("%s port %d, sslmode=%s", host, port, ssl)
+		if ssl == "verify-full" {
+			to += ", sslrootcert=system" // pgtls.go
+		}
+		row("Connect to", to)
+	} else {
+		row("Connect to", fmt.Sprintf("%s port %d, always with TLS (%s)", host, port, engineURLExample(s, host, port)))
+		if e, ok := protocol.CloudEngineFor(s.Engine); ok && e.Engine == protocol.EngineClickHouse && len(e.Ports) > 1 {
+			row("HTTPS interface", "https://"+net.JoinHostPort(host, strconv.Itoa(e.Ports[1])))
+		}
+		if e, ok := protocol.CloudEngineFor(s.Engine); ok && e.Engine == protocol.EngineQdrant && len(e.Ports) > 1 {
+			row("gRPC", net.JoinHostPort(host, strconv.Itoa(e.Ports[1]))+" (TLS)")
+			row("API key", "make one in the dashboard (Databases & users): it is shown once, to you only")
+		}
+	}
+	if s.Address != nil && s.Address.ReadHost != "" && s.Address.ReadHost != host {
+		row("Read-only queries", s.Address.ReadHost)
+	}
 }
 
 func prefix(p, s string) string {
@@ -947,7 +967,7 @@ func cloudResize(ctx context.Context, c *client.Client, args []string) error {
 		return apiErr(err)
 	}
 	if !*wait {
-		fmt.Printf("Changing the size of %s. Follow it with `rowsafe cloud wait %s`.\n", s.Name, s.Name)
+		fmt.Printf("Changing the size of %s.\n\nNext: rowsafe cloud wait %s   (follow it)\n", s.Name, s.Name)
 		return nil
 	}
 	if s, err = waitServer(ctx, c, s.ID, 45*time.Minute, os.Stderr); err != nil {
@@ -1402,6 +1422,6 @@ func cloudRetry(ctx context.Context, c *client.Client, args []string) error {
 		printNext(s)
 		return nil
 	}
-	fmt.Printf("Creating %s again. Follow it with `rowsafe cloud wait %s`.\n", s.Name, s.Name)
+	fmt.Printf("Creating %s again.\n\nNext: rowsafe cloud wait %s   (follow it)\n", s.Name, s.Name)
 	return nil
 }
