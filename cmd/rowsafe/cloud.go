@@ -1354,6 +1354,13 @@ func cloudClone(ctx context.Context, c *client.Client, args []string) error {
 	if err != nil {
 		return cloudErr(err)
 	}
+	// The clone runs the source's engine: only sizes it runs on (MySQL:
+	// Intel and AMD).
+	if d, err := c.Database(ctx, source); err == nil {
+		if e, ok := protocol.CloudEngineFor(d.Engine); ok {
+			cat = catalogFor(cat, e, *size)
+		}
+	}
 	// Next to the source by default, at its size, when it runs in Rowsafe
 	// Cloud by the hour.
 	pick, err := pickCloud(cat, *cloudName, *region, *size, true)
