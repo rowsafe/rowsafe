@@ -463,6 +463,10 @@ func TestMoveInD1(t *testing.T) {
 	if polls != 2 || downloads != 1 || res.Switchover.RowsTotal != 3 || res.TablesTotal != 2 || res.Switchover.Mismatches != 0 {
 		t.Fatalf("polls %d, downloads %d, copy %+v %+v", polls, downloads, res, res.Switchover)
 	}
+	// The D1 database by the name people know it by, as the check showed it.
+	if !strings.Contains(res.Switchover.Summary, " now holds shop from Cloudflare D1:") {
+		t.Errorf("summary %q", res.Switchover.Summary)
+	}
 	if !strings.Contains(strings.Join(res.Warnings, " "), "are in backup ") {
 		t.Errorf("no backup before the write: %q", res.Warnings)
 	}

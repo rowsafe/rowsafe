@@ -302,6 +302,12 @@ func (e *Engine) migrateCopy(ctx context.Context, env agent.EngineEnv, db protoc
 	// 1. The export into a new file in the migration's folder.
 	m.SetPhase(protocol.MigratePhaseDumping)
 	stats, _ := newMoveInSource(src).stats(ctx)
+	// The name people know it by (D1's database name, as the check showed
+	// it), else what the source string says (Turso's, D1's ID).
+	srcName := src.Database()
+	if stats.Name != "" {
+		srcName = stats.Name
+	}
 	if stats.SizeBytes > 0 {
 		if err := ensureSpace(m.Dir, stats.SizeBytes*5/4, "building the moved database"); err != nil {
 			return nil, err
@@ -310,7 +316,7 @@ func (e *Engine) migrateCopy(ctx context.Context, env agent.EngineEnv, db protoc
 	built := filepath.Join(m.Dir, migBuildFile)
 	removeDB(built)
 	defer removeDB(built)
-	tl.Printf("copying %s from %s into a new file on this server first (the file here isn't touched yet)", src.Database(), prov)
+	tl.Printf("copying %s from %s into a new file on this server first (the file here isn't touched yet)", srcName, prov)
 	body, size, err := newMoveInSource(src).export(ctx, func(s string) { tl.Printf("%s", s) })
 	if err != nil {
 		return nil, err
@@ -443,7 +449,7 @@ func (e *Engine) migrateCopy(ctx context.Context, env agent.EngineEnv, db protoc
 	res.TablesTotal = len(names)
 	sw.ConnectionHint = db.SocketDir
 	sw.DurationMs = time.Since(start).Milliseconds()
-	sw.Summary = fmt.Sprintf("%s now holds %s from %s: %d tables, %s rows.", db.SocketDir, src.Database(), prov, len(names), commas(sw.RowsTotal))
+	sw.Summary = fmt.Sprintf("%s now holds %s from %s: %d tables, %s rows.", db.SocketDir, srcName, prov, len(names), commas(sw.RowsTotal))
 	if sw.Mismatches == 0 {
 		sw.Summary += " Row counts match the export."
 	}
