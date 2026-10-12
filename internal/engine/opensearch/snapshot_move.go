@@ -1336,11 +1336,20 @@ func (c *countReader) Read(p []byte) (int, error) {
 }
 
 // writeShared writes src to dir/rel through a temporary file: folders it
-// makes are group-writable with the folder's group (OpenSearch writes and
-// deletes there after the switchover), the file group-readable.
+// makes are group-writable (OpenSearch writes and deletes there after the
+// switchover) and everything it writes belongs to dir's group (OpenSearch's),
+// the file group-readable. The group is set explicitly: the agent's unit
+// has RestrictSUIDSGID=yes, so a chmod that keeps a folder's setgid bit is
+// refused, and one without it clears what the folder inherited.
 func writeShared(dir, rel string, src io.Reader) error {
 	if !safeRel(rel) {
 		return fmt.Errorf("unexpected file %q", rel)
+	}
+	gid := -1
+	if fi, err := os.Stat(dir); err != nil {
+		return err
+	} else if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		gid = int(st.Gid)
 	}
 	parts := strings.Split(rel, "/")
 	p := dir
@@ -1348,7 +1357,10 @@ func writeShared(dir, rel string, src io.Reader) error {
 		p = filepath.Join(p, d)
 		switch err := os.Mkdir(p, 0o770); {
 		case err == nil:
-			if err := os.Chmod(p, 0o770|os.ModeSetgid); err != nil {
+			if err := os.Lchown(p, -1, gid); err != nil {
+				return err
+			}
+			if err := os.Chmod(p, 0o770); err != nil {
 				return err
 			}
 		case errors.Is(err, os.ErrExist):
@@ -1367,6 +1379,9 @@ func writeShared(dir, rel string, src io.Reader) error {
 		return err
 	}
 	_, err = io.Copy(fh, src)
+	if err == nil {
+		err = fh.Chown(-1, gid)
+	}
 	if err == nil {
 		err = fh.Chmod(0o640)
 	}

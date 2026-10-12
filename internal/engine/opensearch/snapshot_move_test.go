@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -704,5 +705,46 @@ func TestNameChunksAndSeries(t *testing.T) {
 	}
 	if safeRel("../x") || safeRel("/etc") || safeRel("a//b") || !safeRel("indices/a/0/__b") {
 		t.Error("safeRel")
+	}
+}
+
+// TestWriteSharedModes: the folders a receiving server's copy makes are
+// group-writable, its files group-readable, all in the snapshot folder's
+// group, and nothing asks for a setgid bit (the agent's unit refuses
+// that: RestrictSUIDSGID=yes, found by the cloud-takeout-search e2e).
+func TestWriteSharedModes(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o770); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeShared(dir, "indices/abc/0/__blob", strings.NewReader("data")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeShared(dir, "indices/abc/0/__blob2", strings.NewReader("more")); err != nil {
+		t.Fatal(err)
+	}
+	gid := func(p string) uint32 {
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fi.Sys().(*syscall.Stat_t).Gid
+	}
+	want := gid(dir)
+	for _, d := range []string{"indices", "indices/abc", "indices/abc/0"} {
+		fi, err := os.Stat(filepath.Join(dir, d))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm() != 0o770 || gid(filepath.Join(dir, d)) != want {
+			t.Errorf("%s: %v gid %d, want 0770 gid %d", d, fi.Mode(), gid(filepath.Join(dir, d)), want)
+		}
+	}
+	f := filepath.Join(dir, "indices/abc/0/__blob")
+	if fi, err := os.Stat(f); err != nil || fi.Mode().Perm() != 0o640 || gid(f) != want {
+		t.Errorf("file: %v %v", fi, err)
+	}
+	if b, _ := os.ReadFile(f); string(b) != "data" {
+		t.Errorf("content %q", b)
 	}
 }
