@@ -102,6 +102,12 @@ const (
 	FeatureFork             = "fork"              // clone the database to another server, as it was at any moment
 	FeatureMoveIn           = "move_in"           // move a database in from a managed provider
 	FeatureSecondCopy       = "second_copy"       // a second copy of the backups in another bucket
+	// FeatureTakeOut ("take_out"): Rowsafe Cloud's "Take it with you", the
+	// database moved from a Rowsafe Cloud server to the customer's own
+	// server. Engines with a standby move through one (standby_move in the
+	// control plane); the search engines move by snapshots
+	// (SnapshotMoveEngine, snapshot_move.go).
+	FeatureTakeOut = "take_out"
 )
 
 // EngineFeatures says which Rowsafe features work for an engine. The
@@ -137,6 +143,7 @@ type EngineFeatures struct {
 	Fork             bool `json:"fork"`
 	MoveIn           bool `json:"move_in"`
 	SecondCopy       bool `json:"second_copy"`
+	TakeOut          bool `json:"take_out"`
 }
 
 // Has reports whether a feature (Feature* above) is supported; unknown
@@ -197,6 +204,8 @@ func (f EngineFeatures) Has(feature string) bool {
 		return f.MoveIn
 	case FeatureSecondCopy:
 		return f.SecondCopy
+	case FeatureTakeOut:
+		return f.TakeOut
 	}
 	return false
 }
@@ -214,7 +223,7 @@ var EngineCapabilities = map[string]EngineFeatures{
 		DBAdmin:  true,
 		Settings: true, Security: true, IndexAdvice: true, Recommendations: true,
 		Logs: true, FindMoment: true, SafeCopies: true, MigrationPreview: true,
-		Fork: true, MoveIn: true, SecondCopy: true,
+		Fork: true, MoveIn: true, SecondCopy: true, TakeOut: true,
 	},
 	// MySQL and MariaDB (internal/engine/mysql): protocol/mysql.go.
 	EngineMySQL:   mysqlFeatures,
@@ -236,6 +245,7 @@ var EngineCapabilities = map[string]EngineFeatures{
 		MoveIn:   true, // copy from Atlas or any MongoDB, live through a change stream (migrate*.go in internal/engine/mongodb)
 		Standby:  true, // a priority-0 member of the replica set (standby*.go in internal/engine/mongodb)
 		Settings: true, // mongod.conf through root's tuning helper (opt-in), setParameter live
+		TakeOut:  true, // through a standby, like Move to a new server
 	},
 	// ClickHouse (internal/engine/clickhouse): protocol/clickhouse.go.
 	EngineClickHouse: clickhouseFeatures,

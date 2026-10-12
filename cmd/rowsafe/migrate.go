@@ -6,6 +6,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/url"
+	"strings"
 
 	"github.com/rowsafe/rowsafe/client"
 	"github.com/rowsafe/rowsafe/protocol"
@@ -13,7 +15,8 @@ import (
 )
 
 // rowsafe migrate: move a database in from a managed provider (DigitalOcean,
-// RDS, Supabase, Neon...) onto a server Rowsafe protects. The source
+// RDS, Supabase, Neon..., Turso or Cloudflare D1 into a SQLite file) onto a
+// server Rowsafe protects. The source
 // connection string is sealed on this machine to the server's key: it
 // never reaches Rowsafe in the clear. The new login's connection string
 // comes back sealed to a key this command holds in memory.
@@ -57,7 +60,8 @@ func migrateList(ctx context.Context, c *client.Client, args []string) error {
 		return printJSON(ms)
 	}
 	if len(ms) == 0 {
-		fmt.Println("No migrations yet. Move a database in from DigitalOcean, RDS, Supabase, Neon or any PostgreSQL:\n  rowsafe migrate start [NAME]")
+		fmt.Println("No migrations yet. Move a database in from DigitalOcean, RDS, Supabase, Neon or any PostgreSQL\n" +
+			"(or Turso or Cloudflare D1 into a SQLite file):\n  rowsafe migrate start [NAME]")
 		return nil
 	}
 	t := newTable("ID", "INTO", "FROM", "METHOD", "STATUS", "PROGRESS")
@@ -118,6 +122,8 @@ func migrateStartCmd(ctx context.Context, c *client.Client, args []string) error
 	again := fs.String("id", "", "check an existing migration again (after fixing what its check found)")
 	host := fs.String("host", "", "one-time copy: the server address to put in the new connection string")
 	user := fs.String("user", "", "one-time copy: the login name apps use on the new server")
+	turso := fs.String("turso", "", "SQLite: move in this Turso database (libsql://<database>-<organization>.turso.io); its token is typed, piped or read from --source-env")
+	d1 := fs.String("d1", "", "SQLite: move in this Cloudflare D1 database (ACCOUNT_ID/DATABASE_ID); an API token with D1 Edit is typed, piped or read from --source-env")
 	name, err := dbArg(ctx, c, fs, args)
 	if err != nil {
 		return err
@@ -125,9 +131,14 @@ func migrateStartCmd(ctx context.Context, c *client.Client, args []string) error
 	if *method != "" && *method != protocol.MigrateMethodLive && *method != protocol.MigrateMethodDump {
 		return errors.New("--method is live or dump")
 	}
-	src, err := readSource(*sourceEnv)
+	src, err := sqliteSource(*turso, *d1, *sourceEnv)
 	if err != nil {
 		return err
+	}
+	if src == "" {
+		if src, err = readSource(*sourceEnv); err != nil {
+			return err
+		}
 	}
 	if src == "" {
 		return errors.New("no connection string given")
@@ -180,7 +191,17 @@ func migrateStartCmd(ctx context.Context, c *client.Client, args []string) error
 	var req protocol.StartMigrationRequest
 	req.Method = chosen
 	var key *ecdh.PrivateKey
-	if chosen == protocol.MigrateMethodDump {
+	if protocol.NormalizeEngine(m.Engine) == protocol.EngineSQLite {
+		prov := protocol.MigrateProviderByID(m.Check.Source.Provider).Name
+		fmt.Printf("\nThe copy reads %s at %s once and writes it into %s on your server%s. Stop your app's writes\n"+
+			"to %s first (Rowsafe can't make it read-only). It takes about %s.\n", m.Check.Source.Database, prov, m.Check.Target.Database,
+			map[bool]string{true: " (it replaces what the file holds: Rowsafe saves a Mark or a backup of it first)"}[m.Check.Target.Exists],
+			prov, humanDuration(m.Check.EstimatedCopySeconds))
+		if key, err = e2e.GenerateKey(); err != nil {
+			return err
+		}
+		req.BrowserKey = e2e.PublicKeyString(key.PublicKey())
+	} else if chosen == protocol.MigrateMethodDump {
 		fmt.Printf("\nA one-time copy stops writes to %s (Rowsafe makes it read-only and disconnects your apps), copies\n"+
 			"everything, then gives you the new connection string. Expect about %s of downtime.\n",
 			m.Check.Source.Host, humanDuration(m.Check.EstimatedCopySeconds))
@@ -233,6 +254,20 @@ func printSwitched(ctx context.Context, c *client.Client, m protocol.Migration, 
 			fmt.Println("  note:", w)
 		}
 	}
+	if m.Copy != nil {
+		for _, w := range m.Copy.Warnings {
+			fmt.Println("  note:", w)
+		}
+	}
+	if protocol.NormalizeEngine(m.Engine) == protocol.EngineSQLite {
+		path := m.TargetDB
+		if m.Switchover != nil && m.Switchover.ConnectionHint != "" {
+			path = m.Switchover.ConnectionHint
+		}
+		fmt.Printf("\nSQLite has no logins: point your app at the file %s (for libSQL clients: file:%s).\n"+
+			"The old database is left as it was; delete it there when you're sure, and: rowsafe migrate finish %s\n", path, path, m.ID)
+		return nil
+	}
 	if key == nil || !m.CredentialsReady {
 		return nil
 	}
@@ -252,8 +287,13 @@ func printSwitched(ctx context.Context, c *client.Client, m protocol.Migration, 
 
 func printCheck(r protocol.MigrateCheckResult) {
 	prov := protocol.MigrateProviderByID(r.Source.Provider)
-	fmt.Printf("\nFrom %s (%s, PostgreSQL %s, %s) into %s on this server (PostgreSQL %s)\n",
-		prov.Name, r.Source.Host, orDash(r.Source.ServerVersion), humanBytes(r.Source.SizeBytes), orDash(r.Target.Database), orDash(r.Target.ServerVersion))
+	if sqliteProvider(r.Source.Provider) {
+		fmt.Printf("\nFrom %s (%s, %s) into the SQLite file %s on this server\n", prov.Name, orDash(r.Source.Database), humanBytes(r.Source.SizeBytes),
+			orDash(r.Target.Database))
+	} else {
+		fmt.Printf("\nFrom %s (%s, PostgreSQL %s, %s) into %s on this server (PostgreSQL %s)\n",
+			prov.Name, r.Source.Host, orDash(r.Source.ServerVersion), humanBytes(r.Source.SizeBytes), orDash(r.Target.Database), orDash(r.Target.ServerVersion))
+	}
 	for _, ch := range r.Checks {
 		mark := map[string]string{protocol.CheckOK: "ok  ", protocol.CheckWarn: "note", protocol.CheckFail: "FIX "}[ch.Status]
 		fmt.Printf("  %s %s\n", mark, ch.Title)
@@ -501,4 +541,65 @@ func migrateFinishCmd(ctx context.Context, c *client.Client, args []string) erro
 	}
 	fmt.Println("Done. You can delete the old database at your provider whenever you like.")
 	return nil
+}
+
+// sqliteProvider: a source moving into a SQLite file (Turso, libSQL, D1).
+func sqliteProvider(id string) bool {
+	return id == protocol.SQLiteSourceTurso || id == protocol.SQLiteSourceLibSQL || id == protocol.SQLiteSourceD1
+}
+
+// sqliteSource builds the sealed source of a Turso (--turso URL) or D1
+// (--d1 ACCOUNT_ID/DATABASE_ID) database from its token, typed (not
+// shown), piped or read from $envVar. "" when neither flag is set.
+func sqliteSource(turso, d1, envVar string) (string, error) {
+	if turso == "" && d1 == "" {
+		return "", nil
+	}
+	if turso != "" && d1 != "" {
+		return "", errors.New("--turso or --d1, not both")
+	}
+	var src protocol.SQLiteSource
+	prompt := "Paste the Turso database token (Turso dashboard > your database > Create Token; it isn't shown, and it is\n" +
+		"encrypted here to your server's key, so Rowsafe never sees it):\n> "
+	if turso != "" {
+		u := strings.TrimSpace(turso)
+		if !strings.Contains(u, "://") {
+			u = "libsql://" + u
+		}
+		src = protocol.SQLiteSource{Provider: protocol.SQLiteSourceTurso, URL: strings.TrimRight(u, "/")}
+	} else {
+		account, database, ok := strings.Cut(strings.TrimSpace(d1), "/")
+		if !ok {
+			return "", errors.New("--d1 is ACCOUNT_ID/DATABASE_ID (Cloudflare dashboard: your account ID; Workers & Pages > D1 > your database's ID)")
+		}
+		src = protocol.SQLiteSource{Provider: protocol.SQLiteSourceD1, AccountID: account, DatabaseID: database}
+		prompt = "Paste a Cloudflare API token with the D1 Edit permission (My Profile > API Tokens; it isn't shown, and it is\n" +
+			"encrypted here to your server's key, so Rowsafe never sees it):\n> "
+	}
+	token, err := readSecret(envVar, prompt)
+	if err != nil {
+		return "", err
+	}
+	if token == "" {
+		return "", errors.New("no token given")
+	}
+	src.Token = token
+	// String then Parse: the same checks as the server, and errors without the token.
+	if src.Provider != protocol.SQLiteSourceD1 {
+		u := src.URL
+		if !strings.HasPrefix(u, "libsql://") && !strings.HasPrefix(u, "https://") && !strings.HasPrefix(u, "http://") {
+			return "", errors.New("--turso is the database's URL: libsql://<database>-<organization>.turso.io")
+		}
+		raw := u + "?" + url.Values{"authToken": {token}}.Encode()
+		parsed, err := protocol.ParseSQLiteSource(raw)
+		if err != nil {
+			return "", err
+		}
+		return parsed.String(), nil
+	}
+	parsed, err := protocol.ParseSQLiteSource(src.String())
+	if err != nil {
+		return "", err
+	}
+	return parsed.String(), nil
 }

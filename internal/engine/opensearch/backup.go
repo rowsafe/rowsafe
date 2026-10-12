@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -159,6 +160,12 @@ func (e *Engine) take(ctx context.Context, env agent.EngineEnv, db protocol.Data
 		StartedAt: snap.start(), StoppedAt: snap.end(), DataStreams: snap.DataStreams, SizeBytes: in.totalBytes()}
 	for _, i := range in.Indices {
 		doc.Indices = append(doc.Indices, docIndex{Name: i.Name, DataStream: i.DataStream, DocsBefore: before[i.Name], DocsAfter: after[i.Name]})
+	}
+	if fz, ok := loadFreeze(env, db.ID); ok {
+		// Apps' writes are stopped for a move: the new server lifts these
+		// blocks and makes the templates and pipelines (snapshot_move.go).
+		doc.MoveBlocked = slices.Clone(fz.Blocked)
+		doc.Globals = readGlobals(ctx, c)
 	}
 	tl.Printf("snapshot done in %s; copying its new files to your bucket, encrypted on this server", snap.end().Sub(snap.start()).Round(time.Millisecond))
 	st, err := r.syncRepo(ctx, dir, in.ClusterUUID, nil)

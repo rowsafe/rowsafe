@@ -181,6 +181,7 @@ var qdrantFeatures = EngineFeatures{
 	Updates:  true, // the newest pinned release of the series, by the root helper (QdrantVersion)
 	DBAdmin:  true, // API keys (JWTs signed on the server), collections listed and removed
 	Security: true, // TLS, keys, JWT, CORS, snapshot recovery from URLs, the look from the internet
+	TakeOut:  true, // Take it with you, by snapshots (snapshot_move.go)
 }
 
 // QdrantStatus is Qdrant's own health detail (DatabaseMonitoring.Qdrant),

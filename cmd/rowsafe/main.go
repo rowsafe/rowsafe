@@ -149,12 +149,15 @@ Rewind: continuous backups, restore to any second
   rowsafe files undo [NAME] [--yes]          undo a --whole-folder restore
   rowsafe files proof [NAME]                 restore a few files and compare them with the live ones, now
 
-Move in: bring a database from DigitalOcean, RDS, Supabase, Neon... onto your server
+Move in: bring a database from DigitalOcean, RDS, Supabase, Neon, Turso, Cloudflare D1... onto your server
   rowsafe migrate [NAME] [--json]            migrations (into NAME, or all)
   rowsafe migrate start [NAME] [--into DB] [--method live|dump] [--source-env VAR] [--id ID] [--host ADDR] [--user NAME] [--yes]
                                              check the source and start copying into the server of NAME. The
                                              connection string is typed (not shown), piped, or read from $VAR,
                                              and sealed here to the server's key: Rowsafe never sees it
+  rowsafe migrate start NAME --turso libsql://DB-ORG.turso.io | --d1 ACCOUNT_ID/DATABASE_ID [--source-env VAR] [--yes]
+                                             SQLite: copy a Turso or Cloudflare D1 database once into NAME's
+                                             file; the token is typed (not shown), piped, or read from $VAR
   rowsafe migrate status ID [--json]         progress: tables copied, how far behind, the check's findings
   rowsafe migrate fix ID [--yes]             mark source tables without a primary key REPLICA IDENTITY FULL
   rowsafe migrate switch ID [--writes-stopped] [--user NAME] [--host ADDR] [--yes]

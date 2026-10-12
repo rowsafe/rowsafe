@@ -76,6 +76,8 @@ import (
 //     first writing statement of a transaction, held until it commits.
 //   - Monitoring: database_size_bytes, disk_* and the sqlite_* metrics
 //     (collect/catalog_sqlite.go), and DatabaseMonitoring.SQLite below.
+//   - Move in: a one-time copy from Turso (libSQL) or Cloudflare D1 into
+//     the file (sqlite_movein.go has the sealed source's format).
 //   - No server: restart, standby, pooling, updates, upgrades, Databases &
 //     users and logs don't exist for SQLite (SQLiteNoServer says why).
 
@@ -124,7 +126,6 @@ var SQLiteNoServer = map[string]string{
 // plain sentence each (shown where people look for them).
 var SQLiteOff = map[string]string{
 	FeatureSettings: "Tuning doesn't apply to SQLite: there is no server to tune, and your app sets SQLite's options when it opens the file.",
-	FeatureMoveIn:   "Moving in from Turso or Cloudflare D1 isn't available yet.",
 }
 
 // sqliteFeatures are what SQLite supports (EngineCapabilities). A SQLite
@@ -152,6 +153,9 @@ var sqliteFeatures = EngineFeatures{
 	// (internal/engine/sqlite/copies*.go).
 	SafeCopies: true,
 	Security:   true, // who on the server can reach the file (internal/engine/sqlite/security.go)
+	// A one-time copy from Turso (libSQL) or Cloudflare D1 into the file
+	// (sqlite_movein.go; internal/engine/sqlite/migrate*.go).
+	MoveIn: true,
 }
 
 // SQLiteStatus is SQLite's own health detail (DatabaseMonitoring.SQLite),

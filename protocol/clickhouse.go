@@ -78,6 +78,7 @@ var clickhouseFeatures = EngineFeatures{
 	PointInTime: true, // new parts copied as they appear (internal/engine/clickhouse/pitr_*.go)
 	FindMoment:  true, // from that record (internal/engine/clickhouse/moment.go)
 	Standby:     true, // follows the primary through that record (internal/engine/clickhouse/standby_*.go)
+	TakeOut:     true, // Take it with you, through a standby
 	RewindCopy:  true, RewindRows: true, RewindInPlace: true, Marks: true,
 	Monitoring: true, Fixes: true, Restart: true, Updates: true, Upgrades: true,
 	Recommendations: true, // query log, table layout (internal/engine/clickhouse/insights.go)

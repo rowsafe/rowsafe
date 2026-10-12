@@ -212,7 +212,7 @@ type Status struct {
 	Cluster     bool
 	Config      string
 	Unit        string
-	Collections int
+	Collections int // the people's (Rowsafe's own collection left out)
 }
 
 // Print writes key=value lines ("-" when empty).
@@ -268,7 +268,7 @@ func ServerStatus(ctx context.Context, env agent.EngineEnv, port int) (Status, e
 	default:
 		st.Login = "refused"
 	}
-	st.Collections = len(names)
+	st.Collections = len(slices.DeleteFunc(names, ownColl)) // the people's: Rowsafe's own left out
 	st.JWT = "unknown"
 	if l.Key != "" && err == nil {
 		st.JWT = "no"

@@ -53,6 +53,12 @@ type keyEntry struct {
 
 func (k keyEntry) admin() bool { return k.Access == protocol.DBAccessOwner }
 
+// canWrite: the key's token can change data (keyClaims: an admin key, or
+// read-write access to some collections).
+func (k keyEntry) canWrite() bool {
+	return k.admin() || k.Access == protocol.DBAccessReadWrite && len(k.Collections) > 0
+}
+
 func (k keyEntry) expired(now time.Time) bool { return k.ExpiresAt != nil && !now.Before(*k.ExpiresAt) }
 
 // keyList is the agent's record of the keys on one server.
@@ -60,6 +66,25 @@ type keyList struct {
 	Keys []keyEntry `json:"keys"`
 	// Repair is the last time reconcile undid someone else's change.
 	Repair *protocol.QdrantKeyRepair `json:"repair,omitempty"`
+	// Frozen: apps' writes are stopped while the database moves to another
+	// server (snapshot_move.go): the points of the keys that can write stay
+	// out of the collection, so their tokens don't work, until Thaw.
+	Frozen *time.Time `json:"frozen,omitempty"`
+}
+
+// active are the keys whose points belong in the collection: every key,
+// but while frozen only those that can't write.
+func (l keyList) active() []keyEntry {
+	if l.Frozen == nil {
+		return l.Keys
+	}
+	var out []keyEntry
+	for _, k := range l.Keys {
+		if !k.canWrite() {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 func (l *keyList) find(name string) int {
@@ -301,7 +326,7 @@ func reconcileLocked(ctx context.Context, env agent.EngineEnv, port int, c *clie
 	}
 	l.Keys = kept
 	want := map[string]keyEntry{}
-	for _, k := range l.Keys {
+	for _, k := range l.active() {
 		want[keyPointID(k.Name)] = k
 	}
 	var strays []json.RawMessage
@@ -321,7 +346,7 @@ func reconcileLocked(ctx context.Context, env agent.EngineEnv, port int, c *clie
 		}
 	}
 	var missing []keyEntry
-	for _, k := range l.Keys {
+	for _, k := range l.active() {
 		if !good[k.Name] {
 			missing = append(missing, k)
 		}

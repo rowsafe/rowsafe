@@ -66,6 +66,7 @@ var mysqlFeatures = EngineFeatures{
 	DBAdmin:         true, Security: true, Files: true, Settings: true, SecondCopy: true,
 	MigrationPreview: true, SafeCopies: true,
 	Standby: true, // seeded from the latest backup, binary log replication (standby_*.go in internal/engine/mysql)
+	TakeOut: true, // Take it with you, through a standby
 	Fork:    true, // clones loaded into an empty server (fork.go in internal/engine/mysql)
 	MoveIn:  true, // one-time copy or live sync from a managed provider (migrate*.go in internal/engine/mysql)
 	Pooling: true, // ProxySQL through root's helper (opt-in)

@@ -38,8 +38,11 @@ var (
 // plugins.security.restapi.roles_enabled (opensearch.yml).
 var (
 	agentCluster = []string{"cluster_monitor", "cluster_composite_ops", "cluster:admin/snapshot/*", "cluster:admin/repository/*",
-		"cluster:admin/settings/update", // only to pause automatic index creation during a rewind in place (inplace.go)
-		"indices:data/write/bulk", "indices:data/read/scroll*", "indices:admin/index_template/get", "indices:admin/template/get"}
+		"cluster:admin/settings/update", // only to pause automatic index creation during a rewind in place (inplace.go) and a move
+		"indices:data/write/bulk", "indices:data/read/scroll*", "indices:admin/index_template/get", "indices:admin/template/get",
+		// A move (snapshot_move.go) reads the index templates and ingest
+		// pipelines on the old server and makes them on the new one.
+		"indices:admin/index_template/*", "indices:admin/template/*", "cluster:admin/component_template/*", "cluster:admin/ingest/pipeline/*"}
 	agentIndex = []string{"indices_monitor", "read", "write", "delete", "create_index", "indices:admin/delete", "indices:admin/close*",
 		"indices:admin/open", "indices:admin/mapping/put", "indices:admin/mappings/get", "indices:admin/get", "indices:admin/settings/update",
 		"indices:monitor/settings/get", "indices:admin/refresh*", "indices:admin/data_stream/*", "indices:admin/resolve/index", "indices:admin/aliases*"}
@@ -55,6 +58,7 @@ type Status struct {
 	Repo      string // ok (path.repo allows Rowsafe's folder), missing, unknown
 	RepoDir   string
 	RestAPI   string // ok, no, unknown: Rowsafe's role may use the security REST API
+	Role      string // ok, old (made by an older Rowsafe: CreateLogin again), unknown
 	HotReload string // on, off: the REST certificate reloads by itself without the same issuer
 	Nodes     int
 	Config    string
@@ -71,8 +75,8 @@ func (s Status) WriteTo(w io.Writer) (int64, error) {
 		}
 		return v
 	}
-	n, err := fmt.Fprintf(w, "port=%d\nversion=%s\nlogin=%s\nsecurity=%s\ntls=%s\nrepo=%s\nrepodir=%s\nrestapi=%s\nhotreload=%s\nnodes=%d\nconfig=%s\nhome=%s\nunit=%s\nuser=%s\n",
-		s.Port, dash(s.Version), dash(s.Login), dash(s.Security), dash(s.TLS), dash(s.Repo), dash(s.RepoDir), dash(s.RestAPI), dash(s.HotReload), s.Nodes,
+	n, err := fmt.Fprintf(w, "port=%d\nversion=%s\nlogin=%s\nsecurity=%s\ntls=%s\nrepo=%s\nrepodir=%s\nrestapi=%s\nrole=%s\nhotreload=%s\nnodes=%d\nconfig=%s\nhome=%s\nunit=%s\nuser=%s\n",
+		s.Port, dash(s.Version), dash(s.Login), dash(s.Security), dash(s.TLS), dash(s.Repo), dash(s.RepoDir), dash(s.RestAPI), dash(s.Role), dash(s.HotReload), s.Nodes,
 		dash(s.Config), dash(s.Home), dash(s.Unit), dash(s.User))
 	return int64(n), err
 }
@@ -154,9 +158,44 @@ func ServerStatus(ctx context.Context, env agent.EngineEnv, port int) (Status, e
 			case statusOf(err) == http.StatusForbidden:
 				st.RestAPI = "no"
 			}
+			st.Role = roleStatus(ctx, c)
 		}
 	}
 	return st, nil
+}
+
+// roleStatus says whether Rowsafe's role has every permission this agent
+// asks for (ok), lacks some (old: made by an older Rowsafe, CreateLogin
+// makes it again), or can't be read (unknown).
+func roleStatus(ctx context.Context, c *client) string {
+	var v map[string]struct {
+		Cluster []string `json:"cluster_permissions"`
+		Index   []struct {
+			Actions []string `json:"allowed_actions"`
+		} `json:"index_permissions"`
+	}
+	if err := c.get(ctx, secAPI+"roles/"+LoginRole, &v); err != nil {
+		return "unknown"
+	}
+	r, ok := v[LoginRole]
+	if !ok {
+		return "unknown"
+	}
+	var idx []string
+	for _, p := range r.Index {
+		idx = append(idx, p.Actions...)
+	}
+	for _, p := range agentCluster {
+		if !slices.Contains(r.Cluster, p) {
+			return "old"
+		}
+	}
+	for _, p := range agentIndex {
+		if !slices.Contains(idx, p) {
+			return "old"
+		}
+	}
+	return "ok"
 }
 
 // pinLogin signs in with l and, over TLS, records that and the server's key

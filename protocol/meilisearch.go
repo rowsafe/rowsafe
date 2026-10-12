@@ -135,6 +135,7 @@ var meilisearchFeatures = EngineFeatures{
 	Updates:  true, // the newest pinned release (MeilisearchVersion), by the root helper, on servers Rowsafe's installer set up
 	DBAdmin:  true, // indexes and API keys
 	Security: true,
+	TakeOut:  true, // Take it with you, by snapshots (snapshot_move.go)
 }
 
 // MeilisearchStatus is Meilisearch's own health detail

@@ -82,6 +82,7 @@ var opensearchFeatures = EngineFeatures{
 	Restart:  true, // through root's helper, the units root allowed (opensearch.service)
 	DBAdmin:  true, // the security plugin's users and roles, on index patterns (opensearch_dbadmin.go)
 	Security: true,
+	TakeOut:  true, // Take it with you, by snapshots (snapshot_move.go)
 }
 
 // OpenSearchSystemUsers are users OpenSearch's security plugin (or its
