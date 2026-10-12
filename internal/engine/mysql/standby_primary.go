@@ -104,10 +104,10 @@ func (e *Engine) StandbyPrepare(ctx context.Context, env agent.EngineEnv, db pro
 		if port <= 0 {
 			port = db.Port
 		}
-		if pin := s.servedKeyPin(ctx, conn, port, f.DataDir); pin != "" {
+		if pin, why := s.sealedKeyPin(ctx, conn, f, port); pin != "" {
 			sec.EngineData[secretTLSKey] = pin
 		} else {
-			log.Printf("note: Rowsafe couldn't read the certificate %s serves, so the standby won't check whose key it replicates from", s.flavor.display())
+			log.Printf("the standby doesn't pin this server's TLS key: %s", why)
 		}
 	}
 	// What this server holds: an old primary following it by GTID must
@@ -342,6 +342,7 @@ func (e *Engine) StandbyFence(ctx context.Context, env agent.EngineEnv, db proto
 	if res.CheckpointLSN != "" {
 		res.Summary += " Its last change is at " + res.CheckpointLSN + "."
 	}
+	res.Summary += s.lockNote()
 	log.Printf("%s", res.Summary)
 	return res, nil
 }

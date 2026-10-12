@@ -221,11 +221,16 @@ func accountSQL(f flavor, version, password string) []string {
 
 // standbyGrants give Rowsafe's account what standby servers need (see
 // AccountOptions.Standby): loading a copy of every database, its routines,
-// views and logins into an empty server, replication and its settings,
-// the logins standbys replicate with. Not FILE (reading and writing the
-// server's files) or SHUTDOWN. (MariaDB: READ_ONLY ADMIN stays, which
-// setting read_only itself needs; the agent never writes on a read-only
-// server.)
+// views and logins (with whatever rights they hold, so it may grant them
+// all) into an empty server, replication and its settings, the logins
+// standbys replicate with, read_only (MariaDB: READ_ONLY ADMIN, which
+// setting it needs; the agent never writes on a read-only server).
+//
+// That makes it an administrator of the server, as the installer tells
+// root when it asks: FILE and SHUTDOWN are left out because Rowsafe never
+// uses them, not as a limit (an administrator can change the grant
+// tables, or the server's log file settings, and get them back). The
+// agent runs as the server's own operating-system user anyway.
 var standbyGrants = []string{
 	"GRANT ALL PRIVILEGES ON *.* TO 'rowsafe'@'localhost' WITH GRANT OPTION",
 	"REVOKE FILE, SHUTDOWN ON *.* FROM 'rowsafe'@'localhost'",

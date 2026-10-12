@@ -90,13 +90,46 @@ func TestBypassesReadOnly(t *testing.T) {
 		"GRANT ALL PRIVILEGES ON `shop`.* TO `app`@`%`":                false,
 		"GRANT SUPER, REPLICATION SLAVE ADMIN ON *.* TO `tool`@`10.%`": false,
 	} {
-		if bypassesReadOnly([]string{g}) != want {
+		if bypassesReadOnly([]string{g}, false) != want {
 			t.Errorf("%s", g)
+		}
+	}
+	// Before 10.11 SUPER implies READ_ONLY ADMIN.
+	for g, want := range map[string]bool{
+		"GRANT SUPER, REPLICATION SLAVE ADMIN ON *.* TO `tool`@`10.%`": true,
+		"GRANT SELECT, SUPER ON *.* TO `tool`@`%`":                     true,
+		"GRANT SUPER ON `x`.* TO `tool`@`%`":                           false,
+		"GRANT SELECT, SUPERVISOR ON *.* TO `tool`@`%`":                false,
+		"GRANT `superusers` TO `tool`@`%`":                             false,
+	} {
+		if bypassesReadOnly([]string{g}, true) != want {
+			t.Errorf("before 10.11: %s", g)
 		}
 	}
 	l := login{User: "o'k", Host: "%"}
 	if !lockedLoginRE.MatchString(l.quoted()) || lockedLoginRE.MatchString("'a'@'b'; DROP USER x") {
 		t.Error(l.quoted())
+	}
+}
+
+func TestSessionLogin(t *testing.T) {
+	accounts := []login{{"root", "localhost"}, {"root", "%"}, {"app", "10.0.%"}, {"app", "10.0.0.5"}, {"ops", "%"}}
+	for _, tc := range []struct {
+		user, host string
+		want       login
+		ok         bool
+	}{
+		{"root", "localhost", login{"root", "localhost"}, true},
+		{"root", "192.168.1.9:51234", login{"root", "%"}, true},
+		{"app", "10.0.0.5:40000", login{"app", "10.0.0.5"}, true},
+		{"app", "10.0.3.1:40000", login{"app", "10.0.%"}, true},
+		{"app", "172.16.0.1:1", login{}, false},
+		{"ops", "[::1]:3306", login{"ops", "%"}, true},
+	} {
+		got, ok := sessionLogin(accounts, tc.user, tc.host)
+		if ok != tc.ok || got != tc.want {
+			t.Errorf("%s from %s: %v %v", tc.user, tc.host, got, ok)
+		}
 	}
 }
 
@@ -128,5 +161,86 @@ func TestKeyPin(t *testing.T) {
 	key = other
 	if keyPin(mk("x")) == keyPin(a) {
 		t.Fatal("another key, the same pin")
+	}
+}
+
+func TestDecideTLS(t *testing.T) {
+	mk := func(cn string, ca bool, parent *x509.Certificate, parentKey *ecdsa.PrivateKey, dns ...string) (*x509.Certificate, *ecdsa.PrivateKey) {
+		key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		tpl := &x509.Certificate{SerialNumber: big.NewInt(time.Now().UnixNano()), Subject: pkix.Name{CommonName: cn},
+			NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), DNSNames: dns,
+			IsCA: ca, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign}
+		if parent == nil {
+			parent, parentKey = tpl, key
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tpl, parent, &key.PublicKey, parentKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, _ := x509.ParseCertificate(der)
+		return c, key
+	}
+	root, rootKey := mk("Test Root", true, nil, nil)
+	inter, interKey := mk("Test Intermediate", true, root, rootKey)
+	leaf, _ := mk("db.cloud.example", false, inter, interKey, "db.cloud.example")
+	self, _ := mk("rowsafe", true, nil, nil)
+	le, selfSigned := []*x509.Certificate{leaf, inter}, []*x509.Certificate{self}
+
+	sourceCADir = t.TempDir()
+	defer func() { sourceCADir = serverTLSDir; anchorRoots = x509.SystemCertPool }()
+	trusted := x509.NewCertPool()
+	trusted.AddCert(root)
+	anchorRoots = func() (*x509.CertPool, error) { return trusted, nil }
+	my, maria := &server{flavor: flavorMySQL}, &server{flavor: flavorMariaDB}
+	const myV, mariaV = "8.4.6", "11.8.3-MariaDB"
+	pem := func(path string) *x509.Certificate {
+		t.Helper()
+		c, err := readCertFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	for _, tc := range []struct {
+		name   string
+		s      *server
+		v      string
+		chain  []*x509.Certificate
+		pinned bool
+		ca     *x509.Certificate
+		verify bool
+	}{
+		{"mysql self-signed pinned", my, myV, selfSigned, true, self, false},
+		{"mysql self-signed not pinned", my, myV, selfSigned, false, nil, false},
+		{"mysql CA", my, myV, le, true, root, false},
+		{"mariadb self-signed", maria, mariaV, selfSigned, true, nil, true},
+		{"mariadb CA (by address the name check fails)", maria, mariaV, le, true, root, false},
+		{"mariadb CA not pinned", maria, mariaV, le, false, root, false},
+	} {
+		got, err := tc.s.decideTLS(tc.v, "sb_1", tc.chain, tc.pinned)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if got.Verify != tc.verify || (got.CAFile == "") != (tc.ca == nil) || tc.ca != nil && !pem(got.CAFile).Equal(tc.ca) {
+			t.Errorf("%s: %+v", tc.name, got)
+		}
+	}
+	// A CA no root here trusts: MariaDB checks against the password.
+	anchorRoots = func() (*x509.CertPool, error) { return x509.NewCertPool(), nil }
+	if got, _ := maria.decideTLS(mariaV, "sb_1", le, true); !got.Verify || got.CAFile != "" {
+		t.Errorf("mariadb, untrusted CA: %+v", got)
+	}
+	if got, _ := my.decideTLS(myV, "sb_1", le, true); got.Verify || got.CAFile != "" {
+		t.Errorf("mysql, untrusted CA: %+v", got)
+	}
+	opts := tlsCheck{CAFile: "/x/ca.pem", Verify: false}.options(flavorMariaDB, maria.words(mariaV))
+	if strings.Join(opts, ", ") != "MASTER_SSL_CA = '/x/ca.pem', MASTER_SSL_CAPATH = '', MASTER_SSL_VERIFY_SERVER_CERT = 0" {
+		t.Errorf("mariadb options: %v", opts)
+	}
+	if opts := (tlsCheck{}).options(flavorMySQL, my.words(myV)); strings.Join(opts, ", ") != "SOURCE_SSL_CA = ''" {
+		t.Errorf("mysql options: %v", opts)
+	}
+	if sourceCAPath("../x") != "" {
+		t.Error("an id with a path in it")
 	}
 }

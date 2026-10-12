@@ -63,13 +63,16 @@ type standbyRecord struct {
 	// sealed it, and ReplPassword the replication login's password (both
 	// for the key checks, standby_tls.go); KeyMismatch: the primary showed
 	// another key, and the standby stopped receiving.
-	KeyPin       string    `json:"key_pin,omitempty"`
-	ReplPassword string    `json:"replication_password,omitempty"`
-	KeyMismatch  bool      `json:"key_mismatch,omitempty"`
-	Schemas      []string  `json:"schemas,omitempty"` // loaded by Rowsafe (dropped on removal)
-	Users        []string  `json:"users,omitempty"`   // 'user'@'host' loaded by Rowsafe
-	CreatedAt    time.Time `json:"created_at"`
-	StreamSeen   time.Time `json:"streaming_seen_at,omitzero"`
+	KeyPin       string `json:"key_pin,omitempty"`
+	ReplPassword string `json:"replication_password,omitempty"`
+	KeyMismatch  bool   `json:"key_mismatch,omitempty"`
+	// CAFile: MySQL checks the primary's certificate chains to it (the
+	// certificate the primary serves with the pinned key, or its CA).
+	CAFile     string    `json:"ca_file,omitempty"`
+	Schemas    []string  `json:"schemas,omitempty"` // loaded by Rowsafe (dropped on removal)
+	Users      []string  `json:"users,omitempty"`   // 'user'@'host' loaded by Rowsafe
+	CreatedAt  time.Time `json:"created_at"`
+	StreamSeen time.Time `json:"streaming_seen_at,omitzero"`
 }
 
 type standbyFile struct {
@@ -239,8 +242,11 @@ type replicaStatus struct {
 	SQLError      string
 	// GTID: it follows by GTID (Auto_Position 1, Using_Gtid Slave_Pos).
 	GTID bool
-	// SourceServerID is the source's server_id.
+	// SourceServerID is the source's server_id; CAFile the certificate
+	// file the source's certificate must chain to.
 	SourceServerID string
+	CAFile         string
+	VerifyCert     bool
 }
 
 func (st replicaStatus) running() bool { return st.IORunning == "Yes" && st.SQLRunning == "Yes" }
@@ -314,6 +320,8 @@ func (s *server) channelStatus(ctx context.Context, db *sql.DB, channel string) 
 		st.SourceServerID = ""
 	}
 	st.GTID = get("Auto_Position") == "1" || strings.HasSuffix(strings.ToLower(get("Using_Gtid")), "_pos")
+	st.CAFile = get("Source_SSL_CA_File", "Master_SSL_CA_File")
+	st.VerifyCert = get("Source_SSL_Verify_Server_Cert", "Master_SSL_Verify_Server_Cert") == "Yes"
 	st.IOError = get("Last_IO_Error")
 	st.SQLError = get("Last_SQL_Error")
 	return st, rows.Err()
@@ -322,9 +330,10 @@ func (s *server) channelStatus(ctx context.Context, db *sql.DB, channel string) 
 // replicaWords are the statements of the flavor and version: MySQL 8.0.23+
 // says REPLICA and SOURCE, MariaDB and older MySQL SLAVE and MASTER.
 type replicaWords struct {
-	Change, Start, Stop, Reset, Host, Port, User, Password, File, Pos, SSL, PosWait string
-	// AutoPos follows by GTID instead of File and Pos; SSLVerify has the
-	// replica check the primary's certificate itself (MariaDB 11.3+).
+	Change, Start, Stop, Reset, Host, Port, User, Password, File, Pos, SSL, SSLCA, PosWait string
+	// AutoPos follows by GTID instead of File and Pos; SSLVerify is the
+	// option that has the replica check the primary's certificate itself
+	// (MariaDB 11.3+: by name, or against the replication password).
 	AutoPos   string
 	SSLVerify string
 	PublicKey bool
@@ -335,16 +344,16 @@ func (s *server) words(version string) replicaWords {
 	if !s.flavor.mariadb() && n >= 80023 {
 		return replicaWords{Change: "CHANGE REPLICATION SOURCE TO", Start: "START REPLICA", Stop: "STOP REPLICA",
 			Reset: "RESET REPLICA ALL", Host: "SOURCE_HOST", Port: "SOURCE_PORT", User: "SOURCE_USER", Password: "SOURCE_PASSWORD",
-			File: "SOURCE_LOG_FILE", Pos: "SOURCE_LOG_POS", SSL: "SOURCE_SSL", PosWait: "SOURCE_POS_WAIT",
+			File: "SOURCE_LOG_FILE", Pos: "SOURCE_LOG_POS", SSL: "SOURCE_SSL", SSLCA: "SOURCE_SSL_CA", PosWait: "SOURCE_POS_WAIT",
 			AutoPos: "SOURCE_AUTO_POSITION = 1", PublicKey: true}
 	}
 	w := replicaWords{Change: "CHANGE MASTER TO", Start: "START SLAVE", Stop: "STOP SLAVE", Reset: "RESET SLAVE ALL",
 		Host: "MASTER_HOST", Port: "MASTER_PORT", User: "MASTER_USER", Password: "MASTER_PASSWORD",
-		File: "MASTER_LOG_FILE", Pos: "MASTER_LOG_POS", SSL: "MASTER_SSL", PosWait: "MASTER_POS_WAIT", AutoPos: "MASTER_AUTO_POSITION = 1"}
+		File: "MASTER_LOG_FILE", Pos: "MASTER_LOG_POS", SSL: "MASTER_SSL", SSLCA: "MASTER_SSL_CA", PosWait: "MASTER_POS_WAIT", AutoPos: "MASTER_AUTO_POSITION = 1"}
 	if s.flavor.mariadb() {
 		w.AutoPos = "MASTER_USE_GTID = slave_pos"
 		if n >= 110300 {
-			w.SSLVerify = "MASTER_SSL_VERIFY_SERVER_CERT = 1"
+			w.SSLVerify = "MASTER_SSL_VERIFY_SERVER_CERT"
 		}
 	} else if n >= 80000 {
 		w.PublicKey = true
@@ -434,16 +443,24 @@ func (s *server) setReadOnly(ctx context.Context, db *sql.DB, on bool) error {
 		v = "ON"
 	}
 	if s.flavor.mariadb() {
+		// read_only and the logins locked with it change together
+		// (standby_lock.go).
+		mu := s.writerMu()
+		mu.Lock()
+		defer mu.Unlock()
 		if _, err := db.ExecContext(ctx, "SET GLOBAL read_only = "+v); err != nil {
 			return err
 		}
 		if err := s.persistSetting("read_only", map[bool]string{true: "1", false: ""}[on]); err != nil {
 			return err
 		}
+		var err error
 		if on {
-			return s.lockWriters(ctx, db) // standby_lock.go
+			_, err = s.lockWriters(ctx, db)
+		} else {
+			_, err = s.unlockWriters(ctx, db)
 		}
-		return s.unlockWriters(ctx, db)
+		return err
 	}
 	if on {
 		if _, err := db.ExecContext(ctx, "SET PERSIST super_read_only = ON"); err != nil {

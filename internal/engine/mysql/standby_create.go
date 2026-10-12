@@ -72,7 +72,8 @@ func (e *Engine) StandbyCreate(ctx context.Context, env agent.EngineEnv, db prot
 		return nil, err
 	}
 	log.Printf("the primary answers at %s:%d", addr, sec.PrimaryPort)
-	if err := checkSealedKey(ctx, addr, sec, log); err != nil {
+	tc, err := s.primaryTLS(ctx, conn, addr, sec, p.StandbyID, log)
+	if err != nil {
 		return nil, err
 	}
 	if p.SizeBytes > 0 {
@@ -82,7 +83,7 @@ func (e *Engine) StandbyCreate(ctx context.Context, env agent.EngineEnv, db prot
 	}
 	rec := standbyRecord{ID: p.StandbyID, DatabaseID: db.ID, Port: db.Port, Socket: db.SocketDir, Phase: protocol.StandbyPhaseCreating,
 		Address: addr, PrimPort: sec.PrimaryPort, ReplUser: sec.ReplicationUser, CreatedAt: time.Now().UTC(),
-		KeyPin: sec.EngineData[secretTLSKey], ReplPassword: sec.ReplicationPassword}
+		KeyPin: sec.EngineData[secretTLSKey], ReplPassword: sec.ReplicationPassword, CAFile: tc.CAFile}
 	if err := store.put(rec); err != nil {
 		return nil, err
 	}
@@ -93,6 +94,7 @@ func (e *Engine) StandbyCreate(ctx context.Context, env agent.EngineEnv, db prot
 			log.Printf("putting the server back as it was: %v", rerr)
 		}
 		_ = store.remove(rec.ID)
+		s.removeSourceCA(rec)
 		return nil, err
 	}
 	loaded, err := s.seedStandby(ctx, conn, &rec, log)
@@ -126,7 +128,7 @@ func (e *Engine) StandbyCreate(ctx context.Context, env agent.EngineEnv, db prot
 	if err := s.setReadOnly(ctx, conn, true); err != nil {
 		return fail(fmt.Errorf("making the standby read-only: %w", err))
 	}
-	if err := s.startReplication(ctx, conn, addr, sec, pos, byGTID, log); err != nil {
+	if err := s.startReplication(ctx, conn, addr, sec, pos, byGTID, tc, log); err != nil {
 		return fail(err)
 	}
 	rec.Phase = protocol.StandbyPhaseFollowing
@@ -146,7 +148,7 @@ func (e *Engine) StandbyCreate(ctx context.Context, env agent.EngineEnv, db prot
 		how = "by GTID"
 	}
 	res.Summary = fmt.Sprintf("The standby on port %d is loaded from the latest backup and replicates from the primary (%s:%d, %s); it is read-only.",
-		db.Port, addr, sec.PrimaryPort, how)
+		db.Port, addr, sec.PrimaryPort, how) + s.lockNote()
 	log.Printf("%s", res.Summary)
 	return res, nil
 }
@@ -581,7 +583,7 @@ func (s *server) copyLogins(ctx context.Context, sdb *sql.DB, sc *scratch, n int
 
 // startReplication points the server at the primary and starts it.
 // With byGTID it follows by GTID (from what it holds), else from pos.
-func (s *server) startReplication(ctx context.Context, conn *sql.DB, addr string, sec protocol.StandbySecrets, pos filePos, byGTID bool, log agent.TaskLogger) error {
+func (s *server) startReplication(ctx context.Context, conn *sql.DB, addr string, sec protocol.StandbySecrets, pos filePos, byGTID bool, tc tlsCheck, log agent.TaskLogger) error {
 	var version string
 	if err := conn.QueryRowContext(ctx, "SELECT VERSION()").Scan(&version); err != nil {
 		return err
@@ -606,9 +608,7 @@ func (s *server) startReplication(ctx context.Context, conn *sql.DB, addr string
 	}
 	if sec.PrimaryTLS {
 		opts = append(opts, w.SSL+" = 1")
-		if w.SSLVerify != "" {
-			opts = append(opts, w.SSLVerify)
-		}
+		opts = append(opts, tc.options(s.flavor, w)...) // standby_tls.go
 	}
 	if w.PublicKey {
 		key := "GET_SOURCE_PUBLIC_KEY"
@@ -721,7 +721,8 @@ func (s *server) reattach(ctx context.Context, conn *sql.DB, p protocol.StandbyC
 	if err != nil {
 		return nil, err
 	}
-	if err := checkSealedKey(ctx, addr, sec, log); err != nil {
+	tc, err := s.primaryTLS(ctx, conn, addr, sec, p.StandbyID, log)
+	if err != nil {
 		return nil, err
 	}
 	if byGTID {
@@ -732,19 +733,21 @@ func (s *server) reattach(ctx context.Context, conn *sql.DB, p protocol.StandbyC
 	store := standbys(s.env)
 	rec := standbyRecord{ID: p.StandbyID, DatabaseID: s.db.ID, Port: s.db.Port, Socket: s.db.SocketDir, Phase: protocol.StandbyPhaseCreating,
 		Address: addr, PrimPort: sec.PrimaryPort, ReplUser: sec.ReplicationUser, Rebuild: true, GTID: byGTID, CreatedAt: time.Now().UTC(),
-		KeyPin: sec.EngineData[secretTLSKey], ReplPassword: sec.ReplicationPassword}
+		KeyPin: sec.EngineData[secretTLSKey], ReplPassword: sec.ReplicationPassword, CAFile: tc.CAFile}
 	if err := store.put(rec); err != nil {
 		return nil, err
 	}
 	if err := s.setReadOnly(ctx, conn, true); err != nil {
 		_ = store.remove(rec.ID)
+		s.removeSourceCA(rec)
 		return nil, err
 	}
-	if err := s.startReplication(ctx, conn, addr, sec, pos, byGTID, log); err != nil {
+	if err := s.startReplication(ctx, conn, addr, sec, pos, byGTID, tc, log); err != nil {
 		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
 		_ = s.undoStandby(cctx, conn, rec, log)
 		cancel()
 		_ = store.remove(rec.ID)
+		s.removeSourceCA(rec)
 		return nil, err
 	}
 	rec.Phase, rec.StreamSeen = protocol.StandbyPhaseFollowing, time.Now().UTC()
@@ -757,7 +760,7 @@ func (s *server) reattach(ctx context.Context, conn *sql.DB, p protocol.StandbyC
 	}
 	res := &protocol.StandbyCreateResult{StandbyID: p.StandbyID, Mode: protocol.StandbyModeStreaming, PrimaryAddress: addr, Reattached: true,
 		ReplayLSN: pos.String(), DurationMs: time.Since(start).Milliseconds(),
-		Summary: fmt.Sprintf("The old primary on port %d follows the new primary (%s:%d) %s; it is read-only.", s.db.Port, addr, sec.PrimaryPort, how)}
+		Summary: fmt.Sprintf("The old primary on port %d follows the new primary (%s:%d) %s; it is read-only.", s.db.Port, addr, sec.PrimaryPort, how) + s.lockNote()}
 	log.Printf("%s", res.Summary)
 	return res, nil
 }

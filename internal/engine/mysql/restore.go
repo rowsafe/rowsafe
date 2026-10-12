@@ -293,27 +293,22 @@ func (s *server) fetchBinlogs(ctx context.Context, st *objStore, dir string, res
 				server = id.Server
 			}
 		}
-		next, ok, err := nextOnServer(ctx, st, idx, cur, server, bdir)
-		if err != nil {
-			return err
-		}
-		if ok {
-			if stopUnix > 0 && next.Created >= stopUnix {
-				break
-			}
-			if closed, err := endsWithRotate(local); err != nil || !closed {
-				return fmt.Errorf("the binary log %s is incomplete in the bucket (only %s of it arrived); restores can reach up to its end at most",
-					cur.Name, humanBytes(end))
-			}
-			cur = next
-			continue
-		}
-		// The chain ends here on this server: the database may have moved.
+		// The database moved to another server from this file: what
+		// this server wrote after that (in this file or the next ones,
+		// replicated from the new primary once it followed it, or nothing
+		// after a restart) isn't its history.
 		lk, found, err := findLink(ctx, st, links, cur, server, followed)
 		if err != nil {
 			return err
 		}
-		if found && (stopUnix == 0 || lk.To.Created < stopUnix) && lk.From.Pos <= end && (len(res.Binlogs) > 1 || lk.From.Pos >= res.StartPos) {
+		if found && (len(res.Binlogs) > 1 || lk.From.Pos >= res.StartPos) {
+			if stopUnix > 0 && lk.To.Created >= stopUnix {
+				break // the moment is before the switch
+			}
+			if lk.From.Pos > end {
+				return fmt.Errorf("the database moved to another server at %s, and the old primary's binary log %s isn't in the bucket up to there "+
+					"(only %s of it arrived); restores can reach up to its end at most", lk.At.UTC().Format("15:04:05 UTC on 2006-01-02"), cur.Name, humanBytes(end))
+			}
 			to, ok := idx.find(lk.To, time.Time{})
 			if !ok {
 				return fmt.Errorf("the database moved to another server at %s, and that server's binary log isn't in the bucket yet; restores can reach up to %s at most",
@@ -331,10 +326,40 @@ func (s *server) fetchBinlogs(ctx context.Context, st *objStore, dir string, res
 			cur = to
 			continue
 		}
+		next, ok, err := nextOnServer(ctx, st, idx, cur, server, bdir)
+		if err != nil {
+			return err
+		}
+		if ok {
+			if stopUnix > 0 && next.Created >= stopUnix {
+				break
+			}
+			if closed, err := endsWithRotate(local); err != nil || !closed {
+				return fmt.Errorf("the binary log %s is incomplete in the bucket (only %s of it arrived); restores can reach up to its end at most",
+					cur.Name, humanBytes(end))
+			}
+			cur = next
+			continue
+		}
+		// The chain ends here on this server.
+		if lk, found, err := laterLink(ctx, st, links, cur, server, followed); err != nil {
+			return err
+		} else if found && (stopUnix == 0 || lk.To.Created < stopUnix) {
+			return fmt.Errorf("the database moved to another server at %s from the old primary's binary log %s, which isn't in the bucket; "+
+				"restores can reach up to the end of %s at most: pick a moment before %s, or one after that server's first backup",
+				lk.At.UTC().Format("15:04:05 UTC on 2006-01-02"), lk.From.Name, cur.Name, lk.At.UTC().Format("15:04:05 UTC"))
+		}
 		if t.Mark != nil {
 			return fmt.Errorf("the binary logs up to the Mark %s aren't in the bucket", t.Mark.Name)
 		}
-		if moved, at := movedAway(idx, cur, server, stopUnix); stopUnix > 0 && moved {
+		// No record of where it went (a switch by an older agent, or the
+		// record couldn't be written): say so, also for the latest moment
+		// (clones, standbys, Proof), rather than stop at the switch.
+		moveStop := stopUnix
+		if moveStop == 0 {
+			moveStop = time.Now().Unix() + 1
+		}
+		if moved, at := movedAway(idx, cur, server, moveStop); moved {
 			return fmt.Errorf("the database moved to another server at %s, and the bucket doesn't say where its binary log goes on from %s "+
 				"(the switch was made by an older agent): pick a moment before %s, or one after that server's first backup",
 				at.UTC().Format("15:04:05 UTC on 2006-01-02"), cur.Name, at.UTC().Format("15:04:05 UTC"))
@@ -403,6 +428,32 @@ func findLink(ctx context.Context, st *objStore, links []binlogFile, cur binlogF
 			return lk, false, err
 		}
 		if lk.From.Name == cur.Name && (lk.From.Server == server || server == "") && lk.To == to {
+			return lk, true, nil
+		}
+	}
+	return binlogLink{}, false, nil
+}
+
+// laterLink is a switch to another server recorded from a later file of
+// server than cur (one the bucket doesn't have).
+func laterLink(ctx context.Context, st *objStore, links []binlogFile, cur binlogFile, server string, followed map[binlogFile]bool) (binlogLink, bool, error) {
+	base, n, ok := binlogSeq(cur.Name)
+	if !ok || server == "" {
+		return binlogLink{}, false, nil
+	}
+	for _, to := range links {
+		if followed[to] || to.Server == server || to.Created < cur.Created {
+			continue
+		}
+		var lk binlogLink
+		if err := st.getJSON(ctx, linkKey(to), &lk); err != nil {
+			if errors.Is(err, errNotFound) {
+				continue
+			}
+			return lk, false, err
+		}
+		fb, fn, ok := binlogSeq(lk.From.Name)
+		if ok && fb == base && fn > n && lk.From.Server == server && lk.To == to {
 			return lk, true, nil
 		}
 	}

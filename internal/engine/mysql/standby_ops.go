@@ -102,16 +102,32 @@ func (e *Engine) StandbyPromote(ctx context.Context, env agent.EngineEnv, db pro
 	// and the switch is recorded in the bucket (restores to a moment after
 	// it go on there until this server's first backup).
 	f, ferr := s.readFacts(ctx, conn)
+	flushed := false
 	if ferr == nil && f.LogBin {
 		if _, err := conn.ExecContext(ctx, "FLUSH BINARY LOGS"); err != nil {
 			log.Printf("note: couldn't start a new binary log file: %v", err)
+		} else {
+			flushed = true
 		}
+	}
+	noRecord := func(why string) {
+		w := "Restores to a moment after the switch wait for this server's first backup: " + why + "."
+		res.Warnings = append(res.Warnings, w)
+		log.Printf("note: %s", w)
 	}
 	if pos, err := s.currentPosition(ctx, conn); err == nil {
 		res.ReplayLSN = filePos{File: pos.File.Name, Pos: pos.Pos}.String() // where the old primary can follow from
-		if ferr == nil && f.LogBin && final.Exec.File != "" && final.SourceServerID != "" && s.env.Repo.Bucket != "" {
+		switch {
+		case s.env.Repo.Bucket == "" || ferr != nil || !f.LogBin:
+		case !flushed:
+			// Its current file also holds what it replicated: a restore
+			// going on there would apply that twice.
+			noRecord("it couldn't start a binary log file of its own, so the switch wasn't recorded in the bucket")
+		case final.Exec.File == "" || final.SourceServerID == "":
+			noRecord("the standby didn't say where the old primary's history ends, so the switch wasn't recorded in the bucket")
+		default:
 			if err := s.recordStandbySwitch(ctx, f, final, pos, now); err != nil {
-				log.Printf("note: restores to a moment after the switch wait for this server's first backup: recording the switch failed: %v", err)
+				noRecord("recording the switch in the bucket failed (" + err.Error() + ")")
 			} else {
 				log.Printf("recorded the switch in the bucket: the old primary's history ends at %s, this server's begins with %s", final.Exec, pos.File.Name)
 			}
@@ -127,9 +143,13 @@ func (e *Engine) StandbyPromote(ctx context.Context, env agent.EngineEnv, db pro
 	}
 	res.Promoted, res.PromotedAt, res.LastReplayAt = true, &now, &now
 	_ = store.remove(rec.ID)
+	s.removeSourceCA(rec)
 	res.Summary = fmt.Sprintf("%s on port %d is the primary now and takes writes.", s.flavor.display(), rec.Port)
 	if !res.CaughtUp {
 		res.Summary += " It was promoted before it had every change of the old primary."
+	}
+	for _, w := range res.Warnings {
+		res.Summary += " " + w
 	}
 	log.Printf("%s", res.Summary)
 	return res, nil
@@ -155,9 +175,22 @@ func (e *Engine) StandbyRemove(ctx context.Context, env agent.EngineEnv, db prot
 		return nil, err
 	}
 	_ = store.remove(rec.ID)
+	s.removeSourceCA(rec)
 	if rec.Rebuild {
 		res.Summary = fmt.Sprintf("Removed the standby: %s on port %d doesn't replicate any more; its data (a copy of the database) stays, read-only.",
 			s.flavor.display(), rec.Port)
+		// Nothing holds it read-only for Rowsafe any more: the logins
+		// locked for that sign in again.
+		mu := s.writerMu()
+		mu.Lock()
+		done, err := s.unlockWriters(ctx, conn)
+		mu.Unlock()
+		if len(done) > 0 {
+			res.Summary += " The logins Rowsafe had locked while it was read-only (" + strings.Join(done, ", ") + ") can sign in again."
+		}
+		if err != nil {
+			res.Summary += " Some logins Rowsafe had locked are still locked: " + err.Error() + "."
+		}
 	} else {
 		res.Restored = true
 		res.Summary = fmt.Sprintf("Removed the standby: %s on port %d is empty and writable again, as before.", s.flavor.display(), rec.Port)
@@ -173,6 +206,7 @@ func (e *Engine) StandbyStates(ctx context.Context, env agent.EngineEnv) []proto
 	for _, rec := range store.all() {
 		out = append(out, e.standbyState(ctx, env, store, rec))
 	}
+	e.healWriterLocks(ctx, env) // MariaDB: logins left locked on a server that takes writes
 	return out
 }
 
@@ -235,7 +269,7 @@ func (e *Engine) standbyState(ctx context.Context, env agent.EngineEnv, store *s
 	case !ro:
 		out.Error = "the standby isn't read-only"
 	}
-	if why := s.watchKey(cctx, conn, store, rec); why != "" {
+	if why := s.watchKey(cctx, conn, store, rec, st); why != "" {
 		out.Error = why
 	}
 	return out

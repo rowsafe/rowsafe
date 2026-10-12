@@ -471,9 +471,12 @@ type StandbyPromoteResult struct {
 	// CaughtUp: WaitForLSN was reached (or there was none and everything
 	// received was replayed). MissingBytes is how much of the old primary's
 	// WAL the standby didn't have when it promoted anyway (Force).
-	CaughtUp     bool   `json:"caught_up"`
-	MissingBytes int64  `json:"missing_bytes,omitempty"`
-	Summary      string `json:"summary"`
+	CaughtUp     bool  `json:"caught_up"`
+	MissingBytes int64 `json:"missing_bytes,omitempty"`
+	// Warnings: what went wrong around the promotion without stopping it
+	// (the summary says it too).
+	Warnings []string `json:"warnings,omitempty"`
+	Summary  string   `json:"summary"`
 }
 
 // StandbyFenceParams are the params of a standby_fence task (on the old

@@ -31,6 +31,12 @@ import (
 //	ROWSAFE_MYSQL_IT_GTID            1: both servers set up for GTIDs (it follows by GTID);
 //	                                 mixed: the primary only (MySQL: the empty server's
 //	                                 gtid_mode is switched to match; MariaDB: by position)
+//	ROWSAFE_MYSQL_IT_TLS             self: both serve a self-signed certificate from Rowsafe's
+//	                                 files (pinned); ca: a CA's chain for a name (a Let's
+//	                                 Encrypt-like one; SSL_CERT_FILE trusts its root), reached
+//	                                 by address; "": the image's own (not pinned)
+//	ROWSAFE_MYSQL_IT_CA_DIR          where the standbys' certificate files go (both servers
+//	                                 read it)
 //
 // With GTIDs it also switches back: the first server becomes the primary
 // again and the second follows it, on its own data both times.
@@ -50,6 +56,18 @@ func TestStandbyIntegration(t *testing.T) {
 		return addrs[0]
 	}
 	ipA, ipB := ipOf(os.Getenv("ROWSAFE_MYSQL_IT_PRIMARY_HOST")), ipOf(os.Getenv("ROWSAFE_MYSQL_IT_STANDBY_HOST"))
+	tlsMode := os.Getenv("ROWSAFE_MYSQL_IT_TLS")
+	if d := os.Getenv("ROWSAFE_MYSQL_IT_CA_DIR"); d != "" {
+		sourceCADir = d
+		defer func() { sourceCADir = serverTLSDir }()
+	}
+	servedCertHost = func(s *server) string {
+		if s.db.SocketDir == sbSocket {
+			return ipB
+		}
+		return ipA
+	}
+	defer func() { servedCertHost = func(*server) string { return "127.0.0.1" } }()
 	// The agents run in this container (sidecars), not on the servers: the
 	// replication logins also let it in (the key checks sign in from here).
 	ipAgent := ""
@@ -165,6 +183,25 @@ func TestStandbyIntegration(t *testing.T) {
 	boss := func(socket string) (*sql.DB, error) {
 		return openWith(ctx, account{User: "boss", Password: "boss-secret-1"}, socket, 3306)
 	}
+	locked := func(db *sql.DB, user string) bool {
+		t.Helper()
+		var v sql.NullString
+		if err := db.QueryRowContext(ctx, "SELECT JSON_VALUE(Priv, '$.account_locked') FROM mysql.global_priv WHERE User = ?", user).Scan(&v); err != nil {
+			t.Fatalf("%s: %v", user, err)
+		}
+		return v.String == "true" || v.String == "1"
+	}
+	if e.flavor.mariadb() {
+		// Every right through a role of a role; a login a person locked.
+		exec(adbA, "CREATE ROLE power")
+		exec(adbA, "GRANT ALL PRIVILEGES ON *.* TO power")
+		exec(adbA, "CREATE ROLE ops")
+		exec(adbA, "GRANT power TO ops")
+		exec(adbA, "CREATE USER 'rolly'@'%' IDENTIFIED BY 'rolly-secret-1'")
+		exec(adbA, "GRANT ops TO 'rolly'@'%'")
+		exec(adbA, "CREATE USER 'parked'@'%' IDENTIFIED BY 'parked-secret-1' ACCOUNT LOCK")
+		exec(adbA, "GRANT ALL PRIVILEGES ON *.* TO 'parked'@'%'")
+	}
 	for i := 1; i <= 100; i++ {
 		exec(adbA, "INSERT INTO shop.orders VALUES (?, 'before backup')", i)
 	}
@@ -198,6 +235,36 @@ func TestStandbyIntegration(t *testing.T) {
 	t.Logf("create: %+v", cres)
 	adbB.Close() // its sessions were ended (server_id changed)
 	adbB = admin(specB.SocketDir)
+	// How the standby checks the primary's certificate.
+	rec1, _ := standbys(envB).get("sb1")
+	st1, err := e.server(envB, specB).readReplicaStatus(ctx, adbB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("TLS %q: pin %q, CA file %q, verify %v", tlsMode, rec1.KeyPin, st1.CAFile, st1.VerifyCert)
+	switch {
+	case tlsMode != "" && rec1.KeyPin == "":
+		t.Fatal("the primary serves Rowsafe's certificate files with a P-256 key: its key is pinned")
+	case tlsMode == "" && rec1.KeyPin != "":
+		t.Fatal("a certificate Rowsafe didn't set up is pinned")
+	case tlsMode == "ca" && (st1.CAFile == "" || st1.VerifyCert):
+		t.Fatal("a CA's certificate: the standby's server checks it chains to the root (not the name)")
+	case tlsMode == "self" && e.flavor.mariadb() && (!st1.VerifyCert || st1.CAFile != ""):
+		t.Fatal("MariaDB checks a self-signed certificate against the replication password")
+	case tlsMode == "self" && !e.flavor.mariadb() && st1.CAFile == "":
+		t.Fatal("MySQL checks it is the pinned self-signed certificate")
+	case tlsMode == "" && e.flavor.mariadb() && !st1.VerifyCert:
+		t.Fatal("MariaDB checks the primary's own certificate against the replication password")
+	}
+	if e.flavor.mariadb() {
+		if !strings.Contains(cres.Summary, "Root on the server itself") || !strings.Contains(cres.Summary, "'rolly'@'%'") ||
+			strings.Contains(cres.Summary, "'parked'") {
+			t.Fatalf("summary: %s", cres.Summary)
+		}
+		if !locked(adbB, "rolly") || !locked(adbB, "parked") {
+			t.Fatal("a login with every right through roles isn't locked on the standby")
+		}
+	}
 	followsByGTID := func(db *sql.DB, spec protocol.DatabaseSpec, env agent.EngineEnv) {
 		t.Helper()
 		st, err := e.server(env, spec).readReplicaStatus(ctx, db)
@@ -224,6 +291,47 @@ func TestStandbyIntegration(t *testing.T) {
 	}
 	if ts := e.StandbyTargets(ctx, envB); len(ts) != 0 {
 		t.Logf("targets (sidecar: none expected): %+v", ts)
+	}
+	// Another key at the primary's address: the standby stops receiving,
+	// again after something starts it, until the key is back.
+	if rec1.KeyPin != "" {
+		keyCheckEvery, keyRetryEvery = 0, 0
+		setPin := func(pin string) {
+			_ = standbys(envB).update(func(f *standbyFile) {
+				for i := range f.Standbys {
+					f.Standbys[i].KeyPin = pin
+				}
+			})
+		}
+		ioState := func() string {
+			st, err := e.server(envB, specB).readReplicaStatus(ctx, adbB)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return st.IORunning
+		}
+		setPin(strings.Repeat("0", 64))
+		if st := e.StandbyStates(ctx, envB); len(st) != 1 || !strings.Contains(st[0].Error, "another key") || ioState() != "No" {
+			t.Fatalf("another key: %+v, receiving %s", st, ioState())
+		}
+		var version string
+		if err := adbB.QueryRowContext(ctx, "SELECT VERSION()").Scan(&version); err != nil {
+			t.Fatal(err)
+		}
+		w := e.server(envB, specB).words(version)
+		exec(adbB, w.Start+" IO_THREAD")
+		if st := e.StandbyStates(ctx, envB); !strings.Contains(st[0].Error, "another key") || ioState() != "No" {
+			t.Fatalf("started again: %+v, receiving %s", st, ioState())
+		}
+		setPin(rec1.KeyPin)
+		if st := e.StandbyStates(ctx, envB); st[0].Error != "" && strings.Contains(st[0].Error, "another key") {
+			t.Fatalf("the key is back: %+v", st)
+		}
+		exec(adbA, "INSERT INTO shop.orders VALUES (300, 'after the key check')")
+		waitCount(adbB, "SELECT COUNT(*) FROM shop.orders WHERE id = 300", 1)
+		exec(adbA, "DELETE FROM shop.orders WHERE id = 300")
+		waitCount(adbB, "SELECT COUNT(*) FROM shop.orders WHERE id = 300", 0)
+		keyCheckEvery, keyRetryEvery = 10*time.Minute, time.Minute
 	}
 
 	// The app login can't write to the standby.
@@ -257,6 +365,9 @@ func TestStandbyIntegration(t *testing.T) {
 	if err != nil || fres.CheckpointLSN == "" {
 		t.Fatalf("fence: %+v %v", fres, err)
 	}
+	if e.flavor.mariadb() && (!strings.Contains(fres.Summary, "Root on the server itself") || !strings.Contains(fres.Summary, "'boss'@'%'")) {
+		t.Fatalf("fence summary: %s", fres.Summary)
+	}
 	appA, err := openWith(ctx, account{User: "app", Password: "app-secret-1"}, specA.SocketDir, 3306)
 	if err != nil {
 		t.Fatal(err)
@@ -270,13 +381,24 @@ func TestStandbyIntegration(t *testing.T) {
 	if !e.flavor.mariadb() {
 		exec(adbA, "SET GLOBAL super_read_only = OFF")
 	}
+	if e.flavor.mariadb() {
+		// Writable with logins still locked (as if the agent stopped
+		// between the two): the heartbeat unlocks them.
+		e.StandbyStates(ctx, envA)
+		if locked(adbA, "boss") || !locked(adbA, "parked") {
+			t.Fatal("a writable server keeps the logins Rowsafe locked (or lost a person's lock)")
+		}
+	}
 	if enforced, other, err := e.HoldFence(ctx, envA, fence); !enforced || other || err != nil {
 		t.Fatalf("hold: %v %v %v", enforced, other, err)
 	}
 	pres, err := e.StandbyPromote(ctx, envB, specB, protocol.StandbyPromoteParams{StandbyID: "sb1", WaitForLSN: fres.CheckpointLSN}, tl)
-	if err != nil || !pres.Promoted || !pres.CaughtUp || pres.ReplayLSN == "" {
+	if err != nil || !pres.Promoted || !pres.CaughtUp || pres.ReplayLSN == "" || len(pres.Warnings) > 0 {
 		t.Fatalf("promote: %+v %v", pres, err)
 	}
+	// The old primary starts a new binary log file (a restart) after the
+	// switch: its history still ends where the switch was recorded.
+	exec(adbA, "FLUSH BINARY LOGS")
 	at212 := time.Now().UTC()
 	if _, err := appB.ExecContext(ctx, "INSERT INTO shop.orders VALUES (212, 'on the new primary')"); err != nil {
 		t.Fatalf("the new primary refused a write: %v", err)
@@ -291,12 +413,16 @@ func TestStandbyIntegration(t *testing.T) {
 			bdb.Close()
 			t.Fatal("a login that bypasses read_only signs in to the fenced old primary")
 		}
+		if locked(adbB, "rolly") || !locked(adbB, "parked") {
+			t.Fatal("the new primary: Rowsafe's locks go, a person's stays")
+		}
 	}
 	// A restore after the switch, before the new primary's first backup:
 	// the old primary's backup, its binary log up to the switch, then the
 	// new primary's own (the switch recorded in the bucket).
 	for i := 0; i < 12; i++ {
 		_, _ = e.Archiver(ctx, envB, specB)
+		_, _ = e.Archiver(ctx, envA, specA) // its new file too
 		time.Sleep(time.Second)
 	}
 	dr := run(envB, specB, protocol.TaskDrill, nil).(*protocol.DrillResult)
@@ -372,6 +498,11 @@ func TestStandbyIntegration(t *testing.T) {
 	}
 	if n := count(adbB, "SELECT COUNT(*) FROM shop.orders"); n != 215 {
 		t.Fatalf("the rebuilt standby lost data: %d", n)
+	}
+	if e.flavor.mariadb() {
+		if !strings.Contains(rm.Summary, "can sign in again") || locked(adbB, "boss") || !locked(adbB, "parked") {
+			t.Fatalf("remove: the logins Rowsafe locked sign in again: %s", rm.Summary)
+		}
 	}
 	// The first server's earlier login (sb1) went when it prepared sb3;
 	// the second server is read-only again: its release waits.
