@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -59,21 +60,31 @@ func (e *Engine) StandbyCreate(ctx context.Context, env agent.EngineEnv, db prot
 	if p.Rebuild {
 		return s.reattach(ctx, conn, p, sec, start, log)
 	}
-	if err := s.checkTarget(ctx, conn, p); err != nil {
+	if err := s.checkTarget(ctx, conn, p, log); err != nil {
 		return nil, err
 	}
+	tf, err := s.readFacts(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	byGTID := s.followsByGTID(p.Settings, tf)
 	addr, err := reachable(sec.PrimaryAddresses, sec.PrimaryPort)
 	if err != nil {
 		return nil, err
 	}
 	log.Printf("the primary answers at %s:%d", addr, sec.PrimaryPort)
+	tc, err := s.primaryTLS(ctx, conn, addr, sec, p.StandbyID, p.PrimaryName, log)
+	if err != nil {
+		return nil, err
+	}
 	if p.SizeBytes > 0 {
 		if err := checkSpace(env.Config.RewindDir, p.SizeBytes); err != nil {
 			return nil, err
 		}
 	}
 	rec := standbyRecord{ID: p.StandbyID, DatabaseID: db.ID, Port: db.Port, Socket: db.SocketDir, Phase: protocol.StandbyPhaseCreating,
-		Address: addr, PrimPort: sec.PrimaryPort, ReplUser: sec.ReplicationUser, CreatedAt: time.Now().UTC()}
+		Address: addr, PrimPort: sec.PrimaryPort, ReplUser: sec.ReplicationUser, CreatedAt: time.Now().UTC(),
+		KeyPin: sec.EngineData[secretTLSKey], ReplPassword: sec.ReplicationPassword, CAFile: tc.CAFile, PrimaryName: p.PrimaryName}
 	if err := store.put(rec); err != nil {
 		return nil, err
 	}
@@ -84,20 +95,41 @@ func (e *Engine) StandbyCreate(ctx context.Context, env agent.EngineEnv, db prot
 			log.Printf("putting the server back as it was: %v", rerr)
 		}
 		_ = store.remove(rec.ID)
+		s.removeSourceCA(rec)
 		return nil, err
 	}
-	pos, err := s.seedStandby(ctx, conn, &rec, log)
+	loaded, err := s.seedStandby(ctx, conn, &rec, log)
 	if err != nil {
 		return fail(err)
 	}
+	pos := loaded.Pos
+	if byGTID && loaded.GTIDErr != nil {
+		log.Printf("following by binary log position: the GTIDs at the copy's position can't be read (%v)", loaded.GTIDErr)
+		byGTID = false
+	}
+	if byGTID {
+		if err := s.adoptGTIDs(ctx, conn, loaded.GTIDs, tf.Version); err != nil {
+			return fail(err)
+		}
+		log.Printf("loaded the copy; it holds the primary's transactions up to %s (GTIDs %s)", pos, cmpOr(cmpOr(loaded.GTIDs.Pos, loaded.GTIDs.Set), "none"))
+	} else {
+		// By position: the position must be in the primary's own binary
+		// log (after a switchover, the copy in the bucket can end in the
+		// other server's until the new primary's first backup).
+		if sid, ok := p.Settings[settingServerID]; ok && loaded.PosServer != "" && loaded.PosServer != strconv.Itoa(sid) {
+			return fail(fmt.Errorf("the latest backup and binary logs in the bucket end in another server's binary log (the database moved to this " +
+				"primary recently): add the standby once the primary's first backup is done"))
+		}
+		log.Printf("loaded the copy; it continues from the primary's binary log at %s", pos)
+	}
+	rec.GTID = byGTID
 	if err := store.put(rec); err != nil {
 		return fail(err)
 	}
-	log.Printf("loaded the copy; it continues from the primary's binary log at %s", pos)
-	if err := s.setReadOnly(ctx, conn, true); err != nil {
+	if err := s.setReadOnlyThen(ctx, conn, true, true); err != nil {
 		return fail(fmt.Errorf("making the standby read-only: %w", err))
 	}
-	if err := s.startReplication(ctx, conn, addr, sec, pos, log); err != nil {
+	if err := s.startReplication(ctx, conn, addr, sec, pos, byGTID, tc, log); err != nil {
 		return fail(err)
 	}
 	rec.Phase = protocol.StandbyPhaseFollowing
@@ -112,15 +144,19 @@ func (e *Engine) StandbyCreate(ctx context.Context, env agent.EngineEnv, db prot
 		res.Warnings = append(res.Warnings, fmt.Sprintf("The binary log is off on this %s server: if it is promoted, restores to any second "+
 			"need it on (Rowsafe offers it then; it takes a restart).", s.flavor.display()))
 	}
-	res.Summary = fmt.Sprintf("The standby on port %d is loaded from the latest backup and replicates from the primary (%s:%d); it is read-only.",
-		db.Port, addr, sec.PrimaryPort)
+	how := "by binary log position"
+	if byGTID {
+		how = "by GTID"
+	}
+	res.Summary = fmt.Sprintf("The standby on port %d is loaded from the latest backup and replicates from the primary (%s:%d, %s); it is read-only.",
+		db.Port, addr, sec.PrimaryPort, how) + s.lockNote()
 	log.Printf("%s", res.Summary)
 	return res, nil
 }
 
 // checkTarget makes sure the server can become the standby; nothing
 // changes when it can't (except a clashing server_id, which it changes).
-func (s *server) checkTarget(ctx context.Context, conn *sql.DB, p protocol.StandbyCreateParams) error {
+func (s *server) checkTarget(ctx context.Context, conn *sql.DB, p protocol.StandbyCreateParams, log agent.TaskLogger) error {
 	f, err := s.readFacts(ctx, conn)
 	if err != nil {
 		return err
@@ -157,13 +193,14 @@ func (s *server) checkTarget(ctx context.Context, conn *sql.DB, p protocol.Stand
 	if lc, ok := p.Settings[settingLowerCase]; ok && lc != f.LowerCase {
 		return fmt.Errorf("lower_case_table_names is %d here and %d on the primary; they must be the same", f.LowerCase, lc)
 	}
-	if !s.flavor.mariadb() {
+	if !s.flavor.mariadb() && f.GTIDMode != "" {
+		// The empty server takes the primary's gtid_mode (online, kept after
+		// a restart), so the two can follow each other either way.
 		primaryGTID := p.Settings[settingGTID] == 1
-		switch mode := strings.ToUpper(f.GTIDMode); {
-		case primaryGTID && mode != "ON" && mode != "ON_PERMISSIVE":
-			return fmt.Errorf("the primary has GTIDs on (gtid_mode ON) and this server has them off (%s): set gtid_mode = ON and enforce_gtid_consistency = ON here, restart, and create the standby again", mode)
-		case !primaryGTID && mode == "ON":
-			return errors.New("this server has GTIDs on (gtid_mode ON) and the primary has them off: set gtid_mode = OFF here, restart, and create the standby again")
+		if on := strings.EqualFold(f.GTIDMode, "ON"); on != primaryGTID {
+			if err := s.matchGTIDMode(ctx, conn, f.GTIDMode, primaryGTID, log); err != nil {
+				return fmt.Errorf("matching the primary's gtid_mode here: %w", err)
+			}
 		}
 	}
 	if id, ok := p.Settings[settingServerID]; ok && int64(id) == f.ServerID {
@@ -180,6 +217,14 @@ func (s *server) checkTarget(ctx context.Context, conn *sql.DB, p protocol.Stand
 		// would write as the primary once promoted, and the old primary
 		// would skip its changes as its own. The server is empty: end them.
 		s.endSessions(ctx, conn)
+		// Its binary log starts over under the new server_id: the files it
+		// has were written as the old one (and the bucket keys files by the
+		// server that wrote them).
+		if f.LogBin {
+			if err := s.resetBinlog(ctx, conn, f.Version); err != nil {
+				return fmt.Errorf("starting the binary log over after changing server_id: %w", err)
+			}
+		}
 	}
 	return nil
 }
@@ -211,21 +256,20 @@ func reachable(addrs []string, port int) (string, error) {
 
 // seedStandby loads the latest copy in the bucket into the standby's
 // server and returns the primary's binary log position it is at.
-func (s *server) seedStandby(ctx context.Context, conn *sql.DB, rec *standbyRecord, log agent.TaskLogger) (filePos, error) {
+func (s *server) seedStandby(ctx context.Context, conn *sql.DB, rec *standbyRecord, log agent.TaskLogger) (loadedCopy, error) {
 	log.Printf("restoring the latest backup on this server (not from the primary)")
-	loaded, err := s.loadCopy(ctx, "standby-"+rec.ID, restoreTarget{}, true, func(schemas, users []string) {
+	return s.loadCopy(ctx, "standby-"+rec.ID, restoreTarget{}, true, func(schemas, users []string) {
 		rec.Schemas, rec.Users = schemas, users
 		_ = standbys(s.env).put(*rec) // so an interrupted load can be undone
 	}, nil, log)
-	if err != nil {
-		return filePos{}, err
-	}
-	return loaded.Pos, nil
 }
 
 // loadedCopy is what loadCopy loaded.
 type loadedCopy struct {
 	Pos         filePos    // the source's binary log position it is at (latest only)
+	GTIDs       seedGTIDs  // the source's GTIDs at Pos (latest only; gtid.go)
+	PosServer   string     // the server_id of the server whose file Pos is in ("" when not known)
+	GTIDErr     error      // why GTIDs couldn't be read
 	RecoveredTo *time.Time // the last transaction replayed (nil: none after the backup)
 	Schemas     []string
 	Users       []string
@@ -264,6 +308,12 @@ func (s *server) loadCopy(ctx context.Context, id string, t restoreTarget, lates
 	if latest {
 		if out.Pos, err = stopAtLastCommit(r); err != nil {
 			return out, err
+		}
+		out.GTIDs, out.GTIDErr = seedGTIDsAt(r, dir, out.Pos, s.flavor.mariadb())
+		if id, err := readBinlogFile(filepath.Join(dir, "binlogs", out.Pos.File)); err == nil {
+			out.PosServer = id.Server
+		} else if b := r.Backup.Binlog.File; b.Name == out.Pos.File {
+			out.PosServer = b.Server
 		}
 	}
 	sc, err := s.startScratch(ctx, dir, r.Backup, drillStartTimeout)
@@ -533,7 +583,8 @@ func (s *server) copyLogins(ctx context.Context, sdb *sql.DB, sc *scratch, n int
 }
 
 // startReplication points the server at the primary and starts it.
-func (s *server) startReplication(ctx context.Context, conn *sql.DB, addr string, sec protocol.StandbySecrets, pos filePos, log agent.TaskLogger) error {
+// With byGTID it follows by GTID (from what it holds), else from pos.
+func (s *server) startReplication(ctx context.Context, conn *sql.DB, addr string, sec protocol.StandbySecrets, pos filePos, byGTID bool, tc tlsCheck, log agent.TaskLogger) error {
 	var version string
 	if err := conn.QueryRowContext(ctx, "SELECT VERSION()").Scan(&version); err != nil {
 		return err
@@ -542,19 +593,23 @@ func (s *server) startReplication(ctx context.Context, conn *sql.DB, addr string
 	if !standbyUserRE.MatchString(sec.ReplicationUser) || strings.ContainsAny(sec.ReplicationPassword, "'\\") {
 		return errors.New("the primary sent an invalid replication login")
 	}
-	if !isBinlogName(pos.File) {
+	if !byGTID && !isBinlogName(pos.File) {
 		return fmt.Errorf("invalid binary log position %s", pos)
 	}
 	opts := []string{
-		w.Host + " = " + quoteString(addr),
+		w.Host + " = " + quoteString(cmp.Or(tc.Host, addr)), // by name: standby_tls.go
 		w.Port + " = " + strconv.Itoa(sec.PrimaryPort),
 		w.User + " = " + quoteString(sec.ReplicationUser),
 		w.Password + " = " + quoteString(sec.ReplicationPassword),
-		w.File + " = " + quoteString(pos.File),
-		w.Pos + " = " + strconv.FormatInt(pos.Pos, 10),
+	}
+	if byGTID {
+		opts = append(opts, w.AutoPos)
+	} else {
+		opts = append(opts, w.File+" = "+quoteString(pos.File), w.Pos+" = "+strconv.FormatInt(pos.Pos, 10))
 	}
 	if sec.PrimaryTLS {
 		opts = append(opts, w.SSL+" = 1")
+		opts = append(opts, tc.options(s.flavor, w)...) // standby_tls.go
 	}
 	if w.PublicKey {
 		key := "GET_SOURCE_PUBLIC_KEY"
@@ -569,7 +624,11 @@ func (s *server) startReplication(ctx context.Context, conn *sql.DB, addr string
 	if _, err := conn.ExecContext(ctx, w.Start); err != nil {
 		return fmt.Errorf("starting replication: %w", err)
 	}
-	log.Printf("replication started from %s:%d", addr, sec.PrimaryPort)
+	if byGTID {
+		log.Printf("replication started from %s:%d, by GTID", addr, sec.PrimaryPort)
+	} else {
+		log.Printf("replication started from %s:%d at %s", addr, sec.PrimaryPort, pos)
+	}
 	deadline := time.Now().Add(standbyConnectWait)
 	for {
 		st, err := s.readReplicaStatus(ctx, conn)
@@ -639,8 +698,16 @@ func (s *server) undoStandby(ctx context.Context, conn *sql.DB, rec standbyRecor
 // clean (the standby applied everything the old primary wrote before it
 // was made read-only).
 func (s *server) reattach(ctx context.Context, conn *sql.DB, p protocol.StandbyCreateParams, sec protocol.StandbySecrets, start time.Time, log agent.TaskLogger) (*protocol.StandbyCreateResult, error) {
+	f, err := s.readFacts(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	byGTID := s.followsByGTID(p.Settings, f)
+	if _, sent := sec.EngineData[secretGTIDExecuted]; byGTID && !s.flavor.mariadb() && !sent {
+		byGTID = false // a new primary whose agent doesn't send its GTIDs: by position
+	}
 	pos, ok := parseFilePos(p.SwitchLSN)
-	if !p.Reattach || !ok {
+	if !p.Reattach || !ok && !byGTID {
 		return nil, fmt.Errorf("the old primary on port %d may hold changes the new primary doesn't have (the promotion didn't wait for all of them), "+
 			"so Rowsafe won't turn it into a standby: keep it as it is, and add a standby on an empty %s server instead", s.db.Port, s.flavor.display())
 	}
@@ -655,30 +722,46 @@ func (s *server) reattach(ctx context.Context, conn *sql.DB, p protocol.StandbyC
 	if err != nil {
 		return nil, err
 	}
+	tc, err := s.primaryTLS(ctx, conn, addr, sec, p.StandbyID, p.PrimaryName, log)
+	if err != nil {
+		return nil, err
+	}
+	if byGTID {
+		if err := s.prepareReattachGTID(ctx, conn, sec); err != nil {
+			return nil, err
+		}
+	}
 	store := standbys(s.env)
 	rec := standbyRecord{ID: p.StandbyID, DatabaseID: s.db.ID, Port: s.db.Port, Socket: s.db.SocketDir, Phase: protocol.StandbyPhaseCreating,
-		Address: addr, PrimPort: sec.PrimaryPort, ReplUser: sec.ReplicationUser, Rebuild: true, CreatedAt: time.Now().UTC()}
+		Address: addr, PrimPort: sec.PrimaryPort, ReplUser: sec.ReplicationUser, Rebuild: true, GTID: byGTID, CreatedAt: time.Now().UTC(),
+		KeyPin: sec.EngineData[secretTLSKey], ReplPassword: sec.ReplicationPassword, CAFile: tc.CAFile, PrimaryName: p.PrimaryName}
 	if err := store.put(rec); err != nil {
 		return nil, err
 	}
 	if err := s.setReadOnly(ctx, conn, true); err != nil {
 		_ = store.remove(rec.ID)
+		s.removeSourceCA(rec)
 		return nil, err
 	}
-	if err := s.startReplication(ctx, conn, addr, sec, pos, log); err != nil {
+	if err := s.startReplication(ctx, conn, addr, sec, pos, byGTID, tc, log); err != nil {
 		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
 		_ = s.undoStandby(cctx, conn, rec, log)
 		cancel()
 		_ = store.remove(rec.ID)
+		s.removeSourceCA(rec)
 		return nil, err
 	}
 	rec.Phase, rec.StreamSeen = protocol.StandbyPhaseFollowing, time.Now().UTC()
 	if err := store.put(rec); err != nil {
 		return nil, err
 	}
+	how := "from where it took over"
+	if byGTID {
+		how = "by GTID, from what it holds"
+	}
 	res := &protocol.StandbyCreateResult{StandbyID: p.StandbyID, Mode: protocol.StandbyModeStreaming, PrimaryAddress: addr, Reattached: true,
 		ReplayLSN: pos.String(), DurationMs: time.Since(start).Milliseconds(),
-		Summary: fmt.Sprintf("The old primary on port %d follows the new primary (%s:%d) from where it took over; it is read-only.", s.db.Port, addr, sec.PrimaryPort)}
+		Summary: fmt.Sprintf("The old primary on port %d follows the new primary (%s:%d) %s; it is read-only.", s.db.Port, addr, sec.PrimaryPort, how) + s.lockNote()}
 	log.Printf("%s", res.Summary)
 	return res, nil
 }

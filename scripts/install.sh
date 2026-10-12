@@ -556,7 +556,9 @@ Options (when piping, pass them after `sh -s --`):
   --mysql-standby        MySQL/MariaDB: let Rowsafe set up standby servers with this
                          server (its MySQL account gets administrator rights, used only
                          when someone adds, promotes or removes a standby and confirms);
-                         an empty server can then become another server's standby
+                         an empty server can then become another server's standby or
+                         receive clones (without a terminal and without --protect, every
+                         empty MySQL or MariaDB server here is readied for that)
   --no-mysql-standby     don't
   --mongodb-standby      MongoDB: let Rowsafe set up standby servers with this server:
                          its user gets clusterManager, and root's helper may hand out
@@ -1343,6 +1345,22 @@ mysql_account() {
   if [ "$_rc" = 0 ]; then note "$(cat "$TMP/account.log")"; return 0; fi
   sed 's/^/    /' "$TMP/account.log" >&2
   return 1
+}
+
+# mysql_targets_unattended is --mysql-standby without --protect and without
+# a terminal (a server Rowsafe creates to hold a standby or receive a
+# clone): Rowsafe's account, allowed to set up standbys, on each empty
+# MySQL or MariaDB server here.
+mysql_targets_unattended() {
+  _found=0
+  while IFS= read -r _line <&4; do
+    read_cluster "$_line"
+    { [ "$C_ENGINE" = mysql ] || [ "$C_ENGINE" = mariadb ]; } && [ "$C_DBS" = - ] || continue
+    _found=1
+    mysql_account || die "could not set up Rowsafe's account on $(engine_label "$C_ENGINE") on port $C_PORT (see above)"
+    ok "$(engine_label "$C_ENGINE") on port $C_PORT is ready to hold a standby or receive a clone"
+  done 4<"$TMP/clusters"
+  [ "$_found" = 1 ] || die "found no empty MySQL or MariaDB server here to hold a standby or receive a clone"
 }
 
 # mysql_standby_wanted: --mysql-standby, or yes to the question (asked once,
@@ -2260,6 +2278,7 @@ install_database() {
         _c=$(apt_candidate mysql-community-server)
         case $_c in 8.4.*) ;; *) die "MySQL 8.4 isn't available for $OS_NAME from Oracle's repository (found ${_c:-nothing})" ;; esac
         mysql_local_conf
+        mysql_replication_conf
         # root signs in through the socket only (auth_socket): no password.
         printf '%s\n' "mysql-community-server mysql-community-server/root-pass password " \
           "mysql-community-server mysql-community-server/re-root-pass password " | debconf-set-selections
@@ -2271,6 +2290,7 @@ install_database() {
         _c=$(apt_candidate mariadb-server)
         case ${_c#*:} in "$INSTALL_DB_VERSION".*) ;; *) die "MariaDB $INSTALL_DB_VERSION isn't available for $OS_NAME from MariaDB's repository (found ${_c:-nothing})" ;; esac
         mysql_local_conf
+        mysql_replication_conf
         apt_install mariadb-server mariadb-client mariadb-backup
         ;;
       valkey)
@@ -2426,6 +2446,38 @@ mysql_local_conf() {
     echo "[mysqld]"
     echo "bind-address = 127.0.0.1"
     [ "$INSTALL_DB" != mysql ] || echo "mysqlx = OFF"
+  } | write_file "$_f" 0644 root:root || true
+}
+
+# mysql_replication_conf: before the packages start the new server, what
+# standby servers need (a second server Rowsafe keeps in sync, both ways
+# after a switchover): its own random server_id; MySQL: GTIDs on
+# (gtid_mode, enforce_gtid_consistency); MariaDB: the binary log (ROW),
+# log_slave_updates (a promoted standby's binary log holds the old
+# primary's transactions with their GTIDs) and gtid_strict_mode. In
+# conf.d for both, before Rowsafe's own option file (zz-rowsafe.cnf, which
+# sorts after it): a server_id the agent changes later wins. A new server
+# only: a re-run never changes it.
+mysql_replication_conf() {
+  _f=/etc/mysql/conf.d/zz-rowsafe-replication.cnf
+  [ ! -e "$_f" ] || return 0
+  install -d -m 0755 -o root -g root /etc/mysql "${_f%/*}"
+  _sid=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
+  _sid=$((_sid % 4000000000 + 2))
+  {
+    echo "# Written by the Rowsafe installer (--install-$INSTALL_DB): what standby servers need,"
+    echo "# set when $(engine_label "$INSTALL_DB") was installed."
+    echo "[mysqld]"
+    echo "server_id = $_sid"
+    if [ "$INSTALL_DB" = mariadb ]; then
+      echo "log_bin = mysql-bin"
+      echo "binlog_format = ROW"
+      echo "log_slave_updates = ON"
+      echo "gtid_strict_mode = ON"
+    else
+      echo "gtid_mode = ON"
+      echo "enforce_gtid_consistency = ON"
+    fi
   } | write_file "$_f" 0644 root:root || true
 }
 
@@ -12552,7 +12604,7 @@ databases() {
   if [ "$interactive" = 1 ] || [ -n "$PROTECT_NAME" ] || [ "$ALLOW_RESTART" = yes ] || grep -qs '^[0-9]' "$RESTART_ALLOW_FILE" ||
     [ -n "$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT" ] || [ "$ALLOW_FIREWALL" = yes ] || grep -qs '^[0-9]' "$FIREWALL_ALLOW_FILE" ||
     [ "$ALLOW_TUNING" = yes ] || [ "$ALLOW_SQLITE_MODES" = yes ] || grep -qsx 'sqlite-paths' "$SQLITE_MODES_ALLOW_FILE" ||
-    [ "$ALLOW_POOLER" = yes ] || grep -qs '^[0-9]' "$POOLER_ALLOW_FILE"; then
+    [ "$ALLOW_POOLER" = yes ] || grep -qs '^[0-9]' "$POOLER_ALLOW_FILE" || [ "$MYSQL_STANDBY" = yes ]; then
     say ""
     step "Looking for $(engine_label) on this server"
     if ! discover; then
@@ -12576,6 +12628,8 @@ databases() {
     protect_unattended
   elif [ "$interactive" = 1 ]; then
     setup_databases
+  elif [ "$MYSQL_STANDBY" = yes ] && { [ "$HOST_ENGINE" = mysql ] || [ "$HOST_ENGINE" = mariadb ]; }; then
+    mysql_targets_unattended
   elif [ "$NO_SETUP" = 0 ] || [ -z "$FILES_PATHS" ]; then
     next_steps
   fi

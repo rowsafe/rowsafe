@@ -880,7 +880,7 @@ func TestCloudEngines(t *testing.T) {
 	for _, tc := range []struct{ args, want string }{
 		{"--engine mongodb", "doesn't host MongoDB"},
 		{"--engine mysql --engine-version 8.0", "MySQL 8.4 on new servers, not 8.0"},
-		{"--engine valkey --standby", "standby server is offered for PostgreSQL so far"},
+		{"--engine valkey --standby", "new Valkey servers can't have a standby yet"},
 		{"--engine mysql --size arm-s", "Intel and AMD processors only"},
 		{"--engine valkey --postgres 16", "--postgres is PostgreSQL's version"},
 		{"--postgres 16 --engine-version 17", "disagree"},
@@ -906,7 +906,7 @@ func TestCloudEngines(t *testing.T) {
 	}
 
 	out, err = run(t, "cloud", "sizes")
-	for _, want := range []string{"Databases (--engine, --engine-version):", "MySQL (mysql): 8.4, default 8.4; apps connect on port 3306 with TLS; no standby yet; Intel and AMD sizes only (not Arm)",
+	for _, want := range []string{"Databases (--engine, --engine-version):", "MySQL (mysql): 8.4, default 8.4; apps connect on port 3306 with TLS; Intel and AMD sizes only (not Arm)", "Valkey (valkey): 8, default 8; apps connect on port 6380 with TLS; no standby yet",
 		"Valkey (valkey): 8, default 8; apps connect on port 6380", "Arm processor: not for MySQL"} {
 		if err != nil || !strings.Contains(out, want) {
 			t.Errorf("sizes lacks %q: %v\n%s", want, err, out)

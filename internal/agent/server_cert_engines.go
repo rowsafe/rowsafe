@@ -82,9 +82,18 @@ func (a *Agent) engineCertRequest(db protocol.DatabaseSpec, st *ServerTLS, p pro
 	if err != nil {
 		return nil, err
 	}
-	keyPEM, csrPEM, err := newCertRequest(p.Names)
-	if err != nil {
-		return nil, err
+	var keyPEM, csrPEM []byte
+	reused := false
+	if st.ReuseKey {
+		if key, ok := readECKey(st.KeyFile); ok {
+			keyPEM, csrPEM, err = certRequestFor(key, p.Names)
+			reused = err == nil
+		}
+	}
+	if !reused {
+		if keyPEM, csrPEM, err = newCertRequest(p.Names); err != nil {
+			return nil, err
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
 		return nil, err
@@ -94,6 +103,9 @@ func (a *Agent) engineCertRequest(db protocol.DatabaseSpec, st *ServerTLS, p pro
 	}
 	res.CSR, res.Why = string(csrPEM), why
 	res.Summary = fmt.Sprintf("A new certificate is needed: %s. Made a new key (it stays on this server) and a request for %s.", why, joinAnd(p.Names))
+	if reused {
+		res.Summary = fmt.Sprintf("A new certificate is needed: %s. Made a request for %s with the key the server has (it stays on this server).", why, joinAnd(p.Names))
+	}
 	tl.Printf("%s", res.Summary)
 	return res, nil
 }

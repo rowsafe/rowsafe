@@ -28,8 +28,11 @@ import (
 // bucket are replayed up to the last complete transaction, and its
 // databases, routines and logins are loaded into the standby's server
 // (without writing them to its own binary log). The standby then
-// replicates from the primary from exactly that binary log position, with
-// a replication login made for its addresses only, and stays read-only.
+// replicates from the primary from exactly that point, with a replication
+// login made for its addresses only, and stays read-only: by GTID when both
+// servers can (standby_gtid.go: it is given the primary's GTIDs at that
+// point, read from the files in the bucket), else from that binary log
+// position.
 //
 // Promoting it waits until it has applied everything the old primary
 // wrote (the position the old primary stopped at, when it could be fenced),
@@ -37,22 +40,44 @@ import (
 // read-only (super_read_only on MySQL) and ends its client sessions; the
 // agent keeps it read-only, also across restarts (SET PERSIST on MySQL, the
 // settings file Rowsafe writes on MariaDB).
+//
+// The old primary then follows the new one on its own data: by GTID (after
+// checking it holds nothing the new primary lacks), else from where the
+// new primary took over.
 
 // standbyRecord is a standby this server runs.
 type standbyRecord struct {
-	ID         string    `json:"id"`
-	DatabaseID string    `json:"database_id"`
-	Port       int       `json:"port"`
-	Socket     string    `json:"socket,omitempty"`
-	Phase      string    `json:"phase"` // protocol.StandbyPhase*
-	Address    string    `json:"primary_address,omitempty"`
-	PrimPort   int       `json:"primary_port,omitempty"`
-	ReplUser   string    `json:"replication_user,omitempty"`
-	Rebuild    bool      `json:"rebuild,omitempty"`
-	Schemas    []string  `json:"schemas,omitempty"` // loaded by Rowsafe (dropped on removal)
-	Users      []string  `json:"users,omitempty"`   // 'user'@'host' loaded by Rowsafe
-	CreatedAt  time.Time `json:"created_at"`
-	StreamSeen time.Time `json:"streaming_seen_at,omitzero"`
+	ID         string `json:"id"`
+	DatabaseID string `json:"database_id"`
+	Port       int    `json:"port"`
+	Socket     string `json:"socket,omitempty"`
+	Phase      string `json:"phase"` // protocol.StandbyPhase*
+	Address    string `json:"primary_address,omitempty"`
+	PrimPort   int    `json:"primary_port,omitempty"`
+	ReplUser   string `json:"replication_user,omitempty"`
+	Rebuild    bool   `json:"rebuild,omitempty"`
+	// GTID: it follows by GTID (SOURCE_AUTO_POSITION, MASTER_USE_GTID),
+	// not by binary log position (gtid.go).
+	GTID bool `json:"gtid,omitempty"`
+	// KeyPin is the SHA-256 of the key the primary serves TLS with, as it
+	// sealed it, and ReplPassword the replication login's password (both
+	// for the key checks, standby_tls.go); KeyMismatch: the primary showed
+	// another key, and the standby stopped receiving.
+	KeyPin       string `json:"key_pin,omitempty"`
+	ReplPassword string `json:"replication_password,omitempty"`
+	KeyMismatch  bool   `json:"key_mismatch,omitempty"`
+	// CAFile: MySQL checks the primary's certificate chains to it (the
+	// certificate the primary serves with the pinned key, or its CA).
+	CAFile string `json:"ca_file,omitempty"`
+	// PrimaryName: the primary's own name to replicate by (its
+	// certificate from a CA checked for it); TLSProblem: why the standby
+	// doesn't replicate from what the primary serves now (standby_tls.go).
+	PrimaryName string    `json:"primary_name,omitempty"`
+	TLSProblem  string    `json:"tls_problem,omitempty"`
+	Schemas     []string  `json:"schemas,omitempty"` // loaded by Rowsafe (dropped on removal)
+	Users       []string  `json:"users,omitempty"`   // 'user'@'host' loaded by Rowsafe
+	CreatedAt   time.Time `json:"created_at"`
+	StreamSeen  time.Time `json:"streaming_seen_at,omitzero"`
 }
 
 type standbyFile struct {
@@ -220,6 +245,13 @@ type replicaStatus struct {
 	SecondsBehind *int64
 	IOError       string
 	SQLError      string
+	// GTID: it follows by GTID (Auto_Position 1, Using_Gtid Slave_Pos).
+	GTID bool
+	// SourceServerID is the source's server_id; CAFile the certificate
+	// file the source's certificate must chain to.
+	SourceServerID string
+	CAFile         string
+	VerifyCert     bool
 }
 
 func (st replicaStatus) running() bool { return st.IORunning == "Yes" && st.SQLRunning == "Yes" }
@@ -288,6 +320,13 @@ func (s *server) channelStatus(ctx context.Context, db *sql.DB, channel string) 
 			st.SecondsBehind = &n
 		}
 	}
+	st.SourceServerID = get("Source_Server_Id", "Master_Server_Id")
+	if st.SourceServerID == "0" {
+		st.SourceServerID = ""
+	}
+	st.GTID = get("Auto_Position") == "1" || strings.HasSuffix(strings.ToLower(get("Using_Gtid")), "_pos")
+	st.CAFile = get("Source_SSL_CA_File", "Master_SSL_CA_File")
+	st.VerifyCert = get("Source_SSL_Verify_Server_Cert", "Master_SSL_Verify_Server_Cert") == "Yes"
 	st.IOError = get("Last_IO_Error")
 	st.SQLError = get("Last_SQL_Error")
 	return st, rows.Err()
@@ -296,8 +335,15 @@ func (s *server) channelStatus(ctx context.Context, db *sql.DB, channel string) 
 // replicaWords are the statements of the flavor and version: MySQL 8.0.23+
 // says REPLICA and SOURCE, MariaDB and older MySQL SLAVE and MASTER.
 type replicaWords struct {
-	Change, Start, Stop, Reset, Host, Port, User, Password, File, Pos, SSL, PosWait string
-	PublicKey                                                                       bool
+	Change, Start, Stop, Reset, Host, Port, User, Password, File, Pos, SSL, SSLCA, PosWait string
+	// AutoPos follows by GTID instead of File and Pos; SSLVerify is the
+	// option that has the replica check the primary's certificate's name
+	// (and, MariaDB 11.3+ without a CA: a self-signed one against the
+	// replication password: ZeroConfig).
+	AutoPos    string
+	SSLVerify  string
+	ZeroConfig bool
+	PublicKey  bool
 }
 
 func (s *server) words(version string) replicaWords {
@@ -305,12 +351,17 @@ func (s *server) words(version string) replicaWords {
 	if !s.flavor.mariadb() && n >= 80023 {
 		return replicaWords{Change: "CHANGE REPLICATION SOURCE TO", Start: "START REPLICA", Stop: "STOP REPLICA",
 			Reset: "RESET REPLICA ALL", Host: "SOURCE_HOST", Port: "SOURCE_PORT", User: "SOURCE_USER", Password: "SOURCE_PASSWORD",
-			File: "SOURCE_LOG_FILE", Pos: "SOURCE_LOG_POS", SSL: "SOURCE_SSL", PosWait: "SOURCE_POS_WAIT", PublicKey: true}
+			File: "SOURCE_LOG_FILE", Pos: "SOURCE_LOG_POS", SSL: "SOURCE_SSL", SSLCA: "SOURCE_SSL_CA", PosWait: "SOURCE_POS_WAIT",
+			AutoPos: "SOURCE_AUTO_POSITION = 1", SSLVerify: "SOURCE_SSL_VERIFY_SERVER_CERT", PublicKey: true}
 	}
 	w := replicaWords{Change: "CHANGE MASTER TO", Start: "START SLAVE", Stop: "STOP SLAVE", Reset: "RESET SLAVE ALL",
 		Host: "MASTER_HOST", Port: "MASTER_PORT", User: "MASTER_USER", Password: "MASTER_PASSWORD",
-		File: "MASTER_LOG_FILE", Pos: "MASTER_LOG_POS", SSL: "MASTER_SSL", PosWait: "MASTER_POS_WAIT"}
-	if !s.flavor.mariadb() && n >= 80000 {
+		File: "MASTER_LOG_FILE", Pos: "MASTER_LOG_POS", SSL: "MASTER_SSL", SSLCA: "MASTER_SSL_CA", PosWait: "MASTER_POS_WAIT", AutoPos: "MASTER_AUTO_POSITION = 1",
+		SSLVerify: "MASTER_SSL_VERIFY_SERVER_CERT"}
+	if s.flavor.mariadb() {
+		w.AutoPos = "MASTER_USE_GTID = slave_pos"
+		w.ZeroConfig = n >= 110300
+	} else if n >= 80000 {
 		w.PublicKey = true
 	}
 	return w
@@ -393,15 +444,54 @@ func userSchemas(ctx context.Context, db *sql.DB) ([]string, error) {
 
 // setReadOnly turns read_only on or off now and after a restart.
 func (s *server) setReadOnly(ctx context.Context, db *sql.DB, on bool) error {
+	return s.setReadOnlyThen(ctx, db, on, false)
+}
+
+// setReadOnlyThen is setReadOnly; revert: MariaDB, when the logins that
+// could still write can't be locked, the server takes writes again (a
+// first fence, an empty server becoming a standby: nothing changed). Not
+// for a server that must stay read-only whatever happens (a fenced old
+// primary held so, rebuilt as a standby): it stays read-only, with the
+// error.
+func (s *server) setReadOnlyThen(ctx context.Context, db *sql.DB, on, revert bool) error {
 	v := "OFF"
 	if on {
 		v = "ON"
 	}
 	if s.flavor.mariadb() {
+		// read_only and the logins locked with it change together
+		// (standby_lock.go).
+		mu := s.writerMu()
+		mu.Lock()
+		defer mu.Unlock()
 		if _, err := db.ExecContext(ctx, "SET GLOBAL read_only = "+v); err != nil {
 			return err
 		}
-		return s.persistSetting("read_only", map[bool]string{true: "1", false: ""}[on])
+		if err := s.persistSetting("read_only", map[bool]string{true: "1", false: ""}[on]); err != nil {
+			return err
+		}
+		if !on {
+			// It takes writes now, whatever happens to the locks: a login
+			// left locked is unlocked on a heartbeat (healWriterLocks).
+			if _, err := s.unlockWriters(ctx, db); err != nil && s.env.Log != nil {
+				s.env.Log.Warn("unlocking logins Rowsafe locked; the heartbeat tries again", "port", s.db.Port, "err", err)
+			}
+			return nil
+		}
+		if _, err := s.lockWriters(ctx, db); err != nil {
+			if !revert {
+				return fmt.Errorf("locking the logins that could still write: %w", err)
+			}
+			// Not read-only half-way: writable again, with what was
+			// locked unlocked (the heartbeat unlocks only writable servers).
+			_, _ = db.ExecContext(ctx, "SET GLOBAL read_only = OFF")
+			_ = s.persistSetting("read_only", "")
+			if _, uerr := s.unlockWriters(ctx, db); uerr != nil && s.env.Log != nil {
+				s.env.Log.Warn("unlocking logins Rowsafe locked; the heartbeat tries again", "port", s.db.Port, "err", uerr)
+			}
+			return fmt.Errorf("locking the logins that could still write: %w", err)
+		}
+		return nil
 	}
 	if on {
 		if _, err := db.ExecContext(ctx, "SET PERSIST super_read_only = ON"); err != nil {

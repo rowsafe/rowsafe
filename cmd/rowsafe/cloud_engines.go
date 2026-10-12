@@ -58,7 +58,7 @@ func chooseEngine(cat client.CloudCatalog, name, version, pg string, standby boo
 	case !slices.Contains(e.Versions, version):
 		return e, "", fmt.Errorf("Rowsafe installs %s %s on new servers, not %s", e.Name, strings.Join(e.Versions, ", "), version)
 	case standby && !e.Standby:
-		return e, "", fmt.Errorf("a standby server is offered for PostgreSQL so far, not %s: leave out --standby", e.Name)
+		return e, "", fmt.Errorf("new %s servers can't have a standby yet: leave out --standby", e.Name)
 	}
 	return e, version, nil
 }

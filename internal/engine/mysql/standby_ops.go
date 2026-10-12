@@ -2,8 +2,11 @@ package mysql
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +21,9 @@ var _ agent.EngineStandby = (*Engine)(nil)
 // applied what the old primary wrote, stops replication and takes writes.
 func (e *Engine) StandbyPromote(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec, p protocol.StandbyPromoteParams, log agent.TaskLogger) (*protocol.StandbyPromoteResult, error) {
 	store := standbys(env)
+	mu := standbyMu(p.StandbyID) // not while the key watch changes its replication
+	mu.Lock()
+	defer mu.Unlock()
 	rec, ok := store.get(p.StandbyID)
 	if !ok {
 		return nil, errors.New("this server runs no such standby")
@@ -86,21 +92,71 @@ func (e *Engine) StandbyPromote(ctx context.Context, env agent.EngineEnv, db pro
 	if _, err := conn.ExecContext(ctx, w.Stop); err != nil {
 		return nil, fmt.Errorf("stopping replication: %w", err)
 	}
+	// Where the old primary's history ends, as this server applied it.
+	final, err := s.readReplicaStatus(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := conn.ExecContext(ctx, w.Reset); err != nil {
 		return nil, fmt.Errorf("forgetting the old primary: %w", err)
+	}
+	now := time.Now().UTC()
+	// Still read-only: its own binary log starts in a file of its own,
+	// and the switch is recorded in the bucket (restores to a moment after
+	// it go on there until this server's first backup).
+	f, ferr := s.readFacts(ctx, conn)
+	flushed := false
+	if ferr == nil && f.LogBin {
+		if _, err := conn.ExecContext(ctx, "FLUSH BINARY LOGS"); err != nil {
+			log.Printf("note: couldn't start a new binary log file: %v", err)
+		} else {
+			flushed = true
+		}
+	}
+	noRecord := func(why string) {
+		w := "Restores to a moment after the switch wait for this server's first backup: " + why + "."
+		res.Warnings = append(res.Warnings, w)
+		log.Printf("note: %s", w)
+	}
+	if pos, err := s.currentPosition(ctx, conn); err == nil {
+		res.ReplayLSN = filePos{File: pos.File.Name, Pos: pos.Pos}.String() // where the old primary can follow from
+		switch {
+		case s.env.Repo.Bucket == "" || ferr != nil || !f.LogBin:
+		case !flushed:
+			// Its current file also holds what it replicated: a restore
+			// going on there would apply that twice.
+			noRecord("it couldn't start a binary log file of its own, so the switch wasn't recorded in the bucket")
+		case final.Exec.File == "" || final.SourceServerID == "":
+			noRecord("the standby didn't say where the old primary's history ends, so the switch wasn't recorded in the bucket")
+		default:
+			if err := s.recordStandbySwitch(ctx, f, final, pos, now); err != nil {
+				noRecord("recording the switch in the bucket failed (" + err.Error() + ")")
+			} else {
+				log.Printf("recorded the switch in the bucket: the old primary's history ends at %s, this server's begins with %s", final.Exec, pos.File.Name)
+			}
+		}
 	}
 	if err := s.setReadOnly(ctx, conn, false); err != nil {
 		return nil, fmt.Errorf("making the new primary writable: %w", err)
 	}
-	now := time.Now().UTC()
-	res.Promoted, res.PromotedAt, res.LastReplayAt = true, &now, &now
-	if pos, err := s.currentPosition(ctx, conn); err == nil {
-		res.ReplayLSN = filePos{File: pos.File.Name, Pos: pos.Pos}.String() // where the old primary can follow from
+	if left := s.readWriterLocks().Locked; len(left) > 0 {
+		res.Warnings = append(res.Warnings, "Some logins Rowsafe locked while it was read-only are still locked ("+strings.Join(left, ", ")+
+			"); the agent unlocks them by itself.")
 	}
+	// It had no standby of its own: replication logins left from when it
+	// was a primary before go.
+	if err := s.dropStaleReplicationLogins(ctx, conn); err != nil {
+		log.Printf("dropping old replication logins: %v", err)
+	}
+	res.Promoted, res.PromotedAt, res.LastReplayAt = true, &now, &now
 	_ = store.remove(rec.ID)
+	s.removeSourceCA(rec)
 	res.Summary = fmt.Sprintf("%s on port %d is the primary now and takes writes.", s.flavor.display(), rec.Port)
 	if !res.CaughtUp {
 		res.Summary += " It was promoted before it had every change of the old primary."
+	}
+	for _, w := range res.Warnings {
+		res.Summary += " " + w
 	}
 	log.Printf("%s", res.Summary)
 	return res, nil
@@ -110,6 +166,9 @@ func (e *Engine) StandbyPromote(ctx context.Context, env agent.EngineEnv, db pro
 func (e *Engine) StandbyRemove(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec, p protocol.StandbyRemoveParams, log agent.TaskLogger) (*protocol.StandbyRemoveResult, error) {
 	store := standbys(env)
 	res := &protocol.StandbyRemoveResult{StandbyID: p.StandbyID}
+	mu := standbyMu(p.StandbyID)
+	mu.Lock()
+	defer mu.Unlock()
 	rec, ok := store.get(p.StandbyID)
 	if !ok {
 		res.Summary = "No such standby runs here (already removed)."
@@ -126,9 +185,22 @@ func (e *Engine) StandbyRemove(ctx context.Context, env agent.EngineEnv, db prot
 		return nil, err
 	}
 	_ = store.remove(rec.ID)
+	s.removeSourceCA(rec)
 	if rec.Rebuild {
 		res.Summary = fmt.Sprintf("Removed the standby: %s on port %d doesn't replicate any more; its data (a copy of the database) stays, read-only.",
 			s.flavor.display(), rec.Port)
+		// Nothing holds it read-only for Rowsafe any more: the logins
+		// locked for that sign in again.
+		mu := s.writerMu()
+		mu.Lock()
+		done, err := s.unlockWriters(ctx, conn)
+		mu.Unlock()
+		if len(done) > 0 {
+			res.Summary += " The logins Rowsafe had locked while it was read-only (" + strings.Join(done, ", ") + ") can sign in again."
+		}
+		if err != nil {
+			res.Summary += " Some logins Rowsafe had locked are still locked: " + err.Error() + "."
+		}
 	} else {
 		res.Restored = true
 		res.Summary = fmt.Sprintf("Removed the standby: %s on port %d is empty and writable again, as before.", s.flavor.display(), rec.Port)
@@ -144,6 +216,7 @@ func (e *Engine) StandbyStates(ctx context.Context, env agent.EngineEnv) []proto
 	for _, rec := range store.all() {
 		out = append(out, e.standbyState(ctx, env, store, rec))
 	}
+	e.healWriterLocks(ctx, env) // MariaDB: logins left locked on a server that takes writes
 	return out
 }
 
@@ -175,6 +248,9 @@ func (e *Engine) standbyState(ctx context.Context, env agent.EngineEnv, store *s
 	}
 	ro, _ := s.isReadOnly(cctx, conn)
 	out.InRecovery = st.Configured && ro
+	if ro {
+		s.keepWritersLocked(cctx, conn) // MariaDB: logins replicated since (standby_lock.go)
+	}
 	out.ReceiveLSN = lsn(st.Read.File, st.Read.Pos)
 	out.ReplayLSN = lsn(st.Exec.File, st.Exec.Pos)
 	if st.IORunning == "Yes" {
@@ -202,6 +278,9 @@ func (e *Engine) standbyState(ctx context.Context, env agent.EngineEnv, store *s
 		out.Error = "receiving the primary's changes: " + st.IOError
 	case !ro:
 		out.Error = "the standby isn't read-only"
+	}
+	if why := s.watchKey(cctx, conn, store, rec, st); why != "" {
+		out.Error = why
 	}
 	return out
 }
@@ -234,7 +313,7 @@ func (e *Engine) StandbyTargets(ctx context.Context, env agent.EngineEnv) []prot
 	var out []protocol.StandbyTarget
 	for _, d := range found {
 		t := protocol.StandbyTarget{Engine: string(e.flavor), Port: d.Port, Version: d.Version, Socket: d.SocketDir}
-		t.Reason = e.targetReason(ctx, env, store, d)
+		t.Reason, t.Replication = e.targetReason(ctx, env, store, d)
 		t.Usable = t.Reason == ""
 		t.Standby, t.NoStandby = t.Usable, t.Reason // the same rights and an empty server
 		out = append(out, t)
@@ -245,28 +324,67 @@ func (e *Engine) StandbyTargets(ctx context.Context, env agent.EngineEnv) []prot
 	return out
 }
 
-func (e *Engine) targetReason(ctx context.Context, env agent.EngineEnv, store *standbyStore, d agent.DiscoveredDatabase) string {
+// targetReason says why the server can't take a standby or a clone ("" when
+// it can), and whether Rowsafe's account there may set up replication (nil:
+// not known).
+func (e *Engine) targetReason(ctx context.Context, env agent.EngineEnv, store *standbyStore, d agent.DiscoveredDatabase) (string, *bool) {
 	if r, ok := store.onPort(d.Port); ok && r.Phase != protocol.StandbyPhaseCreating {
-		return "it already runs a standby"
+		return "it already runs a standby", nil
 	}
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	s := e.server(env, protocol.DatabaseSpec{Engine: string(e.flavor), Port: d.Port, SocketDir: d.SocketDir})
 	conn, err := s.open(cctx)
 	if err != nil {
-		return "Rowsafe has no account on it: run the Rowsafe installer on this server and answer yes to standby servers"
+		return "Rowsafe has no account on it: run the Rowsafe installer on this server and answer yes to standby servers", nil
 	}
 	defer conn.Close()
-	if ok, err := standbyRights(cctx, conn); err != nil || !ok {
-		return "Rowsafe's account there may not set up standby servers: run the Rowsafe installer on this server again and answer yes to standby servers"
+	ok, err := standbyRights(cctx, conn)
+	if err != nil {
+		return "Rowsafe's account there may not set up standby servers: run the Rowsafe installer on this server again and answer yes to standby servers", nil
+	}
+	if !ok {
+		return "Rowsafe's account there may not set up standby servers: run the Rowsafe installer on this server again and answer yes to standby servers", &ok
 	}
 	if schemas, err := userSchemas(cctx, conn); err != nil {
-		return err.Error()
+		return err.Error(), &ok
 	} else if len(schemas) > 0 {
-		return "it isn't empty (databases: " + strings.Join(schemas, ", ") + ")"
+		return "it isn't empty (databases: " + strings.Join(schemas, ", ") + ")", &ok
 	}
 	if st, err := s.readReplicaStatus(cctx, conn); err == nil && st.Configured {
-		return "it already replicates from " + st.SourceHost
+		return "it already replicates from " + st.SourceHost, &ok
 	}
-	return ""
+	return "", &ok
+}
+
+// recordStandbySwitch writes the link from the old primary's last applied position
+// (final, in its files) to this server's new file (pos) in the bucket.
+func (s *server) recordStandbySwitch(ctx context.Context, f facts, final replicaStatus, pos position, at time.Time) error {
+	to, err := readBinlogFile(filepath.Join(filepath.Dir(f.LogBinBasename), pos.File.Name))
+	if err != nil {
+		return err
+	}
+	if to.Server != strconv.FormatInt(f.ServerID, 10) {
+		return fmt.Errorf("the binary log file %s here wasn't written by this server (server_id %s, not %d)", to.Name, to.Server, f.ServerID)
+	}
+	st, err := openStore(s.env.Repo, string(s.flavor), s.db.Stanza, s.cfg.PartSizeMB)
+	if err != nil {
+		return err
+	}
+	lk := binlogLink{From: linkFrom{Name: final.Exec.File, Server: final.SourceServerID, Pos: final.Exec.Pos}, To: to, At: at}
+	return st.putJSON(ctx, linkKey(to), lk)
+}
+
+// dropStaleReplicationLogins drops every standby login of Rowsafe's here,
+// outside the binary log.
+func (s *server) dropStaleReplicationLogins(ctx context.Context, conn *sql.DB) error {
+	c, err := conn.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	if _, err := c.ExecContext(ctx, "SET SESSION sql_log_bin = 0"); err != nil {
+		return err
+	}
+	return dropReplicationUsers(ctx, c)
 }

@@ -240,6 +240,10 @@ type StandbyTarget struct {
 	// there when it is picked (Redis and Valkey: --redis-standby,
 	// --redis-clones).
 	New bool `json:"new,omitempty"`
+	// Replication (MySQL, MariaDB): Rowsafe's account there may set up
+	// replication (the installer's --mysql-standby), which a primary needs
+	// for a standby too; nil from older agents.
+	Replication *bool `json:"replication,omitempty"`
 }
 
 // StandbyInstructions are what the control plane tells an agent about
@@ -425,6 +429,11 @@ type StandbyCreateParams struct {
 	// RestartOK: the person confirmed that the server becoming the standby
 	// may be restarted once (MongoDB: to join the replica set).
 	RestartOK bool `json:"restart_ok,omitempty"`
+	// PrimaryName (MySQL, MariaDB on servers Rowsafe creates): the primary
+	// server's own name, which points at that server only and which its
+	// certificate from a CA covers: the standby replicates by this name,
+	// its server checking the certificate in full (name included).
+	PrimaryName string `json:"primary_name,omitempty"`
 }
 
 // StandbyCreateResult is the agent's report for a standby_create task.
@@ -467,9 +476,12 @@ type StandbyPromoteResult struct {
 	// CaughtUp: WaitForLSN was reached (or there was none and everything
 	// received was replayed). MissingBytes is how much of the old primary's
 	// WAL the standby didn't have when it promoted anyway (Force).
-	CaughtUp     bool   `json:"caught_up"`
-	MissingBytes int64  `json:"missing_bytes,omitempty"`
-	Summary      string `json:"summary"`
+	CaughtUp     bool  `json:"caught_up"`
+	MissingBytes int64 `json:"missing_bytes,omitempty"`
+	// Warnings: what went wrong around the promotion without stopping it
+	// (the summary says it too).
+	Warnings []string `json:"warnings,omitempty"`
+	Summary  string   `json:"summary"`
 }
 
 // StandbyFenceParams are the params of a standby_fence task (on the old

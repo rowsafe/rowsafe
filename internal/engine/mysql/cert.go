@@ -69,6 +69,7 @@ func (e *Engine) ServerTLS(ctx context.Context, env agent.EngineEnv, db protocol
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 	st.Served = func(ctx context.Context) (*x509.Certificate, error) { return servedCert(ctx, addr) }
 	st.Close = func() { conn.Close() }
+	st.ReuseKey = true // a standby pins this server's key (standby_tls.go)
 	return st, nil
 }
 

@@ -573,8 +573,8 @@ func (s *server) shipNow(ctx context.Context, log agent.TaskLogger) {
 	if err != nil {
 		return
 	}
-	if created, err := readBinlogCreated(filepath.Join(filepath.Dir(basename), pos.File.Name)); err == nil {
-		pos.File.Created = created
+	if id, err := readBinlogFile(filepath.Join(filepath.Dir(basename), pos.File.Name)); err == nil {
+		pos.File = id
 	}
 	if _, err := shipperFor(s).waitShipped(ctx, pos, inPlaceShipWait); err != nil {
 		log.Printf("note: the last changes before the rewind may not all be in your storage yet (%v); they stay in the data kept aside", err)

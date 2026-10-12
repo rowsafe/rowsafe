@@ -67,7 +67,9 @@ func TestMoveInIntegration(t *testing.T) {
 	if ok, err := e.server(env, spec).createAccountAsAdmin(ctx); err != nil || !ok {
 		t.Fatalf("account: %v %v", ok, err)
 	}
-	exec(tgt, standbyGrant)
+	for _, g := range standbyGrants {
+		exec(tgt, g)
+	}
 	exec(tgt, "SET GLOBAL server_id = 2")
 	exec(src, "CREATE DATABASE shop")
 	exec(src, "CREATE TABLE shop.orders (id INT PRIMARY KEY, note VARCHAR(50))")

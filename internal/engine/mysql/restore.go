@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -232,7 +234,10 @@ func (s *server) unpack(ctx context.Context, st *objStore, m manifest, xb, dir s
 }
 
 // fetchBinlogs downloads the binary logs from the backup's position to the
-// target into dir/binlogs.
+// target into dir/binlogs. The chain stays on the server that wrote the
+// backup's file; where the database moved to another server (a standby's
+// promotion) and that server shipped nothing more, it goes on in the new
+// primary's own files (binlogLink).
 func (s *server) fetchBinlogs(ctx context.Context, st *objStore, dir string, res *restored, t restoreTarget, log agent.TaskLogger) error {
 	from := res.Backup.Binlog
 	objs, err := st.list(ctx, "binlogs/")
@@ -240,7 +245,11 @@ func (s *server) fetchBinlogs(ctx context.Context, st *objStore, dir string, res
 		return err
 	}
 	idx := indexBinlogs(objs)
-	cur, ok := idx.find(from.File.Name, from.File.Created, res.Backup.StoppedAt.Add(time.Minute))
+	links, err := loadLinks(ctx, st, linksTo(objs))
+	if err != nil {
+		return err
+	}
+	cur, ok := idx.find(from.File, res.Backup.StoppedAt.Add(time.Minute))
 	if !ok {
 		if t.Mark != nil || t.Time != nil && t.Time.After(res.Backup.StoppedAt) {
 			return fmt.Errorf("the binary logs written after the backup %s (from %s) aren't in the bucket", res.Backup.Label, from)
@@ -258,43 +267,292 @@ func (s *server) fetchBinlogs(ctx context.Context, st *objStore, dir string, res
 	}
 	res.StartPos = from.Pos
 	var total int64
+	followed := map[binlogFile]bool{}
 	for {
 		chunks, end := idx.contiguous(cur)
 		if end == 0 {
 			return fmt.Errorf("the binary log %s isn't complete in the bucket", cur.Name)
 		}
-		local := filepath.Join(bdir, cur.Name)
+		local, err := localBinlog(bdir, cur.Name, res)
+		if err != nil {
+			return err
+		}
 		if err := downloadChunks(ctx, st, chunks, local); err != nil {
 			return err
 		}
 		res.Binlogs = append(res.Binlogs, local)
 		total += end
 		if t.Mark != nil && t.Mark.Position.File.Name == cur.Name &&
-			(t.Mark.Position.File.Created == 0 || t.Mark.Position.File.Created == cur.Created) {
+			(t.Mark.Position.File.Created == 0 || t.Mark.Position.File.same(cur)) {
 			if end < t.Mark.Position.Pos {
 				return fmt.Errorf("the binary log up to the Mark %s isn't in the bucket", t.Mark.Name)
 			}
 			res.StopPos = t.Mark.Position.Pos
 			break
 		}
-		next, ok := idx.next(cur)
-		if !ok {
-			if t.Mark != nil {
-				return fmt.Errorf("the binary logs up to the Mark %s aren't in the bucket", t.Mark.Name)
+		// The server that wrote it: a file from an older agent says so
+		// itself (its first event), so the chain stays on that server.
+		server := cur.Server
+		if server == "" {
+			if id, err := readBinlogFile(local); err == nil {
+				server = id.Server
 			}
-			break
 		}
-		if stopUnix > 0 && next.Created >= stopUnix {
-			break
+		// The database moved to another server from this file: what
+		// this server wrote after that (in this file or the next ones,
+		// replicated from the new primary once it followed it, or nothing
+		// after a restart) isn't its history.
+		lk, found := findLink(links, cur, server, followed)
+		if found && (len(res.Binlogs) > 1 || lk.From.Pos >= res.StartPos) {
+			if stopUnix > 0 && lk.To.Created >= stopUnix {
+				break // the moment is before the switch
+			}
+			if lk.From.Pos > end {
+				return fmt.Errorf("the database moved to another server at %s, and the old primary's binary log %s isn't in the bucket up to there "+
+					"(only %s of it arrived); restores can reach up to its end at most", lk.At.UTC().Format("15:04:05 UTC on 2006-01-02"), cur.Name, humanBytes(end))
+			}
+			to, ok := idx.find(lk.To, time.Time{})
+			if !ok {
+				return fmt.Errorf("the database moved to another server at %s, and that server's binary log isn't in the bucket yet; restores can reach up to %s at most",
+					lk.At.UTC().Format("15:04:05 UTC on 2006-01-02"), lk.At.UTC().Format("15:04:05 UTC"))
+			}
+			// What the old primary wrote after it (replicated from the new
+			// one, once it followed it) isn't its history.
+			if err := os.Truncate(local, lk.From.Pos); err != nil {
+				return err
+			}
+			total -= end - lk.From.Pos
+			followed[lk.To] = true
+			log.Printf("the database moved to another server at %s (%s:%d): going on with its binary log %s",
+				lk.At.UTC().Format("15:04:05 UTC on 2006-01-02"), cur.Name, lk.From.Pos, to.Name)
+			cur = to
+			continue
 		}
-		if closed, err := endsWithRotate(local); err != nil || !closed {
-			return fmt.Errorf("the binary log %s is incomplete in the bucket (only %s of it arrived); restores can reach up to its end at most",
-				cur.Name, humanBytes(end))
+		next, ok, err := nextOnServer(ctx, st, idx, cur, server, bdir)
+		if err != nil {
+			return err
 		}
-		cur = next
+		if ok {
+			if stopUnix > 0 && next.Created >= stopUnix {
+				break
+			}
+			if closed, err := endsWithRotate(local); err != nil || !closed {
+				return fmt.Errorf("the binary log %s is incomplete in the bucket (only %s of it arrived); restores can reach up to its end at most",
+					cur.Name, humanBytes(end))
+			}
+			cur = next
+			continue
+		}
+		// The chain ends here on this server.
+		if lk, found := laterLink(links, cur, server, followed); found && (stopUnix == 0 || lk.To.Created < stopUnix) {
+			return fmt.Errorf("the database moved to another server at %s from the old primary's binary log %s, which isn't in the bucket; "+
+				"restores can reach up to the end of %s at most: pick a moment before %s, or one after that server's first backup",
+				lk.At.UTC().Format("15:04:05 UTC on 2006-01-02"), lk.From.Name, cur.Name, lk.At.UTC().Format("15:04:05 UTC"))
+		}
+		if t.Mark != nil {
+			return fmt.Errorf("the binary logs up to the Mark %s aren't in the bucket", t.Mark.Name)
+		}
+		// No record of where it went (a switch by an older agent, or the
+		// record couldn't be written): say so, also for the latest moment
+		// (clones, standbys, Proof), rather than stop at the switch.
+		moveStop := stopUnix
+		if moveStop == 0 {
+			moveStop = time.Now().Unix() + 1
+		}
+		ownWrites := func(g binlogFile) (bool, error) { return wroteItself(ctx, st, idx, g, bdir) }
+		moved, at, err := movedAway(idx, links, cur, server, moveStop, ownWrites)
+		if err != nil {
+			return err
+		}
+		if moved {
+			return fmt.Errorf("the database moved to another server at %s, and the bucket doesn't say where its binary log goes on from %s "+
+				"(the switch was made by an older agent): pick a moment before %s, or one after that server's first backup",
+				at.UTC().Format("15:04:05 UTC on 2006-01-02"), cur.Name, at.UTC().Format("15:04:05 UTC"))
+		}
+		break
 	}
 	log.Printf("fetched %s of binary logs (%s)", humanBytes(total), plural(int64(len(res.Binlogs)), "file", "files"))
 	return nil
+}
+
+// localBinlog is where a binary log file goes: its own name (positions and
+// tools name it so); a file of that name fetched earlier (the other server
+// of a pair) is moved aside first.
+func localBinlog(bdir, name string, res *restored) (string, error) {
+	local := filepath.Join(bdir, name)
+	for i, p := range res.Binlogs {
+		if p != local {
+			continue
+		}
+		aside := fmt.Sprintf("%s.%d", local, i)
+		if err := os.Rename(p, aside); err != nil {
+			return "", err
+		}
+		res.Binlogs[i] = aside
+	}
+	return local, nil
+}
+
+// nextOnServer is the file that follows cur on server: a file from an older
+// agent (which doesn't say whose it is) only once its first event says it
+// is that server's.
+func nextOnServer(ctx context.Context, st *objStore, idx binlogIndex, cur binlogFile, server, bdir string) (binlogFile, bool, error) {
+	for _, c := range idx.candidates(cur, server) {
+		if c.Server != "" || server == "" {
+			return c, true, nil
+		}
+		chunks, end := idx.contiguous(c)
+		if end == 0 {
+			continue
+		}
+		check := filepath.Join(bdir, ".check-"+c.Name)
+		if err := downloadChunks(ctx, st, chunks[:1], check); err != nil {
+			return binlogFile{}, false, err
+		}
+		id, err := readBinlogFile(check)
+		_ = os.Remove(check)
+		if err == nil && id.Server == server {
+			return c, true, nil
+		}
+	}
+	return binlogFile{}, false, nil
+}
+
+// loadLinks reads the recorded switches (newest first); a record whose
+// content doesn't match its key is left out.
+func loadLinks(ctx context.Context, st *objStore, keys []binlogFile) ([]binlogLink, error) {
+	var out []binlogLink
+	for _, to := range keys {
+		var lk binlogLink
+		if err := st.getJSON(ctx, linkKey(to), &lk); err != nil {
+			if errors.Is(err, errNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		if lk.To == to {
+			out = append(out, lk)
+		}
+	}
+	return out, nil
+}
+
+// findLink is the switch to another server recorded from cur (written by
+// server), if any.
+func findLink(links []binlogLink, cur binlogFile, server string, followed map[binlogFile]bool) (binlogLink, bool) {
+	for _, lk := range links {
+		if followed[lk.To] || lk.To.Server == server {
+			continue
+		}
+		if lk.From.Name == cur.Name && (lk.From.Server == server || server == "") {
+			return lk, true
+		}
+	}
+	return binlogLink{}, false
+}
+
+// laterLink is a switch to another server recorded from a later file of
+// server than cur (one the bucket doesn't have).
+func laterLink(links []binlogLink, cur binlogFile, server string, followed map[binlogFile]bool) (binlogLink, bool) {
+	base, n, ok := binlogSeq(cur.Name)
+	if !ok || server == "" {
+		return binlogLink{}, false
+	}
+	for _, lk := range links {
+		if followed[lk.To] || lk.To.Server == server || lk.To.Created < cur.Created {
+			continue
+		}
+		fb, fn, ok := binlogSeq(lk.From.Name)
+		if ok && fb == base && fn > n && lk.From.Server == server {
+			return lk, true
+		}
+	}
+	return binlogLink{}, false
+}
+
+// movedOff reports whether server's file created then is from after a
+// recorded switch away from server, and before one back to it: the old
+// primary restarted, or followed the new one, unless it wrote something
+// itself there (wroteItself: the database came back to it unrecorded).
+func movedOff(links []binlogLink, server string, created int64) bool {
+	var at int64 = -1
+	off := false
+	for _, lk := range links {
+		t := lk.To.Created
+		if t > created {
+			continue
+		}
+		switch {
+		case lk.To.Server == server && t >= at: // back here (its first file is history)
+			at, off = t, false
+		case lk.From.Server == server && t > at:
+			at, off = t, true
+		}
+	}
+	return off
+}
+
+// movedAway reports whether another server's binary logs begin after cur
+// was created and before stop: the database moved there (and when), and
+// the bucket doesn't say how. A server's file from after a recorded
+// switch away from it counts only when it holds a transaction that server
+// wrote itself (ownWrites), not only what it replicated or nothing.
+func movedAway(idx binlogIndex, links []binlogLink, cur binlogFile, server string, stopUnix int64,
+	ownWrites func(binlogFile) (bool, error)) (bool, time.Time, error) {
+	var cands []binlogFile
+	for g := range idx {
+		if g.Server == "" || g.Server == server || g.Created <= cur.Created || g.Created >= stopUnix {
+			continue
+		}
+		cands = append(cands, g)
+	}
+	slices.SortFunc(cands, func(a, b binlogFile) int { return cmp.Compare(a.Created, b.Created) })
+	for _, g := range cands {
+		if movedOff(links, g.Server, g.Created) {
+			own, err := ownWrites(g)
+			if err != nil {
+				return false, time.Time{}, err
+			}
+			if !own {
+				continue
+			}
+		}
+		return true, time.Unix(g.Created, 0), nil
+	}
+	return false, time.Time{}, nil
+}
+
+// wroteItself reports whether g (as far as it is in the bucket) holds a
+// transaction its server wrote itself: events keep the server_id of the
+// server that wrote them first.
+func wroteItself(ctx context.Context, st *objStore, idx binlogIndex, g binlogFile, bdir string) (bool, error) {
+	chunks, end := idx.contiguous(g)
+	if end == 0 {
+		return false, nil
+	}
+	path := filepath.Join(bdir, ".check-"+g.Name)
+	defer os.Remove(path)
+	if err := downloadChunks(ctx, st, chunks, path); err != nil {
+		return false, err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	id, err := strconv.ParseUint(g.Server, 10, 32)
+	if err != nil {
+		return true, nil // can't tell: counts
+	}
+	own := false
+	err = scanEvents(f, func(_ int64, h eventHeader, _ []byte) bool {
+		switch h.Type {
+		case evGTID, evAnonymousGTID, evGTIDTagged, evMariaGTID, evQuery:
+			own = h.ServerID == uint32(id)
+		}
+		return !own
+	})
+	return own, err
 }
 
 // downloadChunks concatenates a file's pieces.

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -14,10 +15,13 @@ import (
 	"time"
 )
 
-// Binary log files. A file is identified by its name and the time it was
-// created (the timestamp of its first event, the format description): a
-// server that starts over (RESET MASTER, a new data directory) reuses
-// names, never both.
+// Binary log files. A file is identified by its name, the time it was
+// created (the timestamp of its first event, the format description) and
+// the server that wrote it (that event's server_id): a server that starts
+// over (RESET MASTER, a new data directory) reuses names, never both, and
+// the two servers of a standby pair name theirs alike (binlog.000001...):
+// after a switchover the bucket holds both servers' files, and a chain
+// never goes from one server's file to the other's.
 
 const (
 	binlogMagic          = "\xfebin"
@@ -34,23 +38,49 @@ const (
 	evXID                = 16
 	evTransactionPayload = 40  // MySQL binlog_transaction_compression
 	evMariaStartEncrypt  = 164 // MariaDB encrypt_binlog
+	// GTIDs (gtid.go).
+	evGTID          = 33  // MySQL: the next transaction's GTID
+	evAnonymousGTID = 34  // MySQL: a transaction without a GTID
+	evPreviousGTIDs = 35  // MySQL: the GTIDs of every earlier file
+	evGTIDTagged    = 42  // MySQL 8.3+: a tagged GTID
+	evMariaGTID     = 162 // MariaDB: the next event group's GTID
+	evMariaGTIDList = 163 // MariaDB: the binary log state at the file's start
 )
+
+// bodyLimit: scanEvents hands the body of these events to its callback
+// (at most this many bytes of it).
+var bodyLimit = map[byte]int{evQuery: 64 << 10, evGTID: 64, evPreviousGTIDs: 16 << 20, evGTIDTagged: 64,
+	evMariaGTID: 64, evMariaGTIDList: 16 << 20}
 
 // binlogFile is one binary log file.
 type binlogFile struct {
 	Name    string `json:"name"`    // mysql-bin.000012
 	Created int64  `json:"created"` // unix seconds
+	// Server is the server_id of the server that wrote it; "" for files
+	// shipped by older agents (and positions recorded by them).
+	Server string `json:"server,omitempty"`
 }
 
 // dir is the file's folder in the bucket.
-func (f binlogFile) dir() string { return fmt.Sprintf("binlogs/%s~%d", f.Name, f.Created) }
+func (f binlogFile) dir() string {
+	if f.Server == "" {
+		return fmt.Sprintf("binlogs/%s~%d", f.Name, f.Created)
+	}
+	return fmt.Sprintf("binlogs/%s~%d~%s", f.Name, f.Created, f.Server)
+}
+
+// same reports whether f and g are one file (the server compared when both
+// say).
+func (f binlogFile) same(g binlogFile) bool {
+	return f.Name == g.Name && f.Created == g.Created && (f.Server == "" || g.Server == "" || f.Server == g.Server)
+}
 
 // chunkKey names the bytes [from, to) of a file.
 func chunkKey(f binlogFile, from, to int64) string {
 	return fmt.Sprintf("%s/%012d-%012d.zst.age", f.dir(), from, to)
 }
 
-var chunkKeyRE = regexp.MustCompile(`^binlogs/([A-Za-z0-9._-]+)~(\d+)/(\d{12})-(\d{12})\.zst\.age$`)
+var chunkKeyRE = regexp.MustCompile(`^binlogs/([A-Za-z0-9._-]+)~(\d+)(?:~(\d{1,10}))?/(\d{12})-(\d{12})\.zst\.age$`)
 
 // parseChunkKey reads a chunk key.
 func parseChunkKey(key string) (f binlogFile, from, to int64, ok bool) {
@@ -58,10 +88,10 @@ func parseChunkKey(key string) (f binlogFile, from, to int64, ok bool) {
 	if m == nil {
 		return f, 0, 0, false
 	}
-	f.Name = m[1]
+	f.Name, f.Server = m[1], m[3]
 	f.Created, _ = strconv.ParseInt(m[2], 10, 64)
-	from, _ = strconv.ParseInt(m[3], 10, 64)
-	to, _ = strconv.ParseInt(m[4], 10, 64)
+	from, _ = strconv.ParseInt(m[4], 10, 64)
+	to, _ = strconv.ParseInt(m[5], 10, 64)
 	return f, from, to, to > from
 }
 
@@ -102,35 +132,47 @@ func parseEventHeader(b []byte) eventHeader {
 	}
 }
 
-// readBinlogCreated reads when a binary log file was created.
-func readBinlogCreated(path string) (int64, error) {
+// readBinlogFile reads a binary log file's identity: its name, when it was
+// created and the server that wrote it.
+func readBinlogFile(path string) (binlogFile, error) {
+	created, server, err := readBinlogHeader(path)
+	if err != nil {
+		return binlogFile{}, err
+	}
+	return binlogFile{Name: filepath.Base(path), Created: created, Server: strconv.FormatUint(uint64(server), 10)}, nil
+}
+
+// readBinlogHeader reads when a binary log file was created and by which
+// server (the format description event's timestamp and server_id).
+func readBinlogHeader(path string) (int64, uint32, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer f.Close()
 	var b [4 + eventHeaderLen]byte
 	if _, err := io.ReadFull(f, b[:]); err != nil {
-		return 0, fmt.Errorf("%s: too short to be a binary log", path)
+		return 0, 0, fmt.Errorf("%s: too short to be a binary log", path)
 	}
 	switch string(b[:4]) {
 	case binlogMagic:
 	case binlogMagicEncrypted:
-		return 0, errBinlogEncrypted
+		return 0, 0, errBinlogEncrypted
 	default:
-		return 0, fmt.Errorf("%s is not a binary log", path)
+		return 0, 0, fmt.Errorf("%s is not a binary log", path)
 	}
 	h := parseEventHeader(b[4:])
 	if h.Type != evFormatDescription {
-		return 0, fmt.Errorf("%s: unexpected first event %d", path, h.Type)
+		return 0, 0, fmt.Errorf("%s: unexpected first event %d", path, h.Type)
 	}
-	return int64(h.Timestamp), nil
+	return int64(h.Timestamp), h.ServerID, nil
 }
 
 // scanEvents walks the events of a binary log file (from its start) until
 // fn returns false or the file ends. A partial event at the end (a file
 // still being written) ends the walk without error. body is the event's
-// body for query events (at most 64 KiB of it), nil for the others.
+// body for query and GTID events (at most bodyLimit of it), nil for the
+// others.
 func scanEvents(r io.Reader, fn func(pos int64, h eventHeader, body []byte) bool) error {
 	br := bufio.NewReaderSize(r, 1<<20)
 	magic := make([]byte, 4)
@@ -158,8 +200,8 @@ func scanEvents(r io.Reader, fn func(pos int64, h eventHeader, body []byte) bool
 		}
 		rest := int(h.Size) - eventHeaderLen
 		var body []byte
-		if h.Type == evQuery {
-			n := min(rest, 64<<10)
+		if limit, ok := bodyLimit[h.Type]; ok {
+			n := min(rest, limit)
 			body = make([]byte, n)
 			if _, err := io.ReadFull(br, body); err != nil {
 				return nil
@@ -270,39 +312,74 @@ func (idx binlogIndex) contiguous(f binlogFile) ([]binlogChunk, int64) {
 	return out, end
 }
 
-// next finds the file that follows f: the next number, created at or after
-// f (the earliest such, if the server started over later).
-func (idx binlogIndex) next(f binlogFile) (binlogFile, bool) {
-	base, n, ok := binlogSeq(f.Name)
-	if !ok {
+// next finds the file that follows f, written by server (f's own, or the
+// one its contents say for a file from an older agent; "" when not known):
+// the next number, created at or after f (the earliest such, if the server
+// started over later), never another server's (candidates).
+func (idx binlogIndex) next(f binlogFile, server string) (binlogFile, bool) {
+	c := idx.candidates(f, server)
+	if len(c) == 0 {
 		return binlogFile{}, false
 	}
-	var best binlogFile
-	found := false
+	return c[0], true
+}
+
+// candidates are the files that may follow f, best first: the same
+// server's (known), then files from older agents (which don't say whose
+// they are: the caller checks their first event), each by creation.
+func (idx binlogIndex) candidates(f binlogFile, server string) []binlogFile {
+	base, n, ok := binlogSeq(f.Name)
+	if !ok {
+		return nil
+	}
+	if f.Server != "" {
+		server = f.Server
+	}
+	var out []binlogFile
 	for g := range idx {
 		gb, gn, ok := binlogSeq(g.Name)
 		if !ok || gb != base || gn != n+1 || g.Created < f.Created {
 			continue
 		}
-		if !found || g.Created < best.Created {
-			best, found = g, true
+		if server != "" && g.Server != "" && g.Server != server {
+			continue // the other server's file of that name (a standby pair)
 		}
+		out = append(out, g)
 	}
-	return best, found
+	slices.SortFunc(out, func(a, b binlogFile) int {
+		if (a.Server == server) != (b.Server == server) {
+			if a.Server == server {
+				return -1
+			}
+			return 1
+		}
+		return int(a.Created - b.Created)
+	})
+	return out
 }
 
-// find returns the stored file named name created at created, or, when
-// created is 0, the newest one created at or before notAfter.
-func (idx binlogIndex) find(name string, created int64, notAfter time.Time) (binlogFile, bool) {
-	if created != 0 {
-		f := binlogFile{Name: name, Created: created}
-		_, ok := idx[f]
-		return f, ok
-	}
+// find returns the stored file f names (by name and creation, and server
+// when f says), the most complete when an agent update shipped it twice;
+// or, when f.Created is 0, the newest one named so created at or before
+// notAfter.
+func (idx binlogIndex) find(f binlogFile, notAfter time.Time) (binlogFile, bool) {
 	var best binlogFile
 	found := false
+	bestEnd := int64(-1)
 	for g := range idx {
-		if g.Name != name || (!notAfter.IsZero() && g.Created > notAfter.Unix()) {
+		if g.Name != f.Name || f.Server != "" && g.Server != "" && g.Server != f.Server {
+			continue
+		}
+		if f.Created != 0 {
+			if g.Created != f.Created {
+				continue
+			}
+			if _, end := idx.contiguous(g); end > bestEnd {
+				best, bestEnd, found = g, end, true
+			}
+			continue
+		}
+		if !notAfter.IsZero() && g.Created > notAfter.Unix() {
 			continue
 		}
 		if !found || g.Created > best.Created {
@@ -345,4 +422,56 @@ func (p position) String() string {
 func isBinlogName(s string) bool {
 	_, _, ok := binlogSeq(s)
 	return ok && !strings.Contains(s, "/")
+}
+
+// ---- switches between servers ----
+
+// binlogLink records that the database moved to another server (a
+// standby's promotion, StandbyPromote): the old primary's history ends at
+// From (its file and position, as the new primary applied it), and the new
+// primary's own begins with To, a file it started for that at the
+// promotion. A restore whose chain reaches From, and the old primary
+// shipped nothing more, goes on in To; until the new primary's first
+// backup, that is the only way to a moment after the switch.
+type binlogLink struct {
+	From linkFrom   `json:"from"`
+	To   binlogFile `json:"to"`
+	At   time.Time  `json:"at"`
+}
+
+// linkFrom is where the old primary's history ends.
+type linkFrom struct {
+	Name   string `json:"name"`
+	Server string `json:"server"`
+	Pos    int64  `json:"pos"`
+}
+
+// linkKey is the link to f in the bucket.
+func linkKey(f binlogFile) string {
+	return fmt.Sprintf("binlogs/links/%s~%d~%s.json.age", f.Name, f.Created, f.Server)
+}
+
+var linkKeyRE = regexp.MustCompile(`^binlogs/links/([A-Za-z0-9._-]+)~(\d+)~(\d{1,10})\.json\.age$`)
+
+// parseLinkKey reads a link key: the file it leads to.
+func parseLinkKey(key string) (binlogFile, bool) {
+	m := linkKeyRE.FindStringSubmatch(key)
+	if m == nil {
+		return binlogFile{}, false
+	}
+	created, err := strconv.ParseInt(m[2], 10, 64)
+	return binlogFile{Name: m[1], Created: created, Server: m[3]}, err == nil
+}
+
+// linksTo lists the links in the bucket (the files they lead to), newest
+// first.
+func linksTo(objs []objInfo) []binlogFile {
+	var out []binlogFile
+	for _, o := range objs {
+		if f, ok := parseLinkKey(o.Key); ok {
+			out = append(out, f)
+		}
+	}
+	slices.SortFunc(out, func(a, b binlogFile) int { return int(b.Created - a.Created) })
+	return out
 }

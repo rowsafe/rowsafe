@@ -23,6 +23,20 @@ const (
 	settingServerID  = "server_id"              // the primary's server_id
 	settingLowerCase = "lower_case_table_names" // must be the same on the standby
 	settingVersion   = "version"                // numeric version (80403)
+	// settingReplicaUpdates: 1 when the server writes what it replicates to
+	// its own binary log (log_replica_updates, log_slave_updates). Absent
+	// from older agents: the standby then follows by position.
+	settingReplicaUpdates = "log_replica_updates"
+	settingLogBin         = "log_bin" // 1: the binary log is on
+)
+
+// StandbySecrets.EngineData: the primary's gtid_executed (MySQL with
+// GTIDs) and gtid_binlog_state (MariaDB) when it prepared the standby, and
+// the SHA-256 of the public key it serves TLS with (standby_tls.go).
+const (
+	secretGTIDExecuted    = "gtid_executed"
+	secretGTIDBinlogState = "gtid_binlog_state"
+	secretTLSKey          = "tls_key_sha256"
 )
 
 // StandbyPrepare checks the primary can be followed and creates the
@@ -71,16 +85,47 @@ func (e *Engine) StandbyPrepare(ctx context.Context, env agent.EngineEnv, db pro
 	if strings.EqualFold(f.GTIDMode, "ON") {
 		res.Settings[settingGTID] = 1
 	}
+	res.Settings[settingReplicaUpdates], res.Settings[settingLogBin] = boolInt(f.ReplicaUpdates), boolInt(f.LogBin)
 	user := replicationUser(p.StandbyID)
 	password, err := randomPassword()
 	if err != nil {
 		return err
 	}
 	password = password[:32] // replication passwords are at most 32 characters
-	if err := s.createReplicationUser(ctx, conn, user, password, p.StandbyAddresses); err != nil {
+	if err := s.createReplicationUser(ctx, conn, user, password, p.StandbyAddresses, res.TLS); err != nil {
 		return err
 	}
 	sec.ReplicationUser, sec.ReplicationPassword, sec.PrimaryTLS = user, password, res.TLS
+	sec.EngineData = map[string]string{}
+	if res.TLS {
+		// The key this server serves TLS with: the standby checks it is
+		// this server it replicates from (standby_tls.go).
+		port := f.Port
+		if port <= 0 {
+			port = db.Port
+		}
+		if pin, why := s.sealedKeyPin(ctx, conn, f, port); pin != "" {
+			sec.EngineData[secretTLSKey] = pin
+		} else {
+			log.Printf("the standby doesn't pin this server's TLS key: %s", why)
+		}
+	}
+	// What this server holds: an old primary following it by GTID must
+	// hold nothing more (standby_gtid.go).
+	if res.Settings[settingGTID] == 1 {
+		var executed string
+		if err := conn.QueryRowContext(ctx, "SELECT @@global.gtid_executed").Scan(&executed); err != nil {
+			return fmt.Errorf("reading the GTIDs this server holds: %w", err)
+		}
+		sec.EngineData[secretGTIDExecuted] = strings.Join(strings.Fields(executed), "")
+	}
+	if s.flavor.mariadb() {
+		var state string
+		if err := conn.QueryRowContext(ctx, "SELECT @@global.gtid_binlog_state").Scan(&state); err != nil {
+			return fmt.Errorf("reading the GTIDs this server holds: %w", err)
+		}
+		sec.EngineData[secretGTIDBinlogState] = strings.Join(strings.Fields(state), "")
+	}
 	res.Streaming, res.ReplicationRole = true, user
 	res.Summary = fmt.Sprintf("Sealed the bucket settings and a replication login (%s, allowed from %s only) for the standby.",
 		user, strings.Join(p.StandbyAddresses, ", "))
@@ -125,8 +170,11 @@ func listensLocallyOnly(bind string) bool {
 }
 
 // createReplicationUser creates (or resets) the standby's login for each
-// address, outside the binary log (it is this server's own business).
-func (s *server) createReplicationUser(ctx context.Context, conn *sql.DB, user, password string, addrs []string) error {
+// address, outside the binary log (it is this server's own business):
+// replication only, TLS required when the server has it. (Logins of earlier
+// standbys, left on a server that was read-only meanwhile, go when it is
+// promoted: StandbyPromote.)
+func (s *server) createReplicationUser(ctx context.Context, conn *sql.DB, user, password string, addrs []string, tls bool) error {
 	if !standbyUserRE.MatchString(user) {
 		return fmt.Errorf("invalid replication user %q", user)
 	}
@@ -147,10 +195,14 @@ func (s *server) createReplicationUser(ctx context.Context, conn *sql.DB, user, 
 			return fmt.Errorf("invalid standby address %q", a)
 		}
 		who := quoteString(user) + "@" + quoteString(ip.String())
-		if _, err := c.ExecContext(ctx, "CREATE USER "+who+" IDENTIFIED BY "+quoteString(password)); err != nil {
+		req := ""
+		if tls {
+			req = " REQUIRE SSL"
+		}
+		if _, err := c.ExecContext(ctx, "CREATE USER "+who+" IDENTIFIED BY "+quoteString(password)+req); err != nil {
 			return fmt.Errorf("creating the replication login: %w", err)
 		}
-		if _, err := c.ExecContext(ctx, "GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO "+who); err != nil {
+		if _, err := c.ExecContext(ctx, "GRANT REPLICATION SLAVE ON *.* TO "+who); err != nil {
 			return fmt.Errorf("granting replication to %s: %w", user, err)
 		}
 	}
@@ -159,22 +211,34 @@ func (s *server) createReplicationUser(ctx context.Context, conn *sql.DB, user, 
 
 // dropReplicationUser drops the login at every host.
 func dropReplicationUser(ctx context.Context, c *sql.Conn, user string) error {
-	rows, err := c.QueryContext(ctx, "SELECT Host FROM mysql.user WHERE User = ?", user)
+	return dropLogins(ctx, c, "SELECT User, Host FROM mysql.user WHERE User = ?", user)
+}
+
+// dropReplicationUsers drops every standby login of Rowsafe's here.
+func dropReplicationUsers(ctx context.Context, c *sql.Conn) error {
+	return dropLogins(ctx, c, `SELECT User, Host FROM mysql.user WHERE User LIKE 'rowsafe\_sb\_%'`)
+}
+
+func dropLogins(ctx context.Context, c *sql.Conn, q string, args ...any) error {
+	rows, err := c.QueryContext(ctx, q, args...)
 	if err != nil {
 		return err
 	}
-	var hosts []string
+	type login struct{ user, host string }
+	var found []login
 	for rows.Next() {
-		var h string
-		if err := rows.Scan(&h); err != nil {
+		var l login
+		if err := rows.Scan(&l.user, &l.host); err != nil {
 			rows.Close()
 			return err
 		}
-		hosts = append(hosts, h)
+		if standbyUserRE.MatchString(l.user) {
+			found = append(found, l)
+		}
 	}
 	rows.Close()
-	for _, h := range hosts {
-		if _, err := c.ExecContext(ctx, "DROP USER IF EXISTS "+quoteString(user)+"@"+quoteString(h)); err != nil {
+	for _, l := range found {
+		if _, err := c.ExecContext(ctx, "DROP USER IF EXISTS "+quoteString(l.user)+"@"+quoteString(l.host)); err != nil {
 			return err
 		}
 	}
@@ -189,6 +253,15 @@ func (e *Engine) StandbyRelease(ctx context.Context, env agent.EngineEnv, db pro
 		return nil, err
 	}
 	defer conn.Close()
+	user := replicationUser(p.StandbyID)
+	if ro, err := s.isReadOnly(ctx, conn); err == nil && ro {
+		// A standby (or a fenced old primary) now: nothing changes on a
+		// read-only server. The login goes when it prepares its next standby.
+		res := &protocol.StandbyReleaseResult{StandbyID: p.StandbyID, Summary: fmt.Sprintf("Kept the replication login %s for now: this server is "+
+			"read-only. Rowsafe drops it when this server is the primary again and prepares a standby.", user)}
+		log.Printf("%s", res.Summary)
+		return res, nil
+	}
 	c, err := conn.Conn(ctx)
 	if err != nil {
 		return nil, err
@@ -197,7 +270,6 @@ func (e *Engine) StandbyRelease(ctx context.Context, env agent.EngineEnv, db pro
 	if _, err := c.ExecContext(ctx, "SET SESSION sql_log_bin = 0"); err != nil {
 		return nil, err
 	}
-	user := replicationUser(p.StandbyID)
 	if err := dropReplicationUser(ctx, c, user); err != nil {
 		return nil, err
 	}
@@ -223,6 +295,10 @@ func (e *Engine) PrimaryState(ctx context.Context, env agent.EngineEnv, db proto
 	return st, st.WALLSN != ""
 }
 
+// fenceShipWait bounds how long a fence waits for the old primary's last
+// binary log bytes to reach the bucket (a variable for tests).
+var fenceShipWait = 30 * time.Second
+
 // StandbyFence makes the old primary read-only for good and ends its
 // client sessions; its last position is where the standby must get to.
 func (e *Engine) StandbyFence(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec, p protocol.StandbyFenceParams, log agent.TaskLogger) (*protocol.StandbyFenceResult, error) {
@@ -235,7 +311,7 @@ func (e *Engine) StandbyFence(ctx context.Context, env agent.EngineEnv, db proto
 	if id := s.systemID(ctx, conn); p.SystemID != "" && id != "" && id != p.SystemID {
 		return nil, fmt.Errorf("the %s on port %d is another server (%s, not %s); Rowsafe left it alone", s.flavor.display(), db.Port, id, p.SystemID)
 	}
-	if err := s.setReadOnly(ctx, conn, true); err != nil {
+	if err := s.setReadOnlyThen(ctx, conn, true, true); err != nil {
 		return nil, fmt.Errorf("making %s read-only: %w", s.flavor.display(), err)
 	}
 	log.Printf("%s on port %d is read-only now (also after a restart)", s.flavor.display(), db.Port)
@@ -251,11 +327,22 @@ func (e *Engine) StandbyFence(ctx context.Context, env agent.EngineEnv, db proto
 		res.Warnings = append(res.Warnings, "couldn't read the last binary log position: "+err.Error())
 	} else {
 		res.CheckpointLSN = filePos{File: pos.File.Name, Pos: pos.Pos}.String()
+		// Its last changes go to the bucket now (not up to a minute later):
+		// restores to any second until the switch don't wait for this
+		// server, which no longer holds the database.
+		if s.env.Repo.Bucket != "" {
+			if _, err := shipperFor(s).waitShipped(ctx, pos, fenceShipWait); err != nil {
+				res.Warnings = append(res.Warnings, "its last changes may not all be in the bucket yet: "+err.Error())
+			} else {
+				log.Printf("its binary log up to %s is in the bucket", res.CheckpointLSN)
+			}
+		}
 	}
 	res.Summary = fmt.Sprintf("Made %s on port %d read-only for good and ended its client sessions; the agent keeps it read-only.", s.flavor.display(), db.Port)
 	if res.CheckpointLSN != "" {
 		res.Summary += " Its last change is at " + res.CheckpointLSN + "."
 	}
+	res.Summary += s.lockNote()
 	log.Printf("%s", res.Summary)
 	return res, nil
 }
@@ -302,8 +389,12 @@ func (e *Engine) HoldFence(ctx context.Context, env agent.EngineEnv, f protocol.
 		return false, true, nil
 	}
 	ro, err := s.isReadOnly(ctx, conn)
-	if err != nil || ro {
+	if err != nil {
 		return false, false, err
+	}
+	if ro {
+		s.keepWritersLocked(ctx, conn) // MariaDB: logins made since (standby_lock.go)
+		return false, false, nil
 	}
 	if err := s.setReadOnly(ctx, conn, true); err != nil {
 		return false, false, err

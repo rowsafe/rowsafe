@@ -28,6 +28,19 @@ import (
 //	ROWSAFE_MYSQL_IT_STANDBY_SOCKET  the second (empty) server's socket
 //	ROWSAFE_MYSQL_IT_PRIMARY_HOST    the first server's host name on the network
 //	ROWSAFE_MYSQL_IT_STANDBY_HOST    the second server's host name
+//	ROWSAFE_MYSQL_IT_GTID            1: both servers set up for GTIDs (it follows by GTID);
+//	                                 mixed: the primary only (MySQL: the empty server's
+//	                                 gtid_mode is switched to match; MariaDB: by position)
+//	ROWSAFE_MYSQL_IT_TLS             self: both serve a self-signed certificate from Rowsafe's
+//	                                 files (pinned); ca: a CA's chain for the pair's name and
+//	                                 each server's own (a Let's Encrypt-like one; SSL_CERT_FILE
+//	                                 trusts its root): the standby replicates by the primary's
+//	                                 own name; "": the image's own (not pinned)
+//	ROWSAFE_MYSQL_IT_CA_DIR          where the standbys' certificate files go (both servers
+//	                                 read it)
+//
+// With GTIDs it also switches back: the first server becomes the primary
+// again and the second follows it, on its own data both times.
 func TestStandbyIntegration(t *testing.T) {
 	engine := os.Getenv("ROWSAFE_MYSQL_IT")
 	sbSocket := os.Getenv("ROWSAFE_MYSQL_IT_STANDBY_SOCKET")
@@ -43,7 +56,34 @@ func TestStandbyIntegration(t *testing.T) {
 		}
 		return addrs[0]
 	}
-	ipA, ipB := ipOf(os.Getenv("ROWSAFE_MYSQL_IT_PRIMARY_HOST")), ipOf(os.Getenv("ROWSAFE_MYSQL_IT_STANDBY_HOST"))
+	hostA, hostB := os.Getenv("ROWSAFE_MYSQL_IT_PRIMARY_HOST"), os.Getenv("ROWSAFE_MYSQL_IT_STANDBY_HOST")
+	ipA, ipB := ipOf(hostA), ipOf(hostB)
+	tlsMode := os.Getenv("ROWSAFE_MYSQL_IT_TLS")
+	if d := os.Getenv("ROWSAFE_MYSQL_IT_CA_DIR"); d != "" {
+		sourceCADir = d
+		defer func() { sourceCADir = serverTLSDir }()
+	}
+	servedCertHost = func(s *server) string {
+		if s.db.SocketDir == sbSocket {
+			return ipB
+		}
+		return ipA
+	}
+	defer func() { servedCertHost = func(*server) string { return "127.0.0.1" } }()
+	// The agents run in this container (sidecars), not on the servers: the
+	// replication logins also let it in (the key checks sign in from here).
+	ipAgent := ""
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range addrs {
+			if n, ok := a.(*net.IPNet); ok && n.IP.To4() != nil && !n.IP.IsLoopback() {
+				ipAgent = n.IP.String()
+				break
+			}
+		}
+	}
+	if ipAgent == "" {
+		t.Fatal("this container's address")
+	}
 	port, _ := strconv.Atoi(os.Getenv("ROWSAFE_REPO_S3_PORT"))
 	repo := pgbackrest.Repo{
 		Endpoint: os.Getenv("ROWSAFE_REPO_S3_ENDPOINT"), Bucket: os.Getenv("ROWSAFE_REPO_S3_BUCKET"),
@@ -60,6 +100,8 @@ func TestStandbyIntegration(t *testing.T) {
 	}
 	envA, envB := envFor("a"), envFor("b")
 	e := &Engine{flavor: flavor(engine)}
+	gtidIT := os.Getenv("ROWSAFE_MYSQL_IT_GTID")
+	wantGTID := gtidIT == "1" || gtidIT == "mixed" && !e.flavor.mariadb()
 	specA := protocol.DatabaseSpec{ID: "db_sb_" + engine, Name: "shop", Stanza: "shop", Port: 3306,
 		SocketDir: os.Getenv("ROWSAFE_MYSQL_IT_SOCKET"), Engine: engine, RetentionFull: 2}
 	specB := specA
@@ -116,7 +158,9 @@ func TestStandbyIntegration(t *testing.T) {
 		if ok, err := e.server(x.env, x.spec).createAccountAsAdmin(ctx); err != nil || !ok {
 			t.Fatalf("account: %v %v", ok, err)
 		}
-		exec(x.db, standbyGrant)
+		for _, g := range standbyGrants {
+			exec(x.db, g)
+		}
 	}
 
 	// The primary: backups on, data, an app login, a full backup, more data.
@@ -134,6 +178,32 @@ func TestStandbyIntegration(t *testing.T) {
 	exec(adbA, "CREATE TABLE shop.orders (id INT PRIMARY KEY, note VARCHAR(50))")
 	exec(adbA, "CREATE USER 'app'@'%' IDENTIFIED BY 'app-secret-1'")
 	exec(adbA, "GRANT SELECT, INSERT ON shop.* TO 'app'@'%'")
+	// A login with every right (MariaDB: READ_ONLY ADMIN, which read_only
+	// lets write).
+	exec(adbA, "CREATE USER 'boss'@'%' IDENTIFIED BY 'boss-secret-1'")
+	exec(adbA, "GRANT ALL PRIVILEGES ON *.* TO 'boss'@'%'")
+	boss := func(socket string) (*sql.DB, error) {
+		return openWith(ctx, account{User: "boss", Password: "boss-secret-1"}, socket, 3306)
+	}
+	locked := func(db *sql.DB, user string) bool {
+		t.Helper()
+		var v sql.NullString
+		if err := db.QueryRowContext(ctx, "SELECT JSON_VALUE(Priv, '$.account_locked') FROM mysql.global_priv WHERE User = ?", user).Scan(&v); err != nil {
+			t.Fatalf("%s: %v", user, err)
+		}
+		return v.String == "true" || v.String == "1"
+	}
+	if e.flavor.mariadb() {
+		// Every right through a role of a role; a login a person locked.
+		exec(adbA, "CREATE ROLE power")
+		exec(adbA, "GRANT ALL PRIVILEGES ON *.* TO power")
+		exec(adbA, "CREATE ROLE ops")
+		exec(adbA, "GRANT power TO ops")
+		exec(adbA, "CREATE USER 'rolly'@'%' IDENTIFIED BY 'rolly-secret-1'")
+		exec(adbA, "GRANT ops TO 'rolly'@'%'")
+		exec(adbA, "CREATE USER 'parked'@'%' IDENTIFIED BY 'parked-secret-1' ACCOUNT LOCK")
+		exec(adbA, "GRANT ALL PRIVILEGES ON *.* TO 'parked'@'%'")
+	}
 	for i := 1; i <= 100; i++ {
 		exec(adbA, "INSERT INTO shop.orders VALUES (?, 'before backup')", i)
 	}
@@ -154,19 +224,60 @@ func TestStandbyIntegration(t *testing.T) {
 	var sec protocol.StandbySecrets
 	sec.PrimaryPort, sec.PrimaryAddresses = 3306, []string{ipA}
 	var prep protocol.StandbyPrepareResult
-	if err := e.StandbyPrepare(ctx, envA, specA, protocol.StandbyPrepareParams{StandbyID: "sb1", StandbyAddresses: []string{ipB}, Stream: true},
+	if err := e.StandbyPrepare(ctx, envA, specA, protocol.StandbyPrepareParams{StandbyID: "sb1", StandbyAddresses: []string{ipB, ipAgent}, Stream: true},
 		&sec, &prep, tl); err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
 	t.Logf("prepare: %+v", prep)
 	cres, err := e.StandbyCreate(ctx, envB, specB, protocol.StandbyCreateParams{StandbyID: "sb1", Port: 3306, SocketDir: sbSocket,
-		Major: prep.Major, SystemID: prep.SystemID, SizeBytes: prep.SizeBytes, Settings: prep.Settings}, sec, tl)
+		Major: prep.Major, SystemID: prep.SystemID, SizeBytes: prep.SizeBytes, Settings: prep.Settings, PrimaryName: hostA}, sec, tl)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	t.Logf("create: %+v", cres)
 	adbB.Close() // its sessions were ended (server_id changed)
 	adbB = admin(specB.SocketDir)
+	// How the standby checks the primary's certificate.
+	rec1, _ := standbys(envB).get("sb1")
+	st1, err := e.server(envB, specB).readReplicaStatus(ctx, adbB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("TLS %q: pin %q, CA file %q, verify %v", tlsMode, rec1.KeyPin, st1.CAFile, st1.VerifyCert)
+	switch {
+	case tlsMode != "" && rec1.KeyPin == "":
+		t.Fatal("the primary serves Rowsafe's certificate files with a P-256 key: its key is pinned")
+	case tlsMode == "" && rec1.KeyPin != "":
+		t.Fatal("a certificate Rowsafe didn't set up is pinned")
+	case tlsMode == "ca" && (st1.CAFile == "" || !st1.VerifyCert || st1.SourceHost != hostA):
+		t.Fatal("a CA's certificate: the standby replicates by the primary's own name, its certificate checked in full")
+	case tlsMode == "self" && e.flavor.mariadb() && (!st1.VerifyCert || st1.CAFile != ""):
+		t.Fatal("MariaDB checks a self-signed certificate against the replication password")
+	case tlsMode == "self" && !e.flavor.mariadb() && st1.CAFile == "":
+		t.Fatal("MySQL checks it is the pinned self-signed certificate")
+	case tlsMode == "" && e.flavor.mariadb() && !st1.VerifyCert:
+		t.Fatal("MariaDB checks the primary's own certificate against the replication password")
+	}
+	if e.flavor.mariadb() {
+		if !strings.Contains(cres.Summary, "Root on the server itself") || !strings.Contains(cres.Summary, "'rolly'@'%'") ||
+			strings.Contains(cres.Summary, "'parked'") {
+			t.Fatalf("summary: %s", cres.Summary)
+		}
+		if !locked(adbB, "rolly") || !locked(adbB, "parked") {
+			t.Fatal("a login with every right through roles isn't locked on the standby")
+		}
+	}
+	followsByGTID := func(db *sql.DB, spec protocol.DatabaseSpec, env agent.EngineEnv) {
+		t.Helper()
+		st, err := e.server(env, spec).readReplicaStatus(ctx, db)
+		if err != nil || !st.Configured || st.GTID != wantGTID {
+			t.Fatalf("replica status: %+v %v (want GTID %v)", st, err, wantGTID)
+		}
+	}
+	followsByGTID(adbB, specB, envB)
+	if wantGTID && !strings.Contains(cres.Summary, "by GTID") || !wantGTID && !strings.Contains(cres.Summary, "by binary log position") {
+		t.Fatalf("summary: %s", cres.Summary)
+	}
 	waitCount(adbB, "SELECT COUNT(*) FROM shop.orders", 210)
 	exec(adbA, "INSERT INTO shop.orders VALUES (211, 'replicated')")
 	waitCount(adbB, "SELECT COUNT(*) FROM shop.orders", 211)
@@ -183,6 +294,47 @@ func TestStandbyIntegration(t *testing.T) {
 	if ts := e.StandbyTargets(ctx, envB); len(ts) != 0 {
 		t.Logf("targets (sidecar: none expected): %+v", ts)
 	}
+	// Another key at the primary's address: the standby stops receiving,
+	// again after something starts it, until the key is back.
+	if rec1.KeyPin != "" {
+		keyCheckEvery, keyRetryEvery = 0, 0
+		setPin := func(pin string) {
+			_ = standbys(envB).update(func(f *standbyFile) {
+				for i := range f.Standbys {
+					f.Standbys[i].KeyPin = pin
+				}
+			})
+		}
+		ioState := func() string {
+			st, err := e.server(envB, specB).readReplicaStatus(ctx, adbB)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return st.IORunning
+		}
+		setPin(strings.Repeat("0", 64))
+		if st := e.StandbyStates(ctx, envB); len(st) != 1 || !strings.Contains(st[0].Error, "another key") || ioState() != "No" {
+			t.Fatalf("another key: %+v, receiving %s", st, ioState())
+		}
+		var version string
+		if err := adbB.QueryRowContext(ctx, "SELECT VERSION()").Scan(&version); err != nil {
+			t.Fatal(err)
+		}
+		w := e.server(envB, specB).words(version)
+		exec(adbB, w.Start+" IO_THREAD")
+		if st := e.StandbyStates(ctx, envB); !strings.Contains(st[0].Error, "another key") || ioState() != "No" {
+			t.Fatalf("started again: %+v, receiving %s", st, ioState())
+		}
+		setPin(rec1.KeyPin)
+		if st := e.StandbyStates(ctx, envB); st[0].Error != "" && strings.Contains(st[0].Error, "another key") {
+			t.Fatalf("the key is back: %+v", st)
+		}
+		exec(adbA, "INSERT INTO shop.orders VALUES (300, 'after the key check')")
+		waitCount(adbB, "SELECT COUNT(*) FROM shop.orders WHERE id = 300", 1)
+		exec(adbA, "DELETE FROM shop.orders WHERE id = 300")
+		waitCount(adbB, "SELECT COUNT(*) FROM shop.orders WHERE id = 300", 0)
+		keyCheckEvery, keyRetryEvery = 10*time.Minute, time.Minute
+	}
 
 	// The app login can't write to the standby.
 	appB, err := openWith(ctx, account{User: "app", Password: "app-secret-1"}, sbSocket, 3306)
@@ -193,11 +345,30 @@ func TestStandbyIntegration(t *testing.T) {
 	if _, err := appB.ExecContext(ctx, "INSERT INTO shop.orders VALUES (999, 'x')"); err == nil {
 		t.Fatal("the standby took a write")
 	}
+	// Nor can a login with every right: MariaDB's is locked while the
+	// standby is read-only, MySQL's super_read_only stops it.
+	if bdb, err := boss(sbSocket); e.flavor.mariadb() {
+		if err == nil {
+			bdb.Close()
+			t.Fatal("a login that bypasses read_only signs in to the MariaDB standby")
+		}
+	} else {
+		if err != nil {
+			t.Fatalf("boss on the standby: %v", err)
+		}
+		if _, err := bdb.ExecContext(ctx, "INSERT INTO shop.orders VALUES (997, 'x')"); err == nil {
+			t.Fatal("a login with every right wrote on the MySQL standby")
+		}
+		bdb.Close()
+	}
 
 	// Fence the primary, promote the standby.
 	fres, err := e.StandbyFence(ctx, envA, specA, protocol.StandbyFenceParams{FenceID: "f1", StandbyID: "sb1", SystemID: prep.SystemID}, tl)
 	if err != nil || fres.CheckpointLSN == "" {
 		t.Fatalf("fence: %+v %v", fres, err)
+	}
+	if e.flavor.mariadb() && (!strings.Contains(fres.Summary, "Root on the server itself") || !strings.Contains(fres.Summary, "'boss'@'%'")) {
+		t.Fatalf("fence summary: %s", fres.Summary)
 	}
 	appA, err := openWith(ctx, account{User: "app", Password: "app-secret-1"}, specA.SocketDir, 3306)
 	if err != nil {
@@ -212,27 +383,69 @@ func TestStandbyIntegration(t *testing.T) {
 	if !e.flavor.mariadb() {
 		exec(adbA, "SET GLOBAL super_read_only = OFF")
 	}
+	if e.flavor.mariadb() {
+		// Writable with logins still locked (as if the agent stopped
+		// between the two): the heartbeat unlocks them.
+		e.StandbyStates(ctx, envA)
+		if locked(adbA, "boss") || !locked(adbA, "parked") {
+			t.Fatal("a writable server keeps the logins Rowsafe locked (or lost a person's lock)")
+		}
+	}
 	if enforced, other, err := e.HoldFence(ctx, envA, fence); !enforced || other || err != nil {
 		t.Fatalf("hold: %v %v %v", enforced, other, err)
 	}
 	pres, err := e.StandbyPromote(ctx, envB, specB, protocol.StandbyPromoteParams{StandbyID: "sb1", WaitForLSN: fres.CheckpointLSN}, tl)
-	if err != nil || !pres.Promoted || !pres.CaughtUp || pres.ReplayLSN == "" {
+	if err != nil || !pres.Promoted || !pres.CaughtUp || pres.ReplayLSN == "" || len(pres.Warnings) > 0 {
 		t.Fatalf("promote: %+v %v", pres, err)
 	}
+	// The old primary starts a new binary log file (a restart) after the
+	// switch, in a later second than the new primary's first file (files
+	// are dated to the second): its history still ends where the switch
+	// was recorded, and that file isn't the database moving back.
+	time.Sleep(time.Until(time.Now().Truncate(time.Second).Add(1100 * time.Millisecond)))
+	exec(adbA, "FLUSH BINARY LOGS")
+	at212 := time.Now().UTC()
 	if _, err := appB.ExecContext(ctx, "INSERT INTO shop.orders VALUES (212, 'on the new primary')"); err != nil {
 		t.Fatalf("the new primary refused a write: %v", err)
 	}
+	if e.flavor.mariadb() {
+		if bdb, err := boss(sbSocket); err != nil {
+			t.Fatalf("the login with every right isn't unlocked on the new primary: %v", err)
+		} else {
+			bdb.Close()
+		}
+		if bdb, err := boss(specA.SocketDir); err == nil {
+			bdb.Close()
+			t.Fatal("a login that bypasses read_only signs in to the fenced old primary")
+		}
+		if locked(adbB, "rolly") || !locked(adbB, "parked") {
+			t.Fatal("the new primary: Rowsafe's locks go, a person's stays")
+		}
+	}
+	// A restore after the switch, before the new primary's first backup:
+	// the old primary's backup, its binary log up to the switch, then the
+	// new primary's own (the switch recorded in the bucket).
+	for i := 0; i < 12; i++ {
+		_, _ = e.Archiver(ctx, envB, specB)
+		_, _ = e.Archiver(ctx, envA, specA) // its new file too
+		time.Sleep(time.Second)
+	}
+	dr := run(envB, specB, protocol.TaskDrill, nil).(*protocol.DrillResult)
+	if !dr.Passed || dr.RecoveredTo == nil || dr.RecoveredTo.Unix() < at212.Unix() {
+		t.Fatalf("a restore after the switch stopped at it: recovered to %v (the new primary wrote at %v): %+v", dr.RecoveredTo, at212, dr)
+	}
+	t.Logf("restored across the switch, to %v", dr.RecoveredTo)
 
 	// The old primary follows the new one.
 	var sec2 protocol.StandbySecrets
 	sec2.PrimaryPort, sec2.PrimaryAddresses = 3306, []string{ipB}
 	var prep2 protocol.StandbyPrepareResult
-	if err := e.StandbyPrepare(ctx, envB, specB, protocol.StandbyPrepareParams{StandbyID: "sb2", StandbyAddresses: []string{ipA}, Stream: true},
+	if err := e.StandbyPrepare(ctx, envB, specB, protocol.StandbyPrepareParams{StandbyID: "sb2", StandbyAddresses: []string{ipA, ipAgent}, Stream: true},
 		&sec2, &prep2, tl); err != nil {
 		t.Fatalf("prepare 2: %v", err)
 	}
 	rres, err := e.StandbyCreate(ctx, envA, specA, protocol.StandbyCreateParams{StandbyID: "sb2", Port: 3306, SocketDir: specA.SocketDir,
-		Rebuild: true, FenceID: "f1", Reattach: true, SwitchLSN: pres.ReplayLSN, Settings: prep2.Settings, Major: prep2.Major}, sec2, tl)
+		Rebuild: true, FenceID: "f1", Reattach: true, SwitchLSN: pres.ReplayLSN, Settings: prep2.Settings, Major: prep2.Major, PrimaryName: hostB}, sec2, tl)
 	if err != nil || !rres.Reattached {
 		t.Fatalf("reattach: %+v %v", rres, err)
 	}
@@ -245,20 +458,68 @@ func TestStandbyIntegration(t *testing.T) {
 		t.Logf("old primary as a standby: %+v", e.StandbyStates(ctx, envA))
 	}
 	waitCount(adbA, "SELECT COUNT(*) FROM shop.orders", 213)
+	followsByGTID(adbA, specA, envA)
+
+	// And back: the second server stops taking writes, the first is the
+	// primary again, the second follows it on its own data.
+	fence2 := protocol.Fence{ID: "f2", DatabaseID: specA.ID, Port: 3306, SocketDir: specB.SocketDir, SystemID: prep2.SystemID, Engine: engine}
+	fres2, err := e.StandbyFence(ctx, envB, specB, protocol.StandbyFenceParams{FenceID: "f2", StandbyID: "sb2", SystemID: prep2.SystemID}, tl)
+	if err != nil || fres2.CheckpointLSN == "" {
+		t.Fatalf("fence 2: %+v %v", fres2, err)
+	}
+	pres2, err := e.StandbyPromote(ctx, envA, specA, protocol.StandbyPromoteParams{StandbyID: "sb2", WaitForLSN: fres2.CheckpointLSN}, tl)
+	if err != nil || !pres2.Promoted || !pres2.CaughtUp {
+		t.Fatalf("promote 2: %+v %v", pres2, err)
+	}
+	if _, err := appA.ExecContext(ctx, "INSERT INTO shop.orders VALUES (214, 'back on the first server')"); err != nil {
+		t.Fatalf("the first server refused a write after switching back: %v", err)
+	}
+	var sec3 protocol.StandbySecrets
+	sec3.PrimaryPort, sec3.PrimaryAddresses = 3306, []string{ipA}
+	var prep3 protocol.StandbyPrepareResult
+	if err := e.StandbyPrepare(ctx, envA, specA, protocol.StandbyPrepareParams{StandbyID: "sb3", StandbyAddresses: []string{ipB, ipAgent}, Stream: true},
+		&sec3, &prep3, tl); err != nil {
+		t.Fatalf("prepare 3: %v", err)
+	}
+	rres3, err := e.StandbyCreate(ctx, envB, specB, protocol.StandbyCreateParams{StandbyID: "sb3", Port: 3306, SocketDir: specB.SocketDir,
+		Rebuild: true, FenceID: "f2", Reattach: true, SwitchLSN: pres2.ReplayLSN, Settings: prep3.Settings, Major: prep3.Major, PrimaryName: hostA}, sec3, tl)
+	if err != nil || !rres3.Reattached {
+		t.Fatalf("reattach 2: %+v %v", rres3, err)
+	}
+	if enforced, _, _ := e.HoldFence(ctx, envB, fence2); enforced {
+		t.Fatal("the fence fought the second rebuilt standby")
+	}
+	exec(adbA, "INSERT INTO shop.orders VALUES (215, 'follows again')")
+	waitCount(adbB, "SELECT COUNT(*) FROM shop.orders", 215)
+	followsByGTID(adbB, specB, envB)
+	if _, err := appB.ExecContext(ctx, "INSERT INTO shop.orders VALUES (997, 'x')"); err == nil {
+		t.Fatal("the second server took a write as a standby again")
+	}
 
 	// Remove: the rebuilt old primary keeps its data; release drops the login.
-	rm, err := e.StandbyRemove(ctx, envA, specA, protocol.StandbyRemoveParams{StandbyID: "sb2"}, tl)
+	rm, err := e.StandbyRemove(ctx, envB, specB, protocol.StandbyRemoveParams{StandbyID: "sb3"}, tl)
 	if err != nil || rm.Restored {
 		t.Fatalf("remove: %+v %v", rm, err)
 	}
-	if n := count(adbA, "SELECT COUNT(*) FROM shop.orders"); n != 213 {
+	if n := count(adbB, "SELECT COUNT(*) FROM shop.orders"); n != 215 {
 		t.Fatalf("the rebuilt standby lost data: %d", n)
 	}
-	if _, err := e.StandbyRelease(ctx, envB, specB, protocol.StandbyReleaseParams{StandbyID: "sb2"}, tl); err != nil {
-		t.Fatalf("release: %v", err)
+	if e.flavor.mariadb() {
+		if !strings.Contains(rm.Summary, "can sign in again") || locked(adbB, "boss") || !locked(adbB, "parked") {
+			t.Fatalf("remove: the logins Rowsafe locked sign in again: %s", rm.Summary)
+		}
 	}
-	if n := count(adbB, "SELECT COUNT(*) FROM mysql.user WHERE User LIKE 'rowsafe\\_sb\\_%'"); n != 0 {
-		t.Fatalf("replication logins left: %d", n)
+	// The first server's earlier login (sb1) went when it prepared sb3;
+	// the second server is read-only again: its release waits.
+	if rel, err := e.StandbyRelease(ctx, envB, specB, protocol.StandbyReleaseParams{StandbyID: "sb2"}, tl); err != nil ||
+		!strings.Contains(rel.Summary, "read-only") {
+		t.Fatalf("release on the read-only server: %+v %v", rel, err)
+	}
+	if _, err := e.StandbyRelease(ctx, envA, specA, protocol.StandbyReleaseParams{StandbyID: "sb3"}, tl); err != nil {
+		t.Fatalf("release sb3: %v", err)
+	}
+	if n := count(adbA, "SELECT COUNT(*) FROM mysql.user WHERE User LIKE 'rowsafe\\_sb\\_%'"); n != 0 {
+		t.Fatalf("replication logins left on the primary: %d", n)
 	}
 }
 
@@ -340,7 +601,9 @@ func TestCloneIntegration(t *testing.T) {
 	if ok, err := e.server(envB, specB).createAccountAsAdmin(ctx); err != nil || !ok {
 		t.Fatalf("account: %v %v", ok, err)
 	}
-	exec(adbB, standbyGrant)
+	for _, g := range standbyGrants {
+		exec(adbB, g)
+	}
 	run := func(typ string, params any) any {
 		t.Helper()
 		res, err := e.Run(ctx, envA, &protocol.Task{ID: fmt.Sprintf("t%d", time.Now().UnixNano()), Type: typ, Database: &specA, Params: mustJSON(t, params)}, tl)

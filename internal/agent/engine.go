@@ -108,6 +108,10 @@ type ServerTLS struct {
 	Served func(ctx context.Context) (*x509.Certificate, error)
 	// Close releases what ServerTLS opened (nil: nothing).
 	Close func()
+	// ReuseKey: a new certificate keeps the key KeyFile holds (a P-256 key
+	// the agent can read), so what pins it stays right (a MySQL or
+	// MariaDB standby checks its primary's key: standby_tls.go).
+	ReuseKey bool
 }
 
 // engineCertificates is db's engine as an EngineCertificates (nil when it

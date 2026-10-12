@@ -102,7 +102,7 @@ func TestCloudCatalogEngines(t *testing.T) {
 	t.Cleanup(func() { cloudCatalogJSON = orig })
 	cloudCatalogJSON = strings.Replace(orig, `"max_servers":3`, `"engines":`+string(all)+`,"max_servers":3`, 1)
 	txt, res = callText(t, cs, "cloud_catalog", nil)
-	for _, want := range []string{"Database MySQL (engine mysql): versions 8.4 (default 8.4), apps connect on port 3306 with TLS; no standby server yet; not on arm64 sizes.",
+	for _, want := range []string{"Database MySQL (engine mysql): versions 8.4 (default 8.4), apps connect on port 3306 with TLS; not on arm64 sizes.",
 		"Database Valkey (engine valkey): versions 8 (default 8), apps connect on port 6380 with TLS",
 		"Database ClickHouse (engine clickhouse): versions 26.3, 26.8 (default 26.8), apps connect on ports 9440 and 8443 with TLS; no standby server yet; sizes with 4 GB of memory or more.",
 		"engine with engine_version"} {

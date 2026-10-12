@@ -100,7 +100,8 @@ var (
 func shipperFor(s *server) *shipper {
 	shippersMu.Lock()
 	defer shippersMu.Unlock()
-	sh := shippers[s.db.ID]
+	key := s.env.StateDir + "\x00" + s.db.ID // one agent's (tests run two in one process)
+	sh := shippers[key]
 	if sh != nil {
 		select {
 		case <-sh.done:
@@ -114,7 +115,7 @@ func shipperFor(s *server) *shipper {
 			created:   map[string]binlogFile{}, pending: map[string]time.Time{},
 			wake: make(chan struct{}, 1), done: make(chan struct{}),
 		}
-		shippers[s.db.ID] = sh
+		shippers[key] = sh
 		sh.srv = s
 		sh.seen = time.Now()
 		go sh.run()
@@ -419,7 +420,9 @@ func sidecarHint(s *server) string {
 	return ""
 }
 
-// identity reads (and caches) a file's creation time.
+// identity reads (and caches) a file's identity: its creation time and the
+// server that wrote it. A file an older agent started shipping (its folder
+// without the server) goes on in that folder.
 func (sh *shipper) identity(dir, name string) (binlogFile, error) {
 	sh.mu.Lock()
 	id, ok := sh.created[name]
@@ -427,12 +430,17 @@ func (sh *shipper) identity(dir, name string) (binlogFile, error) {
 	if ok {
 		return id, nil
 	}
-	created, err := readBinlogCreated(filepath.Join(dir, name))
+	id, err := readBinlogFile(filepath.Join(dir, name))
 	if err != nil {
 		return binlogFile{}, err
 	}
-	id = binlogFile{Name: name, Created: created}
 	sh.mu.Lock()
+	legacy := binlogFile{Name: id.Name, Created: id.Created}
+	if _, started := sh.state.Files[legacy.dir()]; started {
+		if _, ok := sh.state.Files[id.dir()]; !ok {
+			id = legacy
+		}
+	}
 	sh.created[name] = id
 	sh.mu.Unlock()
 	return id, nil
@@ -495,12 +503,14 @@ func (sh *shipper) gap() string {
 func (sh *shipper) shippedUpTo(p position) bool {
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
-	id := p.File
-	if id.Created == 0 {
-		var ok bool
-		if id, ok = sh.created[p.File.Name]; !ok {
+	// The shipper's own identity of the file (it may ship a file in an
+	// older agent's folder).
+	id, ok := sh.created[p.File.Name]
+	if !ok || p.File.Created != 0 && !p.File.same(id) {
+		if p.File.Created == 0 {
 			return false
 		}
+		id = p.File
 	}
 	return sh.state.Files[id.dir()] >= p.Pos
 }
