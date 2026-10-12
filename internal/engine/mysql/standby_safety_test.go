@@ -280,28 +280,45 @@ func TestMovedAwayAfterSwitches(t *testing.T) {
 	}
 	a1, a2 := f("bin.000001", 100, "1"), f("bin.000002", 200, "1")
 	b1 := f("bin.000001", 300, "2") // B's own file from the switch at 300
-	aRestart := f("bin.000003", 301, "1")
-	idx := binlogIndex{a1: nil, a2: nil, b1: nil, aRestart: nil}
+	aLater := f("bin.000003", 301, "1")
+	idx := binlogIndex{a1: nil, a2: nil, b1: nil, aLater: nil}
 	ab := binlogLink{From: linkFrom{Name: a2.Name, Server: "1", Pos: 500}, To: b1}
 	now := int64(10_000)
+	own := map[binlogFile]bool{} // the files whose server wrote a transaction itself
+	ownWrites := func(g binlogFile) (bool, error) { return own[g], nil }
+	moved := func(links []binlogLink, cur binlogFile, server string) (bool, int64) {
+		t.Helper()
+		m, at, err := movedAway(idx, links, cur, server, now, ownWrites)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return m, at.Unix()
+	}
 
-	// Restoring on B's chain: A's file from after the switch (a restart,
-	// following B) isn't a move.
-	if moved, _ := movedAway(idx, []binlogLink{ab}, b1, "2", now); moved {
+	// Restoring on B's chain: A's later file holds only what it replicated
+	// from B (or nothing: a restart): not a move.
+	if m, _ := moved([]binlogLink{ab}, b1, "2"); m {
 		t.Fatal("the old primary's later file counted as the database moving back")
 	}
-	// Without the record, B's files after A's are a move nobody recorded.
-	if moved, at := movedAway(idx, nil, a2, "1", now); !moved || at.Unix() != 300 {
-		t.Fatalf("an unrecorded switch: %v %v", moved, at)
+	// A wrote in it itself: the database came back to A, unrecorded (a
+	// failover whose record failed): refuse rather than miss A's writes.
+	own[aLater] = true
+	if m, at := moved([]binlogLink{ab}, b1, "2"); !m || at != 301 {
+		t.Fatalf("an unrecorded switch back: %v %v", m, at)
 	}
-	// There and back: A again from 400; its files from then are history,
-	// B's later ones (following A) aren't.
+	own[aLater] = false
+	// Without the record, B's files after A's are a move nobody recorded.
+	if m, at := moved(nil, a2, "1"); !m || at != 300 {
+		t.Fatalf("an unrecorded switch: %v %v", m, at)
+	}
+	// There and back, recorded: A again from 400; its files from then are
+	// history, B's later ones (following A) aren't.
 	a4 := f("bin.000004", 400, "1")
 	bLater := f("bin.000002", 401, "2")
 	ba := binlogLink{From: linkFrom{Name: b1.Name, Server: "2", Pos: 900}, To: a4}
 	idx[a4], idx[bLater] = nil, nil
 	links := []binlogLink{ba, ab}
-	if moved, _ := movedAway(idx, links, a4, "1", now); moved {
+	if m, _ := moved(links, a4, "1"); m {
 		t.Fatal("B's file after the switch back counted as a move")
 	}
 	if !movedOff(links, "1", 301) || movedOff(links, "1", 400) || movedOff(links, "1", 450) || !movedOff(links, "2", 401) || movedOff(links, "2", 300) {
@@ -310,7 +327,7 @@ func TestMovedAwayAfterSwitches(t *testing.T) {
 	// A server that took over unrecorded after the switch back still counts.
 	c1 := f("bin.000001", 500, "3")
 	idx[c1] = nil
-	if moved, at := movedAway(idx, links, a4, "1", now); !moved || at.Unix() != 500 {
-		t.Fatalf("a third server: %v %v", moved, at)
+	if m, at := moved(links, a4, "1"); !m || at != 500 {
+		t.Fatalf("a third server: %v %v", m, at)
 	}
 }

@@ -126,7 +126,7 @@ func (e *Engine) StandbyCreate(ctx context.Context, env agent.EngineEnv, db prot
 	if err := store.put(rec); err != nil {
 		return fail(err)
 	}
-	if err := s.setReadOnly(ctx, conn, true); err != nil {
+	if err := s.setReadOnlyThen(ctx, conn, true, true); err != nil {
 		return fail(fmt.Errorf("making the standby read-only: %w", err))
 	}
 	if err := s.startReplication(ctx, conn, addr, sec, pos, byGTID, tc, log); err != nil {

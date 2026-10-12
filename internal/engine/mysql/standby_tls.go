@@ -153,8 +153,10 @@ type tlsCheck struct {
 	Verify bool   // SOURCE_SSL_VERIFY_SERVER_CERT / MASTER_SSL_VERIFY_SERVER_CERT
 	How    string
 	// Refuse: why the standby mustn't replicate from what the primary
-	// serves (a CA's certificate that isn't for the primary's own name).
-	Refuse string
+	// serves (a CA's certificate that isn't for the primary's own name);
+	// Transient: only for now (the name doesn't resolve).
+	Refuse    string
+	Transient bool
 }
 
 // options are the CHANGE REPLICATION SOURCE / CHANGE MASTER options for
@@ -234,7 +236,8 @@ func (s *server) decideTLS(ctx context.Context, version, id string, chain []*x50
 		addrs, err := lookupHost(cctx, name)
 		cancel()
 		if err != nil || len(addrs) == 0 {
-			return tlsCheck{Refuse: fmt.Sprintf("the primary's name %s doesn't resolve here yet, so the standby can't check the primary's certificate by it", name)}
+			return tlsCheck{Transient: true,
+				Refuse: fmt.Sprintf("the primary's name %s doesn't resolve here yet, so the standby can't check the primary's certificate by it", name)}
 		}
 		return withFile(tlsCheck{Host: name, Verify: true,
 			How: fmt.Sprintf("%s replicates by the primary's name %s and checks its certificate for it, from %s", s.flavor.display(), name, how)}, a)
@@ -435,6 +438,9 @@ func (s *server) watchKey(ctx context.Context, conn *sql.DB, store *standbyStore
 		return why(rec)
 	}
 	tc := s.decideTLS(ctx, version, rec.ID, chain, true, rec.PrimaryName)
+	if tc.Transient {
+		return why(rec) // a DNS hiccup changes nothing: replication goes on as it is
+	}
 	if tc.Refuse != "" {
 		_, _ = conn.ExecContext(ctx, w.Stop+" IO_THREAD")
 		setRec(func(r *standbyRecord) { r.KeyMismatch, r.TLSProblem = false, tc.Refuse })

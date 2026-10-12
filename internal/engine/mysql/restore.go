@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -357,7 +359,12 @@ func (s *server) fetchBinlogs(ctx context.Context, st *objStore, dir string, res
 		if moveStop == 0 {
 			moveStop = time.Now().Unix() + 1
 		}
-		if moved, at := movedAway(idx, links, cur, server, moveStop); moved {
+		ownWrites := func(g binlogFile) (bool, error) { return wroteItself(ctx, st, idx, g, bdir) }
+		moved, at, err := movedAway(idx, links, cur, server, moveStop, ownWrites)
+		if err != nil {
+			return err
+		}
+		if moved {
 			return fmt.Errorf("the database moved to another server at %s, and the bucket doesn't say where its binary log goes on from %s "+
 				"(the switch was made by an older agent): pick a moment before %s, or one after that server's first backup",
 				at.UTC().Format("15:04:05 UTC on 2006-01-02"), cur.Name, at.UTC().Format("15:04:05 UTC"))
@@ -463,10 +470,10 @@ func laterLink(links []binlogLink, cur binlogFile, server string, followed map[b
 	return binlogLink{}, false
 }
 
-// movedOff reports whether server's file created then was written after
-// the database moved away from server (a recorded switch) and before it
-// came back: not the database's history (the old primary restarted, or
-// followed the new one).
+// movedOff reports whether server's file created then is from after a
+// recorded switch away from server, and before one back to it: the old
+// primary restarted, or followed the new one, unless it wrote something
+// itself there (wroteItself: the database came back to it unrecorded).
 func movedOff(links []binlogLink, server string, created int64) bool {
 	var at int64 = -1
 	off := false
@@ -486,20 +493,66 @@ func movedOff(links []binlogLink, server string, created int64) bool {
 }
 
 // movedAway reports whether another server's binary logs begin after cur
-// was created and before stop, not counting a server's files from after
-// the database moved away from it: the database moved there (and when),
-// and the bucket doesn't say how.
-func movedAway(idx binlogIndex, links []binlogLink, cur binlogFile, server string, stopUnix int64) (bool, time.Time) {
-	var first int64
+// was created and before stop: the database moved there (and when), and
+// the bucket doesn't say how. A server's file from after a recorded
+// switch away from it counts only when it holds a transaction that server
+// wrote itself (ownWrites), not only what it replicated or nothing.
+func movedAway(idx binlogIndex, links []binlogLink, cur binlogFile, server string, stopUnix int64,
+	ownWrites func(binlogFile) (bool, error)) (bool, time.Time, error) {
+	var cands []binlogFile
 	for g := range idx {
-		if g.Server == "" || g.Server == server || g.Created <= cur.Created || g.Created >= stopUnix || movedOff(links, g.Server, g.Created) {
+		if g.Server == "" || g.Server == server || g.Created <= cur.Created || g.Created >= stopUnix {
 			continue
 		}
-		if first == 0 || g.Created < first {
-			first = g.Created
-		}
+		cands = append(cands, g)
 	}
-	return first != 0, time.Unix(first, 0)
+	slices.SortFunc(cands, func(a, b binlogFile) int { return cmp.Compare(a.Created, b.Created) })
+	for _, g := range cands {
+		if movedOff(links, g.Server, g.Created) {
+			own, err := ownWrites(g)
+			if err != nil {
+				return false, time.Time{}, err
+			}
+			if !own {
+				continue
+			}
+		}
+		return true, time.Unix(g.Created, 0), nil
+	}
+	return false, time.Time{}, nil
+}
+
+// wroteItself reports whether g (as far as it is in the bucket) holds a
+// transaction its server wrote itself: events keep the server_id of the
+// server that wrote them first.
+func wroteItself(ctx context.Context, st *objStore, idx binlogIndex, g binlogFile, bdir string) (bool, error) {
+	chunks, end := idx.contiguous(g)
+	if end == 0 {
+		return false, nil
+	}
+	path := filepath.Join(bdir, ".check-"+g.Name)
+	defer os.Remove(path)
+	if err := downloadChunks(ctx, st, chunks, path); err != nil {
+		return false, err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	id, err := strconv.ParseUint(g.Server, 10, 32)
+	if err != nil {
+		return true, nil // can't tell: counts
+	}
+	own := false
+	err = scanEvents(f, func(_ int64, h eventHeader, _ []byte) bool {
+		switch h.Type {
+		case evGTID, evAnonymousGTID, evGTIDTagged, evMariaGTID, evQuery:
+			own = h.ServerID == uint32(id)
+		}
+		return !own
+	})
+	return own, err
 }
 
 // downloadChunks concatenates a file's pieces.

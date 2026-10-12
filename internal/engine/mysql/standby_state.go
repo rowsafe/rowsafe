@@ -444,6 +444,16 @@ func userSchemas(ctx context.Context, db *sql.DB) ([]string, error) {
 
 // setReadOnly turns read_only on or off now and after a restart.
 func (s *server) setReadOnly(ctx context.Context, db *sql.DB, on bool) error {
+	return s.setReadOnlyThen(ctx, db, on, false)
+}
+
+// setReadOnlyThen is setReadOnly; revert: MariaDB, when the logins that
+// could still write can't be locked, the server takes writes again (a
+// first fence, an empty server becoming a standby: nothing changed). Not
+// for a server that must stay read-only whatever happens (a fenced old
+// primary held so, rebuilt as a standby): it stays read-only, with the
+// error.
+func (s *server) setReadOnlyThen(ctx context.Context, db *sql.DB, on, revert bool) error {
 	v := "OFF"
 	if on {
 		v = "ON"
@@ -469,6 +479,9 @@ func (s *server) setReadOnly(ctx context.Context, db *sql.DB, on bool) error {
 			return nil
 		}
 		if _, err := s.lockWriters(ctx, db); err != nil {
+			if !revert {
+				return fmt.Errorf("locking the logins that could still write: %w", err)
+			}
 			// Not read-only half-way: writable again, with what was
 			// locked unlocked (the heartbeat unlocks only writable servers).
 			_, _ = db.ExecContext(ctx, "SET GLOBAL read_only = OFF")

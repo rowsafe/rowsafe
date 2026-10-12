@@ -311,7 +311,7 @@ func (e *Engine) StandbyFence(ctx context.Context, env agent.EngineEnv, db proto
 	if id := s.systemID(ctx, conn); p.SystemID != "" && id != "" && id != p.SystemID {
 		return nil, fmt.Errorf("the %s on port %d is another server (%s, not %s); Rowsafe left it alone", s.flavor.display(), db.Port, id, p.SystemID)
 	}
-	if err := s.setReadOnly(ctx, conn, true); err != nil {
+	if err := s.setReadOnlyThen(ctx, conn, true, true); err != nil {
 		return nil, fmt.Errorf("making %s read-only: %w", s.flavor.display(), err)
 	}
 	log.Printf("%s on port %d is read-only now (also after a restart)", s.flavor.display(), db.Port)
