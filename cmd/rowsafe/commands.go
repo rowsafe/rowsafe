@@ -895,19 +895,29 @@ func taskShow(ctx context.Context, c *client.Client, args []string) error {
 }
 
 func waitAndReport(ctx context.Context, c *client.Client, taskID, dbName string) error {
-	last := ""
+	last, shownID := "", false
 	t, err := c.WaitTask(ctx, taskID, func(t protocol.TaskView) {
 		if t.Status != last {
 			last = t.Status
 			if t.Status == protocol.StatusQueued {
 				fmt.Fprintf(os.Stderr, "Waiting for the agent to pick up the %s (task %s)...\n", taskName(t.Type), t.ID)
+				shownID = true
 			} else if t.Status == protocol.StatusRunning {
-				fmt.Fprintf(os.Stderr, "Running...\n")
+				if !shownID {
+					fmt.Fprintf(os.Stderr, "Running (task %s)...\n", t.ID)
+				} else {
+					fmt.Fprintf(os.Stderr, "Running...\n")
+				}
+				shownID = true
 			}
 		}
 	})
 	if err != nil {
 		return err
+	}
+	if !shownID {
+		// Done before any progress line: scripts still find the task's ID.
+		fmt.Fprintf(os.Stderr, "(task %s)\n", t.ID)
 	}
 	// The task's ID went to stderr while waiting: lead with what it did.
 	printed := printTaskResult(t)
