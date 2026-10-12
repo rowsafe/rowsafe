@@ -53,4 +53,11 @@ func TestPinsAgree(t *testing.T) {
 	if s := seriesOf(v); s != all("scripts/install.sh", `(?m)^MEILI_SERIES=(\S+)$`)[0] {
 		t.Errorf("MEILI_SERIES isn't %s", s)
 	}
+	// The Docker sidecar is built on the image of the same release, and the
+	// compose example runs that image.
+	same("agent-meilisearch.Dockerfile DB_VERSION", v, all("deploy/docker/agent-meilisearch.Dockerfile", `(?m)^ARG DB_VERSION=(\S+)$`))
+	digest := all("deploy/docker/agent-meilisearch.Dockerfile", `(?m)^ARG DB_IMAGE_DIGEST=(sha256:[0-9a-f]{64})$`)[0]
+	same("compose.meilisearch.example.yml image", "v"+v, all("deploy/docker/compose.meilisearch.example.yml", `image: getmeili/meilisearch:(\S+)`))
+	same("release.yml meilisearch1 DB_VERSION", v, all(".github/workflows/release.yml", `meilisearch1\) \{ echo "DB_VERSION=(\S+)";`))
+	same("release.yml meilisearch1 DB_IMAGE_DIGEST", digest, all(".github/workflows/release.yml", `meilisearch1\) \{ echo "DB_VERSION=\S+"; echo "DB_IMAGE_DIGEST=(sha256:[0-9a-f]{64})"`))
 }

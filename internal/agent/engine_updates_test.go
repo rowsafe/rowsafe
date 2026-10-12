@@ -75,6 +75,58 @@ func TestEngineSoftware(t *testing.T) {
 	}
 }
 
+// OpenSearch: one series per major version (3), from OpenSearch's own
+// apt repository; the update helper is asked like for the other engines,
+// and the summary names the major version.
+func TestEngineSoftwareOpenSearch(t *testing.T) {
+	e := newUpgradeEnv(t)
+	os.WriteFile(e.a.cfg.RestartAllowFile, []byte("9200 opensearch.service\n"), 0o644)
+	eng := &versionEngine{readyEngine: readyEngine{fakeEngine: fakeEngine{name: protocol.EngineOpenSearch}, tries: 5}, version: "3.7.0"}
+	withEngine(t, eng)
+	e.a.watched = []protocol.DatabaseSpec{{ID: "db_o", Port: 9200, Engine: protocol.EngineOpenSearch}}
+	e.run.outs["dpkg-query -W -f=${Version} opensearch"] = "3.7.0"
+	e.run.outs["apt-cache madison opensearch"] = " opensearch |      3.9.0 | https://artifacts.opensearch.org/releases/bundle/opensearch/3.x/apt stable/main amd64 Packages\n" +
+		" opensearch |      3.8.0 | https://artifacts.opensearch.org/releases/bundle/opensearch/3.x/apt stable/main amd64 Packages\n" +
+		" opensearch |      3.7.0 | https://artifacts.opensearch.org/releases/bundle/opensearch/3.x/apt stable/main amd64 Packages\n"
+	cs := e.a.engineSoftware(context.Background())
+	if len(cs) != 1 {
+		t.Fatalf("%+v", cs)
+	}
+	c := cs[0]
+	if c.Engine != "opensearch" || c.Series != "3" || c.Installed != "3.7.0" || c.Candidate != "3.9.0" || c.Running != "3.7.0" ||
+		len(c.NextSeries) != 0 || c.Unit != "opensearch.service" || c.PackageUpdate {
+		t.Errorf("%+v", c)
+	}
+	for v, want := range map[string]string{"3.9.0": "3", "2.19.6": "2", "": ""} {
+		if got := engineSeries(protocol.EngineOpenSearch, v); got != want {
+			t.Errorf("engineSeries(opensearch, %q) = %q, want %q", v, got, want)
+		}
+	}
+	if engineSeries(protocol.EngineMySQL, "8.0.40-1debian12") != "8.0" {
+		t.Error("MySQL keeps major.minor")
+	}
+
+	// Update: the helper's db-minor-update, then a summary for 3.x.
+	os.WriteFile(e.a.cfg.UpdateAllowFile, []byte("database\n"), 0o644)
+	os.WriteFile(e.a.cfg.RestartHelper, []byte("#!/bin/sh\n# update-actions: db-minor-update\n"), 0o755)
+	db := e.a.watched[0]
+	e.helper = func(id string, args []string) map[string]string {
+		eng.version = "3.9.0"
+		return map[string]string{"id": id, "ok": "1", "package": "3.9.0", "packages": "opensearch", "restarted": "1"}
+	}
+	res, err := e.a.runTask(context.Background(), &protocol.Task{ID: "t1", Type: protocol.TaskPGUpdate, Database: &db}, &taskLog{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := res.(*protocol.PGUpdateResult)
+	if r.FromVersion != "3.7.0" || r.ToVersion != "3.9.0" || !r.ArchivingOK || !strings.HasPrefix(r.Summary, "Updated OpenSearch from 3.7.0 to 3.9.0") {
+		t.Errorf("%+v", r)
+	}
+	if len(e.asked) != 1 || e.asked[0] != "db-minor-update 9200" {
+		t.Errorf("asked %v", e.asked)
+	}
+}
+
 // upgradeEngine is a ClickHouse engine that can be upgraded.
 type upgradeEngine struct {
 	versionEngine
@@ -232,6 +284,29 @@ func TestEngineContainerSoftware(t *testing.T) {
 	// The image is older than the server: the running version is the newest.
 	eng.bundled = "8.2.0"
 	if c = e.a.buildSoftware(context.Background()).Clusters[0]; c.Candidate != "8.2.1" {
+		t.Errorf("%+v", c)
+	}
+}
+
+// OpenSearch in Docker: the agent image's release of the same major
+// version (3.9.0 next to 3.7.0) is the newest Rowsafe knows.
+func TestEngineContainerSoftwareOpenSearch(t *testing.T) {
+	e := newUpgradeEnv(t)
+	e.a.cfg.ImageVariant = "opensearch3"
+	eng := &bundledEngine{versionEngine: versionEngine{readyEngine: readyEngine{fakeEngine: fakeEngine{name: protocol.EngineOpenSearch}, tries: 5}, version: "3.7.0"}, bundled: "3.9.0"}
+	withEngine(t, eng)
+	e.a.watched = []protocol.DatabaseSpec{{ID: "db_o", Port: 9200, Engine: protocol.EngineOpenSearch}}
+	r := e.a.buildSoftware(context.Background())
+	if !r.Container || len(r.Clusters) != 1 {
+		t.Fatalf("%+v", r)
+	}
+	c := r.Clusters[0]
+	if c.Running != "3.7.0" || c.Candidate != "3.9.0" || c.CandidateSource != protocol.CandidateAgentImage || c.Series != "3" {
+		t.Errorf("%+v", c)
+	}
+	// An image of the other major version knows nothing about this one.
+	eng.bundled = "2.19.6"
+	if c = e.a.buildSoftware(context.Background()).Clusters[0]; c.Candidate != "3.7.0" || c.CandidateSource != "" {
 		t.Errorf("%+v", c)
 	}
 }

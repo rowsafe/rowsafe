@@ -4973,7 +4973,7 @@ cloud_engine_container() {
     mysql | mariadb) cloud_mysql_checks ;;
     valkey) cloud_valkey_checks ;;
     clickhouse) cloud_clickhouse_checks ;;
-    opensearch) cloud_opensearch_checks ;;
+    opensearch) cloud_opensearch_checks && cloud_opensearch_update ;;
     qdrant) cloud_qdrant_checks && cloud_qdrant_update ;;
     meilisearch) cloud_meilisearch_checks && cloud_meilisearch_update ;;
   esac
@@ -5503,6 +5503,55 @@ os_wait() {
     [ "$i" -lt 300 ] || { journalctl -u opensearch -n 30 --no-pager >&2; fail "OpenSearch doesn't answer on 9200"; }
     sleep 2
   done
+}
+
+# cloud_opensearch_update: the root helper's OpenSearch update
+# (db-minor-update): nothing to do at the newest release of the major
+# version; from an older 3.x package to the newest one with one restart,
+# opensearch.yml kept; refused while a plugin installed by hand is there.
+cloud_opensearch_update() {
+  hd=$W/oshelper
+  install -d -m 0755 "$hd" "$hd/out" "$hd/state"
+  install -d -m 0700 -o rowsafe -g rowsafe "$hd/req"
+  printf 'database\n' >"$hd/updates-allowed"
+  printf '9200 opensearch.service\n' >"$hd/restart-allowed"
+  chmod 644 "$hd/updates-allowed" "$hd/restart-allowed"
+  os_helper() {
+    printf '%s db-minor-update 9200\n' "$1" | runuser -u rowsafe -- sh -c 'cat >"$1"' sh "$hd/req/update-request"
+    rm -f "$hd/out/update-result"
+    timeout 1800 env ROWSAFE_HELPER_MODE=update ROWSAFE_AGENT_USER=rowsafe ROWSAFE_RESTART_DIR="$hd/req" ROWSAFE_UPDATES_ALLOW="$hd/updates-allowed" \
+      ROWSAFE_RESTART_ALLOW="$hd/restart-allowed" RUNTIME_DIRECTORY="$hd/out" STATE_DIRECTORY="$hd/state" \
+      sh /src/scripts/rowsafe-pg-restart 2>>"$W/oshelper.log" || fail "$name: the helper failed ($1)"
+  }
+  newest=$(dpkg-query -W -f='${Version}' opensearch)
+  pid=$(systemctl show -p MainPID --value opensearch)
+  os_helper osu1
+  grep -qx ok=1 "$hd/out/update-result" && grep -qx "package=$newest" "$hd/out/update-result" && grep -qx restarted=0 "$hd/out/update-result" &&
+    grep -qx series=3 "$hd/out/update-result" || { cat "$hd/out/update-result" "$W/oshelper.log" >&2; fail "$name: the newest OpenSearch 3 isn't 'already the newest'"; }
+  [ "$(systemctl show -p MainPID --value opensearch)" = "$pid" ] || fail "$name: nothing to update, yet OpenSearch restarted"
+  # An older release of the same major version.
+  older=$(apt-cache madison opensearch | awk -F'|' '{ gsub(/ /, "", $2); print $2 }' | grep '^3\.' | grep -vx "$newest" | sort -V | tail -n 1)
+  [ -n "$older" ] || fail "$name: OpenSearch's repository offers no older 3.x release"
+  sum=$(sha256sum /etc/opensearch/opensearch.yml | cut -d' ' -f1)
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -q --allow-downgrades -o Dpkg::Options::=--force-confold "opensearch=$older" >>"$W/oshelper.log" 2>&1 ||
+    fail "$name: can't install OpenSearch $older"
+  systemctl restart opensearch
+  os_wait
+  pid=$(systemctl show -p MainPID --value opensearch)
+  # A plugin installed by hand stops the update: OpenSearch wouldn't start.
+  install -d /usr/share/opensearch/plugins/handmade-plugin
+  os_helper osu2
+  grep -qx ok=1 "$hd/out/update-result" && fail "$name: updated with a plugin installed by hand"
+  grep -q 'plugins installed outside its package (handmade-plugin)' "$hd/out/update-result" || { cat "$hd/out/update-result" >&2; fail "$name: the refusal doesn't name the plugin"; }
+  rmdir /usr/share/opensearch/plugins/handmade-plugin
+  os_helper osu3
+  grep -qx ok=1 "$hd/out/update-result" && grep -qx "from_package=$older" "$hd/out/update-result" && grep -qx "package=$newest" "$hd/out/update-result" &&
+    grep -qx restarted=1 "$hd/out/update-result" || { cat "$hd/out/update-result" "$W/oshelper.log" >&2; fail "$name: the helper didn't update OpenSearch"; }
+  [ "$(dpkg-query -W -f='${Version}' opensearch)" = "$newest" ] || fail "$name: OpenSearch isn't $newest after the update"
+  [ "$(sha256sum /etc/opensearch/opensearch.yml | cut -d' ' -f1)" = "$sum" ] || fail "$name: the update changed opensearch.yml"
+  [ "$(systemctl show -p MainPID --value opensearch)" != "$pid" ] || fail "$name: OpenSearch wasn't restarted on the new version"
+  os_wait
+  pass "the root helper updates OpenSearch within its major version ($older -> $newest), keeps opensearch.yml, restarts it, refuses with a plugin installed by hand"
 }
 
 # cloud_opensearch_checks: OpenSearch after the cloud-init run.

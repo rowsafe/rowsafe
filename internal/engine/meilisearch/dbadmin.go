@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -301,7 +302,14 @@ func (d *mdba) inventory(ctx context.Context) (*protocol.DBInventory, error) {
 	if listen == "" {
 		listen = "*"
 	}
-	inv.Addresses, inv.SuggestedHost, inv.LocalOnly = agent.DBServerAddresses(listen, nil)
+	if d.s.URL != "" {
+		// Apps on the compose network reach it by its service's name.
+		if u, err := url.Parse(d.s.URL); err == nil {
+			inv.SuggestedHost = u.Hostname()
+		}
+	} else {
+		inv.Addresses, inv.SuggestedHost, inv.LocalOnly = agent.DBServerAddresses(listen, nil)
+	}
 	for _, i := range in.Indexes {
 		if len(inv.Databases) >= maxListed {
 			inv.Truncated = true

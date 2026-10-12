@@ -1368,11 +1368,34 @@ mysql_standby_wanted() {
 }
 # <<< mysql
 
+# containerized_search prints the search engines that run in containers
+# here (a process in another mount namespace than this server's: OpenSearch
+# by its Java main class, Meilisearch and Qdrant by name), one per line
+# with the Rowsafe agent image for its Docker sidecar.
+containerized_search() {
+  [ -d /proc/1/ns ] || return 0
+  _host_ns=$(readlink /proc/1/ns/mnt 2>/dev/null) || return 0
+  for _p in /proc/[0-9]*; do
+    _ns=$(readlink "$_p/ns/mnt" 2>/dev/null) || continue
+    [ "$_ns" != "$_host_ns" ] || continue
+    _cmd=$(tr '\0' ' ' <"$_p/cmdline" 2>/dev/null) || continue
+    case $_cmd in
+      *org.opensearch.bootstrap.OpenSearch*) echo "OpenSearch: ghcr.io/rowsafe/agent:opensearch3 (opensearch2 for OpenSearch 2)" ;;
+      meilisearch* | */meilisearch*) echo "Meilisearch: ghcr.io/rowsafe/agent:meilisearch1" ;;
+      qdrant* | */qdrant*) echo "Qdrant: ghcr.io/rowsafe/agent:qdrant1.19" ;;
+    esac
+  done | sort -u
+}
+
 # check_postgres finds the postgres OS user and the installed server majors.
 check_postgres() {
   [ "$HOST_ENGINE" = postgresql ] || return 0 # mysql
-  id -u "$AGENT_USER" >/dev/null 2>&1 ||
-    die "no '$AGENT_USER' user on this host. Rowsafe adopts an existing PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey or Qdrant; install one first."
+  if ! id -u "$AGENT_USER" >/dev/null 2>&1; then
+    # A search engine in Docker: the agent runs next to it, in its own image.
+    _found=$(containerized_search)
+    [ -z "$_found" ] || die "found no database installed on this server, but $(printf '%s' "$_found" | sed 's/:.*//' | paste -sd, - | sed 's/,/, /g') in a container. In Docker, run Rowsafe's agent image next to it in your compose file ($(printf '%s' "$_found" | sed 's/^[^:]*: //' | paste -sd ';' - | sed 's/;/; /g')): see https://rowsafe.sh/docs/guides/docker"
+    die "no '$AGENT_USER' user on this host. Rowsafe adopts an existing PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey, OpenSearch, Qdrant or Meilisearch; install one first."
+  fi
   PG_MAJORS=''
   for bin in /usr/lib/postgresql/*/bin/postgres; do
     [ -x "$bin" ] || continue
@@ -6333,6 +6356,11 @@ db_engine() {
       db_engine=valkey
       set -- valkey-server
       ;;
+    opensearch.service)
+      # OpenSearch's own apt repository, one per major version (2.x, 3.x).
+      db_engine=opensearch
+      set -- opensearch
+      ;;
     qdrant.service)
       # Qdrant's program comes from its release on GitHub (qdrant_update).
       db_engine=qdrant db_main=qdrant
@@ -6343,7 +6371,7 @@ db_engine() {
       db_engine=meilisearch db_main=meilisearch
       return 0
       ;;
-    *) refuse "$unit is not a MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey, Qdrant or Meilisearch service" ;;
+    *) refuse "$unit is not a MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey, OpenSearch, Qdrant or Meilisearch service" ;;
   esac
   db_main=''
   for p in "$@"; do
@@ -6367,12 +6395,35 @@ db_patterns() {
     # Debian's and packages.redis.io's packages, all of one version.
     redis) locked='redis redis-server redis-tools redis-sentinel' free='' ;;
     valkey) locked='valkey valkey-server valkey-tools valkey-sentinel valkey-redis-compat' free='' ;;
+    # One package with its bundled plugins and Java.
+    opensearch) locked='opensearch' free='' ;;
   esac
 }
 
 # series VERSION prints the release series of a package version:
-# "1:10.11.9+maria~deb12" -> 10.11, "8.0.40-1debian12" -> 8.0.
-series() { printf '%s\n' "$1" | sed -E 's/^[0-9]+://' | sed -nE 's/^([0-9]+\.[0-9]+).*/\1/p'; }
+# "1:10.11.9+maria~deb12" -> 10.11, "8.0.40-1debian12" -> 8.0. OpenSearch's
+# series is its whole major version ("3.9.0" -> 3): its minor releases keep
+# the data, the API and the plugins compatible, and its apt repository
+# carries one major version.
+series() {
+  if [ "${db_engine:-}" = opensearch ]; then
+    printf '%s\n' "$1" | sed -E 's/^[0-9]+://' | sed -nE 's/^([0-9]+)\..*/\1/p'
+    return 0
+  fi
+  printf '%s\n' "$1" | sed -E 's/^[0-9]+://' | sed -nE 's/^([0-9]+\.[0-9]+).*/\1/p'
+}
+
+# opensearch_plugins_ok refuses an update while OpenSearch has plugins
+# installed outside its package (opensearch-plugin install): each must
+# match OpenSearch's exact version, so the new version wouldn't start.
+opensearch_plugins_ok() {
+  _extra=''
+  for _d in /usr/share/opensearch/plugins/*; do
+    [ -d "$_d" ] || continue
+    dpkg -S "$_d" >/dev/null 2>&1 || _extra="$_extra ${_d##*/}"
+  done
+  [ -z "$_extra" ] || refuse "OpenSearch has plugins installed outside its package ($(printf '%s' "$_extra" | sed 's/^ //; s/ /, /g')): each must match OpenSearch's exact version, so after an update OpenSearch wouldn't start. Update OpenSearch together with them yourself, or remove them first"
+}
 
 # newest_in PKG SERIES prints the newest available version of PKG in SERIES.
 newest_in() {
@@ -6611,6 +6662,7 @@ act_db_minor_update() {
   before=$(pkg_version "$db_main")
   ser=$(series "$before")
   [ -n "$ser" ] || refuse "can't tell the release series of $db_main $before"
+  [ "$db_engine" != opensearch ] || opensearch_plugins_ok
   : >"$work_log"
   t0=$(active_since "$unit")
   was_active=0
@@ -6643,8 +6695,11 @@ act_db_minor_update() {
   restarted=0
   if [ "$after" != "$before" ] && [ "$was_active" = 1 ]; then
     if [ "$(active_since "$unit")" = "$t0" ]; then
-      # The packages didn't restart it: start the new binaries now.
-      out=$(timeout 300 "$systemctl" restart "$unit" 2>&1 </dev/null) ||
+      # The packages didn't restart it: start the new binaries now
+      # (OpenSearch, a Java server with its plugins, takes longer).
+      wait=300
+      [ "$db_engine" != opensearch ] || wait=600
+      out=$(timeout "$wait" "$systemctl" restart "$unit" 2>&1 </dev/null) ||
         refuse "the update is installed, but restarting $unit failed: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
     fi
     restarted=1
@@ -14483,7 +14538,7 @@ meilisearch_find() {
   _mp=$(meilisearch_pid "$1")
   [ -n "$_mp" ] || { warn "no Meilisearch process listens on port $1"; return 1; }
   if [ "$(readlink "/proc/$_mp/ns/mnt" 2>/dev/null || echo unknown)" != "$(readlink /proc/1/ns/mnt 2>/dev/null || echo unknown)" ]; then
-    warn "the Meilisearch on port $1 runs in a container: Rowsafe protects a Meilisearch installed on the server itself for now"
+    warn "the Meilisearch on port $1 runs in a container: in Docker, run Rowsafe's agent image next to it in your compose file (ghcr.io/rowsafe/agent:meilisearch1, see https://rowsafe.sh/docs/guides/docker)"
     return 1
   fi
   meilisearch_settings_of "$_mp"

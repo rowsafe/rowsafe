@@ -61,6 +61,24 @@ import "time"
 //     snapshot taken first is restored instead.
 //   - Monitoring: the shared metrics the engine can fill (database_size_bytes,
 //     connections_*, disk_*), and DatabaseMonitoring.OpenSearch below.
+//   - Docker: the agent runs as a sidecar (ghcr.io/rowsafe/agent:opensearch2
+//     or :opensearch3, built on the official opensearchproject/opensearch
+//     image, whose program runs Proof and Rewind copies) and reaches the
+//     server at ROWSAFE_OPENSEARCH_URL on the compose network: plain HTTP
+//     only while the security plugin is off (nothing to sign in with),
+//     HTTPS checked against ROWSAFE_OPENSEARCH_CA_FILE otherwise; a password
+//     never goes over plain HTTP to another host. The snapshot folder is a
+//     volume both containers mount at /var/lib/rowsafe-opensearch/snapshots
+//     (OpenSearch writes, the agent reads through OpenSearch's group).
+//     Restarts go through the container control service.
+//   - Updates (FeatureUpdates): the newest release of the server's major
+//     version (2.x or 3.x) from OpenSearch's own apt repository, installed by
+//     the root helper (db-minor-update) when a person asks, after a Mark,
+//     with one restart; refused while plugins installed by hand (outside
+//     the package) would stop the new version from starting. A move to the
+//     next major version (an upgrade) isn't done from Rowsafe. In Docker,
+//     Rowsafe never changes the database's image: the newest release it
+//     knows is the one in the agent image, and Pulse shows the compose step.
 
 // EngineOpenSearch is OpenSearch (Apache-2.0).
 const EngineOpenSearch = "opensearch"
@@ -79,7 +97,8 @@ var opensearchFeatures = EngineFeatures{
 	Backups: true, Proof: true,
 	RewindCopy: true, RewindRows: true, RewindInPlace: true, Marks: true,
 	Monitoring: true, Fixes: true,
-	Restart:  true, // through root's helper, the units root allowed (opensearch.service)
+	Restart:  true, // through root's helper, the units root allowed (opensearch.service), or the container control service
+	Updates:  true, // the newest release of the major version from OpenSearch's apt repository, by the root helper
 	DBAdmin:  true, // the security plugin's users and roles, on index patterns (opensearch_dbadmin.go)
 	Security: true,
 }

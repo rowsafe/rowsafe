@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -283,12 +282,18 @@ func (e *Engine) rewindInPlace(ctx context.Context, env agent.EngineEnv, db prot
 		defer func() { _ = pc.deleteKey(context.WithoutCancel(ctx), tk.UID) }()
 		tl.Printf("copying %s (%s) into production under temporary names; production keeps answering meanwhile",
 			plural(int64(len(snap.Indexes)), "index", "indexes"), plural(snap.documents(), "document", "documents"))
-		body := map[string]any{"url": "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(s.localPort())), "apiKey": tk.Key,
+		target, _, err := s.exportTarget(ctx)
+		if err != nil {
+			return fail(err)
+		}
+		body := map[string]any{"url": target, "apiKey": tk.Key,
 			"indexes": map[string]any{prefix + "*": map[string]any{"overrideSettings": true}}}
 		// The temporary Meilisearch sends that key to production's port:
-		// checked just before.
-		if err := prodCheck(s)(s.localPort()); err != nil {
-			return fail(err)
+		// checked just before (from a sidecar, the compose file's address).
+		if s.URL == "" {
+			if err := prodCheck(s)(s.localPort()); err != nil {
+				return fail(err)
+			}
 		}
 		t, err = sc2.enqueue(ctx, http.MethodPost, "/export", nil, body)
 		if err == nil {

@@ -124,11 +124,13 @@ func ServerStatus(ctx context.Context, env agent.EngineEnv, port int) (Status, e
 		}
 	}
 	l, ok, lerr := loadLogin(env, port)
+	anyone := lerr == nil && !ok && st.Security == "off"
+	if anyone {
+		l, ok = Login{NoAuth: true}, true // nothing to sign in with: read it as anyone can
+	}
 	switch {
 	case lerr != nil:
 		st.Login = "refused"
-	case !ok && st.Security == "off":
-		st.Login = "none"
 	case !ok:
 		st.Login = "missing"
 	default:
@@ -155,6 +157,9 @@ func ServerStatus(ctx context.Context, env agent.EngineEnv, port int) (Status, e
 				st.RestAPI = "no"
 			}
 		}
+	}
+	if anyone {
+		st.Login = "none"
 	}
 	return st, nil
 }
@@ -186,15 +191,21 @@ func HashPassword(pw string) (string, error) {
 // CreateLogin creates (or refreshes) Rowsafe's role and user through the
 // security plugin's REST API, signing in as adminUser with adminPass, with
 // a new random password, and saves the login for the agent. A server
-// without the security plugin needs no login: that is saved instead.
-func CreateLogin(ctx context.Context, env agent.EngineEnv, port int, adminUser, adminPass string) error {
+// without the security plugin needs no login: that is saved instead
+// (noAuth).
+func CreateLogin(ctx context.Context, env agent.EngineEnv, port int, adminUser, adminPass string) (noAuth bool, err error) {
 	anon, err := dial(ctx, port, Login{})
 	if err == nil && !securityOn(ctx, anon) {
-		return saveLogin(env, port, Login{NoAuth: true})
+		return true, saveLogin(env, port, Login{NoAuth: true})
 	}
 	if err != nil && statusOf(err) == 0 {
-		return fmt.Errorf("can't connect to OpenSearch on port %d: %w", port, err)
+		return false, fmt.Errorf("can't connect to OpenSearch on port %d: %w", port, err)
 	}
+	return false, createUser(ctx, env, port, adminUser, adminPass)
+}
+
+// createUser is CreateLogin on a server with the security plugin.
+func createUser(ctx context.Context, env agent.EngineEnv, port int, adminUser, adminPass string) error {
 	if adminUser == "" {
 		return ErrNeedAdmin
 	}

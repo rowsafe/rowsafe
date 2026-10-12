@@ -34,7 +34,10 @@ for, is read from stdin (one line) and never stored (except the agent's own).
       (password on stdin), with a new random password saved for the agent
       only. Without the security plugin nothing is needed: that is saved.
       Exit 11: an administrator's login is needed; 12: it was refused; 13:
-      that login can't create users.
+      that login can't create users. In the Docker sidecar
+      (ROWSAFE_OPENSEARCH_URL set), with the security plugin on:
+        docker compose exec -it rowsafe-agent rowsafe-agent opensearch login --admin-user admin
+      (without it, the sidecar needs no login at all).
 
   rowsafe-agent opensearch save-login --port PORT
       Save "user:password" read from stdin as the agent's login, after
@@ -118,8 +121,13 @@ func opensearchCmd(ctx context.Context, args []string) int {
 		if *adminUser != "" {
 			pw = readSecret()
 		}
-		if err = opensearch.CreateLogin(ctx, env, *port, *adminUser, pw); err == nil {
-			fmt.Printf("Rowsafe's OpenSearch user %q is ready; its password is saved for the agent only.\n", opensearch.LoginUser)
+		var noAuth bool
+		if noAuth, err = opensearch.CreateLogin(ctx, env, *port, *adminUser, pw); err == nil {
+			if noAuth {
+				fmt.Println("OpenSearch runs without its security plugin: Rowsafe needs no login (that is saved).")
+			} else {
+				fmt.Printf("Rowsafe's OpenSearch user %q is ready; its password is saved for the agent only.\n", opensearch.LoginUser)
+			}
 		}
 	case "save-login":
 		err = opensearch.SaveLogin(ctx, env, *port, readSecret())

@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# OpenSearch (the official, unmodified opensearchproject/opensearch image,
+# one node) with the Rowsafe agent as a sidecar on the same compose network:
+# OpenSearch's own snapshots into a volume both containers mount, each new
+# file encrypted in the agent container (with your passphrase) and copied
+# to your bucket; Marks; weekly Proof (a temporary OpenSearch in the agent
+# container restores the newest snapshot); Rewind (a copy, documents brought
+# back, or every index back to a snapshot, with Undo); Pulse. Restores go
+# back to a snapshot (every 5 minutes by default) or a Mark, not to any
+# second: OpenSearch keeps no log of its changes to replay.
+#
+#   1. Put the agent's settings in rowsafe-agent.env next to this file
+#      (chmod 600), with a one-time token from `rowsafe hosts enroll-token`.
+#   2. docker compose up -d
+#   3. rowsafe adopt search --host db-1 --engine opensearch --port 9200, then
+#      `rowsafe apply search` (or Turn on backups in the dashboard).
+#
+# This example keeps OpenSearch's security plugin off and its port on this
+# host only (127.0.0.1), as in OpenSearch's own development examples: the
+# agent then needs no login. To open OpenSearch beyond this host, turn the
+# plugin on with your own certificates (not the demo ones, whose keys are
+# published), point the agent at https://opensearch:9200 with
+# ROWSAFE_OPENSEARCH_CA_FILE (the authority that signed OpenSearch's
+# certificate, mounted read-only), and give Rowsafe its own user once:
+#   docker compose exec -it rowsafe-agent rowsafe-agent opensearch login --admin-user admin
+# (the administrator's password is typed once and never saved).
+#
+# Update the agent (OpenSearch keeps running):
+#   docker compose pull rowsafe-agent && docker compose up -d rowsafe-agent
+
+name: myapp
+
+services:
+  # Once: gives the snapshot folder to OpenSearch's user (uid 1000). A new
+  # Docker volume belongs to root, and OpenSearch doesn't run as root.
+  opensearch-snapshots:
+    image: opensearchproject/opensearch:3.9.0
+    user: "0"
+    entrypoint: ["sh", "-c", "chown 1000:1000 /var/lib/rowsafe-opensearch/snapshots && chmod 0750 /var/lib/rowsafe-opensearch/snapshots"]
+    volumes:
+      - rowsafe-snapshots:/var/lib/rowsafe-opensearch/snapshots
+
+  opensearch:
+    image: opensearchproject/opensearch:3.9.0
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      path.repo: /var/lib/rowsafe-opensearch/snapshots   # Rowsafe's snapshot folder
+      DISABLE_SECURITY_PLUGIN: "true"                    # see above to turn it on
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms1g -Xmx1g"
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65536, hard: 65536 }
+    ports:
+      - "127.0.0.1:9200:9200"                            # REST, this host only
+    volumes:
+      - opensearchdata:/usr/share/opensearch/data
+      - rowsafe-snapshots:/var/lib/rowsafe-opensearch/snapshots
+    depends_on:
+      opensearch-snapshots:
+        condition: service_completed_successfully
+
+  # Rowsafe
+  rowsafe-agent:
+    # One image per OpenSearch major version, built FROM the same image (its
+    # program runs Proof and Rewind copies): opensearch3, or opensearch2 for
+    # OpenSearch 2.x. It follows the newest Rowsafe release; to pin one, use
+    # the exact tag, e.g. ghcr.io/rowsafe/agent:<version>-opensearch3.
+    image: ghcr.io/rowsafe/agent:opensearch3
+    # The name Rowsafe shows for this host: `rowsafe adopt search --host db-1`.
+    hostname: db-1
+    restart: unless-stopped
+    environment:
+      # The opensearch service on the compose network (private to this host).
+      ROWSAFE_OPENSEARCH_URL: http://opensearch:9200
+    depends_on:
+      - opensearch
+    env_file: rowsafe-agent.env
+    volumes:
+      - rowsafe-state:/var/lib/rowsafe
+      # The same snapshot folder, read through OpenSearch's group.
+      - rowsafe-snapshots:/var/lib/rowsafe-opensearch/snapshots:ro
+
+volumes:
+  opensearchdata:
+  rowsafe-snapshots:
+  rowsafe-state:

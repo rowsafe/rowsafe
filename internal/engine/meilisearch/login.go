@@ -76,6 +76,28 @@ func Login(ctx context.Context, env agent.EngineEnv, opts LoginOptions, masterKe
 	if opts.Port <= 0 || opts.Port > 65535 || opts.LocalPort < 0 || opts.LocalPort > 65535 {
 		return res, errors.New("invalid port")
 	}
+	docker := inDocker()
+	var base string
+	if docker {
+		// A sidecar: Meilisearch in its own container; the program for
+		// Proof and Rewind copies is the agent image's, the snapshot folder
+		// the volume both containers mount.
+		u, err := sidecarURL()
+		if err != nil {
+			return res, err
+		}
+		base = u.String()
+		opts.LocalPort, opts.Unit, opts.Rowsafe = 0, "", false
+		opts.Binary = cmpOr(opts.Binary, strings.TrimSpace(os.Getenv(binEnv)))
+		opts.SnapshotDir = cmpOr(opts.SnapshotDir, strings.TrimSpace(os.Getenv(snapDirEnv)))
+		if opts.SnapshotDir == "" {
+			return res, fmt.Errorf("Rowsafe doesn't know where Meilisearch's snapshots are: mount its snapshot folder into the agent's container "+
+				"and set %s to it (see %s)", snapDirEnv, dockerGuide)
+		}
+		if opts.Listen == "" {
+			opts.Listen = "0.0.0.0" // the image's default, inside its container
+		}
+	}
 	for _, p := range []string{opts.Binary, opts.SnapshotDir} {
 		if !filepath.IsAbs(p) {
 			return res, fmt.Errorf("%q isn't an absolute path", p)
@@ -86,7 +108,7 @@ func Login(ctx context.Context, env agent.EngineEnv, opts LoginOptions, masterKe
 	}
 	s := server{Port: opts.Port, LocalPort: opts.LocalPort, Binary: filepath.Clean(opts.Binary), DBPath: opts.DBPath,
 		SnapshotDir: filepath.Clean(opts.SnapshotDir), Unit: opts.Unit, Listen: opts.Listen, Rowsafe: opts.Rowsafe,
-		MaxIndexingMemory: opts.MaxIndexingMemory, Analytics: opts.Analytics, MadeAt: time.Now().UTC()}
+		MaxIndexingMemory: opts.MaxIndexingMemory, Analytics: opts.Analytics, MadeAt: time.Now().UTC(), URL: base}
 	if s.LocalPort == s.Port {
 		s.LocalPort = 0
 	}
@@ -94,12 +116,19 @@ func Login(ctx context.Context, env agent.EngineEnv, opts LoginOptions, masterKe
 	if _, err := trustedProgram(s.Binary); err != nil {
 		return res, err
 	}
-	// The snapshot folder is the instance's: its user owns it.
-	if u := ownerUID(s.SnapshotDir); u >= 0 && !slices.Contains(meilisearchUIDs(s), u) {
+	// The snapshot folder is the instance's: its user owns it. (In Docker
+	// it is a volume of the compose project, mounted from the instance's
+	// container.)
+	if docker {
+		if err := readable(s.SnapshotDir); err != nil {
+			return res, fmt.Errorf("Rowsafe can't read Meilisearch's snapshot folder %s in its container (%v): mount the volume Meilisearch "+
+				"writes snapshots to (MEILI_SNAPSHOT_DIR) there, read-only (see %s)", s.SnapshotDir, err, dockerGuide)
+		}
+	} else if u := ownerUID(s.SnapshotDir); u >= 0 && !slices.Contains(meilisearchUIDs(s), u) {
 		return res, fmt.Errorf("the snapshot folder %s belongs to %s, not to the user Meilisearch runs as: Rowsafe doesn't read snapshots from it",
 			s.SnapshotDir, userName(u))
 	}
-	c, tls, err := probe(ctx, s.localPort(), masterKey, prodCheck(s))
+	c, tls, err := probe(ctx, s, masterKey)
 	if err != nil {
 		return res, err
 	}
@@ -190,9 +219,22 @@ func Login(ctx context.Context, env agent.EngineEnv, opts LoginOptions, masterKe
 	return res, nil
 }
 
-// probe connects to 127.0.0.1:port with key, over plain HTTP or else TLS
-// (the health check, which carries no key), once check passed.
-func probe(ctx context.Context, port int, key string, check listenerCheck) (*client, bool, error) {
+// probe connects to s with key: a sidecar to its URL; else to
+// 127.0.0.1:port over plain HTTP or else TLS (the health check, which
+// carries no key), once its listener check passed.
+func probe(ctx context.Context, s server, key string) (*client, bool, error) {
+	if s.URL != "" {
+		c, err := s.prodClient("", key)
+		if err != nil {
+			return nil, false, err
+		}
+		if err := c.health(ctx); err != nil {
+			c.close()
+			return nil, false, err
+		}
+		return c, strings.HasPrefix(s.URL, "https:"), nil
+	}
+	port, check := s.localPort(), prodCheck(s)
 	c := newClient("http", port, key, check)
 	err := c.health(ctx)
 	if err == nil {
@@ -219,13 +261,15 @@ type Status struct {
 func ServerStatus(ctx context.Context, env agent.EngineEnv, port int) Status {
 	var st Status
 	s, lerr := loadServer(env, port)
-	local := port
-	if lerr == nil {
-		local = s.localPort()
-	} else {
+	if lerr != nil {
 		s = server{Port: port}
+		if inDocker() {
+			if u, err := sidecarURL(); err == nil {
+				s.URL = u.String()
+			}
+		}
 	}
-	c, tls, err := probe(ctx, local, "", prodCheck(s))
+	c, tls, err := probe(ctx, s, "")
 	if err != nil {
 		return st
 	}
@@ -263,6 +307,13 @@ func majorMinor(v string) (int, int, bool) {
 		return 0, 0, false
 	}
 	return maj, minor, true
+}
+
+func cmpOr(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
 
 func containsStr(s []string, v string) bool {
