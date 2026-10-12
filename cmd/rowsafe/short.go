@@ -255,7 +255,7 @@ func fleetStatus(ctx context.Context, c *client.Client, asJSON bool) error {
 		out, _ := json.MarshalIndent(h, "", "  ")
 		fmt.Println(string(out))
 	} else {
-		fmt.Println(h.Summary)
+		fmt.Println(fleetHeadline(h))
 		for _, p := range h.Problems {
 			where := p.Database
 			if where == "" {
@@ -276,6 +276,28 @@ func fleetStatus(ctx context.Context, c *client.Client, asJSON bool) error {
 		return exitError(3)
 	}
 	return nil
+}
+
+// fleetHeadline is rowsafe status's first line: the verdict, then the counts.
+func fleetHeadline(h mcp.FleetHealth) string {
+	counts := fmt.Sprintf("%d %s, %d %s", h.Hosts, plural(h.Hosts, "host", "hosts"), h.Databases, plural(h.Databases, "database", "databases"))
+	if waiting := h.Databases - h.Active; waiting > 0 {
+		counts += fmt.Sprintf(" (%d not active yet)", waiting)
+	}
+	switch {
+	case !h.Healthy:
+		var parts []string
+		if h.Critical > 0 {
+			parts = append(parts, fmt.Sprintf("%d critical", h.Critical))
+		}
+		if h.Warnings > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", h.Warnings, plural(h.Warnings, "warning", "warnings")))
+		}
+		return fmt.Sprintf("Needs attention: %s. %s.", strings.Join(parts, ", "), counts)
+	case h.Databases == 0:
+		return fmt.Sprintf("No databases yet (%d %s).", h.Hosts, plural(h.Hosts, "host", "hosts"))
+	}
+	return fmt.Sprintf("All good: %s. Every active database has recent backups, working WAL archiving and a passing restore test.", counts)
 }
 
 func initCmd(ctx context.Context, c *client.Client, args []string) error {
@@ -381,7 +403,7 @@ func createRestorePoint(ctx context.Context, c *client.Client, db, label string,
 		return err
 	}
 	if noWait {
-		fmt.Printf("Queued restore point %q on %s (task %s).\n", label, db, t.ID)
+		fmt.Printf("Queued Mark %q on %s (task %s).\n", label, db, t.ID)
 		return nil
 	}
 	return waitAndReport(ctx, c, t.ID, db)
@@ -414,13 +436,13 @@ func printProtection(name string, p protocol.Protection) {
 			fmt.Printf("  - %s\n", r)
 		}
 	}
+	for _, t := range p.OpenFailedTasks {
+		fmt.Printf("  ! the last %s %s (task %s): %s\n", taskName(t.Type), t.Status, t.ID, firstLine(t.Error, 80))
+	}
 	fmt.Printf("\nLast backup:          %s\n", ago(p.LastBackupAt))
 	fmt.Printf("Last WAL archived:    %s\n", ago(p.WALLastArchivedAt))
+	fmt.Printf("Restore test passed:  %s\n", ago(p.LastDrillPassedAt))
 	if p.RecoveryWindowStart != nil {
 		fmt.Printf("Recoverable from:     %s\n", p.RecoveryWindowStart.Local().Format(time.RFC1123))
-	}
-	fmt.Printf("Restore test passed:  %s\n", ago(p.LastDrillPassedAt))
-	for _, t := range p.OpenFailedTasks {
-		fmt.Printf("Failing:              %s %s (%s): %s\n", t.Type, t.Status, t.ID, firstLine(t.Error, 80))
 	}
 }

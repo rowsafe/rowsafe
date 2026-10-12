@@ -192,7 +192,7 @@ func poolingError(err error) error {
 }
 
 // poolingResult prints what a finished pooling task reported.
-func poolingResult(t protocol.TaskView) {
+func poolingResult(t protocol.TaskView) bool {
 	switch t.Type {
 	case protocol.TaskPooling:
 		var r protocol.PoolingResult
@@ -201,11 +201,14 @@ func poolingResult(t protocol.TaskView) {
 			for _, w := range r.Warnings {
 				fmt.Println("Note: " + w)
 			}
+			return true
 		}
 	case protocol.TaskPoolerRetarget:
 		var r protocol.PoolerRetargetResult
 		if json.Unmarshal(t.Result, &r) == nil && r.Summary != "" {
 			fmt.Println(r.Summary)
+			return true
 		}
 	}
+	return false
 }

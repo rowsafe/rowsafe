@@ -50,13 +50,30 @@ func hostsList(ctx context.Context, c *client.Client, args []string) error {
 	if err != nil {
 		return err
 	}
-	t := newTable("HOST", "ID", "AGENT", "PLATFORM", "CHANNEL", "PIN", "LAST UPDATE", "LAST SEEN")
+	if len(hosts) == 0 {
+		fmt.Println("No servers yet. Next: rowsafe hosts enroll-token   (the install command for a database server)")
+		return nil
+	}
+	t := newTable("HOST", "LAST SEEN", "AGENT", "UPDATES", "PLATFORM", "ID")
 	for _, h := range hosts {
-		t.row(h.Hostname, h.ID, orDash(h.AgentVersion), orDash(h.Platform), h.UpdateChannel, orDash(h.PinnedVersion),
-			updateText(h.LastUpdate), ago(h.LastSeenAt))
+		updates := h.UpdateChannel
+		if h.PinnedVersion != "" {
+			updates = "pinned to " + h.PinnedVersion
+		}
+		t.row(h.Hostname, ago(h.LastSeenAt), agentText(h), updates, orDash(h.Platform), h.ID)
 	}
 	t.flush()
 	return nil
+}
+
+// agentText is a host's agent version, with its last update when that one
+// didn't end on the version it runs (failed, rolled back or under way).
+func agentText(h protocol.Host) string {
+	v := orDash(h.AgentVersion)
+	if r := h.LastUpdate; r != nil && !(r.State == protocol.UpdateConfirmed && r.ToVersion == h.AgentVersion) {
+		v += " (" + updateText(r) + ")"
+	}
+	return v
 }
 
 // parseN is parse for commands with a fixed number of positional arguments.
@@ -296,17 +313,22 @@ func listCmd(ctx context.Context, c *client.Client, args []string) error {
 	if err != nil {
 		return err
 	}
-	t := newTable("NAME", "HOST", "STATUS", "POSTGRES", "SIZE", "LAST WAL ARCHIVED")
+	if len(dbs) == 0 {
+		fmt.Println("No databases yet. Next: rowsafe hosts enroll-token   (the install command for a database server)")
+		return nil
+	}
+	t := newTable("NAME", "STATUS", "LAST WAL ARCHIVED", "ENGINE", "SIZE", "HOST")
 	for _, d := range dbs {
-		version, size := "-", "-"
+		engine, size := protocol.EngineDisplayName(d.Engine), "-"
 		if d.Inspect != nil {
-			version, size = d.Inspect.ServerVersion, humanBytes(d.Inspect.TotalSizeBytes)
+			engine += " " + d.Inspect.ServerVersion
+			size = humanBytes(d.Inspect.TotalSizeBytes)
 		}
 		wal := "-"
 		if d.Archiver != nil {
 			wal = ago(d.Archiver.LastArchivedTime)
 		}
-		t.row(d.Name, d.Hostname, d.Status, version, size, wal)
+		t.row(d.Name, strings.ReplaceAll(d.Status, "_", " "), wal, strings.TrimSpace(engine), size, d.Hostname)
 	}
 	t.flush()
 	return nil
@@ -321,20 +343,19 @@ func showCmd(ctx context.Context, c *client.Client, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Status and what needs doing first, then backups, then the setup.
 	fmt.Printf("Name:       %s (%s)\n", d.Name, d.ID)
-	fmt.Printf("Host:       %s\n", d.Hostname)
 	fmt.Printf("Status:     %s\n", statusText(d.Status))
-	fmt.Printf("Socket:     %s port %d\n", d.SocketDir, d.Port)
-	fmt.Printf("Retention:  %d full backups\n", d.RetentionFull)
-	fmt.Printf("Schedules:  full %q, diff %q, restore test %q (UTC)\n", d.ScheduleFull, d.ScheduleDiff, d.ScheduleDrill)
-	if in := d.Inspect; in != nil {
-		fmt.Printf("%-11s %s, %s, data directory %s\n", protocol.EngineDisplayName(d.Engine)+":", in.ServerVersion, humanBytes(in.TotalSizeBytes), in.DataDirectory)
-		if protocol.NormalizeEngine(d.Engine) == protocol.EnginePostgreSQL {
-			fmt.Printf("Archiving:  archive_mode=%s archive_timeout=%ds\n", in.ArchiveMode, in.ArchiveTimeoutSeconds)
-		}
-		if len(in.PendingRestart) > 0 {
-			fmt.Printf("Pending:    restart needed for %s\n", strings.Join(in.PendingRestart, ", "))
-		}
+	if in := d.Inspect; in != nil && len(in.PendingRestart) > 0 {
+		fmt.Printf("Pending:    restart needed for %s\n", strings.Join(in.PendingRestart, ", "))
+	}
+	if backups, err := c.Backups(ctx, name, 1); err == nil && len(backups) > 0 {
+		b := backups[0]
+		fmt.Printf("Backup:     %s %s, %s\n", b.Type, b.Label, ago(&b.StoppedAt))
+	}
+	if drills, err := c.Drills(ctx, name, 1); err == nil && len(drills) > 0 {
+		dr := drills[0]
+		fmt.Printf("Proof:      restore test %s, %s\n", passFail(dr.Passed), ago(&dr.CreatedAt))
 	}
 	if a := d.Archiver; a != nil {
 		fmt.Printf("WAL:        last archived %s, %d archived, %d failed", ago(a.LastArchivedTime), a.ArchivedCount, a.FailedCount)
@@ -346,6 +367,16 @@ func showCmd(ctx context.Context, c *client.Client, args []string) error {
 			fmt.Printf("            the agent can't read archiver stats right now: %s\n", firstLine(a.Error, 100))
 		}
 	}
+	fmt.Printf("Host:       %s\n", d.Hostname)
+	if in := d.Inspect; in != nil {
+		fmt.Printf("%-11s %s, %s, data directory %s\n", protocol.EngineDisplayName(d.Engine)+":", in.ServerVersion, humanBytes(in.TotalSizeBytes), in.DataDirectory)
+		if protocol.NormalizeEngine(d.Engine) == protocol.EnginePostgreSQL {
+			fmt.Printf("Archiving:  archive_mode=%s archive_timeout=%ds\n", in.ArchiveMode, in.ArchiveTimeoutSeconds)
+		}
+	}
+	fmt.Printf("Socket:     %s port %d\n", d.SocketDir, d.Port)
+	fmt.Printf("Retention:  %d full backups\n", d.RetentionFull)
+	fmt.Printf("Schedules:  full %q, diff %q, restore test %q (UTC)\n", d.ScheduleFull, d.ScheduleDiff, d.ScheduleDrill)
 	if d.CanRestart {
 		fmt.Println("Restart:    allowed from Rowsafe (rowsafe restart)")
 	} else {
@@ -354,16 +385,6 @@ func showCmd(ctx context.Context, c *client.Client, args []string) error {
 		} else {
 			fmt.Println("Restart:    not allowed from Rowsafe on this server (allowed at install time)")
 		}
-	}
-	backups, err := c.Backups(ctx, name, 1)
-	if err == nil && len(backups) > 0 {
-		b := backups[0]
-		fmt.Printf("Backup:     %s %s, %s ago\n", b.Type, b.Label, time.Since(b.StoppedAt).Round(time.Minute))
-	}
-	drills, err := c.Drills(ctx, name, 1)
-	if err == nil && len(drills) > 0 {
-		dr := drills[0]
-		fmt.Printf("Proof:      restore test %s, %s ago\n", passFail(dr.Passed), time.Since(dr.CreatedAt).Round(time.Minute))
 	}
 	return nil
 }
@@ -649,10 +670,14 @@ func backupsCmd(ctx context.Context, c *client.Client, args []string) error {
 	if err != nil {
 		return err
 	}
-	t := newTable("LABEL", "TYPE", "FINISHED", "DURATION", "DB SIZE", "STORED")
+	if len(backups) == 0 {
+		fmt.Printf("No backups of %s yet. Back up now: rowsafe backup %s\n", name, name)
+		return nil
+	}
+	t := newTable("FINISHED", "TYPE", "DB SIZE", "STORED", "DURATION", "LABEL")
 	for _, b := range backups {
-		t.row(b.Label, b.Type, b.StoppedAt.Local().Format("2006-01-02 15:04"),
-			b.StoppedAt.Sub(b.StartedAt).Round(time.Second).String(), humanBytes(b.SizeBytes), humanBytes(b.RepoSizeBytes))
+		t.row(b.StoppedAt.Local().Format("2006-01-02 15:04"), b.Type, humanBytes(b.SizeBytes), humanBytes(b.RepoSizeBytes),
+			b.StoppedAt.Sub(b.StartedAt).Round(time.Second).String(), b.Label)
 	}
 	t.flush()
 	return nil
@@ -689,13 +714,13 @@ func proofsCmd(ctx context.Context, c *client.Client, args []string) error {
 		fmt.Printf("No restore tests of %s yet. Run one now: rowsafe proof %s\n", name, name)
 		return nil
 	}
-	t := newTable("WHEN", "RESULT", "BACKUP", "RECOVERED TO", "DURATION", "DATABASES")
+	t := newTable("RESULT", "WHEN", "BACKUP", "RECOVERED TO", "DURATION", "DATABASES")
 	for _, d := range drills {
 		recovered := "-"
 		if d.Result.RecoveredTo != nil {
 			recovered = d.Result.RecoveredTo.Local().Format("2006-01-02 15:04:05")
 		}
-		t.row(d.CreatedAt.Local().Format("2006-01-02 15:04"), passFail(d.Passed), d.Result.BackupLabel, recovered,
+		t.row(passFail(d.Passed), d.CreatedAt.Local().Format("2006-01-02 15:04"), d.Result.BackupLabel, recovered,
 			(time.Duration(d.Result.DurationSeconds) * time.Second).String(), fmt.Sprint(len(d.Result.Databases)))
 	}
 	t.flush()
@@ -884,8 +909,15 @@ func waitAndReport(ctx context.Context, c *client.Client, taskID, dbName string)
 	if err != nil {
 		return err
 	}
-	printTask(t)
-	if t.Status != protocol.StatusSucceeded {
+	// The task's ID went to stderr while waiting: lead with what it did.
+	printed := printTaskResult(t)
+	ok := t.Status == protocol.StatusSucceeded
+	if !printed && (!ok || t.Type != protocol.TaskCheck) {
+		what := taskName(t.Type)
+		fmt.Printf("%s%s %s (task %s).\n", strings.ToUpper(what[:1]), what[1:], doneText(t.Status), t.ID)
+	}
+	printTaskTrouble(t)
+	if !ok {
 		return exitError(1)
 	}
 	switch t.Type {
@@ -904,11 +936,28 @@ func waitAndReport(ctx context.Context, c *client.Client, taskID, dbName string)
 			}
 		}
 	case protocol.TaskCheck:
-		fmt.Printf("\n%s is protected. The first full backup is queued; follow it with `rowsafe tasks %s`.\n", dbName, dbName)
+		fmt.Printf("WAL archiving works on %s. Its first full backup is queued.\n", dbName)
+		fmt.Printf("\nNext: rowsafe tasks %s   (follow it)\n", dbName)
 	case protocol.TaskRestorePoint:
-		fmt.Printf("\nTo go back to it: rowsafe rewind copy %s --mark LABEL (a copy next to production), or Rewind in the dashboard\n", dbName)
+		var r protocol.RestorePointResult
+		label := "LABEL"
+		if json.Unmarshal(t.Result, &r) == nil && r.Name != "" {
+			label = r.Name
+		}
+		fmt.Printf("\nTo go back to it: rowsafe rewind copy %s --mark %s (a copy next to production), or Rewind in the dashboard\n", dbName, label)
 	}
 	return nil
+}
+
+// doneText is a finished task's status in words.
+func doneText(status string) string {
+	switch status {
+	case protocol.StatusSucceeded:
+		return "done"
+	case protocol.StatusLost:
+		return "LOST (the agent stopped answering)"
+	}
+	return strings.ToUpper(status)
 }
 
 // stdin is where confirm reads the answer; tests replace it.
@@ -917,6 +966,8 @@ var stdin io.Reader = os.Stdin
 // taskName is a task type in words.
 func taskName(typ string) string {
 	switch typ {
+	case protocol.TaskAdopt:
+		return "setup"
 	case protocol.TaskDrill:
 		return "restore test"
 	case protocol.TaskRestorePoint:
@@ -967,6 +1018,10 @@ func marksCmd(ctx context.Context, c *client.Client, args []string) error {
 	points, err := c.RestorePoints(ctx, name)
 	if err != nil {
 		return err
+	}
+	if len(points) == 0 {
+		fmt.Printf("No Marks on %s yet. Make one: rowsafe mark %s LABEL\n", name, name)
+		return nil
 	}
 	t := newTable("NAME", "STATUS", "CREATED", "RESTORE FROM BACKUP", "LSN", "BY")
 	for _, p := range points {

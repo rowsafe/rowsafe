@@ -376,7 +376,7 @@ func TestCloudCreate(t *testing.T) {
 		t.Errorf("request %+v", req)
 	}
 	for _, want := range []string{"New server shop-db: PostgreSQL 17 on Hetzner, fsn1", "Who can connect: 203.0.113.9.",
-		"Pay as you go isn't set up yet", "add a card once", "https://app.example/api/rowsafe-cloud/checkout/cs_shop-db", "rowsafe cloud wait shop-db"} {
+		"adds a card once for pay as you go", "https://app.example/api/rowsafe-cloud/checkout/cs_shop-db", "Next: rowsafe cloud wait shop-db"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}
@@ -437,7 +437,8 @@ func TestCloudListShowWait(t *testing.T) {
 		t.Fatalf("list: %v\n%s", err, out)
 	}
 	out, err = run(t, "cloud", "show") // the only server
-	for _, want := range []string{"shop (cs_shop)", "$0.011 an hour, at most $7.99 a month", "198.51.100.7", "not saved yet: rowsafe cloud passphrase shop"} {
+	for _, want := range []string{"shop (cs_shop): ready", "$0.011 an hour, at most $7.99 a month", "198.51.100.7", "Backup passphrase:  not saved yet",
+		"rowsafe cloud passphrase shop --file FILE", "Size:               small: 2 CPUs"} {
 		if err != nil || !strings.Contains(out, want) {
 			t.Errorf("show lacks %q: %v\n%s", want, err, out)
 		}
