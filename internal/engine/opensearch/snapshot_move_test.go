@@ -367,9 +367,22 @@ func (f *fakeOS) snapshot(w http.ResponseWriter, r *http.Request, seg []string, 
 		writeJSON(w, 200, map[string]any{"snapshot": m.info()})
 	case len(seg) == 4 && seg[3] == "_restore":
 		_, snaps := f.repoState()
+		// "*" and exclusions ("-prefix*"), as OpenSearch reads them.
+		pattern, _ := body["indices"].(string)
+		var excluded []string
+		for _, p := range strings.Split(pattern, ",") {
+			if strings.HasPrefix(p, "-") {
+				excluded = append(excluded, strings.TrimSuffix(strings.TrimPrefix(p, "-"), "*"))
+			}
+		}
 		for _, s := range snaps {
 			if s.Name != seg[2] {
 				continue
+			}
+			for n := range s.Indices {
+				if slices.ContainsFunc(excluded, func(x string) bool { return strings.HasPrefix(n, x) }) {
+					delete(s.Indices, n)
+				}
 			}
 			for n := range s.Indices {
 				if _, ok := f.indices[n]; ok {
@@ -438,7 +451,8 @@ func TestSnapshotMove(t *testing.T) {
 
 	src := newFakeOS(t, "old-cluster", "3.1.0", t.TempDir())
 	src.indices["products"] = &fIndex{}
-	src.indices["archive"] = &fIndex{Blocked: true} // a block of its own
+	src.indices["archive"] = &fIndex{Blocked: true}         // a block of its own
+	src.indices["top_queries-2026.10.12-59492"] = &fIndex{} // Query Insights' own, in its snapshots too
 	src.indices[".ds-logs-000001"] = &fIndex{DS: "logs"}
 	src.streams["logs"] = []string{".ds-logs-000001"}
 	src.globals["pipeline"] = map[string]json.RawMessage{"p1": json.RawMessage(`{"processors":[]}`)}
@@ -534,8 +548,13 @@ func TestSnapshotMove(t *testing.T) {
 		t.Fatalf("the last snapshot's record: %+v %+v", doc.MoveBlocked, doc.Globals)
 	}
 
-	// The new server restores the last one and becomes the database's.
+	// The new server restores the last one and becomes the database's,
+	// although Query Insights made an index of the same name there
+	// meanwhile (found by the cloud-takeout-search e2e).
 	dst.use(t)
+	dst.mu.Lock()
+	dst.indices["top_queries-2026.10.12-59492"] = &fIndex{}
+	dst.mu.Unlock()
 	if newest, err := e.SnapshotMoveNewest(ctx, dstEnv, db); err != nil || newest.Label != last.Label {
 		t.Fatalf("newest %+v %v", newest, err)
 	}

@@ -923,7 +923,7 @@ func (e *Engine) SnapshotMoveRestore(ctx context.Context, env agent.EngineEnv, d
 	}
 	var indices []string
 	for _, i := range snap.Indices {
-		if i != noIndex {
+		if i != noIndex && !systemIndex(i) { // Query Insights' are each server's own
 			indices = append(indices, i)
 		}
 	}
@@ -953,7 +953,7 @@ func (e *Engine) SnapshotMoveRestore(ctx context.Context, env agent.EngineEnv, d
 	}
 	if len(indices) > 0 {
 		log.Printf("restoring snapshot %s: %d indices, %d data streams", label, len(indices), len(snap.DataStreams))
-		req := map[string]any{"indices": "*", "include_global_state": false, "include_aliases": true, "ignore_unavailable": true}
+		req := map[string]any{"indices": restoreIndices, "include_global_state": false, "include_aliases": true, "ignore_unavailable": true}
 		var res struct {
 			Snapshot struct {
 				Shards struct{ Total, Failed int } `json:"shards"`
