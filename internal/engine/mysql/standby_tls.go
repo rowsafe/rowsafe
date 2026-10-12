@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -29,33 +30,38 @@ import (
 )
 
 // Whose TLS a standby replicates over. The replication login requires TLS
-// where the primary has it. The primary is reached by address, and
-// servers Rowsafe creates serve a self-signed certificate or a CA's (Let's
-// Encrypt) for their Rowsafe Cloud name, which no check by name passes.
-// So the standby checks, as far as its server can:
-//   - a CA's certificate: the server checks it chains to that CA's root
-//     (SOURCE_SSL_CA / MASTER_SSL_CA, a file of the root among those its
-//     host trusts, without the name; MariaDB 11.8's
-//     MASTER_SSL_VERIFY_SERVER_CERT would check the name and fail by
-//     address). Only that CA's certificates pass;
+// where the primary has it, and the standby's own server checks the
+// primary's certificate:
+//   - a CA's certificate (Let's Encrypt, on servers in Rowsafe Cloud): by
+//     the primary server's own name (StandbyCreateParams.PrimaryName,
+//     "<label>-<server>.cloud.rowsafe.sh"), which points at that server
+//     whatever its role and which only its certificate covers: the
+//     standby replicates by that name, with the full check (the CA's root
+//     from the host's trusted ones, SOURCE_SSL_CA / MASTER_SSL_CA, and
+//     SOURCE_SSL_VERIFY_SERVER_CERT / MASTER_SSL_VERIFY_SERVER_CERT for
+//     the name). By address no name check passes (MariaDB 11.8 refuses
+//     such a certificate outright), and the database's names follow roles
+//     (a promoted server could resolve them to itself), so neither is
+//     used. A CA's certificate that isn't for the primary's own name is
+//     refused (any certificate from that CA would pass), for servers
+//     Rowsafe set up; for others, that CA's certificates pass;
 //   - a self-signed certificate: MariaDB 11.3+ checks it itself
 //     (MASTER_SSL_VERIFY_SERVER_CERT without a CA: the primary proves it
 //     knows the replication password's hash for the certificate it
 //     serves, whichever key that is); MySQL checks it is that very
-//     certificate (SOURCE_SSL_CA, the certificate itself), when it is
-//     pinned (below).
+//     certificate (SOURCE_SSL_CA, the certificate itself), when pinned.
 //
-// And when the primary serves the certificate files Rowsafe set up
-// (cert.go) with a P-256 key, which Rowsafe's renewals keep
+// When the primary serves the certificate files Rowsafe set up (cert.go)
+// with a P-256 key, which Rowsafe's renewals keep
 // (agent.ServerTLS.ReuseKey), it seals the SHA-256 of that key
-// (secretTLSKey) with the replication login. The standby then signs in
-// over TLS with that login and compares the key before it follows
-// (creating it, an old primary following the new one), and every few
-// minutes (soon after a TLS error) while it follows: the pinned key with
-// a new certificate (a renewal, a first certificate from a CA) gets the
-// check above again; another key stops receiving (STOP REPLICA
-// IO_THREAD, again at each check, also after a restart started it) and
-// says why, until the pinned key is back.
+// (secretTLSKey) with the replication login. The standby signs in over
+// TLS with that login and compares the key before it follows (creating
+// it, an old primary following the new one), and every few minutes
+// (soon after a TLS error) while it follows: the pinned key with a new
+// certificate (a renewal, a first certificate from a CA) gets the check
+// above again; another key, or a certificate it can't check, stops
+// receiving (STOP REPLICA IO_THREAD, again at each check, also after a
+// restart started it) and says why, until that is over.
 
 // keyCheckEvery is how often a following standby checks the primary's key
 // (keyRetryEvery after a TLS error).
@@ -142,9 +148,13 @@ func probePrimary(ctx context.Context, addr string, port int, user, password, pi
 
 // tlsCheck is how a standby's server checks the primary's certificate.
 type tlsCheck struct {
+	Host   string // the primary's name to replicate by ("": its address)
 	CAFile string // the certificate it must chain to ("": none)
-	Verify bool   // MariaDB's MASTER_SSL_VERIFY_SERVER_CERT
+	Verify bool   // SOURCE_SSL_VERIFY_SERVER_CERT / MASTER_SSL_VERIFY_SERVER_CERT
 	How    string
+	// Refuse: why the standby mustn't replicate from what the primary
+	// serves (a CA's certificate that isn't for the primary's own name).
+	Refuse string
 }
 
 // options are the CHANGE REPLICATION SOURCE / CHANGE MASTER options for
@@ -154,16 +164,14 @@ func (tc tlsCheck) options(f flavor, w replicaWords) []string {
 	if f.mariadb() {
 		out = append(out, "MASTER_SSL_CAPATH = ''")
 	}
-	if w.SSLVerify != "" {
-		out = append(out, w.SSLVerify+" = "+map[bool]string{true: "1", false: "0"}[tc.Verify])
-	}
-	return out
+	return append(out, w.SSLVerify+" = "+map[bool]string{true: "1", false: "0"}[tc.Verify])
 }
 
 // primaryTLS checks the primary at addr serves the key it sealed (when it
 // sealed one) and decides how the standby's server checks its
-// certificate (writing the certificate file for standby id).
-func (s *server) primaryTLS(ctx context.Context, conn *sql.DB, addr string, sec protocol.StandbySecrets, id string, log agent.TaskLogger) (tlsCheck, error) {
+// certificate (writing the certificate file for standby id); name is the
+// primary's own name (StandbyCreateParams.PrimaryName).
+func (s *server) primaryTLS(ctx context.Context, conn *sql.DB, addr string, sec protocol.StandbySecrets, id, name string, log agent.TaskLogger) (tlsCheck, error) {
 	if !sec.PrimaryTLS {
 		return tlsCheck{}, nil
 	}
@@ -179,43 +187,95 @@ func (s *server) primaryTLS(ctx context.Context, conn *sql.DB, addr string, sec 
 	if err := conn.QueryRowContext(ctx, "SELECT VERSION()").Scan(&version); err != nil {
 		return tlsCheck{}, err
 	}
-	tc, err := s.decideTLS(version, id, chain, pin != "")
-	if err != nil {
-		log.Printf("note: %v", err)
+	tc := s.decideTLS(ctx, version, id, chain, pin != "", name)
+	if tc.Refuse != "" {
+		return tc, errors.New(tc.Refuse)
 	}
 	log.Printf("%s", tc.How)
 	return tc, nil
 }
 
+// lookupHost resolves a name (a variable for tests).
+var lookupHost = net.DefaultResolver.LookupHost
+
 // decideTLS is how the standby's server checks a certificate the primary
-// serves (pinned: with the key the primary sealed); the error says what
-// it couldn't do (the check is the best left).
-func (s *server) decideTLS(version, id string, chain []*x509.Certificate, pinned bool) (tlsCheck, error) {
-	zeroConfig := s.words(version).SSLVerify != ""
+// serves (pinned: with the key the primary sealed; name: the primary's
+// own name, if Rowsafe gave one).
+func (s *server) decideTLS(ctx context.Context, version, id string, chain []*x509.Certificate, pinned bool, name string) tlsCheck {
+	w := s.words(version)
 	a, how := anchor(chain)
-	selfSigned := a != nil && len(chain) > 0 && a == chain[0]
-	none := tlsCheck{How: "the standby's server checks no certificate of the primary's; Rowsafe checks its key every few minutes"}
-	if !pinned {
-		none.How = "the standby's server checks no certificate of the primary's"
+	selfSigned := a != nil && a == chain[0]
+	none := tlsCheck{How: "the standby's server checks no certificate of the primary's"}
+	if pinned {
+		none.How += "; Rowsafe checks its key every few minutes"
 	}
 	zero := tlsCheck{Verify: true, How: "MariaDB checks the primary's certificate against the replication password"}
+	withFile := func(tc tlsCheck, c *x509.Certificate) tlsCheck {
+		path, err := writeSourceCA(id, c)
+		if err != nil {
+			return tlsCheck{Refuse: err.Error()}
+		}
+		tc.CAFile = path
+		return tc
+	}
 	switch {
-	case a == nil || selfSigned && !pinned && !zeroConfig:
-		if zeroConfig {
-			return zero, nil
-		}
-		return none, nil
-	case selfSigned && zeroConfig:
-		return zero, nil
+	case selfSigned && w.ZeroConfig:
+		return zero
+	case selfSigned && pinned:
+		return withFile(tlsCheck{How: s.flavor.display() + " checks the primary serves its own self-signed certificate"}, a)
+	case selfSigned, a == nil && !w.ZeroConfig:
+		return none
+	case a == nil: // a CA this host doesn't trust: MariaDB checks it against the password
+		return zero
 	}
-	path, err := writeSourceCA(id, a)
-	if err != nil {
-		if zeroConfig && selfSigned {
-			return zero, err
+	// A CA's certificate: by the primary's own name, checked in full.
+	if name != "" && verifyName(chain, name) == nil {
+		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		addrs, err := lookupHost(cctx, name)
+		cancel()
+		if err != nil || len(addrs) == 0 {
+			return tlsCheck{Refuse: fmt.Sprintf("the primary's name %s doesn't resolve here yet, so the standby can't check the primary's certificate by it", name)}
 		}
-		return none, err
+		return withFile(tlsCheck{Host: name, Verify: true,
+			How: fmt.Sprintf("%s replicates by the primary's name %s and checks its certificate for it, from %s", s.flavor.display(), name, how)}, a)
 	}
-	return tlsCheck{CAFile: path, How: s.flavor.display() + " checks the primary's certificate chains to " + how}, nil
+	if pinned {
+		why := "Rowsafe didn't give the primary's own name"
+		if name != "" {
+			why = "it isn't for the primary's own name " + name
+		}
+		return tlsCheck{Refuse: fmt.Sprintf("the primary serves a certificate from %s, and %s, so the standby can't check it is the primary "+
+			"(any certificate from that authority would pass); Rowsafe waits for the primary's certificate for its name", issuerName(chain), why)}
+	}
+	// Not a server Rowsafe set up: that CA's certificates only.
+	return withFile(tlsCheck{How: s.flavor.display() + " checks the primary's certificate chains to " + how + " (not its name)"}, a)
+}
+
+// verifyName checks chain is for name, from a root this host trusts.
+func verifyName(chain []*x509.Certificate, name string) error {
+	roots, err := anchorRoots()
+	if err != nil || roots == nil {
+		return errors.New("no trusted roots")
+	}
+	inter := x509.NewCertPool()
+	for _, c := range chain[1:] {
+		inter.AddCert(c)
+	}
+	_, err = chain[0].Verify(x509.VerifyOptions{DNSName: name, Roots: roots, Intermediates: inter, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}})
+	return err
+}
+
+func issuerName(chain []*x509.Certificate) string {
+	if len(chain) == 0 {
+		return "a certificate authority"
+	}
+	if o := chain[0].Issuer.Organization; len(o) > 0 && o[0] != "" {
+		return o[0]
+	}
+	if cn := chain[0].Issuer.CommonName; cn != "" {
+		return cn
+	}
+	return "a certificate authority"
 }
 
 // caFileRE: standby ids that make a file name.
@@ -238,7 +298,8 @@ func anchor(chain []*x509.Certificate) (*x509.Certificate, string) {
 		return nil, ""
 	}
 	leaf := chain[0]
-	if bytes.Equal(leaf.RawIssuer, leaf.RawSubject) && leaf.CheckSignatureFrom(leaf) == nil {
+	// Self-signed, CA or not (CheckSignatureFrom wants a CA).
+	if bytes.Equal(leaf.RawIssuer, leaf.RawSubject) && leaf.CheckSignature(leaf.SignatureAlgorithm, leaf.RawTBSCertificate, leaf.Signature) == nil {
 		return leaf, "the primary's own (self-signed) certificate"
 	}
 	roots, err := anchorRoots()
@@ -286,7 +347,27 @@ func (s *server) removeSourceCA(rec standbyRecord) {
 var (
 	keyChecksMu sync.Mutex
 	keyChecks   = map[string]time.Time{} // standby -> last key check
+
+	standbyMusMu sync.Mutex
+	standbyMus   = map[string]*sync.Mutex{} // standby -> its lock
 )
+
+// standbyMu serializes changes to one standby's replication: the key
+// watch's against a promotion or removal.
+func standbyMu(id string) *sync.Mutex {
+	standbyMusMu.Lock()
+	defer standbyMusMu.Unlock()
+	m, ok := standbyMus[id]
+	if !ok {
+		m = &sync.Mutex{}
+		standbyMus[id] = m
+	}
+	return m
+}
+
+// errAnotherKey is why a standby stopped receiving at another key.
+const errAnotherKey = "the primary's address serves TLS with another key than the primary had when this standby was set up, " +
+	"so Rowsafe stopped replicating from it: remove the standby and add it again if the primary's key changed"
 
 // watchKey keeps a following standby on the primary that sealed its key
 // (see above); it returns why the standby doesn't receive ("" when
@@ -295,33 +376,45 @@ func (s *server) watchKey(ctx context.Context, conn *sql.DB, store *standbyStore
 	if rec.KeyPin == "" || rec.Phase != protocol.StandbyPhaseFollowing {
 		return ""
 	}
-	why := "the primary's address serves TLS with another key than the primary had when this standby was set up, " +
-		"so Rowsafe stopped replicating from it: remove the standby and add it again if the primary's key changed"
-	var version string
-	if err := conn.QueryRowContext(ctx, "SELECT VERSION()").Scan(&version); err != nil {
-		if rec.KeyMismatch {
-			return why
+	why := func(r standbyRecord) string {
+		switch {
+		case r.KeyMismatch:
+			return errAnotherKey
+		case r.TLSProblem != "":
+			return "Rowsafe stopped replicating: " + r.TLSProblem
 		}
 		return ""
 	}
+	mu := standbyMu(rec.ID)
+	if !mu.TryLock() {
+		return why(rec) // a promotion or removal is under way
+	}
+	defer mu.Unlock()
+	if cur, ok := store.get(rec.ID); !ok || cur.Phase != protocol.StandbyPhaseFollowing {
+		return ""
+	} else {
+		rec = cur
+	}
+	var version string
+	if err := conn.QueryRowContext(ctx, "SELECT VERSION()").Scan(&version); err != nil {
+		return why(rec)
+	}
 	w := s.words(version)
-	if rec.KeyMismatch && st.IORunning != "No" {
+	blocked := rec.KeyMismatch || rec.TLSProblem != ""
+	if blocked && st.IORunning != "No" {
 		// A restart (or a person) started it again.
 		_, _ = conn.ExecContext(ctx, w.Stop+" IO_THREAD")
 	}
 	tlsTrouble := st.IORunning != "Yes" && (strings.Contains(st.IOError, "SSL") || strings.Contains(st.IOError, "certificate"))
 	keyChecksMu.Lock()
 	since := time.Since(keyChecks[rec.ID])
-	due := since >= keyCheckEvery || (tlsTrouble || rec.KeyMismatch) && since >= keyRetryEvery
+	due := since >= keyCheckEvery || (tlsTrouble || blocked) && since >= keyRetryEvery
 	if due {
 		keyChecks[rec.ID] = time.Now()
 	}
 	keyChecksMu.Unlock()
 	if !due {
-		if rec.KeyMismatch {
-			return why
-		}
-		return ""
+		return why(rec)
 	}
 	setRec := func(fn func(r *standbyRecord)) {
 		_ = store.update(func(f *standbyFile) {
@@ -336,56 +429,62 @@ func (s *server) watchKey(ctx context.Context, conn *sql.DB, store *standbyStore
 	if errors.Is(err, errPrimaryKey) {
 		_, _ = conn.ExecContext(ctx, w.Stop+" IO_THREAD")
 		setRec(func(r *standbyRecord) { r.KeyMismatch = true })
-		return why
+		return errAnotherKey
 	}
 	if err != nil { // not reachable now: the replication status says
-		if rec.KeyMismatch {
-			return why
-		}
-		return ""
+		return why(rec)
 	}
-	s.refreshTLS(ctx, conn, version, w, rec, chain, st, setRec)
-	if !rec.KeyMismatch && tlsTrouble && st.IORunning == "No" {
-		// It gave up connecting (SOURCE_RETRY_COUNT) before the file
-		// above was right.
-		_, _ = conn.ExecContext(ctx, w.Start+" IO_THREAD")
+	tc := s.decideTLS(ctx, version, rec.ID, chain, true, rec.PrimaryName)
+	if tc.Refuse != "" {
+		_, _ = conn.ExecContext(ctx, w.Stop+" IO_THREAD")
+		setRec(func(r *standbyRecord) { r.KeyMismatch, r.TLSProblem = false, tc.Refuse })
+		return "Rowsafe stopped replicating: " + tc.Refuse
 	}
-	if rec.KeyMismatch { // the primary's key is back
-		setRec(func(r *standbyRecord) { r.KeyMismatch = false })
+	s.applyTLS(ctx, conn, w, rec, tc, st, setRec)
+	if blocked { // the primary's key and a certificate the standby can check are back
+		setRec(func(r *standbyRecord) { r.KeyMismatch, r.TLSProblem = false, "" })
 		_, _ = conn.ExecContext(ctx, w.Start+" IO_THREAD")
 		if s.env.Log != nil {
-			s.env.Log.Info("the primary serves its sealed key again: the standby receives again", "port", rec.Port)
+			s.env.Log.Info("the primary serves its sealed key and a certificate the standby checks: the standby receives again", "port", rec.Port)
 		}
+	} else if tlsTrouble && st.IORunning == "No" {
+		// It gave up connecting (SOURCE_RETRY_COUNT) before the check
+		// was right.
+		_, _ = conn.ExecContext(ctx, w.Start+" IO_THREAD")
 	}
 	return ""
 }
 
-// refreshTLS keeps the standby's certificate check right for what the
-// primary serves with the pinned key (a renewal, a first certificate from
-// a CA).
-func (s *server) refreshTLS(ctx context.Context, conn *sql.DB, version string, w replicaWords, rec standbyRecord, chain []*x509.Certificate,
+// applyTLS points the standby's replication at tc (a renewal, a first
+// certificate from a CA change it). The caller holds standbyMu.
+func (s *server) applyTLS(ctx context.Context, conn *sql.DB, w replicaWords, rec standbyRecord, tc tlsCheck,
 	st replicaStatus, setRec func(func(*standbyRecord))) {
-	tc, err := s.decideTLS(version, rec.ID, chain, true)
-	if err != nil && s.env.Log != nil {
-		s.env.Log.Warn("keeping the primary's certificate for the standby", "port", rec.Port, "err", err)
-	}
 	if tc.CAFile == "" && rec.CAFile != "" {
 		_ = os.Remove(rec.CAFile)
 	}
-	if st.CAFile == tc.CAFile && (w.SSLVerify == "" || st.VerifyCert == tc.Verify) {
+	host := cmp.Or(tc.Host, rec.Address)
+	if st.CAFile == tc.CAFile && st.VerifyCert == tc.Verify && st.SourceHost == host {
 		if rec.CAFile != tc.CAFile {
 			setRec(func(r *standbyRecord) { r.CAFile = tc.CAFile })
 		}
 		return
+	}
+	opts := tc.options(s.flavor, w)
+	if st.SourceHost != host {
+		opts = append(opts, w.Host+" = "+quoteString(host))
+		if !st.GTID && st.Exec.File != "" && isBinlogName(st.Exec.File) {
+			// A new host forgets the position: where it applied up to.
+			opts = append(opts, w.File+" = "+quoteString(st.Exec.File), w.Pos+" = "+strconv.FormatInt(st.Exec.Pos, 10))
+		}
 	}
 	// What was received is applied first again (MariaDB changes the
 	// source with both threads stopped).
 	if _, err := conn.ExecContext(ctx, w.Stop); err != nil {
 		return
 	}
-	_, err = conn.ExecContext(ctx, w.Change+" "+strings.Join(tc.options(s.flavor, w), ", "))
+	_, err := conn.ExecContext(ctx, w.Change+" "+strings.Join(opts, ", "))
 	start := w.Start
-	if rec.KeyMismatch {
+	if rec.KeyMismatch || rec.TLSProblem != "" {
 		start += " SQL_THREAD"
 	}
 	_, _ = conn.ExecContext(ctx, start)

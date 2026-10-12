@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -72,7 +73,7 @@ func (e *Engine) StandbyCreate(ctx context.Context, env agent.EngineEnv, db prot
 		return nil, err
 	}
 	log.Printf("the primary answers at %s:%d", addr, sec.PrimaryPort)
-	tc, err := s.primaryTLS(ctx, conn, addr, sec, p.StandbyID, log)
+	tc, err := s.primaryTLS(ctx, conn, addr, sec, p.StandbyID, p.PrimaryName, log)
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +84,7 @@ func (e *Engine) StandbyCreate(ctx context.Context, env agent.EngineEnv, db prot
 	}
 	rec := standbyRecord{ID: p.StandbyID, DatabaseID: db.ID, Port: db.Port, Socket: db.SocketDir, Phase: protocol.StandbyPhaseCreating,
 		Address: addr, PrimPort: sec.PrimaryPort, ReplUser: sec.ReplicationUser, CreatedAt: time.Now().UTC(),
-		KeyPin: sec.EngineData[secretTLSKey], ReplPassword: sec.ReplicationPassword, CAFile: tc.CAFile}
+		KeyPin: sec.EngineData[secretTLSKey], ReplPassword: sec.ReplicationPassword, CAFile: tc.CAFile, PrimaryName: p.PrimaryName}
 	if err := store.put(rec); err != nil {
 		return nil, err
 	}
@@ -596,7 +597,7 @@ func (s *server) startReplication(ctx context.Context, conn *sql.DB, addr string
 		return fmt.Errorf("invalid binary log position %s", pos)
 	}
 	opts := []string{
-		w.Host + " = " + quoteString(addr),
+		w.Host + " = " + quoteString(cmp.Or(tc.Host, addr)), // by name: standby_tls.go
 		w.Port + " = " + strconv.Itoa(sec.PrimaryPort),
 		w.User + " = " + quoteString(sec.ReplicationUser),
 		w.Password + " = " + quoteString(sec.ReplicationPassword),
@@ -721,7 +722,7 @@ func (s *server) reattach(ctx context.Context, conn *sql.DB, p protocol.StandbyC
 	if err != nil {
 		return nil, err
 	}
-	tc, err := s.primaryTLS(ctx, conn, addr, sec, p.StandbyID, log)
+	tc, err := s.primaryTLS(ctx, conn, addr, sec, p.StandbyID, p.PrimaryName, log)
 	if err != nil {
 		return nil, err
 	}
@@ -733,7 +734,7 @@ func (s *server) reattach(ctx context.Context, conn *sql.DB, p protocol.StandbyC
 	store := standbys(s.env)
 	rec := standbyRecord{ID: p.StandbyID, DatabaseID: s.db.ID, Port: s.db.Port, Socket: s.db.SocketDir, Phase: protocol.StandbyPhaseCreating,
 		Address: addr, PrimPort: sec.PrimaryPort, ReplUser: sec.ReplicationUser, Rebuild: true, GTID: byGTID, CreatedAt: time.Now().UTC(),
-		KeyPin: sec.EngineData[secretTLSKey], ReplPassword: sec.ReplicationPassword, CAFile: tc.CAFile}
+		KeyPin: sec.EngineData[secretTLSKey], ReplPassword: sec.ReplicationPassword, CAFile: tc.CAFile, PrimaryName: p.PrimaryName}
 	if err := store.put(rec); err != nil {
 		return nil, err
 	}

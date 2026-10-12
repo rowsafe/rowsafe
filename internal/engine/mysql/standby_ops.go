@@ -21,6 +21,9 @@ var _ agent.EngineStandby = (*Engine)(nil)
 // applied what the old primary wrote, stops replication and takes writes.
 func (e *Engine) StandbyPromote(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec, p protocol.StandbyPromoteParams, log agent.TaskLogger) (*protocol.StandbyPromoteResult, error) {
 	store := standbys(env)
+	mu := standbyMu(p.StandbyID) // not while the key watch changes its replication
+	mu.Lock()
+	defer mu.Unlock()
 	rec, ok := store.get(p.StandbyID)
 	if !ok {
 		return nil, errors.New("this server runs no such standby")
@@ -136,6 +139,10 @@ func (e *Engine) StandbyPromote(ctx context.Context, env agent.EngineEnv, db pro
 	if err := s.setReadOnly(ctx, conn, false); err != nil {
 		return nil, fmt.Errorf("making the new primary writable: %w", err)
 	}
+	if left := s.readWriterLocks().Locked; len(left) > 0 {
+		res.Warnings = append(res.Warnings, "Some logins Rowsafe locked while it was read-only are still locked ("+strings.Join(left, ", ")+
+			"); the agent unlocks them by itself.")
+	}
 	// It had no standby of its own: replication logins left from when it
 	// was a primary before go.
 	if err := s.dropStaleReplicationLogins(ctx, conn); err != nil {
@@ -159,6 +166,9 @@ func (e *Engine) StandbyPromote(ctx context.Context, env agent.EngineEnv, db pro
 func (e *Engine) StandbyRemove(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec, p protocol.StandbyRemoveParams, log agent.TaskLogger) (*protocol.StandbyRemoveResult, error) {
 	store := standbys(env)
 	res := &protocol.StandbyRemoveResult{StandbyID: p.StandbyID}
+	mu := standbyMu(p.StandbyID)
+	mu.Lock()
+	defer mu.Unlock()
 	rec, ok := store.get(p.StandbyID)
 	if !ok {
 		res.Summary = "No such standby runs here (already removed)."

@@ -243,7 +243,10 @@ func (s *server) fetchBinlogs(ctx context.Context, st *objStore, dir string, res
 		return err
 	}
 	idx := indexBinlogs(objs)
-	links := linksTo(objs)
+	links, err := loadLinks(ctx, st, linksTo(objs))
+	if err != nil {
+		return err
+	}
 	cur, ok := idx.find(from.File, res.Backup.StoppedAt.Add(time.Minute))
 	if !ok {
 		if t.Mark != nil || t.Time != nil && t.Time.After(res.Backup.StoppedAt) {
@@ -297,10 +300,7 @@ func (s *server) fetchBinlogs(ctx context.Context, st *objStore, dir string, res
 		// this server wrote after that (in this file or the next ones,
 		// replicated from the new primary once it followed it, or nothing
 		// after a restart) isn't its history.
-		lk, found, err := findLink(ctx, st, links, cur, server, followed)
-		if err != nil {
-			return err
-		}
+		lk, found := findLink(links, cur, server, followed)
 		if found && (len(res.Binlogs) > 1 || lk.From.Pos >= res.StartPos) {
 			if stopUnix > 0 && lk.To.Created >= stopUnix {
 				break // the moment is before the switch
@@ -342,9 +342,7 @@ func (s *server) fetchBinlogs(ctx context.Context, st *objStore, dir string, res
 			continue
 		}
 		// The chain ends here on this server.
-		if lk, found, err := laterLink(ctx, st, links, cur, server, followed); err != nil {
-			return err
-		} else if found && (stopUnix == 0 || lk.To.Created < stopUnix) {
+		if lk, found := laterLink(links, cur, server, followed); found && (stopUnix == 0 || lk.To.Created < stopUnix) {
 			return fmt.Errorf("the database moved to another server at %s from the old primary's binary log %s, which isn't in the bucket; "+
 				"restores can reach up to the end of %s at most: pick a moment before %s, or one after that server's first backup",
 				lk.At.UTC().Format("15:04:05 UTC on 2006-01-02"), lk.From.Name, cur.Name, lk.At.UTC().Format("15:04:05 UTC"))
@@ -359,7 +357,7 @@ func (s *server) fetchBinlogs(ctx context.Context, st *objStore, dir string, res
 		if moveStop == 0 {
 			moveStop = time.Now().Unix() + 1
 		}
-		if moved, at := movedAway(idx, cur, server, moveStop); moved {
+		if moved, at := movedAway(idx, links, cur, server, moveStop); moved {
 			return fmt.Errorf("the database moved to another server at %s, and the bucket doesn't say where its binary log goes on from %s "+
 				"(the switch was made by an older agent): pick a moment before %s, or one after that server's first backup",
 				at.UTC().Format("15:04:05 UTC on 2006-01-02"), cur.Name, at.UTC().Format("15:04:05 UTC"))
@@ -413,59 +411,88 @@ func nextOnServer(ctx context.Context, st *objStore, idx binlogIndex, cur binlog
 	return binlogFile{}, false, nil
 }
 
-// findLink is the switch to another server recorded from cur (written by
-// server), if any.
-func findLink(ctx context.Context, st *objStore, links []binlogFile, cur binlogFile, server string, followed map[binlogFile]bool) (binlogLink, bool, error) {
-	for _, to := range links {
-		if followed[to] || to.Server == server {
-			continue
-		}
+// loadLinks reads the recorded switches (newest first); a record whose
+// content doesn't match its key is left out.
+func loadLinks(ctx context.Context, st *objStore, keys []binlogFile) ([]binlogLink, error) {
+	var out []binlogLink
+	for _, to := range keys {
 		var lk binlogLink
 		if err := st.getJSON(ctx, linkKey(to), &lk); err != nil {
 			if errors.Is(err, errNotFound) {
 				continue
 			}
-			return lk, false, err
+			return nil, err
 		}
-		if lk.From.Name == cur.Name && (lk.From.Server == server || server == "") && lk.To == to {
-			return lk, true, nil
+		if lk.To == to {
+			out = append(out, lk)
 		}
 	}
-	return binlogLink{}, false, nil
+	return out, nil
+}
+
+// findLink is the switch to another server recorded from cur (written by
+// server), if any.
+func findLink(links []binlogLink, cur binlogFile, server string, followed map[binlogFile]bool) (binlogLink, bool) {
+	for _, lk := range links {
+		if followed[lk.To] || lk.To.Server == server {
+			continue
+		}
+		if lk.From.Name == cur.Name && (lk.From.Server == server || server == "") {
+			return lk, true
+		}
+	}
+	return binlogLink{}, false
 }
 
 // laterLink is a switch to another server recorded from a later file of
 // server than cur (one the bucket doesn't have).
-func laterLink(ctx context.Context, st *objStore, links []binlogFile, cur binlogFile, server string, followed map[binlogFile]bool) (binlogLink, bool, error) {
+func laterLink(links []binlogLink, cur binlogFile, server string, followed map[binlogFile]bool) (binlogLink, bool) {
 	base, n, ok := binlogSeq(cur.Name)
 	if !ok || server == "" {
-		return binlogLink{}, false, nil
+		return binlogLink{}, false
 	}
-	for _, to := range links {
-		if followed[to] || to.Server == server || to.Created < cur.Created {
+	for _, lk := range links {
+		if followed[lk.To] || lk.To.Server == server || lk.To.Created < cur.Created {
 			continue
 		}
-		var lk binlogLink
-		if err := st.getJSON(ctx, linkKey(to), &lk); err != nil {
-			if errors.Is(err, errNotFound) {
-				continue
-			}
-			return lk, false, err
-		}
 		fb, fn, ok := binlogSeq(lk.From.Name)
-		if ok && fb == base && fn > n && lk.From.Server == server && lk.To == to {
-			return lk, true, nil
+		if ok && fb == base && fn > n && lk.From.Server == server {
+			return lk, true
 		}
 	}
-	return binlogLink{}, false, nil
+	return binlogLink{}, false
+}
+
+// movedOff reports whether server's file created then was written after
+// the database moved away from server (a recorded switch) and before it
+// came back: not the database's history (the old primary restarted, or
+// followed the new one).
+func movedOff(links []binlogLink, server string, created int64) bool {
+	var at int64 = -1
+	off := false
+	for _, lk := range links {
+		t := lk.To.Created
+		if t > created {
+			continue
+		}
+		switch {
+		case lk.To.Server == server && t >= at: // back here (its first file is history)
+			at, off = t, false
+		case lk.From.Server == server && t > at:
+			at, off = t, true
+		}
+	}
+	return off
 }
 
 // movedAway reports whether another server's binary logs begin after cur
-// was created and before stop: the database moved there (and when).
-func movedAway(idx binlogIndex, cur binlogFile, server string, stopUnix int64) (bool, time.Time) {
+// was created and before stop, not counting a server's files from after
+// the database moved away from it: the database moved there (and when),
+// and the bucket doesn't say how.
+func movedAway(idx binlogIndex, links []binlogLink, cur binlogFile, server string, stopUnix int64) (bool, time.Time) {
 	var first int64
 	for g := range idx {
-		if g.Server == "" || g.Server == server || g.Created <= cur.Created || g.Created >= stopUnix {
+		if g.Server == "" || g.Server == server || g.Created <= cur.Created || g.Created >= stopUnix || movedOff(links, g.Server, g.Created) {
 			continue
 		}
 		if first == 0 || g.Created < first {

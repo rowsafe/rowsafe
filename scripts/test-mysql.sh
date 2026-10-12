@@ -62,7 +62,7 @@ done
 # Certificates as Rowsafe's servers serve them (P-256 keys in
 # /etc/mysql/rowsafe-tls): self-signed (as the installer makes), or a CA's
 # chain for a name (as a Rowsafe Cloud name's), one per server.
-server_tls() { # dir
+server_tls() { # dir name: the server's own name (with the pair's)
   mkdir -p "$1"
   if [ "$tls" = self ]; then
     openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 2 -subj /CN=rowsafe \
@@ -70,7 +70,7 @@ server_tls() { # dir
   else
     openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -subj /CN=db.cloud.example \
       -keyout "$1/rowsafe-server.key" -out "$1/leaf.csr" >/dev/null 2>&1
-    printf 'subjectAltName=DNS:db.cloud.example\n' >"$1/ext"
+    printf 'subjectAltName=DNS:db.cloud.example,DNS:%s\n' "$2" >"$1/ext"
     openssl x509 -req -in "$1/leaf.csr" -CA "$work/tlsca/inter.crt" -CAkey "$work/tlsca/inter.key" -CAcreateserial -days 2 \
       -extfile "$1/ext" -out "$1/leaf.crt" >/dev/null 2>&1
     cat "$1/leaf.crt" "$work/tlsca/inter.crt" >"$1/rowsafe-server.crt"
@@ -125,8 +125,8 @@ for target in $targets; do
   esac
   tls_a='' tls_b='' tls_it=''
   if [ "$run" = Standby ] && [ -n "$tls" ]; then
-    server_tls "$work/tls-$image-a"
-    server_tls "$work/tls-$image-b"
+    server_tls "$work/tls-$image-a" "$name"
+    server_tls "$work/tls-$image-b" "$name-sb"
     certargs="--ssl-cert=/etc/mysql/rowsafe-tls/rowsafe-server.crt --ssl-key=/etc/mysql/rowsafe-tls/rowsafe-server.key"
     primary_args="$primary_args $certargs" sb_args="$sb_args $certargs"
     tls_a="-v $work/tls-$image-a:/etc/mysql/rowsafe-tls:ro" tls_b="-v $work/tls-$image-b:/etc/mysql/rowsafe-tls:ro"

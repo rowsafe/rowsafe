@@ -1,12 +1,15 @@
 package mysql
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"math/big"
+	"net"
 	"os"
 	"slices"
 	"strings"
@@ -169,7 +172,10 @@ func TestDecideTLS(t *testing.T) {
 		key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		tpl := &x509.Certificate{SerialNumber: big.NewInt(time.Now().UnixNano()), Subject: pkix.Name{CommonName: cn},
 			NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), DNSNames: dns,
-			IsCA: ca, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign}
+			IsCA: ca, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageDigitalSignature}
+		if ca {
+			tpl.KeyUsage |= x509.KeyUsageCertSign
+		}
 		if parent == nil {
 			parent, parentKey = tpl, key
 		}
@@ -182,18 +188,29 @@ func TestDecideTLS(t *testing.T) {
 	}
 	root, rootKey := mk("Test Root", true, nil, nil)
 	inter, interKey := mk("Test Intermediate", true, root, rootKey)
-	leaf, _ := mk("db.cloud.example", false, inter, interKey, "db.cloud.example")
+	leaf, _ := mk("db.cloud.example", false, inter, interKey, "db.cloud.example", "db-1.cloud.example")
 	self, _ := mk("rowsafe", true, nil, nil)
-	le, selfSigned := []*x509.Certificate{leaf, inter}, []*x509.Certificate{self}
+	selfLeaf, _ := mk("rowsafe-agent", false, nil, nil, "host") // not a CA (the agent's own self-signed certificates)
+	le := []*x509.Certificate{leaf, inter}
 
 	sourceCADir = t.TempDir()
-	defer func() { sourceCADir = serverTLSDir; anchorRoots = x509.SystemCertPool }()
+	defer func() {
+		sourceCADir = serverTLSDir
+		anchorRoots = x509.SystemCertPool
+		lookupHost = net.DefaultResolver.LookupHost
+	}()
 	trusted := x509.NewCertPool()
 	trusted.AddCert(root)
 	anchorRoots = func() (*x509.CertPool, error) { return trusted, nil }
+	lookupHost = func(_ context.Context, name string) ([]string, error) {
+		if name == "db-1.cloud.example" {
+			return []string{"203.0.113.10"}, nil
+		}
+		return nil, errors.New("no such host")
+	}
 	my, maria := &server{flavor: flavorMySQL}, &server{flavor: flavorMariaDB}
 	const myV, mariaV = "8.4.6", "11.8.3-MariaDB"
-	pem := func(path string) *x509.Certificate {
+	cert := func(path string) *x509.Certificate {
 		t.Helper()
 		c, err := readCertFile(path)
 		if err != nil {
@@ -201,46 +218,99 @@ func TestDecideTLS(t *testing.T) {
 		}
 		return c
 	}
+	ctx := context.Background()
 	for _, tc := range []struct {
-		name   string
-		s      *server
-		v      string
-		chain  []*x509.Certificate
-		pinned bool
-		ca     *x509.Certificate
-		verify bool
+		name         string
+		s            *server
+		v            string
+		chain        []*x509.Certificate
+		pinned       bool
+		primaryName  string
+		ca           *x509.Certificate
+		verify       bool
+		host, refuse string
 	}{
-		{"mysql self-signed pinned", my, myV, selfSigned, true, self, false},
-		{"mysql self-signed not pinned", my, myV, selfSigned, false, nil, false},
-		{"mysql CA", my, myV, le, true, root, false},
-		{"mariadb self-signed", maria, mariaV, selfSigned, true, nil, true},
-		{"mariadb CA (by address the name check fails)", maria, mariaV, le, true, root, false},
-		{"mariadb CA not pinned", maria, mariaV, le, false, root, false},
+		{"mysql self-signed pinned", my, myV, []*x509.Certificate{self}, true, "", self, false, "", ""},
+		{"mysql self-signed, not a CA, pinned", my, myV, []*x509.Certificate{selfLeaf}, true, "", selfLeaf, false, "", ""},
+		{"mysql self-signed not pinned", my, myV, []*x509.Certificate{self}, false, "", nil, false, "", ""},
+		{"mysql CA by the primary's name", my, myV, le, true, "db-1.cloud.example", root, true, "db-1.cloud.example", ""},
+		{"mysql CA without a name", my, myV, le, true, "", nil, false, "", "didn't give the primary's own name"},
+		{"mysql CA for other names", my, myV, le, true, "db-2.cloud.example", nil, false, "", "isn't for the primary's own name"},
+		{"mysql CA, the name doesn't resolve", my, myV, le, true, "db.cloud.example", nil, false, "", "doesn't resolve"},
+		{"mariadb self-signed", maria, mariaV, []*x509.Certificate{self}, true, "", nil, true, "", ""},
+		{"mariadb CA by the primary's name", maria, mariaV, le, true, "db-1.cloud.example", root, true, "db-1.cloud.example", ""},
+		{"mariadb CA without a name", maria, mariaV, le, true, "", nil, false, "", "any certificate from that authority"},
+		{"mariadb CA not pinned (not Rowsafe's)", maria, mariaV, le, false, "", root, false, "", ""},
 	} {
-		got, err := tc.s.decideTLS(tc.v, "sb_1", tc.chain, tc.pinned)
-		if err != nil {
-			t.Fatalf("%s: %v", tc.name, err)
+		got := tc.s.decideTLS(ctx, tc.v, "sb_1", tc.chain, tc.pinned, tc.primaryName)
+		if tc.refuse != "" {
+			if !strings.Contains(got.Refuse, tc.refuse) {
+				t.Errorf("%s: %+v", tc.name, got)
+			}
+			continue
 		}
-		if got.Verify != tc.verify || (got.CAFile == "") != (tc.ca == nil) || tc.ca != nil && !pem(got.CAFile).Equal(tc.ca) {
+		if got.Refuse != "" || got.Verify != tc.verify || got.Host != tc.host || (got.CAFile == "") != (tc.ca == nil) ||
+			tc.ca != nil && !cert(got.CAFile).Equal(tc.ca) {
 			t.Errorf("%s: %+v", tc.name, got)
 		}
 	}
 	// A CA no root here trusts: MariaDB checks against the password.
 	anchorRoots = func() (*x509.CertPool, error) { return x509.NewCertPool(), nil }
-	if got, _ := maria.decideTLS(mariaV, "sb_1", le, true); !got.Verify || got.CAFile != "" {
+	if got := maria.decideTLS(ctx, mariaV, "sb_1", le, true, ""); !got.Verify || got.CAFile != "" || got.Refuse != "" {
 		t.Errorf("mariadb, untrusted CA: %+v", got)
 	}
-	if got, _ := my.decideTLS(myV, "sb_1", le, true); got.Verify || got.CAFile != "" {
+	if got := my.decideTLS(ctx, myV, "sb_1", le, true, ""); got.Verify || got.CAFile != "" || got.Refuse != "" {
 		t.Errorf("mysql, untrusted CA: %+v", got)
 	}
 	opts := tlsCheck{CAFile: "/x/ca.pem", Verify: false}.options(flavorMariaDB, maria.words(mariaV))
 	if strings.Join(opts, ", ") != "MASTER_SSL_CA = '/x/ca.pem', MASTER_SSL_CAPATH = '', MASTER_SSL_VERIFY_SERVER_CERT = 0" {
 		t.Errorf("mariadb options: %v", opts)
 	}
-	if opts := (tlsCheck{}).options(flavorMySQL, my.words(myV)); strings.Join(opts, ", ") != "SOURCE_SSL_CA = ''" {
+	if opts := (tlsCheck{Verify: true}).options(flavorMySQL, my.words(myV)); strings.Join(opts, ", ") != "SOURCE_SSL_CA = '', SOURCE_SSL_VERIFY_SERVER_CERT = 1" {
 		t.Errorf("mysql options: %v", opts)
 	}
 	if sourceCAPath("../x") != "" {
 		t.Error("an id with a path in it")
+	}
+}
+
+func TestMovedAwayAfterSwitches(t *testing.T) {
+	f := func(name string, created int64, server string) binlogFile {
+		return binlogFile{Name: name, Created: created, Server: server}
+	}
+	a1, a2 := f("bin.000001", 100, "1"), f("bin.000002", 200, "1")
+	b1 := f("bin.000001", 300, "2") // B's own file from the switch at 300
+	aRestart := f("bin.000003", 301, "1")
+	idx := binlogIndex{a1: nil, a2: nil, b1: nil, aRestart: nil}
+	ab := binlogLink{From: linkFrom{Name: a2.Name, Server: "1", Pos: 500}, To: b1}
+	now := int64(10_000)
+
+	// Restoring on B's chain: A's file from after the switch (a restart,
+	// following B) isn't a move.
+	if moved, _ := movedAway(idx, []binlogLink{ab}, b1, "2", now); moved {
+		t.Fatal("the old primary's later file counted as the database moving back")
+	}
+	// Without the record, B's files after A's are a move nobody recorded.
+	if moved, at := movedAway(idx, nil, a2, "1", now); !moved || at.Unix() != 300 {
+		t.Fatalf("an unrecorded switch: %v %v", moved, at)
+	}
+	// There and back: A again from 400; its files from then are history,
+	// B's later ones (following A) aren't.
+	a4 := f("bin.000004", 400, "1")
+	bLater := f("bin.000002", 401, "2")
+	ba := binlogLink{From: linkFrom{Name: b1.Name, Server: "2", Pos: 900}, To: a4}
+	idx[a4], idx[bLater] = nil, nil
+	links := []binlogLink{ba, ab}
+	if moved, _ := movedAway(idx, links, a4, "1", now); moved {
+		t.Fatal("B's file after the switch back counted as a move")
+	}
+	if !movedOff(links, "1", 301) || movedOff(links, "1", 400) || movedOff(links, "1", 450) || !movedOff(links, "2", 401) || movedOff(links, "2", 300) {
+		t.Fatal("movedOff")
+	}
+	// A server that took over unrecorded after the switch back still counts.
+	c1 := f("bin.000001", 500, "3")
+	idx[c1] = nil
+	if moved, at := movedAway(idx, links, a4, "1", now); !moved || at.Unix() != 500 {
+		t.Fatalf("a third server: %v %v", moved, at)
 	}
 }

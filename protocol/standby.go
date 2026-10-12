@@ -429,6 +429,11 @@ type StandbyCreateParams struct {
 	// RestartOK: the person confirmed that the server becoming the standby
 	// may be restarted once (MongoDB: to join the replica set).
 	RestartOK bool `json:"restart_ok,omitempty"`
+	// PrimaryName (MySQL, MariaDB on servers Rowsafe creates): the primary
+	// server's own name, which points at that server only and which its
+	// certificate from a CA covers: the standby replicates by this name,
+	// its server checking the certificate in full (name included).
+	PrimaryName string `json:"primary_name,omitempty"`
 }
 
 // StandbyCreateResult is the agent's report for a standby_create task.

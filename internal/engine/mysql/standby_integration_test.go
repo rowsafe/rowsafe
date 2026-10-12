@@ -32,9 +32,10 @@ import (
 //	                                 mixed: the primary only (MySQL: the empty server's
 //	                                 gtid_mode is switched to match; MariaDB: by position)
 //	ROWSAFE_MYSQL_IT_TLS             self: both serve a self-signed certificate from Rowsafe's
-//	                                 files (pinned); ca: a CA's chain for a name (a Let's
-//	                                 Encrypt-like one; SSL_CERT_FILE trusts its root), reached
-//	                                 by address; "": the image's own (not pinned)
+//	                                 files (pinned); ca: a CA's chain for the pair's name and
+//	                                 each server's own (a Let's Encrypt-like one; SSL_CERT_FILE
+//	                                 trusts its root): the standby replicates by the primary's
+//	                                 own name; "": the image's own (not pinned)
 //	ROWSAFE_MYSQL_IT_CA_DIR          where the standbys' certificate files go (both servers
 //	                                 read it)
 //
@@ -55,7 +56,8 @@ func TestStandbyIntegration(t *testing.T) {
 		}
 		return addrs[0]
 	}
-	ipA, ipB := ipOf(os.Getenv("ROWSAFE_MYSQL_IT_PRIMARY_HOST")), ipOf(os.Getenv("ROWSAFE_MYSQL_IT_STANDBY_HOST"))
+	hostA, hostB := os.Getenv("ROWSAFE_MYSQL_IT_PRIMARY_HOST"), os.Getenv("ROWSAFE_MYSQL_IT_STANDBY_HOST")
+	ipA, ipB := ipOf(hostA), ipOf(hostB)
 	tlsMode := os.Getenv("ROWSAFE_MYSQL_IT_TLS")
 	if d := os.Getenv("ROWSAFE_MYSQL_IT_CA_DIR"); d != "" {
 		sourceCADir = d
@@ -228,7 +230,7 @@ func TestStandbyIntegration(t *testing.T) {
 	}
 	t.Logf("prepare: %+v", prep)
 	cres, err := e.StandbyCreate(ctx, envB, specB, protocol.StandbyCreateParams{StandbyID: "sb1", Port: 3306, SocketDir: sbSocket,
-		Major: prep.Major, SystemID: prep.SystemID, SizeBytes: prep.SizeBytes, Settings: prep.Settings}, sec, tl)
+		Major: prep.Major, SystemID: prep.SystemID, SizeBytes: prep.SizeBytes, Settings: prep.Settings, PrimaryName: hostA}, sec, tl)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -247,8 +249,8 @@ func TestStandbyIntegration(t *testing.T) {
 		t.Fatal("the primary serves Rowsafe's certificate files with a P-256 key: its key is pinned")
 	case tlsMode == "" && rec1.KeyPin != "":
 		t.Fatal("a certificate Rowsafe didn't set up is pinned")
-	case tlsMode == "ca" && (st1.CAFile == "" || st1.VerifyCert):
-		t.Fatal("a CA's certificate: the standby's server checks it chains to the root (not the name)")
+	case tlsMode == "ca" && (st1.CAFile == "" || !st1.VerifyCert || st1.SourceHost != hostA):
+		t.Fatal("a CA's certificate: the standby replicates by the primary's own name, its certificate checked in full")
 	case tlsMode == "self" && e.flavor.mariadb() && (!st1.VerifyCert || st1.CAFile != ""):
 		t.Fatal("MariaDB checks a self-signed certificate against the replication password")
 	case tlsMode == "self" && !e.flavor.mariadb() && st1.CAFile == "":
@@ -397,7 +399,10 @@ func TestStandbyIntegration(t *testing.T) {
 		t.Fatalf("promote: %+v %v", pres, err)
 	}
 	// The old primary starts a new binary log file (a restart) after the
-	// switch: its history still ends where the switch was recorded.
+	// switch, in a later second than the new primary's first file (files
+	// are dated to the second): its history still ends where the switch
+	// was recorded, and that file isn't the database moving back.
+	time.Sleep(time.Until(time.Now().Truncate(time.Second).Add(1100 * time.Millisecond)))
 	exec(adbA, "FLUSH BINARY LOGS")
 	at212 := time.Now().UTC()
 	if _, err := appB.ExecContext(ctx, "INSERT INTO shop.orders VALUES (212, 'on the new primary')"); err != nil {
@@ -440,7 +445,7 @@ func TestStandbyIntegration(t *testing.T) {
 		t.Fatalf("prepare 2: %v", err)
 	}
 	rres, err := e.StandbyCreate(ctx, envA, specA, protocol.StandbyCreateParams{StandbyID: "sb2", Port: 3306, SocketDir: specA.SocketDir,
-		Rebuild: true, FenceID: "f1", Reattach: true, SwitchLSN: pres.ReplayLSN, Settings: prep2.Settings, Major: prep2.Major}, sec2, tl)
+		Rebuild: true, FenceID: "f1", Reattach: true, SwitchLSN: pres.ReplayLSN, Settings: prep2.Settings, Major: prep2.Major, PrimaryName: hostB}, sec2, tl)
 	if err != nil || !rres.Reattached {
 		t.Fatalf("reattach: %+v %v", rres, err)
 	}
@@ -477,7 +482,7 @@ func TestStandbyIntegration(t *testing.T) {
 		t.Fatalf("prepare 3: %v", err)
 	}
 	rres3, err := e.StandbyCreate(ctx, envB, specB, protocol.StandbyCreateParams{StandbyID: "sb3", Port: 3306, SocketDir: specB.SocketDir,
-		Rebuild: true, FenceID: "f2", Reattach: true, SwitchLSN: pres2.ReplayLSN, Settings: prep3.Settings, Major: prep3.Major}, sec3, tl)
+		Rebuild: true, FenceID: "f2", Reattach: true, SwitchLSN: pres2.ReplayLSN, Settings: prep3.Settings, Major: prep3.Major, PrimaryName: hostA}, sec3, tl)
 	if err != nil || !rres3.Reattached {
 		t.Fatalf("reattach 2: %+v %v", rres3, err)
 	}
