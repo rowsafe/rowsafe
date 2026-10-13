@@ -389,3 +389,20 @@ func TestServerCertificateIntegration(t *testing.T) {
 		t.Fatalf("install after a failed one: %v", err)
 	}
 }
+
+// issueCA signs an intermediate CA's certificate for pub.
+func (ca *testCA) issueCA(t *testing.T, pub crypto.PublicKey, name string) *x509.Certificate {
+	t.Helper()
+	serial, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
+	tmpl := &x509.Certificate{
+		SerialNumber: serial, Subject: pkix.Name{Organization: []string{name}, CommonName: name},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour),
+		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, pub, ca.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, _ := x509.ParseCertificate(der)
+	return c
+}

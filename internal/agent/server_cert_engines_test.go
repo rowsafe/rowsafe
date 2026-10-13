@@ -2,6 +2,9 @@ package agent
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
@@ -123,5 +126,75 @@ func TestEngineServerCertificate(t *testing.T) {
 	res, err = a.engineCertRequest(db, f.st(), req, &taskLog{})
 	if err != nil || res.CSR != "" || !strings.Contains(res.Summary, "nothing to do") {
 		t.Fatalf("second request: %+v %v", res, err)
+	}
+}
+
+// A server that checks its certificate against what issued it (MySQL's
+// ssl_cert against ssl_ca: ServerTLS.CAFile) gets that written next to
+// it, and put back with the certificate when the server refuses it.
+func TestEngineServerCertificateCAFile(t *testing.T) {
+	defer func(d time.Duration) { hbaReloadSettle = d }(hbaReloadSettle)
+	hbaReloadSettle = time.Millisecond
+	a := New(Config{StateDir: t.TempDir(), Mode: ModeNative}, slog.New(slog.DiscardHandler))
+	db := protocol.DatabaseSpec{ID: "db_my", Engine: protocol.EngineMySQL, Port: 3306}
+	ca := newTestCA(t, "Test Encrypt")
+	f := &fakeServerTLS{dir: t.TempDir()}
+	st := func() *ServerTLS {
+		s := f.st()
+		s.CAFile = filepath.Join(f.dir, "rowsafe-ca.crt")
+		return s
+	}
+	ctx := context.Background()
+	certPEM, keyPEM, err := selfSignedCert("db1", nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeKeyPair(filepath.Join(f.dir, "rowsafe-server.crt"), filepath.Join(f.dir, "rowsafe-server.key"), certPEM, keyPEM); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st().Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	req := protocol.ServerCertificateParams{Action: protocol.CertRequest, Names: cloudNames}
+	res, err := a.engineCertRequest(db, st(), req, &taskLog{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	install := protocol.ServerCertificateParams{Action: protocol.CertInstall, Names: cloudNames, Chain: ca.sign(t, res.CSR, time.Now().Add(90*24*time.Hour))}
+
+	f.failReload = true
+	if _, err := a.engineCertInstall(ctx, db, st(), install, &taskLog{}); err == nil || !strings.Contains(err.Error(), "previous certificate is back") {
+		t.Fatalf("failed reload: %v", err)
+	}
+	if fileExists(filepath.Join(f.dir, "rowsafe-ca.crt")) {
+		t.Fatal("the CA file stayed after the server refused the certificate")
+	}
+	f.failReload = false
+
+	if _, err := a.engineCertInstall(ctx, db, st(), install, &taskLog{}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(f.dir, "rowsafe-ca.crt"))
+	if err != nil || string(got) != chainPEM(ca.cert) {
+		t.Fatalf("CA file: %q %v", got, err)
+	}
+}
+
+// certIssuers: the intermediates sent along and the root, the host's or
+// one sent along; a chain to no root known is refused.
+func TestCertIssuers(t *testing.T) {
+	root := newTestCA(t, "Test Root")
+	ikey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	inter := &testCA{key: ikey, cert: root.issueCA(t, &ikey.PublicKey, "Test Encrypt E1")}
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	leaf := inter.issue(t, &key.PublicKey, cloudNames, time.Now().Add(-time.Minute), time.Now().Add(time.Hour))
+	now := time.Now()
+
+	got, err := certIssuers([]*x509.Certificate{leaf, inter.cert, root.cert}, now)
+	if err != nil || len(got) != 2 || !got[0].Equal(inter.cert) || !got[1].Equal(root.cert) {
+		t.Fatalf("root sent along: %v %v", got, err)
+	}
+	if _, err := certIssuers([]*x509.Certificate{leaf, inter.cert}, now); err == nil || !strings.Contains(err.Error(), "doesn't chain up to a root this server trusts") {
+		t.Fatalf("unknown root: %v", err)
 	}
 }

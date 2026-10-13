@@ -173,16 +173,33 @@ func (a *Agent) engineCertInstall(ctx context.Context, db protocol.DatabaseSpec,
 		return saved{data: data, mode: fi.Mode().Perm(), ok: err == nil}
 	}
 	oldCert, oldKey := keep(st.CertFile), keep(st.KeyFile)
+	var oldCA saved
+	var caPEM []byte
+	if st.CAFile != "" {
+		up, err := certIssuers(chain, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range up {
+			caPEM = append(caPEM, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.Raw})...)
+		}
+		oldCA = keep(st.CAFile)
+	}
 	var chainPEM []byte
 	for _, c := range chain {
 		chainPEM = append(chainPEM, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.Raw})...)
 	}
 	rollback := func(why string) error {
 		rctx := context.WithoutCancel(ctx)
-		for _, f := range []struct {
+		type file struct {
 			path string
 			old  saved
-		}{{st.CertFile, oldCert}, {st.KeyFile, oldKey}} {
+		}
+		files := []file{{st.CertFile, oldCert}, {st.KeyFile, oldKey}}
+		if st.CAFile != "" {
+			files = append(files, file{st.CAFile, oldCA})
+		}
+		for _, f := range files {
 			if f.old.ok {
 				_ = writeFileAtomic(f.path, f.old.data, f.old.mode)
 			} else {
@@ -198,7 +215,13 @@ func (a *Agent) engineCertInstall(ctx context.Context, db protocol.DatabaseSpec,
 
 	// The certificate first, then its key, each replaced in one rename: a
 	// server that loads new files by itself (ClickHouse) sees the new pair
-	// as soon as the key lands, and a failed write is put back.
+	// as soon as the key lands, and a failed write is put back. What
+	// issued it goes first, for a server that checks against it (MySQL).
+	if st.CAFile != "" {
+		if err := writeFileAtomic(st.CAFile, caPEM, 0o644); err != nil {
+			return nil, rollback("writing the certificates that issued it failed: " + err.Error())
+		}
+	}
 	if err := writeFileAtomic(st.CertFile, chainPEM, 0o644); err != nil {
 		return nil, rollback("writing the certificate failed: " + err.Error())
 	}

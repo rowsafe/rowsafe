@@ -112,6 +112,13 @@ type ServerTLS struct {
 	// the agent can read), so what pins it stays right (a MySQL or
 	// MariaDB standby checks its primary's key: standby_tls.go).
 	ReuseKey bool
+	// CAFile, when set, is where the agent writes what issued a new
+	// certificate (the intermediates sent with it and the root this host
+	// trusts) before Reload, put back like the certificate on a failure:
+	// MySQL checks the certificate it loads against its ssl_ca and refuses
+	// a CA's without it ("Invalid certificates"), and Reload points it
+	// there while the file is there.
+	CAFile string
 }
 
 // engineCertificates is db's engine as an EngineCertificates (nil when it
