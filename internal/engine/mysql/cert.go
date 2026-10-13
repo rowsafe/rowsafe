@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"strconv"
 	"time"
@@ -35,6 +36,7 @@ const (
 	serverTLSDir   = "/etc/mysql/rowsafe-tls"
 	serverCertFile = "rowsafe-server.crt"
 	serverKeyFile  = "rowsafe-server.key"
+	serverCAName   = "rowsafe-ca.crt" // what issued a CA's certificate (MySQL's ssl_ca)
 )
 
 // ServerTLS is how the server serves TLS.
@@ -44,9 +46,10 @@ func (e *Engine) ServerTLS(ctx context.Context, env agent.EngineEnv, db protocol
 	if err != nil {
 		return nil, err
 	}
-	var dataDir, cert, key sql.NullString
+	var dataDir, cert, key, ca, caPath sql.NullString
 	var port int
-	if err := conn.QueryRowContext(ctx, `SELECT @@datadir, @@ssl_cert, @@ssl_key, @@port`).Scan(&dataDir, &cert, &key, &port); err != nil {
+	if err := conn.QueryRowContext(ctx, `SELECT @@datadir, @@ssl_cert, @@ssl_key, @@ssl_ca, @@ssl_capath, @@port`).
+		Scan(&dataDir, &cert, &key, &ca, &caPath, &port); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("reading %s's TLS settings: %w", s.flavor.display(), err)
 	}
@@ -55,13 +58,14 @@ func (e *Engine) ServerTLS(ctx context.Context, env agent.EngineEnv, db protocol
 		conn.Close()
 		return nil, err
 	}
-	reload := "ALTER INSTANCE RELOAD TLS"
 	if s.flavor.mariadb() {
-		reload = "FLUSH SSL"
-	}
-	st.Reload = func(ctx context.Context) error {
-		_, err := conn.ExecContext(ctx, reload)
-		return err
+		st.Reload = func(ctx context.Context) error {
+			_, err := conn.ExecContext(ctx, "FLUSH SSL")
+			return err
+		}
+	} else {
+		st.CAFile = serverCAFile(st.CertFile, dataDir.String, ca.String, caPath.String)
+		st.Reload = func(ctx context.Context) error { return s.reloadTLS(ctx, conn, st.CAFile, ca.String) }
 	}
 	if port <= 0 {
 		port = db.Port
@@ -71,6 +75,61 @@ func (e *Engine) ServerTLS(ctx context.Context, env agent.EngineEnv, db protocol
 	st.Close = func() { conn.Close() }
 	st.ReuseKey = true // a standby pins this server's key (standby_tls.go)
 	return st, nil
+}
+
+// serverCAFile is where the agent keeps what issued the certificate
+// Rowsafe installs (ServerTLS.CAFile), next to it: MySQL checks the
+// certificate ALTER INSTANCE RELOAD TLS loads against ssl_ca, which then
+// has to name that file (the installer's self-signed certificate passes
+// on its own). "" when TLS is off or the server checks against a CA of
+// someone else's (ssl_ca or ssl_capath set to other files).
+func serverCAFile(certFile, dataDir, ca, caPath string) string {
+	if certFile == "" || caPath != "" {
+		return ""
+	}
+	f := filepath.Join(filepath.Dir(certFile), serverCAName)
+	if ca != "" && !filepath.IsAbs(ca) {
+		ca = filepath.Join(dataDir, ca)
+	}
+	if ca != "" && filepath.Clean(ca) != f {
+		return ""
+	}
+	return f
+}
+
+// reloadTLS has MySQL load its certificate again: with ssl_ca naming
+// caFile while it is there (what issued the certificate, for MySQL's
+// check), else as the server had it (was), kept in Rowsafe's option
+// file for restarts.
+func (s *server) reloadTLS(ctx context.Context, conn *sql.DB, caFile, was string) error {
+	if caFile != "" {
+		want := was
+		if _, err := os.Stat(caFile); err == nil {
+			want = caFile
+		}
+		var cur sql.NullString
+		if err := conn.QueryRowContext(ctx, "SELECT @@GLOBAL.ssl_ca").Scan(&cur); err != nil {
+			return err
+		}
+		if cur.String != want {
+			v := "DEFAULT"
+			if want != "" {
+				v = quoteString(want)
+			}
+			if _, err := conn.ExecContext(ctx, "SET GLOBAL ssl_ca = "+v); err != nil {
+				return fmt.Errorf("pointing ssl_ca at %s: %w", cmpOr(want, "nothing"), err)
+			}
+		}
+		if _, err := conn.ExecContext(ctx, "ALTER INSTANCE RELOAD TLS"); err != nil {
+			return err
+		}
+		if err := s.persistSetting("ssl_ca", want); err != nil && s.env.Log != nil {
+			s.env.Log.Warn("keeping ssl_ca in Rowsafe's option file", "err", err)
+		}
+		return nil
+	}
+	_, err := conn.ExecContext(ctx, "ALTER INSTANCE RELOAD TLS")
+	return err
 }
 
 // serverTLSFiles checks the server serves the files --listen-public set up

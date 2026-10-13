@@ -246,6 +246,27 @@ func checkIssued(chain []*x509.Certificate, key crypto.Signer, names []string, n
 	return nil
 }
 
+// certIssuers are the certificates that issued chain's leaf, up to its
+// root (ServerTLS.CAFile): the intermediates sent along and the root this
+// host trusts (Let's Encrypt's sends no root), else a root sent along.
+func certIssuers(chain []*x509.Certificate, now time.Time) ([]*x509.Certificate, error) {
+	leaf := chain[0]
+	opts := x509.VerifyOptions{Intermediates: x509.NewCertPool(), CurrentTime: now, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	for _, c := range chain[1:] {
+		opts.Intermediates.AddCert(c)
+	}
+	chains, err := leaf.Verify(opts) // the system's roots
+	if last := chain[len(chain)-1]; err != nil && len(chain) > 1 && bytes.Equal(last.RawIssuer, last.RawSubject) && last.CheckSignatureFrom(last) == nil {
+		opts.Roots = x509.NewCertPool()
+		opts.Roots.AddCert(last)
+		chains, err = leaf.Verify(opts)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("the certificate doesn't chain up to a root this server trusts (%v); nothing changed", err)
+	}
+	return chains[0][1:], nil
+}
+
 // certIssuerName is who issued c, for people ("Let's Encrypt").
 func certIssuerName(c *x509.Certificate) string {
 	if len(c.Issuer.Organization) > 0 && c.Issuer.Organization[0] != "" {
@@ -281,6 +302,15 @@ func (a *Agent) pendingCertKey(db protocol.DatabaseSpec) (string, error) {
 		return "", fmt.Errorf("the database ID %q can't name a file", db.ID)
 	}
 	return filepath.Join(a.cfg.StateDir, "tls", db.ID+".pending.key"), nil
+}
+
+// ServerCertificate does a server_certificate task's work on db, as the
+// task runner does, and returns its log: the engines' integration tests
+// take the agent's own path with it.
+func (a *Agent) ServerCertificate(ctx context.Context, db protocol.DatabaseSpec, p protocol.ServerCertificateParams) (*protocol.ServerCertificateResult, string, error) {
+	tl := &taskLog{}
+	res, err := a.serverCertificate(ctx, db, p, tl)
+	return res, tl.String(), err
 }
 
 // serverCertificate runs a server_certificate task on db (on a Rowsafe

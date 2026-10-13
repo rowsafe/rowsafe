@@ -115,3 +115,21 @@ func TestServedCert(t *testing.T) {
 		t.Fatal("short greeting accepted")
 	}
 }
+
+// MySQL's ssl_ca for a CA's certificate: Rowsafe's file next to the
+// certificate, unless the server checks against someone else's CA.
+func TestServerCAFile(t *testing.T) {
+	const crt = "/etc/mysql/rowsafe-tls/rowsafe-server.crt"
+	for _, c := range []struct{ cert, ca, capath, want string }{
+		{crt, "", "", "/etc/mysql/rowsafe-tls/rowsafe-ca.crt"},
+		{crt, "/etc/mysql/rowsafe-tls/rowsafe-ca.crt", "", "/etc/mysql/rowsafe-tls/rowsafe-ca.crt"},
+		{"/var/lib/mysql/rowsafe-server.crt", "rowsafe-ca.crt", "", "/var/lib/mysql/rowsafe-ca.crt"},
+		{crt, "/etc/ssl/company-ca.pem", "", ""},
+		{crt, "", "/etc/ssl/certs", ""},
+		{"", "", "", ""},
+	} {
+		if got := serverCAFile(c.cert, "/var/lib/mysql/", c.ca, c.capath); got != c.want {
+			t.Errorf("%+v: %q", c, got)
+		}
+	}
+}

@@ -16,6 +16,8 @@
 #    a CA's chain for a name, reached by address; MYSQL_IT_TLS=self|ca|none picks)
 #   MYSQL_IT_RUN=Clone sh scripts/test-mysql.sh     # clones into a second, empty server
 #   MYSQL_IT_RUN=MoveIn sh scripts/test-mysql.sh    # move in from the first server into the second
+#   MYSQL_IT_RUN=Certificate sh scripts/test-mysql.sh  # the agent installs a CA's certificate for a name
+#                                                     on a server serving the installer's self-signed one
 set -eu
 cd "$(dirname "$0")/.."
 targets=${MYSQL_IT:-"mysql:8.4 mariadb:11.4"}
@@ -26,6 +28,7 @@ case ${MYSQL_IT_TLS:-$gtid} in
   ca | mixed) tls=ca ;;
   *) tls='' ;;
 esac
+[ "$run" != Certificate ] || tls=self # the installer's certificate; the test CA signs the new one
 proj=rowsafe-mysql-it-$$
 work=$(mktemp -d "${TMPDIR:-/tmp}/rowsafe-mysql-it.XXXXXX")
 arch=$(docker version --format '{{.Server.Arch}}')
@@ -78,7 +81,7 @@ server_tls() { # dir name: the server's own name (with the pair's)
   chmod 0755 "$1"
   chmod 0644 "$1"/*
 }
-if [ "$tls" = ca ]; then
+if [ "$tls" = ca ] || [ "$run" = Certificate ]; then
   mkdir -p "$work/tlsca"
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 2 -subj "/CN=Test Root" \
     -addext basicConstraints=critical,CA:TRUE -keyout "$work/tlsca/root.key" -out "$work/tlsca/root.crt" >/dev/null 2>&1
@@ -87,7 +90,7 @@ if [ "$tls" = ca ]; then
   printf 'basicConstraints=critical,CA:TRUE\nkeyUsage=keyCertSign,cRLSign\n' >"$work/tlsca/ext"
   openssl x509 -req -in "$work/tlsca/inter.csr" -CA "$work/tlsca/root.crt" -CAkey "$work/tlsca/root.key" -CAcreateserial -days 2 \
     -extfile "$work/tlsca/ext" -out "$work/tlsca/inter.crt" >/dev/null 2>&1
-  chmod 0644 "$work/tlsca/root.crt"
+  chmod 0644 "$work/tlsca/root.crt" "$work/tlsca/inter.crt" "$work/tlsca/inter.key"
 fi
 
 status=0
@@ -144,6 +147,15 @@ for target in $targets; do
       fi
     fi
   fi
+  if [ "$run" = Certificate ]; then
+    # The server serves the installer's files, which the agent (the test,
+    # as the same mysql user) replaces in place.
+    server_tls "$work/tls-$image-a" "$name"
+    chmod 0777 "$work/tls-$image-a"
+    primary_args="$primary_args --ssl-cert=/etc/mysql/rowsafe-tls/rowsafe-server.crt --ssl-key=/etc/mysql/rowsafe-tls/rowsafe-server.key"
+    tls_a="-v $work/tls-$image-a:/etc/mysql/rowsafe-tls"
+    tls_it="$tls_a -v $work/tlsca:/it/tlsca:ro -e ROWSAFE_MYSQL_IT_TLSCA=/it/tlsca -e SSL_CERT_FILE=/it/tlsca/root.crt"
+  fi
   docker volume create --label "$proj" "$name-ca" >/dev/null
   docker run --rm --label "$proj" -v "$name-ca:/c" --entrypoint chmod "$image:$version" 0777 /c
   # shellcheck disable=SC2086
@@ -169,8 +181,11 @@ for target in $targets; do
     done
   done
   sleep 3
+  itargs=$sbargs itnet=$net
+  # The agent checks the served certificate on 127.0.0.1: the server's network.
+  [ "$run" != Certificate ] || itargs=$tls_it itnet=container:$name
   # shellcheck disable=SC2086
-  if ! docker run --rm --label "$proj" --network "$net" $sbargs \
+  if ! docker run --rm --label "$proj" --network "$itnet" $itargs \
     -v "$data:/var/lib/mysql:ro" -v "$sock:$sockdir" \
     -v "$work/mysql.test:/it/mysql.test:ro" -v "$work/rootpw:/it/rootpw:ro" -v "$work/certs/public.crt:/it/ca.crt:ro" \
     -e ROWSAFE_MYSQL_IT="$image" -e ROWSAFE_MYSQL_IT_SOCKET=$sockdir/mysqld.sock \
