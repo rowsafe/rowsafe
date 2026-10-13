@@ -20,6 +20,7 @@ Features per database: `protocol.EngineCapabilities`.
 ## Get started
 
 ```sh
+curl -fsSL https://rowsafe.sh/cli | sh           # the CLI, on your Mac or Linux computer
 rowsafe login
 rowsafe hosts enroll-token                       # prints the install command
 curl -fsSL https://rowsafe.sh | sudo sh -s rse_… # on the database server
@@ -73,6 +74,7 @@ Full guide: [Quickstart](https://rowsafe.sh/docs/quickstart).
 | `internal/pgbackrest`, `internal/pginspect` | PostgreSQL. |
 | `internal/engine` | MySQL/MariaDB, MongoDB, ClickHouse, Redis/Valkey, SQLite, Qdrant, Meilisearch. |
 | `scripts/install.sh` | The installer served at `https://rowsafe.sh`. |
+| `scripts/cli.sh` | The CLI installer served at `https://rowsafe.sh/cli` (macOS and Linux). |
 | `release`, `cmd/rowsafe-release` | Release signing and verification. |
 
 ## Safety

@@ -15,7 +15,7 @@ It works with PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey, SQ
 
 - A Rowsafe account with the database connected.
 - The project's database named once, so the skill and the hook know which one to check: `.rowsafe.json` at the project root (`{"database": "app"}`, or `rowsafe init app` with the CLI), or `ROWSAFE_DATABASE`. Without it, Codex asks you which database.
-- For the hook only: the `rowsafe` CLI on your `PATH`, logged in (`rowsafe login`; see the [Quickstart](https://rowsafe.sh/docs/quickstart#install-the-cli-and-log-in)).
+- For the hook only: the `rowsafe` CLI on your `PATH` (`curl -fsSL https://rowsafe.sh/cli | sh`, macOS and Linux), logged in (`rowsafe login`).
 
 ## Install
 

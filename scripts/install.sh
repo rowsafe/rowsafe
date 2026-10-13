@@ -15341,6 +15341,14 @@ download_only() {
 }
 
 main() {
+  if [ "$(uname -s)" = Darwin ]; then
+    say "This is a Mac. The Rowsafe agent runs on your Linux servers, next to the database"
+    say "(or in Docker there: https://rowsafe.sh/docs/guides/docker)."
+    say ""
+    say "To install the rowsafe CLI on this Mac (no sudo):"
+    say "  curl -fsSL https://rowsafe.sh/cli | sh"
+    exit 1
+  fi
   mode=install
   purge=0
   dir=''
