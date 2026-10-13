@@ -604,6 +604,7 @@ func (d *dbaRun) inventory(ctx context.Context) (*protocol.DBInventory, error) {
 	} else {
 		locked = "account_locked"
 	}
+	auth := d.s.mariadbAccounts(ctx, d.db)
 	rows, err = d.db.QueryContext(ctx, `SELECT User, Host, IFNULL(plugin, ''), IFNULL(authentication_string, '') = '', `+locked+`, `+role+`,
 		Super_priv, Create_priv, Create_user_priv, Repl_slave_priv FROM mysql.user ORDER BY User, Host LIMIT 501`)
 	if err != nil {
@@ -620,9 +621,9 @@ func (d *dbaRun) inventory(ctx context.Context) (*protocol.DBInventory, error) {
 		if roleV == "Y" {
 			continue
 		}
-		x := protocol.DBUser{Name: u.display(), Login: lockedV != "Y", Superuser: super == "Y", CreateDB: create == "Y",
+		x := protocol.DBUser{Name: u.display(), Superuser: super == "Y", CreateDB: create == "Y",
 			CreateRole: createUser == "Y", Replication: repl == "Y", Connections: userConns[u.user]}
-		x.Password = passwordKind(plugin, empty)
+		x.Password, x.Login = d.s.loginKind(auth, u, plugin, empty, lockedV == "Y")
 		for _, g := range grants[u] {
 			x.Databases = append(x.Databases, g.db)
 			if g.create == "Y" {

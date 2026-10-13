@@ -151,6 +151,36 @@ var adminExtra = func(t *testing.T, ctx context.Context, e *Engine, env agent.En
 	if len(es.AnonymousUsers) != 1 || !es.TestDatabase || len(es.OpenNoPassword) != 1 || len(rep.Roles) == 0 {
 		t.Fatalf("report: %+v", es)
 	}
+	// How accounts log in, as Pulse reads it: Rowsafe's own password is
+	// stored the server's modern way (MariaDB's is mysql_native_password);
+	// the server's locked accounts can't log in; on MariaDB a login only
+	// the system's user can use (Debian's root and mysql: 'invalid' or the
+	// socket) is a socket login.
+	want := map[string]protocol.RoleInfo{"rowsafe@localhost": {CanLogin: true, Password: protocol.PasswordSet}}
+	if e.flavor.mariadb() {
+		if _, err := adb.ExecContext(ctx, "CREATE USER IF NOT EXISTS 'sockonly'@'localhost' IDENTIFIED VIA mysql_native_password USING 'invalid' OR unix_socket"); err != nil {
+			t.Fatal(err)
+		}
+		defer adb.ExecContext(ctx, "DROP USER IF EXISTS 'sockonly'@'localhost'") //nolint:errcheck
+		want["sockonly@localhost"] = protocol.RoleInfo{CanLogin: true, Password: protocol.PasswordSocket}
+		want["mariadb.sys@localhost"] = protocol.RoleInfo{CanLogin: false, Password: protocol.PasswordNone}
+		if rep, err = e.SecurityReport(ctx, env, spec); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		want["mysql.sys@localhost"] = protocol.RoleInfo{CanLogin: false, Password: protocol.PasswordSet}
+	}
+	for _, r := range rep.Roles {
+		if w, ok := want[r.Name]; ok {
+			if r.CanLogin != w.CanLogin || r.Password != w.Password {
+				t.Errorf("%s: can log in %v, password %s; want %v, %s", r.Name, r.CanLogin, r.Password, w.CanLogin, w.Password)
+			}
+			delete(want, r.Name)
+		}
+	}
+	if len(want) > 0 {
+		t.Errorf("not in the report: %v", want)
+	}
 	for _, a := range []string{protocol.SecDropAnonymous, protocol.SecDropTestDatabase} {
 		res, err := e.SecurityFix(ctx, env, spec, protocol.SecurityFixParams{Action: a}, &testLog{t: t})
 		if err != nil {

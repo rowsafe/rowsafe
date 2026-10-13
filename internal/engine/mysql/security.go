@@ -68,6 +68,7 @@ func (e *Engine) SecurityReport(ctx context.Context, env agent.EngineEnv, spec p
 	} else {
 		locked = "account_locked"
 	}
+	auth := s.mariadbAccounts(ctx, db)
 	rows, err = db.QueryContext(ctx, `SELECT User, Host, IFNULL(plugin, ''), IFNULL(authentication_string, '') = '', `+locked+`, `+role+`, Super_priv
 		FROM mysql.user ORDER BY User, Host LIMIT 200`)
 	if err != nil {
@@ -84,8 +85,7 @@ func (e *Engine) SecurityReport(ctx context.Context, env agent.EngineEnv, spec p
 			if roleV == "Y" {
 				continue
 			}
-			login := lockedV != "Y"
-			kind := passwordKind(plugin, empty)
+			kind, login := s.loginKind(auth, u, plugin, empty, lockedV == "Y")
 			rep.Roles = append(rep.Roles, protocol.RoleInfo{Name: u.display(), Superuser: super == "Y", CanLogin: login, Password: kind})
 			remote := !localHost(u.host)
 			switch {
