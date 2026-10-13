@@ -100,7 +100,9 @@
 #      restart),
 #      TLS from the network with the certificate at the exact paths, the
 #      ports closed by the firewall before the server listens publicly,
-#      Rowsafe's own login made unattended, the new server restarted once; a
+#      Rowsafe's own login made unattended, MySQL's and MariaDB's error and
+#      slow query logs in /var/log/mysql (slow queries over 1 second logged,
+#      readable by the agent, rotated), the new server restarted once; a
 #      re-run (after what the agent does later: ACL SAVE, CONFIG REWRITE)
 #      changes nothing; other servers refused. Needs the network.
 #      And OpenSearch on a customer's own server (opensearch-own, Debian 12):
@@ -5162,6 +5164,18 @@ cloud_mysql_checks() {
     [ "$(printf '%s\n' /etc/mysql/conf.d/zz-rowsafe-replication.cnf /etc/mysql/conf.d/zz-rowsafe.cnf | LC_ALL=C sort | tail -1)" = /etc/mysql/conf.d/zz-rowsafe.cnf ] ||
       fail "$name: zz-rowsafe.cnf isn't read after the replication settings"
   fi
+  # Its logs in files the agent reads, the slow query log on, rotated.
+  lconf=/etc/mysql/conf.d/zz-rowsafe-logs.cnf
+  [ "$(stat -c '%U %G %a' "$lconf")" = "root root 644" ] || fail "$name: $lconf owner/mode"
+  [ "$(printf '%s\n' "$lconf" /etc/mysql/conf.d/zz-rowsafe.cnf | LC_ALL=C sort | tail -1)" = /etc/mysql/conf.d/zz-rowsafe.cnf ] ||
+    fail "$name: zz-rowsafe.cnf isn't read after the log settings"
+  [ "$(q 'SELECT @@log_error, @@slow_query_log, @@slow_query_log_file, @@long_query_time' | tr '\t' ' ')" = "/var/log/mysql/error.log 1 /var/log/mysql/$engine-slow.log 1.000000" ] ||
+    fail "$name: log settings: $(q 'SELECT @@log_error, @@slow_query_log, @@slow_query_log_file, @@long_query_time')"
+  for f in /var/log/mysql/error.log "/var/log/mysql/$engine-slow.log"; do
+    runuser -u mysql -- head -c 1 "$f" >/dev/null || fail "$name: the agent's user can't read $f"
+  done
+  grep -ls '/var/log/mysql/' /etc/logrotate.d/* >/dev/null || fail "$name: nothing rotates /var/log/mysql"
+  [ "$engine" != mysql ] || [ "$(stat -c '%U %G %a' /etc/logrotate.d/rowsafe-mysql)" = "root root 644" ] || fail "$name: /etc/logrotate.d/rowsafe-mysql"
   grep -q "$label restarted" "$W/out" || fail "$name: the new $label wasn't restarted for backups"
   called "apply --database db_fake"
   [ "$(stat -c '%U %G %a' /etc/mysql/rowsafe-tls)" = "mysql mysql 750" ] || fail "$name: certificate folder owner/mode"

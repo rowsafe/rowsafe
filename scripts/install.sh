@@ -2279,6 +2279,7 @@ install_database() {
         case $_c in 8.4.*) ;; *) die "MySQL 8.4 isn't available for $OS_NAME from Oracle's repository (found ${_c:-nothing})" ;; esac
         mysql_local_conf
         mysql_replication_conf
+        mysql_logs_conf
         # root signs in through the socket only (auth_socket): no password.
         printf '%s\n' "mysql-community-server mysql-community-server/root-pass password " \
           "mysql-community-server mysql-community-server/re-root-pass password " | debconf-set-selections
@@ -2291,6 +2292,7 @@ install_database() {
         case ${_c#*:} in "$INSTALL_DB_VERSION".*) ;; *) die "MariaDB $INSTALL_DB_VERSION isn't available for $OS_NAME from MariaDB's repository (found ${_c:-nothing})" ;; esac
         mysql_local_conf
         mysql_replication_conf
+        mysql_logs_conf
         apt_install mariadb-server mariadb-client mariadb-backup
         ;;
       valkey)
@@ -2479,6 +2481,42 @@ mysql_replication_conf() {
       echo "enforce_gtid_consistency = ON"
     fi
   } | write_file "$_f" 0644 root:root || true
+}
+
+# mysql_logs_conf: before the packages start the new server, its logs in
+# files Rowsafe's agent (the mysql user) reads, in /var/log/mysql: the
+# error log (MariaDB writes it to the journal otherwise) and the slow
+# query log, on for statements over 1 second, so Pulse shows slow queries
+# from the first day. In conf.d, before Rowsafe's own option file:
+# Tuning's changes win. MariaDB's package rotates the folder; Oracle's
+# MySQL packages don't, so Rowsafe's logrotate file does (weekly, four
+# kept, copytruncate). A new server only: a re-run never changes it.
+mysql_logs_conf() {
+  _f=/etc/mysql/conf.d/zz-rowsafe-logs.cnf
+  [ ! -e "$_f" ] || return 0
+  install -d -m 0755 -o root -g root /etc/mysql "${_f%/*}"
+  {
+    echo "# Written by the Rowsafe installer (--install-$INSTALL_DB): $(engine_label "$INSTALL_DB")'s logs, in files"
+    echo "# Rowsafe reads; set when $(engine_label "$INSTALL_DB") was installed."
+    echo "[mysqld]"
+    echo "log_error = /var/log/mysql/error.log"
+    echo "slow_query_log = ON"
+    echo "slow_query_log_file = /var/log/mysql/$INSTALL_DB-slow.log"
+    echo "long_query_time = 1"
+  } | write_file "$_f" 0644 root:root || true
+  [ "$INSTALL_DB" = mysql ] || return 0
+  {
+    echo "# Written by the Rowsafe installer (--install-mysql): MySQL's logs."
+    echo "/var/log/mysql/*.log {"
+    echo "  weekly"
+    echo "  rotate 4"
+    echo "  compress"
+    echo "  delaycompress"
+    echo "  missingok"
+    echo "  notifempty"
+    echo "  copytruncate"
+    echo "}"
+  } | write_file /etc/logrotate.d/rowsafe-mysql 0644 root:root || true
 }
 
 # mysql_root_sql: the statements on stdin, run as MySQL's/MariaDB's root
