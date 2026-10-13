@@ -49,7 +49,7 @@ When the user allowed you to act, `request_change` and the direct change tools (
 
 ## The `rowsafe` CLI
 
-When the CLI is installed and logged in (`rowsafe whoami`), it does everything the dashboard does, with the user's rights, like `doctl` or `aws`: `rowsafe --help` lists it (backups, Marks, Rewind, fixes, settings, security, updates, standby, moves, pooling, databases and users, Rowsafe Cloud servers, alerts, logs). Add `--json` to read its output. Changes that are disruptive or destructive ask for confirmation; pass `--yes` only after the user agreed in chat. If Rowsafe refuses, the CLI prints the reason: tell the user.
+When the CLI is installed and logged in (`rowsafe whoami`), it does everything the dashboard does, with the user's rights, like `doctl` or `aws`: `rowsafe --help` lists it (backups, Marks, Rewind, fixes, settings, security, updates, standby, moves, pooling, databases and users, Rowsafe Cloud servers, alerts, logs). Add `--json` to read its output. Changes that are disruptive or destructive ask for confirmation; pass `--yes` only after the user agreed in chat. If Rowsafe refuses, the CLI prints the reason: tell the user. If it isn't installed and the user wants it, it installs with `curl -fsSL https://rowsafe.sh/cli | sh` (macOS and Linux, no sudo; ask first), then `rowsafe login`.
 
 ## What counts as destructive
 

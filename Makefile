@@ -4,6 +4,7 @@
 #   make test                  unit tests
 #   make lint                  go vet, gofmt, shellcheck, installer consistency
 #   make test-installer        scripts/install.sh in Debian/Ubuntu containers (Docker)
+#   make test-cli-installer    scripts/cli.sh (rowsafe.sh/cli) on this computer, macOS or Linux
 #   make test-installer-cloud  --install-postgres and --listen-public for real, as cloud-init runs them (Docker, network)
 #   make test-mongodb          the MongoDB engine on real mongo 7.0/8.0 containers (Docker)
 #   make test-clickhouse       the ClickHouse engine on real ClickHouse 26.8/26.3/25.8/24.8 containers (Docker)
@@ -39,7 +40,7 @@ AGENT_LDFLAGS := -s -w -buildid= -X $(PKG)/internal/agent.Version=$(VERSION) -X 
 MAIN_LDFLAGS := -s -w -buildid= -X main.version=$(VERSION)
 GOBUILD := CGO_ENABLED=0 GOFLAGS=-mod=readonly $(GO) build -trimpath -buildvcs=false
 
-.PHONY: all build test lint check-installer test-installer test-installer-cloud test-mongodb test-clickhouse test-redis test-qdrant check-qdrant-pins test-sqlite test-rewind test-secondcopy test-mysql test-upgrade test-pooling test-permissions test-action dist release check-release-env clean test-opensearch
+.PHONY: all build test lint check-installer test-installer test-cli-installer test-installer-cloud test-mongodb test-clickhouse test-redis test-qdrant check-qdrant-pins test-sqlite test-rewind test-secondcopy test-mysql test-upgrade test-pooling test-permissions test-action dist release check-release-env clean test-opensearch
 
 all: lint test build
 
@@ -62,7 +63,7 @@ lint: check-installer
 		done; \
 	done
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck -S warning -s sh scripts/install.sh scripts/test-install.sh scripts/test-rewind.sh scripts/test-pooling.sh scripts/test-secondcopy.sh scripts/test-mysql.sh scripts/test-upgrade.sh scripts/test-permissions.sh scripts/rowsafe-agent-guard scripts/rowsafe-pg-restart scripts/rowsafe-firewall scripts/rowsafe-pg-create-cluster scripts/rowsafe-allow scripts/check-qdrant-pins.sh; \
+		shellcheck -S warning -s sh scripts/install.sh scripts/cli.sh scripts/test-cli.sh scripts/test-install.sh scripts/test-rewind.sh scripts/test-pooling.sh scripts/test-secondcopy.sh scripts/test-mysql.sh scripts/test-upgrade.sh scripts/test-permissions.sh scripts/rowsafe-agent-guard scripts/rowsafe-pg-restart scripts/rowsafe-firewall scripts/rowsafe-pg-create-cluster scripts/rowsafe-allow scripts/check-qdrant-pins.sh; \
 		shellcheck -S warning -s bash integrations/github-action/scripts/*.sh integrations/github-action/test/*.sh integrations/github-action/export.sh; \
 	else echo "shellcheck not installed; skipping"; fi
 
@@ -119,6 +120,9 @@ check-installer:
 
 test-installer:
 	sh scripts/test-install.sh
+
+test-cli-installer:
+	sh scripts/test-cli.sh
 
 test-installer-cloud:
 	sh scripts/test-install.sh --cloud
