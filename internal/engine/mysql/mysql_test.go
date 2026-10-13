@@ -297,14 +297,27 @@ func TestDBAdminHelpers(t *testing.T) {
 	if u := parseUser("app@10.0.%"); u != (dbaUser{"app", "10.0.%"}) || u.display() != "app@10.0.%" || u.sql() != "'app'@'10.0.%'" {
 		t.Error(u)
 	}
-	for plugin, want := range map[string]string{"auth_socket": protocol.PasswordSocket, "mysql_native_password": protocol.PasswordWeak,
-		"caching_sha2_password": protocol.PasswordSet} {
-		if got := passwordKind(plugin, false); got != want {
-			t.Errorf("%s: %s", plugin, got)
+	for _, c := range []struct {
+		plugin, auth string
+		mariadb      bool
+		want         string
+	}{
+		{"auth_socket", "", false, protocol.PasswordSocket},
+		{"mysql_native_password", "set", false, protocol.PasswordWeak},
+		{"caching_sha2_password", "set", false, protocol.PasswordSet},
+		{"caching_sha2_password", "", false, protocol.PasswordNone},
+		// MariaDB 11.8 on Debian as installed: root and mysql sign in
+		// through the socket ("invalid" password), mariadb.sys is locked;
+		// a password from Rowsafe is mysql_native_password, its default.
+		{"mysql_native_password", "invalid", true, protocol.PasswordSocket},
+		{"mysql_native_password", "set", true, protocol.PasswordSet},
+		{"mysql_native_password", "", true, protocol.PasswordNone},
+		{"mysql_old_password", "set", true, protocol.PasswordWeak},
+		{"unix_socket", "", true, protocol.PasswordSocket},
+	} {
+		if got := passwordKind(c.plugin, c.auth, c.mariadb); got != c.want {
+			t.Errorf("%+v: %s", c, got)
 		}
-	}
-	if passwordKind("caching_sha2_password", true) != protocol.PasswordNone {
-		t.Error("empty")
 	}
 }
 

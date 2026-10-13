@@ -10,9 +10,12 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/binary"
+	"encoding/pem"
 	"io"
 	"math/big"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -113,5 +116,103 @@ func TestServedCert(t *testing.T) {
 	}
 	if _, err := greetingCapabilities([]byte{10, 'x'}); err == nil {
 		t.Fatal("short greeting accepted")
+	}
+}
+
+// TestIssuerChainPEM: MySQL's ssl_ca for each kind of certificate file.
+func TestIssuerChainPEM(t *testing.T) {
+	type ca struct {
+		cert *x509.Certificate
+		key  *ecdsa.PrivateKey
+	}
+	serial := int64(10)
+	issue := func(name string, parent *ca, isCA bool) *ca {
+		key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		serial++
+		tmpl := &x509.Certificate{SerialNumber: big.NewInt(serial), Subject: pkix.Name{CommonName: name},
+			NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+			BasicConstraintsValid: true, IsCA: isCA, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+		if isCA {
+			tmpl.KeyUsage = x509.KeyUsageCertSign
+		} else {
+			tmpl.DNSNames = []string{name}
+		}
+		signer, signerKey := tmpl, key
+		if parent != nil {
+			signer, signerKey = parent.cert, parent.key
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, signer, &key.PublicKey, signerKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, _ := x509.ParseCertificate(der)
+		return &ca{c, key}
+	}
+	file := func(cs ...*ca) string {
+		var b []byte
+		for _, c := range cs {
+			b = append(b, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.cert.Raw})...)
+		}
+		p := filepath.Join(t.TempDir(), "rowsafe-server.crt")
+		if err := os.WriteFile(p, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	names := func(b []byte) string {
+		var out []string
+		for rest := b; ; {
+			var blk *pem.Block
+			if blk, rest = pem.Decode(rest); blk == nil {
+				break
+			}
+			c, _ := x509.ParseCertificate(blk.Bytes)
+			out = append(out, c.Subject.CommonName)
+		}
+		return strings.Join(out, ",")
+	}
+
+	// Like Let's Encrypt: leaf, YE2, Root YE (cross-signed by X2), X2
+	// (cross-signed by X1); the system trusts X1.
+	x1 := issue("X1", nil, true)
+	x2 := issue("X2", x1, true)
+	ye := issue("Root YE", x2, true)
+	ye2 := issue("YE2", ye, true)
+	leaf := issue("db.cloud.rowsafe.test", ye2, false)
+	system := x509.NewCertPool()
+	system.AddCert(x1.cert)
+	if got, err := issuerChainPEM(file(leaf, ye2, ye, x2), system); err != nil || names(got) != "YE2,Root YE,X2,X1" {
+		t.Fatalf("public authority: %q %v", names(got), err)
+	}
+	// A shorter path to a root the system trusts wins.
+	selfYE := &ca{key: ye.key}
+	{
+		tmpl := *ye.cert
+		der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &ye.key.PublicKey, ye.key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		selfYE.cert, _ = x509.ParseCertificate(der)
+	}
+	system.AddCert(selfYE.cert)
+	if got, err := issuerChainPEM(file(leaf, ye2, ye, x2), system); err != nil || names(got) != "YE2,Root YE" {
+		t.Fatalf("shorter path: %q %v", names(got), err)
+	}
+	// Self-signed (the installer's): itself.
+	self := issue("db.test", nil, false)
+	if got, err := issuerChainPEM(file(self), x509.NewCertPool()); err != nil || names(got) != "db.test" {
+		t.Fatalf("self-signed: %q %v", names(got), err)
+	}
+	// A private authority ending the chain (the e2e test authority).
+	testCA := issue("Rowsafe test CA", nil, true)
+	if got, err := issuerChainPEM(file(issue("db.test", testCA, false), testCA), x509.NewCertPool()); err != nil || names(got) != "Rowsafe test CA" {
+		t.Fatalf("private authority: %q %v", names(got), err)
+	}
+	// Issuers that lead nowhere trusted: an error, nothing loaded.
+	if _, err := issuerChainPEM(file(leaf, ye2), x509.NewCertPool()); err == nil {
+		t.Fatal("an untrusted chain: accepted")
+	}
+	if _, err := issuerChainPEM(file(), nil); err == nil {
+		t.Fatal("no certificate: accepted")
 	}
 }

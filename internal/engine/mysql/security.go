@@ -62,22 +62,15 @@ func (e *Engine) SecurityReport(ctx context.Context, env agent.EngineEnv, spec p
 
 	var note []string
 	// Accounts.
-	locked, role := "'N'", "'N'"
-	if s.flavor.mariadb() {
-		role = "is_role"
-	} else {
-		locked = "account_locked"
-	}
-	rows, err = db.QueryContext(ctx, `SELECT User, Host, IFNULL(plugin, ''), IFNULL(authentication_string, '') = '', `+locked+`, `+role+`, Super_priv
+	rows, err = db.QueryContext(ctx, `SELECT User, Host, IFNULL(plugin, ''), `+accountColumns(ctx, db, s.flavor.mariadb())+`, Super_priv
 		FROM mysql.user ORDER BY User, Host LIMIT 200`)
 	if err != nil {
 		note = append(note, "accounts could not be read: "+err.Error())
 	} else {
 		for rows.Next() {
 			var u dbaUser
-			var plugin, lockedV, roleV, super string
-			var empty bool
-			if err := rows.Scan(&u.user, &u.host, &plugin, &empty, &lockedV, &roleV, &super); err != nil {
+			var plugin, auth, lockedV, roleV, super string
+			if err := rows.Scan(&u.user, &u.host, &plugin, &auth, &lockedV, &roleV, &super); err != nil {
 				rows.Close()
 				return rep, err
 			}
@@ -85,7 +78,7 @@ func (e *Engine) SecurityReport(ctx context.Context, env agent.EngineEnv, spec p
 				continue
 			}
 			login := lockedV != "Y"
-			kind := passwordKind(plugin, empty)
+			kind := passwordKind(plugin, auth, s.flavor.mariadb())
 			rep.Roles = append(rep.Roles, protocol.RoleInfo{Name: u.display(), Superuser: super == "Y", CanLogin: login, Password: kind})
 			remote := !localHost(u.host)
 			switch {

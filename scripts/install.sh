@@ -344,6 +344,7 @@ DB_FRESH=0         # this run installed it (nothing runs on it yet)
 CH_CONF_CHANGED=0  # --install-clickhouse's settings changed in this run
 OS_CONF_CHANGED=0  # --install-opensearch's settings changed in this run
 QD_CONF_CHANGED=0  # --install-qdrant's settings, keys or unit changed in this run
+MY_LOG_CHANGED=0   # --install-mysql/-mariadb: its log settings were written in this run (a restart applies them)
 INSTALL_TWICE="--install-postgres, --install-mysql, --install-mariadb, --install-valkey, --install-clickhouse, --install-opensearch, --install-qdrant and --install-meilisearch each install a database server on a fresh server: give only one"
 SQLITE_PATHS=''    # --sqlite PATH, one per line
 SQLITE_LIST=$CONFIG_DIR/sqlite-paths # the agent's SQLite files (one per line)
@@ -2354,7 +2355,13 @@ install_database() {
   [ "$INSTALL_DB" != clickhouse ] || clickhouse_conf
   [ "$INSTALL_DB" != opensearch ] || opensearch_conf # opensearch
   [ "$INSTALL_DB" != qdrant ] || qdrant_conf
+  MY_LOG_CHANGED=0
+  case $INSTALL_DB in mysql | mariadb) [ "$DB_FRESH" != 1 ] || ! mysql_log_conf || MY_LOG_CHANGED=1 ;; esac
   db_running
+  if [ "$MY_LOG_CHANGED" = 1 ] && [ "$DB_STARTED" != 1 ]; then
+    note "restarting the new $(engine_label "$INSTALL_DB") so it writes its logs to /var/log/mysql"
+    db_restart || die "restarting $(engine_label "$INSTALL_DB") failed (see above)"
+  fi
   case $INSTALL_DB in
     valkey) valkey_secure ;;
     clickhouse) clickhouse_secure ;;
@@ -2479,6 +2486,46 @@ mysql_replication_conf() {
       echo "enforce_gtid_consistency = ON"
     fi
   } | write_file "$_f" 0644 root:root || true
+}
+
+# mysql_log_conf: a server this run installed writes its error log and its
+# slow query log (statements over 1 second) to files in /var/log/mysql,
+# which Pulse reads (the agent runs as mysql); MariaDB's packages send the
+# error log to the journal, and both leave slow queries unlogged. In conf.d,
+# before Rowsafe's own option file (zz-rowsafe.cnf, the agent's settings,
+# sorts after it). Rotated by its packages' logrotate file, or Rowsafe's
+# when none covers /var/log/mysql. Returns 0 when it wrote the file (a
+# restart applies it).
+mysql_log_conf() {
+  _f=/etc/mysql/conf.d/zz-rowsafe-logs.cnf
+  [ ! -e "$_f" ] || return 1
+  [ -d /var/log/mysql ] || install -d -m 2750 -o mysql -g adm /var/log/mysql 2>/dev/null || install -d -m 0750 -o mysql -g mysql /var/log/mysql
+  {
+    echo "# Written by the Rowsafe installer (--install-$INSTALL_DB): $(engine_label "$INSTALL_DB")'s logs, in files"
+    echo "# Rowsafe's Pulse reads. Rowsafe's settings (zz-rowsafe.cnf) come after this file."
+    echo "[mysqld]"
+    echo "log_error = /var/log/mysql/error.log"
+    echo "slow_query_log = ON"
+    echo "slow_query_log_file = /var/log/mysql/mysql-slow.log"
+    echo "long_query_time = 1"
+  } | write_file "$_f" 0644 root:root || return 1
+  if [ -d /etc/logrotate.d ] && ! grep -qs '/var/log/mysql/' /etc/logrotate.d/*; then
+    {
+      echo "# Written by the Rowsafe installer (--install-$INSTALL_DB): rotates $(engine_label "$INSTALL_DB")'s logs."
+      echo "/var/log/mysql/error.log /var/log/mysql/mysql-slow.log {"
+      echo "  su mysql mysql"
+      echo "  daily"
+      echo "  rotate 7"
+      echo "  maxsize 100M"
+      echo "  missingok"
+      echo "  notifempty"
+      echo "  compress"
+      echo "  delaycompress"
+      echo "  copytruncate"
+      echo "}"
+    } | write_file /etc/logrotate.d/rowsafe-mysql 0644 root:root || true
+  fi
+  return 0
 }
 
 # mysql_root_sql: the statements on stdin, run as MySQL's/MariaDB's root

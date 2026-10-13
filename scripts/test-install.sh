@@ -5162,6 +5162,11 @@ cloud_mysql_checks() {
     [ "$(printf '%s\n' /etc/mysql/conf.d/zz-rowsafe-replication.cnf /etc/mysql/conf.d/zz-rowsafe.cnf | LC_ALL=C sort | tail -1)" = /etc/mysql/conf.d/zz-rowsafe.cnf ] ||
       fail "$name: zz-rowsafe.cnf isn't read after the replication settings"
   fi
+  # Its logs, in files Pulse reads (the agent runs as mysql), rotated.
+  [ "$(q 'SELECT @@log_error, @@slow_query_log, @@slow_query_log_file, @@long_query_time' | tr '\t' ' ')" = "/var/log/mysql/error.log 1 /var/log/mysql/mysql-slow.log 1.000000" ] ||
+    fail "$name: log settings: $(q 'SELECT @@log_error, @@slow_query_log, @@slow_query_log_file, @@long_query_time')"
+  runuser -u mysql -- test -r /var/log/mysql/error.log || fail "$name: the agent's user can't read the error log"
+  grep -qs '/var/log/mysql/' /etc/logrotate.d/* || fail "$name: nothing rotates /var/log/mysql"
   grep -q "$label restarted" "$W/out" || fail "$name: the new $label wasn't restarted for backups"
   called "apply --database db_fake"
   [ "$(stat -c '%U %G %a' /etc/mysql/rowsafe-tls)" = "mysql mysql 750" ] || fail "$name: certificate folder owner/mode"

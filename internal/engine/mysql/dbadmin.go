@@ -597,23 +597,15 @@ func (d *dbaRun) inventory(ctx context.Context) (*protocol.DBInventory, error) {
 	}
 	owners := map[string][]string{}
 
-	locked := "'N'"
-	role := "'N'"
-	if d.s.flavor.mariadb() {
-		role = "is_role"
-	} else {
-		locked = "account_locked"
-	}
-	rows, err = d.db.QueryContext(ctx, `SELECT User, Host, IFNULL(plugin, ''), IFNULL(authentication_string, '') = '', `+locked+`, `+role+`,
+	rows, err = d.db.QueryContext(ctx, `SELECT User, Host, IFNULL(plugin, ''), `+accountColumns(ctx, d.db, d.s.flavor.mariadb())+`,
 		Super_priv, Create_priv, Create_user_priv, Repl_slave_priv FROM mysql.user ORDER BY User, Host LIMIT 501`)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var u dbaUser
-		var plugin, lockedV, roleV, super, create, createUser, repl string
-		var empty bool
-		if err := rows.Scan(&u.user, &u.host, &plugin, &empty, &lockedV, &roleV, &super, &create, &createUser, &repl); err != nil {
+		var plugin, auth, lockedV, roleV, super, create, createUser, repl string
+		if err := rows.Scan(&u.user, &u.host, &plugin, &auth, &lockedV, &roleV, &super, &create, &createUser, &repl); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -622,7 +614,7 @@ func (d *dbaRun) inventory(ctx context.Context) (*protocol.DBInventory, error) {
 		}
 		x := protocol.DBUser{Name: u.display(), Login: lockedV != "Y", Superuser: super == "Y", CreateDB: create == "Y",
 			CreateRole: createUser == "Y", Replication: repl == "Y", Connections: userConns[u.user]}
-		x.Password = passwordKind(plugin, empty)
+		x.Password = passwordKind(plugin, auth, d.s.flavor.mariadb())
 		for _, g := range grants[u] {
 			x.Databases = append(x.Databases, g.db)
 			if g.create == "Y" {
@@ -662,23 +654,52 @@ func (d *dbaRun) inventory(ctx context.Context) (*protocol.DBInventory, error) {
 	return inv, nil
 }
 
-// passwordKind maps an authentication plugin to protocol.Password*.
-func passwordKind(plugin string, empty bool) string {
+// passwordKind maps an authentication plugin and the form of its
+// authentication string (accountColumns: "" none, "invalid", "set") to
+// protocol.Password*. MariaDB's mysql_native_password is its default, the
+// one every client speaks, and what Rowsafe's own passwords use there: not
+// "old-style" on MariaDB (MySQL's default is caching_sha2_password). MariaDB's
+// "invalid" matches no password: its root and mysql accounts sign in
+// through the socket instead.
+func passwordKind(plugin, auth string, mariadb bool) string {
 	switch plugin {
 	case "auth_socket", "unix_socket":
 		return protocol.PasswordSocket
 	case "mysql_native_password", "mysql_old_password":
-		if empty {
+		switch {
+		case auth == "":
 			return protocol.PasswordNone
+		case auth == "invalid" && mariadb:
+			return protocol.PasswordSocket
+		case plugin == "mysql_native_password" && mariadb:
+			return protocol.PasswordSet
 		}
 		return protocol.PasswordWeak
 	case "", "caching_sha2_password", "sha256_password", "ed25519", "parsec":
-		if empty {
+		if auth == "" {
 			return protocol.PasswordNone
 		}
 		return protocol.PasswordSet
 	}
 	return protocol.PasswordSet // PAM, LDAP...: someone else checks the password
+}
+
+// accountColumns are the account columns both readers of mysql.user select
+// (never a hash): the authentication string's form, locked ('Y'/'N') and
+// role ('Y'/'N'). MariaDB keeps an account's lock in mysql.global_priv
+// (10.4 and later), not in the mysql.user view.
+func accountColumns(ctx context.Context, db *sql.DB, mariadb bool) string {
+	auth := `CASE WHEN IFNULL(authentication_string, '') = '' THEN '' WHEN authentication_string = 'invalid' THEN 'invalid' ELSE 'set' END`
+	if !mariadb {
+		return auth + `, account_locked, 'N'`
+	}
+	locked := "'N'"
+	var n int
+	if db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'mysql' AND TABLE_NAME = 'global_priv'`).Scan(&n) == nil && n > 0 {
+		locked = `IF((SELECT JSON_VALUE(g.Priv, '$.account_locked') FROM mysql.global_priv g
+			WHERE g.User = mysql.user.User AND g.Host = mysql.user.Host) IN ('1', 'true'), 'Y', 'N')`
+	}
+	return auth + ", " + locked + ", is_role"
 }
 
 func upperFirst(s string) string {

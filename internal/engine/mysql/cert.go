@@ -1,15 +1,18 @@
 package mysql
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"database/sql"
 	"encoding/binary"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"strconv"
 	"time"
@@ -25,7 +28,8 @@ import (
 // rewinds never carry the key or put an older one back; servers set up
 // before had them in the data directory, which the installer moves); the
 // agent replaces both and has the server load them again:
-// ALTER INSTANCE RELOAD TLS on MySQL, FLUSH SSL on MariaDB. Nothing
+// ALTER INSTANCE RELOAD TLS on MySQL (with the certificate's issuers in
+// ssl_ca, rowsafe-server-ca.crt next to it), FLUSH SSL on MariaDB. Nothing
 // restarts, and connections already open keep their certificate.
 
 var _ agent.EngineCertificates = (*Engine)(nil)
@@ -35,7 +39,71 @@ const (
 	serverTLSDir   = "/etc/mysql/rowsafe-tls"
 	serverCertFile = "rowsafe-server.crt"
 	serverKeyFile  = "rowsafe-server.key"
+	serverCAFile   = "rowsafe-server-ca.crt" // MySQL's ssl_ca: the certificate's issuers
 )
+
+// issuerChainPEM is what MySQL's ssl_ca needs for the certificate in
+// certFile: every issuer up to a root, each checkable from the others. A
+// self-signed certificate is its own; one from a public authority gets its
+// intermediates and the system's root that signs them (roots nil: the
+// system's); a private authority whose root ends the chain (the e2e test
+// authority) gets the chain's own.
+func issuerChainPEM(certFile string, roots *x509.CertPool) ([]byte, error) {
+	data, err := os.ReadFile(certFile)
+	if err != nil {
+		return nil, err
+	}
+	var chain []*x509.Certificate
+	for rest := data; ; {
+		var b *pem.Block
+		if b, rest = pem.Decode(rest); b == nil {
+			break
+		}
+		if b.Type != "CERTIFICATE" {
+			continue
+		}
+		c, err := x509.ParseCertificate(b.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("reading %s: %w", certFile, err)
+		}
+		chain = append(chain, c)
+	}
+	if len(chain) == 0 {
+		return nil, fmt.Errorf("%s holds no certificate", certFile)
+	}
+	selfSigned := func(c *x509.Certificate) bool {
+		return bytes.Equal(c.RawIssuer, c.RawSubject) && c.CheckSignature(c.SignatureAlgorithm, c.RawTBSCertificate, c.Signature) == nil
+	}
+	encode := func(cs []*x509.Certificate) []byte {
+		var out []byte
+		for _, c := range cs {
+			out = append(out, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.Raw})...)
+		}
+		return out
+	}
+	leaf := chain[0]
+	if selfSigned(leaf) {
+		return encode(chain[:1]), nil
+	}
+	inter := x509.NewCertPool()
+	for _, c := range chain[1:] {
+		inter.AddCert(c)
+	}
+	paths, err := leaf.Verify(x509.VerifyOptions{Intermediates: inter, Roots: roots, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}})
+	if err != nil {
+		if len(chain) > 1 && selfSigned(chain[len(chain)-1]) {
+			return encode(chain[1:]), nil
+		}
+		return nil, fmt.Errorf("the certificate's issuers don't lead to a root this server trusts (%v)", err)
+	}
+	best := paths[0]
+	for _, p := range paths[1:] {
+		if len(p) < len(best) {
+			best = p
+		}
+	}
+	return encode(best[1:]), nil
+}
 
 // ServerTLS is how the server serves TLS.
 func (e *Engine) ServerTLS(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec) (*agent.ServerTLS, error) {
@@ -55,12 +123,29 @@ func (e *Engine) ServerTLS(ctx context.Context, env agent.EngineEnv, db protocol
 		conn.Close()
 		return nil, err
 	}
-	reload := "ALTER INSTANCE RELOAD TLS"
-	if s.flavor.mariadb() {
-		reload = "FLUSH SSL"
-	}
 	st.Reload = func(ctx context.Context) error {
-		_, err := conn.ExecContext(ctx, reload)
+		if s.flavor.mariadb() {
+			_, err := conn.ExecContext(ctx, "FLUSH SSL")
+			return err
+		}
+		// MySQL's reload checks the certificate against ssl_ca, and only
+		// against it (the chain's other certificates don't count): one
+		// from Let's Encrypt is "Invalid certificates" without its issuers
+		// there. Written from the file being loaded, each time (a rollback
+		// loads the previous one); a restart, which doesn't check, forgets
+		// the setting until the next reload.
+		ca, err := issuerChainPEM(st.CertFile, nil)
+		if err != nil {
+			return err
+		}
+		caFile := filepath.Join(filepath.Dir(st.CertFile), serverCAFile)
+		if err := writeFileAtomic(caFile, ca, 0o644); err != nil {
+			return fmt.Errorf("writing %s: %w", caFile, err)
+		}
+		if _, err := conn.ExecContext(ctx, "SET GLOBAL ssl_ca = "+quoteString(caFile)); err != nil {
+			return err
+		}
+		_, err = conn.ExecContext(ctx, "ALTER INSTANCE RELOAD TLS")
 		return err
 	}
 	if port <= 0 {
