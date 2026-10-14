@@ -20,8 +20,9 @@ const shortHelp = `rowsafe - backups you can restore to any second, tested every
 
 Getting started
   rowsafe login                      log in with your browser
-  rowsafe hosts enroll-token         the install command for a database server; the installer
+  rowsafe hosts add root@SERVER      install Rowsafe on a database server over SSH; the installer
                                      sets up backups there and asks before changing anything
+  rowsafe hosts enroll-token         the install command to paste on a server yourself
   rowsafe restart [NAME]             restart the database when setup needs it (asks first)
   rowsafe init NAME                  make NAME this project's database (.rowsafe.json)
   rowsafe adopt | plan | apply | verify NAME

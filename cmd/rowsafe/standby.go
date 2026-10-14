@@ -229,7 +229,7 @@ func standbyAddCmd(ctx context.Context, c *client.Client, args []string) error {
 			names = append(names, s)
 		}
 		if len(names) == 0 {
-			return errors.New("no other server with the Rowsafe agent in this organization: install it on the standby server first (rowsafe hosts enroll-token)")
+			return errors.New("no other server with the Rowsafe agent in this organization: install it on the standby server first (rowsafe hosts add root@SERVER)")
 		}
 		return fmt.Errorf("which server? Pass --host with one of: %s", strings.Join(names, ", "))
 	}
