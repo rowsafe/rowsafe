@@ -599,6 +599,19 @@ func TestCloudClone(t *testing.T) {
 	if _, err := run(t, "cloud", "clone", "shop", "t3", "--delete-after", "90d", "--yes"); err == nil || !strings.Contains(err.Error(), "30 days") {
 		t.Errorf("too long: %v", err)
 	}
+
+	// A MySQL source: never an Arm size, even the cheapest.
+	f.armSize = true
+	f.addServer("orders", "ready").Engine = protocol.EngineMySQL
+	if out, err := run(t, "cloud", "clone", "orders", "orders-test", "--cloud", "hetzner", "--yes"); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if req := f.clones[len(f.clones)-1]; req.Name != "orders-test" || req.Size != "small" {
+		t.Errorf("MySQL clone on %q, want small (not arm-s): %+v", req.Size, req)
+	}
+	if _, err := run(t, "cloud", "clone", "shop", "shop-arm", "--cloud", "hetzner", "--yes"); err != nil || f.clones[len(f.clones)-1].Size != "arm-s" {
+		t.Errorf("PostgreSQL clone: %v %+v", err, f.clones[len(f.clones)-1])
+	}
 }
 
 // scramMatches checks a SCRAM-SHA-256 verifier against a password.
