@@ -59,6 +59,9 @@ type objStore struct {
 
 // openStore connects to the bucket for one database.
 func openStore(repo pgbackrest.Repo, engine, stanza string, partSizeMB int) (*objStore, error) {
+	if repo.SFTP() {
+		return nil, errors.New("backups to an SFTP server work for PostgreSQL only for now: MySQL and MariaDB need a bucket (ROWSAFE_REPO_TYPE=s3)")
+	}
 	if err := repo.Validate(); err != nil {
 		return nil, err
 	}

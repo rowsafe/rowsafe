@@ -3,6 +3,7 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -204,6 +205,9 @@ func ConfigFromEnv() (Config, error) {
 	if err := poolerConfigFromEnv(&c); err != nil {
 		return c, err
 	}
+	if err := sftpRepoFromEnv(&c); err != nil {
+		return c, err
+	}
 	if c.Storage != protocol.StorageOwn && c.Storage != protocol.StorageRowsafe {
 		return c, fmt.Errorf("ROWSAFE_STORAGE must be %q (Rowsafe Storage) or %q (your bucket, ROWSAFE_REPO_S3_*)",
 			protocol.StorageRowsafe, protocol.StorageOwn)
@@ -307,4 +311,35 @@ func (c Config) pgBin(major int, tool string) string {
 
 func (c Config) configPath(stanza string) string {
 	return filepath.Join(c.ConfigDir, stanza+".conf")
+}
+
+// sftpRepoFromEnv reads ROWSAFE_REPO_TYPE and, for "sftp", the SFTP server
+// (ROWSAFE_REPO_SFTP_*; pgbackrest/sftp.go). The SSH key is the one the
+// installer made in the config directory, unless ROWSAFE_REPO_SFTP_KEY_FILE
+// says otherwise.
+func sftpRepoFromEnv(c *Config) error {
+	switch t := strings.ToLower(env("ROWSAFE_REPO_TYPE", "s3")); t {
+	case "s3":
+		return nil
+	case "sftp":
+	default:
+		return fmt.Errorf("ROWSAFE_REPO_TYPE must be s3 (a bucket, the default) or sftp (an SFTP server), not %q", t)
+	}
+	if c.Storage == protocol.StorageRowsafe {
+		return errors.New("ROWSAFE_REPO_TYPE=sftp is your own SFTP server, and ROWSAFE_STORAGE=rowsafe is Rowsafe Storage: choose one")
+	}
+	c.Repo.Type = "sftp"
+	c.Repo.SFTPHost = env("ROWSAFE_REPO_SFTP_HOST", "")
+	c.Repo.SFTPUser = env("ROWSAFE_REPO_SFTP_USER", "")
+	c.Repo.Path = env("ROWSAFE_REPO_SFTP_PATH", "")
+	c.Repo.SFTPHostKey = env("ROWSAFE_REPO_SFTP_HOST_KEY", "")
+	c.Repo.SFTPKeyFile = env("ROWSAFE_REPO_SFTP_KEY_FILE", filepath.Join(c.ConfigDir, pgbackrest.SFTPKeyFileName))
+	if p := env("ROWSAFE_REPO_SFTP_PORT", ""); p != "" {
+		port, err := strconv.Atoi(p)
+		if err != nil || port < 1 || port > 65535 {
+			return fmt.Errorf("ROWSAFE_REPO_SFTP_PORT must be a port number (22, or 23 for a Hetzner Storage Box), not %q", p)
+		}
+		c.Repo.SFTPPort = port
+	}
+	return nil
 }

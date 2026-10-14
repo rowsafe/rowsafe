@@ -81,6 +81,9 @@ func (a *Agent) newRestic(stanza string) (*restic, error) {
 			env: []string{"RESTIC_PASSWORD=" + FilesPassword(rt.passOverride, stanza)}}, nil
 	}
 	repo := a.cfg.Repo
+	if repo.SFTP() {
+		return nil, errors.New("backing up the files next to a database needs a bucket for now: the backups here go to an SFTP server")
+	}
 	if err := repo.Validate(); err != nil {
 		return nil, err
 	}

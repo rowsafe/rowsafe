@@ -71,6 +71,8 @@ func TestClassifyPgBackRestCodes(t *testing.T) {
 		{39, line("039", "HTTP request failed with 403 (Forbidden):\n    <Error><Code>SignatureDoesNotMatch</Code></Error>"), TaskErrStorageBadKeys},
 		{39, line("039", "HTTP request failed with 403 (Forbidden):\n    <Error><Code>RequestTimeTooSkewed</Code></Error>"), TaskErrClockSkew},
 		{101, line("101", "HTTP request failed with 503 (Service Unavailable)"), TaskErrStorageError},
+		{101, line("101", "host [8d4bd2c7d3f9a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a] and configured fingerprint (repo-sftp-host-fingerprint) [0000000000000000000000000000000000000000000000000000000000000000] do not match"), TaskErrSFTPHostKey},
+		{101, line("101", "public key authentication failed: libssh2 error [-18]\n    HINT: check authorization log on the SFTP server"), TaskErrStorageBadKeys},
 		{25, line("025", "something unexpected"), TaskErrOther},
 		{40, "", TaskErrPathNotEmpty}, // no output: the exit status alone
 		{-1, "", TaskErrNotInstalled},

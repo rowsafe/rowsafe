@@ -189,6 +189,9 @@ func ProviderOf(r Repo) string {
 	if r.Posix() {
 		return protocol.ProviderPosix
 	}
+	if r.SFTP() {
+		return protocol.ProviderSFTP
+	}
 	h := strings.ToLower(r.Endpoint)
 	if host, _, err := net.SplitHostPort(h); err == nil {
 		h = host
@@ -213,6 +216,11 @@ func (r Repo) Info(n int) protocol.RepoInfo {
 	ri := protocol.RepoInfo{Repo: n, Provider: ProviderOf(r), Bucket: r.Bucket, Region: r.Region}
 	if r.Posix() {
 		ri.Endpoint = r.Path
+		return ri
+	}
+	if r.SFTP() {
+		// The server and the directory on it; nothing secret.
+		ri.Endpoint, ri.Bucket, ri.Region = r.SFTPEndpoint(), r.sftpRoot(), ""
 		return ri
 	}
 	ri.Endpoint = r.Endpoint

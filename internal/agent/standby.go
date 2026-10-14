@@ -460,6 +460,11 @@ func (a *Agent) handedRepo(db protocol.DatabaseSpec) (protocol.StandbyRepo, erro
 	default:
 		r = a.cfg.Repo
 	}
+	if r.SFTP() {
+		// The SSH key never leaves this server, and the other server has
+		// none the SFTP server accepts.
+		return protocol.StandbyRepo{}, errors.New("standby servers and copies on another server need the backups in a bucket for now: this server's backups go to an SFTP server")
+	}
 	if r.Folder == "" {
 		r.Folder = a.repoFolder(db.Stanza) // taskerror.go
 	}

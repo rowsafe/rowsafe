@@ -54,12 +54,19 @@ type Object struct {
 	LastModified time.Time
 }
 
+// ErrSFTPRepo: the backups go to an SFTP server, which only PostgreSQL's
+// backups (pgBackRest) can use for now.
+var ErrSFTPRepo = errors.New("backups to an SFTP server work for PostgreSQL only for now: this needs a bucket (ROWSAFE_REPO_TYPE=s3)")
+
 // ErrNotFound is returned by Get for a missing key.
 var ErrNotFound = errors.New("object not found")
 
 // New returns a Store for repo, rooted at repo.PathPrefix plus sub (e.g.
 // the stanza). It validates nothing beyond what it needs to build requests.
 func New(repo pgbackrest.Repo, sub string) (*Store, error) {
+	if repo.SFTP() {
+		return nil, ErrSFTPRepo
+	}
 	if repo.Endpoint == "" || repo.Bucket == "" || repo.Key == "" || repo.KeySecret == "" {
 		return nil, errors.New("backup storage is not configured")
 	}
