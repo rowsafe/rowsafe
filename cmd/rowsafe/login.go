@@ -49,15 +49,32 @@ var (
 // canOpenBrowser is false over SSH or without a graphical session, where a
 // browser would open (if at all) on the wrong machine.
 func canOpenBrowser() bool {
-	for _, v := range []string{"SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"} {
-		if os.Getenv(v) != "" {
-			return false
-		}
+	if overSSH() {
+		return false
 	}
 	if runtime.GOOS == "linux" || runtime.GOOS == "freebsd" {
 		return os.Getenv("DISPLAY") != "" || os.Getenv("WAYLAND_DISPLAY") != ""
 	}
 	return true
+}
+
+func overSSH() bool {
+	for _, v := range []string{"SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"} {
+		if os.Getenv(v) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// clickable makes u a link the terminal opens on click (OSC 8). The text is
+// still the whole URL, so terminals without OSC 8 show it as before.
+func clickable(u string) string {
+	fi, err := os.Stdout.Stat()
+	if err != nil || fi.Mode()&os.ModeCharDevice == 0 || os.Getenv("TERM") == "dumb" {
+		return u
+	}
+	return "\x1b]8;;" + u + "\x1b\\" + u + "\x1b]8;;\x1b\\"
 }
 
 // readSavedConfig reads the login file only, without environment overrides.
@@ -169,10 +186,13 @@ func loginWithBrowser(ctx context.Context, url, name string, browser bool) (conf
 	if err != nil {
 		return config{}, fmt.Errorf("starting the login at %s: %w", url, err)
 	}
-	if browser && openBrowser(start.VerificationURIComplete) == nil {
-		fmt.Printf("Confirm the code %s in your browser (or open this link):\n  %s\n", start.UserCode, start.VerificationURIComplete)
-	} else {
-		fmt.Printf("Open this link on any device and confirm the code %s:\n  %s\n", start.UserCode, start.VerificationURIComplete)
+	switch {
+	case browser && openBrowser(start.VerificationURIComplete) == nil:
+		fmt.Printf("Opened your browser: confirm the code %s there.\nIf it didn't open, copy this link into your browser:\n  %s\n", start.UserCode, clickable(start.VerificationURIComplete))
+	case overSSH():
+		fmt.Printf("This server has no browser. Copy this link, open it on your laptop or phone, and confirm the code %s:\n  %s\n", start.UserCode, clickable(start.VerificationURIComplete))
+	default:
+		fmt.Printf("Copy this link, open it in any browser, and confirm the code %s:\n  %s\n", start.UserCode, clickable(start.VerificationURIComplete))
 	}
 	fmt.Println("Waiting for you to approve...")
 
