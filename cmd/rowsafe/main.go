@@ -30,6 +30,10 @@ Getting started
   rowsafe login --key rsk_... [--url URL]    log in with an existing API key (CI, scripts)
   rowsafe logout [--keep-key]                forget the login and revoke the key "rowsafe login" created
   rowsafe whoami [--json]                    control plane, organization, plan, API key in use and who it acts as
+  rowsafe hosts add [USER@]SERVER [-p PORT] [-i KEY] [-- INSTALLER OPTIONS]
+                                             install the agent on a Linux server over SSH from this computer
+                                             (no SERVER: on this Linux server). The installer sets up everything
+                                             there and asks before turning on backups
   rowsafe hosts enroll-token [--ttl 1h]      the install command for a database server. The installer sets up
                                              everything there and asks before turning on backups
   rowsafe init [NAME]                        write .rowsafe.json here, so commands in this project use NAME
@@ -648,6 +652,9 @@ func dispatch(ctx context.Context, args []string) error {
 			"permissions": hostsPermissions, "update": hostsUpdate,
 			"enroll-token": func(ctx context.Context, c *client.Client, args []string) error {
 				return hostsEnrollToken(ctx, c, cfg, args)
+			},
+			"add": func(ctx context.Context, c *client.Client, args []string) error {
+				return hostsAdd(ctx, c, cfg, args)
 			},
 		})
 	case "api-keys":

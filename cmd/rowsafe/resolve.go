@@ -116,7 +116,7 @@ func resolveHost(ctx context.Context, c *client.Client, explicit string) (string
 	case 1:
 		return hosts[0].Hostname, nil
 	case 0:
-		return "", errors.New("no hosts enrolled yet: install the agent with the command from `rowsafe hosts enroll-token`")
+		return "", errors.New("no hosts enrolled yet: install the agent with `rowsafe hosts add root@SERVER`")
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "this organization has %d hosts; say which one with --host:", len(hosts))

@@ -146,7 +146,7 @@ func pickForkTarget(info protocol.ForkInfo, to string) (*protocol.ForkTarget, er
 		names = append(names, s)
 	}
 	if len(names) == 0 {
-		return nil, errors.New("no server can take the fork: install the Rowsafe agent on one (rowsafe hosts enroll-token)")
+		return nil, errors.New("no server can take the fork: install the Rowsafe agent on one (rowsafe hosts add root@SERVER)")
 	}
 	if to == "" {
 		return nil, fmt.Errorf("where to? Pass --to with one of: %s", strings.Join(names, ", "))

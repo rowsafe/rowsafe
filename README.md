@@ -22,8 +22,8 @@ Features per database: `protocol.EngineCapabilities`.
 ```sh
 curl -fsSL https://rowsafe.sh/cli | sh           # the CLI, on your Mac or Linux computer
 rowsafe login
-rowsafe hosts enroll-token                       # prints the install command
-curl -fsSL https://rowsafe.sh | sudo sh -s rse_… # on the database server
+rowsafe hosts add root@203.0.113.10              # installs the agent on that server over SSH
+# or on the database server itself:  curl -fsSL https://rowsafe.sh | sudo sh
 ```
 
 **Rewind**: continuous backups, restore to any second.

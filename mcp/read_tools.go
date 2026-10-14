@@ -265,7 +265,7 @@ func (t *tools) listHosts(ctx context.Context, _ *sdk.CallToolRequest, _ noInput
 	out := HostsOutput{Hosts: []HostView{}}
 	var b textBuilder
 	if len(hosts) == 0 {
-		b.line("No hosts enrolled. Enroll one with `rowsafe hosts enroll-token` (the user runs the printed install command on the database host).")
+		b.line("No hosts enrolled. Install Rowsafe on one with `rowsafe hosts add USER@SERVER` (over SSH from the user's computer; the installer asks its questions there), or `curl -fsSL https://rowsafe.sh | sudo sh` on the server.")
 	}
 	for _, h := range hosts {
 		out.Hosts = append(out.Hosts, hostView(h, now))
@@ -303,7 +303,7 @@ func (t *tools) listDatabases(ctx context.Context, _ *sdk.CallToolRequest, _ noI
 	out := DatabasesOutput{Databases: []DatabaseSummary{}}
 	var b textBuilder
 	if len(dbs) == 0 {
-		b.line("No databases registered. The installer from `rowsafe hosts enroll-token` sets one up on its server; or register one with plan_adoption (`rowsafe adopt NAME --host HOST`).")
+		b.line("No databases registered. `rowsafe hosts add USER@SERVER` (or the installer, `curl -fsSL https://rowsafe.sh | sudo sh`) sets one up on its server; or register one with plan_adoption (`rowsafe adopt NAME --host HOST`).")
 	}
 	for _, s := range t.gather(ctx, dbs) {
 		sum := summarize(s, byID[s.db.HostID], now)

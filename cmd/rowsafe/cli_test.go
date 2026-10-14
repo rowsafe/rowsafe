@@ -363,7 +363,7 @@ func TestResolveHost(t *testing.T) {
 	f := &fakeAPI{}
 	_, c := cliEnv(t, f)
 	ctx := t.Context()
-	if _, err := resolveHost(ctx, c, ""); err == nil || !strings.Contains(err.Error(), "enroll-token") {
+	if _, err := resolveHost(ctx, c, ""); err == nil || !strings.Contains(err.Error(), "rowsafe hosts add") {
 		t.Fatalf("no hosts: %v", err)
 	}
 	f.hosts = []protocol.Host{{ID: "host_1", Hostname: "db1"}}

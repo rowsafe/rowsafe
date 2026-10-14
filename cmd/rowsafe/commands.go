@@ -51,7 +51,7 @@ func hostsList(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if len(hosts) == 0 {
-		fmt.Println("No servers yet. Next: rowsafe hosts enroll-token   (the install command for a database server)")
+		fmt.Println("No servers yet. Next: rowsafe hosts add root@SERVER   (installs Rowsafe there over SSH)")
 		return nil
 	}
 	t := newTable("HOST", "LAST SEEN", "AGENT", "UPDATES", "PLATFORM", "ID")
@@ -314,7 +314,7 @@ func listCmd(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if len(dbs) == 0 {
-		fmt.Println("No databases yet. Next: rowsafe hosts enroll-token   (the install command for a database server)")
+		fmt.Println("No databases yet. Next: rowsafe hosts add root@SERVER   (installs Rowsafe there over SSH)")
 		return nil
 	}
 	t := newTable("NAME", "STATUS", "LAST WAL ARCHIVED", "ENGINE", "SIZE", "HOST")
