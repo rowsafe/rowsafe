@@ -636,8 +636,12 @@ func TestBrowserLogin(t *testing.T) {
 	t.Setenv("SSH_CONNECTION", "10.0.0.1 22 10.0.0.2 22")
 	opened = nil
 	f.polls = []string{protocol.DeviceAccessDenied}
-	if err := dispatch(ctx, []string{"login", "--url", ts.URL}); err == nil || !strings.Contains(err.Error(), "declined") {
+	out, err = captureStdout(t, func() error { return dispatch(ctx, []string{"login", "--url", ts.URL}) })
+	if err == nil || !strings.Contains(err.Error(), "declined") {
 		t.Fatalf("denied login: %v", err)
+	}
+	if !strings.Contains(out, "Copy this link, open it on your laptop or phone") || !strings.Contains(out, "https://app.test/cli?code=BCDF-GHJK") {
+		t.Fatalf("over SSH the login says:\n%s", out)
 	}
 	if len(opened) != 0 {
 		t.Fatal("opened a browser over SSH")
