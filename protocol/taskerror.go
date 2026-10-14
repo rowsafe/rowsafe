@@ -51,11 +51,15 @@ const (
 	TaskErrStorageUnreachable = "pgbackrest.storage_unreachable"  // DNS, firewall, wrong endpoint
 	TaskErrStorageTLS         = "pgbackrest.storage_tls"          // the storage's certificate isn't trusted
 	TaskErrStorageError       = "pgbackrest.storage_error"        // any other storage error (5xx, throttling)
-	TaskErrClockSkew          = "pgbackrest.clock_skew"           // the server's clock is off, so requests are refused
-	TaskErrPathNotEmpty       = "pgbackrest.path_not_empty"       // the backup folder has files but no backup index
-	TaskErrStanzaMismatch     = "pgbackrest.stanza_mismatch"      // the backups in the folder are of another database (or version)
-	TaskErrCipherMismatch     = "pgbackrest.cipher_mismatch"      // the backups in the folder were encrypted with another key
-	TaskErrStanzaMissing      = "pgbackrest.stanza_missing"       // backups were never set up in this folder
+	// TaskErrSFTPHostKey: the SFTP server presented another host key than
+	// the one pinned on this server (ROWSAFE_REPO_SFTP_HOST_KEY). Nothing
+	// connects until a person checks the new key and pins it.
+	TaskErrSFTPHostKey        = "pgbackrest.sftp_host_key_changed"
+	TaskErrClockSkew          = "pgbackrest.clock_skew"      // the server's clock is off, so requests are refused
+	TaskErrPathNotEmpty       = "pgbackrest.path_not_empty"  // the backup folder has files but no backup index
+	TaskErrStanzaMismatch     = "pgbackrest.stanza_mismatch" // the backups in the folder are of another database (or version)
+	TaskErrCipherMismatch     = "pgbackrest.cipher_mismatch" // the backups in the folder were encrypted with another key
+	TaskErrStanzaMissing      = "pgbackrest.stanza_missing"  // backups were never set up in this folder
 	TaskErrArchiveNotSet      = "pgbackrest.archive_not_configured"
 	TaskErrArchiveTimeout     = "pgbackrest.archive_timeout" // PostgreSQL didn't hand over a WAL file in time
 	TaskErrLockHeld           = "pgbackrest.lock_held"       // another backup command is running
@@ -277,6 +281,14 @@ func classifyPgBackRest(code int, text string, te *TaskError) string {
 	// Whatever the command, a full disk is a full disk.
 	if has("No space left on device") && !has("HTTP request failed") {
 		return TaskErrDiskFull
+	}
+	// SFTP servers (repo-type=sftp): a host key that isn't the pinned one,
+	// and an SSH key the server doesn't (or no longer) accept(s).
+	if has("configured fingerprint (repo-sftp-host-fingerprint)") {
+		return TaskErrSFTPHostKey
+	}
+	if has("public key authentication failed") {
+		return TaskErrStorageBadKeys
 	}
 	// Storage requests (39 protocol, 101 service, 103 no valid repository
 	// with the storage's answer inside).

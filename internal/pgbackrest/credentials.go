@@ -61,12 +61,16 @@ func isCredentialKey(k string) bool {
 // bucket and path (which ends in the stanza). Two configs with the same
 // Location use the same repository, whatever their credentials.
 func Location(conf string) string {
-	want := map[string]string{"repo1-s3-endpoint": "", "repo1-storage-port": "", "repo1-s3-bucket": "", "repo1-path": ""}
+	want := map[string]string{"repo1-s3-endpoint": "", "repo1-storage-port": "", "repo1-s3-bucket": "", "repo1-path": "",
+		"repo1-type": "", "repo1-sftp-host": "", "repo1-sftp-host-port": ""}
 	for _, line := range strings.Split(conf, "\n") {
 		k, v, ok := strings.Cut(line, "=")
 		if _, known := want[k]; ok && known {
 			want[k] = v
 		}
+	}
+	if want["repo1-type"] == "sftp" {
+		return sftpLocation(want["repo1-sftp-host"], want["repo1-sftp-host-port"], want["repo1-path"])
 	}
 	if want["repo1-s3-bucket"] == "" {
 		return ""
@@ -79,6 +83,10 @@ func Location(conf string) string {
 // what the agent reports to the control plane, which takes a new full
 // backup when it changes.
 func (r Repo) ID() string {
+	if r.SFTP() {
+		sum := sha256.Sum256([]byte(r.Root()))
+		return hex.EncodeToString(sum[:6])
+	}
 	if r.Bucket == "" {
 		return ""
 	}
@@ -90,6 +98,9 @@ func (r Repo) ID() string {
 // Location is where RenderConfig(r, ...) puts stanza, in the form
 // Location(conf) returns.
 func (r Repo) Location(stanza string) string {
+	if r.SFTP() {
+		return sftpLocation(r.SFTPHost, fmt.Sprint(r.sftpPort()), r.sftpRoot()+"/"+r.folder(stanza))
+	}
 	port := ""
 	if r.Port != 0 {
 		port = fmt.Sprint(r.Port)
@@ -102,6 +113,9 @@ func (r Repo) Location(stanza string) string {
 // A config whose Location starts with it is in this repository, whatever
 // its folder.
 func (r Repo) Root() string {
+	if r.SFTP() {
+		return sftpLocation(r.SFTPHost, fmt.Sprint(r.sftpPort()), r.sftpRoot()+"/")
+	}
 	port := ""
 	if r.Port != 0 {
 		port = fmt.Sprint(r.Port)
@@ -116,4 +130,10 @@ func repoPath(pathPrefix, stanza string) string {
 		prefix = ""
 	}
 	return prefix + "/" + stanza
+}
+
+// sftpLocation is Location for an SFTP repository: never a prefix of an S3
+// one's.
+func sftpLocation(host, port, path string) string {
+	return "sftp://" + host + ":" + port + path
 }

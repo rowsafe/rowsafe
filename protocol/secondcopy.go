@@ -45,7 +45,11 @@ const (
 	ProviderWasabi = "wasabi"
 	ProviderSpaces = "spaces"
 	ProviderPosix  = "posix" // a local or mounted directory (tests)
-	ProviderOther  = "other"
+	// ProviderSFTP is a directory on an SFTP server (a Hetzner Storage Box,
+	// a NAS, another server; PostgreSQL only). Its RepoInfo is Endpoint
+	// "host:port" and Bucket the directory on the server.
+	ProviderSFTP  = "sftp"
+	ProviderOther = "other"
 )
 
 // RepoInfo says where a repository is. It carries no secrets.

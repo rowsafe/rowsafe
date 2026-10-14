@@ -63,7 +63,7 @@ Usage:
   rowsafe-agent selftest                    check this binary can run here (used before self-update)
   rowsafe-agent storage test [--wait 60s] [--own-client]
                                             write, read back and delete a test file in the backup
-                                            storage (Rowsafe Storage or your bucket)
+                                            storage (Rowsafe Storage, your bucket or your SFTP server)
   rowsafe-agent health                      container health check (docker-sidecar mode)
   rowsafe-agent version
 

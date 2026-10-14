@@ -181,6 +181,24 @@
 # Agent settings (ROWSAFE_URL, ROWSAFE_ENROLL_TOKEN, ROWSAFE_REPO_*, ...) found
 # in the environment are written to /etc/rowsafe/agent.env; see AGENT_VARS.
 #
+# Backups to an SFTP server instead of a bucket (PostgreSQL only; a Hetzner
+# Storage Box, a NAS, another server; pgBackRest 2.48 or later):
+#   ROWSAFE_REPO_TYPE=sftp        (the default is s3: a bucket)
+#   ROWSAFE_REPO_SFTP_HOST        the server, e.g. u123456.your-storagebox.de
+#   ROWSAFE_REPO_SFTP_PORT        its SSH port (default 22; Hetzner Storage Box: 23)
+#   ROWSAFE_REPO_SFTP_USER        the user on it, e.g. u123456
+#   ROWSAFE_REPO_SFTP_PATH        the backup directory on it, e.g. /backups/rowsafe
+#   ROWSAFE_REPO_SFTP_HOST_KEY    optional: the server's host key, as a SHA256:...
+#                                 fingerprint or a known_hosts line. Without it the
+#                                 installer trusts the key it finds on first use and
+#                                 pins it; a different key later stops every backup.
+#   ROWSAFE_REPO_CIPHER_PASS      the encryption passphrase (generated when unset)
+# The installer makes an SSH key on this server for the postgres user
+# (/etc/rowsafe/pgbackrest/sftp_ed25519, 0600; ROWSAFE_REPO_SFTP_KEY_FILE
+# changes where) that never leaves it, and prints its public half to add on
+# the SFTP server. It writes, reads and deletes a test file there before
+# anything else changes, and stops if the server doesn't accept the key yet.
+#
 # Every download is verified before anything is installed: the release
 # manifest must carry a valid Ed25519 signature from the Rowsafe release key
 # embedded below, and the binary must match the SHA-256 and size in that signed
@@ -295,6 +313,12 @@ AGENT_VARS="ROWSAFE_URL ROWSAFE_ENROLL_TOKEN $REQUIRED_REPO_VARS ROWSAFE_STORAGE
 REPO2_VARS="ROWSAFE_REPO2_S3_ENDPOINT ROWSAFE_REPO2_S3_BUCKET ROWSAFE_REPO2_S3_KEY ROWSAFE_REPO2_S3_KEY_SECRET ROWSAFE_REPO2_CIPHER_PASS"
 REPO2_OPT_VARS="ROWSAFE_REPO2_S3_REGION ROWSAFE_REPO2_S3_URI_STYLE ROWSAFE_REPO2_PATH_PREFIX ROWSAFE_REPO2_S3_PORT ROWSAFE_REPO2_S3_CA_FILE ROWSAFE_REPO2_S3_VERIFY_TLS"
 AGENT_VARS="$AGENT_VARS $REPO2_VARS $REPO2_OPT_VARS"
+# ---- SFTP server (ROWSAFE_REPO_TYPE=sftp; PostgreSQL only)
+SFTP_VARS="ROWSAFE_REPO_TYPE ROWSAFE_REPO_SFTP_HOST ROWSAFE_REPO_SFTP_PORT ROWSAFE_REPO_SFTP_USER ROWSAFE_REPO_SFTP_PATH
+  ROWSAFE_REPO_SFTP_HOST_KEY ROWSAFE_REPO_SFTP_KEY_FILE"
+SFTP_REQUIRED_VARS="ROWSAFE_REPO_SFTP_HOST ROWSAFE_REPO_SFTP_USER ROWSAFE_REPO_SFTP_PATH ROWSAFE_REPO_SFTP_HOST_KEY ROWSAFE_REPO_CIPHER_PASS"
+SFTP_MIN_PGBACKREST=2.48 # repo-sftp-host-key-check-type (pgbackrest.SFTPMinVersion)
+AGENT_VARS="$AGENT_VARS $SFTP_VARS"
 SECOND_COPY=''     # --add-storage (add) / --remove-second-copy (remove)
 # ---- end second copy
 
@@ -642,6 +666,15 @@ Backup storage (guided setup):
   ROWSAFE_REPO_CIPHER_PASS, or is generated and kept in agent.env), or set
   ROWSAFE_REPO_S3_ENDPOINT, _BUCKET, _KEY, _KEY_SECRET and
   ROWSAFE_REPO_CIPHER_PASS in the environment, and check with --check-storage.
+
+  An SFTP server instead of a bucket (PostgreSQL only: a Hetzner Storage Box,
+  a NAS, another server): set ROWSAFE_REPO_TYPE=sftp, ROWSAFE_REPO_SFTP_HOST,
+  _SFTP_USER, _SFTP_PATH (the backup directory there) and _SFTP_PORT (default
+  22; a Hetzner Storage Box uses 23), and optionally _SFTP_HOST_KEY (the
+  server's SHA256:... fingerprint or known_hosts line; otherwise the key
+  found on first use is trusted and pinned). The installer makes an SSH key
+  here that never leaves this server and shows its public half: add it on
+  the SFTP server, then run the installer again.
 
 Turning on backups:
   Once the agent runs, the installer looks for PostgreSQL on this server,
@@ -11426,14 +11459,26 @@ GENERATED_PASS=0
 # Rowsafe Storage.
 on_rowsafe_storage() { [ "$(s_get ROWSAFE_STORAGE)" = rowsafe ]; }
 
+# on_sftp: backups go to an SFTP server (ROWSAFE_REPO_TYPE=sftp).
+on_sftp() { [ "$(s_get ROWSAFE_REPO_TYPE | tr '[:upper:]' '[:lower:]')" = sftp ]; }
+
 # required_repo_vars prints the settings the storage needs.
 required_repo_vars() {
-  if on_rowsafe_storage; then echo ROWSAFE_REPO_CIPHER_PASS; else echo "$REQUIRED_REPO_VARS"; fi
+  if on_rowsafe_storage; then
+    echo ROWSAFE_REPO_CIPHER_PASS
+  elif on_sftp; then
+    echo "$SFTP_REQUIRED_VARS"
+  else
+    echo "$REQUIRED_REPO_VARS"
+  fi
 }
 
 storage_desc() {
   if on_rowsafe_storage; then
     echo "Rowsafe Storage"
+  elif on_sftp; then
+    _p=$(env_value ROWSAFE_REPO_SFTP_PORT)
+    echo "folder '$(env_value ROWSAFE_REPO_SFTP_PATH)' on the SFTP server $(env_value ROWSAFE_REPO_SFTP_USER)@$(env_value ROWSAFE_REPO_SFTP_HOST):${_p:-22}"
   else
     echo "bucket '$(env_value ROWSAFE_REPO_S3_BUCKET)' at $(env_value ROWSAFE_REPO_S3_ENDPOINT)"
   fi
@@ -11470,7 +11515,7 @@ rowsafe_storage_ask() {
 rowsafe_storage_env() {
   ROWSAFE_STORAGE=rowsafe ROWSAFE_REPO_CIPHER_PASS=$S_CIPHER
   export ROWSAFE_STORAGE ROWSAFE_REPO_CIPHER_PASS
-  for key in $ROWSAFE_REPO_S3_VARS; do
+  for key in $ROWSAFE_REPO_S3_VARS ROWSAFE_REPO_TYPE; do
     unset "$key"
     STORAGE_CLEAR="$STORAGE_CLEAR $key"
   done
@@ -11786,6 +11831,13 @@ choose_passphrase() {
 # is not configured yet (or --setup-storage asks for it). Settings in the
 # installer's environment mean automation: then it never asks.
 maybe_guided_storage() {
+  # An SFTP server (ROWSAFE_REPO_TYPE=sftp): set up from the environment or
+  # agent.env, never asked for. --setup-storage alone goes back to the
+  # guided setup (a bucket or Rowsafe Storage).
+  if on_sftp && { [ "$SETUP_STORAGE" = 0 ] || [ -n "${ROWSAFE_REPO_TYPE:-}" ]; }; then
+    sftp_storage
+    return 0
+  fi
   # --storage rowsafe needs no questions without a terminal, or with the
   # passphrase in the environment (automation).
   if [ "$STORAGE_PROVIDER" = rowsafe ] && { [ "$TTY" = 0 ] || [ -n "${ROWSAFE_REPO_CIPHER_PASS:-}" ]; }; then
@@ -11856,8 +11908,8 @@ guided_storage() {
   export ROWSAFE_REPO_S3_ENDPOINT ROWSAFE_REPO_S3_BUCKET ROWSAFE_REPO_S3_KEY ROWSAFE_REPO_S3_KEY_SECRET \
     ROWSAFE_REPO_CIPHER_PASS ROWSAFE_REPO_S3_REGION ROWSAFE_REPO_S3_URI_STYLE
   # Settings from a previous provider must not linger in agent.env.
-  unset ROWSAFE_STORAGE
-  STORAGE_CLEAR="$STORAGE_CLEAR ROWSAFE_STORAGE"
+  unset ROWSAFE_STORAGE ROWSAFE_REPO_TYPE
+  STORAGE_CLEAR="$STORAGE_CLEAR ROWSAFE_STORAGE ROWSAFE_REPO_TYPE"
   if [ -n "$S_PORT" ]; then
     ROWSAFE_REPO_S3_PORT=$S_PORT
     export ROWSAFE_REPO_S3_PORT
@@ -11937,6 +11989,14 @@ check_storage() {
     agent_show storage test --wait 30s $(storage_test_client) || die "the Rowsafe Storage test failed; nothing was changed"
     return 0
   fi
+  if on_sftp; then
+    sftp_load
+    [ -n "$SF_HOST_KEY" ] || die "no pinned host key for the SFTP server (ROWSAFE_REPO_SFTP_HOST_KEY); run the installer to set it up"
+    sftp_pinned=$(sftp_hex_of "$SF_HOST_KEY") || die "ROWSAFE_REPO_SFTP_HOST_KEY in $ENV_FILE is not a SHA256 fingerprint or a known_hosts line"
+    step "Testing the backup storage"
+    sftp_test "$sftp_pinned" || die "the backup storage test failed; nothing was changed"
+    return 0
+  fi
   load_storage
   missing=''
   for key in $REQUIRED_REPO_VARS; do
@@ -11951,6 +12011,313 @@ check_storage() {
     step "Testing the second copy's storage"
     storage_test || die "the second copy's storage test failed; nothing was changed"
   fi
+}
+
+# ---------------------------------------------------------------- SFTP server (ROWSAFE_REPO_TYPE=sftp)
+# Backups of PostgreSQL to a directory on an SFTP server (pgBackRest's
+# repo-type=sftp). The SSH key is made here, as the agent user, and never
+# leaves this server; only its public half is shown. The server's host key
+# is pinned: the one given in ROWSAFE_REPO_SFTP_HOST_KEY, or the one found
+# on first use, said so plainly. A different key later stops everything:
+# nothing accepts a new one by itself. All of it is checked (the key
+# accepted, a test file written, read and deleted) before agent.env is
+# written and before anything touches PostgreSQL.
+
+# sftp_load reads the SFTP settings into SF_*, the environment taking
+# precedence over agent.env.
+sftp_load() {
+  SF_HOST=$(s_get ROWSAFE_REPO_SFTP_HOST)
+  SF_PORT=$(s_get ROWSAFE_REPO_SFTP_PORT)
+  SF_USER=$(s_get ROWSAFE_REPO_SFTP_USER)
+  SF_PATH=$(s_get ROWSAFE_REPO_SFTP_PATH)
+  SF_HOST_KEY=$(s_get ROWSAFE_REPO_SFTP_HOST_KEY)
+  SF_KEY=$(s_get ROWSAFE_REPO_SFTP_KEY_FILE)
+  [ -n "$SF_PORT" ] || SF_PORT=22
+  [ -n "$SF_KEY" ] || SF_KEY=$CONFIG_DIR/pgbackrest/sftp_ed25519
+  SF_PATH=/$(printf '%s\n' "$SF_PATH" | sed -e 's|^/*||' -e 's|/*$||')
+}
+
+# sftp_check_settings refuses settings the agent would refuse.
+sftp_check_settings() {
+  missing=''
+  for key in ROWSAFE_REPO_SFTP_HOST ROWSAFE_REPO_SFTP_USER ROWSAFE_REPO_SFTP_PATH; do
+    [ -n "$(s_get "$key")" ] || missing="$missing $key"
+  done
+  [ -z "$missing" ] || die "backups to an SFTP server need:$missing"
+  case $SF_HOST in *@*) die "ROWSAFE_REPO_SFTP_HOST is the server's name only: put the user name in ROWSAFE_REPO_SFTP_USER" ;; esac
+  matches "$SF_HOST" '^[A-Za-z0-9.:_-]+$' || die "ROWSAFE_REPO_SFTP_HOST '$SF_HOST' is not a server name or address"
+  matches "$SF_USER" '^[A-Za-z0-9._-]+$' || die "ROWSAFE_REPO_SFTP_USER '$SF_USER' is not a user name"
+  { matches "$SF_PORT" '^[0-9]{1,5}$' && [ "$SF_PORT" -ge 1 ] && [ "$SF_PORT" -le 65535 ]; } ||
+    die "ROWSAFE_REPO_SFTP_PORT must be a port number (22, or 23 for a Hetzner Storage Box)"
+  { [ "$SF_PATH" != / ] && matches "$SF_PATH" '^/[A-Za-z0-9/_.-]+$' && ! matches "$SF_PATH" '[.][.]'; } ||
+    die "ROWSAFE_REPO_SFTP_PATH must be a directory on the SFTP server, e.g. /backups/rowsafe"
+  matches "$SF_KEY" '^/[A-Za-z0-9/_.-]+$' || die "ROWSAFE_REPO_SFTP_KEY_FILE must be an absolute path"
+}
+
+# sftp_run FINGERPRINT PGBACKREST ARGS... runs pgBackRest as the agent user
+# against the SFTP server, the host key checked against FINGERPRINT (hex
+# SHA-256), the way the agent's rendered config does (without the cipher:
+# the test file is not a backup). Settings travel in the environment only.
+sftp_run() {
+  _fp=$1 _bin=$2
+  shift 2
+  (
+    export PGBACKREST_REPO1_TYPE=sftp
+    export PGBACKREST_REPO1_SFTP_HOST="$SF_HOST"
+    export PGBACKREST_REPO1_SFTP_HOST_PORT="$SF_PORT"
+    export PGBACKREST_REPO1_SFTP_HOST_USER="$SF_USER"
+    export PGBACKREST_REPO1_SFTP_PRIVATE_KEY_FILE="$SF_KEY"
+    export PGBACKREST_REPO1_SFTP_PUBLIC_KEY_FILE="$SF_KEY.pub"
+    export PGBACKREST_REPO1_SFTP_HOST_KEY_CHECK_TYPE=fingerprint
+    export PGBACKREST_REPO1_SFTP_HOST_KEY_HASH_TYPE=sha256
+    export PGBACKREST_REPO1_SFTP_HOST_FINGERPRINT="$_fp"
+    export PGBACKREST_REPO1_PATH="$SF_PATH"
+    export PGBACKREST_LOG_LEVEL_FILE=off PGBACKREST_LOG_LEVEL_CONSOLE=off PGBACKREST_LOG_LEVEL_STDERR=warn
+    export PGBACKREST_IO_TIMEOUT=10
+    cd /
+    exec runuser -u "$AGENT_USER" -- timeout 120 "$_bin" --no-config "$@"
+  )
+}
+
+# sftp_fp HEX prints a SHA-256 (64 hex digits) the way OpenSSH shows
+# fingerprints: SHA256:<base64, no padding>.
+sftp_fp() {
+  _oct=$(printf '%s\n' "$1" | awk '{
+    h = "0123456789abcdef"
+    for (i = 1; i < length($0); i += 2)
+      printf "\\%03o", (index(h, substr($0, i, 1)) - 1) * 16 + index(h, substr($0, i + 1, 1)) - 1
+  }')
+  # shellcheck disable=SC2059 # the format is the octal escapes made above
+  printf 'SHA256:%s\n' "$(printf "$_oct" | base64 | tr -d '=\n')"
+}
+
+# sftp_hex_of KEY prints the hex SHA-256 of a host key given as a SHA256:
+# fingerprint, 64 hex digits, a known_hosts line or a public key. Fails for
+# anything else (MD5 and SHA-1 fingerprints included).
+sftp_hex_of() {
+  _k=$(printf '%s' "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+  case $_k in
+    SHA256:*)
+      _b=${_k#SHA256:}
+      _b=${_b%%=*}
+      case $((${#_b} % 4)) in 2) _b="$_b==" ;; 3) _b="$_b=" ;; esac
+      _h=$(printf '%s\n' "$_b" | base64 -d 2>/dev/null | od -An -tx1 -v | tr -d ' \n')
+      ;;
+    *' '*)
+      # The word after the key type is the key itself.
+      _b=$(printf '%s\n' "$_k" | awk '{ for (i = 1; i < NF; i++) if ($i ~ /^(ssh-|ecdsa-|sk-)/) { print $(i + 1); exit } }')
+      [ -n "$_b" ] || return 1
+      [ "$(printf '%s\n' "$_b" | base64 -d 2>/dev/null | wc -c)" -gt 4 ] || return 1
+      _h=$(printf '%s\n' "$_b" | base64 -d 2>/dev/null | sha256sum | cut -d' ' -f1)
+      ;;
+    *) _h=$(printf '%s' "$_k" | tr -d ':' | tr '[:upper:]' '[:lower:]') ;;
+  esac
+  matches "$_h" '^[0-9a-f]{64}$' || return 1
+  printf '%s\n' "$_h"
+}
+
+# sftp_explain says what the pgBackRest error in $TMP/sftp.log means.
+sftp_explain() {
+  log=$TMP/sftp.log
+  if grep -q 'unable to get address' "$log"; then
+    say "Can't find $SF_HOST. Check the name, and that this server can look up internet names (DNS)."
+  elif grep -Eq 'unable to connect|onnection refused|No route to host' "$log"; then
+    say "Can't connect to $SF_HOST on port $SF_PORT. Check the port (a Hetzner Storage Box uses 23),"
+    say "that SSH is on there, and that a firewall allows outgoing connections to it."
+  elif grep -Eqi 'timeout|timed out' "$log"; then
+    say "$SF_HOST did not answer in time on port $SF_PORT. Check the port and the network."
+  elif grep -Eq 'unable to (open|create|make)|Permission denied|permission denied' "$log"; then
+    say "The user $SF_USER can't write to $SF_PATH there. Check the directory and its permissions."
+  fi
+  awk 'err == "" && /ERROR: \[/ { err = $0; sub(/^.*ERROR: \[[0-9]+\]: /, "", err) }
+    END { if (err != "") print "(pgBackRest: " substr(err, 1, 200) ")" }' "$log"
+}
+
+sftp_failed() {
+  printf '    %s%s %s%s\n' "$RED" "$CROSS" "$1" "$RESET"
+  sftp_explain | while IFS= read -r line; do say "      $line"; done
+}
+
+# sftp_add_key_help shows the public key and how to add it on the server.
+sftp_add_key_help() {
+  say ""
+  say "    This server's SSH key for backups (the private half never leaves this server):"
+  say ""
+  say "      $(cat "$SF_KEY.pub")"
+  say ""
+  say "    Add it on the SFTP server for the user $SF_USER:"
+  case $SF_HOST in
+    *.your-storagebox.de | *.your-backup.de)
+      say "      Hetzner Storage Box: run this here and type the Storage Box password once,"
+      say "        cat $SF_KEY.pub | ssh -p 23 $SF_USER@$SF_HOST install-ssh-key"
+      say "      or add the key in Hetzner's console (your Storage Box, SSH keys)."
+      ;;
+    *)
+      say "      Append it to ~/.ssh/authorized_keys of $SF_USER on $SF_HOST (one line)."
+      [ "$SF_PORT" != 23 ] || say "      A Hetzner Storage Box: cat $SF_KEY.pub | ssh -p 23 $SF_USER@$SF_HOST install-ssh-key"
+      ;;
+  esac
+  say "    Then run the install command again."
+}
+
+# sftp_key makes the SSH key, as the agent user, unless it exists.
+sftp_key() {
+  if [ ! -f "$SF_KEY" ]; then
+    have ssh-keygen || apt_install openssh-client
+    as_agent ssh-keygen -q -t ed25519 -N '' -C "rowsafe@$(uname -n)" -f "$SF_KEY" >/dev/null ||
+      die "could not make an SSH key at $SF_KEY"
+    ok "made an SSH key for backups at $SF_KEY (it never leaves this server)"
+  fi
+  [ -f "$SF_KEY.pub" ] ||
+    as_agent sh -c 'umask 022; ssh-keygen -y -f "$1" >"$1.pub"' rowsafe-sftp-key "$SF_KEY" ||
+    die "could not read the public key of $SF_KEY"
+  [ "$(stat -c '%U %a' "$SF_KEY" 2>/dev/null)" = "$AGENT_USER 600" ] ||
+    die "$SF_KEY must belong to $AGENT_USER with mode 600 (it is $(stat -c '%U %a' "$SF_KEY" 2>/dev/null))"
+}
+
+# sftp_host_key pins the server's host key in SF_PINNED (hex SHA-256): the
+# key pgBackRest is presented when it connects, checked against
+# ROWSAFE_REPO_SFTP_HOST_KEY when that is set, trusted on first use
+# otherwise. When they differ, ssh-keyscan says which of the server's keys
+# each one is.
+sftp_host_key() {
+  pgbr=$1
+  sftp_run "$(printf '%064d' 0)" "$pgbr" repo-ls >"$TMP/sftp.log" 2>&1 </dev/null && :
+  presented=$(sed -n 's/.*host \[\([0-9a-f]\{64\}\)\] and configured fingerprint.*/\1/p' "$TMP/sftp.log" | head -n 1)
+  if [ -z "$presented" ]; then
+    sftp_failed "could not reach the SFTP server $SF_HOST:$SF_PORT"
+    die "nothing was changed. Fix the above, then run the install command again."
+  fi
+  presented_fp=$(sftp_fp "$presented")
+  if [ -n "$SF_HOST_KEY" ]; then
+    want=$(sftp_hex_of "$SF_HOST_KEY") ||
+      die "ROWSAFE_REPO_SFTP_HOST_KEY is not a SHA256:... fingerprint or a known_hosts line (MD5 fingerprints are not enough)"
+    if [ "$want" != "$presented" ]; then
+      # Which of the server's keys each one is (a scan only now: every
+      # connection counts against servers that slow down repeated ones).
+      ktype='' other=''
+      if have ssh-keyscan; then
+        ssh-keyscan -T 10 -p "$SF_PORT" "$SF_HOST" 2>/dev/null >"$TMP/sftp.scan" || :
+        while read -r _h _t _b _rest; do
+          _x=$(printf '%s\n' "$_b" | base64 -d 2>/dev/null | sha256sum | cut -d' ' -f1)
+          [ "$_x" != "$presented" ] || ktype=$_t
+          [ "$_x" != "$want" ] || other=$_t
+        done <"$TMP/sftp.scan"
+      fi
+      printf '    %s%s The SFTP server presented a different host key than ROWSAFE_REPO_SFTP_HOST_KEY.%s\n' "$RED" "$CROSS" "$RESET"
+      say "      expected: $(sftp_fp "$want")${other:+ ($other)}"
+      say "      presented: $presented_fp${ktype:+ ($ktype)}"
+      if [ -n "$other" ]; then
+        say "      Yours is the server's $other key, but backups connect with its ${ktype:-other} key."
+        say "      Check that key's fingerprint with your provider and set ROWSAFE_REPO_SFTP_HOST_KEY to it."
+      else
+        say "      Someone may be between this server and $SF_HOST, or the server's key changed."
+        say "      Check the fingerprint with your provider before you change ROWSAFE_REPO_SFTP_HOST_KEY."
+      fi
+      die "nothing was sent to the SFTP server and nothing was changed."
+    fi
+    ok "the SFTP server's host key matches: $presented_fp"
+  else
+    note "First connection to $SF_HOST:$SF_PORT. Its host key:"
+    note "  $presented_fp"
+    note "Trust on first use: nothing vouched for this key. Compare it with the fingerprint your"
+    note "provider shows. Rowsafe pins it: if the server ever presents another key, backups stop"
+    note "instead of connecting. (To give the key yourself, set ROWSAFE_REPO_SFTP_HOST_KEY.)"
+    if [ "$TTY" = 1 ] && ! confirm "Trust this host key?" y; then
+      die "nothing was changed. Set ROWSAFE_REPO_SFTP_HOST_KEY to the fingerprint your provider shows, then run the install command again."
+    fi
+    ok "pinned the SFTP server's host key"
+  fi
+  SF_PINNED=$presented
+}
+
+# sftp_test PINNED writes, reads back and deletes a small file in the
+# backup directory with pgBackRest, the way backups will use it.
+sftp_test() {
+  pgbr=${ROWSAFE_PGBACKREST_BIN:-/usr/bin/pgbackrest}
+  [ -x "$pgbr" ] || pgbr=$(command -v pgbackrest 2>/dev/null) || die "pgBackRest is not installed; run the installer first"
+  where="'$SF_PATH' on $SF_USER@$SF_HOST:$SF_PORT"
+  note "writing, reading and deleting a test file in $where..."
+  probe=rowsafe-storage-test-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+  printf 'Rowsafe storage test from %s\n' "$(uname -n)" >"$TMP/probe"
+  chmod 0644 "$TMP/probe"
+  if ! sftp_run "$1" "$pgbr" repo-put "$probe" <"$TMP/probe" >"$TMP/sftp.log" 2>&1; then
+    if grep -q 'public key authentication failed' "$TMP/sftp.log"; then
+      printf '    %s%s The SFTP server does not accept this server'"'"'s SSH key yet.%s\n' "$RED" "$CROSS" "$RESET"
+      sftp_add_key_help
+      SFTP_NEEDS_KEY=1
+      return 1
+    fi
+    if grep -q 'configured fingerprint' "$TMP/sftp.log"; then
+      printf '    %s%s The SFTP server presented a different host key than the pinned one (ROWSAFE_REPO_SFTP_HOST_KEY).%s\n' "$RED" "$CROSS" "$RESET"
+      say "      Someone may be between this server and $SF_HOST, or the server's key changed. Nothing was sent."
+      return 1
+    fi
+    sftp_failed "could not write to $where"
+    return 1
+  fi
+  if ! sftp_run "$1" "$pgbr" repo-get "$probe" </dev/null >"$TMP/probe.back" 2>"$TMP/sftp.log" ||
+    ! cmp -s "$TMP/probe" "$TMP/probe.back"; then
+    sftp_run "$1" "$pgbr" repo-rm "$probe" </dev/null >/dev/null 2>&1 || true
+    sftp_failed "wrote a test file to $where but could not read it back"
+    return 1
+  fi
+  if ! sftp_run "$1" "$pgbr" repo-rm "$probe" </dev/null >"$TMP/sftp.log" 2>&1; then
+    sftp_failed "could not delete the test file from $where. Backups need delete access too: old ones are deleted when they expire."
+    return 1
+  fi
+  ok "backup storage works: wrote, read back and deleted a test file on the SFTP server"
+}
+
+# sftp_storage sets up backups to an SFTP server (maybe_guided_storage),
+# or stops before anything changes.
+sftp_storage() {
+  say ""
+  step "Backup storage: an SFTP server"
+  [ "$HOST_ENGINE" = postgresql ] ||
+    die "backups to an SFTP server work for PostgreSQL only for now, and this server runs $(engine_label). Use a bucket or Rowsafe Storage: unset ROWSAFE_REPO_TYPE"
+  if [ "$STORAGE_PROVIDER" = rowsafe ] || [ "${ROWSAFE_STORAGE:-}" = rowsafe ]; then
+    die "ROWSAFE_REPO_TYPE=sftp is your own SFTP server and Rowsafe Storage was asked for too: choose one"
+  fi
+  [ -z "$STORAGE_PROVIDER" ] || die "--storage $STORAGE_PROVIDER is a bucket, and ROWSAFE_REPO_TYPE=sftp an SFTP server: choose one"
+  sftp_load
+  sftp_check_settings
+  pgbr=${ROWSAFE_PGBACKREST_BIN:-/usr/bin/pgbackrest}
+  [ -x "$pgbr" ] || pgbr=$(command -v pgbackrest 2>/dev/null) || die "pgBackRest is not installed"
+  _v=$("$pgbr" version 2>/dev/null | sed -n 's/^pgBackRest //p')
+  if [ -z "$_v" ] || ! have dpkg || dpkg --compare-versions "$_v" lt "$SFTP_MIN_PGBACKREST"; then
+    die "backups to an SFTP server need pgBackRest $SFTP_MIN_PGBACKREST or later, and this server has ${_v:-an unknown version}. Install pgbackrest from apt.postgresql.org (the PostgreSQL apt repository), then run the installer again."
+  fi
+  sftp_key
+  sftp_host_key "$pgbr"
+  SFTP_NEEDS_KEY=0
+  if ! sftp_test "$SF_PINNED"; then
+    [ "$SFTP_NEEDS_KEY" = 0 ] || die "add this key, then run the install command again. Nothing else was changed."
+    die "the SFTP server test failed; nothing was changed. Fix the above, then run the install command again."
+  fi
+  S_CIPHER=$(s_get ROWSAFE_REPO_CIPHER_PASS)
+  if [ -z "$S_CIPHER" ]; then
+    if [ "$TTY" = 1 ]; then
+      choose_passphrase
+    else
+      S_CIPHER=$(gen_passphrase)
+      [ "${#S_CIPHER}" = 40 ] || die "could not generate a passphrase"
+      GENERATED_PASS=1
+    fi
+  fi
+  ROWSAFE_REPO_TYPE=sftp ROWSAFE_REPO_SFTP_HOST=$SF_HOST ROWSAFE_REPO_SFTP_PORT=$SF_PORT ROWSAFE_REPO_SFTP_USER=$SF_USER
+  ROWSAFE_REPO_SFTP_PATH=$SF_PATH ROWSAFE_REPO_SFTP_HOST_KEY=$(sftp_fp "$SF_PINNED") ROWSAFE_REPO_CIPHER_PASS=$S_CIPHER
+  export ROWSAFE_REPO_TYPE ROWSAFE_REPO_SFTP_HOST ROWSAFE_REPO_SFTP_PORT ROWSAFE_REPO_SFTP_USER ROWSAFE_REPO_SFTP_PATH \
+    ROWSAFE_REPO_SFTP_HOST_KEY ROWSAFE_REPO_CIPHER_PASS
+  if [ "$SF_KEY" != "$CONFIG_DIR/pgbackrest/sftp_ed25519" ]; then
+    ROWSAFE_REPO_SFTP_KEY_FILE=$SF_KEY
+    export ROWSAFE_REPO_SFTP_KEY_FILE
+  fi
+  # Rowsafe Storage from an earlier setup must not linger in agent.env.
+  unset ROWSAFE_STORAGE
+  STORAGE_CLEAR="$STORAGE_CLEAR ROWSAFE_STORAGE"
+  STORAGE_GUIDED=1
+  ok "backups go to $SF_PATH on $SF_USER@$SF_HOST:$SF_PORT, encrypted on this server first"
 }
 
 # ---------------------------------------------------------------- second copy (--add-storage)

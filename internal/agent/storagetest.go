@@ -35,6 +35,12 @@ import (
 func StorageTest(ctx context.Context, cfg Config, w io.Writer, wait time.Duration, ownClient bool) error {
 	repo := cfg.Repo
 	where := fmt.Sprintf("bucket '%s' at %s", repo.Bucket, repo.Endpoint)
+	if repo.SFTP() {
+		where = fmt.Sprintf("folder %s on the SFTP server %s@%s", repo.Path, repo.SFTPUser, repo.SFTPEndpoint())
+		if ownClient {
+			return errors.New("backups to an SFTP server work for PostgreSQL only for now: use a bucket for this server")
+		}
+	}
 	if cfg.RowsafeStorage() {
 		c, err := storageCredentialsForTest(ctx, cfg, wait)
 		if err != nil {
@@ -75,7 +81,7 @@ func StorageTest(ctx context.Context, cfg Config, w io.Writer, wait time.Duratio
 		cmd.Stdout, cmd.Stderr = &out, &errb
 		err := cmd.Run()
 		if err != nil {
-			return out.Bytes(), fmt.Errorf("%w: %s", err, redact(lastLine(errb.Bytes()), repo))
+			return out.Bytes(), fmt.Errorf("%w: %s%s", err, redact(lastLine(errb.Bytes()), repo), sftpHint(errb.Bytes(), repo))
 		}
 		return out.Bytes(), nil
 	}
@@ -100,6 +106,11 @@ func StorageTest(ctx context.Context, cfg Config, w io.Writer, wait time.Duratio
 // storageTestEnv points pgBackRest at repo through its environment, never
 // its command line. No cipher: the test file is not a backup.
 func storageTestEnv(r pgbackrest.Repo) []string {
+	if r.SFTP() {
+		return append(r.SFTPEnv(strings.TrimRight(r.Path, "/")),
+			"PGBACKREST_LOG_LEVEL_FILE=off", "PGBACKREST_LOG_LEVEL_CONSOLE=off", "PGBACKREST_LOG_LEVEL_STDERR=warn",
+			"PGBACKREST_IO_TIMEOUT=10")
+	}
 	region, uri := r.Region, r.URIStyle
 	if region == "" {
 		region = "auto"
@@ -132,6 +143,28 @@ func storageTestEnv(r pgbackrest.Repo) []string {
 		env = append(env, "PGBACKREST_REPO1_STORAGE_VERIFY_TLS=n")
 	}
 	return env
+}
+
+// sftpHint says what to do about the two SFTP failures that need a person:
+// the SSH key not (yet) accepted, and a host key that isn't the pinned one.
+func sftpHint(stderr []byte, r pgbackrest.Repo) string {
+	if !r.SFTP() {
+		return ""
+	}
+	switch {
+	case bytes.Contains(stderr, []byte("public key authentication failed")):
+		return fmt.Sprintf(". The SFTP server doesn't accept this server's SSH key: add the public key in %s.pub "+
+			"for the user %s on %s, then try again", r.SFTPKeyFile, r.SFTPUser, r.SFTPHost)
+	case bytes.Contains(stderr, []byte("configured fingerprint")):
+		got := ""
+		if k, ok := pgbackrest.SFTPHostKeyFromError(stderr); ok {
+			got = " (it presented " + k.Fingerprint() + ")"
+		}
+		return fmt.Sprintf(". The SFTP server's host key is not the one pinned in ROWSAFE_REPO_SFTP_HOST_KEY%s: "+
+			"this can be someone between this server and %s. Nothing was sent. If the server's key really changed, "+
+			"check the new fingerprint with its provider and put it in ROWSAFE_REPO_SFTP_HOST_KEY", got, r.SFTPHost)
+	}
+	return ""
 }
 
 func storageTestPath(prefix string) string {

@@ -17,9 +17,10 @@ import (
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
-// Repo is the S3-compatible repository (Cloudflare R2 in production).
-// Credentials come from the agent's environment and are written only to the
-// host-local config file, which Postgres' archive_command also reads.
+// Repo is the repository: S3-compatible storage (Cloudflare R2 in
+// production), or a directory on an SFTP server (sftp.go). Credentials come
+// from the agent's environment and are written only to the host-local
+// config file, which Postgres' archive_command also reads.
 type Repo struct {
 	Endpoint  string // e.g. <account>.eu.r2.cloudflarestorage.com
 	Bucket    string
@@ -41,11 +42,22 @@ type Repo struct {
 	SkipTLSVerify bool
 	CAFile        string // PEM bundle trusted instead of the system store
 
-	// Type is "" or "s3" for S3-compatible storage, or "posix" for a
-	// directory on this host (Path; tests and mounted storage). Only S3 is
-	// configurable through the environment.
+	// Type is "" or "s3" for S3-compatible storage, "sftp" for a
+	// directory on an SFTP server (Path, SFTP*; sftp.go), or "posix" for a
+	// directory on this host (Path; tests and mounted storage). S3 and SFTP
+	// are configurable through the environment (ROWSAFE_REPO_TYPE).
 	Type string
-	Path string // posix: the repository directory
+	Path string // posix: the repository directory; sftp: the one on the SFTP server
+
+	// SFTP (Type "sftp"): the server, its SSH port (0 = 22), the user,
+	// the private key made on this server (its public half is
+	// SFTPKeyFile+".pub"), and the server's pinned host key in any form
+	// ParseHostKey reads.
+	SFTPHost    string
+	SFTPPort    int
+	SFTPUser    string
+	SFTPKeyFile string
+	SFTPHostKey string
 
 	// Folder is the last part of repo1-path, where this database's backups
 	// are: "" means the stanza's name. A setup that found the usual folder
@@ -74,7 +86,7 @@ func (r Repo) Posix() bool { return r.Type == "posix" }
 // Configured reports whether any setting of the repository is set (a
 // second copy is optional; see ValidateAs).
 func (r Repo) Configured() bool {
-	return r.Posix() || strings.TrimSpace(r.Endpoint+r.Bucket+r.Key+r.KeySecret+r.CipherPass) != ""
+	return r.Posix() || r.SFTP() || strings.TrimSpace(r.Endpoint+r.Bucket+r.Key+r.KeySecret+r.CipherPass) != ""
 }
 
 func (r Repo) Validate() error { return r.ValidateAs("ROWSAFE_REPO_") }
@@ -90,6 +102,12 @@ func (r Repo) ValidateAs(prefix string) error {
 			return fmt.Errorf("%sCIPHER_PASS must be at least 20 characters", prefix)
 		}
 		return nil
+	}
+	if r.SFTP() {
+		return r.validateSFTP(prefix)
+	}
+	if r.Type != "" && r.Type != "s3" {
+		return fmt.Errorf("%sTYPE must be s3 or sftp, not %q", prefix, r.Type)
 	}
 	var missing []string
 	for name, v := range map[string]string{
@@ -168,10 +186,17 @@ func RenderConfig(repo Repo, in ConfigInput) string {
 	b.WriteString("[global]\n")
 	kv := func(k string, v any) { fmt.Fprintf(&b, "%s=%v\n", k, v) }
 	path := repoPath(repo.PathPrefix, repo.folder(in.Stanza))
-	if repo.Posix() {
+	switch {
+	case repo.Posix():
 		kv("repo1-type", "posix")
 		path = strings.TrimRight(repo.Path, "/") + "/" + repo.folder(in.Stanza)
-	} else {
+	case repo.SFTP():
+		kv("repo1-type", "sftp")
+		for _, o := range repo.sftpOptions() {
+			kv("repo1-"+o[0], o[1])
+		}
+		path = repo.sftpRoot() + "/" + repo.folder(in.Stanza)
+	default:
 		kv("repo1-type", "s3")
 		kv("repo1-s3-endpoint", repo.Endpoint)
 		kv("repo1-s3-bucket", repo.Bucket)

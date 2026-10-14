@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -71,6 +72,13 @@ type gapInfo struct {
 // ---- configuration ----
 
 func secondCopyFromEnv(c *Config) error {
+	switch t := strings.ToLower(env("ROWSAFE_REPO2_TYPE", "s3")); t {
+	case "s3":
+	case "sftp":
+		return errors.New("ROWSAFE_REPO2_TYPE=sftp: a second copy on an SFTP server isn't supported yet; use a bucket (ROWSAFE_REPO2_S3_*)")
+	default:
+		return fmt.Errorf("ROWSAFE_REPO2_TYPE must be s3, not %q", t)
+	}
 	c.Repo2 = pgbackrest.Repo{
 		Endpoint:   env("ROWSAFE_REPO2_S3_ENDPOINT", ""),
 		Bucket:     env("ROWSAFE_REPO2_S3_BUCKET", ""),
@@ -126,6 +134,9 @@ func (c Config) secondCopyQueue(stanza string) (string, error) {
 func describeRepo(r pgbackrest.Repo) string {
 	if r.Posix() {
 		return r.Path
+	}
+	if r.SFTP() {
+		return fmt.Sprintf("folder %s on SFTP server %s", r.Path, r.SFTPEndpoint())
 	}
 	i := r.Info(0)
 	return fmt.Sprintf("bucket %s at %s", r.Bucket, i.Endpoint)
