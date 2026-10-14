@@ -140,9 +140,9 @@ every problem across hosts and databases, each with the command to run next.
 Exit status: 0 protected (or all healthy), 3 not, 1 on errors.`,
 	"login": `Opens a browser page where you confirm the code shown in the terminal; the
 new API key is saved to your config directory (mode 0600). Over SSH it prints
-a link to open on your laptop or phone instead (--no-browser does the same).
---key logs in with an existing key instead. The control plane is --url, else ROWSAFE_URL, else the
-saved login, else https://api.rowsafe.sh.`,
+a link to open on your laptop or phone instead. --key logs in with an existing
+key instead. The control plane is --url, else ROWSAFE_URL, else the saved
+login, else https://api.rowsafe.sh.`,
 	"cloud": `Rowsafe Cloud servers run in Rowsafe's own cloud accounts with PostgreSQL, backups,
 Proof and Pulse on from the first minute. A read-write API key (or rowsafe
 login) creates, resizes and deletes them, like the dashboard; anything that

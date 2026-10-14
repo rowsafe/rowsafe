@@ -26,7 +26,7 @@ const usage = `rowsafe - databases that let you sleep at night
 All commands (NAME is optional where shown in brackets; see "rowsafe help names"):
 
 Getting started
-  rowsafe login [--no-browser] [--url URL]   log in with your browser (default URL https://api.rowsafe.sh)
+  rowsafe login [--url URL]                  log in with your browser (default URL https://api.rowsafe.sh)
   rowsafe login --key rsk_... [--url URL]    log in with an existing API key (CI, scripts)
   rowsafe logout [--keep-key]                forget the login and revoke the key "rowsafe login" created
   rowsafe whoami [--json]                    control plane, organization, plan, API key in use and who it acts as

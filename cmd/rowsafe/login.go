@@ -128,7 +128,6 @@ func login(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("login", flag.ContinueOnError)
 	urlFlag := fs.String("url", "", "control plane URL (default "+protocol.DefaultAPIURL+")")
 	key := fs.String("key", "", "log in with an existing API key (rsk_...) instead of the browser")
-	noBrowser := fs.Bool("no-browser", false, "print the login link instead of opening a browser")
 	host, _ := os.Hostname()
 	name := fs.String("name", "rowsafe CLI on "+host, "what the new API key is called (shown in the dashboard)")
 	if _, err := parse(fs, args, false); err != nil {
@@ -144,7 +143,7 @@ func login(ctx context.Context, args []string) error {
 	if *key != "" {
 		cfg, err = loginWithKey(ctx, url, strings.TrimSpace(*key))
 	} else {
-		cfg, err = loginWithBrowser(ctx, url, *name, !*noBrowser && canOpenBrowser())
+		cfg, err = loginWithBrowser(ctx, url, *name, canOpenBrowser())
 	}
 	if err != nil {
 		return err
