@@ -356,3 +356,91 @@ func TestSettingsLocked(t *testing.T) {
 		t.Errorf("%+v", f.Fixes[0])
 	}
 }
+
+func TestDashboardMode(t *testing.T) {
+	start := now.Add(-time.Hour)
+	in := healthy()
+	in.Dashboard, in.MarkFirst, in.Host = true, true, "db1"
+	in.Metrics[collect.MConnUsedPct], in.Metrics[collect.MConnTotal] = 97, 97
+	in.Metrics[collect.MLongestBlockedSeconds], in.Metrics[collect.MBlockedSessions] = 400, 2
+	in.Activity = &protocol.Activity{CollectedAt: now, Queries: []protocol.ActivityQuery{
+		{PID: 11, BackendStart: &start, State: "idle in transaction", DurationSeconds: 1200}},
+		Blocking: []protocol.LockSession{{PID: 12, BackendStart: &start, State: "active", Blocking: 2}}}
+	in.Insights = &protocol.Insights{CollectedAt: now,
+		UnusedIndexes: []protocol.UnusedIndex{{Database: "app", Schema: "public", Table: "orders", Index: "orders_status", Bytes: 50 << 20}}}
+	sb := setting("shared_buffers", "16384", "8kB")
+	sb.PendingRestart, sb.PendingValue = true, "524288"
+	in.Settings = &protocol.SettingsSnapshot{CollectedAt: now, Host: protocol.SettingsHost{MemoryBytes: 16 << 30, CPUs: 4},
+		Settings: []protocol.PGSetting{sb, setting("max_connections", "100", "")}}
+	pooling := protocol.FindingFix{ID: "pooling", Kind: protocol.FixPooling, Label: "Turn on pooling", Available: true}
+	restart := protocol.FindingFix{ID: "restart", Kind: protocol.FixRestart, Label: "Restart PostgreSQL", Available: false, Reason: "not allowed"}
+	in.ConnectionFixes, in.RestartFixes = []protocol.FindingFix{pooling}, []protocol.FindingFix{restart}
+	var seen []string
+	in.Fix = func(fx protocol.FindingFix) protocol.FindingFix {
+		seen = append(seen, fx.ID)
+		if fx.Kind == protocol.FixMaintenance && strings.HasPrefix(fx.ID, "cancel:") {
+			fx.Available, fx.Reason = false, "busy"
+		}
+		return fx
+	}
+	var points []string
+	in.Extra = func(point string, sofar []protocol.Finding) []protocol.Finding {
+		points = append(points, point)
+		if point == PointAfterCache && !slices.ContainsFunc(sofar, func(f protocol.Finding) bool { return f.ID == "blocked_queries" }) {
+			t.Error("Extra doesn't see the findings so far")
+		}
+		if point == PointEnd {
+			return []protocol.Finding{{ID: "deadlocks", Category: CatPerformance, Severity: protocol.SeverityWarning, Title: "Transactions are deadlocking", Penalty: 2}}
+		}
+		return nil
+	}
+	h := Evaluate(in, now)
+	if !slices.Equal(points, []string{PointAfterCache, PointAfterIndexes, PointAfterStatements, PointEnd}) {
+		t.Errorf("points %v", points)
+	}
+	if c := check(t, h, CatPerformance); c.Status != "warning" {
+		t.Errorf("performance check doesn't count Extra's findings: %+v", c)
+	}
+	c := finding(t, h, "connections_exhausted")
+	if c.Fixes[len(c.Fixes)-1].ID != "pooling" {
+		t.Errorf("connection fixes %+v", c.Fixes)
+	}
+	b := finding(t, h, "blocked_queries")
+	if len(seen) == 0 || b.Fixes[0].Available || b.Fixes[0].Reason != "busy" {
+		t.Errorf("Fix hook not applied: %+v (seen %v)", b.Fixes, seen)
+	}
+	u := finding(t, h, "unused_indexes")
+	if !u.Fixes[0].MarkFirst || !strings.Contains(u.Fixes[0].Description, "Rowsafe saves a Mark first") {
+		t.Errorf("drop fix: %+v", u.Fixes[0])
+	}
+	p := finding(t, h, "settings_pending_restart")
+	if len(p.Fixes) != 1 || p.Fixes[0].ID != "restart" || p.Command != "sudo systemctl restart postgresql" {
+		t.Errorf("pending restart: %+v", p)
+	}
+	for _, f := range h.Findings {
+		if strings.Contains(f.Action, "rowsafe ") {
+			t.Errorf("%s tells people to run a command in the dashboard: %s", f.ID, f.Action)
+		}
+	}
+	in.SkipPendingRestart = true
+	if slices.Contains(ids(Evaluate(in, now)), "settings_pending_restart") {
+		t.Error("SkipPendingRestart")
+	}
+}
+
+func TestRulesSections(t *testing.T) {
+	in := healthy()
+	in.Metrics[collect.MConnUsedPct] = 85
+	r := NewRules(in, now)
+	f, c := r.Connections(true)
+	if len(f) != 1 || f[0].ID != "connections_high" || c.Category != CatConnections || c.Status != "warning" {
+		t.Errorf("connections %+v %+v", f, c)
+	}
+	f, c = r.Maintenance(false)
+	if len(f) != 0 || c.Status != "unknown" {
+		t.Errorf("maintenance without readings %+v %+v", f, c)
+	}
+	if f, c := r.Replication(true); len(f) != 0 || c.Detail != "No replicas." {
+		t.Errorf("replication %+v %+v", f, c)
+	}
+}

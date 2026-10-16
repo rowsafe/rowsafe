@@ -35,13 +35,27 @@ const (
 	maxDiskIndexFixes = 3
 )
 
-// fix builds a fix that can run now.
-func fix(id, kind, label, desc string, params any) protocol.FindingFix {
+// fix builds a fix; Input.Fix says whether it can run now.
+func (e *evaluator) fix(id, kind, label, desc string, params any) protocol.FindingFix {
 	fx := protocol.FindingFix{ID: id, Kind: kind, Label: label, Description: desc, Available: true}
 	if params != nil {
 		fx.Params, _ = json.Marshal(params)
 	}
+	if e.in.Fix != nil {
+		fx = e.in.Fix(fx)
+	}
 	return fx
+}
+
+// availableFixes are the fixes that can run now.
+func availableFixes(fixes []protocol.FindingFix) []protocol.FindingFix {
+	var out []protocol.FindingFix
+	for _, f := range fixes {
+		if f.Available {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // confirm makes a fix ask before it runs.
@@ -127,19 +141,19 @@ func fromLock(q protocol.LockSession) session {
 
 // endFix ends a session (pg_terminate_backend), identified by PID and
 // backend start so a reused PID is never hit.
-func endFix(s session, why string) protocol.FindingFix {
+func (e *evaluator) endFix(s session, why string) protocol.FindingFix {
 	desc := fmt.Sprintf("%s %s. %sEnding it rolls back its open transaction. Takes a few seconds; the app that opened it gets an error and should reconnect.",
 		s.who(), s.doing(), why)
-	fx := fix(fmt.Sprintf("end:%d:%d", s.pid, s.start.Unix()), protocol.FixMaintenance, fmt.Sprintf("End session %d", s.pid), desc,
+	fx := e.fix(fmt.Sprintf("end:%d:%d", s.pid, s.start.Unix()), protocol.FixMaintenance, fmt.Sprintf("End session %d", s.pid), desc,
 		protocol.MaintenanceParams{Action: protocol.MaintTerminateSession, PID: s.pid, BackendStart: s.start})
 	return confirm(fx, fmt.Sprintf("End session %d? Its open transaction is rolled back, and the app that opened it gets an error.", s.pid), true)
 }
 
 // cancelFix cancels a session's running query (pg_cancel_backend).
-func cancelFix(s session) protocol.FindingFix {
+func (e *evaluator) cancelFix(s session) protocol.FindingFix {
 	desc := fmt.Sprintf("%s %s. Stopping the query keeps the session connected; the app gets an error for that query. Takes a second.",
 		s.who(), s.doing())
-	return fix(fmt.Sprintf("cancel:%d:%d", s.pid, s.start.Unix()), protocol.FixMaintenance, fmt.Sprintf("Stop the query of session %d", s.pid), desc,
+	return e.fix(fmt.Sprintf("cancel:%d:%d", s.pid, s.start.Unix()), protocol.FixMaintenance, fmt.Sprintf("Stop the query of session %d", s.pid), desc,
 		protocol.MaintenanceParams{Action: protocol.MaintCancelQuery, PID: s.pid, BackendStart: s.start})
 }
 
@@ -160,9 +174,9 @@ func (e *evaluator) sessionFixes(match func(session) bool, by func(session) floa
 	var out []protocol.FindingFix
 	for _, s := range ss[:min(len(ss), limit)] {
 		if s.state == "active" {
-			out = append(out, cancelFix(s))
+			out = append(out, e.cancelFix(s))
 		}
-		out = append(out, endFix(s, why))
+		out = append(out, e.endFix(s, why))
 	}
 	return out
 }
@@ -190,9 +204,9 @@ func (e *evaluator) blockerFixes() []protocol.FindingFix {
 		s := fromLock(r)
 		why := fmt.Sprintf("%s waiting for it. ", plural(r.Blocking, "session is", "sessions are"))
 		if s.state == "active" {
-			out = append(out, cancelFix(s))
+			out = append(out, e.cancelFix(s))
 		}
-		out = append(out, endFix(s, why))
+		out = append(out, e.endFix(s, why))
 	}
 	return out
 }
@@ -233,7 +247,7 @@ func names(ts []table) string {
 }
 
 // tableFixes builds one maintenance fix per database.
-func tableFixes(ts []table, build func(db string, ts []table, several bool) protocol.FindingFix) []protocol.FindingFix {
+func (e *evaluator) tableFixes(ts []table, build func(db string, ts []table, several bool) protocol.FindingFix) []protocol.FindingFix {
 	dbs, tables := byDatabase(ts)
 	var out []protocol.FindingFix
 	for _, db := range dbs {
@@ -259,8 +273,8 @@ func inDB(label, db string, several bool) string {
 
 // vacuumFixes clean up dead rows (VACUUM ANALYZE).
 func (e *evaluator) vacuumFixes(ts []table, verb, what string) []protocol.FindingFix {
-	return tableFixes(ts, func(db string, ts []table, several bool) protocol.FindingFix {
-		return fix("vacuum:"+db, protocol.FixMaintenance, inDB(fmt.Sprintf("%s %s", verb, plural(len(ts), "table", "tables")), db, several),
+	return e.tableFixes(ts, func(db string, ts []table, several bool) protocol.FindingFix {
+		return e.fix("vacuum:"+db, protocol.FixMaintenance, inDB(fmt.Sprintf("%s %s", verb, plural(len(ts), "table", "tables")), db, several),
 			fmt.Sprintf("Runs VACUUM on %s %s. Your app keeps working while it runs; it goes easy on the server and can take a few minutes on big tables.", names(ts), what),
 			protocol.MaintenanceParams{Action: protocol.MaintVacuum, DB: db, Tables: tableList(ts)})
 	})
@@ -268,8 +282,8 @@ func (e *evaluator) vacuumFixes(ts []table, verb, what string) []protocol.Findin
 
 // freezeFixes freeze the oldest tables (VACUUM FREEZE).
 func (e *evaluator) freezeFixes(ts []table) []protocol.FindingFix {
-	return tableFixes(ts, func(db string, ts []table, several bool) protocol.FindingFix {
-		return fix("freeze:"+db, protocol.FixMaintenance, inDB("Freeze the "+plural(len(ts), "oldest table", "oldest tables"), db, several),
+	return e.tableFixes(ts, func(db string, ts []table, several bool) protocol.FindingFix {
+		return e.fix("freeze:"+db, protocol.FixMaintenance, inDB("Freeze the "+plural(len(ts), "oldest table", "oldest tables"), db, several),
 			fmt.Sprintf("Runs VACUUM (FREEZE) on %s, the tables with the oldest rows, which gives PostgreSQL back its transaction numbers. Your app keeps working; on big tables it can take a while.", names(ts)),
 			protocol.MaintenanceParams{Action: protocol.MaintVacuum, DB: db, Tables: tableList(ts), Freeze: true})
 	})
@@ -293,13 +307,24 @@ func (e *evaluator) oldestTables() []table {
 	return out
 }
 
-// dropIndexFix drops an unused or duplicate index.
-func dropIndexFix(db, schema, tbl, index string, bytes int64, unused bool, why string) protocol.FindingFix {
-	desc := fmt.Sprintf("%s Dropping it gives back %s of disk and makes writes to %s a little faster. Your app keeps working while it is dropped. Rowsafe shows its definition afterwards, to create it again if needed.",
+// dropIndexFix drops an unused or duplicate index, after a Mark when the
+// database is backed up (Input.MarkFirst).
+func (e *evaluator) dropIndexFix(db, schema, tbl, index string, bytes int64, unused bool, why string) protocol.FindingFix {
+	desc := fmt.Sprintf("%s Dropping it gives back %s of disk and makes writes to %s a little faster. Your app keeps working while it is dropped.",
 		why, Bytes(float64(bytes)), qualified(schema, tbl))
-	fx := fix("drop:"+db+"."+schema+"."+index, protocol.FixMaintenance, "Drop "+index, desc,
+	switch {
+	case e.in.MarkFirst:
+		desc += " Rowsafe saves a Mark first, and the task log keeps the index's definition to recreate it."
+	case e.in.Dashboard:
+		desc += " The task log keeps the index's definition to recreate it."
+	default:
+		desc += " Rowsafe shows its definition afterwards, to create it again if needed."
+	}
+	fx := e.fix("drop:"+db+"."+schema+"."+index, protocol.FixMaintenance, "Drop "+index, desc,
 		protocol.MaintenanceParams{Action: protocol.MaintDropIndex, DB: db, Index: schema + "." + index, Unused: unused})
-	return confirm(fx, fmt.Sprintf("Drop the index %s on %s? Any query that needs it would be slower until it is created again.", index, qualified(schema, tbl)), true)
+	fx = confirm(fx, fmt.Sprintf("Drop the index %s on %s? Any query that needs it would be slower until it is created again.", index, qualified(schema, tbl)), true)
+	fx.MarkFirst = e.in.MarkFirst
+	return fx
 }
 
 // inDatabases adds "in DB" to index fix labels when they span databases
@@ -328,7 +353,7 @@ func (e *evaluator) unusedIndexFixes(limit int) []protocol.FindingFix {
 		if x.Bytes < 10<<20 || x.Database == "" || x.Schema == "" || len(out) >= limit {
 			continue
 		}
-		out = append(out, dropIndexFix(x.Database, x.Schema, x.Table, x.Index, x.Bytes, true,
+		out = append(out, e.dropIndexFix(x.Database, x.Schema, x.Table, x.Index, x.Bytes, true,
 			strings.Replace(unusedSince, "them", x.Index, 1)))
 		dbs = append(dbs, x.Database)
 	}
@@ -346,7 +371,7 @@ func (e *evaluator) duplicateIndexFixes() []protocol.FindingFix {
 		if d.Database == "" || d.Schema == "" || len(out) >= maxIndexFixes {
 			continue
 		}
-		out = append(out, dropIndexFix(d.Database, d.Schema, d.Table, d.Index, d.Bytes, false,
+		out = append(out, e.dropIndexFix(d.Database, d.Schema, d.Table, d.Index, d.Bytes, false,
 			fmt.Sprintf("%s already does the job of %s.", d.CoveredBy, d.Index)))
 		dbs = append(dbs, d.Database)
 	}
@@ -355,11 +380,11 @@ func (e *evaluator) duplicateIndexFixes() []protocol.FindingFix {
 
 // reindexFix rebuilds a bloated index (REINDEX INDEX CONCURRENTLY).
 func (e *evaluator) reindexFix(x protocol.IndexBloat) protocol.FindingFix {
-	fx := fix("reindex:"+x.Database+"."+x.Schema+"."+x.Index, protocol.FixMaintenance, "Rebuild "+x.Index,
+	fx := e.fix("reindex:"+x.Database+"."+x.Schema+"."+x.Index, protocol.FixMaintenance, "Rebuild "+x.Index,
 		fmt.Sprintf("Builds a fresh copy of %s next to the old one and swaps them, giving back about %s. Reads and writes keep working; it needs about %s of free disk while it runs.",
 			x.Index, Bytes(float64(x.BloatBytes)), Bytes(float64(x.IndexBytes-x.BloatBytes))),
 		protocol.MaintenanceParams{Action: protocol.MaintReindexIndex, DB: x.Database, Index: x.Schema + "." + x.Index})
-	if e.in.VersionNum > 0 && e.in.VersionNum < 120000 {
+	if e.in.VersionNum > 0 && e.in.VersionNum < 120000 && fx.Available {
 		fx.Available, fx.Reason = false, "Rebuilding an index without blocking your app needs PostgreSQL 12 or newer."
 	}
 	return fx
@@ -378,7 +403,7 @@ func (e *evaluator) slotFixes(minBytes int64) []protocol.FindingFix {
 	slices.SortStableFunc(slots, func(a, b protocol.ReplicationSlot) int { return cmp.Compare(*b.RetainedBytes, *a.RetainedBytes) })
 	var out []protocol.FindingFix
 	for _, s := range slots[:min(len(slots), maxSlotFixes)] {
-		fx := fix("drop_slot:"+s.Name, protocol.FixMaintenance, "Drop slot "+s.Name,
+		fx := e.fix("drop_slot:"+s.Name, protocol.FixMaintenance, "Drop slot "+s.Name,
 			fmt.Sprintf("The %s replication slot %s has no consumer and holds %s of change log. Dropping it lets PostgreSQL delete that log. Takes a second; nothing else is affected.",
 				s.Type, s.Name, Bytes(float64(*s.RetainedBytes))),
 			protocol.MaintenanceParams{Action: protocol.MaintDropReplicationSlot, Slot: s.Name})

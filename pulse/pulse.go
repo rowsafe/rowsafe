@@ -83,11 +83,46 @@ type Input struct {
 	// SettingsLocked says why settings can't be changed with this
 	// connection (not a superuser); "" when they can.
 	SettingsLocked string
+
+	// ---- the dashboard (internal/health in the control plane) ----
+
+	// Dashboard words actions for the dashboard: its pages and buttons,
+	// never a command to run (the product rule), and "No recent readings".
+	Dashboard bool
+	// Fix, when set, decides whether each fix can run now (the agent is
+	// online, no task of its kind is open...): it gets every fix as built
+	// and returns it, with Available and Reason set.
+	Fix func(protocol.FindingFix) protocol.FindingFix
+	// MarkFirst: the database is backed up, so dropping an index and
+	// changing settings save a Mark (restore point) first.
+	MarkFirst bool
+	// ConnectionFixes are added to the connection findings' fixes (the
+	// dashboard's "turn on pooling").
+	ConnectionFixes []protocol.FindingFix
+	// RestartFixes restart PostgreSQL, for the findings a restart solves
+	// (none: the finding gives the command, when it runs here).
+	RestartFixes []protocol.FindingFix
+	// SkipPendingRestart: another finding already asks for the restart
+	// (setting up backups waits for one).
+	SkipPendingRestart bool
+	// Extra adds the caller's own findings at a point of the performance
+	// section (Point*), so the order and the section's status include them.
+	// sofar are the section's findings until then (its rules may depend on
+	// them).
+	Extra func(point string, sofar []protocol.Finding) []protocol.Finding
 	// Command, when set, turns a rowsafe subcommand into the command line
 	// for this database ("activity" -> "rowsafe activity 'postgres://...'");
 	// nil: "rowsafe activity".
 	Command func(sub string) string
 }
+
+// Points of the performance section where Input.Extra adds findings.
+const (
+	PointAfterCache      = "after_cache"      // after the cache hit ratio (the dashboard's query slow-downs)
+	PointAfterIndexes    = "after_indexes"    // after the index findings (its index recommendations)
+	PointAfterStatements = "after_statements" // after pg_stat_statements (its extension findings)
+	PointEnd             = "end"              // last (its deadlocks)
+)
 
 // Thresholds.
 const (
@@ -246,10 +281,10 @@ func (e *evaluator) cmd(sub string) string {
 	return e.in.Command(sub)
 }
 
-// statusOf is a category's status from its findings: critical, warning, or
-// ok (info findings don't change it).
-func (e *evaluator) statusOf(cat string) (status, detail string) {
-	status = "ok"
+// statusOf is a category's status from its findings, starting from status
+// and detail: critical or warning, with the last such finding's title
+// (info findings don't change it).
+func (e *evaluator) statusOf(cat, status, detail string) (string, string) {
 	for _, x := range e.findings {
 		if x.Category != cat || x.Severity == protocol.SeverityInfo {
 			continue
@@ -259,11 +294,65 @@ func (e *evaluator) statusOf(cat string) (status, detail string) {
 		} else if status != "critical" {
 			status = "warning"
 		}
-		if detail == "" {
-			detail = x.Title + "."
-		}
+		detail = x.Title + "."
 	}
 	return status, detail
+}
+
+// noReadings is a section's detail without readings.
+func (e *evaluator) noReadings() string {
+	if e.in.Dashboard {
+		return "No recent readings."
+	}
+	return "No readings."
+}
+
+// extra adds the caller's findings at a point (Input.Extra).
+func (e *evaluator) extra(point string) {
+	if e.in.Extra != nil {
+		e.findings = append(e.findings, e.in.Extra(point, e.findings)...)
+	}
+}
+
+// Rules runs the sections one by one, for a caller that has sections of
+// its own in between (the dashboard: backups, availability, pooling...).
+// Each returns the section's findings, in order, and its status line.
+type Rules struct{ e *evaluator }
+
+// NewRules prepares the sections for in at now.
+func NewRules(in Input, now time.Time) *Rules {
+	return &Rules{&evaluator{in: in, now: now, checks: map[string]*protocol.HealthCheck{}}}
+}
+
+// section runs one section on its own.
+func (r *Rules) section(cat string, run func()) ([]protocol.Finding, protocol.HealthCheck) {
+	r.e.findings, r.e.checks = nil, map[string]*protocol.HealthCheck{}
+	run()
+	var c protocol.HealthCheck
+	if x, ok := r.e.checks[cat]; ok {
+		c = *x
+	}
+	return r.e.findings, c
+}
+
+// Connections: how many are in use. fresh: the metrics are recent.
+func (r *Rules) Connections(fresh bool) ([]protocol.Finding, protocol.HealthCheck) {
+	return r.section(CatConnections, func() { r.e.connections(fresh) })
+}
+
+// Maintenance: wraparound, long and idle transactions, vacuum, bloat.
+func (r *Rules) Maintenance(fresh bool) ([]protocol.Finding, protocol.HealthCheck) {
+	return r.section(CatMaintenance, func() { r.e.maintenance(fresh) })
+}
+
+// Performance: locks, cache, indexes and settings, with Input.Extra's.
+func (r *Rules) Performance(fresh bool) ([]protocol.Finding, protocol.HealthCheck) {
+	return r.section(CatPerformance, func() { r.e.performance(fresh) })
+}
+
+// Replication: slots, lag, a replica's connection.
+func (r *Rules) Replication(fresh bool) ([]protocol.Finding, protocol.HealthCheck) {
+	return r.section(CatReplication, func() { r.e.replication(fresh) })
 }
 
 // ---- wording helpers ----
