@@ -302,15 +302,22 @@ func activityCmd(ctx context.Context, c *client.Client, args []string) error {
 	if err != nil {
 		return err
 	}
+	printActivity(name, a, *width, "rowsafe fix "+name)
+	return nil
+}
+
+// printActivity shows long-running and idle-in-transaction sessions;
+// fixCmd is the command that ends one ("rowsafe fix NAME").
+func printActivity(name string, a protocol.Activity, width int, fixCmd string) {
 	if a.CollectedAt.IsZero() {
 		fmt.Printf("No activity reported for %s yet (the agent reports every minute).\n", name)
-		return nil
+		return
 	}
 	fmt.Printf("Sessions of %s running one query or idle in a transaction for over a minute (collected %s)\n\n",
 		name, ago(&a.CollectedAt))
 	if len(a.Queries) == 0 {
 		fmt.Println("None.")
-		return nil
+		return
 	}
 	t := newTable("PID", "STATE", "QUERY TIME", "XACT TIME", "WAITING ON", "APPLICATION", "DATABASE", "USER", "QUERY")
 	for _, q := range a.Queries {
@@ -323,12 +330,11 @@ func activityCmd(ctx context.Context, c *client.Client, args []string) error {
 			query = "(not collected)"
 		}
 		t.row(strconv.Itoa(q.PID), q.State, secsText(q.DurationSeconds), secsText(q.XactSeconds), wait,
-			orDash(q.ApplicationName), orDash(q.Database), orDash(q.User), firstLine(orDash(query), max(*width, 20)))
+			orDash(q.ApplicationName), orDash(q.Database), orDash(q.User), firstLine(orDash(query), max(width, 20)))
 	}
 	t.flush()
-	fmt.Printf("\nSessions that block others or stay idle in a transaction too long show up in `rowsafe fix %s`,\n"+
-		"which cancels the query or ends the session for you (after checking it is still the same session).\n", name)
-	return nil
+	fmt.Printf("\nSessions that block others or stay idle in a transaction too long show up in `%s`,\n"+
+		"which cancels the query or ends the session for you (after checking it is still the same session).\n", fixCmd)
 }
 
 func secsText(s float64) string {

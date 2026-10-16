@@ -57,9 +57,9 @@ func settingsCmd(ctx context.Context, c *client.Client, args []string) error {
 		return nil
 	}
 	if setting != "" {
-		return printSetting(db, ov, setting)
+		return printSetting(db, ov, setting, "rowsafe settings set "+db)
 	}
-	printSettings(db, ov, *all)
+	printSettings(db, ov, *all, settingsHints{restart: "`rowsafe restart " + db + "` restarts PostgreSQL (asks first).", tune: "rowsafe tune " + db})
 	return nil
 }
 
@@ -112,7 +112,13 @@ func settingValue(s protocol.SettingView) string {
 	return v
 }
 
-func printSettings(db string, ov protocol.SettingsOverview, all bool) {
+// settingsHints are what the settings page points to.
+type settingsHints struct {
+	restart string // how to restart, in a sentence
+	tune    string // rowsafe tune NAME
+}
+
+func printSettings(db string, ov protocol.SettingsOverview, all bool, hints settingsHints) {
 	fmt.Printf("PostgreSQL settings of %s", db)
 	if h := hostLine(ov.Host); h != "" {
 		fmt.Printf(" (%s)", h)
@@ -163,10 +169,10 @@ func printSettings(db string, ov protocol.SettingsOverview, all bool) {
 		fmt.Printf("\nConfiguration error: %s\n", e)
 	}
 	if len(ov.PendingRestart) > 0 {
-		fmt.Printf("\nWaiting for a restart: %s. `rowsafe restart %s` restarts PostgreSQL (asks first).\n", strings.Join(ov.PendingRestart, ", "), db)
+		fmt.Printf("\nWaiting for a restart: %s. %s\n", strings.Join(ov.PendingRestart, ", "), hints.restart)
 	}
 	if n := countRequired(ov.Recommendations); n > 0 {
-		fmt.Printf("\nRowsafe recommends %s for this server: `rowsafe tune %s` shows them.\n", fmt.Sprintf("%d %s", n, plural(n, "change", "changes")), db)
+		fmt.Printf("\nRowsafe recommends %s for this server: `%s` shows them.\n", fmt.Sprintf("%d %s", n, plural(n, "change", "changes")), hints.tune)
 	}
 	printChanges(db, ov.Changes, 5)
 }
@@ -208,7 +214,9 @@ func printChanges(db string, changes []protocol.SettingsChange, limit int) {
 	}
 }
 
-func printSetting(db string, ov protocol.SettingsOverview, name string) error {
+// printSetting shows one setting; setCmd changes it ("rowsafe settings set
+// NAME"; "" when settings can't be set one by one).
+func printSetting(db string, ov protocol.SettingsOverview, name, setCmd string) error {
 	i := slices.IndexFunc(append(slices.Clone(ov.Settings), ov.Other...), func(s protocol.SettingView) bool { return s.Name == name })
 	if i < 0 {
 		return fmt.Errorf("%s isn't among the settings Rowsafe shows for %s (the ones that matter, and those set in a configuration file)", name, db)
@@ -228,10 +236,14 @@ func printSetting(db string, ov protocol.SettingsOverview, name string) error {
 	switch {
 	case s.Locked:
 		fmt.Printf("Change:   never through Rowsafe. %s\n", s.LockedReason)
+	case setCmd == "" && s.Apply == "restart":
+		fmt.Printf("Change:   takes effect after a restart\n")
+	case setCmd == "":
+		fmt.Printf("Change:   applies at once\n")
 	case s.Apply == "restart":
-		fmt.Printf("Change:   takes effect after a restart: rowsafe settings set %s %s=VALUE\n", db, s.Name)
+		fmt.Printf("Change:   takes effect after a restart: %s %s=VALUE\n", setCmd, s.Name)
 	default:
-		fmt.Printf("Change:   applies at once: rowsafe settings set %s %s=VALUE\n", db, s.Name)
+		fmt.Printf("Change:   applies at once: %s %s=VALUE\n", setCmd, s.Name)
 	}
 	for _, r := range ov.Recommendations {
 		if r.Name == s.Name {

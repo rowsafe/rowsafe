@@ -21,7 +21,7 @@ func init() {
 
 // logSettings applies pglog.LoggingPlan.
 func (m *maint) logSettings(ctx context.Context) error {
-	conn, err := m.connect(ctx, "postgres", nil)
+	conn, err := m.connect(ctx, m.t.MaintenanceDB(), nil)
 	if err != nil {
 		return err
 	}

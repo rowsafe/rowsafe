@@ -269,6 +269,21 @@ func (a *Agent) fixTarget(db protocol.DatabaseSpec) pginspect.Target {
 
 // maintenance runs one maintenance action.
 func (a *Agent) maintenance(ctx context.Context, db protocol.DatabaseSpec, p protocol.MaintenanceParams, tl *taskLog) (*protocol.MaintenanceResult, error) {
+	return runMaintenance(ctx, a.fixTarget(db), p, tl)
+}
+
+// Maintain runs one maintenance action (a Pulse fix) on the PostgreSQL at
+// t, with every check a maintenance task makes: for the CLI on a database
+// it reaches directly, without an agent (rowsafe fix postgres://...). It
+// returns the task log with the result.
+func Maintain(ctx context.Context, t pginspect.Target, p protocol.MaintenanceParams) (*protocol.MaintenanceResult, string, error) {
+	t.AppName = fixAppName
+	tl := &taskLog{}
+	res, err := runMaintenance(ctx, t, p, tl)
+	return res, tl.buf.String(), err
+}
+
+func runMaintenance(ctx context.Context, t pginspect.Target, p protocol.MaintenanceParams, tl *taskLog) (*protocol.MaintenanceResult, error) {
 	if err := validateMaintenance(p); err != nil {
 		return nil, err
 	}
@@ -276,7 +291,7 @@ func (a *Agent) maintenance(ctx context.Context, db protocol.DatabaseSpec, p pro
 	limit := maintenanceTimeouts[p.Action]
 	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
-	m := &maint{t: a.fixTarget(db), p: p, tl: tl, res: &protocol.MaintenanceResult{Action: p.Action}}
+	m := &maint{t: t, p: p, tl: tl, res: &protocol.MaintenanceResult{Action: p.Action}}
 	var err error
 	switch p.Action {
 	case protocol.MaintVacuum, protocol.MaintAnalyze:
@@ -745,6 +760,12 @@ func (m *maint) dropIndex(ctx context.Context) error {
 	if err := refuseIfIndexBuilding(ctx, conn, v, tableOID, f.table); err != nil {
 		return err
 	}
+	// Its definition, to create it again if a query turns out to need it.
+	var def string
+	if err := conn.QueryRow(ctx, `SELECT pg_get_indexdef($1)`, idx.oid).Scan(&def); err != nil {
+		return err
+	}
+	m.tl.Printf("definition: %s", def)
 	stmt := "DROP INDEX CONCURRENTLY " + idx.ident
 	err = retryOnLock(ctx, m.tl, func() error {
 		// The name must still be this index (not one created since).
@@ -777,6 +798,7 @@ func (m *maint) dropIndex(ctx context.Context) error {
 		adj = "duplicate"
 	}
 	m.res.Summary = fmt.Sprintf("Removed the %s index %s (freed %s).", adj, idx.display(), humanBytes(f.bytes))
+	m.res.Details = append(m.res.Details, "To create it again: "+strings.Replace(def, "CREATE INDEX ", "CREATE INDEX CONCURRENTLY ", 1)+";")
 	return nil
 }
 
@@ -845,7 +867,7 @@ func signalRefusal(s session, action string) string {
 }
 
 func (m *maint) signalBackend(ctx context.Context) error {
-	conn, err := m.connect(ctx, "postgres", map[string]string{"statement_timeout": "10s", "lock_timeout": ddlLockTimeout})
+	conn, err := m.connect(ctx, m.t.MaintenanceDB(), map[string]string{"statement_timeout": "10s", "lock_timeout": ddlLockTimeout})
 	if err != nil {
 		return err
 	}
@@ -966,7 +988,7 @@ func describeSession(s session) string {
 // ---- replication slot ----
 
 func (m *maint) dropSlot(ctx context.Context) error {
-	conn, err := m.connect(ctx, "postgres", map[string]string{"statement_timeout": "10s", "lock_timeout": ddlLockTimeout})
+	conn, err := m.connect(ctx, m.t.MaintenanceDB(), map[string]string{"statement_timeout": "10s", "lock_timeout": ddlLockTimeout})
 	if err != nil {
 		return err
 	}
