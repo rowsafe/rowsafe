@@ -165,7 +165,8 @@ main() {
   add_to_path
   say ''
   [ -z "$PATH_NOTE" ] || say "$PATH_NOTE"
-  say "  rowsafe login"
+  say "  rowsafe pulse postgres://USER@HOST/DB   check a PostgreSQL database now, no account"
+  say "  rowsafe login                            backups, restore tests and the dashboard"
 }
 
 main "$@"
