@@ -46,7 +46,7 @@ func (e *evaluator) disk(fresh bool) {
 			Action:      diskAction("Plan more disk space, or reclaim space from bloated tables and unused indexes.", space),
 			Fixes:       space})
 	}
-	status, _ := e.statusOf(CatDisk)
+	status, _ := e.statusOf(CatDisk, "ok", "")
 	e.check(CatDisk, label, status, fmt.Sprintf("%.0f%% free (%s).", freePct, Bytes(freeBytes)))
 }
 
@@ -73,6 +73,7 @@ func (e *evaluator) connections(fresh bool) {
 		detail = fmt.Sprintf("%.0f%% in use.", used)
 	}
 	idle := e.idleSessionFixes(idleSessionMin)
+	fixes := append(idle[:len(idle):len(idle)], e.in.ConnectionFixes...)
 	switch {
 	case used >= 95:
 		e.add(protocol.Finding{ID: "connections_exhausted", Category: CatConnections, Severity: protocol.SeverityCritical, Penalty: 15,
@@ -80,7 +81,7 @@ func (e *evaluator) connections(fresh bool) {
 			Explanation: "PostgreSQL allows a fixed number of connections. When they run out, your application gets errors connecting.",
 			Action:      connAction(idle, "A connection pooler such as PgBouncer usually fixes this for good."),
 			Command:     connectionsSQL,
-			Fixes:       idle})
+			Fixes:       fixes})
 		e.check(CatConnections, label, "critical", detail)
 	case used >= 80:
 		e.add(protocol.Finding{ID: "connections_high", Category: CatConnections, Severity: protocol.SeverityWarning, Penalty: 8,
@@ -88,7 +89,7 @@ func (e *evaluator) connections(fresh bool) {
 			Explanation: "Over 80% of the allowed connections are taken. A traffic spike could use up the rest, and new connections would fail.",
 			Action:      connAction(idle, "Look for idle connections held open by applications, or add a connection pooler."),
 			Command:     connectionsSQL,
-			Fixes:       idle})
+			Fixes:       fixes})
 		e.check(CatConnections, label, "warning", detail)
 	default:
 		e.check(CatConnections, label, "ok", detail)
@@ -135,7 +136,7 @@ func (e *evaluator) maintenance(fresh bool) {
 			e.add(protocol.Finding{ID: "long_transaction", Category: CatMaintenance, Severity: protocol.SeverityWarning, Penalty: pen,
 				Title:       "A transaction has been open for " + secsAgo(s),
 				Explanation: "While a transaction stays open, PostgreSQL can't clean up rows changed since it began, so tables grow and slow down. It may also hold locks others wait for.",
-				Action:      withFixes(long, "If nobody needs it, end it: its changes are rolled back.", "Find it with "+e.cmd("activity")+" and, if nobody needs it, end it."),
+				Action:      withFixes(long, "If nobody needs it, end it: its changes are rolled back.", "Find it "+e.on("activity")+" and, if nobody needs it, end it."),
 				Command:     withFixes(long, "", longXactSQL),
 				Fixes:       long})
 		} else if s, ok := m[collect.MIdleInXactOldest]; ok && s >= 10*60 {
@@ -143,7 +144,7 @@ func (e *evaluator) maintenance(fresh bool) {
 			e.add(protocol.Finding{ID: "idle_in_transaction", Category: CatMaintenance, Severity: protocol.SeverityWarning, Penalty: 5,
 				Title:       "An application left a transaction open and idle",
 				Explanation: fmt.Sprintf("A session started a transaction %s ago and has done nothing since, usually an application that forgot to commit. It blocks cleanup and may hold locks.", secsAgo(s)),
-				Action:      withFixes(idle, "End the idle session now, then fix the application's transaction handling. The idle_in_transaction_session_timeout setting ends such sessions automatically.", "Find the application with "+e.cmd("activity")+" and fix its transaction handling; the idle_in_transaction_session_timeout setting ends such sessions automatically."),
+				Action:      withFixes(idle, "End the idle session now, then fix the application's transaction handling. The idle_in_transaction_session_timeout setting ends such sessions automatically.", "Find the application "+e.on("activity")+" and fix its transaction handling; the idle_in_transaction_session_timeout setting ends such sessions automatically."),
 				Command:     withFixes(idle, "", idleXactSQL),
 				Fixes:       idle})
 		}
@@ -166,16 +167,14 @@ func (e *evaluator) maintenance(fresh bool) {
 		}
 		e.bloat(ins)
 	}
-	status, detail := e.statusOf(CatMaintenance)
-	if status == "ok" {
-		detail = "Cleanup is keeping up."
-		if h, ok := m[collect.MXIDHeadroomPct]; ok && fresh {
-			detail = fmt.Sprintf("Cleanup is keeping up; %.0f%% transaction ID headroom.", h)
-		}
-		if !fresh && ins == nil {
-			status, detail = "unknown", "No readings."
-		}
+	status, detail := "ok", "Cleanup is keeping up."
+	if h, ok := m[collect.MXIDHeadroomPct]; ok && fresh {
+		detail = fmt.Sprintf("Cleanup is keeping up; %.0f%% transaction ID headroom.", h)
 	}
+	if !fresh && ins == nil {
+		status, detail = "unknown", e.noReadings()
+	}
+	status, detail = e.statusOf(CatMaintenance, status, detail)
 	e.check(CatMaintenance, label, status, detail)
 }
 
@@ -261,28 +260,35 @@ func (e *evaluator) performance(fresh bool) {
 			e.add(protocol.Finding{ID: "blocked_queries", Category: CatPerformance, Severity: protocol.SeverityWarning, Penalty: pen,
 				Title:       fmt.Sprintf("Queries are stuck waiting for a lock (%s)", secsAgo(s)),
 				Explanation: fmt.Sprintf("%s waiting for a lock another session holds. The application may be slow or timing out.", plural(int(m[collect.MBlockedSessions]), "session is", "sessions are")),
-				Action:      withFixes(blockers, "End the session holding the lock if it is safe to (or stop just its query); the sessions waiting for it then continue.", "See who is blocking whom with "+e.cmd("activity")+" and end the blocking session if it is safe to."),
+				Action:      withFixes(blockers, "End the session holding the lock if it is safe to (or stop just its query); the sessions waiting for it then continue.", "See who is blocking whom "+e.on("activity")+" and end the blocking session if it is safe to."),
 				Command:     withFixes(blockers, "", blockedSQL),
 				Fixes:       blockers})
 		}
 		if v, ok := m[collect.MCacheHitPct]; ok && v < 90 {
 			if more, ok := e.memoryAwaitingRestart(); ok {
+				restart := e.in.RestartFixes
 				e.add(protocol.Finding{ID: "cache_hit_low", Category: CatPerformance, Severity: protocol.SeverityInfo, Penalty: 3,
 					Title:       fmt.Sprintf("Only %.0f%% of reads come from memory", v),
 					Explanation: fmt.Sprintf("Most reads should be served from PostgreSQL's memory cache. More memory for it (%s) is already set and takes effect when PostgreSQL restarts.", more),
 					Action:      "Restart PostgreSQL when a few seconds of disconnection suit your apps.",
-					Command:     "sudo systemctl restart postgresql"})
+					Command:     withFixes(availableFixes(restart), "", e.restartCommand()),
+					Fixes:       restart})
 			} else {
 				fix := e.memoryTuneFix()
+				top, tuning := e.cmd("top"), "("+e.cmd("tune")+")"
+				if e.in.Dashboard {
+					top, tuning = "Top queries and Recommendations", "on the Tuning page"
+				}
 				e.add(protocol.Finding{ID: "cache_hit_low", Category: CatPerformance, Severity: protocol.SeverityInfo, Penalty: 3,
 					Title:       fmt.Sprintf("Only %.0f%% of reads come from memory", v),
 					Explanation: "Most reads should be served from PostgreSQL's memory cache. Reading from disk this often makes queries slower; the data in use may not fit in memory. Right after a restart this is normal and clears up by itself.",
-					Action: withFixes(fix, "Give PostgreSQL more of this server's memory (Tune for this server), and look at "+e.cmd("top")+" for queries that read whole tables.",
-						"Look at "+e.cmd("top")+" for queries that read whole tables; if the server has memory to spare, raise shared_buffers ("+e.cmd("tune")+")."),
+					Action: withFixes(fix, "Give PostgreSQL more of this server's memory (Tune for this server), and look at "+top+" for queries that read whole tables.",
+						"Look at "+top+" for queries that read whole tables; if the server has memory to spare, raise shared_buffers "+tuning+"."),
 					Fixes: fix})
 			}
 		}
 	}
+	e.extra(PointAfterCache)
 	if ins := e.insights(); ins != nil {
 		var unusedBytes int64
 		var unused int
@@ -317,14 +323,16 @@ func (e *evaluator) performance(fresh bool) {
 			e.add(protocol.Finding{ID: "missing_index", Category: CatPerformance, Severity: protocol.SeverityInfo, Penalty: 2,
 				Title:       fmt.Sprintf("%s may be missing an index", qualified(t.Schema, t.Table)),
 				Explanation: fmt.Sprintf("Queries read this %s-row table from start to finish %s times, about %s rows each time. An index on the columns they filter by would usually make them much faster.", count(t.LiveRows), count(t.SeqScans), count(t.SeqRows/max(t.SeqScans, 1))),
-				Action:      "Find the queries that read it with " + e.cmd("top") + ", then index the columns they filter by.",
+				Action:      e.missingIndexAction(),
 				Command:     fmt.Sprintf("CREATE INDEX CONCURRENTLY ON %s (<column>);", qualified(t.Schema, t.Table))})
 		}
 	}
+	e.extra(PointAfterIndexes)
 	e.settingsFindings() // settings.go
+	e.extra(PointEnd)
 	status, detail := "ok", "No problems found."
 	if !fresh {
-		status, detail = "unknown", "No readings."
+		status, detail = "unknown", e.noReadings()
 	}
 	for _, x := range e.findings {
 		if x.Category != CatPerformance {
@@ -342,6 +350,22 @@ func (e *evaluator) performance(fresh bool) {
 }
 
 const unusedSince = "No query has used them since statistics were last reset."
+
+func (e *evaluator) missingIndexAction() string {
+	if e.in.Dashboard {
+		return "Pulse, Recommendations finds the indexes your busiest queries need, tests each one on a copy of your database, and creates the ones you pick."
+	}
+	return "Find the queries that read it with " + e.cmd("top") + ", then index the columns they filter by."
+}
+
+// on says where people find something: "on the Activity page" in the
+// dashboard, "with rowsafe activity ..." in a terminal.
+func (e *evaluator) on(place string) string {
+	if e.in.Dashboard {
+		return map[string]string{"activity": "on the Activity page"}[place]
+	}
+	return "with " + e.cmd(place)
+}
 
 // ---- replication ----
 
@@ -392,7 +416,7 @@ func (e *evaluator) replication(fresh bool) {
 	status, detail := "ok", "No replicas."
 	switch {
 	case !fresh && rs == nil:
-		status, detail = "unknown", "No readings."
+		status, detail = "unknown", e.noReadings()
 	case rs != nil && rs.Role == "replica":
 		detail = "This server is a replica."
 		if rs.ReplayLagSeconds != nil {
@@ -407,8 +431,15 @@ func (e *evaluator) replication(fresh bool) {
 		}
 		detail = fmt.Sprintf("%s, at most %s behind.", plural(len(rs.Replicas), "replica", "replicas"), secs(worst))
 	}
-	if st, d := e.statusOf(CatReplication); st != "ok" {
-		status, detail = st, d
+	for _, x := range e.findings {
+		if x.Category == CatReplication {
+			if x.Severity == protocol.SeverityCritical {
+				status = "critical"
+			} else if status != "critical" {
+				status = "warning"
+			}
+			detail = x.Title + "."
+		}
 	}
 	e.check(CatReplication, label, status, detail)
 }

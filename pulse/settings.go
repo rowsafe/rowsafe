@@ -33,14 +33,20 @@ func (e *evaluator) settings() *protocol.SettingsSnapshot {
 // settingsFix builds a fix that changes settings (ALTER SYSTEM, then a
 // reload; nothing restarts).
 func (e *evaluator) settingsFix(id, label, desc string, changes []protocol.SettingChange, snap *protocol.SettingsSnapshot) protocol.FindingFix {
-	fx := fix(id, protocol.FixTune, label, desc, protocol.SettingsParams{Kind: protocol.SettingsKindFix, Changes: changes})
+	fx := e.fix(id, protocol.FixTune, label, desc, protocol.SettingsParams{Kind: protocol.SettingsKindFix, Changes: changes})
+	fx.MarkFirst = e.in.MarkFirst
+	configErrors := "PostgreSQL's configuration has errors; Rowsafe changes nothing until they are fixed on the server."
+	if e.in.Dashboard {
+		configErrors = "PostgreSQL's configuration has errors (see Tuning); Rowsafe changes nothing until they are fixed on the server."
+	}
 	switch {
+	case !fx.Available:
 	case e.in.SettingsLocked != "":
 		fx.Available, fx.Reason = false, e.in.SettingsLocked
 	case snap.InRecovery:
 		fx.Available, fx.Reason = false, "This server is a standby: change settings on the primary."
 	case len(snap.ConfigErrors) > 0:
-		fx.Available, fx.Reason = false, "PostgreSQL's configuration has errors; Rowsafe changes nothing until they are fixed on the server."
+		fx.Available, fx.Reason = false, configErrors
 	}
 	return fx
 }
@@ -77,8 +83,13 @@ func (e *evaluator) tuneFix(snap *protocol.SettingsSnapshot) (protocol.FindingFi
 	if restart {
 		desc += " The memory settings take effect when PostgreSQL restarts; you choose when."
 	}
+	where := ""
+	if e.in.Dashboard {
+		desc += " You can undo it in one click on the Tuning page."
+		where = " on " + e.in.Host
+	}
 	fx := e.settingsFix("tune", "Tune for this server", desc, changes, snap)
-	fx.Confirm = fmt.Sprintf("Change %s of PostgreSQL? Nothing restarts now.", plural(len(changes), "setting", "settings"))
+	fx.Confirm = fmt.Sprintf("Change %s of PostgreSQL%s? Nothing restarts now.", plural(len(changes), "setting", "settings"), where)
 	return fx, true
 }
 
@@ -133,7 +144,7 @@ func (e *evaluator) memoryAwaitingRestart() (string, bool) {
 // restartCommand is how to restart PostgreSQL by hand ("" when it doesn't
 // run here: a managed database restarts from its provider's console).
 func (e *evaluator) restartCommand() string {
-	if e.in.Local {
+	if e.in.Local || e.in.Dashboard {
 		return "sudo systemctl restart postgresql"
 	}
 	return ""
@@ -163,8 +174,8 @@ func (e *evaluator) settingsFindings() {
 				Title: fmt.Sprintf("PostgreSQL is using default memory settings on a %s server", tune.HumanBytes(ram)),
 				Explanation: fmt.Sprintf("PostgreSQL keeps only %s of your data in its own memory, out of %s on this server. Tuned settings let it keep much more in memory and plan queries better.",
 					tune.HumanBytes(b), tune.HumanBytes(ram)),
-				Action:  withFixes(fixes, "Let Rowsafe tune the settings for this server; "+e.cmd("tune")+" shows each one first.", "Review the recommendations: "+e.cmd("tune")+"."),
-				Command: withFixes(fixes, "", e.cmd("tune")),
+				Action:  e.defaultMemoryAction(fixes),
+				Command: withFixes(fixes, "", e.tuneCommand()),
 				Fixes:   fixes})
 		}
 	}
@@ -178,13 +189,19 @@ func (e *evaluator) settingsFindings() {
 				[]protocol.SettingChange{{Name: "shared_preload_libraries", Value: value}}, snap)
 			e.add(protocol.Finding{ID: "pg_stat_statements_off", Category: CatPerformance, Severity: protocol.SeverityInfo, Penalty: 2,
 				Title:       "Query statistics are off (pg_stat_statements isn't loaded)",
-				Explanation: "pg_stat_statements is installed but PostgreSQL doesn't load it, so Rowsafe can't show which queries take the most time.",
+				Explanation: "pg_stat_statements is installed but PostgreSQL doesn't load it, so Rowsafe can't show which queries take the most time" + e.slowerToo() + ".",
 				Action:      "Turn it on; it takes effect after the next restart of PostgreSQL.",
 				Fixes:       []protocol.FindingFix{fx}})
 		}
 	}
 
-	// Changed settings waiting for a restart.
+	e.extra(PointAfterStatements)
+
+	// Changed settings waiting for a restart (unless another finding
+	// already asks for the restart).
+	if e.in.SkipPendingRestart {
+		return
+	}
 	var pending []string
 	for _, s := range snap.Settings {
 		if s.PendingRestart {
@@ -206,7 +223,31 @@ func (e *evaluator) settingsFindings() {
 		Title:       title,
 		Explanation: fmt.Sprintf("%s changed, but PostgreSQL only reads %s when it starts.", strings.Join(pending, ", "), them),
 		Action:      "Restart PostgreSQL when a few seconds of disconnection suit your apps.",
-		Command:     e.restartCommand()})
+		Command:     withFixes(availableFixes(e.in.RestartFixes), "", e.restartCommand()),
+		Fixes:       e.in.RestartFixes})
+}
+
+func (e *evaluator) defaultMemoryAction(fixes []protocol.FindingFix) string {
+	if e.in.Dashboard {
+		return withFixes(fixes, "Let Rowsafe tune the settings for this server; review them first on the Tuning page if you like.", "Review the recommendations on the Tuning page.")
+	}
+	return withFixes(fixes, "Let Rowsafe tune the settings for this server; "+e.cmd("tune")+" shows each one first.", "Review the recommendations: "+e.cmd("tune")+".")
+}
+
+func (e *evaluator) tuneCommand() string {
+	if e.in.Dashboard {
+		return "rowsafe tune " + e.in.Database
+	}
+	return e.cmd("tune")
+}
+
+// slowerToo: the dashboard keeps history, so it also shows which queries
+// got slower.
+func (e *evaluator) slowerToo() string {
+	if e.in.Dashboard {
+		return " or which got slower"
+	}
+	return ""
 }
 
 // pendingGains says in plain words what a restart turns on (the settings
