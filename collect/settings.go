@@ -2,6 +2,7 @@ package collect
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/rowsafe/rowsafe/protocol"
 	"github.com/rowsafe/rowsafe/tune"
@@ -31,21 +33,24 @@ const pendingNotApplied = "setting could not be applied"
 // where /proc is mounted ("" is /proc). It opens its own connection
 // without session settings, so every value is the cluster's.
 func ReadSettings(ctx context.Context, t Target, procRoot string) (*protocol.SettingsSnapshot, error) {
-	cfg, err := pgx.ParseConfig("")
+	cfg, err := t.config(t.MaintenanceDB())
 	if err != nil {
 		return nil, err
 	}
-	cfg.Host, cfg.Port, cfg.User, cfg.Database = t.SocketDir, uint16(t.Port), t.User, "postgres"
 	cfg.ConnectTimeout = 5 * time.Second
 	cfg.RuntimeParams["application_name"] = "rowsafe-agent-monitor"
 	conn, err := pgx.ConnectConfig(ctx, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("connecting to PostgreSQL on %s port %d as %s: %w", t.SocketDir, t.Port, t.User, err)
+		return nil, fmt.Errorf("connecting to PostgreSQL on %s: %w", t, err)
 	}
 	defer conn.Close(context.WithoutCancel(ctx))
 	snap, err := readSettings(ctx, conn, procRoot)
 	if err != nil {
 		return nil, err
+	}
+	if !t.Local() {
+		// Another machine's memory, CPUs and disk can't be read from here.
+		snap.Host = protocol.SettingsHost{}
 	}
 	// The extensions Rowsafe installs and where they are on (a failure
 	// leaves them out: settings changes and Pulse then know less).
@@ -58,8 +63,10 @@ func ReadSettings(ctx context.Context, t Target, procRoot string) (*protocol.Set
 func readSettings(ctx context.Context, conn *pgx.Conn, procRoot string) (*protocol.SettingsSnapshot, error) {
 	snap := &protocol.SettingsSnapshot{Settings: []protocol.PGSetting{}}
 	var dataDir string
+	// pg_settings hides data_directory from roles that may not read it
+	// (current_setting refuses them).
 	if err := conn.QueryRow(ctx, `SELECT current_setting('server_version_num')::int, pg_is_in_recovery(),
-		       coalesce(current_setting('data_directory', true), '')`).Scan(&snap.VersionNum, &snap.InRecovery, &dataDir); err != nil {
+		       coalesce((SELECT setting FROM pg_settings WHERE name = 'data_directory'), '')`).Scan(&snap.VersionNum, &snap.InRecovery, &dataDir); err != nil {
 		return nil, fmt.Errorf("reading the server version: %w", err)
 	}
 	rows, err := conn.Query(ctx, `
@@ -113,7 +120,7 @@ func readSettings(ctx context.Context, conn *pgx.Conn, procRoot string) (*protoc
 	if snap.PgStatStatements == "" && available {
 		snap.PgStatStatements = "available"
 	}
-	_ = conn.QueryRow(ctx, `SELECT coalesce(sum(pg_database_size(oid)), 0)::int8 FROM pg_database WHERE datallowconn`).Scan(&snap.DatabaseBytes)
+	_ = conn.QueryRow(ctx, `SELECT coalesce(sum(pg_database_size(oid)), 0)::int8 FROM pg_database WHERE datallowconn AND has_database_privilege(oid, 'CONNECT')`).Scan(&snap.DatabaseBytes)
 
 	snap.Host = hostFacts(procRoot, dataDir)
 	return snap, nil
@@ -154,6 +161,10 @@ func readFileSettings(ctx context.Context, conn *pgx.Conn, snap *protocol.Settin
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
+		var pe *pgconn.PgError
+		if errors.As(err, &pe) && pe.Code == "42501" {
+			return nil // not a superuser (PostgreSQL says so while reading): the rest still helps
+		}
 		return err
 	}
 	for i := range snap.Settings {

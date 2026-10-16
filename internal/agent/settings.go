@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/rowsafe/rowsafe/collect"
+	"github.com/rowsafe/rowsafe/internal/pginspect"
 	"github.com/rowsafe/rowsafe/protocol"
 	"github.com/rowsafe/rowsafe/tune"
 )
@@ -63,22 +64,45 @@ func (a *Agent) settingsTarget(db protocol.DatabaseSpec) collect.Target {
 }
 
 func (a *Agent) changeSettings(ctx context.Context, db protocol.DatabaseSpec, p protocol.SettingsParams, tl *taskLog) (*protocol.SettingsResult, error) {
+	var standbyDataDir string
+	if p.Standby {
+		r, ok := a.followingStandby(db) // standby_updates.go
+		if !ok {
+			return nil, errors.New("this server doesn't run a standby of this database")
+		}
+		standbyDataDir = r.DataDir
+		db.Port, db.SocketDir = r.Database.Port, r.Database.SocketDir
+	}
+	return changeSettingsAt(ctx, settingsAt{pg: a.target(db), read: a.settingsTarget(db)}, p, standbyDataDir, tl)
+}
+
+// ChangeSettings changes settings of the PostgreSQL at pg (collect's
+// target read reaches the same server), with every check a settings task
+// makes: for the CLI on a database it reaches directly, without an agent
+// (rowsafe tune postgres://...). It returns the task log with the result.
+func ChangeSettings(ctx context.Context, pg pginspect.Target, read collect.Target, p protocol.SettingsParams) (*protocol.SettingsResult, string, error) {
+	if p.Standby {
+		return nil, "", errors.New("a standby's settings change only through its agent")
+	}
+	tl := &taskLog{}
+	res, err := changeSettingsAt(ctx, settingsAt{pg: pg, read: read}, p, "", tl)
+	return res, tl.buf.String(), err
+}
+
+// settingsAt is the server a settings change applies to.
+type settingsAt struct {
+	pg   pginspect.Target
+	read collect.Target
+}
+
+func changeSettingsAt(ctx context.Context, at settingsAt, p protocol.SettingsParams, standbyDataDir string, tl *taskLog) (*protocol.SettingsResult, error) {
 	switch p.Kind {
 	case protocol.SettingsKindTune, protocol.SettingsKindSet, protocol.SettingsKindFix, protocol.SettingsKindRevert:
 	default:
 		return nil, fmt.Errorf("unknown kind of settings change %q", p.Kind)
 	}
 	changes := tune.Normalize(p.Changes)
-	var standby standbyRecord
-	if p.Standby {
-		r, ok := a.followingStandby(db) // standby_updates.go
-		if !ok {
-			return nil, errors.New("this server doesn't run a standby of this database")
-		}
-		standby = r
-		db.Port, db.SocketDir = r.Database.Port, r.Database.SocketDir
-	}
-	before, err := collect.ReadSettings(ctx, a.settingsTarget(db), settingsProcRoot)
+	before, err := collect.ReadSettings(ctx, at.read, settingsProcRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +117,7 @@ func (a *Agent) changeSettings(ctx context.Context, db protocol.DatabaseSpec, p 
 			strings.Join(before.ConfigErrors, "; "))
 	}
 
-	conn, err := a.target(db).Connect(ctx, "postgres")
+	conn, err := at.pg.Connect(ctx, at.pg.MaintenanceDB())
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +146,7 @@ func (a *Agent) changeSettings(ctx context.Context, db protocol.DatabaseSpec, p 
 		if err := standbySettingsAllowed(changes, current); err != nil {
 			return nil, err
 		}
-		keep, err := standbyConfKeeper(standby.DataDir)
+		keep, err := standbyConfKeeper(standbyDataDir)
 		if err != nil {
 			return nil, err
 		}
@@ -172,7 +196,7 @@ func (a *Agent) changeSettings(ctx context.Context, db protocol.DatabaseSpec, p 
 	}
 	tl.Printf("configuration reloaded")
 
-	after, err := a.waitForSettings(ctx, db, changes, current)
+	after, err := waitForSettings(ctx, at, changes, current)
 	if err != nil {
 		return nil, rollback(err)
 	}
@@ -312,11 +336,11 @@ func restoreSettings(ctx context.Context, conn *pgx.Conn, applied []protocol.App
 
 // waitForSettings reads the settings until the ones that apply at once
 // show their new values (a reload reaches new sessions within moments).
-func (a *Agent) waitForSettings(ctx context.Context, db protocol.DatabaseSpec, changes []protocol.SettingChange,
+func waitForSettings(ctx context.Context, at settingsAt, changes []protocol.SettingChange,
 	before map[string]protocol.PGSetting) (*protocol.SettingsSnapshot, error) {
 	deadline := time.Now().Add(settingsReloadWait)
 	for {
-		snap, err := collect.ReadSettings(ctx, a.settingsTarget(db), settingsProcRoot)
+		snap, err := collect.ReadSettings(ctx, at.read, settingsProcRoot)
 		if err != nil {
 			return nil, err
 		}
@@ -332,7 +356,7 @@ func (a *Agent) waitForSettings(ctx context.Context, db protocol.DatabaseSpec, c
 				// Not in the snapshot (outside the catalog, at its default):
 				// read it directly.
 				s.Setting = ""
-				if err := readSetting(ctx, a, db, &s); err != nil {
+				if err := readSetting(ctx, at.pg, &s); err != nil {
 					return nil, err
 				}
 			}
@@ -359,8 +383,8 @@ func (a *Agent) waitForSettings(ctx context.Context, db protocol.DatabaseSpec, c
 	}
 }
 
-func readSetting(ctx context.Context, a *Agent, db protocol.DatabaseSpec, s *protocol.PGSetting) error {
-	conn, err := a.target(db).Connect(ctx, "postgres")
+func readSetting(ctx context.Context, t pginspect.Target, s *protocol.PGSetting) error {
+	conn, err := t.Connect(ctx, t.MaintenanceDB())
 	if err != nil {
 		return err
 	}
@@ -380,7 +404,7 @@ func ensureStatements(ctx context.Context, conn *pgx.Conn, changes []protocol.Se
 	if err := conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements')`).Scan(&exists); err != nil || exists {
 		return "", err
 	}
-	tl.Printf("CREATE EXTENSION IF NOT EXISTS pg_stat_statements (in the postgres database)")
+	tl.Printf("CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
 	if _, err := conn.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS pg_stat_statements`); err != nil {
 		return "", err
 	}

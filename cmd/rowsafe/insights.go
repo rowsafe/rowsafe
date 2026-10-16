@@ -58,7 +58,7 @@ func pulseCmd(ctx context.Context, c *client.Client, args []string) error {
 			return err
 		}
 	} else {
-		printHealth(h)
+		printHealth(h, "rowsafe fix "+h.Database)
 		if av, err := c.Availability(ctx, pos[0]); err == nil {
 			var parts []string
 			for _, w := range av.Windows {
@@ -87,7 +87,9 @@ func pctText(p float64) string {
 	return strconv.FormatFloat(p, 'f', 1, 64) + "%"
 }
 
-func printHealth(h protocol.DatabaseHealth) {
+// printHealth shows a health score and its findings; fixCmd is the command
+// that applies a fix ("rowsafe fix NAME").
+func printHealth(h protocol.DatabaseHealth, fixCmd string) {
 	fmt.Printf("%s on %s: %d/100, %s\n", h.Database, h.Host, h.Score, gradeText[h.Grade])
 	fmt.Println(h.Summary)
 	for _, f := range h.Findings {
@@ -96,7 +98,7 @@ func printHealth(h protocol.DatabaseHealth) {
 		fmt.Printf("   %s\n", f.Explanation)
 		fmt.Printf("   What to do: %s\n", f.Action)
 		if fx := firstAvailableFix(f); fx != nil {
-			fmt.Printf("   Fix: rowsafe fix %s %s  (%s)\n", h.Database, f.ID, fx.Label)
+			fmt.Printf("   Fix: %s %s  (%s)\n", fixCmd, f.ID, fx.Label)
 		} else if f.Command != "" {
 			fmt.Printf("   Try: %s\n", f.Command)
 		}
@@ -158,11 +160,18 @@ func insightsCmd(ctx context.Context, c *client.Client, args []string) error {
 	if *asJSON {
 		return printJSON(ins)
 	}
+	printInsights(name, ins, *limit, "rowsafe fix "+name)
+	return nil
+}
+
+// printInsights shows tables and indexes; fixCmd is the command that
+// applies a fix ("rowsafe fix NAME").
+func printInsights(name string, ins protocol.InsightsResponse, limit int, fixCmd string) {
 	if !ins.Available {
 		fmt.Printf("No table insights for %s yet. %s\n", name, ins.Reason)
-		return nil
+		return
 	}
-	n := max(*limit, 1)
+	n := max(limit, 1)
 	fmt.Printf("Table and index insights for %s (collected %s", name, ago(&ins.CollectedAt))
 	if ins.Truncated {
 		fmt.Print("; partial, see the notes at the end")
@@ -247,7 +256,7 @@ func insightsCmd(ctx context.Context, c *client.Client, args []string) error {
 		t.flush()
 	}
 	if len(ins.UnusedIndexes)+len(ins.DuplicateIndexes)+len(ins.IndexBloat) > 0 {
-		fmt.Printf("\nRowsafe can rebuild or remove these indexes for you, safely: rowsafe fix %s\n", name)
+		fmt.Printf("\nRowsafe can rebuild or remove these indexes for you, safely: %s\n", fixCmd)
 	}
 	if len(ins.Notes) > 0 {
 		fmt.Println("\nNotes")
@@ -255,7 +264,6 @@ func insightsCmd(ctx context.Context, c *client.Client, args []string) error {
 			fmt.Printf("  %s\n", note)
 		}
 	}
-	return nil
 }
 
 func cut[T any](s []T, n int) []T {
@@ -300,7 +308,7 @@ func topCmd(ctx context.Context, c *client.Client, args []string) error {
 		return printJSON(q)
 	}
 	if !q.TrendAvailable {
-		return printCumulativeTop(name, q.Statements, *width)
+		return printCumulativeTop(name, q.Statements, *width, "Numbers per time range, and which queries got slower, arrive within 10 minutes.")
 	}
 	fmt.Printf("Top statements of %s in the last %s by %s: %d calls, %s of execution time in total\n\n",
 		name, *since, strings.ReplaceAll(*sort, "_", " "), q.Totals.Calls, msText(q.Totals.TotalTimeMs))
@@ -333,15 +341,19 @@ func topCmd(ctx context.Context, c *client.Client, args []string) error {
 }
 
 // printCumulativeTop shows pg_stat_statements' totals since its last reset,
-// for when the per-interval numbers are not there yet.
-func printCumulativeTop(name string, st protocol.Statements, width int) error {
+// for when the per-interval numbers are not there yet (or without an
+// agent); note follows the heading.
+func printCumulativeTop(name string, st protocol.Statements, width int, note string) error {
 	if !st.Available || len(st.Statements) == 0 {
 		fmt.Printf("No query statistics for %s yet: %s\n", name, cmp.Or(st.Reason,
 			"they need pg_stat_statements; the first numbers arrive 10 minutes after the agent starts"))
 		return nil
 	}
 	fmt.Printf("Top statements of %s by total time since pg_stat_statements was last reset (collected %s).\n", name, ago(&st.CollectedAt))
-	fmt.Printf("Numbers per time range, and which queries got slower, arrive within 10 minutes.\n\n")
+	if note != "" {
+		fmt.Println(note)
+	}
+	fmt.Println()
 	t := newTable("QUERY ID", "TOTAL", "CALLS", "MEAN", "ROWS", "DATABASE", "QUERY")
 	for _, s := range st.Statements {
 		query := strings.Join(strings.Fields(s.Query), " ")

@@ -76,10 +76,10 @@ func readStatements(ctx context.Context, t Target, conn *pgx.Conn, st *clusterSt
 	if st.statementsDB != "" {
 		names = append(names, st.statementsDB)
 	}
-	names = append(names, "postgres")
+	names = append(names, t.MaintenanceDB())
 	rows, err := conn.Query(ctx, `
 		SELECT datname::text FROM pg_database
-		WHERE datallowconn AND NOT datistemplate AND datname <> 'postgres' ORDER BY datname LIMIT 20`)
+		WHERE datallowconn AND NOT datistemplate AND datname <> $1 AND has_database_privilege(oid, 'CONNECT') ORDER BY datname LIMIT 20`, t.MaintenanceDB())
 	if err == nil {
 		if more, err := pgx.CollectRows(rows, pgx.RowTo[string]); err == nil {
 			names = append(names, more...)
@@ -92,7 +92,7 @@ func readStatements(ctx context.Context, t Target, conn *pgx.Conn, st *clusterSt
 		}
 		seen[name] = true
 		c := conn
-		if name != "postgres" {
+		if name != t.MaintenanceDB() {
 			var err error
 			if c, err = t.connect(ctx, name); err != nil {
 				continue

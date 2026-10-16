@@ -25,6 +25,10 @@ const usage = `rowsafe - databases that let you sleep at night
 
 All commands (NAME is optional where shown in brackets; see "rowsafe help names"):
 
+No account needed: on a PostgreSQL database this computer reaches (CONN is postgres://USER@HOST/DB, or
+DATABASE_URL when you aren't logged in; "rowsafe help local")
+  rowsafe pulse CONN | fix CONN | insights CONN | top CONN | activity CONN | settings CONN | tune CONN | mcp CONN
+
 Getting started
   rowsafe login [--url URL]                  log in with your browser (default URL https://api.rowsafe.sh)
   rowsafe login --key rsk_... [--url URL]    log in with an existing API key (CI, scripts)
@@ -405,6 +409,8 @@ func configPath() (string, error) {
 	return filepath.Join(dir, "rowsafe", "config.json"), nil
 }
 
+var errNotLoggedIn = errors.New("not logged in: run `rowsafe login`")
+
 func loadConfig() (config, error) {
 	var c config
 	if p, err := configPath(); err == nil {
@@ -424,7 +430,7 @@ func loadConfig() (config, error) {
 		c.URL = protocol.DefaultAPIURL
 	}
 	if c.APIKey == "" {
-		return c, errors.New("not logged in: run `rowsafe login`")
+		return c, errNotLoggedIn
 	}
 	c.URL = strings.TrimRight(c.URL, "/")
 	return c, nil
@@ -517,7 +523,21 @@ func dispatch(ctx context.Context, args []string) error {
 		return guard(ctx, rest)
 	}
 	cfg, err := loadConfig()
+	// Without an account: a connection string, or $DATABASE_URL with no
+	// saved login (local.go).
+	if run, ok := localCommands[cmd]; ok {
+		db, args, isLocal, lerr := localArgs(rest, err == nil)
+		if lerr != nil {
+			return lerr
+		}
+		if isLocal {
+			return run(ctx, db, args)
+		}
+	}
 	if err != nil {
+		if errors.Is(err, errNotLoggedIn) {
+			return errors.New(notLoggedIn)
+		}
 		return err
 	}
 	c := client.New(cfg.URL, cfg.APIKey)

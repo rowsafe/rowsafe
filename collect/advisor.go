@@ -56,7 +56,7 @@ func advisorCluster(ctx context.Context, conn *pgx.Conn, ins *protocol.Insights)
 		       pg_size_bytes(current_setting('work_mem')), current_setting('max_connections')::int,
 		       current_setting('autovacuum_vacuum_scale_factor')::float8, current_setting('autovacuum_vacuum_threshold')::bigint,
 		       current_setting('autovacuum_analyze_scale_factor')::float8,
-		       coalesce((SELECT sum(pg_database_size(oid)) FROM pg_database WHERE datallowconn), 0)::bigint,
+		       coalesce((SELECT sum(pg_database_size(oid)) FROM pg_database WHERE datallowconn AND has_database_privilege(oid, 'CONNECT')), 0)::bigint,
 		       current_setting('server_version_num')::int`).Scan(
 		&m.SharedBuffersBytes, &m.EffectiveCacheSizeBytes, &m.WorkMemBytes, &m.MaxConnections,
 		&m.VacuumScaleFactor, &m.VacuumThreshold, &m.AnalyzeScaleFactor, &m.DatabaseBytes, &m.VersionNum)

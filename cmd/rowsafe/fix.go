@@ -92,7 +92,7 @@ func fixCmd(ctx context.Context, c *client.Client, args []string) error {
 	var pick *fixChoice
 	switch {
 	case len(ids) == 0:
-		printFixes(h, choices)
+		printFixes(h, choices, "rowsafe fix "+h.Database)
 		if !hasAvailable(choices) || *yes || !stdinIsTerminal() {
 			return nil
 		}
@@ -105,7 +105,7 @@ func fixCmd(ctx context.Context, c *client.Client, args []string) error {
 			return err
 		}
 	default:
-		if pick, err = pickByID(h, choices, ids); err != nil {
+		if pick, err = pickByID(h, choices, ids, "rowsafe fix "+h.Database); err != nil {
 			return err
 		}
 	}
@@ -165,8 +165,9 @@ func pickByNumber(choices []fixChoice, s string) (*fixChoice, error) {
 	return nil, fmt.Errorf("there is no fix number %d (the list may have changed; run rowsafe fix again)", n)
 }
 
-// pickByID finds FINDING [FIX], or a list number.
-func pickByID(h protocol.DatabaseHealth, choices []fixChoice, ids []string) (*fixChoice, error) {
+// pickByID finds FINDING [FIX], or a list number. fixCmd is the command
+// that lists the fixes ("rowsafe fix NAME").
+func pickByID(h protocol.DatabaseHealth, choices []fixChoice, ids []string, fixCmd string) (*fixChoice, error) {
 	if len(ids) == 1 {
 		if _, err := strconv.Atoi(ids[0]); err == nil {
 			return pickByNumber(choices, ids[0])
@@ -179,8 +180,8 @@ func pickByID(h protocol.DatabaseHealth, choices []fixChoice, ids []string) (*fi
 		}
 	}
 	if finding == nil {
-		return nil, fmt.Errorf("%s has no finding %q now (it may have been resolved); run `rowsafe fix %s` to see what can be fixed",
-			h.Database, ids[0], h.Database)
+		return nil, fmt.Errorf("%s has no finding %q now (it may have been resolved); run `%s` to see what can be fixed",
+			h.Database, ids[0], fixCmd)
 	}
 	var mine []fixChoice
 	for _, c := range choices {
@@ -212,7 +213,7 @@ func pickByID(h protocol.DatabaseHealth, choices []fixChoice, ids []string) (*fi
 		return &mine[avail[0]], nil
 	}
 	if stdinIsTerminal() {
-		printFixes(protocol.DatabaseHealth{Database: h.Database, Findings: []protocol.Finding{*finding}}, mine)
+		printFixes(protocol.DatabaseHealth{Database: h.Database, Findings: []protocol.Finding{*finding}}, mine, fixCmd)
 		fmt.Print("\nWhich one? (number, or Enter to leave it) ")
 		answer := readLine()
 		if answer == "" {
@@ -231,12 +232,15 @@ func fixIDs(cs []fixChoice) string {
 	return strings.Join(ids, ", ")
 }
 
-func printFixes(h protocol.DatabaseHealth, choices []fixChoice) {
+// printFixes lists the fixes; fixCmd is the command that applies one
+// ("rowsafe fix NAME").
+func printFixes(h protocol.DatabaseHealth, choices []fixChoice, fixCmd string) {
 	if len(choices) == 0 {
 		if len(h.Findings) == 0 {
 			fmt.Printf("%s: nothing to fix, no problems found.\n", h.Database)
 		} else {
-			fmt.Printf("%s: nothing Rowsafe can fix by itself right now. What to do about each finding: rowsafe pulse %s\n", h.Database, h.Database)
+			fmt.Printf("%s: nothing Rowsafe can fix by itself right now. What to do about each finding: %s\n", h.Database,
+				strings.Replace(fixCmd, "rowsafe fix", "rowsafe pulse", 1))
 		}
 		return
 	}
@@ -278,7 +282,7 @@ func printFixes(h protocol.DatabaseHealth, choices []fixChoice) {
 		}
 	}
 	if hasAvailable(choices) {
-		fmt.Printf("\nApply one: rowsafe fix %s NUMBER   (or: rowsafe fix %s FINDING FIX)\n", h.Database, h.Database)
+		fmt.Printf("\nApply one: %s NUMBER   (or: %s FINDING FIX)\n", fixCmd, fixCmd)
 	}
 }
 

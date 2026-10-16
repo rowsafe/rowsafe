@@ -14,18 +14,69 @@ import (
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
-// Target is a PostgreSQL cluster reachable over its local Unix socket.
+// Target is a PostgreSQL cluster reachable over its local Unix socket, or
+// through a connection string (Conn).
 type Target struct {
 	SocketDir string
 	Port      int
 	User      string
+	// Conn, when set, is how to reach PostgreSQL instead of the socket: a
+	// parsed connection string (host, port, user, password, TLS), as
+	// `rowsafe pulse postgres://...` uses without an agent. Each connection
+	// copies it and picks its own database; cluster-wide readings use its
+	// database (MaintenanceDB).
+	Conn *pgx.ConnConfig
 }
 
-// statementTimeout bounds every monitoring query: a busy server gets a
-// gap in its graphs, never a pile-up of monitoring queries.
-const statementTimeout = 2 * time.Second
+// MaintenanceDB is the database cluster-wide readings connect to: the
+// connection string's, or postgres.
+func (t Target) MaintenanceDB() string {
+	if t.Conn != nil && t.Conn.Database != "" {
+		return t.Conn.Database
+	}
+	return "postgres"
+}
 
-func (t Target) connect(ctx context.Context, dbname string) (*pgx.Conn, error) {
+// OnlyDB is the one database a connection string names, whose tables and
+// indexes are examined alone ("" over the socket: every database).
+func (t Target) OnlyDB() string {
+	if t.Conn != nil {
+		return t.Conn.Database
+	}
+	return ""
+}
+
+// Local reports whether the cluster runs on this machine, so that its
+// data directory's disk and the host's memory can be read here: always
+// over the socket, and for a connection string to a Unix socket or to
+// localhost.
+func (t Target) Local() bool {
+	if t.Conn == nil {
+		return true
+	}
+	h := t.Conn.Host
+	return strings.HasPrefix(h, "/") || h == "localhost" || h == "127.0.0.1" || h == "::1"
+}
+
+// String names the target in errors, never with a password.
+func (t Target) String() string {
+	if t.Conn != nil {
+		return fmt.Sprintf("%s port %d as %s", t.Conn.Host, t.Conn.Port, t.Conn.User)
+	}
+	return fmt.Sprintf("%s port %d as %s", t.SocketDir, t.Port, t.User)
+}
+
+// config is the connection config for dbname, before the caller's
+// session settings.
+func (t Target) config(dbname string) (*pgx.ConnConfig, error) {
+	if t.Conn != nil {
+		cfg := t.Conn.Copy()
+		cfg.Database = dbname
+		if cfg.RuntimeParams == nil {
+			cfg.RuntimeParams = map[string]string{}
+		}
+		return cfg, nil
+	}
 	cfg, err := pgx.ParseConfig("")
 	if err != nil {
 		return nil, err
@@ -34,6 +85,18 @@ func (t Target) connect(ctx context.Context, dbname string) (*pgx.Conn, error) {
 	cfg.Port = uint16(t.Port)
 	cfg.User = t.User
 	cfg.Database = dbname
+	return cfg, nil
+}
+
+// statementTimeout bounds every monitoring query: a busy server gets a
+// gap in its graphs, never a pile-up of monitoring queries.
+const statementTimeout = 2 * time.Second
+
+func (t Target) connect(ctx context.Context, dbname string) (*pgx.Conn, error) {
+	cfg, err := t.config(dbname)
+	if err != nil {
+		return nil, err
+	}
 	cfg.ConnectTimeout = 5 * time.Second
 	cfg.RuntimeParams["application_name"] = "rowsafe-agent-monitor"
 	cfg.RuntimeParams["statement_timeout"] = strconv.Itoa(int(statementTimeout.Milliseconds()))
@@ -85,9 +148,9 @@ type clusterReading struct {
 // readCluster runs the monitoring queries against one cluster. withSlow
 // adds database sizes and pg_stat_statements (every few minutes).
 func readCluster(ctx context.Context, t Target, st *clusterState, withSlow, queryText bool) (*clusterReading, error) {
-	conn, err := t.connect(ctx, "postgres")
+	conn, err := t.connect(ctx, t.MaintenanceDB())
 	if err != nil {
-		return nil, fmt.Errorf("connecting to PostgreSQL on %s port %d as %s: %w", t.SocketDir, t.Port, t.User, err)
+		return nil, fmt.Errorf("connecting to PostgreSQL on %s: %w", t, err)
 	}
 	defer conn.Close(context.WithoutCancel(ctx))
 
@@ -293,7 +356,7 @@ func readActivity(ctx context.Context, conn *pgx.Conn, r *clusterReading, queryT
 // every few minutes; a very large database may exceed the timeout and is
 // then left out of that round.
 func readSizes(ctx context.Context, conn *pgx.Conn, r *clusterReading) {
-	rows, err := conn.Query(ctx, `SELECT datname::text FROM pg_database WHERE datallowconn AND NOT datistemplate ORDER BY datname`)
+	rows, err := conn.Query(ctx, `SELECT datname::text FROM pg_database WHERE datallowconn AND NOT datistemplate AND has_database_privilege(oid, 'CONNECT') ORDER BY datname`)
 	if err != nil {
 		return
 	}

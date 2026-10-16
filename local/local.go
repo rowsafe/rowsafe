@@ -1,0 +1,345 @@
+// Package local is Rowsafe on a PostgreSQL database it reaches directly,
+// with a connection string: no agent, no account, no control plane. The
+// CLI (rowsafe pulse postgres://...) and the local MCP server (rowsafe mcp
+// postgres://...) use it for Pulse (health score, findings and fixes),
+// tables and indexes, top queries, live activity and settings.
+//
+// Reads are read-only and bounded (statement and lock timeouts). Changes
+// are the agent's own code with all its checks: a fix runs only once it is
+// found again in a fresh evaluation (ApplyFix), every name is looked up
+// again in the catalogs, and settings go through tune's validation, ALTER
+// SYSTEM and a reload, never a restart. Nothing is sent anywhere.
+package local
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/rowsafe/rowsafe/collect"
+	"github.com/rowsafe/rowsafe/internal/agent"
+	"github.com/rowsafe/rowsafe/internal/pginspect"
+	"github.com/rowsafe/rowsafe/protocol"
+	"github.com/rowsafe/rowsafe/pulse"
+	"github.com/rowsafe/rowsafe/tune"
+)
+
+// IsConnString reports whether s is a PostgreSQL connection URL
+// (postgres:// or postgresql://).
+func IsConnString(s string) bool {
+	s = strings.ToLower(strings.TrimSpace(s))
+	return strings.HasPrefix(s, "postgres://") || strings.HasPrefix(s, "postgresql://")
+}
+
+// DB is a PostgreSQL database reached through a connection string.
+type DB struct {
+	conn *pgx.ConnConfig
+	// Ref is how commands name this database: the connection string
+	// without its password, or "" when the commands find it by themselves
+	// (DATABASE_URL).
+	Ref string
+	// PasswordInURL: the connection string carried a password, which Ref
+	// leaves out.
+	PasswordInURL bool
+}
+
+// Open parses a connection string. Like psql, it also reads PGPASSWORD,
+// ~/.pgpass and the other PG* variables for what the string leaves out.
+func Open(connString string) (*DB, error) {
+	connString = strings.TrimSpace(connString)
+	if !IsConnString(connString) {
+		return nil, errors.New("expected a connection string such as postgres://user@host:5432/dbname")
+	}
+	cfg, err := pgx.ParseConfig(connString)
+	if err != nil {
+		return nil, fmt.Errorf("reading the connection string: %w", err)
+	}
+	d := &DB{conn: cfg}
+	if u, err := url.Parse(connString); err == nil && u.User != nil {
+		if _, ok := u.User.Password(); ok {
+			d.PasswordInURL = true
+			u.User = url.User(u.User.Username())
+		}
+		d.Ref = u.String()
+	} else {
+		d.Ref = connString
+	}
+	return d, nil
+}
+
+// Command is a rowsafe command for this database, ready to paste in a
+// shell: "rowsafe fix 'postgres://app@db/app?sslmode=require'", or
+// "rowsafe fix" when Ref is "".
+func (d *DB) Command(sub string) string {
+	if d.Ref == "" {
+		return "rowsafe " + sub
+	}
+	return "rowsafe " + sub + " " + shellQuote(d.Ref)
+}
+
+// shellQuote quotes s for a POSIX shell when it needs it.
+func shellQuote(s string) string {
+	if s != "" && strings.Trim(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@%_+=:,./-") == "" {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// Name is the database's name (its user's when the string names none).
+func (d *DB) Name() string {
+	if d.conn.Database != "" {
+		return d.conn.Database
+	}
+	return d.conn.User
+}
+
+// Host is where it runs, for people: host or host:port.
+func (d *DB) Host() string {
+	h := d.conn.Host
+	if strings.HasPrefix(h, "/") {
+		return "localhost"
+	}
+	if d.conn.Port != 0 && d.conn.Port != 5432 {
+		return net.JoinHostPort(h, strconv.Itoa(int(d.conn.Port)))
+	}
+	return h
+}
+
+func (d *DB) collectTarget() collect.Target   { return collect.Target{Conn: d.conn} }
+func (d *DB) inspectTarget() pginspect.Target { return pginspect.Target{Conn: d.conn} }
+
+// Local reports whether the database runs on this machine.
+func (d *DB) Local() bool { return d.collectTarget().Local() }
+
+// Options refine a health evaluation or the settings recommendations.
+type Options struct {
+	// Workload and Disk: protocol.Workload*, protocol.Disk* ("" for the
+	// defaults).
+	Workload, Disk string
+	// Memory and CPUs of the server, when it isn't this machine (Rowsafe
+	// can't see another server's from a connection; 0: unknown).
+	MemoryBytes int64
+	CPUs        int
+}
+
+// connectError says plainly that the database couldn't be reached.
+func (d *DB) connectError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) {
+		return err
+	}
+	return fmt.Errorf("can't read %s on %s as %s: %w", d.Name(), d.Host(), d.conn.User, err)
+}
+
+// read takes one reading.
+func (d *DB) read(ctx context.Context, o collect.ReadOptions, opts Options) (*collect.Reading, error) {
+	r, err := collect.Read(ctx, d.collectTarget(), o)
+	if err != nil {
+		return nil, d.connectError(err)
+	}
+	if r.Settings != nil {
+		d.hostFacts(r.Settings, opts)
+	}
+	return r, nil
+}
+
+// hostFacts fills in the server's memory and CPUs: what the person said,
+// else this machine's when the database runs here.
+func (d *DB) hostFacts(s *protocol.SettingsSnapshot, opts Options) {
+	if s.Host.MemoryBytes == 0 && d.Local() {
+		s.Host.MemoryBytes = machineMemory()
+	}
+	if opts.MemoryBytes > 0 {
+		s.Host.MemoryBytes = opts.MemoryBytes
+	}
+	if opts.CPUs > 0 {
+		s.Host.CPUs = opts.CPUs
+	}
+}
+
+// Health reads the database and evaluates it: the score, the findings and
+// their fixes.
+func (d *DB) Health(ctx context.Context, opts Options) (protocol.DatabaseHealth, error) {
+	r, err := d.read(ctx, collect.ReadOptions{Insights: true, Settings: true, QueryText: true}, opts)
+	if err != nil {
+		return protocol.DatabaseHealth{}, err
+	}
+	in := d.input(r, opts)
+	in.SettingsLocked = d.settingsLocked(ctx)
+	return pulse.Evaluate(in, time.Now()), nil
+}
+
+// settingsLocked says why this connection can't change settings: ALTER
+// SYSTEM needs a superuser, or from PostgreSQL 15 a grant on the setting
+// ("" when it can, or when that can't be told: the change then says).
+func (d *DB) settingsLocked(ctx context.Context) string {
+	conn, err := d.inspectTarget().Connect(ctx, d.inspectTarget().MaintenanceDB())
+	if err != nil {
+		return ""
+	}
+	defer conn.Close(context.WithoutCancel(ctx))
+	var super bool
+	var version int
+	if err := conn.QueryRow(ctx, `SELECT current_setting('is_superuser') = 'on', current_setting('server_version_num')::int`).Scan(&super, &version); err != nil || super {
+		return ""
+	}
+	if version >= 150000 {
+		var granted bool
+		if err := conn.QueryRow(ctx, `SELECT has_parameter_privilege('shared_buffers', 'ALTER SYSTEM')`).Scan(&granted); err != nil || granted {
+			return ""
+		}
+	}
+	return fmt.Sprintf("Changing settings needs a superuser (ALTER SYSTEM), and %s isn't one. On a managed database, change them in your provider's console.", d.conn.User)
+}
+
+func (d *DB) input(r *collect.Reading, opts Options) pulse.Input {
+	return pulse.Input{Database: d.Name(), Host: d.Host(), Metrics: r.Metrics, Activity: r.Activity,
+		Slots: r.ReplicationSlots, Replication: r.Replication, Insights: r.Insights, Settings: r.Settings,
+		VersionNum: r.VersionNum, Workload: opts.Workload, Disk: opts.Disk, Local: r.Local, Command: d.Command}
+}
+
+// Insights reads tables and indexes: sizes, estimated bloat, unused and
+// duplicate indexes, sequential scans, dead rows and transaction ID age.
+func (d *DB) Insights(ctx context.Context) (*protocol.Insights, error) {
+	ins, err := collect.CollectInsights(ctx, d.collectTarget())
+	if err != nil {
+		return nil, d.connectError(err)
+	}
+	ins.CollectedAt = time.Now().UTC()
+	return ins, nil
+}
+
+// Statements reads the top of pg_stat_statements: totals since it was last
+// reset.
+func (d *DB) Statements(ctx context.Context) (*protocol.Statements, error) {
+	r, err := d.read(ctx, collect.ReadOptions{Statements: true, QueryText: true}, Options{})
+	if err != nil {
+		return nil, err
+	}
+	if r.Statements == nil {
+		return &protocol.Statements{Statements: []protocol.StatementStat{}, Reason: "pg_stat_statements couldn't be read"}, nil
+	}
+	return r.Statements, nil
+}
+
+// Activity reads the sessions running one query, or idle in a
+// transaction, for over a minute, and who blocks whom.
+func (d *DB) Activity(ctx context.Context) (*protocol.Activity, error) {
+	r, err := d.read(ctx, collect.ReadOptions{QueryText: true}, Options{})
+	if err != nil {
+		return nil, err
+	}
+	return r.Activity, nil
+}
+
+// Settings reads the settings that matter and what would suit the server.
+func (d *DB) Settings(ctx context.Context, opts Options) (protocol.SettingsOverview, error) {
+	snap, err := collect.ReadSettings(ctx, d.collectTarget(), "")
+	if err != nil {
+		return protocol.SettingsOverview{}, d.connectError(err)
+	}
+	snap.CollectedAt = time.Now().UTC()
+	d.hostFacts(snap, opts)
+	ov := tune.Overview(protocol.EnginePostgreSQL, snap, opts.Workload, opts.Disk, 0)
+	if why := d.settingsLocked(ctx); why != "" && ov.CanChange {
+		ov.CanChange, ov.ChangeReason = false, why
+	}
+	return ov, nil
+}
+
+// FixResult is what applying a fix did.
+type FixResult struct {
+	Summary string   `json:"summary"`
+	Details []string `json:"details,omitempty"`
+	// Log is the step-by-step log (the statements run).
+	Log string `json:"log,omitempty"`
+}
+
+// ErrFixGone: the finding or fix isn't there any more (resolved, or the
+// session ended).
+var ErrFixGone = errors.New("not found")
+
+// ApplyFix evaluates the database again and applies the fix fixID of the
+// finding findingID only if that evaluation proposes it, with its fresh
+// parameters.
+func (d *DB) ApplyFix(ctx context.Context, findingID, fixID string, opts Options) (FixResult, error) {
+	h, err := d.Health(ctx, opts)
+	if err != nil {
+		return FixResult{}, err
+	}
+	for _, f := range h.Findings {
+		if f.ID != findingID {
+			continue
+		}
+		for _, fx := range f.Fixes {
+			if fx.ID == fixID {
+				return d.run(ctx, fx)
+			}
+		}
+		return FixResult{}, fmt.Errorf("%w: %q has no fix %q now", ErrFixGone, f.Title, fixID)
+	}
+	return FixResult{}, fmt.Errorf("%w: no finding %q now (it may have been resolved)", ErrFixGone, findingID)
+}
+
+// Apply applies a fix of an evaluation of this database (Health) that the
+// person just chose; ApplyFix evaluates again first, for callers that only
+// have IDs. Either way the fix's code checks every name and condition again
+// before it changes anything.
+func (d *DB) Apply(ctx context.Context, fx protocol.FindingFix) (FixResult, error) {
+	return d.run(ctx, fx)
+}
+
+func (d *DB) run(ctx context.Context, fx protocol.FindingFix) (FixResult, error) {
+	if !fx.Available {
+		return FixResult{}, fmt.Errorf("%q can't run now: %s", fx.Label, fx.Reason)
+	}
+	switch fx.Kind {
+	case protocol.FixMaintenance:
+		var p protocol.MaintenanceParams
+		if err := json.Unmarshal(fx.Params, &p); err != nil {
+			return FixResult{}, err
+		}
+		res, log, err := agent.Maintain(ctx, d.inspectTarget(), p)
+		out := FixResult{Log: log}
+		if res != nil {
+			out.Summary, out.Details = res.Summary, res.Details
+		}
+		return out, err
+	case protocol.FixTune:
+		var p protocol.SettingsParams
+		if err := json.Unmarshal(fx.Params, &p); err != nil {
+			return FixResult{}, err
+		}
+		res, err := d.ChangeSettings(ctx, p)
+		return res, err
+	}
+	return FixResult{}, fmt.Errorf("%q needs the Rowsafe agent on the server", fx.Label)
+}
+
+// ChangeSettings changes settings with ALTER SYSTEM and a reload (nothing
+// restarts), after checking the values against this server.
+func (d *DB) ChangeSettings(ctx context.Context, p protocol.SettingsParams) (FixResult, error) {
+	res, log, err := agent.ChangeSettings(ctx, d.inspectTarget(), d.collectTarget(), p)
+	out := FixResult{Log: log}
+	if res != nil {
+		out.Summary = res.Summary
+		for _, a := range res.Applied {
+			line := fmt.Sprintf("%s: %s -> %s", a.Name, a.From, a.To)
+			if a.Restart {
+				line += " (after a restart)"
+			}
+			out.Details = append(out.Details, line)
+		}
+	}
+	return out, err
+}

@@ -94,14 +94,10 @@ func (s *insightsState) take() *protocol.Insights {
 
 // insightsConnect opens a read-only session with tight timeouts.
 func (t Target) insightsConnect(ctx context.Context, dbname string) (*pgx.Conn, error) {
-	cfg, err := pgx.ParseConfig("")
+	cfg, err := t.config(dbname)
 	if err != nil {
 		return nil, err
 	}
-	cfg.Host = t.SocketDir
-	cfg.Port = uint16(t.Port)
-	cfg.User = t.User
-	cfg.Database = dbname
 	cfg.ConnectTimeout = 5 * time.Second
 	cfg.RuntimeParams["application_name"] = "rowsafe-agent-insights"
 	cfg.RuntimeParams["statement_timeout"] = strconv.Itoa(int(insightsQueryTimeout.Milliseconds()))
@@ -121,7 +117,7 @@ func CollectInsights(ctx context.Context, t Target) (*protocol.Insights, error) 
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, insightsBudget)
 	defer cancel()
-	conn, err := t.insightsConnect(ctx, "postgres")
+	conn, err := t.insightsConnect(ctx, t.MaintenanceDB())
 	if err != nil {
 		return nil, fmt.Errorf("connecting to PostgreSQL: %w", err)
 	}
@@ -134,6 +130,9 @@ func CollectInsights(ctx context.Context, t Target) (*protocol.Insights, error) 
 		if err == nil {
 			names, err = pgx.CollectRows(rows, pgx.RowTo[string])
 		}
+	}
+	if only := t.OnlyDB(); only != "" && err == nil {
+		names = slices.DeleteFunc(names, func(n string) bool { return n != only })
 	}
 	ins := &protocol.Insights{Databases: []protocol.InsightsDatabase{}}
 	if err == nil {

@@ -18,6 +18,11 @@ import (
 
 const shortHelp = `rowsafe - backups you can restore to any second, tested every week
 
+No account needed: point it at a PostgreSQL database
+  rowsafe pulse postgres://USER@HOST/DB
+                                     health score (0-100) and what to fix; also fix, insights, top,
+                                     activity, settings, tune and mcp (rowsafe help local)
+
 Getting started
   rowsafe login                      log in with your browser
   rowsafe hosts add root@SERVER      install Rowsafe on a database server over SSH; the installer
@@ -104,6 +109,7 @@ func init() {
 // helpDetails adds explanations that don't fit the one-line reference.
 var helpDetails = map[string]string{
 	"names": nameRules,
+	"local": localHelp,
 	"security": `Rowsafe never sees passwords: set_password makes the new password on this
 computer and sends only its SCRAM verifier (or --password-env VAR uses yours);
 redis_require_password's password is made on the server and encrypted for
@@ -127,7 +133,9 @@ restore tests and WAL archiving; whether PostgreSQL answers; disk space and
 when it will run out; connections; vacuum, transaction ID wraparound and
 wasted space; locks, slow-downs and index suggestions; replication. One
 critical problem caps the score at 59, a warning at 89. 90-100 is healthy,
-70-89 needs attention, 50-69 at risk, below 50 critical.`,
+70-89 needs attention, 50-69 at risk, below 50 critical.
+Without an account, rowsafe pulse postgres://... checks the database itself
+(rowsafe help local).`,
 	"mark": `LABEL defaults to manual-<UTC time>. With a single argument, it is the
 database if it names one of your databases, and otherwise the label for the
 inferred database: in a project whose .rowsafe.json names "app",

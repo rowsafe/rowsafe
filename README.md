@@ -17,6 +17,23 @@ This repository is the open-source part of [Rowsafe](https://rowsafe.sh): the ag
 
 Features per database: `protocol.EngineCapabilities`.
 
+## Try it now: no account
+
+```sh
+curl -fsSL https://rowsafe.sh/cli | sh
+rowsafe pulse postgres://user@host:5432/dbname
+```
+
+A 0–100 health score for a PostgreSQL database you can connect to, with what to fix in plain language: cleanup falling behind, transaction ID wraparound, bloat, unused and duplicate indexes, stuck sessions and locks, connections, replication slots and settings. Rowsafe applies the fixes after you confirm. Nothing is sent anywhere.
+
+```sh
+rowsafe fix postgres://…                  # apply what pulse found (asks first)
+rowsafe insights | top | activity | settings | tune postgres://…
+rowsafe mcp postgres://… --allow-writes   # the same as MCP tools for Claude Code, Codex or Cursor
+```
+
+Or set `DATABASE_URL` and leave the argument out. Use the direct connection, not a pooler. Backups, restore to any second, the weekly restore test, alerts and history need the agent on your server: see below. `rowsafe help local` has the details.
+
 ## Get started
 
 ```sh
@@ -70,6 +87,7 @@ Full guide: [Quickstart](https://rowsafe.sh/docs/quickstart).
 | `cmd/rowsafe`, `client` | The CLI. |
 | `mcp`, `integrations/` | Guard: the MCP server, Claude Code and Codex plugins, and the GitHub Action (`rowsafe/action`). |
 | `collect`, `tune` | Monitoring, and settings recommendations. |
+| `pulse`, `local` | The health score and its fixes, and Rowsafe without an account (`rowsafe pulse postgres://…`). |
 | `protocol` | API types shared by the agent, the CLI and the control plane. |
 | `internal/pgbackrest`, `internal/pginspect` | PostgreSQL. |
 | `internal/engine` | MySQL/MariaDB, MongoDB, ClickHouse, Redis/Valkey, SQLite, Qdrant, Meilisearch. |

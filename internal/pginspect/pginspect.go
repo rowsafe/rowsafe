@@ -21,16 +21,37 @@ type Target struct {
 	// AppName is the connection's application_name ("rowsafe-agent" when
 	// empty).
 	AppName string
+	// Conn, when set, is how to reach PostgreSQL instead of the socket: a
+	// parsed connection string (collect.Target.Conn). Each connection
+	// copies it and picks its own database.
+	Conn *pgx.ConnConfig
+}
+
+// MaintenanceDB is the database cluster-wide work connects to: the
+// connection string's, or postgres.
+func (t Target) MaintenanceDB() string {
+	if t.Conn != nil && t.Conn.Database != "" {
+		return t.Conn.Database
+	}
+	return "postgres"
 }
 
 func (t Target) Connect(ctx context.Context, dbname string) (*pgx.Conn, error) {
-	cfg, err := pgx.ParseConfig("")
-	if err != nil {
-		return nil, err
+	var cfg *pgx.ConnConfig
+	if t.Conn != nil {
+		cfg = t.Conn.Copy()
+		if cfg.RuntimeParams == nil {
+			cfg.RuntimeParams = map[string]string{}
+		}
+	} else {
+		var err error
+		if cfg, err = pgx.ParseConfig(""); err != nil {
+			return nil, err
+		}
+		cfg.Host = t.SocketDir
+		cfg.Port = uint16(t.Port)
+		cfg.User = t.User
 	}
-	cfg.Host = t.SocketDir
-	cfg.Port = uint16(t.Port)
-	cfg.User = t.User
 	cfg.Database = dbname
 	cfg.RuntimeParams["application_name"] = "rowsafe-agent"
 	if t.AppName != "" {
