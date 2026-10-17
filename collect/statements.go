@@ -70,7 +70,7 @@ type stmtState struct {
 // view lives in whichever database the extension was created in, so look
 // for it in the postgres database first, then in the others (remembering
 // where it was).
-func readStatements(ctx context.Context, t Target, conn *pgx.Conn, st *clusterState, version int, now time.Time) (*protocol.Statements, *protocol.QueryStats) {
+func readStatements(ctx context.Context, t Target, conn Querier, st *clusterState, version int, now time.Time) (*protocol.Statements, *protocol.QueryStats) {
 	out := &protocol.Statements{Statements: []protocol.StatementStat{}}
 	var names []string
 	if st.statementsDB != "" {
@@ -92,16 +92,18 @@ func readStatements(ctx context.Context, t Target, conn *pgx.Conn, st *clusterSt
 		}
 		seen[name] = true
 		c := conn
+		var opened *session
 		if name != t.MaintenanceDB() {
 			var err error
-			if c, err = t.connect(ctx, name); err != nil {
+			if opened, err = t.connect(ctx, name); err != nil {
 				continue
 			}
+			c = opened
 		}
 		schema, found := statementsSchema(ctx, c)
 		if !found {
-			if c != conn {
-				c.Close(context.WithoutCancel(ctx))
+			if opened != nil {
+				opened.Close(context.WithoutCancel(ctx))
 			}
 			continue
 		}
@@ -111,8 +113,8 @@ func readStatements(ctx context.Context, t Target, conn *pgx.Conn, st *clusterSt
 		if err == nil {
 			qs, err = st.stmts.read(ctx, c, schema, version, now)
 		}
-		if c != conn {
-			c.Close(context.WithoutCancel(ctx))
+		if opened != nil {
+			opened.Close(context.WithoutCancel(ctx))
 		}
 		if err != nil {
 			out.Reason = "reading pg_stat_statements failed: " + err.Error()
@@ -131,7 +133,7 @@ func readStatements(ctx context.Context, t Target, conn *pgx.Conn, st *clusterSt
 
 // statementsSchema finds the schema of the pg_stat_statements extension
 // in the connected database.
-func statementsSchema(ctx context.Context, conn *pgx.Conn) (string, bool) {
+func statementsSchema(ctx context.Context, conn Querier) (string, bool) {
 	var schema string
 	err := conn.QueryRow(ctx, `
 		SELECT n.nspname::text FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
@@ -148,7 +150,7 @@ func execTimeColumns(version int) (total, mean string) {
 }
 
 // statementsFrom reads the cumulative top statements by total time.
-func statementsFrom(ctx context.Context, conn *pgx.Conn, schema string, version int) ([]protocol.StatementStat, error) {
+func statementsFrom(ctx context.Context, conn Querier, schema string, version int) ([]protocol.StatementStat, error) {
 	total, mean := execTimeColumns(version)
 	rows, err := conn.Query(ctx, fmt.Sprintf(`
 		SELECT coalesce(s.queryid, 0), left(coalesce(s.query, ''), %d), coalesce(d.datname::text, ''),
@@ -174,7 +176,7 @@ func statementsFrom(ctx context.Context, conn *pgx.Conn, schema string, version 
 // read takes a cumulative reading of every pg_stat_statements entry
 // (without query text, which is cheap) and returns the activity since the
 // previous reading, or nil when there is no usable previous reading.
-func (s *stmtState) read(ctx context.Context, conn *pgx.Conn, schema string, version int, now time.Time) (*protocol.QueryStats, error) {
+func (s *stmtState) read(ctx context.Context, conn Querier, schema string, version int, now time.Time) (*protocol.QueryStats, error) {
 	fn := pgx.Identifier{schema}.Sanitize() + ".pg_stat_statements(false)"
 	total, _ := execTimeColumns(version)
 	toplevel := ""
@@ -326,7 +328,7 @@ func pickStatements(deltas []stmtDelta) []stmtDelta {
 // fillTexts makes sure the texts of the picked statements are known,
 // reading pg_stat_statements with text only for new query IDs, and forgets
 // texts not sent for a while.
-func (s *stmtState) fillTexts(ctx context.Context, conn *pgx.Conn, schema string, picked []stmtDelta) error {
+func (s *stmtState) fillTexts(ctx context.Context, conn Querier, schema string, picked []stmtDelta) error {
 	var missing []int64
 	for _, d := range picked {
 		if t, ok := s.texts[d.queryID]; ok {
@@ -376,7 +378,7 @@ type oidNames struct {
 }
 
 // catalogNames maps database and role OIDs to names.
-func catalogNames(ctx context.Context, conn *pgx.Conn) oidNames {
+func catalogNames(ctx context.Context, conn Querier) oidNames {
 	out := oidNames{db: map[uint32]string{}, role: map[uint32]string{}}
 	load := func(sql string, m map[uint32]string) {
 		rows, err := conn.Query(ctx, sql)

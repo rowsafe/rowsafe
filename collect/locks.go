@@ -16,7 +16,7 @@ const maxLockSessions = 50
 // and the sessions they wait for. pg_blocking_pids briefly takes the lock
 // manager's locks, so it only runs when some lock request is waiting.
 // Errors leave the snapshot without blocking chains.
-func readBlocking(ctx context.Context, conn *pgx.Conn, r *clusterReading, queryText bool) {
+func readBlocking(ctx context.Context, conn Querier, r *clusterReading, queryText bool) {
 	waitStart := "a.query_start"
 	if r.versionNum >= 140000 {
 		waitStart = "coalesce(l.waitstart, a.query_start)"

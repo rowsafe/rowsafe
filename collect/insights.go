@@ -93,18 +93,13 @@ func (s *insightsState) take() *protocol.Insights {
 }
 
 // insightsConnect opens a read-only session with tight timeouts.
-func (t Target) insightsConnect(ctx context.Context, dbname string) (*pgx.Conn, error) {
-	cfg, err := t.config(dbname)
-	if err != nil {
-		return nil, err
-	}
-	cfg.ConnectTimeout = 5 * time.Second
-	cfg.RuntimeParams["application_name"] = "rowsafe-agent-insights"
-	cfg.RuntimeParams["statement_timeout"] = strconv.Itoa(int(insightsQueryTimeout.Milliseconds()))
-	cfg.RuntimeParams["lock_timeout"] = strconv.Itoa(int(insightsLockTimeout.Milliseconds()))
-	cfg.RuntimeParams["idle_in_transaction_session_timeout"] = "10000"
-	cfg.RuntimeParams["default_transaction_read_only"] = "on"
-	return pgx.ConnectConfig(ctx, cfg)
+func (t Target) insightsConnect(ctx context.Context, dbname string) (*session, error) {
+	return t.connectSession(ctx, dbname, "rowsafe-agent-insights", map[string]string{
+		"statement_timeout":                   strconv.Itoa(int(insightsQueryTimeout.Milliseconds())),
+		"lock_timeout":                        strconv.Itoa(int(insightsLockTimeout.Milliseconds())),
+		"idle_in_transaction_session_timeout": "10000",
+		"default_transaction_read_only":       "on",
+	})
 }
 
 // CollectInsights examines every database of a cluster (up to 20): table
@@ -246,7 +241,7 @@ func firstLineOf(s string) string {
 }
 
 type insightQueries struct {
-	conn *pgx.Conn
+	conn Querier
 	db   string
 }
 
@@ -254,7 +249,7 @@ type insightQueries struct {
 const userSchemas = `n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname !~ '^pg_(toast|temp)'`
 
 // collect runs a query and appends a row per result through scan.
-func collectRows(ctx context.Context, conn *pgx.Conn, sql string, scan func(pgx.Rows) error, args ...any) error {
+func collectRows(ctx context.Context, conn Querier, sql string, scan func(pgx.Rows) error, args ...any) error {
 	rows, err := conn.Query(ctx, sql, args...)
 	if err != nil {
 		return err

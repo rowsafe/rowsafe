@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -49,6 +50,9 @@ type DB struct {
 	// PasswordInURL: the connection string carried a password, which Ref
 	// leaves out.
 	PasswordInURL bool
+
+	mu     sync.Mutex
+	pooler *string // the connection pooler in between, once known
 }
 
 // Open parses a connection string. Like psql, it also reads PGPASSWORD,
@@ -176,7 +180,38 @@ func (d *DB) Health(ctx context.Context, opts Options) (protocol.DatabaseHealth,
 	}
 	in := d.input(r, opts)
 	in.SettingsLocked = d.settingsLocked(ctx)
-	return pulse.Evaluate(in, time.Now()), nil
+	h := pulse.Evaluate(in, time.Now())
+	if why := d.needsSession(ctx); why != "" {
+		for i := range h.Findings {
+			for j, fx := range h.Findings[i].Fixes {
+				if fx.Kind == protocol.FixMaintenance && fx.Available {
+					h.Findings[i].Fixes[j].Available, h.Findings[i].Fixes[j].Reason = false, why
+				}
+			}
+		}
+	}
+	return h, nil
+}
+
+// needsSession says why the fixes that run in PostgreSQL itself (vacuum,
+// indexes, ending a session, ...) can't run through this connection: it
+// goes through a connection pooler, where they can't keep one session
+// with their own lock and statement timeouts ("" when they can, or when
+// that can't be told: the fix then connects and says).
+func (d *DB) needsSession(ctx context.Context) string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.pooler == nil {
+		p, err := d.inspectTarget().Pooler(ctx)
+		if err != nil {
+			return ""
+		}
+		d.pooler = &p
+	}
+	if *d.pooler == "" {
+		return ""
+	}
+	return pginspect.PoolerReason(*d.pooler)
 }
 
 // settingsLocked says why this connection can't change settings: ALTER
@@ -305,6 +340,9 @@ func (d *DB) run(ctx context.Context, fx protocol.FindingFix) (FixResult, error)
 	}
 	switch fx.Kind {
 	case protocol.FixMaintenance:
+		if why := d.needsSession(ctx); why != "" {
+			return FixResult{}, fmt.Errorf("%q can't run now: %s", fx.Label, why)
+		}
 		var p protocol.MaintenanceParams
 		if err := json.Unmarshal(fx.Params, &p); err != nil {
 			return FixResult{}, err

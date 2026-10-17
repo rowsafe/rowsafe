@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/rowsafe/rowsafe/internal/pginspect"
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
@@ -75,6 +76,7 @@ func (t Target) config(dbname string) (*pgx.ConnConfig, error) {
 		if cfg.RuntimeParams == nil {
 			cfg.RuntimeParams = map[string]string{}
 		}
+		pginspect.ForConnString(cfg)
 		return cfg, nil
 	}
 	cfg, err := pgx.ParseConfig("")
@@ -92,17 +94,12 @@ func (t Target) config(dbname string) (*pgx.ConnConfig, error) {
 // gap in its graphs, never a pile-up of monitoring queries.
 const statementTimeout = 2 * time.Second
 
-func (t Target) connect(ctx context.Context, dbname string) (*pgx.Conn, error) {
-	cfg, err := t.config(dbname)
-	if err != nil {
-		return nil, err
-	}
-	cfg.ConnectTimeout = 5 * time.Second
-	cfg.RuntimeParams["application_name"] = "rowsafe-agent-monitor"
-	cfg.RuntimeParams["statement_timeout"] = strconv.Itoa(int(statementTimeout.Milliseconds()))
-	cfg.RuntimeParams["lock_timeout"] = "500"
-	cfg.RuntimeParams["idle_in_transaction_session_timeout"] = "10000"
-	return pgx.ConnectConfig(ctx, cfg)
+func (t Target) connect(ctx context.Context, dbname string) (*session, error) {
+	return t.connectSession(ctx, dbname, "rowsafe-agent-monitor", map[string]string{
+		"statement_timeout":                   strconv.Itoa(int(statementTimeout.Milliseconds())),
+		"lock_timeout":                        "500",
+		"idle_in_transaction_session_timeout": "10000",
+	})
 }
 
 // Limits on what is sent, whatever the server holds.
@@ -272,7 +269,7 @@ func readCluster(ctx context.Context, t Target, st *clusterState, withSlow, quer
 	return r, nil
 }
 
-func readSlots(ctx context.Context, conn *pgx.Conn, r *clusterReading) error {
+func readSlots(ctx context.Context, conn Querier, r *clusterReading) error {
 	rows, err := conn.Query(ctx, `
 		SELECT slot_name::text, coalesce(slot_type, ''), active,
 		       CASE WHEN pg_is_in_recovery() OR restart_lsn IS NULL THEN NULL
@@ -321,7 +318,7 @@ func readSlots(ctx context.Context, conn *pgx.Conn, r *clusterReading) error {
 
 // readActivity lists sessions running one query, or idle inside a
 // transaction, for over a minute.
-func readActivity(ctx context.Context, conn *pgx.Conn, r *clusterReading, queryText bool, minSeconds float64) error {
+func readActivity(ctx context.Context, conn Querier, r *clusterReading, queryText bool, minSeconds float64) error {
 	rows, err := conn.Query(ctx, `
 		SELECT pid,
 		       coalesce(extract(epoch FROM clock_timestamp() - CASE WHEN state = 'active' THEN query_start ELSE state_change END), 0)::float8,
@@ -355,7 +352,7 @@ func readActivity(ctx context.Context, conn *pgx.Conn, r *clusterReading, queryT
 // readSizes walks each database's files (pg_database_size), so it runs only
 // every few minutes; a very large database may exceed the timeout and is
 // then left out of that round.
-func readSizes(ctx context.Context, conn *pgx.Conn, r *clusterReading) {
+func readSizes(ctx context.Context, conn Querier, r *clusterReading) {
 	rows, err := conn.Query(ctx, `SELECT datname::text FROM pg_database WHERE datallowconn AND NOT datistemplate AND has_database_privilege(oid, 'CONNECT') ORDER BY datname`)
 	if err != nil {
 		return

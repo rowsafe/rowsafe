@@ -44,6 +44,11 @@ Reads are read-only, with short timeouts. A fix is looked up again in a fresh
 check, and every name is checked again before anything changes. Nothing is
 sent to Rowsafe. Passwords: in the string, PGPASSWORD or ~/.pgpass.
 
+Connection poolers (PgBouncer, Supavisor, Neon's pooler) work for everything
+but the fixes that run in the database itself (cleaning up tables, indexes,
+ending a session, replication slots): those need the direct connection
+string. Settings changes work through a pooler.
+
 Rowsafe can't see another server's memory or disk over a connection: pass
 --memory and --cpus for settings advice. Backups, restore to any second, the
 weekly restore test, alerts and history need the agent on the server

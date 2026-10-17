@@ -39,7 +39,7 @@ type advisorCheck struct {
 // advisorCluster reads the cluster-wide memory facts (on the postgres
 // database connection) and makes ins.Advisor ready for the per-database
 // readings.
-func advisorCluster(ctx context.Context, conn *pgx.Conn, ins *protocol.Insights) {
+func advisorCluster(ctx context.Context, conn Querier, ins *protocol.Insights) {
 	ins.Advisor = &protocol.AdvisorFacts{
 		ForeignKeys:          []protocol.ForeignKeyWithoutIndex{},
 		NoPrimaryKey:         []protocol.TableWithoutPK{},

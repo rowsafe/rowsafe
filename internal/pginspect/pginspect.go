@@ -36,13 +36,30 @@ func (t Target) MaintenanceDB() string {
 	return "postgres"
 }
 
+// Connect opens a session to dbname. Through a connection string it sends
+// no session settings at startup and uses the simple protocol, so that it
+// works through connection poolers (pooler.go).
 func (t Target) Connect(ctx context.Context, dbname string) (*pgx.Conn, error) {
+	cfg, err := t.config(dbname)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if t.Conn != nil {
+		return ConnectConfig(ctx, cfg, "application_name")
+	}
+	return pgx.ConnectConfig(ctx, cfg)
+}
+
+func (t Target) config(dbname string) (*pgx.ConnConfig, error) {
 	var cfg *pgx.ConnConfig
 	if t.Conn != nil {
 		cfg = t.Conn.Copy()
 		if cfg.RuntimeParams == nil {
 			cfg.RuntimeParams = map[string]string{}
 		}
+		ForConnString(cfg)
 	} else {
 		var err error
 		if cfg, err = pgx.ParseConfig(""); err != nil {
@@ -57,9 +74,7 @@ func (t Target) Connect(ctx context.Context, dbname string) (*pgx.Conn, error) {
 	if t.AppName != "" {
 		cfg.RuntimeParams["application_name"] = t.AppName
 	}
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	return pgx.ConnectConfig(ctx, cfg)
+	return cfg, nil
 }
 
 var settingNames = []string{

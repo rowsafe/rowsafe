@@ -16,7 +16,7 @@ const maxReplicas = 50
 // primary (pg_stat_replication) or, on a standby, how far behind it is and
 // its connection to the primary. The connection string (conninfo) is never
 // read: it can carry a password. Errors leave the report without it.
-func readReplication(ctx context.Context, conn *pgx.Conn, r *clusterReading, inRecovery bool) {
+func readReplication(ctx context.Context, conn Querier, r *clusterReading, inRecovery bool) {
 	rs := &protocol.ReplicationStatus{Role: "primary", Replicas: []protocol.Replica{}}
 	if inRecovery {
 		rs.Role = "replica"
