@@ -117,6 +117,22 @@ func TestMySQL(t *testing.T) {
 	if cp.Database.Engine != protocol.EngineMySQL {
 		t.Fatalf("copy's database: %+v", cp.Database)
 	}
+	copyID := copyResp.Copy.ID
+	a.done(cp, protocol.StatusSucceeded, protocol.RewindCopyResult{CopyID: copyID, Expires: copyResp.Copy.Expires})
+	// MySQL's tables: a database and a name, no schema.
+	if _, err := c.CompareRewindCopy(ctx, "crm", copyID, []protocol.RewindTable{{DB: "mysql", Table: "user"}}); apiStatus(err) != http.StatusBadRequest {
+		t.Fatalf("compare the system database: %v", err)
+	}
+	if _, err := c.CompareRewindCopy(ctx, "crm", copyID, []protocol.RewindTable{{DB: "crm", Table: "orders"}}); err != nil {
+		t.Fatal(err)
+	}
+	a.done(a.claimOne(protocol.TaskRewindCompare), protocol.StatusSucceeded, protocol.RewindCompareResult{CopyID: copyID})
+	rows, err := c.RestoreRows(ctx, "crm", copyID, protocol.RewindRowsRequest{Tables: []protocol.RewindTable{{DB: "crm", Table: "orders"}}, Confirm: "crm"})
+	if err != nil || len(rows.Tasks) != 2 || rows.Tasks[0].Type != protocol.TaskRestorePoint {
+		t.Fatalf("rows back: %+v %v", rows, err)
+	}
+	a.done(a.claimOne(protocol.TaskRestorePoint), protocol.StatusSucceeded, protocol.RestorePointResult{LSN: "binlog.000003:2001", Archived: true, CreatedAt: *now})
+	a.done(a.claimOne(protocol.TaskRewindRows), protocol.StatusSucceeded, protocol.RewindRowsResult{})
 
 	// Its alerts speak of MySQL.
 	*now = now.Add(time.Hour) // no archiver report for an hour

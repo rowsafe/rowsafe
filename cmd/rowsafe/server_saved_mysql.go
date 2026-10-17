@@ -185,3 +185,6 @@ func mysqlLogin(conn string) (user, password string) {
 	}
 	return user, pw
 }
+
+// mysqlSystemDBs are MySQL's and MariaDB's own databases.
+var mysqlSystemDBs = []string{"mysql", "sys", "information_schema", "performance_schema"}

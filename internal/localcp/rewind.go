@@ -544,7 +544,7 @@ func (s *Server) compareCopy(st *state, d *dbRec, r *http.Request, now time.Time
 	if err := decode(r, &req, true); err != nil {
 		return 0, nil, err
 	}
-	if err := validTables(req.Tables, maxCompareTables); err != nil {
+	if err := validTablesFor(d.Engine, req.Tables, maxCompareTables); err != nil { // mysql.go
 		return 0, nil, err
 	}
 	c, err := readyCopy(st, d, r)
@@ -572,7 +572,7 @@ func (s *Server) restoreRows(st *state, d *dbRec, r *http.Request, now time.Time
 	if len(req.Tables) == 0 {
 		return 0, nil, &httpErr{http.StatusBadRequest, "Pick the tables to bring rows back to."}
 	}
-	if err := validTables(req.Tables, maxRewindTables); err != nil {
+	if err := validTablesFor(d.Engine, req.Tables, maxRewindTables); err != nil {
 		return 0, nil, err
 	}
 	if req.Confirm != d.Name {

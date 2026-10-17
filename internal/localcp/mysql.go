@@ -2,6 +2,7 @@ package localcp
 
 import (
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 	"time"
@@ -140,6 +141,31 @@ func (st *state) serverAt(engine string, port int, socket string) *dbRec {
 		if mysqlFamily(d.Engine) && d.Port == port {
 			return d
 		}
+	}
+	return nil
+}
+
+// validTablesFor checks the tables of a compare or a bring-back for the
+// database's engine: MySQL and MariaDB name a table by its database ("db")
+// and its own name, with no schema (the agent's allTables); PostgreSQL's
+// rule is validTables.
+func validTablesFor(engine string, tables []protocol.RewindTable, limit int) error {
+	if !mysqlFamily(engine) {
+		return validTables(tables, limit)
+	}
+	if len(tables) > limit {
+		return &httpErr{http.StatusBadRequest, fmt.Sprintf("Pick at most %d tables at a time.", limit)}
+	}
+	seen := map[protocol.RewindTable]bool{}
+	for _, t := range tables {
+		if t.DB == "" || t.Table == "" || len(t.DB) > 64 || len(t.Table) > 64 || strings.ContainsRune(t.DB+t.Table, 0) ||
+			slices.Contains([]string{"mysql", "information_schema", "performance_schema", "sys"}, strings.ToLower(t.DB)) {
+			return &httpErr{http.StatusBadRequest, fmt.Sprintf(`%q in %q isn't a table: give "db" (the database) and "table" (its name).`, t.Table, t.DB)}
+		}
+		if seen[t] {
+			return &httpErr{http.StatusBadRequest, fmt.Sprintf("%s is listed twice.", t.Table)}
+		}
+		seen[t] = true
 	}
 	return nil
 }
