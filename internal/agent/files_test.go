@@ -198,7 +198,7 @@ func TestSetConfigs(t *testing.T) {
 			{ID: "f1", Path: "/srv/app/storage"}, {ID: "f2", Path: "relative"}, {ID: "bad id", Path: "/srv/x"}, {ID: "f3", Path: "/srv/../etc"},
 			{ID: "f4", Path: "/etc/rowsafe"}, {ID: "f5", Path: "/var/lib/rowsafe/state"}}},
 		{DatabaseID: "db2", Stanza: "../evil"},
-	}, []protocol.FilesKeptExpiry{{RestoreID: "r1", Expires: now.Add(90 * 24 * time.Hour)}})
+	}, nil, []protocol.FilesKeptExpiry{{RestoreID: "r1", Expires: now.Add(90 * 24 * time.Hour)}})
 	cs := rt.configs()
 	if len(cs) != 1 || len(cs[0].Folders) != 1 || cs[0].Folders[0].ID != "f1" {
 		t.Fatalf("configs %+v", cs)

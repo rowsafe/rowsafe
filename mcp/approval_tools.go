@@ -248,8 +248,11 @@ func paramsSchema(a protocol.ApprovalAction) (*jsonschema.Schema, error) {
 	}
 	for _, p := range pathParams(a) {
 		desc := "the " + strings.ReplaceAll(p, "_", " ") + " (part of the API path)"
-		if p == "server" {
+		switch p {
+		case "server":
 			desc = "the Rowsafe Cloud server's name or ID (cs_...; list_cloud_servers shows them)"
+		case "host":
+			desc = "the server's hostname or ID (host_...; list_hosts shows them)"
 		}
 		s.Properties[p] = &jsonschema.Schema{Type: "string", Description: desc}
 		if !slices.Contains(s.Required, p) {

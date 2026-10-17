@@ -62,7 +62,7 @@ func newFilesFixture(t *testing.T) *filesFixture {
 	f.folder = protocol.FilesFolder{ID: "fld_1", Path: folder, Excludes: []string{"cache"}}
 	f.cfg = protocol.FilesConfig{DatabaseID: "db_1", Name: "app", Stanza: "app", Folders: []protocol.FilesFolder{f.folder},
 		IntervalMinutes: 15, RetentionDays: 14, ListNames: true}
-	a.filesRuntime().setConfigs([]protocol.FilesConfig{f.cfg}, nil)
+	a.filesRuntime().setConfigs([]protocol.FilesConfig{f.cfg}, nil, nil)
 	f.write(t, "cvs/a.pdf", "CV of Ada")
 	f.write(t, "cvs/b c.pdf", "CV of Bob")
 	f.write(t, "cvs/we*ird [1].pdf", "odd name")
@@ -280,7 +280,7 @@ func TestFilesBrowseCheckForgetIntegration(t *testing.T) {
 	// With file names kept on the server, browsing is refused.
 	c := f.cfg
 	c.ListNames = false
-	f.a.filesRuntime().setConfigs([]protocol.FilesConfig{c}, nil)
+	f.a.filesRuntime().setConfigs([]protocol.FilesConfig{c}, nil, nil)
 	if _, err := f.a.filesBrowse(ctx, f.db, protocol.FilesBrowseParams{FolderID: "fld_1"}, tl); err == nil || !strings.Contains(err.Error(), "stay on your server") {
 		t.Errorf("browse with ListNames off: %v", err)
 	}
@@ -305,7 +305,7 @@ func TestFilesMissingFolderIntegration(t *testing.T) {
 	f := newFilesFixture(t)
 	c := f.cfg
 	c.Folders = append(c.Folders, protocol.FilesFolder{ID: "fld_2", Path: filepath.Join(f.dir, "not-mounted")})
-	f.a.filesRuntime().setConfigs([]protocol.FilesConfig{c}, nil)
+	f.a.filesRuntime().setConfigs([]protocol.FilesConfig{c}, nil, nil)
 	f.a.filesDue(t.Context())
 	rep := f.a.filesReport(t.Context())
 	var got []string

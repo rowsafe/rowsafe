@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// ---- Files: the folders that go with a database ----
+// ---- Files: the folders that go with a database, or with a server ----
 //
 // Uploads, CVs, media: a database is rarely the whole story. Rowsafe backs up
 // the folders a person chose (native folders, or Docker volumes mounted into
@@ -14,6 +14,14 @@ import (
 // from the backup passphrase. Only metadata reaches the control plane: paths,
 // sizes, counts and times; file names only while the database allows it
 // (FilesConfig.ListNames); never file contents.
+//
+// Folders can also belong to the server itself (an app server, a static
+// files box, an app's config folder), with or without a database on it:
+// FilesSync.Host, FilesReport.Host and the /v1/hosts/{ref}/files endpoints.
+// Their repository is in the server's own storage (its bucket, or Rowsafe
+// Storage's prefix for the organization) under FilesHostStanza, encrypted
+// with the server's backup passphrase like a database's. Their tasks have no
+// database. Rowsafe still doesn't take whole-server or disk snapshots.
 
 // Files task types. They run in their own lane on the agent and the control
 // plane, beside backups and Rewind.
@@ -80,7 +88,17 @@ const (
 	// FilesMinRetentionDays is the least time snapshots are kept, whatever
 	// the database's recovery window.
 	FilesMinRetentionDays = 7
+	// A server's own folders have no recovery window: they keep snapshots
+	// for FilesHostDefaultRetentionDays unless the person chose another
+	// number of days (at most FilesMaxRetentionDays).
+	FilesHostDefaultRetentionDays = 30
+	FilesMaxRetentionDays         = 400
 )
+
+// FilesHostStanza names the repository of a server's own folders in its
+// storage (<prefix>/<FilesHostStanza>/files): the host's ID, which never
+// matches a database's stanza (database names have no underscore).
+func FilesHostStanza(hostID string) string { return hostID }
 
 // Folder statuses (FilesFolderState.Status).
 const (
@@ -132,11 +150,16 @@ type FilesReport struct {
 	// anywhere else, need the installer again (--files PATH).
 	AllowedRoots []string             `json:"allowed_roots,omitempty"`
 	Databases    []FilesDatabaseState `json:"databases,omitempty"`
+	// Host is the state of the server's own folders (HostID set,
+	// DatabaseID empty).
+	Host *FilesDatabaseState `json:"host,omitempty"`
 }
 
-// FilesDatabaseState is one database's files state on the host.
+// FilesDatabaseState is one database's files state on the host, or (HostID
+// set) the server's own folders.
 type FilesDatabaseState struct {
 	DatabaseID string             `json:"database_id"`
+	HostID     string             `json:"host_id,omitempty"`
 	Folders    []FilesFolderState `json:"folders"`
 	// RepoSizeBytes is what the files take in the bucket (after
 	// deduplication and compression), measured after pruning.
@@ -188,6 +211,7 @@ type FilesSnapshot struct {
 type FilesKept struct {
 	RestoreID  string     `json:"restore_id"`
 	DatabaseID string     `json:"database_id,omitempty"`
+	HostID     string     `json:"host_id,omitempty"` // a server's own folder
 	FolderID   string     `json:"folder_id"`
 	Path       string     `json:"path"` // the protected folder
 	Files      int64      `json:"files"`
@@ -197,9 +221,10 @@ type FilesKept struct {
 }
 
 // FilesSync answers a files report: the files settings of the host's
-// databases.
+// databases, and of the server's own folders (Host, nil when it has none).
 type FilesSync struct {
 	Databases []FilesConfig `json:"databases"`
+	Host      *FilesConfig  `json:"host,omitempty"`
 	// IntervalSeconds is how often the control plane wants reports.
 	IntervalSeconds int `json:"interval_seconds,omitempty"`
 	// KeptExpires changes when kept folders are deleted (Keep longer).
@@ -213,16 +238,19 @@ type FilesKeptExpiry struct {
 	Expires   time.Time `json:"expires"`
 }
 
-// FilesConfig is one database's files settings.
+// FilesConfig is one database's files settings, or (HostID set,
+// DatabaseID empty, Stanza FilesHostStanza) the server's own folders'.
 type FilesConfig struct {
 	DatabaseID string        `json:"database_id"`
+	HostID     string        `json:"host_id,omitempty"`
 	Name       string        `json:"name"`
 	Stanza     string        `json:"stanza"`
 	Folders    []FilesFolder `json:"folders"`
 	// IntervalMinutes is how often each folder is snapshotted.
 	IntervalMinutes int `json:"interval_minutes"`
 	// RetentionDays is how far back snapshots go: the database's recovery
-	// window (at least FilesMinRetentionDays).
+	// window (at least FilesMinRetentionDays); for a server's own folders,
+	// the days the person chose (FilesHostDefaultRetentionDays).
 	RetentionDays int `json:"retention_days"`
 	// ListNames allows file names to reach the control plane (browse,
 	// search, examples in results). Off: only counts and sizes do.
@@ -465,13 +493,23 @@ type FilesCheckResult struct {
 //	POST   /v1/databases/{ref}/files/check                         -> FilesTasksResponse
 //	GET    /v1/databases/{ref}/files/nearest?time=RFC3339          FilesNearest
 //
-// Everything that changes files is for people only (never AI assistants on
-// /mcp); the MCP server only reads FilesInfo.
+// A server's own folders (with or without a database on it) have the same
+// endpoints under /v1/hosts/{ref}/files (ref: the host's ID or hostname),
+// apart from nearest's Mark and the referenced restore mode (no database).
+// Confirmations there are the server's hostname. PATCH also takes
+// retention_days.
+//
+// Changing folders and settings is for people in the dashboard; AI agents
+// back up and check files directly and restore them as their person
+// (ApprovalActions restore_files, undo_files_restore, restore_server_files,
+// undo_server_files_restore).
 
-// FilesInfo answers GET /v1/databases/{ref}/files.
+// FilesInfo answers GET /v1/databases/{ref}/files, and GET
+// /v1/hosts/{ref}/files (HostID set, DatabaseID and Database empty).
 type FilesInfo struct {
 	DatabaseID string            `json:"database_id"`
 	Database   string            `json:"database"`
+	HostID     string            `json:"host_id,omitempty"`
 	Settings   FilesSettings     `json:"settings"`
 	Folders    []FilesFolderView `json:"folders"`
 	Host       FilesHost         `json:"host"`
@@ -519,10 +557,12 @@ type FilesFolderView struct {
 }
 
 // UpdateFilesSettingsRequest changes a database's files settings; omitted
-// fields are unchanged.
+// fields are unchanged. RetentionDays is for a server's own folders only
+// (a database's follow its recovery window).
 type UpdateFilesSettingsRequest struct {
 	IntervalMinutes *int  `json:"interval_minutes,omitempty"`
 	ListNames       *bool `json:"list_names,omitempty"`
+	RetentionDays   *int  `json:"retention_days,omitempty"`
 }
 
 // AddFilesFolderRequest protects a folder.
@@ -553,7 +593,8 @@ type FilesRestoreRequest struct {
 	AfterTaskID string          `json:"after_task_id,omitempty"`
 }
 
-// FilesConfirmRequest confirms a files action with the database's name.
+// FilesConfirmRequest confirms a files action with the database's name (a
+// server's own folders: its hostname).
 type FilesConfirmRequest struct {
 	Confirm string `json:"confirm"`
 }

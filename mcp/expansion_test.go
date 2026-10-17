@@ -177,6 +177,11 @@ func (f *dashAPI) answer(r *http.Request, at time.Time) (any, int) {
 			return []protocol.StandbyCandidate{{HostID: "h_2", Hostname: "db2", Online: true, Usable: true}}, ok
 		case "/v1/databases/db_app/files":
 			return protocol.FilesInfo{Database: "app", Folders: []protocol.FilesFolderView{{FilesFolder: protocol.FilesFolder{ID: "f1", Path: "/srv/app/storage"}}}}, ok
+		case "/v1/hosts/web1/files", "/v1/hosts/host_web/files":
+			return protocol.FilesInfo{HostID: "host_web", Host: protocol.FilesHost{Hostname: "web1"}, Settings: protocol.FilesSettings{IntervalMinutes: 15, RetentionDays: 30},
+				Folders: []protocol.FilesFolderView{{FilesFolder: protocol.FilesFolder{ID: "f9", Path: "/var/www/shop"}}}}, ok
+		case "/v1/hosts/host_web/files/nearest":
+			return protocol.FilesNearest{Folders: []protocol.FilesNearestFolder{{FolderID: "f9", Path: "/var/www/shop", Snapshot: &protocol.FilesSnapshot{Time: at, Files: 77}, GapSeconds: 60}}}, ok
 		case "/v1/databases/db_app/files/nearest":
 			return protocol.FilesNearest{Folders: []protocol.FilesNearestFolder{{FolderID: "f1", Path: "/srv/app/storage", Snapshot: &protocol.FilesSnapshot{Time: at, Files: 1204}, GapSeconds: 300}}}, ok
 		case "/v1/databases/db_app/recommendations", "/v1/databases/app/recommendations":
@@ -211,6 +216,10 @@ func (f *dashAPI) answer(r *http.Request, at time.Time) (any, int) {
 		return protocol.FilesTasksResponse{Tasks: []protocol.TaskView{task("t_fb", protocol.TaskFilesBackup)}}, http.StatusAccepted
 	case "POST /v1/databases/db_app/files/check":
 		return protocol.FilesTasksResponse{Tasks: []protocol.TaskView{task("t_fc", protocol.TaskFilesCheck)}}, http.StatusAccepted
+	case "POST /v1/hosts/host_web/files/backup":
+		return protocol.FilesTasksResponse{Tasks: []protocol.TaskView{task("t_hfb", protocol.TaskFilesBackup)}}, http.StatusAccepted
+	case "POST /v1/hosts/host_web/files/check":
+		return protocol.FilesTasksResponse{Tasks: []protocol.TaskView{task("t_hfc", protocol.TaskFilesCheck)}}, http.StatusAccepted
 	case "POST /v1/databases/db_app/safe-copies/sc_1/extend":
 		return protocol.SafeCopy{ID: "sc_1", Status: protocol.CopyReady, Masked: true, Expires: time.Now().Add(48 * time.Hour)}, ok
 	}
@@ -289,6 +298,7 @@ func TestNewReadToolsOnlyRead(t *testing.T) {
 		{"find_moment", map[string]any{"database": "app", "list_searches": true}, []string{"t_m (succeeded): 1,204 rows deleted"}},
 		{"standby_status", map[string]any{"database": "app", "candidates": true}, []string{`"hostname":"db2"`, `"usable":true`}},
 		{"files_status", map[string]any{"database": "app", "at": "2026-09-24T14:00:00Z"}, []string{"/srv/app/storage: the snapshot of", "1204 files"}},
+		{"files_status", map[string]any{"server": "web1", "at": "2026-09-24T14:00:00Z"}, []string{"/var/www/shop: the snapshot of", "77 files", `"server":"web1"`, "restore_server_files"}},
 		{"recommendations", map[string]any{"database": "app"}, []string{"Foreign key without an index (id rec_1)"}},
 	}
 	for _, tc := range cases {
@@ -347,6 +357,8 @@ func TestActionToolsHitOnlyTheirEndpoint(t *testing.T) {
 		{"run_security_check", map[string]any{"database": "app", "wait_seconds": 5}, "POST /v1/databases/db_app/security/check", "", []string{"Now grade D, 55/100", "check from the internet"}},
 		{"backup_files", map[string]any{"database": "app", "folders": []any{"/srv/app/storage/"}, "mark": "before-cleanup"}, "POST /v1/databases/db_app/files/backup", `"folder_ids":["f1"]`, []string{"tagged before-cleanup", "t_fb"}},
 		{"backup_files", map[string]any{"database": "app", "check": true}, "POST /v1/databases/db_app/files/check", "", []string{"files Proof", "t_fc"}},
+		{"backup_files", map[string]any{"server": "web1", "folders": []any{"/var/www/shop"}}, "POST /v1/hosts/host_web/files/backup", `"folder_ids":["f9"]`, []string{"web1's folders", "t_hfb", "restore_server_files"}},
+		{"backup_files", map[string]any{"server": "web1", "check": true}, "POST /v1/hosts/host_web/files/check", "", []string{"files Proof", "t_hfc"}},
 		{"extend_safe_copy", map[string]any{"database": "app", "id": "sc_1", "hours": 48}, "POST /v1/databases/db_app/safe-copies/sc_1/extend", `"hours":48`, []string{"is now deleted at"}},
 	}
 	for _, tc := range cases {

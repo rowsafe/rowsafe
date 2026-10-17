@@ -59,3 +59,28 @@ func (c *Client) FilesCheck(ctx context.Context, ref string) (out protocol.Files
 func (c *Client) FilesNearest(ctx context.Context, ref string, t time.Time) (out protocol.FilesNearest, err error) {
 	return out, c.do(ctx, http.MethodGet, filesPath(ref)+"/nearest?time="+url.QueryEscape(t.UTC().Format(time.RFC3339)), nil, &out)
 }
+
+// ---- a server's own folders (with or without a database on it) ----
+
+func hostFilesPath(ref string) string { return "/v1/hosts/" + esc(ref) + "/files" }
+
+// HostFilesInfo is the folders backed up with a server itself.
+func (c *Client) HostFilesInfo(ctx context.Context, ref string) (out protocol.FilesInfo, err error) {
+	return out, c.do(ctx, http.MethodGet, hostFilesPath(ref), nil, &out)
+}
+
+// HostFilesBackup snapshots a server's folders now.
+func (c *Client) HostFilesBackup(ctx context.Context, ref string, req protocol.FilesBackupParams) (out protocol.FilesTasksResponse, err error) {
+	return out, c.do(ctx, http.MethodPost, hostFilesPath(ref)+"/backup", req, &out)
+}
+
+// HostFilesCheck runs the files Proof of a server's folders now.
+func (c *Client) HostFilesCheck(ctx context.Context, ref string) (out protocol.FilesTasksResponse, err error) {
+	return out, c.do(ctx, http.MethodPost, hostFilesPath(ref)+"/check", nil, &out)
+}
+
+// HostFilesNearest says which snapshot of a server's folders a restore to
+// t would use.
+func (c *Client) HostFilesNearest(ctx context.Context, ref string, t time.Time) (out protocol.FilesNearest, err error) {
+	return out, c.do(ctx, http.MethodGet, hostFilesPath(ref)+"/nearest?time="+url.QueryEscape(t.UTC().Format(time.RFC3339)), nil, &out)
+}
