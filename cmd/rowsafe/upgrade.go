@@ -49,11 +49,8 @@ func updateCmd(ctx context.Context, c *client.Client, args []string) error {
 	}
 	fmt.Printf("\nUpdate %s from PostgreSQL %s to %s: Rowsafe saves a Mark, installs PostgreSQL %d's newest packages,\n", name, info.Version, info.Candidate, info.Major)
 	fmt.Println("restarts PostgreSQL (apps are disconnected for a few seconds) and checks that backups still work.")
-	if !*yes {
-		fmt.Printf("Type the database name (%s) to update: ", name)
-		if readLine() != name {
-			return errors.New("cancelled; nothing was changed")
-		}
+	if err := confirmTypedAs(*yes, name, fmt.Sprintf("Type the database name (%s) to update: ", name)); err != nil {
+		return err
 	}
 	resp, err := c.UpdatePostgres(ctx, name, name)
 	if err != nil {
@@ -209,7 +206,7 @@ func upgradeCmd(ctx context.Context, c *client.Client, args []string) error {
 	}
 	if !acting {
 		if *asJSON {
-			enc := json.NewEncoder(os.Stdout)
+			enc := json.NewEncoder(jsonWriter())
 			enc.SetIndent("", "  ")
 			return enc.Encode(info)
 		}
@@ -290,11 +287,8 @@ func upgradeCmd(ctx context.Context, c *client.Client, args []string) error {
 		fmt.Printf("  - Undo (7 days) restores PostgreSQL %d from the backup taken just before: anything written after the upgrade is lost from the live database.\n", info.Major)
 	}
 	fmt.Println("  - Then a full backup and a Proof run on the new version.")
-	if !*yes {
-		fmt.Printf("Type the database name (%s) to upgrade: ", name)
-		if readLine() != name {
-			return errors.New("cancelled; nothing was changed")
-		}
+	if err := confirmTypedAs(*yes, name, fmt.Sprintf("Type the database name (%s) to upgrade: ", name)); err != nil {
+		return err
 	}
 	resp, err := c.Upgrade(ctx, name, protocol.UpgradeRequest{To: target, Mode: *mode, Confirm: name})
 	if err != nil {
@@ -415,11 +409,8 @@ func upgradeUndoCmd(ctx context.Context, c *client.Client, args []string) error 
 	} else {
 		fmt.Printf("  Anything written since the upgrade stays in PostgreSQL %d, kept aside (not in the live database). A short stop.\n", up.ToMajor)
 	}
-	if !*yes {
-		fmt.Printf("Type the database name (%s) to undo the upgrade: ", name)
-		if readLine() != name {
-			return errors.New("cancelled; nothing was changed")
-		}
+	if err := confirmTypedAs(*yes, name, fmt.Sprintf("Type the database name (%s) to undo the upgrade: ", name)); err != nil {
+		return err
 	}
 	resp, err := c.UndoUpgrade(ctx, name, up.ID, name)
 	if err != nil {
@@ -448,11 +439,8 @@ func upgradeCleanupCmd(ctx context.Context, c *client.Client, args []string) err
 		kept = up.ToMajor
 	}
 	fmt.Printf("Remove PostgreSQL %d from %s's server (kept by the upgrade); the upgrade can't be undone afterwards.\n", kept, name)
-	if !*yes {
-		fmt.Printf("Type the database name (%s) to remove it: ", name)
-		if readLine() != name {
-			return errors.New("cancelled; nothing was changed")
-		}
+	if err := confirmTypedAs(*yes, name, fmt.Sprintf("Type the database name (%s) to remove it: ", name)); err != nil {
+		return err
 	}
 	resp, err := c.CleanupUpgrade(ctx, name, up.ID, name)
 	if err != nil {
@@ -487,7 +475,7 @@ func waitUpgradeTasks(ctx context.Context, c *client.Client, tasks []protocol.Ta
 	var last protocol.TaskView
 	for _, t := range tasks {
 		status := ""
-		done, err := c.WaitTask(ctx, t.ID, func(v protocol.TaskView) {
+		done, err := waitTask(ctx, c, t.ID, func(v protocol.TaskView) {
 			if v.Status == status {
 				return
 			}

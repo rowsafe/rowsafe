@@ -76,14 +76,14 @@ func envCmd(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if len(pos) > 1 {
-		return errors.New("usage: rowsafe env [DATABASE] [--on NAME] [--file .env] [--name DATABASE_URL]")
+		return newUsageError("usage: rowsafe env [DATABASE] [--on NAME] [--file .env] [--name DATABASE_URL]")
 	}
 	dbname := defaultDBName()
 	if len(pos) == 1 {
 		dbname = pos[0]
 	}
 	if !envNameRE.MatchString(*name) {
-		return fmt.Errorf("--name %q isn't a variable name (like DATABASE_URL)", *name)
+		return usageErrorf("--name %q isn't a variable name (like DATABASE_URL)", *name)
 	}
 	if v, ok, err := readEnvKey(*file, *name); err != nil {
 		return err

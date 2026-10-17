@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -134,6 +135,9 @@ type noAccountServer struct {
 
 func newNoAccountServer(t *testing.T, open ...protocol.TaskView) *noAccountServer {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("a server without an account is a Linux server")
+	}
 	dir, err := os.MkdirTemp("/tmp", "rs-na") // short: a socket path has a length limit
 	if err != nil {
 		t.Fatal(err)

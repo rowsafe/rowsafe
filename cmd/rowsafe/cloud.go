@@ -44,7 +44,7 @@ func cloudCmd(ctx context.Context, c *client.Client, args []string) error {
 	if run, ok := subs[args[0]]; ok {
 		return run(ctx, c, args[1:])
 	}
-	return fmt.Errorf("unknown command %q. The cloud commands:\n%s", "cloud "+args[0], strings.TrimSpace(helpFor([]string{"cloud"})))
+	return usageErrorf("unknown command %q. The cloud commands:\n%s", "cloud "+args[0], strings.TrimSpace(helpFor([]string{"cloud"})))
 }
 
 // cloudPoll is how often rowsafe cloud wait reads the server again.
@@ -453,7 +453,7 @@ func cloudCreate(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if len(pos) != 1 {
-		return errors.New("usage: rowsafe cloud create NAME [--region REGION] [--size SIZE] [--allow me|IP] [--wait]")
+		return newUsageError("usage: rowsafe cloud create NAME [--region REGION] [--size SIZE] [--allow me|IP] [--wait]")
 	}
 	name := pos[0]
 	if err := checkServerName(name); err != nil {
@@ -658,7 +658,7 @@ func optionalName(fs *flag.FlagSet, args []string) (string, error) {
 		return "", err
 	}
 	if len(pos) > 1 {
-		return "", fmt.Errorf("expected at most one server name, got %q", strings.Join(pos, " "))
+		return "", usageErrorf("expected at most one server name, got %q", strings.Join(pos, " "))
 	}
 	if len(pos) == 1 {
 		return pos[0], nil
@@ -913,7 +913,7 @@ func cloudResize(ctx context.Context, c *client.Client, args []string) error {
 	case 2:
 		ref, size = pos[0], pos[1]
 	default:
-		return errors.New("usage: rowsafe cloud resize [NAME] SIZE [--yes]")
+		return newUsageError("usage: rowsafe cloud resize [NAME] SIZE [--yes]")
 	}
 	s, err := findServer(ctx, c, ref)
 	if err != nil {
@@ -1038,7 +1038,7 @@ func cloudFirewall(ctx context.Context, c *client.Client, args []string) error {
 		return nil
 	}
 	if *clear && (len(set) > 0 || len(add) > 0) {
-		return errors.New("--clear and --set/--add don't go together")
+		return newUsageError("--clear and --set/--add don't go together")
 	}
 	list := slices.Clone(s.AllowedIPs)
 	switch {
@@ -1114,6 +1114,9 @@ func setFirewall(ctx context.Context, c *client.Client, s client.CloudServer, li
 	if err != nil {
 		return apiErr(err)
 	}
+	if jsonMode {
+		return printJSON(out)
+	}
 	fmt.Printf("Who can connect to %s now: %s.\n", out.Name, sourcesText(out.AllowedIPs))
 	if out.FirewallPending {
 		fmt.Println("The server's own firewall applies it within a minute.")
@@ -1173,7 +1176,7 @@ func cloudDelete(ctx context.Context, c *client.Client, args []string) error {
 		if !stdinIsTerminal() {
 			return errors.New("deleting a server can't be undone: pass --yes to confirm")
 		}
-		fmt.Printf("Type the server's name (%s) to delete it: ", s.Name)
+		fmt.Fprintf(os.Stderr, "Type the server's name (%s) to delete it: ", s.Name)
 		if strings.TrimSpace(readLine()) != s.Name {
 			return errors.New("cancelled; nothing was deleted")
 		}
@@ -1239,7 +1242,7 @@ func cloudPassphrase(ctx context.Context, c *client.Client, args []string) error
 		return apiErr(err)
 	}
 	fmt.Fprintln(os.Stderr, "Asking the server for it, encrypted for this terminal only...")
-	t, err := c.WaitTask(ctx, taskID, nil)
+	t, err := waitTask(ctx, c, taskID, nil)
 	if err != nil {
 		return err
 	}
@@ -1320,7 +1323,7 @@ func cloudClone(ctx context.Context, c *client.Client, args []string) error {
 	case 2:
 		source, name = pos[0], pos[1]
 	default:
-		return errors.New("usage: rowsafe cloud clone [SOURCE] NAME [--at TIME | --mark LABEL] [--delete-after 24h]")
+		return newUsageError("usage: rowsafe cloud clone [SOURCE] NAME [--at TIME | --mark LABEL] [--delete-after 24h]")
 	}
 	if err := checkServerName(name); err != nil {
 		return err
@@ -1347,7 +1350,7 @@ func cloudClone(ctx context.Context, c *client.Client, args []string) error {
 			return fmt.Errorf("can't read --delete-after %q: use e.g. 4h, 2d (at most 30d)", v)
 		}
 		if hours = int(math.Ceil(d.Hours())); hours < 1 || hours > 720 {
-			return errors.New("--delete-after must be between 1 hour and 30 days")
+			return newUsageError("--delete-after must be between 1 hour and 30 days")
 		}
 	}
 	cat, err := c.CloudCatalog(ctx)

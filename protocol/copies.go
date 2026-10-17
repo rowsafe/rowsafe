@@ -101,7 +101,25 @@ type PreviewResult struct {
 	Statements []PreviewStatement `json:"statements"`
 	Findings   []PreviewFinding   `json:"findings,omitempty"`
 	Error      *PreviewError      `json:"error,omitempty"`
+	// Checked is how the migration was checked when it didn't run on a
+	// restored copy of the data (rowsafe preview without an account):
+	// PreviewCheckedSchema or PreviewCheckedStatic; "" for the agent's copy.
+	// Sizes, rows and times then come from production's statistics and are
+	// estimates.
+	Checked string `json:"checked,omitempty"`
+	// CheckNote says why, or what the check couldn't cover, in plain words.
+	CheckNote string `json:"check_note,omitempty"`
 }
+
+// PreviewResult.Checked values.
+const (
+	// PreviewCheckedSchema: the migration ran on an empty copy of the
+	// schema in a temporary database on the same server, dropped afterwards.
+	PreviewCheckedSchema = "schema_copy"
+	// PreviewCheckedStatic: nothing ran; the SQL was read statement by
+	// statement against production's catalog (read-only).
+	PreviewCheckedStatic = "static"
+)
 
 // PreviewStatement is what one statement did on the copy.
 type PreviewStatement struct {

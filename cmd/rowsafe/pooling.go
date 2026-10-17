@@ -76,8 +76,8 @@ func poolingOn(ctx context.Context, c *client.Client, args []string) error {
 	if shown.Listen == protocol.PoolerListenPublic {
 		fmt.Println("PgBouncer will accept connections on every address, including public ones: make sure a firewall protects it.")
 	}
-	if !*yes && !confirm(verb+"?") {
-		return errors.New("cancelled; nothing was changed")
+	if err := confirmChange(*yes, verb+"?"); err != nil {
+		return err
 	}
 	t, err := c.SetPooling(ctx, name, protocol.PoolingRequest{Settings: s, Confirm: name})
 	if err != nil {
@@ -101,8 +101,8 @@ func poolingOff(ctx context.Context, c *client.Client, args []string) error {
 	}
 	fmt.Printf("Turning pooling off stops PgBouncer for %s: apps connected through it lose their connection and must\n"+
 		"connect to PostgreSQL directly again. PgBouncer is removed if Rowsafe installed it.\n", name)
-	if !*yes && !confirm("Turn pooling off?") {
-		return errors.New("cancelled; nothing was changed")
+	if err := confirmChange(*yes, "Turn pooling off?"); err != nil {
+		return err
 	}
 	t, err := c.PoolingOff(ctx, name, name)
 	if err != nil {

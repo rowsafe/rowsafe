@@ -266,7 +266,7 @@ func securityFixCmd(ctx context.Context, c *client.Client, args []string) error 
 	case 2:
 		explicit, action = pos[0], pos[1]
 	default:
-		return errors.New("usage: rowsafe security fix [NAME] ACTION")
+		return newUsageError("usage: rowsafe security fix [NAME] ACTION")
 	}
 	name, err := resolveDatabase(ctx, c, explicit)
 	if err != nil {
@@ -332,7 +332,7 @@ func securityFixCmd(ctx context.Context, c *client.Client, args []string) error 
 			return err
 		}
 		if len(req.AllowedAddresses) == 0 {
-			return errors.New("--allow names nobody: give at least one address that may connect")
+			return newUsageError("--allow names nobody: give at least one address that may connect")
 		}
 		fmt.Fprintf(out, "%s: only %s may connect afterwards. Anyone else is cut off.\n", name, strings.Join(req.AllowedAddresses, ", "))
 	case protocol.SecSetPassword:

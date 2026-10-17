@@ -39,6 +39,24 @@ func verdictIcon(verdict string) string {
 // dataNote: "on a copy of app restored 12 min ago".
 func dataNote(res *protocol.PreviewResult) string {
 	var b strings.Builder
+	if res.Checked != "" {
+		db := "the database"
+		if res.DB != "" {
+			db = res.DB
+		}
+		switch res.Checked {
+		case protocol.PreviewCheckedSchema:
+			fmt.Fprintf(&b, "Ran on an empty copy of %s's schema (no rows) in a temporary database on the same server, deleted afterwards; %s itself was not touched.", db, db)
+			b.WriteString(" Sizes and times are estimates from production's statistics, and errors that depend on the rows (duplicates, NULLs, values that don't convert) can't show here.")
+		default:
+			fmt.Fprintf(&b, "Checked from the SQL and %s's table sizes (read-only); nothing ran.", db)
+			b.WriteString(" Locks follow PostgreSQL's documented lock levels; sizes and times are estimates, and errors that depend on the rows can't show here.")
+		}
+		if res.CheckNote != "" {
+			b.WriteString(" " + res.CheckNote)
+		}
+		return b.String()
+	}
 	b.WriteString("Ran on a copy")
 	if res.DB != "" {
 		fmt.Fprintf(&b, " of %s", res.DB)
@@ -70,7 +88,7 @@ func Text(res *protocol.PreviewResult) string {
 		case s.Error != "":
 			status = "FAILED"
 		}
-		line := fmt.Sprintf("%3d  %-9s %-26s %s", s.N, status, shortCommand(s), humanDurationShort(s.DurationMs))
+		line := fmt.Sprintf("%3d  %-9s %-26s %s", s.N, status, shortCommand(s), statementTime(res, s))
 		if s.Rows != nil {
 			line += fmt.Sprintf("  %s rows", humanCount(*s.Rows))
 		}
@@ -108,6 +126,18 @@ func shortCommand(s protocol.PreviewStatement) string {
 		c = c[:25] + "…"
 	}
 	return c
+}
+
+// statementTime is a statement's time in reports: measured on a copy of
+// the data, else an estimate ("~2.0 s"), and nothing for a moment.
+func statementTime(res *protocol.PreviewResult, s protocol.PreviewStatement) string {
+	if res.Checked == "" {
+		return humanDurationShort(s.DurationMs)
+	}
+	if s.DurationMs < 100 {
+		return ""
+	}
+	return "~" + humanDurationShort(s.DurationMs)
 }
 
 func humanDurationShort(ms int64) string {
@@ -162,7 +192,7 @@ func Markdown(res *protocol.PreviewResult, title string) string {
 		case s.Impact != "":
 			result = verdictIcon(s.Risk) + " " + s.Impact
 		}
-		fmt.Fprintf(&b, "| %d | %d | `%s` | %s | %s | %s | %s |\n", s.N, s.Line, mdCode(Shorten(s.SQL, 80)), humanDurationShort(s.DurationMs), rows,
+		fmt.Fprintf(&b, "| %d | %d | `%s` | %s | %s | %s | %s |\n", s.N, s.Line, mdCode(Shorten(s.SQL, 80)), statementTime(res, s), rows,
 			mdCell(strings.Join(locks, "; ")), mdCell(result))
 	}
 	b.WriteString("\n</details>\n\n")

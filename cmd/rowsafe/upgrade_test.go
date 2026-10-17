@@ -132,6 +132,7 @@ func TestUpdateAndUpgradeCommands(t *testing.T) {
 	if _, err := captureStdout(t, func() error { return dispatch(ctx, []string{"update", "shop"}) }); err == nil || len(f.reqs) != 0 {
 		t.Fatalf("update with y: %v %v", err, f.reqs)
 	}
+	onTerminal(t)
 	stdin = strings.NewReader("shop\n")
 	out, err := captureStdout(t, func() error { return dispatch(ctx, []string{"update", "shop"}) })
 	if err != nil || !strings.Contains(out, "Update available:   17.6") || !strings.Contains(out, "Mark saved first") ||

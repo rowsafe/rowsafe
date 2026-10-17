@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"strings"
@@ -108,11 +107,14 @@ func recommendationsSchedule(ctx context.Context, c *client.Client, args []strin
 	case 2:
 		name, sched = pos[0], pos[1]
 	default:
-		return errors.New(`usage: rowsafe recommendations schedule [NAME] auto|off|"CRON"`)
+		return newUsageError(`usage: rowsafe recommendations schedule [NAME] auto|off|"CRON"`)
 	}
 	v, err := c.SetIndexAdvisorSchedule(ctx, name, strings.TrimSpace(sched))
 	if err != nil {
 		return err
+	}
+	if jsonMode {
+		return printJSON(v)
 	}
 	fmt.Printf("Index checks for %s: %s.\n", name, v.Schedule)
 	return nil

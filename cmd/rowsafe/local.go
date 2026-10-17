@@ -65,8 +65,17 @@ it once, then use it by name:
   rowsafe explain [NAME] "SELECT ..."
                                      why a query is slow, in plain words, and the index that would
                                      likely help (--analyze runs a SELECT read-only; -f FILE)
+  rowsafe preview [NAME] FILE [--static] [--json] [--fail-on careful|dangerous]
+                                     check a migration without changing the database: it runs on an
+                                     empty copy of the schema in a temporary database on the same
+                                     server (when the role may create one), else Rowsafe reads the
+                                     SQL; locks, rewrites, drops and a verdict, with times estimated
+                                     from the table sizes. No restore point: back up first (pg_dump)
   rowsafe mcp [NAME] [--allow-writes]
-                                     an MCP server for AI assistants with these tools
+                                     an MCP server for AI assistants with these tools, and
+                                     check_migration
+  rowsafe guard                      Claude Code's hook: before a destructive command, checks the
+                                     SQL and tells the assistant there is no restore point
 
 Once, without saving: a connection string instead of NAME (rowsafe pulse
 postgres://USER@HOST:5432/DB), or DATABASE_URL when you aren't logged in.
@@ -102,6 +111,7 @@ var localCommands = map[string]func(context.Context, *localDB, []string) error{
 	"settings": localSettings,
 	"tune":     localTune,
 	"mcp":      localMCP,
+	"preview":  localPreview, // local_preview.go
 }
 
 // localDB is the database a local command works on.
@@ -172,7 +182,7 @@ func localControl(want string) (url string, err error) {
 
 // notLoggedIn explains what works without an account.
 const notLoggedIn = "not logged in: run `rowsafe login`.\n" +
-	"Without an account, pulse, fix, insights, top, activity, settings, tune, schema, explain and mcp work on a PostgreSQL database directly:\n" +
+	"Without an account, pulse, fix, insights, top, activity, settings, tune, schema, explain, preview and mcp work on a PostgreSQL database directly:\n" +
 	"  rowsafe add shop postgres://user@host:5432/dbname   then: rowsafe pulse shop\n" +
 	"  or once: rowsafe pulse postgres://user@host:5432/dbname   (or set DATABASE_URL)"
 

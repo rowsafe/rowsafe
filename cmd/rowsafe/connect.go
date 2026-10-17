@@ -220,7 +220,7 @@ func checkReachable(ctx context.Context, c *client.Client, t pgTarget, yes bool)
 // NAME rules).
 func connectArgs(ctx context.Context, c *client.Client, on string, pos []string) (server, dbname string, err error) {
 	if len(pos) > 1 {
-		return "", "", fmt.Errorf("expected at most one database, got %q (psql's own options go after --)", strings.Join(pos, " "))
+		return "", "", usageErrorf("expected at most one database, got %q (psql's own options go after --)", strings.Join(pos, " "))
 	}
 	if on != "" {
 		server = on
@@ -269,7 +269,7 @@ func connectCmd(ctx context.Context, c *client.Client, args []string) error {
 	}
 	acc := strings.ReplaceAll(*access, "-", "_")
 	if !slices.Contains([]string{protocol.DBAccessReadOnly, protocol.DBAccessReadWrite, protocol.DBAccessOwner}, acc) {
-		return errors.New("--access must be read_only, read_write or owner")
+		return newUsageError("--access must be read_only, read_write or owner")
 	}
 	psql, err := lookPSQL()
 	if err != nil {

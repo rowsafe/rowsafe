@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/rowsafe/rowsafe/client"
@@ -80,6 +81,9 @@ func moveStartCmd(ctx context.Context, c *client.Client, args []string) error {
 		if err != nil {
 			return apiErr(err)
 		}
+		if jsonMode {
+			return printJSON(info.Move) // null: no move
+		}
 		printMove(name, info.Move)
 		return nil
 	}
@@ -132,7 +136,7 @@ func moveStartCmd(ctx context.Context, c *client.Client, args []string) error {
 		if !stdinIsTerminal() {
 			return errors.New("pass --fingerprint with the fingerprint `rowsafe-agent key` prints on the new server")
 		}
-		fmt.Printf("\nType the fingerprint %s prints to go ahead: ", cand.Hostname)
+		fmt.Fprintf(os.Stderr, "\nType the fingerprint %s prints to go ahead: ", cand.Hostname)
 		*fingerprint = strings.TrimSpace(readLine())
 	}
 	req.Fingerprint = *fingerprint
@@ -192,11 +196,8 @@ func moveSwitchCmd(ctx context.Context, c *client.Client, args []string) error {
 	}
 	fmt.Printf("Switch %s over to %s now: %s stops briefly and cleanly, %s replays everything and takes over.\n",
 		name, m.To.Hostname, m.From.Hostname, m.To.Hostname)
-	if !*yes {
-		fmt.Printf("Type the database name (%s) to switch over: ", name)
-		if readLine() != name {
-			return errors.New("cancelled; nothing was changed")
-		}
+	if err := confirmTypedAs(*yes, name, fmt.Sprintf("Type the database name (%s) to switch over: ", name)); err != nil {
+		return err
 	}
 	if _, err := c.MoveSwitch(ctx, name, name); err != nil {
 		return apiErr(err)
@@ -258,11 +259,8 @@ func moveCancelCmd(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	fmt.Printf("Cancel moving %s to %s: it stays where it is; %s gets its own data back.\n", name, m.To.Hostname, m.To.Hostname)
-	if !*yes {
-		fmt.Printf("Type the database name (%s) to cancel the move: ", name)
-		if readLine() != name {
-			return errors.New("not cancelled")
-		}
+	if err := confirmTypedAs(*yes, name, fmt.Sprintf("Type the database name (%s) to cancel the move: ", name)); err != nil {
+		return err
 	}
 	if _, err := c.MoveCancel(ctx, name, name); err != nil {
 		return apiErr(err)
@@ -288,11 +286,8 @@ func moveBackCmd(ctx context.Context, c *client.Client, args []string) error {
 	if *fingerprint == "" {
 		*fingerprint = m.From.Fingerprint
 	}
-	if !*yes {
-		fmt.Printf("Type the database name (%s) to switch back: ", name)
-		if readLine() != name {
-			return errors.New("cancelled; nothing was changed")
-		}
+	if err := confirmTypedAs(*yes, name, fmt.Sprintf("Type the database name (%s) to switch back: ", name)); err != nil {
+		return err
 	}
 	if _, err := c.MoveBack(ctx, name, protocol.MoveBackRequest{Confirm: name, Fingerprint: *fingerprint}); err != nil {
 		return apiErr(err)
@@ -329,11 +324,8 @@ func moveFinishCmd(ctx context.Context, c *client.Client, args []string) error {
 	}
 	fmt.Printf("Remove the old server %s from %s: Rowsafe stops keeping it stopped. PostgreSQL stays stopped there\n", m.From.Hostname, name)
 	fmt.Println("(read-only if started); switching back is no longer possible.")
-	if !*yes {
-		fmt.Printf("Type the old server's name (%s) to remove it: ", m.From.Hostname)
-		if readLine() != m.From.Hostname {
-			return errors.New("cancelled; nothing was changed")
-		}
+	if err := confirmTypedAs(*yes, m.From.Hostname, fmt.Sprintf("Type the old server's name (%s) to remove it: ", m.From.Hostname)); err != nil {
+		return err
 	}
 	if _, err := c.MoveFinish(ctx, name, m.From.Hostname); err != nil {
 		return apiErr(err)

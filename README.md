@@ -41,9 +41,11 @@ rowsafe add shop postgres://user@host:5432/dbname   # once: checks it connects, 
 rowsafe pulse shop                                  # a 0–100 health score and what to fix
 rowsafe fix shop                                    # apply a fix, after you confirm
 rowsafe insights | top | activity | settings | tune shop
-rowsafe schema shop [TABLE…]                        # tables, columns, keys, indexes: compact for an AI agent
+rowsafe schema shop [TABLE…]                        # tables, columns, keys, indexes (used or not): compact for an AI agent
 rowsafe explain shop "SELECT …"                     # why a query is slow, and the index that would likely help
-rowsafe mcp shop --allow-writes                     # the same tools for Claude Code, Codex or Cursor
+rowsafe preview shop 0042.sql                       # check a migration first: locks, rewrites, a verdict
+rowsafe mcp shop --allow-writes                     # the same as MCP tools for Claude Code, Codex or Cursor
+rowsafe use shop                                    # in a project: then just `rowsafe pulse`
 ```
 
 Pulse checks cleanup falling behind, bloat, duplicate and unused indexes, stuck sessions, locks, connections, replication slots, transaction ID wraparound and settings. The connection string stays in your config folder, readable only by you; `rowsafe pulse postgres://…` works once without saving, and `rowsafe use shop` makes it a project's database. Through a pooler, everything works but the fixes that run inside the database. Nothing is sent to Rowsafe. `rowsafe help local` has the rest; the demo above is a [real recording](docs/demo).

@@ -86,7 +86,7 @@ func parseWeekday(s string) (int, error) {
 			return d, nil
 		}
 	}
-	return 0, fmt.Errorf("--day takes a day of the week (sun, mon, ... or 0-6), not %q", s)
+	return 0, usageErrorf("--day takes a day of the week (sun, mon, ... or 0-6), not %q", s)
 }
 
 // cloudMaintenanceSet: rowsafe cloud maintenance set [NAME] [--day sun]
@@ -121,12 +121,12 @@ func cloudMaintenanceSet(ctx context.Context, c *client.Client, args []string) e
 			req.Enabled = true
 		case "hour":
 			if *hour < 0 || *hour > 23 {
-				ferr = errors.New("--hour takes 0 to 23")
+				ferr = newUsageError("--hour takes 0 to 23")
 			}
 			req.Hour, req.Enabled = *hour, true
 		case "timezone":
 			if _, err := time.LoadLocation(*tz); *tz != "" && err != nil {
-				ferr = fmt.Errorf("unknown time zone %q (use an IANA name like Europe/Berlin)", *tz)
+				ferr = usageErrorf("unknown time zone %q (use an IANA name like Europe/Berlin)", *tz)
 			}
 			req.Timezone = *tz
 		case "on":
@@ -137,7 +137,7 @@ func cloudMaintenanceSet(ctx context.Context, c *client.Client, args []string) e
 		return ferr
 	}
 	if *off && *on {
-		return errors.New("--on or --off, not both")
+		return newUsageError("--on or --off, not both")
 	}
 	if *off {
 		req.Enabled, changed = false, true
@@ -217,7 +217,7 @@ func cloudDeleteAfter(ctx context.Context, c *client.Client, args []string) erro
 	case 2:
 		ref, when = pos[0], pos[1]
 	default:
-		return errors.New("usage: rowsafe cloud delete-after [NAME] 24h|never")
+		return newUsageError("usage: rowsafe cloud delete-after [NAME] 24h|never")
 	}
 	hours := 0
 	if v := strings.TrimSpace(when); v != "0" && v != "never" {

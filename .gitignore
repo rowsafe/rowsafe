@@ -6,3 +6,6 @@
 .DS_Store
 /integrations/npm/SHA256SUMS
 /integrations/npm/*.tgz
+/rowsafe
+/cmd/rowsafe/rowsafe
+/cmd/rowsafe-agent/rowsafe-agent

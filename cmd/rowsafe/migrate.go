@@ -123,7 +123,7 @@ func migrateStartCmd(ctx context.Context, c *client.Client, args []string) error
 		return err
 	}
 	if *method != "" && *method != protocol.MigrateMethodLive && *method != protocol.MigrateMethodDump {
-		return errors.New("--method is live or dump")
+		return newUsageError("--method is live or dump")
 	}
 	src, err := readSource(*sourceEnv)
 	if err != nil {
@@ -191,9 +191,8 @@ func migrateStartCmd(ctx context.Context, c *client.Client, args []string) error
 	} else {
 		fmt.Println("\nLive sync copies everything while your apps keep running, then follows every change until you switch over.")
 	}
-	if !*yes && !confirm("Start now?") {
-		fmt.Printf("Not started. Start later with: rowsafe migrate start again, or cancel: rowsafe migrate cancel %s\n", m.ID)
-		return nil
+	if err := confirmChange(*yes, "Start now?"); err != nil {
+		return fmt.Errorf("%w. Start later with rowsafe migrate start again (--yes to confirm), or cancel: rowsafe migrate cancel %s", err, m.ID)
 	}
 	if m, err = c.StartMigration(ctx, m.ID, req); err != nil {
 		return err
@@ -294,7 +293,7 @@ func migrationArg(fs *flag.FlagSet, args []string) (string, error) {
 		return "", err
 	}
 	if len(pos) != 1 {
-		return "", errors.New("which migration? Pass its ID (rowsafe migrate lists them)")
+		return "", newUsageError("which migration? Pass its ID (rowsafe migrate lists them)")
 	}
 	return pos[0], nil
 }
@@ -370,8 +369,8 @@ func migrateFixCmd(ctx context.Context, c *client.Client, args []string) error {
 	}
 	fmt.Println("Rowsafe marks the source's tables without a primary key REPLICA IDENTITY FULL, so live sync can copy their\n" +
 		"updates and deletes. Your data doesn't change; updates to those tables write a little more to the source's log.")
-	if !*yes && !confirm("Change the source?") {
-		return nil
+	if err := confirmChange(*yes, "Change the source?"); err != nil {
+		return err
 	}
 	m, err := c.FixMigrationIdentity(ctx, id, nil)
 	if err != nil {
@@ -405,8 +404,8 @@ func migrateSwitchCmd(ctx context.Context, c *client.Client, args []string) erro
 			"every change, sets the sequences, ends the sync and compares row counts. Your apps can't write until they\n" +
 			"use the new connection string. The old database stays as it is, for rollback.")
 	}
-	if !*yes && !confirm(fmt.Sprintf("Switch %s over now?", m.DatabaseName)) {
-		return nil
+	if err := confirmChange(*yes, fmt.Sprintf("Switch %s over now?", m.DatabaseName)); err != nil {
+		return err
 	}
 	key, err := e2e.GenerateKey()
 	if err != nil {
@@ -468,8 +467,8 @@ func migrateCancelCmd(ctx context.Context, c *client.Client, args []string) erro
 	if err != nil {
 		return err
 	}
-	if !*yes && !confirm("Cancel this migration? Rowsafe removes its sync from the old database, which keeps running as before.") {
-		return nil
+	if err := confirmChange(*yes, "Cancel this migration? Rowsafe removes its sync from the old database, which keeps running as before."); err != nil {
+		return err
 	}
 	m, err := c.CancelMigration(ctx, id, *drop)
 	if err != nil {
@@ -489,8 +488,8 @@ func migrateFinishCmd(ctx context.Context, c *client.Client, args []string) erro
 	if err != nil {
 		return err
 	}
-	if !*yes && !confirm("Forget the old database's connection string? (Rowsafe can't make it writable again afterwards; the old database itself isn't changed.)") {
-		return nil
+	if err := confirmChange(*yes, "Forget the old database's connection string? (Rowsafe can't make it writable again afterwards; the old database itself isn't changed.)"); err != nil {
+		return err
 	}
 	m, err := c.FinishMigration(ctx, id)
 	if err != nil {

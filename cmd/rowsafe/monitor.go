@@ -63,6 +63,9 @@ func alertsList(ctx context.Context, c *client.Client, args []string) error {
 	if err != nil {
 		return err
 	}
+	if jsonMode {
+		return printJSON(orEmpty(alerts))
+	}
 	if len(alerts) == 0 {
 		if state == protocol.AlertFiring {
 			fmt.Println("No alerts firing.")
@@ -102,6 +105,9 @@ func alertsAck(ctx context.Context, c *client.Client, args []string) error {
 	a, err := c.AckAlert(ctx, pos[0])
 	if err != nil {
 		return err
+	}
+	if jsonMode {
+		return printJSON(a)
 	}
 	fmt.Printf("Acknowledged %s (%s on %s). No more reminders are sent; you are notified when it resolves.\n",
 		a.ID, a.Rule, alertTarget(a))
@@ -210,7 +216,7 @@ func alertRulesSet(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if *on && *off {
-		return errors.New("--on or --off, not both")
+		return newUsageError("--on or --off, not both")
 	}
 	r, err := findAlertRule(ctx, c, pos[0])
 	if err != nil {
@@ -302,6 +308,9 @@ func activityCmd(ctx context.Context, c *client.Client, args []string) error {
 	if err != nil {
 		return err
 	}
+	if jsonMode {
+		return printJSON(a)
+	}
 	printActivity(name, a, *width, "rowsafe fix "+name)
 	return nil
 }
@@ -359,6 +368,9 @@ func channelsList(ctx context.Context, c *client.Client, args []string) error {
 	if err != nil {
 		return err
 	}
+	if jsonMode {
+		return printJSON(orEmpty(chans))
+	}
 	if len(chans) == 0 {
 		fmt.Println("No notification channels. Add one: rowsafe channels add --type email --name ops --address you@example.com")
 		return nil
@@ -391,13 +403,16 @@ func channelsAdd(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if *typ == "" || *name == "" {
-		return errors.New("--type and --name are required")
+		return newUsageError("--type and --name are required")
 	}
 	req := protocol.CreateNotificationChannelRequest{Type: *typ, Name: *name, MinSeverity: *minSev,
 		Config: protocol.ChannelConfig{Addresses: addrs, URL: *url}}
 	ch, err := c.CreateNotificationChannel(ctx, req)
 	if err != nil {
 		return err
+	}
+	if jsonMode {
+		return printJSON(ch)
 	}
 	fmt.Printf("Added %s channel %q (%s); alerts of severity %s and above go there.\n", ch.Type, ch.Name, ch.ID, ch.MinSeverity)
 	if ch.SigningSecret != "" {
@@ -428,6 +443,12 @@ func channelsTest(ctx context.Context, c *client.Client, args []string) error {
 	res, err := c.TestNotificationChannel(ctx, pos[0])
 	if err != nil {
 		return err
+	}
+	if jsonMode {
+		if err := printJSON(res); err != nil || res.OK {
+			return err
+		}
+		return exitError(1)
 	}
 	if !res.OK {
 		fmt.Println("Test notification failed:", res.Error)

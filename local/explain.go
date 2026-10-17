@@ -12,7 +12,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/rowsafe/rowsafe/internal/agent"
 	"github.com/rowsafe/rowsafe/internal/indexadvisor"
 	"github.com/rowsafe/rowsafe/protocol"
 )
@@ -503,7 +502,7 @@ func scanCatalog(ctx context.Context, tx pgx.Tx, root *planNode, version int) (i
 	if _, err := tx.Exec(ctx, "SAVEPOINT rowsafe_catalog"); err != nil {
 		return none, nil
 	}
-	cat, err := agent.IndexCatalog(ctx, tx.Conn(), rels)
+	cat, err := indexCatalog(ctx, tx.Conn(), rels) // agent.go: none on Windows
 	if err != nil {
 		_, _ = tx.Exec(ctx, "ROLLBACK TO SAVEPOINT rowsafe_catalog")
 		return none, nil

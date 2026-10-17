@@ -114,7 +114,7 @@ func rewindFindCmd(ctx context.Context, c *client.Client, args []string) error {
 		}
 		fmt.Fprintf(os.Stderr, "Looking for %s in %s's change log...\n", what, name)
 	}
-	done, err := c.WaitTask(ctx, task.ID, func(v protocol.TaskView) {})
+	done, err := waitTask(ctx, c, task.ID, func(v protocol.TaskView) {})
 	if err != nil {
 		return err
 	}
@@ -128,7 +128,7 @@ func rewindFindCmd(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if *asJSON {
-		enc := json.NewEncoder(os.Stdout)
+		enc := json.NewEncoder(jsonWriter())
 		enc.SetIndent("", "  ")
 		return enc.Encode(r)
 	}
