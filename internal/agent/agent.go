@@ -201,6 +201,9 @@ func (a *Agent) ensureEnrolled(ctx context.Context) error {
 // Run heartbeats and executes tasks one at a time until ctx is cancelled.
 // It returns ErrRestartForUpdate when systemd should start another version.
 func (a *Agent) Run(ctx context.Context) error {
+	if err := a.startLocalControl(ctx); err != nil { // localcontrol.go: without an account
+		return err
+	}
 	if a.pusher != nil {
 		if err := SidecarStartupCheck(a.cfg); err != nil {
 			return err

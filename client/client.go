@@ -26,8 +26,11 @@ type Client struct {
 	HTTP  *http.Client
 }
 
+// New returns a client for the API at baseURL: https, or unix://PATH for
+// the control plane inside the agent on this server (no account).
 func New(baseURL, apiKey string) *Client {
-	return &Client{BaseURL: baseURL, APIKey: apiKey, HTTP: &http.Client{Timeout: 30 * time.Second}}
+	h, base := protocol.HTTPClient(baseURL, 30*time.Second)
+	return &Client{BaseURL: base, APIKey: apiKey, HTTP: h}
 }
 
 // NewService returns a client that authenticates with the service token and

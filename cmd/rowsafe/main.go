@@ -426,6 +426,14 @@ func loadConfig() (config, error) {
 	if v := os.Getenv("ROWSAFE_API_KEY"); v != "" {
 		c.APIKey = v
 	}
+	if c.APIKey == "" {
+		// Without an account, on a server whose agent runs its own control
+		// plane: its socket (local.go).
+		if url, err := localControl(c.URL); url != "" || err != nil {
+			c.URL, c.APIKey = url, "local"
+			return c, err
+		}
+	}
 	if c.URL == "" {
 		c.URL = protocol.DefaultAPIURL
 	}

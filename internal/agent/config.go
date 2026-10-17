@@ -259,9 +259,18 @@ func ConfigFromEnv() (Config, error) {
 		c.RestorePointTimeout <= 0 || c.RestorePointTimeout > 4*time.Minute {
 		return c, fmt.Errorf("ROWSAFE_RESTORE_POINT_TIMEOUT must be a duration between 1s and 4m")
 	}
-	if !strings.HasPrefix(c.ControlURL, "https://") && !strings.HasPrefix(c.ControlURL, "http://127.0.0.1") &&
+	if sock, ok := protocol.LocalSocket(c.ControlURL); ok {
+		// Without an account: the control plane runs in this agent
+		// (internal/localcp), on a socket of an absolute path.
+		if !filepath.IsAbs(sock) {
+			return c, fmt.Errorf("ROWSAFE_URL unix://PATH needs an absolute path")
+		}
+		if c.EnrollToken == "" {
+			c.EnrollToken = protocol.LocalEnrollToken
+		}
+	} else if !strings.HasPrefix(c.ControlURL, "https://") && !strings.HasPrefix(c.ControlURL, "http://127.0.0.1") &&
 		!strings.HasPrefix(c.ControlURL, "http://localhost") {
-		return c, fmt.Errorf("ROWSAFE_URL must use https (plain http is only allowed for localhost)")
+		return c, fmt.Errorf("ROWSAFE_URL must use https (plain http is only allowed for localhost), or be unix://PATH without an account")
 	}
 	for _, p := range []string{c.StateDir, c.ConfigDir, c.LogDir, c.DrillDir, c.InstallDir, c.RestartDir, c.RestartAllowFile, c.RestartResultDir, c.RestartHelper, c.RewindDir, c.UpdateAllowFile, c.SecondCopyQueueDir,
 		c.CreateClusterAllowFile, c.CreatedClustersFile} {

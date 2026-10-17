@@ -105,7 +105,7 @@ host() {
     -e MINIO_ROOT_USER=rowsafe-test -e MINIO_ROOT_PASSWORD="$secret" \
     -v "$W/minio-certs:/certs:ro" minio/minio server /data --address :9000 --certs-dir /certs >/dev/null
   i=0
-  until docker run --rm --network "$name" --entrypoint sh minio/mc -c \
+  until docker run --rm --network "$name" --entrypoint sh minio/minio -c \
     "mc alias set m https://minio:9000 rowsafe-test $secret --insecure >/dev/null && mc mb --insecure --ignore-existing m/rowsafe >/dev/null" 2>/dev/null; do
     i=$((i + 1))
     [ "$i" -lt 30 ] || {

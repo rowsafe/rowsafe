@@ -23,9 +23,21 @@ import (
 // agent on the server and an account (rowsafe login).
 
 // localHelp is rowsafe help local.
-const localHelp = `Without an account: Rowsafe on a PostgreSQL database this computer reaches
-directly. Give a connection string instead of NAME, or set DATABASE_URL (used
-when you aren't logged in):
+const localHelp = `Without an account.
+
+On your database server (PostgreSQL): continuous backups to your own bucket,
+Marks, a weekly restore test and Pulse, with no account (restoring with
+Rewind needs an account for now):
+
+  curl -fsSL https://rowsafe.sh | sudo sh -s -- --no-account
+  sudo rowsafe status NAME           protected? (backups, the change log, Proof)
+  sudo rowsafe mark NAME LABEL       a restore point, e.g. before a migration
+  sudo rowsafe backups NAME | proofs NAME | backup NAME | proof NAME
+  sudo rowsafe login                 the dashboard, alerts and more, later
+
+From anywhere, on a PostgreSQL this computer reaches (also managed ones): give
+a connection string instead of NAME, or set DATABASE_URL (used when you
+aren't logged in):
 
   rowsafe pulse postgres://USER@HOST:5432/DB    health score and findings (exit 3 below 70)
   rowsafe fix CONN [FINDING [FIX] | NUMBER] [--yes]
@@ -98,6 +110,29 @@ func localArgs(args []string, loggedIn bool) (db *localDB, rest []string, ok boo
 		return &localDB{DB: d, env: "DATABASE_URL"}, args, true, nil
 	}
 	return nil, args, false, nil
+}
+
+// localControl is the control plane of this server's agent without an
+// account, when it runs here: url "" when it doesn't. want is ROWSAFE_URL
+// ("" or a unix:// URL to use; another URL is not local).
+func localControl(want string) (url string, err error) {
+	sock := protocol.LocalSocketPath
+	if want != "" {
+		var ok bool
+		if sock, ok = protocol.LocalSocket(want); !ok {
+			return "", nil
+		}
+	}
+	fi, err := os.Stat(sock)
+	switch {
+	case err == nil && fi.Mode()&os.ModeSocket != 0:
+		return "unix://" + sock, nil
+	case errors.Is(err, os.ErrPermission):
+		return "", errors.New("this server runs Rowsafe without an account, and its agent only answers root: run sudo rowsafe ...")
+	case want != "" && err != nil:
+		return "", fmt.Errorf("ROWSAFE_URL %s: the agent isn't listening there (check it with systemctl status rowsafe-agent)", want)
+	}
+	return "", nil
 }
 
 // notLoggedIn explains what works without an account.

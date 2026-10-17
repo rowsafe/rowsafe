@@ -217,6 +217,7 @@ RELEASE_PUBLIC_KEY='@RELEASE_PUBLIC_KEY@'
 INSTALL_DIR=/opt/rowsafe
 CONFIG_DIR=/etc/rowsafe
 STATE_DIR=/var/lib/rowsafe
+LOCAL_URL=unix://$STATE_DIR/control.sock # the control plane without an account (in the agent)
 LOG_DIR=/var/log/rowsafe
 ENV_FILE=$CONFIG_DIR/agent.env
 UNIT_FILE=/etc/systemd/system/rowsafe-agent.service
@@ -330,6 +331,7 @@ TTY_SAVED=''       # terminal settings to restore (stty -g)
 STORAGE_CLEAR=''   # agent.env keys the guided setup turns back into comments
 STORAGE_GUIDED=0
 NO_SETUP=0         # --no-setup
+NO_ACCOUNT=''      # --no-account (1) / --account (0); '' = ask once on a terminal when there is no token
 PROTECT_NAME=''    # --protect NAME
 PROTECT_PORT=''    # --protect-port PORT
 ALLOW_RESTART=''   # --allow-restart (yes) / --no-allow-restart (no); '' = ask once on a terminal, else yes
@@ -426,9 +428,15 @@ Rowsafe agent installer
       prints a link; approve the server in your browser and the install goes on
   curl -fsSL https://rowsafe.sh | sudo sh -s rse_...
       for automation (no terminal): a one-time enrollment token instead
+  curl -fsSL https://rowsafe.sh | sudo sh -s -- --no-account
+      without an account: backups, restore tests and Pulse on this server, used with
+      sudo rowsafe ... here. Connect it to an account later with sudo rowsafe login
 
 Options (when piping, pass them after `sh -s --`):
   rse_...                the one-time enrollment token from `rowsafe hosts enroll-token`
+  --no-account           no account: the agent runs its own control plane on this server
+                         and the rowsafe CLI is installed here (PostgreSQL for now)
+  --account              connect to an account (in the browser) without asking first
   --setup-storage        set up (or change) the backup storage, even if it is configured
   --storage PROVIDER     skip the "where" question: rowsafe (Rowsafe Storage, no bucket
                          needed; also without a terminal), r2, b2, s3, wasabi, spaces,
@@ -10822,8 +10830,8 @@ check_value() {
   case $1 in
     ROWSAFE_URL)
       case $2 in
-        https://* | http://localhost* | http://127.0.0.1*) ;;
-        *) die "ROWSAFE_URL must start with https:// (plain http only for localhost)" ;;
+        https://* | http://localhost* | http://127.0.0.1* | "$LOCAL_URL") ;;
+        *) die "ROWSAFE_URL must start with https:// (plain http only for localhost), or be $LOCAL_URL without an account" ;;
       esac
       ;;
     ROWSAFE_ENROLL_TOKEN)
@@ -10920,10 +10928,70 @@ missing_config() {
   for key in $(required_repo_vars); do
     [ -n "$(env_value "$key")" ] || out="$out $key"
   done
-  if [ ! -f "$STATE_DIR/agent.json" ] && [ -z "$(env_value ROWSAFE_ENROLL_TOKEN)" ]; then
+  if [ ! -f "$STATE_DIR/agent.json" ] && [ -z "$(env_value ROWSAFE_ENROLL_TOKEN)" ] && ! no_account; then
     out="$out ROWSAFE_ENROLL_TOKEN"
   fi
   printf '%s\n' "${out# }"
+}
+
+# ---------------------------------------------------------------- without an account
+
+# no_account: this server uses Rowsafe without an account (its agent runs its
+# own control plane, on a socket in its state directory).
+no_account() { [ "$(s_get ROWSAFE_URL)" = "$LOCAL_URL" ]; }
+
+# choose_account runs before connecting in the browser on a server that isn't
+# enrolled and has no token: with an account (the dashboard) or without one.
+# --no-account and --account answer it; without a terminal, it stays with an
+# account (a token or the browser), as before.
+choose_account() {
+  if no_account; then
+    NO_ACCOUNT=1
+    return 0
+  fi
+  [ ! -f "$STATE_DIR/agent.json" ] || return 0
+  [ -z "$(s_get ROWSAFE_ENROLL_TOKEN)" ] || return 0
+  if [ -z "$NO_ACCOUNT" ] && [ "$TTY" = 1 ]; then
+    tty_say ""
+    tty_say "${BOLD}Use Rowsafe with an account?${RESET}"
+    tty_say "  1) Yes: connect this server in the browser (the dashboard, alerts, Rewind from anywhere)"
+    tty_say "  2) No account: backups, restore tests and Pulse on this server, with sudo rowsafe ..."
+    tty_say "     here. You can connect it to an account later (sudo rowsafe login)"
+    _acct=1
+    choose _acct "Choose" 1 2
+    [ "$_acct" = 2 ] && NO_ACCOUNT=1 || NO_ACCOUNT=0
+  fi
+  [ "$NO_ACCOUNT" = 1 ] || return 0
+  ROWSAFE_URL=$LOCAL_URL
+  export ROWSAFE_URL
+  ok "without an account: everything stays on this server"
+}
+
+# install_local_cli installs the rowsafe CLI here (no account: it is how this
+# server is used), with the CLI's own verified installer.
+install_local_cli() {
+  no_account || return 0
+  # Already there, and new enough to find this server's agent.
+  if [ -x /usr/local/bin/rowsafe ] && /usr/local/bin/rowsafe help local >/dev/null 2>&1; then return 0; fi
+  step "Installing the rowsafe CLI"
+  if curl -fsSL --proto '=https' --retry 3 --connect-timeout 20 --max-time 300 "${ROWSAFE_CLI_URL:-https://rowsafe.sh/cli}" -o "$TMP/cli.sh" &&
+    ROWSAFE_INSTALL_DIR=/usr/local/bin sh "$TMP/cli.sh" >"$TMP/cli.log" 2>&1; then
+    ok "rowsafe is in /usr/local/bin"
+  else
+    warn "could not install the rowsafe CLI (see $TMP/cli.log); install it with: curl -fsSL https://rowsafe.sh/cli | sudo ROWSAFE_INSTALL_DIR=/usr/local/bin sh"
+  fi
+}
+
+# no_account_next says how to use this server without an account.
+no_account_next() {
+  no_account || return 0
+  say ""
+  say "${BOLD}On this server, without an account:${RESET}"
+  say "    sudo rowsafe status ${C_NAME:-NAME}        protected? (backups, the change log, Proof)"
+  say "    sudo rowsafe mark ${C_NAME:-NAME} LABEL     a restore point, e.g. before a migration"
+  say "    sudo rowsafe backups ${C_NAME:-NAME}       backups; sudo rowsafe proofs ${C_NAME:-NAME}: restore tests"
+  say "    sudo rowsafe help local         everything that works without an account"
+  say "    The dashboard, alerts and Rewind from anywhere: sudo rowsafe login"
 }
 
 # ---------------------------------------------------------------- connect in the browser
@@ -10953,6 +11021,7 @@ api_post() {
 # only (never an API key); from there the install goes on as with rse_...
 # Nothing on the host has changed yet when this runs.
 connect_in_browser() {
+  ! no_account || return 0
   [ ! -f "$STATE_DIR/agent.json" ] || return 0
   [ -z "$(s_get ROWSAFE_ENROLL_TOKEN)" ] || return 0
   [ "$TTY" = 1 ] || return 0
@@ -12978,11 +13047,11 @@ next_steps() {
   say "${BOLD}${GREEN}${CHECK} All set.${RESET} ${BOLD}Next: turn on backups for this server's PostgreSQL.${RESET}"
   if [ "${1:-}" = not-running ]; then
     say "    Once the agent runs, run this installer again from a terminal: it finds"
-    say "    PostgreSQL and asks before changing anything. Or use the Rowsafe dashboard."
+    say "    PostgreSQL and asks before changing anything.$(no_account || printf ' Or use the Rowsafe dashboard.')"
   else
     say "    Run this installer again from a terminal: it finds PostgreSQL and asks"
     say "    before changing anything (or, without questions: --protect NAME)."
-    say "    Or use the Rowsafe dashboard, where $(uname -n) shows up within a minute."
+    no_account || say "    Or use the Rowsafe dashboard, where $(uname -n) shows up within a minute."
   fi
 }
 
@@ -13039,6 +13108,7 @@ databases() {
     next_steps
   fi
   files_setup # files section
+  no_account_next
 }
 
 # --- permissions helper (permit-host) ---
@@ -13066,6 +13136,7 @@ PERMISSIONS_DIR=$STATE_DIR/permissions
 # stays one command away (sudo rowsafe-allow --add-owner).
 offer_passkey() {
   [ "$TTY" = 1 ] && [ "$PROMPT" != never ] || return 0
+  ! no_account || return 0 # the passkey signs changes made in the dashboard
   [ "$HOST_ENGINE" = postgresql ] && perm_has_postgres || return 0
   [ -x "$PERMISSIONS_HELPER" ] && [ ! -L "$PERMISSIONS_HELPER" ] && [ "$(stat -c %u "$PERMISSIONS_HELPER" 2>/dev/null)" = 0 ] || return 0
   ! grep -qs '"credential_id"' "$CONFIG_DIR/owners" || return 0
@@ -15502,7 +15573,8 @@ install_agent() {
   # 1. Resolve and verify the release. Nothing on the host changes if this fails.
   agent_release
 
-  # No enrollment token: have someone approve this server in the browser.
+  # No enrollment token: an account (approve this server in the browser) or none.
+  choose_account
   connect_in_browser
 
   # 2. Dependencies and layout.
@@ -15536,6 +15608,7 @@ install_agent() {
   meilisearch_setup # meilisearch
   sqlite_setup # sqlite
   install_logrotate
+  install_local_cli
   case $AUTO_SECURITY in
     yes) auto_security_updates && asu_first_run ;;
     no) remove_auto_security_updates ;;
@@ -15770,6 +15843,8 @@ main() {
       --setup-storage) SETUP_STORAGE=1 ;;
       --no-prompt) PROMPT=never ;;
       --no-setup) NO_SETUP=1 ;;
+      --no-account) NO_ACCOUNT=1 ;;
+      --account) NO_ACCOUNT=0 ;;
       --allow-restart) ALLOW_RESTART=yes ;;
       --mysql-standby) MYSQL_STANDBY=yes ;;
       --clickhouse-clones) CH_CLONES=yes ;;
@@ -15930,6 +16005,9 @@ main() {
   fi
   if [ "$purge" = 1 ] && [ "$mode" != uninstall ]; then
     die "--purge only goes with --uninstall"
+  fi
+  if [ "$NO_ACCOUNT" = 1 ] && [ -n "${ROWSAFE_ENROLL_TOKEN:-}" ]; then
+    die "an enrollment token connects this server to an account; --no-account is without one: pass one or the other"
   fi
   if [ "$mode" != install ] && { [ "$SETUP_STORAGE" = 1 ] || [ -n "$STORAGE_PROVIDER" ] || [ -n "$SECOND_COPY" ]; }; then
     die "--setup-storage, --storage, --add-storage and --remove-second-copy only go with an install"
