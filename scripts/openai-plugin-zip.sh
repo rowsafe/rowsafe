@@ -18,7 +18,9 @@ pkg="$work/rowsafe"
 mkdir -p "$pkg/.codex-plugin"
 
 cp -R "$src/skills" "$src/assets" "$src/README.md" "$pkg/"
-cp "$src/.mcp.json" "$pkg/.mcp.json"
+# The directory matches the server by key and URL only (the draft it created
+# has no Codex-only settings such as tool_timeout_sec).
+jq --indent 2 '{mcpServers: (.mcpServers | map_values({url}))}' "$src/.mcp.json" >"$pkg/.mcp.json"
 jq --indent 2 'del(.hooks)' "$src/.codex-plugin/plugin.json" >"$pkg/.codex-plugin/plugin.json"
 
 # The directory takes exactly one remote MCP server with no headers.
