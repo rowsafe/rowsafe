@@ -227,7 +227,7 @@ func (c *Collector) Collect(ctx context.Context) protocol.MonitoringReport {
 		}
 		dm.ReplicationSlots = r.slots
 		dm.Activity = &protocol.Activity{CollectedAt: at.UTC(), QueryTextCollected: c.o.QueryText, Queries: r.activity,
-			Blocking: r.blocking}
+			Blocking: r.blocking, Horizon: r.horizon}
 		if dm.Activity.Queries == nil {
 			dm.Activity.Queries = []protocol.ActivityQuery{}
 		}

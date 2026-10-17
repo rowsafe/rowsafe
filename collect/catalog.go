@@ -61,6 +61,12 @@ const (
 	MReplicationLagSeconds = "replication_lag_seconds"
 	MReplicationLagBytes   = "replication_lag_bytes"
 	MLogicalSlotLagBytes   = "logical_slot_lag_bytes"
+	// Multixact IDs and autovacuum (newer agents).
+	MMultixactAge         = "multixact_age"
+	MMultixactHeadroomPct = "multixact_headroom_pct"
+	MAutovacuumWorkers    = "autovacuum_workers"
+	MAutovacuumMaxWorkers = "autovacuum_max_workers"
+	MAutovacuumBusyMin    = "autovacuum_all_busy_minutes"
 	// Set by the control plane, not the agent.
 	MPostgresUp  = "postgres_up"
 	MHealthScore = "health_score"
@@ -122,6 +128,11 @@ var Catalog = []Metric{
 	{MReplicationLagSeconds, ScopeDatabase, "s", "Replication delay: the slowest standby's replay lag (on a primary) or this standby's own (on a replica)"},
 	{MReplicationLagBytes, ScopeDatabase, "B", "WAL not yet replayed by the slowest standby (on a primary) or by this standby (on a replica)"},
 	{MLogicalSlotLagBytes, ScopeDatabase, "B", "WAL not yet confirmed by the slowest logical replication consumer"},
+	{MMultixactAge, ScopeDatabase, "count", "Multixact ID age of the oldest database (mxid_age(datminmxid))"},
+	{MMultixactHeadroomPct, ScopeDatabase, "%", "Multixact IDs left before wraparound protection stops writes"},
+	{MAutovacuumWorkers, ScopeDatabase, "count", "Autovacuum workers running"},
+	{MAutovacuumMaxWorkers, ScopeDatabase, "count", "autovacuum_max_workers"},
+	{MAutovacuumBusyMin, ScopeDatabase, "min", "How long every autovacuum worker has been busy, in a row (0 when one is free)"},
 	{MPostgresUp, ScopeDatabase, "", "1 when the agent could query PostgreSQL that minute, 0 when it could not (recorded by the control plane)"},
 	{MHealthScore, ScopeDatabase, "", "Health score, 0-100 (computed by the control plane)"},
 

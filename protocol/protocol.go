@@ -88,6 +88,10 @@ type MaintenanceParams struct {
 	// Extension and Databases: update_extension (pg_extensions.go).
 	Extension string   `json:"extension,omitempty"`
 	Databases []string `json:"databases,omitempty"`
+	// GID and PreparedAt identify the prepared transaction of a
+	// rollback_prepared, in DB (cleanup.go).
+	GID        string     `json:"gid,omitempty"`
+	PreparedAt *time.Time `json:"prepared_at,omitempty"`
 }
 
 // MaintenanceResult is the agent's report for a maintenance task.
@@ -959,6 +963,12 @@ type ReplicationSlot struct {
 	// but not yet confirmed by the consumer). Newer agents only.
 	LagBytes *int64 `json:"lag_bytes,omitempty"`
 	Database string `json:"database,omitempty"` // logical slots: the database it decodes
+	// XminAge and CatalogXminAge are how many transactions ago the oldest
+	// rows the slot still needs were current (age(xmin), age(catalog_xmin)):
+	// VACUUM can't remove dead rows newer than that (cleanup.go). Nil when
+	// the slot holds none. Newer agents only.
+	XminAge        *int64 `json:"xmin_age,omitempty"`
+	CatalogXminAge *int64 `json:"catalog_xmin_age,omitempty"`
 }
 
 // Activity lists sessions running a query, or idle in a transaction, for
@@ -973,6 +983,10 @@ type Activity struct {
 	// and the sessions holding those locks (newer agents; absent when no
 	// session is blocked).
 	Blocking []LockSession `json:"blocking,omitempty"`
+	// Horizon is what holds back cleanup (VACUUM) the longest: sessions
+	// with old snapshots and prepared transactions (cleanup.go). Newer
+	// agents only; nil when nothing does.
+	Horizon *CleanupHorizon `json:"horizon,omitempty"`
 }
 
 type ActivityQuery struct {
@@ -993,6 +1007,9 @@ type ActivityQuery struct {
 	// QueryID identifies a ClickHouse query (PID is 0 there) for a
 	// kill_query fix.
 	QueryID string `json:"query_id,omitempty"`
+	// XminAge is how many transactions ago the session's oldest snapshot
+	// (or its own transaction ID) was taken: CleanupHorizon.Sessions only.
+	XminAge int64 `json:"xmin_age,omitempty"`
 }
 
 // Statements is the top of pg_stat_statements by total execution time,
@@ -1003,6 +1020,9 @@ type Statements struct {
 	Available   bool            `json:"available"`
 	Reason      string          `json:"reason,omitempty"` // why not available
 	Statements  []StatementStat `json:"statements"`
+	// Plans are the busiest statements' plans, without values (plans.go).
+	// Newer agents only.
+	Plans []QueryPlan `json:"plans,omitempty"`
 }
 
 type StatementStat struct {

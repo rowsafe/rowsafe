@@ -136,7 +136,12 @@ func (e *evaluator) maintenance(fresh bool) {
 					Fixes:       freeze})
 			}
 		}
-		if s, ok := m[collect.MLongestXactSeconds]; ok && s >= 30*60 {
+		e.multixact()           // autovacuum.go
+		e.autovacuumSaturated() // autovacuum.go
+		// A session holding back cleanup is named by cleanup_blocked
+		// (cleanup.go), with its dead rows: no second finding for it.
+		named := e.cleanupBlocked(fresh)
+		if s, ok := m[collect.MLongestXactSeconds]; ok && s >= 30*60 && !named {
 			pen := 5
 			if s >= 6*3600 {
 				pen = 10
@@ -148,7 +153,7 @@ func (e *evaluator) maintenance(fresh bool) {
 				Action:      withFixes(long, "If nobody needs it, end it: its changes are rolled back.", "Find it "+e.on("activity")+" and, if nobody needs it, end it."),
 				Command:     withFixes(long, "", longXactSQL),
 				Fixes:       long})
-		} else if s, ok := m[collect.MIdleInXactOldest]; ok && s >= 10*60 {
+		} else if s, ok := m[collect.MIdleInXactOldest]; ok && s >= 10*60 && !named {
 			idle := e.idleSessionFixes(10 * time.Minute)
 			e.add(protocol.Finding{ID: "idle_in_transaction", Category: CatMaintenance, Severity: protocol.SeverityWarning, Penalty: 5,
 				Title:       "An application left a transaction open and idle",
@@ -192,15 +197,20 @@ func (e *evaluator) bloat(ins *protocol.Insights) {
 	var wasted int64
 	var fixes []protocol.FindingFix
 	var bloated []table
+	var bloatedTables []protocol.TableBloat
 	for i, t := range ins.TableBloat {
 		if t.BloatPct >= 30 && t.BloatBytes >= 256<<20 {
 			wasted += t.BloatBytes
 			bloated = append(bloated, table{t.Database, t.Schema, t.Table})
+			bloatedTables = append(bloatedTables, t)
 			if worst == nil {
 				worst = &ins.TableBloat[i]
 			}
 		}
 	}
+	// pg_repack gives a table's space back without a long lock (tools.go).
+	repack := e.repackFixes(ins, bloatedTables)
+	fixes = append(fixes, repack...)
 	for _, x := range ins.IndexBloat {
 		if x.BloatPct >= 30 && x.BloatBytes >= 256<<20 {
 			wasted += x.BloatBytes
@@ -209,8 +219,11 @@ func (e *evaluator) bloat(ins *protocol.Insights) {
 			}
 		}
 	}
-	fixes = append(fixes, e.vacuumFixes(bloated, "Tidy up",
-		"so the space inside them is reused and they stop growing (giving it back to the disk needs a full rebuild; see Do it yourself)")...)
+	tidy := "so the space inside them is reused and they stop growing (giving it back to the disk needs a full rebuild; see Do it yourself)"
+	if len(repack) > 0 {
+		tidy = "so the space inside them is reused and they stop growing"
+	}
+	fixes = append(fixes, e.vacuumFixes(bloated, "Tidy up", tidy)...)
 	if wasted == 0 {
 		return
 	}
@@ -224,10 +237,15 @@ func (e *evaluator) bloat(ins *protocol.Insights) {
 		what = fmt.Sprintf("%s alone wastes an estimated %s (%.0f%%); in all, tables and indexes waste", qualified(worst.Schema, worst.Table), Bytes(float64(worst.BloatBytes)), worst.BloatPct)
 		command = "pg_repack, or VACUUM FULL " + qualified(worst.Schema, worst.Table) + " in a maintenance window (it locks the table)"
 	}
+	action := withFixes(fixes, "Rebuild the bloated indexes and tidy up the tables now. Giving a table's space back to the disk needs a full rebuild that locks it, so that is for a maintenance window (see Do it yourself).", "Rebuild the worst tables and indexes when convenient; this gives the space back.")
+	if len(repack) > 0 {
+		action = "Rebuild the bloated tables with pg_repack: it gives their space back to the disk while your app keeps working, with only a brief lock at the start and the end."
+		command = ""
+	}
 	e.add(protocol.Finding{ID: "bloat", Category: CatMaintenance, Severity: sev, Penalty: pen,
 		Title:       fmt.Sprintf("About %s of disk is wasted space (estimate)", Bytes(float64(wasted))),
 		Explanation: fmt.Sprintf("%s about %s on space left behind by updates and deletes. It is an estimate from PostgreSQL's statistics.", what, Bytes(float64(wasted))),
-		Action:      withFixes(fixes, "Rebuild the bloated indexes and tidy up the tables now. Giving a table's space back to the disk needs a full rebuild that locks it, so that is for a maintenance window (see Do it yourself).", "Rebuild the worst tables and indexes when convenient; this gives the space back."),
+		Action:      action,
 		Command:     command,
 		Fixes:       fixes})
 }

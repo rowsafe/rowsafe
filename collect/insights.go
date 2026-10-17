@@ -212,6 +212,7 @@ func examineDatabase(ctx context.Context, t Target, name string, inRecovery bool
 	run("largest tables", func() error { return q.largestTables(ctx, ins) })
 	run("largest indexes", func() error { return q.largestIndexes(ctx, ins) })
 	run("transaction ID age", func() error { return q.freezeAge(ctx, ins) })
+	run("multixact ID age", func() error { return q.multixactAge(ctx, ins) }) // autovacuum.go
 	run("duplicate indexes", func() error { return q.duplicateIndexes(ctx, ins) })
 	if info.Tables <= maxBloatTables {
 		run("table bloat estimate", func() error { return q.tableBloat(ctx, ins) })
@@ -224,6 +225,7 @@ func examineDatabase(ctx context.Context, t Target, name string, inRecovery bool
 		run("unused indexes", func() error { return q.unusedIndexes(ctx, ins, info.StatsReset) })
 		run("sequential scans", func() error { return q.seqScans(ctx, ins) })
 		run("vacuum statistics", func() error { return q.vacuumStats(ctx, ins) })
+		run("autovacuum backlog", func() error { return q.autovacuumBacklog(ctx, ins) }) // autovacuum.go
 	}
 	// advisor (advisor.go)
 	for _, c := range q.advisorChecks(ins, inRecovery, info.StatsReset) {
@@ -600,6 +602,7 @@ func sortAndCap(ins *protocol.Insights) {
 	capSort(&ins.SeqScanTables, func(a, b protocol.SeqScanTable) int { return cmp.Compare(b.SeqRows, a.SeqRows) })
 	capSort(&ins.VacuumStats, func(a, b protocol.TableVacuum) int { return cmp.Compare(b.DeadRows, a.DeadRows) })
 	capSort(&ins.FreezeAge, func(a, b protocol.TableFreeze) int { return cmp.Compare(b.XIDAge, a.XIDAge) })
+	sortAndCapAutovacuum(ins) // autovacuum.go
 	if len(ins.Notes) > 50 {
 		ins.Notes = ins.Notes[:50]
 	}

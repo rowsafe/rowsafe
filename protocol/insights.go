@@ -110,6 +110,10 @@ type Replica struct {
 	FlushLagSeconds  *float64   `json:"flush_lag_seconds,omitempty"`
 	ReplayLagSeconds *float64   `json:"replay_lag_seconds,omitempty"`
 	ReplyAt          *time.Time `json:"reply_at,omitempty"`
+	// XminAge is age(backend_xmin): with hot_standby_feedback on, the
+	// standby's oldest query keeps the rows it may still read from cleanup
+	// here (nil: it holds none). Newer agents only.
+	XminAge *int64 `json:"xmin_age,omitempty"`
 }
 
 // WALReceiver is a replica's connection to its primary (pg_stat_wal_receiver).
@@ -145,6 +149,13 @@ type Insights struct {
 	SeqScanTables    []SeqScanTable   `json:"seq_scan_tables"`
 	VacuumStats      []TableVacuum    `json:"vacuum_stats"`
 	FreezeAge        []TableFreeze    `json:"freeze_age"`
+	// MultixactAge are the tables with the oldest multixact IDs (rows
+	// locked by several transactions at once), which must be frozen like
+	// transaction IDs (TableFreeze.MXIDAge). Newer agents only.
+	MultixactAge []TableFreeze `json:"multixact_age,omitempty"`
+	// Autovacuum is how far behind autovacuum is (autovacuum.go). Newer
+	// agents only.
+	Autovacuum *AutovacuumBacklog `json:"autovacuum,omitempty"`
 	// Advisor are the extra catalog facts for recommendations (advisor.go).
 	Advisor *AdvisorFacts `json:"advisor,omitempty"`
 }
@@ -266,6 +277,9 @@ type TableFreeze struct {
 	FreezeMaxAge  int64   `json:"freeze_max_age"` // autovacuum_freeze_max_age
 	WraparoundPct float64 `json:"wraparound_pct"` // XIDAge as a share of the 2^31 limit
 	TableBytes    int64   `json:"table_bytes"`
+	// MXIDAge is the table's multixact ID age (mxid_age(relminmxid)), in
+	// Insights.MultixactAge.
+	MXIDAge int64 `json:"mxid_age,omitempty"`
 }
 
 // ---- User API ----
@@ -464,6 +478,9 @@ type QueryTrend struct {
 	// Regression: mean time more than doubled against the previous window
 	// (with enough calls in both to mean something).
 	Regression bool `json:"regression"`
+	// PlanSummary is its plan in plain words, when the agent planned it
+	// (QueryPlan.Summary).
+	PlanSummary string `json:"plan_summary,omitempty"`
 }
 
 type QueryTotals struct {
@@ -485,6 +502,9 @@ type QueryDetail struct {
 	Previous   *QueryPeriod `json:"previous,omitempty"`
 	Regression bool         `json:"regression"`
 	Points     []QueryPoint `json:"points"`
+	// Plan is how PostgreSQL runs it, when the agent planned it (one of
+	// the busiest statements; plans.go).
+	Plan *QueryPlan `json:"plan,omitempty"`
 }
 
 type QueryPeriod struct {
