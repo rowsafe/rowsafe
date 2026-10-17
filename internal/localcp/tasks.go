@@ -80,6 +80,14 @@ func openKey(typ string, params json.RawMessage) string {
 		_ = json.Unmarshal(params, &p)
 		return typ + ":" + p.Name
 	}
+	if typ == protocol.TaskPreviewMigration || typ == protocol.TaskSafeCopy { // each its own (guard.go)
+		var p struct {
+			PreviewID string `json:"preview_id"`
+			CopyID    string `json:"copy_id"`
+		}
+		_ = json.Unmarshal(params, &p)
+		return typ + ":" + p.PreviewID + p.CopyID
+	}
 	return typ
 }
 
@@ -288,6 +296,8 @@ func (s *state) afterTask(t *taskRec, db *dbRec, req protocol.CompleteRequest, n
 		s.finishMark(t.ID, res, now)
 	case protocol.TaskRewindCopy, protocol.TaskRewindDrop:
 		s.afterRewind(t, ok, req.Result, now) // rewind.go
+	case protocol.TaskPreviewMigration, protocol.TaskSafeCopy, protocol.TaskCopySchema:
+		s.afterGuard(t, ok, req.Result, now) // guard.go
 	}
 	return nil
 }

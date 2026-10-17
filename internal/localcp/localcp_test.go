@@ -198,7 +198,7 @@ func TestLifecycle(t *testing.T) {
 	}
 	a.done(rp, protocol.StatusSucceeded, protocol.RestorePointResult{Name: "before-drop", LSN: "0/3000000", Archived: true, CreatedAt: *now})
 	marks, _ := c.RestorePoints(ctx, "shop")
-	if len(marks) != 1 || marks[0].ArchivedAt == nil || marks[0].RestoreFromBackup != "20261014-120000F" {
+	if len(marks) != 1 || marks[0].ArchivedAt == nil || marks[0].Status != protocol.RestorePointArchived || marks[0].RestoreFromBackup != "20261014-120000F" {
 		t.Fatalf("marks: %+v", marks)
 	}
 	a.done(running, protocol.StatusFailed, nil)

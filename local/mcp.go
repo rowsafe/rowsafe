@@ -9,6 +9,7 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/rowsafe/rowsafe/preview"
+	"github.com/rowsafe/rowsafe/protocol"
 )
 
 // MCPOptions configures the local MCP server.
@@ -17,6 +18,11 @@ type MCPOptions struct {
 	// every tool is read-only.
 	AllowWrites bool
 	Version     string
+	// FullPreview, when set, runs check_migration on a full copy of the
+	// data restored from the backups on this server (the agent's preview,
+	// on a server Rowsafe protects on its own). It returns nil, nil when it
+	// can't run now; the usual check runs then.
+	FullPreview func(ctx context.Context, sql string) (*protocol.PreviewResult, error)
 }
 
 const mcpInstructions = `Rowsafe, without an account: tools for one database (PostgreSQL, MySQL or MariaDB) that this machine reaches directly with a connection string. Nothing is sent to Rowsafe.
@@ -31,7 +37,12 @@ const mcpInstructions = `Rowsafe, without an account: tools for one database (Po
 
 - Migrations: before running one (a migration tool, or SQL with ALTER, DROP, CREATE INDEX, bulk UPDATE/DELETE), call check_migration with its SQL (PostgreSQL only for now) and tell the user the verdict (safe, careful, dangerous, failed) and what to change. It never changes the database.
 
-Backups are not known here: this database may have none. Before a destructive operation (migrations, DROP, TRUNCATE, bulk DELETE/UPDATE), tell the user there is no Rowsafe restore point to go back to and get their OK; they can take a backup first (pg_dump, mysqldump), or protect the database with Rowsafe's agent (https://rowsafe.sh), which adds restore points and restore to any second.`
+` + mcpBackups
+
+const mcpBackups = `Backups are not known here: this database may have none. Before a destructive operation (migrations, DROP, TRUNCATE, bulk DELETE/UPDATE), tell the user there is no Rowsafe restore point to go back to and get their OK; they can take a backup first (pg_dump, mysqldump), or protect the database with Rowsafe's agent (https://rowsafe.sh), which adds restore points and restore to any second.`
+
+const mcpBackupsHere = `Rowsafe's agent backs this database up on this server: check_migration runs the migration on a full copy of its data, restored from the backups next to production. ` +
+	`Before a destructive operation, tell the user and get their OK; sudo rowsafe mark NAME saves a restore point first.`
 
 type noInput struct{}
 
@@ -71,8 +82,12 @@ func NewMCPServer(d *DB, opts MCPOptions) *sdk.Server {
 	if opts.Version == "" {
 		opts.Version = "dev"
 	}
+	instructions := mcpInstructions + mcpBackups
+	if opts.FullPreview != nil {
+		instructions = mcpInstructions + mcpBackupsHere
+	}
 	s := sdk.NewServer(&sdk.Implementation{Name: "rowsafe", Title: "Rowsafe", Version: opts.Version}, &sdk.ServerOptions{
-		Instructions: mcpInstructions,
+		Instructions: instructions,
 		Capabilities: &sdk.ServerCapabilities{},
 	})
 	sdk.AddTool(s, &sdk.Tool{
@@ -135,7 +150,12 @@ func NewMCPServer(d *DB, opts MCPOptions) *sdk.Server {
 		checkDesc += " When the connection's role may create databases, it first runs the migration on an empty copy of the schema in a temporary database on the same server " +
 			"(dropped afterwards; never for SQL that reaches beyond its database, such as roles or server settings), which also catches statements that fail."
 	}
-	checkDesc += " Rowsafe saves no restore point here: tell the user to back up first (pg_dump)."
+	if opts.FullPreview != nil {
+		checkDesc += " On this server, Rowsafe first runs it on a full copy of the data restored from the backups next to production (the real rows: " +
+			"it catches statements that fail only on the data, with the real locks, row counts and times); production is never touched. A first preview restores the copy (minutes on a large database); the next ones within an hour reuse it."
+	} else {
+		checkDesc += " Rowsafe saves no restore point here: tell the user to back up first (pg_dump)."
+	}
 	f := false
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "check_migration",
@@ -144,6 +164,15 @@ func NewMCPServer(d *DB, opts MCPOptions) *sdk.Server {
 	}, func(ctx context.Context, _ *sdk.CallToolRequest, in migrationInput) (*sdk.CallToolResult, any, error) {
 		if strings.TrimSpace(in.SQL) == "" {
 			return nil, nil, errors.New("sql is required: the migration's SQL")
+		}
+		if opts.FullPreview != nil && !in.Static {
+			res, err := opts.FullPreview(ctx, in.SQL)
+			if err != nil {
+				return nil, nil, err
+			}
+			if res != nil {
+				return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: preview.Text(res)}}}, res, nil
+			}
 		}
 		res, err := d.Preview(ctx, in.SQL, PreviewOptions{Static: in.Static || !opts.AllowWrites})
 		if err != nil {

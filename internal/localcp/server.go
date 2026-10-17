@@ -164,6 +164,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/databases/{ref}/restore-points", s.marks)
 	mux.HandleFunc("POST /v1/databases/{ref}/restore-points", s.createMark)
 	s.rewindRoutes(mux)                                             // rewind.go
+	s.guardRoutes(mux)                                              // guard.go
 	mux.HandleFunc("GET /v1/notification-channels", s.channelsList) // alerts.go
 	mux.HandleFunc("POST /v1/notification-channels", s.channelsCreate)
 	mux.HandleFunc("DELETE /v1/notification-channels/{id}", s.channelsDelete)
@@ -264,6 +265,7 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		resp.RewindExpires = st.recordRewinds(req.Rewinds, now) // rewind.go
+		resp.Copies = st.recordCopies(req.Copies, now)          // guard.go
 		for _, d := range st.Databases {
 			if d.Status != protocol.DBPendingAdopt {
 				resp.Databases = append(resp.Databases, d.spec())
@@ -664,9 +666,15 @@ func (st *state) markViews(d *dbRec) []protocol.RestorePoint {
 		if m.DatabaseID != d.ID || m.LSN == "" && !st.taskOpen(m.TaskID) {
 			continue // attempts that failed before PostgreSQL wrote it
 		}
-		m.Status = protocol.StatusQueued
-		if t := st.task(m.TaskID); t != nil {
-			m.Status = t.Status
+		// As on the hosted control plane: pending, archived (in the backup
+		// storage, so a restore can reach it) or unconfirmed.
+		switch {
+		case st.taskOpen(m.TaskID):
+			m.Status = protocol.RestorePointPending
+		case m.ArchivedAt != nil:
+			m.Status = protocol.RestorePointArchived
+		default:
+			m.Status = protocol.RestorePointUnconfirmed
 		}
 		if m.CreatedAt != nil {
 			m.RestoreFromBackup = st.backupBefore(d.ID, *m.CreatedAt)

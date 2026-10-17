@@ -157,6 +157,12 @@ func guard(ctx context.Context, args []string) error {
 			return fail(fmt.Sprintf("%s is not protected: %s.", db, strings.Join(p.Reasons, "; ")))
 		}
 	}
+	// On this server, the SQL also runs on a full copy of the data, beside
+	// the restore point (server_guard.go).
+	var pv *guardPreview
+	if onServer {
+		pv = startGuardPreview(ctx, c, db, ev)
+	}
 	name := "agent-" + time.Now().UTC().Format("20060102-150405")
 	task, err := c.CreateRestorePoint(ctx, db, name)
 	var ae *client.APIError
@@ -191,13 +197,26 @@ func guard(ctx context.Context, args []string) error {
 		src = projPath
 	}
 	undo := fmt.Sprintf("they can Rewind %s to restore point %q in the Rowsafe dashboard (or `rowsafe rewind copy %s --mark %s`, then bring the rows back)", db, name, db, name)
+	hint := previewHint(reason)
 	if onServer {
-		undo = fmt.Sprintf("restore point %q on this server holds %s as it was; going back to it takes Rewind, which needs a Rowsafe account for now (`sudo rowsafe login` connects this server)", name, db)
+		undo = fmt.Sprintf("restore point %q on this server holds %s as it was (`sudo rowsafe restore %s --to %s` makes a copy as it was, next to production, to bring rows back from)", name, db, db, name)
 	}
-	return hookReply(fmt.Sprintf("Rowsafe: restore point %s created on %s (LSN %s) before: %s", name, db, lsn, reason),
+	userExtra, noteExtra := "", ""
+	if pv != nil {
+		hint = ""
+		var fails bool
+		userExtra, noteExtra, fails = pv.wait(ctx)
+		if fails {
+			fmt.Fprintf(os.Stderr, "Rowsafe stopped this command (%s): it fails on a full copy of %s's data, so it would fail on production too.%s "+
+				"Restore point %s was saved. Tell the user why it fails and fix the migration; don't work around this block (if they still want it run, they run it themselves).\n",
+				reason, db, noteExtra, name)
+			return exitError(2) // the hook's exit 2 blocks the command
+		}
+	}
+	return hookReply(fmt.Sprintf("Rowsafe: restore point %s created on %s (LSN %s) before: %s", name, db, lsn, reason)+userExtra,
 		fmt.Sprintf("Rowsafe created restore point %q on database %s (from %s), confirmed in the backup repository, right before this command (%s). "+
 			"If the command goes wrong, stop and tell the user: %s; "+
-			"don't try to repair the data or restore it yourself."+previewHint(reason),
+			"don't try to repair the data or restore it yourself."+hint+noteExtra,
 			name, db, src, reason, undo))
 }
 

@@ -482,11 +482,30 @@ func freeCopyPortIn(cfg CopiesConfig, used map[int]bool, listen []string, want i
 	return 0, fmt.Errorf("no free port for a copy in %d-%d (ROWSAFE_COPY_PORTS)", cfg.PortMin, cfg.PortMax)
 }
 
+// chosenCopyPort checks the port a person chose for a copy (any port from
+// 1024): no copy uses it and nothing listens on it.
+func (a *Agent) chosenCopyPort(listen []string, port int) (int, error) {
+	if port < 1024 || port > 65535 {
+		return 0, fmt.Errorf("port %d can't be used for a copy: pick one from 1024 to 65535", port)
+	}
+	if a.copyTools().used()[port] {
+		return 0, fmt.Errorf("another copy already uses port %d: pick another (or leave the port out)", port)
+	}
+	for _, addr := range append([]string{"127.0.0.1"}, listen...) {
+		l, err := net.Listen("tcp", net.JoinHostPort(addr, strconv.Itoa(port)))
+		if err != nil {
+			return 0, fmt.Errorf("port %d is in use on this server: pick another (or leave the port out)", port)
+		}
+		_ = l.Close()
+	}
+	return port, nil
+}
+
 // resolveListen checks a listen choice against the server's addresses:
-// "*" is every address.
+// "*" is every address, protocol.CopyListenLocal localhost only.
 func resolveListen(listen string, addrs []protocol.HostAddress) ([]string, error) {
-	if listen == "*" {
-		return []string{"*"}, nil
+	if listen == "*" || listen == protocol.CopyListenLocal {
+		return []string{listen}, nil
 	}
 	ip, err := netip.ParseAddr(listen)
 	if err != nil {

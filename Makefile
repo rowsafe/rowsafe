@@ -15,6 +15,7 @@
 #   make test-rewind           a real Rewind (copy, rows, in place, undo) on a systemd Debian container (Docker)
 #   make test-pooling          real PgBouncer through the root helper on a systemd Debian container (Docker)
 #   make test-no-account-pooler  rowsafe pulse postgres://... through a real PgBouncer in transaction mode (Docker)
+#   make test-no-account-guard   previews on a full copy, guard and masked copies on a server on its own (Docker)
 #   make test-permissions      passkey-signed permission changes through root's helper on a systemd Debian container (Docker)
 #   make test-secondcopy       a real second backup copy (two storages, one going away) in a Debian container (Docker)
 #   make test-sftp             backups to a real SFTP server: the installer's setup and the agent (Docker)
@@ -46,7 +47,7 @@ AGENT_LDFLAGS := -s -w -buildid= -X $(PKG)/internal/agent.Version=$(VERSION) -X 
 MAIN_LDFLAGS := -s -w -buildid= -X main.version=$(VERSION)
 GOBUILD := CGO_ENABLED=0 GOFLAGS=-mod=readonly $(GO) build -trimpath -buildvcs=false
 
-.PHONY: all build test lint check-installer test-installer test-cli-installer test-npm test-installer-cloud test-mongodb test-clickhouse test-redis test-qdrant check-qdrant-pins test-sqlite test-rewind test-secondcopy test-sftp test-mysql test-upgrade test-pooling test-no-account-pooler test-permissions test-action openai-plugin-zip dist release check-release-env clean test-opensearch mcp-registry
+.PHONY: all build test lint check-installer test-installer test-cli-installer test-npm test-installer-cloud test-mongodb test-clickhouse test-redis test-qdrant check-qdrant-pins test-sqlite test-rewind test-secondcopy test-sftp test-mysql test-upgrade test-pooling test-no-account-pooler test-no-account-guard test-permissions test-action openai-plugin-zip dist release check-release-env clean test-opensearch mcp-registry
 
 all: lint test build
 
@@ -73,7 +74,7 @@ lint: check-installer
 		done; \
 	done
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck -S warning -s sh scripts/install.sh scripts/cli.sh scripts/test-cli.sh scripts/test-install.sh scripts/test-rewind.sh scripts/test-pooling.sh scripts/test-no-account-pooler.sh scripts/test-secondcopy.sh scripts/test-sftp.sh scripts/test-mysql.sh scripts/test-upgrade.sh scripts/test-permissions.sh scripts/rowsafe-agent-guard scripts/rowsafe-pg-restart scripts/rowsafe-firewall scripts/rowsafe-pg-create-cluster scripts/rowsafe-allow scripts/check-qdrant-pins.sh scripts/publish-mcp-registry.sh; \
+		shellcheck -S warning -s sh scripts/install.sh scripts/cli.sh scripts/test-cli.sh scripts/test-install.sh scripts/test-rewind.sh scripts/test-pooling.sh scripts/test-no-account-pooler.sh scripts/test-no-account-guard.sh scripts/test-secondcopy.sh scripts/test-sftp.sh scripts/test-mysql.sh scripts/test-upgrade.sh scripts/test-permissions.sh scripts/rowsafe-agent-guard scripts/rowsafe-pg-restart scripts/rowsafe-firewall scripts/rowsafe-pg-create-cluster scripts/rowsafe-allow scripts/check-qdrant-pins.sh scripts/publish-mcp-registry.sh; \
 		shellcheck -S warning -s bash integrations/github-action/scripts/*.sh integrations/github-action/test/*.sh integrations/github-action/export.sh; \
 	else echo "shellcheck not installed; skipping"; fi
 
@@ -172,6 +173,9 @@ test-secondcopy:
 
 test-no-account-pooler:
 	sh scripts/test-no-account-pooler.sh
+
+test-no-account-guard:
+	sh scripts/test-no-account-guard.sh
 
 test-sftp:
 	sh scripts/test-sftp.sh
