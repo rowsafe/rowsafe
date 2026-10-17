@@ -69,7 +69,7 @@ func TestNotLoggedIn(t *testing.T) {
 	t.Setenv("ROWSAFE_API_KEY", "")
 	t.Setenv("ROWSAFE_DATABASE_URL", "")
 	t.Setenv("DATABASE_URL", "")
-	for _, args := range [][]string{{"ls"}, {"pulse"}, {"mark", "app"}} {
+	for _, args := range [][]string{{"backups"}, {"pulse"}, {"mark", "app"}} {
 		err := dispatch(t.Context(), args)
 		if err == nil || !strings.Contains(err.Error(), "rowsafe pulse postgres://") {
 			t.Errorf("rowsafe %s: %v", strings.Join(args, " "), err)

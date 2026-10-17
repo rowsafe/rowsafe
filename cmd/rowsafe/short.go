@@ -18,9 +18,9 @@ import (
 
 const shortHelp = `rowsafe - backups you can restore to any second, tested every week
 
-No account needed: point it at a PostgreSQL database
-  rowsafe pulse postgres://USER@HOST/DB
-                                     health score (0-100) and what to fix; also fix, insights, top,
+No account needed: save a PostgreSQL database once, then use it by name
+  rowsafe add NAME postgres://...    save it on this computer (rowsafe use NAME: this project's)
+  rowsafe pulse NAME                 health score (0-100) and what to fix; also fix, insights, top,
                                      activity, settings, tune and mcp (rowsafe help local)
 
 Getting started
@@ -134,8 +134,8 @@ when it will run out; connections; vacuum, transaction ID wraparound and
 wasted space; locks, slow-downs and index suggestions; replication. One
 critical problem caps the score at 59, a warning at 89. 90-100 is healthy,
 70-89 needs attention, 50-69 at risk, below 50 critical.
-Without an account, rowsafe pulse postgres://... checks the database itself
-(rowsafe help local).`,
+Without an account, rowsafe pulse NAME (a database saved with rowsafe add)
+or rowsafe pulse postgres://... checks the database itself (rowsafe help local).`,
 	"mark": `LABEL defaults to manual-<UTC time>. With a single argument, it is the
 database if it names one of your databases, and otherwise the label for the
 inferred database: in a project whose .rowsafe.json names "app",

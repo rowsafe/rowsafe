@@ -35,26 +35,46 @@ Rewind needs an account for now):
   sudo rowsafe backups NAME | proofs NAME | backup NAME | proof NAME
   sudo rowsafe login                 the dashboard, alerts and more, later
 
-From anywhere, on a PostgreSQL this computer reaches (also managed ones): give
-a connection string instead of NAME, or set DATABASE_URL (used when you
-aren't logged in):
+From anywhere, on a PostgreSQL this computer reaches (also managed ones): save
+it once, then use it by name:
 
-  rowsafe pulse postgres://USER@HOST:5432/DB    health score and findings (exit 3 below 70)
-  rowsafe fix CONN [FINDING [FIX] | NUMBER] [--yes]
+  rowsafe add shop postgres://USER:PASSWORD@HOST:5432/DB
+                                     save it on this computer (checks it connects, read-only). Pipe
+                                     the string in or pass --from-env VAR to keep the password out
+                                     of your shell history. No arguments: offers DATABASE_URL from
+                                     the environment or .env (asks first; --yes)
+  rowsafe use shop                   make it this project's database: .rowsafe.json gets the name,
+                                     never the connection string. Then leave NAME out
+  rowsafe databases [--json]         the saved ones (rowsafe ls when not logged in)
+  rowsafe forget shop [--yes]        delete a saved connection string
+
+  rowsafe pulse [NAME]               health score and findings (exit 3 below 70)
+  rowsafe fix [NAME] [FINDING [FIX] | NUMBER] [--yes]
                                      apply what pulse found: clean up tables, end a stuck session,
                                      drop an unused or duplicate index, tune settings (asks first)
-  rowsafe insights CONN              largest tables, unused and duplicate indexes, bloat, vacuum
-  rowsafe top CONN                   queries that took the most time (pg_stat_statements)
-  rowsafe activity CONN              queries running or idle in a transaction for over a minute
-  rowsafe settings CONN [SETTING]    the settings that matter
-  rowsafe tune CONN [--memory 16GB --cpus 4] [--workload web|analytics|mixed] [--yes]
+  rowsafe insights [NAME]            largest tables, unused and duplicate indexes, bloat, vacuum
+  rowsafe top [NAME]                 queries that took the most time (pg_stat_statements)
+  rowsafe activity [NAME]            queries running or idle in a transaction for over a minute
+  rowsafe settings [NAME] [SETTING]  the settings that matter
+  rowsafe tune [NAME] [--memory 16GB --cpus 4] [--workload web|analytics|mixed] [--yes]
                                      settings that suit the server, applied with ALTER SYSTEM and a
                                      reload (nothing restarts)
-  rowsafe mcp CONN [--allow-writes]  an MCP server for AI assistants with these tools
+  rowsafe mcp [NAME] [--allow-writes]
+                                     an MCP server for AI assistants with these tools
 
-Reads are read-only, with short timeouts. A fix is looked up again in a fresh
-check, and every name is checked again before anything changes. Nothing is
-sent to Rowsafe. Passwords: in the string, PGPASSWORD or ~/.pgpass.
+Once, without saving: a connection string instead of NAME (rowsafe pulse
+postgres://USER@HOST:5432/DB), or DATABASE_URL when you aren't logged in.
+
+Which database: a connection string; else a saved NAME; else this project's
+(ROWSAFE_DATABASE or .rowsafe.json) when it's saved here; else DATABASE_URL.
+Logged in, a saved NAME runs here unless your account has a database by that
+name too (then the account's, and Rowsafe says so).
+
+Saved connection strings stay in your config folder (rowsafe/databases.json),
+readable only by you: never in the project, never sent to Rowsafe. Reads are
+read-only, with short timeouts. A fix is looked up again in a fresh check, and
+every name is checked again before anything changes. Passwords: in the string,
+PGPASSWORD or ~/.pgpass.
 
 Connection poolers (PgBouncer, Supavisor, Neon's pooler) work for everything
 but the fixes that run in the database itself (cleaning up tables, indexes,
@@ -87,8 +107,8 @@ type localDB struct {
 }
 
 // localArgs finds a local command's database: a connection string among
-// args (removed from them), or $DATABASE_URL when the CLI has no saved
-// login. ok is false when the command should go to the control plane.
+// args (removed from them), a saved database (saved.go), or $DATABASE_URL
+// when the CLI has no saved login. ok is false when the command should go to the control plane.
 // (Not ROWSAFE_DATABASE_URL: rowsafed's own metadata database, set where
 // operators run the CLI.)
 func localArgs(args []string, loggedIn bool) (db *localDB, rest []string, ok bool, err error) {
@@ -104,6 +124,10 @@ func localArgs(args []string, loggedIn bool) (db *localDB, rest []string, ok boo
 			rest = append(append([]string{}, args[:i]...), args[i+1:]...)
 			return &localDB{DB: d}, rest, true, nil
 		}
+	}
+	// A saved database: rowsafe pulse shop, or the project's (saved.go).
+	if db, rest, ok, err := savedArgs(args, loggedIn); ok {
+		return db, rest, ok, err
 	}
 	// An app's own DATABASE_URL only when there is no login to use.
 	if v := strings.TrimSpace(os.Getenv("DATABASE_URL")); !loggedIn && local.IsConnString(v) {
@@ -143,7 +167,8 @@ func localControl(want string) (url string, err error) {
 // notLoggedIn explains what works without an account.
 const notLoggedIn = "not logged in: run `rowsafe login`.\n" +
 	"Without an account, pulse, fix, insights, top, activity, settings, tune and mcp work on a PostgreSQL database directly:\n" +
-	"  rowsafe pulse postgres://user@host:5432/dbname   (or set DATABASE_URL)"
+	"  rowsafe add shop postgres://user@host:5432/dbname   then: rowsafe pulse shop\n" +
+	"  or once: rowsafe pulse postgres://user@host:5432/dbname   (or set DATABASE_URL)"
 
 // localFlags are the options of the commands that evaluate a server.
 type localFlags struct {
@@ -199,7 +224,7 @@ func memorySize(s string) (int64, bool) {
 // noArgs refuses positional arguments a local command doesn't take.
 func noArgs(pos []string) error {
 	if len(pos) > 0 {
-		return fmt.Errorf("unexpected argument %q (the database is the connection string)", pos[0])
+		return fmt.Errorf("unexpected argument %q (no database is saved by that name: rowsafe databases lists them)", pos[0])
 	}
 	return nil
 }
@@ -208,7 +233,7 @@ func noArgs(pos []string) error {
 func localFooter(l *localDB) {
 	fmt.Println("\nBackups, restore to any second and a weekly restore test: https://rowsafe.sh")
 	if l.PasswordInURL {
-		fmt.Println("Tip: put the connection string in DATABASE_URL and run `rowsafe pulse`, so the password stays out of your shell history.")
+		fmt.Println("Tip: save it once with `rowsafe add NAME` (it asks for the connection string, so the password stays out of your shell history), then run `rowsafe pulse NAME`.")
 	}
 }
 
