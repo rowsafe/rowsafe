@@ -64,9 +64,13 @@ func (e *Engine) ForkRestore(ctx context.Context, env agent.EngineEnv, p protoco
 	if err != nil {
 		return nil, err
 	}
-	target, err := s.rewindTarget(ctx, st, p.Target)
-	if err != nil {
-		return nil, err
+	// Neither a time nor a Mark: the latest point in the backups (a source
+	// whose server is lost, where no Mark can be saved first).
+	var target restoreTarget
+	if p.Target.Time != nil || p.Target.Mark != "" {
+		if target, err = s.rewindTarget(ctx, st, p.Target); err != nil {
+			return nil, err
+		}
 	}
 	if p.SizeBytes > 0 {
 		if err := checkSpace(env.Config.RewindDir, p.SizeBytes); err != nil {

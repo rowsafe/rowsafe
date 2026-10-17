@@ -77,6 +77,18 @@ type controlData struct {
 	Timeline      int
 	RedoWALFile   string
 	SystemID      string
+	// Settings are the hotStandbySettings the cluster last ran with (by
+	// their pg_settings names).
+	Settings map[string]int
+}
+
+// controlDataSettings maps pg_controldata's labels to hotStandbySettings.
+var controlDataSettings = map[string]string{
+	"max_connections setting":      "max_connections",
+	"max_worker_processes setting": "max_worker_processes",
+	"max_wal_senders setting":      "max_wal_senders",
+	"max_prepared_xacts setting":   "max_prepared_transactions",
+	"max_locks_per_xact setting":   "max_locks_per_transaction",
 }
 
 func (a *Agent) sops() standbyOps {
@@ -196,6 +208,15 @@ func parseControlData(out []byte) controlData {
 			c.RedoWALFile = v
 		case "Database system identifier":
 			c.SystemID = v
+		default:
+			if name, ok := controlDataSettings[strings.TrimSpace(k)]; ok {
+				if n, err := strconv.Atoi(v); err == nil && n > 0 {
+					if c.Settings == nil {
+						c.Settings = map[string]int{}
+					}
+					c.Settings[name] = n
+				}
+			}
 		}
 	}
 	return c

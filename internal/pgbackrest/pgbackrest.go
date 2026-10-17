@@ -403,7 +403,9 @@ type RestoreOptions struct {
 	// production keeps its archiving (false).
 	ArchiveOff bool
 	// Type is "time", "name" or "xid"; Target the time ("2006-01-02
-	// 15:04:05.999999+00"), restore point name or transaction ID.
+	// 15:04:05.999999+00"), restore point name or transaction ID. Type
+	// "default" with no Target replays every change the backups hold (the
+	// latest point), then promotes.
 	Type, Target string
 	// Exclusive stops just before the target (--target-exclusive): for an
 	// xid, everything up to that transaction, not including it.
@@ -430,7 +432,8 @@ func ValidBackupLabel(s string) bool { return backupLabelRE.MatchString(s) }
 // Every value is checked, so nothing unexpected reaches pgBackRest's
 // command line or the recovery settings it writes.
 func (c CLI) RestoreTo(ctx context.Context, o RestoreOptions) ([]byte, error) {
-	if !restoreTargetType[o.Type] || !restoreTargetRE.MatchString(o.Target) || (o.Type == "xid" && !xidTargetRE.MatchString(o.Target)) {
+	latest := o.Type == "default" && o.Target == "" && !o.Exclusive
+	if !latest && (!restoreTargetType[o.Type] || !restoreTargetRE.MatchString(o.Target) || (o.Type == "xid" && !xidTargetRE.MatchString(o.Target))) {
 		return nil, fmt.Errorf("invalid restore target %q %q", o.Type, o.Target)
 	}
 	if o.Set != "" && !ValidBackupLabel(o.Set) {
@@ -449,7 +452,13 @@ func (c CLI) RestoreTo(ctx context.Context, o RestoreOptions) ([]byte, error) {
 	if o.ArchiveOff {
 		args = append(args, "--archive-mode=off")
 	}
-	args = append(args, "--type="+o.Type, "--target="+o.Target, "--target-action=promote")
+	if latest {
+		// No target: PostgreSQL replays to the end of the archived WAL and
+		// promotes itself.
+		args = append(args, "--type=default")
+	} else {
+		args = append(args, "--type="+o.Type, "--target="+o.Target, "--target-action=promote")
+	}
 	if o.Exclusive {
 		args = append(args, "--target-exclusive")
 	}

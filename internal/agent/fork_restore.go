@@ -63,6 +63,9 @@ type forkOps interface {
 	recover(ctx context.Context, pr privateRecovery, during func(ctx context.Context, t pginspect.Target) error) (*time.Time, error)
 	waitReady(ctx context.Context, db protocol.DatabaseSpec, dataDir string, timeout time.Duration) error
 	databases(ctx context.Context, db protocol.DatabaseSpec) ([]protocol.DBInfo, error)
+	// controlData is pg_controldata of a restored data directory (a lost
+	// source's settings).
+	controlData(dataDir string, major int) (controlData, error)
 }
 
 func (a *Agent) fops() forkOps {
@@ -163,13 +166,25 @@ type forkSource struct {
 	major     int
 	sizeBytes int64
 	settings  map[string]int
+	// lost: the source's server is lost (OwnRepo): its settings are read
+	// from the restored backup (forkBackupSettings).
+	lost bool
 }
 
-// forkSourceFor opens the handoff (another server) or reads the source here
-// (this server: nothing moved).
+// forkSourceFor opens the handoff (another server), reads the source here
+// (this server: nothing moved), or, when the source's server is lost
+// (OwnRepo), reads its backups with this server's own storage settings.
 func (a *Agent) forkSourceFor(ctx context.Context, ops forkOps, p protocol.ForkRestoreParams, tl *taskLog) (forkSource, error) {
 	s := forkSource{major: p.Major, sizeBytes: p.SizeBytes, settings: p.Settings}
-	if p.Box == nil {
+	if p.Box == nil && p.OwnRepo {
+		var err error
+		if s.repo, err = a.lostSourceRepo(ctx, p); err != nil {
+			return s, err
+		}
+		s.lost = true
+		tl.Printf("the source's server is lost: reading %s's backups with this server's own storage settings (PostgreSQL %d, %s); nothing was handed over",
+			cmp.Or(p.Source.Name, p.Source.Stanza), s.major, humanBytes(s.sizeBytes))
+	} else if p.Box == nil {
 		if a.cfg.Sidecar() {
 			return s, errors.New("a Docker fork target restores from another server's backups: the source's sealed bucket settings are missing")
 		}
@@ -218,6 +233,51 @@ func (a *Agent) forkSourceFor(ctx context.Context, ops forkOps, p protocol.ForkR
 		return s, errors.New("the source's PostgreSQL version is unknown")
 	}
 	return s, nil
+}
+
+// lostSourceRepo is the repository a lost source's backups are read from:
+// this server's own (the bucket a primary handed over when this server was
+// its standby, else this agent's own storage), in the source's folder. It
+// only works when this server was installed with the same storage and
+// passphrase as the lost one; a wrong bucket or passphrase fails when the
+// backups are read, with the usual plain error.
+func (a *Agent) lostSourceRepo(ctx context.Context, p protocol.ForkRestoreParams) (pgbackrest.Repo, error) {
+	if _, handed, _ := a.loadHanded(p.Source.ID); !handed && a.cfg.RowsafeStorage() {
+		if err := a.ensureStorageCredentials(ctx); err != nil {
+			return pgbackrest.Repo{}, fmt.Errorf("this server's Rowsafe Storage credentials: %w", err)
+		}
+	}
+	r := a.repoFor(p.Source)
+	if r.Folder == "" && p.SourceFolder != "" {
+		f := validFolder(p.SourceFolder)
+		if f == "" {
+			return r, fmt.Errorf("invalid backup folder %q", p.SourceFolder)
+		}
+		r.Folder = f
+	}
+	if err := r.Validate(); err != nil {
+		return r, fmt.Errorf("this server's backup storage isn't set up (%w): install it with the same storage and passphrase as the lost server", err)
+	}
+	return r, nil
+}
+
+// lostSourceHint completes an error reading a lost source's backups.
+const lostSourceHint = "this server reads the lost server's backups with its own storage settings, so it must use the same storage and backup passphrase as the lost server"
+
+// forkBackupSettings reads, from a lost source's restored backup, the
+// settings recovery needs at least as high as on the source (the source
+// can't be asked). A failure only costs a warning: recovery says plainly
+// if a setting is too low.
+func (a *Agent) forkBackupSettings(ops forkOps, src *forkSource, dataDir string, tl *taskLog) {
+	if !src.lost {
+		return
+	}
+	cd, err := ops.controlData(dataDir, src.major)
+	if err != nil {
+		tl.Printf("reading the backup's settings: %v", err)
+		return
+	}
+	src.settings = mergeSettings(src.settings, cd.Settings)
 }
 
 // forkAutoConf is Rowsafe's part of the fork's postgresql.auto.conf (the
@@ -280,7 +340,7 @@ func (a *Agent) forkRestore(ctx context.Context, p protocol.ForkRestoreParams, t
 	case !forkStanzaRE.MatchString(p.Source.Stanza):
 		return nil, errors.New("the fork names no source database")
 	}
-	typ, target, set, err := rewindRestoreArgs(p.Target)
+	typ, target, set, err := forkRestoreArgs(p.Target)
 	if err != nil {
 		return nil, err
 	}
@@ -367,9 +427,15 @@ func (a *Agent) forkRestore(ctx context.Context, p protocol.ForkRestoreParams, t
 	cli := pgbackrest.CLI{Bin: a.cfg.PgBackRestBin, ConfigPath: rec.SourceConf, Stanza: p.Source.Stanza, Runner: a.runner}
 	stanzas, err := ops.sourceInfo(ctx, cli)
 	if err != nil {
+		if src.lost {
+			err = fmt.Errorf("%w (%s)", err, lostSourceHint)
+		}
 		return a.forkPreflightFailed(ctx, rec, res, fmt.Errorf("Rowsafe can't read %s's backups from this server: %w", cmp.Or(p.Source.Name, p.Source.Stanza), err), tl)
 	}
 	if err := checkBackupSet(stanzas, p.Source.Stanza, set); err != nil {
+		if src.lost { // another bucket, or another folder: nothing of it there
+			err = fmt.Errorf("%w (%s)", err, lostSourceHint)
+		}
 		return a.forkPreflightFailed(ctx, rec, res, err, tl)
 	}
 
@@ -457,6 +523,7 @@ func (a *Agent) forkRestore(ctx context.Context, p protocol.ForkRestoreParams, t
 			return fail("keeping the cluster's configuration", err)
 		}
 	}
+	a.forkBackupSettings(ops, &src, rec.DataDir, tl)
 	if w, err := a.writeForkAutoConf(rec, src, pkgLibDir); err != nil {
 		return fail("configuring the fork", err)
 	} else if w != "" {
@@ -493,6 +560,19 @@ func (a *Agent) forkRestore(ctx context.Context, p protocol.ForkRestoreParams, t
 	}
 	a.finishFork(ctx, ops, db, rec, res, start, tl)
 	return res, nil
+}
+
+// forkRestoreArgs is rewindRestoreArgs, plus the latest point in the
+// backups when neither a time nor a Mark is given (a lost source, where no
+// Mark can be saved first).
+func forkRestoreArgs(t protocol.RewindTarget) (typ, target, set string, err error) {
+	if t.Time != nil || t.Mark != "" || t.XID != 0 {
+		return rewindRestoreArgs(t)
+	}
+	if t.BackupSet != "" && !pgbackrest.ValidBackupLabel(t.BackupSet) {
+		return "", "", "", fmt.Errorf("invalid backup set %q", t.BackupSet)
+	}
+	return "default", "", t.BackupSet, nil
 }
 
 // mergeSettings keeps the higher value of each setting.
