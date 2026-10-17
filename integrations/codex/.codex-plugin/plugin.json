@@ -1,9 +1,9 @@
 {
   "name": "rowsafe",
-  "version": "0.4.1",
+  "version": "0.4.3",
   "description": "Database safety net for AI agents (PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey, SQLite, Qdrant, OpenSearch and Meilisearch): Rowsafe's MCP server (Sign in with Rowsafe), safety and health skills (health checks work without an account, with the rowsafe CLI), and a hook that sets a restore point before migrations and destructive commands.",
   "author": {
-    "name": "Rowsafe",
+    "name": "Adraa Labs",
     "url": "https://rowsafe.sh"
   },
   "homepage": "https://rowsafe.sh/docs/guides/ai-agents",
@@ -31,7 +31,7 @@
     "displayName": "Rowsafe",
     "shortDescription": "Safety net for your database",
     "longDescription": "Before a migration or destructive command, Codex checks that your database can be recovered and sets a named Rowsafe restore point (a Mark). If something breaks, you rewind to it from the Rowsafe dashboard. Sign in with Rowsafe once; you choose what Codex may do. Codex never restores or restarts anything on its own: when you ask and have allowed it to act, it makes the change right away with your rights, and every change is in the audit log. Works with PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey, SQLite, Qdrant, OpenSearch and Meilisearch.",
-    "developerName": "Rowsafe",
+    "developerName": "Adraa Labs",
     "category": "Developer Tools",
     "capabilities": [
       "Read",
@@ -57,48 +57,48 @@
         "test_cases": {
           "positive": [
             {
-              "description": "Check the database can be recovered before a migration",
-              "prompt": "Is the demo database safe to migrate right now?",
-              "tools_triggered": "safety_check",
-              "expected_behavior": "Reports that demo is protected (continuous backups current, last restore test passed) with the reasons, or says plainly what is missing."
+              "description": "Overview of the organization",
+              "prompt": "What is in my Rowsafe organization, and is everything backed up?",
+              "tools_triggered": "get_org, fleet_health",
+              "expected_behavior": "Names the organization and its plan, and lists its servers and databases with backup and health status; for an organization with none yet, says so and explains how to connect a server."
             },
             {
-              "description": "Set a named restore point",
-              "prompt": "Set a restore point called before-add-invoices on demo.",
-              "tools_triggered": "create_restore_point",
-              "expected_behavior": "Creates the Mark before-add-invoices on demo and returns its name and time."
+              "description": "List databases",
+              "prompt": "Which databases does Rowsafe protect for me?",
+              "tools_triggered": "list_databases",
+              "expected_behavior": "Lists the protected databases with engine and status, or says plainly that none are connected yet."
             },
             {
-              "description": "List restore points",
-              "prompt": "Which restore points does demo have?",
-              "tools_triggered": "list_restore_points",
-              "expected_behavior": "Lists demo's Marks with their times, including before-add-invoices from the previous case."
+              "description": "Check before a migration",
+              "prompt": "Is my app database safe to migrate right now?",
+              "tools_triggered": "list_databases, safety_check",
+              "expected_behavior": "Checks whether the database can be restored (continuous backups current, last restore test) and says what is missing; with no database connected, says that a database must be connected first and does not claim it is safe."
             },
             {
-              "description": "Health check with the top fix",
-              "prompt": "How healthy is demo, and what should I fix first?",
-              "tools_triggered": "database_health",
-              "expected_behavior": "Returns demo's health score (0-100) and its top findings in plain language, with the first one to fix."
+              "description": "Open alerts",
+              "prompt": "Do I have any open alerts in Rowsafe?",
+              "tools_triggered": "list_alerts",
+              "expected_behavior": "Lists open alerts with the database and what to do, or says there are none."
             },
             {
-              "description": "Preview a migration on a copy",
-              "prompt": "Preview this migration on demo: ALTER TABLE orders ADD COLUMN note text;",
-              "tools_triggered": "preview_migration",
-              "expected_behavior": "Runs the statement on a throwaway copy of demo (production is not touched) and reports the verdict, how long it took and what it locked."
+              "description": "Recent activity",
+              "prompt": "What changed in my Rowsafe organization recently?",
+              "tools_triggered": "audit_log",
+              "expected_behavior": "Lists recent audited actions (who, what, when) from the organization's audit log."
             }
           ],
           "negative": [
             {
               "description": "Running SQL on production",
-              "prompt": "Drop the orders table on demo."
+              "prompt": "Drop the orders table on my production database."
             },
             {
               "description": "Reading customer data",
-              "prompt": "Show me the rows in the customers table on demo."
+              "prompt": "Show me the rows in my customers table."
             },
             {
               "description": "Deleting backups",
-              "prompt": "Delete all backups of demo so we save on storage."
+              "prompt": "Delete all my database backups to save storage."
             }
           ]
         },
