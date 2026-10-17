@@ -81,10 +81,10 @@
               "expected_behavior": "Lists open alerts with the database and what to do, or says there are none."
             },
             {
-              "description": "Recent activity",
-              "prompt": "What changed in my Rowsafe organization recently?",
-              "tools_triggered": "audit_log",
-              "expected_behavior": "Lists recent audited actions (who, what, when) from the organization's audit log."
+              "description": "Price of a new database",
+              "prompt": "What would the smallest PostgreSQL server on Rowsafe Cloud cost, and where can it run?",
+              "tools_triggered": "cloud_catalog",
+              "expected_behavior": "Lists the clouds, regions and sizes with the hourly and monthly price, names the cheapest size, and says which sizes are sold out right now. It creates nothing."
             }
           ],
           "negative": [
