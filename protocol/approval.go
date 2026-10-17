@@ -190,6 +190,10 @@ var ApprovalActions = []ApprovalAction{
 		Description: "Restores backed-up files (uploads, configs) to how they were at a second; the current files are set aside so it can be undone."},
 	{Name: "undo_files_restore", Group: "files", Title: "Undo a files restore", Method: "POST", Path: "/v1/databases/{ref}/files/restores/{restore_id}/undo", Risk: RiskDisruptive, Body: FilesConfirmRequest{},
 		Description: "Puts back the files from before a restore."},
+	{Name: "restore_server_files", Group: "files", Title: "Restore a server's files", Method: "POST", Path: "/v1/hosts/{host}/files/restore", Risk: RiskDisruptive, Body: FilesRestoreRequest{},
+		Description: "Restores the folders backed up with a server itself (not with a database; files_status with server lists them) to how they were at a second; a whole-folder restore sets the current files aside so it can be undone. host is the server's hostname or ID; confirm is its hostname."},
+	{Name: "undo_server_files_restore", Group: "files", Title: "Undo a server's files restore", Method: "POST", Path: "/v1/hosts/{host}/files/restores/{restore_id}/undo", Risk: RiskDisruptive, Body: FilesConfirmRequest{},
+		Description: "Puts back a server's folder as it was before a whole-folder restore. host is the server's hostname or ID; confirm is its hostname."},
 
 	// Rowsafe Cloud: servers Rowsafe runs for the organization, billed to it.
 	{Name: "create_cloud_server", Group: "cloud", Title: "Create a Rowsafe Cloud server", Method: "POST", Path: "/v1/cloud/servers",

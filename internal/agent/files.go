@@ -21,7 +21,11 @@ import (
 )
 
 // Files: the folders that go with a database (uploads, media), backed up
-// with restic (files_restic.go) into the database's bucket.
+// with restic (files_restic.go) into the database's bucket, and the
+// server's own folders (with or without a database here), backed up into
+// the server's storage under protocol.FilesHostStanza. The server's own
+// folders are kept as one more config with no DatabaseID (key ""): their
+// tasks come without a database.
 //
 // Two goroutines run beside the task loop, both needing nothing from the
 // control plane once settings are saved:
@@ -196,7 +200,8 @@ func (f *filesRuntime) configs() []protocol.FilesConfig {
 	return slices.Clone(f.st.Configs)
 }
 
-// config returns one database's settings.
+// config returns one database's settings, or with "" the server's own
+// folders'.
 func (f *filesRuntime) config(databaseID string) (protocol.FilesConfig, bool) {
 	for _, c := range f.configs() {
 		if c.DatabaseID == databaseID {
@@ -252,12 +257,30 @@ func (f *filesRuntime) lock(folderID string) *sync.Mutex {
 	return m
 }
 
-// setConfigs applies new settings from the control plane.
-func (f *filesRuntime) setConfigs(cs []protocol.FilesConfig, exps []protocol.FilesKeptExpiry) {
+// setConfigs applies new settings from the control plane: its databases'
+// and (host, nil when none) the server's own folders'.
+func (f *filesRuntime) setConfigs(cs []protocol.FilesConfig, host *protocol.FilesConfig, exps []protocol.FilesKeptExpiry) {
 	f.update(func(st *filesState) {
 		valid := cs[:0:0]
-		for _, c := range cs {
+		all := slices.Clone(cs)
+		for i := range all {
+			all[i].HostID = "" // a database's
+		}
+		if host != nil {
+			h := *host
+			h.DatabaseID = ""
+			all = append(all, h)
+		}
+		for _, c := range all {
 			if !rewindIDRE.MatchString(c.Stanza) {
+				continue
+			}
+			// The server's own folders live in their own repository, never
+			// a database's; a database's config always names its database.
+			if c.HostID != "" && (!rewindIDRE.MatchString(c.HostID) || c.Stanza != protocol.FilesHostStanza(c.HostID)) {
+				continue
+			}
+			if c.HostID == "" && c.DatabaseID == "" {
 				continue
 			}
 			var folders []protocol.FilesFolder
@@ -270,7 +293,7 @@ func (f *filesRuntime) setConfigs(cs []protocol.FilesConfig, exps []protocol.Fil
 			}
 			c.Folders = folders
 			c.IntervalMinutes = clampInt(c.IntervalMinutes, protocol.FilesMinIntervalMinutes, protocol.FilesMaxIntervalMinutes, protocol.FilesDefaultIntervalMinutes)
-			c.RetentionDays = max(c.RetentionDays, protocol.FilesMinRetentionDays)
+			c.RetentionDays = min(max(c.RetentionDays, protocol.FilesMinRetentionDays), protocol.FilesMaxRetentionDays)
 			valid = append(valid, c)
 		}
 		st.Configs = valid
@@ -387,7 +410,7 @@ func (a *Agent) filesSync(ctx context.Context) {
 	var he *httpError
 	switch {
 	case err == nil:
-		rt.setConfigs(sync.Databases, sync.KeptExpires)
+		rt.setConfigs(sync.Databases, sync.Host, sync.KeptExpires)
 		every := time.Minute
 		if sync.IntervalSeconds >= 5 {
 			every = time.Duration(sync.IntervalSeconds) * time.Second
@@ -416,7 +439,7 @@ func (a *Agent) filesReport(ctx context.Context) protocol.FilesReport {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	for _, c := range rt.st.Configs {
-		ds := protocol.FilesDatabaseState{DatabaseID: c.DatabaseID, Folders: []protocol.FilesFolderState{}}
+		ds := protocol.FilesDatabaseState{DatabaseID: c.DatabaseID, HostID: c.HostID, Folders: []protocol.FilesFolderState{}}
 		for _, fo := range c.Folders {
 			r := rt.folderRecord(&rt.st, c.DatabaseID, fo)
 			s := r.FilesFolderState
@@ -433,6 +456,10 @@ func (a *Agent) filesReport(ctx context.Context) protocol.FilesReport {
 			if k.DatabaseID == c.DatabaseID {
 				ds.Kept = append(ds.Kept, k.FilesKept)
 			}
+		}
+		if c.HostID != "" {
+			rep.Host = &ds
+			continue
 		}
 		rep.Databases = append(rep.Databases, ds)
 	}
@@ -926,8 +953,9 @@ func (a *Agent) runFilesTask(ctx context.Context, task *protocol.Task, db protoc
 	return nil, fmt.Errorf("unsupported files task %q", task.Type)
 }
 
-// filesConfigFor returns the settings of a task's database, syncing first
-// when the agent hasn't got them yet (a folder added a moment ago).
+// filesConfigFor returns the settings of a task's database (a task without
+// one: the server's own folders), syncing first when the agent hasn't got
+// them yet (a folder added a moment ago).
 func (a *Agent) filesConfigFor(ctx context.Context, db protocol.DatabaseSpec) (protocol.FilesConfig, error) {
 	rt := a.filesRuntime()
 	c, ok := rt.config(db.ID)
@@ -936,12 +964,26 @@ func (a *Agent) filesConfigFor(ctx context.Context, db protocol.DatabaseSpec) (p
 		c, ok = rt.config(db.ID)
 	}
 	if !ok {
-		return c, errors.New("no folders are protected for this database yet")
+		return c, fmt.Errorf("no folders are protected for %s yet", filesOwner(db))
 	}
 	if c.Stanza == "" {
 		c.Stanza = db.Stanza
 	}
 	return c, nil
+}
+
+// filesOwner names what a files task is about in messages.
+func filesOwner(db protocol.DatabaseSpec) string {
+	if db.ID == "" {
+		return "this server"
+	}
+	return "this database"
+}
+
+// runHostFilesTask runs a files task without a database: the server's own
+// folders.
+func (a *Agent) runHostFilesTask(ctx context.Context, task *protocol.Task, tl *taskLog) (any, error) {
+	return a.runFilesTask(ctx, task, protocol.DatabaseSpec{}, tl)
 }
 
 // filesBackupTask snapshots folders now.
@@ -980,7 +1022,7 @@ func (a *Agent) filesBackupTask(ctx context.Context, db protocol.DatabaseSpec, p
 		}
 	}
 	if len(res.Snapshots) == 0 && len(res.Failures) == 0 {
-		return res, errors.New("no such folder is protected for this database")
+		return res, fmt.Errorf("no such folder is protected for %s", filesOwner(db))
 	}
 	res.Summary = fmt.Sprintf("Backed up %s (%s files).", filesCount(len(res.Snapshots), "folder", "folders"), humanCount(files))
 	if bytes > 0 {

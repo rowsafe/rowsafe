@@ -38,8 +38,9 @@ type upgradeTaskInput struct {
 }
 
 type filesBackupInput struct {
-	Database    string   `json:"database" jsonschema:"database name or ID"`
-	Folders     []string `json:"folders,omitempty" jsonschema:"only these folders (paths or IDs from files_status); default every folder backed up with the database"`
+	Database    string   `json:"database,omitempty" jsonschema:"database name or ID"`
+	Server      string   `json:"server,omitempty" jsonschema:"instead of database: a server's hostname or ID, for the folders backed up with the server itself"`
+	Folders     []string `json:"folders,omitempty" jsonschema:"only these folders (paths or IDs from files_status); default every folder backed up with the database (or server)"`
 	Mark        string   `json:"mark,omitempty" jsonschema:"tag the snapshots with this name, e.g. before-cleanup-uploads"`
 	Check       bool     `json:"check,omitempty" jsonschema:"run the files Proof instead: restore a sample to a scratch folder and compare it with the live files"`
 	WaitSeconds int      `json:"wait_seconds,omitempty" jsonschema:"seconds to wait for the result (0 returns at once); a task still running is returned with its ID"`
@@ -115,7 +116,7 @@ func (t *tools) addActionTools(s *sdk.Server) {
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "backup_files",
-		Description: "Takes a snapshot now of the folders backed up with a database (uploads, media; files_status lists them), optionally tagged with a name, e.g. before an operation that deletes files. Reads the files only. " +
+		Description: "Takes a snapshot now of the folders backed up with a database (uploads, media; files_status lists them), or with server, of the folders backed up with a server itself, optionally tagged with a name, e.g. before an operation that deletes files. Reads the files only. " +
 			"With check, runs the files Proof instead: restores a sample to a scratch folder and compares it with the live files. Restoring files is for people (request_change, action restore_files).",
 		Annotations: writes("Back up files now", false, false),
 		InputSchema: withWait[filesBackupInput](nil),
@@ -290,6 +291,9 @@ func (t *tools) runSecurityCheck(ctx context.Context, _ *sdk.CallToolRequest, in
 }
 
 func (t *tools) backupFiles(ctx context.Context, _ *sdk.CallToolRequest, in filesBackupInput) (*sdk.CallToolResult, ActionResult, error) {
+	if strings.TrimSpace(in.Server) != "" {
+		return t.backupServerFiles(ctx, in)
+	}
 	d, msg, err := t.featureDB(ctx, in.Database, protocol.FeatureFiles, "file backups")
 	if err != nil {
 		return nil, ActionResult{}, err
@@ -335,6 +339,50 @@ func (t *tools) backupFiles(ctx context.Context, _ *sdk.CallToolRequest, in file
 	}
 	return t.actionResult(ctx, d, resp.Tasks, in.WaitSeconds, lead+" (reads the files only).",
 		"files_status shows the new snapshot. To restore files, "+requestChange("restore_files")+".")
+}
+
+// backupServerFiles is backup_files for a server's own folders.
+func (t *tools) backupServerFiles(ctx context.Context, in filesBackupInput) (*sdk.CallToolResult, ActionResult, error) {
+	if strings.TrimSpace(in.Database) != "" {
+		return nil, ActionResult{}, fmt.Errorf("give database or server, not both")
+	}
+	info, err := t.c.HostFilesInfo(ctx, in.Server)
+	if err != nil {
+		return nil, ActionResult{}, apiError(err)
+	}
+	host := protocol.Database{Name: info.Host.Hostname}
+	if in.Check {
+		resp, err := t.c.HostFilesCheck(ctx, info.HostID)
+		if err != nil {
+			return nil, ActionResult{}, apiError(err)
+		}
+		return t.actionResult(ctx, host, resp.Tasks, in.WaitSeconds, "Running the files Proof of "+host.Name+"'s folders (a sample restored to a scratch folder and compared; live files untouched).",
+			"files_status (server) shows the result as the latest files Proof.")
+	}
+	req := protocol.FilesBackupParams{Mark: in.Mark}
+	for _, want := range in.Folders {
+		i := slices.IndexFunc(info.Folders, func(f protocol.FilesFolderView) bool {
+			return f.ID == want || f.Path == want || strings.TrimRight(f.Path, "/") == strings.TrimRight(want, "/")
+		})
+		if i < 0 {
+			var have []string
+			for _, f := range info.Folders {
+				have = append(have, f.Path)
+			}
+			return nil, ActionResult{}, fmt.Errorf("%s isn't backed up with %s; its folders are: %s", want, host.Name, cmpOr(strings.Join(have, ", "), "none"))
+		}
+		req.FolderIDs = append(req.FolderIDs, info.Folders[i].ID)
+	}
+	resp, err := t.c.HostFilesBackup(ctx, info.HostID, req)
+	if err != nil {
+		return nil, ActionResult{}, apiError(err)
+	}
+	lead := "Taking a snapshot of " + host.Name + "'s folders now"
+	if in.Mark != "" {
+		lead += ", tagged " + in.Mark
+	}
+	return t.actionResult(ctx, host, resp.Tasks, in.WaitSeconds, lead+" (reads the files only).",
+		"files_status (server) shows the new snapshot. To restore files, "+requestChange("restore_server_files")+".")
 }
 
 // actionResult waits for the last of tasks (the one that matters when a
