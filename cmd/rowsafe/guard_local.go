@@ -55,7 +55,10 @@ func guardWithoutRestorePoint(ctx context.Context, ev hookEvent, reason string, 
 		os.Exit(2)
 	}
 	backup := "pg_dump -Fc -f before-change.dump with the database's connection string"
-	if strings.HasPrefix(src, "DATABASE_URL") {
+	switch {
+	case d.Engine() != protocol.EnginePostgreSQL:
+		backup = "mysqldump --single-transaction with the database's connection details"
+	case strings.HasPrefix(src, "DATABASE_URL"):
 		backup = `pg_dump -Fc -f before-change.dump "$DATABASE_URL"`
 	}
 	userMsg := fmt.Sprintf("Rowsafe: no restore point for %s (Rowsafe's agent doesn't protect it).", d.Name())
@@ -64,7 +67,7 @@ func guardWithoutRestorePoint(ctx context.Context, ev hookEvent, reason string, 
 		"or protecting the database with Rowsafe's agent (https://rowsafe.sh), which saves a restore point before commands like this and can restore to any second.",
 		reason, d.Name(), src, backup)
 	sql := mcp.PostgresSQL(ev.ToolInput.Command, func(p string) ([]byte, error) { return readSmallFile(ev.Cwd, p) })
-	if strings.TrimSpace(sql) != "" {
+	if strings.TrimSpace(sql) != "" && d.Engine() == protocol.EnginePostgreSQL {
 		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		res, err := d.Preview(cctx, sql, local.PreviewOptions{Static: true})
 		cancel()
@@ -75,7 +78,7 @@ func guardWithoutRestorePoint(ctx context.Context, ev hookEvent, reason string, 
 			userMsg += " " + preview.VerdictLabel(res.Verdict) + ": " + firstLine(res.Summary, 300)
 			note += " Rowsafe checked the SQL against " + d.Name() + " (read-only; nothing ran): " + checkSummary(res)
 		}
-	} else if previewHint(reason) != "" {
+	} else if previewHint(reason) != "" && d.Engine() == protocol.EnginePostgreSQL {
 		note += fmt.Sprintf(" To check a migration's SQL first without changing the database: `%s FILE.sql` "+
 			"(it runs on an empty copy of the schema in a temporary database, or reads the SQL, and reports locks, rewrites and a verdict).", d.Command("preview"))
 	}
