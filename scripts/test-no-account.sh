@@ -12,8 +12,9 @@
 #   check, the first full backup and the first Proof (rowsafe status says
 #   protected), a Mark, a differential backup, the agent restarting (the
 #   state is kept), Rewind (a copy restored to the Mark has the rows deleted
-#   since; compare; bring them back), and a command that needs the
-#   dashboard saying so.
+#   since; compare; bring them back), alerts, rowsafe pulse and top with
+#   the agent's readings over time, and a command that needs the dashboard
+#   saying so.
 #
 # Usage: sh scripts/test-no-account.sh [debian:trixie]   (needs Docker, ~4 min)
 
@@ -177,6 +178,16 @@ EOF
   rowsafe pulse shop >/tmp/pulse-saved.out 2>&1 || true
   grep -q "/100" /tmp/pulse-saved.out || { cat /tmp/pulse-saved.out; fail "rowsafe pulse shop"; }
   echo "  ok: rowsafe pulse shop uses the saved connection string"
+  # ... with what the agent saw over time (internal/localcp/history.go).
+  grep -q "Protected: continuous backups" /tmp/pulse-saved.out || { cat /tmp/pulse-saved.out; fail "rowsafe pulse shop: no protection check from the agent"; }
+  grep -q "History: the agent's readings" /tmp/pulse-saved.out || { cat /tmp/pulse-saved.out; fail "rowsafe pulse shop: not the agent's readings"; }
+  rowsafe pulse shop --json 2>/dev/null | grep -q '"disk_forecast"' || fail "rowsafe pulse shop --json: no disk forecast"
+  rowsafe top shop >/tmp/top.out 2>&1 || { cat /tmp/top.out; fail "rowsafe top shop"; }
+  grep -q "Top statements of shop\|No query statistics for shop" /tmp/top.out || { cat /tmp/top.out; fail "rowsafe top shop"; }
+  # Every database on the server, from the agent's readings alone.
+  rowsafe pulse >/tmp/pulse-all.out 2>&1 || true
+  grep -q "^shop " /tmp/pulse-all.out || { cat /tmp/pulse-all.out; fail "rowsafe pulse: the server's databases"; }
+  echo "  ok: rowsafe pulse and top use the agent's readings over time"
   # And the connection string mode still works on the same server.
   runuser -u postgres -- /usr/local/bin/rowsafe pulse "postgresql:///postgres?host=/var/run/postgresql" >/tmp/pulse.out 2>&1 || true
   grep -q "/100" /tmp/pulse.out || { cat /tmp/pulse.out; fail "rowsafe pulse on a connection string"; }

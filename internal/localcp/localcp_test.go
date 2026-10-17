@@ -239,9 +239,9 @@ func TestLifecycle(t *testing.T) {
 	if _, err := c.Hosts(ctx); err != nil {
 		t.Error(err)
 	}
-	_, err = c.Insights(ctx, "shop")
+	_, err = c.Availability(ctx, "shop")
 	if err == nil || !strings.Contains(err.Error(), "rowsafe login") {
-		t.Errorf("insights without an account: %v", err)
+		t.Errorf("availability without an account: %v", err)
 	}
 }
 
