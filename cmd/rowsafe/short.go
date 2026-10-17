@@ -99,10 +99,14 @@ Admin
 NAME can be left out in a project with .rowsafe.json, with ROWSAFE_DATABASE
 set, or when the organization has one database ("rowsafe help names").
 
+Scripts and AI agents: --json, --yes, exit codes 0 ok, 1 error, 2 usage, 3 not healthy ("rowsafe help agents").
+
 "rowsafe help COMMAND" shows a command's details; "rowsafe help all" lists everything.
 `
 
 func init() {
+	helpDetails["agents"] = agentsHelp
+	helpDetails["exit-codes"] = exitCodes
 	helpDetails["adopt"] = "--engine is one of " + adoptEngineList() + ".\n" +
 		"Without --port, --socket-dir and --retention-full, each engine gets its own defaults."
 }
@@ -258,7 +262,7 @@ func statusCmd(ctx context.Context, c *client.Client, args []string) error {
 	case 1:
 		return protectionStatus(ctx, c, pos[0], *asJSON)
 	}
-	return errors.New("expected at most one database name")
+	return newUsageError("expected at most one database name")
 }
 
 func fleetStatus(ctx context.Context, c *client.Client, asJSON bool) error {
@@ -267,8 +271,9 @@ func fleetStatus(ctx context.Context, c *client.Client, asJSON bool) error {
 		return err
 	}
 	if asJSON {
-		out, _ := json.MarshalIndent(h, "", "  ")
-		fmt.Println(string(out))
+		if err := printJSON(h); err != nil {
+			return err
+		}
 	} else {
 		fmt.Println(fleetHeadline(h))
 		for _, p := range h.Problems {
@@ -325,7 +330,7 @@ func initCmd(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if len(pos) > 1 {
-		return errors.New("expected at most one database name")
+		return newUsageError("expected at most one database name")
 	}
 	name := ""
 	if len(pos) == 1 {
@@ -408,8 +413,10 @@ func helpFor(args []string) string {
 		return usage + "\n" + nameRules + "\n"
 	}
 	lines := referenceLines(topic)
-	if d, ok := helpDetails[topic]; ok {
+	if d, ok := helpDetails[topic]; ok && len(lines) > 0 {
 		lines = append(lines, "", d)
+	} else if ok {
+		lines = []string{d}
 	}
 	if len(lines) == 0 {
 		return fmt.Sprintf("No help for %q. Run `rowsafe help all` for every command.\n", topic)
@@ -456,8 +463,9 @@ func protectionStatus(ctx context.Context, c *client.Client, name string, asJSON
 		return err
 	}
 	if asJSON {
-		out, _ := json.MarshalIndent(p, "", "  ")
-		fmt.Println(string(out))
+		if err := printJSON(p); err != nil {
+			return err
+		}
 	} else {
 		printProtection(name, p)
 	}

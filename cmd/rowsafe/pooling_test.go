@@ -83,6 +83,7 @@ func TestPoolingCommands(t *testing.T) {
 		t.Fatalf("not allowed: %v", err)
 	}
 	p.view.Allowed = true
+	onTerminal(t)
 	stdin = strings.NewReader("n\n")
 	if err := dispatch(ctx, []string{"pooling", "on", "app"}); err == nil || !strings.Contains(err.Error(), "cancelled") || len(p.puts) != 0 {
 		t.Fatalf("answering n: %v %v", err, p.puts)

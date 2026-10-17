@@ -189,6 +189,7 @@ func TestMoveCommands(t *testing.T) {
 	if err != nil || !strings.Contains(out, "rowsafe move finish shop") || !strings.Contains(out, "stays stopped until") {
 		t.Fatalf("move status: %v\n%s", err, out)
 	}
+	onTerminal(t)
 	stdin = strings.NewReader("db-1\n")
 	if _, err := captureStdout(t, func() error { return dispatch(ctx, []string{"move", "finish", "shop"}) }); err != nil ||
 		last() != `POST /move/finish {"confirm":"db-1"}` {

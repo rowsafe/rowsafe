@@ -71,10 +71,10 @@ func previewCmd(ctx context.Context, c *client.Client, args []string) error {
 		*format = "json"
 	}
 	if *format != "text" && *format != "json" && *format != "markdown" {
-		return errors.New("--format must be text, json or markdown")
+		return newUsageError("--format must be text, json or markdown")
 	}
 	if *failOn != protocol.PreviewCareful && *failOn != protocol.PreviewDangerous && *failOn != "never" {
-		return errors.New("--fail-on must be careful, dangerous or never")
+		return newUsageError("--fail-on must be careful, dangerous or never")
 	}
 	var name, file string
 	switch len(pos) {
@@ -83,7 +83,7 @@ func previewCmd(ctx context.Context, c *client.Client, args []string) error {
 	case 2:
 		name, file = pos[0], pos[1]
 	default:
-		return errors.New("usage: rowsafe preview [NAME] FILE (.sql; for MongoDB a .js file of mongosh calls; - reads stdin)")
+		return newUsageError("usage: rowsafe preview [NAME] FILE (.sql; for MongoDB a .js file of mongosh calls; - reads stdin)")
 	}
 	if file != "-" && *label == "" {
 		*label = filepath.Base(file)
@@ -212,7 +212,7 @@ func previewsCmd(ctx context.Context, c *client.Client, args []string) error {
 	case 2:
 		name, id = pos[0], pos[1]
 	default:
-		return errors.New("usage: rowsafe previews [NAME] [ID]")
+		return newUsageError("usage: rowsafe previews [NAME] [ID]")
 	}
 	if id != "" {
 		p, err := c.Preview(ctx, id)
@@ -355,7 +355,7 @@ func copiesCreateCmd(ctx context.Context, c *client.Client, args []string) error
 		return err
 	}
 	if *hours < 1 || *hours > 168 {
-		return errors.New("--hours must be between 1 and 168 (7 days)")
+		return newUsageError("--hours must be between 1 and 168 (7 days)")
 	}
 	d, err := c.Database(ctx, name)
 	if err != nil {
@@ -367,17 +367,14 @@ func copiesCreateCmd(ctx context.Context, c *client.Client, args []string) error
 	req := protocol.CreateSafeCopyRequest{Hours: *hours, AllowFrom: allow, Listen: *listen, ConnectHost: *connectHost, DB: *db}
 	if *noMasking {
 		fmt.Printf("This copy will hold the REAL data of %s, reachable over the network by the allowed addresses.\n", name)
-		if !*yes {
-			fmt.Printf("Type the database's name to confirm: ")
-			if strings.TrimSpace(readLine()) != name {
-				return errors.New("not confirmed; nothing was made")
-			}
+		if err := confirmTypedAs(*yes, name, "Type the database's name to confirm: "); err != nil {
+			return err
 		}
 		req.Masking, req.NoMaskingConfirm = protocol.MaskingNone, name
 	}
 	if *structure {
 		if *noMasking {
-			return errors.New("--structure and --no-masking don't go together")
+			return newUsageError("--structure and --no-masking don't go together")
 		}
 		req.Masking = protocol.MaskingStructure
 	}
@@ -393,7 +390,7 @@ func copiesCreateCmd(ctx context.Context, c *client.Client, args []string) error
 	conn := client.ConnectionString(resp.Copy, password)
 	if !*noWait {
 		fmt.Fprintf(os.Stderr, "Making a safe copy of %s: restoring the latest backup, masking, then opening it on the server...\n", name)
-		t, err := c.WaitTask(ctx, resp.Task.ID, nil)
+		t, err := waitTask(ctx, c, resp.Task.ID, nil)
 		if err != nil {
 			return err
 		}
@@ -441,11 +438,8 @@ func copiesCreateFile(ctx context.Context, c *client.Client, d protocol.Database
 		what = "a structure-only copy"
 	case noMasking:
 		fmt.Printf("This copy will hold the REAL data of %s, as a file on its server.\n", name)
-		if !yes {
-			fmt.Printf("Type the database's name to confirm: ")
-			if strings.TrimSpace(readLine()) != name {
-				return errors.New("not confirmed; nothing was made")
-			}
+		if err := confirmTypedAs(yes, name, "Type the database's name to confirm: "); err != nil {
+			return err
 		}
 		req.Masking, req.NoMaskingConfirm = protocol.MaskingNone, name
 		what = "an unmasked copy"
@@ -456,7 +450,7 @@ func copiesCreateFile(ctx context.Context, c *client.Client, d protocol.Database
 	}
 	if !noWait {
 		fmt.Fprintf(os.Stderr, "Making %s of %s as a new file on its server...\n", what, name)
-		t, err := c.WaitTask(ctx, resp.Task.ID, nil)
+		t, err := waitTask(ctx, c, resp.Task.ID, nil)
 		if err != nil {
 			return err
 		}
@@ -505,7 +499,7 @@ func copyArgs(ctx context.Context, c *client.Client, fs *flag.FlagSet, args []st
 	case 2:
 		name, id = pos[0], pos[1]
 	default:
-		return "", "", errors.New("usage: rowsafe copies " + fs.Name()[len("copies "):] + " [NAME] ID")
+		return "", "", newUsageError("usage: rowsafe copies " + fs.Name()[len("copies "):] + " [NAME] ID")
 	}
 	name, err = resolveDatabase(ctx, c, name)
 	return name, id, err
@@ -518,8 +512,8 @@ func copiesDeleteCmd(ctx context.Context, c *client.Client, args []string) error
 	if err != nil {
 		return err
 	}
-	if !*yes && !confirm(fmt.Sprintf("Delete safe copy %s of %s? Anyone using it is disconnected (a SQLite copy's file is removed).", id, name)) {
-		return errors.New("not deleted")
+	if err := confirmChange(*yes, fmt.Sprintf("Delete safe copy %s of %s? Anyone using it is disconnected (a SQLite copy's file is removed).", id, name)); err != nil {
+		return err
 	}
 	if _, err := c.DeleteSafeCopy(ctx, name, id); err != nil {
 		return apiErr(err)
@@ -566,6 +560,9 @@ func copiesExtendCmd(ctx context.Context, c *client.Client, args []string) error
 	cp, err := c.ExtendSafeCopy(ctx, name, id, *hours)
 	if err != nil {
 		return apiErr(err)
+	}
+	if jsonMode {
+		return printJSON(cp)
 	}
 	fmt.Printf("Safe copy %s is now deleted by itself at %s.\n", id, describeTime(cp.Expires))
 	return nil
@@ -653,10 +650,10 @@ func maskingSetCmd(ctx context.Context, c *client.Client, args []string) error {
 		name, pos = pos[0], pos[1:]
 	}
 	if len(pos) != 2 {
-		return errors.New("usage: rowsafe masking set [NAME] [DB:]TABLE.COLUMN STRATEGY")
+		return newUsageError("usage: rowsafe masking set [NAME] [DB:]TABLE.COLUMN STRATEGY")
 	}
 	if !masking.Known(pos[1]) {
-		return fmt.Errorf("unknown strategy %q (one of: %s)", pos[1], strategyNames())
+		return usageErrorf("unknown strategy %q (one of: %s)", pos[1], strategyNames())
 	}
 	if name, err = resolveDatabase(ctx, c, name); err != nil {
 		return err

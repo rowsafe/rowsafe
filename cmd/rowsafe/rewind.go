@@ -115,7 +115,7 @@ func rewindTarget(at, mark string) (*time.Time, string, string, error) {
 		utc := t.UTC()
 		return &utc, "", describeTime(t), nil
 	}
-	return nil, "", "", errors.New("which point? Pass --at TIME (e.g. --at \"14:04\" or --at \"10m ago\") or --mark LABEL")
+	return nil, "", "", newUsageError("which point? Pass --at TIME (e.g. --at \"14:04\" or --at \"10m ago\") or --mark LABEL")
 }
 
 // ---- rowsafe rewind [NAME] ----
@@ -132,7 +132,7 @@ func rewindShow(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if *asJSON {
-		enc := json.NewEncoder(os.Stdout)
+		enc := json.NewEncoder(jsonWriter())
 		enc.SetIndent("", "  ")
 		return enc.Encode(info)
 	}
@@ -259,7 +259,7 @@ func waitRewindTasks(ctx context.Context, c *client.Client, tasks []protocol.Tas
 	var last protocol.TaskView
 	for _, t := range tasks {
 		status := ""
-		done, err := c.WaitTask(ctx, t.ID, func(v protocol.TaskView) {
+		done, err := waitTask(ctx, c, t.ID, func(v protocol.TaskView) {
 			if v.Status == status {
 				return
 			}
@@ -355,7 +355,7 @@ func rewindCopyCmd(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if *hours < 1 || *hours > 168 {
-		return errors.New("--hours must be between 1 and 168 (7 days)")
+		return newUsageError("--hours must be between 1 and 168 (7 days)")
 	}
 	resp, err := c.CreateRewindCopy(ctx, name, protocol.CreateRewindCopyRequest{Time: t, Mark: markName, Hours: *hours})
 	if err != nil {
@@ -460,7 +460,7 @@ func rewindCompareCmd(ctx context.Context, c *client.Client, args []string) erro
 	var r protocol.RewindCompareResult
 	_ = json.Unmarshal(done.Result, &r)
 	if *asJSON {
-		enc := json.NewEncoder(os.Stdout)
+		enc := json.NewEncoder(jsonWriter())
 		enc.SetIndent("", "  ")
 		return enc.Encode(r)
 	}
@@ -533,7 +533,7 @@ func rewindRowsCmd(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if len(tablesArg) == 0 {
-		return fmt.Errorf("which tables? rowsafe rewind rows %s TABLE... (see rowsafe rewind compare %s)", name, name)
+		return usageErrorf("which tables? rowsafe rewind rows %s TABLE... (see rowsafe rewind compare %s)", name, name)
 	}
 	_, cp, err := readyCopy(ctx, c, name)
 	if err != nil {
@@ -560,11 +560,8 @@ func rewindRowsCmd(ctx context.Context, c *client.Client, args []string) error {
 		fmt.Println("Rows that exist in production are left as they are (--include-changed sets changed ones back).")
 	}
 	fmt.Println("Rowsafe saves a Mark first. Triggers don't fire for the rows brought back; rows added since stay.")
-	if !*yes {
-		fmt.Printf("Type the database name (%s) to go ahead: ", name)
-		if readLine() != name {
-			return errors.New("cancelled; nothing was changed")
-		}
+	if err := confirmTypedAs(*yes, name, fmt.Sprintf("Type the database name (%s) to go ahead: ", name)); err != nil {
+		return err
 	}
 	resp, err := c.RestoreRows(ctx, name, cp.ID, protocol.RewindRowsRequest{Tables: tables, IncludeChanged: *changed, Confirm: name})
 	if err != nil {
@@ -597,11 +594,8 @@ func rewindDropCmd(ctx context.Context, c *client.Client, args []string) error {
 		fmt.Printf("%s has no copy.\n", name)
 		return nil
 	}
-	if !*yes {
-		fmt.Printf("Delete the copy of %s (%s)? Production isn't touched. [y/N] ", name, humanBytes(info.Copy.SizeBytes))
-		if a := readLine(); !strings.EqualFold(a, "y") && !strings.EqualFold(a, "yes") {
-			return errors.New("cancelled")
-		}
+	if err := confirmChange(*yes, fmt.Sprintf("Delete the copy of %s (%s)? Production isn't touched.", name, humanBytes(info.Copy.SizeBytes))); err != nil {
+		return err
 	}
 	resp, err := c.DeleteRewindCopy(ctx, name, info.Copy.ID)
 	if err != nil {
@@ -625,7 +619,7 @@ func rewindExtendCmd(ctx context.Context, c *client.Client, args []string) error
 		return err
 	}
 	if *hours < 1 || *hours > 168 {
-		return errors.New("--hours must be between 1 and 168 (7 days)")
+		return newUsageError("--hours must be between 1 and 168 (7 days)")
 	}
 	_, cp, err := readyCopy(ctx, c, name)
 	if err != nil {
@@ -634,6 +628,9 @@ func rewindExtendCmd(ctx context.Context, c *client.Client, args []string) error
 	out, err := c.ExtendRewindCopy(ctx, name, cp.ID, *hours)
 	if err != nil {
 		return apiErr(err)
+	}
+	if jsonMode {
+		return printJSON(out)
 	}
 	fmt.Printf("The copy of %s is now kept until %s.\n", name, describeTime(out.Expires))
 	return nil
@@ -665,11 +662,8 @@ func rewindDatabaseCmd(ctx context.Context, c *client.Client, args []string) err
 	fmt.Println("  PostgreSQL is stopped while Rowsafe restores it: apps can't connect until it's done.")
 	fmt.Println("  The current data is kept aside for 7 days so you can undo (rowsafe rewind undo).")
 	fmt.Println("  Rowsafe saves a Mark first. To look at old data without touching production, use rowsafe rewind copy instead.")
-	if !*yes {
-		fmt.Printf("\nType the database name (%s) to rewind it: ", name)
-		if readLine() != name {
-			return errors.New("cancelled; nothing was changed")
-		}
+	if err := confirmTypedAs(*yes, name, fmt.Sprintf("\nType the database name (%s) to rewind it: ", name)); err != nil {
+		return err
 	}
 	resp, err := c.RewindInPlace(ctx, name, protocol.RewindInPlaceRequest{Time: t, Mark: markName, Confirm: name})
 	if err != nil {
@@ -721,11 +715,8 @@ func rewindUndoCmd(ctx context.Context, c *client.Client, args []string) error {
 	}
 	fmt.Printf("Undo the rewind of %s: put the data from before the rewind back.\n", name)
 	fmt.Println("  Anything written since the rewind is kept aside (not deleted), and PostgreSQL is stopped for a moment.")
-	if !*yes {
-		fmt.Printf("Type the database name (%s) to undo the rewind: ", name)
-		if readLine() != name {
-			return errors.New("cancelled; nothing was changed")
-		}
+	if err := confirmTypedAs(*yes, name, fmt.Sprintf("Type the database name (%s) to undo the rewind: ", name)); err != nil {
+		return err
 	}
 	resp, err := c.UndoRewind(ctx, name, k.RewindID, name)
 	if err != nil {
@@ -760,11 +751,8 @@ func rewindCleanupCmd(ctx context.Context, c *client.Client, args []string) erro
 	for _, k := range info.Kept {
 		total += k.SizeBytes
 	}
-	if !*yes {
-		fmt.Printf("Delete the data %s kept aside by rewinds (%s)? The rewind can't be undone after this. [y/N] ", name, humanBytes(total))
-		if a := readLine(); !strings.EqualFold(a, "y") && !strings.EqualFold(a, "yes") {
-			return errors.New("cancelled")
-		}
+	if err := confirmChange(*yes, fmt.Sprintf("Delete the data %s kept aside by rewinds (%s)? The rewind can't be undone after this.", name, humanBytes(total))); err != nil {
+		return err
 	}
 	for _, k := range info.Kept {
 		resp, err := c.CleanupRewind(ctx, name, k.RewindID)
@@ -782,12 +770,9 @@ func rewindCleanupCmd(ctx context.Context, c *client.Client, args []string) erro
 	return nil
 }
 
-// apiErr shows the control plane's reason as is.
+// apiErr shows the control plane's reason as is (explain, in errors.go,
+// adds the next step when the reason has none).
 func apiErr(err error) error {
-	var ae *client.APIError
-	if errors.As(err, &ae) {
-		return errors.New(ae.Msg)
-	}
 	return err
 }
 

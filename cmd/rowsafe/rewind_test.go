@@ -232,6 +232,7 @@ func TestRewindCommands(t *testing.T) {
 
 	// Bring back rows: the name must be typed.
 	n := len(f.reqs)
+	onTerminal(t)
 	stdin = strings.NewReader("y\n")
 	if _, err := captureStdout(t, func() error { return dispatch(ctx, []string{"rewind", "rows", "shop", "public.orders"}) }); err == nil ||
 		!strings.Contains(err.Error(), "cancelled") || len(f.reqs) != n {

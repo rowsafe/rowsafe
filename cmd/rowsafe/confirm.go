@@ -20,17 +20,24 @@ import (
 // --yes confirms; on a terminal the command asks; without a terminal and
 // without --yes it refuses before changing anything.
 
+// errNoTerminal is the refusal of a change without --yes when there is no
+// terminal to ask on: scripts and AI agents never wait on a question.
+var errNoTerminal = errors.New("not changed: pass --yes to confirm (there is no terminal to ask on)")
+
+// errCancelled is a question answered no.
+var errCancelled = errors.New("cancelled; nothing was changed")
+
 // confirmChange asks a yes/no question before a change.
 func confirmChange(yes bool, question string) error {
 	if yes {
 		return nil
 	}
 	if !stdinIsTerminal() {
-		return errors.New("not changed: pass --yes to confirm (no terminal to ask on)")
+		return errNoTerminal
 	}
 	fmt.Fprintf(os.Stderr, "%s [y/N] ", question)
 	if a := readLine(); !strings.EqualFold(a, "y") && !strings.EqualFold(a, "yes") {
-		return errors.New("cancelled; nothing was changed")
+		return errCancelled
 	}
 	return nil
 }
@@ -38,15 +45,21 @@ func confirmChange(yes bool, question string) error {
 // confirmTyped asks the person to type name (a database's or a server's)
 // before a disruptive change.
 func confirmTyped(yes bool, name string) error {
+	return confirmTypedAs(yes, name, fmt.Sprintf("Type %s to go ahead: ", name))
+}
+
+// confirmTypedAs is confirmTyped with its own question, e.g. "Type the
+// database name (app) to rewind it: ".
+func confirmTypedAs(yes bool, name, prompt string) error {
 	if yes {
 		return nil
 	}
 	if !stdinIsTerminal() {
-		return errors.New("not changed: pass --yes to confirm (no terminal to ask on)")
+		return errNoTerminal
 	}
-	fmt.Fprintf(os.Stderr, "Type %s to go ahead: ", name)
-	if readLine() != name {
-		return errors.New("cancelled; nothing was changed")
+	fmt.Fprint(os.Stderr, prompt)
+	if strings.TrimSpace(readLine()) != name {
+		return errCancelled
 	}
 	return nil
 }
@@ -92,7 +105,7 @@ func onOff(flagName, v string) (bool, error) {
 	case "off", "false", "no":
 		return false, nil
 	}
-	return false, fmt.Errorf("--%s takes on or off, not %q", flagName, v)
+	return false, usageErrorf("--%s takes on or off, not %q", flagName, v)
 }
 
 // finishTasks waits for the tasks a change queued (a Mark first, then the
@@ -132,7 +145,7 @@ func waitTasks(ctx context.Context, c *client.Client, tasks []protocol.TaskView,
 	var done []protocol.TaskView
 	for _, t := range tasks {
 		status := ""
-		v, err := c.WaitTask(ctx, t.ID, func(v protocol.TaskView) {
+		v, err := waitTask(ctx, c, t.ID, func(v protocol.TaskView) {
 			if quiet || v.Status == status {
 				return
 			}

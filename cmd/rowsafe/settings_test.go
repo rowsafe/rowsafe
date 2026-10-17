@@ -153,6 +153,7 @@ func TestSettingsSet(t *testing.T) {
 		Applied: []protocol.AppliedSetting{{Name: "work_mem"}, {Name: "shared_buffers", Restart: true}}}}
 	settingsCLI(t, f)
 	ctx := t.Context()
+	onTerminal(t)
 	stdin = strings.NewReader("y\n")
 	out, err := captureStdout(t, func() error {
 		return dispatch(ctx, []string{"settings", "set", "shop", "work_mem=64MB", "Shared_Buffers=2GB", "log_line_prefix=default"})
@@ -194,6 +195,7 @@ func TestTune(t *testing.T) {
 	f := &fakeSettingsAPI{ov: settingsOverview(), result: protocol.SettingsResult{Summary: "Changed 2 settings."}}
 	settingsCLI(t, f)
 	ctx := t.Context()
+	onTerminal(t)
 	stdin = strings.NewReader("y\n")
 	out, err := captureStdout(t, func() error { return dispatch(ctx, []string{"tune", "shop", "--workload", "web", "--disk", "ssd"}) })
 	if err != nil {
@@ -231,6 +233,7 @@ func TestSettingsUndo(t *testing.T) {
 	f := &fakeSettingsAPI{ov: settingsOverview(), result: protocol.SettingsResult{Summary: "Set work_mem to 64 MB."}}
 	settingsCLI(t, f)
 	ctx := t.Context()
+	onTerminal(t)
 	stdin = strings.NewReader("y\n")
 	out, err := captureStdout(t, func() error { return dispatch(ctx, []string{"settings", "undo", "shop"}) })
 	if err != nil || !strings.Contains(out, "work_mem back to 64MB") || len(f.reverted) != 1 || f.reverted[0] != "stc_9" {

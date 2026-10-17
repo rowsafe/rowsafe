@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"strconv"
@@ -22,7 +21,7 @@ func printJSON(v any) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println(string(out))
+	fmt.Fprintln(jsonWriter(), string(out))
 	return nil
 }
 
@@ -44,7 +43,7 @@ func pulseCmd(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if len(pos) > 1 {
-		return errors.New("expected at most one database name")
+		return newUsageError("expected at most one database name")
 	}
 	if len(pos) == 0 {
 		return fleetPulse(ctx, c, *asJSON)
@@ -408,7 +407,7 @@ func reportCmd(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if *on && *off {
-		return errors.New("--on and --off contradict each other")
+		return newUsageError("--on and --off contradict each other")
 	}
 	toSet := false
 	fs.Visit(func(f *flag.Flag) { toSet = toSet || f.Name == "to" })
@@ -436,6 +435,9 @@ func reportCmd(ctx context.Context, c *client.Client, args []string) error {
 		if err != nil {
 			return err
 		}
+		if jsonMode {
+			return printJSON(p)
+		}
 		if *html {
 			fmt.Print(p.HTML)
 			return nil
@@ -448,6 +450,12 @@ func reportCmd(ctx context.Context, c *client.Client, args []string) error {
 		if err != nil {
 			return err
 		}
+		if jsonMode {
+			if err := printJSON(res); err != nil || res.OK {
+				return err
+			}
+			return exitError(1)
+		}
 		if !res.OK {
 			fmt.Println("Sending the weekly Pulse failed:", res.Error)
 			return exitError(1)
@@ -458,6 +466,9 @@ func reportCmd(ctx context.Context, c *client.Client, args []string) error {
 	st, err := c.OrgSettings(ctx)
 	if err != nil {
 		return err
+	}
+	if jsonMode {
+		return printJSON(st)
 	}
 	state := "off"
 	if st.WeeklyReport {

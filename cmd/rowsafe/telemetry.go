@@ -29,6 +29,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/term"
+
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
@@ -92,6 +94,8 @@ func exitCode(err error) int {
 		return 0
 	case errors.As(err, &exit):
 		return min(max(int(exit), 0), 255)
+	case errors.As(err, new(usageError)):
+		return 2
 	}
 	return 1
 }
@@ -108,12 +112,7 @@ func telemetryVersion() string {
 // telemetryTerminal: stdin is a terminal (a character device other than
 // /dev/null, which agents and scripts often give).
 func telemetryTerminal() bool {
-	fi, err := os.Stdin.Stat()
-	if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
-		return false
-	}
-	null, err := os.Stat(os.DevNull)
-	return err != nil || !os.SameFile(fi, null)
+	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
 // telemetryOffBy names the environment variable that turns usage counts
@@ -405,8 +404,9 @@ func parseTelemetryFlags(name string, args []string, define func(*flag.FlagSet))
 	if define != nil {
 		define(fs)
 	}
+	acceptJSON(fs)
 	if err := fs.Parse(args); err != nil {
-		return nil, err
+		return nil, flagError(err)
 	}
 	if fs.NArg() > 0 {
 		return nil, fmt.Errorf("rowsafe %s takes no arguments", name)

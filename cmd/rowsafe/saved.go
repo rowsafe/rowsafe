@@ -361,7 +361,7 @@ func savedAdd(ctx context.Context, args []string) error {
 		return err
 	}
 	if len(pos) > 2 {
-		return errors.New("usage: rowsafe add NAME [postgres://USER@HOST:5432/DB]")
+		return newUsageError("usage: rowsafe add NAME [postgres://USER@HOST:5432/DB]")
 	}
 	var name, conn, source string
 	if len(pos) > 0 {
@@ -402,7 +402,7 @@ func savedAdd(ctx context.Context, args []string) error {
 	}
 	if name == "" {
 		if !offered {
-			return errors.New("usage: rowsafe add NAME postgres://USER@HOST:5432/DB\n" +
+			return newUsageError("usage: rowsafe add NAME postgres://USER@HOST:5432/DB\n" +
 				"(or pipe the connection string in, or --from-env VAR, so the password stays out of your shell history)")
 		}
 		name = directoryName()
@@ -416,7 +416,7 @@ func savedAdd(ctx context.Context, args []string) error {
 		}
 	}
 	if !local.IsConnString(conn) {
-		return errors.New("expected a PostgreSQL connection string: postgres://USER:PASSWORD@HOST:5432/DB")
+		return newUsageError("expected a PostgreSQL connection string: postgres://USER:PASSWORD@HOST:5432/DB")
 	}
 	d, err := local.Open(conn)
 	if err != nil {
@@ -488,7 +488,7 @@ func savedUse(args []string) error {
 		return err
 	}
 	if len(pos) != 1 {
-		return errors.New("usage: rowsafe use NAME (rowsafe databases lists the saved ones)")
+		return newUsageError("usage: rowsafe use NAME (rowsafe databases lists the saved ones)")
 	}
 	name := pos[0]
 	if local.IsConnString(name) {
@@ -538,7 +538,7 @@ func savedList(args []string) error {
 		return err
 	}
 	if len(pos) > 0 {
-		return fmt.Errorf("unexpected argument %q", pos[0])
+		return usageErrorf("unexpected argument %q", pos[0])
 	}
 	dbs, err := loadSaved()
 	if err != nil {
@@ -587,7 +587,7 @@ func savedForget(args []string) error {
 		return err
 	}
 	if len(pos) != 1 {
-		return errors.New("usage: rowsafe forget NAME")
+		return newUsageError("usage: rowsafe forget NAME")
 	}
 	name := pos[0]
 	dbs, err := loadSaved()

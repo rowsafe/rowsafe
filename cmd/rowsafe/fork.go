@@ -88,7 +88,7 @@ func forkCmd(ctx context.Context, c *client.Client, args []string) error {
 			if !stdinIsTerminal() {
 				return errors.New("pass --fingerprint with the fingerprint `rowsafe-agent key` prints on the target server")
 			}
-			fmt.Printf("\nType the fingerprint %s prints to go ahead: ", target.Hostname)
+			fmt.Fprintf(os.Stderr, "\nType the fingerprint %s prints to go ahead: ", target.Hostname)
 			*fingerprint = strings.TrimSpace(readLine())
 		}
 		req.Fingerprint = *fingerprint
@@ -120,7 +120,7 @@ func forkCmd(ctx context.Context, c *client.Client, args []string) error {
 }
 
 func printForkJSON(v any) error {
-	enc := json.NewEncoder(os.Stdout)
+	enc := json.NewEncoder(jsonWriter())
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
 }

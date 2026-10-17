@@ -21,6 +21,7 @@ func TestMain(m *testing.M) {
 		telemetrySend(os.Stdin)
 		os.Exit(0)
 	}
+	stdinIsTerminal = func() bool { return false } // agents_test.go
 	os.Exit(m.Run())
 }
 

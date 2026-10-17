@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"strconv"
@@ -33,10 +32,10 @@ func recommendationsCmd(ctx context.Context, c *client.Client, args []string) er
 		return err
 	}
 	if len(pos) > 1 {
-		return errors.New("expected at most one database name")
+		return newUsageError("expected at most one database name")
 	}
 	if *group != "" && !isRecGroup(*group) {
-		return fmt.Errorf("--group must be schema, queries, capacity or indexes")
+		return usageErrorf("--group must be schema, queries, capacity or indexes")
 	}
 	if len(pos) == 0 && *dismiss == "" && *restore == "" {
 		return fleetRecommendations(ctx, c, *asJSON)
@@ -53,6 +52,9 @@ func recommendationsCmd(ctx context.Context, c *client.Client, args []string) er
 		d, err := c.DismissRecommendation(ctx, name, *dismiss, protocol.DismissRecommendationRequest{Reason: *reason, Note: *note})
 		if err != nil {
 			return err
+		}
+		if jsonMode {
+			return printJSON(d)
 		}
 		fmt.Printf("Dismissed %s (%s). Bring it back with: rowsafe recommendations %s --restore %s\n",
 			*dismiss, orText(protocol.DismissReasons[d.Reason], d.Reason), name, *dismiss)

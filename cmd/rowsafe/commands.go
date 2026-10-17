@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,10 +18,11 @@ import (
 
 // parse handles "NAME --flags" and "--flags NAME" orders.
 func parse(fs *flag.FlagSet, args []string, wantName bool) (string, error) {
+	acceptJSON(fs)
 	var positional []string
 	for len(args) > 0 {
 		if err := fs.Parse(args); err != nil {
-			return "", err
+			return "", flagError(err)
 		}
 		args = fs.Args()
 		if len(args) > 0 {
@@ -32,12 +32,12 @@ func parse(fs *flag.FlagSet, args []string, wantName bool) (string, error) {
 	}
 	if !wantName {
 		if len(positional) > 0 {
-			return "", fmt.Errorf("unexpected argument %q", positional[0])
+			return "", usageErrorf("unexpected argument %q", positional[0])
 		}
 		return "", nil
 	}
 	if len(positional) != 1 {
-		return "", errors.New("expected exactly one database name")
+		return "", newUsageError("expected exactly one database name")
 	}
 	return positional[0], nil
 }
@@ -49,6 +49,9 @@ func hostsList(ctx context.Context, c *client.Client, args []string) error {
 	hosts, err := c.Hosts(ctx)
 	if err != nil {
 		return err
+	}
+	if jsonMode {
+		return printJSON(orEmpty(hosts))
 	}
 	if len(hosts) == 0 {
 		fmt.Println("No servers yet. Next: rowsafe hosts add root@SERVER   (installs Rowsafe there over SSH)")
@@ -78,10 +81,11 @@ func agentText(h protocol.Host) string {
 
 // parseN is parse for commands with a fixed number of positional arguments.
 func parseN(fs *flag.FlagSet, args []string, names ...string) ([]string, error) {
+	acceptJSON(fs)
 	var positional []string
 	for len(args) > 0 {
 		if err := fs.Parse(args); err != nil {
-			return nil, err
+			return nil, flagError(err)
 		}
 		args = fs.Args()
 		if len(args) > 0 {
@@ -90,7 +94,7 @@ func parseN(fs *flag.FlagSet, args []string, names ...string) ([]string, error) 
 		}
 	}
 	if len(positional) != len(names) {
-		return nil, fmt.Errorf("expected %s", strings.Join(names, " "))
+		return nil, usageErrorf("expected %s", strings.Join(names, " "))
 	}
 	return positional, nil
 }
@@ -112,6 +116,9 @@ func hostsPin(ctx context.Context, c *client.Client, args []string) error {
 	if err != nil {
 		return err
 	}
+	if jsonMode {
+		return printJSON(h)
+	}
 	printHostPolicy(h)
 	return nil
 }
@@ -126,6 +133,9 @@ func hostsUnpin(ctx context.Context, c *client.Client, args []string) error {
 	if err != nil {
 		return err
 	}
+	if jsonMode {
+		return printJSON(h)
+	}
 	printHostPolicy(h)
 	return nil
 }
@@ -138,6 +148,9 @@ func hostsChannel(ctx context.Context, c *client.Client, args []string) error {
 	h, err := c.UpdateHost(ctx, pos[0], protocol.UpdateHostRequest{UpdateChannel: &pos[1]})
 	if err != nil {
 		return err
+	}
+	if jsonMode {
+		return printJSON(h)
 	}
 	printHostPolicy(h)
 	return nil
@@ -219,6 +232,9 @@ func orgShow(ctx context.Context, c *client.Client, args []string) error {
 	if err != nil {
 		return err
 	}
+	if jsonMode {
+		return printJSON(o)
+	}
 	fmt.Printf("Organization: %s (%s)\n", o.Name, o.ID)
 	fmt.Printf("Plan:         %s", o.Plan)
 	if o.PlanPeriodEnd != nil {
@@ -237,6 +253,9 @@ func apiKeysList(ctx context.Context, c *client.Client, args []string) error {
 	keys, err := c.APIKeys(ctx)
 	if err != nil {
 		return err
+	}
+	if jsonMode {
+		return printJSON(orEmpty(keys))
 	}
 	t := newTable("ID", "NAME", "ACCESS", "CREATED", "LAST USED")
 	for _, k := range keys {
@@ -261,6 +280,9 @@ func apiKeysCreate(ctx context.Context, c *client.Client, args []string) error {
 	if err != nil {
 		return err
 	}
+	if jsonMode {
+		return printJSON(k)
+	}
 	fmt.Printf("API key %q (%s):\n  %s\n\nThe key is shown once; store it now.\n", k.Name, k.ID, k.Key)
 	return nil
 }
@@ -272,6 +294,9 @@ func apiKeysRevoke(ctx context.Context, c *client.Client, args []string) error {
 	}
 	if err := c.RevokeAPIKey(ctx, pos[0]); err != nil {
 		return err
+	}
+	if jsonMode {
+		return printJSON(map[string]string{"revoked": pos[0]})
 	}
 	fmt.Println("Revoked", pos[0])
 	return nil
@@ -286,6 +311,12 @@ func hostsEnrollToken(ctx context.Context, c *client.Client, cfg config, args []
 	tok, err := c.CreateEnrollmentToken(ctx, *ttl)
 	if err != nil {
 		return err
+	}
+	if jsonMode {
+		return printJSON(struct {
+			protocol.EnrollmentToken
+			InstallCommand string `json:"install_command"`
+		}{tok, installCommand(cfg.URL, tok.Token)})
 	}
 	fmt.Printf("Enrollment token (single use, expires %s):\n  %s\n\n", tok.ExpiresAt.Local().Format(time.RFC1123), tok.Token)
 	fmt.Printf("On the database server:\n  %s\n\n", installCommand(cfg.URL, tok.Token))
@@ -312,6 +343,9 @@ func listCmd(ctx context.Context, c *client.Client, args []string) error {
 	dbs, err := c.Databases(ctx)
 	if err != nil {
 		return err
+	}
+	if jsonMode {
+		return printJSON(orEmpty(dbs))
 	}
 	if len(dbs) == 0 {
 		fmt.Println("No databases yet. Next: rowsafe hosts add root@SERVER   (installs Rowsafe there over SSH)")
@@ -342,6 +376,9 @@ func showCmd(ctx context.Context, c *client.Client, args []string) error {
 	d, err := c.Database(ctx, name)
 	if err != nil {
 		return err
+	}
+	if jsonMode {
+		return printJSON(d)
 	}
 	// Status and what needs doing first, then backups, then the setup.
 	fmt.Printf("Name:       %s (%s)\n", d.Name, d.ID)
@@ -412,11 +449,11 @@ func adoptCmd(ctx context.Context, c *client.Client, args []string) error {
 		// A SQLite database is a file: its path, no port, the control
 		// plane's daily full backups.
 		if !protocol.SQLitePath(*path) {
-			return errors.New("--path is required for SQLite: the database file's absolute path, e.g. /srv/app/db/production.sqlite3")
+			return newUsageError("--path is required for SQLite: the database file's absolute path, e.g. /srv/app/db/production.sqlite3")
 		}
 		*port, *socketDir = 0, *path
 	} else if *path != "" {
-		return errors.New("--path is for SQLite databases (--engine sqlite)")
+		return newUsageError("--path is for SQLite databases (--engine sqlite)")
 	}
 	resp, err := c.CreateDatabase(ctx, protocol.CreateDatabaseRequest{
 		HostID: *host, Name: name, Port: *port, SocketDir: *socketDir, RetentionFull: *retention, Engine: *engine,
@@ -510,8 +547,8 @@ func applyCmd(ctx context.Context, c *client.Client, args []string) error {
 	if !*yes {
 		fmt.Printf("This changes PostgreSQL settings on %s (%s) with ALTER SYSTEM and reloads it.\n", d.Hostname, d.Name)
 		fmt.Println("It never restarts PostgreSQL. Review the plan first with `rowsafe plan`.")
-		if !confirm("Apply?") {
-			return errors.New("cancelled")
+		if err := confirmChange(false, "Apply?"); err != nil {
+			return err
 		}
 	}
 	t, err := c.CreateTask(ctx, name, protocol.TaskAdopt, protocol.AdoptParams{Apply: true, Force: *force})
@@ -567,8 +604,8 @@ func restartCmd(ctx context.Context, c *client.Client, args []string) error {
 	engine := protocol.EngineDisplayName(d.Engine)
 	fmt.Printf("Database %s on %s (%s)\n", d.Name, d.Hostname, statusText(d.Status))
 	fmt.Println(engine + " restarts: it takes a few seconds; open connections are dropped and apps reconnect.")
-	if !*yes && !confirm("Restart "+engine+" on "+d.Hostname+" now?") {
-		return errors.New("cancelled; nothing was restarted")
+	if err := confirmChange(*yes, "Restart "+engine+" on "+d.Hostname+" now?"); err != nil {
+		return err
 	}
 	t, err := c.CreateTask(ctx, d.Name, protocol.TaskRestart, map[string]string{"confirm": d.Name})
 	var ae *client.APIError
@@ -655,6 +692,9 @@ func backupCmd(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if *noWait {
+		if jsonMode {
+			return printJSON(t)
+		}
 		fmt.Println("Queued", t.ID)
 		return nil
 	}
@@ -669,6 +709,9 @@ func backupsCmd(ctx context.Context, c *client.Client, args []string) error {
 	backups, err := c.Backups(ctx, name, 50)
 	if err != nil {
 		return err
+	}
+	if jsonMode {
+		return printJSON(orEmpty(backups))
 	}
 	if len(backups) == 0 {
 		fmt.Printf("No backups of %s yet. Back up now: rowsafe backup %s\n", name, name)
@@ -695,6 +738,9 @@ func proofCmd(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if *noWait {
+		if jsonMode {
+			return printJSON(t)
+		}
 		fmt.Printf("Queued the restore test of %s (task %s). See the result with `rowsafe proofs %s`.\n", name, t.ID, name)
 		return nil
 	}
@@ -709,6 +755,9 @@ func proofsCmd(ctx context.Context, c *client.Client, args []string) error {
 	drills, err := c.Drills(ctx, name, 20)
 	if err != nil {
 		return err
+	}
+	if jsonMode {
+		return printJSON(orEmpty(drills))
 	}
 	if len(drills) == 0 {
 		fmt.Printf("No restore tests of %s yet. Run one now: rowsafe proof %s\n", name, name)
@@ -732,17 +781,18 @@ func tasksList(ctx context.Context, c *client.Client, args []string) error {
 	status := fs.String("status", "", "only tasks in this status (queued, running, succeeded, failed, lost, cancelled)")
 	typ := fs.String("type", "", "only tasks of this type (inspect, adopt, check, backup, drill (the restore test), restore_point, restart)")
 	limit := fs.Int("limit", 30, "how many tasks to show")
+	acceptJSON(fs)
 	var positional []string
 	for len(args) > 0 {
 		if err := fs.Parse(args); err != nil {
-			return err
+			return flagError(err)
 		}
 		if args = fs.Args(); len(args) > 0 {
 			positional, args = append(positional, args[0]), args[1:]
 		}
 	}
 	if len(positional) > 1 {
-		return errors.New("expected at most one database name")
+		return newUsageError("expected at most one database name")
 	}
 	q := client.TaskQuery{Status: *status, Type: *typ, Limit: *limit}
 	if len(positional) == 1 {
@@ -751,6 +801,9 @@ func tasksList(ctx context.Context, c *client.Client, args []string) error {
 	tasks, err := c.AllTasks(ctx, q)
 	if err != nil {
 		return err
+	}
+	if jsonMode {
+		return printJSON(orEmpty(tasks))
 	}
 	t := newTable("ID", "DATABASE", "TYPE", "STATUS", "CREATED", "DURATION", "ERROR")
 	for _, task := range tasks {
@@ -778,6 +831,9 @@ func auditList(ctx context.Context, c *client.Client, args []string) error {
 	events, err := c.AuditEvents(ctx, *limit)
 	if err != nil {
 		return err
+	}
+	if jsonMode {
+		return printJSON(orEmpty(events))
 	}
 	t := newTable("WHEN", "ACTOR", "ACTION", "TARGET", "DETAIL")
 	for _, e := range events {
@@ -817,6 +873,9 @@ func setCmd(ctx context.Context, c *client.Client, args []string) error {
 	if err != nil {
 		return err
 	}
+	if jsonMode {
+		return printJSON(d)
+	}
 	diffText := d.ScheduleDiff
 	if diffText == "" {
 		diffText = "off"
@@ -844,8 +903,8 @@ func removeCmd(ctx context.Context, c *client.Client, args []string) error {
 			fmt.Println("PostgreSQL keeps archiving WAL to the repository. To turn that off, follow the Rollback")
 			fmt.Println("section of https://rowsafe.sh/docs/guides/adopt#rollback")
 		}
-		if !confirm("Remove " + d.Name + "?") {
-			return errors.New("cancelled")
+		if err := confirmChange(false, "Remove "+d.Name+"?"); err != nil {
+			return err
 		}
 	}
 	if err := c.DeleteDatabase(ctx, name, *keep); err != nil {
@@ -869,8 +928,8 @@ func hostsRemove(ctx context.Context, c *client.Client, args []string) error {
 	if !*yes {
 		fmt.Printf("This revokes the agent on %s; it stops working until the host is enrolled again.\n", pos[0])
 		fmt.Println("WAL archiving on the host is not affected. Uninstall the agent afterwards (https://rowsafe.sh/docs/guides/agent-updates#uninstall).")
-		if !confirm("Remove host " + pos[0] + "?") {
-			return errors.New("cancelled")
+		if err := confirmChange(false, "Remove host "+pos[0]+"?"); err != nil {
+			return err
 		}
 	}
 	if err := c.DeleteHost(ctx, pos[0]); err != nil {
@@ -890,13 +949,16 @@ func taskShow(ctx context.Context, c *client.Client, args []string) error {
 	if err != nil {
 		return err
 	}
+	if jsonMode {
+		return printJSON(t)
+	}
 	printTask(t)
 	return nil
 }
 
 func waitAndReport(ctx context.Context, c *client.Client, taskID, dbName string) error {
 	last, shownID := "", false
-	t, err := c.WaitTask(ctx, taskID, func(t protocol.TaskView) {
+	t, err := waitTask(ctx, c, taskID, func(t protocol.TaskView) {
 		if t.Status != last {
 			last = t.Status
 			if t.Status == protocol.StatusQueued {
@@ -918,6 +980,16 @@ func waitAndReport(ctx context.Context, c *client.Client, taskID, dbName string)
 	if !shownID {
 		// Done before any progress line: scripts still find the task's ID.
 		fmt.Fprintf(os.Stderr, "(task %s)\n", t.ID)
+	}
+	if jsonMode {
+		// The task as it ended; a task that didn't succeed exits 1.
+		if err := printJSON(t); err != nil {
+			return err
+		}
+		if t.Status != protocol.StatusSucceeded {
+			return exitError(1)
+		}
+		return nil
 	}
 	// The task's ID went to stderr while waiting: lead with what it did.
 	printed := printTaskResult(t)
@@ -1007,16 +1079,16 @@ func taskName(typ string) string {
 	return typ
 }
 
-// The question goes to stderr, so --json output on stdout stays JSON. With
-// no terminal and no answer piped in, it says how to confirm (--yes)
-// instead of only "cancelled".
+// confirm asks a yes/no question on stderr, so --json output on stdout
+// stays JSON. Without a terminal it never waits for an answer: it says how
+// to confirm (--yes) and answers no. New code uses confirmChange.
 func confirm(prompt string) bool {
-	fmt.Fprintf(os.Stderr, "%s [y/N] ", prompt)
-	line, _ := bufio.NewReader(stdin).ReadString('\n')
-	line = strings.TrimSpace(line)
-	if line == "" && !stdinIsTerminal() {
-		fmt.Fprintln(os.Stderr, "\nNo terminal to ask on: pass --yes to confirm.")
+	if !stdinIsTerminal() {
+		fmt.Fprintln(os.Stderr, "No terminal to ask on: pass --yes to confirm.")
+		return false
 	}
+	fmt.Fprintf(os.Stderr, "%s [y/N] ", prompt)
+	line := strings.TrimSpace(readLine())
 	return strings.EqualFold(line, "y") || strings.EqualFold(line, "yes")
 }
 
@@ -1028,6 +1100,9 @@ func marksCmd(ctx context.Context, c *client.Client, args []string) error {
 	points, err := c.RestorePoints(ctx, name)
 	if err != nil {
 		return err
+	}
+	if jsonMode {
+		return printJSON(orEmpty(points))
 	}
 	if len(points) == 0 {
 		fmt.Printf("No Marks on %s yet. Make one: rowsafe mark %s LABEL\n", name, name)

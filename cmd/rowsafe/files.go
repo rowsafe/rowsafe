@@ -50,7 +50,7 @@ func filesShow(ctx context.Context, c *client.Client, args []string) error {
 		return apiErr(err)
 	}
 	if *asJSON {
-		enc := json.NewEncoder(os.Stdout)
+		enc := json.NewEncoder(jsonWriter())
 		enc.SetIndent("", "  ")
 		return enc.Encode(info)
 	}
@@ -125,7 +125,7 @@ func filesAddCmd(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if len(paths) != 1 {
-		return errors.New("which folder? rowsafe files add [NAME] /srv/app/storage (the path on the database server)")
+		return newUsageError("which folder? rowsafe files add [NAME] /srv/app/storage (the path on the database server)")
 	}
 	var ex []string
 	for _, x := range strings.Split(*exclude, ",") {
@@ -136,6 +136,9 @@ func filesAddCmd(ctx context.Context, c *client.Client, args []string) error {
 	f, err := c.AddFilesFolder(ctx, name, protocol.AddFilesFolderRequest{Path: paths[0], Excludes: ex})
 	if err != nil {
 		return apiErr(err)
+	}
+	if jsonMode {
+		return printJSON(f)
 	}
 	fmt.Printf("%s: protecting %s. The first snapshot starts within a minute; follow it with rowsafe files %s\n", name, f.Path, name)
 	return nil
@@ -165,7 +168,7 @@ func filesRemoveCmd(ctx context.Context, c *client.Client, args []string) error 
 		return err
 	}
 	if len(paths) != 1 {
-		return errors.New("which folder? rowsafe files remove [NAME] PATH")
+		return newUsageError("which folder? rowsafe files remove [NAME] PATH")
 	}
 	info, err := c.FilesInfo(ctx, name)
 	if err != nil {
@@ -175,8 +178,8 @@ func filesRemoveCmd(ctx context.Context, c *client.Client, args []string) error 
 	if err != nil {
 		return err
 	}
-	if !*yes && !confirm(fmt.Sprintf("Stop backing up %s? Its snapshots stay in your bucket until they age out.", f.Path)) {
-		return errors.New("cancelled")
+	if err := confirmChange(*yes, fmt.Sprintf("Stop backing up %s? Its snapshots stay in your bucket until they age out.", f.Path)); err != nil {
+		return err
 	}
 	if err := c.RemoveFilesFolder(ctx, name, f.ID); err != nil {
 		return apiErr(err)
@@ -295,11 +298,8 @@ func filesRestoreCmd(ctx context.Context, c *client.Client, args []string) error
 		fmt.Println("Only missing files are put back; nothing that exists now is overwritten.")
 	}
 	if !*preview {
-		if !*yes {
-			fmt.Printf("Type the database name (%s) to go ahead: ", name)
-			if readLine() != name {
-				return errors.New("cancelled; nothing was changed")
-			}
+		if err := confirmTypedAs(*yes, name, fmt.Sprintf("Type the database name (%s) to go ahead: ", name)); err != nil {
+			return err
 		}
 		req.Confirm = name
 	}
@@ -356,11 +356,8 @@ func filesUndoCmd(ctx context.Context, c *client.Client, args []string) error {
 	}
 	k := info.Kept[len(info.Kept)-1]
 	fmt.Printf("%s: put %s back as it was just before the restore of %s.\n", name, k.Path, describeTime(k.CreatedAt))
-	if !*yes {
-		fmt.Printf("Type the database name (%s) to go ahead: ", name)
-		if readLine() != name {
-			return errors.New("cancelled; nothing was changed")
-		}
+	if err := confirmTypedAs(*yes, name, fmt.Sprintf("Type the database name (%s) to go ahead: ", name)); err != nil {
+		return err
 	}
 	resp, err := c.FilesUndo(ctx, name, k.RestoreID, name)
 	if err != nil {
@@ -402,7 +399,7 @@ func waitFilesTasks(ctx context.Context, c *client.Client, tasks []protocol.Task
 	var last protocol.TaskView
 	for _, t := range tasks {
 		status := ""
-		done, err := c.WaitTask(ctx, t.ID, func(v protocol.TaskView) {
+		done, err := waitTask(ctx, c, t.ID, func(v protocol.TaskView) {
 			if v.Status == status {
 				return
 			}
