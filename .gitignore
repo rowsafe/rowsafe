@@ -4,3 +4,5 @@
 .env
 .env.*
 .DS_Store
+/integrations/npm/SHA256SUMS
+/integrations/npm/*.tgz

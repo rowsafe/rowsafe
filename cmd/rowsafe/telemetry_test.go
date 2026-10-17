@@ -107,7 +107,7 @@ func TestTelemetryOnKeepsOneID(t *testing.T) {
 		t.Fatalf("install ID %q", id)
 	}
 	p, _ := telemetryPath()
-	if fi, err := os.Stat(p); err != nil || fi.Mode().Perm() != 0o600 {
+	if fi, err := os.Stat(p); err != nil || !hasPerm(fi, 0o600) {
 		t.Fatalf("telemetry.json: %v %v", fi, err)
 	}
 	if err := telemetryCmd([]string{"on"}); err != nil {

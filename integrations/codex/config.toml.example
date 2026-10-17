@@ -34,3 +34,12 @@ tool_timeout_sec = 180
 # # Forward the Rowsafe ones if you use them instead of `rowsafe login`.
 # env_vars = ["ROWSAFE_API_KEY", "ROWSAFE_URL"]
 # tool_timeout_sec = 180
+
+# D. Without an account: the CLI's local server on a PostgreSQL database.
+#    Health, insights, top queries, live activity and settings, read-only;
+#    add "--allow-writes" for apply_fix. Nothing is sent to Rowsafe. Same as:
+#    codex mcp add rowsafe-db -- rowsafe mcp "postgres://user@host:5432/app"
+# [mcp_servers.rowsafe-db]
+# command = "rowsafe"
+# args = ["mcp", "postgres://user@host:5432/app"]
+# # A password can stay in ~/.pgpass instead of the connection string.

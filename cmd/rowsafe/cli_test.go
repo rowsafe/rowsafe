@@ -602,7 +602,7 @@ func TestBrowserLogin(t *testing.T) {
 	if err != nil || saved.URL != ts.URL || saved.APIKey != "rsk_new" || saved.KeyID != "key_new" || saved.Org == nil || saved.Org.Name != "Acme" {
 		t.Fatalf("saved config %+v, %v", saved, err)
 	}
-	if st, _ := os.Stat(p); st.Mode().Perm() != 0o600 {
+	if st, _ := os.Stat(p); !hasPerm(st, 0o600) {
 		t.Fatalf("config mode %v", st.Mode().Perm())
 	}
 	// The saved URL is used from now on, without --url or ROWSAFE_URL.

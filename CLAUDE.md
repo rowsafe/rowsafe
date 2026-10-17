@@ -25,6 +25,14 @@ proprietary (api.rowsafe.sh, app.rowsafe.sh).
   The CLI covers what the dashboard does with an API key (`security`, `security-updates`, `reboot`,
   `alerts rules set`, `logs`, `log-destinations`, `cloud maintenance`, ...): new changes use
   `confirm.go` (`--yes`; refused without a terminal) and offer `--json`.
+  The CLI also builds for Windows (amd64, arm64; `make dist`, CI job "CLI on Windows"): Unix-only
+  code its packages need has a `_windows.go` counterpart (`collect/disk_windows.go`;
+  `local/agent_windows.go`, since `internal/agent`, the agent, stays Linux/macOS-only).
+  `rowsafe init` offers a Rowsafe section in AGENTS.md / CLAUDE.md (`agentsmd.go`; append-only).
+- `integrations/npm`: the `rowsafe` npm package (`npx rowsafe`): no install script; on first run it
+  downloads the release binary, checks it against the `SHA256SUMS` the release workflow puts in
+  the package, and caches it. Published by release.yml's `npm` job when `NPM_TOKEN` is set.
+  `make test-npm` (fake release on 127.0.0.1).
 - `mcp/`: the MCP server (`rowsafe mcp`, also served remotely by the control plane). Read-only
   unless `--allow-restore-points` / `--allow-writes` (remote: OAuth scopes `rowsafe:marks` /
   `rowsafe:act`). Changes to production go through `request_change` (and the direct

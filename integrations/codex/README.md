@@ -6,6 +6,7 @@ This directory is a Codex plugin with three parts:
 
 - **MCP server** `https://api.rowsafe.sh/mcp` (`.mcp.json`): sign in with Rowsafe once; you choose the organization and what Codex may do. Always: `safety_check`, `list_restore_points` and read-only tools such as `fleet_health`, `database_health`, `list_alerts`, `live_activity`, Rowsafe Cloud's `cloud_catalog` and `get_cloud_server`, and `describe_change`. If you allow Marks: `create_restore_point`. If you allow it to act: backups, restore tests, checks, migration previews, safe copies, `request_change` for a change to production or a new Rowsafe Cloud server, the direct `create_cloud_server`, `cloud_firewall` and `apply_fix`, and `create_app_database` for the app's own database and login. Codex makes these changes with your rights (see [Safety model](#safety-model)).
 - **Skill** `rowsafe-safety` (`skills/`): the workflow. Check, set a Mark, tell you its name, proceed; if something goes wrong, stop and hand recovery to you.
+- **Skill** `rowsafe-health` (`skills/`): is the database healthy, why is it slow, what's stuck, how to tune it, with the `rowsafe` CLI (`pulse`, `insights`, `top`, `activity`, `settings`, `tune`); fixes only after you agree. Works without a Rowsafe account, on a PostgreSQL connection string.
 - **Skill** `rowsafe-new-database` (`skills/`): when the app needs a database, Codex picks the cheapest fitting Rowsafe Cloud size, tells you the price and gets your OK, creates the server (with a checkout link if pay as you go isn't on yet), waits until it's ready, gets the app's own database and login (made in the dashboard, where your browser makes its password, or `create_app_database` from a local `rowsafe mcp`), and puts the connection string in `.env`. The password never passes through Rowsafe.
 - **Hook** `rowsafe guard` (`hooks/hooks.json`): a `PreToolUse` hook on shell commands. With the `rowsafe` CLI installed, it sets a Mark right before commands like `prisma migrate deploy`, `rails db:migrate`, `alembic upgrade`, `psql -c "DROP TABLE ..."`, `mysql -e "TRUNCATE ..."`, `mongosh --eval "db.orders.drop()"`, `clickhouse-client -q "ALTER TABLE ... DELETE ..."` or `sqlite3 app.db "DROP TABLE ..."`, whether or not the model remembered to. Without the CLI it does nothing.
 
@@ -13,9 +14,9 @@ It works with PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey, SQ
 
 ## Requirements
 
-- A Rowsafe account with the database connected.
-- The project's database named once, so the skill and the hook know which one to check: `.rowsafe.json` at the project root (`{"database": "app"}`, or `rowsafe init app` with the CLI), or `ROWSAFE_DATABASE`. Without it, Codex asks you which database.
-- For the hook only: the `rowsafe` CLI on your `PATH` (`curl -fsSL https://rowsafe.sh/cli | sh`, macOS and Linux), logged in (`rowsafe login`).
+- For restore points: a Rowsafe account with the database connected. Health checks (`rowsafe-health`) need only the CLI, on a PostgreSQL connection string; see [Without an account](#without-an-account).
+- The project's database named once, so the skill and the hook know which one to check: `.rowsafe.json` at the project root (`{"database": "app"}`, or `rowsafe init app` with the CLI, which also offers to add a short Rowsafe section to `AGENTS.md`), or `ROWSAFE_DATABASE`. Without it, Codex asks you which database.
+- For the hook only: the `rowsafe` CLI on your `PATH` (`curl -fsSL https://rowsafe.sh/cli | sh` on macOS and Linux; on Windows, `rowsafe-windows-amd64.exe` from the [latest release](https://github.com/rowsafe/rowsafe/releases/latest)), logged in (`rowsafe login`).
 
 ## Install
 
@@ -64,9 +65,19 @@ Add the workflow with the [AGENTS.md snippet](#agentsmd-snippet) or the skill: c
 
 For the hook without the plugin, put [`hooks/hooks.json`](hooks/hooks.json) in `~/.codex/hooks.json` or in a trusted project's `.codex/hooks.json`, and trust it with `/hooks`.
 
+### Without an account
+
+The `rowsafe-health` skill runs the CLI on the connection string your app uses. For MCP tools instead (`database_health`, `database_insights`, `top_queries`, `live_activity`, `database_settings`; `apply_fix` with `--allow-writes`), run the CLI's local server on the database:
+
+```sh
+codex mcp add rowsafe-db -- rowsafe mcp "postgres://user@host:5432/app"
+```
+
+It runs on your computer, reads with short timeouts, and sends nothing to Rowsafe. Passwords can stay in `~/.pgpass`. Backups and restore points need the Rowsafe agent on the database server.
+
 ### AGENTS.md snippet
 
-With or without the plugin, you can put the workflow in your project's `AGENTS.md`. Copy [`AGENTS.snippet.md`](AGENTS.snippet.md) and replace `app` with your database's name.
+With or without the plugin, you can put the workflow in your project's `AGENTS.md`. Copy [`AGENTS.snippet.md`](AGENTS.snippet.md) and replace `app` with your database's name. Or run `rowsafe init app --yes`: it adds a shorter section, for the CLI, to `AGENTS.md` (and `CLAUDE.md` if there is one), keeping what's there.
 
 ## What it does
 

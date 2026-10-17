@@ -1,0 +1,48 @@
+{
+  "name": "rowsafe",
+  "version": "0.0.0",
+  "mcpName": "sh.rowsafe/rowsafe",
+  "description": "The rowsafe CLI: database health checks, fixes, restore points and an MCP server for AI agents. PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse and more.",
+  "keywords": [
+    "database",
+    "postgres",
+    "postgresql",
+    "mysql",
+    "backup",
+    "mcp",
+    "ai-agents",
+    "cli"
+  ],
+  "homepage": "https://rowsafe.sh/docs/reference/cli",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rowsafe/rowsafe.git",
+    "directory": "integrations/npm"
+  },
+  "bugs": "https://github.com/rowsafe/rowsafe/issues",
+  "license": "Apache-2.0",
+  "author": "Adraa Labs",
+  "bin": {
+    "rowsafe": "bin/rowsafe.js"
+  },
+  "files": [
+    "bin/rowsafe.js",
+    "SHA256SUMS",
+    "README.md"
+  ],
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test test/wrapper.test.js"
+  }
+}

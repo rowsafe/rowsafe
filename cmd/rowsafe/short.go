@@ -29,7 +29,8 @@ Getting started
                                      sets up backups there and asks before changing anything
   rowsafe hosts enroll-token         the install command to paste on a server yourself
   rowsafe restart [NAME]             restart the database when setup needs it (asks first)
-  rowsafe init NAME                  make NAME this project's database (.rowsafe.json)
+  rowsafe init NAME                  make NAME this project's database (.rowsafe.json) and tell
+                                     AI agents to use rowsafe (AGENTS.md, CLAUDE.md; asks first)
   rowsafe adopt | plan | apply | verify NAME
                                      set up by hand from your workstation instead
 
@@ -194,7 +195,12 @@ let it connect (--yes: without asking). Arguments after -- go to psql:
   rowsafe connect shop -- -c "select count(*) from orders"`,
 	"init": `Writes {"database": NAME} to .rowsafe.json in the current directory (keeping
 other settings in an existing file). Commands run in this directory or below
-then use NAME when it is left out; so does the Claude Code guard hook.`,
+then use NAME when it is left out; so does the Claude Code guard hook.
+It also offers to add a short section to AGENTS.md and CLAUDE.md (a new
+AGENTS.md if neither exists) telling AI agents to check rowsafe status and
+set a Mark before migrations. It only appends, between <!-- rowsafe:start -->
+and <!-- rowsafe:end -->, and skips a file that already has it. --yes adds it
+without asking; --no-agents leaves the files alone.`,
 	"restart": `Rowsafe never restarts a database (PostgreSQL, MySQL, MariaDB, MongoDB or
 ClickHouse) on its own. It restarts it only when you ask (this command,
 Restart in the dashboard, or the installer), and only on servers where the
@@ -310,7 +316,11 @@ func fleetHeadline(h mcp.FleetHealth) string {
 }
 
 func initCmd(ctx context.Context, c *client.Client, args []string) error {
-	pos, err := positionals(flag.NewFlagSet("init", flag.ContinueOnError), args)
+	fs := flag.NewFlagSet("init", flag.ContinueOnError)
+	yes := fs.Bool("yes", false, "also add the Rowsafe section to AGENTS.md / CLAUDE.md without asking")
+	noAgents := fs.Bool("no-agents", false, "leave AGENTS.md and CLAUDE.md alone")
+	asJSON := fs.Bool("json", false, "print what was written as JSON")
+	pos, err := positionals(fs, args)
 	if err != nil {
 		return err
 	}
@@ -343,7 +353,28 @@ func initCmd(ctx context.Context, c *client.Client, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Wrote %s: rowsafe commands in this directory now default to %s.\n", p, d.Name)
+	if !*asJSON {
+		fmt.Printf("Wrote %s: rowsafe commands in this directory now default to %s.\n", p, d.Name)
+	}
+	files := []agentFile{}
+	if !*noAgents {
+		got, err := offerAgentSection(".", d.Name, *yes, *asJSON)
+		files = append(files, got...)
+		if err != nil {
+			return err
+		}
+	}
+	if *asJSON {
+		return printJSON(map[string]any{"config": p, "database": d.Name, "agent_files": files})
+	}
+	for _, f := range files {
+		switch f.Result {
+		case "added":
+			fmt.Printf("Added a Rowsafe section to %s for AI agents.\n", f.Path)
+		case "created":
+			fmt.Printf("Created %s with a Rowsafe section for AI agents.\n", f.Path)
+		}
+	}
 	return nil
 }
 
