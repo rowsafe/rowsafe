@@ -308,6 +308,24 @@ func TestClickHouseEndToEnd(t *testing.T) {
 		t.Fatalf("drill left %d entries", len(left))
 	}
 
+	// Proof on another server: the same restore and checks from the bucket
+	// alone, against what the source's server reports (ForkVerify).
+	t.Run("ForkVerify", func(t *testing.T) {
+		facts, err := e.VerifyFacts(ctx, env, db)
+		if err != nil || len(facts.Databases) == 0 || facts.Version == "" {
+			t.Fatalf("facts: %+v %v", facts, err)
+		}
+		p := protocol.ForkRestoreParams{ForkID: "v1", Verify: true, Source: db, VerifyFacts: facts}
+		p.Source.Port = 0 // on another server
+		vr, err := e.ForkVerify(ctx, env, p, "verify-v1", &testLog{t: t})
+		if err != nil || !vr.Passed || vr.BackupLabel == "" || vr.RestoredBytes == 0 || len(vr.Databases) == 0 {
+			t.Fatalf("fork verify: %+v %v", vr, err)
+		}
+		if left, _ := os.ReadDir(drillRoot(env)); len(left) != 0 {
+			t.Fatalf("fork verify left %d entries", len(left))
+		}
+	})
+
 	// Guard: a migration preview on a copy; production is untouched.
 	pv, err := run[protocol.PreviewResult](t, e, env, db, protocol.TaskPreviewMigration, protocol.PreviewParams{PreviewID: "p1", DB: "shop",
 		SQL: "ALTER TABLE orders ADD COLUMN status String DEFAULT 'new';\n" +

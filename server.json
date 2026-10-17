@@ -3,7 +3,7 @@
   "name": "sh.rowsafe/rowsafe",
   "title": "Rowsafe",
   "description": "Database backups and an AI agent safety net: restore points, health, audited changes as you.",
-  "version": "0.10.11",
+  "version": "0.10.20",
   "websiteUrl": "https://rowsafe.sh/docs/reference/mcp",
   "repository": {
     "url": "https://github.com/rowsafe/rowsafe",

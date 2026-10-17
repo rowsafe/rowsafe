@@ -435,7 +435,9 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 		timed("archiving", func() { req.Archivers = a.archiverStats(ctx) })
 		req.Update = a.updateReport()                            // container_update.go
 		req.Features = []string{protocol.FeatureDBAdminVerifier, // dbadmin.go: a new owner from the requester's verifier
-			protocol.FeatureQuickSnapshots} // snapshots every few minutes for OpenSearch, Qdrant and Meilisearch (protocol/snapshots.go)
+			protocol.FeatureQuickSnapshots, // snapshots every few minutes for OpenSearch, Qdrant and Meilisearch (protocol/snapshots.go)
+			protocol.FeatureForkOwnRepo,    // fork_restore.go: a lost source's backups read with this server's own storage
+			protocol.FeatureForkVerify}     // fork_verify.go: restore tests of other servers' databases
 		if !a.cfg.Sidecar() {
 			req.Features = append(req.Features, protocol.FeatureServerCertificate, // server_cert.go: PostgreSQL's files are the agent's to change
 				protocol.FeatureServerCertificateEngines,     // and MySQL's, MariaDB's and Valkey's set up by the installer (EngineCertificates)

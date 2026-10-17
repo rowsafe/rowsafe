@@ -152,6 +152,9 @@ var sqliteFeatures = EngineFeatures{
 	// (internal/engine/sqlite/copies*.go).
 	SafeCopies: true,
 	Security:   true, // who on the server can reach the file (internal/engine/sqlite/security.go)
+	// The drill's restore and checks on another server, against the
+	// source's table count (internal/engine/sqlite/fork.go).
+	ProofElsewhere: true,
 }
 
 // SQLiteStatus is SQLite's own health detail (DatabaseMonitoring.SQLite),

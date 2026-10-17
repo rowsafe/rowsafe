@@ -403,13 +403,18 @@ func (e *evaluator) slotFixes(minBytes int64) []protocol.FindingFix {
 	slices.SortStableFunc(slots, func(a, b protocol.ReplicationSlot) int { return cmp.Compare(*b.RetainedBytes, *a.RetainedBytes) })
 	var out []protocol.FindingFix
 	for _, s := range slots[:min(len(slots), maxSlotFixes)] {
-		fx := e.fix("drop_slot:"+s.Name, protocol.FixMaintenance, "Drop slot "+s.Name,
-			fmt.Sprintf("The %s replication slot %s has no consumer and holds %s of change log. Dropping it lets PostgreSQL delete that log. Takes a second; nothing else is affected.",
-				s.Type, s.Name, Bytes(float64(*s.RetainedBytes))),
-			protocol.MaintenanceParams{Action: protocol.MaintDropReplicationSlot, Slot: s.Name})
-		out = append(out, confirm(fx, fmt.Sprintf("Drop the replication slot %s? If the replica or tool that used it comes back, it has to be set up again from scratch.", s.Name), true))
+		out = append(out, e.dropSlotFix(s, fmt.Sprintf("The %s replication slot %s has no consumer and holds %s of change log. Dropping it lets PostgreSQL delete that log.",
+			s.Type, s.Name, Bytes(float64(*s.RetainedBytes)))))
 	}
 	return out
+}
+
+// dropSlotFix drops an inactive replication slot; why says what it holds.
+func (e *evaluator) dropSlotFix(s protocol.ReplicationSlot, why string) protocol.FindingFix {
+	fx := e.fix("drop_slot:"+s.Name, protocol.FixMaintenance, "Drop slot "+s.Name,
+		why+" Takes a second; nothing else is affected.",
+		protocol.MaintenanceParams{Action: protocol.MaintDropReplicationSlot, Slot: s.Name})
+	return confirm(fx, fmt.Sprintf("Drop the replication slot %s? If the replica or tool that used it comes back, it has to be set up again from scratch.", s.Name), true)
 }
 
 // spaceFixes are the fixes that give disk space back: abandoned

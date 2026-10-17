@@ -3,15 +3,18 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/rowsafe/rowsafe/internal/handoff"
+	"github.com/rowsafe/rowsafe/internal/objstore"
 	"github.com/rowsafe/rowsafe/internal/pgbackrest"
 	"github.com/rowsafe/rowsafe/internal/pginspect"
 	"github.com/rowsafe/rowsafe/protocol"
@@ -142,7 +145,16 @@ type fakeForkOps struct {
 	dataDir    string
 	up         bool
 	restoreErr error
+	infoErr    error
 	calls      []string
+	// sourceConf is the pgBackRest config the restore read the source with.
+	sourceConf string
+	// sourceAsked: the source on this server was asked for its facts.
+	sourceAsked bool
+}
+
+func (f *fakeForkOps) controlData(dataDir string, major int) (controlData, error) {
+	return controlData{State: "shut down", Settings: map[string]int{"max_connections": 400, "max_worker_processes": 16}}, nil
 }
 
 func (f *fakeForkOps) facts(ctx context.Context, db protocol.DatabaseSpec) (inPlaceFacts, error) {
@@ -153,6 +165,7 @@ func (f *fakeForkOps) usage(ctx context.Context, db protocol.DatabaseSpec) (clus
 	return clusterUsage{Settings: map[string]int{"max_connections": 100}}, nil
 }
 func (f *fakeForkOps) sourceFacts(ctx context.Context, db protocol.DatabaseSpec) (primaryFacts, error) {
+	f.sourceAsked = true
 	return primaryFacts{clusterFacts: clusterFacts{Major: 17}, SizeBytes: 1 << 20, Settings: map[string]int{"max_connections": 300}}, nil
 }
 func (f *fakeForkOps) helper(ctx context.Context, action string, port int, id string) error {
@@ -170,11 +183,15 @@ func (f *fakeForkOps) stopLocal(string, int) error {
 func (f *fakeForkOps) freeBytes(string) (int64, error) { return 1 << 40, nil }
 func (f *fakeForkOps) sourceInfo(ctx context.Context, cli pgbackrest.CLI) ([]pgbackrest.Stanza, error) {
 	f.calls = append(f.calls, "info "+cli.Stanza)
+	if f.infoErr != nil {
+		return nil, f.infoErr
+	}
 	return []pgbackrest.Stanza{{Name: cli.Stanza, Backup: []pgbackrest.BackupInfo{{Label: "20260924-010000F"}}}}, nil
 }
 func (f *fakeForkOps) restore(ctx context.Context, cli pgbackrest.CLI, o pgbackrest.RestoreOptions) ([]byte, error) {
 	f.calls = append(f.calls, "restore "+o.Type+" "+o.Target)
 	conf, err := os.ReadFile(cli.ConfigPath)
+	f.sourceConf = string(conf)
 	if err != nil || !strings.Contains(string(conf), "repo1-cipher-pass=") {
 		return nil, errors.New("no source config")
 	}
@@ -312,6 +329,166 @@ func TestForkRestoreRefusesNonEmptyAndBadInput(t *testing.T) {
 		if _, err := a.forkRestore(context.Background(), p, &taskLog{}); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+// The source's server is lost: nothing was sealed, and the backups are read
+// with this server's own storage (in the source's folder), to the latest
+// point, with the settings recovery needs read from the restored backup.
+func TestForkRestoreLostSource(t *testing.T) {
+	ops := &fakeForkOps{up: true}
+	a, clusters := forkTestAgent(t, ops)
+	ops.dataDir = filepath.Join(clusters, "17", "empty")
+	if err := os.MkdirAll(ops.dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(ops.dataDir, "PG_VERSION"), []byte("17\n"), 0o600)
+	_ = os.WriteFile(filepath.Join(ops.dataDir, "postgresql.conf"), []byte("port = 5433 # its own\n"), 0o600)
+	p := protocol.ForkRestoreParams{ForkID: "fork_lost", Name: "shop-restored", Source: protocol.DatabaseSpec{ID: "db_1", Name: "shop", Stanza: "shop", Port: 5432},
+		Placement: protocol.ForkEmptyCluster, Port: 5433, OwnRepo: true, SourceFolder: "shop-20260901-120000", Major: 17, SizeBytes: 1 << 20,
+		Settings: map[string]int{"max_connections": 200}}
+	res, err := a.forkRestore(context.Background(), p, &taskLog{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ops.sourceAsked {
+		t.Error("the lost source was asked for its facts")
+	}
+	if strings.Join(ops.calls, ",") != "info shop,stop,restore default ,recover,start" {
+		t.Errorf("calls %v", ops.calls)
+	}
+	for _, want := range []string{"repo1-s3-bucket=b", "repo1-cipher-pass=a-long-enough-cipher-passphrase", "shop-20260901-120000"} {
+		if !strings.Contains(ops.sourceConf, want) {
+			t.Errorf("source config lacks %q:\n%s", want, ops.sourceConf)
+		}
+	}
+	auto, _ := os.ReadFile(filepath.Join(ops.dataDir, "postgresql.auto.conf"))
+	for _, want := range []string{"max_connections = '400'", "max_worker_processes = '16'"} {
+		if !strings.Contains(string(auto), want) {
+			t.Errorf("auto.conf lacks %q:\n%s", want, auto)
+		}
+	}
+	if res.Port != 5433 || res.Major != 17 {
+		t.Fatalf("%+v", res)
+	}
+}
+
+func TestForkSourceForLostSource(t *testing.T) {
+	ops := &fakeForkOps{}
+	a, _ := forkTestAgent(t, ops)
+	base := protocol.ForkRestoreParams{ForkID: "fork_l2", Name: "shop-restored", Source: protocol.DatabaseSpec{ID: "db_1", Stanza: "shop"},
+		OwnRepo: true, Major: 17}
+	tl := &taskLog{}
+	s, err := a.forkSourceFor(context.Background(), ops, base, tl)
+	if err != nil || !s.lost || s.major != 17 || s.repo.Bucket != "b" || s.repo.Folder != "" || ops.sourceAsked {
+		t.Fatalf("%+v %v", s, err)
+	}
+	if !strings.Contains(tl.String(), "lost") {
+		t.Errorf("log: %s", tl.String())
+	}
+	// A Docker fork target reads with its own storage too.
+	a.cfg.Mode = ModeDockerSidecar
+	if _, err := a.forkSourceFor(context.Background(), ops, base, &taskLog{}); err != nil {
+		t.Fatalf("sidecar: %v", err)
+	}
+	a.cfg.Mode = ModeNative
+	// Without the version, nothing is restored.
+	p := base
+	p.Major = 0
+	if _, err := a.forkSourceFor(context.Background(), ops, p, &taskLog{}); err == nil || !strings.Contains(err.Error(), "version is unknown") {
+		t.Fatalf("no major: %v", err)
+	}
+	p = base
+	p.SourceFolder = "../other"
+	if _, err := a.forkSourceFor(context.Background(), ops, p, &taskLog{}); err == nil {
+		t.Fatal("unsafe folder accepted")
+	}
+	// A server without storage of its own says what it needs.
+	a.cfg.Repo = pgbackrest.Repo{}
+	if _, err := a.forkSourceFor(context.Background(), ops, base, &taskLog{}); err == nil || !strings.Contains(err.Error(), "same storage and passphrase") {
+		t.Fatalf("no storage: %v", err)
+	}
+}
+
+// A wrong passphrase or bucket fails before anything is stopped, with
+// pgBackRest's own error (classified as usual) and why it matters here.
+func TestForkRestoreLostSourceWrongPassphrase(t *testing.T) {
+	out := "ERROR: [095]: unable to load info file '/shop/backup.info' or '/shop/backup.info.copy':\n       CryptoError: cipher header invalid"
+	ops := &fakeForkOps{up: true, infoErr: &pgbackrest.CommandError{Tool: "pgbackrest", ExitCode: 95, Output: []byte(out),
+		Err: errors.New("pgbackrest info: exit status 95: " + out)}}
+	a, clusters := forkTestAgent(t, ops)
+	ops.dataDir = filepath.Join(clusters, "17", "empty")
+	_ = os.MkdirAll(ops.dataDir, 0o700)
+	_ = os.WriteFile(filepath.Join(ops.dataDir, "PG_VERSION"), []byte("17\n"), 0o600)
+	p := protocol.ForkRestoreParams{ForkID: "fork_l3", Name: "shop-restored", Source: protocol.DatabaseSpec{ID: "db_1", Stanza: "shop"},
+		Placement: protocol.ForkEmptyCluster, Port: 5433, OwnRepo: true, Major: 17}
+	_, err := a.forkRestore(context.Background(), p, &taskLog{})
+	if err == nil || !strings.Contains(err.Error(), "same storage and backup passphrase") || !strings.Contains(err.Error(), "[095]") {
+		t.Fatalf("%v", err)
+	}
+	if te := a.taskErrorOf(err); te == nil || te.Code != protocol.TaskErrCipherMismatch {
+		t.Fatalf("classified as %+v", te)
+	}
+	if !ops.up || slices.Contains(ops.calls, "stop") {
+		t.Fatalf("the cluster was touched: %v", ops.calls)
+	}
+}
+
+func TestForkRestoreArgsLatest(t *testing.T) {
+	typ, target, set, err := forkRestoreArgs(protocol.RewindTarget{})
+	if err != nil || typ != "default" || target != "" || set != "" {
+		t.Fatalf("%q %q %q %v", typ, target, set, err)
+	}
+	if _, _, _, err := forkRestoreArgs(protocol.RewindTarget{BackupSet: "x; rm"}); err == nil {
+		t.Fatal("bad set accepted")
+	}
+	at := time.Now().Add(-time.Hour)
+	if typ, _, _, err := forkRestoreArgs(protocol.RewindTarget{Time: &at}); err != nil || typ != "time" {
+		t.Fatalf("%q %v", typ, err)
+	}
+	if lostSourceErr(errors.New("the MongoDB server on port 27018 isn't empty")).Error() != "the MongoDB server on port 27018 isn't empty" {
+		t.Error("a target error got the storage hint")
+	}
+	if err := lostSourceErr(fmt.Errorf("reading the backup: %w", objstore.ErrBadPassphrase)); !errors.Is(err, objstore.ErrBadPassphrase) ||
+		!strings.Contains(err.Error(), "same storage and backup passphrase") {
+		t.Errorf("%v", err)
+	}
+}
+
+// forkEngine is a fake engine with clones.
+type forkEngine struct {
+	fakeEngine
+	repo pgbackrest.Repo
+	err  error
+}
+
+func (f *forkEngine) ForkFacts(context.Context, EngineEnv, protocol.DatabaseSpec) (int, int64, map[string]int, error) {
+	return 0, 0, nil, errors.New("not in this test")
+}
+
+func (f *forkEngine) ForkRestore(_ context.Context, env EngineEnv, p protocol.ForkRestoreParams, _ TaskLogger) (*protocol.ForkRestoreResult, error) {
+	f.repo = env.Repo
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &protocol.ForkRestoreResult{ForkID: p.ForkID, Port: p.Port}, nil
+}
+
+// Every engine with clones restores a lost source the same way: with this
+// server's own storage, nothing handed over.
+func TestEngineForkRestoreLostSource(t *testing.T) {
+	e := &forkEngine{fakeEngine: fakeEngine{name: protocol.EngineMySQL}}
+	withEngine(t, e)
+	a, _ := forkTestAgent(t, &fakeForkOps{})
+	p := protocol.ForkRestoreParams{ForkID: "fork_e1", Name: "shop-restored", Source: protocol.DatabaseSpec{ID: "db_m", Stanza: "shop", Engine: protocol.EngineMySQL},
+		Placement: protocol.ForkEmptyServer, Port: 3307, OwnRepo: true}
+	res, err := a.engineForkRestore(context.Background(), p, &taskLog{})
+	if err != nil || res.Port != 3307 || e.repo.Bucket != "b" || e.repo.CipherPass != "a-long-enough-cipher-passphrase" {
+		t.Fatalf("%+v %v %+v", res, err, e.repo)
+	}
+	e.err = fmt.Errorf("reading the backup: %w", objstore.ErrBadPassphrase)
+	if _, err := a.engineForkRestore(context.Background(), p, &taskLog{}); err == nil || !strings.Contains(err.Error(), "same storage and backup passphrase") {
+		t.Fatalf("%v", err)
 	}
 }
 

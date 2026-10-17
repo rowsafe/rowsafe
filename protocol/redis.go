@@ -119,6 +119,7 @@ var redisFeatures = EngineFeatures{
 	Logs:            true,
 	Recommendations: true,
 	Security:        true,
+	ProofElsewhere:  true, // the drill's restores and checks on another server, against the source's key counts (fork.go)
 }
 
 // valkeyFeatures are Redis's: Valkey is a fork of Redis 7.2 that speaks the

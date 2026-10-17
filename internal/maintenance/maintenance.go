@@ -113,6 +113,10 @@ func Validate(p protocol.MaintenanceParams) error {
 		return validateAdvisorMaintenance(p)
 	case protocol.MaintUpdateExtension: // extensions.go
 		return validateUpdateExtension(p)
+	case protocol.MaintRollbackPrepared, protocol.MaintAdvanceReplicationSlot: // maintenance_cleanup.go
+		return validateCleanupMaintenance(p)
+	case protocol.MaintCreateExtension, protocol.MaintRepackTable: // maintenance_tools.go
+		return validateToolMaintenance(p)
 	}
 	return nil
 }
@@ -309,6 +313,14 @@ func Run(ctx context.Context, t pginspect.Target, p protocol.MaintenanceParams, 
 		err = m.logSettings(ctx)
 	case protocol.MaintUpdateExtension: // extensions.go
 		err = m.updateExtension(ctx)
+	case protocol.MaintRollbackPrepared: // maintenance_cleanup.go
+		err = m.rollbackPrepared(ctx)
+	case protocol.MaintAdvanceReplicationSlot: // maintenance_cleanup.go
+		err = m.advanceSlot(ctx)
+	case protocol.MaintCreateExtension: // maintenance_tools.go
+		err = m.createExtension(ctx)
+	case protocol.MaintRepackTable: // maintenance_tools.go
+		err = m.repackTable(ctx)
 	case protocol.MaintCreateIndex, protocol.MaintDropInvalidIndex, protocol.MaintSyncSequence, protocol.MaintSetTableStorageParams: // advisor
 		err = m.advisorAction(ctx)
 	}

@@ -86,7 +86,7 @@ var ApprovalActions = []ApprovalAction{
 	{Name: "index_check_settings", Group: "pulse", Title: "Change the index check schedule", Method: "PUT", Path: "/v1/databases/{ref}/index-recommendations/settings", Risk: RiskNormal, Body: IndexAdvisorSettingsRequest{},
 		Description: "Turns the weekly index check (indexes tested on a copy) on or off, or changes when it runs."},
 	{Name: "restart", Group: "pulse", Title: "Restart the database", Method: "POST", Path: "/v1/databases/{ref}/tasks", Task: TaskRestart, Risk: RiskDisruptive,
-		Description: "Restarts the database server (where root allowed Rowsafe to). Apps are disconnected for a few seconds. params: {\"confirm\": the database's name}."},
+		Description: "Restarts the database server (where root allowed Rowsafe to). Apps are disconnected for a few seconds. params: {\"confirm\": the database's name}; add \"at\": an RFC 3339 time (up to 30 days ahead) or \"window\" (the next Rowsafe Cloud maintenance window) to schedule it instead."},
 	{Name: "turn_on_backups", Group: "pulse", Title: "Turn on backups", Method: "POST", Path: "/v1/databases/{ref}/tasks", Task: TaskAdopt, Fixed: map[string]any{"apply": true}, Risk: RiskDisruptive,
 		Description: "Applies the adopt plan (plan_adoption shows it): changes the server's settings so continuous backups can run. Some engines need a restart afterwards, which the plan says."},
 
@@ -155,6 +155,11 @@ var ApprovalActions = []ApprovalAction{
 		Description: "Ends a move and stops the old server for good (no switching back). Rowsafe types the old server's hostname as the confirmation."},
 	{Name: "fork_database", Group: "move", Title: "Fork the database", Method: "POST", Path: "/v1/databases/{ref}/forks", Risk: RiskNormal, Body: CreateForkRequest{},
 		Description: "Makes an independent new database from this one at a point in time (now, a second or a Mark), on this or another server. " + personOnly},
+	{Name: "restore_elsewhere", Group: "move", Title: "Restore to another server", Method: "POST", Path: "/v1/databases/{ref}/restore-elsewhere", Risk: RiskNormal, Body: RestoreElsewhereRequest{},
+		Description: "When a database's server is lost (silent for 10 minutes or more), restores the database from its backups onto another server of the organization that was installed with the same storage and passphrase, as a new database called name. " +
+			"Without at or mark: the latest point in the backups. Nothing changes on the lost server. list_forks shows the servers that can take it (source_lost)."},
+	{Name: "retire_database", Group: "move", Title: "Retire a lost database", Method: "POST", Path: "/v1/databases/{ref}/retire", Risk: RiskDestructive, Body: RetireDatabaseRequest{},
+		Description: "Removes a database whose server is lost from Rowsafe, typically once it was restored to another server: Rowsafe stops watching it and keeps its backups until an owner deletes them. confirm is the database's name."},
 
 	// Connection pooling and security.
 	{Name: "pooling_on", Group: "security", Title: "Turn on connection pooling", Method: "PUT", Path: "/v1/databases/{ref}/pooling", Risk: RiskNormal, Body: PoolingRequest{},
@@ -185,6 +190,10 @@ var ApprovalActions = []ApprovalAction{
 		Description: "Restores backed-up files (uploads, configs) to how they were at a second; the current files are set aside so it can be undone."},
 	{Name: "undo_files_restore", Group: "files", Title: "Undo a files restore", Method: "POST", Path: "/v1/databases/{ref}/files/restores/{restore_id}/undo", Risk: RiskDisruptive, Body: FilesConfirmRequest{},
 		Description: "Puts back the files from before a restore."},
+	{Name: "restore_server_files", Group: "files", Title: "Restore a server's files", Method: "POST", Path: "/v1/hosts/{host}/files/restore", Risk: RiskDisruptive, Body: FilesRestoreRequest{},
+		Description: "Restores the folders backed up with a server itself (not with a database; files_status with server lists them) to how they were at a second; a whole-folder restore sets the current files aside so it can be undone. host is the server's hostname or ID; confirm is its hostname."},
+	{Name: "undo_server_files_restore", Group: "files", Title: "Undo a server's files restore", Method: "POST", Path: "/v1/hosts/{host}/files/restores/{restore_id}/undo", Risk: RiskDisruptive, Body: FilesConfirmRequest{},
+		Description: "Puts back a server's folder as it was before a whole-folder restore. host is the server's hostname or ID; confirm is its hostname."},
 
 	// Rowsafe Cloud: servers Rowsafe runs for the organization, billed to it.
 	{Name: "create_cloud_server", Group: "cloud", Title: "Create a Rowsafe Cloud server", Method: "POST", Path: "/v1/cloud/servers",

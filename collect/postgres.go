@@ -120,6 +120,10 @@ type clusterState struct {
 	statementsDB string // database where pg_stat_statements was found
 	stmts        stmtState
 	insights     insightsState
+	// autovacuumBusySince is when every autovacuum worker was first seen
+	// busy, in a row (unix seconds; 0: one is free). autovacuum.go
+	autovacuumBusySince int64
+	plans               planState // plans.go
 }
 
 // clusterReading is one round of raw readings from a cluster.
@@ -140,6 +144,7 @@ type clusterReading struct {
 	queryStats      *protocol.QueryStats
 	blocking        []protocol.LockSession
 	replication     *protocol.ReplicationStatus
+	horizon         *protocol.CleanupHorizon // cleanup.go
 }
 
 // readCluster runs the monitoring queries against one cluster. withSlow
@@ -249,6 +254,13 @@ func readCluster(ctx context.Context, t Target, st *clusterState, withSlow, quer
 		g[MXIDAge] = xidAge
 		g[MXIDHeadroomPct] = clampPct(100 * (1 - xidAge/xidWraparoundLimit))
 	}
+	// Multixact IDs (rows locked by several transactions at once) wrap
+	// around at the same age.
+	var mxidAge float64
+	if err := conn.QueryRow(ctx, `SELECT coalesce(max(mxid_age(datminmxid)), 0)::float8 FROM pg_database`).Scan(&mxidAge); err == nil {
+		g[MMultixactAge] = mxidAge
+		g[MMultixactHeadroomPct] = clampPct(100 * (1 - mxidAge/xidWraparoundLimit))
+	}
 
 	if err := readSlots(ctx, conn, r); err != nil {
 		return nil, err
@@ -262,9 +274,14 @@ func readCluster(ctx context.Context, t Target, st *clusterState, withSlow, quer
 		g[MBlockedSessions], g[MLongestBlockedSeconds] = 0, 0
 	}
 	readReplication(ctx, conn, r, inRecovery)
+	readHorizon(ctx, conn, r, queryText)                                        // cleanup.go
+	readAutovacuum(ctx, conn, r, st, func() int64 { return time.Now().Unix() }) // autovacuum.go
 	if withSlow {
 		readSizes(ctx, conn, r)
 		r.statements, r.queryStats = readStatements(ctx, t, conn, st, r.versionNum, time.Now())
+		if r.statements != nil && r.statements.Available { // plans.go
+			r.statements.Plans = readPlans(ctx, t, &st.plans, r.versionNum, r.statements.Statements, time.Now())
+		}
 	}
 	return r, nil
 }
@@ -277,14 +294,16 @@ func readSlots(ctx context.Context, conn Querier, r *clusterReading) error {
 		       coalesce(wal_status, ''),
 		       CASE WHEN slot_type <> 'logical' OR pg_is_in_recovery() OR confirmed_flush_lsn IS NULL THEN NULL
 		            ELSE greatest(pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn), 0)::bigint END,
-		       coalesce(database::text, '')
+		       coalesce(database::text, ''),
+		       age(xmin)::bigint, age(catalog_xmin)::bigint
 		FROM pg_replication_slots ORDER BY slot_name LIMIT 100`)
 	if err != nil {
 		return fmt.Errorf("reading pg_replication_slots: %w", err)
 	}
 	r.slots, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (protocol.ReplicationSlot, error) {
 		var s protocol.ReplicationSlot
-		err := row.Scan(&s.Name, &s.Type, &s.Active, &s.RetainedBytes, &s.WALStatus, &s.LagBytes, &s.Database)
+		err := row.Scan(&s.Name, &s.Type, &s.Active, &s.RetainedBytes, &s.WALStatus, &s.LagBytes, &s.Database,
+			&s.XminAge, &s.CatalogXminAge)
 		return s, err
 	})
 	if err != nil {

@@ -128,6 +128,9 @@ func (a *Agent) forkRestoreDocker(ctx context.Context, ops forkOps, p protocol.F
 	} else {
 		err = fmt.Errorf("Rowsafe can't read %s's backups from here: %w", cmp.Or(p.Source.Name, p.Source.Stanza), err)
 	}
+	if err != nil && src.lost {
+		err = fmt.Errorf("%w (%s)", err, lostSourceHint)
+	}
 	if err != nil {
 		_ = a.rollbackFork(ctx, rec, tl)
 		_ = rt.remove(p.ForkID)
@@ -158,6 +161,7 @@ func (a *Agent) forkRestoreDocker(ctx context.Context, ops forkOps, p protocol.F
 			tl.Printf("wrote the postgres image's default %s (the source keeps its configuration outside its data directory)", name)
 		}
 	}
+	a.forkBackupSettings(ops, &src, dir, tl)
 	if w, err := a.writeForkAutoConf(rec, src, ""); err != nil {
 		return fail("configuring the fork", err)
 	} else if w != "" {

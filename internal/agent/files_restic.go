@@ -72,7 +72,26 @@ type restic struct {
 	wrap     []string // nice/ionice
 }
 
-// newRestic builds the CLI for a database's repository from the agent's
+// filesRepo is the storage files go to, for a database's folders and the
+// server's own alike: this server's own bucket when it has one, else
+// Rowsafe Storage (the organization's prefix) with the current temporary
+// credentials.
+func (a *Agent) filesRepo() (pgbackrest.Repo, error) {
+	repo, err := a.repo() // storage.go
+	if err != nil {
+		return repo, err
+	}
+	if repo.SFTP() {
+		return repo, errors.New("backing up files needs a bucket for now: the backups here go to an SFTP server")
+	}
+	if err := repo.Validate(); err != nil {
+		return repo, err
+	}
+	return repo, nil
+}
+
+// newRestic builds the CLI for a repository (a database's stanza, or
+// protocol.FilesHostStanza for the server's own folders) from the agent's
 // backup storage settings.
 func (a *Agent) newRestic(stanza string) (*restic, error) {
 	rt := a.filesRuntime()
@@ -80,11 +99,8 @@ func (a *Agent) newRestic(stanza string) (*restic, error) {
 		return &restic{bin: rt.bin, repo: rt.repoOverride + "/" + stanza, cacheDir: rt.cacheDir,
 			env: []string{"RESTIC_PASSWORD=" + FilesPassword(rt.passOverride, stanza)}}, nil
 	}
-	repo := a.cfg.Repo
-	if repo.SFTP() {
-		return nil, errors.New("backing up the files next to a database needs a bucket for now: the backups here go to an SFTP server")
-	}
-	if err := repo.Validate(); err != nil {
+	repo, err := a.filesRepo()
+	if err != nil {
 		return nil, err
 	}
 	r := &restic{bin: rt.bin, repo: FilesRepository(repo, stanza), cacheDir: rt.cacheDir, wrap: niceWrap()}
@@ -107,6 +123,9 @@ func (a *Agent) newRestic(stanza string) (*restic, error) {
 		"AWS_ACCESS_KEY_ID=" + repo.Key,
 		"AWS_SECRET_ACCESS_KEY=" + repo.KeySecret,
 		"RESTIC_PASSWORD=" + FilesPassword(repo.CipherPass, stanza),
+	}
+	if repo.Token != "" { // Rowsafe Storage's temporary credentials
+		r.env = append(r.env, "AWS_SESSION_TOKEN="+repo.Token)
 	}
 	return r, nil
 }

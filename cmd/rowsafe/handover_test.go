@@ -351,7 +351,7 @@ func TestLoginAsksBeforeConnecting(t *testing.T) {
 	t.Cleanup(func() { stdin = os.Stdin })
 	stdin = strings.NewReader("")
 	err := dispatch(t.Context(), []string{"login", "--url", ts.URL, "--key", "rsk_person"})
-	if err == nil || !strings.Contains(err.Error(), "stays without an account") || s.restarts != 0 {
+	if err == nil || !strings.Contains(err.Error(), "stays on its own") || s.restarts != 0 {
 		t.Fatalf("no answer: %v (restarts %d)", err, s.restarts)
 	}
 	if saved, _, _ := readSavedConfig(); saved.APIKey != "" {

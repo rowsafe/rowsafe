@@ -81,7 +81,7 @@ func TestNotLoggedIn(t *testing.T) {
 	}
 	// Without an account, settings set and undo say what to use instead.
 	t.Setenv("DATABASE_URL", "postgres://app@db.example.com/shop")
-	if err := dispatch(t.Context(), []string{"settings", "set", "work_mem=8MB", "--yes"}); err == nil || !strings.Contains(err.Error(), "needs an account") {
+	if err := dispatch(t.Context(), []string{"settings", "set", "work_mem=8MB", "--yes"}); err == nil || !strings.Contains(err.Error(), "needs the dashboard") {
 		t.Errorf("settings set without an account: %v", err)
 	}
 	t.Setenv("DATABASE_URL", "")

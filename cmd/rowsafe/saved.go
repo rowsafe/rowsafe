@@ -348,6 +348,8 @@ type savedAddResult struct {
 	File string `json:"file"`
 	// ProjectFile is the .rowsafe.json add wrote, if any.
 	ProjectFile string `json:"project_file,omitempty"`
+	// Server is the database protected on this server (server_saved.go).
+	Server *serverProtection `json:"server,omitempty"`
 }
 
 // savedAdd is rowsafe add [NAME] [CONN] [--from-env VAR] [--no-check] [--yes] [--json].
@@ -463,17 +465,27 @@ func savedAdd(ctx context.Context, args []string) error {
 			}
 		}
 	}
+	if !*asJSON {
+		pg := ""
+		if res.Version != "" {
+			pg = " (" + d.EngineName() + " " + res.Version + ")"
+		}
+		fmt.Printf("%s %s%s.\n", green("Saved "+name+":"), v.describe(), pg)
+		fmt.Printf("The connection string is in %s, readable only by you.\n", res.File)
+	}
+	// On this database's server: protect it too (server_saved.go).
+	if res.Server, err = protectOnServer(ctx, s, *yes, *asJSON); err != nil {
+		return err
+	}
 	if *asJSON {
 		return printJSON(res)
 	}
-	pg := ""
-	if res.Version != "" {
-		pg = " (" + d.EngineName() + " " + res.Version + ")"
-	}
-	fmt.Printf("%s %s%s.\n", green("Saved "+name+":"), v.describe(), pg)
-	fmt.Printf("The connection string is in %s, readable only by you.\n", res.File)
 	if res.ProjectFile != "" {
 		fmt.Printf("Wrote %s: rowsafe commands here now use %s.\n\nNext: rowsafe pulse\n", res.ProjectFile, name)
+		return nil
+	}
+	if res.Server != nil {
+		fmt.Printf("\n%s %s   %s\n", bold("Next:"), cyan("sudo rowsafe status "+name), dim("(then: rowsafe pulse "+name+", rowsafe mark "+name+" LABEL, rowsafe restore "+name+" --to TIME)"))
 		return nil
 	}
 	fmt.Printf("\n%s %s   %s\n", bold("Next:"), cyan("rowsafe pulse "+name), dim("(or rowsafe use "+name+" in a project, then just rowsafe pulse)"))

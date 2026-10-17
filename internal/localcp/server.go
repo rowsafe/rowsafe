@@ -28,10 +28,12 @@ const tick = 30 * time.Second
 
 // Server is the control plane of one server without an account.
 type Server struct {
-	st      *store
-	log     *slog.Logger
-	now     func() time.Time
-	updates *updates
+	st        *store
+	log       *slog.Logger
+	now       func() time.Time
+	updates   *updates
+	alertHTTP *http.Client // alerts.go
+	allowHTTP bool         // tests: channels on http://
 }
 
 // Open loads (or starts) the state kept in dir.
@@ -43,7 +45,8 @@ func Open(dir string, log *slog.Logger) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{st: st, log: log, now: time.Now, updates: &updates{http: &http.Client{Timeout: 30 * time.Second}}}, nil
+	return &Server{st: st, log: log, now: time.Now, updates: &updates{http: &http.Client{Timeout: 30 * time.Second}},
+		alertHTTP: &http.Client{Timeout: 15 * time.Second}}, nil
 }
 
 // Serve listens on the Unix socket at path (0660: the agent's user and
@@ -68,6 +71,7 @@ func (s *Server) Serve(ctx context.Context, path string) error {
 		defer cancel()
 		_ = srv.Shutdown(sctx)
 	}()
+	s.cameBack()
 	go s.run(ctx)
 	go s.runUpdates(ctx) // updates.go
 	s.log.Info("control plane without an account listening", "socket", path)
@@ -91,18 +95,32 @@ func (s *Server) run(ctx context.Context) {
 	}
 }
 
-// Tick reaps lost tasks and queues what the schedules say is due.
+// Tick reaps lost tasks, queues what the schedules say is due and sends
+// the alerts that changed.
 func (s *Server) Tick() {
 	now := s.now()
+	var notices []notice
 	if err := s.st.update(func(st *state) error {
 		if n := st.reap(now); n > 0 {
 			s.log.Warn("tasks lost after their lease ran out", "count", n)
 		}
 		st.schedule(now)
+		notices = st.evaluateAlerts(now) // alerts.go
 		return nil
 	}); err != nil {
 		s.log.Error("scheduling", "err", err)
 	}
+	s.send(notices)
+}
+
+// cameBack, when the agent starts, says how long it was out (alerts.go).
+func (s *Server) cameBack() {
+	var notices []notice
+	_ = s.st.update(func(st *state) error {
+		notices = st.agentWasOffline(s.now())
+		return nil
+	})
+	s.send(notices)
 }
 
 // Handler serves the agent API and the user API subset.
@@ -117,9 +135,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/agent/setup/databases", s.agent(s.setupList))
 	mux.HandleFunc("GET /v1/agent/setup/databases/{id}", s.agent(s.setupGet))
 	mux.HandleFunc("POST /v1/agent/setup/databases/{id}/apply", s.agent(s.setupApply))
+	mux.HandleFunc("POST /v1/agent/monitoring", s.agent(s.monitoring))
 	// Reports kept on the server for now: accepted, not stored.
 	for path, ack := range map[string]any{
-		"/v1/agent/monitoring": protocol.MonitoringAck{}, "/v1/agent/logs": protocol.LogAck{Databases: []protocol.LogSettings{}},
+		"/v1/agent/logs":     protocol.LogAck{Databases: []protocol.LogSettings{}},
 		"/v1/agent/security": protocol.SecurityAck{}, "/v1/agent/files": protocol.FilesSync{Databases: []protocol.FilesConfig{}},
 	} {
 		mux.HandleFunc("POST "+path, s.agent(func(w http.ResponseWriter, r *http.Request) {
@@ -128,13 +147,14 @@ func (s *Server) Handler() http.Handler {
 		}))
 	}
 	mux.HandleFunc("POST /v1/agent/storage/credentials", s.agent(func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, http.StatusNotFound, "Rowsafe Storage needs an account: this server backs up to its own storage")
+		writeError(w, http.StatusNotFound, "Rowsafe Storage needs the dashboard: this server backs up to its own storage")
 	}))
 
 	// The rowsafe CLI on this server.
 	mux.HandleFunc("GET /v1/whoami", s.whoami)
 	mux.HandleFunc("GET /v1/hosts", s.hosts)
 	mux.HandleFunc("GET /v1/databases", s.databases)
+	mux.HandleFunc("POST /v1/databases", s.createDatabase)
 	mux.HandleFunc("GET /v1/databases/{ref}", s.databaseGet)
 	mux.HandleFunc("GET /v1/databases/{ref}/protection", s.protection)
 	mux.HandleFunc("GET /v1/databases/{ref}/backups", s.backups)
@@ -143,11 +163,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/databases/{ref}/tasks", s.createTask)
 	mux.HandleFunc("GET /v1/databases/{ref}/restore-points", s.marks)
 	mux.HandleFunc("POST /v1/databases/{ref}/restore-points", s.createMark)
+	s.rewindRoutes(mux)                                             // rewind.go
+	mux.HandleFunc("GET /v1/notification-channels", s.channelsList) // alerts.go
+	mux.HandleFunc("POST /v1/notification-channels", s.channelsCreate)
+	mux.HandleFunc("DELETE /v1/notification-channels/{id}", s.channelsDelete)
+	mux.HandleFunc("POST /v1/notification-channels/{id}/test", s.channelsTest)
+	mux.HandleFunc("GET /v1/alerts", s.alertsList)
+	mux.HandleFunc("GET /v1/alerts/{id}", s.alertGet)
+	mux.HandleFunc("POST /v1/alerts/{id}/ack", s.alertAck)
+	mux.HandleFunc("GET /v1/alert-rules", s.alertRules)
 	mux.HandleFunc("GET /v1/tasks", s.allTasks)
 	mux.HandleFunc("GET /v1/tasks/{id}", s.taskGet)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, http.StatusNotFound, "This server runs Rowsafe without an account, which doesn't do this. "+
-			"rowsafe login connects it to an account (the dashboard, alerts, Rewind and more), keeping its backups")
+		writeError(w, http.StatusNotFound, "This needs the dashboard: rowsafe login connects this server to it "+
+			"(every server in one place, history, your team and more), keeping its backups, Proofs and Marks")
 	})
 	return mux
 }
@@ -234,6 +263,7 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 				return err
 			}
 		}
+		resp.RewindExpires = st.recordRewinds(req.Rewinds, now) // rewind.go
 		for _, d := range st.Databases {
 			if d.Status != protocol.DBPendingAdopt {
 				resp.Databases = append(resp.Databases, d.spec())
@@ -303,48 +333,62 @@ func (s *Server) setupRegister(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &req) {
 		return
 	}
-	if e := protocol.NormalizeEngine(req.Engine); e != protocol.EnginePostgreSQL {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("Without an account, Rowsafe protects PostgreSQL for now; %s needs an account (connect this server with rowsafe login)",
-			protocol.EngineDisplayName(req.Engine)))
+	var out protocol.SetupDatabase
+	s.register(w, req.Name, req.Port, req.SocketDir, req.Engine, func(st *state, db *dbRec, _ *taskRec) any {
+		out = st.setupDatabase(db)
+		return out
+	})
+}
+
+// register adds a database (or finds it again by name) and queues its plan,
+// for the installer (setupRegister) and for rowsafe add and adopt
+// (createDatabase); body makes the response.
+func (s *Server) register(w http.ResponseWriter, name string, port int, socketDir, engine string, body func(st *state, db *dbRec, plan *taskRec) any) {
+	if e := protocol.NormalizeEngine(engine); e != protocol.EnginePostgreSQL {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("Rowsafe on this server protects PostgreSQL for now; %s needs the dashboard (rowsafe login connects this server)",
+			protocol.EngineDisplayName(engine)))
 		return
 	}
-	if !nameRE.MatchString(req.Name) {
+	if !nameRE.MatchString(name) {
 		writeError(w, http.StatusBadRequest, "the name must be 2-40 lowercase letters, digits and dashes, starting with a letter")
 		return
 	}
-	if req.Port <= 0 || req.Port > 65535 {
+	if port <= 0 || port > 65535 {
 		writeError(w, http.StatusBadRequest, "invalid port")
 		return
 	}
-	if req.SocketDir == "" {
-		req.SocketDir = "/var/run/postgresql" // as on the hosted control plane
+	if socketDir == "" {
+		socketDir = "/var/run/postgresql" // as on the hosted control plane
 	}
-	if !filepath.IsAbs(req.SocketDir) {
+	if !strings.HasPrefix(socketDir, "/") { // a path on this Linux server
 		writeError(w, http.StatusBadRequest, "socket_dir must be an absolute path")
 		return
 	}
 	now := s.now()
 	status := http.StatusOK
-	var out protocol.SetupDatabase
+	var out any
 	err := s.st.update(func(st *state) error {
-		db := st.db(req.Name)
+		db := st.db(name)
 		if db == nil {
-			if slices.ContainsFunc(st.Databases, func(d *dbRec) bool { return d.Port == req.Port && d.SocketDir == req.SocketDir }) {
-				return fmt.Errorf("conflict: the PostgreSQL on port %d is already registered under another name", req.Port)
+			if other := st.dbAt(port, socketDir); other != nil {
+				return fmt.Errorf("conflict: the PostgreSQL on port %d is already protected as %s", port, other.Name)
 			}
 			status = http.StatusCreated
-			db = &dbRec{Database: protocol.Database{ID: newID("db"), HostID: st.Host.ID, Hostname: st.Host.Hostname, Name: req.Name,
-				Stanza: req.Name, Port: req.Port, SocketDir: req.SocketDir, Status: protocol.DBPendingAdopt,
+			db = &dbRec{Database: protocol.Database{ID: newID("db"), HostID: st.Host.ID, Hostname: st.Host.Hostname, Name: name,
+				Stanza: name, Port: port, SocketDir: socketDir, Status: protocol.DBPendingAdopt,
 				RetentionFull: defaultRetentionFull, ScheduleFull: defaultScheduleFull, ScheduleDiff: defaultScheduleDiff,
 				ScheduleDrill: defaultScheduleDrill, CreatedAt: now.UTC()}, StatusSince: now.UTC()}
 			st.Databases = append(st.Databases, db)
 		}
+		var plan *taskRec
 		if db.Status == protocol.DBPendingAdopt {
-			if _, err := st.enqueue(db, protocol.TaskAdopt, protocol.AdoptParams{Apply: false}, "", false, now); err != nil && !errors.Is(err, errTaskOpen) {
+			t, err := st.enqueue(db, protocol.TaskAdopt, protocol.AdoptParams{Apply: false}, "", false, now)
+			if err != nil && !errors.Is(err, errTaskOpen) {
 				return err
 			}
+			plan = t
 		}
-		out = st.setupDatabase(db)
+		out = body(st, db, plan)
 		return nil
 	})
 	if err != nil {
@@ -356,6 +400,38 @@ func (s *Server) setupRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, status, out)
+}
+
+// dbAt is the database on that port and socket directory.
+func (st *state) dbAt(port int, socketDir string) *dbRec {
+	for _, d := range st.Databases {
+		if d.Port == port && d.SocketDir == socketDir {
+			return d
+		}
+	}
+	return nil
+}
+
+// createDatabase is rowsafe add (on this server) and rowsafe adopt: the
+// database and its plan, which changes nothing.
+func (s *Server) createDatabase(w http.ResponseWriter, r *http.Request) {
+	var req protocol.CreateDatabaseRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	s.register(w, req.Name, req.Port, req.SocketDir, req.Engine, func(st *state, db *dbRec, plan *taskRec) any {
+		if req.RetentionFull > 0 && db.Status == protocol.DBPendingAdopt {
+			db.RetentionFull = min(req.RetentionFull, 52)
+		}
+		out := protocol.CreateDatabaseResponse{Database: st.view(db)}
+		if plan == nil {
+			plan = st.latest(db.ID, protocol.TaskAdopt)
+		}
+		if plan != nil {
+			out.Task = plan.TaskView
+		}
+		return out
+	})
 }
 
 func (s *Server) setupList(w http.ResponseWriter, r *http.Request) {
@@ -500,7 +576,7 @@ func limitParam(r *http.Request, def int) int {
 }
 
 func (s *Server) whoami(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, protocol.WhoAmI{Org: protocol.Org{ID: "local", Name: "This server, without an account", Plan: "local"},
+	writeJSON(w, http.StatusOK, protocol.WhoAmI{Org: protocol.Org{ID: "local", Name: "This server", Plan: "local"},
 		Actor: "root on this server"})
 }
 
@@ -577,24 +653,27 @@ func (s *Server) drills(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) marks(w http.ResponseWriter, r *http.Request) {
-	s.withDB(w, r, func(st *state, d *dbRec) {
-		var out []protocol.RestorePoint
-		for i := len(st.Marks) - 1; i >= 0; i-- {
-			m := st.Marks[i]
-			if m.DatabaseID != d.ID || m.LSN == "" && !st.taskOpen(m.TaskID) {
-				continue // attempts that failed before PostgreSQL wrote it
-			}
-			m.Status = protocol.StatusQueued
-			if t := st.task(m.TaskID); t != nil {
-				m.Status = t.Status
-			}
-			if m.CreatedAt != nil {
-				m.RestoreFromBackup = st.backupBefore(d.ID, *m.CreatedAt)
-			}
-			out = append(out, m)
+	s.withDB(w, r, func(st *state, d *dbRec) { writeJSON(w, http.StatusOK, st.markViews(d)) })
+}
+
+// markViews are a database's Marks, newest first.
+func (st *state) markViews(d *dbRec) []protocol.RestorePoint {
+	out := []protocol.RestorePoint{}
+	for i := len(st.Marks) - 1; i >= 0; i-- {
+		m := st.Marks[i]
+		if m.DatabaseID != d.ID || m.LSN == "" && !st.taskOpen(m.TaskID) {
+			continue // attempts that failed before PostgreSQL wrote it
 		}
-		writeJSON(w, http.StatusOK, nonNil(out))
-	})
+		m.Status = protocol.StatusQueued
+		if t := st.task(m.TaskID); t != nil {
+			m.Status = t.Status
+		}
+		if m.CreatedAt != nil {
+			m.RestoreFromBackup = st.backupBefore(d.ID, *m.CreatedAt)
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 func (st *state) taskOpen(id string) bool {
@@ -673,7 +752,7 @@ func (s *Server) taskGet(w http.ResponseWriter, r *http.Request) {
 }
 
 // userTasks are what people (the CLI) may queue on this server.
-var userTasks = []string{protocol.TaskBackup, protocol.TaskDrill, protocol.TaskCheck, protocol.TaskInspect, protocol.TaskRestart}
+var userTasks = []string{protocol.TaskBackup, protocol.TaskDrill, protocol.TaskCheck, protocol.TaskInspect, protocol.TaskRestart, protocol.TaskAdopt}
 
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	var req protocol.CreateTaskRequest
@@ -681,7 +760,7 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !slices.Contains(userTasks, req.Type) {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("Without an account, this server can't run %s tasks: rowsafe login connects it to an account", req.Type))
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("%s tasks need the dashboard: rowsafe login connects this server to it", req.Type))
 		return
 	}
 	now := s.now()
@@ -697,6 +776,16 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		case (req.Type == protocol.TaskBackup || req.Type == protocol.TaskDrill) && d.Status != protocol.DBActive:
 			code, msg = http.StatusConflict, fmt.Sprintf("%s is %s: backups start once it is set up and archiving is proven", d.Name, d.Status)
 			return nil
+		case req.Type == protocol.TaskAdopt && d.Status != protocol.DBPendingAdopt:
+			code, msg = http.StatusConflict, fmt.Sprintf("%s is already set up (status %s), so there is no plan to make or apply.", d.Name, d.Status)
+			return nil
+		case req.Type == protocol.TaskAdopt:
+			var p protocol.AdoptParams
+			_ = json.Unmarshal(req.Params, &p)
+			if m := applyBlocked(d.Name, st.latest(d.ID, protocol.TaskAdopt), p.Force); p.Apply && m != "" {
+				code, msg = http.StatusConflict, m
+				return nil
+			}
 		case req.Type == protocol.TaskRestart && !slices.Contains(st.Host.RestartPorts, d.Port):
 			code, msg = http.StatusForbidden, fmt.Sprintf("%s doesn't allow restarts from Rowsafe (only root can allow it, at install time). Restart PostgreSQL yourself: sudo systemctl restart postgresql", st.Host.Hostname)
 			return nil

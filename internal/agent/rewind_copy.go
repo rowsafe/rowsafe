@@ -76,7 +76,7 @@ func describeTarget(t protocol.RewindTarget) string {
 	if t.Time != nil {
 		return t.Time.UTC().Format("15:04:05 UTC on 2006-01-02")
 	}
-	return "the chosen point"
+	return "the latest point in its backups" // forks of a lost source (forkRestoreArgs)
 }
 
 // checkBackupSet makes sure the repository answers and holds the backup

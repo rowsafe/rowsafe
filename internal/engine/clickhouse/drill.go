@@ -1,9 +1,12 @@
 package clickhouse
 
 import (
+	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/rowsafe/rowsafe/internal/agent"
@@ -43,16 +46,105 @@ func (e *Engine) drill(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 	if err != nil {
 		return fail(&protocol.DrillResult{}, err)
 	}
+	return drillCopy(ctx, env, r, b, stopped, taskID, b.DataBytes, nil, started, tl)
+}
+
+// Proof on another server (protocol.FeatureProofElsewhere): when the
+// database's own server lacks the disk, the drill's restore and checks run
+// on another server of the organization. The drill already checks against
+// the backup's own description, so nothing on the source is needed there
+// beyond what VerifyFacts read. Nothing is registered or backed up.
+
+var _ agent.EngineForkVerify = (*Engine)(nil)
+
+// VerifyFacts reads the source's databases, size and version.
+func (e *Engine) VerifyFacts(ctx context.Context, env agent.EngineEnv, source protocol.DatabaseSpec) (*protocol.ForkVerifyFacts, error) {
+	c, err := connectDB(ctx, env, source)
+	if err != nil {
+		return nil, err
+	}
+	in, err := inspect(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	return &protocol.ForkVerifyFacts{Databases: in.Databases, SizeBytes: in.TotalBytes, Version: in.Version}, nil
+}
+
+// ForkVerify restores the newest point in the source's backups (env.Repo)
+// into a temporary server in the drill directory, checks it like the drill
+// and deletes it.
+func (e *Engine) ForkVerify(ctx context.Context, env agent.EngineEnv, p protocol.ForkRestoreParams, id string, tl agent.TaskLogger) (*protocol.DrillResult, error) {
+	started := time.Now()
+	switch {
+	case p.VerifyFacts == nil:
+		return nil, errors.New("the restore test has nothing to check the restore against: the source's server didn't report its databases")
+	case p.Source.Stanza == "":
+		return nil, errors.New("the restore test names no source database")
+	case p.Target.Time != nil || p.Target.Mark != "":
+		return nil, errors.New("a restore test restores the newest point in the backups, not a moment or a Mark")
+	case env.Config.DrillDir == "":
+		return nil, errors.New("this server has no folder for restore tests")
+	case !idRE.MatchString(id):
+		return nil, fmt.Errorf("invalid restore test id %q", id)
+	}
+	if _, _, err := clickhouseBinary(); err != nil {
+		what := "ClickHouse"
+		if v := strings.SplitN(p.VerifyFacts.Version, ".", 3); len(v) >= 2 {
+			what += " " + v[0] + "." + v[1]
+		}
+		return nil, fmt.Errorf("%s isn't installed on this server, and a restore test needs that version or newer (%w)", what, err)
+	}
+	// Only the backups: the source's server isn't reachable here.
+	r, err := openRepo(env, protocol.DatabaseSpec{Stanza: p.Source.Stanza})
+	if err != nil {
+		return nil, err
+	}
+	name := cmp.Or(p.Source.Name, p.Source.Stanza)
+	b, stopped, err := newestPoint(ctx, r, name, tl)
+	if err != nil {
+		return &protocol.DrillResult{Failures: []string{err.Error()}, DurationSeconds: time.Since(started).Seconds()}, err
+	}
+	tl.Printf("restore test of %s (ClickHouse %s) from its backups, on this server", name, p.VerifyFacts.Version)
+	return drillCopy(ctx, env, r, b, stopped, id, cmp.Or(p.VerifyFacts.SizeBytes, b.DataBytes), p.VerifyFacts, started, tl)
+}
+
+// newestPoint is what a restore test on another server restores: the
+// newest moment the source's record reaches (from its head in the
+// bucket: no copier runs here), else its newest backup, as latestTarget.
+func newestPoint(ctx context.Context, r *repo, name string, tl agent.TaskLogger) (backupDoc, time.Time, error) {
+	if h, ok, err := r.readHead(ctx); err == nil && ok && !h.To.IsZero() {
+		if res, err := pitAt(ctx, r, h.To, ""); err == nil && res.Exact {
+			tl.Printf("restoring %s as it was at %s: the newest backup with every change since", name,
+				h.To.UTC().Format("2006-01-02 15:04:05.000000 UTC"))
+			return res.Doc, h.To, nil
+		} else if err == nil {
+			tl.Printf("note: %s", res.Note)
+		}
+	}
+	b, err := pickBackup(ctx, r, restoreTarget{Latest: true})
+	return b, b.StoppedAt, err
+}
+
+// drillCopy restores b into a temporary server under the drill directory
+// (id), checks it (checkRestored; with facts, also against the source's
+// databases) and deletes it. size is the data it needs room for.
+func drillCopy(ctx context.Context, env agent.EngineEnv, r *repo, b backupDoc, stopped time.Time, id string, size int64,
+	facts *protocol.ForkVerifyFacts, started time.Time, tl agent.TaskLogger) (*protocol.DrillResult, error) {
+	fail := func(res *protocol.DrillResult, err error) (*protocol.DrillResult, error) {
+		res.Failures = append(res.Failures, err.Error())
+		res.DurationSeconds = time.Since(started).Seconds()
+		return res, err
+	}
 	label := b.Label
 	if b.virtualDir != "" {
 		label = b.from // the backup the restore started from
 	}
 	res := &protocol.DrillResult{BackupLabel: label, RecoveredTo: &stopped}
 	root := drillRoot(env)
-	if err := ensureSpace(filepath.Dir(root), int64(float64(b.DataBytes)*drillSpaceFactor)+512<<20); err != nil {
+	if err := ensureSpace(filepath.Dir(root), int64(float64(size)*drillSpaceFactor)+512<<20); err != nil {
 		return fail(res, err)
 	}
-	s, err := newScratch(root, taskID, b.Macros, b.needsKeeper())
+	s, err := newScratch(root, id, b.Macros, b.needsKeeper())
 	if err != nil {
 		return nil, err
 	}
@@ -76,6 +168,9 @@ func (e *Engine) drill(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 	}
 	tl.Printf("restored; checking every table")
 	checkRestored(ctx, c, b, skip, res, tl)
+	if facts != nil {
+		checkFacts(facts, res)
+	}
 	res.RestoredBytes = dirSize(s.dataDir())
 	res.DurationSeconds = time.Since(started).Seconds()
 	res.Passed = len(res.Failures) == 0
@@ -158,6 +253,20 @@ func checkRestored(ctx context.Context, c *client, b backupDoc, skip map[string]
 	if unread > 0 {
 		res.Warnings = append(res.Warnings, fmt.Sprintf("%d tables were only counted, not read in full (the test reads for at most %s)",
 			unread, readBudget))
+	}
+}
+
+// checkFacts warns about the source's databases with tables that aren't in
+// the restore (created after its newest backup).
+func checkFacts(facts *protocol.ForkVerifyFacts, res *protocol.DrillResult) {
+	have := map[string]bool{}
+	for _, d := range res.Databases {
+		have[d.Name] = true
+	}
+	for _, d := range facts.Databases {
+		if d.Tables > 0 && !have[d.Name] {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("%s is on the source but not in its newest backup (created since?)", d.Name))
+		}
 	}
 }
 

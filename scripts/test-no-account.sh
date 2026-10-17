@@ -1,16 +1,19 @@
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
-# Test Rowsafe without an account, for real: a Debian server with systemd as
-# PID 1, PostgreSQL, pgBackRest and a MinIO bucket. The agent runs as its
-# systemd unit with ROWSAFE_URL=unix:///var/lib/rowsafe/control.sock, so its
-# own control plane (internal/localcp) runs inside it, and the rowsafe CLI on
-# the server finds it by itself:
+# Test Rowsafe on a server on its own (the installer's --no-account), for
+# real: a Debian server with systemd as PID 1, PostgreSQL, pgBackRest and a
+# MinIO bucket. The agent runs as its systemd unit with
+# ROWSAFE_URL=unix:///var/lib/rowsafe/control.sock, so its own control plane
+# (internal/localcp) runs inside it, and the rowsafe CLI on the server finds
+# it by itself:
 #
-#   rowsafe-agent setup plan and apply (as the installer runs them), the
-#   restart through the root helper (rowsafe restart), the check, the first
-#   full backup and the first Proof (rowsafe status says protected), a Mark,
-#   a differential backup, the agent restarting (the state is kept), and a
-#   command that needs an account saying so.
+#   sudo rowsafe add (saves the connection string, plans and turns on
+#   backups), the restart through the root helper (rowsafe restart), the
+#   check, the first full backup and the first Proof (rowsafe status says
+#   protected), a Mark, a differential backup, the agent restarting (the
+#   state is kept), Rewind (a copy restored to the Mark has the rows deleted
+#   since; compare; bring them back), and a command that needs the
+#   dashboard saying so.
 #
 # Usage: sh scripts/test-no-account.sh [debian:trixie]   (needs Docker, ~4 min)
 
@@ -87,17 +90,23 @@ EOF
   grep -q "sudo rowsafe" /tmp/nobody.out || { cat /tmp/nobody.out; fail "no plain answer for a user without access"; }
   echo "  ok: other users get a plain 'sudo rowsafe' answer"
 
-  # Setup, as the installer runs it.
-  # shellcheck disable=SC2016 # expanded by the inner shell
-  ag() { runuser -u postgres -- sh -c 'set -a; . /etc/rowsafe/agent.env; set +a; exec /opt/rowsafe/rowsafe-agent "$@"' ag "$@"; }
-  ag setup plan --name shop --port 5432 --socket-dir /var/run/postgresql --id-file /tmp/db.id --timeout 2m ||
-    fail "setup plan"
-  # Exit 10: applied, PostgreSQL needs a restart (as the installer reads it).
-  _rc=0
-  ag setup apply --database "$(cat /tmp/db.id)" --timeout 2m || _rc=$?
-  [ "$_rc" = 0 ] || [ "$_rc" = 10 ] || fail "setup apply (exit $_rc)"
+  # An app's role (root can't sign in as postgres), and rows to lose later.
+  runuser -u postgres -- psql -qX -c "CREATE ROLE app LOGIN SUPERUSER PASSWORD 'app-pw'" -c "CREATE DATABASE shop OWNER app" ||
+    fail "the app role and database"
+  psql_app() { PGPASSWORD=app-pw psql -qAtX -h localhost -U app -d shop "$@"; }
+  psql_app -c "CREATE TABLE orders (id int PRIMARY KEY, note text); INSERT INTO orders SELECT g, 'order ' || g FROM generate_series(1, 5) g" ||
+    fail "the orders table"
+
+  # rowsafe add saves the database and, on its own server, protects it: the
+  # plan, then backups on (--yes answers the question).
+  rowsafe add shop "postgres://app:app-pw@localhost:5432/shop" --yes | tee /tmp/add.out || fail "rowsafe add"
+  grep -q "Saved shop" /tmp/add.out || fail "rowsafe add didn't save shop"
+  grep -q "needs a quick restart" /tmp/add.out || fail "rowsafe add didn't say PostgreSQL needs a restart"
   rowsafe ls | tee /tmp/ls.out
   grep -q "shop" /tmp/ls.out || fail "rowsafe ls doesn't show shop"
+  # Adding it again finds it.
+  rowsafe add shop "postgres://app:app-pw@localhost:5432/shop" --yes | grep -q "protected on this server" ||
+    fail "rowsafe add twice"
 
   # The archiving settings need a restart: through the root helper.
   until_ok 60 "the agent reports that restarts are allowed" sh -c "rowsafe show shop --json 2>/dev/null | grep -q '\"can_restart\": true' || rowsafe show shop | grep -qi restart"
@@ -109,9 +118,11 @@ EOF
   rowsafe backups shop
   rowsafe proofs shop
 
-  # A Mark, then a differential backup on demand.
+  # A Mark, then rows deleted by mistake, then a differential backup.
   rowsafe mark shop before-drop --json | tee /tmp/mark.json
   grep -q '"before-drop"' /tmp/mark.json || fail "the Mark"
+  psql_app -c "DELETE FROM orders WHERE id > 2" || fail "deleting rows"
+  [ "$(psql_app -c 'SELECT count(*) FROM orders')" = 2 ] || fail "the rows weren't deleted"
   rowsafe marks shop | grep -q before-drop || fail "rowsafe marks"
   rowsafe backup shop --type diff || fail "rowsafe backup"
   rowsafe backups shop | tee /tmp/backups.out
@@ -123,10 +134,49 @@ EOF
   until_ok 30 "still active after the agent restarted" sh -c "rowsafe ls | grep shop | grep -q active"
   rowsafe marks shop | grep -q before-drop || fail "the Mark is gone after a restart"
 
-  # What needs an account says so.
-  ! rowsafe insights shop >/tmp/insights.out 2>&1 || fail "insights worked without an account?"
-  grep -q "rowsafe login" /tmp/insights.out || { cat /tmp/insights.out; fail "no pointer to rowsafe login"; }
-  echo "  ok: what needs an account points to rowsafe login"
+  # Rewind: a copy as it was at the Mark, next to production, with the rows.
+  rowsafe restore shop --to before-drop | tee /tmp/restore.out || fail "rowsafe restore"
+  rowsafe restores shop | grep -q ready || fail "rowsafe restores doesn't show the copy ready"
+  rowsafe tasks shop --type rewind_copy --json >/tmp/copy.json || fail "the copy's task"
+  copy_sock=$(grep -o '"socket_dir": *"[^"]*"' /tmp/copy.json | head -1 | sed 's/.*: *"\(.*\)"/\1/')
+  copy_port=$(grep -o '"port": *[0-9]*' /tmp/copy.json | head -1 | sed 's/.*: *//')
+  [ -n "$copy_sock" ] && [ -n "$copy_port" ] || { cat /tmp/copy.json; fail "where the copy listens"; }
+  n=$(runuser -u postgres -- psql -qAtX -h "$copy_sock" -p "$copy_port" -d shop -c 'SELECT count(*) FROM orders') ||
+    fail "reading the copy"
+  [ "$n" = 5 ] || fail "the copy has $n orders, want 5 (as at the Mark)"
+  [ "$(psql_app -c 'SELECT count(*) FROM orders')" = 2 ] || fail "restoring a copy changed production"
+  echo "  ok: the copy at the Mark has the 5 orders; production still has 2"
+  rowsafe rewind compare shop public.orders | tee /tmp/compare.out || fail "rowsafe rewind compare"
+  grep -q "orders" /tmp/compare.out || fail "the comparison doesn't list orders"
+  ! rowsafe rewind rows shop public.orders </dev/null >/tmp/rows.out 2>&1 || fail "rows came back without a confirmation"
+  rowsafe rewind rows shop public.orders --yes || fail "rowsafe rewind rows"
+  [ "$(psql_app -c 'SELECT count(*) FROM orders')" = 5 ] || fail "the rows didn't come back"
+  rowsafe marks shop | grep -q before-rewind-rows || fail "no Mark before bringing rows back"
+  echo "  ok: the deleted rows are back, after a Mark"
+  ! rowsafe rewind database shop --mark before-drop --yes >/tmp/inplace.out 2>&1 || fail "rewound in place"
+  grep -q "rowsafe login" /tmp/inplace.out || { cat /tmp/inplace.out; fail "rewinding in place doesn't say why not"; }
+  rowsafe rewind drop shop --yes || fail "rowsafe rewind drop"
+  until_ok 60 "the copy is gone" sh -c "! rowsafe restores shop | grep -q ready"
+
+  # Alerts: a webhook next to the server gets a signed test notification
+  # (the host checks what it received); no alert fires on a healthy server.
+  rowsafe channels list | grep -q "No notification channels" || fail "rowsafe channels list"
+  rowsafe channels add --type webhook --name ops --url "$HOOK_URL" >/tmp/chan.out 2>&1 || { cat /tmp/chan.out; fail "rowsafe channels add"; }
+  grep -q "whsec_" /tmp/chan.out || { cat /tmp/chan.out; fail "no signing secret"; }
+  rowsafe channels test ops >/tmp/chantest.out 2>&1 || { cat /tmp/chantest.out; fail "rowsafe channels test"; }
+  rowsafe alerts >/tmp/alerts.out 2>&1 || { cat /tmp/alerts.out; fail "rowsafe alerts"; }
+  ! grep -q "backup_stale\|postgres_unreachable\|wal_archiving_failing" /tmp/alerts.out || { cat /tmp/alerts.out; fail "an alert fires on a healthy server"; }
+  rowsafe alerts rules | grep -q backup_stale || fail "rowsafe alerts rules"
+  echo "  ok: alerts go to a webhook; none fire on a healthy server"
+
+  # What needs the dashboard says so.
+  ! rowsafe alerts rules set backup_stale --off >/tmp/rules.out 2>&1 || fail "changed a rule on the server alone?"
+  grep -q "rowsafe login" /tmp/rules.out || { cat /tmp/rules.out; fail "no pointer to rowsafe login"; }
+  echo "  ok: what needs the dashboard points to rowsafe login"
+  # Direct commands use the saved connection string.
+  rowsafe pulse shop >/tmp/pulse-saved.out 2>&1 || true
+  grep -q "/100" /tmp/pulse-saved.out || { cat /tmp/pulse-saved.out; fail "rowsafe pulse shop"; }
+  echo "  ok: rowsafe pulse shop uses the saved connection string"
   # And the connection string mode still works on the same server.
   runuser -u postgres -- /usr/local/bin/rowsafe pulse "postgresql:///postgres?host=/var/run/postgresql" >/tmp/pulse.out 2>&1 || true
   grep -q "/100" /tmp/pulse.out || { cat /tmp/pulse.out; fail "rowsafe pulse on a connection string"; }
@@ -145,7 +195,7 @@ host() {
   chmod 0755 "$W"
   name=rowsafe-noaccount-$$
   cleanup() {
-    docker rm -f "$name-pg" "$name-minio" >/dev/null 2>&1 || true
+    docker rm -f "$name-pg" "$name-minio" "$name-hook" >/dev/null 2>&1 || true
     docker volume rm "$name-pgdata" >/dev/null 2>&1 || true
     docker network rm "$name" >/dev/null 2>&1 || true
     rm -rf "$W"
@@ -169,6 +219,19 @@ host() {
   cipher=$(openssl rand -hex 24)
 
   docker network create "$name" >/dev/null
+  # A webhook receiver for alerts: prints each request's signature and body.
+  cat >"$W/hook.py" <<'PY'
+import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0))).decode()
+        print("X-Rowsafe-Signature: %s %s" % (self.headers.get("X-Rowsafe-Signature"), body), flush=True)
+        self.send_response(204)
+        self.end_headers()
+http.server.HTTPServer(("", 8080), H).serve_forever()
+PY
+  docker run -d --name "$name-hook" --network "$name" --network-alias hook -v "$W/hook.py:/hook.py:ro" \
+    python:3.13-alpine python3 -u /hook.py >/dev/null
   docker run -d --name "$name-minio" --network "$name" --network-alias minio \
     -e MINIO_ROOT_USER=rowsafe-test -e MINIO_ROOT_PASSWORD="$secret" \
     -v "$W/minio-certs:/certs:ro" minio/minio server /data --address :9000 --certs-dir /certs >/dev/null
@@ -213,7 +276,14 @@ EOF
     }
     sleep 1
   done
-  docker exec -e S3_SECRET="$secret" -e CIPHER_PASS="$cipher" "$name-pg" sh /src/scripts/test-no-account.sh --in-container
+  docker exec -e S3_SECRET="$secret" -e CIPHER_PASS="$cipher" -e HOOK_URL="http://hook:8080/rowsafe" "$name-pg" \
+    sh /src/scripts/test-no-account.sh --in-container
+  docker logs "$name-hook" 2>/dev/null | grep -q 'X-Rowsafe-Signature: t=.*,v1=.*"event": *"test"' || {
+    docker logs "$name-hook" >&2
+    echo "test-no-account: the webhook didn't get a signed test notification" >&2
+    exit 1
+  }
+  echo "  ok: the webhook got a signed test notification"
   echo "test-no-account: passed on $image"
 }
 

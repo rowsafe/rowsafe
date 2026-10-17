@@ -284,13 +284,13 @@ func TestCreateAppDatabaseRemote(t *testing.T) {
 	f.mu.Lock()
 	f.decided = &a
 	f.mu.Unlock()
-	txt, _ = callText(t, cs, "get_approval", map[string]any{"id": "apr_1"})
+	txt, _ = callText(t, cs, "get_agent_action", map[string]any{"id": "apr_1"})
 	if !strings.Contains(txt, "task_9") || !strings.Contains(txt, "shown once, in the browser of the person it ran as") {
 		t.Errorf("done: %s", txt)
 	}
 }
 
-// get_approval tells the assistant which server a change created, and that
+// get_agent_action tells the assistant which server a change created, and that
 // it waits for payment.
 func TestApprovalCreatedServer(t *testing.T) {
 	f := &cloudAPI{t: t, servers: []string{cloudServerJSON("payment", "", nil)}}
@@ -300,7 +300,7 @@ func TestApprovalCreatedServer(t *testing.T) {
 		CheckoutURL: "https://app.rowsafe.test/api/rowsafe-cloud/checkout/cs_1", Body: json.RawMessage(`{"checkout_url":"https://x","server":{"id":"cs_1"}}`)}
 	f.decided = &a
 	cs := connect(t, f, Options{AllowWrites: true, MaxWait: time.Second}, nil)
-	txt, res := callText(t, cs, "get_approval", map[string]any{"id": "apr_1"})
+	txt, res := callText(t, cs, "get_agent_action", map[string]any{"id": "apr_1"})
 	for _, want := range []string{"Server cs_1 waits for its first payment", "/api/rowsafe-cloud/checkout/cs_1", "Follow server cs_1 with get_cloud_server"} {
 		if !strings.Contains(txt, want) {
 			t.Errorf("missing %q in %s", want, txt)

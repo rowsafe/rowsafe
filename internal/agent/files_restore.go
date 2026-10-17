@@ -88,12 +88,15 @@ func (a *Agent) filesRestore(ctx context.Context, db protocol.DatabaseSpec, p pr
 		folders = slices.DeleteFunc(slices.Clone(folders), func(f protocol.FilesFolder) bool { return !slices.Contains(p.FolderIDs, f.ID) })
 	}
 	if len(folders) == 0 {
-		return nil, errors.New("no such folder is protected for this database")
+		return nil, fmt.Errorf("no such folder is protected for %s", filesOwner(db))
 	}
 	if (p.Mode == protocol.FilesRestorePaths || p.Mode == protocol.FilesRestoreReferenced) && len(folders) != 1 {
 		return nil, errors.New("choose the one folder the paths are in")
 	}
 	var refs []string
+	if p.Mode == protocol.FilesRestoreReferenced && db.ID == "" {
+		return nil, errors.New("a server's own folders have no database to read file paths from: restore the missing files or chosen paths")
+	}
 	if p.Mode == protocol.FilesRestoreReferenced && !isPostgres(db) {
 		return nil, fmt.Errorf("restoring the files a table column points to works for PostgreSQL; for %s, restore the missing files or chosen paths",
 			protocol.EngineDisplayName(db.Engine))
@@ -196,7 +199,7 @@ func (a *Agent) restoreFolder(ctx context.Context, c protocol.FilesConfig, fo pr
 			keep = min(keep, protocol.FilesMaxKeepDays)
 			until := rt.now().Add(time.Duration(keep) * 24 * time.Hour).UTC()
 			fr.KeptUntil = &until
-			k := filesKeptRecord{FilesKept: protocol.FilesKept{RestoreID: p.RestoreID, DatabaseID: c.DatabaseID, FolderID: fo.ID,
+			k := filesKeptRecord{FilesKept: protocol.FilesKept{RestoreID: p.RestoreID, DatabaseID: c.DatabaseID, HostID: c.HostID, FolderID: fo.ID,
 				Path: fo.Path, Files: before.Files, SizeBytes: before.SizeBytes, CreatedAt: rt.now().UTC(), Expires: &until},
 				Stanza: c.Stanza, SnapshotID: before.ID}
 			rt.update(func(st *filesState) {

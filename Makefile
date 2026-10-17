@@ -22,6 +22,7 @@
 #   make test-upgrade          real PostgreSQL updates and upgrades (16 -> 18, undo) on a systemd Debian container (Docker)
 #   make test-action           the GitHub Action (integrations/github-action) against a mock API
 #   make openai-plugin-zip     the OpenAI plugin directory ZIP (integrations/codex without the hook) in dist/
+#   make mcp-registry VERSION=1.2.3   server.json to the MCP Registry (release.yml does it for each tag)
 #   make dist VERSION=1.2.3 RELEASE_PUBLIC_KEY=...    reproducible release binaries in dist/1.2.3/
 #                              (the CLI for Linux, macOS and Windows; the agent for Linux)
 #   make release VERSION=1.2.3 RELEASE_PUBLIC_KEY=... (needs ROWSAFE_RELEASE_PRIVATE_KEY)
@@ -45,7 +46,7 @@ AGENT_LDFLAGS := -s -w -buildid= -X $(PKG)/internal/agent.Version=$(VERSION) -X 
 MAIN_LDFLAGS := -s -w -buildid= -X main.version=$(VERSION)
 GOBUILD := CGO_ENABLED=0 GOFLAGS=-mod=readonly $(GO) build -trimpath -buildvcs=false
 
-.PHONY: all build test lint check-installer test-installer test-cli-installer test-npm test-installer-cloud test-mongodb test-clickhouse test-redis test-qdrant check-qdrant-pins test-sqlite test-rewind test-secondcopy test-sftp test-mysql test-upgrade test-pooling test-no-account-pooler test-permissions test-action openai-plugin-zip dist release check-release-env clean test-opensearch
+.PHONY: all build test lint check-installer test-installer test-cli-installer test-npm test-installer-cloud test-mongodb test-clickhouse test-redis test-qdrant check-qdrant-pins test-sqlite test-rewind test-secondcopy test-sftp test-mysql test-upgrade test-pooling test-no-account-pooler test-permissions test-action openai-plugin-zip dist release check-release-env clean test-opensearch mcp-registry
 
 all: lint test build
 
@@ -72,7 +73,7 @@ lint: check-installer
 		done; \
 	done
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck -S warning -s sh scripts/install.sh scripts/cli.sh scripts/test-cli.sh scripts/test-install.sh scripts/test-rewind.sh scripts/test-pooling.sh scripts/test-no-account-pooler.sh scripts/test-secondcopy.sh scripts/test-sftp.sh scripts/test-mysql.sh scripts/test-upgrade.sh scripts/test-permissions.sh scripts/rowsafe-agent-guard scripts/rowsafe-pg-restart scripts/rowsafe-firewall scripts/rowsafe-pg-create-cluster scripts/rowsafe-allow scripts/check-qdrant-pins.sh; \
+		shellcheck -S warning -s sh scripts/install.sh scripts/cli.sh scripts/test-cli.sh scripts/test-install.sh scripts/test-rewind.sh scripts/test-pooling.sh scripts/test-no-account-pooler.sh scripts/test-secondcopy.sh scripts/test-sftp.sh scripts/test-mysql.sh scripts/test-upgrade.sh scripts/test-permissions.sh scripts/rowsafe-agent-guard scripts/rowsafe-pg-restart scripts/rowsafe-firewall scripts/rowsafe-pg-create-cluster scripts/rowsafe-allow scripts/check-qdrant-pins.sh scripts/publish-mcp-registry.sh; \
 		shellcheck -S warning -s bash integrations/github-action/scripts/*.sh integrations/github-action/test/*.sh integrations/github-action/export.sh; \
 	else echo "shellcheck not installed; skipping"; fi
 
@@ -231,6 +232,9 @@ release: check-release-env
 	bin/rowsafe-release sign --key-env ROWSAFE_RELEASE_PRIVATE_KEY $(DIST)/manifest.json
 	bin/rowsafe-release verify --public-key '$(RELEASE_PUBLIC_KEY)' $(DIST)/manifest.json $(DIST)/manifest.json.sig
 	cd $(DIST) && if command -v sha256sum >/dev/null 2>&1; then sha256sum -- * > SHA256SUMS; else shasum -a 256 -- * > SHA256SUMS; fi
+
+mcp-registry:
+	sh scripts/publish-mcp-registry.sh $(VERSION)
 
 test-npm:
 	cd integrations/npm && node --test test/wrapper.test.js

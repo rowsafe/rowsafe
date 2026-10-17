@@ -26,8 +26,9 @@ import (
 // (<state>/clones.json), as long as its folder stays allowed.
 
 var (
-	_ agent.EngineFork    = (*Engine)(nil)
-	_ agent.EngineTargets = (*Engine)(nil)
+	_ agent.EngineFork       = (*Engine)(nil)
+	_ agent.EngineTargets    = (*Engine)(nil)
+	_ agent.EngineForkVerify = (*Engine)(nil)
 )
 
 // CloneDirsFile is root's list of folders for SQLite clones, written by
@@ -199,6 +200,70 @@ func (e *Engine) ForkFacts(ctx context.Context, env agent.EngineEnv, source prot
 		return 0, 0, nil, err
 	}
 	return 0, fileSize(source.SocketDir) + fileSize(source.SocketDir+"-wal"), nil, nil
+}
+
+// ---- Proof on another server (agent.EngineForkVerify): the drill's
+// restore and checks (drillRestore), run where there is room, against what
+// the source's server reported. No clone file is written there.
+
+// VerifyFacts reads the source's tables (counted as the drill counts
+// production's) and size. Like the drill, it first lets the newest changes
+// reach the bucket so the test covers them.
+func (e *Engine) VerifyFacts(ctx context.Context, env agent.EngineEnv, source protocol.DatabaseSpec) (*protocol.ForkVerifyFacts, error) {
+	if !protocol.SQLitePath(source.SocketDir) {
+		return nil, fmt.Errorf("this SQLite database has no valid file path (%q)", source.SocketDir)
+	}
+	if err := allowed(env, source.SocketDir); err != nil {
+		return nil, err
+	}
+	if s := e.existingShipper(source.ID); s != nil {
+		if _, err := s.flush(ctx, time.Minute); err != nil {
+			env.Log.Warn("the newest SQLite changes haven't reached the bucket before a restore test elsewhere", "db", source.ID, "err", err)
+		}
+	}
+	tables, err := tableCounts(ctx, source.SocketDir)
+	if err != nil {
+		return nil, fmt.Errorf("reading the database's tables: %w", err)
+	}
+	size := fileSize(source.SocketDir) + fileSize(source.SocketDir+"-wal")
+	return &protocol.ForkVerifyFacts{Databases: []protocol.DBInfo{{Name: "main", SizeBytes: size, Tables: len(tables)}}, SizeBytes: size}, nil
+}
+
+// ForkVerify restores the newest point of p.Source's backups (env.Repo) into
+// a scratch file in the drill folder named after id, checks it like the
+// drill (the backup's recorded row counts, integrity_check,
+// foreign_key_check) and against p.VerifyFacts, and deletes it.
+func (e *Engine) ForkVerify(ctx context.Context, env agent.EngineEnv, p protocol.ForkRestoreParams, id string, tl agent.TaskLogger) (*protocol.DrillResult, error) {
+	started := time.Now()
+	switch {
+	case p.VerifyFacts == nil:
+		return nil, errors.New("the restore test has nothing to check the restore against: the source's server didn't report its database")
+	case !idRE.MatchString(id):
+		return nil, fmt.Errorf("invalid restore test id %q", id)
+	}
+	r, err := openRepo(env, protocol.DatabaseSpec{Stanza: p.Source.Stanza})
+	if err != nil {
+		return nil, err
+	}
+	tables := -1
+	for _, d := range p.VerifyFacts.Databases {
+		if d.Name == "main" {
+			tables = d.Tables
+		}
+	}
+	tl.Printf("restore test of %s (%s) from its backups, on this server", orText(p.Source.Name, p.Source.Stanza), humanBytes(p.VerifyFacts.SizeBytes))
+	compare := func(full copyCheck, dd *protocol.DrillDatabase, res *protocol.DrillResult) {
+		tl.Printf("the source's file can't be read from here: its row counts aren't compared with the restore")
+		if tables < 0 {
+			return
+		}
+		dd.SourceTables = tables
+		if len(full.Tables) < tables {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("%s restored, the source had %d (created in the last moments?)",
+				countWord(len(full.Tables), "table", "tables"), tables))
+		}
+	}
+	return drillRestore(ctx, env, r, safeName(id), started, compare, tl)
 }
 
 // checkClonePath validates a clone's new file: in an allowed folder the

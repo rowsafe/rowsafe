@@ -53,6 +53,10 @@ proprietary (api.rowsafe.sh, app.rowsafe.sh).
   budget); `ask` is gone (read as act). A connection or key made before agents could act as their
   person (`OAuthConnection.ActsAsYou`, `APIKey.ActsAsCreator` false), or a key made by a key, is
   refused until its person lets it act. No tool can change the setting.
+  `get_agent_action` / `list_agent_actions` show what agents did (the old names `get_approval` /
+  `list_approvals` still work, unlisted: `toolAliases`). `server.json` is the MCP Registry entry
+  (`sh.rowsafe/rowsafe`): release.yml's `mcp-registry` job publishes it at each tag's version
+  (`scripts/publish-mcp-registry.sh`, secret `MCP_REGISTRY_PRIVATE_KEY`, the DNS key of rowsafe.sh).
 - `scripts/install.sh`: the installer served at `curl -fsSL https://rowsafe.sh | sudo sh -s rse_...`
   (guided storage setup, finds PostgreSQL, plan → yes → apply, optional restart).
   `scripts/rowsafe-pg-restart`: the only root component (a sandboxed systemd path/service pair that
