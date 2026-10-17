@@ -485,7 +485,7 @@ func savedAdd(ctx context.Context, args []string) error {
 		return nil
 	}
 	if res.Server != nil {
-		fmt.Printf("\n%s %s   %s\n", bold("Next:"), cyan("sudo rowsafe status "+name), dim("(then: rowsafe pulse "+name+", rowsafe mark "+name+" LABEL, rowsafe restore "+name+" --to TIME)"))
+		fmt.Printf("\n%s %s   %s\n", bold("Next:"), cyan(serverCLI()+" status "+name), dim("(then: rowsafe pulse "+name+", rowsafe mark "+name+" LABEL, rowsafe restore "+name+" --to TIME)"))
 		return nil
 	}
 	fmt.Printf("\n%s %s   %s\n", bold("Next:"), cyan("rowsafe pulse "+name), dim("(or rowsafe use "+name+" in a project, then just rowsafe pulse)"))

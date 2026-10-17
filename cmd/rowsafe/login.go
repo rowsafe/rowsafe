@@ -134,6 +134,9 @@ func login(ctx context.Context, args []string) error {
 	if _, err := parse(fs, args, false); err != nil {
 		return err
 	}
+	if err := sidecarLoginRefusal(); err != nil {
+		return err
+	}
 	// On a server without an account, logging in connects it (handover.go).
 	local, err := findNoAccount()
 	if err != nil {
@@ -370,4 +373,16 @@ func agentOnAccount() bool {
 	}
 	_, local := protocol.LocalSocket(envValue(data, "ROWSAFE_URL"))
 	return !local
+}
+
+// sidecarLoginRefusal: in the agent's Docker container running on its own
+// (ROWSAFE_URL=unix://...), logging in can't connect it to the dashboard
+// yet (the handover moves a server's systemd agent), and a login there would
+// only mix the two.
+func sidecarLoginRefusal() error {
+	if _, ok := protocol.LocalSocket(os.Getenv("ROWSAFE_URL")); !ok || !inSidecar() {
+		return nil
+	}
+	return errors.New("this container runs Rowsafe on its own, and connecting it to the dashboard from here isn't supported yet. " +
+		"Nothing was changed. For the dashboard, run the agent with an account: https://rowsafe.sh/docs/guides/docker")
 }

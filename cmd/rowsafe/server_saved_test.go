@@ -44,6 +44,47 @@ func TestLocalCluster(t *testing.T) {
 	}
 }
 
+// In the agent's Docker container, another host is this server's only when
+// it is the PostgreSQL behind the shared socket; outside it, never.
+func TestServerClusterSidecar(t *testing.T) {
+	t.Setenv("ROWSAFE_MODE", "")
+	if _, _, ok := serverCluster(t.Context(), "postgres://app@postgres:5432/shop"); ok {
+		t.Error("a compose service's host is this server's outside the agent's container")
+	}
+	if serverCLI() != "sudo rowsafe" {
+		t.Errorf("serverCLI() = %q on a server", serverCLI())
+	}
+	t.Setenv("ROWSAFE_MODE", "docker-sidecar")
+	if serverCLI() != "rowsafe" {
+		t.Errorf("serverCLI() = %q in the agent's container", serverCLI())
+	}
+	if port, sock, ok := serverCluster(t.Context(), "postgresql:///shop?host=/var/run/postgresql"); !ok || port != 5432 || sock != "/var/run/postgresql" {
+		t.Errorf("the shared socket: %d %q %v", port, sock, ok)
+	}
+	for _, conn := range []string{"mysql://app@db:3306/shop", "postgres://app@db.invalid/shop?connect_timeout=2"} {
+		if _, _, ok := serverCluster(t.Context(), conn); ok {
+			t.Errorf("%s: this server's PostgreSQL in the container", conn)
+		}
+	}
+}
+
+func TestSidecarLoginRefusal(t *testing.T) {
+	t.Setenv("ROWSAFE_MODE", "docker-sidecar")
+	t.Setenv("ROWSAFE_URL", protocol.LocalControlURL)
+	if err := sidecarLoginRefusal(); err == nil || !strings.Contains(err.Error(), "Nothing was changed") {
+		t.Errorf("in the container on its own: %v", err)
+	}
+	t.Setenv("ROWSAFE_URL", "https://api.rowsafe.sh")
+	if err := sidecarLoginRefusal(); err != nil {
+		t.Errorf("in the container with an account: %v", err)
+	}
+	t.Setenv("ROWSAFE_MODE", "")
+	t.Setenv("ROWSAFE_URL", protocol.LocalControlURL)
+	if err := sidecarLoginRefusal(); err != nil {
+		t.Errorf("on a server: %v", err)
+	}
+}
+
 // localServer runs this server's control plane (internal/localcp) on a Unix
 // socket, with shop protected (a full backup, an archived Mark), and a fake
 // agent that runs every task it is given.
