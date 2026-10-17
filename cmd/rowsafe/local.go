@@ -25,7 +25,7 @@ import (
 // localHelp is rowsafe help local.
 const localHelp = `Without an account: Rowsafe on a PostgreSQL database this computer reaches
 directly. Give a connection string instead of NAME, or set DATABASE_URL (used
-when you aren't logged in; ROWSAFE_DATABASE_URL always):
+when you aren't logged in):
 
   rowsafe pulse postgres://USER@HOST:5432/DB    health score and findings (exit 3 below 70)
   rowsafe fix CONN [FINDING [FIX] | NUMBER] [--yes]
@@ -70,9 +70,10 @@ type localDB struct {
 }
 
 // localArgs finds a local command's database: a connection string among
-// args (removed from them), $ROWSAFE_DATABASE_URL, or $DATABASE_URL when
-// the CLI has no saved login. ok is false when the command should go to the
-// control plane.
+// args (removed from them), or $DATABASE_URL when the CLI has no saved
+// login. ok is false when the command should go to the control plane.
+// (Not ROWSAFE_DATABASE_URL: rowsafed's own metadata database, set where
+// operators run the CLI.)
 func localArgs(args []string, loggedIn bool) (db *localDB, rest []string, ok bool, err error) {
 	for i, a := range args {
 		if a == "--" {
@@ -87,20 +88,14 @@ func localArgs(args []string, loggedIn bool) (db *localDB, rest []string, ok boo
 			return &localDB{DB: d}, rest, true, nil
 		}
 	}
-	envs := []string{"ROWSAFE_DATABASE_URL"}
-	if !loggedIn {
-		// An app's own DATABASE_URL only when there is no login to use.
-		envs = append(envs, "DATABASE_URL")
-	}
-	for _, env := range envs {
-		if v := strings.TrimSpace(os.Getenv(env)); local.IsConnString(v) {
-			d, err := local.Open(v)
-			if err != nil {
-				return nil, nil, true, fmt.Errorf("%s: %w", env, err)
-			}
-			d.Ref = ""
-			return &localDB{DB: d, env: env}, args, true, nil
+	// An app's own DATABASE_URL only when there is no login to use.
+	if v := strings.TrimSpace(os.Getenv("DATABASE_URL")); !loggedIn && local.IsConnString(v) {
+		d, err := local.Open(v)
+		if err != nil {
+			return nil, nil, true, fmt.Errorf("DATABASE_URL: %w", err)
 		}
+		d.Ref = ""
+		return &localDB{DB: d, env: "DATABASE_URL"}, args, true, nil
 	}
 	return nil, args, false, nil
 }
@@ -362,6 +357,10 @@ func localSettings(ctx context.Context, l *localDB, args []string) error {
 	asJSON := fs.Bool("json", false, "print JSON")
 	var lf localFlags
 	lf.add(fs)
+	if len(args) > 0 && (args[0] == "set" || args[0] == "undo") {
+		return fmt.Errorf("rowsafe settings %s needs an account (rowsafe login). Without one, %s applies the settings Rowsafe recommends",
+			args[0], l.Command("tune"))
+	}
 	pos, err := positionals(fs, args)
 	if err != nil {
 		return err

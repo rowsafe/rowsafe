@@ -43,17 +43,19 @@ func TestLocalArgs(t *testing.T) {
 	if err != nil || !ok || db.env != "DATABASE_URL" || db.Command("fix") != "rowsafe fix" {
 		t.Fatalf("DATABASE_URL: %+v %v %v", db, ok, err)
 	}
-	t.Setenv("ROWSAFE_DATABASE_URL", "postgresql://app@other.example.com/crm")
+	// Its words are the command's own (rowsafe fix vacuum_behind).
+	if _, rest, ok, _ := localArgs([]string{"vacuum_behind"}, false); !ok || !slices.Equal(rest, []string{"vacuum_behind"}) {
+		t.Errorf("finding with DATABASE_URL: %v %v", rest, ok)
+	}
+	// ROWSAFE_DATABASE_URL is rowsafed's metadata database (set on the
+	// control plane, where operators also run the CLI): never used here.
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("ROWSAFE_DATABASE_URL", "postgres://rowsafe@localhost/rowsafe")
 	for _, loggedIn := range []bool{false, true} {
-		if db, _, _, _ := localArgs(nil, loggedIn); db == nil || db.env != "ROWSAFE_DATABASE_URL" || db.Name() != "crm" {
-			t.Errorf("ROWSAFE_DATABASE_URL first (logged in %v): %+v", loggedIn, db)
+		if _, _, ok, _ := localArgs([]string{"tvhub"}, loggedIn); ok {
+			t.Errorf("ROWSAFE_DATABASE_URL used (logged in %v)", loggedIn)
 		}
 	}
-	// Its words are the command's own (rowsafe fix vacuum_behind).
-	if _, rest, ok, _ := localArgs([]string{"vacuum_behind"}, true); !ok || !slices.Equal(rest, []string{"vacuum_behind"}) {
-		t.Errorf("finding with ROWSAFE_DATABASE_URL: %v %v", rest, ok)
-	}
-	t.Setenv("ROWSAFE_DATABASE_URL", "")
 	t.Setenv("DATABASE_URL", "mysql://app@db/shop")
 	if _, _, ok, _ := localArgs(nil, false); ok {
 		t.Error("a MySQL DATABASE_URL")
@@ -73,6 +75,12 @@ func TestNotLoggedIn(t *testing.T) {
 			t.Errorf("rowsafe %s: %v", strings.Join(args, " "), err)
 		}
 	}
+	// Without an account, settings set and undo say what to use instead.
+	t.Setenv("DATABASE_URL", "postgres://app@db.example.com/shop")
+	if err := dispatch(t.Context(), []string{"settings", "set", "work_mem=8MB", "--yes"}); err == nil || !strings.Contains(err.Error(), "needs an account") {
+		t.Errorf("settings set without an account: %v", err)
+	}
+	t.Setenv("DATABASE_URL", "")
 	var lf localFlags
 	lf.memory = "16GB"
 	if o, err := lf.options(); err != nil || o.MemoryBytes != 16<<30 {
