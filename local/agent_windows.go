@@ -24,8 +24,8 @@ func changeSettings(context.Context, pginspect.Target, collect.Target, protocol.
 	return nil, "", errFixWindows
 }
 
-// indexCatalog: the agent's catalog code doesn't build on Windows yet;
-// rowsafe explain works without it (it only can't name a missing index).
+// indexCatalog: on Windows, rowsafe explain explains the plan without
+// suggesting an index (that reads the catalogs with the agent's code).
 func indexCatalog(context.Context, *pgx.Conn, []indexadvisor.Relation) (indexadvisor.Catalog, error) {
 	return nil, errFixWindows
 }

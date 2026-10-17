@@ -24,8 +24,7 @@ func changeSettings(ctx context.Context, t pginspect.Target, read collect.Target
 	return agent.ChangeSettings(ctx, t, read, p)
 }
 
-// indexCatalog is the agent's index catalog, which rowsafe explain uses
-// to say which indexes a plan could use.
+// indexCatalog reads what index advice needs (rowsafe explain).
 func indexCatalog(ctx context.Context, conn *pgx.Conn, rels []indexadvisor.Relation) (indexadvisor.Catalog, error) {
 	return agent.IndexCatalog(ctx, conn, rels)
 }

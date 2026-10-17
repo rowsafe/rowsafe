@@ -136,7 +136,7 @@ type noAccountServer struct {
 func newNoAccountServer(t *testing.T, open ...protocol.TaskView) *noAccountServer {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		t.Skip("connecting a server is for the database server itself (Linux), over a Unix socket")
+		t.Skip("a server without an account is a Linux server")
 	}
 	dir, err := os.MkdirTemp("/tmp", "rs-na") // short: a socket path has a length limit
 	if err != nil {
