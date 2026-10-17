@@ -32,7 +32,7 @@ var missingLibraryRE = regexp.MustCompile(`\$libdir/(timescaledb)-([0-9][0-9A-Za
 // ExtensionUse reads which of the extensions Rowsafe installs are turned
 // on where, on the server conn is connected to (any database); t connects
 // to the others. Nil when none is.
-func ExtensionUse(ctx context.Context, t Target, conn *pgx.Conn) ([]protocol.ExtensionUse, error) {
+func ExtensionUse(ctx context.Context, t Target, conn Querier) ([]protocol.ExtensionUse, error) {
 	names := make([]string, len(protocol.PGPackagedExtensions))
 	for i, e := range protocol.PGPackagedExtensions {
 		names[i] = e.Name
@@ -87,11 +87,13 @@ func ExtensionUse(ctx context.Context, t Target, conn *pgx.Conn) ([]protocol.Ext
 			break
 		}
 		c := conn
+		var opened *session
 		if db != here {
-			if c, err = t.connect(ctx, db); err != nil {
+			if opened, err = t.connect(ctx, db); err != nil {
 				truncated = true
 				continue
 			}
+			c = opened
 		}
 		rows, err := c.Query(ctx, `SELECT extname::text, extversion FROM pg_extension WHERE extname = ANY($1)`, names)
 		if err == nil {
@@ -130,8 +132,8 @@ func ExtensionUse(ctx context.Context, t Target, conn *pgx.Conn) ([]protocol.Ext
 				truncated = true
 			}
 		}
-		if c != conn {
-			c.Close(context.WithoutCancel(ctx))
+		if opened != nil {
+			opened.Close(context.WithoutCancel(ctx))
 		}
 	}
 	var out []protocol.ExtensionUse

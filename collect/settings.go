@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/rowsafe/rowsafe/protocol"
@@ -33,13 +32,7 @@ const pendingNotApplied = "setting could not be applied"
 // where /proc is mounted ("" is /proc). It opens its own connection
 // without session settings, so every value is the cluster's.
 func ReadSettings(ctx context.Context, t Target, procRoot string) (*protocol.SettingsSnapshot, error) {
-	cfg, err := t.config(t.MaintenanceDB())
-	if err != nil {
-		return nil, err
-	}
-	cfg.ConnectTimeout = 5 * time.Second
-	cfg.RuntimeParams["application_name"] = "rowsafe-agent-monitor"
-	conn, err := pgx.ConnectConfig(ctx, cfg)
+	conn, err := t.connectSession(ctx, t.MaintenanceDB(), "rowsafe-agent-monitor", nil)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to PostgreSQL on %s: %w", t, err)
 	}
@@ -60,7 +53,7 @@ func ReadSettings(ctx context.Context, t Target, procRoot string) (*protocol.Set
 	return snap, nil
 }
 
-func readSettings(ctx context.Context, conn *pgx.Conn, procRoot string) (*protocol.SettingsSnapshot, error) {
+func readSettings(ctx context.Context, conn Querier, procRoot string) (*protocol.SettingsSnapshot, error) {
 	snap := &protocol.SettingsSnapshot{Settings: []protocol.PGSetting{}}
 	var dataDir string
 	// pg_settings hides data_directory from roles that may not read it
@@ -129,7 +122,7 @@ func readSettings(ctx context.Context, conn *pgx.Conn, procRoot string) (*protoc
 // readFileSettings adds what only pg_file_settings knows (superusers):
 // values waiting for a restart, postgresql.auto.conf's lines, and errors
 // that would stop PostgreSQL at its next start.
-func readFileSettings(ctx context.Context, conn *pgx.Conn, snap *protocol.SettingsSnapshot) error {
+func readFileSettings(ctx context.Context, conn Querier, snap *protocol.SettingsSnapshot) error {
 	rows, err := conn.Query(ctx, `
 		SELECT coalesce(sourcefile, ''), coalesce(sourceline, 0), coalesce(name, ''), coalesce(setting, ''), coalesce(error, '')
 		FROM pg_file_settings ORDER BY seqno`)
