@@ -98,7 +98,13 @@ func securityServer(t *testing.T) *secAgent {
 		Roles:    []protocol.RoleInfo{{Name: "app", CanLogin: true, Password: protocol.PasswordSCRAM}},
 		Clients:  []protocol.ClientAddr{{Address: "10.0.1.5", Users: []string{"app"}, Sessions: 1}},
 		Firewall: protocol.FirewallState{Reason: "Root didn't allow Rowsafe to manage the firewall for this port when installing the agent."}}}
-	go a.run(ctx, sock)
+	ready := make(chan struct{})
+	go a.run(ctx, sock, ready)
+	select { // the CLI's first command finds the agent reporting
+	case <-ready:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the fake agent never reported")
+	}
 
 	_, _ = cliEnv(t, &fakeAPI{})
 	t.Setenv("ROWSAFE_API_KEY", "")
@@ -107,25 +113,29 @@ func securityServer(t *testing.T) *secAgent {
 	return a
 }
 
-func (a *secAgent) run(ctx context.Context, sock string) {
+func (a *secAgent) run(ctx context.Context, sock string, ready chan struct{}) {
 	hc := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", sock)
 	}}}
-	post := func(path string, in, out any) {
+	post := func(path string, in, out any) bool {
 		body, _ := json.Marshal(in)
 		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://local"+path, bytes.NewReader(body))
 		req.Header.Set("Authorization", "Bearer rsl_sec")
 		resp, err := hc.Do(req)
 		if err != nil {
-			return
+			return false
 		}
 		defer resp.Body.Close()
 		if out != nil {
 			_ = json.NewDecoder(resp.Body).Decode(out)
 		}
+		return resp.StatusCode < 300
 	}
 	for ctx.Err() == nil {
-		post("/v1/agent/heartbeat", protocol.HeartbeatRequest{Hostname: "db1", AgentVersion: "0.10.22"}, nil)
+		if post("/v1/agent/heartbeat", protocol.HeartbeatRequest{Hostname: "db1", AgentVersion: "0.10.22"}, nil) && ready != nil {
+			close(ready)
+			ready = nil
+		}
 		var claim protocol.ClaimResponse
 		post("/v1/agent/tasks/claim", protocol.ClaimRequest{}, &claim)
 		task := claim.Task
