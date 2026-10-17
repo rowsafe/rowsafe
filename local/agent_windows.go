@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/rowsafe/rowsafe/collect"
+	"github.com/rowsafe/rowsafe/internal/indexadvisor"
 	"github.com/rowsafe/rowsafe/internal/pginspect"
 	"github.com/rowsafe/rowsafe/protocol"
 )
@@ -19,4 +22,10 @@ func maintain(context.Context, pginspect.Target, protocol.MaintenanceParams) (*p
 
 func changeSettings(context.Context, pginspect.Target, collect.Target, protocol.SettingsParams) (*protocol.SettingsResult, string, error) {
 	return nil, "", errFixWindows
+}
+
+// indexCatalog: the agent's catalog code doesn't build on Windows yet;
+// rowsafe explain works without it (it only can't name a missing index).
+func indexCatalog(context.Context, *pgx.Conn, []indexadvisor.Relation) (indexadvisor.Catalog, error) {
+	return nil, errFixWindows
 }
