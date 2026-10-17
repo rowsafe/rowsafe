@@ -280,7 +280,7 @@ func LibraryInstalled(ctx context.Context, conn *pgx.Conn, lib string) bool {
 	}
 	var ok bool
 	err := conn.QueryRow(ctx, `
-		SELECT EXISTS (SELECT 1 FROM pg_config c, unnest(ARRAY['.so', '.dylib']) AS suffix,
+		SELECT EXISTS (SELECT 1 FROM pg_config c, unnest(ARRAY['.so', '.dylib', '.dll']) AS suffix,
 		                    LATERAL pg_stat_file(c.setting || '/' || $1 || suffix, true) f
 		               WHERE c.name = 'PKGLIBDIR' AND f.size IS NOT NULL AND NOT f.isdir)`, lib).Scan(&ok)
 	return err == nil && ok
