@@ -42,6 +42,7 @@ type state struct {
 	Backups   []protocol.Backup       `json:"backups"`
 	Drills    []protocol.Drill        `json:"drills"`
 	Marks     []protocol.RestorePoint `json:"restore_points"`
+	Copies    []*copyRec              `json:"copies,omitempty"` // Rewind (rewind.go)
 }
 
 // hostRec is this server, once its agent has enrolled.
@@ -169,6 +170,10 @@ func (s *state) prune() {
 	if n := len(s.Marks) - keepMarks; n > 0 {
 		s.Marks = s.Marks[n:]
 	}
+	// Copies gone for a week are forgotten.
+	s.Copies = slices.DeleteFunc(s.Copies, func(c *copyRec) bool {
+		return c.RemovedAt != nil && time.Since(*c.RemovedAt) > 7*24*time.Hour
+	})
 }
 
 // db finds a database by ID or name.

@@ -1009,6 +1009,10 @@ func waitAndReport(ctx context.Context, c *client.Client, taskID, dbName string)
 			switch {
 			case !res.Applied:
 				fmt.Printf("\nNext: rowsafe apply %s\n", dbName)
+			case res.RestartRequired && onServer:
+				fmt.Printf("\nNext: PostgreSQL needs a quick restart for backups to start. Restart it when it suits you:\n"+
+					"  sudo rowsafe restart %s (asks first), or sudo systemctl restart postgresql\n"+
+					"Rowsafe notices the restart by itself and finishes; sudo rowsafe verify %s checks right away.\n", dbName, dbName)
 			case res.RestartRequired:
 				fmt.Printf("\nNext: PostgreSQL needs a quick restart for backups to start. Restart it when it suits you:\n"+
 					"  `rowsafe restart %s`, Restart PostgreSQL in the dashboard, or on the server: sudo systemctl restart postgresql\n"+

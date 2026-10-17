@@ -130,7 +130,7 @@ func login(ctx context.Context, args []string) error {
 	key := fs.String("key", "", "log in with an existing API key (rsk_...) instead of the browser")
 	host, _ := os.Hostname()
 	name := fs.String("name", "rowsafe CLI on "+host, "what the new API key is called (shown in the dashboard)")
-	yes := fs.Bool("yes", false, "on a server that runs Rowsafe without an account: connect it without asking")
+	yes := fs.Bool("yes", false, "on a database server: connect it to the dashboard without asking")
 	if _, err := parse(fs, args, false); err != nil {
 		return err
 	}
@@ -141,10 +141,10 @@ func login(ctx context.Context, args []string) error {
 	}
 	if local != nil {
 		if err := local.ready(); err != nil {
-			return fmt.Errorf("this server runs Rowsafe without an account, and logging in here connects it to the account. Not yet: %w", err)
+			return fmt.Errorf("this server runs Rowsafe on its own, and logging in here connects it to the dashboard. Not yet: %w", err)
 		}
 		if !*yes && !stdinIsTerminal() {
-			return fmt.Errorf("this server runs Rowsafe without an account (%s), and logging in here connects it to the account: pass --yes for that (no terminal to ask on). Nothing was changed", local.what())
+			return fmt.Errorf("this server runs Rowsafe on its own (%s), and logging in here connects it to the dashboard: pass --yes for that (no terminal to ask on). Nothing was changed", local.what())
 		}
 	}
 	saved, _, err := readSavedConfig()
@@ -197,10 +197,10 @@ func connectNoAccount(ctx context.Context, local *noAccount, cfg config, yes boo
 		org = cfg.Org.ID
 	}
 	if !yes {
-		fmt.Printf("This server runs Rowsafe without an account (%s).\n", local.what())
+		fmt.Printf("This server runs Rowsafe on its own (%s).\n", local.what())
 		fmt.Printf("Connect it to %s? Its backups, Proofs and Marks come along; the Rowsafe agent restarts, PostgreSQL doesn't. [Y/n] ", org)
 		if !answerYes() {
-			return errors.New("not logged in: this server stays without an account, as it was. sudo rowsafe login connects it whenever you like")
+			return errors.New("not logged in: this server stays on its own, as it was. sudo rowsafe login connects it whenever you like")
 		}
 	}
 	if err := local.connect(ctx, cfg, os.Stdout); err != nil {
@@ -355,7 +355,7 @@ func logout(ctx context.Context, args []string) error {
 	fmt.Println("Logged out; removed", p)
 	if agentOnAccount() {
 		fmt.Println("The Rowsafe agent on this server stays connected to the account: logging out only signs this CLI out.\n" +
-			"To use this server without an account again, run the installer with --no-account:\n" +
+			"To run this server on its own again, run the installer with --no-account:\n" +
 			"  curl -fsSL https://rowsafe.sh | sudo sh -s -- --no-account")
 	}
 	return nil

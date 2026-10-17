@@ -24,18 +24,26 @@ import (
 // agent on the server and an account (rowsafe login).
 
 // localHelp is rowsafe help local.
-const localHelp = `Without an account.
+const localHelp = `Save a database once, then use it by name.
 
-On your database server (PostgreSQL): continuous backups to your own bucket,
-Marks, a weekly restore test and Pulse, with no account (restoring with
-Rewind needs an account for now):
+On your database server (PostgreSQL), rowsafe add also protects it:
+continuous backups to your own bucket, Marks, a weekly restore test and
+restore to any second, all on that server:
 
   curl -fsSL https://rowsafe.sh | sudo sh -s -- --no-account
-  sudo rowsafe status NAME           protected? (backups, the change log, Proof)
-  sudo rowsafe mark NAME LABEL       a restore point, e.g. before a migration
-  sudo rowsafe backups NAME | proofs NAME | backup NAME | proof NAME
-  sudo rowsafe login                 later: connects this server to an account (the dashboard,
-                                     alerts, Rewind), keeping its backups, Proofs and Marks
+  sudo rowsafe add shop postgresql:///shop
+                                     saves it and, once you say yes, turns on backups (ALTER SYSTEM
+                                     and a reload; PostgreSQL restarts only when you ask)
+  sudo rowsafe status shop           protected? (backups, the change log, Proof)
+  sudo rowsafe mark shop LABEL       a restore point, e.g. before a migration
+  sudo rowsafe restore shop --to "10m ago"    (or --to LABEL, a Mark)
+                                     a copy as it was then, next to production (never touches it)
+  sudo rowsafe rewind compare shop   rows deleted, changed or added since, by primary key
+  sudo rowsafe rewind rows shop TABLE...
+                                     bring the deleted rows back (a Mark first; asks you to type the name)
+  sudo rowsafe backups shop | proofs shop | restores shop | backup shop | proof shop
+  sudo rowsafe login                 later: adds the dashboard (alerts, history, your team, rewinding the
+                                     whole database in place), keeping its backups, Proofs and Marks
 
 From anywhere, on a PostgreSQL, MySQL or MariaDB database this computer
 reaches (also managed ones): save it once, then use it by name:
@@ -112,8 +120,8 @@ to see other sessions.
 
 Rowsafe can't see another server's memory or disk over a connection: pass
 --memory and --cpus for settings advice. Backups, restore to any second, the
-weekly restore test, alerts and history need the agent on the server
-(https://rowsafe.sh).`
+weekly restore test and restores run on the database's server: install
+Rowsafe there (https://rowsafe.sh) and run sudo rowsafe add on it.`
 
 // localCommands are the commands that work on a connection string.
 var localCommands = map[string]func(context.Context, *localDB, []string) error{
@@ -187,7 +195,7 @@ func localControl(want string) (url string, err error) {
 	case err == nil && fi.Mode()&os.ModeSocket != 0:
 		return "unix://" + sock, nil
 	case errors.Is(err, os.ErrPermission):
-		return "", errors.New("this server runs Rowsafe without an account, and its agent only answers root: run sudo rowsafe ...")
+		return "", errors.New("Rowsafe's agent on this server only answers root: run sudo rowsafe ...")
 	case want != "" && err != nil:
 		return "", fmt.Errorf("ROWSAFE_URL %s: the agent isn't listening there (check it with systemctl status rowsafe-agent)", want)
 	}
@@ -196,9 +204,10 @@ func localControl(want string) (url string, err error) {
 
 // notLoggedIn explains what works without an account.
 const notLoggedIn = "not logged in: run `rowsafe login`.\n" +
-	"Without an account, pulse, fix, insights, top, activity, settings, tune, schema, explain, preview and mcp work on a database directly (PostgreSQL; MySQL and MariaDB but schema, explain and preview):\n" +
+	"pulse, fix, insights, top, activity, settings, tune, schema, explain, preview and mcp work on a database directly (PostgreSQL; MySQL and MariaDB but schema, explain and preview):\n" +
 	"  rowsafe add shop postgres://user@host:5432/dbname   then: rowsafe pulse shop\n" +
-	"  or once: rowsafe pulse postgres://user@host:5432/dbname   (or set DATABASE_URL)"
+	"  or once: rowsafe pulse postgres://user@host:5432/dbname   (or set DATABASE_URL)\n" +
+	"Backups, Marks and restores run on the database's server: install Rowsafe there (https://rowsafe.sh), then sudo rowsafe add NAME postgres://... on it"
 
 // localFlags are the options of the commands that evaluate a server.
 type localFlags struct {
@@ -453,7 +462,7 @@ func localSettings(ctx context.Context, l *localDB, args []string) error {
 	var lf localFlags
 	lf.add(fs)
 	if len(args) > 0 && (args[0] == "set" || args[0] == "undo") {
-		return fmt.Errorf("rowsafe settings %s needs an account (rowsafe login). Without one, %s applies the settings Rowsafe recommends",
+		return fmt.Errorf("rowsafe settings %s needs the dashboard (rowsafe login). Here, %s applies the settings Rowsafe recommends",
 			args[0], l.Command("tune"))
 	}
 	pos, err := positionals(fs, args)
@@ -584,7 +593,7 @@ func localMCP(ctx context.Context, l *localDB, args []string) error {
 	if *allowWrites {
 		mode = "read and fix"
 	}
-	fmt.Fprintf(os.Stderr, "rowsafe mcp: serving %s tools for %s on %s on stdio (no account; nothing leaves this machine)\n", mode, l.Name(), l.Host())
+	fmt.Fprintf(os.Stderr, "rowsafe mcp: serving %s tools for %s on %s on stdio (nothing leaves this machine)\n", mode, l.Name(), l.Host())
 	s := local.NewMCPServer(l.DB, local.MCPOptions{AllowWrites: *allowWrites, Version: version})
 	if err := s.Run(ctx, &sdk.StdioTransport{}); err != nil && ctx.Err() == nil {
 		return err
