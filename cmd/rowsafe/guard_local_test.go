@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -122,6 +123,9 @@ func TestPreviewWithoutAccount(t *testing.T) {
 // restore point through the agent's local control plane, as with an
 // account, and finds the only database by itself.
 func TestGuardLocalControlPlane(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a server without an account is a Linux server")
+	}
 	_, _ = cliEnv(t, &fakeAPI{})
 	dir, err := os.MkdirTemp("/tmp", "rsg") // a socket path under 104 bytes
 	if err != nil {
