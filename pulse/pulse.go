@@ -1,10 +1,11 @@
-// Package pulse turns one reading of a PostgreSQL, MySQL, MariaDB or
-// MongoDB database into a health score from 0 to 100 and a short list of findings
+// Package pulse turns one reading of a PostgreSQL, MySQL, MariaDB, MongoDB,
+// Redis or Valkey database into a health score from 0 to 100 and a short list of findings
 // in plain language, each with the fixes Rowsafe can apply. It needs no
 // agent and no account: `rowsafe pulse postgres://...` reads the database
 // (collect.Read; MySQL and MariaDB: the MySQL engine's reading; MongoDB:
-// the MongoDB engine's) and evaluates it here (MySQL's rules: mysql.go;
-// MongoDB's: mongodb.go). It is pure and
+// the MongoDB engine's; Redis and Valkey: the Redis engine's) and
+// evaluates it here (MySQL's rules: mysql.go; MongoDB's: mongodb.go;
+// Redis's: redis.go). It is pure and
 // deterministic: the same input always gives the same result.
 //
 // It covers what the database itself shows: connections, cleanup (vacuum,
@@ -44,12 +45,14 @@ const (
 )
 
 var categoryCaps = map[string]int{
-	CatProtection:  50,
-	CatDisk:        30,
-	CatConnections: 15,
-	CatMaintenance: 35,
-	CatPerformance: 15,
-	CatReplication: 25,
+	CatProtection: 50,
+	// Redis and Valkey (redis.go), as the dashboard counts them.
+	CatAvailability: 40,
+	CatDisk:         30,
+	CatConnections:  15,
+	CatMaintenance:  35,
+	CatPerformance:  15,
+	CatReplication:  25,
 }
 
 // Score caps by the worst severity present.
@@ -64,14 +67,17 @@ type Input struct {
 	// Database and Host name it for people (never with a password).
 	Database, Host string
 	// Engine is protocol.EngineMySQL or EngineMariaDB for their rules
-	// (mysql.go), EngineMongoDB for MongoDB's (mongodb.go); "" or
-	// EnginePostgreSQL is PostgreSQL.
+	// (mysql.go), EngineMongoDB for MongoDB's (mongodb.go), EngineRedis or
+	// EngineValkey for Redis's (redis.go); "" or EnginePostgreSQL is
+	// PostgreSQL.
 	Engine string
 	// Metrics are collect's gauges (collect.M*).
 	Metrics map[string]float64
 	// Activity: sessions running or idle in a transaction for over a
 	// minute, and lock chains.
-	Activity    *protocol.Activity
+	Activity *protocol.Activity
+	// Redis is Redis's and Valkey's health detail (redis.go).
+	Redis       *protocol.RedisStatus
 	Slots       []protocol.ReplicationSlot
 	Replication *protocol.ReplicationStatus
 	Insights    *protocol.Insights
@@ -187,6 +193,8 @@ func Evaluate(in Input, now time.Time) protocol.DatabaseHealth {
 		e.mysql(fresh) // mysql.go
 	case e.mongodb():
 		e.mongo(fresh) // mongodb.go
+	case e.redisFamily():
+		e.redis(fresh) // redis.go
 	default:
 		e.connections(fresh)
 		e.maintenance(fresh)
@@ -203,7 +211,7 @@ func Evaluate(in Input, now time.Time) protocol.DatabaseHealth {
 	}
 	h.Score = Score(h.Findings)
 	h.Grade = Grade(h.Score)
-	for _, cat := range []string{CatProtection, CatDisk, CatConnections, CatMaintenance, CatPerformance, CatReplication} {
+	for _, cat := range []string{CatProtection, CatAvailability, CatSecurity, CatDisk, CatConnections, CatMaintenance, CatPerformance, CatReplication} {
 		if c, ok := e.checks[cat]; ok {
 			h.Checks = append(h.Checks, *c)
 		}

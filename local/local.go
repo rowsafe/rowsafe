@@ -1,7 +1,8 @@
 // Package local is Rowsafe on a database it reaches directly, with a
 // connection string: no agent, no account, no control plane. PostgreSQL
-// (postgres://), MySQL and MariaDB (mysql://, mariadb://: mysql.go), and
-// MongoDB (mongodb://, mongodb+srv://: mongodb.go).
+// (postgres://), MySQL and MariaDB (mysql://, mariadb://: mysql.go),
+// MongoDB (mongodb://, mongodb+srv://: mongodb.go), and Redis and Valkey
+// (redis://, rediss://: redis.go).
 // The CLI (rowsafe pulse postgres://...) and the local MCP server (rowsafe
 // mcp postgres://...) use it for Pulse (health score, findings and fixes),
 // tables and indexes, top queries, live activity and settings.
@@ -38,9 +39,9 @@ import (
 
 // IsConnString reports whether s is a connection URL Rowsafe reads:
 // postgres:// or postgresql://, mysql:// or mariadb://, mongodb:// or
-// mongodb+srv://.
+// mongodb+srv://, redis:// or rediss://.
 func IsConnString(s string) bool {
-	if isMySQLURL(s) || isMongoURL(s) {
+	if isMySQLURL(s) || isMongoURL(s) || isRedisURL(s) {
 		return true
 	}
 	s = strings.ToLower(strings.TrimSpace(s))
@@ -57,6 +58,9 @@ type DB struct {
 	engine         string
 	// mg is a MongoDB server's instead (mongodb.go).
 	mg *mongoConn
+	// rd is a Redis or Valkey server's instead (redis.go); engine is which,
+	// once read.
+	rd *redisConn
 	// Ref is how commands name this database: the connection string
 	// without its password, or "" when the commands find it by themselves
 	// (DATABASE_URL).
@@ -78,13 +82,16 @@ type DB struct {
 func Open(connString string) (*DB, error) {
 	connString = strings.TrimSpace(connString)
 	if !IsConnString(connString) {
-		return nil, errors.New("expected a connection string such as postgres://user@host:5432/dbname, mysql://user@host:3306/dbname or mongodb://user@host:27017/dbname")
+		return nil, errors.New("expected a connection string such as postgres://user@host:5432/dbname, mysql://user@host:3306/dbname, mongodb://user@host:27017/dbname or redis://host:6379")
 	}
 	if isMySQLURL(connString) {
 		return openMySQL(connString)
 	}
 	if isMongoURL(connString) {
 		return openMongo(connString)
+	}
+	if isRedisURL(connString) {
+		return openRedis(connString)
 	}
 	cfg, err := pgx.ParseConfig(connString)
 	if err != nil {
@@ -129,6 +136,12 @@ func (d *DB) Engine() string {
 	switch {
 	case d.mg != nil:
 		return protocol.EngineMongoDB
+	case d.rd != nil && d.engine != "":
+		return d.engine
+	case d.rd != nil && strings.HasPrefix(strings.ToLower(d.Ref), "valkey"):
+		return protocol.EngineValkey
+	case d.rd != nil:
+		return protocol.EngineRedis
 	case d.my == nil:
 		return protocol.EnginePostgreSQL
 	case d.engine != "":
@@ -147,6 +160,9 @@ func (d *DB) Name() string {
 	if d.mg != nil {
 		return d.mg.name()
 	}
+	if d.rd != nil {
+		return d.rd.name()
+	}
 	if d.my != nil {
 		if d.my.DBName != "" {
 			return d.my.DBName
@@ -163,6 +179,9 @@ func (d *DB) Name() string {
 func (d *DB) Host() string {
 	if d.mg != nil {
 		return d.mg.host
+	}
+	if d.rd != nil {
+		return d.rd.hostPort()
 	}
 	if d.my != nil {
 		if d.my.Net == "unix" || d.myPort == "3306" {
@@ -187,6 +206,9 @@ func (d *DB) inspectTarget() pginspect.Target { return pginspect.Target{Conn: d.
 func (d *DB) Local() bool {
 	if d.mg != nil {
 		return d.mg.local()
+	}
+	if d.rd != nil {
+		return d.rd.local()
 	}
 	if d.my != nil {
 		return d.mysqlLocal()
@@ -248,6 +270,9 @@ func (d *DB) Health(ctx context.Context, opts Options) (protocol.DatabaseHealth,
 	if d.mg != nil {
 		return d.mongoHealth(ctx, opts)
 	}
+	if d.rd != nil {
+		return d.redisHealth(ctx, opts)
+	}
 	if d.my != nil {
 		return d.mysqlHealth(ctx, opts)
 	}
@@ -276,8 +301,8 @@ func (d *DB) Health(ctx context.Context, opts Options) (protocol.DatabaseHealth,
 // with their own lock and statement timeouts ("" when they can, or when
 // that can't be told: the fix then connects and says).
 func (d *DB) needsSession(ctx context.Context) string {
-	if d.my != nil || d.mg != nil {
-		return "" // MySQL, MongoDB: the fixes check their session themselves
+	if d.conn == nil {
+		return "" // MySQL, MongoDB, Redis: the fixes check their session themselves
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -329,6 +354,9 @@ func (d *DB) Insights(ctx context.Context) (*protocol.Insights, error) {
 	if d.mg != nil {
 		return d.mongoInsights(ctx)
 	}
+	if d.rd != nil {
+		return nil, errRedisNotHere("insights", d.Command("pulse")+" shows its memory, keys and slow commands")
+	}
 	if d.my != nil {
 		return d.mysqlInsights(ctx)
 	}
@@ -346,6 +374,9 @@ func (d *DB) Insights(ctx context.Context) (*protocol.Insights, error) {
 func (d *DB) Statements(ctx context.Context) (*protocol.Statements, error) {
 	if d.mg != nil {
 		return d.mongoStatements(ctx)
+	}
+	if d.rd != nil {
+		return nil, errRedisNotHere("top", d.Command("pulse")+" lists the slow commands of the last hour")
 	}
 	if d.my != nil {
 		return d.mysqlStatements(ctx)
@@ -366,6 +397,9 @@ func (d *DB) Activity(ctx context.Context) (*protocol.Activity, error) {
 	if d.mg != nil {
 		return d.mongoActivity(ctx)
 	}
+	if d.rd != nil {
+		return nil, errRedisNotHere("activity", d.Command("pulse")+" lists the connections that look stuck, with a fix to disconnect each")
+	}
 	if d.my != nil {
 		return d.mysqlActivity(ctx)
 	}
@@ -380,6 +414,9 @@ func (d *DB) Activity(ctx context.Context) (*protocol.Activity, error) {
 func (d *DB) Settings(ctx context.Context, opts Options) (protocol.SettingsOverview, error) {
 	if d.mg != nil {
 		return d.mongoSettings(ctx, opts)
+	}
+	if d.rd != nil {
+		return d.redisSettings(ctx, opts)
 	}
 	if d.my != nil {
 		return d.mysqlSettings(ctx, opts)
@@ -458,6 +495,9 @@ func (d *DB) run(ctx context.Context, fx protocol.FindingFix) (FixResult, error)
 		if d.mg != nil {
 			return d.mongoMaintain(ctx, p)
 		}
+		if d.rd != nil {
+			return d.redisMaintain(ctx, p)
+		}
 		res, log, err := maintenance.Maintain(ctx, d.inspectTarget(), p)
 		out := FixResult{Log: log}
 		if res != nil {
@@ -481,6 +521,9 @@ func (d *DB) run(ctx context.Context, fx protocol.FindingFix) (FixResult, error)
 func (d *DB) ChangeSettings(ctx context.Context, p protocol.SettingsParams) (FixResult, error) {
 	if d.mg != nil {
 		return FixResult{}, errors.New(mongoSettingsLocked)
+	}
+	if d.rd != nil {
+		return d.redisChangeSettings(ctx, p)
 	}
 	if d.my != nil {
 		return d.mysqlChangeSettings(ctx, p)

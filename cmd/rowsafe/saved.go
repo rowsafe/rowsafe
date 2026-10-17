@@ -419,7 +419,7 @@ func savedAdd(ctx context.Context, args []string) error {
 		}
 	}
 	if !local.IsConnString(conn) {
-		return newUsageError("expected a connection string: postgres://USER:PASSWORD@HOST:5432/DB, mysql://USER:PASSWORD@HOST:3306/DB or mongodb://USER:PASSWORD@HOST:27017/DB")
+		return newUsageError("expected a connection string: postgres://USER:PASSWORD@HOST:5432/DB, mysql://USER:PASSWORD@HOST:3306/DB, mongodb://USER:PASSWORD@HOST:27017/DB or redis://:PASSWORD@HOST:6379")
 	}
 	d, err := local.Open(conn)
 	if err != nil {

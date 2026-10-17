@@ -180,6 +180,11 @@ func (e *Engine) settingsTask(ctx context.Context, env agent.EngineEnv, db proto
 		return nil, err
 	}
 	defer c.Close()
+	return e.settingsOn(ctx, env, c, p, log)
+}
+
+// settingsOn changes the settings over c.
+func (e *Engine) settingsOn(ctx context.Context, env agent.EngineEnv, c *conn, p protocol.SettingsParams, log agent.TaskLogger) (*protocol.SettingsResult, error) {
 	snap, err := e.settingsSnapshot(ctx, env, c)
 	if err != nil {
 		return nil, err
