@@ -372,6 +372,12 @@ func channelsList(ctx context.Context, c *client.Client, args []string) error {
 		return printJSON(orEmpty(chans))
 	}
 	if len(chans) == 0 {
+		if onServer {
+			fmt.Println("No notification channels, so alerts aren't sent anywhere. Add one:\n" +
+				"  sudo rowsafe channels add --type slack --name ops --url https://hooks.slack.com/services/...\n" +
+				"  (or --type discord, --type ntfy --url https://ntfy.sh/TOPIC, or --type webhook)")
+			return nil
+		}
 		fmt.Println("No notification channels. Add one: rowsafe channels add --type email --name ops --address you@example.com")
 		return nil
 	}
@@ -393,7 +399,7 @@ func channelsList(ctx context.Context, c *client.Client, args []string) error {
 
 func channelsAdd(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("channels add", flag.ContinueOnError)
-	typ := fs.String("type", "", "email, slack, discord or webhook")
+	typ := fs.String("type", "", "email, slack, discord or webhook (ntfy on a server without the dashboard)")
 	name := fs.String("name", "", "a name for the channel")
 	url := fs.String("url", "", "incoming webhook URL (slack, discord, webhook; https only)")
 	minSev := fs.String("min-severity", protocol.SeverityWarning, "send alerts of this severity and above: info, warning or critical")

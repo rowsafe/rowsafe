@@ -11023,6 +11023,8 @@ no_account_next() {
   say "    sudo rowsafe status ${C_NAME:-NAME}        protected? (backups, the change log, Proof)"
   say "    sudo rowsafe mark ${C_NAME:-NAME} LABEL     a restore point, e.g. before a migration"
   say "    sudo rowsafe backups ${C_NAME:-NAME}       backups; sudo rowsafe proofs ${C_NAME:-NAME}: restore tests"
+  say "    sudo rowsafe channels add --type slack --name ops --url https://hooks.slack.com/..."
+  say "                                    alerts to Slack, Discord, ntfy or a webhook"
   say "    sudo rowsafe help local         everything that works without an account"
   say ""
   say "    Later, for the dashboard, alerts and Rewind from anywhere: sudo rowsafe login"

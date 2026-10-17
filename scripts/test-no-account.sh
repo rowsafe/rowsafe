@@ -158,9 +158,20 @@ EOF
   rowsafe rewind drop shop --yes || fail "rowsafe rewind drop"
   until_ok 60 "the copy is gone" sh -c "! rowsafe restores shop | grep -q ready"
 
+  # Alerts: a webhook next to the server gets a signed test notification
+  # (the host checks what it received); no alert fires on a healthy server.
+  rowsafe channels list | grep -q "No notification channels" || fail "rowsafe channels list"
+  rowsafe channels add --type webhook --name ops --url "$HOOK_URL" >/tmp/chan.out 2>&1 || { cat /tmp/chan.out; fail "rowsafe channels add"; }
+  grep -q "whsec_" /tmp/chan.out || { cat /tmp/chan.out; fail "no signing secret"; }
+  rowsafe channels test ops >/tmp/chantest.out 2>&1 || { cat /tmp/chantest.out; fail "rowsafe channels test"; }
+  rowsafe alerts >/tmp/alerts.out 2>&1 || { cat /tmp/alerts.out; fail "rowsafe alerts"; }
+  ! grep -q "backup_stale\|postgres_unreachable\|wal_archiving_failing" /tmp/alerts.out || { cat /tmp/alerts.out; fail "an alert fires on a healthy server"; }
+  rowsafe alerts rules | grep -q backup_stale || fail "rowsafe alerts rules"
+  echo "  ok: alerts go to a webhook; none fire on a healthy server"
+
   # What needs the dashboard says so.
-  ! rowsafe alerts >/tmp/alerts.out 2>&1 || fail "alerts worked on the server alone?"
-  grep -q "rowsafe login" /tmp/alerts.out || { cat /tmp/alerts.out; fail "no pointer to rowsafe login"; }
+  ! rowsafe alerts rules set backup_stale --off >/tmp/rules.out 2>&1 || fail "changed a rule on the server alone?"
+  grep -q "rowsafe login" /tmp/rules.out || { cat /tmp/rules.out; fail "no pointer to rowsafe login"; }
   echo "  ok: what needs the dashboard points to rowsafe login"
   # Direct commands use the saved connection string.
   rowsafe pulse shop >/tmp/pulse-saved.out 2>&1 || true
@@ -184,7 +195,7 @@ host() {
   chmod 0755 "$W"
   name=rowsafe-noaccount-$$
   cleanup() {
-    docker rm -f "$name-pg" "$name-minio" >/dev/null 2>&1 || true
+    docker rm -f "$name-pg" "$name-minio" "$name-hook" >/dev/null 2>&1 || true
     docker volume rm "$name-pgdata" >/dev/null 2>&1 || true
     docker network rm "$name" >/dev/null 2>&1 || true
     rm -rf "$W"
@@ -208,6 +219,19 @@ host() {
   cipher=$(openssl rand -hex 24)
 
   docker network create "$name" >/dev/null
+  # A webhook receiver for alerts: prints each request's signature and body.
+  cat >"$W/hook.py" <<'PY'
+import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0))).decode()
+        print("X-Rowsafe-Signature: %s %s" % (self.headers.get("X-Rowsafe-Signature"), body), flush=True)
+        self.send_response(204)
+        self.end_headers()
+http.server.HTTPServer(("", 8080), H).serve_forever()
+PY
+  docker run -d --name "$name-hook" --network "$name" --network-alias hook -v "$W/hook.py:/hook.py:ro" \
+    python:3.13-alpine python3 -u /hook.py >/dev/null
   docker run -d --name "$name-minio" --network "$name" --network-alias minio \
     -e MINIO_ROOT_USER=rowsafe-test -e MINIO_ROOT_PASSWORD="$secret" \
     -v "$W/minio-certs:/certs:ro" minio/minio server /data --address :9000 --certs-dir /certs >/dev/null
@@ -252,7 +276,14 @@ EOF
     }
     sleep 1
   done
-  docker exec -e S3_SECRET="$secret" -e CIPHER_PASS="$cipher" "$name-pg" sh /src/scripts/test-no-account.sh --in-container
+  docker exec -e S3_SECRET="$secret" -e CIPHER_PASS="$cipher" -e HOOK_URL="http://hook:8080/rowsafe" "$name-pg" \
+    sh /src/scripts/test-no-account.sh --in-container
+  docker logs "$name-hook" 2>/dev/null | grep -q 'X-Rowsafe-Signature: t=.*,v1=.*"event": *"test"' || {
+    docker logs "$name-hook" >&2
+    echo "test-no-account: the webhook didn't get a signed test notification" >&2
+    exit 1
+  }
+  echo "  ok: the webhook got a signed test notification"
   echo "test-no-account: passed on $image"
 }
 
