@@ -1,0 +1,26 @@
+# The demo in the README: a real PostgreSQL with planted problems, and vhs
+# recording a terminal that installs the rowsafe CLI and checks it.
+# Run ./record.sh (it takes about 12 minutes).
+name: rowsafe-demo
+
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: demo
+      POSTGRES_DB: shop
+    # Query statistics on, so the demo shows only the planted problems.
+    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "shop"]
+      interval: 1s
+      retries: 60
+
+  vhs:
+    build: .
+    working_dir: /vhs
+    volumes:
+      - .:/vhs
+    depends_on:
+      db:
+        condition: service_healthy
