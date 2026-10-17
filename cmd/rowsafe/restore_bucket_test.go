@@ -19,4 +19,3 @@ func TestFromBucket(t *testing.T) {
 		t.Fatalf("off the server: %v", err)
 	}
 }
-

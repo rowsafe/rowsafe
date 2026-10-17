@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/rowsafe/rowsafe/internal/pgbackrest"
 	"github.com/rowsafe/rowsafe/protocol"
@@ -31,7 +32,7 @@ func (a *Agent) lostSourceFacts(ctx context.Context, ops forkOps, p protocol.For
 	}
 	latest, err := pgbackrest.LatestBackup(stanzas, p.Source.Stanza)
 	if err != nil {
-		return 0, 0, fmt.Errorf("nothing to restore from: %w (%s)", err, lostSourceHint)
+		return 0, 0, lostSourceError(stanzas, p, err)
 	}
 	major := 0
 	for _, s := range stanzas {
@@ -52,4 +53,26 @@ func (a *Agent) lostSourceFacts(ctx context.Context, ops forkOps, p protocol.For
 		return 0, 0, fmt.Errorf("the backups of %s don't say which PostgreSQL version they are of", p.Source.Stanza)
 	}
 	return major, latest.Info.Size, nil
+}
+
+// lostSourceError says plainly why a lost source's backups can't be read
+// here: they can't be decrypted (another passphrase), or there are none
+// where this server looks (another bucket, name or folder).
+func lostSourceError(stanzas []pgbackrest.Stanza, p protocol.ForkRestoreParams, err error) error {
+	name, folder := cmp.Or(p.Source.Name, p.Source.Stanza), cmp.Or(p.SourceFolder, p.Source.Stanza)
+	for _, s := range stanzas {
+		if s.Name != p.Source.Stanza {
+			continue
+		}
+		msg := s.RepoMessage()
+		switch {
+		case strings.Contains(msg, "CryptoError") || strings.Contains(msg, "FormatError") && strings.Contains(msg, "outside of section"):
+			return fmt.Errorf("%s's backups are in this server's bucket, but this server's backup passphrase can't decrypt them: "+
+				"it must be the old server's (ROWSAFE_REPO_CIPHER_PASS in its /etc/rowsafe/agent.env)", name)
+		case strings.Contains(msg, "missing stanza path"):
+			return fmt.Errorf("no backups of %s in this server's bucket (folder %s): check the name (its name on the old server), "+
+				"--folder, and that this server uses the old server's bucket", name, folder)
+		}
+	}
+	return fmt.Errorf("nothing to restore from: %w (%s)", err, lostSourceHint)
 }

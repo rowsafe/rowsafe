@@ -535,3 +535,25 @@ func TestValidKeptForkDir(t *testing.T) {
 		}
 	}
 }
+
+// Restoring a lost source from the bucket says plainly what's wrong: the
+// passphrase, or nothing where this server looks.
+func TestLostSourceError(t *testing.T) {
+	p := protocol.ForkRestoreParams{Source: protocol.DatabaseSpec{Name: "shop", Stanza: "shop"}}
+	st := func(msg string) []pgbackrest.Stanza {
+		s := pgbackrest.Stanza{Name: "shop"}
+		s.Repo = make([]pgbackrest.StanzaRepo, 1)
+		s.Repo[0].Status.Code, s.Repo[0].Status.Message = 99, msg
+		return []pgbackrest.Stanza{s}
+	}
+	for msg, want := range map[string]string{
+		"FormatError: key/value found outside of section at line 1: ??": "passphrase can't decrypt them",
+		"CryptoError: cipher header invalid":                            "passphrase can't decrypt them",
+		"missing stanza path":                                           "no backups of shop in this server's bucket (folder shop)",
+		"something else":                                                "nothing to restore from",
+	} {
+		if err := lostSourceError(st(msg), p, errors.New("x")); !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: %v", msg, err)
+		}
+	}
+}

@@ -115,9 +115,9 @@ func restoreFromBucketCmd(ctx context.Context, c *client.Client, args []string) 
 		fmt.Printf("The restore didn't work: %s\n", orText(res.Summary, orText(done.Error, "the task ended as "+done.Status)))
 		return exitError(1)
 	}
-	fmt.Println(orText(res.Summary, fmt.Sprintf("Restored %s on port %d.", req.Source, res.Port)))
+	fmt.Printf("Restored %s into the PostgreSQL on port %d (PostgreSQL %d).\n", req.Source, res.Port, res.Major)
 	if res.RecoveredTo != nil {
-		fmt.Printf("It has everything up to %s.\n", describeTime(*res.RecoveredTo))
+		fmt.Printf("It has everything up to the last change its backups hold: %s.\n", describeTime(*res.RecoveredTo))
 	}
 	return followProtection(ctx, c, req.Name)
 }

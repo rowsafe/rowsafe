@@ -133,7 +133,7 @@ server_b() {
   sleep 6
   ! rowsafe restore shop --from-bucket --yes >/tmp/wrong.out 2>&1 || { cat /tmp/wrong.out; fail "restored with the wrong passphrase"; }
   cat /tmp/wrong.out
-  grep -qi "passphrase" /tmp/wrong.out || fail "a wrong passphrase isn't said plainly"
+  grep -q "passphrase can't decrypt them" /tmp/wrong.out || fail "a wrong passphrase isn't said plainly"
   runuser -u postgres -- psql -qAtX -c "SELECT count(*) FROM pg_database WHERE datname = 'shop'" | grep -qx 0 ||
     fail "the empty cluster isn't as before after a failed restore"
   ! ls -d /var/lib/postgresql/*/main.before-fork-* >/dev/null 2>&1 || fail "a failed restore set the cluster's data aside"
@@ -255,12 +255,12 @@ EOF
   # A's backups are where they were; B's start in a new folder.
   docker run --rm --network "$name" --entrypoint sh minio/minio -c \
     "mc alias set m https://minio:9000 rowsafe-test $secret --insecure >/dev/null && mc ls --recursive --insecure m/rowsafe" >"$W/bucket.txt"
-  grep -q '/shop/backup.info' "$W/bucket.txt" || grep -q 'shop/backup.info' "$W/bucket.txt" || {
+  grep -q 'rowsafe/shop/backup/shop/backup.info$' "$W/bucket.txt" || {
     cat "$W/bucket.txt" >&2
     echo "test-no-account-restore: A's backups aren't in the bucket any more" >&2
     exit 1
   }
-  grep -q 'shop-20[0-9]*-[0-9]*/backup.info' "$W/bucket.txt" || {
+  grep -q 'rowsafe/shop-20[0-9]*-[0-9]*/backup/shop/backup.info$' "$W/bucket.txt" || {
     cat "$W/bucket.txt" >&2
     echo "test-no-account-restore: B's backups aren't in a new folder" >&2
     exit 1
