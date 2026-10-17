@@ -13,7 +13,7 @@ import (
 // Tasks run one at a time per database and lane, like on the hosted control
 // plane: the main lane (backups, Proof, setup...), and side lanes for the
 // short work people wait for. A task that stops PostgreSQL never runs beside
-// a health fix.
+// a health fix, and Marks wait for it.
 var sideLanes = map[string]string{
 	protocol.TaskRestorePoint:  "restore_point",
 	protocol.TaskCopySchema:    "restore_point",
@@ -25,7 +25,7 @@ var sideLanes = map[string]string{
 	protocol.TaskRewindCleanup: "maintenance",
 }
 
-var stopsPostgres = []string{protocol.TaskRestart, protocol.TaskRewindInPlace, protocol.TaskRewindUndo}
+var stopsPostgres = []string{protocol.TaskRestart, protocol.TaskRewindInPlace, protocol.TaskRewindUndo, protocol.TaskUpgrade, protocol.TaskUpgradeUndo}
 
 func lane(typ string) string {
 	if l, ok := sideLanes[typ]; ok {
@@ -38,7 +38,7 @@ func lane(typ string) string {
 // the same database.
 func conflicts(r, t string) bool {
 	return lane(r) == lane(t) ||
-		slices.Contains(stopsPostgres, r) && lane(t) == "maintenance" ||
+		slices.Contains(stopsPostgres, r) && (lane(t) == "maintenance" || lane(t) == "restore_point") ||
 		lane(r) == "maintenance" && slices.Contains(stopsPostgres, t)
 }
 
@@ -288,6 +288,8 @@ func (s *state) afterTask(t *taskRec, db *dbRec, req protocol.CompleteRequest, n
 		s.finishMark(t.ID, res, now)
 	case protocol.TaskRewindCopy, protocol.TaskRewindDrop:
 		s.afterRewind(t, ok, req.Result, now) // rewind.go
+	case protocol.TaskUpgrade, protocol.TaskUpgradeUndo:
+		return s.afterUpgrade(db, ok, now) // upgrade.go
 	}
 	return nil
 }

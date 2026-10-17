@@ -124,7 +124,11 @@ func printVersions(info protocol.UpgradeInfo) {
 		if info.RebootRequired {
 			fmt.Print("; a reboot is needed")
 		}
-		fmt.Printf(" (rowsafe fix %s)\n", info.Database)
+		if onServer { // server_saved.go: this server's own agent
+			fmt.Println(" (installing them from Rowsafe needs the dashboard: sudo rowsafe login)")
+		} else {
+			fmt.Printf(" (rowsafe fix %s)\n", info.Database)
+		}
 	}
 	printMaintenance(info.Maintenance)
 }

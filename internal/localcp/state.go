@@ -61,6 +61,9 @@ type hostRec struct {
 	EnrolledAt   time.Time  `json:"enrolled_at,omitzero"`
 	LastSeen     *time.Time `json:"last_seen,omitempty"`
 	RestartPorts []int      `json:"restart_ports,omitempty"`
+	// Software is the agent's newest software report (upgrade.go).
+	Software   *protocol.SoftwareReport `json:"software,omitempty"`
+	SoftwareAt *time.Time               `json:"software_at,omitempty"`
 }
 
 // dbRec is a database with what its health depends on.

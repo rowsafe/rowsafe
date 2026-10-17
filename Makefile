@@ -184,6 +184,10 @@ test-mysql:
 test-upgrade:
 	sh scripts/test-upgrade.sh
 
+.PHONY: test-no-account-upgrade
+test-no-account-upgrade:
+	sh scripts/test-no-account-upgrade.sh
+
 test-action:
 	integrations/github-action/test/test-action.sh
 
