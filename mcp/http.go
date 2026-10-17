@@ -43,7 +43,7 @@ type clientKey struct{}
 // through the user API served by api. For an API key the write tools are
 // always listed: the API refuses them with 403 for a read-only key. For an
 // OAuth token the tools follow its scopes: read-only tools (describe_change,
-// get_approval and list_approvals included); create_restore_point with
+// get_agent_action and list_agent_actions included); create_restore_point with
 // rowsafe:marks; and with rowsafe:act every write tool, request_change
 // included (it makes a change to production as the person who connected
 // the app, or is refused with the reason). The API enforces the same

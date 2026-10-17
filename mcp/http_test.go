@@ -101,7 +101,7 @@ func TestHTTPOAuthScopesDecideTools(t *testing.T) {
 		}
 	}
 	// Anyone can see what they could ask for and how their requests went.
-	for _, r := range []string{"describe_change", "get_approval", "list_approvals"} {
+	for _, r := range []string{"describe_change", "get_agent_action", "list_agent_actions"} {
 		if !slices.Contains(read, r) || !slices.Contains(marks, r) {
 			t.Errorf("read-only OAuth tools lack %s", r)
 		}

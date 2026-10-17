@@ -27,8 +27,9 @@ import (
 // exactly their rights in the dashboard (protocol.AgentAutonomy), and
 // returns the record (approved: done, or failed), or refuses it (403) with
 // the reason, which the assistant tells its user. Nothing waits for a
-// person. The tool names keep "approval" for compatibility: get_approval and
-// list_approvals show what AI agents did.
+// person. get_agent_action and list_agent_actions show what AI agents did
+// (the records keep the API's "approval" names; the tools' old names
+// get_approval and list_approvals still work: toolAliases).
 
 // ---- inputs and outputs ----
 
@@ -118,6 +119,26 @@ type DescribeChangeOutput struct {
 
 // ---- registration ----
 
+// toolAliases are the tools' names from when AI agents' changes waited for a
+// person's approval. Clients may still call them; tools/list shows only the
+// new names.
+var toolAliases = map[string]string{
+	"get_approval":   "get_agent_action",
+	"list_approvals": "list_agent_actions",
+}
+
+// aliasMiddleware sends a call to an old tool name to the tool's new name.
+func aliasMiddleware(next sdk.MethodHandler) sdk.MethodHandler {
+	return func(ctx context.Context, method string, req sdk.Request) (sdk.Result, error) {
+		if r, ok := req.(*sdk.CallToolRequest); ok && r.Params != nil {
+			if name, ok := toolAliases[r.Params.Name]; ok {
+				r.Params.Name = name
+			}
+		}
+		return next(ctx, method, req)
+	}
+}
+
 // approvalStatuses are the states a change has now (earlier records may
 // have others; listing without a status shows them).
 var approvalStatuses = []any{protocol.ApprovalApproved, protocol.ApprovalFailed}
@@ -135,14 +156,14 @@ func (t *tools) addApprovalReadTools(s *sdk.Server) {
 	}, t.describeChange)
 
 	sdk.AddTool(s, &sdk.Tool{
-		Name:        "get_approval",
+		Name:        "get_agent_action",
 		Description: "Shows a change an AI agent made (request_change, create_cloud_server, cloud_firewall, apply_fix, create_app_database): done (with the tasks it queued: follow them with get_task) or failed (with why). Read-only.",
 		Annotations: readOnly("Get a change an AI agent made"),
 		InputSchema: inputSchema[approvalIDInput](nil),
 	}, t.getApproval)
 
 	sdk.AddTool(s, &sdk.Tool{
-		Name:        "list_approvals",
+		Name:        "list_agent_actions",
 		Description: "Lists the changes to production AI agents and API keys made in this organization, newest first. Read-only.",
 		Annotations: readOnly("List changes AI agents made"),
 		InputSchema: inputSchema[listApprovalsInput](func(p map[string]*jsonschema.Schema) {
