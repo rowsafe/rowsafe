@@ -28,10 +28,12 @@ const tick = 30 * time.Second
 
 // Server is the control plane of one server without an account.
 type Server struct {
-	st      *store
-	log     *slog.Logger
-	now     func() time.Time
-	updates *updates
+	st        *store
+	log       *slog.Logger
+	now       func() time.Time
+	updates   *updates
+	alertHTTP *http.Client // alerts.go
+	allowHTTP bool         // tests: channels on http://
 }
 
 // Open loads (or starts) the state kept in dir.
@@ -43,7 +45,8 @@ func Open(dir string, log *slog.Logger) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{st: st, log: log, now: time.Now, updates: &updates{http: &http.Client{Timeout: 30 * time.Second}}}, nil
+	return &Server{st: st, log: log, now: time.Now, updates: &updates{http: &http.Client{Timeout: 30 * time.Second}},
+		alertHTTP: &http.Client{Timeout: 15 * time.Second}}, nil
 }
 
 // Serve listens on the Unix socket at path (0660: the agent's user and
@@ -68,6 +71,7 @@ func (s *Server) Serve(ctx context.Context, path string) error {
 		defer cancel()
 		_ = srv.Shutdown(sctx)
 	}()
+	s.cameBack()
 	go s.run(ctx)
 	go s.runUpdates(ctx) // updates.go
 	s.log.Info("control plane without an account listening", "socket", path)
@@ -91,18 +95,32 @@ func (s *Server) run(ctx context.Context) {
 	}
 }
 
-// Tick reaps lost tasks and queues what the schedules say is due.
+// Tick reaps lost tasks, queues what the schedules say is due and sends
+// the alerts that changed.
 func (s *Server) Tick() {
 	now := s.now()
+	var notices []notice
 	if err := s.st.update(func(st *state) error {
 		if n := st.reap(now); n > 0 {
 			s.log.Warn("tasks lost after their lease ran out", "count", n)
 		}
 		st.schedule(now)
+		notices = st.evaluateAlerts(now) // alerts.go
 		return nil
 	}); err != nil {
 		s.log.Error("scheduling", "err", err)
 	}
+	s.send(notices)
+}
+
+// cameBack, when the agent starts, says how long it was out (alerts.go).
+func (s *Server) cameBack() {
+	var notices []notice
+	_ = s.st.update(func(st *state) error {
+		notices = st.agentWasOffline(s.now())
+		return nil
+	})
+	s.send(notices)
 }
 
 // Handler serves the agent API and the user API subset.
@@ -117,9 +135,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/agent/setup/databases", s.agent(s.setupList))
 	mux.HandleFunc("GET /v1/agent/setup/databases/{id}", s.agent(s.setupGet))
 	mux.HandleFunc("POST /v1/agent/setup/databases/{id}/apply", s.agent(s.setupApply))
+	mux.HandleFunc("POST /v1/agent/monitoring", s.agent(s.monitoring))
 	// Reports kept on the server for now: accepted, not stored.
 	for path, ack := range map[string]any{
-		"/v1/agent/monitoring": protocol.MonitoringAck{}, "/v1/agent/logs": protocol.LogAck{Databases: []protocol.LogSettings{}},
+		"/v1/agent/logs":     protocol.LogAck{Databases: []protocol.LogSettings{}},
 		"/v1/agent/security": protocol.SecurityAck{}, "/v1/agent/files": protocol.FilesSync{Databases: []protocol.FilesConfig{}},
 	} {
 		mux.HandleFunc("POST "+path, s.agent(func(w http.ResponseWriter, r *http.Request) {
@@ -144,12 +163,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/databases/{ref}/tasks", s.createTask)
 	mux.HandleFunc("GET /v1/databases/{ref}/restore-points", s.marks)
 	mux.HandleFunc("POST /v1/databases/{ref}/restore-points", s.createMark)
-	s.rewindRoutes(mux) // rewind.go
+	s.rewindRoutes(mux)                                             // rewind.go
+	mux.HandleFunc("GET /v1/notification-channels", s.channelsList) // alerts.go
+	mux.HandleFunc("POST /v1/notification-channels", s.channelsCreate)
+	mux.HandleFunc("DELETE /v1/notification-channels/{id}", s.channelsDelete)
+	mux.HandleFunc("POST /v1/notification-channels/{id}/test", s.channelsTest)
+	mux.HandleFunc("GET /v1/alerts", s.alertsList)
+	mux.HandleFunc("GET /v1/alerts/{id}", s.alertGet)
+	mux.HandleFunc("POST /v1/alerts/{id}/ack", s.alertAck)
+	mux.HandleFunc("GET /v1/alert-rules", s.alertRules)
 	mux.HandleFunc("GET /v1/tasks", s.allTasks)
 	mux.HandleFunc("GET /v1/tasks/{id}", s.taskGet)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "This needs the dashboard: rowsafe login connects this server to it "+
-			"(alerts, history, your team and more), keeping its backups, Proofs and Marks")
+			"(every server in one place, history, your team and more), keeping its backups, Proofs and Marks")
 	})
 	return mux
 }

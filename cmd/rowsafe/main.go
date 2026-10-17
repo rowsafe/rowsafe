@@ -289,7 +289,8 @@ Pulse: health, monitoring and alerts
   rowsafe channels list
   rowsafe channels add --type email --name NAME --address A [--address B] [--min-severity warning]
   rowsafe channels add --type slack|discord|webhook --name NAME --url URL [--min-severity warning]
-                                             where alerts are sent (webhooks print a signing secret once)
+                                             where alerts are sent (webhooks print a signing secret once);
+                                             on a server without the dashboard: slack, discord, ntfy or webhook
   rowsafe channels remove ID
   rowsafe channels test ID                   send a test notification now
   rowsafe report [--preview [--html]] [--on | --off] [--to A,B] [--send-test]
