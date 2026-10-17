@@ -187,8 +187,21 @@ func (a *Agent) guardTarget(port int, socketDir, user string) pginspect.Target {
 func (r copyRecord) socketDir() string { return filepath.Join(r.Dir, "socket") }
 
 // copyConnect connects to a copy with default_transaction_read_only off
-// (the scratch settings default sessions to read-only).
+// (the scratch settings default sessions to read-only). A target with a
+// connection string (RunPreviewOn) connects with it, to dbname.
 func copyConnect(ctx context.Context, t pginspect.Target, dbname string) (*pgx.Conn, error) {
+	var cfg *pgx.ConnConfig
+	if t.Conn != nil {
+		cfg = t.Conn.Copy()
+		if cfg.RuntimeParams == nil {
+			cfg.RuntimeParams = map[string]string{}
+		}
+		cfg.Database = dbname
+		cfg.RuntimeParams["application_name"] = copyAppName
+		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		return pgx.ConnectConfig(cctx, cfg)
+	}
 	cfg, err := pgx.ParseConfig("")
 	if err != nil {
 		return nil, err
