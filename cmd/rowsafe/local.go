@@ -23,9 +23,21 @@ import (
 // agent on the server and an account (rowsafe login).
 
 // localHelp is rowsafe help local.
-const localHelp = `Without an account: Rowsafe on a PostgreSQL database this computer reaches
-directly. Give a connection string instead of NAME, or set DATABASE_URL (used
-when you aren't logged in):
+const localHelp = `Without an account.
+
+On your database server (PostgreSQL): continuous backups to your own bucket,
+Marks, a weekly restore test and Pulse, with no account (restoring with
+Rewind needs an account for now):
+
+  curl -fsSL https://rowsafe.sh | sudo sh -s -- --no-account
+  sudo rowsafe status NAME           protected? (backups, the change log, Proof)
+  sudo rowsafe mark NAME LABEL       a restore point, e.g. before a migration
+  sudo rowsafe backups NAME | proofs NAME | backup NAME | proof NAME
+  sudo rowsafe login                 the dashboard, alerts and more, later
+
+From anywhere, on a PostgreSQL this computer reaches (also managed ones): give
+a connection string instead of NAME, or set DATABASE_URL (used when you
+aren't logged in):
 
   rowsafe pulse postgres://USER@HOST:5432/DB    health score and findings (exit 3 below 70)
   rowsafe fix CONN [FINDING [FIX] | NUMBER] [--yes]
