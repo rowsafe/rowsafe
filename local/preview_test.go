@@ -234,3 +234,13 @@ func TestMCPCheckMigration(t *testing.T) {
 	}
 	noScratchLeft(t, d)
 }
+
+func TestPreviewRefusesMySQL(t *testing.T) {
+	d, err := Open("mysql://app@db.example.com:3306/shop")
+	if err != nil {
+		t.Skip(err)
+	}
+	if _, err := d.Preview(t.Context(), "ALTER TABLE t ADD c int", PreviewOptions{}); err == nil || !strings.Contains(err.Error(), "PostgreSQL for now") {
+		t.Errorf("MySQL preview: %v", err)
+	}
+}

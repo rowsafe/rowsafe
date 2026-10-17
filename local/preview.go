@@ -71,6 +71,9 @@ func (d *DB) Preview(ctx context.Context, sql string, o PreviewOptions) (*protoc
 	if d.my != nil {
 		return nil, fmt.Errorf("checking a migration works on PostgreSQL for now, not %s", d.EngineName())
 	}
+	if d.my != nil {
+		return nil, fmt.Errorf("migration previews work on PostgreSQL for now, not %s", d.EngineName())
+	}
 	progress := o.Progress
 	if progress == nil {
 		progress = func(string) {}
