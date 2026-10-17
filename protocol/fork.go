@@ -91,6 +91,10 @@ type ForkPrepareParams struct {
 	// agent refuses when they don't match.
 	RecipientKey         string `json:"recipient_key"`
 	RecipientFingerprint string `json:"recipient_fingerprint"`
+	// Verify: the fork is a restore test (Proof on another server): the
+	// source also reports what the test checks the restore against
+	// (ForkPrepareResult.Verify).
+	Verify bool `json:"verify,omitempty"`
 }
 
 // ForkPrepareResult is the agent's report for a fork_prepare task.
@@ -103,7 +107,10 @@ type ForkPrepareResult struct {
 	SystemID  string         `json:"system_id"`
 	SizeBytes int64          `json:"size_bytes"`
 	Settings  map[string]int `json:"settings,omitempty"`
-	Summary   string         `json:"summary"`
+	// Verify is what a restore test elsewhere checks against (only with
+	// ForkPrepareParams.Verify).
+	Verify  *ForkVerifyFacts `json:"verify,omitempty"`
+	Summary string           `json:"summary"`
 }
 
 // ForkMaskRule masks one column of the fork with a strategy (the same
@@ -179,6 +186,54 @@ type ForkRestoreParams struct {
 	Settings     map[string]int `json:"settings,omitempty"`
 	// Masking, when set, masks the fork before it starts for real.
 	Masking *ForkMasking `json:"masking,omitempty"`
+	// Verify: a restore test (Proof on another server), not a fork. The
+	// agent restores the newest point in the source's backups into its
+	// drill directory, runs the drill's checks against VerifyFacts,
+	// reports ForkRestoreResult.Drill and deletes the restored copy.
+	// Placement, Port and Masking are ignored; nothing is registered and
+	// no backups start.
+	Verify      bool             `json:"verify,omitempty"`
+	VerifyFacts *ForkVerifyFacts `json:"verify_facts,omitempty"`
+}
+
+// ---- Proof on another server (ForkRestoreParams.Verify) ----
+//
+// When a database's own server lacks the disk for Proof (the weekly restore
+// test), the test can run on another server of the organization, or on a
+// temporary Rowsafe Cloud server deleted right after. It is a fork that is
+// only checked: fork_prepare on the source's server seals the bucket
+// settings to the other server's key (as for any fork) and, with Verify,
+// reports what the test checks against; fork_restore with Verify on the
+// other server restores into its drill directory, checks like the drill
+// does, reports a DrillResult and deletes the copy. The control plane
+// records it as the source's Proof (DrillResult.RanOn).
+
+// FeatureForkVerify is in HeartbeatRequest.Features of agents that run
+// restore tests of another server's databases (ForkRestoreParams.Verify)
+// and report ForkHeartbeat.DrillFreeBytes.
+const FeatureForkVerify = "fork_verify"
+
+// ForkVerifyFacts is what a restore test elsewhere checks the restored copy
+// against, read on the source's server when the test starts.
+type ForkVerifyFacts struct {
+	// Databases are the source's databases (tables per database), as the
+	// drill compares them.
+	Databases []DBInfo `json:"databases"`
+	// SizeBytes is the source's size (the disk the test needs).
+	SizeBytes int64 `json:"size_bytes"`
+	// Version is the engine's version ("8.4.6", "7.0.15"; PostgreSQL:
+	// server_version_num), for the other server's programs.
+	Version string `json:"version,omitempty"`
+	// Preload is PostgreSQL's shared_preload_libraries (loaded only when
+	// the restore can't start without them, as in the drill).
+	Preload string `json:"preload,omitempty"`
+}
+
+// ProofSpaceNeeded is the free disk a restore test of a database of
+// sizeBytes needs where it runs (the agent's drill check: the restored data
+// plus replayed changes and headroom).
+func ProofSpaceNeeded(sizeBytes int64) int64 {
+	return int64(float64(sizeBytes)*1.3) + 1<<30
 }
 
 // ForkRestoreResult is the agent's report for a fork_restore task.
@@ -205,6 +260,10 @@ type ForkRestoreResult struct {
 	DurationMs  int64    `json:"duration_ms"`
 	Warnings    []string `json:"warnings,omitempty"`
 	Summary     string   `json:"summary"`
+	// Drill is a restore test's result (ForkRestoreParams.Verify): the
+	// fork's restored copy is gone, nothing else above is set but
+	// ForkID, DurationMs and Summary.
+	Drill *DrillResult `json:"drill,omitempty"`
 }
 
 // ---- Heartbeat additions (embedded in HeartbeatRequest) ----
@@ -221,6 +280,9 @@ type ForkHeartbeat struct {
 	ForkTarget *ForkDockerTarget `json:"fork_target,omitempty"`
 	// Forks is the progress of the fork restores running on this server.
 	Forks []ForkState `json:"forks,omitempty"`
+	// DrillFreeBytes is the free disk in this server's drill directory
+	// (where restore tests run, its own and other servers'); 0: unknown.
+	DrillFreeBytes int64 `json:"drill_free_bytes,omitempty"`
 }
 
 // ForkClusters is what the root helper may create on a server.

@@ -310,6 +310,28 @@ func TestRedisEndToEnd(t *testing.T) {
 		t.Fatalf("the drills folder is left behind: %v", err)
 	}
 
+	// Proof on another server: the facts read here, the restore test run by
+	// a second engine with its own state and drill directory.
+	facts, err := e.VerifyFacts(ctx, env, db)
+	if err != nil || len(facts.Databases) == 0 || facts.Version == "" {
+		t.Fatalf("facts: %+v %v", facts, err)
+	}
+	other := env
+	odir := t.TempDir()
+	other.StateDir = filepath.Join(odir, "engines", e.name)
+	other.Config.DrillDir, other.Config.RewindDir = filepath.Join(odir, "drills"), filepath.Join(odir, "rewind")
+	pv := protocol.ForkRestoreParams{ForkID: "fork_v", Verify: true, VerifyFacts: facts,
+		Source: protocol.DatabaseSpec{ID: db.ID, Name: db.Name, Stanza: db.Stanza, Engine: db.Engine}}
+	vr, err := (&Engine{name: e.name}).ForkVerify(ctx, other, pv, "verify-fork_v", &testLog{t: t})
+	if err != nil || !vr.Passed || vr.BackupLabel == "" || vr.RecoveredTo == nil || len(vr.Databases) == 0 {
+		t.Fatalf("restore test elsewhere: %+v %v", vr, err)
+	}
+	for _, p := range []string{drillRoot(other, e.name), other.Config.RewindDir} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("the restore test elsewhere left %s: %v", p, err)
+		}
+	}
+
 	// Rewind in place to the Mark, then undo.
 	rd(t, a, "SET", "doomed", "1")
 	ip := mustRun[protocol.RewindInPlaceResult](t, e, env, db, protocol.TaskRewindInPlace, protocol.RewindInPlaceParams{RewindID: "r1",

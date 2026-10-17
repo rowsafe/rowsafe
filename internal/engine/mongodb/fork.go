@@ -1,8 +1,10 @@
 package mongodb
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -26,8 +28,9 @@ import (
 // the server's own (and the source's include Rowsafe's own login).
 
 var (
-	_ agent.EngineFork    = (*Engine)(nil)
-	_ agent.EngineTargets = (*Engine)(nil)
+	_ agent.EngineFork       = (*Engine)(nil)
+	_ agent.EngineTargets    = (*Engine)(nil)
+	_ agent.EngineForkVerify = (*Engine)(nil)
 )
 
 // cloneRole is the built-in role receiving a clone needs.
@@ -45,6 +48,53 @@ func (e *Engine) ForkFacts(ctx context.Context, env agent.EngineEnv, source prot
 		return 0, 0, nil, err
 	}
 	return in.VersionNum / 100, in.TotalBytes, nil, nil
+}
+
+// Proof on another server (agent.EngineForkVerify): the drill's restore and
+// checks (drillRestore), run where there is disk, against what the source's
+// server reported. Nothing is copied into a server there.
+
+// VerifyFacts reads the source's databases (collections in Tables), size
+// and version, as the drill reads production. Like the drill, it first lets
+// the newest changes reach the bucket so the test covers them.
+func (e *Engine) VerifyFacts(ctx context.Context, env agent.EngineEnv, source protocol.DatabaseSpec) (*protocol.ForkVerifyFacts, error) {
+	c, err := connectDB(ctx, env, source)
+	if err != nil {
+		return nil, err
+	}
+	defer disconnect(c)
+	in, err := inspect(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	if s, err := e.shipperFor(env, source); err == nil {
+		if latest, err := latestOpTime(ctx, c); err == nil {
+			if err := s.flush(ctx, fromBSON(latest), time.Minute); err != nil {
+				env.Log.Warn("the newest MongoDB changes haven't reached the bucket before a restore test elsewhere", "db", source.ID, "err", err)
+			}
+		}
+	}
+	return &protocol.ForkVerifyFacts{Databases: in.Databases, SizeBytes: in.TotalBytes, Version: in.Version}, nil
+}
+
+// ForkVerify restores the newest point of p.Source's backups (env.Repo) into
+// a scratch server in the drill directory named id, checks it against
+// p.VerifyFacts and deletes it.
+func (e *Engine) ForkVerify(ctx context.Context, env agent.EngineEnv, p protocol.ForkRestoreParams, id string, tl agent.TaskLogger) (*protocol.DrillResult, error) {
+	started := time.Now()
+	switch {
+	case p.VerifyFacts == nil:
+		return nil, errors.New("the restore test has nothing to check the restore against: the source's server didn't report its databases")
+	case !idRE.MatchString(id):
+		return nil, fmt.Errorf("invalid restore test id %q", id)
+	}
+	r, err := openRepo(env, protocol.DatabaseSpec{Stanza: p.Source.Stanza})
+	if err != nil {
+		return nil, err
+	}
+	tl.Printf("restore test of %s (MongoDB %s, %s) from its backups, on this server", cmp.Or(p.Source.Name, p.Source.Stanza),
+		cmp.Or(p.VerifyFacts.Version, "unknown version"), humanBytes(p.VerifyFacts.SizeBytes))
+	return drillRestore(ctx, env, r, nil, p.VerifyFacts.Databases, p.VerifyFacts.SizeBytes, id, started, tl)
 }
 
 // cloneTargetReason says why a server can't take a clone ("" when it can).

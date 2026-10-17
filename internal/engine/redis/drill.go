@@ -43,6 +43,15 @@ func (e *Engine) drill(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 			}
 		}
 	}
+	return e.drillRestore(ctx, env, r, prod.Keyspace, prod.Executable, taskID, started, tl)
+}
+
+// drillRestore is the drill once production was read (prodKeys: its keys
+// per logical database when Proof started, nil when it couldn't be read;
+// executable: its server program, "" for the one installed here): restore
+// into temporary servers named after id, check, and delete them.
+func (e *Engine) drillRestore(ctx context.Context, env agent.EngineEnv, r *repo, prodKeys map[int]dbKeys, executable, id string,
+	started time.Time, tl agent.TaskLogger) (*protocol.DrillResult, error) {
 	e.copyMu.Lock()
 	defer e.copyMu.Unlock()
 	// The engine's folder under the drills goes too once empty (nothing
@@ -56,7 +65,7 @@ func (e *Engine) drill(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 	res := &protocol.DrillResult{}
 
 	// 1. The snapshot alone, checked against what it recorded.
-	s, err := newScratch(env, drillRoot(env, e.name), taskID)
+	s, err := newScratch(env, drillRoot(env, e.name), id)
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +75,7 @@ func (e *Engine) drill(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 		}
 	}()
 	tl.Printf("restoring the newest backup into an isolated %s server (Unix socket only, no network)", e.display())
-	out, c, err := e.restoreInto(ctx, env, r, restoreTarget{Latest: true, SnapshotOnly: true}, &s, prod.Executable, tl)
+	out, c, err := e.restoreInto(ctx, env, r, restoreTarget{Latest: true, SnapshotOnly: true}, &s, executable, tl)
 	res.BackupLabel = out.Base.Label
 	res.Warnings = append(res.Warnings, out.Warnings...)
 	if err != nil {
@@ -86,12 +95,12 @@ func (e *Engine) drill(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 	t := out.Base.TakenAt
 	res.RecoveredTo = &t
 	if out.Base.Exact && len(res.Failures) == 0 {
-		s2, err := newScratch(env, drillRoot(env, e.name), taskID+"-latest")
+		s2, err := newScratch(env, drillRoot(env, e.name), id+"-latest")
 		if err != nil {
 			return fail(res, err)
 		}
 		defer func() { _, _ = s2.remove() }()
-		out2, c2, err := e.restoreInto(ctx, env, r, restoreTarget{Latest: true}, &s2, prod.Executable, tl)
+		out2, c2, err := e.restoreInto(ctx, env, r, restoreTarget{Latest: true}, &s2, executable, tl)
 		switch {
 		case err != nil:
 			return fail(res, fmt.Errorf("replaying the changes after the backup: %w", err))
@@ -103,10 +112,10 @@ func (e *Engine) drill(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 					"keeps changes for it): the next backup starts a new unbroken chain", out2.GapAfter.Format(time.RFC3339)))
 			}
 			if latest, err := keyCounts(ctx, c2); err == nil {
-				if len(prod.Keyspace) > 0 {
-					compareWithProduction(latest, prod.Keyspace, res)
+				if len(prodKeys) > 0 {
+					compareWithProduction(latest, prodKeys, res)
 				}
-				replayedCounts(latest, prod.Keyspace, res)
+				replayedCounts(latest, prodKeys, res)
 			}
 			c2.Close()
 			tl.Printf("replayed %s changes made after the backup", commas(out2.Replayed))

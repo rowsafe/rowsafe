@@ -400,6 +400,13 @@ type DrillResult struct {
 	Failures        []string        `json:"failures,omitempty"`
 	Warnings        []string        `json:"warnings,omitempty"`
 	Repo            int             `json:"repo,omitempty"` // RepoSecond: restored from the second copy
+	// RanOn names the server the test ran on when it wasn't the database's
+	// own (Proof on another server, protocol/fork.go); RanOnHostID is its
+	// host ID ("" for a temporary Rowsafe Cloud server, deleted since) and
+	// Temporary says it was one. Set by the control plane.
+	RanOn       string `json:"ran_on,omitempty"`
+	RanOnHostID string `json:"ran_on_host_id,omitempty"`
+	Temporary   bool   `json:"temporary,omitempty"`
 }
 
 type DrillDatabase struct {

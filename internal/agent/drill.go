@@ -211,36 +211,75 @@ func (a *Agent) drillFrom(ctx context.Context, db protocol.DatabaseSpec, taskID 
 	if repo == protocol.RepoSecond {
 		tl.Printf("restoring from the second copy (%s)", describeRepo(a.cfg.Repo2))
 	}
+	err = a.drillRestore(ctx, drillSource{cli: cli, stanza: db.Stanza, major: prod.Major(), sizeBytes: prod.TotalSizeBytes,
+		preload: prod.SharedPreloadLibraries, databases: prod.Databases, prodDataDir: prod.DataDirectory}, taskID, res, tl)
+	return res, err
+}
+
+// drillSource is what a drill restores and checks against: production on
+// this server, or another server's database (fork_verify.go).
+type drillSource struct {
+	cli       pgbackrest.CLI // reads the backups
+	stanza    string
+	major     int
+	sizeBytes int64
+	preload   string // production's shared_preload_libraries
+	databases []protocol.DBInfo
+	// prodDataDir is production's data directory on this server ("" for
+	// another server's database): the scratch directory must not overlap it.
+	prodDataDir string
+}
+
+// drillRestoreCmd is pgBackRest's restore of a drill (a variable for
+// tests).
+var drillRestoreCmd = func(ctx context.Context, cli pgbackrest.CLI, dataDir, tablespaceDir string) ([]byte, error) {
+	return cli.Restore(ctx, dataDir, tablespaceDir)
+}
+
+// drillRestore restores src's latest backup plus all archived WAL into the
+// scratch directory id, starts it on a private socket, checks every
+// database against src.databases into res, then stops and deletes it.
+func (a *Agent) drillRestore(ctx context.Context, src drillSource, id string, res *protocol.DrillResult, tl *taskLog) error {
+	start := time.Now()
+	finishErr := func(err error) error {
+		res.DurationSeconds = time.Since(start).Seconds()
+		if err != nil {
+			res.Passed = false
+			res.Failures = append(res.Failures, err.Error())
+		}
+		return err
+	}
+	cli := src.cli
 	stanzas, err := cli.Info(ctx)
 	if err != nil {
-		return finish(err)
+		return finishErr(err)
 	}
-	backup, err := pgbackrest.LatestBackup(stanzas, db.Stanza)
+	backup, err := pgbackrest.LatestBackup(stanzas, src.stanza)
 	if err != nil {
-		return finish(fmt.Errorf("nothing to restore: %w", err))
+		return finishErr(fmt.Errorf("nothing to restore: %w", err))
 	}
 	latest := backup.Label
 	res.BackupLabel = latest
 
-	dir, err := a.drillDir(taskID, prod.DataDirectory)
+	dir, err := a.drillDir(id, src.prodDataDir)
 	if err != nil {
-		return finish(err)
+		return finishErr(err)
 	}
 	if err := os.MkdirAll(a.cfg.DrillDir, 0o700); err != nil {
-		return finish(err)
+		return finishErr(err)
 	}
-	need := int64(float64(prod.TotalSizeBytes)*drillSpaceFactor) + 1<<30
+	need := int64(float64(src.sizeBytes)*drillSpaceFactor) + 1<<30
 	if free, err := freeBytes(a.cfg.DrillDir); err == nil && free < need {
-		return finish(fmt.Errorf("not enough disk for a drill: %s free in %s, need about %s",
+		return finishErr(fmt.Errorf("not enough disk for a drill: %s free in %s, need about %s",
 			humanBytes(free), a.cfg.DrillDir, humanBytes(need)))
 	}
 
 	dataDir := filepath.Join(dir, "data")
 	socketDir := filepath.Join(dir, "socket")
 	if n := len(socketDir) + len("/.s.PGSQL.") + len(strconv.Itoa(a.cfg.DrillPort)); n > maxSocketPath {
-		return finish(fmt.Errorf("drill socket path would be %d bytes, over the %d byte limit: use a shorter ROWSAFE_DRILL_DIR", n, maxSocketPath))
+		return finishErr(fmt.Errorf("drill socket path would be %d bytes, over the %d byte limit: use a shorter ROWSAFE_DRILL_DIR", n, maxSocketPath))
 	}
-	pgCtl := a.cfg.pgBin(prod.Major(), "pg_ctl")
+	pgCtl := a.cfg.pgBin(src.major, "pg_ctl")
 	defer func() {
 		// Always stop and delete the scratch cluster; drills run on the
 		// production host and must not leave data or processes behind.
@@ -256,23 +295,23 @@ func (a *Agent) drillFrom(ctx context.Context, db protocol.DatabaseSpec, taskID 
 	// The marker lets a restarted agent recognise (and only ever remove)
 	// directories it created for drills.
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return finish(err)
+		return finishErr(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, drillMarker), []byte(taskID+"\n"), 0o600); err != nil {
-		return finish(err)
+	if err := os.WriteFile(filepath.Join(dir, drillMarker), []byte(id+"\n"), 0o600); err != nil {
+		return finishErr(err)
 	}
 	for _, d := range []string{dataDir, socketDir} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
-			return finish(err)
+			return finishErr(err)
 		}
 	}
 
 	cli.Wrap = niceWrap()
 	tl.Printf("restoring backup %s and replaying archived WAL into %s", latest, dataDir)
-	out, err := cli.Restore(ctx, dataDir, filepath.Join(dir, "tablespaces"))
+	out, err := drillRestoreCmd(ctx, cli, dataDir, filepath.Join(dir, "tablespaces"))
 	tl.Output("pgbackrest restore", out)
 	if err != nil {
-		return finish(err)
+		return finishErr(err)
 	}
 	res.RestoredBytes = dirSize(dataDir)
 
@@ -280,10 +319,10 @@ func (a *Agent) drillFrom(ctx context.Context, db protocol.DatabaseSpec, taskID 
 	// data directory usually has none. Write our own either way; the
 	// isolation settings are also pinned at the end of postgresql.auto.conf
 	// (see drillSettings).
-	spec := scratchSpec{Port: a.cfg.DrillPort, SocketDir: socketDir, Major: prod.Major()}
-	spec.Preload = a.scratchPreload(prod.SharedPreloadLibraries, prod.Major()) // pg_extensions.go
+	spec := scratchSpec{Port: a.cfg.DrillPort, SocketDir: socketDir, Major: src.major}
+	spec.Preload = a.scratchPreload(src.preload, src.major) // pg_extensions.go
 	if err := a.writeScratchConf(dataDir, spec); err != nil {
-		return finish(err)
+		return finishErr(err)
 	}
 
 	timeout := 4 * time.Hour
@@ -291,23 +330,23 @@ func (a *Agent) drillFrom(ctx context.Context, db protocol.DatabaseSpec, taskID 
 		timeout = max(time.Until(dl)-5*time.Minute, time.Minute)
 	}
 	scratch := pginspect.Target{SocketDir: socketDir, Port: a.cfg.DrillPort, User: a.cfg.PGUser}
-	conn, spec, err := a.startScratchFallback(ctx, tl, spec, scratch, pgCtl, dir, timeout, prod.SharedPreloadLibraries)
-	if spec.Preload != a.scratchPreload(prod.SharedPreloadLibraries, prod.Major()) && a.cfg.DrillPreload != DrillPreloadProduction {
+	conn, spec, err := a.startScratchFallback(ctx, tl, spec, scratch, pgCtl, dir, timeout, src.preload)
+	if spec.Preload != a.scratchPreload(src.preload, src.major) && a.cfg.DrillPreload != DrillPreloadProduction {
 		res.Warnings = append(res.Warnings, fmt.Sprintf(
 			"the restored cluster only started with production's shared_preload_libraries (%s) loaded", spec.Preload))
 	}
 	if err != nil {
-		return finish(err)
+		return finishErr(err)
 	}
 	defer conn.Close(context.Background())
 	var recoveredTo *time.Time
 	if err := conn.QueryRow(ctx, `SELECT pg_last_xact_replay_timestamp()`).Scan(&recoveredTo); err != nil {
-		return finish(err)
+		return finishErr(err)
 	}
 	res.RecoveredTo = recoveredTo
 
 	if err := checkScratchIsolation(ctx, conn, tl); err != nil {
-		return finish(err)
+		return finishErr(err)
 	}
 	if recoveredTo != nil {
 		tl.Printf("recovered to last transaction at %s", recoveredTo.UTC().Format(time.RFC3339Nano))
@@ -317,18 +356,18 @@ func (a *Agent) drillFrom(ctx context.Context, db protocol.DatabaseSpec, taskID 
 
 	restored, err := pginspect.Databases(ctx, scratch, conn)
 	if err != nil {
-		return finish(err)
+		return finishErr(err)
 	}
-	res.Databases, res.Failures, res.Warnings = compareDatabases(prod.Databases, restored)
+	res.Databases, res.Failures, res.Warnings = compareDatabases(src.databases, restored)
 	res.Passed = len(res.Failures) == 0
 	for _, d := range res.Databases {
 		tl.Printf("database %-24s present=%-5t tables: source %d, restored %d", d.Name, d.Present, d.SourceTables, d.RestoredTables)
 	}
 	if !res.Passed {
-		return finish(fmt.Errorf("drill checks failed: %s", strings.Join(res.Failures, "; ")))
+		return finishErr(fmt.Errorf("drill checks failed: %s", strings.Join(res.Failures, "; ")))
 	}
 	tl.Printf("drill passed in %s", time.Since(start).Round(time.Second))
-	return finish(nil)
+	return finishErr(nil)
 }
 
 // writeScratchConf writes the scratch cluster's own postgresql.conf,

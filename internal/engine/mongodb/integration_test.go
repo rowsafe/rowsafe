@@ -193,6 +193,7 @@ func TestMongoDBEndToEnd(t *testing.T) {
 	if left, _ := os.ReadDir(drillRoot(env)); len(left) != 0 {
 		t.Fatalf("drill left %d entries", len(left))
 	}
+	testForkVerify(t, e, env, db)
 
 	// Guard: a migration preview on a copy; production is untouched.
 	pv, err := run[protocol.PreviewResult](t, e, env, db, protocol.TaskPreviewMigration, protocol.PreviewParams{PreviewID: "p1", DB: "shop",
@@ -466,5 +467,33 @@ func safeCopyIntegration(t *testing.T, e *Engine, env agent.EngineEnv, db protoc
 	}
 	if !e.DropCopy(ctx, env, "sc1") || len(e.CopyStates(env)) != 0 {
 		t.Fatal("drop")
+	}
+}
+
+// testForkVerify is Proof on another server: the facts read on the source,
+// the restore test run by a second engine with its own state and drill
+// directory (the other server), reading the same bucket.
+func testForkVerify(t *testing.T, e *Engine, env agent.EngineEnv, db protocol.DatabaseSpec) {
+	t.Helper()
+	ctx := context.Background()
+	facts, err := e.VerifyFacts(ctx, env, db)
+	if err != nil || len(facts.Databases) == 0 || facts.SizeBytes == 0 || facts.Version == "" {
+		t.Fatalf("facts: %+v %v", facts, err)
+	}
+	other := env
+	dir := t.TempDir()
+	other.StateDir = filepath.Join(dir, "engines", "mongodb")
+	other.Config.DrillDir, other.Config.RewindDir = filepath.Join(dir, "drills"), filepath.Join(dir, "rewind")
+	p := protocol.ForkRestoreParams{ForkID: "fork_v", Verify: true, VerifyFacts: facts,
+		Source: protocol.DatabaseSpec{ID: db.ID, Name: db.Name, Stanza: db.Stanza, Engine: db.Engine}}
+	dr, err := (&Engine{}).ForkVerify(ctx, other, p, "verify-fork_v", &testLog{t: t})
+	if err != nil || !dr.Passed || dr.BackupLabel == "" || dr.RecoveredTo == nil || len(dr.Databases) != len(facts.Databases) {
+		t.Fatalf("restore test elsewhere: %+v %v", dr, err)
+	}
+	if left, _ := os.ReadDir(drillRoot(other)); len(left) != 0 {
+		t.Fatalf("the restore test elsewhere left %d entries", len(left))
+	}
+	if _, err := os.Stat(other.Config.RewindDir); err == nil {
+		t.Fatal("the restore test elsewhere wrote a clone folder")
 	}
 }

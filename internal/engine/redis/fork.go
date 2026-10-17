@@ -2,9 +2,12 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/rowsafe/rowsafe/internal/agent"
@@ -23,8 +26,9 @@ import (
 // protected mode lets in from that server only, until users are added.
 
 var (
-	_ agent.EngineFork    = (*Engine)(nil)
-	_ agent.EngineTargets = (*Engine)(nil)
+	_ agent.EngineFork       = (*Engine)(nil)
+	_ agent.EngineTargets    = (*Engine)(nil)
+	_ agent.EngineForkVerify = (*Engine)(nil)
 )
 
 // settingDatabases is the source's databases setting (ForkPrepareResult
@@ -187,6 +191,66 @@ func (e *Engine) ForkRestore(ctx context.Context, env agent.EngineEnv, p protoco
 		rt.UTC().Format("15:04:05 UTC on 2006-01-02"), e.display(), p.Port, commas(cs.Keys), len(dbs))
 	tl.Printf("%s", res.Summary)
 	return res, nil
+}
+
+// Proof on another server (agent.EngineForkVerify): the drill's restores
+// and checks (drillRestore), run where there is room, against the keys the
+// source's server reported. Nothing is copied into a server there.
+
+// VerifyFacts reads the source's keys per logical database ("db0", keys in
+// Tables), size and version, as the drill reads production. Like the drill,
+// it first lets the newest changes reach the bucket so the test covers them.
+func (e *Engine) VerifyFacts(ctx context.Context, env agent.EngineEnv, source protocol.DatabaseSpec) (*protocol.ForkVerifyFacts, error) {
+	c, err := connectDB(ctx, env, source)
+	if err != nil {
+		return nil, err
+	}
+	in, err := inspect(ctx, c)
+	c.Close()
+	if err != nil {
+		return nil, err
+	}
+	if f := e.existingFollower(source.ID); f != nil && !strings.HasSuffix(source.ID, "~copy2") && in.ReplOffset > 0 {
+		if st := f.snapshot(); st.Mode == modeReplica && st.StreamID != "" {
+			if err := f.flush(ctx, st.StreamID, in.ReplOffset, time.Minute); err != nil {
+				env.Log.Warn("the newest changes haven't reached the bucket before a restore test elsewhere", "db", source.ID, "err", err)
+			}
+		}
+	}
+	return &protocol.ForkVerifyFacts{Databases: in.dbInfos(), SizeBytes: in.UsedMemoryDataset, Version: in.Version}, nil
+}
+
+// ForkVerify restores the newest backup of p.Source (env.Repo), then it and
+// every change since, into temporary servers in the drill directory named
+// after id, checks them against the backup's own counts and p.VerifyFacts,
+// and deletes them.
+func (e *Engine) ForkVerify(ctx context.Context, env agent.EngineEnv, p protocol.ForkRestoreParams, id string, tl agent.TaskLogger) (*protocol.DrillResult, error) {
+	started := time.Now()
+	switch {
+	case p.VerifyFacts == nil:
+		return nil, errors.New("the restore test has nothing to check the restore against: the source's server didn't report its databases")
+	case !idRE.MatchString(id):
+		return nil, fmt.Errorf("invalid restore test id %q", id)
+	}
+	r, err := openRepo(env, protocol.DatabaseSpec{Stanza: p.Source.Stanza})
+	if err != nil {
+		return nil, err
+	}
+	tl.Printf("restore test of %s (%s %s, %s) from its backups, on this server", cmpOr(p.Source.Name, p.Source.Stanza), e.display(),
+		cmpOr(p.VerifyFacts.Version, "of an unknown version"), humanBytes(p.VerifyFacts.SizeBytes))
+	return e.drillRestore(ctx, env, r, factKeys(p.VerifyFacts.Databases), "", id, started, tl)
+}
+
+// factKeys is the source's keys per logical database from what its server
+// reported (dbInfos).
+func factKeys(dbs []protocol.DBInfo) map[int]dbKeys {
+	out := map[int]dbKeys{}
+	for _, d := range dbs {
+		if n, err := strconv.Atoi(strings.TrimPrefix(d.Name, "db")); err == nil && n >= 0 && strings.HasPrefix(d.Name, "db") {
+			out[n] = dbKeys{Keys: int64(d.Tables)}
+		}
+	}
+	return out
 }
 
 func sumKeys(ks map[int]dbKeys) int64 {
