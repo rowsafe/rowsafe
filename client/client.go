@@ -436,3 +436,25 @@ func (c *Client) DenyDevice(ctx context.Context, userCode, orgID string) (out pr
 	return out, c.do(ctx, http.MethodPost, "/v1/internal/device/"+esc(userCode)+"/deny",
 		protocol.DenyDeviceRequest{OrgID: orgID}, &out)
 }
+
+// ScheduleRestart plans a restart of the database for at (RFC 3339, or
+// protocol.RestartAtWindow); confirm is the database's name.
+func (c *Client) ScheduleRestart(ctx context.Context, ref, confirm, at string) (out protocol.ScheduledRestart, err error) {
+	params, err := json.Marshal(protocol.RestartParams{Confirm: confirm, At: at})
+	if err != nil {
+		return out, err
+	}
+	req := protocol.CreateTaskRequest{Type: protocol.TaskRestart, Params: params}
+	return out, c.do(ctx, http.MethodPost, "/v1/databases/"+esc(ref)+"/tasks", req, &out)
+}
+
+// ScheduledRestart is the database's planned restart (an APIError with
+// status 404 when there is none).
+func (c *Client) ScheduledRestart(ctx context.Context, ref string) (out protocol.ScheduledRestart, err error) {
+	return out, c.do(ctx, http.MethodGet, "/v1/databases/"+esc(ref)+"/scheduled-restart", nil, &out)
+}
+
+// CancelScheduledRestart cancels the database's planned restart.
+func (c *Client) CancelScheduledRestart(ctx context.Context, ref string) (out protocol.ScheduledRestart, err error) {
+	return out, c.do(ctx, http.MethodDelete, "/v1/databases/"+esc(ref)+"/scheduled-restart", nil, &out)
+}

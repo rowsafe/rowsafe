@@ -8,14 +8,143 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/rowsafe/rowsafe/client"
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
-// rowsafe files: the folders that go with a database (uploads, media).
-// Rowsafe snapshots them into the database's bucket and brings files back
-// as they were at a point in time; everything runs on the database server.
+// rowsafe files: the folders that go with a database (uploads, media), or
+// with --server a server's own folders (any folder or Docker volume, with or
+// without a database on it). Rowsafe snapshots them into the database's (or
+// the server's) bucket and brings files back as they were at a point in
+// time; everything runs on the server.
+
+// filesTarget is whose folders a files command is about.
+type filesTarget struct {
+	ref  string // the database's name, or the server as given to --server
+	host bool
+}
+
+// label names it in messages: "shop", "the server web1".
+func (t filesTarget) label() string {
+	if t.host {
+		return "the server " + t.ref
+	}
+	return t.ref
+}
+
+// arg is it as the CLI takes it again: "shop", "--server web1".
+func (t filesTarget) arg() string {
+	if t.host {
+		return "--server " + t.ref
+	}
+	return t.ref
+}
+
+// confirmName is what confirms a restore: the database's name, or the
+// server's hostname.
+func (t filesTarget) confirmName(info protocol.FilesInfo) string {
+	if t.host && info.Host.Hostname != "" {
+		return info.Host.Hostname
+	}
+	return t.ref
+}
+
+func (t filesTarget) confirmPrompt(name string) string {
+	if t.host {
+		return fmt.Sprintf("Type the server's hostname (%s) to go ahead: ", name)
+	}
+	return fmt.Sprintf("Type the database name (%s) to go ahead: ", name)
+}
+
+func (t filesTarget) info(ctx context.Context, c *client.Client) (protocol.FilesInfo, error) {
+	if t.host {
+		return c.HostFilesInfo(ctx, t.ref)
+	}
+	return c.FilesInfo(ctx, t.ref)
+}
+
+func (t filesTarget) add(ctx context.Context, c *client.Client, req protocol.AddFilesFolderRequest) (protocol.FilesFolderView, error) {
+	if t.host {
+		return c.HostAddFilesFolder(ctx, t.ref, req)
+	}
+	return c.AddFilesFolder(ctx, t.ref, req)
+}
+
+func (t filesTarget) remove(ctx context.Context, c *client.Client, folderID string) error {
+	if t.host {
+		return c.HostRemoveFilesFolder(ctx, t.ref, folderID)
+	}
+	return c.RemoveFilesFolder(ctx, t.ref, folderID)
+}
+
+func (t filesTarget) backup(ctx context.Context, c *client.Client) (protocol.FilesTasksResponse, error) {
+	if t.host {
+		return c.HostFilesBackup(ctx, t.ref, protocol.FilesBackupParams{})
+	}
+	return c.FilesBackup(ctx, t.ref, protocol.FilesBackupParams{})
+}
+
+func (t filesTarget) restore(ctx context.Context, c *client.Client, req protocol.FilesRestoreRequest) (protocol.FilesTasksResponse, error) {
+	if t.host {
+		return c.HostFilesRestore(ctx, t.ref, req)
+	}
+	return c.FilesRestore(ctx, t.ref, req)
+}
+
+func (t filesTarget) undo(ctx context.Context, c *client.Client, restoreID, confirm string) (protocol.FilesTasksResponse, error) {
+	if t.host {
+		return c.HostFilesUndo(ctx, t.ref, restoreID, confirm)
+	}
+	return c.FilesUndo(ctx, t.ref, restoreID, confirm)
+}
+
+func (t filesTarget) check(ctx context.Context, c *client.Client) (protocol.FilesTasksResponse, error) {
+	if t.host {
+		return c.HostFilesCheck(ctx, t.ref)
+	}
+	return c.FilesCheck(ctx, t.ref)
+}
+
+func (t filesTarget) nearest(ctx context.Context, c *client.Client, at time.Time) (protocol.FilesNearest, error) {
+	if t.host {
+		return c.HostFilesNearest(ctx, t.ref, at)
+	}
+	return c.FilesNearest(ctx, t.ref, at)
+}
+
+// serverFlag adds --server to a files command.
+func serverFlag(fs *flag.FlagSet) *string {
+	return fs.String("server", "", "a server's own folders instead of a database's: its hostname or ID (see rowsafe hosts list)")
+}
+
+// filesArgs parses a files command's flags and [NAME] (none with --server),
+// and resolves whose folders.
+func filesArgs(ctx context.Context, c *client.Client, fs *flag.FlagSet, server *string, args []string) (filesTarget, error) {
+	t, rest, err := filesArgsRest(ctx, c, fs, server, args)
+	if err == nil && len(rest) > 0 {
+		if t.host {
+			return t, usageErrorf("unexpected argument %q: with --server, name no database", rest[0])
+		}
+		return t, usageErrorf("expected at most one database name, got %q", strings.Join(append([]string{t.ref}, rest...), " "))
+	}
+	return t, err
+}
+
+// filesArgsRest is filesArgs for commands that take more arguments after
+// [NAME] (absolute paths).
+func filesArgsRest(ctx context.Context, c *client.Client, fs *flag.FlagSet, server *string, args []string) (filesTarget, []string, error) {
+	pos, err := positionals(fs, args)
+	if err != nil {
+		return filesTarget{}, nil, err
+	}
+	if s := strings.TrimSpace(*server); s != "" {
+		return filesTarget{ref: s, host: true}, pos, nil
+	}
+	name, rest, err := nameAndRest(ctx, c, pos)
+	return filesTarget{ref: name}, rest, err
+}
 
 var filesSubs = map[string]subcommand{
 	"list":    filesShow,
@@ -41,11 +170,13 @@ func filesCmd(ctx context.Context, c *client.Client, args []string) error {
 func filesShow(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("files", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "print JSON")
-	name, err := dbArg(ctx, c, fs, args)
+	server := serverFlag(fs)
+	t, err := filesArgs(ctx, c, fs, server, args)
 	if err != nil {
 		return err
 	}
-	info, err := c.FilesInfo(ctx, name)
+	name := t.ref
+	info, err := t.info(ctx, c)
 	if err != nil {
 		return apiErr(err)
 	}
@@ -56,30 +187,38 @@ func filesShow(ctx context.Context, c *client.Client, args []string) error {
 	}
 	fmt.Printf("%s: Files\n\n", name)
 	if len(info.Folders) == 0 {
-		fmt.Println("No folders are protected yet. Uploads, CVs or media your app stores next to the database can be")
-		fmt.Println("backed up with it, so a restore brings back both:")
-		fmt.Printf("  rowsafe files add %s /srv/app/storage\n", name)
+		if t.host {
+			fmt.Println("No folders of this server are protected yet. Any folder, or a Docker volume, can be backed up:")
+		} else {
+			fmt.Println("No folders are protected yet. Uploads, CVs or media your app stores next to the database can be")
+			fmt.Println("backed up with it, so a restore brings back both:")
+		}
+		fmt.Printf("  rowsafe files add %s /srv/app/storage\n", t.arg())
 		for _, cand := range info.Candidates {
 			fmt.Printf("  Suggested: %s (%s, %s)\n", cand.Path, cand.Why, humanBytes(cand.SizeBytes))
 		}
 		return nil
 	}
-	t := newTable("FOLDER", "STATUS", "LAST SNAPSHOT", "FILES", "SIZE")
+	tbl := newTable("FOLDER", "STATUS", "LAST SNAPSHOT", "FILES", "SIZE")
 	for _, f := range info.Folders {
 		last, files, size := "never", "-", "-"
 		if s := f.State.LastSnapshot; s != nil {
 			last = s.Time.Local().Format("2006-01-02 15:04")
 			files, size = fmt.Sprint(s.Files), humanBytes(s.SizeBytes)
 		}
-		t.row(f.Path, f.State.Status, last, files, size)
+		tbl.row(f.Path, f.State.Status, last, files, size)
 	}
-	t.flush()
+	tbl.flush()
 	for _, f := range info.Folders {
 		if f.State.Problem != "" {
 			fmt.Printf("\n%s: %s\n", f.Path, f.State.Problem)
 		}
 	}
-	fmt.Printf("\nSnapshots every %d minutes and at every Mark; kept %d days", info.Settings.IntervalMinutes, info.Settings.RetentionDays)
+	every := "Snapshots every %d minutes and at every Mark; kept %d days"
+	if t.host {
+		every = "Snapshots every %d minutes; kept %d days"
+	}
+	fmt.Printf("\n"+every, info.Settings.IntervalMinutes, info.Settings.RetentionDays)
 	if info.RepoSizeBytes > 0 {
 		fmt.Printf("; %s in your bucket", humanBytes(info.RepoSizeBytes))
 	}
@@ -93,7 +232,7 @@ func filesShow(ctx context.Context, c *client.Client, args []string) error {
 			until = " until " + describeTime(*k.Expires)
 		}
 		fmt.Printf("\n%s was restored as a whole; the folder as it was before is kept%s.\n", k.Path, until)
-		fmt.Printf("  Undo it: rowsafe files undo %s\n", name)
+		fmt.Printf("  Undo it: rowsafe files undo %s\n", t.arg())
 	}
 	if !info.Host.CanPutBack && info.Host.Reason != "" {
 		fmt.Printf("\nNote: %s\n", info.Host.Reason)
@@ -116,16 +255,14 @@ func nameAndRest(ctx context.Context, c *client.Client, pos []string) (string, [
 func filesAddCmd(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("files add", flag.ContinueOnError)
 	exclude := fs.String("exclude", "", "comma-separated patterns to leave out, e.g. cache,*.tmp")
-	pos, err := positionals(fs, args)
+	server := serverFlag(fs)
+	t, paths, err := filesArgsRest(ctx, c, fs, server, args)
 	if err != nil {
 		return err
 	}
-	name, paths, err := nameAndRest(ctx, c, pos)
-	if err != nil {
-		return err
-	}
+	name := t.ref
 	if len(paths) != 1 {
-		return newUsageError("which folder? rowsafe files add [NAME] /srv/app/storage (the path on the database server)")
+		return newUsageError("which folder? rowsafe files add [NAME | --server SERVER] /srv/app/storage (the path on the server; a Docker volume: /var/lib/docker/volumes/VOLUME/_data)")
 	}
 	var ex []string
 	for _, x := range strings.Split(*exclude, ",") {
@@ -133,25 +270,25 @@ func filesAddCmd(ctx context.Context, c *client.Client, args []string) error {
 			ex = append(ex, x)
 		}
 	}
-	f, err := c.AddFilesFolder(ctx, name, protocol.AddFilesFolderRequest{Path: paths[0], Excludes: ex})
+	f, err := t.add(ctx, c, protocol.AddFilesFolderRequest{Path: paths[0], Excludes: ex})
 	if err != nil {
 		return apiErr(err)
 	}
 	if jsonMode {
 		return printJSON(f)
 	}
-	fmt.Printf("%s: protecting %s. The first snapshot starts within a minute; follow it with rowsafe files %s\n", name, f.Path, name)
+	fmt.Printf("%s: protecting %s. The first snapshot starts within a minute; follow it with rowsafe files %s\n", name, f.Path, t.arg())
 	return nil
 }
 
 // folderByPath finds a protected folder by path or ID.
-func folderByPath(info protocol.FilesInfo, name, p string) (protocol.FilesFolderView, error) {
+func folderByPath(info protocol.FilesInfo, t filesTarget, p string) (protocol.FilesFolderView, error) {
 	for _, f := range info.Folders {
 		if f.Path == p || f.ID == p || f.Path == strings.TrimSuffix(p, "/") {
 			return f, nil
 		}
 	}
-	return protocol.FilesFolderView{}, fmt.Errorf("%s is not protected for %s (see rowsafe files %s)", p, name, name)
+	return protocol.FilesFolderView{}, fmt.Errorf("%s is not protected for %s (see rowsafe files %s)", p, t.label(), t.arg())
 }
 
 // ---- rowsafe files remove [NAME] PATH ----
@@ -159,30 +296,31 @@ func folderByPath(info protocol.FilesInfo, name, p string) (protocol.FilesFolder
 func filesRemoveCmd(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("files remove", flag.ContinueOnError)
 	yes := fs.Bool("yes", false, "don't ask")
-	pos, err := positionals(fs, args)
+	server := serverFlag(fs)
+	t, paths, err := filesArgsRest(ctx, c, fs, server, args)
 	if err != nil {
 		return err
 	}
-	name, paths, err := nameAndRest(ctx, c, pos)
-	if err != nil {
-		return err
-	}
+	name := t.ref
 	if len(paths) != 1 {
-		return newUsageError("which folder? rowsafe files remove [NAME] PATH")
+		return newUsageError("which folder? rowsafe files remove [NAME | --server SERVER] PATH")
 	}
-	info, err := c.FilesInfo(ctx, name)
+	info, err := t.info(ctx, c)
 	if err != nil {
 		return apiErr(err)
 	}
-	f, err := folderByPath(info, name, paths[0])
+	f, err := folderByPath(info, t, paths[0])
 	if err != nil {
 		return err
 	}
 	if err := confirmChange(*yes, fmt.Sprintf("Stop backing up %s? Its snapshots stay in your bucket until they age out.", f.Path)); err != nil {
 		return err
 	}
-	if err := c.RemoveFilesFolder(ctx, name, f.ID); err != nil {
+	if err := t.remove(ctx, c, f.ID); err != nil {
 		return apiErr(err)
+	}
+	if jsonMode {
+		return printJSON(f)
 	}
 	fmt.Printf("%s: no longer backing up %s.\n", name, f.Path)
 	return nil
@@ -193,11 +331,13 @@ func filesRemoveCmd(ctx context.Context, c *client.Client, args []string) error 
 func filesBackupCmd(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("files backup", flag.ContinueOnError)
 	noWait := fs.Bool("no-wait", false, "don't wait for it to finish")
-	name, err := dbArg(ctx, c, fs, args)
+	server := serverFlag(fs)
+	t, err := filesArgs(ctx, c, fs, server, args)
 	if err != nil {
 		return err
 	}
-	resp, err := c.FilesBackup(ctx, name, protocol.FilesBackupParams{})
+	name := t.ref
+	resp, err := t.backup(ctx, c)
 	if err != nil {
 		return apiErr(err)
 	}
@@ -227,10 +367,15 @@ func filesRestoreCmd(ctx context.Context, c *client.Client, args []string) error
 	whole := fs.Bool("whole-folder", false, "make the whole folder exactly as it was (files added since are removed; kept for undo)")
 	overwrite := fs.Bool("overwrite", false, "also put back files that changed since (default: only missing files)")
 	preview := fs.Bool("preview", false, "only say what would be restored")
-	yes := fs.Bool("yes", false, "don't ask; confirms with the database's name")
-	name, err := dbArg(ctx, c, fs, args)
+	yes := fs.Bool("yes", false, "don't ask; confirms with the database's name (the server's hostname with --server)")
+	server := serverFlag(fs)
+	t, err := filesArgs(ctx, c, fs, server, args)
 	if err != nil {
 		return err
+	}
+	name := t.ref
+	if t.host && *column != "" {
+		return newUsageError("--column restores the files a database column refers to: name the database instead of --server")
 	}
 	req := protocol.FilesRestoreRequest{Mode: protocol.FilesRestoreMissing, Overwrite: *overwrite, Preview: *preview}
 	var what string
@@ -238,12 +383,12 @@ func filesRestoreCmd(ctx context.Context, c *client.Client, args []string) error
 	if err != nil {
 		return err
 	}
-	info, err := c.FilesInfo(ctx, name)
+	info, err := t.info(ctx, c)
 	if err != nil {
 		return apiErr(err)
 	}
 	if *folder != "" {
-		f, err := folderByPath(info, name, *folder)
+		f, err := folderByPath(info, t, *folder)
 		if err != nil {
 			return err
 		}
@@ -280,7 +425,7 @@ func filesRestoreCmd(ctx context.Context, c *client.Client, args []string) error
 	}
 	fmt.Printf("%s: restore %s as of %s.\n", name, desc, what)
 	if req.Time != nil {
-		if n, err := c.FilesNearest(ctx, name, *req.Time); err == nil {
+		if n, err := t.nearest(ctx, c, *req.Time); err == nil {
 			for _, f := range n.Folders {
 				if f.Snapshot != nil {
 					fmt.Printf("  %s: files from %s (the nearest snapshot before)\n", f.Path, describeTime(f.Snapshot.Time))
@@ -298,12 +443,13 @@ func filesRestoreCmd(ctx context.Context, c *client.Client, args []string) error
 		fmt.Println("Only missing files are put back; nothing that exists now is overwritten.")
 	}
 	if !*preview {
-		if err := confirmTypedAs(*yes, name, fmt.Sprintf("Type the database name (%s) to go ahead: ", name)); err != nil {
+		confirm := t.confirmName(info)
+		if err := confirmTypedAs(*yes, confirm, t.confirmPrompt(confirm)); err != nil {
 			return err
 		}
-		req.Confirm = name
+		req.Confirm = confirm
 	}
-	resp, err := c.FilesRestore(ctx, name, req)
+	resp, err := t.restore(ctx, c, req)
 	if err != nil {
 		return apiErr(err)
 	}
@@ -342,12 +488,14 @@ func parseColumnRef(s string) (*protocol.FilesReference, error) {
 
 func filesUndoCmd(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("files undo", flag.ContinueOnError)
-	yes := fs.Bool("yes", false, "don't ask; confirms with the database's name")
-	name, err := dbArg(ctx, c, fs, args)
+	yes := fs.Bool("yes", false, "don't ask; confirms with the database's name (the server's hostname with --server)")
+	server := serverFlag(fs)
+	t, err := filesArgs(ctx, c, fs, server, args)
 	if err != nil {
 		return err
 	}
-	info, err := c.FilesInfo(ctx, name)
+	name := t.ref
+	info, err := t.info(ctx, c)
 	if err != nil {
 		return apiErr(err)
 	}
@@ -356,10 +504,11 @@ func filesUndoCmd(ctx context.Context, c *client.Client, args []string) error {
 	}
 	k := info.Kept[len(info.Kept)-1]
 	fmt.Printf("%s: put %s back as it was just before the restore of %s.\n", name, k.Path, describeTime(k.CreatedAt))
-	if err := confirmTypedAs(*yes, name, fmt.Sprintf("Type the database name (%s) to go ahead: ", name)); err != nil {
+	confirm := t.confirmName(info)
+	if err := confirmTypedAs(*yes, confirm, t.confirmPrompt(confirm)); err != nil {
 		return err
 	}
-	resp, err := c.FilesUndo(ctx, name, k.RestoreID, name)
+	resp, err := t.undo(ctx, c, k.RestoreID, confirm)
 	if err != nil {
 		return apiErr(err)
 	}
@@ -377,11 +526,12 @@ func filesUndoCmd(ctx context.Context, c *client.Client, args []string) error {
 
 func filesProofCmd(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("files proof", flag.ContinueOnError)
-	name, err := dbArg(ctx, c, fs, args)
+	server := serverFlag(fs)
+	t, err := filesArgs(ctx, c, fs, server, args)
 	if err != nil {
 		return err
 	}
-	resp, err := c.FilesCheck(ctx, name)
+	resp, err := t.check(ctx, c)
 	if err != nil {
 		return apiErr(err)
 	}

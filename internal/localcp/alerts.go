@@ -33,9 +33,9 @@ import (
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
-// ChannelNtfy is an ntfy topic (https://ntfy.sh or a self-hosted server):
-// on a server without an account only.
-const ChannelNtfy = "ntfy"
+// ChannelNtfy is an ntfy topic (https://ntfy.sh or a self-hosted server),
+// its whole URL in config.url.
+const ChannelNtfy = protocol.ChannelNtfy
 
 const (
 	keepResolvedAlerts = 200
