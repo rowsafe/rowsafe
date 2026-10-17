@@ -1,6 +1,6 @@
 # Rowsafe
 
-![rowsafe pulse finds a session idle in a transaction and 200 thousand dead rows; rowsafe fix ends the session and cleans up; the score goes from 88 to 98](docs/demo/rowsafe-demo.gif)
+![rowsafe add saves the database once; rowsafe pulse finds a session idle in a transaction and 200 thousand dead rows; rowsafe fix ends the session and cleans up; the score goes from 88 to 98](docs/demo/rowsafe-demo.gif)
 
 **The database admin you never hired.** Rowsafe looks after the databases you run on your own servers: backups you can restore to any second, a restore test every week, monitoring with one-click fixes, and a safety net for AI coding agents.
 
@@ -19,7 +19,7 @@ This repository is the open-source part of [Rowsafe](https://rowsafe.sh): the ag
 
 Features per database: `protocol.EngineCapabilities`.
 
-## Try it now: no account
+## Try it now
 
 On your database server (PostgreSQL on Linux):
 
@@ -28,10 +28,9 @@ curl -fsSL https://rowsafe.sh | sudo sh -s -- --no-account
 sudo rowsafe status shop                  # protected? backups, the change log, the last restore test
 sudo rowsafe mark shop before-migration   # a restore point (a Mark)
 sudo rowsafe backups shop                 # also: proofs, backup, proof
-sudo rowsafe login                        # later: the dashboard, alerts and Rewind, keeping it all
 ```
 
-Continuous backups to your own bucket, Marks, a weekly restore test and Pulse, with no account. Restoring with Rewind needs an account for now.
+Continuous backups to your own bucket (encrypted on the server, with a passphrase only you have), Marks, a weekly restore test and Pulse. Restoring through Rowsafe (Rewind) comes with the dashboard, for now.
 
 From anywhere, on a PostgreSQL you can connect to (managed ones too):
 
@@ -54,14 +53,17 @@ MySQL and MariaDB work the same way (`rowsafe add shop mysql://user@host:3306/db
 
 On Windows, download `rowsafe-windows-amd64.exe` (or `-arm64.exe`) from the [latest release](https://github.com/rowsafe/rowsafe/releases/latest); the commands from anywhere work there except applying fixes and settings (`fix`, `tune --yes`) and MySQL, for now.
 
-## Get started
+## Link it to the dashboard
+
+[The dashboard](https://app.rowsafe.sh) adds every server and database in one place, alerts, history, Rewind in one click and teams. Free for one server.
 
 ```sh
-curl -fsSL https://rowsafe.sh/cli | sh           # the CLI, on your Mac or Linux computer
-rowsafe login
-rowsafe hosts add root@203.0.113.10              # installs the agent on that server over SSH
-# or on the database server itself:  curl -fsSL https://rowsafe.sh | sudo sh
+sudo rowsafe login                    # on a server set up above: keeps its backups, Marks and restore tests
+rowsafe login                         # on your computer
+rowsafe hosts add root@203.0.113.10   # then add more servers: installs the agent over SSH
 ```
+
+Or install on a new server already linked: `curl -fsSL https://rowsafe.sh | sudo sh`.
 
 **Rewind**: continuous backups, restore to any second.
 
@@ -107,7 +109,7 @@ Full guide: [Quickstart](https://rowsafe.sh/docs/quickstart).
 | `cmd/rowsafe`, `client` | The CLI. |
 | `mcp`, `integrations/` | Guard: the MCP server, Claude Code and Codex plugins, and the GitHub Action (`rowsafe/action`). |
 | `collect`, `tune` | Monitoring, and settings recommendations. |
-| `pulse`, `local` | The health score and its fixes, and Rowsafe without an account (`rowsafe pulse postgres://…`). |
+| `pulse`, `local` | The health score and its fixes, and Rowsafe on a connection string (`rowsafe pulse postgres://…`). |
 | `protocol` | API types shared by the agent, the CLI and the control plane. |
 | `internal/pgbackrest`, `internal/pginspect` | PostgreSQL. |
 | `internal/engine` | MySQL/MariaDB, MongoDB, ClickHouse, Redis/Valkey, SQLite, Qdrant, Meilisearch. |
