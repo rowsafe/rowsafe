@@ -34,9 +34,15 @@ No account needed: on a PostgreSQL database this computer reaches ("rowsafe help
   rowsafe use NAME [--json]                  make NAME this project's database (.rowsafe.json; never the password)
   rowsafe databases [--json]                 databases saved on this computer (also rowsafe ls when not logged in)
   rowsafe forget NAME [--yes]                delete a saved database's connection string
-  rowsafe pulse [NAME|CONN] | fix | insights | top | activity | settings | tune | mcp
+  rowsafe pulse [NAME|CONN] | fix | insights | top | activity | settings | tune | schema | explain | mcp
                                              NAME: a saved database, or this project's; CONN: a connection string
                                              used once; DATABASE_URL when you aren't logged in
+  rowsafe schema [NAME|CONN] [TABLE...] [--table T] [--schema S] [--limit N] [--json]
+                                             tables, columns, keys, indexes (used or not), views and enums,
+                                             compact for an AI agent's context (the largest 100 tables unless named)
+  rowsafe explain [NAME|CONN] "SELECT ..." | -f FILE [--analyze [--timeout 30s]] [--json]
+                                             why a query is slow, in plain words, and the index that would likely
+                                             help; --analyze runs a SELECT read-only (rolled back)
 
 Getting started
   rowsafe login [--url URL]                  log in with your browser (default URL https://api.rowsafe.sh)
@@ -565,6 +571,9 @@ func dispatch(ctx context.Context, args []string) error {
 		if isLocal {
 			return run(ctx, db, args)
 		}
+	}
+	if cmd == "schema" || cmd == "explain" { // only without an account (schema.go)
+		return localOnly(ctx, cmd, rest)
 	}
 	if err != nil {
 		if errors.Is(err, errNotLoggedIn) {

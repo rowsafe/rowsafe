@@ -20,6 +20,8 @@ const mcpInstructions = `Rowsafe, without an account: tools for one PostgreSQL d
 
 - "Is the database healthy?", "what needs attention?": database_health (a 0-100 score and findings in plain language, each with what to do and the fixes Rowsafe can apply).
 - "What is slow?": top_queries (pg_stat_statements totals) and database_insights (largest tables, unused and duplicate indexes, bloat, dead rows, transaction ID age).
+- "What does the database look like?": describe_schema (tables, columns, keys, indexes, views, enums; compact). Use it before writing SQL or a migration.
+- "Why is this query slow?": explain_query (the plan in plain words and the index that would likely help; analyze runs a SELECT read-only).
 - "What is running now / what is blocked?": live_activity.
 - Settings: database_settings (the settings that matter and what would suit the server).
 - Fixing: when a finding has a fix, use apply_fix (finding_id and fix_id) once the user agrees, instead of giving them SQL. It evaluates the database again and runs only a fix that evaluation proposes; every name and condition is checked again first. Tell the user what a destructive fix does (its confirm text) before applying it. Without apply_fix (read-only), tell the user the command: rowsafe fix.
@@ -113,6 +115,7 @@ func NewMCPServer(d *DB, opts MCPOptions) *sdk.Server {
 		ov, err := d.Settings(ctx, in.options())
 		return nil, ov, err
 	})
+	addSchemaTools(s, d)
 	if opts.AllowWrites {
 		f, t := false, true
 		sdk.AddTool(s, &sdk.Tool{

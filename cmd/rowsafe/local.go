@@ -59,6 +59,11 @@ it once, then use it by name:
   rowsafe tune [NAME] [--memory 16GB --cpus 4] [--workload web|analytics|mixed] [--yes]
                                      settings that suit the server, applied with ALTER SYSTEM and a
                                      reload (nothing restarts)
+  rowsafe schema [NAME] [TABLE...]   tables, columns, keys, indexes (used or not), views and enums,
+                                     compact for an AI agent (--json: everything)
+  rowsafe explain [NAME] "SELECT ..."
+                                     why a query is slow, in plain words, and the index that would
+                                     likely help (--analyze runs a SELECT read-only; -f FILE)
   rowsafe mcp [NAME] [--allow-writes]
                                      an MCP server for AI assistants with these tools
 
@@ -166,7 +171,7 @@ func localControl(want string) (url string, err error) {
 
 // notLoggedIn explains what works without an account.
 const notLoggedIn = "not logged in: run `rowsafe login`.\n" +
-	"Without an account, pulse, fix, insights, top, activity, settings, tune and mcp work on a PostgreSQL database directly:\n" +
+	"Without an account, pulse, fix, insights, top, activity, settings, tune, schema, explain and mcp work on a PostgreSQL database directly:\n" +
 	"  rowsafe add shop postgres://user@host:5432/dbname   then: rowsafe pulse shop\n" +
 	"  or once: rowsafe pulse postgres://user@host:5432/dbname   (or set DATABASE_URL)"
 
