@@ -41,6 +41,8 @@ No account needed: on a PostgreSQL database this computer reaches ("rowsafe help
 Getting started
   rowsafe login [--url URL]                  log in with your browser (default URL https://api.rowsafe.sh)
   rowsafe login --key rsk_... [--url URL]    log in with an existing API key (CI, scripts)
+  sudo rowsafe login [--yes]                 on a server set up without an account: also connects it to the
+                                             account, with its backups, Proofs and Marks (no reinstall)
   rowsafe logout [--keep-key]                forget the login and revoke the key "rowsafe login" created
   rowsafe whoami [--json]                    control plane, organization, plan, API key in use and who it acts as
   rowsafe hosts add [USER@]SERVER [-p PORT] [-i KEY] [-- INSTALLER OPTIONS]
@@ -449,6 +451,14 @@ func loadConfig() (config, error) {
 		if url, err := localControl(c.URL); url != "" || err != nil {
 			c.URL, c.APIKey = url, "local"
 			return c, err
+		}
+	} else if os.Getenv("ROWSAFE_API_KEY") == "" && os.Getenv("ROWSAFE_URL") == "" {
+		// A login saved on a server whose agent went back to running
+		// without an account (the installer's --no-account): the agent's
+		// socket only exists then, and commands here are about it.
+		if url, err := localControl(""); url != "" && err == nil {
+			c.URL, c.APIKey, c.KeyID = url, "local", ""
+			return c, nil
 		}
 	}
 	if c.URL == "" {

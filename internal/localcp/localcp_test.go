@@ -218,6 +218,23 @@ func TestLifecycle(t *testing.T) {
 		}
 	})
 
+	// What rowsafe login hands over to an account: the history, no secret.
+	x, err := ReadExport(s.st.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(x.Databases) != 1 || x.Databases[0].Name != "shop" || x.Databases[0].Status != protocol.DBActive || len(x.Open) != 0 {
+		t.Fatalf("export: %+v open %+v", x.Databases, x.Open)
+	}
+	h := x.History.Databases[0]
+	if h.Name != "shop" || len(h.Backups) != 1 || len(h.Drills) != 1 || len(h.RestorePoints) != 1 || h.RestorePoints[0].LSN != "0/3000000" {
+		t.Fatalf("history: %+v", h)
+	}
+	raw, _ := json.Marshal(x)
+	if strings.Contains(string(raw), a.token) {
+		t.Error("the export holds the agent's token")
+	}
+
 	// Things that need an account say so.
 	if _, err := c.Hosts(ctx); err != nil {
 		t.Error(err)

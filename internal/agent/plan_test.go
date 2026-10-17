@@ -50,6 +50,29 @@ func TestPlanAdoptAlreadyAdoptedIsNoop(t *testing.T) {
 	if len(p.Settings) != 0 || p.Restart {
 		t.Errorf("expected no setting changes and no restart, got %v restart=%v", p.Settings, p.Restart)
 	}
+	if !p.AlreadySetUp {
+		t.Error("archiving with Rowsafe's own command is already set up")
+	}
+	// A longer archive_timeout is lowered with a reload: still set up.
+	in.ArchiveTimeoutSeconds = 300
+	if p, _ := PlanAdopt(in, "/etc/rowsafe/pgbackrest/app.conf", ourCmd, false); !p.AlreadySetUp || p.Restart {
+		t.Errorf("archive_timeout only: AlreadySetUp=%v restart=%v", p.AlreadySetUp, p.Restart)
+	}
+}
+
+func TestPlanAdoptNotAlreadySetUp(t *testing.T) {
+	fresh, _ := PlanAdopt(appToday(), "x", ourCmd, false)
+	pending := appToday()
+	pending.ArchiveMode, pending.ArchiveCommand, pending.PendingRestart = "on", ourCmd, []string{"archive_mode"}
+	pend, _ := PlanAdopt(pending, "x", ourCmd, false)
+	other := appToday()
+	other.ArchiveMode, other.ArchiveCommand = "on", "cp %p /x/%f"
+	oth, _ := PlanAdopt(other, "x", ourCmd, true)
+	for name, p := range map[string]Plan{"fresh": fresh, "pending restart": pend, "another archiver": oth} {
+		if p.AlreadySetUp {
+			t.Errorf("%s: AlreadySetUp", name)
+		}
+	}
 }
 
 func TestPlanAdoptPendingRestartStillNeedsRestart(t *testing.T) {

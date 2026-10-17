@@ -352,6 +352,10 @@ type AdoptResult struct {
 	// RepoFolder is the backup folder when it isn't the default one (the
 	// setup started fresh in a new folder: ExistingBackupsNewFolder).
 	RepoFolder string `json:"repo_folder,omitempty"`
+	// AlreadySetUp: WAL archiving is on with Rowsafe's own archive_command
+	// for this database (an earlier setup, or the server without an
+	// account it was connected from): the plan changes no setting.
+	AlreadySetUp bool `json:"already_set_up,omitempty"`
 }
 
 // RestartResult is the agent's report for a restart task.
