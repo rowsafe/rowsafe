@@ -23,6 +23,9 @@ func (d *DB) Check(ctx context.Context) (Server, error) {
 	if d.my != nil {
 		return d.mysqlCheck(ctx)
 	}
+	if d.mg != nil {
+		return d.mongoCheck(ctx)
+	}
 	conn, err := pgx.ConnectConfig(ctx, d.conn.Copy())
 	if err != nil {
 		return Server{}, d.connectError(err)

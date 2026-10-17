@@ -19,7 +19,7 @@ import (
 // a statement timeout and a short lock timeout, and rolls it back.
 // Nothing fn runs can change data: PostgreSQL refuses writes in it.
 func (d *DB) readOnly(ctx context.Context, timeout time.Duration, fn func(pgx.Tx) error) error {
-	if d.my != nil {
+	if d.conn == nil {
 		return fmt.Errorf("describing the schema and explaining queries work on PostgreSQL for now, not %s", d.EngineName())
 	}
 	// pginspect's connection: no session settings at startup and the simple
