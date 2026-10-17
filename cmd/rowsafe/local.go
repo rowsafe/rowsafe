@@ -261,7 +261,7 @@ func noArgs(pos []string) error {
 
 // localFooter points to Rowsafe for what isn't checked without the agent.
 func localFooter(l *localDB) {
-	fmt.Println("\nBackups, restore to any second and a weekly restore test: https://rowsafe.sh")
+	fmt.Println("\n" + dim("Backups, restore to any second and a weekly restore test:") + " " + cyan("https://rowsafe.sh"))
 	if l.PasswordInURL {
 		fmt.Println("Tip: save it once with `rowsafe add NAME` (it asks for the connection string, so the password stays out of your shell history), then run `rowsafe pulse NAME`.")
 	}
@@ -344,15 +344,15 @@ func localFix(ctx context.Context, l *localDB, args []string) error {
 		return fmt.Errorf("%q can't run now: %s", pick.fix.Label, orText(pick.fix.Reason, "Rowsafe didn't say why"))
 	}
 	fx := pick.fix
-	fmt.Printf("%s: %s\n", h.Database, fx.Label)
+	fmt.Printf("%s: %s\n", bold(h.Database), bold(fx.Label))
 	if fx.Description != "" {
-		fmt.Println(fx.Description)
+		fmt.Println(wrap(fx.Description, "", wrapWidth()))
 	}
 	if !stdinIsTerminal() && !*yes {
 		return errors.New("not applied: pass --yes to apply a fix without a terminal")
 	}
 	if fx.Confirm != "" {
-		fmt.Printf("\nWarning: %s\n", fx.Confirm)
+		fmt.Printf("\n%s %s\n", yellow("Warning:"), fx.Confirm)
 		if !*yes {
 			fmt.Printf("Type the database name (%s) to go ahead: ", h.Database)
 			if readLine() != h.Database {
@@ -368,11 +368,11 @@ func localFix(ctx context.Context, l *localDB, args []string) error {
 	fmt.Fprintln(os.Stderr, "Running...")
 	res, err := l.Apply(ctx, fx)
 	if err != nil {
-		fmt.Printf("The fix didn't work: %v\n", err)
+		fmt.Printf("%s %v\n", red("The fix didn't work:"), err)
 		printDetails(res.Details)
 		return exitError(1)
 	}
-	fmt.Println(orText(res.Summary, "Done."))
+	fmt.Println(green(orText(res.Summary, "Done.")))
 	printDetails(res.Details)
 	return nil
 }

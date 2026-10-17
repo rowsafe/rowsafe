@@ -89,24 +89,25 @@ func pctText(p float64) string {
 // printHealth shows a health score and its findings; fixCmd is the command
 // that applies a fix ("rowsafe fix NAME").
 func printHealth(h protocol.DatabaseHealth, fixCmd string) {
-	fmt.Printf("%s on %s: %d/100, %s\n", h.Database, h.Host, h.Score, gradeText[h.Grade])
+	fmt.Printf("%s on %s: %s\n", bold(h.Database), h.Host, byScore(h.Score, fmt.Sprintf("%d/100, %s", h.Score, gradeText[h.Grade])))
 	fmt.Println(h.Summary)
+	width := wrapWidth()
 	for _, f := range h.Findings {
 		mark := map[string]string{protocol.SeverityCritical: "!!", protocol.SeverityWarning: "! ", protocol.SeverityInfo: "- "}[f.Severity]
-		fmt.Printf("\n%s %s  (%s, -%d)\n", mark, f.Title, f.Severity, f.Penalty)
-		fmt.Printf("   %s\n", f.Explanation)
-		fmt.Printf("   What to do: %s\n", f.Action)
+		fmt.Printf("\n%s %s  %s\n", bySeverity(f.Severity, mark), bold(f.Title), dim(fmt.Sprintf("(%s, -%d)", f.Severity, f.Penalty)))
+		fmt.Println(wrap(f.Explanation, "   ", width))
+		fmt.Println(wrap(bold("What to do:")+" "+f.Action, "   ", width))
 		if fx := firstAvailableFix(f); fx != nil {
-			fmt.Printf("   Fix: %s %s  (%s)\n", fixCmd, f.ID, fx.Label)
+			fmt.Printf("   %s %s  %s\n", green("Fix:"), cyan(fixCmd+" "+f.ID), dim("("+fx.Label+")"))
 		} else if f.Command != "" {
-			fmt.Printf("   Try: %s\n", f.Command)
+			fmt.Printf("   %s %s\n", bold("Try:"), cyan(f.Command))
 		}
 	}
 	if len(h.Checks) > 0 {
 		fmt.Println()
 		t := newTable("AREA", "STATUS", "DETAIL")
 		for _, ch := range h.Checks {
-			t.row(ch.Label, ch.Status, firstLine(ch.Detail, 120))
+			t.row(ch.Label, byStatus(ch.Status), firstLine(ch.Detail, 120))
 		}
 		t.flush()
 	}

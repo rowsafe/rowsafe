@@ -470,13 +470,13 @@ func savedAdd(ctx context.Context, args []string) error {
 	if res.Version != "" {
 		pg = " (" + d.EngineName() + " " + res.Version + ")"
 	}
-	fmt.Printf("Saved %s: %s%s.\n", name, v.describe(), pg)
+	fmt.Printf("%s %s%s.\n", green("Saved "+name+":"), v.describe(), pg)
 	fmt.Printf("The connection string is in %s, readable only by you.\n", res.File)
 	if res.ProjectFile != "" {
 		fmt.Printf("Wrote %s: rowsafe commands here now use %s.\n\nNext: rowsafe pulse\n", res.ProjectFile, name)
 		return nil
 	}
-	fmt.Printf("\nNext: rowsafe pulse %s   (or rowsafe use %s in a project, then just rowsafe pulse)\n", name, name)
+	fmt.Printf("\n%s %s   %s\n", bold("Next:"), cyan("rowsafe pulse "+name), dim("(or rowsafe use "+name+" in a project, then just rowsafe pulse)"))
 	return nil
 }
 
