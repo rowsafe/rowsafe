@@ -139,6 +139,10 @@ func hostsAdd(ctx context.Context, c *client.Client, cfg config, args []string) 
 	if strings.HasPrefix(dest, "-") {
 		return fmt.Errorf("%q isn't a server: give [USER@]SERVER, e.g. root@203.0.113.10", dest)
 	}
+	if runtime.GOOS == "windows" {
+		// Windows' OpenSSH has no connection sharing (ControlMaster).
+		return errors.New("installing over SSH doesn't work from Windows yet: run this from WSL, macOS or Linux, or run `rowsafe hosts enroll-token` and paste its command on the server")
+	}
 	if _, err := exec.LookPath(sshBinary()); err != nil {
 		return errors.New("ssh isn't installed on this computer; install OpenSSH, or run `rowsafe hosts enroll-token` and paste its command on the server")
 	}

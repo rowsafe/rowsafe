@@ -22,6 +22,7 @@ jobs:
       - run: make test
       - run: make build
       - run: make test-cli-installer
+      - run: make test-npm
   macos:
     name: CLI on macOS
     runs-on: macos-15
@@ -36,6 +37,27 @@ jobs:
       - run: make build
       - name: Install the CLI as a user would (fake release, then the real latest one)
         run: sh scripts/test-cli.sh --real
+      - name: npm wrapper (fake release)
+        run: make test-npm
+  windows:
+    name: CLI on Windows
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go test ./cmd/rowsafe/... ./mcp/... ./client/... ./preview/... ./protocol/... ./local/... ./pulse/...
+      - name: Build rowsafe.exe and run it
+        shell: bash
+        run: |
+          go build -o rowsafe.exe ./cmd/rowsafe
+          ./rowsafe.exe version
+          ./rowsafe.exe help local
+      - name: npm wrapper (fake release)
+        run: node --test integrations/npm/test/wrapper.test.js
   reproducible:
     name: reproducible build
     runs-on: ubuntu-24.04

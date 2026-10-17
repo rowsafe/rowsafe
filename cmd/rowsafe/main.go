@@ -49,7 +49,8 @@ Getting started
                                              there and asks before turning on backups
   rowsafe hosts enroll-token [--ttl 1h]      the install command for a database server. The installer sets up
                                              everything there and asks before turning on backups
-  rowsafe init [NAME]                        write .rowsafe.json here, so commands in this project use NAME
+  rowsafe init [NAME] [--yes] [--no-agents]  write .rowsafe.json here, so commands in this project use NAME;
+                                             offers a short section in AGENTS.md / CLAUDE.md for AI agents
   rowsafe restart [NAME] [--yes]             restart the database, e.g. when setup needs it; asks first. Only on
                                              servers where the installer allowed it
   rowsafe version                            the CLI's version
