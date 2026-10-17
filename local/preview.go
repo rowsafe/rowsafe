@@ -13,7 +13,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/rowsafe/rowsafe/internal/agent"
 	"github.com/rowsafe/rowsafe/internal/pginspect"
 	"github.com/rowsafe/rowsafe/preview"
 	"github.com/rowsafe/rowsafe/protocol"
@@ -378,7 +377,7 @@ func (d *DB) previewOnScratch(ctx context.Context, conn *pgx.Conn, info serverIn
 		runFor = defaultPreviewRun
 	}
 	res = &protocol.PreviewResult{Mode: preview.Mode(stmts), DB: d.Name(), Checked: protocol.PreviewCheckedSchema, Statements: []protocol.PreviewStatement{}}
-	if _, err := agent.RunPreviewOn(ctx, t, name, stmts, res, runFor); err != nil {
+	if err := runPreviewOn(ctx, t, name, stmts, res, runFor); err != nil {
 		return nil, "the run on the temporary database stopped (" + firstLine(err.Error()) + ")"
 	}
 	if res.Error != nil && len(failed) > 0 {
