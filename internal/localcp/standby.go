@@ -680,6 +680,11 @@ func (s *Server) standbyCreate(w http.ResponseWriter, r *http.Request) {
 				params.PrimaryPort = 5432
 			}
 		}
+		if d != nil {
+			if t := st.standbyOpen(d.ID); t != nil {
+				return nil, conflict("A %s task is already queued or running for %s (%s): wait for it (sudo rowsafe standby %s).", t.Type, d.Name, t.ID, d.Name)
+			}
+		}
 		switch {
 		case d == nil:
 			if !nameRE.MatchString(name) {
@@ -703,7 +708,7 @@ func (s *Server) standbyCreate(w http.ResponseWriter, r *http.Request) {
 			params.Rebuild, params.FenceID = true, f.ID
 			d.setStatus(dbStandby, now)
 		case d.Status == dbStandby:
-			if st.standbyOpen(d.ID) == nil && st.Standby[d.ID] != nil && st.Standby[d.ID].State != nil {
+			if st.Standby[d.ID] != nil && st.Standby[d.ID].State != nil {
 				return nil, conflict("this server already runs the standby of %s (sudo rowsafe standby %s)", d.Name, d.Name)
 			}
 			// A create that failed: try again.
@@ -778,10 +783,12 @@ func (s *Server) standbyLink(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		id := standbyID(d.Name)
-		p := st.pair(d.ID)
-		p.Link = &protocol.LocalLink{StandbyID: id, Addresses: slices.Clone(req.Addresses), CreatedAt: now.UTC()}
-		return d, st.enqueueStandby(d, protocol.TaskStandbyPrepare,
-			protocol.StandbyPrepareParams{StandbyID: id, StandbyAddresses: req.Addresses, Stream: true, Local: true}, now)
+		if err := st.enqueueStandby(d, protocol.TaskStandbyPrepare,
+			protocol.StandbyPrepareParams{StandbyID: id, StandbyAddresses: req.Addresses, Stream: true, Local: true}, now); err != nil {
+			return nil, err
+		}
+		st.pair(d.ID).Link = &protocol.LocalLink{StandbyID: id, Addresses: slices.Clone(req.Addresses), CreatedAt: now.UTC()}
+		return d, nil
 	})
 }
 
@@ -817,9 +824,6 @@ func (s *Server) standbyFence(w http.ResponseWriter, r *http.Request) {
 		}
 		if d.Status != protocol.DBActive {
 			return nil, conflict("%s isn't the primary on this server (%s)", d.Name, d.Status)
-		}
-		if !slices.Contains(st.Host.RestartPorts, d.Port) {
-			return nil, conflict("root on %s doesn't let Rowsafe stop PostgreSQL on port %d, so it can't stop it for good either", st.hostname(), d.Port)
 		}
 		if t := st.standbyOpen(d.ID); t != nil {
 			return nil, conflict("A %s task is running for %s: wait for it.", t.Type, d.Name)
