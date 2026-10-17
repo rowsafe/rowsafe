@@ -856,6 +856,9 @@ func backupsCmd(ctx context.Context, c *client.Client, args []string) error {
 }
 
 func proofCmd(ctx context.Context, c *client.Client, args []string) error {
+	if fromBucket(args) { // another server's backups, from the bucket (restore_bucket.go)
+		return proofFromBucketCmd(ctx, c, args)
+	}
 	fs := flag.NewFlagSet("proof", flag.ContinueOnError)
 	noWait := fs.Bool("no-wait", false, "return once queued")
 	name, err := dbArg(ctx, c, fs, args)

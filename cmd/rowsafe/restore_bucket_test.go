@@ -18,4 +18,7 @@ func TestFromBucket(t *testing.T) {
 	if err := restoreCmd(context.Background(), nil, []string{"shop", "--from-bucket", "--yes"}); !errors.Is(err, errFromBucketElsewhere) {
 		t.Fatalf("off the server: %v", err)
 	}
+	if err := proofCmd(context.Background(), nil, []string{"shop", "--from-bucket"}); !errors.Is(err, errProofFromBucketElsewhere) {
+		t.Fatalf("proof off the server: %v", err)
+	}
 }

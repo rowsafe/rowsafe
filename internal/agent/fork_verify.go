@@ -236,10 +236,14 @@ func (a *Agent) pgForkVerify(ctx context.Context, p protocol.ForkRestoreParams, 
 		return nil, err
 	}
 	cli := pgbackrest.CLI{Bin: a.cfg.PgBackRestBin, ConfigPath: conf, Stanza: p.Source.Stanza, Runner: a.runner}
+	// Without an account the source's server can't be asked (sudo rowsafe
+	// proof NAME --from-bucket): the backups give the size, and the
+	// restored databases are listed rather than compared.
+	size, list := cmp.Or(p.VerifyFacts.SizeBytes, src.sizeBytes), p.OwnRepo && len(p.VerifyFacts.Databases) == 0
 	tl.Printf("restore test of %s (PostgreSQL %d, %s) from its backups, on this server", cmp.Or(p.Source.Name, p.Source.Stanza), major,
-		humanBytes(p.VerifyFacts.SizeBytes))
+		humanBytes(size))
 	res := &protocol.DrillResult{}
-	err = a.drillRestore(ctx, drillSource{cli: cli, stanza: p.Source.Stanza, major: major, sizeBytes: p.VerifyFacts.SizeBytes,
-		preload: p.VerifyFacts.Preload, databases: p.VerifyFacts.Databases}, id, res, tl)
+	err = a.drillRestore(ctx, drillSource{cli: cli, stanza: p.Source.Stanza, major: major, sizeBytes: size,
+		preload: p.VerifyFacts.Preload, databases: p.VerifyFacts.Databases, listRestored: list}, id, res, tl)
 	return res, err
 }

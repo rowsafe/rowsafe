@@ -9,7 +9,9 @@
 #   server A: rowsafe add shop (backups on, the first backup and Proof),
 #   rows, a Mark (everything until then is in the bucket); then A is lost
 #   (stopped). Server B, with an empty PostgreSQL: with a wrong passphrase
-#   the restore fails plainly and the empty cluster runs as before; without
+#   the restore fails plainly and the empty cluster runs as before; a
+#   restore test of shop's backups passes there (rowsafe proof --from-bucket)
+#   and changes nothing; without
 #   a terminal it is refused; with the name typed, sudo rowsafe restore shop
 #   --from-bucket restores shop into it with every row (same checksum), and
 #   protects it (a full backup and a Proof, in a new folder; A's backups stay
@@ -143,6 +145,16 @@ server_b() {
   systemctl restart rowsafe-agent
   until_ok 30 "the agent is back" test -S /var/lib/rowsafe/control.sock
   sleep 6
+
+  # Proof of A's backups on B, before anything moves: restored into a
+  # scratch copy and checked, then deleted; nothing changes here.
+  rowsafe proof shop --from-bucket >/tmp/proof.out 2>&1 || { cat /tmp/proof.out; fail "the restore test from the bucket"; }
+  cat /tmp/proof.out
+  grep -q "Restore test of shop on this server: passed" /tmp/proof.out || fail "the restore test didn't pass"
+  grep -q "Database shop .*restored" /tmp/proof.out || fail "the restore test doesn't list shop"
+  rowsafe ls | grep -q shop && fail "a restore test added shop"
+  runuser -u postgres -- psql -qAtX -c "SELECT count(*) FROM pg_database WHERE datname = 'shop'" | grep -qx 0 || fail "a restore test changed the cluster"
+  echo "  ok (B): A's backups restore and check out here; nothing changed"
 
   # It asks for the name.
   ! rowsafe restore shop --from-bucket </dev/null >/tmp/noterm.out 2>&1 || fail "restored without a confirmation"
