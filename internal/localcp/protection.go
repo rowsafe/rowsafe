@@ -124,6 +124,7 @@ func (st *state) protection(d *dbRec, now time.Time) protocol.Protection {
 			p.OpenFailedTasks = append(p.OpenFailedTasks, v)
 		}
 	}
+	p.Reasons = engineReasons(d.Engine, p.Reasons) // mysql.go
 	p.Protected = len(p.Reasons) == 0
 	return p
 }
