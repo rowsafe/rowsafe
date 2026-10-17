@@ -91,6 +91,10 @@ type ForkPrepareParams struct {
 	// agent refuses when they don't match.
 	RecipientKey         string `json:"recipient_key"`
 	RecipientFingerprint string `json:"recipient_fingerprint"`
+	// Verify: the fork is a restore test (Proof on another server): the
+	// source also reports what the test checks the restore against
+	// (ForkPrepareResult.Verify).
+	Verify bool `json:"verify,omitempty"`
 }
 
 // ForkPrepareResult is the agent's report for a fork_prepare task.
@@ -103,7 +107,10 @@ type ForkPrepareResult struct {
 	SystemID  string         `json:"system_id"`
 	SizeBytes int64          `json:"size_bytes"`
 	Settings  map[string]int `json:"settings,omitempty"`
-	Summary   string         `json:"summary"`
+	// Verify is what a restore test elsewhere checks against (only with
+	// ForkPrepareParams.Verify).
+	Verify  *ForkVerifyFacts `json:"verify,omitempty"`
+	Summary string           `json:"summary"`
 }
 
 // ForkMaskRule masks one column of the fork with a strategy (the same
@@ -149,7 +156,8 @@ type ForkRestoreParams struct {
 	Source DatabaseSpec `json:"source"`
 	// Target is the point to restore: a Time or a Mark (the control plane
 	// turns "now" into a Mark it saves first), with the backup to start
-	// from.
+	// from. Neither: the latest point the backups hold (a source that is
+	// lost, where no Mark can be saved; SQLite without continuous backups).
 	Target    RewindTarget `json:"target"`
 	Placement string       `json:"placement"` // Fork*
 	// Port: for a new cluster the port to create it on (0: the agent picks a
@@ -160,13 +168,72 @@ type ForkRestoreParams struct {
 	SocketDir string `json:"socket_dir,omitempty"`
 	// Box and SenderKey: the source agent's sealed repository settings (nil
 	// when the source is on this server: nothing moves).
-	Box       *SealedBox     `json:"box,omitempty"`
-	SenderKey string         `json:"sender_key,omitempty"`
-	Major     int            `json:"major,omitempty"`
-	SizeBytes int64          `json:"size_bytes,omitempty"`
-	Settings  map[string]int `json:"settings,omitempty"`
+	Box *SealedBox `json:"box,omitempty"`
+	// OwnRepo: the source's server is lost (Restore to another server), so
+	// nothing was sealed: this server reads the source's backups with its
+	// own storage settings (installed with the same storage and passphrase
+	// as the lost one). Major, SizeBytes and the rest come from what the
+	// control plane last knew; PostgreSQL's settings are read from the
+	// restored backup itself.
+	OwnRepo bool `json:"own_repo,omitempty"`
+	// SourceFolder is the source's backup folder when it isn't its stanza
+	// (the setup started fresh in a new folder: AdoptResult.RepoFolder);
+	// only with OwnRepo (a handoff carries it).
+	SourceFolder string         `json:"source_folder,omitempty"`
+	SenderKey    string         `json:"sender_key,omitempty"`
+	Major        int            `json:"major,omitempty"`
+	SizeBytes    int64          `json:"size_bytes,omitempty"`
+	Settings     map[string]int `json:"settings,omitempty"`
 	// Masking, when set, masks the fork before it starts for real.
 	Masking *ForkMasking `json:"masking,omitempty"`
+	// Verify: a restore test (Proof on another server), not a fork. The
+	// agent restores the newest point in the source's backups into its
+	// drill directory, runs the drill's checks against VerifyFacts,
+	// reports ForkRestoreResult.Drill and deletes the restored copy.
+	// Placement, Port and Masking are ignored; nothing is registered and
+	// no backups start.
+	Verify      bool             `json:"verify,omitempty"`
+	VerifyFacts *ForkVerifyFacts `json:"verify_facts,omitempty"`
+}
+
+// ---- Proof on another server (ForkRestoreParams.Verify) ----
+//
+// When a database's own server lacks the disk for Proof (the weekly restore
+// test), the test can run on another server of the organization, or on a
+// temporary Rowsafe Cloud server deleted right after. It is a fork that is
+// only checked: fork_prepare on the source's server seals the bucket
+// settings to the other server's key (as for any fork) and, with Verify,
+// reports what the test checks against; fork_restore with Verify on the
+// other server restores into its drill directory, checks like the drill
+// does, reports a DrillResult and deletes the copy. The control plane
+// records it as the source's Proof (DrillResult.RanOn).
+
+// FeatureForkVerify is in HeartbeatRequest.Features of agents that run
+// restore tests of another server's databases (ForkRestoreParams.Verify)
+// and report ForkHeartbeat.DrillFreeBytes.
+const FeatureForkVerify = "fork_verify"
+
+// ForkVerifyFacts is what a restore test elsewhere checks the restored copy
+// against, read on the source's server when the test starts.
+type ForkVerifyFacts struct {
+	// Databases are the source's databases (tables per database), as the
+	// drill compares them.
+	Databases []DBInfo `json:"databases"`
+	// SizeBytes is the source's size (the disk the test needs).
+	SizeBytes int64 `json:"size_bytes"`
+	// Version is the engine's version ("8.4.6", "7.0.15"; PostgreSQL:
+	// server_version_num), for the other server's programs.
+	Version string `json:"version,omitempty"`
+	// Preload is PostgreSQL's shared_preload_libraries (loaded only when
+	// the restore can't start without them, as in the drill).
+	Preload string `json:"preload,omitempty"`
+}
+
+// ProofSpaceNeeded is the free disk a restore test of a database of
+// sizeBytes needs where it runs (the agent's drill check: the restored data
+// plus replayed changes and headroom).
+func ProofSpaceNeeded(sizeBytes int64) int64 {
+	return int64(float64(sizeBytes)*1.3) + 1<<30
 }
 
 // ForkRestoreResult is the agent's report for a fork_restore task.
@@ -193,6 +260,10 @@ type ForkRestoreResult struct {
 	DurationMs  int64    `json:"duration_ms"`
 	Warnings    []string `json:"warnings,omitempty"`
 	Summary     string   `json:"summary"`
+	// Drill is a restore test's result (ForkRestoreParams.Verify): the
+	// fork's restored copy is gone, nothing else above is set but
+	// ForkID, DurationMs and Summary.
+	Drill *DrillResult `json:"drill,omitempty"`
 }
 
 // ---- Heartbeat additions (embedded in HeartbeatRequest) ----
@@ -209,6 +280,9 @@ type ForkHeartbeat struct {
 	ForkTarget *ForkDockerTarget `json:"fork_target,omitempty"`
 	// Forks is the progress of the fork restores running on this server.
 	Forks []ForkState `json:"forks,omitempty"`
+	// DrillFreeBytes is the free disk in this server's drill directory
+	// (where restore tests run, its own and other servers'); 0: unknown.
+	DrillFreeBytes int64 `json:"drill_free_bytes,omitempty"`
 }
 
 // ForkClusters is what the root helper may create on a server.
@@ -255,8 +329,93 @@ type ForkState struct {
 //	POST /v1/databases/{ref}/forks   CreateForkRequest -> 202 ForkView
 //	GET  /v1/forks/{id}              ForkView
 //
-// Writes are for people only (owners and admins in the dashboard,
-// read-write API keys); AI assistants on /mcp can't fork.
+//	POST /v1/databases/{ref}/restore-elsewhere   RestoreElsewhereRequest -> 202 ForkView
+//	POST /v1/databases/{ref}/retire              RetireDatabaseRequest -> 204
+//
+// Writes are for owners and admins (the dashboard, read-write API keys).
+// AI agents can't fork (a person compares the target's key), but they can
+// restore a database whose server is lost to another server, and retire it
+// (protocol.ApprovalActions): nothing secret moves then.
+
+// ---- Restore to another server (the source's server is lost) ----
+//
+// When a database's server is gone (dead disk, deleted VPS), nothing can
+// seal its bucket settings any more. Another server of the organization
+// that was installed with the same storage (the same bucket, or Rowsafe
+// Storage) and the same passphrase can read its backups with its own
+// settings: the control plane queues fork_restore there with OwnRepo, the
+// point (the latest in the backups, a second, or a Mark) and what it last
+// knew about the source. The control plane never sees the passphrase: a
+// wrong one fails on that server with the usual plain error (the backups
+// were encrypted with another passphrase). Afterwards the old database can
+// be retired: Rowsafe forgets it and keeps its backups until an owner
+// deletes them.
+
+// FeatureForkOwnRepo is in HeartbeatRequest.Features of agents that restore
+// a lost source's backups with their own storage (ForkRestoreParams.OwnRepo,
+// and a fork to the latest point in the backups).
+const FeatureForkOwnRepo = "fork_own_repo"
+
+// SourceLostAfter is how long a database's server must have been silent
+// before it can be restored to another server as lost (a reboot or a
+// network blip is not a lost server).
+const SourceLostAfter = 10 * time.Minute
+
+// How a target's storage compares with the lost source's
+// (ForkTarget.Storage, on ForkSourceLost.Targets).
+const (
+	// ForkStorageSame: the same storage (Rowsafe Storage of the same
+	// organization, or the same bucket). The passphrase is checked when it
+	// restores.
+	ForkStorageSame = "same"
+	// ForkStorageUnknown: its agent hasn't said where its backups go yet;
+	// the restore checks.
+	ForkStorageUnknown = "unknown"
+	// ForkStorageOther: another bucket or kind of storage: it can't read
+	// the lost server's backups.
+	ForkStorageOther = "other"
+)
+
+// ForkSourceLost is ForkInfo's part for a database whose server is offline.
+type ForkSourceLost struct {
+	// LastSeen is when the source's server last reported.
+	LastSeen *time.Time `json:"last_seen,omitempty"`
+	// Allowed: it has been silent for SourceLostAfter and the database can
+	// be restored to another server now; else Hint says why not.
+	Allowed bool   `json:"allowed"`
+	Hint    string `json:"hint,omitempty"`
+	// Storage is where its backups are (StorageRowsafe, StorageOwn, "" when
+	// unknown); Bucket and Endpoint name its own bucket (no secrets), for
+	// installing a new server with the same storage.
+	Storage  string `json:"storage,omitempty"`
+	Bucket   string `json:"bucket,omitempty"`
+	Endpoint string `json:"endpoint,omitempty"`
+	// Targets are the organization's other servers, with Storage set;
+	// usable ones first.
+	Targets []ForkTarget `json:"targets"`
+}
+
+// RestoreElsewhereRequest restores a database whose server is lost to
+// another server. Neither At nor Mark: the latest point in its backups.
+type RestoreElsewhereRequest struct {
+	// Name is the restored database's name (the old one keeps its name
+	// until it is retired).
+	Name      string     `json:"name"`
+	HostID    string     `json:"host_id"` // host ID or hostname
+	Placement string     `json:"placement,omitempty"`
+	Port      int        `json:"port,omitempty"`
+	At        *time.Time `json:"at,omitempty"`
+	Mark      string     `json:"mark,omitempty"`
+	// Path is a SQLite database's new file (ForkSQLiteFile).
+	Path string `json:"path,omitempty"`
+}
+
+// RetireDatabaseRequest retires a database whose server is lost: Rowsafe
+// forgets it and keeps its backups until an owner deletes them. Confirm is
+// the database's name.
+type RetireDatabaseRequest struct {
+	Confirm string `json:"confirm"`
+}
 
 // Fork statuses (ForkView.Status).
 const (
@@ -291,6 +450,9 @@ type ForkInfo struct {
 	Forks []ForkView `json:"forks"`
 	// ForkedFrom is set when this database is itself a fork.
 	ForkedFrom *ForkView `json:"forked_from,omitempty"`
+	// SourceLost is set when the database's server is offline: it can be
+	// restored to another server (Restore to another server).
+	SourceLost *ForkSourceLost `json:"source_lost,omitempty"`
 }
 
 // ForkWindow is the span a fork can be taken from.
@@ -321,6 +483,9 @@ type ForkTarget struct {
 	Reason      string      `json:"reason,omitempty"` // why not usable, in plain words
 	// Docker: the server is a Docker sidecar waiting for a fork.
 	Docker bool `json:"docker,omitempty"`
+	// Storage compares its storage with a lost source's (ForkStorage*;
+	// only on ForkSourceLost.Targets).
+	Storage string `json:"storage,omitempty"`
 }
 
 // ForkPlace is one place on a server a fork can go.
@@ -353,19 +518,22 @@ type CreateForkRequest struct {
 
 // ForkView is one fork and its progress.
 type ForkView struct {
-	ID          string             `json:"id"`
-	Name        string             `json:"name"`
-	SourceID    string             `json:"source_id"`
-	SourceName  string             `json:"source_name"`
-	HostID      string             `json:"host_id"`
-	Hostname    string             `json:"hostname"`
-	SameServer  bool               `json:"same_server"`
-	Placement   string             `json:"placement"`
-	Port        int                `json:"port,omitempty"`
-	Path        string             `json:"path,omitempty"` // a SQLite clone's file
-	At          *time.Time         `json:"at,omitempty"`   // the chosen time
-	Mark        string             `json:"mark,omitempty"` // the chosen (or saved) Mark
-	Now         bool               `json:"now,omitempty"`
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	SourceID   string     `json:"source_id"`
+	SourceName string     `json:"source_name"`
+	HostID     string     `json:"host_id"`
+	Hostname   string     `json:"hostname"`
+	SameServer bool       `json:"same_server"`
+	Placement  string     `json:"placement"`
+	Port       int        `json:"port,omitempty"`
+	Path       string     `json:"path,omitempty"` // a SQLite clone's file
+	At         *time.Time `json:"at,omitempty"`   // the chosen time
+	Mark       string     `json:"mark,omitempty"` // the chosen (or saved) Mark
+	Now        bool       `json:"now,omitempty"`
+	// SourceLost: a restore to another server of a database whose server
+	// is lost (read with the target's own storage settings).
+	SourceLost  bool               `json:"source_lost,omitempty"`
 	Masked      bool               `json:"masked"`
 	Status      string             `json:"status"` // Fork*
 	Steps       []ForkProgressStep `json:"steps"`

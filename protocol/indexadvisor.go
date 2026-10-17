@@ -311,6 +311,12 @@ type IndexAdvisorResult struct {
 	Usage     []IndexUsage    `json:"usage,omitempty"`
 	// CopySeconds is how long restoring the copy took (0: no copy).
 	CopySeconds float64 `json:"copy_seconds,omitempty"`
+	// Hypothetical is how many ideas were checked with hypothetical
+	// indexes (hypopg) on production first; HypoPG says whether hypopg is
+	// "on" (in every database with ideas), "available" (its package is on
+	// the server, not turned on everywhere) or "" (not on the server).
+	Hypothetical int    `json:"hypothetical,omitempty"`
+	HypoPG       string `json:"hypopg,omitempty"`
 	// Skipped says, in plain words, why ideas were not tested (no backup
 	// yet, not enough disk for a copy, PostgreSQL too old, ...).
 	Skipped    string   `json:"skipped,omitempty"`
@@ -343,7 +349,21 @@ type IndexRecommendation struct {
 	// (SQLite, which keeps no query statistics: no Statements); Speedup is
 	// then its lookup's (sqlite_advice.go).
 	ForeignKey *IndexForeignKey `json:"foreign_key,omitempty"`
+	// Method is how it was checked: IndexMethodCopy ("" from older agents:
+	// built and timed on a copy) or IndexMethodHypothetical (planned with a
+	// hypothetical index on production, hypopg: SizeBytes and BuildMs are
+	// estimates, Speedup is the planner's).
+	Method string `json:"method,omitempty"`
 }
+
+// How a recommendation was checked (IndexRecommendation.Method).
+const (
+	IndexMethodCopy         = "copy"
+	IndexMethodHypothetical = "hypothetical"
+)
+
+// Hypothetical reports whether it was checked without a copy.
+func (r IndexRecommendation) Hypothetical() bool { return r.Method == IndexMethodHypothetical }
 
 // IndexGain is one statement before and after the index, on the copy.
 type IndexGain struct {
@@ -463,6 +483,8 @@ type IndexRecommendationView struct {
 	// ForeignKey: an index for a foreign key (SQLite), with its lookup
 	// measured on the copy (IndexRecommendation.ForeignKey).
 	ForeignKey *IndexForeignKey `json:"foreign_key,omitempty"`
+	// Method is how it was checked (IndexRecommendation.Method).
+	Method string `json:"method,omitempty"`
 }
 
 // IndexStatementView is a statement a recommendation helps.

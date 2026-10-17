@@ -125,7 +125,20 @@ type ForksOutput struct {
 	Forks      []ForkSummary   `json:"forks"`
 	ForkedFrom *ForkSummary    `json:"forked_from,omitempty"`
 	MoveIns    []MoveInSummary `json:"move_ins,omitempty"`
-	Note       string          `json:"note,omitempty"`
+	// SourceLost: the database's server is offline; it can be restored to
+	// another server (request_change restore_elsewhere).
+	SourceLost *SourceLostSummary `json:"source_lost,omitempty"`
+	Note       string             `json:"note,omitempty"`
+}
+
+// SourceLostSummary is what list_forks says about a database whose server
+// is offline.
+type SourceLostSummary struct {
+	LastSeen *time.Time `json:"last_seen,omitempty"`
+	Allowed  bool       `json:"allowed" jsonschema:"it can be restored to another server now (restore_elsewhere)"`
+	Hint     string     `json:"hint,omitempty"`
+	Storage  string     `json:"storage,omitempty" jsonschema:"where its backups are: rowsafe (Rowsafe Storage) or own (a bucket)"`
+	Targets  []string   `json:"targets" jsonschema:"servers that can take it (same storage, or not reported yet)"`
 }
 
 func (t *tools) addOpsReadTools(s *sdk.Server) {
@@ -619,6 +632,24 @@ func (t *tools) listForks(ctx context.Context, _ *sdk.CallToolRequest, in forksI
 			b.line("A new fork can be made%s; the user makes one in the Rowsafe dashboard (AI agents can't: a person compares the server's key).", when)
 		} else if info.Hint != "" {
 			b.line("A new fork can't be made now: %s", info.Hint)
+		}
+		if sl := info.SourceLost; sl != nil {
+			s := &SourceLostSummary{LastSeen: sl.LastSeen, Allowed: sl.Allowed, Hint: sl.Hint, Storage: sl.Storage, Targets: []string{}}
+			for _, x := range sl.Targets {
+				if x.Usable {
+					s.Targets = append(s.Targets, x.Hostname)
+				}
+			}
+			out.SourceLost = s
+			switch {
+			case !sl.Allowed:
+				b.line("%s's server isn't reporting: %s", d.Name, sl.Hint)
+			case len(s.Targets) == 0:
+				b.line("%s's server is lost. To restore it, the user installs Rowsafe on another server with the same storage and backup passphrase (see the dashboard's Restore to another server), then request_change restore_elsewhere.", d.Name)
+			default:
+				b.line("%s's server is lost. request_change restore_elsewhere restores it from its backups as a new database on: %s (each must use the same storage and passphrase).",
+					d.Name, strings.Join(s.Targets, ", "))
+			}
 		}
 	} else {
 		out.Note = fmt.Sprintf("Rowsafe doesn't fork %s databases.", engineName(d))

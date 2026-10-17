@@ -50,6 +50,9 @@ func ReadSettings(ctx context.Context, t Target, procRoot string) (*protocol.Set
 	if uses, err := ExtensionUse(ctx, t, conn); err == nil {
 		snap.Extensions = uses
 	}
+	if tools, err := ToolUse(ctx, t, conn, snap.VersionNum); err == nil { // tools.go
+		snap.Tools = tools
+	}
 	return snap, nil
 }
 

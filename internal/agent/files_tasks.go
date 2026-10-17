@@ -34,11 +34,11 @@ func (a *Agent) filesBrowse(ctx context.Context, db protocol.DatabaseSpec, p pro
 		return nil, err
 	}
 	if !c.ListNames {
-		return nil, errors.New("file names stay on your server for this database (listing is turned off in the Files settings)")
+		return nil, fmt.Errorf("file names stay on your server for %s (listing is turned off in the Files settings)", filesOwner(db))
 	}
 	_, fo, ok := a.filesRuntime().folder(db.ID, p.FolderID)
 	if !ok {
-		return nil, errors.New("no such folder is protected for this database")
+		return nil, fmt.Errorf("no such folder is protected for %s", filesOwner(db))
 	}
 	limit := p.Limit
 	if limit <= 0 {
@@ -145,7 +145,10 @@ var (
 		"image": true, "buildkit": true}
 )
 
-// filesDiscover suggests folders to protect.
+// filesDiscover suggests folders to protect: upload folders for a
+// database; for the server's own (a task without a database), also its
+// apps' folders and Docker volumes. Folders already protected (for any
+// database here or the server) are left out.
 func (a *Agent) filesDiscover(ctx context.Context, db protocol.DatabaseSpec, _ struct{}, tl *taskLog) (*protocol.FilesDiscoverResult, error) {
 	rt := a.filesRuntime()
 	roots := discoverRoots
@@ -153,15 +156,118 @@ func (a *Agent) filesDiscover(ctx context.Context, db protocol.DatabaseSpec, _ s
 		roots = []string{rt.mountRoot}
 	}
 	var protected []string
-	if c, ok := rt.config(db.ID); ok {
+	for _, c := range rt.configs() {
 		for _, f := range c.Folders {
 			protected = append(protected, f.Path)
 		}
 	}
-	cands := DiscoverFolders(ctx, roots, a.cfg.Sidecar())
+	var cands []protocol.FilesCandidate
+	if db.ID == "" {
+		cands = DiscoverHostFolders(ctx, roots, a.cfg.Sidecar())
+	} else {
+		cands = DiscoverFolders(ctx, roots, a.cfg.Sidecar())
+	}
 	cands = slices.DeleteFunc(cands, func(c protocol.FilesCandidate) bool { return slices.Contains(protected, c.Path) })
-	tl.Printf("found %d folders that look like uploads", len(cands))
+	tl.Printf("found %d folders worth backing up", len(cands))
 	return &protocol.FilesDiscoverResult{Candidates: cands}, nil
+}
+
+// DiscoverHostFolders suggests a server's own folders: upload folders
+// (DiscoverFolders), then each site under /var/www, each app under /srv,
+// the data folder of each app under /opt (/opt/<app>/data), apps in home
+// folders (/home/<user>/app, apps, www, sites) and every Docker volume
+// that isn't a database's. Never a system, database or Rowsafe folder
+// (CleanFolderPath), nor one inside another suggestion.
+func DiscoverHostFolders(ctx context.Context, roots []string, mounts bool) []protocol.FilesCandidate {
+	out := DiscoverFolders(ctx, roots, mounts)
+	if mounts { // a sidecar sees only the volumes mounted into it: all listed already
+		return out
+	}
+	var paths []struct{ path, why string }
+	add := func(p, why string) { paths = append(paths, struct{ path, why string }{p, why}) }
+	subdirs := func(dir string) []string {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return nil
+		}
+		var names []string
+		for _, e := range entries {
+			if e.IsDir() && !strings.HasPrefix(e.Name(), ".") && !skipDirs[e.Name()] {
+				names = append(names, e.Name())
+			}
+		}
+		return names
+	}
+	kind := func(root string) string { // by its end, so tests can use a temporary tree
+		for _, k := range []string{"/var/www", "/srv", "/opt", "/home", "/var/lib/docker/volumes"} {
+			if root == k || strings.HasSuffix(root, k) {
+				return k
+			}
+		}
+		return ""
+	}
+	for _, root := range roots {
+		switch kind(root) {
+		case "/var/www":
+			for _, n := range subdirs(root) {
+				add(filepath.Join(root, n), "website files ("+n+")")
+			}
+		case "/srv":
+			for _, n := range subdirs(root) {
+				add(filepath.Join(root, n), "app files ("+n+")")
+			}
+		case "/opt":
+			for _, n := range subdirs(root) {
+				for _, d := range []string{"data", "storage", "config"} {
+					if st, err := os.Stat(filepath.Join(root, n, d)); err == nil && st.IsDir() {
+						add(filepath.Join(root, n, d), n+" "+d)
+					}
+				}
+			}
+		case "/home":
+			for _, u := range subdirs(root) {
+				for _, d := range []string{"app", "apps", "www", "sites"} {
+					if st, err := os.Stat(filepath.Join(root, u, d)); err == nil && st.IsDir() {
+						add(filepath.Join(root, u, d), "app files of "+u)
+					}
+				}
+			}
+		case "/var/lib/docker/volumes":
+			for _, n := range subdirs(root) {
+				data := filepath.Join(root, n, "_data")
+				if st, err := os.Stat(data); err == nil && st.IsDir() && !looksLikeDatabase(n) {
+					add(data, "Docker volume "+n)
+				}
+			}
+		}
+	}
+	have := map[string]bool{}
+	for _, c := range out {
+		have[c.Path] = true
+	}
+	inside := func(p string) bool {
+		for h := range have {
+			if p == h || strings.HasPrefix(p, h+"/") || strings.HasPrefix(h, p+"/") {
+				return true
+			}
+		}
+		return false
+	}
+	for _, x := range paths {
+		if ctx.Err() != nil || len(out) >= 30 {
+			break
+		}
+		if p, err := CleanFolderPath(x.path); err != nil || p != x.path || inside(p) {
+			continue
+		}
+		c := protocol.FilesCandidate{Path: x.path, Why: x.why}
+		c.Files, c.SizeBytes, c.Readable, c.Partial = folderStats(ctx, x.path)
+		if c.Files > 0 || !c.Readable {
+			have[x.path] = true
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // DiscoverFolders looks for upload folders under roots (for a sidecar:
@@ -237,13 +343,20 @@ func DiscoverFolders(ctx context.Context, roots []string, mounts bool) []protoco
 var uploadVolumeRE = regexp.MustCompile(`(?i)(upload|media|storage|files|attach|document|asset|public)`)
 
 func looksLikeUploads(name string) bool {
+	return !looksLikeDatabase(name) && uploadVolumeRE.MatchString(name)
+}
+
+// looksLikeDatabase: a Docker volume that holds a database's (or
+// Rowsafe's) files, which Rowsafe backs up as a database, not as files.
+func looksLikeDatabase(name string) bool {
 	l := strings.ToLower(name)
-	for _, db := range []string{"postgres", "pgdata", "rowsafe", "mysql", "mariadb", "mongo", "clickhouse", "qdrant"} {
+	for _, db := range []string{"postgres", "pgdata", "rowsafe", "mysql", "mariadb", "mongo", "clickhouse", "qdrant",
+		"redis", "valkey", "opensearch", "elastic", "meili"} {
 		if strings.Contains(l, db) {
-			return false
+			return true
 		}
 	}
-	return uploadVolumeRE.MatchString(name)
+	return false
 }
 
 // walkShallow visits directories under root up to depth, while visit says

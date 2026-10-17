@@ -102,6 +102,7 @@ const (
 	FeatureFork             = "fork"              // clone the database to another server, as it was at any moment
 	FeatureMoveIn           = "move_in"           // move a database in from a managed provider
 	FeatureSecondCopy       = "second_copy"       // a second copy of the backups in another bucket
+	FeatureProofElsewhere   = "proof_elsewhere"   // Proof on another server when the database's own lacks disk (ForkRestoreParams.Verify)
 )
 
 // EngineFeatures says which Rowsafe features work for an engine. The
@@ -137,6 +138,10 @@ type EngineFeatures struct {
 	Fork             bool `json:"fork"`
 	MoveIn           bool `json:"move_in"`
 	SecondCopy       bool `json:"second_copy"`
+	// ProofElsewhere: Proof can run on another server of the organization
+	// or a temporary Rowsafe Cloud server (a fork that is only checked:
+	// ForkRestoreParams.Verify).
+	ProofElsewhere bool `json:"proof_elsewhere"`
 }
 
 // Has reports whether a feature (Feature* above) is supported; unknown
@@ -197,6 +202,8 @@ func (f EngineFeatures) Has(feature string) bool {
 		return f.MoveIn
 	case FeatureSecondCopy:
 		return f.SecondCopy
+	case FeatureProofElsewhere:
+		return f.ProofElsewhere
 	}
 	return false
 }
@@ -215,6 +222,7 @@ var EngineCapabilities = map[string]EngineFeatures{
 		Settings: true, Security: true, IndexAdvice: true, Recommendations: true,
 		Logs: true, FindMoment: true, SafeCopies: true, MigrationPreview: true,
 		Fork: true, MoveIn: true, SecondCopy: true,
+		ProofElsewhere: true, // the drill's restore and checks on another server (internal/agent/fork_verify.go)
 	},
 	// MySQL and MariaDB (internal/engine/mysql): protocol/mysql.go.
 	EngineMySQL:   mysqlFeatures,
@@ -236,6 +244,9 @@ var EngineCapabilities = map[string]EngineFeatures{
 		MoveIn:   true, // copy from Atlas or any MongoDB, live through a change stream (migrate*.go in internal/engine/mongodb)
 		Standby:  true, // a priority-0 member of the replica set (standby*.go in internal/engine/mongodb)
 		Settings: true, // mongod.conf through root's tuning helper (opt-in), setParameter live
+		// The drill's restore and checks on another server, against the
+		// source's databases and collection counts (internal/engine/mongodb/fork.go).
+		ProofElsewhere: true,
 	},
 	// ClickHouse (internal/engine/clickhouse): protocol/clickhouse.go.
 	EngineClickHouse: clickhouseFeatures,

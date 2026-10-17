@@ -80,6 +80,10 @@ func TestValidateMaintenance(t *testing.T) {
 		{Action: protocol.MaintCancelQuery, PID: 42, BackendStart: &now},
 		{Action: protocol.MaintTerminateSession, PID: 42, BackendStart: &now},
 		{Action: protocol.MaintDropReplicationSlot, Slot: "old_replica_1"},
+		{Action: protocol.MaintRollbackPrepared, DB: "shop", GID: "order-42 'x'", PreparedAt: &now},
+		{Action: protocol.MaintAdvanceReplicationSlot, Slot: "cdc_1"},
+		{Action: protocol.MaintCreateExtension, Extension: "hypopg", Databases: []string{"shop", "app"}},
+		{Action: protocol.MaintRepackTable, DB: "shop", Tables: []string{"public.orders"}},
 	}
 	for _, p := range ok {
 		if err := Validate(p); err != nil {
@@ -106,6 +110,15 @@ func TestValidateMaintenance(t *testing.T) {
 		"slot uppercase":  {Action: protocol.MaintDropReplicationSlot, Slot: "Replica"},
 		"slot injection":  {Action: protocol.MaintDropReplicationSlot, Slot: "x'); drop table y; --"},
 		"no slot":         {Action: protocol.MaintDropReplicationSlot},
+		"no gid":          {Action: protocol.MaintRollbackPrepared, DB: "shop", PreparedAt: &now},
+		"long gid":        {Action: protocol.MaintRollbackPrepared, DB: "shop", GID: strings.Repeat("g", 201), PreparedAt: &now},
+		"gid no time":     {Action: protocol.MaintRollbackPrepared, DB: "shop", GID: "x"},
+		"gid no db":       {Action: protocol.MaintRollbackPrepared, GID: "x", PreparedAt: &now},
+		"advance bad":     {Action: protocol.MaintAdvanceReplicationSlot, Slot: "a b"},
+		"any extension":   {Action: protocol.MaintCreateExtension, Extension: "plpython3u", Databases: []string{"shop"}},
+		"extension no db": {Action: protocol.MaintCreateExtension, Extension: "hypopg"},
+		"repack two":      {Action: protocol.MaintRepackTable, DB: "shop", Tables: []string{"a", "b"}},
+		"repack no db":    {Action: protocol.MaintRepackTable, Tables: []string{"a"}},
 	}
 	for name, p := range bad {
 		if err := Validate(p); err == nil {
@@ -637,6 +650,44 @@ func TestMaintenanceAgainstPostgres(t *testing.T) {
 		}
 		e.mustRun(protocol.MaintenanceParams{Action: protocol.MaintDropReplicationSlot, Slot: slot}, "was already removed")
 	})
+
+	t.Run("cleanup blockers", func(t *testing.T) {
+		at := time.Now()
+		e.mustRun(protocol.MaintenanceParams{Action: protocol.MaintRollbackPrepared, DB: e.db, GID: "gone'; --", PreparedAt: &at},
+			"was already committed or rolled back")
+		e.mustRun(protocol.MaintenanceParams{Action: protocol.MaintAdvanceReplicationSlot, Slot: e.db + "_none"}, "was already removed")
+		// Only logical slots move forward.
+		slot := e.db + "_phys"
+		e.exec(`SELECT pg_create_physical_replication_slot($1, true)`, slot)
+		t.Cleanup(func() {
+			e.conn.Exec(context.Background(), `SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1`, slot)
+		})
+		e.mustRefuse(protocol.MaintenanceParams{Action: protocol.MaintAdvanceReplicationSlot, Slot: slot}, "physical slot")
+	})
+
+	t.Run("tool extensions", func(t *testing.T) {
+		var hypo bool
+		_ = e.conn.QueryRow(t.Context(), `SELECT EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'hypopg')`).Scan(&hypo)
+		p := protocol.MaintenanceParams{Action: protocol.MaintCreateExtension, Extension: "hypopg", Databases: []string{e.db}}
+		if !hypo {
+			e.mustRefuse(p, "package isn't installed")
+			return
+		}
+		e.mustRun(p, "Turned on hypopg in "+e.db)
+		e.mustRun(p, "already on")
+	})
+
+	t.Run("repack", func(t *testing.T) {
+		e.exec(`CREATE TABLE nokey (n int)`)
+		e.mustRefuse(protocol.MaintenanceParams{Action: protocol.MaintRepackTable, DB: e.db, Tables: []string{"public.nokey"}}, "has no primary key")
+		var repack bool
+		_ = e.conn.QueryRow(t.Context(), `SELECT EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'pg_repack')`).Scan(&repack)
+		if !repack {
+			e.mustRefuse(protocol.MaintenanceParams{Action: protocol.MaintRepackTable, DB: e.db, Tables: []string{"public.t1"}}, "package isn't installed")
+		}
+		e.mustRefuse(protocol.MaintenanceParams{Action: protocol.MaintRepackTable, DB: e.db, Tables: []string{"public.gone"}}, "no longer exists")
+	})
+
 }
 
 func pgxConnect(t *testing.T, tg pginspect.Target, db, app string) (*pgx.Conn, error) {

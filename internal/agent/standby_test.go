@@ -74,11 +74,26 @@ Latest checkpoint location:           0/3004FD0
 Latest checkpoint's REDO location:    0/3004FD0
 Latest checkpoint's REDO WAL file:    000000010000000000000003
 Latest checkpoint's TimeLineID:       1
+max_connections setting:              250
+max_worker_processes setting:         8
+max_wal_senders setting:              10
+max_prepared_xacts setting:           0
+max_locks_per_xact setting:           64
 `
 	c := parseControlData([]byte(out))
 	if c.State != "shut down" || c.CheckpointLSN != "0/3004FD0" || c.Timeline != 1 || c.RedoWALFile != "000000010000000000000003" ||
 		c.SystemID != "7412345678901234567" {
 		t.Fatalf("%+v", c)
+	}
+	// The settings recovery needs at least as high (a lost source's fork).
+	want := map[string]int{"max_connections": 250, "max_worker_processes": 8, "max_wal_senders": 10, "max_locks_per_transaction": 64}
+	if len(c.Settings) != len(want) {
+		t.Fatalf("settings %v", c.Settings)
+	}
+	for k, v := range want {
+		if c.Settings[k] != v {
+			t.Errorf("%s = %d, want %d", k, c.Settings[k], v)
+		}
 	}
 }
 

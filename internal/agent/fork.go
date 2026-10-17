@@ -169,6 +169,7 @@ func (a *Agent) forkHeartbeat() protocol.ForkHeartbeat {
 	}
 	hb.ForkClusters = a.forkClusters()
 	hb.ForkTarget = a.forkDockerTarget()
+	hb.DrillFreeBytes = a.drillFreeBytes() // where restore tests of other servers' databases run (fork_verify.go)
 	rt := a.fk()
 	rt.mu.Lock()
 	for _, s := range rt.progress {
@@ -280,7 +281,9 @@ func (a *Agent) runForkTask(ctx context.Context, task *protocol.Task, tl *taskLo
 		}
 		var res *protocol.ForkRestoreResult
 		var err error
-		if isPostgres(p.Source) {
+		if p.Verify { // a restore test, never a fork (fork_verify.go)
+			res, err = a.forkVerify(ctx, p, tl)
+		} else if isPostgres(p.Source) {
 			res, err = a.forkRestore(ctx, p, tl)
 		} else {
 			res, err = a.engineForkRestore(ctx, p, tl) // engine_fork.go
@@ -331,10 +334,15 @@ func (a *Agent) forkPrepare(ctx context.Context, p protocol.ForkPrepareParams, t
 		if err != nil {
 			return nil, fmt.Errorf("reading PostgreSQL's settings: %w", err)
 		}
-		if f.Tablespaces > 0 {
+		if f.Tablespaces > 0 && !p.Verify { // a restore test maps them into its scratch directory, like the drill
 			return nil, fmt.Errorf("this database uses %s; Rowsafe can't fork those to another server yet", countNoun(f.Tablespaces, "tablespace", "tablespaces"))
 		}
 		res.Major, res.SystemID, res.SizeBytes, res.Settings = f.Major, f.SystemID, f.SizeBytes, f.Settings
+	}
+	if p.Verify {
+		if res.Verify, err = a.verifyFacts(ctx, p.Source); err != nil { // fork_verify.go
+			return nil, fmt.Errorf("reading what the restore test checks: %w", err)
+		}
 	}
 	repo, err := a.handedRepo(p.Source)
 	if err != nil {

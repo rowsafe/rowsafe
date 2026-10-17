@@ -677,6 +677,194 @@ func TestReplicationLocalPostgres(t *testing.T) {
 	}
 }
 
+func TestAutovacuumLocalPostgres(t *testing.T) {
+	tg := localTarget(t)
+	dbName, conn := scratchDB(t, tg)
+	for _, sql := range []string{
+		`CREATE TABLE due (id int) WITH (autovacuum_vacuum_threshold = 10, autovacuum_vacuum_scale_factor = 0, autovacuum_vacuum_insert_threshold = -1)`,
+		`CREATE TABLE off (id int) WITH (autovacuum_enabled = false)`,
+		`INSERT INTO due SELECT generate_series(1, 1000)`,
+		`INSERT INTO off SELECT generate_series(1, 1000)`,
+		`DELETE FROM due WHERE id > 100`,
+		`DELETE FROM off`,
+		`SELECT pg_stat_force_next_flush()`,
+	} {
+		if _, err := conn.Exec(t.Context(), sql); err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+	}
+	mon, err := tg.insightsConnect(t.Context(), dbName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mon.Close(context.Background())
+	q := insightQueries{conn: mon, db: dbName}
+	ins := &protocol.Insights{}
+	if err := q.multixactAge(t.Context(), ins); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.autovacuumBacklog(t.Context(), ins); err != nil {
+		t.Fatal(err)
+	}
+	sortAndCapAutovacuum(ins)
+	t.Logf("backlog %+v, multixact %+v", ins.Autovacuum, len(ins.MultixactAge))
+	// Autovacuum may have cleaned it already; when not, only "due" waits.
+	if b := ins.Autovacuum; b != nil {
+		if b.Waiting != 1 || len(b.Tables) != 1 || b.Tables[0].Table != "due" || b.Tables[0].DeadRows != 900 || b.DeadRows != 900 {
+			t.Errorf("backlog = %+v", b)
+		}
+	}
+	r := &clusterReading{gauges: map[string]float64{}}
+	st := &clusterState{}
+	clock := int64(1000)
+	readAutovacuum(t.Context(), mon, r, st, func() int64 { return clock })
+	if r.gauges[MAutovacuumMaxWorkers] < 1 {
+		t.Errorf("gauges %v", r.gauges)
+	}
+	// All busy for 10 minutes, then one free.
+	st.autovacuumBusySince = 0
+	r.gauges[MAutovacuumMaxWorkers] = 0
+	busy := &clusterReading{gauges: map[string]float64{}}
+	fake := &fakeAutovacuum{running: 3, max: 3}
+	readAutovacuum(t.Context(), fake, busy, st, func() int64 { return clock })
+	clock += 600
+	readAutovacuum(t.Context(), fake, busy, st, func() int64 { return clock })
+	if busy.gauges[MAutovacuumBusyMin] != 10 {
+		t.Errorf("busy minutes = %v", busy.gauges[MAutovacuumBusyMin])
+	}
+	fake.running = 1
+	readAutovacuum(t.Context(), fake, busy, st, func() int64 { return clock })
+	if busy.gauges[MAutovacuumBusyMin] != 0 || st.autovacuumBusySince != 0 {
+		t.Errorf("after a worker is free: %v", busy.gauges)
+	}
+}
+
+// fakeAutovacuum answers readAutovacuum's query.
+type fakeAutovacuum struct{ running, max float64 }
+
+func (f *fakeAutovacuum) Query(context.Context, string, ...any) (pgx.Rows, error) { return nil, nil }
+func (f *fakeAutovacuum) QueryRow(context.Context, string, ...any) pgx.Row {
+	return fakeRow{f.running, f.max}
+}
+
+type fakeRow []float64
+
+func (r fakeRow) Scan(dest ...any) error {
+	for i := range dest {
+		*dest[i].(*float64) = r[i]
+	}
+	return nil
+}
+
+func TestPlansLocalPostgres(t *testing.T) {
+	tg := localTarget(t)
+	dbName, conn := scratchDB(t, tg)
+	for _, sql := range []string{
+		`CREATE TABLE big (id int PRIMARY KEY, status text, created_at timestamptz)`,
+		`INSERT INTO big SELECT g, (ARRAY['new','paid'])[1 + g % 2], now() FROM generate_series(1, 50000) g`,
+		`ANALYZE big`,
+	} {
+		if _, err := conn.Exec(t.Context(), sql); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stmts := []protocol.StatementStat{
+		{QueryID: "1", Database: dbName, TotalTimeMs: 900, Query: "SELECT * FROM big WHERE status = $1 ORDER BY created_at"},
+		{QueryID: "2", Database: dbName, TotalTimeMs: 800, Query: "SELECT * FROM big WHERE status = 'paid' AND id > 5"},
+		{QueryID: "3", Database: dbName, TotalTimeMs: 700, Query: "UPDATE big SET status = $1 WHERE id = $2"},
+		{QueryID: "4", Database: dbName, TotalTimeMs: 600, Query: "VACUUM big"},
+	}
+	ps := &planState{}
+	now := time.Now()
+	plans := readPlans(t.Context(), tg, ps, 170000, stmts, now)
+	if len(plans) != 2 { // two new plans a round
+		t.Fatalf("first round: %+v", plans)
+	}
+	plans = readPlans(t.Context(), tg, ps, 170000, stmts, now.Add(time.Minute))
+	byID := map[string]protocol.QueryPlan{}
+	for _, p := range plans {
+		byID[p.QueryID] = p
+		t.Logf("%s: %s\n%s", p.QueryID, p.Summary, p.Text)
+		if protocol.PlanHasLiterals(p.Text) || strings.Contains(p.Text, "paid") || strings.Contains(p.Text, "> 5") {
+			t.Errorf("plan %s holds a value:\n%s", p.QueryID, p.Text)
+		}
+	}
+	if p := byID["1"]; p.Summary != "Reads the whole table big: about 50 thousand rows." || !strings.Contains(p.Text, "$1") || p.TotalCost <= 0 {
+		t.Errorf("plan 1: %+v", p)
+	}
+	if p := byID["2"]; !strings.Contains(p.Text, "'?'") {
+		t.Errorf("plan 2 not scrubbed: %+v", p)
+	}
+	if p, ok := byID["3"]; ok && !strings.Contains(p.Summary, "big_pkey") {
+		t.Errorf("plan 3: %+v", p)
+	}
+	if _, ok := byID["4"]; ok {
+		t.Error("VACUUM planned")
+	}
+	// Nothing ran: the rows are as they were.
+	var paid int
+	_ = conn.QueryRow(t.Context(), `SELECT count(*) FROM big WHERE status = 'paid'`).Scan(&paid)
+	if paid != 25000 {
+		t.Errorf("paid rows %d", paid)
+	}
+}
+
+func TestToolUseLocalPostgres(t *testing.T) {
+	tg := localTarget(t)
+	conn, err := tg.connect(t.Context(), "postgres")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(context.Background())
+	tools, err := ToolUse(t.Context(), tg, conn, 170000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, x := range tools {
+		if x.Version == "" || (x.Name != protocol.ToolHypoPG && x.Name != protocol.ToolPgRepack) {
+			t.Errorf("tool %+v", x)
+		}
+	}
+}
+
+func TestHorizonLocalPostgres(t *testing.T) {
+	tg := localTarget(t)
+	dbName, holder := scratchDB(t, tg)
+	// A repeatable read transaction keeps its snapshot: it holds back
+	// cleanup until it ends.
+	if _, err := holder.Exec(t.Context(), `BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT 1`); err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Exec(context.Background(), `ROLLBACK`)
+	mon, err := tg.connect(t.Context(), "postgres")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mon.Close(context.Background())
+	r := &clusterReading{gauges: map[string]float64{}}
+	readHorizon(t.Context(), mon, r, true)
+	if r.horizon == nil {
+		t.Fatal("no horizon")
+	}
+	pid := int(holder.PgConn().PID())
+	found := false
+	for _, s := range r.horizon.Sessions {
+		if s.PID == pid {
+			found = true
+			if s.Database != dbName || s.BackendStart == nil || s.State != "idle in transaction" {
+				t.Errorf("session = %+v", s)
+			}
+		}
+	}
+	if !found && len(r.horizon.Sessions) < maxHorizon {
+		t.Errorf("holder %d not in %+v", pid, r.horizon.Sessions)
+	}
+	// The slot query reads the xmin ages.
+	if err := readSlots(t.Context(), mon, r); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestStatementReads runs the pg_stat_statements queries against a stand-in
 // schema with the same shape (the extension needs shared_preload_libraries,
 // which a developer's PostgreSQL may not have).

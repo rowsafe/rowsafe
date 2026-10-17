@@ -46,11 +46,20 @@ func (e *Engine) drill(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 			}
 		}
 	}
+	return drillRestore(ctx, env, r, prod, in.Databases, in.TotalBytes, taskID, started, tl)
+}
+
+// drillRestore is the drill once production was read: restore the newest
+// point into a scratch server named id, check it against databases (and
+// against production when prod is set; Proof on another server can't reach
+// it) and delete the scratch server.
+func drillRestore(ctx context.Context, env agent.EngineEnv, r *repo, prod *mongo.Client, databases []protocol.DBInfo, sizeBytes int64,
+	id string, started time.Time, tl agent.TaskLogger) (*protocol.DrillResult, error) {
 	root := drillRoot(env)
-	if err := ensureSpace(filepath.Dir(root), int64(float64(in.TotalBytes)*drillSpaceFactor)+256<<20); err != nil {
+	if err := ensureSpace(filepath.Dir(root), int64(float64(sizeBytes)*drillSpaceFactor)+256<<20); err != nil {
 		return &protocol.DrillResult{Failures: []string{err.Error()}}, err
 	}
-	s, err := newScratch(env, root, taskID)
+	s, err := newScratch(env, root, id)
 	if err != nil {
 		return nil, err
 	}
@@ -83,8 +92,13 @@ func (e *Engine) drill(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 	if out.Failed > 0 {
 		res.Failures = append(res.Failures, fmt.Sprintf("%d documents couldn't be restored", out.Failed))
 	}
-	tl.Printf("restored; checking it against production")
-	checkRestored(ctx, prod, c, in, res, tl)
+	if prod != nil {
+		tl.Printf("restored; checking it against production")
+	} else {
+		tl.Printf("restored; checking it against what the source's server reported (production can't be reached from here, " +
+			"so document counts and indexes aren't compared with it)")
+	}
+	checkRestored(ctx, prod, c, databases, res, tl)
 	res.RestoredBytes = dirSize(s.dataDir())
 	res.DurationSeconds = time.Since(started).Seconds()
 	res.Passed = len(res.Failures) == 0
@@ -98,21 +112,35 @@ func (e *Engine) drill(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 // checkRestored compares the restored server with production: every
 // database and collection present, indexes present, document counts close
 // to production's (which kept changing since), and validate() on a sample
-// of collections.
-func checkRestored(ctx context.Context, prod, restored *mongo.Client, in serverInfo, res *protocol.DrillResult, tl agent.TaskLogger) {
+// of collections. Without prod (Proof on another server) it checks the
+// databases and collection counts the source's server reported, counts
+// the restored documents and validates the sample.
+func checkRestored(ctx context.Context, prod, restored *mongo.Client, databases []protocol.DBInfo, res *protocol.DrillResult, tl agent.TaskLogger) {
 	type coll struct{ db, name string }
 	var sample []coll
-	for _, d := range in.Databases {
+	for _, d := range databases {
 		dd := protocol.DrillDatabase{Name: d.Name, SourceTables: d.Tables}
-		prodColls, err := collections(ctx, prod.Database(d.Name))
-		if err != nil {
-			res.Warnings = append(res.Warnings, fmt.Sprintf("%s: can't list production's collections: %v", d.Name, err))
+		var prodColls []string
+		var err error
+		if prod != nil {
+			if prodColls, err = collections(ctx, prod.Database(d.Name)); err != nil {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("%s: can't list production's collections: %v", d.Name, err))
+			}
 		}
 		gotColls, err := collections(ctx, restored.Database(d.Name))
 		if err != nil {
 			res.Failures = append(res.Failures, fmt.Sprintf("%s: can't list the restored collections: %v", d.Name, err))
 		}
-		dd.Present = len(gotColls) > 0 || len(prodColls) == 0
+		if prod != nil {
+			dd.Present = len(gotColls) > 0 || len(prodColls) == 0
+		} else {
+			dd.Present = len(gotColls) > 0 || d.Tables == 0
+			if len(gotColls) < d.Tables {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("%s: %d collections restored, the source had %d (created in the last minutes?)",
+					d.Name, len(gotColls), d.Tables))
+			}
+			prodColls = gotColls // nothing to compare names with: check every restored one
+		}
 		dd.RestoredTables = len(gotColls)
 		if !dd.Present {
 			res.Failures = append(res.Failures, fmt.Sprintf("database %s is missing from the restore", d.Name))
@@ -123,12 +151,15 @@ func checkRestored(ctx context.Context, prod, restored *mongo.Client, in serverI
 				continue
 			}
 			sample = append(sample, coll{d.Name, name})
-			pc, _ := prod.Database(d.Name).Collection(name).EstimatedDocumentCount(ctx)
 			rc, err := restored.Database(d.Name).Collection(name).CountDocuments(ctx, bson.D{})
 			if err != nil {
 				res.Failures = append(res.Failures, fmt.Sprintf("%s.%s: counting restored documents failed: %v", d.Name, name, err))
 				continue
 			}
+			if prod == nil {
+				continue
+			}
+			pc, _ := prod.Database(d.Name).Collection(name).EstimatedDocumentCount(ctx)
 			if diff := pc - rc; (diff > 1000 || diff < -1000) && (float64(abs(diff)) > 0.1*float64(max(pc, 1))) {
 				res.Warnings = append(res.Warnings, fmt.Sprintf("%s.%s: %d documents restored, production has about %d now", d.Name, name, rc, pc))
 			}

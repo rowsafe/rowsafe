@@ -179,6 +179,25 @@ func TestIntegration(t *testing.T) {
 	}
 	t.Logf("drill: %+v", dr)
 
+	// Proof on another server: the drill's restore and checks against what
+	// the source's server reports, without asking production (ForkVerify).
+	t.Run("ForkVerify", func(t *testing.T) {
+		facts, err := e.VerifyFacts(ctx, env, spec)
+		if err != nil || len(facts.Databases) == 0 || facts.SizeBytes == 0 || facts.Version == "" {
+			t.Fatalf("facts: %+v %v", facts, err)
+		}
+		p := protocol.ForkRestoreParams{ForkID: "v1", Verify: true, Source: spec, VerifyFacts: facts}
+		p.Source.Port, p.Source.SocketDir = 0, "" // on another server
+		vr, err := e.ForkVerify(ctx, env, p, "verify-v1", &testLog{t: t})
+		if err != nil || !vr.Passed || vr.RecoveredTo == nil || vr.BackupLabel == "" || !slices.ContainsFunc(vr.Databases,
+			func(d protocol.DrillDatabase) bool { return d.Name == "shop" && d.Present && d.RestoredTables >= 3 }) {
+			t.Fatalf("fork verify: %+v %v", vr, err)
+		}
+		if _, err := os.Stat(filepath.Join(env.Config.DrillDir, "mysql-verify-v1")); !os.IsNotExist(err) {
+			t.Fatalf("the restored copy is still there: %v", err)
+		}
+	})
+
 	// Guard: a migration preview on a copy; production is untouched.
 	pv := must(protocol.TaskPreviewMigration, protocol.PreviewParams{PreviewID: "p1", SQL: "-- add a column\n" +
 		"ALTER TABLE orders ADD COLUMN status VARCHAR(10) DEFAULT 'new';\n" +

@@ -83,6 +83,9 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 	if task.Type == protocol.TaskAutoSecurityUpdates { // the server's own, with or without a database (auto_security.go)
 		return typed(a.autoSecurityUpdates(ctx, task.ID, tl))
 	}
+	if task.Database == nil && protocol.IsFilesTask(task.Type) { // the server's own folders (files.go)
+		return a.runHostFilesTask(ctx, task, tl)
+	}
 	if task.Database == nil {
 		return nil, fmt.Errorf("task %s has no database", task.Type)
 	}
