@@ -149,6 +149,9 @@ Rewind: continuous backups, restore to any second
   rowsafe restore [NAME] --to TIME|MARK [--hours 24] [--no-wait]
                                              restore a copy as it was then, next to production (never
                                              touches it): rowsafe rewind copy, with the time or Mark in one flag
+  rowsafe restore NAME --from-bucket [--as NAME] [--to TIME] [--port N | --new-cluster] [--folder F] [--yes]
+                                             on a server on its own, installed with the old server's bucket and
+                                             passphrase: restore a lost (or moving) database here and protect it
   rowsafe restores [NAME] [--json]           the copy, the recovery window and recent restores (rowsafe rewind)
   rowsafe rewind [NAME] [--json]             the recovery window, the copy and data kept aside by a rewind
   rowsafe rewind find [NAME] [--table T] [--since 24h | --from TIME [--to TIME]] [--kind delete,update,truncate,drop]

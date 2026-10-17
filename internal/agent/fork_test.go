@@ -146,6 +146,7 @@ type fakeForkOps struct {
 	up         bool
 	restoreErr error
 	infoErr    error
+	infoDB     []pgbackrest.StanzaDB // the stanza's history (fork_bucket.go)
 	calls      []string
 	// sourceConf is the pgBackRest config the restore read the source with.
 	sourceConf string
@@ -186,7 +187,9 @@ func (f *fakeForkOps) sourceInfo(ctx context.Context, cli pgbackrest.CLI) ([]pgb
 	if f.infoErr != nil {
 		return nil, f.infoErr
 	}
-	return []pgbackrest.Stanza{{Name: cli.Stanza, Backup: []pgbackrest.BackupInfo{{Label: "20260924-010000F"}}}}, nil
+	b := pgbackrest.BackupInfo{Label: "20260924-010000F"}
+	b.Info.Size = 3 << 20
+	return []pgbackrest.Stanza{{Name: cli.Stanza, Backup: []pgbackrest.BackupInfo{b}, DB: f.infoDB}}, nil
 }
 func (f *fakeForkOps) restore(ctx context.Context, cli pgbackrest.CLI, o pgbackrest.RestoreOptions) ([]byte, error) {
 	f.calls = append(f.calls, "restore "+o.Type+" "+o.Target)
@@ -392,12 +395,24 @@ func TestForkSourceForLostSource(t *testing.T) {
 		t.Fatalf("sidecar: %v", err)
 	}
 	a.cfg.Mode = ModeNative
-	// Without the version, nothing is restored.
+	// Without the version (a server without an account), the backups say
+	// it: the newest entry of the stanza's history.
 	p := base
 	p.Major = 0
-	if _, err := a.forkSourceFor(context.Background(), ops, p, &taskLog{}); err == nil || !strings.Contains(err.Error(), "version is unknown") {
+	if _, err := a.forkSourceFor(context.Background(), ops, p, &taskLog{}); err == nil || !strings.Contains(err.Error(), "which PostgreSQL version") {
 		t.Fatalf("no major: %v", err)
 	}
+	ops.infoDB = []pgbackrest.StanzaDB{{ID: 2, Version: "17"}, {ID: 1, Version: "16"}}
+	if s, err := a.forkSourceFor(context.Background(), ops, p, &taskLog{}); err != nil || s.major != 17 || s.sizeBytes != 3<<20 {
+		t.Fatalf("major from the backups: %+v %v", s, err)
+	}
+	if !slices.Contains(ops.calls, "info shop") {
+		t.Fatalf("calls %v", ops.calls)
+	}
+	if left, _ := filepath.Glob(filepath.Join(a.cfg.ConfigDir, "fork-*-probe.conf")); len(left) > 0 {
+		t.Fatalf("the probe's config was left behind: %v", left)
+	}
+	ops.infoDB = nil
 	p = base
 	p.SourceFolder = "../other"
 	if _, err := a.forkSourceFor(context.Background(), ops, p, &taskLog{}); err == nil {
