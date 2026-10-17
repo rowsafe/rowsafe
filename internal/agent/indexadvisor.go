@@ -219,6 +219,52 @@ func (a *Agent) indexAdvisor(ctx context.Context, db protocol.DatabaseSpec, task
 		return finish(nil)
 	}
 
+	// A cheap first pass where hypopg is on: hypothetical indexes on
+	// production, planned only (indexadvisor_hypo.go). Only the ideas the
+	// planner would use go on to the copy.
+	var hypoRecs []protocol.IndexRecommendation
+	allOn, anyAvailable, budget := true, false, advisorMaxHypothetical
+	for i := range work {
+		w := &work[i]
+		cands := w.cands[:min(len(w.cands), budget)]
+		if len(cands) == 0 {
+			break
+		}
+		rs, installed, available, err := hypoTest(ctx, prod, in.VersionNum, w.db, w.stmts, cands, w.prod, tl)
+		anyAvailable = anyAvailable || available
+		if err != nil || !installed {
+			allOn = false
+			if err != nil {
+				tl.Printf("database %s: checking ideas with hypopg failed, the copy checks them all: %v", w.db, err)
+			}
+			continue
+		}
+		budget -= len(rs)
+		res.Hypothetical += len(rs)
+		recs, rejected := indexadvisor.Choose(rs)
+		hypoRecs = append(hypoRecs, hypoRecommendations(recs)...)
+		for _, r := range rs {
+			if why, ok := rejected[r.Candidate.Key()]; ok {
+				res.Rejected = append(res.Rejected, protocol.RejectedIndex{Spec: r.Candidate.Spec, Key: r.Candidate.Key(), Reason: hypoRejected(why)})
+			}
+		}
+		checked, keep := keysOf(rs), keysOf(recs)
+		w.cands = slices.DeleteFunc(w.cands, func(c *indexadvisor.Candidate) bool { return checked[c.Key()] && !keep[c.Key()] })
+	}
+	switch {
+	case res.Hypothetical > 0 && allOn:
+		res.HypoPG = "on"
+	case anyAvailable || res.Hypothetical > 0:
+		res.HypoPG = "available"
+	}
+	total = 0
+	for _, w := range work {
+		total += len(w.cands)
+	}
+	if total == 0 {
+		return finish(nil) // hypopg ruled every idea out
+	}
+
 	// Test the new ideas on a copy.
 	var results []*indexadvisor.Result
 	err = a.withAdvisorCopy(ctx, db, taskID, res, tl, func(copyT pginspect.Target) error {
@@ -243,8 +289,24 @@ func (a *Agent) indexAdvisor(ctx context.Context, db protocol.DatabaseSpec, task
 		}
 		return nil
 	})
+	if err != nil && len(hypoRecs) > 0 {
+		// The copy failed: what the planner confirmed still stands, marked
+		// as checked without a copy.
+		res.Notes = append(res.Notes, fmt.Sprintf("The copy couldn't be made (%v); these recommendations were checked without one.", sentence(err)))
+		res.Recommendations = append(res.Recommendations, hypoRecs...)
+		return finish(nil)
+	}
 	if err != nil {
 		return finish(err)
+	}
+	if res.Skipped != "" && len(results) == 0 {
+		// No copy (no backup yet, not enough disk): the hypopg pass's
+		// recommendations, or a word about hypopg.
+		res.Recommendations = append(res.Recommendations, hypoRecs...)
+		if res.Hypothetical == 0 {
+			res.Skipped += hypoNote(res.HypoPG == "available")
+		}
+		return finish(nil)
 	}
 	res.Tested = len(results)
 	// Production's indexes now (not the copy's, which may be older): an idea
@@ -265,7 +327,9 @@ func (a *Agent) indexAdvisor(ctx context.Context, db protocol.DatabaseSpec, task
 	}
 	recs, rejected := indexadvisor.Choose(results)
 	for _, r := range recs {
-		res.Recommendations = append(res.Recommendations, r.Recommendation())
+		rec := r.Recommendation()
+		rec.Method = protocol.IndexMethodCopy
+		res.Recommendations = append(res.Recommendations, rec)
 	}
 	for _, r := range results {
 		if why, ok := rejected[r.Candidate.Key()]; ok {
@@ -279,6 +343,18 @@ func (a *Agent) indexAdvisor(ctx context.Context, db protocol.DatabaseSpec, task
 // copy of your database: 1 makes 2 queries about 40x faster."
 func advisorSummary(r *protocol.IndexAdvisorResult) string {
 	switch {
+	case r.Hypothetical > 0 && r.Tested == 0:
+		s := fmt.Sprintf("Looked at %s and checked %s with hypothetical indexes, without a copy",
+			countNoun(r.Statements, "busy query", "busy queries"), countNoun(r.Hypothetical, "index idea", "index ideas"))
+		if len(r.Recommendations) == 0 {
+			s += ": PostgreSQL wouldn't use any of them enough to be worth adding."
+		} else {
+			s += fmt.Sprintf(": %d %s worth adding.", len(r.Recommendations), plural(len(r.Recommendations), "is", "are"))
+		}
+		if r.Skipped != "" {
+			s += " " + r.Skipped
+		}
+		return s
 	case r.Skipped != "" && r.Tested == 0:
 		return r.Skipped
 	case r.Statements == 0:
@@ -752,6 +828,9 @@ var advisorTestCopy *struct {
 	dbName func(string) string
 }
 
+// advisorTestNoCopy, when set (tests), is why no copy can be made.
+var advisorTestNoCopy string
+
 // copyDBName is the name of a production database on the copy.
 func copyDBName(db string) string {
 	if advisorTestCopy != nil && advisorTestCopy.dbName != nil {
@@ -769,6 +848,10 @@ func (a *Agent) withAdvisorCopy(ctx context.Context, db protocol.DatabaseSpec, t
 	res *protocol.IndexAdvisorResult, tl *taskLog, fn func(pginspect.Target) error) error {
 	if advisorTestCopy != nil {
 		return fn(advisorTestCopy.target) // tests: a second database stands in for the copy
+	}
+	if advisorTestNoCopy != "" {
+		res.Skipped = advisorTestNoCopy // tests: no copy can be made
+		return nil
 	}
 	start := time.Now()
 	prod, err := pginspect.Inspect(ctx, a.target(db))

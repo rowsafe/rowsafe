@@ -168,6 +168,9 @@ type SettingsSnapshot struct {
 	// turned on in a database here (pg_extensions.go): settings changes
 	// keep what they need loaded, and Pulse watches them.
 	Extensions []ExtensionUse `json:"extensions,omitempty"`
+	// Tools (PostgreSQL) are the tool extensions whose packages are on the
+	// server (hypopg, pg_repack; tools.go). Newer agents only.
+	Tools []ToolExtension `json:"tools,omitempty"`
 }
 
 // ---- User API ----

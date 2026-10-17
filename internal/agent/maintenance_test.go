@@ -82,6 +82,7 @@ func TestValidateMaintenance(t *testing.T) {
 		{Action: protocol.MaintDropReplicationSlot, Slot: "old_replica_1"},
 		{Action: protocol.MaintRollbackPrepared, DB: "shop", GID: "order-42 'x'", PreparedAt: &now},
 		{Action: protocol.MaintAdvanceReplicationSlot, Slot: "cdc_1"},
+		{Action: protocol.MaintCreateExtension, Extension: "hypopg", Databases: []string{"shop", "app"}},
 	}
 	for _, p := range ok {
 		if err := validateMaintenance(p); err != nil {
@@ -113,6 +114,8 @@ func TestValidateMaintenance(t *testing.T) {
 		"gid no time":     {Action: protocol.MaintRollbackPrepared, DB: "shop", GID: "x"},
 		"gid no db":       {Action: protocol.MaintRollbackPrepared, GID: "x", PreparedAt: &now},
 		"advance bad":     {Action: protocol.MaintAdvanceReplicationSlot, Slot: "a b"},
+		"any extension":   {Action: protocol.MaintCreateExtension, Extension: "plpython3u", Databases: []string{"shop"}},
+		"extension no db": {Action: protocol.MaintCreateExtension, Extension: "hypopg"},
 	}
 	for name, p := range bad {
 		if err := validateMaintenance(p); err == nil {
@@ -694,6 +697,18 @@ func TestMaintenanceAgainstPostgres(t *testing.T) {
 			e.conn.Exec(context.Background(), `SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1`, slot)
 		})
 		e.mustRefuse(protocol.MaintenanceParams{Action: protocol.MaintAdvanceReplicationSlot, Slot: slot}, "physical slot")
+	})
+
+	t.Run("tool extensions", func(t *testing.T) {
+		var hypo bool
+		_ = e.conn.QueryRow(t.Context(), `SELECT EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'hypopg')`).Scan(&hypo)
+		p := protocol.MaintenanceParams{Action: protocol.MaintCreateExtension, Extension: "hypopg", Databases: []string{e.db}}
+		if !hypo {
+			e.mustRefuse(p, "package isn't installed")
+			return
+		}
+		e.mustRun(p, "Turned on hypopg in "+e.db)
+		e.mustRun(p, "already on")
 	})
 
 	t.Run("through runTask", func(t *testing.T) {

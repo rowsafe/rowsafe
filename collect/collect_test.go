@@ -756,6 +756,24 @@ func (r fakeRow) Scan(dest ...any) error {
 	return nil
 }
 
+func TestToolUseLocalPostgres(t *testing.T) {
+	tg := localTarget(t)
+	conn, err := tg.connect(t.Context(), "postgres")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(context.Background())
+	tools, err := ToolUse(t.Context(), tg, conn, 170000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, x := range tools {
+		if x.Version == "" || (x.Name != protocol.ToolHypoPG && x.Name != protocol.ToolPgRepack) {
+			t.Errorf("tool %+v", x)
+		}
+	}
+}
+
 func TestHorizonLocalPostgres(t *testing.T) {
 	tg := localTarget(t)
 	dbName, holder := scratchDB(t, tg)
