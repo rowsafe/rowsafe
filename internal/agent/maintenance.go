@@ -318,6 +318,8 @@ func runMaintenance(ctx context.Context, t pginspect.Target, p protocol.Maintena
 		err = m.advanceSlot(ctx)
 	case protocol.MaintCreateExtension: // maintenance_tools.go
 		err = m.createExtension(ctx)
+	case protocol.MaintRepackTable: // maintenance_tools.go
+		err = m.repackTable(ctx)
 	case protocol.MaintCreateIndex, protocol.MaintDropInvalidIndex, protocol.MaintSyncSequence, protocol.MaintSetTableStorageParams: // advisor
 		err = m.advisorAction(ctx)
 	}

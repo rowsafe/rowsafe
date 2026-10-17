@@ -83,6 +83,7 @@ func TestValidateMaintenance(t *testing.T) {
 		{Action: protocol.MaintRollbackPrepared, DB: "shop", GID: "order-42 'x'", PreparedAt: &now},
 		{Action: protocol.MaintAdvanceReplicationSlot, Slot: "cdc_1"},
 		{Action: protocol.MaintCreateExtension, Extension: "hypopg", Databases: []string{"shop", "app"}},
+		{Action: protocol.MaintRepackTable, DB: "shop", Tables: []string{"public.orders"}},
 	}
 	for _, p := range ok {
 		if err := validateMaintenance(p); err != nil {
@@ -116,6 +117,8 @@ func TestValidateMaintenance(t *testing.T) {
 		"advance bad":     {Action: protocol.MaintAdvanceReplicationSlot, Slot: "a b"},
 		"any extension":   {Action: protocol.MaintCreateExtension, Extension: "plpython3u", Databases: []string{"shop"}},
 		"extension no db": {Action: protocol.MaintCreateExtension, Extension: "hypopg"},
+		"repack two":      {Action: protocol.MaintRepackTable, DB: "shop", Tables: []string{"a", "b"}},
+		"repack no db":    {Action: protocol.MaintRepackTable, Tables: []string{"a"}},
 	}
 	for name, p := range bad {
 		if err := validateMaintenance(p); err == nil {
@@ -709,6 +712,17 @@ func TestMaintenanceAgainstPostgres(t *testing.T) {
 		}
 		e.mustRun(p, "Turned on hypopg in "+e.db)
 		e.mustRun(p, "already on")
+	})
+
+	t.Run("repack", func(t *testing.T) {
+		e.exec(`CREATE TABLE nokey (n int)`)
+		e.mustRefuse(protocol.MaintenanceParams{Action: protocol.MaintRepackTable, DB: e.db, Tables: []string{"public.nokey"}}, "has no primary key")
+		var repack bool
+		_ = e.conn.QueryRow(t.Context(), `SELECT EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'pg_repack')`).Scan(&repack)
+		if !repack {
+			e.mustRefuse(protocol.MaintenanceParams{Action: protocol.MaintRepackTable, DB: e.db, Tables: []string{"public.t1"}}, "package isn't installed")
+		}
+		e.mustRefuse(protocol.MaintenanceParams{Action: protocol.MaintRepackTable, DB: e.db, Tables: []string{"public.gone"}}, "no longer exists")
 	})
 
 	t.Run("through runTask", func(t *testing.T) {

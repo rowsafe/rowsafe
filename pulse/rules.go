@@ -197,15 +197,20 @@ func (e *evaluator) bloat(ins *protocol.Insights) {
 	var wasted int64
 	var fixes []protocol.FindingFix
 	var bloated []table
+	var bloatedTables []protocol.TableBloat
 	for i, t := range ins.TableBloat {
 		if t.BloatPct >= 30 && t.BloatBytes >= 256<<20 {
 			wasted += t.BloatBytes
 			bloated = append(bloated, table{t.Database, t.Schema, t.Table})
+			bloatedTables = append(bloatedTables, t)
 			if worst == nil {
 				worst = &ins.TableBloat[i]
 			}
 		}
 	}
+	// pg_repack gives a table's space back without a long lock (tools.go).
+	repack := e.repackFixes(ins, bloatedTables)
+	fixes = append(fixes, repack...)
 	for _, x := range ins.IndexBloat {
 		if x.BloatPct >= 30 && x.BloatBytes >= 256<<20 {
 			wasted += x.BloatBytes
@@ -214,8 +219,11 @@ func (e *evaluator) bloat(ins *protocol.Insights) {
 			}
 		}
 	}
-	fixes = append(fixes, e.vacuumFixes(bloated, "Tidy up",
-		"so the space inside them is reused and they stop growing (giving it back to the disk needs a full rebuild; see Do it yourself)")...)
+	tidy := "so the space inside them is reused and they stop growing (giving it back to the disk needs a full rebuild; see Do it yourself)"
+	if len(repack) > 0 {
+		tidy = "so the space inside them is reused and they stop growing"
+	}
+	fixes = append(fixes, e.vacuumFixes(bloated, "Tidy up", tidy)...)
 	if wasted == 0 {
 		return
 	}
@@ -229,10 +237,15 @@ func (e *evaluator) bloat(ins *protocol.Insights) {
 		what = fmt.Sprintf("%s alone wastes an estimated %s (%.0f%%); in all, tables and indexes waste", qualified(worst.Schema, worst.Table), Bytes(float64(worst.BloatBytes)), worst.BloatPct)
 		command = "pg_repack, or VACUUM FULL " + qualified(worst.Schema, worst.Table) + " in a maintenance window (it locks the table)"
 	}
+	action := withFixes(fixes, "Rebuild the bloated indexes and tidy up the tables now. Giving a table's space back to the disk needs a full rebuild that locks it, so that is for a maintenance window (see Do it yourself).", "Rebuild the worst tables and indexes when convenient; this gives the space back.")
+	if len(repack) > 0 {
+		action = "Rebuild the bloated tables with pg_repack: it gives their space back to the disk while your app keeps working, with only a brief lock at the start and the end."
+		command = ""
+	}
 	e.add(protocol.Finding{ID: "bloat", Category: CatMaintenance, Severity: sev, Penalty: pen,
 		Title:       fmt.Sprintf("About %s of disk is wasted space (estimate)", Bytes(float64(wasted))),
 		Explanation: fmt.Sprintf("%s about %s on space left behind by updates and deletes. It is an estimate from PostgreSQL's statistics.", what, Bytes(float64(wasted))),
-		Action:      withFixes(fixes, "Rebuild the bloated indexes and tidy up the tables now. Giving a table's space back to the disk needs a full rebuild that locks it, so that is for a maintenance window (see Do it yourself).", "Rebuild the worst tables and indexes when convenient; this gives the space back."),
+		Action:      action,
 		Command:     command,
 		Fixes:       fixes})
 }
