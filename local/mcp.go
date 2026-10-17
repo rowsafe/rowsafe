@@ -19,7 +19,7 @@ type MCPOptions struct {
 	Version     string
 }
 
-const mcpInstructions = `Rowsafe, without an account: tools for one database (PostgreSQL, MySQL, MariaDB or MongoDB) that this machine reaches directly with a connection string. Nothing is sent to Rowsafe.
+const mcpInstructions = `Rowsafe, without an account: tools for one database (PostgreSQL, MySQL, MariaDB, MongoDB, Redis or Valkey) that this machine reaches directly with a connection string. Nothing is sent to Rowsafe.
 
 - "Is the database healthy?", "what needs attention?": database_health (a 0-100 score and findings in plain language, each with what to do and the fixes Rowsafe can apply).
 - "What is slow?": top_queries (pg_stat_statements totals; MySQL and MariaDB: performance_schema; MongoDB: the profiler's slow operations) and database_insights (largest tables, unused and duplicate indexes, bloat or free space inside tables, dead rows, transaction ID age, tables without a primary key).
@@ -31,7 +31,7 @@ const mcpInstructions = `Rowsafe, without an account: tools for one database (Po
 
 - Migrations: before running one (a migration tool, or SQL with ALTER, DROP, CREATE INDEX, bulk UPDATE/DELETE), call check_migration with its SQL (PostgreSQL only for now) and tell the user the verdict (safe, careful, dangerous, failed) and what to change. It never changes the database.
 
-Backups are not known here: this database may have none. Before a destructive operation (migrations, DROP, TRUNCATE, bulk DELETE/UPDATE), tell the user there is no Rowsafe restore point to go back to and get their OK; they can take a backup first (pg_dump, mysqldump, mongodump), or protect the database with Rowsafe's agent (https://rowsafe.sh), which adds restore points and restore to any second.`
+Backups are not known here: this database may have none. Before a destructive operation (migrations, DROP, TRUNCATE, bulk DELETE/UPDATE), tell the user there is no Rowsafe restore point to go back to and get their OK; they can take a backup first (pg_dump, mysqldump, mongodump; Redis: BGSAVE), or protect the database with Rowsafe's agent (https://rowsafe.sh), which adds restore points and restore to any second.`
 
 type noInput struct{}
 

@@ -420,7 +420,7 @@ func (e *evaluator) dropSlotFix(s protocol.ReplicationSlot, why string) protocol
 // spaceFixes are the fixes that give disk space back: abandoned
 // replication slots and the largest unused indexes.
 func (e *evaluator) spaceFixes() []protocol.FindingFix {
-	if e.mysqlFamily() || e.mongodb() {
+	if e.mysqlFamily() || e.mongodb() || e.redisFamily() {
 		return nil // MySQL: OPTIMIZE TABLE, with its own finding (mysql.go); MongoDB: its index findings (mongodb.go)
 	}
 	return append(e.slotFixes(64<<20), e.unusedIndexFixes(maxDiskIndexFixes)...)

@@ -17,9 +17,9 @@ import (
 )
 
 // Without an account: these commands also run on a PostgreSQL, MySQL,
-// MariaDB or MongoDB database the CLI reaches directly, given a connection
-// string (rowsafe pulse postgres://user@host/db, mysql://user@host/db,
-// mongodb://user@host/db), or
+// MariaDB, MongoDB, Redis or Valkey database the CLI reaches directly,
+// given a connection string (rowsafe pulse postgres://user@host/db,
+// mysql://user@host/db, mongodb://user@host/db, redis://host:6379), or
 // $DATABASE_URL when there is no saved login.
 // Nothing is sent to Rowsafe. Backups, Proof and alerts need the agent on
 // the server; history and the dashboard need an account (rowsafe login).
@@ -52,8 +52,9 @@ restore to any second, all on that server:
                                      rewinding the whole database in place), keeping its backups,
                                      Proofs and Marks
 
-From anywhere, on a PostgreSQL, MySQL, MariaDB or MongoDB database this
-computer reaches (also managed ones): save it once, then use it by name:
+From anywhere, on a PostgreSQL, MySQL, MariaDB, MongoDB, Redis or Valkey
+database this computer reaches (also managed ones): save it once, then use
+it by name:
 
   rowsafe add shop postgres://USER:PASSWORD@HOST:5432/DB    (or mysql://USER:PASSWORD@HOST:3306/DB)
                                      save it on this computer (checks it connects, read-only). Pipe
@@ -97,7 +98,8 @@ computer reaches (also managed ones): save it once, then use it by name:
 
 Once, without saving: a connection string instead of NAME (rowsafe pulse
 postgres://USER@HOST:5432/DB, mysql://USER@HOST:3306/DB, mariadb://... or
-mongodb://USER@HOST:27017/DB), or DATABASE_URL when you aren't logged in.
+mongodb://USER@HOST:27017/DB or redis://:PASSWORD@HOST:6379), or
+DATABASE_URL when you aren't logged in.
 
 Which database: a connection string; else a saved NAME; else this project's
 (ROWSAFE_DATABASE or .rowsafe.json) when it's saved here; else DATABASE_URL.
@@ -131,6 +133,15 @@ replication lag, the profiler, and indexes unused for a week or covered by
 another; fixes stop an operation, turn the profiler on and drop an index. top
 reads the profiler's slow operations. Settings are shown, not changed: they
 live in mongod.conf. The user needs clusterMonitor (dbAdmin for the fixes).
+
+Redis and Valkey (redis://, rediss:// for TLS, redis+unix:///path.sock;
+REDISCLI_AUTH for the password): connections, memory and its limit,
+fragmentation, stuck clients, slow commands, latency spikes, saving to its
+own disk, replication and a default user without a password; fixes evict
+instead of refusing writes, give memory back, defragment, disconnect a
+client and turn on snapshots; settings and tune change them with CONFIG SET
+and keep them with CONFIG REWRITE. insights, top and activity are for
+tables and queries: pulse covers Redis.
 
 Rowsafe can't see another server's memory or disk over a connection: pass
 --memory and --cpus for settings advice. Backups, restore to any second, the
@@ -218,7 +229,7 @@ func localControl(want string) (url string, err error) {
 
 // notLoggedIn explains what works without an account.
 const notLoggedIn = "not logged in: run `rowsafe login`.\n" +
-	"pulse, fix, insights, top, activity, settings, tune, schema, explain, preview and mcp work on a database directly (PostgreSQL; MySQL, MariaDB and MongoDB but schema, explain and preview):\n" +
+	"pulse, fix, insights, top, activity, settings, tune, schema, explain, preview and mcp work on a database directly (PostgreSQL; MySQL, MariaDB, MongoDB, Redis and Valkey but schema, explain and preview):\n" +
 	"  rowsafe add shop postgres://user@host:5432/dbname   then: rowsafe pulse shop\n" +
 	"  or once: rowsafe pulse postgres://user@host:5432/dbname   (or set DATABASE_URL)\n" +
 	"Backups, Marks and restores run on the database's server: install Rowsafe there (https://rowsafe.sh), then sudo rowsafe add NAME postgres://... on it"
@@ -500,7 +511,8 @@ func localSettings(ctx context.Context, l *localDB, args []string) error {
 	if len(pos) == 1 {
 		return printSetting(l.Name(), ov, strings.ToLower(pos[0]), "")
 	}
-	printSettings(l.Name(), ov, *all, settingsHints{restart: "Restart " + l.EngineName() + " when it suits you; nothing restarts by itself.", tune: l.Command("tune")})
+	printSettings(l.Name(), ov, *all, settingsHints{restart: "Restart " + l.EngineName() + " when it suits you; nothing restarts by itself.", tune: l.Command("tune"),
+		engine: l.EngineName(), local: true})
 	return nil
 }
 

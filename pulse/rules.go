@@ -27,7 +27,7 @@ func (e *evaluator) disk(fresh bool) {
 	freePct, ok := e.in.Metrics[collect.MDiskFreePct]
 	if !fresh || !ok {
 		why := "No disk readings (PostgreSQL shows its data directory only to superusers)."
-		if e.mysqlFamily() || e.mongodb() {
+		if e.mysqlFamily() || e.mongodb() || e.redisFamily() {
 			why = "No disk readings (the data directory isn't on this machine's disk)."
 		}
 		e.check(CatDisk, label, "unknown", why)
@@ -40,6 +40,9 @@ func (e *evaluator) disk(fresh bool) {
 	if e.mysqlFamily() {
 		full, cmd = "Free up or add disk space now. Old binary logs (binlog_expire_logs_seconds) and tables with free space inside are the usual places to look.", "df -h; du -sh /var/lib/mysql"
 	}
+	if e.redisFamily() {
+		full, cmd = "Free up or add disk space now: "+name+" can no longer save its snapshots and may refuse writes. Old snapshot or append-only files and other programs' files are the usual places to look.", "df -h; redis-cli CONFIG GET dir"
+	}
 	if e.mongodb() {
 		full, cmd = "Free up or add disk space now. Unused indexes and collections nobody needs any more are the usual places to look; MongoDB gives the space of deleted documents back only when a collection is compacted.", "df -h; du -sh /var/lib/mongodb"
 	}
@@ -47,14 +50,14 @@ func (e *evaluator) disk(fresh bool) {
 	case freePct < 5:
 		e.add(protocol.Finding{ID: "disk_almost_full", Category: CatDisk, Severity: protocol.SeverityCritical, Penalty: 30,
 			Title:       fmt.Sprintf("The disk is almost full (%s free)", Bytes(freeBytes)),
-			Explanation: "When the disk fills up, " + name + " stops accepting changes and may shut down.",
+			Explanation: map[bool]string{false: "When the disk fills up, " + name + " stops accepting changes and may shut down.", true: "When the disk fills up, " + name + " can no longer save its snapshots and may refuse writes."}[e.redisFamily()],
 			Action:      diskAction(full, space),
 			Command:     cmd,
 			Fixes:       space})
 	case freePct < 15:
 		e.add(protocol.Finding{ID: "disk_low", Category: CatDisk, Severity: protocol.SeverityWarning, Penalty: 15,
 			Title:       fmt.Sprintf("Disk space is running low (%.0f%% free)", freePct),
-			Explanation: "Less than 15% of the disk is free. When it fills up, " + name + " stops accepting changes.",
+			Explanation: "Less than 15% of the disk is free. When it fills up, " + name + map[bool]string{false: " stops accepting changes.", true: " can no longer save its snapshots and may refuse writes."}[e.redisFamily()],
 			Action:      diskAction(map[bool]string{false: "Plan more disk space, or reclaim space from bloated tables and unused indexes.", true: "Plan more disk space, or reclaim space from old data and unused indexes."}[e.mongodb()], space),
 			Fixes:       space})
 	}

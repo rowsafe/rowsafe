@@ -27,9 +27,9 @@ func (e *evaluator) mariadb() bool {
 }
 
 // engineName is the database's engine for people: PostgreSQL, MySQL,
-// MariaDB, MongoDB.
+// MariaDB, MongoDB, Redis, Valkey.
 func (e *evaluator) engineName() string {
-	if e.mysqlFamily() || e.mongodb() {
+	if e.mysqlFamily() || e.mongodb() || e.redisFamily() {
 		return protocol.EngineDisplayName(e.in.Engine)
 	}
 	return "PostgreSQL"
