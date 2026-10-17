@@ -109,6 +109,7 @@ jobs:
             dist/${{ env.VERSION }}/rowsafe-agent-linux-*
             dist/${{ env.VERSION }}/rowsafe-linux-*
             dist/${{ env.VERSION }}/rowsafe-darwin-*
+            dist/${{ env.VERSION }}/rowsafe-windows-*
             dist/${{ env.VERSION }}/rowsafe-release-*
             dist/${{ env.VERSION }}/install.sh
             dist/${{ env.VERSION }}/manifest.json
@@ -121,6 +122,7 @@ jobs:
             dist/${{ env.VERSION }}/rowsafe-agent-linux-*
             dist/${{ env.VERSION }}/rowsafe-linux-*
             dist/${{ env.VERSION }}/rowsafe-darwin-*
+            dist/${{ env.VERSION }}/rowsafe-windows-*
           sbom-path: dist/${{ env.VERSION }}/rowsafe-${{ env.VERSION }}.spdx.json
 
       - name: GitHub release
@@ -157,6 +159,51 @@ jobs:
             echo "rowsafed release add --manifest manifest.json --signature manifest.json.sig --channel stable --rollout 10"
             echo '```'
           } >>"$GITHUB_STEP_SUMMARY"
+
+  # The npm package (npx rowsafe, npm i -g rowsafe): the wrapper in
+  # integrations/npm with this release's SHA256SUMS inside, so it only ever
+  # runs these binaries. Published with provenance when the release
+  # environment has an NPM_TOKEN secret (an npm token that can publish
+  # "rowsafe"); without one it is checked and packed, not published.
+  npm:
+    needs: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: read
+      id-token: write   # npm provenance
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Package this release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: integrations/npm
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          gh release download "$GITHUB_REF_NAME" -p SHA256SUMS -R "$GITHUB_REPOSITORY"
+          npm version "$v" --no-git-tag-version
+          # Run the published binary through the package, as npx would.
+          got=$(ROWSAFE_CACHE_DIR="$RUNNER_TEMP/cache" node bin/rowsafe.js version)
+          [ "$got" = "$v" ] || { echo "::error::the package ran rowsafe $got, want $v"; exit 1; }
+          npm pack --dry-run
+      - name: Publish to npm
+        if: env.NPM_TOKEN != ''
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        working-directory: integrations/npm
+        run: npm publish --provenance --access public
+      - name: Not published (no NPM_TOKEN)
+        if: env.NPM_TOKEN == ''
+        run: echo "::warning::NPM_TOKEN is not set in the release environment, so ${GITHUB_REF_NAME#v} was not published to npm"
 
   # Rebuild from the tag on a fresh runner and require byte-identical binaries.
   reproducible:

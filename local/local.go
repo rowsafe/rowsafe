@@ -26,7 +26,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/rowsafe/rowsafe/collect"
-	"github.com/rowsafe/rowsafe/internal/agent"
 	"github.com/rowsafe/rowsafe/internal/pginspect"
 	"github.com/rowsafe/rowsafe/protocol"
 	"github.com/rowsafe/rowsafe/pulse"
@@ -351,7 +350,7 @@ func (d *DB) run(ctx context.Context, fx protocol.FindingFix) (FixResult, error)
 		if err := json.Unmarshal(fx.Params, &p); err != nil {
 			return FixResult{}, err
 		}
-		res, log, err := agent.Maintain(ctx, d.inspectTarget(), p)
+		res, log, err := maintain(ctx, d.inspectTarget(), p)
 		out := FixResult{Log: log}
 		if res != nil {
 			out.Summary, out.Details = res.Summary, res.Details
@@ -371,7 +370,7 @@ func (d *DB) run(ctx context.Context, fx protocol.FindingFix) (FixResult, error)
 // ChangeSettings changes settings with ALTER SYSTEM and a reload (nothing
 // restarts), after checking the values against this server.
 func (d *DB) ChangeSettings(ctx context.Context, p protocol.SettingsParams) (FixResult, error) {
-	res, log, err := agent.ChangeSettings(ctx, d.inspectTarget(), d.collectTarget(), p)
+	res, log, err := changeSettings(ctx, d.inspectTarget(), d.collectTarget(), p)
 	out := FixResult{Log: log}
 	if res != nil {
 		out.Summary = res.Summary

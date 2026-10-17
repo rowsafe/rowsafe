@@ -18,6 +18,10 @@ Rowsafe continuously copies this project's database changes (PostgreSQL's and SQ
    - If the Rowsafe tools aren't available, don't work around it. If Codex isn't signed in to Rowsafe, ask the user to run `codex mcp login rowsafe`; if `create_restore_point` isn't listed, Marks weren't allowed at sign-in. Otherwise ask the user to save a Mark in the Rowsafe dashboard, or to run `rowsafe mark DATABASE NAME` themselves, and wait for them to confirm. (Codex's sandbox usually has no network access, so running the CLI yourself would fail anyway.)
 4. **Proceed** with the operation, against the same database you checked and marked. If the command's connection string points somewhere else (another `DATABASE_URL`, host or database name), stop and ask.
 
+## If the database isn't in Rowsafe
+
+Without a Rowsafe account, or for a database Rowsafe doesn't back up (no MCP tools, `safety_check` doesn't know it, `rowsafe whoami` fails), there is no restore point to set. Don't pretend there is: before the destructive operation, tell the user plainly that it can't be undone with Rowsafe, and wait for their OK. The `rowsafe-health` skill still checks a PostgreSQL database on its connection string, without an account.
+
 ## Preview a migration before running it
 
 Before a migration runs against the database, see what it would do there:
@@ -47,7 +51,7 @@ When the user allowed Codex to act, `request_change` and the direct change tools
 
 ## The `rowsafe` CLI
 
-When the CLI is installed and logged in (`rowsafe whoami`), it does everything the dashboard does, with the user's rights, like `doctl` or `aws`: `rowsafe --help` lists it (backups, Marks, Rewind, fixes, settings, security, updates, standby, moves, pooling, databases and users, Rowsafe Cloud servers, alerts, logs). Add `--json` to read its output. Changes that are disruptive or destructive ask for confirmation; pass `--yes` only after the user agreed in chat. If Rowsafe refuses, the CLI prints the reason: tell the user. If it isn't installed and the user wants it, it installs with `curl -fsSL https://rowsafe.sh/cli | sh` (macOS and Linux, no sudo; ask first), then `rowsafe login`.
+When the CLI is installed and logged in (`rowsafe whoami`), it does everything the dashboard does, with the user's rights, like `doctl` or `aws`: `rowsafe --help` lists it (backups, Marks, Rewind, fixes, settings, security, updates, standby, moves, pooling, databases and users, Rowsafe Cloud servers, alerts, logs). Add `--json` to read its output. Changes that are disruptive or destructive ask for confirmation; pass `--yes` only after the user agreed in chat. If Rowsafe refuses, the CLI prints the reason: tell the user. If it isn't installed and the user wants it, it installs with `curl -fsSL https://rowsafe.sh/cli | sh` (macOS and Linux, no sudo; ask first; on Windows, `rowsafe-windows-amd64.exe` from https://github.com/rowsafe/rowsafe/releases/latest), then `rowsafe login`.
 
 ## What counts as destructive
 

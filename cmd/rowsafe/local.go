@@ -33,7 +33,8 @@ Rewind needs an account for now):
   sudo rowsafe status NAME           protected? (backups, the change log, Proof)
   sudo rowsafe mark NAME LABEL       a restore point, e.g. before a migration
   sudo rowsafe backups NAME | proofs NAME | backup NAME | proof NAME
-  sudo rowsafe login                 the dashboard, alerts and more, later
+  sudo rowsafe login                 later: connects this server to an account (the dashboard,
+                                     alerts, Rewind), keeping its backups, Proofs and Marks
 
 From anywhere, on a PostgreSQL this computer reaches (also managed ones): save
 it once, then use it by name:

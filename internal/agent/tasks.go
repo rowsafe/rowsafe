@@ -360,7 +360,8 @@ func (a *Agent) adopt(ctx context.Context, db protocol.DatabaseSpec, p protocol.
 	if err != nil {
 		return &protocol.AdoptResult{Inspect: in}, err
 	}
-	res := &protocol.AdoptResult{Inspect: in, Plan: plan.Changes, RestartRequired: plan.Restart, Warnings: plan.Warnings}
+	res := &protocol.AdoptResult{Inspect: in, Plan: plan.Changes, RestartRequired: plan.Restart, Warnings: plan.Warnings,
+		AlreadySetUp: plan.AlreadySetUp}
 	if !p.Apply {
 		tl.Printf("plan only: %d changes, nothing was modified", len(plan.Changes))
 		return res, nil

@@ -41,6 +41,8 @@ The connection string stays in your config folder, readable only by you; `.rowsa
 
 Once, without saving: `rowsafe pulse postgres://…`, or set `DATABASE_URL` and leave the argument out. Use the direct connection, not a pooler. Backups, restore to any second, the weekly restore test, alerts and history need the agent on your server: see below. `rowsafe help local` has the details.
 
+On Windows, download `rowsafe-windows-amd64.exe` (or `-arm64.exe`) from the [latest release](https://github.com/rowsafe/rowsafe/releases/latest); everything above works there except applying fixes and settings (`fix`, `tune --yes`), for now.
+
 ## Get started
 
 ```sh
@@ -100,6 +102,7 @@ Full guide: [Quickstart](https://rowsafe.sh/docs/quickstart).
 | `internal/engine` | MySQL/MariaDB, MongoDB, ClickHouse, Redis/Valkey, SQLite, Qdrant, Meilisearch. |
 | `scripts/install.sh` | The installer served at `https://rowsafe.sh`. |
 | `scripts/cli.sh` | The CLI installer served at `https://rowsafe.sh/cli` (macOS and Linux). |
+| `integrations/npm` | The `rowsafe` npm package: downloads the release's CLI for the platform (checked against `SHA256SUMS`) on first run. |
 | `release`, `cmd/rowsafe-release` | Release signing and verification. |
 
 ## Safety

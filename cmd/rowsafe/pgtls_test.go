@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/rowsafe/rowsafe/protocol"
@@ -71,6 +72,11 @@ func TestPSQLTLS(t *testing.T) {
 		t.Fatal(err)
 	}
 	vf := protocol.DBConnection{Host: "x7kq2mfa3pzd.cloud.rowsafe.sh", SSLMode: "verify-full"}
+	// On Windows, libpq's OpenSSL may have no system certificates: no "system".
+	psql16Mode, psql16Root := "verify-full", protocol.SSLRootCertSystem
+	if runtime.GOOS == "windows" {
+		psql16Mode, psql16Root = "require", ""
+	}
 	for _, tc := range []struct {
 		name               string
 		major              int
@@ -79,7 +85,7 @@ func TestPSQLTLS(t *testing.T) {
 		wantMode, wantRoot string
 	}{
 		{"the system's certificate file, any psql", 14, []string{"/nonexistent/ca.crt", bundle}, vf, "verify-full", bundle},
-		{"psql 16 without a file", 16, []string{"/nonexistent/ca.crt"}, vf, "verify-full", protocol.SSLRootCertSystem},
+		{"psql 16 without a file", 16, []string{"/nonexistent/ca.crt"}, vf, psql16Mode, psql16Root},
 		{"older psql without a file", 15, nil, vf, "require", ""},
 		{"not verify-full: untouched", 17, []string{bundle}, protocol.DBConnection{SSLMode: "require"}, "require", ""},
 	} {

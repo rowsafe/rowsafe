@@ -1,7 +1,7 @@
 package protocol
 
 import (
-	"path/filepath"
+	"path"
 	"regexp"
 	"strings"
 )
@@ -50,15 +50,16 @@ func SQLiteCloneName(name string) bool {
 }
 
 // SQLiteCloneDir reports whether dir can be a folder for SQLite clones:
-// absolute, clean, not the root folder.
+// absolute, clean, not the root folder. Paths are the server's (Linux), so
+// they are checked with slashes wherever this runs (the CLI on Windows too).
 func SQLiteCloneDir(dir string) bool {
-	return dir != "/" && len(dir) <= 800 && SQLitePath(dir) && filepath.Clean(dir) == dir
+	return dir != "/" && len(dir) <= 800 && SQLitePath(dir) && path.Clean(dir) == dir
 }
 
-// SQLiteClonePath reports whether path is a valid clone file directly in
+// SQLiteClonePath reports whether file is a valid clone file directly in
 // the folder dir.
-func SQLiteClonePath(dir, path string) bool {
-	return SQLiteCloneDir(dir) && SQLitePath(path) && filepath.Dir(path) == dir && SQLiteCloneName(filepath.Base(path))
+func SQLiteClonePath(dir, file string) bool {
+	return SQLiteCloneDir(dir) && SQLitePath(file) && path.Dir(file) == dir && SQLiteCloneName(path.Base(file))
 }
 
 // SQLiteNoCloneDir is why a server whose agent reports no folder for

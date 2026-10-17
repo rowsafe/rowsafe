@@ -5,6 +5,7 @@
 #   make lint                  go vet, gofmt, shellcheck, installer consistency
 #   make test-installer        scripts/install.sh in Debian/Ubuntu containers (Docker)
 #   make test-cli-installer    scripts/cli.sh (rowsafe.sh/cli) on this computer, macOS or Linux
+#   make test-npm              the npm package (npx rowsafe) against a fake release (Node.js, Go)
 #   make test-installer-cloud  --install-postgres and --listen-public for real, as cloud-init runs them (Docker, network)
 #   make test-mongodb          the MongoDB engine on real mongo 7.0/8.0 containers (Docker)
 #   make test-clickhouse       the ClickHouse engine on real ClickHouse 26.8/26.3/25.8/24.8 containers (Docker)
@@ -21,6 +22,7 @@
 #   make test-upgrade          real PostgreSQL updates and upgrades (16 -> 18, undo) on a systemd Debian container (Docker)
 #   make test-action           the GitHub Action (integrations/github-action) against a mock API
 #   make dist VERSION=1.2.3 RELEASE_PUBLIC_KEY=...    reproducible release binaries in dist/1.2.3/
+#                              (the CLI for Linux, macOS and Windows; the agent for Linux)
 #   make release VERSION=1.2.3 RELEASE_PUBLIC_KEY=... (needs ROWSAFE_RELEASE_PRIVATE_KEY)
 #                              dist + rendered install.sh + Ed25519-signed manifest (covering both) + SHA256SUMS
 #
@@ -42,7 +44,7 @@ AGENT_LDFLAGS := -s -w -buildid= -X $(PKG)/internal/agent.Version=$(VERSION) -X 
 MAIN_LDFLAGS := -s -w -buildid= -X main.version=$(VERSION)
 GOBUILD := CGO_ENABLED=0 GOFLAGS=-mod=readonly $(GO) build -trimpath -buildvcs=false
 
-.PHONY: all build test lint check-installer test-installer test-cli-installer test-installer-cloud test-mongodb test-clickhouse test-redis test-qdrant check-qdrant-pins test-sqlite test-rewind test-secondcopy test-sftp test-mysql test-upgrade test-pooling test-no-account-pooler test-permissions test-action dist release check-release-env clean test-opensearch
+.PHONY: all build test lint check-installer test-installer test-cli-installer test-npm test-installer-cloud test-mongodb test-clickhouse test-redis test-qdrant check-qdrant-pins test-sqlite test-rewind test-secondcopy test-sftp test-mysql test-upgrade test-pooling test-no-account-pooler test-permissions test-action dist release check-release-env clean test-opensearch
 
 all: lint test build
 
@@ -58,6 +60,9 @@ test:
 lint: check-installer
 	$(GO) vet ./...
 	@test -z "$$(gofmt -l .)" || { echo "gofmt needed:"; gofmt -l .; exit 1; }
+	@# The CLI builds for Windows: code it reaches that is Unix-only goes behind
+	@# a build tag (local/agent.go and agent_windows.go).
+	@GOOS=windows GOARCH=amd64 $(GO) build -o /dev/null ./cmd/rowsafe || { echo "the rowsafe CLI no longer builds for Windows (see local/agent_windows.go)"; exit 1; }
 	@# The agent images copy only listed folders: each one the agent needs must be listed.
 	@for d in $$($(GO) list -deps ./cmd/rowsafe-agent | sed -n 's#^github.com/rowsafe/rowsafe/\([^/]*\).*#\1#p' | sort -u); do \
 		for f in deploy/docker/agent*.Dockerfile; do \
@@ -192,6 +197,11 @@ dist:
 		GOOS=$$os GOARCH=$$arch $(GOBUILD) -ldflags '$(MAIN_LDFLAGS)' -o $(DIST)/rowsafe-$$os-$$arch ./cmd/rowsafe || exit 1; \
 		GOOS=$$os GOARCH=$$arch $(GOBUILD) -ldflags '$(MAIN_LDFLAGS)' -o $(DIST)/rowsafe-release-$$os-$$arch ./cmd/rowsafe-release || exit 1; \
 	done; done
+	@# The CLI on Windows (the agent and the release tool stay Unix-only).
+	@for arch in amd64 arm64; do \
+		echo "rowsafe windows/$$arch"; \
+		GOOS=windows GOARCH=$$arch $(GOBUILD) -ldflags '$(MAIN_LDFLAGS)' -o $(DIST)/rowsafe-windows-$$arch.exe ./cmd/rowsafe || exit 1; \
+	done
 
 check-release-env:
 	@echo "$(VERSION)" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$$' || \
@@ -216,6 +226,9 @@ release: check-release-env
 	bin/rowsafe-release sign --key-env ROWSAFE_RELEASE_PRIVATE_KEY $(DIST)/manifest.json
 	bin/rowsafe-release verify --public-key '$(RELEASE_PUBLIC_KEY)' $(DIST)/manifest.json $(DIST)/manifest.json.sig
 	cd $(DIST) && if command -v sha256sum >/dev/null 2>&1; then sha256sum -- * > SHA256SUMS; else shasum -a 256 -- * > SHA256SUMS; fi
+
+test-npm:
+	cd integrations/npm && node --test test/wrapper.test.js
 
 clean:
 	rm -rf bin dist

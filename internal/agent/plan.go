@@ -39,6 +39,10 @@ type Plan struct {
 	Settings map[string]string // ALTER SYSTEM SET name = value
 	Restart  bool
 	Warnings []string
+	// AlreadySetUp: archiving is on with Rowsafe's own archive_command
+	// for this database, without a restart (archive_timeout may still be
+	// lowered, with a reload).
+	AlreadySetUp bool
 }
 
 // PlanInput is what the planner needs besides the inspected cluster.
@@ -170,5 +174,8 @@ func PlanAdoptInput(in protocol.InspectResult, pi PlanInput) (Plan, error) {
 	if p.Restart {
 		p.Warnings = append(p.Warnings, restartWarning(sidecar, pi.Name))
 	}
+	_, changed := p.Settings["archive_command"]
+	p.AlreadySetUp = !p.Restart && !changed && in.ArchiveLibrary == "" && in.WalLevel != "minimal" &&
+		(in.ArchiveMode == "on" || in.ArchiveMode == "always")
 	return p, nil
 }

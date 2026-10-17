@@ -91,6 +91,9 @@ func enrollAPI(t *testing.T, token string, made *int) *client.Client {
 }
 
 func TestHostsAddOverSSH(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("installing over SSH needs WSL, macOS or Linux (TestHostsAddWindows)")
+	}
 	if _, err := exec.LookPath("curl"); err != nil {
 		t.Skip("needs curl")
 	}
@@ -133,6 +136,9 @@ func TestHostsAddOverSSH(t *testing.T) {
 }
 
 func TestHostsAddRefuses(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("installing over SSH needs WSL, macOS or Linux (TestHostsAddWindows)")
+	}
 	dir := t.TempDir()
 	ssh, _ := fakeSSH(t, dir, "Darwin")
 	t.Setenv("ROWSAFE_SSH", ssh)
