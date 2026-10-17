@@ -76,10 +76,10 @@ func projectDatabase() (name, source string) {
 
 func resolveDatabase(ctx context.Context, c *client.Client, explicit string) (string, error) {
 	if explicit != "" {
-		return explicit, nil
+		return serverName(ctx, c, explicit), nil // a saved name on this server (server_saved.go)
 	}
 	if name, _ := projectDatabase(); name != "" {
-		return name, nil
+		return serverName(ctx, c, name), nil
 	}
 	dbs, err := c.Databases(ctx)
 	if err != nil {
@@ -138,9 +138,10 @@ func markArgs(ctx context.Context, c *client.Client, pos []string) (db, label st
 		if err != nil {
 			return "", "", err
 		}
+		name := serverName(ctx, c, pos[0])
 		for _, d := range dbs {
-			if d.Name == pos[0] || d.ID == pos[0] {
-				db = pos[0]
+			if d.Name == name || d.ID == name {
+				db = name
 			}
 		}
 		if db == "" {

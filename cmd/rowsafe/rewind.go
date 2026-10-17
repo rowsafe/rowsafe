@@ -381,6 +381,33 @@ func rewindCopyCmd(ctx context.Context, c *client.Client, args []string) error {
 	return nil
 }
 
+// ---- rowsafe restore ----
+
+// restoreCmd is rowsafe restore NAME --to TIME|MARK: rewind copy with the
+// point in one flag (a time when it reads as one, else a Mark's name).
+func restoreCmd(ctx context.Context, c *client.Client, args []string) error {
+	fs := flag.NewFlagSet("restore", flag.ContinueOnError)
+	to := fs.String("to", "", "the point: a time (\"14:04\", \"10m ago\", \"2026-09-24 14:04\", RFC 3339) or a Mark's name")
+	hours := fs.Int("hours", 24, "how long to keep the copy (at most 168)")
+	noWait := fs.Bool("no-wait", false, "return once the copy is queued")
+	name, err := dbArg(ctx, c, fs, args)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(*to) == "" {
+		return newUsageError("to which point? Pass --to TIME (e.g. --to \"10m ago\" or --to \"14:04\") or --to MARK (rowsafe marks lists them)")
+	}
+	point := "--mark"
+	if _, err := parseRewindTime(*to); err == nil {
+		point = "--at"
+	}
+	copyArgs := []string{name, point, *to, "--hours", strconv.Itoa(*hours)}
+	if *noWait {
+		copyArgs = append(copyArgs, "--no-wait")
+	}
+	return rewindCopyCmd(ctx, c, copyArgs)
+}
+
 // ---- rowsafe rewind compare ----
 
 // tableArgs reads TABLE arguments: "schema.table" or "table" in the only
