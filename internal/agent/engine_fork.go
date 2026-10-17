@@ -1,16 +1,11 @@
 package agent
 
 import (
-	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
-	"github.com/rowsafe/rowsafe/internal/handoff"
 	"github.com/rowsafe/rowsafe/internal/objstore"
 	"github.com/rowsafe/rowsafe/protocol"
 )
@@ -77,52 +72,17 @@ func (a *Agent) engineForkRestore(ctx context.Context, p protocol.ForkRestorePar
 		return nil, errors.New("clones need the agent installed on the server itself; databases in Docker aren't supported yet")
 	}
 	env := a.engineEnv(protocol.NormalizeEngine(p.Source.Engine))
+	repo, cleanup, err := a.engineForkRepo(ctx, p, tl) // fork_verify.go
+	defer cleanup()
+	if err != nil {
+		return nil, err
+	}
+	env.Repo = repo
 	if p.Box == nil && p.OwnRepo {
 		// The source's server is lost: its backups are read with this
-		// server's own storage settings (forkSourceFor's lostSourceRepo).
-		r, err := a.lostSourceRepo(ctx, p)
-		if err != nil {
-			return nil, err
-		}
-		env.Repo = r
-		tl.Printf("the source's server is lost: reading %s's backups with this server's own storage settings; nothing was handed over",
-			cmp.Or(p.Source.Name, p.Source.Stanza))
+		// server's own storage settings (lostSourceRepo).
 		res, err := ef.ForkRestore(ctx, env, p, tl)
 		return res, lostSourceErr(err)
-	} else if p.Box == nil {
-		env.Repo = a.repoFor(p.Source)
-		tl.Printf("the source %s runs on this server: its backups are read with this server's own settings; nothing leaves the server",
-			cmp.Or(p.Source.Name, p.Source.Stanza))
-	} else {
-		rt := a.sb()
-		if rt.key == nil {
-			return nil, errors.New("this agent's key for sealed handoffs isn't available (see the agent's log)")
-		}
-		if err := a.peerAllowed(p.Box.SenderKey, "the source's server"); err != nil {
-			return nil, err
-		}
-		plain, err := handoff.Open(rt.key, *p.Box, protocol.HandoffPurposeFork, protocol.ForkHandoffContext(p.Source.ID, p.ForkID), p.SenderKey)
-		if err != nil {
-			return nil, fmt.Errorf("opening the source server's sealed bucket settings: %w", err)
-		}
-		var sec protocol.ForkSecrets
-		err = json.Unmarshal(plain, &sec)
-		clear(plain)
-		if err != nil {
-			return nil, fmt.Errorf("reading the source server's handoff: %w", err)
-		}
-		ca := filepath.Join(a.standbyDir(), "fork-"+safeFileID(p.ForkID)+"-ca.pem")
-		if sec.Repo.CAPEM != "" {
-			if err := os.MkdirAll(a.standbyDir(), 0o700); err != nil {
-				return nil, err
-			}
-			defer os.Remove(ca)
-		}
-		// In Rowsafe Storage: this agent's own credentials (same organization).
-		if env.Repo, err = a.repoFromHandoff(ctx, sec.Repo, ca); err != nil {
-			return nil, err
-		}
-		tl.Printf("opened the source server's sealed bucket settings (read access to %s's backups)", cmp.Or(p.Source.Name, p.Source.Stanza))
 	}
 	if err := env.Repo.Validate(); err != nil {
 		return nil, fmt.Errorf("the source's backup settings: %w", err)

@@ -220,7 +220,43 @@ func (e *Engine) drill(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 			tl.Printf("note: the newest changes haven't reached your bucket yet (%v)", err)
 		}
 	}
-	dir := filepath.Join(drillRoot(env), safeName(taskID))
+	// 3. Next to production: tables present, counts close (it kept
+	// changing).
+	compare := func(full copyCheck, dd *protocol.DrillDatabase, res *protocol.DrillResult) {
+		e.noteIntegrity(env, db, time.Now(), full.Integrity)
+		prod, err := tableCounts(ctx, db.SocketDir)
+		if err != nil {
+			res.Warnings = append(res.Warnings, "couldn't count production's rows to compare: "+err.Error())
+			return
+		}
+		dd.SourceTables = len(prod)
+		got := map[string]int64{}
+		for _, t := range full.Tables {
+			got[t.Name] = t.Rows
+		}
+		for _, t := range prod {
+			rc, ok := got[t.Name]
+			if !ok {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("table %s isn't in the restore (created in the last moments?)", t.Name))
+				continue
+			}
+			if diff := t.Rows - rc; (diff > 1000 || diff < -1000) && float64(absInt(diff)) > 0.1*float64(max(t.Rows, 1)) {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("table %s: %d rows restored, production has %d now", t.Name, rc, t.Rows))
+			}
+		}
+	}
+	return drillRestore(ctx, env, r, safeName(taskID), started, compare, tl)
+}
+
+// drillRestore is the drill once production's changes reached the bucket:
+// restore the newest backup into a scratch file in the drill folder named
+// id, check it against what the backup recorded, carry it forward to the
+// newest point, run the full checks, then compare (production next to it;
+// Proof on another server: what the source's server reported) and delete
+// the file.
+func drillRestore(ctx context.Context, env agent.EngineEnv, r *repo, id string, started time.Time,
+	compare func(full copyCheck, dd *protocol.DrillDatabase, res *protocol.DrillResult), tl agent.TaskLogger) (*protocol.DrillResult, error) {
+	dir := filepath.Join(drillRoot(env), id)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
@@ -290,29 +326,8 @@ func (e *Engine) drill(ctx context.Context, env agent.EngineEnv, db protocol.Dat
 		res.Warnings = append(res.Warnings, fmt.Sprintf("foreign_key_check found %d rows whose parent row is missing "+
 			"(the same in production: SQLite only enforces foreign keys when the app turns them on)", full.FKErrors))
 	}
-	e.noteIntegrity(env, db, time.Now(), full.Integrity)
-	// 3. Next to production: tables present, counts close (it kept
-	// changing).
 	dd := protocol.DrillDatabase{Name: "main", Present: full.Integrity == "ok", RestoredTables: len(full.Tables)}
-	if prod, err := tableCounts(ctx, db.SocketDir); err == nil {
-		dd.SourceTables = len(prod)
-		got := map[string]int64{}
-		for _, t := range full.Tables {
-			got[t.Name] = t.Rows
-		}
-		for _, t := range prod {
-			rc, ok := got[t.Name]
-			if !ok {
-				res.Warnings = append(res.Warnings, fmt.Sprintf("table %s isn't in the restore (created in the last moments?)", t.Name))
-				continue
-			}
-			if diff := t.Rows - rc; (diff > 1000 || diff < -1000) && float64(absInt(diff)) > 0.1*float64(max(t.Rows, 1)) {
-				res.Warnings = append(res.Warnings, fmt.Sprintf("table %s: %d rows restored, production has %d now", t.Name, rc, t.Rows))
-			}
-		}
-	} else {
-		res.Warnings = append(res.Warnings, "couldn't count production's rows to compare: "+err.Error())
-	}
+	compare(full, &dd, res)
 	res.Databases = []protocol.DrillDatabase{dd}
 	res.RestoredBytes = fileSize(path)
 	res.DurationSeconds = time.Since(started).Seconds()

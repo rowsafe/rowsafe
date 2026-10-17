@@ -1,8 +1,10 @@
 package mysql
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -31,22 +33,12 @@ var drillStartTimeout = 15 * time.Minute
 
 func (s *server) drill(ctx context.Context, taskID string, log agent.TaskLogger) (*protocol.DrillResult, error) {
 	start := time.Now()
-	res := &protocol.DrillResult{}
-	finish := func(err error) (*protocol.DrillResult, error) {
-		res.DurationSeconds = time.Since(start).Seconds()
-		if err != nil {
-			res.Passed = false
-			res.Failures = append(res.Failures, err.Error())
-		}
-		return res, err
-	}
 	prod, err := s.open(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer prod.Close()
-	f, err := s.readFacts(ctx, prod)
-	if err != nil {
+	if _, err := s.readFacts(ctx, prod); err != nil {
 		return nil, err
 	}
 	source, _, err := schemaSizes(ctx, prod)
@@ -67,8 +59,97 @@ func (s *server) drill(ctx context.Context, taskID string, log agent.TaskLogger)
 			log.Printf("the newest changes aren't in the bucket yet (%v); testing what is there", err)
 		}
 	}
+	return s.drillCopy(ctx, st, "mysql-"+taskID, source, size, prod, start, log)
+}
+
+// Proof on another server (protocol.FeatureProofElsewhere): when the
+// database's own server lacks the disk, the drill's restore and checks run
+// on another server of the organization, against what VerifyFacts read on
+// the source's server. Nothing there is registered, loaded or backed up.
+
+var _ agent.EngineForkVerify = (*Engine)(nil)
+
+// VerifyFacts reads the source's databases as the drill compares them,
+// their size and the server's version.
+func (e *Engine) VerifyFacts(ctx context.Context, env agent.EngineEnv, source protocol.DatabaseSpec) (*protocol.ForkVerifyFacts, error) {
+	s := e.server(env, source)
+	conn, err := s.open(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	f, err := s.readFacts(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	dbs, _, err := schemaSizes(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	facts := &protocol.ForkVerifyFacts{Databases: dbs, Version: f.Version}
+	for _, d := range dbs {
+		facts.SizeBytes += d.SizeBytes
+	}
+	return facts, nil
+}
+
+// ForkVerify restores the newest point in the source's backups (env.Repo)
+// into the drill directory, checks it like the drill against p.VerifyFacts
+// and deletes it. The source can't be asked here: what needs production
+// (waiting for the newest changes to ship, the row count comparison) is
+// skipped.
+func (e *Engine) ForkVerify(ctx context.Context, env agent.EngineEnv, p protocol.ForkRestoreParams, id string, log agent.TaskLogger) (*protocol.DrillResult, error) {
+	start := time.Now()
+	switch {
+	case p.VerifyFacts == nil:
+		return nil, errors.New("the restore test has nothing to check the restore against: the source's server didn't report its databases")
+	case p.Source.Stanza == "":
+		return nil, errors.New("the restore test names no source database")
+	case p.Target.Time != nil || p.Target.Mark != "":
+		return nil, errors.New("a restore test restores the newest point in the backups, not a moment or a Mark")
+	case env.Config.DrillDir == "":
+		return nil, errors.New("this server has no folder for restore tests")
+	}
+	if _, err := safeDir(env.Config.DrillDir, "mysql-"+id); err != nil {
+		return nil, err
+	}
+	// Only the backups: the source's port and socket are on its own server.
+	spec := protocol.DatabaseSpec{ID: p.Source.ID, Name: p.Source.Name, Stanza: p.Source.Stanza, Engine: string(e.flavor)}
+	s := e.server(env, spec)
+	if _, err := s.tool("server"); err != nil {
+		what := e.flavor.display()
+		if v := strings.TrimSpace(p.VerifyFacts.Version); v != "" {
+			what += " " + majorMinor(v)
+		}
+		return nil, fmt.Errorf("%s isn't installed on this server, and a restore test needs the source's version series", what)
+	}
+	st, err := openStore(env.Repo, string(e.flavor), p.Source.Stanza, s.cfg.PartSizeMB)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("restore test of %s (%s %s, %s) from its backups, on this server", cmp.Or(p.Source.Name, p.Source.Stanza),
+		e.flavor.display(), p.VerifyFacts.Version, humanBytes(p.VerifyFacts.SizeBytes))
+	return s.drillCopy(ctx, st, "mysql-"+id, p.VerifyFacts.Databases, p.VerifyFacts.SizeBytes, nil, start, log)
+}
+
+// drillCopy restores the newest point in st into the drill directory
+// (name), starts a private server on it and checks it against source (the
+// databases as schemaSizes reads them), then deletes it. prod, when set,
+// is production, for the row counts; a restore test on another server
+// (ForkVerify) has none.
+func (s *server) drillCopy(ctx context.Context, st *objStore, name string, source []protocol.DBInfo, size int64, prod *sql.DB,
+	start time.Time, log agent.TaskLogger) (*protocol.DrillResult, error) {
+	res := &protocol.DrillResult{}
+	finish := func(err error) (*protocol.DrillResult, error) {
+		res.DurationSeconds = time.Since(start).Seconds()
+		if err != nil {
+			res.Passed = false
+			res.Failures = append(res.Failures, err.Error())
+		}
+		return res, err
+	}
 	root := s.env.Config.DrillDir
-	dir, err := safeDir(root, "mysql-"+taskID)
+	dir, err := safeDir(root, name)
 	if err != nil {
 		return nil, err
 	}
@@ -76,8 +157,8 @@ func (s *server) drill(ctx context.Context, taskID string, log agent.TaskLogger)
 		return finish(err)
 	}
 	cs := rewinds(s.env)
-	cs.drillBusy("mysql-"+taskID, true)
-	defer cs.drillBusy("mysql-"+taskID, false)
+	cs.drillBusy(name, true)
+	defer cs.drillBusy(name, false)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
@@ -131,14 +212,17 @@ func (s *server) drill(ctx context.Context, taskID string, log agent.TaskLogger)
 	}
 	checked, failures := s.checkTables(ctx, copyDB, log)
 	res.Failures = append(res.Failures, failures...)
-	res.Warnings = append(res.Warnings, compareCounts(ctx, prod, copyDB, log)...)
+	if prod != nil {
+		res.Warnings = append(res.Warnings, compareCounts(ctx, prod, copyDB, log)...)
+	} else {
+		log.Printf("row counts not compared with production's estimates: the source runs on another server")
+	}
 	res.Passed = len(res.Failures) == 0
 	res.DurationSeconds = time.Since(start).Seconds()
 	if res.Passed {
 		log.Printf("restore test passed: %s restored to %s, %s checked, %s",
 			plural(int64(len(restored)), "database", "databases"), res.RecoveredTo.UTC().Format(time.RFC3339),
 			plural(int64(checked), "table", "tables"), humanBytes(res.RestoredBytes))
-		_ = f
 		return res, nil
 	}
 	return res, fmt.Errorf("restore test failed: %s", strings.Join(res.Failures, "; "))

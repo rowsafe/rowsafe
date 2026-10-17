@@ -65,10 +65,11 @@ var mysqlFeatures = EngineFeatures{
 	FindMoment:      true, // the binary logs in the bucket (internal/engine/mysql/moment.go)
 	DBAdmin:         true, Security: true, Files: true, Settings: true, SecondCopy: true,
 	MigrationPreview: true, SafeCopies: true,
-	Standby: true, // seeded from the latest backup, binary log replication (standby_*.go in internal/engine/mysql)
-	Fork:    true, // clones loaded into an empty server (fork.go in internal/engine/mysql)
-	MoveIn:  true, // one-time copy or live sync from a managed provider (migrate*.go in internal/engine/mysql)
-	Pooling: true, // ProxySQL through root's helper (opt-in)
+	Standby:        true, // seeded from the latest backup, binary log replication (standby_*.go in internal/engine/mysql)
+	Fork:           true, // clones loaded into an empty server (fork.go in internal/engine/mysql)
+	MoveIn:         true, // one-time copy or live sync from a managed provider (migrate*.go in internal/engine/mysql)
+	Pooling:        true, // ProxySQL through root's helper (opt-in)
+	ProofElsewhere: true, // restore tests on another server (internal/engine/mysql/drill.go)
 }
 
 // mariadbFeatures are MySQL's: index advice takes its samples from the

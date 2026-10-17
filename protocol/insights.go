@@ -359,6 +359,17 @@ const (
 	FixPlan        = "plan"        // adopt task, plan only
 	FixRestart     = "restart"     // restart task (confirm; only when restarts are allowed)
 	FixMaintenance = "maintenance" // maintenance task, params MaintenanceParams
+	// FixProofWhere is no task: clients open the database's Proof setting
+	// "Where restore tests run" (its server lacks the disk for them).
+	FixProofWhere = "proof_where"
+)
+
+// Where a database's restore tests run (Proof on another server,
+// protocol/fork.go).
+const (
+	ProofHere   = "here"   // on the database's own server (the drill)
+	ProofServer = "server" // on another server of the organization
+	ProofCloud  = "cloud"  // on a temporary Rowsafe Cloud server, deleted right after
 )
 
 // ApplyFixRequest is the body of POST /v1/databases/{ref}/fixes.

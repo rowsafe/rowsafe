@@ -84,9 +84,10 @@ var clickhouseFeatures = EngineFeatures{
 	Logs:            true, // the error log (internal/engine/clickhouse/logs.go)
 	DBAdmin:         true, Security: true, Files: true, SecondCopy: true,
 	MigrationPreview: true, SafeCopies: true,
-	Fork:     true, // clones restored from a backup into an empty server (fork.go in internal/engine/clickhouse)
-	MoveIn:   true, // one-time copy from ClickHouse Cloud or any ClickHouse (migrate.go in internal/engine/clickhouse)
-	Settings: true, // config.d and users.d through root's tuning helper (opt-in)
+	Fork:           true, // clones restored from a backup into an empty server (fork.go in internal/engine/clickhouse)
+	ProofElsewhere: true, // restore tests on another server (internal/engine/clickhouse/drill.go)
+	MoveIn:         true, // one-time copy from ClickHouse Cloud or any ClickHouse (migrate.go in internal/engine/clickhouse)
+	Settings:       true, // config.d and users.d through root's tuning helper (opt-in)
 	// Skipping indexes and projections tested on a copy
 	// (internal/engine/clickhouse/advisor.go, protocol/indexadvisor_clickhouse.go).
 	IndexAdvice: true,
