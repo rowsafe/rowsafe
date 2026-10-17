@@ -26,8 +26,11 @@ proprietary (api.rowsafe.sh, app.rowsafe.sh).
   `alerts rules set`, `logs`, `log-destinations`, `cloud maintenance`, ...): new changes use
   `confirm.go` (`--yes`; refused without a terminal) and offer `--json`.
   The CLI also builds for Windows (amd64, arm64; `make dist`, CI job "CLI on Windows"): Unix-only
-  code its packages need has a `_windows.go` counterpart (`collect/disk_windows.go`;
-  `local/agent_windows.go`, since `internal/agent`, the agent, stays Linux/macOS-only).
+  code its packages need has a `_windows.go` counterpart (`collect/disk_windows.go`), and
+  `internal/agent`, the agent, stays Linux/macOS-only: the CLI's fixes run `internal/maintenance`
+  (Pulse fixes and settings changes, plain SQL; the agent's maintenance and settings tasks run it
+  too) and `rowsafe explain` reads indexes with `internal/indexadvisor`. MySQL/MariaDB without an
+  account and running a migration on a copy (`local/*_windows.go`) still need macOS or Linux.
   `rowsafe init` offers a Rowsafe section in AGENTS.md / CLAUDE.md (`agentsmd.go`; append-only).
   Rules for scripts and AI agents (`rowsafe help agents`, checked over every command by
   `TestAgentRules`): every command takes `--json` (stdout only JSON, `jsonout.go`); exit codes

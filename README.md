@@ -52,7 +52,7 @@ Pulse checks cleanup falling behind, bloat, duplicate and unused indexes, stuck 
 
 MySQL and MariaDB work the same way (`rowsafe add shop mysql://user@host:3306/dbname`): stuck sessions and locks, long transactions, InnoDB's old row versions, the buffer pool, free space inside tables, unused and duplicate indexes, tables without a primary key and the slow query log, with fixes to end a session, drop an index, turn on the slow log and rebuild a table. Not yet: `schema`, `explain`, `preview`, replication checks, and MariaDB settings changes (they live in its configuration file).
 
-On Windows, download `rowsafe-windows-amd64.exe` (or `-arm64.exe`) from the [latest release](https://github.com/rowsafe/rowsafe/releases/latest); the commands from anywhere work there except applying fixes and settings (`fix`, `tune --yes`) and MySQL, for now.
+On Windows, download `rowsafe-windows-amd64.exe` (or `-arm64.exe`) from the [latest release](https://github.com/rowsafe/rowsafe/releases/latest); the commands from anywhere work there, fixes included, except MySQL for now.
 
 ## Get started
 

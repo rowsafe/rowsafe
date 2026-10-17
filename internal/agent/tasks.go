@@ -8,11 +8,8 @@ import (
 	"fmt"
 	"os"
 	"runtime"
-	"strings"
 	"sync"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 
 	"github.com/rowsafe/rowsafe/internal/pgbackrest"
 	"github.com/rowsafe/rowsafe/internal/pginspect"
@@ -219,7 +216,7 @@ func (a *Agent) runTask(ctx context.Context, task *protocol.Task, tl *taskLog) (
 			return nil, err
 		}
 		return res, err
-	case protocol.TaskSettings: // settings.go
+	case protocol.TaskSettings: // settings_standby.go
 		return runRewind(ctx, task, tl, db, a.changeSettings)
 	case protocol.TaskSecurityScan, protocol.TaskSecurityFix: // security.go
 		return a.runSecurityTask(ctx, task, tl, db)
@@ -450,20 +447,6 @@ func applySettings(ctx context.Context, t pginspect.Target, settings map[string]
 	return nil
 }
 
-// alterSystem builds an ALTER SYSTEM statement. Utility statements can't take
-// bind parameters, so the value is quoted as a literal and rejected if it
-// contains anything that could escape the literal.
-func alterSystem(name, value string) (string, error) {
-	if strings.ContainsAny(value, "\\\n\r\x00") {
-		return "", fmt.Errorf("refusing unsafe value for %s", name)
-	}
-	ident := pgx.Identifier{name}.Sanitize()
-	if value == "" {
-		return "ALTER SYSTEM RESET " + ident, nil
-	}
-	return fmt.Sprintf("ALTER SYSTEM SET %s = '%s'", ident, strings.ReplaceAll(value, "'", "''")), nil
-}
-
 func (a *Agent) check(ctx context.Context, db protocol.DatabaseSpec, tl *taskLog) (*protocol.CheckResult, error) {
 	in, err := pginspect.Inspect(ctx, a.target(db))
 	if err != nil {
@@ -542,17 +525,4 @@ func (a *Agent) backup(ctx context.Context, db protocol.DatabaseSpec, typ string
 	r := latest.Result()
 	tl.Printf("backup %s complete: %s database, %s stored", r.Label, humanBytes(r.SizeBytes), humanBytes(r.RepoSizeBytes))
 	return &r, nil
-}
-
-func humanBytes(n int64) string {
-	const unit = 1024
-	if n < unit {
-		return fmt.Sprintf("%d B", n)
-	}
-	div, exp := int64(unit), 0
-	for m := n / unit; m >= unit; m /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }

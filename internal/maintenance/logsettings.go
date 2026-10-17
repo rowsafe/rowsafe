@@ -1,4 +1,4 @@
-package agent
+package maintenance
 
 import (
 	"context"
@@ -25,7 +25,7 @@ func (m *maint) logSettings(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer closeConn(ctx, conn)
+	defer CloseConn(ctx, conn)
 	current := map[string]string{}
 	rows, err := conn.Query(ctx, `SELECT name, setting FROM pg_settings WHERE name IN
 		('log_min_duration_statement','log_lock_waits','log_temp_files','log_autovacuum_min_duration',
@@ -52,13 +52,13 @@ func (m *maint) logSettings(ctx context.Context) error {
 	}
 	var whats []string
 	for _, c := range plan {
-		stmt, err := alterSystem(c.Name, c.To)
+		stmt, err := AlterSystem(c.Name, c.To)
 		if err != nil {
 			return err
 		}
 		m.tl.Printf("%s (was %q)", stmt, c.From)
 		if _, err := conn.Exec(ctx, stmt); err != nil {
-			return fmt.Errorf("changing %s: %w", c.Name, plainPGError(err))
+			return fmt.Errorf("changing %s: %w", c.Name, PlainPGError(err))
 		}
 		whats = append(whats, c.What)
 		m.res.Details = append(m.res.Details, fmt.Sprintf("%s: %s → %s", c.Name, c.From, c.To))
