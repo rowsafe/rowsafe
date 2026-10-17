@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"time"
 
 	"github.com/rowsafe/rowsafe/protocol"
 )
@@ -16,6 +17,7 @@ type LogsQuery struct {
 	Group  string
 	Before string // entry ID: older entries
 	After  string // entry ID: newer entries (live tail)
+	From   time.Time
 	Limit  int
 }
 
@@ -31,6 +33,9 @@ func (q LogsQuery) values() string {
 	set("group", q.Group)
 	set("before", q.Before)
 	set("after", q.After)
+	if !q.From.IsZero() {
+		v.Set("from", q.From.UTC().Format(time.RFC3339))
+	}
 	if q.Limit > 0 {
 		v.Set("limit", strconv.Itoa(q.Limit))
 	}

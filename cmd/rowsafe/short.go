@@ -73,7 +73,7 @@ Pulse: health and monitoring
   rowsafe settings [NAME]            PostgreSQL's settings; rowsafe tune [NAME]: what suits the server
   rowsafe recommendations [NAME]     what would make it better, why and what it costs
   rowsafe security [NAME]            who can reach the database and how they log in; fix it (asks first)
-  rowsafe logs [NAME]                the database's logs (rowsafe log-destinations: forward them)
+  rowsafe logs [NAME]                the database's logs: --errors, --since 1h, --grep TEXT (logs forward: send them on)
   rowsafe alerts                     firing alerts (rowsafe channels: where they go)
   rowsafe report                     "Your weekly Pulse", the weekly email
 

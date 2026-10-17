@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rowsafe/rowsafe/protocol"
@@ -34,6 +35,8 @@ type Server struct {
 	updates   *updates
 	alertHTTP *http.Client // alerts.go
 	allowHTTP bool         // tests: channels on http://
+	logsOnce  sync.Once    // logs.go
+	logs      *logStore
 }
 
 // Open loads (or starts) the state kept in dir.
@@ -73,7 +76,8 @@ func (s *Server) Serve(ctx context.Context, path string) error {
 	}()
 	s.cameBack()
 	go s.run(ctx)
-	go s.runUpdates(ctx) // updates.go
+	go s.runUpdates(ctx)       // updates.go
+	go s.runLogForwarding(ctx) // logs_forward.go
 	s.log.Info("control plane without an account listening", "socket", path)
 	if err := srv.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
@@ -138,7 +142,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/agent/monitoring", s.agent(s.monitoring))
 	// Reports kept on the server for now: accepted, not stored.
 	for path, ack := range map[string]any{
-		"/v1/agent/logs":     protocol.LogAck{Databases: []protocol.LogSettings{}},
 		"/v1/agent/security": protocol.SecurityAck{}, "/v1/agent/files": protocol.FilesSync{Databases: []protocol.FilesConfig{}},
 	} {
 		mux.HandleFunc("POST "+path, s.agent(func(w http.ResponseWriter, r *http.Request) {
@@ -164,6 +167,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/databases/{ref}/restore-points", s.marks)
 	mux.HandleFunc("POST /v1/databases/{ref}/restore-points", s.createMark)
 	s.rewindRoutes(mux)                                             // rewind.go
+	s.logRoutes(mux)                                                // logs.go
 	mux.HandleFunc("GET /v1/notification-channels", s.channelsList) // alerts.go
 	mux.HandleFunc("POST /v1/notification-channels", s.channelsCreate)
 	mux.HandleFunc("DELETE /v1/notification-channels/{id}", s.channelsDelete)
