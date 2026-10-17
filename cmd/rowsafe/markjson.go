@@ -36,7 +36,7 @@ func createRestorePointJSON(ctx context.Context, c *client.Client, db, label str
 	failed := false
 	if !noWait {
 		last := ""
-		t, err = c.WaitTask(ctx, t.ID, func(t protocol.TaskView) {
+		t, err = waitTask(ctx, c, t.ID, func(t protocol.TaskView) {
 			if t.Status != last {
 				last = t.Status
 				switch t.Status {

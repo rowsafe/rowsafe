@@ -44,11 +44,11 @@ func dbCmd(ctx context.Context, c *client.Client, args []string) error {
 				return dbUserRemove(ctx, c, args[2:])
 			}
 		}
-		return fmt.Errorf("which one? rowsafe db user add | password | remove\n%s", strings.TrimSpace(helpFor([]string{"db user"})))
+		return usageErrorf("which one? rowsafe db user add | password | remove\n%s", strings.TrimSpace(helpFor([]string{"db user"})))
 	case "ext":
 		return dbExt(ctx, c, args[1:])
 	}
-	return fmt.Errorf("unknown command %q. The db commands:\n%s", "db "+args[0], strings.TrimSpace(helpFor([]string{"db"})))
+	return usageErrorf("unknown command %q. The db commands:\n%s", "db "+args[0], strings.TrimSpace(helpFor([]string{"db"})))
 }
 
 // onFlag is --on NAME: the Rowsafe database (server) to act on; the usual
@@ -73,7 +73,7 @@ func dbRun(ctx context.Context, c *client.Client, server string, p protocol.DBAd
 	var last protocol.TaskView
 	for _, t := range resp.Tasks {
 		status := ""
-		last, err = c.WaitTask(ctx, t.ID, func(v protocol.TaskView) {
+		last, err = waitTask(ctx, c, t.ID, func(v protocol.TaskView) {
 			if v.Status == status {
 				return
 			}
@@ -343,7 +343,7 @@ func dbCreate(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if len(pos) != 1 {
-		return errors.New("usage: rowsafe db create DB [--owner USER] [--extension EXT]... [--on NAME]")
+		return newUsageError("usage: rowsafe db create DB [--owner USER] [--extension EXT]... [--on NAME]")
 	}
 	p := protocol.DBAdminParams{Action: protocol.DBAdminCreateDatabase, Database: pos[0], Extensions: exts,
 		Template: *template, Locale: *locale, Host: *host}
@@ -395,7 +395,7 @@ func dbDrop(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if len(pos) != 1 {
-		return errors.New("usage: rowsafe db drop DB [--on NAME]")
+		return newUsageError("usage: rowsafe db drop DB [--on NAME]")
 	}
 	name := pos[0]
 	server, err := resolveDatabase(ctx, c, *on)
@@ -407,7 +407,7 @@ func dbDrop(ctx context.Context, c *client.Client, args []string) error {
 			return errors.New("removing a database deletes everything in it: pass --yes to confirm")
 		}
 		fmt.Printf("This removes the database %s on %s and everything in it. Rowsafe saves a Mark first, so you can get it back with Rewind.\n", name, server)
-		fmt.Printf("Type the database's name (%s) to remove it: ", name)
+		fmt.Fprintf(os.Stderr, "Type the database's name (%s) to remove it: ", name)
 		if readLine() != name {
 			return errors.New("cancelled; nothing was removed")
 		}
@@ -434,7 +434,7 @@ func dbUserAdd(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if len(pos) != 1 {
-		return errors.New("usage: rowsafe db user add USER --db DB [--access read_only|read_write|owner] [--on NAME]\n" +
+		return newUsageError("usage: rowsafe db user add USER --db DB [--access read_only|read_write|owner] [--on NAME]\n" +
 			"       rowsafe db user add USER [--keys PATTERN] [--access ...] [--on NAME]   (Redis and Valkey)\n" +
 			"       rowsafe db user add KEY [--db COLLECTION] [--access ...] [--expires DAYS] [--on NAME]   (Qdrant: an API key)")
 	}
@@ -488,7 +488,7 @@ func dbUserPassword(ctx context.Context, c *client.Client, args []string) error 
 		return err
 	}
 	if len(pos) != 1 {
-		return errors.New("usage: rowsafe db user password USER [--on NAME]")
+		return newUsageError("usage: rowsafe db user password USER [--on NAME]")
 	}
 	server, err := resolveDatabase(ctx, c, *on)
 	if err != nil {
@@ -518,14 +518,14 @@ func dbUserRemove(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if len(pos) != 1 {
-		return errors.New("usage: rowsafe db user remove USER [--reassign-to USER] [--on NAME]")
+		return newUsageError("usage: rowsafe db user remove USER [--reassign-to USER] [--on NAME]")
 	}
 	server, err := resolveDatabase(ctx, c, *on)
 	if err != nil {
 		return err
 	}
-	if !*yes && !confirm(fmt.Sprintf("Remove the user %s from %s? Apps that log in as it stop working.", pos[0], server)) {
-		return errors.New("cancelled; nothing was removed")
+	if err := confirmChange(*yes, fmt.Sprintf("Remove the user %s from %s? Apps that log in as it stop working.", pos[0], server)); err != nil {
+		return err
 	}
 	_, res, _, err := dbRun(ctx, c, server, protocol.DBAdminParams{Action: protocol.DBAdminDropUser, User: pos[0], ReassignTo: *to}, nil)
 	printDBResult(res)
@@ -546,7 +546,7 @@ func dbExt(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if len(pos) != 3 || (pos[0] != "on" && pos[0] != "off") {
-		return errors.New("usage: rowsafe db ext on|off DB EXTENSION [--restart] [--on NAME]")
+		return newUsageError("usage: rowsafe db ext on|off DB EXTENSION [--restart] [--on NAME]")
 	}
 	p := protocol.DBAdminParams{Action: protocol.DBAdminEnableExtension, Database: pos[1], Extension: pos[2]}
 	if e, ok := protocol.PGPackagedExtensionFor(pos[2]); ok {
@@ -559,7 +559,7 @@ func dbExt(ctx context.Context, c *client.Client, args []string) error {
 	}
 	if *restart {
 		if e, ok := protocol.PGPackagedExtensionFor(p.Extension); p.Action != protocol.DBAdminEnableExtension || !ok || !e.Preload {
-			return errors.New("--restart only goes with turning on an extension loaded when PostgreSQL starts (timescaledb)")
+			return newUsageError("--restart only goes with turning on an extension loaded when PostgreSQL starts (timescaledb)")
 		}
 		p.Restart = true
 	} else if e, ok := protocol.PGPackagedExtensionFor(p.Extension); ok && e.Preload && p.Action == protocol.DBAdminEnableExtension {

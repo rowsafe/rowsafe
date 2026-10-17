@@ -53,7 +53,7 @@ func standbyStatusCmd(ctx context.Context, c *client.Client, args []string) erro
 		return apiErr(err)
 	}
 	if *asJSON {
-		enc := json.NewEncoder(os.Stdout)
+		enc := json.NewEncoder(jsonWriter())
 		enc.SetIndent("", "  ")
 		return enc.Encode(info)
 	}
@@ -250,7 +250,7 @@ func standbyAddCmd(ctx context.Context, c *client.Client, args []string) error {
 		if !stdinIsTerminal() {
 			return errors.New("pass --fingerprint with the fingerprint `rowsafe-agent key` prints on the standby server")
 		}
-		fmt.Printf("\nType the fingerprint %s prints to go ahead: ", cand.Hostname)
+		fmt.Fprintf(os.Stderr, "\nType the fingerprint %s prints to go ahead: ", cand.Hostname)
 		*fingerprint = strings.TrimSpace(readLine())
 	}
 	stream := !*noStream
@@ -317,18 +317,14 @@ func standbyPromoteCmd(ctx context.Context, c *client.Client, args []string) err
 			return fmt.Errorf("the primary isn't reporting: pass --primary-down to confirm %s is down or will stay stopped", info.Primary.Hostname)
 		}
 		if !*down {
-			fmt.Printf("\nType %q to confirm: ", req.PrimaryDown)
-			if readLine() != req.PrimaryDown {
-				return errors.New("cancelled; nothing was changed")
+			if err := confirmTypedAs(false, req.PrimaryDown, fmt.Sprintf("\nType %q to confirm: ", req.PrimaryDown)); err != nil {
+				return err
 			}
 		}
 	}
 	fmt.Println("  Apps using a connection string with both servers (rowsafe standby shows them) follow by themselves.")
-	if !*yes {
-		fmt.Printf("\nType the database name (%s) to promote the standby: ", name)
-		if readLine() != name {
-			return errors.New("cancelled; nothing was changed")
-		}
+	if err := confirmTypedAs(*yes, name, fmt.Sprintf("\nType the database name (%s) to promote the standby: ", name)); err != nil {
+		return err
 	}
 	if _, err := c.PromoteStandby(ctx, name, req); err != nil {
 		return apiErr(err)
@@ -402,15 +398,15 @@ func standbyRebuildCmd(ctx context.Context, c *client.Client, args []string) err
 	if *fingerprint == "" {
 		*fingerprint = f.Server.Fingerprint
 		if !*yes {
-			fmt.Printf("\nType the fingerprint %s prints to go ahead: ", f.Server.Hostname)
+			if !stdinIsTerminal() {
+				return errors.New("pass --fingerprint with the fingerprint `rowsafe-agent key` prints there, and --yes to confirm")
+			}
+			fmt.Fprintf(os.Stderr, "\nType the fingerprint %s prints to go ahead: ", f.Server.Hostname)
 			*fingerprint = strings.TrimSpace(readLine())
 		}
 	}
-	if !*yes {
-		fmt.Printf("Type the database name (%s) to rebuild it: ", name)
-		if readLine() != name {
-			return errors.New("cancelled; nothing was changed")
-		}
+	if err := confirmTypedAs(*yes, name, fmt.Sprintf("Type the database name (%s) to rebuild it: ", name)); err != nil {
+		return err
 	}
 	if _, err := c.RebuildStandby(ctx, name, protocol.RebuildStandbyRequest{FenceID: f.ID, Fingerprint: *fingerprint, Confirm: name}); err != nil {
 		return apiErr(err)
@@ -452,11 +448,8 @@ func standbyRemoveCmd(ctx context.Context, c *client.Client, args []string) erro
 	}
 	fmt.Printf("Remove the standby of %s on %s: its PostgreSQL is stopped, the cluster gets its own data back,\n", name, info.Standby.Server.Hostname)
 	fmt.Println("and the primary drops the standby's access. Automatic failover turns off.")
-	if !*yes {
-		fmt.Printf("Type the database name (%s) to remove the standby: ", name)
-		if readLine() != name {
-			return errors.New("cancelled; nothing was changed")
-		}
+	if err := confirmTypedAs(*yes, name, fmt.Sprintf("Type the database name (%s) to remove the standby: ", name)); err != nil {
+		return err
 	}
 	if _, err := c.RemoveStandby(ctx, name, name); err != nil {
 		return apiErr(err)
@@ -498,11 +491,8 @@ func standbyFailoverCmd(ctx context.Context, c *client.Client, args []string) er
 			time.Duration(req.MaxDataLossSeconds)*time.Second)
 		fmt.Println("If the old primary was only cut off and apps can still reach it, both may accept writes until its agent")
 		fmt.Println("comes back and Rowsafe stops it: https://rowsafe.sh/docs/guides/standby#split-brain")
-		if !*yes {
-			fmt.Printf("Type the database name (%s) to turn it on: ", name)
-			if readLine() != name {
-				return errors.New("cancelled; nothing was changed")
-			}
+		if err := confirmTypedAs(*yes, name, fmt.Sprintf("Type the database name (%s) to turn it on: ", name)); err != nil {
+			return err
 		}
 		req.Confirm = name
 	}
@@ -534,11 +524,8 @@ func standbyUnfenceCmd(ctx context.Context, c *client.Client, args []string) err
 		return fmt.Errorf("%s can't be started again as the primary: the standby became the primary. Rebuild it as the new standby instead", f.Server.Hostname)
 	}
 	fmt.Printf("Start PostgreSQL on %s again as the primary of %s (the standby wasn't promoted).\n", f.Server.Hostname, name)
-	if !*yes {
-		fmt.Printf("Type the database name (%s) to go ahead: ", name)
-		if readLine() != name {
-			return errors.New("cancelled; nothing was changed")
-		}
+	if err := confirmTypedAs(*yes, name, fmt.Sprintf("Type the database name (%s) to go ahead: ", name)); err != nil {
+		return err
 	}
 	if _, err := c.Unfence(ctx, name, protocol.UnfenceRequest{FenceID: f.ID, Confirm: name}); err != nil {
 		return apiErr(err)

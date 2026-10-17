@@ -29,6 +29,10 @@ proprietary (api.rowsafe.sh, app.rowsafe.sh).
   code its packages need has a `_windows.go` counterpart (`collect/disk_windows.go`;
   `local/agent_windows.go`, since `internal/agent`, the agent, stays Linux/macOS-only).
   `rowsafe init` offers a Rowsafe section in AGENTS.md / CLAUDE.md (`agentsmd.go`; append-only).
+  Rules for scripts and AI agents (`rowsafe help agents`, checked over every command by
+  `TestAgentRules`): every command takes `--json` (stdout only JSON, `jsonout.go`); exit codes
+  0/1/2 usage/3 not healthy; no question without a terminal; errors say the next step
+  (`errors.go`: `explain`, `newUsageError`).
 - `integrations/npm`: the `rowsafe` npm package (`npx rowsafe`): no install script; on first run it
   downloads the release binary, checks it against the `SHA256SUMS` the release workflow puts in
   the package, and caches it. Published by release.yml's `npm` job when `NPM_TOKEN` is set.

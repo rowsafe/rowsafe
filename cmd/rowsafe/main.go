@@ -411,9 +411,13 @@ Usage counts: off unless you turn them on; nothing is sent by default
                                              DO_NOT_TRACK=1 also keep them off)
 
 Backups, proof and mark wait for the task to finish; pass --no-wait to return at once.
-Changes ask first on a terminal. Scripts and AI agents pass --yes; without a terminal, a change without --yes is
-refused. --json prints JSON for scripts (messages go to stderr). The CLI acts as the person behind the key, with
-that person's rights; when it can't, the error says why.
+Scripts and AI agents (rowsafe help agents):
+  Changes ask first on a terminal. Pass --yes to confirm; without a terminal, a change without --yes is refused
+  at once, it never waits for an answer.
+  Every command takes --json: stdout is then only JSON, messages and progress go to stderr.
+  Exit codes: 0 it worked, 1 it didn't (the error says what to do next), 2 the command was used the wrong way,
+  3 not healthy or not protected (status, pulse, preview --fail-on).
+The CLI acts as the person behind the key, with that person's rights; when it can't, the error says why.
 
 Environment: ROWSAFE_URL and ROWSAFE_API_KEY override the saved login; ROWSAFE_DATABASE names the database.
 `
@@ -479,37 +483,57 @@ func loadConfig() (config, error) {
 }
 
 func main() {
-	args := os.Args[1:]
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	code := cliMain(ctx, os.Args[1:])
+	stop()
+	os.Exit(code)
+}
+
+// cliMain runs one command and returns its exit code (rowsafe help
+// exit-codes). Errors go to stderr in plain words with the next step.
+func cliMain(ctx context.Context, args []string) int {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
 		if len(args) == 0 {
-			fmt.Print(shortHelp)
-			os.Exit(2)
+			fmt.Fprint(os.Stderr, shortHelp)
+			return 2
 		}
 		fmt.Print(helpFor(args[1:]))
-		return
+		return 0
 	}
 	if topic, ok := helpRequest(args); ok {
 		// rowsafe COMMAND --help: the command's reference, logged in or not.
 		fmt.Print(helpFor(topic))
-		return
+		return 0
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
 	run := telemetryStart(args) // usage counts, off unless turned on (telemetry.go)
-	err := dispatch(ctx, args)
-	run.done(err)
-	if err != nil {
-		var exit exitError
-		if errors.As(err, &exit) {
-			os.Exit(int(exit)) // the command already said what happened
-		}
-		if errors.Is(err, flag.ErrHelp) {
-			return // the flag package printed the command's flags
-		}
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
+	if len(referenceLines(args[0])) == 0 {
+		// Before the login check: an unknown command is a usage error, logged in or not.
+		fmt.Fprintf(os.Stderr, "error: unknown command %q; run `rowsafe help`\n", args[0])
+		return 2
 	}
+	finish := startJSON(args)
+	err := dispatch(ctx, args)
+	var exit exitError
+	finish(err == nil || errors.As(err, &exit))
+	run.done(err)
+	if err == nil {
+		return 0
+	}
+	if errors.As(err, &exit) {
+		return int(exit) // the command already said what happened
+	}
+	if errors.Is(err, flag.ErrHelp) {
+		return 0 // the flag package printed the command's flags
+	}
+	fmt.Fprintln(os.Stderr, "error:", explain(err))
+	var ue usageError
+	if errors.As(err, &ue) {
+		if topic := helpTopic(args); len(topic) > 0 && len(referenceLines(strings.Join(topic, " "))) > 0 {
+			fmt.Fprintf(os.Stderr, "How to use it: rowsafe help %s\n", strings.Join(topic, " "))
+		}
+		return 2
+	}
+	return 1
 }
 
 // helpRequest reports whether args ask for a command's help (rowsafe cloud
@@ -531,6 +555,12 @@ func helpRequest(args []string) ([]string, bool) {
 	if !help {
 		return nil, false
 	}
+	return helpTopic(args), true
+}
+
+// helpTopic is the longest run of args' leading words with a reference
+// entry (rowsafe cloud create mydb is about cloud create).
+func helpTopic(args []string) []string {
 	var words []string
 	for _, a := range args {
 		if strings.HasPrefix(a, "-") {
@@ -540,10 +570,10 @@ func helpRequest(args []string) ([]string, bool) {
 	}
 	for n := len(words); n > 1; n-- {
 		if len(referenceLines(strings.Join(words[:n], " "))) > 0 {
-			return words[:n], true
+			return words[:n]
 		}
 	}
-	return words[:min(len(words), 1)], true
+	return words[:min(len(words), 1)]
 }
 
 // exitError carries a non-zero exit code for failed tasks.
@@ -741,7 +771,7 @@ func dispatch(ctx context.Context, args []string) error {
 	case "audit":
 		return auditList(ctx, c, rest)
 	}
-	return fmt.Errorf("unknown command %q; run `rowsafe help`", cmd)
+	return usageErrorf("unknown command %q; run `rowsafe help`", cmd)
 }
 
 // subcommand runs one command of a group such as rowsafe hosts.
@@ -753,7 +783,7 @@ func group(ctx context.Context, c *client.Client, name string, args []string, su
 		if run, ok := subs[args[0]]; ok {
 			return run(ctx, c, args[1:])
 		}
-		return fmt.Errorf("unknown command %q. The %s commands:\n%s", name+" "+args[0], name, strings.TrimSpace(helpFor([]string{name})))
+		return usageErrorf("unknown command %q. The %s commands:\n%s", name+" "+args[0], name, strings.TrimSpace(helpFor([]string{name})))
 	}
-	return fmt.Errorf("which one? The %s commands:\n%s", name, strings.TrimSpace(helpFor([]string{name})))
+	return usageErrorf("which one? The %s commands:\n%s", name, strings.TrimSpace(helpFor([]string{name})))
 }

@@ -30,10 +30,10 @@ func chooseEngine(cat client.CloudCatalog, name, version, pg string, standby boo
 	offered := offeredEngines(cat)
 	if pg != "" {
 		if name != "" && protocol.NormalizeEngine(name) != protocol.EnginePostgreSQL {
-			return protocol.CloudEngine{}, "", fmt.Errorf("--postgres is PostgreSQL's version: use --engine-version with --engine %s", name)
+			return protocol.CloudEngine{}, "", usageErrorf("--postgres is PostgreSQL's version: use --engine-version with --engine %s", name)
 		}
 		if version != "" && version != pg {
-			return protocol.CloudEngine{}, "", fmt.Errorf("--postgres %s and --engine-version %s disagree: give one", pg, version)
+			return protocol.CloudEngine{}, "", usageErrorf("--postgres %s and --engine-version %s disagree: give one", pg, version)
 		}
 		name, version = protocol.EnginePostgreSQL, pg
 	}
@@ -181,14 +181,14 @@ func chooseExtensions(e protocol.CloudEngine, version string, names []string) ([
 		return nil, nil
 	}
 	if e.Engine != protocol.EnginePostgreSQL {
-		return nil, fmt.Errorf("--extensions are PostgreSQL extensions; %s has none: leave it out", e.Name)
+		return nil, usageErrorf("--extensions are PostgreSQL extensions; %s has none: leave it out", e.Name)
 	}
 	if len(e.Extensions) == 0 {
 		return nil, errors.New("this Rowsafe doesn't install extensions on new servers yet: leave out --extensions and turn them on later with `rowsafe db ext on`")
 	}
 	out, err := protocol.NormalizePGExtensions(names, version)
 	if err != nil {
-		return nil, fmt.Errorf("--extensions: %s", strings.TrimSuffix(err.Error(), "."))
+		return nil, usageErrorf("--extensions: %s", strings.TrimSuffix(err.Error(), "."))
 	}
 	return out, nil
 }

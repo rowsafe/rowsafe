@@ -113,7 +113,7 @@ func printLogEntries(entries []protocol.LogEntryView, asJSON bool) {
 	for _, e := range entries {
 		if asJSON {
 			b, _ := json.Marshal(e)
-			fmt.Println(string(b))
+			fmt.Fprintln(jsonWriter(), string(b))
 			continue
 		}
 		line := fmt.Sprintf("%s  %-7s %-11s %s", e.Time.Local().Format("2006-01-02 15:04:05"), e.Severity, e.Kind, firstLine(e.Message, 200))
@@ -223,10 +223,10 @@ func logDestAdd(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if !slices.Contains(protocol.LogDestTypes, *typ) {
-		return fmt.Errorf("--type is one of %s", strings.Join(protocol.LogDestTypes, ", "))
+		return usageErrorf("--type is one of %s", strings.Join(protocol.LogDestTypes, ", "))
 	}
 	if strings.TrimSpace(*name) == "" {
-		return errors.New("--name is required")
+		return newUsageError("--name is required")
 	}
 	req := protocol.CreateLogDestinationRequest{Type: *typ, Name: *name, Config: cfg}
 	if *kinds != "" {
@@ -300,6 +300,12 @@ func logDestTest(ctx context.Context, c *client.Client, args []string) error {
 	if err != nil {
 		return apiErr(err)
 	}
+	if jsonMode {
+		if err := printJSON(r); err != nil || r.OK {
+			return err
+		}
+		return exitError(1)
+	}
 	if !r.OK {
 		return fmt.Errorf("the test entry didn't arrive: %s", orText(r.Error, "no reason given"))
 	}
@@ -318,6 +324,9 @@ func logDestToggle(on bool) subcommand {
 		d, err := c.UpdateLogDestination(ctx, pos[0], protocol.UpdateLogDestinationRequest{Enabled: &on})
 		if err != nil {
 			return apiErr(err)
+		}
+		if jsonMode {
+			return printJSON(d)
 		}
 		fmt.Printf("Forwarding to %s is %s.\n", d.Name, map[bool]string{true: "on", false: "off"}[d.Enabled])
 		return nil

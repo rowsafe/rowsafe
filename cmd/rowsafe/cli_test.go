@@ -38,6 +38,7 @@ type fakeAPI struct {
 	findings   []protocol.Finding  // findings of every database (with health set)
 	fixes      []protocol.ApplyFixRequest
 	fixReject  *protocol.Error // POST /fixes answers 409 with this
+	anything   bool            // a GET that isn't faked answers {} instead of 404
 }
 
 func (f *fakeAPI) handler(t *testing.T) http.Handler {
@@ -242,6 +243,9 @@ func (f *fakeAPI) handler(t *testing.T) http.Handler {
 		f.mu.Unlock()
 		w.WriteHeader(204)
 	}))
+	if f.anything {
+		mux.HandleFunc("GET /", authed(func(w http.ResponseWriter, r *http.Request) { j(w, 200, map[string]any{}) }))
+	}
 	return mux
 }
 
@@ -445,6 +449,7 @@ func TestRestart(t *testing.T) {
 	}
 	f.dbs[0].CanRestart = true
 
+	onTerminal(t)
 	stdin = strings.NewReader("n\n")
 	if err := dispatch(ctx, []string{"restart", "app"}); err == nil || !strings.Contains(err.Error(), "cancelled") {
 		t.Fatalf("answering n: %v", err)
@@ -810,8 +815,8 @@ func captureStdout(t *testing.T, fn func() error) (string, error) {
 // confirm asks on stderr (stdout stays the command's output, JSON included)
 // and reads the answer; without one it says no.
 func TestConfirmAsksOnStderr(t *testing.T) {
-	t.Cleanup(func() { stdin, stdinIsTerminal = os.Stdin, func() bool { return false } })
-	stdinIsTerminal = func() bool { return false }
+	t.Cleanup(func() { stdin = os.Stdin })
+	onTerminal(t)
 	for answer, want := range map[string]bool{"y\n": true, "YES\n": true, "n\n": false, "": false} {
 		stdin = strings.NewReader(answer)
 		var got bool
@@ -846,6 +851,7 @@ func TestFix(t *testing.T) {
 	}
 
 	// By number, answering y.
+	onTerminal(t)
 	stdin = strings.NewReader("y\n")
 	out, err = captureStdout(t, func() error { return dispatch(ctx, []string{"fix", "shop", "1"}) })
 	if err != nil || !strings.Contains(out, "Cleaned up 3 tables; about 1.2 million dead rows removed.") || !strings.Contains(out, "  Tables: a, b, c.") {

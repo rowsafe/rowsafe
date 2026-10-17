@@ -30,10 +30,11 @@ const nameRules = `Commands that take NAME find the database like this:
 // positionals parses flags that may come before, between or after
 // positional arguments, and returns the positionals.
 func positionals(fs *flag.FlagSet, args []string) ([]string, error) {
+	acceptJSON(fs)
 	var pos []string
 	for len(args) > 0 {
 		if err := fs.Parse(args); err != nil {
-			return nil, err
+			return nil, flagError(err)
 		}
 		args = fs.Args()
 		if len(args) > 0 {
@@ -52,7 +53,7 @@ func dbArg(ctx context.Context, c *client.Client, fs *flag.FlagSet, args []strin
 		return "", err
 	}
 	if len(pos) > 1 {
-		return "", fmt.Errorf("expected at most one database name, got %q", strings.Join(pos, " "))
+		return "", usageErrorf("expected at most one database name, got %q", strings.Join(pos, " "))
 	}
 	explicit := ""
 	if len(pos) == 1 {
@@ -148,7 +149,7 @@ func markArgs(ctx context.Context, c *client.Client, pos []string) (db, label st
 	case 2:
 		db, label = pos[0], pos[1]
 	default:
-		return "", "", errors.New("expected [NAME] [LABEL]")
+		return "", "", newUsageError("expected [NAME] [LABEL]")
 	}
 	if db, err = resolveDatabase(ctx, c, db); err != nil {
 		return "", "", err

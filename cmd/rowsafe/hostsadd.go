@@ -125,7 +125,7 @@ func hostsAdd(ctx context.Context, c *client.Client, cfg config, args []string) 
 		return err
 	}
 	if len(pos) > 1 {
-		return errors.New("usage: rowsafe hosts add [USER@]SERVER [-p PORT] [-i KEY] [-- INSTALLER OPTIONS]")
+		return newUsageError("usage: rowsafe hosts add [USER@]SERVER [-p PORT] [-i KEY] [-- INSTALLER OPTIONS]")
 	}
 	for _, a := range installerArgs {
 		if strings.HasPrefix(a, "rse_") {

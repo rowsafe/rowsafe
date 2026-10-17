@@ -48,7 +48,7 @@ func settingsCmd(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if *asJSON {
-		enc := json.NewEncoder(os.Stdout)
+		enc := json.NewEncoder(jsonWriter())
 		enc.SetIndent("", "  ")
 		return enc.Encode(ov)
 	}
@@ -81,7 +81,7 @@ func settingsArgs(ctx context.Context, c *client.Client, pos []string) (db, sett
 	case 2:
 		db, setting = pos[0], pos[1]
 	default:
-		return "", "", errors.New("expected [NAME] [SETTING]")
+		return "", "", newUsageError("expected [NAME] [SETTING]")
 	}
 	db, err = resolveDatabase(ctx, c, db)
 	return db, strings.ToLower(setting), err
@@ -267,7 +267,7 @@ func settingsSet(ctx context.Context, c *client.Client, args []string) error {
 		name, pos = pos[0], pos[1:]
 	}
 	if len(pos) == 0 {
-		return errors.New("expected SETTING=VALUE, e.g. rowsafe settings set mydb work_mem=64MB (VALUE default resets it)")
+		return newUsageError("expected SETTING=VALUE, e.g. rowsafe settings set mydb work_mem=64MB (VALUE default resets it)")
 	}
 	var changes []protocol.SettingChange
 	for _, kv := range pos {
@@ -329,17 +329,17 @@ func tuneCmd(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	if *workload != "" && !tune.ValidWorkload(*workload) {
-		return errors.New("--workload must be web, analytics or mixed")
+		return newUsageError("--workload must be web, analytics or mixed")
 	}
 	if *disk != "" && *disk != protocol.DiskSSD && *disk != protocol.DiskHDD {
-		return errors.New("--disk must be ssd or hdd")
+		return newUsageError("--disk must be ssd or hdd")
 	}
 	ov, err := c.Settings(ctx, db, *workload, *disk)
 	if err != nil {
 		return err
 	}
 	if *asJSON {
-		enc := json.NewEncoder(os.Stdout)
+		enc := json.NewEncoder(jsonWriter())
 		enc.SetIndent("", "  ")
 		return enc.Encode(ov.Recommendations)
 	}
@@ -394,8 +394,8 @@ func applySettings(ctx context.Context, c *client.Client, db string, ov protocol
 	if restart {
 		fmt.Println("Some take effect only after PostgreSQL restarts; nothing restarts now.")
 	}
-	if !yes && !confirm(fmt.Sprintf("Apply %s?", fmt.Sprintf("%d %s", len(req.Changes), plural(len(req.Changes), "change", "changes")))) {
-		return errors.New("cancelled; nothing was changed")
+	if err := confirmChange(yes, fmt.Sprintf("Apply %s?", fmt.Sprintf("%d %s", len(req.Changes), plural(len(req.Changes), "change", "changes")))); err != nil {
+		return err
 	}
 	resp, err := c.ApplySettings(ctx, db, req)
 	var ae *client.APIError
@@ -422,7 +422,7 @@ func waitSettings(ctx context.Context, c *client.Client, db string, resp protoco
 			continue
 		}
 		last := ""
-		done, err := c.WaitTask(ctx, t.ID, func(v protocol.TaskView) {
+		done, err := waitTask(ctx, c, t.ID, func(v protocol.TaskView) {
 			if v.Status != last {
 				last = v.Status
 				if v.Status == protocol.StatusQueued {
@@ -469,7 +469,7 @@ func settingsUndo(ctx context.Context, c *client.Client, args []string) error {
 	case 2:
 		name, id = pos[0], pos[1]
 	default:
-		return errors.New("expected [NAME] [CHANGE_ID]")
+		return newUsageError("expected [NAME] [CHANGE_ID]")
 	}
 	db, err := resolveDatabase(ctx, c, name)
 	if err != nil {
@@ -500,8 +500,8 @@ func settingsUndo(ctx context.Context, c *client.Client, args []string) error {
 		}
 		fmt.Printf("  %s back to %s\n", a.Name, back)
 	}
-	if !*yes && !confirm("Undo it?") {
-		return errors.New("cancelled; nothing was changed")
+	if err := confirmChange(*yes, "Undo it?"); err != nil {
+		return err
 	}
 	resp, err := c.RevertSettings(ctx, db, ch.ID)
 	var ae *client.APIError

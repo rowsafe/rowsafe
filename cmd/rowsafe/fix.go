@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 
+	"golang.org/x/term"
+
 	"github.com/rowsafe/rowsafe/client"
 	"github.com/rowsafe/rowsafe/protocol"
 )
@@ -20,11 +22,9 @@ import (
 // parameters, and the agent checks once more before running it.
 
 // stdinIsTerminal reports whether the user can answer questions (tests
-// replace it).
-var stdinIsTerminal = func() bool {
-	fi, err := os.Stdin.Stat()
-	return err == nil && fi.Mode()&os.ModeCharDevice != 0
-}
+// replace it). /dev/null, a pipe or a file is no terminal: AI agents and
+// CI run commands like that, and a command must never wait for them.
+var stdinIsTerminal = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
 
 // readLine reads one line from stdin without buffering past it, so several
 // questions can read from the same input.
@@ -91,12 +91,14 @@ func fixCmd(ctx context.Context, c *client.Client, args []string) error {
 
 	var pick *fixChoice
 	switch {
+	case len(ids) == 0 && jsonMode:
+		return printJSON(h) // the findings with their fixes; apply one with its ids
 	case len(ids) == 0:
 		printFixes(h, choices, "rowsafe fix "+h.Database)
 		if !hasAvailable(choices) || *yes || !stdinIsTerminal() {
 			return nil
 		}
-		fmt.Print("\nWhich one? (number, or Enter to leave it) ")
+		fmt.Fprint(os.Stderr, "\nWhich one? (number, or Enter to leave it) ")
 		answer := readLine()
 		if answer == "" {
 			return nil
@@ -137,7 +139,7 @@ func fixArgs(ctx context.Context, c *client.Client, pos []string) (db string, id
 	case 3:
 		db, ids = pos[0], pos[1:]
 	default:
-		return "", nil, errors.New("expected [NAME] [FINDING] [FIX]")
+		return "", nil, newUsageError("expected [NAME] [FINDING] [FIX]")
 	}
 	db, err = resolveDatabase(ctx, c, db)
 	return db, ids, err
@@ -214,7 +216,7 @@ func pickByID(h protocol.DatabaseHealth, choices []fixChoice, ids []string, fixC
 	}
 	if stdinIsTerminal() {
 		printFixes(protocol.DatabaseHealth{Database: h.Database, Findings: []protocol.Finding{*finding}}, mine, fixCmd)
-		fmt.Print("\nWhich one? (number, or Enter to leave it) ")
+		fmt.Fprint(os.Stderr, "\nWhich one? (number, or Enter to leave it) ")
 		answer := readLine()
 		if answer == "" {
 			return nil, errors.New("nothing was changed")
@@ -299,17 +301,11 @@ func applyFix(ctx context.Context, c *client.Client, h protocol.DatabaseHealth, 
 	if fx.Confirm != "" {
 		confirmName = h.Database
 		fmt.Printf("\nWarning: %s\n", fx.Confirm)
-		if !yes {
-			fmt.Printf("Type the database name (%s) to go ahead: ", h.Database)
-			if readLine() != h.Database {
-				return errors.New("cancelled; nothing was changed")
-			}
+		if err := confirmTypedAs(yes, h.Database, fmt.Sprintf("Type the database name (%s) to go ahead: ", h.Database)); err != nil {
+			return err
 		}
-	} else if !yes {
-		fmt.Print("Apply this fix now? [y/N] ")
-		if a := readLine(); !strings.EqualFold(a, "y") && !strings.EqualFold(a, "yes") {
-			return errors.New("cancelled; nothing was changed")
-		}
+	} else if err := confirmChange(yes, "Apply this fix now?"); err != nil {
+		return err
 	}
 	resp, err := c.ApplyFix(ctx, h.Database, pick.finding.ID, fx.ID, confirmName)
 	var ae *client.APIError
@@ -318,6 +314,9 @@ func applyFix(ctx context.Context, c *client.Client, h protocol.DatabaseHealth, 
 	}
 	if err != nil {
 		return err
+	}
+	if jsonMode {
+		return finishTasks(ctx, c, resp.Tasks, false, true)
 	}
 	if len(resp.Tasks) == 0 {
 		fmt.Println("Done.")
@@ -346,7 +345,7 @@ func waitFixTask(ctx context.Context, c *client.Client, t protocol.TaskView, db 
 		what = "a Mark first"
 	}
 	last := ""
-	done, err := c.WaitTask(ctx, t.ID, func(v protocol.TaskView) {
+	done, err := waitTask(ctx, c, t.ID, func(v protocol.TaskView) {
 		if v.Status == last {
 			return
 		}
