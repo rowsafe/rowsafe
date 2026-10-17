@@ -632,7 +632,9 @@ release_setup() {
   sed "s|@RELEASE_PUBLIC_KEY@|$pub|" /src/scripts/install.sh >install.sh
   # An executable wrapper (not a function) so `env VAR=... $INSTALLER` works.
   INSTALLER=$W/installer
-  printf '#!/bin/sh\nexec env ROWSAFE_RELEASES_URL=https://localhost:18443/agent ROWSAFE_RESTIC_URL=https://localhost:18443/restic ROWSAFE_MEILISEARCH_URL=https://localhost:18443/meilisearch sh %s/install.sh "$@"\n' "$W" >"$INSTALLER"
+  printf '#!/bin/sh\nexec env ROWSAFE_RELEASES_URL=https://localhost:18443/agent ROWSAFE_RESTIC_URL=https://localhost:18443/restic ROWSAFE_MEILISEARCH_URL=https://localhost:18443/meilisearch ROWSAFE_CLI_URL=https://localhost:18443/cli.sh sh %s/install.sh "$@"\n' "$W" >"$INSTALLER"
+  # A stand-in for rowsafe.sh/cli: installs a rowsafe that knows "help local".
+  printf '#!/bin/sh\nset -e\nprintf "#!/bin/sh\\nexit 0\\n" >"$ROWSAFE_INSTALL_DIR/rowsafe"\nchmod 755 "$ROWSAFE_INSTALL_DIR/rowsafe"\n' >"$W/srv/cli.sh"
   chmod 755 "$INSTALLER"
   cp /src/scripts/install.sh placeholder-install.sh
 
@@ -754,6 +756,7 @@ in_container() {
   done
   [ ! -e /etc/rowsafe ] || fail "a refused argument wrote /etc/rowsafe"
   pass "token argument errors echo nothing and write nothing"
+  no_account_tests
 
   # No ROWSAFE_URL: the agent defaults to https://api.rowsafe.sh. The token
   # is the argument, as in `curl -fsSL https://rowsafe.sh | sudo sh -s rse_...`.
@@ -1330,6 +1333,27 @@ env_is() { grep -qxF "$1='$2'" /etc/rowsafe/agent.env || {
   grep "^#*$1=" /etc/rowsafe/agent.env >&2
   fail "$name: agent.env lacks $1='$2'"
 }; }
+
+# no_account_tests: --no-account installs the agent with its own control plane
+# (ROWSAFE_URL=unix://...), needs no enrollment token, installs the rowsafe
+# CLI, and refuses a token next to it. Leaves nothing behind (purge).
+no_account_tests() {
+  expect_fail "--no-account with a token refused" "pass one or the other" "$INSTALLER" rse_secrettoken123 --no-account
+  ! grep -qF rse_secrettoken123 "$W/out" || fail "a token was echoed"
+  [ ! -e /etc/rowsafe ] || fail "a refused --no-account wrote /etc/rowsafe"
+  expect_ok "--no-account install without storage settings" "$INSTALLER" --no-account --no-prompt
+  env_is ROWSAFE_URL unix:///var/lib/rowsafe/control.sock
+  ! grep -q '^ROWSAFE_ENROLL_TOKEN=' /etc/rowsafe/agent.env || fail "--no-account wrote a token"
+  has "Before the agent can start"
+  ! grep -q "^    ROWSAFE_ENROLL_TOKEN\$" "$W/out" || fail "--no-account still asks for an enrollment token"
+  [ -x /usr/local/bin/rowsafe ] || fail "--no-account didn't install the rowsafe CLI"
+  # A re-run without the option stays without an account.
+  expect_ok "re-run keeps no account" "$INSTALLER" --no-prompt
+  env_is ROWSAFE_URL unix:///var/lib/rowsafe/control.sock
+  expect_ok "purge after --no-account" "$INSTALLER" --uninstall --purge
+  rm -f /usr/local/bin/rowsafe
+  pass "--no-account installs without a token"
+}
 
 guided_storage_tests() {
   echo "  -- guided storage setup on a terminal"

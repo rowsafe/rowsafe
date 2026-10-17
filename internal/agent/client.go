@@ -20,8 +20,11 @@ type controlClient struct {
 	http    *http.Client
 }
 
+// newControlClient talks to the control plane at baseURL: https, or a
+// unix:// socket on this server without an account (internal/localcp).
 func newControlClient(baseURL, token string) *controlClient {
-	return &controlClient{baseURL: baseURL, token: token, http: &http.Client{Timeout: 30 * time.Second}}
+	h, base := protocol.HTTPClient(baseURL, 30*time.Second)
+	return &controlClient{baseURL: base, token: token, http: h}
 }
 
 func (c *controlClient) post(ctx context.Context, path string, in, out any) error {

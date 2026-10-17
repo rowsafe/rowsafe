@@ -100,6 +100,29 @@ func localArgs(args []string, loggedIn bool) (db *localDB, rest []string, ok boo
 	return nil, args, false, nil
 }
 
+// localControl is the control plane of this server's agent without an
+// account, when it runs here: url "" when it doesn't. want is ROWSAFE_URL
+// ("" or a unix:// URL to use; another URL is not local).
+func localControl(want string) (url string, err error) {
+	sock := protocol.LocalSocketPath
+	if want != "" {
+		var ok bool
+		if sock, ok = protocol.LocalSocket(want); !ok {
+			return "", nil
+		}
+	}
+	fi, err := os.Stat(sock)
+	switch {
+	case err == nil && fi.Mode()&os.ModeSocket != 0:
+		return "unix://" + sock, nil
+	case errors.Is(err, os.ErrPermission):
+		return "", errors.New("this server runs Rowsafe without an account, and its agent only answers root: run sudo rowsafe ...")
+	case want != "" && err != nil:
+		return "", fmt.Errorf("ROWSAFE_URL %s: the agent isn't listening there (check it with systemctl status rowsafe-agent)", want)
+	}
+	return "", nil
+}
+
 // notLoggedIn explains what works without an account.
 const notLoggedIn = "not logged in: run `rowsafe login`.\n" +
 	"Without an account, pulse, fix, insights, top, activity, settings, tune and mcp work on a PostgreSQL database directly:\n" +
