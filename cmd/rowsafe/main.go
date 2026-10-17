@@ -175,18 +175,27 @@ Rewind: continuous backups, restore to any second
   rowsafe files [NAME] [--json]              the folders backed up with the database (uploads, media)
   rowsafe files add [NAME] PATH [--exclude cache,*.tmp]
                                              back up a folder of the database server with the database
+                                             (PATH, or docker:VOLUME for a Docker volume)
   rowsafe files remove [NAME] PATH [--yes]   stop backing up a folder
   rowsafe files backup [NAME] [--no-wait]    snapshot the folders now
-  rowsafe files restore [NAME] (--at TIME | --mark LABEL) [--folder PATH] [--path REL]...
-                        [--column DB:schema.table.column] [--whole-folder] [--overwrite] [--preview] [--yes]
+  rowsafe files snapshots [NAME] [--folder PATH]
+                                             the folders' snapshots, newest first
+  rowsafe files set [NAME] --every 15m [--keep-days N]
+                                             how often to snapshot (and, with --server, how long to keep them)
+  rowsafe files restore [NAME] (--at TIME | --mark LABEL | --snapshot ID) [--folder PATH] [--path REL]...
+                        [--column DB:schema.table.column] [--whole-folder] [--overwrite] [--into DIR]
+                        [--preview] [--yes]
                                              bring files back as they were: by default only the missing
-                                             ones; --column restores the files a column refers to
+                                             ones; --column restores the files a column refers to; --into
+                                             restores into another folder, leaving the live one as it is
   rowsafe files undo [NAME] [--yes]          undo a --whole-folder restore
   rowsafe files proof [NAME]                 restore a few files and compare them with the live ones, now
   rowsafe files [SUBCOMMAND] --server SERVER ...
                                              the same for a server's own folders (any folder or Docker volume
                                              as /var/lib/docker/volumes/VOLUME/_data, with or without a
-                                             database on it); a restore asks for the server's hostname
+                                             database on it); a restore asks for the server's hostname. On
+                                             the server, --server alone is this one (and the default when it
+                                             has no database)
 
 Move in: bring a database from DigitalOcean, RDS, Supabase, Neon... onto your server
   rowsafe migrate [NAME] [--json]            migrations (into NAME, or all)

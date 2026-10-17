@@ -958,11 +958,10 @@ func (a *Agent) runFilesTask(ctx context.Context, task *protocol.Task, db protoc
 // them yet (a folder added a moment ago).
 func (a *Agent) filesConfigFor(ctx context.Context, db protocol.DatabaseSpec) (protocol.FilesConfig, error) {
 	rt := a.filesRuntime()
+	// The settings first: a folder added a moment ago (then "back up now")
+	// isn't in the last ones yet. Unreachable, the saved ones do.
+	a.filesSync(ctx)
 	c, ok := rt.config(db.ID)
-	if !ok || len(c.Folders) == 0 {
-		a.filesSync(ctx)
-		c, ok = rt.config(db.ID)
-	}
 	if !ok {
 		return c, fmt.Errorf("no folders are protected for %s yet", filesOwner(db))
 	}

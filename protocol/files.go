@@ -316,6 +316,11 @@ type FilesRestoreParams struct {
 	// KeepDays is how long a whole-folder restore keeps the current folder
 	// aside (default FilesDefaultKeepDays).
 	KeepDays int `json:"keep_days,omitempty"`
+	// Into restores the snapshot (all of it, or Paths) into this other
+	// folder instead (absolute; it must not exist yet, or be empty), to look
+	// at or compare: the protected folder isn't touched. One folder only;
+	// modes missing and paths.
+	Into string `json:"into,omitempty"`
 }
 
 // FilesRestoreResult is the agent's report for a files_restore task.
@@ -358,6 +363,9 @@ type FilesFolderRestore struct {
 	// Examples are up to 10 restored paths, relative to the folder (only
 	// when the database allows file names to leave the server).
 	Examples []string `json:"examples,omitempty"`
+	// Into is the other folder the files were restored into
+	// (FilesRestoreParams.Into); the protected folder wasn't changed.
+	Into string `json:"into,omitempty"`
 }
 
 // FilesUndoParams are the params of a files_undo task.
@@ -591,6 +599,10 @@ type FilesRestoreRequest struct {
 	Preview     bool            `json:"preview,omitempty"`
 	Confirm     string          `json:"confirm,omitempty"`
 	AfterTaskID string          `json:"after_task_id,omitempty"`
+	// Into restores into another folder instead of the protected one
+	// (FilesRestoreParams.Into); no confirmation needed, nothing live
+	// changes. On a server on its own for now.
+	Into string `json:"into,omitempty"`
 }
 
 // FilesConfirmRequest confirms a files action with the database's name (a

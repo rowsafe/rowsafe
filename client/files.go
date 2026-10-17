@@ -107,3 +107,9 @@ func (c *Client) HostFilesCheck(ctx context.Context, ref string) (out protocol.F
 func (c *Client) HostFilesNearest(ctx context.Context, ref string, t time.Time) (out protocol.FilesNearest, err error) {
 	return out, c.do(ctx, http.MethodGet, hostFilesPath(ref)+"/nearest?time="+url.QueryEscape(t.UTC().Format(time.RFC3339)), nil, &out)
 }
+
+// UpdateHostFilesSettings changes how often a server's folders are
+// snapshotted and how long snapshots are kept.
+func (c *Client) UpdateHostFilesSettings(ctx context.Context, ref string, req protocol.UpdateFilesSettingsRequest) (out protocol.FilesInfo, err error) {
+	return out, c.do(ctx, http.MethodPatch, hostFilesPath(ref), req, &out)
+}

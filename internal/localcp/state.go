@@ -49,6 +49,7 @@ type state struct {
 	Alerts       []*alertRec           `json:"alerts,omitempty"`
 	AlertPending map[string]time.Time  `json:"alert_pending,omitempty"`
 	Metrics      map[string]*dbMetrics `json:"metrics,omitempty"`
+	Files        *filesData            `json:"files,omitempty"` // files.go
 }
 
 // hostRec is this server, once its agent has enrolled.
@@ -177,6 +178,7 @@ func (s *state) prune() {
 		s.Marks = s.Marks[n:]
 	}
 	s.pruneAlerts()
+	s.pruneFiles(time.Now())
 	// Copies gone for a week are forgotten.
 	s.Copies = slices.DeleteFunc(s.Copies, func(c *copyRec) bool {
 		return c.RemovedAt != nil && time.Since(*c.RemovedAt) > 7*24*time.Hour

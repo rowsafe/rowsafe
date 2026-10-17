@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -93,6 +94,17 @@ func (a *Agent) filesRestore(ctx context.Context, db protocol.DatabaseSpec, p pr
 	if (p.Mode == protocol.FilesRestorePaths || p.Mode == protocol.FilesRestoreReferenced) && len(folders) != 1 {
 		return nil, errors.New("choose the one folder the paths are in")
 	}
+	if p.Into != "" {
+		if len(folders) != 1 {
+			return nil, errors.New("restoring into another folder works for one protected folder at a time: choose it")
+		}
+		if p.Mode != protocol.FilesRestoreMissing && p.Mode != protocol.FilesRestorePaths {
+			return nil, errors.New("restoring into another folder brings back the whole snapshot or chosen paths")
+		}
+		if err := checkInto(p.Into, folders[0].Path); err != nil {
+			return nil, err
+		}
+	}
 	var refs []string
 	if p.Mode == protocol.FilesRestoreReferenced && db.ID == "" {
 		return nil, errors.New("a server's own folders have no database to read file paths from: restore the missing files or chosen paths")
@@ -153,6 +165,7 @@ func (a *Agent) restoreFolder(ctx context.Context, c protocol.FilesConfig, fo pr
 	if err != nil {
 		return fr, err
 	}
+	fr.Into = p.Into
 	fr.Unchanged, fr.Differ, fr.NotFound = plan.counts.Unchanged, plan.counts.Differ, plan.notFound
 	fr.Referenced = int64(len(refs))
 	var bytes int64
@@ -178,6 +191,24 @@ func (a *Agent) restoreFolder(ctx context.Context, c protocol.FilesConfig, fo pr
 		fo.Path, humanCount(fr.Restored), humanBytes(bytes), humanCount(fr.Replaced), humanCount(fr.Removed), humanCount(fr.Unchanged))
 	if p.Preview || (len(plan.items) == 0 && len(plan.remove) == 0) {
 		return fr, nil
+	}
+	if p.Into != "" {
+		// Another folder: nothing live changes, so nothing to keep first.
+		if err := os.MkdirAll(p.Into, 0o700); err != nil {
+			return fr, fmt.Errorf("creating %s: %w", p.Into, err)
+		}
+		stage, err := a.stageRestore(ctx, r, fo, snap, plan, p.RestoreID, tl)
+		if stage != "" {
+			defer os.RemoveAll(filepath.Dir(stage))
+		}
+		if err != nil {
+			return fr, err
+		}
+		if !canCreateIn(p.Into) {
+			return fr, fmt.Errorf("Rowsafe's agent can't write into %s: choose a folder that doesn't exist yet (sudo rowsafe files restore --into creates it)", p.Into)
+		}
+		tl.Printf("putting the files into %s (%s is not changed)", p.Into, fo.Path)
+		return fr, placeDirect(ctx, stage, p.Into, true, nil)
 	}
 
 	// Keep what would be overwritten or removed.
@@ -356,7 +387,7 @@ func (a *Agent) planRestore(ctx context.Context, r *restic, fo protocol.FilesFol
 		if n.Type != "file" && n.Type != "symlink" {
 			continue // directories come with their files
 		}
-		switch state := compareLive(filepath.Join(fo.Path, filepath.FromSlash(rel)), n); state {
+		switch state := compareLive(filepath.Join(cmp.Or(p.Into, fo.Path), filepath.FromSlash(rel)), n); state {
 		case liveMissing:
 			plan.items = append(plan.items, filesPlanItem{rel: rel, node: n})
 		case liveSame:
@@ -386,6 +417,35 @@ func (a *Agent) planRestore(ctx context.Context, r *restic, fo protocol.FilesFol
 		}
 	}
 	return plan, nil
+}
+
+// checkInto checks the other folder a restore goes into: absolute and
+// clean, apart from the protected folder, not a system folder, and missing
+// or empty.
+func checkInto(into, folder string) error {
+	if !filepath.IsAbs(into) || filepath.Clean(into) != into || into == "/" {
+		return fmt.Errorf("restore into a folder's full, plain path (got %q)", into)
+	}
+	inside := func(a, b string) bool { return a == b || strings.HasPrefix(a, strings.TrimSuffix(b, "/")+"/") }
+	if inside(into, folder) || inside(folder, into) {
+		return fmt.Errorf("%s overlaps the protected folder %s: restore into a folder apart from it", into, folder)
+	}
+	for _, sys := range []string{"/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/boot", "/proc", "/sys", "/dev", "/run",
+		"/var/lib/postgresql", "/var/lib/mysql", "/var/lib/rowsafe", "/opt/rowsafe"} {
+		if inside(into, sys) {
+			return fmt.Errorf("%s is a system folder: restore into a folder of its own, e.g. /srv/restored", into)
+		}
+	}
+	entries, err := os.ReadDir(into)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil
+	case err != nil:
+		return fmt.Errorf("reading %s: %w", into, err)
+	case len(entries) > 0:
+		return fmt.Errorf("%s isn't empty: restore into a new or empty folder", into)
+	}
+	return nil
 }
 
 type liveState int
@@ -822,7 +882,7 @@ func copyFileInto(src, out string, info fs.FileInfo, onlyMissing bool) error {
 // restoreSummary says what a restore did in plain words.
 func restoreSummary(r *protocol.FilesRestoreResult) string {
 	var restored, replaced, removed, bytes, notFound, differ int64
-	var held []string
+	var held, into []string
 	var when time.Time
 	for _, f := range r.Folders {
 		restored += f.Restored
@@ -833,6 +893,9 @@ func restoreSummary(r *protocol.FilesRestoreResult) string {
 		differ += f.Differ
 		if f.HeldDir != "" {
 			held = append(held, f.HeldDir)
+		}
+		if f.Into != "" {
+			into = append(into, f.Into)
 		}
 		if f.Snapshot.Time.After(when) {
 			when = f.Snapshot.Time
@@ -871,6 +934,9 @@ func restoreSummary(r *protocol.FilesRestoreResult) string {
 	}
 	if len(held) > 0 {
 		s += " Rowsafe couldn't write into the folder, so the files " + did + " are waiting in " + strings.Join(held, ", ") + "."
+	}
+	if len(into) > 0 {
+		s += fmt.Sprintf(" Into %s; the protected folder %s changed.", strings.Join(into, ", "), map[bool]string{true: "wouldn't be", false: "wasn't"}[r.Preview])
 	}
 	return s
 }

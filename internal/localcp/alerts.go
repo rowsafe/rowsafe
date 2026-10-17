@@ -294,46 +294,22 @@ func (s *state) evaluateAlerts(now time.Time) []notice {
 	for _, d := range s.Databases {
 		p := s.protection(d, now)
 		for _, rule := range localRules {
-			key := rule.name + ":" + d.ID
-			r := rule.eval(s, d, p, now)
-			open := s.openAlert(key)
-			switch {
-			case !r.known:
-			case r.firing && open != nil:
-				open.Summary, open.Description, open.NextStep = r.summary, r.description, r.next
-				open.Value, open.Threshold = r.value, r.threshold
-				if open.Severity == protocol.SeverityCritical && open.AcknowledgedAt == nil &&
-					open.NotifiedAt != nil && now.Sub(*open.NotifiedAt) >= alertReminderEvery {
-					at := now
-					open.NotifiedAt = &at
-					out = append(out, s.noticesFor(eventReminder, open.Alert)...)
-				}
-			case r.firing:
-				first, seen := s.AlertPending[key]
-				if !seen {
-					s.AlertPending[key], first = now, now
-				}
-				if now.Sub(first) < rule.forDur {
-					continue
-				}
-				delete(s.AlertPending, key)
-				at := now
-				a := &alertRec{Key: key, NotifiedAt: &at, Alert: protocol.Alert{
-					ID: newID("alr"), Rule: rule.name, Severity: rule.severity, State: "firing",
-					Database: &protocol.AlertDatabase{ID: d.ID, Name: d.Name}, Host: s.alertHost(),
-					Summary: r.summary, Description: r.description, NextStep: r.next,
-					Value: r.value, Threshold: r.threshold, Unit: r.unit, StartedAt: first.UTC(),
-				}}
-				s.Alerts = append(s.Alerts, a)
-				out = append(out, s.noticesFor(eventFiring, a.Alert)...)
-			default:
-				delete(s.AlertPending, key)
-				if open != nil {
-					at := now.UTC()
-					open.State, open.ResolvedAt = "resolved", &at
-					out = append(out, s.noticesFor(eventResolved, open.Alert)...)
-				}
+			out = append(out, s.step(rule, rule.name+":"+d.ID, &protocol.AlertDatabase{ID: d.ID, Name: d.Name}, rule.eval(s, d, p, now), now)...)
+		}
+	}
+	// Files: each database's folders, and the server's own.
+	for _, sc := range s.files().Scopes {
+		var db *protocol.AlertDatabase
+		key := ":host"
+		if sc.DatabaseID != "" {
+			d := s.db(sc.DatabaseID)
+			if d == nil {
+				continue
 			}
+			db, key = &protocol.AlertDatabase{ID: d.ID, Name: d.Name}, ":"+d.ID
+		}
+		for _, rule := range filesRules {
+			out = append(out, s.step(rule.localRule, rule.name+key, db, rule.evalFiles(s, sc, now), now)...)
 		}
 	}
 	// A database that is gone has nothing to alert about.
@@ -344,6 +320,50 @@ func (s *state) evaluateAlerts(now time.Time) []notice {
 		}
 	}
 	return out
+}
+
+// step moves one rule's alert along (pending, firing, reminded, resolved)
+// and returns what to send.
+func (s *state) step(rule localRule, key string, db *protocol.AlertDatabase, r ruleResult, now time.Time) []notice {
+	open := s.openAlert(key)
+	switch {
+	case !r.known:
+	case r.firing && open != nil:
+		open.Summary, open.Description, open.NextStep = r.summary, r.description, r.next
+		open.Value, open.Threshold = r.value, r.threshold
+		if open.Severity == protocol.SeverityCritical && open.AcknowledgedAt == nil &&
+			open.NotifiedAt != nil && now.Sub(*open.NotifiedAt) >= alertReminderEvery {
+			at := now
+			open.NotifiedAt = &at
+			return s.noticesFor(eventReminder, open.Alert)
+		}
+	case r.firing:
+		first, seen := s.AlertPending[key]
+		if !seen {
+			s.AlertPending[key], first = now, now
+		}
+		if now.Sub(first) < rule.forDur {
+			return nil
+		}
+		delete(s.AlertPending, key)
+		at := now
+		a := &alertRec{Key: key, NotifiedAt: &at, Alert: protocol.Alert{
+			ID: newID("alr"), Rule: rule.name, Severity: rule.severity, State: "firing",
+			Database: db, Host: s.alertHost(),
+			Summary: r.summary, Description: r.description, NextStep: r.next,
+			Value: r.value, Threshold: r.threshold, Unit: r.unit, StartedAt: first.UTC(),
+		}}
+		s.Alerts = append(s.Alerts, a)
+		return s.noticesFor(eventFiring, a.Alert)
+	default:
+		delete(s.AlertPending, key)
+		if open != nil {
+			at := now.UTC()
+			open.State, open.ResolvedAt = "resolved", &at
+			return s.noticesFor(eventResolved, open.Alert)
+		}
+	}
+	return nil
 }
 
 func (s *state) openAlert(key string) *alertRec {
@@ -756,7 +776,11 @@ func (srv *Server) alertAck(w http.ResponseWriter, r *http.Request) {
 
 func (srv *Server) alertRules(w http.ResponseWriter, r *http.Request) {
 	out := []protocol.AlertRule{}
-	for _, rule := range localRules {
+	rules := slices.Clone(localRules)
+	for _, fr := range filesRules {
+		rules = append(rules, fr.localRule)
+	}
+	for _, rule := range rules {
 		out = append(out, protocol.AlertRule{Rule: rule.name, Title: rule.title, Scope: "database", Description: rule.description,
 			Enabled: true, Threshold: rule.threshold, Unit: rule.unit, ForSeconds: int(rule.forDur.Seconds()), Severity: rule.severity,
 			Defaults: protocol.AlertRuleDefault{Threshold: rule.threshold, ForSeconds: int(rule.forDur.Seconds()), Severity: rule.severity}})
@@ -876,4 +900,73 @@ func (srv *Server) monitoring(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	writeJSON(w, http.StatusOK, protocol.MonitoringAck{})
+}
+
+// ---- Files (files.go) ----
+
+// filesRule is a rule about a database's folders, or the server's own.
+type filesRule struct {
+	localRule
+	evalFiles func(st *state, sc *filesScope, now time.Time) ruleResult
+}
+
+// filesStaleAfter is how long a folder may go without a snapshot: at least
+// 2 hours, and three missed snapshots.
+func filesStaleAfter(sc *filesScope) time.Duration {
+	return max(2*time.Hour, 3*time.Duration(sc.IntervalMinutes)*time.Minute)
+}
+
+// filesWhat names a scope in alerts and its commands' argument.
+func (st *state) filesWhat(sc *filesScope) (what, arg string) {
+	if d := st.db(sc.DatabaseID); d != nil {
+		return d.Name, d.Name
+	}
+	return st.hostname(), "--server"
+}
+
+var filesRules = []filesRule{
+	{localRule: localRule{name: "files_backup_stale", title: "Files not backed up", severity: protocol.SeverityWarning,
+		description: "A protected folder has had no snapshot for 2 hours (or three missed snapshots), so a restore would bring back older files.",
+		threshold:   f64(2), unit: "hours", forDur: 15 * time.Minute},
+		evalFiles: func(st *state, sc *filesScope, now time.Time) ruleResult {
+			var stale []string
+			var worst time.Duration
+			problem := ""
+			for _, v := range st.folderViews(sc) {
+				since := v.CreatedAt
+				if v.State.LastSnapshot != nil {
+					since = v.State.LastSnapshot.Time
+				}
+				age := now.Sub(since)
+				if age <= filesStaleAfter(sc) {
+					continue
+				}
+				stale = append(stale, v.Path)
+				if age > worst {
+					worst, problem = age, v.State.Problem
+				}
+			}
+			if len(stale) == 0 {
+				return okResult
+			}
+			what, arg := st.filesWhat(sc)
+			desc := fmt.Sprintf("No snapshot of %s for %s. Snapshots are due every %d minutes.", strings.Join(stale, ", "), human(worst), sc.IntervalMinutes)
+			if problem != "" {
+				desc += " " + problem
+			}
+			r := fire(fmt.Sprintf("Files of %s aren't being backed up", what), desc,
+				fmt.Sprintf("See what's wrong: sudo rowsafe files %s; then back them up now: sudo rowsafe files backup %s", arg, arg))
+			r.value, r.threshold, r.unit = f64(float64(int(worst.Hours()*10))/10), f64(filesStaleAfter(sc).Hours()), "hours"
+			return r
+		}},
+	{localRule: localRule{name: "files_proof_failed", title: "Files Proof failed", severity: protocol.SeverityWarning,
+		description: "The latest files Proof failed: reading the snapshots back or comparing restored files with the live ones found a problem."},
+		evalFiles: func(st *state, sc *filesScope, now time.Time) ruleResult {
+			if len(sc.Folders) == 0 || sc.LastCheck == nil || sc.LastCheck.Passed {
+				return okResult
+			}
+			what, arg := st.filesWhat(sc)
+			return fire(fmt.Sprintf("Files Proof failed for %s", what), sc.LastCheck.Summary,
+				fmt.Sprintf("Run it again: sudo rowsafe files proof %s; if it keeps failing, its task log says why (sudo rowsafe tasks).", arg))
+		}},
 }

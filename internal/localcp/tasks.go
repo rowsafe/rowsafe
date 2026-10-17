@@ -28,6 +28,9 @@ var sideLanes = map[string]string{
 var stopsPostgres = []string{protocol.TaskRestart, protocol.TaskRewindInPlace, protocol.TaskRewindUndo}
 
 func lane(typ string) string {
+	if protocol.IsFilesTask(typ) {
+		return "files" // files.go
+	}
 	if l, ok := sideLanes[typ]; ok {
 		return l
 	}
@@ -172,6 +175,7 @@ func (s *state) complete(id string, req protocol.CompleteRequest, now time.Time)
 	}
 	finish(t, req.Status, clip(req.Error, 4000), now)
 	t.Log, t.Result, t.ErrorInfo = clip(req.Log, 64000), req.Result, req.ErrorInfo
+	s.afterFilesTask(t, req, now) // files.go
 	db := s.db(t.DatabaseID)
 	if db == nil {
 		return t, nil
