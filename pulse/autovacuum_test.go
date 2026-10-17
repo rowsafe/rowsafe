@@ -79,6 +79,28 @@ func TestAutovacuumSaturated(t *testing.T) {
 	if p.Kind != protocol.SettingsKindFix || !slices.Equal(p.Changes, want) {
 		t.Errorf("changes %+v", p.Changes)
 	}
+	// Before PostgreSQL 18 more workers need a restart, and the fix says so.
+	if fx := f.Fixes[0]; !strings.Contains(fx.Description, "need a restart") || !strings.Contains(fx.Confirm, "after a restart") {
+		t.Errorf("restart not said: %+v", fx)
+	}
+	// PostgreSQL 18: workers change on reload, up to autovacuum_worker_slots.
+	in = autovacuumInput(45, 12)
+	in.Settings.VersionNum = 180000
+	in.Settings.Settings[0].Context = "sighup"
+	in.Settings.Settings = append(in.Settings.Settings, setting("autovacuum_worker_slots", "16", ""))
+	fx := finding(t, Evaluate(in, now), "autovacuum_saturated").Fixes[0]
+	if err := json.Unmarshal(fx.Params, &p); err != nil || !slices.Equal(p.Changes, want) || strings.Contains(fx.Description, "restart") ||
+		strings.Contains(fx.Confirm, "after a restart") {
+		t.Errorf("PostgreSQL 18 reload: %+v %+v", fx, p.Changes)
+	}
+	// ... and past the slots, the slots too, with a restart.
+	in.Settings.Settings[2].Setting = "3"
+	fx = finding(t, Evaluate(in, now), "autovacuum_saturated").Fixes[0]
+	p = protocol.SettingsParams{}
+	_ = json.Unmarshal(fx.Params, &p)
+	if !slices.Contains(p.Changes, protocol.SettingChange{Name: "autovacuum_worker_slots", Value: "5"}) || !strings.Contains(fx.Description, "need a restart") {
+		t.Errorf("PostgreSQL 18 slots: %+v %+v", fx, p.Changes)
+	}
 	// Busy now with tables waiting, not for long: a suggestion.
 	if f := finding(t, Evaluate(autovacuumInput(5, 4), now), "autovacuum_saturated"); f.Severity != protocol.SeverityInfo || !strings.Contains(f.Title, "4 tables are waiting") {
 		t.Errorf("info: %+v", f)

@@ -54,7 +54,7 @@ func hypoAvailable(ctx context.Context, conn *pgx.Conn) bool {
 // production. installed is false when hypopg isn't turned on there
 // (available: its package is on the server).
 func hypoTest(ctx context.Context, t pginspect.Target, version int, dbname string, stmts []advisorStatement,
-	cands []*indexadvisor.Candidate, prodCat *catalog, tl *taskLog) (results []*indexadvisor.Result, installed, available bool, err error) {
+	cands []*indexadvisor.Candidate, prodCat *indexadvisor.Tables, tl *taskLog) (results []*indexadvisor.Result, installed, available bool, err error) {
 	conn, err := t.Connect(ctx, dbname)
 	if err != nil {
 		return nil, false, false, fmt.Errorf("connecting: %w", err)
@@ -85,7 +85,7 @@ func hypoTest(ctx context.Context, t pginspect.Target, version int, dbname strin
 
 	uses := map[string][]int{} // "schema.table" -> statements
 	for i, s := range stmts {
-		for _, u := range indexadvisor.Resolve(s.Shape, prodCat.lookup) {
+		for _, u := range indexadvisor.Resolve(s.Shape, prodCat.Lookup) {
 			k := u.Table.Schema + "." + u.Table.Name
 			if !slices.Contains(uses[k], i) {
 				uses[k] = append(uses[k], i)

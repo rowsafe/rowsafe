@@ -108,7 +108,7 @@ func (e *evaluator) autovacuumSaturated() {
 	}
 	expl += " Meanwhile dead rows pile up, and tables grow and slow down."
 	fixes, pending := e.autovacuumCapacityFix()
-	action := withFixes(fixes, "Give cleanup more room: more workers, and more work each before it pauses. The speed changes at once; the extra workers start after a restart, which you choose.",
+	action := withFixes(fixes, "Give cleanup more room: more workers, and more work each before it pauses. The speed changes at once; more workers need a restart of PostgreSQL (before version 18), which you choose when.",
 		"Raise autovacuum_max_workers (takes a restart) and autovacuum_vacuum_cost_limit (the workers share it, so raise it too).")
 	if pending {
 		fixes = e.in.RestartFixes
@@ -139,6 +139,22 @@ func (e *evaluator) autovacuumCapacityFix() (fixes []protocol.FindingFix, pendin
 	if err != nil {
 		return nil, false
 	}
+	// Before PostgreSQL 18 the number of workers is read only at start
+	// (postmaster); from 18 it changes on reload up to
+	// autovacuum_worker_slots, which itself needs a restart.
+	slotsName, slots := "", 0
+	restart := w.Context == "postmaster" || w.Context == "" && snap.VersionNum < 180000
+	if !restart {
+		slotsName, slots = "autovacuum_worker_slots", 16 // its default
+		if sl, ok := cur[slotsName]; ok {
+			if v, err := strconv.Atoi(sl.Setting); err == nil {
+				slots = v
+			}
+			if v, err := strconv.Atoi(sl.PendingValue); err == nil && sl.PendingRestart && v > slots {
+				return nil, true
+			}
+		}
+	}
 	if w.PendingRestart {
 		if p, err := strconv.Atoi(w.PendingValue); err == nil && p > workers {
 			return nil, true
@@ -149,6 +165,12 @@ func (e *evaluator) autovacuumCapacityFix() (fixes []protocol.FindingFix, pendin
 	if next := min(workers+2, maxAutovacuumWorkers); next > workers {
 		changes = append(changes, protocol.SettingChange{Name: "autovacuum_max_workers", Value: strconv.Itoa(next)})
 		shown = append(shown, fmt.Sprintf("workers %d → %d", workers, next))
+		if slotsName != "" && next > slots {
+			changes = append(changes, protocol.SettingChange{Name: slotsName, Value: strconv.Itoa(next)})
+			restart = true
+		}
+	} else {
+		restart = false
 	}
 	limit := 200 // -1: vacuum_cost_limit, 200 unless changed
 	if c, ok := cur["autovacuum_vacuum_cost_limit"]; ok {
@@ -164,8 +186,8 @@ func (e *evaluator) autovacuumCapacityFix() (fixes []protocol.FindingFix, pendin
 		return nil, false
 	}
 	desc := fmt.Sprintf("Gives cleanup more room (%s), so more tables are cleaned at once, each faster. It uses a little more disk and CPU while it runs.", joinAnd(shown))
-	if len(changes) == 2 || changes[0].Name == "autovacuum_max_workers" {
-		desc += " The extra workers start when PostgreSQL restarts; you choose when."
+	if restart {
+		desc += " The extra workers need a restart of PostgreSQL: once this is set, Rowsafe offers it, and you choose when."
 	}
 	where := ""
 	if e.in.Dashboard {
@@ -174,6 +196,9 @@ func (e *evaluator) autovacuumCapacityFix() (fixes []protocol.FindingFix, pendin
 	}
 	fx := e.settingsFix("autovacuum_capacity", "Give cleanup more room", desc, changes, snap)
 	fx.Confirm = fmt.Sprintf("Change %s of PostgreSQL%s? Nothing restarts now.", plural(len(changes), "setting", "settings"), where)
+	if restart {
+		fx.Confirm = fmt.Sprintf("Change %s of PostgreSQL%s? Nothing restarts now; the extra workers start after a restart, which you choose when.", plural(len(changes), "setting", "settings"), where)
+	}
 	return []protocol.FindingFix{fx}, false
 }
 

@@ -1,4 +1,4 @@
-package agent
+package maintenance
 
 import (
 	"context"
@@ -79,16 +79,16 @@ func (m *maint) createIndexSpec(ctx context.Context) error {
 	spec := m.p.CreateIndex
 	conn, err := m.connect(ctx, m.p.DB, map[string]string{
 		"statement_timeout": "0",
-		"lock_timeout":      ddlLockTimeout,
+		"lock_timeout":      DDLLockTimeout,
 	})
 	if err != nil {
 		return err
 	}
-	defer closeConn(ctx, conn)
-	if err := requirePrimary(ctx, conn); err != nil {
+	defer CloseConn(ctx, conn)
+	if err := RequirePrimary(ctx, conn); err != nil {
 		return err
 	}
-	v, err := serverVersionNum(ctx, conn)
+	v, err := ServerVersionNum(ctx, conn)
 	if err != nil {
 		return err
 	}
@@ -183,10 +183,10 @@ func (m *maint) createIndexSpec(ctx context.Context) error {
 		stmt += " INCLUDE (" + strings.Join(inc, ", ") + ")"
 	}
 	var where []string
-	for _, c := range sortedStrings(spec.WhereNull) {
+	for _, c := range slices.Sorted(slices.Values(spec.WhereNull)) {
 		where = append(where, cols[c].ident+" IS NULL")
 	}
-	for _, c := range sortedStrings(spec.WhereNotNull) {
+	for _, c := range slices.Sorted(slices.Values(spec.WhereNotNull)) {
 		where = append(where, cols[c].ident+" IS NOT NULL")
 	}
 	pred := strings.Join(where, " AND ")
@@ -237,7 +237,7 @@ func (m *maint) createIndexSpec(ctx context.Context) error {
 	case clashKind == "i" && clashTable == tableOID && clashValid != nil && !*clashValid:
 		m.tl.Printf("removing %s, left behind by an earlier build that didn't finish", display)
 		if _, err := conn.Exec(ctx, "DROP INDEX CONCURRENTLY IF EXISTS "+display); err != nil {
-			return fmt.Errorf("an unfinished index named %s is in the way and removing it failed: %w", display, plainPGError(err))
+			return fmt.Errorf("an unfinished index named %s is in the way and removing it failed: %w", display, PlainPGError(err))
 		}
 	default:
 		return fmt.Errorf("something named %s already exists in %s, so Rowsafe didn't create the index", spec.Name, spec.Schema)
@@ -254,16 +254,16 @@ func (m *maint) createIndexSpec(ctx context.Context) error {
 			if spec.EstimatedBytes == 0 {
 				need = tableBytes/2 + 1<<30
 			}
-			if free, err := freeBytes(dataDir); err == nil && free < need {
+			if free, err := FreeBytes(dataDir); err == nil && free < need {
 				return fmt.Errorf("there isn't enough free disk for the index: %s free, and building it needs about %s; Rowsafe didn't start",
-					humanBytes(free), humanBytes(need))
+					HumanBytes(free), HumanBytes(need))
 			}
 		}
 	}
 
 	start := time.Now()
 	err = retryOnLock(ctx, m.tl, func() error {
-		m.tl.Printf("%s (table %s)", stmt, humanBytes(tableBytes))
+		m.tl.Printf("%s (table %s)", stmt, HumanBytes(tableBytes))
 		_, err := conn.Exec(ctx, stmt)
 		if err != nil {
 			m.removeFailedBuild(ctx, conn, tableOID, spec.Schema, spec.Name, display)
@@ -271,10 +271,10 @@ func (m *maint) createIndexSpec(ctx context.Context) error {
 		return err
 	})
 	if err != nil {
-		if isLockTimeout(err) {
+		if IsLockTimeout(err) {
 			return fmt.Errorf("the table %s stayed busy with long-running work, so Rowsafe couldn't create the index without getting in the way; nothing changed. Try again later", table)
 		}
-		return fmt.Errorf("creating the index %s failed (nothing was left behind): %w", display, plainPGError(err))
+		return fmt.Errorf("creating the index %s failed (nothing was left behind): %w", display, PlainPGError(err))
 	}
 	var size int64
 	var valid bool
@@ -288,7 +288,7 @@ func (m *maint) createIndexSpec(ctx context.Context) error {
 		return fmt.Errorf("PostgreSQL finished building %s but marked it unusable, so Rowsafe removed it; nothing changed", display)
 	}
 	m.res.Summary = fmt.Sprintf("Created the index %s on %s (%s) in %s. PostgreSQL uses it for queries right away.",
-		display, table, humanBytes(size), plainDuration(time.Since(start)))
+		display, table, HumanBytes(size), PlainDuration(time.Since(start)))
 	m.res.Details = append(m.res.Details, "Definition: "+stmt+".")
 	return nil
 }

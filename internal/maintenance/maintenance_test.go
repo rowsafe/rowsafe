@@ -1,4 +1,4 @@
-package agent
+package maintenance
 
 import (
 	"context"
@@ -23,14 +23,14 @@ import (
 func TestNameCandidates(t *testing.T) {
 	for _, tc := range []struct {
 		in   string
-		want []qualName
+		want []QualName
 	}{
-		{"public.orders", []qualName{{"public", "orders"}}},
-		{"orders", []qualName{{"public", "orders"}}},
-		{"Sales.Orders", []qualName{{"Sales", "Orders"}}}, // raw names keep their case
-		{"a.b.c", []qualName{{"a", "b.c"}, {"a.b", "c"}}},
-		{`"odd.schema"."We""ird"`, []qualName{{"odd.schema", `We"ird`}, {`"odd`, `schema"."We""ird"`}, {`"odd.schema"`, `"We""ird"`}}},
-		{`odd.schema.we"ird.t`, []qualName{{"odd", `schema.we"ird.t`}, {"odd.schema", `we"ird.t`}, {`odd.schema.we"ird`, "t"}}},
+		{"public.orders", []QualName{{"public", "orders"}}},
+		{"orders", []QualName{{"public", "orders"}}},
+		{"Sales.Orders", []QualName{{"Sales", "Orders"}}}, // raw names keep their case
+		{"a.b.c", []QualName{{"a", "b.c"}, {"a.b", "c"}}},
+		{`"odd.schema"."We""ird"`, []QualName{{"odd.schema", `We"ird`}, {`"odd`, `schema"."We""ird"`}, {`"odd.schema"`, `"We""ird"`}}},
+		{`odd.schema.we"ird.t`, []QualName{{"odd", `schema.we"ird.t`}, {"odd.schema", `we"ird.t`}, {`odd.schema.we"ird`, "t"}}},
 		{"", nil},
 		{".x", nil},
 		{"x.", nil},
@@ -38,8 +38,8 @@ func TestNameCandidates(t *testing.T) {
 		{"public." + strings.Repeat("x", 64), nil},
 		{strings.Repeat("x", 301), nil},
 	} {
-		if got := nameCandidates(tc.in); !slices.Equal(got, tc.want) {
-			t.Errorf("nameCandidates(%q) = %q, want %q", tc.in, got, tc.want)
+		if got := NameCandidates(tc.in); !slices.Equal(got, tc.want) {
+			t.Errorf("NameCandidates(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }
@@ -86,7 +86,7 @@ func TestValidateMaintenance(t *testing.T) {
 		{Action: protocol.MaintRepackTable, DB: "shop", Tables: []string{"public.orders"}},
 	}
 	for _, p := range ok {
-		if err := validateMaintenance(p); err != nil {
+		if err := Validate(p); err != nil {
 			t.Errorf("%+v: %v", p, err)
 		}
 	}
@@ -121,7 +121,7 @@ func TestValidateMaintenance(t *testing.T) {
 		"repack no db":    {Action: protocol.MaintRepackTable, Tables: []string{"a"}},
 	}
 	for name, p := range bad {
-		if err := validateMaintenance(p); err == nil {
+		if err := Validate(p); err == nil {
 			t.Errorf("%s: accepted %+v", name, p)
 		}
 	}
@@ -182,54 +182,19 @@ func TestSignalRefusal(t *testing.T) {
 func TestPlainWords(t *testing.T) {
 	for n, want := range map[int64]string{0: "0", 812: "812", 8120: "8,120", 12_345: "12 thousand",
 		999_400: "999 thousand", 1_200_000: "1.2 million", 3_000_000: "3 million", 1_234_567_890: "1.2 billion"} {
-		if got := plainCount(n); got != want {
-			t.Errorf("plainCount(%d) = %q, want %q", n, got, want)
+		if got := PlainCount(n); got != want {
+			t.Errorf("PlainCount(%d) = %q, want %q", n, got, want)
 		}
 	}
 	for d, want := range map[time.Duration]string{45 * time.Second: "45s", 12 * time.Minute: "12m",
 		3*time.Hour + 12*time.Minute: "3h 12m", 2 * time.Hour: "2h", 50 * time.Hour: "2d 2h", 72 * time.Hour: "3d"} {
-		if got := plainDuration(d); got != want {
-			t.Errorf("plainDuration(%s) = %q, want %q", d, got, want)
+		if got := PlainDuration(d); got != want {
+			t.Errorf("PlainDuration(%s) = %q, want %q", d, got, want)
 		}
 	}
 	s := session{user: "app_user", db: "shop", state: "idle in transaction", stateSecs: 3*3600 + 12*60}
 	if got := describeSession(s); got != "app_user (database shop) that was idle in a transaction for 3h 12m" {
 		t.Errorf("describeSession = %q", got)
-	}
-}
-
-func TestFastLaneClaimsMaintenanceOneAtATime(t *testing.T) {
-	a := &Agent{}
-	a.poolerBusy.Store(true) // pooling tasks: TestFastLaneClaimsPooling
-	// fork_prepare (fork.go) is appended at init; the rest in order.
-	if got := slices.DeleteFunc(a.fastLaneClaim(), func(t string) bool { return t == protocol.TaskForkPrepare }); !slices.Equal(got, []string{protocol.TaskRestorePoint, protocol.TaskCopySchema, protocol.TaskMaintenance,
-		protocol.TaskRewindCompare, protocol.TaskRewindRows, protocol.TaskRewindDrop, protocol.TaskRewindCleanup,
-		protocol.TaskFindMoment, protocol.TaskDBAdmin, protocol.TaskBackupPassphrase, protocol.TaskServerFirewall, protocol.TaskServerCertificate, protocol.TaskMigrate, protocol.TaskSettings,
-		protocol.TaskSecurityScan, protocol.TaskSecurityFix, protocol.TaskPermissions, protocol.TaskPermissionsRemove}) || !slices.Contains(a.fastLaneClaim(), protocol.TaskForkPrepare) {
-		t.Fatalf("idle claim %v", got)
-	}
-	a.maintBusy.Store(true)
-	if got := a.fastLaneClaim(); !slices.Equal(got, []string{protocol.TaskRestorePoint, protocol.TaskCopySchema}) {
-		t.Fatalf("busy claim %v", got)
-	}
-	if len(fastLaneTypes) != 2 {
-		t.Fatal("fastLaneClaim modified fastLaneTypes")
-	}
-}
-
-func TestMaintenanceRejectsBadParamsBeforeConnecting(t *testing.T) {
-	a := &Agent{cfg: Config{PGUser: "nobody"}}
-	db := protocol.DatabaseSpec{SocketDir: "/nonexistent", Port: 1}
-	task := &protocol.Task{Type: protocol.TaskMaintenance, Database: &db,
-		Params: []byte(`{"action":"vacuum","db":"shop","tables":["public.orders; DROP TABLE x"]}`)}
-	// A table name like that is a valid lookup key (never SQL), so it
-	// passes validation and fails on connecting instead.
-	if _, err := a.runTask(t.Context(), task, &taskLog{}); err == nil || !strings.Contains(err.Error(), "Connecting to PostgreSQL") {
-		t.Fatalf("err = %v", err)
-	}
-	task.Params = []byte(`{"action":"exec_sql","db":"shop"}`)
-	if _, err := a.runTask(t.Context(), task, &taskLog{}); err == nil || !strings.Contains(err.Error(), "unknown maintenance action") {
-		t.Fatalf("err = %v", err)
 	}
 }
 
@@ -272,8 +237,6 @@ func fixTestTarget(t *testing.T) pginspect.Target {
 
 type fixEnv struct {
 	t    *testing.T
-	a    *Agent
-	spec protocol.DatabaseSpec
 	tg   pginspect.Target
 	db   string
 	conn *pgx.Conn // to db
@@ -289,7 +252,9 @@ func (e *fixEnv) exec(sql string, args ...any) {
 func (e *fixEnv) run(p protocol.MaintenanceParams) (*protocol.MaintenanceResult, error, string) {
 	e.t.Helper()
 	tl := &taskLog{}
-	res, err := e.a.maintenance(e.t.Context(), e.spec, p, tl)
+	tg := e.tg
+	tg.AppName = AppName
+	res, err := Run(e.t.Context(), tg, p, tl)
 	return res, err, tl.String()
 }
 
@@ -346,9 +311,7 @@ func newFixEnv(t *testing.T) *fixEnv {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { conn.Close(context.Background()) })
-	e := &fixEnv{t: t, tg: tg, db: db, conn: conn,
-		a:    &Agent{cfg: Config{PGUser: tg.User}},
-		spec: protocol.DatabaseSpec{SocketDir: tg.SocketDir, Port: tg.Port}}
+	e := &fixEnv{t: t, tg: tg, db: db, conn: conn}
 	oldWait := lockRetryWait
 	lockRetryWait = 100 * time.Millisecond
 	t.Cleanup(func() { lockRetryWait = oldWait })
@@ -725,14 +688,6 @@ func TestMaintenanceAgainstPostgres(t *testing.T) {
 		e.mustRefuse(protocol.MaintenanceParams{Action: protocol.MaintRepackTable, DB: e.db, Tables: []string{"public.gone"}}, "no longer exists")
 	})
 
-	t.Run("through runTask", func(t *testing.T) {
-		task := &protocol.Task{Type: protocol.TaskMaintenance, Database: &e.spec,
-			Params: []byte(`{"action":"analyze","db":"` + e.db + `","tables":["public.t1"]}`)}
-		res, err := e.a.runTask(t.Context(), task, &taskLog{})
-		if r, ok := res.(*protocol.MaintenanceResult); err != nil || !ok || r.Action != protocol.MaintAnalyze || r.Summary == "" {
-			t.Fatalf("%#v, %v", res, err)
-		}
-	})
 }
 
 func pgxConnect(t *testing.T, tg pginspect.Target, db, app string) (*pgx.Conn, error) {

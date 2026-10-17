@@ -502,7 +502,7 @@ func scanCatalog(ctx context.Context, tx pgx.Tx, root *planNode, version int) (i
 	if _, err := tx.Exec(ctx, "SAVEPOINT rowsafe_catalog"); err != nil {
 		return none, nil
 	}
-	cat, err := indexCatalog(ctx, tx.Conn(), rels) // agent.go: none on Windows
+	tables, err := indexadvisor.LoadTables(ctx, tx.Conn(), rels)
 	if err != nil {
 		_, _ = tx.Exec(ctx, "ROLLBACK TO SAVEPOINT rowsafe_catalog")
 		return none, nil
@@ -533,7 +533,7 @@ func scanCatalog(ctx context.Context, tx pgx.Tx, root *planNode, version int) (i
 			_, _ = tx.Exec(ctx, "ROLLBACK TO SAVEPOINT rowsafe_catalog")
 		}
 	}
-	return cat, roots
+	return tables.Lookup, roots
 }
 
 // tableRows is the catalog's row estimate for a scanned table (-1: unknown).

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rowsafe/rowsafe/internal/maintenance"
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
@@ -210,7 +211,7 @@ func TestUpdateExtensionAgainstPostgres(t *testing.T) {
 		{Action: protocol.MaintUpdateExtension, Extension: "pg_trgm", Databases: []string{"app"}},
 		{Action: protocol.MaintUpdateExtension, Extension: "vector"},
 	} {
-		if err := validateMaintenance(p); err == nil {
+		if err := maintenance.Validate(p); err == nil {
 			t.Errorf("%+v accepted", p)
 		}
 	}

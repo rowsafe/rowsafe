@@ -1,4 +1,9 @@
-package agent
+// Package maintenance runs Pulse fixes (maintenance actions) and settings
+// changes on a PostgreSQL: plain SQL, so it builds wherever the CLI does
+// (Windows too). The agent's maintenance and settings tasks run it, and so
+// does the CLI on a connection string, without an agent (rowsafe fix,
+// rowsafe tune).
+package maintenance
 
 import (
 	"context"
@@ -23,9 +28,13 @@ import (
 // conditions that made the fix safe are checked again, and statements are
 // built only from identifiers PostgreSQL itself quoted (format('%I.%I')).
 
-// fixAppName is the application_name of the agent's maintenance sessions
-// (and "rowsafe%" sessions are never ended by a fix).
-const fixAppName = "rowsafe-agent-fix"
+// AppName is the application_name of maintenance sessions (and
+// "rowsafe%" sessions are never ended by a fix).
+const AppName = "rowsafe-agent-fix"
+
+// Version is the agent's version, named when an action is unknown (the
+// agent sets it).
+var Version = "dev"
 
 // maxMaintenanceTables caps how many tables one vacuum or analyze touches.
 const maxMaintenanceTables = 100
@@ -43,9 +52,9 @@ var maintenanceTimeouts = map[string]time.Duration{
 	protocol.MaintDropReplicationSlot: 30 * time.Second,
 }
 
-// ddlLockTimeout keeps DDL from queueing behind long transactions (and
+// DDLLockTimeout keeps DDL from queueing behind long transactions (and
 // making every other query queue behind it).
-const ddlLockTimeout = "5s"
+const DDLLockTimeout = "5s"
 
 // lockRetries is how often a CONCURRENTLY operation that hit the lock
 // timeout is tried again, and lockRetryWait the pause before each retry.
@@ -60,15 +69,15 @@ var slotNameRE = regexp.MustCompile(`^[a-z0-9_]{1,63}$`)
 // systemSchemas are never touched by index fixes.
 var systemSchemas = []string{"pg_catalog", "information_schema", "pg_toast"}
 
-// validateMaintenance checks params before anything connects: the action is
+// Validate checks params before anything connects: the action is
 // known and carries what it needs, and names are plausible.
-func validateMaintenance(p protocol.MaintenanceParams) error {
+func Validate(p protocol.MaintenanceParams) error {
 	if _, ok := maintenanceTimeouts[p.Action]; !ok {
 		return fmt.Errorf("unknown maintenance action %q (agent %s)", p.Action, Version)
 	}
 	switch p.Action {
 	case protocol.MaintVacuum, protocol.MaintAnalyze:
-		if err := validDatName(p.DB); err != nil {
+		if err := ValidDatName(p.DB); err != nil {
 			return err
 		}
 		if len(p.Tables) == 0 {
@@ -78,15 +87,15 @@ func validateMaintenance(p protocol.MaintenanceParams) error {
 			return fmt.Errorf("too many tables (%d, at most %d at a time)", len(p.Tables), maxMaintenanceTables)
 		}
 		for _, t := range p.Tables {
-			if len(nameCandidates(t)) == 0 {
+			if len(NameCandidates(t)) == 0 {
 				return fmt.Errorf("invalid table name %q", t)
 			}
 		}
 	case protocol.MaintReindexIndex, protocol.MaintDropIndex:
-		if err := validDatName(p.DB); err != nil {
+		if err := ValidDatName(p.DB); err != nil {
 			return err
 		}
-		if len(nameCandidates(p.Index)) == 0 {
+		if len(NameCandidates(p.Index)) == 0 {
 			return fmt.Errorf("invalid index name %q", p.Index)
 		}
 	case protocol.MaintCancelQuery, protocol.MaintTerminateSession:
@@ -102,7 +111,7 @@ func validateMaintenance(p protocol.MaintenanceParams) error {
 		}
 	case protocol.MaintCreateIndex, protocol.MaintDropInvalidIndex, protocol.MaintSyncSequence, protocol.MaintSetTableStorageParams: // advisor
 		return validateAdvisorMaintenance(p)
-	case protocol.MaintUpdateExtension: // pg_extensions.go
+	case protocol.MaintUpdateExtension: // extensions.go
 		return validateUpdateExtension(p)
 	case protocol.MaintRollbackPrepared, protocol.MaintAdvanceReplicationSlot: // maintenance_cleanup.go
 		return validateCleanupMaintenance(p)
@@ -112,7 +121,7 @@ func validateMaintenance(p protocol.MaintenanceParams) error {
 	return nil
 }
 
-func validDatName(name string) error {
+func ValidDatName(name string) error {
 	if name == "" {
 		return fmt.Errorf("no database given")
 	}
@@ -122,36 +131,36 @@ func validDatName(name string) error {
 	return nil
 }
 
-// qualName is a schema-qualified name as the catalogs store it (unquoted).
-type qualName struct{ schema, name string }
+// QualName is a schema-qualified name as the catalogs store it (unquoted).
+type QualName struct{ Schema, Name string }
 
-// nameCandidates lists the ways s can name an object: "schema.name" split
+// NameCandidates lists the ways s can name an object: "schema.name" split
 // at any dot (names may contain dots themselves), or a quoted SQL name such
 // as "My.Schema"."t". A bare name means the public schema. The catalog
 // lookup decides which reading exists; names are never pasted into SQL.
-func nameCandidates(s string) []qualName {
+func NameCandidates(s string) []QualName {
 	if s == "" || len(s) > 300 || strings.ContainsRune(s, 0) || !utf8.ValidString(s) {
 		return nil
 	}
-	var out []qualName
-	add := func(q qualName) {
-		if q.schema == "" || q.name == "" || len(q.schema) > 63 || len(q.name) > 63 || slices.Contains(out, q) {
+	var out []QualName
+	add := func(q QualName) {
+		if q.Schema == "" || q.Name == "" || len(q.Schema) > 63 || len(q.Name) > 63 || slices.Contains(out, q) {
 			return
 		}
 		out = append(out, q)
 	}
 	if strings.Contains(s, `"`) {
 		if parts, ok := parseSQLName(s); ok && len(parts) == 2 {
-			add(qualName{parts[0], parts[1]})
+			add(QualName{parts[0], parts[1]})
 		}
 	}
 	for i := 0; i < len(s); i++ {
 		if s[i] == '.' {
-			add(qualName{s[:i], s[i+1:]})
+			add(QualName{s[:i], s[i+1:]})
 		}
 	}
 	if !strings.Contains(s, ".") {
-		add(qualName{"public", s})
+		add(QualName{"public", s})
 	}
 	return out
 }
@@ -211,30 +220,31 @@ func parseSQLName(s string) ([]string, bool) {
 
 var bareIdentRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_$]*$`)
 
-// relation is a table or index found in the catalogs.
-type relation struct {
-	oid   uint32
-	ident string // quoted by PostgreSQL: format('%I.%I', schema, name)
-	qualName
-	kind string // pg_class.relkind
+// Relation is a table or index found in the catalogs.
+type Relation struct {
+	OID   uint32
+	Ident string // quoted by PostgreSQL: format('%I.%I', schema, name)
+	QualName
+	Kind string // pg_class.relkind
 }
 
-// display is the name shown to people: schema.name, quoted only when needed.
-func (r relation) display() string { return r.ident }
+// Display is the name shown to people: schema.name, quoted only when needed.
+func (r Relation) Display() string { return r.Ident }
 
-var errNotFound = errors.New("not found")
+// ErrNotFound: LookupRelation found nothing by that name.
+var ErrNotFound = errors.New("not found")
 
-// lookupRelation finds the one relation that s names. kinds limits the
+// LookupRelation finds the one Relation that s names. kinds limits the
 // relkinds accepted; what is the word used in messages ("table", "index").
-func lookupRelation(ctx context.Context, conn *pgx.Conn, s string, kinds []string, what string) (relation, error) {
-	cands := nameCandidates(s)
+func LookupRelation(ctx context.Context, conn *pgx.Conn, s string, kinds []string, what string) (Relation, error) {
+	cands := NameCandidates(s)
 	if len(cands) == 0 {
-		return relation{}, fmt.Errorf("invalid %s name %q", what, s)
+		return Relation{}, fmt.Errorf("invalid %s name %q", what, s)
 	}
 	nsps := make([]string, len(cands))
 	rels := make([]string, len(cands))
 	for i, c := range cands {
-		nsps[i], rels[i] = c.schema, c.name
+		nsps[i], rels[i] = c.Schema, c.Name
 	}
 	rows, err := conn.Query(ctx, `
 		SELECT DISTINCT c.oid, format('%I.%I', n.nspname, c.relname), n.nspname::text, c.relname::text, c.relkind::text
@@ -242,38 +252,27 @@ func lookupRelation(ctx context.Context, conn *pgx.Conn, s string, kinds []strin
 		JOIN pg_namespace n ON n.nspname = k.nsp
 		JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = k.rel`, nsps, rels)
 	if err != nil {
-		return relation{}, err
+		return Relation{}, err
 	}
-	found, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (relation, error) {
-		var r relation
-		err := row.Scan(&r.oid, &r.ident, &r.schema, &r.name, &r.kind)
+	found, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Relation, error) {
+		var r Relation
+		err := row.Scan(&r.OID, &r.Ident, &r.Schema, &r.Name, &r.Kind)
 		return r, err
 	})
 	if err != nil {
-		return relation{}, err
+		return Relation{}, err
 	}
 	switch {
 	case len(found) == 0:
-		return relation{}, fmt.Errorf("%w: the %s %s no longer exists", errNotFound, what, s)
+		return Relation{}, fmt.Errorf("%w: the %s %s no longer exists", ErrNotFound, what, s)
 	case len(found) > 1:
-		return relation{}, fmt.Errorf("the name %q matches more than one object (%s and %s), so Rowsafe didn't guess",
-			s, found[0].ident, found[1].ident)
+		return Relation{}, fmt.Errorf("the name %q matches more than one object (%s and %s), so Rowsafe didn't guess",
+			s, found[0].Ident, found[1].Ident)
 	}
-	if !slices.Contains(kinds, found[0].kind) {
-		return relation{}, fmt.Errorf("the name %s belongs to something that isn't %s", found[0].ident, withArticle(what))
+	if !slices.Contains(kinds, found[0].Kind) {
+		return Relation{}, fmt.Errorf("the name %s belongs to something that isn't %s", found[0].Ident, withArticle(what))
 	}
 	return found[0], nil
-}
-
-func (a *Agent) fixTarget(db protocol.DatabaseSpec) pginspect.Target {
-	t := a.target(db)
-	t.AppName = fixAppName
-	return t
-}
-
-// maintenance runs one maintenance action.
-func (a *Agent) maintenance(ctx context.Context, db protocol.DatabaseSpec, p protocol.MaintenanceParams, tl *taskLog) (*protocol.MaintenanceResult, error) {
-	return runMaintenance(ctx, a.fixTarget(db), p, tl)
 }
 
 // Maintain runs one maintenance action (a Pulse fix) on the PostgreSQL at
@@ -281,14 +280,16 @@ func (a *Agent) maintenance(ctx context.Context, db protocol.DatabaseSpec, p pro
 // it reaches directly, without an agent (rowsafe fix postgres://...). It
 // returns the task log with the result.
 func Maintain(ctx context.Context, t pginspect.Target, p protocol.MaintenanceParams) (*protocol.MaintenanceResult, string, error) {
-	t.AppName = fixAppName
+	t.AppName = AppName
 	tl := &taskLog{}
-	res, err := runMaintenance(ctx, t, p, tl)
-	return res, tl.buf.String(), err
+	res, err := Run(ctx, t, p, tl)
+	return res, tl.String(), err
 }
 
-func runMaintenance(ctx context.Context, t pginspect.Target, p protocol.MaintenanceParams, tl *taskLog) (*protocol.MaintenanceResult, error) {
-	if err := validateMaintenance(p); err != nil {
+// Run runs one maintenance action on the PostgreSQL at t (the agent's
+// maintenance task), writing what it does to tl.
+func Run(ctx context.Context, t pginspect.Target, p protocol.MaintenanceParams, tl Log) (*protocol.MaintenanceResult, error) {
+	if err := Validate(p); err != nil {
 		return nil, err
 	}
 	start := time.Now()
@@ -310,7 +311,7 @@ func runMaintenance(ctx context.Context, t pginspect.Target, p protocol.Maintena
 		err = m.dropSlot(ctx)
 	case protocol.MaintLogSettings: // logsettings.go
 		err = m.logSettings(ctx)
-	case protocol.MaintUpdateExtension: // pg_extensions.go
+	case protocol.MaintUpdateExtension: // extensions.go
 		err = m.updateExtension(ctx)
 	case protocol.MaintRollbackPrepared: // maintenance_cleanup.go
 		err = m.rollbackPrepared(ctx)
@@ -325,10 +326,10 @@ func runMaintenance(ctx context.Context, t pginspect.Target, p protocol.Maintena
 	}
 	m.res.DurationMs = time.Since(start).Milliseconds()
 	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		err = fmt.Errorf("it didn't finish within %s, so Rowsafe stopped it (nothing is left half-done): %w", plainDuration(limit), err)
+		err = fmt.Errorf("it didn't finish within %s, so Rowsafe stopped it (nothing is left half-done): %w", PlainDuration(limit), err)
 	}
 	if err != nil {
-		err = sentence(err)
+		err = Sentence(err)
 		tl.Printf("failed: %v", err)
 	} else {
 		tl.Printf("%s", m.res.Summary)
@@ -339,7 +340,7 @@ func runMaintenance(ctx context.Context, t pginspect.Target, p protocol.Maintena
 type maint struct {
 	t   pginspect.Target
 	p   protocol.MaintenanceParams
-	tl  *taskLog
+	tl  Log
 	res *protocol.MaintenanceResult
 }
 
@@ -368,7 +369,7 @@ func (m *maint) connect(ctx context.Context, dbname string, settings map[string]
 	return conn, nil
 }
 
-func closeConn(ctx context.Context, conn *pgx.Conn) {
+func CloseConn(ctx context.Context, conn *pgx.Conn) {
 	if conn == nil {
 		return
 	}
@@ -377,8 +378,8 @@ func closeConn(ctx context.Context, conn *pgx.Conn) {
 	conn.Close(cctx)
 }
 
-// requirePrimary refuses changes on a read-only standby.
-func requirePrimary(ctx context.Context, conn *pgx.Conn) error {
+// RequirePrimary refuses changes on a read-only standby.
+func RequirePrimary(ctx context.Context, conn *pgx.Conn) error {
 	var inRecovery bool
 	if err := conn.QueryRow(ctx, `SELECT pg_is_in_recovery()`).Scan(&inRecovery); err != nil {
 		return err
@@ -389,7 +390,7 @@ func requirePrimary(ctx context.Context, conn *pgx.Conn) error {
 	return nil
 }
 
-func serverVersionNum(ctx context.Context, conn *pgx.Conn) (int, error) {
+func ServerVersionNum(ctx context.Context, conn *pgx.Conn) (int, error) {
 	var v int
 	err := conn.QueryRow(ctx, `SELECT current_setting('server_version_num')::int`).Scan(&v)
 	return v, err
@@ -401,7 +402,7 @@ func (m *maint) vacuumOrAnalyze(ctx context.Context) error {
 	vacuum := m.p.Action == protocol.MaintVacuum
 	conn, err := m.connect(ctx, m.p.DB, map[string]string{
 		"statement_timeout": "0",
-		"lock_timeout":      ddlLockTimeout,
+		"lock_timeout":      DDLLockTimeout,
 		// Gentle: VACUUM pauses 2ms after each batch of pages, like
 		// autovacuum does by default.
 		"vacuum_cost_delay": "2",
@@ -409,8 +410,8 @@ func (m *maint) vacuumOrAnalyze(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer closeConn(ctx, conn)
-	if err := requirePrimary(ctx, conn); err != nil {
+	defer CloseConn(ctx, conn)
+	if err := RequirePrimary(ctx, conn); err != nil {
 		return err
 	}
 
@@ -421,8 +422,8 @@ func (m *maint) vacuumOrAnalyze(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		rel, err := lookupRelation(ctx, conn, name, []string{"r", "m", "p"}, "table")
-		if errors.Is(err, errNotFound) {
+		rel, err := LookupRelation(ctx, conn, name, []string{"r", "m", "p"}, "table")
+		if errors.Is(err, ErrNotFound) {
 			missing = append(missing, name)
 			m.tl.Printf("%s: skipped, it no longer exists", name)
 			continue
@@ -430,34 +431,34 @@ func (m *maint) vacuumOrAnalyze(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		dead, age, err := tableState(ctx, conn, rel.oid)
+		dead, age, err := tableState(ctx, conn, rel.OID)
 		if err != nil {
 			return err
 		}
-		stmt := "ANALYZE " + rel.ident
+		stmt := "ANALYZE " + rel.Ident
 		if vacuum {
-			stmt = "VACUUM (ANALYZE) " + rel.ident
+			stmt = "VACUUM (ANALYZE) " + rel.Ident
 			if m.p.Freeze {
-				stmt = "VACUUM (FREEZE, ANALYZE) " + rel.ident
+				stmt = "VACUUM (FREEZE, ANALYZE) " + rel.Ident
 			}
 		}
-		m.tl.Printf("%s: %s (%d dead rows)", rel.display(), stmt, dead)
+		m.tl.Printf("%s: %s (%d dead rows)", rel.Display(), stmt, dead)
 		t0 := time.Now()
 		if _, err := conn.Exec(ctx, stmt); err != nil {
-			if isLockTimeout(err) {
-				busy = append(busy, rel.display())
-				m.tl.Printf("%s: skipped, another operation (often autovacuum) holds it", rel.display())
+			if IsLockTimeout(err) {
+				busy = append(busy, rel.Display())
+				m.tl.Printf("%s: skipped, another operation (often autovacuum) holds it", rel.Display())
 				continue
 			}
-			return fmt.Errorf("%s of %s failed: %w", strings.Fields(stmt)[0], rel.display(), plainPGError(err))
+			return fmt.Errorf("%s of %s failed: %w", strings.Fields(stmt)[0], rel.Display(), PlainPGError(err))
 		}
 		_, _ = conn.Exec(ctx, `SELECT pg_stat_clear_snapshot()`)
-		deadNow, ageNow, err := tableState(ctx, conn, rel.oid)
+		deadNow, ageNow, err := tableState(ctx, conn, rel.OID)
 		if err != nil {
 			return err
 		}
-		m.tl.Printf("%s: done in %s, %d dead rows left", rel.display(), time.Since(t0).Round(time.Millisecond), deadNow)
-		done = append(done, rel.display())
+		m.tl.Printf("%s: done in %s, %d dead rows left", rel.Display(), time.Since(t0).Round(time.Millisecond), deadNow)
+		done = append(done, rel.Display())
 		deadBefore += dead
 		deadAfter += deadNow
 		ageBefore = max(ageBefore, age)
@@ -473,31 +474,31 @@ func (m *maint) vacuumOrAnalyze(ctx context.Context) error {
 	if len(done) == 0 {
 		if len(busy) > 0 {
 			return fmt.Errorf("the %s %s busy (another operation, often PostgreSQL's own autovacuum, was working on %s), so nothing was done; try again later",
-				plural(len(busy), "table", "tables"), isAre(len(busy)), itThem(len(busy)))
+				Plural(len(busy), "table", "tables"), IsAre(len(busy)), ItThem(len(busy)))
 		}
-		m.res.Summary = "There was nothing to do: the " + plural(len(missing), "table", "tables") + " no longer " + existExists(len(missing)) + "."
+		m.res.Summary = "There was nothing to do: the " + Plural(len(missing), "table", "tables") + " no longer " + existExists(len(missing)) + "."
 		return nil
 	}
 	removed := max(deadBefore-deadAfter, 0)
 	switch {
 	case vacuum && m.p.Freeze:
-		m.res.Summary = fmt.Sprintf("Froze %s", countNoun(len(done), "table", "tables"))
+		m.res.Summary = fmt.Sprintf("Froze %s", CountNoun(len(done), "table", "tables"))
 		if ageBefore >= 1_000_000 && ageAfter < ageBefore {
-			m.res.Summary += fmt.Sprintf("; the oldest transaction age went from %s to %s", plainCount(ageBefore), plainCount(ageAfter))
+			m.res.Summary += fmt.Sprintf("; the oldest transaction age went from %s to %s", PlainCount(ageBefore), PlainCount(ageAfter))
 		}
 		m.res.Summary += "."
 	case vacuum:
-		m.res.Summary = fmt.Sprintf("Cleaned up %s", countNoun(len(done), "table", "tables"))
+		m.res.Summary = fmt.Sprintf("Cleaned up %s", CountNoun(len(done), "table", "tables"))
 		if removed > 0 {
-			m.res.Summary += fmt.Sprintf("; about %s dead %s removed", plainCount(removed), plural(int(min(removed, 2)), "row", "rows"))
+			m.res.Summary += fmt.Sprintf("; about %s dead %s removed", PlainCount(removed), Plural(int(min(removed, 2)), "row", "rows"))
 		}
 		m.res.Summary += "."
 	default:
 		m.res.Summary = fmt.Sprintf("Refreshed the statistics of %s, so PostgreSQL can plan queries on %s well again.",
-			countNoun(len(done), "table", "tables"), itThem(len(done)))
+			CountNoun(len(done), "table", "tables"), ItThem(len(done)))
 	}
 	if n := len(missing) + len(busy); n > 0 {
-		m.res.Summary += fmt.Sprintf(" Skipped %s (see details).", countNoun(n, "table", "tables"))
+		m.res.Summary += fmt.Sprintf(" Skipped %s (see details).", CountNoun(n, "table", "tables"))
 	}
 	if len(done) <= 10 {
 		m.res.Details = append([]string{"Tables: " + strings.Join(done, ", ") + "."}, m.res.Details...)
@@ -523,16 +524,16 @@ func tableState(ctx context.Context, conn *pgx.Conn, oid uint32) (dead, age int6
 func (m *maint) reindex(ctx context.Context) error {
 	conn, err := m.connect(ctx, m.p.DB, map[string]string{
 		"statement_timeout": "0",
-		"lock_timeout":      ddlLockTimeout,
+		"lock_timeout":      DDLLockTimeout,
 	})
 	if err != nil {
 		return err
 	}
-	defer closeConn(ctx, conn)
-	if err := requirePrimary(ctx, conn); err != nil {
+	defer CloseConn(ctx, conn)
+	if err := RequirePrimary(ctx, conn); err != nil {
 		return err
 	}
-	v, err := serverVersionNum(ctx, conn)
+	v, err := ServerVersionNum(ctx, conn)
 	if err != nil {
 		return err
 	}
@@ -549,7 +550,7 @@ func (m *maint) reindex(ctx context.Context) error {
 	if err := conn.QueryRow(ctx, `
 		SELECT x.indrelid, format('%I.%I', n.nspname, t.relname), pg_relation_size(x.indexrelid)
 		FROM pg_index x JOIN pg_class t ON t.oid = x.indrelid JOIN pg_namespace n ON n.oid = t.relnamespace
-		WHERE x.indexrelid = $1`, idx.oid).Scan(&tableOID, &table, &sizeBefore); err != nil {
+		WHERE x.indexrelid = $1`, idx.OID).Scan(&tableOID, &table, &sizeBefore); err != nil {
 		return err
 	}
 	if err := refuseIfIndexBuilding(ctx, conn, v, tableOID, table); err != nil {
@@ -561,10 +562,10 @@ func (m *maint) reindex(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	stmt := "REINDEX INDEX CONCURRENTLY " + idx.ident
+	stmt := "REINDEX INDEX CONCURRENTLY " + idx.Ident
 	leftBehind := false
 	err = retryOnLock(ctx, m.tl, func() error {
-		m.tl.Printf("%s (%s)", stmt, humanBytes(sizeBefore))
+		m.tl.Printf("%s (%s)", stmt, HumanBytes(sizeBefore))
 		_, err := conn.Exec(ctx, stmt)
 		if err != nil && !m.cleanupReindex(ctx, conn, tableOID, idx, before) {
 			// Don't pile up unfinished copies: stop here.
@@ -578,20 +579,20 @@ func (m *maint) reindex(ctx context.Context) error {
 		if leftBehind {
 			outcome = "an unfinished copy of the index was left behind (PostgreSQL doesn't use it; Rowsafe removes it the next time this fix runs)"
 		}
-		if isLockTimeout(err) {
-			return fmt.Errorf("the table %s stayed busy with other work, so Rowsafe couldn't rebuild the index %s without getting in the way; %s. Try again later", table, idx.display(), outcome)
+		if IsLockTimeout(err) {
+			return fmt.Errorf("the table %s stayed busy with other work, so Rowsafe couldn't rebuild the index %s without getting in the way; %s. Try again later", table, idx.Display(), outcome)
 		}
-		return fmt.Errorf("rebuilding the index %s failed (%s): %w", idx.display(), outcome, plainPGError(err))
+		return fmt.Errorf("rebuilding the index %s failed (%s): %w", idx.Display(), outcome, PlainPGError(err))
 	}
 	var sizeAfter int64
 	if err := conn.QueryRow(ctx, `
 		SELECT pg_relation_size(c.oid) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = $1 AND c.relname = $2`, idx.schema, idx.name).Scan(&sizeAfter); err != nil {
+		WHERE n.nspname = $1 AND c.relname = $2`, idx.Schema, idx.Name).Scan(&sizeAfter); err != nil {
 		return err
 	}
-	m.res.Summary = fmt.Sprintf("Rebuilt the index %s", idx.display())
+	m.res.Summary = fmt.Sprintf("Rebuilt the index %s", idx.Display())
 	if sizeAfter < sizeBefore {
-		m.res.Summary += fmt.Sprintf("; it went from %s to %s (freed %s)", humanBytes(sizeBefore), humanBytes(sizeAfter), humanBytes(sizeBefore-sizeAfter))
+		m.res.Summary += fmt.Sprintf("; it went from %s to %s (freed %s)", HumanBytes(sizeBefore), HumanBytes(sizeAfter), HumanBytes(sizeBefore-sizeAfter))
 	}
 	m.res.Summary += "."
 	return nil
@@ -603,10 +604,10 @@ func (m *maint) reindex(ctx context.Context) error {
 // name are considered, and only when they carry the index's name (which
 // PostgreSQL may shorten), are the index itself, or appeared since before
 // (nil: nothing is known to be new). It reports whether none is left.
-func (m *maint) cleanupReindex(ctx context.Context, conn *pgx.Conn, tableOID uint32, idx relation, before []uint32) bool {
+func (m *maint) cleanupReindex(ctx context.Context, conn *pgx.Conn, tableOID uint32, idx Relation, before []uint32) bool {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 	defer cancel()
-	prefix := idx.name[:min(len(idx.name), 40)]
+	prefix := idx.Name[:min(len(idx.Name), 40)]
 	rows, err := conn.Query(cctx, `
 		SELECT c.oid, format('%I.%I', n.nspname, c.relname), c.relname::text
 		FROM pg_index x JOIN pg_class c ON c.oid = x.indexrelid JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -633,7 +634,7 @@ func (m *maint) cleanupReindex(ctx context.Context, conn *pgx.Conn, tableOID uin
 			continue
 		}
 		isNew := before != nil && !slices.Contains(before, l.oid)
-		if !isNew && l.oid != idx.oid && !strings.HasPrefix(l.name, prefix) {
+		if !isNew && l.oid != idx.OID && !strings.HasPrefix(l.name, prefix) {
 			continue
 		}
 		m.tl.Printf("removing %s, left behind by a failed rebuild", l.ident)
@@ -668,16 +669,16 @@ func refuseIfIndexBuilding(ctx context.Context, conn *pgx.Conn, versionNum int, 
 	return nil
 }
 
-func (m *maint) lookupIndex(ctx context.Context, conn *pgx.Conn) (relation, error) {
-	idx, err := lookupRelation(ctx, conn, m.p.Index, []string{"i", "I"}, "index")
+func (m *maint) lookupIndex(ctx context.Context, conn *pgx.Conn) (Relation, error) {
+	idx, err := LookupRelation(ctx, conn, m.p.Index, []string{"i", "I"}, "index")
 	if err != nil {
 		return idx, err
 	}
-	if idx.kind == "I" {
-		return idx, fmt.Errorf("the index %s is the parent index of a partitioned table; Rowsafe only changes the indexes of single tables", idx.display())
+	if idx.Kind == "I" {
+		return idx, fmt.Errorf("the index %s is the parent index of a partitioned table; Rowsafe only changes the indexes of single tables", idx.Display())
 	}
-	if slices.Contains(systemSchemas, idx.schema) || strings.HasPrefix(idx.schema, "pg_temp") || strings.HasPrefix(idx.schema, "pg_toast_temp") {
-		return idx, fmt.Errorf("the index %s belongs to PostgreSQL itself; Rowsafe leaves it alone", idx.display())
+	if slices.Contains(systemSchemas, idx.Schema) || strings.HasPrefix(idx.Schema, "pg_temp") || strings.HasPrefix(idx.Schema, "pg_toast_temp") {
+		return idx, fmt.Errorf("the index %s belongs to PostgreSQL itself; Rowsafe leaves it alone", idx.Display())
 	}
 	return idx, nil
 }
@@ -717,21 +718,21 @@ func dropRefusal(f indexFacts, unused bool, name string) string {
 func (m *maint) dropIndex(ctx context.Context) error {
 	conn, err := m.connect(ctx, m.p.DB, map[string]string{
 		"statement_timeout": "0",
-		"lock_timeout":      ddlLockTimeout,
+		"lock_timeout":      DDLLockTimeout,
 	})
 	if err != nil {
 		return err
 	}
-	defer closeConn(ctx, conn)
-	if err := requirePrimary(ctx, conn); err != nil {
+	defer CloseConn(ctx, conn)
+	if err := RequirePrimary(ctx, conn); err != nil {
 		return err
 	}
-	v, err := serverVersionNum(ctx, conn)
+	v, err := ServerVersionNum(ctx, conn)
 	if err != nil {
 		return err
 	}
 	idx, err := m.lookupIndex(ctx, conn)
-	if errors.Is(err, errNotFound) {
+	if errors.Is(err, ErrNotFound) {
 		m.res.Summary = fmt.Sprintf("The index %s was already removed; there was nothing to do.", m.p.Index)
 		return nil
 	}
@@ -760,13 +761,13 @@ func (m *maint) dropIndex(ctx context.Context) error {
 		           AND (b.indoption::int2[])[0:a.indnkeyatts - 1] = (a.indoption::int2[])[0:a.indnkeyatts - 1])
 		FROM pg_index a JOIN pg_class ac ON ac.oid = a.indexrelid
 		JOIN pg_class t ON t.oid = a.indrelid JOIN pg_namespace tn ON tn.oid = t.relnamespace
-		WHERE a.indexrelid = $1`, idx.oid).Scan(&tableOID, &f.table,
+		WHERE a.indexrelid = $1`, idx.OID).Scan(&tableOID, &f.table,
 		&f.primary, &f.unique, &f.exclusion, &f.replID, &f.valid, &f.constraint, &f.scans, &f.bytes, &f.covered); err != nil {
 		return err
 	}
 	m.tl.Printf("index %s on %s: %s, %d scans, valid=%v, primary=%v unique=%v exclusion=%v constraint=%v replica_identity=%v covered=%v",
-		idx.display(), f.table, humanBytes(f.bytes), f.scans, f.valid, f.primary, f.unique, f.exclusion, f.constraint, f.replID, f.covered)
-	if why := dropRefusal(f, m.p.Unused, idx.display()); why != "" {
+		idx.Display(), f.table, HumanBytes(f.bytes), f.scans, f.valid, f.primary, f.unique, f.exclusion, f.constraint, f.replID, f.covered)
+	if why := dropRefusal(f, m.p.Unused, idx.Display()); why != "" {
 		return errors.New(why)
 	}
 	if err := refuseIfIndexBuilding(ctx, conn, v, tableOID, f.table); err != nil {
@@ -774,18 +775,18 @@ func (m *maint) dropIndex(ctx context.Context) error {
 	}
 	// Its definition, to create it again if a query turns out to need it.
 	var def string
-	if err := conn.QueryRow(ctx, `SELECT pg_get_indexdef($1)`, idx.oid).Scan(&def); err != nil {
+	if err := conn.QueryRow(ctx, `SELECT pg_get_indexdef($1)`, idx.OID).Scan(&def); err != nil {
 		return err
 	}
 	m.tl.Printf("definition: %s", def)
-	stmt := "DROP INDEX CONCURRENTLY " + idx.ident
+	stmt := "DROP INDEX CONCURRENTLY " + idx.Ident
 	err = retryOnLock(ctx, m.tl, func() error {
 		// The name must still be this index (not one created since).
 		var same bool
 		if err := conn.QueryRow(ctx, `
 			SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 			               WHERE n.nspname = $1 AND c.relname = $2 AND c.oid = $3)`,
-			idx.schema, idx.name, idx.oid).Scan(&same); err != nil {
+			idx.Schema, idx.Name, idx.OID).Scan(&same); err != nil {
 			return err
 		}
 		if !same {
@@ -797,19 +798,19 @@ func (m *maint) dropIndex(ctx context.Context) error {
 	})
 	switch {
 	case errors.Is(err, errIndexGone):
-		m.res.Summary = fmt.Sprintf("The index %s was already removed; there was nothing to do.", idx.display())
+		m.res.Summary = fmt.Sprintf("The index %s was already removed; there was nothing to do.", idx.Display())
 		return nil
-	case err != nil && isLockTimeout(err):
+	case err != nil && IsLockTimeout(err):
 		return fmt.Errorf("the table %s stayed busy with long-running work, so Rowsafe couldn't remove the index %s without getting in the way; "+
-			"if it is now marked invalid, PostgreSQL no longer uses it and applying the fix again finishes the job", f.table, idx.display())
+			"if it is now marked invalid, PostgreSQL no longer uses it and applying the fix again finishes the job", f.table, idx.Display())
 	case err != nil:
-		return fmt.Errorf("removing the index %s failed: %w", idx.display(), plainPGError(err))
+		return fmt.Errorf("removing the index %s failed: %w", idx.Display(), PlainPGError(err))
 	}
 	adj := "unused"
 	if !m.p.Unused {
 		adj = "duplicate"
 	}
-	m.res.Summary = fmt.Sprintf("Removed the %s index %s (freed %s).", adj, idx.display(), humanBytes(f.bytes))
+	m.res.Summary = fmt.Sprintf("Removed the %s index %s (freed %s).", adj, idx.Display(), HumanBytes(f.bytes))
 	m.res.Details = append(m.res.Details, "To create it again: "+strings.Replace(def, "CREATE INDEX ", "CREATE INDEX CONCURRENTLY ", 1)+";")
 	return nil
 }
@@ -823,11 +824,11 @@ func (e noRetry) Error() string { return e.err.Error() }
 func (e noRetry) Unwrap() error { return e.err }
 
 // retryOnLock runs fn, trying again a few times after a lock timeout.
-func retryOnLock(ctx context.Context, tl *taskLog, fn func() error) error {
+func retryOnLock(ctx context.Context, tl Log, fn func() error) error {
 	var err error
 	for attempt := 1; attempt <= lockRetries; attempt++ {
 		var stop noRetry
-		if err = fn(); err == nil || !isLockTimeout(err) || attempt == lockRetries || errors.As(err, &stop) {
+		if err = fn(); err == nil || !IsLockTimeout(err) || attempt == lockRetries || errors.As(err, &stop) {
 			return err
 		}
 		wait := time.Duration(attempt) * lockRetryWait
@@ -879,11 +880,11 @@ func signalRefusal(s session, action string) string {
 }
 
 func (m *maint) signalBackend(ctx context.Context) error {
-	conn, err := m.connect(ctx, m.t.MaintenanceDB(), map[string]string{"statement_timeout": "10s", "lock_timeout": ddlLockTimeout})
+	conn, err := m.connect(ctx, m.t.MaintenanceDB(), map[string]string{"statement_timeout": "10s", "lock_timeout": DDLLockTimeout})
 	if err != nil {
 		return err
 	}
-	defer closeConn(ctx, conn)
+	defer CloseConn(ctx, conn)
 	s, found, err := readSession(ctx, conn, m.p.PID)
 	if err != nil {
 		return err
@@ -909,7 +910,7 @@ func (m *maint) signalBackend(ctx context.Context) error {
 		}
 		var ok bool
 		if err := conn.QueryRow(ctx, `SELECT pg_cancel_backend($1)`, m.p.PID).Scan(&ok); err != nil {
-			return fmt.Errorf("PostgreSQL refused to cancel the query: %w", plainPGError(err))
+			return fmt.Errorf("PostgreSQL refused to cancel the query: %w", PlainPGError(err))
 		}
 		if !ok {
 			m.res.Summary = "The query had already finished, so there was nothing to cancel."
@@ -917,12 +918,12 @@ func (m *maint) signalBackend(ctx context.Context) error {
 		}
 		m.tl.Printf("cancelled the query of pid %d (%s)", m.p.PID, who)
 		m.res.Summary = fmt.Sprintf("Cancelled the query of %s; it had been running for %s. The session stays connected, and the application gets an error for that query.",
-			sessionOwner(s), plainDuration(time.Duration(s.stateSecs*float64(time.Second))))
+			sessionOwner(s), PlainDuration(time.Duration(s.stateSecs*float64(time.Second))))
 		return nil
 	}
 	var ok bool
 	if err := conn.QueryRow(ctx, `SELECT pg_terminate_backend($1)`, m.p.PID).Scan(&ok); err != nil {
-		return fmt.Errorf("PostgreSQL refused to end the session: %w", plainPGError(err))
+		return fmt.Errorf("PostgreSQL refused to end the session: %w", PlainPGError(err))
 	}
 	if !ok {
 		m.res.Summary = "The session had already ended, so there was nothing to do."
@@ -984,7 +985,7 @@ func sessionOwner(s session) string {
 // describeSession: "app_user (database shop) that was idle in a
 // transaction for 3h 12m".
 func describeSession(s session) string {
-	d := plainDuration(time.Duration(s.stateSecs * float64(time.Second)))
+	d := PlainDuration(time.Duration(s.stateSecs * float64(time.Second)))
 	who := sessionOwner(s)
 	switch s.state {
 	case "idle in transaction", "idle in transaction (aborted)":
@@ -1000,11 +1001,11 @@ func describeSession(s session) string {
 // ---- replication slot ----
 
 func (m *maint) dropSlot(ctx context.Context) error {
-	conn, err := m.connect(ctx, m.t.MaintenanceDB(), map[string]string{"statement_timeout": "10s", "lock_timeout": ddlLockTimeout})
+	conn, err := m.connect(ctx, m.t.MaintenanceDB(), map[string]string{"statement_timeout": "10s", "lock_timeout": DDLLockTimeout})
 	if err != nil {
 		return err
 	}
-	defer closeConn(ctx, conn)
+	defer CloseConn(ctx, conn)
 	var active bool
 	var slotType, slotDB string
 	var retained *int64
@@ -1034,11 +1035,11 @@ func (m *maint) dropSlot(ctx context.Context) error {
 			m.res.Summary = fmt.Sprintf("The replication slot %s was already removed; there was nothing to do.", m.p.Slot)
 			return nil
 		}
-		return fmt.Errorf("removing the replication slot %s failed: %w", m.p.Slot, plainPGError(err))
+		return fmt.Errorf("removing the replication slot %s failed: %w", m.p.Slot, PlainPGError(err))
 	}
 	m.res.Summary = fmt.Sprintf("Removed the inactive replication slot %s", m.p.Slot)
 	if retained != nil && *retained > 0 {
-		m.res.Summary += fmt.Sprintf("; PostgreSQL can now recycle the %s of WAL it was keeping for it", humanBytes(*retained))
+		m.res.Summary += fmt.Sprintf("; PostgreSQL can now recycle the %s of WAL it was keeping for it", HumanBytes(*retained))
 	}
 	m.res.Summary += "."
 	if slotType == "logical" {
@@ -1051,14 +1052,14 @@ func (m *maint) dropSlot(ctx context.Context) error {
 
 // ---- errors and words ----
 
-func isLockTimeout(err error) bool {
+func IsLockTimeout(err error) bool {
 	var pe *pgconn.PgError
 	return errors.As(err, &pe) && pe.Code == "55P03"
 }
 
-// plainPGError keeps PostgreSQL's message but drops the "ERROR: ... (SQLSTATE
+// PlainPGError keeps PostgreSQL's message but drops the "ERROR: ... (SQLSTATE
 // ...)" wrapping.
-func plainPGError(err error) error {
+func PlainPGError(err error) error {
 	var pe *pgconn.PgError
 	if errors.As(err, &pe) {
 		msg := pe.Message
@@ -1070,8 +1071,8 @@ func plainPGError(err error) error {
 	return err
 }
 
-// plainCount: 812, 8,120, 120 thousand, 1.2 million, 1.2 billion.
-func plainCount(n int64) string {
+// PlainCount: 812, 8,120, 120 thousand, 1.2 million, 1.2 billion.
+func PlainCount(n int64) string {
 	switch {
 	case n < 10_000:
 		s := fmt.Sprint(n)
@@ -1087,8 +1088,8 @@ func plainCount(n int64) string {
 	return trimZero(fmt.Sprintf("%.1f", float64(n)/1e9)) + " billion"
 }
 
-// sentence makes an error message a sentence: capitalized, with a period.
-func sentence(err error) error {
+// Sentence makes an error message a sentence: capitalized, with a period.
+func Sentence(err error) error {
 	msg := strings.TrimSpace(err.Error())
 	if msg == "" {
 		return err
@@ -1110,8 +1111,8 @@ func withArticle(noun string) string {
 
 func trimZero(s string) string { return strings.TrimSuffix(s, ".0") }
 
-// plainDuration: 45s, 12m, 3h 12m, 2d 4h.
-func plainDuration(d time.Duration) string {
+// PlainDuration: 45s, 12m, 3h 12m, 2d 4h.
+func PlainDuration(d time.Duration) string {
 	d = d.Round(time.Second)
 	switch {
 	case d < time.Minute:
@@ -1132,17 +1133,17 @@ func plainDuration(d time.Duration) string {
 	return fmt.Sprintf("%dd", days)
 }
 
-func plural(n int, one, many string) string {
+func Plural(n int, one, many string) string {
 	if n == 1 {
 		return one
 	}
 	return many
 }
 
-func countNoun(n int, one, many string) string { return fmt.Sprintf("%d %s", n, plural(n, one, many)) }
+func CountNoun(n int, one, many string) string { return fmt.Sprintf("%d %s", n, Plural(n, one, many)) }
 
-func isAre(n int) string { return plural(n, "was", "were") }
+func IsAre(n int) string { return Plural(n, "was", "were") }
 
-func itThem(n int) string { return plural(n, "it", "them") }
+func ItThem(n int) string { return Plural(n, "it", "them") }
 
-func existExists(n int) string { return plural(n, "exists", "exist") }
+func existExists(n int) string { return Plural(n, "exists", "exist") }

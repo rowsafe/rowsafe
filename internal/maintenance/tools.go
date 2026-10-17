@@ -1,4 +1,4 @@
-package agent
+package maintenance
 
 import (
 	"context"
@@ -56,24 +56,24 @@ func (m *maint) repackTable(ctx context.Context) error {
 	if m.t.Conn != nil {
 		return fmt.Errorf("Rowsafe runs pg_repack on the database's own server, through the agent")
 	}
-	conn, err := m.connect(ctx, m.p.DB, map[string]string{"statement_timeout": "60s", "lock_timeout": ddlLockTimeout})
+	conn, err := m.connect(ctx, m.p.DB, map[string]string{"statement_timeout": "60s", "lock_timeout": DDLLockTimeout})
 	if err != nil {
 		return err
 	}
-	defer closeConn(ctx, conn)
-	if err := requirePrimary(ctx, conn); err != nil {
+	defer CloseConn(ctx, conn)
+	if err := RequirePrimary(ctx, conn); err != nil {
 		return err
 	}
-	v, err := serverVersionNum(ctx, conn)
+	v, err := ServerVersionNum(ctx, conn)
 	if err != nil {
 		return err
 	}
-	rel, err := lookupRelation(ctx, conn, m.p.Tables[0], []string{"r"}, "table")
+	rel, err := LookupRelation(ctx, conn, m.p.Tables[0], []string{"r"}, "table")
 	if err != nil {
 		return err
 	}
-	if slices.Contains(systemSchemas, rel.schema) {
-		return fmt.Errorf("the table %s belongs to PostgreSQL itself; Rowsafe leaves it alone", rel.display())
+	if slices.Contains(systemSchemas, rel.Schema) {
+		return fmt.Errorf("the table %s belongs to PostgreSQL itself; Rowsafe leaves it alone", rel.Display())
 	}
 	var keyed, available, on bool
 	var size int64
@@ -84,11 +84,11 @@ func (m *maint) repackTable(ctx context.Context) error {
 		            AND NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = $1 AND a.attnum = ANY(x.indkey) AND NOT a.attnotnull))),
 		       EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'pg_repack'),
 		       EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_repack'),
-		       pg_total_relation_size($1), current_setting('data_directory')`, rel.oid).Scan(&keyed, &available, &on, &size, &dataDir); err != nil {
+		       pg_total_relation_size($1), current_setting('data_directory')`, rel.OID).Scan(&keyed, &available, &on, &size, &dataDir); err != nil {
 		return err
 	}
 	if !keyed {
-		return fmt.Errorf("the table %s has no primary key (or unique index on columns that are never empty), which pg_repack needs", rel.display())
+		return fmt.Errorf("the table %s has no primary key (or unique index on columns that are never empty), which pg_repack needs", rel.Display())
 	}
 	if !on && !available {
 		return fmt.Errorf("the pg_repack package isn't installed on this server")
@@ -98,38 +98,47 @@ func (m *maint) repackTable(ctx context.Context) error {
 		return fmt.Errorf("pg_repack's program isn't on this server")
 	}
 	need := int64(float64(size)*repackDiskFactor) + repackDiskSlack
-	free, err := freeBytes(dataDir)
+	free, err := FreeBytes(dataDir)
 	if err != nil {
 		return fmt.Errorf("Rowsafe couldn't check the free disk for the copy pg_repack makes: %w", err)
 	}
 	if free < need {
-		return fmt.Errorf("rebuilding %s needs about %s of free disk for the copy, and %s is free", rel.display(), humanBytes(need), humanBytes(free))
+		return fmt.Errorf("rebuilding %s needs about %s of free disk for the copy, and %s is free", rel.Display(), HumanBytes(need), HumanBytes(free))
 	}
 	if !on {
 		m.tl.Printf("CREATE EXTENSION pg_repack in %s", m.p.DB)
 		if _, err := conn.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS pg_repack"); err != nil {
-			return fmt.Errorf("turning on pg_repack in %s failed: %w", m.p.DB, plainPGError(err))
+			return fmt.Errorf("turning on pg_repack in %s failed: %w", m.p.DB, PlainPGError(err))
 		}
 	}
-	m.tl.Printf("pg_repack of %s (%s with indexes; %s free)", rel.display(), humanBytes(size), humanBytes(free))
+	m.tl.Printf("pg_repack of %s (%s with indexes; %s free)", rel.Display(), HumanBytes(size), HumanBytes(free))
 	args := []string{"--host", m.t.SocketDir, "--port", strconv.Itoa(m.t.Port), "--username", m.t.User, "--dbname", m.p.DB,
-		"--table", rel.ident, "--no-kill-backend", "--wait-timeout", repackWaitSeconds}
-	out, err := repackRun(ctx, prog, args, []string{"PGAPPNAME=" + fixAppName, "PGCONNECT_TIMEOUT=10"})
-	m.tl.Output("pg_repack", out)
+		"--table", rel.Ident, "--no-kill-backend", "--wait-timeout", repackWaitSeconds}
+	out, err := repackRun(ctx, prog, args, []string{"PGAPPNAME=" + AppName, "PGCONNECT_TIMEOUT=10"})
+	tail := strings.TrimSpace(string(out))
+	if len(tail) > 4000 {
+		tail = tail[len(tail)-4000:]
+	}
+	if tail != "" {
+		m.tl.Printf("pg_repack output:\n%s", tail)
+	}
 	if err != nil {
-		why := lastLine(out)
+		why := tail
+		if i := strings.LastIndexByte(why, '\n'); i >= 0 {
+			why = why[i+1:]
+		}
 		if why == "" {
 			why = err.Error()
 		}
-		return fmt.Errorf("pg_repack of %s didn't finish (the table is as it was): %s", rel.display(), why)
+		return fmt.Errorf("pg_repack of %s didn't finish (the table is as it was): %s", rel.Display(), why)
 	}
 	var after int64
-	if err := conn.QueryRow(ctx, `SELECT pg_total_relation_size($1::regclass)`, rel.ident).Scan(&after); err != nil {
+	if err := conn.QueryRow(ctx, `SELECT pg_total_relation_size($1::regclass)`, rel.Ident).Scan(&after); err != nil {
 		return err
 	}
-	m.res.Summary = fmt.Sprintf("Rebuilt %s with pg_repack", rel.display())
+	m.res.Summary = fmt.Sprintf("Rebuilt %s with pg_repack", rel.Display())
 	if after < size {
-		m.res.Summary += fmt.Sprintf(": it went from %s to %s (freed %s)", humanBytes(size), humanBytes(after), humanBytes(size-after))
+		m.res.Summary += fmt.Sprintf(": it went from %s to %s (freed %s)", HumanBytes(size), HumanBytes(after), HumanBytes(size-after))
 	}
 	m.res.Summary += "."
 	return nil
@@ -145,15 +154,15 @@ func validateToolMaintenance(p protocol.MaintenanceParams) error {
 			return fmt.Errorf("between 1 and %d databases are needed", maxExtensionDatabases)
 		}
 		for _, db := range p.Databases {
-			if err := validDatName(db); err != nil {
+			if err := ValidDatName(db); err != nil {
 				return err
 			}
 		}
 	case protocol.MaintRepackTable:
-		if err := validDatName(p.DB); err != nil {
+		if err := ValidDatName(p.DB); err != nil {
 			return err
 		}
-		if len(p.Tables) != 1 || len(nameCandidates(p.Tables[0])) == 0 {
+		if len(p.Tables) != 1 || len(NameCandidates(p.Tables[0])) == 0 {
 			return fmt.Errorf("exactly one table is needed")
 		}
 	}
@@ -164,13 +173,13 @@ func validateToolMaintenance(p protocol.MaintenanceParams) error {
 func (m *maint) createExtension(ctx context.Context) error {
 	var done, already []string
 	for _, db := range m.p.Databases {
-		conn, err := m.connect(ctx, db, map[string]string{"statement_timeout": "60s", "lock_timeout": ddlLockTimeout})
+		conn, err := m.connect(ctx, db, map[string]string{"statement_timeout": "60s", "lock_timeout": DDLLockTimeout})
 		if err != nil {
 			return err
 		}
 		err = func() error {
-			defer closeConn(ctx, conn)
-			if err := requirePrimary(ctx, conn); err != nil {
+			defer CloseConn(ctx, conn)
+			if err := RequirePrimary(ctx, conn); err != nil {
 				return err
 			}
 			var available, on bool
@@ -187,7 +196,7 @@ func (m *maint) createExtension(ctx context.Context) error {
 			}
 			m.tl.Printf("CREATE EXTENSION %s in %s", m.p.Extension, db)
 			if _, err := conn.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS "+pgx.Identifier{m.p.Extension}.Sanitize()); err != nil {
-				return fmt.Errorf("turning on %s in %s failed: %w", m.p.Extension, db, plainPGError(err))
+				return fmt.Errorf("turning on %s in %s failed: %w", m.p.Extension, db, PlainPGError(err))
 			}
 			done = append(done, db)
 			return nil

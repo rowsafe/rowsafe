@@ -12,16 +12,68 @@ import (
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
-type table struct{ w *tabwriter.Writer }
+// table prints aligned columns. With colors on, cells may hold color codes,
+// so it pads by what shows on the terminal (tabwriter counts the codes).
+type table struct {
+	w    *tabwriter.Writer
+	rows [][]string
+}
 
 func newTable(headers ...string) *table {
+	if colorOn() {
+		t := &table{}
+		for i := range headers {
+			headers[i] = bold(headers[i])
+		}
+		t.row(headers...)
+		return t
+	}
 	t := &table{w: tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)}
 	t.row(headers...)
 	return t
 }
 
-func (t *table) row(cols ...string) { fmt.Fprintln(t.w, strings.Join(cols, "\t")) }
-func (t *table) flush()             { t.w.Flush() }
+func (t *table) row(cols ...string) {
+	if t.w == nil {
+		t.rows = append(t.rows, cols)
+		return
+	}
+	fmt.Fprintln(t.w, strings.Join(cols, "\t"))
+}
+
+func (t *table) flush() {
+	if t.w != nil {
+		t.w.Flush()
+		return
+	}
+	var widths []int
+	for _, r := range t.rows {
+		for i, c := range r[:max(len(r)-1, 0)] { // the last column isn't padded
+			if i == len(widths) {
+				widths = append(widths, 0)
+			}
+			widths[i] = max(widths[i], visibleLen(c))
+		}
+	}
+	for _, r := range t.rows {
+		var b strings.Builder
+		for i, c := range r {
+			if i == len(r)-1 {
+				// A long last cell wraps under its own column.
+				pad := visibleLen(b.String())
+				if w := wrapWidth(); w > 0 && pad+visibleLen(c) > w && w-pad >= 30 {
+					c = strings.TrimPrefix(wrap(c, strings.Repeat(" ", pad), w), strings.Repeat(" ", pad))
+				}
+				b.WriteString(c)
+				break
+			}
+			b.WriteString(c)
+			b.WriteString(strings.Repeat(" ", widths[i]-visibleLen(c)+2))
+		}
+		fmt.Println(strings.TrimRight(b.String(), " "))
+	}
+	t.rows = nil
+}
 
 func ago(t *time.Time) string {
 	if t == nil || t.IsZero() {

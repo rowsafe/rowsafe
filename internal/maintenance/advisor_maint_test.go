@@ -1,4 +1,4 @@
-package agent
+package maintenance
 
 import (
 	"strings"
@@ -17,7 +17,7 @@ func TestValidateAdvisorMaintenance(t *testing.T) {
 			Settings: map[string]string{"autovacuum_vacuum_scale_factor": "0", "autovacuum_vacuum_threshold": "50000"}},
 	}
 	for _, p := range ok {
-		if err := validateMaintenance(p); err != nil {
+		if err := Validate(p); err != nil {
 			t.Errorf("%+v: %v", p, err)
 		}
 	}
@@ -38,7 +38,7 @@ func TestValidateAdvisorMaintenance(t *testing.T) {
 		"fraction for an int": {Action: protocol.MaintSetTableStorageParams, DB: "shop", Tables: []string{"t"}, Settings: map[string]string{"autovacuum_vacuum_threshold": "1.5"}},
 	}
 	for name, p := range bad {
-		if err := validateMaintenance(p); err == nil {
+		if err := Validate(p); err == nil {
 			t.Errorf("%s: accepted %+v", name, p)
 		}
 	}

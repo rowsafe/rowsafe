@@ -61,8 +61,9 @@ lint: check-installer
 	$(GO) vet ./...
 	@test -z "$$(gofmt -l .)" || { echo "gofmt needed:"; gofmt -l .; exit 1; }
 	@# The CLI builds for Windows: code it reaches that is Unix-only goes behind
-	@# a build tag (local/agent.go and agent_windows.go).
-	@GOOS=windows GOARCH=amd64 $(GO) build -o /dev/null ./cmd/rowsafe || { echo "the rowsafe CLI no longer builds for Windows (see local/agent_windows.go)"; exit 1; }
+	@# a build tag (a _windows.go counterpart); it never imports internal/agent.
+	@GOOS=windows GOARCH=amd64 $(GO) build -o /dev/null ./cmd/rowsafe || { echo "the rowsafe CLI no longer builds for Windows (see the CLI on Windows in CLAUDE.md)"; exit 1; }
+	@GOOS=windows GOARCH=amd64 $(GO) vet ./cmd/rowsafe ./local ./internal/maintenance || { echo "the rowsafe CLI's tests no longer build for Windows"; exit 1; }
 	@# The agent images copy only listed folders: each one the agent needs must be listed.
 	@for d in $$($(GO) list -deps ./cmd/rowsafe-agent | sed -n 's#^github.com/rowsafe/rowsafe/\([^/]*\).*#\1#p' | sort -u); do \
 		for f in deploy/docker/agent*.Dockerfile; do \

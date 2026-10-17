@@ -1,4 +1,4 @@
-package agent
+package maintenance
 
 import (
 	"context"
@@ -30,7 +30,7 @@ func init() {
 func validateCleanupMaintenance(p protocol.MaintenanceParams) error {
 	switch p.Action {
 	case protocol.MaintRollbackPrepared:
-		if err := validDatName(p.DB); err != nil {
+		if err := ValidDatName(p.DB); err != nil {
 			return err
 		}
 		if p.GID == "" || len(p.GID) > maxGIDBytes || strings.ContainsRune(p.GID, 0) || !utf8.ValidString(p.GID) {
@@ -50,12 +50,12 @@ func validateCleanupMaintenance(p protocol.MaintenanceParams) error {
 // rollbackPrepared rolls back one prepared transaction, found again by
 // name, database and time.
 func (m *maint) rollbackPrepared(ctx context.Context) error {
-	conn, err := m.connect(ctx, m.p.DB, map[string]string{"statement_timeout": "30s", "lock_timeout": ddlLockTimeout})
+	conn, err := m.connect(ctx, m.p.DB, map[string]string{"statement_timeout": "30s", "lock_timeout": DDLLockTimeout})
 	if err != nil {
 		return err
 	}
-	defer closeConn(ctx, conn)
-	if err := requirePrimary(ctx, conn); err != nil {
+	defer CloseConn(ctx, conn)
+	if err := RequirePrimary(ctx, conn); err != nil {
 		return err
 	}
 	var db, owner, literal string
@@ -81,7 +81,7 @@ func (m *maint) rollbackPrepared(ctx context.Context) error {
 			m.res.Summary = fmt.Sprintf("The prepared transaction %s finished meanwhile; there was nothing to do.", m.p.GID)
 			return nil
 		}
-		return fmt.Errorf("rolling back the prepared transaction %s failed: %w", m.p.GID, plainPGError(err))
+		return fmt.Errorf("rolling back the prepared transaction %s failed: %w", m.p.GID, PlainPGError(err))
 	}
 	m.res.Summary = fmt.Sprintf("Rolled back the prepared transaction %s; cleanup can go on.", m.p.GID)
 	m.res.Details = append(m.res.Details, "Its changes were discarded. If the app or transaction manager that prepared it tries to commit it, it gets an error.")
@@ -92,15 +92,15 @@ func (m *maint) rollbackPrepared(ctx context.Context) error {
 // it stops holding back cleanup and the change log. Its consumer skips
 // the changes in between.
 func (m *maint) advanceSlot(ctx context.Context) error {
-	conn, err := m.connect(ctx, m.t.MaintenanceDB(), map[string]string{"statement_timeout": "10s", "lock_timeout": ddlLockTimeout})
+	conn, err := m.connect(ctx, m.t.MaintenanceDB(), map[string]string{"statement_timeout": "10s", "lock_timeout": DDLLockTimeout})
 	if err != nil {
 		return err
 	}
-	defer func() { closeConn(ctx, conn) }()
-	if err := requirePrimary(ctx, conn); err != nil {
+	defer func() { CloseConn(ctx, conn) }()
+	if err := RequirePrimary(ctx, conn); err != nil {
 		return err
 	}
-	v, err := serverVersionNum(ctx, conn)
+	v, err := ServerVersionNum(ctx, conn)
 	if err != nil {
 		return err
 	}
@@ -126,9 +126,9 @@ func (m *maint) advanceSlot(ctx context.Context) error {
 	}
 	// A logical slot is moved from a session in its own database.
 	if slotDB != m.t.MaintenanceDB() {
-		closeConn(ctx, conn)
+		CloseConn(ctx, conn)
 		conn = nil
-		if conn, err = m.connect(ctx, slotDB, map[string]string{"statement_timeout": "60s", "lock_timeout": ddlLockTimeout}); err != nil {
+		if conn, err = m.connect(ctx, slotDB, map[string]string{"statement_timeout": "60s", "lock_timeout": DDLLockTimeout}); err != nil {
 			return err
 		}
 	}
@@ -138,7 +138,7 @@ func (m *maint) advanceSlot(ctx context.Context) error {
 		if errors.As(err, &pe) && pe.Code == "55006" {
 			return fmt.Errorf("the replication slot %s became active while Rowsafe was moving it, so it was left alone", m.p.Slot)
 		}
-		return fmt.Errorf("moving the replication slot %s forward failed: %w", m.p.Slot, plainPGError(err))
+		return fmt.Errorf("moving the replication slot %s forward failed: %w", m.p.Slot, PlainPGError(err))
 	}
 	m.res.Summary = fmt.Sprintf("Moved the replication slot %s forward; it no longer holds back cleanup or the change log.", m.p.Slot)
 	m.res.Details = append(m.res.Details, "The tool that reads it skips the changes made before now.")

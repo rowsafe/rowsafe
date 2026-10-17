@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -47,13 +46,6 @@ const (
 type fileTail struct {
 	pos Position
 	f   *os.File
-}
-
-func inode(fi os.FileInfo) uint64 {
-	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
-		return uint64(st.Ino)
-	}
-	return 0
 }
 
 // readResult is one round of reading.
