@@ -1,6 +1,6 @@
 {
   "name": "rowsafe",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Database safety net for AI agents (PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey, SQLite, Qdrant, OpenSearch and Meilisearch): Rowsafe's MCP server (Sign in with Rowsafe), safety and health skills (health checks work without an account, with the rowsafe CLI), and a hook that sets a restore point before migrations and destructive commands.",
   "author": {
     "name": "Adraa Labs",
@@ -30,7 +30,7 @@
   "interface": {
     "displayName": "Rowsafe",
     "shortDescription": "Safety net for your database",
-    "longDescription": "Before a migration or destructive command, Codex checks that your database can be recovered and sets a named Rowsafe restore point (a Mark). If something breaks, you rewind to it from the Rowsafe dashboard. Sign in with Rowsafe once; you choose what Codex may do. Codex never restores or restarts anything on its own: when you ask and have allowed it to act, it makes the change right away with your rights, and every change is in the audit log. Works with PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey, SQLite, Qdrant, OpenSearch and Meilisearch.",
+    "longDescription": "Ask about your databases in plain language: are they backed up, are they healthy, what should you fix first, did this week's restore test pass. Before a migration or destructive command, it checks that your database can be recovered and sets a named restore point (a Mark) you can rewind to from the Rowsafe dashboard. Sign in with Rowsafe and choose the organization: it reads your databases' health, backups and recommendations, and saves Marks if you allow it. It never sees the rows in your tables. Works with PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey, SQLite, Qdrant, OpenSearch and Meilisearch.",
     "developerName": "Adraa Labs",
     "category": "Developer Tools",
     "capabilities": [
