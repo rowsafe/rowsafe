@@ -211,7 +211,11 @@ Restart in the dashboard, or the installer), and only on servers where the
 installer was allowed to (root decides at install time). If this server
 doesn't allow it, the task fails and says how to restart by hand. A database
 waiting for a restart to start its backups finishes setting up by itself
-once it is back.`,
+once it is back.
+
+--at picks a time instead (up to 30 days ahead; "window": a Rowsafe Cloud
+server's maintenance window). Your team's email recipients hear about it
+when it's scheduled, an hour before, and after; --cancel cancels it.`,
 	"fix": `Without FINDING, lists the findings of "rowsafe pulse" that Rowsafe can fix
 by itself, numbered, and (in a terminal) asks which one to apply. Fixes are
 proposed by Rowsafe and checked again right before they run: cleaning up

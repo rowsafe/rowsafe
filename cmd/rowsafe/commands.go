@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -590,9 +592,17 @@ func verifyCmd(ctx context.Context, c *client.Client, args []string) error {
 func restartCmd(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("restart", flag.ContinueOnError)
 	yes := fs.Bool("yes", false, "don't ask for confirmation")
+	at := fs.String("at", "", `restart later: "2026-10-20 03:00" (your time zone), "03:00" (the next one), "in 2h", RFC 3339, or "window" (the server's maintenance window)`)
+	cancel := fs.Bool("cancel", false, "cancel the scheduled restart")
 	name, err := dbArg(ctx, c, fs, args)
 	if err != nil {
 		return err
+	}
+	if *cancel {
+		if *at != "" {
+			return newUsageError("pass --at or --cancel, not both")
+		}
+		return restartCancel(ctx, c, name)
 	}
 	d, err := c.Database(ctx, name)
 	if err != nil {
@@ -600,6 +610,9 @@ func restartCmd(ctx context.Context, c *client.Client, args []string) error {
 	}
 	if !d.CanRestart {
 		return errors.New(restartNotAllowed(d))
+	}
+	if *at != "" {
+		return restartLater(ctx, c, d, *at, *yes)
 	}
 	engine := protocol.EngineDisplayName(d.Engine)
 	fmt.Printf("Database %s on %s (%s)\n", d.Name, d.Hostname, statusText(d.Status))
@@ -633,6 +646,122 @@ func restartCmd(ctx context.Context, c *client.Client, args []string) error {
 		fmt.Printf("\nRowsafe now checks the backups by itself and starts them; follow it with `rowsafe status %s`.\n", d.Name)
 	}
 	return nil
+}
+
+// restartLater schedules a restart of d at the time --at names.
+func restartLater(ctx context.Context, c *client.Client, d protocol.Database, at string, yes bool) error {
+	when, err := parseRestartAt(at)
+	if err != nil {
+		return err
+	}
+	engine := protocol.EngineDisplayName(d.Engine)
+	whenText := "in the server's next maintenance window"
+	if when != protocol.RestartAtWindow {
+		t, _ := time.Parse(time.RFC3339, when)
+		whenText = "at " + describeTime(t)
+	}
+	fmt.Printf("Database %s on %s (%s)\n", d.Name, d.Hostname, statusText(d.Status))
+	fmt.Printf("%s restarts %s: it takes a few seconds; open connections are dropped and apps reconnect.\n", engine, whenText)
+	fmt.Println("Your team's email recipients hear about it now, an hour before, and after.")
+	if err := confirmChange(yes, "Schedule the restart of "+engine+" on "+d.Hostname+" "+whenText+"?"); err != nil {
+		return err
+	}
+	x, err := c.ScheduleRestart(ctx, d.Name, d.Name, when)
+	var ae *client.APIError
+	if errors.As(err, &ae) {
+		switch ae.Status {
+		case http.StatusForbidden:
+			if strings.Contains(ae.Msg, "admins and owners") {
+				return fmt.Errorf("not scheduled: %s", ae.Msg)
+			}
+			return errors.New(strings.Replace(restartNotAllowed(d), "not restarted", "not scheduled", 1))
+		case http.StatusConflict:
+			if strings.Contains(ae.Msg, "already scheduled") {
+				return fmt.Errorf("not scheduled: a restart of %s is already scheduled. Cancel it first with `rowsafe restart %s --cancel`, then pick another time", d.Name, d.Name)
+			}
+			return fmt.Errorf("not scheduled: %s", ae.Msg)
+		case http.StatusBadRequest:
+			return fmt.Errorf("not scheduled: %s", ae.Msg)
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if jsonMode {
+		return printJSON(x)
+	}
+	fmt.Printf("Scheduled: %s restarts at %s. Cancel it with `rowsafe restart %s --cancel`.\n", engine, describeTime(x.At), d.Name)
+	return nil
+}
+
+// restartCancel cancels name's scheduled restart.
+func restartCancel(ctx context.Context, c *client.Client, name string) error {
+	x, err := c.CancelScheduledRestart(ctx, name)
+	var ae *client.APIError
+	if errors.As(err, &ae) && ae.Status == http.StatusNotFound && strings.Contains(ae.Msg, "scheduled") {
+		return fmt.Errorf("no restart of %s is scheduled; nothing to cancel", name)
+	}
+	if err != nil {
+		return err
+	}
+	if jsonMode {
+		return printJSON(x)
+	}
+	fmt.Printf("Cancelled the restart of %s planned for %s.\n", name, describeTime(x.At))
+	return nil
+}
+
+// parseRestartAt reads --at for a restart: "window", "in 2h" (or "2h"),
+// "03:00" (the next 03:00), "2026-10-20 03:00" in the local time zone, or
+// RFC 3339. It returns params.at: "window" or an RFC 3339 time in UTC.
+func parseRestartAt(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	lower := strings.ToLower(s)
+	if lower == protocol.RestartAtWindow {
+		return protocol.RestartAtWindow, nil
+	}
+	n := now()
+	var t time.Time
+	if d, ok := restartIn(lower); ok {
+		if d <= 0 {
+			return "", usageErrorf("--at %q: pick a time in the future", s)
+		}
+		t = n.Add(d)
+	} else if strings.HasSuffix(lower, " ago") {
+		return "", usageErrorf("--at %q: pick a time in the future", s)
+	} else {
+		pt, err := parseRewindTime(s)
+		if err != nil {
+			return "", usageErrorf(`--at: can't read %q: use e.g. "2026-10-20 03:00" (your time zone), "03:00" (the next one), "in 2h", 2026-10-20T01:00:00Z or "window"`, s)
+		}
+		t = pt
+		// "03:00" means the next 03:00.
+		if _, err := time.ParseInLocation("15:04", s, time.Local); err == nil && !t.After(n) {
+			t = t.AddDate(0, 0, 1)
+		} else if _, err := time.ParseInLocation("15:04:05", s, time.Local); err == nil && !t.After(n) {
+			t = t.AddDate(0, 0, 1)
+		}
+	}
+	switch {
+	case !t.After(n):
+		return "", usageErrorf("--at: %s is in the past; pick a time in the future", describeTime(t))
+	case t.After(n.Add(30 * 24 * time.Hour)):
+		return "", usageErrorf("--at: a restart can be scheduled at most 30 days ahead (%s is further)", describeTime(t))
+	}
+	return t.UTC().Format(time.RFC3339), nil
+}
+
+var restartDaysRE = regexp.MustCompile(`^(\d+(?:\.\d+)?)d$`)
+
+// restartIn reads "in 2h", "90m", "1h30m" or "2d".
+func restartIn(s string) (time.Duration, bool) {
+	s = strings.ReplaceAll(strings.TrimPrefix(s, "in "), " ", "")
+	if m := restartDaysRE.FindStringSubmatch(s); m != nil {
+		days, _ := strconv.ParseFloat(m[1], 64)
+		return time.Duration(days * float64(24*time.Hour)), true
+	}
+	d, err := time.ParseDuration(s)
+	return d, err == nil
 }
 
 // restartNotAllowed explains why Rowsafe can't restart d's database.
