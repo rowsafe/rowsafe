@@ -41,8 +41,11 @@ func indexTarget(p protocol.MaintenanceParams) (schema, table string, err error)
 func validName(s string) bool { return s != "" && len(s) <= 64 && !strings.ContainsAny(s, "\x00") }
 
 // noIndexPrivilege turns MySQL's "command denied" into plain words.
-func noIndexPrivilege(err error) error {
+func (s *server) noIndexPrivilege(err error) error {
 	var me *mysqldriver.MySQLError
+	if errors.As(err, &me) && (me.Number == 1142 || me.Number == 1044 || me.Number == 1227) && s.direct != nil {
+		return fmt.Errorf("%s may not create or drop indexes on this table (the INDEX and ALTER privileges)", s.accountWords())
+	}
 	if errors.As(err, &me) && (me.Number == 1142 || me.Number == 1044 || me.Number == 1227) {
 		return errors.New("Rowsafe's database account may not create or drop indexes (the INDEX privilege): run the Rowsafe installer on the server again to update its account, then try again")
 	}
@@ -118,7 +121,7 @@ func (s *server) createIndex(ctx context.Context, db *sql.DB, p protocol.Mainten
 	log.Printf("%s", stmt)
 	start := time.Now()
 	if _, err := db.ExecContext(ctx, stmt); err != nil {
-		return fmt.Errorf("creating the index: %w", noIndexPrivilege(err))
+		return fmt.Errorf("creating the index: %w", s.noIndexPrivilege(err))
 	}
 	res.Summary = fmt.Sprintf("Created the index %s on %s.%s (%s) in %s; reads and writes went on while it was built.",
 		name, schema, table, strings.Join(spec.Columns, ", "), time.Since(start).Round(time.Second))
@@ -170,11 +173,13 @@ func (s *server) dropIndex(ctx context.Context, db *sql.DB, p protocol.Maintenan
 			return fmt.Errorf("the index %s has been used since it was found unused (%d reads): it was kept", name, reads)
 		}
 	}
-	stmt := fmt.Sprintf("DROP INDEX %s ON %s ALGORITHM=INPLACE LOCK=NONE", quoteIdent(name), quoteIdent(schema)+"."+quoteIdent(table))
+	// ALTER TABLE: MariaDB's DROP INDEX takes no ALGORITHM or LOCK.
+	stmt := fmt.Sprintf("ALTER TABLE %s DROP INDEX %s, ALGORITHM=INPLACE, LOCK=NONE", quoteIdent(schema)+"."+quoteIdent(table), quoteIdent(name))
 	log.Printf("%s", stmt)
 	if _, err := db.ExecContext(ctx, stmt); err != nil {
-		return fmt.Errorf("dropping the index: %w", noIndexPrivilege(err))
+		return fmt.Errorf("dropping the index: %w", s.noIndexPrivilege(err))
 	}
 	res.Summary = fmt.Sprintf("Dropped the index %s on %s.%s (%s); writes no longer maintain it.", name, schema, table, humanBytes(found.bytes))
+	res.Details = append(res.Details, fmt.Sprintf("To create it again: ALTER TABLE %s.%s ADD %s", quoteIdent(schema), quoteIdent(table), found.definition()))
 	return nil
 }

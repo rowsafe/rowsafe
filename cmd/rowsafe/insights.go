@@ -166,6 +166,19 @@ func insightsCmd(ctx context.Context, c *client.Client, args []string) error {
 // printInsights shows tables and indexes; fixCmd is the command that
 // applies a fix ("rowsafe fix NAME").
 func printInsights(name string, ins protocol.InsightsResponse, limit int, fixCmd string) {
+	printInsightsFor("", name, ins, limit, fixCmd)
+}
+
+// printInsightsFor words them for an engine (protocol.Engine*; "" is
+// PostgreSQL's wording).
+func printInsightsFor(engine, name string, ins protocol.InsightsResponse, limit int, fixCmd string) {
+	my := engine == protocol.EngineMySQL || engine == protocol.EngineMariaDB
+	unusedHint, wasted, wastedHint := "Never used since statistics were reset; they slow down writes (use on replicas is not counted).",
+		"Wasted space (estimate)", "Estimated from PostgreSQL's statistics; rebuilding gives the space back."
+	if my {
+		unusedHint, wasted, wastedHint = "Never used since "+protocol.EngineDisplayName(engine)+" started; they slow down writes (use on replicas is not counted).",
+			"Free space inside tables", "InnoDB's free space inside each table: the table reuses it, a rebuild (OPTIMIZE TABLE) gives it back to the disk."
+	}
 	if !ins.Available {
 		fmt.Printf("No table insights for %s yet. %s\n", name, ins.Reason)
 		return
@@ -202,7 +215,7 @@ func printInsights(name string, ins protocol.InsightsResponse, limit int, fixCmd
 		}
 		t.flush()
 	}
-	if section("Unused indexes", "Never used since statistics were reset; they slow down writes (use on replicas is not counted).", len(ins.UnusedIndexes)) {
+	if section("Unused indexes", unusedHint, len(ins.UnusedIndexes)) {
 		t := newTable("  INDEX", "TABLE", "SIZE", "UNUSED SINCE")
 		for _, x := range cut(ins.UnusedIndexes, n) {
 			since := "statistics began"
@@ -228,7 +241,7 @@ func printInsights(name string, ins protocol.InsightsResponse, limit int, fixCmd
 		}
 		t.flush()
 	}
-	if section("Dead rows and vacuum", "", len(ins.VacuumStats)) {
+	if !my && section("Dead rows and vacuum", "", len(ins.VacuumStats)) {
 		t := newTable("  TABLE", "DEAD ROWS", "DEAD %", "LAST VACUUM", "LAST ANALYZE")
 		for _, x := range cut(ins.VacuumStats, n) {
 			t.row("  "+qual(x.Database, x.Schema, x.Table), strconv.FormatInt(x.DeadRows, 10), fmt.Sprintf("%.0f%%", x.DeadPct),
@@ -236,8 +249,7 @@ func printInsights(name string, ins protocol.InsightsResponse, limit int, fixCmd
 		}
 		t.flush()
 	}
-	if section("Wasted space (estimate)", "Estimated from PostgreSQL's statistics; rebuilding gives the space back.",
-		len(ins.TableBloat)+len(ins.IndexBloat)) {
+	if section(wasted, wastedHint, len(ins.TableBloat)+len(ins.IndexBloat)) {
 		t := newTable("  TABLE OR INDEX", "SIZE", "WASTED (EST.)", "WASTED %")
 		for _, x := range cut(ins.TableBloat, n) {
 			t.row("  "+qual(x.Database, x.Schema, x.Table), humanBytes(x.TableBytes), humanBytes(x.BloatBytes), fmt.Sprintf("%.0f%%", x.BloatPct))
@@ -247,10 +259,17 @@ func printInsights(name string, ins protocol.InsightsResponse, limit int, fixCmd
 		}
 		t.flush()
 	}
-	if section("Oldest transaction IDs", "At 100% PostgreSQL stops accepting writes; autovacuum freezes tables long before.", len(ins.FreezeAge)) {
+	if !my && section("Oldest transaction IDs", "At 100% PostgreSQL stops accepting writes; autovacuum freezes tables long before.", len(ins.FreezeAge)) {
 		t := newTable("  TABLE", "XID AGE", "OF LIMIT")
 		for _, x := range cut(ins.FreezeAge, min(n, 5)) {
 			t.row("  "+qual(x.Database, x.Schema, x.Table), strconv.FormatInt(x.XIDAge, 10), fmt.Sprintf("%.1f%%", x.WraparoundPct))
+		}
+		t.flush()
+	}
+	if my && ins.Advisor != nil && section("Tables without a primary key", "InnoDB uses a hidden key; replicas and online migration tools struggle with them.", len(ins.Advisor.NoPrimaryKey)) {
+		t := newTable("  TABLE", "SIZE", "ROWS (EST.)")
+		for _, x := range cut(ins.Advisor.NoPrimaryKey, n) {
+			t.row("  "+qual(x.Database, x.Schema, x.Table), humanBytes(x.TableBytes), strconv.FormatInt(x.RowsEstimate, 10))
 		}
 		t.flush()
 	}
@@ -343,12 +362,20 @@ func topCmd(ctx context.Context, c *client.Client, args []string) error {
 // for when the per-interval numbers are not there yet (or without an
 // agent); note follows the heading.
 func printCumulativeTop(name string, st protocol.Statements, width int, note string) error {
+	return printCumulativeTopFor("", name, st, width, note)
+}
+
+// printCumulativeTopFor words it for an engine ("" is PostgreSQL).
+func printCumulativeTopFor(engine, name string, st protocol.Statements, width int, note string) error {
+	since, none := "since pg_stat_statements was last reset", "they need pg_stat_statements; the first numbers arrive 10 minutes after the agent starts"
+	if engine == protocol.EngineMySQL || engine == protocol.EngineMariaDB {
+		since, none = "since "+protocol.EngineDisplayName(engine)+" started (performance_schema)", "performance_schema has recorded no statements yet"
+	}
 	if !st.Available || len(st.Statements) == 0 {
-		fmt.Printf("No query statistics for %s yet: %s\n", name, cmp.Or(st.Reason,
-			"they need pg_stat_statements; the first numbers arrive 10 minutes after the agent starts"))
+		fmt.Printf("No query statistics for %s yet: %s\n", name, cmp.Or(st.Reason, none))
 		return nil
 	}
-	fmt.Printf("Top statements of %s by total time since pg_stat_statements was last reset (collected %s).\n", name, ago(&st.CollectedAt))
+	fmt.Printf("Top statements of %s by total time %s (collected %s).\n", name, since, ago(&st.CollectedAt))
 	if note != "" {
 		fmt.Println(note)
 	}

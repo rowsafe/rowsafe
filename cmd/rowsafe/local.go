@@ -16,9 +16,10 @@ import (
 	"github.com/rowsafe/rowsafe/tune"
 )
 
-// Without an account: these commands also run on a PostgreSQL database the
-// CLI reaches directly, given a connection string (rowsafe pulse
-// postgres://user@host/db), or $DATABASE_URL when there is no saved login.
+// Without an account: these commands also run on a PostgreSQL, MySQL or
+// MariaDB database the CLI reaches directly, given a connection string
+// (rowsafe pulse postgres://user@host/db, mysql://user@host/db), or
+// $DATABASE_URL when there is no saved login.
 // Nothing is sent to Rowsafe. Backups, Proof, alerts and history need the
 // agent on the server and an account (rowsafe login).
 
@@ -36,10 +37,10 @@ Rewind needs an account for now):
   sudo rowsafe login                 later: connects this server to an account (the dashboard,
                                      alerts, Rewind), keeping its backups, Proofs and Marks
 
-From anywhere, on a PostgreSQL this computer reaches (also managed ones): save
-it once, then use it by name:
+From anywhere, on a PostgreSQL, MySQL or MariaDB database this computer
+reaches (also managed ones): save it once, then use it by name:
 
-  rowsafe add shop postgres://USER:PASSWORD@HOST:5432/DB
+  rowsafe add shop postgres://USER:PASSWORD@HOST:5432/DB    (or mysql://USER:PASSWORD@HOST:3306/DB)
                                      save it on this computer (checks it connects, read-only). Pipe
                                      the string in or pass --from-env VAR to keep the password out
                                      of your shell history. No arguments: offers DATABASE_URL from
@@ -61,16 +62,18 @@ it once, then use it by name:
                                      settings that suit the server, applied with ALTER SYSTEM and a
                                      reload (nothing restarts)
   rowsafe schema [NAME] [TABLE...]   tables, columns, keys, indexes (used or not), views and enums,
-                                     compact for an AI agent (--json: everything)
+                                     compact for an AI agent (--json: everything; PostgreSQL for now)
   rowsafe explain [NAME] "SELECT ..."
                                      why a query is slow, in plain words, and the index that would
-                                     likely help (--analyze runs a SELECT read-only; -f FILE)
+                                     likely help (--analyze runs a SELECT read-only; -f FILE;
+                                     PostgreSQL for now)
   rowsafe preview [NAME] FILE [--static] [--json] [--fail-on careful|dangerous]
                                      check a migration without changing the database: it runs on an
                                      empty copy of the schema in a temporary database on the same
                                      server (when the role may create one), else Rowsafe reads the
                                      SQL; locks, rewrites, drops and a verdict, with times estimated
-                                     from the table sizes. No restore point: back up first (pg_dump)
+                                     from the table sizes. No restore point: back up first (pg_dump).
+                                     PostgreSQL for now
   rowsafe mcp [NAME] [--allow-writes]
                                      an MCP server for AI assistants with these tools, and
                                      check_migration
@@ -78,7 +81,8 @@ it once, then use it by name:
                                      SQL and tells the assistant there is no restore point
 
 Once, without saving: a connection string instead of NAME (rowsafe pulse
-postgres://USER@HOST:5432/DB), or DATABASE_URL when you aren't logged in.
+postgres://USER@HOST:5432/DB, mysql://USER@HOST:3306/DB or mariadb://...), or
+DATABASE_URL when you aren't logged in.
 
 Which database: a connection string; else a saved NAME; else this project's
 (ROWSAFE_DATABASE or .rowsafe.json) when it's saved here; else DATABASE_URL.
@@ -89,12 +93,22 @@ Saved connection strings stay in your config folder (rowsafe/databases.json),
 readable only by you: never in the project, never sent to Rowsafe. Reads are
 read-only, with short timeouts. A fix is looked up again in a fresh check, and
 every name is checked again before anything changes. Passwords: in the string,
-PGPASSWORD or ~/.pgpass.
+PGPASSWORD or ~/.pgpass (MySQL: MYSQL_PWD).
 
 Connection poolers (PgBouncer, Supavisor, Neon's pooler) work for everything
 but the fixes that run in the database itself (cleaning up tables, indexes,
 ending a session, replication slots): those need the direct connection
 string. Settings changes work through a pooler.
+
+MySQL and MariaDB: sessions, long transactions, locks, InnoDB's old row
+versions, free space inside tables, the buffer pool, the slow query log,
+unused and duplicate indexes and tables without a primary key; fixes stop a
+query, end a session, drop an index, turn on the slow query log and rebuild a
+table (only when its data directory is on this machine: Rowsafe checks the
+disk has room). top reads performance_schema. tune changes MySQL's settings
+with SET PERSIST; MariaDB keeps them in its configuration file, which a
+connection can't reach. Replication isn't checked. The account needs PROCESS
+to see other sessions.
 
 Rowsafe can't see another server's memory or disk over a connection: pass
 --memory and --cpus for settings advice. Backups, restore to any second, the
@@ -182,7 +196,7 @@ func localControl(want string) (url string, err error) {
 
 // notLoggedIn explains what works without an account.
 const notLoggedIn = "not logged in: run `rowsafe login`.\n" +
-	"Without an account, pulse, fix, insights, top, activity, settings, tune, schema, explain, preview and mcp work on a PostgreSQL database directly:\n" +
+	"Without an account, pulse, fix, insights, top, activity, settings, tune, schema, explain, preview and mcp work on a database directly (PostgreSQL; MySQL and MariaDB but schema, explain and preview):\n" +
 	"  rowsafe add shop postgres://user@host:5432/dbname   then: rowsafe pulse shop\n" +
 	"  or once: rowsafe pulse postgres://user@host:5432/dbname   (or set DATABASE_URL)"
 
@@ -382,7 +396,7 @@ func localInsights(ctx context.Context, l *localDB, args []string) error {
 	if *asJSON {
 		return printJSON(resp)
 	}
-	printInsights(l.Name(), resp, *limit, l.Command("fix"))
+	printInsightsFor(l.Engine(), l.Name(), resp, *limit, l.Command("fix"))
 	return nil
 }
 
@@ -406,7 +420,7 @@ func localTop(ctx context.Context, l *localDB, args []string) error {
 	if *asJSON {
 		return printJSON(st)
 	}
-	return printCumulativeTop(l.Name(), *st, *width,
+	return printCumulativeTopFor(l.Engine(), l.Name(), *st, *width,
 		"Which queries got slower over time needs history: the Rowsafe agent keeps it.")
 }
 
@@ -463,7 +477,7 @@ func localSettings(ctx context.Context, l *localDB, args []string) error {
 	if len(pos) == 1 {
 		return printSetting(l.Name(), ov, strings.ToLower(pos[0]), "")
 	}
-	printSettings(l.Name(), ov, *all, settingsHints{restart: "Restart PostgreSQL when it suits you; nothing restarts by itself.", tune: l.Command("tune")})
+	printSettings(l.Name(), ov, *all, settingsHints{restart: "Restart " + l.EngineName() + " when it suits you; nothing restarts by itself.", tune: l.Command("tune")})
 	return nil
 }
 
@@ -529,9 +543,13 @@ func localTune(ctx context.Context, l *localDB, args []string) error {
 		return errors.New(orText(ov.ChangeReason, "Rowsafe can't change settings on this database now"))
 	}
 	fmt.Println()
-	fmt.Println("Rowsafe changes them with ALTER SYSTEM and reloads PostgreSQL (that needs a superuser); the result lists the old values.")
+	if l.Engine() == protocol.EnginePostgreSQL {
+		fmt.Println("Rowsafe changes them with ALTER SYSTEM and reloads PostgreSQL (that needs a superuser); the result lists the old values.")
+	} else {
+		fmt.Printf("Rowsafe changes them with SET PERSIST, so they last after a restart (that needs SYSTEM_VARIABLES_ADMIN); the result lists the old values.\n")
+	}
 	if restart {
-		fmt.Println("Some take effect only after PostgreSQL restarts; nothing restarts now.")
+		fmt.Printf("Some take effect only after %s restarts; nothing restarts now.\n", l.EngineName())
 	}
 	if !*yes && !stdinIsTerminal() {
 		return errors.New("not changed: pass --yes to apply without a terminal")

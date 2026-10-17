@@ -37,10 +37,12 @@ func (s *server) slowLogFacts(ctx context.Context, db *sql.DB) *protocol.MySQLSl
 	}
 	f.File = path
 	f.On = (on.String == "1" || strings.EqualFold(on.String, "ON")) && strings.Contains(strings.ToUpper(output.String), "FILE")
-	if st, err := os.Stat(path); err == nil {
-		f.Bytes = st.Size()
+	if s.direct == nil || s.local { // the file is on this machine
+		if st, err := os.Stat(path); err == nil {
+			f.Bytes = st.Size()
+		}
+		f.Rotated = logrotateCovers(filepath.Dir(path))
 	}
-	f.Rotated = logrotateCovers(filepath.Dir(path))
 	f.Persist = !s.flavor.mariadb() && !strings.HasPrefix(version.String, "5.")
 	f.CanSet = canSetVariables(ctx, db)
 	return f
@@ -118,7 +120,7 @@ func (s *server) slowLogOn(ctx context.Context, db *sql.DB, res *protocol.Mainte
 		if _, err := db.ExecContext(ctx, q); err != nil {
 			var me *mysqldriver.MySQLError
 			if errors.As(err, &me) && (me.Number == 1227 || me.Number == 1142) {
-				return fmt.Errorf("Rowsafe's database account may not change server settings (it needs %s): turn the slow query log on yourself", map[bool]string{true: "SUPER", false: "SYSTEM_VARIABLES_ADMIN"}[s.flavor.mariadb()])
+				return fmt.Errorf("%s may not change server settings (it needs %s): turn the slow query log on yourself", s.accountWords(), map[bool]string{true: "SUPER", false: "SYSTEM_VARIABLES_ADMIN"}[s.flavor.mariadb()])
 			}
 			return fmt.Errorf("%s: %w", q, err)
 		}

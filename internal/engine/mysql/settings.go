@@ -95,6 +95,9 @@ func (s *server) settingsSnapshot(ctx context.Context, db *sql.DB) (*protocol.Se
 	if s.env.Config.Sidecar() {
 		snap.Host = collect.HostFacts("", "")
 	}
+	if s.direct != nil && !s.local {
+		snap.Host = protocol.SettingsHost{} // another machine's: unknown
+	}
 	type row struct {
 		value, source, file, min, max, def string
 	}
@@ -292,6 +295,9 @@ func (s *server) settings(ctx context.Context, p protocol.SettingsParams, log ag
 				stmt = "SET PERSIST_ONLY " + c.Name + " = " + sqlValue(value)
 			}
 			if _, err := db.ExecContext(ctx, stmt); err != nil {
+				if isAccessDenied(err) && s.direct != nil {
+					return res, fmt.Errorf("%s may not change settings (it needs SYSTEM_VARIABLES_ADMIN, and PERSIST_RO_VARIABLES_ADMIN for the ones read at start): %w", s.accountWords(), plainError(err))
+				}
 				if isAccessDenied(err) {
 					return res, fmt.Errorf("Rowsafe's MySQL account can't change settings yet (it was set up before Tuning came to MySQL): "+
 						"run this once on the server as root, then try again: sudo rowsafe-agent setup mysql-account --engine mysql --port %d", s.db.Port)

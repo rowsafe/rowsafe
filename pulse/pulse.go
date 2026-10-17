@@ -1,9 +1,10 @@
-// Package pulse turns one reading of a PostgreSQL database into a health
-// score from 0 to 100 and a short list of findings in plain language, each
-// with the fixes Rowsafe can apply. It needs no agent and no account:
-// `rowsafe pulse postgres://...` reads the database (collect.Read) and
-// evaluates it here. It is pure and deterministic: the same input always
-// gives the same result.
+// Package pulse turns one reading of a PostgreSQL, MySQL or MariaDB
+// database into a health score from 0 to 100 and a short list of findings
+// in plain language, each with the fixes Rowsafe can apply. It needs no
+// agent and no account: `rowsafe pulse postgres://...` reads the database
+// (collect.Read; MySQL and MariaDB: the MySQL engine's reading) and
+// evaluates it here (MySQL's rules: mysql.go). It is pure and
+// deterministic: the same input always gives the same result.
 //
 // It covers what the database itself shows: connections, cleanup (vacuum,
 // transaction ID wraparound, bloat, long transactions), performance
@@ -61,6 +62,9 @@ const (
 type Input struct {
 	// Database and Host name it for people (never with a password).
 	Database, Host string
+	// Engine is protocol.EngineMySQL or EngineMariaDB for their rules
+	// (mysql.go); "" or EnginePostgreSQL is PostgreSQL.
+	Engine string
 	// Metrics are collect's gauges (collect.M*).
 	Metrics map[string]float64
 	// Activity: sessions running or idle in a transaction for over a
@@ -176,10 +180,14 @@ func Evaluate(in Input, now time.Time) protocol.DatabaseHealth {
 	if in.Local {
 		e.disk(fresh)
 	}
-	e.connections(fresh)
-	e.maintenance(fresh)
-	e.performance(fresh)
-	e.replication(fresh)
+	if e.mysqlFamily() {
+		e.mysql(fresh) // mysql.go
+	} else {
+		e.connections(fresh)
+		e.maintenance(fresh)
+		e.performance(fresh)
+		e.replication(fresh)
+	}
 
 	slices.SortStableFunc(e.findings, func(a, b protocol.Finding) int {
 		return cmp.Or(cmp.Compare(severityRank(b.Severity), severityRank(a.Severity)), cmp.Compare(b.Penalty, a.Penalty))

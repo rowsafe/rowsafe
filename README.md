@@ -50,7 +50,9 @@ rowsafe use shop                                    # in a project: then just `r
 
 Pulse checks cleanup falling behind, bloat, duplicate and unused indexes, stuck sessions, locks, connections, replication slots, transaction ID wraparound and settings. The connection string stays in your config folder, readable only by you; `rowsafe pulse postgres://…` works once without saving, and `rowsafe use shop` makes it a project's database. Through a pooler, everything works but the fixes that run inside the database. Nothing is sent to Rowsafe. `rowsafe help local` has the rest; the demo above is a [real recording](docs/demo).
 
-On Windows, download `rowsafe-windows-amd64.exe` (or `-arm64.exe`) from the [latest release](https://github.com/rowsafe/rowsafe/releases/latest); the commands from anywhere work there except applying fixes and settings (`fix`, `tune --yes`), for now.
+MySQL and MariaDB work the same way (`rowsafe add shop mysql://user@host:3306/dbname`): stuck sessions and locks, long transactions, InnoDB's old row versions, the buffer pool, free space inside tables, unused and duplicate indexes, tables without a primary key and the slow query log, with fixes to end a session, drop an index, turn on the slow log and rebuild a table. Not yet: `schema`, `explain`, `preview`, replication checks, and MariaDB settings changes (they live in its configuration file).
+
+On Windows, download `rowsafe-windows-amd64.exe` (or `-arm64.exe`) from the [latest release](https://github.com/rowsafe/rowsafe/releases/latest); the commands from anywhere work there except applying fixes and settings (`fix`, `tune --yes`) and MySQL, for now.
 
 ## Get started
 

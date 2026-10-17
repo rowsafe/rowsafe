@@ -172,6 +172,9 @@ func dsn(a account, socket string, port int) *mysql.Config {
 // connection: statements that belong together (a transaction, session
 // settings) run on it.
 func (s *server) open(ctx context.Context) (*sql.DB, error) {
+	if s.direct != nil {
+		return s.openDirect(ctx) // direct.go
+	}
 	a, err := s.account()
 	if err != nil {
 		return nil, err
