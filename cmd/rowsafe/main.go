@@ -384,6 +384,14 @@ Admin
   rowsafe api-keys revoke ID
   rowsafe audit [--limit N]                  who changed what, newest first
 
+Usage counts: off unless you turn them on; nothing is sent by default
+  rowsafe telemetry status [--json]          on or off, and exactly what would be sent after each command
+  rowsafe telemetry on                       send anonymous counts of the commands you run: names from this
+                                             list, version, OS, exit code, how long, terminal or AI agent,
+                                             logged in or not, a random ID. Never arguments, names or errors
+  rowsafe telemetry off                      stop, and forget the random ID (ROWSAFE_TELEMETRY=0 or
+                                             DO_NOT_TRACK=1 also keep them off)
+
 Backups, proof and mark wait for the task to finish; pass --no-wait to return at once.
 Changes ask first on a terminal. Scripts and AI agents pass --yes; without a terminal, a change without --yes is
 refused. --json prints JSON for scripts (messages go to stderr). The CLI acts as the person behind the key, with
@@ -454,7 +462,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := dispatch(ctx, args); err != nil {
+	run := telemetryStart(args) // usage counts, off unless turned on (telemetry.go)
+	err := dispatch(ctx, args)
+	run.done(err)
+	if err != nil {
 		var exit exitError
 		if errors.As(err, &exit) {
 			os.Exit(int(exit)) // the command already said what happened
@@ -517,6 +528,8 @@ func dispatch(ctx context.Context, args []string) error {
 		return login(ctx, rest)
 	case "logout":
 		return logout(ctx, rest)
+	case "telemetry":
+		return telemetryCmd(rest)
 	case "whoami":
 		return whoami(ctx, rest)
 	case "guard":
