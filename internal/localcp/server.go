@@ -138,8 +138,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/agent/monitoring", s.agent(s.monitoring))
 	// Reports kept on the server for now: accepted, not stored.
 	for path, ack := range map[string]any{
-		"/v1/agent/logs":     protocol.LogAck{Databases: []protocol.LogSettings{}},
-		"/v1/agent/security": protocol.SecurityAck{}, "/v1/agent/files": protocol.FilesSync{Databases: []protocol.FilesConfig{}},
+		"/v1/agent/logs":  protocol.LogAck{Databases: []protocol.LogSettings{}},
+		"/v1/agent/files": protocol.FilesSync{Databases: []protocol.FilesConfig{}},
 	} {
 		mux.HandleFunc("POST "+path, s.agent(func(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 64<<20))
@@ -164,6 +164,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/databases/{ref}/restore-points", s.marks)
 	mux.HandleFunc("POST /v1/databases/{ref}/restore-points", s.createMark)
 	s.rewindRoutes(mux)                                             // rewind.go
+	s.securityRoutes(mux)                                           // security.go
 	mux.HandleFunc("GET /v1/notification-channels", s.channelsList) // alerts.go
 	mux.HandleFunc("POST /v1/notification-channels", s.channelsCreate)
 	mux.HandleFunc("DELETE /v1/notification-channels/{id}", s.channelsDelete)

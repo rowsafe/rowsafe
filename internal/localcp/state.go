@@ -49,6 +49,8 @@ type state struct {
 	Alerts       []*alertRec           `json:"alerts,omitempty"`
 	AlertPending map[string]time.Time  `json:"alert_pending,omitempty"`
 	Metrics      map[string]*dbMetrics `json:"metrics,omitempty"`
+	// Security (security.go): each database's newest security report.
+	Security map[string]*securityRec `json:"security,omitempty"`
 }
 
 // hostRec is this server, once its agent has enrolled.

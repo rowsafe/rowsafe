@@ -15,6 +15,7 @@
 #   make test-rewind           a real Rewind (copy, rows, in place, undo) on a systemd Debian container (Docker)
 #   make test-pooling          real PgBouncer through the root helper on a systemd Debian container (Docker)
 #   make test-no-account-pooler  rowsafe pulse postgres://... through a real PgBouncer in transaction mode (Docker)
+#   make test-no-account-security  rowsafe security and its fixes on a server on its own, for real (Docker)
 #   make test-permissions      passkey-signed permission changes through root's helper on a systemd Debian container (Docker)
 #   make test-secondcopy       a real second backup copy (two storages, one going away) in a Debian container (Docker)
 #   make test-sftp             backups to a real SFTP server: the installer's setup and the agent (Docker)
@@ -172,6 +173,9 @@ test-secondcopy:
 
 test-no-account-pooler:
 	sh scripts/test-no-account-pooler.sh
+
+test-no-account-security:
+	sh scripts/test-no-account-security.sh
 
 test-sftp:
 	sh scripts/test-sftp.sh

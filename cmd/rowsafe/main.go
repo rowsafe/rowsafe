@@ -319,7 +319,9 @@ Pulse: health, monitoring and alerts
         [--password-env VAR] [--yes] [--no-wait] [--json]
                                              without ACTION: the actions and whether each can run now. E.g.
                                              restrict_access --allow 10.0.0.0/16, enable_tls, firewall, set_password
-                                             --role app (the password is made here; Rowsafe never sees it)
+                                             --role app (the password is made here; Rowsafe never sees it). ACTION
+                                             may be a finding's ID (security_tls_off). On the server, root is asked
+                                             before Rowsafe may touch the server itself (firewall, restart)
   rowsafe logs [NAME] [--kind errors|locks|maintenance|KIND] [--search TEXT] [--limit 50] [--groups] [--follow] [--json]
                                              the database's log entries (redacted on the server), newest last;
                                              --groups: repeated messages of the last 24 hours

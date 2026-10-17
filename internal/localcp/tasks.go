@@ -288,6 +288,8 @@ func (s *state) afterTask(t *taskRec, db *dbRec, req protocol.CompleteRequest, n
 		s.finishMark(t.ID, res, now)
 	case protocol.TaskRewindCopy, protocol.TaskRewindDrop:
 		s.afterRewind(t, ok, req.Result, now) // rewind.go
+	case protocol.TaskSecurityScan, protocol.TaskSecurityFix:
+		s.afterSecurity(t, ok, req.Result, now) // security.go
 	}
 	return nil
 }
