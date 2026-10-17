@@ -28,9 +28,10 @@ curl -fsSL https://rowsafe.sh | sudo sh -s -- --no-account
 sudo rowsafe status shop                  # protected? backups, the change log, the last restore test
 sudo rowsafe mark shop before-migration   # a restore point (a Mark)
 sudo rowsafe backups shop                 # also: proofs, backup, proof
+sudo rowsafe login                        # later: the dashboard, alerts and Rewind, keeping it all
 ```
 
-Continuous backups to your own bucket, Marks, a weekly restore test and Pulse, with no account. Restoring with Rewind needs an account for now; connecting the server to one later is coming.
+Continuous backups to your own bucket, Marks, a weekly restore test and Pulse, with no account. Restoring with Rewind needs an account for now.
 
 From anywhere, on a PostgreSQL you can connect to (managed ones too):
 

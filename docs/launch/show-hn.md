@@ -9,7 +9,6 @@ Drafts only. Nothing here has been posted. The founder edits and posts.
 - Every command below works on that release, and rowsafe.sh/docs/guides/no-account-server is live.
 - Restores without an account: confirm pgBackRest restores the backups by hand with the
   passphrase from the server, or cut "What if you go away?".
-- Once "log in later" (rowsafe/rowsafe#77) ships, say that `sudo rowsafe login` connects the server later.
 - The demo was recorded with v0.10.18: re-record it (`docs/demo/record.sh`) if pulse's output changed.
 
 ## Show HN
@@ -29,7 +28,7 @@ Drafts only. Nothing here has been posted. The founder edits and posts.
 >
 >     curl -fsSL https://rowsafe.sh | sudo sh -s -- --no-account
 >
-> That sets up continuous backups of PostgreSQL to your own S3 bucket (pgBackRest, encrypted on the server with a passphrase only you hold), a restore test every week that restores the latest backup next to production and checks it, and a health score. `sudo rowsafe status shop` says whether it's protected, `sudo rowsafe mark shop before-migration` saves a named restore point, `sudo rowsafe backups shop` lists backups. Restoring through Rowsafe (a copy as of any second, bringing back deleted rows, rewinding in place) needs an account for now.
+> That sets up continuous backups of PostgreSQL to your own S3 bucket (pgBackRest, encrypted on the server with a passphrase only you hold), a restore test every week that restores the latest backup next to production and checks it, and a health score. `sudo rowsafe status shop` says whether it's protected, `sudo rowsafe mark shop before-migration` saves a named restore point, `sudo rowsafe backups shop` lists backups. Restoring through Rowsafe (a copy as of any second, bringing back deleted rows, rewinding in place) needs an account for now. `sudo rowsafe login` connects the server to an account later and keeps its backups and Marks.
 >
 > For a database you can't install anything on (RDS, Cloud SQL, Supabase, Neon), from your laptop:
 >
