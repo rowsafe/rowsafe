@@ -68,7 +68,7 @@ type serverInfo struct {
 
 // Preview checks the migration sql without changing this database.
 func (d *DB) Preview(ctx context.Context, sql string, o PreviewOptions) (*protocol.PreviewResult, error) {
-	if d.my != nil {
+	if d.conn == nil {
 		return nil, fmt.Errorf("checking a migration works on PostgreSQL for now, not %s", d.EngineName())
 	}
 	progress := o.Progress

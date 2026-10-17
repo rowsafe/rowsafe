@@ -27,7 +27,7 @@ func (e *evaluator) disk(fresh bool) {
 	freePct, ok := e.in.Metrics[collect.MDiskFreePct]
 	if !fresh || !ok {
 		why := "No disk readings (PostgreSQL shows its data directory only to superusers)."
-		if e.mysqlFamily() {
+		if e.mysqlFamily() || e.mongodb() {
 			why = "No disk readings (the data directory isn't on this machine's disk)."
 		}
 		e.check(CatDisk, label, "unknown", why)
@@ -39,6 +39,9 @@ func (e *evaluator) disk(fresh bool) {
 	full, cmd := "Free up or add disk space now. The change log folder (pg_wal) grows when archiving or a replication slot holds it back.", "df -h; du -sh $PGDATA/pg_wal"
 	if e.mysqlFamily() {
 		full, cmd = "Free up or add disk space now. Old binary logs (binlog_expire_logs_seconds) and tables with free space inside are the usual places to look.", "df -h; du -sh /var/lib/mysql"
+	}
+	if e.mongodb() {
+		full, cmd = "Free up or add disk space now. Unused indexes and collections nobody needs any more are the usual places to look; MongoDB gives the space of deleted documents back only when a collection is compacted.", "df -h; du -sh /var/lib/mongodb"
 	}
 	switch {
 	case freePct < 5:
@@ -52,7 +55,7 @@ func (e *evaluator) disk(fresh bool) {
 		e.add(protocol.Finding{ID: "disk_low", Category: CatDisk, Severity: protocol.SeverityWarning, Penalty: 15,
 			Title:       fmt.Sprintf("Disk space is running low (%.0f%% free)", freePct),
 			Explanation: "Less than 15% of the disk is free. When it fills up, " + name + " stops accepting changes.",
-			Action:      diskAction("Plan more disk space, or reclaim space from bloated tables and unused indexes.", space),
+			Action:      diskAction(map[bool]string{false: "Plan more disk space, or reclaim space from bloated tables and unused indexes.", true: "Plan more disk space, or reclaim space from old data and unused indexes."}[e.mongodb()], space),
 			Fixes:       space})
 	}
 	status, _ := e.statusOf(CatDisk, "ok", "")

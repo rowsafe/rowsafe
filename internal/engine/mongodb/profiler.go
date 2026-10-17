@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 
 	"github.com/rowsafe/rowsafe/internal/agent"
 	"github.com/rowsafe/rowsafe/protocol"
@@ -19,12 +20,18 @@ import (
 // only writes operations slower than slowms into a small capped collection
 // (system.profile, 1 MB by default): a negligible cost.
 func (e *Engine) profileOn(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec, p protocol.MaintenanceParams, tl agent.TaskLogger) (*protocol.MaintenanceResult, error) {
-	start := time.Now()
 	c, err := connectDB(ctx, env, db)
 	if err != nil {
 		return nil, err
 	}
 	defer disconnect(c)
+	return profileOnClient(ctx, c, p, "Rowsafe's MongoDB user may not change the profiler yet: run the install command on the server again (it refreshes Rowsafe's role), then try again", tl)
+}
+
+// profileOnClient turns the profiler on over c; denied is the error when
+// c's user may not.
+func profileOnClient(ctx context.Context, c *mongo.Client, p protocol.MaintenanceParams, denied string, tl agent.TaskLogger) (*protocol.MaintenanceResult, error) {
+	start := time.Now()
 	dbs, err := userDatabases(ctx, c)
 	if err != nil {
 		return nil, err
@@ -40,7 +47,7 @@ func (e *Engine) profileOn(ctx context.Context, env agent.EngineEnv, db protocol
 		}
 		if err := c.Database(name).RunCommand(ctx, bson.D{{Key: "profile", Value: 1}}).Err(); err != nil {
 			if isUnauthorized(err) {
-				return nil, errors.New("Rowsafe's MongoDB user may not change the profiler yet: run the install command on the server again (it refreshes Rowsafe's role), then try again")
+				return nil, errors.New(denied)
 			}
 			return nil, fmt.Errorf("turning the profiler on in %s: %w", name, err)
 		}

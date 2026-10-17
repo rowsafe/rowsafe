@@ -1,6 +1,7 @@
 // Package local is Rowsafe on a database it reaches directly, with a
 // connection string: no agent, no account, no control plane. PostgreSQL
-// (postgres://), and MySQL and MariaDB (mysql://, mariadb://: mysql.go).
+// (postgres://), MySQL and MariaDB (mysql://, mariadb://: mysql.go), and
+// MongoDB (mongodb://, mongodb+srv://: mongodb.go).
 // The CLI (rowsafe pulse postgres://...) and the local MCP server (rowsafe
 // mcp postgres://...) use it for Pulse (health score, findings and fixes),
 // tables and indexes, top queries, live activity and settings.
@@ -36,9 +37,10 @@ import (
 )
 
 // IsConnString reports whether s is a connection URL Rowsafe reads:
-// postgres:// or postgresql://, mysql:// or mariadb://.
+// postgres:// or postgresql://, mysql:// or mariadb://, mongodb:// or
+// mongodb+srv://.
 func IsConnString(s string) bool {
-	if isMySQLURL(s) {
+	if isMySQLURL(s) || isMongoURL(s) {
 		return true
 	}
 	s = strings.ToLower(strings.TrimSpace(s))
@@ -53,6 +55,8 @@ type DB struct {
 	my             *mysqldriver.Config
 	myHost, myPort string
 	engine         string
+	// mg is a MongoDB server's instead (mongodb.go).
+	mg *mongoConn
 	// Ref is how commands name this database: the connection string
 	// without its password, or "" when the commands find it by themselves
 	// (DATABASE_URL).
@@ -74,10 +78,13 @@ type DB struct {
 func Open(connString string) (*DB, error) {
 	connString = strings.TrimSpace(connString)
 	if !IsConnString(connString) {
-		return nil, errors.New("expected a connection string such as postgres://user@host:5432/dbname or mysql://user@host:3306/dbname")
+		return nil, errors.New("expected a connection string such as postgres://user@host:5432/dbname, mysql://user@host:3306/dbname or mongodb://user@host:27017/dbname")
 	}
 	if isMySQLURL(connString) {
 		return openMySQL(connString)
+	}
+	if isMongoURL(connString) {
+		return openMongo(connString)
 	}
 	cfg, err := pgx.ParseConfig(connString)
 	if err != nil {
@@ -115,10 +122,13 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// Engine is protocol.EnginePostgreSQL, EngineMySQL or EngineMariaDB (for
-// mysql://, MySQL until a reading says MariaDB; mariadb:// says it first).
+// Engine is protocol.EnginePostgreSQL, EngineMySQL, EngineMariaDB (for
+// mysql://, MySQL until a reading says MariaDB; mariadb:// says it first)
+// or EngineMongoDB.
 func (d *DB) Engine() string {
 	switch {
+	case d.mg != nil:
+		return protocol.EngineMongoDB
 	case d.my == nil:
 		return protocol.EnginePostgreSQL
 	case d.engine != "":
@@ -129,11 +139,14 @@ func (d *DB) Engine() string {
 	return protocol.EngineMySQL
 }
 
-// EngineName is the engine for people: PostgreSQL, MySQL, MariaDB.
+// EngineName is the engine for people: PostgreSQL, MySQL, MariaDB, MongoDB.
 func (d *DB) EngineName() string { return protocol.EngineDisplayName(d.Engine()) }
 
 // Name is the database's name (its user's when the string names none).
 func (d *DB) Name() string {
+	if d.mg != nil {
+		return d.mg.name()
+	}
 	if d.my != nil {
 		if d.my.DBName != "" {
 			return d.my.DBName
@@ -148,6 +161,9 @@ func (d *DB) Name() string {
 
 // Host is where it runs, for people: host or host:port.
 func (d *DB) Host() string {
+	if d.mg != nil {
+		return d.mg.host
+	}
 	if d.my != nil {
 		if d.my.Net == "unix" || d.myPort == "3306" {
 			return d.myHost
@@ -169,6 +185,9 @@ func (d *DB) inspectTarget() pginspect.Target { return pginspect.Target{Conn: d.
 
 // Local reports whether the database runs on this machine.
 func (d *DB) Local() bool {
+	if d.mg != nil {
+		return d.mg.local()
+	}
 	if d.my != nil {
 		return d.mysqlLocal()
 	}
@@ -226,6 +245,9 @@ func (d *DB) hostFacts(s *protocol.SettingsSnapshot, opts Options) {
 // Health reads the database and evaluates it: the score, the findings and
 // their fixes.
 func (d *DB) Health(ctx context.Context, opts Options) (protocol.DatabaseHealth, error) {
+	if d.mg != nil {
+		return d.mongoHealth(ctx, opts)
+	}
 	if d.my != nil {
 		return d.mysqlHealth(ctx, opts)
 	}
@@ -254,8 +276,8 @@ func (d *DB) Health(ctx context.Context, opts Options) (protocol.DatabaseHealth,
 // with their own lock and statement timeouts ("" when they can, or when
 // that can't be told: the fix then connects and says).
 func (d *DB) needsSession(ctx context.Context) string {
-	if d.my != nil {
-		return "" // MySQL: the fixes check their session themselves
+	if d.my != nil || d.mg != nil {
+		return "" // MySQL, MongoDB: the fixes check their session themselves
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -304,6 +326,9 @@ func (d *DB) input(r *collect.Reading, opts Options) pulse.Input {
 // Insights reads tables and indexes: sizes, estimated bloat, unused and
 // duplicate indexes, sequential scans, dead rows and transaction ID age.
 func (d *DB) Insights(ctx context.Context) (*protocol.Insights, error) {
+	if d.mg != nil {
+		return d.mongoInsights(ctx)
+	}
 	if d.my != nil {
 		return d.mysqlInsights(ctx)
 	}
@@ -316,8 +341,12 @@ func (d *DB) Insights(ctx context.Context) (*protocol.Insights, error) {
 }
 
 // Statements reads the top of pg_stat_statements (MySQL, MariaDB:
-// performance_schema's statement digests): totals since it was last reset.
+// performance_schema's statement digests; MongoDB: the profiler's slow
+// operations): totals since it was last reset.
 func (d *DB) Statements(ctx context.Context) (*protocol.Statements, error) {
+	if d.mg != nil {
+		return d.mongoStatements(ctx)
+	}
 	if d.my != nil {
 		return d.mysqlStatements(ctx)
 	}
@@ -334,6 +363,9 @@ func (d *DB) Statements(ctx context.Context) (*protocol.Statements, error) {
 // Activity reads the sessions running one query, or idle in a
 // transaction, for over a minute, and who blocks whom.
 func (d *DB) Activity(ctx context.Context) (*protocol.Activity, error) {
+	if d.mg != nil {
+		return d.mongoActivity(ctx)
+	}
 	if d.my != nil {
 		return d.mysqlActivity(ctx)
 	}
@@ -346,6 +378,9 @@ func (d *DB) Activity(ctx context.Context) (*protocol.Activity, error) {
 
 // Settings reads the settings that matter and what would suit the server.
 func (d *DB) Settings(ctx context.Context, opts Options) (protocol.SettingsOverview, error) {
+	if d.mg != nil {
+		return d.mongoSettings(ctx, opts)
+	}
 	if d.my != nil {
 		return d.mysqlSettings(ctx, opts)
 	}
@@ -420,6 +455,9 @@ func (d *DB) run(ctx context.Context, fx protocol.FindingFix) (FixResult, error)
 		if d.my != nil {
 			return d.mysqlMaintain(ctx, p)
 		}
+		if d.mg != nil {
+			return d.mongoMaintain(ctx, p)
+		}
 		res, log, err := maintenance.Maintain(ctx, d.inspectTarget(), p)
 		out := FixResult{Log: log}
 		if res != nil {
@@ -441,6 +479,9 @@ func (d *DB) run(ctx context.Context, fx protocol.FindingFix) (FixResult, error)
 // SET PERSIST; nothing restarts), after checking the values against this
 // server. MariaDB's are refused: they live in its configuration file.
 func (d *DB) ChangeSettings(ctx context.Context, p protocol.SettingsParams) (FixResult, error) {
+	if d.mg != nil {
+		return FixResult{}, errors.New(mongoSettingsLocked)
+	}
 	if d.my != nil {
 		return d.mysqlChangeSettings(ctx, p)
 	}

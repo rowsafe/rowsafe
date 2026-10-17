@@ -180,6 +180,11 @@ func printInsightsFor(engine, name string, ins protocol.InsightsResponse, limit 
 		unusedHint, wasted, wastedHint = "Never used since "+protocol.EngineDisplayName(engine)+" started; they slow down writes (use on replicas is not counted).",
 			"Free space inside tables", "InnoDB's free space inside each table: the table reuses it, a rebuild (OPTIMIZE TABLE) gives it back to the disk."
 	}
+	mongo := engine == protocol.EngineMongoDB
+	tables := "Largest tables"
+	if mongo {
+		unusedHint, tables = "Not used for over a week (counted since MongoDB started); they slow down writes (use on secondaries is not counted).", "Largest collections"
+	}
 	if !ins.Available {
 		fmt.Printf("No table insights for %s yet. %s\n", name, ins.Reason)
 		return
@@ -208,8 +213,11 @@ func printInsightsFor(engine, name string, ins protocol.InsightsResponse, limit 
 		}
 		return true
 	}
-	if section("Largest tables", "", len(ins.LargestTables)) {
+	if section(tables, "", len(ins.LargestTables)) {
 		t := newTable("  TABLE", "TOTAL", "DATA", "INDEXES", "ROWS (EST.)")
+		if mongo {
+			t = newTable("  COLLECTION", "TOTAL", "DATA", "INDEXES", "DOCUMENTS")
+		}
 		for _, x := range cut(ins.LargestTables, n) {
 			t.row("  "+qual(x.Database, x.Schema, x.Table), humanBytes(x.TotalBytes), humanBytes(x.TableBytes), humanBytes(x.IndexBytes),
 				strconv.FormatInt(x.RowsEstimate, 10))
@@ -234,7 +242,7 @@ func printInsightsFor(engine, name string, ins protocol.InsightsResponse, limit 
 		}
 		t.flush()
 	}
-	if section("Tables that may be missing an index", "Large tables read start to finish over and over.", len(ins.SeqScanTables)) {
+	if !mongo && section("Tables that may be missing an index", "Large tables read start to finish over and over.", len(ins.SeqScanTables)) {
 		t := newTable("  TABLE", "FULL SCANS", "ROWS PER SCAN", "INDEX SCANS", "ROWS")
 		for _, x := range cut(ins.SeqScanTables, n) {
 			t.row("  "+qual(x.Database, x.Schema, x.Table), strconv.FormatInt(x.SeqScans, 10),
@@ -242,7 +250,7 @@ func printInsightsFor(engine, name string, ins protocol.InsightsResponse, limit 
 		}
 		t.flush()
 	}
-	if !my && section("Dead rows and vacuum", "", len(ins.VacuumStats)) {
+	if !my && !mongo && section("Dead rows and vacuum", "", len(ins.VacuumStats)) {
 		t := newTable("  TABLE", "DEAD ROWS", "DEAD %", "LAST VACUUM", "LAST ANALYZE")
 		for _, x := range cut(ins.VacuumStats, n) {
 			t.row("  "+qual(x.Database, x.Schema, x.Table), strconv.FormatInt(x.DeadRows, 10), fmt.Sprintf("%.0f%%", x.DeadPct),
@@ -250,7 +258,7 @@ func printInsightsFor(engine, name string, ins protocol.InsightsResponse, limit 
 		}
 		t.flush()
 	}
-	if section(wasted, wastedHint, len(ins.TableBloat)+len(ins.IndexBloat)) {
+	if !mongo && section(wasted, wastedHint, len(ins.TableBloat)+len(ins.IndexBloat)) {
 		t := newTable("  TABLE OR INDEX", "SIZE", "WASTED (EST.)", "WASTED %")
 		for _, x := range cut(ins.TableBloat, n) {
 			t.row("  "+qual(x.Database, x.Schema, x.Table), humanBytes(x.TableBytes), humanBytes(x.BloatBytes), fmt.Sprintf("%.0f%%", x.BloatPct))
@@ -260,7 +268,7 @@ func printInsightsFor(engine, name string, ins protocol.InsightsResponse, limit 
 		}
 		t.flush()
 	}
-	if !my && section("Oldest transaction IDs", "At 100% PostgreSQL stops accepting writes; autovacuum freezes tables long before.", len(ins.FreezeAge)) {
+	if !my && !mongo && section("Oldest transaction IDs", "At 100% PostgreSQL stops accepting writes; autovacuum freezes tables long before.", len(ins.FreezeAge)) {
 		t := newTable("  TABLE", "XID AGE", "OF LIMIT")
 		for _, x := range cut(ins.FreezeAge, min(n, 5)) {
 			t.row("  "+qual(x.Database, x.Schema, x.Table), strconv.FormatInt(x.XIDAge, 10), fmt.Sprintf("%.1f%%", x.WraparoundPct))
@@ -371,6 +379,9 @@ func printCumulativeTopFor(engine, name string, st protocol.Statements, width in
 	since, none := "since pg_stat_statements was last reset", "they need pg_stat_statements; the first numbers arrive 10 minutes after the agent starts"
 	if engine == protocol.EngineMySQL || engine == protocol.EngineMariaDB {
 		since, none = "since "+protocol.EngineDisplayName(engine)+" started (performance_schema)", "performance_schema has recorded no statements yet"
+	}
+	if engine == protocol.EngineMongoDB {
+		since, none = "among the slow operations MongoDB's profiler kept", "MongoDB's profiler has kept no slow operations yet"
 	}
 	if !st.Available || len(st.Statements) == 0 {
 		fmt.Printf("No query statistics for %s yet: %s\n", name, cmp.Or(st.Reason, none))
