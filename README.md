@@ -30,6 +30,8 @@ A 0–100 health score for a PostgreSQL database you can connect to, with what t
 ```sh
 rowsafe fix shop                       # apply what pulse found (asks first)
 rowsafe insights | top | activity | settings | tune shop
+rowsafe schema shop [TABLE…]           # tables, columns, keys, indexes (used or not): compact for an AI agent
+rowsafe explain shop "SELECT …"        # why a query is slow, and the index that would likely help
 rowsafe mcp shop --allow-writes        # the same as MCP tools for Claude Code, Codex or Cursor
 rowsafe use shop                       # in a project: then just `rowsafe pulse`
 ```

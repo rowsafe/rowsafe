@@ -21,7 +21,7 @@ const shortHelp = `rowsafe - backups you can restore to any second, tested every
 No account needed: save a PostgreSQL database once, then use it by name
   rowsafe add NAME postgres://...    save it on this computer (rowsafe use NAME: this project's)
   rowsafe pulse NAME                 health score (0-100) and what to fix; also fix, insights, top,
-                                     activity, settings, tune and mcp (rowsafe help local)
+                                     activity, settings, tune, schema, explain and mcp (rowsafe help local)
 
 Getting started
   rowsafe login                      log in with your browser
