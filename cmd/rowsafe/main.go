@@ -245,7 +245,7 @@ Standby: a second server that stays in sync, is readable, and takes over
   rowsafe standby forget [NAME] [--host SERVER] [--yes]
                                              stop watching a fenced old primary (it stays stopped; asks you to
                                              type its name)
-  On servers on their own (no account; both set up with the same bucket and passphrase), one command on each:
+  On servers on their own (both set up with the same bucket and passphrase), one command on each server:
   sudo rowsafe standby link NAME --address IP
                                              on the primary: let the standby at IP stream (optional; without
                                              it the standby follows through the bucket)
