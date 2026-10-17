@@ -136,6 +136,8 @@ func (e *evaluator) maintenance(fresh bool) {
 					Fixes:       freeze})
 			}
 		}
+		e.multixact()           // autovacuum.go
+		e.autovacuumSaturated() // autovacuum.go
 		// A session holding back cleanup is named by cleanup_blocked
 		// (cleanup.go), with its dead rows: no second finding for it.
 		named := e.cleanupBlocked(fresh)

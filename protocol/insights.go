@@ -149,6 +149,13 @@ type Insights struct {
 	SeqScanTables    []SeqScanTable   `json:"seq_scan_tables"`
 	VacuumStats      []TableVacuum    `json:"vacuum_stats"`
 	FreezeAge        []TableFreeze    `json:"freeze_age"`
+	// MultixactAge are the tables with the oldest multixact IDs (rows
+	// locked by several transactions at once), which must be frozen like
+	// transaction IDs (TableFreeze.MXIDAge). Newer agents only.
+	MultixactAge []TableFreeze `json:"multixact_age,omitempty"`
+	// Autovacuum is how far behind autovacuum is (autovacuum.go). Newer
+	// agents only.
+	Autovacuum *AutovacuumBacklog `json:"autovacuum,omitempty"`
 	// Advisor are the extra catalog facts for recommendations (advisor.go).
 	Advisor *AdvisorFacts `json:"advisor,omitempty"`
 }
@@ -270,6 +277,9 @@ type TableFreeze struct {
 	FreezeMaxAge  int64   `json:"freeze_max_age"` // autovacuum_freeze_max_age
 	WraparoundPct float64 `json:"wraparound_pct"` // XIDAge as a share of the 2^31 limit
 	TableBytes    int64   `json:"table_bytes"`
+	// MXIDAge is the table's multixact ID age (mxid_age(relminmxid)), in
+	// Insights.MultixactAge.
+	MXIDAge int64 `json:"mxid_age,omitempty"`
 }
 
 // ---- User API ----

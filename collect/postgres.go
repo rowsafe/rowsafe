@@ -120,6 +120,9 @@ type clusterState struct {
 	statementsDB string // database where pg_stat_statements was found
 	stmts        stmtState
 	insights     insightsState
+	// autovacuumBusySince is when every autovacuum worker was first seen
+	// busy, in a row (unix seconds; 0: one is free). autovacuum.go
+	autovacuumBusySince int64
 }
 
 // clusterReading is one round of raw readings from a cluster.
@@ -250,6 +253,13 @@ func readCluster(ctx context.Context, t Target, st *clusterState, withSlow, quer
 		g[MXIDAge] = xidAge
 		g[MXIDHeadroomPct] = clampPct(100 * (1 - xidAge/xidWraparoundLimit))
 	}
+	// Multixact IDs (rows locked by several transactions at once) wrap
+	// around at the same age.
+	var mxidAge float64
+	if err := conn.QueryRow(ctx, `SELECT coalesce(max(mxid_age(datminmxid)), 0)::float8 FROM pg_database`).Scan(&mxidAge); err == nil {
+		g[MMultixactAge] = mxidAge
+		g[MMultixactHeadroomPct] = clampPct(100 * (1 - mxidAge/xidWraparoundLimit))
+	}
 
 	if err := readSlots(ctx, conn, r); err != nil {
 		return nil, err
@@ -263,7 +273,8 @@ func readCluster(ctx context.Context, t Target, st *clusterState, withSlow, quer
 		g[MBlockedSessions], g[MLongestBlockedSeconds] = 0, 0
 	}
 	readReplication(ctx, conn, r, inRecovery)
-	readHorizon(ctx, conn, r, queryText) // cleanup.go
+	readHorizon(ctx, conn, r, queryText)                                        // cleanup.go
+	readAutovacuum(ctx, conn, r, st, func() int64 { return time.Now().Unix() }) // autovacuum.go
 	if withSlow {
 		readSizes(ctx, conn, r)
 		r.statements, r.queryStats = readStatements(ctx, t, conn, st, r.versionNum, time.Now())
