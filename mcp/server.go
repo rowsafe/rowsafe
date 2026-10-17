@@ -54,7 +54,7 @@ Before any destructive or risky database operation (migrations such as prisma mi
 1. Call safety_check on the database. If it is not protected, tell the user the reasons and get their OK before doing anything destructive. For a migration, preview_migration runs it on a fresh copy first (never production; use it freely) and returns a verdict (safe, careful, dangerous or failed) with suggestions: follow them before running it for real.
 2. Call create_restore_point with a name that describes the operation (e.g. before-drop-orders), and tell the user the Mark's name. (If the tool is unavailable, ask the user to run: rowsafe mark DB NAME.)
 3. Proceed.
-4. If something breaks, stop. Don't try to repair data yourself and never restore over production on your own: tell the user what happened and the Mark. rewind_window shows how far back they can go; find_moment finds when rows were deleted or changed (read-only). Recovery (restore a copy, compare, bring rows back, rewind the whole database) is the user's call: they do it in the dashboard (Rewind), or you do it with request_change once they say so.
+4. If something breaks, stop. Don't try to repair data yourself and never restore over production on your own: tell the user what happened and the Mark. rewind_window shows how far back they can go; find_moment finds when rows were deleted or changed (it never changes the database). Recovery (restore a copy, compare, bring rows back, rewind the whole database) is the user's call: they do it in the dashboard (Rewind), or you do it with request_change once they say so.
 
 Where to start:
 - "Is everything OK?", "what needs attention?": fleet_health lists each problem with the next step. list_databases summarizes each database; get_database shows one in depth; get_org shows plan limits and usage (or explains a 402); list_hosts gives host names and IDs.
@@ -97,7 +97,7 @@ func NewServer(c *client.Client, opts Options) *sdk.Server {
 	t.addRewindReadTools(s)
 	t.addFilesReadTools(s) // files_tools.go
 	t.addStorageTools(s)
-	t.addMomentTools(s)      // read-only: find when rows were deleted
+	t.addMomentTools(s)      // find when rows were deleted: never changes the database
 	t.addCopiesTools(s)      // Guard copies: never touch production (copies_tools.go)
 	t.addSettingsTools(s)    // settings_tools.go
 	t.addLogTools(s)         // logs_tools.go
