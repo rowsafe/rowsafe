@@ -110,6 +110,10 @@ type Replica struct {
 	FlushLagSeconds  *float64   `json:"flush_lag_seconds,omitempty"`
 	ReplayLagSeconds *float64   `json:"replay_lag_seconds,omitempty"`
 	ReplyAt          *time.Time `json:"reply_at,omitempty"`
+	// XminAge is age(backend_xmin): with hot_standby_feedback on, the
+	// standby's oldest query keeps the rows it may still read from cleanup
+	// here (nil: it holds none). Newer agents only.
+	XminAge *int64 `json:"xmin_age,omitempty"`
 }
 
 // WALReceiver is a replica's connection to its primary (pg_stat_wal_receiver).

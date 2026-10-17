@@ -67,7 +67,8 @@ func Read(ctx context.Context, t Target, o ReadOptions) (*Reading, error) {
 		}
 	}
 	dm.ReplicationSlots = r.slots
-	dm.Activity = &protocol.Activity{CollectedAt: at, QueryTextCollected: o.QueryText, Queries: r.activity, Blocking: r.blocking}
+	dm.Activity = &protocol.Activity{CollectedAt: at, QueryTextCollected: o.QueryText, Queries: r.activity, Blocking: r.blocking,
+		Horizon: r.horizon}
 	if dm.Activity.Queries == nil {
 		dm.Activity.Queries = []protocol.ActivityQuery{}
 	}

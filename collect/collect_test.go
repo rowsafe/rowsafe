@@ -677,6 +677,44 @@ func TestReplicationLocalPostgres(t *testing.T) {
 	}
 }
 
+func TestHorizonLocalPostgres(t *testing.T) {
+	tg := localTarget(t)
+	dbName, holder := scratchDB(t, tg)
+	// A repeatable read transaction keeps its snapshot: it holds back
+	// cleanup until it ends.
+	if _, err := holder.Exec(t.Context(), `BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT 1`); err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Exec(context.Background(), `ROLLBACK`)
+	mon, err := tg.connect(t.Context(), "postgres")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mon.Close(context.Background())
+	r := &clusterReading{gauges: map[string]float64{}}
+	readHorizon(t.Context(), mon, r, true)
+	if r.horizon == nil {
+		t.Fatal("no horizon")
+	}
+	pid := int(holder.PgConn().PID())
+	found := false
+	for _, s := range r.horizon.Sessions {
+		if s.PID == pid {
+			found = true
+			if s.Database != dbName || s.BackendStart == nil || s.State != "idle in transaction" {
+				t.Errorf("session = %+v", s)
+			}
+		}
+	}
+	if !found && len(r.horizon.Sessions) < maxHorizon {
+		t.Errorf("holder %d not in %+v", pid, r.horizon.Sessions)
+	}
+	// The slot query reads the xmin ages.
+	if err := readSlots(t.Context(), mon, r); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestStatementReads runs the pg_stat_statements queries against a stand-in
 // schema with the same shape (the extension needs shared_preload_libraries,
 // which a developer's PostgreSQL may not have).

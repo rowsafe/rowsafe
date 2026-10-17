@@ -104,6 +104,8 @@ func validateMaintenance(p protocol.MaintenanceParams) error {
 		return validateAdvisorMaintenance(p)
 	case protocol.MaintUpdateExtension: // pg_extensions.go
 		return validateUpdateExtension(p)
+	case protocol.MaintRollbackPrepared, protocol.MaintAdvanceReplicationSlot: // maintenance_cleanup.go
+		return validateCleanupMaintenance(p)
 	}
 	return nil
 }
@@ -308,6 +310,10 @@ func runMaintenance(ctx context.Context, t pginspect.Target, p protocol.Maintena
 		err = m.logSettings(ctx)
 	case protocol.MaintUpdateExtension: // pg_extensions.go
 		err = m.updateExtension(ctx)
+	case protocol.MaintRollbackPrepared: // maintenance_cleanup.go
+		err = m.rollbackPrepared(ctx)
+	case protocol.MaintAdvanceReplicationSlot: // maintenance_cleanup.go
+		err = m.advanceSlot(ctx)
 	case protocol.MaintCreateIndex, protocol.MaintDropInvalidIndex, protocol.MaintSyncSequence, protocol.MaintSetTableStorageParams: // advisor
 		err = m.advisorAction(ctx)
 	}

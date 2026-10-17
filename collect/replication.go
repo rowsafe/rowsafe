@@ -35,7 +35,7 @@ func readReplication(ctx context.Context, conn Querier, r *clusterReading, inRec
 		SELECT coalesce(application_name, ''), coalesce(host(client_addr), ''), coalesce(state, ''), coalesce(sync_state, ''),
 		       `+lsnDiff("sent_lsn")+`, `+lsnDiff("flush_lsn")+`, `+lsnDiff("replay_lsn")+`,
 		       extract(epoch FROM write_lag)::float8, extract(epoch FROM flush_lag)::float8, extract(epoch FROM replay_lag)::float8,
-		       `+replyTime+`
+		       `+replyTime+`, age(backend_xmin)::bigint
 		FROM pg_stat_replication ORDER BY application_name, pid LIMIT $1`, maxReplicas)
 	if err != nil {
 		return
@@ -43,7 +43,7 @@ func readReplication(ctx context.Context, conn Querier, r *clusterReading, inRec
 	rs.Replicas, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (protocol.Replica, error) {
 		var x protocol.Replica
 		err := row.Scan(&x.ApplicationName, &x.ClientAddr, &x.State, &x.SyncState, &x.SentLagBytes, &x.FlushLagBytes,
-			&x.ReplayLagBytes, &x.WriteLagSeconds, &x.FlushLagSeconds, &x.ReplayLagSeconds, &x.ReplyAt)
+			&x.ReplayLagBytes, &x.WriteLagSeconds, &x.FlushLagSeconds, &x.ReplayLagSeconds, &x.ReplyAt, &x.XminAge)
 		return x, err
 	})
 	if err != nil {

@@ -140,6 +140,7 @@ type clusterReading struct {
 	queryStats      *protocol.QueryStats
 	blocking        []protocol.LockSession
 	replication     *protocol.ReplicationStatus
+	horizon         *protocol.CleanupHorizon // cleanup.go
 }
 
 // readCluster runs the monitoring queries against one cluster. withSlow
@@ -262,6 +263,7 @@ func readCluster(ctx context.Context, t Target, st *clusterState, withSlow, quer
 		g[MBlockedSessions], g[MLongestBlockedSeconds] = 0, 0
 	}
 	readReplication(ctx, conn, r, inRecovery)
+	readHorizon(ctx, conn, r, queryText) // cleanup.go
 	if withSlow {
 		readSizes(ctx, conn, r)
 		r.statements, r.queryStats = readStatements(ctx, t, conn, st, r.versionNum, time.Now())
@@ -277,14 +279,16 @@ func readSlots(ctx context.Context, conn Querier, r *clusterReading) error {
 		       coalesce(wal_status, ''),
 		       CASE WHEN slot_type <> 'logical' OR pg_is_in_recovery() OR confirmed_flush_lsn IS NULL THEN NULL
 		            ELSE greatest(pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn), 0)::bigint END,
-		       coalesce(database::text, '')
+		       coalesce(database::text, ''),
+		       age(xmin)::bigint, age(catalog_xmin)::bigint
 		FROM pg_replication_slots ORDER BY slot_name LIMIT 100`)
 	if err != nil {
 		return fmt.Errorf("reading pg_replication_slots: %w", err)
 	}
 	r.slots, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (protocol.ReplicationSlot, error) {
 		var s protocol.ReplicationSlot
-		err := row.Scan(&s.Name, &s.Type, &s.Active, &s.RetainedBytes, &s.WALStatus, &s.LagBytes, &s.Database)
+		err := row.Scan(&s.Name, &s.Type, &s.Active, &s.RetainedBytes, &s.WALStatus, &s.LagBytes, &s.Database,
+			&s.XminAge, &s.CatalogXminAge)
 		return s, err
 	})
 	if err != nil {

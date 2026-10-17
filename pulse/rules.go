@@ -136,7 +136,10 @@ func (e *evaluator) maintenance(fresh bool) {
 					Fixes:       freeze})
 			}
 		}
-		if s, ok := m[collect.MLongestXactSeconds]; ok && s >= 30*60 {
+		// A session holding back cleanup is named by cleanup_blocked
+		// (cleanup.go), with its dead rows: no second finding for it.
+		named := e.cleanupBlocked(fresh)
+		if s, ok := m[collect.MLongestXactSeconds]; ok && s >= 30*60 && !named {
 			pen := 5
 			if s >= 6*3600 {
 				pen = 10
@@ -148,7 +151,7 @@ func (e *evaluator) maintenance(fresh bool) {
 				Action:      withFixes(long, "If nobody needs it, end it: its changes are rolled back.", "Find it "+e.on("activity")+" and, if nobody needs it, end it."),
 				Command:     withFixes(long, "", longXactSQL),
 				Fixes:       long})
-		} else if s, ok := m[collect.MIdleInXactOldest]; ok && s >= 10*60 {
+		} else if s, ok := m[collect.MIdleInXactOldest]; ok && s >= 10*60 && !named {
 			idle := e.idleSessionFixes(10 * time.Minute)
 			e.add(protocol.Finding{ID: "idle_in_transaction", Category: CatMaintenance, Severity: protocol.SeverityWarning, Penalty: 5,
 				Title:       "An application left a transaction open and idle",

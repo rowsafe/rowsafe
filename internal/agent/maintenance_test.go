@@ -80,6 +80,8 @@ func TestValidateMaintenance(t *testing.T) {
 		{Action: protocol.MaintCancelQuery, PID: 42, BackendStart: &now},
 		{Action: protocol.MaintTerminateSession, PID: 42, BackendStart: &now},
 		{Action: protocol.MaintDropReplicationSlot, Slot: "old_replica_1"},
+		{Action: protocol.MaintRollbackPrepared, DB: "shop", GID: "order-42 'x'", PreparedAt: &now},
+		{Action: protocol.MaintAdvanceReplicationSlot, Slot: "cdc_1"},
 	}
 	for _, p := range ok {
 		if err := validateMaintenance(p); err != nil {
@@ -106,6 +108,11 @@ func TestValidateMaintenance(t *testing.T) {
 		"slot uppercase":  {Action: protocol.MaintDropReplicationSlot, Slot: "Replica"},
 		"slot injection":  {Action: protocol.MaintDropReplicationSlot, Slot: "x'); drop table y; --"},
 		"no slot":         {Action: protocol.MaintDropReplicationSlot},
+		"no gid":          {Action: protocol.MaintRollbackPrepared, DB: "shop", PreparedAt: &now},
+		"long gid":        {Action: protocol.MaintRollbackPrepared, DB: "shop", GID: strings.Repeat("g", 201), PreparedAt: &now},
+		"gid no time":     {Action: protocol.MaintRollbackPrepared, DB: "shop", GID: "x"},
+		"gid no db":       {Action: protocol.MaintRollbackPrepared, GID: "x", PreparedAt: &now},
+		"advance bad":     {Action: protocol.MaintAdvanceReplicationSlot, Slot: "a b"},
 	}
 	for name, p := range bad {
 		if err := validateMaintenance(p); err == nil {
@@ -673,6 +680,20 @@ func TestMaintenanceAgainstPostgres(t *testing.T) {
 			t.Fatalf("slot still there: %d, %v", n, err)
 		}
 		e.mustRun(protocol.MaintenanceParams{Action: protocol.MaintDropReplicationSlot, Slot: slot}, "was already removed")
+	})
+
+	t.Run("cleanup blockers", func(t *testing.T) {
+		at := time.Now()
+		e.mustRun(protocol.MaintenanceParams{Action: protocol.MaintRollbackPrepared, DB: e.db, GID: "gone'; --", PreparedAt: &at},
+			"was already committed or rolled back")
+		e.mustRun(protocol.MaintenanceParams{Action: protocol.MaintAdvanceReplicationSlot, Slot: e.db + "_none"}, "was already removed")
+		// Only logical slots move forward.
+		slot := e.db + "_phys"
+		e.exec(`SELECT pg_create_physical_replication_slot($1, true)`, slot)
+		t.Cleanup(func() {
+			e.conn.Exec(context.Background(), `SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1`, slot)
+		})
+		e.mustRefuse(protocol.MaintenanceParams{Action: protocol.MaintAdvanceReplicationSlot, Slot: slot}, "physical slot")
 	})
 
 	t.Run("through runTask", func(t *testing.T) {
