@@ -204,6 +204,40 @@ jobs:
         if: vars.NPM_PUBLISH != 'true'
         run: echo "::warning::the repository variable NPM_PUBLISH is not true, so ${GITHUB_REF_NAME#v} was not published to npm"
 
+  # The official MCP Registry (sh.rowsafe/rowsafe) at this release's version,
+  # so it never lists an old one. The release environment's secret
+  # MCP_REGISTRY_PRIVATE_KEY is the Ed25519 key (hex) behind rowsafe.sh's
+  # "v=MCPv1" TXT record; without it the job warns instead of publishing.
+  mcp-registry:
+    needs: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: read
+    env:
+      MCP_REGISTRY_PRIVATE_KEY: ${{ secrets.MCP_REGISTRY_PRIVATE_KEY }}
+      MCP_PUBLISHER_VERSION: v1.8.1
+      MCP_PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install mcp-publisher
+        if: env.MCP_REGISTRY_PRIVATE_KEY != ''
+        run: |
+          curl -fsSLo "$RUNNER_TEMP/mcp-publisher.tar.gz" \
+            "https://github.com/modelcontextprotocol/registry/releases/download/$MCP_PUBLISHER_VERSION/mcp-publisher_linux_amd64.tar.gz"
+          echo "$MCP_PUBLISHER_SHA256  $RUNNER_TEMP/mcp-publisher.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/mcp-publisher.tar.gz" -C "$RUNNER_TEMP" mcp-publisher
+          echo "$RUNNER_TEMP" >>"$GITHUB_PATH"
+      - name: Publish to the MCP Registry
+        if: env.MCP_REGISTRY_PRIVATE_KEY != ''
+        run: scripts/publish-mcp-registry.sh "$GITHUB_REF_NAME"
+      - name: Not published (no MCP_REGISTRY_PRIVATE_KEY)
+        if: env.MCP_REGISTRY_PRIVATE_KEY == ''
+        run: echo "::warning::the release environment has no MCP_REGISTRY_PRIVATE_KEY, so ${GITHUB_REF_NAME#v} was not published to the MCP Registry (run scripts/publish-mcp-registry.sh)"
+
   # Rebuild from the tag on a fresh runner and require byte-identical binaries.
   reproducible:
     needs: release

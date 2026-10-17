@@ -269,13 +269,13 @@ func TestDescribeChangeEveryAction(t *testing.T) {
 	}
 }
 
-func TestGetApproval(t *testing.T) {
+func TestGetAgentAction(t *testing.T) {
 	done := approvalRecord(protocol.CreateApprovalRequest{Action: "apply_fix", Database: "app"})
 	done.Result = &protocol.ApprovalResult{HTTPStatus: 202, Message: "Queued the fix", TaskIDs: []string{"tk_9"},
 		Body: json.RawMessage(`{"tasks":[{"id":"tk_9"}],"password":"hunter2"}`)}
 	f := &approvalAPI{t: t, decide: []protocol.Approval{done}}
 	cs := connect(t, f, Options{MaxWait: 30 * time.Second}, nil)
-	txt, res := callText(t, cs, "get_approval", map[string]any{"id": "apr_1"})
+	txt, res := callText(t, cs, "get_agent_action", map[string]any{"id": "apr_1"})
 	if res.IsError {
 		t.Fatal(txt)
 	}
@@ -304,7 +304,7 @@ func TestGetApproval(t *testing.T) {
 		f.mu.Lock()
 		f.decide, f.reads = []protocol.Approval{c.a}, 0
 		f.mu.Unlock()
-		if txt, _ := callText(t, cs, "get_approval", map[string]any{"id": "apr_1"}); !strings.Contains(txt, c.want) {
+		if txt, _ := callText(t, cs, "get_agent_action", map[string]any{"id": "apr_1"}); !strings.Contains(txt, c.want) {
 			t.Errorf("%s: missing %q in:\n%s", c.a.Status, c.want, txt)
 		}
 	}
@@ -324,7 +324,7 @@ func TestApprovalToolsByAccess(t *testing.T) {
 			if strings.Contains(tl.Name, "approve") || strings.Contains(tl.Name, "deny") || strings.Contains(tl.Name, "decide") || strings.Contains(tl.Name, "cancel_approval") {
 				t.Errorf("tool %s: nothing waits for a decision", tl.Name)
 			}
-			if slices.Contains([]string{"request_change", "get_approval", "create_cloud_server", "cloud_firewall", "apply_fix", "create_app_database"}, tl.Name) {
+			if slices.Contains([]string{"request_change", "get_agent_action", "create_cloud_server", "cloud_firewall", "apply_fix", "create_app_database"}, tl.Name) {
 				schema, _ := json.Marshal(tl.InputSchema)
 				if strings.Contains(string(schema), "wait_seconds") {
 					t.Errorf("%s waits: %s", tl.Name, schema)
@@ -337,7 +337,7 @@ func TestApprovalToolsByAccess(t *testing.T) {
 		return out
 	}
 	ro := names(connect(t, &approvalAPI{t: t}, Options{AllowRestorePoints: true}, nil))
-	for _, n := range []string{"describe_change", "get_approval", "list_approvals"} {
+	for _, n := range []string{"describe_change", "get_agent_action", "list_agent_actions"} {
 		if !slices.Contains(ro, n) {
 			t.Errorf("read-only lacks %s", n)
 		}
@@ -351,19 +351,44 @@ func TestApprovalToolsByAccess(t *testing.T) {
 	}
 }
 
-func TestListApprovals(t *testing.T) {
+func TestListAgentActions(t *testing.T) {
 	f := &approvalAPI{t: t}
 	cs := connect(t, f, Options{AllowWrites: true, MaxWait: time.Second}, nil)
-	txt, res := callText(t, cs, "list_approvals", map[string]any{"status": "approved"})
+	txt, res := callText(t, cs, "list_agent_actions", map[string]any{"status": "approved"})
 	if res.IsError || !strings.Contains(txt, "apr_1  approved  Restart the database (restart) on app (db1), by key:k_1 (test) at 2026-10-04T12:00:00Z, as ana@example.com") {
-		t.Errorf("list_approvals:\n%s", txt)
+		t.Errorf("list_agent_actions:\n%s", txt)
 	}
-	if txt, res := callText(t, cs, "list_approvals", map[string]any{"status": "pending"}); !res.IsError {
+	if txt, res := callText(t, cs, "list_agent_actions", map[string]any{"status": "pending"}); !res.IsError {
 		t.Errorf("pending is no longer a state to list: %s", txt)
 	}
 	calls, _ := f.snapshot()
 	if !slices.Equal(calls, []string{"GET /v1/approvals"}) {
 		t.Errorf("calls = %v", calls)
+	}
+}
+
+// The names from when changes waited for approval still work, unlisted.
+func TestApprovalToolAliases(t *testing.T) {
+	f := &approvalAPI{t: t, decide: []protocol.Approval{approvalRecord(protocol.CreateApprovalRequest{Action: "apply_fix", Database: "app"})}}
+	cs := connect(t, f, Options{MaxWait: time.Second}, nil)
+	res, err := cs.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tl := range res.Tools {
+		if _, old := toolAliases[tl.Name]; old {
+			t.Errorf("tools/list shows the old name %s", tl.Name)
+		}
+	}
+	for old, name := range toolAliases {
+		args := map[string]any{"id": "apr_1"}
+		if name == "list_agent_actions" {
+			args = map[string]any{}
+		}
+		want, _ := callText(t, cs, name, args)
+		if got, res := callText(t, cs, old, args); res.IsError || got != want {
+			t.Errorf("%s = %q, want %s's %q", old, got, name, want)
+		}
 	}
 }
 
