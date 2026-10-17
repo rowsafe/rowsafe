@@ -19,7 +19,8 @@ import (
 // engine runs, and the words people read.
 
 // localEngines are the engines this control plane protects.
-var localEngines = []string{protocol.EnginePostgreSQL, protocol.EngineMySQL, protocol.EngineMariaDB, protocol.EngineMongoDB}
+var localEngines = []string{protocol.EnginePostgreSQL, protocol.EngineMySQL, protocol.EngineMariaDB, protocol.EngineMongoDB,
+	protocol.EngineRedis, protocol.EngineValkey}
 
 // localFeatures are what this control plane offers for a database: every
 // local engine has them all (protocol.EngineCapabilities; a test checks).
@@ -59,8 +60,8 @@ func defaultSocket(engine string) string {
 		return "/var/run/mysqld/mysqld.sock"
 	case protocol.EngineMariaDB:
 		return "/run/mysqld/mysqld.sock"
-	case protocol.EngineMongoDB:
-		return "" // over TCP on 127.0.0.1 (mongodb.go)
+	case protocol.EngineMongoDB, protocol.EngineRedis, protocol.EngineValkey:
+		return "" // over TCP on 127.0.0.1 (mongodb.go, redis.go)
 	}
 	return "/var/run/postgresql"
 }
@@ -72,6 +73,8 @@ func defaultPort(engine string) int {
 		return 3306
 	case isMongo(engine):
 		return 27017
+	case redisFamily(engine):
+		return 6379
 	}
 	return 5432
 }
@@ -85,6 +88,10 @@ func restartYourself(engine string) string {
 		return "Restart MariaDB yourself: sudo systemctl restart mariadb"
 	case protocol.EngineMongoDB:
 		return "Restart MongoDB yourself: sudo systemctl restart mongod"
+	case protocol.EngineRedis:
+		return "Restart Redis yourself: sudo systemctl restart redis-server"
+	case protocol.EngineValkey:
+		return "Restart Valkey yourself: sudo systemctl restart valkey-server"
 	}
 	return "Restart PostgreSQL yourself: sudo systemctl restart postgresql"
 }
@@ -110,6 +117,9 @@ func engineReasons(engine string, reasons []string) []string {
 // engineAlert words a firing alert for a MySQL or MariaDB database (the
 // rules are PostgreSQL's: the facts they read are reported the same way).
 func engineAlert(rule string, st *state, d *dbRec, r ruleResult, now time.Time) ruleResult {
+	if redisFamily(d.Engine) {
+		return redisAlert(rule, st, d, r, now) // redis.go
+	}
 	if isMongo(d.Engine) && r.firing {
 		return mongoAlert(rule, st, d, r, now) // mongodb.go
 	}
@@ -145,6 +155,10 @@ func unitName(engine string) string {
 		return "mariadb"
 	case protocol.EngineMongoDB:
 		return "mongod"
+	case protocol.EngineRedis:
+		return "redis-server"
+	case protocol.EngineValkey:
+		return "valkey-server"
 	}
 	return "postgresql"
 }
@@ -154,11 +168,11 @@ func unitName(engine string) string {
 // server per port; its socket file has more than one name, /run and
 // /var/run).
 func (st *state) serverAt(engine string, port int, socket string) *dbRec {
-	if !mysqlFamily(engine) && !isMongo(engine) {
+	if !mysqlFamily(engine) && !isMongo(engine) && !redisFamily(engine) {
 		return st.dbAt(port, socket)
 	}
-	for _, d := range st.Databases { // MongoDB: one server per port, on 127.0.0.1
-		if (mysqlFamily(d.Engine) && mysqlFamily(engine) || isMongo(d.Engine) && isMongo(engine)) && d.Port == port {
+	for _, d := range st.Databases { // MongoDB, Redis: one server per port, on 127.0.0.1
+		if (mysqlFamily(d.Engine) && mysqlFamily(engine) || isMongo(d.Engine) && isMongo(engine) || redisFamily(d.Engine) && redisFamily(engine)) && d.Port == port {
 			return d
 		}
 	}
@@ -172,6 +186,9 @@ func (st *state) serverAt(engine string, port int, socket string) *dbRec {
 func validTablesFor(engine string, tables []protocol.RewindTable, limit int) error {
 	if isMongo(engine) {
 		return mongoTables(tables, limit) // mongodb.go
+	}
+	if redisFamily(engine) {
+		return redisTables(tables, limit) // redis.go
 	}
 	if !mysqlFamily(engine) {
 		return validTables(tables, limit)

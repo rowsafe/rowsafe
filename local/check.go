@@ -12,6 +12,10 @@ type Server struct {
 	Database string `json:"database"`
 	User     string `json:"user"`
 	Version  string `json:"version"`
+	// Redis and Valkey: the server's configuration and ACL files, for
+	// keeping Rowsafe's user on its server ("" when none or unknown).
+	ConfigFile string `json:"-"`
+	ACLFile    string `json:"-"`
 }
 
 // Check connects once and reads who and what the connection reaches,

@@ -27,8 +27,8 @@ import (
 // localHelp is rowsafe help local.
 const localHelp = `Save a database once, then use it by name.
 
-On your database server (PostgreSQL, MySQL, MariaDB or MongoDB), rowsafe add
-also protects it:
+On your database server (PostgreSQL, MySQL, MariaDB, MongoDB, Redis or
+Valkey), rowsafe add also protects it:
 continuous backups to your own bucket, Marks, a weekly restore test and
 restore to any second, all on that server:
 

@@ -178,9 +178,9 @@ func TestMariaDBRegister(t *testing.T) {
 	if err != nil || resp.Database.Engine != protocol.EnginePostgreSQL || resp.Database.SocketDir != "/var/run/postgresql" {
 		t.Fatalf("PostgreSQL next to it: %+v %v", resp, err)
 	}
-	if _, err := c.CreateDatabase(context.Background(), protocol.CreateDatabaseRequest{Name: "cache", Engine: protocol.EngineValkey}); apiStatus(err) != http.StatusBadRequest ||
-		!strings.Contains(err.Error(), "Valkey needs the dashboard") {
-		t.Fatalf("Valkey: %v", err)
+	if _, err := c.CreateDatabase(context.Background(), protocol.CreateDatabaseRequest{Name: "events", Engine: protocol.EngineClickHouse}); apiStatus(err) != http.StatusBadRequest ||
+		!strings.Contains(err.Error(), "ClickHouse needs the dashboard") {
+		t.Fatalf("ClickHouse: %v", err)
 	}
 	if _, err := c.CreateDatabase(context.Background(), protocol.CreateDatabaseRequest{Name: "x", Engine: "oracle"}); apiStatus(err) != http.StatusBadRequest ||
 		!strings.Contains(err.Error(), "unknown engine") {

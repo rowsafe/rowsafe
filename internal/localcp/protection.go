@@ -125,6 +125,9 @@ func (st *state) protection(d *dbRec, now time.Time) protocol.Protection {
 		}
 	}
 	p.Reasons = engineReasons(d.Engine, p.Reasons) // mysql.go
+	if redisFamily(d.Engine) {
+		p.Reasons = redisReasons(d, p.Reasons) // redis.go
+	}
 	p.Protected = len(p.Reasons) == 0
 	return p
 }

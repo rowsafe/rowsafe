@@ -218,6 +218,9 @@ func ownDataDir(in serverInfo) bool {
 // Server is who and what a connection reaches.
 type Server struct {
 	Engine, User, Version string
+	// ConfigFile and ACLFile are the server's (as it says; "" for none or
+	// when this user may not read them).
+	ConfigFile, ACLFile string
 }
 
 // Check connects once and reads what the connection reaches, changing
@@ -233,10 +236,11 @@ func Check(ctx context.Context, c Conn) (Server, error) {
 		return Server{}, err
 	}
 	engine, version := engineOf(info)
-	out := Server{Engine: engine, Version: version, User: c.User}
+	out := Server{Engine: engine, Version: version, User: c.User, ConfigFile: info["config_file"]}
 	if who, err := cn.str(ctx, "ACL", "WHOAMI"); err == nil {
 		out.User = who
 	}
+	out.ACLFile, _ = cn.configGet(ctx, "aclfile")
 	return out, nil
 }
 

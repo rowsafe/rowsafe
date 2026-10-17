@@ -82,5 +82,5 @@ func (d *DB) redisCheck(ctx context.Context) (Server, error) {
 		return Server{}, d.redisConnectError(err)
 	}
 	d.engine = s.Engine
-	return Server{Database: d.rd.name(), User: s.User, Version: s.Version}, nil
+	return Server{Database: d.rd.name(), User: s.User, Version: s.Version, ConfigFile: s.ConfigFile, ACLFile: s.ACLFile}, nil
 }

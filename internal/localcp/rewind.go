@@ -590,15 +590,21 @@ func (s *Server) restoreRows(st *state, d *dbRec, r *http.Request, now time.Time
 	}) {
 		return 0, nil, &httpErr{http.StatusConflict, "Rowsafe is already bringing rows back. Try again when it has finished."}
 	}
-	mark, err := st.createMark(d, "before-rewind-rows-"+now.UTC().Format("20060102-150405"), "Rowsafe, before bringing rows back", now)
-	if err != nil {
-		return 0, nil, &httpErr{http.StatusConflict, err.Error()}
+	// A Mark first, unless the database can't take one (redis.go).
+	var tasks []protocol.TaskView
+	after := ""
+	if redisMarksRefusal(d) == "" {
+		mark, err := st.createMark(d, "before-rewind-rows-"+now.UTC().Format("20060102-150405"), "Rowsafe, before bringing rows back", now)
+		if err != nil {
+			return 0, nil, &httpErr{http.StatusConflict, err.Error()}
+		}
+		tasks, after = append(tasks, mark.TaskView), mark.ID
 	}
 	t, err := st.enqueue(d, protocol.TaskRewindRows, protocol.RewindRowsParams{CopyID: c.ID, Tables: req.Tables, IncludeChanged: req.IncludeChanged},
-		mark.ID, false, now)
+		after, false, now)
 	if err != nil {
 		return 0, nil, err
 	}
 	v := st.copyView(c)
-	return http.StatusAccepted, protocol.RewindTasksResponse{Tasks: []protocol.TaskView{mark.TaskView, t.TaskView}, Copy: &v}, nil
+	return http.StatusAccepted, protocol.RewindTasksResponse{Tasks: append(tasks, t.TaskView), Copy: &v}, nil
 }
