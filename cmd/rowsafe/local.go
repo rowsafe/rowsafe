@@ -41,14 +41,17 @@ restore to any second, all on that server:
   sudo rowsafe rewind compare shop   rows deleted, changed or added since, by primary key
   sudo rowsafe rewind rows shop TABLE...
                                      bring the deleted rows back (a Mark first; asks you to type the name)
+  sudo rowsafe rewind database shop --to "10m ago"    (or --to LABEL)
+                                     the whole database back to then (a Mark first; asks you to type
+                                     the name; stops PostgreSQL). sudo rowsafe rewind undo shop puts
+                                     it back as it was, for 7 days
   sudo rowsafe backups shop | proofs shop | restores shop | backup shop | proof shop
   sudo rowsafe channels add --type slack --name ops --url https://hooks.slack.com/...
                                      alerts when backups, Proof, continuous backup or the disk need you
                                      (slack, discord, ntfy or a signed webhook); sudo rowsafe alerts
   sudo rowsafe login                 later: adds the dashboard (every server in one place, alerts
-                                     from outside when the server is down, history, your team,
-                                     rewinding the whole database in place), keeping its backups,
-                                     Proofs and Marks
+                                     from outside when the server is down, history, your team),
+                                     keeping its backups, Proofs and Marks
 
 From anywhere, on a PostgreSQL, MySQL or MariaDB database this computer
 reaches (also managed ones): save it once, then use it by name:
