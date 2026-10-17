@@ -89,7 +89,7 @@ func guard(ctx context.Context, args []string) error {
 	}
 
 	var ev hookEvent
-	if err := json.NewDecoder(io.LimitReader(os.Stdin, 4<<20)).Decode(&ev); err != nil {
+	if err := json.NewDecoder(io.LimitReader(stdin, 4<<20)).Decode(&ev); err != nil {
 		return fmt.Errorf("reading the hook event from stdin: %w", err)
 	}
 	if ev.ToolName != "Bash" || ev.ToolInput.Command == "" {
@@ -100,6 +100,9 @@ func guard(ctx context.Context, args []string) error {
 		return nil
 	}
 
+	if ev.Cwd != "" {
+		_ = os.Chdir(ev.Cwd) // the project's .rowsafe.json, saved database and .env
+	}
 	proj, projPath := findProjectConfig(ev.Cwd)
 	db := cmp.Or(strings.TrimSpace(os.Getenv("ROWSAFE_DATABASE")), proj.Database)
 	required := proj.RequireProtection
@@ -114,16 +117,36 @@ func guard(ctx context.Context, args []string) error {
 		return hookReply("Rowsafe: "+msg+" The command runs without a fresh restore point.",
 			fmt.Sprintf("Rowsafe could not create a restore point before this command (%s): %s Tell the user before relying on being able to undo it.", reason, msg))
 	}
-	if db == "" {
-		return fail("no Rowsafe database is configured for this project: set ROWSAFE_DATABASE or add .rowsafe.json with {\"database\": \"NAME\"}.")
-	}
+	noDatabase := "no Rowsafe database is configured for this project: set ROWSAFE_DATABASE or add .rowsafe.json with {\"database\": \"NAME\"}."
 	cfg, err := loadConfig()
+	// On a server whose agent runs without an account, the CLI talks to
+	// its local control plane: restore points work the same.
+	_, onServer := protocol.LocalSocket(cfg.URL)
+	onServer = onServer && err == nil
+	// Without an account (or for a database the account doesn't have):
+	// the project's database reached directly, with no restore point.
+	if d, src := guardLocalDB(err == nil, onServer, db); d != nil {
+		return guardWithoutRestorePoint(ctx, ev, reason, d, src, required)
+	}
 	if err != nil {
+		if db == "" {
+			return fail(noDatabase)
+		}
 		return fail(err.Error() + ".")
 	}
 	c := client.New(cfg.URL, cfg.APIKey)
 	ctx, cancel := context.WithTimeout(ctx, 100*time.Second)
 	defer cancel()
+	if db == "" {
+		if !onServer {
+			return fail(noDatabase)
+		}
+		name, err := resolveDatabase(ctx, c, "")
+		if err != nil {
+			return fail(err.Error() + ".")
+		}
+		db, projPath = name, "this server's Rowsafe agent"
+	}
 
 	if required {
 		p, err := c.Protection(ctx, db)
@@ -167,11 +190,15 @@ func guard(ctx context.Context, args []string) error {
 	if os.Getenv("ROWSAFE_DATABASE") == "" {
 		src = projPath
 	}
+	undo := fmt.Sprintf("they can Rewind %s to restore point %q in the Rowsafe dashboard (or `rowsafe rewind copy %s --mark %s`, then bring the rows back)", db, name, db, name)
+	if onServer {
+		undo = fmt.Sprintf("restore point %q on this server holds %s as it was; going back to it takes Rewind, which needs a Rowsafe account for now (`sudo rowsafe login` connects this server)", name, db)
+	}
 	return hookReply(fmt.Sprintf("Rowsafe: restore point %s created on %s (LSN %s) before: %s", name, db, lsn, reason),
 		fmt.Sprintf("Rowsafe created restore point %q on database %s (from %s), confirmed in the backup repository, right before this command (%s). "+
-			"If the command goes wrong, stop and tell the user they can Rewind %s to restore point %q in the Rowsafe dashboard (or `rowsafe rewind copy %s --mark %s`, then bring the rows back); "+
+			"If the command goes wrong, stop and tell the user: %s; "+
 			"don't try to repair the data or restore it yourself."+previewHint(reason),
-			name, db, src, reason, db, name, db, name))
+			name, db, src, reason, undo))
 }
 
 // previewHint nudges an assistant running a migration to preview the next

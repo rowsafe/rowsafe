@@ -3,6 +3,7 @@ package preview
 import (
 	"cmp"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -254,8 +255,19 @@ func summary(res *protocol.PreviewResult, worstN int, worstImpact string) string
 		if e := res.Error; e != nil {
 			return fmt.Sprintf("The migration fails at statement %d (line %d): %s. Nothing was changed on production.", e.Statement, e.Line, e.Message)
 		}
+		if res.Checked == protocol.PreviewCheckedSchema {
+			return "The migration fails on the copy of the schema. Nothing was changed on production."
+		}
 		return "The migration fails on the copy. Nothing was changed on production."
 	case protocol.PreviewSafe:
+		switch res.Checked {
+		case protocol.PreviewCheckedStatic:
+			return fmt.Sprintf("Safe: %d %s, with no long locks, table rewrites or data loss expected on production.",
+				ran, plural(ran, "statement", "statements"))
+		case protocol.PreviewCheckedSchema:
+			return fmt.Sprintf("Safe: %d %s ran on an empty copy of the schema, with no long locks, table rewrites or data loss expected on production.",
+				ran, plural(ran, "statement", "statements"))
+		}
 		return fmt.Sprintf("Safe: %d %s ran in %s on %s, with no long locks, table rewrites or data loss.",
 			ran, plural(ran, "statement", "statements"), humanDuration(res.DurationMs), where)
 	}
@@ -268,8 +280,11 @@ func summary(res *protocol.PreviewResult, worstN int, worstImpact string) string
 		top = res.Findings[0]
 	}
 	msg := title + ": "
+	// A finding worse than any statement's impact (an extra finding, such
+	// as a column that can't be added) leads the summary.
+	topFirst := worstN > 0 && worstN <= len(res.Statements) && rank(top.Severity) > rank(res.Statements[worstN-1].Risk)
 	switch {
-	case worstImpact != "" && worstN > 0:
+	case worstImpact != "" && worstN > 0 && !topFirst:
 		cmd := ""
 		if worstN <= len(res.Statements) && res.Statements[worstN-1].Command != "" {
 			cmd = " (" + res.Statements[worstN-1].Command + ")"
@@ -304,9 +319,19 @@ func (d dialect) lockSuggestion(mode, text string) string {
 	return "Run it when traffic is low, and set lock_timeout so it gives up instead of stalling the app."
 }
 
+// rewriteLikely: a column type change, or a column added with a value
+// that differs per row (a volatile default, serial, identity, generated).
+// A constant default is instant from PostgreSQL 11.
 func rewriteLikely(text string) bool {
 	n := Normalize(text)
-	return alterTypeRE.MatchString(n) || (addColumnRE.MatchString(n) && defaultRE.MatchString(n))
+	if alterTypeRE.MatchString(n) {
+		return true
+	}
+	if !addColumnRE.MatchString(n) || !defaultRE.MatchString(n) {
+		return false
+	}
+	return volatileRE.MatchString(n) || identityRE.MatchString(n) || storedRE.MatchString(n) ||
+		regexp.MustCompile(`(?i)\b(SMALL|BIG)?SERIAL\b`).MatchString(n)
 }
 
 func biggestTable(s *protocol.PreviewStatement) int64 {

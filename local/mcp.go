@@ -3,9 +3,12 @@ package local
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/rowsafe/rowsafe/preview"
 )
 
 // MCPOptions configures the local MCP server.
@@ -26,6 +29,8 @@ const mcpInstructions = `Rowsafe, without an account: tools for one PostgreSQL d
 - Settings: database_settings (the settings that matter and what would suit the server).
 - Fixing: when a finding has a fix, use apply_fix (finding_id and fix_id) once the user agrees, instead of giving them SQL. It evaluates the database again and runs only a fix that evaluation proposes; every name and condition is checked again first. Tell the user what a destructive fix does (its confirm text) before applying it. Without apply_fix (read-only), tell the user the command: rowsafe fix.
 
+- Migrations: before running one (a migration tool, or SQL with ALTER, DROP, CREATE INDEX, bulk UPDATE/DELETE), call check_migration with its SQL and tell the user the verdict (safe, careful, dangerous, failed) and what to change. It never changes the database.
+
 Backups are not known here: this database may have none. Before a destructive operation (migrations, DROP, TRUNCATE, bulk DELETE/UPDATE), tell the user there is no Rowsafe restore point to go back to and get their OK; they can take a backup first (pg_dump), or protect the database with Rowsafe's agent (https://rowsafe.sh), which adds restore points and restore to any second.`
 
 type noInput struct{}
@@ -42,6 +47,12 @@ func (in healthInput) options() Options {
 
 type topInput struct {
 	Limit int `json:"limit,omitempty" jsonschema:"how many statements (default 20)"`
+}
+
+type migrationInput struct {
+	SQL string `json:"sql" jsonschema:"the migration's SQL (PostgreSQL), as it will run"`
+	// Static skips the temporary copy of the schema.
+	Static bool `json:"static,omitempty" jsonschema:"only read the SQL against the catalog, without running it on a temporary copy of the schema"`
 }
 
 type fixInput struct {
@@ -116,6 +127,29 @@ func NewMCPServer(d *DB, opts MCPOptions) *sdk.Server {
 		return nil, ov, err
 	})
 	addSchemaTools(s, d)
+	checkDesc := "Check a migration before it runs, without changing the database: which statements lock which tables and for how long (estimated from the table sizes), " +
+		"table rewrites, index builds without CONCURRENTLY, dropped tables and columns, UPDATE or DELETE without WHERE, a missing lock_timeout, and a verdict: safe, careful, dangerous or failed, " +
+		"with what to change. Rowsafe reads the SQL against the database's catalog (read-only)."
+	if opts.AllowWrites {
+		checkDesc += " When the connection's role may create databases, it first runs the migration on an empty copy of the schema in a temporary database on the same server " +
+			"(dropped afterwards; never for SQL that reaches beyond its database, such as roles or server settings), which also catches statements that fail."
+	}
+	checkDesc += " Rowsafe saves no restore point here: tell the user to back up first (pg_dump)."
+	f := false
+	sdk.AddTool(s, &sdk.Tool{
+		Name:        "check_migration",
+		Description: checkDesc,
+		Annotations: &sdk.ToolAnnotations{Title: "Check a migration", ReadOnlyHint: !opts.AllowWrites, DestructiveHint: &f, IdempotentHint: true, OpenWorldHint: &f},
+	}, func(ctx context.Context, _ *sdk.CallToolRequest, in migrationInput) (*sdk.CallToolResult, any, error) {
+		if strings.TrimSpace(in.SQL) == "" {
+			return nil, nil, errors.New("sql is required: the migration's SQL")
+		}
+		res, err := d.Preview(ctx, in.SQL, PreviewOptions{Static: in.Static || !opts.AllowWrites})
+		if err != nil {
+			return nil, nil, err
+		}
+		return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: preview.Text(res)}}}, res, nil
+	})
 	if opts.AllowWrites {
 		f, t := false, true
 		sdk.AddTool(s, &sdk.Tool{

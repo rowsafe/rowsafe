@@ -49,6 +49,9 @@ type DB struct {
 	// PasswordInURL: the connection string carried a password, which Ref
 	// leaves out.
 	PasswordInURL bool
+	// url is the connection string without its password, for pg_dump
+	// (the password goes in its environment).
+	url string
 
 	mu     sync.Mutex
 	pooler *string // the connection pooler in between, once known
@@ -75,6 +78,7 @@ func Open(connString string) (*DB, error) {
 	} else {
 		d.Ref = connString
 	}
+	d.url = d.Ref
 	return d, nil
 }
 
