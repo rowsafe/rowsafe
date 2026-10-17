@@ -4,8 +4,9 @@
 # Records the README demo (docs/demo/rowsafe-demo.gif, .mp4, .webm) with real
 # output: a PostgreSQL 17 in Docker with planted problems, a terminal that
 # installs the rowsafe CLI from https://rowsafe.sh/cli, saves the database with
-# rowsafe add and runs pulse, fix and pulse again. Needs Docker. Takes about 12 minutes: pulse reports a session
-# idle in a transaction only after 10 minutes.
+# rowsafe add and runs pulse, fix and pulse again. Needs Docker. Takes about
+# 12 minutes: pulse reports a session idle in a transaction only after 10
+# minutes.
 #
 #   docs/demo/record.sh
 set -eu
