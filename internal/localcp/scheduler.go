@@ -65,10 +65,11 @@ func (s *state) schedule(now time.Time) {
 			case kindFull, kindDiff:
 				_, err = s.enqueue(db, protocol.TaskBackup, protocol.BackupParams{Type: kind}, "", true, now)
 			case kindDrill:
-				_, err = s.enqueue(db, protocol.TaskDrill, nil, "", true, now)
+				_, err = s.enqueue(db, protocol.TaskDrill, s.drillParams(db, now), "", true, now) // alternates with the second copy
 			}
 			_ = ignoreOpen(err)
 		}
+		s.scheduleSecondCopy(db, now) // secondcopy.go
 	}
 }
 

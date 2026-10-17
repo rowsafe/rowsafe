@@ -128,9 +128,9 @@ Rewind: continuous backups, restore to any second
   rowsafe show [NAME]                        one database in detail
   rowsafe status [NAME] [--json]             with NAME: is it recoverable right now? without: every problem, with
                                              what to do. Exit 0 if protected / all healthy, 3 if not
-  rowsafe backup [NAME] [--type full|diff|incr] [--no-wait]
-                                             take a backup now
-  rowsafe backups [NAME]                     backups
+  rowsafe backup [NAME] [--type full|diff|incr] [--second-copy] [--no-wait]
+                                             take a backup now (--second-copy: a full one to the second copy)
+  rowsafe backups [NAME] [--second-copy]     backups (in the second copy)
   rowsafe mark [NAME] [LABEL] [--no-wait] [--json]
                                              a named restore point (a Mark), e.g. before a migration.
                                              LABEL defaults to manual-<UTC time>. --json prints the Mark
@@ -138,19 +138,27 @@ Rewind: continuous backups, restore to any second
   rowsafe marks [NAME]                       restore points
   rowsafe storage [NAME] [--json]            what the backups take in each storage, the cost a month, the second
                                              copy, and ways to spend less
+  rowsafe secondcopy [NAME] [--json]         the second backup copy: where it is, how far it is, its backups
+  rowsafe secondcopy add [NAME] --endpoint HOST --bucket BUCKET [--region R] [--yes] [--no-wait]
+                                             on the server, with sudo: keep a second copy of the backups and the
+                                             change log in another bucket, ideally at another provider. The key
+                                             ($ROWSAFE_REPO2_S3_KEY, $ROWSAFE_REPO2_S3_KEY_SECRET, or asked) and a
+                                             new passphrase stay in /etc/rowsafe/agent.env. Tests the bucket first
+  rowsafe secondcopy remove [--yes]          on the server, with sudo: stop the second copy (its bucket is kept)
   rowsafe set [NAME] [--retention-full N] [--full-schedule CRON] [--diff-schedule CRON] [--proof-schedule CRON]
                                              change retention and schedules (5-field cron, UTC; --diff-schedule "" disables diffs)
   rowsafe remove NAME [--keep-archiving] [--yes]
                                              stop managing a database; never changes the server
-  rowsafe restore [NAME] --to TIME|MARK [--hours 24] [--no-wait]
+  rowsafe restore [NAME] --to TIME|MARK [--hours 24] [--second-copy] [--no-wait]
                                              restore a copy as it was then, next to production (never
-                                             touches it): rowsafe rewind copy, with the time or Mark in one flag
+                                             touches it): rowsafe rewind copy, with the time or Mark in one flag.
+                                             --second-copy restores from the second copy (the first bucket is gone)
   rowsafe restores [NAME] [--json]           the copy, the recovery window and recent restores (rowsafe rewind)
   rowsafe rewind [NAME] [--json]             the recovery window, the copy and data kept aside by a rewind
   rowsafe rewind find [NAME] [--table T] [--since 24h | --from TIME [--to TIME]] [--kind delete,update,truncate,drop]
                                              when were rows deleted or changed, or a table emptied or dropped?
                                              Lists the biggest changes with exact times, to rewind to just before
-  rowsafe rewind copy [NAME] (--at TIME | --mark LABEL) [--hours 24] [--no-wait]
+  rowsafe rewind copy [NAME] (--at TIME | --mark LABEL) [--hours 24] [--second-copy] [--no-wait]
                                              restore a copy as it was then, next to production (never
                                              touches it). TIME: "2026-09-24 14:04" or "14:04" (your time
                                              zone), "10m ago", or RFC 3339
@@ -253,7 +261,9 @@ Fork: a new, independent database from any moment, on another server or a new po
   rowsafe forks [SOURCE] [--json]            the forks made from SOURCE, and what it was forked from
 
 Proof: the weekly restore test
-  rowsafe proof [NAME] [--no-wait]           restore the latest backup to a scratch copy and check it, now
+  rowsafe proof [NAME] [--second-copy] [--no-wait]
+                                             restore the latest backup (in the second copy) to a scratch copy and
+                                             check it, now
   rowsafe proofs [NAME]                      restore test results
 
 Pulse: health, monitoring and alerts
@@ -734,6 +744,8 @@ func dispatch(ctx context.Context, args []string) error {
 		})
 	case "storage":
 		return storageCmd(ctx, c, rest)
+	case "secondcopy", "second-copy": // secondcopy.go
+		return secondCopyCmd(ctx, c, rest)
 	case "settings": // settings.go
 		return settingsCmd(ctx, c, rest)
 	case "tune":

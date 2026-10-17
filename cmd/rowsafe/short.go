@@ -493,4 +493,7 @@ func printProtection(name string, p protocol.Protection) {
 	if p.RecoveryWindowStart != nil {
 		fmt.Printf("Recoverable from:     %s\n", p.RecoveryWindowStart.Local().Format(time.RFC1123))
 	}
+	if sc := p.SecondCopy; sc != nil {
+		fmt.Printf("Second copy:          %s\n", orText(sc.Summary, sc.State))
+	}
 }

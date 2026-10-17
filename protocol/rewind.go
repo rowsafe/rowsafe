@@ -343,6 +343,9 @@ type CreateRewindCopyRequest struct {
 	Mark  string     `json:"mark,omitempty"`
 	XID   uint32     `json:"xid,omitempty"`
 	Hours int        `json:"hours,omitempty"` // how long to keep it (default 24, at most 168)
+	// Repo RepoSecond restores from the second copy (when the first bucket
+	// is gone). On a server without an account only, for now.
+	Repo int `json:"repo,omitempty"`
 }
 
 // ExtendRewindCopyRequest keeps a copy Hours longer (from now).

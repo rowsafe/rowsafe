@@ -68,11 +68,15 @@ func (s *state) enqueue(db *dbRec, typ string, params any, after string, schedul
 }
 
 // openKey is what makes two open tasks the same: their type, and a backup's
-// kind (a full and a differential backup may wait together).
+// kind and storage (a full and a differential backup may wait together, and
+// a full one to each storage).
 func openKey(typ string, params json.RawMessage) string {
 	if typ == protocol.TaskBackup {
 		var p protocol.BackupParams
 		_ = json.Unmarshal(params, &p)
+		if p.Repo == protocol.RepoSecond {
+			return typ + ":" + p.Type + ":copy2"
+		}
 		return typ + ":" + p.Type
 	}
 	if typ == protocol.TaskRestorePoint {
@@ -152,7 +156,7 @@ func (s *state) reap(now time.Time) int {
 // spec is what the agent gets about a database.
 func (d *dbRec) spec() protocol.DatabaseSpec {
 	return protocol.DatabaseSpec{ID: d.ID, Name: d.Name, Stanza: d.Stanza, Port: d.Port, SocketDir: d.SocketDir,
-		RetentionFull: d.RetentionFull, Engine: d.Engine}
+		RetentionFull: d.RetentionFull, Engine: d.Engine, SecondCopyRetentionFull: protocol.DefaultSecondCopyRetentionFull}
 }
 
 func (d *dbRec) setStatus(status string, now time.Time) {
@@ -241,8 +245,9 @@ func (s *state) afterTask(t *taskRec, db *dbRec, req protocol.CompleteRequest, n
 		if err := json.Unmarshal(req.Result, &res); err != nil {
 			return err
 		}
-		if res.Repo == protocol.RepoSecond {
-			return nil // a second copy needs an account
+		if res.Repo == protocol.RepoSecond || backupRepo(t.Params) == protocol.RepoSecond {
+			s.afterSecondCopyBackup(t, db, res) // secondcopy.go
+			return nil
 		}
 		s.Backups = append(s.Backups, protocol.Backup{ID: newID("bk"), DatabaseID: db.ID, TaskID: t.ID, Label: res.Label,
 			Type: res.Type, StartedAt: res.StartedAt, StoppedAt: res.StoppedAt, SizeBytes: res.SizeBytes, RepoSizeBytes: res.RepoSizeBytes})
