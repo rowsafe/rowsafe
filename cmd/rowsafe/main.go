@@ -415,6 +415,8 @@ Usage counts: off unless you turn them on; nothing is sent by default
                                              logged in or not, a random ID. Never arguments, names or errors
   rowsafe telemetry off                      stop, and forget the random ID (ROWSAFE_TELEMETRY=0 or
                                              DO_NOT_TRACK=1 also keep them off)
+  rowsafe tips on | off | status             a short tip after a command, at most one an hour, only at a
+                                             terminal (never with --json or for AI agents; ROWSAFE_NO_TIPS=1)
 
 Backups, proof and mark wait for the task to finish; pass --no-wait to return at once.
 Scripts and AI agents (rowsafe help agents):
@@ -471,7 +473,7 @@ func loadConfig() (config, error) {
 		}
 	} else if os.Getenv("ROWSAFE_API_KEY") == "" && os.Getenv("ROWSAFE_URL") == "" {
 		// A login saved on a server whose agent went back to running
-		// without an account (the installer's --no-account): the agent's
+		// without an account (the installer's --no-account, now its default): the agent's
 		// socket only exists then, and commands here are about it.
 		if url, err := localControl(""); url != "" && err == nil {
 			c.URL, c.APIKey, c.KeyID = url, "local", ""
@@ -523,6 +525,7 @@ func cliMain(ctx context.Context, args []string) int {
 	finish(err == nil || errors.As(err, &exit))
 	run.done(err)
 	if err == nil {
+		showTip(ctx, args) // tips.go
 		return 0
 	}
 	if errors.As(err, &exit) {
@@ -598,6 +601,8 @@ func dispatch(ctx context.Context, args []string) error {
 		return login(ctx, rest)
 	case "logout":
 		return logout(ctx, rest)
+	case "tips": // tips.go
+		return tipsCmd(rest)
 	case "telemetry":
 		return telemetryCmd(rest)
 	case "whoami":

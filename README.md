@@ -24,7 +24,7 @@ Features per database: `protocol.EngineCapabilities`.
 On your database server (PostgreSQL on Linux):
 
 ```sh
-curl -fsSL https://rowsafe.sh | sudo sh -s -- --no-account
+curl -fsSL https://rowsafe.sh | sudo sh
 sudo rowsafe status shop                  # protected? backups, the change log, the last restore test
 sudo rowsafe mark shop before-migration   # a restore point (a Mark)
 sudo rowsafe backups shop                 # also: proofs, backup, proof
@@ -63,7 +63,7 @@ rowsafe login                         # on your computer
 rowsafe hosts add root@203.0.113.10   # then add more servers: installs the agent over SSH
 ```
 
-Or install on a new server already linked: `curl -fsSL https://rowsafe.sh | sudo sh`.
+Or install on a new server already linked: `curl -fsSL https://rowsafe.sh | sudo sh -s -- --account`.
 
 **Rewind**: continuous backups, restore to any second.
 

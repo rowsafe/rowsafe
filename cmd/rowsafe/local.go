@@ -30,7 +30,7 @@ On your database server (PostgreSQL), rowsafe add also protects it:
 continuous backups to your own bucket, Marks, a weekly restore test and
 restore to any second, all on that server:
 
-  curl -fsSL https://rowsafe.sh | sudo sh -s -- --no-account
+  curl -fsSL https://rowsafe.sh | sudo sh
   sudo rowsafe add shop postgresql:///shop
                                      saves it and, once you say yes, turns on backups (ALTER SYSTEM
                                      and a reload; PostgreSQL restarts only when you ask)

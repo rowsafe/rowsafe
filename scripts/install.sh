@@ -331,8 +331,11 @@ TTY_SAVED=''       # terminal settings to restore (stty -g)
 STORAGE_CLEAR=''   # agent.env keys the guided setup turns back into comments
 STORAGE_GUIDED=0
 NO_SETUP=0         # --no-setup
-NO_ACCOUNT=''      # --no-account (1) / --account (0); '' = ask once on a terminal when there is no token
+NO_ACCOUNT=''      # --no-account (1) / --account (0); '' = without one, unless a token connects it
 LEAVE_ACCOUNT=0    # --no-account on a server connected to an account (choose_account)
+NO_ACCOUNT_FLAG='' # --no-account was passed (not just the default)
+FRESH_LOCAL=0      # a new server on its own by default: choosing Rowsafe Storage connects it
+ACCOUNT_API_URL='' # the control plane it would connect to then ('' = https://api.rowsafe.sh)
 PROTECT_NAME=''    # --protect NAME
 PROTECT_PORT=''    # --protect-port PORT
 ALLOW_RESTART=''   # --allow-restart (yes) / --no-allow-restart (no); '' = ask once on a terminal, else yes
@@ -426,20 +429,21 @@ usage() {
 Rowsafe agent installer
 
   curl -fsSL https://rowsafe.sh | sudo sh
-      prints a link; approve the server in your browser and the install goes on
-  curl -fsSL https://rowsafe.sh | sudo sh -s rse_...
-      for automation (no terminal): a one-time enrollment token instead
-  curl -fsSL https://rowsafe.sh | sudo sh -s -- --no-account
       everything on this server, used with sudo rowsafe ... here: backups, restore to
-      any second, restore tests and Pulse (sudo rowsafe add NAME postgresql:///DB).
+      any second, restore tests, alerts and Pulse (sudo rowsafe add NAME postgresql:///DB).
       Add the dashboard later with sudo rowsafe login (it keeps its backups, Proofs
-      and Marks). On a server connected to the dashboard, --no-account turns it back
+      and Marks)
+  curl -fsSL https://rowsafe.sh | sudo sh -s -- --account
+      connect it to the dashboard now: prints a link; approve the server in your browser
+  curl -fsSL https://rowsafe.sh | sudo sh -s rse_...
+      for automation (no terminal): connect with a one-time enrollment token instead
 
 Options (when piping, pass them after `sh -s --`):
   rse_...                the one-time enrollment token from `rowsafe hosts enroll-token`
-  --no-account           no account: the agent runs its own control plane on this server
-                         and the rowsafe CLI is installed here (PostgreSQL for now)
-  --account              connect to an account (in the browser) without asking first
+  --account              connect this server to the dashboard (in the browser)
+  --no-account           without the dashboard (the default for a new server): the agent
+                         runs its own control plane here. On a server connected to the
+                         dashboard, it disconnects it (backups go on)
   --setup-storage        set up (or change) the backup storage, even if it is configured
   --storage PROVIDER     skip the "where" question: rowsafe (Rowsafe Storage, no bucket
                          needed; also without a terminal), r2, b2, s3, wasabi, spaces,
@@ -10943,10 +10947,9 @@ missing_config() {
 # own control plane, on a socket in its state directory).
 no_account() { [ "$(s_get ROWSAFE_URL)" = "$LOCAL_URL" ]; }
 
-# choose_account runs before connecting in the browser on a server that isn't
-# enrolled and has no token: with an account (the dashboard) or without one.
-# --no-account and --account answer it; without a terminal, it stays with an
-# account (a token or the browser), as before.
+# choose_account decides, on a server that isn't enrolled and has no token,
+# whether it connects to the dashboard: only with --account (or a token).
+# Without either, it runs on its own; sudo rowsafe login connects it later.
 choose_account() {
   if no_account; then
     # Connecting keeps the backups, Proofs and Marks: the CLI does it.
@@ -10967,20 +10970,24 @@ choose_account() {
     return 0
   fi
   [ -z "$(s_get ROWSAFE_ENROLL_TOKEN)" ] || return 0
-  if [ -z "$NO_ACCOUNT" ] && [ "$TTY" = 1 ]; then
-    tty_say ""
-    tty_say "${BOLD}Use Rowsafe with an account?${RESET}"
-    tty_say "  1) Yes: connect this server in the browser (the dashboard, alerts, Rewind from anywhere)"
-    tty_say "  2) No: backups, restore to any second, restore tests and Pulse on this server, with sudo rowsafe ..."
-    tty_say "     here. You can connect it to an account later (sudo rowsafe login)"
-    _acct=1
-    choose _acct "Choose" 1 2
-    [ "$_acct" = 2 ] && NO_ACCOUNT=1 || NO_ACCOUNT=0
+  [ "$NO_ACCOUNT" != 0 ] || return 0
+  # On its own, a server protects PostgreSQL for now; the other engines
+  # need the dashboard (rowsafe_storage too: Rowsafe Storage is the account's).
+  if [ "$HOST_ENGINE" != postgresql ] || [ "$STORAGE_PROVIDER" = rowsafe ]; then
+    if [ "$NO_ACCOUNT" = 1 ]; then
+      [ "$HOST_ENGINE" = postgresql ] || die "on its own, Rowsafe protects PostgreSQL for now, and this server runs $(engine_label). Connect it to the dashboard instead: curl -fsSL https://rowsafe.sh | sudo sh -s -- --account"
+      die "Rowsafe Storage comes with the dashboard: use your own bucket, or connect this server with --account"
+    fi
+    NO_ACCOUNT=0
+    note "$( [ "$HOST_ENGINE" = postgresql ] && echo "Rowsafe Storage comes with the dashboard" || echo "on its own, Rowsafe protects PostgreSQL for now, and this server runs $(engine_label)"): connecting it to the dashboard"
+    return 0
   fi
-  [ "$NO_ACCOUNT" = 1 ] || return 0
+  NO_ACCOUNT=1
+  [ -n "$NO_ACCOUNT_FLAG" ] || FRESH_LOCAL=1 # the storage answer may still connect it
+  ACCOUNT_API_URL=$(s_get ROWSAFE_URL)       # where it would connect (default: api.rowsafe.sh)
   ROWSAFE_URL=$LOCAL_URL
   export ROWSAFE_URL
-  ok "without an account: everything stays on this server"
+  ok "everything stays on this server (sudo rowsafe login adds the dashboard later)"
 }
 
 # leave_account finishes --no-account on a server that was connected to an
@@ -10998,6 +11005,30 @@ leave_account() {
   fi
   CHANGED=1
   note "the account's identity is kept aside in $STATE_DIR/agent.json.account; remove this server in the dashboard"
+}
+
+# use_account connects a new server to the dashboard after all, because the
+# answer to "where should backups go?" was Rowsafe Storage: approve it in the
+# browser now. False (it stays on its own) when that doesn't work out.
+use_account() {
+  [ "$FRESH_LOCAL" = 1 ] || return 1
+  ROWSAFE_URL=$ACCOUNT_API_URL
+  export ROWSAFE_URL
+  NO_ACCOUNT=0 FRESH_LOCAL=0
+  # In a subshell, so a declined or expired approval doesn't end the install.
+  rm -f "$TMP/enroll-token"
+  (connect_in_browser && [ -n "${ROWSAFE_ENROLL_TOKEN:-}" ] && printf '%s\n' "$ROWSAFE_ENROLL_TOKEN" >"$TMP/enroll-token") || true
+  if [ -s "$TMP/enroll-token" ]; then
+    ROWSAFE_ENROLL_TOKEN=$(cat "$TMP/enroll-token")
+    export ROWSAFE_ENROLL_TOKEN
+    rm -f "$TMP/enroll-token"
+    return 0
+  fi
+  ROWSAFE_URL=$LOCAL_URL
+  export ROWSAFE_URL
+  NO_ACCOUNT=1
+  warn "not connected: backups go to your own bucket, and sudo rowsafe login connects it later"
+  return 1
 }
 
 # install_local_cli installs the rowsafe CLI here (no account: it is how this
@@ -11595,6 +11626,14 @@ storage_desc() {
 # sets OFFER_FREE to what the free plan includes (e.g. "10 GB").
 storage_offer() {
   _url=$(s_get ROWSAFE_URL)
+  if no_account; then
+    # Rowsafe Storage comes with the dashboard: offered on a new server only,
+    # where choosing it connects the server (use_account). Nothing is asked
+    # of Rowsafe's servers until then.
+    [ "$FRESH_LOCAL" = 1 ] && [ "$TTY" = 1 ] || return 1
+    OFFER_FREE=''
+    return 0
+  fi
   [ -n "$_url" ] || _url=https://api.rowsafe.sh
   _o=$(curl -fsS --max-time 5 "${_url%/}/v1/storage/offer" 2>/dev/null) || return 1
   case $_o in *'"available":true'*) ;; *) return 1 ;; esac
@@ -11608,7 +11647,11 @@ storage_offer() {
 rowsafe_storage_ask() {
   tty_say ""
   tty_say "${BOLD}Where should backups go?${RESET}"
-  tty_say "  1) Rowsafe Storage     nothing to set up${OFFER_FREE:+ ($OFFER_FREE)}"
+  if no_account; then
+    tty_say "  1) Rowsafe Storage     nothing to set up${OFFER_FREE:+ ($OFFER_FREE)}; connects this server to the dashboard"
+  else
+    tty_say "  1) Rowsafe Storage     nothing to set up${OFFER_FREE:+ ($OFFER_FREE)}"
+  fi
   tty_say "  2) Your own bucket     Cloudflare R2, Amazon S3, Backblaze B2, ..."
   tty_hint "Either way, backups are encrypted on this server first: Rowsafe can't read them."
   _w=1
@@ -11999,6 +12042,11 @@ guided_storage() {
       tty_say "Rowsafe keeps your backups in a storage bucket that you own. You need an"
       tty_say "empty bucket and an access key that can read, write and delete in it."
     fi
+  fi
+  if [ "$S_WHERE" = rowsafe ] && no_account && ! use_account; then
+    S_WHERE=own
+    tty_say "Rowsafe keeps your backups in a storage bucket that you own. You need an"
+    tty_say "empty bucket and an access key that can read, write and delete in it."
   fi
   if [ "$S_WHERE" = rowsafe ]; then
     rowsafe_storage_guided
@@ -15882,7 +15930,7 @@ main() {
       --setup-storage) SETUP_STORAGE=1 ;;
       --no-prompt) PROMPT=never ;;
       --no-setup) NO_SETUP=1 ;;
-      --no-account) NO_ACCOUNT=1 ;;
+      --no-account) NO_ACCOUNT=1 NO_ACCOUNT_FLAG=1 ;;
       --account) NO_ACCOUNT=0 ;;
       --allow-restart) ALLOW_RESTART=yes ;;
       --mysql-standby) MYSQL_STANDBY=yes ;;

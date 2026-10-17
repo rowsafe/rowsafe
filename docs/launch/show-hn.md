@@ -4,8 +4,8 @@ Drafts only. Nothing here has been posted. The founder edits and posts.
 
 **Before posting:**
 
-- v0.10.19 (the installer's `--no-account`, `rowsafe add`, poolers) is released, and
-  `curl -fsSL https://rowsafe.sh | sudo sh -s -- --no-account` works on a fresh server.
+- v0.10.19 (the installer without an account by default, `rowsafe add`, poolers) is released, and
+  `curl -fsSL https://rowsafe.sh | sudo sh` works on a fresh server.
 - Every command below works on that release, and rowsafe.sh/docs/guides/no-account-server is live.
 - Restores without an account: confirm pgBackRest restores the backups by hand with the
   passphrase from the server, or cut "What if you go away?".
@@ -26,7 +26,7 @@ Drafts only. Nothing here has been posted. The founder edits and posts.
 >
 > On the database server, with no account:
 >
->     curl -fsSL https://rowsafe.sh | sudo sh -s -- --no-account
+>     curl -fsSL https://rowsafe.sh | sudo sh
 >
 > That sets up continuous backups of PostgreSQL to your own S3 bucket (pgBackRest, encrypted on the server with a passphrase only you hold), a restore test every week that restores the latest backup next to production and checks it, and a health score. `sudo rowsafe status shop` says whether it's protected, `sudo rowsafe mark shop before-migration` saves a named restore point, `sudo rowsafe backups shop` lists backups. Restoring through Rowsafe (a copy as of any second, bringing back deleted rows, rewinding in place) needs an account for now. `sudo rowsafe login` connects the server to an account later and keeps its backups and Marks.
 >
@@ -77,7 +77,7 @@ You don't have to. The MCP server is read-only by default. If you do let one cha
 
 > Backups, a weekly restore test and a health score for the PostgreSQL on your own server. No account:
 >
-> curl -fsSL https://rowsafe.sh | sudo sh -s -- --no-account
+> curl -fsSL https://rowsafe.sh | sudo sh
 >
 > No server access? `rowsafe pulse postgres://…` scores any Postgres, managed ones too, and fixes what it finds after you confirm.
 >
@@ -93,6 +93,6 @@ Attach `docs/demo/rowsafe-demo.mp4` (sharper than the GIF on X).
 >
 > Nothing is sent to us (usage counts are opt-in). Apache-2.0: https://github.com/rowsafe/rowsafe
 >
-> On your own server, `curl -fsSL https://rowsafe.sh | sudo sh -s -- --no-account` also sets up continuous backups to your own bucket and a weekly restore test, still with no account. Restoring through Rowsafe needs an account for now.
+> On your own server, `curl -fsSL https://rowsafe.sh | sudo sh` also sets up continuous backups to your own bucket and a weekly restore test, still with no account. Restoring through Rowsafe needs an account for now.
 >
 > Limits: PostgreSQL 13–18; through PgBouncer the fixes that run inside the database need the direct connection; on Windows, fixes don't apply yet. I'd like to know which findings are wrong or missing.
