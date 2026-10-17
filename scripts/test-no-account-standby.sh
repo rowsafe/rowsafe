@@ -49,9 +49,9 @@ psql_local() { runuser -u postgres -- psql -qAtX -d "${DB:-postgres}" "$@"; }
 pg_running() { runuser -u postgres -- pg_isready -q -h /var/run/postgresql -p 5432; }
 in_recovery() { [ "$(psql_local -c 'SELECT pg_is_in_recovery()')" = t ]; }
 
-# install: what the installer puts in place without an account, with
+# setup_server: what the installer puts in place without an account, with
 # restarts allowed for the main cluster, which listens on the network.
-install() {
+setup_server() {
   export DEBIAN_FRONTEND=noninteractive
   W=/w
   install -d -m 0755 /opt/rowsafe /usr/local/lib/rowsafe /etc/rowsafe
@@ -93,7 +93,7 @@ EOF
 
 # primary: shop protected, with rows, and its first full backup.
 primary() {
-  install
+  setup_server
   runuser -u postgres -- psql -qX -c "CREATE ROLE app LOGIN SUPERUSER PASSWORD 'app-pw'" -c "CREATE DATABASE shop OWNER app" ||
     fail "the app role and database"
   DB=shop psql_local -c "CREATE TABLE orders (id int PRIMARY KEY, note text); INSERT INTO orders SELECT g, 'order ' || g FROM generate_series(1, 5) g" ||
@@ -120,7 +120,7 @@ link() {
 
 # standby PRIMARY: this server's empty cluster becomes shop's standby.
 standby() {
-  install
+  setup_server
   ! rowsafe standby create shop --primary "$1" </dev/null >/tmp/create.out 2>&1 || fail "created a standby without a confirmation"
   rowsafe standby create shop --primary "$1" --port 5432 --yes | tee /tmp/create.out || fail "rowsafe standby create"
   until_ok 120 "the standby streams from the primary" sh -c "rowsafe standby shop | grep -q 'in sync (streaming)'"
