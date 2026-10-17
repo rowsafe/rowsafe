@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -188,7 +190,7 @@ func Read(ctx context.Context, c Conn, o ReadOptions) (*Reading, error) {
 	dm.Activity = act
 	s.replication(ctx, db, dm)
 	var datadir string
-	if c.Local && db.QueryRowContext(ctx, "SELECT @@datadir").Scan(&datadir) == nil {
+	if c.Local && db.QueryRowContext(ctx, "SELECT @@datadir").Scan(&datadir) == nil && ownDataDir(ctx, db, datadir) {
 		if free, err := freeBytes(datadir); err == nil {
 			if total, err := totalBytes(datadir); err == nil && total > 0 {
 				m[collect.MDiskTotalBytes], m[collect.MDiskFreeBytes] = float64(total), float64(free)
@@ -331,4 +333,38 @@ func totalBytes(dir string) (int64, error) {
 		return 0, err
 	}
 	return int64(st.Blocks) * int64(st.Bsize), nil
+}
+
+// ownDataDir reports whether dir, the server's @@datadir, is that server's
+// on this machine: a server in a container (port-mapped to localhost)
+// reports a path that may be another server's here, or nothing. MySQL's
+// auto.cnf holds its server_uuid; otherwise one of its schemas has a
+// folder there. When neither can be read (the folder is the mysql user's),
+// it isn't counted: no disk readings beat another disk's.
+func ownDataDir(ctx context.Context, db *sql.DB, dir string) bool {
+	if dir == "" {
+		return false
+	}
+	var uuid string
+	if db.QueryRowContext(ctx, "SELECT @@server_uuid").Scan(&uuid) == nil && uuid != "" {
+		if b, err := os.ReadFile(filepath.Join(dir, "auto.cnf")); err == nil {
+			return strings.Contains(string(b), uuid)
+		}
+	}
+	rows, err := db.QueryContext(ctx, `SELECT schema_name FROM information_schema.schemata
+		WHERE schema_name NOT IN (`+advisorSkipSchemas+`) LIMIT 50`)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if rows.Scan(&name) != nil || strings.ContainsAny(name, "/\\.") {
+			continue
+		}
+		if fi, err := os.Stat(filepath.Join(dir, name)); err == nil && fi.IsDir() {
+			return true
+		}
+	}
+	return false
 }

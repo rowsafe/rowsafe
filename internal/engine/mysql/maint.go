@@ -138,7 +138,7 @@ func (s *server) tableAction(ctx context.Context, db *sql.DB, p protocol.Mainten
 		}
 		if verb == "OPTIMIZE TABLE" {
 			free, err := freeBytes(datadir)
-			if err != nil && s.direct != nil {
+			if s.direct != nil && (err != nil || !ownDataDir(ctx, db, datadir)) {
 				return fmt.Errorf("Rowsafe can't see the free disk of %s's data directory from here, and rebuilding %s.%s needs room for a copy of it: check the disk has %s free, then run OPTIMIZE TABLE yourself",
 					s.flavor.display(), schema, table, humanBytes(info.Size*2+1<<30))
 			}
