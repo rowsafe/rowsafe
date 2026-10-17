@@ -15,7 +15,7 @@ import (
 )
 
 // On a database server where the agent runs its own control plane (the
-// installer's --no-account), `sudo rowsafe add NAME postgres://...` also
+// installer's default), `sudo rowsafe add NAME postgres://...` also
 // protects the PostgreSQL it reaches on this server (continuous backups,
 // Marks, Proof, Rewind), under the same name. Then every command takes the
 // saved name: pulse, fix and the other direct ones on the connection
