@@ -259,6 +259,10 @@ func TestExitCodes(t *testing.T) {
 			t.Errorf("rowsafe %s: exit %d (want %d), stderr %q (want %q)", strings.Join(tc.args, " "), code, tc.code, errOut, tc.says)
 		}
 	}
+	t.Setenv("ROWSAFE_API_KEY", "")
+	if code, _, errOut := runCaptured(t, t.Context(), "no-such-command"); code != 2 || !strings.Contains(errOut, "unknown command") {
+		t.Errorf("an unknown command, not logged in: exit %d, %s", code, errOut)
+	}
 	t.Setenv("ROWSAFE_API_KEY", "bad") // the fake control plane refuses it: 401
 	if code, _, errOut := runCaptured(t, t.Context(), "ls"); code != 1 || !strings.Contains(errOut, "rowsafe login") {
 		t.Errorf("a refused key: exit %d, %s", code, errOut)

@@ -506,6 +506,11 @@ func cliMain(ctx context.Context, args []string) int {
 		return 0
 	}
 	run := telemetryStart(args) // usage counts, off unless turned on (telemetry.go)
+	if len(referenceLines(args[0])) == 0 {
+		// Before the login check: an unknown command is a usage error, logged in or not.
+		fmt.Fprintf(os.Stderr, "error: unknown command %q; run `rowsafe help`\n", args[0])
+		return 2
+	}
 	finish := startJSON(args)
 	err := dispatch(ctx, args)
 	var exit exitError

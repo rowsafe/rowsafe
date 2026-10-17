@@ -375,7 +375,7 @@ func telemetryStatus(args []string) error {
 		out.Example.InstallID = "(a random ID made by rowsafe telemetry on)"
 	}
 	if asJSON {
-		enc := json.NewEncoder(os.Stdout)
+		enc := json.NewEncoder(jsonWriter())
 		enc.SetIndent("", "  ")
 		return enc.Encode(out)
 	}
