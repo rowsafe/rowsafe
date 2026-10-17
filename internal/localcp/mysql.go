@@ -19,7 +19,7 @@ import (
 // engine runs, and the words people read.
 
 // localEngines are the engines this control plane protects.
-var localEngines = []string{protocol.EnginePostgreSQL, protocol.EngineMySQL, protocol.EngineMariaDB}
+var localEngines = []string{protocol.EnginePostgreSQL, protocol.EngineMySQL, protocol.EngineMariaDB, protocol.EngineMongoDB}
 
 // localFeatures are what this control plane offers for a database: every
 // local engine has them all (protocol.EngineCapabilities; a test checks).
@@ -38,11 +38,16 @@ func checkLocalEngine(engine string) string {
 	if slices.Contains(localEngines, e) {
 		return ""
 	}
-	if !protocol.ValidEngine(e) {
-		return fmt.Sprintf("unknown engine %q: Rowsafe on this server protects PostgreSQL, MySQL and MariaDB", engine)
+	var names []string
+	for _, l := range localEngines {
+		names = append(names, protocol.EngineDisplayName(l))
 	}
-	return fmt.Sprintf("Rowsafe on this server protects PostgreSQL, MySQL and MariaDB for now; %s needs the dashboard (rowsafe login connects this server)",
-		protocol.EngineDisplayName(e))
+	list := strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
+	if !protocol.ValidEngine(e) {
+		return fmt.Sprintf("unknown engine %q: Rowsafe on this server protects %s", engine, list)
+	}
+	return fmt.Sprintf("Rowsafe on this server protects %s for now; %s needs the dashboard (rowsafe login connects this server)",
+		list, protocol.EngineDisplayName(e))
 }
 
 // defaultSocket is where the engine's server listens when the request
@@ -54,14 +59,19 @@ func defaultSocket(engine string) string {
 		return "/var/run/mysqld/mysqld.sock"
 	case protocol.EngineMariaDB:
 		return "/run/mysqld/mysqld.sock"
+	case protocol.EngineMongoDB:
+		return "" // over TCP on 127.0.0.1 (mongodb.go)
 	}
 	return "/var/run/postgresql"
 }
 
 // defaultPort is the engine's usual port.
 func defaultPort(engine string) int {
-	if mysqlFamily(engine) {
+	switch {
+	case mysqlFamily(engine):
 		return 3306
+	case isMongo(engine):
+		return 27017
 	}
 	return 5432
 }
@@ -73,6 +83,8 @@ func restartYourself(engine string) string {
 		return "Restart MySQL yourself: sudo systemctl restart mysql"
 	case protocol.EngineMariaDB:
 		return "Restart MariaDB yourself: sudo systemctl restart mariadb"
+	case protocol.EngineMongoDB:
+		return "Restart MongoDB yourself: sudo systemctl restart mongod"
 	}
 	return "Restart PostgreSQL yourself: sudo systemctl restart postgresql"
 }
@@ -81,6 +93,9 @@ func restartYourself(engine string) string {
 // hosted control plane does: MySQL and MariaDB ship their binary log
 // (continuous backup) where PostgreSQL archives WAL.
 func engineReasons(engine string, reasons []string) []string {
+	if isMongo(engine) {
+		return mongoReasons(reasons) // mongodb.go
+	}
 	if !mysqlFamily(engine) {
 		return reasons
 	}
@@ -95,6 +110,9 @@ func engineReasons(engine string, reasons []string) []string {
 // engineAlert words a firing alert for a MySQL or MariaDB database (the
 // rules are PostgreSQL's: the facts they read are reported the same way).
 func engineAlert(rule string, st *state, d *dbRec, r ruleResult, now time.Time) ruleResult {
+	if isMongo(d.Engine) && r.firing {
+		return mongoAlert(rule, st, d, r, now) // mongodb.go
+	}
 	if !mysqlFamily(d.Engine) || !r.firing {
 		return r
 	}
@@ -125,6 +143,8 @@ func unitName(engine string) string {
 		return "mysql"
 	case protocol.EngineMariaDB:
 		return "mariadb"
+	case protocol.EngineMongoDB:
+		return "mongod"
 	}
 	return "postgresql"
 }
@@ -134,11 +154,11 @@ func unitName(engine string) string {
 // server per port; its socket file has more than one name, /run and
 // /var/run).
 func (st *state) serverAt(engine string, port int, socket string) *dbRec {
-	if !mysqlFamily(engine) {
+	if !mysqlFamily(engine) && !isMongo(engine) {
 		return st.dbAt(port, socket)
 	}
-	for _, d := range st.Databases {
-		if mysqlFamily(d.Engine) && d.Port == port {
+	for _, d := range st.Databases { // MongoDB: one server per port, on 127.0.0.1
+		if (mysqlFamily(d.Engine) && mysqlFamily(engine) || isMongo(d.Engine) && isMongo(engine)) && d.Port == port {
 			return d
 		}
 	}
@@ -150,6 +170,9 @@ func (st *state) serverAt(engine string, port int, socket string) *dbRec {
 // and its own name, with no schema (the agent's allTables); PostgreSQL's
 // rule is validTables.
 func validTablesFor(engine string, tables []protocol.RewindTable, limit int) error {
+	if isMongo(engine) {
+		return mongoTables(tables, limit) // mongodb.go
+	}
 	if !mysqlFamily(engine) {
 		return validTables(tables, limit)
 	}

@@ -363,7 +363,7 @@ func (s *Server) register(w http.ResponseWriter, name string, port int, socketDi
 	if socketDir == "" {
 		socketDir = defaultSocket(engine) // as on the hosted control plane
 	}
-	if !strings.HasPrefix(socketDir, "/") { // a path on this Linux server
+	if socketDir != "" && !strings.HasPrefix(socketDir, "/") || socketDir == "" && !isMongo(engine) { // a path on this Linux server
 		writeError(w, http.StatusBadRequest, "socket_dir must be an absolute path")
 		return
 	}
@@ -381,6 +381,9 @@ func (s *Server) register(w http.ResponseWriter, name string, port int, socketDi
 				Stanza: name, Port: port, SocketDir: socketDir, Engine: engine, Status: protocol.DBPendingAdopt,
 				RetentionFull: defaultRetentionFull, ScheduleFull: defaultScheduleFull, ScheduleDiff: defaultScheduleDiff,
 				ScheduleDrill: defaultScheduleDrill, CreatedAt: now.UTC()}, StatusSince: now.UTC()}
+			if isMongo(engine) {
+				mongoDefaults(db) // mongodb.go
+			}
 			st.Databases = append(st.Databases, db)
 		}
 		var plan *taskRec

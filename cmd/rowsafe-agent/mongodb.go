@@ -8,6 +8,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,7 +36,9 @@ password, when asked for, is read from stdin (one line) and never stored.
       userAdminAnyDatabase and dbAdminAnyDatabase for Databases & users, and
       rowsafeAgent: write a Mark, stop an operation, bring documents back)
       and save it for the agent. Exit 11: an administrator's login is
-      needed; 12: that login was refused.
+      needed; 12: that login was refused. As root (sudo rowsafe add), with
+      --state-dir DIR --owner USER: the login is saved there, owned by the
+      agent's user.
 
   rowsafe-agent mongodb initiate --port PORT [--admin-user NAME]
       Start the single-member replica set of a server restarted with a
@@ -66,10 +71,16 @@ func mongodbCmd(ctx context.Context, args []string) int {
 	adminUser := fs.String("admin-user", "", "administrator user (password on stdin)")
 	clones := fs.Bool("clones", false, "login: also the restore role, so this (empty) server can receive clones")
 	standby := fs.Bool("standby", false, "login: also clusterManager, for standby servers (adding a member, fencing, promoting)")
+	stateDir := fs.String("state-dir", "", "login as root: the agent's state directory")
+	owner := fs.String("owner", "", "login as root: the agent's user, who owns the saved login")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
-	if os.Geteuid() == 0 {
+	asRoot := os.Geteuid() == 0 && args[0] == "login" && *stateDir != "" && *owner != ""
+	if asRoot {
+		os.Setenv("ROWSAFE_STATE_DIR", *stateDir)
+	}
+	if os.Geteuid() == 0 && !asRoot {
 		fmt.Fprintln(os.Stderr, "run this as the agent user, with /etc/rowsafe/agent.env loaded (the installer does this)")
 		return 1
 	}
@@ -102,6 +113,9 @@ func mongodbCmd(ctx context.Context, args []string) int {
 		if args[0] == "login" {
 			var roles []string
 			roles, err = mongodb.CreateLoginRoles(ctx, env, *port, *adminUser, pw, *clones, *standby)
+			if err == nil && asRoot {
+				err = chownTree(filepath.Join(*stateDir, "engines", protocol.EngineMongoDB), *owner)
+			}
 			if err == nil {
 				fmt.Printf("Created MongoDB user %q for Rowsafe (roles: %s); its password is saved for the agent only.\n",
 					mongodb.LoginUser, strings.Join(roles, ", "))
@@ -147,4 +161,25 @@ func unseal() error {
 		return err
 	}
 	return w.Flush()
+}
+
+// chownTree gives dir, everything in it and its parent (the engines
+// folder, which root may have just made) to the user name: the agent's,
+// when root saved its login.
+func chownTree(dir, name string) error {
+	u, err := user.Lookup(name)
+	if err != nil {
+		return err
+	}
+	uid, _ := strconv.Atoi(u.Uid)
+	gid, _ := strconv.Atoi(u.Gid)
+	if err := os.Lchown(filepath.Dir(dir), uid, gid); err != nil {
+		return err
+	}
+	return filepath.Walk(dir, func(p string, _ os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Lchown(p, uid, gid)
+	})
 }

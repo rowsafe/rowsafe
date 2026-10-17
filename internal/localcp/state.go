@@ -3,9 +3,10 @@
 // serves, on that Unix socket, the agent API the agent already speaks and the
 // part of the user API the rowsafe CLI needs on the server. It keeps one
 // server's databases, tasks, backups, Proofs and Marks in a JSON file, runs
-// the schedules (full backups weekly, differential ones daily, Proof weekly)
-// and moves a database through setup (plan, apply, restart, check, active)
-// the way the hosted control plane does.
+// the schedules (full backups weekly, differential ones daily, Proof weekly;
+// MongoDB: a full backup daily) and moves a database through setup (plan,
+// apply, restart, check, active) the way the hosted control plane does.
+// PostgreSQL, MySQL and MariaDB (mysql.go), MongoDB (mongodb.go).
 //
 // The socket's file permissions are its access control, like Docker's: the
 // agent's user (postgres) and root. Nothing leaves the server.
