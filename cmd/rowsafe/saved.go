@@ -191,7 +191,8 @@ func openSaved(s savedDB, ref string) (*localDB, error) {
 
 // localValueFlags are the local commands' flags that take a value, so
 // the value isn't mistaken for a database name.
-var localValueFlags = map[string]bool{"workload": true, "disk": true, "memory": true, "cpus": true, "limit": true, "width": true}
+var localValueFlags = map[string]bool{"workload": true, "disk": true, "memory": true, "cpus": true, "limit": true, "width": true,
+	"format": true, "fail-on": true, "label": true, "timeout": true}
 
 // savedNameArg is the index of the first positional argument when it
 // names a saved database, else -1.

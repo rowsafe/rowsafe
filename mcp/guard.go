@@ -677,3 +677,55 @@ func destructiveRedisScript(s string) (string, bool) {
 	}
 	return "", false
 }
+
+// PostgresSQL is the SQL a shell command sends to psql or pgcli: -c
+// strings, and -f files and files redirected or piped in (read with
+// readFile, when not nil). "" when there is none (a migration tool such
+// as rails db:migrate, whose SQL isn't on the command line).
+func PostgresSQL(command string, readFile func(string) ([]byte, error)) string {
+	var parts, piped []string
+	for _, seg := range splitSegments(command) {
+		words := shellWords(seg.text)
+		in := piped
+		piped = nil
+		if len(words) == 0 {
+			continue
+		}
+		if base(words[0]) == "cat" {
+			if seg.pipes {
+				for _, w := range words[1:] {
+					if !strings.HasPrefix(w, "-") {
+						piped = append(piped, w)
+					}
+				}
+			}
+			continue
+		}
+		i := slices.IndexFunc(words, func(w string) bool { return base(w) == "psql" || base(w) == "pgcli" })
+		if i < 0 {
+			continue
+		}
+		args := words[i+1:]
+		for j := 0; j < len(args); j++ {
+			a := args[j]
+			switch {
+			case (a == "-c" || a == "--command") && j+1 < len(args):
+				parts = append(parts, args[j+1])
+				j++
+			case strings.HasPrefix(a, "--command="):
+				parts = append(parts, strings.TrimPrefix(a, "--command="))
+			case strings.HasPrefix(a, "-c") && len(a) > 2:
+				parts = append(parts, a[2:])
+			}
+		}
+		if readFile == nil {
+			continue
+		}
+		for _, f := range append(clientFiles(base(words[i]), args), in...) {
+			if data, err := readFile(f); err == nil {
+				parts = append(parts, string(data))
+			}
+		}
+	}
+	return strings.Join(parts, ";\n")
+}

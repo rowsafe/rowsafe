@@ -223,3 +223,25 @@ func TestDestructiveDBCommand(t *testing.T) {
 		}
 	}
 }
+
+func TestPostgresSQL(t *testing.T) {
+	files := map[string]string{"m.sql": "ALTER TABLE a DROP COLUMN b;", "d.sql": "DROP TABLE x;"}
+	read := func(p string) ([]byte, error) {
+		if s, ok := files[p]; ok {
+			return []byte(s), nil
+		}
+		return nil, errors.New("no such file")
+	}
+	for cmd, want := range map[string]string{
+		`psql "$DATABASE_URL" -c "DROP TABLE users; DELETE FROM x"`: "DROP TABLE users; DELETE FROM x",
+		`psql -h db -U app -f m.sql app`:                            "ALTER TABLE a DROP COLUMN b;",
+		`cat d.sql | psql app`:                                      "DROP TABLE x;",
+		`psql app < m.sql && psql --command='TRUNCATE t'`:           "ALTER TABLE a DROP COLUMN b;;\nTRUNCATE t",
+		`bin/rails db:migrate`:                                      "",
+		`echo "psql -c 'DROP TABLE a'"`:                             "",
+	} {
+		if got := PostgresSQL(cmd, read); got != want {
+			t.Errorf("PostgresSQL(%q) = %q, want %q", cmd, got, want)
+		}
+	}
+}
