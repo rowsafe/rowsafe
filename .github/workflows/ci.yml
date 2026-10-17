@@ -56,6 +56,20 @@ jobs:
           go build -o rowsafe.exe ./cmd/rowsafe
           ./rowsafe.exe version
           ./rowsafe.exe help local
+      - name: Fixes without an account, on the runner's PostgreSQL
+        shell: pwsh
+        run: |
+          Set-Service -InputObject (Get-Service -Name postgresql*) -Status running -StartupType manual
+          & "$env:PGBIN\pg_isready" -h localhost -t 60
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          # A table with dead rows that autovacuum won't clean: Pulse's "Clean up 1 table".
+          & "$env:PGBIN\psql" -h localhost -v ON_ERROR_STOP=1 -c "CREATE TABLE t (id int, v text) WITH (autovacuum_enabled = false); INSERT INTO t SELECT g, repeat('x', 100) FROM generate_series(1, 200000) g; DELETE FROM t WHERE id % 10 <> 0; SELECT pg_stat_force_next_flush();"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $db = "postgresql://postgres:$($env:PGPASSWORD)@localhost:5432/postgres?sslmode=disable"
+          ./rowsafe.exe fix $db vacuum_behind --yes
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          ./rowsafe.exe tune $db --memory 4GB --cpus 2 --yes
+          if ($LASTEXITCODE -ne 0) { exit 1 }
       - name: npm wrapper (fake release)
         run: node --test integrations/npm/test/wrapper.test.js
   reproducible:
