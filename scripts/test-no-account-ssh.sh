@@ -145,7 +145,7 @@ EOF
 
   rowsafe status shop || fail "rowsafe status shop (over SSH)"
   rowsafe status shop --json >/tmp/status.json || fail "rowsafe status --json"
-  python3 -c 'import json,sys; d=json.load(open("/tmp/status.json")); sys.exit(0 if "shop" in json.dumps(d) else 1)' ||
+  python3 -c 'import json,sys; sys.exit(0 if json.load(open("/tmp/status.json"))["protected"] is True else 1)' ||
     { cat /tmp/status.json; fail "status --json"; }
   echo "  ok: rowsafe status shop over SSH (and --json)"
 
