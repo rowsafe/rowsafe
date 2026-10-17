@@ -161,7 +161,7 @@ func TestMongoDBDirect(t *testing.T) {
 
 	// A slow operation, seen and stopped.
 	go func() {
-		_, _ = orders.Find(context.Background(), bson.D{{Key: "$where", Value: "sleep(100) || true"}})
+		_, _ = orders.Find(context.Background(), bson.D{{Key: "$where", Value: "sleep(100) || false"}})
 	}()
 	var op protocol.ActivityQuery
 	for deadline := time.Now().Add(2 * time.Minute); time.Now().Before(deadline); time.Sleep(2 * time.Second) {

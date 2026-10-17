@@ -33,6 +33,7 @@ type serverInfo struct {
 	OplogFirst  time.Time
 	OplogLast   time.Time
 	OplogSizeMB float64
+	OplogUsedMB float64           // what it holds now (under OplogSizeMB while it fills)
 	Databases   []protocol.DBInfo // user databases (collections in Tables)
 	TotalBytes  int64
 	Roles       []string // the agent's roles ("role@db")
@@ -42,12 +43,24 @@ type serverInfo struct {
 // Major is 7 for 7.0.12.
 func (s serverInfo) Major() int { return s.VersionNum / 10000 }
 
-// OplogWindow is how far back the oplog reaches.
+// OplogWindow is how far back the oplog reaches (projected while it isn't
+// full yet: projectWindow).
 func (s serverInfo) OplogWindow() time.Duration {
 	if s.OplogFirst.IsZero() || s.OplogLast.IsZero() {
 		return 0
 	}
-	return s.OplogLast.Sub(s.OplogFirst)
+	return projectWindow(s.OplogLast.Sub(s.OplogFirst), s.OplogUsedMB, s.OplogSizeMB)
+}
+
+// projectWindow: while the oplog isn't full yet (a new replica set, a
+// quiet server) its entries span only the time since it started, which
+// says nothing about its room; then the window is the span it will hold at
+// the rate it fills now.
+func projectWindow(span time.Duration, used, size float64) time.Duration {
+	if used > 0 && size > 0 && used < 0.9*size {
+		return time.Duration(float64(max(span, time.Minute)) * size / used)
+	}
+	return span
 }
 
 func versionNum(v string) int {
@@ -157,14 +170,14 @@ func inspect(ctx context.Context, c *mongo.Client) (serverInfo, error) {
 	slices.SortFunc(in.Databases, func(a, b protocol.DBInfo) int { return strings.Compare(a.Name, b.Name) })
 
 	if in.SetName != "" {
-		in.OplogFirst, in.OplogLast, in.OplogSizeMB = oplogBounds(ctx, c)
+		in.OplogFirst, in.OplogLast, in.OplogSizeMB, in.OplogUsedMB = oplogBounds(ctx, c)
 	}
 	return in, nil
 }
 
-// oplogBounds reads the wall times of the first and last oplog entries and
-// the oplog's size.
-func oplogBounds(ctx context.Context, c *mongo.Client) (first, last time.Time, sizeMB float64) {
+// oplogBounds reads the wall times of the first and last oplog entries, the
+// oplog's size and what it holds now.
+func oplogBounds(ctx context.Context, c *mongo.Client) (first, last time.Time, sizeMB, usedMB float64) {
 	coll := c.Database("local").Collection("oplog.rs")
 	read := func(dir int) time.Time {
 		var e struct {
@@ -183,12 +196,22 @@ func oplogBounds(ctx context.Context, c *mongo.Client) (first, last time.Time, s
 	}
 	first, last = read(1), read(-1)
 	var st struct {
+		Size    float64 `bson:"size"`
 		MaxSize float64 `bson:"maxSize"`
 	}
 	if err := c.Database("local").RunCommand(ctx, bson.D{{Key: "collStats", Value: "oplog.rs"}}).Decode(&st); err == nil {
-		sizeMB = st.MaxSize / (1 << 20)
+		sizeMB, usedMB = st.MaxSize/(1<<20), st.Size/(1<<20)
 	}
-	return first, last, sizeMB
+	return first, last, sizeMB, usedMB
+}
+
+// oplogWindow is how far back the oplog reaches (projectWindow).
+func oplogWindow(ctx context.Context, c *mongo.Client) (time.Duration, bool) {
+	first, last, size, used := oplogBounds(ctx, c)
+	if first.IsZero() {
+		return 0, false
+	}
+	return projectWindow(last.Sub(first), used, size), true
 }
 
 // latestOpTime is the newest oplog entry's timestamp.

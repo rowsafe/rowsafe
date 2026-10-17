@@ -150,9 +150,8 @@ func (e *Engine) sample(ctx context.Context, m *dbMonitor, dm *protocol.Database
 	m.prev, m.prevAt = counters, now
 
 	if _, isRS := lookup(ss, "repl", "setName").(string); isRS {
-		first, last, _ := oplogBounds(ctx, c)
-		if !first.IsZero() {
-			metrics[collect.MMongoOplogWindow] = last.Sub(first).Hours()
+		if w, ok := oplogWindow(ctx, c); ok {
+			metrics[collect.MMongoOplogWindow] = w.Hours()
 		}
 		lag, secondaries := replicationLag(ctx, c)
 		metrics[collect.MReplicasConnected] = float64(secondaries)
