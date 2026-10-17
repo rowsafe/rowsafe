@@ -871,6 +871,7 @@ func (srv *Server) monitoring(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := srv.now()
+	srv.prom.record(rep, now) // metrics.go
 	_ = srv.st.update(func(st *state) error {
 		st.recordMonitoring(rep, now)
 		return nil
