@@ -68,10 +68,10 @@ func TestSavedAddUseForget(t *testing.T) {
 	}
 	p, _ := savedPath()
 	st, err := os.Stat(p)
-	if err != nil || st.Mode().Perm() != 0o600 {
+	if err != nil || !hasPerm(st, 0o600) {
 		t.Fatalf("databases.json: %v %v", st, err)
 	}
-	if st, _ := os.Stat(filepath.Dir(p)); st.Mode().Perm() != 0o700 {
+	if st, _ := os.Stat(filepath.Dir(p)); !hasPerm(st, 0o700) {
 		t.Errorf("config folder mode %v", st.Mode().Perm())
 	}
 	if data, _ := os.ReadFile(p); !strings.Contains(string(data), shopURL) {
