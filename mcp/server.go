@@ -108,7 +108,7 @@ func NewServer(c *client.Client, opts Options) *sdk.Server {
 	t.addOpsReadTools(s)          // security, updates, pooling, forks (ops_tools.go)
 	t.addCloudReadTools(s)        // private connections, read-only (cloud_tools.go)
 	t.addRowsafeCloudReadTools(s) // catalog and servers, read-only (rowsafe_cloud_tools.go)
-	t.addApprovalReadTools(s)     // describe_change, get_approval, list_approvals (approval_tools.go)
+	t.addApprovalReadTools(s)     // describe_change, get_agent_action, list_agent_actions (approval_tools.go)
 	if opts.AllowWrites {
 		t.addWriteTools(s)
 		t.addActionTools(s)        // never change production (action_tools.go)
@@ -119,6 +119,7 @@ func NewServer(c *client.Client, opts Options) *sdk.Server {
 		t.addSafetyWriteTools(s)
 	}
 	addPrompts(s)
+	s.AddReceivingMiddleware(aliasMiddleware) // get_approval, list_approvals
 	return s
 }
 
