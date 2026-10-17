@@ -28,6 +28,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/rowsafe/rowsafe/collect"
+	"github.com/rowsafe/rowsafe/internal/maintenance"
 	"github.com/rowsafe/rowsafe/internal/pginspect"
 	"github.com/rowsafe/rowsafe/protocol"
 	"github.com/rowsafe/rowsafe/pulse"
@@ -419,7 +420,7 @@ func (d *DB) run(ctx context.Context, fx protocol.FindingFix) (FixResult, error)
 		if d.my != nil {
 			return d.mysqlMaintain(ctx, p)
 		}
-		res, log, err := maintain(ctx, d.inspectTarget(), p)
+		res, log, err := maintenance.Maintain(ctx, d.inspectTarget(), p)
 		out := FixResult{Log: log}
 		if res != nil {
 			out.Summary, out.Details = res.Summary, res.Details
@@ -443,7 +444,7 @@ func (d *DB) ChangeSettings(ctx context.Context, p protocol.SettingsParams) (Fix
 	if d.my != nil {
 		return d.mysqlChangeSettings(ctx, p)
 	}
-	res, log, err := changeSettings(ctx, d.inspectTarget(), d.collectTarget(), p)
+	res, log, err := maintenance.ChangeSettings(ctx, d.inspectTarget(), d.collectTarget(), p)
 	return settingsResult(res, log), err
 }
 

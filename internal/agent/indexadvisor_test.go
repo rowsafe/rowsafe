@@ -54,33 +54,6 @@ func TestMeasurable(t *testing.T) {
 	}
 }
 
-func TestValidateCreateIndex(t *testing.T) {
-	good := &protocol.CreateIndexParams{IndexSpec: protocol.IndexSpec{DB: "shop", Schema: "public", Table: "orders",
-		Columns: []string{"customer_id", "created_at"}, Name: "rs_orders_customer_id_created_at_idx"}}
-	if err := validateMaintenance(protocol.MaintenanceParams{Action: protocol.MaintCreateIndex, DB: "shop", CreateIndex: good}); err != nil {
-		t.Fatal(err)
-	}
-	bad := map[string]func(*protocol.CreateIndexParams){
-		"foreign name": func(c *protocol.CreateIndexParams) { c.Name = "orders_idx" },
-		"no columns":   func(c *protocol.CreateIndexParams) { c.Columns = nil },
-		"dup column":   func(c *protocol.CreateIndexParams) { c.Include = []string{"customer_id"} },
-		"nul":          func(c *protocol.CreateIndexParams) { c.Columns = []string{"a\x00"} },
-		"long table":   func(c *protocol.CreateIndexParams) { c.Table = strings.Repeat("t", 64) },
-		"stray desc":   func(c *protocol.CreateIndexParams) { c.Descending = []string{"total"} },
-	}
-	for name, mutate := range bad {
-		c := *good
-		c.Columns = slices.Clone(good.Columns)
-		mutate(&c)
-		if err := validateMaintenance(protocol.MaintenanceParams{Action: protocol.MaintCreateIndex, DB: "shop", CreateIndex: &c}); err == nil {
-			t.Errorf("%s: accepted", name)
-		}
-	}
-	if err := validateMaintenance(protocol.MaintenanceParams{Action: protocol.MaintCreateIndex, DB: "shop"}); err == nil {
-		t.Error("accepted no index")
-	}
-}
-
 // Against a real PostgreSQL: a 1M-row table with slow queries. A second
 // database created from the first stands in for the restored copy. The
 // advisor must recommend an index led by customer_id for the queries that

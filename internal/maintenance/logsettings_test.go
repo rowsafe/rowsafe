@@ -1,4 +1,4 @@
-package agent
+package maintenance
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rowsafe/rowsafe/internal/pginspect"
 	"github.com/rowsafe/rowsafe/internal/pgscratch"
 	"github.com/rowsafe/rowsafe/protocol"
 )
@@ -16,10 +17,9 @@ func TestLogSettingsFix(t *testing.T) {
 	c := pgscratch.Start(t, "log_checkpoints=on", "log_min_duration_statement=250")
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	a := &Agent{cfg: Config{PGUser: c.User}}
-	db := protocol.DatabaseSpec{ID: "db_1", Port: c.Port, SocketDir: c.SocketDir}
+	tg := pginspect.Target{SocketDir: c.SocketDir, Port: c.Port, User: c.User, AppName: AppName}
 	tl := &taskLog{}
-	res, err := a.maintenance(ctx, db, protocol.MaintenanceParams{Action: protocol.MaintLogSettings}, tl)
+	res, err := Run(ctx, tg, protocol.MaintenanceParams{Action: protocol.MaintLogSettings}, tl)
 	if err != nil {
 		t.Fatalf("%v\n%s", err, tl)
 	}
@@ -40,7 +40,7 @@ func TestLogSettingsFix(t *testing.T) {
 	if lockWaits != "on" || !strings.Contains(prefix, "client=%h") || minDur != "250ms" {
 		t.Errorf("after the fix: log_lock_waits=%s log_line_prefix=%q log_min_duration_statement=%s", lockWaits, prefix, minDur)
 	}
-	res, err = a.maintenance(ctx, db, protocol.MaintenanceParams{Action: protocol.MaintLogSettings}, &taskLog{})
+	res, err = Run(ctx, tg, protocol.MaintenanceParams{Action: protocol.MaintLogSettings}, &taskLog{})
 	if err != nil || !strings.Contains(res.Summary, "nothing changed") {
 		t.Errorf("second run: %v %+v", err, res)
 	}

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/rowsafe/rowsafe/collect"
+	"github.com/rowsafe/rowsafe/internal/maintenance"
 	"github.com/rowsafe/rowsafe/protocol"
 	"github.com/rowsafe/rowsafe/tune"
 )
@@ -26,7 +27,7 @@ func TuneNew(ctx context.Context, socketDir string, port int, user string, log i
 	if err := a.newCluster(ctx, db); err != nil {
 		return nil, err
 	}
-	snap, err := collect.ReadSettings(ctx, a.settingsTarget(db), settingsProcRoot)
+	snap, err := collect.ReadSettings(ctx, a.settingsTarget(db), maintenance.SettingsProcRoot)
 	if err != nil {
 		return nil, err
 	}

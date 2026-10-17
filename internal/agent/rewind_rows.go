@@ -146,7 +146,7 @@ func readTableMeta(ctx context.Context, conn *pgx.Conn, rel relation) (tableMeta
 		       a.attgenerated <> '', a.attidentity::text, a.attnotnull, a.atthasdef
 		FROM pg_attribute a
 		WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped
-		ORDER BY a.attnum`, rel.oid)
+		ORDER BY a.attnum`, rel.OID)
 	if err != nil {
 		return m, err
 	}
@@ -164,7 +164,7 @@ func readTableMeta(ctx context.Context, conn *pgx.Conn, rel relation) (tableMeta
 		CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
 		JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
 		WHERE i.indrelid = $1 AND i.indisprimary
-		ORDER BY k.ord`, rel.oid)
+		ORDER BY k.ord`, rel.OID)
 	if err != nil {
 		return m, err
 	}
@@ -176,7 +176,7 @@ func readTableMeta(ctx context.Context, conn *pgx.Conn, rel relation) (tableMeta
 		SELECT coalesce(sum(pg_total_relation_size(t.relid)), 0)::bigint,
 		       coalesce(sum(greatest(c.reltuples, 0)), 0)::bigint
 		FROM pg_partition_tree($1::regclass) t JOIN pg_class c ON c.oid = t.relid
-		WHERE t.isleaf`, rel.oid).Scan(&m.sizeBytes, &m.estRows)
+		WHERE t.isleaf`, rel.OID).Scan(&m.sizeBytes, &m.estRows)
 	return m, err
 }
 
@@ -301,11 +301,11 @@ func shipKeys(ctx context.Context, prodConn, copyConn *pgx.Conn, p tablePlan, ke
 		return 0, err
 	}
 	if _, err := prodConn.Exec(ctx, fmt.Sprintf(`CREATE TEMP TABLE %s AS SELECT %s, NULL::text AS %s FROM %s WITH NO DATA`,
-		keys, idents(p.key, ""), hashColumn, p.prod.rel.ident)); err != nil {
+		keys, idents(p.key, ""), hashColumn, p.prod.rel.Ident)); err != nil {
 		return 0, err
 	}
 	n, err := pipeCopy(ctx,
-		copyConn, fmt.Sprintf(`COPY (SELECT %s, %s FROM %s c) TO STDOUT (FORMAT %s)`, idents(p.key, "c."), rowHash(p.common, "c"), p.copy.rel.ident, p.format),
+		copyConn, fmt.Sprintf(`COPY (SELECT %s, %s FROM %s c) TO STDOUT (FORMAT %s)`, idents(p.key, "c."), rowHash(p.common, "c"), p.copy.rel.Ident, p.format),
 		prodConn, fmt.Sprintf(`COPY pg_temp.%s FROM STDIN (FORMAT %s)`, keys, p.format))
 	if err != nil {
 		return 0, err
@@ -328,7 +328,7 @@ func tooBig(m tableMeta) string {
 
 // displayName is how a table is named in results: schema.name, unquoted
 // (the agent's name lookup reads it back).
-func displayName(r relation) string { return r.schema + "." + r.name }
+func displayName(r relation) string { return r.Schema + "." + r.Name }
 
 // relatedTables lists the tables linked to rel by foreign keys, either way.
 func relatedTables(ctx context.Context, conn *pgx.Conn, oid uint32) ([]string, error) {
@@ -478,7 +478,7 @@ func compareDB(ctx context.Context, sides rewindSides, db string, tables []proto
 		*compared++
 		d.Table = displayName(p.prod.rel)
 		d.SizeBytes = p.copy.sizeBytes
-		if d.Related, err = relatedFor(ctx, prodConn, db, p.prod.rel.oid); err != nil {
+		if d.Related, err = relatedFor(ctx, prodConn, db, p.prod.rel.OID); err != nil {
 			return out, err
 		}
 		start := time.Now()
@@ -576,13 +576,13 @@ func compareOne(ctx context.Context, prodConn, copyConn *pgx.Conn, p tablePlan, 
 	err := prodConn.QueryRow(ctx, fmt.Sprintf(`
 		SELECT count(*) FILTER (WHERE p.ctid IS NULL),
 		       count(*) FILTER (WHERE p.ctid IS NOT NULL AND %s IS DISTINCT FROM k.%s)
-		FROM pg_temp.%s k LEFT JOIN %s p ON %s`, rowHash(p.common, "p"), hashColumn, keys, p.prod.rel.ident, match)).
+		FROM pg_temp.%s k LEFT JOIN %s p ON %s`, rowHash(p.common, "p"), hashColumn, keys, p.prod.rel.Ident, match)).
 		Scan(&d.MissingInProduction, &d.Changed)
 	if err != nil {
 		return err
 	}
 	return prodConn.QueryRow(ctx, fmt.Sprintf(`
-		SELECT count(*) FROM %s p WHERE NOT EXISTS (SELECT 1 FROM pg_temp.%s k WHERE %s)`, p.prod.rel.ident, keys, match)).
+		SELECT count(*) FROM %s p WHERE NOT EXISTS (SELECT 1 FROM pg_temp.%s k WHERE %s)`, p.prod.rel.Ident, keys, match)).
 		Scan(&d.OnlyInProduction)
 }
 
@@ -720,7 +720,7 @@ func rowsDB(ctx context.Context, sides rewindSides, db string, reqs []protocol.R
 		if why != "" {
 			return nil, fmt.Errorf("%s: %s; nothing was changed", r.Table, why)
 		}
-		if slices.ContainsFunc(tables, func(t *rowsTable) bool { return t.plan.prod.rel.oid == p.prod.rel.oid }) {
+		if slices.ContainsFunc(tables, func(t *rowsTable) bool { return t.plan.prod.rel.OID == p.prod.rel.OID }) {
 			continue
 		}
 		t := &rowsTable{req: r, plan: p, rows: fmt.Sprintf("rowsafe_rows_%d", len(tables)+1)}
@@ -810,10 +810,10 @@ func rowsOne(ctx context.Context, prodConn, copyConn *pgx.Conn, t *rowsTable, in
 	match := keyMatch(p.key, "p", "k")
 	sql := fmt.Sprintf(`CREATE TEMP TABLE %s ON COMMIT DROP AS
 		SELECT %s FROM pg_temp.%s k WHERE NOT EXISTS (SELECT 1 FROM %s p WHERE %s)`,
-		need, idents(p.key, "k."), keys, p.prod.rel.ident, match)
+		need, idents(p.key, "k."), keys, p.prod.rel.Ident, match)
 	if includeChanged {
 		sql += fmt.Sprintf(` UNION ALL SELECT %s FROM pg_temp.%s k JOIN %s p ON %s WHERE %s IS DISTINCT FROM k.%s`,
-			idents(p.key, "k."), keys, p.prod.rel.ident, match, rowHash(p.common, "p"), hashColumn)
+			idents(p.key, "k."), keys, p.prod.rel.Ident, match, rowHash(p.common, "p"), hashColumn)
 	}
 	if _, err := prodConn.Exec(ctx, `DROP TABLE IF EXISTS pg_temp.`+need); err != nil {
 		return err
@@ -842,7 +842,7 @@ func rowsOne(ctx context.Context, prodConn, copyConn *pgx.Conn, t *rowsTable, in
 		return err
 	}
 	if _, err := copyConn.Exec(ctx, fmt.Sprintf(`CREATE TEMP TABLE %s AS SELECT %s FROM %s WITH NO DATA`,
-		need, idents(p.key, ""), p.copy.rel.ident)); err != nil {
+		need, idents(p.key, ""), p.copy.rel.Ident)); err != nil {
 		return err
 	}
 	defer func() { _, _ = copyConn.Exec(context.WithoutCancel(ctx), `DROP TABLE IF EXISTS pg_temp.`+need) }()
@@ -852,12 +852,12 @@ func rowsOne(ctx context.Context, prodConn, copyConn *pgx.Conn, t *rowsTable, in
 		return err
 	}
 	if _, err := prodConn.Exec(ctx, fmt.Sprintf(`CREATE TEMP TABLE %s ON COMMIT DROP AS SELECT %s FROM %s WITH NO DATA`,
-		t.rows, idents(p.common, ""), p.prod.rel.ident)); err != nil {
+		t.rows, idents(p.common, ""), p.prod.rel.Ident)); err != nil {
 		return err
 	}
 	if _, err := pipeCopy(ctx,
 		copyConn, fmt.Sprintf(`COPY (SELECT %s FROM %s c JOIN pg_temp.%s k ON %s) TO STDOUT (FORMAT %s)`,
-			idents(p.common, "c."), p.copy.rel.ident, need, keyMatch(p.key, "c", "k"), p.format),
+			idents(p.common, "c."), p.copy.rel.Ident, need, keyMatch(p.key, "c", "k"), p.format),
 		prodConn, fmt.Sprintf(`COPY pg_temp.%s FROM STDIN (FORMAT %s)`, t.rows, p.format)); err != nil {
 		return err
 	}
@@ -874,7 +874,7 @@ func rowsOne(ctx context.Context, prodConn, copyConn *pgx.Conn, t *rowsTable, in
 	rmatch := keyMatch(p.key, "p", "r")
 	var candidates int64
 	if err := prodConn.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM pg_temp.%s r WHERE NOT EXISTS (SELECT 1 FROM %s p WHERE %s)`,
-		t.rows, p.prod.rel.ident, rmatch)).Scan(&candidates); err != nil {
+		t.rows, p.prod.rel.Ident, rmatch)).Scan(&candidates); err != nil {
 		return err
 	}
 	overriding := ""
@@ -883,7 +883,7 @@ func rowsOne(ctx context.Context, prodConn, copyConn *pgx.Conn, t *rowsTable, in
 	}
 	tag, err := prodConn.Exec(ctx, fmt.Sprintf(`INSERT INTO %s (%s)%s SELECT %s FROM pg_temp.%s r
 		WHERE NOT EXISTS (SELECT 1 FROM %s p WHERE %s) ON CONFLICT DO NOTHING`,
-		p.prod.rel.ident, idents(p.common, ""), overriding, idents(p.common, "r."), t.rows, p.prod.rel.ident, rmatch))
+		p.prod.rel.Ident, idents(p.common, ""), overriding, idents(p.common, "r."), t.rows, p.prod.rel.Ident, rmatch))
 	if err != nil {
 		return err
 	}
@@ -899,7 +899,7 @@ func rowsOne(ctx context.Context, prodConn, copyConn *pgx.Conn, t *rowsTable, in
 		}
 		if len(set) > 0 {
 			tag, err := prodConn.Exec(ctx, fmt.Sprintf(`UPDATE %s p SET (%s) = ROW(%s) FROM pg_temp.%s r WHERE %s AND %s IS DISTINCT FROM %s`,
-				p.prod.rel.ident, idents(set, ""), idents(set, "r."), t.rows, rmatch, rowHash(p.common, "p"), rowHash(p.common, "r")))
+				p.prod.rel.Ident, idents(set, ""), idents(set, "r."), t.rows, rmatch, rowHash(p.common, "p"), rowHash(p.common, "r")))
 			if err != nil {
 				return err
 			}
@@ -915,7 +915,7 @@ func rowsOne(ctx context.Context, prodConn, copyConn *pgx.Conn, t *rowsTable, in
 // can treat every table alike.
 func prepareEmptyRows(ctx context.Context, prodConn *pgx.Conn, t *rowsTable) error {
 	_, err := prodConn.Exec(ctx, fmt.Sprintf(`CREATE TEMP TABLE %s ON COMMIT DROP AS SELECT %s FROM %s WITH NO DATA`,
-		t.rows, idents(t.plan.common, ""), t.plan.prod.rel.ident))
+		t.rows, idents(t.plan.common, ""), t.plan.prod.rel.Ident))
 	return err
 }
 
@@ -932,7 +932,7 @@ func catchUpSequences(ctx context.Context, conn *pgx.Conn, t *rowsTable) error {
 		JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
 		WHERE d.classid = 'pg_class'::regclass AND d.refclassid = 'pg_class'::regclass
 		  AND d.refobjid = $1 AND d.deptype IN ('a', 'i')
-		  AND a.atttypid IN ('int2'::regtype, 'int4'::regtype, 'int8'::regtype)`, t.plan.prod.rel.oid)
+		  AND a.atttypid IN ('int2'::regtype, 'int4'::regtype, 'int8'::regtype)`, t.plan.prod.rel.OID)
 	if err != nil {
 		return err
 	}
@@ -959,7 +959,7 @@ func catchUpSequences(ctx context.Context, conn *pgx.Conn, t *rowsTable) error {
 			     cur AS (SELECT pg_sequence_last_value($1::regclass) AS v)
 			SELECT CASE WHEN m.v IS NOT NULL AND (cur.v IS NULL OR cur.v < m.v)
 			            THEN setval($1::regclass, m.v) IS NOT NULL ELSE false END
-			FROM m, cur`, s.col, t.plan.prod.rel.ident), s.oid).Scan(&advanced)
+			FROM m, cur`, s.col, t.plan.prod.rel.Ident), s.oid).Scan(&advanced)
 		if err != nil {
 			return err
 		}
@@ -1016,7 +1016,7 @@ func readForeignKeys(ctx context.Context, conn *pgx.Conn, where string, oids []u
 func orderByForeignKeys(ctx context.Context, conn *pgx.Conn, tables []*rowsTable) error {
 	oids := make([]uint32, len(tables))
 	for i, t := range tables {
-		oids[i] = t.plan.prod.rel.oid
+		oids[i] = t.plan.prod.rel.OID
 	}
 	fks, err := readForeignKeys(ctx, conn, "conrelid", oids)
 	if err != nil {
@@ -1024,7 +1024,7 @@ func orderByForeignKeys(ctx context.Context, conn *pgx.Conn, tables []*rowsTable
 	}
 	for _, t := range tables {
 		for _, f := range fks {
-			if f.child == t.plan.prod.rel.oid && f.parent != f.child && slices.Contains(oids, f.parent) {
+			if f.child == t.plan.prod.rel.OID && f.parent != f.child && slices.Contains(oids, f.parent) {
 				t.parents = append(t.parents, f.parent)
 			}
 		}
@@ -1034,7 +1034,7 @@ func orderByForeignKeys(ctx context.Context, conn *pgx.Conn, tables []*rowsTable
 	for len(out) < len(tables) {
 		progress := false
 		for _, t := range tables {
-			if placed[t.plan.prod.rel.oid] {
+			if placed[t.plan.prod.rel.OID] {
 				continue
 			}
 			ready := true
@@ -1044,15 +1044,15 @@ func orderByForeignKeys(ctx context.Context, conn *pgx.Conn, tables []*rowsTable
 				}
 			}
 			if ready {
-				placed[t.plan.prod.rel.oid] = true
+				placed[t.plan.prod.rel.OID] = true
 				out = append(out, t)
 				progress = true
 			}
 		}
 		if !progress { // a cycle: the rest in the order given
 			for _, t := range tables {
-				if !placed[t.plan.prod.rel.oid] {
-					placed[t.plan.prod.rel.oid] = true
+				if !placed[t.plan.prod.rel.OID] {
+					placed[t.plan.prod.rel.OID] = true
 					out = append(out, t)
 				}
 			}
@@ -1070,7 +1070,7 @@ func checkForeignKeys(ctx context.Context, conn *pgx.Conn, tables []*rowsTable, 
 	oids := make([]uint32, len(tables))
 	byOID := map[uint32]*rowsTable{}
 	for i, t := range tables {
-		oids[i] = t.plan.prod.rel.oid
+		oids[i] = t.plan.prod.rel.OID
 		byOID[oids[i]] = t
 	}
 	children, err := readForeignKeys(ctx, conn, "conrelid", oids)
