@@ -13,7 +13,8 @@
 #   terminal and cancelled when the wrong name is typed; then, with the
 #   name typed, a Mark and the upgrade to 17 (the rows and their checksum
 #   intact, a full backup and a Proof on 17); undo (back on 16 with the
-#   rows); removing the kept 17.
+#   rows); removing the kept 17; the server's security updates after a
+#   Mark; a reboot root didn't allow, refused.
 #
 # Usage: sh scripts/test-no-account-upgrade.sh [debian:trixie]   (needs
 # Docker and the network for apt.postgresql.org; ~10 min)
@@ -85,7 +86,7 @@ in_container() {
     /src/deploy/systemd/rowsafe-pg-update.service /src/deploy/systemd/rowsafe-pg-update.path \
     /src/deploy/systemd/rowsafe-agent.service /etc/systemd/system/
   printf '# test\n5432 %s\n' "$unit" >/etc/rowsafe/restart-allowed
-  printf '# test\npostgresql\n' >/etc/rowsafe/updates-allowed
+  printf '# test\npostgresql\nsecurity\n' >/etc/rowsafe/updates-allowed
   chmod 0644 /etc/rowsafe/restart-allowed /etc/rowsafe/updates-allowed
   install -d -m 0700 -o postgres -g postgres /var/lib/rowsafe /var/lib/rowsafe/restart /etc/rowsafe/pgbackrest /var/log/rowsafe
   umask 077
@@ -191,6 +192,21 @@ EOF
   until_ok 120 "the kept PostgreSQL $TO is gone" sh -c "! pg_lsclusters -h | grep -q '^$TO '"
   protected "after the undo"
   echo "  ok: the kept PostgreSQL $TO is removed; shop is still protected"
+
+  # The server's security updates (allowed), after a Mark; PostgreSQL
+  # keeps running. Reboots weren't allowed: it says how.
+  if rowsafe upgrade shop | grep -q "security updates waiting"; then
+    typed shop rowsafe security-updates shop >/tmp/security.out 2>&1 || { cat /tmp/security.out; fail "the security updates"; }
+    cat /tmp/security.out
+    rowsafe marks shop | grep -q "before-security-updates-" || fail "no Mark before the security updates"
+    [ "$(psql_app -c 'SELECT count(*) FROM orders')" = 20000 ] || fail "PostgreSQL after the security updates"
+    echo "  ok: security updates installed after a Mark; PostgreSQL kept running"
+  else
+    echo "  (no security updates waiting in this image: skipped)"
+  fi
+  ! rowsafe reboot shop --yes >/tmp/reboot.out 2>&1 || fail "rebooted without root's yes"
+  grep -q "sudo rowsafe-allow reboot" /tmp/reboot.out || { cat /tmp/reboot.out; fail "the reboot refusal doesn't say how to allow it"; }
+  echo "  ok: a reboot root didn't allow is refused, saying how to allow it"
 }
 
 host() {

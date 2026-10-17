@@ -24,7 +24,8 @@ import (
 // runs for the dashboard, through the root helper root allowed at install
 // time (sudo rowsafe-allow updates).
 //
-// Minor updates, security updates and reboots still need the dashboard.
+// The server's security updates and reboots work the same way (a Mark
+// first, confirmed); minor updates still need the dashboard.
 
 const (
 	// rehearsalValidFor is how long a passed rehearsal allows the upgrade.
@@ -37,9 +38,14 @@ const (
 	maxSoftwareReport = 256 << 10
 )
 
-// upgradeTaskTypes are the tasks of major upgrades; one runs at a time.
+// upgradeTaskTypes are the tasks of major upgrades, security updates and
+// reboots; one runs at a time.
 var upgradeTaskTypes = []string{protocol.TaskUpgradeCheck, protocol.TaskUpgradeRehearsal, protocol.TaskUpgrade,
-	protocol.TaskUpgradeUndo, protocol.TaskUpgradeCleanup}
+	protocol.TaskUpgradeUndo, protocol.TaskUpgradeCleanup, protocol.TaskSecurityUpdates, protocol.TaskReboot}
+
+// hostWideTypes change the whole server: none runs beside another one, of
+// any database.
+var hostWideTypes = []string{protocol.TaskSecurityUpdates, protocol.TaskReboot, protocol.TaskUpgrade, protocol.TaskUpgradeUndo}
 
 func (s *Server) upgradeRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/databases/{ref}/upgrades", s.getUpgrades)
@@ -48,6 +54,8 @@ func (s *Server) upgradeRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/databases/{ref}/upgrades", s.postUpgrade)
 	mux.HandleFunc("POST /v1/databases/{ref}/upgrades/{id}/undo", s.postUpgradeUndo)
 	mux.HandleFunc("POST /v1/databases/{ref}/upgrades/{id}/cleanup", s.postUpgradeCleanup)
+	mux.HandleFunc("POST /v1/databases/{ref}/security-updates", s.postSecurityUpdates)
+	mux.HandleFunc("POST /v1/databases/{ref}/reboot", s.postReboot)
 }
 
 // recordSoftware keeps the agent's newest software report.
@@ -108,26 +116,36 @@ func (f upgradeFacts) running(d *dbRec) (string, int) {
 	return v, major
 }
 
-// actionReason says, in plain words, why the helper can't do action on
-// this server now ("" when it can): what root allowed, the helper, the
-// restart allow list, the agent being connected.
-func (s *state) actionReason(d *dbRec, f upgradeFacts, action string, needRestart bool, now time.Time) string {
-	sw, host := f.sw, s.Host.Hostname
+// What root allows for each kind of change (UpdateAllow*): what it is, in
+// plain words, and the rowsafe-allow name that allows it.
+var allowWords = map[string][2]string{
+	protocol.UpdateAllowPostgres: {"install PostgreSQL", "updates"},
+	protocol.UpdateAllowSecurity: {"install this server's security updates", "security-updates"},
+	protocol.UpdateAllowReboot:   {"reboot this server", "reboot"},
+}
+
+// actionReason says, in plain words, why the helper can't do action
+// (allowed by root's word) on this server now ("" when it can): what root
+// allowed, the helper, the restart allow list, the agent being connected.
+func (s *state) actionReason(d *dbRec, f upgradeFacts, word, action string, needRestart bool, now time.Time) string {
+	sw, host, what := f.sw, s.Host.Hostname, allowWords[word]
 	switch {
-	case sw != nil && sw.Container:
+	case sw != nil && sw.Container && word == protocol.UpdateAllowPostgres:
 		return "PostgreSQL runs in Docker here: Rowsafe can't install packages in your containers. Change the image's version in your compose file."
+	case sw != nil && sw.Container:
+		return "The Rowsafe agent runs in Docker here, so it can't change the server's packages or reboot it."
 	case s.Host.LastSeen == nil || now.Sub(*s.Host.LastSeen) > agentOnline:
 		return "The Rowsafe agent on this server isn't running, so it can't do this now (sudo systemctl start rowsafe-agent)."
 	case sw == nil:
 		return "The agent hasn't looked at this server's packages yet: it does within a minute of starting. Try again shortly."
 	case sw.PackageManager != "apt":
-		return fmt.Sprintf("Rowsafe installs PostgreSQL only on Debian and Ubuntu servers (apt); %s isn't one.", host)
-	case !slices.Contains(sw.Allowed, protocol.UpdateAllowPostgres):
-		return "Root hasn't allowed Rowsafe to install PostgreSQL on this server. To allow it: sudo rowsafe-allow updates"
+		return fmt.Sprintf("Rowsafe installs updates only on Debian and Ubuntu servers (apt); %s isn't one.", host)
+	case !slices.Contains(sw.Allowed, word):
+		return fmt.Sprintf("Root hasn't allowed Rowsafe to %s. To allow it: sudo rowsafe-allow %s", what[0], what[1])
 	case needRestart && !slices.Contains(s.Host.RestartPorts, d.Port):
 		return "Root hasn't allowed Rowsafe to restart this PostgreSQL, which an upgrade needs. To allow it: sudo rowsafe-allow restart"
 	case !slices.Contains(sw.HelperActions, action):
-		return "The helper that installs PostgreSQL on this server is missing or from an older Rowsafe: run the install command again."
+		return "The helper that installs updates on this server is missing or from an older Rowsafe: run the install command again."
 	}
 	return ""
 }
@@ -172,9 +190,10 @@ func (s *state) upgradeInfo(d *dbRec, now time.Time) protocol.UpgradeInfo {
 		info.SecurityUpdates, info.RebootRequired = sw.SecurityUpdates, sw.RebootRequired
 		info.Sidecar = sw.Container
 	}
-	const dashboard = "This needs the dashboard: rowsafe login connects this server to it."
-	info.UpdateReason, info.SecurityReason, info.RebootReason = dashboard, dashboard, dashboard
-	info.UpgradeReason = s.actionReason(d, f, "pg-upgrade", true, now)
+	info.UpdateReason = "Minor updates need the dashboard for now: rowsafe login connects this server to it."
+	info.SecurityReason = s.actionReason(d, f, protocol.UpdateAllowSecurity, "security-updates", false, now)
+	info.RebootReason = s.actionReason(d, f, protocol.UpdateAllowReboot, "reboot", false, now)
+	info.UpgradeReason = s.actionReason(d, f, protocol.UpdateAllowPostgres, "pg-upgrade", true, now)
 	if check := s.latestFinished(d.ID, protocol.TaskUpgradeCheck); check != nil && check.Status == protocol.StatusSucceeded {
 		var res protocol.UpgradeCheckResult
 		if json.Unmarshal(check.Result, &res) == nil {
@@ -291,9 +310,9 @@ func upgradeTarget(r *http.Request, f upgradeFacts, major int) (int, error) {
 // running: one runs at a time.
 func (s *state) refuseOpen(d *dbRec) error {
 	if slices.ContainsFunc(s.Tasks, func(t *taskRec) bool {
-		return t.open() && t.DatabaseID == d.ID && slices.Contains(upgradeTaskTypes, t.Type)
+		return t.open() && (t.DatabaseID == d.ID && slices.Contains(upgradeTaskTypes, t.Type) || slices.Contains(hostWideTypes, t.Type))
 	}) {
-		return refuse(http.StatusConflict, "An upgrade task is already queued or running for %s; one runs at a time. Try again when it finishes.", d.Name)
+		return refuse(http.StatusConflict, "An upgrade, security update or reboot is already queued or running for %s or its server; one runs at a time. Try again when it finishes.", d.Name)
 	}
 	return nil
 }
@@ -384,7 +403,7 @@ func (s *Server) postUpgrade(w http.ResponseWriter, r *http.Request) {
 		case req.To <= major || req.To > 99:
 			return nil, refuse(http.StatusBadRequest, "PostgreSQL %d is not newer than PostgreSQL %d", req.To, major)
 		}
-		if why := st.actionReason(d, f, "pg-upgrade", true, now); why != "" {
+		if why := st.actionReason(d, f, protocol.UpdateAllowPostgres, "pg-upgrade", true, now); why != "" {
 			return nil, refuse(http.StatusConflict, "%s", why)
 		}
 		if up := f.upgrade; up != nil {
@@ -459,7 +478,7 @@ func (s *Server) postUpgradeUndo(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, err
 		}
-		if why := st.actionReason(d, f, "pg-upgrade-undo", true, now); why != "" {
+		if why := st.actionReason(d, f, protocol.UpdateAllowPostgres, "pg-upgrade-undo", true, now); why != "" {
 			return nil, refuse(http.StatusConflict, "%s", why)
 		}
 		if up.Status != protocol.UpgradeDone {
@@ -489,7 +508,7 @@ func (s *Server) postUpgradeCleanup(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, err
 		}
-		if why := st.actionReason(d, f, "pg-upgrade-cleanup", false, now); why != "" {
+		if why := st.actionReason(d, f, protocol.UpdateAllowPostgres, "pg-upgrade-cleanup", false, now); why != "" {
 			return nil, refuse(http.StatusConflict, "%s", why)
 		}
 		kept := up.FromMajor
@@ -521,4 +540,39 @@ func (s *state) afterUpgrade(db *dbRec, ok bool, now time.Time) error {
 	}
 	_, err = s.enqueue(db, protocol.TaskDrill, nil, backup.ID, false, now)
 	return ignoreOpen(err)
+}
+
+// postSecurityUpdates installs the server's pending security updates
+// (services keep running; PostgreSQL's own server packages are left for an
+// update), after a Mark, confirmed with the database's name.
+func (s *Server) postSecurityUpdates(w http.ResponseWriter, r *http.Request) {
+	s.upgradeChange(w, r, func(st *state, d *dbRec, now time.Time) ([]protocol.TaskView, error) {
+		if why := st.actionReason(d, st.upgradeFacts(d), protocol.UpdateAllowSecurity, "security-updates", false, now); why != "" {
+			return nil, refuse(http.StatusConflict, "%s", why)
+		}
+		if err := readConfirm(r, d.Name, fmt.Sprintf("Installing security updates on %s changes the server's packages (services keep running).", st.Host.Hostname)); err != nil {
+			return nil, err
+		}
+		if err := st.refuseOpen(d); err != nil {
+			return nil, err
+		}
+		return st.queueWithMark(d, "before-security-updates-"+markStamp(now), "security updates: root on "+st.Host.Hostname, protocol.TaskSecurityUpdates, nil, now)
+	})
+}
+
+// postReboot reboots the server, after a Mark, confirmed with the
+// hostname: everything on it stops for a minute or two.
+func (s *Server) postReboot(w http.ResponseWriter, r *http.Request) {
+	s.upgradeChange(w, r, func(st *state, d *dbRec, now time.Time) ([]protocol.TaskView, error) {
+		if why := st.actionReason(d, st.upgradeFacts(d), protocol.UpdateAllowReboot, "reboot", false, now); why != "" {
+			return nil, refuse(http.StatusConflict, "%s", why)
+		}
+		if err := readConfirm(r, st.Host.Hostname, fmt.Sprintf("Rebooting %s stops everything on it for a minute or two, PostgreSQL included.", st.Host.Hostname)); err != nil {
+			return nil, err
+		}
+		if err := st.refuseOpen(d); err != nil {
+			return nil, err
+		}
+		return st.queueWithMark(d, "before-reboot-"+markStamp(now), "reboot: root on "+st.Host.Hostname, protocol.TaskReboot, nil, now)
+	})
 }

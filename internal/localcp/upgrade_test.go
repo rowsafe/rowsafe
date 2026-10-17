@@ -242,3 +242,60 @@ func TestUpgradeNeedsActive(t *testing.T) {
 }
 
 func fileDir(s *Server) string { return strings.TrimSuffix(s.st.path, "/"+StateFile) }
+
+func TestSecurityUpdatesAndReboot(t *testing.T) {
+	_, a, c, now := setup(t)
+	ctx := context.Background()
+	activeDB(t, a, c, now)
+
+	// Not allowed yet: each says how to allow it.
+	softwareBeat(a, []string{protocol.UpdateAllowPostgres})
+	info, _ := c.Upgrades(ctx, "shop")
+	if !strings.Contains(info.SecurityReason, "sudo rowsafe-allow security-updates") || !strings.Contains(info.RebootReason, "sudo rowsafe-allow reboot") {
+		t.Fatalf("reasons: %q %q", info.SecurityReason, info.RebootReason)
+	}
+	if _, err := c.InstallSecurityUpdates(ctx, "shop", "shop"); apiStatus(err) != http.StatusConflict {
+		t.Fatalf("security updates not allowed: %v", err)
+	}
+	beat := func(actions ...string) {
+		sw := &protocol.SoftwareReport{CheckedAt: *now, PackageManager: "apt", Allowed: []string{protocol.UpdateAllowSecurity, protocol.UpdateAllowReboot},
+			HelperActions: actions, SecurityUpdates: 3, RebootRequired: true}
+		a.call("POST", "/v1/agent/heartbeat", protocol.HeartbeatRequest{Hostname: "db1", RestartPorts: []int{5432}, Software: sw}, nil)
+	}
+	beat("pg-upgrade")
+	if info, _ = c.Upgrades(ctx, "shop"); !strings.Contains(info.SecurityReason, "helper") {
+		t.Fatalf("an old helper: %q", info.SecurityReason)
+	}
+	beat("security-updates", "reboot")
+	info, _ = c.Upgrades(ctx, "shop")
+	if info.SecurityReason != "" || info.RebootReason != "" || info.SecurityUpdates != 3 || !info.RebootRequired {
+		t.Fatalf("allowed: %+v", info)
+	}
+
+	// Security updates: the database's name confirms; a Mark first.
+	if _, err := c.InstallSecurityUpdates(ctx, "shop", "nope"); apiStatus(err) != http.StatusBadRequest {
+		t.Fatalf("a wrong confirmation: %v", err)
+	}
+	resp, err := c.InstallSecurityUpdates(ctx, "shop", "shop")
+	if err != nil || !slices.Equal(taskTypes(resp.Tasks), []string{protocol.TaskRestorePoint, protocol.TaskSecurityUpdates}) {
+		t.Fatalf("security updates: %+v %v", resp, err)
+	}
+	// One server-wide change at a time.
+	if _, err := c.RebootServer(ctx, "shop", "db1"); apiStatus(err) != http.StatusConflict {
+		t.Fatalf("a reboot beside security updates: %v", err)
+	}
+	a.done(a.claimOne(protocol.TaskRestorePoint), protocol.StatusSucceeded, protocol.RestorePointResult{LSN: "0/8000000", CreatedAt: *now})
+	a.done(a.claimOne(protocol.TaskSecurityUpdates), protocol.StatusSucceeded, protocol.SecurityUpdatesResult{Installed: 3, RebootRequired: true})
+
+	// The reboot: the hostname confirms; a Mark first.
+	if _, err := c.RebootServer(ctx, "shop", "shop"); apiStatus(err) != http.StatusBadRequest || !strings.Contains(err.Error(), `"db1"`) {
+		t.Fatalf("a reboot confirmed with the database's name: %v", err)
+	}
+	resp, err = c.RebootServer(ctx, "shop", "db1")
+	if err != nil || !slices.Equal(taskTypes(resp.Tasks), []string{protocol.TaskRestorePoint, protocol.TaskReboot}) {
+		t.Fatalf("reboot: %+v %v", resp, err)
+	}
+	if info, _ = c.Upgrades(ctx, "shop"); len(info.Tasks) < 2 {
+		t.Fatalf("the tasks aren't listed: %+v", info.Tasks)
+	}
+}
