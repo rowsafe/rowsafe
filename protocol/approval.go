@@ -155,6 +155,11 @@ var ApprovalActions = []ApprovalAction{
 		Description: "Ends a move and stops the old server for good (no switching back). Rowsafe types the old server's hostname as the confirmation."},
 	{Name: "fork_database", Group: "move", Title: "Fork the database", Method: "POST", Path: "/v1/databases/{ref}/forks", Risk: RiskNormal, Body: CreateForkRequest{},
 		Description: "Makes an independent new database from this one at a point in time (now, a second or a Mark), on this or another server. " + personOnly},
+	{Name: "restore_elsewhere", Group: "move", Title: "Restore to another server", Method: "POST", Path: "/v1/databases/{ref}/restore-elsewhere", Risk: RiskNormal, Body: RestoreElsewhereRequest{},
+		Description: "When a database's server is lost (silent for 10 minutes or more), restores the database from its backups onto another server of the organization that was installed with the same storage and passphrase, as a new database called name. " +
+			"Without at or mark: the latest point in the backups. Nothing changes on the lost server. list_forks shows the servers that can take it (source_lost)."},
+	{Name: "retire_database", Group: "move", Title: "Retire a lost database", Method: "POST", Path: "/v1/databases/{ref}/retire", Risk: RiskDestructive, Body: RetireDatabaseRequest{},
+		Description: "Removes a database whose server is lost from Rowsafe, typically once it was restored to another server: Rowsafe stops watching it and keeps its backups until an owner deletes them. confirm is the database's name."},
 
 	// Connection pooling and security.
 	{Name: "pooling_on", Group: "security", Title: "Turn on connection pooling", Method: "PUT", Path: "/v1/databases/{ref}/pooling", Risk: RiskNormal, Body: PoolingRequest{},

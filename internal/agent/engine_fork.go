@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/rowsafe/rowsafe/internal/handoff"
+	"github.com/rowsafe/rowsafe/internal/objstore"
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
@@ -47,6 +49,21 @@ func (a *Agent) engineForkFacts(ctx context.Context, source protocol.DatabaseSpe
 	return err
 }
 
+// lostSourceErr adds why to an error reading a lost source's backups with
+// this server's own settings (a wrong passphrase, no backups where this
+// server's storage looks).
+func lostSourceErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := strings.ToLower(err.Error())
+	if errors.Is(err, objstore.ErrBadPassphrase) || errors.Is(err, objstore.ErrNotFound) ||
+		strings.Contains(msg, "no backup") || strings.Contains(msg, "decrypt") || strings.Contains(msg, "nosuchkey") {
+		return fmt.Errorf("%w (%s)", err, lostSourceHint)
+	}
+	return err
+}
+
 // engineForkRestore restores a fork of a database of another engine.
 func (a *Agent) engineForkRestore(ctx context.Context, p protocol.ForkRestoreParams, tl *taskLog) (*protocol.ForkRestoreResult, error) {
 	ef := engineFork(p.Source.Engine)
@@ -60,7 +77,19 @@ func (a *Agent) engineForkRestore(ctx context.Context, p protocol.ForkRestorePar
 		return nil, errors.New("clones need the agent installed on the server itself; databases in Docker aren't supported yet")
 	}
 	env := a.engineEnv(protocol.NormalizeEngine(p.Source.Engine))
-	if p.Box == nil {
+	if p.Box == nil && p.OwnRepo {
+		// The source's server is lost: its backups are read with this
+		// server's own storage settings (forkSourceFor's lostSourceRepo).
+		r, err := a.lostSourceRepo(ctx, p)
+		if err != nil {
+			return nil, err
+		}
+		env.Repo = r
+		tl.Printf("the source's server is lost: reading %s's backups with this server's own storage settings; nothing was handed over",
+			cmp.Or(p.Source.Name, p.Source.Stanza))
+		res, err := ef.ForkRestore(ctx, env, p, tl)
+		return res, lostSourceErr(err)
+	} else if p.Box == nil {
 		env.Repo = a.repoFor(p.Source)
 		tl.Printf("the source %s runs on this server: its backups are read with this server's own settings; nothing leaves the server",
 			cmp.Or(p.Source.Name, p.Source.Stanza))
