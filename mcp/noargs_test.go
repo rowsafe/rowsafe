@@ -31,3 +31,24 @@ func TestEveryToolWithoutArguments(t *testing.T) {
 		}
 	}
 }
+
+// Every tool declares what it returns and how it behaves, so directories and
+// clients can show it without calling it.
+func TestEveryToolDescribed(t *testing.T) {
+	cs := connectClient(t, client.New("http://127.0.0.1:1", "rsk_test"), Options{AllowWrites: true, MaxWait: 1})
+	tools, err := cs.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range tools.Tools {
+		if tool.Description == "" {
+			t.Errorf("%s: no description", tool.Name)
+		}
+		if tool.OutputSchema == nil {
+			t.Errorf("%s: no outputSchema", tool.Name)
+		}
+		if tool.Annotations == nil {
+			t.Errorf("%s: no annotations", tool.Name)
+		}
+	}
+}
