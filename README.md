@@ -103,6 +103,7 @@ Full guide: [Quickstart](https://rowsafe.sh/docs/quickstart).
 - **Your data and secrets stay on your server.** Backups are encrypted before upload; Rowsafe sees table names and counts, not rows.
 - **Signed, reproducible releases** with automatic rollback. See [verifying releases](docs/verifying-releases.md).
 - **Monitoring is read-only.** `ROWSAFE_COLLECT_QUERY_TEXT=false` keeps query text on your server; `ROWSAFE_MONITORING=false` turns it off.
+- **No usage tracking unless you turn it on.** The CLI sends nothing about how you use it by default. `rowsafe telemetry on` sends, after each command, its name (`cloud create`, never its arguments), the CLI version, OS, exit code, a duration range, whether a terminal or an AI agent ran it, whether you're logged in, and a random ID made on this computer. `rowsafe telemetry status` shows exactly what goes out; `rowsafe telemetry off`, `ROWSAFE_TELEMETRY=0` or `DO_NOT_TRACK=1` stop it. The schema is [`protocol/telemetry.go`](protocol/telemetry.go).
 
 ## Build
 
