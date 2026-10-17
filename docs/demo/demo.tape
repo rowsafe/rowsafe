@@ -35,7 +35,12 @@ Hide
 Type "clear"
 Enter
 Show
-Type "rowsafe pulse postgres://postgres@db/shop"
+Type "rowsafe add shop postgres://postgres@db/shop"
+Sleep 300ms
+Enter
+Wait
+Sleep 1500ms
+Type "rowsafe pulse shop"
 Sleep 300ms
 Enter
 Wait
@@ -45,12 +50,12 @@ Hide
 Type "clear"
 Enter
 Show
-Type "rowsafe fix postgres://postgres@db/shop idle_in_transaction --yes"
+Type "rowsafe fix shop idle_in_transaction --yes"
 Sleep 300ms
 Enter
 Wait
 Sleep 1500ms
-Type "rowsafe fix postgres://postgres@db/shop vacuum_behind --yes"
+Type "rowsafe fix shop vacuum_behind --yes"
 Sleep 300ms
 Enter
 Wait
@@ -60,7 +65,7 @@ Hide
 Type "clear"
 Enter
 Show
-Type "rowsafe pulse postgres://postgres@db/shop"
+Type "rowsafe pulse shop"
 Sleep 300ms
 Enter
 Wait
