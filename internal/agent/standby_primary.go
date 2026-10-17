@@ -109,16 +109,19 @@ func (a *Agent) standbyPrepare(ctx context.Context, db protocol.DatabaseSpec, p 
 	if rt.key == nil {
 		return nil, errors.New("this agent's key for sealed handoffs isn't available (see the agent's log)")
 	}
-	fp, err := handoff.Fingerprint(p.RecipientKey)
-	if err != nil {
-		return nil, fmt.Errorf("the standby server's key: %w", err)
-	}
-	if !handoff.SameFingerprint(fp, p.RecipientFingerprint) {
-		return nil, fmt.Errorf("the standby server's key has fingerprint %s, not %s as confirmed: nothing was sent. "+
-			"Compare again with `sudo -u postgres rowsafe-agent key` on that server", fp, p.RecipientFingerprint)
-	}
-	if err := a.peerAllowed(p.RecipientKey, "the standby server"); err != nil {
-		return nil, err
+	fp := ""
+	if !p.Local { // without an account nothing is sealed (standby_local.go)
+		var err error
+		if fp, err = handoff.Fingerprint(p.RecipientKey); err != nil {
+			return nil, fmt.Errorf("the standby server's key: %w", err)
+		}
+		if !handoff.SameFingerprint(fp, p.RecipientFingerprint) {
+			return nil, fmt.Errorf("the standby server's key has fingerprint %s, not %s as confirmed: nothing was sent. "+
+				"Compare again with `sudo -u postgres rowsafe-agent key` on that server", fp, p.RecipientFingerprint)
+		}
+		if err := a.peerAllowed(p.RecipientKey, "the standby server"); err != nil {
+			return nil, err
+		}
 	}
 	f, err := a.readPrimaryFacts(ctx, db)
 	if err != nil {
@@ -157,7 +160,11 @@ func (a *Agent) standbyPrepare(ctx context.Context, db protocol.DatabaseSpec, p 
 			why = "this server has no address the standby could connect to, so it follows through the bucket"
 		}
 		if why == "" {
-			user, password, err := a.createReplicationRole(ctx, db, p.StandbyID, tl)
+			password := ""
+			if p.Local {
+				password = derivedReplicationPassword(repo.CipherPass, p.StandbyID)
+			}
+			user, password, err := a.createReplicationRole(ctx, db, p.StandbyID, password, tl)
 			if err != nil {
 				return res, err
 			}
@@ -173,6 +180,19 @@ func (a *Agent) standbyPrepare(ctx context.Context, db protocol.DatabaseSpec, p 
 			res.Warnings = append(res.Warnings, why)
 			tl.Printf("%s", why)
 		}
+	}
+	if p.Local {
+		res.Port, res.PrimaryAddresses = db.Port, secrets.PrimaryAddresses
+		if repo.Folder != db.Stanza {
+			res.Folder = repo.Folder
+		}
+		res.Summary = "Nothing to hand over: the standby's server reads the backups with its own settings for the same bucket."
+		if res.Streaming {
+			res.Summary = fmt.Sprintf("The standby may stream: role %s may connect from %s only, with a password both servers derive from the backup passphrase.",
+				res.ReplicationRole, strings.Join(p.StandbyAddresses, ", "))
+		}
+		tl.Printf("%s", res.Summary)
+		return res, nil
 	}
 	plain, err := json.Marshal(secrets)
 	if err != nil {
@@ -198,13 +218,15 @@ func (a *Agent) standbyPrepare(ctx context.Context, db protocol.DatabaseSpec, p 
 // createReplicationRole creates (or resets) the standby's role with a new
 // random password. Only its SCRAM verifier reaches PostgreSQL, so the
 // password is never in a statement a log could keep.
-func (a *Agent) createReplicationRole(ctx context.Context, db protocol.DatabaseSpec, standbyID string, tl *taskLog) (user, password string, err error) {
+func (a *Agent) createReplicationRole(ctx context.Context, db protocol.DatabaseSpec, standbyID, password string, tl *taskLog) (user, _ string, err error) {
 	user = replicationRole(standbyID)
-	raw := make([]byte, 24)
-	if _, err := rand.Read(raw); err != nil {
-		return "", "", err
+	if password == "" { // else derived from the passphrase (standby_local.go)
+		raw := make([]byte, 24)
+		if _, err := rand.Read(raw); err != nil {
+			return "", "", err
+		}
+		password = hex.EncodeToString(raw)
 	}
-	password = hex.EncodeToString(raw)
 	verifier, err := scramVerifier(password)
 	if err != nil {
 		return "", "", err
@@ -226,7 +248,7 @@ func (a *Agent) createReplicationRole(ctx context.Context, db protocol.DatabaseS
 	if _, err := conn.Exec(ctx, stmt); err != nil {
 		return "", "", fmt.Errorf("creating the replication role: %w", err)
 	}
-	tl.Printf("replication role %s ready (random password, sealed for the standby only)", user)
+	tl.Printf("replication role %s ready", user)
 	return user, password, nil
 }
 

@@ -49,6 +49,10 @@ type state struct {
 	Alerts       []*alertRec           `json:"alerts,omitempty"`
 	AlertPending map[string]time.Time  `json:"alert_pending,omitempty"`
 	Metrics      map[string]*dbMetrics `json:"metrics,omitempty"`
+	// Standby (standby.go): this server's half of each standby pair, and
+	// the fences its agent holds.
+	Standby map[string]*pairRec `json:"standby,omitempty"`
+	Fences  []*fenceRec         `json:"fences,omitempty"`
 }
 
 // hostRec is this server, once its agent has enrolled.

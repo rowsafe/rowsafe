@@ -288,6 +288,10 @@ func (s *state) afterTask(t *taskRec, db *dbRec, req protocol.CompleteRequest, n
 		s.finishMark(t.ID, res, now)
 	case protocol.TaskRewindCopy, protocol.TaskRewindDrop:
 		s.afterRewind(t, ok, req.Result, now) // rewind.go
+	default:
+		if protocol.IsStandbyTask(t.Type) {
+			return s.afterStandby(t, db, ok, req.Result, now) // standby.go
+		}
 	}
 	return nil
 }

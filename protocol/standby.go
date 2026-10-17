@@ -218,6 +218,10 @@ type StandbyHeartbeat struct {
 	// on this host that could hold a standby, and why not when they can't.
 	// PostgreSQL clusters are offered through the root helper's ports.
 	Targets []StandbyTarget `json:"standby_targets,omitempty"`
+	// Records are the pairs' records this agent read in the bucket, for the
+	// databases StandbyInstructions.Records names (servers without an
+	// account: standby_local.go).
+	Records []PrimaryRecordState `json:"primary_records,omitempty"`
 }
 
 // StandbyTarget is a database server of another engine than PostgreSQL on
@@ -254,6 +258,9 @@ type StandbyInstructions struct {
 	// (through the root helper, else pg_ctl) whenever they run, and never
 	// starts them.
 	Fences []Fence `json:"fences,omitempty"`
+	// Records are the IDs of databases whose pair's record in the bucket
+	// the agent reads (servers without an account: standby_local.go).
+	Records []string `json:"primary_records,omitempty"`
 }
 
 // Standby phases (StandbyState.Phase).
@@ -370,6 +377,10 @@ type StandbyPrepareParams struct {
 	StandbyAddresses []string `json:"standby_addresses,omitempty"`
 	// Stream sets up streaming (role and pg_hba); false: archive only.
 	Stream bool `json:"stream"`
+	// Local: the two servers have no account and share the bucket and its
+	// passphrase: the replication password is derived from the passphrase
+	// on both (nothing is sealed or sent; RecipientKey is not needed).
+	Local bool `json:"local,omitempty"`
 }
 
 // StandbyPrepareResult is the agent's report for a standby_prepare task.
@@ -391,6 +402,13 @@ type StandbyPrepareResult struct {
 	ListenLocalOnly bool     `json:"listen_local_only,omitempty"` // listen_addresses is localhost: no streaming
 	Warnings        []string `json:"warnings,omitempty"`
 	Summary         string   `json:"summary"`
+	// Folder is the backups' folder in the bucket when it isn't the
+	// database's name (Local: the standby must be told).
+	Folder string `json:"folder,omitempty"`
+	// Port is the primary's PostgreSQL port and PrimaryAddresses its own
+	// addresses (Local: the standby is told where to stream from).
+	Port             int      `json:"port,omitempty"`
+	PrimaryAddresses []string `json:"primary_addresses,omitempty"`
 }
 
 // StandbyCreateParams are the params of a standby_create task (on the
@@ -434,6 +452,15 @@ type StandbyCreateParams struct {
 	// certificate from a CA covers: the standby replicates by this name,
 	// its server checking the certificate in full (name included).
 	PrimaryName string `json:"primary_name,omitempty"`
+	// FromBucket (servers without an account): there is no box. The
+	// standby's server was set up with the primary's bucket and passphrase,
+	// restores from its own bucket settings (Folder, else the database's
+	// name), and streams from PrimaryAddresses:PrimaryPort with the
+	// password both servers derive from the passphrase.
+	FromBucket       bool     `json:"from_bucket,omitempty"`
+	PrimaryAddresses []string `json:"primary_addresses,omitempty"`
+	PrimaryPort      int      `json:"primary_port,omitempty"`
+	Folder           string   `json:"folder,omitempty"`
 }
 
 // StandbyCreateResult is the agent's report for a standby_create task.
@@ -463,6 +490,13 @@ type StandbyPromoteParams struct {
 	Force bool `json:"force,omitempty"`
 	// Automatic marks a promotion by automatic failover (for messages).
 	Automatic bool `json:"automatic,omitempty"`
+	// Record (servers without an account): read the pair's record in the
+	// bucket first (a stopped primary's last change is WaitForLSN when none
+	// is given) and write it after promoting. Without a record of the
+	// primary stopping, the promotion needs PrimaryDown: a person confirmed
+	// the primary is down.
+	Record      bool `json:"record,omitempty"`
+	PrimaryDown bool `json:"primary_down,omitempty"`
 }
 
 // StandbyPromoteResult is the agent's report for a standby_promote task.
@@ -478,6 +512,9 @@ type StandbyPromoteResult struct {
 	// WAL the standby didn't have when it promoted anyway (Force).
 	CaughtUp     bool  `json:"caught_up"`
 	MissingBytes int64 `json:"missing_bytes,omitempty"`
+	// Recorded: the pair's record in the bucket says this server is the
+	// primary now (Record).
+	Recorded bool `json:"recorded,omitempty"`
 	// Warnings: what went wrong around the promotion without stopping it
 	// (the summary says it too).
 	Warnings []string `json:"warnings,omitempty"`
@@ -490,12 +527,18 @@ type StandbyFenceParams struct {
 	FenceID   string `json:"fence_id"`
 	StandbyID string `json:"standby_id"`
 	SystemID  string `json:"system_id,omitempty"`
+	// Record (servers without an account): once stopped, the pair's record
+	// in the bucket says so, with the last change, for the standby.
+	Record bool `json:"record,omitempty"`
 }
 
 // StandbyFenceResult is the agent's report for a standby_fence task.
 type StandbyFenceResult struct {
-	FenceID string `json:"fence_id"`
-	Stopped bool   `json:"stopped"`
+	// Recorded: the pair's record in the bucket says this server stopped
+	// (Record).
+	Recorded bool   `json:"recorded,omitempty"`
+	FenceID  string `json:"fence_id"`
+	Stopped  bool   `json:"stopped"`
 	// Method is how PostgreSQL was stopped: "helper", "pg_ctl" or
 	// "already_stopped".
 	Method string `json:"method"`
@@ -527,6 +570,10 @@ type StandbyRemoveResult struct {
 // StandbyUnfenceParams are the params of a standby_unfence task.
 type StandbyUnfenceParams struct {
 	FenceID string `json:"fence_id"`
+	// Record (servers without an account): refuse when the pair's record
+	// says another server was promoted; say this server is the primary
+	// again once started.
+	Record bool `json:"record,omitempty"`
 }
 
 // StandbyUnfenceResult is the agent's report for a standby_unfence task.
@@ -608,6 +655,9 @@ type StandbyInfo struct {
 	// servers Rowsafe created ("the standby runs in another availability
 	// zone (eu-central-1b)"), in plain words; empty otherwise.
 	Placement string `json:"placement,omitempty"`
+	// Local (addition) is the pair on a server without an account
+	// (standby_local.go).
+	Local *LocalStandby `json:"local,omitempty"`
 }
 
 // StandbyServer is a server in a standby pair.

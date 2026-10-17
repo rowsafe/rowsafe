@@ -120,6 +120,10 @@ type standbyRuntime struct {
 	// when its primary doesn't answer.
 	streamingSeen    map[string]time.Time
 	unreachableSince map[string]time.Time
+
+	// The pairs' records in the bucket (servers without an account:
+	// standby_local.go).
+	records recordWatch
 }
 
 func (a *Agent) standbyDir() string { return filepath.Join(a.cfg.StateDir, "standby") }
@@ -557,6 +561,7 @@ func (a *Agent) standbyHeartbeat(ctx context.Context) protocol.StandbyHeartbeat 
 		hb.Standbys = append(hb.Standbys, a.standbyState(ctx, r))
 	}
 	hb.Primaries = a.primaryStates(ctx)
+	hb.Records = rt.recordStates()     // standby_local.go
 	a.engineStandbyHeartbeat(ctx, &hb) // engine_standby.go
 	for _, f := range rt.fences() {
 		hb.Fences = append(hb.Fences, protocol.FenceState{ID: f.ID, DatabaseID: f.DatabaseID, Port: f.Port, Running: f.Running,
@@ -571,6 +576,7 @@ func (a *Agent) applyStandbyInstructions(in protocol.StandbyInstructions) {
 		return // this server takes no part in standbys: nothing to hold
 	}
 	a.sb().setFences(in.Fences)
+	a.sb().setRecordIDs(in.Records) // standby_local.go
 }
 
 // standbyLoop holds fences, watches primaries from the standbys and deletes
@@ -589,6 +595,7 @@ func (a *Agent) standbyLoop(ctx context.Context) {
 		for _, r := range rt.standbys() {
 			a.checkPrimary(r)
 		}
+		a.checkRecords(ctx, time.Now()) // standby_local.go
 		a.expireKept(time.Now())
 		select {
 		case <-ctx.Done():
