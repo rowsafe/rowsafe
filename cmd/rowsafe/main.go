@@ -25,9 +25,18 @@ const usage = `rowsafe - databases that let you sleep at night
 
 All commands (NAME is optional where shown in brackets; see "rowsafe help names"):
 
-No account needed: on a PostgreSQL database this computer reaches (CONN is postgres://USER@HOST/DB, or
-DATABASE_URL when you aren't logged in; "rowsafe help local")
-  rowsafe pulse CONN | fix CONN | insights CONN | top CONN | activity CONN | settings CONN | tune CONN | mcp CONN
+No account needed: on a PostgreSQL database this computer reaches ("rowsafe help local")
+  rowsafe add NAME [CONN] [--from-env VAR] [--no-check] [--yes] [--json]
+                                             save a database on this computer once (checks it connects, read-only);
+                                             the connection string stays in your config folder, readable only by you.
+                                             CONN is postgres://USER:PASSWORD@HOST/DB; without it: piped in, or this
+                                             project's DATABASE_URL (asks first)
+  rowsafe use NAME [--json]                  make NAME this project's database (.rowsafe.json; never the password)
+  rowsafe databases [--json]                 databases saved on this computer (also rowsafe ls when not logged in)
+  rowsafe forget NAME [--yes]                delete a saved database's connection string
+  rowsafe pulse [NAME|CONN] | fix | insights | top | activity | settings | tune | mcp
+                                             NAME: a saved database, or this project's; CONN: a connection string
+                                             used once; DATABASE_URL when you aren't logged in
 
 Getting started
   rowsafe login [--url URL]                  log in with your browser (default URL https://api.rowsafe.sh)
@@ -542,6 +551,8 @@ func dispatch(ctx context.Context, args []string) error {
 		return whoami(ctx, rest)
 	case "guard":
 		return guard(ctx, rest)
+	case "add", "use", "databases", "forget": // saved databases (saved.go)
+		return savedCmd(ctx, cmd, rest)
 	}
 	cfg, err := loadConfig()
 	// Without an account: a connection string, or $DATABASE_URL with no
@@ -557,7 +568,10 @@ func dispatch(ctx context.Context, args []string) error {
 	}
 	if err != nil {
 		if errors.Is(err, errNotLoggedIn) {
-			return errors.New(notLoggedIn)
+			if cmd == "ls" {
+				return savedList(rest)
+			}
+			return notLoggedInError()
 		}
 		return err
 	}

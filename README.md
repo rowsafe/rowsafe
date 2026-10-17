@@ -21,18 +21,22 @@ Features per database: `protocol.EngineCapabilities`.
 
 ```sh
 curl -fsSL https://rowsafe.sh/cli | sh
-rowsafe pulse postgres://user@host:5432/dbname
+rowsafe add shop postgres://user@host:5432/dbname   # once: checks it connects, saves it on this computer
+rowsafe pulse shop
 ```
 
 A 0–100 health score for a PostgreSQL database you can connect to, with what to fix in plain language: cleanup falling behind, transaction ID wraparound, bloat, unused and duplicate indexes, stuck sessions and locks, connections, replication slots and settings. Rowsafe applies the fixes after you confirm. Nothing is sent anywhere.
 
 ```sh
-rowsafe fix postgres://…                  # apply what pulse found (asks first)
-rowsafe insights | top | activity | settings | tune postgres://…
-rowsafe mcp postgres://… --allow-writes   # the same as MCP tools for Claude Code, Codex or Cursor
+rowsafe fix shop                       # apply what pulse found (asks first)
+rowsafe insights | top | activity | settings | tune shop
+rowsafe mcp shop --allow-writes        # the same as MCP tools for Claude Code, Codex or Cursor
+rowsafe use shop                       # in a project: then just `rowsafe pulse`
 ```
 
-Or set `DATABASE_URL` and leave the argument out. Use the direct connection, not a pooler. Backups, restore to any second, the weekly restore test, alerts and history need the agent on your server: see below. `rowsafe help local` has the details.
+The connection string stays in your config folder, readable only by you; `.rowsafe.json` gets only the name. Pipe it in (`rowsafe add shop < url.txt`) or use `--from-env VAR` to keep the password out of your shell history; in a project, `rowsafe add` alone offers the `DATABASE_URL` from `.env`. `rowsafe databases` lists them, `rowsafe forget shop` removes one.
+
+Once, without saving: `rowsafe pulse postgres://…`, or set `DATABASE_URL` and leave the argument out. Use the direct connection, not a pooler. Backups, restore to any second, the weekly restore test, alerts and history need the agent on your server: see below. `rowsafe help local` has the details.
 
 ## Get started
 
