@@ -27,7 +27,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/rowsafe/rowsafe/protocol"
@@ -257,7 +256,7 @@ var telemetryLaunch = func(url string, ev protocol.TelemetryEvent) {
 	}
 	cmd := exec.Command(exe, telemetrySendArg)
 	cmd.Stdin = r // stdout and stderr: /dev/null, so nobody reading ours waits for it
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	detach(cmd)   // its own process group: Ctrl-C in the terminal doesn't reach it
 	if cmd.Start() == nil {
 		_ = cmd.Process.Release()
 	}
