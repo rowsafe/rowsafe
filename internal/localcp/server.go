@@ -316,6 +316,13 @@ func (s *Server) setupRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid port")
 		return
 	}
+	if req.SocketDir == "" {
+		req.SocketDir = "/var/run/postgresql" // as on the hosted control plane
+	}
+	if !filepath.IsAbs(req.SocketDir) {
+		writeError(w, http.StatusBadRequest, "socket_dir must be an absolute path")
+		return
+	}
 	now := s.now()
 	status := http.StatusOK
 	var out protocol.SetupDatabase

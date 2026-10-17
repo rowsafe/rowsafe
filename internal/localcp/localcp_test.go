@@ -315,3 +315,14 @@ func TestLostAndWaiting(t *testing.T) {
 		t.Errorf("completing a lost task: %d", code)
 	}
 }
+
+func TestRegisterSocketDir(t *testing.T) {
+	_, a, _, _ := setup(t)
+	var sd protocol.SetupDatabase
+	if code := a.call("POST", "/v1/agent/setup/databases", protocol.SetupRegisterRequest{Name: "shop", Port: 5432}, &sd); code != http.StatusCreated || sd.SocketDir != "/var/run/postgresql" {
+		t.Fatalf("without a socket directory: %d %+v", code, sd)
+	}
+	if code := a.call("POST", "/v1/agent/setup/databases", protocol.SetupRegisterRequest{Name: "crm", Port: 5433, SocketDir: "tmp"}, nil); code != http.StatusBadRequest {
+		t.Fatalf("a relative socket directory: %d", code)
+	}
+}
