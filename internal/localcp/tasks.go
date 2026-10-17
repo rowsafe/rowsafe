@@ -286,6 +286,8 @@ func (s *state) afterTask(t *taskRec, db *dbRec, req protocol.CompleteRequest, n
 			res.Archived = res.Archived && ok
 		}
 		s.finishMark(t.ID, res, now)
+	case protocol.TaskRewindCopy, protocol.TaskRewindDrop:
+		s.afterRewind(t, ok, req.Result, now) // rewind.go
 	}
 	return nil
 }

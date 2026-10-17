@@ -430,10 +430,10 @@ Rowsafe agent installer
   curl -fsSL https://rowsafe.sh | sudo sh -s rse_...
       for automation (no terminal): a one-time enrollment token instead
   curl -fsSL https://rowsafe.sh | sudo sh -s -- --no-account
-      without an account: backups, restore tests and Pulse on this server, used with
-      sudo rowsafe ... here. Connect it to an account later with sudo rowsafe login
-      (it keeps its backups, Proofs and Marks). On a server connected to an account,
-      --no-account turns it back into one without
+      everything on this server, used with sudo rowsafe ... here: backups, restore to
+      any second, restore tests and Pulse (sudo rowsafe add NAME postgresql:///DB).
+      Add the dashboard later with sudo rowsafe login (it keeps its backups, Proofs
+      and Marks). On a server connected to the dashboard, --no-account turns it back
 
 Options (when piping, pass them after `sh -s --`):
   rse_...                the one-time enrollment token from `rowsafe hosts enroll-token`
@@ -10971,7 +10971,7 @@ choose_account() {
     tty_say ""
     tty_say "${BOLD}Use Rowsafe with an account?${RESET}"
     tty_say "  1) Yes: connect this server in the browser (the dashboard, alerts, Rewind from anywhere)"
-    tty_say "  2) No account: backups, restore tests and Pulse on this server, with sudo rowsafe ..."
+    tty_say "  2) No: backups, restore to any second, restore tests and Pulse on this server, with sudo rowsafe ..."
     tty_say "     here. You can connect it to an account later (sudo rowsafe login)"
     _acct=1
     choose _acct "Choose" 1 2

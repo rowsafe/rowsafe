@@ -103,7 +103,7 @@ func findNoAccount() (*noAccount, error) {
 		err = nil // the agent hasn't started yet: nothing to hand over
 	}
 	if err != nil {
-		return nil, fmt.Errorf("reading what this server keeps without an account: %w", err)
+		return nil, fmt.Errorf("reading what this server keeps on its own: %w", err)
 	}
 	return n, nil
 }
@@ -422,13 +422,13 @@ func (h *handover) putBack(cause error) error {
 		}
 	}
 	if len(errs) > 0 {
-		msg = append(msg, fmt.Sprintf("Putting this server back without an account failed too (%v). Do it yourself:\n"+
+		msg = append(msg, fmt.Sprintf("Putting this server back on its own failed too (%v). Do it yourself:\n"+
 			"  sudo cp %[2]s%[3]s %[2]s\n  sudo mv %[4]s%[3]s %[4]s   (if it is there)\n  sudo systemctl restart rowsafe-agent",
 			errors.Join(errs...), n.envPath, asideSuffix, id))
 		return errors.New(strings.Join(msg, "\n"))
 	}
 	_ = os.Remove(n.envPath + asideSuffix)
-	msg = append(msg, "Put back as it was: the agent runs without an account again, with its databases, backups, Proofs and Marks. "+
+	msg = append(msg, "Put back as it was: the agent runs on its own again, with its databases, backups, Proofs and Marks. "+
 		"Backups never stopped (PostgreSQL sends its changes to storage by itself).")
 
 	// What the account got of this attempt: records only (the backups

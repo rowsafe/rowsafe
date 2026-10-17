@@ -25,12 +25,13 @@ const usage = `rowsafe - databases that let you sleep at night
 
 All commands (NAME is optional where shown in brackets; see "rowsafe help names"):
 
-No account needed: on a PostgreSQL database this computer reaches ("rowsafe help local")
+Start here: save a database once, then use it by name ("rowsafe help local")
   rowsafe add NAME [CONN] [--from-env VAR] [--no-check] [--yes] [--json]
                                              save a database on this computer once (checks it connects, read-only);
                                              the connection string stays in your config folder, readable only by you.
                                              CONN is postgres://USER:PASSWORD@HOST/DB; without it: piped in, or this
-                                             project's DATABASE_URL (asks first)
+                                             project's DATABASE_URL (asks first). On the database's own server
+                                             (sudo), also offers to turn on backups, Marks, Proof and restores
   rowsafe use NAME [--json]                  make NAME this project's database (.rowsafe.json; never the password)
   rowsafe databases [--json]                 databases saved on this computer (also rowsafe ls when not logged in)
   rowsafe forget NAME [--yes]                delete a saved database's connection string
@@ -47,8 +48,8 @@ No account needed: on a PostgreSQL database this computer reaches ("rowsafe help
 Getting started
   rowsafe login [--url URL]                  log in with your browser (default URL https://api.rowsafe.sh)
   rowsafe login --key rsk_... [--url URL]    log in with an existing API key (CI, scripts)
-  sudo rowsafe login [--yes]                 on a server set up without an account: also connects it to the
-                                             account, with its backups, Proofs and Marks (no reinstall)
+  sudo rowsafe login [--yes]                 on a database server: also connects it to the dashboard, with its
+                                             backups, Proofs and Marks (no reinstall)
   rowsafe logout [--keep-key]                forget the login and revoke the key "rowsafe login" created
   rowsafe whoami [--json]                    control plane, organization, plan, API key in use and who it acts as
   rowsafe hosts add [USER@]SERVER [-p PORT] [-i KEY] [-- INSTALLER OPTIONS]
@@ -141,6 +142,10 @@ Rewind: continuous backups, restore to any second
                                              change retention and schedules (5-field cron, UTC; --diff-schedule "" disables diffs)
   rowsafe remove NAME [--keep-archiving] [--yes]
                                              stop managing a database; never changes the server
+  rowsafe restore [NAME] --to TIME|MARK [--hours 24] [--no-wait]
+                                             restore a copy as it was then, next to production (never
+                                             touches it): rowsafe rewind copy, with the time or Mark in one flag
+  rowsafe restores [NAME] [--json]           the copy, the recovery window and recent restores (rowsafe rewind)
   rowsafe rewind [NAME] [--json]             the recovery window, the copy and data kept aside by a rewind
   rowsafe rewind find [NAME] [--table T] [--since 24h | --from TIME [--to TIME]] [--kind delete,update,truncate,drop]
                                              when were rows deleted or changed, or a table emptied or dropped?
@@ -602,10 +607,12 @@ func dispatch(ctx context.Context, args []string) error {
 		return savedCmd(ctx, cmd, rest)
 	}
 	cfg, err := loadConfig()
-	// Without an account: a connection string, or $DATABASE_URL with no
-	// saved login (local.go).
+	// This server's agent (server_saved.go): saved names reach its databases.
+	onServer = err == nil && cfg.APIKey == "local"
+	// Directly on a database: a connection string, a saved name, or
+	// $DATABASE_URL with no saved login (local.go).
 	if run, ok := localCommands[cmd]; ok {
-		db, args, isLocal, lerr := localArgs(rest, err == nil)
+		db, args, isLocal, lerr := localArgs(rest, err == nil && !onServer)
 		if lerr != nil {
 			return lerr
 		}
@@ -668,6 +675,10 @@ func dispatch(ctx context.Context, args []string) error {
 		return removeCmd(ctx, c, rest)
 	case "rewind":
 		return rewindCmd(ctx, c, rest)
+	case "restore":
+		return restoreCmd(ctx, c, rest)
+	case "restores":
+		return rewindShow(ctx, c, rest)
 	case "files":
 		return filesCmd(ctx, c, rest) // files.go
 	case "migrate": // move in from a managed database (migrate.go)
