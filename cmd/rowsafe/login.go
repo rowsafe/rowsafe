@@ -130,8 +130,22 @@ func login(ctx context.Context, args []string) error {
 	key := fs.String("key", "", "log in with an existing API key (rsk_...) instead of the browser")
 	host, _ := os.Hostname()
 	name := fs.String("name", "rowsafe CLI on "+host, "what the new API key is called (shown in the dashboard)")
+	yes := fs.Bool("yes", false, "on a server that runs Rowsafe without an account: connect it without asking")
 	if _, err := parse(fs, args, false); err != nil {
 		return err
+	}
+	// On a server without an account, logging in connects it (handover.go).
+	local, err := findNoAccount()
+	if err != nil {
+		return err
+	}
+	if local != nil {
+		if err := local.ready(); err != nil {
+			return fmt.Errorf("this server runs Rowsafe without an account, and logging in here connects it to the account. Not yet: %w", err)
+		}
+		if !*yes && !stdinIsTerminal() {
+			return fmt.Errorf("this server runs Rowsafe without an account (%s), and logging in here connects it to the account: pass --yes for that (no terminal to ask on). Nothing was changed", local.what())
+		}
 	}
 	saved, _, err := readSavedConfig()
 	if err != nil {
@@ -147,6 +161,12 @@ func login(ctx context.Context, args []string) error {
 	}
 	if err != nil {
 		return err
+	}
+	if local != nil {
+		if err := connectNoAccount(ctx, local, cfg, *yes); err != nil {
+			forgetLogin(ctx, cfg)
+			return err
+		}
 	}
 	p, err := saveConfig(cfg)
 	if err != nil {
@@ -168,6 +188,34 @@ func login(ctx context.Context, args []string) error {
 		}
 	}
 	return nil
+}
+
+// connectNoAccount asks, then connects this server to cfg's account.
+func connectNoAccount(ctx context.Context, local *noAccount, cfg config, yes bool) error {
+	org := cfg.Org.Name
+	if org == "" {
+		org = cfg.Org.ID
+	}
+	if !yes {
+		fmt.Printf("This server runs Rowsafe without an account (%s).\n", local.what())
+		fmt.Printf("Connect it to %s? Its backups, Proofs and Marks come along; the Rowsafe agent restarts, PostgreSQL doesn't. [Y/n] ", org)
+		if !answerYes() {
+			return errors.New("not logged in: this server stays without an account, as it was. sudo rowsafe login connects it whenever you like")
+		}
+	}
+	if err := local.connect(ctx, cfg, os.Stdout); err != nil {
+		return fmt.Errorf("%w\nNot logged in", err)
+	}
+	fmt.Printf("%s is connected to %s: the dashboard, alerts and Rewind from anywhere. Backups went on all along.\n", local.hostname(), org)
+	return nil
+}
+
+// forgetLogin revokes the key a browser login just made, when it isn't
+// kept after all.
+func forgetLogin(ctx context.Context, cfg config) {
+	if cfg.KeyID != "" {
+		_ = client.New(cfg.URL, cfg.APIKey).Logout(ctx)
+	}
 }
 
 func loginWithKey(ctx context.Context, url, key string) (config, error) {
@@ -305,5 +353,21 @@ func logout(ctx context.Context, args []string) error {
 		return err
 	}
 	fmt.Println("Logged out; removed", p)
+	if agentOnAccount() {
+		fmt.Println("The Rowsafe agent on this server stays connected to the account: logging out only signs this CLI out.\n" +
+			"To use this server without an account again, run the installer with --no-account:\n" +
+			"  curl -fsSL https://rowsafe.sh | sudo sh -s -- --no-account")
+	}
 	return nil
+}
+
+// agentOnAccount reports whether this server's agent is connected to an
+// account (only root can read agent.env: sudo rowsafe logout).
+func agentOnAccount() bool {
+	data, err := os.ReadFile(agentEnvPath)
+	if err != nil {
+		return false
+	}
+	_, local := protocol.LocalSocket(envValue(data, "ROWSAFE_URL"))
+	return !local
 }

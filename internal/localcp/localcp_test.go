@@ -218,6 +218,23 @@ func TestLifecycle(t *testing.T) {
 		}
 	})
 
+	// What rowsafe login hands over to an account: the history, no secret.
+	x, err := ReadExport(s.st.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(x.Databases) != 1 || x.Databases[0].Name != "shop" || x.Databases[0].Status != protocol.DBActive || len(x.Open) != 0 {
+		t.Fatalf("export: %+v open %+v", x.Databases, x.Open)
+	}
+	h := x.History.Databases[0]
+	if h.Name != "shop" || len(h.Backups) != 1 || len(h.Drills) != 1 || len(h.RestorePoints) != 1 || h.RestorePoints[0].LSN != "0/3000000" {
+		t.Fatalf("history: %+v", h)
+	}
+	raw, _ := json.Marshal(x)
+	if strings.Contains(string(raw), a.token) {
+		t.Error("the export holds the agent's token")
+	}
+
 	// Things that need an account say so.
 	if _, err := c.Hosts(ctx); err != nil {
 		t.Error(err)
@@ -296,5 +313,16 @@ func TestLostAndWaiting(t *testing.T) {
 	// A late completion of the lost task is refused.
 	if code := a.call("POST", "/v1/agent/tasks/"+backup.ID+"/complete", protocol.CompleteRequest{Status: protocol.StatusSucceeded}, nil); code != http.StatusConflict {
 		t.Errorf("completing a lost task: %d", code)
+	}
+}
+
+func TestRegisterSocketDir(t *testing.T) {
+	_, a, _, _ := setup(t)
+	var sd protocol.SetupDatabase
+	if code := a.call("POST", "/v1/agent/setup/databases", protocol.SetupRegisterRequest{Name: "shop", Port: 5432}, &sd); code != http.StatusCreated || sd.SocketDir != "/var/run/postgresql" {
+		t.Fatalf("without a socket directory: %d %+v", code, sd)
+	}
+	if code := a.call("POST", "/v1/agent/setup/databases", protocol.SetupRegisterRequest{Name: "crm", Port: 5433, SocketDir: "tmp"}, nil); code != http.StatusBadRequest {
+		t.Fatalf("a relative socket directory: %d", code)
 	}
 }

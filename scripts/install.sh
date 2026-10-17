@@ -332,6 +332,7 @@ STORAGE_CLEAR=''   # agent.env keys the guided setup turns back into comments
 STORAGE_GUIDED=0
 NO_SETUP=0         # --no-setup
 NO_ACCOUNT=''      # --no-account (1) / --account (0); '' = ask once on a terminal when there is no token
+LEAVE_ACCOUNT=0    # --no-account on a server connected to an account (choose_account)
 PROTECT_NAME=''    # --protect NAME
 PROTECT_PORT=''    # --protect-port PORT
 ALLOW_RESTART=''   # --allow-restart (yes) / --no-allow-restart (no); '' = ask once on a terminal, else yes
@@ -431,6 +432,8 @@ Rowsafe agent installer
   curl -fsSL https://rowsafe.sh | sudo sh -s -- --no-account
       without an account: backups, restore tests and Pulse on this server, used with
       sudo rowsafe ... here. Connect it to an account later with sudo rowsafe login
+      (it keeps its backups, Proofs and Marks). On a server connected to an account,
+      --no-account turns it back into one without
 
 Options (when piping, pass them after `sh -s --`):
   rse_...                the one-time enrollment token from `rowsafe hosts enroll-token`
@@ -10946,10 +10949,23 @@ no_account() { [ "$(s_get ROWSAFE_URL)" = "$LOCAL_URL" ]; }
 # account (a token or the browser), as before.
 choose_account() {
   if no_account; then
+    # Connecting keeps the backups, Proofs and Marks: the CLI does it.
+    if [ "$NO_ACCOUNT" = 0 ] || [ -n "${ROWSAFE_ENROLL_TOKEN:-}" ]; then
+      die "this server runs Rowsafe without an account. To connect it to an account, keeping its backups, Proofs and Marks, run: sudo rowsafe login"
+    fi
     NO_ACCOUNT=1
     return 0
   fi
-  [ ! -f "$STATE_DIR/agent.json" ] || return 0
+  if [ -f "$STATE_DIR/agent.json" ]; then
+    # --no-account on a server connected to an account: its agent goes on
+    # without one (leave_account, once agent.env is written).
+    [ "$NO_ACCOUNT" = 1 ] || return 0
+    LEAVE_ACCOUNT=1
+    ROWSAFE_URL=$LOCAL_URL
+    export ROWSAFE_URL
+    ok "without an account from now on: this server's agent stops reporting to the account"
+    return 0
+  fi
   [ -z "$(s_get ROWSAFE_ENROLL_TOKEN)" ] || return 0
   if [ -z "$NO_ACCOUNT" ] && [ "$TTY" = 1 ]; then
     tty_say ""
@@ -10965,6 +10981,23 @@ choose_account() {
   ROWSAFE_URL=$LOCAL_URL
   export ROWSAFE_URL
   ok "without an account: everything stays on this server"
+}
+
+# leave_account finishes --no-account on a server that was connected to an
+# account: the account's identity is set aside (agent.json.account; the
+# account sees this server offline from now on) and the used enrollment
+# token goes, so the agent starts on its own control plane when it
+# restarts. PostgreSQL's archiving doesn't change: backups go on to the same
+# storage, and the installer sets each database up here again (no restart:
+# archiving is already Rowsafe's).
+leave_account() {
+  [ "$LEAVE_ACCOUNT" = 1 ] || return 0
+  ! grep -q '^ROWSAFE_ENROLL_TOKEN=' "$ENV_FILE" || clear_env_var ROWSAFE_ENROLL_TOKEN
+  if [ -f "$STATE_DIR/agent.json" ]; then
+    mv -f "$STATE_DIR/agent.json" "$STATE_DIR/agent.json.account"
+  fi
+  CHANGED=1
+  note "the account's identity is kept aside in $STATE_DIR/agent.json.account; remove this server in the dashboard"
 }
 
 # install_local_cli installs the rowsafe CLI here (no account: it is how this
@@ -10991,7 +11024,10 @@ no_account_next() {
   say "    sudo rowsafe mark ${C_NAME:-NAME} LABEL     a restore point, e.g. before a migration"
   say "    sudo rowsafe backups ${C_NAME:-NAME}       backups; sudo rowsafe proofs ${C_NAME:-NAME}: restore tests"
   say "    sudo rowsafe help local         everything that works without an account"
-  say "    The dashboard, alerts and Rewind from anywhere: sudo rowsafe login"
+  say ""
+  say "    Later, for the dashboard, alerts and Rewind from anywhere: sudo rowsafe login"
+  say "    connects this server to an account, with its backups, Proofs and Marks"
+  say "    (no reinstall; the agent restarts, PostgreSQL doesn't)."
 }
 
 # ---------------------------------------------------------------- connect in the browser
@@ -15617,6 +15653,7 @@ install_agent() {
   maybe_guided_storage
   second_copy
   write_env
+  leave_account
 
   if systemd_running; then
     [ "$UNIT_CHANGED" = 0 ] || systemctl daemon-reload

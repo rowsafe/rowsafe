@@ -43,3 +43,47 @@ func HTTPClient(controlURL string, timeout time.Duration) (*http.Client, string)
 	}}
 	return &http.Client{Timeout: timeout, Transport: tr}, "http://rowsafe.local"
 }
+
+// Connecting a server without an account to one (`sudo rowsafe login` on
+// it): the agent enrolls in the account, each database is registered there
+// under the same name, and its history comes along so the dashboard isn't
+// empty. The history is metadata only (backup labels and sizes, Proof
+// results, Marks' names and positions): no data, no secrets.
+
+// ImportRequest is that history, sent once with the agent's new token:
+// POST /v1/agent/import. Each database must already be registered for the
+// calling host; records already imported are skipped, so it can be sent
+// again.
+type ImportRequest struct {
+	Databases []ImportDatabase `json:"databases"`
+}
+
+// ImportDatabase is one database's history. IDs are the server's own:
+// the control plane keeps them to skip what it already has.
+type ImportDatabase struct {
+	Name          string         `json:"name"`
+	Backups       []Backup       `json:"backups"`
+	Drills        []Drill        `json:"drills"`
+	RestorePoints []RestorePoint `json:"restore_points"`
+}
+
+// ImportResponse counts what was added per database.
+type ImportResponse struct {
+	Databases []ImportCounts `json:"databases"`
+}
+
+// ImportCounts is what one database's import added (Skipped: already there).
+type ImportCounts struct {
+	Name          string `json:"name"`
+	Backups       int    `json:"backups"`
+	Drills        int    `json:"drills"`
+	RestorePoints int    `json:"restore_points"`
+	Skipped       int    `json:"skipped"`
+}
+
+// Import limits per database (the server keeps less: internal/localcp).
+const (
+	ImportMaxBackups       = 1000
+	ImportMaxDrills        = 500
+	ImportMaxRestorePoints = 1000
+)

@@ -1350,9 +1350,25 @@ no_account_tests() {
   # A re-run without the option stays without an account.
   expect_ok "re-run keeps no account" "$INSTALLER" --no-prompt
   env_is ROWSAFE_URL unix:///var/lib/rowsafe/control.sock
+  # Connecting is rowsafe login's (it keeps the history), not the installer's.
+  expect_fail "--account on a server without one" "sudo rowsafe login" "$INSTALLER" --account --no-prompt
+  expect_fail "a token on a server without an account" "sudo rowsafe login" "$INSTALLER" rse_secrettoken123 --no-prompt
+  env_is ROWSAFE_URL unix:///var/lib/rowsafe/control.sock
   expect_ok "purge after --no-account" "$INSTALLER" --uninstall --purge
   rm -f /usr/local/bin/rowsafe
-  pass "--no-account installs without a token"
+
+  # A server connected to an account goes back to none with --no-account.
+  expect_ok "install with a token" "$INSTALLER" rse_secrettoken123 --no-prompt
+  echo '{"host_id":"host_1","agent_token":"rsa_x"}' >/var/lib/rowsafe/agent.json
+  chown postgres:postgres /var/lib/rowsafe/agent.json
+  expect_ok "--no-account on a connected server" "$INSTALLER" --no-account --no-prompt
+  env_is ROWSAFE_URL unix:///var/lib/rowsafe/control.sock
+  ! grep -q '^ROWSAFE_ENROLL_TOKEN=' /etc/rowsafe/agent.env || fail "the used token is still in agent.env"
+  [ ! -e /var/lib/rowsafe/agent.json ] && [ -f /var/lib/rowsafe/agent.json.account ] || fail "the account's identity isn't set aside"
+  has "agent.json.account"
+  expect_ok "purge after leaving the account" "$INSTALLER" --uninstall --purge
+  rm -f /usr/local/bin/rowsafe
+  pass "--no-account installs without a token, and takes a server off its account"
 }
 
 guided_storage_tests() {
