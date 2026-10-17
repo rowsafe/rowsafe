@@ -19,19 +19,19 @@ type MCPOptions struct {
 	Version     string
 }
 
-const mcpInstructions = `Rowsafe, without an account: tools for one PostgreSQL database that this machine reaches directly with a connection string. Nothing is sent to Rowsafe.
+const mcpInstructions = `Rowsafe, without an account: tools for one database (PostgreSQL, MySQL or MariaDB) that this machine reaches directly with a connection string. Nothing is sent to Rowsafe.
 
 - "Is the database healthy?", "what needs attention?": database_health (a 0-100 score and findings in plain language, each with what to do and the fixes Rowsafe can apply).
-- "What is slow?": top_queries (pg_stat_statements totals) and database_insights (largest tables, unused and duplicate indexes, bloat, dead rows, transaction ID age).
-- "What does the database look like?": describe_schema (tables, columns, keys, indexes, views, enums; compact). Use it before writing SQL or a migration.
-- "Why is this query slow?": explain_query (the plan in plain words and the index that would likely help; analyze runs a SELECT read-only).
+- "What is slow?": top_queries (pg_stat_statements totals; MySQL and MariaDB: performance_schema) and database_insights (largest tables, unused and duplicate indexes, bloat or free space inside tables, dead rows, transaction ID age, tables without a primary key).
+- "What does the database look like?": describe_schema (tables, columns, keys, indexes, views, enums; compact). Use it before writing SQL or a migration. PostgreSQL only for now.
+- "Why is this query slow?": explain_query (the plan in plain words and the index that would likely help; analyze runs a SELECT read-only). PostgreSQL only for now.
 - "What is running now / what is blocked?": live_activity.
 - Settings: database_settings (the settings that matter and what would suit the server).
 - Fixing: when a finding has a fix, use apply_fix (finding_id and fix_id) once the user agrees, instead of giving them SQL. It evaluates the database again and runs only a fix that evaluation proposes; every name and condition is checked again first. Tell the user what a destructive fix does (its confirm text) before applying it. Without apply_fix (read-only), tell the user the command: rowsafe fix.
 
-- Migrations: before running one (a migration tool, or SQL with ALTER, DROP, CREATE INDEX, bulk UPDATE/DELETE), call check_migration with its SQL and tell the user the verdict (safe, careful, dangerous, failed) and what to change. It never changes the database.
+- Migrations: before running one (a migration tool, or SQL with ALTER, DROP, CREATE INDEX, bulk UPDATE/DELETE), call check_migration with its SQL (PostgreSQL only for now) and tell the user the verdict (safe, careful, dangerous, failed) and what to change. It never changes the database.
 
-Backups are not known here: this database may have none. Before a destructive operation (migrations, DROP, TRUNCATE, bulk DELETE/UPDATE), tell the user there is no Rowsafe restore point to go back to and get their OK; they can take a backup first (pg_dump), or protect the database with Rowsafe's agent (https://rowsafe.sh), which adds restore points and restore to any second.`
+Backups are not known here: this database may have none. Before a destructive operation (migrations, DROP, TRUNCATE, bulk DELETE/UPDATE), tell the user there is no Rowsafe restore point to go back to and get their OK; they can take a backup first (pg_dump, mysqldump), or protect the database with Rowsafe's agent (https://rowsafe.sh), which adds restore points and restore to any second.`
 
 type noInput struct{}
 
@@ -78,7 +78,8 @@ func NewMCPServer(d *DB, opts MCPOptions) *sdk.Server {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "database_health",
 		Description: "The database's health: a score from 0 to 100, a grade, and findings in plain language (connections, cleanup and transaction ID wraparound, bloat, " +
-			"long and idle transactions, locks, cache, unused and duplicate indexes, settings, replication, and the disk when it runs on this machine), each with what to do and the fixes Rowsafe can apply. " +
+			"long and idle transactions, locks, cache, unused and duplicate indexes, settings, replication, and the disk when it runs on this machine; MySQL and MariaDB: " +
+			"also InnoDB's old row versions, free space inside tables, the slow query log and tables without a primary key), each with what to do and the fixes Rowsafe can apply. " +
 			"Reads the database now (up to a minute on a large one). Read-only.",
 		Annotations: readOnly("Database health"),
 		InputSchema: schema[healthInput](func(p map[string]*jsonschema.Schema) {
@@ -98,7 +99,7 @@ func NewMCPServer(d *DB, opts MCPOptions) *sdk.Server {
 	})
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "top_queries",
-		Description: "The statements that took the most time since pg_stat_statements was last reset: calls, total and mean time, rows, and the query text. Needs the pg_stat_statements extension (database_health says how to turn it on). Read-only.",
+		Description: "The statements that took the most time since pg_stat_statements was last reset (MySQL and MariaDB: performance_schema, since the server started): calls, total and mean time, rows, and the query text. PostgreSQL needs the pg_stat_statements extension (database_health says how to turn it on). Read-only.",
 		Annotations: readOnly("Top queries"),
 	}, func(ctx context.Context, _ *sdk.CallToolRequest, in topInput) (*sdk.CallToolResult, any, error) {
 		st, err := d.Statements(ctx)
@@ -117,7 +118,7 @@ func NewMCPServer(d *DB, opts MCPOptions) *sdk.Server {
 	})
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "database_settings",
-		Description: "PostgreSQL's settings that matter (value, default, where it is set, whether a change needs a restart) and what Rowsafe recommends for the server's memory, CPUs and disk. Read-only.",
+		Description: "The settings that matter (value, default, where it is set, whether a change needs a restart) and what Rowsafe recommends for the server's memory, CPUs and disk. Read-only.",
 		Annotations: readOnly("Settings"),
 		InputSchema: schema[healthInput](func(p map[string]*jsonschema.Schema) {
 			p["workload"].Enum = []any{"web", "analytics", "mixed"}
@@ -155,7 +156,7 @@ func NewMCPServer(d *DB, opts MCPOptions) *sdk.Server {
 		sdk.AddTool(s, &sdk.Tool{
 			Name: "apply_fix",
 			Description: "Apply a fix that database_health proposes (finding_id and fix_id): clean up or freeze tables, rebuild a bloated index, drop an unused or duplicate index, " +
-				"stop a query or end a session, drop an abandoned replication slot, or change settings (ALTER SYSTEM and a reload; nothing restarts). The database is evaluated again first and only a fix that evaluation proposes runs, " +
+				"stop a query or end a session, drop an abandoned replication slot, rebuild a table or turn on the slow query log (MySQL, MariaDB), or change settings (ALTER SYSTEM and a reload, MySQL: SET PERSIST; nothing restarts). The database is evaluated again first and only a fix that evaluation proposes runs, " +
 				"with every name and condition checked again. Changes production: get the user's OK first, and for a fix with a confirm text, tell them what it says.",
 			Annotations: &sdk.ToolAnnotations{Title: "Apply a fix", DestructiveHint: &t, IdempotentHint: false, OpenWorldHint: &f},
 		}, func(ctx context.Context, _ *sdk.CallToolRequest, in fixInput) (*sdk.CallToolResult, any, error) {

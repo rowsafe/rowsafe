@@ -417,7 +417,7 @@ func savedAdd(ctx context.Context, args []string) error {
 		}
 	}
 	if !local.IsConnString(conn) {
-		return newUsageError("expected a PostgreSQL connection string: postgres://USER:PASSWORD@HOST:5432/DB")
+		return newUsageError("expected a connection string: postgres://USER:PASSWORD@HOST:5432/DB or mysql://USER:PASSWORD@HOST:3306/DB")
 	}
 	d, err := local.Open(conn)
 	if err != nil {
@@ -468,7 +468,7 @@ func savedAdd(ctx context.Context, args []string) error {
 	}
 	pg := ""
 	if res.Version != "" {
-		pg = " (PostgreSQL " + res.Version + ")"
+		pg = " (" + d.EngineName() + " " + res.Version + ")"
 	}
 	fmt.Printf("Saved %s: %s%s.\n", name, v.describe(), pg)
 	fmt.Printf("The connection string is in %s, readable only by you.\n", res.File)

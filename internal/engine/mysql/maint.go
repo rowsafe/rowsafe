@@ -99,7 +99,11 @@ func (s *server) kill(ctx context.Context, db *sql.DB, p protocol.MaintenancePar
 	if _, err := db.ExecContext(ctx, stmt, p.PID); err != nil {
 		var me *mysqldriver.MySQLError
 		if errors.As(err, &me) && me.Number == 1095 {
-			return fmt.Errorf("session %d belongs to an administrator account (%s): Rowsafe's account may not end it; end it yourself if needed", p.PID, user)
+			who := "Rowsafe's account"
+			if s.direct != nil {
+				who = fmt.Sprintf("this connection's account (%s)", s.direct.User)
+			}
+			return fmt.Errorf("session %d belongs to an administrator account (%s): %s may not end it; end it yourself if needed", p.PID, user, who)
 		}
 		return fmt.Errorf("%s: %w", strings.Replace(stmt, "?", fmt.Sprint(p.PID), 1), err)
 	}
@@ -134,6 +138,10 @@ func (s *server) tableAction(ctx context.Context, db *sql.DB, p protocol.Mainten
 		}
 		if verb == "OPTIMIZE TABLE" {
 			free, err := freeBytes(datadir)
+			if err != nil && s.direct != nil {
+				return fmt.Errorf("Rowsafe can't see the free disk of %s's data directory from here, and rebuilding %s.%s needs room for a copy of it: check the disk has %s free, then run OPTIMIZE TABLE yourself",
+					s.flavor.display(), schema, table, humanBytes(info.Size*2+1<<30))
+			}
 			if err == nil && free < info.Size*2+1<<30 {
 				return fmt.Errorf("not enough free disk to rebuild %s.%s (%s): about %s needed, %s free", schema, table,
 					humanBytes(info.Size), humanBytes(info.Size*2+1<<30), humanBytes(free))

@@ -1,7 +1,8 @@
-// Package local is Rowsafe on a PostgreSQL database it reaches directly,
-// with a connection string: no agent, no account, no control plane. The
-// CLI (rowsafe pulse postgres://...) and the local MCP server (rowsafe mcp
-// postgres://...) use it for Pulse (health score, findings and fixes),
+// Package local is Rowsafe on a database it reaches directly, with a
+// connection string: no agent, no account, no control plane. PostgreSQL
+// (postgres://), and MySQL and MariaDB (mysql://, mariadb://: mysql.go).
+// The CLI (rowsafe pulse postgres://...) and the local MCP server (rowsafe
+// mcp postgres://...) use it for Pulse (health score, findings and fixes),
 // tables and indexes, top queries, live activity and settings.
 //
 // Reads are read-only and bounded (statement and lock timeouts). Changes
@@ -23,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/rowsafe/rowsafe/collect"
@@ -32,16 +34,24 @@ import (
 	"github.com/rowsafe/rowsafe/tune"
 )
 
-// IsConnString reports whether s is a PostgreSQL connection URL
-// (postgres:// or postgresql://).
+// IsConnString reports whether s is a connection URL Rowsafe reads:
+// postgres:// or postgresql://, mysql:// or mariadb://.
 func IsConnString(s string) bool {
+	if isMySQLURL(s) {
+		return true
+	}
 	s = strings.ToLower(strings.TrimSpace(s))
 	return strings.HasPrefix(s, "postgres://") || strings.HasPrefix(s, "postgresql://")
 }
 
-// DB is a PostgreSQL database reached through a connection string.
+// DB is a database reached through a connection string.
 type DB struct {
 	conn *pgx.ConnConfig
+	// my is a MySQL or MariaDB server's instead (mysql.go), at myHost and
+	// myPort; engine is which, once read.
+	my             *mysqldriver.Config
+	myHost, myPort string
+	engine         string
 	// Ref is how commands name this database: the connection string
 	// without its password, or "" when the commands find it by themselves
 	// (DATABASE_URL).
@@ -58,11 +68,15 @@ type DB struct {
 }
 
 // Open parses a connection string. Like psql, it also reads PGPASSWORD,
-// ~/.pgpass and the other PG* variables for what the string leaves out.
+// ~/.pgpass and the other PG* variables for what the string leaves out
+// (MySQL: MYSQL_PWD).
 func Open(connString string) (*DB, error) {
 	connString = strings.TrimSpace(connString)
 	if !IsConnString(connString) {
-		return nil, errors.New("expected a connection string such as postgres://user@host:5432/dbname")
+		return nil, errors.New("expected a connection string such as postgres://user@host:5432/dbname or mysql://user@host:3306/dbname")
+	}
+	if isMySQLURL(connString) {
+		return openMySQL(connString)
 	}
 	cfg, err := pgx.ParseConfig(connString)
 	if err != nil {
@@ -100,8 +114,31 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// Engine is protocol.EnginePostgreSQL, EngineMySQL or EngineMariaDB (for
+// mysql://, MySQL until a reading says MariaDB; mariadb:// says it first).
+func (d *DB) Engine() string {
+	switch {
+	case d.my == nil:
+		return protocol.EnginePostgreSQL
+	case d.engine != "":
+		return d.engine
+	case strings.HasPrefix(strings.ToLower(d.Ref), "mariadb://"):
+		return protocol.EngineMariaDB
+	}
+	return protocol.EngineMySQL
+}
+
+// EngineName is the engine for people: PostgreSQL, MySQL, MariaDB.
+func (d *DB) EngineName() string { return protocol.EngineDisplayName(d.Engine()) }
+
 // Name is the database's name (its user's when the string names none).
 func (d *DB) Name() string {
+	if d.my != nil {
+		if d.my.DBName != "" {
+			return d.my.DBName
+		}
+		return d.my.User
+	}
 	if d.conn.Database != "" {
 		return d.conn.Database
 	}
@@ -110,6 +147,12 @@ func (d *DB) Name() string {
 
 // Host is where it runs, for people: host or host:port.
 func (d *DB) Host() string {
+	if d.my != nil {
+		if d.my.Net == "unix" || d.myPort == "3306" {
+			return d.myHost
+		}
+		return net.JoinHostPort(d.myHost, d.myPort)
+	}
 	h := d.conn.Host
 	if strings.HasPrefix(h, "/") {
 		return "localhost"
@@ -124,7 +167,12 @@ func (d *DB) collectTarget() collect.Target   { return collect.Target{Conn: d.co
 func (d *DB) inspectTarget() pginspect.Target { return pginspect.Target{Conn: d.conn} }
 
 // Local reports whether the database runs on this machine.
-func (d *DB) Local() bool { return d.collectTarget().Local() }
+func (d *DB) Local() bool {
+	if d.my != nil {
+		return d.mysqlLocal()
+	}
+	return d.collectTarget().Local()
+}
 
 // Options refine a health evaluation or the settings recommendations.
 type Options struct {
@@ -177,6 +225,9 @@ func (d *DB) hostFacts(s *protocol.SettingsSnapshot, opts Options) {
 // Health reads the database and evaluates it: the score, the findings and
 // their fixes.
 func (d *DB) Health(ctx context.Context, opts Options) (protocol.DatabaseHealth, error) {
+	if d.my != nil {
+		return d.mysqlHealth(ctx, opts)
+	}
 	r, err := d.read(ctx, collect.ReadOptions{Insights: true, Settings: true, QueryText: true}, opts)
 	if err != nil {
 		return protocol.DatabaseHealth{}, err
@@ -202,6 +253,9 @@ func (d *DB) Health(ctx context.Context, opts Options) (protocol.DatabaseHealth,
 // with their own lock and statement timeouts ("" when they can, or when
 // that can't be told: the fix then connects and says).
 func (d *DB) needsSession(ctx context.Context) string {
+	if d.my != nil {
+		return "" // MySQL: the fixes check their session themselves
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.pooler == nil {
@@ -249,6 +303,9 @@ func (d *DB) input(r *collect.Reading, opts Options) pulse.Input {
 // Insights reads tables and indexes: sizes, estimated bloat, unused and
 // duplicate indexes, sequential scans, dead rows and transaction ID age.
 func (d *DB) Insights(ctx context.Context) (*protocol.Insights, error) {
+	if d.my != nil {
+		return d.mysqlInsights(ctx)
+	}
 	ins, err := collect.CollectInsights(ctx, d.collectTarget())
 	if err != nil {
 		return nil, d.connectError(err)
@@ -257,9 +314,12 @@ func (d *DB) Insights(ctx context.Context) (*protocol.Insights, error) {
 	return ins, nil
 }
 
-// Statements reads the top of pg_stat_statements: totals since it was last
-// reset.
+// Statements reads the top of pg_stat_statements (MySQL, MariaDB:
+// performance_schema's statement digests): totals since it was last reset.
 func (d *DB) Statements(ctx context.Context) (*protocol.Statements, error) {
+	if d.my != nil {
+		return d.mysqlStatements(ctx)
+	}
 	r, err := d.read(ctx, collect.ReadOptions{Statements: true, QueryText: true}, Options{})
 	if err != nil {
 		return nil, err
@@ -273,6 +333,9 @@ func (d *DB) Statements(ctx context.Context) (*protocol.Statements, error) {
 // Activity reads the sessions running one query, or idle in a
 // transaction, for over a minute, and who blocks whom.
 func (d *DB) Activity(ctx context.Context) (*protocol.Activity, error) {
+	if d.my != nil {
+		return d.mysqlActivity(ctx)
+	}
 	r, err := d.read(ctx, collect.ReadOptions{QueryText: true}, Options{})
 	if err != nil {
 		return nil, err
@@ -282,6 +345,9 @@ func (d *DB) Activity(ctx context.Context) (*protocol.Activity, error) {
 
 // Settings reads the settings that matter and what would suit the server.
 func (d *DB) Settings(ctx context.Context, opts Options) (protocol.SettingsOverview, error) {
+	if d.my != nil {
+		return d.mysqlSettings(ctx, opts)
+	}
 	snap, err := collect.ReadSettings(ctx, d.collectTarget(), "")
 	if err != nil {
 		return protocol.SettingsOverview{}, d.connectError(err)
@@ -350,6 +416,9 @@ func (d *DB) run(ctx context.Context, fx protocol.FindingFix) (FixResult, error)
 		if err := json.Unmarshal(fx.Params, &p); err != nil {
 			return FixResult{}, err
 		}
+		if d.my != nil {
+			return d.mysqlMaintain(ctx, p)
+		}
 		res, log, err := maintain(ctx, d.inspectTarget(), p)
 		out := FixResult{Log: log}
 		if res != nil {
@@ -367,10 +436,19 @@ func (d *DB) run(ctx context.Context, fx protocol.FindingFix) (FixResult, error)
 	return FixResult{}, fmt.Errorf("%q needs the Rowsafe agent on the server", fx.Label)
 }
 
-// ChangeSettings changes settings with ALTER SYSTEM and a reload (nothing
-// restarts), after checking the values against this server.
+// ChangeSettings changes settings with ALTER SYSTEM and a reload (MySQL:
+// SET PERSIST; nothing restarts), after checking the values against this
+// server. MariaDB's are refused: they live in its configuration file.
 func (d *DB) ChangeSettings(ctx context.Context, p protocol.SettingsParams) (FixResult, error) {
+	if d.my != nil {
+		return d.mysqlChangeSettings(ctx, p)
+	}
 	res, log, err := changeSettings(ctx, d.inspectTarget(), d.collectTarget(), p)
+	return settingsResult(res, log), err
+}
+
+// settingsResult is what a settings change did.
+func settingsResult(res *protocol.SettingsResult, log string) FixResult {
 	out := FixResult{Log: log}
 	if res != nil {
 		out.Summary = res.Summary
@@ -382,5 +460,5 @@ func (d *DB) ChangeSettings(ctx context.Context, p protocol.SettingsParams) (Fix
 			out.Details = append(out.Details, line)
 		}
 	}
-	return out, err
+	return out
 }

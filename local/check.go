@@ -20,6 +20,9 @@ type Server struct {
 func (d *DB) Check(ctx context.Context) (Server, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
+	if d.my != nil {
+		return d.mysqlCheck(ctx)
+	}
 	conn, err := pgx.ConnectConfig(ctx, d.conn.Copy())
 	if err != nil {
 		return Server{}, d.connectError(err)

@@ -415,5 +415,8 @@ func (e *evaluator) slotFixes(minBytes int64) []protocol.FindingFix {
 // spaceFixes are the fixes that give disk space back: abandoned
 // replication slots and the largest unused indexes.
 func (e *evaluator) spaceFixes() []protocol.FindingFix {
+	if e.mysqlFamily() {
+		return nil // OPTIMIZE TABLE, with its own finding (mysql.go)
+	}
 	return append(e.slotFixes(64<<20), e.unusedIndexFixes(maxDiskIndexFixes)...)
 }

@@ -84,7 +84,7 @@ func TestSavedAddUseForget(t *testing.T) {
 	// Names, and connection strings where a name goes.
 	for _, args := range [][]string{
 		{"add", "postgres://app@db/shop"}, {"add", "bad name", shopURL}, {"add", "set", shopURL},
-		{"add", "x", "mysql://app@db/shop", "--no-check"}, {"add"},
+		{"add", "x", "redis://app@db/0", "--no-check"}, {"add"},
 	} {
 		if _, err := run(t, args...); err == nil {
 			t.Errorf("rowsafe %s: no error", strings.Join(args, " "))

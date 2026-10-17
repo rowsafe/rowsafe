@@ -20,6 +20,8 @@ import (
 	"strings"
 	"time"
 
+	mysqldriver "github.com/go-sql-driver/mysql"
+
 	"github.com/rowsafe/rowsafe/internal/agent"
 	"github.com/rowsafe/rowsafe/protocol"
 )
@@ -243,6 +245,10 @@ type server struct {
 	env    agent.EngineEnv
 	db     protocol.DatabaseSpec
 	cfg    config
+	// direct: reached with a connection string, without the agent
+	// (direct.go); local: that server runs on this machine.
+	direct *mysqldriver.Config
+	local  bool
 }
 
 // nilable keeps a typed nil pointer out of the task result.
