@@ -31,6 +31,11 @@ proprietary (api.rowsafe.sh, app.rowsafe.sh).
   (Pulse fixes and settings changes, plain SQL; the agent's maintenance and settings tasks run it
   too) and `rowsafe explain` reads indexes with `internal/indexadvisor`. MySQL/MariaDB without an
   account and running a migration on a copy (`local/*_windows.go`) still need macOS or Linux.
+  A server without an account is reachable from another computer over plain SSH:
+  `rowsafe add NAME ssh://USER@HOST` (cmd/rowsafe/ssh_saved.go) saves only the address; commands
+  that go to a control plane then reach the agent's socket through `client.NewSSH` (each HTTP
+  connection is `ssh HOST sudo -n rowsafe-agent control-bridge`, internal/localcp/bridge.go),
+  and pulse/fix/... run on the server with its rowsafe (`ssh -t`). `make test-no-account-ssh`.
   `rowsafe init` offers a Rowsafe section in AGENTS.md / CLAUDE.md (`agentsmd.go`; append-only).
   Rules for scripts and AI agents (`rowsafe help agents`, checked over every command by
   `TestAgentRules`): every command takes `--json` (stdout only JSON, `jsonout.go`); exit codes

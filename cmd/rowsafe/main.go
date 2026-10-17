@@ -32,6 +32,12 @@ Start here: save a database once, then use it by name ("rowsafe help local")
                                              CONN is postgres://USER:PASSWORD@HOST/DB; without it: piped in, or this
                                              project's DATABASE_URL (asks first). On the database's own server
                                              (sudo), also offers to turn on backups, Marks, Proof and restores
+  rowsafe add NAME ssh://USER@HOST[:PORT] [--database DB] [--no-check] [--yes] [--json]
+                                             a server set up with Rowsafe (no account), from this computer over your own
+                                             SSH (keys, ~/.ssh/config; sudo when USER isn't root). Only the address is
+                                             saved here. Then status, mark, backups, restore, rewind, proof, alerts,
+                                             channels and mcp take NAME and run on that server's agent; pulse, fix and
+                                             the other direct ones run there with its rowsafe. Also --ssh USER@HOST
   rowsafe use NAME [--json]                  make NAME this project's database (.rowsafe.json; never the password)
   rowsafe databases [--json]                 databases saved on this computer (also rowsafe ls when not logged in)
   rowsafe forget NAME [--yes]                delete a saved database's connection string
@@ -354,10 +360,12 @@ Pulse: health, monitoring and alerts
                                              them; asks first. Nothing restarts: see rowsafe restart
 
 Guard: the safety net for AI agents
-  rowsafe mcp [--allow-restore-points | --allow-writes]
+  rowsafe mcp [NAME] [--allow-restore-points | --allow-writes]
                                              MCP server on stdio for AI assistants (https://rowsafe.sh/docs/reference/mcp); read-only
                                              unless restore points or all write tools are allowed (changes to
-                                             production run as the signed-in person, with their rights)
+                                             production run as the signed-in person, with their rights). NAME: a
+                                             server saved over SSH (rowsafe add NAME ssh://...): its Marks, backups,
+                                             restores and alerts
   rowsafe guard                              Claude Code PreToolUse hook: before a destructive database
                                              command, create a restore point (https://rowsafe.sh/docs/guides/ai-agents)
   rowsafe guard --check COMMAND              tell whether COMMAND looks destructive (exit 0 yes, 1 no)
@@ -624,6 +632,13 @@ func dispatch(ctx context.Context, args []string) error {
 	cfg, err := loadConfig()
 	// This server's agent (server_saved.go): saved names reach its databases.
 	onServer = err == nil && cfg.APIKey == "local"
+	// A server saved over SSH (ssh_saved.go): its agent, through ssh.
+	if s, args, explicit, ok, serr := sshRoute(cmd, rest, err == nil && !onServer); ok {
+		if serr != nil {
+			return serr
+		}
+		return runOverSSH(ctx, s, cmd, args, explicit, cfg)
+	}
 	// Directly on a database: a connection string, a saved name, or
 	// $DATABASE_URL with no saved login (local.go).
 	if run, ok := localCommands[cmd]; ok {
@@ -647,7 +662,12 @@ func dispatch(ctx context.Context, args []string) error {
 		}
 		return err
 	}
-	c := client.New(cfg.URL, cfg.APIKey)
+	return runCommand(ctx, client.New(cfg.URL, cfg.APIKey), cfg, cmd, rest)
+}
+
+// runCommand runs a command that goes to a control plane: the account's,
+// this server's agent, or a saved server's over SSH.
+func runCommand(ctx context.Context, c *client.Client, cfg config, cmd string, rest []string) error {
 	switch cmd {
 	// Rowsafe Cloud (cloud.go), and connecting apps and people (env.go, connect.go)
 	case "cloud":

@@ -49,6 +49,13 @@ func TestLocalCluster(t *testing.T) {
 // agent that runs every task it is given.
 func localServer(t *testing.T) *client.Client {
 	t.Helper()
+	c, _ := localServerSock(t)
+	return c
+}
+
+// localServerSock is localServer, with its socket's path.
+func localServerSock(t *testing.T) (*client.Client, string) {
+	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("the agent's own control plane runs on a Linux server")
 	}
@@ -91,7 +98,7 @@ func localServer(t *testing.T) *client.Client {
 	t.Setenv("ROWSAFE_API_KEY", "")
 	t.Setenv("ROWSAFE_URL", "unix://"+sock)
 	t.Setenv("DATABASE_URL", "")
-	return client.New("unix://"+sock, "local")
+	return client.New("unix://"+sock, "local"), sock
 }
 
 // fakeLocalAgent claims tasks on the socket and finishes each as the agent
@@ -134,6 +141,10 @@ func fakeLocalAgent(ctx context.Context, sock string) {
 			result = protocol.BackupResult{Label: "20261017-000000F", Type: protocol.BackupFull, StartedAt: now.Add(-time.Second), StoppedAt: now}
 		case protocol.TaskDrill:
 			result = protocol.DrillResult{Passed: true}
+		case protocol.TaskRestorePoint:
+			var p protocol.RestorePointParams
+			_ = json.Unmarshal(task.Params, &p)
+			result = protocol.RestorePointResult{Name: p.Name, LSN: "0/4000000", Archived: true, CreatedAt: now, ArchivedAt: &now}
 		case protocol.TaskRewindCopy:
 			var p protocol.RewindCopyParams
 			_ = json.Unmarshal(task.Params, &p)

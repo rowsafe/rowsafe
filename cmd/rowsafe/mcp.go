@@ -40,7 +40,11 @@ func mcpServe(ctx context.Context, c *client.Client, args []string) error {
 	case *allowRP:
 		mode = "read-only + restore point"
 	}
-	fmt.Fprintf(os.Stderr, "rowsafe mcp: serving %s tools for %s on stdio\n", mode, c.BaseURL)
+	where := c.BaseURL
+	if sshVia != nil {
+		where = sshVia.SSH.String() + " over SSH"
+	}
+	fmt.Fprintf(os.Stderr, "rowsafe mcp: serving %s tools for %s on stdio\n", mode, where)
 	s := mcp.NewServer(c, mcp.Options{AllowWrites: *allowWrites, AllowRestorePoints: *allowRP, Version: version})
 	if err := s.Run(ctx, &sdk.StdioTransport{}); err != nil && ctx.Err() == nil {
 		return err
@@ -119,10 +123,20 @@ func guard(ctx context.Context, args []string) error {
 	}
 	noDatabase := "no Rowsafe database is configured for this project: set ROWSAFE_DATABASE or add .rowsafe.json with {\"database\": \"NAME\"}."
 	cfg, err := loadConfig()
+	// A server saved over SSH (ssh_saved.go): the restore point is saved
+	// there, through ssh (never asking: the hook has no terminal).
+	if s := sshProjectServer(db, err == nil && cfg.APIKey != "local"); s != nil {
+		sshVia = s
+		c := client.NewSSH(*s.SSH, client.SSHOptions{})
+		defer c.HTTP.CloseIdleConnections()
+		ctx, cancel := context.WithTimeout(ctx, 100*time.Second)
+		defer cancel()
+		return guardRestorePoint(ctx, c, reason, s.serverDB(), projPath, required, fail)
+	}
 	// On a server whose agent runs without an account, the CLI talks to
 	// its local control plane: restore points work the same.
-	_, onServer := protocol.LocalSocket(cfg.URL)
-	onServer = onServer && err == nil
+	_, here := protocol.LocalSocket(cfg.URL)
+	onServer = here && err == nil
 	// Without an account (or for a database the account doesn't have):
 	// the project's database reached directly, with no restore point.
 	if d, src := guardLocalDB(err == nil, onServer, db); d != nil {
@@ -147,7 +161,12 @@ func guard(ctx context.Context, args []string) error {
 		}
 		db, projPath = name, "this server's Rowsafe agent"
 	}
+	return guardRestorePoint(ctx, c, reason, db, projPath, required, fail)
+}
 
+// guardRestorePoint saves a restore point on db before the command, waits
+// until the backup repository has it, and tells the assistant.
+func guardRestorePoint(ctx context.Context, c *client.Client, reason, db, projPath string, required bool, fail func(string) error) error {
 	if required {
 		p, err := c.Protection(ctx, db)
 		if err != nil {
@@ -191,8 +210,13 @@ func guard(ctx context.Context, args []string) error {
 		src = projPath
 	}
 	undo := fmt.Sprintf("they can Rewind %s to restore point %q in the Rowsafe dashboard (or `rowsafe rewind copy %s --mark %s`, then bring the rows back)", db, name, db, name)
-	if onServer {
-		undo = fmt.Sprintf("restore point %q on this server holds %s as it was; going back to it takes Rewind, which needs a Rowsafe account for now (`sudo rowsafe login` connects this server)", name, db)
+	switch {
+	case sshVia != nil:
+		undo = fmt.Sprintf("restore point %q on %s holds %s as it was: `rowsafe restore %s --to %s` makes a copy as it was then, next to production, "+
+			"and `rowsafe rewind rows %s TABLE` brings deleted rows back from it (both ask the user first)", name, sshVia.SSH.Host, db, sshVia.Name, name, sshVia.Name)
+	case onServer:
+		undo = fmt.Sprintf("restore point %q on this server holds %s as it was: `sudo rowsafe restore %s --to %s` makes a copy as it was then, next to production, "+
+			"and `sudo rowsafe rewind rows %s TABLE` brings deleted rows back from it (both ask the user first)", name, db, db, name, db)
 	}
 	return hookReply(fmt.Sprintf("Rowsafe: restore point %s created on %s (LSN %s) before: %s", name, db, lsn, reason),
 		fmt.Sprintf("Rowsafe created restore point %q on database %s (from %s), confirmed in the backup repository, right before this command (%s). "+

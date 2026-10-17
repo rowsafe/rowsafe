@@ -50,6 +50,26 @@ restore to any second, all on that server:
                                      rewinding the whole database in place), keeping its backups,
                                      Proofs and Marks
 
+From your computer (or an AI agent on it), over SSH: nothing listens on
+the network and no account is needed. Your own ssh, keys and ~/.ssh/config;
+sudo on the server when you don't log in as root, without a password
+(https://rowsafe.sh/docs/guides/no-account-server#from-your-computer-over-ssh):
+
+  rowsafe add shop ssh://root@db1.example.com
+                                     saves the server's database shop by name (only the address is
+                                     saved here; the connection string stays on the server).
+                                     --database DB when it has another name there
+  rowsafe status shop | mark shop LABEL | backups shop | marks shop | proofs shop
+  rowsafe restore shop --to "10m ago" | rewind compare shop | rewind rows shop TABLE...
+  rowsafe alerts shop | channels list shop | channels add shop --type slack ...
+                                     the same as sudo rowsafe ... on the server, through its agent
+  rowsafe pulse shop | fix shop | insights shop | top shop | settings shop | tune shop
+                                     run on the server by its rowsafe (with the name saved there)
+  rowsafe mcp shop --allow-restore-points
+                                     for Claude Code or Codex: the server's Marks, backups, restores
+                                     and alerts; with rowsafe use shop, the Guard hook saves a Mark
+                                     there before a destructive command
+
 From anywhere, on a PostgreSQL, MySQL or MariaDB database this computer
 reaches (also managed ones): save it once, then use it by name:
 
