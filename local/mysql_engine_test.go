@@ -57,16 +57,18 @@ func dockerMySQL(t *testing.T, image string) string {
 	if err := exec.Command("docker", "info").Run(); err != nil {
 		t.Skip("no Docker")
 	}
-	out, err := exec.Command("docker", "run", "-d", "--rm", "-p", "127.0.0.1::3306",
+	out, err := exec.Command("docker", "run", "-d", "-p", "127.0.0.1::3306",
 		"-e", "MYSQL_ROOT_PASSWORD=rowsafe-test", "-e", "MARIADB_ROOT_PASSWORD=rowsafe-test", image).CombinedOutput()
 	if err != nil {
 		t.Fatalf("docker run %s: %v\n%s", image, err, out)
 	}
 	id := strings.TrimSpace(string(out))
 	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", id).Run() })
-	out, err = exec.Command("docker", "port", id, "3306/tcp").Output()
+	out, err = exec.Command("docker", "port", id, "3306/tcp").CombinedOutput()
 	if err != nil {
-		t.Fatal(err)
+		logs, _ := exec.Command("docker", "logs", "--tail", "30", id).CombinedOutput()
+		state, _ := exec.Command("docker", "inspect", "-f", "{{.State.Status}} exit {{.State.ExitCode}} {{.State.Error}}", id).CombinedOutput()
+		t.Fatalf("docker port %s: %v %s\nstate: %s\n%s", image, err, out, state, logs)
 	}
 	addr := strings.TrimSpace(strings.Split(string(out), "\n")[0])
 	dsn := "root:rowsafe-test@tcp(" + addr + ")/?parseTime=true"
