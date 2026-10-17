@@ -40,6 +40,7 @@ COPY masking ./masking
 COPY pglog ./pglog
 COPY preview ./preview
 COPY tune ./tune
+COPY pulse ./pulse
 COPY pgprobe ./pgprobe
 ARG VERSION=dev
 ARG TARGETOS=linux
