@@ -21,6 +21,7 @@
 #   make test-mysql            the MySQL/MariaDB engine against real MySQL 8.4 and MariaDB 11.4 (Docker)
 #   make test-upgrade          real PostgreSQL updates and upgrades (16 -> 18, undo) on a systemd Debian container (Docker)
 #   make test-action           the GitHub Action (integrations/github-action) against a mock API
+#   make openai-plugin-zip     the OpenAI plugin directory ZIP (integrations/codex without the hook) in dist/
 #   make mcp-registry VERSION=1.2.3   server.json to the MCP Registry (release.yml does it for each tag)
 #   make dist VERSION=1.2.3 RELEASE_PUBLIC_KEY=...    reproducible release binaries in dist/1.2.3/
 #                              (the CLI for Linux, macOS and Windows; the agent for Linux)
@@ -45,7 +46,7 @@ AGENT_LDFLAGS := -s -w -buildid= -X $(PKG)/internal/agent.Version=$(VERSION) -X 
 MAIN_LDFLAGS := -s -w -buildid= -X main.version=$(VERSION)
 GOBUILD := CGO_ENABLED=0 GOFLAGS=-mod=readonly $(GO) build -trimpath -buildvcs=false
 
-.PHONY: all build test lint check-installer test-installer test-cli-installer test-npm test-installer-cloud test-mongodb test-clickhouse test-redis test-qdrant check-qdrant-pins test-sqlite test-rewind test-secondcopy test-sftp test-mysql test-upgrade test-pooling test-no-account-pooler test-permissions test-action dist release check-release-env clean test-opensearch mcp-registry
+.PHONY: all build test lint check-installer test-installer test-cli-installer test-npm test-installer-cloud test-mongodb test-clickhouse test-redis test-qdrant check-qdrant-pins test-sqlite test-rewind test-secondcopy test-sftp test-mysql test-upgrade test-pooling test-no-account-pooler test-permissions test-action openai-plugin-zip dist release check-release-env clean test-opensearch mcp-registry
 
 all: lint test build
 
@@ -188,6 +189,9 @@ test-action:
 
 # The agent ships for linux/amd64 and linux/arm64 (the names the release
 # manifest expects); the CLI and the release tool for Linux and macOS.
+openai-plugin-zip:
+	scripts/openai-plugin-zip.sh
+
 dist:
 	@rm -rf $(DIST) && mkdir -p $(DIST)
 	@for arch in amd64 arm64; do \

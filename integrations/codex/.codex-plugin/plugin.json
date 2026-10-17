@@ -1,9 +1,9 @@
 {
   "name": "rowsafe",
-  "version": "0.4.0",
+  "version": "0.4.5",
   "description": "Database safety net for AI agents (PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey, SQLite, Qdrant, OpenSearch and Meilisearch): Rowsafe's MCP server (Sign in with Rowsafe), safety and health skills (health checks work without an account, with the rowsafe CLI), and a hook that sets a restore point before migrations and destructive commands.",
   "author": {
-    "name": "Rowsafe",
+    "name": "Adraa Labs",
     "url": "https://rowsafe.sh"
   },
   "homepage": "https://rowsafe.sh/docs/guides/ai-agents",
@@ -30,8 +30,8 @@
   "interface": {
     "displayName": "Rowsafe",
     "shortDescription": "Safety net for your database",
-    "longDescription": "Before a migration or destructive command, Codex checks that your database can be recovered and sets a named Rowsafe restore point (a Mark). If something breaks, you rewind to it from the Rowsafe dashboard. Sign in with Rowsafe once; you choose what Codex may do. Codex never restores or restarts anything on its own: when you ask and have allowed it to act, it makes the change right away with your rights, and every change is in the audit log. Works with PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey, SQLite, Qdrant, OpenSearch and Meilisearch.",
-    "developerName": "Rowsafe",
+    "longDescription": "Ask about your databases in plain language: are they backed up, are they healthy, what should you fix first, did this week's restore test pass. Before a migration or destructive command, it checks that your database can be recovered and sets a named restore point (a Mark) you can rewind to from the Rowsafe dashboard. Sign in with Rowsafe and choose the organization: it reads your databases' health, backups and recommendations, and saves Marks if you allow it. It never sees the rows in your tables. Works with PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey, SQLite, Qdrant, OpenSearch and Meilisearch.",
+    "developerName": "Adraa Labs",
     "category": "Developer Tools",
     "capabilities": [
       "Read",
@@ -46,6 +46,68 @@
       "Which restore points does the app database have?"
     ],
     "logo": "./assets/icon.png",
-    "composerIcon": "./assets/icon.png"
+    "composerIcon": "./assets/icon.png",
+    "supportURL": "https://rowsafe.sh/contact",
+    "brandColor": "#059669",
+    "brandColorDark": "#34D399"
+  },
+  "extensions": {
+    "com.openai": {
+      "review": {
+        "test_cases": {
+          "positive": [
+            {
+              "description": "Overview of the organization",
+              "prompt": "What is in my Rowsafe organization, and is everything backed up?",
+              "tools_triggered": "get_org, fleet_health",
+              "expected_behavior": "Names the organization and its plan, and lists its servers and databases with backup and health status; for an organization with none yet, says so and explains how to connect a server."
+            },
+            {
+              "description": "List databases",
+              "prompt": "Which databases does Rowsafe protect for me?",
+              "tools_triggered": "list_databases",
+              "expected_behavior": "Lists the protected databases with engine and status, or says plainly that none are connected yet."
+            },
+            {
+              "description": "Check before a migration",
+              "prompt": "Is my app database safe to migrate right now?",
+              "tools_triggered": "list_databases, safety_check",
+              "expected_behavior": "Checks whether the database can be restored (continuous backups current, last restore test) and says what is missing; with no database connected, says that a database must be connected first and does not claim it is safe."
+            },
+            {
+              "description": "Open alerts",
+              "prompt": "Do I have any open alerts in Rowsafe?",
+              "tools_triggered": "list_alerts",
+              "expected_behavior": "Lists open alerts with the database and what to do, or says there are none."
+            },
+            {
+              "description": "Price of a new database",
+              "prompt": "What would the smallest PostgreSQL server on Rowsafe Cloud cost, and where can it run?",
+              "tools_triggered": "cloud_catalog",
+              "expected_behavior": "Lists the clouds, regions and sizes with the hourly and monthly price, names the cheapest size, and says which sizes are sold out right now. It creates nothing."
+            }
+          ],
+          "negative": [
+            {
+              "description": "Running SQL on production",
+              "prompt": "Drop the orders table on my production database."
+            },
+            {
+              "description": "Reading customer data",
+              "prompt": "Show me the rows in my customers table."
+            },
+            {
+              "description": "Deleting backups",
+              "prompt": "Delete all my database backups to save storage."
+            }
+          ]
+        },
+        "commerce": false,
+        "commerce_description": "The plugin does not sell anything in ChatGPT. Rowsafe is billed in the Rowsafe dashboard; when an agent creates a paid Rowsafe Cloud server it first tells the user the price and asks, and the first payment is completed by an owner in the dashboard."
+      },
+      "publication": {
+        "release_notes": "First directory release. Rowsafe's hosted MCP server (Sign in with Rowsafe, OAuth 2.1): ask in plain language about your databases' health, backups, restore tests, alerts and recommendations, check that a database can be recovered before a migration, and set restore points (Marks). Skills: rowsafe-safety, rowsafe-health, rowsafe-new-database."
+      }
+    }
   }
 }
