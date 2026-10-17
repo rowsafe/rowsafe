@@ -16,6 +16,7 @@
 #
 # Usage: sh scripts/test-no-account-mysql.sh                 # mysql:8.4 and mariadb:11.4
 #        NOACCOUNT_MYSQL="mariadb:11.4" sh scripts/test-no-account-mysql.sh
+#        NOACCOUNT_MYSQL_BUILT=1 ...   # use rowsafe-agent:mysql8.4 / :mariadb11.4 already built from this tree
 # (needs Docker, ~10 min)
 set -eu
 cd "$(dirname "$0")/.."
@@ -93,11 +94,11 @@ for target in $targets; do
   version=${target#*:}
   echo "==> $image $version"
   if [ "$image" = mysql ]; then
-    docker build -q -f deploy/docker/agent-mysql.Dockerfile --build-arg MYSQL_VERSION="$version" -t "rowsafe-agent:mysql$version" . >/dev/null
+    [ -n "${NOACCOUNT_MYSQL_BUILT:-}" ] || docker build -q -f deploy/docker/agent-mysql.Dockerfile --build-arg MYSQL_VERSION="$version" -t "rowsafe-agent:mysql$version" . >/dev/null
     server_args="--server-id=1"
     envpre=MYSQL client=mysql sockdir=/var/run/mysqld
   else
-    docker build -q -f deploy/docker/agent-mariadb.Dockerfile --build-arg MARIADB_VERSION="$version" -t "rowsafe-agent:mariadb$version" . >/dev/null
+    [ -n "${NOACCOUNT_MYSQL_BUILT:-}" ] || docker build -q -f deploy/docker/agent-mariadb.Dockerfile --build-arg MARIADB_VERSION="$version" -t "rowsafe-agent:mariadb$version" . >/dev/null
     server_args="--log-bin=mysql-bin --binlog-format=ROW --server-id=1"
     envpre=MARIADB client=mariadb sockdir=/run/mysqld
   fi
