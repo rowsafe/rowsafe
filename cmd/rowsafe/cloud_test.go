@@ -536,7 +536,7 @@ func TestCloudPassphraseAndDelete(t *testing.T) {
 	}
 	data, _ := os.ReadFile(file)
 	fi, _ := os.Stat(file)
-	if !strings.Contains(string(data), "passphrase: correct-horse-battery") || fi.Mode().Perm() != 0o600 {
+	if !strings.Contains(string(data), "passphrase: correct-horse-battery") || !hasPerm(fi, 0o600) {
 		t.Errorf("file %v:\n%s", fi.Mode(), data)
 	}
 	if _, err := run(t, "cloud", "passphrase", "shop", "--file", file); err == nil || !strings.Contains(err.Error(), "already exists") {
@@ -671,7 +671,7 @@ func TestEnv(t *testing.T) {
 	}
 	data, _ := os.ReadFile(".env")
 	fi, _ := os.Stat(".env")
-	if !strings.HasPrefix(string(data), "# app\nexport SECRET_KEY=abc\nPORT=3000\nDATABASE_URL=") || fi.Mode().Perm() != 0o640 {
+	if !strings.HasPrefix(string(data), "# app\nexport SECRET_KEY=abc\nPORT=3000\nDATABASE_URL=") || !hasPerm(fi, 0o640) {
 		t.Errorf(".env (%v):\n%s", fi.Mode(), data)
 	}
 	if gi, _ := os.ReadFile(".gitignore"); string(gi) != ".env\n" || !strings.Contains(out, "Added .env to .gitignore") {
@@ -747,7 +747,7 @@ func TestEnvFile(t *testing.T) {
 	if err := writeEnvKey(p, "DATABASE_URL", "postgresql://a:b@h:5432/d?sslmode=require"); err != nil {
 		t.Fatal(err)
 	}
-	if fi, _ := os.Stat(p); fi.Mode().Perm() != 0o600 {
+	if fi, _ := os.Stat(p); !hasPerm(fi, 0o600) {
 		t.Errorf("new file mode %v", fi.Mode())
 	}
 	if err := os.WriteFile(p, []byte("A=1\nexport DATABASE_URL=old\n# DATABASE_URL=comment\nB=\"x y\"\n"), 0o600); err != nil {
@@ -793,6 +793,7 @@ func TestConnect(t *testing.T) {
 	oldBundles := caBundles
 	t.Cleanup(func() { caBundles = oldBundles })
 	caBundles = []string{bundle}
+	inURL := strings.NewReplacer(":", "%3A", `\`, "%5C").Replace(bundle) // a Windows path, escaped
 
 	// This computer isn't allowed yet: without a terminal, it says how.
 	if _, err := run(t, "connect", "shop"); err == nil || !strings.Contains(err.Error(), "rowsafe cloud allow shop") || len(f.params) != 0 {
@@ -816,7 +817,7 @@ func TestConnect(t *testing.T) {
 		t.Errorf("drop %+v", drop)
 	}
 	r := runs[0]
-	if want := "postgresql://" + create.User + "@x7kq2mfa3pzd.cloud.rowsafe.sh:5432/shop?sslmode=verify-full&sslrootcert=" + bundle; !slices.Equal(r.args, []string{want, "-c", "select 1"}) {
+	if want := "postgresql://" + create.User + "@x7kq2mfa3pzd.cloud.rowsafe.sh:5432/shop?sslmode=verify-full&sslrootcert=" + inURL; !slices.Equal(r.args, []string{want, "-c", "select 1"}) {
 		t.Errorf("psql args %q, want %q", r.args, want)
 	}
 	if !slices.Contains(r.env, "PGPASSWORD=SealedPw42") || strings.Contains(strings.Join(r.args, " "), "SealedPw42") {
@@ -831,7 +832,7 @@ func TestConnect(t *testing.T) {
 	if _, err := run(t, "connect", "--on", "shop", "postgres", "--user", "reporting"); err != nil || len(f.params) != 2 {
 		t.Fatalf("--user: %v %+v", err, f.params)
 	}
-	if got := runs[1].args[0]; got != "postgresql://reporting@x7kq2mfa3pzd.cloud.rowsafe.sh:5432/postgres?sslmode=verify-full&sslrootcert="+bundle || slices.ContainsFunc(runs[1].env, func(e string) bool { return strings.HasPrefix(e, "PGPASSWORD") }) {
+	if got := runs[1].args[0]; got != "postgresql://reporting@x7kq2mfa3pzd.cloud.rowsafe.sh:5432/postgres?sslmode=verify-full&sslrootcert="+inURL || slices.ContainsFunc(runs[1].env, func(e string) bool { return strings.HasPrefix(e, "PGPASSWORD") }) {
 		t.Errorf("--user run %v", runs[1])
 	}
 	// Several databases: which one?
