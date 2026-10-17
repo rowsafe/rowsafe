@@ -35,7 +35,7 @@ proprietary (api.rowsafe.sh, app.rowsafe.sh).
   (`errors.go`: `explain`, `newUsageError`).
 - `integrations/npm`: the `rowsafe` npm package (`npx rowsafe`): no install script; on first run it
   downloads the release binary, checks it against the `SHA256SUMS` the release workflow puts in
-  the package, and caches it. Published by release.yml's `npm` job when `NPM_TOKEN` is set.
+  the package, and caches it. Published by release.yml's `npm` job through npm trusted publishing (OIDC, no token) when the repository variable `NPM_PUBLISH` is `true`.
   `make test-npm` (fake release on 127.0.0.1).
 - `mcp/`: the MCP server (`rowsafe mcp`, also served remotely by the control plane). Read-only
   unless `--allow-restore-points` / `--allow-writes` (remote: OAuth scopes `rowsafe:marks` /
