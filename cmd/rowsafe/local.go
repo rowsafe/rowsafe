@@ -352,7 +352,7 @@ func localFix(ctx context.Context, l *localDB, args []string) error {
 		return errors.New("not applied: pass --yes to apply a fix without a terminal")
 	}
 	if fx.Confirm != "" {
-		fmt.Printf("\n%s %s\n", yellow("Warning:"), fx.Confirm)
+		fmt.Println("\n" + wrap(yellow("Warning:")+" "+fx.Confirm, "", wrapWidth()))
 		if !*yes {
 			fmt.Printf("Type the database name (%s) to go ahead: ", h.Database)
 			if readLine() != h.Database {
@@ -368,11 +368,11 @@ func localFix(ctx context.Context, l *localDB, args []string) error {
 	fmt.Fprintln(os.Stderr, "Running...")
 	res, err := l.Apply(ctx, fx)
 	if err != nil {
-		fmt.Printf("%s %v\n", red("The fix didn't work:"), err)
+		fmt.Println(wrap(red("The fix didn't work:")+" "+err.Error(), "", wrapWidth()))
 		printDetails(res.Details)
 		return exitError(1)
 	}
-	fmt.Println(green(orText(res.Summary, "Done.")))
+	fmt.Println(wrap(green(orText(res.Summary, "Done.")), "", wrapWidth()))
 	printDetails(res.Details)
 	return nil
 }
