@@ -42,6 +42,12 @@ type Options struct {
 	// never make a safe copy's password: copies start without one, and a
 	// person sets it in the dashboard.
 	Remote bool
+	// OAuth: the credential is an access token from "Sign in with Rowsafe".
+	// The control plane never lets one read the audit log, the notification
+	// channels or the weekly report (people's emails, webhook URLs, report
+	// recipients), so audit_log and weekly_pulse aren't offered and
+	// list_alerts leaves the channels out.
+	OAuth bool
 	// SchemaCache avoids re-deriving schemas when a server is built per request.
 	SchemaCache *sdk.SchemaCache
 }

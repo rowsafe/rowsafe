@@ -42,7 +42,8 @@ type clientKey struct{}
 // set, an OAuth access token (rso_...); the tools act as that credential
 // through the user API served by api. For an API key the write tools are
 // always listed: the API refuses them with 403 for a read-only key. For an
-// OAuth token the tools follow its scopes: read-only tools (describe_change,
+// OAuth token the tools follow its scopes (and leave out what the API never
+// shows an access token: Options.OAuth): read-only tools (describe_change,
 // get_agent_action and list_agent_actions included); create_restore_point with
 // rowsafe:marks; and with rowsafe:act every write tool, request_change
 // included (it makes a change to production as the person who connected
@@ -59,7 +60,7 @@ func NewHTTPHandler(api http.Handler, opts HTTPOptions) http.Handler {
 		if a == nil {
 			return nil
 		}
-		return NewServer(a.c, Options{AllowWrites: a.writes, AllowRestorePoints: a.marks, Remote: true, Version: opts.Version,
+		return NewServer(a.c, Options{AllowWrites: a.writes, AllowRestorePoints: a.marks, OAuth: a.oauth, Remote: true, Version: opts.Version,
 			MaxWait: opts.MaxWait, SchemaCache: cache})
 	}, &sdk.StreamableHTTPOptions{
 		// Each request stands alone and is authenticated on its own; no
@@ -112,6 +113,7 @@ func NewHTTPHandler(api http.Handler, opts HTTPOptions) http.Handler {
 				if who.OAuth == nil {
 					err = &client.APIError{Status: http.StatusUnauthorized, Msg: "not an OAuth access token"}
 				} else {
+					a.oauth = true
 					a.marks = slices.Contains(who.OAuth.Scopes, protocol.ScopeMarks)
 					a.writes = slices.Contains(who.OAuth.Scopes, protocol.ScopeAct)
 				}
@@ -141,6 +143,7 @@ type access struct {
 	c      *client.Client
 	writes bool // API key (the API checks read-only keys), or OAuth token with rowsafe:act
 	marks  bool // OAuth token with rowsafe:marks
+	oauth  bool // OAuth token (Options.OAuth)
 }
 
 // unauthorized answers 401 with a Bearer challenge. With OAuth on it names
