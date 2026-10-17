@@ -478,6 +478,9 @@ type QueryTrend struct {
 	// Regression: mean time more than doubled against the previous window
 	// (with enough calls in both to mean something).
 	Regression bool `json:"regression"`
+	// PlanSummary is its plan in plain words, when the agent planned it
+	// (QueryPlan.Summary).
+	PlanSummary string `json:"plan_summary,omitempty"`
 }
 
 type QueryTotals struct {
@@ -499,6 +502,9 @@ type QueryDetail struct {
 	Previous   *QueryPeriod `json:"previous,omitempty"`
 	Regression bool         `json:"regression"`
 	Points     []QueryPoint `json:"points"`
+	// Plan is how PostgreSQL runs it, when the agent planned it (one of
+	// the busiest statements; plans.go).
+	Plan *QueryPlan `json:"plan,omitempty"`
 }
 
 type QueryPeriod struct {

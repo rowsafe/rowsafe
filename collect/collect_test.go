@@ -756,6 +756,59 @@ func (r fakeRow) Scan(dest ...any) error {
 	return nil
 }
 
+func TestPlansLocalPostgres(t *testing.T) {
+	tg := localTarget(t)
+	dbName, conn := scratchDB(t, tg)
+	for _, sql := range []string{
+		`CREATE TABLE big (id int PRIMARY KEY, status text, created_at timestamptz)`,
+		`INSERT INTO big SELECT g, (ARRAY['new','paid'])[1 + g % 2], now() FROM generate_series(1, 50000) g`,
+		`ANALYZE big`,
+	} {
+		if _, err := conn.Exec(t.Context(), sql); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stmts := []protocol.StatementStat{
+		{QueryID: "1", Database: dbName, TotalTimeMs: 900, Query: "SELECT * FROM big WHERE status = $1 ORDER BY created_at"},
+		{QueryID: "2", Database: dbName, TotalTimeMs: 800, Query: "SELECT * FROM big WHERE status = 'paid' AND id > 5"},
+		{QueryID: "3", Database: dbName, TotalTimeMs: 700, Query: "UPDATE big SET status = $1 WHERE id = $2"},
+		{QueryID: "4", Database: dbName, TotalTimeMs: 600, Query: "VACUUM big"},
+	}
+	ps := &planState{}
+	now := time.Now()
+	plans := readPlans(t.Context(), tg, ps, 170000, stmts, now)
+	if len(plans) != 2 { // two new plans a round
+		t.Fatalf("first round: %+v", plans)
+	}
+	plans = readPlans(t.Context(), tg, ps, 170000, stmts, now.Add(time.Minute))
+	byID := map[string]protocol.QueryPlan{}
+	for _, p := range plans {
+		byID[p.QueryID] = p
+		t.Logf("%s: %s\n%s", p.QueryID, p.Summary, p.Text)
+		if protocol.PlanHasLiterals(p.Text) || strings.Contains(p.Text, "paid") || strings.Contains(p.Text, "> 5") {
+			t.Errorf("plan %s holds a value:\n%s", p.QueryID, p.Text)
+		}
+	}
+	if p := byID["1"]; p.Summary != "Reads the whole table big: about 50 thousand rows." || !strings.Contains(p.Text, "$1") || p.TotalCost <= 0 {
+		t.Errorf("plan 1: %+v", p)
+	}
+	if p := byID["2"]; !strings.Contains(p.Text, "'?'") {
+		t.Errorf("plan 2 not scrubbed: %+v", p)
+	}
+	if p, ok := byID["3"]; ok && !strings.Contains(p.Summary, "big_pkey") {
+		t.Errorf("plan 3: %+v", p)
+	}
+	if _, ok := byID["4"]; ok {
+		t.Error("VACUUM planned")
+	}
+	// Nothing ran: the rows are as they were.
+	var paid int
+	_ = conn.QueryRow(t.Context(), `SELECT count(*) FROM big WHERE status = 'paid'`).Scan(&paid)
+	if paid != 25000 {
+		t.Errorf("paid rows %d", paid)
+	}
+}
+
 func TestToolUseLocalPostgres(t *testing.T) {
 	tg := localTarget(t)
 	conn, err := tg.connect(t.Context(), "postgres")

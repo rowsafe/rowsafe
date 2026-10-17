@@ -123,6 +123,7 @@ type clusterState struct {
 	// autovacuumBusySince is when every autovacuum worker was first seen
 	// busy, in a row (unix seconds; 0: one is free). autovacuum.go
 	autovacuumBusySince int64
+	plans               planState // plans.go
 }
 
 // clusterReading is one round of raw readings from a cluster.
@@ -278,6 +279,9 @@ func readCluster(ctx context.Context, t Target, st *clusterState, withSlow, quer
 	if withSlow {
 		readSizes(ctx, conn, r)
 		r.statements, r.queryStats = readStatements(ctx, t, conn, st, r.versionNum, time.Now())
+		if r.statements != nil && r.statements.Available { // plans.go
+			r.statements.Plans = readPlans(ctx, t, &st.plans, r.versionNum, r.statements.Statements, time.Now())
+		}
 	}
 	return r, nil
 }

@@ -1020,6 +1020,9 @@ type Statements struct {
 	Available   bool            `json:"available"`
 	Reason      string          `json:"reason,omitempty"` // why not available
 	Statements  []StatementStat `json:"statements"`
+	// Plans are the busiest statements' plans, without values (plans.go).
+	// Newer agents only.
+	Plans []QueryPlan `json:"plans,omitempty"`
 }
 
 type StatementStat struct {
