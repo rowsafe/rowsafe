@@ -1,5 +1,7 @@
 # Rowsafe
 
+![rowsafe pulse finds a session idle in a transaction and 200 thousand dead rows; rowsafe fix ends the session and cleans up; the score goes from 88 to 98](docs/demo/rowsafe-demo.gif)
+
 **The database admin you never hired.** Rowsafe looks after the databases you run on your own servers: backups you can restore to any second, a restore test every week, monitoring with one-click fixes, and a safety net for AI coding agents.
 
 This repository is the open-source part of [Rowsafe](https://rowsafe.sh): the agent, the `rowsafe` CLI, the installer and the MCP server. Everything that touches your data is here, under Apache-2.0.
@@ -19,28 +21,33 @@ Features per database: `protocol.EngineCapabilities`.
 
 ## Try it now: no account
 
+On your database server (PostgreSQL on Linux):
+
+```sh
+curl -fsSL https://rowsafe.sh | sudo sh -s -- --no-account
+sudo rowsafe status shop                  # protected? backups, the change log, the last restore test
+sudo rowsafe mark shop before-migration   # a restore point (a Mark)
+sudo rowsafe backups shop                 # also: proofs, backup, proof
+```
+
+Continuous backups to your own bucket, Marks, a weekly restore test and Pulse, with no account. Restoring with Rewind needs an account for now; connecting the server to one later is coming.
+
+From anywhere, on a PostgreSQL you can connect to (managed ones too):
+
 ```sh
 curl -fsSL https://rowsafe.sh/cli | sh
 rowsafe add shop postgres://user@host:5432/dbname   # once: checks it connects, saves it on this computer
-rowsafe pulse shop
-```
-
-A 0–100 health score for a PostgreSQL database you can connect to, with what to fix in plain language: cleanup falling behind, transaction ID wraparound, bloat, unused and duplicate indexes, stuck sessions and locks, connections, replication slots and settings. Rowsafe applies the fixes after you confirm. Nothing is sent anywhere.
-
-```sh
-rowsafe fix shop                       # apply what pulse found (asks first)
+rowsafe pulse shop                                  # a 0–100 health score and what to fix
+rowsafe fix shop                                    # apply a fix, after you confirm
 rowsafe insights | top | activity | settings | tune shop
-rowsafe schema shop [TABLE…]           # tables, columns, keys, indexes (used or not): compact for an AI agent
-rowsafe explain shop "SELECT …"        # why a query is slow, and the index that would likely help
-rowsafe mcp shop --allow-writes        # the same as MCP tools for Claude Code, Codex or Cursor
-rowsafe use shop                       # in a project: then just `rowsafe pulse`
+rowsafe schema shop [TABLE…]                        # tables, columns, keys, indexes: compact for an AI agent
+rowsafe explain shop "SELECT …"                     # why a query is slow, and the index that would likely help
+rowsafe mcp shop --allow-writes                     # the same tools for Claude Code, Codex or Cursor
 ```
 
-The connection string stays in your config folder, readable only by you; `.rowsafe.json` gets only the name. Pipe it in (`rowsafe add shop < url.txt`) or use `--from-env VAR` to keep the password out of your shell history; in a project, `rowsafe add` alone offers the `DATABASE_URL` from `.env`. `rowsafe databases` lists them, `rowsafe forget shop` removes one.
+Pulse checks cleanup falling behind, bloat, duplicate and unused indexes, stuck sessions, locks, connections, replication slots, transaction ID wraparound and settings. The connection string stays in your config folder, readable only by you; `rowsafe pulse postgres://…` works once without saving, and `rowsafe use shop` makes it a project's database. Through a pooler, everything works but the fixes that run inside the database. Nothing is sent to Rowsafe. `rowsafe help local` has the rest; the demo above is a [real recording](docs/demo).
 
-Once, without saving: `rowsafe pulse postgres://…`, or set `DATABASE_URL` and leave the argument out. Use the direct connection, not a pooler. Backups, restore to any second, the weekly restore test, alerts and history need the agent on your server: see below. `rowsafe help local` has the details.
-
-On Windows, download `rowsafe-windows-amd64.exe` (or `-arm64.exe`) from the [latest release](https://github.com/rowsafe/rowsafe/releases/latest); everything above works there except applying fixes and settings (`fix`, `tune --yes`), for now.
+On Windows, download `rowsafe-windows-amd64.exe` (or `-arm64.exe`) from the [latest release](https://github.com/rowsafe/rowsafe/releases/latest); the commands from anywhere work there except applying fixes and settings (`fix`, `tune --yes`), for now.
 
 ## Get started
 

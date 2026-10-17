@@ -7,10 +7,10 @@ Drafts only. Nothing here has been posted. The founder edits and posts.
 - v0.10.19 (the installer's `--no-account`, `rowsafe add`, poolers) is released, and
   `curl -fsSL https://rowsafe.sh | sudo sh -s -- --no-account` works on a fresh server.
 - Every command below works on that release, and rowsafe.sh/docs/guides/no-account-server is live.
-- "Connect the server to an account later" ships before you say it; until then keep "for now".
 - Restores without an account: confirm pgBackRest restores the backups by hand with the
   passphrase from the server, or cut "What if you go away?".
-- If Windows builds and the npm package (rowsafe/rowsafe#71) have shipped, drop "macOS and Linux".
+- Once "log in later" (rowsafe/rowsafe#77) ships, say that `sudo rowsafe login` connects the server later.
+- The demo was recorded with v0.10.18: re-record it (`docs/demo/record.sh`) if pulse's output changed.
 
 ## Show HN
 
@@ -96,4 +96,4 @@ Attach `docs/demo/rowsafe-demo.mp4` (sharper than the GIF on X).
 >
 > On your own server, `curl -fsSL https://rowsafe.sh | sudo sh -s -- --no-account` also sets up continuous backups to your own bucket and a weekly restore test, still with no account. Restoring through Rowsafe needs an account for now.
 >
-> Limits: PostgreSQL 13–18; through PgBouncer the fixes that run inside the database need the direct connection; the CLI runs on macOS and Linux. I'd like to know which findings are wrong or missing.
+> Limits: PostgreSQL 13–18; through PgBouncer the fixes that run inside the database need the direct connection; on Windows, fixes don't apply yet. I'd like to know which findings are wrong or missing.
