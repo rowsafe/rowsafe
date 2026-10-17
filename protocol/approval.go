@@ -86,7 +86,7 @@ var ApprovalActions = []ApprovalAction{
 	{Name: "index_check_settings", Group: "pulse", Title: "Change the index check schedule", Method: "PUT", Path: "/v1/databases/{ref}/index-recommendations/settings", Risk: RiskNormal, Body: IndexAdvisorSettingsRequest{},
 		Description: "Turns the weekly index check (indexes tested on a copy) on or off, or changes when it runs."},
 	{Name: "restart", Group: "pulse", Title: "Restart the database", Method: "POST", Path: "/v1/databases/{ref}/tasks", Task: TaskRestart, Risk: RiskDisruptive,
-		Description: "Restarts the database server (where root allowed Rowsafe to). Apps are disconnected for a few seconds. params: {\"confirm\": the database's name}."},
+		Description: "Restarts the database server (where root allowed Rowsafe to). Apps are disconnected for a few seconds. params: {\"confirm\": the database's name}; add \"at\": an RFC 3339 time (up to 30 days ahead) or \"window\" (the next Rowsafe Cloud maintenance window) to schedule it instead."},
 	{Name: "turn_on_backups", Group: "pulse", Title: "Turn on backups", Method: "POST", Path: "/v1/databases/{ref}/tasks", Task: TaskAdopt, Fixed: map[string]any{"apply": true}, Risk: RiskDisruptive,
 		Description: "Applies the adopt plan (plan_adoption shows it): changes the server's settings so continuous backups can run. Some engines need a restart afterwards, which the plan says."},
 
