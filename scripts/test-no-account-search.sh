@@ -19,6 +19,8 @@
 #        NOACCOUNT_SEARCH="qdrant" sh scripts/test-no-account-search.sh
 # (needs Docker, ~5 min; OpenSearch needs about 2 GB of memory)
 set -eu
+# The MinIO test image (built once from source: scripts/minio).
+MINIO_SH=$(cd "$(dirname "$0")" && pwd)/minio/image.sh
 cd "$(dirname "$0")/.."
 engines=${NOACCOUNT_SEARCH:-"qdrant meilisearch opensearch"}
 proj=rowsafe-noaccount-search-$$
@@ -90,9 +92,9 @@ chmod 0644 "$work/certs/private.key" "$work/certs/public.crt"
 secret=$(openssl rand -hex 16)
 docker run -d --label "$proj" --network "$net" --network-alias minio --name "$proj-minio" \
   -e MINIO_ROOT_USER=rowsafe -e MINIO_ROOT_PASSWORD="$secret" \
-  -v "$work/certs:/root/.minio/certs:ro" minio/minio:latest server /data >/dev/null
+  -v "$work/certs:/root/.minio/certs:ro" "$(sh "$MINIO_SH")" server /data >/dev/null
 for _ in $(seq 1 30); do
-  docker run --rm --label "$proj" --network "$net" --entrypoint sh minio/minio:latest -c \
+  docker run --rm --label "$proj" --network "$net" --entrypoint sh "$(sh "$MINIO_SH")" -c \
     "mc --insecure alias set m https://minio:9000 rowsafe $secret >/dev/null && mc --insecure mb -p m/backups >/dev/null" \
     >/dev/null 2>&1 && break
   sleep 1
@@ -100,6 +102,11 @@ done
 
 for engine in $engines; do
   name=$proj-$engine
+  # A bucket of its own: each engine's database is called search, and a
+  # bucket folder holds one database's backups and Marks.
+  bucket=backups-$engine
+  docker run --rm --label "$proj" --network "$net" --entrypoint sh "$(sh "$MINIO_SH")" -c \
+    "mc --insecure alias set m https://minio:9000 rowsafe $secret >/dev/null && mc --insecure mb -p m/$bucket >/dev/null"
   agent=$name-agent
   docker volume create --label "$proj" "$name-state" >/dev/null
   docker volume create --label "$proj" "$name-snap" >/dev/null
@@ -162,7 +169,7 @@ for engine in $engines; do
     -e ROWSAFE_CONFIG_DIR=/var/lib/rowsafe/config -e ROWSAFE_DRILL_DIR=/var/lib/rowsafe/drills \
     -e ROWSAFE_REWIND_DIR=/var/lib/rowsafe/rewind -e ROWSAFE_LOG_DIR=/var/lib/rowsafe/log \
     -e ROWSAFE_REPO_S3_ENDPOINT=minio -e ROWSAFE_REPO_S3_PORT=9000 -e ROWSAFE_REPO_S3_REGION=us-east-1 \
-    -e ROWSAFE_REPO_S3_BUCKET=backups -e ROWSAFE_REPO_S3_KEY=rowsafe -e ROWSAFE_REPO_S3_KEY_SECRET="$secret" \
+    -e ROWSAFE_REPO_S3_BUCKET="$bucket" -e ROWSAFE_REPO_S3_KEY=rowsafe -e ROWSAFE_REPO_S3_KEY_SECRET="$secret" \
     -e ROWSAFE_REPO_CIPHER_PASS="cipher-$secret" -e ROWSAFE_REPO_S3_CA_FILE=/it/ca.crt $extra \
     --entrypoint /opt/rowsafe/rowsafe-agent "$image" run >/dev/null
   until_ok 60 "the agent's control plane listens" docker exec "$agent" test -S /var/lib/rowsafe/control.sock

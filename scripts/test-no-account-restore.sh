@@ -20,6 +20,8 @@
 # Usage: sh scripts/test-no-account-restore.sh [debian:trixie]   (needs Docker, ~8 min)
 
 set -eu
+# The MinIO test image (built once from source: scripts/minio).
+MINIO_SH=$(cd "$(dirname "$0")" && pwd)/minio/image.sh
 
 fail() {
   echo "test-no-account-restore ($ROLE): $*" >&2
@@ -208,9 +210,9 @@ host() {
   docker network create "$name" >/dev/null
   docker run -d --name "$name-minio" --network "$name" --network-alias minio \
     -e MINIO_ROOT_USER=rowsafe-test -e MINIO_ROOT_PASSWORD="$secret" \
-    -v "$W/minio-certs:/certs:ro" minio/minio server /data --address :9000 --certs-dir /certs >/dev/null
+    -v "$W/minio-certs:/certs:ro" "$(sh "$MINIO_SH")" server /data --address :9000 --certs-dir /certs >/dev/null
   i=0
-  until docker run --rm --network "$name" --entrypoint sh minio/minio -c \
+  until docker run --rm --network "$name" --entrypoint sh "$(sh "$MINIO_SH")" -c \
     "mc alias set m https://minio:9000 rowsafe-test $secret --insecure >/dev/null && mc mb --insecure --ignore-existing m/rowsafe >/dev/null" 2>/dev/null; do
     i=$((i + 1))
     [ "$i" -lt 30 ] || {
@@ -265,7 +267,7 @@ EOF
   start b
   run b
   # A's backups are where they were; B's start in a new folder.
-  docker run --rm --network "$name" --entrypoint sh minio/minio -c \
+  docker run --rm --network "$name" --entrypoint sh "$(sh "$MINIO_SH")" -c \
     "mc alias set m https://minio:9000 rowsafe-test $secret --insecure >/dev/null && mc ls --recursive --insecure m/rowsafe" >"$W/bucket.txt"
   grep -q 'rowsafe/shop/backup/shop/backup.info$' "$W/bucket.txt" || {
     cat "$W/bucket.txt" >&2

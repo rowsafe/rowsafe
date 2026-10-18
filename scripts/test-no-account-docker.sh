@@ -20,6 +20,8 @@
 # Usage: sh scripts/test-no-account-docker.sh   (needs Docker, ~8 min the first time)
 
 set -eu
+# The MinIO test image (built once from source: scripts/minio).
+MINIO_SH=$(cd "$(dirname "$0")" && pwd)/minio/image.sh
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 docker info >/dev/null 2>&1 || {
@@ -128,7 +130,7 @@ services:
     volumes:
       - $W/certs/ca.crt:/certs/ca.crt:ro
   minio:
-    image: minio/minio
+    image: $(sh "$MINIO_SH")
     command: server /data --address :9000 --certs-dir /certs
     environment:
       MINIO_ROOT_USER: rowsafe-test
