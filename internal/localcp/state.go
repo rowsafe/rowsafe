@@ -5,10 +5,12 @@
 // server's databases, tasks, backups, Proofs and Marks in a JSON file, runs
 // the schedules (full backups weekly, differential ones daily, Proof weekly;
 // MongoDB, Redis, Valkey, SQLite: a full backup daily; ClickHouse: a
-// differential one hourly) and moves a database through setup (plan, apply,
-// restart, check, active) the way the hosted control plane does.
-// PostgreSQL, MySQL and MariaDB (mysql.go), MongoDB (mongodb.go), Redis and
-// Valkey (redis.go), SQLite (sqlite.go), ClickHouse (clickhouse.go).
+// differential one hourly; OpenSearch, Qdrant, Meilisearch: snapshots every
+// few minutes) and moves a database through setup (plan, apply, restart,
+// check, active) the way the hosted control plane does. PostgreSQL, MySQL
+// and MariaDB (mysql.go), MongoDB (mongodb.go), Redis and Valkey
+// (redis.go), SQLite (sqlite.go), ClickHouse (clickhouse.go), OpenSearch,
+// Qdrant and Meilisearch (search.go).
 //
 // The socket's file permissions are its access control, like Docker's: the
 // agent's user (postgres) and root. Nothing leaves the server.

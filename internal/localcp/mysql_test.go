@@ -11,12 +11,17 @@ import (
 )
 
 // Every engine this control plane protects has every feature it offers
-// (SQLite: but those that need a database server, which it has none of).
+// (SQLite: but those that need a database server, which it has none of;
+// OpenSearch, Qdrant, Meilisearch: but restores to any second, which need a
+// change log they don't keep, and Qdrant's Rewind rows).
 func TestLocalEnginesHaveLocalFeatures(t *testing.T) {
 	for _, e := range localEngines {
 		for _, f := range localFeatures {
 			if _, noServer := protocol.SQLiteNoServer[f]; noServer && isSQLite(e) {
 				continue
+			}
+			if f == protocol.FeaturePointInTime && snapshotEngine(e) || f == protocol.FeatureRewindRows && e == protocol.EngineQdrant {
+				continue // snapshots only (search.go)
 			}
 			if !protocol.EngineHas(e, f) {
 				t.Errorf("%s lacks %s, which this control plane offers it", e, f)
@@ -181,10 +186,6 @@ func TestMariaDBRegister(t *testing.T) {
 	resp, err := c.CreateDatabase(context.Background(), protocol.CreateDatabaseRequest{Name: "app", Port: 5432})
 	if err != nil || resp.Database.Engine != protocol.EnginePostgreSQL || resp.Database.SocketDir != "/var/run/postgresql" {
 		t.Fatalf("PostgreSQL next to it: %+v %v", resp, err)
-	}
-	if _, err := c.CreateDatabase(context.Background(), protocol.CreateDatabaseRequest{Name: "search", Engine: protocol.EngineMeilisearch}); apiStatus(err) != http.StatusBadRequest ||
-		!strings.Contains(err.Error(), "Meilisearch needs the dashboard") {
-		t.Fatalf("Meilisearch: %v", err)
 	}
 	if _, err := c.CreateDatabase(context.Background(), protocol.CreateDatabaseRequest{Name: "x", Engine: "oracle"}); apiStatus(err) != http.StatusBadRequest ||
 		!strings.Contains(err.Error(), "unknown engine") {
