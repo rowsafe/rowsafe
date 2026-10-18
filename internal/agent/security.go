@@ -22,8 +22,8 @@ import (
 // Security check: every 15 minutes (and on demand, as a security_scan
 // task) the agent reads what decides who can reach each database and how
 // they log in, and posts it to POST /v1/agent/security. Everything is
-// read-only and cheap: a few catalog queries per cluster and one per
-// database for schema privileges. Password hashes are never read: only
+// read-only and cheap: a few catalog queries per cluster and a few per
+// database for schema privileges and row-level security. Password hashes are never read: only
 // which kind a role has.
 
 // Timings of the security loop (variables for tests).
@@ -299,8 +299,8 @@ func readClients(ctx context.Context, conn *pgx.Conn, rep *protocol.SecurityRepo
 }
 
 // readDatabasePrivileges checks, in each database, whether everyone may
-// create objects in schema public, and for untrusted languages someone
-// marked trusted.
+// create objects in schema public, for untrusted languages someone marked
+// trusted, and row-level security (pginspect.ReadRLS).
 func (a *Agent) readDatabasePrivileges(ctx context.Context, db protocol.DatabaseSpec, conn *pgx.Conn, rep *protocol.SecurityReport) error {
 	rows, err := conn.Query(ctx, `SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate ORDER BY datname LIMIT $1`, maxSecurityDBs)
 	if err != nil {
@@ -326,12 +326,23 @@ func (a *Agent) readDatabasePrivileges(ctx context.Context, db protocol.Database
 			WHERE n.nspname = 'public' AND acl.grantee = 0 AND acl.privilege_type = 'CREATE'),
 			coalesce((SELECT array_agg(lanname ORDER BY lanname) FROM pg_language WHERE lanpltrusted AND lanname = ANY($1)), '{}')`,
 			untrustedLanguages).Scan(&public, &langs)
+		var rls *protocol.RLSDatabase
+		var rlsErr error
+		if err == nil {
+			rls, rlsErr = pginspect.ReadRLS(ctx, c)
+		}
 		if c != conn {
 			c.Close(context.WithoutCancel(ctx))
 		}
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 			continue
+		}
+		switch {
+		case rlsErr != nil:
+			rep.Notes = append(rep.Notes, fmt.Sprintf("row-level security in %s could not be read: %v", name, rlsErr))
+		case rls != nil:
+			rep.RLS = append(rep.RLS, *rls)
 		}
 		if public {
 			rep.PublicCreate = append(rep.PublicCreate, name)

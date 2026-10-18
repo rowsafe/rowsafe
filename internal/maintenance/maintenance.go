@@ -117,6 +117,8 @@ func Validate(p protocol.MaintenanceParams) error {
 		return validateCleanupMaintenance(p)
 	case protocol.MaintCreateExtension, protocol.MaintRepackTable: // maintenance_tools.go
 		return validateToolMaintenance(p)
+	case protocol.MaintEnableRLS: // rls.go
+		return validateEnableRLS(p)
 	}
 	return nil
 }
@@ -323,6 +325,8 @@ func Run(ctx context.Context, t pginspect.Target, p protocol.MaintenanceParams, 
 		err = m.repackTable(ctx)
 	case protocol.MaintCreateIndex, protocol.MaintDropInvalidIndex, protocol.MaintSyncSequence, protocol.MaintSetTableStorageParams: // advisor
 		err = m.advisorAction(ctx)
+	case protocol.MaintEnableRLS: // rls.go
+		err = m.enableRLS(ctx)
 	}
 	m.res.DurationMs = time.Since(start).Milliseconds()
 	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {

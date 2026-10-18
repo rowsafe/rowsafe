@@ -226,6 +226,13 @@ func (st *state) securityInput(d *dbRec, now time.Time) pulse.SecurityInput {
 		RestartAllowed: slices.Contains(st.Host.RestartPorts, d.Port),
 		NotAllowed: func(perm string) string {
 			return pulse.NotAllowedText(perm, host, "Root allows it on this server with: sudo rowsafe-allow "+perm)
+		},
+		// Row-level security's fixes run on a connection to the database,
+		// like the rest of Pulse's (health in history.go).
+		Fix: func(fx protocol.FindingFix) protocol.FindingFix {
+			fx.Available = false
+			fx.Reason = fmt.Sprintf("Fixes run on a connection to the database: save it once on this server with sudo rowsafe add %s postgresql:///DBNAME, then sudo rowsafe fix %s", d.Name, d.Name)
+			return fx
 		}}
 	if rec := st.Security[d.ID]; rec != nil && rec.Report != nil {
 		at := rec.ReportedAt

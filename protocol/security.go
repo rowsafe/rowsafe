@@ -172,6 +172,9 @@ type SecurityReport struct {
 	// someone marked trusted, so any user may write functions that run as
 	// the server's operating system user: "db: language".
 	UntrustedLanguages []string `json:"untrusted_languages,omitempty"`
+	// RLS (addition) is row-level security per database (rls.go), only for
+	// databases that look like they use it.
+	RLS []RLSDatabase `json:"rls,omitempty"`
 
 	// Clients are the network addresses connected right now (not the Unix
 	// socket or loopback), at most 50.

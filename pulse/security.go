@@ -62,6 +62,10 @@ type SecurityInput struct {
 	// Terminal: say what to do as rowsafe commands on the server instead of
 	// the dashboard's pages.
 	Terminal bool
+	// Fix, when set, decides whether a maintenance fix of a security
+	// finding (row-level security) can run now, like Input.Fix; nil: when
+	// the agent is online.
+	Fix func(protocol.FindingFix) protocol.FindingFix
 	// Related are findings from the rest of health that matter for security
 	// (PostgreSQL updates); an end of support there replaces this check's.
 	Related []protocol.Finding
@@ -222,6 +226,19 @@ func (e *secEval) secFix(action, label, desc string, p protocol.SecurityFixParam
 	}
 	if r := e.in.Report; r != nil && r.Docker && (action == protocol.SecEnableTLS || action == protocol.SecRenewCertificate) && fx.Available {
 		fx.Available, fx.Reason = false, "PostgreSQL runs in Docker, where the agent can't change its files: turn on TLS in the container's configuration."
+	}
+	return fx
+}
+
+// maintFix builds a maintenance fix of a security finding.
+func (e *secEval) maintFix(id, label, desc string, p protocol.MaintenanceParams) protocol.FindingFix {
+	fx := protocol.FindingFix{ID: id, Kind: protocol.FixMaintenance, Label: label, Description: desc, Available: true}
+	fx.Params, _ = json.Marshal(p)
+	switch {
+	case e.in.Fix != nil:
+		fx = e.in.Fix(fx)
+	case !e.in.Online:
+		fx.Available, fx.Reason = false, e.offline()
 	}
 	return fx
 }
@@ -460,6 +477,11 @@ func (e *secEval) run() {
 			Explanation: fmt.Sprintf("%s in database %s is marked trusted, so any user may write functions that run as the server's operating system user.", lang, db),
 			Action:      "Mark it untrusted again (see Do it yourself); only superusers then write functions in it.",
 			Command:     fmt.Sprintf("\\c %s\nUPDATE pg_language SET lanpltrusted = false WHERE lanname = '%s';", db, lang)})
+	}
+
+	// Row-level security (rls.go).
+	for _, f := range RLSFindings(rep.RLS, e.maintFix) {
+		e.findings = append(e.findings, f)
 	}
 
 	// Version (unless the updates feature already reports the end of support).
@@ -768,6 +790,9 @@ func securityChecks(in SecurityInput, fs []protocol.Finding) []protocol.Security
 		"security_password_cleartext", "security_superuser_network", "security_password_encryption", "security_md5_passwords"))
 	out = append(out, line("privileges", "Privileges", "Only owners can create objects; no untrusted language is open to everyone.",
 		"security_untrusted_language", "security_public_create"))
+	if len(rep.RLS) > 0 {
+		out = append(out, line("rls", "Row-level security", "Your API's users only reach tables row-level security protects, and no policy lets every row through.", RLSFindingIDs...))
+	}
 	ver := "Supported, and getting security fixes."
 	if f := strings.Fields(rep.ServerVersion); len(f) > 0 {
 		ver = "PostgreSQL " + f[0] + " is supported and gets security fixes."
