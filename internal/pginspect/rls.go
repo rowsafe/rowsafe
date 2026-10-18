@@ -63,9 +63,9 @@ func ReadRLS(ctx context.Context, conn *pgx.Conn) (*protocol.RLSDatabase, error)
 		if err := readExposed(ctx, conn, d); err != nil {
 			return nil, fmt.Errorf("tables: %w", err)
 		}
-	}
-	if err := readOpenPolicies(ctx, conn, d); err != nil {
-		return nil, fmt.Errorf("policies: %w", err)
+		if err := readOpenPolicies(ctx, conn, d); err != nil {
+			return nil, fmt.Errorf("policies: %w", err)
+		}
 	}
 	if err := readSlowPolicies(ctx, conn, d); err != nil {
 		return nil, fmt.Errorf("policy columns: %w", err)
@@ -126,7 +126,7 @@ func readExposed(ctx context.Context, conn *pgx.Conn, d *protocol.RLSDatabase) e
 }
 
 // readOpenPolicies lists the policies for everyone or an API role whose
-// USING or WITH CHECK is always true. Without API roles, every role's.
+// USING or WITH CHECK is always true.
 func readOpenPolicies(ctx context.Context, conn *pgx.Conn, d *protocol.RLSDatabase) error {
 	rows, err := conn.Query(ctx, `
 		WITH p AS (
@@ -137,7 +137,7 @@ func readOpenPolicies(ctx context.Context, conn *pgx.Conn, d *protocol.RLSDataba
 		  FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
 		  WHERE p.polpermissive AND n.nspname <> ALL($1) AND n.nspname NOT LIKE 'pg\_%')
 		SELECT schema, tbl, name, cmd, rls, roles, using_true, check_true FROM p
-		WHERE (using_true OR check_true) AND (cardinality($2::text[]) = 0 OR roles && ($2::text[] || '{public}'::text[]))
+		WHERE (using_true OR check_true) AND roles && ($2::text[] || '{public}'::text[])
 		ORDER BY schema, tbl, name
 		LIMIT $3`, rlsSkipSchemas, d.APIRoles, maxRLSOpen+1)
 	if err != nil {

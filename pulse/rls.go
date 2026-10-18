@@ -85,11 +85,14 @@ func RLSFindings(dbs []protocol.RLSDatabase, fix RLSFixer) []protocol.Finding {
 
 	var writeAnon, writeSigned, insertAnon, insertSigned, readAll []rlsPolicy
 	for _, d := range dbs {
+		if len(d.APIRoles) == 0 {
+			continue // no API: who "anyone" is can't be told
+		}
 		for _, p := range d.OpenPolicies {
 			if !p.TableRLS {
 				continue // the table is listed as without row-level security
 			}
-			anon := slices.ContainsFunc(p.Roles, anonymous) || len(d.APIRoles) == 0 && slices.Contains(p.Roles, "public")
+			anon := slices.ContainsFunc(p.Roles, anonymous)
 			rp := rlsPolicy{d.Database, p}
 			switch {
 			case p.Command == "select":

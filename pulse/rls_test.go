@@ -156,17 +156,24 @@ func TestRLSInEvaluate(t *testing.T) {
 	}
 }
 
-// A database with policies but no API roles: only the policies count, and
-// the examples don't assume Supabase.
+// A database with policies but no API roles: always-true policies say
+// nothing about strangers there, so only slow policies count; PostgREST
+// (API roles, no Supabase) gets examples that don't assume Supabase.
 func TestRLSPlainPostgres(t *testing.T) {
 	d := protocol.RLSDatabase{Database: "app",
-		OpenPolicies: []protocol.RLSPolicy{{Schema: "public", Table: "docs", Name: "all", Command: "delete", Roles: []string{"public"}, Using: true, TableRLS: true}}}
-	fs := secIDs(RLSFindings([]protocol.RLSDatabase{d}, func(id, label, desc string, p protocol.MaintenanceParams) protocol.FindingFix {
-		return protocol.FindingFix{ID: id}
-	}))
+		OpenPolicies: []protocol.RLSPolicy{{Schema: "public", Table: "docs", Name: "all", Command: "delete", Roles: []string{"public"}, Using: true, TableRLS: true}},
+		SlowPolicies: []protocol.RLSSlowColumn{{Schema: "public", Table: "docs", Column: "owner", Policies: []string{"own"}, Rows: 50000}}}
+	noop := func(id, label, desc string, p protocol.MaintenanceParams) protocol.FindingFix { return protocol.FindingFix{ID: id} }
+	fs := secIDs(RLSFindings([]protocol.RLSDatabase{d}, noop))
+	if _, ok := fs["rls_unindexed"]; !ok || len(fs) != 1 {
+		t.Fatalf("no API roles: %+v", fs)
+	}
+	d.APIRoles = []string{"web_anon"}
+	fs = secIDs(RLSFindings([]protocol.RLSDatabase{d}, noop))
 	f, ok := fs["rls_open_write_anonymous"]
-	if !ok || strings.Contains(f.Command, "auth.uid") || !strings.Contains(f.Command, "owner = current_user") || strings.Contains(f.Explanation, "anon) key") {
-		t.Fatalf("plain: %+v", fs)
+	if !ok || strings.Contains(f.Command, "auth.uid") || !strings.Contains(f.Command, "owner = current_user") || strings.Contains(f.Explanation, "anon) key") ||
+		!strings.Contains(f.Explanation, "without signing in") {
+		t.Fatalf("PostgREST: %+v", fs)
 	}
 	// Two databases: names say which.
 	d2 := supabaseRLS()

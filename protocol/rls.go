@@ -26,7 +26,7 @@ type RLSDatabase struct {
 	// APIRoles are the roles an API connects as for its users (anon,
 	// authenticated, web_anon and the roles PostgREST's authenticator may
 	// switch to), at most 10. Without them nothing says which tables an
-	// API exposes, so only the policies are checked.
+	// API exposes or who "anyone" is, so only SlowPolicies are checked.
 	APIRoles []string `json:"api_roles,omitempty"`
 	// Supabase: the database has Supabase's auth and storage schemas.
 	Supabase bool `json:"supabase,omitempty"`
