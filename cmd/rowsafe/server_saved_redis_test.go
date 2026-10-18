@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -36,7 +37,7 @@ func TestAddACLLine(t *testing.T) {
 	if string(got) != "port 6379\n"+line+"\n" {
 		t.Errorf("conf:\n%s", got)
 	}
-	if fi, _ := os.Stat(conf); fi.Mode().Perm() != 0o640 {
+	if fi, _ := os.Stat(conf); runtime.GOOS != "windows" && fi.Mode().Perm() != 0o640 {
 		t.Errorf("mode %v", fi.Mode())
 	}
 	for _, bad := range []string{"user rowsafe on >password ~*", "user admin on #" + strings.Repeat("ab", 32) + " +@all", line + "\nuser x on nopass"} {
