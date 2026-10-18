@@ -422,12 +422,12 @@ func tableArgs(pos []string, db string, cp protocol.RewindCopy) ([]protocol.Rewi
 		if d == "" {
 			var user []string
 			for _, x := range cp.Databases {
-				if x.Name != "postgres" && !strings.HasPrefix(x.Name, "template") {
+				if x.Name != "postgres" && !strings.HasPrefix(x.Name, "template") && !slices.Contains(mysqlSystemDBs, x.Name) {
 					user = append(user, x.Name)
 				}
 			}
 			if len(user) != 1 {
-				return nil, fmt.Errorf("which PostgreSQL database is %s in? The copy has %s; write DB:%s or pass --db DB",
+				return nil, fmt.Errorf("which database is %s in? The copy has %s; write DB:%s or pass --db DB",
 					p, strings.Join(user, ", "), p)
 			}
 			d = user[0]

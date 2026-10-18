@@ -116,8 +116,8 @@ func TestLifecycle(t *testing.T) {
 	if code := a.call("POST", "/v1/agent/setup/databases", protocol.SetupRegisterRequest{Name: "shop", Port: 5432, SocketDir: "/var/run/postgresql"}, &sd); code != http.StatusCreated {
 		t.Fatalf("register: %d", code)
 	}
-	if code := a.call("POST", "/v1/agent/setup/databases", protocol.SetupRegisterRequest{Name: "crm", Port: 3306, Engine: protocol.EngineMySQL}, nil); code != http.StatusBadRequest {
-		t.Fatalf("MySQL without an account: %d", code)
+	if code := a.call("POST", "/v1/agent/setup/databases", protocol.SetupRegisterRequest{Name: "crm", Port: 27017, Engine: protocol.EngineMongoDB}, nil); code != http.StatusBadRequest {
+		t.Fatalf("MongoDB without an account: %d", code)
 	}
 	// Pending: monitored, not yet protected.
 	hb := heartbeat(a)

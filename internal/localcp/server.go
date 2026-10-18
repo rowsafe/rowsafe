@@ -351,21 +351,24 @@ func (s *Server) setupRegister(w http.ResponseWriter, r *http.Request) {
 // for the installer (setupRegister) and for rowsafe add and adopt
 // (createDatabase); body makes the response.
 func (s *Server) register(w http.ResponseWriter, name string, port int, socketDir, engine string, body func(st *state, db *dbRec, plan *taskRec) any) {
-	if e := protocol.NormalizeEngine(engine); e != protocol.EnginePostgreSQL {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("Rowsafe on this server protects PostgreSQL for now; %s needs the dashboard (rowsafe login connects this server)",
-			protocol.EngineDisplayName(engine)))
+	if msg := checkLocalEngine(engine); msg != "" { // mysql.go
+		writeError(w, http.StatusBadRequest, msg)
 		return
 	}
+	engine = protocol.NormalizeEngine(engine)
 	if !nameRE.MatchString(name) {
 		writeError(w, http.StatusBadRequest, "the name must be 2-40 lowercase letters, digits and dashes, starting with a letter")
 		return
 	}
-	if port <= 0 || port > 65535 {
+	if port == 0 {
+		port = defaultPort(engine)
+	}
+	if port < 0 || port > 65535 {
 		writeError(w, http.StatusBadRequest, "invalid port")
 		return
 	}
 	if socketDir == "" {
-		socketDir = "/var/run/postgresql" // as on the hosted control plane
+		socketDir = defaultSocket(engine) // as on the hosted control plane
 	}
 	if !strings.HasPrefix(socketDir, "/") { // a path on this Linux server
 		writeError(w, http.StatusBadRequest, "socket_dir must be an absolute path")
@@ -377,12 +380,12 @@ func (s *Server) register(w http.ResponseWriter, name string, port int, socketDi
 	err := s.st.update(func(st *state) error {
 		db := st.db(name)
 		if db == nil {
-			if other := st.dbAt(port, socketDir); other != nil {
-				return fmt.Errorf("conflict: the PostgreSQL on port %d is already protected as %s", port, other.Name)
+			if other := st.serverAt(engine, port, socketDir); other != nil { // mysql.go
+				return fmt.Errorf("conflict: the %s on port %d is already protected as %s", protocol.EngineDisplayName(other.Engine), port, other.Name)
 			}
 			status = http.StatusCreated
 			db = &dbRec{Database: protocol.Database{ID: newID("db"), HostID: st.Host.ID, Hostname: st.Host.Hostname, Name: name,
-				Stanza: name, Port: port, SocketDir: socketDir, Status: protocol.DBPendingAdopt,
+				Stanza: name, Port: port, SocketDir: socketDir, Engine: engine, Status: protocol.DBPendingAdopt,
 				RetentionFull: defaultRetentionFull, ScheduleFull: defaultScheduleFull, ScheduleDiff: defaultScheduleDiff,
 				ScheduleDrill: defaultScheduleDrill, CreatedAt: now.UTC()}, StatusSince: now.UTC()}
 			st.Databases = append(st.Databases, db)
@@ -794,7 +797,7 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 				return nil
 			}
 		case req.Type == protocol.TaskRestart && !slices.Contains(st.Host.RestartPorts, d.Port):
-			code, msg = http.StatusForbidden, fmt.Sprintf("%s doesn't allow restarts from Rowsafe (only root can allow it, at install time). Restart PostgreSQL yourself: sudo systemctl restart postgresql", st.Host.Hostname)
+			code, msg = http.StatusForbidden, fmt.Sprintf("%s doesn't allow restarts from Rowsafe (only root can allow it, at install time). %s", st.Host.Hostname, restartYourself(d.Engine))
 			return nil
 		}
 		var params any

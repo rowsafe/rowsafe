@@ -474,7 +474,7 @@ func savedAdd(ctx context.Context, args []string) error {
 		fmt.Printf("The connection string is in %s, readable only by you.\n", res.File)
 	}
 	// On this database's server: protect it too (server_saved.go).
-	if res.Server, err = protectOnServer(ctx, s, *yes, *asJSON); err != nil {
+	if res.Server, err = protectOnServer(ctx, s, d, !*noCheck, *yes, *asJSON); err != nil {
 		return err
 	}
 	if *asJSON {

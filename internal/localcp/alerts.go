@@ -295,7 +295,7 @@ func (s *state) evaluateAlerts(now time.Time) []notice {
 		p := s.protection(d, now)
 		for _, rule := range localRules {
 			key := rule.name + ":" + d.ID
-			r := rule.eval(s, d, p, now)
+			r := engineAlert(rule.name, s, d, rule.eval(s, d, p, now), now) // mysql.go
 			open := s.openAlert(key)
 			switch {
 			case !r.known:
