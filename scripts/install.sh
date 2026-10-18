@@ -10971,15 +10971,11 @@ choose_account() {
   fi
   [ -z "$(s_get ROWSAFE_ENROLL_TOKEN)" ] || return 0
   [ "$NO_ACCOUNT" != 0 ] || return 0
-  # On its own, a server protects PostgreSQL for now; the other engines
-  # need the dashboard (rowsafe_storage too: Rowsafe Storage is the account's).
-  if [ "$HOST_ENGINE" != postgresql ] || [ "$STORAGE_PROVIDER" = rowsafe ]; then
-    if [ "$NO_ACCOUNT" = 1 ]; then
-      [ "$HOST_ENGINE" = postgresql ] || die "on its own, Rowsafe protects PostgreSQL for now, and this server runs $(engine_label). Connect it to the dashboard instead: curl -fsSL https://rowsafe.sh | sudo sh -s -- --account"
-      die "Rowsafe Storage comes with the dashboard: use your own bucket, or connect this server with --account"
-    fi
+  # --storage rowsafe: Rowsafe Storage comes with the dashboard.
+  if [ "$STORAGE_PROVIDER" = rowsafe ]; then
+    [ "$NO_ACCOUNT" != 1 ] || die "Rowsafe Storage comes with the dashboard: use your own bucket, or connect this server with --account"
     NO_ACCOUNT=0
-    note "$( [ "$HOST_ENGINE" = postgresql ] && echo "Rowsafe Storage comes with the dashboard" || echo "on its own, Rowsafe protects PostgreSQL for now, and this server runs $(engine_label)"): connecting it to the dashboard"
+    note "Rowsafe Storage comes with the dashboard: connecting this server to it"
     return 0
   fi
   NO_ACCOUNT=1
