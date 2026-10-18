@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -26,6 +27,52 @@ import (
 // onServer is set when commands go to this server's agent (loadConfig
 // found its socket).
 var onServer bool
+
+// In Docker, the CLI runs in the agent's container (docker compose exec
+// rowsafe rowsafe ...): the agent image sets ROWSAFE_MODE, the container
+// shares the postgres container's socket directory, and there is no sudo.
+const sidecarSocketDir = "/var/run/postgresql"
+
+func inSidecar() bool { return os.Getenv("ROWSAFE_MODE") == "docker-sidecar" }
+
+// serverCLI is how to run rowsafe for this server's agent, in hints.
+func serverCLI() string {
+	if inSidecar() {
+		return "rowsafe"
+	}
+	return "sudo rowsafe"
+}
+
+// serverCluster is localCluster, and in the agent's container also a
+// connection string to the postgres service (postgres://app@postgres/shop)
+// when it reaches the PostgreSQL behind the shared socket (local.SocketPort).
+// serverTargetOf is the database a connection string reaches on this
+// server (localTarget), or in a Docker sidecar, the PostgreSQL that shares
+// its socket (serverCluster).
+func serverTargetOf(ctx context.Context, conn string) (serverTarget, bool) {
+	if t, ok := localTarget(conn); ok {
+		return t, true
+	}
+	if port, sock, ok := serverCluster(ctx, conn); ok {
+		return serverTarget{port: port, socket: sock}, true
+	}
+	return serverTarget{}, false
+}
+
+func serverCluster(ctx context.Context, conn string) (port int, socketDir string, ok bool) {
+	if port, socketDir, ok = localCluster(conn); ok || !inSidecar() {
+		return port, socketDir, ok
+	}
+	d, err := local.Open(conn)
+	if err != nil || d.Engine() != protocol.EnginePostgreSQL {
+		return 0, "", false
+	}
+	p, same, err := d.SocketPort(ctx, sidecarSocketDir)
+	if err != nil || !same {
+		return 0, "", false
+	}
+	return p, sidecarSocketDir, true
+}
 
 var encodedSocketRE = regexp.MustCompile(`^(postgres(?:ql)?://(?:[^@/]*@)?)(%2[Ff][^:/?]*)(:\d+)?(/[^?]*)?(\?.*)?$`)
 
@@ -100,7 +147,7 @@ func serverName(ctx context.Context, c *client.Client, name string) string {
 			return name
 		}
 	}
-	if t, ok := localTarget(s.URL); ok { // server_saved_mysql.go
+	if t, ok := serverTargetOf(ctx, s.URL); ok { // server_saved_mysql.go
 		if d := t.match(dbs); d != nil {
 			return d.Name
 		}
@@ -122,8 +169,11 @@ type serverProtection struct {
 // for it). Nothing happens when the database is
 // elsewhere.
 func protectOnServer(ctx context.Context, s savedDB, d *local.DB, checked, yes, asJSON bool) (*serverProtection, error) {
-	t, ok := localTarget(s.URL) // server_saved_mysql.go
+	t, ok := serverTargetOf(ctx, s.URL) // server_saved_mysql.go, and a Docker sidecar's PostgreSQL
 	if !ok {
+		if inSidecar() {
+			say(asJSON, "\nIt isn't the PostgreSQL this container shares a socket with (%s), so backups aren't turned on for it here.\n", sidecarSocketDir)
+		}
 		return nil, nil
 	}
 	port, sock := t.port, t.socket
@@ -150,7 +200,7 @@ func protectOnServer(ctx context.Context, s savedDB, d *local.DB, checked, yes, 
 		return &serverProtection{Name: m.Name, Status: m.Status}, nil
 	}
 	if !serverNameRE.MatchString(s.Name) { // the agent's rule too
-		say(asJSON, "\nTo protect it with backups on this server, save it under a name of 2-40 lowercase letters, digits and dashes (starting with a letter): sudo rowsafe add NAME ...\n")
+		say(asJSON, "\nTo protect it with backups on this server, save it under a name of 2-40 lowercase letters, digits and dashes (starting with a letter): %s add NAME ...\n", serverCLI())
 		return nil, nil
 	}
 	engine, how := protocol.EnginePostgreSQL, "PostgreSQL settings with ALTER SYSTEM and a reload"
@@ -205,7 +255,7 @@ func protectOnServer(ctx context.Context, s savedDB, d *local.DB, checked, yes, 
 	printTaskResult(plan[0])
 	printTaskTrouble(plan[0])
 	if plan[0].Status != protocol.StatusSucceeded {
-		return out, fmt.Errorf("the plan for %s failed; saved, but backups aren't on. Try again with sudo rowsafe plan %s", s.Name, s.Name)
+		return out, fmt.Errorf("the plan for %s failed; saved, but backups aren't on. Try again with %s plan %s", s.Name, serverCLI(), s.Name)
 	}
 	if t.mongo && mongoReplSetNeeded(plan[0]) {
 		say(asJSON, "\n%s", mongoReplSetHelp)
@@ -214,7 +264,7 @@ func protectOnServer(ctx context.Context, s savedDB, d *local.DB, checked, yes, 
 	q := fmt.Sprintf("Turn on backups for %s now? (%s; it never restarts)", s.Name, how)
 	if err := confirmChange(yes, q); err != nil {
 		if errors.Is(err, errNoTerminal) || errors.Is(err, errCancelled) {
-			say(asJSON, "Backups aren't on yet. Turn them on when you like: sudo rowsafe apply %s\n", s.Name)
+			say(asJSON, "Backups aren't on yet. Turn them on when you like: %s apply %s\n", serverCLI(), s.Name)
 			return out, nil
 		}
 		return out, err
@@ -230,7 +280,7 @@ func protectOnServer(ctx context.Context, s savedDB, d *local.DB, checked, yes, 
 	printTaskResult(applied[0])
 	printTaskTrouble(applied[0])
 	if applied[0].Status != protocol.StatusSucceeded {
-		return out, fmt.Errorf("turning on backups for %s failed (sudo rowsafe task %s shows why)", s.Name, applied[0].ID)
+		return out, fmt.Errorf("turning on backups for %s failed (%s task %s shows why)", s.Name, serverCLI(), applied[0].ID)
 	}
 	var res protocol.AdoptResult
 	_ = json.Unmarshal(applied[0].Result, &res)
@@ -242,7 +292,7 @@ func protectOnServer(ctx context.Context, s savedDB, d *local.DB, checked, yes, 
 		}
 	}
 	if !res.RestartRequired { // the plan said what a restart needs
-		say(asJSON, "\nBackups are on: Rowsafe checks that changes reach your storage, then takes the first full backup and a Proof (sudo rowsafe status %s).\n", s.Name)
+		say(asJSON, "\nBackups are on: Rowsafe checks that changes reach your storage, then takes the first full backup and a Proof (%s status %s).\n", serverCLI(), s.Name)
 	}
 	return out, nil
 }

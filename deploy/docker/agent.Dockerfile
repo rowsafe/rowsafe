@@ -35,6 +35,7 @@ COPY pglog ./pglog
 COPY preview ./preview
 COPY tune ./tune
 COPY pgprobe ./pgprobe
+COPY local ./local
 COPY pulse ./pulse
 ARG VERSION=dev
 ARG TARGETOS=linux
@@ -42,7 +43,10 @@ ARG TARGETARCH
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
       -ldflags "-s -w -X github.com/rowsafe/rowsafe/internal/agent.Version=${VERSION}" \
-      -o /out/rowsafe-agent ./cmd/rowsafe-agent
+      -o /out/rowsafe-agent ./cmd/rowsafe-agent && \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
+      -ldflags "-s -w -X main.version=${VERSION}" \
+      -o /out/rowsafe ./cmd/rowsafe
 
 FROM debian:${DEBIAN_SUITE}-slim
 ARG DEBIAN_SUITE
@@ -116,6 +120,9 @@ RUN install -d -o postgres -g postgres -m 0700 /var/lib/rowsafe /var/log/rowsafe
  && install -d -o postgres -g postgres -m 0700 /tmp/pgbackrest
 
 COPY --from=build /out/rowsafe-agent /usr/local/bin/rowsafe-agent
+# The rowsafe CLI, for a server without an account (ROWSAFE_URL=unix://...,
+# compose.no-account.yml): docker compose exec rowsafe rowsafe status shop.
+COPY --from=build /out/rowsafe /usr/local/bin/rowsafe
 
 LABEL org.opencontainers.image.title="Rowsafe agent (PostgreSQL ${PG_MAJOR} sidecar)" \
       org.opencontainers.image.source="https://github.com/rowsafe/rowsafe" \
