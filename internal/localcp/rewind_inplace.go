@@ -141,14 +141,14 @@ func (w window) pick(p time.Time) (set, timeline string, err error) {
 			case undoneAt != nil && !undoneAt.After(p):
 				// p is after the undo: backups taken while the rewound data
 				// ran are on a timeline that was left.
-				if !b.StartedAt.Before(e.At) && !b.StartedAt.After(*undoneAt) {
+				if s := w.start(b); !s.Before(e.At) && !s.After(*undoneAt) {
 					return false
 				}
 			case !e.At.After(p):
 				// p is after the rewind (and before any undo): its timeline
 				// leaves the old one at BranchAt, so backups taken on the
 				// old one after that point can't reach p.
-				if b.StartedAt.Before(e.At) && (e.BranchAt == nil || b.StartedAt.After(*e.BranchAt)) {
+				if s := w.start(b); s.Before(e.At) && (e.BranchAt == nil || s.After(*e.BranchAt)) {
 					return false
 				}
 			}
@@ -195,8 +195,8 @@ func (w window) pick(p time.Time) (set, timeline string, err error) {
 	var tl int64
 	for i := len(w.backups) - 1; i >= 0; i-- {
 		x := w.backups[i]
-		if !x.StartedAt.Before(last.At) {
-			if x.StartedAt.Before(next.At) {
+		if !w.start(x).Before(last.At) {
+			if w.start(x).Before(next.At) {
 				tl = w.timelines[x.ID]
 			}
 			break

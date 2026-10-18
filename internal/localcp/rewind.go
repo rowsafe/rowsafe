@@ -218,10 +218,22 @@ type window struct {
 	backups          []protocol.Backup // usable ones, newest first
 	timelines        map[string]int64  // backup ID -> timeline (0: unknown)
 	events           []rewindEvent     // oldest first (rewind_inplace.go)
+	// starts are when each backup's task started, on this control plane's
+	// clock: pgBackRest's own start time has whole seconds only, too coarse
+	// next to a rewind or an undo in the same second (window.start).
+	starts map[string]time.Time
+}
+
+// start is when a backup started, as precisely as known.
+func (w window) start(b protocol.Backup) time.Time {
+	if t, ok := w.starts[b.ID]; ok {
+		return t
+	}
+	return b.StartedAt
 }
 
 func (s *state) windowOf(d *dbRec, now time.Time) window {
-	w := window{timelines: s.Timelines, events: s.rewindEvents(d.ID)}
+	w := window{timelines: s.Timelines, events: s.rewindEvents(d.ID), starts: map[string]time.Time{}}
 	var all, fulls []protocol.Backup
 	for i := len(s.Backups) - 1; i >= 0; i-- { // newest first
 		if b := s.Backups[i]; b.DatabaseID == d.ID {
@@ -238,6 +250,13 @@ func (s *state) windowOf(d *dbRec, now time.Time) window {
 	for _, b := range all {
 		if !b.StartedAt.Before(oldest.StartedAt) {
 			w.backups = append(w.backups, b)
+		}
+	}
+	if len(w.events) > 0 {
+		for _, b := range w.backups {
+			if t := s.task(b.TaskID); t != nil && t.StartedAt != nil {
+				w.starts[b.ID] = *t.StartedAt
+			}
 		}
 	}
 	earliest, latest := oldest.StoppedAt.UTC(), all[0].StoppedAt.UTC()
