@@ -357,11 +357,17 @@ Pulse: health, monitoring and alerts
                                              without ACTION: the actions and whether each can run now. E.g.
                                              restrict_access --allow 10.0.0.0/16, enable_tls, firewall, set_password
                                              --role app (the password is made here; Rowsafe never sees it)
-  rowsafe logs [NAME] [--kind errors|locks|maintenance|KIND] [--search TEXT] [--limit 50] [--groups] [--follow] [--json]
+  rowsafe logs [NAME] [--errors | --kind errors|locks|maintenance|KIND] [--since 1h] [--grep TEXT] [--limit 50]
+        [--groups] [--follow] [--json]
                                              the database's log entries (redacted on the server), newest last;
-                                             --groups: repeated messages of the last 24 hours
+                                             --groups: repeated messages (of the last 24 hours, or --since);
+                                             slow statements over time: --kind slow_query --since 24h
   rowsafe logs set [NAME] [--send on|off] [--full-text on|off] [--json]
-                                             send the logs to Rowsafe or not; keep literal values or not
+                                             send the logs to Rowsafe (on a server on its own: keep them there)
+                                             or not; keep literal values or not
+  rowsafe logs forward [list | --url URL | --type T ...]
+                                             forward the logs: the same as rowsafe log-destinations (a webhook
+                                             with --url alone; on a server on its own, sent from the server)
   rowsafe log-destinations list [--json]     where the organization's logs are forwarded
   rowsafe log-destinations add --type datadog|betterstack|papertrail|loki|elasticsearch|webhook|syslog --name NAME
         [--site S] [--url U] [--host H --port P] [--username U] [--index I] [--kinds errors,locks]

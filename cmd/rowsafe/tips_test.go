@@ -55,4 +55,3 @@ func TestTips(t *testing.T) {
 		t.Fatalf("not at a terminal: %q", out)
 	}
 }
-
