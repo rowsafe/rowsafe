@@ -67,6 +67,10 @@ type state struct {
 	// forecasts are the disk forecasts from the history (history.go), set
 	// before the alerts run.
 	forecasts map[string]protocol.DiskForecast
+	// Standby (standby.go): this server's half of each standby pair, and
+	// the fences its agent holds.
+	Standby map[string]*pairRec `json:"standby,omitempty"`
+	Fences  []*fenceRec         `json:"fences,omitempty"`
 }
 
 // hostRec is this server, once its agent has enrolled.

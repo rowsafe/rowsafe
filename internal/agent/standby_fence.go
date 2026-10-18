@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -108,6 +109,18 @@ func (a *Agent) standbyFence(ctx context.Context, db protocol.DatabaseSpec, p pr
 			res.Warnings = append(res.Warnings, "pushing the last WAL to the bucket: "+err.Error())
 		default:
 			res.FinalWALPushed = pushed
+		}
+	}
+	if p.Record {
+		// Without an account (standby_local.go): the standby reads where the
+		// last change is from the bucket.
+		systemID := cmp.Or(cd.SystemID, c.SystemID, p.SystemID)
+		err := a.writeRecord(ctx, db, protocol.PrimaryRecord{SystemID: systemID, State: protocol.PrimaryRecordStopped,
+			Timeline: res.Timeline, CheckpointLSN: res.CheckpointLSN})
+		if err != nil {
+			res.Warnings = append(res.Warnings, "couldn't say in the bucket that this server stopped: "+err.Error())
+		} else {
+			res.Recorded = true
 		}
 	}
 	res.Summary = fmt.Sprintf("Stopped PostgreSQL on port %d for good (%s): standby.signal keeps it read-only if started again, and the agent keeps it stopped.",
@@ -237,6 +250,18 @@ func (a *Agent) standbyUnfence(ctx context.Context, db protocol.DatabaseSpec, p 
 	if err := a.helperCanStopStart(fence.Port); err != nil {
 		return nil, err
 	}
+	if p.Record {
+		// Without an account (standby_local.go): never start it again once
+		// another server was promoted.
+		pr, err := a.readRecord(ctx, db)
+		if err != nil {
+			return nil, fmt.Errorf("Rowsafe can't check in the bucket that the standby wasn't promoted, so PostgreSQL stays stopped: %w", err)
+		}
+		if pr != nil && pr.State == protocol.PrimaryRecordPrimary && !a.mine(pr) {
+			return nil, fmt.Errorf("%s was promoted to primary at %s: this server's copy is behind it and must never take writes again. "+
+				"Turn it into the new standby instead (sudo rowsafe standby create %s)", pr.Primary, pr.At.Format("2006-01-02 15:04 MST"), db.Name)
+		}
+	}
 	if err := rt.releaseFence(p.FenceID); err != nil {
 		return nil, err
 	}
@@ -255,6 +280,15 @@ func (a *Agent) standbyUnfence(ctx context.Context, db protocol.DatabaseSpec, p 
 	}
 	res.Started = true
 	res.Summary = fmt.Sprintf("PostgreSQL on port %d is running again as the primary.", fence.Port)
+	if p.Record {
+		st, err := ops.status(ctx, db)
+		if err == nil {
+			err = a.writeRecord(ctx, db, protocol.PrimaryRecord{SystemID: st.SystemID, State: protocol.PrimaryRecordPrimary, Timeline: st.Timeline})
+		}
+		if err != nil {
+			res.Summary += " Saying so in the bucket failed (" + err.Error() + "): the standby still sees it stopped, so don't promote it."
+		}
+	}
 	tl.Printf("%s", res.Summary)
 	return res, nil
 }

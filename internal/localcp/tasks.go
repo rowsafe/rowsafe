@@ -305,6 +305,10 @@ func (s *state) afterTask(t *taskRec, db *dbRec, req protocol.CompleteRequest, n
 		return s.afterUpgrade(db, ok, now) // upgrade.go
 	case protocol.TaskRewindInPlace, protocol.TaskRewindUndo, protocol.TaskRewindCleanup:
 		return s.afterInPlace(t, db, ok, req.Result, now) // rewind_inplace.go
+	default:
+		if protocol.IsStandbyTask(t.Type) {
+			return s.afterStandby(t, db, ok, req.Result, now) // standby.go
+		}
 	}
 	return nil
 }

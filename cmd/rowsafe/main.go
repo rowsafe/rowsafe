@@ -262,6 +262,21 @@ Standby: a second server that stays in sync, is readable, and takes over
   rowsafe standby forget [NAME] [--host SERVER] [--yes]
                                              stop watching a fenced old primary (it stays stopped; asks you to
                                              type its name)
+  On servers on their own (both set up with the same bucket and passphrase), one command on each server:
+  sudo rowsafe standby link NAME --address IP
+                                             on the primary: let the standby at IP stream (optional; without
+                                             it the standby follows through the bucket)
+  sudo rowsafe standby create NAME [--primary IP[:PORT]] [--port N] [--folder F] [--yes]
+                                             on the standby's server: its empty cluster restores the backups
+                                             and follows the primary; on a fenced old primary, rebuilds it
+  sudo rowsafe standby fence NAME [--yes]    on the primary: stop it for good for a switchover (the bucket
+                                             says where its last change is)
+  sudo rowsafe standby promote NAME [--primary-down] [--yes]
+                                             on the standby's server: promote it (after the fence, nothing is
+                                             lost; --primary-down when the primary is down)
+  sudo rowsafe standby unfence|unlink|remove|forget NAME [--yes]
+                                             start a fenced primary again (if the standby wasn't promoted),
+                                             stop the streaming, remove the standby, let a fenced copy go
   rowsafe move [NAME] --to SERVER [--port N] [--at TIME] [--keep-days 7] [--fingerprint F]
                                              move the database to another server: a standby there, then a
                                              planned switchover (nothing lost); the old server is kept stopped
