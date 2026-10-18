@@ -36,6 +36,7 @@ type Server struct {
 	alertHTTP *http.Client   // alerts.go
 	allowHTTP bool           // tests: channels on http://
 	sending   sync.WaitGroup // notifications on their way (alerts.go, weekly.go)
+	hist      *history       // history.go
 }
 
 // Open loads (or starts) the state kept in dir.
@@ -47,8 +48,12 @@ func Open(dir string, log *slog.Logger) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	hist, err := openHistory(filepath.Join(dir, HistoryFile))
+	if err != nil {
+		return nil, err
+	}
 	return &Server{st: st, log: log, now: time.Now, updates: &updates{http: &http.Client{Timeout: 30 * time.Second}},
-		alertHTTP: &http.Client{Timeout: 15 * time.Second}}, nil
+		alertHTTP: &http.Client{Timeout: 15 * time.Second}, hist: hist}, nil
 }
 
 // Serve listens on the Unix socket at path (0660: the agent's user and
@@ -72,6 +77,7 @@ func (s *Server) Serve(ctx context.Context, path string) error {
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(sctx)
+		s.hist.flush(s.now()) // history.go
 	}()
 	s.cameBack()
 	go s.run(ctx)
@@ -101,8 +107,10 @@ func (s *Server) run(ctx context.Context) {
 // the alerts that changed.
 func (s *Server) Tick() {
 	now := s.now()
+	fcs := s.hist.forecasts(s.knownDBs(), now) // history.go
 	var notices []notice
 	if err := s.st.update(func(st *state) error {
+		st.forecasts = fcs
 		if n := st.reap(now); n > 0 {
 			s.log.Warn("tasks lost after their lease ran out", "count", n)
 		}
@@ -169,6 +177,7 @@ func (s *Server) Handler() http.Handler {
 	s.rewindRoutes(mux)                                             // rewind.go
 	s.upgradeRoutes(mux)                                            // upgrade.go
 	s.restoreBucketRoutes(mux)                                      // restore_bucket.go
+	s.historyRoutes(mux)                                            // history.go
 	mux.HandleFunc("GET /v1/notification-channels", s.channelsList) // alerts.go
 	mux.HandleFunc("POST /v1/notification-channels", s.channelsCreate)
 	mux.HandleFunc("DELETE /v1/notification-channels/{id}", s.channelsDelete)

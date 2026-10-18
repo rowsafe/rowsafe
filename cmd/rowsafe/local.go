@@ -22,7 +22,8 @@ import (
 // mysql://user@host/db, mongodb://user@host/db, redis://host:6379), or
 // $DATABASE_URL when there is no saved login.
 // Nothing is sent to Rowsafe. Backups, Proof and alerts need the agent on
-// the server; history and the dashboard need an account (rowsafe login).
+// the server, and so does history (the agent keeps it: server_history.go);
+// the dashboard needs an account (rowsafe login).
 
 // localHelp is rowsafe help local.
 const localHelp = `Save a database once, then use it by name.
@@ -58,12 +59,17 @@ restore to any second, all on that server:
                                      the name; stops PostgreSQL). sudo rowsafe rewind undo shop puts
                                      it back as it was, for 7 days
   sudo rowsafe backups shop | proofs shop | restores shop | backup shop | proof shop
+  sudo rowsafe pulse shop | top shop  with what the agent saw over time: when the disk will be
+                                     full, which queries got slower (hour by hour, up to 14 days)
   sudo rowsafe channels add --type slack --name ops --url https://hooks.slack.com/...
                                      alerts when backups, Proof, continuous backup or the disk need you
                                      (slack, discord, ntfy or a signed webhook); sudo rowsafe alerts
   sudo rowsafe login                 later: adds the dashboard (every server in one place, alerts
                                      from outside when the server is down, history, your team),
                                      keeping its backups, Proofs and Marks
+                                     from outside when the server is down, charts, your team,
+                                     rewinding the whole database in place), keeping its backups,
+                                     Proofs and Marks
 
 From anywhere, on a PostgreSQL, MySQL, MariaDB, MongoDB, Redis or Valkey
 database this computer reaches (also managed ones): save it once, then use
@@ -330,17 +336,23 @@ func localPulse(ctx context.Context, l *localDB, args []string) error {
 	if err != nil {
 		return err
 	}
-	h, err := l.Health(ctx, opts)
+	hist, name := serverHistory(ctx, l) // the agent's, on its server (server_history.go)
+	h, err := l.Health(ctx, withHistory(opts, hist))
 	if err != nil {
 		return err
 	}
+	applyHistory(&h, hist)
 	if *asJSON {
 		if err := printJSON(h); err != nil {
 			return err
 		}
 	} else {
 		printHealth(h, l.Command("fix"))
-		localFooter(l)
+		if hist != nil {
+			historyFooter(name, hist)
+		} else {
+			localFooter(l)
+		}
 	}
 	if h.Score < 70 {
 		return exitError(3)
@@ -364,7 +376,8 @@ func localFix(ctx context.Context, l *localDB, args []string) error {
 	if err != nil {
 		return err
 	}
-	h, err := l.Health(ctx, opts)
+	hist, _ := serverHistory(ctx, l) // server_history.go
+	h, err := l.Health(ctx, withHistory(opts, hist))
 	if err != nil {
 		return err
 	}
@@ -459,6 +472,9 @@ func localTop(ctx context.Context, l *localDB, args []string) error {
 	if err := noArgs(pos); err != nil {
 		return err
 	}
+	if c, name, ok := serverDB(ctx, l); ok { // the agent's readings over time (server_history.go)
+		return topCmd(ctx, c, append([]string{name}, args...))
+	}
 	st, err := l.Statements(ctx)
 	if err != nil {
 		return err
@@ -468,7 +484,7 @@ func localTop(ctx context.Context, l *localDB, args []string) error {
 		return printJSON(st)
 	}
 	return printCumulativeTopFor(l.Engine(), l.Name(), *st, *width,
-		"Which queries got slower over time needs history: the Rowsafe agent keeps it.")
+		"Which queries got slower over time needs history: the Rowsafe agent keeps it on the database's server (sudo rowsafe top NAME there).")
 }
 
 func localActivity(ctx context.Context, l *localDB, args []string) error {

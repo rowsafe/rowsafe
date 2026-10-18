@@ -59,6 +59,9 @@ type state struct {
 	AlertPending map[string]time.Time  `json:"alert_pending,omitempty"`
 	Metrics      map[string]*dbMetrics `json:"metrics,omitempty"`
 	Weekly       weeklyRec             `json:"weekly_report,omitzero"` // weekly.go
+	// forecasts are the disk forecasts from the history (history.go), set
+	// before the alerts run.
+	forecasts map[string]protocol.DiskForecast
 }
 
 // hostRec is this server, once its agent has enrolled.

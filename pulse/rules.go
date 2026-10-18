@@ -25,6 +25,11 @@ const idleSessionMin = 5 * time.Minute
 func (e *evaluator) disk(fresh bool) {
 	const label = "Disk space"
 	freePct, ok := e.in.Metrics[collect.MDiskFreePct]
+	freeBytes := e.in.Metrics[collect.MDiskFreeBytes]
+	if fc := e.in.Forecast; (!fresh || !ok) && fc != nil && fc.FreeBytes != nil && fc.TotalBytes != nil && *fc.TotalBytes > 0 {
+		// The agent's own disk readings (history.go).
+		freePct, freeBytes, fresh, ok = 100*float64(*fc.FreeBytes)/float64(*fc.TotalBytes), float64(*fc.FreeBytes), true, true
+	}
 	if !fresh || !ok {
 		why := "No disk readings (PostgreSQL shows its data directory only to superusers)."
 		if e.mysqlFamily() || e.mongodb() || e.redisFamily() {
@@ -33,7 +38,6 @@ func (e *evaluator) disk(fresh bool) {
 		e.check(CatDisk, label, "unknown", why)
 		return
 	}
-	freeBytes := e.in.Metrics[collect.MDiskFreeBytes]
 	name := e.engineName()
 	space := e.spaceFixes()
 	full, cmd := "Free up or add disk space now. The change log folder (pg_wal) grows when archiving or a replication slot holds it back.", "df -h; du -sh $PGDATA/pg_wal"
@@ -61,8 +65,13 @@ func (e *evaluator) disk(fresh bool) {
 			Action:      diskAction(map[bool]string{false: "Plan more disk space, or reclaim space from bloated tables and unused indexes.", true: "Plan more disk space, or reclaim space from old data and unused indexes."}[e.mongodb()], space),
 			Fixes:       space})
 	}
+	e.forecastFindings(space) // history.go
 	status, _ := e.statusOf(CatDisk, "ok", "")
-	e.check(CatDisk, label, status, fmt.Sprintf("%.0f%% free (%s).", freePct, Bytes(freeBytes)))
+	detail := fmt.Sprintf("%.0f%% free (%s).", freePct, Bytes(freeBytes))
+	if fc := e.in.Forecast; fc != nil && (fc.State == protocol.ForecastFilling || fc.State == protocol.ForecastNotGrowing) {
+		detail += " " + fc.Summary
+	}
+	e.check(CatDisk, label, status, detail)
 }
 
 func diskAction(base string, fixes []protocol.FindingFix) string {
@@ -321,6 +330,7 @@ func (e *evaluator) performance(fresh bool) {
 			}
 		}
 	}
+	e.regressionFinding() // history.go
 	e.extra(PointAfterCache)
 	if ins := e.insights(); ins != nil {
 		var unusedBytes int64

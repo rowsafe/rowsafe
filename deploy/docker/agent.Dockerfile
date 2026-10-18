@@ -35,6 +35,7 @@ COPY pglog ./pglog
 COPY preview ./preview
 COPY tune ./tune
 COPY pgprobe ./pgprobe
+COPY pulse ./pulse
 ARG VERSION=dev
 ARG TARGETOS=linux
 ARG TARGETARCH

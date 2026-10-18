@@ -241,10 +241,10 @@ func (e *evaluator) tuneCommand() string {
 	return e.cmd("tune")
 }
 
-// slowerToo: the dashboard keeps history, so it also shows which queries
-// got slower.
+// slowerToo: the dashboard and the agent keep history, so they also show
+// which queries got slower.
 func (e *evaluator) slowerToo() string {
-	if e.in.Dashboard {
+	if e.in.Dashboard || e.in.Forecast != nil {
 		return " or which got slower"
 	}
 	return ""

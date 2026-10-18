@@ -13,6 +13,7 @@ package localcp
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -94,6 +95,7 @@ type ruleResult struct {
 	known, firing                    bool
 	summary, description, next, unit string
 	value, threshold                 *float64
+	severity                         string // "" is the rule's
 }
 
 func fire(summary, description, next string) ruleResult {
@@ -375,6 +377,7 @@ func (s *state) evaluateAlerts(now time.Time) []notice {
 			case !r.known:
 			case r.firing && open != nil:
 				open.Summary, open.Description, open.NextStep = r.summary, r.description, r.next
+				open.Severity = cmp.Or(r.severity, rule.severity)
 				open.Value, open.Threshold = r.value, r.threshold
 				if open.Severity == protocol.SeverityCritical && open.AcknowledgedAt == nil &&
 					open.NotifiedAt != nil && now.Sub(*open.NotifiedAt) >= alertReminderEvery {
@@ -393,7 +396,7 @@ func (s *state) evaluateAlerts(now time.Time) []notice {
 				delete(s.AlertPending, key)
 				at := now
 				a := &alertRec{Key: key, NotifiedAt: &at, Alert: protocol.Alert{
-					ID: newID("alr"), Rule: rule.name, Severity: rule.severity, State: "firing",
+					ID: newID("alr"), Rule: rule.name, Severity: cmp.Or(r.severity, rule.severity), State: "firing",
 					Database: &protocol.AlertDatabase{ID: d.ID, Name: d.Name}, Host: s.alertHost(),
 					Summary: r.summary, Description: r.description, NextStep: r.next,
 					Value: r.value, Threshold: r.threshold, Unit: r.unit, StartedAt: first.UTC(),
@@ -994,8 +997,8 @@ func bytesText(b float64) string {
 	return fmt.Sprintf("%.1f %s", b, units[i])
 }
 
-// monitoring keeps the disk readings and errors the rules use; the rest
-// of the report stays on the server.
+// monitoring keeps the disk readings and errors the rules use, and the
+// history (history.go).
 func (srv *Server) monitoring(w http.ResponseWriter, r *http.Request) {
 	var rep protocol.MonitoringReport
 	if !readJSON(w, r, &rep) {
@@ -1006,5 +1009,6 @@ func (srv *Server) monitoring(w http.ResponseWriter, r *http.Request) {
 		st.recordMonitoring(rep, now)
 		return nil
 	})
+	srv.recordHistory(rep, now) // history.go
 	writeJSON(w, http.StatusOK, protocol.MonitoringAck{})
 }

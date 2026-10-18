@@ -13,7 +13,8 @@
 // (locks, cache, indexes, settings), replication and, when the database
 // runs on this machine, its disk. Backups, restore tests (Proof), history
 // (regressions, outages, disk forecasts) and alerts need the Rowsafe agent
-// on the server and the dashboard; they are not checked here.
+// on the server; its history comes in through Input.Forecast and
+// Input.Regressions (history.go), else they are not checked.
 //
 // The score starts at 100. Each finding takes off its penalty, and the
 // penalties of one category together never take off more than that
@@ -95,6 +96,16 @@ type Input struct {
 	// SettingsLocked says why settings can't be changed with this
 	// connection (not a superuser); "" when they can.
 	SettingsLocked string
+
+	// ---- history (history.go), from a caller that keeps the agent's
+	// readings over time ----
+
+	// Forecast is when the disk fills up at its recent growth (it also
+	// stands in for the disk readings when this reading has none). A
+	// caller that keeps history always sets it, even without enough yet.
+	Forecast *protocol.DiskForecast
+	// Regressions are the queries that got slower, slowest first.
+	Regressions []Regression
 
 	// ---- the dashboard (internal/health in the control plane) ----
 
@@ -185,7 +196,7 @@ func Evaluate(in Input, now time.Time) protocol.DatabaseHealth {
 	fresh := len(in.Metrics) > 0
 	e.check(CatProtection, "Backups", "unknown",
 		"Not checked here: continuous backups and the weekly restore test need the Rowsafe agent on the server.")
-	if in.Local {
+	if in.Local || in.Forecast != nil && in.Forecast.FreeBytes != nil {
 		e.disk(fresh)
 	}
 	switch {

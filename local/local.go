@@ -225,6 +225,10 @@ type Options struct {
 	// can't see another server's from a connection; 0: unknown).
 	MemoryBytes int64
 	CPUs        int
+	// Forecast and Regressions come from the agent's history, on its
+	// server (pulse.Input's).
+	Forecast    *protocol.DiskForecast
+	Regressions []pulse.Regression
 }
 
 // connectError says plainly that the database couldn't be reached.
@@ -345,7 +349,8 @@ func (d *DB) settingsLocked(ctx context.Context) string {
 func (d *DB) input(r *collect.Reading, opts Options) pulse.Input {
 	return pulse.Input{Database: d.Name(), Host: d.Host(), Metrics: r.Metrics, Activity: r.Activity,
 		Slots: r.ReplicationSlots, Replication: r.Replication, Insights: r.Insights, Settings: r.Settings,
-		VersionNum: r.VersionNum, Workload: opts.Workload, Disk: opts.Disk, Local: r.Local, Command: d.Command}
+		VersionNum: r.VersionNum, Workload: opts.Workload, Disk: opts.Disk, Local: r.Local, Command: d.Command,
+		Forecast: opts.Forecast, Regressions: opts.Regressions}
 }
 
 // Insights reads tables and indexes: sizes, estimated bloat, unused and
