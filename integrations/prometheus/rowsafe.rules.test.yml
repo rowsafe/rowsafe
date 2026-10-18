@@ -1,0 +1,127 @@
+# promtool test rules rowsafe.rules.test.yml
+rule_files:
+  - rowsafe.rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  # The newest backup finished at time 0: 26 hours later (plus "for") it fires.
+  - interval: 1m
+    input_series:
+      - series: 'rowsafe_database_info{database="app",host="db1",engine="postgresql",status="active"}'
+        values: '1x1700'
+      - series: 'rowsafe_backup_last_success_timestamp_seconds{database="app",host="db1",type="any"}'
+        values: '0x1700'
+    alert_rule_test:
+      - eval_time: 25h
+        alertname: RowsafeBackupMissing
+        exp_alerts: []
+      - eval_time: 27h
+        alertname: RowsafeBackupMissing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              database: app
+              host: db1
+              type: any
+            exp_annotations:
+              summary: "No successful backup of app in 1d 3h 0m 0s"
+              description: >-
+                The newest successful backup of app on db1 finished 1d 3h 0m 0s ago; one is scheduled every day.
+                sudo rowsafe backups app says why; sudo rowsafe backup app runs one now.
+
+  # Archiving fails from minute 10 on (the failure counter keeps rising).
+  - interval: 1m
+    input_series:
+      - series: 'rowsafe_database_info{database="app",host="db1",engine="postgresql",status="active"}'
+        values: '1x60'
+      - series: 'rowsafe_wal_last_archived_timestamp_seconds{database="app",host="db1"}'
+        values: '0x60'
+      - series: 'rowsafe_wal_last_failed_timestamp_seconds{database="app",host="db1"}'
+        values: '_x10 600+60x50'
+      - series: 'rowsafe_wal_archive_failed_total{database="app",host="db1"}'
+        values: '0x10 1+1x50'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: RowsafeWALArchivingFailing
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: RowsafeWALArchivingFailing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              database: app
+              host: db1
+              engine: postgresql
+              status: active
+            exp_annotations:
+              summary: "Continuous backup is failing for app"
+              description: >-
+                app on db1 has failed to archive its changes for over 10 minutes. Restores stop at the
+                last archived moment, and the change log grows on the server's disk until it fills.
+                sudo rowsafe status app says why.
+
+  # The server stops answering Prometheus.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="rowsafe",instance="db1:9188"}'
+        values: '1x5 0x10'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: RowsafeMetricsDown
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: RowsafeMetricsDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: rowsafe
+              instance: db1:9188
+            exp_annotations:
+              summary: "Rowsafe on db1:9188 is not answering"
+              description: >-
+                Prometheus can't read Rowsafe's metrics on db1:9188. The server or the Rowsafe agent is
+                down: scheduled backups, Proofs and the server's own alerts are paused until it is back.
+                On the server: sudo systemctl status rowsafe-agent
+
+  # A failed Proof fires at once; a failed backup task for an hour.
+  - interval: 1m
+    input_series:
+      - series: 'rowsafe_database_info{database="app",host="db1",engine="postgresql",status="active"}'
+        values: '1x90'
+      - series: 'rowsafe_drill_last_passed{database="app",host="db1"}'
+        values: '1x4 0x80'
+      - series: 'rowsafe_task_last_failure_timestamp_seconds{database="app",host="db1",type="backup_diff"}'
+        values: '_x4 300x80'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: RowsafeProofFailed
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: RowsafeProofFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              database: app
+              host: db1
+            exp_annotations:
+              summary: "The newest Proof of app failed"
+              description: >-
+                The newest restore test of app on db1 failed. Until one passes, there is no proof its
+                backups restore. sudo rowsafe proof app runs one now.
+      - eval_time: 30m
+        alertname: RowsafeTaskFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              database: app
+              host: db1
+              type: backup_diff
+            exp_annotations:
+              summary: "A backup_diff task of app failed"
+              description: >-
+                The newest backup_diff task of app on db1 failed or was lost. sudo rowsafe tasks app
+                shows its log.
+      - eval_time: 70m
+        alertname: RowsafeTaskFailed
+        exp_alerts: []

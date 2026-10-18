@@ -3,9 +3,14 @@
 // serves, on that Unix socket, the agent API the agent already speaks and the
 // part of the user API the rowsafe CLI needs on the server. It keeps one
 // server's databases, tasks, backups, Proofs and Marks in a JSON file, runs
-// the schedules (full backups weekly, differential ones daily, Proof weekly)
-// and moves a database through setup (plan, apply, restart, check, active)
-// the way the hosted control plane does.
+// the schedules (full backups weekly, differential ones daily, Proof weekly;
+// MongoDB, Redis, Valkey, SQLite: a full backup daily; ClickHouse: a
+// differential one hourly; OpenSearch, Qdrant, Meilisearch: snapshots every
+// few minutes) and moves a database through setup (plan, apply, restart,
+// check, active) the way the hosted control plane does. PostgreSQL, MySQL
+// and MariaDB (mysql.go), MongoDB (mongodb.go), Redis and Valkey
+// (redis.go), SQLite (sqlite.go), ClickHouse (clickhouse.go), OpenSearch,
+// Qdrant and Meilisearch (search.go).
 //
 // The socket's file permissions are its access control, like Docker's: the
 // agent's user (postgres) and root. Nothing leaves the server.
@@ -43,6 +48,15 @@ type state struct {
 	Drills    []protocol.Drill        `json:"drills"`
 	Marks     []protocol.RestorePoint `json:"restore_points"`
 	Copies    []*copyRec              `json:"copies,omitempty"` // Rewind (rewind.go)
+	// Rewinds in place and the timeline each backup was taken on
+	// (rewind_inplace.go): which backup and timeline a restore follows.
+	Rewinds   []*inPlaceRec    `json:"rewinds,omitempty"`
+	Timelines map[string]int64 `json:"timelines,omitempty"` // backup ID -> PostgreSQL timeline
+	// The second copy (secondcopy.go): what the agent reports about it, the
+	// backups in it, and the newest measurement of each storage.
+	SecondCopies map[string]*secondCopyRec       `json:"second_copies,omitempty"`
+	Backups2     []protocol.Backup               `json:"second_copy_backups,omitempty"`
+	Storage      map[string]protocol.RepoStorage `json:"storage,omitempty"`
 	// Alerts (alerts.go): channels, alerts, conditions waiting out their
 	// "for" duration, and the newest monitoring reading of each database.
 	Channels     []*channelRec         `json:"channels,omitempty"`
@@ -50,6 +64,18 @@ type state struct {
 	AlertPending map[string]time.Time  `json:"alert_pending,omitempty"`
 	Metrics      map[string]*dbMetrics `json:"metrics,omitempty"`
 	Weekly       weeklyRec             `json:"weekly_report,omitzero"` // weekly.go
+	// forecasts are the disk forecasts from the history (history.go), set
+	// before the alerts run.
+	forecasts map[string]protocol.DiskForecast
+	// Standby (standby.go): this server's half of each standby pair, and
+	// the fences its agent holds.
+	Standby map[string]*pairRec `json:"standby,omitempty"`
+	Fences  []*fenceRec         `json:"fences,omitempty"`
+	// Guard (guard.go): previews, safe copies and masking rules.
+	Guard guardState `json:"guard,omitzero"`
+	// Security (security.go): each database's newest security report.
+	Security map[string]*securityRec `json:"security,omitempty"`
+	Files    *filesData              `json:"files,omitempty"` // files.go
 }
 
 // hostRec is this server, once its agent has enrolled.
@@ -62,6 +88,9 @@ type hostRec struct {
 	EnrolledAt   time.Time  `json:"enrolled_at,omitzero"`
 	LastSeen     *time.Time `json:"last_seen,omitempty"`
 	RestartPorts []int      `json:"restart_ports,omitempty"`
+	// Software is the agent's newest software report (upgrade.go).
+	Software   *protocol.SoftwareReport `json:"software,omitempty"`
+	SoftwareAt *time.Time               `json:"software_at,omitempty"`
 }
 
 // dbRec is a database with what its health depends on.
@@ -171,6 +200,9 @@ func (s *state) prune() {
 	if n := len(s.Backups) - keepBackups; n > 0 {
 		s.Backups = s.Backups[n:]
 	}
+	if n := len(s.Backups2) - keepBackups; n > 0 {
+		s.Backups2 = s.Backups2[n:]
+	}
 	if n := len(s.Drills) - keepDrills; n > 0 {
 		s.Drills = s.Drills[n:]
 	}
@@ -178,6 +210,9 @@ func (s *state) prune() {
 		s.Marks = s.Marks[n:]
 	}
 	s.pruneAlerts()
+	s.pruneRewinds()         // rewind_inplace.go
+	s.pruneGuard(time.Now()) // guard.go
+	s.pruneFiles(time.Now())
 	// Copies gone for a week are forgotten.
 	s.Copies = slices.DeleteFunc(s.Copies, func(c *copyRec) bool {
 		return c.RemovedAt != nil && time.Since(*c.RemovedAt) > 7*24*time.Hour

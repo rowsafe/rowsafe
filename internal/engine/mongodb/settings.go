@@ -65,17 +65,29 @@ func (e *Engine) settingsSnapshot(ctx context.Context, env agent.EngineEnv, c *m
 		return nil, err
 	}
 	dbPath := cmpOr(lookupString(opts.Parsed, "storage", "dbPath"), "/var/lib/mongodb")
-	snap := &protocol.SettingsSnapshot{Settings: []protocol.PGSetting{}, Host: collect.HostFacts("", dbPath)}
+	host := collect.HostFacts("", dbPath)
 	if env.Config.Sidecar() {
-		snap.Host = collect.HostFacts("", "")
+		host = collect.HostFacts("", "")
 	}
+	snap, err := readSettings(ctx, c, opts.Parsed, host)
+	if err != nil {
+		return nil, err
+	}
+	_, snap.ChangeBlocked = agent.TuningAllowed(env.Config, protocol.EngineMongoDB)
+	return snap, nil
+}
+
+// readSettings reads the catalog's settings from the running server and its
+// configuration file (parsed: getCmdLineOpts), on a server with host's
+// memory, CPUs and disk.
+func readSettings(ctx context.Context, c *mongo.Client, parsed bson.M, host protocol.SettingsHost) (*protocol.SettingsSnapshot, error) {
+	snap := &protocol.SettingsSnapshot{Settings: []protocol.PGSetting{}, Host: host}
 	var build struct {
 		VersionArray []int `bson:"versionArray"`
 	}
 	if runAdmin(ctx, c, bson.D{{Key: "buildInfo", Value: 1}}, &build) == nil && len(build.VersionArray) >= 3 {
 		snap.VersionNum = build.VersionArray[0]*10000 + build.VersionArray[1]*100 + build.VersionArray[2]
 	}
-	_, snap.ChangeBlocked = agent.TuningAllowed(env.Config, protocol.EngineMongoDB)
 	var ss bson.M
 	if err := runAdmin(ctx, c, bson.D{{Key: "serverStatus", Value: 1}}, &ss); err != nil {
 		return nil, err
@@ -103,7 +115,7 @@ func (e *Engine) settingsSnapshot(ctx context.Context, env agent.EngineEnv, c *m
 		if s.runtime {
 			st.Context = "sighup"
 		}
-		if fv := fileValue(opts.Parsed, name); fv != "" {
+		if fv := fileValue(parsed, name); fv != "" {
 			st.Source, st.SourceFile = "configuration file", "mongod.conf"
 			st.AutoConf = &fv
 			if !tune.SameValue(st, fv) {

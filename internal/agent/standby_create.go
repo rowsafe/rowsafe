@@ -163,23 +163,49 @@ func (a *Agent) standbyCreate(ctx context.Context, db protocol.DatabaseSpec, p p
 		}
 	}
 	db.Port, db.SocketDir = p.Port, p.SocketDir
-	if err := a.peerAllowed(p.Box.SenderKey, "the primary"); err != nil {
-		return nil, err
-	}
-	plain, err := handoff.Open(rt.key, p.Box, protocol.HandoffPurposeStandby, protocol.StandbyHandoffContext(db.ID, p.StandbyID), p.SenderKey)
-	if err != nil {
-		return nil, fmt.Errorf("opening the primary's sealed handoff: %w", err)
-	}
 	var sec protocol.StandbySecrets
-	err = json.Unmarshal(plain, &sec)
-	clear(plain)
-	if err != nil {
-		return nil, fmt.Errorf("reading the primary's handoff: %w", err)
+	if p.FromBucket {
+		// Without an account: this server's own settings for the primary's
+		// bucket, no box (standby_local.go).
+		var err error
+		if sec, err = a.bucketSecrets(p); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := a.peerAllowed(p.Box.SenderKey, "the primary"); err != nil {
+			return nil, err
+		}
+		plain, err := handoff.Open(rt.key, p.Box, protocol.HandoffPurposeStandby, protocol.StandbyHandoffContext(db.ID, p.StandbyID), p.SenderKey)
+		if err != nil {
+			return nil, fmt.Errorf("opening the primary's sealed handoff: %w", err)
+		}
+		err = json.Unmarshal(plain, &sec)
+		clear(plain)
+		if err != nil {
+			return nil, fmt.Errorf("reading the primary's handoff: %w", err)
+		}
 	}
 	if err := a.helperCanStopStart(p.Port); err != nil {
 		return nil, err
 	}
 	ops := a.sops()
+	hadRepo := exists(a.repoPath(db.ID))
+	if p.FromBucket {
+		// What the primary's prepare would have said, from the bucket.
+		dataDir := ""
+		if c, ok := rt.cluster(db.ID); ok && p.Rebuild {
+			dataDir = c.DataDir
+		} else if f, err := ops.facts(ctx, db); err == nil && !p.Rebuild {
+			dataDir = f.DataDir
+		}
+		if err := a.bucketFacts(ctx, db, dataDir, sec, &p); err != nil {
+			if !hadRepo && !p.Rebuild {
+				_ = os.Remove(a.repoPath(db.ID))
+				_ = os.Remove(a.caPath(db.ID))
+			}
+			return nil, err
+		}
+	}
 	res := &protocol.StandbyCreateResult{StandbyID: p.StandbyID}
 	rec := standbyRecord{ID: p.StandbyID, DatabaseID: db.ID, Database: db, Phase: protocol.StandbyPhaseCreating, Step: phasePreflight,
 		PrimPort: sec.PrimaryPort, Role: sec.ReplicationUser, Rebuild: p.Rebuild, CreatedAt: time.Now().UTC()}
@@ -232,7 +258,6 @@ func (a *Agent) standbyCreate(ctx context.Context, db protocol.DatabaseSpec, p p
 			return nil, err
 		}
 	}
-	hadRepo := exists(a.repoPath(db.ID))
 	if err := a.saveHandedRepo(db.ID, sec.Repo); err != nil {
 		return nil, err
 	}
@@ -377,6 +402,12 @@ func (a *Agent) restoreAsStandby(ctx context.Context, ops standbyOps, rec *stand
 		rel := strings.TrimPrefix(path, rec.DataDir+string(filepath.Separator))
 		if err := copyConfFile(filepath.Join(kept, rel), filepath.Join(rec.DataDir, rel)); err != nil {
 			return err
+		}
+	}
+	if p.FromBucket {
+		// No primary told its settings: the restored pg_control has them.
+		if cd, err := ops.controlData(rec.DataDir, rec.Major); err == nil && len(cd.Settings) > 0 {
+			block = raiseSettings(block, cd.Settings) // standby_local.go
 		}
 	}
 	if err := setStandbyConf(rec.DataDir, block); err != nil {

@@ -811,12 +811,17 @@ func engineServiceNames(engine string) (service, unit string) {
 func backupCmd(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
 	typ := fs.String("type", "full", "full, diff or incr")
+	second := fs.Bool("second-copy", false, "a full backup to the second copy (rowsafe secondcopy)")
 	noWait := fs.Bool("no-wait", false, "return once queued")
 	name, err := dbArg(ctx, c, fs, args)
 	if err != nil {
 		return err
 	}
-	t, err := c.CreateTask(ctx, name, protocol.TaskBackup, protocol.BackupParams{Type: *typ})
+	params := protocol.BackupParams{Type: *typ}
+	if *second {
+		params.Repo = protocol.RepoSecond
+	}
+	t, err := c.CreateTask(ctx, name, protocol.TaskBackup, params)
 	if err != nil {
 		return err
 	}
@@ -831,11 +836,21 @@ func backupCmd(ctx context.Context, c *client.Client, args []string) error {
 }
 
 func backupsCmd(ctx context.Context, c *client.Client, args []string) error {
-	name, err := dbArg(ctx, c, flag.NewFlagSet("backups", flag.ContinueOnError), args)
+	fs := flag.NewFlagSet("backups", flag.ContinueOnError)
+	second := fs.Bool("second-copy", false, "the backups in the second copy")
+	name, err := dbArg(ctx, c, fs, args)
 	if err != nil {
 		return err
 	}
-	backups, err := c.Backups(ctx, name, 50)
+	var backups []protocol.Backup
+	switch {
+	case *second && !onServer:
+		return errors.New("the second copy's backups: rowsafe storage " + name + " lists them")
+	case *second:
+		backups, err = c.SecondCopyBackups(ctx, name, 50)
+	default:
+		backups, err = c.Backups(ctx, name, 50)
+	}
 	if err != nil {
 		return err
 	}
@@ -856,13 +871,21 @@ func backupsCmd(ctx context.Context, c *client.Client, args []string) error {
 }
 
 func proofCmd(ctx context.Context, c *client.Client, args []string) error {
+	if fromBucket(args) { // another server's backups, from the bucket (restore_bucket.go)
+		return proofFromBucketCmd(ctx, c, args)
+	}
 	fs := flag.NewFlagSet("proof", flag.ContinueOnError)
+	second := fs.Bool("second-copy", false, "restore the latest backup in the second copy")
 	noWait := fs.Bool("no-wait", false, "return once queued")
 	name, err := dbArg(ctx, c, fs, args)
 	if err != nil {
 		return err
 	}
-	t, err := c.CreateTask(ctx, name, protocol.TaskDrill, nil)
+	var params any
+	if *second {
+		params = protocol.DrillParams{Repo: protocol.RepoSecond}
+	}
+	t, err := c.CreateTask(ctx, name, protocol.TaskDrill, params)
 	if err != nil {
 		return err
 	}
@@ -1138,6 +1161,10 @@ func waitAndReport(ctx context.Context, c *client.Client, taskID, dbName string)
 			switch {
 			case !res.Applied:
 				fmt.Printf("\nNext: rowsafe apply %s\n", dbName)
+			case res.RestartRequired && onServer && inSidecar():
+				fmt.Printf("\nNext: PostgreSQL needs a quick restart for backups to start. Restart its container when it suits you:\n"+
+					"  docker compose restart postgres (your PostgreSQL service)\n"+
+					"Rowsafe notices the restart by itself and finishes; rowsafe verify %s checks right away.\n", dbName)
 			case res.RestartRequired && onServer:
 				fmt.Printf("\nNext: PostgreSQL needs a quick restart for backups to start. Restart it when it suits you:\n"+
 					"  sudo rowsafe restart %s (asks first), or sudo systemctl restart postgresql\n"+

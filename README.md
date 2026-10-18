@@ -28,6 +28,7 @@ curl -fsSL https://rowsafe.sh | sudo sh
 sudo rowsafe status shop                  # protected? backups, the change log, the last restore test
 sudo rowsafe mark shop before-migration   # a restore point (a Mark)
 sudo rowsafe backups shop                 # also: proofs, backup, proof
+sudo rowsafe upgrade shop --to 18         # a new PostgreSQL major: a test on a copy, a Mark, then the upgrade (undo for 7 days)
 ```
 
 Continuous backups to your own bucket (encrypted on the server, with a passphrase only you have), Marks, a weekly restore test and Pulse. Restoring through Rowsafe (Rewind) comes with the dashboard, for now.

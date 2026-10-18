@@ -36,6 +36,10 @@ type Server struct {
 	alertHTTP *http.Client   // alerts.go
 	allowHTTP bool           // tests: channels on http://
 	sending   sync.WaitGroup // notifications on their way (alerts.go, weekly.go)
+	hist      *history       // history.go
+	prom      readings       // metrics.go
+	logsOnce  sync.Once      // logs.go
+	logs      *logStore
 }
 
 // Open loads (or starts) the state kept in dir.
@@ -47,8 +51,12 @@ func Open(dir string, log *slog.Logger) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	hist, err := openHistory(filepath.Join(dir, HistoryFile))
+	if err != nil {
+		return nil, err
+	}
 	return &Server{st: st, log: log, now: time.Now, updates: &updates{http: &http.Client{Timeout: 30 * time.Second}},
-		alertHTTP: &http.Client{Timeout: 15 * time.Second}}, nil
+		alertHTTP: &http.Client{Timeout: 15 * time.Second}, hist: hist}, nil
 }
 
 // Serve listens on the Unix socket at path (0660: the agent's user and
@@ -72,10 +80,13 @@ func (s *Server) Serve(ctx context.Context, path string) error {
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(sctx)
+		s.hist.flush(s.now()) // history.go
 	}()
 	s.cameBack()
 	go s.run(ctx)
-	go s.runUpdates(ctx) // updates.go
+	go s.runUpdates(ctx)       // updates.go
+	go s.runLogForwarding(ctx) // logs_forward.go
+	s.serveMetrics(ctx)        // metrics.go
 	s.log.Info("control plane without an account listening", "socket", path)
 	if err := srv.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
@@ -101,8 +112,10 @@ func (s *Server) run(ctx context.Context) {
 // the alerts that changed.
 func (s *Server) Tick() {
 	now := s.now()
+	fcs := s.hist.forecasts(s.knownDBs(), now) // history.go
 	var notices []notice
 	if err := s.st.update(func(st *state) error {
+		st.forecasts = fcs
 		if n := st.reap(now); n > 0 {
 			s.log.Warn("tasks lost after their lease ran out", "count", n)
 		}
@@ -139,16 +152,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/agent/setup/databases/{id}", s.agent(s.setupGet))
 	mux.HandleFunc("POST /v1/agent/setup/databases/{id}/apply", s.agent(s.setupApply))
 	mux.HandleFunc("POST /v1/agent/monitoring", s.agent(s.monitoring))
-	// Reports kept on the server for now: accepted, not stored.
-	for path, ack := range map[string]any{
-		"/v1/agent/logs":     protocol.LogAck{Databases: []protocol.LogSettings{}},
-		"/v1/agent/security": protocol.SecurityAck{}, "/v1/agent/files": protocol.FilesSync{Databases: []protocol.FilesConfig{}},
-	} {
-		mux.HandleFunc("POST "+path, s.agent(func(w http.ResponseWriter, r *http.Request) {
-			_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 64<<20))
-			writeJSON(w, http.StatusOK, ack)
-		}))
-	}
 	mux.HandleFunc("POST /v1/agent/storage/credentials", s.agent(func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "Rowsafe Storage needs the dashboard: this server backs up to its own storage")
 	}))
@@ -162,11 +165,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/databases/{ref}/protection", s.protection)
 	mux.HandleFunc("GET /v1/databases/{ref}/backups", s.backups)
 	mux.HandleFunc("GET /v1/databases/{ref}/drills", s.drills)
+	mux.HandleFunc("GET /v1/databases/{ref}/storage", s.storage) // secondcopy.go
 	mux.HandleFunc("GET /v1/databases/{ref}/tasks", s.dbTasks)
 	mux.HandleFunc("POST /v1/databases/{ref}/tasks", s.createTask)
 	mux.HandleFunc("GET /v1/databases/{ref}/restore-points", s.marks)
 	mux.HandleFunc("POST /v1/databases/{ref}/restore-points", s.createMark)
 	s.rewindRoutes(mux)                                             // rewind.go
+	s.upgradeRoutes(mux)                                            // upgrade.go
+	s.restoreBucketRoutes(mux)                                      // restore_bucket.go
+	s.historyRoutes(mux)                                            // history.go
+	s.standbyRoutes(mux)                                            // standby.go
+	s.guardRoutes(mux)                                              // guard.go
+	s.logRoutes(mux)                                                // logs.go
+	s.securityRoutes(mux)                                           // security.go
+	s.filesRoutes(mux)                                              // files.go
 	mux.HandleFunc("GET /v1/notification-channels", s.channelsList) // alerts.go
 	mux.HandleFunc("POST /v1/notification-channels", s.channelsCreate)
 	mux.HandleFunc("DELETE /v1/notification-channels/{id}", s.channelsDelete)
@@ -271,7 +283,15 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		resp.RewindExpires = st.recordRewinds(req.Rewinds, now) // rewind.go
+		st.recordSoftware(req.Software, now)                    // upgrade.go
+		st.recordStorage(req.SecondCopies, req.Storage, now)    // secondcopy.go
+		st.recordStandby(req.StandbyHeartbeat, now)             // standby.go
+		resp.StandbyInstructions = st.standbyInstructions()
+		resp.Copies = st.recordCopies(req.Copies, now) // guard.go
 		for _, d := range st.Databases {
+			if !agentWatches(d) {
+				continue // a standby or a fenced copy (standby.go)
+			}
 			if d.Status != protocol.DBPendingAdopt {
 				resp.Databases = append(resp.Databases, d.spec())
 			}
@@ -351,23 +371,31 @@ func (s *Server) setupRegister(w http.ResponseWriter, r *http.Request) {
 // for the installer (setupRegister) and for rowsafe add and adopt
 // (createDatabase); body makes the response.
 func (s *Server) register(w http.ResponseWriter, name string, port int, socketDir, engine string, body func(st *state, db *dbRec, plan *taskRec) any) {
-	if e := protocol.NormalizeEngine(engine); e != protocol.EnginePostgreSQL {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("Rowsafe on this server protects PostgreSQL for now; %s needs the dashboard (rowsafe login connects this server)",
-			protocol.EngineDisplayName(engine)))
+	if msg := checkLocalEngine(engine); msg != "" { // mysql.go
+		writeError(w, http.StatusBadRequest, msg)
 		return
 	}
+	engine = protocol.NormalizeEngine(engine)
 	if !nameRE.MatchString(name) {
 		writeError(w, http.StatusBadRequest, "the name must be 2-40 lowercase letters, digits and dashes, starting with a letter")
 		return
 	}
-	if port <= 0 || port > 65535 {
+	if isSQLite(engine) {
+		if msg := sqliteIdentity(port, socketDir); msg != "" { // sqlite.go
+			writeError(w, http.StatusBadRequest, msg)
+			return
+		}
+	} else if port == 0 {
+		port = defaultPort(engine)
+	}
+	if port < 0 || port > 65535 {
 		writeError(w, http.StatusBadRequest, "invalid port")
 		return
 	}
 	if socketDir == "" {
-		socketDir = "/var/run/postgresql" // as on the hosted control plane
+		socketDir = defaultSocket(engine) // as on the hosted control plane
 	}
-	if !strings.HasPrefix(socketDir, "/") { // a path on this Linux server
+	if socketDir != "" && !strings.HasPrefix(socketDir, "/") || socketDir == "" && defaultSocket(engine) != "" { // a path on this Linux server
 		writeError(w, http.StatusBadRequest, "socket_dir must be an absolute path")
 		return
 	}
@@ -377,14 +405,29 @@ func (s *Server) register(w http.ResponseWriter, name string, port int, socketDi
 	err := s.st.update(func(st *state) error {
 		db := st.db(name)
 		if db == nil {
-			if other := st.dbAt(port, socketDir); other != nil {
-				return fmt.Errorf("conflict: the PostgreSQL on port %d is already protected as %s", port, other.Name)
+			if other := st.serverAt(engine, port, socketDir); other != nil { // mysql.go
+				return fmt.Errorf("conflict: the %s on port %d is already protected as %s", protocol.EngineDisplayName(other.Engine), port, other.Name)
 			}
 			status = http.StatusCreated
 			db = &dbRec{Database: protocol.Database{ID: newID("db"), HostID: st.Host.ID, Hostname: st.Host.Hostname, Name: name,
-				Stanza: name, Port: port, SocketDir: socketDir, Status: protocol.DBPendingAdopt,
+				Stanza: name, Port: port, SocketDir: socketDir, Engine: engine, Status: protocol.DBPendingAdopt,
 				RetentionFull: defaultRetentionFull, ScheduleFull: defaultScheduleFull, ScheduleDiff: defaultScheduleDiff,
 				ScheduleDrill: defaultScheduleDrill, CreatedAt: now.UTC()}, StatusSince: now.UTC()}
+			if isMongo(engine) {
+				mongoDefaults(db) // mongodb.go
+			}
+			if redisFamily(engine) {
+				redisDefaults(db) // redis.go
+			}
+			if isSQLite(engine) {
+				sqliteDefaults(db) // sqlite.go
+			}
+			if isClickHouse(engine) {
+				clickhouseDefaults(db) // clickhouse.go
+			}
+			if snapshotEngine(engine) {
+				snapshotDefaults(db) // search.go
+			}
 			st.Databases = append(st.Databases, db)
 		}
 		var plan *taskRec
@@ -633,13 +676,22 @@ func (s *Server) databaseGet(w http.ResponseWriter, r *http.Request) {
 	s.withDB(w, r, func(st *state, d *dbRec) { writeJSON(w, http.StatusOK, st.view(d)) })
 }
 
+// backups lists the first storage's backups, or the second copy's with
+// ?repo=2.
 func (s *Server) backups(w http.ResponseWriter, r *http.Request) {
 	n := limitParam(r, 50)
 	s.withDB(w, r, func(st *state, d *dbRec) {
+		backups := st.Backups
+		if r.URL.Query().Get("repo") == strconv.Itoa(protocol.RepoSecond) {
+			backups = nil
+			if st.copyRec(d.ID, s.now()) != nil { // secondcopy.go
+				backups = st.Backups2
+			}
+		}
 		var out []protocol.Backup
-		for i := len(st.Backups) - 1; i >= 0 && len(out) < n; i-- { // newest first
-			if st.Backups[i].DatabaseID == d.ID {
-				out = append(out, st.Backups[i])
+		for i := len(backups) - 1; i >= 0 && len(out) < n; i-- { // newest first
+			if backups[i].DatabaseID == d.ID {
+				out = append(out, backups[i])
 			}
 		}
 		writeJSON(w, http.StatusOK, nonNil(out))
@@ -671,9 +723,15 @@ func (st *state) markViews(d *dbRec) []protocol.RestorePoint {
 		if m.DatabaseID != d.ID || m.LSN == "" && !st.taskOpen(m.TaskID) {
 			continue // attempts that failed before PostgreSQL wrote it
 		}
-		m.Status = protocol.StatusQueued
-		if t := st.task(m.TaskID); t != nil {
-			m.Status = t.Status
+		// As on the hosted control plane: pending, archived (in the backup
+		// storage, so a restore can reach it) or unconfirmed.
+		switch {
+		case st.taskOpen(m.TaskID):
+			m.Status = protocol.RestorePointPending
+		case m.ArchivedAt != nil:
+			m.Status = protocol.RestorePointArchived
+		default:
+			m.Status = protocol.RestorePointUnconfirmed
 		}
 		if m.CreatedAt != nil {
 			m.RestoreFromBackup = st.backupBefore(d.ID, *m.CreatedAt)
@@ -793,8 +851,16 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 				code, msg = http.StatusConflict, m
 				return nil
 			}
+		case req.Type == protocol.TaskRestart && isSQLite(d.Engine):
+			code, msg = http.StatusBadRequest, sqliteNoServer
+			return nil
+		case req.Type == protocol.TaskBackup || req.Type == protocol.TaskDrill:
+			if c, m := st.checkRepoTask(d, req.Type, req.Params, now); c != 0 { // secondcopy.go
+				code, msg = c, m
+				return nil
+			}
 		case req.Type == protocol.TaskRestart && !slices.Contains(st.Host.RestartPorts, d.Port):
-			code, msg = http.StatusForbidden, fmt.Sprintf("%s doesn't allow restarts from Rowsafe (only root can allow it, at install time). Restart PostgreSQL yourself: sudo systemctl restart postgresql", st.Host.Hostname)
+			code, msg = http.StatusForbidden, fmt.Sprintf("%s doesn't allow restarts from Rowsafe (only root can allow it, at install time). %s", st.Host.Hostname, restartYourself(d.Engine))
 			return nil
 		}
 		var params any

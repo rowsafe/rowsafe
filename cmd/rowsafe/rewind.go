@@ -174,7 +174,7 @@ func rewindShow(ctx context.Context, c *client.Client, args []string) error {
 	}
 	fmt.Println()
 	if info.CanRewindInPlace {
-		fmt.Printf("Rewind the whole database in place: rowsafe rewind database %s --at \"TIME\" (asks first)\n", name)
+		fmt.Printf("Rewind the whole database in place: rowsafe rewind database %s --to TIME|MARK (asks first)\n", name)
 	} else if info.InPlaceReason != "" {
 		fmt.Printf("Rewinding the whole database in place isn't available: %s\n", info.InPlaceReason)
 	}
@@ -345,6 +345,7 @@ func rewindCopyCmd(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("rewind copy", flag.ContinueOnError)
 	at, mark := rewindTargetFlags(fs)
 	hours := fs.Int("hours", 24, "how long to keep the copy (at most 168)")
+	second := fs.Bool("second-copy", false, "restore from the second copy (when the first bucket is gone)")
 	noWait := fs.Bool("no-wait", false, "return once the copy is queued")
 	name, err := dbArg(ctx, c, fs, args)
 	if err != nil {
@@ -357,11 +358,19 @@ func rewindCopyCmd(ctx context.Context, c *client.Client, args []string) error {
 	if *hours < 1 || *hours > 168 {
 		return newUsageError("--hours must be between 1 and 168 (7 days)")
 	}
-	resp, err := c.CreateRewindCopy(ctx, name, protocol.CreateRewindCopyRequest{Time: t, Mark: markName, Hours: *hours})
+	req := protocol.CreateRewindCopyRequest{Time: t, Mark: markName, Hours: *hours}
+	from := ""
+	if *second {
+		if !onServer {
+			return errors.New("--second-copy works on a server on its own for now (sudo rowsafe restore ... --second-copy on it)")
+		}
+		req.Repo, from = protocol.RepoSecond, " from the second copy"
+	}
+	resp, err := c.CreateRewindCopy(ctx, name, req)
 	if err != nil {
 		return apiErr(err)
 	}
-	fmt.Printf("Restoring a copy of %s as it was at %s, next to production (it never touches production).\n", name, what)
+	fmt.Printf("Restoring a copy of %s as it was at %s%s, next to production (it never touches production).\n", name, what, from)
 	if *noWait {
 		fmt.Printf("Queued. Follow it with: rowsafe rewind %s\n", name)
 		return nil
@@ -386,9 +395,13 @@ func rewindCopyCmd(ctx context.Context, c *client.Client, args []string) error {
 // restoreCmd is rowsafe restore NAME --to TIME|MARK: rewind copy with the
 // point in one flag (a time when it reads as one, else a Mark's name).
 func restoreCmd(ctx context.Context, c *client.Client, args []string) error {
+	if fromBucket(args) { // a lost server's database, from the bucket (restore_bucket.go)
+		return restoreFromBucketCmd(ctx, c, args)
+	}
 	fs := flag.NewFlagSet("restore", flag.ContinueOnError)
 	to := fs.String("to", "", "the point: a time (\"14:04\", \"10m ago\", \"2026-09-24 14:04\", RFC 3339) or a Mark's name")
 	hours := fs.Int("hours", 24, "how long to keep the copy (at most 168)")
+	second := fs.Bool("second-copy", false, "restore from the second copy (when the first bucket is gone)")
 	noWait := fs.Bool("no-wait", false, "return once the copy is queued")
 	name, err := dbArg(ctx, c, fs, args)
 	if err != nil {
@@ -404,6 +417,9 @@ func restoreCmd(ctx context.Context, c *client.Client, args []string) error {
 	copyArgs := []string{name, point, *to, "--hours", strconv.Itoa(*hours)}
 	if *noWait {
 		copyArgs = append(copyArgs, "--no-wait")
+	}
+	if *second {
+		copyArgs = append(copyArgs, "--second-copy")
 	}
 	return rewindCopyCmd(ctx, c, copyArgs)
 }
@@ -422,12 +438,12 @@ func tableArgs(pos []string, db string, cp protocol.RewindCopy) ([]protocol.Rewi
 		if d == "" {
 			var user []string
 			for _, x := range cp.Databases {
-				if x.Name != "postgres" && !strings.HasPrefix(x.Name, "template") {
+				if x.Name != "postgres" && !strings.HasPrefix(x.Name, "template") && !slices.Contains(mysqlSystemDBs, x.Name) {
 					user = append(user, x.Name)
 				}
 			}
 			if len(user) != 1 {
-				return nil, fmt.Errorf("which PostgreSQL database is %s in? The copy has %s; write DB:%s or pass --db DB",
+				return nil, fmt.Errorf("which database is %s in? The copy has %s; write DB:%s or pass --db DB",
 					p, strings.Join(user, ", "), p)
 			}
 			d = user[0]
@@ -668,10 +684,21 @@ func rewindExtendCmd(ctx context.Context, c *client.Client, args []string) error
 func rewindDatabaseCmd(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("rewind database", flag.ContinueOnError)
 	at, mark := rewindTargetFlags(fs)
+	to := fs.String("to", "", "the point: a time (\"14:04\", \"10m ago\", \"2026-09-24 14:04\", RFC 3339) or a Mark's name")
 	yes := fs.Bool("yes", false, "don't ask; confirms with the database's name")
 	name, err := dbArg(ctx, c, fs, args)
 	if err != nil {
 		return err
+	}
+	if *to != "" { // --to: a time when it reads as one, else a Mark (as rowsafe restore)
+		if *at != "" || *mark != "" {
+			return newUsageError("give --to, or --at or --mark, not both")
+		}
+		if _, err := parseRewindTime(*to); err == nil {
+			*at = *to
+		} else {
+			*mark = *to
+		}
 	}
 	t, markName, what, err := rewindTarget(*at, *mark)
 	if err != nil {

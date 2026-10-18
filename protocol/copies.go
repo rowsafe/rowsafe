@@ -240,7 +240,8 @@ type MaskingReport struct {
 // CopyAccess is who can reach a safe copy and how.
 type CopyAccess struct {
 	// Listen is the server address the copy listens on (besides
-	// localhost): one of CopiesReport.Addresses, or "*" for all of them.
+	// localhost): one of CopiesReport.Addresses, "*" for all of them, or
+	// CopyListenLocal for localhost only.
 	Listen string `json:"listen"`
 	// AllowFrom are the client addresses (IP or CIDR) pg_hba lets in; at
 	// least one.
@@ -255,7 +256,16 @@ type CopyAccess struct {
 	// CopiesReport.PortMin/PortMax). The agent takes another if it is busy
 	// and says so in the result.
 	Port int `json:"port,omitempty"`
+	// PortChosen: a person chose Port (a server on its own, rowsafe copies
+	// create --port): any port from 1024, and the task fails rather than
+	// take another when it is busy.
+	PortChosen bool `json:"port_chosen,omitempty"`
 }
+
+// CopyListenLocal makes a safe copy listen on localhost only (127.0.0.1
+// and ::1 may connect): reached from the server itself, or through an SSH
+// tunnel.
+const CopyListenLocal = "127.0.0.1"
 
 // SafeCopyParams are the params of a safe_copy task.
 type SafeCopyParams struct {
@@ -518,7 +528,12 @@ type CreateSafeCopyRequest struct {
 	AllowFrom []string `json:"allow_from,omitempty"`
 	// Listen: an address from SafeCopiesInfo.Addresses, "private" (the
 	// first private one, default), "public" (the first public one) or "*".
+	// On a server on its own also "localhost" (its default): the copy
+	// listens on 127.0.0.1 only.
 	Listen string `json:"listen,omitempty"`
+	// Port is the TCP port the copy listens on (a server on its own only;
+	// default: the first free one in ROWSAFE_COPY_PORTS).
+	Port int `json:"port,omitempty"`
 	// ConnectHost is the host name clients use when it isn't the listen
 	// address (e.g. a public IP in front of a private one, or a DNS name).
 	ConnectHost string `json:"connect_host,omitempty"`

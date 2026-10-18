@@ -112,6 +112,12 @@ func printSecurity(v protocol.SecurityView) {
 			if f.Action != "" {
 				fmt.Printf("     %s\n", f.Action)
 			}
+			if a, _ := findingAction(f); a != "" && f.Category == "security" {
+				fmt.Printf("     Fix it: rowsafe security fix %s %s\n", v.Database, f.ID)
+			}
+			if f.Command != "" {
+				fmt.Printf("     Do it yourself:\n       %s\n", strings.ReplaceAll(f.Command, "\n", "\n       "))
+			}
 		}
 	}
 	var can, cannot []protocol.SecurityActionState
@@ -258,7 +264,7 @@ func securityFixCmd(ctx context.Context, c *client.Client, args []string) error 
 	switch len(pos) {
 	case 0:
 	case 1:
-		if _, ok := securityActionText[pos[0]]; ok {
+		if _, ok := securityActionText[pos[0]]; ok || isFindingID(pos[0]) {
 			action = pos[0]
 		} else {
 			explicit = pos[0]
@@ -296,6 +302,23 @@ func securityFixCmd(ctx context.Context, c *client.Client, args []string) error 
 		fmt.Printf("\nRun one: rowsafe security fix %s ACTION\n", name)
 		return nil
 	}
+	if isFindingID(action) { // a finding's ID: its fix
+		i := slices.IndexFunc(v.Findings, func(f protocol.Finding) bool { return f.ID == action })
+		if i < 0 {
+			return fmt.Errorf("%s has no finding %s now (rowsafe security %s lists them)", name, action, name)
+		}
+		f := v.Findings[i]
+		a, tls := findingAction(f)
+		if a == "" {
+			msg := fmt.Sprintf("Rowsafe has no fix it can run for %s: %s", f.ID, orText(f.Action, f.Title))
+			if f.Command != "" {
+				msg += "\nDo it yourself:\n  " + strings.ReplaceAll(f.Command, "\n", "\n  ")
+			}
+			return errors.New(msg)
+		}
+		action, *requireTLS = a, *requireTLS || tls
+		fmt.Fprintf(msgOut(*asJSON), "%s: %s.\n", f.ID, f.Title)
+	}
 	i := slices.IndexFunc(v.Actions, func(a protocol.SecurityActionState) bool { return a.Action == action })
 	if i < 0 {
 		var names []string
@@ -305,7 +328,11 @@ func securityFixCmd(ctx context.Context, c *client.Client, args []string) error 
 		return fmt.Errorf("%s has no security action %q; its actions: %s", name, action, orText(strings.Join(names, ", "), "none"))
 	}
 	if st := v.Actions[i]; !st.Available {
-		return fmt.Errorf("%s can't run now: %s", action, orText(st.Reason, "Rowsafe didn't say why"))
+		// On the server, root at this terminal may give the permission it
+		// needs (security_root.go).
+		if v, err = allowAsRoot(ctx, c, name, action, st.Reason, *asJSON); err != nil {
+			return err
+		}
 	}
 
 	req := protocol.SecurityActionRequest{Action: action, RequireTLS: *requireTLS, Role: *role, Confirm: name}

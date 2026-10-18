@@ -17,12 +17,10 @@ import (
 // has the endpoints): restore a copy of a database as it was at any second
 // (or a Mark) next to production, compare it with production, bring rows
 // back (after a Mark, confirmed with the database's name), keep it longer
-// or delete it. The agent runs the same tasks it runs for the dashboard.
-//
-// Rewinding the whole database in place isn't offered here: later restores
-// would need the history of timelines it starts, which only the hosted
-// control plane follows. A copy and bringing rows back never stop
-// production.
+// or delete it; or rewind the whole database in place, undo that and
+// delete the data kept aside (rewind_inplace.go). The agent runs the same
+// tasks it runs for the dashboard. A copy and bringing rows back never
+// stop production.
 
 const (
 	copyDefaultHours = 24
@@ -36,11 +34,8 @@ const (
 	rewindGoneGrace = 3 * time.Minute
 )
 
-// errInPlace answers the in-place endpoints.
-const errInPlace = "Rewinding the whole database in place needs the dashboard (rowsafe login connects this server, keeping its backups). " +
-	"Here, restore a copy and bring back what you need: it never stops production."
-
-var rewindTaskTypes = []string{protocol.TaskRewindCopy, protocol.TaskRewindDrop, protocol.TaskRewindCompare, protocol.TaskRewindRows}
+var rewindTaskTypes = []string{protocol.TaskRewindCopy, protocol.TaskRewindDrop, protocol.TaskRewindCompare, protocol.TaskRewindRows,
+	protocol.TaskRewindInPlace, protocol.TaskRewindUndo, protocol.TaskRewindCleanup}
 
 // copyRec is a copy restored (or being restored) next to production.
 type copyRec struct {
@@ -143,16 +138,20 @@ func (s *state) currentCopy(dbID string, now time.Time) *copyRec {
 
 // ---- the agent's side ----
 
-// recordRewinds keeps the copies the agent reports, marks the ones it no
-// longer reports gone (expired on the server), and returns the expiries
-// people changed (Extend).
+// recordRewinds keeps the copies and kept data the agent reports, marks
+// the ones it no longer reports gone (expired on the server), and returns
+// the expiries people changed (Extend).
 func (s *state) recordRewinds(reported []protocol.RewindState, now time.Time) []protocol.RewindExpiry {
-	byID := map[string]protocol.RewindState{}
+	byID, kept := map[string]protocol.RewindState{}, map[string]protocol.RewindState{}
 	for _, r := range reported {
-		if r.Kind == protocol.RewindKindCopy {
+		switch r.Kind {
+		case protocol.RewindKindCopy:
 			byID[r.ID] = r
+		case protocol.RewindKindKeptData:
+			kept[r.ID] = r
 		}
 	}
+	s.recordKept(kept, now) // rewind_inplace.go
 	var out []protocol.RewindExpiry
 	for _, c := range s.Copies {
 		if c.RemovedAt != nil {
@@ -217,10 +216,24 @@ func (s *state) afterRewind(t *taskRec, ok bool, result json.RawMessage, now tim
 type window struct {
 	Earliest, Latest *time.Time
 	backups          []protocol.Backup // usable ones, newest first
+	timelines        map[string]int64  // backup ID -> timeline (0: unknown)
+	events           []rewindEvent     // oldest first (rewind_inplace.go)
+	// starts are when each backup's task started, on this control plane's
+	// clock: pgBackRest's own start time has whole seconds only, too coarse
+	// next to a rewind or an undo in the same second (window.start).
+	starts map[string]time.Time
+}
+
+// start is when a backup started, as precisely as known.
+func (w window) start(b protocol.Backup) time.Time {
+	if t, ok := w.starts[b.ID]; ok {
+		return t
+	}
+	return b.StartedAt
 }
 
 func (s *state) windowOf(d *dbRec, now time.Time) window {
-	var w window
+	w := window{timelines: s.Timelines, events: s.rewindEvents(d.ID), starts: map[string]time.Time{}}
 	var all, fulls []protocol.Backup
 	for i := len(s.Backups) - 1; i >= 0; i-- { // newest first
 		if b := s.Backups[i]; b.DatabaseID == d.ID {
@@ -237,6 +250,13 @@ func (s *state) windowOf(d *dbRec, now time.Time) window {
 	for _, b := range all {
 		if !b.StartedAt.Before(oldest.StartedAt) {
 			w.backups = append(w.backups, b)
+		}
+	}
+	if len(w.events) > 0 {
+		for _, b := range w.backups {
+			if t := s.task(b.TaskID); t != nil && t.StartedAt != nil {
+				w.starts[b.ID] = *t.StartedAt
+			}
 		}
 	}
 	earliest, latest := oldest.StoppedAt.UTC(), all[0].StoppedAt.UTC()
@@ -263,28 +283,36 @@ func (e *httpErr) Error() string { return e.msg }
 
 func windowTime(t time.Time) string { return t.UTC().Format("2006-01-02 15:04:05 UTC") }
 
-// pick is the backup a restore to p starts from.
-func (w window) pick(p time.Time) (string, error) {
+// check refuses a point outside the window, in plain words.
+func (w window) check(p time.Time) error {
 	switch {
 	case w.Earliest == nil || w.Latest == nil:
-		return "", &httpErr{http.StatusConflict, "There is nothing to restore yet: Rewind works once the first full backup has finished."}
+		return &httpErr{http.StatusConflict, "There is nothing to restore yet: Rewind works once the first full backup has finished."}
 	case p.Before(*w.Earliest):
-		return "", &httpErr{http.StatusBadRequest, fmt.Sprintf("The earliest point you can go back to is %s (older backups are no longer kept). Pick a later time.", windowTime(*w.Earliest))}
+		return &httpErr{http.StatusBadRequest, fmt.Sprintf("The earliest point you can go back to is %s (older backups are no longer kept). Pick a later time.", windowTime(*w.Earliest))}
 	case p.After(*w.Latest):
-		return "", &httpErr{http.StatusBadRequest, fmt.Sprintf("Backups have only reached %s so far (they are at most about a minute behind). Pick an earlier time, or try again in a minute.", windowTime(*w.Latest))}
+		return &httpErr{http.StatusBadRequest, fmt.Sprintf("Backups have only reached %s so far (they are at most about a minute behind). Pick an earlier time, or try again in a minute.", windowTime(*w.Latest))}
 	}
-	for _, b := range w.backups {
-		if b.StoppedAt.Before(p) {
-			return b.Label, nil
-		}
-	}
-	return "", &httpErr{http.StatusConflict, fmt.Sprintf("No backup finished before %s. Pick a later time.", windowTime(p))}
+	return nil
 }
 
-// target checks a time or a Mark against the window and picks the backup.
-func (s *state) target(d *dbRec, at *time.Time, mark string, xid uint32, now time.Time) (protocol.RewindTarget, error) {
+// target checks a time or a Mark against the window and picks the backup
+// and the timeline (window.pick, rewind_inplace.go). repo RepoSecond picks
+// from the second copy's backups and window.
+func (s *state) target(d *dbRec, repo int, at *time.Time, mark string, xid uint32, now time.Time) (protocol.RewindTarget, error) {
 	bad := func(msg string) error { return &httpErr{http.StatusBadRequest, msg} }
 	w := s.windowOf(d, now)
+	switch repo {
+	case 0, protocol.RepoPrimary:
+		repo = 0
+	case protocol.RepoSecond:
+		var err error
+		if w, err = s.secondWindow(d, now); err != nil { // secondcopy.go
+			return protocol.RewindTarget{}, err
+		}
+	default:
+		return protocol.RewindTarget{}, bad(`"repo" is 1 (the first storage) or 2 (the second copy).`)
+	}
 	switch {
 	case xid != 0 && (at == nil || mark != ""):
 		return protocol.RewindTarget{}, bad(`To stop just before a transaction ("xid"), give its commit time as "time", and no Mark.`)
@@ -295,11 +323,11 @@ func (s *state) target(d *dbRec, at *time.Time, mark string, xid uint32, now tim
 		if t.After(now) {
 			return protocol.RewindTarget{}, bad(fmt.Sprintf("%s is in the future. Pick a time in the past.", windowTime(t)))
 		}
-		set, err := w.pick(t)
+		set, tl, err := w.pick(t)
 		if err != nil {
 			return protocol.RewindTarget{}, err
 		}
-		return protocol.RewindTarget{Time: &t, XID: xid, BackupSet: set}, nil
+		return protocol.RewindTarget{Time: &t, XID: xid, BackupSet: set, Timeline: tl, Repo: repo}, nil
 	case mark != "":
 		if !markNameRE.MatchString(mark) {
 			return protocol.RewindTarget{}, bad(fmt.Sprintf("%q isn't a Mark name.", mark))
@@ -316,16 +344,19 @@ func (s *state) target(d *dbRec, at *time.Time, mark string, xid uint32, now tim
 			return protocol.RewindTarget{}, &httpErr{http.StatusConflict, fmt.Sprintf("The Mark %s isn't confirmed in your backup storage yet, so Rowsafe can't restore to it. It is confirmed as soon as newer changes reach storage; try again in a minute.", mark)}
 		}
 		p := m.CreatedAt.UTC()
-		// A confirmed Mark is in storage even when the archiving report
-		// (the window's end) hasn't caught up with it yet.
-		if w.Latest != nil && p.After(*w.Latest) {
+		switch {
+		case repo == protocol.RepoSecond && w.Latest != nil && p.After(*w.Latest):
+			return protocol.RewindTarget{}, &httpErr{http.StatusConflict, fmt.Sprintf("The Mark %s hasn't reached the second copy yet (it has changes up to %s). Try again in a minute.", mark, windowTime(*w.Latest))}
+		case w.Latest != nil && p.After(*w.Latest):
+			// A confirmed Mark is in storage even when the archiving report
+			// (the window's end) hasn't caught up with it yet.
 			w.Latest = &p
 		}
-		set, err := w.pick(p)
+		set, tl, err := w.pick(p)
 		if err != nil {
 			return protocol.RewindTarget{}, err
 		}
-		return protocol.RewindTarget{Mark: mark, BackupSet: set}, nil
+		return protocol.RewindTarget{Mark: mark, BackupSet: set, Timeline: tl, Repo: repo}, nil
 	}
 	return protocol.RewindTarget{}, bad(`Pick a time ("time") or a Mark ("mark") to go back to.`)
 }
@@ -358,11 +389,9 @@ func (s *Server) rewindRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/databases/{ref}/rewind/copies/{id}/extend", s.rewindWrite(s.extendCopy))
 	mux.HandleFunc("POST /v1/databases/{ref}/rewind/copies/{id}/compare", s.rewindWrite(s.compareCopy))
 	mux.HandleFunc("POST /v1/databases/{ref}/rewind/copies/{id}/restore-rows", s.rewindWrite(s.restoreRows))
-	for _, p := range []string{"/in-place", "/{rewind_id}/undo", "/{rewind_id}/cleanup"} {
-		mux.HandleFunc("POST /v1/databases/{ref}/rewind"+p, func(w http.ResponseWriter, r *http.Request) {
-			writeError(w, http.StatusForbidden, errInPlace)
-		})
-	}
+	mux.HandleFunc("POST /v1/databases/{ref}/rewind/in-place", s.rewindWrite(s.rewindInPlace)) // rewind_inplace.go
+	mux.HandleFunc("POST /v1/databases/{ref}/rewind/{rewind_id}/undo", s.rewindWrite(s.undoRewind))
+	mux.HandleFunc("POST /v1/databases/{ref}/rewind/{rewind_id}/cleanup", s.rewindWrite(s.cleanupRewind))
 }
 
 func (s *Server) getRewind(w http.ResponseWriter, r *http.Request) {
@@ -370,11 +399,26 @@ func (s *Server) getRewind(w http.ResponseWriter, r *http.Request) {
 	s.withDB(w, r, func(st *state, d *dbRec) {
 		win := st.windowOf(d, now)
 		info := protocol.RewindInfo{DatabaseID: d.ID, Database: d.Name, Earliest: win.Earliest, Latest: win.Latest,
-			Marks: st.markViews(d), InPlaceReason: errInPlace,
+			Marks: st.markViews(d),
 			Tasks: st.tasks(func(t *taskRec) bool { return t.DatabaseID == d.ID && slices.Contains(rewindTaskTypes, t.Type) }, rewindTasksShown, false)}
 		if c := st.currentCopy(d.ID, now); c != nil {
 			v := st.copyView(c)
 			info.Copy = &v
+		}
+		for i := len(st.Rewinds) - 1; i >= 0; i-- { // newest first
+			if rec := st.Rewinds[i]; rec.DatabaseID == d.ID {
+				if k, ok := st.keptView(rec); ok {
+					info.Kept = append(info.Kept, k)
+				}
+			}
+		}
+		switch reason := st.inPlaceRefusal(d, win, now); {
+		case reason != "":
+			info.InPlaceReason = reason
+		case len(info.Kept) > 0:
+			info.InPlaceReason = errRewindKept
+		default:
+			info.CanRewindInPlace = true
 		}
 		writeJSON(w, http.StatusOK, info)
 	})
@@ -446,7 +490,7 @@ func (s *Server) createCopy(st *state, d *dbRec, r *http.Request, now time.Time)
 	if slices.ContainsFunc(st.Copies, func(c *copyRec) bool { return c.DatabaseID == d.ID && st.live(c) }) {
 		return 0, nil, &httpErr{http.StatusConflict, "This database already has a copy. Delete it first (rowsafe rewind drop): there is one copy per database at a time."}
 	}
-	target, err := st.target(d, req.Time, req.Mark, req.XID, now)
+	target, err := st.target(d, req.Repo, req.Time, req.Mark, req.XID, now)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -544,7 +588,7 @@ func (s *Server) compareCopy(st *state, d *dbRec, r *http.Request, now time.Time
 	if err := decode(r, &req, true); err != nil {
 		return 0, nil, err
 	}
-	if err := validTables(req.Tables, maxCompareTables); err != nil {
+	if err := validTablesFor(d.Engine, req.Tables, maxCompareTables); err != nil { // mysql.go
 		return 0, nil, err
 	}
 	c, err := readyCopy(st, d, r)
@@ -572,7 +616,7 @@ func (s *Server) restoreRows(st *state, d *dbRec, r *http.Request, now time.Time
 	if len(req.Tables) == 0 {
 		return 0, nil, &httpErr{http.StatusBadRequest, "Pick the tables to bring rows back to."}
 	}
-	if err := validTables(req.Tables, maxRewindTables); err != nil {
+	if err := validTablesFor(d.Engine, req.Tables, maxRewindTables); err != nil {
 		return 0, nil, err
 	}
 	if req.Confirm != d.Name {
@@ -590,15 +634,27 @@ func (s *Server) restoreRows(st *state, d *dbRec, r *http.Request, now time.Time
 	}) {
 		return 0, nil, &httpErr{http.StatusConflict, "Rowsafe is already bringing rows back. Try again when it has finished."}
 	}
-	mark, err := st.createMark(d, "before-rewind-rows-"+now.UTC().Format("20060102-150405"), "Rowsafe, before bringing rows back", now)
-	if err != nil {
-		return 0, nil, &httpErr{http.StatusConflict, err.Error()}
+	if st.openTask(d.ID, protocol.TaskRewindInPlace, protocol.TaskRewindUndo) {
+		return 0, nil, &httpErr{http.StatusConflict, "The whole database is being rewound. Try again when that has finished."}
+	}
+	// A Mark first, unless the database can't take one (redis.go).
+	var tasks []protocol.TaskView
+	after := ""
+	if isSQLite(d.Engine) && req.IncludeChanged {
+		return 0, nil, &httpErr{http.StatusBadRequest, "SQLite rows are only brought back when they're missing; Rowsafe never overwrites a row that exists."}
+	}
+	if redisMarksRefusal(d)+sqliteMarksRefusal(d) == "" {
+		mark, err := st.createMark(d, "before-rewind-rows-"+now.UTC().Format("20060102-150405"), "Rowsafe, before bringing rows back", now)
+		if err != nil {
+			return 0, nil, &httpErr{http.StatusConflict, err.Error()}
+		}
+		tasks, after = append(tasks, mark.TaskView), mark.ID
 	}
 	t, err := st.enqueue(d, protocol.TaskRewindRows, protocol.RewindRowsParams{CopyID: c.ID, Tables: req.Tables, IncludeChanged: req.IncludeChanged},
-		mark.ID, false, now)
+		after, false, now)
 	if err != nil {
 		return 0, nil, err
 	}
 	v := st.copyView(c)
-	return http.StatusAccepted, protocol.RewindTasksResponse{Tasks: []protocol.TaskView{mark.TaskView, t.TaskView}, Copy: &v}, nil
+	return http.StatusAccepted, protocol.RewindTasksResponse{Tasks: append(tasks, t.TaskView), Copy: &v}, nil
 }

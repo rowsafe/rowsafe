@@ -30,6 +30,9 @@ var standbySubs = map[string]subcommand{
 }
 
 func standbyCmd(ctx context.Context, c *client.Client, args []string) error {
+	if onServer { // a server on its own: each server's half (standby_local.go)
+		return localStandbyCmd(ctx, c, args)
+	}
 	if len(args) > 0 {
 		if run, ok := standbySubs[args[0]]; ok {
 			return run(ctx, c, args[1:])

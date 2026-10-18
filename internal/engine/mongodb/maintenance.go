@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 
 	"github.com/rowsafe/rowsafe/internal/agent"
 	"github.com/rowsafe/rowsafe/protocol"
@@ -48,6 +49,16 @@ func (e *Engine) maintenance(ctx context.Context, env agent.EngineEnv, db protoc
 		return nil, err
 	}
 	defer disconnect(c)
+	return killOp(ctx, c, p, tl)
+}
+
+// killOp stops the client operation p names over c, after checking it is
+// still the same one.
+func killOp(ctx context.Context, c *mongo.Client, p protocol.MaintenanceParams, tl agent.TaskLogger) (*protocol.MaintenanceResult, error) {
+	start := time.Now()
+	if p.PID <= 0 || p.BackendStart == nil {
+		return nil, errors.New("kill_op needs the operation's id and start time")
+	}
 	var res struct {
 		Inprog []bson.M `bson:"inprog"`
 	}

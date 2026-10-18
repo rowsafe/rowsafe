@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# PostgreSQL 17 (the official, unmodified postgres:17 image) with Rowsafe
+# next to it, no account: continuous backups to your own S3-compatible
+# bucket, encrypted with a key only you hold, Marks, the weekly Proof
+# (restore test), restores to any second and alerts. The Rowsafe container
+# runs its own control plane; nothing talks to rowsafe.sh.
+#
+#   1. Put the settings in rowsafe.env next to this file (chmod 600; see
+#      the end of this file).
+#   2. docker compose up -d
+#   3. docker compose exec rowsafe rowsafe add shop postgres://postgres:PASSWORD@postgres:5432/shop
+#      It saves the database, shows what backups need (changes nothing),
+#      and turns them on once you say yes (PostgreSQL settings with ALTER
+#      SYSTEM; Rowsafe never restarts PostgreSQL by itself).
+#   4. When it suits you: docker compose restart postgres (a few seconds;
+#      apps reconnect). Rowsafe notices it, checks archiving, takes the
+#      first full backup and runs the first Proof.
+#   5. docker compose exec rowsafe rowsafe status shop
+#
+# Then, all with `docker compose exec rowsafe rowsafe ...`:
+#   mark shop before-migration      a restore point
+#   backups shop | proofs shop      what's there
+#   restore shop --to before-migration   a copy as it was, next to production
+#   channels add --type slack --name ops --url https://hooks.slack.com/...
+#
+# Adding Rowsafe to an existing compose file takes only the lines marked
+# "Rowsafe": two volume mounts on your postgres service, the rowsafe service,
+# and three volumes. Recreating the postgres container to add the mounts is a
+# few seconds of downtime; do it when it suits you.
+#
+# PostgreSQL 18 and later images keep their data in a version-specific
+# directory and want the volume at /var/lib/postgresql: mount the data volume
+# there in BOTH services and use the matching image (ghcr.io/rowsafe/agent:pg18).
+# For postgres:NN-alpine, use the -alpine image (agent:pg17-alpine) and
+# user "70:70".
+#
+# Update Rowsafe (PostgreSQL keeps running):
+#   docker compose pull rowsafe && docker compose up -d rowsafe
+
+name: myapp
+
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data           # PostgreSQL 18+: pgdata:/var/lib/postgresql
+      - pgsocket:/var/run/postgresql              # Rowsafe: it connects over this socket
+      - rowsafe-spool:/rowsafe-spool              # Rowsafe: archive_command hands WAL over here
+    # Your application reaches PostgreSQL as before (network/ports unchanged).
+
+  # Rowsafe
+  rowsafe:
+    # One image per PostgreSQL major. It follows the newest Rowsafe release;
+    # to pin one, use the exact tag: ghcr.io/rowsafe/agent:<version>-pg17.
+    image: ghcr.io/rowsafe/agent:pg17
+    hostname: db-1
+    # The postgres user of the postgres image: 999:999 (Debian images),
+    # 70:70 (-alpine images).
+    user: "999:999"
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    env_file: rowsafe.env
+    # Proof and restored copies start a scratch PostgreSQL in this container.
+    shm_size: 256m
+    volumes:
+      # The same data volume at the same path as in the postgres service,
+      # read-only: Rowsafe reads it for backups and never writes to it.
+      - pgdata:/var/lib/postgresql/data:ro        # PostgreSQL 18+: pgdata:/var/lib/postgresql:ro
+      - pgsocket:/var/run/postgresql
+      - rowsafe-spool:/rowsafe-spool
+      # Its control plane, saved databases, Marks, history and the scratch
+      # space for Proof and copies (about 1.3 x your database + 1 GiB free).
+      - rowsafe-state:/var/lib/rowsafe
+
+volumes:
+  pgdata:
+  pgsocket:        # Rowsafe
+  rowsafe-spool:   # Rowsafe: WAL waiting to be pushed; on durable disk (not tmpfs)
+  rowsafe-state:   # Rowsafe
+
+# rowsafe.env (chmod 600, never commit it):
+#
+#   ROWSAFE_URL=unix:///var/lib/rowsafe/control.sock   # no account: the control plane runs in this container
+#   ROWSAFE_REPO_S3_ENDPOINT=s3.eu-central-1.amazonaws.com   # or <account-id>.r2.cloudflarestorage.com, ...
+#   ROWSAFE_REPO_S3_REGION=eu-central-1
+#   ROWSAFE_REPO_S3_BUCKET=myapp-backups
+#   ROWSAFE_REPO_S3_KEY=...
+#   ROWSAFE_REPO_S3_KEY_SECRET=...
+#   ROWSAFE_REPO_CIPHER_PASS=...           # your encryption key: store it in your password manager FIRST
+#                                          # (openssl rand -base64 32); without it no backup can be read

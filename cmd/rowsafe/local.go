@@ -16,17 +16,22 @@ import (
 	"github.com/rowsafe/rowsafe/tune"
 )
 
-// Without an account: these commands also run on a PostgreSQL, MySQL or
-// MariaDB database the CLI reaches directly, given a connection string
-// (rowsafe pulse postgres://user@host/db, mysql://user@host/db), or
+// Without an account: these commands also run on a PostgreSQL, MySQL,
+// MariaDB, MongoDB, Redis or Valkey database the CLI reaches directly,
+// given a connection string (rowsafe pulse postgres://user@host/db,
+// mysql://user@host/db, mongodb://user@host/db, redis://host:6379), or
 // $DATABASE_URL when there is no saved login.
 // Nothing is sent to Rowsafe. Backups, Proof and alerts need the agent on
-// the server; history and the dashboard need an account (rowsafe login).
+// the server, and so does history (the agent keeps it: server_history.go);
+// the dashboard needs an account (rowsafe login).
 
 // localHelp is rowsafe help local.
 const localHelp = `Save a database once, then use it by name.
 
-On your database server (PostgreSQL), rowsafe add also protects it:
+On your database server (PostgreSQL, MySQL, MariaDB, MongoDB, Redis or
+Valkey), rowsafe add also protects it (SQLite files: the installer, with
+--sqlite /path/to/file; ClickHouse, OpenSearch, Qdrant and Meilisearch: the
+installer finds them):
 continuous backups to your own bucket, Marks, a weekly restore test and
 restore to any second, all on that server:
 
@@ -41,17 +46,60 @@ restore to any second, all on that server:
   sudo rowsafe rewind compare shop   rows deleted, changed or added since, by primary key
   sudo rowsafe rewind rows shop TABLE...
                                      bring the deleted rows back (a Mark first; asks you to type the name)
+  sudo rowsafe upgrade shop --to 18  a new major: tested on a copy first, then (you type the name, a
+                                     Mark first) the upgrade; sudo rowsafe upgrade undo shop for 7 days
+  sudo rowsafe security-updates shop | reboot shop
+                                     the server's security updates, a reboot (a Mark first; you confirm)
+  sudo rowsafe restore shop --from-bucket
+                                     on a new server installed with the same bucket and passphrase:
+                                     shop as its backups hold it, restored here and protected (a move);
+                                     sudo rowsafe proof shop --from-bucket only tests them here
+  sudo rowsafe rewind database shop --to "10m ago"    (or --to LABEL)
+                                     the whole database back to then (a Mark first; asks you to type
+                                     the name; stops PostgreSQL). sudo rowsafe rewind undo shop puts
+                                     it back as it was, for 7 days
+  sudo rowsafe preview shop migration.sql
+                                     run a migration on a full copy restored from the backups, next to
+                                     production: real locks, row counts and the errors only the data causes
+  sudo rowsafe copies create shop --masked --port 55440
+                                     a masked copy for development on localhost (sudo rowsafe masking shop
+                                     shows the rules); deleted by itself after 24 hours (--hours)
   sudo rowsafe backups shop | proofs shop | restores shop | backup shop | proof shop
+  sudo rowsafe pulse shop | top shop  with what the agent saw over time: when the disk will be
+                                     full, which queries got slower (hour by hour, up to 14 days)
   sudo rowsafe channels add --type slack --name ops --url https://hooks.slack.com/...
                                      alerts when backups, Proof, continuous backup or the disk need you
                                      (slack, discord, ntfy or a signed webhook); sudo rowsafe alerts
   sudo rowsafe login                 later: adds the dashboard (every server in one place, alerts
-                                     from outside when the server is down, history, your team,
+                                     from outside when the server is down, history, your team),
+                                     keeping its backups, Proofs and Marks
+                                     from outside when the server is down, charts, your team,
                                      rewinding the whole database in place), keeping its backups,
                                      Proofs and Marks
 
-From anywhere, on a PostgreSQL, MySQL or MariaDB database this computer
-reaches (also managed ones): save it once, then use it by name:
+From your computer (or an AI agent on it), over SSH: nothing listens on
+the network and no account is needed. Your own ssh, keys and ~/.ssh/config;
+sudo on the server when you don't log in as root, without a password
+(https://rowsafe.sh/docs/guides/no-account-server#from-your-computer-over-ssh):
+
+  rowsafe add shop ssh://root@db1.example.com
+                                     saves the server's database shop by name (only the address is
+                                     saved here; the connection string stays on the server).
+                                     --database DB when it has another name there
+  rowsafe status shop | mark shop LABEL | backups shop | marks shop | proofs shop
+  rowsafe restore shop --to "10m ago" | rewind compare shop | rewind rows shop TABLE...
+  rowsafe alerts shop | channels list shop | channels add shop --type slack ...
+                                     the same as sudo rowsafe ... on the server, through its agent
+  rowsafe pulse shop | fix shop | insights shop | top shop | settings shop | tune shop
+                                     run on the server by its rowsafe (with the name saved there)
+  rowsafe mcp shop --allow-restore-points
+                                     for Claude Code or Codex: the server's Marks, backups, restores
+                                     and alerts; with rowsafe use shop, the Guard hook saves a Mark
+                                     there before a destructive command
+
+From anywhere, on a PostgreSQL, MySQL, MariaDB, MongoDB, Redis or Valkey
+database this computer reaches (also managed ones): save it once, then use
+it by name:
 
   rowsafe add shop postgres://USER:PASSWORD@HOST:5432/DB    (or mysql://USER:PASSWORD@HOST:3306/DB)
                                      save it on this computer (checks it connects, read-only). Pipe
@@ -94,7 +142,8 @@ reaches (also managed ones): save it once, then use it by name:
                                      SQL and tells the assistant there is no restore point
 
 Once, without saving: a connection string instead of NAME (rowsafe pulse
-postgres://USER@HOST:5432/DB, mysql://USER@HOST:3306/DB or mariadb://...), or
+postgres://USER@HOST:5432/DB, mysql://USER@HOST:3306/DB, mariadb://... or
+mongodb://USER@HOST:27017/DB or redis://:PASSWORD@HOST:6379), or
 DATABASE_URL when you aren't logged in.
 
 Which database: a connection string; else a saved NAME; else this project's
@@ -122,6 +171,22 @@ disk has room). top reads performance_schema. tune changes MySQL's settings
 with SET PERSIST; MariaDB keeps them in its configuration file, which a
 connection can't reach. Replication isn't checked. The account needs PROCESS
 to see other sessions.
+
+MongoDB (mongodb:// and mongodb+srv://): connections, operations running for
+over 5 minutes, the WiredTiger cache, queued operations, the oplog's reach,
+replication lag, the profiler, and indexes unused for a week or covered by
+another; fixes stop an operation, turn the profiler on and drop an index. top
+reads the profiler's slow operations. Settings are shown, not changed: they
+live in mongod.conf. The user needs clusterMonitor (dbAdmin for the fixes).
+
+Redis and Valkey (redis://, rediss:// for TLS, redis+unix:///path.sock;
+REDISCLI_AUTH for the password): connections, memory and its limit,
+fragmentation, stuck clients, slow commands, latency spikes, saving to its
+own disk, replication and a default user without a password; fixes evict
+instead of refusing writes, give memory back, defragment, disconnect a
+client and turn on snapshots; settings and tune change them with CONFIG SET
+and keep them with CONFIG REWRITE. insights, top and activity are for
+tables and queries: pulse covers Redis.
 
 Rowsafe can't see another server's memory or disk over a connection: pass
 --memory and --cpus for settings advice. Backups, restore to any second, the
@@ -209,7 +274,7 @@ func localControl(want string) (url string, err error) {
 
 // notLoggedIn explains what works without an account.
 const notLoggedIn = "not logged in: run `rowsafe login`.\n" +
-	"pulse, fix, insights, top, activity, settings, tune, schema, explain, preview and mcp work on a database directly (PostgreSQL; MySQL and MariaDB but schema, explain and preview):\n" +
+	"pulse, fix, insights, top, activity, settings, tune, schema, explain, preview and mcp work on a database directly (PostgreSQL; MySQL, MariaDB, MongoDB, Redis and Valkey but schema, explain and preview):\n" +
 	"  rowsafe add shop postgres://user@host:5432/dbname   then: rowsafe pulse shop\n" +
 	"  or once: rowsafe pulse postgres://user@host:5432/dbname   (or set DATABASE_URL)\n" +
 	"Backups, Marks and restores run on the database's server: install Rowsafe there (https://rowsafe.sh), then sudo rowsafe add NAME postgres://... on it"
@@ -297,17 +362,23 @@ func localPulse(ctx context.Context, l *localDB, args []string) error {
 	if err != nil {
 		return err
 	}
-	h, err := l.Health(ctx, opts)
+	hist, name := serverHistory(ctx, l) // the agent's, on its server (server_history.go)
+	h, err := l.Health(ctx, withHistory(opts, hist))
 	if err != nil {
 		return err
 	}
+	applyHistory(&h, hist)
 	if *asJSON {
 		if err := printJSON(h); err != nil {
 			return err
 		}
 	} else {
 		printHealth(h, l.Command("fix"))
-		localFooter(l)
+		if hist != nil {
+			historyFooter(name, hist)
+		} else {
+			localFooter(l)
+		}
 	}
 	if h.Score < 70 {
 		return exitError(3)
@@ -331,7 +402,8 @@ func localFix(ctx context.Context, l *localDB, args []string) error {
 	if err != nil {
 		return err
 	}
-	h, err := l.Health(ctx, opts)
+	hist, _ := serverHistory(ctx, l) // server_history.go
+	h, err := l.Health(ctx, withHistory(opts, hist))
 	if err != nil {
 		return err
 	}
@@ -426,6 +498,9 @@ func localTop(ctx context.Context, l *localDB, args []string) error {
 	if err := noArgs(pos); err != nil {
 		return err
 	}
+	if c, name, ok := serverDB(ctx, l); ok { // the agent's readings over time (server_history.go)
+		return topCmd(ctx, c, append([]string{name}, args...))
+	}
 	st, err := l.Statements(ctx)
 	if err != nil {
 		return err
@@ -435,7 +510,7 @@ func localTop(ctx context.Context, l *localDB, args []string) error {
 		return printJSON(st)
 	}
 	return printCumulativeTopFor(l.Engine(), l.Name(), *st, *width,
-		"Which queries got slower over time needs history: the Rowsafe agent keeps it.")
+		"Which queries got slower over time needs history: the Rowsafe agent keeps it on the database's server (sudo rowsafe top NAME there).")
 }
 
 func localActivity(ctx context.Context, l *localDB, args []string) error {
@@ -491,7 +566,8 @@ func localSettings(ctx context.Context, l *localDB, args []string) error {
 	if len(pos) == 1 {
 		return printSetting(l.Name(), ov, strings.ToLower(pos[0]), "")
 	}
-	printSettings(l.Name(), ov, *all, settingsHints{restart: "Restart " + l.EngineName() + " when it suits you; nothing restarts by itself.", tune: l.Command("tune")})
+	printSettings(l.Name(), ov, *all, settingsHints{restart: "Restart " + l.EngineName() + " when it suits you; nothing restarts by itself.", tune: l.Command("tune"),
+		engine: l.EngineName(), local: true})
 	return nil
 }
 
@@ -599,7 +675,11 @@ func localMCP(ctx context.Context, l *localDB, args []string) error {
 		mode = "read and fix"
 	}
 	fmt.Fprintf(os.Stderr, "rowsafe mcp: serving %s tools for %s on %s on stdio (nothing leaves this machine)\n", mode, l.Name(), l.Host())
-	s := local.NewMCPServer(l.DB, local.MCPOptions{AllowWrites: *allowWrites, Version: version})
+	opts := local.MCPOptions{AllowWrites: *allowWrites, Version: version}
+	if c, d := serverDatabaseOf(ctx, l); d != nil { // check_migration on a full copy (server_guard.go)
+		opts.FullPreview = fullPreviewFunc(c, d.Name)
+	}
+	s := local.NewMCPServer(l.DB, opts)
 	if err := s.Run(ctx, &sdk.StdioTransport{}); err != nil && ctx.Err() == nil {
 		return err
 	}

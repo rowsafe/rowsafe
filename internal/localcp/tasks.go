@@ -13,7 +13,7 @@ import (
 // Tasks run one at a time per database and lane, like on the hosted control
 // plane: the main lane (backups, Proof, setup...), and side lanes for the
 // short work people wait for. A task that stops PostgreSQL never runs beside
-// a health fix.
+// a health fix, and Marks wait for it.
 var sideLanes = map[string]string{
 	protocol.TaskRestorePoint:  "restore_point",
 	protocol.TaskCopySchema:    "restore_point",
@@ -25,9 +25,12 @@ var sideLanes = map[string]string{
 	protocol.TaskRewindCleanup: "maintenance",
 }
 
-var stopsPostgres = []string{protocol.TaskRestart, protocol.TaskRewindInPlace, protocol.TaskRewindUndo}
+var stopsPostgres = []string{protocol.TaskRestart, protocol.TaskRewindInPlace, protocol.TaskRewindUndo, protocol.TaskUpgrade, protocol.TaskUpgradeUndo}
 
 func lane(typ string) string {
+	if protocol.IsFilesTask(typ) {
+		return "files" // files.go
+	}
 	if l, ok := sideLanes[typ]; ok {
 		return l
 	}
@@ -38,7 +41,7 @@ func lane(typ string) string {
 // the same database.
 func conflicts(r, t string) bool {
 	return lane(r) == lane(t) ||
-		slices.Contains(stopsPostgres, r) && lane(t) == "maintenance" ||
+		slices.Contains(stopsPostgres, r) && (lane(t) == "maintenance" || lane(t) == "restore_point") ||
 		lane(r) == "maintenance" && slices.Contains(stopsPostgres, t)
 }
 
@@ -68,17 +71,29 @@ func (s *state) enqueue(db *dbRec, typ string, params any, after string, schedul
 }
 
 // openKey is what makes two open tasks the same: their type, and a backup's
-// kind (a full and a differential backup may wait together).
+// kind and storage (a full and a differential backup may wait together, and
+// a full one to each storage).
 func openKey(typ string, params json.RawMessage) string {
 	if typ == protocol.TaskBackup {
 		var p protocol.BackupParams
 		_ = json.Unmarshal(params, &p)
+		if p.Repo == protocol.RepoSecond {
+			return typ + ":" + p.Type + ":copy2"
+		}
 		return typ + ":" + p.Type
 	}
 	if typ == protocol.TaskRestorePoint {
 		var p protocol.RestorePointParams
 		_ = json.Unmarshal(params, &p)
 		return typ + ":" + p.Name
+	}
+	if typ == protocol.TaskPreviewMigration || typ == protocol.TaskSafeCopy { // each its own (guard.go)
+		var p struct {
+			PreviewID string `json:"preview_id"`
+			CopyID    string `json:"copy_id"`
+		}
+		_ = json.Unmarshal(params, &p)
+		return typ + ":" + p.PreviewID + p.CopyID
 	}
 	return typ
 }
@@ -152,7 +167,7 @@ func (s *state) reap(now time.Time) int {
 // spec is what the agent gets about a database.
 func (d *dbRec) spec() protocol.DatabaseSpec {
 	return protocol.DatabaseSpec{ID: d.ID, Name: d.Name, Stanza: d.Stanza, Port: d.Port, SocketDir: d.SocketDir,
-		RetentionFull: d.RetentionFull, Engine: d.Engine}
+		RetentionFull: d.RetentionFull, Engine: d.Engine, SecondCopyRetentionFull: protocol.DefaultSecondCopyRetentionFull}
 }
 
 func (d *dbRec) setStatus(status string, now time.Time) {
@@ -172,7 +187,11 @@ func (s *state) complete(id string, req protocol.CompleteRequest, now time.Time)
 	}
 	finish(t, req.Status, clip(req.Error, 4000), now)
 	t.Log, t.Result, t.ErrorInfo = clip(req.Log, 64000), req.Result, req.ErrorInfo
+	s.afterFilesTask(t, req, now) // files.go
 	db := s.db(t.DatabaseID)
+	if t.DatabaseID == "" {
+		return t, s.afterHostTask(t, req, now) // restore_bucket.go
+	}
 	if db == nil {
 		return t, nil
 	}
@@ -202,6 +221,7 @@ func (s *state) afterTask(t *taskRec, db *dbRec, req protocol.CompleteRequest, n
 			return err
 		}
 		db.Inspect = &res
+		quickSnapshots(db) // search.go
 	case protocol.TaskAdopt:
 		if !ok {
 			return nil
@@ -211,6 +231,7 @@ func (s *state) afterTask(t *taskRec, db *dbRec, req protocol.CompleteRequest, n
 			return err
 		}
 		db.Inspect = &res.Inspect
+		quickSnapshots(db) // search.go
 		if !res.Applied {
 			return nil
 		}
@@ -230,6 +251,7 @@ func (s *state) afterTask(t *taskRec, db *dbRec, req protocol.CompleteRequest, n
 			return err
 		}
 		db.Inspect = &res.Inspect
+		quickSnapshots(db) // search.go
 		if res.OK {
 			return s.activate(db, now)
 		}
@@ -241,11 +263,14 @@ func (s *state) afterTask(t *taskRec, db *dbRec, req protocol.CompleteRequest, n
 		if err := json.Unmarshal(req.Result, &res); err != nil {
 			return err
 		}
-		if res.Repo == protocol.RepoSecond {
-			return nil // a second copy needs an account
+		if res.Repo == protocol.RepoSecond || backupRepo(t.Params) == protocol.RepoSecond {
+			s.afterSecondCopyBackup(t, db, res) // secondcopy.go
+			return nil
 		}
-		s.Backups = append(s.Backups, protocol.Backup{ID: newID("bk"), DatabaseID: db.ID, TaskID: t.ID, Label: res.Label,
-			Type: res.Type, StartedAt: res.StartedAt, StoppedAt: res.StoppedAt, SizeBytes: res.SizeBytes, RepoSizeBytes: res.RepoSizeBytes})
+		b := protocol.Backup{ID: newID("bk"), DatabaseID: db.ID, TaskID: t.ID, Label: res.Label,
+			Type: res.Type, StartedAt: res.StartedAt, StoppedAt: res.StoppedAt, SizeBytes: res.SizeBytes, RepoSizeBytes: res.RepoSizeBytes}
+		s.Backups = append(s.Backups, b)
+		s.recordTimeline(b.ID, res.WALStart) // rewind_inplace.go
 		if res.Kept != nil && res.Label != "" && slices.Contains(res.Kept, res.Label) {
 			// Backups retention removed are forgotten: a restore never names one.
 			s.Backups = slices.DeleteFunc(s.Backups, func(b protocol.Backup) bool {
@@ -288,6 +313,18 @@ func (s *state) afterTask(t *taskRec, db *dbRec, req protocol.CompleteRequest, n
 		s.finishMark(t.ID, res, now)
 	case protocol.TaskRewindCopy, protocol.TaskRewindDrop:
 		s.afterRewind(t, ok, req.Result, now) // rewind.go
+	case protocol.TaskUpgrade, protocol.TaskUpgradeUndo:
+		return s.afterUpgrade(db, ok, now) // upgrade.go
+	case protocol.TaskRewindInPlace, protocol.TaskRewindUndo, protocol.TaskRewindCleanup:
+		return s.afterInPlace(t, db, ok, req.Result, now) // rewind_inplace.go
+	case protocol.TaskPreviewMigration, protocol.TaskSafeCopy, protocol.TaskCopySchema:
+		s.afterGuard(t, ok, req.Result, now) // guard.go
+	case protocol.TaskSecurityScan, protocol.TaskSecurityFix:
+		s.afterSecurity(t, ok, req.Result, now) // security.go
+	default:
+		if protocol.IsStandbyTask(t.Type) {
+			return s.afterStandby(t, db, ok, req.Result, now) // standby.go
+		}
 	}
 	return nil
 }
@@ -338,7 +375,10 @@ func (s *state) archiver(a protocol.ArchiverStats, now time.Time) error {
 		return nil
 	}
 	at := now.UTC()
-	if a.Error != "" {
+	// A Redis or Valkey server Rowsafe can't follow reports "snapshots"
+	// with Error saying why: how it is backed up, not a failure to read the
+	// status (redis.go).
+	if a.Error != "" && a.ArchiveMode != protocol.RedisArchiveSnapshots {
 		db.ArchiverError, db.ArchiverErrorAt = clip(a.Error, 2000), &at
 		return nil
 	}
@@ -355,6 +395,9 @@ func (s *state) archiver(a protocol.ArchiverStats, now time.Time) error {
 func (s *state) createMark(db *dbRec, name, by string, now time.Time) (*taskRec, error) {
 	if db.Status != protocol.DBActive {
 		return nil, fmt.Errorf("%s is %s: Marks need an active database (backups on and proven)", db.Name, db.Status)
+	}
+	if msg := redisMarksRefusal(db) + sqliteMarksRefusal(db); msg != "" { // redis.go, sqlite.go
+		return nil, errors.New(msg)
 	}
 	// An earlier attempt with this name that never got written is replaced.
 	s.Marks = slices.DeleteFunc(s.Marks, func(m protocol.RestorePoint) bool {

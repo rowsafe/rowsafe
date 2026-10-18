@@ -287,7 +287,11 @@ func copiesList(ctx context.Context, c *client.Client, args []string) error {
 	if *asJSON {
 		return printJSON(info)
 	}
-	fmt.Printf("%s: safe copies (%d of %d in use across the organization)\n\n", name, info.Used, info.Limit)
+	if onServer {
+		fmt.Printf("%s: safe copies (%d of %d on this server)\n\n", name, info.Used, info.Limit)
+	} else {
+		fmt.Printf("%s: safe copies (%d of %d in use across the organization)\n\n", name, info.Used, info.Limit)
+	}
 	if len(info.Copies) == 0 {
 		fmt.Println("No safe copies. A safe copy is a masked copy of the database, on its server, that your developers")
 		fmt.Println("and AI agents can connect to. Make one: rowsafe copies create " + name)
@@ -341,7 +345,9 @@ func copiesCreateCmd(ctx context.Context, c *client.Client, args []string) error
 	fs := flag.NewFlagSet("copies create", flag.ContinueOnError)
 	var allow csvList
 	fs.Var(&allow, "allow", "IP address or range that may connect (repeat or comma-separate; default: this computer's address as Rowsafe sees it)")
-	listen := fs.String("listen", "private", "where the copy listens on the server: private, public, an IP of the server, or *")
+	listen := fs.String("listen", "", "where the copy listens on the server: private (default), public, an IP of the server, or *; on a server Rowsafe protects on its own also localhost (its default)")
+	port := fs.Int("port", 0, "the TCP port the copy listens on (on a server Rowsafe protects on its own; default: the first free one from 55440)")
+	maskedFlag := fs.Bool("masked", false, "mask it with the database's rules (rowsafe masking; the default)")
 	connectHost := fs.String("connect-host", "", "host name to put in the connection string, if not the listen address")
 	hours := fs.Int("hours", 24, "how long to keep it (at most 168)")
 	db := fs.String("db", "", "database in the connection string")
@@ -357,6 +363,12 @@ func copiesCreateCmd(ctx context.Context, c *client.Client, args []string) error
 	if *hours < 1 || *hours > 168 {
 		return newUsageError("--hours must be between 1 and 168 (7 days)")
 	}
+	if *maskedFlag && *noMasking {
+		return newUsageError("--masked and --no-masking don't go together")
+	}
+	if *port != 0 && !onServer {
+		return newUsageError("--port is for a server Rowsafe protects on its own; with an account Rowsafe picks the port")
+	}
 	d, err := c.Database(ctx, name)
 	if err != nil {
 		return apiErr(err)
@@ -364,7 +376,7 @@ func copiesCreateCmd(ctx context.Context, c *client.Client, args []string) error
 	if !client.CopyHasPassword(d.Engine) {
 		return copiesCreateFile(ctx, c, d, name, *hours, *structure, *noMasking, *yes, *asJSON, *noWait)
 	}
-	req := protocol.CreateSafeCopyRequest{Hours: *hours, AllowFrom: allow, Listen: *listen, ConnectHost: *connectHost, DB: *db}
+	req := protocol.CreateSafeCopyRequest{Hours: *hours, AllowFrom: allow, Listen: *listen, ConnectHost: *connectHost, DB: *db, Port: *port}
 	if *noMasking {
 		fmt.Printf("This copy will hold the REAL data of %s, reachable over the network by the allowed addresses.\n", name)
 		if err := confirmTypedAs(*yes, name, "Type the database's name to confirm: "); err != nil {
@@ -424,6 +436,12 @@ func copiesCreateCmd(ctx context.Context, c *client.Client, args []string) error
 		fmt.Printf(": %d columns masked in %d tables", m.Columns, m.Tables)
 	}
 	fmt.Printf(".\n\nConnect (the password is shown only now):\n\n  %s\n\n", conn)
+	if resp.Copy.Host == protocol.CopyListenLocal {
+		fmt.Printf("It listens on this server only. From your computer: ssh -L %d:127.0.0.1:%d %s, then connect to 127.0.0.1:%d.\n",
+			resp.Copy.Port, resp.Copy.Port, orText(d.Hostname, "SERVER"), resp.Copy.Port)
+		fmt.Printf("Deleted by itself at %s.\n", describeTime(resp.Copy.Expires))
+		return nil
+	}
 	fmt.Printf("Allowed from %s. Deleted by itself at %s.\n", strings.Join(resp.Copy.AllowFrom, ", "), describeTime(resp.Copy.Expires))
 	return nil
 }

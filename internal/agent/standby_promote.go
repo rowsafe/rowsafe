@@ -51,6 +51,29 @@ func (a *Agent) standbyPromote(ctx context.Context, db protocol.DatabaseSpec, p 
 		_ = rt.removeStandby(p.StandbyID)
 		return res, nil
 	}
+	if p.Record {
+		// Without an account (standby_local.go): the primary's fence says in
+		// the bucket where its last change is; without that, a person must
+		// have confirmed it is down.
+		pr, rerr := a.readRecord(ctx, rec.Database)
+		stopped := rerr == nil && pr != nil && pr.State == protocol.PrimaryRecordStopped && !a.mine(pr) &&
+			(pr.SystemID == "" || st.SystemID == "" || pr.SystemID == st.SystemID)
+		switch {
+		case stopped && p.WaitForLSN == "":
+			p.WaitForLSN = pr.CheckpointLSN
+			tl.Printf("%s stopped for good at %s; its last change is at %s", pr.Primary, pr.At.Format(time.RFC3339), orDash(pr.CheckpointLSN))
+		case stopped:
+		case !p.PrimaryDown:
+			why := "the pair's record in the bucket doesn't say it stopped"
+			if rerr != nil {
+				why = rerr.Error()
+			}
+			return nil, fmt.Errorf("didn't promote: the primary wasn't stopped for a switchover (%s). Stop it first on its server "+
+				"(sudo rowsafe standby fence %s), or, if it is down, promote with --primary-down", why, rec.Database.Name)
+		default:
+			tl.Printf("promoting without the primary stopping first: a person confirmed it is down")
+		}
+	}
 	rec.Phase = protocol.StandbyPhasePromoting
 	_ = rt.putStandby(rec)
 	back := func() {
@@ -151,6 +174,19 @@ func (a *Agent) standbyPromote(ctx context.Context, db protocol.DatabaseSpec, p 
 	_ = rt.removeStandby(p.StandbyID)
 	rt.setCluster(rec.DatabaseID, clusterFacts{DataDir: rec.DataDir, Major: rec.Major, SystemID: st.SystemID,
 		ConfigFile: rec.ConfigFile, HbaFile: rec.HbaFile, IdentFile: rec.IdentFile})
+	if p.Record {
+		err := a.writeRecord(ctx, rec.Database, protocol.PrimaryRecord{SystemID: st.SystemID, State: protocol.PrimaryRecordPrimary,
+			Timeline: res.Timeline, SwitchLSN: res.ReplayLSN})
+		if err != nil {
+			w := "couldn't say in the bucket that this server is the primary now (" + err.Error() + "): the old primary won't stop by itself " +
+				"if it comes back, so fence it on its server (sudo rowsafe standby fence " + rec.Database.Name + ") before it starts"
+			res.Warnings = append(res.Warnings, w)
+			tl.Printf("%s", w)
+		} else {
+			res.Recorded = true
+			tl.Printf("the pair's record in the bucket says this server is the primary (timeline %d)", res.Timeline)
+		}
+	}
 
 	switch {
 	case p.WaitForLSN != "" && res.CaughtUp:

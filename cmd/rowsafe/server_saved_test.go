@@ -44,10 +44,58 @@ func TestLocalCluster(t *testing.T) {
 	}
 }
 
+// In the agent's Docker container, another host is this server's only when
+// it is the PostgreSQL behind the shared socket; outside it, never.
+func TestServerClusterSidecar(t *testing.T) {
+	t.Setenv("ROWSAFE_MODE", "")
+	if _, _, ok := serverCluster(t.Context(), "postgres://app@postgres:5432/shop"); ok {
+		t.Error("a compose service's host is this server's outside the agent's container")
+	}
+	if serverCLI() != "sudo rowsafe" {
+		t.Errorf("serverCLI() = %q on a server", serverCLI())
+	}
+	t.Setenv("ROWSAFE_MODE", "docker-sidecar")
+	if serverCLI() != "rowsafe" {
+		t.Errorf("serverCLI() = %q in the agent's container", serverCLI())
+	}
+	if port, sock, ok := serverCluster(t.Context(), "postgresql:///shop?host=/var/run/postgresql"); !ok || port != 5432 || sock != "/var/run/postgresql" {
+		t.Errorf("the shared socket: %d %q %v", port, sock, ok)
+	}
+	for _, conn := range []string{"mysql://app@db:3306/shop", "postgres://app@db.invalid/shop?connect_timeout=2"} {
+		if _, _, ok := serverCluster(t.Context(), conn); ok {
+			t.Errorf("%s: this server's PostgreSQL in the container", conn)
+		}
+	}
+}
+
+func TestSidecarLoginRefusal(t *testing.T) {
+	t.Setenv("ROWSAFE_MODE", "docker-sidecar")
+	t.Setenv("ROWSAFE_URL", protocol.LocalControlURL)
+	if err := sidecarLoginRefusal(); err == nil || !strings.Contains(err.Error(), "Nothing was changed") {
+		t.Errorf("in the container on its own: %v", err)
+	}
+	t.Setenv("ROWSAFE_URL", "https://api.rowsafe.sh")
+	if err := sidecarLoginRefusal(); err != nil {
+		t.Errorf("in the container with an account: %v", err)
+	}
+	t.Setenv("ROWSAFE_MODE", "")
+	t.Setenv("ROWSAFE_URL", protocol.LocalControlURL)
+	if err := sidecarLoginRefusal(); err != nil {
+		t.Errorf("on a server: %v", err)
+	}
+}
+
 // localServer runs this server's control plane (internal/localcp) on a Unix
 // socket, with shop protected (a full backup, an archived Mark), and a fake
 // agent that runs every task it is given.
 func localServer(t *testing.T) *client.Client {
+	t.Helper()
+	c, _, _ := localServerAt(t)
+	return c
+}
+
+// localServerAt is localServer with the control plane and its socket.
+func localServerAt(t *testing.T) (*client.Client, *localcp.Server, string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("the agent's own control plane runs on a Linux server")
@@ -91,7 +139,7 @@ func localServer(t *testing.T) *client.Client {
 	t.Setenv("ROWSAFE_API_KEY", "")
 	t.Setenv("ROWSAFE_URL", "unix://"+sock)
 	t.Setenv("DATABASE_URL", "")
-	return client.New("unix://"+sock, "local")
+	return client.New("unix://"+sock, "local"), srv, sock
 }
 
 // fakeLocalAgent claims tasks on the socket and finishes each as the agent
@@ -118,6 +166,8 @@ func fakeLocalAgent(ctx context.Context, sock string) {
 		post("/v1/agent/tasks/claim", protocol.ClaimRequest{}, &claim)
 		task := claim.Task
 		if task == nil {
+			// Guard copies need the agent's report (server_guard_test.go).
+			post("/v1/agent/heartbeat", protocol.HeartbeatRequest{Hostname: "db1", Copies: &protocol.CopiesReport{PortMin: 55440, PortMax: 55539}}, nil)
 			time.Sleep(20 * time.Millisecond)
 			continue
 		}
@@ -134,10 +184,16 @@ func fakeLocalAgent(ctx context.Context, sock string) {
 			result = protocol.BackupResult{Label: "20261017-000000F", Type: protocol.BackupFull, StartedAt: now.Add(-time.Second), StoppedAt: now}
 		case protocol.TaskDrill:
 			result = protocol.DrillResult{Passed: true}
+		case protocol.TaskRestorePoint:
+			var p protocol.RestorePointParams
+			_ = json.Unmarshal(task.Params, &p)
+			result = protocol.RestorePointResult{Name: p.Name, LSN: "0/4000000", Archived: true, CreatedAt: now, ArchivedAt: &now}
 		case protocol.TaskRewindCopy:
 			var p protocol.RewindCopyParams
 			_ = json.Unmarshal(task.Params, &p)
 			result = protocol.RewindCopyResult{CopyID: p.CopyID, Expires: p.Expires, Summary: "The copy of shop is ready (restored to the Mark " + p.Target.Mark + ")."}
+		default:
+			result = fakeGuardResult(task) // server_guard_test.go
 		}
 		raw, _ := json.Marshal(result)
 		post("/v1/agent/tasks/"+task.ID+"/complete", protocol.CompleteRequest{Status: protocol.StatusSucceeded, Result: raw}, nil)
@@ -206,4 +262,10 @@ func TestAddProtectsOnServer(t *testing.T) {
 	if err := dispatch(ctx, []string{"restore", "shop"}); err == nil || !strings.Contains(err.Error(), "--to") {
 		t.Fatalf("no --to: %v", err)
 	}
+}
+
+// localServerSock is localServer, with its socket's path.
+func localServerSock(t *testing.T) (*client.Client, string) {
+	c, _, sock := localServerAt(t)
+	return c, sock
 }

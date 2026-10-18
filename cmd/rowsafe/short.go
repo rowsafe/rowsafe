@@ -73,7 +73,7 @@ Pulse: health and monitoring
   rowsafe settings [NAME]            PostgreSQL's settings; rowsafe tune [NAME]: what suits the server
   rowsafe recommendations [NAME]     what would make it better, why and what it costs
   rowsafe security [NAME]            who can reach the database and how they log in; fix it (asks first)
-  rowsafe logs [NAME]                the database's logs (rowsafe log-destinations: forward them)
+  rowsafe logs [NAME]                the database's logs: --errors, --since 1h, --grep TEXT (logs forward: send them on)
   rowsafe alerts                     firing alerts (rowsafe channels: where they go)
   rowsafe report                     "Your weekly Pulse", the weekly email
 
@@ -295,6 +295,9 @@ func fleetStatus(ctx context.Context, c *client.Client, asJSON bool) error {
 				fmt.Printf("      next: %s\n", firstLine(p.NextAction, 160))
 			}
 		}
+		if onServer && filesStatus(ctx, c, "") > 0 { // files.go
+			h.Healthy = false
+		}
 	}
 	if !h.Healthy {
 		return exitError(3)
@@ -472,6 +475,9 @@ func protectionStatus(ctx context.Context, c *client.Client, name string, asJSON
 		}
 	} else {
 		printProtection(name, p)
+		if filesStatus(ctx, c, name) > 0 { // files.go
+			return exitError(3)
+		}
 	}
 	if !p.Protected {
 		return exitError(3)
@@ -492,9 +498,14 @@ func printProtection(name string, p protocol.Protection) {
 		fmt.Printf("  ! the last %s %s (task %s): %s\n", taskName(t.Type), t.Status, t.ID, firstLine(t.Error, 80))
 	}
 	fmt.Printf("\nLast backup:          %s\n", ago(p.LastBackupAt))
-	fmt.Printf("Last WAL archived:    %s\n", ago(p.WALLastArchivedAt))
+	if p.WALLastArchivedAt != nil || p.ArchiverUp { // engines with no change log have none (OpenSearch, Qdrant, Meilisearch)
+		fmt.Printf("Last change copied:   %s\n", ago(p.WALLastArchivedAt))
+	}
 	fmt.Printf("Restore test passed:  %s\n", ago(p.LastDrillPassedAt))
 	if p.RecoveryWindowStart != nil {
 		fmt.Printf("Recoverable from:     %s\n", p.RecoveryWindowStart.Local().Format(time.RFC1123))
+	}
+	if sc := p.SecondCopy; sc != nil {
+		fmt.Printf("Second copy:          %s\n", orText(sc.Summary, sc.State))
 	}
 }

@@ -34,8 +34,9 @@ func activeDB(t *testing.T, a *fakeAgent, c *client.Client, now *time.Time) prot
 		!strings.Contains(err.Error(), "already protected as shop") {
 		t.Fatalf("the same PostgreSQL under another name: %v", err)
 	}
-	if _, err := c.CreateDatabase(ctx, protocol.CreateDatabaseRequest{Name: "crm", Port: 3306, Engine: protocol.EngineMySQL}); apiStatus(err) != http.StatusBadRequest {
-		t.Fatalf("MySQL: %v", err)
+	if _, err := c.CreateDatabase(ctx, protocol.CreateDatabaseRequest{Name: "crm", Port: 1521, Engine: "oracle"}); apiStatus(err) != http.StatusBadRequest ||
+		!strings.Contains(err.Error(), "unknown engine") {
+		t.Fatalf("an unknown engine: %v", err)
 	}
 	// Applying before the plan finished is refused.
 	if _, err := c.CreateTask(ctx, "shop", protocol.TaskAdopt, protocol.AdoptParams{Apply: true}); apiStatus(err) != http.StatusConflict {
@@ -78,7 +79,7 @@ func TestRewind(t *testing.T) {
 
 	info, err := c.RewindInfo(ctx, "shop")
 	if err != nil || info.Earliest == nil || info.Latest == nil || !info.Latest.Equal(*now) || len(info.Marks) != 1 || info.Copy != nil ||
-		info.CanRewindInPlace || info.InPlaceReason == "" {
+		info.CanRewindInPlace || !strings.Contains(info.InPlaceReason, "only root can allow it") {
 		t.Fatalf("rewind info: %+v %v", info, err)
 	}
 
@@ -163,9 +164,10 @@ func TestRewind(t *testing.T) {
 	a.done(mark, protocol.StatusSucceeded, protocol.RestorePointResult{Name: "x", LSN: "0/4000000", CreatedAt: *now})
 	a.done(a.claimOne(protocol.TaskRewindRows), protocol.StatusSucceeded, protocol.RewindRowsResult{Summary: "Brought back 3 rows."})
 
-	// The whole database in place: not here.
+	// The whole database in place: not until root allows stopping PostgreSQL
+	// (rewind_inplace_test.go has the rest).
 	if _, err := c.RewindInPlace(ctx, "shop", protocol.RewindInPlaceRequest{Mark: "before-drop", Confirm: "shop"}); apiStatus(err) != http.StatusForbidden ||
-		!strings.Contains(err.Error(), "rowsafe login") {
+		!strings.Contains(err.Error(), "only root can allow it") {
 		t.Fatalf("in place: %v", err)
 	}
 

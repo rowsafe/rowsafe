@@ -13,6 +13,7 @@ package localcp
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -76,6 +77,8 @@ type dbMetrics struct {
 	Error         string    `json:"error,omitempty"`
 	DiskFreePct   *float64  `json:"disk_free_pct,omitempty"`
 	DiskFreeBytes *float64  `json:"disk_free_bytes,omitempty"`
+	// Values are the readings an engine's own rules look at (engineRules).
+	Values map[string]float64 `json:"values,omitempty"`
 }
 
 // localRule is one rule: firing reports whether it fires now; known=false
@@ -92,6 +95,7 @@ type ruleResult struct {
 	known, firing                    bool
 	summary, description, next, unit string
 	value, threshold                 *float64
+	severity                         string // "" is the rule's
 }
 
 func fire(summary, description, next string) ruleResult {
@@ -256,6 +260,78 @@ var localRules = []localRule{
 		}},
 }
 
+// rulesFor are the rules for a database of that engine: the shared ones
+// (in the engine's words: engineAlert) and its own.
+func rulesFor(engine string) []localRule {
+	own := engineRules(engine)
+	if len(own) == 0 {
+		return localRules
+	}
+	return append(localRules[:len(localRules):len(localRules)], own...)
+}
+
+// engineRules are an engine's own rules (mongodb.go...).
+func engineRules(engine string) []localRule {
+	switch protocol.NormalizeEngine(engine) {
+	case protocol.EngineMongoDB:
+		return mongoRules
+	case protocol.EngineRedis, protocol.EngineValkey:
+		return redisRules
+	case protocol.EngineSQLite:
+		return sqliteRules
+	case protocol.EngineClickHouse:
+		return clickhouseRules
+	case protocol.EngineOpenSearch:
+		return openSearchRules // search.go
+	case protocol.EngineQdrant:
+		return qdrantRules
+	}
+	return nil
+}
+
+// engineMetrics are the readings an engine's own rules look at.
+func engineMetrics(engine string) []string {
+	switch protocol.NormalizeEngine(engine) {
+	case protocol.EngineMongoDB:
+		return mongoMetrics
+	case protocol.EngineRedis, protocol.EngineValkey:
+		return redisMetrics
+	case protocol.EngineClickHouse:
+		return clickhouseMetrics
+	case protocol.EngineOpenSearch, protocol.EngineQdrant, protocol.EngineMeilisearch:
+		return snapshotMetrics // search.go
+	}
+	return nil
+}
+
+// freshMetrics are a database's newest readings for its engine's rules,
+// nil when there are none from the last 10 minutes.
+func (s *state) freshMetrics(d *dbRec, now time.Time) map[string]float64 {
+	m := s.Metrics[d.ID]
+	if m == nil || now.Sub(m.At) > metricsFresh {
+		return nil
+	}
+	return m.Values
+}
+
+// metricRule fires when the reading key is above threshold (unknown
+// without a recent reading); build words the alert.
+func metricRule(key string, threshold float64, build func(st *state, d *dbRec, m map[string]float64, v float64) ruleResult) func(*state, *dbRec, protocol.Protection, time.Time) ruleResult {
+	return func(st *state, d *dbRec, p protocol.Protection, now time.Time) ruleResult {
+		m := st.freshMetrics(d, now)
+		v, ok := m[key]
+		if !ok {
+			return ruleResult{}
+		}
+		if v <= threshold {
+			return okResult
+		}
+		r := build(st, d, m, v)
+		r.value, r.threshold = f64(float64(int(v*10))/10), f64(threshold)
+		return r
+	}
+}
+
 func activated(d *dbRec) bool {
 	return d.Status == protocol.DBActive || d.Status == protocol.DBVerifying
 }
@@ -293,47 +369,24 @@ func (s *state) evaluateAlerts(now time.Time) []notice {
 	var out []notice
 	for _, d := range s.Databases {
 		p := s.protection(d, now)
-		for _, rule := range localRules {
-			key := rule.name + ":" + d.ID
-			r := rule.eval(s, d, p, now)
-			open := s.openAlert(key)
-			switch {
-			case !r.known:
-			case r.firing && open != nil:
-				open.Summary, open.Description, open.NextStep = r.summary, r.description, r.next
-				open.Value, open.Threshold = r.value, r.threshold
-				if open.Severity == protocol.SeverityCritical && open.AcknowledgedAt == nil &&
-					open.NotifiedAt != nil && now.Sub(*open.NotifiedAt) >= alertReminderEvery {
-					at := now
-					open.NotifiedAt = &at
-					out = append(out, s.noticesFor(eventReminder, open.Alert)...)
-				}
-			case r.firing:
-				first, seen := s.AlertPending[key]
-				if !seen {
-					s.AlertPending[key], first = now, now
-				}
-				if now.Sub(first) < rule.forDur {
-					continue
-				}
-				delete(s.AlertPending, key)
-				at := now
-				a := &alertRec{Key: key, NotifiedAt: &at, Alert: protocol.Alert{
-					ID: newID("alr"), Rule: rule.name, Severity: rule.severity, State: "firing",
-					Database: &protocol.AlertDatabase{ID: d.ID, Name: d.Name}, Host: s.alertHost(),
-					Summary: r.summary, Description: r.description, NextStep: r.next,
-					Value: r.value, Threshold: r.threshold, Unit: r.unit, StartedAt: first.UTC(),
-				}}
-				s.Alerts = append(s.Alerts, a)
-				out = append(out, s.noticesFor(eventFiring, a.Alert)...)
-			default:
-				delete(s.AlertPending, key)
-				if open != nil {
-					at := now.UTC()
-					open.State, open.ResolvedAt = "resolved", &at
-					out = append(out, s.noticesFor(eventResolved, open.Alert)...)
-				}
+		for _, rule := range rulesFor(d.Engine) {
+			r := engineAlert(rule.name, s, d, rule.eval(s, d, p, now), now) // mysql.go
+			out = append(out, s.step(rule, rule.name+":"+d.ID, &protocol.AlertDatabase{ID: d.ID, Name: d.Name}, r, now)...)
+		}
+	}
+	// Files: each database's folders, and the server's own.
+	for _, sc := range s.files().Scopes {
+		var db *protocol.AlertDatabase
+		key := ":host"
+		if sc.DatabaseID != "" {
+			d := s.db(sc.DatabaseID)
+			if d == nil {
+				continue
 			}
+			db, key = &protocol.AlertDatabase{ID: d.ID, Name: d.Name}, ":"+d.ID
+		}
+		for _, rule := range filesRules {
+			out = append(out, s.step(rule.localRule, rule.name+key, db, rule.evalFiles(s, sc, now), now)...)
 		}
 	}
 	// A database that is gone has nothing to alert about.
@@ -344,6 +397,51 @@ func (s *state) evaluateAlerts(now time.Time) []notice {
 		}
 	}
 	return out
+}
+
+// step moves one rule's alert along (pending, firing, reminded, resolved)
+// and returns what to send.
+func (s *state) step(rule localRule, key string, db *protocol.AlertDatabase, r ruleResult, now time.Time) []notice {
+	open := s.openAlert(key)
+	switch {
+	case !r.known:
+	case r.firing && open != nil:
+		open.Summary, open.Description, open.NextStep = r.summary, r.description, r.next
+		open.Severity = cmp.Or(r.severity, rule.severity)
+		open.Value, open.Threshold = r.value, r.threshold
+		if open.Severity == protocol.SeverityCritical && open.AcknowledgedAt == nil &&
+			open.NotifiedAt != nil && now.Sub(*open.NotifiedAt) >= alertReminderEvery {
+			at := now
+			open.NotifiedAt = &at
+			return s.noticesFor(eventReminder, open.Alert)
+		}
+	case r.firing:
+		first, seen := s.AlertPending[key]
+		if !seen {
+			s.AlertPending[key], first = now, now
+		}
+		if now.Sub(first) < rule.forDur {
+			return nil
+		}
+		delete(s.AlertPending, key)
+		at := now
+		a := &alertRec{Key: key, NotifiedAt: &at, Alert: protocol.Alert{
+			ID: newID("alr"), Rule: rule.name, Severity: cmp.Or(r.severity, rule.severity), State: "firing",
+			Database: db, Host: s.alertHost(),
+			Summary: r.summary, Description: r.description, NextStep: r.next,
+			Value: r.value, Threshold: r.threshold, Unit: r.unit, StartedAt: first.UTC(),
+		}}
+		s.Alerts = append(s.Alerts, a)
+		return s.noticesFor(eventFiring, a.Alert)
+	default:
+		delete(s.AlertPending, key)
+		if open != nil {
+			at := now.UTC()
+			open.State, open.ResolvedAt = "resolved", &at
+			return s.noticesFor(eventResolved, open.Alert)
+		}
+	}
+	return nil
 }
 
 func (s *state) openAlert(key string) *alertRec {
@@ -430,6 +528,32 @@ func (s *state) recordMonitoring(rep protocol.MonitoringReport, now time.Time) {
 		}
 		if v, ok := d.Metrics[collect.MDiskFreeBytes]; ok {
 			m.DiskFreeBytes = &v
+		}
+		for _, k := range engineMetrics(s.db(d.DatabaseID).Engine) {
+			if v, ok := d.Metrics[k]; ok {
+				if m.Values == nil {
+					m.Values = map[string]float64{}
+				}
+				m.Values[k] = v
+			}
+		}
+		for k, v := range openSearchValues(d.OpenSearch) { // search.go
+			if m.Values == nil {
+				m.Values = map[string]float64{}
+			}
+			m.Values[k] = v
+		}
+		for k, v := range sqliteValues(d.SQLite) { // sqlite.go
+			if m.Values == nil {
+				m.Values = map[string]float64{}
+			}
+			m.Values[k] = v
+		}
+		for k, v := range redisValues(d.Redis) { // redis.go
+			if m.Values == nil {
+				m.Values = map[string]float64{}
+			}
+			m.Values[k] = v
 		}
 		s.Metrics[d.DatabaseID] = m
 	}
@@ -777,7 +901,20 @@ func (srv *Server) alertAck(w http.ResponseWriter, r *http.Request) {
 
 func (srv *Server) alertRules(w http.ResponseWriter, r *http.Request) {
 	out := []protocol.AlertRule{}
-	for _, rule := range localRules {
+	rules := slices.Clone(localRules)
+	for _, fr := range filesRules {
+		rules = append(rules, fr.localRule)
+	}
+	srv.st.read(func(st *state) {
+		seen := map[string]bool{}
+		for _, d := range st.Databases {
+			if e := protocol.NormalizeEngine(d.Engine); !seen[e] {
+				seen[e] = true
+				rules = append(rules[:len(rules):len(rules)], engineRules(e)...)
+			}
+		}
+	})
+	for _, rule := range rules {
 		out = append(out, protocol.AlertRule{Rule: rule.name, Title: rule.title, Scope: "database", Description: rule.description,
 			Enabled: true, Threshold: rule.threshold, Unit: rule.unit, ForSeconds: int(rule.forDur.Seconds()), Severity: rule.severity,
 			Defaults: protocol.AlertRuleDefault{Threshold: rule.threshold, ForSeconds: int(rule.forDur.Seconds()), Severity: rule.severity}})
@@ -884,17 +1021,88 @@ func bytesText(b float64) string {
 	return fmt.Sprintf("%.1f %s", b, units[i])
 }
 
-// monitoring keeps the disk readings and errors the rules use; the rest
-// of the report stays on the server.
+// monitoring keeps the disk readings and errors the rules use, and the
+// history (history.go).
 func (srv *Server) monitoring(w http.ResponseWriter, r *http.Request) {
 	var rep protocol.MonitoringReport
 	if !readJSON(w, r, &rep) {
 		return
 	}
 	now := srv.now()
+	srv.prom.record(rep, now) // metrics.go
 	_ = srv.st.update(func(st *state) error {
 		st.recordMonitoring(rep, now)
 		return nil
 	})
+	srv.recordHistory(rep, now) // history.go
 	writeJSON(w, http.StatusOK, protocol.MonitoringAck{})
+}
+
+// ---- Files (files.go) ----
+
+// filesRule is a rule about a database's folders, or the server's own.
+type filesRule struct {
+	localRule
+	evalFiles func(st *state, sc *filesScope, now time.Time) ruleResult
+}
+
+// filesStaleAfter is how long a folder may go without a snapshot: at least
+// 2 hours, and three missed snapshots.
+func filesStaleAfter(sc *filesScope) time.Duration {
+	return max(2*time.Hour, 3*time.Duration(sc.IntervalMinutes)*time.Minute)
+}
+
+// filesWhat names a scope in alerts and its commands' argument.
+func (st *state) filesWhat(sc *filesScope) (what, arg string) {
+	if d := st.db(sc.DatabaseID); d != nil {
+		return d.Name, d.Name
+	}
+	return st.hostname(), "--server"
+}
+
+var filesRules = []filesRule{
+	{localRule: localRule{name: "files_backup_stale", title: "Files not backed up", severity: protocol.SeverityWarning,
+		description: "A protected folder has had no snapshot for 2 hours (or three missed snapshots), so a restore would bring back older files.",
+		threshold:   f64(2), unit: "hours", forDur: 15 * time.Minute},
+		evalFiles: func(st *state, sc *filesScope, now time.Time) ruleResult {
+			var stale []string
+			var worst time.Duration
+			problem := ""
+			for _, v := range st.folderViews(sc) {
+				since := v.CreatedAt
+				if v.State.LastSnapshot != nil {
+					since = v.State.LastSnapshot.Time
+				}
+				age := now.Sub(since)
+				if age <= filesStaleAfter(sc) {
+					continue
+				}
+				stale = append(stale, v.Path)
+				if age > worst {
+					worst, problem = age, v.State.Problem
+				}
+			}
+			if len(stale) == 0 {
+				return okResult
+			}
+			what, arg := st.filesWhat(sc)
+			desc := fmt.Sprintf("No snapshot of %s for %s. Snapshots are due every %d minutes.", strings.Join(stale, ", "), human(worst), sc.IntervalMinutes)
+			if problem != "" {
+				desc += " " + problem
+			}
+			r := fire(fmt.Sprintf("Files of %s aren't being backed up", what), desc,
+				fmt.Sprintf("See what's wrong: sudo rowsafe files %s; then back them up now: sudo rowsafe files backup %s", arg, arg))
+			r.value, r.threshold, r.unit = f64(float64(int(worst.Hours()*10))/10), f64(filesStaleAfter(sc).Hours()), "hours"
+			return r
+		}},
+	{localRule: localRule{name: "files_proof_failed", title: "Files Proof failed", severity: protocol.SeverityWarning,
+		description: "The latest files Proof failed: reading the snapshots back or comparing restored files with the live ones found a problem."},
+		evalFiles: func(st *state, sc *filesScope, now time.Time) ruleResult {
+			if len(sc.Folders) == 0 || sc.LastCheck == nil || sc.LastCheck.Passed {
+				return okResult
+			}
+			what, arg := st.filesWhat(sc)
+			return fire(fmt.Sprintf("Files Proof failed for %s", what), sc.LastCheck.Summary,
+				fmt.Sprintf("Run it again: sudo rowsafe files proof %s; if it keeps failing, its task log says why (sudo rowsafe tasks).", arg))
+		}},
 }

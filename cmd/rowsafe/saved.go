@@ -35,9 +35,14 @@ import (
 // savedDB is one saved database. URL is the connection string as given,
 // password included: it never leaves databases.json.
 type savedDB struct {
-	Name  string    `json:"name"`
-	URL   string    `json:"url"`
-	Added time.Time `json:"added"`
+	Name string `json:"name"`
+	URL  string `json:"url,omitempty"`
+	// SSH is a server reached over SSH (ssh_saved.go), instead of URL: its
+	// database's connection string stays on that server. Server is the
+	// database's name there.
+	SSH    *client.SSHTarget `json:"ssh,omitempty"`
+	Server string            `json:"server,omitempty"`
+	Added  time.Time         `json:"added"`
 }
 
 type savedFile struct {
@@ -136,10 +141,20 @@ type savedView struct {
 	User     string `json:"user"`
 	// Project: this project's database (ROWSAFE_DATABASE or .rowsafe.json).
 	Project bool `json:"project,omitempty"`
+	// SSH: on a server reached over SSH (ssh://USER@HOST), Database being
+	// its name there.
+	SSH string `json:"ssh,omitempty"`
 }
 
 func viewSaved(s savedDB) savedView {
 	v := savedView{Name: s.Name}
+	if s.SSH != nil {
+		v.SSH, v.Host, v.Database, v.User = s.SSH.String(), s.SSH.Host, s.serverDB(), s.SSH.User
+		if s.SSH.Port != 0 {
+			v.Port = fmt.Sprint(s.SSH.Port)
+		}
+		return v
+	}
 	u, err := url.Parse(strings.TrimSpace(s.URL))
 	if err != nil {
 		return v
@@ -165,6 +180,13 @@ func viewSaved(s savedDB) savedView {
 
 // describe is a saved database in a few words: "shop on db.example.com as app".
 func (v savedView) describe() string {
+	if v.SSH != "" {
+		s := v.Database + " on " + v.Host + " over SSH"
+		if v.User != "" {
+			s += " (as " + v.User + ")"
+		}
+		return s
+	}
 	s := cmp.Or(v.Database, v.User, "the default database")
 	host := v.Host
 	if v.Port != "" && v.Port != "5432" {
@@ -260,6 +282,7 @@ func savedArgs(args []string, loggedIn bool) (db *localDB, rest []string, ok boo
 	if err != nil {
 		return nil, nil, true, err
 	}
+	dbs = slices.DeleteFunc(dbs, func(d savedDB) bool { return d.URL == "" }) // servers over SSH: ssh_saved.go
 	if len(dbs) == 0 {
 		return nil, args, false, nil
 	}
@@ -359,12 +382,34 @@ func savedAdd(ctx context.Context, args []string) error {
 	noCheck := fs.Bool("no-check", false, "save it without connecting first")
 	yes := fs.Bool("yes", false, "don't ask for confirmation")
 	asJSON := fs.Bool("json", false, "print what was saved as JSON")
+	sshAddr := fs.String("ssh", "", "a server set up with Rowsafe, reached over SSH: USER@HOST (or ssh://USER@HOST:PORT)")
+	database := fs.String("database", "", "with --ssh: the database's name on the server (default: NAME, or its only one)")
 	pos, err := positionals(fs, args)
 	if err != nil {
 		return err
 	}
 	if len(pos) > 2 {
-		return newUsageError("usage: rowsafe add NAME [postgres://USER@HOST:5432/DB]")
+		return newUsageError("usage: rowsafe add NAME [postgres://USER@HOST:5432/DB | ssh://USER@HOST]")
+	}
+	if len(pos) == 2 && strings.HasPrefix(pos[1], "ssh://") || *sshAddr != "" {
+		// A server set up with Rowsafe, over SSH (ssh_saved.go).
+		if len(pos) == 2 && *sshAddr != "" {
+			return newUsageError("give the server once: rowsafe add NAME ssh://USER@HOST, or --ssh USER@HOST")
+		}
+		if len(pos) == 2 {
+			*sshAddr = pos[1]
+		}
+		name := ""
+		if len(pos) > 0 {
+			name = pos[0]
+			if err := validSavedName(name); err != nil {
+				return err
+			}
+		}
+		return sshAdd(ctx, name, *sshAddr, *database, *noCheck, *yes, *asJSON)
+	}
+	if *database != "" {
+		return newUsageError("--database goes with a server over SSH: rowsafe add NAME ssh://USER@HOST --database DB")
 	}
 	var name, conn, source string
 	if len(pos) > 0 {
@@ -418,8 +463,14 @@ func savedAdd(ctx context.Context, args []string) error {
 			return err
 		}
 	}
+	if sqliteFile(conn) { // a SQLite file (server_saved_sqlite.go)
+		return sqliteAddHelp(conn)
+	}
+	if engine := installerEngine(conn); engine != "" { // server_saved_installer.go
+		return installerAddHelp(engine)
+	}
 	if !local.IsConnString(conn) {
-		return newUsageError("expected a connection string: postgres://USER:PASSWORD@HOST:5432/DB or mysql://USER:PASSWORD@HOST:3306/DB")
+		return newUsageError("expected a connection string: postgres://USER:PASSWORD@HOST:5432/DB, mysql://USER:PASSWORD@HOST:3306/DB, mongodb://USER:PASSWORD@HOST:27017/DB or redis://:PASSWORD@HOST:6379")
 	}
 	d, err := local.Open(conn)
 	if err != nil {
@@ -474,7 +525,7 @@ func savedAdd(ctx context.Context, args []string) error {
 		fmt.Printf("The connection string is in %s, readable only by you.\n", res.File)
 	}
 	// On this database's server: protect it too (server_saved.go).
-	if res.Server, err = protectOnServer(ctx, s, *yes, *asJSON); err != nil {
+	if res.Server, err = protectOnServer(ctx, s, d, !*noCheck, *yes, *asJSON); err != nil {
 		return err
 	}
 	if *asJSON {
@@ -485,7 +536,7 @@ func savedAdd(ctx context.Context, args []string) error {
 		return nil
 	}
 	if res.Server != nil {
-		fmt.Printf("\n%s %s   %s\n", bold("Next:"), cyan("sudo rowsafe status "+name), dim("(then: rowsafe pulse "+name+", rowsafe mark "+name+" LABEL, rowsafe restore "+name+" --to TIME)"))
+		fmt.Printf("\n%s %s   %s\n", bold("Next:"), cyan(serverCLI()+" status "+name), dim("(then: rowsafe pulse "+name+", rowsafe mark "+name+" LABEL, rowsafe restore "+name+" --to TIME)"))
 		return nil
 	}
 	fmt.Printf("\n%s %s   %s\n", bold("Next:"), cyan("rowsafe pulse "+name), dim("(or rowsafe use "+name+" in a project, then just rowsafe pulse)"))
@@ -577,6 +628,9 @@ func savedList(args []string) error {
 		host := v.Host
 		if v.Port != "" && v.Port != "5432" {
 			host += ":" + v.Port
+		}
+		if v.SSH != "" {
+			host = v.SSH
 		}
 		name := v.Name
 		if v.Project {

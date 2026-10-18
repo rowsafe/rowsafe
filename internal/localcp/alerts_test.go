@@ -194,7 +194,7 @@ func TestAlertsDiskAndChannels(t *testing.T) {
 
 	// Rules are listed; channels can be removed by name.
 	rules, err := c.AlertRules(ctx)
-	if err != nil || len(rules) != len(localRules) || rules[0].Rule != "backup_stale" {
+	if err != nil || len(rules) != len(localRules)+len(filesRules) || rules[0].Rule != "backup_stale" {
 		t.Fatalf("rules: %+v %v", rules, err)
 	}
 	if err := c.DeleteNotificationChannel(ctx, ChannelNtfy); err != nil {

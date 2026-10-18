@@ -1,0 +1,140 @@
+# HELP rowsafe_agent_info The agent's version and platform; value is always 1.
+# TYPE rowsafe_agent_info gauge
+rowsafe_agent_info{host="db1",version="0.10.18",platform="linux/amd64"} 1
+# HELP rowsafe_agent_last_seen_timestamp_seconds Last heartbeat from the agent.
+# TYPE rowsafe_agent_last_seen_timestamp_seconds gauge
+rowsafe_agent_last_seen_timestamp_seconds{host="db1"} 1791979180
+# HELP rowsafe_agent_update_available 1 when Rowsafe has promoted a newer stable agent than the one running (label version), 0 when it is up to date.
+# TYPE rowsafe_agent_update_available gauge
+rowsafe_agent_update_available{host="db1",version="0.10.22"} 1
+# HELP rowsafe_database_info Databases on this server; value is always 1.
+# TYPE rowsafe_database_info gauge
+rowsafe_database_info{database="app",host="db1",engine="postgresql",status="active"} 1
+rowsafe_database_info{database="shop",host="db1",engine="postgresql",status="awaiting_restart"} 1
+# HELP rowsafe_database_status_since_timestamp_seconds When the database entered its current status.
+# TYPE rowsafe_database_status_since_timestamp_seconds gauge
+rowsafe_database_status_since_timestamp_seconds{database="app",host="db1",status="active"} 1790251200
+rowsafe_database_status_since_timestamp_seconds{database="shop",host="db1",status="awaiting_restart"} 1791885600
+# HELP rowsafe_database_protected 1 when the database is protected (rowsafe status NAME): continuous backup works, a backup in the last 26 hours and a passing Proof in the last 8 days.
+# TYPE rowsafe_database_protected gauge
+rowsafe_database_protected{database="app",host="db1"} 0
+rowsafe_database_protected{database="shop",host="db1"} 0
+# HELP rowsafe_backup_last_success_timestamp_seconds Stop time of the newest successful backup (type any, full, diff or incr).
+# TYPE rowsafe_backup_last_success_timestamp_seconds gauge
+rowsafe_backup_last_success_timestamp_seconds{database="app",host="db1",type="any"} 1791939600
+rowsafe_backup_last_success_timestamp_seconds{database="app",host="db1",type="full"} 1791720000
+rowsafe_backup_last_success_timestamp_seconds{database="app",host="db1",type="diff"} 1791939600
+# HELP rowsafe_backup_last_size_bytes Size of the database the newest successful backup copied.
+# TYPE rowsafe_backup_last_size_bytes gauge
+rowsafe_backup_last_size_bytes{database="app",host="db1",type="any"} 6442450944
+rowsafe_backup_last_size_bytes{database="app",host="db1",type="full"} 6442450944
+rowsafe_backup_last_size_bytes{database="app",host="db1",type="diff"} 6442450944
+# HELP rowsafe_backup_last_stored_bytes What the newest successful backup added to the backup storage (compressed; a diff or incr only stores changes).
+# TYPE rowsafe_backup_last_stored_bytes gauge
+rowsafe_backup_last_stored_bytes{database="app",host="db1",type="any"} 41943040
+rowsafe_backup_last_stored_bytes{database="app",host="db1",type="full"} 1258291200
+rowsafe_backup_last_stored_bytes{database="app",host="db1",type="diff"} 41943040
+# HELP rowsafe_backup_last_duration_seconds How long the newest successful backup took.
+# TYPE rowsafe_backup_last_duration_seconds gauge
+rowsafe_backup_last_duration_seconds{database="app",host="db1",type="any"} 90
+rowsafe_backup_last_duration_seconds{database="app",host="db1",type="full"} 720
+rowsafe_backup_last_duration_seconds{database="app",host="db1",type="diff"} 90
+# HELP rowsafe_recovery_window_start_timestamp_seconds The oldest moment the database can be restored to (start of the oldest full backup kept).
+# TYPE rowsafe_recovery_window_start_timestamp_seconds gauge
+rowsafe_recovery_window_start_timestamp_seconds{database="app",host="db1"} 1791114600
+# HELP rowsafe_drill_last_run_timestamp_seconds When the newest Proof (restore test) ran, passed or not.
+# TYPE rowsafe_drill_last_run_timestamp_seconds gauge
+rowsafe_drill_last_run_timestamp_seconds{database="app",host="db1"} 1791806400
+# HELP rowsafe_drill_last_success_timestamp_seconds When the newest passing Proof (restore test) ran.
+# TYPE rowsafe_drill_last_success_timestamp_seconds gauge
+rowsafe_drill_last_success_timestamp_seconds{database="app",host="db1"} 1791201600
+# HELP rowsafe_drill_last_passed 1 if the newest Proof (restore test) passed, 0 if it failed.
+# TYPE rowsafe_drill_last_passed gauge
+rowsafe_drill_last_passed{database="app",host="db1"} 0
+# HELP rowsafe_archiver_up 1 if the agent's newest report of continuous backup (pg_stat_archiver) succeeded and is under 10 minutes old; exported once setup is applied.
+# TYPE rowsafe_archiver_up gauge
+rowsafe_archiver_up{database="app",host="db1"} 1
+rowsafe_archiver_up{database="shop",host="db1"} 0
+# HELP rowsafe_wal_last_archived_timestamp_seconds Last change-log (WAL) segment archived to the backup storage.
+# TYPE rowsafe_wal_last_archived_timestamp_seconds gauge
+rowsafe_wal_last_archived_timestamp_seconds{database="app",host="db1"} 1791979080
+# HELP rowsafe_wal_archive_failed_total Failed change-log (WAL) archive attempts since PostgreSQL's statistics were reset.
+# TYPE rowsafe_wal_archive_failed_total counter
+rowsafe_wal_archive_failed_total{database="app",host="db1"} 3
+# HELP rowsafe_wal_last_failed_timestamp_seconds Last failed change-log (WAL) archive attempt.
+# TYPE rowsafe_wal_last_failed_timestamp_seconds gauge
+rowsafe_wal_last_failed_timestamp_seconds{database="app",host="db1"} 1791720000
+# HELP rowsafe_archiver_report_timestamp_seconds When the agent last read the continuous backup status.
+# TYPE rowsafe_archiver_report_timestamp_seconds gauge
+rowsafe_archiver_report_timestamp_seconds{database="app",host="db1"} 1791979170
+# HELP rowsafe_task_last_failure_timestamp_seconds When the newest task of a type (backup, check, drill...) finished, when it failed or was lost.
+# TYPE rowsafe_task_last_failure_timestamp_seconds gauge
+rowsafe_task_last_failure_timestamp_seconds{database="app",host="db1",type="drill"} 1791806400
+# HELP rowsafe_alert_firing 1 while the alert rule fires for the database (the alerts sudo rowsafe alerts lists), 0 when it doesn't.
+# TYPE rowsafe_alert_firing gauge
+rowsafe_alert_firing{database="app",host="db1",rule="backup_stale",severity="critical"} 0
+rowsafe_alert_firing{database="app",host="db1",rule="full_backup_stale",severity="warning"} 0
+rowsafe_alert_firing{database="app",host="db1",rule="drill_failed",severity="warning"} 1
+rowsafe_alert_firing{database="app",host="db1",rule="drill_overdue",severity="warning"} 0
+rowsafe_alert_firing{database="app",host="db1",rule="wal_archiving_failing",severity="critical"} 0
+rowsafe_alert_firing{database="app",host="db1",rule="postgres_unreachable",severity="critical"} 0
+rowsafe_alert_firing{database="app",host="db1",rule="awaiting_restart",severity="warning"} 0
+rowsafe_alert_firing{database="app",host="db1",rule="verify_failed",severity="warning"} 0
+rowsafe_alert_firing{database="app",host="db1",rule="disk_free_low",severity="warning"} 0
+rowsafe_alert_firing{database="app",host="db1",rule="disk_full_forecast",severity="warning"} 0
+rowsafe_alert_firing{database="app",host="db1",rule="second_copy_failing",severity="warning"} 0
+rowsafe_alert_firing{database="app",host="db1",rule="security_critical",severity="critical"} 0
+rowsafe_alert_firing{database="app",host="db1",rule="standby_down",severity="warning"} 0
+rowsafe_alert_firing{database="app",host="db1",rule="standby_behind",severity="warning"} 0
+rowsafe_alert_firing{database="app",host="db1",rule="standby_primary_unreachable",severity="critical"} 0
+rowsafe_alert_firing{database="app",host="db1",rule="standby_promoted",severity="critical"} 0
+rowsafe_alert_firing{database="app",host="db1",rule="fence_breached",severity="critical"} 0
+rowsafe_alert_firing{database="shop",host="db1",rule="backup_stale",severity="critical"} 0
+rowsafe_alert_firing{database="shop",host="db1",rule="full_backup_stale",severity="warning"} 0
+rowsafe_alert_firing{database="shop",host="db1",rule="drill_failed",severity="warning"} 0
+rowsafe_alert_firing{database="shop",host="db1",rule="drill_overdue",severity="warning"} 0
+rowsafe_alert_firing{database="shop",host="db1",rule="wal_archiving_failing",severity="critical"} 0
+rowsafe_alert_firing{database="shop",host="db1",rule="postgres_unreachable",severity="critical"} 0
+rowsafe_alert_firing{database="shop",host="db1",rule="awaiting_restart",severity="warning"} 0
+rowsafe_alert_firing{database="shop",host="db1",rule="verify_failed",severity="warning"} 0
+rowsafe_alert_firing{database="shop",host="db1",rule="disk_free_low",severity="warning"} 0
+rowsafe_alert_firing{database="shop",host="db1",rule="disk_full_forecast",severity="warning"} 0
+rowsafe_alert_firing{database="shop",host="db1",rule="second_copy_failing",severity="warning"} 0
+rowsafe_alert_firing{database="shop",host="db1",rule="security_critical",severity="critical"} 0
+rowsafe_alert_firing{database="shop",host="db1",rule="standby_down",severity="warning"} 0
+rowsafe_alert_firing{database="shop",host="db1",rule="standby_behind",severity="warning"} 0
+rowsafe_alert_firing{database="shop",host="db1",rule="standby_primary_unreachable",severity="critical"} 0
+rowsafe_alert_firing{database="shop",host="db1",rule="standby_promoted",severity="critical"} 0
+rowsafe_alert_firing{database="shop",host="db1",rule="fence_breached",severity="critical"} 0
+# HELP rowsafe_monitoring_report_timestamp_seconds When the agent last sent monitoring readings of the database (about every minute).
+# TYPE rowsafe_monitoring_report_timestamp_seconds gauge
+rowsafe_monitoring_report_timestamp_seconds{database="app",host="db1"} 1791979160
+rowsafe_monitoring_report_timestamp_seconds{database="shop",host="db1"} 1791979160
+# HELP rowsafe_database_up 1 when the agent could query the database in its newest reading (under 10 minutes old), 0 when it couldn't.
+# TYPE rowsafe_database_up gauge
+rowsafe_database_up{database="app",host="db1"} 1
+rowsafe_database_up{database="shop",host="db1"} 0
+# HELP rowsafe_connections_active Client sessions running a query.
+# TYPE rowsafe_connections_active gauge
+rowsafe_connections_active{database="app",host="db1"} 3
+# HELP rowsafe_connections_used_pct Client sessions as a percentage of max_connections (%).
+# TYPE rowsafe_connections_used_pct gauge
+rowsafe_connections_used_pct{database="app",host="db1"} 4.5
+# HELP rowsafe_cache_hit_pct Share of block reads served from shared buffers (only when there was real read traffic) (%).
+# TYPE rowsafe_cache_hit_pct gauge
+rowsafe_cache_hit_pct{database="app",host="db1"} 99.25
+# HELP rowsafe_disk_free_pct Free space on the data directory's filesystem (%).
+# TYPE rowsafe_disk_free_pct gauge
+rowsafe_disk_free_pct{database="app",host="db1"} 61
+# HELP rowsafe_replication_lag_seconds Replication delay: the slowest standby's replay lag (on a primary) or this standby's own (on a replica) (s).
+# TYPE rowsafe_replication_lag_seconds gauge
+rowsafe_replication_lag_seconds{database="app",host="db1"} 0.5
+# HELP rowsafe_host_cpu_pct CPU busy (all cores) (%).
+# TYPE rowsafe_host_cpu_pct gauge
+rowsafe_host_cpu_pct{host="db1"} 12.5
+# HELP rowsafe_host_mem_used_pct Memory in use (1 - MemAvailable/MemTotal) (%).
+# TYPE rowsafe_host_mem_used_pct gauge
+rowsafe_host_mem_used_pct{host="db1"} 41
+# HELP rowsafe_host_disk_free_bytes Free bytes on that filesystem (B).
+# TYPE rowsafe_host_disk_free_bytes gauge
+rowsafe_host_disk_free_bytes{host="db1"} 21474836480

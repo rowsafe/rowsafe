@@ -32,6 +32,12 @@ Start here: save a database once, then use it by name ("rowsafe help local")
                                              CONN is postgres://USER:PASSWORD@HOST/DB; without it: piped in, or this
                                              project's DATABASE_URL (asks first). On the database's own server
                                              (sudo), also offers to turn on backups, Marks, Proof and restores
+  rowsafe add NAME ssh://USER@HOST[:PORT] [--database DB] [--no-check] [--yes] [--json]
+                                             a server set up with Rowsafe (no account), from this computer over your own
+                                             SSH (keys, ~/.ssh/config; sudo when USER isn't root). Only the address is
+                                             saved here. Then status, mark, backups, restore, rewind, proof, alerts,
+                                             channels and mcp take NAME and run on that server's agent; pulse, fix and
+                                             the other direct ones run there with its rowsafe. Also --ssh USER@HOST
   rowsafe use NAME [--json]                  make NAME this project's database (.rowsafe.json; never the password)
   rowsafe databases [--json]                 databases saved on this computer (also rowsafe ls when not logged in)
   rowsafe forget NAME [--yes]                delete a saved database's connection string
@@ -132,9 +138,9 @@ Rewind: continuous backups, restore to any second
   rowsafe show [NAME]                        one database in detail
   rowsafe status [NAME] [--json]             with NAME: is it recoverable right now? without: every problem, with
                                              what to do. Exit 0 if protected / all healthy, 3 if not
-  rowsafe backup [NAME] [--type full|diff|incr] [--no-wait]
-                                             take a backup now
-  rowsafe backups [NAME]                     backups
+  rowsafe backup [NAME] [--type full|diff|incr] [--second-copy] [--no-wait]
+                                             take a backup now (--second-copy: a full one to the second copy)
+  rowsafe backups [NAME] [--second-copy]     backups (in the second copy)
   rowsafe mark [NAME] [LABEL] [--no-wait] [--json]
                                              a named restore point (a Mark), e.g. before a migration.
                                              LABEL defaults to manual-<UTC time>. --json prints the Mark
@@ -142,19 +148,30 @@ Rewind: continuous backups, restore to any second
   rowsafe marks [NAME]                       restore points
   rowsafe storage [NAME] [--json]            what the backups take in each storage, the cost a month, the second
                                              copy, and ways to spend less
+  rowsafe secondcopy [NAME] [--json]         the second backup copy: where it is, how far it is, its backups
+  rowsafe secondcopy add [NAME] --endpoint HOST --bucket BUCKET [--region R] [--yes] [--no-wait]
+                                             on the server, with sudo: keep a second copy of the backups and the
+                                             change log in another bucket, ideally at another provider. The key
+                                             ($ROWSAFE_REPO2_S3_KEY, $ROWSAFE_REPO2_S3_KEY_SECRET, or asked) and a
+                                             new passphrase stay in /etc/rowsafe/agent.env. Tests the bucket first
+  rowsafe secondcopy remove [--yes]          on the server, with sudo: stop the second copy (its bucket is kept)
   rowsafe set [NAME] [--retention-full N] [--full-schedule CRON] [--diff-schedule CRON] [--proof-schedule CRON]
                                              change retention and schedules (5-field cron, UTC; --diff-schedule "" disables diffs)
   rowsafe remove NAME [--keep-archiving] [--yes]
                                              stop managing a database; never changes the server
-  rowsafe restore [NAME] --to TIME|MARK [--hours 24] [--no-wait]
+  rowsafe restore [NAME] --to TIME|MARK [--hours 24] [--second-copy] [--no-wait]
                                              restore a copy as it was then, next to production (never
-                                             touches it): rowsafe rewind copy, with the time or Mark in one flag
+                                             touches it): rowsafe rewind copy, with the time or Mark in one flag.
+                                             --second-copy restores from the second copy (the first bucket is gone)
+  rowsafe restore NAME --from-bucket [--as NAME] [--to TIME] [--port N | --new-cluster] [--folder F] [--yes]
+                                             on a server on its own, installed with the old server's bucket and
+                                             passphrase: restore a lost (or moving) database here and protect it
   rowsafe restores [NAME] [--json]           the copy, the recovery window and recent restores (rowsafe rewind)
   rowsafe rewind [NAME] [--json]             the recovery window, the copy and data kept aside by a rewind
   rowsafe rewind find [NAME] [--table T] [--since 24h | --from TIME [--to TIME]] [--kind delete,update,truncate,drop]
                                              when were rows deleted or changed, or a table emptied or dropped?
                                              Lists the biggest changes with exact times, to rewind to just before
-  rowsafe rewind copy [NAME] (--at TIME | --mark LABEL) [--hours 24] [--no-wait]
+  rowsafe rewind copy [NAME] (--at TIME | --mark LABEL) [--hours 24] [--second-copy] [--no-wait]
                                              restore a copy as it was then, next to production (never
                                              touches it). TIME: "2026-09-24 14:04" or "14:04" (your time
                                              zone), "10m ago", or RFC 3339
@@ -166,7 +183,7 @@ Rewind: continuous backups, restore to any second
                                              you to type the name). TABLE is schema.table or DB:schema.table
   rowsafe rewind extend [NAME] [--hours 24]  keep the copy longer
   rowsafe rewind drop [NAME] [--yes]         delete the copy
-  rowsafe rewind database [NAME] (--at TIME | --mark LABEL) [--yes]
+  rowsafe rewind database [NAME] --to TIME|MARK [--yes]
                                              rewind the whole live database (stops PostgreSQL; the current
                                              data is kept aside for undo; asks you to type the name). Only on
                                              servers where the installer allowed restarting PostgreSQL
@@ -175,18 +192,27 @@ Rewind: continuous backups, restore to any second
   rowsafe files [NAME] [--json]              the folders backed up with the database (uploads, media)
   rowsafe files add [NAME] PATH [--exclude cache,*.tmp]
                                              back up a folder of the database server with the database
+                                             (PATH, or docker:VOLUME for a Docker volume)
   rowsafe files remove [NAME] PATH [--yes]   stop backing up a folder
   rowsafe files backup [NAME] [--no-wait]    snapshot the folders now
-  rowsafe files restore [NAME] (--at TIME | --mark LABEL) [--folder PATH] [--path REL]...
-                        [--column DB:schema.table.column] [--whole-folder] [--overwrite] [--preview] [--yes]
+  rowsafe files snapshots [NAME] [--folder PATH]
+                                             the folders' snapshots, newest first
+  rowsafe files set [NAME] --every 15m [--keep-days N]
+                                             how often to snapshot (and, with --server, how long to keep them)
+  rowsafe files restore [NAME] (--at TIME | --mark LABEL | --snapshot ID) [--folder PATH] [--path REL]...
+                        [--column DB:schema.table.column] [--whole-folder] [--overwrite] [--into DIR]
+                        [--preview] [--yes]
                                              bring files back as they were: by default only the missing
-                                             ones; --column restores the files a column refers to
+                                             ones; --column restores the files a column refers to; --into
+                                             restores into another folder, leaving the live one as it is
   rowsafe files undo [NAME] [--yes]          undo a --whole-folder restore
   rowsafe files proof [NAME]                 restore a few files and compare them with the live ones, now
   rowsafe files [SUBCOMMAND] --server SERVER ...
                                              the same for a server's own folders (any folder or Docker volume
                                              as /var/lib/docker/volumes/VOLUME/_data, with or without a
-                                             database on it); a restore asks for the server's hostname
+                                             database on it); a restore asks for the server's hostname. On
+                                             the server, --server alone is this one (and the default when it
+                                             has no database)
 
 Move in: bring a database from DigitalOcean, RDS, Supabase, Neon... onto your server
   rowsafe migrate [NAME] [--json]            migrations (into NAME, or all)
@@ -245,6 +271,21 @@ Standby: a second server that stays in sync, is readable, and takes over
   rowsafe standby forget [NAME] [--host SERVER] [--yes]
                                              stop watching a fenced old primary (it stays stopped; asks you to
                                              type its name)
+  On servers on their own (both set up with the same bucket and passphrase), one command on each server:
+  sudo rowsafe standby link NAME --address IP
+                                             on the primary: let the standby at IP stream (optional; without
+                                             it the standby follows through the bucket)
+  sudo rowsafe standby create NAME [--primary IP[:PORT]] [--port N] [--folder F] [--yes]
+                                             on the standby's server: its empty cluster restores the backups
+                                             and follows the primary; on a fenced old primary, rebuilds it
+  sudo rowsafe standby fence NAME [--yes]    on the primary: stop it for good for a switchover (the bucket
+                                             says where its last change is)
+  sudo rowsafe standby promote NAME [--primary-down] [--yes]
+                                             on the standby's server: promote it (after the fence, nothing is
+                                             lost; --primary-down when the primary is down)
+  sudo rowsafe standby unfence|unlink|remove|forget NAME [--yes]
+                                             start a fenced primary again (if the standby wasn't promoted),
+                                             stop the streaming, remove the standby, let a fenced copy go
   rowsafe move [NAME] --to SERVER [--port N] [--at TIME] [--keep-days 7] [--fingerprint F]
                                              move the database to another server: a standby there, then a
                                              planned switchover (nothing lost); the old server is kept stopped
@@ -261,7 +302,12 @@ Fork: a new, independent database from any moment, on another server or a new po
   rowsafe forks [SOURCE] [--json]            the forks made from SOURCE, and what it was forked from
 
 Proof: the weekly restore test
-  rowsafe proof [NAME] [--no-wait]           restore the latest backup to a scratch copy and check it, now
+  rowsafe proof [NAME] [--second-copy] [--no-wait]
+                                             restore the latest backup (in the second copy) to a scratch copy and
+                                             check it, now
+  rowsafe proof NAME --from-bucket [--folder F]
+                                             on another server on its own with the same bucket and passphrase:
+                                             test NAME's backups there (nothing changes on either server)
   rowsafe proofs [NAME]                      restore test results
 
 Pulse: health, monitoring and alerts
@@ -319,12 +365,20 @@ Pulse: health, monitoring and alerts
         [--password-env VAR] [--yes] [--no-wait] [--json]
                                              without ACTION: the actions and whether each can run now. E.g.
                                              restrict_access --allow 10.0.0.0/16, enable_tls, firewall, set_password
-                                             --role app (the password is made here; Rowsafe never sees it)
-  rowsafe logs [NAME] [--kind errors|locks|maintenance|KIND] [--search TEXT] [--limit 50] [--groups] [--follow] [--json]
+                                             --role app (the password is made here; Rowsafe never sees it). ACTION
+                                             may be a finding's ID (security_tls_off). On the server, root is asked
+                                             before Rowsafe may touch the server itself (firewall, restart)
+  rowsafe logs [NAME] [--errors | --kind errors|locks|maintenance|KIND] [--since 1h] [--grep TEXT] [--limit 50]
+        [--groups] [--follow] [--json]
                                              the database's log entries (redacted on the server), newest last;
-                                             --groups: repeated messages of the last 24 hours
+                                             --groups: repeated messages (of the last 24 hours, or --since);
+                                             slow statements over time: --kind slow_query --since 24h
   rowsafe logs set [NAME] [--send on|off] [--full-text on|off] [--json]
-                                             send the logs to Rowsafe or not; keep literal values or not
+                                             send the logs to Rowsafe (on a server on its own: keep them there)
+                                             or not; keep literal values or not
+  rowsafe logs forward [list | --url URL | --type T ...]
+                                             forward the logs: the same as rowsafe log-destinations (a webhook
+                                             with --url alone; on a server on its own, sent from the server)
   rowsafe log-destinations list [--json]     where the organization's logs are forwarded
   rowsafe log-destinations add --type datadog|betterstack|papertrail|loki|elasticsearch|webhook|syslog --name NAME
         [--site S] [--url U] [--host H --port P] [--username U] [--index I] [--kinds errors,locks]
@@ -354,10 +408,12 @@ Pulse: health, monitoring and alerts
                                              them; asks first. Nothing restarts: see rowsafe restart
 
 Guard: the safety net for AI agents
-  rowsafe mcp [--allow-restore-points | --allow-writes]
+  rowsafe mcp [NAME] [--allow-restore-points | --allow-writes]
                                              MCP server on stdio for AI assistants (https://rowsafe.sh/docs/reference/mcp); read-only
                                              unless restore points or all write tools are allowed (changes to
-                                             production run as the signed-in person, with their rights)
+                                             production run as the signed-in person, with their rights). NAME: a
+                                             server saved over SSH (rowsafe add NAME ssh://...): its Marks, backups,
+                                             restores and alerts
   rowsafe guard                              Claude Code PreToolUse hook: before a destructive database
                                              command, create a restore point (https://rowsafe.sh/docs/guides/ai-agents)
   rowsafe guard --check COMMAND              tell whether COMMAND looks destructive (exit 0 yes, 1 no)
@@ -371,9 +427,10 @@ Guard: the safety net for AI agents
                                              above that verdict and 2 if the migration fails
   rowsafe previews [NAME] [ID] [--json]      recent previews, or one in full
   rowsafe copies [NAME] [--json]             safe copies: masked copies developers and AI agents can connect to
-  rowsafe copies create [NAME] [--allow IP] [--listen private|public|IP|*] [--hours 24] [--db DB] [--structure] [--json]
-                                             make one: restore, mask, open it on the server for the allowed
-                                             addresses (default: this computer's). Prints the connection string once.
+  rowsafe copies create [NAME] [--allow IP] [--listen private|public|localhost|IP|*] [--port PORT] [--hours 24] [--db DB] [--structure] [--json]
+                                             make one: restore, mask (--masked, the default), open it on the server for the
+                                             allowed addresses (default: this computer's; on a server Rowsafe protects on its
+                                             own: localhost, on --port). Prints the connection string once.
                                              SQLite: a new file on the server (no password); --structure for the
                                              structure without rows
   rowsafe copies extend [NAME] ID [--hours 24]
@@ -629,6 +686,18 @@ func dispatch(ctx context.Context, args []string) error {
 	cfg, err := loadConfig()
 	// This server's agent (server_saved.go): saved names reach its databases.
 	onServer = err == nil && cfg.APIKey == "local"
+	// A server saved over SSH (ssh_saved.go): its agent, through ssh.
+	if s, args, explicit, ok, serr := sshRoute(cmd, rest, err == nil && !onServer); ok {
+		if serr != nil {
+			return serr
+		}
+		return runOverSSH(ctx, s, cmd, args, explicit, cfg)
+	}
+	// A preview on a database this server backs up runs on a full copy of
+	// its data (server_guard.go).
+	if cmd == "preview" && onServer && fullCopyPreview(ctx, client.New(cfg.URL, cfg.APIKey), rest) {
+		return previewCmd(ctx, client.New(cfg.URL, cfg.APIKey), rest)
+	}
 	// Directly on a database: a connection string, a saved name, or
 	// $DATABASE_URL with no saved login (local.go).
 	if run, ok := localCommands[cmd]; ok {
@@ -652,7 +721,12 @@ func dispatch(ctx context.Context, args []string) error {
 		}
 		return err
 	}
-	c := client.New(cfg.URL, cfg.APIKey)
+	return runCommand(ctx, client.New(cfg.URL, cfg.APIKey), cfg, cmd, rest)
+}
+
+// runCommand runs a command that goes to a control plane: the account's,
+// this server's agent, or a saved server's over SSH.
+func runCommand(ctx context.Context, c *client.Client, cfg config, cmd string, rest []string) error {
 	switch cmd {
 	// Rowsafe Cloud (cloud.go), and connecting apps and people (env.go, connect.go)
 	case "cloud":
@@ -753,6 +827,8 @@ func dispatch(ctx context.Context, args []string) error {
 		})
 	case "storage":
 		return storageCmd(ctx, c, rest)
+	case "secondcopy", "second-copy": // secondcopy.go
+		return secondCopyCmd(ctx, c, rest)
 	case "settings": // settings.go
 		return settingsCmd(ctx, c, rest)
 	case "tune":

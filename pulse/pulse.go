@@ -1,9 +1,11 @@
-// Package pulse turns one reading of a PostgreSQL, MySQL or MariaDB
-// database into a health score from 0 to 100 and a short list of findings
+// Package pulse turns one reading of a PostgreSQL, MySQL, MariaDB, MongoDB,
+// Redis or Valkey database into a health score from 0 to 100 and a short list of findings
 // in plain language, each with the fixes Rowsafe can apply. It needs no
 // agent and no account: `rowsafe pulse postgres://...` reads the database
-// (collect.Read; MySQL and MariaDB: the MySQL engine's reading) and
-// evaluates it here (MySQL's rules: mysql.go). It is pure and
+// (collect.Read; MySQL and MariaDB: the MySQL engine's reading; MongoDB:
+// the MongoDB engine's; Redis and Valkey: the Redis engine's) and
+// evaluates it here (MySQL's rules: mysql.go; MongoDB's: mongodb.go;
+// Redis's: redis.go). It is pure and
 // deterministic: the same input always gives the same result.
 //
 // It covers what the database itself shows: connections, cleanup (vacuum,
@@ -11,7 +13,8 @@
 // (locks, cache, indexes, settings), replication and, when the database
 // runs on this machine, its disk. Backups, restore tests (Proof), history
 // (regressions, outages, disk forecasts) and alerts need the Rowsafe agent
-// on the server and the dashboard; they are not checked here.
+// on the server; its history comes in through Input.Forecast and
+// Input.Regressions (history.go), else they are not checked.
 //
 // The score starts at 100. Each finding takes off its penalty, and the
 // penalties of one category together never take off more than that
@@ -43,12 +46,14 @@ const (
 )
 
 var categoryCaps = map[string]int{
-	CatProtection:  50,
-	CatDisk:        30,
-	CatConnections: 15,
-	CatMaintenance: 35,
-	CatPerformance: 15,
-	CatReplication: 25,
+	CatProtection: 50,
+	// Redis and Valkey (redis.go), as the dashboard counts them.
+	CatAvailability: 40,
+	CatDisk:         30,
+	CatConnections:  15,
+	CatMaintenance:  35,
+	CatPerformance:  15,
+	CatReplication:  25,
 }
 
 // Score caps by the worst severity present.
@@ -63,13 +68,17 @@ type Input struct {
 	// Database and Host name it for people (never with a password).
 	Database, Host string
 	// Engine is protocol.EngineMySQL or EngineMariaDB for their rules
-	// (mysql.go); "" or EnginePostgreSQL is PostgreSQL.
+	// (mysql.go), EngineMongoDB for MongoDB's (mongodb.go), EngineRedis or
+	// EngineValkey for Redis's (redis.go); "" or EnginePostgreSQL is
+	// PostgreSQL.
 	Engine string
 	// Metrics are collect's gauges (collect.M*).
 	Metrics map[string]float64
 	// Activity: sessions running or idle in a transaction for over a
 	// minute, and lock chains.
-	Activity    *protocol.Activity
+	Activity *protocol.Activity
+	// Redis is Redis's and Valkey's health detail (redis.go).
+	Redis       *protocol.RedisStatus
 	Slots       []protocol.ReplicationSlot
 	Replication *protocol.ReplicationStatus
 	Insights    *protocol.Insights
@@ -87,6 +96,16 @@ type Input struct {
 	// SettingsLocked says why settings can't be changed with this
 	// connection (not a superuser); "" when they can.
 	SettingsLocked string
+
+	// ---- history (history.go), from a caller that keeps the agent's
+	// readings over time ----
+
+	// Forecast is when the disk fills up at its recent growth (it also
+	// stands in for the disk readings when this reading has none). A
+	// caller that keeps history always sets it, even without enough yet.
+	Forecast *protocol.DiskForecast
+	// Regressions are the queries that got slower, slowest first.
+	Regressions []Regression
 
 	// ---- the dashboard (internal/health in the control plane) ----
 
@@ -177,12 +196,17 @@ func Evaluate(in Input, now time.Time) protocol.DatabaseHealth {
 	fresh := len(in.Metrics) > 0
 	e.check(CatProtection, "Backups", "unknown",
 		"Not checked here: continuous backups and the weekly restore test need the Rowsafe agent on the server.")
-	if in.Local {
+	if in.Local || in.Forecast != nil && in.Forecast.FreeBytes != nil {
 		e.disk(fresh)
 	}
-	if e.mysqlFamily() {
+	switch {
+	case e.mysqlFamily():
 		e.mysql(fresh) // mysql.go
-	} else {
+	case e.mongodb():
+		e.mongo(fresh) // mongodb.go
+	case e.redisFamily():
+		e.redis(fresh) // redis.go
+	default:
 		e.connections(fresh)
 		e.maintenance(fresh)
 		e.performance(fresh)
@@ -198,7 +222,7 @@ func Evaluate(in Input, now time.Time) protocol.DatabaseHealth {
 	}
 	h.Score = Score(h.Findings)
 	h.Grade = Grade(h.Score)
-	for _, cat := range []string{CatProtection, CatDisk, CatConnections, CatMaintenance, CatPerformance, CatReplication} {
+	for _, cat := range []string{CatProtection, CatAvailability, CatSecurity, CatDisk, CatConnections, CatMaintenance, CatPerformance, CatReplication} {
 		if c, ok := e.checks[cat]; ok {
 			h.Checks = append(h.Checks, *c)
 		}

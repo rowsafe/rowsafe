@@ -890,6 +890,10 @@ type Protection struct {
 	LastDrillPassedAt   *time.Time `json:"last_drill_passed_at,omitempty"`
 	LastDrillPassed     *bool      `json:"last_drill_passed,omitempty"`
 	OpenFailedTasks     []TaskView `json:"open_failed_tasks"`
+	// SecondCopy is the second backup copy's state on a server without an
+	// account (nil without one). It doesn't count toward Protected: the
+	// first storage protects the database while it works.
+	SecondCopy *SecondCopyView `json:"second_copy,omitempty"`
 }
 
 // ---- Monitoring (agent -> control plane) ----

@@ -502,6 +502,29 @@ type Stanza struct {
 	// DB is the stanza's database history: the system and PostgreSQL
 	// version its backups are of (the highest ID is the current one).
 	DB []StanzaDB `json:"db"`
+	// Repo is each repository's status ("missing stanza path", or the
+	// error reading it).
+	Repo []StanzaRepo `json:"repo,omitempty"`
+}
+
+// StanzaRepo is one repository's status for a stanza.
+type StanzaRepo struct {
+	Key    int `json:"key"`
+	Status struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	} `json:"status"`
+}
+
+// RepoMessage is the first repository's status message when it isn't OK
+// ("" otherwise).
+func (s Stanza) RepoMessage() string {
+	for _, r := range s.Repo {
+		if r.Status.Code != StatusOK {
+			return r.Status.Message
+		}
+	}
+	return ""
 }
 
 // StanzaDB is one entry of a stanza's database history.
@@ -536,6 +559,15 @@ type BackupInfo struct {
 // line; anything else pgBackRest printed around it (warnings go to the
 // console too) is skipped.
 func ParseInfo(data []byte) ([]Stanza, error) {
+	// A wrong passphrase makes pgBackRest quote the undecryptable bytes in
+	// its status message, raw control characters included: JSON can't hold
+	// them unescaped, and they say nothing anyway.
+	data = bytes.Map(func(r rune) rune {
+		if r < 0x20 && r != '\n' && r != '\r' && r != '\t' {
+			return '?'
+		}
+		return r
+	}, data)
 	var s []Stanza
 	err := json.Unmarshal(data, &s)
 	if err == nil {

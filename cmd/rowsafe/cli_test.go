@@ -709,8 +709,11 @@ func TestHelp(t *testing.T) {
 	if h := helpFor([]string{"backups"}); !strings.Contains(h, "rowsafe backups [NAME]") || strings.Contains(h, "rowsafe backup [NAME]") {
 		t.Fatalf("help backups:\n%s", h)
 	}
-	if h := helpFor([]string{"proof"}); !strings.Contains(h, "rowsafe proof [NAME] [--no-wait]") || !strings.Contains(h, "--proof-schedule") {
+	if h := helpFor([]string{"proof"}); !strings.Contains(h, "rowsafe proof [NAME] [--second-copy] [--no-wait]") || !strings.Contains(h, "--proof-schedule") {
 		t.Fatalf("help proof:\n%s", h)
+	}
+	if h := helpFor([]string{"secondcopy", "add"}); !strings.Contains(h, "rowsafe secondcopy add [NAME] --endpoint HOST") || !strings.Contains(h, "agent.env") {
+		t.Fatalf("help secondcopy add:\n%s", h)
 	}
 	if h := helpFor([]string{"adopt"}); !strings.Contains(h, "--host may be omitted") {
 		t.Fatalf("help adopt:\n%s", h)

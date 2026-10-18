@@ -68,24 +68,32 @@ func (st *state) protection(d *dbRec, now time.Time) protocol.Protection {
 	}
 
 	if d.Status != protocol.DBActive {
-		fail("database is %s, not active: WAL archiving to the repository is not proven", d.Status)
+		if !protocol.EngineHas(d.Engine, protocol.FeaturePointInTime) {
+			fail("database is %s, not active: backups are not set up yet", d.Status)
+		} else {
+			fail("database is %s, not active: WAL archiving to the repository is not proven", d.Status)
+		}
 	}
-	errorNewer := d.ArchiverErrorAt != nil && (d.ArchiverAt == nil || d.ArchiverErrorAt.After(*d.ArchiverAt))
-	p.ArchiverUp = d.ArchiverAt != nil && now.Sub(*d.ArchiverAt) < archiverFreshness && !errorNewer
-	switch {
-	case p.ArchiverUp:
-	case errorNewer:
-		fail("the agent can't read WAL archiving status from PostgreSQL (since %s): %s", when(*d.ArchiverErrorAt), d.ArchiverError)
-	case d.ArchiverAt == nil:
-		fail("the agent has never reported WAL archiving status")
-	default:
-		fail("no WAL archiving report from the agent since %s (agent down or unreachable)", when(*d.ArchiverAt))
-	}
-	if a := d.Archiver; a != nil {
-		p.WALLastArchivedAt = a.LastArchivedTime
-		if lf := a.LastFailedTime; lf != nil && now.Sub(*lf) < protectionArchiveFailWin {
-			p.ArchiveFailing = true
-			fail("WAL archiving failed at %s (within the last %s)", when(*lf), "15 minutes")
+	// Engines with no change log to copy (search.go) are held to their
+	// snapshots: no continuous backup to report.
+	if protocol.EngineHas(d.Engine, protocol.FeaturePointInTime) {
+		errorNewer := d.ArchiverErrorAt != nil && (d.ArchiverAt == nil || d.ArchiverErrorAt.After(*d.ArchiverAt))
+		p.ArchiverUp = d.ArchiverAt != nil && now.Sub(*d.ArchiverAt) < archiverFreshness && !errorNewer
+		switch {
+		case p.ArchiverUp:
+		case errorNewer:
+			fail("the agent can't read WAL archiving status from PostgreSQL (since %s): %s", when(*d.ArchiverErrorAt), d.ArchiverError)
+		case d.ArchiverAt == nil:
+			fail("the agent has never reported WAL archiving status")
+		default:
+			fail("no WAL archiving report from the agent since %s (agent down or unreachable)", when(*d.ArchiverAt))
+		}
+		if a := d.Archiver; a != nil {
+			p.WALLastArchivedAt = a.LastArchivedTime
+			if lf := a.LastFailedTime; lf != nil && now.Sub(*lf) < protectionArchiveFailWin {
+				p.ArchiveFailing = true
+				fail("WAL archiving failed at %s (within the last %s)", when(*lf), "15 minutes")
+			}
 		}
 	}
 	switch {
@@ -124,6 +132,22 @@ func (st *state) protection(d *dbRec, now time.Time) protocol.Protection {
 			p.OpenFailedTasks = append(p.OpenFailedTasks, v)
 		}
 	}
+	p.Reasons = engineReasons(d.Engine, p.Reasons) // mysql.go
+	if redisFamily(d.Engine) {
+		p.Reasons = redisReasons(d, p.Reasons) // redis.go
+	}
+	if isSQLite(d.Engine) {
+		p.Reasons = sqliteReasons(d, p.Reasons) // sqlite.go
+	}
+	if isClickHouse(d.Engine) {
+		p.Reasons = clickhouseReasons(p.Reasons) // clickhouse.go
+	}
+	if snapshotEngine(d.Engine) {
+		p.Reasons = snapshotReasons(d, p.Reasons) // search.go
+	}
 	p.Protected = len(p.Reasons) == 0
+	// The second copy is shown, not counted: when it fails, the first
+	// storage still protects the database (second_copy_failing alerts).
+	p.SecondCopy = st.secondCopyView(d, now)
 	return p
 }

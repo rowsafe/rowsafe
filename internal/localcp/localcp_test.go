@@ -116,8 +116,8 @@ func TestLifecycle(t *testing.T) {
 	if code := a.call("POST", "/v1/agent/setup/databases", protocol.SetupRegisterRequest{Name: "shop", Port: 5432, SocketDir: "/var/run/postgresql"}, &sd); code != http.StatusCreated {
 		t.Fatalf("register: %d", code)
 	}
-	if code := a.call("POST", "/v1/agent/setup/databases", protocol.SetupRegisterRequest{Name: "crm", Port: 3306, Engine: protocol.EngineMySQL}, nil); code != http.StatusBadRequest {
-		t.Fatalf("MySQL without an account: %d", code)
+	if code := a.call("POST", "/v1/agent/setup/databases", protocol.SetupRegisterRequest{Name: "crm", Port: 1521, Engine: "oracle"}, nil); code != http.StatusBadRequest {
+		t.Fatalf("an unknown engine: %d", code)
 	}
 	// Pending: monitored, not yet protected.
 	hb := heartbeat(a)
@@ -199,7 +199,7 @@ func TestLifecycle(t *testing.T) {
 	}
 	a.done(rp, protocol.StatusSucceeded, protocol.RestorePointResult{Name: "before-drop", LSN: "0/3000000", Archived: true, CreatedAt: *now})
 	marks, _ := c.RestorePoints(ctx, "shop")
-	if len(marks) != 1 || marks[0].ArchivedAt == nil || marks[0].RestoreFromBackup != "20261014-120000F" {
+	if len(marks) != 1 || marks[0].ArchivedAt == nil || marks[0].Status != protocol.RestorePointArchived || marks[0].RestoreFromBackup != "20261014-120000F" {
 		t.Fatalf("marks: %+v", marks)
 	}
 	a.done(running, protocol.StatusFailed, nil)
@@ -240,9 +240,9 @@ func TestLifecycle(t *testing.T) {
 	if _, err := c.Hosts(ctx); err != nil {
 		t.Error(err)
 	}
-	_, err = c.Insights(ctx, "shop")
+	_, err = c.Availability(ctx, "shop")
 	if err == nil || !strings.Contains(err.Error(), "rowsafe login") {
-		t.Errorf("insights without an account: %v", err)
+		t.Errorf("availability without an account: %v", err)
 	}
 }
 

@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -55,20 +54,4 @@ func TestTips(t *testing.T) {
 	if out := captureStderr(t, func() { showTip(context.Background(), []string{"pulse", "shop"}) }); out != "" {
 		t.Fatalf("not at a terminal: %q", out)
 	}
-}
-
-func captureStderr(t *testing.T, fn func()) string {
-	t.Helper()
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	old := os.Stderr
-	os.Stderr = w
-	fn()
-	os.Stderr = old
-	w.Close()
-	b := make([]byte, 1<<16)
-	n, _ := r.Read(b)
-	return string(b[:n])
 }

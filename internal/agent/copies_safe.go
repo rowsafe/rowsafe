@@ -65,6 +65,9 @@ func (a *Agent) safeCopy(ctx context.Context, db protocol.DatabaseSpec, p protoc
 		bind = []string{"0.0.0.0"}
 	}
 	port, err := a.freeCopyPort(bind, p.Access.Port)
+	if p.Access.PortChosen {
+		port, err = a.chosenCopyPort(bind, p.Access.Port)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +160,11 @@ func (a *Agent) safeCopy(ctx context.Context, db protocol.DatabaseSpec, p protoc
 		return fail(err)
 	}
 	listenAddrs := "*"
-	if listen[0] != "*" {
+	switch listen[0] {
+	case "*":
+	case protocol.CopyListenLocal:
+		listenAddrs = protocol.CopyListenLocal
+	default:
 		listenAddrs = "127.0.0.1," + strings.Join(listen, ",")
 	}
 	open := renderSettings([]drillSetting{

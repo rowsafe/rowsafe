@@ -26,9 +26,15 @@ func logsCmd(ctx context.Context, c *client.Client, args []string) error {
 	if len(args) > 0 && args[0] == "set" {
 		return logsSetCmd(ctx, c, args[1:])
 	}
+	if len(args) > 0 && args[0] == "forward" {
+		return logsForwardCmd(ctx, c, args[1:])
+	}
 	fs := flag.NewFlagSet("logs", flag.ContinueOnError)
 	kind := fs.String("kind", "", "errors, locks, maintenance, or a kind (slow_query, deadlock, connection, ...)")
+	errorsOnly := fs.Bool("errors", false, "only errors (the same as --kind errors)")
 	search := fs.String("search", "", "only entries that contain this text")
+	fs.StringVar(search, "grep", "", "the same as --search")
+	since := fs.Duration("since", 0, "only entries of this last stretch of time (e.g. 1h, 24h)")
 	limit := fs.Int("limit", 50, "how many entries")
 	groups := fs.Bool("groups", false, "repeated messages of the last 24 hours, most frequent first")
 	follow := fs.Bool("follow", false, "keep printing new entries as they arrive (Ctrl-C stops)")
@@ -37,7 +43,19 @@ func logsCmd(ctx context.Context, c *client.Client, args []string) error {
 	if err != nil {
 		return err
 	}
+	if *errorsOnly {
+		if *kind != "" && *kind != protocol.LogFilterErrors {
+			return newUsageError("--errors and --kind go one at a time")
+		}
+		*kind = protocol.LogFilterErrors
+	}
+	if *since < 0 {
+		return newUsageError("--since is a duration, like 1h or 24h")
+	}
 	q := client.LogsQuery{Kind: *kind, Search: *search, Limit: *limit}
+	if *since > 0 {
+		q.From = time.Now().Add(-*since)
+	}
 	if *groups {
 		g, err := c.LogGroups(ctx, name, q)
 		if err != nil {
@@ -47,7 +65,7 @@ func logsCmd(ctx context.Context, c *client.Client, args []string) error {
 			return printJSON(g)
 		}
 		if len(g.Groups) == 0 {
-			fmt.Printf("%s: no log messages in the last 24 hours.\n", name)
+			fmt.Printf("%s: no log messages in the last %s.\n", name, orText(sinceText(*since), "24 hours"))
 			return nil
 		}
 		t := newTable("COUNT", "SEVERITY", "KIND", "LAST", "MESSAGE")
@@ -70,7 +88,15 @@ func logsCmd(ctx context.Context, c *client.Client, args []string) error {
 	if len(entries) == 0 && !*follow {
 		ov, err := c.LogsOverview(ctx, name)
 		if err == nil && !ov.Settings.Enabled {
+			if onServer {
+				fmt.Printf("%s's logs aren't kept on this server: sudo rowsafe logs set %s --send on\n", name, name)
+				return nil
+			}
 			fmt.Printf("%s doesn't send its logs to Rowsafe: rowsafe logs set %s --send on\n", name, name)
+			return nil
+		}
+		if err == nil && ov.Source != nil && !ov.Source.Readable {
+			fmt.Printf("%s: no log entries: the agent can't read the log (%s).\n", name, orText(ov.Source.Detail, ov.Source.Problem))
 			return nil
 		}
 		fmt.Printf("%s: no log entries match.\n", name)
@@ -92,7 +118,7 @@ func logsCmd(ctx context.Context, c *client.Client, args []string) error {
 		}
 		// Everything after the newest entry seen (with none seen yet:
 		// everything there is now, which is all new).
-		q.After, q.Limit = latest, 200
+		q.After, q.Limit, q.From = latest, 200, time.Time{}
 		next, err := c.Logs(ctx, name, q)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -165,9 +191,73 @@ func logsSetCmd(ctx context.Context, c *client.Client, args []string) error {
 	if *asJSON {
 		return printJSON(st)
 	}
-	fmt.Printf("%s: logs sent to Rowsafe %s, full text %s.\n", name,
+	where := "sent to Rowsafe"
+	if onServer {
+		where = "kept on this server"
+	}
+	fmt.Printf("%s: logs %s %s, full text %s.\n", name, where,
 		map[bool]string{true: "on", false: "off"}[st.Enabled], map[bool]string{true: "on", false: "off"}[st.FullText])
 	return nil
+}
+
+// sinceText words --since for messages ("" for none).
+func sinceText(d time.Duration) string {
+	if d <= 0 {
+		return ""
+	}
+	return strings.TrimSuffix(strings.TrimSuffix(d.String(), "0s"), "0m")
+}
+
+// logsForwardCmd: rowsafe logs forward [list|test|on|off|remove ID], or
+// rowsafe logs forward --url URL (a webhook) / --type T ... to add one; the
+// same as rowsafe log-destinations, with a webhook and its type as the
+// name by default.
+func logsForwardCmd(ctx context.Context, c *client.Client, args []string) error {
+	if len(args) == 0 {
+		return logDestList(ctx, c, nil)
+	}
+	switch args[0] {
+	case "list":
+		return logDestList(ctx, c, args[1:])
+	case "test":
+		return logDestTest(ctx, c, args[1:])
+	case "remove":
+		return logDestRemove(ctx, c, args[1:])
+	case "on", "off":
+		return logDestToggle(args[0] == "on")(ctx, c, args[1:])
+	case "add":
+		args = args[1:]
+	}
+	typ := flagValue(args, "type")
+	if typ == "" {
+		if flagValue(args, "url") == "" {
+			return newUsageError("where to? --url https://... for a webhook, or --type datadog|betterstack|papertrail|loki|elasticsearch|syslog")
+		}
+		typ = protocol.LogDestWebhook
+		args = append([]string{"--type", typ}, args...)
+	}
+	if flagValue(args, "name") == "" {
+		args = append([]string{"--name", typ}, args...)
+	}
+	return logDestAdd(ctx, c, args)
+}
+
+// flagValue is --name VALUE or --name=VALUE among args ("" without it).
+func flagValue(args []string, name string) string {
+	for i, a := range args {
+		if a == "--" {
+			break
+		}
+		for _, p := range []string{"--" + name, "-" + name} {
+			if a == p && i+1 < len(args) {
+				return args[i+1]
+			}
+			if v, ok := strings.CutPrefix(a, p+"="); ok {
+				return v
+			}
+		}
+	}
+	return ""
 }
 
 // ---- rowsafe log-destinations ----
@@ -186,6 +276,10 @@ func logDestList(ctx context.Context, c *client.Client, args []string) error {
 		return printJSON(list)
 	}
 	if len(list) == 0 {
+		if onServer {
+			fmt.Println("Logs aren't forwarded anywhere. Add a destination: sudo rowsafe logs forward --url https://... (a webhook), or --type datadog|loki|...")
+			return nil
+		}
 		fmt.Println("Logs aren't forwarded anywhere. Add a destination: rowsafe log-destinations add --type datadog --name NAME")
 		return nil
 	}
@@ -269,6 +363,10 @@ func logDestAdd(ctx context.Context, c *client.Client, args []string) error {
 	fmt.Printf("Added %s (%s): logs go to %s.\n", d.Name, d.ID, d.Type)
 	if d.SigningSecret != "" {
 		fmt.Printf("Signing secret (shown once; check X-Rowsafe-Signature with it):\n  %s\n", d.SigningSecret)
+	}
+	if onServer {
+		fmt.Printf("Send a test entry: sudo rowsafe logs forward test %s\n", d.ID)
+		return nil
 	}
 	fmt.Printf("Send a test entry: rowsafe log-destinations test %s\n", d.ID)
 	return nil
