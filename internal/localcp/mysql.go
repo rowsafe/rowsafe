@@ -20,7 +20,7 @@ import (
 
 // localEngines are the engines this control plane protects.
 var localEngines = []string{protocol.EnginePostgreSQL, protocol.EngineMySQL, protocol.EngineMariaDB, protocol.EngineMongoDB,
-	protocol.EngineRedis, protocol.EngineValkey}
+	protocol.EngineRedis, protocol.EngineValkey, protocol.EngineSQLite}
 
 // localFeatures are what this control plane offers for a database: every
 // local engine has them all (protocol.EngineCapabilities; a test checks).
@@ -75,6 +75,8 @@ func defaultPort(engine string) int {
 		return 27017
 	case redisFamily(engine):
 		return 6379
+	case isSQLite(engine):
+		return 0 // a file (sqlite.go)
 	}
 	return 5432
 }
@@ -92,6 +94,8 @@ func restartYourself(engine string) string {
 		return "Restart Redis yourself: sudo systemctl restart redis-server"
 	case protocol.EngineValkey:
 		return "Restart Valkey yourself: sudo systemctl restart valkey-server"
+	case protocol.EngineSQLite:
+		return sqliteNoServer
 	}
 	return "Restart PostgreSQL yourself: sudo systemctl restart postgresql"
 }
@@ -119,6 +123,9 @@ func engineReasons(engine string, reasons []string) []string {
 func engineAlert(rule string, st *state, d *dbRec, r ruleResult, now time.Time) ruleResult {
 	if redisFamily(d.Engine) {
 		return redisAlert(rule, st, d, r, now) // redis.go
+	}
+	if isSQLite(d.Engine) {
+		return sqliteAlert(rule, st, d, r, now) // sqlite.go
 	}
 	if isMongo(d.Engine) && r.firing {
 		return mongoAlert(rule, st, d, r, now) // mongodb.go
@@ -189,6 +196,9 @@ func validTablesFor(engine string, tables []protocol.RewindTable, limit int) err
 	}
 	if redisFamily(engine) {
 		return redisTables(tables, limit) // redis.go
+	}
+	if isSQLite(engine) {
+		return sqliteTables(tables, limit) // sqlite.go
 	}
 	if !mysqlFamily(engine) {
 		return validTables(tables, limit)

@@ -275,6 +275,8 @@ func engineRules(engine string) []localRule {
 		return mongoRules
 	case protocol.EngineRedis, protocol.EngineValkey:
 		return redisRules
+	case protocol.EngineSQLite:
+		return sqliteRules
 	}
 	return nil
 }
@@ -500,6 +502,12 @@ func (s *state) recordMonitoring(rep protocol.MonitoringReport, now time.Time) {
 				}
 				m.Values[k] = v
 			}
+		}
+		for k, v := range sqliteValues(d.SQLite) { // sqlite.go
+			if m.Values == nil {
+				m.Values = map[string]float64{}
+			}
+			m.Values[k] = v
 		}
 		for k, v := range redisValues(d.Redis) { // redis.go
 			if m.Values == nil {

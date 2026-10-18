@@ -128,6 +128,9 @@ func (st *state) protection(d *dbRec, now time.Time) protocol.Protection {
 	if redisFamily(d.Engine) {
 		p.Reasons = redisReasons(d, p.Reasons) // redis.go
 	}
+	if isSQLite(d.Engine) {
+		p.Reasons = sqliteReasons(d, p.Reasons) // sqlite.go
+	}
 	p.Protected = len(p.Reasons) == 0
 	return p
 }

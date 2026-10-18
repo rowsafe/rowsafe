@@ -360,7 +360,12 @@ func (s *Server) register(w http.ResponseWriter, name string, port int, socketDi
 		writeError(w, http.StatusBadRequest, "the name must be 2-40 lowercase letters, digits and dashes, starting with a letter")
 		return
 	}
-	if port == 0 {
+	if isSQLite(engine) {
+		if msg := sqliteIdentity(port, socketDir); msg != "" { // sqlite.go
+			writeError(w, http.StatusBadRequest, msg)
+			return
+		}
+	} else if port == 0 {
 		port = defaultPort(engine)
 	}
 	if port < 0 || port > 65535 {
@@ -393,6 +398,9 @@ func (s *Server) register(w http.ResponseWriter, name string, port int, socketDi
 			}
 			if redisFamily(engine) {
 				redisDefaults(db) // redis.go
+			}
+			if isSQLite(engine) {
+				sqliteDefaults(db) // sqlite.go
 			}
 			st.Databases = append(st.Databases, db)
 		}
@@ -802,6 +810,9 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 				code, msg = http.StatusConflict, m
 				return nil
 			}
+		case req.Type == protocol.TaskRestart && isSQLite(d.Engine):
+			code, msg = http.StatusBadRequest, sqliteNoServer
+			return nil
 		case req.Type == protocol.TaskRestart && !slices.Contains(st.Host.RestartPorts, d.Port):
 			code, msg = http.StatusForbidden, fmt.Sprintf("%s doesn't allow restarts from Rowsafe (only root can allow it, at install time). %s", st.Host.Hostname, restartYourself(d.Engine))
 			return nil

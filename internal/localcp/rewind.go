@@ -593,7 +593,10 @@ func (s *Server) restoreRows(st *state, d *dbRec, r *http.Request, now time.Time
 	// A Mark first, unless the database can't take one (redis.go).
 	var tasks []protocol.TaskView
 	after := ""
-	if redisMarksRefusal(d) == "" {
+	if isSQLite(d.Engine) && req.IncludeChanged {
+		return 0, nil, &httpErr{http.StatusBadRequest, "SQLite rows are only brought back when they're missing; Rowsafe never overwrites a row that exists."}
+	}
+	if redisMarksRefusal(d)+sqliteMarksRefusal(d) == "" {
 		mark, err := st.createMark(d, "before-rewind-rows-"+now.UTC().Format("20060102-150405"), "Rowsafe, before bringing rows back", now)
 		if err != nil {
 			return 0, nil, &httpErr{http.StatusConflict, err.Error()}
