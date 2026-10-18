@@ -295,6 +295,7 @@ func (d *DB) Health(ctx context.Context, opts Options) (protocol.DatabaseHealth,
 	}
 	in := d.input(r, opts)
 	in.SettingsLocked = d.settingsLocked(ctx)
+	in.RLS, in.RLSChecked = d.rls(ctx)
 	h := pulse.Evaluate(in, time.Now())
 	if why := d.needsSession(ctx); why != "" {
 		for i := range h.Findings {
@@ -330,6 +331,24 @@ func (d *DB) needsSession(ctx context.Context) string {
 		return ""
 	}
 	return pginspect.PoolerReason(*d.pooler)
+}
+
+// rls reads the database's row-level security (false when it can't be
+// read: the check is then left out).
+func (d *DB) rls(ctx context.Context) ([]protocol.RLSDatabase, bool) {
+	conn, err := d.inspectTarget().Connect(ctx, d.inspectTarget().MaintenanceDB())
+	if err != nil {
+		return nil, false
+	}
+	defer conn.Close(context.WithoutCancel(ctx))
+	r, err := pginspect.ReadRLS(ctx, conn)
+	switch {
+	case err != nil:
+		return nil, false
+	case r == nil:
+		return nil, true
+	}
+	return []protocol.RLSDatabase{*r}, true
 }
 
 // settingsLocked says why this connection can't change settings: ALTER

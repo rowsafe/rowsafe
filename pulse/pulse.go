@@ -96,6 +96,12 @@ type Input struct {
 	// SettingsLocked says why settings can't be changed with this
 	// connection (not a superuser); "" when they can.
 	SettingsLocked string
+	// RLS is the database's row-level security (rls.go), read over a
+	// connection string; RLSChecked says it was read (RLS is empty when
+	// the database doesn't use it). The dashboard leaves both unset: its
+	// row-level security comes with the agent's security report.
+	RLS        []protocol.RLSDatabase
+	RLSChecked bool
 
 	// ---- history (history.go), from a caller that keeps the agent's
 	// readings over time ----
@@ -211,6 +217,7 @@ func Evaluate(in Input, now time.Time) protocol.DatabaseHealth {
 		e.maintenance(fresh)
 		e.performance(fresh)
 		e.replication(fresh)
+		e.rls() // rls.go
 	}
 
 	slices.SortStableFunc(e.findings, func(a, b protocol.Finding) int {
