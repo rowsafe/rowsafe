@@ -115,10 +115,11 @@ type serverProtection struct {
 }
 
 // protectOnServer offers, after rowsafe add saved s (d, read once when
-// checked), to protect the PostgreSQL, MySQL or MariaDB it reaches on this
-// server: a plan (read-only), then backups on once the person says yes
-// (PostgreSQL: ALTER SYSTEM and a reload; MySQL: Rowsafe's option file; a
-// restart only when they ask for it). Nothing happens when the database is
+// checked), to protect the PostgreSQL, MySQL, MariaDB or MongoDB it reaches
+// on this server: a plan (read-only), then backups on once the person says
+// yes (PostgreSQL: ALTER SYSTEM and a reload; MySQL: Rowsafe's option file;
+// MongoDB: nothing changes on a replica set; a restart only when they ask
+// for it). Nothing happens when the database is
 // elsewhere.
 func protectOnServer(ctx context.Context, s savedDB, d *local.DB, checked, yes, asJSON bool) (*serverProtection, error) {
 	t, ok := localTarget(s.URL) // server_saved_mysql.go
@@ -165,9 +166,16 @@ func protectOnServer(ctx context.Context, s savedDB, d *local.DB, checked, yes, 
 			return nil, err
 		}
 	}
+	if t.mongo { // server_saved_mongodb.go
+		engine, how = protocol.EngineMongoDB, "MongoDB's changes are copied from its oplog; its settings don't change"
+		sockPath, _ := protocol.LocalSocket(cfg.URL)
+		if ok, err := ensureMongoLogin(ctx, s, port, filepath.Dir(sockPath), yes, asJSON); !ok || err != nil {
+			return nil, err
+		}
+	}
 	name := protocol.EngineDisplayName(engine)
 	say(asJSON, "\nIt runs on this server: Rowsafe can back it up continuously to your storage, with Marks, a weekly restore test and restore to any second.\nChecking what that needs (changes nothing)...\n")
-	if sock == "" && !t.mysql {
+	if sock == "" && !t.mysql && !t.mongo {
 		sock = "/var/run/postgresql"
 	}
 	resp, err := c.CreateDatabase(ctx, protocol.CreateDatabaseRequest{Name: s.Name, Port: port, SocketDir: sock, Engine: engine})
@@ -183,6 +191,10 @@ func protectOnServer(ctx context.Context, s savedDB, d *local.DB, checked, yes, 
 	printTaskTrouble(plan[0])
 	if plan[0].Status != protocol.StatusSucceeded {
 		return out, fmt.Errorf("the plan for %s failed; saved, but backups aren't on. Try again with sudo rowsafe plan %s", s.Name, s.Name)
+	}
+	if t.mongo && mongoReplSetNeeded(plan[0]) {
+		say(asJSON, "\n%s", mongoReplSetHelp)
+		return out, nil
 	}
 	q := fmt.Sprintf("Turn on backups for %s now? (%s; it never restarts)", s.Name, how)
 	if err := confirmChange(yes, q); err != nil {

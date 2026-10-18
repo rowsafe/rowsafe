@@ -34,9 +34,9 @@ func activeDB(t *testing.T, a *fakeAgent, c *client.Client, now *time.Time) prot
 		!strings.Contains(err.Error(), "already protected as shop") {
 		t.Fatalf("the same PostgreSQL under another name: %v", err)
 	}
-	if _, err := c.CreateDatabase(ctx, protocol.CreateDatabaseRequest{Name: "crm", Port: 27017, Engine: protocol.EngineMongoDB}); apiStatus(err) != http.StatusBadRequest ||
-		!strings.Contains(err.Error(), "MongoDB needs the dashboard") {
-		t.Fatalf("MongoDB: %v", err)
+	if _, err := c.CreateDatabase(ctx, protocol.CreateDatabaseRequest{Name: "crm", Port: 9000, Engine: protocol.EngineClickHouse}); apiStatus(err) != http.StatusBadRequest ||
+		!strings.Contains(err.Error(), "ClickHouse needs the dashboard") {
+		t.Fatalf("ClickHouse: %v", err)
 	}
 	// Applying before the plan finished is refused.
 	if _, err := c.CreateTask(ctx, "shop", protocol.TaskAdopt, protocol.AdoptParams{Apply: true}); apiStatus(err) != http.StatusConflict {

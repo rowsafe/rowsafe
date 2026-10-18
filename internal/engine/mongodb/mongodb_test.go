@@ -186,3 +186,22 @@ func TestEngineRegistered(t *testing.T) {
 		}
 	}
 }
+
+// A new oplog's window is the span it will hold at the rate it fills; a
+// full one's is what it spans.
+func TestProjectWindow(t *testing.T) {
+	for _, tc := range []struct {
+		span       time.Duration
+		used, size float64
+		want       time.Duration
+	}{
+		{30 * time.Second, 1, 1000, 1000 * time.Minute}, // fresh: at least a minute, times its room
+		{2 * time.Hour, 500, 1000, 4 * time.Hour},
+		{3 * time.Hour, 950, 1000, 3 * time.Hour}, // full
+		{3 * time.Hour, 0, 1000, 3 * time.Hour},   // unknown use
+	} {
+		if got := projectWindow(tc.span, tc.used, tc.size); got != tc.want {
+			t.Errorf("projectWindow(%s, %v, %v) = %s, want %s", tc.span, tc.used, tc.size, got, tc.want)
+		}
+	}
+}

@@ -16,9 +16,10 @@ import (
 	"github.com/rowsafe/rowsafe/tune"
 )
 
-// Without an account: these commands also run on a PostgreSQL, MySQL or
-// MariaDB database the CLI reaches directly, given a connection string
-// (rowsafe pulse postgres://user@host/db, mysql://user@host/db), or
+// Without an account: these commands also run on a PostgreSQL, MySQL,
+// MariaDB or MongoDB database the CLI reaches directly, given a connection
+// string (rowsafe pulse postgres://user@host/db, mysql://user@host/db,
+// mongodb://user@host/db), or
 // $DATABASE_URL when there is no saved login.
 // Nothing is sent to Rowsafe. Backups, Proof and alerts need the agent on
 // the server; history and the dashboard need an account (rowsafe login).
@@ -26,7 +27,8 @@ import (
 // localHelp is rowsafe help local.
 const localHelp = `Save a database once, then use it by name.
 
-On your database server (PostgreSQL), rowsafe add also protects it:
+On your database server (PostgreSQL, MySQL, MariaDB or MongoDB), rowsafe add
+also protects it:
 continuous backups to your own bucket, Marks, a weekly restore test and
 restore to any second, all on that server:
 
@@ -50,8 +52,8 @@ restore to any second, all on that server:
                                      rewinding the whole database in place), keeping its backups,
                                      Proofs and Marks
 
-From anywhere, on a PostgreSQL, MySQL or MariaDB database this computer
-reaches (also managed ones): save it once, then use it by name:
+From anywhere, on a PostgreSQL, MySQL, MariaDB or MongoDB database this
+computer reaches (also managed ones): save it once, then use it by name:
 
   rowsafe add shop postgres://USER:PASSWORD@HOST:5432/DB    (or mysql://USER:PASSWORD@HOST:3306/DB)
                                      save it on this computer (checks it connects, read-only). Pipe
@@ -94,8 +96,8 @@ reaches (also managed ones): save it once, then use it by name:
                                      SQL and tells the assistant there is no restore point
 
 Once, without saving: a connection string instead of NAME (rowsafe pulse
-postgres://USER@HOST:5432/DB, mysql://USER@HOST:3306/DB or mariadb://...), or
-DATABASE_URL when you aren't logged in.
+postgres://USER@HOST:5432/DB, mysql://USER@HOST:3306/DB, mariadb://... or
+mongodb://USER@HOST:27017/DB), or DATABASE_URL when you aren't logged in.
 
 Which database: a connection string; else a saved NAME; else this project's
 (ROWSAFE_DATABASE or .rowsafe.json) when it's saved here; else DATABASE_URL.
@@ -122,6 +124,13 @@ disk has room). top reads performance_schema. tune changes MySQL's settings
 with SET PERSIST; MariaDB keeps them in its configuration file, which a
 connection can't reach. Replication isn't checked. The account needs PROCESS
 to see other sessions.
+
+MongoDB (mongodb:// and mongodb+srv://): connections, operations running for
+over 5 minutes, the WiredTiger cache, queued operations, the oplog's reach,
+replication lag, the profiler, and indexes unused for a week or covered by
+another; fixes stop an operation, turn the profiler on and drop an index. top
+reads the profiler's slow operations. Settings are shown, not changed: they
+live in mongod.conf. The user needs clusterMonitor (dbAdmin for the fixes).
 
 Rowsafe can't see another server's memory or disk over a connection: pass
 --memory and --cpus for settings advice. Backups, restore to any second, the
@@ -209,7 +218,7 @@ func localControl(want string) (url string, err error) {
 
 // notLoggedIn explains what works without an account.
 const notLoggedIn = "not logged in: run `rowsafe login`.\n" +
-	"pulse, fix, insights, top, activity, settings, tune, schema, explain, preview and mcp work on a database directly (PostgreSQL; MySQL and MariaDB but schema, explain and preview):\n" +
+	"pulse, fix, insights, top, activity, settings, tune, schema, explain, preview and mcp work on a database directly (PostgreSQL; MySQL, MariaDB and MongoDB but schema, explain and preview):\n" +
 	"  rowsafe add shop postgres://user@host:5432/dbname   then: rowsafe pulse shop\n" +
 	"  or once: rowsafe pulse postgres://user@host:5432/dbname   (or set DATABASE_URL)\n" +
 	"Backups, Marks and restores run on the database's server: install Rowsafe there (https://rowsafe.sh), then sudo rowsafe add NAME postgres://... on it"

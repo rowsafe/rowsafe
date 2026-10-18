@@ -33,6 +33,7 @@ var mysqlSockets = []string{"/var/run/mysqld/mysqld.sock", "/run/mysqld/mysqld.s
 // machine.
 type serverTarget struct {
 	mysql  bool // MySQL or MariaDB; PostgreSQL otherwise
+	mongo  bool // MongoDB (server_saved_mongodb.go)
 	port   int
 	socket string // PostgreSQL: the socket's directory; MySQL: the socket file ("" over TCP)
 }
@@ -42,6 +43,9 @@ type serverTarget struct {
 func localTarget(conn string) (serverTarget, bool) {
 	if port, sock, ok := localCluster(conn); ok {
 		return serverTarget{port: port, socket: sock}, true
+	}
+	if port, ok := localMongo(conn); ok {
+		return serverTarget{mongo: true, port: port}, true
 	}
 	port, sock, ok := localMySQL(conn)
 	return serverTarget{mysql: true, port: port, socket: sock}, ok
@@ -76,6 +80,14 @@ func localMySQL(conn string) (port int, socket string, ok bool) {
 
 // match is the server's database for the target, if any.
 func (t serverTarget) match(dbs []protocol.Database) *protocol.Database {
+	if t.mongo {
+		for i, d := range dbs {
+			if protocol.NormalizeEngine(d.Engine) == protocol.EngineMongoDB && d.Port == t.port {
+				return &dbs[i]
+			}
+		}
+		return nil
+	}
 	if !t.mysql {
 		return clusterOf(dbs, t.port, t.socket)
 	}

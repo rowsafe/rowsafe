@@ -1,9 +1,10 @@
-// Package pulse turns one reading of a PostgreSQL, MySQL or MariaDB
-// database into a health score from 0 to 100 and a short list of findings
+// Package pulse turns one reading of a PostgreSQL, MySQL, MariaDB or
+// MongoDB database into a health score from 0 to 100 and a short list of findings
 // in plain language, each with the fixes Rowsafe can apply. It needs no
 // agent and no account: `rowsafe pulse postgres://...` reads the database
-// (collect.Read; MySQL and MariaDB: the MySQL engine's reading) and
-// evaluates it here (MySQL's rules: mysql.go). It is pure and
+// (collect.Read; MySQL and MariaDB: the MySQL engine's reading; MongoDB:
+// the MongoDB engine's) and evaluates it here (MySQL's rules: mysql.go;
+// MongoDB's: mongodb.go). It is pure and
 // deterministic: the same input always gives the same result.
 //
 // It covers what the database itself shows: connections, cleanup (vacuum,
@@ -63,7 +64,8 @@ type Input struct {
 	// Database and Host name it for people (never with a password).
 	Database, Host string
 	// Engine is protocol.EngineMySQL or EngineMariaDB for their rules
-	// (mysql.go); "" or EnginePostgreSQL is PostgreSQL.
+	// (mysql.go), EngineMongoDB for MongoDB's (mongodb.go); "" or
+	// EnginePostgreSQL is PostgreSQL.
 	Engine string
 	// Metrics are collect's gauges (collect.M*).
 	Metrics map[string]float64
@@ -180,9 +182,12 @@ func Evaluate(in Input, now time.Time) protocol.DatabaseHealth {
 	if in.Local {
 		e.disk(fresh)
 	}
-	if e.mysqlFamily() {
+	switch {
+	case e.mysqlFamily():
 		e.mysql(fresh) // mysql.go
-	} else {
+	case e.mongodb():
+		e.mongo(fresh) // mongodb.go
+	default:
 		e.connections(fresh)
 		e.maintenance(fresh)
 		e.performance(fresh)

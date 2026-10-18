@@ -76,6 +76,8 @@ type dbMetrics struct {
 	Error         string    `json:"error,omitempty"`
 	DiskFreePct   *float64  `json:"disk_free_pct,omitempty"`
 	DiskFreeBytes *float64  `json:"disk_free_bytes,omitempty"`
+	// Values are the readings an engine's own rules look at (engineRules).
+	Values map[string]float64 `json:"values,omitempty"`
 }
 
 // localRule is one rule: firing reports whether it fires now; known=false
@@ -256,6 +258,62 @@ var localRules = []localRule{
 		}},
 }
 
+// rulesFor are the rules for a database of that engine: the shared ones
+// (in the engine's words: engineAlert) and its own.
+func rulesFor(engine string) []localRule {
+	own := engineRules(engine)
+	if len(own) == 0 {
+		return localRules
+	}
+	return append(localRules[:len(localRules):len(localRules)], own...)
+}
+
+// engineRules are an engine's own rules (mongodb.go...).
+func engineRules(engine string) []localRule {
+	switch protocol.NormalizeEngine(engine) {
+	case protocol.EngineMongoDB:
+		return mongoRules
+	}
+	return nil
+}
+
+// engineMetrics are the readings an engine's own rules look at.
+func engineMetrics(engine string) []string {
+	switch protocol.NormalizeEngine(engine) {
+	case protocol.EngineMongoDB:
+		return mongoMetrics
+	}
+	return nil
+}
+
+// freshMetrics are a database's newest readings for its engine's rules,
+// nil when there are none from the last 10 minutes.
+func (s *state) freshMetrics(d *dbRec, now time.Time) map[string]float64 {
+	m := s.Metrics[d.ID]
+	if m == nil || now.Sub(m.At) > metricsFresh {
+		return nil
+	}
+	return m.Values
+}
+
+// metricRule fires when the reading key is above threshold (unknown
+// without a recent reading); build words the alert.
+func metricRule(key string, threshold float64, build func(st *state, d *dbRec, m map[string]float64, v float64) ruleResult) func(*state, *dbRec, protocol.Protection, time.Time) ruleResult {
+	return func(st *state, d *dbRec, p protocol.Protection, now time.Time) ruleResult {
+		m := st.freshMetrics(d, now)
+		v, ok := m[key]
+		if !ok {
+			return ruleResult{}
+		}
+		if v <= threshold {
+			return okResult
+		}
+		r := build(st, d, m, v)
+		r.value, r.threshold = f64(float64(int(v*10))/10), f64(threshold)
+		return r
+	}
+}
+
 func activated(d *dbRec) bool {
 	return d.Status == protocol.DBActive || d.Status == protocol.DBVerifying
 }
@@ -293,7 +351,7 @@ func (s *state) evaluateAlerts(now time.Time) []notice {
 	var out []notice
 	for _, d := range s.Databases {
 		p := s.protection(d, now)
-		for _, rule := range localRules {
+		for _, rule := range rulesFor(d.Engine) {
 			key := rule.name + ":" + d.ID
 			r := engineAlert(rule.name, s, d, rule.eval(s, d, p, now), now) // mysql.go
 			open := s.openAlert(key)
@@ -430,6 +488,14 @@ func (s *state) recordMonitoring(rep protocol.MonitoringReport, now time.Time) {
 		}
 		if v, ok := d.Metrics[collect.MDiskFreeBytes]; ok {
 			m.DiskFreeBytes = &v
+		}
+		for _, k := range engineMetrics(s.db(d.DatabaseID).Engine) {
+			if v, ok := d.Metrics[k]; ok {
+				if m.Values == nil {
+					m.Values = map[string]float64{}
+				}
+				m.Values[k] = v
+			}
 		}
 		s.Metrics[d.DatabaseID] = m
 	}
@@ -777,7 +843,17 @@ func (srv *Server) alertAck(w http.ResponseWriter, r *http.Request) {
 
 func (srv *Server) alertRules(w http.ResponseWriter, r *http.Request) {
 	out := []protocol.AlertRule{}
-	for _, rule := range localRules {
+	rules := localRules
+	srv.st.read(func(st *state) {
+		seen := map[string]bool{}
+		for _, d := range st.Databases {
+			if e := protocol.NormalizeEngine(d.Engine); !seen[e] {
+				seen[e] = true
+				rules = append(rules[:len(rules):len(rules)], engineRules(e)...)
+			}
+		}
+	})
+	for _, rule := range rules {
 		out = append(out, protocol.AlertRule{Rule: rule.name, Title: rule.title, Scope: "database", Description: rule.description,
 			Enabled: true, Threshold: rule.threshold, Unit: rule.unit, ForSeconds: int(rule.forDur.Seconds()), Severity: rule.severity,
 			Defaults: protocol.AlertRuleDefault{Threshold: rule.threshold, ForSeconds: int(rule.forDur.Seconds()), Severity: rule.severity}})
