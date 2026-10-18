@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rowsafe/rowsafe/protocol"
@@ -32,8 +33,9 @@ type Server struct {
 	log       *slog.Logger
 	now       func() time.Time
 	updates   *updates
-	alertHTTP *http.Client // alerts.go
-	allowHTTP bool         // tests: channels on http://
+	alertHTTP *http.Client   // alerts.go
+	allowHTTP bool           // tests: channels on http://
+	sending   sync.WaitGroup // notifications on their way (alerts.go, weekly.go)
 }
 
 // Open loads (or starts) the state kept in dir.

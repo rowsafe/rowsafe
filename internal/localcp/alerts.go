@@ -448,7 +448,9 @@ func (srv *Server) send(ns []notice) {
 	if len(ns) == 0 {
 		return
 	}
+	srv.sending.Add(1)
 	go func() {
+		defer srv.sending.Done()
 		for _, n := range ns {
 			err := srv.deliver(context.Background(), n.ch, n.event, n.alert)
 			if err != nil {

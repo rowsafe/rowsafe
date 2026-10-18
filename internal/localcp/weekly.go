@@ -192,7 +192,9 @@ func (srv *Server) sendWeekly() {
 	}
 	m := message{event: eventWeekly, title: subject, text: subject + "\n\n" + text, priority: "3", tag: "bar_chart",
 		payload: map[string]any{"report": map[string]any{"subject": subject, "text": text, "databases": rows}}}
+	srv.sending.Add(1)
 	go func() {
+		defer srv.sending.Done()
 		for _, n := range ns {
 			err := srv.post(context.Background(), n.ch, m)
 			if err != nil {
