@@ -167,6 +167,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/databases/{ref}/restore-points", s.marks)
 	mux.HandleFunc("POST /v1/databases/{ref}/restore-points", s.createMark)
 	s.rewindRoutes(mux)                                             // rewind.go
+	s.upgradeRoutes(mux)                                            // upgrade.go
 	mux.HandleFunc("GET /v1/notification-channels", s.channelsList) // alerts.go
 	mux.HandleFunc("POST /v1/notification-channels", s.channelsCreate)
 	mux.HandleFunc("DELETE /v1/notification-channels/{id}", s.channelsDelete)
@@ -271,6 +272,7 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		resp.RewindExpires = st.recordRewinds(req.Rewinds, now) // rewind.go
+		st.recordSoftware(req.Software, now)                    // upgrade.go
 		for _, d := range st.Databases {
 			if d.Status != protocol.DBPendingAdopt {
 				resp.Databases = append(resp.Databases, d.spec())
