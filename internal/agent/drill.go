@@ -225,6 +225,10 @@ type drillSource struct {
 	sizeBytes int64
 	preload   string // production's shared_preload_libraries
 	databases []protocol.DBInfo
+	// listRestored: nothing to compare with (another server's database,
+	// without an account): the drill lists the restored databases instead,
+	// and fails when the backup holds none.
+	listRestored bool
 	// prodDataDir is production's data directory on this server ("" for
 	// another server's database): the scratch directory must not overlap it.
 	prodDataDir string
@@ -359,6 +363,12 @@ func (a *Agent) drillRestore(ctx context.Context, src drillSource, id string, re
 		return finishErr(err)
 	}
 	res.Databases, res.Failures, res.Warnings = compareDatabases(src.databases, restored)
+	if src.listRestored && len(src.databases) == 0 {
+		res.Databases = restoredDatabases(restored)
+		if len(res.Databases) == 0 {
+			res.Failures = append(res.Failures, "the backup holds no database")
+		}
+	}
 	res.Passed = len(res.Failures) == 0
 	for _, d := range res.Databases {
 		tl.Printf("database %-24s present=%-5t tables: source %d, restored %d", d.Name, d.Present, d.SourceTables, d.RestoredTables)
@@ -702,6 +712,16 @@ func compareDatabases(source, restored []protocol.DBInfo) (out []protocol.DrillD
 		}
 	}
 	return out, failures, warnings
+}
+
+// restoredDatabases lists what a drill restored, when there is nothing to
+// compare it with.
+func restoredDatabases(restored []protocol.DBInfo) []protocol.DrillDatabase {
+	var out []protocol.DrillDatabase
+	for _, r := range restored {
+		out = append(out, protocol.DrillDatabase{Name: r.Name, Present: true, RestoredTables: r.Tables})
+	}
+	return out
 }
 
 // niceWrap lowers a drill's or backup's CPU and IO priority so it competes

@@ -140,3 +140,30 @@ func TestProofSpaceNeededMatchesDrill(t *testing.T) {
 		t.Fatalf("%d != %d", got, want)
 	}
 }
+
+// Without an account (sudo rowsafe proof NAME --from-bucket on another
+// server), nobody can say what the source holds: the backups give its
+// version and size, and the restored databases are listed.
+func TestForkVerifyFromBucket(t *testing.T) {
+	ops := &fakeForkOps{infoDB: []pgbackrest.StanzaDB{{ID: 1, Version: "17"}}}
+	a, _ := verifyTestAgent(t, ops)
+	old := drillRestoreCmd
+	drillRestoreCmd = func(ctx context.Context, cli pgbackrest.CLI, dataDir, tablespaceDir string) ([]byte, error) {
+		return nil, errors.New("stop here")
+	}
+	t.Cleanup(func() { drillRestoreCmd = old })
+	p := verifyParams()
+	p.Source.ID, p.OwnRepo, p.Major, p.SizeBytes, p.VerifyFacts = "", true, 0, 0, &protocol.ForkVerifyFacts{}
+	tl := &taskLog{}
+	res, err := a.forkVerify(context.Background(), p, tl)
+	if err == nil || !strings.Contains(err.Error(), "stop here") || res == nil || res.Drill == nil {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if !strings.Contains(tl.String(), "PostgreSQL 17, 3.0 MiB") {
+		t.Fatalf("log: %s", tl.String())
+	}
+	got := restoredDatabases([]protocol.DBInfo{{Name: "app", Tables: 4}})
+	if len(got) != 1 || !got[0].Present || got[0].RestoredTables != 4 || got[0].SourceTables != 0 {
+		t.Fatalf("listed: %+v", got)
+	}
+}

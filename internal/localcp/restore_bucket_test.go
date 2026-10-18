@@ -135,3 +135,38 @@ func TestRestoreFromBucket(t *testing.T) {
 		t.Fatalf("agent away: %v", err)
 	}
 }
+
+func TestProofFromBucket(t *testing.T) {
+	_, a, c, _ := setup(t)
+	ctx := context.Background()
+	a.call("POST", "/v1/agent/heartbeat", protocol.HeartbeatRequest{Hostname: "db2"}, nil)
+	if _, err := c.ProofFromBucket(ctx, protocol.BucketProofRequest{Source: "../x"}); apiStatus(err) != http.StatusBadRequest {
+		t.Fatalf("an unsafe source: %v", err)
+	}
+	resp, err := c.ProofFromBucket(ctx, protocol.BucketProofRequest{Source: "shop", Folder: "shop-20261001-120000"})
+	if err != nil || resp.Task.Type != protocol.TaskForkRestore {
+		t.Fatalf("%+v %v", resp, err)
+	}
+	if _, err := c.RestoreFromBucket(ctx, protocol.BucketRestoreRequest{Source: "shop", Confirm: "shop", NewCluster: true}); apiStatus(err) != http.StatusConflict {
+		t.Fatalf("a restore beside the test: %v", err)
+	}
+	task := a.claimOne(protocol.TaskForkRestore)
+	var p protocol.ForkRestoreParams
+	_ = json.Unmarshal(task.Params, &p)
+	if !p.Verify || !p.OwnRepo || p.VerifyFacts == nil || p.Source.Stanza != "shop" || p.SourceFolder != "shop-20261001-120000" || p.Target.Time != nil {
+		t.Fatalf("params: %+v", p)
+	}
+	// A test adds nothing.
+	a.done(task, protocol.StatusSucceeded, protocol.ForkRestoreResult{ForkID: p.ForkID, Drill: &protocol.DrillResult{Passed: true}})
+	if dbs, _ := c.Databases(ctx); len(dbs) != 0 {
+		t.Fatalf("a restore test added %+v", dbs)
+	}
+	// A database of this server is tested with its own Proof.
+	if _, err := c.CreateDatabase(ctx, protocol.CreateDatabaseRequest{Name: "crm", Port: 5432}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ProofFromBucket(ctx, protocol.BucketProofRequest{Source: "crm"}); apiStatus(err) != http.StatusConflict ||
+		!strings.Contains(err.Error(), "sudo rowsafe proof crm") {
+		t.Fatalf("a database of this server: %v", err)
+	}
+}

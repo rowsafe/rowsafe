@@ -265,6 +265,9 @@ Fork: a new, independent database from any moment, on another server or a new po
 
 Proof: the weekly restore test
   rowsafe proof [NAME] [--no-wait]           restore the latest backup to a scratch copy and check it, now
+  rowsafe proof NAME --from-bucket [--folder F]
+                                             on another server on its own with the same bucket and passphrase:
+                                             test NAME's backups there (nothing changes on either server)
   rowsafe proofs [NAME]                      restore test results
 
 Pulse: health, monitoring and alerts

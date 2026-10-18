@@ -160,3 +160,77 @@ func followProtection(ctx context.Context, c *client.Client, name string) error 
 		}
 	}
 }
+
+// rowsafe proof NAME --from-bucket, on another server on its own: a
+// restore test of NAME's backups here, from this server's storage (the same
+// bucket and passphrase). Nothing is added or changed on either server.
+func proofFromBucketCmd(ctx context.Context, c *client.Client, args []string) error {
+	fs := flag.NewFlagSet("proof", flag.ContinueOnError)
+	_ = fs.Bool("from-bucket", true, "test the backups in this server's storage (the database's own server's bucket and passphrase)")
+	folder := fs.String("folder", "", "its backup folder in the bucket, when it isn't the name (a fresh start: shop-20260901-120000)")
+	noWait := fs.Bool("no-wait", false, "return once the test is queued")
+	pos, err := positionals(fs, args)
+	if err != nil {
+		return err
+	}
+	if !onServer {
+		return errProofFromBucketElsewhere
+	}
+	if len(pos) != 1 {
+		return newUsageError("which database? sudo rowsafe proof NAME --from-bucket, with its name on its own server")
+	}
+	name := pos[0]
+	fmt.Printf("Restore test of %s's backups on this server: the newest point is restored into a scratch copy from this server's\n", name)
+	fmt.Println("storage (the same bucket and passphrase), started privately and checked, then deleted. Nothing else changes.")
+	resp, err := c.ProofFromBucket(ctx, protocol.BucketProofRequest{Source: name, Folder: *folder})
+	if err != nil {
+		return apiErr(err)
+	}
+	if *noWait {
+		fmt.Printf("Restore test queued (task %s): sudo rowsafe task %s\n", resp.Task.ID, resp.Task.ID)
+		return nil
+	}
+	status := ""
+	done, err := waitTask(ctx, c, resp.Task.ID, func(v protocol.TaskView) {
+		if v.Status != status && v.Status == protocol.StatusRunning {
+			fmt.Fprintln(os.Stderr, "Restoring and checking...")
+		}
+		status = v.Status
+	})
+	if err != nil {
+		return err
+	}
+	var res protocol.ForkRestoreResult
+	_ = json.Unmarshal(done.Result, &res)
+	d := res.Drill
+	if d == nil {
+		fmt.Printf("The restore test didn't run: %s\n", orText(done.Error, "the task ended as "+done.Status))
+		return exitError(1)
+	}
+	verdict := "passed"
+	if !d.Passed || done.Status != protocol.StatusSucceeded {
+		verdict = "FAILED"
+	}
+	fmt.Printf("Restore test of %s on this server: %s in %s (backup %s)\n", name, verdict, humanDurationSeconds(d.DurationSeconds), orText(d.BackupLabel, "-"))
+	if d.RecoveredTo != nil {
+		fmt.Printf("  Recovered to:  %s\n", describeTime(*d.RecoveredTo))
+	}
+	for _, db := range d.Databases {
+		fmt.Printf("  Database %-20s restored, %d tables\n", db.Name, db.RestoredTables)
+	}
+	for _, f := range d.Failures {
+		fmt.Printf("  problem: %s\n", f)
+	}
+	for _, w := range d.Warnings {
+		fmt.Printf("  note:    %s\n", w)
+	}
+	if verdict != "passed" {
+		return exitError(1)
+	}
+	fmt.Printf("Its own server isn't asked, so the databases aren't compared with production there: its weekly Proof does that.\n")
+	return nil
+}
+
+// errProofFromBucketElsewhere: proof --from-bucket runs on the other server.
+var errProofFromBucketElsewhere = errors.New("--from-bucket runs on another server installed with Rowsafe (--no-account) and the same storage and passphrase " +
+	"as the database's own server: sudo rowsafe proof NAME --from-bucket there")

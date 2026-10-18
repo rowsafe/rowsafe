@@ -29,6 +29,57 @@ var (
 
 func (s *Server) restoreBucketRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/restores/from-bucket", s.restoreFromBucket)
+	mux.HandleFunc("POST /v1/proofs/from-bucket", s.proofFromBucket)
+}
+
+// proofFromBucket queues a restore test of a database's backups on this
+// server: the agent's restore test of another server's database (Verify),
+// with this server's own storage and nothing to compare with.
+func (s *Server) proofFromBucket(w http.ResponseWriter, r *http.Request) {
+	var req protocol.BucketProofRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	switch {
+	case !bucketSourceRE.MatchString(req.Source):
+		writeError(w, http.StatusBadRequest, "which database? Give its name on its own server (its backup folder in the bucket)")
+		return
+	case req.Folder != "" && !bucketFolderRE.MatchString(req.Folder):
+		writeError(w, http.StatusBadRequest, "invalid backup folder")
+		return
+	}
+	now := s.now()
+	var out protocol.BucketProofResponse
+	err := s.st.update(func(st *state) error {
+		if st.Host.LastSeen == nil || now.Sub(*st.Host.LastSeen) > agentOnline {
+			return refuse(http.StatusConflict, "The Rowsafe agent on this server isn't running, so it can't run the test now (sudo systemctl start rowsafe-agent).")
+		}
+		if d := st.db(req.Source); d != nil || slices.ContainsFunc(st.Databases, func(d *dbRec) bool { return d.Stanza == req.Source }) {
+			return refuse(http.StatusConflict, "%s is a database on this server: sudo rowsafe proof %s tests it here. --from-bucket tests another server's database.", req.Source, req.Source)
+		}
+		p := protocol.ForkRestoreParams{ForkID: newID("fork"), Name: "proof", Verify: true, OwnRepo: true, SourceFolder: req.Folder,
+			Source:      protocol.DatabaseSpec{Name: req.Source, Stanza: req.Source, RetentionFull: defaultRetentionFull},
+			VerifyFacts: &protocol.ForkVerifyFacts{}}
+		t, err := st.enqueueHost(protocol.TaskForkRestore, p, now)
+		if errors.Is(err, errTaskOpen) {
+			return refuse(http.StatusConflict, "A restore or restore test is already running on this server (task %s): one at a time. Try again when it has finished.", t.ID)
+		}
+		if err != nil {
+			return err
+		}
+		out.Task = t.TaskView
+		return nil
+	})
+	var ref *upgradeRefusal
+	switch {
+	case errors.As(err, &ref):
+		writeError(w, ref.status, ref.msg)
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, err.Error())
+	default:
+		s.log.Info("restore test from the bucket queued", "task_id", out.Task.ID, "source", req.Source)
+		writeJSON(w, http.StatusAccepted, out)
+	}
 }
 
 func (s *Server) restoreFromBucket(w http.ResponseWriter, r *http.Request) {
@@ -66,7 +117,7 @@ func (s *Server) restoreFromBucket(w http.ResponseWriter, r *http.Request) {
 		}
 		t, err := st.enqueueHost(protocol.TaskForkRestore, p, now)
 		if errors.Is(err, errTaskOpen) {
-			return refuse(http.StatusConflict, "A restore is already running on this server (task %s): one at a time. Try again when it has finished.", t.ID)
+			return refuse(http.StatusConflict, "A restore or restore test is already running on this server (task %s): one at a time. Try again when it has finished.", t.ID)
 		}
 		if err != nil {
 			return err

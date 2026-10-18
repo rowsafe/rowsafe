@@ -46,3 +46,26 @@ type BucketRestoreResponse struct {
 	Placement string   `json:"placement"` // ForkEmptyCluster | ForkNewCluster
 	Port      int      `json:"port,omitempty"`
 }
+
+// ---- Proof from the bucket (another server on its own) ----
+//
+// `sudo rowsafe proof NAME --from-bucket` on another server installed with
+// the same bucket and passphrase: a restore test of NAME's backups there
+// (fork_restore with Verify and OwnRepo). The newest point is restored into
+// a scratch copy, started privately, its databases listed (nothing on the
+// database's own server can be asked, so they aren't compared with it), and
+// the copy deleted. Nothing is added or changed on either server.
+//
+//	POST /v1/proofs/from-bucket   BucketProofRequest -> 202 BucketProofResponse
+
+// BucketProofRequest asks for a restore test of a database's backups here.
+type BucketProofRequest struct {
+	Source string `json:"source"`
+	Folder string `json:"folder,omitempty"`
+}
+
+// BucketProofResponse is the queued restore test (fork_restore); its
+// result's Drill is the test.
+type BucketProofResponse struct {
+	Task TaskView `json:"task"`
+}
