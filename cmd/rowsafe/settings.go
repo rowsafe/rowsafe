@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -116,10 +117,16 @@ func settingValue(s protocol.SettingView) string {
 type settingsHints struct {
 	restart string // how to restart, in a sentence
 	tune    string // rowsafe tune NAME
+	engine  string // the engine for people ("" is PostgreSQL)
+	local   bool   // without the agent: its locked settings are left to it
 }
 
 func printSettings(db string, ov protocol.SettingsOverview, all bool, hints settingsHints) {
-	fmt.Printf("PostgreSQL settings of %s", db)
+	fmt.Printf("%s settings of %s", cmp.Or(hints.engine, "PostgreSQL"), db)
+	locked := "managed by Rowsafe"
+	if hints.local {
+		locked = "left to Rowsafe's agent"
+	}
 	if h := hostLine(ov.Host); h != "" {
 		fmt.Printf(" (%s)", h)
 	}
@@ -142,7 +149,7 @@ func printSettings(db string, ov protocol.SettingsOverview, all bool, hints sett
 				apply = "needs a restart"
 			}
 			if s.Locked {
-				apply = "managed by Rowsafe"
+				apply = locked
 			}
 			t.row("  "+s.Name, settingValue(s), s.Default, s.Source, apply)
 		}
@@ -157,7 +164,7 @@ func printSettings(db string, ov protocol.SettingsOverview, all bool, hints sett
 				apply = "needs a restart"
 			}
 			if s.Locked {
-				apply = "managed by Rowsafe"
+				apply = locked
 			}
 			t.row("  "+s.Name, settingValue(s), s.Source, apply)
 		}

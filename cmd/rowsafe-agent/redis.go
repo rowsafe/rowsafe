@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -50,6 +51,8 @@ for, is read from stdin (one line) and never stored (except the agent's own).
       amounts to administrator rights.
       --target: this empty server receives clones or holds a standby of a
       database on another server: Rowsafe's user gets every right on it.
+      As root (sudo rowsafe add), with --state-dir DIR --owner USER: the
+      login is saved there, owned by the agent's user.
 
   rowsafe-agent redis save-login --port PORT
       Save "user:password" read from stdin as the agent's login (a user you
@@ -89,8 +92,14 @@ func redisCmd(ctx context.Context, args []string) int {
 	stanza := fs.String("stanza", "", "the database's folder in the bucket")
 	label := fs.String("label", "", "the snapshot to download")
 	to := fs.String("to", "", "the file to write")
+	stateDir := fs.String("state-dir", "", "login as root: the agent's state directory")
+	owner := fs.String("owner", "", "login as root: the agent's user, who owns the saved login")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
+	}
+	asRoot := os.Geteuid() == 0 && args[0] == "login" && *stateDir != "" && *owner != ""
+	if asRoot {
+		os.Setenv("ROWSAFE_STATE_DIR", *stateDir)
 	}
 	cfg, err := agent.ConfigFromEnv()
 	if err != nil {
@@ -104,7 +113,7 @@ func redisCmd(ctx context.Context, args []string) int {
 	if args[0] == "download-backup" {
 		return redisDownload(ctx, agent.EngineEnvFor(cfg, *engine, os.Stderr), *stanza, *label, *to)
 	}
-	if os.Geteuid() == 0 {
+	if os.Geteuid() == 0 && !asRoot {
 		fmt.Fprintln(os.Stderr, "run this as the agent user, with /etc/rowsafe/agent.env loaded (the installer does this)")
 		return 1
 	}
@@ -137,12 +146,15 @@ func redisCmd(ctx context.Context, args []string) int {
 		st.Print(os.Stdout)
 		return 0
 	case "login":
-		env, _ := envFor()
+		env, eng := envFor()
 		pw := ""
 		if *adminUser != "" {
 			pw = readSecret()
 		}
 		res, err := redis.CreateLoginWith(ctx, env, *port, *adminUser, pw, redis.LoginOptions{Standby: *standby, Target: *target})
+		if err == nil && asRoot {
+			err = chownTree(filepath.Join(*stateDir, "engines", eng), *owner) // mongodb.go
+		}
 		switch {
 		case err == nil:
 			fmt.Printf("persisted=%s\n", res.Persisted)

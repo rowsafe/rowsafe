@@ -22,7 +22,7 @@ func TestOpen(t *testing.T) {
 			t.Errorf("%q is a connection string", s)
 		}
 	}
-	for _, s := range []string{"app", "redis://u@h/db", "host=h dbname=db", ""} {
+	for _, s := range []string{"app", "sqlserver://u@h/db", "unix:///tmp/x", "host=h dbname=db", ""} {
 		if IsConnString(s) {
 			t.Errorf("%q is not a connection string", s)
 		}

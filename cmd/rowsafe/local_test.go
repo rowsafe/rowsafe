@@ -61,8 +61,12 @@ func TestLocalArgs(t *testing.T) {
 		t.Errorf("a MySQL DATABASE_URL: %v %v", ok, err)
 	}
 	t.Setenv("DATABASE_URL", "redis://app@db/0")
+	if l, _, ok, err := localArgs(nil, false); !ok || err != nil || l.Engine() != protocol.EngineRedis {
+		t.Errorf("a Redis DATABASE_URL: %v %v", ok, err)
+	}
+	t.Setenv("DATABASE_URL", "sqlserver://app@db/shop")
 	if _, _, ok, _ := localArgs(nil, false); ok {
-		t.Error("a Redis DATABASE_URL")
+		t.Error("a SQL Server DATABASE_URL")
 	}
 }
 

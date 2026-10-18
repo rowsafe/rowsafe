@@ -173,9 +173,24 @@ func protectOnServer(ctx context.Context, s savedDB, d *local.DB, checked, yes, 
 			return nil, err
 		}
 	}
+	if t.redis { // server_saved_redis.go
+		srv, err := redisServer(ctx, d)
+		if err != nil {
+			return nil, fmt.Errorf("%w\nSaved, but not protected: Rowsafe reads the server first", err)
+		}
+		engine = protocol.EngineRedis
+		if d.Engine() == protocol.EngineValkey {
+			engine = protocol.EngineValkey
+		}
+		how = "Rowsafe follows it as a replica that serves nothing; its settings don't change"
+		sockPath, _ := protocol.LocalSocket(cfg.URL)
+		if ok, err := ensureRedisLogin(ctx, s, engine, port, srv, filepath.Dir(sockPath), yes, asJSON); !ok || err != nil {
+			return nil, err
+		}
+	}
 	name := protocol.EngineDisplayName(engine)
 	say(asJSON, "\nIt runs on this server: Rowsafe can back it up continuously to your storage, with Marks, a weekly restore test and restore to any second.\nChecking what that needs (changes nothing)...\n")
-	if sock == "" && !t.mysql && !t.mongo {
+	if sock == "" && !t.mysql && !t.mongo && !t.redis {
 		sock = "/var/run/postgresql"
 	}
 	resp, err := c.CreateDatabase(ctx, protocol.CreateDatabaseRequest{Name: s.Name, Port: port, SocketDir: sock, Engine: engine})

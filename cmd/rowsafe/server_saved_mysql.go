@@ -34,6 +34,7 @@ var mysqlSockets = []string{"/var/run/mysqld/mysqld.sock", "/run/mysqld/mysqld.s
 type serverTarget struct {
 	mysql  bool // MySQL or MariaDB; PostgreSQL otherwise
 	mongo  bool // MongoDB (server_saved_mongodb.go)
+	redis  bool // Redis or Valkey (server_saved_redis.go)
 	port   int
 	socket string // PostgreSQL: the socket's directory; MySQL: the socket file ("" over TCP)
 }
@@ -46,6 +47,9 @@ func localTarget(conn string) (serverTarget, bool) {
 	}
 	if port, ok := localMongo(conn); ok {
 		return serverTarget{mongo: true, port: port}, true
+	}
+	if port, ok := localRedis(conn); ok {
+		return serverTarget{redis: true, port: port}, true
 	}
 	port, sock, ok := localMySQL(conn)
 	return serverTarget{mysql: true, port: port, socket: sock}, ok
@@ -80,6 +84,14 @@ func localMySQL(conn string) (port int, socket string, ok bool) {
 
 // match is the server's database for the target, if any.
 func (t serverTarget) match(dbs []protocol.Database) *protocol.Database {
+	if t.redis {
+		for i, d := range dbs {
+			if e := protocol.NormalizeEngine(d.Engine); (e == protocol.EngineRedis || e == protocol.EngineValkey) && d.Port == t.port {
+				return &dbs[i]
+			}
+		}
+		return nil
+	}
 	if t.mongo {
 		for i, d := range dbs {
 			if protocol.NormalizeEngine(d.Engine) == protocol.EngineMongoDB && d.Port == t.port {

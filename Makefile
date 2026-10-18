@@ -21,6 +21,7 @@
 #   make test-mysql            the MySQL/MariaDB engine against real MySQL 8.4 and MariaDB 11.4 (Docker)
 #   make test-no-account-mysql MySQL 8.4 and MariaDB 11.4 on a server on its own: rowsafe add, backups, Proof, Marks, Rewind (Docker)
 #   make test-no-account-mongodb MongoDB 8.0 on a server on its own: rowsafe add, backups, Proof, Marks, Rewind (Docker)
+#   make test-no-account-redis   Redis 7 and Valkey 8 on a server on its own: rowsafe add, backups, Proof, Marks, Rewind (Docker)
 #   make test-upgrade          real PostgreSQL updates and upgrades (16 -> 18, undo) on a systemd Debian container (Docker)
 #   make test-action           the GitHub Action (integrations/github-action) against a mock API
 #   make openai-plugin-zip     the OpenAI plugin directory ZIP (integrations/codex without the hook) in dist/
@@ -48,7 +49,7 @@ AGENT_LDFLAGS := -s -w -buildid= -X $(PKG)/internal/agent.Version=$(VERSION) -X 
 MAIN_LDFLAGS := -s -w -buildid= -X main.version=$(VERSION)
 GOBUILD := CGO_ENABLED=0 GOFLAGS=-mod=readonly $(GO) build -trimpath -buildvcs=false
 
-.PHONY: all build test lint check-installer test-installer test-cli-installer test-npm test-installer-cloud test-mongodb test-clickhouse test-redis test-qdrant check-qdrant-pins test-sqlite test-rewind test-secondcopy test-sftp test-mysql test-no-account-mysql test-no-account-mongodb test-upgrade test-pooling test-no-account-pooler test-permissions test-action openai-plugin-zip dist release check-release-env clean test-opensearch mcp-registry
+.PHONY: all build test lint check-installer test-installer test-cli-installer test-npm test-installer-cloud test-mongodb test-clickhouse test-redis test-qdrant check-qdrant-pins test-sqlite test-rewind test-secondcopy test-sftp test-mysql test-no-account-mysql test-no-account-mongodb test-no-account-redis test-upgrade test-pooling test-no-account-pooler test-permissions test-action openai-plugin-zip dist release check-release-env clean test-opensearch mcp-registry
 
 all: lint test build
 
@@ -75,7 +76,7 @@ lint: check-installer
 		done; \
 	done
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck -S warning -s sh scripts/install.sh scripts/cli.sh scripts/test-cli.sh scripts/test-install.sh scripts/test-rewind.sh scripts/test-pooling.sh scripts/test-no-account-pooler.sh scripts/test-secondcopy.sh scripts/test-sftp.sh scripts/test-mysql.sh scripts/test-no-account-mysql.sh scripts/test-no-account-mongodb.sh scripts/test-upgrade.sh scripts/test-permissions.sh scripts/rowsafe-agent-guard scripts/rowsafe-pg-restart scripts/rowsafe-firewall scripts/rowsafe-pg-create-cluster scripts/rowsafe-allow scripts/check-qdrant-pins.sh scripts/publish-mcp-registry.sh; \
+		shellcheck -S warning -s sh scripts/install.sh scripts/cli.sh scripts/test-cli.sh scripts/test-install.sh scripts/test-rewind.sh scripts/test-pooling.sh scripts/test-no-account-pooler.sh scripts/test-secondcopy.sh scripts/test-sftp.sh scripts/test-mysql.sh scripts/test-no-account-mysql.sh scripts/test-no-account-mongodb.sh scripts/test-no-account-redis.sh scripts/test-upgrade.sh scripts/test-permissions.sh scripts/rowsafe-agent-guard scripts/rowsafe-pg-restart scripts/rowsafe-firewall scripts/rowsafe-pg-create-cluster scripts/rowsafe-allow scripts/check-qdrant-pins.sh scripts/publish-mcp-registry.sh; \
 		shellcheck -S warning -s bash integrations/github-action/scripts/*.sh integrations/github-action/test/*.sh integrations/github-action/export.sh; \
 	else echo "shellcheck not installed; skipping"; fi
 
@@ -188,6 +189,9 @@ test-no-account-mysql:
 
 test-no-account-mongodb:
 	sh scripts/test-no-account-mongodb.sh
+
+test-no-account-redis:
+	sh scripts/test-no-account-redis.sh
 
 test-upgrade:
 	sh scripts/test-upgrade.sh

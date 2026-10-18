@@ -338,7 +338,10 @@ func (s *state) archiver(a protocol.ArchiverStats, now time.Time) error {
 		return nil
 	}
 	at := now.UTC()
-	if a.Error != "" {
+	// A Redis or Valkey server Rowsafe can't follow reports "snapshots"
+	// with Error saying why: how it is backed up, not a failure to read the
+	// status (redis.go).
+	if a.Error != "" && a.ArchiveMode != protocol.RedisArchiveSnapshots {
 		db.ArchiverError, db.ArchiverErrorAt = clip(a.Error, 2000), &at
 		return nil
 	}
@@ -355,6 +358,9 @@ func (s *state) archiver(a protocol.ArchiverStats, now time.Time) error {
 func (s *state) createMark(db *dbRec, name, by string, now time.Time) (*taskRec, error) {
 	if db.Status != protocol.DBActive {
 		return nil, fmt.Errorf("%s is %s: Marks need an active database (backups on and proven)", db.Name, db.Status)
+	}
+	if msg := redisMarksRefusal(db); msg != "" { // redis.go
+		return nil, errors.New(msg)
 	}
 	// An earlier attempt with this name that never got written is replaced.
 	s.Marks = slices.DeleteFunc(s.Marks, func(m protocol.RestorePoint) bool {

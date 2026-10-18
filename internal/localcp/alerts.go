@@ -273,6 +273,8 @@ func engineRules(engine string) []localRule {
 	switch protocol.NormalizeEngine(engine) {
 	case protocol.EngineMongoDB:
 		return mongoRules
+	case protocol.EngineRedis, protocol.EngineValkey:
+		return redisRules
 	}
 	return nil
 }
@@ -282,6 +284,8 @@ func engineMetrics(engine string) []string {
 	switch protocol.NormalizeEngine(engine) {
 	case protocol.EngineMongoDB:
 		return mongoMetrics
+	case protocol.EngineRedis, protocol.EngineValkey:
+		return redisMetrics
 	}
 	return nil
 }
@@ -496,6 +500,12 @@ func (s *state) recordMonitoring(rep protocol.MonitoringReport, now time.Time) {
 				}
 				m.Values[k] = v
 			}
+		}
+		for k, v := range redisValues(d.Redis) { // redis.go
+			if m.Values == nil {
+				m.Values = map[string]float64{}
+			}
+			m.Values[k] = v
 		}
 		s.Metrics[d.DatabaseID] = m
 	}

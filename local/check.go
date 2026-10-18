@@ -12,6 +12,10 @@ type Server struct {
 	Database string `json:"database"`
 	User     string `json:"user"`
 	Version  string `json:"version"`
+	// Redis and Valkey: the server's configuration and ACL files, for
+	// keeping Rowsafe's user on its server ("" when none or unknown).
+	ConfigFile string `json:"-"`
+	ACLFile    string `json:"-"`
 }
 
 // Check connects once and reads who and what the connection reaches,
@@ -25,6 +29,9 @@ func (d *DB) Check(ctx context.Context) (Server, error) {
 	}
 	if d.mg != nil {
 		return d.mongoCheck(ctx)
+	}
+	if d.rd != nil {
+		return d.redisCheck(ctx)
 	}
 	conn, err := pgx.ConnectConfig(ctx, d.conn.Copy())
 	if err != nil {
