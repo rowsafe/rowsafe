@@ -359,7 +359,7 @@ func (s *state) createMark(db *dbRec, name, by string, now time.Time) (*taskRec,
 	if db.Status != protocol.DBActive {
 		return nil, fmt.Errorf("%s is %s: Marks need an active database (backups on and proven)", db.Name, db.Status)
 	}
-	if msg := redisMarksRefusal(db); msg != "" { // redis.go
+	if msg := redisMarksRefusal(db) + sqliteMarksRefusal(db); msg != "" { // redis.go, sqlite.go
 		return nil, errors.New(msg)
 	}
 	// An earlier attempt with this name that never got written is replaced.

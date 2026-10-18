@@ -10,10 +10,14 @@ import (
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
-// Every engine this control plane protects has every feature it offers.
+// Every engine this control plane protects has every feature it offers
+// (SQLite: but those that need a database server, which it has none of).
 func TestLocalEnginesHaveLocalFeatures(t *testing.T) {
 	for _, e := range localEngines {
 		for _, f := range localFeatures {
+			if _, noServer := protocol.SQLiteNoServer[f]; noServer && isSQLite(e) {
+				continue
+			}
 			if !protocol.EngineHas(e, f) {
 				t.Errorf("%s lacks %s, which this control plane offers it", e, f)
 			}
