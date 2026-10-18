@@ -1368,7 +1368,20 @@ no_account_tests() {
   has "agent.json.account"
   expect_ok "purge after leaving the account" "$INSTALLER" --uninstall --purge
   rm -f /usr/local/bin/rowsafe
-  pass "--no-account installs without a token, and takes a server off its account"
+
+  # No account is the default for a new server; --account connects it.
+  expect_ok "plain install, no token" "$INSTALLER" --no-prompt
+  env_is ROWSAFE_URL unix:///var/lib/rowsafe/control.sock
+  ! grep -q "^    ROWSAFE_ENROLL_TOKEN\$" "$W/out" || fail "a plain install asks for an enrollment token"
+  has "sudo rowsafe login adds the dashboard later"
+  expect_ok "purge after a plain install" "$INSTALLER" --uninstall --purge
+  rm -f /usr/local/bin/rowsafe
+  expect_ok "--account without a terminal" "$INSTALLER" --account --no-prompt
+  ! grep -q '^ROWSAFE_URL=unix:' /etc/rowsafe/agent.env || fail "--account installed without an account"
+  grep -q "^    ROWSAFE_ENROLL_TOKEN\$" "$W/out" || fail "--account without a terminal doesn't ask for a token"
+  expect_ok "purge after --account" "$INSTALLER" --uninstall --purge
+  rm -f /usr/local/bin/rowsafe
+  pass "no account by default; --no-account takes a server off its account; --account connects"
 }
 
 guided_storage_tests() {

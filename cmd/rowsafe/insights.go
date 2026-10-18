@@ -488,6 +488,10 @@ func reportCmd(ctx context.Context, c *client.Client, args []string) error {
 			fmt.Println("Sending the weekly Pulse failed:", res.Error)
 			return exitError(1)
 		}
+		if onServer {
+			fmt.Println("Sent \"Your weekly Pulse\" to this server's alert channels.")
+			return nil
+		}
 		fmt.Println("Test email sent: \"Your weekly Pulse\".")
 		return nil
 	}
@@ -501,6 +505,20 @@ func reportCmd(ctx context.Context, c *client.Client, args []string) error {
 	state := "off"
 	if st.WeeklyReport {
 		state = "on (every Monday morning, UTC)"
+	}
+	if onServer {
+		// A server on its own: the report goes to its alert channels.
+		fmt.Printf("Your weekly Pulse: %s\n", state)
+		if len(st.WeeklyReportSendsTo) > 0 {
+			fmt.Printf("Sent to this server's alert channels: %s\n", strings.Join(st.WeeklyReportSendsTo, ", "))
+		} else {
+			fmt.Println("No alert channel yet, so it isn't sent anywhere: sudo rowsafe channels add --type slack --name ops --url https://hooks.slack.com/...")
+		}
+		if st.WeeklyReportLastSentAt != nil {
+			fmt.Printf("Last sent: %s\n", ago(st.WeeklyReportLastSentAt))
+		}
+		fmt.Println("\nPreview it: sudo rowsafe report --preview   Send it now: sudo rowsafe report --send-test")
+		return nil
 	}
 	fmt.Printf("Your weekly Pulse (email): %s\n", state)
 	switch {

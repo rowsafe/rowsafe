@@ -62,6 +62,10 @@ Getting started
                                              offers a short section in AGENTS.md / CLAUDE.md for AI agents
   rowsafe restart [NAME] [--yes]             restart the database, e.g. when setup needs it; asks first. Only on
                                              servers where the installer allowed it
+  rowsafe restart [NAME] --at TIME|window [--yes]
+                                             restart it later: "03:00", "2026-10-20 03:00", "in 2h" (up to 30
+                                             days ahead) or the server's maintenance window (Rowsafe Cloud)
+  rowsafe restart [NAME] --cancel            cancel the scheduled restart
   rowsafe version                            the CLI's version
 
 Rowsafe Cloud: PostgreSQL servers Rowsafe runs for you, billed by the hour (never more than the monthly price)
@@ -179,6 +183,10 @@ Rewind: continuous backups, restore to any second
                                              ones; --column restores the files a column refers to
   rowsafe files undo [NAME] [--yes]          undo a --whole-folder restore
   rowsafe files proof [NAME]                 restore a few files and compare them with the live ones, now
+  rowsafe files [SUBCOMMAND] --server SERVER ...
+                                             the same for a server's own folders (any folder or Docker volume
+                                             as /var/lib/docker/volumes/VOLUME/_data, with or without a
+                                             database on it); a restore asks for the server's hostname
 
 Move in: bring a database from DigitalOcean, RDS, Supabase, Neon... onto your server
   rowsafe migrate [NAME] [--json]            migrations (into NAME, or all)
@@ -288,9 +296,15 @@ Pulse: health, monitoring and alerts
   rowsafe alerts rules reset RULE [--json]   back to the defaults
   rowsafe channels list
   rowsafe channels add --type email --name NAME --address A [--address B] [--min-severity warning]
-  rowsafe channels add --type slack|discord|webhook --name NAME --url URL [--min-severity warning]
-                                             where alerts are sent (webhooks print a signing secret once);
-                                             on a server without the dashboard: slack, discord, ntfy or webhook
+  rowsafe channels add --type slack|discord|teams|webhook --name NAME --url URL [--min-severity warning]
+  rowsafe channels add --type pagerduty --name NAME --routing-key KEY [--region us|eu]
+  rowsafe channels add --type opsgenie --name NAME --api-key KEY [--region us|eu]
+  rowsafe channels add --type telegram --name NAME --bot-token TOKEN --chat-id ID
+  rowsafe channels add --type ntfy --name NAME --topic TOPIC [--server https://ntfy.sh] [--token tk_...]
+                                             where alerts are sent (webhooks print a signing secret once).
+                                             Leave out --routing-key, --api-key or --bot-token to type it
+                                             (not shown) or pipe it, or pass --secret-env VAR. On a server
+                                             without the dashboard: slack, discord, ntfy (no --token), webhook
   rowsafe channels remove ID
   rowsafe channels test ID                   send a test notification now
   rowsafe report [--preview [--html]] [--on | --off] [--to A,B] [--send-test]
@@ -415,6 +429,8 @@ Usage counts: off unless you turn them on; nothing is sent by default
                                              logged in or not, a random ID. Never arguments, names or errors
   rowsafe telemetry off                      stop, and forget the random ID (ROWSAFE_TELEMETRY=0 or
                                              DO_NOT_TRACK=1 also keep them off)
+  rowsafe tips on | off | status             a short tip after a command, at most one an hour, only at a
+                                             terminal (never with --json or for AI agents; ROWSAFE_NO_TIPS=1)
 
 Backups, proof and mark wait for the task to finish; pass --no-wait to return at once.
 Scripts and AI agents (rowsafe help agents):
@@ -471,7 +487,7 @@ func loadConfig() (config, error) {
 		}
 	} else if os.Getenv("ROWSAFE_API_KEY") == "" && os.Getenv("ROWSAFE_URL") == "" {
 		// A login saved on a server whose agent went back to running
-		// without an account (the installer's --no-account): the agent's
+		// without an account (the installer's --no-account, now its default): the agent's
 		// socket only exists then, and commands here are about it.
 		if url, err := localControl(""); url != "" && err == nil {
 			c.URL, c.APIKey, c.KeyID = url, "local", ""
@@ -523,6 +539,7 @@ func cliMain(ctx context.Context, args []string) int {
 	finish(err == nil || errors.As(err, &exit))
 	run.done(err)
 	if err == nil {
+		showTip(ctx, args) // tips.go
 		return 0
 	}
 	if errors.As(err, &exit) {
@@ -598,6 +615,8 @@ func dispatch(ctx context.Context, args []string) error {
 		return login(ctx, rest)
 	case "logout":
 		return logout(ctx, rest)
+	case "tips": // tips.go
+		return tipsCmd(rest)
 	case "telemetry":
 		return telemetryCmd(rest)
 	case "whoami":

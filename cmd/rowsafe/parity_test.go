@@ -29,6 +29,8 @@ type parityAPI struct {
 	sealTo string
 	rules  []protocol.AlertRule
 	maint  protocol.MaintenanceInfo
+	// restart: the scheduled restart of shop.
+	restart *protocol.ScheduledRestart
 }
 
 func (p *parityAPI) last() string {
@@ -68,7 +70,7 @@ func (p *parityAPI) serve(t *testing.T) {
 	}
 	mux.HandleFunc("GET /v1/databases", func(w http.ResponseWriter, r *http.Request) { j(w, 200, dbs("shop")) })
 	mux.HandleFunc("GET /v1/databases/shop", func(w http.ResponseWriter, r *http.Request) {
-		j(w, 200, protocol.Database{ID: "db_shop", Name: "shop", Hostname: "db1"})
+		j(w, 200, protocol.Database{ID: "db_shop", Name: "shop", Hostname: "db1", CanRestart: true, Engine: protocol.EnginePostgreSQL})
 	})
 	mux.HandleFunc("GET /v1/tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
 		p.mu.Lock()
@@ -244,6 +246,83 @@ func (p *parityAPI) serve(t *testing.T) {
 	mux.HandleFunc("GET /v1/databases/shop/storage", func(w http.ResponseWriter, r *http.Request) {
 		j(w, 200, protocol.StorageOverview{Database: "shop", TotalBytes: 3 << 30, MonthlyCost: &cost,
 			Repos: []protocol.RepoCost{{RepoInfo: protocol.RepoInfo{Repo: 1, Bucket: "backups"}, ProviderName: "Cloudflare R2", TotalBytes: 3 << 30, FullBackups: 2, RetentionFull: 2, MonthlyCost: &cost}}})
+	})
+
+	// Notification channels.
+	mux.HandleFunc("POST /v1/notification-channels", func(w http.ResponseWriter, r *http.Request) {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		b := record(r)
+		j(w, 201, protocol.NotificationChannel{ID: "nc_1", Type: b["type"].(string), Name: b["name"].(string), MinSeverity: "warning"})
+	})
+	// Scheduled restarts.
+	mux.HandleFunc("POST /v1/databases/shop/tasks", func(w http.ResponseWriter, r *http.Request) {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		b := record(r)
+		params, _ := b["params"].(map[string]any)
+		at, _ := params["at"].(string)
+		if at == "" {
+			j(w, 400, protocol.Error{Error: "only scheduled restarts in this fake"})
+			return
+		}
+		if p.restart != nil {
+			j(w, 409, protocol.Error{Error: "A restart of shop is already scheduled. Cancel it first to pick another time."})
+			return
+		}
+		when, err := time.Parse(time.RFC3339, at)
+		if at == protocol.RestartAtWindow {
+			when, err = time.Date(2026, 10, 20, 3, 0, 0, 0, time.UTC), nil
+		}
+		if err != nil {
+			j(w, 400, protocol.Error{Error: "params.at must be a time"})
+			return
+		}
+		p.restart = &protocol.ScheduledRestart{ID: "sr_1", At: when, InWindow: at == protocol.RestartAtWindow, Status: "scheduled", ScheduledBy: "API key ci"}
+		j(w, 201, p.restart)
+	})
+	mux.HandleFunc("DELETE /v1/databases/shop/scheduled-restart", func(w http.ResponseWriter, r *http.Request) {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		record(r)
+		if p.restart == nil {
+			j(w, 404, protocol.Error{Error: "No restart of shop is scheduled."})
+			return
+		}
+		x := *p.restart
+		x.Status, p.restart = "cancelled", nil
+		j(w, 200, x)
+	})
+	// A server's own files.
+	mux.HandleFunc("GET /v1/hosts/web1/files", func(w http.ResponseWriter, r *http.Request) {
+		j(w, 200, protocol.FilesInfo{HostID: "h_web1", Host: protocol.FilesHost{Hostname: "web1.example.com"},
+			Settings: protocol.FilesSettings{IntervalMinutes: 60, RetentionDays: 30},
+			Folders:  []protocol.FilesFolderView{{FilesFolder: protocol.FilesFolder{ID: "ff_1", Path: "/srv/uploads"}, State: protocol.FilesFolderState{Status: "ok"}}},
+			Kept:     []protocol.FilesKept{{RestoreID: "fr_1", FolderID: "ff_1", Path: "/srv/uploads", CreatedAt: time.Now().Add(-time.Hour)}}})
+	})
+	mux.HandleFunc("POST /v1/hosts/web1/files/folders", func(w http.ResponseWriter, r *http.Request) {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		b := record(r)
+		j(w, 201, protocol.FilesFolderView{FilesFolder: protocol.FilesFolder{ID: "ff_2", Path: b["path"].(string)}})
+	})
+	mux.HandleFunc("DELETE /v1/hosts/web1/files/folders/{id}", func(w http.ResponseWriter, r *http.Request) {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		record(r)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	for route, typ := range map[string]string{"POST /v1/hosts/web1/files/backup": protocol.TaskFilesBackup, "POST /v1/hosts/web1/files/restore": protocol.TaskFilesRestore,
+		"POST /v1/hosts/web1/files/restores/fr_1/undo": protocol.TaskFilesUndo, "POST /v1/hosts/web1/files/check": protocol.TaskFilesCheck} {
+		mux.HandleFunc(route, func(w http.ResponseWriter, r *http.Request) {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			record(r)
+			j(w, 202, protocol.FilesTasksResponse{Tasks: queue(typ)})
+		})
+	}
+	mux.HandleFunc("GET /v1/hosts/web1/files/nearest", func(w http.ResponseWriter, r *http.Request) {
+		j(w, 200, protocol.FilesNearest{})
 	})
 
 	ts := httptest.NewServer(mux)

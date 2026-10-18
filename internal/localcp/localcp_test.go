@@ -79,6 +79,7 @@ func setup(t *testing.T) (*Server, *fakeAgent, *client.Client, *time.Time) {
 	}
 	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC) // a Wednesday
 	s.now = func() time.Time { return now }
+	t.Cleanup(s.sending.Wait) // before the state's folder goes
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
 	a := &fakeAgent{t: t, url: ts.URL}

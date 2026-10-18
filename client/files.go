@@ -69,6 +69,29 @@ func (c *Client) HostFilesInfo(ctx context.Context, ref string) (out protocol.Fi
 	return out, c.do(ctx, http.MethodGet, hostFilesPath(ref), nil, &out)
 }
 
+// HostAddFilesFolder protects a folder of a server (any folder, or a Docker
+// volume as /var/lib/docker/volumes/NAME/_data).
+func (c *Client) HostAddFilesFolder(ctx context.Context, ref string, req protocol.AddFilesFolderRequest) (out protocol.FilesFolderView, err error) {
+	return out, c.do(ctx, http.MethodPost, hostFilesPath(ref)+"/folders", req, &out)
+}
+
+// HostRemoveFilesFolder stops protecting a server's folder.
+func (c *Client) HostRemoveFilesFolder(ctx context.Context, ref, folderID string) error {
+	return c.do(ctx, http.MethodDelete, hostFilesPath(ref)+"/folders/"+esc(folderID), nil, nil)
+}
+
+// HostFilesRestore restores a server's files (or previews it); Confirm is
+// the server's hostname.
+func (c *Client) HostFilesRestore(ctx context.Context, ref string, req protocol.FilesRestoreRequest) (out protocol.FilesTasksResponse, err error) {
+	return out, c.do(ctx, http.MethodPost, hostFilesPath(ref)+"/restore", req, &out)
+}
+
+// HostFilesUndo puts a server's folder replaced by a whole-folder restore
+// back; confirm is the server's hostname.
+func (c *Client) HostFilesUndo(ctx context.Context, ref, restoreID, confirm string) (out protocol.FilesTasksResponse, err error) {
+	return out, c.do(ctx, http.MethodPost, hostFilesPath(ref)+"/restores/"+esc(restoreID)+"/undo", protocol.FilesConfirmRequest{Confirm: confirm}, &out)
+}
+
 // HostFilesBackup snapshots a server's folders now.
 func (c *Client) HostFilesBackup(ctx context.Context, ref string, req protocol.FilesBackupParams) (out protocol.FilesTasksResponse, err error) {
 	return out, c.do(ctx, http.MethodPost, hostFilesPath(ref)+"/backup", req, &out)

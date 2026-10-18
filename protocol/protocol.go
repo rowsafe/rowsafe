@@ -1168,6 +1168,19 @@ const (
 	ChannelSlack   = "slack"
 	ChannelDiscord = "discord"
 	ChannelWebhook = "webhook"
+	// Since control plane 2026-10-17 (the dashboard and API; a server
+	// without an account has slack, discord, ntfy and webhook).
+	ChannelPagerDuty = "pagerduty"
+	ChannelOpsgenie  = "opsgenie"
+	ChannelTeams     = "teams"
+	ChannelTelegram  = "telegram"
+	ChannelNtfy      = "ntfy"
+)
+
+// Regions of a PagerDuty or Opsgenie account.
+const (
+	ChannelRegionUS = "us" // the default
+	ChannelRegionEU = "eu"
 )
 
 type NotificationChannel struct {
@@ -1184,9 +1197,21 @@ type NotificationChannel struct {
 	SigningSecret string `json:"signing_secret,omitempty"`
 }
 
+// ChannelConfig is a channel's settings; each type uses its own fields.
+// Keys and tokens are write-only: responses leave them out or mask them.
 type ChannelConfig struct {
 	Addresses []string `json:"addresses,omitempty"` // email
-	URL       string   `json:"url,omitempty"`       // slack, discord, webhook (https only)
+	// URL: slack, discord, teams, webhook (https only); ntfy: the server
+	// (default https://ntfy.sh; on a server without an account, the
+	// topic's whole URL).
+	URL        string `json:"url,omitempty"`
+	RoutingKey string `json:"routing_key,omitempty"` // pagerduty: the Events API v2 integration key
+	APIKey     string `json:"api_key,omitempty"`     // opsgenie: an API integration's key
+	Region     string `json:"region,omitempty"`      // pagerduty, opsgenie: us (default) or eu
+	BotToken   string `json:"bot_token,omitempty"`   // telegram
+	ChatID     string `json:"chat_id,omitempty"`     // telegram: a chat ID or @channel
+	Topic      string `json:"topic,omitempty"`       // ntfy
+	Token      string `json:"token,omitempty"`       // ntfy: an access token (optional)
 }
 
 type CreateNotificationChannelRequest struct {

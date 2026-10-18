@@ -5,6 +5,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"maps"
+	neturl "net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -375,7 +378,7 @@ func channelsList(ctx context.Context, c *client.Client, args []string) error {
 		if onServer {
 			fmt.Println("No notification channels, so alerts aren't sent anywhere. Add one:\n" +
 				"  sudo rowsafe channels add --type slack --name ops --url https://hooks.slack.com/services/...\n" +
-				"  (or --type discord, --type ntfy --url https://ntfy.sh/TOPIC, or --type webhook)")
+				"  (or --type discord, --type ntfy --topic TOPIC [--server https://ntfy.example.com], or --type webhook)")
 			return nil
 		}
 		fmt.Println("No notification channels. Add one: rowsafe channels add --type email --name ops --address you@example.com")
@@ -383,10 +386,7 @@ func channelsList(ctx context.Context, c *client.Client, args []string) error {
 	}
 	t := newTable("ID", "TYPE", "NAME", "MIN SEVERITY", "DESTINATION", "LAST SENT", "LAST ERROR")
 	for _, ch := range chans {
-		dest := ch.Config.URL
-		if ch.Type == protocol.ChannelEmail {
-			dest = strings.Join(ch.Config.Addresses, ", ")
-		}
+		dest := channelDestination(ch)
 		lastErr := "-"
 		if ch.LastError != "" && (ch.LastSentAt == nil || (ch.LastErrorAt != nil && ch.LastErrorAt.After(*ch.LastSentAt))) {
 			lastErr = firstLine(ch.LastError, 60)
@@ -397,22 +397,55 @@ func channelsList(ctx context.Context, c *client.Client, args []string) error {
 	return nil
 }
 
+// channelDestination says where a channel sends, without its secrets (the
+// control plane masks keys, tokens and webhook paths).
+func channelDestination(ch protocol.NotificationChannel) string {
+	cfg := ch.Config
+	switch ch.Type {
+	case protocol.ChannelEmail:
+		return strings.Join(cfg.Addresses, ", ")
+	case protocol.ChannelPagerDuty, protocol.ChannelOpsgenie:
+		return "region " + strings.ToUpper(orText(cfg.Region, protocol.ChannelRegionUS))
+	case protocol.ChannelTelegram:
+		return orDash(cfg.ChatID)
+	}
+	return orDash(cfg.URL)
+}
+
 func channelsAdd(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("channels add", flag.ContinueOnError)
-	typ := fs.String("type", "", "email, slack, discord or webhook (ntfy on a server without the dashboard)")
+	typ := fs.String("type", "", "email, slack, discord, teams, webhook, pagerduty, opsgenie, telegram or ntfy")
 	name := fs.String("name", "", "a name for the channel")
-	url := fs.String("url", "", "incoming webhook URL (slack, discord, webhook; https only)")
+	url := fs.String("url", "", "incoming webhook URL (slack, discord, teams, webhook; https only)")
 	minSev := fs.String("min-severity", protocol.SeverityWarning, "send alerts of this severity and above: info, warning or critical")
 	var addrs stringList
 	fs.Var(&addrs, "address", "email address (repeat for several)")
+	var cfg protocol.ChannelConfig
+	fs.StringVar(&cfg.RoutingKey, "routing-key", "", "pagerduty: the service's Events API v2 integration key")
+	fs.StringVar(&cfg.APIKey, "api-key", "", "opsgenie: an API integration's key")
+	fs.StringVar(&cfg.Region, "region", "", "pagerduty, opsgenie: us (default) or eu")
+	fs.StringVar(&cfg.BotToken, "bot-token", "", "telegram: the bot's token (from @BotFather)")
+	fs.StringVar(&cfg.ChatID, "chat-id", "", "telegram: the chat ID (like -1001234567890) or @channel")
+	server := fs.String("server", "", "ntfy: the server (default https://ntfy.sh)")
+	fs.StringVar(&cfg.Topic, "topic", "", "ntfy: the topic")
+	fs.StringVar(&cfg.Token, "token", "", "ntfy: an access token (tk_...), for a protected topic")
+	secretEnv := fs.String("secret-env", "", "read the key or token (pagerduty, opsgenie, telegram, ntfy) from this environment variable, off the command line")
 	if _, err := parse(fs, args, false); err != nil {
 		return err
 	}
 	if *typ == "" || *name == "" {
-		return newUsageError("--type and --name are required")
+		return newUsageError("--type and --name are required (rowsafe help channels add)")
 	}
-	req := protocol.CreateNotificationChannelRequest{Type: *typ, Name: *name, MinSeverity: *minSev,
-		Config: protocol.ChannelConfig{Addresses: addrs, URL: *url}}
+	cfg.Addresses, cfg.URL = addrs, *url
+	if _, ok := channelFlags[*typ]; ok {
+		if err := channelSecret(*typ, *secretEnv, &cfg); err != nil {
+			return err
+		}
+	}
+	if err := channelConfig(*typ, *server, onServer, &cfg); err != nil {
+		return err
+	}
+	req := protocol.CreateNotificationChannelRequest{Type: *typ, Name: *name, MinSeverity: *minSev, Config: cfg}
 	ch, err := c.CreateNotificationChannel(ctx, req)
 	if err != nil {
 		return err
@@ -426,6 +459,161 @@ func channelsAdd(ctx context.Context, c *client.Client, args []string) error {
 			"X-Rowsafe-Signature", ch.SigningSecret)
 	}
 	fmt.Printf("\nSend a test notification: rowsafe channels test %s\n", ch.ID)
+	return nil
+}
+
+// channelFlags are the flags each channel type takes besides --type, --name
+// and --min-severity.
+var channelFlags = map[string][]string{
+	protocol.ChannelEmail:     {"--address"},
+	protocol.ChannelSlack:     {"--url"},
+	protocol.ChannelDiscord:   {"--url"},
+	protocol.ChannelTeams:     {"--url"},
+	protocol.ChannelWebhook:   {"--url"},
+	protocol.ChannelPagerDuty: {"--routing-key", "--region"},
+	protocol.ChannelOpsgenie:  {"--api-key", "--region"},
+	protocol.ChannelTelegram:  {"--bot-token", "--chat-id"},
+	protocol.ChannelNtfy:      {"--server", "--topic", "--token"},
+}
+
+// channelSecretFlag is the flag of each type's key or token.
+var channelSecretFlag = map[string]string{
+	protocol.ChannelPagerDuty: "--routing-key",
+	protocol.ChannelOpsgenie:  "--api-key",
+	protocol.ChannelTelegram:  "--bot-token",
+	protocol.ChannelNtfy:      "--token",
+}
+
+// channelSecret fills the type's key or token from $secretEnv or, when
+// its flag is missing, from stdin (typed without echo on a terminal), so
+// it needn't be on the command line. ntfy's token is optional: only from
+// the flag or $secretEnv.
+func channelSecret(typ, secretEnv string, cfg *protocol.ChannelConfig) error {
+	flag, ok := channelSecretFlag[typ]
+	if !ok {
+		if secretEnv != "" {
+			return usageErrorf("--secret-env: %s channels have no key or token", typ)
+		}
+		return nil
+	}
+	field := map[string]*string{protocol.ChannelPagerDuty: &cfg.RoutingKey, protocol.ChannelOpsgenie: &cfg.APIKey,
+		protocol.ChannelTelegram: &cfg.BotToken, protocol.ChannelNtfy: &cfg.Token}[typ]
+	switch {
+	case secretEnv != "" && *field != "":
+		return usageErrorf("pass %s or --secret-env, not both", flag)
+	case secretEnv != "":
+		v, err := readSecret(secretEnv, "")
+		if err != nil {
+			return err
+		}
+		*field = v
+	case *field == "" && typ != protocol.ChannelNtfy:
+		what := map[string]string{protocol.ChannelPagerDuty: "The PagerDuty integration key (Events API v2)",
+			protocol.ChannelOpsgenie: "The Opsgenie API integration key", protocol.ChannelTelegram: "The Telegram bot token (from @BotFather)"}[typ]
+		v, err := readSecret("", what+" (it isn't shown): ")
+		if err != nil {
+			return err
+		}
+		if v == "" {
+			return usageErrorf("%s channels need %s: pass --secret-env VAR, pipe it on stdin, or %s KEY", typ, flag, flag)
+		}
+		*field = v
+	}
+	return nil
+}
+
+// channelConfig checks that cfg has what typ needs and nothing another
+// type takes, so a mistyped flag isn't silently dropped. ntfy: --server
+// and --topic (or --url https://ntfy.sh/TOPIC) become the server and the
+// topic; local (a server without an account) wants the topic's whole URL.
+func channelConfig(typ, server string, local bool, cfg *protocol.ChannelConfig) error {
+	allowed, ok := channelFlags[typ]
+	if !ok {
+		return usageErrorf("--type: email, slack, discord, teams, webhook, pagerduty, opsgenie, telegram or ntfy (got %q)", typ)
+	}
+	given := map[string]bool{"--address": len(cfg.Addresses) > 0, "--url": cfg.URL != "", "--routing-key": cfg.RoutingKey != "",
+		"--api-key": cfg.APIKey != "", "--region": cfg.Region != "", "--bot-token": cfg.BotToken != "", "--chat-id": cfg.ChatID != "",
+		"--server": server != "", "--topic": cfg.Topic != "", "--token": cfg.Token != ""}
+	if typ == protocol.ChannelNtfy {
+		allowed = append(allowed, "--url")
+	}
+	for _, f := range slices.Sorted(maps.Keys(given)) {
+		if given[f] && !slices.Contains(allowed, f) {
+			return usageErrorf("%s channels don't take %s; they take %s", typ, f, strings.Join(channelFlags[typ], ", "))
+		}
+	}
+	need := func(flag, v, example string) error {
+		if strings.TrimSpace(v) == "" {
+			return usageErrorf("%s channels need %s, e.g. %s", typ, flag, example)
+		}
+		return nil
+	}
+	switch typ {
+	case protocol.ChannelEmail:
+		if len(cfg.Addresses) == 0 {
+			return usageErrorf("email channels need --address you@example.com (repeat it for several)")
+		}
+	case protocol.ChannelSlack, protocol.ChannelDiscord, protocol.ChannelTeams, protocol.ChannelWebhook:
+		return need("--url", cfg.URL, "--url https://...")
+	case protocol.ChannelPagerDuty, protocol.ChannelOpsgenie:
+		key, flag := cfg.RoutingKey, "--routing-key"
+		if typ == protocol.ChannelOpsgenie {
+			key, flag = cfg.APIKey, "--api-key"
+		}
+		if err := need(flag, key, flag+" KEY"); err != nil {
+			return err
+		}
+		cfg.Region = strings.ToLower(strings.TrimSpace(cfg.Region))
+		if cfg.Region != "" && cfg.Region != protocol.ChannelRegionUS && cfg.Region != protocol.ChannelRegionEU {
+			return usageErrorf("--region: us or eu (got %q)", cfg.Region)
+		}
+	case protocol.ChannelTelegram:
+		if err := need("--bot-token", cfg.BotToken, "--bot-token 123456789:ABC... (from @BotFather)"); err != nil {
+			return err
+		}
+		return need("--chat-id", cfg.ChatID, "--chat-id -1001234567890 or --chat-id @yourchannel")
+	case protocol.ChannelNtfy:
+		return ntfyConfig(server, local, cfg)
+	}
+	return nil
+}
+
+// ntfyConfig fills an ntfy channel's server (config.url) and topic.
+func ntfyConfig(server string, local bool, cfg *protocol.ChannelConfig) error {
+	if cfg.URL != "" && server != "" {
+		return newUsageError("ntfy: pass --server and --topic (or the topic's whole URL with --url), not both")
+	}
+	if cfg.URL != "" {
+		u, err := neturl.Parse(cfg.URL)
+		if err != nil || u.Host == "" {
+			return usageErrorf("--url: the ntfy topic's address, like https://ntfy.sh/TOPIC (got %q)", cfg.URL)
+		}
+		topic := strings.Trim(u.Path, "/")
+		if topic != "" {
+			if cfg.Topic != "" && cfg.Topic != topic {
+				return usageErrorf("--url names the topic %q and --topic %q: pass one", topic, cfg.Topic)
+			}
+			cfg.Topic = topic
+		}
+		server = u.Scheme + "://" + u.Host
+	}
+	if server == "" {
+		server = "https://ntfy.sh"
+	}
+	server = strings.TrimRight(server, "/")
+	if cfg.Topic == "" || strings.Contains(cfg.Topic, "/") {
+		return newUsageError("ntfy channels need --topic NAME (letters, digits, - or _), e.g. --topic my-alerts-7f3k")
+	}
+	if local {
+		// The local control plane stores the topic's whole URL and sends
+		// without a token.
+		if cfg.Token != "" {
+			return newUsageError("--token: a protected ntfy topic needs the dashboard (rowsafe login); on this server use a topic without a token")
+		}
+		cfg.URL, cfg.Topic = server+"/"+cfg.Topic, ""
+		return nil
+	}
+	cfg.URL = server
 	return nil
 }
 

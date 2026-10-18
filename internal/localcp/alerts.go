@@ -34,9 +34,9 @@ import (
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
-// ChannelNtfy is an ntfy topic (https://ntfy.sh or a self-hosted server):
-// on a server without an account only.
-const ChannelNtfy = "ntfy"
+// ChannelNtfy is an ntfy topic (https://ntfy.sh or a self-hosted server),
+// its whole URL in config.url.
+const ChannelNtfy = protocol.ChannelNtfy
 
 const (
 	keepResolvedAlerts = 200
@@ -451,7 +451,9 @@ func (srv *Server) send(ns []notice) {
 	if len(ns) == 0 {
 		return
 	}
+	srv.sending.Add(1)
 	go func() {
+		defer srv.sending.Done()
 		for _, n := range ns {
 			err := srv.deliver(context.Background(), n.ch, n.event, n.alert)
 			if err != nil {
@@ -462,8 +464,11 @@ func (srv *Server) send(ns []notice) {
 	}()
 }
 
+// recordDelivery notes a channel's outcome. Deliveries use the real clock
+// (they happen in the background, and receivers check signatures against
+// theirs).
 func (srv *Server) recordDelivery(id string, err error) {
-	now := srv.now().UTC()
+	now := time.Now().UTC()
 	_ = srv.st.update(func(st *state) error {
 		for _, c := range st.Channels {
 			if c.ID != id {
@@ -480,36 +485,52 @@ func (srv *Server) recordDelivery(id string, err error) {
 }
 
 func (srv *Server) deliver(ctx context.Context, ch channelRec, event string, a protocol.Alert) error {
+	priority := map[string]string{protocol.SeverityCritical: "5", protocol.SeverityWarning: "4"}[a.Severity]
+	tag := "rotating_light"
+	if event == eventResolved || event == eventTest {
+		priority, tag = "3", "white_check_mark"
+	}
+	return srv.post(ctx, ch, message{event: event, title: title(event, a), text: alertText(event, a),
+		priority: priority, tag: tag, payload: map[string]any{"alert": a}})
+}
+
+// message is one notification, as each kind of channel gets it: text for
+// Slack, Discord and ntfy (with a title), JSON for a webhook.
+type message struct {
+	event, title, text, priority, tag string
+	payload                           map[string]any // a webhook's body, besides version, event and delivery
+}
+
+func (srv *Server) post(ctx context.Context, ch channelRec, m message) error {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	text := alertText(event, a)
 	var body []byte
 	h := http.Header{"Content-Type": {"application/json"}, "User-Agent": {"Rowsafe"}}
 	switch ch.Type {
 	case protocol.ChannelSlack:
-		body, _ = json.Marshal(map[string]string{"text": clip(text, 3500)})
+		body, _ = json.Marshal(map[string]string{"text": clip(m.text, 3500)})
 	case protocol.ChannelDiscord:
-		body, _ = json.Marshal(map[string]string{"content": clip(text, 1900)})
+		body, _ = json.Marshal(map[string]string{"content": clip(m.text, 1900)})
 	case ChannelNtfy:
-		body = []byte(clip(text, 3500))
+		body = []byte(clip(m.text, 3500))
 		h.Set("Content-Type", "text/plain; charset=utf-8")
-		h.Set("Title", headerSafe(clip(title(event, a), 200)))
-		h.Set("Priority", map[string]string{protocol.SeverityCritical: "5", protocol.SeverityWarning: "4"}[a.Severity])
-		if event == eventResolved || event == eventTest {
-			h.Set("Priority", "3")
+		h.Set("Title", headerSafe(clip(m.title, 200)))
+		if m.priority != "" {
+			h.Set("Priority", m.priority)
 		}
-		h.Set("Tags", map[bool]string{true: "white_check_mark", false: "rotating_light"}[event == eventResolved || event == eventTest])
+		if m.tag != "" {
+			h.Set("Tags", m.tag)
+		}
 	case protocol.ChannelWebhook:
-		body, _ = json.Marshal(map[string]any{"version": webhookPayloadVer, "event": event, "delivery_id": newID("dlv"),
-			"sent_at": srv.now().UTC(), "org_id": "", "alert": a})
-		ts := srv.now().Unix()
-		h.Set("X-Rowsafe-Event", event)
-		h.Set(signatureHeader, sign(ch.Secret, ts, body))
+		p := map[string]any{"version": webhookPayloadVer, "event": m.event, "delivery_id": newID("dlv"), "sent_at": time.Now().UTC(), "org_id": ""}
+		for k, v := range m.payload {
+			p[k] = v
+		}
+		body, _ = json.Marshal(p)
+		h.Set("X-Rowsafe-Event", m.event)
+		h.Set(signatureHeader, sign(ch.Secret, time.Now().Unix(), body))
 	default:
 		return fmt.Errorf("unknown channel type %q", ch.Type)
-	}
-	if h.Get("Priority") == "" {
-		h.Del("Priority")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ch.Config.URL, bytes.NewReader(body))
 	if err != nil {
