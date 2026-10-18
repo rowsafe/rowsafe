@@ -305,3 +305,28 @@ func TestPlainTree(t *testing.T) {
 		t.Error("the copy lost its content")
 	}
 }
+
+func TestCheckInto(t *testing.T) {
+	dir := t.TempDir()
+	full := filepath.Join(dir, "full")
+	if err := os.MkdirAll(full, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(full, "x"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for into, ok := range map[string]bool{
+		filepath.Join(dir, "new"): true, dir + "/empty/": false, "relative": false, "/": false,
+		"/srv/app/storage": false, "/srv/app/storage/old": false, "/srv": false, "/etc/restored": false, full: false,
+	} {
+		if err := checkInto(into, "/srv/app/storage"); (err == nil) != ok {
+			t.Errorf("%s: %v", into, err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(dir, "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkInto(filepath.Join(dir, "empty"), "/srv/app/storage"); err != nil {
+		t.Errorf("an empty folder: %v", err)
+	}
+}

@@ -295,6 +295,9 @@ func fleetStatus(ctx context.Context, c *client.Client, asJSON bool) error {
 				fmt.Printf("      next: %s\n", firstLine(p.NextAction, 160))
 			}
 		}
+		if onServer && filesStatus(ctx, c, "") > 0 { // files.go
+			h.Healthy = false
+		}
 	}
 	if !h.Healthy {
 		return exitError(3)
@@ -472,6 +475,9 @@ func protectionStatus(ctx context.Context, c *client.Client, name string, asJSON
 		}
 	} else {
 		printProtection(name, p)
+		if filesStatus(ctx, c, name) > 0 { // files.go
+			return exitError(3)
+		}
 	}
 	if !p.Protected {
 		return exitError(3)

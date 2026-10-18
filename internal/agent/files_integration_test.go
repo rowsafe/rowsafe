@@ -384,3 +384,38 @@ func TestFilesReferencedIntegration(t *testing.T) {
 		t.Fatalf("the table changed: %d %v", n, err)
 	}
 }
+
+func TestFilesRestoreIntoIntegration(t *testing.T) {
+	f := newFilesFixture(t)
+	f.a.filesDue(t.Context())
+	time.Sleep(1100 * time.Millisecond)
+	os.Remove(filepath.Join(f.dir, "cvs/a.pdf"))
+	f.write(t, "cvs/b c.pdf", "changed since")
+
+	// Into another folder: the whole snapshot there, the folder untouched.
+	into := filepath.Join(t.TempDir(), "restored")
+	now := time.Now()
+	res := f.restore(t, protocol.FilesRestoreParams{RestoreID: "r1", Target: protocol.FilesTarget{Time: &now}, Into: into})
+	if fr := res.Folders[0]; fr.Restored != 3 || fr.Into != into || fr.HeldDir != "" {
+		t.Fatalf("into: %+v", fr)
+	}
+	for rel, want := range map[string]string{"cvs/a.pdf": "CV of Ada", "cvs/b c.pdf": "CV of Bob", "cvs/we*ird [1].pdf": "odd name"} {
+		if b, err := os.ReadFile(filepath.Join(into, rel)); err != nil || string(b) != want {
+			t.Errorf("%s: %q %v", rel, b, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(into, "cache")); err == nil {
+		t.Error("an excluded folder came back")
+	}
+	if f.read("cvs/b c.pdf") != "changed since" || !strings.HasPrefix(f.read("cvs/a.pdf"), "<") {
+		t.Error("restoring into another folder changed the protected one")
+	}
+	if !strings.Contains(res.Summary, "Into "+into) {
+		t.Error(res.Summary)
+	}
+	// Not into a folder that has files.
+	tl := &taskLog{}
+	if _, err := f.a.filesRestore(t.Context(), f.db, protocol.FilesRestoreParams{RestoreID: "r2", Target: protocol.FilesTarget{Time: &now}, Into: into}, tl); err == nil {
+		t.Fatal("restored into a folder that isn't empty")
+	}
+}

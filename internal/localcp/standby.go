@@ -1,6 +1,7 @@
 package localcp
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -924,19 +925,12 @@ func (s *Server) standbyRemove(w http.ResponseWriter, r *http.Request) {
 			return nil, conflict("this server doesn't run a standby of %s (%s)", d.Name, d.Status)
 		}
 		p := st.pair(d.ID)
-		if err := st.enqueueStandby(d, protocol.TaskStandbyRemove, protocol.StandbyRemoveParams{StandbyID: cmpOr(p.StandbyID, standbyID(d.Name))}, now); err != nil {
+		if err := st.enqueueStandby(d, protocol.TaskStandbyRemove, protocol.StandbyRemoveParams{StandbyID: cmp.Or(p.StandbyID, standbyID(d.Name))}, now); err != nil {
 			return nil, err
 		}
 		p.event("removing", "Removing the standby: PostgreSQL here gets its own data back.", now)
 		return d, nil
 	})
-}
-
-func cmpOr(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
 }
 
 func (s *Server) standbyForget(w http.ResponseWriter, r *http.Request) {

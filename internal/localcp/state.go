@@ -75,6 +75,7 @@ type state struct {
 	Guard guardState `json:"guard,omitzero"`
 	// Security (security.go): each database's newest security report.
 	Security map[string]*securityRec `json:"security,omitempty"`
+	Files    *filesData              `json:"files,omitempty"` // files.go
 }
 
 // hostRec is this server, once its agent has enrolled.
@@ -211,6 +212,7 @@ func (s *state) prune() {
 	s.pruneAlerts()
 	s.pruneRewinds()         // rewind_inplace.go
 	s.pruneGuard(time.Now()) // guard.go
+	s.pruneFiles(time.Now())
 	// Copies gone for a week are forgotten.
 	s.Copies = slices.DeleteFunc(s.Copies, func(c *copyRec) bool {
 		return c.RemovedAt != nil && time.Since(*c.RemovedAt) > 7*24*time.Hour

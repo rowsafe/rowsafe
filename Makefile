@@ -16,7 +16,7 @@
 #   make test-pooling          real PgBouncer through the root helper on a systemd Debian container (Docker)
 #   make test-no-account-logs    logs on a server on its own: rowsafe logs --errors, rowsafe logs forward to a webhook (Docker)
 #   make test-no-account-pooler  rowsafe pulse postgres://... through a real PgBouncer in transaction mode (Docker)
-#   make test-no-account-ssh   a server without an account used from another computer over SSH only (Docker) test-no-account-standby standby on second account: switchover, fences test-no-account-guard previews full copy, guard and masked copies its own test-no-account-security rowsafe security fixes own, for real
+#   make test-no-account-ssh   a server without an account used from another computer over SSH only (Docker) test-no-account-standby standby on second account: switchover, fences test-no-account-guard previews full copy, guard and masked copies its own test-no-account-security rowsafe security fixes own, for real test-no-account-files folders Docker volume own: back up, restore, compare
 #   make test-permissions      passkey-signed permission changes through root's helper on a systemd Debian container (Docker)
 #   make test-secondcopy       a real second backup copy (two storages, one going away) in a Debian container (Docker)
 #   make test-no-account-secondcopy  sudo rowsafe secondcopy add on a server on its own; restore with the first bucket deleted (Docker)
@@ -55,7 +55,7 @@ AGENT_LDFLAGS := -s -w -buildid= -X $(PKG)/internal/agent.Version=$(VERSION) -X 
 MAIN_LDFLAGS := -s -w -buildid= -X main.version=$(VERSION)
 GOBUILD := CGO_ENABLED=0 GOFLAGS=-mod=readonly $(GO) build -trimpath -buildvcs=false
 
-.PHONY: all build test lint check-installer test-installer test-cli-installer test-npm test-installer-cloud test-mongodb test-clickhouse test-redis test-qdrant check-qdrant-pins test-sqlite test-rewind test-secondcopy test-sftp test-mysql test-no-account-mysql test-no-account-mongodb test-no-account-redis test-no-account-sqlite test-no-account-clickhouse test-no-account-search test-upgrade test-pooling test-no-account-pooler test-permissions test-action openai-plugin-zip dist release check-release-env clean test-opensearch mcp-registry test-no-account-secondcopy test-no-account-ssh test-no-account-standby test-no-account-guard test-no-account-logs
+.PHONY: all build test lint check-installer test-installer test-cli-installer test-npm test-installer-cloud test-mongodb test-clickhouse test-redis test-qdrant check-qdrant-pins test-sqlite test-rewind test-secondcopy test-sftp test-mysql test-no-account-mysql test-no-account-mongodb test-no-account-redis test-no-account-sqlite test-no-account-clickhouse test-no-account-search test-upgrade test-pooling test-no-account-pooler test-permissions test-action openai-plugin-zip dist release check-release-env clean test-opensearch mcp-registry test-no-account-secondcopy test-no-account-ssh test-no-account-standby test-no-account-guard test-no-account-logs test-no-account-files
 
 all: lint test build
 
@@ -82,7 +82,7 @@ lint: check-installer
 		done; \
 	done
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck -S warning -s sh scripts/install.sh scripts/cli.sh scripts/test-cli.sh scripts/test-install.sh scripts/test-rewind.sh scripts/test-pooling.sh scripts/test-no-account-pooler.sh scripts/test-secondcopy.sh scripts/test-sftp.sh scripts/test-mysql.sh scripts/test-no-account-mysql.sh scripts/test-no-account-mongodb.sh scripts/test-no-account-redis.sh scripts/test-no-account-sqlite.sh scripts/test-no-account-clickhouse.sh scripts/test-no-account-search.sh scripts/test-upgrade.sh scripts/test-permissions.sh scripts/rowsafe-agent-guard scripts/rowsafe-pg-restart scripts/rowsafe-firewall scripts/rowsafe-pg-create-cluster scripts/rowsafe-allow scripts/check-qdrant-pins.sh scripts/publish-mcp-registry.sh; \ scripts/test-no-account-secondcopy.sh scripts/test-no-account-ssh.sh scripts/test-no-account-standby.sh scripts/test-no-account-guard.sh scripts/test-no-account-logs.sh
+		shellcheck -S warning -s sh scripts/install.sh scripts/cli.sh scripts/test-cli.sh scripts/test-install.sh scripts/test-rewind.sh scripts/test-pooling.sh scripts/test-no-account-pooler.sh scripts/test-secondcopy.sh scripts/test-sftp.sh scripts/test-mysql.sh scripts/test-no-account-mysql.sh scripts/test-no-account-mongodb.sh scripts/test-no-account-redis.sh scripts/test-no-account-sqlite.sh scripts/test-no-account-clickhouse.sh scripts/test-no-account-search.sh scripts/test-upgrade.sh scripts/test-permissions.sh scripts/rowsafe-agent-guard scripts/rowsafe-pg-restart scripts/rowsafe-firewall scripts/rowsafe-pg-create-cluster scripts/rowsafe-allow scripts/check-qdrant-pins.sh scripts/publish-mcp-registry.sh; \ scripts/test-no-account-secondcopy.sh scripts/test-no-account-ssh.sh scripts/test-no-account-standby.sh scripts/test-no-account-guard.sh scripts/test-no-account-logs.sh scripts/test-no-account-files.sh
 		shellcheck -S warning -s bash integrations/github-action/scripts/*.sh integrations/github-action/test/*.sh integrations/github-action/export.sh; \
 	else echo "shellcheck not installed; skipping"; fi
 
@@ -190,7 +190,8 @@ test-no-account-ssh:
 	sh scripts/test-no-account-standby.sh test-no-account-guard:
 	sh scripts/test-no-account-guard.sh test-no-account-logs:
 	sh scripts/test-no-account-logs.sh test-no-account-security:
-	sh scripts/test-no-account-security.sh
+	sh scripts/test-no-account-security.sh test-no-account-files:
+	sh scripts/test-no-account-files.sh
 
 test-sftp:
 	sh scripts/test-sftp.sh

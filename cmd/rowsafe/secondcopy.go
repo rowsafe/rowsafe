@@ -597,7 +597,7 @@ func (e *envFile) write() error          { return writeLike(e.path, e.data, e.fi
 
 // agentUser is the user the agent runs as: the owner of its state
 // directory (postgres, as the installer sets it up).
-func agentUser() string {
+func agentUserName() string {
 	if fi, err := os.Stat(filepath.Dir(protocol.LocalSocketPath)); err == nil {
 		if uid, _, ok := fileOwner(fi); ok {
 			if u, err := user.LookupId(strconv.Itoa(uid)); err == nil {
@@ -633,7 +633,7 @@ func pgbackrestBucketTest(ctx context.Context, envf *envFile, b bucketSettings) 
 	if b.NoVerifyTLS {
 		env = append(env, "PGBACKREST_REPO1_STORAGE_VERIFY_TLS=n")
 	}
-	runAs := agentUser()
+	runAs := agentUserName()
 	run := func(stdin []byte, args ...string) ([]byte, error) {
 		cctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()

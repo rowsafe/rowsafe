@@ -152,15 +152,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/agent/setup/databases/{id}", s.agent(s.setupGet))
 	mux.HandleFunc("POST /v1/agent/setup/databases/{id}/apply", s.agent(s.setupApply))
 	mux.HandleFunc("POST /v1/agent/monitoring", s.agent(s.monitoring))
-	// Reports kept on the server for now: accepted, not stored.
-	for path, ack := range map[string]any{
-		"/v1/agent/files": protocol.FilesSync{Databases: []protocol.FilesConfig{}},
-	} {
-		mux.HandleFunc("POST "+path, s.agent(func(w http.ResponseWriter, r *http.Request) {
-			_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 64<<20))
-			writeJSON(w, http.StatusOK, ack)
-		}))
-	}
 	mux.HandleFunc("POST /v1/agent/storage/credentials", s.agent(func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "Rowsafe Storage needs the dashboard: this server backs up to its own storage")
 	}))
@@ -187,6 +178,7 @@ func (s *Server) Handler() http.Handler {
 	s.guardRoutes(mux)                                              // guard.go
 	s.logRoutes(mux)                                                // logs.go
 	s.securityRoutes(mux)                                           // security.go
+	s.filesRoutes(mux)                                              // files.go
 	mux.HandleFunc("GET /v1/notification-channels", s.channelsList) // alerts.go
 	mux.HandleFunc("POST /v1/notification-channels", s.channelsCreate)
 	mux.HandleFunc("DELETE /v1/notification-channels/{id}", s.channelsDelete)
