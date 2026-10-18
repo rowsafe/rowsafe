@@ -58,6 +58,12 @@ restore to any second, all on that server:
                                      the whole database back to then (a Mark first; asks you to type
                                      the name; stops PostgreSQL). sudo rowsafe rewind undo shop puts
                                      it back as it was, for 7 days
+  sudo rowsafe preview shop migration.sql
+                                     run a migration on a full copy restored from the backups, next to
+                                     production: real locks, row counts and the errors only the data causes
+  sudo rowsafe copies create shop --masked --port 55440
+                                     a masked copy for development on localhost (sudo rowsafe masking shop
+                                     shows the rules); deleted by itself after 24 hours (--hours)
   sudo rowsafe backups shop | proofs shop | restores shop | backup shop | proof shop
   sudo rowsafe pulse shop | top shop  with what the agent saw over time: when the disk will be
                                      full, which queries got slower (hour by hour, up to 14 days)
@@ -669,7 +675,11 @@ func localMCP(ctx context.Context, l *localDB, args []string) error {
 		mode = "read and fix"
 	}
 	fmt.Fprintf(os.Stderr, "rowsafe mcp: serving %s tools for %s on %s on stdio (nothing leaves this machine)\n", mode, l.Name(), l.Host())
-	s := local.NewMCPServer(l.DB, local.MCPOptions{AllowWrites: *allowWrites, Version: version})
+	opts := local.MCPOptions{AllowWrites: *allowWrites, Version: version}
+	if c, d := serverDatabaseOf(ctx, l); d != nil { // check_migration on a full copy (server_guard.go)
+		opts.FullPreview = fullPreviewFunc(c, d.Name)
+	}
+	s := local.NewMCPServer(l.DB, opts)
 	if err := s.Run(ctx, &sdk.StdioTransport{}); err != nil && ctx.Err() == nil {
 		return err
 	}

@@ -199,6 +199,15 @@ func (d *DB) Host() string {
 	return h
 }
 
+// Endpoint is the PostgreSQL host (or socket directory) and port the
+// connection string reaches; "" and 0 for MySQL and MariaDB.
+func (d *DB) Endpoint() (host string, port int) {
+	if d.my != nil || d.conn == nil {
+		return "", 0
+	}
+	return d.conn.Host, int(d.conn.Port)
+}
+
 func (d *DB) collectTarget() collect.Target   { return collect.Target{Conn: d.conn} }
 func (d *DB) inspectTarget() pginspect.Target { return pginspect.Target{Conn: d.conn} }
 

@@ -410,9 +410,10 @@ Guard: the safety net for AI agents
                                              above that verdict and 2 if the migration fails
   rowsafe previews [NAME] [ID] [--json]      recent previews, or one in full
   rowsafe copies [NAME] [--json]             safe copies: masked copies developers and AI agents can connect to
-  rowsafe copies create [NAME] [--allow IP] [--listen private|public|IP|*] [--hours 24] [--db DB] [--structure] [--json]
-                                             make one: restore, mask, open it on the server for the allowed
-                                             addresses (default: this computer's). Prints the connection string once.
+  rowsafe copies create [NAME] [--allow IP] [--listen private|public|localhost|IP|*] [--port PORT] [--hours 24] [--db DB] [--structure] [--json]
+                                             make one: restore, mask (--masked, the default), open it on the server for the
+                                             allowed addresses (default: this computer's; on a server Rowsafe protects on its
+                                             own: localhost, on --port). Prints the connection string once.
                                              SQLite: a new file on the server (no password); --structure for the
                                              structure without rows
   rowsafe copies extend [NAME] ID [--hours 24]
@@ -674,6 +675,11 @@ func dispatch(ctx context.Context, args []string) error {
 			return serr
 		}
 		return runOverSSH(ctx, s, cmd, args, explicit, cfg)
+	}
+	// A preview on a database this server backs up runs on a full copy of
+	// its data (server_guard.go).
+	if cmd == "preview" && onServer && fullCopyPreview(ctx, client.New(cfg.URL, cfg.APIKey), rest) {
+		return previewCmd(ctx, client.New(cfg.URL, cfg.APIKey), rest)
 	}
 	// Directly on a database: a connection string, a saved name, or
 	// $DATABASE_URL with no saved login (local.go).

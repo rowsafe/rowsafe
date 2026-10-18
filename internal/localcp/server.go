@@ -182,6 +182,7 @@ func (s *Server) Handler() http.Handler {
 	s.restoreBucketRoutes(mux)                                      // restore_bucket.go
 	s.historyRoutes(mux)                                            // history.go
 	s.standbyRoutes(mux)                                            // standby.go
+	s.guardRoutes(mux)                                              // guard.go
 	mux.HandleFunc("GET /v1/notification-channels", s.channelsList) // alerts.go
 	mux.HandleFunc("POST /v1/notification-channels", s.channelsCreate)
 	mux.HandleFunc("DELETE /v1/notification-channels/{id}", s.channelsDelete)
@@ -290,6 +291,7 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 		st.recordStorage(req.SecondCopies, req.Storage, now)    // secondcopy.go
 		st.recordStandby(req.StandbyHeartbeat, now)             // standby.go
 		resp.StandbyInstructions = st.standbyInstructions()
+		resp.Copies = st.recordCopies(req.Copies, now) // guard.go
 		for _, d := range st.Databases {
 			if !agentWatches(d) {
 				continue // a standby or a fenced copy (standby.go)
@@ -725,8 +727,8 @@ func (st *state) markViews(d *dbRec) []protocol.RestorePoint {
 		if m.DatabaseID != d.ID || m.LSN == "" && !st.taskOpen(m.TaskID) {
 			continue // attempts that failed before PostgreSQL wrote it
 		}
-		// The states the control plane gives a Mark (Guard and the MCP
-		// tools wait for archived).
+		// As on the hosted control plane: pending, archived (in the backup
+		// storage, so a restore can reach it) or unconfirmed.
 		switch {
 		case st.taskOpen(m.TaskID):
 			m.Status = protocol.RestorePointPending

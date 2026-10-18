@@ -166,6 +166,8 @@ func fakeLocalAgent(ctx context.Context, sock string) {
 		post("/v1/agent/tasks/claim", protocol.ClaimRequest{}, &claim)
 		task := claim.Task
 		if task == nil {
+			// Guard copies need the agent's report (server_guard_test.go).
+			post("/v1/agent/heartbeat", protocol.HeartbeatRequest{Hostname: "db1", Copies: &protocol.CopiesReport{PortMin: 55440, PortMax: 55539}}, nil)
 			time.Sleep(20 * time.Millisecond)
 			continue
 		}
@@ -190,6 +192,8 @@ func fakeLocalAgent(ctx context.Context, sock string) {
 			var p protocol.RewindCopyParams
 			_ = json.Unmarshal(task.Params, &p)
 			result = protocol.RewindCopyResult{CopyID: p.CopyID, Expires: p.Expires, Summary: "The copy of shop is ready (restored to the Mark " + p.Target.Mark + ")."}
+		default:
+			result = fakeGuardResult(task) // server_guard_test.go
 		}
 		raw, _ := json.Marshal(result)
 		post("/v1/agent/tasks/"+task.ID+"/complete", protocol.CompleteRequest{Status: protocol.StatusSucceeded, Result: raw}, nil)

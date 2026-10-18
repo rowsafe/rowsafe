@@ -92,6 +92,7 @@ func guard(ctx context.Context, args []string) error {
 		return nil
 	}
 
+	sshVia = nil // set below when the project's database is on a server reached over SSH
 	var ev hookEvent
 	if err := json.NewDecoder(io.LimitReader(stdin, 4<<20)).Decode(&ev); err != nil {
 		return fmt.Errorf("reading the hook event from stdin: %w", err)
@@ -131,7 +132,7 @@ func guard(ctx context.Context, args []string) error {
 		defer c.HTTP.CloseIdleConnections()
 		ctx, cancel := context.WithTimeout(ctx, 100*time.Second)
 		defer cancel()
-		return guardRestorePoint(ctx, c, reason, s.serverDB(), projPath, required, fail)
+		return guardRestorePoint(ctx, c, ev, reason, s.serverDB(), projPath, required, fail)
 	}
 	// On a server whose agent runs without an account, the CLI talks to
 	// its local control plane: restore points work the same.
@@ -161,12 +162,12 @@ func guard(ctx context.Context, args []string) error {
 		}
 		db, projPath = name, "this server's Rowsafe agent"
 	}
-	return guardRestorePoint(ctx, c, reason, db, projPath, required, fail)
+	return guardRestorePoint(ctx, c, ev, reason, db, projPath, required, fail)
 }
 
 // guardRestorePoint saves a restore point on db before the command, waits
 // until the backup repository has it, and tells the assistant.
-func guardRestorePoint(ctx context.Context, c *client.Client, reason, db, projPath string, required bool, fail func(string) error) error {
+func guardRestorePoint(ctx context.Context, c *client.Client, ev hookEvent, reason, db, projPath string, required bool, fail func(string) error) error {
 	if required {
 		p, err := c.Protection(ctx, db)
 		if err != nil {
@@ -175,6 +176,12 @@ func guardRestorePoint(ctx context.Context, c *client.Client, reason, db, projPa
 		if !p.Protected {
 			return fail(fmt.Sprintf("%s is not protected: %s.", db, strings.Join(p.Reasons, "; ")))
 		}
+	}
+	// On this server, the SQL also runs on a full copy of the data, beside
+	// the restore point (server_guard.go).
+	var pv *guardPreview
+	if onServer && sshVia == nil {
+		pv = startGuardPreview(ctx, c, db, ev)
 	}
 	name := "agent-" + time.Now().UTC().Format("20060102-150405")
 	task, err := c.CreateRestorePoint(ctx, db, name)
@@ -210,6 +217,7 @@ func guardRestorePoint(ctx context.Context, c *client.Client, reason, db, projPa
 		src = projPath
 	}
 	undo := fmt.Sprintf("they can Rewind %s to restore point %q in the Rowsafe dashboard (or `rowsafe rewind copy %s --mark %s`, then bring the rows back)", db, name, db, name)
+	hint := previewHint(reason)
 	switch {
 	case sshVia != nil:
 		undo = fmt.Sprintf("restore point %q on %s holds %s as it was: `rowsafe restore %s --to %s` makes a copy as it was then, next to production, "+
@@ -218,10 +226,22 @@ func guardRestorePoint(ctx context.Context, c *client.Client, reason, db, projPa
 		undo = fmt.Sprintf("restore point %q on this server holds %s as it was: `sudo rowsafe restore %s --to %s` makes a copy as it was then, next to production, "+
 			"and `sudo rowsafe rewind rows %s TABLE` brings deleted rows back from it (both ask the user first)", name, db, db, name, db)
 	}
-	return hookReply(fmt.Sprintf("Rowsafe: restore point %s created on %s (LSN %s) before: %s", name, db, lsn, reason),
+	userExtra, noteExtra := "", ""
+	if pv != nil {
+		hint = ""
+		var fails bool
+		userExtra, noteExtra, fails = pv.wait(ctx)
+		if fails {
+			fmt.Fprintf(os.Stderr, "Rowsafe stopped this command (%s): it fails on a full copy of %s's data, so it would fail on production too.%s "+
+				"Restore point %s was saved. Tell the user why it fails and fix the migration; don't work around this block (if they still want it run, they run it themselves).\n",
+				reason, db, noteExtra, name)
+			return exitError(2) // the hook's exit 2 blocks the command
+		}
+	}
+	return hookReply(fmt.Sprintf("Rowsafe: restore point %s created on %s (LSN %s) before: %s", name, db, lsn, reason)+userExtra,
 		fmt.Sprintf("Rowsafe created restore point %q on database %s (from %s), confirmed in the backup repository, right before this command (%s). "+
 			"If the command goes wrong, stop and tell the user: %s; "+
-			"don't try to repair the data or restore it yourself."+previewHint(reason),
+			"don't try to repair the data or restore it yourself."+hint+noteExtra,
 			name, db, src, reason, undo))
 }
 
