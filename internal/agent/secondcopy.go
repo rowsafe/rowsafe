@@ -350,7 +350,7 @@ func (a *Agent) secondCopyPushCLI(stanza string) (pgbackrest.CLI, bool) {
 }
 
 // errNoSecondCopy answers a request for the second copy on a host without one.
-var errNoSecondCopy = errors.New("no second copy is set up on this server: add one by running the Rowsafe installer on it with --add-storage")
+var errNoSecondCopy = errors.New("no second copy is set up on this server: add one on it with `sudo rowsafe secondcopy add`, or the Rowsafe installer with --add-storage")
 
 // repoCLI is the pgBackRest CLI for one storage (0 or RepoPrimary: the
 // first; RepoSecond: the second copy).

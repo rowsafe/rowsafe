@@ -278,10 +278,22 @@ func (w window) check(p time.Time) error {
 }
 
 // target checks a time or a Mark against the window and picks the backup
-// and the timeline (window.pick, rewind_inplace.go).
-func (s *state) target(d *dbRec, at *time.Time, mark string, xid uint32, now time.Time) (protocol.RewindTarget, error) {
+// and the timeline (window.pick, rewind_inplace.go). repo RepoSecond picks
+// from the second copy's backups and window.
+func (s *state) target(d *dbRec, repo int, at *time.Time, mark string, xid uint32, now time.Time) (protocol.RewindTarget, error) {
 	bad := func(msg string) error { return &httpErr{http.StatusBadRequest, msg} }
 	w := s.windowOf(d, now)
+	switch repo {
+	case 0, protocol.RepoPrimary:
+		repo = 0
+	case protocol.RepoSecond:
+		var err error
+		if w, err = s.secondWindow(d, now); err != nil { // secondcopy.go
+			return protocol.RewindTarget{}, err
+		}
+	default:
+		return protocol.RewindTarget{}, bad(`"repo" is 1 (the first storage) or 2 (the second copy).`)
+	}
 	switch {
 	case xid != 0 && (at == nil || mark != ""):
 		return protocol.RewindTarget{}, bad(`To stop just before a transaction ("xid"), give its commit time as "time", and no Mark.`)
@@ -296,7 +308,7 @@ func (s *state) target(d *dbRec, at *time.Time, mark string, xid uint32, now tim
 		if err != nil {
 			return protocol.RewindTarget{}, err
 		}
-		return protocol.RewindTarget{Time: &t, XID: xid, BackupSet: set, Timeline: tl}, nil
+		return protocol.RewindTarget{Time: &t, XID: xid, BackupSet: set, Timeline: tl, Repo: repo}, nil
 	case mark != "":
 		if !markNameRE.MatchString(mark) {
 			return protocol.RewindTarget{}, bad(fmt.Sprintf("%q isn't a Mark name.", mark))
@@ -313,16 +325,19 @@ func (s *state) target(d *dbRec, at *time.Time, mark string, xid uint32, now tim
 			return protocol.RewindTarget{}, &httpErr{http.StatusConflict, fmt.Sprintf("The Mark %s isn't confirmed in your backup storage yet, so Rowsafe can't restore to it. It is confirmed as soon as newer changes reach storage; try again in a minute.", mark)}
 		}
 		p := m.CreatedAt.UTC()
-		// A confirmed Mark is in storage even when the archiving report
-		// (the window's end) hasn't caught up with it yet.
-		if w.Latest != nil && p.After(*w.Latest) {
+		switch {
+		case repo == protocol.RepoSecond && w.Latest != nil && p.After(*w.Latest):
+			return protocol.RewindTarget{}, &httpErr{http.StatusConflict, fmt.Sprintf("The Mark %s hasn't reached the second copy yet (it has changes up to %s). Try again in a minute.", mark, windowTime(*w.Latest))}
+		case w.Latest != nil && p.After(*w.Latest):
+			// A confirmed Mark is in storage even when the archiving report
+			// (the window's end) hasn't caught up with it yet.
 			w.Latest = &p
 		}
 		set, tl, err := w.pick(p)
 		if err != nil {
 			return protocol.RewindTarget{}, err
 		}
-		return protocol.RewindTarget{Mark: mark, BackupSet: set, Timeline: tl}, nil
+		return protocol.RewindTarget{Mark: mark, BackupSet: set, Timeline: tl, Repo: repo}, nil
 	}
 	return protocol.RewindTarget{}, bad(`Pick a time ("time") or a Mark ("mark") to go back to.`)
 }
@@ -456,7 +471,7 @@ func (s *Server) createCopy(st *state, d *dbRec, r *http.Request, now time.Time)
 	if slices.ContainsFunc(st.Copies, func(c *copyRec) bool { return c.DatabaseID == d.ID && st.live(c) }) {
 		return 0, nil, &httpErr{http.StatusConflict, "This database already has a copy. Delete it first (rowsafe rewind drop): there is one copy per database at a time."}
 	}
-	target, err := st.target(d, req.Time, req.Mark, req.XID, now)
+	target, err := st.target(d, req.Repo, req.Time, req.Mark, req.XID, now)
 	if err != nil {
 		return 0, nil, err
 	}

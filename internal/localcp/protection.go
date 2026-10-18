@@ -146,5 +146,8 @@ func (st *state) protection(d *dbRec, now time.Time) protocol.Protection {
 		p.Reasons = snapshotReasons(d, p.Reasons) // search.go
 	}
 	p.Protected = len(p.Reasons) == 0
+	// The second copy is shown, not counted: when it fails, the first
+	// storage still protects the database (second_copy_failing alerts).
+	p.SecondCopy = st.secondCopyView(d, now)
 	return p
 }

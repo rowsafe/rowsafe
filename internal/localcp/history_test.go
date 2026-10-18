@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -72,8 +73,9 @@ func TestHistoryDiskForecastAndAlert(t *testing.T) {
 	}
 	// The rule is listed with the hosted one's threshold.
 	rules, _ := c.AlertRules(ctx)
-	if r := rules[len(rules)-1]; r.Rule != "disk_full_forecast" || *r.Threshold != 14 || r.Unit != "days" {
-		t.Fatalf("rules: %+v", r)
+	i := slices.IndexFunc(rules, func(r protocol.AlertRule) bool { return r.Rule == "disk_full_forecast" })
+	if i < 0 || *rules[i].Threshold != 14 || rules[i].Unit != "days" {
+		t.Fatalf("rules: %+v", rules)
 	}
 	// The space was given back: not growing any more, resolved.
 	start, free = *now, func() float64 { return 60e9 }

@@ -170,6 +170,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/databases/{ref}/protection", s.protection)
 	mux.HandleFunc("GET /v1/databases/{ref}/backups", s.backups)
 	mux.HandleFunc("GET /v1/databases/{ref}/drills", s.drills)
+	mux.HandleFunc("GET /v1/databases/{ref}/storage", s.storage) // secondcopy.go
 	mux.HandleFunc("GET /v1/databases/{ref}/tasks", s.dbTasks)
 	mux.HandleFunc("POST /v1/databases/{ref}/tasks", s.createTask)
 	mux.HandleFunc("GET /v1/databases/{ref}/restore-points", s.marks)
@@ -283,6 +284,7 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 		}
 		resp.RewindExpires = st.recordRewinds(req.Rewinds, now) // rewind.go
 		st.recordSoftware(req.Software, now)                    // upgrade.go
+		st.recordStorage(req.SecondCopies, req.Storage, now)    // secondcopy.go
 		for _, d := range st.Databases {
 			if d.Status != protocol.DBPendingAdopt {
 				resp.Databases = append(resp.Databases, d.spec())
@@ -668,13 +670,22 @@ func (s *Server) databaseGet(w http.ResponseWriter, r *http.Request) {
 	s.withDB(w, r, func(st *state, d *dbRec) { writeJSON(w, http.StatusOK, st.view(d)) })
 }
 
+// backups lists the first storage's backups, or the second copy's with
+// ?repo=2.
 func (s *Server) backups(w http.ResponseWriter, r *http.Request) {
 	n := limitParam(r, 50)
 	s.withDB(w, r, func(st *state, d *dbRec) {
+		backups := st.Backups
+		if r.URL.Query().Get("repo") == strconv.Itoa(protocol.RepoSecond) {
+			backups = nil
+			if st.copyRec(d.ID, s.now()) != nil { // secondcopy.go
+				backups = st.Backups2
+			}
+		}
 		var out []protocol.Backup
-		for i := len(st.Backups) - 1; i >= 0 && len(out) < n; i-- { // newest first
-			if st.Backups[i].DatabaseID == d.ID {
-				out = append(out, st.Backups[i])
+		for i := len(backups) - 1; i >= 0 && len(out) < n; i-- { // newest first
+			if backups[i].DatabaseID == d.ID {
+				out = append(out, backups[i])
 			}
 		}
 		writeJSON(w, http.StatusOK, nonNil(out))
@@ -831,6 +842,11 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		case req.Type == protocol.TaskRestart && isSQLite(d.Engine):
 			code, msg = http.StatusBadRequest, sqliteNoServer
 			return nil
+		case req.Type == protocol.TaskBackup || req.Type == protocol.TaskDrill:
+			if c, m := st.checkRepoTask(d, req.Type, req.Params, now); c != 0 { // secondcopy.go
+				code, msg = c, m
+				return nil
+			}
 		case req.Type == protocol.TaskRestart && !slices.Contains(st.Host.RestartPorts, d.Port):
 			code, msg = http.StatusForbidden, fmt.Sprintf("%s doesn't allow restarts from Rowsafe (only root can allow it, at install time). %s", st.Host.Hostname, restartYourself(d.Engine))
 			return nil

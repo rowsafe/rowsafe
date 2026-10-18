@@ -52,6 +52,11 @@ type state struct {
 	// (rewind_inplace.go): which backup and timeline a restore follows.
 	Rewinds   []*inPlaceRec    `json:"rewinds,omitempty"`
 	Timelines map[string]int64 `json:"timelines,omitempty"` // backup ID -> PostgreSQL timeline
+	// The second copy (secondcopy.go): what the agent reports about it, the
+	// backups in it, and the newest measurement of each storage.
+	SecondCopies map[string]*secondCopyRec       `json:"second_copies,omitempty"`
+	Backups2     []protocol.Backup               `json:"second_copy_backups,omitempty"`
+	Storage      map[string]protocol.RepoStorage `json:"storage,omitempty"`
 	// Alerts (alerts.go): channels, alerts, conditions waiting out their
 	// "for" duration, and the newest monitoring reading of each database.
 	Channels     []*channelRec         `json:"channels,omitempty"`
@@ -185,6 +190,9 @@ func (s *state) prune() {
 	}
 	if n := len(s.Backups) - keepBackups; n > 0 {
 		s.Backups = s.Backups[n:]
+	}
+	if n := len(s.Backups2) - keepBackups; n > 0 {
+		s.Backups2 = s.Backups2[n:]
 	}
 	if n := len(s.Drills) - keepDrills; n > 0 {
 		s.Drills = s.Drills[n:]

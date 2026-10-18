@@ -438,7 +438,7 @@ func (s *Server) rewindInPlace(st *state, d *dbRec, r *http.Request, now time.Ti
 	if err := st.refuseInPlace(d, now); err != nil {
 		return 0, nil, err
 	}
-	target, err := st.target(d, req.Time, req.Mark, req.XID, now)
+	target, err := st.target(d, protocol.RepoPrimary, req.Time, req.Mark, req.XID, now)
 	if err != nil {
 		return 0, nil, err
 	}

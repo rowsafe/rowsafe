@@ -90,6 +90,13 @@ func TestSidecarLoginRefusal(t *testing.T) {
 // agent that runs every task it is given.
 func localServer(t *testing.T) *client.Client {
 	t.Helper()
+	c, _, _ := localServerAt(t)
+	return c
+}
+
+// localServerAt is localServer with the control plane and its socket.
+func localServerAt(t *testing.T) (*client.Client, *localcp.Server, string) {
+	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("the agent's own control plane runs on a Linux server")
 	}
@@ -132,7 +139,7 @@ func localServer(t *testing.T) *client.Client {
 	t.Setenv("ROWSAFE_API_KEY", "")
 	t.Setenv("ROWSAFE_URL", "unix://"+sock)
 	t.Setenv("DATABASE_URL", "")
-	return client.New("unix://"+sock, "local")
+	return client.New("unix://"+sock, "local"), srv, sock
 }
 
 // fakeLocalAgent claims tasks on the socket and finishes each as the agent
