@@ -1,6 +1,6 @@
 {
   "name": "rowsafe",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "Database safety net for AI agents (PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey, SQLite, Qdrant, OpenSearch and Meilisearch): Rowsafe's MCP server (Sign in with Rowsafe), safety and health skills (health checks work without an account, with the rowsafe CLI), and a hook that sets a restore point before migrations and destructive commands.",
   "author": {
     "name": "Adraa Labs",
@@ -103,7 +103,8 @@
           ]
         },
         "commerce": false,
-        "commerce_description": "The plugin does not sell anything in ChatGPT. Rowsafe is billed in the Rowsafe dashboard; when an agent creates a paid Rowsafe Cloud server it first tells the user the price and asks, and the first payment is completed by an owner in the dashboard."
+        "commerce_description": "The plugin does not sell anything in ChatGPT. Rowsafe is billed in the Rowsafe dashboard; when an agent creates a paid Rowsafe Cloud server it first tells the user the price and asks, and the first payment is completed by an owner in the dashboard.",
+        "demo_recording_url": "https://rowsafe.sh/r/c0ed163b74f706082bd066e9/rowsafe-chatgpt.mp4"
       },
       "publication": {
         "release_notes": "First directory release. Rowsafe's hosted MCP server (Sign in with Rowsafe, OAuth 2.1): ask in plain language about your databases' health, backups, restore tests, alerts and recommendations, check that a database can be recovered before a migration, and set restore points (Marks). Skills: rowsafe-safety, rowsafe-health, rowsafe-new-database."
