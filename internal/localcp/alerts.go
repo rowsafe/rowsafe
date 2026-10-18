@@ -279,6 +279,10 @@ func engineRules(engine string) []localRule {
 		return sqliteRules
 	case protocol.EngineClickHouse:
 		return clickhouseRules
+	case protocol.EngineOpenSearch:
+		return openSearchRules // search.go
+	case protocol.EngineQdrant:
+		return qdrantRules
 	}
 	return nil
 }
@@ -292,6 +296,8 @@ func engineMetrics(engine string) []string {
 		return redisMetrics
 	case protocol.EngineClickHouse:
 		return clickhouseMetrics
+	case protocol.EngineOpenSearch, protocol.EngineQdrant, protocol.EngineMeilisearch:
+		return snapshotMetrics // search.go
 	}
 	return nil
 }
@@ -506,6 +512,12 @@ func (s *state) recordMonitoring(rep protocol.MonitoringReport, now time.Time) {
 				}
 				m.Values[k] = v
 			}
+		}
+		for k, v := range openSearchValues(d.OpenSearch) { // search.go
+			if m.Values == nil {
+				m.Values = map[string]float64{}
+			}
+			m.Values[k] = v
 		}
 		for k, v := range sqliteValues(d.SQLite) { // sqlite.go
 			if m.Values == nil {

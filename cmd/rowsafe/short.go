@@ -492,7 +492,9 @@ func printProtection(name string, p protocol.Protection) {
 		fmt.Printf("  ! the last %s %s (task %s): %s\n", taskName(t.Type), t.Status, t.ID, firstLine(t.Error, 80))
 	}
 	fmt.Printf("\nLast backup:          %s\n", ago(p.LastBackupAt))
-	fmt.Printf("Last WAL archived:    %s\n", ago(p.WALLastArchivedAt))
+	if p.WALLastArchivedAt != nil || p.ArchiverUp { // engines with no change log have none (OpenSearch, Qdrant, Meilisearch)
+		fmt.Printf("Last change copied:   %s\n", ago(p.WALLastArchivedAt))
+	}
 	fmt.Printf("Restore test passed:  %s\n", ago(p.LastDrillPassedAt))
 	if p.RecoveryWindowStart != nil {
 		fmt.Printf("Recoverable from:     %s\n", p.RecoveryWindowStart.Local().Format(time.RFC1123))

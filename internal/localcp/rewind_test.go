@@ -34,9 +34,9 @@ func activeDB(t *testing.T, a *fakeAgent, c *client.Client, now *time.Time) prot
 		!strings.Contains(err.Error(), "already protected as shop") {
 		t.Fatalf("the same PostgreSQL under another name: %v", err)
 	}
-	if _, err := c.CreateDatabase(ctx, protocol.CreateDatabaseRequest{Name: "crm", Port: 7700, Engine: protocol.EngineMeilisearch}); apiStatus(err) != http.StatusBadRequest ||
-		!strings.Contains(err.Error(), "Meilisearch needs the dashboard") {
-		t.Fatalf("Meilisearch: %v", err)
+	if _, err := c.CreateDatabase(ctx, protocol.CreateDatabaseRequest{Name: "crm", Port: 1521, Engine: "oracle"}); apiStatus(err) != http.StatusBadRequest ||
+		!strings.Contains(err.Error(), "unknown engine") {
+		t.Fatalf("an unknown engine: %v", err)
 	}
 	// Applying before the plan finished is refused.
 	if _, err := c.CreateTask(ctx, "shop", protocol.TaskAdopt, protocol.AdoptParams{Apply: true}); apiStatus(err) != http.StatusConflict {

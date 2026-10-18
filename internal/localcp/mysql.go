@@ -20,7 +20,8 @@ import (
 
 // localEngines are the engines this control plane protects.
 var localEngines = []string{protocol.EnginePostgreSQL, protocol.EngineMySQL, protocol.EngineMariaDB, protocol.EngineMongoDB,
-	protocol.EngineRedis, protocol.EngineValkey, protocol.EngineSQLite, protocol.EngineClickHouse}
+	protocol.EngineRedis, protocol.EngineValkey, protocol.EngineSQLite, protocol.EngineClickHouse,
+	protocol.EngineOpenSearch, protocol.EngineQdrant, protocol.EngineMeilisearch}
 
 // localFeatures are what this control plane offers for a database: every
 // local engine has them all (protocol.EngineCapabilities; a test checks).
@@ -60,8 +61,9 @@ func defaultSocket(engine string) string {
 		return "/var/run/mysqld/mysqld.sock"
 	case protocol.EngineMariaDB:
 		return "/run/mysqld/mysqld.sock"
-	case protocol.EngineMongoDB, protocol.EngineRedis, protocol.EngineValkey, protocol.EngineClickHouse:
-		return "" // over TCP on 127.0.0.1 (mongodb.go, redis.go, clickhouse.go)
+	case protocol.EngineMongoDB, protocol.EngineRedis, protocol.EngineValkey, protocol.EngineClickHouse,
+		protocol.EngineOpenSearch, protocol.EngineQdrant, protocol.EngineMeilisearch:
+		return "" // over TCP on 127.0.0.1 (mongodb.go, redis.go, clickhouse.go, search.go)
 	}
 	return "/var/run/postgresql"
 }
@@ -79,6 +81,8 @@ func defaultPort(engine string) int {
 		return 0 // a file (sqlite.go)
 	case isClickHouse(engine):
 		return clickhousePort
+	case snapshotEngine(engine):
+		return snapshotPort(engine) // search.go
 	}
 	return 5432
 }
@@ -100,6 +104,8 @@ func restartYourself(engine string) string {
 		return sqliteNoServer
 	case protocol.EngineClickHouse:
 		return "Restart ClickHouse yourself: sudo systemctl restart clickhouse-server"
+	case protocol.EngineOpenSearch, protocol.EngineQdrant, protocol.EngineMeilisearch:
+		return fmt.Sprintf("Restart %s yourself: sudo systemctl restart %s", protocol.EngineDisplayName(engine), unitName(engine))
 	}
 	return "Restart PostgreSQL yourself: sudo systemctl restart postgresql"
 }
@@ -133,6 +139,9 @@ func engineAlert(rule string, st *state, d *dbRec, r ruleResult, now time.Time) 
 	}
 	if isClickHouse(d.Engine) {
 		return clickhouseAlert(rule, st, d, r, now) // clickhouse.go
+	}
+	if snapshotEngine(d.Engine) {
+		return snapshotAlert(rule, st, d, r, now) // search.go
 	}
 	if isMongo(d.Engine) && r.firing {
 		return mongoAlert(rule, st, d, r, now) // mongodb.go
@@ -175,6 +184,12 @@ func unitName(engine string) string {
 		return "valkey-server"
 	case protocol.EngineClickHouse:
 		return "clickhouse-server"
+	case protocol.EngineOpenSearch:
+		return "opensearch"
+	case protocol.EngineQdrant:
+		return "qdrant"
+	case protocol.EngineMeilisearch:
+		return "meilisearch"
 	}
 	return "postgresql"
 }
@@ -184,12 +199,12 @@ func unitName(engine string) string {
 // server per port; its socket file has more than one name, /run and
 // /var/run).
 func (st *state) serverAt(engine string, port int, socket string) *dbRec {
-	if !mysqlFamily(engine) && !isMongo(engine) && !redisFamily(engine) && !isClickHouse(engine) {
+	if !mysqlFamily(engine) && !isMongo(engine) && !redisFamily(engine) && !isClickHouse(engine) && !snapshotEngine(engine) {
 		return st.dbAt(port, socket)
 	}
-	for _, d := range st.Databases { // MongoDB, Redis, ClickHouse: one server per port, on 127.0.0.1
+	for _, d := range st.Databases { // the others: one server per port, on 127.0.0.1
 		if (mysqlFamily(d.Engine) && mysqlFamily(engine) || isMongo(d.Engine) && isMongo(engine) || redisFamily(d.Engine) && redisFamily(engine) ||
-			isClickHouse(d.Engine) && isClickHouse(engine)) && d.Port == port {
+			isClickHouse(d.Engine) && isClickHouse(engine) || snapshotEngine(engine) && protocol.NormalizeEngine(d.Engine) == protocol.NormalizeEngine(engine)) && d.Port == port {
 			return d
 		}
 	}
@@ -212,6 +227,9 @@ func validTablesFor(engine string, tables []protocol.RewindTable, limit int) err
 	}
 	if isClickHouse(engine) {
 		return clickhouseTables(tables, limit) // clickhouse.go
+	}
+	if snapshotEngine(engine) {
+		return snapshotTables(engine, tables, limit) // search.go
 	}
 	if !mysqlFamily(engine) {
 		return validTables(tables, limit)

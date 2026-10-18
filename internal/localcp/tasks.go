@@ -202,6 +202,7 @@ func (s *state) afterTask(t *taskRec, db *dbRec, req protocol.CompleteRequest, n
 			return err
 		}
 		db.Inspect = &res
+		quickSnapshots(db) // search.go
 	case protocol.TaskAdopt:
 		if !ok {
 			return nil
@@ -211,6 +212,7 @@ func (s *state) afterTask(t *taskRec, db *dbRec, req protocol.CompleteRequest, n
 			return err
 		}
 		db.Inspect = &res.Inspect
+		quickSnapshots(db) // search.go
 		if !res.Applied {
 			return nil
 		}
@@ -230,6 +232,7 @@ func (s *state) afterTask(t *taskRec, db *dbRec, req protocol.CompleteRequest, n
 			return err
 		}
 		db.Inspect = &res.Inspect
+		quickSnapshots(db) // search.go
 		if res.OK {
 			return s.activate(db, now)
 		}
