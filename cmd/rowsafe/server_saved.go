@@ -130,6 +130,9 @@ func clusterOf(dbs []protocol.Database, port int, socketDir string) *protocol.Da
 // or the one its PostgreSQL is protected as. Elsewhere, or when nothing
 // matches, the name is unchanged.
 func serverName(ctx context.Context, c *client.Client, name string) string {
+	if sshVia != nil && name == sshVia.Name { // a server saved over SSH (ssh_saved.go)
+		return sshVia.serverDB()
+	}
 	if !onServer || name == "" {
 		return name
 	}

@@ -376,8 +376,12 @@ func channelsList(ctx context.Context, c *client.Client, args []string) error {
 	}
 	if len(chans) == 0 {
 		if onServer {
+			add := "sudo rowsafe channels add"
+			if sshVia != nil {
+				add = "rowsafe channels add " + sshVia.Name
+			}
 			fmt.Println("No notification channels, so alerts aren't sent anywhere. Add one:\n" +
-				"  sudo rowsafe channels add --type slack --name ops --url https://hooks.slack.com/services/...\n" +
+				"  " + add + " --type slack --name ops --url https://hooks.slack.com/services/...\n" +
 				"  (or --type discord, --type ntfy --topic TOPIC [--server https://ntfy.example.com], or --type webhook)")
 			return nil
 		}

@@ -17,6 +17,9 @@ import (
 
 // TestMain lets the test binary act as the sender process, as the CLI does.
 func TestMain(m *testing.M) {
+	if code, ran := fakeSSHMain(); ran { // ssh_saved_test.go
+		os.Exit(code)
+	}
 	if len(os.Args) > 1 && os.Args[1] == telemetrySendArg {
 		telemetrySend(os.Stdin)
 		os.Exit(0)

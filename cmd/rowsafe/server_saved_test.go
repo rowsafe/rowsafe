@@ -182,6 +182,10 @@ func fakeLocalAgent(ctx context.Context, sock string) {
 			result = protocol.BackupResult{Label: "20261017-000000F", Type: protocol.BackupFull, StartedAt: now.Add(-time.Second), StoppedAt: now}
 		case protocol.TaskDrill:
 			result = protocol.DrillResult{Passed: true}
+		case protocol.TaskRestorePoint:
+			var p protocol.RestorePointParams
+			_ = json.Unmarshal(task.Params, &p)
+			result = protocol.RestorePointResult{Name: p.Name, LSN: "0/4000000", Archived: true, CreatedAt: now, ArchivedAt: &now}
 		case protocol.TaskRewindCopy:
 			var p protocol.RewindCopyParams
 			_ = json.Unmarshal(task.Params, &p)
@@ -254,4 +258,10 @@ func TestAddProtectsOnServer(t *testing.T) {
 	if err := dispatch(ctx, []string{"restore", "shop"}); err == nil || !strings.Contains(err.Error(), "--to") {
 		t.Fatalf("no --to: %v", err)
 	}
+}
+
+// localServerSock is localServer, with its socket's path.
+func localServerSock(t *testing.T) (*client.Client, string) {
+	c, _, sock := localServerAt(t)
+	return c, sock
 }

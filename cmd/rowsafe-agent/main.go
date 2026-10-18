@@ -17,7 +17,9 @@ import (
 
 	"github.com/rowsafe/rowsafe/internal/agent"
 	_ "github.com/rowsafe/rowsafe/internal/engine/mysql" // registers MySQL and MariaDB
+	"github.com/rowsafe/rowsafe/internal/localcp"
 	"github.com/rowsafe/rowsafe/internal/pginspect"
+	"github.com/rowsafe/rowsafe/protocol"
 	"github.com/rowsafe/rowsafe/release"
 )
 
@@ -65,6 +67,10 @@ Usage:
                                             write, read back and delete a test file in the backup
                                             storage (Rowsafe Storage, your bucket or your SFTP server)
   rowsafe-agent health                      container health check (docker-sidecar mode)
+  rowsafe-agent control-bridge [--socket PATH]
+                                            (root) joins stdin/stdout to the agent's own control plane
+                                            without an account: how the rowsafe CLI on another computer
+                                            reaches this server over SSH (rowsafe add NAME ssh://HOST)
   rowsafe-agent version
 
 Runs as the postgres OS user. Configuration comes from the environment,
@@ -123,6 +129,8 @@ func main() {
 		err = storage(ctx, os.Args[2:])
 	case "health":
 		os.Exit(health())
+	case "control-bridge": // the rowsafe CLI over SSH (internal/localcp/bridge.go)
+		os.Exit(controlBridge(os.Args[2:]))
 	case "sql-shapes": // internal: the index advisor's parser process
 		os.Exit(sqlShapes())
 	case "version":
@@ -301,4 +309,19 @@ func storage(ctx context.Context, args []string) error {
 		return err
 	}
 	return agent.StorageTest(ctx, cfg, os.Stdout, *wait, *own)
+}
+
+// controlBridge is rowsafe-agent control-bridge: the rowsafe CLI on
+// another computer runs it over SSH to reach this server's control plane.
+func controlBridge(args []string) int {
+	fs := flag.NewFlagSet("control-bridge", flag.ContinueOnError)
+	sock := fs.String("socket", protocol.LocalSocketPath, "the control plane's socket")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if err := localcp.Bridge(*sock, os.Stdin, os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, "rowsafe:", err)
+		return 1
+	}
+	return 0
 }

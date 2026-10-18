@@ -175,7 +175,7 @@ func TestGuardLocalControlPlane(t *testing.T) {
 	if len(marks) != 1 || !strings.Contains(msg, "restore point "+marks[0]+" created on app") {
 		t.Fatalf("marks %v, message %q", marks, msg)
 	}
-	if !strings.Contains(ctx, "this server's Rowsafe agent") || !strings.Contains(ctx, "sudo rowsafe login") {
+	if !strings.Contains(ctx, "this server's Rowsafe agent") || !strings.Contains(ctx, "sudo rowsafe restore app --to "+marks[0]) {
 		t.Errorf("context: %s", ctx)
 	}
 }

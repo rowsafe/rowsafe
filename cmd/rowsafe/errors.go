@@ -79,13 +79,19 @@ func explain(err error) string {
 		return explainAPI(ae, err.Error())
 	}
 	var ue *url.Error
+	var sshErr *client.SSHError
 	switch {
+	case errors.As(err, &sshErr): // a server over SSH (ssh_saved.go)
+		return sshErr.Msg
 	case errors.Is(err, context.Canceled):
 		return "stopped before it finished. A change already sent goes on: see `rowsafe tasks`"
 	case errors.As(err, &ue):
 		host := ue.URL
 		if u, perr := url.Parse(ue.URL); perr == nil && u.Host != "" {
 			host = u.Scheme + "://" + u.Host
+		}
+		if sshVia != nil {
+			host = sshVia.SSH.String() + " (over SSH)"
 		}
 		var ne net.Error
 		if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()) {

@@ -56,6 +56,10 @@ jobs:
           go build -o rowsafe.exe ./cmd/rowsafe
           ./rowsafe.exe version
           ./rowsafe.exe help local
+          # A server over SSH goes through the system's ssh.exe: nothing listens on port 9.
+          if out=$(./rowsafe.exe add x ssh://rowsafe@127.0.0.1:9 2>&1); then echo "$out"; exit 1; fi
+          echo "$out"
+          echo "$out" | grep -q "ssh rowsafe@127.0.0.1: .*port 9"
       - name: Fixes without an account, on the runner's PostgreSQL
         shell: pwsh
         run: |

@@ -717,9 +717,15 @@ func (st *state) markViews(d *dbRec) []protocol.RestorePoint {
 		if m.DatabaseID != d.ID || m.LSN == "" && !st.taskOpen(m.TaskID) {
 			continue // attempts that failed before PostgreSQL wrote it
 		}
-		m.Status = protocol.StatusQueued
-		if t := st.task(m.TaskID); t != nil {
-			m.Status = t.Status
+		// The states the control plane gives a Mark (Guard and the MCP
+		// tools wait for archived).
+		switch {
+		case st.taskOpen(m.TaskID):
+			m.Status = protocol.RestorePointPending
+		case m.ArchivedAt != nil:
+			m.Status = protocol.RestorePointArchived
+		default:
+			m.Status = protocol.RestorePointUnconfirmed
 		}
 		if m.CreatedAt != nil {
 			m.RestoreFromBackup = st.backupBefore(d.ID, *m.CreatedAt)
