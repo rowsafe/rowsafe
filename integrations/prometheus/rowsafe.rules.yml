@@ -1,0 +1,288 @@
+# Prometheus alert rules for a Rowsafe server on its own (installed with
+# --no-account), scraped from the agent's /metrics (ROWSAFE_METRICS_LISTEN).
+# Install as /etc/prometheus/rules/rowsafe.yml and list it under rule_files.
+#
+# Every series has the labels database and host. Times are Unix seconds;
+# "age" below is time() minus a timestamp. Schedules: a full backup every
+# week, a differential one every day, a Proof (restore test) every week.
+#
+# The server already sends its own alerts (sudo rowsafe channels add). What
+# Prometheus adds: it notices when the server or the agent is down, which
+# the server can't tell you itself (RowsafeMetricsDown).
+#
+# Severity: critical = the ability to restore is degrading now;
+#           warning  = needs attention within a working day;
+#           info     = for the record.
+#
+# Validate: promtool check rules rowsafe.rules.yml
+#           promtool test rules rowsafe.rules.test.yml
+
+groups:
+  - name: rowsafe
+    rules:
+      # ---- The server and the agent ------------------------------------
+
+      - alert: RowsafeMetricsDown
+        # The agent serves the metrics: down means the agent (and its
+        # backups, Proofs and alerts) or the whole server is down.
+        # Continuous backup itself is run by the database and carries on.
+        expr: up{job="rowsafe"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Rowsafe on {{ $labels.instance }} is not answering"
+          description: >-
+            Prometheus can't read Rowsafe's metrics on {{ $labels.instance }}. The server or the
+            Rowsafe agent is down: scheduled backups, Proofs and the server's own alerts are paused
+            until it is back. On the server: sudo systemctl status rowsafe-agent
+
+      - alert: RowsafeAgentUpdateAvailable
+        expr: rowsafe_agent_update_available == 1
+        for: 7d
+        labels:
+          severity: info
+        annotations:
+          summary: "A newer Rowsafe agent ({{ $labels.version }}) is available on {{ $labels.host }}"
+          description: >-
+            The agent on {{ $labels.host }} hasn't updated itself to {{ $labels.version }} for a week.
+            It updates on its own unless ROWSAFE_AUTO_UPDATE=false is set in /etc/rowsafe/agent.env.
+
+      # ---- Continuous backup ---------------------------------------------
+
+      - alert: RowsafeDatabaseUnreachable
+        # The agent is up but can't read the database's archiving status.
+        expr: |
+          (rowsafe_archiver_up == 0)
+          * on (database, host) group_left (status) rowsafe_database_info{status=~"active|verifying"}
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Rowsafe can't reach {{ $labels.database }} on {{ $labels.host }}"
+          description: >-
+            The agent on {{ $labels.host }} has not read the continuous backup status of
+            {{ $labels.database }} for over 5 minutes. The database is probably down or refusing the
+            agent's connection. sudo rowsafe status {{ $labels.database }} says why.
+
+      - alert: RowsafeWALArchivingFailing
+        # PostgreSQL retries a failed segment about once a minute, so a real
+        # outage keeps the failure counter rising. The newest attempt must
+        # also have failed. No alert on archive age alone: an idle database
+        # legitimately archives nothing for hours.
+        expr: |
+          rowsafe_database_info
+          and on (database, host)
+          (
+            (
+                (rowsafe_wal_last_failed_timestamp_seconds > on (database, host) rowsafe_wal_last_archived_timestamp_seconds)
+              or
+                (rowsafe_wal_last_failed_timestamp_seconds unless on (database, host) rowsafe_wal_last_archived_timestamp_seconds)
+            )
+            and on (database, host) (increase(rowsafe_wal_archive_failed_total[15m]) > 0)
+          )
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Continuous backup is failing for {{ $labels.database }}"
+          description: >-
+            {{ $labels.database }} on {{ $labels.host }} has failed to archive its changes for over
+            10 minutes. Restores stop at the last archived moment, and the change log grows on the
+            server's disk until it fills. sudo rowsafe status {{ $labels.database }} says why.
+
+      # ---- Backups -------------------------------------------------------
+
+      - alert: RowsafeBackupMissing
+        # A backup (full or differential) runs every day; 26h leaves two
+        # hours of slack for a slow one.
+        expr: |
+          ((time() - rowsafe_backup_last_success_timestamp_seconds{type="any"}) > 26 * 3600)
+          * on (database, host) group_left () rowsafe_database_info{status="active"}
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No successful backup of {{ $labels.database }} in {{ $value | humanizeDuration }}"
+          description: >-
+            The newest successful backup of {{ $labels.database }} on {{ $labels.host }} finished
+            {{ $value | humanizeDuration }} ago; one is scheduled every day.
+            sudo rowsafe backups {{ $labels.database }} says why; sudo rowsafe backup {{ $labels.database }} runs one now.
+
+      - alert: RowsafeFirstBackupMissing
+        # Setup queues the first full backup right away.
+        expr: |
+          (
+            (time() - rowsafe_database_status_since_timestamp_seconds{status="active"}) > 12 * 3600
+            unless on (database, host) rowsafe_backup_last_success_timestamp_seconds{type="any"}
+          )
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.database }} is set up but has never been backed up"
+          description: >-
+            {{ $labels.database }} on {{ $labels.host }} has been active for {{ $value | humanizeDuration }}
+            without a successful backup. sudo rowsafe backup {{ $labels.database }} runs one now.
+
+      - alert: RowsafeFullBackupMissing
+        # Fulls run weekly. Without new ones, old backups can't expire and
+        # restores replay ever longer chains.
+        expr: |
+          ((time() - rowsafe_backup_last_success_timestamp_seconds{type="full"}) > 8 * 86400)
+          * on (database, host) group_left () rowsafe_database_info{status="active"}
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No full backup of {{ $labels.database }} in {{ $value | humanizeDuration }}"
+          description: >-
+            The newest full backup of {{ $labels.database }} finished {{ $value | humanizeDuration }} ago;
+            one is scheduled every week. sudo rowsafe backup {{ $labels.database }} --type full
+
+      - alert: RowsafeTaskFailed
+        # Within a minute of a failed or lost backup or check, long before
+        # RowsafeBackupMissing (26h). A failed Proof is RowsafeProofFailed.
+        # Resolves an hour after the failure, or when the next one succeeds.
+        expr: |
+          (time() - rowsafe_task_last_failure_timestamp_seconds{type=~"backup.*|check"}) < 3600
+        labels:
+          severity: warning
+        annotations:
+          summary: "A {{ $labels.type }} task of {{ $labels.database }} failed"
+          description: >-
+            The newest {{ $labels.type }} task of {{ $labels.database }} on {{ $labels.host }} failed
+            or was lost. sudo rowsafe tasks {{ $labels.database }} shows its log.
+
+      # ---- Proof (the weekly restore test) ----------------------------------
+
+      - alert: RowsafeProofFailed
+        expr: |
+          (rowsafe_drill_last_passed == 0)
+          * on (database, host) group_left () rowsafe_database_info{status="active"}
+        labels:
+          severity: warning
+        annotations:
+          summary: "The newest Proof of {{ $labels.database }} failed"
+          description: >-
+            The newest restore test of {{ $labels.database }} on {{ $labels.host }} failed. Until one
+            passes, there is no proof its backups restore. sudo rowsafe proof {{ $labels.database }} runs one now.
+
+      - alert: RowsafeProofOverdue
+        expr: |
+          ((time() - rowsafe_drill_last_success_timestamp_seconds) > 8 * 86400)
+          * on (database, host) group_left () rowsafe_database_info{status="active"}
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No passing Proof of {{ $labels.database }} in {{ $value | humanizeDuration }}"
+          description: >-
+            The newest passing restore test of {{ $labels.database }} was {{ $value | humanizeDuration }}
+            ago; one runs every week.
+
+      - alert: RowsafeFirstProofMissing
+        expr: |
+          (
+            (time() - rowsafe_database_status_since_timestamp_seconds{status="active"}) > 8 * 86400
+            unless on (database, host) rowsafe_drill_last_success_timestamp_seconds
+          )
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.database }} has never passed a Proof"
+          description: >-
+            {{ $labels.database }} on {{ $labels.host }} has been active for {{ $value | humanizeDuration }}
+            without a passing restore test. sudo rowsafe proof {{ $labels.database }} runs one now.
+
+      # ---- Setup -------------------------------------------------------------
+
+      - alert: RowsafeAwaitingRestart
+        # Setup is applied; continuous backup starts once the database
+        # restarts. Rowsafe never restarts it on its own.
+        expr: |
+          (time() - rowsafe_database_status_since_timestamp_seconds{status="awaiting_restart"}) > 24 * 3600
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.database }} has waited {{ $value | humanizeDuration }} for a restart"
+          description: >-
+            {{ $labels.database }} on {{ $labels.host }} isn't protected until it restarts once.
+            sudo rowsafe restart {{ $labels.database }} restarts it when you are ready.
+
+      - alert: RowsafeVerificationStuck
+        expr: |
+          (time() - rowsafe_database_status_since_timestamp_seconds{status="verifying"}) > 3600
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.database }} has not passed its setup check"
+          description: >-
+            {{ $labels.database }} on {{ $labels.host }} has been checking for {{ $value | humanizeDuration }};
+            no backups are scheduled until the check passes. sudo rowsafe status {{ $labels.database }} says why.
+
+      # ---- The database (the agent's monitoring) ----------------------------
+
+      - alert: RowsafeDatabaseDown
+        expr: rowsafe_database_up == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.database }} on {{ $labels.host }} is not answering"
+          description: >-
+            The agent couldn't query {{ $labels.database }} on {{ $labels.host }} for 5 minutes.
+
+      - alert: RowsafeDiskFreeLow
+        expr: rowsafe_disk_free_pct < 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.database }}: {{ $value | humanize }}% of the disk is free"
+          description: >-
+            The disk holding {{ $labels.database }}'s data on {{ $labels.host }} is nearly full. When it
+            fills, the database stops accepting writes.
+
+      - alert: RowsafeDiskFreeCritical
+        expr: rowsafe_disk_free_pct < 5
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.database }}: only {{ $value | humanize }}% of the disk is free"
+          description: >-
+            The disk holding {{ $labels.database }}'s data on {{ $labels.host }} is about to fill. When it
+            fills, the database stops accepting writes.
+
+      - alert: RowsafeConnectionsHigh
+        expr: rowsafe_connections_used_pct > 90
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.database }} uses {{ $value | humanize }}% of its connections"
+          description: >-
+            {{ $labels.database }} on {{ $labels.host }} is close to max_connections; new clients will
+            be refused. A connection pooler helps: sudo rowsafe pulse {{ $labels.database }}
+
+      - alert: RowsafeReplicationLagHigh
+        expr: rowsafe_replication_lag_seconds > 300
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.database }}'s standby is {{ $value | humanizeDuration }} behind"
+          description: >-
+            Replication of {{ $labels.database }} on {{ $labels.host }} is over 5 minutes behind.
+
+      - alert: RowsafeTransactionIDsRunningOut
+        # PostgreSQL stops writes to protect itself near wraparound.
+        expr: rowsafe_xid_headroom_pct < 20
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.database }} has {{ $value | humanize }}% of its transaction IDs left"
+          description: >-
+            Autovacuum is not keeping up on {{ $labels.database }} ({{ $labels.host }}). Below 3%
+            PostgreSQL refuses writes. sudo rowsafe pulse {{ $labels.database }} finds what blocks it.

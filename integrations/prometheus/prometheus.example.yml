@@ -1,0 +1,26 @@
+# The scrape job for a Rowsafe server on its own. Merge into
+# /etc/prometheus/prometheus.yml. Turn the metrics on first, on the server,
+# in /etc/rowsafe/agent.env, then sudo systemctl restart rowsafe-agent:
+#
+#   ROWSAFE_METRICS_LISTEN=127.0.0.1:9188
+#
+# Prometheus on another machine: listen on an address it can reach and set
+# a token (a non-loopback address is refused without one):
+#
+#   ROWSAFE_METRICS_LISTEN=10.0.0.5:9188
+#   ROWSAFE_METRICS_TOKEN=<the output of: openssl rand -hex 32>
+#
+# The token travels in plain HTTP: keep the address on a private network or
+# a VPN, or put a TLS proxy in front.
+
+rule_files:
+  - /etc/prometheus/rules/rowsafe.yml # rowsafe.rules.yml
+
+scrape_configs:
+  - job_name: rowsafe
+    scrape_interval: 60s # the agent's readings change about once a minute
+    static_configs:
+      - targets: ["127.0.0.1:9188"]
+    # With ROWSAFE_METRICS_TOKEN: the same value, in a file only Prometheus reads.
+    # authorization:
+    #   credentials_file: /etc/prometheus/rowsafe-token

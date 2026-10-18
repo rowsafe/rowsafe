@@ -37,6 +37,7 @@ type Server struct {
 	allowHTTP bool           // tests: channels on http://
 	sending   sync.WaitGroup // notifications on their way (alerts.go, weekly.go)
 	hist      *history       // history.go
+	prom      readings       // metrics.go
 }
 
 // Open loads (or starts) the state kept in dir.
@@ -82,6 +83,7 @@ func (s *Server) Serve(ctx context.Context, path string) error {
 	s.cameBack()
 	go s.run(ctx)
 	go s.runUpdates(ctx) // updates.go
+	s.serveMetrics(ctx)  // metrics.go
 	s.log.Info("control plane without an account listening", "socket", path)
 	if err := srv.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
