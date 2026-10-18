@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rowsafe/rowsafe/protocol"
@@ -32,8 +33,9 @@ type Server struct {
 	log       *slog.Logger
 	now       func() time.Time
 	updates   *updates
-	alertHTTP *http.Client // alerts.go
-	allowHTTP bool         // tests: channels on http://
+	alertHTTP *http.Client   // alerts.go
+	allowHTTP bool           // tests: channels on http://
+	sending   sync.WaitGroup // notifications on their way (alerts.go, weekly.go)
 }
 
 // Open loads (or starts) the state kept in dir.
@@ -111,6 +113,7 @@ func (s *Server) Tick() {
 		s.log.Error("scheduling", "err", err)
 	}
 	s.send(notices)
+	s.sendWeekly() // weekly.go
 }
 
 // cameBack, when the agent starts, says how long it was out (alerts.go).
@@ -172,6 +175,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/alerts/{id}", s.alertGet)
 	mux.HandleFunc("POST /v1/alerts/{id}/ack", s.alertAck)
 	mux.HandleFunc("GET /v1/alert-rules", s.alertRules)
+	mux.HandleFunc("GET /v1/org/settings", s.orgSettings) // weekly.go
+	mux.HandleFunc("PUT /v1/org/settings", s.updateOrgSettings)
+	mux.HandleFunc("GET /v1/org/weekly-report", s.weeklyPreview)
+	mux.HandleFunc("POST /v1/org/weekly-report/test", s.weeklyTest)
 	mux.HandleFunc("GET /v1/tasks", s.allTasks)
 	mux.HandleFunc("GET /v1/tasks/{id}", s.taskGet)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
