@@ -34,11 +34,9 @@ const (
 	redisRecent      = time.Hour
 )
 
-// Categories only Redis's findings use here.
-const (
-	CatAvailability = "availability"
-	CatSecurity     = "security"
-)
+// CatAvailability is a category only Redis's findings use here (CatSecurity
+// is in security.go).
+const CatAvailability = "availability"
 
 func (e *evaluator) redisFamily() bool {
 	n := protocol.NormalizeEngine(e.in.Engine)

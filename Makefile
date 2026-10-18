@@ -16,7 +16,7 @@
 #   make test-pooling          real PgBouncer through the root helper on a systemd Debian container (Docker)
 #   make test-no-account-logs    logs on a server on its own: rowsafe logs --errors, rowsafe logs forward to a webhook (Docker)
 #   make test-no-account-pooler  rowsafe pulse postgres://... through a real PgBouncer in transaction mode (Docker)
-#   make test-no-account-ssh   a server without an account used from another computer over SSH only (Docker) test-no-account-standby standby on second account: switchover, fences test-no-account-guard previews full copy, guard and masked copies its own
+#   make test-no-account-ssh   a server without an account used from another computer over SSH only (Docker) test-no-account-standby standby on second account: switchover, fences test-no-account-guard previews full copy, guard and masked copies its own test-no-account-security rowsafe security fixes own, for real
 #   make test-permissions      passkey-signed permission changes through root's helper on a systemd Debian container (Docker)
 #   make test-secondcopy       a real second backup copy (two storages, one going away) in a Debian container (Docker)
 #   make test-no-account-secondcopy  sudo rowsafe secondcopy add on a server on its own; restore with the first bucket deleted (Docker)
@@ -189,7 +189,8 @@ test-no-account-ssh:
 	sh scripts/test-no-account-ssh.sh test-no-account-standby:
 	sh scripts/test-no-account-standby.sh test-no-account-guard:
 	sh scripts/test-no-account-guard.sh test-no-account-logs:
-	sh scripts/test-no-account-logs.sh
+	sh scripts/test-no-account-logs.sh test-no-account-security:
+	sh scripts/test-no-account-security.sh
 
 test-sftp:
 	sh scripts/test-sftp.sh

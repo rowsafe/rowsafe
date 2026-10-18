@@ -34,6 +34,7 @@ COPY masking ./masking
 COPY pglog ./pglog
 COPY preview ./preview
 COPY tune ./tune
+COPY pulse ./pulse
 COPY pgprobe ./pgprobe
 COPY local ./local
 COPY pulse ./pulse

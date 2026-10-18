@@ -315,6 +315,8 @@ func (s *state) afterTask(t *taskRec, db *dbRec, req protocol.CompleteRequest, n
 		return s.afterInPlace(t, db, ok, req.Result, now) // rewind_inplace.go
 	case protocol.TaskPreviewMigration, protocol.TaskSafeCopy, protocol.TaskCopySchema:
 		s.afterGuard(t, ok, req.Result, now) // guard.go
+	case protocol.TaskSecurityScan, protocol.TaskSecurityFix:
+		s.afterSecurity(t, ok, req.Result, now) // security.go
 	default:
 		if protocol.IsStandbyTask(t.Type) {
 			return s.afterStandby(t, db, ok, req.Result, now) // standby.go

@@ -73,6 +73,8 @@ type state struct {
 	Fences  []*fenceRec         `json:"fences,omitempty"`
 	// Guard (guard.go): previews, safe copies and masking rules.
 	Guard guardState `json:"guard,omitzero"`
+	// Security (security.go): each database's newest security report.
+	Security map[string]*securityRec `json:"security,omitempty"`
 }
 
 // hostRec is this server, once its agent has enrolled.

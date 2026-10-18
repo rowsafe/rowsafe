@@ -83,6 +83,7 @@ rowsafe_alert_firing{database="app",host="db1",rule="verify_failed",severity="wa
 rowsafe_alert_firing{database="app",host="db1",rule="disk_free_low",severity="warning"} 0
 rowsafe_alert_firing{database="app",host="db1",rule="disk_full_forecast",severity="warning"} 0
 rowsafe_alert_firing{database="app",host="db1",rule="second_copy_failing",severity="warning"} 0
+rowsafe_alert_firing{database="app",host="db1",rule="security_critical",severity="critical"} 0
 rowsafe_alert_firing{database="app",host="db1",rule="standby_down",severity="warning"} 0
 rowsafe_alert_firing{database="app",host="db1",rule="standby_behind",severity="warning"} 0
 rowsafe_alert_firing{database="app",host="db1",rule="standby_primary_unreachable",severity="critical"} 0
@@ -99,6 +100,7 @@ rowsafe_alert_firing{database="shop",host="db1",rule="verify_failed",severity="w
 rowsafe_alert_firing{database="shop",host="db1",rule="disk_free_low",severity="warning"} 0
 rowsafe_alert_firing{database="shop",host="db1",rule="disk_full_forecast",severity="warning"} 0
 rowsafe_alert_firing{database="shop",host="db1",rule="second_copy_failing",severity="warning"} 0
+rowsafe_alert_firing{database="shop",host="db1",rule="security_critical",severity="critical"} 0
 rowsafe_alert_firing{database="shop",host="db1",rule="standby_down",severity="warning"} 0
 rowsafe_alert_firing{database="shop",host="db1",rule="standby_behind",severity="warning"} 0
 rowsafe_alert_firing{database="shop",host="db1",rule="standby_primary_unreachable",severity="critical"} 0
