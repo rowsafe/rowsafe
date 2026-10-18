@@ -163,7 +163,9 @@ func TestRLSPlainPostgres(t *testing.T) {
 	d := protocol.RLSDatabase{Database: "app",
 		OpenPolicies: []protocol.RLSPolicy{{Schema: "public", Table: "docs", Name: "all", Command: "delete", Roles: []string{"public"}, Using: true, TableRLS: true}},
 		SlowPolicies: []protocol.RLSSlowColumn{{Schema: "public", Table: "docs", Column: "owner", Policies: []string{"own"}, Rows: 50000}}}
-	noop := func(id, label, desc string, p protocol.MaintenanceParams) protocol.FindingFix { return protocol.FindingFix{ID: id} }
+	noop := func(id, label, desc string, p protocol.MaintenanceParams) protocol.FindingFix {
+		return protocol.FindingFix{ID: id}
+	}
 	fs := secIDs(RLSFindings([]protocol.RLSDatabase{d}, noop))
 	if _, ok := fs["rls_unindexed"]; !ok || len(fs) != 1 {
 		t.Fatalf("no API roles: %+v", fs)
