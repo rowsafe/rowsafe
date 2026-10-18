@@ -92,6 +92,11 @@ for image in $images; do
   esac
   name=$proj-$engine
   agent=$name-agent
+  # A bucket of its own: the database is called cache each time, and a
+  # bucket folder holds one database's backups.
+  bucket=backups-$engine
+  docker run --rm --label "$proj" --network "$net" --entrypoint sh minio/minio:latest -c \
+    "mc --insecure alias set m https://minio:9000 rowsafe $secret >/dev/null && mc --insecure mb -p m/$bucket >/dev/null"
   docker volume create --label "$proj" "$name-state" >/dev/null
   docker run -d --label "$proj" --network "$net" --name "$name" "$image" >/dev/null
   until_ok 60 "$engine answers" cli PING
@@ -109,7 +114,7 @@ for image in $images; do
     -e ROWSAFE_CONFIG_DIR=/var/lib/rowsafe/config -e ROWSAFE_DRILL_DIR=/var/lib/rowsafe/drills \
     -e ROWSAFE_REWIND_DIR=/var/lib/rowsafe/rewind -e ROWSAFE_LOG_DIR=/var/lib/rowsafe/log \
     -e ROWSAFE_REPO_S3_ENDPOINT=minio -e ROWSAFE_REPO_S3_PORT=9000 -e ROWSAFE_REPO_S3_REGION=us-east-1 \
-    -e ROWSAFE_REPO_S3_BUCKET=backups -e ROWSAFE_REPO_S3_KEY=rowsafe -e ROWSAFE_REPO_S3_KEY_SECRET="$secret" \
+    -e ROWSAFE_REPO_S3_BUCKET="$bucket" -e ROWSAFE_REPO_S3_KEY=rowsafe -e ROWSAFE_REPO_S3_KEY_SECRET="$secret" \
     -e ROWSAFE_REPO_CIPHER_PASS="cipher-$secret" -e ROWSAFE_REPO_S3_CA_FILE=/it/ca.crt \
     --entrypoint /opt/rowsafe/rowsafe-agent "$image" run >/dev/null
   until_ok 60 "the agent's control plane listens" docker exec "$agent" test -S /var/lib/rowsafe/control.sock
