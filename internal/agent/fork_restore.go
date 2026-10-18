@@ -182,6 +182,11 @@ func (a *Agent) forkSourceFor(ctx context.Context, ops forkOps, p protocol.ForkR
 			return s, err
 		}
 		s.lost = true
+		if s.major == 0 { // without an account nobody knows it: the backups say (fork_bucket.go)
+			if s.major, s.sizeBytes, err = a.lostSourceFacts(ctx, ops, p, s.repo); err != nil {
+				return s, err
+			}
+		}
 		tl.Printf("the source's server is lost: reading %s's backups with this server's own storage settings (PostgreSQL %d, %s); nothing was handed over",
 			cmp.Or(p.Source.Name, p.Source.Stanza), s.major, humanBytes(s.sizeBytes))
 	} else if p.Box == nil {

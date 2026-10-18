@@ -173,6 +173,9 @@ func (s *state) complete(id string, req protocol.CompleteRequest, now time.Time)
 	finish(t, req.Status, clip(req.Error, 4000), now)
 	t.Log, t.Result, t.ErrorInfo = clip(req.Log, 64000), req.Result, req.ErrorInfo
 	db := s.db(t.DatabaseID)
+	if t.DatabaseID == "" {
+		return t, s.afterHostTask(t, req, now) // restore_bucket.go
+	}
 	if db == nil {
 		return t, nil
 	}

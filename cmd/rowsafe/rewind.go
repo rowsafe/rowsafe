@@ -386,6 +386,9 @@ func rewindCopyCmd(ctx context.Context, c *client.Client, args []string) error {
 // restoreCmd is rowsafe restore NAME --to TIME|MARK: rewind copy with the
 // point in one flag (a time when it reads as one, else a Mark's name).
 func restoreCmd(ctx context.Context, c *client.Client, args []string) error {
+	if fromBucket(args) { // a lost server's database, from the bucket (restore_bucket.go)
+		return restoreFromBucketCmd(ctx, c, args)
+	}
 	fs := flag.NewFlagSet("restore", flag.ContinueOnError)
 	to := fs.String("to", "", "the point: a time (\"14:04\", \"10m ago\", \"2026-09-24 14:04\", RFC 3339) or a Mark's name")
 	hours := fs.Int("hours", 24, "how long to keep the copy (at most 168)")

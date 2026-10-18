@@ -276,3 +276,15 @@ func TestRenderConfigExclude(t *testing.T) {
 		t.Errorf("config:\n%s", conf)
 	}
 }
+
+// With a wrong passphrase pgBackRest 2.59 exits 0 and quotes the
+// undecryptable bytes, raw control characters included, in its JSON.
+func TestParseInfoWrongPassphrase(t *testing.T) {
+	data := []byte("[{\"archive\":[],\"backup\":[],\"cipher\":\"aes-256-cbc\",\"db\":[],\"name\":\"shop\",\"repo\":[{\"cipher\":\"aes-256-cbc\",\"key\":1," +
+		"\"status\":{\"code\":99,\"message\":\"[FormatError] unable to load info file '/shop/backup/shop/backup.info':\\nFormatError: key/value found outside of section at line 1: \xc3\xd4\x1d\xaf=\"}}]," +
+		"\"status\":{\"code\":99,\"lock\":{\"backup\":{\"held\":false}},\"message\":\"other\"}}]")
+	s, err := ParseInfo(data)
+	if err != nil || len(s) != 1 || s[0].Status.Code != 99 || !strings.Contains(s[0].RepoMessage(), "outside of section") {
+		t.Fatalf("%+v %v", s, err)
+	}
+}

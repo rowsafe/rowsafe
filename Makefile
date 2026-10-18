@@ -212,6 +212,10 @@ test-upgrade:
 test-no-account-upgrade:
 	sh scripts/test-no-account-upgrade.sh
 
+.PHONY: test-no-account-restore
+test-no-account-restore:
+	sh scripts/test-no-account-restore.sh
+
 test-action:
 	integrations/github-action/test/test-action.sh
 

@@ -49,6 +49,9 @@ restore to any second, all on that server:
                                      Mark first) the upgrade; sudo rowsafe upgrade undo shop for 7 days
   sudo rowsafe security-updates shop | reboot shop
                                      the server's security updates, a reboot (a Mark first; you confirm)
+  sudo rowsafe restore shop --from-bucket
+                                     on a new server installed with the same bucket and passphrase:
+                                     shop as its backups hold it, restored here and protected (a move)
   sudo rowsafe backups shop | proofs shop | restores shop | backup shop | proof shop
   sudo rowsafe channels add --type slack --name ops --url https://hooks.slack.com/...
                                      alerts when backups, Proof, continuous backup or the disk need you

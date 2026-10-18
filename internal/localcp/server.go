@@ -168,6 +168,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/databases/{ref}/restore-points", s.createMark)
 	s.rewindRoutes(mux)                                             // rewind.go
 	s.upgradeRoutes(mux)                                            // upgrade.go
+	s.restoreBucketRoutes(mux)                                      // restore_bucket.go
 	mux.HandleFunc("GET /v1/notification-channels", s.channelsList) // alerts.go
 	mux.HandleFunc("POST /v1/notification-channels", s.channelsCreate)
 	mux.HandleFunc("DELETE /v1/notification-channels/{id}", s.channelsDelete)
