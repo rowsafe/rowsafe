@@ -49,6 +49,7 @@ type state struct {
 	Alerts       []*alertRec           `json:"alerts,omitempty"`
 	AlertPending map[string]time.Time  `json:"alert_pending,omitempty"`
 	Metrics      map[string]*dbMetrics `json:"metrics,omitempty"`
+	Weekly       weeklyRec             `json:"weekly_report,omitzero"` // weekly.go
 }
 
 // hostRec is this server, once its agent has enrolled.

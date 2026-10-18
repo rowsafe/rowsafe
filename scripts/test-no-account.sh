@@ -168,6 +168,11 @@ EOF
   ! grep -q "backup_stale\|postgres_unreachable\|wal_archiving_failing" /tmp/alerts.out || { cat /tmp/alerts.out; fail "an alert fires on a healthy server"; }
   rowsafe alerts rules | grep -q backup_stale || fail "rowsafe alerts rules"
   echo "  ok: alerts go to a webhook; none fire on a healthy server"
+  # Your weekly Pulse goes to the same channels (Mondays; --send-test now).
+  rowsafe report | grep -q "Sent to this server's alert channels: webhook ops" || { rowsafe report; fail "rowsafe report"; }
+  rowsafe report --preview | grep -q "shop: protected" || { rowsafe report --preview; fail "rowsafe report --preview"; }
+  rowsafe report --send-test >/tmp/report.out 2>&1 || { cat /tmp/report.out; fail "rowsafe report --send-test"; }
+  echo "  ok: the weekly Pulse previews and goes to the alert channels"
 
   # What needs the dashboard says so.
   ! rowsafe alerts rules set backup_stale --off >/tmp/rules.out 2>&1 || fail "changed a rule on the server alone?"
@@ -284,6 +289,12 @@ EOF
     exit 1
   }
   echo "  ok: the webhook got a signed test notification"
+  docker logs "$name-hook" 2>/dev/null | grep -q '"event":"weekly_report"' || {
+    docker logs "$name-hook" >&2
+    echo "test-no-account: the webhook didn't get the weekly Pulse" >&2
+    exit 1
+  }
+  echo "  ok: the webhook got the weekly Pulse"
   echo "test-no-account: passed on $image"
 }
 
