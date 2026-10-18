@@ -375,7 +375,7 @@ func (s *Server) register(w http.ResponseWriter, name string, port int, socketDi
 	if socketDir == "" {
 		socketDir = defaultSocket(engine) // as on the hosted control plane
 	}
-	if socketDir != "" && !strings.HasPrefix(socketDir, "/") || socketDir == "" && !isMongo(engine) && !redisFamily(engine) { // a path on this Linux server
+	if socketDir != "" && !strings.HasPrefix(socketDir, "/") || socketDir == "" && !isMongo(engine) && !redisFamily(engine) && !isClickHouse(engine) { // a path on this Linux server
 		writeError(w, http.StatusBadRequest, "socket_dir must be an absolute path")
 		return
 	}
@@ -401,6 +401,9 @@ func (s *Server) register(w http.ResponseWriter, name string, port int, socketDi
 			}
 			if isSQLite(engine) {
 				sqliteDefaults(db) // sqlite.go
+			}
+			if isClickHouse(engine) {
+				clickhouseDefaults(db) // clickhouse.go
 			}
 			st.Databases = append(st.Databases, db)
 		}

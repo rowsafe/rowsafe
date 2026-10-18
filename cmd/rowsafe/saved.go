@@ -421,6 +421,9 @@ func savedAdd(ctx context.Context, args []string) error {
 	if sqliteFile(conn) { // a SQLite file (server_saved_sqlite.go)
 		return sqliteAddHelp(conn)
 	}
+	if engine := installerEngine(conn); engine != "" { // server_saved_installer.go
+		return installerAddHelp(engine)
+	}
 	if !local.IsConnString(conn) {
 		return newUsageError("expected a connection string: postgres://USER:PASSWORD@HOST:5432/DB, mysql://USER:PASSWORD@HOST:3306/DB, mongodb://USER:PASSWORD@HOST:27017/DB or redis://:PASSWORD@HOST:6379")
 	}

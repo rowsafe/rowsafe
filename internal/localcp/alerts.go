@@ -277,6 +277,8 @@ func engineRules(engine string) []localRule {
 		return redisRules
 	case protocol.EngineSQLite:
 		return sqliteRules
+	case protocol.EngineClickHouse:
+		return clickhouseRules
 	}
 	return nil
 }
@@ -288,6 +290,8 @@ func engineMetrics(engine string) []string {
 		return mongoMetrics
 	case protocol.EngineRedis, protocol.EngineValkey:
 		return redisMetrics
+	case protocol.EngineClickHouse:
+		return clickhouseMetrics
 	}
 	return nil
 }

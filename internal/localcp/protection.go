@@ -131,6 +131,9 @@ func (st *state) protection(d *dbRec, now time.Time) protocol.Protection {
 	if isSQLite(d.Engine) {
 		p.Reasons = sqliteReasons(d, p.Reasons) // sqlite.go
 	}
+	if isClickHouse(d.Engine) {
+		p.Reasons = clickhouseReasons(p.Reasons) // clickhouse.go
+	}
 	p.Protected = len(p.Reasons) == 0
 	return p
 }

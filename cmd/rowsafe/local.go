@@ -29,7 +29,7 @@ const localHelp = `Save a database once, then use it by name.
 
 On your database server (PostgreSQL, MySQL, MariaDB, MongoDB, Redis or
 Valkey), rowsafe add also protects it (SQLite files: the installer, with
---sqlite /path/to/file):
+--sqlite /path/to/file; ClickHouse: the installer finds it):
 continuous backups to your own bucket, Marks, a weekly restore test and
 restore to any second, all on that server:
 
