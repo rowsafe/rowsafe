@@ -115,8 +115,8 @@ func TestLifecycle(t *testing.T) {
 	if code := a.call("POST", "/v1/agent/setup/databases", protocol.SetupRegisterRequest{Name: "shop", Port: 5432, SocketDir: "/var/run/postgresql"}, &sd); code != http.StatusCreated {
 		t.Fatalf("register: %d", code)
 	}
-	if code := a.call("POST", "/v1/agent/setup/databases", protocol.SetupRegisterRequest{Name: "crm", Port: 9000, Engine: protocol.EngineClickHouse}, nil); code != http.StatusBadRequest {
-		t.Fatalf("ClickHouse without an account: %d", code)
+	if code := a.call("POST", "/v1/agent/setup/databases", protocol.SetupRegisterRequest{Name: "crm", Port: 7700, Engine: protocol.EngineMeilisearch}, nil); code != http.StatusBadRequest {
+		t.Fatalf("Meilisearch without an account: %d", code)
 	}
 	// Pending: monitored, not yet protected.
 	hb := heartbeat(a)

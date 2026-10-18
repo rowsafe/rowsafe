@@ -16,3 +16,11 @@ func TestAddSQLiteFile(t *testing.T) {
 		t.Fatalf("a -wal file: %v", err)
 	}
 }
+
+func TestAddClickHouse(t *testing.T) {
+	noLogin(t)
+	if err := savedAdd(t.Context(), []string{"events", "clickhouse://localhost:9000/analytics"}); err == nil ||
+		!strings.Contains(err.Error(), "installer, which gives Rowsafe its own ClickHouse user") {
+		t.Fatalf("add ClickHouse: %v", err)
+	}
+}

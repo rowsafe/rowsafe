@@ -20,7 +20,7 @@ import (
 
 // localEngines are the engines this control plane protects.
 var localEngines = []string{protocol.EnginePostgreSQL, protocol.EngineMySQL, protocol.EngineMariaDB, protocol.EngineMongoDB,
-	protocol.EngineRedis, protocol.EngineValkey, protocol.EngineSQLite}
+	protocol.EngineRedis, protocol.EngineValkey, protocol.EngineSQLite, protocol.EngineClickHouse}
 
 // localFeatures are what this control plane offers for a database: every
 // local engine has them all (protocol.EngineCapabilities; a test checks).
@@ -60,8 +60,8 @@ func defaultSocket(engine string) string {
 		return "/var/run/mysqld/mysqld.sock"
 	case protocol.EngineMariaDB:
 		return "/run/mysqld/mysqld.sock"
-	case protocol.EngineMongoDB, protocol.EngineRedis, protocol.EngineValkey:
-		return "" // over TCP on 127.0.0.1 (mongodb.go, redis.go)
+	case protocol.EngineMongoDB, protocol.EngineRedis, protocol.EngineValkey, protocol.EngineClickHouse:
+		return "" // over TCP on 127.0.0.1 (mongodb.go, redis.go, clickhouse.go)
 	}
 	return "/var/run/postgresql"
 }
@@ -77,6 +77,8 @@ func defaultPort(engine string) int {
 		return 6379
 	case isSQLite(engine):
 		return 0 // a file (sqlite.go)
+	case isClickHouse(engine):
+		return clickhousePort
 	}
 	return 5432
 }
@@ -96,6 +98,8 @@ func restartYourself(engine string) string {
 		return "Restart Valkey yourself: sudo systemctl restart valkey-server"
 	case protocol.EngineSQLite:
 		return sqliteNoServer
+	case protocol.EngineClickHouse:
+		return "Restart ClickHouse yourself: sudo systemctl restart clickhouse-server"
 	}
 	return "Restart PostgreSQL yourself: sudo systemctl restart postgresql"
 }
@@ -126,6 +130,9 @@ func engineAlert(rule string, st *state, d *dbRec, r ruleResult, now time.Time) 
 	}
 	if isSQLite(d.Engine) {
 		return sqliteAlert(rule, st, d, r, now) // sqlite.go
+	}
+	if isClickHouse(d.Engine) {
+		return clickhouseAlert(rule, st, d, r, now) // clickhouse.go
 	}
 	if isMongo(d.Engine) && r.firing {
 		return mongoAlert(rule, st, d, r, now) // mongodb.go
@@ -166,6 +173,8 @@ func unitName(engine string) string {
 		return "redis-server"
 	case protocol.EngineValkey:
 		return "valkey-server"
+	case protocol.EngineClickHouse:
+		return "clickhouse-server"
 	}
 	return "postgresql"
 }
@@ -175,11 +184,12 @@ func unitName(engine string) string {
 // server per port; its socket file has more than one name, /run and
 // /var/run).
 func (st *state) serverAt(engine string, port int, socket string) *dbRec {
-	if !mysqlFamily(engine) && !isMongo(engine) && !redisFamily(engine) {
+	if !mysqlFamily(engine) && !isMongo(engine) && !redisFamily(engine) && !isClickHouse(engine) {
 		return st.dbAt(port, socket)
 	}
-	for _, d := range st.Databases { // MongoDB, Redis: one server per port, on 127.0.0.1
-		if (mysqlFamily(d.Engine) && mysqlFamily(engine) || isMongo(d.Engine) && isMongo(engine) || redisFamily(d.Engine) && redisFamily(engine)) && d.Port == port {
+	for _, d := range st.Databases { // MongoDB, Redis, ClickHouse: one server per port, on 127.0.0.1
+		if (mysqlFamily(d.Engine) && mysqlFamily(engine) || isMongo(d.Engine) && isMongo(engine) || redisFamily(d.Engine) && redisFamily(engine) ||
+			isClickHouse(d.Engine) && isClickHouse(engine)) && d.Port == port {
 			return d
 		}
 	}
@@ -199,6 +209,9 @@ func validTablesFor(engine string, tables []protocol.RewindTable, limit int) err
 	}
 	if isSQLite(engine) {
 		return sqliteTables(tables, limit) // sqlite.go
+	}
+	if isClickHouse(engine) {
+		return clickhouseTables(tables, limit) // clickhouse.go
 	}
 	if !mysqlFamily(engine) {
 		return validTables(tables, limit)
