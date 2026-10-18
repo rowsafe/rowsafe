@@ -19,6 +19,8 @@
 #        NOACCOUNT_MONGO="7.0" sh scripts/test-no-account-mongodb.sh
 # (needs Docker, ~10 min)
 set -eu
+# The MinIO test image (built once from source: scripts/minio).
+MINIO_SH=$(cd "$(dirname "$0")" && pwd)/minio/image.sh
 cd "$(dirname "$0")/.."
 versions=${NOACCOUNT_MONGO:-8.0}
 proj=rowsafe-noaccount-mongo-$$
@@ -78,9 +80,9 @@ chmod 0644 "$work/certs/private.key" "$work/certs/public.crt"
 secret=$(openssl rand -hex 16)
 docker run -d --label "$proj" --network "$net" --network-alias minio --name "$proj-minio" \
   -e MINIO_ROOT_USER=rowsafe -e MINIO_ROOT_PASSWORD="$secret" \
-  -v "$work/certs:/root/.minio/certs:ro" minio/minio:latest server /data >/dev/null
+  -v "$work/certs:/root/.minio/certs:ro" "$(sh "$MINIO_SH")" server /data >/dev/null
 for _ in $(seq 1 30); do
-  docker run --rm --label "$proj" --network "$net" --entrypoint sh minio/minio:latest -c \
+  docker run --rm --label "$proj" --network "$net" --entrypoint sh "$(sh "$MINIO_SH")" -c \
     "mc --insecure alias set m https://minio:9000 rowsafe $secret >/dev/null && mc --insecure mb -p m/backups >/dev/null" \
     >/dev/null 2>&1 && break
   sleep 1

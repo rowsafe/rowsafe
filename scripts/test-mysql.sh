@@ -19,6 +19,8 @@
 #   MYSQL_IT_RUN=Certificate sh scripts/test-mysql.sh  # the agent installs a CA's certificate for a name
 #                                                     on a server serving the installer's self-signed one
 set -eu
+# The MinIO test image (built once from source: scripts/minio).
+MINIO_SH=$(cd "$(dirname "$0")" && pwd)/minio/image.sh
 cd "$(dirname "$0")/.."
 targets=${MYSQL_IT:-"mysql:8.4 mariadb:11.4"}
 run=${MYSQL_IT_RUN:-Integration}
@@ -54,9 +56,9 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=minio" -addext "sub
 chmod 0644 "$work/certs/private.key" "$work/certs/public.crt"
 docker run -d --label "$proj" --network "$net" --network-alias minio --name "$proj-minio" \
   -e MINIO_ROOT_USER=rowsafe -e MINIO_ROOT_PASSWORD=rowsafe-secret-key \
-  -v "$work/certs:/root/.minio/certs:ro" minio/minio:latest server /data >/dev/null
+  -v "$work/certs:/root/.minio/certs:ro" "$(sh "$MINIO_SH")" server /data >/dev/null
 for _ in $(seq 1 30); do
-  docker run --rm --label "$proj" --network "$net" --entrypoint sh minio/minio:latest -c \
+  docker run --rm --label "$proj" --network "$net" --entrypoint sh "$(sh "$MINIO_SH")" -c \
     'mc --insecure alias set m https://minio:9000 rowsafe rowsafe-secret-key >/dev/null && mc --insecure mb -p m/backups >/dev/null' \
     >/dev/null 2>&1 && break
   sleep 1
