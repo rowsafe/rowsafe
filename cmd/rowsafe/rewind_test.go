@@ -267,6 +267,18 @@ func TestRewindCommands(t *testing.T) {
 	if last() != `POST /in-place {"confirm":"shop","time":"2026-09-24T12:04:00Z"}` {
 		t.Fatalf("in-place request %s", last())
 	}
+	// --to takes a time or a Mark, as rowsafe restore does.
+	for to, want := range map[string]string{
+		"2026-09-24T12:04:00Z": `POST /in-place {"confirm":"shop","time":"2026-09-24T12:04:00Z"}`,
+		"before-migration":     `POST /in-place {"confirm":"shop","mark":"before-migration"}`,
+	} {
+		if _, err := captureStdout(t, func() error { return dispatch(ctx, []string{"rewind", "database", "shop", "--to", to, "--yes"}) }); err != nil || last() != want {
+			t.Fatalf("database --to %s: %v %s", to, err, last())
+		}
+	}
+	if err := dispatch(ctx, []string{"rewind", "database", "shop", "--to", "m", "--mark", "m"}); err == nil || !strings.Contains(err.Error(), "not both") {
+		t.Fatalf("--to and --mark: %v", err)
+	}
 	// A failed rewind says so and exits 1.
 	f.fail = protocol.TaskRewindInPlace
 	stdin = strings.NewReader("shop\n")

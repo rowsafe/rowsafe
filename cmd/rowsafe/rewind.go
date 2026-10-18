@@ -174,7 +174,7 @@ func rewindShow(ctx context.Context, c *client.Client, args []string) error {
 	}
 	fmt.Println()
 	if info.CanRewindInPlace {
-		fmt.Printf("Rewind the whole database in place: rowsafe rewind database %s --at \"TIME\" (asks first)\n", name)
+		fmt.Printf("Rewind the whole database in place: rowsafe rewind database %s --to TIME|MARK (asks first)\n", name)
 	} else if info.InPlaceReason != "" {
 		fmt.Printf("Rewinding the whole database in place isn't available: %s\n", info.InPlaceReason)
 	}
@@ -671,10 +671,21 @@ func rewindExtendCmd(ctx context.Context, c *client.Client, args []string) error
 func rewindDatabaseCmd(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("rewind database", flag.ContinueOnError)
 	at, mark := rewindTargetFlags(fs)
+	to := fs.String("to", "", "the point: a time (\"14:04\", \"10m ago\", \"2026-09-24 14:04\", RFC 3339) or a Mark's name")
 	yes := fs.Bool("yes", false, "don't ask; confirms with the database's name")
 	name, err := dbArg(ctx, c, fs, args)
 	if err != nil {
 		return err
+	}
+	if *to != "" { // --to: a time when it reads as one, else a Mark (as rowsafe restore)
+		if *at != "" || *mark != "" {
+			return newUsageError("give --to, or --at or --mark, not both")
+		}
+		if _, err := parseRewindTime(*to); err == nil {
+			*at = *to
+		} else {
+			*mark = *to
+		}
 	}
 	t, markName, what, err := rewindTarget(*at, *mark)
 	if err != nil {

@@ -48,6 +48,10 @@ type state struct {
 	Drills    []protocol.Drill        `json:"drills"`
 	Marks     []protocol.RestorePoint `json:"restore_points"`
 	Copies    []*copyRec              `json:"copies,omitempty"` // Rewind (rewind.go)
+	// Rewinds in place and the timeline each backup was taken on
+	// (rewind_inplace.go): which backup and timeline a restore follows.
+	Rewinds   []*inPlaceRec    `json:"rewinds,omitempty"`
+	Timelines map[string]int64 `json:"timelines,omitempty"` // backup ID -> PostgreSQL timeline
 	// Alerts (alerts.go): channels, alerts, conditions waiting out their
 	// "for" duration, and the newest monitoring reading of each database.
 	Channels     []*channelRec         `json:"channels,omitempty"`
@@ -186,6 +190,7 @@ func (s *state) prune() {
 		s.Marks = s.Marks[n:]
 	}
 	s.pruneAlerts()
+	s.pruneRewinds() // rewind_inplace.go
 	// Copies gone for a week are forgotten.
 	s.Copies = slices.DeleteFunc(s.Copies, func(c *copyRec) bool {
 		return c.RemovedAt != nil && time.Since(*c.RemovedAt) > 7*24*time.Hour

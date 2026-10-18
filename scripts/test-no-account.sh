@@ -13,9 +13,12 @@
 #   protected), a Mark, a differential backup, the agent restarting (the
 #   state is kept), Rewind (a copy restored to the Mark has the rows deleted
 #   since; compare; bring them back), and a command that needs the
-#   dashboard saying so.
+#   dashboard saying so. Then the whole database rewound in place to a Mark
+#   (typed confirmation, a Mark first), more writes, copies restored after
+#   the rewind and at a point it went back from, the undo, copies after it
+#   and inside the undone rewind, a Proof and the cleanup.
 #
-# Usage: sh scripts/test-no-account.sh [debian:trixie]   (needs Docker, ~4 min)
+# Usage: sh scripts/test-no-account.sh [debian:trixie]   (needs Docker, ~8 min)
 
 set -eu
 
@@ -153,10 +156,12 @@ EOF
   [ "$(psql_app -c 'SELECT count(*) FROM orders')" = 5 ] || fail "the rows didn't come back"
   rowsafe marks shop | grep -q before-rewind-rows || fail "no Mark before bringing rows back"
   echo "  ok: the deleted rows are back, after a Mark"
-  ! rowsafe rewind database shop --mark before-drop --yes >/tmp/inplace.out 2>&1 || fail "rewound in place"
-  grep -q "rowsafe login" /tmp/inplace.out || { cat /tmp/inplace.out; fail "rewinding in place doesn't say why not"; }
   rowsafe rewind drop shop --yes || fail "rowsafe rewind drop"
   until_ok 60 "the copy is gone" sh -c "! rowsafe restores shop | grep -q ready"
+
+  # Rewind the whole database in place, write more, restore copies on both
+  # sides of it, undo it: every restore follows the right timeline.
+  rewind_in_place
 
   # Alerts: a webhook next to the server gets a signed test notification
   # (the host checks what it received); no alert fires on a healthy server.
@@ -186,6 +191,93 @@ EOF
   runuser -u postgres -- /usr/local/bin/rowsafe pulse "postgresql:///postgres?host=/var/run/postgresql" >/tmp/pulse.out 2>&1 || true
   grep -q "/100" /tmp/pulse.out || { cat /tmp/pulse.out; fail "rowsafe pulse on a connection string"; }
   echo "  ok: rowsafe pulse postgres://... works next to it"
+}
+
+# copy_orders TIME|MARK: restores a copy (waiting while backups catch up
+# with TIME), sets copy_n to its orders as "count:max id", and drops it.
+copy_orders() {
+  _i=0
+  until rowsafe restore shop --to "$1" >/tmp/restore-at.out 2>&1; do
+    _i=$((_i + 1))
+    grep -q "only reached" /tmp/restore-at.out && [ "$_i" -lt 30 ] || { cat /tmp/restore-at.out >&2; fail "rowsafe restore shop --to $1"; }
+    sleep 3
+  done
+  rowsafe tasks shop --type rewind_copy --json >/tmp/copy-at.json || fail "the copy's task"
+  _sock=$(grep -o '"socket_dir": *"[^"]*"' /tmp/copy-at.json | head -1 | sed 's/.*: *"\(.*\)"/\1/')
+  _port=$(grep -o '"port": *[0-9]*' /tmp/copy-at.json | head -1 | sed 's/.*: *//')
+  copy_n=$(runuser -u postgres -- psql -qAtX -h "$_sock" -p "$_port" -d shop -c "SELECT count(*) || ':' || coalesce(max(id), 0) FROM orders") ||
+    fail "reading the copy at $1"
+  rowsafe rewind drop shop --yes >/dev/null || fail "dropping the copy at $1"
+  until_ok 60 "the copy at $1 is gone" sh -c "! rowsafe restores shop | grep -q ready"
+}
+
+# now_after_commit: a time just after the last commit, and a later commit
+# archived with a Mark, so a restore to it has something to stop at.
+now_after_commit() {
+  sleep 1
+  at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  sleep 1
+  psql_app -c "INSERT INTO ticks VALUES (now())" || fail "a tick"
+  rowsafe mark shop "$1" >/dev/null || fail "the Mark $1"
+}
+
+# last_backup_done: the newest backup task (the full one after a rewind or
+# an undo) succeeded.
+last_backup_done() {
+  until_ok 300 "$1" sh -c "rowsafe tasks shop --type backup --json | grep -o '\"status\": *\"[a-z]*\"' | head -1 | grep -q succeeded"
+}
+
+rewind_in_place() {
+  psql_app -c "CREATE TABLE ticks (at timestamptz)" || fail "the ticks table"
+  [ "$(psql_app -c 'SELECT count(*) FROM orders')" = 5 ] || fail "orders before the rewind"
+  rowsafe mark shop before-oops >/dev/null || fail "the Mark before-oops"
+  psql_app -c "DELETE FROM orders WHERE id > 1" || fail "the mistake"
+  rowsafe mark shop oops >/dev/null || fail "the Mark oops"
+
+  # Never without the typed name; production untouched.
+  ! rowsafe rewind database shop --to before-oops </dev/null >/tmp/inplace.out 2>&1 || fail "rewound without a confirmation"
+  [ "$(psql_app -c 'SELECT count(*) FROM orders')" = 1 ] || fail "a refused rewind changed production"
+  rowsafe rewind database shop --to before-oops --yes | tee /tmp/inplace.out || fail "rowsafe rewind database"
+  [ "$(psql_app -c 'SELECT count(*) FROM orders')" = 5 ] || fail "the rewind didn't bring the 5 orders back"
+  rowsafe marks shop | grep -q before-rewind- || fail "no Mark before the rewind"
+  rowsafe restores shop | tee /tmp/kept.out
+  grep -q "rowsafe rewind undo shop" /tmp/kept.out || fail "rowsafe restores doesn't offer the undo"
+  ! rowsafe rewind database shop --to before-oops --yes >/tmp/again.out 2>&1 || fail "rewound again while data is kept"
+  grep -q "rowsafe rewind undo" /tmp/again.out || { cat /tmp/again.out; fail "rewinding again doesn't say why not"; }
+  echo "  ok: rewound in place to the Mark, after a Mark; the data from before is kept"
+
+  # Writes after the rewind, on its new timeline.
+  psql_app -c "INSERT INTO orders VALUES (6, 'after the rewind')" || fail "writing after the rewind"
+  now_after_commit after-rewind
+  after_rewind=$at
+  last_backup_done "the full backup that starts the new timeline"
+  copy_orders "$after_rewind"
+  [ "$copy_n" = 6:6 ] || fail "a copy at $after_rewind (after the rewind) has $copy_n orders, want 6:6"
+  echo "  ok: a copy after the rewind has what was written since"
+  copy_orders oops
+  [ "$copy_n" = 1:1 ] || fail "a copy at the Mark oops (rewound away) has $copy_n orders, want 1:1"
+  echo "  ok: a copy at a point the rewind went back from follows the old timeline"
+
+  # Undo: the data from before the rewind comes back; what was written
+  # since is kept aside.
+  ! rowsafe rewind undo shop </dev/null >/tmp/undo.out 2>&1 || fail "undone without a confirmation"
+  rowsafe rewind undo shop --yes || fail "rowsafe rewind undo"
+  [ "$(psql_app -c 'SELECT count(*) FROM orders')" = 1 ] || fail "the undo didn't put the data from before the rewind back"
+  psql_app -c "INSERT INTO orders VALUES (7, 'after the undo')" || fail "writing after the undo"
+  now_after_commit after-undo
+  last_backup_done "the full backup after the undo"
+  copy_orders after-undo
+  [ "$copy_n" = 2:7 ] || fail "a copy after the undo has $copy_n orders, want 2:7"
+  copy_orders "$after_rewind"
+  [ "$copy_n" = 6:6 ] || fail "a copy inside the undone rewind has $copy_n orders, want 6:6"
+  echo "  ok: undone; copies after the undo and inside the undone rewind are right"
+
+  # Proof after it all, then delete the kept data.
+  rowsafe proof shop || fail "rowsafe proof after the undo"
+  rowsafe rewind cleanup shop --yes | tee /tmp/cleanup.out || fail "rowsafe rewind cleanup"
+  ! rowsafe restores shop | grep -q "rowsafe rewind cleanup" || fail "the kept data is still listed"
+  rowsafe status shop || fail "not protected after rewinding in place"
+  echo "  ok: Proof passes after the rewind and the undo; the kept data is deleted"
 }
 
 host() {

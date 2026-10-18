@@ -169,7 +169,7 @@ Rewind: continuous backups, restore to any second
                                              you to type the name). TABLE is schema.table or DB:schema.table
   rowsafe rewind extend [NAME] [--hours 24]  keep the copy longer
   rowsafe rewind drop [NAME] [--yes]         delete the copy
-  rowsafe rewind database [NAME] (--at TIME | --mark LABEL) [--yes]
+  rowsafe rewind database [NAME] --to TIME|MARK [--yes]
                                              rewind the whole live database (stops PostgreSQL; the current
                                              data is kept aside for undo; asks you to type the name). Only on
                                              servers where the installer allowed restarting PostgreSQL

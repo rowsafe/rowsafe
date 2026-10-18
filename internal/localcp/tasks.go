@@ -250,8 +250,10 @@ func (s *state) afterTask(t *taskRec, db *dbRec, req protocol.CompleteRequest, n
 		if res.Repo == protocol.RepoSecond {
 			return nil // a second copy needs an account
 		}
-		s.Backups = append(s.Backups, protocol.Backup{ID: newID("bk"), DatabaseID: db.ID, TaskID: t.ID, Label: res.Label,
-			Type: res.Type, StartedAt: res.StartedAt, StoppedAt: res.StoppedAt, SizeBytes: res.SizeBytes, RepoSizeBytes: res.RepoSizeBytes})
+		b := protocol.Backup{ID: newID("bk"), DatabaseID: db.ID, TaskID: t.ID, Label: res.Label,
+			Type: res.Type, StartedAt: res.StartedAt, StoppedAt: res.StoppedAt, SizeBytes: res.SizeBytes, RepoSizeBytes: res.RepoSizeBytes}
+		s.Backups = append(s.Backups, b)
+		s.recordTimeline(b.ID, res.WALStart) // rewind_inplace.go
 		if res.Kept != nil && res.Label != "" && slices.Contains(res.Kept, res.Label) {
 			// Backups retention removed are forgotten: a restore never names one.
 			s.Backups = slices.DeleteFunc(s.Backups, func(b protocol.Backup) bool {
@@ -296,6 +298,8 @@ func (s *state) afterTask(t *taskRec, db *dbRec, req protocol.CompleteRequest, n
 		s.afterRewind(t, ok, req.Result, now) // rewind.go
 	case protocol.TaskUpgrade, protocol.TaskUpgradeUndo:
 		return s.afterUpgrade(db, ok, now) // upgrade.go
+	case protocol.TaskRewindInPlace, protocol.TaskRewindUndo, protocol.TaskRewindCleanup:
+		return s.afterInPlace(t, db, ok, req.Result, now) // rewind_inplace.go
 	}
 	return nil
 }
