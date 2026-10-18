@@ -60,7 +60,7 @@ protected() {
   rowsafe status shop >/tmp/status.out 2>&1 && return
   cat /tmp/status.out
   ! grep '^  - ' /tmp/status.out | grep -qv 'WAL archiving failed at' || fail "not protected $1"
-  grep -q 'Last WAL archived' /tmp/status.out || fail "no WAL archived $1"
+  grep -q 'Last change copied' /tmp/status.out || fail "no WAL archived $1"
   echo "  ok: protected $1 but for one change log push that failed while the backups moved to the running version"
 }
 
