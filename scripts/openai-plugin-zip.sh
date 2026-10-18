@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Builds the ZIP for the OpenAI plugin directory (ChatGPT and Codex) from
-# integrations/codex: the MCP server and the skills. The directory rejects
-# packages with lifecycle hooks, so the guard hook stays in the plugin people
-# install from this repository and is left out here.
+# integrations/codex: the MCP server only. The directory rejects packages
+# with lifecycle hooks, and flags skills that run code outside the package
+# (the rowsafe CLI); ChatGPT can't run the CLI and its connection is read and
+# Marks only, so the hook and the skills stay in the plugin people install
+# from this repository.
 #
 #   scripts/openai-plugin-zip.sh            -> dist/rowsafe-openai-plugin-<version>.zip
 set -euo pipefail
@@ -17,11 +19,11 @@ trap 'rm -rf "$work"' EXIT
 pkg="$work/rowsafe"
 mkdir -p "$pkg/.codex-plugin"
 
-cp -R "$src/skills" "$src/assets" "$src/README.md" "$pkg/"
+cp -R "$src/assets" "$src/README.md" "$pkg/"
 # The directory matches the server by key and URL only (the draft it created
 # has no Codex-only settings such as tool_timeout_sec).
 jq --indent 2 '{mcpServers: (.mcpServers | map_values({url}))}' "$src/.mcp.json" >"$pkg/.mcp.json"
-jq --indent 2 'del(.hooks)' "$src/.codex-plugin/plugin.json" >"$pkg/.codex-plugin/plugin.json"
+jq --indent 2 'del(.hooks, .skills)' "$src/.codex-plugin/plugin.json" >"$pkg/.codex-plugin/plugin.json"
 
 # The directory takes exactly one remote MCP server with no headers.
 jq -e '(.mcpServers | length) == 1 and ([.mcpServers[] | select(.headers)] | length) == 0' \
