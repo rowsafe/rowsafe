@@ -21,19 +21,20 @@ Features per database: `protocol.EngineCapabilities`.
 
 ## Try it now
 
-On your database server (PostgreSQL on Linux):
+On your database server (Linux, or [Docker](https://rowsafe.sh/docs/guides/no-account-server#docker)):
 
 ```sh
 curl -fsSL https://rowsafe.sh | sudo sh
 sudo rowsafe status shop                  # protected? backups, the change log, the last restore test
 sudo rowsafe mark shop before-migration   # a restore point (a Mark)
-sudo rowsafe backups shop                 # also: proofs, backup, proof
+sudo rowsafe restore shop --to "10m ago"  # a copy as it was then, next to production; rewind rows brings rows back
+sudo rowsafe channels add --type slack --name ops --url https://hooks.slack.com/...   # alerts, and the weekly Pulse
 sudo rowsafe upgrade shop --to 18         # a new PostgreSQL major: a test on a copy, a Mark, then the upgrade (undo for 7 days)
 ```
 
-Continuous backups to your own bucket (encrypted on the server, with a passphrase only you have), Marks, a weekly restore test and Pulse. Restoring through Rowsafe (Rewind) comes with the dashboard, for now.
+Every engine above, with nothing sent to Rowsafe: continuous backups to your own bucket (encrypted on the server, with a passphrase only you have), Marks, a weekly restore test, restore to any second (or rewind the whole database, with undo), a second copy, alerts, Pulse with history, logs, security fixes, file backups, standbys and Prometheus metrics. From your laptop or an AI agent, over SSH: `rowsafe add shop ssh://root@db1`. All of it: [Rowsafe on your server](https://rowsafe.sh/docs/guides/no-account-server).
 
-From anywhere, on a PostgreSQL you can connect to (managed ones too):
+From anywhere, on a database you can connect to (managed ones too):
 
 ```sh
 curl -fsSL https://rowsafe.sh/cli | sh
@@ -50,13 +51,13 @@ rowsafe use shop                                    # in a project: then just `r
 
 Pulse checks cleanup falling behind, bloat, duplicate and unused indexes, stuck sessions, locks, connections, replication slots, transaction ID wraparound and settings. The connection string stays in your config folder, readable only by you; `rowsafe pulse postgres://…` works once without saving, and `rowsafe use shop` makes it a project's database. Through a pooler, everything works but the fixes that run inside the database. Nothing is sent to Rowsafe. `rowsafe help local` has the rest; the demo above is a [real recording](docs/demo).
 
-MySQL and MariaDB work the same way (`rowsafe add shop mysql://user@host:3306/dbname`): stuck sessions and locks, long transactions, InnoDB's old row versions, the buffer pool, free space inside tables, unused and duplicate indexes, tables without a primary key and the slow query log, with fixes to end a session, drop an index, turn on the slow log and rebuild a table. Not yet: `schema`, `explain`, `preview`, replication checks, and MariaDB settings changes (they live in its configuration file).
+MySQL and MariaDB work the same way (`rowsafe add shop mysql://user@host:3306/dbname`), and so do MongoDB (`mongodb://`), Redis and Valkey (`redis://`). MySQL and MariaDB: stuck sessions and locks, long transactions, InnoDB's old row versions, the buffer pool, free space inside tables, unused and duplicate indexes, tables without a primary key and the slow query log, with fixes to end a session, drop an index, turn on the slow log and rebuild a table. Not yet: `schema`, `explain`, `preview`, replication checks, and MariaDB settings changes (they live in its configuration file).
 
 On Windows, download `rowsafe-windows-amd64.exe` (or `-arm64.exe`) from the [latest release](https://github.com/rowsafe/rowsafe/releases/latest); the commands from anywhere work there, fixes included, except MySQL for now.
 
 ## Link it to the dashboard
 
-[The dashboard](https://app.rowsafe.sh) adds every server and database in one place, alerts, history, Rewind in one click and teams. Free for one server.
+[The dashboard](https://app.rowsafe.sh) adds every server and database in one place, alerts from outside when a server is down, email, charts, teams and Rowsafe Storage. Free for one server.
 
 ```sh
 sudo rowsafe login                    # on a server set up above: keeps its backups, Marks and restore tests
