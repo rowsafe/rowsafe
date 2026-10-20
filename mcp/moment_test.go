@@ -89,8 +89,11 @@ func TestFindMomentTool(t *testing.T) {
 	}
 	tools, _ := cs.ListTools(ctx, nil)
 	for _, tool := range tools.Tools {
-		if tool.Name == "find_moment" && (tool.Annotations == nil || !tool.Annotations.ReadOnlyHint) {
-			t.Error("find_moment isn't marked read-only")
+		// It queues a task, so it isn't read-only to a directory's review,
+		// but it's never destructive.
+		if tool.Name == "find_moment" && (tool.Annotations == nil || tool.Annotations.ReadOnlyHint ||
+			tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint) {
+			t.Errorf("find_moment annotations: %+v", tool.Annotations)
 		}
 	}
 }

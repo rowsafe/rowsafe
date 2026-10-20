@@ -82,11 +82,14 @@ func (t *tools) addMomentTools(s *sdk.Server) {
 		Name: "find_moment",
 		Description: "Finds when rows were deleted or changed, or a table emptied (TRUNCATE) or dropped: the Rowsafe agent reads the database's change log (PostgreSQL's WAL; for other engines where supported, their binary log, oplog, Redis's replication stream or, for SQLite, the WAL pages replayed on a private copy) in the user's own storage, on their server, " +
 			"and lists the biggest changes per transaction with the exact commit time, transaction ID, table, row count and the point in time just before it (the moment to rewind to). " +
-			"Read-only: it never changes the database and never reads row contents. " +
+			"It never changes the database and never reads row contents; each call starts a search task on the user's server (listed by list_searches). " +
 			"Redis and Valkey: pass key names or patterns in tables; results count the keys each change touched under the pattern searched (key names never leave the server). " +
 			"Default range: the last 24 hours. A search can take a minute or more; while its status is queued or running, the result has a task_id, and passing that task_id returns the search's result instead of starting a new one. " +
 			"list_searches lists the recent searches (their task_ids and summaries) and how far back a search can go.",
-		Annotations: readOnly("Find the moment"),
+		// Not readOnlyHint: each call queues a search task the user can see
+		// (list_searches, the dashboard's Tasks), though it never changes the
+		// database. Registered for read-only connections all the same.
+		Annotations: writes("Find the moment", false, false),
 		InputSchema: inputSchema[findMomentInput](func(p map[string]*jsonschema.Schema) {
 			p["since_hours"].Minimum, p["since_hours"].Maximum = ptr(0.0), ptr(protocol.MaxMomentRange.Hours())
 			p["kinds"].Items.Enum = []any{protocol.MomentDelete, protocol.MomentUpdate, protocol.MomentTruncate, protocol.MomentDrop}
