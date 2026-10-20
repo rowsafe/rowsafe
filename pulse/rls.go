@@ -29,10 +29,7 @@ const (
 	rlsNames         = 3
 )
 
-// anonymousRoles are the API roles of visitors who aren't signed in.
-var anonymousRoles = []string{"anon", "web_anon", "public"}
-
-func anonymous(role string) bool { return slices.Contains(anonymousRoles, role) }
+func anonymous(role string) bool { return protocol.AnonymousAPIRole(role) }
 
 // rlsTable is a table of one of the databases.
 type rlsTable struct {

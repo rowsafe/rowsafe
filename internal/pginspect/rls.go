@@ -6,6 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/rowsafe/rowsafe/preview"
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
@@ -218,4 +219,47 @@ func readPublicBuckets(ctx context.Context, conn *pgx.Conn, d *protocol.RLSDatab
 		d.PublicBuckets, d.Truncated = d.PublicBuckets[:maxRLSBuckets], true
 	}
 	return err
+}
+
+// maxRLSCatalog caps the tables and policies ReadRLSCatalog reads.
+const maxRLSCatalog = 20000
+
+// ReadRLSCatalog reads what a migration preview compares before and after
+// the migration on the copy: ReadRLS's facts, whether row-level security
+// is on for each of the application's tables, and its policies' names.
+// Catalog only.
+func ReadRLSCatalog(ctx context.Context, conn *pgx.Conn) (*preview.RLSCatalog, error) {
+	facts, err := ReadRLS(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	c := &preview.RLSCatalog{Facts: facts, Tables: map[string]bool{}, Policies: map[string][]string{}}
+	rows, err := conn.Query(ctx, `
+		SELECT n.nspname || '.' || c.relname, c.relrowsecurity
+		FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE c.relkind IN ('r', 'p') AND NOT c.relispartition
+		  AND n.nspname <> ALL($1) AND n.nspname NOT LIKE 'pg\_%'
+		LIMIT $2`, rlsSkipSchemas, maxRLSCatalog)
+	if err != nil {
+		return nil, err
+	}
+	var name string
+	var on bool
+	if _, err := pgx.ForEachRow(rows, []any{&name, &on}, func() error { c.Tables[name] = on; return nil }); err != nil {
+		return nil, err
+	}
+	rows, err = conn.Query(ctx, `
+		SELECT n.nspname || '.' || c.relname, p.polname::text
+		FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname <> ALL($1) AND n.nspname NOT LIKE 'pg\_%'
+		LIMIT $2`, rlsSkipSchemas, maxRLSCatalog)
+	if err != nil {
+		return nil, err
+	}
+	var table, policy string
+	_, err = pgx.ForEachRow(rows, []any{&table, &policy}, func() error {
+		c.Policies[table] = append(c.Policies[table], policy)
+		return nil
+	})
+	return c, err
 }

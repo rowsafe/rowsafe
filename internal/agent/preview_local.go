@@ -15,10 +15,11 @@ import (
 // watches its locks, and fills res.Statements, res.Error and
 // res.DurationMs: the agent's preview run, for rowsafe preview without an
 // account, which runs it on a temporary database holding a copy of the
-// schema. It returns the run's log. The caller assesses res.
-func RunPreviewOn(ctx context.Context, t pginspect.Target, dbname string, stmts []preview.Stmt, res *protocol.PreviewResult, runFor time.Duration) (string, error) {
+// schema. It returns the row-level security regressions it found and the
+// run's log. The caller assesses res.
+func RunPreviewOn(ctx context.Context, t pginspect.Target, dbname string, stmts []preview.Stmt, res *protocol.PreviewResult, runFor time.Duration) ([]protocol.PreviewFinding, string, error) {
 	a := &Agent{log: slog.New(slog.DiscardHandler)}
 	tl := &taskLog{}
-	err := a.runPreview(ctx, t, t, dbname, stmts, res, runFor, tl)
-	return tl.String(), err
+	rls, err := a.runPreview(ctx, t, t, dbname, stmts, res, runFor, tl)
+	return rls, tl.String(), err
 }

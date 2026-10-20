@@ -18,6 +18,12 @@ const MaintEnableRLS = "enable_rls"
 // MaxRLSTables caps the tables of one enable_rls.
 const MaxRLSTables = 50
 
+// AnonymousAPIRole: role is how an API reaches visitors who aren't signed
+// in (Supabase's anon, PostgREST's web_anon, or "public": every role).
+func AnonymousAPIRole(role string) bool {
+	return role == "anon" || role == "web_anon" || role == "public"
+}
+
 // RLSDatabase is one PostgreSQL database's row-level security facts. The
 // agent only reports databases that look like they use row-level
 // security: API roles exist, or a table has it on or a policy.

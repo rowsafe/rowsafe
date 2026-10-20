@@ -100,14 +100,15 @@ func runTestPreview(t *testing.T, a *Agent, super pginspect.Target, db, sql stri
 	runner := super
 	runner.User = previewRole
 	tl := &taskLog{}
-	if err := a.runPreview(context.Background(), super, runner, db, stmts, res, time.Minute, tl); err != nil {
+	rls, err := a.runPreview(context.Background(), super, runner, db, stmts, res, time.Minute, tl)
+	if err != nil {
 		t.Fatalf("runPreview: %v\n%s", err, tl.String())
 	}
 	var texts []string
 	for _, s := range stmts {
 		texts = append(texts, s.Text)
 	}
-	preview.Assess(res, texts)
+	preview.AssessEngine(protocol.EnginePostgreSQL, res, texts, rls)
 	return res
 }
 
@@ -239,6 +240,79 @@ COMMIT;`)
 			t.Fatalf("%+v %s", res.Statements[0], res.Verdict)
 		}
 	})
+}
+
+func TestPreviewRowLevelSecurity(t *testing.T) {
+	tgt, conn := copiesCluster(t)
+	ctx := context.Background()
+	var exists bool
+	_ = conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'web_anon')`).Scan(&exists)
+	if exists {
+		t.Skip("the test cluster already has a web_anon role")
+	}
+	db := copiesScratchDB(t, conn, "web_anon")
+	if _, err := conn.Exec(ctx, "CREATE ROLE web_anon NOLOGIN"); err != nil {
+		t.Fatal(err)
+	}
+	copiesExec(t, tgt, db, `
+		CREATE TABLE profiles (id int PRIMARY KEY, owner name NOT NULL DEFAULT current_user);
+		ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+		CREATE POLICY own ON profiles USING (owner = current_user);
+		CREATE TABLE notes (id int PRIMARY KEY, owner name);
+		ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+		CREATE POLICY p ON notes USING (owner = current_user);
+		GRANT SELECT ON profiles, notes TO web_anon;`)
+	a := copiesAgent(t, tgt.User)
+	if _, err := conn.Exec(ctx, "CREATE ROLE "+previewRole+" LOGIN"); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareRoles(ctx, tgt, conn, []string{db}, previewRole, &taskLog{}); err != nil {
+		t.Fatalf("prepareRoles: %v", err)
+	}
+	res := runTestPreview(t, a, tgt, db, `
+CREATE TABLE invoices (id int PRIMARY KEY, total numeric);
+GRANT SELECT ON invoices TO web_anon;
+ALTER TABLE profiles DISABLE ROW LEVEL SECURITY;
+DROP POLICY p ON notes;
+CREATE POLICY everyone ON notes FOR SELECT TO web_anon USING (true);`)
+	if res.Error != nil {
+		t.Fatalf("error: %+v", res.Error)
+	}
+	got := map[string]protocol.PreviewFinding{}
+	for _, f := range res.Findings {
+		got[f.Rule] = f
+	}
+	if f := got["rls_new_table"]; f.Statement != 1 || f.Title != "New table public.invoices has no row-level security" {
+		t.Errorf("new table: %+v", f)
+	}
+	if f := got["rls_disabled"]; f.Statement != 3 || f.Severity != protocol.PreviewDangerous {
+		t.Errorf("disabled: %+v", f)
+	}
+	if f := got["rls_policy_dropped"]; f.Statement != 4 || f.Title != "Drops the policy p on public.notes" {
+		t.Errorf("dropped: %+v", f)
+	}
+	if f := got["rls_open_policy"]; f.Statement != 5 {
+		t.Errorf("open policy: %+v", f)
+	}
+	if res.Verdict != protocol.PreviewDangerous || !strings.Contains(res.Summary, "row-level security") {
+		t.Errorf("verdict %s: %s", res.Verdict, res.Summary)
+	}
+
+	// A new table with row-level security and a policy: nothing to say.
+	// (The run above changed the test database itself: no clone here.)
+	res = runTestPreview(t, a, tgt, db, `
+CREATE TABLE receipts (id int PRIMARY KEY, owner name);
+ALTER TABLE receipts ENABLE ROW LEVEL SECURITY;
+CREATE POLICY own ON receipts USING (owner = current_user);
+GRANT SELECT ON receipts TO web_anon;`)
+	if res.Error != nil {
+		t.Fatalf("error: %+v", res.Error)
+	}
+	for _, f := range res.Findings {
+		if strings.HasPrefix(f.Rule, "rls_") {
+			t.Errorf("unexpected: %+v", f)
+		}
+	}
 }
 
 func TestMaskCopy(t *testing.T) {
