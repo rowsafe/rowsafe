@@ -80,7 +80,8 @@ func dockerMongo(t *testing.T, image string) string {
 			}
 		}
 		if ctx.Err() != nil {
-			t.Fatalf("%s didn't start: %v", image, err)
+			logs, _ := exec.Command("docker", "logs", "--tail", "30", id).CombinedOutput()
+			t.Fatalf("%s didn't start: %v\n%s", image, err, logs)
 		}
 		time.Sleep(time.Second)
 	}

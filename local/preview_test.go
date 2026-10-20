@@ -137,6 +137,45 @@ INSERT INTO events VALUES ('2026-05-01', 'x');`
 	}
 }
 
+func TestPreviewRowLevelSecurity(t *testing.T) {
+	d, conn := testDB(t)
+	for _, q := range append(slices.Clone(previewSchema), `ALTER TABLE users ENABLE ROW LEVEL SECURITY`, `CREATE POLICY own ON users USING (email = current_user)`) {
+		if _, err := conn.Exec(t.Context(), q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, viaDump := range []bool{true, false} {
+		name := "catalogs"
+		if viaDump {
+			name = "pg_dump"
+		}
+		t.Run(name, func(t *testing.T) {
+			if !viaDump {
+				old := lookPgDump
+				lookPgDump = func(int) (string, bool) { return "", false }
+				t.Cleanup(func() { lookPgDump = old })
+			} else if _, ok := findPgDump(17); !ok {
+				t.Skip("no pg_dump for this server")
+			}
+			res, err := d.Preview(t.Context(), "DROP POLICY own ON users;\nALTER TABLE users DISABLE ROW LEVEL SECURITY;", PreviewOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Checked != protocol.PreviewCheckedSchema {
+				t.Fatalf("checked %q: %s (%s)", res.Checked, res.Summary, res.CheckNote)
+			}
+			var rules []string
+			for _, f := range res.Findings {
+				rules = append(rules, f.Rule)
+			}
+			if !slices.Contains(rules, "rls_disabled") || !slices.Contains(rules, "rls_policy_dropped") || res.Verdict != protocol.PreviewCareful {
+				t.Errorf("%s: %s; rules %q", res.Verdict, res.Summary, rules)
+			}
+		})
+	}
+	noScratchLeft(t, d)
+}
+
 func TestPreviewFailsAndFallsBack(t *testing.T) {
 	d := setupPreview(t)
 	// The view uses user_id: PostgreSQL refuses the type change.

@@ -12,6 +12,6 @@ import (
 
 // runPreviewOn: the agent's preview run doesn't build on Windows, so
 // previews there read the SQL instead.
-func runPreviewOn(context.Context, pginspect.Target, string, []preview.Stmt, *protocol.PreviewResult, time.Duration) error {
-	return errors.New("running it on a copy isn't available on Windows yet")
+func runPreviewOn(context.Context, pginspect.Target, string, []preview.Stmt, *protocol.PreviewResult, time.Duration) ([]protocol.PreviewFinding, error) {
+	return nil, errors.New("running it on a copy isn't available on Windows yet")
 }

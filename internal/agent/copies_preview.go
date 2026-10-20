@@ -210,11 +210,12 @@ func (a *Agent) previewMigration(ctx context.Context, db protocol.DatabaseSpec, 
 		texts = append(texts, s.Text)
 	}
 	superT, runnerT := a.guardTarget(rec.Port, rec.socketDir(), ""), a.guardTarget(rec.Port, rec.socketDir(), previewRole)
-	if err := a.runPreview(ctx, superT, runnerT, dbname, stmts, res, runFor, tl); err != nil {
+	rls, err := a.runPreview(ctx, superT, runnerT, dbname, stmts, res, runFor, tl)
+	if err != nil {
 		keep = false
 		return nil, err
 	}
-	preview.Assess(res, texts)
+	preview.AssessEngine(protocol.EnginePostgreSQL, res, texts, rls)
 	tl.Printf("%s", res.Summary)
 	return res, nil
 }
@@ -478,8 +479,46 @@ type stmtRun struct {
 }
 
 // runPreview runs the statements on the copy's database dbname and fills
-// res.Statements (and res.Error, res.DurationMs).
+// res.Statements (and res.Error, res.DurationMs). It returns the row-level
+// security regressions found by comparing the copy's catalog before and
+// after (preview.RLSFindings), for the assessment.
 func (a *Agent) runPreview(ctx context.Context, superT, runnerT pginspect.Target, dbname string, stmts []preview.Stmt,
+	res *protocol.PreviewResult, runFor time.Duration, tl *taskLog) ([]protocol.PreviewFinding, error) {
+	before := a.readRLSCatalog(ctx, superT, dbname, tl)
+	if err := a.runStatements(ctx, superT, runnerT, dbname, stmts, res, runFor, tl); err != nil {
+		return nil, err
+	}
+	if before == nil || res.Error != nil {
+		return nil, nil
+	}
+	after := a.readRLSCatalog(ctx, superT, dbname, tl)
+	texts := make([]string, len(stmts))
+	for i, s := range stmts {
+		texts[i] = s.Text
+	}
+	return preview.RLSFindings(before, after, texts), nil
+}
+
+// readRLSCatalog reads the copy's row-level security (catalog only); nil
+// when it can't, so the preview goes on without that check.
+func (a *Agent) readRLSCatalog(ctx context.Context, t pginspect.Target, dbname string, tl *taskLog) *preview.RLSCatalog {
+	conn, err := copyConnect(ctx, t, dbname)
+	if err != nil {
+		tl.Printf("reading row-level security on the copy: %v", err)
+		return nil
+	}
+	defer closeConn(context.Background(), conn)
+	c, err := pginspect.ReadRLSCatalog(ctx, conn)
+	if err != nil {
+		tl.Printf("reading row-level security on the copy: %v", err)
+		return nil
+	}
+	return c
+}
+
+// runStatements runs the statements on the copy's database dbname and
+// fills res.Statements (and res.Error, res.DurationMs).
+func (a *Agent) runStatements(ctx context.Context, superT, runnerT pginspect.Target, dbname string, stmts []preview.Stmt,
 	res *protocol.PreviewResult, runFor time.Duration, tl *taskLog) error {
 	super, err := copyConnect(ctx, superT, dbname)
 	if err != nil {

@@ -380,14 +380,15 @@ func (d *DB) previewOnScratch(ctx context.Context, conn *pgx.Conn, info serverIn
 		runFor = defaultPreviewRun
 	}
 	res = &protocol.PreviewResult{Mode: preview.Mode(stmts), DB: d.Name(), Checked: protocol.PreviewCheckedSchema, Statements: []protocol.PreviewStatement{}}
-	if err := runPreviewOn(ctx, t, name, stmts, res, runFor); err != nil {
+	rls, err := runPreviewOn(ctx, t, name, stmts, res, runFor)
+	if err != nil {
 		return nil, "the run on the temporary database stopped (" + firstLine(err.Error()) + ")"
 	}
 	if res.Error != nil && len(failed) > 0 {
 		return nil, fmt.Sprintf("statement %d failed on the temporary copy (%s), but %d %s of the schema couldn't be copied there (first: %s), which may be why",
 			res.Error.Statement, res.Error.Message, len(failed), plural(len(failed), "object", "objects"), failed[0])
 	}
-	extra := estimate(res, stmts, cat)
+	extra := append(estimate(res, stmts, cat), rls...)
 	tidyErrors(res, info.user)
 	texts := make([]string, len(stmts))
 	for i, s := range stmts {
