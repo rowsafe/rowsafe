@@ -55,8 +55,10 @@ func Open(dir string, log *slog.Logger) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{st: st, log: log, now: time.Now, updates: &updates{http: &http.Client{Timeout: 30 * time.Second}},
-		alertHTTP: &http.Client{Timeout: 15 * time.Second}, hist: hist}, nil
+	s := &Server{st: st, log: log, now: time.Now, updates: &updates{http: &http.Client{Timeout: 30 * time.Second}},
+		alertHTTP: &http.Client{Timeout: 15 * time.Second}, hist: hist}
+	st.now = func() time.Time { return s.now() } // pruning follows the server's clock
+	return s, nil
 }
 
 // Serve listens on the Unix socket at path (0660: the agent's user and
