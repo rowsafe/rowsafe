@@ -119,10 +119,11 @@ type store struct {
 	mu   sync.Mutex
 	path string
 	s    state
+	now  func() time.Time
 }
 
 func openStore(path string) (*store, error) {
-	st := &store{path: path}
+	st := &store{path: path, now: time.Now}
 	data, err := os.ReadFile(path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
@@ -150,7 +151,7 @@ func (st *store) update(fn func(s *state) error) error {
 	if err := fn(&st.s); err != nil {
 		return err
 	}
-	st.s.prune()
+	st.s.prune(st.now())
 	return st.save()
 }
 
@@ -187,7 +188,7 @@ func (st *store) save() error {
 }
 
 // prune drops the oldest history beyond what is kept.
-func (s *state) prune() {
+func (s *state) prune(now time.Time) {
 	finished := 0
 	for i := len(s.Tasks) - 1; i >= 0; i-- { // newest last
 		if !s.Tasks[i].open() {
@@ -210,12 +211,12 @@ func (s *state) prune() {
 		s.Marks = s.Marks[n:]
 	}
 	s.pruneAlerts()
-	s.pruneRewinds()         // rewind_inplace.go
-	s.pruneGuard(time.Now()) // guard.go
-	s.pruneFiles(time.Now())
+	s.pruneRewinds()  // rewind_inplace.go
+	s.pruneGuard(now) // guard.go
+	s.pruneFiles(now)
 	// Copies gone for a week are forgotten.
 	s.Copies = slices.DeleteFunc(s.Copies, func(c *copyRec) bool {
-		return c.RemovedAt != nil && time.Since(*c.RemovedAt) > 7*24*time.Hour
+		return c.RemovedAt != nil && now.Sub(*c.RemovedAt) > 7*24*time.Hour
 	})
 }
 
