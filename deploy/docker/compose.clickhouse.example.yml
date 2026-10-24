@@ -53,6 +53,7 @@ services:
     # clickhouse25.8. It follows the newest Rowsafe release; to pin one, use
     # the exact tag instead, e.g. ghcr.io/rowsafe/agent:<version>-clickhouse26.8.
     image: ghcr.io/rowsafe/agent:clickhouse26.8
+    stop_grace_period: 45s # a stopping agent sends its running tasks' outcome first
     # The name Rowsafe shows for this host: `rowsafe adopt events --host db-1`.
     hostname: db-1
     restart: unless-stopped

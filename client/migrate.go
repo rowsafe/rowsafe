@@ -100,23 +100,29 @@ func (c *Client) FinishMigration(ctx context.Context, id string) (protocol.Migra
 // ready says so), calling progress on every change.
 func (c *Client) WaitMigration(ctx context.Context, id string, ready func(protocol.Migration) bool, progress func(protocol.Migration)) (protocol.Migration, error) {
 	var last string
+	var poll Poll
 	for {
 		m, err := c.Migration(ctx, id)
-		if err != nil {
-			return m, err
-		}
-		key := fmt.Sprintf("%s/%s/%v", m.Status, m.TaskStatus, m.Progress)
-		if progress != nil && key != last {
-			progress(m)
-			last = key
-		}
-		if ready(m) {
-			return m, nil
+		switch {
+		case err != nil:
+			if !poll.Retry(ctx, err) {
+				return m, err
+			}
+		default:
+			poll.OK()
+			key := fmt.Sprintf("%s/%s/%v", m.Status, m.TaskStatus, m.Progress)
+			if progress != nil && key != last {
+				progress(m)
+				last = key
+			}
+			if ready(m) {
+				return m, nil
+			}
 		}
 		select {
 		case <-ctx.Done():
 			return m, ctx.Err()
-		case <-time.After(2 * time.Second):
+		case <-time.After(waitTaskPoll):
 		}
 	}
 }

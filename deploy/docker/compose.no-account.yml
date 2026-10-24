@@ -57,6 +57,7 @@ services:
     # One image per PostgreSQL major. It follows the newest Rowsafe release;
     # to pin one, use the exact tag: ghcr.io/rowsafe/agent:<version>-pg17.
     image: ghcr.io/rowsafe/agent:pg17
+    stop_grace_period: 45s # a stopping agent sends its running tasks' outcome first
     hostname: db-1
     # The postgres user of the postgres image: 999:999 (Debian images),
     # 70:70 (-alpine images).

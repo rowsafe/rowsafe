@@ -444,7 +444,9 @@ func scratchDB(t *testing.T, tg Target) (string, *pgx.Conn) {
 	if err != nil {
 		t.Skip(err)
 	}
-	name := fmt.Sprintf("rowsafe_scratch_%d", time.Now().UnixNano())
+	// "_" sorts before lowercase names, so the scratch database is among the
+	// first 20 Insights examines even on a server crowded with databases.
+	name := fmt.Sprintf("_rowsafe_scratch_%d", time.Now().UnixNano())
 	if _, err := admin.Exec(t.Context(), `CREATE DATABASE `+name); err != nil {
 		admin.Close(context.Background())
 		t.Skipf("can't create a scratch database: %v", err)

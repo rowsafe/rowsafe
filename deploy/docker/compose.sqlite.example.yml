@@ -49,6 +49,7 @@ services:
     # It follows the newest Rowsafe release; to pin one, use the exact tag
     # instead, e.g. ghcr.io/rowsafe/agent:<version>-sqlite.
     image: ghcr.io/rowsafe/agent:sqlite
+    stop_grace_period: 45s # a stopping agent sends its running tasks' outcome first
     # The name Rowsafe shows for this host.
     hostname: app-1
     restart: unless-stopped

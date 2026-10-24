@@ -261,3 +261,44 @@ func TestSnapshotProblem(t *testing.T) {
 		t.Fatal(p)
 	}
 }
+
+// A big command cut short (the link drops in the middle of it) leaves
+// nothing of itself in the segment: the records before it read back.
+func TestSegmentCutInSpilledRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "a.open")
+	w, err := createSegment(path, strings.Repeat("a", 40), 100, 0, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ping := "*1\r\n$4\r\nPING\r\n"
+	w.begin()
+	info, err := readCommand(bufio.NewReader(strings.NewReader(ping)), w.emit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.end(time.Now(), 100, info); err != nil {
+		t.Fatal(err)
+	}
+	w.begin()
+	if err := w.emit([]byte("*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$20000000\r\n" + strings.Repeat("v", spillAt))); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.close(); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	sr, err := newSegReader(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := sr.next()
+	if err != nil || rec.Len != int64(len(ping)) {
+		t.Fatalf("first record %+v %v", rec, err)
+	}
+	if err := sr.skip(rec.Len); err != nil {
+		t.Fatal(err)
+	}
+	if rec, err := sr.next(); err != io.EOF {
+		t.Fatalf("after the cut record: %+v %v, want the end", rec, err)
+	}
+}

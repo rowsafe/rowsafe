@@ -216,3 +216,23 @@ func TestUnreachable(t *testing.T) {
 		t.Errorf("unreachable: %v", err)
 	}
 }
+
+// The password never stays in Ref (shown in commands, --json and MCP
+// answers, and given to pg_dump), however the string is written.
+func TestPostgresRefDropsPassword(t *testing.T) {
+	for in, want := range map[string]string{
+		"postgres://app:pa^ss{|}@db.example.com/app":                          "postgres://app@db.example.com/app",
+		"postgres://app@db.example.com/app?password=s3cret":                   "postgres://app@db.example.com/app",
+		"postgres://app@db/app?sslmode=require&PassWord=s3cret&sslpassword=k": "postgres://app@db/app?sslmode=require",
+		"postgresql://app:s3cret@db:5433/app?sslmode=verify-full":             "postgresql://app@db:5433/app?sslmode=verify-full",
+		"postgres://app@db/app?sslmode=disable":                               "postgres://app@db/app?sslmode=disable",
+	} {
+		d, err := Open(in)
+		if err != nil {
+			t.Fatalf("%s: %v", in, err)
+		}
+		if d.Ref != want || d.url != want || d.PasswordInURL != (in != want) {
+			t.Errorf("%s: ref %q url %q password in URL %v, want %q", in, d.Ref, d.url, d.PasswordInURL, want)
+		}
+	}
+}

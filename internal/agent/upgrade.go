@@ -714,7 +714,7 @@ func (a *Agent) upgradeRehearsal(ctx context.Context, db protocol.DatabaseSpec, 
 	if err := a.writeScratchConf(dataDir, nspec); err != nil {
 		return finish(err)
 	}
-	nconn, nspec, err := a.startScratchFallback(ctx, tl, nspec, scratch, newCtl, dir, 10*time.Minute, prod.SharedPreloadLibraries)
+	nconn, _, err := a.startScratchFallback(ctx, tl, nspec, scratch, newCtl, dir, 10*time.Minute, prod.SharedPreloadLibraries)
 	if err != nil {
 		return finish(fmt.Errorf("the upgraded copy didn't start: %w", err))
 	}

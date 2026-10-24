@@ -492,6 +492,15 @@ func joinAnd(parts []string) string {
 	return strings.Join(parts[:len(parts)-1], ", ") + " and " + parts[len(parts)-1]
 }
 
+// maxPlaceholders is the most ? a MySQL prepared statement takes.
+const maxPlaceholders = 65535
+
+// insertBatch is how many rows of cols columns one INSERT carries: rowBatch,
+// fewer for a wide table (each value is a placeholder).
+func insertBatch(cols int) int {
+	return max(1, min(rowBatch, maxPlaceholders/max(cols, 1)))
+}
+
 // bringBack writes one database's rows in one transaction.
 func (s *server) bringBack(ctx context.Context, prod, cp *sql.DB, tables []protocol.RewindTable, diffs map[protocol.RewindTable]*tableDiff,
 	includeChanged bool, log agent.TaskLogger) ([]protocol.RewindTableRows, error) {
@@ -505,7 +514,7 @@ func (s *server) bringBack(ctx context.Context, prod, cp *sql.DB, tables []proto
 		d := diffs[t]
 		r := protocol.RewindTableRows{RewindTable: t}
 		cols := append(slices.Clone(d.Copy.PK), without(d.CommonInsert, d.Copy.PK)...)
-		for batch := range slices.Chunk(d.Missing, rowBatch) {
+		for batch := range slices.Chunk(d.Missing, insertBatch(len(cols))) {
 			rows, err := fetchRows(ctx, cp, d.Copy, cols, batch)
 			if err != nil {
 				return nil, err

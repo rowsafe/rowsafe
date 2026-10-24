@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rowsafe/rowsafe/protocol"
 )
@@ -85,7 +86,7 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 	if resp.StatusCode >= 300 {
 		var e protocol.Error
 		if json.Unmarshal(data, &e) != nil || e.Error == "" {
-			e.Error = fmt.Sprintf("HTTP %d: %s", resp.StatusCode, bytes.TrimSpace(data))
+			e.Error = fmt.Sprintf("HTTP %d: %s", resp.StatusCode, clip(bytes.TrimSpace(data), maxErrorBody))
 		}
 		ae := &APIError{Status: resp.StatusCode, Msg: e.Error}
 		if secs, err := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After"))); err == nil && secs > 0 {
@@ -97,6 +98,21 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		return json.Unmarshal(data, out)
 	}
 	return nil
+}
+
+// maxErrorBody is how much of an error that isn't Rowsafe's JSON (a
+// proxy's HTML page, say) goes into APIError.Msg.
+const maxErrorBody = 300
+
+// clip cuts b to at most n bytes, on a UTF-8 boundary, marking the cut.
+func clip(b []byte, n int) string {
+	if len(b) <= n {
+		return string(b)
+	}
+	for n > 0 && !utf8.RuneStart(b[n]) {
+		n--
+	}
+	return string(b[:n]) + "…"
 }
 
 func esc(s string) string { return url.PathEscape(s) }
@@ -261,16 +277,17 @@ func (c *Client) Protection(ctx context.Context, ref string) (out protocol.Prote
 // the wait: the task goes on without us, and waits can last hours.
 func (c *Client) WaitTask(ctx context.Context, id string, onTick func(protocol.TaskView)) (protocol.TaskView, error) {
 	var last protocol.TaskView
-	failures := 0
+	var poll Poll
 	for {
 		t, err := c.Task(ctx, id)
 		switch {
 		case err != nil:
-			if failures++; failures > waitTaskRetries || !transient(ctx, err) {
+			if !poll.Retry(ctx, err) {
 				return last, err
 			}
 		default:
-			failures, last = 0, t
+			poll.OK()
+			last = t
 			if onTick != nil {
 				onTick(t)
 			}
@@ -287,10 +304,25 @@ func (c *Client) WaitTask(ctx context.Context, id string, onTick func(protocol.T
 	}
 }
 
-// waitTaskRetries is how many failed polls in a row WaitTask rides out.
+// waitTaskRetries is how many failed polls in a row a wait rides out.
 const waitTaskRetries = 5
 
-// waitTaskPoll is how often WaitTask polls; tests shorten it.
+// Poll counts a wait loop's failed polls in a row, so a long wait rides out
+// a control plane redeploy, a 502 or a 429 instead of stopping on the first
+// one (a refusal, or ctx ending, still stops it).
+type Poll struct{ failures int }
+
+// Retry reports whether the wait should poll again after err.
+func (p *Poll) Retry(ctx context.Context, err error) bool {
+	p.failures++
+	return p.failures <= waitTaskRetries && transient(ctx, err)
+}
+
+// OK resets the count after a poll that worked.
+func (p *Poll) OK() { p.failures = 0 }
+
+// waitTaskPoll is how often WaitTask (and the other waits) poll; tests
+// shorten it.
 var waitTaskPoll = 2 * time.Second
 
 // transient: a failed request worth trying again (not one Rowsafe refused,

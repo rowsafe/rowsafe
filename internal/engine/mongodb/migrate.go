@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -405,22 +404,14 @@ func copyDatabase(ctx context.Context, env agent.EngineEnv, db protocol.Database
 	defer os.Remove(srcCfg)
 	defer os.Remove(tgtCfg)
 	tl.Printf("copying %s from %s", src.DB, src.Host)
-	pr, pw := io.Pipe()
 	dcmd := command(ctx, env, true, dump, "--config="+srcCfg, "--db="+src.DB, "--archive", "--gzip")
-	dcmd.Stdout = pw
 	var derr, rerr tailBuffer
 	derr.max, rerr.max = 32<<10, 64<<10
 	dcmd.Stderr = &derr
 	rcmd := command(ctx, env, true, restore, "--config="+tgtCfg, "--archive", "--gzip", "--nsInclude="+src.DB+".*",
 		"--nsFrom="+src.DB+".*", "--nsTo="+st.TargetDB+".*", "--numInsertionWorkersPerCollection=2")
-	rcmd.Stdin = pr
 	rcmd.Stderr = &rerr
-	if err := rcmd.Start(); err != nil {
-		return err
-	}
-	dumpErr := dcmd.Run()
-	pw.CloseWithError(dumpErr)
-	restoreErr := rcmd.Wait()
+	dumpErr, restoreErr := pipeTools(dcmd, rcmd)
 	tl.Output("mongorestore", summaryLines(rerr.Bytes()))
 	switch {
 	case dumpErr != nil:

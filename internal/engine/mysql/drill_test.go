@@ -3,6 +3,7 @@ package mysql
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -147,5 +149,40 @@ func TestForkVerifyNeedsServerProgram(t *testing.T) {
 	_, err := e.ForkVerify(context.Background(), env, p, "verify-f1", &testLog{t: t})
 	if err == nil || !strings.Contains(err.Error(), "MariaDB 11.4 isn't installed on this server") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// remove reads every result of a failing bulk delete, so minio's sender
+// doesn't stay blocked behind the first error.
+func TestRemoveDrainsErrors(t *testing.T) {
+	env, s3 := verifyEnv(t)
+	s3.Fail = func(r *http.Request) int {
+		if r.Method == http.MethodPost && r.URL.Query().Has("delete") {
+			return http.StatusForbidden // not retried
+		}
+		return 0
+	}
+	st, err := openStore(env.Repo, protocol.EngineMySQL, "shop", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := make([]string, 2500) // more than one 1000-key request
+	for i := range keys {
+		keys[i] = fmt.Sprintf("binlog/%04d", i)
+	}
+	if err := st.remove(t.Context(), keys); err == nil {
+		t.Fatal("a failing delete reported success")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		buf := make([]byte, 1<<20)
+		stacks := string(buf[:runtime.Stack(buf, true)])
+		if !strings.Contains(stacks, "minio-go/v7.(*Client).removeObjects") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("minio's delete goroutine was left behind")
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }

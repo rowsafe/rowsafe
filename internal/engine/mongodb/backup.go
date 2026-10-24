@@ -108,11 +108,16 @@ func (e *Engine) backup(ctx context.Context, env agent.EngineEnv, db protocol.Da
 		return nil, fmt.Errorf("starting mongodump: %w", err)
 	}
 	stored, upErr := r.putSealed(ctx, backupKey(label, archiveName), stdout)
+	if upErr != nil {
+		// Nothing reads its output any more: it would block on it until the
+		// task times out.
+		_ = cmd.Process.Kill()
+	}
 	waitErr := cmd.Wait()
 	tl.Output("mongodump", stderr.Bytes())
 	if upErr != nil || waitErr != nil {
 		_ = r.deleteBackup(context.WithoutCancel(ctx), label)
-		if waitErr != nil {
+		if waitErr != nil && upErr == nil {
 			return nil, fmt.Errorf("mongodump failed: %v: %s", waitErr, lastLine(stderr.Bytes()))
 		}
 		return nil, fmt.Errorf("uploading the backup: %w", upErr)

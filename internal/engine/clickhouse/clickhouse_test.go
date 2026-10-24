@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	rsclient "github.com/rowsafe/rowsafe/client"
 	"github.com/rowsafe/rowsafe/internal/agent"
 	"github.com/rowsafe/rowsafe/internal/objstore/fakes3"
 	"github.com/rowsafe/rowsafe/internal/pgbackrest"
@@ -564,5 +565,76 @@ func TestMoveInCreate(t *testing.T) {
 	}
 	if _, err := parseMigSource("https://u:p@h:8443/system"); err == nil {
 		t.Error("system database accepted")
+	}
+}
+
+// A new password that can't be written to the copy's users.xml leaves the
+// copy on its old password version, so the control plane sends it again.
+func TestSetCopyPasswordWriteFails(t *testing.T) {
+	env := testEnvUnit(t)
+	e := &Engine{}
+	dir := t.TempDir()
+	s := scratchAt(dir)
+	if err := s.saveState(scratchState{Password: "admin", Open: &openConf{Role: "dev"}}); err != nil {
+		t.Fatal(err)
+	}
+	// users.xml is a directory: writing it fails.
+	if err := os.Mkdir(filepath.Join(dir, "users.xml"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cs := e.copyState(env)
+	if err := cs.put(copyRecord{ID: "sc1", Dir: dir, Status: protocol.CopyReady, Kind: protocol.CopyKindSafe, PasswordVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+	_, v, err := rsclient.NewCopyPasswordFor(protocol.EngineClickHouse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !e.SetCopyPassword(t.Context(), env, protocol.CopyPassword{ID: "sc1", Version: 2, Verifier: v}) {
+		t.Fatal("SetCopyPassword: not the engine's")
+	}
+	if r, _ := cs.get("sc1"); r.PasswordVersion != 1 {
+		t.Fatalf("password version %d after a failed write, want 1", r.PasswordVersion)
+	}
+}
+
+// A round works on a deep copy: what a failed round marked (parts seen,
+// tables, pending events) doesn't reach the copier's state.
+func TestShipLocalCloneIsDeep(t *testing.T) {
+	st := shipLocal{Seen: map[string]map[string]bool{"t1": {"p1": true}}, Tables: map[string]pitTable{}, DBs: map[string]pitDB{},
+		Files: map[string]copiedFile{}, Existing: map[string]int64{}, Pending: []pendingEvent{{Key: "a"}}}
+	c := st.clone()
+	c.Seen["t1"]["p2"] = true
+	c.Seen["t2"] = map[string]bool{"p1": true}
+	c.Tables["u"], c.DBs["d"], c.Files["f"], c.Existing["t1/p2"] = pitTable{}, pitDB{}, copiedFile{}, 1
+	c.Pending[0].Resolved = true
+	if len(st.Seen) != 1 || len(st.Seen["t1"]) != 1 || len(st.Tables)+len(st.DBs)+len(st.Files)+len(st.Existing) != 0 || st.Pending[0].Resolved {
+		t.Fatalf("the original changed: %+v", st)
+	}
+}
+
+// An unreadable state file is put aside, and the copier starts a new
+// record instead of failing on every round.
+func TestLoadShipLocalCorrupt(t *testing.T) {
+	env := testEnvUnit(t)
+	path := shipStatePath(env, "s1")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"record": "r1", "seen": {`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := loadShipLocal(env, "s1")
+	if err != nil || st.Record != "" {
+		t.Fatalf("state %+v, %v", st, err)
+	}
+	if _, err := os.Stat(path + ".corrupt"); err != nil {
+		t.Fatal("the unreadable state wasn't kept aside:", err)
+	}
+	if err := saveJSONFile(path, shipLocal{Record: "r2"}); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := loadShipLocal(env, "s1"); err != nil || st.Record != "r2" {
+		t.Fatalf("state %+v, %v", st, err)
 	}
 }

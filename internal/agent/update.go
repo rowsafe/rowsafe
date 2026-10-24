@@ -69,6 +69,9 @@ type Updater struct {
 	offer     *protocol.UpdateOffer
 	probation *probation
 	report    *protocol.UpdateReport
+	// staging is set while apply downloads and self-tests a release
+	// without the lock (heartbeats and side lanes need it meanwhile).
+	staging bool
 }
 
 type probation struct {
@@ -263,10 +266,10 @@ func (u *Updater) Tick(ctx context.Context) error {
 		return nil
 	}
 	u.mu.Lock()
-	defer u.mu.Unlock()
 	now := u.Now()
 
 	if p := u.probation; p != nil {
+		defer u.mu.Unlock()
 		switch {
 		case p.heartbeatOK && now.Sub(p.startedAt) >= ProbationConfirmAfter:
 			return u.confirm(p)
@@ -277,10 +280,18 @@ func (u *Updater) Tick(ctx context.Context) error {
 	}
 
 	offer := u.offer
-	if offer == nil {
+	if offer == nil || u.staging {
+		u.mu.Unlock()
 		return nil
 	}
 	u.offer = nil
+	u.staging = true
+	u.mu.Unlock()
+	defer func() {
+		u.mu.Lock()
+		u.staging = false
+		u.mu.Unlock()
+	}()
 	return u.apply(ctx, offer)
 }
 
@@ -364,6 +375,9 @@ func fail(retryable bool, format string, args ...any) error {
 
 // apply stages, verifies and self-tests an offered release, then switches to
 // it. Any failure before the switch leaves the running version untouched.
+// It runs without u.mu (Tick sets staging instead): the download can take
+// minutes, and heartbeats and side lanes read the updater meanwhile. Only
+// recording the outcome and switching take the lock.
 func (u *Updater) apply(ctx context.Context, offer *protocol.UpdateOffer) error {
 	target := normVersion(offer.Version)
 	if u.recentlyFailed(target) {
@@ -371,6 +385,8 @@ func (u *Updater) apply(ctx context.Context, offer *protocol.UpdateOffer) error 
 	}
 	u.Log.Info("agent update offered", "from", u.Version, "to", target)
 	binary, err := u.stage(ctx, offer)
+	u.mu.Lock()
+	defer u.mu.Unlock()
 	if err != nil {
 		var ue *updateError
 		retryable := errors.As(err, &ue) && ue.retryable

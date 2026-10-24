@@ -57,6 +57,9 @@ type Agent struct {
 	// task (a health fix), for the same reason; maintBusy says one runs.
 	maintMu   sync.Mutex
 	maintBusy atomic.Bool
+	// running counts the tasks being run (execute) in every lane, so a
+	// stopping agent waits for their reports (waitTasks).
+	running atomic.Int32
 	// poolerBusy says a pooling task runs beside the fast lane (pooling.go).
 	poolerBusy atomic.Bool
 
@@ -235,7 +238,15 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.recoverCopies(ctx) // Guard copies: same, see copies_state.go
 	a.reportInterrupted(ctx)
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	// On the way out, stop every lane, then give the tasks they run (a Mark,
+	// a fence, a health fix...) time to send their outcome: none of them
+	// is kept on disk for the next process.
+	defer func() {
+		cancel()
+		if !a.waitTasks(shutdownGrace) {
+			a.log.Warn("stopping with tasks still running; the control plane closes them when their lease ends", "tasks", a.running.Load())
+		}
+	}()
 	a.startEngines(ctx) // engines' background work (e.g. MongoDB's oplog copying)
 	go a.heartbeatLoop(ctx)
 	go a.fastLane(ctx)
@@ -562,6 +573,8 @@ func (a *Agent) target(db protocol.DatabaseSpec) pginspect.Target {
 // lane persists its task for crash recovery (persist); a restore point or
 // health fix interrupted by a crash is closed by its lease.
 func (a *Agent) execute(ctx context.Context, task *protocol.Task, persist bool) {
+	a.running.Add(1)
+	defer a.running.Add(-1)
 	log := a.log.With("task_id", task.ID, "type", task.Type)
 	log.Info("task started")
 	start := time.Now()
@@ -600,6 +613,7 @@ func (a *Agent) execute(ctx context.Context, task *protocol.Task, persist bool) 
 	} else {
 		log.Info("task succeeded", "duration", time.Since(start).Round(time.Second).String())
 	}
+	req.Log = clipLog(req.Log, maxReportLog)
 	if a.report(ctx, log, task.ID, req) {
 		if persist {
 			a.clearRunning()
@@ -610,10 +624,54 @@ func (a *Agent) execute(ctx context.Context, task *protocol.Task, persist bool) 
 	}
 }
 
+// shutdownGrace is how long a stopping agent waits for running tasks to
+// report: a cancelled task's report gets one attempt of up to 30 seconds
+// (report); systemd waits 120 seconds (TimeoutStopSec) before it kills
+// the agent.
+const shutdownGrace = 40 * time.Second
+
+// waitTasks waits up to grace for the tasks being run to finish, and
+// reports whether they did.
+func (a *Agent) waitTasks(grace time.Duration) bool {
+	deadline := time.Now().Add(grace)
+	for a.running.Load() > 0 {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return true
+}
+
+// maxReportLog is the most of a task's log a report carries (the control
+// plane caps request bodies at 1 MiB); a longer log keeps its first and
+// last lines. A refused report is sent again with at most minReportLog.
+const (
+	maxReportLog = 256 << 10
+	minReportLog = 16 << 10
+)
+
+// clipLog keeps the first quarter and the last three quarters of n bytes of
+// a long log, cut at line breaks, with a line saying how much was left out.
+func clipLog(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	head, tailStart := s[:n/4], len(s)-n*3/4
+	if i := strings.LastIndexByte(head, '\n'); i > 0 {
+		head = head[:i+1]
+	}
+	if i := strings.IndexByte(s[tailStart:], '\n'); i >= 0 && tailStart+i+1 < len(s) {
+		tailStart += i + 1
+	}
+	return head + fmt.Sprintf("... %d bytes of the log left out ...\n", tailStart-len(head)) + s[tailStart:]
+}
+
 // report sends a task outcome, retrying transient failures. It returns false
 // if the outcome could not be delivered and should be kept for later. When
 // the agent is shutting down it still makes one short attempt.
 func (a *Agent) report(ctx context.Context, log *slog.Logger, taskID string, req protocol.CompleteRequest) bool {
+	shrunk := false
 	for attempt := 1; ; attempt++ {
 		actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		err := a.client.complete(actx, taskID, req)
@@ -627,7 +685,23 @@ func (a *Agent) report(ctx context.Context, log *slog.Logger, taskID string, req
 			req.ErrorInfo = nil
 			continue
 		}
-		if errors.As(err, &he) && he.Status < 500 {
+		if errors.As(err, &he) && (he.Status == 400 || he.Status == 413) && !shrunk {
+			// Too large, or a result this control plane can't read: send the
+			// outcome with a shorter log and, if it had one, without the
+			// result, as a failure that says why (rather than losing it).
+			shrunk = true
+			log.Warn("control plane refused the task report; sending a shorter one", "err", err)
+			req.Log = clipLog(req.Log, minReportLog)
+			if len(req.Result) > 0 {
+				req.Result = nil
+				if req.Status == protocol.StatusSucceeded {
+					req.Status = protocol.StatusFailed
+					req.Error = fmt.Sprintf("the task finished but the control plane refused its result (HTTP %d): %s", he.Status, he.Msg)
+				}
+			}
+			continue
+		}
+		if errors.As(err, &he) && he.Status < 500 && he.Status != 408 && he.Status != 429 {
 			// The task is no longer ours (already closed or reaped).
 			log.Error("control plane rejected task report", "err", err)
 			return true

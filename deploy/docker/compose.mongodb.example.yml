@@ -36,6 +36,7 @@ services:
   # Rowsafe
   rowsafe-agent:
     image: ghcr.io/rowsafe/agent:${ROWSAFE_AGENT_VERSION:?set ROWSAFE_AGENT_VERSION to a Rowsafe release}-mongo8
+    stop_grace_period: 45s # a stopping agent sends its running tasks' outcome first
     # The name Rowsafe shows for this host: `rowsafe adopt shop --host db-1`.
     hostname: db-1
     restart: unless-stopped

@@ -275,10 +275,13 @@ func (e *Engine) takeBackup(ctx context.Context, env agent.EngineEnv, db protoco
 	if err := r.ensureMarker(ctx, db.Name); err != nil {
 		return backupDoc{}, err
 	}
-	e.cleanPending(ctx, c, tl)
 	l := e.dbLock(db.ID)
 	l.Lock()
 	defer l.Unlock()
+	// Under the lock: a backup or rewind running beside this one holds it
+	// while its own snapshot is pending, so that snapshot isn't deleted
+	// from under it.
+	e.cleanPending(ctx, c, tl)
 	docs, _, err := r.listBackups(ctx)
 	if err != nil {
 		return backupDoc{}, fmt.Errorf("reading your bucket: %w", err)

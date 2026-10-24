@@ -556,6 +556,9 @@ func TestParallelMultipart(t *testing.T) {
 
 	// An aborted upload stores nothing and leaves no part behind.
 	resp, b = e.do(s, http.MethodPost, "backup/aborted", "uploads", nil, nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("create upload: %d %s", resp.StatusCode, b)
+	}
 	id2 := xmlField(b, "UploadId")
 	for _, n := range []int{1, 3} {
 		resp, b = e.do(s, http.MethodPut, "backup/aborted", fmt.Sprintf("partNumber=%d&uploadId=%s", n, id2), data[:partSize], nil)
@@ -579,6 +582,9 @@ func TestPartsNeverInPlaintext(t *testing.T) {
 	e := newEnv(t, nil)
 	s := e.signer()
 	resp, b := e.do(s, http.MethodPost, "backup/p", "uploads", nil, nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("create upload: %d %s", resp.StatusCode, b)
+	}
 	id := xmlField(b, "UploadId")
 	// Part 2 waits on disk for part 1.
 	if resp, b = e.do(s, http.MethodPut, "backup/p", "partNumber=2&uploadId="+id, payload(200<<10), nil); resp.StatusCode != 200 {
@@ -626,12 +632,12 @@ func TestDeleteObjectsCopyAndListV1(t *testing.T) {
 		t.Fatalf("list v1: %s", b)
 	}
 	resp, b = e.do(s, http.MethodGet, "", "delimiter=%2F&max-keys=1&prefix=backup%2Fb1%2F", nil, nil)
-	if xmlField(b, "Prefix") != "backup/b1/" || !bytes.Contains(b, []byte("<CommonPrefixes><Prefix>backup/b1/dir0/</Prefix></CommonPrefixes>")) ||
+	if resp.StatusCode != 200 || xmlField(b, "Prefix") != "backup/b1/" || !bytes.Contains(b, []byte("<CommonPrefixes><Prefix>backup/b1/dir0/</Prefix></CommonPrefixes>")) ||
 		xmlField(b, "IsTruncated") != "true" || xmlField(b, "NextMarker") != "backup/b1/dir0/" {
 		t.Fatalf("list v1 delimiter: %s", b)
 	}
 	resp, b = e.do(s, http.MethodGet, "", "delimiter=%2F&marker=backup%2Fb1%2Fdir0%2F&prefix=backup%2Fb1%2F", nil, nil)
-	if !bytes.Contains(b, []byte("<CommonPrefixes><Prefix>backup/b1/dir1/</Prefix></CommonPrefixes>")) || bytes.Contains(b, []byte("<Prefix>backup/b1/dir0/")) {
+	if resp.StatusCode != 200 || !bytes.Contains(b, []byte("<CommonPrefixes><Prefix>backup/b1/dir1/</Prefix></CommonPrefixes>")) || bytes.Contains(b, []byte("<Prefix>backup/b1/dir0/")) {
 		t.Fatalf("list v1 second page: %s", b)
 	}
 

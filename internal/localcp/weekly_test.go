@@ -73,7 +73,7 @@ func TestWeeklyReport(t *testing.T) {
 	}
 
 	// Once a week.
-	*now = now.Add(3 * time.Hour)
+	advance(s, now, 3*time.Hour)
 	s.sendWeekly()
 	none(t, slack)
 

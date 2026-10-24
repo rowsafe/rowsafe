@@ -232,3 +232,41 @@ func TestSQLitePathRules(t *testing.T) {
 		t.Errorf("open of a missing file: %v", err)
 	}
 }
+
+// The saved position never covers frames that are only in the open chunk:
+// a restart drops that chunk, so they must be read again.
+func TestSaveStateStopsAtCompleteChunks(t *testing.T) {
+	dir := t.TempDir()
+	sp, err := openSpool(filepath.Join(dir, "spool"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &shipper{dir: dir, sp: sp}
+	s.st = shipState{Gen: "g1", W: 1, Salt: "aa", Frame: 5, Ck1: 1, Ck2: 2, PageSize: 4096, Seq: 1}
+	if err := s.saveState(); err != nil { // nothing open: 5 is safe
+		t.Fatal(err)
+	}
+	seg := segHeader{Gen: "g1", Seq: 1, W: 1, PageSize: 4096, Salt: "aa"}
+	if err := sp.appendFrame(seg, make([]byte, walFrameHeaderSize+4096)); err != nil {
+		t.Fatal(err)
+	}
+	sp.commit(segTxn{First: 6, Last: 6, Commit: 1}, 3, 4)
+	s.st.Frame, s.st.Ck1, s.st.Ck2 = 6, 3, 4
+	if err := s.saveState(); err != nil {
+		t.Fatal(err)
+	}
+	var saved shipState
+	if err := loadJSONFile(s.statePath(), &saved); err != nil || saved.Frame != 5 || saved.Ck1 != 1 || saved.Gen != "g1" {
+		t.Fatalf("saved %+v, %v: want frame 5 (the open chunk's frames read again)", saved, err)
+	}
+	if _, ok, err := sp.cut(); !ok || err != nil {
+		t.Fatalf("cut: %v %v", ok, err)
+	}
+	s.st.Seq = 2
+	if err := s.saveState(); err != nil {
+		t.Fatal(err)
+	}
+	if err := loadJSONFile(s.statePath(), &saved); err != nil || saved.Frame != 6 || saved.Seq != 2 {
+		t.Fatalf("saved %+v, %v: want frame 6 once the chunk is complete", saved, err)
+	}
+}

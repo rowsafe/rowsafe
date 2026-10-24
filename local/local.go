@@ -74,6 +74,18 @@ type DB struct {
 
 	mu     sync.Mutex
 	pooler *string // the connection pooler in between, once known
+
+	// engineMu guards engine: MCP tool calls read the database at the
+	// same time.
+	engineMu sync.Mutex
+}
+
+// setEngine records the engine a reading reported (MySQL or MariaDB,
+// Redis or Valkey).
+func (d *DB) setEngine(e string) {
+	d.engineMu.Lock()
+	d.engine = e
+	d.engineMu.Unlock()
 }
 
 // Open parses a connection string. Like psql, it also reads PGPASSWORD,
@@ -98,17 +110,36 @@ func Open(connString string) (*DB, error) {
 		return nil, fmt.Errorf("reading the connection string: %w", err)
 	}
 	d := &DB{conn: cfg}
-	if u, err := url.Parse(connString); err == nil && u.User != nil {
-		if _, ok := u.User.Password(); ok {
-			d.PasswordInURL = true
-			u.User = url.User(u.User.Username())
-		}
-		d.Ref = u.String()
-	} else {
-		d.Ref = connString
-	}
+	d.Ref, d.PasswordInURL = pgRef(connString)
 	d.url = d.Ref
 	return d, nil
+}
+
+// pgRef is a PostgreSQL connection string without its password, whether
+// it is in the user part or in the query (password=, sslpassword=), and
+// whether one was there. It works on the text, not url.Parse: pgx reads
+// strings url.Parse refuses (a password with ^ or a space), and those
+// must not keep their password either.
+func pgRef(connString string) (string, bool) {
+	ref := withoutPassword(connString) // mongodb.go
+	found := ref != connString
+	base, query, ok := strings.Cut(ref, "?")
+	if !ok {
+		return ref, found
+	}
+	var kept []string
+	for _, kv := range strings.Split(query, "&") {
+		k, _, _ := strings.Cut(kv, "=")
+		if k, err := url.QueryUnescape(k); err == nil && (strings.EqualFold(k, "password") || strings.EqualFold(k, "sslpassword")) {
+			found = true
+			continue
+		}
+		kept = append(kept, kv)
+	}
+	if len(kept) == 0 {
+		return base, found
+	}
+	return base + "?" + strings.Join(kept, "&"), found
 }
 
 // Command is a rowsafe command for this database, ready to paste in a
@@ -133,19 +164,22 @@ func shellQuote(s string) string {
 // mysql://, MySQL until a reading says MariaDB; mariadb:// says it first)
 // or EngineMongoDB.
 func (d *DB) Engine() string {
+	d.engineMu.Lock()
+	engine := d.engine
+	d.engineMu.Unlock()
 	switch {
 	case d.mg != nil:
 		return protocol.EngineMongoDB
-	case d.rd != nil && d.engine != "":
-		return d.engine
+	case d.rd != nil && engine != "":
+		return engine
 	case d.rd != nil && strings.HasPrefix(strings.ToLower(d.Ref), "valkey"):
 		return protocol.EngineValkey
 	case d.rd != nil:
 		return protocol.EngineRedis
 	case d.my == nil:
 		return protocol.EnginePostgreSQL
-	case d.engine != "":
-		return d.engine
+	case engine != "":
+		return engine
 	case strings.HasPrefix(strings.ToLower(d.Ref), "mariadb://"):
 		return protocol.EngineMariaDB
 	}

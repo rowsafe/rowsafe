@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -357,6 +358,35 @@ func TestBinlogPair(t *testing.T) {
 	for _, f := range []binlogFile{b1, legacy} {
 		if !got[chunkKey(f, 0, 100)] {
 			t.Errorf("%s kept, no backup needs it", f.dir())
+		}
+	}
+}
+
+// A copy's saved PID counts only for a process running its data folder:
+// after a reboot it may be someone else's.
+func TestScratchAliveOnlyForItsProcess(t *testing.T) {
+	dir := t.TempDir()
+	other := &scratch{Dir: dir, PID: os.Getpid(), Args: []string{"mysqld", "--datadir=" + filepath.Join(dir, "data")}}
+	if other.alive() {
+		t.Fatal("another process counted as the copy's server")
+	}
+	cmd := exec.Command("sh", "-c", "sleep 30", "sh", "--datadir="+filepath.Join(dir, "data"))
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	sc := &scratch{Dir: dir, PID: cmd.Process.Pid, Args: other.Args}
+	if !sc.alive() {
+		t.Fatal("the copy's own server didn't count")
+	}
+}
+
+// An INSERT of brought-back rows stays within MySQL's 65,535 placeholders,
+// however wide the table.
+func TestInsertBatch(t *testing.T) {
+	for cols, want := range map[int]int{1: 500, 131: 500, 132: 496, 1000: 65, 4096: 15, 70000: 1} {
+		if got := insertBatch(cols); got != want {
+			t.Errorf("insertBatch(%d) = %d, want %d", cols, got, want)
 		}
 	}
 }
