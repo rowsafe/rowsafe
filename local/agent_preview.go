@@ -13,8 +13,9 @@ import (
 )
 
 // runPreviewOn runs a migration on the temporary database with the
-// agent's own preview run (it builds on Linux and macOS only).
-func runPreviewOn(ctx context.Context, t pginspect.Target, dbname string, stmts []preview.Stmt, res *protocol.PreviewResult, runFor time.Duration) error {
-	_, err := agent.RunPreviewOn(ctx, t, dbname, stmts, res, runFor)
-	return err
+// agent's own preview run (it builds on Linux and macOS only), and returns
+// the row-level security regressions it found.
+func runPreviewOn(ctx context.Context, t pginspect.Target, dbname string, stmts []preview.Stmt, res *protocol.PreviewResult, runFor time.Duration) ([]protocol.PreviewFinding, error) {
+	rls, _, err := agent.RunPreviewOn(ctx, t, dbname, stmts, res, runFor)
+	return rls, err
 }

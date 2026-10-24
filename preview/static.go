@@ -970,6 +970,7 @@ func Static(stmts []Stmt, cat *Catalog) *protocol.PreviewResult {
 			extra = append(extra, f)
 		}
 	}
+	extra = append(extra, StaticRLSFindings(texts)...)
 	AssessEngine(protocol.EnginePostgreSQL, res, texts, extra)
 	return res
 }
