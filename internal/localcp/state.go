@@ -119,11 +119,12 @@ type store struct {
 	mu   sync.Mutex
 	path string
 	s    state
-	now  func() time.Time
+	// now is the server's clock (Server.now), for pruning; nil: time.Now.
+	now func() time.Time
 }
 
 func openStore(path string) (*store, error) {
-	st := &store{path: path, now: time.Now}
+	st := &store{path: path}
 	data, err := os.ReadFile(path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
@@ -151,7 +152,11 @@ func (st *store) update(fn func(s *state) error) error {
 	if err := fn(&st.s); err != nil {
 		return err
 	}
-	st.s.prune(st.now())
+	now := time.Now
+	if st.now != nil {
+		now = st.now
+	}
+	st.s.prune(now())
 	return st.save()
 }
 
@@ -211,8 +216,8 @@ func (s *state) prune(now time.Time) {
 		s.Marks = s.Marks[n:]
 	}
 	s.pruneAlerts()
-	s.pruneRewinds()  // rewind_inplace.go
-	s.pruneGuard(now) // guard.go
+	s.pruneRewinds(now) // rewind_inplace.go
+	s.pruneGuard(now)   // guard.go
 	s.pruneFiles(now)
 	// Copies gone for a week are forgotten.
 	s.Copies = slices.DeleteFunc(s.Copies, func(c *copyRec) bool {

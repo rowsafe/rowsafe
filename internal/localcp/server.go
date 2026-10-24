@@ -57,7 +57,7 @@ func Open(dir string, log *slog.Logger) (*Server, error) {
 	}
 	s := &Server{st: st, log: log, now: time.Now, updates: &updates{http: &http.Client{Timeout: 30 * time.Second}},
 		alertHTTP: &http.Client{Timeout: 15 * time.Second}, hist: hist}
-	st.now = func() time.Time { return s.now() } // pruning follows the server's clock
+	st.now = func() time.Time { return s.now() } // tests set s.now later
 	return s, nil
 }
 
