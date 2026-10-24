@@ -1,25 +1,30 @@
 # Rowsafe
 
+**The database admin you never hired.** Backups you can restore to any second, a restore test every week, monitoring with one-click fixes and a safety net for AI coding agents, for the databases you run on your own servers. Open source, no account needed.
+
+[![Release](https://img.shields.io/github/v/release/rowsafe/rowsafe)](https://github.com/rowsafe/rowsafe/releases/latest)
+[![CI](https://github.com/rowsafe/rowsafe/actions/workflows/ci.yml/badge.svg)](https://github.com/rowsafe/rowsafe/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/rowsafe/rowsafe?style=social)](https://github.com/rowsafe/rowsafe/stargazers)
+
 ![rowsafe add saves the database once; rowsafe pulse finds a session idle in a transaction and 200 thousand dead rows; rowsafe fix ends the session and cleans up; the score goes from 88 to 98](docs/demo/rowsafe-demo.gif)
 
-**The database admin you never hired.** Rowsafe looks after the databases you run on your own servers: backups you can restore to any second, a restore test every week, monitoring with one-click fixes, and a safety net for AI coding agents.
+## Try it in 30 seconds
+
+From your laptop, on any database you can connect to (managed ones too):
+
+```sh
+curl -fsSL https://rowsafe.sh/cli | sh
+rowsafe pulse postgres://user@host:5432/dbname   # a 0–100 health score and what to fix (mysql:// works too)
+```
+
+No account, no agent on the server, nothing sent to Rowsafe. The recording above is [real](docs/demo). If Rowsafe helps you, a ⭐ helps others find it.
+
+**Docs:** [rowsafe.sh/docs](https://rowsafe.sh/docs) · **Databases:** PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse, Redis/Valkey, SQLite and [more](#databases)
+
+## Protect a server
 
 This repository is the open-source part of [Rowsafe](https://rowsafe.sh): the agent, the `rowsafe` CLI, the installer and the MCP server. Everything that touches your data is here, under Apache-2.0.
-
-**Docs:** [rowsafe.sh/docs](https://rowsafe.sh/docs)
-
-**Databases**, on Linux servers and in Docker:
-
-- PostgreSQL 13–18, MySQL 8.0/8.4, MariaDB 10.6–11.4, MongoDB 6.0–8.0, ClickHouse 24.8–26.8
-- Redis 7.0+ and Valkey 7.2+ (standalone servers)
-- SQLite (restore to any second needs WAL mode)
-- OpenSearch 2.x/3.x (single node; snapshots every 5 minutes: restores go back to a snapshot or a Mark, not to any second)
-- Qdrant 1.13+ (single servers; snapshots every 15 minutes, only of the collections that changed: restores go back to a snapshot or a Mark, not to any second)
-- Meilisearch 1.12+, Community Edition, on Linux servers (snapshots every 15 minutes when something changed: restores go back to a snapshot or a Mark, not to any second)
-
-Features per database: `protocol.EngineCapabilities`.
-
-## Try it now
 
 On your database server (Linux, or [Docker](https://rowsafe.sh/docs/guides/no-account-server#docker)):
 
@@ -34,10 +39,11 @@ sudo rowsafe upgrade shop --to 18         # a new PostgreSQL major: a test on a 
 
 Every engine above, with nothing sent to Rowsafe: continuous backups to your own bucket (encrypted on the server, with a passphrase only you have), Marks, a weekly restore test, restore to any second (or rewind the whole database, with undo), a second copy, alerts, Pulse with history, logs, security fixes, file backups, standbys and Prometheus metrics. From your laptop or an AI agent, over SSH: `rowsafe add shop ssh://root@db1`. All of it: [Rowsafe on your server](https://rowsafe.sh/docs/guides/no-account-server).
 
-From anywhere, on a database you can connect to (managed ones too):
+## From your laptop
+
+On a database you can connect to (managed ones too):
 
 ```sh
-curl -fsSL https://rowsafe.sh/cli | sh
 rowsafe add shop postgres://user@host:5432/dbname   # once: checks it connects, saves it on this computer
 rowsafe pulse shop                                  # a 0–100 health score and what to fix
 rowsafe fix shop                                    # apply a fix, after you confirm
@@ -49,11 +55,24 @@ rowsafe mcp shop --allow-writes                     # the same as MCP tools for 
 rowsafe use shop                                    # in a project: then just `rowsafe pulse`
 ```
 
-Pulse checks cleanup falling behind, bloat, duplicate and unused indexes, stuck sessions, locks, connections, replication slots, transaction ID wraparound and settings. The connection string stays in your config folder, readable only by you; `rowsafe pulse postgres://…` works once without saving, and `rowsafe use shop` makes it a project's database. Through a pooler, everything works but the fixes that run inside the database. Nothing is sent to Rowsafe. `rowsafe help local` has the rest; the demo above is a [real recording](docs/demo).
+Pulse checks cleanup falling behind, bloat, duplicate and unused indexes, stuck sessions, locks, connections, replication slots, transaction ID wraparound and settings. The connection string stays in your config folder, readable only by you; `rowsafe pulse postgres://…` works once without saving, and `rowsafe use shop` makes it a project's database. Through a pooler, everything works but the fixes that run inside the database. Nothing is sent to Rowsafe. `rowsafe help local` has the rest.
 
 MySQL and MariaDB work the same way (`rowsafe add shop mysql://user@host:3306/dbname`), and so do MongoDB (`mongodb://`), Redis and Valkey (`redis://`). MySQL and MariaDB: stuck sessions and locks, long transactions, InnoDB's old row versions, the buffer pool, free space inside tables, unused and duplicate indexes, tables without a primary key and the slow query log, with fixes to end a session, drop an index, turn on the slow log and rebuild a table. Not yet: `schema`, `explain`, `preview`, replication checks, and MariaDB settings changes (they live in its configuration file).
 
-On Windows, download `rowsafe-windows-amd64.exe` (or `-arm64.exe`) from the [latest release](https://github.com/rowsafe/rowsafe/releases/latest); the commands from anywhere work there, fixes included, except MySQL for now.
+On Windows, download `rowsafe-windows-amd64.exe` (or `-arm64.exe`) from the [latest release](https://github.com/rowsafe/rowsafe/releases/latest); the commands from your laptop work there, fixes included, except MySQL for now.
+
+## Databases
+
+On Linux servers and in Docker:
+
+- PostgreSQL 13–18, MySQL 8.0/8.4, MariaDB 10.6–11.4, MongoDB 6.0–8.0, ClickHouse 24.8–26.8
+- Redis 7.0+ and Valkey 7.2+ (standalone servers)
+- SQLite (restore to any second needs WAL mode)
+- OpenSearch 2.x/3.x (single node; snapshots every 5 minutes: restores go back to a snapshot or a Mark, not to any second)
+- Qdrant 1.13+ (single servers; snapshots every 15 minutes, only of the collections that changed: restores go back to a snapshot or a Mark, not to any second)
+- Meilisearch 1.12+, Community Edition, on Linux servers (snapshots every 15 minutes when something changed: restores go back to a snapshot or a Mark, not to any second)
+
+Features per database: `protocol.EngineCapabilities`.
 
 ## Link it to the dashboard
 
