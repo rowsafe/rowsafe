@@ -346,7 +346,7 @@ func (s *state) afterInPlace(t *taskRec, db *dbRec, ok bool, result json.RawMess
 // week, and ones whose kept data is gone once no backup of the database is
 // older than their last timeline change. Timelines of forgotten backups
 // go too.
-func (s *state) pruneRewinds() {
+func (s *state) pruneRewinds(now time.Time) {
 	oldest := map[string]time.Time{} // database -> its oldest backup's start
 	ids := map[string]bool{}
 	for _, b := range s.Backups {
@@ -362,7 +362,7 @@ func (s *state) pruneRewinds() {
 		case r.RemovedAt == nil:
 			return false
 		case r.RewoundAt == nil:
-			return time.Since(*r.RemovedAt) > 7*24*time.Hour
+			return now.Sub(*r.RemovedAt) > 7*24*time.Hour
 		}
 		last := *r.RewoundAt
 		if r.UndoneAt != nil {
