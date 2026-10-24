@@ -218,6 +218,9 @@ func (t *tools) addPulseReadTools(s *sdk.Server) {
 		}),
 	}, t.databaseMetrics)
 
+	if t.opts.OAuth {
+		return // audit_log and weekly_pulse: the API refuses access tokens (Options.OAuth)
+	}
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "audit_log",
 		Description: "The organization's audit log, newest first: who (a person in the dashboard, an API key, an app or Rowsafe itself) did what to which database or setting, and when. " +
@@ -411,9 +414,11 @@ func (t *tools) listAlerts(ctx context.Context, _ *sdk.CallToolRequest, in alert
 		if err != nil {
 			return nil, out, apiError(err)
 		}
-		chans, err := t.c.NotificationChannels(ctx)
-		if err != nil {
-			return nil, out, apiError(err)
+		var chans []protocol.NotificationChannel
+		if !t.opts.OAuth { // the API refuses access tokens (Options.OAuth)
+			if chans, err = t.c.NotificationChannels(ctx); err != nil {
+				return nil, out, apiError(err)
+			}
 		}
 		out.Rules, out.Channels = []AlertRuleView{}, []ChannelView{}
 		b.line("")
@@ -439,7 +444,9 @@ func (t *tools) listAlerts(ctx context.Context, _ *sdk.CallToolRequest, in alert
 		}
 		b.line("To change a rule, %s.", requestChange("alert_rule"))
 		b.line("")
-		if len(chans) == 0 {
+		if t.opts.OAuth {
+			b.line("Where notifications go is shown in the dashboard (Alerts), not to apps connected with Sign in with Rowsafe.")
+		} else if len(chans) == 0 {
 			b.line("No notification channels: alerts only show in the dashboard. A person adds email, Slack, Discord or a webhook in the dashboard (Alerts).")
 		} else {
 			b.line("Notifications go to:")
