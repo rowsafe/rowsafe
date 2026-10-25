@@ -259,8 +259,11 @@ func (h *handover) run(ctx context.Context, token string) error {
 		}
 		return json.Unmarshal(data, &st) == nil && st.AgentToken != "", nil
 	})
-	if err != nil {
+	if errors.Is(err, context.DeadlineExceeded) {
 		return fmt.Errorf("the agent didn't connect to %s within %s (journalctl -u rowsafe-agent says why)", h.org(), handoverEnroll)
+	}
+	if err != nil {
+		return err
 	}
 	h.hostID = st.HostID
 	h.say("The agent is connected to %s.", h.org())
@@ -358,14 +361,17 @@ func (h *handover) waitActive(ctx context.Context, agent *client.Client, id, nam
 // waitFor polls ok until it says done, fails, or within ends
 // (context.DeadlineExceeded).
 func waitFor(ctx context.Context, within time.Duration, ok func() (bool, error)) error {
-	ctx, cancel := context.WithTimeout(ctx, within)
+	wctx, cancel := context.WithTimeout(ctx, within)
 	defer cancel()
 	for {
 		done, err := ok()
 		if err != nil || done {
 			return err
 		}
-		if err := sleepCtx(ctx, handoverPoll); err != nil {
+		if err := sleepCtx(wctx, handoverPoll); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err() // Ctrl-C, not the wait running out
+			}
 			return context.DeadlineExceeded
 		}
 	}

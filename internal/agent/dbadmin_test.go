@@ -336,7 +336,11 @@ func TestDBAdminAgainstPostgres(t *testing.T) {
 	e.mustRefuse(protocol.DBAdminParams{Action: protocol.DBAdminCreateUser, User: e.name("y"), Access: protocol.DBAccessReadOnly, Databases: []string{"template0"}}, "template")
 	e.mustRefuse(protocol.DBAdminParams{Action: protocol.DBAdminCreateUser, User: e.name("y"), Access: protocol.DBAccessReadOnly, Databases: []string{e.name("nope")}}, "no database named")
 
-	// A new password.
+	// A new password, with the database ro was given, not the first one
+	// it may connect to (everyone may, through PUBLIC).
+	if _, err := e.admin.Exec(ctx, `CREATE DATABASE `+e.name("aaa_first")); err != nil {
+		t.Fatal(err)
+	}
 	var before string
 	_ = e.admin.QueryRow(ctx, `SELECT rolpassword FROM pg_authid WHERE rolname = $1`, ro).Scan(&before)
 	res = e.mustRun(protocol.DBAdminParams{Action: protocol.DBAdminResetPassword, User: ro}, "Gave "+ro+" a new password")

@@ -385,7 +385,7 @@ func TestServerCertificateIntegration(t *testing.T) {
 		t.Error("the previous certificate was not put back")
 	}
 	probeServed = pgprobe.Probe
-	if res, err = run(protocol.ServerCertificateParams{Action: protocol.CertInstall, Names: cloudNames, Chain: renewed}); err != nil {
+	if _, err = run(protocol.ServerCertificateParams{Action: protocol.CertInstall, Names: cloudNames, Chain: renewed}); err != nil {
 		t.Fatalf("install after a failed one: %v", err)
 	}
 }

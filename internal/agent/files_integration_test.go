@@ -221,7 +221,7 @@ func TestFilesWholeFolderUndoIntegration(t *testing.T) {
 	}
 
 	// Cleanup of a kept folder.
-	res = f.restore(t, protocol.FilesRestoreParams{RestoreID: "whole2", Mode: protocol.FilesRestoreFolder, Target: protocol.FilesTarget{Time: &at}})
+	f.restore(t, protocol.FilesRestoreParams{RestoreID: "whole2", Mode: protocol.FilesRestoreFolder, Target: protocol.FilesTarget{Time: &at}})
 	cl, err := f.a.filesCleanup(ctx, f.db, protocol.FilesCleanupParams{RestoreID: "whole2"}, tl)
 	if err != nil || !cl.Removed {
 		t.Fatalf("cleanup: %+v %v", cl, err)

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -357,6 +358,46 @@ func TestBinlogPair(t *testing.T) {
 	for _, f := range []binlogFile{b1, legacy} {
 		if !got[chunkKey(f, 0, 100)] {
 			t.Errorf("%s kept, no backup needs it", f.dir())
+		}
+	}
+}
+
+// A copy's saved PID counts only for a process running its data folder:
+// after a reboot it may be someone else's.
+func TestScratchAliveOnlyForItsProcess(t *testing.T) {
+	dir := t.TempDir()
+	other := &scratch{Dir: dir, PID: os.Getpid(), Args: []string{"mysqld", "--datadir=" + filepath.Join(dir, "data")}}
+	if other.alive() {
+		t.Fatal("another process counted as the copy's server")
+	}
+	// "; exit": Linux's sh would otherwise become sleep, without --datadir.
+	cmd := exec.Command("sh", "-c", "sleep 30; exit 0", "sh", "--datadir="+filepath.Join(dir, "data"))
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	// A PID read from disk, as after an agent restart (no sc.proc). Right
+	// after the start, Linux may still show the parent's command line.
+	sc := &scratch{Dir: dir, PID: cmd.Process.Pid, Args: other.Args}
+	for deadline := time.Now().Add(5 * time.Second); !sc.alive(); time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the copy's own server didn't count")
+		}
+	}
+	// One this agent started counts at once.
+	self, _ := os.FindProcess(os.Getpid())
+	started := &scratch{Dir: dir, PID: os.Getpid(), Args: other.Args, proc: self}
+	if !started.alive() {
+		t.Fatal("a server this agent started didn't count")
+	}
+}
+
+// An INSERT of brought-back rows stays within MySQL's 65,535 placeholders,
+// however wide the table.
+func TestInsertBatch(t *testing.T) {
+	for cols, want := range map[int]int{1: 500, 131: 500, 132: 496, 1000: 65, 4096: 15, 70000: 1} {
+		if got := insertBatch(cols); got != want {
+			t.Errorf("insertBatch(%d) = %d, want %d", cols, got, want)
 		}
 	}
 }

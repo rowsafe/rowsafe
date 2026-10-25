@@ -2,7 +2,9 @@
 #
 #   make build                 host binaries into bin/
 #   make test                  unit tests
+#   make test-race             unit tests with the race detector (-short: no Docker databases)
 #   make lint                  go vet, gofmt, shellcheck, installer consistency
+#   make staticcheck           staticcheck's bug checks (SA*), pinned
 #   make test-installer        scripts/install.sh in Debian/Ubuntu containers (Docker)
 #   make test-cli-installer    scripts/cli.sh (rowsafe.sh/cli) on this computer, macOS or Linux
 #   make test-npm              the npm package (npx rowsafe) against a fake release (Node.js, Go)
@@ -55,7 +57,7 @@ AGENT_LDFLAGS := -s -w -buildid= -X $(PKG)/internal/agent.Version=$(VERSION) -X 
 MAIN_LDFLAGS := -s -w -buildid= -X main.version=$(VERSION)
 GOBUILD := CGO_ENABLED=0 GOFLAGS=-mod=readonly $(GO) build -trimpath -buildvcs=false
 
-.PHONY: all build test lint check-installer test-installer test-cli-installer test-npm test-installer-cloud test-mongodb test-clickhouse test-redis test-qdrant check-qdrant-pins test-sqlite test-rewind test-secondcopy test-sftp test-mysql test-no-account-mysql test-no-account-mongodb test-no-account-redis test-no-account-sqlite test-no-account-clickhouse test-no-account-search test-upgrade test-pooling test-no-account-pooler test-permissions test-action openai-plugin-zip dist release check-release-env clean test-opensearch mcp-registry test-no-account-secondcopy test-no-account-ssh test-no-account-standby test-no-account-guard test-no-account-logs test-no-account-files
+.PHONY: all build test test-race staticcheck lint check-installer test-installer test-cli-installer test-npm test-installer-cloud test-mongodb test-clickhouse test-redis test-qdrant check-qdrant-pins test-sqlite test-rewind test-secondcopy test-sftp test-mysql test-no-account-mysql test-no-account-mongodb test-no-account-redis test-no-account-sqlite test-no-account-clickhouse test-no-account-search test-upgrade test-pooling test-no-account-pooler test-permissions test-action openai-plugin-zip dist release check-release-env clean test-opensearch mcp-registry test-no-account-secondcopy test-no-account-ssh test-no-account-standby test-no-account-guard test-no-account-logs test-no-account-files
 
 all: lint test build
 
@@ -67,6 +69,13 @@ build:
 
 test:
 	$(GO) test ./...
+
+test-race:
+	$(GO) test -race -short ./...
+
+STATICCHECK ?= honnef.co/go/tools/cmd/staticcheck@v0.8.2
+staticcheck:
+	$(GO) run $(STATICCHECK) -checks 'SA*' ./...
 
 lint: check-installer
 	$(GO) vet ./...

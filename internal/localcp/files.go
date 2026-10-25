@@ -795,7 +795,7 @@ func filesTaskName(typ string) string {
 // queueFiles runs fn in an update and answers with the tasks it queued.
 func (s *Server) queueFiles(w http.ResponseWriter, r *http.Request, host bool, fn func(st *state, dbID, confirm string, sc *filesScope, now time.Time) ([]*taskRec, error)) {
 	now := s.now()
-	var tasks []*taskRec
+	out := protocol.FilesTasksResponse{Tasks: []protocol.TaskView{}}
 	err := s.st.update(func(st *state) error {
 		dbID, confirm, err := st.scopeRef(r.PathValue("ref"), host)
 		if err != nil {
@@ -809,16 +809,16 @@ func (s *Server) queueFiles(w http.ResponseWriter, r *http.Request, host bool, f
 			}
 			return errf(http.StatusConflict, "no folders are protected for %s yet: rowsafe files add PATH", what)
 		}
-		tasks, err = fn(st, dbID, confirm, sc, now)
+		tasks, err := fn(st, dbID, confirm, sc, now)
+		// Copied under the lock: the agent claims and updates these tasks.
+		for _, t := range tasks {
+			out.Tasks = append(out.Tasks, t.TaskView)
+		}
 		return err
 	})
 	if err != nil {
 		writeFilesErr(w, err)
 		return
-	}
-	out := protocol.FilesTasksResponse{Tasks: []protocol.TaskView{}}
-	for _, t := range tasks {
-		out.Tasks = append(out.Tasks, t.TaskView)
 	}
 	writeJSON(w, http.StatusAccepted, out)
 }
@@ -1084,21 +1084,24 @@ func (s *Server) filesBrowse(w http.ResponseWriter, r *http.Request, host bool) 
 func (s *Server) filesDiscover(w http.ResponseWriter, r *http.Request, host bool) {
 	_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 1<<20))
 	now := s.now()
-	var t *taskRec
+	var task protocol.TaskView
 	err := s.st.update(func(st *state) error {
 		dbID, _, err := st.scopeRef(r.PathValue("ref"), host)
 		if err != nil {
 			return err
 		}
 		st.filesScopeOf(dbID, true) // its suggestions are kept there
-		t, err = st.enqueueFiles(dbID, protocol.TaskFilesDiscover, nil, "", true, now)
+		t, err := st.enqueueFiles(dbID, protocol.TaskFilesDiscover, nil, "", true, now)
+		if err == nil {
+			task = t.TaskView
+		}
 		return err
 	})
 	if err != nil {
 		writeFilesErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, protocol.FilesTasksResponse{Tasks: []protocol.TaskView{t.TaskView}})
+	writeJSON(w, http.StatusAccepted, protocol.FilesTasksResponse{Tasks: []protocol.TaskView{task}})
 }
 
 func (s *Server) filesCheck(w http.ResponseWriter, r *http.Request, host bool) {

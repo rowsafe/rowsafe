@@ -24,7 +24,7 @@ func (d *DB) mysqlRead(ctx context.Context, o mysql.ReadOptions, opts Options) (
 	if err != nil {
 		return nil, d.mysqlConnectError(err)
 	}
-	d.engine = r.Engine
+	d.setEngine(r.Engine)
 	if r.Settings != nil {
 		d.hostFacts(r.Settings, opts)
 	}
@@ -112,7 +112,7 @@ func (d *DB) mysqlCheck(ctx context.Context) (Server, error) {
 	if err != nil {
 		return Server{}, d.mysqlConnectError(err)
 	}
-	d.engine = s.Engine
+	d.setEngine(s.Engine)
 	v, _, _ := strings.Cut(s.Version, "-") // 11.4.5, not 11.4.5-MariaDB-ubu2404
 	return Server{Database: s.Database, User: s.User, Version: v}, nil
 }

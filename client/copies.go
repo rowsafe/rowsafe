@@ -38,22 +38,28 @@ func (c *Client) Preview(ctx context.Context, id string) (out protocol.Preview, 
 
 // WaitPreview polls a preview until its task has ended.
 func (c *Client) WaitPreview(ctx context.Context, id string, onTick func(protocol.Preview)) (protocol.Preview, error) {
+	var poll Poll
 	for {
 		p, err := c.Preview(ctx, id)
-		if err != nil {
-			return p, err
-		}
-		if onTick != nil {
-			onTick(p)
-		}
-		switch p.Status {
-		case protocol.StatusSucceeded, protocol.StatusFailed, protocol.StatusLost, protocol.StatusCancelled:
-			return p, nil
+		switch {
+		case err != nil:
+			if !poll.Retry(ctx, err) {
+				return p, err
+			}
+		default:
+			poll.OK()
+			if onTick != nil {
+				onTick(p)
+			}
+			switch p.Status {
+			case protocol.StatusSucceeded, protocol.StatusFailed, protocol.StatusLost, protocol.StatusCancelled:
+				return p, nil
+			}
 		}
 		select {
 		case <-ctx.Done():
 			return p, ctx.Err()
-		case <-time.After(2 * time.Second):
+		case <-time.After(waitTaskPoll):
 		}
 	}
 }

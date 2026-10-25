@@ -130,6 +130,7 @@ type shipper struct {
 	mu       sync.Mutex
 	db       protocol.DatabaseSpec
 	st       shipState
+	safe     shipState // st at the end of the last complete chunk (saveState)
 	sinks    map[string]*sink
 	err      error  // the newest problem (nil after a good round)
 	off      string // why copying is off ("": on)
@@ -202,13 +203,22 @@ func (s *shipper) loadState() error {
 			st.Ck1, st.Ck2, st.Seq = h.EndCk1, h.EndCk2, h.Seq+1
 		}
 	}
-	s.st = st
+	s.st, s.safe = st, st
 	return nil
 }
 
+// saveState saves the position after the last transaction in a complete
+// chunk. The open chunk's frames don't count: a restart drops that chunk
+// (openSpool) and they must be read again, not skipped.
 func (s *shipper) saveState() error {
+	_, _, open := s.sp.openInfo()
 	s.mu.Lock()
 	st := s.st
+	if open == 0 {
+		s.safe = st
+	} else {
+		st.W, st.Salt, st.Frame, st.Ck1, st.Ck2, st.Seq, st.PageSize = s.safe.W, s.safe.Salt, s.safe.Frame, s.safe.Ck1, s.safe.Ck2, s.safe.Seq, s.safe.PageSize
+	}
 	s.mu.Unlock()
 	return saveJSONFile(s.statePath(), st)
 }
@@ -274,7 +284,7 @@ func (s *shipper) detach() {
 		st = saved
 	}
 	s.mu.Lock()
-	s.st = st
+	s.st, s.safe = st, st
 	s.mu.Unlock()
 }
 
@@ -439,7 +449,7 @@ func (s *shipper) poll() error {
 		s.mu.Lock()
 		s.st.W++
 		s.st.Salt, s.st.Frame, s.st.Ck1, s.st.Ck2 = salt, 0, 0, 0
-		st = s.st
+		st, s.safe = s.st, s.st // nothing open: the new WAL's start is safe
 		s.mu.Unlock()
 	case hdr.MaxFrame < st.Frame:
 		return s.newGeneration(hdr, "the -wal file is shorter than what Rowsafe already copied", true)

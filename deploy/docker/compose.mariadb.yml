@@ -37,6 +37,7 @@ services:
     # One tag per MariaDB version: <version>-mariadb11.4, -mariadb10.11,
     # -mariadb10.6 (built FROM the same mariadb image).
     image: ghcr.io/rowsafe/agent:${ROWSAFE_AGENT_VERSION:?set ROWSAFE_AGENT_VERSION to a Rowsafe release}-mariadb11.4
+    stop_grace_period: 45s # a stopping agent sends its running tasks' outcome first
     hostname: db-1
     user: "999:999"                                # the mariadb image's mysql user
     restart: unless-stopped

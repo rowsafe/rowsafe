@@ -337,12 +337,15 @@ func (s *objStore) remove(ctx context.Context, keys []string) error {
 		ch <- minio.ObjectInfo{Key: s.prefix + k}
 	}
 	close(ch)
+	// Read every result: minio's sender blocks on an unread one, and its
+	// goroutine would stay behind.
+	var first error
 	for e := range s.mc.RemoveObjects(ctx, s.bucket, ch, minio.RemoveObjectsOptions{}) {
-		if e.Err != nil {
-			return fmt.Errorf("deleting %s: %w", strings.TrimPrefix(e.ObjectName, s.prefix), e.Err)
+		if e.Err != nil && first == nil {
+			first = fmt.Errorf("deleting %s: %w", strings.TrimPrefix(e.ObjectName, s.prefix), e.Err)
 		}
 	}
-	return nil
+	return first
 }
 
 // repoMarker is repository.json.age: it proves the passphrase can read

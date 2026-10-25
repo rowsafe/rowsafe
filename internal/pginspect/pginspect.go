@@ -174,12 +174,19 @@ const tableCountSQL = `
 	  AND n.nspname NOT LIKE 'pg\_toast%'
 	  AND n.nspname NOT LIKE 'pg\_temp%'`
 
+// databaseSizesSQL lists connectable databases with their size. A database
+// dropped while it runs has a NULL size and is left out, so a DROP DATABASE
+// elsewhere on the server doesn't fail the whole reading.
+const databaseSizesSQL = `
+	SELECT datname, size FROM (
+		SELECT datname, pg_database_size(oid) AS size FROM pg_database
+		WHERE datallowconn AND NOT datistemplate
+	) d WHERE size IS NOT NULL ORDER BY datname`
+
 // Databases lists connectable databases with their size and table count.
 // conn must be connected to the same cluster.
 func Databases(ctx context.Context, t Target, conn *pgx.Conn) ([]protocol.DBInfo, error) {
-	rows, err := conn.Query(ctx, `
-		SELECT datname, pg_database_size(oid) FROM pg_database
-		WHERE datallowconn AND NOT datistemplate ORDER BY datname`)
+	rows, err := conn.Query(ctx, databaseSizesSQL)
 	if err != nil {
 		return nil, err
 	}
@@ -267,9 +274,7 @@ func Summarize(ctx context.Context, t Target) (Summary, error) {
 	).Scan(&s.ServerVersion, &s.VersionNum, &s.DataDirectory, &s.InRecovery); err != nil {
 		return s, err
 	}
-	rows, err := conn.Query(ctx, `
-		SELECT datname, pg_database_size(oid) FROM pg_database
-		WHERE datallowconn AND NOT datistemplate ORDER BY datname`)
+	rows, err := conn.Query(ctx, databaseSizesSQL)
 	if err != nil {
 		return s, err
 	}

@@ -25,7 +25,7 @@ func (d *DB) redisRead(ctx context.Context, o redis.ReadOptions, opts Options) (
 	if err != nil {
 		return nil, d.redisConnectError(err)
 	}
-	d.engine = r.Engine
+	d.setEngine(r.Engine)
 	if r.Settings != nil {
 		d.hostFacts(r.Settings, opts)
 	}
@@ -81,6 +81,6 @@ func (d *DB) redisCheck(ctx context.Context) (Server, error) {
 	if err != nil {
 		return Server{}, d.redisConnectError(err)
 	}
-	d.engine = s.Engine
+	d.setEngine(s.Engine)
 	return Server{Database: d.rd.name(), User: s.User, Version: s.Version, ConfigFile: s.ConfigFile, ACLFile: s.ACLFile}, nil
 }

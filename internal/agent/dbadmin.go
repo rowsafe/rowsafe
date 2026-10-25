@@ -918,11 +918,17 @@ func (d *dba) resetPassword(ctx context.Context, conn *pgx.Conn) error {
 		`ALTER ROLE %I PASSWORD %L`, r.name, verifier); err != nil {
 		return err
 	}
+	// The database its new connection string names: one it owns, else one
+	// it was given CONNECT on by name (every user may connect to most
+	// databases through PUBLIC, PostgreSQL's default), else any it can.
 	var dbname string
 	err = conn.QueryRow(ctx, `
 		SELECT datname::text FROM pg_database
 		WHERE datallowconn AND NOT datistemplate AND has_database_privilege($1::oid, oid, 'CONNECT')
-		ORDER BY datname = 'postgres', datname LIMIT 1`, r.oid).Scan(&dbname)
+		ORDER BY datdba <> $1::oid,
+		         NOT EXISTS (SELECT 1 FROM aclexplode(datacl) a WHERE a.grantee = $1::oid AND a.privilege_type = 'CONNECT'),
+		         datname = 'postgres', datname
+		LIMIT 1`, r.oid).Scan(&dbname)
 	if errors.Is(err, pgx.ErrNoRows) {
 		dbname, err = "postgres", nil
 	}

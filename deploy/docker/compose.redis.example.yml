@@ -55,6 +55,7 @@ services:
     # follows the newest Rowsafe release; to pin one, use the exact tag,
     # e.g. ghcr.io/rowsafe/agent:<version>-redis8.2.
     image: ghcr.io/rowsafe/agent:redis8.2
+    stop_grace_period: 45s # a stopping agent sends its running tasks' outcome first
     # The name Rowsafe shows for this host: `rowsafe adopt cache --host db-1`.
     hostname: db-1
     restart: unless-stopped

@@ -88,16 +88,42 @@ func loadShipState(env agent.EngineEnv, stanza string) (shipState, error) {
 	if err != nil {
 		return st, err
 	}
-	return st, json.Unmarshal(data, &st)
+	if err := json.Unmarshal(data, &st); err != nil {
+		// A damaged file (a crash mid-write before saves were synced) must
+		// not stop copying the oplog for good: it is set aside and copying
+		// starts again from now. The chunks in the bucket don't link up
+		// across that span, so a restore sees the gap.
+		path := statePath(env, stanza, "oplog.json")
+		_ = os.Rename(path, path+".damaged")
+		if env.Log != nil {
+			env.Log.Warn("MongoDB oplog copy state was unreadable; starting again from now", "file", path, "err", err)
+		}
+		return shipState{}, nil
+	}
+	return st, nil
 }
 
+// saveJSONFile writes v to path atomically and durably: a temporary file,
+// synced, then renamed over it.
 func saveJSONFile(path string, v any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	data, _ := json.MarshalIndent(v, "", "  ")
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)

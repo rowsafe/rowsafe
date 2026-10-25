@@ -133,8 +133,9 @@ type segWriter struct {
 	Records    int
 	Data       int // records other than PING/REPLCONF
 
-	// the record being written
+	// the record being written (open: begun, not ended)
 	cur     bytes.Buffer
+	open    bool
 	spilled bool
 	spillAt int64 // file position of the spilled record's header
 	recLen  int64
@@ -160,7 +161,7 @@ func createSegment(path, replid string, start int64, db int, now time.Time) (*se
 // begin starts a record.
 func (w *segWriter) begin() {
 	w.cur.Reset()
-	w.spilled, w.recLen = false, 0
+	w.open, w.spilled, w.recLen = true, false, 0
 }
 
 // emit takes the next bytes of the record being written.
@@ -207,6 +208,7 @@ func (w *segWriter) end(t time.Time, start int64, info cmdInfo) error {
 		}
 	}
 	w.pos += recHeaderLen + w.recLen
+	w.open = false
 	w.End = start + info.Size
 	w.Last = t
 	w.Records++
@@ -224,9 +226,15 @@ func (w *segWriter) end(t time.Time, start int64, info cmdInfo) error {
 // Size is the file's size so far.
 func (w *segWriter) Size() int64 { return w.pos }
 
-// close flushes and syncs the file.
+// close flushes and syncs the file. A big record cut short (the link
+// dropped in the middle of it) already wrote its blank header and part of
+// its bytes: the file is cut back to the last whole record, or every later
+// restore would stop at a corrupt record.
 func (w *segWriter) close() error {
 	err := w.bw.Flush()
+	if err == nil && w.open && w.spilled {
+		err = w.f.Truncate(w.pos)
+	}
 	if serr := w.f.Sync(); err == nil {
 		err = serr
 	}

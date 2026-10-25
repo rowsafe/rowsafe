@@ -168,17 +168,23 @@ func printStandby(info protocol.StandbyInfo) {
 // its status as it changes.
 func waitStandby(ctx context.Context, c *client.Client, name string, done func(protocol.StandbyInfo) (bool, error)) (protocol.StandbyInfo, error) {
 	last := ""
+	var poll client.Poll
 	for {
 		info, err := c.StandbyInfo(ctx, name)
-		if err != nil {
-			return info, apiErr(err)
-		}
-		if ok, err := done(info); ok || err != nil {
-			return info, err
-		}
-		if v := info.Standby; v != nil && v.Status != last {
-			last = v.Status
-			fmt.Printf("  %s\n", standbyStatusText(v))
+		switch {
+		case err != nil:
+			if !poll.Retry(ctx, err) {
+				return info, apiErr(err)
+			}
+		default:
+			poll.OK()
+			if ok, err := done(info); ok || err != nil {
+				return info, err
+			}
+			if v := info.Standby; v != nil && v.Status != last {
+				last = v.Status
+				fmt.Printf("  %s\n", standbyStatusText(v))
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -257,8 +263,7 @@ func standbyAddCmd(ctx context.Context, c *client.Client, args []string) error {
 		*fingerprint = strings.TrimSpace(readLine())
 	}
 	stream := !*noStream
-	info, err := c.CreateStandby(ctx, name, protocol.CreateStandbyRequest{HostID: cand.HostID, Port: *port, Fingerprint: *fingerprint, Stream: &stream})
-	if err != nil {
+	if _, err := c.CreateStandby(ctx, name, protocol.CreateStandbyRequest{HostID: cand.HostID, Port: *port, Fingerprint: *fingerprint, Stream: &stream}); err != nil {
 		return apiErr(err)
 	}
 	if *noWait {
@@ -266,7 +271,7 @@ func standbyAddCmd(ctx context.Context, c *client.Client, args []string) error {
 		return nil
 	}
 	fmt.Println("\nCreating the standby (restoring the latest backup; this takes as long as a restore):")
-	info, err = waitStandby(ctx, c, name, func(i protocol.StandbyInfo) (bool, error) {
+	info, err := waitStandby(ctx, c, name, func(i protocol.StandbyInfo) (bool, error) {
 		if i.Standby == nil {
 			return true, errors.New("the standby is gone")
 		}

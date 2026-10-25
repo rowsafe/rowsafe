@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -321,15 +322,20 @@ func connectCmd(ctx context.Context, c *client.Client, args []string) error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "Making a temporary user for this session (%s, %s access to %s)...\n", tmp, strings.ReplaceAll(acc, "_", "-"), dbname)
-	_, res, secret, err := dbRun(ctx, c, server, protocol.DBAdminParams{Action: protocol.DBAdminCreateUser, User: tmp,
-		Databases: []string{dbname}, Access: acc, Host: t.Host}, key)
-	if err != nil {
-		return apiErr(err)
-	}
-	if secret == nil {
-		return errors.New("the server didn't send the temporary user's password")
-	}
 	owner := ""
+	// drop removes it, even after Ctrl-C (which psql handles, but cancels
+	// ctx) or a wait that ended before the agent finished making it.
+	drop := func() {
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Minute)
+		defer cancel()
+		fmt.Fprintf(os.Stderr, "Removing the temporary user %s...\n", tmp)
+		if _, _, _, err := dbRun(cctx, c, server, protocol.DBAdminParams{Action: protocol.DBAdminDropUser, User: tmp, ReassignTo: owner}, nil); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: the temporary user %s couldn't be removed (%v); remove it with `rowsafe db user remove %s --on %s --reassign-to %s`\n",
+				tmp, apiErr(err), tmp, server, orText(owner, "USER"))
+		}
+	}
+	task, res, secret, err := dbRun(ctx, c, server, protocol.DBAdminParams{Action: protocol.DBAdminCreateUser, User: tmp,
+		Databases: []string{dbname}, Access: acc, Host: t.Host}, key)
 	for _, i := range []*protocol.DBInventory{resInventory(res), inv} {
 		if i != nil {
 			if d := findDatabase(i, dbname); d != nil {
@@ -338,20 +344,39 @@ func connectCmd(ctx context.Context, c *client.Client, args []string) error {
 			}
 		}
 	}
+	if err != nil || secret == nil {
+		if tmpUserMayExist(task, err) {
+			drop()
+		}
+		if err != nil {
+			return apiErr(err)
+		}
+		return errors.New("the server didn't send the temporary user's password")
+	}
 	conn.User = tmp
 	fmt.Fprintf(os.Stderr, "Connecting to %s on %s. Its password was made on the server and encrypted for this terminal; Rowsafe never saw it.\n", dbname, server)
 	code, runErr := runPSQL(psql, append([]string{protocol.ConnectionURL(conn, "")}, extra...),
 		[]string{"PGPASSWORD=" + secret.Password, "PGAPPNAME=rowsafe connect"})
-
-	// Remove it, even after Ctrl-C (which psql handles, but cancels ctx).
-	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Minute)
-	defer cancel()
-	fmt.Fprintf(os.Stderr, "Removing the temporary user %s...\n", tmp)
-	if _, _, _, err := dbRun(cctx, c, server, protocol.DBAdminParams{Action: protocol.DBAdminDropUser, User: tmp, ReassignTo: owner}, nil); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: the temporary user %s couldn't be removed (%v); remove it with `rowsafe db user remove %s --on %s --reassign-to %s`\n",
-			tmp, apiErr(err), tmp, server, orText(owner, "USER"))
-	}
+	drop()
 	return psqlExit(code, runErr)
+}
+
+// tmpUserMayExist reports whether a create_user that returned err may
+// still have made the user: it did (no error), or the wait for it ended
+// (Ctrl-C, a timeout, the control plane unreachable) before the task
+// finished. A task that failed, or a request Rowsafe refused, made nothing.
+func tmpUserMayExist(task protocol.TaskView, err error) bool {
+	switch task.Status {
+	case protocol.StatusFailed, protocol.StatusLost, protocol.StatusCancelled:
+		return false
+	case protocol.StatusSucceeded:
+		return true
+	}
+	var ae *client.APIError
+	if task.ID == "" && errors.As(err, &ae) && ae.Status < 500 && ae.Status != http.StatusTooManyRequests {
+		return false
+	}
+	return err != nil || task.ID != ""
 }
 
 func resInventory(res *protocol.DBAdminResult) *protocol.DBInventory {

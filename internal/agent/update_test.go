@@ -334,3 +334,45 @@ func TestSwapLinkRefusesOutsideVersions(t *testing.T) {
 		}
 	}
 }
+
+// Staging a release (a download that can take minutes, then the self-test)
+// doesn't hold the updater: heartbeats and side lanes go on, and a second
+// Tick doesn't stage it again.
+func TestUpdateStagingDoesNotBlockHeartbeats(t *testing.T) {
+	e := newUpdateEnv(t)
+	u := e.updater("0.1.0")
+	inSelfTest, release := make(chan struct{}), make(chan struct{})
+	selfTest := u.SelfTest
+	u.SelfTest = func(ctx context.Context, bin string) ([]byte, error) {
+		close(inSelfTest)
+		<-release
+		return selfTest(ctx, bin)
+	}
+	u.OnHeartbeat(e.offer("0.2.0", fakeAgent("0.2.0", true), nil))
+	done := make(chan error, 1)
+	go func() { done <- u.Tick(context.Background()) }()
+	<-inSelfTest
+
+	others := make(chan error, 1)
+	go func() {
+		u.OnHeartbeat(e.offer("0.2.0", fakeAgent("0.2.0", true), nil))
+		_ = u.Report()
+		_ = u.InProbation()
+		others <- u.Tick(context.Background())
+	}()
+	select {
+	case err := <-others:
+		if err != nil {
+			t.Fatalf("a Tick while staging: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("heartbeats wait for the release being staged")
+	}
+	close(release)
+	if err := <-done; !errors.Is(err, ErrRestartForUpdate) {
+		t.Fatalf("expected restart, got %v", err)
+	}
+	if got := e.link(); got != "versions/0.2.0/rowsafe-agent" {
+		t.Fatalf("link = %s", got)
+	}
+}

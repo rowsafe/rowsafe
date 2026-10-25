@@ -91,12 +91,12 @@ func TestAlertsBackupStale(t *testing.T) {
 
 	// 27 hours without a backup (the Proof and Mark are recent enough), with
 	// the archiver still reporting: backup_stale after its 15 minutes.
-	*now = now.Add(27 * time.Hour)
+	advance(s, now, 27*time.Hour)
 	last := *now
 	heartbeat(a, protocol.ArchiverStats{DatabaseID: db.ID, ArchiveMode: "on", LastArchivedTime: &last})
 	s.Tick()
 	none(t, slack) // waiting out "for"
-	*now = now.Add(16 * time.Minute)
+	advance(s, now, 16*time.Minute)
 	heartbeat(a, protocol.ArchiverStats{DatabaseID: db.ID, ArchiveMode: "on", LastArchivedTime: &last})
 	s.Tick()
 	r := next(t, slack)
@@ -177,7 +177,7 @@ func TestAlertsDiskAndChannels(t *testing.T) {
 	}
 	report(9.94)
 	s.Tick()
-	*now = now.Add(6 * time.Minute)
+	advance(s, now, 6*time.Minute)
 	report(9.94)
 	s.Tick()
 	r := next(t, ntfy)
@@ -185,7 +185,7 @@ func TestAlertsDiskAndChannels(t *testing.T) {
 		!strings.Contains(r.body, "Value:    9.9 %") {
 		t.Fatalf("ntfy: %v %s", r.header, r.body)
 	}
-	*now = now.Add(time.Minute)
+	advance(s, now, time.Minute)
 	report(40)
 	s.Tick()
 	if r := next(t, ntfy); !strings.HasPrefix(r.header.Get("Title"), "[RESOLVED]") {
@@ -213,7 +213,7 @@ func TestAlertsAgentWasOffline(t *testing.T) {
 	hookURL, hook := receiver(t)
 	addChannel(t, c, protocol.ChannelDiscord, hookURL)
 
-	*now = now.Add(3 * time.Hour)
+	advance(s, now, 3*time.Hour)
 	s.cameBack()
 	r := next(t, hook)
 	if !strings.Contains(r.body, "was not running for 3 hours") || !strings.Contains(r.body, "[RESOLVED]") {

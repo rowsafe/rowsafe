@@ -718,12 +718,54 @@ func (sc *scratch) start() error {
 	return nil
 }
 
-// alive reports whether the server process runs.
+// alive reports whether the server process runs. The PID is saved with
+// the copy: after a reboot it can be another process's (production's
+// mysqld even), so it counts only when that process runs this copy's
+// data folder.
 func (sc *scratch) alive() bool {
 	if sc.PID <= 0 {
 		return false
 	}
-	return syscall.Kill(sc.PID, 0) == nil && !zombie(sc.PID)
+	return syscall.Kill(sc.PID, 0) == nil && !zombie(sc.PID) && sc.owns(sc.PID)
+}
+
+// owns reports whether process pid is this private server: one this agent
+// started, or one whose command line names its data folder (a PID saved
+// before a restart may be someone else's after a reboot).
+func (sc *scratch) owns(pid int) bool {
+	if sc.proc != nil && sc.proc.Pid == pid {
+		return true // also before its exec shows the new command line
+	}
+	cmdline, ok := commandLine(pid)
+	return ok && strings.Contains(cmdline, "--datadir="+sc.dataDirArg())
+}
+
+// dataDirArg is the --datadir the server was started with.
+func (sc *scratch) dataDirArg() string {
+	for _, a := range sc.Args {
+		if d, ok := strings.CutPrefix(a, "--datadir="); ok {
+			return d
+		}
+	}
+	if sc.DataDir != "" {
+		return sc.DataDir
+	}
+	return filepath.Join(sc.Dir, "data")
+}
+
+// commandLine is a process's command line, arguments separated by spaces:
+// /proc on Linux, ps elsewhere.
+func commandLine(pid int) (string, bool) {
+	if b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); err == nil {
+		return strings.ReplaceAll(string(b), "\x00", " "), true
+	} else if _, serr := os.Stat("/proc/self"); serr == nil {
+		return "", errors.Is(err, os.ErrNotExist) // gone: an empty command line
+	}
+	out, err := exec.Command("ps", "-o", "args=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return "", false
+	}
+	return string(out), true
 }
 
 // zombie reports whether a process has exited but isn't reaped yet.

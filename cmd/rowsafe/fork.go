@@ -238,6 +238,7 @@ func pickSQLiteForkPlace(t protocol.ForkTarget, file string) (protocol.ForkPlace
 // step as it starts.
 func waitFork(ctx context.Context, c *client.Client, v protocol.ForkView) (protocol.ForkView, error) {
 	printed := map[string]string{}
+	var poll client.Poll
 	for {
 		for _, s := range v.Steps {
 			if s.State == protocol.ForkStepPending || printed[s.Key] == s.State+s.Detail {
@@ -270,8 +271,12 @@ func waitFork(ctx context.Context, c *client.Client, v protocol.ForkView) (proto
 		}
 		next, err := c.Fork(ctx, v.ID)
 		if err != nil {
-			return v, apiErr(err)
+			if !poll.Retry(ctx, err) {
+				return v, apiErr(err)
+			}
+			continue // v as it was: nothing new to print
 		}
+		poll.OK()
 		v = next
 	}
 }

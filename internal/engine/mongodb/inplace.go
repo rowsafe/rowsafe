@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -486,9 +485,7 @@ func (e *Engine) loadInto(ctx context.Context, env agent.EngineEnv, db protocol.
 		return err
 	}
 	defer os.RemoveAll(tmp)
-	pr, pw := io.Pipe()
 	dcmd := command(ctx, env, true, dump, "--uri="+s.uri(), "--archive", "--quiet")
-	dcmd.Stdout = pw
 	var dErr tailBuffer
 	dErr.max = 16 << 10
 	dcmd.Stderr = &dErr
@@ -496,21 +493,10 @@ func (e *Engine) loadInto(ctx context.Context, env agent.EngineEnv, db protocol.
 		"--nsExclude=admin.*", "--nsExclude=config.*", "--nsExclude=local.*", "--nsExclude=*.system.*",
 		"--nsFrom=$db$.$coll$", "--nsTo=$db$." + tempPrefix(tag) + "$coll$"}
 	rcmd := command(ctx, env, true, restore, args...)
-	rcmd.Stdin = pr
 	var rErr tailBuffer
 	rErr.max = 64 << 10
 	rcmd.Stderr = &rErr
-	if err := dcmd.Start(); err != nil {
-		return fmt.Errorf("starting mongodump: %w", err)
-	}
-	if err := rcmd.Start(); err != nil {
-		_ = dcmd.Process.Kill()
-		_ = dcmd.Wait()
-		return fmt.Errorf("starting mongorestore: %w", err)
-	}
-	dWait := dcmd.Wait()
-	pw.CloseWithError(dWait)
-	rWait := rcmd.Wait()
+	dWait, rWait := pipeTools(dcmd, rcmd)
 	tl.Output("mongorestore", summaryLines(rErr.Bytes()))
 	switch {
 	case dWait != nil:

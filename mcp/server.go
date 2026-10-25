@@ -125,7 +125,8 @@ func NewServer(c *client.Client, opts Options) *sdk.Server {
 		t.addSafetyWriteTools(s)
 	}
 	addPrompts(s)
-	s.AddReceivingMiddleware(aliasMiddleware) // get_approval, list_approvals
+	s.AddReceivingMiddleware(aliasMiddleware)   // get_approval, list_approvals
+	s.AddReceivingMiddleware(recoverMiddleware) // outermost: a panic is an error (recover.go)
 	return s
 }
 

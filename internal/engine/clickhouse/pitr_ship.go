@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -76,6 +77,21 @@ type shipLocal struct {
 	Problem string `json:"problem,omitempty"`
 }
 
+// clone is a deep copy of the state's maps and slices (what a round
+// changes in place).
+func (st shipLocal) clone() shipLocal {
+	if st.Seen != nil {
+		seen := make(map[string]map[string]bool, len(st.Seen))
+		for k, v := range st.Seen {
+			seen[k] = maps.Clone(v)
+		}
+		st.Seen = seen
+	}
+	st.Tables, st.DBs, st.Files, st.Existing = maps.Clone(st.Tables), maps.Clone(st.DBs), maps.Clone(st.Files), maps.Clone(st.Existing)
+	st.Pending = slices.Clone(st.Pending)
+	return st
+}
+
 type copiedFile struct {
 	Part   string       `json:"part"` // table UUID/part name it was copied with
 	Pieces []s3gw.Piece `json:"pieces"`
@@ -110,7 +126,17 @@ func loadShipLocal(env agent.EngineEnv, stanza string) (shipLocal, error) {
 	if err != nil {
 		return st, err
 	}
-	return st, json.Unmarshal(data, &st)
+	if err := json.Unmarshal(data, &st); err != nil {
+		// An unreadable state would stop the copier for good: put it aside
+		// and start a new record (the old one stays in the bucket).
+		bad := shipStatePath(env, stanza) + ".corrupt"
+		_ = os.Rename(shipStatePath(env, stanza), bad)
+		if env.Log != nil {
+			env.Log.Error("the ClickHouse change copier's state was unreadable; starting a new record", "stanza", stanza, "err", err, "kept_as", bad)
+		}
+		return shipLocal{}, nil
+	}
+	return st, nil
 }
 
 // shipperFor returns the database's copier, starting it when needed.
@@ -267,7 +293,9 @@ func (st shipLocal) archiverStats(err error) *protocol.ArchiverStats {
 // round runs one round of the copier.
 func (s *shipper) round(ctx context.Context) (err error) {
 	s.mu.Lock()
-	st, db, env := s.st, s.db, s.env
+	// A copy the round can change freely: a round that fails half way
+	// (an upload refused) must not leave parts marked as recorded.
+	st, db, env := s.st.clone(), s.db, s.env
 	s.mu.Unlock()
 	defer func() {
 		if err != nil && ctx.Err() == nil {

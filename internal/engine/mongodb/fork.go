@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
-	"io"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -250,21 +249,13 @@ func copyServer(ctx context.Context, env agent.EngineEnv, from, to string, tl ag
 	if err != nil {
 		return err
 	}
-	pr, pw := io.Pipe()
 	dcmd := command(ctx, env, true, dump, "--uri="+from, "--archive", "--gzip") // mongodump has no --nsExclude: mongorestore leaves them out
-	dcmd.Stdout = pw
 	var derr, rerr tailBuffer
 	derr.max, rerr.max = 32<<10, 64<<10
 	dcmd.Stderr = &derr
 	rcmd := command(ctx, env, true, restore, append([]string{"--uri=" + to, "--archive", "--gzip", "--numInsertionWorkersPerCollection=2"}, systemNS...)...)
-	rcmd.Stdin = pr
 	rcmd.Stderr = &rerr
-	if err := rcmd.Start(); err != nil {
-		return err
-	}
-	dumpErr := dcmd.Run()
-	pw.CloseWithError(dumpErr)
-	restoreErr := rcmd.Wait()
+	dumpErr, restoreErr := pipeTools(dcmd, rcmd)
 	tl.Output("mongorestore", summaryLines(rerr.Bytes()))
 	switch {
 	case dumpErr != nil:

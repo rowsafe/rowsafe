@@ -110,6 +110,7 @@ func logsCmd(ctx context.Context, c *client.Client, args []string) error {
 		return nil
 	}
 	latest := res.Latest
+	var poll client.Poll
 	for {
 		select {
 		case <-ctx.Done():
@@ -124,8 +125,12 @@ func logsCmd(ctx context.Context, c *client.Client, args []string) error {
 			if ctx.Err() != nil {
 				return nil
 			}
+			if poll.Retry(ctx, err) {
+				continue
+			}
 			return apiErr(err)
 		}
+		poll.OK()
 		fresh := slices.Clone(next.Entries)
 		slices.Reverse(fresh)
 		printLogEntries(fresh, *asJSON)

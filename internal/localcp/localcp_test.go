@@ -70,6 +70,13 @@ func (a *fakeAgent) done(task *protocol.Task, status string, result any) {
 	}
 }
 
+// advance moves the test clock once the notifications on their way are
+// sent: they record their delivery in the state, which reads the clock.
+func advance(s *Server, now *time.Time, d time.Duration) {
+	s.sending.Wait()
+	*now = now.Add(d)
+}
+
 func setup(t *testing.T) (*Server, *fakeAgent, *client.Client, *time.Time) {
 	t.Helper()
 	dir := t.TempDir()

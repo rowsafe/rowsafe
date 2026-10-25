@@ -21,7 +21,6 @@ func TestReadRLS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer admin.Close(context.Background())
 	suffix := fmt.Sprintf("%d", rand.N(1_000_000))
 	db, role := "rowsafe_rls_"+suffix, "rowsafe_rls_api_"+suffix
 	exec := func(c *pgx.Conn, sql string) {
@@ -30,13 +29,16 @@ func TestReadRLS(t *testing.T) {
 			t.Fatalf("%s: %v", sql, err)
 		}
 	}
-	exec(admin, "CREATE DATABASE "+db)
-	exec(admin, "CREATE ROLE "+role+" NOLOGIN")
+	// admin stays open for the cleanup (a deferred Close would run first and
+	// leave the database behind).
 	t.Cleanup(func() {
 		ctx := context.Background()
 		_, _ = admin.Exec(ctx, "DROP DATABASE IF EXISTS "+db+" WITH (FORCE)")
 		_, _ = admin.Exec(ctx, "DROP ROLE IF EXISTS "+role)
+		admin.Close(ctx)
 	})
+	exec(admin, "CREATE DATABASE "+db)
+	exec(admin, "CREATE ROLE "+role+" NOLOGIN")
 
 	conn, err := tg.Connect(ctx, db)
 	if err != nil {

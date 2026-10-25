@@ -279,7 +279,7 @@ func (e *Engine) SetCopyPassword(ctx context.Context, env agent.EngineEnv, p pro
 		return true
 	}
 	st.Open.Verifier = p.Verifier
-	if err := s.saveState(st); err == nil {
+	if err = s.saveState(st); err == nil {
 		err = s.writeUsers(st)
 	}
 	if err != nil {
