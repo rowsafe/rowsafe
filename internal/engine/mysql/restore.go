@@ -729,15 +729,15 @@ func (sc *scratch) alive() bool {
 	return syscall.Kill(sc.PID, 0) == nil && !zombie(sc.PID) && sc.owns(sc.PID)
 }
 
-// owns reports whether process pid is this private server: its command
-// line names its data folder. When the command line can't be read, only a
-// process this agent started counts.
+// owns reports whether process pid is this private server: one this agent
+// started, or one whose command line names its data folder (a PID saved
+// before a restart may be someone else's after a reboot).
 func (sc *scratch) owns(pid int) bool {
-	cmdline, ok := commandLine(pid)
-	if !ok {
-		return sc.proc != nil && sc.proc.Pid == pid
+	if sc.proc != nil && sc.proc.Pid == pid {
+		return true // also before its exec shows the new command line
 	}
-	return strings.Contains(cmdline, "--datadir="+sc.dataDirArg())
+	cmdline, ok := commandLine(pid)
+	return ok && strings.Contains(cmdline, "--datadir="+sc.dataDirArg())
 }
 
 // dataDirArg is the --datadir the server was started with.

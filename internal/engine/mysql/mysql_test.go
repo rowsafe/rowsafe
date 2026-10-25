@@ -376,9 +376,19 @@ func TestScratchAliveOnlyForItsProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	// A PID read from disk, as after an agent restart (no sc.proc). Right
+	// after the start, Linux may still show the parent's command line.
 	sc := &scratch{Dir: dir, PID: cmd.Process.Pid, Args: other.Args}
-	if !sc.alive() {
-		t.Fatal("the copy's own server didn't count")
+	for deadline := time.Now().Add(5 * time.Second); !sc.alive(); time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the copy's own server didn't count")
+		}
+	}
+	// One this agent started counts at once.
+	self, _ := os.FindProcess(os.Getpid())
+	started := &scratch{Dir: dir, PID: os.Getpid(), Args: other.Args, proc: self}
+	if !started.alive() {
+		t.Fatal("a server this agent started didn't count")
 	}
 }
 
