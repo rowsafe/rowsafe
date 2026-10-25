@@ -53,6 +53,9 @@ type server struct {
 	MaxIndexingMemory int64     `json:"max_indexing_memory,omitempty"`
 	Analytics         *bool     `json:"analytics,omitempty"`
 	MadeAt            time.Time `json:"made_at"`
+	// URL: a Docker sidecar reaches Meilisearch there, in its container on
+	// the compose network (docker.go), rather than on this machine.
+	URL string `json:"url,omitempty"`
 }
 
 // localPort is where the agent talks to Meilisearch.
@@ -83,6 +86,10 @@ func serverFile(env agent.EngineEnv, port int) string {
 var errNoLogin = errors.New("Rowsafe has no API key for this Meilisearch yet: run the Rowsafe installer on the server again " +
 	"(it makes Rowsafe's own key once with the master key, which it never keeps)")
 
+// errNoLoginDocker is errNoLogin for a Docker sidecar.
+var errNoLoginDocker = errors.New("Rowsafe has no API key for this Meilisearch yet: make it once with " +
+	"`docker compose exec -it rowsafe-agent rowsafe-agent meilisearch login` (paste the master key; it is used once and never kept)")
+
 // loadServer reads the facts for port.
 func loadServer(env agent.EngineEnv, port int) (server, error) {
 	var s server
@@ -91,12 +98,25 @@ func loadServer(env agent.EngineEnv, port int) (server, error) {
 	}
 	if err := loadJSONFile(serverFile(env, port), &s); err != nil {
 		if notExist(err) {
+			if inDocker() {
+				return s, errNoLoginDocker
+			}
 			return s, errNoLogin
 		}
 		return s, fmt.Errorf("reading Rowsafe's Meilisearch settings: %w", err)
 	}
 	if s.Port != port || !(keyRE.MatchString(s.Key) || s.NoAuth && s.Key == "") {
 		return s, errors.New("Rowsafe's Meilisearch settings for this port are damaged: run the Rowsafe installer on the server again")
+	}
+	// A sidecar follows the address in its compose file; anywhere else
+	// Meilisearch is on this machine.
+	s.URL = ""
+	if inDocker() {
+		u, err := sidecarURL()
+		if err != nil {
+			return s, err
+		}
+		s.URL = u.String()
 	}
 	return s, nil
 }
@@ -122,8 +142,9 @@ func knownPorts(env agent.EngineEnv) []int {
 // connect opens a client for db with Rowsafe's key, finding out once
 // whether the instance speaks plain HTTP or TLS on its local port.
 func connect(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec) (*client, server, error) {
-	if env.Config.Sidecar() {
-		return nil, server{}, errors.New("Rowsafe protects a Meilisearch installed on the server itself for now, not one in Docker")
+	if env.Config.Sidecar() && !inDocker() {
+		return nil, server{}, fmt.Errorf("set %s in the agent's container to Meilisearch's address on the compose network "+
+			"(http://meilisearch:7700): see %s", urlEnv, dockerGuide)
 	}
 	s, err := loadServer(env, db.Port)
 	if err != nil {
@@ -136,11 +157,10 @@ func connect(ctx context.Context, env agent.EngineEnv, db protocol.DatabaseSpec)
 // dial is a client for s (plain HTTP, or TLS when the instance serves its
 // own certificate on its port).
 func dial(ctx context.Context, s server) (*client, error) {
-	scheme := "http"
-	if s.TLS && s.LocalPort == 0 {
-		scheme = "https"
+	c, err := s.prodClient(s.localScheme(), s.Key)
+	if err != nil {
+		return nil, err
 	}
-	c := newClient(scheme, s.localPort(), s.Key, prodCheck(s))
 	hctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if err := c.health(hctx); err != nil {

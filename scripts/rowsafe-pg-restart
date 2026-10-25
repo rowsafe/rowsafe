@@ -2123,6 +2123,11 @@ db_engine() {
       db_engine=valkey
       set -- valkey-server
       ;;
+    opensearch.service)
+      # OpenSearch's own apt repository, one per major version (2.x, 3.x).
+      db_engine=opensearch
+      set -- opensearch
+      ;;
     qdrant.service)
       # Qdrant's program comes from its release on GitHub (qdrant_update).
       db_engine=qdrant db_main=qdrant
@@ -2133,7 +2138,7 @@ db_engine() {
       db_engine=meilisearch db_main=meilisearch
       return 0
       ;;
-    *) refuse "$unit is not a MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey, Qdrant or Meilisearch service" ;;
+    *) refuse "$unit is not a MySQL, MariaDB, MongoDB, ClickHouse, Redis, Valkey, OpenSearch, Qdrant or Meilisearch service" ;;
   esac
   db_main=''
   for p in "$@"; do
@@ -2157,12 +2162,35 @@ db_patterns() {
     # Debian's and packages.redis.io's packages, all of one version.
     redis) locked='redis redis-server redis-tools redis-sentinel' free='' ;;
     valkey) locked='valkey valkey-server valkey-tools valkey-sentinel valkey-redis-compat' free='' ;;
+    # One package with its bundled plugins and Java.
+    opensearch) locked='opensearch' free='' ;;
   esac
 }
 
 # series VERSION prints the release series of a package version:
-# "1:10.11.9+maria~deb12" -> 10.11, "8.0.40-1debian12" -> 8.0.
-series() { printf '%s\n' "$1" | sed -E 's/^[0-9]+://' | sed -nE 's/^([0-9]+\.[0-9]+).*/\1/p'; }
+# "1:10.11.9+maria~deb12" -> 10.11, "8.0.40-1debian12" -> 8.0. OpenSearch's
+# series is its whole major version ("3.9.0" -> 3): its minor releases keep
+# the data, the API and the plugins compatible, and its apt repository
+# carries one major version.
+series() {
+  if [ "${db_engine:-}" = opensearch ]; then
+    printf '%s\n' "$1" | sed -E 's/^[0-9]+://' | sed -nE 's/^([0-9]+)\..*/\1/p'
+    return 0
+  fi
+  printf '%s\n' "$1" | sed -E 's/^[0-9]+://' | sed -nE 's/^([0-9]+\.[0-9]+).*/\1/p'
+}
+
+# opensearch_plugins_ok refuses an update while OpenSearch has plugins
+# installed outside its package (opensearch-plugin install): each must
+# match OpenSearch's exact version, so the new version wouldn't start.
+opensearch_plugins_ok() {
+  _extra=''
+  for _d in /usr/share/opensearch/plugins/*; do
+    [ -d "$_d" ] || continue
+    dpkg -S "$_d" >/dev/null 2>&1 || _extra="$_extra ${_d##*/}"
+  done
+  [ -z "$_extra" ] || refuse "OpenSearch has plugins installed outside its package ($(printf '%s' "$_extra" | sed 's/^ //; s/ /, /g')): each must match OpenSearch's exact version, so after an update OpenSearch wouldn't start. Update OpenSearch together with them yourself, or remove them first"
+}
 
 # newest_in PKG SERIES prints the newest available version of PKG in SERIES.
 newest_in() {
@@ -2401,6 +2429,7 @@ act_db_minor_update() {
   before=$(pkg_version "$db_main")
   ser=$(series "$before")
   [ -n "$ser" ] || refuse "can't tell the release series of $db_main $before"
+  [ "$db_engine" != opensearch ] || opensearch_plugins_ok
   : >"$work_log"
   t0=$(active_since "$unit")
   was_active=0
@@ -2433,8 +2462,11 @@ act_db_minor_update() {
   restarted=0
   if [ "$after" != "$before" ] && [ "$was_active" = 1 ]; then
     if [ "$(active_since "$unit")" = "$t0" ]; then
-      # The packages didn't restart it: start the new binaries now.
-      out=$(timeout 300 "$systemctl" restart "$unit" 2>&1 </dev/null) ||
+      # The packages didn't restart it: start the new binaries now
+      # (OpenSearch, a Java server with its plugins, takes longer).
+      wait=300
+      [ "$db_engine" != opensearch ] || wait=600
+      out=$(timeout "$wait" "$systemctl" restart "$unit" 2>&1 </dev/null) ||
         refuse "the update is installed, but restarting $unit failed: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
     fi
     restarted=1

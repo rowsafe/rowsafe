@@ -327,16 +327,28 @@ plugins.security.check_snapshot_restore_write_privileges: false
 	if err := os.WriteFile(filepath.Join(conf, "jvm.options.d", "rowsafe-scratch.options"), []byte(heap), 0o600); err != nil {
 		return err
 	}
-	// Plugins' own settings folders (small files they read at start).
-	if entries, err := os.ReadDir(prodConfDir()); err == nil {
+	// Plugins' own settings folders (small files they read at start):
+	// production's, else the program's own (a Docker sidecar's image).
+	src := pluginConfDir()
+	if entries, err := os.ReadDir(src); err == nil {
 		for _, e := range entries {
 			if !e.IsDir() || e.Name() == "opensearch-security" || e.Name() == "jvm.options.d" || strings.HasPrefix(e.Name(), ".") {
 				continue
 			}
-			_ = copyTree(filepath.Join(prodConfDir(), e.Name()), filepath.Join(conf, e.Name()))
+			_ = copyTree(filepath.Join(src, e.Name()), filepath.Join(conf, e.Name()))
 		}
 	}
 	return nil
+}
+
+// pluginConfDir is where the plugins' settings folders are read from:
+// production's configuration folder, or, where there is none here (the
+// agent in Docker, built on OpenSearch's own image), the program's.
+func pluginConfDir() string {
+	if dirExists(prodConfDir()) {
+		return prodConfDir()
+	}
+	return filepath.Join(openSearchHome(), "config")
 }
 
 // scratchJVMOptions is production's jvm.options without what names
@@ -660,7 +672,7 @@ func (s scratch) restore(ctx context.Context, c *client, name string) error {
 	}
 	// Global state (templates, pipelines) stays out: the security plugin
 	// lets only its super administrator (a certificate) restore it.
-	req := map[string]any{"indices": "*", "include_global_state": false, "ignore_unavailable": true,
+	req := map[string]any{"indices": restoreIndices, "include_global_state": false, "ignore_unavailable": true,
 		"index_settings": map[string]any{"index.number_of_replicas": 0}}
 	var res struct {
 		Snapshot struct {

@@ -42,8 +42,17 @@ func repoDir(in serverInfo) (string, error) {
 			return want, nil
 		}
 	}
-	return want, fmt.Errorf("%w: OpenSearch doesn't allow snapshots in %s yet (its path.repo setting, read when OpenSearch starts). "+
-		"The Rowsafe installer adds it to opensearch.yml; OpenSearch then needs one restart", errNoRepoPath, want)
+	return want, fmt.Errorf("%w: OpenSearch doesn't allow snapshots in %s yet (its path.repo setting, read when OpenSearch starts). %s",
+		errNoRepoPath, want, repoPathHint(want))
+}
+
+// repoPathHint says how path.repo gets Rowsafe's folder.
+func repoPathHint(dir string) string {
+	if inDocker() {
+		return "In Docker, give the opensearch service path.repo=" + dir + " in its environment and the snapshots volume mounted there " +
+			"(the compose example in Rowsafe's Docker guide), then recreate its container once"
+	}
+	return "The Rowsafe installer adds it to opensearch.yml; OpenSearch then needs one restart"
 }
 
 // ensureRepo registers Rowsafe's repository in OpenSearch at dir (again
@@ -66,7 +75,7 @@ func ensureRepo(ctx context.Context, c *client, dir string) error {
 	body := map[string]any{"type": "fs", "settings": map[string]any{"location": dir, "compress": true}}
 	if err := c.do(ctx, http.MethodPut, "/_snapshot/"+repoName, body, nil); err != nil {
 		if strings.Contains(err.Error(), "path.repo") || strings.Contains(err.Error(), "doesn't match any of the locations") {
-			return fmt.Errorf("%w: OpenSearch doesn't allow snapshots in %s yet (path.repo): the Rowsafe installer adds it; OpenSearch then needs one restart", errNoRepoPath, dir)
+			return fmt.Errorf("%w: OpenSearch doesn't allow snapshots in %s yet (path.repo). %s", errNoRepoPath, dir, repoPathHint(dir))
 		}
 		return fmt.Errorf("setting up Rowsafe's snapshot repository in OpenSearch: %w", err)
 	}
@@ -76,6 +85,10 @@ func ensureRepo(ctx context.Context, c *client, dir string) error {
 // checkRepoReadable checks the agent can read the snapshot folder.
 func checkRepoReadable(dir string) error {
 	if _, err := os.ReadDir(dir); err != nil {
+		if inDocker() {
+			return fmt.Errorf("Rowsafe can't read the snapshot folder %s (%v): mount the snapshots volume into the rowsafe-agent service too, "+
+				"at the same path (read-only is enough), as in the compose example", dir, errorsTail(err))
+		}
 		return fmt.Errorf("Rowsafe can't read the snapshot folder %s (%v): the installer gives Rowsafe's user read access to it through OpenSearch's group", dir, errorsTail(err))
 	}
 	return nil

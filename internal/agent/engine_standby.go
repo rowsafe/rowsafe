@@ -72,8 +72,7 @@ func engineStandby(engine string) EngineStandby {
 	if e == nil {
 		return nil
 	}
-	s, _ := e.(EngineStandby)
-	return s
+	return standbyOf(e) // its own, or its snapshot moves' (snapshot_move.go)
 }
 
 // engineEnvFor is the EngineEnv for one of db's tasks: the bucket is the
@@ -342,7 +341,7 @@ func (a *Agent) holdEngineFence(ctx context.Context, f fenceRecord) {
 func (a *Agent) engineStandbyHeartbeat(ctx context.Context, hb *protocol.StandbyHeartbeat) {
 	for _, e := range registeredEngines() {
 		env := a.engineEnv(e.Name())
-		if es, ok := e.(EngineStandby); ok {
+		if es := standbyOf(e); es != nil {
 			hb.Standbys = append(hb.Standbys, es.StandbyStates(ctx, env)...)
 		}
 	}

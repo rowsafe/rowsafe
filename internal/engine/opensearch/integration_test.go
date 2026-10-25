@@ -128,13 +128,13 @@ func TestOpenSearch(t *testing.T) {
 	if st, err := ServerStatus(ctx, env, 9200); err != nil || st.Login != "missing" || st.Security != "on" || st.TLS != "on" {
 		t.Fatalf("status before login: %+v %v", st, err)
 	}
-	if err := CreateLogin(ctx, env, 9200, "", ""); err != ErrNeedAdmin {
+	if _, err := CreateLogin(ctx, env, 9200, "", ""); err != ErrNeedAdmin {
 		t.Fatalf("no admin: %v", err)
 	}
-	if err := CreateLogin(ctx, env, 9200, "admin", "wrong"); err != ErrAdminRefused {
+	if _, err := CreateLogin(ctx, env, 9200, "admin", "wrong"); err != ErrAdminRefused {
 		t.Fatalf("wrong admin: %v", err)
 	}
-	if err := CreateLogin(ctx, env, 9200, "admin", os.Getenv("ROWSAFE_TEST_OPENSEARCH_ADMIN_PASSWORD")); err != nil {
+	if _, err := CreateLogin(ctx, env, 9200, "admin", os.Getenv("ROWSAFE_TEST_OPENSEARCH_ADMIN_PASSWORD")); err != nil {
 		t.Fatalf("login: %v", err)
 	}
 	st, err := ServerStatus(ctx, env, 9200)

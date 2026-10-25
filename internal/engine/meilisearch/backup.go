@@ -48,7 +48,10 @@ func (e *Engine) takeSnapshot(ctx context.Context, env agent.EngineEnv, db proto
 	}
 	// Nothing changed since the newest snapshot: record it again.
 	keys, settings := keysMark(ctx, c, s), instanceSettingsMark(ctx, c)
-	if docs, _, err := r.listBackups(ctx); err == nil && len(docs) > 0 {
+	// After a move here (snapshot_move.go), the folder's snapshots are the
+	// old server's: the first one taken here is whole.
+	fresh := freshNeeded(env, db)
+	if docs, _, err := r.listBackups(ctx); err == nil && len(docs) > 0 && !fresh {
 		prev := docs[len(docs)-1]
 		holder := prev
 		if prev.Data != "" {
@@ -124,6 +127,9 @@ func (e *Engine) takeSnapshot(ctx context.Context, env agent.EngineEnv, db proto
 	if err := r.putJSON(ctx, backupKey(doc.Label, backupDocName), doc); err != nil {
 		_ = r.deleteBackup(context.WithoutCancel(ctx), doc.Label)
 		return doc, fmt.Errorf("saving the backup's description: %w", err)
+	}
+	if fresh {
+		_ = os.Remove(freshFile(env, db.ID))
 	}
 	return doc, nil
 }

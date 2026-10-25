@@ -70,6 +70,18 @@ import (
 //     (SealedSecret); DBSecret.Password is the key, DBSecret.URL the
 //     instance's address. Rowsafe's own key and keys with every right are
 //     listed, never changed.
+//   - Docker: the agent runs as a sidecar (ghcr.io/rowsafe/agent:meilisearch1,
+//     built on the official getmeili/meilisearch image of MeilisearchVersion,
+//     whose program runs Proof and Rewind copies and opens snapshots of 1.12
+//     and newer) and reaches the instance at ROWSAFE_MEILISEARCH_URL on the
+//     compose network (plain HTTP there, or HTTPS checked against
+//     ROWSAFE_MEILISEARCH_CA_FILE). Meilisearch writes its snapshots into a
+//     volume both containers mount (MEILI_SNAPSHOT_DIR, the agent's
+//     ROWSAFE_MEILISEARCH_SNAPSHOT_DIR); `rowsafe-agent meilisearch login` in
+//     the agent's container makes Rowsafe's key. A rewind in place lets the
+//     temporary Meilisearch export to production's container only. Restarts
+//     go through the container control service; Rowsafe never changes
+//     Meilisearch's image (no updates there).
 
 // Meilisearch's defaults.
 const (
@@ -135,6 +147,7 @@ var meilisearchFeatures = EngineFeatures{
 	Updates:  true, // the newest pinned release (MeilisearchVersion), by the root helper, on servers Rowsafe's installer set up
 	DBAdmin:  true, // indexes and API keys
 	Security: true,
+	TakeOut:  true, // Take it with you, by snapshots (snapshot_move.go)
 }
 
 // MeilisearchStatus is Meilisearch's own health detail

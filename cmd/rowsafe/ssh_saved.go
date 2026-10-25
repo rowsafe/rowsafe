@@ -39,7 +39,7 @@ var sshValueFlags = func() map[string]bool {
 		new-owner note on outside-check owner p password-env path pool-size port postgres proof-schedule query reason reassign-to region
 		remove restore retention-full role schema search secret-env send set severity since site size socket-dir sort source source-env
 		server ssh status table template token topic api-key bot-token chat-id routing-key threshold timeout timezone to ttl type url user username version width workload
-		as endpoint bucket uri-style path-prefix ca-file primary grep every snapshot`) {
+		as endpoint bucket uri-style path-prefix ca-file primary grep every snapshot turso d1`) {
 		m[f] = true
 	}
 	return m

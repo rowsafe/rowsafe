@@ -125,6 +125,10 @@ type startOptions struct {
 	Upgrade bool
 	// IndexingMemory caps its indexing memory (bytes, 0: 256 MiB).
 	IndexingMemory int64
+	// Network is the one network its exports may reach (a rewind in place
+	// exports into production): "" is this machine (127.0.0.1/32); from a
+	// Docker sidecar, production's container.
+	Network string
 }
 
 // start runs the instance on a free port and waits until it answers.
@@ -148,8 +152,8 @@ func (s *scratch) start(ctx context.Context, o startOptions) error {
 			"--dump-dir", filepath.Join(s.Dir, "dumps"),
 			"--max-indexing-memory", strconv.FormatInt(mem, 10),
 			"--max-indexing-threads", "1",
-			// Exports go to this server only (rewinds in place).
-			"--experimental-allowed-ip-networks", "127.0.0.1/32",
+			// Exports go to production only (rewinds in place).
+			"--experimental-allowed-ip-networks", cmpOr(o.Network, "127.0.0.1/32"),
 		}
 		if o.Import != "" {
 			if _, err := os.Stat(s.dbPath()); notExist(err) {
@@ -332,8 +336,15 @@ func restoreScratch(ctx context.Context, env agent.EngineEnv, r *repo, s server,
 		_ = sc.remove()
 		return nil, fmt.Errorf("the snapshot is from Meilisearch %s, newer than the program on this server (%s), which can't open it", doc.Version, progVersion)
 	}
+	o := startOptions{Import: sc.snapshotPath(), Upgrade: upgrade}
+	if s.URL != "" {
+		// From a Docker sidecar, production is another container.
+		if _, n, err := s.exportTarget(ctx); err == nil {
+			o.Network = n
+		}
+	}
 	tl.Printf("starting a temporary Meilisearch %s on 127.0.0.1 from it", progVersion)
-	if err := sc.start(ctx, startOptions{Import: sc.snapshotPath(), Upgrade: upgrade}); err != nil {
+	if err := sc.start(ctx, o); err != nil {
 		_ = sc.remove()
 		return nil, err
 	}

@@ -1,0 +1,26 @@
+/* WARNING: Script requires that SQLITE_DBCONFIG_DEFENSIVE be disabled */
+PRAGMA foreign_keys=OFF;
+BEGIN TRANSACTION;
+PRAGMA writable_schema=ON;
+INSERT INTO sqlite_schema(type,name,tbl_name,rootpage,sql)VALUES('table','docs','docs',0,'CREATE VIRTUAL TABLE docs USING fts5(body)');
+CREATE TABLE IF NOT EXISTS 'docs_data'(id INTEGER PRIMARY KEY, block BLOB);
+INSERT INTO docs_data VALUES(1,x'0204');
+INSERT INTO docs_data VALUES(10,x'000000000101010001010101');
+INSERT INTO docs_data VALUES(137438953473,x'0000002b0430646f63020203010568656c6c6f01020201067365636f6e640202020105776f726c6401020304080a0b');
+CREATE TABLE IF NOT EXISTS 'docs_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID;
+INSERT INTO docs_idx VALUES(1,x'',2);
+CREATE TABLE IF NOT EXISTS 'docs_content'(id INTEGER PRIMARY KEY, c0);
+INSERT INTO docs_content VALUES(1,'hello world');
+INSERT INTO docs_content VALUES(2,'second doc');
+CREATE TABLE IF NOT EXISTS 'docs_docsize'(id INTEGER PRIMARY KEY, sz BLOB);
+INSERT INTO docs_docsize VALUES(1,x'02');
+INSERT INTO docs_docsize VALUES(2,x'02');
+CREATE TABLE IF NOT EXISTS 'docs_config'(k PRIMARY KEY, v) WITHOUT ROWID;
+INSERT INTO docs_config VALUES('version',4);
+CREATE TABLE t(id INTEGER PRIMARY KEY AUTOINCREMENT, x);
+INSERT INTO t VALUES(1,1);
+CREATE TABLE IF NOT EXISTS sqlite_sequence(name,seq);
+DELETE FROM sqlite_sequence;
+INSERT INTO sqlite_sequence VALUES('t',1);
+PRAGMA writable_schema=OFF;
+COMMIT;

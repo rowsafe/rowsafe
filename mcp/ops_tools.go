@@ -165,7 +165,7 @@ func (t *tools) addOpsReadTools(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name: "list_forks",
 		Description: "A database's forks (independent new databases made from it as it was at a point in time, on this or another server) with their progress, the window a new fork can start from, the database it was forked from, " +
-			"and move-ins (copying a database in from a managed provider such as RDS, Supabase or Atlas) with their phase. With fork_id, one fork's progress. Read-only.",
+			"and move-ins (copying a database in from a managed provider such as RDS, Supabase, Atlas, Turso or Cloudflare D1) with their phase. With fork_id, one fork's progress. Read-only.",
 		Annotations: readOnly("Forks and move-ins"),
 	}, t.listForks)
 }

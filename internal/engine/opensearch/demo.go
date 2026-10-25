@@ -5,7 +5,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -49,7 +48,7 @@ func demoCheck(ctx context.Context, port int, st *protocol.OpenSearchStatus, try
 	}
 	if st.TLS {
 		cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		if c, err := servedCert(cctx, net.JoinHostPort("127.0.0.1", strconv.Itoa(port))); err == nil {
+		if c, err := servedCert(cctx, baseURL(port).Host); err == nil {
 			if strings.Contains(c.Issuer.String(), "Example Com Inc.") || strings.HasSuffix(c.Subject.CommonName, ".example.com") {
 				st.DemoCertificates = true
 			}
@@ -93,6 +92,11 @@ func packageKeyProblem() string {
 // transportPublic reports whether the node-to-node port is bound beyond
 // loopback.
 func transportPublic(ctx context.Context, c *client) bool {
+	if inDocker() {
+		// Bound beyond the container's own loopback is normal there: Docker
+		// publishes only the ports the compose file lists.
+		return false
+	}
 	var v struct {
 		Nodes map[string]struct {
 			Transport struct {

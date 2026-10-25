@@ -431,7 +431,12 @@ func (d *dba) inventory(ctx context.Context) (*protocol.DBInventory, error) {
 	if listen == "" {
 		listen = "127.0.0.1" // OpenSearch's default: this server only
 	}
-	inv.Addresses, inv.SuggestedHost, inv.LocalOnly = agent.DBServerAddresses(strings.ReplaceAll(listen, "_local_", "127.0.0.1"), nil)
+	if inDocker() {
+		// Apps on the compose network reach it by its service's name.
+		inv.SuggestedHost = baseURL(d.db.Port).Hostname()
+	} else {
+		inv.Addresses, inv.SuggestedHost, inv.LocalOnly = agent.DBServerAddresses(strings.ReplaceAll(listen, "_local_", "127.0.0.1"), nil)
+	}
 	if !in.Security {
 		return inv, nil
 	}

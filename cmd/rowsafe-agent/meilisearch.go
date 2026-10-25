@@ -32,6 +32,10 @@ const meilisearchUsage = `rowsafe-agent meilisearch - Meilisearch helpers for th
       the facts root found (the program, the snapshot folder...) for the
       agent only. Prints key=value lines: version, tls, key_uid, no_auth.
       Exit 11: a master key is needed; 12: it was refused.
+      In the Docker sidecar (ROWSAFE_MEILISEARCH_URL set) only --port is
+      needed: the program is the image's (ROWSAFE_MEILISEARCH_BIN) and the
+      snapshot folder the volume mounted at ROWSAFE_MEILISEARCH_SNAPSHOT_DIR:
+        docker compose exec -it rowsafe-agent rowsafe-agent meilisearch login
 
   rowsafe-agent meilisearch tls-front --listen ADDR --to 127.0.0.1:PORT --cert FILE --key FILE
       Rowsafe's TLS front (servers Rowsafe creates; its own systemd service):

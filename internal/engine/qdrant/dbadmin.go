@@ -195,6 +195,10 @@ func makeKey(ctx context.Context, env agent.EngineEnv, port int, c *client, l Lo
 		}
 		k = list.Keys[i]
 	}
+	if list.Frozen != nil && k.canWrite() {
+		return nil, "", errors.New("apps' writes here are stopped while this database moves to another server: " +
+			"make keys that can write on the new server")
+	}
 	days, err := expiryDays(k, p.ExpiresDays)
 	if err != nil {
 		return nil, "", err
@@ -341,6 +345,9 @@ func dropCollection(ctx context.Context, env agent.EngineEnv, port int, c *clien
 	*list = next
 	for _, n := range removed {
 		_ = deleteKeyByName(ctx, c, n)
+	}
+	if next.Frozen != nil { // writes stopped for a move: their points stay out until Thaw
+		changed = slices.DeleteFunc(changed, keyEntry.canWrite)
 	}
 	return renewed, removed, putKeyPoints(ctx, c, changed)
 }

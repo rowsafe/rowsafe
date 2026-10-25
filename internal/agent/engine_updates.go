@@ -56,6 +56,23 @@ var engineServerPackages = map[string][]string{
 	// Debian's, Ubuntu's and packages.redis.io's packages share the name.
 	protocol.EngineRedis:  {"redis-server"},
 	protocol.EngineValkey: {"valkey-server"},
+	// OpenSearch's own apt repository (one per major version).
+	protocol.EngineOpenSearch: {"opensearch"},
+}
+
+// engineSeries is the release series updates stay within: major.minor
+// ("8.0", "10.11", "25.8"), but OpenSearch's whole major version ("3"):
+// its minor releases keep the data, the API and the plugins compatible,
+// and its apt repository carries one major version.
+func engineSeries(engine, v string) string {
+	if protocol.NormalizeEngine(engine) == protocol.EngineOpenSearch {
+		up := upstreamVersion(v)
+		if i := strings.Index(up, "."); i > 0 {
+			return up[:i]
+		}
+		return ""
+	}
+	return seriesOf(v)
 }
 
 // EngineBundledVersioner is optionally implemented by an engine whose
@@ -134,12 +151,12 @@ func (a *Agent) engineSoftware(ctx context.Context) []protocol.ClusterSoftware {
 			}
 		}
 		if pkg != "" {
-			cs.Installed, cs.Series = upstreamVersion(cs.InstalledPackage), seriesOf(cs.InstalledPackage)
+			cs.Installed, cs.Series = upstreamVersion(cs.InstalledPackage), engineSeries(engine, cs.InstalledPackage)
 			cs.Candidate, cs.CandidatePackage = cs.Installed, cs.InstalledPackage
 			if b, err := a.runner.Run(ctx, "apt-cache", "madison", pkg); err == nil {
 				for _, m := range parseMadisonSources(b) {
 					v := m.version
-					up, s := upstreamVersion(v), seriesOf(v)
+					up, s := upstreamVersion(v), engineSeries(engine, v)
 					switch {
 					case s == cs.Series && debCompare(v, cs.CandidatePackage) > 0:
 						// The newest package of the series: a newer release, or
@@ -190,15 +207,15 @@ func (a *Agent) engineContainerSoftware(ctx context.Context) []protocol.ClusterS
 		vctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		running, err := vr.Version(vctx, a.engineEnv(engine), db)
 		cancel()
-		if err != nil || seriesOf(running) == "" {
+		if err != nil || engineSeries(engine, running) == "" {
 			continue
 		}
-		cs := protocol.ClusterSoftware{Port: db.Port, Engine: engine, Running: running, Series: seriesOf(running), Candidate: running}
+		cs := protocol.ClusterSoftware{Port: db.Port, Engine: engine, Running: running, Series: engineSeries(engine, running), Candidate: running}
 		cs.Major = protocol.SeriesNumber(cs.Series)
 		bctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		bundled, err := bv.BundledVersion(bctx)
 		cancel()
-		if err == nil && seriesOf(bundled) == cs.Series {
+		if err == nil && engineSeries(engine, bundled) == cs.Series {
 			cs.CandidateSource = protocol.CandidateAgentImage
 			if newerMinor(running, bundled) {
 				cs.Candidate = bundled
@@ -282,7 +299,7 @@ func (a *Agent) engineUpdate(ctx context.Context, db protocol.DatabaseSpec, task
 		return nil, fmt.Errorf("reading %s's version: %w", name, err)
 	}
 	res := &protocol.PGUpdateResult{FromVersion: before}
-	tl.Printf("installing the newest %s %s release through the update helper (%s, port %d)", name, seriesOf(before), unit, db.Port)
+	tl.Printf("installing the newest %s %s release through the update helper (%s, port %d)", name, engineSeries(db.Engine, before), unit, db.Port)
 	t0 := time.Now()
 	ans, err := a.updateHelper()(ctx, taskID+"-update", []string{actDBMinorUpdate, strconv.Itoa(db.Port)}, 40*time.Minute)
 	if err == nil {
@@ -298,7 +315,11 @@ func (a *Agent) engineUpdate(ctx context.Context, db protocol.DatabaseSpec, task
 	res.Packages = strings.Fields(ans["packages"])
 	res.Restarted = ans["restarted"] == "1"
 	out := &protocol.RestartResult{}
-	if err := a.waitBackWithin(ctx, db, out, updateReadyWait); err != nil {
+	wait := updateReadyWait
+	if protocol.NormalizeEngine(db.Engine) == protocol.EngineOpenSearch {
+		wait = slowBackTimeout // a Java server with its plugins
+	}
+	if err := a.waitBackWithin(ctx, db, out, wait); err != nil {
 		return res, fmt.Errorf("the update is installed, but %s isn't answering: %w", name, err)
 	}
 	if res.Restarted {
@@ -309,7 +330,7 @@ func (a *Agent) engineUpdate(ctx context.Context, db protocol.DatabaseSpec, task
 	// can't follow keeps its scheduled snapshots: neither is a failure.
 	snapshots := out.ArchiveMode == protocol.RedisArchiveSnapshots
 	switch protocol.NormalizeEngine(db.Engine) {
-	case protocol.EngineClickHouse, protocol.EngineQdrant, protocol.EngineMeilisearch: // no change log to archive
+	case protocol.EngineClickHouse, protocol.EngineOpenSearch, protocol.EngineQdrant, protocol.EngineMeilisearch: // no change log to archive
 		res.ArchivingOK = true
 	default:
 		res.ArchivingOK = out.ArchiveMode == "on" || snapshots
@@ -321,7 +342,7 @@ func (a *Agent) engineUpdate(ctx context.Context, db protocol.DatabaseSpec, task
 	res.DurationMs = time.Since(start).Milliseconds()
 	switch {
 	case res.ToVersion == before && !res.Restarted:
-		res.Summary = fmt.Sprintf("%s %s is already the newest %s release available to this server.", name, before, seriesOf(before))
+		res.Summary = fmt.Sprintf("%s %s is already the newest %s release available to this server.", name, before, engineSeries(db.Engine, before))
 	case res.Restarted && res.ToVersion == before:
 		// The distribution's fixes of the same release (Debian's 7.0.15-1~deb12u10).
 		res.Summary = fmt.Sprintf("Installed the newest %s %s package (%s) and restarted %s in %s.", name, before, res.PackageVersion, name,

@@ -68,8 +68,9 @@ proprietary (api.rowsafe.sh, app.rowsafe.sh).
   restarts/stops/starts only the PostgreSQL units root listed in `/etc/rowsafe/restart-allowed`).
 - `integrations/claude-code`, `integrations/codex`, `integrations/github-action`: plugins and the
   GitHub Action (published separately as github.com/rowsafe/action).
-- `deploy/`: systemd unit, Docker sidecar images (`ghcr.io/rowsafe/agent:pg<major>`, `:clickhouse<YY.M>`, `:redis<X.Y>`
-  and `:valkey<X.Y>` floating, `:<ver>-pg<major>`, `:<ver>-clickhouse<YY.M>`... exact), compose examples.
+- `deploy/`: systemd unit, Docker sidecar images (`ghcr.io/rowsafe/agent:pg<major>`, `:clickhouse<YY.M>`, `:redis<X.Y>`,
+  `:valkey<X.Y>`, `:qdrant<X.Y>`, `:opensearch<major>` and `:meilisearch1` floating, `:<ver>-pg<major>`,
+  `:<ver>-clickhouse<YY.M>`... exact), compose examples.
 
 ## Commands
 
