@@ -56,8 +56,8 @@ func TestPinsAgree(t *testing.T) {
 	}
 	same("Dockerfile DB_VERSION", v, all("deploy/docker/agent-qdrant.Dockerfile", `(?m)^ARG DB_VERSION=(\S+)$`))
 	digest := all("deploy/docker/agent-qdrant.Dockerfile", `(?m)^ARG DB_IMAGE_DIGEST=(sha256:[0-9a-f]{64})$`)[0]
-	same("release.yml DB_VERSION", v, all(".github/workflows/release.yml", `DB_VERSION=(\d+\.\d+\.\d+)"`))
-	same("release.yml DB_IMAGE_DIGEST", digest, all(".github/workflows/release.yml", `DB_IMAGE_DIGEST=(sha256:[0-9a-f]{64})"`))
+	same("release.yml DB_VERSION", v, all(".github/workflows/release.yml", `qdrant\d+\.\d+\) \{ echo "DB_VERSION=(\d+\.\d+\.\d+)"`))
+	same("release.yml DB_IMAGE_DIGEST", digest, all(".github/workflows/release.yml", `qdrant\d+\.\d+\) \{ echo "DB_VERSION=\S+"; echo "DB_IMAGE_DIGEST=(sha256:[0-9a-f]{64})"`))
 	same("compose example image", "v"+v+"@"+digest, all("deploy/docker/compose.qdrant.example.yml", `image: qdrant/qdrant:(\S+)`))
 	same("test-qdrant.sh image", "v"+v, all("scripts/test-qdrant.sh", `QDRANT_IMAGES:-qdrant/qdrant:(\S+)\}`))
 	ce, ok := protocol.CloudEngineFor(protocol.EngineQdrant)

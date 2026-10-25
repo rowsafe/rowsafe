@@ -9,8 +9,15 @@
 # snapshot folder through OpenSearch's group on a real server) and keeps
 # the bucket inside its process.
 #
+# Then, again as a Docker sidecar: the agent's own image
+# (deploy/docker/agent-opensearch.Dockerfile, built here) runs the test in
+# its own container, reaching OpenSearch at https://opensearch:9200 on a
+# compose-like network and reading the snapshot folder from a shared volume
+# through OpenSearch's group, as compose.opensearch.example.yml sets it up.
+#
 #   scripts/test-opensearch.sh
 #   OPENSEARCH_IMAGES="opensearchproject/opensearch:2.19.4" scripts/test-opensearch.sh
+#   SIDECAR=0 scripts/test-opensearch.sh    # the native run only
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 IMAGES=${OPENSEARCH_IMAGES:-opensearchproject/opensearch:3.9.0}
@@ -32,9 +39,13 @@ aarch64 | arm64) arch=arm64 ;;
 esac
 work=$(mktemp -d)
 containers=""
+net="rowsafe-test-opensearch-$$"
+vol="rowsafe-test-opensearch-snapshots-$$"
 # shellcheck disable=SC2329 # the EXIT trap runs it
 cleanup() {
 	for c in $containers; do docker rm -f "$c" >/dev/null 2>&1 || true; done
+	docker network rm "$net" >/dev/null 2>&1 || true
+	docker volume rm "$vol" >/dev/null 2>&1 || true
 	rm -rf "$work"
 }
 trap cleanup EXIT
@@ -52,7 +63,7 @@ mkdir -p "$work/tls"
 	printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth,clientAuth\n' >ext.cnf
 	openssl x509 -req -in node.csr -CA transport-ca.crt -CAkey ca.key -CAcreateserial -days 3650 -extfile ext.cnf -out transport.crt 2>/dev/null
 	openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 -subj "/CN=localhost" \
-		-addext "subjectAltName=DNS:localhost,IP:127.0.0.1" -keyout rowsafe-server.key -out rowsafe-server.crt 2>/dev/null
+		-addext "subjectAltName=DNS:localhost,DNS:opensearch,IP:127.0.0.1" -keyout rowsafe-server.key -out rowsafe-server.crt 2>/dev/null
 	rm -f ca.key node.csr ext.cnf transport-ca.srl
 )
 
@@ -129,5 +140,43 @@ DOCKERFILE
 		echo "== $src: passed"
 	fi
 	docker rm -f "$c" >/dev/null
+
+	[ "${SIDECAR:-1}" = 1 ] || continue
+	# The same OpenSearch, with the agent's image next to it.
+	major=$(docker run --rm --entrypoint sh "$src" -c 'ls /usr/share/opensearch/lib' | sed -n 's/^opensearch-\([0-9]*\)\.[0-9.]*\.jar$/\1/p')
+	agent="rowsafe-test/agent:opensearch$major"
+	if ! docker image inspect "$agent" >/dev/null 2>&1; then
+		echo "== building the agent image for OpenSearch $major (from $src)"
+		digest=$(docker image inspect "$src" --format '{{index .RepoDigests 0}}' | sed 's/.*@//')
+		to 1800 docker build -q -f "$HERE/deploy/docker/agent-opensearch.Dockerfile" --build-arg DB_VERSION="${src##*:}" \
+			--build-arg DB_IMAGE_DIGEST="$digest" --build-arg IMAGE_VARIANT="opensearch$major" -t "$agent" "$HERE" >/dev/null
+	fi
+	docker network create "$net" >/dev/null 2>&1 || true
+	docker volume rm "$vol" >/dev/null 2>&1 || true
+	cs="$c-db"
+	containers="$containers $cs"
+	# OpenSearch mounts the snapshot volume first: it starts with the folder's
+	# owner and mode from the image (uid 1000, 2750).
+	docker run -d --name "$cs" -m 4g --network "$net" --network-alias opensearch -v "$vol:/var/lib/rowsafe-opensearch/snapshots" "$tag" >/dev/null
+	echo "== $src: waiting for OpenSearch (sidecar)"
+	code=''
+	for _ in $(seq 1 90); do
+		code=$(docker exec "$cs" curl -sk -o /dev/null -w '%{http_code}' https://127.0.0.1:9200/ 2>/dev/null || true)
+		[ "$code" = 401 ] && break
+		sleep 2
+	done
+	[ "$code" = 401 ] || { docker logs --tail 40 "$cs"; echo "OpenSearch didn't start"; rc=1; continue; }
+	if ! to "$LIMIT" docker run --rm -m 2g --network "$net" -v "$vol:/var/lib/rowsafe-opensearch/snapshots:ro" \
+		-v "$work/opensearch.test:/usr/local/bin/opensearch.test:ro" -v "$work/tls/rowsafe-server.crt:/etc/rowsafe-test/ca.crt:ro" \
+		-e ROWSAFE_TEST_OPENSEARCH_ADMIN_PASSWORD=$PASS -e ROWSAFE_OPENSEARCH_URL=https://opensearch:9200 \
+		-e ROWSAFE_OPENSEARCH_CA_FILE=/etc/rowsafe-test/ca.crt -w /tmp --entrypoint /usr/local/bin/opensearch.test "$agent" \
+		-test.v -test.count=1 -test.timeout=$((LIMIT - 60))s -test.run "$TEST_RUN"; then
+		echo "== $src (sidecar): FAILED"
+		docker logs --tail 30 "$cs" 2>&1 | grep -v '^WARNING' || true
+		rc=1
+	else
+		echo "== $src (sidecar): passed"
+	fi
+	docker rm -f "$cs" >/dev/null
 done
 exit $rc

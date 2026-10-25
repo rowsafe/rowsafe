@@ -1,0 +1,68 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Meilisearch Community Edition (the official, unmodified
+# getmeili/meilisearch image) with the Rowsafe agent as a sidecar on the
+# same compose network: Meilisearch's own snapshots, written into a volume
+# both containers mount, encrypted in the agent container (with your
+# passphrase) and copied to your bucket; Marks; weekly Proof; Rewind (a
+# copy, documents brought back, or every index back to a snapshot, with
+# Undo); Pulse; API keys per index. Restores go back to a snapshot (every
+# 15 minutes when something changed) or a Mark, not to any second.
+#
+#   1. Put the agent's settings in rowsafe-agent.env next to this file
+#      (chmod 600), with a one-time token from `rowsafe hosts enroll-token`,
+#      and Meilisearch's master key in meilisearch.env (chmod 600):
+#        MEILI_MASTER_KEY=<a long random key: openssl rand -hex 32>
+#   2. docker compose up -d
+#   3. Once, give the agent its own API key (paste the master key and press
+#      Enter: the agent makes a key of its own with it and never keeps the
+#      master key):
+#        docker compose exec -it rowsafe-agent rowsafe-agent meilisearch login
+#   4. rowsafe adopt search --host db-1 --engine meilisearch --port 7700, then
+#      `rowsafe apply search` (or Turn on backups in the dashboard).
+#
+# Update the agent (Meilisearch keeps running):
+#   docker compose pull rowsafe-agent && docker compose up -d rowsafe-agent
+
+name: myapp
+
+services:
+  meilisearch:
+    image: getmeili/meilisearch:v1.54.3
+    restart: unless-stopped
+    env_file: meilisearch.env                    # MEILI_MASTER_KEY
+    environment:
+      MEILI_ENV: production
+      MEILI_NO_ANALYTICS: "true"
+      MEILI_SNAPSHOT_DIR: /meili_snapshots         # the volume the agent reads
+    ports:
+      - "127.0.0.1:7700:7700"                    # this host only (put TLS in front to open it)
+    volumes:
+      - meilidata:/meili_data
+      - meilisnapshots:/meili_snapshots
+
+  # Rowsafe
+  rowsafe-agent:
+    # Built FROM the same image (its meilisearch program runs Proof and
+    # Rewind copies; it opens snapshots of Meilisearch 1.12 and newer). It
+    # follows the newest Rowsafe release; to pin one, use the exact tag,
+    # e.g. ghcr.io/rowsafe/agent:<version>-meilisearch1.
+    image: ghcr.io/rowsafe/agent:meilisearch1
+    # The name Rowsafe shows for this host: `rowsafe adopt search --host db-1`.
+    hostname: db-1
+    restart: unless-stopped
+    environment:
+      # The meilisearch service on the compose network (private to this host).
+      ROWSAFE_MEILISEARCH_URL: http://meilisearch:7700
+      ROWSAFE_MEILISEARCH_SNAPSHOT_DIR: /meili_snapshots
+    depends_on:
+      - meilisearch
+    env_file: rowsafe-agent.env
+    volumes:
+      - rowsafe-state:/var/lib/rowsafe
+      - meilisnapshots:/meili_snapshots:ro       # the snapshots Meilisearch writes
+
+volumes:
+  meilidata:
+  meilisnapshots:
+  rowsafe-state:

@@ -33,11 +33,18 @@ func (e *Engine) SecurityReport(ctx context.Context, env agent.EngineEnv, db pro
 		rep.ListenAddresses = "unknown"
 		rep.Notes = append(rep.Notes, "Rowsafe doesn't know which addresses Meilisearch listens on: run the Rowsafe installer on the server again.")
 	}
+	if s.URL != "" {
+		rep.Notes = append(rep.Notes, "Meilisearch runs in Docker: it listens on every address of its container, and Docker publishes only the ports "+
+			"your compose file lists.")
+	}
 	// TLS: Rowsafe's TLS front (servers Rowsafe creates) or Meilisearch's own.
 	rep.SSL = s.LocalPort > 0 || s.TLS
 	es.RequireTLS = rep.SSL
 	// Without a master key Meilisearch answers anyone, with no key at all.
-	open := newClient(map[bool]string{true: "https", false: "http"}[s.TLS && s.LocalPort == 0], s.localPort(), "", prodCheck(s))
+	open, err := s.prodClient(s.localScheme(), "")
+	if err != nil {
+		return rep, err
+	}
 	defer open.close()
 	if _, err := open.version(ctx); err == nil {
 		es.AuthDisabled = true

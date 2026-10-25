@@ -89,6 +89,26 @@ const (
 	caEnv = "ROWSAFE_OPENSEARCH_CA_FILE"
 )
 
+// inDocker: the agent is a Docker sidecar (ghcr.io/rowsafe/agent:opensearch3)
+// reaching OpenSearch in another container at ROWSAFE_OPENSEARCH_URL.
+func inDocker() bool {
+	return os.Getenv("ROWSAFE_MODE") == "docker-sidecar" && strings.TrimSpace(os.Getenv(urlEnv)) != ""
+}
+
+// loginHint is how a person makes Rowsafe's user (again).
+func loginHint() string {
+	if inDocker() {
+		return "create Rowsafe's own user once with `docker compose exec -it rowsafe-agent rowsafe-agent opensearch login --admin-user admin` " +
+			"(an administrator's password, typed once and never saved)"
+	}
+	return "run the Rowsafe installer on this server again to create Rowsafe's own OpenSearch user"
+}
+
+// errPlainLogin: a password would cross a network in the clear.
+var errPlainLogin = errors.New("OpenSearch answers in plain HTTP at an address beyond this machine, and Rowsafe doesn't send a password in the clear: " +
+	"turn TLS on for OpenSearch's REST port (https:// in ROWSAFE_OPENSEARCH_URL, with ROWSAFE_OPENSEARCH_CA_FILE), " +
+	"or keep its security plugin off on a private compose network")
+
 func loginsDir(env agent.EngineEnv) string { return filepath.Join(env.SharedStateDir(), "logins") }
 
 func loginPath(env agent.EngineEnv, port int) string {
@@ -301,6 +321,9 @@ func (c *client) raw(ctx context.Context, method, path string, body io.Reader, c
 	}
 	req.Header.Set("User-Agent", "rowsafe-agent")
 	if !c.login.NoAuth && c.login.User != "" {
+		if c.base.Scheme != "https" && !loopback(c.base.Host) {
+			return 0, nil, errPlainLogin
+		}
 		req.SetBasicAuth(c.login.User, c.login.Password)
 	}
 	resp, err := c.http.Do(req)
@@ -356,6 +379,9 @@ func plainConnError(err error) error {
 		return errors.New("nothing answers on OpenSearch's port (connection refused): is OpenSearch running?")
 	case errors.As(err, &ne) && ne.Timeout():
 		return errors.New("OpenSearch didn't answer in time")
+	case strings.Contains(err.Error(), "x509:") || strings.Contains(err.Error(), "tls: failed to verify"):
+		return fmt.Errorf("OpenSearch's certificate isn't one Rowsafe can check (%v): set ROWSAFE_OPENSEARCH_CA_FILE to the certificate "+
+			"of the authority that signed it", err)
 	}
 	return err
 }
@@ -407,13 +433,21 @@ func connectPort(ctx context.Context, env agent.EngineEnv, port int) (*client, e
 	if err != nil {
 		return nil, err
 	}
+	if !ok && inDocker() {
+		// A sidecar next to an OpenSearch without its security plugin needs
+		// no login: nothing to sign in with, nothing to save but that.
+		if anon, err := dial(ctx, port, Login{}); err == nil && !securityOn(ctx, anon) {
+			l, ok = Login{NoAuth: true}, true
+			_ = saveLogin(env, port, l)
+		}
+	}
 	if !ok {
-		return nil, fmt.Errorf("Rowsafe has no login for OpenSearch on port %d yet: run the Rowsafe installer on this server again to create Rowsafe's own OpenSearch user", port)
+		return nil, fmt.Errorf("Rowsafe has no login for OpenSearch on port %d yet: %s", port, loginHint())
 	}
 	c, err := dial(ctx, port, l)
 	if err != nil {
 		if statusOf(err) == http.StatusUnauthorized {
-			return nil, fmt.Errorf("OpenSearch on port %d refused Rowsafe's own user: run the Rowsafe installer on this server again to make it a new password", port)
+			return nil, fmt.Errorf("OpenSearch on port %d refused Rowsafe's own user: %s", port, loginHint())
 		}
 		return nil, err
 	}
