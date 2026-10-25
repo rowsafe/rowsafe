@@ -370,7 +370,8 @@ func TestScratchAliveOnlyForItsProcess(t *testing.T) {
 	if other.alive() {
 		t.Fatal("another process counted as the copy's server")
 	}
-	cmd := exec.Command("sh", "-c", "sleep 30", "sh", "--datadir="+filepath.Join(dir, "data"))
+	// "; exit": Linux's sh would otherwise become sleep, without --datadir.
+	cmd := exec.Command("sh", "-c", "sleep 30; exit 0", "sh", "--datadir="+filepath.Join(dir, "data"))
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
