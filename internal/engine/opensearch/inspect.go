@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -81,10 +82,20 @@ func versionNum(v string) int {
 }
 
 // systemIndex reports whether an index is OpenSearch's (or a plugin's) own:
-// a name starting with a dot, except data streams' backing indices.
+// a name starting with a dot, except data streams' backing indices, and the
+// Query Insights plugin's daily top_queries-YYYY.MM.dd-<n> indices (its
+// local exporter, on by default in OpenSearch 3; each server makes its own,
+// not hidden, deleted after a week).
 func systemIndex(name string) bool {
-	return strings.HasPrefix(name, ".") && !strings.HasPrefix(name, ".ds-")
+	return strings.HasPrefix(name, ".") && !strings.HasPrefix(name, ".ds-") || queryInsightsRE.MatchString(name)
 }
+
+var queryInsightsRE = regexp.MustCompile(`^top_queries-\d{4}\.\d{2}\.\d{2}(-\d+)?$`)
+
+// restoreIndices is what restores take from a snapshot: every index and
+// data stream but Query Insights' (the server has its own of the same
+// name, so restoring it would collide).
+const restoreIndices = "*,-top_queries-*"
 
 // catIndex is one row of _cat/indices.
 type catIndex struct {

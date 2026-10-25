@@ -139,6 +139,9 @@ func userName(uid int) string {
 	return "uid " + strconv.Itoa(uid)
 }
 
+// listenerCheck is checkListener (tests reach a fake Qdrant without it).
+var listenerCheck = checkListener
+
 // checkListener: every socket listening on port belongs to a user Qdrant
 // runs as.
 func checkListener(port int) error {
@@ -200,7 +203,7 @@ var localDialer = &net.Dialer{Timeout: 5 * time.Second}
 // localDial opens a plain connection to Qdrant on this machine, once the
 // port's listener is checked.
 func localDial(ctx context.Context, network, addr string) (net.Conn, error) {
-	if err := checkListener(portOf(addr)); err != nil {
+	if err := listenerCheck(portOf(addr)); err != nil {
 		return nil, err
 	}
 	return localDialer.DialContext(ctx, network, addr)
@@ -211,7 +214,7 @@ func localDial(ctx context.Context, network, addr string) (net.Conn, error) {
 // listener is checked.
 func localDialTLS(cfg *tls.Config) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		ownerErr := checkListener(portOf(addr))
+		ownerErr := listenerCheck(portOf(addr))
 		raw, err := localDialer.DialContext(ctx, network, addr)
 		if err != nil {
 			return nil, err

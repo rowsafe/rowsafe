@@ -358,6 +358,7 @@ CH_CLONES=''       # --clickhouse-clones (yes): this (empty) ClickHouse may rece
 MYSQL_STANDBY=''   # --mysql-standby (yes) / --no-mysql-standby (no); '' = ask once, on a terminal
 REDIS_STANDBY=''   # --redis-standby (yes): Redis/Valkey standby servers with this server
 REDIS_CLONES=''    # --redis-clones (yes): Redis/Valkey servers here may receive clones
+MOVE_TARGET=''     # --move-target (yes): this (empty) OpenSearch, Qdrant or Meilisearch may receive a database (Take it with you)
 MONGODB_REPLSET='' # --mongodb-replica-set (yes) / --no-mongodb-replica-set (no); '' = ask on a terminal
 INSTALL_PG=''      # --install-postgres VERSION (servers Rowsafe creates)
 PG_EXTENSIONS=''   # --pg-extensions NAME,... (with --install-postgres): vector, postgis, timescaledb
@@ -619,6 +620,10 @@ Options (when piping, pass them after `sh -s --`):
   --clickhouse-clones    ClickHouse: keep an empty server ready to receive clones of a
                          database from another server (Rowsafe's user there may then
                          create and drop databases)
+  --move-target          OpenSearch, Qdrant or Meilisearch: keep an empty server ready to
+                         receive a database moved from Rowsafe Cloud (Take it with you):
+                         Rowsafe gets its own user or key there (as for backups), and
+                         nothing is backed up until a database moves in
   --mongodb-replica-set  MongoDB: turn a standalone server into a single-member replica
                          set without asking (one MongoDB restart); restoring to any
                          second needs it
@@ -4005,6 +4010,34 @@ qdrant_prepare() {
     note "Qdrant's JSON Web Tokens are off (service.jwt_rbac): backups work; Databases & users makes keys once they are on."
   [ "$QD_TLS" != no ] ||
     note "Qdrant doesn't use TLS here: keys and data cross the network in the clear when apps connect from other servers."
+}
+
+# qdrant_move_target sets an empty Qdrant up to receive a database (Take it
+# with you): Rowsafe's own key saved for the agent, as for backups
+# (qdrant_prepare). A restore needs nothing else: the collections' snapshots
+# are uploaded over Qdrant's API. A Qdrant that asks for no key can't
+# receive one (the database would be open to anyone who reaches it).
+qdrant_move_target() {
+  if ! qdrant_status; then
+    sed 's/^/    /' "$TMP/qdstatus.err" >&2
+    warn "could not reach Qdrant on port $C_PORT"
+    return 1
+  fi
+  if [ "$QD_LOGIN" = none ]; then
+    warn "Qdrant on port $C_PORT asks for no key: turn keys on in its configuration (service.api_key) and restart it, then run this installer again with --move-target"
+    return 1
+  fi
+  qdrant_prepare || return 1
+  if ! qdrant_status || [ "$QD_LOGIN" != ok ]; then
+    warn "Rowsafe can't sign in to Qdrant on port $C_PORT"
+    return 1
+  fi
+  # Rowsafe's own collection (the keys of Databases & users) isn't counted.
+  _n=$(sed -n 's/^collections=//p' "$TMP/qdstatus" | head -n 1)
+  if [ "${_n:-0}" != 0 ]; then
+    warn "Qdrant on port $C_PORT holds $_n collections: only an empty server can receive a database"
+    return 1
+  fi
 }
 
 # ---------------------------------------------------------------- release
@@ -13024,6 +13057,9 @@ setup_databases() {
         if { [ "$C_ENGINE" = redis ] || [ "$C_ENGINE" = valkey ]; } && redis_target_offer; then # redis
           continue
         fi
+        if move_target_offer; then # opensearch, qdrant, meilisearch: Take it with you
+          continue
+        fi
         if [ "$_count" -gt 1 ] && [ "$C_ENGINE" != sqlite ] && ! confirm "Set up backups for it?" y; then
           continue
         fi
@@ -13032,6 +13068,64 @@ setup_databases() {
     esac
     protect_cluster
   done 4<"$TMP/clusters"
+}
+
+# ---------------------------------------------------------------- Take it with you
+#
+# An empty OpenSearch, Qdrant or Meilisearch can receive a database moved
+# from Rowsafe Cloud (--move-target, or yes on a terminal): Rowsafe gets its
+# own user or key there, exactly as for backups (the engine's
+# <engine>_move_target), and the agent reports the server as one a move may
+# restore into. Nothing is backed up until a database moves in; then its
+# backups go on there, in the database's own folder.
+
+# move_target_engine: the current cluster's engine moves by snapshots.
+move_target_engine() {
+  case $C_ENGINE in opensearch | qdrant | meilisearch) return 0 ;; esac
+  return 1
+}
+
+# move_target_offer (interactive): an empty server of such an engine, with
+# --move-target or a yes, is set up to receive. 1: not offered or declined.
+move_target_offer() {
+  move_target_engine || return 1
+  [ "$C_DBS" = - ] || return 1
+  [ "$MOVE_TARGET" = yes ] ||
+    { [ "$TTY" = 1 ] && confirm "It has no data. Keep it empty, ready to receive a database you take with you from Rowsafe Cloud?" n; } ||
+    return 1
+  MOVE_TARGET=yes
+  move_target_prepare
+  return 0
+}
+
+# move_target_prepare sets the current cluster up to receive.
+move_target_prepare() {
+  if "${C_ENGINE}_move_target"; then
+    ok "$(engine_label "$C_ENGINE") on port $C_PORT is ready to receive a database: choose Take it with you on the Rowsafe Cloud server and pick this server"
+  else
+    warn "$(engine_label "$C_ENGINE") on port $C_PORT couldn't be set up to receive a database (see above)"
+  fi
+}
+
+# move_target_unattended is --move-target without --protect and without a
+# terminal: every empty OpenSearch, Qdrant or Meilisearch found.
+move_target_unattended() {
+  _found=0
+  while IFS= read -r _line <&4; do
+    read_cluster "$_line"
+    move_target_engine || continue
+    if [ "$C_REG" = yes ]; then
+      note "$(cluster_desc) is protected as $C_NAME; it can't receive another database"
+      continue
+    fi
+    if [ "$C_DBS" != - ]; then
+      note "$(cluster_desc) holds data; only an empty server can receive a database"
+      continue
+    fi
+    _found=1
+    move_target_prepare
+  done 4<"$TMP/clusters"
+  [ "$_found" = 1 ] || warn "--move-target: no empty OpenSearch, Qdrant or Meilisearch found on this server"
 }
 
 # protect_unattended is --protect NAME: no questions, and no restart, except
@@ -13157,7 +13251,7 @@ databases() {
   if on_rowsafe_storage; then rowsafe_storage_test; fi
   interactive=0
   if [ "$TTY" = 1 ] && [ "$NO_SETUP" = 0 ]; then interactive=1; fi
-  if [ "$interactive" = 1 ] || [ -n "$PROTECT_NAME" ] || [ "$ALLOW_RESTART" = yes ] || grep -qs '^[0-9]' "$RESTART_ALLOW_FILE" ||
+  if [ "$interactive" = 1 ] || [ -n "$PROTECT_NAME" ] || [ "$MOVE_TARGET" = yes ] || [ "$ALLOW_RESTART" = yes ] || grep -qs '^[0-9]' "$RESTART_ALLOW_FILE" ||
     [ -n "$ALLOW_UPDATES$ALLOW_SECURITY$ALLOW_REBOOT" ] || [ "$ALLOW_FIREWALL" = yes ] || grep -qs '^[0-9]' "$FIREWALL_ALLOW_FILE" ||
     [ "$ALLOW_TUNING" = yes ] || [ "$ALLOW_SQLITE_MODES" = yes ] || grep -qsx 'sqlite-paths' "$SQLITE_MODES_ALLOW_FILE" ||
     [ "$ALLOW_POOLER" = yes ] || grep -qs '^[0-9]' "$POOLER_ALLOW_FILE" || [ "$MYSQL_STANDBY" = yes ]; then
@@ -13182,6 +13276,8 @@ databases() {
   offer_passkey
   if [ -n "$PROTECT_NAME" ]; then
     protect_unattended
+  elif [ "$MOVE_TARGET" = yes ] && [ "$interactive" = 0 ]; then
+    move_target_unattended
   elif [ "$interactive" = 1 ]; then
     setup_databases
   elif [ "$MYSQL_STANDBY" = yes ] && { [ "$HOST_ENGINE" = mysql ] || [ "$HOST_ENGINE" = mariadb ]; }; then
@@ -13801,11 +13897,11 @@ check_opensearch_program() {
 }
 
 # opensearch_status reads `rowsafe-agent opensearch status` into OS_* variables.
-OS_LOGIN='' OS_SECURITY='' OS_REPO='' OS_RESTAPI='' OS_CONFIG='' OS_UNIT='' OS_VERSION='' OS_TLS=''
+OS_LOGIN='' OS_SECURITY='' OS_REPO='' OS_RESTAPI='' OS_CONFIG='' OS_UNIT='' OS_VERSION='' OS_TLS='' OS_ROLE=''
 opensearch_status() {
   agent_run opensearch status --port "$C_PORT" >"$TMP/osstatus" 2>"$TMP/osstatus.err" || return 1
   _k() { sed -n "s/^$1=//p" "$TMP/osstatus" | head -n 1; }
-  OS_LOGIN=$(_k login) OS_SECURITY=$(_k security) OS_REPO=$(_k repo) OS_RESTAPI=$(_k restapi)
+  OS_LOGIN=$(_k login) OS_SECURITY=$(_k security) OS_REPO=$(_k repo) OS_RESTAPI=$(_k restapi) OS_ROLE=$(_k role)
   OS_CONFIG=$(_k config) OS_UNIT=$(_k unit) OS_VERSION=$(_k version) OS_TLS=$(_k tls)
   [ "$OS_CONFIG" != - ] || OS_CONFIG=''
   [ "$OS_UNIT" != - ] || OS_UNIT=''
@@ -14105,6 +14201,37 @@ opensearch_prepare() {
     note "(or with Restart in the Rowsafe dashboard). Rowsafe notices the restart by itself."
   else
     note "Rowsafe notices the restart by itself."
+  fi
+}
+
+# opensearch_move_target sets this empty OpenSearch up to receive a
+# database moved from Rowsafe Cloud (Take it with you) without backing it
+# up: what opensearch_prepare does for backups (Rowsafe's folder in
+# path.repo, Rowsafe's own user, a restart only with a yes), Rowsafe's role
+# made again when an older Rowsafe made it (a move also makes the index
+# templates and ingest pipelines), and Rowsafe's snapshot folder writable by
+# OpenSearch's group: the agent copies the snapshots it receives there, the
+# same files under the same names, so OpenSearch's backups go on in them
+# after the switchover.
+opensearch_move_target() {
+  _u=1
+  [ "$TTY" != 1 ] || _u=0
+  opensearch_prepare "$_u" || return 1
+  if [ "$OS_ROLE" = old ]; then
+    say ""
+    note "Rowsafe's OpenSearch user needs a few more rights to receive a database (index templates and"
+    note "ingest pipelines): an administrator signs in once more (the password is never saved)."
+    opensearch_login || return 1
+  fi
+  if ! chmod 2770 "$OPENSEARCH_SNAPSHOTS"; then
+    warn "could not let Rowsafe write into $OPENSEARCH_SNAPSHOTS"
+    return 1
+  fi
+  ok "$OPENSEARCH_SNAPSHOTS: the agent may write there too (it copies the snapshots it receives into it)"
+  opensearch_status || true
+  if [ "$OS_REPO" != ok ]; then
+    note "OpenSearch on port $C_PORT can receive a database once it has restarted (it reads path.repo when it starts)."
+    return 1
   fi
 }
 # <<< opensearch
@@ -15280,6 +15407,26 @@ meilisearch_prepare() {
   _st=$(agent_run meilisearch status --port "$C_PORT" 2>/dev/null | sed -n 's/^login=//p')
   [ "$_st" = ok ] || meilisearch_login "$C_PORT"
 }
+
+# meilisearch_move_target sets the Meilisearch on $C_PORT up to receive a
+# database (Take it with you): Rowsafe's own key, made exactly as for
+# backups, and nothing else. The agent copies the database in over plain
+# HTTP on this server, with a key it makes for that alone.
+meilisearch_move_target() {
+  meilisearch_prepare || return 1
+  agent_run meilisearch status --port "$C_PORT" >"$TMP/msstatus" 2>/dev/null || {
+    warn "Meilisearch on port $C_PORT doesn't answer"
+    return 1
+  }
+  if [ "$(sed -n 's/^login=//p' "$TMP/msstatus")" != ok ]; then
+    warn "Rowsafe's API key for Meilisearch on port $C_PORT doesn't work"
+    return 1
+  fi
+  if [ "$(sed -n 's/^tls=//p' "$TMP/msstatus")" = yes ]; then
+    warn "Meilisearch on port $C_PORT serves TLS itself, and Rowsafe copies a database in over plain HTTP on this server: serve it over plain HTTP on 127.0.0.1 (Rowsafe's installer can put TLS in front of it), then run this installer again"
+    return 1
+  fi
+}
 # <<< meilisearch
 
 # ---------------------------------------------------------------- modes
@@ -15934,6 +16081,7 @@ main() {
       --mongodb-clones) M_CLONES=yes ;;
       --redis-standby) REDIS_STANDBY=yes ;;
       --redis-clones) REDIS_CLONES=yes ;;
+      --move-target) MOVE_TARGET=yes ;;
       --mongodb-standby) MONGODB_STANDBY=yes ;;
       --no-mysql-standby) MYSQL_STANDBY=no ;;
       --mongodb-replica-set) MONGODB_REPLSET=yes ;;

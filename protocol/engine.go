@@ -103,6 +103,12 @@ const (
 	FeatureMoveIn           = "move_in"           // move a database in from a managed provider
 	FeatureSecondCopy       = "second_copy"       // a second copy of the backups in another bucket
 	FeatureProofElsewhere   = "proof_elsewhere"   // Proof on another server when the database's own lacks disk (ForkRestoreParams.Verify)
+	// FeatureTakeOut ("take_out"): Rowsafe Cloud's "Take it with you", the
+	// database moved from a Rowsafe Cloud server to the customer's own
+	// server. Engines with a standby move through one (standby_move in the
+	// control plane); the search engines move by snapshots
+	// (SnapshotMoveEngine, snapshot_move.go).
+	FeatureTakeOut = "take_out"
 )
 
 // EngineFeatures says which Rowsafe features work for an engine. The
@@ -142,6 +148,7 @@ type EngineFeatures struct {
 	// or a temporary Rowsafe Cloud server (a fork that is only checked:
 	// ForkRestoreParams.Verify).
 	ProofElsewhere bool `json:"proof_elsewhere"`
+	TakeOut        bool `json:"take_out"`
 }
 
 // Has reports whether a feature (Feature* above) is supported; unknown
@@ -204,6 +211,8 @@ func (f EngineFeatures) Has(feature string) bool {
 		return f.SecondCopy
 	case FeatureProofElsewhere:
 		return f.ProofElsewhere
+	case FeatureTakeOut:
+		return f.TakeOut
 	}
 	return false
 }
@@ -221,7 +230,7 @@ var EngineCapabilities = map[string]EngineFeatures{
 		DBAdmin:  true,
 		Settings: true, Security: true, IndexAdvice: true, Recommendations: true,
 		Logs: true, FindMoment: true, SafeCopies: true, MigrationPreview: true,
-		Fork: true, MoveIn: true, SecondCopy: true,
+		Fork: true, MoveIn: true, SecondCopy: true, TakeOut: true,
 		ProofElsewhere: true, // the drill's restore and checks on another server (internal/agent/fork_verify.go)
 	},
 	// MySQL and MariaDB (internal/engine/mysql): protocol/mysql.go.
@@ -244,6 +253,7 @@ var EngineCapabilities = map[string]EngineFeatures{
 		MoveIn:   true, // copy from Atlas or any MongoDB, live through a change stream (migrate*.go in internal/engine/mongodb)
 		Standby:  true, // a priority-0 member of the replica set (standby*.go in internal/engine/mongodb)
 		Settings: true, // mongod.conf through root's tuning helper (opt-in), setParameter live
+		TakeOut:  true, // through a standby, like Move to a new server
 		// The drill's restore and checks on another server, against the
 		// source's databases and collection counts (internal/engine/mongodb/fork.go).
 		ProofElsewhere: true,

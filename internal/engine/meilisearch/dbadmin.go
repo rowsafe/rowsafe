@@ -102,6 +102,8 @@ func (d *mdba) protectedReason(k apiKey) string {
 		return "Rowsafe's own key"
 	case strings.HasPrefix(k.name(), "Rowsafe rewind "):
 		return "a key of a rewind in progress"
+	case k.name() == moveKeyName:
+		return "a key of a move in progress"
 	case isAdminKey(k):
 		return "an administrator key (every right, or it can make keys with any right): change it with the master key"
 	}
@@ -321,7 +323,7 @@ func (d *mdba) inventory(ctx context.Context) (*protocol.DBInventory, error) {
 	}
 	now := time.Now()
 	for _, k := range keys {
-		if strings.HasPrefix(k.name(), "Rowsafe rewind ") {
+		if strings.HasPrefix(k.name(), "Rowsafe rewind ") || k.name() == moveKeyName {
 			continue
 		}
 		if len(inv.Users) >= maxListed {

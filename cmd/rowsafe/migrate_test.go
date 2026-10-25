@@ -130,3 +130,82 @@ func TestMigrateStartAndSwitch(t *testing.T) {
 		t.Errorf("switch output:\n%s", out)
 	}
 }
+
+// A Turso database into a SQLite file: the source is built from the URL
+// and the token, sealed here; the copy ends with the file's path, no
+// password.
+func TestMigrateStartSQLite(t *testing.T) {
+	agentKey, _ := e2e.GenerateKey()
+	const token = "eyJhbGciOiJFZERTQSJ9.eyJpZCI6InNlY3JldCJ9.c2lnbmF0dXJlLXNlY3JldA"
+	var mu sync.Mutex
+	var bodies []string
+	var gotSource string
+	var started protocol.StartMigrationRequest
+	m := protocol.Migration{ID: "mig_2", DatabaseName: "app", Engine: protocol.EngineSQLite, Status: protocol.MigratePhaseReady,
+		PublicKey: e2e.PublicKeyString(agentKey.PublicKey()), TaskStatus: protocol.StatusSucceeded}
+	j := func(w http.ResponseWriter, v any) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(v)
+	}
+	record := func(r *http.Request) []byte {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, string(b))
+		mu.Unlock()
+		return b
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/databases", func(w http.ResponseWriter, r *http.Request) { j(w, dbs("app")) })
+	mux.HandleFunc("POST /v1/migrations", func(w http.ResponseWriter, r *http.Request) { record(r); j(w, m) })
+	mux.HandleFunc("GET /v1/migrations/mig_2", func(w http.ResponseWriter, r *http.Request) { j(w, m) })
+	mux.HandleFunc("POST /v1/migrations/mig_2/check", func(w http.ResponseWriter, r *http.Request) {
+		var req protocol.CheckMigrationRequest
+		_ = json.Unmarshal(record(r), &req)
+		plain, _ := e2e.Open(agentKey, protocol.MigrateInfo, protocol.MigrateSourceAAD("mig_2"), req.Source)
+		gotSource = string(plain)
+		m.Status = protocol.MigratePhaseChecked
+		m.Check = &protocol.MigrateCheckResult{DumpOK: true, Method: protocol.MigrateMethodDump, EstimatedCopySeconds: 5,
+			Source: protocol.MigrateSource{Host: "app-acme.turso.io", Database: "app-acme", Provider: "turso", SizeBytes: 1 << 20},
+			Target: protocol.MigrateTarget{Database: "/srv/app/data.db", Exists: true}, Summary: "Ready for a one-time copy"}
+		j(w, m)
+	})
+	mux.HandleFunc("POST /v1/migrations/mig_2/start", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.Unmarshal(record(r), &started)
+		m.Status, m.Method, m.TargetDB = protocol.MigratePhaseSwitched, protocol.MigrateMethodDump, "/srv/app/data.db"
+		m.Switchover = &protocol.MigrateSwitchoverResult{Summary: "/srv/app/data.db now holds app-acme from Turso.", ConnectionHint: "/srv/app/data.db"}
+		j(w, m)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	_, _ = cliEnv(t, &fakeAPI{})
+	t.Setenv("ROWSAFE_URL", ts.URL)
+	t.Setenv("TURSO_TOKEN", token)
+	t.Cleanup(func() { stdin, stdinIsTerminal = os.Stdin, func() bool { return false } })
+	stdinIsTerminal = func() bool { return false }
+	out, err := captureStdout(t, func() error {
+		return dispatch(t.Context(), []string{"migrate", "start", "app", "--turso", "app-acme.turso.io", "--source-env", "TURSO_TOKEN", "--yes"})
+	})
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if gotSource != "libsql://app-acme.turso.io?authToken="+token {
+		t.Errorf("the agent got %q", gotSource)
+	}
+	for _, b := range bodies {
+		if strings.Contains(b, token) {
+			t.Fatalf("the token reached the control plane in the clear: %s", b)
+		}
+	}
+	if started.Method != protocol.MigrateMethodDump || started.ReadOnly {
+		t.Errorf("start = %+v", started)
+	}
+	if !strings.Contains(out, "From Turso") || !strings.Contains(out, "point your app at the file /srv/app/data.db") || strings.Contains(out, token) {
+		t.Errorf("output:\n%s", out)
+	}
+	if _, err := sqliteSource("", "nope", "TURSO_TOKEN"); err == nil {
+		t.Error("--d1 without a slash accepted")
+	}
+	if _, err := sqliteSource("", "0123456789abcdef0123456789abcdef/not-a-uuid", "TURSO_TOKEN"); err == nil || strings.Contains(err.Error(), token) {
+		t.Errorf("bad D1 id: %v", err)
+	}
+}

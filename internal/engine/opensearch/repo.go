@@ -212,6 +212,12 @@ type backupDoc struct {
 	StoredBytes int64 `json:"stored_bytes"`
 	// KeepUntil (R: before a rewind in place) is when it may be deleted.
 	KeepUntil *time.Time `json:"keep_until,omitempty"`
+	// MoveBlocked (a snapshot taken while a move stopped apps' writes,
+	// snapshot_move.go) are the indices whose write block is Rowsafe's,
+	// not their own: a restore on the new server lifts it. Globals are the
+	// server's index templates and ingest pipelines then.
+	MoveBlocked []string     `json:"move_blocked,omitempty"`
+	Globals     *globalState `json:"globals,omitempty"`
 }
 
 // docIndex is one index of a snapshot.

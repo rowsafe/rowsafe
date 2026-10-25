@@ -660,7 +660,7 @@ func (s scratch) restore(ctx context.Context, c *client, name string) error {
 	}
 	// Global state (templates, pipelines) stays out: the security plugin
 	// lets only its super administrator (a certificate) restore it.
-	req := map[string]any{"indices": "*", "include_global_state": false, "ignore_unavailable": true,
+	req := map[string]any{"indices": restoreIndices, "include_global_state": false, "ignore_unavailable": true,
 		"index_settings": map[string]any{"index.number_of_replicas": 0}}
 	var res struct {
 		Snapshot struct {

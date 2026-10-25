@@ -515,9 +515,15 @@ var otherProvider = MigrateProvider{
 	Docs:    "https://www.postgresql.org/docs/current/logical-replication-config.html",
 }
 
-// MigrateProviderByID returns a provider by id ("other" when unknown).
+// MigrateProviderByID returns a provider by id, PostgreSQL's or SQLite's
+// ("other" when unknown).
 func MigrateProviderByID(id string) MigrateProvider {
 	for _, p := range MigrateProviders {
+		if p.ID == id {
+			return p
+		}
+	}
+	for _, p := range SQLiteMigrateProviders {
 		if p.ID == id {
 			return p
 		}

@@ -32,8 +32,15 @@ type Engine struct {
 	// snapMu: one snapshot at a time (Meilisearch writes them to one file).
 	snapMu sync.Mutex
 	// copyMu serializes temporary instances' restores (Proof, copies,
-	// rewinds in place).
+	// rewinds in place, moves).
 	copyMu sync.Mutex
+	// moveMu: one freeze or thaw at a time (snapshot_move.go).
+	moveMu sync.Mutex
+	// StandbyTargets' cache (snapshot_move.go).
+	targetsMu    sync.Mutex
+	targetsDir   string
+	targetsAt    time.Time
+	targetsCache []protocol.StandbyTarget
 }
 
 var (

@@ -254,7 +254,7 @@ func replaceAll(ctx context.Context, c *client, in serverInfo, label string, tl 
 		}
 	}
 	tl.Printf("removed %d indices and %d data streams; restoring snapshot %s", len(in.Indices), len(in.DataStreams), snapshotName(label))
-	req := map[string]any{"indices": "*", "include_global_state": false, "include_aliases": true, "ignore_unavailable": true}
+	req := map[string]any{"indices": restoreIndices, "include_global_state": false, "include_aliases": true, "ignore_unavailable": true}
 	var res struct {
 		Snapshot struct {
 			Shards struct{ Total, Failed int } `json:"shards"`
