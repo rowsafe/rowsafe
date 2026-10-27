@@ -171,6 +171,13 @@ case \${1:-} in
     fi
     i=0; while [ \$i -lt 1800 ]; do sleep 1; i=\$((i + 1)); done ;; # at most 30 minutes, even if nothing kills it
   storage)
+    if [ "\${2:-}" = put ]; then
+      # The storage test's file (pgBackRest 2.60 has no repo-put): the
+      # real agent's (built from this tree) writes it.
+      r=/go-release/real/rowsafe-agent-linux-\$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
+      [ -x "\$r" ] || { echo "no real agent here" >&2; exit 2; }
+      exec "\$r" "\$@"
+    fi
     # Rowsafe Storage test: must run as postgres (the agent's user:
     # /tmp/rowsafe-fake-user) with agent.env loaded.
     f=/tmp/rowsafe-fake
@@ -373,18 +380,14 @@ host() {
     done
   fi
 
-  # (--cloud, postgres) The real agent: the new PostgreSQL's settings come
+  # The real agent: it writes the storage tests' file (rowsafe-agent
+  # storage put), and (--cloud, postgres) the new PostgreSQL's settings come
   # from it (rowsafe-agent postgres tune).
-  if [ "$mode" = --in-container-cloud ]; then
-    case " $(printf '%s' "${TEST_ONLY:-postgres}" | tr ',' ' ') " in
-      *" postgres "*)
-        case $(docker info --format '{{.Architecture}}') in aarch64 | arm64) parch=arm64 ;; *) parch=amd64 ;; esac
-        [ -x "$work/go/real/rowsafe-agent-linux-$parch" ] ||
-          (cd "$root" && CGO_ENABLED=0 GOOS=linux GOARCH=$parch GOWORK=off go build -o "$work/go/real/rowsafe-agent-linux-$parch" ./cmd/rowsafe-agent) ||
-          { echo "test-install: building the agent for linux/$parch failed (PostgreSQL's settings)" >&2; exit 1; }
-        ;;
-    esac
-  fi
+  case $(docker info --format '{{.Architecture}}') in aarch64 | arm64) parch=arm64 ;; *) parch=amd64 ;; esac
+  mkdir -p "$work/go/real"
+  [ -x "$work/go/real/rowsafe-agent-linux-$parch" ] ||
+    (cd "$root" && CGO_ENABLED=0 GOOS=linux GOARCH=$parch GOWORK=off go build -o "$work/go/real/rowsafe-agent-linux-$parch" ./cmd/rowsafe-agent) ||
+    { echo "test-install: building the agent for linux/$parch failed" >&2; exit 1; }
 
   if [ "$mode" = --in-container-cloud ]; then
     opensearch_host_prep # opensearch

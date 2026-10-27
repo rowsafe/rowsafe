@@ -7,11 +7,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 	_ "github.com/rowsafe/rowsafe/internal/engine/mysql" // registers MySQL and MariaDB
 	"github.com/rowsafe/rowsafe/internal/localcp"
 	"github.com/rowsafe/rowsafe/internal/pginspect"
+	"github.com/rowsafe/rowsafe/internal/repoput"
 	"github.com/rowsafe/rowsafe/protocol"
 	"github.com/rowsafe/rowsafe/release"
 )
@@ -293,8 +296,12 @@ func keyCmd() error {
 	return nil
 }
 
-// storage runs `rowsafe-agent storage test`.
+// storage runs `rowsafe-agent storage test` (and `storage put`, the
+// installer's).
 func storage(ctx context.Context, args []string) error {
+	if len(args) == 2 && args[0] == "put" {
+		return storagePut(ctx, args[1])
+	}
 	if len(args) == 0 || args[0] != "test" {
 		return errors.New("usage: rowsafe-agent storage test [--wait 60s] [--own-client]")
 	}
@@ -309,6 +316,27 @@ func storage(ctx context.Context, args []string) error {
 		return err
 	}
 	return agent.StorageTest(ctx, cfg, os.Stdout, *wait, *own)
+}
+
+// storagePut is rowsafe-agent storage put NAME: stdin becomes NAME in the
+// repository pgBackRest's environment (PGBACKREST_REPO1_*) describes, what
+// `pgbackrest --no-config repo-put NAME` did before pgBackRest 2.60. The
+// installer's storage test writes its test file with it.
+func storagePut(ctx context.Context, name string) error {
+	if name == "" || strings.HasPrefix(name, "/") || strings.Contains(name, "..") {
+		return errors.New("usage: rowsafe-agent storage put NAME (a file name in the repository) < file")
+	}
+	repo, err := repoput.FromEnv(os.Getenv)
+	if err != nil {
+		return err
+	}
+	data, err := io.ReadAll(io.LimitReader(os.Stdin, 1<<20))
+	if err != nil {
+		return err
+	}
+	cctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	return repoput.Put(cctx, repo, name, data)
 }
 
 // controlBridge is rowsafe-agent control-bridge: the rowsafe CLI on

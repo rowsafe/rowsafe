@@ -18,11 +18,12 @@ import (
 
 	"github.com/rowsafe/rowsafe/internal/objstore"
 	"github.com/rowsafe/rowsafe/internal/pgbackrest"
+	"github.com/rowsafe/rowsafe/internal/repoput"
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
-// StorageTest writes, reads back and deletes a small file in the
-// repository with pgBackRest, the way backups will use it (`rowsafe-agent
+// StorageTest writes a small file in the repository, then reads it back
+// and deletes it with pgBackRest, the way backups will use it (`rowsafe-agent
 // storage test`; the installer runs it for Rowsafe Storage). For Rowsafe
 // Storage it uses the credentials the agent saved, or asks the control
 // plane for them with the agent's identity, waiting up to wait for the
@@ -85,8 +86,10 @@ func StorageTest(ctx context.Context, cfg Config, w io.Writer, wait time.Duratio
 		}
 		return out.Bytes(), nil
 	}
-	if _, err := run(content, "repo-put", probe); err != nil {
-		return fmt.Errorf("could not write to %s (%v)", where, err)
+	// pgBackRest 2.60 has no repo-put: the agent writes the file, then
+	// pgBackRest reads it back and deletes it as backups will.
+	if err := repoPut(ctx, repo, probe, content); err != nil {
+		return fmt.Errorf("could not write to %s (%s%s)", where, redact(err.Error(), repo), sftpHint([]byte(err.Error()), repo))
 	}
 	back, err := run(nil, "repo-get", probe)
 	if err != nil || !bytes.Equal(back, content) {
@@ -102,6 +105,9 @@ func StorageTest(ctx context.Context, cfg Config, w io.Writer, wait time.Duratio
 	fmt.Fprintf(w, "%s works: wrote, read back and deleted a test file\n", strings.ToUpper(where[:1])+where[1:])
 	return nil
 }
+
+// repoPut writes the storage test's file (tests replace it).
+var repoPut = repoput.Put
 
 // storageTestEnv points pgBackRest at repo through its environment, never
 // its command line. No cipher: the test file is not a backup.

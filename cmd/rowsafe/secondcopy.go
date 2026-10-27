@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/rowsafe/rowsafe/client"
+	"github.com/rowsafe/rowsafe/internal/pgbackrest"
+	"github.com/rowsafe/rowsafe/internal/repoput"
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
@@ -655,8 +657,15 @@ func pgbackrestBucketTest(ctx context.Context, envf *envFile, b bucketSettings) 
 	}
 	probe := fmt.Sprintf("rowsafe-storage-test-%x", time.Now().UnixNano())
 	body := []byte("Rowsafe storage test\n")
-	if _, err := run(body, "repo-put", probe); err != nil {
-		return fmt.Errorf("couldn't write to %s: %w", b.where(), err)
+	// pgBackRest 2.60 has no repo-put: write the file with Rowsafe's own
+	// client, then pgBackRest reads it back and deletes it as backups will.
+	repo := pgbackrest.Repo{Endpoint: b.Endpoint, Bucket: b.Bucket, Region: b.Region, URIStyle: b.URIStyle, Key: b.Key,
+		KeySecret: b.Secret, PathPrefix: b.PathPrefix, Port: b.Port, CAFile: b.CAFile, SkipTLSVerify: b.NoVerifyTLS}
+	pctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	err := repoput.Put(pctx, repo, probe, body)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("couldn't write to %s: %w", b.where(), errors.New(explainStorageError(err.Error(), b)))
 	}
 	got, err := run(nil, "repo-get", probe)
 	if err != nil || !bytes.Equal(got, body) {

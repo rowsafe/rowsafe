@@ -11428,8 +11428,22 @@ st_run() {
     export PGBACKREST_LOG_LEVEL_FILE=off PGBACKREST_LOG_LEVEL_CONSOLE=off PGBACKREST_LOG_LEVEL_STDERR=warn
     export PGBACKREST_IO_TIMEOUT=5
     cd /
-    exec runuser -u "$AGENT_USER" -- timeout 120 "$_bin" --no-config "$@"
+    case $_bin in */rowsafe-agent) ;; *) set -- --no-config "$@" ;; esac
+    exec runuser -u "$AGENT_USER" -- timeout 120 "$_bin" "$@"
   )
+}
+
+# repo_put PGBACKREST prints the command that writes the storage test's
+# file, for st_run and sftp_run: pgBackRest's repo-put, or where pgBackRest
+# has none (2.60 removed it) the agent's `storage put`, which reads the same
+# settings from the same environment. Reading the file back and deleting it
+# stay pgBackRest's.
+repo_put() {
+  if "$1" help repo-put >/dev/null 2>&1 || [ ! -x "$INSTALL_DIR/rowsafe-agent" ]; then
+    echo "$1 repo-put"
+  else
+    echo "$INSTALL_DIR/rowsafe-agent storage put"
+  fi
 }
 
 # storage_test writes, reads back and deletes a small file in the S_*
@@ -11441,7 +11455,8 @@ storage_test() {
   note "writing, reading and deleting a test file in $where..."
   probe=rowsafe-storage-test-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
   printf 'Rowsafe storage test from %s\n' "$(uname -n)" >"$TMP/probe"
-  if ! st_run "$pgbr" repo-put "$probe" <"$TMP/probe" >"$TMP/storage.log" 2>&1; then
+  # shellcheck disable=SC2046 # a command and its arguments
+  if ! st_run $(repo_put "$pgbr") "$probe" <"$TMP/probe" >"$TMP/storage.log" 2>&1; then
     storage_failed "could not write to $where"
     return 1
   fi
@@ -11488,7 +11503,7 @@ storage_explain() {
   elif grep -Eq 'AccessDenied|failed with 403' "$log"; then
     say "The key is valid but not allowed to use this bucket. Give it read, write"
     say "and delete access to '$S_BUCKET' (R2: Object Read & Write)."
-  elif grep -q 'unable to get address' "$log"; then
+  elif grep -Eq 'unable to get address|no such host' "$log"; then
     say "Can't find $S_ENDPOINT. Check the account ID or region, and that this"
     say "server can look up internet names (DNS)."
   elif grep -Eq 'unable to connect|onnection refused|No route to host' "$log"; then
@@ -11501,8 +11516,9 @@ storage_explain() {
     say "The storage did not answer in time. Check the endpoint and the network."
   fi
   # The underlying error, for support: the storage's error code and message
-  # if it sent one, else pgBackRest's error. pgBackRest redacts credentials;
-  # mask them anyway in case a provider echoes one back.
+  # if it sent one, else pgBackRest's error (or the agent's, which wrote the
+  # test file). pgBackRest redacts credentials; mask them anyway in case a
+  # provider echoes one back.
   RS_A=$S_KEY RS_B=$S_SECRET RS_C=${S_CIPHER:-} awk '
     function mask(s, v,   i) {
       if (v == "") return s
@@ -11514,15 +11530,19 @@ storage_explain() {
       return (a && b > a) ? substr(s, a + length(t) + 2, b - a - length(t) - 2) : ""
     }
     err == "" && /ERROR: \[/ {
+      err = "pgBackRest: " $0
+      sub(/^.*ERROR: \[[0-9]+\]: /, "pgBackRest: ", err)
+    }
+    err == "" && /^error: / {
       err = $0
-      sub(/^.*ERROR: \[[0-9]+\]: /, "", err)
+      sub(/^error: /, "", err)
     }
     code == "" && /<Code>/ {
       code = tag($0, "Code")
       if (tag($0, "Message") != "") code = code ": " tag($0, "Message")
     }
     END {
-      s = code != "" ? "storage said: " code : err != "" ? "pgBackRest: " err : ""
+      s = code != "" ? "storage said: " code : err
       s = mask(mask(mask(s, ENVIRON["RS_A"]), ENVIRON["RS_B"]), ENVIRON["RS_C"])
       if (s != "") print "(" substr(s, 1, 200) ")"
     }' "$log"
@@ -12314,7 +12334,8 @@ sftp_run() {
     export PGBACKREST_LOG_LEVEL_FILE=off PGBACKREST_LOG_LEVEL_CONSOLE=off PGBACKREST_LOG_LEVEL_STDERR=warn
     export PGBACKREST_IO_TIMEOUT=10
     cd /
-    exec runuser -u "$AGENT_USER" -- timeout 120 "$_bin" --no-config "$@"
+    case $_bin in */rowsafe-agent) ;; *) set -- --no-config "$@" ;; esac
+    exec runuser -u "$AGENT_USER" -- timeout 120 "$_bin" "$@"
   )
 }
 
@@ -12358,7 +12379,7 @@ sftp_hex_of() {
 # sftp_explain says what the pgBackRest error in $TMP/sftp.log means.
 sftp_explain() {
   log=$TMP/sftp.log
-  if grep -q 'unable to get address' "$log"; then
+  if grep -Eq 'unable to get address|no such host' "$log"; then
     say "Can't find $SF_HOST. Check the name, and that this server can look up internet names (DNS)."
   elif grep -Eq 'unable to connect|onnection refused|No route to host' "$log"; then
     say "Can't connect to $SF_HOST on port $SF_PORT. Check the port (a Hetzner Storage Box uses 23),"
@@ -12368,8 +12389,9 @@ sftp_explain() {
   elif grep -Eq 'unable to (open|create|make)|Permission denied|permission denied' "$log"; then
     say "The user $SF_USER can't write to $SF_PATH there. Check the directory and its permissions."
   fi
-  awk 'err == "" && /ERROR: \[/ { err = $0; sub(/^.*ERROR: \[[0-9]+\]: /, "", err) }
-    END { if (err != "") print "(pgBackRest: " substr(err, 1, 200) ")" }' "$log"
+  awk 'err == "" && /ERROR: \[/ { err = $0; sub(/^.*ERROR: \[[0-9]+\]: /, "pgBackRest: ", err) }
+    err == "" && /^error: / { err = $0; sub(/^error: /, "", err) }
+    END { if (err != "") print "(" substr(err, 1, 200) ")" }' "$log"
 }
 
 sftp_failed() {
@@ -12480,7 +12502,8 @@ sftp_test() {
   probe=rowsafe-storage-test-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
   printf 'Rowsafe storage test from %s\n' "$(uname -n)" >"$TMP/probe"
   chmod 0644 "$TMP/probe"
-  if ! sftp_run "$1" "$pgbr" repo-put "$probe" <"$TMP/probe" >"$TMP/sftp.log" 2>&1; then
+  # shellcheck disable=SC2046 # a command and its arguments
+  if ! sftp_run "$1" $(repo_put "$pgbr") "$probe" <"$TMP/probe" >"$TMP/sftp.log" 2>&1; then
     if grep -q 'public key authentication failed' "$TMP/sftp.log"; then
       printf '    %s%s The SFTP server does not accept this server'"'"'s SSH key yet.%s\n' "$RED" "$CROSS" "$RESET"
       sftp_add_key_help

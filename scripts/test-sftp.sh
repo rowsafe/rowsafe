@@ -173,7 +173,7 @@ CONF
   [ "$rc" = 0 ] || tfail "--check-storage (exit $rc)"
   has "backup storage works" "--check-storage"
   pass "--check-storage tests the SFTP server with the pinned key"
-  sed -i "s/^ROWSAFE_REPO_SFTP_HOST_KEY=.*/ROWSAFE_REPO_SFTP_HOST_KEY='$other_fp'/" "$ENV_FILE"
+  sed -i "s|^ROWSAFE_REPO_SFTP_HOST_KEY=.*|ROWSAFE_REPO_SFTP_HOST_KEY='$other_fp'|" "$ENV_FILE" # base64 has /
   rc=0
   (check_storage) >"$W/out" 2>&1 || rc=$?
   [ "$rc" != 0 ] || tfail "--check-storage with another host key passed"
