@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,8 @@ import (
 	"time"
 
 	"github.com/rowsafe/rowsafe/internal/objstore"
+	"github.com/rowsafe/rowsafe/internal/pgbackrest"
+	"github.com/rowsafe/rowsafe/internal/repoput"
 	"github.com/rowsafe/rowsafe/protocol"
 )
 
@@ -128,6 +131,20 @@ esac
 	if err := os.WriteFile(cfg.PgBackRestBin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// The agent writes the file (pgBackRest 2.60 has no repo-put), into
+	// the same stand-in repository, failing the same way.
+	var put pgbackrest.Repo
+	repoPut = func(_ context.Context, r pgbackrest.Repo, name string, data []byte) error {
+		put = r
+		if msg, err := os.ReadFile(filepath.Join(dir, "fail")); err == nil {
+			return errors.New(strings.TrimSpace(string(msg)))
+		}
+		if err := os.MkdirAll(filepath.Join(dir, "repo"), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(dir, "repo", name), data, 0o644)
+	}
+	t.Cleanup(func() { repoPut = repoput.Put })
 	var out bytes.Buffer
 	if err := StorageTest(context.Background(), cfg, &out, time.Second, false); err != nil {
 		t.Fatalf("StorageTest: %v\n%s", err, out.String())
@@ -146,14 +163,18 @@ esac
 	if strings.Contains(string(args), "sftp") || strings.Contains(string(args), "u123") {
 		t.Errorf("settings on the command line: %s", args)
 	}
+	if put.SFTPHost != "u123.your-storagebox.de" || put.Path != "/backups/rowsafe" || put.SFTPKeyFile == "" || put.SFTPHostKey == "" {
+		t.Errorf("the file was written to %+v", put)
+	}
 	if left, _ := os.ReadDir(filepath.Join(dir, "repo")); len(left) != 0 {
 		t.Errorf("test file left behind: %v", left)
 	}
 
 	for name, tc := range map[string]struct{ stderr, want string }{
-		"key not added": {"ERROR: [101]: public key authentication failed: libssh2 error [-18]",
+		// repoput's wording, which follows pgBackRest's.
+		"key not added": {"public key authentication failed for u123@u123.your-storagebox.de",
 			"add the public key in /etc/rowsafe/pgbackrest/sftp_ed25519.pub for the user u123"},
-		"host key changed": {"ERROR: [101]: host [" + strings.Repeat("ab", 32) + "] and configured fingerprint (repo-sftp-host-fingerprint) [00] do not match",
+		"host key changed": {"host [" + strings.Repeat("ab", 32) + "] and configured fingerprint [00] do not match",
 			"not the one pinned in ROWSAFE_REPO_SFTP_HOST_KEY (it presented SHA256:"},
 	} {
 		if err := os.WriteFile(filepath.Join(dir, "fail"), []byte(tc.stderr+"\n"), 0o644); err != nil {
